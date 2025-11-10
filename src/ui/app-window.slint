@@ -1,0 +1,54 @@
+import { Button, VerticalBox, HorizontalBox } from "std-widgets.slint";
+
+import { SplashScreen } from "./splash-screen.slint";
+import { HomeWindow } from "./home-screen.slint";
+import { SketchWindow } from "./sketch-window.slint";
+import { NewBERWindow } from "./new-ber-window.slint";
+import { KeyDeetsWindow } from "./key-deets-window.slint";
+import { MoreDeetsWindow } from "./more-deets-window.slint";
+import { PageBase } from "./page-base.slint";
+import { AppNavigation, SplashState, Page } from "./app-state.slint";
+
+export component MainWindow inherits PageBase {
+  title: "BER App";
+  width: 800px;
+  height: 1000px;
+
+  HomeWindow {
+      visible: AppNavigation.current_page == Page.Home;
+      new_ber => { AppNavigation.current_page = Page.NewBER; }
+      continue_ber => { AppNavigation.current_page = Page.ContinueBER; }
+      old_bers => { AppNavigation.current_page = Page.OldBERs; }
+      settings => { AppNavigation.current_page = Page.Settings; }
+  }
+  SplashScreen {
+      visible: AppNavigation.current_page == Page.Splash;
+
+  }
+  NewBERWindow {
+      visible: AppNavigation.current_page == Page.NewBER;
+      next => { AppNavigation.current_page = Page.KeyDeets; }
+  }
+  KeyDeetsWindow {
+      visible: AppNavigation.current_page == Page.KeyDeets;
+      next => { AppNavigation.current_page = Page.Sketch; }
+  }
+  SketchWindow {
+      visible: AppNavigation.current_page == Page.Sketch;
+      next => { AppNavigation.current_page = Page.MoreDeets; }
+  }
+      MoreDeetsWindow {
+        visible: AppNavigation.current_page == Page.MoreDeets;
+    }
+
+}
+
+export { SplashScreen }
+export { HomeWindow }
+export { SketchWindow }
+export { NewBERWindow }
+export { KeyDeetsWindow }
+export { MoreDeetsWindow }
+export { AppNavigation }
+export {SplashState }
+export { Page }

@@ -1,0 +1,46 @@
+import { Button, VerticalBox, HorizontalBox } from "std-widgets.slint";
+import { PageBase } from "./page-base.slint";
+
+export component HomeWindow inherits PageBase {
+    callback new_ber();
+    callback continue_ber();
+    callback old_bers();
+    callback settings();
+
+
+    VerticalBox {
+        padding: 20px;         // fixed pixels, can scale with window in Rust if needed
+        spacing: 15px;
+        // Title
+        Text { 
+            text: "Welcome to BER App"; 
+            font-size: root.height/15;           // relative to window height
+            horizontal-alignment: center; 
+        }
+
+        // Start button
+        Button {
+            text: "New BER";
+            width: root.width * 0.4;               // relative width
+            clicked => { new_ber(); }
+        }
+        // Start button
+        Button {
+            text: "Continue BER";
+            width: root.width * 0.4;               // relative width
+            clicked => { continue_ber(); }
+        }
+        // Start button
+        Button {
+            text: "Old BERs";
+            width: root.width * 0.4;               // relative width
+            clicked => { old_bers(); }
+        }
+        // Start button
+        Button {
+            text: "Settings";
+            width: root.width * 0.4;               // relative width
+            clicked => { settings(); }
+        }
+    }
+}

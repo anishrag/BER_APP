@@ -1,0 +1,29 @@
+import { PageBase } from "./page-base.slint";
+import { SplashState } from "./app-state.slint";
+
+export component SplashScreen inherits PageBase {
+
+    VerticalLayout {
+        spacing: 20px;
+        Text {
+            text: "Loading";
+            font-size: 24px;
+        }
+        Text {
+            text: SplashState.progress_text;
+            font-size: 18px;
+        }
+        Rectangle {
+            width: 300px;
+            height: 10px;
+            border-radius: 5px;
+            background: #ddd;
+            Rectangle {
+                width: 300px * SplashState.progress_value;
+                height: parent.height;
+                border-radius: 5px;
+                background: #4caf50;
+            }
+        }
+    }
+}

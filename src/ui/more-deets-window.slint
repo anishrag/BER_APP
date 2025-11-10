@@ -1,0 +1,114 @@
+import { Button, VerticalBox, HorizontalBox} from "std-widgets.slint";
+import { PageBase } from "./page-base.slint";
+
+export component MoreDeetsWindow inherits PageBase {
+    
+    callback load_clicked();
+    callback next(string, string, string, string, string, string);
+    
+    // Properties to store input values
+    in-out property <string> name_text;
+    in-out property <string> email_text;
+    in-out property <string> address_text;
+    in-out property <string> eircode_text;
+    in-out property <string> fee_text;
+    in-out property <string> house_type_text;
+    
+    VerticalLayout {
+        spacing: 10px;
+        padding: 20px;
+        
+        // Top Load button
+        Rectangle {
+            height: 40px;
+            background: #0d6efd;
+            border-radius: 4px;
+            
+            Text {
+                text: "Load";
+                color: white;
+                horizontal-alignment: center;
+                vertical-alignment: center;
+            }
+            
+            TouchArea {
+                clicked => { root.load_clicked(); }
+            }
+        }
+        
+        // Form fields
+        VerticalLayout {
+            spacing: 8px;
+            
+            // Name
+            Text { text: "Name:"; }
+            TextInput { 
+                text <=> root.name_text;
+            }
+            
+            // Email
+            Text { text: "Email:"; }
+            TextInput { 
+                text <=> root.email_text;
+            }
+            
+            // Address
+            Text { text: "Address:"; }
+            TextInput { 
+                text <=> root.address_text;
+            }
+            
+            // Eircode
+            Text { text: "Eircode:"; }
+            TextInput { 
+                text <=> root.eircode_text;
+            }
+            
+            // Fee
+            Text { text: "Fee:"; }
+            TextInput { 
+                text <=> root.fee_text;
+            }
+            
+            // House type
+            Text { text: "House Type:"; }
+            TextInput { 
+                text <=> root.house_type_text;
+            }
+        }
+        
+        // Spacer to push Next button to bottom
+        Rectangle {
+            vertical-stretch: 1;
+        }
+        
+        // Bottom Next button
+        Rectangle {
+            height: 40px;
+            background: #0d6efd;
+            border-radius: 4px;
+            
+            Text {
+                text: "Next";
+                color: white;
+                horizontal-alignment: center;
+                vertical-alignment: center;
+            }
+            
+            TouchArea {
+                clicked => { 
+                    root.next(
+                        root.name_text,
+                        root.email_text,
+                        root.address_text,
+                        root.eircode_text,
+                        root.fee_text,
+                        root.house_type_text
+                    );
+                }
+            }
+        }
+    }
+}
+
+
