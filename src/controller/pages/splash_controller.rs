@@ -4,7 +4,7 @@ use std::rc::Rc;
 use std::sync::mpsc::Sender;
 use std::thread;
 
-use super::app_controller::AppController;
+use crate::controller::app_controller::AppController;
 
 /// Splash page controller
 pub struct SplashController {

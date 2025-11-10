@@ -1,4 +1,4 @@
-use super::app_controller::AppController;
+use crate::controller::app_controller::AppController;
 use crate::KeyDeetsWindow;
 use slint::Weak;
 use std::rc::Rc;

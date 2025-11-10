@@ -3,12 +3,12 @@ mod controller;
 use std::rc::Rc;
 
 use controller::app_controller::AppController;
-use controller::home_controller::HomeController;
-use controller::key_deets_controller::KeyDeetsController;
-use controller::more_deets_controller::MoreDeetsController;
-use controller::new_ber_controller::NewBerController;
-use controller::sketch_window_controller::SketchWindowController;
-use controller::splash_controller::SplashController;
+use controller::pages::home_controller::HomeController;
+use controller::pages::key_deets_controller::KeyDeetsController;
+use controller::pages::more_deets_controller::MoreDeetsController;
+use controller::pages::new_ber_controller::NewBerController;
+use controller::pages::sketch_window_controller::SketchWindowController;
+use controller::pages::splash_controller::SplashController;
 
 slint::include_modules!();
 

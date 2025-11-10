@@ -1,7 +1,7 @@
 use std::rc::Rc;
 use slint::Weak;
 use crate::SketchWindow;
-use super::app_controller::AppController;
+use crate::controller::app_controller::AppController;
 
 pub struct SketchWindowController {
     ui: Weak<SketchWindow>,
