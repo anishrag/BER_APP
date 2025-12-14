@@ -1,4 +1,5 @@
 mod controller;
+mod engine;
 
 use std::rc::Rc;
 
