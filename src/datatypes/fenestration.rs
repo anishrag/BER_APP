@@ -3,6 +3,8 @@
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
+use super::common::Photo;
+
 #[derive(Debug, Serialize, Deserialize)]
 pub enum Glazing {
     Single,
@@ -13,19 +15,25 @@ pub enum Glazing {
 
 #[derive(Debug, Serialize, Deserialize)]
 pub enum Frame {
-    Wood_UPVC,
+    WoodUPVC,
     Metal,
     Other(String),
 }
 
 #[derive(Debug, Serialize, Deserialize)]
+pub enum WindowNameSpecifics {
+    Standard,
+    Custom(String),
+}
+
+#[derive(Debug, Serialize, Deserialize)]
 pub struct WindowType {
     pub id: Uuid,
-    pub name: String, // e.g., "Double Glazed", "Triple Glazed"
     pub year: i32,
     pub glazing: Glazing,
+    pub gap: Vec<u32>, // gap in mm for double/triple glazing
     pub frame: Frame,
-    pub specifics: DefaultOrNot,
+    pub specifics: WindowNameSpecifics,
     pub photos: Vec<Photo>,
     pub notes: Option<String>,
 }
@@ -40,25 +48,9 @@ pub struct Window {
 }
 
 #[derive(Debug, Serialize, Deserialize)]
-pub struct WindowTypeGroup {
-    pub window_type: WindowType,
-    pub windows: Vec<Uuid>,
-}
-
-#[derive(Debug, Serialize, Deserialize)]
 pub struct Door {
     pub id: Uuid,
     pub type_name: String,
     pub vertices: Vec<(f32, f32, f32)>,
     pub photos: Vec<Photo>,
-}
-
-impl WindowTypeGroup {
-    pub fn validate(&self, windows: &[Window]) -> bool {
-        self.windows.iter().all(|id| {
-            windows
-                .iter()
-                .any(|w| w.id == *id && w.window_type_id == self.window_type.id)
-        })
-    }
 }

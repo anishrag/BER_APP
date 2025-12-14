@@ -1,8 +1,6 @@
-#[derive(Debug, Serialize, Deserialize)]
-pub enum DefaultOrNot {
-    Default,
-    Custom(String),
-}
+use uuid::Uuid;
+
+use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct Photo {
@@ -16,13 +14,6 @@ pub struct ConstructionPhase {
     pub id: Uuid,
     pub phase_name: String, // e.g., "Original", "Extension 1"
     pub year_built: i32,
-}
-
-#[derive(Debug, Serialize, Deserialize)]
-pub enum ElementType {
-    Floor,
-    Wall,
-    Roof,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
