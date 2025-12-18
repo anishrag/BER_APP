@@ -224,5 +224,5 @@ pub enum ThermalBridging {
     Default,
     ACDs,
     TGDL2005,
-    Custom { y_value: fp32 },
+    Custom { y_value: f32 },
 }
