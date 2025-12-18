@@ -1,18 +1,20 @@
-mod controller;
-mod engine;
+use rusqlite::Connection;
+use slint::ComponentHandle;
 
 use std::rc::Rc;
 
-use controller::app_controller::AppController;
-use controller::pages::home_controller::HomeController;
-use controller::pages::key_deets_controller::KeyDeetsController;
-use controller::pages::more_deets_controller::MoreDeetsController;
-use controller::pages::new_ber_controller::NewBerController;
-use controller::pages::sketch_window_controller::SketchWindowController;
-use controller::pages::splash_controller::SplashController;
+use ber_app::controller::app_controller::AppController;
+use ber_app::controller::pages::home_controller::HomeController;
+use ber_app::controller::pages::key_deets_controller::KeyDeetsController;
+use ber_app::controller::pages::more_deets_controller::MoreDeetsController;
+use ber_app::controller::pages::new_ber_controller::NewBerController;
+use ber_app::controller::pages::sketch_window_controller::SketchWindowController;
+use ber_app::controller::pages::splash_controller::SplashController;
 
-slint::include_modules!();
-
+use ber_app::{
+    HomeWindow, KeyDeetsWindow, MainWindow, MoreDeetsWindow, NewBERWindow, SketchWindow,
+    SplashScreen,
+};
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Create the shared AppController
     let app_controller = Rc::new(AppController::new());
