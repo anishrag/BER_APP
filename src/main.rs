@@ -16,8 +16,10 @@ use ber_app::{
     SplashScreen,
 };
 fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let conn = Connection::open_in_memory()?;
+
     // Create the shared AppController
-    let app_controller = Rc::new(AppController::new());
+    let app_controller = Rc::new(AppController::new(conn));
 
     // Instantiate Slint main window
     let main_window = MainWindow::new()?;
