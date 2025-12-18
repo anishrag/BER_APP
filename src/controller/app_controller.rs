@@ -5,13 +5,12 @@ use std::sync::mpsc::Sender;
 use crate::datatypes::ber::ber::Ber;
 use crate::engine::ber_repository::{BerRecord, BerRepository};
 use crate::engine::dataloader::DataLoader;
-use crate::engine::processing_engine::ProcessingEngine;
 
 pub struct AppController {
     conn: Connection,
 
     loader_engine: DataLoader,
-    processing_engine: ProcessingEngine,
+    //   processing_engine: ProcessingEngine,
 }
 
 impl AppController {
@@ -19,7 +18,7 @@ impl AppController {
         Self {
             conn,
             loader_engine: DataLoader::new(),
-            processing_engine: ProcessingEngine::new(),
+            //            processing_engine: ProcessingEngine::new(),
         }
     }
 
@@ -50,10 +49,10 @@ impl AppController {
         repo.load(id).ok().map(|record| record.data)
     }
 
-    pub fn create_evidence_doc(&self, tx: Sender<(String, f32)>) {
-        let processing_engine = self.processing_engine.clone();
-        std::thread::spawn(move || {
-            let _ = processing_engine.generate_evidence_document(tx);
-        });
-    }
+    //     pub fn create_evidence_doc(&self, tx: Sender<(String, f32)>) {
+    //         let processing_engine = self.processing_engine.clone();
+    //         std::thread::spawn(move || {
+    //             let _ = processing_engine.generate_evidence_document(tx);
+    //         });
+    //     }
 }
