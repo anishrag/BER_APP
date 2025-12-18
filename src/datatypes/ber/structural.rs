@@ -193,7 +193,7 @@ pub struct ShelteredSideInfo {
     pub sheltered_sides: i32, // e.g., ["North", "West"]
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub enum ThermalMassCategoryEnum {
     Low,
     Medium,
