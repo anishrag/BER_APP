@@ -5,7 +5,7 @@ use uuid::Uuid;
 use super::common::{Item, Photo};
 use super::fenestration::{Door, Window};
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Opes {
     pub doors: Vec<Uuid>,   // references to Door IDs
     pub windows: Vec<Uuid>, // references to Window IDs
@@ -69,12 +69,12 @@ pub enum ConstructionMakeup {
     Layers(Vec<ConstructionLayer>), // custom stack of layers
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FloorData {
     pub storey: u8,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum PlanarElement {
     Floor {
         id: Uuid,
@@ -160,7 +160,7 @@ impl PlanarElement {
     }
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Room {
     pub id: Uuid,
     pub name: String,
@@ -175,7 +175,7 @@ pub struct Room {
     pub underfloor_heating: bool,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Storey {
     pub id: Uuid,
     pub name: String, // e.g., "Ground Floor", "First Floor"
@@ -187,13 +187,13 @@ pub struct Storey {
     pub rooms: Vec<Room>,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ShelteredSideInfo {
     pub id: Uuid,
     pub sheltered_sides: i32, // e.g., ["North", "West"]
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum ThermalMassCategoryEnum {
     Low,
     Medium,
@@ -207,7 +207,7 @@ impl Default for ThermalMassCategoryEnum {
     }
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ThermalMassInfo {
     pub id: Uuid,
     pub floors: ThermalMassCategoryEnum,

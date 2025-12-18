@@ -5,7 +5,7 @@ use super::common::{ConstructionPhase, Photo};
 use super::structural::{Storey, ThermalMassInfo};
 use super::systems::{HeatingSystem, SolarElements, VentilationSystem};
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Ber {
     pub id: Uuid,
     pub address: String,

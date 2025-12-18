@@ -5,7 +5,7 @@ use uuid::Uuid;
 
 use super::common::Photo;
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum HeatingSystemType {
     GasBoiler,
     OilBoiler,
@@ -15,14 +15,14 @@ pub enum HeatingSystemType {
     Invalid,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct HeatingControls {
     pub id: Uuid,
     pub programmer: bool,
     pub zones: u32,
     pub notes: Option<String>,
 }
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct HeatingSystem {
     pub id: Uuid,
     pub system_type: HeatingSystemType, // e.g., "Gas boiler", "Heat pump"
@@ -50,7 +50,7 @@ impl Default for HeatingSystem {
     }
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum VentilationSystemType {
     Natural,
     Mechanical,
@@ -59,7 +59,7 @@ pub enum VentilationSystemType {
     Invalid,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct VentilationSystem {
     pub id: Uuid,
     pub system_type: VentilationSystemType, // e.g., "Natural ventilation", "Mechanical ventilation with heat recovery"
@@ -76,7 +76,7 @@ impl Default for VentilationSystem {
     }
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum Direction {
     North,
     East,
@@ -89,7 +89,7 @@ pub enum Direction {
     Other(String),
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SolarElements {
     pub id: Uuid,
     pub num_panels: u32,

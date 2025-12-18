@@ -5,7 +5,7 @@ use uuid::Uuid;
 
 use super::common::Photo;
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum Glazing {
     Single,
     Double,
@@ -13,20 +13,20 @@ pub enum Glazing {
     Other(String),
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum Frame {
     WoodUPVC,
     Metal,
     Other(String),
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum WindowNameSpecifics {
     Standard,
     Custom(String),
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct WindowType {
     pub id: Uuid,
     pub year: i32,
@@ -38,7 +38,7 @@ pub struct WindowType {
     pub notes: Option<String>,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Window {
     pub id: Uuid,
     pub vertices: Vec<(f32, f32, f32)>,
@@ -47,7 +47,7 @@ pub struct Window {
     pub window_type_id: Uuid,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Door {
     pub id: Uuid,
     pub type_name: String,

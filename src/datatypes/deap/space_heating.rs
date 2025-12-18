@@ -170,29 +170,6 @@ pub struct OtherHeatingSystemBools {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct SpaceHeating {
-    pub main_systems: Vec<HeatingSystem>,
-    pub secondary_system: Option<HeatingSystem>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct HeatingSystem {
-    pub id: Uuid,
-    pub system_type: HeatingSystemType,
-    pub efficiency: f32,
-    pub emitter_type: EmitterType,
-    pub fraction_of_load: f32,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub enum HeatingSystemType {
-    Boiler { fuel: FuelType, condensing: bool },
-    HeatPump { cop: f32 },
-    RoomHeater { fuel: FuelType },
-    DistrictHeating,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum FuelType {
     Oil,
     Gas,
