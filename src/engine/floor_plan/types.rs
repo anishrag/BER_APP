@@ -5,7 +5,7 @@ pub struct Polygon3D {
     pub exterior: Vec<Vertex3D>,
 }
 
-type Year = u32;
+pub type Year = u32;
 type LocalId = u32;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -52,4 +52,25 @@ pub struct Vertex3D {
 pub struct Vertex2D {
     pub x: f64,
     pub y: f64,
+}
+
+/// Construction types (example: 5-6 options)
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ConstructionType {
+    Concrete,
+    Timber,
+    Steel,
+    Brick,
+    Mixed,
+    Other,
+}
+
+/// Construction layers (optional multiple layers)
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ConstructionLayer {
+    Insulation,
+    Reinforcement,
+    Waterproofing,
+    Finish,
+    // add more as needed
 }

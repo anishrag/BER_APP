@@ -1,3 +1,7 @@
+use geo::{LineString, Polygon};
+
+use super::types::{Polygon3D, Vertex3D};
+
 // Helper function to check if a point lies on a line segment in 2D
 fn point_on_segment_2d(px: f64, py: f64, ax: f64, ay: f64, bx: f64, by: f64, epsilon: f64) -> bool {
     // Check if point is collinear with the segment

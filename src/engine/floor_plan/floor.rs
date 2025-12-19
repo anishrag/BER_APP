@@ -1,12 +1,11 @@
-use earcutr::earcut;
-
-use super::types::{Vertex2D, Year, YearId, YearIdAllocator};
-use geo::algorithm::union::Union;
+// standard includes
+use geo::bool_ops::BooleanOps;
 use geo::{LineString, MultiPolygon, Polygon};
 use nalgebra::{Point3, Vector3};
-use spade::constrained_delaunay::{CDTVertex, ConstrainedDelaunayTriangulation};
-use spade::HasPosition;
 use std::collections::HashMap;
+
+// local includes
+use super::types::{Polygon3D, Vertex2D, Year, YearId, YearIdAllocator};
 
 /// A planar region of the floor
 #[derive(Clone, Debug)]
@@ -173,44 +172,125 @@ pub struct FloorRegionByYear {
 mod tests {
     use super::*;
 
-    #[test]
-    fn create_flat_floor_with_vertex_heights() {
-        // Given a rectangular floor plan
-        let boundary = vec![(0.0, 0.0), (10.0, 0.0), (10.0, 5.0), (0.0, 5.0)];
+    fn rectangle(min_x: f64, min_y: f64, max_x: f64, max_y: f64) -> Polygon<f64> {
+        Polygon::new(
+            LineString::from(vec![
+                (min_x, min_y),
+                (max_x, min_y),
+                (max_x, max_y),
+                (min_x, max_y),
+                (min_x, min_y), // close the loop
+            ]),
+            vec![], // no holes
+        )
+    }
 
-        // All vertices at the same height
-        let heights = vec![1.0, 1.0, 1.0, 1.0];
+    fn base_floor(year: Year) -> FloorRegions {
+        let vertices = vec![
+            Vertex2D { x: 0.0, y: 0.0 },
+            Vertex2D { x: 10.0, y: 0.0 },
+            Vertex2D { x: 10.0, y: 10.0 },
+            Vertex2D { x: 0.0, y: 10.0 },
+        ];
 
-        // When we create the floor plan
-        let plan = FloorPlan3D::new(boundary, heights.clone());
-
-        // Then there is exactly one region
-        assert_eq!(plan.region_count(), 1);
-
-        // And all vertices have the expected heights
-        let verts = plan.vertices();
-        assert_eq!(verts.len(), 4);
-
-        for v in verts {
-            assert_eq!(v.z, 1.0);
-        }
+        FloorRegions::new(vertices, year)
     }
 
     #[test]
-    fn create_sloped_floor_with_per_vertex_heights() {
-        // Rectangle again
-        let boundary = vec![(0.0, 0.0), (10.0, 0.0), (10.0, 5.0), (0.0, 5.0)];
+    fn new_creates_single_region() {
+        let floor = base_floor(2020);
 
-        // Sloped floor: left side low, right side high
-        let heights = vec![0.0, 2.0, 2.0, 0.0];
+        assert_eq!(floor.regions.len(), 1);
+        assert_eq!(floor.regions[0].height, 0.0);
+        assert_eq!(floor.regions[0].year_id.year, 2020);
+    }
 
-        let plan = FloorPlan3D::new(boundary, heights.clone());
+    #[test]
+    fn raise_polygon_splits_region_and_changes_height() {
+        let mut floor = base_floor(2020);
 
-        let verts = plan.vertices();
+        let raise_poly = rectangle(0.0, 0.0, 5.0, 10.0);
+        floor.raise_lower_polygon(raise_poly, 2.5);
 
-        // Heights match exactly
-        for (v, expected) in verts.iter().zip(heights.iter()) {
-            assert!((v.z - expected).abs() < 1e-9);
-        }
+        assert_eq!(floor.regions.len(), 2);
+
+        let raised = floor.regions.iter().filter(|r| r.height == 2.5).count();
+        let flat = floor.regions.iter().filter(|r| r.height == 0.0).count();
+
+        assert_eq!(raised, 1);
+        assert_eq!(flat, 1);
+    }
+
+    #[test]
+    fn change_year_polygon_updates_only_intersection() {
+        let mut floor = base_floor(2020);
+
+        let poly = rectangle(0.0, 0.0, 5.0, 10.0);
+        floor.change_year_polygon(poly, 2025);
+
+        assert_eq!(floor.regions.len(), 2);
+
+        let years: Vec<u32> = floor.regions.iter().map(|r| r.year_id.year).collect();
+
+        assert!(years.contains(&2020));
+        assert!(years.contains(&2025));
+    }
+
+    #[test]
+    fn change_id_polygon_allocates_new_id_same_year() {
+        let mut floor = base_floor(2020);
+
+        let poly = rectangle(0.0, 0.0, 5.0, 10.0);
+        floor.change_id_polygon(poly);
+
+        assert_eq!(floor.regions.len(), 2);
+
+        let ids: Vec<_> = floor.regions.iter().map(|r| r.year_id.id).collect();
+        let years: Vec<_> = floor.regions.iter().map(|r| r.year_id.year).collect();
+
+        assert_eq!(years[0], 2020);
+        assert_eq!(years[1], 2020);
+        assert_ne!(ids[0], ids[1]);
+    }
+
+    #[test]
+    #[should_panic(expected = "change_id_polygon spans multiple years")]
+    fn change_id_polygon_panics_on_mixed_years() {
+        let mut floor = base_floor(2020);
+
+        let left = rectangle(0.0, 0.0, 5.0, 10.0);
+        floor.change_year_polygon(left, 2025);
+
+        let spanning = rectangle(0.0, 0.0, 10.0, 10.0);
+        floor.change_id_polygon(spanning);
+    }
+
+    #[test]
+    fn by_year_unions_regions_per_year() {
+        let mut floor = base_floor(2020);
+
+        let left = rectangle(0.0, 0.0, 5.0, 10.0);
+        let right = rectangle(5.0, 0.0, 10.0, 10.0);
+
+        floor.change_year_polygon(left, 2021);
+        floor.change_year_polygon(right, 2021);
+
+        let by_year = floor.by_year();
+
+        let regions_2021: Vec<_> = by_year.iter().filter(|r| r.year == 2021).collect();
+        assert_eq!(regions_2021.len(), 1);
+    }
+
+    #[test]
+    fn height_is_preserved_for_remainder() {
+        let mut floor = base_floor(2020);
+
+        floor.raise_lower_polygon(rectangle(0.0, 0.0, 10.0, 10.0), 1.0);
+        floor.raise_lower_polygon(rectangle(0.0, 0.0, 5.0, 10.0), 2.0);
+
+        let heights: Vec<f64> = floor.regions.iter().map(|r| r.height).collect();
+
+        assert!(heights.contains(&3.0)); // overlap region
+        assert!(heights.contains(&1.0)); // remainder region
     }
 }
