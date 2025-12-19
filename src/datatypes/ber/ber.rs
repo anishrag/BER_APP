@@ -1,7 +1,7 @@
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-use super::common::{ConstructionPhase, Photo};
+use super::common::{ConstructionPhases, Photo};
 use super::structural::{Storey, ThermalMassInfo};
 use super::systems::{HeatingSystem, SolarElements, VentilationSystem};
 
@@ -10,7 +10,7 @@ pub struct Ber {
     pub id: Uuid,
     pub address: String,
     pub eircode: String,
-    pub construction_phases: Vec<ConstructionPhase>,
+    pub construction_phases: ConstructionPhases,
     pub heating_system: HeatingSystem,
     pub ventilation_system: VentilationSystem,
     pub sheltered_sides: f32,
@@ -29,7 +29,7 @@ impl Ber {
             id: Uuid::new_v4(),
             address: String::new(),
             eircode: String::new(),
-            construction_phases: vec![],
+            construction_phases: Default::default(),
             heating_system: Default::default(),
             ventilation_system: Default::default(),
             sheltered_sides: 0.0,

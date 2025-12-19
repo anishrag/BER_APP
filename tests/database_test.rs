@@ -4,7 +4,7 @@ use rusqlite::Connection;
 use uuid::Uuid;
 
 use ber_app::datatypes::ber::ber::Ber;
-use ber_app::datatypes::ber::common::{ConstructionPhase, Photo};
+use ber_app::datatypes::ber::common::{ConstructionPhase, ConstructionPhases, Photo};
 use ber_app::datatypes::ber::structural::{
     ConstructionMakeup, PlanarElement, Storey, ThermalMassCategoryEnum, ThermalMassInfo,
 };
@@ -71,7 +71,7 @@ fn test_insert_and_load_full_ber() -> Result<()> {
 
     let loaded = repo.load(&id)?;
 
-    assert_eq!(loaded.data.construction_phases.len(), 2);
+    assert_eq!(loaded.data.construction_phases.years.len(), 2);
     assert_eq!(loaded.data.storeys.len(), 2);
     assert_eq!(loaded.data.photos.len(), 2);
     assert_eq!(loaded.data.solar.len(), 1);
@@ -177,7 +177,9 @@ fn create_minimal_ber(id: Uuid) -> Ber {
         id,
         address: "123 Test Street".to_string(),
         eircode: "D01TEST".to_string(),
-        construction_phases: vec![],
+        construction_phases: ConstructionPhases {
+            years: [(ConstructionPhase::Original, 2000)].into_iter().collect(),
+        },
         heating_system: HeatingSystem {
             id: Uuid::new_v4(),
             system_type: HeatingSystemType::GasBoiler,
@@ -215,18 +217,14 @@ fn create_minimal_ber(id: Uuid) -> Ber {
 fn create_full_ber(id: Uuid) -> Ber {
     let mut ber = create_minimal_ber(id);
 
-    ber.construction_phases = vec![
-        ConstructionPhase {
-            id: Uuid::new_v4(),
-            phase_name: "Original".to_string(),
-            year_built: 1950,
-        },
-        ConstructionPhase {
-            id: Uuid::new_v4(),
-            phase_name: "Extension".to_string(),
-            year_built: 2010,
-        },
-    ];
+    ber.construction_phases = ConstructionPhases {
+        years: [
+            (ConstructionPhase::Original, 1950),
+            (ConstructionPhase::Extension1, 1970),
+        ]
+        .into_iter()
+        .collect(),
+    };
 
     ber.storeys = vec![
         Storey {
@@ -239,7 +237,7 @@ fn create_full_ber(id: Uuid) -> Ber {
                     (10.0, 8.0, 0.0),
                     (0.0, 8.0, 0.0),
                 ],
-                ber.construction_phases[0].id,
+                ConstructionPhase::Original,
                 ConstructionMakeup::Default,
             )],
             walls: vec![],

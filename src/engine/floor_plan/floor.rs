@@ -4,14 +4,19 @@ use geo::{LineString, MultiPolygon, Polygon};
 use nalgebra::{Point3, Vector3};
 use std::collections::HashMap;
 
+use crate::datatypes::ber::common::ConstructionPhase;
+
 // local includes
-use super::types::{Polygon3D, Vertex2D, Year, YearId, YearIdAllocator};
+use super::types::{ConstructionLayer, ConstructionType, Vertex2D, Year, YearId, YearIdAllocator};
 
 /// A planar region of the floor
 #[derive(Clone, Debug)]
 pub struct FloorRegion {
     pub polygon: Polygon<f64>, // 2D polygon boundary
     pub height: f64,           // height per vertex
+    pub construction_type: ConstructionType,
+    pub construction_layers: Option<Vec<ConstructionLayer>>,
+    pub construction_phase: ConstructionPhase,
     pub year_id: YearId,
 }
 /// A planar region of the floor
@@ -37,6 +42,9 @@ impl FloorRegions {
             regions: vec![FloorRegion {
                 polygon,
                 height: 0.0f64,
+                construction_type: ConstructionType::Concrete,
+                construction_layers: None,
+                construction_phase: ConstructionPhase::Original,
                 year_id,
             }],
         }
@@ -63,6 +71,9 @@ impl FloorRegions {
                 new_regions.push(FloorRegion {
                     polygon: poly,
                     height: region.height,
+                    construction_type: region.construction_type,
+                    construction_layers: region.construction_layers.clone(),
+                    construction_phase: region.construction_phase.clone(),
                     year_id: region.year_id,
                 });
             }

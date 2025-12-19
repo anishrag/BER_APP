@@ -2,22 +2,13 @@
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-use super::common::{Item, Photo};
+use super::common::{ConstructionPhase, Item, Photo};
 use super::fenestration::{Door, Window};
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Default, Clone, Serialize, Deserialize)]
 pub struct Opes {
     pub doors: Vec<Uuid>,   // references to Door IDs
     pub windows: Vec<Uuid>, // references to Window IDs
-}
-
-impl Default for Opes {
-    fn default() -> Self {
-        Self {
-            doors: vec![],
-            windows: vec![],
-        }
-    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -79,7 +70,7 @@ pub enum PlanarElement {
     Floor {
         id: Uuid,
         vertices: Vec<(f32, f32, f32)>,
-        construction_phase_id: Uuid,
+        construction_phase: ConstructionPhase,
         opes: Opes,
         construction: ConstructionMakeup,
         photos: Vec<Photo>,
@@ -91,7 +82,7 @@ pub enum PlanarElement {
     Wall {
         id: Uuid,
         vertices: Vec<(f32, f32, f32)>,
-        construction_phase_id: Uuid,
+        construction_phase: ConstructionPhase,
         opes: Opes,
         construction: ConstructionMakeup,
         photos: Vec<Photo>,
@@ -101,7 +92,7 @@ pub enum PlanarElement {
     Roof {
         id: Uuid,
         vertices: Vec<(f32, f32, f32)>,
-        construction_phase_id: Uuid,
+        construction_phase: ConstructionPhase,
         opes: Opes,
         construction: ConstructionMakeup,
         photos: Vec<Photo>,
@@ -112,13 +103,13 @@ pub enum PlanarElement {
 impl PlanarElement {
     pub fn new_floor(
         vertices: Vec<(f32, f32, f32)>,
-        construction_phase_id: Uuid,
+        construction_phase: ConstructionPhase,
         construction: ConstructionMakeup,
     ) -> Self {
         Self::Floor {
             id: Uuid::new_v4(),
             vertices,
-            construction_phase_id,
+            construction_phase,
             opes: Opes::default(),
             construction,
             photos: vec![],
@@ -129,13 +120,13 @@ impl PlanarElement {
 
     pub fn new_wall(
         vertices: Vec<(f32, f32, f32)>,
-        construction_phase_id: Uuid,
+        construction_phase: ConstructionPhase,
         construction: ConstructionMakeup,
     ) -> Self {
         Self::Wall {
             id: Uuid::new_v4(),
             vertices,
-            construction_phase_id,
+            construction_phase,
             opes: Opes::default(),
             construction,
             photos: vec![],
@@ -145,13 +136,13 @@ impl PlanarElement {
 
     pub fn new_roof(
         vertices: Vec<(f32, f32, f32)>,
-        construction_phase_id: Uuid,
+        construction_phase: ConstructionPhase,
         construction: ConstructionMakeup,
     ) -> Self {
         Self::Roof {
             id: Uuid::new_v4(),
             vertices,
-            construction_phase_id,
+            construction_phase,
             opes: Opes::default(),
             construction,
             photos: vec![],

@@ -1,6 +1,6 @@
-use uuid::Uuid;
-
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
+use uuid::Uuid;
 
 pub type Year = u32;
 
@@ -11,11 +11,33 @@ pub struct Photo {
     pub description: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ConstructionPhase {
-    pub id: Uuid,
-    pub phase_name: String, // e.g., "Original", "Extension 1"
-    pub year_built: Year,
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Hash)]
+pub enum ConstructionPhase {
+    Original,
+    Extension1,
+    Extension2,
+    Extension3,
+    Extension4,
+    Other(String),
+}
+
+/// BER-level construction dates mapping
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct ConstructionPhases {
+    pub years: HashMap<ConstructionPhase, Year>,
+}
+
+impl ConstructionPhases {
+    pub fn new(years: HashMap<ConstructionPhase, Year>) -> Self {
+        Self { years }
+    }
+
+    pub fn get_year(&self, phase: ConstructionPhase) -> Year {
+        self.years
+            .get(&phase)
+            .copied()
+            .expect("Phase not found in construction years")
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
