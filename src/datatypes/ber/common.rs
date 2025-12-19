@@ -2,6 +2,8 @@ use uuid::Uuid;
 
 use serde::{Deserialize, Serialize};
 
+pub type Year = u32;
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Photo {
     pub id: Uuid,
@@ -13,7 +15,7 @@ pub struct Photo {
 pub struct ConstructionPhase {
     pub id: Uuid,
     pub phase_name: String, // e.g., "Original", "Extension 1"
-    pub year_built: i32,
+    pub year_built: Year,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

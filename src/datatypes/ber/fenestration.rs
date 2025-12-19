@@ -3,7 +3,7 @@
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-use super::common::Photo;
+use super::common::{Photo, Year};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum Glazing {
@@ -29,7 +29,7 @@ pub enum WindowNameSpecifics {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct WindowType {
     pub id: Uuid,
-    pub year: i32,
+    pub year: Year,
     pub glazing: Glazing,
     pub gap: Vec<u32>, // gap in mm for double/triple glazing
     pub frame: Frame,

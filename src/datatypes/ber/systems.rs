@@ -3,7 +3,7 @@
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-use super::common::Photo;
+use super::common::{Photo, Year};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum HeatingSystemType {
@@ -27,7 +27,7 @@ pub struct HeatingSystem {
     pub id: Uuid,
     pub system_type: HeatingSystemType, // e.g., "Gas boiler", "Heat pump"
     pub description: String,
-    pub year_installed: Option<u32>,
+    pub year_installed: Option<Year>,
     pub controls: HeatingControls,
     pub separate_hot_water: bool,
 }
