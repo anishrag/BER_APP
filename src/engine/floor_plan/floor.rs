@@ -7,7 +7,7 @@ use std::collections::HashMap;
 use crate::datatypes::ber::common::ConstructionPhase;
 
 // local includes
-use super::types::{ConstructionLayer, ConstructionType, Vertex2D, Year, YearId, YearIdAllocator};
+use super::types::{ConstructionLayer, ConstructionType, Vertex2D};
 
 /// A planar region of the floor
 #[derive(Clone, Debug)]
@@ -31,8 +31,6 @@ impl FloorRegions {
             LineString::from(vertices.iter().map(|p| (p.x, p.y)).collect::<Vec<_>>()),
             vec![],
         );
-        let mut allocator = YearIdAllocator::new();
-
         Self {
             regions: vec![FloorRegion {
                 polygon,
