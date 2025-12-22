@@ -96,7 +96,7 @@ impl FloorRegions {
         });
     }
 
-    pub fn change_polygon_construction_phase(
+    pub fn modify_polygon_construction_phase(
         &mut self,
         polygon: Polygon<f64>,
         construction_phase: ConstructionPhase,
@@ -106,18 +106,30 @@ impl FloorRegions {
         });
     }
 
-    // pub fn change_id_polygon(&mut self, polygon: Polygon<f64>) {
-    //     let year = self
-    //         .year_for_polygon(&polygon)
-    //         .expect("change_id_polygon spans multiple years");
-    //
-    //     let new_year_id = self.year_id_allocator.alloc(year);
-    //
-    //     self.modify_polygon(polygon, |r| {
-    //         r.year_id = new_year_id;
-    //     });
-    // }
-    //
+    pub fn modify_polygon_all_fields(
+        &mut self,
+        polygon: Polygon<f64>,
+        height: Option<f64>,
+        construction_type: Option<FloorConstructionType>,
+        construction_layers: Option<Vec<(ConstructionLayer, u32)>>,
+        construction_phase: Option<ConstructionPhase>,
+    ) {
+        self.modify_polygon(polygon, |r| {
+            if let Some(h) = height {
+                r.height = h;
+            }
+            if let Some(ct) = construction_type {
+                r.construction_type = ct;
+            }
+            if let Some(cl) = construction_layers.clone() {
+                r.construction_layers = cl;
+            }
+            if let Some(cp) = construction_phase.clone() {
+                r.construction_phase = cp;
+            }
+        });
+    }
+
     pub fn by_construction_phase(&self) -> Vec<FloorRegionByConstructionPhase> {
         let mut per_construction_phase: HashMap<ConstructionPhase, Vec<Polygon<f64>>> =
             HashMap::new();
