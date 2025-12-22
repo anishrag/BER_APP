@@ -1,134 +1,143 @@
-// 1. take floor polygon and split by discontinuitys
+// 1. x take floor polygon and split by discontinuitys
 // 2. Triangulate each region separately
 // 3. Create extra vertices if needed and set heights
 // 4. repolygon and split by planes
-// 5. further split by year
-// 6. futher user splitting if required
-use geo::algorithm::bool_ops::BooleanOps;
-use geo_types::{LineString, MultiPolygon, Polygon};
+// 5. x further split by year
+// 6. x futher user splitting if required
+// external crates
+use earcutr::earcut;
+use geo::Polygon;
+use nalgebra::{Point3, Vector3};
+// crate includes
+use crate::datatypes::ber::common::ConstructionPhase;
 
-use super::geometry::{Polygon3D, Vertex2D, Vertex3D};
-use super::types::{Year, YearId, YearIdAllocator};
+// local includes
+use super::geometry::{point_in_triangle_2d, point_on_segment_2d};
+use super::types::{CeilingConstructionType, ConstructionLayer, Polygon3D};
 
+/// A planar region of the floor
 #[derive(Clone, Debug)]
 pub struct CeilingRegion {
-    pub polygon: Polygon3D,
-    pub year_id: YearId,
+    pub polygon: Polygon3D, // 2D polygon boundary
+    pub construction_type: CeilingConstructionType,
+    pub construction_layers: Vec<(ConstructionLayer, u32)>,
+    pub construction_phase: ConstructionPhase,
 }
-
+/// A planar region of the floor
 #[derive(Debug)]
 pub struct CeilingRegions {
-    pub regions: Vec<CeilingRegion>,
-
-    pub allocator: YearIdAllocator,
+    pub regions: Vec<CeilingRegion>, // height per vertex
 }
-
 impl CeilingRegions {
-    pub fn new(storey_footprint: Polygon<f64>, height: f64, year: Year) -> Self {
-        let mut allocator = YearIdAllocator::new();
-
-        let exterior = storey_footprint
-            .exterior()
-            .points_iter()
-            .map(|p| Vertex3D {
-                x: p.x(),
-                y: p.y(),
-                z: height,
-            })
-            .collect();
-
-        let regions = vec![CeilingRegion {
-            polygon: Polygon3D { exterior },
-            year_id: allocator.alloc(year),
-        }];
-
-        Self { regions, allocator }
-    }
-
-    /// Split regions by polyline, inheriting the original year_id
-    pub fn split_by_polyline(&mut self, split: &[Vertex2D]) -> Result<(), &'static str> {
-        self.split_by_polyline_with(split, |year_id, _idx, _allocator| year_id)
-    }
-
-    /// Split regions by polyline, allocating a new year_id for split regions
-    pub fn split_by_polyline_new_year(
-        &mut self,
-        split: &[Vertex2D],
-        year: Year,
-    ) -> Result<(), &'static str> {
-        self.split_by_polyline_with(split, |_year_id, _idx, allocator| allocator.alloc(year))
-    }
-
-    /// General split method with custom year_id assignment logic
-    ///
-    /// The function receives:
-    /// - original_year_id: the year_id of the region being split
-    /// - region_index: index of the resulting region (0 or 1 for two-way splits)
-    /// - allocator: mutable reference to allocate new year_ids if needed
-    pub fn split_by_polyline_with<F>(
-        &mut self,
-        split: &[Vertex2D],
-        mut year_id_fn: F,
-    ) -> Result<(), &'static str>
-    where
-        F: FnMut(YearId, usize, &mut YearIdAllocator) -> YearId,
-    {
-        if split.len() < 2 {
-            return Err("Split polyline must have at least two points");
+    /// Create a new CeilingRegions
+    pub fn new(
+        vertices: Vec<Point3<f64>>,
+        construction_type: Option<CeilingConstructionType>,
+        construction_layers: Option<Vec<(ConstructionLayer, u32)>>,
+        construction_phase: Option<ConstructionPhase>,
+    ) -> Self {
+        Self {
+            regions: vec![CeilingRegion {
+                polygon: Polygon3D::new(vertices),
+                construction_type: construction_type
+                    .unwrap_or(CeilingConstructionType::SlopedInsOnCeiling),
+                construction_layers: construction_layers.unwrap_or_default(),
+                construction_phase: construction_phase.unwrap_or(ConstructionPhase::Original),
+            }],
         }
+    }
 
-        let split_ls = LineString::from(split.iter().map(|v| (v.x, v.y)).collect::<Vec<_>>());
+    fn modify_polygon<F>(&mut self, polygon: Polygon<f64>, mut modify: F)
+    where
+        F: FnMut(&mut CeilingRegion),
+    {
         let mut new_regions = Vec::new();
-        let mut any_split = false;
+        let mut regions_to_remove = Vec::new();
 
-        for region in self.regions.drain(..) {
-            let z = region.polygon.exterior[0].z;
-            let geo_poly = polygon3d_to_geo(&region.polygon);
-            let result: MultiPolygon<f64> = geo_poly.difference(&split_ls);
+        for (idx, region) in self.regions.iter().enumerate() {
+            let intersection = region.polygon.intersection(&polygon);
+            if intersection.polygons.is_empty() {
+                continue;
+            }
 
-            match result.0.len() {
-                // Region not affected → keep as-is
-                1 => {
-                    new_regions.push(region);
-                }
-                // Region split into exactly two → replace
-                2 => {
-                    any_split = true;
-                    for (idx, poly) in result.0.into_iter().enumerate() {
-                        let year_id = year_id_fn(region.year_id, idx, &mut self.allocator);
-                        new_regions.push(CeilingRegion {
-                            polygon: geo_to_polygon3d(&poly, z),
-                            year_id,
-                        });
-                    }
-                }
-                // Invalid / ambiguous split
-                _ => {
-                    return Err("Split produced invalid number of regions");
-                }
+            let remainder = region.polygon.difference(&polygon);
+            regions_to_remove.push(idx);
+
+            // remainder
+            for poly in remainder.polygons {
+                new_regions.push(CeilingRegion {
+                    polygon: poly,
+                    construction_type: region.construction_type,
+                    construction_layers: region.construction_layers.clone(),
+                    construction_phase: region.construction_phase.clone(),
+                });
+            }
+
+            // intersection
+            for poly in intersection.polygons {
+                let mut new_region = region.clone();
+                new_region.polygon = poly;
+                modify(&mut new_region);
+                new_regions.push(new_region);
             }
         }
 
-        if !any_split {
-            return Err("Split did not affect any ceiling regions");
+        for idx in regions_to_remove.into_iter().rev() {
+            self.regions.remove(idx);
         }
 
-        self.regions = new_regions;
-        Ok(())
+        self.regions.extend(new_regions);
+    }
+
+    pub fn modify_polygon_construction_phase(
+        &mut self,
+        polygon: Polygon<f64>,
+        construction_phase: ConstructionPhase,
+    ) {
+        self.modify_polygon(polygon, |r| {
+            r.construction_phase = construction_phase.clone();
+        });
+    }
+
+    pub fn modify_polygon_all_fields(
+        &mut self,
+        polygon: Polygon<f64>,
+        construction_type: Option<CeilingConstructionType>,
+        construction_layers: Option<Vec<(ConstructionLayer, u32)>>,
+        construction_phase: Option<ConstructionPhase>,
+    ) {
+        self.modify_polygon(polygon, |r| {
+            if let Some(ct) = construction_type {
+                r.construction_type = ct;
+            }
+            if let Some(cl) = construction_layers.clone() {
+                r.construction_layers = cl;
+            }
+            if let Some(cp) = construction_phase.clone() {
+                r.construction_phase = cp;
+            }
+        });
+    }
+
+    pub fn modify_polygon_increase_height(&mut self, polygon: Polygon<f64>, delta_height: f64) {
+        self.modify_polygon(polygon, |r| {
+            for vertex in r.polygon.exterior.iter_mut() {
+                vertex.z += delta_height;
+            }
+        });
     }
 }
 
 #[derive(Debug)]
 struct CeilingMesh {
     pub triangles: Vec<CeilingTriangle>,
-    pub year_id: YearId,
 }
 
 impl CeilingMesh {
     pub fn add_new_vertex_with_height(&mut self, x: f64, y: f64, height: f64) {
         const EPSILON: f64 = 1e-9;
 
-        let new_vertex = Vertex3D { x, y, z: height };
+        let new_vertex = Point3::new(x, y, height);
 
         // Find all triangles that need modification
         let mut triangles_to_remove = Vec::new();
@@ -183,7 +192,6 @@ impl CeilingMesh {
                 let tri1 = CeilingTriangle {
                     vertices: tri1_verts,
                     plane: Plane::from_triangle(&tri1_verts),
-                    year: triangle.year,
                 };
 
                 // Triangle 2: new_vertex, vertices[j], vertices[k]
@@ -191,7 +199,6 @@ impl CeilingMesh {
                 let tri2 = CeilingTriangle {
                     vertices: tri2_verts,
                     plane: Plane::from_triangle(&tri2_verts),
-                    year: triangle.year,
                 };
 
                 triangles_to_remove.push(idx);
@@ -219,7 +226,6 @@ impl CeilingMesh {
                     let tri = CeilingTriangle {
                         vertices: tri_verts,
                         plane: Plane::from_triangle(&tri_verts),
-                        year: triangle.year,
                     };
                     triangles_to_add.push(tri);
                 }
@@ -240,66 +246,43 @@ impl CeilingMesh {
     }
 }
 
-#[derive(Clone, Debug)]
-pub struct CeilingRegionsTriangulated {
-    pub meshes: HashMap<u32, CeilingMesh>,
-}
+use std::convert::TryFrom;
 
-impl From<&CeilingRegions> for CeilingRegionsTriangulated {
-    fn from(src: &CeilingRegions) -> Self {
-        let mut meshes = HashMap::new();
+impl TryFrom<Polygon3D> for CeilingMesh {
+    type Error = earcutr::Error; // or the actual error type from earcutr
 
-        for (mesh_id, region) in src.regions.iter().enumerate() {
-            let z = region.polygon.exterior[0].z;
+    fn try_from(polygon: Polygon3D) -> Result<Self, Self::Error> {
+        let vertices_3d = &polygon.exterior;
 
-            let exterior_2d: Vec<Vertex2D> = region
-                .polygon
-                .exterior
-                .iter()
-                .map(|v| Vertex2D { x: v.x, y: v.y })
-                .collect();
-
-            let tris_2d = triangulate_polygon_exterior(&exterior_2d);
-
-            let triangles = tris_2d
-                .into_iter()
-                .map(|tri| {
-                    let verts = [
-                        Vertex3D {
-                            x: tri[0].x,
-                            y: tri[0].y,
-                            z,
-                        },
-                        Vertex3D {
-                            x: tri[1].x,
-                            y: tri[1].y,
-                            z,
-                        },
-                        Vertex3D {
-                            x: tri[2].x,
-                            y: tri[2].y,
-                            z,
-                        },
-                    ];
-
-                    CeilingTriangle {
-                        plane: Plane::from_triangle(&verts),
-                        vertices: verts,
-                        year_id: region.year_id,
-                    }
-                })
-                .collect();
-
-            meshes.insert(
-                mesh_id as u32,
-                CeilingMesh {
-                    triangles,
-                    year_id: region.year_id,
-                },
-            );
+        if vertices_3d.len() < 3 {
+            return Err(earcutr::Error::Unknown);
         }
 
-        CeilingRegionsTriangulated { meshes }
+        // Flatten into 2D
+        let mut coords_2d = Vec::with_capacity(vertices_3d.len() * 2);
+        for v in vertices_3d {
+            coords_2d.push(v.x);
+            coords_2d.push(v.y);
+        }
+
+        let holes: Vec<usize> = Vec::new();
+
+        // Triangulate — propagate error with ?
+        let indices = earcutr::earcut(&coords_2d, &holes, 2)?;
+
+        let mut triangles = Vec::with_capacity(indices.len() / 3);
+        for chunk in indices.chunks_exact(3) {
+            let a = vertices_3d[chunk[0]].clone();
+            let b = vertices_3d[chunk[1]].clone();
+            let c = vertices_3d[chunk[2]].clone();
+
+            triangles.push(CeilingTriangle {
+                vertices: [a.clone(), b.clone(), c.clone()],
+                plane: Plane::from_triangle(&[a, b, c]),
+            });
+        }
+
+        Ok(CeilingMesh { triangles })
     }
 }
 
@@ -313,7 +296,7 @@ impl Plane {
         (-self.d - self.normal.x * x - self.normal.y * y) / self.normal.z
     }
 
-    pub fn from_triangle(v: &[Vertex3D; 3]) -> Self {
+    pub fn from_triangle(v: &[Point3<f64>; 3]) -> Self {
         let a = nalgebra::Point3::new(v[0].x, v[0].y, v[0].z);
         let b = nalgebra::Point3::new(v[1].x, v[1].y, v[1].z);
         let c = nalgebra::Point3::new(v[2].x, v[2].y, v[2].z);
@@ -331,132 +314,6 @@ pub struct Plane {
 
 #[derive(Clone, Debug)]
 pub struct CeilingTriangle {
-    pub vertices: [Vertex3D; 3],
+    pub vertices: [Point3<f64>; 3],
     pub plane: Plane,
-    pub year: u32,
-}
-
-// -----------------------------
-// Conversion from Triangulated → Polygonal
-// -----------------------------
-
-impl From<&CeilingRegionsTriangulated> for CeilingRegions {
-    fn from(src: &CeilingRegionsTriangulated) -> Self {
-        let mut allocator = YearIdAllocator::new();
-        let mut regions = Vec::new();
-
-        for mesh in src.meshes.values() {
-            // Step 1: Group triangles by plane
-            let mut plane_groups: Vec<Vec<&CeilingTriangle>> = Vec::new();
-
-            'outer: for tri in &mesh.triangles {
-                for group in plane_groups.iter_mut() {
-                    if tri.plane.approx_eq(&group[0].plane, EPSILON) {
-                        group.push(tri);
-                        continue 'outer;
-                    }
-                }
-                plane_groups.push(vec![tri]);
-            }
-
-            // Step 2: For each plane group, extract polygons
-            for group in plane_groups {
-                let polygons = extract_polygons_from_triangles(&group);
-                for poly in polygons {
-                    regions.push(CeilingRegion {
-                        polygon: poly,
-                        year_id: mesh.year_id,
-                    });
-                }
-            }
-        }
-
-        CeilingRegions { regions, allocator }
-    }
-}
-
-// -----------------------------
-// Extract polygons from triangles
-// -----------------------------
-
-fn extract_polygons_from_triangles(tris: &[&CeilingTriangle]) -> Vec<Polygon3D> {
-    // 1. Collect edges and count occurrences
-    let mut edge_count: HashMap<((f64, f64), (f64, f64)), usize> = HashMap::new();
-
-    for tri in tris {
-        let verts = &tri.vertices;
-        let edges = [
-            (verts[0], verts[1]),
-            (verts[1], verts[2]),
-            (verts[2], verts[0]),
-        ];
-        for &(a, b) in &edges {
-            // normalize edge direction
-            let key = if (a.x < b.x) || (a.x == b.x && a.y < b.y) {
-                ((a.x, a.y), (b.x, b.y))
-            } else {
-                ((b.x, b.y), (a.x, a.y))
-            };
-            *edge_count.entry(key).or_insert(0) += 1;
-        }
-    }
-
-    // 2. Keep only boundary edges (edges seen once)
-    let boundary_edges: Vec<((f64, f64), (f64, f64))> = edge_count
-        .iter()
-        .filter_map(|(k, &v)| if v == 1 { Some(*k) } else { None })
-        .collect();
-
-    // 3. Walk edges to form polygons
-    let mut polygons = Vec::new();
-    let mut edges_set: HashSet<_> = boundary_edges.iter().cloned().collect();
-
-    while !edges_set.is_empty() {
-        let mut poly_coords = Vec::new();
-        let mut start_edge = *edges_set.iter().next().unwrap();
-        edges_set.remove(&start_edge);
-
-        poly_coords.push(Vertex3D {
-            x: start_edge.0 .0,
-            y: start_edge.0 .1,
-            z: tris[0].vertices[0].z,
-        });
-        poly_coords.push(Vertex3D {
-            x: start_edge.1 .0,
-            y: start_edge.1 .1,
-            z: tris[0].vertices[0].z,
-        });
-
-        let mut current = start_edge.1;
-        loop {
-            let mut found_next = false;
-            let mut remove_edge = None;
-            for e in &edges_set {
-                if (e.0 == current) || (e.1 == current) {
-                    let next = if e.0 == current { e.1 } else { e.0 };
-                    poly_coords.push(Vertex3D {
-                        x: next.0,
-                        y: next.1,
-                        z: tris[0].vertices[0].z,
-                    });
-                    remove_edge = Some(*e);
-                    current = next;
-                    found_next = true;
-                    break;
-                }
-            }
-            if let Some(e) = remove_edge {
-                edges_set.remove(&e);
-            }
-            if !found_next {
-                break;
-            }
-        }
-
-        polygons.push(Polygon3D {
-            exterior: poly_coords,
-        });
-    }
-
-    polygons
 }
