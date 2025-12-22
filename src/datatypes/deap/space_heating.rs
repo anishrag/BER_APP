@@ -1,5 +1,4 @@
 use serde::{Deserialize, Serialize};
-use uuid::Uuid;
 
 // ------------------- SECTION 3: Space Heating -------------------
 //
@@ -58,8 +57,8 @@ pub enum HeatingSubCategory1 {
 pub enum GasOilSubCategory2 {
     CPSU,
     GasPost1998,
-    GasPre1998_nfa_flue,
-    GasPre1998_fa_flue,
+    GasPre1998NFAFlue,
+    GasPre1998FAFlue,
     Oil,
     RangeCookerOil,
     RangeCookerGas,
