@@ -7,15 +7,15 @@ use std::collections::HashMap;
 use crate::datatypes::ber::common::ConstructionPhase;
 
 // local includes
-use super::types::{ConstructionLayer, ConstructionType, Vertex2D};
+use super::types::{ConstructionLayer, FloorConstructionType};
 
 /// A planar region of the floor
 #[derive(Clone, Debug)]
 pub struct FloorRegion {
     pub polygon: Polygon<f64>, // 2D polygon boundary
     pub height: f64,           // height per vertex
-    pub construction_type: ConstructionType,
-    pub construction_layers: Option<Vec<ConstructionLayer>>,
+    pub construction_type: FloorConstructionType,
+    pub construction_layers: Vec<(ConstructionLayer, u32)>,
     pub construction_phase: ConstructionPhase,
 }
 /// A planar region of the floor
@@ -40,9 +40,9 @@ impl FloorRegions {
             regions: vec![FloorRegion {
                 polygon,
                 height: 0.0f64,
-                construction_type: ConstructionType::Concrete,
-                construction_layers: None,
-                construction_phase: ConstructionPhase::Original,
+                construction_type: construction_type.unwrap_or(FloorConstructionType::SolidFloor),
+                construction_layers: construction_layers.unwrap_or_default(),
+                construction_phase: construction_phase.unwrap_or(ConstructionPhase::Original),
             }],
         }
     }
