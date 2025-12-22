@@ -1,7 +1,7 @@
 // standard includes
 use geo::bool_ops::BooleanOps;
 use geo::{LineString, MultiPolygon, Polygon};
-use nalgebra::{Point3, Vector3};
+use nalgebra::Point2;
 use std::collections::HashMap;
 
 use crate::datatypes::ber::common::ConstructionPhase;
@@ -26,7 +26,12 @@ pub struct FloorRegions {
 
 impl FloorRegions {
     /// Create a new FloorRegions
-    pub fn new(vertices: Vec<Vertex2D>) -> Self {
+    pub fn new(
+        vertices: Vec<Point2<f64>>,
+        construction_type: Option<FloorConstructionType>,
+        construction_layers: Option<Vec<(ConstructionLayer, u32)>>,
+        construction_phase: Option<ConstructionPhase>,
+    ) -> Self {
         let polygon = Polygon::new(
             LineString::from(vertices.iter().map(|p| (p.x, p.y)).collect::<Vec<_>>()),
             vec![],

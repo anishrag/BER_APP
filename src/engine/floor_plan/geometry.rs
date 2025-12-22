@@ -1,9 +1,18 @@
 use geo::{LineString, Polygon};
+use nalgebra::Point3;
 
-use super::types::{Polygon3D, Vertex3D};
+use super::types::Polygon3D;
 
 // Helper function to check if a point lies on a line segment in 2D
-fn point_on_segment_2d(px: f64, py: f64, ax: f64, ay: f64, bx: f64, by: f64, epsilon: f64) -> bool {
+pub fn point_on_segment_2d(
+    px: f64,
+    py: f64,
+    ax: f64,
+    ay: f64,
+    bx: f64,
+    by: f64,
+    epsilon: f64,
+) -> bool {
     // Check if point is collinear with the segment
     let cross = (py - ay) * (bx - ax) - (px - ax) * (by - ay);
     if cross.abs() > epsilon {
@@ -18,7 +27,7 @@ fn point_on_segment_2d(px: f64, py: f64, ax: f64, ay: f64, bx: f64, by: f64, eps
 }
 
 // Helper function to check if a point is inside a triangle in 2D using barycentric coordinates
-fn point_in_triangle_2d(
+pub fn point_in_triangle_2d(
     px: f64,
     py: f64,
     ax: f64,
@@ -59,11 +68,7 @@ fn geo_to_polygon3d(poly: &Polygon<f64>, z: f64) -> Polygon3D {
     let exterior = poly
         .exterior()
         .points_iter()
-        .map(|p| Vertex3D {
-            x: p.x(),
-            y: p.y(),
-            z,
-        })
+        .map(|p| Point3::new(p.x(), p.y(), z))
         .collect();
 
     Polygon3D { exterior }
