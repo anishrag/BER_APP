@@ -175,129 +175,167 @@ pub struct FloorRegionByConstructionPhase {
     pub construction_phase: ConstructionPhase,
 }
 
-// #[cfg(test)]
-// mod tests {
-//     use super::*;
-//
-//     fn rectangle(min_x: f64, min_y: f64, max_x: f64, max_y: f64) -> Polygon<f64> {
-//         Polygon::new(
-//             LineString::from(vec![
-//                 (min_x, min_y),
-//                 (max_x, min_y),
-//                 (max_x, max_y),
-//                 (min_x, max_y),
-//                 (min_x, min_y), // close the loop
-//             ]),
-//             vec![], // no holes
-//         )
-//     }
-//
-//     fn base_floor(year: Year) -> FloorRegions {
-//         let vertices = vec![
-//             Vertex2D { x: 0.0, y: 0.0 },
-//             Vertex2D { x: 10.0, y: 0.0 },
-//             Vertex2D { x: 10.0, y: 10.0 },
-//             Vertex2D { x: 0.0, y: 10.0 },
-//         ];
-//
-//         FloorRegions::new(vertices, year)
-//     }
-//
-//     #[test]
-//     fn new_creates_single_region() {
-//         let floor = base_floor(2020);
-//
-//         assert_eq!(floor.regions.len(), 1);
-//         assert_eq!(floor.regions[0].height, 0.0);
-//         assert_eq!(floor.regions[0].year_id.year, 2020);
-//     }
-//
-//     #[test]
-//     fn raise_polygon_splits_region_and_changes_height() {
-//         let mut floor = base_floor(2020);
-//
-//         let raise_poly = rectangle(0.0, 0.0, 5.0, 10.0);
-//         floor.raise_lower_polygon(raise_poly, 2.5);
-//
-//         assert_eq!(floor.regions.len(), 2);
-//
-//         let raised = floor.regions.iter().filter(|r| r.height == 2.5).count();
-//         let flat = floor.regions.iter().filter(|r| r.height == 0.0).count();
-//
-//         assert_eq!(raised, 1);
-//         assert_eq!(flat, 1);
-//     }
-//
-//     #[test]
-//     fn change_year_polygon_updates_only_intersection() {
-//         let mut floor = base_floor(2020);
-//
-//         let poly = rectangle(0.0, 0.0, 5.0, 10.0);
-//         floor.change_year_polygon(poly, 2025);
-//
-//         assert_eq!(floor.regions.len(), 2);
-//
-//         let years: Vec<u32> = floor.regions.iter().map(|r| r.year_id.year).collect();
-//
-//         assert!(years.contains(&2020));
-//         assert!(years.contains(&2025));
-//     }
-//
-//     #[test]
-//     fn change_id_polygon_allocates_new_id_same_year() {
-//         let mut floor = base_floor(2020);
-//
-//         let poly = rectangle(0.0, 0.0, 5.0, 10.0);
-//         floor.change_id_polygon(poly);
-//
-//         assert_eq!(floor.regions.len(), 2);
-//
-//         let ids: Vec<_> = floor.regions.iter().map(|r| r.year_id.id).collect();
-//         let years: Vec<_> = floor.regions.iter().map(|r| r.year_id.year).collect();
-//
-//         assert_eq!(years[0], 2020);
-//         assert_eq!(years[1], 2020);
-//         assert_ne!(ids[0], ids[1]);
-//     }
-//
-//     #[test]
-//     #[should_panic(expected = "change_id_polygon spans multiple years")]
-//     fn change_id_polygon_panics_on_mixed_years() {
-//         let mut floor = base_floor(2020);
-//
-//         let left = rectangle(0.0, 0.0, 5.0, 10.0);
-//         floor.change_year_polygon(left, 2025);
-//
-//         let spanning = rectangle(0.0, 0.0, 10.0, 10.0);
-//         floor.change_id_polygon(spanning);
-//     }
-//
-//     #[test]
-//     fn by_year_unions_regions_per_year() {
-//         let mut floor = base_floor(2020);
-//
-//         let left = rectangle(0.0, 0.0, 5.0, 10.0);
-//         let right = rectangle(5.0, 0.0, 10.0, 10.0);
-//
-//         floor.change_year_polygon(left, 2021);
-//         floor.change_year_polygon(right, 2021);
-//
-//         let by_year = floor.by_year();
-//
-//         let regions_2021: Vec<_> = by_year.iter().filter(|r| r.year == 2021).collect();
-//         assert_eq!(regions_2021.len(), 1);
-//     }
-//
-//     #[test]
-//     fn height_is_preserved_for_remainder() {
-//         let mut floor = base_floor(2020);
-//
-//         floor.raise_lower_polygon(rectangle(0.0, 0.0, 10.0, 10.0), 1.0);
-//         floor.raise_lower_polygon(rectangle(0.0, 0.0, 5.0, 10.0), 2.0);
-//
-//         let heights: Vec<f64> = floor.regions.iter().map(|r| r.height).collect();
-//
-//         assert!(heights.contains(&3.0)); // overlap region
-//         assert!(heights.contains(&1.0)); // remainder region
-//     }
-// }
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn rectangle(min_x: f64, min_y: f64, max_x: f64, max_y: f64) -> Polygon<f64> {
+        Polygon::new(
+            LineString::from(vec![
+                (min_x, min_y),
+                (max_x, min_y),
+                (max_x, max_y),
+                (min_x, max_y),
+                (min_x, min_y), // close the loop
+            ]),
+            vec![], // no holes
+        )
+    }
+
+    fn base_floor() -> FloorRegions {
+        let vertices = vec![
+            Point2::new(0.0, 0.0),
+            Point2::new(10.0, 0.0),
+            Point2::new(10.0, 10.0),
+            Point2::new(0.0, 10.0),
+        ];
+
+        FloorRegions::new(vertices, None, None, None)
+    }
+
+    #[test]
+    fn new_creates_single_region() {
+        let floor = base_floor();
+
+        assert_eq!(floor.regions.len(), 1);
+        assert_eq!(floor.regions[0].height, 0.0);
+        assert_eq!(
+            floor.regions[0].construction_type,
+            FloorConstructionType::SolidFloor
+        );
+        assert_eq!(floor.regions[0].construction_layers.len(), 0);
+        assert_eq!(
+            floor.regions[0].construction_phase,
+            ConstructionPhase::Original
+        );
+    }
+
+    #[test]
+    fn raise_polygon_splits_region_and_changes_height() {
+        let mut floor = base_floor();
+
+        let raise_poly = rectangle(0.0, 0.0, 5.0, 10.0);
+        floor.raise_lower_polygon(raise_poly, 2.5);
+
+        assert_eq!(floor.regions.len(), 2);
+
+        let raised = floor.regions.iter().filter(|r| r.height == 2.5).count();
+        let flat = floor.regions.iter().filter(|r| r.height == 0.0).count();
+
+        assert_eq!(raised, 1);
+        assert_eq!(flat, 1);
+    }
+
+    #[test]
+    fn change_year_polygon_updates_only_intersection() {
+        let mut floor = base_floor();
+
+        let poly = rectangle(0.0, 0.0, 5.0, 10.0);
+        floor.modify_polygon_construction_phase(poly, ConstructionPhase::Extension1);
+
+        assert_eq!(floor.regions.len(), 2);
+
+        let phases: Vec<ConstructionPhase> = floor
+            .regions
+            .iter()
+            .map(|r| r.construction_phase.clone())
+            .collect();
+
+        assert!(phases.contains(&ConstructionPhase::Original));
+        assert!(phases.contains(&ConstructionPhase::Extension1));
+    }
+
+    #[test]
+    fn change_id_polygon_allocates_new_id_same_year() {
+        let mut floor = base_floor();
+
+        let poly = rectangle(0.0, 0.0, 5.0, 10.0);
+        floor.modify_polygon_all_fields(
+            poly,
+            None,
+            None,
+            Some(vec![
+                (ConstructionLayer::Insulation, 100),
+                (ConstructionLayer::Concrete, 100),
+            ]),
+            None,
+        );
+
+        assert_eq!(floor.regions.len(), 2);
+
+        let num_regions = floor.regions.len();
+        let construction_phases = floor
+            .regions
+            .iter()
+            .map(|r| r.construction_phase.clone())
+            .collect::<Vec<_>>();
+
+        assert_eq!(num_regions, 2);
+        assert_eq!(construction_phases[1], ConstructionPhase::Original);
+        assert_eq!(construction_phases[0], ConstructionPhase::Original);
+    }
+    //
+    #[test]
+    fn add_construction_layers_for_part_of_multiple_polygons_should_create_extra_polys() {
+        let mut floor = base_floor();
+
+        let left = rectangle(0.0, 0.0, 5.0, 10.0);
+        floor.modify_polygon_construction_phase(left, ConstructionPhase::Extension1);
+
+        let spanning = rectangle(0.0, 0.0, 10.0, 5.0);
+        floor.modify_polygon_all_fields(
+            spanning,
+            None,
+            None,
+            Some(vec![
+                (ConstructionLayer::Insulation, 100),
+                (ConstructionLayer::Concrete, 100),
+            ]),
+            None,
+        );
+        let num_regions = floor.regions.len();
+        assert_eq!(num_regions, 4);
+    }
+
+    #[test]
+    fn construction_phase_unions_regions_per_phase() {
+        let mut floor = base_floor();
+
+        let left = rectangle(0.0, 0.0, 5.0, 10.0);
+        let right = rectangle(5.0, 0.0, 10.0, 10.0);
+
+        floor.modify_polygon_construction_phase(left, ConstructionPhase::Extension1);
+        floor.modify_polygon_construction_phase(right, ConstructionPhase::Extension1);
+
+        let by_construction_phase = floor.by_construction_phase();
+
+        let regions: Vec<_> = by_construction_phase
+            .iter()
+            .filter(|r| r.construction_phase == ConstructionPhase::Extension1)
+            .collect();
+        assert_eq!(regions.len(), 1);
+    }
+
+    #[test]
+    fn height_is_preserved_for_remainder() {
+        let mut floor = base_floor();
+
+        floor.raise_lower_polygon(rectangle(0.0, 0.0, 10.0, 10.0), 1.0);
+        floor.raise_lower_polygon(rectangle(0.0, 0.0, 5.0, 10.0), 2.0);
+
+        let heights: Vec<f64> = floor.regions.iter().map(|r| r.height).collect();
+
+        assert!(heights.contains(&3.0)); // overlap region
+        assert!(heights.contains(&1.0)); // remainder region
+    }
+}
