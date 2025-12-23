@@ -8,6 +8,7 @@
 use earcutr::earcut;
 use geo::Polygon;
 use nalgebra::{Point3, Vector3};
+use std::convert::TryFrom;
 // crate includes
 use crate::datatypes::ber::common::ConstructionPhase;
 
@@ -246,13 +247,11 @@ impl CeilingMesh {
     }
 }
 
-use std::convert::TryFrom;
-
-impl TryFrom<Polygon3D> for CeilingMesh {
+impl TryFrom<CeilingRegion> for CeilingMesh {
     type Error = earcutr::Error; // or the actual error type from earcutr
 
-    fn try_from(polygon: Polygon3D) -> Result<Self, Self::Error> {
-        let vertices_3d = &polygon.exterior;
+    fn try_from(ceiling_region: CeilingRegion) -> Result<Self, Self::Error> {
+        let vertices_3d = &ceiling_region.polygon.exterior;
 
         if vertices_3d.len() < 3 {
             return Err(earcutr::Error::Unknown);
