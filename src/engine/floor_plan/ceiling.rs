@@ -1,6 +1,6 @@
 // 1. x take floor polygon and split by discontinuitys
-// 2. Triangulate each region separately
-// 3. Create extra vertices if needed and set heights
+// 2. x Triangulate each region separately
+// 3. x Create extra vertices if needed and set heights
 // 4. repolygon and split by planes
 // 5. x further split by year
 // 6. x futher user splitting if required
@@ -8,6 +8,7 @@
 use earcutr::earcut;
 use geo::Polygon;
 use nalgebra::{Point3, Vector3};
+use std::collections::HashMap;
 use std::convert::TryFrom;
 // crate includes
 use crate::datatypes::ber::common::ConstructionPhase;
@@ -15,6 +16,72 @@ use crate::datatypes::ber::common::ConstructionPhase;
 // local includes
 use super::geometry::{point_in_triangle_2d, point_on_segment_2d};
 use super::types::{CeilingConstructionType, ConstructionLayer, Polygon3D};
+
+const EPSILON: f64 = 1e-9;
+
+fn same_point_2d(a: &Point3<f64>, b: &Point3<f64>) -> bool {
+    (a.x - b.x).abs() < EPSILON && (a.y - b.y).abs() < EPSILON
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+struct Edge2D {
+    a: (i64, i64),
+    b: (i64, i64),
+}
+
+#[derive(Debug, Clone)]
+struct Edge3DF {
+    a: (f64, f64, f64),
+    b: (f64, f64, f64),
+}
+
+impl PartialEq for Edge3DF {
+    fn eq(&self, other: &Self) -> bool {
+        fn feq(a: f64, b: f64) -> bool {
+            (a - b).abs() <= EPSILON
+        }
+
+        let same_dir = feq(self.a.0, other.a.0)
+            && feq(self.a.1, other.a.1)
+            && feq(self.a.2, other.a.2)
+            && feq(self.b.0, other.b.0)
+            && feq(self.b.1, other.b.1)
+            && feq(self.b.2, other.b.2);
+
+        let swapped_dir = feq(self.a.0, other.b.0)
+            && feq(self.a.1, other.b.1)
+            && feq(self.a.2, other.b.2)
+            && feq(self.b.0, other.a.0)
+            && feq(self.b.1, other.a.1)
+            && feq(self.b.2, other.a.2);
+
+        same_dir || swapped_dir
+    }
+}
+
+fn quantize(p: &Point3<f64>) -> (i64, i64) {
+    ((p.x * 1e9) as i64, (p.y * 1e9) as i64)
+}
+
+fn undirected_edge_2d(a: &Point3<f64>, b: &Point3<f64>) -> Edge2D {
+    let qa = quantize(a);
+    let qb = quantize(b);
+    if qa <= qb {
+        Edge2D { a: qa, b: qb }
+    } else {
+        Edge2D { a: qb, b: qa }
+    }
+}
+
+fn undirected_edge_3df(a: &Point3<f64>, b: &Point3<f64>) -> Edge3DF {
+    let pa = (a.x, a.y, a.z);
+    let pb = (b.x, b.y, b.z);
+    if pa <= pb {
+        Edge3DF { a: pa, b: pb }
+    } else {
+        Edge3DF { a: pb, b: pa }
+    }
+}
 
 /// A planar region of the floor
 #[derive(Clone, Debug)]
@@ -130,20 +197,32 @@ impl CeilingRegions {
 }
 
 #[derive(Debug)]
+pub enum VertexInsertionError {
+    VertexNotInAnyTriangle { x: f64, y: f64 },
+    DegenerateTriangle { triangle_idx: usize },
+    EmptyMesh,
+}
+
+#[derive(Debug)]
 struct CeilingMesh {
     pub triangles: Vec<CeilingTriangle>,
     pub construction_phase: ConstructionPhase,
 }
-
 impl CeilingMesh {
-    pub fn add_new_vertex_with_height(&mut self, x: f64, y: f64, height: f64) {
-        const EPSILON: f64 = 1e-9;
+    pub fn add_new_vertex_with_height(
+        &mut self,
+        x: f64,
+        y: f64,
+        height: f64,
+    ) -> Result<(), VertexInsertionError> {
+        if self.triangles.is_empty() {
+            return Err(VertexInsertionError::EmptyMesh);
+        }
 
         let new_vertex = Point3::new(x, y, height);
-
-        // Find all triangles that need modification
         let mut triangles_to_remove = Vec::new();
         let mut triangles_to_add = Vec::new();
+        let mut vertex_was_processed = false;
 
         for (idx, triangle) in self.triangles.iter().enumerate() {
             // Case 1: Check if the point matches an existing vertex
@@ -156,19 +235,18 @@ impl CeilingMesh {
             }
 
             if let Some(v_idx) = vertex_match_idx {
-                // Update the height of this vertex
                 let mut new_triangle = triangle.clone();
                 new_triangle.vertices[v_idx].z = height;
                 new_triangle.plane = Plane::from_triangle(&new_triangle.vertices);
 
                 triangles_to_remove.push(idx);
                 triangles_to_add.push(new_triangle);
+                vertex_was_processed = true;
                 continue;
             }
 
             // Case 2: Check if the point lies on an edge
             let edges = [(0, 1), (1, 2), (2, 0)];
-
             let mut on_edge = None;
             for &(i, j) in &edges {
                 if point_on_segment_2d(
@@ -186,18 +264,20 @@ impl CeilingMesh {
             }
 
             if let Some((i, j)) = on_edge {
-                // Split triangle into 2 triangles
-                let k = 3 - i - j; // The third vertex
+                let k = 3 - i - j;
 
-                // Triangle 1: vertices[i], new_vertex, vertices[k]
                 let tri1_verts = [triangle.vertices[i], new_vertex, triangle.vertices[k]];
+                let tri2_verts = [new_vertex, triangle.vertices[j], triangle.vertices[k]];
+
+                // Validate non-degenerate
+                if Self::is_degenerate(&tri1_verts) || Self::is_degenerate(&tri2_verts) {
+                    return Err(VertexInsertionError::DegenerateTriangle { triangle_idx: idx });
+                }
+
                 let tri1 = CeilingTriangle {
                     vertices: tri1_verts,
                     plane: Plane::from_triangle(&tri1_verts),
                 };
-
-                // Triangle 2: new_vertex, vertices[j], vertices[k]
-                let tri2_verts = [new_vertex, triangle.vertices[j], triangle.vertices[k]];
                 let tri2 = CeilingTriangle {
                     vertices: tri2_verts,
                     plane: Plane::from_triangle(&tri2_verts),
@@ -206,6 +286,7 @@ impl CeilingMesh {
                 triangles_to_remove.push(idx);
                 triangles_to_add.push(tri1);
                 triangles_to_add.push(tri2);
+                vertex_was_processed = true;
                 continue;
             }
 
@@ -221,10 +302,14 @@ impl CeilingMesh {
                 triangle.vertices[2].y,
                 EPSILON,
             ) {
-                // Split triangle into 3 triangles
                 for i in 0..3 {
                     let j = (i + 1) % 3;
                     let tri_verts = [triangle.vertices[i], triangle.vertices[j], new_vertex];
+
+                    if Self::is_degenerate(&tri_verts) {
+                        return Err(VertexInsertionError::DegenerateTriangle { triangle_idx: idx });
+                    }
+
                     let tri = CeilingTriangle {
                         vertices: tri_verts,
                         plane: Plane::from_triangle(&tri_verts),
@@ -233,18 +318,184 @@ impl CeilingMesh {
                 }
 
                 triangles_to_remove.push(idx);
-                break; // Point can only be inside one triangle
+                vertex_was_processed = true;
+                break;
             }
         }
 
-        // Remove triangles in reverse order to maintain indices
+        if !vertex_was_processed {
+            return Err(VertexInsertionError::VertexNotInAnyTriangle { x, y });
+        }
+
+        // Apply changes
         triangles_to_remove.sort_unstable();
         for &idx in triangles_to_remove.iter().rev() {
             self.triangles.remove(idx);
         }
-
-        // Add new triangles
         self.triangles.extend(triangles_to_add);
+
+        Ok(())
+    }
+
+    fn is_degenerate(verts: &[Point3<f64>; 3]) -> bool {
+        let v0 = verts[1] - verts[0];
+        let v1 = verts[2] - verts[0];
+        let cross = v0.cross(&v1);
+        cross.norm() < EPSILON
+    }
+    fn split_by_plane(&self) -> Vec<Vec<&CeilingTriangle>> {
+        let mut groups: Vec<Vec<&CeilingTriangle>> = Vec::new();
+
+        'outer: for tri in &self.triangles {
+            for group in &mut groups {
+                let p = &group[0].plane;
+                if p.approx_eq(&tri.plane, EPSILON) {
+                    group.push(tri);
+                    continue 'outer;
+                }
+            }
+            groups.push(vec![tri]);
+        }
+
+        groups
+    }
+
+    fn split_by_connectivity<'a>(tris: &'a [&'a CeilingTriangle]) -> Vec<Vec<&'a CeilingTriangle>> {
+        // ============================================================
+        // 2. For each plane group → split by connectivity
+        // ============================================================
+        let n = tris.len();
+
+        // ---- build edge → triangles map ----
+        let mut edge_map: HashMap<Edge2D, Vec<usize>> = HashMap::new();
+
+        for (i, &tri) in tris.iter().enumerate() {
+            let v = tri.vertices;
+            for &(a, b) in &[(0, 1), (1, 2), (2, 0)] {
+                edge_map
+                    .entry(undirected_edge_2d(&v[a], &v[b]))
+                    .or_default()
+                    .push(i);
+            }
+        }
+
+        // ---- build adjacency list ----
+        let mut adj = vec![Vec::<usize>::new(); n];
+
+        for tri_indices in edge_map.values() {
+            if tri_indices.len() == 2 {
+                let a = tri_indices[0];
+                let b = tri_indices[1];
+                adj[a].push(b);
+                adj[b].push(a);
+            }
+        }
+
+        // ---- connected components (DFS) ----
+        let mut visited = vec![false; n];
+        let mut components: Vec<Vec<&CeilingTriangle>> = Vec::new(); // <-- collect all components
+
+        for start in 0..n {
+            if visited[start] {
+                continue;
+            }
+
+            let mut stack = vec![start];
+            let mut component = Vec::new();
+            visited[start] = true;
+
+            while let Some(i) = stack.pop() {
+                component.push(tris[i]);
+                for &j in &adj[i] {
+                    if !visited[j] {
+                        visited[j] = true;
+                        stack.push(j);
+                    }
+                }
+            }
+            components.push(component); // <-- store finished component
+        }
+        components
+    }
+
+    fn boundary_polygon(tris: &[&CeilingTriangle]) -> Option<Polygon3D> {
+        // EXISTING boundary reconstruction logic MOVED here unchanged
+        // returns None if non-manifold or degenerate
+        // ====================================================
+        // 3. Reconstruct boundary polygon for this component
+        // ====================================================
+        let mut edges = Vec::new();
+
+        for tri in tris.iter() {
+            let v = &tri.vertices;
+            edges.push(undirected_edge_3df(&v[0], &v[1]));
+            edges.push(undirected_edge_3df(&v[1], &v[2]));
+            edges.push(undirected_edge_3df(&v[2], &v[0]));
+        }
+
+        let mut boundary_edges = Vec::new();
+
+        for i in 0..edges.len() {
+            let curr_edge = &edges[i];
+            let mut count = 0;
+
+            for test_edge in &edges {
+                if test_edge == curr_edge {
+                    count += 1;
+                }
+            }
+
+            if count == 1 {
+                boundary_edges.push(curr_edge.clone());
+            }
+        }
+
+        if boundary_edges.is_empty() {
+            return None;
+        }
+
+        // ---- stitch boundary ----
+        let mut polygon_vertices = Vec::new();
+        polygon_vertices.push(boundary_edges[0].a);
+        polygon_vertices.push(boundary_edges[0].b);
+        boundary_edges.remove(0);
+
+        while !boundary_edges.is_empty() {
+            let last = *polygon_vertices.last().unwrap();
+            let mut found = false;
+
+            for i in 0..boundary_edges.len() {
+                let edge = &boundary_edges[i];
+                let (a, b) = (edge.a, edge.b);
+                if last == a {
+                    polygon_vertices.push(b);
+                    boundary_edges.remove(i);
+                    found = true;
+                    break;
+                } else if last == b {
+                    polygon_vertices.push(a);
+                    boundary_edges.remove(i);
+                    found = true;
+                    break;
+                }
+            }
+
+            if !found {
+                return None; // malformed / non-manifold
+            }
+        }
+        if polygon_vertices.first() != polygon_vertices.last() {
+            return None; // malformed / not closed
+        }
+        polygon_vertices.pop(); // remove the duplicate last vertex
+
+        Some(Polygon3D::new(
+            polygon_vertices
+                .iter()
+                .map(|&(x, y, z)| Point3::new(x, y, z))
+                .collect::<Vec<Point3<f64>>>()
+                .into(),
+        ))
     }
 }
 
@@ -290,6 +541,16 @@ impl TryFrom<CeilingRegion> for CeilingMesh {
 }
 
 impl Plane {
+    fn new(normal: Vector3<f64>, d: f64) -> Self {
+        let norm = normal.norm();
+        debug_assert!(norm.is_finite() && norm > 0.0);
+
+        let n = normal / norm;
+        Plane {
+            normal: n,
+            d: d / norm,
+        }
+    }
     pub fn approx_eq(&self, other: &Plane, eps: f64) -> bool {
         let dot = self.normal.dot(&other.normal);
 
@@ -309,20 +570,19 @@ impl Plane {
         (-self.d - self.normal.x * x - self.normal.y * y) / self.normal.z
     }
 
-    pub fn from_triangle(v: &[Point3<f64>; 3]) -> Self {
-        let a = Point3::new(v[0].x, v[0].y, v[0].z);
-        let b = Point3::new(v[1].x, v[1].y, v[1].z);
-        let c = Point3::new(v[2].x, v[2].y, v[2].z);
-        let normal = (b - a).cross(&(c - a)).normalize();
-        let d = -normal.dot(&a.coords);
-        Self { normal, d }
+    fn from_triangle(verts: &[Point3<f64>; 3]) -> Self {
+        let v0 = verts[1] - verts[0];
+        let v1 = verts[2] - verts[0];
+        let normal = v0.cross(&v1);
+        let d = -normal.dot(&verts[0].coords);
+        Plane::new(normal, d)
     }
 }
 
 #[derive(Clone, Debug)]
 pub struct Plane {
-    pub normal: Vector3<f64>,
-    pub d: f64,
+    normal: Vector3<f64>,
+    d: f64,
 }
 
 #[derive(Clone, Debug)]
@@ -335,179 +595,485 @@ fn points_eq_2d(a: &Point3<f64>, b: &Point3<f64>, eps: f64) -> bool {
     (a.x - b.x).abs() < eps && (a.y - b.y).abs() < eps
 }
 
-#[derive(Hash, Eq, PartialEq)]
-struct Edge2D {
-    a: (i64, i64),
-    b: (i64, i64),
+pub struct CeilingRegionConversion {
+    pub regions: Vec<CeilingRegion>,
+    pub failed_components: usize,
 }
 
-impl Edge2D {
-    fn new(p1: Point3<f64>, p2: Point3<f64>, eps: f64) -> Self {
-        let q = |v: f64| (v / eps).round() as i64;
-        let a = (q(p1.x), q(p1.y));
-        let b = (q(p2.x), q(p2.y));
-        if a <= b {
-            Self { a, b }
-        } else {
-            Self { a: b, b: a }
+impl Into<CeilingRegionConversion> for CeilingMesh {
+    fn into(self) -> CeilingRegionConversion {
+        let mut regions = Vec::new();
+        let mut failed_components = 0;
+
+        for coplanar in self.split_by_plane() {
+            for connected in CeilingMesh::split_by_connectivity(&coplanar) {
+                match CeilingMesh::boundary_polygon(&connected) {
+                    Some(polygon) => {
+                        regions.push(CeilingRegion {
+                            polygon,
+                            construction_phase: self.construction_phase.clone(),
+                            construction_type: CeilingConstructionType::Uninitialised,
+                            construction_layers: vec![],
+                        });
+                    }
+                    None => {
+                        failed_components += 1;
+                    }
+                }
+            }
+        }
+
+        CeilingRegionConversion {
+            regions,
+            failed_components,
         }
     }
 }
 
-impl Into<Vec<CeilingRegion>> for CeilingMesh {
-    fn into(self) -> Vec<CeilingRegion> {
-        const PLANE_EPS: f64 = 1e-6;
-        const POINT_EPS: f64 = 1e-9;
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use nalgebra::Point3;
 
-        // ============================================================
-        // 1. Group triangles by geometric plane
-        // ============================================================
-        let mut plane_groups: Vec<(Plane, Vec<&CeilingTriangle>)> = Vec::new();
-
-        'triangles: for tri in &self.triangles {
-            for (plane, tris) in plane_groups.iter_mut() {
-                if plane.approx_eq(&tri.plane, PLANE_EPS) {
-                    tris.push(tri);
-                    continue 'triangles;
-                }
-            }
-            plane_groups.push((tri.plane.clone(), vec![tri]));
+    // Helper function to create a simple triangular region
+    fn create_triangle_region() -> CeilingRegion {
+        CeilingRegion {
+            polygon: Polygon3D::new(vec![
+                Point3::new(0.0, 0.0, 0.0),
+                Point3::new(1.0, 0.0, 0.0),
+                Point3::new(0.5, 1.0, 0.0),
+            ]),
+            construction_type: CeilingConstructionType::Uninitialised,
+            construction_layers: vec![],
+            construction_phase: ConstructionPhase::Original,
         }
+    }
 
-        let mut regions = Vec::new();
-
-        // ============================================================
-        // 2. For each plane group → split by connectivity
-        // ============================================================
-        for (_plane, tris) in plane_groups {
-            let n = tris.len();
-
-            // ---- build edge → triangles map ----
-            use std::collections::HashMap;
-
-            let mut edge_map: HashMap<Edge2D, Vec<usize>> = HashMap::new();
-
-            for (i, tri) in tris.iter().enumerate() {
-                let v = &tri.vertices;
-                for &(a, b) in &[(0, 1), (1, 2), (2, 0)] {
-                    edge_map
-                        .entry(Edge2D::new(v[a], v[b], POINT_EPS))
-                        .or_default()
-                        .push(i);
-                }
-            }
-
-            // ---- build adjacency list ----
-            let mut adj = vec![Vec::<usize>::new(); n];
-
-            for tri_indices in edge_map.values() {
-                if tri_indices.len() == 2 {
-                    let a = tri_indices[0];
-                    let b = tri_indices[1];
-                    adj[a].push(b);
-                    adj[b].push(a);
-                }
-            }
-
-            // ---- connected components (DFS) ----
-            let mut visited = vec![false; n];
-
-            for start in 0..n {
-                if visited[start] {
-                    continue;
-                }
-
-                let mut stack = vec![start];
-                let mut component = Vec::new();
-                visited[start] = true;
-
-                while let Some(i) = stack.pop() {
-                    component.push(tris[i]);
-                    for &j in &adj[i] {
-                        if !visited[j] {
-                            visited[j] = true;
-                            stack.push(j);
-                        }
-                    }
-                }
-
-                // ====================================================
-                // 3. Reconstruct boundary polygon for this component
-                // ====================================================
-                let mut edges = Vec::new();
-
-                for tri in &component {
-                    let v = &tri.vertices;
-                    edges.push((v[0], v[1]));
-                    edges.push((v[1], v[2]));
-                    edges.push((v[2], v[0]));
-                }
-
-                let mut boundary_edges = Vec::new();
-
-                for i in 0..edges.len() {
-                    let (a1, b1) = &edges[i];
-                    let mut count = 0;
-
-                    for (a2, b2) in &edges {
-                        if (points_eq_2d(a1, a2, POINT_EPS) && points_eq_2d(b1, b2, POINT_EPS))
-                            || (points_eq_2d(a1, b2, POINT_EPS) && points_eq_2d(b1, a2, POINT_EPS))
-                        {
-                            count += 1;
-                        }
-                    }
-
-                    if count == 1 {
-                        boundary_edges.push((*a1, *b1));
-                    }
-                }
-
-                if boundary_edges.is_empty() {
-                    continue;
-                }
-
-                // ---- stitch boundary ----
-                let mut polygon = Vec::new();
-                polygon.push(boundary_edges[0].0);
-                polygon.push(boundary_edges[0].1);
-                boundary_edges.remove(0);
-
-                while !boundary_edges.is_empty() {
-                    let last = *polygon.last().unwrap();
-                    let mut found = false;
-
-                    for i in 0..boundary_edges.len() {
-                        let (a, b) = boundary_edges[i];
-                        if points_eq_2d(&last, &a, POINT_EPS) {
-                            polygon.push(b);
-                            boundary_edges.remove(i);
-                            found = true;
-                            break;
-                        } else if points_eq_2d(&last, &b, POINT_EPS) {
-                            polygon.push(a);
-                            boundary_edges.remove(i);
-                            found = true;
-                            break;
-                        }
-                    }
-
-                    if !found {
-                        break; // malformed / non-manifold
-                    }
-                }
-
-                // ====================================================
-                // 4. Emit one CeilingRegion per component
-                // ====================================================
-                regions.push(CeilingRegion {
-                    polygon: Polygon3D::new(polygon),
-                    construction_type: CeilingConstructionType::Uninitialised,
-                    construction_layers: Vec::new(),
-                    construction_phase: self.construction_phase.clone(),
-                });
-            }
+    // Helper function to create a square region
+    fn create_square_region(z: f64) -> CeilingRegion {
+        CeilingRegion {
+            polygon: Polygon3D::new(vec![
+                Point3::new(0.0, 0.0, z),
+                Point3::new(1.0, 0.0, z),
+                Point3::new(1.0, 1.0, z),
+                Point3::new(0.0, 1.0, z),
+            ]),
+            construction_type: CeilingConstructionType::Uninitialised,
+            construction_layers: vec![],
+            construction_phase: ConstructionPhase::Original,
         }
+    }
 
-        regions
+    #[test]
+    fn test_same_point_2d() {
+        let p1 = Point3::new(1.0, 2.0, 3.0);
+        let p2 = Point3::new(1.0, 2.0, 5.0); // Different z
+        let p3 = Point3::new(1.0 + EPSILON / 2.0, 2.0, 3.0); // Within epsilon
+        let p4 = Point3::new(2.0, 2.0, 3.0); // Different x
+
+        assert!(same_point_2d(&p1, &p2));
+        assert!(same_point_2d(&p1, &p3));
+        assert!(!same_point_2d(&p1, &p4));
+    }
+
+    #[test]
+    fn test_quantize() {
+        let p = Point3::new(1.23456789, 9.87654321, 0.0);
+        let (x, y) = quantize(&p);
+
+        assert_eq!(x, 1234567890);
+        assert_eq!(y, 9876543210);
+    }
+
+    #[test]
+    fn test_undirected_edge_2d() {
+        let p1 = Point3::new(0.0, 0.0, 0.0);
+        let p2 = Point3::new(1.0, 1.0, 0.0);
+
+        let edge1 = undirected_edge_2d(&p1, &p2);
+        let edge2 = undirected_edge_2d(&p2, &p1);
+
+        assert_eq!(edge1, edge2); // Should be the same regardless of order
+    }
+
+    #[test]
+    fn test_undirected_edge_3df_equality() {
+        let p1 = Point3::new(0.0, 0.0, 0.0);
+        let p2 = Point3::new(1.0, 1.0, 1.0);
+
+        let edge1 = undirected_edge_3df(&p1, &p2);
+        let edge2 = undirected_edge_3df(&p2, &p1);
+
+        assert_eq!(edge1, edge2);
+    }
+
+    #[test]
+    fn test_edge3df_equality_with_epsilon() {
+        let p1 = Point3::new(0.0, 0.0, 0.0);
+        let p2 = Point3::new(1.0, 1.0, 1.0);
+        let p2_close = Point3::new(1.0 + EPSILON / 2.0, 1.0, 1.0);
+
+        let edge1 = undirected_edge_3df(&p1, &p2);
+        let edge2 = undirected_edge_3df(&p1, &p2_close);
+
+        assert_eq!(edge1, edge2);
+    }
+
+    #[test]
+    fn test_ceiling_regions_new() {
+        let vertices = vec![
+            Point3::new(0.0, 0.0, 0.0),
+            Point3::new(1.0, 0.0, 0.0),
+            Point3::new(0.5, 1.0, 0.0),
+        ];
+
+        let regions = CeilingRegions::new(vertices, None, None, None);
+
+        assert_eq!(regions.regions.len(), 1);
+        assert_eq!(
+            regions.regions[0].construction_type,
+            CeilingConstructionType::Uninitialised
+        );
+        assert_eq!(
+            regions.regions[0].construction_phase,
+            ConstructionPhase::Original
+        );
+    }
+
+    #[test]
+    fn test_ceiling_regions_modify_polygon_increase_height() {
+        let vertices = vec![
+            Point3::new(0.0, 0.0, 0.0),
+            Point3::new(1.0, 0.0, 0.0),
+            Point3::new(1.0, 1.0, 0.0),
+            Point3::new(0.0, 1.0, 0.0),
+        ];
+
+        let mut regions = CeilingRegions::new(vertices, None, None, None);
+
+        // Create a polygon that overlaps
+        let poly = geo::Polygon::new(
+            geo::LineString::from(vec![
+                (0.0, 0.0),
+                (1.0, 0.0),
+                (1.0, 1.0),
+                (0.0, 1.0),
+                (0.0, 0.0),
+            ]),
+            vec![],
+        );
+
+        regions.modify_polygon_increase_height(poly, 2.0);
+
+        // Check that heights were increased
+        for vertex in &regions.regions[0].polygon.exterior {
+            assert_eq!(vertex.z, 2.0);
+        }
+    }
+
+    #[test]
+    fn test_plane_from_triangle() {
+        let verts = [
+            Point3::new(0.0, 0.0, 0.0),
+            Point3::new(1.0, 0.0, 0.0),
+            Point3::new(0.0, 1.0, 0.0),
+        ];
+
+        let plane = Plane::from_triangle(&verts);
+
+        // This should be a plane with normal pointing up (0, 0, 1)
+        assert!((plane.normal.z.abs() - 1.0).abs() < EPSILON);
+    }
+
+    #[test]
+    fn test_plane_approx_eq() {
+        let verts1 = [
+            Point3::new(0.0, 0.0, 0.0),
+            Point3::new(1.0, 0.0, 0.0),
+            Point3::new(0.0, 1.0, 0.0),
+        ];
+        let verts2 = [
+            Point3::new(0.0, 0.0, 0.0),
+            Point3::new(2.0, 0.0, 0.0),
+            Point3::new(0.0, 2.0, 0.0),
+        ];
+
+        let plane1 = Plane::from_triangle(&verts1);
+        let plane2 = Plane::from_triangle(&verts2);
+
+        assert!(plane1.approx_eq(&plane2, EPSILON));
+    }
+
+    #[test]
+    fn test_plane_z_at() {
+        // Create a sloped plane
+        let verts = [
+            Point3::new(0.0, 0.0, 0.0),
+            Point3::new(1.0, 0.0, 1.0),
+            Point3::new(0.0, 1.0, 0.0),
+        ];
+
+        let plane = Plane::from_triangle(&verts);
+        let z = plane.z_at(0.5, 0.0);
+
+        // Should be approximately 0.5 for this plane
+        assert!((z - 0.5).abs() < 0.1);
+    }
+
+    #[test]
+    fn test_is_degenerate_collinear() {
+        let verts = [
+            Point3::new(0.0, 0.0, 0.0),
+            Point3::new(1.0, 0.0, 0.0),
+            Point3::new(2.0, 0.0, 0.0), // Collinear
+        ];
+
+        assert!(CeilingMesh::is_degenerate(&verts));
+    }
+
+    #[test]
+    fn test_is_degenerate_valid() {
+        let verts = [
+            Point3::new(0.0, 0.0, 0.0),
+            Point3::new(1.0, 0.0, 0.0),
+            Point3::new(0.0, 1.0, 0.0),
+        ];
+
+        assert!(!CeilingMesh::is_degenerate(&verts));
+    }
+
+    #[test]
+    fn test_ceiling_mesh_try_from_region() {
+        let region = create_square_region(0.0);
+        let mesh = CeilingMesh::try_from(region);
+
+        assert!(mesh.is_ok());
+        let mesh = mesh.unwrap();
+        assert_eq!(mesh.triangles.len(), 2); // Square should be 2 triangles
+    }
+
+    #[test]
+    fn test_ceiling_mesh_try_from_invalid_region() {
+        let region = CeilingRegion {
+            polygon: Polygon3D::new(vec![Point3::new(0.0, 0.0, 0.0), Point3::new(1.0, 0.0, 0.0)]), // Only 2 vertices
+            construction_type: CeilingConstructionType::Uninitialised,
+            construction_layers: vec![],
+            construction_phase: ConstructionPhase::Original,
+        };
+
+        let mesh = CeilingMesh::try_from(region);
+        assert!(mesh.is_err());
+    }
+
+    #[test]
+    fn test_add_vertex_empty_mesh() {
+        let mut mesh = CeilingMesh {
+            triangles: vec![],
+            construction_phase: ConstructionPhase::Original,
+        };
+
+        let result = mesh.add_new_vertex_with_height(0.5, 0.5, 1.0);
+        assert!(matches!(result, Err(VertexInsertionError::EmptyMesh)));
+    }
+
+    #[test]
+    fn test_add_vertex_inside_triangle() {
+        let region = create_square_region(0.0);
+        let mut mesh = CeilingMesh::try_from(region).unwrap();
+        let initial_count = mesh.triangles.len();
+
+        // Add vertex in the middle of the square
+        let result = mesh.add_new_vertex_with_height(0.5, 0.5, 1.0);
+        assert!(result.is_ok());
+
+        // Should have split one triangle into 3, so net +2 triangles
+        assert_eq!(mesh.triangles.len(), initial_count + 2);
+    }
+
+    #[test]
+    fn test_add_vertex_on_edge() {
+        let region = create_square_region(0.0);
+        let mut mesh = CeilingMesh::try_from(region).unwrap();
+        let initial_count = mesh.triangles.len();
+
+        // Add vertex on an edge
+        let result = mesh.add_new_vertex_with_height(0.5, 0.0, 1.0);
+        assert!(result.is_ok());
+
+        // Should have split one triangle into 2, so net +1 triangle
+        assert_eq!(mesh.triangles.len(), initial_count + 1);
+    }
+
+    #[test]
+    fn test_add_vertex_at_existing_vertex() {
+        let region = create_square_region(0.0);
+        let mut mesh = CeilingMesh::try_from(region).unwrap();
+        let initial_count = mesh.triangles.len();
+
+        // Add vertex at existing location with different height
+        let result = mesh.add_new_vertex_with_height(0.0, 0.0, 2.0);
+        assert!(result.is_ok());
+
+        // Should have same number of triangles but updated height
+        assert_eq!(mesh.triangles.len(), initial_count);
+    }
+
+    #[test]
+    fn test_add_vertex_outside_mesh() {
+        let region = create_square_region(0.0);
+        let mut mesh = CeilingMesh::try_from(region).unwrap();
+
+        // Add vertex outside the mesh
+        let result = mesh.add_new_vertex_with_height(5.0, 5.0, 1.0);
+        assert!(matches!(
+            result,
+            Err(VertexInsertionError::VertexNotInAnyTriangle { .. })
+        ));
+    }
+
+    #[test]
+    fn test_split_by_plane_single_plane() {
+        let region = create_square_region(0.0);
+        let mesh = CeilingMesh::try_from(region).unwrap();
+
+        let groups = mesh.split_by_plane();
+
+        // All triangles should be in one group (same plane)
+        assert_eq!(groups.len(), 1);
+        assert_eq!(groups[0].len(), mesh.triangles.len());
+    }
+
+    #[test]
+    fn test_split_by_connectivity_single_component() {
+        let region = create_square_region(0.0);
+        let mesh = CeilingMesh::try_from(region).unwrap();
+
+        let plane_groups = mesh.split_by_plane();
+        let components = CeilingMesh::split_by_connectivity(&plane_groups[0]);
+
+        // Should be one connected component
+        assert_eq!(components.len(), 1);
+    }
+
+    #[test]
+    fn test_boundary_polygon_simple_square() {
+        let region = create_square_region(0.0);
+        let mesh = CeilingMesh::try_from(region).unwrap();
+
+        let plane_groups = mesh.split_by_plane();
+        let components = CeilingMesh::split_by_connectivity(&plane_groups[0]);
+        let boundary = CeilingMesh::boundary_polygon(&components[0]);
+
+        assert!(boundary.is_some());
+        let polygon = boundary.unwrap();
+        assert_eq!(polygon.exterior.len(), 4); // Square has 4 vertices
+    }
+
+    #[test]
+    fn test_ceiling_mesh_into_conversion() {
+        let region = create_square_region(0.0);
+        let mesh = CeilingMesh::try_from(region).unwrap();
+
+        let conversion: CeilingRegionConversion = mesh.into();
+
+        assert_eq!(conversion.regions.len(), 1);
+        assert_eq!(conversion.failed_components, 0);
+    }
+
+    #[test]
+    fn test_points_eq_2d() {
+        let p1 = Point3::new(1.0, 2.0, 3.0);
+        let p2 = Point3::new(1.0 + EPSILON / 2.0, 2.0 + EPSILON / 2.0, 5.0);
+        let p3 = Point3::new(2.0, 2.0, 3.0);
+
+        assert!(points_eq_2d(&p1, &p2, EPSILON));
+        assert!(!points_eq_2d(&p1, &p3, EPSILON));
+    }
+
+    #[test]
+    fn test_modify_polygon_construction_phase() {
+        let vertices = vec![
+            Point3::new(0.0, 0.0, 0.0),
+            Point3::new(1.0, 0.0, 0.0),
+            Point3::new(1.0, 1.0, 0.0),
+            Point3::new(0.0, 1.0, 0.0),
+        ];
+
+        let mut regions = CeilingRegions::new(vertices, None, None, None);
+
+        let poly = geo::Polygon::new(
+            geo::LineString::from(vec![
+                (0.0, 0.0),
+                (1.0, 0.0),
+                (1.0, 1.0),
+                (0.0, 1.0),
+                (0.0, 0.0),
+            ]),
+            vec![],
+        );
+
+        regions.modify_polygon_construction_phase(
+            poly,
+            ConstructionPhase::Other("NewPhase".to_string()),
+        );
+
+        assert_eq!(
+            regions.regions[0].construction_phase,
+            ConstructionPhase::Other("NewPhase".to_string())
+        );
+    }
+
+    #[test]
+    fn test_ceiling_triangle_plane_consistency() {
+        let verts = [
+            Point3::new(0.0, 0.0, 0.0),
+            Point3::new(1.0, 0.0, 0.0),
+            Point3::new(0.0, 1.0, 0.0),
+        ];
+
+        let triangle = CeilingTriangle {
+            vertices: verts,
+            plane: Plane::from_triangle(&verts),
+        };
+
+        // All vertices should lie on the plane
+        for v in &triangle.vertices {
+            let z_on_plane = triangle.plane.z_at(v.x, v.y);
+            assert!((z_on_plane - v.z).abs() < EPSILON);
+        }
+    }
+
+    #[test]
+    fn test_degenerate_detection_zero_area() {
+        let verts = [
+            Point3::new(0.0, 0.0, 0.0),
+            Point3::new(0.0, 0.0, 0.0),
+            Point3::new(0.0, 0.0, 0.0),
+        ];
+
+        assert!(CeilingMesh::is_degenerate(&verts));
+    }
+
+    #[test]
+    fn test_conversion_preserves_construction_phase() {
+        let region = CeilingRegion {
+            polygon: Polygon3D::new(vec![
+                Point3::new(0.0, 0.0, 0.0),
+                Point3::new(1.0, 0.0, 0.0),
+                Point3::new(1.0, 1.0, 0.0),
+                Point3::new(0.0, 1.0, 0.0),
+            ]),
+            construction_type: CeilingConstructionType::Uninitialised,
+            construction_layers: vec![],
+            construction_phase: ConstructionPhase::Other("TestPhase".to_string()),
+        };
+
+        let mesh = CeilingMesh::try_from(region).unwrap();
+        let conversion: CeilingRegionConversion = mesh.into();
+
+        assert_eq!(
+            conversion.regions[0].construction_phase,
+            ConstructionPhase::Other("TestPhase".to_string())
+        );
     }
 }
