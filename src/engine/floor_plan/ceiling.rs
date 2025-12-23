@@ -132,6 +132,7 @@ impl CeilingRegions {
 #[derive(Debug)]
 struct CeilingMesh {
     pub triangles: Vec<CeilingTriangle>,
+    pub construction_phase: ConstructionPhase,
 }
 
 impl CeilingMesh {
