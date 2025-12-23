@@ -330,3 +330,184 @@ pub struct CeilingTriangle {
     pub vertices: [Point3<f64>; 3],
     pub plane: Plane,
 }
+
+fn points_eq_2d(a: &Point3<f64>, b: &Point3<f64>, eps: f64) -> bool {
+    (a.x - b.x).abs() < eps && (a.y - b.y).abs() < eps
+}
+
+#[derive(Hash, Eq, PartialEq)]
+struct Edge2D {
+    a: (i64, i64),
+    b: (i64, i64),
+}
+
+impl Edge2D {
+    fn new(p1: Point3<f64>, p2: Point3<f64>, eps: f64) -> Self {
+        let q = |v: f64| (v / eps).round() as i64;
+        let a = (q(p1.x), q(p1.y));
+        let b = (q(p2.x), q(p2.y));
+        if a <= b {
+            Self { a, b }
+        } else {
+            Self { a: b, b: a }
+        }
+    }
+}
+
+impl Into<Vec<CeilingRegion>> for CeilingMesh {
+    fn into(self) -> Vec<CeilingRegion> {
+        const PLANE_EPS: f64 = 1e-6;
+        const POINT_EPS: f64 = 1e-9;
+
+        // ============================================================
+        // 1. Group triangles by geometric plane
+        // ============================================================
+        let mut plane_groups: Vec<(Plane, Vec<&CeilingTriangle>)> = Vec::new();
+
+        'triangles: for tri in &self.triangles {
+            for (plane, tris) in plane_groups.iter_mut() {
+                if plane.approx_eq(&tri.plane, PLANE_EPS) {
+                    tris.push(tri);
+                    continue 'triangles;
+                }
+            }
+            plane_groups.push((tri.plane.clone(), vec![tri]));
+        }
+
+        let mut regions = Vec::new();
+
+        // ============================================================
+        // 2. For each plane group → split by connectivity
+        // ============================================================
+        for (_plane, tris) in plane_groups {
+            let n = tris.len();
+
+            // ---- build edge → triangles map ----
+            use std::collections::HashMap;
+
+            let mut edge_map: HashMap<Edge2D, Vec<usize>> = HashMap::new();
+
+            for (i, tri) in tris.iter().enumerate() {
+                let v = &tri.vertices;
+                for &(a, b) in &[(0, 1), (1, 2), (2, 0)] {
+                    edge_map
+                        .entry(Edge2D::new(v[a], v[b], POINT_EPS))
+                        .or_default()
+                        .push(i);
+                }
+            }
+
+            // ---- build adjacency list ----
+            let mut adj = vec![Vec::<usize>::new(); n];
+
+            for tri_indices in edge_map.values() {
+                if tri_indices.len() == 2 {
+                    let a = tri_indices[0];
+                    let b = tri_indices[1];
+                    adj[a].push(b);
+                    adj[b].push(a);
+                }
+            }
+
+            // ---- connected components (DFS) ----
+            let mut visited = vec![false; n];
+
+            for start in 0..n {
+                if visited[start] {
+                    continue;
+                }
+
+                let mut stack = vec![start];
+                let mut component = Vec::new();
+                visited[start] = true;
+
+                while let Some(i) = stack.pop() {
+                    component.push(tris[i]);
+                    for &j in &adj[i] {
+                        if !visited[j] {
+                            visited[j] = true;
+                            stack.push(j);
+                        }
+                    }
+                }
+
+                // ====================================================
+                // 3. Reconstruct boundary polygon for this component
+                // ====================================================
+                let mut edges = Vec::new();
+
+                for tri in &component {
+                    let v = &tri.vertices;
+                    edges.push((v[0], v[1]));
+                    edges.push((v[1], v[2]));
+                    edges.push((v[2], v[0]));
+                }
+
+                let mut boundary_edges = Vec::new();
+
+                for i in 0..edges.len() {
+                    let (a1, b1) = &edges[i];
+                    let mut count = 0;
+
+                    for (a2, b2) in &edges {
+                        if (points_eq_2d(a1, a2, POINT_EPS) && points_eq_2d(b1, b2, POINT_EPS))
+                            || (points_eq_2d(a1, b2, POINT_EPS) && points_eq_2d(b1, a2, POINT_EPS))
+                        {
+                            count += 1;
+                        }
+                    }
+
+                    if count == 1 {
+                        boundary_edges.push((*a1, *b1));
+                    }
+                }
+
+                if boundary_edges.is_empty() {
+                    continue;
+                }
+
+                // ---- stitch boundary ----
+                let mut polygon = Vec::new();
+                polygon.push(boundary_edges[0].0);
+                polygon.push(boundary_edges[0].1);
+                boundary_edges.remove(0);
+
+                while !boundary_edges.is_empty() {
+                    let last = *polygon.last().unwrap();
+                    let mut found = false;
+
+                    for i in 0..boundary_edges.len() {
+                        let (a, b) = boundary_edges[i];
+                        if points_eq_2d(&last, &a, POINT_EPS) {
+                            polygon.push(b);
+                            boundary_edges.remove(i);
+                            found = true;
+                            break;
+                        } else if points_eq_2d(&last, &b, POINT_EPS) {
+                            polygon.push(a);
+                            boundary_edges.remove(i);
+                            found = true;
+                            break;
+                        }
+                    }
+
+                    if !found {
+                        break; // malformed / non-manifold
+                    }
+                }
+
+                // ====================================================
+                // 4. Emit one CeilingRegion per component
+                // ====================================================
+                regions.push(CeilingRegion {
+                    polygon: Polygon3D::new(polygon),
+                    construction_type: CeilingConstructionType::Uninitialised,
+                    construction_layers: Vec::new(),
+                    construction_phase: self.construction_phase.clone(),
+                });
+            }
+        }
+
+        regions
+    }
+}
