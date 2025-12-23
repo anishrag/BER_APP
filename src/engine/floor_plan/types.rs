@@ -222,6 +222,7 @@ pub enum CeilingConstructionType {
     SlopedInsOnCeiling,
     SlopedInsOnCeilingAndRafter,
     NonHeatLossCeiling,
+    Uninitialised,
     Other,
 }
 /// Construction layers (optional multiple layers)

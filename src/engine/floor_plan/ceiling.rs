@@ -41,7 +41,7 @@ impl CeilingRegions {
             regions: vec![CeilingRegion {
                 polygon: Polygon3D::new(vertices),
                 construction_type: construction_type
-                    .unwrap_or(CeilingConstructionType::SlopedInsOnCeiling),
+                    .unwrap_or(CeilingConstructionType::Uninitialised),
                 construction_layers: construction_layers.unwrap_or_default(),
                 construction_phase: construction_phase.unwrap_or(ConstructionPhase::Original),
             }],
