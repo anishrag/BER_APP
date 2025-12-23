@@ -268,21 +268,24 @@ impl TryFrom<CeilingRegion> for CeilingMesh {
         let holes: Vec<usize> = Vec::new();
 
         // Triangulate — propagate error with ?
-        let indices = earcutr::earcut(&coords_2d, &holes, 2)?;
+        let indices = earcut(&coords_2d, &holes, 2)?;
 
         let mut triangles = Vec::with_capacity(indices.len() / 3);
         for chunk in indices.chunks_exact(3) {
-            let a = vertices_3d[chunk[0]].clone();
-            let b = vertices_3d[chunk[1]].clone();
-            let c = vertices_3d[chunk[2]].clone();
+            let a = vertices_3d[chunk[0]];
+            let b = vertices_3d[chunk[1]];
+            let c = vertices_3d[chunk[2]];
 
             triangles.push(CeilingTriangle {
-                vertices: [a.clone(), b.clone(), c.clone()],
+                vertices: [a, b, c],
                 plane: Plane::from_triangle(&[a, b, c]),
             });
         }
 
-        Ok(CeilingMesh { triangles })
+        Ok(CeilingMesh {
+            triangles,
+            construction_phase: ceiling_region.construction_phase,
+        })
     }
 }
 
