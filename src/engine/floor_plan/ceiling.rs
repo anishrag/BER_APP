@@ -291,7 +291,17 @@ impl TryFrom<CeilingRegion> for CeilingMesh {
 
 impl Plane {
     pub fn approx_eq(&self, other: &Plane, eps: f64) -> bool {
-        self.normal.dot(&other.normal).abs() > 1.0 - eps && (self.d - other.d).abs() < eps
+        let dot = self.normal.dot(&other.normal);
+
+        if dot > 1.0 - eps {
+            // same orientation
+            (self.d - other.d).abs() < eps
+        } else if dot < -1.0 + eps {
+            // opposite orientation
+            (self.d + other.d).abs() < eps
+        } else {
+            false
+        }
     }
 
     // Solve for z = (-d - nx*x - ny*y) / nz
@@ -300,9 +310,9 @@ impl Plane {
     }
 
     pub fn from_triangle(v: &[Point3<f64>; 3]) -> Self {
-        let a = nalgebra::Point3::new(v[0].x, v[0].y, v[0].z);
-        let b = nalgebra::Point3::new(v[1].x, v[1].y, v[1].z);
-        let c = nalgebra::Point3::new(v[2].x, v[2].y, v[2].z);
+        let a = Point3::new(v[0].x, v[0].y, v[0].z);
+        let b = Point3::new(v[1].x, v[1].y, v[1].z);
+        let c = Point3::new(v[2].x, v[2].y, v[2].z);
         let normal = (b - a).cross(&(c - a)).normalize();
         let d = -normal.dot(&a.coords);
         Self { normal, d }
