@@ -143,6 +143,77 @@ impl Polygon3D {
         let t = ((x - a.x) * dx + (y - a.y) * dy) / len_sq;
         t.clamp(0.0, 1.0)
     }
+    /// Convert from Polygon3DMultiZ, failing if any point has multiple z values
+    pub fn try_from_multi_z(multi_z: &Polygon3DMultiZ) -> Result<Self, Polygon3DConversionError> {
+        let mut points = Vec::new();
+
+        for (idx, (x, y, z_values)) in multi_z.exterior.iter().enumerate() {
+            match z_values.len() {
+                0 => return Err(Polygon3DConversionError::NoZValue { point_index: idx }),
+                1 => points.push(Point3::new(*x, *y, z_values[0])),
+                _ => {
+                    return Err(Polygon3DConversionError::HasDiscontinuity {
+                        point_index: idx,
+                        z_values: z_values.clone(),
+                    })
+                }
+            }
+        }
+
+        Ok(Self::new(points))
+    }
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum Polygon3DConversionError {
+    /// A point has multiple z values (discontinuity)
+    HasDiscontinuity {
+        point_index: usize,
+        z_values: Vec<f64>,
+    },
+    /// A point has no z values
+    NoZValue { point_index: usize },
+}
+
+impl TryFrom<&Polygon3DMultiZ> for Polygon3D {
+    type Error = Polygon3DConversionError;
+
+    fn try_from(multi_z: &Polygon3DMultiZ) -> Result<Self, Self::Error> {
+        Self::try_from_multi_z(multi_z)
+    }
+}
+
+impl TryFrom<Polygon3DMultiZ> for Polygon3D {
+    type Error = Polygon3DConversionError;
+
+    fn try_from(multi_z: Polygon3DMultiZ) -> Result<Self, Self::Error> {
+        Self::try_from_multi_z(&multi_z)
+    }
+}
+
+/// A 3D polygon where each vertex can have multiple Z values (for discontinuities)
+#[derive(Clone, Debug, PartialEq)]
+pub struct Polygon3DMultiZ {
+    /// Each point has an (x, y) coordinate and a vector of z values
+    /// Multiple z values represent discontinuities at that point
+    pub exterior: Vec<(f64, f64, Vec<f64>)>,
+}
+
+impl Polygon3DMultiZ {
+    pub fn new(exterior: Vec<(f64, f64, Vec<f64>)>) -> Self {
+        Self { exterior }
+    }
+}
+
+impl From<Polygon3D> for Polygon3DMultiZ {
+    fn from(polygon: Polygon3D) -> Self {
+        let exterior = polygon
+            .exterior
+            .iter()
+            .map(|point| (point.x, point.y, vec![point.z]))
+            .collect();
+        Self::new(exterior)
+    }
 }
 
 /// Type of boolean operation to perform
