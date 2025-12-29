@@ -1,13 +1,13 @@
 // standard includes
 use geo::bool_ops::BooleanOps;
-use geo::{LineString, MultiPolygon, Polygon};
+use geo::{Intersects, LineString, MultiPolygon, Polygon};
 use nalgebra::Point2;
 use std::collections::HashMap;
 
 use crate::datatypes::ber::common::ConstructionPhase;
 
 // local includes
-use super::types::{ConstructionLayer, FloorConstructionType};
+use super::types::{ConstructionLayer, FloorConstructionType, Polygon3DMultiZ};
 
 /// A planar region of the floor
 #[derive(Clone, Debug)]
@@ -22,6 +22,13 @@ pub struct FloorRegion {
 #[derive(Debug)]
 pub struct FloorRegions {
     pub regions: Vec<FloorRegion>, // height per vertex
+}
+
+#[derive(Clone, Copy, Debug)]
+struct DirectedEdge {
+    from: Point2<f64>,
+    to: Point2<f64>,
+    height: f64,
 }
 
 impl FloorRegions {
@@ -167,6 +174,187 @@ impl FloorRegions {
         }
         result
     }
+
+    pub fn get_clockwise_3d_polygon_starting_closest_to_origin(&self) -> Polygon3DMultiZ {
+        // ------------------------------------------------------------
+        // 1. Collect all directed edges from all regions
+        // ------------------------------------------------------------
+        let mut all_edges: Vec<DirectedEdge> = Vec::new();
+
+        for region in &self.regions {
+            let coords: Vec<Point2<f64>> = region
+                .polygon
+                .exterior()
+                .points()
+                .map(|p| Point2::new(p.x(), p.y()))
+                .collect();
+
+            if coords.len() < 2 {
+                continue;
+            }
+
+            // skip duplicate closing point
+            for i in 0..coords.len() - 1 {
+                all_edges.push(DirectedEdge {
+                    from: coords[i],
+                    to: coords[i + 1],
+                    height: region.height,
+                });
+            }
+            all_edges.push(DirectedEdge {
+                from: coords[coords.len() - 1],
+                to: coords[0],
+                height: region.height,
+            });
+        }
+
+        if all_edges.is_empty() {
+            return Polygon3DMultiZ::new(vec![]);
+        }
+
+        // ------------------------------------------------------------
+        // 2. Cancel interior edges (A→B cancels B→A)
+        // ------------------------------------------------------------
+        let mut exterior_edges: Vec<DirectedEdge> = Vec::new();
+
+        'edge_loop: for (i, e) in all_edges.iter().enumerate() {
+            if all_edges
+                .iter()
+                .enumerate()
+                .any(|(j, other)| j != i && edges_match(e, other))
+            {
+                continue 'edge_loop;
+            }
+            exterior_edges.push(*e);
+        }
+
+        if exterior_edges.is_empty() {
+            return Polygon3DMultiZ::new(vec![]);
+        }
+
+        // ------------------------------------------------------------
+        // 3. Reconstruct ordered boundary edge loop
+        // ------------------------------------------------------------
+        let mut boundary_edges: Vec<DirectedEdge> = Vec::new();
+
+        let start_edge = exterior_edges[0];
+        boundary_edges.push(start_edge);
+
+        loop {
+            let last = boundary_edges.last().unwrap();
+
+            let mut found = false;
+
+            for e in &exterior_edges {
+                if e.from == last.to {
+                    // avoid immediately going backwards
+                    if boundary_edges.len() > 1 {
+                        let prev = boundary_edges[boundary_edges.len() - 2];
+                        if e.to == prev.from {
+                            continue;
+                        }
+                    }
+
+                    if e.to == start_edge.from {
+                        boundary_edges.push(*e);
+                        found = true;
+                        break;
+                    }
+
+                    boundary_edges.push(*e);
+                    found = true;
+                    break;
+                }
+            }
+
+            if !found || boundary_edges.last().unwrap().to == start_edge.from {
+                break;
+            }
+        }
+        // ------------------------------------------------------------
+        // 4. Ensure clockwise orientation
+        // ------------------------------------------------------------
+        let mut signed_area = 0.0;
+
+        for e in &boundary_edges {
+            let pt1 = e.from;
+            let pt2 = e.to;
+            signed_area += pt1.x * pt2.y - pt2.x * pt1.y;
+        }
+        if signed_area > 0.0 {
+            boundary_edges = boundary_edges
+                .iter()
+                .rev()
+                .map(|e| {
+                    let temp = e.from;
+                    DirectedEdge {
+                        from: e.to,
+                        to: temp,
+                        height: e.height,
+                    }
+                })
+                .collect();
+        }
+        // ------------------------------------------------------------
+        // 5. Build traversal-consistent multi-Z vertices
+        // ------------------------------------------------------------
+        let mut points_with_z: Vec<(f64, f64, Vec<f64>)> = Vec::new();
+
+        for i in 0..boundary_edges.len() {
+            let incoming = &boundary_edges[i];
+            let outgoing = &boundary_edges[(i + 1) % boundary_edges.len()];
+
+            let pt = incoming.to;
+
+            let mut heights = Vec::new();
+            heights.push(incoming.height);
+
+            if outgoing.height != incoming.height {
+                heights.push(outgoing.height);
+            }
+
+            points_with_z.push((pt.x, pt.y, heights));
+        }
+
+        // ------------------------------------------------------------
+        // 6. Rotate so closest point to origin is first
+        // ------------------------------------------------------------
+        let closest_idx = points_with_z
+            .iter()
+            .enumerate()
+            .min_by(|(_, (x1, y1, _)), (_, (x2, y2, _))| {
+                let d1 = x1 * x1 + y1 * y1;
+                let d2 = x2 * x2 + y2 * y2;
+                d1.partial_cmp(&d2).unwrap()
+            })
+            .map(|(i, _)| i)
+            .unwrap_or(0);
+
+        points_with_z.rotate_left(closest_idx);
+
+        Polygon3DMultiZ::new(points_with_z)
+    }
+}
+/// Canonical (undirected) edge key for cancellation
+fn edge_key(a: Point2<f64>, b: Point2<f64>) -> (Point2<f64>, Point2<f64>) {
+    if a < b {
+        (a, b)
+    } else {
+        (b, a)
+    }
+}
+
+fn approx_eq(a: f64, b: f64) -> bool {
+    (a - b).abs() < 1e-6
+}
+
+fn points_match(p1: &Point2<f64>, p2: &Point2<f64>) -> bool {
+    approx_eq(p1.x, p2.x) && approx_eq(p1.y, p2.y)
+}
+
+fn edges_match(a: &DirectedEdge, b: &DirectedEdge) -> bool {
+    (points_match(&a.from, &b.from) && points_match(&a.to, &b.to))
+        || (points_match(&a.from, &b.to) && points_match(&a.to, &b.from))
 }
 
 #[derive(Debug)]
