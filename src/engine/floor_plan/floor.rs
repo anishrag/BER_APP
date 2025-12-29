@@ -367,6 +367,8 @@ pub struct FloorRegionByConstructionPhase {
 mod tests {
     use super::*;
 
+    use crate::engine::floor_plan::types::{Polygon3D, Polygon3DConversionError};
+    use nalgebra::Point3;
     fn rectangle(min_x: f64, min_y: f64, max_x: f64, max_y: f64) -> Polygon<f64> {
         Polygon::new(
             LineString::from(vec![
@@ -525,5 +527,219 @@ mod tests {
 
         assert!(heights.contains(&3.0)); // overlap region
         assert!(heights.contains(&1.0)); // remainder region
+    }
+
+    #[test]
+    fn test_single_region_3d_polygon() {
+        // Create a simple square region at height 1.0
+        let vertices = vec![
+            Point2::new(0.0, 0.0),
+            Point2::new(4.0, 0.0),
+            Point2::new(4.0, 4.0),
+            Point2::new(0.0, 4.0),
+        ];
+
+        let mut regions = FloorRegions::new(
+            vertices,
+            Some(FloorConstructionType::SolidFloor),
+            None,
+            Some(ConstructionPhase::Original),
+        );
+        regions.regions[0].height = 1.0;
+
+        let polygon_3d = regions.get_clockwise_3d_polygon_starting_closest_to_origin();
+
+        // Should have 4 vertices (+ closing point potentially, depending on geo crate)
+        assert!(!polygon_3d.exterior.is_empty());
+
+        // All z values should be single (no discontinuities)
+        for (x, y, z_values) in &polygon_3d.exterior {
+            assert_eq!(
+                z_values.len(),
+                1,
+                "Point ({}, {}) should have single z value",
+                x,
+                y
+            );
+            assert_eq!(z_values[0], 1.0, "Height should be 1.0");
+        }
+
+        // First point should be closest to origin (0, 0)
+        let first = &polygon_3d.exterior[0];
+        let first_dist = first.0 * first.0 + first.1 * first.1;
+        for point in &polygon_3d.exterior {
+            let dist = point.0 * point.0 + point.1 * point.1;
+            assert!(
+                first_dist <= dist,
+                "First point should be closest to origin"
+            );
+        }
+
+        // Test conversion to Polygon3D (should succeed)
+        let simple_polygon = Polygon3D::try_from(&polygon_3d);
+        assert!(simple_polygon.is_ok());
+    }
+
+    #[test]
+    fn test_two_regions_with_discontinuity() {
+        // Create two adjacent regions with different heights
+        // Region 1: left square at height 1.0
+        let vertices1 = vec![
+            Point2::new(0.0, 0.0),
+            Point2::new(2.0, 0.0),
+            Point2::new(2.0, 2.0),
+            Point2::new(0.0, 2.0),
+        ];
+
+        // Region 2: right square at height 3.0
+        let vertices2 = vec![
+            Point2::new(2.0, 0.0),
+            Point2::new(4.0, 0.0),
+            Point2::new(4.0, 2.0),
+            Point2::new(2.0, 2.0),
+        ];
+
+        let mut regions = FloorRegions::new(
+            vertices1,
+            Some(FloorConstructionType::SolidFloor),
+            None,
+            Some(ConstructionPhase::Original),
+        );
+        regions.regions[0].height = 1.0;
+
+        // Add second region
+        let polygon2 = Polygon::new(
+            LineString::from(
+                vertices2
+                    .iter()
+                    .map(|p| (p.x, p.y))
+                    .collect::<Vec<(f64, f64)>>(),
+            ),
+            vec![],
+        );
+        regions.regions.push(FloorRegion {
+            polygon: polygon2,
+            height: 3.0,
+            construction_type: FloorConstructionType::SolidFloor,
+            construction_layers: vec![],
+            construction_phase: ConstructionPhase::Original,
+        });
+
+        let polygon_3d = regions.get_clockwise_3d_polygon_starting_closest_to_origin();
+
+        println!("3D Polygon: {:?}", polygon_3d);
+        // Find points on the shared edge (x=2.0)
+        let shared_edge_points: Vec<_> = polygon_3d
+            .exterior
+            .iter()
+            .filter(|(x, _, _)| (*x - 2.0).abs() < 1e-6)
+            .collect();
+
+        println!("Shared edge points: {:?}", shared_edge_points);
+        // There should be at least 2 points on the shared edge
+        assert!(
+            shared_edge_points.len() >= 2,
+            "Should have points on shared edge"
+        );
+
+        // Points on the shared edge should have multiple z values (discontinuity)
+        for (x, y, z_values) in shared_edge_points {
+            assert_eq!(
+                z_values.len(),
+                2,
+                "Point ({}, {}) on shared edge should have 2 z values (discontinuity)",
+                x,
+                y
+            );
+            assert!(z_values.contains(&1.0), "Should contain height 1.0");
+            assert!(z_values.contains(&3.0), "Should contain height 3.0");
+        }
+
+        // Conversion to Polygon3D should fail due to discontinuities
+        let simple_polygon = Polygon3D::try_from(&polygon_3d);
+        assert!(simple_polygon.is_err());
+        if let Err(Polygon3DConversionError::HasDiscontinuity { z_values, .. }) = simple_polygon {
+            assert_eq!(z_values.len(), 2);
+        } else {
+            panic!("Expected HasDiscontinuity error");
+        }
+    }
+
+    #[test]
+    fn test_polygon_3d_conversion_roundtrip() {
+        // Create a simple Polygon3D
+        let points = vec![
+            Point3::new(0.0, 0.0, 1.0),
+            Point3::new(1.0, 0.0, 1.5),
+            Point3::new(1.0, 1.0, 2.0),
+            Point3::new(0.0, 1.0, 1.5),
+        ];
+        let polygon_3d = Polygon3D::new(points.clone());
+
+        // Convert to MultiZ
+        let multi_z = Polygon3DMultiZ::from(polygon_3d.clone());
+
+        // Check that each point has single z value
+        assert_eq!(multi_z.exterior.len(), 4);
+        for (idx, (x, y, z_values)) in multi_z.exterior.iter().enumerate() {
+            assert_eq!(z_values.len(), 1);
+            assert_eq!(*x, points[idx].x);
+            assert_eq!(*y, points[idx].y);
+            assert_eq!(z_values[0], points[idx].z);
+        }
+
+        // Convert back to Polygon3D
+        let roundtrip = Polygon3D::try_from(&multi_z).unwrap();
+
+        // Should match original
+        assert_eq!(roundtrip.exterior.len(), polygon_3d.exterior.len());
+        for (idx, point) in roundtrip.exterior.iter().enumerate() {
+            assert_eq!(point.x, polygon_3d.exterior[idx].x);
+            assert_eq!(point.y, polygon_3d.exterior[idx].y);
+            assert_eq!(point.z, polygon_3d.exterior[idx].z);
+        }
+    }
+    #[test]
+    fn test_clockwise_ordering() {
+        use nalgebra::Point2;
+
+        // Create a simple square
+        let vertices = vec![
+            Point2::new(0.0, 0.0),
+            Point2::new(1.0, 0.0),
+            Point2::new(1.0, 1.0),
+            Point2::new(0.0, 1.0),
+        ];
+
+        let regions = FloorRegions::new(
+            vertices,
+            Some(FloorConstructionType::SolidFloor),
+            None,
+            Some(ConstructionPhase::Original),
+        );
+
+        let polygon_3d = regions.get_clockwise_3d_polygon_starting_closest_to_origin();
+
+        println!("3D Polygon: {:?}", polygon_3d);
+        // Compute signed area using shoelace formula
+        let coords = &polygon_3d.exterior; // assuming this is Vec<(f64, f64, Vec<f64>)>
+        let n = coords.len();
+        let mut signed_area = 0.0;
+
+        for i in 0..n {
+            let (x0, y0, _) = coords[i];
+            let (x1, y1, _) = coords[(i + 1) % n];
+            signed_area += x0 * y1 - x1 * y0;
+        }
+
+        // Divide by 2 (not strictly necessary for sign check)
+        signed_area *= 0.5;
+
+        // Assert clockwise (signed area < 0)
+        assert!(
+            signed_area < 0.0,
+            "Polygon should be clockwise (negative area), got {}",
+            signed_area
+        );
     }
 }
