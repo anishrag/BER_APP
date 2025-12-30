@@ -203,6 +203,47 @@ impl Polygon3DMultiZ {
     pub fn new(exterior: Vec<(f64, f64, Vec<f64>)>) -> Self {
         Self { exterior }
     }
+
+    /// Remove collinear interior points (based on XY coordinates)
+    pub fn simplify(&self, eps: f64) -> Self {
+        if self.exterior.len() < 3 {
+            return self.clone();
+        }
+
+        let mut out = Vec::with_capacity(self.exterior.len());
+        out.push(self.exterior[0].clone());
+
+        for i in 1..self.exterior.len() - 1 {
+            let a = out[out.len() - 1].clone();
+            let b = self.exterior[i].clone();
+            let c = self.exterior[i + 1].clone();
+
+            // compute cross product in XY plane
+            let cross = (b.0 - a.0) * (c.1 - b.1) - (b.1 - a.1) * (c.0 - b.0);
+            if cross.abs() > eps {
+                out.push(b);
+            }
+            // else skip b (it is collinear)
+        }
+
+        out.push(self.exterior.last().unwrap().clone());
+        Self::new(out)
+    }
+
+    pub fn xy_approx_eq(&self, other: &Self, eps: f64) -> bool {
+        if self.exterior.len() != other.exterior.len() {
+            return false;
+        }
+
+        self.exterior
+            .iter()
+            .zip(&other.exterior)
+            .all(|((x1, y1, _), (x2, y2, _))| (x1 - x2).abs() < eps && (y1 - y2).abs() < eps)
+    }
+}
+
+pub fn approx_equal_xy(a: (f64, f64, Vec<f64>), b: (f64, f64, Vec<f64>), eps: f64) -> bool {
+    (a.0 - b.0).abs() < eps && (a.1 - b.1).abs() < eps
 }
 
 impl From<Polygon3D> for Polygon3DMultiZ {
@@ -304,4 +345,41 @@ pub enum ConstructionLayer {
     Waterproofing,
     Finish,
     // add more as needed
+}
+
+#[derive(Clone, Copy, Debug)]
+pub struct DirectedEdge3D {
+    pub from: Point3<f64>,
+    pub to: Point3<f64>,
+}
+
+impl DirectedEdge3D {
+    pub fn new(from: Point3<f64>, to: Point3<f64>) -> Self {
+        Self { from, to }
+    }
+
+    pub fn matches(&self, other: &DirectedEdge3D) -> bool {
+        (self.from == other.from && self.to == other.to)
+            || (self.from == other.to && self.to == other.from)
+    }
+    /// Compare only x/y coordinates, ignoring z
+    pub fn matches_xy(&self, other: &DirectedEdge3D) -> bool {
+        self.from.eq_xy(&other.from, 1e-9) && self.to.eq_xy(&other.to, 1e-9)
+    }
+
+    /// Compare x/y ignoring order (undirected)
+    pub fn matches_xy_undirected(&self, other: &DirectedEdge3D) -> bool {
+        self.matches_xy(other)
+            || self.from.eq_xy(&other.to, 1e-9) && self.to.eq_xy(&other.from, 1e-9)
+    }
+}
+
+pub trait Point3Ext {
+    fn eq_xy(&self, other: &Self, eps: f64) -> bool;
+}
+
+impl Point3Ext for Point3<f64> {
+    fn eq_xy(&self, other: &Self, eps: f64) -> bool {
+        (self.x - other.x).abs() < eps && (self.y - other.y).abs() < eps
+    }
 }
