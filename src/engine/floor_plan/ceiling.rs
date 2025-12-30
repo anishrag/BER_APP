@@ -15,7 +15,10 @@ use crate::datatypes::ber::common::ConstructionPhase;
 
 // local includes
 use super::geometry::{point_in_triangle_2d, point_on_segment_2d};
-use super::types::{CeilingConstructionType, ConstructionLayer, Polygon3D};
+use super::types::{
+    CeilingConstructionType, ConstructionLayer, DirectedEdge3D, Point3Ext, Polygon3D,
+    Polygon3DConversionError, Polygon3DMultiZ,
+};
 
 const EPSILON: f64 = 1e-9;
 
@@ -193,6 +196,144 @@ impl CeilingRegions {
                 vertex.z += delta_height;
             }
         });
+    }
+
+    pub fn get_clockwise_3d_polygon_starting_closest_to_origin(&self) -> Polygon3DMultiZ {
+        // ------------------------------------------------------------
+        // 1. Collect all directed edges from all regions
+        // ------------------------------------------------------------
+        let mut all_edges: Vec<DirectedEdge3D> = Vec::new();
+
+        for region in &self.regions {
+            let coords = &region.polygon.exterior;
+
+            if coords.len() < 2 {
+                continue;
+            }
+
+            for i in 0..coords.len() - 1 {
+                all_edges.push(DirectedEdge3D::new(coords[i], coords[i + 1]));
+            }
+
+            // Closing edge
+            all_edges.push(DirectedEdge3D::new(coords[coords.len() - 1], coords[0]));
+        }
+
+        if all_edges.is_empty() {
+            return Polygon3DMultiZ::new(vec![]);
+        }
+
+        // ------------------------------------------------------------
+        // 2. Cancel interior edges (A→B cancels B→A)
+        // ------------------------------------------------------------
+        let mut exterior_edges: Vec<DirectedEdge3D> = Vec::new();
+
+        'edge_loop: for (i, e) in all_edges.iter().enumerate() {
+            if all_edges
+                .iter()
+                .enumerate()
+                .any(|(j, other)| j != i && e.matches_xy_undirected(other))
+            {
+                continue 'edge_loop;
+            }
+            exterior_edges.push(*e);
+        }
+        println!("Exterior edges: {:?}", exterior_edges);
+        if exterior_edges.is_empty() {
+            return Polygon3DMultiZ::new(vec![]);
+        }
+
+        // ------------------------------------------------------------
+        // 3. Reconstruct ordered boundary edge loop
+        // ------------------------------------------------------------
+        let mut boundary_edges: Vec<DirectedEdge3D> = Vec::new();
+        let start_edge = exterior_edges[0];
+        boundary_edges.push(start_edge);
+
+        loop {
+            let last = boundary_edges.last().unwrap();
+            let mut found = false;
+
+            for e in &exterior_edges {
+                if e.from.eq_xy(&last.to, EPSILON) {
+                    if boundary_edges.len() > 1 {
+                        let prev = boundary_edges[boundary_edges.len() - 2];
+                        if e.to.eq_xy(&prev.from, EPSILON) {
+                            continue;
+                        }
+                    }
+
+                    if e.to.eq_xy(&start_edge.from, EPSILON) {
+                        boundary_edges.push(*e);
+                        found = true;
+                        break;
+                    }
+
+                    boundary_edges.push(*e);
+                    found = true;
+                    break;
+                }
+            }
+
+            if !found || boundary_edges.last().unwrap().to == start_edge.from {
+                break;
+            }
+        }
+
+        println!("Reconstructed boundary edges: {:?}", boundary_edges);
+        // ------------------------------------------------------------
+        // 4. Ensure clockwise orientation
+        // ------------------------------------------------------------
+        let mut signed_area = 0.0;
+        for e in &boundary_edges {
+            let pt1 = e.from;
+            let pt2 = e.to;
+            signed_area += pt1.x * pt2.y - pt2.x * pt1.y;
+        }
+
+        if signed_area > 0.0 {
+            boundary_edges.reverse();
+            for e in &mut boundary_edges {
+                std::mem::swap(&mut e.from, &mut e.to);
+            }
+        }
+
+        // ------------------------------------------------------------
+        // 5. Build traversal-consistent multi-Z vertices
+        // ------------------------------------------------------------
+        let mut points_with_z: Vec<(f64, f64, Vec<f64>)> = Vec::new();
+
+        for i in 0..boundary_edges.len() {
+            let incoming = &boundary_edges[i];
+            let outgoing = &boundary_edges[(i + 1) % boundary_edges.len()];
+
+            let pt = incoming.to; // current vertex
+
+            // Collect Zs from the incoming edge's end and outgoing edge's start
+            let mut heights = vec![incoming.to.z, outgoing.from.z];
+            heights.sort_by(|a, b| a.partial_cmp(b).unwrap());
+            heights.dedup();
+
+            points_with_z.push((pt.x, pt.y, heights));
+        }
+
+        // ------------------------------------------------------------
+        // 6. Rotate so closest point to origin is first
+        // ------------------------------------------------------------
+        let closest_idx = points_with_z
+            .iter()
+            .enumerate()
+            .min_by(|(_, (x1, y1, _)), (_, (x2, y2, _))| {
+                let d1 = x1 * x1 + y1 * y1;
+                let d2 = x2 * x2 + y2 * y2;
+                d1.partial_cmp(&d2).unwrap()
+            })
+            .map(|(i, _)| i)
+            .unwrap_or(0);
+
+        points_with_z.rotate_left(closest_idx);
+
+        Polygon3DMultiZ::new(points_with_z)
     }
 }
 
@@ -1075,5 +1216,97 @@ mod tests {
             conversion.regions[0].construction_phase,
             ConstructionPhase::Other("TestPhase".to_string())
         );
+    }
+
+    #[test]
+    fn test_simple_flat_square_ceiling() {
+        let vertices = vec![
+            Point3::new(0.0, 0.0, 2.5),
+            Point3::new(1.0, 0.0, 2.5),
+            Point3::new(1.0, 1.0, 2.5),
+            Point3::new(0.0, 1.0, 2.5),
+        ];
+
+        let ceilings = CeilingRegions::new(vertices, None, None, None);
+        let polygon_3d = ceilings.get_clockwise_3d_polygon_starting_closest_to_origin();
+
+        // Should have 4 vertices
+        assert_eq!(polygon_3d.exterior.len(), 4);
+
+        // Check all Z values
+        for (_, _, zs) in &polygon_3d.exterior {
+            assert_eq!(zs.len(), 1);
+            assert!((zs[0] - 2.5).abs() < 1e-9);
+        }
+    }
+
+    #[test]
+    fn test_sloped_ceiling_edge() {
+        let vertices = vec![
+            Point3::new(0.0, 0.0, 2.0),
+            Point3::new(1.0, 0.0, 2.5),
+            Point3::new(1.0, 1.0, 3.0),
+            Point3::new(0.0, 1.0, 2.5),
+        ];
+
+        let ceilings = CeilingRegions::new(vertices, None, None, None);
+        let polygon_3d = ceilings.get_clockwise_3d_polygon_starting_closest_to_origin();
+
+        assert_eq!(polygon_3d.exterior.len(), 4);
+
+        // Each vertex should have only 1 1 z value
+        for (_, _, zs) in &polygon_3d.exterior {
+            assert!(!zs.is_empty());
+            assert!(zs.len() == 1);
+        }
+
+        // The lowest Z should be 2.0 and the highest 3.0
+        let mut min_z = f64::MAX;
+        let mut max_z = f64::MIN;
+        for (_, _, zs) in &polygon_3d.exterior {
+            for z in zs {
+                min_z = min_z.min(*z);
+                max_z = max_z.max(*z);
+            }
+        }
+        assert!((min_z - 2.0).abs() < 1e-9);
+        assert!((max_z - 3.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn test_multiple_ceiling_regions() {
+        let region1 = vec![
+            Point3::new(0.0, 0.0, 2.0),
+            Point3::new(1.0, 0.0, 2.0),
+            Point3::new(1.0, 1.0, 2.0),
+            Point3::new(0.0, 1.0, 2.0),
+        ];
+
+        let region2 = vec![
+            Point3::new(1.0, 0.0, 2.5),
+            Point3::new(2.0, 0.0, 2.5),
+            Point3::new(2.0, 1.0, 2.5),
+            Point3::new(1.0, 1.0, 2.5),
+        ];
+
+        let mut ceilings = CeilingRegions::new(region1, None, None, None);
+        ceilings.regions.push(CeilingRegion {
+            polygon: Polygon3D::new(region2),
+            construction_type: CeilingConstructionType::Uninitialised,
+            construction_layers: vec![],
+            construction_phase: ConstructionPhase::Original,
+        });
+
+        println!("{:#?}", ceilings);
+        let polygon_3d = ceilings.get_clockwise_3d_polygon_starting_closest_to_origin();
+
+        println!("{:?}", polygon_3d);
+        // There should be 6 vertices
+        assert!(polygon_3d.exterior.len() == 6);
+
+        // Check that all Z values are correctly present
+        for (_, _, zs) in &polygon_3d.exterior {
+            assert!(!zs.is_empty());
+        }
     }
 }
