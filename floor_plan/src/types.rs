@@ -1,6 +1,16 @@
 use geo::BooleanOps;
 use geo::{Coord, LineString, MultiPolygon, Polygon};
 use nalgebra::{Point3, Vector2};
+use uuid::Uuid;
+
+use datatypes::ber::common::ConstructionPhase;
+use datatypes::ber::structural::ConstructionMakeup;
+#[derive(Clone, Debug)]
+pub struct RegionBase {
+    pub id: Uuid,
+    pub construction_makeup: ConstructionMakeup,
+    pub construction_phase: ConstructionPhase,
+}
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct Polygon3D {

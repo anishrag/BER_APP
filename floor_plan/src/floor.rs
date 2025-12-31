@@ -8,7 +8,7 @@ use datatypes::ber::common::ConstructionPhase;
 use datatypes::ber::structural::{ConstructionMakeup, FloorConstructionType, PlanarElement};
 
 // local includes
-use super::types::Polygon3DMultiZ;
+use super::types::{Polygon3DMultiZ, RegionBase};
 
 /// A planar region of the floor
 #[derive(Clone, Debug)]
@@ -16,8 +16,7 @@ pub struct FloorRegion {
     pub polygon: Polygon<f64>, // 2D polygon boundary
     pub height: f64,           // height per vertex
     pub construction_type: FloorConstructionType,
-    pub construction_makeup: ConstructionMakeup,
-    pub construction_phase: ConstructionPhase,
+    pub base: RegionBase,
 }
 /// A planar region of the floor
 #[derive(Debug)]
@@ -49,8 +48,11 @@ impl FloorRegions {
                 polygon,
                 height: 0.0f64,
                 construction_type: construction_type.unwrap_or(FloorConstructionType::SolidFloor),
-                construction_makeup: construction_makeup.unwrap_or_default(),
-                construction_phase: construction_phase.unwrap_or(ConstructionPhase::Original),
+                base: RegionBase {
+                    id: uuid::Uuid::new_v4(),
+                    construction_makeup: construction_makeup.unwrap_or_default(),
+                    construction_phase: construction_phase.unwrap_or(ConstructionPhase::Original),
+                },
             }],
         }
     }
@@ -77,8 +79,11 @@ impl FloorRegions {
                     polygon: poly,
                     height: region.height,
                     construction_type: region.construction_type,
-                    construction_makeup: region.construction_makeup.clone(),
-                    construction_phase: region.construction_phase.clone(),
+                    base: RegionBase {
+                        id: region.base.id,
+                        construction_makeup: region.base.construction_makeup.clone(),
+                        construction_phase: region.base.construction_phase.clone(),
+                    },
                 });
             }
 
@@ -110,7 +115,7 @@ impl FloorRegions {
         construction_phase: ConstructionPhase,
     ) {
         self.modify_polygon(polygon, |r| {
-            r.construction_phase = construction_phase.clone();
+            r.base.construction_phase = construction_phase.clone();
         });
     }
 
@@ -130,10 +135,10 @@ impl FloorRegions {
                 r.construction_type = ct;
             }
             if let Some(cl) = construction_makeup.clone() {
-                r.construction_makeup = cl;
+                r.base.construction_makeup = cl;
             }
             if let Some(cp) = construction_phase.clone() {
-                r.construction_phase = cp;
+                r.base.construction_phase = cp;
             }
         });
     }
@@ -145,7 +150,7 @@ impl FloorRegions {
         // 1. Group polygons by year
         for region in &self.regions {
             per_construction_phase
-                .entry(region.construction_phase.clone())
+                .entry(region.base.construction_phase.clone())
                 .or_default()
                 .push(region.polygon.clone());
         }
@@ -385,8 +390,11 @@ impl From<Vec<PlanarElement>> for FloorRegions {
                     ),
                     height: 0.0,
                     construction_type: floor_specifics.construction_type,
-                    construction_makeup: common.construction.clone(),
-                    construction_phase: common.construction_phase.clone(),
+                    base: RegionBase {
+                        id: common.id,
+                        construction_makeup: common.construction.clone(),
+                        construction_phase: common.construction_phase.clone(),
+                    },
                 },
                 _ => panic!("Non-floor PlanarElement found when converting to FloorRegions"),
             })
@@ -438,11 +446,11 @@ mod tests {
             FloorConstructionType::SolidFloor
         );
         assert_eq!(
-            floor.regions[0].construction_makeup,
+            floor.regions[0].base.construction_makeup,
             ConstructionMakeup::default()
         );
         assert_eq!(
-            floor.regions[0].construction_phase,
+            floor.regions[0].base.construction_phase,
             ConstructionPhase::Original
         );
     }
@@ -475,7 +483,7 @@ mod tests {
         let phases: Vec<ConstructionPhase> = floor
             .regions
             .iter()
-            .map(|r| r.construction_phase.clone())
+            .map(|r| r.base.construction_phase.clone())
             .collect();
 
         assert!(phases.contains(&ConstructionPhase::Original));
@@ -512,7 +520,7 @@ mod tests {
         let construction_phases = floor
             .regions
             .iter()
-            .map(|r| r.construction_phase.clone())
+            .map(|r| r.base.construction_phase.clone())
             .collect::<Vec<_>>();
 
         assert_eq!(num_regions, 2);
@@ -674,8 +682,11 @@ mod tests {
             polygon: polygon2,
             height: 3.0,
             construction_type: FloorConstructionType::SolidFloor,
-            construction_makeup: ConstructionMakeup::default(),
-            construction_phase: ConstructionPhase::Original,
+            base: RegionBase {
+                id: uuid::Uuid::new_v4(),
+                construction_makeup: ConstructionMakeup::default(),
+                construction_phase: ConstructionPhase::Original,
+            },
         });
 
         let polygon_3d = regions.get_clockwise_3d_polygon_starting_closest_to_origin();

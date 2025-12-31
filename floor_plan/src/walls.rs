@@ -2,6 +2,7 @@
 use geo::{LineString, Polygon};
 use nalgebra::{Point2, Point3};
 use std::collections::HashMap;
+use uuid::Uuid;
 
 use datatypes::ber::common::ConstructionPhase;
 use datatypes::ber::structural::{
@@ -11,17 +12,16 @@ use datatypes::ber::structural::{
 // local includes
 use super::ceiling::CeilingRegions;
 use super::floor::FloorRegions;
-use super::types::{approx_equal_xy, Polygon3D, Polygon3DMultiZ};
+use super::types::{approx_equal_xy, Polygon3D, Polygon3DMultiZ, RegionBase};
 
 const EPSILON: f64 = 1e-9;
 
 /// A vertical planar wall region
 #[derive(Clone, Debug)]
 pub struct WallRegion {
+    pub base: RegionBase,
     pub polygon: Polygon3D, // 3D polygon (vertical plane, typically 4 vertices)
     pub construction_type: WallConstructionType,
-    pub construction_makeup: ConstructionMakeup,
-    pub construction_phase: ConstructionPhase,
     pub exposure: WallExposure,
 }
 
@@ -48,7 +48,6 @@ impl WallRegions {
     /// Generate walls from floor region discontinuities (internal walls where floor height changes)
     pub fn from_floor_discontinuities(
         floor_regions: &FloorRegions,
-        default_ceiling_height: f64,
         default_construction_type: Option<WallConstructionType>,
         default_construction_makeup: Option<ConstructionMakeup>,
         default_exposure: Option<WallExposure>,
@@ -82,20 +81,25 @@ impl WallRegions {
                     ];
 
                     // Determine construction phase (use the later one or the first region's)
-                    let construction_phase =
-                        match (&region_a.construction_phase, &region_b.construction_phase) {
-                            (a, b) if a == b => a.clone(),
-                            _ => ConstructionPhase::Original,
-                        };
+                    let construction_phase = match (
+                        &region_a.base.construction_phase,
+                        &region_b.base.construction_phase,
+                    ) {
+                        (a, b) if a == b => a.clone(),
+                        _ => ConstructionPhase::Original,
+                    };
 
                     regions.push(WallRegion {
                         polygon: Polygon3D::new(vertices),
                         construction_type: default_construction_type
                             .unwrap_or(WallConstructionType::Uninitialised),
-                        construction_makeup: default_construction_makeup
-                            .clone()
-                            .unwrap_or_default(),
-                        construction_phase,
+                        base: RegionBase {
+                            id: Uuid::new_v4(),
+                            construction_phase,
+                            construction_makeup: default_construction_makeup
+                                .clone()
+                                .unwrap_or_default(),
+                        },
                         exposure: default_exposure.unwrap_or(WallExposure::Exposed),
                     });
                 }
@@ -136,20 +140,25 @@ impl WallRegions {
                     let vertices = vec![p1_a, p2_a, p2_b, p1_b];
 
                     // Determine construction phase
-                    let construction_phase =
-                        match (&region_a.construction_phase, &region_b.construction_phase) {
-                            (a, b) if a == b => a.clone(),
-                            _ => ConstructionPhase::Original,
-                        };
+                    let construction_phase = match (
+                        &region_a.base.construction_phase,
+                        &region_b.base.construction_phase,
+                    ) {
+                        (a, b) if a == b => a.clone(),
+                        _ => ConstructionPhase::Original,
+                    };
 
                     regions.push(WallRegion {
                         polygon: Polygon3D::new(vertices),
                         construction_type: default_construction_type
                             .unwrap_or(WallConstructionType::Uninitialised),
-                        construction_makeup: default_construction_makeup
-                            .clone()
-                            .unwrap_or_default(),
-                        construction_phase,
+                        base: RegionBase {
+                            id: Uuid::new_v4(),
+                            construction_makeup: default_construction_makeup
+                                .clone()
+                                .unwrap_or_default(),
+                            construction_phase,
+                        },
                         exposure: default_exposure.unwrap_or(WallExposure::NonHeatLoss),
                     });
                 }
@@ -316,10 +325,13 @@ impl WallRegions {
                             polygon: Polygon3D::new(vertices),
                             construction_type: default_construction_type
                                 .unwrap_or(WallConstructionType::Uninitialised),
-                            construction_makeup: default_construction_makeup
-                                .clone()
-                                .unwrap_or_default(),
-                            construction_phase,
+                            base: RegionBase {
+                                id: Uuid::new_v4(),
+                                construction_makeup: default_construction_makeup
+                                    .clone()
+                                    .unwrap_or_default(),
+                                construction_phase,
+                            },
                             exposure: default_exposure.unwrap_or(WallExposure::Exposed),
                         });
                     }
@@ -350,10 +362,10 @@ impl WallRegions {
                     region.construction_type = ct;
                 }
                 if let Some(cl) = &construction_makeup {
-                    region.construction_makeup = cl.clone();
+                    region.base.construction_makeup = cl.clone();
                 }
                 if let Some(cp) = &construction_phase {
-                    region.construction_phase = cp.clone();
+                    region.base.construction_phase = cp.clone();
                 }
                 if let Some(exp) = exposure {
                     region.exposure = exp;
@@ -374,8 +386,11 @@ impl From<Vec<PlanarElement>> for WallRegions {
                 } => WallRegion {
                     polygon: Polygon3D::new(common.vertices),
                     construction_type: wall_specifics.construction_type,
-                    construction_makeup: common.construction,
-                    construction_phase: common.construction_phase,
+                    base: RegionBase {
+                        id: Uuid::new_v4(),
+                        construction_phase: common.construction_phase,
+                        construction_makeup: common.construction,
+                    },
                     exposure: wall_specifics.exposure,
                 },
                 _ => panic!("Expected PlanarElement::Wall"),
@@ -612,13 +627,13 @@ fn determine_construction_phase_for_exterior_wall(
         .regions
         .iter()
         .find(|r| point_in_polygon_2d(&r.polygon, mid_x, mid_y))
-        .map(|r| r.construction_phase.clone());
+        .map(|r| r.base.construction_phase.clone());
 
     let ceiling_phase = ceiling_regions
         .regions
         .iter()
         .find(|r| point_in_polygon_3d(&r.polygon, mid_x, mid_y))
-        .map(|r| r.construction_phase.clone());
+        .map(|r| r.base.construction_phase.clone());
 
     // If both phases match, use that; otherwise return floor phase
     match (floor_phase, ceiling_phase) {

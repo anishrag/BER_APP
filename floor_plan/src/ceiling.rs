@@ -10,6 +10,7 @@ use geo::Polygon;
 use nalgebra::{Point3, Vector3};
 use std::collections::HashMap;
 use std::convert::TryFrom;
+use uuid::Uuid;
 // crate includes
 use datatypes::ber::common::ConstructionPhase;
 use datatypes::ber::structural::{CeilingConstructionType, ConstructionMakeup, PlanarElement};
@@ -17,7 +18,7 @@ use datatypes::ber::structural::{CeilingConstructionType, ConstructionMakeup, Pl
 // local includes
 use super::geometry::{point_in_triangle_2d, point_on_segment_2d};
 use super::types::{
-    DirectedEdge3D, Point3Ext, Polygon3D, Polygon3DConversionError, Polygon3DMultiZ,
+    DirectedEdge3D, Point3Ext, Polygon3D, Polygon3DConversionError, Polygon3DMultiZ, RegionBase,
 };
 
 const EPSILON: f64 = 1e-9;
@@ -89,10 +90,9 @@ fn undirected_edge_3df(a: &Point3<f64>, b: &Point3<f64>) -> Edge3DF {
 /// A planar region of the floor
 #[derive(Clone, Debug)]
 pub struct CeilingRegion {
+    pub base: RegionBase,
     pub polygon: Polygon3D, // 2D polygon boundary
     pub construction_type: CeilingConstructionType,
-    pub construction_makeup: ConstructionMakeup,
-    pub construction_phase: ConstructionPhase,
 }
 /// A planar region of the floor
 #[derive(Debug)]
@@ -112,8 +112,11 @@ impl CeilingRegions {
                 polygon: Polygon3D::new(vertices),
                 construction_type: construction_type
                     .unwrap_or(CeilingConstructionType::Uninitialised),
-                construction_makeup: construction_makeup.unwrap_or_default(),
-                construction_phase: construction_phase.unwrap_or(ConstructionPhase::Original),
+                base: RegionBase {
+                    id: Uuid::new_v4(),
+                    construction_makeup: construction_makeup.unwrap_or_default(),
+                    construction_phase: construction_phase.unwrap_or(ConstructionPhase::Original),
+                },
             }],
         }
     }
@@ -139,8 +142,11 @@ impl CeilingRegions {
                 new_regions.push(CeilingRegion {
                     polygon: poly,
                     construction_type: region.construction_type,
-                    construction_makeup: region.construction_makeup.clone(),
-                    construction_phase: region.construction_phase.clone(),
+                    base: RegionBase {
+                        id: Uuid::new_v4(),
+                        construction_makeup: region.base.construction_makeup.clone(),
+                        construction_phase: region.base.construction_phase.clone(),
+                    },
                 });
             }
 
@@ -166,7 +172,7 @@ impl CeilingRegions {
         construction_phase: ConstructionPhase,
     ) {
         self.modify_polygon(polygon, |r| {
-            r.construction_phase = construction_phase.clone();
+            r.base.construction_phase = construction_phase.clone();
         });
     }
 
@@ -182,10 +188,10 @@ impl CeilingRegions {
                 r.construction_type = ct;
             }
             if let Some(cl) = construction_makeup.clone() {
-                r.construction_makeup = cl;
+                r.base.construction_makeup = cl;
             }
             if let Some(cp) = construction_phase.clone() {
-                r.construction_phase = cp;
+                r.base.construction_phase = cp;
             }
         });
     }
@@ -348,8 +354,11 @@ impl From<Vec<PlanarElement>> for CeilingRegions {
                 } => CeilingRegion {
                     polygon: Polygon3D::new(common.vertices),
                     construction_type: roof_specifics.construction_type,
-                    construction_makeup: common.construction,
-                    construction_phase: common.construction_phase,
+                    base: RegionBase {
+                        id: common.id,
+                        construction_makeup: common.construction,
+                        construction_phase: common.construction_phase,
+                    },
                 },
                 _ => panic!("Expected PlanarElement::Roof"),
             })
@@ -697,7 +706,7 @@ impl TryFrom<CeilingRegion> for CeilingMesh {
 
         Ok(CeilingMesh {
             triangles,
-            construction_phase: ceiling_region.construction_phase,
+            construction_phase: ceiling_region.base.construction_phase,
         })
     }
 }
@@ -773,9 +782,12 @@ impl Into<CeilingRegionConversion> for CeilingMesh {
                     Some(polygon) => {
                         regions.push(CeilingRegion {
                             polygon,
-                            construction_phase: self.construction_phase.clone(),
                             construction_type: CeilingConstructionType::Uninitialised,
-                            construction_makeup: ConstructionMakeup::default(),
+                            base: RegionBase {
+                                id: Uuid::new_v4(),
+                                construction_phase: self.construction_phase.clone(),
+                                construction_makeup: ConstructionMakeup::default(),
+                            },
                         });
                     }
                     None => {
@@ -806,8 +818,11 @@ mod tests {
                 Point3::new(0.5, 1.0, 0.0),
             ]),
             construction_type: CeilingConstructionType::Uninitialised,
-            construction_makeup: ConstructionMakeup::default(),
-            construction_phase: ConstructionPhase::Original,
+            base: RegionBase {
+                id: Uuid::new_v4(),
+                construction_makeup: ConstructionMakeup::default(),
+                construction_phase: ConstructionPhase::Original,
+            },
         }
     }
 
@@ -821,8 +836,11 @@ mod tests {
                 Point3::new(0.0, 1.0, z),
             ]),
             construction_type: CeilingConstructionType::Uninitialised,
-            construction_makeup: ConstructionMakeup::default(),
-            construction_phase: ConstructionPhase::Original,
+            base: RegionBase {
+                id: Uuid::new_v4(),
+                construction_makeup: ConstructionMakeup::default(),
+                construction_phase: ConstructionPhase::Original,
+            },
         }
     }
 
@@ -897,7 +915,7 @@ mod tests {
             CeilingConstructionType::Uninitialised
         );
         assert_eq!(
-            regions.regions[0].construction_phase,
+            regions.regions[0].base.construction_phase,
             ConstructionPhase::Original
         );
     }
@@ -1019,8 +1037,11 @@ mod tests {
         let region = CeilingRegion {
             polygon: Polygon3D::new(vec![Point3::new(0.0, 0.0, 0.0), Point3::new(1.0, 0.0, 0.0)]), // Only 2 vertices
             construction_type: CeilingConstructionType::Uninitialised,
-            construction_makeup: ConstructionMakeup::default(),
-            construction_phase: ConstructionPhase::Original,
+            base: RegionBase {
+                id: Uuid::new_v4(),
+                construction_makeup: ConstructionMakeup::default(),
+                construction_phase: ConstructionPhase::Original,
+            },
         };
 
         let mesh = CeilingMesh::try_from(region);
@@ -1180,7 +1201,7 @@ mod tests {
         );
 
         assert_eq!(
-            regions.regions[0].construction_phase,
+            regions.regions[0].base.construction_phase,
             ConstructionPhase::Other("NewPhase".to_string())
         );
     }
@@ -1226,15 +1247,18 @@ mod tests {
                 Point3::new(0.0, 1.0, 0.0),
             ]),
             construction_type: CeilingConstructionType::Uninitialised,
-            construction_makeup: ConstructionMakeup::default(),
-            construction_phase: ConstructionPhase::Other("TestPhase".to_string()),
+            base: RegionBase {
+                id: Uuid::new_v4(),
+                construction_makeup: ConstructionMakeup::default(),
+                construction_phase: ConstructionPhase::Other("TestPhase".to_string()),
+            },
         };
 
         let mesh = CeilingMesh::try_from(region).unwrap();
         let conversion: CeilingRegionConversion = mesh.into();
 
         assert_eq!(
-            conversion.regions[0].construction_phase,
+            conversion.regions[0].base.construction_phase,
             ConstructionPhase::Other("TestPhase".to_string())
         );
     }
@@ -1314,8 +1338,11 @@ mod tests {
         ceilings.regions.push(CeilingRegion {
             polygon: Polygon3D::new(region2),
             construction_type: CeilingConstructionType::Uninitialised,
-            construction_makeup: ConstructionMakeup::default(),
-            construction_phase: ConstructionPhase::Original,
+            base: RegionBase {
+                id: Uuid::new_v4(),
+                construction_makeup: ConstructionMakeup::default(),
+                construction_phase: ConstructionPhase::Original,
+            },
         });
 
         println!("{:#?}", ceilings);
