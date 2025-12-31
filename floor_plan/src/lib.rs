@@ -7,6 +7,7 @@ mod floor;
 
 use ceiling::CeilingRegions;
 use datatypes::ber::diffable::AddRemoveTrait;
+use datatypes::ber::structural::Storey;
 use floor::FloorRegions;
 use walls::WallRegions;
 
@@ -16,6 +17,16 @@ pub struct FloorPlan {
     pub floors: FloorRegions,
     pub walls: WallRegions,
     pub ceilings: CeilingRegions,
+}
+
+impl From<Storey> for FloorPlan {
+    fn from(storey: Storey) -> Self {
+        Self {
+            floors: FloorRegions::from(storey.floors),
+            walls: WallRegions::from(storey.walls),
+            ceilings: CeilingRegions::from(storey.roofs),
+        }
+    }
 }
 
 pub struct FloorPlanChangeItem {
