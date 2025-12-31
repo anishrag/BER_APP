@@ -1,5 +1,6 @@
 use anyhow::Result;
 use chrono::NaiveDate;
+use nalgebra::Point3;
 use rusqlite::Connection;
 use uuid::Uuid;
 
@@ -232,10 +233,10 @@ fn create_full_ber(id: Uuid) -> Ber {
             name: "Ground Floor".to_string(),
             floors: vec![PlanarElement::new_floor(
                 vec![
-                    (0.0, 0.0, 0.0),
-                    (10.0, 0.0, 0.0),
-                    (10.0, 8.0, 0.0),
-                    (0.0, 8.0, 0.0),
+                    Point3::new(0.0, 0.0, 0.0),
+                    Point3::new(10.0, 0.0, 0.0),
+                    Point3::new(10.0, 8.0, 0.0),
+                    Point3::new(0.0, 8.0, 0.0),
                 ],
                 ConstructionPhase::Original,
                 ConstructionMakeup::Default,
