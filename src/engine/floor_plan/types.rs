@@ -317,36 +317,6 @@ impl MultiPolygon3D {
     }
 }
 
-/// Construction types (example: 5-6 options)
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum FloorConstructionType {
-    SolidFloor,
-    SuspendedFloor,
-    NonHeatLossFloor,
-    Other,
-}
-
-/// Construction types (example: 5-6 options)
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum CeilingConstructionType {
-    FlatRoof,
-    SlopedInsOnRafter,
-    SlopedInsOnCeiling,
-    SlopedInsOnCeilingAndRafter,
-    NonHeatLossCeiling,
-    Uninitialised,
-    Other,
-}
-/// Construction layers (optional multiple layers)
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ConstructionLayer {
-    Insulation,
-    Concrete,
-    Waterproofing,
-    Finish,
-    // add more as needed
-}
-
 #[derive(Clone, Copy, Debug)]
 pub struct DirectedEdge3D {
     pub from: Point3<f64>,

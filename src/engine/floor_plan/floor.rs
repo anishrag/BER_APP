@@ -5,9 +5,10 @@ use nalgebra::Point2;
 use std::collections::HashMap;
 
 use crate::datatypes::ber::common::ConstructionPhase;
+use crate::datatypes::ber::structural::{ConstructionMakeup, FloorConstructionType};
 
 // local includes
-use super::types::{ConstructionLayer, FloorConstructionType, Polygon3DMultiZ};
+use super::types::Polygon3DMultiZ;
 
 /// A planar region of the floor
 #[derive(Clone, Debug)]
@@ -15,7 +16,7 @@ pub struct FloorRegion {
     pub polygon: Polygon<f64>, // 2D polygon boundary
     pub height: f64,           // height per vertex
     pub construction_type: FloorConstructionType,
-    pub construction_layers: Vec<(ConstructionLayer, u32)>,
+    pub construction_makeup: ConstructionMakeup,
     pub construction_phase: ConstructionPhase,
 }
 /// A planar region of the floor
@@ -36,7 +37,7 @@ impl FloorRegions {
     pub fn new(
         vertices: Vec<Point2<f64>>,
         construction_type: Option<FloorConstructionType>,
-        construction_layers: Option<Vec<(ConstructionLayer, u32)>>,
+        construction_makeup: Option<ConstructionMakeup>,
         construction_phase: Option<ConstructionPhase>,
     ) -> Self {
         let polygon = Polygon::new(
@@ -48,7 +49,7 @@ impl FloorRegions {
                 polygon,
                 height: 0.0f64,
                 construction_type: construction_type.unwrap_or(FloorConstructionType::SolidFloor),
-                construction_layers: construction_layers.unwrap_or_default(),
+                construction_makeup: construction_makeup.unwrap_or_default(),
                 construction_phase: construction_phase.unwrap_or(ConstructionPhase::Original),
             }],
         }
@@ -76,7 +77,7 @@ impl FloorRegions {
                     polygon: poly,
                     height: region.height,
                     construction_type: region.construction_type,
-                    construction_layers: region.construction_layers.clone(),
+                    construction_makeup: region.construction_makeup.clone(),
                     construction_phase: region.construction_phase.clone(),
                 });
             }
@@ -118,7 +119,7 @@ impl FloorRegions {
         polygon: Polygon<f64>,
         height: Option<f64>,
         construction_type: Option<FloorConstructionType>,
-        construction_layers: Option<Vec<(ConstructionLayer, u32)>>,
+        construction_makeup: Option<ConstructionMakeup>,
         construction_phase: Option<ConstructionPhase>,
     ) {
         self.modify_polygon(polygon, |r| {
@@ -128,8 +129,8 @@ impl FloorRegions {
             if let Some(ct) = construction_type {
                 r.construction_type = ct;
             }
-            if let Some(cl) = construction_layers.clone() {
-                r.construction_layers = cl;
+            if let Some(cl) = construction_makeup.clone() {
+                r.construction_makeup = cl;
             }
             if let Some(cp) = construction_phase.clone() {
                 r.construction_phase = cp;
@@ -367,6 +368,7 @@ pub struct FloorRegionByConstructionPhase {
 mod tests {
     use super::*;
 
+    use crate::datatypes::ber::structural::{ConstructionLayer, ConstructionMaterial};
     use crate::engine::floor_plan::types::{Polygon3D, Polygon3DConversionError};
     use nalgebra::Point3;
     fn rectangle(min_x: f64, min_y: f64, max_x: f64, max_y: f64) -> Polygon<f64> {
@@ -403,7 +405,10 @@ mod tests {
             floor.regions[0].construction_type,
             FloorConstructionType::SolidFloor
         );
-        assert_eq!(floor.regions[0].construction_layers.len(), 0);
+        assert_eq!(
+            floor.regions[0].construction_makeup,
+            ConstructionMakeup::default()
+        );
         assert_eq!(
             floor.regions[0].construction_phase,
             ConstructionPhase::Original
@@ -454,10 +459,18 @@ mod tests {
             poly,
             None,
             None,
-            Some(vec![
-                (ConstructionLayer::Insulation, 100),
-                (ConstructionLayer::Concrete, 100),
-            ]),
+            Some(ConstructionMakeup::Layers(vec![
+                ConstructionLayer {
+                    thickness_mm: 200,
+                    material: ConstructionMaterial::Concrete,
+                    bridged: false,
+                },
+                ConstructionLayer {
+                    thickness_mm: 100,
+                    material: ConstructionMaterial::InsulationEPS,
+                    bridged: false,
+                },
+            ])),
             None,
         );
 
@@ -476,7 +489,7 @@ mod tests {
     }
     //
     #[test]
-    fn add_construction_layers_for_part_of_multiple_polygons_should_create_extra_polys() {
+    fn add_construction_makeup_for_part_of_multiple_polygons_should_create_extra_polys() {
         let mut floor = base_floor();
 
         let left = rectangle(0.0, 0.0, 5.0, 10.0);
@@ -487,10 +500,18 @@ mod tests {
             spanning,
             None,
             None,
-            Some(vec![
-                (ConstructionLayer::Insulation, 100),
-                (ConstructionLayer::Concrete, 100),
-            ]),
+            Some(ConstructionMakeup::Layers(vec![
+                ConstructionLayer {
+                    thickness_mm: 200,
+                    material: ConstructionMaterial::Concrete,
+                    bridged: false,
+                },
+                ConstructionLayer {
+                    thickness_mm: 100,
+                    material: ConstructionMaterial::InsulationEPS,
+                    bridged: false,
+                },
+            ])),
             None,
         );
         let num_regions = floor.regions.len();
@@ -621,7 +642,7 @@ mod tests {
             polygon: polygon2,
             height: 3.0,
             construction_type: FloorConstructionType::SolidFloor,
-            construction_layers: vec![],
+            construction_makeup: ConstructionMakeup::default(),
             construction_phase: ConstructionPhase::Original,
         });
 

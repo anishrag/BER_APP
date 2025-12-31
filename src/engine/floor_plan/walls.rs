@@ -4,40 +4,21 @@ use nalgebra::{Point2, Point3};
 use std::collections::HashMap;
 
 use crate::datatypes::ber::common::ConstructionPhase;
+use crate::datatypes::ber::structural::{ConstructionMakeup, WallConstructionType, WallExposure};
 
 // local includes
 use super::ceiling::CeilingRegions;
 use super::floor::FloorRegions;
-use super::types::{approx_equal_xy, ConstructionLayer, Polygon3D, Polygon3DMultiZ};
+use super::types::{approx_equal_xy, Polygon3D, Polygon3DMultiZ};
 
 const EPSILON: f64 = 1e-9;
-
-/// Wall construction types
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum WallConstructionType {
-    CavityWall,
-    FilledCavityWall,
-    ConcreteHollowBlocks,
-    TimberConstruction,
-    ICF,
-    Floor,
-    Uninitialised,
-}
-
-/// Thermal exposure classification
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum WallExposure {
-    Exposed,     // Exterior wall exposed to outside
-    SemiExposed, // Wall to unheated space
-    NonHeatLoss, // Internal wall, no heat loss
-}
 
 /// A vertical planar wall region
 #[derive(Clone, Debug)]
 pub struct WallRegion {
     pub polygon: Polygon3D, // 3D polygon (vertical plane, typically 4 vertices)
     pub construction_type: WallConstructionType,
-    pub construction_layers: Vec<(ConstructionLayer, u32)>,
+    pub construction_makeup: ConstructionMakeup,
     pub construction_phase: ConstructionPhase,
     pub exposure: WallExposure,
 }
@@ -67,7 +48,7 @@ impl WallRegions {
         floor_regions: &FloorRegions,
         default_ceiling_height: f64,
         default_construction_type: Option<WallConstructionType>,
-        default_construction_layers: Option<Vec<(ConstructionLayer, u32)>>,
+        default_construction_makeup: Option<ConstructionMakeup>,
         default_exposure: Option<WallExposure>,
     ) -> Self {
         let mut regions = Vec::new();
@@ -109,7 +90,7 @@ impl WallRegions {
                         polygon: Polygon3D::new(vertices),
                         construction_type: default_construction_type
                             .unwrap_or(WallConstructionType::Uninitialised),
-                        construction_layers: default_construction_layers
+                        construction_makeup: default_construction_makeup
                             .clone()
                             .unwrap_or_default(),
                         construction_phase,
@@ -126,7 +107,7 @@ impl WallRegions {
     pub fn from_ceiling_discontinuities(
         ceiling_regions: &CeilingRegions,
         default_construction_type: Option<WallConstructionType>,
-        default_construction_layers: Option<Vec<(ConstructionLayer, u32)>>,
+        default_construction_makeup: Option<ConstructionMakeup>,
         default_exposure: Option<WallExposure>,
     ) -> Self {
         let mut regions = Vec::new();
@@ -163,7 +144,7 @@ impl WallRegions {
                         polygon: Polygon3D::new(vertices),
                         construction_type: default_construction_type
                             .unwrap_or(WallConstructionType::Uninitialised),
-                        construction_layers: default_construction_layers
+                        construction_makeup: default_construction_makeup
                             .clone()
                             .unwrap_or_default(),
                         construction_phase,
@@ -287,7 +268,7 @@ impl WallRegions {
         floor_regions: &FloorRegions,
         ceiling_regions: &CeilingRegions,
         default_construction_type: Option<WallConstructionType>,
-        default_construction_layers: Option<Vec<(ConstructionLayer, u32)>>,
+        default_construction_makeup: Option<ConstructionMakeup>,
         default_construction_phase: Option<ConstructionPhase>,
         default_exposure: Option<WallExposure>,
     ) -> Self {
@@ -297,7 +278,51 @@ impl WallRegions {
         let ceiling_boundary =
             ceiling_regions.get_clockwise_3d_polygon_starting_closest_to_origin();
         let merged_boundary_vertices =
-            Self::merge_floor_ceiling_by_line(&floor_boundary, &ceiling_boundary);
+            Self::merge_floor_ceiling_by_line(&floor_boundary, &ceiling_boundary).expect(
+                "Failed to merge floor and ceiling boundaries; ensure they are aligned in XY",
+            );
+        merged_boundary_vertices
+            .iter()
+            .enumerate()
+            .for_each(|(i, bv)| {
+                let next_bv = &merged_boundary_vertices[(i + 1) % merged_boundary_vertices.len()];
+                let floor_heights = &bv.floor_height;
+                let ceiling_heights = &bv.ceiling_height;
+                for &fh in floor_heights {
+                    for &ch in ceiling_heights {
+                        if (fh - ch).abs() < EPSILON {
+                            continue; // No wall if floor and ceiling heights are equal
+                        }
+                        let vertices = vec![
+                            Point3::new(bv.point.x, bv.point.y, fh),
+                            Point3::new(next_bv.point.x, next_bv.point.y, fh),
+                            Point3::new(next_bv.point.x, next_bv.point.y, ch),
+                            Point3::new(bv.point.x, bv.point.y, ch),
+                        ];
+                        // Determine construction phase
+                        let construction_phase =
+                            default_construction_phase.clone().unwrap_or_else(|| {
+                                determine_construction_phase_for_exterior_wall(
+                                    floor_regions,
+                                    ceiling_regions,
+                                    &vertices[0],
+                                    &vertices[1],
+                                )
+                                .unwrap_or(ConstructionPhase::Original)
+                            });
+                        regions.push(WallRegion {
+                            polygon: Polygon3D::new(vertices),
+                            construction_type: default_construction_type
+                                .unwrap_or(WallConstructionType::Uninitialised),
+                            construction_makeup: default_construction_makeup
+                                .clone()
+                                .unwrap_or_default(),
+                            construction_phase,
+                            exposure: default_exposure.unwrap_or(WallExposure::Exposed),
+                        });
+                    }
+                }
+            });
 
         Self { regions }
     }
@@ -312,7 +337,7 @@ impl WallRegions {
         &mut self,
         polygon_2d: &Polygon<f64>,
         construction_type: Option<WallConstructionType>,
-        construction_layers: Option<Vec<(ConstructionLayer, u32)>>,
+        construction_makeup: Option<ConstructionMakeup>,
         construction_phase: Option<ConstructionPhase>,
         exposure: Option<WallExposure>,
     ) {
@@ -322,8 +347,8 @@ impl WallRegions {
                 if let Some(ct) = construction_type {
                     region.construction_type = ct;
                 }
-                if let Some(cl) = &construction_layers {
-                    region.construction_layers = cl.clone();
+                if let Some(cl) = &construction_makeup {
+                    region.construction_makeup = cl.clone();
                 }
                 if let Some(cp) = &construction_phase {
                     region.construction_phase = cp.clone();

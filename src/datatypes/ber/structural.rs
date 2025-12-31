@@ -1,4 +1,5 @@
 // src/data/structural.rs
+use nalgebra::Point3;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
@@ -11,6 +12,7 @@ pub struct Opes {
     pub windows: Vec<Uuid>, // references to Window IDs
 }
 
+#[cfg_attr(test, derive(PartialEq))]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum ConstructionMaterial {
     Concrete,
@@ -45,13 +47,14 @@ impl ConstructionMaterial {
     }
 }
 
+#[cfg_attr(test, derive(PartialEq))]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ConstructionLayer {
     pub thickness_mm: u32,              // thickness in meters
     pub material: ConstructionMaterial, // material name or ID
     pub bridged: bool,                  // true if thermal bridging exists
 }
-
+#[cfg_attr(test, derive(PartialEq))]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum ConstructionMakeup {
     NonHeatLoss,                    // no heat loss
@@ -60,102 +63,208 @@ pub enum ConstructionMakeup {
     Layers(Vec<ConstructionLayer>), // custom stack of layers
 }
 
+impl Default for ConstructionMakeup {
+    fn default() -> Self {
+        ConstructionMakeup::Tbd
+    }
+}
+/// Construction types (example: 5-6 options)
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum FloorConstructionType {
+    SolidFloor,
+    SuspendedFloor,
+    NonHeatLossFloor,
+    Uninitialised,
+    Other,
+}
+
+/// Construction types (example: 5-6 options)
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum CeilingConstructionType {
+    FlatRoof,
+    SlopedInsOnRafter,
+    SlopedInsOnCeiling,
+    SlopedInsOnCeilingAndRafter,
+    NonHeatLossCeiling,
+    Uninitialised,
+    Other,
+}
+
+/// Wall construction types
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum WallConstructionType {
+    CavityWall,
+    FilledCavityWall,
+    ConcreteHollowBlocks,
+    TimberConstruction,
+    ICF,
+    Floor,
+    Uninitialised,
+}
+
+/// Thermal exposure classification
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum WallExposure {
+    Exposed,     // Exterior wall exposed to outside
+    SemiExposed, // Wall to unheated space
+    NonHeatLoss, // Internal wall, no heat loss
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FloorData {
+    pub construction_type: FloorConstructionType,
     pub storey: u8,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WallData {
+    pub construction_type: WallConstructionType,
+    pub exposure: WallExposure,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RoofData {
+    pub construction_type: CeilingConstructionType,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PlanarCommon {
+    pub id: Uuid,
+    pub vertices: Vec<Point3<f64>>,
+    pub construction_phase: ConstructionPhase,
+    pub opes: Opes,
+    pub construction: ConstructionMakeup,
+    pub photos: Vec<Photo>,
+    pub description: Option<String>,
+}
+
+impl PlanarCommon {
+    fn new(
+        vertices: Vec<Point3<f64>>,
+        construction_phase: ConstructionPhase,
+        construction: ConstructionMakeup,
+    ) -> Self {
+        Self {
+            id: Uuid::new_v4(),
+            vertices,
+            construction_phase,
+            opes: Opes::default(),
+            construction,
+            photos: Vec::new(),
+            description: None,
+        }
+    }
+}
+
+// --- Planar elements enum ---
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum PlanarElement {
     Floor {
-        id: Uuid,
-        vertices: Vec<(f32, f32, f32)>,
-        construction_phase: ConstructionPhase,
-        opes: Opes,
-        construction: ConstructionMakeup,
-        photos: Vec<Photo>,
-        description: Option<String>,
-
-        floor: FloorData,
+        common: PlanarCommon,
+        floor_specifics: FloorData,
     },
 
     Wall {
-        id: Uuid,
-        vertices: Vec<(f32, f32, f32)>,
-        construction_phase: ConstructionPhase,
-        opes: Opes,
-        construction: ConstructionMakeup,
-        photos: Vec<Photo>,
-        description: Option<String>,
+        common: PlanarCommon,
+        wall_specifics: WallData,
     },
 
     Roof {
-        id: Uuid,
-        vertices: Vec<(f32, f32, f32)>,
-        construction_phase: ConstructionPhase,
-        opes: Opes,
-        construction: ConstructionMakeup,
-        photos: Vec<Photo>,
-        description: Option<String>,
+        common: PlanarCommon,
+        roof_specifics: RoofData,
     },
 }
 
+// --- Constructors ---
+
 impl PlanarElement {
     pub fn new_floor(
-        vertices: Vec<(f32, f32, f32)>,
+        vertices: Vec<Point3<f64>>,
         construction_phase: ConstructionPhase,
         construction: ConstructionMakeup,
     ) -> Self {
         Self::Floor {
-            id: Uuid::new_v4(),
-            vertices,
-            construction_phase,
-            opes: Opes::default(),
-            construction,
-            photos: vec![],
-            description: None,
-            floor: FloorData { storey: 0 },
+            common: PlanarCommon::new(vertices, construction_phase, construction),
+            floor_specifics: FloorData {
+                storey: 0,
+                construction_type: FloorConstructionType::Uninitialised,
+            },
         }
     }
 
     pub fn new_wall(
-        vertices: Vec<(f32, f32, f32)>,
+        vertices: Vec<Point3<f64>>,
         construction_phase: ConstructionPhase,
         construction: ConstructionMakeup,
     ) -> Self {
         Self::Wall {
-            id: Uuid::new_v4(),
-            vertices,
-            construction_phase,
-            opes: Opes::default(),
-            construction,
-            photos: vec![],
-            description: None,
+            common: PlanarCommon::new(vertices, construction_phase, construction),
+            wall_specifics: WallData {
+                construction_type: WallConstructionType::Uninitialised,
+                exposure: WallExposure::Exposed,
+            },
         }
     }
 
     pub fn new_roof(
-        vertices: Vec<(f32, f32, f32)>,
+        vertices: Vec<Point3<f64>>,
         construction_phase: ConstructionPhase,
         construction: ConstructionMakeup,
     ) -> Self {
         Self::Roof {
-            id: Uuid::new_v4(),
-            vertices,
-            construction_phase,
-            opes: Opes::default(),
-            construction,
-            photos: vec![],
-            description: None,
+            common: PlanarCommon::new(vertices, construction_phase, construction),
+            roof_specifics: RoofData {
+                construction_type: CeilingConstructionType::Uninitialised,
+            },
         }
     }
 }
 
+// --- Shared accessors ---
+
+impl PlanarElement {
+    pub fn common(&self) -> &PlanarCommon {
+        match self {
+            Self::Floor { common, .. } | Self::Wall { common, .. } | Self::Roof { common, .. } => {
+                common
+            }
+        }
+    }
+
+    pub fn common_mut(&mut self) -> &mut PlanarCommon {
+        match self {
+            Self::Floor { common, .. } | Self::Wall { common, .. } | Self::Roof { common, .. } => {
+                common
+            }
+        }
+    }
+}
+
+// --- Example ergonomic helpers (optional but recommended) ---
+
+impl PlanarElement {
+    pub fn id(&self) -> Uuid {
+        self.common().id
+    }
+
+    pub fn vertices(&self) -> &[Point3<f64>] {
+        &self.common().vertices
+    }
+
+    pub fn add_photo(&mut self, photo: Photo) {
+        self.common_mut().photos.push(photo);
+    }
+
+    pub fn set_description(&mut self, description: impl Into<String>) {
+        self.common_mut().description = Some(description.into());
+    }
+}
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Room {
     pub id: Uuid,
     pub name: String,
-    pub vertices: Vec<(f32, f32, f32)>,
+    pub vertices: Vec<Point3<f64>>,
     pub thermostats: Vec<Item>,
     pub vents: Vec<Item>,
     pub fans: Vec<Item>,
