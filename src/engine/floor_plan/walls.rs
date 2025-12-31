@@ -4,7 +4,9 @@ use nalgebra::{Point2, Point3};
 use std::collections::HashMap;
 
 use crate::datatypes::ber::common::ConstructionPhase;
-use crate::datatypes::ber::structural::{ConstructionMakeup, WallConstructionType, WallExposure};
+use crate::datatypes::ber::structural::{
+    ConstructionMakeup, PlanarElement, WallConstructionType, WallExposure,
+};
 
 // local includes
 use super::ceiling::CeilingRegions;
@@ -361,6 +363,27 @@ impl WallRegions {
     }
 }
 
+impl From<Vec<PlanarElement>> for WallRegions {
+    fn from(elements: Vec<PlanarElement>) -> Self {
+        let regions = elements
+            .into_iter()
+            .map(|el| match el {
+                PlanarElement::Wall {
+                    common,
+                    wall_specifics,
+                } => WallRegion {
+                    polygon: Polygon3D::new(common.vertices),
+                    construction_type: wall_specifics.construction_type,
+                    construction_makeup: common.construction,
+                    construction_phase: common.construction_phase,
+                    exposure: wall_specifics.exposure,
+                },
+                _ => panic!("Expected PlanarElement::Wall"),
+            })
+            .collect();
+        Self { regions }
+    }
+}
 // Helper structures
 struct SharedEdge3D {
     points_a: (Point3<f64>, Point3<f64>),

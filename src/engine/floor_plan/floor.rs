@@ -5,7 +5,7 @@ use nalgebra::Point2;
 use std::collections::HashMap;
 
 use crate::datatypes::ber::common::ConstructionPhase;
-use crate::datatypes::ber::structural::{ConstructionMakeup, FloorConstructionType};
+use crate::datatypes::ber::structural::{ConstructionMakeup, FloorConstructionType, PlanarElement};
 
 // local includes
 use super::types::Polygon3DMultiZ;
@@ -362,6 +362,37 @@ fn edges_match(a: &DirectedEdge, b: &DirectedEdge) -> bool {
 pub struct FloorRegionByConstructionPhase {
     pub polygon: Polygon<f64>,
     pub construction_phase: ConstructionPhase,
+}
+
+impl From<Vec<PlanarElement>> for FloorRegions {
+    fn from(elements: Vec<PlanarElement>) -> Self {
+        let regions = elements
+            .into_iter()
+            .map(|el| match el {
+                PlanarElement::Floor {
+                    common,
+                    floor_specifics,
+                } => FloorRegion {
+                    polygon: Polygon::new(
+                        LineString::from(
+                            common
+                                .vertices
+                                .iter()
+                                .map(|p| (p.x, p.y))
+                                .collect::<Vec<(f64, f64)>>(),
+                        ),
+                        vec![],
+                    ),
+                    height: 0.0,
+                    construction_type: floor_specifics.construction_type,
+                    construction_makeup: common.construction.clone(),
+                    construction_phase: common.construction_phase.clone(),
+                },
+                _ => panic!("Non-floor PlanarElement found when converting to FloorRegions"),
+            })
+            .collect();
+        FloorRegions { regions }
+    }
 }
 
 #[cfg(test)]

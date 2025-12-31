@@ -339,6 +339,27 @@ impl CeilingRegions {
     }
 }
 
+impl From<Vec<PlanarElement>> for CeilingRegions {
+    fn from(elements: Vec<PlanarElement>) -> Self {
+        let regions = elements
+            .into_iter()
+            .map(|el| match el {
+                PlanarElement::Roof {
+                    common,
+                    roof_specifics,
+                } => CeilingRegion {
+                    polygon: Polygon3D::new(common.vertices),
+                    construction_type: roof_specifics.construction_type,
+                    construction_makeup: common.construction,
+                    construction_phase: common.construction_phase,
+                },
+                _ => panic!("Expected PlanarElement::Roof"),
+            })
+            .collect();
+        CeilingRegions { regions }
+    }
+}
+
 #[derive(Debug)]
 pub enum VertexInsertionError {
     VertexNotInAnyTriangle { x: f64, y: f64 },
