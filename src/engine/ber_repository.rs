@@ -3,7 +3,7 @@ use rusqlite::{params, Connection, Result};
 use serde_json;
 use uuid::Uuid;
 
-use crate::datatypes::ber::ber::Ber;
+use datatypes::ber::ber::Ber;
 
 #[derive(Debug)]
 pub struct BerRecord {

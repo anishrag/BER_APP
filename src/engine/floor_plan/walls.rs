@@ -3,8 +3,8 @@ use geo::{LineString, Polygon};
 use nalgebra::{Point2, Point3};
 use std::collections::HashMap;
 
-use crate::datatypes::ber::common::ConstructionPhase;
-use crate::datatypes::ber::structural::{
+use datatypes::ber::common::ConstructionPhase;
+use datatypes::ber::structural::{
     ConstructionMakeup, PlanarElement, WallConstructionType, WallExposure,
 };
 

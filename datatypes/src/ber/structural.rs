@@ -12,8 +12,7 @@ pub struct Opes {
     pub windows: Vec<Uuid>, // references to Window IDs
 }
 
-#[cfg_attr(test, derive(PartialEq))]
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub enum ConstructionMaterial {
     Concrete,
     InsulationEPS,
@@ -47,15 +46,13 @@ impl ConstructionMaterial {
     }
 }
 
-#[cfg_attr(test, derive(PartialEq))]
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct ConstructionLayer {
     pub thickness_mm: u32,              // thickness in meters
     pub material: ConstructionMaterial, // material name or ID
     pub bridged: bool,                  // true if thermal bridging exists
 }
-#[cfg_attr(test, derive(PartialEq))]
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub enum ConstructionMakeup {
     NonHeatLoss,                    // no heat loss
     Default,                        // use default construction

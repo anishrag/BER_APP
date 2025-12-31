@@ -2,9 +2,9 @@ use chrono::NaiveDate;
 use rusqlite::Connection;
 use std::sync::mpsc::Sender;
 
-use crate::datatypes::ber::ber::Ber;
 use crate::engine::ber_repository::{BerRecord, BerRepository};
 use crate::engine::dataloader::DataLoader;
+use datatypes::ber::ber::Ber;
 
 pub struct AppController {
     conn: Connection,

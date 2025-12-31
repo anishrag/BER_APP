@@ -11,10 +11,8 @@ use nalgebra::{Point3, Vector3};
 use std::collections::HashMap;
 use std::convert::TryFrom;
 // crate includes
-use crate::datatypes::ber::common::ConstructionPhase;
-use crate::datatypes::ber::structural::{
-    CeilingConstructionType, ConstructionMakeup, PlanarElement,
-};
+use datatypes::ber::common::ConstructionPhase;
+use datatypes::ber::structural::{CeilingConstructionType, ConstructionMakeup, PlanarElement};
 
 // local includes
 use super::geometry::{point_in_triangle_2d, point_on_segment_2d};

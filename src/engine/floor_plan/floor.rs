@@ -4,8 +4,8 @@ use geo::{Intersects, LineString, MultiPolygon, Polygon};
 use nalgebra::Point2;
 use std::collections::HashMap;
 
-use crate::datatypes::ber::common::ConstructionPhase;
-use crate::datatypes::ber::structural::{ConstructionMakeup, FloorConstructionType, PlanarElement};
+use datatypes::ber::common::ConstructionPhase;
+use datatypes::ber::structural::{ConstructionMakeup, FloorConstructionType, PlanarElement};
 
 // local includes
 use super::types::Polygon3DMultiZ;
@@ -399,8 +399,8 @@ impl From<Vec<PlanarElement>> for FloorRegions {
 mod tests {
     use super::*;
 
-    use crate::datatypes::ber::structural::{ConstructionLayer, ConstructionMaterial};
     use crate::engine::floor_plan::types::{Polygon3D, Polygon3DConversionError};
+    use datatypes::ber::structural::{ConstructionLayer, ConstructionMaterial};
     use nalgebra::Point3;
     fn rectangle(min_x: f64, min_y: f64, max_x: f64, max_y: f64) -> Polygon<f64> {
         Polygon::new(

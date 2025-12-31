@@ -4,12 +4,12 @@ use nalgebra::Point3;
 use rusqlite::Connection;
 use uuid::Uuid;
 
-use ber_app::datatypes::ber::ber::Ber;
-use ber_app::datatypes::ber::common::{ConstructionPhase, ConstructionPhases, Photo};
-use ber_app::datatypes::ber::structural::{
+use datatypes::ber::ber::Ber;
+use datatypes::ber::common::{ConstructionPhase, ConstructionPhases, Photo};
+use datatypes::ber::structural::{
     ConstructionMakeup, PlanarElement, Storey, ThermalMassCategoryEnum, ThermalMassInfo,
 };
-use ber_app::datatypes::ber::systems::{
+use datatypes::ber::systems::{
     Direction, HeatingControls, HeatingSystem, HeatingSystemType, SolarElements, VentilationSystem,
     VentilationSystemType,
 };
