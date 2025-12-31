@@ -23,3 +23,6 @@ datatypes = { path = "datatypes" }
 
 [build-dependencies]
 slint-build = "1.12.1"
+
+[workspace]
+members = ["datatypes", "floor_plan"]

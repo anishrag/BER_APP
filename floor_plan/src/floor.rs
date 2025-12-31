@@ -399,8 +399,9 @@ impl From<Vec<PlanarElement>> for FloorRegions {
 mod tests {
     use super::*;
 
-    use crate::engine::floor_plan::types::{Polygon3D, Polygon3DConversionError};
+    use crate::types::{Polygon3D, Polygon3DConversionError};
     use datatypes::ber::structural::{ConstructionLayer, ConstructionMaterial};
+
     use nalgebra::Point3;
     fn rectangle(min_x: f64, min_y: f64, max_x: f64, max_y: f64) -> Polygon<f64> {
         Polygon::new(
