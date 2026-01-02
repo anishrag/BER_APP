@@ -4,10 +4,11 @@ pub mod types;
 pub mod walls;
 
 mod floor;
+use nalgebra::Point2;
 
 use ceiling::CeilingRegions;
 use datatypes::ber::diffable::AddRemoveTrait;
-use datatypes::ber::structural::Storey;
+use datatypes::ber::structural::{FloorConstructionType, Storey};
 use floor::FloorRegions;
 use walls::WallRegions;
 
@@ -19,6 +20,32 @@ pub struct FloorPlan {
     pub ceilings: CeilingRegions,
 }
 
+//TODO: ddecide where storey lives
+impl FloorPlan {
+    pub fn new_ground_floor(
+        vertices: Vec<Point2<f64>>,
+        construction_type: FloorConstructionType,
+    ) -> (Self, Storey) {
+        let floor_regions = FloorRegions::new(vertices, Some(construction_type), None, None);
+        (
+            Self {
+                floors: floor_regions.clone(),
+                walls: WallRegions { regions: vec![] },
+                ceilings: CeilingRegions { regions: vec![] },
+            },
+            Storey {
+                id: Uuid::new_v4(),
+                name: "Ground Floor".to_string(),
+                floors: floor_regions.into(),
+                walls: vec![],
+                roofs: vec![],
+                windows: vec![],
+                doors: vec![],
+                rooms: vec![],
+            },
+        )
+    }
+}
 impl From<Storey> for FloorPlan {
     fn from(storey: Storey) -> Self {
         Self {
@@ -34,7 +61,7 @@ pub struct FloorPlanChangeItem {
     pub location_uuid: Option<Uuid>,
 }
 pub struct FloorPlanChangeDyn {
-    pub remove: Vec<Box<dyn AddRemoveTrait>>,
-    pub add: Vec<Box<dyn AddRemoveTrait>>,
-    pub modify: Vec<Box<dyn AddRemoveTrait>>,
+    pub remove: Vec<FloorPlanChangeItem>,
+    pub add: Vec<FloorPlanChangeItem>,
+    pub modify: Vec<FloorPlanChangeItem>,
 }
