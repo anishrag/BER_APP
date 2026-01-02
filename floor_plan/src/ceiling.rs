@@ -137,17 +137,19 @@ impl CeilingRegions {
             let remainder = region.polygon.difference(&polygon);
             regions_to_remove.push(idx);
 
+            let mut id = region.base.id;
             // remainder
             for poly in remainder.polygons {
                 new_regions.push(CeilingRegion {
                     polygon: poly,
                     construction_type: region.construction_type,
                     base: RegionBase {
-                        id: Uuid::new_v4(),
+                        id,
                         construction_makeup: region.base.construction_makeup.clone(),
                         construction_phase: region.base.construction_phase.clone(),
                     },
                 });
+                id = Uuid::new_v4();
             }
 
             // intersection

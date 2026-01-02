@@ -3,6 +3,7 @@ use geo::bool_ops::BooleanOps;
 use geo::{Intersects, LineString, MultiPolygon, Polygon};
 use nalgebra::Point2;
 use std::collections::HashMap;
+use uuid::Uuid;
 
 use datatypes::ber::common::ConstructionPhase;
 use datatypes::ber::structural::{ConstructionMakeup, FloorConstructionType, PlanarElement};
@@ -49,7 +50,7 @@ impl FloorRegions {
                 height: 0.0f64,
                 construction_type: construction_type.unwrap_or(FloorConstructionType::SolidFloor),
                 base: RegionBase {
-                    id: uuid::Uuid::new_v4(),
+                    id: Uuid::new_v4(),
                     construction_makeup: construction_makeup.unwrap_or_default(),
                     construction_phase: construction_phase.unwrap_or(ConstructionPhase::Original),
                 },
@@ -74,17 +75,19 @@ impl FloorRegions {
             regions_to_remove.push(idx);
 
             // remainder
+            let mut id = region.base.id;
             for poly in remainder.0 {
                 new_regions.push(FloorRegion {
                     polygon: poly,
                     height: region.height,
                     construction_type: region.construction_type,
                     base: RegionBase {
-                        id: region.base.id,
+                        id,
                         construction_makeup: region.base.construction_makeup.clone(),
                         construction_phase: region.base.construction_phase.clone(),
                     },
                 });
+                id = Uuid::new_v4(); // ensure new ID for subsequent remainders
             }
 
             // intersection
@@ -683,7 +686,7 @@ mod tests {
             height: 3.0,
             construction_type: FloorConstructionType::SolidFloor,
             base: RegionBase {
-                id: uuid::Uuid::new_v4(),
+                id: Uuid::new_v4(),
                 construction_makeup: ConstructionMakeup::default(),
                 construction_phase: ConstructionPhase::Original,
             },
