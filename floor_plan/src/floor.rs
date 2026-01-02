@@ -1,6 +1,7 @@
 // standard includes
 use geo::bool_ops::BooleanOps;
 use geo::{Intersects, LineString, MultiPolygon, Polygon};
+use itertools::izip;
 use nalgebra::Point2;
 use std::collections::HashMap;
 use uuid::Uuid;
@@ -9,7 +10,7 @@ use datatypes::ber::common::ConstructionPhase;
 use datatypes::ber::structural::{ConstructionMakeup, FloorConstructionType, PlanarElement};
 
 // local includes
-use super::types::{Polygon3DMultiZ, RegionBase};
+use super::types::{Polygon3D, Polygon3DMultiZ, RegionBase};
 
 /// A planar region of the floor
 #[derive(Clone, Debug)]
@@ -20,7 +21,7 @@ pub struct FloorRegion {
     pub base: RegionBase,
 }
 /// A planar region of the floor
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub struct FloorRegions {
     pub regions: Vec<FloorRegion>, // height per vertex
 }
@@ -30,6 +31,14 @@ struct DirectedEdge {
     from: Point2<f64>,
     to: Point2<f64>,
     height: f64,
+}
+#[derive(Debug)]
+pub enum MergeWarning {
+    InvalidIds(Vec<Uuid>),
+    MultipleResultingRegions {
+        source_ids: Vec<Uuid>,
+        resulting_regions: usize,
+    },
 }
 
 impl FloorRegions {
@@ -58,6 +67,104 @@ impl FloorRegions {
         }
     }
 
+    pub fn from_polygon_3ds(
+        polygon_3ds: Vec<&Polygon3D>,
+        construction_type: Vec<Option<FloorConstructionType>>,
+        construction_makeup: Vec<Option<ConstructionMakeup>>,
+        construction_phase: Vec<Option<ConstructionPhase>>,
+    ) -> Self {
+        let mut regions: Vec<FloorRegion> = Vec::new();
+
+        for (polygon, c_type, c_makeup, c_phase) in izip!(
+            &polygon_3ds,
+            &construction_type,
+            &construction_makeup,
+            &construction_phase
+        ) {
+            let (polygon2d, heights) = polygon.to_2d_polygon_and_heights();
+            //assert all heights same
+            assert!(
+                heights.iter().all(|&h| approx_eq(h, heights[0])),
+                "All heights in Polygon3D must be the same to convert to FloorRegion"
+            );
+            let height = heights[0];
+
+            regions.push(FloorRegion {
+                polygon: polygon2d,
+                height,
+                construction_type: c_type.unwrap_or(FloorConstructionType::SolidFloor),
+                base: RegionBase {
+                    id: Uuid::new_v4(),
+                    construction_makeup: c_makeup.clone().unwrap_or_default(),
+                    construction_phase: c_phase.clone().unwrap_or(ConstructionPhase::Original),
+                },
+            });
+        }
+        FloorRegions { regions }
+    }
+
+    pub fn merge_regions(&self, ids: &[Uuid]) -> (Vec<FloorRegion>, Vec<MergeWarning>) {
+        let mut warnings = Vec::new();
+        let mut selected: Vec<&FloorRegion> = self
+            .regions
+            .iter()
+            .filter(|r| ids.contains(&r.base.id))
+            .collect();
+
+        // warn for invalid IDs
+        let invalid_ids: Vec<Uuid> = ids
+            .iter()
+            .filter(|id| !self.regions.iter().any(|r| &r.base.id == *id))
+            .copied()
+            .collect();
+        if !invalid_ids.is_empty() {
+            warnings.push(MergeWarning::InvalidIds(invalid_ids));
+        }
+
+        let mut merged = Vec::new();
+
+        while let Some(region) = selected.pop() {
+            let mut group = vec![region.clone()];
+
+            selected.retain(|other| {
+                if other.height == region.height
+                    && other.construction_type == region.construction_type
+                    && other.base.construction_makeup == region.base.construction_makeup
+                    && other.base.construction_phase == region.base.construction_phase
+                {
+                    group.push((*other).clone());
+                    false
+                } else {
+                    true
+                }
+            });
+
+            let merged_multi: MultiPolygon<f64> = group
+                .iter()
+                .map(|r| r.polygon.clone())
+                .fold(MultiPolygon::new(vec![]), |acc, poly| acc.union(&poly));
+
+            let source_ids: Vec<Uuid> = group.iter().map(|r| r.base.id).collect();
+
+            for poly in merged_multi.0.clone() {
+                merged.push(FloorRegion {
+                    polygon: poly,
+                    height: region.height,
+                    construction_type: region.construction_type,
+                    base: region.base.clone(),
+                });
+            }
+
+            if merged_multi.0.len() > 1 {
+                warnings.push(MergeWarning::MultipleResultingRegions {
+                    source_ids,
+                    resulting_regions: merged_multi.0.len(),
+                });
+            }
+        }
+
+        (merged, warnings)
+    }
     fn modify_polygon<F>(&mut self, polygon: Polygon<f64>, mut modify: F)
     where
         F: FnMut(&mut FloorRegion),
@@ -403,6 +510,27 @@ impl From<Vec<PlanarElement>> for FloorRegions {
             })
             .collect();
         FloorRegions { regions }
+    }
+}
+
+impl Into<Vec<PlanarElement>> for FloorRegions {
+    fn into(self) -> Vec<PlanarElement> {
+        self.regions
+            .into_iter()
+            .map(|region| {
+                let vertices: Vec<nalgebra::Point3<f64>> = region
+                    .polygon
+                    .exterior()
+                    .points()
+                    .map(|p| nalgebra::Point3::new(p.x(), p.y(), region.height))
+                    .collect();
+                PlanarElement::new_floor(
+                    vertices,
+                    region.base.construction_phase.clone(),
+                    region.base.construction_makeup.clone(),
+                )
+            })
+            .collect()
     }
 }
 

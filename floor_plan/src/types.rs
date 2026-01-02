@@ -66,6 +66,19 @@ impl Polygon3D {
         Polygon::new(LineString::from(coords_2d), vec![])
     }
 
+    pub fn to_2d_polygon_and_heights(&self) -> (Polygon<f64>, Vec<f64>) {
+        let mut heights = Vec::with_capacity(self.exterior.len());
+        let coords_2d: Vec<Coord<f64>> = self
+            .exterior
+            .iter()
+            .map(|v| {
+                heights.push(v.z);
+                Coord { x: v.x, y: v.y }
+            })
+            .collect();
+        (Polygon::new(LineString::from(coords_2d), vec![]), heights)
+    }
+
     /// Lifts a 2D MultiPolygon back to 3D by interpolating Z coordinates.
     fn lift_multipolygon_to_3d(&self, multi_2d: &MultiPolygon<f64>) -> MultiPolygon3D {
         let polygons_3d: Vec<Polygon3D> = multi_2d
