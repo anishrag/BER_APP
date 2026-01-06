@@ -377,7 +377,7 @@ pub enum VertexInsertionError {
 }
 
 #[derive(Debug)]
-struct CeilingMesh {
+pub struct CeilingMesh {
     pub triangles: Vec<CeilingTriangle>,
     pub construction_phase: ConstructionPhase,
 }
@@ -672,10 +672,10 @@ impl CeilingMesh {
     }
 }
 
-impl TryFrom<CeilingRegion> for CeilingMesh {
+impl TryFrom<&CeilingRegion> for CeilingMesh {
     type Error = earcutr::Error; // or the actual error type from earcutr
 
-    fn try_from(ceiling_region: CeilingRegion) -> Result<Self, Self::Error> {
+    fn try_from(ceiling_region: &CeilingRegion) -> Result<Self, Self::Error> {
         let vertices_3d = &ceiling_region.polygon.exterior;
 
         if vertices_3d.len() < 3 {
@@ -708,11 +708,51 @@ impl TryFrom<CeilingRegion> for CeilingMesh {
 
         Ok(CeilingMesh {
             triangles,
-            construction_phase: ceiling_region.base.construction_phase,
+            construction_phase: ceiling_region.base.construction_phase.clone(),
         })
     }
 }
 
+impl TryFrom<CeilingRegion> for CeilingMesh {
+    type Error = earcutr::Error; // or the actual error type from earcutr
+
+    fn try_from(ceiling_region: CeilingRegion) -> Result<Self, Self::Error> {
+        let vertices_3d = ceiling_region.polygon.exterior;
+
+        if vertices_3d.len() < 3 {
+            return Err(earcutr::Error::Unknown);
+        }
+
+        // Flatten into 2D
+        let mut coords_2d = Vec::with_capacity(vertices_3d.len() * 2);
+        for v in &vertices_3d {
+            coords_2d.push(v.x);
+            coords_2d.push(v.y);
+        }
+
+        let holes: Vec<usize> = Vec::new();
+
+        // Triangulate — propagate error with ?
+        let indices = earcut(&coords_2d, &holes, 2)?;
+
+        let mut triangles = Vec::with_capacity(indices.len() / 3);
+        for chunk in indices.chunks_exact(3) {
+            let a = vertices_3d[chunk[0]];
+            let b = vertices_3d[chunk[1]];
+            let c = vertices_3d[chunk[2]];
+
+            triangles.push(CeilingTriangle {
+                vertices: [a, b, c],
+                plane: Plane::from_triangle(&[a, b, c]),
+            });
+        }
+
+        Ok(CeilingMesh {
+            triangles,
+            construction_phase: ceiling_region.base.construction_phase.clone(),
+        })
+    }
+}
 impl Plane {
     fn new(normal: Vector3<f64>, d: f64) -> Self {
         let norm = normal.norm();
