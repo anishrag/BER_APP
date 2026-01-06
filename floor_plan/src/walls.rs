@@ -1,6 +1,6 @@
 // standard includes
 use geo::{LineString, Polygon};
-use nalgebra::{Point2, Point3};
+use nalgebra::{Point2, Point3, Vector2, Vector3};
 use std::collections::HashMap;
 use uuid::Uuid;
 
@@ -12,7 +12,7 @@ use datatypes::ber::structural::{
 // local includes
 use super::ceiling::CeilingRegions;
 use super::floor::FloorRegions;
-use super::types::{approx_equal_xy, Polygon3D, Polygon3DMultiZ, RegionBase};
+use super::types::{approx_equal_xy, Polygon3D, Polygon3DMultiZ, RegionBase, SplitLine3D};
 
 const EPSILON: f64 = 1e-9;
 
@@ -23,6 +23,65 @@ pub struct WallRegion {
     pub polygon: Polygon3D, // 3D polygon (vertical plane, typically 4 vertices)
     pub construction_type: WallConstructionType,
     pub exposure: WallExposure,
+}
+
+impl WallRegion {
+    /// Get the length of the wall region (projected to XY plane)
+    pub fn get_leftmost_floor_vertex(&self) -> Point3<f64> {
+        self.polygon.exterior[0]
+    }
+
+    fn wall_horizontal_dir(&self) -> Vector3<f64> {
+        let p0 = self.polygon.exterior[0];
+        let p1 = self.polygon.exterior[1];
+        Vector3::new(p1.x - p0.x, p1.y - p0.y, 0.0)
+    }
+
+    fn wall_plane_normal(&self) -> Vector3<f64> {
+        let p0 = self.polygon.exterior[0];
+        let p1 = self.polygon.exterior[1];
+        let p2 = self.polygon.exterior[2];
+        let u = Vector3::new(p1.x - p0.x, p1.y - p0.y, p1.z - p0.z);
+        let v = Vector3::new(p2.x - p0.x, p2.y - p0.y, p2.z - p0.z);
+        u.cross(&v).normalize()
+    }
+
+    pub fn get_dividing_line_equation(
+        &self,
+        split_along_xy: f64,
+        split_along_z: f64,
+    ) -> SplitLine3D {
+        let origin = self.get_leftmost_floor_vertex();
+
+        let u = self.wall_horizontal_dir().normalize(); // in XY
+        let v = Vector3::new(0.0, 0.0, 1.0);
+
+        // 2D normal in wall coordinates
+        let mut n2 = Vector2::new(0.0, 0.0);
+
+        if split_along_xy != 0.0 {
+            n2.x = 1.0 / split_along_xy;
+        }
+        if split_along_z != 0.0 {
+            n2.y = 1.0 / split_along_z;
+        }
+
+        // Convert to 3D normal
+        let normal = (u * n2.x + v * n2.y).normalize();
+
+        // Find a point on the line
+        // u/s_xy + v/s_z = 1
+        let point = origin + u * split_along_xy.max(0.0) + v * split_along_z.max(0.0);
+
+        // Line direction is perpendicular to normal *in wall plane*
+        let direction = normal.cross(&self.wall_plane_normal()).normalize();
+
+        SplitLine3D {
+            point,
+            direction,
+            normal,
+        }
+    }
 }
 
 /// Collection of wall regions
@@ -42,6 +101,48 @@ impl WallRegions {
     pub fn new() -> Self {
         Self {
             regions: Vec::new(),
+        }
+    }
+
+    pub fn get_wall_region_by_id_mut(&mut self, id: &Uuid) -> Option<&mut WallRegion> {
+        self.regions.iter_mut().find(|region| &region.base.id == id)
+    }
+
+    pub fn split_wall_region<F>(
+        &mut self,
+        wall_id: Uuid,
+        split_along_xy: f64,
+        split_along_z: f64,
+        mut update_new_region: F,
+    ) where
+        F: FnMut(&mut WallRegion),
+    {
+        let Some(wall_region) = self.get_wall_region_by_id_mut(&wall_id) else {
+            println!("Wall with id {:?} not found.", wall_id);
+            return;
+        };
+
+        let split_line = wall_region.get_dividing_line_equation(split_along_xy, split_along_z);
+        let split_polygons = wall_region.polygon.split_by_line(&split_line);
+
+        if split_polygons.is_empty() {
+            println!("Split resulted in no polygons for wall {:?}", wall_id);
+            return;
+        }
+
+        // First polygon stays on the original region
+        wall_region.polygon = split_polygons[0].clone();
+
+        let wall_region_clone = wall_region.clone();
+
+        for split_polygon in split_polygons.iter().skip(1) {
+            let mut new_wall_region = wall_region_clone.clone();
+            new_wall_region.base.id = Uuid::new_v4();
+            new_wall_region.polygon = split_polygon.clone();
+
+            update_new_region(&mut new_wall_region);
+
+            self.regions.push(new_wall_region);
         }
     }
 
