@@ -1,4 +1,5 @@
 // standard includes
+use geo::algorithm::Contains;
 use geo::bool_ops::BooleanOps;
 use geo::{Intersects, LineString, MultiPolygon, Polygon};
 use itertools::izip;
@@ -103,6 +104,38 @@ impl FloorRegions {
         FloorRegions { regions }
     }
 
+    pub fn from_polygons(
+        polygons: Vec<&Polygon<f64>>,
+        heights: Vec<f64>,
+        construction_type: Vec<Option<FloorConstructionType>>,
+        construction_makeup: Vec<Option<ConstructionMakeup>>,
+        construction_phase: Vec<Option<ConstructionPhase>>,
+    ) -> Self {
+        let mut regions: Vec<FloorRegion> = Vec::new();
+        for (polygon, height, c_type, c_makeup, c_phase) in izip!(
+            &polygons,
+            &heights,
+            &construction_type,
+            &construction_makeup,
+            &construction_phase
+        ) {
+            regions.push(FloorRegion {
+                polygon: (*polygon).clone(),
+                height: *height,
+                construction_type: c_type.unwrap_or(FloorConstructionType::SolidFloor),
+                base: RegionBase {
+                    id: Uuid::new_v4(),
+                    construction_makeup: c_makeup.clone().unwrap_or_default(),
+                    construction_phase: c_phase.clone().unwrap_or(ConstructionPhase::Original),
+                },
+            });
+        }
+        FloorRegions { regions }
+    }
+
+    pub fn get_floor_region_by_id(&self, id: &Uuid) -> Option<&FloorRegion> {
+        self.regions.iter().find(|r| &r.base.id == id)
+    }
     pub fn merge_regions(&self, ids: &[Uuid]) -> (Vec<FloorRegion>, Vec<MergeWarning>) {
         let mut warnings = Vec::new();
         let mut selected: Vec<&FloorRegion> = self
@@ -289,6 +322,16 @@ impl FloorRegions {
             }
         }
         result
+    }
+
+    pub fn get_floor_height_at_point(&self, point: &Point2<f64>) -> Vec<f64> {
+        let mut heights = Vec::new();
+        for region in &self.regions {
+            if region.polygon.contains(&geo::Point::new(point.x, point.y)) {
+                heights.push(region.height);
+            }
+        }
+        heights
     }
 
     pub fn get_clockwise_3d_polygon_starting_closest_to_origin(&self) -> Polygon3DMultiZ {
