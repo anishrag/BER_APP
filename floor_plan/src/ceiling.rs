@@ -121,6 +121,10 @@ impl CeilingRegions {
         }
     }
 
+    pub fn get_ceiling_region_by_id(&self, id: Uuid) -> Option<&CeilingRegion> {
+        self.regions.iter().find(|r| r.base.id == id)
+    }
+
     fn modify_polygon<F>(&mut self, polygon: Polygon<f64>, mut modify: F)
     where
         F: FnMut(&mut CeilingRegion),
