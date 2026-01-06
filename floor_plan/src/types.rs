@@ -1,6 +1,6 @@
 use geo::BooleanOps;
 use geo::{Coord, LineString, MultiPolygon, Polygon};
-use nalgebra::{Point3, Vector2};
+use nalgebra::{Point2, Point3, Vector3};
 use uuid::Uuid;
 
 use datatypes::ber::common::ConstructionPhase;
@@ -10,6 +10,12 @@ pub struct RegionBase {
     pub id: Uuid,
     pub construction_makeup: ConstructionMakeup,
     pub construction_phase: ConstructionPhase,
+}
+
+pub struct SplitLine3D {
+    pub point: Point3<f64>,      // point on line
+    pub direction: Vector3<f64>, // unit
+    pub normal: Vector3<f64>,    // points to "positive" side
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -185,6 +191,126 @@ impl Polygon3D {
 
         Ok(Self::new(points))
     }
+
+    pub fn get_normal_and_distance_to_origin(&self) -> Option<(Vector3<f64>, f64)> {
+        if self.exterior.len() < 3 {
+            return None;
+        }
+        let p0 = &self.exterior[0];
+        let p1 = &self.exterior[1];
+        let p2 = &self.exterior[2];
+        let u = Vector3::new(p1.x - p0.x, p1.y - p0.y, p1.z - p0.z);
+        let v = Vector3::new(p2.x - p0.x, p2.y - p0.y, p2.z - p0.z);
+        let normal = Vector3::new(
+            u.y * v.z - u.z * v.y,
+            u.z * v.x - u.x * v.z,
+            u.x * v.y - u.y * v.x,
+        );
+        let norm_length = (normal.x.powi(2) + normal.y.powi(2) + normal.z.powi(2)).sqrt();
+        if norm_length < 1e-10 {
+            return None;
+        }
+        let unit_normal = Vector3::new(
+            normal.x / norm_length,
+            normal.y / norm_length,
+            normal.z / norm_length,
+        );
+        let d = -(unit_normal.x * p0.x + unit_normal.y * p0.y + unit_normal.z * p0.z);
+        Some((unit_normal, d / norm_length))
+    }
+
+    pub fn split_by_line(&self, line: &SplitLine3D) -> Vec<Polygon3D> {
+        let (plane_n, _) = self.get_normal_and_distance_to_origin().unwrap();
+        let line_n = plane_n.cross(&line.direction).normalize();
+
+        let mut left = Vec::new();
+        let mut right = Vec::new();
+
+        let verts = &self.exterior;
+
+        for i in 0..verts.len() {
+            let a = verts[i];
+            let b = verts[(i + 1) % verts.len()];
+
+            let da = (a.coords - line.point.coords).dot(&line_n);
+            let db = (b.coords - line.point.coords).dot(&line_n);
+
+            if da >= 0.0 {
+                left.push(a);
+            }
+            if da <= 0.0 {
+                right.push(a);
+            }
+
+            // Edge crosses the line → add intersection
+            if da * db < 0.0 {
+                let t = da / (da - db);
+                let p = a + t * (b - a);
+                left.push(p);
+                right.push(p);
+            }
+        }
+
+        vec![Polygon3D::new(left), Polygon3D::new(right)]
+    }
+}
+
+impl Polygon3D {
+    /// Returns true if the (x, y) point lies inside the polygon exterior.
+    /// Points on edges are considered inside.
+    pub fn contains_point(&self, x: f64, y: f64) -> bool {
+        let n = self.exterior.len();
+        if n < 3 {
+            return false;
+        }
+
+        let mut inside = false;
+
+        for i in 0..n {
+            let a = &self.exterior[i];
+            let b = &self.exterior[(i + 1) % n];
+
+            // Check if point is exactly on the edge
+            if Self::point_on_segment_2d(x, y, a, b) {
+                return true;
+            }
+
+            // Ray casting: does the horizontal ray cross this edge?
+            let intersects =
+                ((a.y > y) != (b.y > y)) && (x < (b.x - a.x) * (y - a.y) / (b.y - a.y) + a.x);
+
+            if intersects {
+                inside = !inside;
+            }
+        }
+
+        inside
+    }
+
+    /// Checks whether point (x, y) lies on the segment AB (2D only)
+    fn point_on_segment_2d(x: f64, y: f64, a: &Point3<f64>, b: &Point3<f64>) -> bool {
+        const EPS: f64 = 1e-10;
+
+        // Cross product must be ~0 for collinearity
+        let cross = (x - a.x) * (b.y - a.y) - (y - a.y) * (b.x - a.x);
+        if cross.abs() > EPS {
+            return false;
+        }
+
+        // Dot product must be within segment bounds
+        let dot = (x - a.x) * (x - b.x) + (y - a.y) * (y - b.y);
+        dot <= EPS
+    }
+}
+impl Into<Polygon<f64>> for Polygon3D {
+    fn into(self) -> Polygon<f64> {
+        let coords_2d: Vec<Coord<f64>> = self
+            .exterior
+            .iter()
+            .map(|v| Coord { x: v.x, y: v.y })
+            .collect();
+        Polygon::new(LineString::from(coords_2d), vec![])
+    }
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -280,6 +406,15 @@ impl From<Polygon3D> for Polygon3DMultiZ {
     }
 }
 
+impl Into<Vec<Point2<f64>>> for Polygon3DMultiZ {
+    fn into(self) -> Vec<Point2<f64>> {
+        self.exterior
+            .iter()
+            .map(|(x, y, _)| Point2::new(*x, *y))
+            .collect()
+    }
+}
+
 /// Type of boolean operation to perform
 enum OpType {
     Intersection,
@@ -290,6 +425,15 @@ enum OpType {
 #[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
 pub struct MultiPolygon3D {
     pub polygons: Vec<Polygon3D>,
+}
+
+impl IntoIterator for MultiPolygon3D {
+    type Item = Polygon3D;
+    type IntoIter = std::vec::IntoIter<Polygon3D>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        self.polygons.into_iter()
+    }
 }
 
 impl From<Polygon3D> for MultiPolygon3D {
