@@ -276,6 +276,7 @@ pub struct Room {
 pub struct Storey {
     pub id: Uuid,
     pub name: String, // e.g., "Ground Floor", "First Floor"
+    pub storey_number: i32,
     pub floors: Vec<PlanarElement>,
     pub walls: Vec<PlanarElement>,
     pub roofs: Vec<PlanarElement>,

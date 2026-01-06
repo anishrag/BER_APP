@@ -230,6 +230,7 @@ fn create_full_ber(id: Uuid) -> Ber {
     ber.storeys = vec![
         Storey {
             id: Uuid::new_v4(),
+            storey_number: 0,
             name: "Ground Floor".to_string(),
             floors: vec![PlanarElement::new_floor(
                 vec![
@@ -249,6 +250,7 @@ fn create_full_ber(id: Uuid) -> Ber {
         },
         Storey {
             id: Uuid::new_v4(),
+            storey_number: 1,
             name: "First Floor".to_string(),
             floors: vec![],
             walls: vec![],
