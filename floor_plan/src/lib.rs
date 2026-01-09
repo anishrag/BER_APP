@@ -320,6 +320,27 @@ impl FloorPlan {
     // --- Wall modification methods ---
     // ----------------------------------------------------------------------------------------------
     //
+    pub fn create_walls_betweeen_floor_edges(&mut self) {
+        self.walls
+            .add_from_floor_discontinuities(&self.floors, None, None, None);
+    }
+
+    pub fn create_walls_between_ceiling_edges(&mut self) {
+        self.walls
+            .add_from_ceiling_discontinuities(&self.ceilings, None, None, None);
+    }
+
+    pub fn create_exterior_walls(&mut self) {
+        self.walls.add_from_exterior_perimeter(
+            &self.floors,
+            &self.ceilings,
+            None,
+            None,
+            None,
+            None,
+        );
+    }
+
     pub fn change_wall_construction_makeup_split(
         &mut self,
         wall_id: Uuid,

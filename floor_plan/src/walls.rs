@@ -177,14 +177,13 @@ impl WallRegions {
     }
 
     /// Generate walls from floor region discontinuities (internal walls where floor height changes)
-    pub fn from_floor_discontinuities(
+    pub fn add_from_floor_discontinuities(
+        &mut self,
         floor_regions: &FloorRegions,
         default_construction_type: Option<WallConstructionType>,
         default_construction_makeup: Option<ConstructionMakeup>,
         default_exposure: Option<WallExposure>,
-    ) -> Self {
-        let mut regions = Vec::new();
-
+    ) {
         // Find all edges between different floor regions
         for i in 0..floor_regions.regions.len() {
             for j in (i + 1)..floor_regions.regions.len() {
@@ -220,7 +219,7 @@ impl WallRegions {
                         _ => ConstructionPhase::Original,
                     };
 
-                    regions.push(WallRegion {
+                    self.regions.push(WallRegion {
                         polygon: Polygon3D::new(vertices),
                         construction_type: default_construction_type
                             .unwrap_or(WallConstructionType::Uninitialised),
@@ -236,19 +235,16 @@ impl WallRegions {
                 }
             }
         }
-
-        Self { regions }
     }
 
     /// Generate walls from ceiling region discontinuities (internal walls where ceiling height jumps)
-    pub fn from_ceiling_discontinuities(
+    pub fn add_from_ceiling_discontinuities(
+        &mut self,
         ceiling_regions: &CeilingRegions,
         default_construction_type: Option<WallConstructionType>,
         default_construction_makeup: Option<ConstructionMakeup>,
         default_exposure: Option<WallExposure>,
-    ) -> Self {
-        let mut regions = Vec::new();
-
+    ) {
         // Find all edges between different ceiling regions
         for i in 0..ceiling_regions.regions.len() {
             for j in (i + 1)..ceiling_regions.regions.len() {
@@ -279,7 +275,7 @@ impl WallRegions {
                         _ => ConstructionPhase::Original,
                     };
 
-                    regions.push(WallRegion {
+                    self.regions.push(WallRegion {
                         polygon: Polygon3D::new(vertices),
                         construction_type: default_construction_type
                             .unwrap_or(WallConstructionType::Uninitialised),
@@ -295,8 +291,6 @@ impl WallRegions {
                 }
             }
         }
-
-        Self { regions }
     }
 
     fn check_floor_ceiling_aligned(
@@ -406,16 +400,15 @@ impl WallRegions {
         Some(merged)
     }
     /// Generate exterior walls from floor and ceiling perimeters
-    pub fn from_exterior_perimeter(
+    pub fn add_from_exterior_perimeter(
+        &mut self,
         floor_regions: &FloorRegions,
         ceiling_regions: &CeilingRegions,
         default_construction_type: Option<WallConstructionType>,
         default_construction_makeup: Option<ConstructionMakeup>,
         default_construction_phase: Option<ConstructionPhase>,
         default_exposure: Option<WallExposure>,
-    ) -> Self {
-        let mut regions = Vec::new();
-
+    ) {
         let floor_boundary = floor_regions.get_clockwise_3d_polygon_starting_closest_to_origin();
         let ceiling_boundary =
             ceiling_regions.get_clockwise_3d_polygon_starting_closest_to_origin();
@@ -452,7 +445,7 @@ impl WallRegions {
                                 )
                                 .unwrap_or(ConstructionPhase::Original)
                             });
-                        regions.push(WallRegion {
+                        self.regions.push(WallRegion {
                             polygon: Polygon3D::new(vertices),
                             construction_type: default_construction_type
                                 .unwrap_or(WallConstructionType::Uninitialised),
@@ -468,8 +461,6 @@ impl WallRegions {
                     }
                 }
             });
-
-        Self { regions }
     }
 
     /// Merge this WallRegions with another
