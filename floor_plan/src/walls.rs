@@ -12,7 +12,10 @@ use datatypes::ber::structural::{
 // local includes
 use super::ceiling::CeilingRegions;
 use super::floor::FloorRegions;
-use super::types::{approx_equal_xy, Polygon3D, Polygon3DMultiZ, RegionBase, SplitLine3D};
+use super::types::{
+    approx_equal_xy, HasBaseRegion, MergeableRegion, Polygon3D, Polygon3DMultiZ, RegionBase,
+    SplitLine3D,
+};
 
 const EPSILON: f64 = 1e-9;
 
@@ -80,6 +83,33 @@ impl WallRegion {
             point,
             direction,
             normal,
+        }
+    }
+}
+impl MergeableRegion for WallRegion {
+    type Geometry = Polygon3D; // or Vec<Vertex> if you use vertex list
+
+    fn id(&self) -> Uuid {
+        self.base.id
+    }
+
+    fn geometry(&self) -> &Self::Geometry {
+        &self.polygon
+    }
+
+    fn is_merge_compatible(&self, other: &Self) -> bool {
+        self.construction_type == other.construction_type
+            && self.base.construction_makeup == other.base.construction_makeup
+            && self.base.construction_phase == other.base.construction_phase
+            && self.exposure == other.exposure
+    }
+
+    fn with_geometry(&self, geometry: Self::Geometry) -> Self {
+        WallRegion {
+            polygon: geometry,
+            construction_type: self.construction_type,
+            base: self.base.clone(),
+            exposure: self.exposure,
         }
     }
 }
@@ -759,6 +789,12 @@ fn wall_intersects_polygon_2d(wall: &Polygon3D, polygon_2d: &Polygon<f64>) -> bo
         }
     }
     false
+}
+
+impl HasBaseRegion for WallRegion {
+    fn base_mut(&mut self) -> &mut RegionBase {
+        &mut self.base
+    }
 }
 
 #[cfg(test)]

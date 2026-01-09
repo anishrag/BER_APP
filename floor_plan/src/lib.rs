@@ -12,9 +12,12 @@ use datatypes::ber::diffable::AddRemoveTrait;
 use datatypes::ber::structural::{
     CeilingConstructionType, ConstructionMakeup, FloorConstructionType, Storey,
 };
-use floor::FloorRegions;
-use types::{MultiPolygon3D, Polygon3D};
-use walls::WallRegions;
+use floor::{FloorRegion, FloorRegions};
+use types::{
+    MergeWarning, MergeableGeometry, MergeableRegion, MultiPolygon3D, Polygon3D, RegionContainer,
+    RegionType,
+};
+use walls::{WallRegion, WallRegions};
 
 pub use datatypes::ber::common::ConstructionPhase;
 
@@ -360,8 +363,136 @@ impl FloorPlan {
     // --- General modification methods ---
     // ----------------------------------------------------------------------------------------------
 
-    pub fn combine_polygons(&mut self, polygon_ids: Vec<Uuid>) {
-        self.floors.merge_regions(&polygon_ids);
+    pub fn combine_regions(
+        &mut self,
+        region_ids: &mut Vec<Uuid>,
+        region_type: RegionType,
+    ) -> Vec<MergeWarning> {
+        match region_type {
+            RegionType::Floor => self.combine_regions_generic::<FloorRegion>(region_ids),
+            RegionType::Wall => self.combine_regions_generic::<WallRegion>(region_ids),
+            RegionType::Ceiling => self.combine_regions_generic::<CeilingRegion>(region_ids),
+        }
+    }
+
+    fn combine_regions_generic<T>(&mut self, region_ids: &mut Vec<Uuid>) -> (Vec<MergeWarning>)
+    where
+        T: MergeableRegion,
+        FloorPlan: RegionContainer<T>,
+    {
+        let mut warnings = Vec::new();
+        // Select only the regions we want to merge
+        let regions = self.regions();
+        let mut selected: Vec<&T> = regions
+            .iter()
+            .filter(|r: &&T| region_ids.contains(&r.id()))
+            .collect();
+
+        // Warn for invalid IDs
+        let invalid_ids: Vec<Uuid> = region_ids
+            .iter()
+            .filter(|id| !regions.iter().any(|r| &r.id() == *id))
+            .copied()
+            .collect();
+
+        if !invalid_ids.is_empty() {
+            warnings.push(MergeWarning::InvalidIds(invalid_ids));
+        }
+
+        // Process each selected region
+        while let Some(region) = selected.pop() {
+            let mut group = vec![region.clone()];
+
+            // Find all merge-compatible regions
+            selected.retain(|other| {
+                if region.is_merge_compatible(other) {
+                    group.push((*other).clone());
+                    false
+                } else {
+                    true
+                }
+            });
+
+            // --- Iterative / convergence merge ---
+            // Start with all polygons in the group as separate geometries
+            let mut geometries: Vec<T::Geometry> =
+                group.iter().map(|r| r.geometry().clone()).collect();
+
+            let mut changed = true;
+            while changed {
+                changed = false;
+                let mut new_geometries = Vec::new();
+                let mut skip = vec![false; geometries.len()];
+
+                for i in 0..geometries.len() {
+                    if skip[i] {
+                        continue;
+                    }
+                    let mut merged_geom = geometries[i].clone();
+                    for j in (i + 1)..geometries.len() {
+                        if skip[j] {
+                            continue;
+                        }
+                        // Attempt merge
+                        let union_result = merged_geom.merge(&geometries[j]);
+                        if union_result.len() == 1 {
+                            // Successfully merged
+                            merged_geom = union_result.into_iter().next().unwrap();
+                            skip[j] = true;
+                            changed = true;
+                        }
+                    }
+                    new_geometries.push(merged_geom);
+                }
+                geometries = new_geometries;
+            }
+            // --- end convergence merge ---
+
+            let source_ids: Vec<Uuid> = group.iter().map(|r| r.id()).collect();
+
+            // Build new merged regions
+            for geom in geometries.iter().cloned() {
+                region.with_geometry(geom);
+                region_ids.retain(|id| id != &region.id());
+            }
+
+            if geometries.len() > 1 {
+                warnings.push(MergeWarning::MultipleResultingRegions {
+                    source_ids,
+                    resulting_regions: geometries.len(),
+                });
+            }
+        }
+
+        warnings
+    }
+}
+
+impl RegionContainer<FloorRegion> for FloorPlan {
+    fn regions(&self) -> &Vec<FloorRegion> {
+        &self.floors.regions
+    }
+
+    fn regions_mut(&mut self) -> &mut Vec<FloorRegion> {
+        &mut self.floors.regions
+    }
+}
+impl RegionContainer<CeilingRegion> for FloorPlan {
+    fn regions(&self) -> &Vec<CeilingRegion> {
+        &self.ceilings.regions
+    }
+
+    fn regions_mut(&mut self) -> &mut Vec<CeilingRegion> {
+        &mut self.ceilings.regions
+    }
+}
+impl RegionContainer<WallRegion> for FloorPlan {
+    fn regions(&self) -> &Vec<WallRegion> {
+        &self.walls.regions
+    }
+
+    fn regions_mut(&mut self) -> &mut Vec<WallRegion> {
+        &mut self.walls.regions
     }
 }
 

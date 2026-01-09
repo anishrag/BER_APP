@@ -11,7 +11,9 @@ use datatypes::ber::common::ConstructionPhase;
 use datatypes::ber::structural::{ConstructionMakeup, FloorConstructionType, PlanarElement};
 
 // local includes
-use super::types::{Polygon3D, Polygon3DMultiZ, RegionBase};
+use super::types::{
+    CloneWithNewId, HasBaseRegion, MergeableRegion, Polygon3D, Polygon3DMultiZ, RegionBase,
+};
 
 /// A planar region of the floor
 #[derive(Clone, Debug)]
@@ -574,6 +576,37 @@ impl Into<Vec<PlanarElement>> for FloorRegions {
                 )
             })
             .collect()
+    }
+}
+
+impl MergeableRegion for FloorRegion {
+    type Geometry = geo::Polygon<f64>; // or Vec<Vertex> if you use vertex list
+
+    fn id(&self) -> Uuid {
+        self.base.id
+    }
+
+    fn geometry(&self) -> &Self::Geometry {
+        &self.polygon
+    }
+
+    fn is_merge_compatible(&self, other: &Self) -> bool {
+        self.height == other.height
+            && self.construction_type == other.construction_type
+            && self.base.construction_makeup == other.base.construction_makeup
+            && self.base.construction_phase == other.base.construction_phase
+    }
+
+    fn with_geometry(&self, geometry: Self::Geometry) -> Self {
+        let mut new_region = self.clone_with_new_id();
+        new_region.polygon = geometry;
+        new_region
+    }
+}
+
+impl HasBaseRegion for FloorRegion {
+    fn base_mut(&mut self) -> &mut RegionBase {
+        &mut self.base
     }
 }
 

@@ -5,6 +5,9 @@ use uuid::Uuid;
 
 use datatypes::ber::common::ConstructionPhase;
 use datatypes::ber::structural::ConstructionMakeup;
+
+const EPSILON: f64 = 1e-9;
+
 #[derive(Clone, Debug)]
 pub struct RegionBase {
     pub id: Uuid,
@@ -519,4 +522,97 @@ impl Point3Ext for Point3<f64> {
     fn eq_xy(&self, other: &Self, eps: f64) -> bool {
         (self.x - other.x).abs() < eps && (self.y - other.y).abs() < eps
     }
+}
+
+pub trait MergeableGeometry: Clone {
+    /// Merge two geometries into zero or more geometries
+    fn merge(&self, other: &Self) -> Vec<Self>;
+    fn same_orientation(&self, other: &Self) -> bool;
+}
+
+impl MergeableGeometry for geo::Polygon<f64> {
+    fn merge(&self, other: &Self) -> Vec<Self> {
+        let multi = self.union(other);
+        multi.0
+    }
+    fn same_orientation(&self, other: &Self) -> bool {
+        true
+    }
+}
+
+impl MergeableGeometry for Polygon3D {
+    fn merge(&self, other: &Self) -> Vec<Self> {
+        let poly1_2d: Polygon<f64> = self.clone().into();
+        let poly2_2d: Polygon<f64> = other.clone().into();
+        let union_2d = poly1_2d.union(&poly2_2d);
+        // Lift back to 3D
+        let mut result_3d = Vec::new();
+        for poly_2d in union_2d.0 {
+            let lifted = self.lift_polygon_to_3d(&poly_2d);
+            result_3d.push(lifted);
+        }
+        result_3d
+    }
+    fn same_orientation(&self, other: &Self) -> bool {
+        let Some((n1, _)) = self.get_normal_and_distance_to_origin() else {
+            return false;
+        };
+        let Some((n2, _)) = other.get_normal_and_distance_to_origin() else {
+            return false;
+        };
+
+        n1.dot(&n2) - 1.0 < EPSILON
+    }
+}
+
+pub trait MergeableRegion: Clone {
+    type Geometry: MergeableGeometry;
+
+    fn id(&self) -> Uuid;
+    fn geometry(&self) -> &Self::Geometry;
+
+    fn is_merge_compatible(&self, other: &Self) -> bool;
+
+    /// Rebuild region from merged geometry
+    fn with_geometry(&self, geometry: Self::Geometry) -> Self;
+}
+
+pub enum MergeWarning {
+    InvalidIds(Vec<Uuid>),
+    IncompatibleRegions(Uuid, Uuid),
+    DifferentOrientations(Uuid, Uuid),
+    MultipleResultingRegions {
+        source_ids: Vec<Uuid>,    // the IDs of the regions that were merged
+        resulting_regions: usize, // how many regions came out after merging
+    },
+}
+
+pub enum RegionType {
+    Wall,
+    Floor,
+    Ceiling,
+}
+
+pub trait HasBaseRegion {
+    fn base_mut(&mut self) -> &mut RegionBase;
+}
+
+pub trait CloneWithNewId {
+    fn clone_with_new_id(&self) -> Self;
+}
+
+impl<T> CloneWithNewId for T
+where
+    T: Clone + HasBaseRegion,
+{
+    fn clone_with_new_id(&self) -> Self {
+        let mut new_region = self.clone();
+        new_region.base_mut().id = Uuid::new_v4();
+        new_region
+    }
+}
+
+pub trait RegionContainer<T> {
+    fn regions(&self) -> &Vec<T>;
+    fn regions_mut(&mut self) -> &mut Vec<T>;
 }

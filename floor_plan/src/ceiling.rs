@@ -18,7 +18,8 @@ use datatypes::ber::structural::{CeilingConstructionType, ConstructionMakeup, Pl
 // local includes
 use super::geometry::{point_in_triangle_2d, point_on_segment_2d};
 use super::types::{
-    DirectedEdge3D, Point3Ext, Polygon3D, Polygon3DConversionError, Polygon3DMultiZ, RegionBase,
+    DirectedEdge3D, HasBaseRegion, MergeableRegion, Point3Ext, Polygon3D, Polygon3DConversionError,
+    Polygon3DMultiZ, RegionBase,
 };
 
 const EPSILON: f64 = 1e-9;
@@ -94,6 +95,33 @@ pub struct CeilingRegion {
     pub polygon: Polygon3D, // 2D polygon boundary
     pub construction_type: CeilingConstructionType,
 }
+
+impl MergeableRegion for CeilingRegion {
+    type Geometry = Polygon3D; // or Vec<Vertex> if you use vertex list
+
+    fn id(&self) -> Uuid {
+        self.base.id
+    }
+
+    fn geometry(&self) -> &Self::Geometry {
+        &self.polygon
+    }
+
+    fn is_merge_compatible(&self, other: &Self) -> bool {
+        self.construction_type == other.construction_type
+            && self.base.construction_makeup == other.base.construction_makeup
+            && self.base.construction_phase == other.base.construction_phase
+    }
+
+    fn with_geometry(&self, geometry: Self::Geometry) -> Self {
+        CeilingRegion {
+            polygon: geometry,
+            construction_type: self.construction_type,
+            base: self.base.clone(),
+        }
+    }
+}
+
 /// A planar region of the floor
 #[derive(Debug)]
 pub struct CeilingRegions {
@@ -847,6 +875,12 @@ impl Into<CeilingRegionConversion> for CeilingMesh {
             regions,
             failed_components,
         }
+    }
+}
+
+impl HasBaseRegion for CeilingRegion {
+    fn base_mut(&mut self) -> &mut RegionBase {
+        &mut self.base
     }
 }
 
