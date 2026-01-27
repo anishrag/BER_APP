@@ -305,9 +305,10 @@ impl Polygon3D {
         dot <= EPS
     }
 }
-impl Into<Polygon<f64>> for Polygon3D {
-    fn into(self) -> Polygon<f64> {
-        let coords_2d: Vec<Coord<f64>> = self
+
+impl From<Polygon3D> for Polygon<f64> {
+    fn from(polygon_3d: Polygon3D) -> Self {
+        let coords_2d: Vec<Coord<f64>> = polygon_3d
             .exterior
             .iter()
             .map(|v| Coord { x: v.x, y: v.y })
@@ -394,10 +395,6 @@ impl Polygon3DMultiZ {
     }
 }
 
-pub fn approx_equal_xy(a: (f64, f64, Vec<f64>), b: (f64, f64, Vec<f64>), eps: f64) -> bool {
-    (a.0 - b.0).abs() < eps && (a.1 - b.1).abs() < eps
-}
-
 impl From<Polygon3D> for Polygon3DMultiZ {
     fn from(polygon: Polygon3D) -> Self {
         let exterior = polygon
@@ -408,10 +405,10 @@ impl From<Polygon3D> for Polygon3DMultiZ {
         Self::new(exterior)
     }
 }
-
-impl Into<Vec<Point2<f64>>> for Polygon3DMultiZ {
-    fn into(self) -> Vec<Point2<f64>> {
-        self.exterior
+impl From<Polygon3DMultiZ> for Vec<Point2<f64>> {
+    fn from(multi_z: Polygon3DMultiZ) -> Self {
+        multi_z
+            .exterior
             .iter()
             .map(|(x, y, _)| Point2::new(*x, *y))
             .collect()
@@ -425,7 +422,6 @@ enum OpType {
 }
 
 #[derive(PartialEq, Clone, Debug)]
-#[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
 pub struct MultiPolygon3D {
     pub polygons: Vec<Polygon3D>,
 }
@@ -497,11 +493,6 @@ impl DirectedEdge3D {
     pub fn new(from: Point3<f64>, to: Point3<f64>) -> Self {
         Self { from, to }
     }
-
-    pub fn matches(&self, other: &DirectedEdge3D) -> bool {
-        (self.from == other.from && self.to == other.to)
-            || (self.from == other.to && self.to == other.from)
-    }
     /// Compare only x/y coordinates, ignoring z
     pub fn matches_xy(&self, other: &DirectedEdge3D) -> bool {
         self.from.eq_xy(&other.from, 1e-9) && self.to.eq_xy(&other.to, 1e-9)
@@ -535,7 +526,7 @@ impl MergeableGeometry for geo::Polygon<f64> {
         let multi = self.union(other);
         multi.0
     }
-    fn same_orientation(&self, other: &Self) -> bool {
+    fn same_orientation(&self, _: &Self) -> bool {
         true
     }
 }
@@ -614,5 +605,4 @@ where
 
 pub trait RegionContainer<T> {
     fn regions(&self) -> &Vec<T>;
-    fn regions_mut(&mut self) -> &mut Vec<T>;
 }

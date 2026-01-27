@@ -1,7 +1,7 @@
 // standard includes
 use geo::algorithm::Contains;
 use geo::bool_ops::BooleanOps;
-use geo::{Intersects, LineString, MultiPolygon, Polygon};
+use geo::{LineString, MultiPolygon, Polygon};
 use itertools::izip;
 use nalgebra::Point2;
 use std::collections::HashMap;
@@ -496,14 +496,6 @@ impl FloorRegions {
         Polygon3DMultiZ::new(points_with_z)
     }
 }
-/// Canonical (undirected) edge key for cancellation
-fn edge_key(a: Point2<f64>, b: Point2<f64>) -> (Point2<f64>, Point2<f64>) {
-    if a < b {
-        (a, b)
-    } else {
-        (b, a)
-    }
-}
 
 fn approx_eq(a: f64, b: f64) -> bool {
     (a - b).abs() < 1e-6
@@ -558,9 +550,10 @@ impl From<Vec<PlanarElement>> for FloorRegions {
     }
 }
 
-impl Into<Vec<PlanarElement>> for FloorRegions {
-    fn into(self) -> Vec<PlanarElement> {
-        self.regions
+impl From<FloorRegions> for Vec<PlanarElement> {
+    fn from(floor_regions: FloorRegions) -> Self {
+        floor_regions
+            .regions
             .into_iter()
             .map(|region| {
                 let vertices: Vec<nalgebra::Point3<f64>> = region
@@ -860,7 +853,7 @@ mod tests {
         ];
 
         // Region 2: right square at height 3.0
-        let vertices2 = vec![
+        let vertices2 = [
             Point2::new(2.0, 0.0),
             Point2::new(4.0, 0.0),
             Point2::new(4.0, 2.0),

@@ -1,5 +1,4 @@
 use serde::{Deserialize, Serialize};
-use uuid::Uuid;
 
 // ------------------- SECTION 5: Lighting -------------------
 

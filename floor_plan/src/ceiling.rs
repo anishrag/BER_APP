@@ -7,7 +7,7 @@
 // external crates
 use earcutr::earcut;
 use geo::Polygon;
-use nalgebra::{Point3, Vector3};
+use nalgebra::{Point2, Point3, Vector3};
 use std::collections::HashMap;
 use std::convert::TryFrom;
 use uuid::Uuid;
@@ -18,15 +18,11 @@ use datatypes::ber::structural::{CeilingConstructionType, ConstructionMakeup, Pl
 // local includes
 use super::geometry::{point_in_triangle_2d, point_on_segment_2d};
 use super::types::{
-    DirectedEdge3D, HasBaseRegion, MergeableRegion, Point3Ext, Polygon3D, Polygon3DConversionError,
-    Polygon3DMultiZ, RegionBase,
+    DirectedEdge3D, HasBaseRegion, MergeableRegion, Point3Ext, Polygon3D, Polygon3DMultiZ,
+    RegionBase,
 };
 
 const EPSILON: f64 = 1e-9;
-
-fn same_point_2d(a: &Point3<f64>, b: &Point3<f64>) -> bool {
-    (a.x - b.x).abs() < EPSILON && (a.y - b.y).abs() < EPSILON
-}
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 struct Edge2D {
@@ -455,12 +451,9 @@ impl CeilingMesh {
             let mut on_edge = None;
             for &(i, j) in &edges {
                 if point_on_segment_2d(
-                    x,
-                    y,
-                    triangle.vertices[i].x,
-                    triangle.vertices[i].y,
-                    triangle.vertices[j].x,
-                    triangle.vertices[j].y,
+                    &Point2::new(x, y),
+                    &triangle.vertices[i],
+                    &triangle.vertices[j],
                     EPSILON,
                 ) {
                     on_edge = Some((i, j));
@@ -497,14 +490,10 @@ impl CeilingMesh {
 
             // Case 3: Check if the point is inside the triangle
             if point_in_triangle_2d(
-                x,
-                y,
-                triangle.vertices[0].x,
-                triangle.vertices[0].y,
-                triangle.vertices[1].x,
-                triangle.vertices[1].y,
-                triangle.vertices[2].x,
-                triangle.vertices[2].y,
+                &Point2::new(x, y),
+                &triangle.vertices[0].xy(),
+                &triangle.vertices[1].xy(),
+                &triangle.vertices[2].xy(),
                 EPSILON,
             ) {
                 for i in 0..3 {
@@ -698,8 +687,7 @@ impl CeilingMesh {
             polygon_vertices
                 .iter()
                 .map(|&(x, y, z)| Point3::new(x, y, z))
-                .collect::<Vec<Point3<f64>>>()
-                .into(),
+                .collect::<Vec<Point3<f64>>>(),
         ))
     }
 }
@@ -835,22 +823,17 @@ pub struct CeilingTriangle {
     pub vertices: [Point3<f64>; 3],
     pub plane: Plane,
 }
-
-fn points_eq_2d(a: &Point3<f64>, b: &Point3<f64>, eps: f64) -> bool {
-    (a.x - b.x).abs() < eps && (a.y - b.y).abs() < eps
-}
-
 pub struct CeilingRegionConversion {
     pub regions: Vec<CeilingRegion>,
     pub failed_components: usize,
 }
 
-impl Into<CeilingRegionConversion> for CeilingMesh {
-    fn into(self) -> CeilingRegionConversion {
+impl From<CeilingMesh> for CeilingRegionConversion {
+    fn from(mesh: CeilingMesh) -> Self {
         let mut regions = Vec::new();
         let mut failed_components = 0;
 
-        for coplanar in self.split_by_plane() {
+        for coplanar in mesh.split_by_plane() {
             for connected in CeilingMesh::split_by_connectivity(&coplanar) {
                 match CeilingMesh::boundary_polygon(&connected) {
                     Some(polygon) => {
@@ -859,7 +842,7 @@ impl Into<CeilingRegionConversion> for CeilingMesh {
                             construction_type: CeilingConstructionType::Uninitialised,
                             base: RegionBase {
                                 id: Uuid::new_v4(),
-                                construction_phase: self.construction_phase.clone(),
+                                construction_phase: mesh.construction_phase.clone(),
                                 construction_makeup: ConstructionMakeup::default(),
                             },
                         });
@@ -889,23 +872,6 @@ mod tests {
     use super::*;
     use nalgebra::Point3;
 
-    // Helper function to create a simple triangular region
-    fn create_triangle_region() -> CeilingRegion {
-        CeilingRegion {
-            polygon: Polygon3D::new(vec![
-                Point3::new(0.0, 0.0, 0.0),
-                Point3::new(1.0, 0.0, 0.0),
-                Point3::new(0.5, 1.0, 0.0),
-            ]),
-            construction_type: CeilingConstructionType::Uninitialised,
-            base: RegionBase {
-                id: Uuid::new_v4(),
-                construction_makeup: ConstructionMakeup::default(),
-                construction_phase: ConstructionPhase::Original,
-            },
-        }
-    }
-
     // Helper function to create a square region
     fn create_square_region(z: f64) -> CeilingRegion {
         CeilingRegion {
@@ -923,19 +889,6 @@ mod tests {
             },
         }
     }
-
-    #[test]
-    fn test_same_point_2d() {
-        let p1 = Point3::new(1.0, 2.0, 3.0);
-        let p2 = Point3::new(1.0, 2.0, 5.0); // Different z
-        let p3 = Point3::new(1.0 + EPSILON / 2.0, 2.0, 3.0); // Within epsilon
-        let p4 = Point3::new(2.0, 2.0, 3.0); // Different x
-
-        assert!(same_point_2d(&p1, &p2));
-        assert!(same_point_2d(&p1, &p3));
-        assert!(!same_point_2d(&p1, &p4));
-    }
-
     #[test]
     fn test_quantize() {
         let p = Point3::new(1.23456789, 9.87654321, 0.0);
@@ -1241,16 +1194,6 @@ mod tests {
 
         assert_eq!(conversion.regions.len(), 1);
         assert_eq!(conversion.failed_components, 0);
-    }
-
-    #[test]
-    fn test_points_eq_2d() {
-        let p1 = Point3::new(1.0, 2.0, 3.0);
-        let p2 = Point3::new(1.0 + EPSILON / 2.0, 2.0 + EPSILON / 2.0, 5.0);
-        let p3 = Point3::new(2.0, 2.0, 3.0);
-
-        assert!(points_eq_2d(&p1, &p2, EPSILON));
-        assert!(!points_eq_2d(&p1, &p3, EPSILON));
     }
 
     #[test]

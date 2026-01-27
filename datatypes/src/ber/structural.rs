@@ -52,19 +52,15 @@ pub struct ConstructionLayer {
     pub material: ConstructionMaterial, // material name or ID
     pub bridged: bool,                  // true if thermal bridging exists
 }
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Default, Clone, Serialize, Deserialize, PartialEq)]
 pub enum ConstructionMakeup {
-    NonHeatLoss,                    // no heat loss
-    Default,                        // use default construction
-    Tbd,                            // to be determined
+    NonHeatLoss, // no heat loss
+    Default,     // use default construction
+    #[default]
+    Tbd, // to be determined
     Layers(Vec<ConstructionLayer>), // custom stack of layers
 }
 
-impl Default for ConstructionMakeup {
-    fn default() -> Self {
-        ConstructionMakeup::Tbd
-    }
-}
 /// Construction types (example: 5-6 options)
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum FloorConstructionType {
@@ -291,18 +287,14 @@ pub struct ShelteredSideInfo {
     pub sheltered_sides: i32, // e.g., ["North", "West"]
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Default, Clone, Serialize, Deserialize, PartialEq)]
 pub enum ThermalMassCategoryEnum {
     Low,
     Medium,
     High,
+    #[default]
     Invalid,
     Other(String),
-}
-impl Default for ThermalMassCategoryEnum {
-    fn default() -> Self {
-        ThermalMassCategoryEnum::Invalid
-    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

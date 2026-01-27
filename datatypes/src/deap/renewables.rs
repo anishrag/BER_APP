@@ -1,5 +1,4 @@
 use serde::{Deserialize, Serialize};
-use uuid::Uuid;
 
 // ------------------- SECTION 6: Renewables -------------------
 

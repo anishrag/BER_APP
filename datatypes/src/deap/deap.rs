@@ -1,6 +1,4 @@
-use chrono::NaiveDate;
 use serde::{Deserialize, Serialize};
-use uuid::Uuid;
 
 use super::building::Building;
 use super::general::{DeapMetadata, DwellingDetails};

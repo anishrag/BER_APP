@@ -1,5 +1,4 @@
 use serde::{Deserialize, Serialize};
-use uuid::Uuid;
 
 // ------------------- SECTION 4: Water Heating -------------------
 
@@ -11,7 +10,7 @@ pub struct WaterHeating {
     distribution_losses: bool,
     low_water_usage: bool,
     combi_boiler: CombiBoiler,
-    Baths: u32,
+    baths: u32,
     electric_showers: u32,
     mixer_showers_vented: u32,
     mixer_showers_unvented: u32,

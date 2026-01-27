@@ -1,7 +1,6 @@
 // standard includes
-use geo::{LineString, Polygon};
+use geo::Polygon;
 use nalgebra::{Point2, Point3, Vector2, Vector3};
-use std::collections::HashMap;
 use uuid::Uuid;
 
 use datatypes::ber::common::ConstructionPhase;
@@ -13,8 +12,7 @@ use datatypes::ber::structural::{
 use super::ceiling::CeilingRegions;
 use super::floor::FloorRegions;
 use super::types::{
-    approx_equal_xy, HasBaseRegion, MergeableRegion, Polygon3D, Polygon3DMultiZ, RegionBase,
-    SplitLine3D,
+    HasBaseRegion, MergeableRegion, Polygon3D, Polygon3DMultiZ, RegionBase, SplitLine3D,
 };
 
 const EPSILON: f64 = 1e-9;
@@ -115,7 +113,7 @@ impl MergeableRegion for WallRegion {
 }
 
 /// Collection of wall regions
-#[derive(Debug)]
+#[derive(Debug, Default)]
 pub struct WallRegions {
     pub regions: Vec<WallRegion>,
 }
@@ -125,15 +123,8 @@ pub struct BoundaryVertex {
     floor_height: Vec<f64>,
     ceiling_height: Vec<f64>,
 }
-
 impl WallRegions {
     /// Create a new empty WallRegions
-    pub fn new() -> Self {
-        Self {
-            regions: Vec::new(),
-        }
-    }
-
     pub fn get_wall_region_by_id_mut(&mut self, id: &Uuid) -> Option<&mut WallRegion> {
         self.regions.iter_mut().find(|region| &region.base.id == id)
     }
@@ -371,8 +362,7 @@ impl WallRegions {
                 let dist_ceiling = ((*cx - start.0).powi(2) + (*cy - start.1).powi(2)).sqrt();
 
                 if dist_floor <= dist_ceiling {
-                    let mut interpolated_ceiling = Vec::new();
-                    interpolated_ceiling = interpolate_ceiling_height(
+                    let interpolated_ceiling = interpolate_ceiling_height(
                         (*fx, *fy),
                         ceiling_boundary.exterior[ci - 1].clone(),
                         ceiling_boundary.exterior[ci].clone(),
@@ -607,110 +597,6 @@ fn points_equal_3d_xy(a: &Point3<f64>, b: &Point3<f64>) -> bool {
     (a.x - b.x).abs() < EPSILON && (a.y - b.y).abs() < EPSILON
 }
 
-fn extract_floor_boundary_with_all_vertices(floor_regions: &FloorRegions) -> Vec<Point3<f64>> {
-    // Get the outer boundary of the union of all floor regions
-    // This is simplified - you may need to use the geo library's union operation
-
-    let mut all_vertices = Vec::new();
-    let mut vertex_map: HashMap<(i64, i64), Point3<f64>> = HashMap::new();
-
-    for region in &floor_regions.regions {
-        for coord in region.polygon.exterior().coords() {
-            let key = ((coord.x * 1e9) as i64, (coord.y * 1e9) as i64);
-            vertex_map
-                .entry(key)
-                .or_insert(Point3::new(coord.x, coord.y, region.height));
-        }
-    }
-
-    // Extract boundary (simplified - assumes convex hull or proper ordering)
-    all_vertices.extend(vertex_map.values().cloned());
-    all_vertices
-}
-
-fn collect_ceiling_boundary_vertices(
-    ceiling_regions: &CeilingRegions,
-    floor_boundary: &[Point3<f64>],
-) -> Vec<Point3<f64>> {
-    let mut vertices = Vec::new();
-
-    for region in &ceiling_regions.regions {
-        for vertex in &region.polygon.exterior {
-            // Check if this vertex lies on the floor boundary (2D projection)
-            if is_on_boundary_2d(vertex, floor_boundary) {
-                vertices.push(*vertex);
-            }
-        }
-    }
-
-    vertices
-}
-
-fn is_on_boundary_2d(point: &Point3<f64>, boundary: &[Point3<f64>]) -> bool {
-    for i in 0..boundary.len() {
-        let j = (i + 1) % boundary.len();
-        if point_on_segment_2d(point, &boundary[i], &boundary[j]) {
-            return true;
-        }
-    }
-    false
-}
-
-fn point_on_segment_2d(p: &Point3<f64>, a: &Point3<f64>, b: &Point3<f64>) -> bool {
-    let cross = (p.y - a.y) * (b.x - a.x) - (p.x - a.x) * (b.y - a.y);
-    if cross.abs() > EPSILON {
-        return false;
-    }
-
-    let dot = (p.x - a.x) * (b.x - a.x) + (p.y - a.y) * (b.y - a.y);
-    let len_sq = (b.x - a.x).powi(2) + (b.y - a.y).powi(2);
-
-    dot >= -EPSILON && dot <= len_sq + EPSILON
-}
-
-fn merge_boundary_vertices(
-    floor_boundary: &[Point3<f64>],
-    ceiling_vertices: &[Point3<f64>],
-) -> Vec<Point3<f64>> {
-    let mut merged = floor_boundary.to_vec();
-
-    // Insert ceiling vertices into the floor boundary sequence
-    for cv in ceiling_vertices {
-        let mut inserted = false;
-
-        for i in 0..merged.len() {
-            let j = (i + 1) % merged.len();
-
-            if point_on_segment_2d(cv, &merged[i], &merged[j]) {
-                // Check if not already present
-                let already_exists =
-                    points_equal_3d_xy(cv, &merged[i]) || points_equal_3d_xy(cv, &merged[j]);
-
-                if !already_exists {
-                    merged.insert(j, *cv);
-                    inserted = true;
-                    break;
-                }
-            }
-        }
-    }
-
-    merged
-}
-
-fn find_ceiling_height_at_point(ceiling_regions: &CeilingRegions, x: f64, y: f64) -> f64 {
-    // Find which ceiling region contains this point
-    for region in &ceiling_regions.regions {
-        if point_in_polygon_3d(&region.polygon, x, y) {
-            // Interpolate or use the ceiling height at this point
-            return interpolate_ceiling_height(&region.polygon, x, y);
-        }
-    }
-
-    // Default fallback
-    0.0
-}
-
 fn point_in_polygon_3d(polygon: &Polygon3D, x: f64, y: f64) -> bool {
     // Ray casting algorithm in 2D
     let mut inside = false;
@@ -727,12 +613,6 @@ fn point_in_polygon_3d(polygon: &Polygon3D, x: f64, y: f64) -> bool {
     }
 
     inside
-}
-
-fn interpolate_ceiling_height(polygon: &Polygon3D, x: f64, y: f64) -> f64 {
-    // Simple average of all vertices (could be improved with proper interpolation)
-    let sum: f64 = polygon.exterior.iter().map(|v| v.z).sum();
-    sum / polygon.exterior.len() as f64
 }
 
 fn determine_construction_phase_for_exterior_wall(

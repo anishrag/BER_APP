@@ -396,7 +396,7 @@ impl FloorPlan {
         }
     }
 
-    fn combine_regions_generic<T>(&mut self, region_ids: &mut Vec<Uuid>) -> (Vec<MergeWarning>)
+    fn combine_regions_generic<T>(&mut self, region_ids: &mut Vec<Uuid>) -> Vec<MergeWarning>
     where
         T: MergeableRegion,
         FloorPlan: RegionContainer<T>,
@@ -493,27 +493,15 @@ impl RegionContainer<FloorRegion> for FloorPlan {
     fn regions(&self) -> &Vec<FloorRegion> {
         &self.floors.regions
     }
-
-    fn regions_mut(&mut self) -> &mut Vec<FloorRegion> {
-        &mut self.floors.regions
-    }
 }
 impl RegionContainer<CeilingRegion> for FloorPlan {
     fn regions(&self) -> &Vec<CeilingRegion> {
         &self.ceilings.regions
     }
-
-    fn regions_mut(&mut self) -> &mut Vec<CeilingRegion> {
-        &mut self.ceilings.regions
-    }
 }
 impl RegionContainer<WallRegion> for FloorPlan {
     fn regions(&self) -> &Vec<WallRegion> {
         &self.walls.regions
-    }
-
-    fn regions_mut(&mut self) -> &mut Vec<WallRegion> {
-        &mut self.walls.regions
     }
 }
 
