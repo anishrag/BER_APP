@@ -22,6 +22,12 @@ pub use datatypes::ber::common::ConstructionPhase;
 
 use uuid::Uuid;
 
+pub enum FloorPlanError {
+    PointNotOnEdge,
+    HeightConflict,
+    CeilingError,
+}
+
 pub struct FloorPlan {
     pub storey: u32,
     pub floors: FloorRegions,
@@ -37,7 +43,7 @@ impl FloorPlan {
         construction_type: FloorConstructionType,
         floor_plan_below: Option<&FloorPlan>,
     ) -> (Self, Storey) {
-        let mut floor_regions;
+        let floor_regions;
         let mut storey = 0;
         match floor_plan_below {
             Some(floor_plan) => {
@@ -215,48 +221,36 @@ impl FloorPlan {
         point: Point2<f64>,
         new_height: f64,
         from_highest_region: bool,
-    ) {
-        let regions_containing_point: Vec<&CeilingRegion> = self
-            .ceilings
-            .regions
-            .iter()
-            .filter_map(|region| {
-                if region.polygon.contains_point(point.x, point.y) {
-                    Some(region)
-                } else {
-                    None
-                }
-            })
-            .collect();
+    ) -> Result<(), FloorPlanError> {
+        let floor_heights = self.floors.get_floor_height_at_point(&point);
+        let floor_z = if from_highest_region {
+            floor_heights
+                .iter()
+                .copied()
+                .max_by(|a, b| a.partial_cmp(b).unwrap())
+                .unwrap()
+        } else {
+            floor_heights
+                .iter()
+                .copied()
+                .min_by(|a, b| a.partial_cmp(b).unwrap())
+                .unwrap()
+        };
 
-        let floor_height_vec = self.floors.get_floor_height_at_point(&point);
-        let max = floor_height_vec
-            .iter()
-            .copied()
-            .max_by(|a, b| a.partial_cmp(b).unwrap())
-            .unwrap();
-        let min = floor_height_vec
-            .iter()
-            .copied()
-            .min_by(|a, b| a.partial_cmp(b).unwrap())
-            .unwrap();
-        let floor_height_at_point = if from_highest_region { max } else { min };
-        // in the regions containing the point, convert each one to the mesh, insert the vertex,
-        // and then convert back to mutiPolygon3D and then multiple regions
-        let ceiling_regions_new: Vec<CeilingRegion> = regions_containing_point
-            .iter()
-            .map(|region| {
-                let mut ceiling_mesh: CeilingMesh = (*region).clone().try_into().unwrap();
-                ceiling_mesh.add_new_vertex_with_height(
-                    point.x,
-                    point.y,
-                    new_height + floor_height_at_point,
+        let mut updated = Vec::new();
+        for region in &self.ceilings.regions {
+            if region.polygon.contains_point(point.x, point.y) {
+                updated.extend(
+                    region
+                        .insert_vertex(point.x, point.y, new_height + floor_z)
+                        .map_err(|_| FloorPlanError::CeilingError)?,
                 );
-                ceiling_mesh.into()
-            })
-            .filter(|conversion: &CeilingRegionConversion| conversion.failed_components == 0)
-            .flat_map(|conversion| conversion.regions)
-            .collect();
+            } else {
+                updated.push(region.clone());
+            }
+        }
+        self.ceilings.regions = updated;
+        Ok(())
     }
 
     pub fn change_ceiling_construction_makeup_split(

@@ -82,6 +82,10 @@ fn undirected_edge_3df(a: &Point3<f64>, b: &Point3<f64>) -> Edge3DF {
     }
 }
 
+pub enum CeilingRegionError {
+    RegionVertexInsertionError(VertexInsertionError),
+    ConversionFailed,
+}
 /// A planar region of the floor
 #[derive(Clone, Debug)]
 pub struct CeilingRegion {
@@ -90,6 +94,33 @@ pub struct CeilingRegion {
     pub construction_type: CeilingConstructionType,
 }
 
+impl CeilingRegion {
+    /// Insert a vertex at (x, y, z) and return the resulting regions
+    pub fn insert_vertex(
+        &self,
+        x: f64,
+        y: f64,
+        z: f64,
+    ) -> Result<Vec<CeilingRegion>, CeilingRegionError> {
+        // Convert self into a mesh
+        let mut mesh = CeilingMesh::try_from(self).map_err(|e| {
+            CeilingRegionError::RegionVertexInsertionError(VertexInsertionError::EarcutError(e))
+        })?;
+
+        // Add the vertex
+        mesh.add_new_vertex_with_height(x, y, z)
+            .map_err(CeilingRegionError::RegionVertexInsertionError)?;
+
+        // Convert back to regions
+        let conversion: CeilingRegionConversion = mesh.into();
+
+        if conversion.failed_components > 0 || conversion.regions.is_empty() {
+            return Err(CeilingRegionError::ConversionFailed);
+        }
+
+        Ok(conversion.regions) // return all resulting regions
+    }
+}
 impl MergeableRegion for CeilingRegion {
     type Geometry = Polygon3D; // or Vec<Vertex> if you use vertex list
 
@@ -400,6 +431,7 @@ pub enum VertexInsertionError {
     VertexNotInAnyTriangle { x: f64, y: f64 },
     DegenerateTriangle { triangle_idx: usize },
     EmptyMesh,
+    EarcutError(earcutr::Error),
 }
 
 #[derive(Debug)]
