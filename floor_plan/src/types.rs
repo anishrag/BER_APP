@@ -518,16 +518,12 @@ impl Point3Ext for Point3<f64> {
 pub trait MergeableGeometry: Clone {
     /// Merge two geometries into zero or more geometries
     fn merge(&self, other: &Self) -> Vec<Self>;
-    fn same_orientation(&self, other: &Self) -> bool;
 }
 
 impl MergeableGeometry for geo::Polygon<f64> {
     fn merge(&self, other: &Self) -> Vec<Self> {
         let multi = self.union(other);
         multi.0
-    }
-    fn same_orientation(&self, _: &Self) -> bool {
-        true
     }
 }
 
@@ -543,16 +539,6 @@ impl MergeableGeometry for Polygon3D {
             result_3d.push(lifted);
         }
         result_3d
-    }
-    fn same_orientation(&self, other: &Self) -> bool {
-        let Some((n1, _)) = self.get_normal_and_distance_to_origin() else {
-            return false;
-        };
-        let Some((n2, _)) = other.get_normal_and_distance_to_origin() else {
-            return false;
-        };
-
-        n1.dot(&n2) - 1.0 < EPSILON
     }
 }
 

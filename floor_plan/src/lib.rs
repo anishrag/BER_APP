@@ -7,7 +7,7 @@ mod types;
 use geo::{LineString, Polygon};
 use nalgebra::{Point2, Point3};
 
-use ceiling::{CeilingMesh, CeilingRegion, CeilingRegionConversion, CeilingRegions};
+use ceiling::{CeilingRegion, CeilingRegions};
 use datatypes::ber::diffable::AddRemoveTrait;
 use datatypes::ber::structural::{
     CeilingConstructionType, ConstructionMakeup, FloorConstructionType, Storey,
