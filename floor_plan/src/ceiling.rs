@@ -19,10 +19,8 @@ use datatypes::ber::structural::{CeilingConstructionType, ConstructionMakeup, Pl
 use super::geometry::{point_in_triangle_2d, point_on_segment_2d};
 use super::types::{
     DirectedEdge3D, HasBaseRegion, MergeableRegion, Point3Ext, Polygon3D, Polygon3DMultiZ,
-    RegionBase,
+    RegionBase, EPSILON,
 };
-
-const EPSILON: f64 = 1e-9;
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 struct Edge2D {

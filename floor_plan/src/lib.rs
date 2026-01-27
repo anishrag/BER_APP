@@ -14,8 +14,7 @@ use datatypes::ber::structural::{
 };
 use floor::{FloorRegion, FloorRegions};
 use types::{
-    MergeWarning, MergeableGeometry, MergeableRegion, MultiPolygon3D, Polygon3D, RegionContainer,
-    RegionType,
+    MergeWarning, MergeableGeometry, MergeableRegion, RegionContainer, RegionType, EPSILON,
 };
 use walls::{WallRegion, WallRegions};
 
@@ -59,9 +58,7 @@ impl FloorPlan {
                     .map(|poly3d| {
                         let (poly2d, heights) = poly3d.to_2d_polygon_and_heights();
                         // Assert all heights are the same
-                        assert!(heights
-                            .iter()
-                            .all(|&h| (h - heights[0]).abs() < std::f64::EPSILON));
+                        assert!(heights.iter().all(|&h| (h - heights[0]).abs() < EPSILON));
                         (poly2d, heights[0])
                     })
                     .collect();

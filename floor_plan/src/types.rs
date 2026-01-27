@@ -6,7 +6,7 @@ use uuid::Uuid;
 use datatypes::ber::common::ConstructionPhase;
 use datatypes::ber::structural::ConstructionMakeup;
 
-const EPSILON: f64 = 1e-9;
+pub const EPSILON: f64 = 1e-9;
 
 #[derive(Clone, Debug)]
 pub struct RegionBase {

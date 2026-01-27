@@ -12,10 +12,8 @@ use datatypes::ber::structural::{
 use super::ceiling::CeilingRegions;
 use super::floor::FloorRegions;
 use super::types::{
-    HasBaseRegion, MergeableRegion, Polygon3D, Polygon3DMultiZ, RegionBase, SplitLine3D,
+    HasBaseRegion, MergeableRegion, Polygon3D, Polygon3DMultiZ, RegionBase, SplitLine3D, EPSILON,
 };
-
-const EPSILON: f64 = 1e-9;
 
 /// A vertical planar wall region
 #[derive(Clone, Debug)]
@@ -288,8 +286,6 @@ impl WallRegions {
         floor_boundary: &Polygon3DMultiZ,
         ceiling_boundary: &Polygon3DMultiZ,
     ) -> bool {
-        const EPSILON: f64 = 1e-9;
-
         let floor_simple = floor_boundary.simplify(EPSILON);
         let ceiling_simple = ceiling_boundary.simplify(EPSILON);
 
@@ -312,7 +308,7 @@ impl WallRegions {
         let mut fi = 0;
         let mut ci = 0;
         let (fx, fy, fheight) = &floor_boundary.exterior[fi];
-        let (cx, cy, cheight) = &ceiling_boundary.exterior[ci];
+        let (_, _, cheight) = &ceiling_boundary.exterior[ci];
 
         merged.push(BoundaryVertex {
             point: Point2::new(*fx, *fy),
