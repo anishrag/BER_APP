@@ -129,9 +129,6 @@ pub trait CeilingRegionsManip {
     );
     fn modify_polygon_increase_height(&mut self, polygon: Polygon<f64>, delta_height: f64);
     fn get_clockwise_3d_polygon_starting_closest_to_origin(&self) -> Polygon3DMultiZ;
-    fn modify_polygon<F>(&mut self, polygon: Polygon<f64>, modify: F)
-    where
-        F: FnMut(&mut CeilingRegion);
 }
 
 impl CeilingRegionsManip for CeilingRegions {
@@ -167,56 +164,6 @@ impl CeilingRegionsManip for CeilingRegions {
                 Ok(acc)
             })?;
         Ok(())
-    }
-
-    fn modify_polygon<F>(&mut self, polygon: Polygon<f64>, mut modify: F)
-    where
-        F: FnMut(&mut CeilingRegion),
-    {
-        let mut new_regions = Vec::new();
-        let mut regions_to_remove = Vec::new();
-
-        for (idx, region) in self.regions.iter().enumerate() {
-            let intersection = region.polygon.intersection(&polygon);
-            if intersection.polygons.is_empty() {
-                continue;
-            }
-
-            let remainder = region.polygon.difference(&polygon);
-            regions_to_remove.push(idx);
-
-            let mut id = region.base.id;
-            // remainder
-            for poly in remainder.polygons {
-                new_regions.push(CeilingRegion {
-                    polygon: poly,
-                    construction_type: region.construction_type,
-                    base: RegionBase {
-                        id,
-                        construction_makeup: region.base.construction_makeup.clone(),
-                        construction_phase: region.base.construction_phase.clone(),
-                        opes: region.base.opes.clone(),
-                        photos: region.base.photos.clone(),
-                        description: region.base.description.clone(),
-                    },
-                });
-                id = ItemId::default();
-            }
-
-            // intersection
-            for poly in intersection.polygons {
-                let mut new_region = region.clone();
-                new_region.polygon = poly;
-                modify(&mut new_region);
-                new_regions.push(new_region);
-            }
-        }
-
-        for idx in regions_to_remove.into_iter().rev() {
-            self.regions.remove(idx);
-        }
-
-        self.regions.extend(new_regions);
     }
 
     fn modify_polygon_construction_phase(
@@ -396,6 +343,63 @@ impl CeilingRegionsManip for CeilingRegions {
     }
 }
 
+trait CeilingRegionsManipPrivate {
+    fn modify_polygon<F>(&mut self, polygon: Polygon<f64>, modify: F)
+    where
+        F: FnMut(&mut CeilingRegion);
+}
+
+impl CeilingRegionsManipPrivate for CeilingRegions {
+    fn modify_polygon<F>(&mut self, polygon: Polygon<f64>, mut modify: F)
+    where
+        F: FnMut(&mut CeilingRegion),
+    {
+        let mut new_regions = Vec::new();
+        let mut regions_to_remove = Vec::new();
+
+        for (idx, region) in self.regions.iter().enumerate() {
+            let intersection = region.polygon.intersection(&polygon);
+            if intersection.polygons.is_empty() {
+                continue;
+            }
+
+            let remainder = region.polygon.difference(&polygon);
+            regions_to_remove.push(idx);
+
+            let mut id = region.base.id;
+            // remainder
+            for poly in remainder.polygons {
+                new_regions.push(CeilingRegion {
+                    polygon: poly,
+                    construction_type: region.construction_type,
+                    base: RegionBase {
+                        id,
+                        construction_makeup: region.base.construction_makeup.clone(),
+                        construction_phase: region.base.construction_phase.clone(),
+                        opes: region.base.opes.clone(),
+                        photos: region.base.photos.clone(),
+                        description: region.base.description.clone(),
+                    },
+                });
+                id = ItemId::default();
+            }
+
+            // intersection
+            for poly in intersection.polygons {
+                let mut new_region = region.clone();
+                new_region.polygon = poly;
+                modify(&mut new_region);
+                new_regions.push(new_region);
+            }
+        }
+
+        for idx in regions_to_remove.into_iter().rev() {
+            self.regions.remove(idx);
+        }
+
+        self.regions.extend(new_regions);
+    }
+}
 #[derive(Debug)]
 pub enum VertexInsertionError {
     VertexNotInAnyTriangle { x: f64, y: f64 },

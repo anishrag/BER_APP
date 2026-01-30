@@ -31,12 +31,6 @@ pub enum MergeWarning {
 }
 
 pub trait FloorRegionsManip {
-    fn from_polygon_3ds(
-        polygon_3ds: Vec<&Polygon3D>,
-        construction_type: Vec<Option<FloorConstructionType>>,
-        construction_makeup: Vec<Option<ConstructionMakeup>>,
-        construction_phase: Vec<Option<ConstructionPhase>>,
-    ) -> Self;
     fn from_polygons(
         polygons: Vec<&Polygon<f64>>,
         heights: Vec<f64>,
@@ -44,11 +38,7 @@ pub trait FloorRegionsManip {
         construction_makeup: Vec<Option<ConstructionMakeup>>,
         construction_phase: Vec<Option<ConstructionPhase>>,
     ) -> Self;
-    fn get_floor_region_by_id(&self, id: &ItemId) -> Option<&FloorRegion>;
-    fn merge_regions(&self, ids: &[ItemId]) -> (Vec<FloorRegion>, Vec<MergeWarning>);
-    fn modify_polygon<F>(&mut self, polygon: Polygon<f64>, modify: F)
-    where
-        F: FnMut(&mut FloorRegion);
+
     fn raise_lower_polygon(&mut self, polygon: Polygon<f64>, height_change: f64);
     fn modify_polygon_construction_phase(
         &mut self,
@@ -63,45 +53,11 @@ pub trait FloorRegionsManip {
         construction_makeup: Option<ConstructionMakeup>,
         construction_phase: Option<ConstructionPhase>,
     );
-    fn by_construction_phase(&self) -> Vec<FloorRegionByConstructionPhase>;
+
     fn get_floor_height_at_point(&self, point: &Point2<f64>) -> Vec<f64>;
     fn get_clockwise_3d_polygon_starting_closest_to_origin(&self) -> Polygon3DMultiZ;
 }
 impl FloorRegionsManip for FloorRegions {
-    fn from_polygon_3ds(
-        polygon_3ds: Vec<&Polygon3D>,
-        construction_type: Vec<Option<FloorConstructionType>>,
-        construction_makeup: Vec<Option<ConstructionMakeup>>,
-        construction_phase: Vec<Option<ConstructionPhase>>,
-    ) -> Self {
-        let mut regions: Vec<FloorRegion> = Vec::new();
-
-        for (polygon, c_type, c_makeup, c_phase) in izip!(
-            &polygon_3ds,
-            &construction_type,
-            &construction_makeup,
-            &construction_phase
-        ) {
-            let mut region = FloorRegion::default();
-            let (polygon2d, heights) = polygon.to_2d_polygon_and_heights();
-            //assert all heights same
-            assert!(
-                heights.iter().all(|&h| approx_eq(h, heights[0])),
-                "All heights in Polygon3D must be the same to convert to FloorRegion"
-            );
-            let height = heights[0];
-
-            region.polygon = polygon2d;
-            region.height = height;
-            region.construction_type = c_type.unwrap_or_default();
-            region.base.construction_makeup = c_makeup.clone().unwrap_or_default();
-            region.base.construction_phase = c_phase.clone().unwrap_or_default();
-
-            regions.push(region);
-        }
-        FloorRegions { regions }
-    }
-
     fn from_polygons(
         polygons: Vec<&Polygon<f64>>,
         heights: Vec<f64>,
@@ -127,120 +83,6 @@ impl FloorRegionsManip for FloorRegions {
             regions.push(region);
         }
         FloorRegions { regions }
-    }
-
-    fn get_floor_region_by_id(&self, id: &ItemId) -> Option<&FloorRegion> {
-        self.regions.iter().find(|r| &r.base.id == id)
-    }
-    fn merge_regions(&self, ids: &[ItemId]) -> (Vec<FloorRegion>, Vec<MergeWarning>) {
-        let mut warnings = Vec::new();
-        let mut selected: Vec<&FloorRegion> = self
-            .regions
-            .iter()
-            .filter(|r| ids.contains(&r.base.id))
-            .collect();
-
-        // warn for invalid IDs
-        let invalid_ids: Vec<ItemId> = ids
-            .iter()
-            .filter(|id| !self.regions.iter().any(|r| &r.base.id == *id))
-            .copied()
-            .collect();
-        if !invalid_ids.is_empty() {
-            warnings.push(MergeWarning::InvalidIds(invalid_ids));
-        }
-
-        let mut merged = Vec::new();
-
-        while let Some(region) = selected.pop() {
-            let mut group = vec![region.clone()];
-
-            selected.retain(|other| {
-                if other.height == region.height
-                    && other.construction_type == region.construction_type
-                    && other.base.construction_makeup == region.base.construction_makeup
-                    && other.base.construction_phase == region.base.construction_phase
-                {
-                    group.push((*other).clone());
-                    false
-                } else {
-                    true
-                }
-            });
-
-            let merged_multi: MultiPolygon<f64> = group
-                .iter()
-                .map(|r| r.polygon.clone())
-                .fold(MultiPolygon::new(vec![]), |acc, poly| acc.union(&poly));
-
-            let source_ids: Vec<ItemId> = group.iter().map(|r| r.base.id).collect();
-
-            for poly in merged_multi.0.clone() {
-                merged.push(FloorRegion {
-                    polygon: poly,
-                    height: region.height,
-                    construction_type: region.construction_type,
-                    base: region.base.clone_with_new_id(),
-                });
-            }
-
-            if merged_multi.0.len() > 1 {
-                warnings.push(MergeWarning::MultipleResultingRegions {
-                    source_ids,
-                    resulting_regions: merged_multi.0.len(),
-                });
-            }
-        }
-
-        (merged, warnings)
-    }
-    fn modify_polygon<F>(&mut self, polygon: Polygon<f64>, mut modify: F)
-    where
-        F: FnMut(&mut FloorRegion),
-    {
-        let mut new_regions = Vec::new();
-        let mut regions_to_remove = Vec::new();
-
-        for (idx, region) in self.regions.iter().enumerate() {
-            let intersection = region.polygon.intersection(&polygon);
-            if intersection.0.is_empty() {
-                continue;
-            }
-
-            let remainder = region.polygon.difference(&polygon);
-            regions_to_remove.push(idx);
-
-            // remainder
-            let mut id = region.base.id;
-            for poly in remainder.0 {
-                new_regions.push(FloorRegion {
-                    polygon: poly,
-                    height: region.height,
-                    construction_type: region.construction_type,
-                    base: RegionBase {
-                        id,
-                        construction_makeup: region.base.construction_makeup.clone(),
-                        construction_phase: region.base.construction_phase.clone(),
-                        ..Default::default()
-                    },
-                });
-                id = ItemId::default(); // ensure new ID for subsequent remainders
-            }
-
-            // intersection
-            for poly in intersection.0 {
-                let mut new_region = region.clone();
-                new_region.polygon = poly;
-                modify(&mut new_region);
-                new_regions.push(new_region);
-            }
-        }
-
-        for idx in regions_to_remove.into_iter().rev() {
-            self.regions.remove(idx);
-        }
-
-        self.regions.extend(new_regions);
     }
 
     fn raise_lower_polygon(&mut self, polygon: Polygon<f64>, height_change: f64) {
@@ -281,44 +123,6 @@ impl FloorRegionsManip for FloorRegions {
                 r.base.construction_phase = cp;
             }
         });
-    }
-
-    fn by_construction_phase(&self) -> Vec<FloorRegionByConstructionPhase> {
-        let mut per_construction_phase: HashMap<ConstructionPhase, Vec<Polygon<f64>>> =
-            HashMap::new();
-
-        // 1. Group polygons by year
-        for region in &self.regions {
-            per_construction_phase
-                .entry(region.base.construction_phase.clone())
-                .or_default()
-                .push(region.polygon.clone());
-        }
-
-        let mut result = Vec::new();
-
-        // 2. Union per year
-        for (construction_phase, polygons) in per_construction_phase {
-            let mut acc: Option<MultiPolygon<f64>> = None;
-
-            for poly in polygons {
-                acc = Some(match acc {
-                    None => MultiPolygon(vec![poly]),
-                    Some(mp) => mp.union(&poly),
-                });
-            }
-
-            // 3. Emit resulting polygons
-            if let Some(mp) = acc {
-                for poly in mp.0 {
-                    result.push(FloorRegionByConstructionPhase {
-                        polygon: poly,
-                        construction_phase: construction_phase.clone(),
-                    });
-                }
-            }
-        }
-        result
     }
 
     fn get_floor_height_at_point(&self, point: &Point2<f64>) -> Vec<f64> {
@@ -489,6 +293,208 @@ impl FloorRegionsManip for FloorRegions {
         points_with_z.rotate_left(closest_idx);
 
         Polygon3DMultiZ::new(points_with_z)
+    }
+}
+
+trait FloorRegionsManipPrivate {
+    fn from_polygon_3ds(
+        polygon_3ds: Vec<&Polygon3D>,
+        construction_type: Vec<Option<FloorConstructionType>>,
+        construction_makeup: Vec<Option<ConstructionMakeup>>,
+        construction_phase: Vec<Option<ConstructionPhase>>,
+    ) -> Self;
+    fn get_floor_region_by_id(&self, id: &ItemId) -> Option<&FloorRegion>;
+    fn merge_regions(&self, ids: &[ItemId]) -> (Vec<FloorRegion>, Vec<MergeWarning>);
+    fn modify_polygon<F>(&mut self, polygon: Polygon<f64>, modify: F)
+    where
+        F: FnMut(&mut FloorRegion);
+    fn by_construction_phase(&self) -> Vec<FloorRegionByConstructionPhase>;
+}
+
+impl FloorRegionsManipPrivate for FloorRegions {
+    fn from_polygon_3ds(
+        polygon_3ds: Vec<&Polygon3D>,
+        construction_type: Vec<Option<FloorConstructionType>>,
+        construction_makeup: Vec<Option<ConstructionMakeup>>,
+        construction_phase: Vec<Option<ConstructionPhase>>,
+    ) -> Self {
+        let mut regions: Vec<FloorRegion> = Vec::new();
+
+        for (polygon, c_type, c_makeup, c_phase) in izip!(
+            &polygon_3ds,
+            &construction_type,
+            &construction_makeup,
+            &construction_phase
+        ) {
+            let mut region = FloorRegion::default();
+            let (polygon2d, heights) = polygon.to_2d_polygon_and_heights();
+            //assert all heights same
+            assert!(
+                heights.iter().all(|&h| approx_eq(h, heights[0])),
+                "All heights in Polygon3D must be the same to convert to FloorRegion"
+            );
+            let height = heights[0];
+
+            region.polygon = polygon2d;
+            region.height = height;
+            region.construction_type = c_type.unwrap_or_default();
+            region.base.construction_makeup = c_makeup.clone().unwrap_or_default();
+            region.base.construction_phase = c_phase.clone().unwrap_or_default();
+
+            regions.push(region);
+        }
+        FloorRegions { regions }
+    }
+
+    fn get_floor_region_by_id(&self, id: &ItemId) -> Option<&FloorRegion> {
+        self.regions.iter().find(|r| &r.base.id == id)
+    }
+    fn merge_regions(&self, ids: &[ItemId]) -> (Vec<FloorRegion>, Vec<MergeWarning>) {
+        let mut warnings = Vec::new();
+        let mut selected: Vec<&FloorRegion> = self
+            .regions
+            .iter()
+            .filter(|r| ids.contains(&r.base.id))
+            .collect();
+
+        // warn for invalid IDs
+        let invalid_ids: Vec<ItemId> = ids
+            .iter()
+            .filter(|id| !self.regions.iter().any(|r| &r.base.id == *id))
+            .copied()
+            .collect();
+        if !invalid_ids.is_empty() {
+            warnings.push(MergeWarning::InvalidIds(invalid_ids));
+        }
+
+        let mut merged = Vec::new();
+
+        while let Some(region) = selected.pop() {
+            let mut group = vec![region.clone()];
+
+            selected.retain(|other| {
+                if other.height == region.height
+                    && other.construction_type == region.construction_type
+                    && other.base.construction_makeup == region.base.construction_makeup
+                    && other.base.construction_phase == region.base.construction_phase
+                {
+                    group.push((*other).clone());
+                    false
+                } else {
+                    true
+                }
+            });
+
+            let merged_multi: MultiPolygon<f64> = group
+                .iter()
+                .map(|r| r.polygon.clone())
+                .fold(MultiPolygon::new(vec![]), |acc, poly| acc.union(&poly));
+
+            let source_ids: Vec<ItemId> = group.iter().map(|r| r.base.id).collect();
+
+            for poly in merged_multi.0.clone() {
+                merged.push(FloorRegion {
+                    polygon: poly,
+                    height: region.height,
+                    construction_type: region.construction_type,
+                    base: region.base.clone_with_new_id(),
+                });
+            }
+
+            if merged_multi.0.len() > 1 {
+                warnings.push(MergeWarning::MultipleResultingRegions {
+                    source_ids,
+                    resulting_regions: merged_multi.0.len(),
+                });
+            }
+        }
+
+        (merged, warnings)
+    }
+    fn modify_polygon<F>(&mut self, polygon: Polygon<f64>, mut modify: F)
+    where
+        F: FnMut(&mut FloorRegion),
+    {
+        let mut new_regions = Vec::new();
+        let mut regions_to_remove = Vec::new();
+
+        for (idx, region) in self.regions.iter().enumerate() {
+            let intersection = region.polygon.intersection(&polygon);
+            if intersection.0.is_empty() {
+                continue;
+            }
+
+            let remainder = region.polygon.difference(&polygon);
+            regions_to_remove.push(idx);
+
+            // remainder
+            let mut id = region.base.id;
+            for poly in remainder.0 {
+                new_regions.push(FloorRegion {
+                    polygon: poly,
+                    height: region.height,
+                    construction_type: region.construction_type,
+                    base: RegionBase {
+                        id,
+                        construction_makeup: region.base.construction_makeup.clone(),
+                        construction_phase: region.base.construction_phase.clone(),
+                        ..Default::default()
+                    },
+                });
+                id = ItemId::default(); // ensure new ID for subsequent remainders
+            }
+
+            // intersection
+            for poly in intersection.0 {
+                let mut new_region = region.clone();
+                new_region.polygon = poly;
+                modify(&mut new_region);
+                new_regions.push(new_region);
+            }
+        }
+
+        for idx in regions_to_remove.into_iter().rev() {
+            self.regions.remove(idx);
+        }
+
+        self.regions.extend(new_regions);
+    }
+    fn by_construction_phase(&self) -> Vec<FloorRegionByConstructionPhase> {
+        let mut per_construction_phase: HashMap<ConstructionPhase, Vec<Polygon<f64>>> =
+            HashMap::new();
+
+        // 1. Group polygons by year
+        for region in &self.regions {
+            per_construction_phase
+                .entry(region.base.construction_phase.clone())
+                .or_default()
+                .push(region.polygon.clone());
+        }
+
+        let mut result = Vec::new();
+
+        // 2. Union per year
+        for (construction_phase, polygons) in per_construction_phase {
+            let mut acc: Option<MultiPolygon<f64>> = None;
+
+            for poly in polygons {
+                acc = Some(match acc {
+                    None => MultiPolygon(vec![poly]),
+                    Some(mp) => mp.union(&poly),
+                });
+            }
+
+            // 3. Emit resulting polygons
+            if let Some(mp) = acc {
+                for poly in mp.0 {
+                    result.push(FloorRegionByConstructionPhase {
+                        polygon: poly,
+                        construction_phase: construction_phase.clone(),
+                    });
+                }
+            }
+        }
+        result
     }
 }
 

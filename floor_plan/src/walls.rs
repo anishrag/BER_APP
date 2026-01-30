@@ -14,7 +14,7 @@ use super::floor::FloorRegionsManip;
 use super::geometry::{Geometry, MergeableRegion};
 use super::types::{HasBaseRegion, Polygon3D, Polygon3DMultiZ, RegionBase, SplitLine3D, EPSILON};
 
-pub trait WallRegionManip {
+trait WallRegionManip {
     fn get_leftmost_floor_vertex(&self) -> Point3<f64>;
     fn wall_horizontal_dir(&self) -> Vector3<f64>;
     fn wall_plane_normal(&self) -> Vector3<f64>;
@@ -684,9 +684,305 @@ impl HasBaseRegion for WallRegion {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use geo::{polygon, Polygon};
+
+    const TOL: f64 = 1e-9;
+
+    /* ---------------------------------------------------------------------
+     * Test helpers
+     * ------------------------------------------------------------------ */
+
+    fn simple_wall() -> WallRegion {
+        WallRegion {
+            polygon: Polygon3D::new(vec![
+                Point3::new(0.0, 0.0, 0.0),
+                Point3::new(4.0, 0.0, 0.0),
+                Point3::new(4.0, 0.0, 3.0),
+                Point3::new(0.0, 0.0, 3.0),
+            ]),
+            construction_type: WallConstructionType::Uninitialised,
+            base: RegionBase {
+                id: ItemId::default(),
+                construction_phase: ConstructionPhase::Original,
+                ..Default::default()
+            },
+            exposure: WallExposure::Exposed,
+        }
+    }
+
+    fn simple_wall_regions() -> WallRegions {
+        WallRegions {
+            regions: vec![simple_wall()],
+        }
+    }
+
+    fn simple_floor_boundary(z: f64) -> Polygon3DMultiZ {
+        Polygon3DMultiZ {
+            exterior: vec![
+                (0.0, 0.0, vec![z]),
+                (4.0, 0.0, vec![z]),
+                (4.0, 4.0, vec![z]),
+                (0.0, 4.0, vec![z]),
+            ],
+        }
+    }
+
+    fn assert_unit(v: Vector3<f64>) {
+        assert!((v.norm() - 1.0).abs() < TOL);
+    }
+
+    /* ---------------------------------------------------------------------
+     * WallRegionManip
+     * ------------------------------------------------------------------ */
 
     #[test]
-    fn test_wall_creation() {
-        // Add tests here
+    fn leftmost_floor_vertex_is_first_exterior_vertex() {
+        let wall = simple_wall();
+        assert_eq!(wall.get_leftmost_floor_vertex(), Point3::new(0.0, 0.0, 0.0));
+    }
+
+    #[test]
+    fn wall_horizontal_dir_is_xy_only() {
+        let wall = simple_wall();
+        let d = wall.wall_horizontal_dir();
+        assert_eq!(d, Vector3::new(4.0, 0.0, 0.0));
+    }
+
+    #[test]
+    fn wall_plane_normal_is_unit_and_perpendicular() {
+        let wall = simple_wall();
+        let n = wall.wall_plane_normal();
+
+        assert_unit(n);
+
+        let horiz = wall.wall_horizontal_dir();
+        assert!((n.dot(&horiz)).abs() < TOL);
+    }
+
+    #[test]
+    fn dividing_line_geometry_is_consistent() {
+        let wall = simple_wall();
+        let split = wall.get_dividing_line_equation(2.0, 1.5);
+
+        assert_unit(split.normal);
+        assert_unit(split.direction);
+
+        // Direction must lie in the wall plane
+        let plane_n = wall.wall_plane_normal();
+        assert!((split.direction.dot(&plane_n)).abs() < TOL);
+
+        // Normal must be orthogonal to direction
+        assert!((split.direction.dot(&split.normal)).abs() < TOL);
+    }
+
+    /* ---------------------------------------------------------------------
+     * MergeableRegion
+     * ------------------------------------------------------------------ */
+
+    #[test]
+    fn merge_compatible_when_all_fields_match() {
+        let a = simple_wall();
+        let b = simple_wall();
+        assert!(a.is_merge_compatible(&b));
+    }
+
+    #[test]
+    fn merge_incompatible_if_any_field_differs() {
+        let mut a = simple_wall();
+        let mut b = simple_wall();
+
+        b.exposure = WallExposure::NonHeatLoss;
+        assert!(!a.is_merge_compatible(&b));
+
+        b.exposure = a.exposure;
+        b.construction_type = WallConstructionType::TimberConstruction;
+        assert!(!a.is_merge_compatible(&b));
+
+        b.construction_type = a.construction_type;
+        b.base.construction_phase = ConstructionPhase::Extension1;
+        assert!(!a.is_merge_compatible(&b));
+    }
+
+    #[test]
+    fn with_geometry_preserves_metadata() {
+        let wall = simple_wall();
+        let new_poly = Polygon3D::new(vec![
+            Point3::new(0.0, 0.0, 0.0),
+            Point3::new(2.0, 0.0, 0.0),
+            Point3::new(2.0, 0.0, 3.0),
+            Point3::new(0.0, 0.0, 3.0),
+        ]);
+
+        let w2 = wall.with_geometry(new_poly.clone());
+
+        assert_eq!(w2.polygon.exterior, new_poly.exterior);
+        assert_eq!(w2.exposure, wall.exposure);
+        assert_eq!(w2.construction_type, wall.construction_type);
+        assert_eq!(w2.base.construction_phase, wall.base.construction_phase);
+    }
+
+    /* ---------------------------------------------------------------------
+     * WallRegionsManip – lookup & split
+     * ------------------------------------------------------------------ */
+
+    #[test]
+    fn get_wall_region_by_id_mut_returns_correct_region() {
+        let mut walls = simple_wall_regions();
+        let id = walls.regions[0].base.id;
+
+        let r = walls.get_wall_region_by_id_mut(&id).unwrap();
+        r.exposure = WallExposure::NonHeatLoss;
+
+        assert_eq!(walls.regions[0].exposure, WallExposure::NonHeatLoss);
+    }
+
+    #[test]
+    fn split_wall_region_creates_multiple_regions() {
+        let mut walls = simple_wall_regions();
+        let id = walls.regions[0].base.id;
+
+        walls.split_wall_region(id, 2.0, 0.0, |_| {});
+
+        assert!(walls.regions.len() >= 2);
+    }
+
+    #[test]
+    fn split_wall_region_noop_if_id_missing() {
+        let mut walls = simple_wall_regions();
+        walls.split_wall_region(ItemId::default(), 1.0, 0.0, |_| {});
+        assert_eq!(walls.regions.len(), 1);
+    }
+
+    /* ---------------------------------------------------------------------
+     * Floor / ceiling alignment
+     * ------------------------------------------------------------------ */
+
+    #[test]
+    fn floor_ceiling_aligned_when_xy_matches() {
+        let floor = simple_floor_boundary(0.0);
+        let ceiling = simple_floor_boundary(3.0);
+
+        assert!(WallRegions::check_floor_ceiling_aligned(&floor, &ceiling));
+    }
+
+    #[test]
+    fn floor_ceiling_not_aligned_when_xy_differs() {
+        let floor = simple_floor_boundary(0.0);
+
+        let ceiling = Polygon3DMultiZ {
+            exterior: vec![
+                (1.0, 0.0, vec![3.0]),
+                (5.0, 0.0, vec![3.0]),
+                (5.0, 4.0, vec![3.0]),
+                (1.0, 4.0, vec![3.0]),
+            ],
+        };
+
+        assert!(!WallRegions::check_floor_ceiling_aligned(&floor, &ceiling));
+    }
+
+    /* ---------------------------------------------------------------------
+     * merge_floor_ceiling_by_line
+     * ------------------------------------------------------------------ */
+
+    #[test]
+    fn merge_floor_ceiling_produces_boundary_vertices() {
+        let floor = simple_floor_boundary(0.0);
+        let ceiling = simple_floor_boundary(3.0);
+
+        let merged = WallRegions::merge_floor_ceiling_by_line(&floor, &ceiling).unwrap();
+
+        assert_eq!(merged.len(), floor.exterior.len());
+
+        for bv in merged {
+            assert_eq!(bv.floor_height, vec![0.0]);
+            assert_eq!(bv.ceiling_height, vec![3.0]);
+        }
+    }
+
+    #[test]
+    fn merge_floor_ceiling_handles_linear_interpolation() {
+        let floor = Polygon3DMultiZ {
+            exterior: vec![(0.0, 0.0, vec![0.0]), (2.0, 0.0, vec![0.0])],
+        };
+
+        let ceiling = Polygon3DMultiZ {
+            exterior: vec![(0.0, 0.0, vec![2.0]), (2.0, 0.0, vec![4.0])],
+        };
+
+        let merged = WallRegions::merge_floor_ceiling_by_line(&floor, &ceiling).unwrap();
+
+        assert_eq!(merged.len(), 2);
+        assert!((merged[1].ceiling_height[0] - 4.0).abs() < TOL);
+    }
+
+    /* ---------------------------------------------------------------------
+     * modify_walls_in_region
+     * ------------------------------------------------------------------ */
+
+    #[test]
+    fn modify_walls_only_affects_intersecting_walls() {
+        let mut walls = simple_wall_regions();
+
+        let selection = polygon![
+            (x: -1.0, y: -1.0),
+            (x:  5.0, y: -1.0),
+            (x:  5.0, y:  1.0),
+            (x: -1.0, y:  1.0),
+        ];
+
+        walls.modify_walls_in_region(
+            &selection,
+            Some(WallConstructionType::TimberConstruction),
+            None,
+            Some(ConstructionPhase::Extension1),
+            Some(WallExposure::NonHeatLoss),
+        );
+
+        let w = &walls.regions[0];
+        assert_eq!(
+            w.construction_type,
+            WallConstructionType::TimberConstruction
+        );
+        assert_eq!(w.base.construction_phase, ConstructionPhase::Extension1);
+        assert_eq!(w.exposure, WallExposure::NonHeatLoss);
+    }
+
+    #[test]
+    fn modify_walls_noop_when_no_intersection() {
+        let mut walls = simple_wall_regions();
+
+        let selection = polygon![
+            (x: 10.0, y: 10.0),
+            (x: 12.0, y: 10.0),
+            (x: 12.0, y: 12.0),
+            (x: 10.0, y: 12.0),
+        ];
+
+        walls.modify_walls_in_region(
+            &selection,
+            Some(WallConstructionType::TimberConstruction),
+            None,
+            None,
+            None,
+        );
+
+        assert_eq!(
+            walls.regions[0].construction_type,
+            WallConstructionType::Uninitialised
+        );
+    }
+
+    /* ---------------------------------------------------------------------
+     * merge()
+     * ------------------------------------------------------------------ */
+
+    #[test]
+    fn merge_extends_regions() {
+        let mut a = simple_wall_regions();
+        let b = simple_wall_regions();
+
+        a.merge(b);
+        assert_eq!(a.regions.len(), 2);
     }
 }
