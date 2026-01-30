@@ -1,13 +1,13 @@
 use chrono::NaiveDate;
 use rusqlite::{params, Connection, Result};
 use serde_json;
-use uuid::Uuid;
 
-use datatypes::ber::ber::Ber;
+use datatypes::ber::ber_struct::Ber;
+use datatypes::ber::common::ItemId;
 
 #[derive(Debug)]
 pub struct BerRecord {
-    pub id: Uuid,
+    pub id: ItemId,
     pub name: String,
     pub date_assessed: NaiveDate,
     pub data: Ber, // includes address and eircode
@@ -15,7 +15,7 @@ pub struct BerRecord {
 
 #[derive(Debug)]
 pub struct BerSummary {
-    pub id: Uuid,
+    pub id: ItemId,
     pub name: String,
     pub date_assessed: NaiveDate,
     pub address: String, // extracted from Ber JSON
@@ -55,7 +55,7 @@ impl<'a> BerRepository<'a> {
 
         let rows = stmt.query_map([], |row| {
             let id_str: String = row.get(0)?;
-            let id = Uuid::parse_str(&id_str).map_err(|e| {
+            let id = id_str.parse().map_err(|e| {
                 rusqlite::Error::FromSqlConversionFailure(
                     0,
                     rusqlite::types::Type::Text,
@@ -94,7 +94,7 @@ impl<'a> BerRepository<'a> {
     }
 
     /// Delete a BER by id
-    pub fn delete(&self, id: &Uuid) -> Result<()> {
+    pub fn delete(&self, id: &ItemId) -> Result<()> {
         self.conn
             .execute("DELETE FROM ber WHERE id = ?1", params![id.to_string()])?;
         Ok(())
@@ -122,7 +122,7 @@ impl<'a> BerRepository<'a> {
     }
 
     /// Load a full BER record by id
-    pub fn load(&self, id: &Uuid) -> Result<BerRecord> {
+    pub fn load(&self, id: &ItemId) -> Result<BerRecord> {
         self.conn.query_row(
             "SELECT name, date_assessed, data_json FROM ber WHERE id = ?1",
             params![id.to_string()],
@@ -164,9 +164,8 @@ mod tests {
     use super::*;
     use chrono::NaiveDate;
     use rusqlite::Connection;
-    use uuid::Uuid;
 
-    fn make_test_record(id: Uuid) -> BerRecord {
+    fn make_test_record(id: ItemId) -> BerRecord {
         let ber = Ber {
             id,
             address: "123 Test Street".to_string(),
@@ -209,7 +208,7 @@ mod tests {
         let repo = BerRepository::new(&conn);
         repo.init_db().unwrap();
 
-        let record = make_test_record(Uuid::new_v4());
+        let record = make_test_record(ItemId::default());
         repo.upsert(&record).unwrap();
 
         let count: i64 = conn
@@ -225,7 +224,7 @@ mod tests {
         let repo = BerRepository::new(&conn);
         repo.init_db().unwrap();
 
-        let record = make_test_record(Uuid::new_v4());
+        let record = make_test_record(ItemId::default());
         repo.upsert(&record).unwrap();
 
         let json: String = conn
@@ -242,7 +241,7 @@ mod tests {
         let repo = BerRepository::new(&conn);
         repo.init_db().unwrap();
 
-        let id = Uuid::new_v4();
+        let id = ItemId::default();
         let record = make_test_record(id);
 
         repo.upsert(&record).unwrap();
@@ -262,7 +261,7 @@ mod tests {
         let repo = BerRepository::new(&conn);
         repo.init_db().unwrap();
 
-        let id = Uuid::new_v4();
+        let id = ItemId::default();
         let mut record = make_test_record(id);
 
         repo.upsert(&record).unwrap();
@@ -283,8 +282,8 @@ mod tests {
         let repo = BerRepository::new(&conn);
         repo.init_db().unwrap();
 
-        let record1 = make_test_record(Uuid::new_v4());
-        let record2 = make_test_record(Uuid::new_v4());
+        let record1 = make_test_record(ItemId::default());
+        let record2 = make_test_record(ItemId::default());
 
         repo.upsert(&record1).unwrap();
         repo.upsert(&record2).unwrap();
@@ -302,7 +301,7 @@ mod tests {
         let repo = BerRepository::new(&conn);
         repo.init_db().unwrap();
 
-        let record = make_test_record(Uuid::new_v4());
+        let record = make_test_record(ItemId::default());
         repo.upsert(&record).unwrap();
 
         repo.delete(&record.id).unwrap();
@@ -320,7 +319,7 @@ mod tests {
         let repo = BerRepository::new(&conn);
         repo.init_db().unwrap();
 
-        let result = repo.load(&Uuid::new_v4());
+        let result = repo.load(&ItemId::default());
         assert!(result.is_err());
     }
 }

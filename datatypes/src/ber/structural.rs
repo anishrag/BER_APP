@@ -1,15 +1,15 @@
 // src/data/structural.rs
-use nalgebra::Point3;
+use geo::{Coord, LineString, Polygon};
+use nalgebra::{Point2, Point3};
 use serde::{Deserialize, Serialize};
-use uuid::Uuid;
 
-use super::common::{ConstructionPhase, Item, Photo};
+use super::common::{ConstructionPhase, Item, ItemId, Photo};
 use super::fenestration::{Door, Window};
 
 #[derive(Debug, Default, Clone, Serialize, Deserialize)]
 pub struct Opes {
-    pub doors: Vec<Uuid>,   // references to Door IDs
-    pub windows: Vec<Uuid>, // references to Window IDs
+    pub doors: Vec<ItemId>,   // references to Door IDs
+    pub windows: Vec<ItemId>, // references to Window IDs
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -62,8 +62,9 @@ pub enum ConstructionMakeup {
 }
 
 /// Construction types (example: 5-6 options)
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub enum FloorConstructionType {
+    #[default]
     SolidFloor,
     SuspendedFloor,
     NonHeatLossFloor,
@@ -104,12 +105,6 @@ pub enum WallExposure {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct FloorData {
-    pub construction_type: FloorConstructionType,
-    pub storey: u8,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct WallData {
     pub construction_type: WallConstructionType,
     pub exposure: WallExposure,
@@ -120,142 +115,156 @@ pub struct RoofData {
     pub construction_type: CeilingConstructionType,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct PlanarCommon {
-    pub id: Uuid,
-    pub vertices: Vec<Point3<f64>>,
+#[derive(Clone, Debug, Serialize, Deserialize, Default)]
+pub struct RegionBase {
+    pub id: ItemId,
+    pub construction_makeup: ConstructionMakeup,
     pub construction_phase: ConstructionPhase,
     pub opes: Opes,
-    pub construction: ConstructionMakeup,
     pub photos: Vec<Photo>,
     pub description: Option<String>,
 }
 
-impl PlanarCommon {
-    fn new(
+impl RegionBase {
+    pub fn clone_with_new_id(&self) -> Self {
+        Self {
+            id: ItemId::default(),
+            ..self.clone() // use regular clone for the rest
+        }
+    }
+}
+/// A planar region of the floor
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct FloorRegion {
+    pub polygon: Polygon<f64>, // 2D polygon boundary
+    pub height: f64,           // height per vertex
+    pub construction_type: FloorConstructionType,
+    pub base: RegionBase,
+}
+
+/// A planar region of the floor
+#[derive(Clone, Debug, Serialize, Deserialize, Default)]
+pub struct FloorRegions {
+    pub regions: Vec<FloorRegion>, // height per vertex
+}
+
+impl FloorRegions {
+    /// Create a new FloorRegions
+    pub fn new(
+        vertices: Vec<Point2<f64>>,
+        height: f64,
+        construction_type: Option<FloorConstructionType>,
+        construction_makeup: Option<ConstructionMakeup>,
+        construction_phase: Option<ConstructionPhase>,
+    ) -> Self {
+        let polygon = Polygon::new(
+            LineString::from(vertices.iter().map(|p| (p.x, p.y)).collect::<Vec<_>>()),
+            vec![],
+        );
+
+        let region = FloorRegion {
+            polygon,
+            height,
+            construction_type: construction_type.unwrap_or_default(),
+            base: RegionBase {
+                construction_makeup: construction_makeup.unwrap_or_default(),
+                construction_phase: construction_phase.unwrap_or_default(),
+                ..Default::default()
+            },
+        };
+
+        Self {
+            regions: vec![region],
+        }
+    }
+}
+/// A planar region of the floor
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct CeilingRegions {
+    pub regions: Vec<CeilingRegion>, // height per vertex
+}
+impl CeilingRegions {
+    /// Create a new CeilingRegions
+    pub fn new(
         vertices: Vec<Point3<f64>>,
-        construction_phase: ConstructionPhase,
-        construction: ConstructionMakeup,
+        construction_type: Option<CeilingConstructionType>,
+        construction_makeup: Option<ConstructionMakeup>,
+        construction_phase: Option<ConstructionPhase>,
     ) -> Self {
         Self {
-            id: Uuid::new_v4(),
-            vertices,
-            construction_phase,
-            opes: Opes::default(),
-            construction,
-            photos: Vec::new(),
-            description: None,
+            regions: vec![CeilingRegion {
+                polygon: Polygon3D::new(vertices),
+                construction_type: construction_type
+                    .unwrap_or(CeilingConstructionType::Uninitialised),
+                base: RegionBase {
+                    id: ItemId::default(),
+                    construction_makeup: construction_makeup.unwrap_or_default(),
+                    construction_phase: construction_phase.unwrap_or(ConstructionPhase::Original),
+                    opes: Opes::default(),
+                    photos: Vec::new(),
+                    description: None,
+                },
+            }],
+        }
+    }
+}
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct Polygon3D {
+    pub exterior: Vec<Point3<f64>>,
+}
+
+impl Polygon3D {
+    pub fn new(exterior: Vec<Point3<f64>>) -> Self {
+        Self { exterior }
+    }
+}
+impl From<Polygon3D> for Polygon<f64> {
+    fn from(polygon_3d: Polygon3D) -> Self {
+        let coords_2d: Vec<Coord<f64>> = polygon_3d
+            .exterior
+            .iter()
+            .map(|v| Coord { x: v.x, y: v.y })
+            .collect();
+        Polygon::new(LineString::from(coords_2d), vec![])
+    }
+}
+/// A planar region of the ceiling
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct CeilingRegion {
+    pub base: RegionBase,
+    pub polygon: Polygon3D, // 2D polygon boundary
+    pub construction_type: CeilingConstructionType,
+}
+
+impl Default for FloorRegion {
+    fn default() -> Self {
+        Self {
+            polygon: Polygon::new(LineString::new(vec![]), vec![]),
+            height: f64::default(),
+            construction_type: FloorConstructionType::default(),
+            base: RegionBase::default(),
         }
     }
 }
 
-// --- Planar elements enum ---
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub enum PlanarElement {
-    Floor {
-        common: PlanarCommon,
-        floor_specifics: FloorData,
-    },
-
-    Wall {
-        common: PlanarCommon,
-        wall_specifics: WallData,
-    },
-
-    Roof {
-        common: PlanarCommon,
-        roof_specifics: RoofData,
-    },
+/// A vertical planar wall region
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct WallRegion {
+    pub base: RegionBase,
+    pub polygon: Polygon3D, // 3D polygon (vertical plane, typically 4 vertices)
+    pub construction_type: WallConstructionType,
+    pub exposure: WallExposure,
 }
 
-// --- Constructors ---
-
-impl PlanarElement {
-    pub fn new_floor(
-        vertices: Vec<Point3<f64>>,
-        construction_phase: ConstructionPhase,
-        construction: ConstructionMakeup,
-    ) -> Self {
-        Self::Floor {
-            common: PlanarCommon::new(vertices, construction_phase, construction),
-            floor_specifics: FloorData {
-                storey: 0,
-                construction_type: FloorConstructionType::Uninitialised,
-            },
-        }
-    }
-
-    pub fn new_wall(
-        vertices: Vec<Point3<f64>>,
-        construction_phase: ConstructionPhase,
-        construction: ConstructionMakeup,
-    ) -> Self {
-        Self::Wall {
-            common: PlanarCommon::new(vertices, construction_phase, construction),
-            wall_specifics: WallData {
-                construction_type: WallConstructionType::Uninitialised,
-                exposure: WallExposure::Exposed,
-            },
-        }
-    }
-
-    pub fn new_roof(
-        vertices: Vec<Point3<f64>>,
-        construction_phase: ConstructionPhase,
-        construction: ConstructionMakeup,
-    ) -> Self {
-        Self::Roof {
-            common: PlanarCommon::new(vertices, construction_phase, construction),
-            roof_specifics: RoofData {
-                construction_type: CeilingConstructionType::Uninitialised,
-            },
-        }
-    }
+/// Collection of wall regions
+#[derive(Debug, Default, Clone, Serialize, Deserialize)]
+pub struct WallRegions {
+    pub regions: Vec<WallRegion>,
 }
 
-// --- Shared accessors ---
-
-impl PlanarElement {
-    pub fn common(&self) -> &PlanarCommon {
-        match self {
-            Self::Floor { common, .. } | Self::Wall { common, .. } | Self::Roof { common, .. } => {
-                common
-            }
-        }
-    }
-
-    pub fn common_mut(&mut self) -> &mut PlanarCommon {
-        match self {
-            Self::Floor { common, .. } | Self::Wall { common, .. } | Self::Roof { common, .. } => {
-                common
-            }
-        }
-    }
-}
-
-// --- Example ergonomic helpers (optional but recommended) ---
-
-impl PlanarElement {
-    pub fn id(&self) -> Uuid {
-        self.common().id
-    }
-
-    pub fn vertices(&self) -> &[Point3<f64>] {
-        &self.common().vertices
-    }
-
-    pub fn add_photo(&mut self, photo: Photo) {
-        self.common_mut().photos.push(photo);
-    }
-
-    pub fn set_description(&mut self, description: impl Into<String>) {
-        self.common_mut().description = Some(description.into());
-    }
-}
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Room {
-    pub id: Uuid,
+    pub id: ItemId,
     pub name: String,
     pub vertices: Vec<Point3<f64>>,
     pub thermostats: Vec<Item>,
@@ -270,12 +279,12 @@ pub struct Room {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Storey {
-    pub id: Uuid,
+    pub id: ItemId,
     pub name: String, // e.g., "Ground Floor", "First Floor"
     pub storey_number: i32,
-    pub floors: Vec<PlanarElement>,
-    pub walls: Vec<PlanarElement>,
-    pub roofs: Vec<PlanarElement>,
+    pub floors: FloorRegions,
+    pub walls: WallRegions,
+    pub roofs: CeilingRegions,
     pub windows: Vec<Window>,
     pub doors: Vec<Door>,
     pub rooms: Vec<Room>,
@@ -283,7 +292,7 @@ pub struct Storey {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ShelteredSideInfo {
-    pub id: Uuid,
+    pub id: ItemId,
     pub sheltered_sides: i32, // e.g., ["North", "West"]
 }
 
@@ -297,23 +306,11 @@ pub enum ThermalMassCategoryEnum {
     Other(String),
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct ThermalMassInfo {
-    pub id: Uuid,
+    pub id: ItemId,
     pub floors: ThermalMassCategoryEnum,
     pub partition_walls: ThermalMassCategoryEnum,
     pub external_walls: ThermalMassCategoryEnum,
     pub separating_walls: ThermalMassCategoryEnum,
-}
-
-impl Default for ThermalMassInfo {
-    fn default() -> Self {
-        Self {
-            id: Uuid::new_v4(),         // generate a new UUID
-            floors: Default::default(), // ThermalMassCategoryEnum::Invalid
-            partition_walls: Default::default(),
-            external_walls: Default::default(),
-            separating_walls: Default::default(),
-        }
-    }
 }

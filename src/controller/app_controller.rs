@@ -4,7 +4,8 @@ use std::sync::mpsc::Sender;
 
 use crate::engine::ber_repository::{BerRecord, BerRepository};
 use crate::engine::dataloader::DataLoader;
-use datatypes::ber::ber::Ber;
+use datatypes::ber::ber_struct::Ber;
+use datatypes::ber::common::ItemId;
 
 pub struct AppController {
     conn: Connection,
@@ -44,7 +45,7 @@ impl AppController {
         ber
     }
 
-    pub fn get_ber(&self, id: &uuid::Uuid) -> Option<Ber> {
+    pub fn get_ber(&self, id: &ItemId) -> Option<Ber> {
         let repo = BerRepository::new(&self.conn);
         repo.load(id).ok().map(|record| record.data)
     }

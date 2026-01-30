@@ -1,14 +1,11 @@
 use anyhow::Result;
 use chrono::NaiveDate;
-use nalgebra::Point3;
+use nalgebra::Point2;
 use rusqlite::Connection;
-use uuid::Uuid;
 
-use datatypes::ber::ber::Ber;
-use datatypes::ber::common::{ConstructionPhase, ConstructionPhases, Photo};
-use datatypes::ber::structural::{
-    ConstructionMakeup, PlanarElement, Storey, ThermalMassCategoryEnum, ThermalMassInfo,
-};
+use datatypes::ber::ber_struct::Ber;
+use datatypes::ber::common::{ConstructionPhase, ConstructionPhases, ItemId, Photo};
+use datatypes::ber::structural::{FloorRegions, Storey, ThermalMassCategoryEnum, ThermalMassInfo};
 use datatypes::ber::systems::{
     Direction, HeatingControls, HeatingSystem, HeatingSystemType, SolarElements, VentilationSystem,
     VentilationSystemType,
@@ -34,7 +31,7 @@ fn setup_repo() -> Result<BerRepository<'static>> {
 fn test_insert_and_load_minimal_ber() -> Result<()> {
     let repo = setup_repo()?;
 
-    let id = Uuid::new_v4();
+    let id = ItemId::default();
     let ber = create_minimal_ber(id);
 
     repo.upsert(&BerRecord {
@@ -60,7 +57,7 @@ fn test_insert_and_load_minimal_ber() -> Result<()> {
 fn test_insert_and_load_full_ber() -> Result<()> {
     let repo = setup_repo()?;
 
-    let id = Uuid::new_v4();
+    let id = ItemId::default();
     let ber = create_full_ber(id);
 
     repo.upsert(&BerRecord {
@@ -88,7 +85,7 @@ fn test_multiple_ber_entries() -> Result<()> {
     let repo = setup_repo()?;
 
     for i in 0..3 {
-        let id = Uuid::new_v4();
+        let id = ItemId::default();
         let mut ber = create_minimal_ber(id);
         ber.address = format!("{} Test Street", i);
 
@@ -113,10 +110,10 @@ fn test_multiple_ber_entries() -> Result<()> {
 fn test_ber_with_complex_structures() -> Result<()> {
     let repo = setup_repo()?;
 
-    let id = Uuid::new_v4();
+    let id = ItemId::default();
     let mut ber = create_minimal_ber(id);
     ber.thermal_mass_info = ThermalMassInfo {
-        id: Uuid::new_v4(),
+        id: ItemId::default(),
         floors: ThermalMassCategoryEnum::Medium,
         partition_walls: ThermalMassCategoryEnum::High,
         external_walls: ThermalMassCategoryEnum::Medium,
@@ -151,7 +148,7 @@ fn test_ber_with_complex_structures() -> Result<()> {
 fn test_delete_ber() -> Result<()> {
     let repo = setup_repo()?;
 
-    let id = Uuid::new_v4();
+    let id = ItemId::default();
     let ber = create_minimal_ber(id);
 
     repo.upsert(&BerRecord {
@@ -172,8 +169,7 @@ fn test_delete_ber() -> Result<()> {
 /// ============================
 /// Helper BER builders
 /// ============================
-
-fn create_minimal_ber(id: Uuid) -> Ber {
+fn create_minimal_ber(id: ItemId) -> Ber {
     Ber {
         id,
         address: "123 Test Street".to_string(),
@@ -182,12 +178,11 @@ fn create_minimal_ber(id: Uuid) -> Ber {
             years: [(ConstructionPhase::Original, 2000)].into_iter().collect(),
         },
         heating_system: HeatingSystem {
-            id: Uuid::new_v4(),
+            id: ItemId::default(),
             system_type: HeatingSystemType::GasBoiler,
             description: "Standard gas boiler".to_string(),
             year_installed: Some(2018),
             controls: HeatingControls {
-                id: Uuid::new_v4(),
                 programmer: true,
                 zones: 2,
                 notes: None,
@@ -195,7 +190,7 @@ fn create_minimal_ber(id: Uuid) -> Ber {
             separate_hot_water: true,
         },
         ventilation_system: VentilationSystem {
-            id: Uuid::new_v4(),
+            id: ItemId::default(),
             system_type: VentilationSystemType::Natural,
             description: None,
         },
@@ -203,7 +198,7 @@ fn create_minimal_ber(id: Uuid) -> Ber {
         number_of_storeys: 2,
         storeys: vec![],
         thermal_mass_info: ThermalMassInfo {
-            id: Uuid::new_v4(),
+            id: ItemId::default(),
             floors: ThermalMassCategoryEnum::Medium,
             partition_walls: ThermalMassCategoryEnum::Medium,
             external_walls: ThermalMassCategoryEnum::Medium,
@@ -215,7 +210,7 @@ fn create_minimal_ber(id: Uuid) -> Ber {
     }
 }
 
-fn create_full_ber(id: Uuid) -> Ber {
+fn create_full_ber(id: ItemId) -> Ber {
     let mut ber = create_minimal_ber(id);
 
     ber.construction_phases = ConstructionPhases {
@@ -229,32 +224,34 @@ fn create_full_ber(id: Uuid) -> Ber {
 
     ber.storeys = vec![
         Storey {
-            id: Uuid::new_v4(),
+            id: ItemId::default(),
             storey_number: 0,
             name: "Ground Floor".to_string(),
-            floors: vec![PlanarElement::new_floor(
+            floors: FloorRegions::new(
                 vec![
-                    Point3::new(0.0, 0.0, 0.0),
-                    Point3::new(10.0, 0.0, 0.0),
-                    Point3::new(10.0, 8.0, 0.0),
-                    Point3::new(0.0, 8.0, 0.0),
+                    Point2::new(0.0, 0.0),
+                    Point2::new(10.0, 0.0),
+                    Point2::new(10.0, 8.0),
+                    Point2::new(0.0, 8.0),
                 ],
-                ConstructionPhase::Original,
-                ConstructionMakeup::Default,
-            )],
-            walls: vec![],
-            roofs: vec![],
+                0.0,
+                None,
+                None,
+                None,
+            ),
+            walls: Default::default(),
+            roofs: Default::default(),
             windows: vec![],
             doors: vec![],
             rooms: vec![],
         },
         Storey {
-            id: Uuid::new_v4(),
+            id: ItemId::default(),
             storey_number: 1,
             name: "First Floor".to_string(),
-            floors: vec![],
-            walls: vec![],
-            roofs: vec![],
+            floors: Default::default(),
+            walls: Default::default(),
+            roofs: Default::default(),
             windows: vec![],
             doors: vec![],
             rooms: vec![],
@@ -263,21 +260,21 @@ fn create_full_ber(id: Uuid) -> Ber {
 
     ber.photos = vec![
         Photo {
-            id: Uuid::new_v4(),
+            id: ItemId::default(),
             file_path: "assets/front.jpg".to_string(),
             description: Some("Front".to_string()),
         },
         Photo {
-            id: Uuid::new_v4(),
+            id: ItemId::default(),
             file_path: "assets/living.jpg".to_string(),
             description: Some("Living".to_string()),
         },
     ];
 
     ber.solar = vec![SolarElements {
-        id: Uuid::new_v4(),
+        id: ItemId::default(),
         num_panels: 10,
-        roof_element_id: Uuid::new_v4(),
+        roof_element_id: ItemId::default(),
         estimated_angle_degs: 30.0,
         estimated_direction: Direction::South,
         photo: None,

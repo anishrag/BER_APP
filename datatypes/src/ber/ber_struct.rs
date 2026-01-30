@@ -1,13 +1,12 @@
 use serde::{Deserialize, Serialize};
-use uuid::Uuid;
 
-use super::common::{ConstructionPhases, Photo};
+use super::common::{ConstructionPhases, ItemId, Photo};
 use super::structural::{Storey, ThermalMassInfo};
 use super::systems::{HeatingSystem, SolarElements, VentilationSystem};
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct Ber {
-    pub id: Uuid,
+    pub id: ItemId,
     pub address: String,
     pub eircode: String,
     pub construction_phases: ConstructionPhases,
@@ -26,19 +25,8 @@ pub struct Ber {
 impl Ber {
     pub fn new() -> Self {
         Self {
-            id: Uuid::new_v4(),
-            address: String::new(),
-            eircode: String::new(),
-            construction_phases: Default::default(),
-            heating_system: Default::default(),
-            ventilation_system: Default::default(),
-            sheltered_sides: 0.0,
             number_of_storeys: 1,
-            storeys: vec![],
-            thermal_mass_info: Default::default(),
-            orientation_deg: 0.0,
-            solar: vec![],
-            photos: vec![],
+            ..Default::default()
         }
     }
 }

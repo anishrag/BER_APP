@@ -1,26 +1,26 @@
-pub mod ceiling;
-pub mod geometry;
-pub mod walls;
-
+mod ceiling;
 mod floor;
+mod geometry;
 mod types;
+mod walls;
+
 use geo::{LineString, Polygon};
 use nalgebra::{Point2, Point3};
 
-use ceiling::{CeilingRegion, CeilingRegions};
-use datatypes::ber::diffable::AddRemoveTrait;
+use datatypes::ber::common::ItemId;
+
 use datatypes::ber::structural::{
-    CeilingConstructionType, ConstructionMakeup, FloorConstructionType, Storey,
+    CeilingConstructionType, CeilingRegion, CeilingRegions, ConstructionMakeup,
+    FloorConstructionType, FloorRegion, FloorRegions, Storey, WallRegion, WallRegions,
 };
-use floor::{FloorRegion, FloorRegions};
-use types::{
-    MergeWarning, MergeableGeometry, MergeableRegion, RegionContainer, RegionType, EPSILON,
-};
-use walls::{WallRegion, WallRegions};
+
+use crate::ceiling::CeilingRegionsManip;
+use crate::floor::FloorRegionsManip;
+use crate::geometry::{Geometry, MergeableGeometry, MergeableRegion};
+use crate::types::{MergeWarning, RegionContainer, RegionType, EPSILON};
+use crate::walls::WallRegionsManip;
 
 pub use datatypes::ber::common::ConstructionPhase;
-
-use uuid::Uuid;
 
 pub enum FloorPlanError {
     PointNotOnEdge,
@@ -40,9 +40,10 @@ impl FloorPlan {
     // costructors
     pub fn new_floor(
         vertices: Vec<Point2<f64>>,
+        height: f64,
         construction_type: FloorConstructionType,
         floor_plan_below: Option<&FloorPlan>,
-    ) -> (Self, Storey) {
+    ) -> Self {
         let floor_regions;
         let mut storey = 0;
         match floor_plan_below {
@@ -81,29 +82,17 @@ impl FloorPlan {
                 storey = floor_plan.storey + 1;
             }
             None => {
-                floor_regions = FloorRegions::new(vertices, Some(construction_type), None, None);
+                floor_regions =
+                    FloorRegions::new(vertices, height, Some(construction_type), None, None);
             }
         }
 
-        (
-            Self {
-                storey,
-                floors: floor_regions.clone(),
-                walls: WallRegions { regions: vec![] },
-                ceilings: CeilingRegions { regions: vec![] },
-            },
-            Storey {
-                id: Uuid::new_v4(),
-                storey_number: storey as i32,
-                name: "Floor ".to_string() + &storey.to_string(),
-                floors: floor_regions.into(),
-                walls: vec![],
-                roofs: vec![],
-                windows: vec![],
-                doors: vec![],
-                rooms: vec![],
-            },
-        )
+        Self {
+            storey,
+            floors: floor_regions,
+            walls: WallRegions { regions: vec![] },
+            ceilings: CeilingRegions { regions: vec![] },
+        }
     }
 
     // ----------------------------------------------------------------------------------------------
@@ -237,19 +226,8 @@ impl FloorPlan {
                 .unwrap()
         };
 
-        let mut updated = Vec::new();
-        for region in &self.ceilings.regions {
-            if region.polygon.contains_point(point.x, point.y) {
-                updated.extend(
-                    region
-                        .insert_vertex(point.x, point.y, new_height + floor_z)
-                        .map_err(|_| FloorPlanError::CeilingError)?,
-                );
-            } else {
-                updated.push(region.clone());
-            }
-        }
-        self.ceilings.regions = updated;
+        self.ceilings.insert_vertex(point, new_height + floor_z);
+
         Ok(())
     }
 
@@ -334,7 +312,7 @@ impl FloorPlan {
 
     pub fn change_wall_construction_makeup_split(
         &mut self,
-        wall_id: Uuid,
+        wall_id: ItemId,
         split_along_xy: f64,
         split_along_z: f64,
         construction_makeup: ConstructionMakeup,
@@ -347,7 +325,7 @@ impl FloorPlan {
 
     pub fn change_wall_construction_phase_split(
         &mut self,
-        wall_id: Uuid,
+        wall_id: ItemId,
         split_along_xy: f64,
         split_along_z: f64,
         phase: ConstructionPhase,
@@ -360,7 +338,7 @@ impl FloorPlan {
 
     pub fn change_wall_construction_type_split(
         &mut self,
-        wall_id: Uuid,
+        wall_id: ItemId,
         split_along_xy: f64,
         split_along_z: f64,
         construction_type: datatypes::ber::structural::WallConstructionType,
@@ -377,7 +355,7 @@ impl FloorPlan {
 
     pub fn combine_regions(
         &mut self,
-        region_ids: &mut Vec<Uuid>,
+        region_ids: &mut Vec<ItemId>,
         region_type: RegionType,
     ) -> Vec<MergeWarning> {
         match region_type {
@@ -387,7 +365,7 @@ impl FloorPlan {
         }
     }
 
-    fn combine_regions_generic<T>(&mut self, region_ids: &mut Vec<Uuid>) -> Vec<MergeWarning>
+    fn combine_regions_generic<T>(&mut self, region_ids: &mut Vec<ItemId>) -> Vec<MergeWarning>
     where
         T: MergeableRegion,
         FloorPlan: RegionContainer<T>,
@@ -401,7 +379,7 @@ impl FloorPlan {
             .collect();
 
         // Warn for invalid IDs
-        let invalid_ids: Vec<Uuid> = region_ids
+        let invalid_ids: Vec<ItemId> = region_ids
             .iter()
             .filter(|id| !regions.iter().any(|r| &r.id() == *id))
             .copied()
@@ -460,7 +438,7 @@ impl FloorPlan {
             }
             // --- end convergence merge ---
 
-            let source_ids: Vec<Uuid> = group.iter().map(|r| r.id()).collect();
+            let source_ids: Vec<ItemId> = group.iter().map(|r| r.id()).collect();
 
             // Build new merged regions
             for geom in geometries.iter().cloned() {
@@ -505,14 +483,4 @@ impl From<Storey> for FloorPlan {
             ceilings: CeilingRegions::from(storey.roofs),
         }
     }
-}
-
-pub struct FloorPlanChangeItem {
-    pub element: Box<dyn AddRemoveTrait>,
-    pub location_uuid: Option<Uuid>,
-}
-pub struct FloorPlanChangeDyn {
-    pub remove: Vec<FloorPlanChangeItem>,
-    pub add: Vec<FloorPlanChangeItem>,
-    pub modify: Vec<FloorPlanChangeItem>,
 }

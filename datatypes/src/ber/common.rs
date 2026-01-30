@@ -1,18 +1,47 @@
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+use std::ops::Deref;
+
 use uuid::Uuid;
 
 pub type Year = u32;
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash)]
+pub struct ItemId(pub Uuid);
+
+impl Default for ItemId {
+    fn default() -> Self {
+        ItemId(Uuid::new_v4())
+    }
+}
+
+impl Deref for ItemId {
+    type Target = Uuid;
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+
+use std::str::FromStr;
+
+impl FromStr for ItemId {
+    type Err = uuid::Error;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        Uuid::parse_str(s).map(ItemId)
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct Photo {
-    pub id: Uuid,
+    pub id: ItemId,
     pub file_path: String, // local path to image
     pub description: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Hash, Default)]
 pub enum ConstructionPhase {
+    #[default]
     Original,
     Extension1,
     Extension2,
@@ -104,7 +133,7 @@ pub enum ItemType {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Item {
-    pub id: Uuid,
+    pub id: ItemId,
     pub name: String,
     pub item_type: ItemType,
     pub photos: Vec<Photo>,

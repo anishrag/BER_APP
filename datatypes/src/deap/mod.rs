@@ -1,5 +1,5 @@
 pub mod building;
-pub mod deap;
+pub mod deap_struct;
 pub mod general;
 pub mod lighting;
 pub mod renewables;

@@ -1,9 +1,8 @@
 // src/data/fenestration.rs
 
 use serde::{Deserialize, Serialize};
-use uuid::Uuid;
 
-use super::common::{Photo, Year};
+use super::common::{ItemId, Photo, Year};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum Glazing {
@@ -28,7 +27,7 @@ pub enum WindowNameSpecifics {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct WindowType {
-    pub id: Uuid,
+    pub id: ItemId,
     pub year: Year,
     pub glazing: Glazing,
     pub gap: Vec<u32>, // gap in mm for double/triple glazing
@@ -40,16 +39,16 @@ pub struct WindowType {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Window {
-    pub id: Uuid,
+    pub id: ItemId,
     pub vertices: Vec<(f32, f32, f32)>,
     pub width_m: f32,
     pub height_m: f32,
-    pub window_type_id: Uuid,
+    pub window_type_id: ItemId,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Door {
-    pub id: Uuid,
+    pub id: ItemId,
     pub type_name: String,
     pub vertices: Vec<(f32, f32, f32)>,
     pub photos: Vec<Photo>,

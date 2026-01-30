@@ -1,32 +1,29 @@
 // standard includes
 use geo::Polygon;
 use nalgebra::{Point2, Point3, Vector2, Vector3};
-use uuid::Uuid;
 
-use datatypes::ber::common::ConstructionPhase;
+use datatypes::ber::common::{ConstructionPhase, ItemId};
 use datatypes::ber::structural::{
-    ConstructionMakeup, PlanarElement, WallConstructionType, WallExposure,
+    CeilingRegions, ConstructionMakeup, FloorRegions, WallConstructionType, WallExposure,
+    WallRegion, WallRegions,
 };
 
 // local includes
-use super::ceiling::CeilingRegions;
-use super::floor::FloorRegions;
-use super::types::{
-    HasBaseRegion, MergeableRegion, Polygon3D, Polygon3DMultiZ, RegionBase, SplitLine3D, EPSILON,
-};
+use super::ceiling::CeilingRegionsManip;
+use super::floor::FloorRegionsManip;
+use super::geometry::{Geometry, MergeableRegion};
+use super::types::{HasBaseRegion, Polygon3D, Polygon3DMultiZ, RegionBase, SplitLine3D, EPSILON};
 
-/// A vertical planar wall region
-#[derive(Clone, Debug)]
-pub struct WallRegion {
-    pub base: RegionBase,
-    pub polygon: Polygon3D, // 3D polygon (vertical plane, typically 4 vertices)
-    pub construction_type: WallConstructionType,
-    pub exposure: WallExposure,
+pub trait WallRegionManip {
+    fn get_leftmost_floor_vertex(&self) -> Point3<f64>;
+    fn wall_horizontal_dir(&self) -> Vector3<f64>;
+    fn wall_plane_normal(&self) -> Vector3<f64>;
+    fn get_dividing_line_equation(&self, split_along_xy: f64, split_along_z: f64) -> SplitLine3D;
 }
 
-impl WallRegion {
+impl WallRegionManip for WallRegion {
     /// Get the length of the wall region (projected to XY plane)
-    pub fn get_leftmost_floor_vertex(&self) -> Point3<f64> {
+    fn get_leftmost_floor_vertex(&self) -> Point3<f64> {
         self.polygon.exterior[0]
     }
 
@@ -45,11 +42,7 @@ impl WallRegion {
         u.cross(&v).normalize()
     }
 
-    pub fn get_dividing_line_equation(
-        &self,
-        split_along_xy: f64,
-        split_along_z: f64,
-    ) -> SplitLine3D {
+    fn get_dividing_line_equation(&self, split_along_xy: f64, split_along_z: f64) -> SplitLine3D {
         let origin = self.get_leftmost_floor_vertex();
 
         let u = self.wall_horizontal_dir().normalize(); // in XY
@@ -85,7 +78,7 @@ impl WallRegion {
 impl MergeableRegion for WallRegion {
     type Geometry = Polygon3D; // or Vec<Vertex> if you use vertex list
 
-    fn id(&self) -> Uuid {
+    fn id(&self) -> ItemId {
         self.base.id
     }
 
@@ -110,10 +103,56 @@ impl MergeableRegion for WallRegion {
     }
 }
 
-/// Collection of wall regions
-#[derive(Debug, Default)]
-pub struct WallRegions {
-    pub regions: Vec<WallRegion>,
+pub trait WallRegionsManip {
+    fn get_wall_region_by_id_mut(&mut self, id: &ItemId) -> Option<&mut WallRegion>;
+    fn split_wall_region<F>(
+        &mut self,
+        wall_id: ItemId,
+        split_along_xy: f64,
+        split_along_z: f64,
+        update_new_region: F,
+    ) where
+        F: FnMut(&mut WallRegion);
+    fn add_from_floor_discontinuities(
+        &mut self,
+        floor_regions: &FloorRegions,
+        default_construction_type: Option<WallConstructionType>,
+        default_construction_makeup: Option<ConstructionMakeup>,
+        default_exposure: Option<WallExposure>,
+    );
+    fn add_from_ceiling_discontinuities(
+        &mut self,
+        ceiling_regions: &CeilingRegions,
+        default_construction_type: Option<WallConstructionType>,
+        default_construction_makeup: Option<ConstructionMakeup>,
+        default_exposure: Option<WallExposure>,
+    );
+    fn add_from_exterior_perimeter(
+        &mut self,
+        floor_regions: &FloorRegions,
+        ceiling_regions: &CeilingRegions,
+        default_construction_type: Option<WallConstructionType>,
+        default_construction_makeup: Option<ConstructionMakeup>,
+        default_construction_phase: Option<ConstructionPhase>,
+        default_exposure: Option<WallExposure>,
+    );
+    fn merge(&mut self, other: WallRegions);
+    fn modify_walls_in_region(
+        &mut self,
+        polygon_2d: &Polygon<f64>,
+        construction_type: Option<WallConstructionType>,
+        construction_makeup: Option<ConstructionMakeup>,
+        construction_phase: Option<ConstructionPhase>,
+        exposure: Option<WallExposure>,
+    );
+    fn check_floor_ceiling_aligned(
+        floor_boundary: &Polygon3DMultiZ,
+        ceiling_boundary: &Polygon3DMultiZ,
+    ) -> bool;
+    fn merge_floor_ceiling_by_line(
+        floor_boundary: &Polygon3DMultiZ,
+        ceiling_boundary: &Polygon3DMultiZ,
+    ) -> Option<Vec<BoundaryVertex>>;
 }
 
 pub struct BoundaryVertex {
@@ -121,15 +160,15 @@ pub struct BoundaryVertex {
     floor_height: Vec<f64>,
     ceiling_height: Vec<f64>,
 }
-impl WallRegions {
+impl WallRegionsManip for WallRegions {
     /// Create a new empty WallRegions
-    pub fn get_wall_region_by_id_mut(&mut self, id: &Uuid) -> Option<&mut WallRegion> {
+    fn get_wall_region_by_id_mut(&mut self, id: &ItemId) -> Option<&mut WallRegion> {
         self.regions.iter_mut().find(|region| &region.base.id == id)
     }
 
-    pub fn split_wall_region<F>(
+    fn split_wall_region<F>(
         &mut self,
-        wall_id: Uuid,
+        wall_id: ItemId,
         split_along_xy: f64,
         split_along_z: f64,
         mut update_new_region: F,
@@ -156,7 +195,7 @@ impl WallRegions {
 
         for split_polygon in split_polygons.iter().skip(1) {
             let mut new_wall_region = wall_region_clone.clone();
-            new_wall_region.base.id = Uuid::new_v4();
+            new_wall_region.base.id = ItemId::default();
             new_wall_region.polygon = split_polygon.clone();
 
             update_new_region(&mut new_wall_region);
@@ -166,7 +205,7 @@ impl WallRegions {
     }
 
     /// Generate walls from floor region discontinuities (internal walls where floor height changes)
-    pub fn add_from_floor_discontinuities(
+    fn add_from_floor_discontinuities(
         &mut self,
         floor_regions: &FloorRegions,
         default_construction_type: Option<WallConstructionType>,
@@ -213,11 +252,12 @@ impl WallRegions {
                         construction_type: default_construction_type
                             .unwrap_or(WallConstructionType::Uninitialised),
                         base: RegionBase {
-                            id: Uuid::new_v4(),
+                            id: ItemId::default(),
                             construction_phase,
                             construction_makeup: default_construction_makeup
                                 .clone()
                                 .unwrap_or_default(),
+                            ..Default::default()
                         },
                         exposure: default_exposure.unwrap_or(WallExposure::Exposed),
                     });
@@ -227,7 +267,7 @@ impl WallRegions {
     }
 
     /// Generate walls from ceiling region discontinuities (internal walls where ceiling height jumps)
-    pub fn add_from_ceiling_discontinuities(
+    fn add_from_ceiling_discontinuities(
         &mut self,
         ceiling_regions: &CeilingRegions,
         default_construction_type: Option<WallConstructionType>,
@@ -269,11 +309,12 @@ impl WallRegions {
                         construction_type: default_construction_type
                             .unwrap_or(WallConstructionType::Uninitialised),
                         base: RegionBase {
-                            id: Uuid::new_v4(),
+                            id: ItemId::default(),
                             construction_makeup: default_construction_makeup
                                 .clone()
                                 .unwrap_or_default(),
                             construction_phase,
+                            ..Default::default()
                         },
                         exposure: default_exposure.unwrap_or(WallExposure::NonHeatLoss),
                     });
@@ -386,7 +427,7 @@ impl WallRegions {
         Some(merged)
     }
     /// Generate exterior walls from floor and ceiling perimeters
-    pub fn add_from_exterior_perimeter(
+    fn add_from_exterior_perimeter(
         &mut self,
         floor_regions: &FloorRegions,
         ceiling_regions: &CeilingRegions,
@@ -436,11 +477,12 @@ impl WallRegions {
                             construction_type: default_construction_type
                                 .unwrap_or(WallConstructionType::Uninitialised),
                             base: RegionBase {
-                                id: Uuid::new_v4(),
+                                id: ItemId::default(),
                                 construction_makeup: default_construction_makeup
                                     .clone()
                                     .unwrap_or_default(),
                                 construction_phase,
+                                ..Default::default()
                             },
                             exposure: default_exposure.unwrap_or(WallExposure::Exposed),
                         });
@@ -450,12 +492,12 @@ impl WallRegions {
     }
 
     /// Merge this WallRegions with another
-    pub fn merge(&mut self, other: WallRegions) {
+    fn merge(&mut self, other: WallRegions) {
         self.regions.extend(other.regions);
     }
 
     /// Modify wall properties for walls that match a 2D polygon (e.g., for user editing)
-    pub fn modify_walls_in_region(
+    fn modify_walls_in_region(
         &mut self,
         polygon_2d: &Polygon<f64>,
         construction_type: Option<WallConstructionType>,
@@ -480,31 +522,6 @@ impl WallRegions {
                 }
             }
         }
-    }
-}
-
-impl From<Vec<PlanarElement>> for WallRegions {
-    fn from(elements: Vec<PlanarElement>) -> Self {
-        let regions = elements
-            .into_iter()
-            .map(|el| match el {
-                PlanarElement::Wall {
-                    common,
-                    wall_specifics,
-                } => WallRegion {
-                    polygon: Polygon3D::new(common.vertices),
-                    construction_type: wall_specifics.construction_type,
-                    base: RegionBase {
-                        id: Uuid::new_v4(),
-                        construction_phase: common.construction_phase,
-                        construction_makeup: common.construction,
-                    },
-                    exposure: wall_specifics.exposure,
-                },
-                _ => panic!("Expected PlanarElement::Wall"),
-            })
-            .collect();
-        Self { regions }
     }
 }
 // Helper structures

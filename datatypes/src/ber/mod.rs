@@ -1,7 +1,6 @@
 // src/data/mod.rs
-pub mod ber;
+pub mod ber_struct;
 pub mod common;
-pub mod diffable;
 pub mod fenestration;
 pub mod structural;
 pub mod systems;
