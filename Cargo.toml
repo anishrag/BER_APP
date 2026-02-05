@@ -20,6 +20,8 @@ geo = "0.32.0"
 nalgebra = { version = "0.34.1", features = ["serde-serialize"] }
 earcutr = "0.5.0"
 datatypes = { path = "datatypes" }
+egui = "0.33.3"
+eframe = "0.33.3"
 
 [build-dependencies]
 slint-build = "1.12.1"
