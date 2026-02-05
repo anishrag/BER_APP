@@ -25,4 +25,4 @@ datatypes = { path = "datatypes" }
 slint-build = "1.12.1"
 
 [workspace]
-members = ["datatypes", "floor_plan"]
+members = ["datatypes", "gen_3d_vol"]

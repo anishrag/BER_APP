@@ -9,9 +9,10 @@ use nalgebra::{Point2, Point3};
 
 use datatypes::ber::common::ItemId;
 
+pub use datatypes::ber::structural::FloorConstructionType;
 use datatypes::ber::structural::{
-    CeilingConstructionType, CeilingRegion, CeilingRegions, ConstructionMakeup,
-    FloorConstructionType, FloorRegion, FloorRegions, Storey, WallRegion, WallRegions,
+    CeilingConstructionType, CeilingRegion, CeilingRegions, ConstructionMakeup, FloorRegion,
+    FloorRegions, Storey, WallRegion, WallRegions,
 };
 
 use crate::ceiling::CeilingRegionsManip;
@@ -22,13 +23,13 @@ use crate::walls::WallRegionsManip;
 
 pub use datatypes::ber::common::ConstructionPhase;
 
-pub enum FloorPlanError {
+pub enum Gen3DError {
     PointNotOnEdge,
     HeightConflict,
     CeilingError,
 }
 
-pub struct FloorPlan {
+pub struct Gen3D {
     pub storey: u32,
     pub floors: FloorRegions,
     pub walls: WallRegions,
@@ -36,13 +37,13 @@ pub struct FloorPlan {
 }
 
 //TODO: ddecide where storey lives
-impl FloorPlan {
+impl Gen3D {
     // costructors
     pub fn new_floor(
         vertices: Vec<Point2<f64>>,
         height: f64,
         construction_type: FloorConstructionType,
-        floor_plan_below: Option<&FloorPlan>,
+        floor_plan_below: Option<&Gen3D>,
     ) -> Self {
         let floor_regions;
         let mut storey = 0;
@@ -210,7 +211,7 @@ impl FloorPlan {
         point: Point2<f64>,
         new_height: f64,
         from_highest_region: bool,
-    ) -> Result<(), FloorPlanError> {
+    ) -> Result<(), Gen3DError> {
         let floor_heights = self.floors.get_floor_height_at_point(&point);
         let floor_z = if from_highest_region {
             floor_heights
@@ -368,7 +369,7 @@ impl FloorPlan {
     fn combine_regions_generic<T>(&mut self, region_ids: &mut Vec<ItemId>) -> Vec<MergeWarning>
     where
         T: MergeableRegion,
-        FloorPlan: RegionContainer<T>,
+        Gen3D: RegionContainer<T>,
     {
         let mut warnings = Vec::new();
         // Select only the regions we want to merge
@@ -458,23 +459,23 @@ impl FloorPlan {
     }
 }
 
-impl RegionContainer<FloorRegion> for FloorPlan {
+impl RegionContainer<FloorRegion> for Gen3D {
     fn regions(&self) -> &Vec<FloorRegion> {
         &self.floors.regions
     }
 }
-impl RegionContainer<CeilingRegion> for FloorPlan {
+impl RegionContainer<CeilingRegion> for Gen3D {
     fn regions(&self) -> &Vec<CeilingRegion> {
         &self.ceilings.regions
     }
 }
-impl RegionContainer<WallRegion> for FloorPlan {
+impl RegionContainer<WallRegion> for Gen3D {
     fn regions(&self) -> &Vec<WallRegion> {
         &self.walls.regions
     }
 }
 
-impl From<Storey> for FloorPlan {
+impl From<Storey> for Gen3D {
     fn from(storey: Storey) -> Self {
         Self {
             storey: storey.storey_number as u32,

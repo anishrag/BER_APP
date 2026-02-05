@@ -7,7 +7,7 @@
 // external crates
 use earcutr::earcut;
 use geo::Polygon;
-use nalgebra::{Point2, Point3, Vector3};
+use nalgebra::{Point2, Point3, Vector2, Vector3};
 use std::collections::HashMap;
 use std::convert::TryFrom;
 // crate includes
@@ -130,9 +130,50 @@ pub trait CeilingRegionsManip {
     fn modify_polygon_increase_height(&mut self, polygon: Polygon<f64>, delta_height: f64);
     fn get_clockwise_3d_polygon_starting_closest_to_origin(&self) -> Polygon3DMultiZ;
 }
+pub enum RegionDir {
+    NPlus45,
+    NPlus135,
+    NPlus225,
+    NPlus315,
+}
+//TODO: enforce always clockwise
+fn get_region_dir_relative_to_edge_point(p: Point2<f64>, reg: &CeilingRegion) -> Result<f64, ()> {
+    let poly_points = &reg.polygon.exterior;
+    let n = poly_points.len();
+
+    let mut acc_angle: f64 = 0.0;
+    let mut num_segments = 0;
+    for i in 1..n {
+        let a = poly_points[i - 1];
+        let b = poly_points[i];
+
+        if point_on_segment_2d(&p, &a, &b, EPSILON) {
+            let edge = Vector2::new(b.x - a.x, b.y - a.y).normalize();
+
+            let outward = Vector2::new(edge.y, -edge.x);
+
+            let angle = outward.y.atan2(outward.x);
+            acc_angle += angle;
+            num_segments += 1;
+        }
+    }
+    if num_segments == 0 || num_segments > 2 {
+        return Err(());
+    }
+    Ok(acc_angle)
+}
 
 impl CeilingRegionsManip for CeilingRegions {
-    fn insert_vertex(&mut self, p: Point2<f64>, height: f64) -> Result<(), CeilingRegionError> {
+    fn get_all_heights(p: Point2<f64>) -> Vec<(f64, RegionDir)> {
+        vec![]
+    }
+
+    fn insert_vertex(
+        &mut self,
+        p: Point2<f64>,
+        height: f64,
+        which_region: Option<RegionDir>,
+    ) -> Result<(), CeilingRegionError> {
         let old_regions = std::mem::take(&mut self.regions);
 
         self.regions = old_regions

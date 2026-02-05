@@ -1,5 +1,5 @@
 [package]
-name = "floor_plan"
+name = "gen_3d_vol"
 version = "0.1.0"
 edition = "2021"
 

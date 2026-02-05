@@ -91,6 +91,7 @@ pub trait Geometry {
     fn get_normal_and_distance_to_origin(&self) -> Option<(Vector3<f64>, f64)>;
     fn split_by_line(&self, line: &SplitLine3D) -> Vec<Polygon3D>;
     fn contains_point(&self, p: &Point2<f64>) -> bool;
+    fn get_heights_at_edge_point(&self, p: &Point2<f64>) -> Result<Vec<f64>>;
 }
 impl Geometry for Polygon3D {
     /// Returns the overlapping regions shared by both `self` and a 2D `other` polygon.
@@ -316,8 +317,26 @@ impl Geometry for Polygon3D {
 
         inside
     }
+    // TODO: known failure point: if there are 3 regions fr the point and the discontinuities aren't
+    // on the up/down direction
+    fn get_heights_at_edge_point(&self, p: &Point2<f64>) -> Result<Vec<f64>, Polygon3DError> {
+        let n = self.exterior.len();
+        let mut heights = Vec::new();
+        for i in 0..n {
+            let a = &self.exterior[i];
+            let b = &self.exterior[(i + 1) % n];
+            if point_on_segment_2d(p, a, b, EPSILON) {
+                let z = self.interpolate_z(p);
+                heights.push(z);
+            }
+        }
+        Ok(heights)
+    }
 }
 
+enum Polygon3DError {
+    PointNotOnEdge,
+}
 pub trait MergeableGeometry: Clone {
     /// Merge two geometries into zero or more geometries
     fn merge(&self, other: &Self) -> Vec<Self>;

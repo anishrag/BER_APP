@@ -67,6 +67,7 @@ pub enum FloorConstructionType {
     #[default]
     SolidFloor,
     SuspendedFloor,
+    ExposedSemiExposedFloor,
     NonHeatLossFloor,
     Uninitialised,
     Other,
