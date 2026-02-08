@@ -4,7 +4,10 @@ use std::rc::Rc;
 use std::sync::mpsc::{channel, Receiver, Sender};
 
 use crate::controller::app_controller::AppController;
-use crate::ui::pages::{home::HomePage, new_ber::NewBerPage, splash::SplashPage};
+use crate::ui::pages::{
+    home::HomePage, new_ber::NewBerPage, sketch::SketchPage, sketch::SketchState,
+    splash::SplashPage,
+};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Page {
@@ -23,6 +26,7 @@ pub struct BerApp {
     // Page-specific state
     pub splash_state: SplashState,
     pub new_ber_state: NewBerState,
+    pub sketch_state: SketchState,
     // Add other page states as needed
     // pub sketch_state: SketchState,
     // pub key_deets_state: KeyDeetsState,
@@ -62,6 +66,7 @@ impl BerApp {
             app_controller,
             splash_state: SplashState::default(),
             new_ber_state: NewBerState::default(),
+            sketch_state: SketchState::default(),
         }
     }
 
@@ -121,8 +126,7 @@ impl eframe::App for BerApp {
                 HomePage::render(ui, self);
             }
             Page::Sketch => {
-                ui.heading("Sketch Window");
-                ui.label("TODO: Implement sketch page");
+                SketchPage::render(ui, self);
             }
             Page::NewBer => {
                 NewBerPage::render(ui, self);
