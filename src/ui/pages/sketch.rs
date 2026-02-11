@@ -3,6 +3,8 @@ use egui::Pos2;
 use strum::IntoEnumIterator;
 use strum_macros::EnumIter;
 
+use crate::ui::pages::events::UiEvent;
+
 /// The UI-friendly version of a stroke
 pub struct EguiStroke {
     pub points: Vec<Pos2>,
@@ -40,10 +42,10 @@ impl SketchPage {
         mode: SketchMode,
         mut on_event: F,
     ) where
-        F: FnMut(SketchEvent),
+        F: FnMut(UiEvent),
     {
         if let Some(new_mode) = Self::mode_toolbar(ui, mode) {
-            on_event(SketchEvent::ChangeMode(new_mode));
+            on_event(UiEvent::Sketch(SketchEvent::ChangeMode(new_mode)));
         }
         ui.separator();
         Self::canvas(ui, current, on_event);
@@ -51,7 +53,7 @@ impl SketchPage {
 
     fn canvas<F>(ui: &mut egui::Ui, current: Option<EguiStroke>, mut on_event: F)
     where
-        F: FnMut(SketchEvent),
+        F: FnMut(UiEvent),
     {
         let (rect, response) = ui.allocate_exact_size(ui.available_size(), egui::Sense::drag());
         let painter = ui.painter_at(rect);
@@ -62,18 +64,18 @@ impl SketchPage {
         // -------- INPUT --------
         if response.drag_started() {
             if let Some(pos) = response.interact_pointer_pos() {
-                on_event(SketchEvent::StartStroke(pos));
+                on_event(UiEvent::Sketch(SketchEvent::StartStroke(pos)));
             }
         }
 
         if response.dragged() {
             if let Some(pos) = response.interact_pointer_pos() {
-                on_event(SketchEvent::AddPoint(pos));
+                on_event(UiEvent::Sketch(SketchEvent::AddPoint(pos)));
             }
         }
 
         if response.drag_stopped() {
-            on_event(SketchEvent::EndStroke);
+            on_event(UiEvent::Sketch(SketchEvent::EndStroke));
         }
 
         if let Some(stroke) = current {

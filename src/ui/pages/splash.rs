@@ -1,15 +1,17 @@
-use crate::ui::app::BerApp;
+use crate::ui::pages::events::UiEvent;
 use eframe::egui;
 
 pub struct SplashPage;
 
 impl SplashPage {
-    pub fn render(ui: &mut egui::Ui, app: &mut BerApp) {
-        // Start loading on first render
-        if !app.splash_state.loading_started {
-            app.start_loading();
-        }
-
+    pub fn render<F>(
+        ui: &mut egui::Ui,
+        progress_text: String,
+        progress_value: f32,
+        mut _on_event: F,
+    ) where
+        F: FnMut(UiEvent),
+    {
         ui.vertical_centered(|ui| {
             ui.add_space(100.0);
 
@@ -19,12 +21,12 @@ impl SplashPage {
             ui.add_space(50.0);
 
             // Progress text
-            ui.label(&app.splash_state.progress_text);
+            ui.label(progress_text);
 
             ui.add_space(20.0);
 
             // Progress bar
-            let progress_bar = egui::ProgressBar::new(app.splash_state.progress_value)
+            let progress_bar = egui::ProgressBar::new(progress_value)
                 .show_percentage()
                 .animate(true);
             ui.add(progress_bar);
@@ -32,7 +34,7 @@ impl SplashPage {
             ui.add_space(20.0);
 
             // Optional: Loading spinner
-            if app.splash_state.progress_value < 1.0 {
+            if progress_value < 1.0 {
                 ui.spinner();
             }
         });

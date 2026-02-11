@@ -71,6 +71,10 @@ impl AppController {
     pub fn sketch_mode(&self) -> DrawMode {
         self.sketch_engine.mode
     }
+
+    pub fn set_sketch_mode(&mut self, mode: DrawMode) {
+        self.sketch_engine.set_mode(mode);
+    }
 }
 
 /// Statistics about a floor plan

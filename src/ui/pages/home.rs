@@ -1,29 +1,32 @@
-use crate::ui::app::{BerApp, Page};
+use crate::ui::pages::events::{Page, UiEvent};
 use eframe::egui;
 
 pub struct HomePage;
 
 impl HomePage {
-    pub fn render(ui: &mut egui::Ui, app: &mut BerApp) {
+    pub fn render<F>(ui: &mut egui::Ui, mut on_event: F)
+    where
+        F: FnMut(UiEvent),
+    {
         ui.heading("Home");
 
         ui.add_space(20.0);
 
         ui.horizontal(|ui| {
             if ui.button("New BER").clicked() {
-                app.navigate_to(Page::NewBer);
+                on_event(UiEvent::NavigateTo(Page::NewBer));
             }
 
             if ui.button("View Sketch").clicked() {
-                app.navigate_to(Page::Sketch);
+                on_event(UiEvent::NavigateTo(Page::Sketch));
             }
 
             if ui.button("Key Details").clicked() {
-                app.navigate_to(Page::KeyDeets);
+                on_event(UiEvent::NavigateTo(Page::KeyDeets));
             }
 
             if ui.button("More Details").clicked() {
-                app.navigate_to(Page::MoreDeets);
+                on_event(UiEvent::NavigateTo(Page::MoreDeets));
             }
         });
 

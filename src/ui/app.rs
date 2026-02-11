@@ -1,26 +1,18 @@
 use chrono::NaiveDate;
 use eframe::egui;
+use std::cell::RefCell;
 use std::rc::Rc;
+
 use std::sync::mpsc::{channel, Receiver, Sender};
 
 use crate::controller::app_controller::AppController;
-use crate::ui::adapters::sketch_egui::adapt_strokes;
+use crate::ui::pages::events::{Page, UiEvent};
 use crate::ui::pages::sketch::{EguiStroke, SketchEvent, SketchMode, SketchPage};
 use crate::ui::pages::{home::HomePage, new_ber::NewBerPage, splash::SplashPage};
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Page {
-    Splash,
-    Home,
-    Sketch,
-    NewBer,
-    KeyDeets,
-    MoreDeets,
-}
-
 pub struct BerApp {
     pub current_page: Page,
-    pub app_controller: Rc<AppController>,
+    pub app_controller: Rc<RefCell<AppController>>,
 
     // Page-specific state
     pub splash_state: SplashState,
@@ -58,7 +50,7 @@ pub struct NewBerState {
 }
 
 impl BerApp {
-    pub fn new(app_controller: Rc<AppController>) -> Self {
+    pub fn new(app_controller: Rc<RefCell<AppController>>) -> Self {
         Self {
             current_page: Page::Splash,
             app_controller,
@@ -81,7 +73,7 @@ impl BerApp {
         self.splash_state.loading_started = true;
 
         // Start async loading
-        self.app_controller.load_data_async(tx);
+        self.app_controller.borrow().load_data_async(tx);
     }
 
     pub fn check_progress(&mut self) {
@@ -108,6 +100,10 @@ impl BerApp {
 
 impl eframe::App for BerApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        if !self.splash_state.loading_started {
+            self.start_loading();
+            self.splash_state.loading_started = true;
+        }
         // Check for progress updates if on splash screen
         if self.current_page == Page::Splash {
             self.check_progress();
@@ -117,35 +113,51 @@ impl eframe::App for BerApp {
         let page = self.current_page;
         // Render current page
         egui::CentralPanel::default().show(ctx, |ui| match page {
-            Page::Splash => {
-                SplashPage::render(ui, self);
-            }
+            Page::Splash => SplashPage::render(
+                ui,
+                self.splash_state.progress_text.clone(),
+                self.splash_state.progress_value,
+                |_| {},
+            ),
             Page::Home => {
-                HomePage::render(ui, self);
+                HomePage::render(ui, |event| match event {
+                    UiEvent::NavigateTo(p) => self.navigate_to(p),
+                    _ => {}
+                });
             }
             Page::Sketch => {
+                let controller_ref = self.app_controller.borrow();
                 // 1️⃣ Read strokes through controller
-                let stroke = self.app_controller.sketch_stroke();
+                let stroke = controller_ref.sketch_stroke();
 
-                let mode = self.app_controller.sketch_mode();
+                let mode = controller_ref.sketch_mode();
 
                 // 2️⃣ Convert to egui strokes via adapter
                 //let egui_strokes: EguiStroke = adapt_strokes(&strokes);
-
+                let controller = self.app_controller.clone();
                 SketchPage::render(
                     ui,
                     stroke.as_ref().map(EguiStroke::from),
                     mode.into(),
-                    |event| {}, //match event {
-                                //     SketchEvent::StartStroke(p) => self.app_controller.sketch_start_stroke(p),
-                                //     SketchEvent::AddPoint(p) => self.app_controller.sketch_add_point(p),
-                                //     SketchEvent::EndStroke => self.app_controller.sketch_end_stroke(),
-                                //     SketchEvent::ChangeMode => self.app_controller.change_mode(),
-                                // }
+                    |event| match event {
+                        //SketchEvent::StartStroke(p) => self.app_controller.sketch_start_stroke(p),
+                        // SketchEvent::AddPoint(p) => self.app_controller.sketch_add_point(p),
+                        // SketchEvent::EndStroke => self.app_controller.sketch_end_stroke(),
+                        UiEvent::Sketch(sketch_event) => match sketch_event {
+                            SketchEvent::ChangeMode(m) => {
+                                controller.borrow_mut().set_sketch_mode(m.into())
+                            }
+                            _ => {}
+                        },
+                        _ => {}
+                    },
                 );
             }
             Page::NewBer => {
-                NewBerPage::render(ui, self);
+                NewBerPage::render(ui, |event| match event {
+                    UiEvent::NavigateTo(p) => self.navigate_to(p),
+                    _ => {}
+                });
             }
             Page::KeyDeets => {
                 ui.heading("Key Details");

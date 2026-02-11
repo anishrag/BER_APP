@@ -25,6 +25,9 @@ eframe = "0.33.3"
 egui = "0.33.3"
 strum = "0.27.2"
 strum_macros = "0.27.2"
+egui-datepicker = "0.3.0"
+egui_field_editor = "0.2.2"
+egui_extras = { version = "0.33.3", features = ["datepicker"] }
 
 [workspace]
 members = ["datatypes", "gen_3d_vol", "sketch"]

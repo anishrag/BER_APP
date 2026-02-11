@@ -1,3 +1,4 @@
+pub mod events;
 pub mod home;
 pub mod new_ber;
 pub mod sketch;

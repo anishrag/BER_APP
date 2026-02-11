@@ -1,5 +1,6 @@
 use eframe::egui;
 use rusqlite::Connection;
+use std::cell::RefCell;
 use std::rc::Rc;
 use std::sync::mpsc::{channel, Receiver};
 
@@ -12,7 +13,7 @@ use ui::app::BerApp;
 
 fn main() -> Result<(), eframe::Error> {
     let conn = Connection::open_in_memory().expect("Failed to create database");
-    let app_controller = Rc::new(AppController::new(conn));
+    let app_controller = Rc::new(RefCell::new(AppController::new(conn)));
 
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()

@@ -42,6 +42,20 @@ impl From<DrawMode> for SketchMode {
         }
     }
 }
+
+impl From<SketchMode> for DrawMode {
+    fn from(mode: SketchMode) -> Self {
+        match mode {
+            SketchMode::DrawPerpWalls => DrawMode::FloorPlan,
+            SketchMode::SelectRect => DrawMode::FloorPlan, // No direct mapping, default to FloorPlan
+            SketchMode::AmendWallsNonPerp => DrawMode::Wall,
+            SketchMode::AmendWallsCircular => DrawMode::Wall,
+            SketchMode::Door => DrawMode::Door,
+            SketchMode::Window => DrawMode::Window,
+            SketchMode::Eraser => DrawMode::Eraser,
+        }
+    }
+}
 /// Helper to adapt a slice of domain strokes
 pub fn adapt_strokes(strokes: &Stroke) -> EguiStroke {
     strokes.into()
