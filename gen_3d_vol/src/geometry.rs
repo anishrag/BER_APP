@@ -91,7 +91,7 @@ pub trait Geometry {
     fn get_normal_and_distance_to_origin(&self) -> Option<(Vector3<f64>, f64)>;
     fn split_by_line(&self, line: &SplitLine3D) -> Vec<Polygon3D>;
     fn contains_point(&self, p: &Point2<f64>) -> bool;
-    fn get_heights_at_edge_point(&self, p: &Point2<f64>) -> Result<Vec<f64>>;
+    fn get_heights_at_edge_point(&self, p: &Point2<f64>) -> Result<Vec<f64>, Polygon3DError>;
 }
 impl Geometry for Polygon3D {
     /// Returns the overlapping regions shared by both `self` and a 2D `other` polygon.

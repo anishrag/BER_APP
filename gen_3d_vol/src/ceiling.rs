@@ -129,6 +129,7 @@ pub trait CeilingRegionsManip {
     );
     fn modify_polygon_increase_height(&mut self, polygon: Polygon<f64>, delta_height: f64);
     fn get_clockwise_3d_polygon_starting_closest_to_origin(&self) -> Polygon3DMultiZ;
+    fn get_all_heights(p: Point2<f64>) -> Vec<(f64)>;
 }
 pub enum RegionDir {
     NPlus45,
@@ -164,16 +165,12 @@ fn get_region_dir_relative_to_edge_point(p: Point2<f64>, reg: &CeilingRegion) ->
 }
 
 impl CeilingRegionsManip for CeilingRegions {
-    fn get_all_heights(p: Point2<f64>) -> Vec<(f64, RegionDir)> {
+    fn get_all_heights(p: Point2<f64>) -> Vec<(f64)> {
         vec![]
     }
 
-    fn insert_vertex(
-        &mut self,
-        p: Point2<f64>,
-        height: f64,
-        which_region: Option<RegionDir>,
-    ) -> Result<(), CeilingRegionError> {
+    //TODO: fix this. when we put a height, we should specify which region it's for
+    fn insert_vertex(&mut self, p: Point2<f64>, height: f64) -> Result<(), CeilingRegionError> {
         let old_regions = std::mem::take(&mut self.regions);
 
         self.regions = old_regions
