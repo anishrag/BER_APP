@@ -9,9 +9,12 @@ use datatypes::ber::common::ItemId;
 
 use crate::engine::sketch_processor::{ProcessedFloorPlan, SketchProcessor};
 
+use sketch::model::{DrawMode, Stroke};
+use sketch::SketchEngine;
+
 pub struct AppController {
     conn: Connection,
-    sketch_processor: SketchProcessor,
+    sketch_engine: SketchEngine,
     loader_engine: DataLoader,
     //   processing_engine: ProcessingEngine,
 }
@@ -21,8 +24,7 @@ impl AppController {
         Self {
             conn,
             loader_engine: DataLoader::new(),
-            sketch_processor: SketchProcessor::new(),
-            //            processing_engine: ProcessingEngine::new(),
+            sketch_engine: SketchEngine::new(), //            processing_engine: ProcessingEngine::new(),
         }
     }
 
@@ -32,21 +34,6 @@ impl AppController {
         std::thread::spawn(move || {
             let _ = loader.load_general_data(tx);
         });
-    }
-
-    /// Process a closed floor plan stroke
-    /// Simplifies and straightens the floor plan
-    pub fn process_floor_plan(&self, points: Vec<(f32, f32)>) -> ProcessedFloorPlan {
-        self.sketch_processor.process_floor_plan(points)
-    }
-
-    /// Calculate statistics about a floor plan
-    pub fn analyze_floor_plan(&self, points: &[(f32, f32)]) -> FloorPlanStats {
-        FloorPlanStats {
-            perimeter: self.sketch_processor.calculate_length(points),
-            area: self.sketch_processor.calculate_area(points),
-            num_vertices: points.len(),
-        }
     }
 
     pub fn create_ber(&self, name: String, date_assessed: NaiveDate) -> Ber {
@@ -74,6 +61,16 @@ impl AppController {
     //             let _ = processing_engine.generate_evidence_document(tx);
     //         });
     //     }
+
+    /// SKETCHING STUFF--------------------------------------------
+    ///
+    pub fn sketch_stroke(&self) -> &Option<Stroke> {
+        &self.sketch_engine.stroke
+    }
+
+    pub fn sketch_mode(&self) -> DrawMode {
+        self.sketch_engine.mode
+    }
 }
 
 /// Statistics about a floor plan

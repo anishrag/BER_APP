@@ -4,10 +4,9 @@ use std::rc::Rc;
 use std::sync::mpsc::{channel, Receiver, Sender};
 
 use crate::controller::app_controller::AppController;
-use crate::ui::pages::{
-    home::HomePage, new_ber::NewBerPage, sketch::SketchPage, sketch::SketchState,
-    splash::SplashPage,
-};
+use crate::ui::adapters::sketch_egui::adapt_strokes;
+use crate::ui::pages::sketch::{EguiStroke, SketchEvent, SketchMode, SketchPage};
+use crate::ui::pages::{home::HomePage, new_ber::NewBerPage, splash::SplashPage};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Page {
@@ -26,7 +25,6 @@ pub struct BerApp {
     // Page-specific state
     pub splash_state: SplashState,
     pub new_ber_state: NewBerState,
-    pub sketch_state: SketchState,
     // Add other page states as needed
     // pub sketch_state: SketchState,
     // pub key_deets_state: KeyDeetsState,
@@ -66,7 +64,6 @@ impl BerApp {
             app_controller,
             splash_state: SplashState::default(),
             new_ber_state: NewBerState::default(),
-            sketch_state: SketchState::default(),
         }
     }
 
@@ -117,8 +114,9 @@ impl eframe::App for BerApp {
             ctx.request_repaint(); // Keep updating while loading
         }
 
+        let page = self.current_page;
         // Render current page
-        egui::CentralPanel::default().show(ctx, |ui| match self.current_page {
+        egui::CentralPanel::default().show(ctx, |ui| match page {
             Page::Splash => {
                 SplashPage::render(ui, self);
             }
@@ -126,7 +124,25 @@ impl eframe::App for BerApp {
                 HomePage::render(ui, self);
             }
             Page::Sketch => {
-                SketchPage::render(ui, self);
+                // 1️⃣ Read strokes through controller
+                let stroke = self.app_controller.sketch_stroke();
+
+                let mode = self.app_controller.sketch_mode();
+
+                // 2️⃣ Convert to egui strokes via adapter
+                //let egui_strokes: EguiStroke = adapt_strokes(&strokes);
+
+                SketchPage::render(
+                    ui,
+                    stroke.as_ref().map(EguiStroke::from),
+                    mode.into(),
+                    |event| {}, //match event {
+                                //     SketchEvent::StartStroke(p) => self.app_controller.sketch_start_stroke(p),
+                                //     SketchEvent::AddPoint(p) => self.app_controller.sketch_add_point(p),
+                                //     SketchEvent::EndStroke => self.app_controller.sketch_end_stroke(),
+                                //     SketchEvent::ChangeMode => self.app_controller.change_mode(),
+                                // }
+                );
             }
             Page::NewBer => {
                 NewBerPage::render(ui, self);
