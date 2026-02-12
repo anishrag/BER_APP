@@ -2,10 +2,12 @@
 use egui::epaint::{ColorMode, PathStroke};
 use egui::{Color32, Pos2};
 
-use sketch::model::{DrawMode, Stroke};
+use sketch::model::Stroke;
 use sketch::SketchEvent;
 
-use crate::ui::pages::sketch::{EguiStroke, SketchMode};
+use domain::sketch::SketchMode;
+
+use crate::ui::pages::sketch::EguiStroke;
 
 /// Convert a domain Stroke into something egui can render
 impl From<&Stroke> for EguiStroke {
@@ -14,7 +16,7 @@ impl From<&Stroke> for EguiStroke {
             points: s.points.iter().map(|p| Pos2::new(p.x, p.y)).collect(),
             stroke: PathStroke {
                 width: match s.mode {
-                    DrawMode::Eraser => 20.0,
+                    //                    SketchMode::Eraser => 20.0,
                     _ => 2.0,
                 },
                 color: ColorMode::Solid(Color32::WHITE),
@@ -27,33 +29,6 @@ impl From<&Stroke> for EguiStroke {
 impl From<Stroke> for EguiStroke {
     fn from(s: Stroke) -> Self {
         Self::from(&s)
-    }
-}
-
-impl From<DrawMode> for SketchMode {
-    fn from(mode: DrawMode) -> Self {
-        match mode {
-            DrawMode::FloorPlan => SketchMode::DrawPerpWalls,
-            DrawMode::Room => SketchMode::DrawPerpWalls,
-            DrawMode::Wall => SketchMode::DrawPerpWalls,
-            DrawMode::Door => SketchMode::Door,
-            DrawMode::Window => SketchMode::Window,
-            DrawMode::Eraser => SketchMode::Eraser,
-        }
-    }
-}
-
-impl From<SketchMode> for DrawMode {
-    fn from(mode: SketchMode) -> Self {
-        match mode {
-            SketchMode::DrawPerpWalls => DrawMode::FloorPlan,
-            SketchMode::SelectRect => DrawMode::FloorPlan, // No direct mapping, default to FloorPlan
-            SketchMode::AmendWallsNonPerp => DrawMode::Wall,
-            SketchMode::AmendWallsCircular => DrawMode::Wall,
-            SketchMode::Door => DrawMode::Door,
-            SketchMode::Window => DrawMode::Window,
-            SketchMode::Eraser => DrawMode::Eraser,
-        }
     }
 }
 /// Helper to adapt a slice of domain strokes

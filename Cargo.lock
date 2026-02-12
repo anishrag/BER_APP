@@ -616,6 +616,7 @@ dependencies = [
  "anyhow",
  "chrono",
  "datatypes",
+ "domain",
  "earcutr 0.5.0",
  "eframe 0.33.3",
  "egui 0.33.3",
@@ -1526,6 +1527,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d4b8a88685455ed29a21542a33abd9cb6510b6b129abadabdcef0f4c55bc8f61"
 dependencies = [
  "litrs",
+]
+
+[[package]]
+name = "domain"
+version = "0.1.0"
+dependencies = [
+ "chrono",
+ "serde",
+ "strum",
 ]
 
 [[package]]
@@ -5592,6 +5602,7 @@ checksum = "56199f7ddabf13fe5074ce809e7d3f42b42ae711800501b5b16ea82ad029c39d"
 name = "sketch"
 version = "0.1.0"
 dependencies = [
+ "domain",
  "nalgebra",
  "strum",
  "strum_macros",

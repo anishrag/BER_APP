@@ -6,10 +6,9 @@ use crate::engine::ber_repository::{BerRecord, BerRepository};
 use crate::engine::dataloader::DataLoader;
 use datatypes::ber::ber_struct::Ber;
 use datatypes::ber::common::ItemId;
+use domain::sketch::SketchMode;
 
-use crate::engine::sketch_processor::{ProcessedFloorPlan, SketchProcessor};
-
-use sketch::model::{DrawMode, Stroke};
+use sketch::model::Stroke;
 use sketch::SketchEngine;
 
 pub struct AppController {
@@ -64,15 +63,15 @@ impl AppController {
 
     /// SKETCHING STUFF--------------------------------------------
     ///
-    pub fn sketch_stroke(&self) -> &Option<Stroke> {
-        &self.sketch_engine.stroke
+    pub fn sketch_stroke(&self) -> Option<Stroke> {
+        self.sketch_engine.stroke.clone()
     }
 
-    pub fn sketch_mode(&self) -> DrawMode {
+    pub fn sketch_mode(&self) -> SketchMode {
         self.sketch_engine.mode
     }
 
-    pub fn set_sketch_mode(&mut self, mode: DrawMode) {
+    pub fn set_sketch_mode(&mut self, mode: SketchMode) {
         self.sketch_engine.set_mode(mode);
     }
 }

@@ -1,26 +1,15 @@
 use egui::epaint::{PathShape, PathStroke};
 use egui::Pos2;
 use strum::IntoEnumIterator;
-use strum_macros::EnumIter;
 
 use crate::ui::pages::events::UiEvent;
+
+use domain::sketch::SketchMode;
 
 /// The UI-friendly version of a stroke
 pub struct EguiStroke {
     pub points: Vec<Pos2>,
     pub stroke: PathStroke,
-}
-
-#[derive(Default, Clone, Copy, PartialEq, EnumIter, Debug)]
-pub enum SketchMode {
-    #[default]
-    DrawPerpWalls,
-    SelectRect,
-    AmendWallsNonPerp,
-    AmendWallsCircular,
-    Door,
-    Window,
-    Eraser,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -89,7 +78,7 @@ impl SketchPage {
             for mode_item in SketchMode::iter() {
                 let selected = mode == mode_item;
                 if ui
-                    .selectable_label(selected, format!("{:?}", mode))
+                    .selectable_label(selected, format!("{:?}", mode_item))
                     .clicked()
                 {
                     change_mode = Some(mode_item);

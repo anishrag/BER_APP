@@ -7,7 +7,7 @@ use std::sync::mpsc::{channel, Receiver, Sender};
 
 use crate::controller::app_controller::AppController;
 use crate::ui::pages::events::{Page, UiEvent};
-use crate::ui::pages::sketch::{EguiStroke, SketchEvent, SketchMode, SketchPage};
+use crate::ui::pages::sketch::{EguiStroke, SketchEvent, SketchPage};
 use crate::ui::pages::{home::HomePage, new_ber::NewBerPage, splash::SplashPage};
 
 pub struct BerApp {
@@ -126,11 +126,10 @@ impl eframe::App for BerApp {
                 });
             }
             Page::Sketch => {
-                let controller_ref = self.app_controller.borrow();
-                // 1️⃣ Read strokes through controller
-                let stroke = controller_ref.sketch_stroke();
-
-                let mode = controller_ref.sketch_mode();
+                let (stroke, mode) = {
+                    let controller_ref = self.app_controller.borrow();
+                    (controller_ref.sketch_stroke(), controller_ref.sketch_mode())
+                };
 
                 // 2️⃣ Convert to egui strokes via adapter
                 //let egui_strokes: EguiStroke = adapt_strokes(&strokes);
