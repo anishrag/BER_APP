@@ -1,8 +1,31 @@
 // ===== sketch/src/engine.rs =====
 //
-use crate::geometry;
+use crate::fresh_2d_perp::Storey2DPerpWalls;
 use crate::model::{Point2f, Stroke};
 use domain::sketch::{DisplayMode, EditTools, SketchMode};
+
+pub trait SketchModeBehaviour: std::fmt::Debug {
+    fn start_stroke(
+        &mut self,
+        stroke: &mut Option<Stroke>,
+        edit_tool: EditTools,
+        close_epsilon: f32,
+        snap_epsilon: f32,
+        append_mode: &mut StrokeAppendMode,
+        start: Point2f,
+    ) -> Result<(), SketchError>;
+    fn add_point(
+        &mut self,
+        stroke: &mut Option<Stroke>,
+        append_mode: StrokeAppendMode,
+        point: Point2f,
+    ) -> Result<(), SketchError>;
+    fn end_stroke(
+        &mut self,
+        stroke: &mut Option<Stroke>,
+        close_epsilon: f32,
+    ) -> Result<Option<Stroke>, SketchError>;
+}
 
 #[derive(Debug)]
 pub enum SketchError {
@@ -20,16 +43,17 @@ pub enum SketchEvent {
     StrokeClosed { stroke_idx: usize },
 }
 
-#[derive(Default, Debug)]
+#[derive(Default, Debug, Clone)]
 pub enum StrokeAppendMode {
     #[default]
     Forward, // push to end
     Backward, // insert at start
 }
 
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub struct SketchEngine {
     pub stroke: Option<Stroke>,
+    pub mode_behaviour: Box<dyn SketchModeBehaviour>,
     pub mode: SketchMode,
     pub display: DisplayMode,
     pub edit_tool: EditTools,
@@ -38,10 +62,26 @@ pub struct SketchEngine {
     pub append_mode: StrokeAppendMode,
 }
 
+impl Default for SketchEngine {
+    fn default() -> Self {
+        Self {
+            stroke: None,
+            mode_behaviour: Box::new(Storey2DPerpWalls::default()),
+            mode: SketchMode::Storey2D,
+            display: DisplayMode::FloorMapDims,
+            edit_tool: EditTools::DrawPerpWalls,
+            close_epsilon: 8.0,
+            snap_epsilon: 100.0,
+            append_mode: StrokeAppendMode::Forward,
+        }
+    }
+}
+
 impl SketchEngine {
     pub fn new() -> Self {
         Self {
             stroke: None,
+            mode_behaviour: Box::new(Storey2DPerpWalls),
             mode: SketchMode::Storey2D,
             display: DisplayMode::FloorMapDims,
             edit_tool: EditTools::DrawPerpWalls,
@@ -51,101 +91,50 @@ impl SketchEngine {
         }
     }
 
+    pub fn set_mode_behaviour(&mut self, behaviour: Box<dyn SketchModeBehaviour>) {
+        self.mode_behaviour = behaviour;
+    }
     pub fn set_mode(&mut self, mode: SketchMode) {
         self.mode = mode;
+        self.update_mode_behaviour();
     }
     pub fn set_display(&mut self, mode: DisplayMode) {
         self.display = mode;
+        self.update_mode_behaviour();
     }
     pub fn set_edit_tools(&mut self, mode: EditTools) {
         self.edit_tool = mode;
+        self.update_mode_behaviour();
     }
 
-    pub fn start_stroke(&mut self, start: Point2f) -> Result<(), SketchError> {
-        match self.stroke.as_mut() {
-            // --------------------------------
-            // No existing stroke → create new
-            // --------------------------------
-            None => {
-                self.stroke = Some(Stroke::new(self.edit_tool, start));
-                self.append_mode = StrokeAppendMode::Forward;
-                Ok(())
+    fn update_mode_behaviour(&mut self) {
+        // Here you would match on self.mode and set the appropriate behaviour
+        // For example:
+        match (self.mode, self.edit_tool) {
+            (SketchMode::Storey2D, EditTools::DrawPerpWalls) => {
+                self.set_mode_behaviour(Box::new(Storey2DPerpWalls));
             }
-
-            // --------------------------------
-            // Existing stroke → attempt snap
-            // --------------------------------
-            Some(stroke) => {
-                if stroke.check_closed(self.close_epsilon) {
-                    return Err(SketchError::StrokeAlreadyClosed);
-                }
-
-                let first = stroke.first_point();
-                let last = stroke.last_point();
-
-                let dist_to_start = (first - start).norm();
-                let dist_to_end = (last - start).norm();
-
-                let can_snap_start = dist_to_start <= self.snap_epsilon;
-                let can_snap_end = dist_to_end <= self.snap_epsilon;
-
-                match (can_snap_start, can_snap_end) {
-                    (false, false) => {
-                        // Too far from both ends → reject
-                        Err(SketchError::SnapTooFar)
-                    }
-
-                    (true, false) => {
-                        self.append_mode = StrokeAppendMode::Backward;
-                        stroke.insert_at_start(start);
-                        Ok(())
-                    }
-
-                    (false, true) => {
-                        self.append_mode = StrokeAppendMode::Forward;
-                        stroke.push(start);
-                        Ok(())
-                    }
-
-                    (true, true) => {
-                        // Rare case: very small stroke, both ends close
-                        if dist_to_start < dist_to_end {
-                            self.append_mode = StrokeAppendMode::Backward;
-                            stroke.insert_at_start(start);
-                        } else {
-                            self.append_mode = StrokeAppendMode::Forward;
-                            stroke.push(start);
-                        }
-                        Ok(())
-                    }
-                }
-            }
+            _ => (),
         }
+    }
+    pub fn start_stroke(&mut self, start: Point2f) -> Result<(), SketchError> {
+        self.mode_behaviour.start_stroke(
+            &mut self.stroke,
+            self.edit_tool,
+            self.close_epsilon,
+            self.snap_epsilon,
+            &mut self.append_mode,
+            start,
+        )
     }
 
     pub fn add_point(&mut self, point: Point2f) -> Result<(), SketchError> {
-        let stroke = self.stroke.as_mut().ok_or(SketchError::NoActiveStroke)?;
-
-        match self.append_mode {
-            StrokeAppendMode::Forward => stroke.push(point),
-            StrokeAppendMode::Backward => stroke.insert_at_start(point),
-        }
-
-        Ok(())
+        self.mode_behaviour
+            .add_point(&mut self.stroke, self.append_mode.clone(), point)
     }
 
     pub fn end_stroke(&mut self) -> Result<Option<Stroke>, SketchError> {
-        // Take the stroke out of self
-        let mut stroke = self.stroke.take().ok_or(SketchError::NoActiveStroke)?;
-
-        // check_closed mutably
-        if !stroke.check_closed(self.close_epsilon) {
-            // Not closed → put it back
-            self.stroke = Some(stroke);
-            return Ok(None);
-        }
-
-        // Closed → return it
-        Ok(Some(stroke))
+        self.mode_behaviour
+            .end_stroke(&mut self.stroke, self.close_epsilon)
     }
 }

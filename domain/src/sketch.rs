@@ -15,6 +15,7 @@ pub enum DisplayMode {
     Roofs,
     Walls,
     Floors,
+    AllSurfaces,
 }
 
 #[derive(Default, Clone, Copy, PartialEq, EnumIter, Debug)]
