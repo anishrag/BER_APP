@@ -6,9 +6,9 @@ use crate::engine::ber_repository::{BerRecord, BerRepository};
 use crate::engine::dataloader::DataLoader;
 use datatypes::ber::ber_struct::Ber;
 use datatypes::ber::common::ItemId;
-use domain::sketch::SketchMode;
+use domain::sketch::{DisplayMode, EditTools, SketchMode};
 
-use sketch::model::Stroke;
+use sketch::model::{Point2f, Stroke};
 use sketch::SketchEngine;
 
 pub struct AppController {
@@ -70,9 +70,41 @@ impl AppController {
     pub fn sketch_mode(&self) -> SketchMode {
         self.sketch_engine.mode
     }
-
     pub fn set_sketch_mode(&mut self, mode: SketchMode) {
         self.sketch_engine.set_mode(mode);
+    }
+
+    pub fn set_display_mode(&mut self, mode: DisplayMode) {
+        self.sketch_engine.set_display(mode);
+    }
+    pub fn display_mode(&self) -> DisplayMode {
+        self.sketch_engine.display
+    }
+
+    pub fn set_edit_mode(&mut self, mode: EditTools) {
+        self.sketch_engine.set_edit_tools(mode);
+    }
+    pub fn edit_mode(&self) -> EditTools {
+        self.sketch_engine.edit_tool
+    }
+
+    pub fn sketch_start_stroke(&mut self, start: Point2f) -> Result<(), String> {
+        self.sketch_engine
+            .start_stroke(start)
+            .map_err(|e| format!("Failed to start stroke: {:?}", e))
+    }
+
+    pub fn sketch_add_point(&mut self, point: Point2f) -> Result<(), String> {
+        self.sketch_engine
+            .add_point(point)
+            .map_err(|e| format!("Failed to add point: {:?}", e))
+    }
+
+    pub fn sketch_end_stroke(&mut self, point: Point2f) -> Result<(), String> {
+        self.sketch_engine
+            .end_stroke()
+            .map_err(|e| format!("Failed to end stroke: {:?}", e));
+        Ok(())
     }
 }
 

@@ -2,7 +2,7 @@
 use egui::epaint::{ColorMode, PathStroke};
 use egui::{Color32, Pos2};
 
-use sketch::model::Stroke;
+use sketch::model::{Point2f, Stroke};
 use sketch::SketchEvent;
 
 use domain::sketch::SketchMode;
@@ -31,6 +31,11 @@ impl From<Stroke> for EguiStroke {
         Self::from(&s)
     }
 }
+
+pub fn pos2_to_point2f(pos: Pos2) -> Point2f {
+    sketch::model::Point2f::new(pos.x, pos.y)
+}
+
 /// Helper to adapt a slice of domain strokes
 pub fn adapt_strokes(strokes: &Stroke) -> EguiStroke {
     strokes.into()

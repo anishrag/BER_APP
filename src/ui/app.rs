@@ -6,6 +6,7 @@ use std::rc::Rc;
 use std::sync::mpsc::{channel, Receiver, Sender};
 
 use crate::controller::app_controller::AppController;
+use crate::ui::adapters::sketch_egui::pos2_to_point2f;
 use crate::ui::pages::events::{Page, UiEvent};
 use crate::ui::pages::sketch::{EguiStroke, SketchEvent, SketchPage};
 use crate::ui::pages::{home::HomePage, new_ber::NewBerPage, splash::SplashPage};
@@ -126,9 +127,14 @@ impl eframe::App for BerApp {
                 });
             }
             Page::Sketch => {
-                let (stroke, mode) = {
+                let (stroke, mode, edit_mode, display_mode) = {
                     let controller_ref = self.app_controller.borrow();
-                    (controller_ref.sketch_stroke(), controller_ref.sketch_mode())
+                    (
+                        controller_ref.sketch_stroke(),
+                        controller_ref.sketch_mode(),
+                        controller_ref.edit_mode(),
+                        controller_ref.display_mode(),
+                    )
                 };
 
                 // 2️⃣ Convert to egui strokes via adapter
@@ -137,14 +143,31 @@ impl eframe::App for BerApp {
                 SketchPage::render(
                     ui,
                     stroke.as_ref().map(EguiStroke::from),
-                    mode.into(),
+                    mode,
+                    display_mode,
+                    edit_mode,
                     |event| match event {
-                        //SketchEvent::StartStroke(p) => self.app_controller.sketch_start_stroke(p),
-                        // SketchEvent::AddPoint(p) => self.app_controller.sketch_add_point(p),
-                        // SketchEvent::EndStroke => self.app_controller.sketch_end_stroke(),
                         UiEvent::Sketch(sketch_event) => match sketch_event {
+                            SketchEvent::AddPoint(p) => controller
+                                .borrow_mut()
+                                .sketch_add_point(pos2_to_point2f(p))
+                                .expect("Failed to add point"),
+                            SketchEvent::EndStroke(p) => controller
+                                .borrow_mut()
+                                .sketch_end_stroke(pos2_to_point2f(p))
+                                .expect("Failed to end stroke"),
+                            SketchEvent::StartStroke(p) => controller
+                                .borrow_mut()
+                                .sketch_start_stroke(pos2_to_point2f(p))
+                                .expect("Failed to start stroke"),
                             SketchEvent::ChangeMode(m) => {
-                                controller.borrow_mut().set_sketch_mode(m.into())
+                                controller.borrow_mut().set_sketch_mode(m)
+                            }
+                            SketchEvent::ChangeDisplay(m) => {
+                                controller.borrow_mut().set_display_mode(m)
+                            }
+                            SketchEvent::ChangeEditTool(m) => {
+                                controller.borrow_mut().set_edit_mode(m)
                             }
                             _ => {}
                         },
