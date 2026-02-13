@@ -106,6 +106,15 @@ impl AppController {
             .end_stroke()
             .map_err(|e| format!("Failed to end stroke: {:?}", e))?
         {
+            // deal with stroke -- depends on the engine mode
+            match self.sketch_engine.mode_behaviour.as_ref() {
+                // For example, if it's a Storey2DPerpWalls, we might want to convert the stroke into walls and add them to the floor plan
+                Storey2DPerpWalls => {
+                    //     let walls = convert_stroke_to_walls(stroke);
+                    //     self.floor_plan.add_walls(walls);
+                }
+                _ => {}
+            }
             println!("Stroke completed with {} points", stroke.points.len());
         }
         Ok(())
