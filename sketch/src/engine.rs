@@ -1,9 +1,9 @@
 // ===== sketch/src/engine.rs =====
 //
 use crate::fresh_2d_perp::Storey2DPerpWalls;
-use crate::model::{Point2f, Stroke};
+use crate::model::Stroke;
+use domain::points::Point2f32;
 use domain::sketch::{DisplayMode, EditTools, SketchMode};
-
 pub trait SketchModeBehaviour: std::fmt::Debug {
     fn start_stroke(
         &mut self,
@@ -12,13 +12,13 @@ pub trait SketchModeBehaviour: std::fmt::Debug {
         close_epsilon: f32,
         snap_epsilon: f32,
         append_mode: &mut StrokeAppendMode,
-        start: Point2f,
+        start: Point2f32,
     ) -> Result<(), SketchError>;
     fn add_point(
         &mut self,
         stroke: &mut Option<Stroke>,
         append_mode: StrokeAppendMode,
-        point: Point2f,
+        point: Point2f32,
     ) -> Result<(), SketchError>;
     fn end_stroke(
         &mut self,
@@ -117,7 +117,7 @@ impl SketchEngine {
             _ => (),
         }
     }
-    pub fn start_stroke(&mut self, start: Point2f) -> Result<(), SketchError> {
+    pub fn start_stroke(&mut self, start: Point2f32) -> Result<(), SketchError> {
         self.mode_behaviour.start_stroke(
             &mut self.stroke,
             self.edit_tool,
@@ -128,7 +128,7 @@ impl SketchEngine {
         )
     }
 
-    pub fn add_point(&mut self, point: Point2f) -> Result<(), SketchError> {
+    pub fn add_point(&mut self, point: Point2f32) -> Result<(), SketchError> {
         self.mode_behaviour
             .add_point(&mut self.stroke, self.append_mode.clone(), point)
     }

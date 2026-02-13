@@ -2,10 +2,10 @@
 use egui::epaint::{ColorMode, PathStroke};
 use egui::{Color32, Pos2};
 
-use sketch::model::{Point2f, Stroke};
+use sketch::model::Stroke;
 use sketch::SketchEvent;
 
-use domain::sketch::SketchMode;
+use domain::points::Point2f32;
 
 use crate::ui::pages::sketch::EguiStroke;
 
@@ -32,8 +32,8 @@ impl From<Stroke> for EguiStroke {
     }
 }
 
-pub fn pos2_to_point2f(pos: Pos2) -> Point2f {
-    sketch::model::Point2f::new(pos.x, pos.y)
+pub fn pos2_to_point2f(pos: Pos2) -> Point2f32 {
+    Point2f32::new(pos.x, pos.y)
 }
 
 /// Helper to adapt a slice of domain strokes

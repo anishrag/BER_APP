@@ -1,14 +1,14 @@
 // ===== sketch/src/geometry.rs =====
-use crate::model::{Point2f, Stroke};
-
+use crate::model::Stroke;
+use domain::points::Point2f32;
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Aabb {
-    pub min: Point2f,
-    pub max: Point2f,
+    pub min: Point2f32,
+    pub max: Point2f32,
 }
 
 impl Stroke {
-    pub fn add_point(&mut self, p: Point2f) {
+    pub fn add_point(&mut self, p: Point2f32) {
         self.points.push(p);
     }
 

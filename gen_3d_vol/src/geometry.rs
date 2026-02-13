@@ -1,18 +1,13 @@
 use geo::{BooleanOps, Coord, LineString, MultiPolygon, Polygon};
-use nalgebra::{Point2, Point3, Vector3};
 
 use datatypes::ber::common::ItemId;
 use datatypes::ber::structural::Polygon3D;
+use domain::points::{Point2f64, Point3f64, Vector3f64};
 
 use crate::types::{MultiPolygon3D, SplitLine3D, EPSILON};
 
 // Helper function to check if a point lies on a line segment in 2D
-pub fn point_on_segment_2d(
-    p: &Point2<f64>,
-    a: &Point3<f64>,
-    b: &Point3<f64>,
-    epsilon: f64,
-) -> bool {
+pub fn point_on_segment_2d(p: &Point2f64, a: &Point3f64, b: &Point3f64, epsilon: f64) -> bool {
     // Check if point is collinear with the segment
     let cross = (p.y - a.y) * (b.x - a.x) - (p.x - a.x) * (b.y - a.y);
     if cross.abs() > epsilon {
@@ -28,10 +23,10 @@ pub fn point_on_segment_2d(
 
 // Helper function to check if a point is inside a triangle in 2D using barycentric coordinates
 pub fn point_in_triangle_2d(
-    p: &Point2<f64>,
-    a: &Point2<f64>,
-    b: &Point2<f64>,
-    c: &Point2<f64>,
+    p: &Point2f64,
+    a: &Point2f64,
+    b: &Point2f64,
+    c: &Point2f64,
     epsilon: f64,
 ) -> bool {
     let v0x = c.x - a.x;
@@ -54,12 +49,7 @@ pub fn point_in_triangle_2d(
     (u >= -epsilon) && (v >= -epsilon) && (u + v <= 1.0 + epsilon)
 }
 /// Finds the parameter t [0, 1] for the closest point on line segment AB to point (x, y).
-pub fn closest_point_on_segment(
-    p: &Point2<f64>,
-    a: &Point3<f64>,
-    b: &Point3<f64>,
-    epsilon: f64,
-) -> f64 {
+pub fn closest_point_on_segment(p: &Point2f64, a: &Point3f64, b: &Point3f64, epsilon: f64) -> f64 {
     let dx = b.x - a.x;
     let dy = b.y - a.y;
     let len_sq = dx * dx + dy * dy;
@@ -86,12 +76,12 @@ pub trait Geometry {
     fn to_2d_polygon_and_heights(&self) -> (Polygon<f64>, Vec<f64>);
     fn lift_multipolygon_to_3d(&self, multi_2d: &MultiPolygon<f64>) -> MultiPolygon3D;
     fn lift_polygon_to_3d(&self, poly_2d: &Polygon<f64>) -> Polygon3D;
-    fn interpolate_z(&self, p: &Point2<f64>) -> f64;
+    fn interpolate_z(&self, p: &Point2f64) -> f64;
 
-    fn get_normal_and_distance_to_origin(&self) -> Option<(Vector3<f64>, f64)>;
+    fn get_normal_and_distance_to_origin(&self) -> Option<(Vector3f64, f64)>;
     fn split_by_line(&self, line: &SplitLine3D) -> Vec<Polygon3D>;
-    fn contains_point(&self, p: &Point2<f64>) -> bool;
-    fn get_heights_at_edge_point(&self, p: &Point2<f64>) -> Result<Vec<f64>, Polygon3DError>;
+    fn contains_point(&self, p: &Point2f64) -> bool;
+    fn get_heights_at_edge_point(&self, p: &Point2f64) -> Result<Vec<f64>, Polygon3DError>;
 }
 impl Geometry for Polygon3D {
     /// Returns the overlapping regions shared by both `self` and a 2D `other` polygon.
@@ -163,13 +153,13 @@ impl Geometry for Polygon3D {
 
     /// Lifts a single 2D polygon to 3D by interpolating Z coordinates from the original 3D polygon.
     fn lift_polygon_to_3d(&self, poly_2d: &Polygon<f64>) -> Polygon3D {
-        let exterior_3d: Vec<Point3<f64>> = poly_2d
+        let exterior_3d: Vec<Point3f64> = poly_2d
             .exterior()
             .points()
             .map(|point| {
-                let p2: Point2<f64> = Point2::new(point.x(), point.y());
+                let p2: Point2f64 = Point2f64::new(point.x(), point.y());
                 let z = self.interpolate_z(&p2);
-                Point3::new(point.x(), point.y(), z)
+                Point3f64::new(point.x(), point.y(), z)
             })
             .collect();
 
@@ -181,7 +171,7 @@ impl Geometry for Polygon3D {
     /// Interpolates the Z coordinate for a given (x, y) point based on the original 3D polygon.
     /// Uses barycentric interpolation if the point is inside the polygon,
     /// or finds the closest edge and interpolates along it.
-    fn interpolate_z(&self, p: &Point2<f64>) -> f64 {
+    fn interpolate_z(&self, p: &Point2f64) -> f64 {
         if self.exterior.len() < 3 {
             return self.exterior.first().map_or(0.0, |v| v.z);
         }
@@ -226,16 +216,16 @@ impl Geometry for Polygon3D {
         closest_z
     }
 
-    fn get_normal_and_distance_to_origin(&self) -> Option<(Vector3<f64>, f64)> {
+    fn get_normal_and_distance_to_origin(&self) -> Option<(Vector3f64, f64)> {
         if self.exterior.len() < 3 {
             return None;
         }
         let p0 = &self.exterior[0];
         let p1 = &self.exterior[1];
         let p2 = &self.exterior[2];
-        let u = Vector3::new(p1.x - p0.x, p1.y - p0.y, p1.z - p0.z);
-        let v = Vector3::new(p2.x - p0.x, p2.y - p0.y, p2.z - p0.z);
-        let normal = Vector3::new(
+        let u = Vector3f64::new(p1.x - p0.x, p1.y - p0.y, p1.z - p0.z);
+        let v = Vector3f64::new(p2.x - p0.x, p2.y - p0.y, p2.z - p0.z);
+        let normal = Vector3f64::new(
             u.y * v.z - u.z * v.y,
             u.z * v.x - u.x * v.z,
             u.x * v.y - u.y * v.x,
@@ -244,7 +234,7 @@ impl Geometry for Polygon3D {
         if norm_length < 1e-10 {
             return None;
         }
-        let unit_normal = Vector3::new(
+        let unit_normal = Vector3f64::new(
             normal.x / norm_length,
             normal.y / norm_length,
             normal.z / norm_length,
@@ -289,7 +279,7 @@ impl Geometry for Polygon3D {
     }
     /// Returns true if the (x, y) point lies inside the polygon exterior.
     /// Points on edges are considered inside.
-    fn contains_point(&self, p: &Point2<f64>) -> bool {
+    fn contains_point(&self, p: &Point2f64) -> bool {
         let n = self.exterior.len();
         if n < 3 {
             return false;
@@ -319,7 +309,7 @@ impl Geometry for Polygon3D {
     }
     // TODO: known failure point: if there are 3 regions fr the point and the discontinuities aren't
     // on the up/down direction
-    fn get_heights_at_edge_point(&self, p: &Point2<f64>) -> Result<Vec<f64>, Polygon3DError> {
+    fn get_heights_at_edge_point(&self, p: &Point2f64) -> Result<Vec<f64>, Polygon3DError> {
         let n = self.exterior.len();
         let mut heights = Vec::new();
         for i in 0..n {

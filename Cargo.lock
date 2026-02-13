@@ -1446,6 +1446,7 @@ name = "datatypes"
 version = "0.1.0"
 dependencies = [
  "chrono",
+ "domain",
  "geo",
  "nalgebra",
  "serde",
@@ -1534,6 +1535,7 @@ name = "domain"
 version = "0.1.0"
 dependencies = [
  "chrono",
+ "nalgebra",
  "serde",
  "strum",
 ]
@@ -2372,6 +2374,7 @@ name = "gen_3d_vol"
 version = "0.1.0"
 dependencies = [
  "datatypes",
+ "domain",
  "earcutr 0.5.0",
  "geo",
  "itertools 0.14.0",

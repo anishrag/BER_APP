@@ -1,12 +1,11 @@
 // standard includes
-use geo::Polygon;
-use nalgebra::{Point2, Point3, Vector2, Vector3};
-
 use datatypes::ber::common::{ConstructionPhase, ItemId};
 use datatypes::ber::structural::{
     CeilingRegions, ConstructionMakeup, FloorRegions, WallConstructionType, WallExposure,
     WallRegion, WallRegions,
 };
+use domain::points::{Point2f64, Point3f64, Vector2f64, Vector3f64};
+use geo::Polygon;
 
 // local includes
 use super::ceiling::CeilingRegionsManip;
@@ -15,30 +14,30 @@ use super::geometry::{Geometry, MergeableRegion};
 use super::types::{HasBaseRegion, Polygon3D, Polygon3DMultiZ, RegionBase, SplitLine3D, EPSILON};
 
 trait WallRegionManip {
-    fn get_leftmost_floor_vertex(&self) -> Point3<f64>;
-    fn wall_horizontal_dir(&self) -> Vector3<f64>;
-    fn wall_plane_normal(&self) -> Vector3<f64>;
+    fn get_leftmost_floor_vertex(&self) -> Point3f64;
+    fn wall_horizontal_dir(&self) -> Vector3f64<f64>;
+    fn wall_plane_normal(&self) -> Vector3f64<f64>;
     fn get_dividing_line_equation(&self, split_along_xy: f64, split_along_z: f64) -> SplitLine3D;
 }
 
 impl WallRegionManip for WallRegion {
     /// Get the length of the wall region (projected to XY plane)
-    fn get_leftmost_floor_vertex(&self) -> Point3<f64> {
+    fn get_leftmost_floor_vertex(&self) -> Point3f64 {
         self.polygon.exterior[0]
     }
 
-    fn wall_horizontal_dir(&self) -> Vector3<f64> {
+    fn wall_horizontal_dir(&self) -> Vector3f64<f64> {
         let p0 = self.polygon.exterior[0];
         let p1 = self.polygon.exterior[1];
-        Vector3::new(p1.x - p0.x, p1.y - p0.y, 0.0)
+        Vector3f64::new(p1.x - p0.x, p1.y - p0.y, 0.0)
     }
 
-    fn wall_plane_normal(&self) -> Vector3<f64> {
+    fn wall_plane_normal(&self) -> Vector3f64<f64> {
         let p0 = self.polygon.exterior[0];
         let p1 = self.polygon.exterior[1];
         let p2 = self.polygon.exterior[2];
-        let u = Vector3::new(p1.x - p0.x, p1.y - p0.y, p1.z - p0.z);
-        let v = Vector3::new(p2.x - p0.x, p2.y - p0.y, p2.z - p0.z);
+        let u = Vector3f64::new(p1.x - p0.x, p1.y - p0.y, p1.z - p0.z);
+        let v = Vector3f64::new(p2.x - p0.x, p2.y - p0.y, p2.z - p0.z);
         u.cross(&v).normalize()
     }
 
@@ -46,10 +45,10 @@ impl WallRegionManip for WallRegion {
         let origin = self.get_leftmost_floor_vertex();
 
         let u = self.wall_horizontal_dir().normalize(); // in XY
-        let v = Vector3::new(0.0, 0.0, 1.0);
+        let v = Vector3f64::new(0.0, 0.0, 1.0);
 
         // 2D normal in wall coordinates
-        let mut n2 = Vector2::new(0.0, 0.0);
+        let mut n2 = Vector2f64::new(0.0, 0.0);
 
         if split_along_xy != 0.0 {
             n2.x = 1.0 / split_along_xy;
@@ -156,7 +155,7 @@ pub trait WallRegionsManip {
 }
 
 pub struct BoundaryVertex {
-    point: Point2<f64>,
+    point: Point2f64,
     floor_height: Vec<f64>,
     ceiling_height: Vec<f64>,
 }
@@ -232,10 +231,10 @@ impl WallRegionsManip for WallRegions {
                     }
 
                     let vertices = vec![
-                        Point3::new(p1.0, p1.1, z1_a),
-                        Point3::new(p2.0, p2.1, z1_a),
-                        Point3::new(p2.0, p2.1, z1_b),
-                        Point3::new(p1.0, p1.1, z1_b),
+                        Point3f64::new(p1.0, p1.1, z1_a),
+                        Point3f64::new(p2.0, p2.1, z1_a),
+                        Point3f64::new(p2.0, p2.1, z1_b),
+                        Point3f64::new(p1.0, p1.1, z1_b),
                     ];
 
                     // Determine construction phase (use the later one or the first region's)
@@ -352,7 +351,7 @@ impl WallRegionsManip for WallRegions {
         let (_, _, cheight) = &ceiling_boundary.exterior[ci];
 
         merged.push(BoundaryVertex {
-            point: Point2::new(*fx, *fy),
+            point: Point2f64::new(*fx, *fy),
             floor_height: fheight.clone(),
             ceiling_height: cheight.clone(),
         });
@@ -384,7 +383,7 @@ impl WallRegionsManip for WallRegions {
 
             if approx_eq(&(*fx, *fy), &(*cx, *cy)) {
                 merged.push(BoundaryVertex {
-                    point: Point2::new(*fx, *fy),
+                    point: Point2f64::new(*fx, *fy),
                     floor_height: fheight.clone(),
                     ceiling_height: cheight.clone(),
                 });
@@ -405,7 +404,7 @@ impl WallRegionsManip for WallRegions {
                         ceiling_boundary.exterior[ci].clone(),
                     )?;
                     merged.push(BoundaryVertex {
-                        point: Point2::new(*fx, *fy),
+                        point: Point2f64::new(*fx, *fy),
                         floor_height: fheight.clone(),
                         ceiling_height: interpolated_ceiling,
                     });
@@ -414,7 +413,7 @@ impl WallRegionsManip for WallRegions {
                 } else {
                     let floor_height = floor_boundary.exterior[fi - 1].2.last()?;
                     merged.push(BoundaryVertex {
-                        point: Point2::new(*cx, *cy),
+                        point: Point2f64::new(*cx, *cy),
                         floor_height: vec![*floor_height],
                         ceiling_height: cheight.clone(),
                     });
@@ -456,10 +455,10 @@ impl WallRegionsManip for WallRegions {
                             continue; // No wall if floor and ceiling heights are equal
                         }
                         let vertices = vec![
-                            Point3::new(bv.point.x, bv.point.y, fh),
-                            Point3::new(next_bv.point.x, next_bv.point.y, fh),
-                            Point3::new(next_bv.point.x, next_bv.point.y, ch),
-                            Point3::new(bv.point.x, bv.point.y, ch),
+                            Point3f64::new(bv.point.x, bv.point.y, fh),
+                            Point3f64::new(next_bv.point.x, next_bv.point.y, fh),
+                            Point3f64::new(next_bv.point.x, next_bv.point.y, ch),
+                            Point3f64::new(bv.point.x, bv.point.y, ch),
                         ];
                         // Determine construction phase
                         let construction_phase =
@@ -526,8 +525,8 @@ impl WallRegionsManip for WallRegions {
 }
 // Helper structures
 struct SharedEdge3D {
-    points_a: (Point3<f64>, Point3<f64>),
-    points_b: (Point3<f64>, Point3<f64>),
+    points_a: (Point3f64, Point3f64),
+    points_b: (Point3f64, Point3f64),
 }
 
 // Helper functions
@@ -597,8 +596,8 @@ fn find_shared_edges_3d(poly_a: &Polygon3D, poly_b: &Polygon3D) -> Vec<SharedEdg
 }
 
 fn edges_equal_3d_projection(
-    edge_a: (&Point3<f64>, &Point3<f64>),
-    edge_b: (&Point3<f64>, &Point3<f64>),
+    edge_a: (&Point3f64, &Point3f64),
+    edge_b: (&Point3f64, &Point3f64),
 ) -> bool {
     let same_dir = points_equal_3d_xy(edge_a.0, edge_b.0) && points_equal_3d_xy(edge_a.1, edge_b.1);
     let reverse_dir =
@@ -606,7 +605,7 @@ fn edges_equal_3d_projection(
     same_dir || reverse_dir
 }
 
-fn points_equal_3d_xy(a: &Point3<f64>, b: &Point3<f64>) -> bool {
+fn points_equal_3d_xy(a: &Point3f64, b: &Point3f64) -> bool {
     (a.x - b.x).abs() < EPSILON && (a.y - b.y).abs() < EPSILON
 }
 
@@ -631,8 +630,8 @@ fn point_in_polygon_3d(polygon: &Polygon3D, x: f64, y: f64) -> bool {
 fn determine_construction_phase_for_exterior_wall(
     floor_regions: &FloorRegions,
     ceiling_regions: &CeilingRegions,
-    v1: &Point3<f64>,
-    v2: &Point3<f64>,
+    v1: &Point3f64,
+    v2: &Point3f64,
 ) -> Option<ConstructionPhase> {
     // Find floor and ceiling regions that contain the edge midpoint
     let mid_x = (v1.x + v2.x) / 2.0;
@@ -695,10 +694,10 @@ mod tests {
     fn simple_wall() -> WallRegion {
         WallRegion {
             polygon: Polygon3D::new(vec![
-                Point3::new(0.0, 0.0, 0.0),
-                Point3::new(4.0, 0.0, 0.0),
-                Point3::new(4.0, 0.0, 3.0),
-                Point3::new(0.0, 0.0, 3.0),
+                Point3f64::new(0.0, 0.0, 0.0),
+                Point3f64::new(4.0, 0.0, 0.0),
+                Point3f64::new(4.0, 0.0, 3.0),
+                Point3f64::new(0.0, 0.0, 3.0),
             ]),
             construction_type: WallConstructionType::Uninitialised,
             base: RegionBase {
@@ -727,7 +726,7 @@ mod tests {
         }
     }
 
-    fn assert_unit(v: Vector3<f64>) {
+    fn assert_unit(v: Vector3f64<f64>) {
         assert!((v.norm() - 1.0).abs() < TOL);
     }
 
@@ -738,14 +737,17 @@ mod tests {
     #[test]
     fn leftmost_floor_vertex_is_first_exterior_vertex() {
         let wall = simple_wall();
-        assert_eq!(wall.get_leftmost_floor_vertex(), Point3::new(0.0, 0.0, 0.0));
+        assert_eq!(
+            wall.get_leftmost_floor_vertex(),
+            Point3f64::new(0.0, 0.0, 0.0)
+        );
     }
 
     #[test]
     fn wall_horizontal_dir_is_xy_only() {
         let wall = simple_wall();
         let d = wall.wall_horizontal_dir();
-        assert_eq!(d, Vector3::new(4.0, 0.0, 0.0));
+        assert_eq!(d, Vector3f64::new(4.0, 0.0, 0.0));
     }
 
     #[test]
@@ -807,10 +809,10 @@ mod tests {
     fn with_geometry_preserves_metadata() {
         let wall = simple_wall();
         let new_poly = Polygon3D::new(vec![
-            Point3::new(0.0, 0.0, 0.0),
-            Point3::new(2.0, 0.0, 0.0),
-            Point3::new(2.0, 0.0, 3.0),
-            Point3::new(0.0, 0.0, 3.0),
+            Point3f64::new(0.0, 0.0, 0.0),
+            Point3f64::new(2.0, 0.0, 0.0),
+            Point3f64::new(2.0, 0.0, 3.0),
+            Point3f64::new(0.0, 0.0, 3.0),
         ]);
 
         let w2 = wall.with_geometry(new_poly.clone());

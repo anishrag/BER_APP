@@ -1,14 +1,13 @@
-use nalgebra::{Point2, Point3, Vector3};
-
 use datatypes::ber::common::ItemId;
 pub use datatypes::ber::structural::{Polygon3D, RegionBase};
+use domain::points::{Point2f64, Point3f64, Vector3f64};
 
 pub const EPSILON: f64 = 1e-9;
 
 pub struct SplitLine3D {
-    pub point: Point3<f64>,      // point on line
-    pub direction: Vector3<f64>, // unit
-    pub normal: Vector3<f64>,    // points to "positive" side
+    pub point: Point3f64,      // point on line
+    pub direction: Vector3f64, // unit
+    pub normal: Vector3f64,    // points to "positive" side
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -44,7 +43,7 @@ impl FromMultiZ for Polygon3D {
         for (idx, (x, y, z_values)) in multi_z.exterior.iter().enumerate() {
             match z_values.len() {
                 0 => return Err(Polygon3DConversionError::NoZValue { point_index: idx }),
-                1 => points.push(Point3::new(*x, *y, z_values[0])),
+                1 => points.push(Point3f64::new(*x, *y, z_values[0])),
                 _ => {
                     return Err(Polygon3DConversionError::HasDiscontinuity {
                         point_index: idx,
@@ -119,12 +118,12 @@ impl From<Polygon3D> for Polygon3DMultiZ {
         Self::new(exterior)
     }
 }
-impl From<Polygon3DMultiZ> for Vec<Point2<f64>> {
+impl From<Polygon3DMultiZ> for Vec<Point2f64> {
     fn from(multi_z: Polygon3DMultiZ) -> Self {
         multi_z
             .exterior
             .iter()
-            .map(|(x, y, _)| Point2::new(*x, *y))
+            .map(|(x, y, _)| Point2f64::new(*x, *y))
             .collect()
     }
 }
@@ -193,12 +192,12 @@ impl MultiPolygon3D {
 
 #[derive(Clone, Copy, Debug)]
 pub struct DirectedEdge3D {
-    pub from: Point3<f64>,
-    pub to: Point3<f64>,
+    pub from: Point3f64,
+    pub to: Point3f64,
 }
 
 impl DirectedEdge3D {
-    pub fn new(from: Point3<f64>, to: Point3<f64>) -> Self {
+    pub fn new(from: Point3f64, to: Point3f64) -> Self {
         Self { from, to }
     }
     /// Compare only x/y coordinates, ignoring z
@@ -217,7 +216,7 @@ pub trait Point3Ext {
     fn eq_xy(&self, other: &Self, eps: f64) -> bool;
 }
 
-impl Point3Ext for Point3<f64> {
+impl Point3Ext for Point3f64 {
     fn eq_xy(&self, other: &Self, eps: f64) -> bool {
         (self.x - other.x).abs() < eps && (self.y - other.y).abs() < eps
     }

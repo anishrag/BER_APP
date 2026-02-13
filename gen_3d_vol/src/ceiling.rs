@@ -5,9 +5,9 @@
 // 5. x further split by year
 // 6. x futher user splitting if required
 // external crates
+use domain::points::{Point2f64, Point3f64};
 use earcutr::earcut;
 use geo::Polygon;
-use nalgebra::{Point2, Point3, Vector2, Vector3};
 use std::collections::HashMap;
 use std::convert::TryFrom;
 // crate includes
@@ -58,11 +58,11 @@ impl PartialEq for Edge3DF {
     }
 }
 
-fn quantize(p: &Point3<f64>) -> (i64, i64) {
+fn quantize(p: &Point3f64) -> (i64, i64) {
     ((p.x * 1e9) as i64, (p.y * 1e9) as i64)
 }
 
-fn undirected_edge_2d(a: &Point3<f64>, b: &Point3<f64>) -> Edge2D {
+fn undirected_edge_2d(a: &Point3f64, b: &Point3f64) -> Edge2D {
     let qa = quantize(a);
     let qb = quantize(b);
     if qa <= qb {
@@ -72,7 +72,7 @@ fn undirected_edge_2d(a: &Point3<f64>, b: &Point3<f64>) -> Edge2D {
     }
 }
 
-fn undirected_edge_3df(a: &Point3<f64>, b: &Point3<f64>) -> Edge3DF {
+fn undirected_edge_3df(a: &Point3f64, b: &Point3f64) -> Edge3DF {
     let pa = (a.x, a.y, a.z);
     let pb = (b.x, b.y, b.z);
     if pa <= pb {
@@ -114,7 +114,7 @@ impl MergeableRegion for CeilingRegion {
 }
 
 pub trait CeilingRegionsManip {
-    fn insert_vertex(&mut self, p: Point2<f64>, height: f64) -> Result<(), CeilingRegionError>;
+    fn insert_vertex(&mut self, p: Point2f64, height: f64) -> Result<(), CeilingRegionError>;
     fn modify_polygon_construction_phase(
         &mut self,
         polygon: Polygon<f64>,
@@ -129,7 +129,7 @@ pub trait CeilingRegionsManip {
     );
     fn modify_polygon_increase_height(&mut self, polygon: Polygon<f64>, delta_height: f64);
     fn get_clockwise_3d_polygon_starting_closest_to_origin(&self) -> Polygon3DMultiZ;
-    fn get_all_heights(p: Point2<f64>) -> Vec<(f64)>;
+    fn get_all_heights(p: Point2f64) -> Vec<(f64)>;
 }
 pub enum RegionDir {
     NPlus45,
@@ -138,7 +138,7 @@ pub enum RegionDir {
     NPlus315,
 }
 //TODO: enforce always clockwise
-fn get_region_dir_relative_to_edge_point(p: Point2<f64>, reg: &CeilingRegion) -> Result<f64, ()> {
+fn get_region_dir_relative_to_edge_point(p: Point2f64, reg: &CeilingRegion) -> Result<f64, ()> {
     let poly_points = &reg.polygon.exterior;
     let n = poly_points.len();
 
@@ -149,9 +149,9 @@ fn get_region_dir_relative_to_edge_point(p: Point2<f64>, reg: &CeilingRegion) ->
         let b = poly_points[i];
 
         if point_on_segment_2d(&p, &a, &b, EPSILON) {
-            let edge = Vector2::new(b.x - a.x, b.y - a.y).normalize();
+            let edge = Vector2f64::new(b.x - a.x, b.y - a.y).normalize();
 
-            let outward = Vector2::new(edge.y, -edge.x);
+            let outward = Vector2f64::new(edge.y, -edge.x);
 
             let angle = outward.y.atan2(outward.x);
             acc_angle += angle;
@@ -165,12 +165,12 @@ fn get_region_dir_relative_to_edge_point(p: Point2<f64>, reg: &CeilingRegion) ->
 }
 
 impl CeilingRegionsManip for CeilingRegions {
-    fn get_all_heights(p: Point2<f64>) -> Vec<(f64)> {
+    fn get_all_heights(p: Point2f64) -> Vec<(f64)> {
         vec![]
     }
 
     //TODO: fix this. when we put a height, we should specify which region it's for
-    fn insert_vertex(&mut self, p: Point2<f64>, height: f64) -> Result<(), CeilingRegionError> {
+    fn insert_vertex(&mut self, p: Point2f64, height: f64) -> Result<(), CeilingRegionError> {
         let old_regions = std::mem::take(&mut self.regions);
 
         self.regions = old_regions
@@ -462,7 +462,7 @@ impl CeilingMesh {
             return Err(VertexInsertionError::EmptyMesh);
         }
 
-        let new_vertex = Point3::new(x, y, height);
+        let new_vertex = Point3f64::new(x, y, height);
         let mut triangles_to_remove = Vec::new();
         let mut triangles_to_add = Vec::new();
         let mut vertex_was_processed = false;
@@ -493,7 +493,7 @@ impl CeilingMesh {
             let mut on_edge = None;
             for &(i, j) in &edges {
                 if point_on_segment_2d(
-                    &Point2::new(x, y),
+                    &Point2f64::new(x, y),
                     &triangle.vertices[i],
                     &triangle.vertices[j],
                     EPSILON,
@@ -532,7 +532,7 @@ impl CeilingMesh {
 
             // Case 3: Check if the point is inside the triangle
             if point_in_triangle_2d(
-                &Point2::new(x, y),
+                &Point2f64::new(x, y),
                 &triangle.vertices[0].xy(),
                 &triangle.vertices[1].xy(),
                 &triangle.vertices[2].xy(),
@@ -573,7 +573,7 @@ impl CeilingMesh {
         Ok(())
     }
 
-    fn is_degenerate(verts: &[Point3<f64>; 3]) -> bool {
+    fn is_degenerate(verts: &[Point3f64; 3]) -> bool {
         let v0 = verts[1] - verts[0];
         let v1 = verts[2] - verts[0];
         let cross = v0.cross(&v1);
@@ -728,8 +728,8 @@ impl CeilingMesh {
         Some(Polygon3D::new(
             polygon_vertices
                 .iter()
-                .map(|&(x, y, z)| Point3::new(x, y, z))
-                .collect::<Vec<Point3<f64>>>(),
+                .map(|&(x, y, z)| Point3f64::new(x, y, z))
+                .collect::<Vec<Point3f64>>(),
         ))
     }
 }
@@ -845,24 +845,24 @@ impl Plane {
         (-self.d - self.normal.x * x - self.normal.y * y) / self.normal.z
     }
 
-    fn from_triangle(verts: &[Point3<f64>; 3]) -> Self {
+    fn from_triangle(verts: &[Point3f64; 3]) -> Self {
         let v0 = verts[1] - verts[0];
         let v1 = verts[2] - verts[0];
-        let normal = v0.cross(&v1);
-        let d = -normal.dot(&verts[0].coords);
+        let normal = v0.cross(v1);
+        let d = -normal.dot(verts[0]);
         Plane::new(normal, d)
     }
 }
 
 #[derive(Clone, Debug)]
 pub struct Plane {
-    normal: Vector3<f64>,
+    normal: Vector3f64<f64>,
     d: f64,
 }
 
 #[derive(Clone, Debug)]
 pub struct CeilingTriangle {
-    pub vertices: [Point3<f64>; 3],
+    pub vertices: [Point3f64; 3],
     pub plane: Plane,
 }
 pub struct CeilingRegionConversion {
@@ -913,16 +913,14 @@ impl HasBaseRegion for CeilingRegion {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use nalgebra::Point3;
-
     // Helper function to create a square region
     fn create_square_region(z: f64) -> CeilingRegion {
         CeilingRegion {
             polygon: Polygon3D::new(vec![
-                Point3::new(0.0, 0.0, z),
-                Point3::new(1.0, 0.0, z),
-                Point3::new(1.0, 1.0, z),
-                Point3::new(0.0, 1.0, z),
+                Point3f64::new(0.0, 0.0, z),
+                Point3f64::new(1.0, 0.0, z),
+                Point3f64::new(1.0, 1.0, z),
+                Point3f64::new(0.0, 1.0, z),
             ]),
             construction_type: CeilingConstructionType::Uninitialised,
             base: RegionBase {
@@ -935,7 +933,7 @@ mod tests {
     }
     #[test]
     fn test_quantize() {
-        let p = Point3::new(1.23456789, 9.87654321, 0.0);
+        let p = Point3f64::new(1.23456789, 9.87654321, 0.0);
         let (x, y) = quantize(&p);
 
         assert_eq!(x, 1234567890);
@@ -944,8 +942,8 @@ mod tests {
 
     #[test]
     fn test_undirected_edge_2d() {
-        let p1 = Point3::new(0.0, 0.0, 0.0);
-        let p2 = Point3::new(1.0, 1.0, 0.0);
+        let p1 = Point3f64::new(0.0, 0.0, 0.0);
+        let p2 = Point3f64::new(1.0, 1.0, 0.0);
 
         let edge1 = undirected_edge_2d(&p1, &p2);
         let edge2 = undirected_edge_2d(&p2, &p1);
@@ -955,8 +953,8 @@ mod tests {
 
     #[test]
     fn test_undirected_edge_3df_equality() {
-        let p1 = Point3::new(0.0, 0.0, 0.0);
-        let p2 = Point3::new(1.0, 1.0, 1.0);
+        let p1 = Point3f64::new(0.0, 0.0, 0.0);
+        let p2 = Point3f64::new(1.0, 1.0, 1.0);
 
         let edge1 = undirected_edge_3df(&p1, &p2);
         let edge2 = undirected_edge_3df(&p2, &p1);
@@ -966,9 +964,9 @@ mod tests {
 
     #[test]
     fn test_edge3df_equality_with_epsilon() {
-        let p1 = Point3::new(0.0, 0.0, 0.0);
-        let p2 = Point3::new(1.0, 1.0, 1.0);
-        let p2_close = Point3::new(1.0 + EPSILON / 2.0, 1.0, 1.0);
+        let p1 = Point3f64::new(0.0, 0.0, 0.0);
+        let p2 = Point3f64::new(1.0, 1.0, 1.0);
+        let p2_close = Point3f64::new(1.0 + EPSILON / 2.0, 1.0, 1.0);
 
         let edge1 = undirected_edge_3df(&p1, &p2);
         let edge2 = undirected_edge_3df(&p1, &p2_close);
@@ -979,9 +977,9 @@ mod tests {
     #[test]
     fn test_ceiling_regions_new() {
         let vertices = vec![
-            Point3::new(0.0, 0.0, 0.0),
-            Point3::new(1.0, 0.0, 0.0),
-            Point3::new(0.5, 1.0, 0.0),
+            Point3f64::new(0.0, 0.0, 0.0),
+            Point3f64::new(1.0, 0.0, 0.0),
+            Point3f64::new(0.5, 1.0, 0.0),
         ];
 
         let regions = CeilingRegions::new(vertices, None, None, None);
@@ -1000,10 +998,10 @@ mod tests {
     #[test]
     fn test_ceiling_regions_modify_polygon_increase_height() {
         let vertices = vec![
-            Point3::new(0.0, 0.0, 0.0),
-            Point3::new(1.0, 0.0, 0.0),
-            Point3::new(1.0, 1.0, 0.0),
-            Point3::new(0.0, 1.0, 0.0),
+            Point3f64::new(0.0, 0.0, 0.0),
+            Point3f64::new(1.0, 0.0, 0.0),
+            Point3f64::new(1.0, 1.0, 0.0),
+            Point3f64::new(0.0, 1.0, 0.0),
         ];
 
         let mut regions = CeilingRegions::new(vertices, None, None, None);
@@ -1031,9 +1029,9 @@ mod tests {
     #[test]
     fn test_plane_from_triangle() {
         let verts = [
-            Point3::new(0.0, 0.0, 0.0),
-            Point3::new(1.0, 0.0, 0.0),
-            Point3::new(0.0, 1.0, 0.0),
+            Point3f64::new(0.0, 0.0, 0.0),
+            Point3f64::new(1.0, 0.0, 0.0),
+            Point3f64::new(0.0, 1.0, 0.0),
         ];
 
         let plane = Plane::from_triangle(&verts);
@@ -1045,14 +1043,14 @@ mod tests {
     #[test]
     fn test_plane_approx_eq() {
         let verts1 = [
-            Point3::new(0.0, 0.0, 0.0),
-            Point3::new(1.0, 0.0, 0.0),
-            Point3::new(0.0, 1.0, 0.0),
+            Point3f64::new(0.0, 0.0, 0.0),
+            Point3f64::new(1.0, 0.0, 0.0),
+            Point3f64::new(0.0, 1.0, 0.0),
         ];
         let verts2 = [
-            Point3::new(0.0, 0.0, 0.0),
-            Point3::new(2.0, 0.0, 0.0),
-            Point3::new(0.0, 2.0, 0.0),
+            Point3f64::new(0.0, 0.0, 0.0),
+            Point3f64::new(2.0, 0.0, 0.0),
+            Point3f64::new(0.0, 2.0, 0.0),
         ];
 
         let plane1 = Plane::from_triangle(&verts1);
@@ -1065,9 +1063,9 @@ mod tests {
     fn test_plane_z_at() {
         // Create a sloped plane
         let verts = [
-            Point3::new(0.0, 0.0, 0.0),
-            Point3::new(1.0, 0.0, 1.0),
-            Point3::new(0.0, 1.0, 0.0),
+            Point3f64::new(0.0, 0.0, 0.0),
+            Point3f64::new(1.0, 0.0, 1.0),
+            Point3f64::new(0.0, 1.0, 0.0),
         ];
 
         let plane = Plane::from_triangle(&verts);
@@ -1080,9 +1078,9 @@ mod tests {
     #[test]
     fn test_is_degenerate_collinear() {
         let verts = [
-            Point3::new(0.0, 0.0, 0.0),
-            Point3::new(1.0, 0.0, 0.0),
-            Point3::new(2.0, 0.0, 0.0), // Collinear
+            Point3f64::new(0.0, 0.0, 0.0),
+            Point3f64::new(1.0, 0.0, 0.0),
+            Point3f64::new(2.0, 0.0, 0.0), // Collinear
         ];
 
         assert!(CeilingMesh::is_degenerate(&verts));
@@ -1091,9 +1089,9 @@ mod tests {
     #[test]
     fn test_is_degenerate_valid() {
         let verts = [
-            Point3::new(0.0, 0.0, 0.0),
-            Point3::new(1.0, 0.0, 0.0),
-            Point3::new(0.0, 1.0, 0.0),
+            Point3f64::new(0.0, 0.0, 0.0),
+            Point3f64::new(1.0, 0.0, 0.0),
+            Point3f64::new(0.0, 1.0, 0.0),
         ];
 
         assert!(!CeilingMesh::is_degenerate(&verts));
@@ -1112,7 +1110,10 @@ mod tests {
     #[test]
     fn test_ceiling_mesh_try_from_invalid_region() {
         let region = CeilingRegion {
-            polygon: Polygon3D::new(vec![Point3::new(0.0, 0.0, 0.0), Point3::new(1.0, 0.0, 0.0)]), // Only 2 vertices
+            polygon: Polygon3D::new(vec![
+                Point3f64::new(0.0, 0.0, 0.0),
+                Point3f64::new(1.0, 0.0, 0.0),
+            ]), // Only 2 vertices
             construction_type: CeilingConstructionType::Uninitialised,
             base: RegionBase {
                 id: ItemId::default(),
@@ -1244,10 +1245,10 @@ mod tests {
     #[test]
     fn test_modify_polygon_construction_phase() {
         let vertices = vec![
-            Point3::new(0.0, 0.0, 0.0),
-            Point3::new(1.0, 0.0, 0.0),
-            Point3::new(1.0, 1.0, 0.0),
-            Point3::new(0.0, 1.0, 0.0),
+            Point3f64::new(0.0, 0.0, 0.0),
+            Point3f64::new(1.0, 0.0, 0.0),
+            Point3f64::new(1.0, 1.0, 0.0),
+            Point3f64::new(0.0, 1.0, 0.0),
         ];
 
         let mut regions = CeilingRegions::new(vertices, None, None, None);
@@ -1277,9 +1278,9 @@ mod tests {
     #[test]
     fn test_ceiling_triangle_plane_consistency() {
         let verts = [
-            Point3::new(0.0, 0.0, 0.0),
-            Point3::new(1.0, 0.0, 0.0),
-            Point3::new(0.0, 1.0, 0.0),
+            Point3f64::new(0.0, 0.0, 0.0),
+            Point3f64::new(1.0, 0.0, 0.0),
+            Point3f64::new(0.0, 1.0, 0.0),
         ];
 
         let triangle = CeilingTriangle {
@@ -1297,9 +1298,9 @@ mod tests {
     #[test]
     fn test_degenerate_detection_zero_area() {
         let verts = [
-            Point3::new(0.0, 0.0, 0.0),
-            Point3::new(0.0, 0.0, 0.0),
-            Point3::new(0.0, 0.0, 0.0),
+            Point3f64::new(0.0, 0.0, 0.0),
+            Point3f64::new(0.0, 0.0, 0.0),
+            Point3f64::new(0.0, 0.0, 0.0),
         ];
 
         assert!(CeilingMesh::is_degenerate(&verts));
@@ -1309,10 +1310,10 @@ mod tests {
     fn test_conversion_preserves_construction_phase() {
         let region = CeilingRegion {
             polygon: Polygon3D::new(vec![
-                Point3::new(0.0, 0.0, 0.0),
-                Point3::new(1.0, 0.0, 0.0),
-                Point3::new(1.0, 1.0, 0.0),
-                Point3::new(0.0, 1.0, 0.0),
+                Point3f64::new(0.0, 0.0, 0.0),
+                Point3f64::new(1.0, 0.0, 0.0),
+                Point3f64::new(1.0, 1.0, 0.0),
+                Point3f64::new(0.0, 1.0, 0.0),
             ]),
             construction_type: CeilingConstructionType::Uninitialised,
             base: RegionBase {
@@ -1335,10 +1336,10 @@ mod tests {
     #[test]
     fn test_simple_flat_square_ceiling() {
         let vertices = vec![
-            Point3::new(0.0, 0.0, 2.5),
-            Point3::new(1.0, 0.0, 2.5),
-            Point3::new(1.0, 1.0, 2.5),
-            Point3::new(0.0, 1.0, 2.5),
+            Point3f64::new(0.0, 0.0, 2.5),
+            Point3f64::new(1.0, 0.0, 2.5),
+            Point3f64::new(1.0, 1.0, 2.5),
+            Point3f64::new(0.0, 1.0, 2.5),
         ];
 
         let ceilings = CeilingRegions::new(vertices, None, None, None);
@@ -1357,10 +1358,10 @@ mod tests {
     #[test]
     fn test_sloped_ceiling_edge() {
         let vertices = vec![
-            Point3::new(0.0, 0.0, 2.0),
-            Point3::new(1.0, 0.0, 2.5),
-            Point3::new(1.0, 1.0, 3.0),
-            Point3::new(0.0, 1.0, 2.5),
+            Point3f64::new(0.0, 0.0, 2.0),
+            Point3f64::new(1.0, 0.0, 2.5),
+            Point3f64::new(1.0, 1.0, 3.0),
+            Point3f64::new(0.0, 1.0, 2.5),
         ];
 
         let ceilings = CeilingRegions::new(vertices, None, None, None);
@@ -1390,17 +1391,17 @@ mod tests {
     #[test]
     fn test_multiple_ceiling_regions() {
         let region1 = vec![
-            Point3::new(0.0, 0.0, 2.0),
-            Point3::new(1.0, 0.0, 2.0),
-            Point3::new(1.0, 1.0, 2.0),
-            Point3::new(0.0, 1.0, 2.0),
+            Point3f64::new(0.0, 0.0, 2.0),
+            Point3f64::new(1.0, 0.0, 2.0),
+            Point3f64::new(1.0, 1.0, 2.0),
+            Point3f64::new(0.0, 1.0, 2.0),
         ];
 
         let region2 = vec![
-            Point3::new(1.0, 0.0, 2.5),
-            Point3::new(2.0, 0.0, 2.5),
-            Point3::new(2.0, 1.0, 2.5),
-            Point3::new(1.0, 1.0, 2.5),
+            Point3f64::new(1.0, 0.0, 2.5),
+            Point3f64::new(2.0, 0.0, 2.5),
+            Point3f64::new(2.0, 1.0, 2.5),
+            Point3f64::new(1.0, 1.0, 2.5),
         ];
 
         let mut ceilings = CeilingRegions::new(region1, None, None, None);

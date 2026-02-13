@@ -1,11 +1,11 @@
 // src/data/structural.rs
 use geo::{Coord, LineString, Polygon};
-use nalgebra::{Point2, Point3};
 use serde::{Deserialize, Serialize};
 
 use super::common::{ConstructionPhase, Item, ItemId, Photo};
 use super::fenestration::{Door, Window};
 
+use domain::points::{Point2f64, Point3f64};
 #[derive(Debug, Default, Clone, Serialize, Deserialize)]
 pub struct Opes {
     pub doors: Vec<ItemId>,   // references to Door IDs
@@ -152,7 +152,7 @@ pub struct FloorRegions {
 impl FloorRegions {
     /// Create a new FloorRegions
     pub fn new(
-        vertices: Vec<Point2<f64>>,
+        vertices: Vec<Point2f64>,
         height: f64,
         construction_type: Option<FloorConstructionType>,
         construction_makeup: Option<ConstructionMakeup>,
@@ -187,7 +187,7 @@ pub struct CeilingRegions {
 impl CeilingRegions {
     /// Create a new CeilingRegions
     pub fn new(
-        vertices: Vec<Point3<f64>>,
+        vertices: Vec<Point3f64>,
         construction_type: Option<CeilingConstructionType>,
         construction_makeup: Option<ConstructionMakeup>,
         construction_phase: Option<ConstructionPhase>,
@@ -211,11 +211,11 @@ impl CeilingRegions {
 }
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Polygon3D {
-    pub exterior: Vec<Point3<f64>>,
+    pub exterior: Vec<Point3f64>,
 }
 
 impl Polygon3D {
-    pub fn new(exterior: Vec<Point3<f64>>) -> Self {
+    pub fn new(exterior: Vec<Point3f64>) -> Self {
         Self { exterior }
     }
 }
@@ -267,7 +267,7 @@ pub struct WallRegions {
 pub struct Room {
     pub id: ItemId,
     pub name: String,
-    pub vertices: Vec<Point3<f64>>,
+    pub vertices: Vec<Point3f64>,
     pub thermostats: Vec<Item>,
     pub vents: Vec<Item>,
     pub fans: Vec<Item>,

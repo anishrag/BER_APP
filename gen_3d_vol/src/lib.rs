@@ -4,8 +4,8 @@ mod geometry;
 mod types;
 mod walls;
 
+use domain::points::{Point2f64, Point3f64};
 use geo::{LineString, Polygon};
-use nalgebra::{Point2, Point3};
 
 use datatypes::ber::common::ItemId;
 
@@ -40,7 +40,7 @@ pub struct Gen3D {
 impl Gen3D {
     // costructors
     pub fn new_floor(
-        vertices: Vec<Point2<f64>>,
+        vertices: Vec<Point2f64>,
         height: f64,
         construction_type: FloorConstructionType,
         floor_plan_below: Option<&Gen3D>,
@@ -101,7 +101,7 @@ impl Gen3D {
     // ----------------------------------------------------------------------------------------------
     pub fn raise_lower_floor_split(
         &mut self,
-        vertices: Vec<Point2<f64>>,
+        vertices: Vec<Point2f64>,
         split_height_change: f64,
     ) {
         let polygon = Polygon::new(
@@ -119,7 +119,7 @@ impl Gen3D {
 
     pub fn change_floor_construction_phase_split(
         &mut self,
-        vertices: Vec<Point2<f64>>,
+        vertices: Vec<Point2f64>,
         phase: ConstructionPhase,
     ) {
         let polygon = Polygon::new(
@@ -137,7 +137,7 @@ impl Gen3D {
 
     pub fn change_floor_construction_type_split(
         &mut self,
-        vertices: Vec<Point2<f64>>,
+        vertices: Vec<Point2f64>,
         construction_type: FloorConstructionType,
     ) {
         let polygon = Polygon::new(
@@ -155,7 +155,7 @@ impl Gen3D {
 
     pub fn change_floor_construction_makeup_split(
         &mut self,
-        vertices: Vec<Point2<f64>>,
+        vertices: Vec<Point2f64>,
         construction_makeup: ConstructionMakeup,
     ) {
         let polygon = Polygon::new(
@@ -180,17 +180,17 @@ impl Gen3D {
         let exterior_polygon = self
             .floors
             .get_clockwise_3d_polygon_starting_closest_to_origin();
-        let vertices_2d: Vec<Point2<f64>> = exterior_polygon.into();
-        let vertices_3d: Vec<Point3<f64>> = vertices_2d
+        let vertices_2d: Vec<Point2f64> = exterior_polygon.into();
+        let vertices_3d: Vec<Point3f64> = vertices_2d
             .into_iter()
-            .map(|p| Point3::new(p.x, p.y, height))
+            .map(|p| Point3f64::new(p.x, p.y, height))
             .collect();
         self.ceilings = CeilingRegions::new(vertices_3d, None, None, None);
     }
 
     pub fn raise_lower_ceiling_split(
         &mut self,
-        vertices: Vec<Point2<f64>>,
+        vertices: Vec<Point2f64>,
         split_height_change: f64,
     ) {
         let polygon = Polygon::new(
@@ -208,7 +208,7 @@ impl Gen3D {
 
     pub fn set_point_height_ceiling(
         &mut self,
-        point: Point2<f64>,
+        point: Point2f64,
         new_height: f64,
         from_highest_region: bool,
     ) -> Result<(), Gen3DError> {
@@ -234,7 +234,7 @@ impl Gen3D {
 
     pub fn change_ceiling_construction_makeup_split(
         &mut self,
-        vertices: Vec<Point2<f64>>,
+        vertices: Vec<Point2f64>,
         construction_makeup: ConstructionMakeup,
     ) {
         let polygon = Polygon::new(
@@ -252,7 +252,7 @@ impl Gen3D {
 
     pub fn change_ceiling_construction_type_split(
         &mut self,
-        vertices: Vec<Point2<f64>>,
+        vertices: Vec<Point2f64>,
         construction_type: CeilingConstructionType,
     ) {
         let polygon = Polygon::new(
@@ -270,7 +270,7 @@ impl Gen3D {
 
     pub fn change_ceiling_construction_phase_split(
         &mut self,
-        vertices: Vec<Point2<f64>>,
+        vertices: Vec<Point2f64>,
         phase: ConstructionPhase,
     ) {
         let polygon = Polygon::new(

@@ -1,9 +1,9 @@
 // standard includes
+use domain::points::Point2f64;
 use geo::algorithm::Contains;
 use geo::bool_ops::BooleanOps;
 use geo::{LineString, MultiPolygon, Polygon};
 use itertools::izip;
-use nalgebra::Point2;
 use std::collections::HashMap;
 
 use datatypes::ber::common::{ConstructionPhase, ItemId};
@@ -17,8 +17,8 @@ use super::types::{CloneWithNewId, HasBaseRegion, Polygon3D, Polygon3DMultiZ};
 
 #[derive(Clone, Copy, Debug)]
 struct DirectedEdge {
-    from: Point2<f64>,
-    to: Point2<f64>,
+    from: Point2f64,
+    to: Point2f64,
     height: f64,
 }
 #[derive(Debug)]
@@ -54,7 +54,7 @@ pub trait FloorRegionsManip {
         construction_phase: Option<ConstructionPhase>,
     );
 
-    fn get_floor_height_at_point(&self, point: &Point2<f64>) -> Vec<f64>;
+    fn get_floor_height_at_point(&self, point: &Point2f64) -> Vec<f64>;
     fn get_clockwise_3d_polygon_starting_closest_to_origin(&self) -> Polygon3DMultiZ;
 }
 impl FloorRegionsManip for FloorRegions {
@@ -125,7 +125,7 @@ impl FloorRegionsManip for FloorRegions {
         });
     }
 
-    fn get_floor_height_at_point(&self, point: &Point2<f64>) -> Vec<f64> {
+    fn get_floor_height_at_point(&self, point: &Point2f64) -> Vec<f64> {
         let mut heights = Vec::new();
         for region in &self.regions {
             if region.polygon.contains(&geo::Point::new(point.x, point.y)) {
@@ -142,11 +142,11 @@ impl FloorRegionsManip for FloorRegions {
         let mut all_edges: Vec<DirectedEdge> = Vec::new();
 
         for region in &self.regions {
-            let coords: Vec<Point2<f64>> = region
+            let coords: Vec<Point2f64> = region
                 .polygon
                 .exterior()
                 .points()
-                .map(|p| Point2::new(p.x(), p.y()))
+                .map(|p| Point2f64::new(p.x(), p.y()))
                 .collect();
 
             if coords.len() < 2 {
@@ -502,7 +502,7 @@ fn approx_eq(a: f64, b: f64) -> bool {
     (a - b).abs() < 1e-6
 }
 
-fn points_match(p1: &Point2<f64>, p2: &Point2<f64>) -> bool {
+fn points_match(p1: &Point2f64, p2: &Point2f64) -> bool {
     approx_eq(p1.x, p2.x) && approx_eq(p1.y, p2.y)
 }
 
@@ -555,7 +555,7 @@ mod tests {
     use crate::types::{FromMultiZ, Polygon3D, Polygon3DConversionError};
     use datatypes::ber::structural::{ConstructionLayer, ConstructionMaterial};
 
-    use nalgebra::Point3;
+    use domain::points::Point3f64;
     fn rectangle(min_x: f64, min_y: f64, max_x: f64, max_y: f64) -> Polygon<f64> {
         Polygon::new(
             LineString::from(vec![
@@ -571,10 +571,10 @@ mod tests {
 
     fn base_floor() -> FloorRegions {
         let vertices = vec![
-            Point2::new(0.0, 0.0),
-            Point2::new(10.0, 0.0),
-            Point2::new(10.0, 10.0),
-            Point2::new(0.0, 10.0),
+            Point2f64::new(0.0, 0.0),
+            Point2f64::new(10.0, 0.0),
+            Point2f64::new(10.0, 10.0),
+            Point2f64::new(0.0, 10.0),
         ];
 
         FloorRegions::new(vertices, 0.0, None, None, None)
@@ -739,10 +739,10 @@ mod tests {
     fn test_single_region_3d_polygon() {
         // Create a simple square region at height 1.0
         let vertices = vec![
-            Point2::new(0.0, 0.0),
-            Point2::new(4.0, 0.0),
-            Point2::new(4.0, 4.0),
-            Point2::new(0.0, 4.0),
+            Point2f64::new(0.0, 0.0),
+            Point2f64::new(4.0, 0.0),
+            Point2f64::new(4.0, 4.0),
+            Point2f64::new(0.0, 4.0),
         ];
 
         let mut regions = FloorRegions::new(
@@ -792,18 +792,18 @@ mod tests {
         // Create two adjacent regions with different heights
         // Region 1: left square at height 1.0
         let vertices1 = vec![
-            Point2::new(0.0, 0.0),
-            Point2::new(2.0, 0.0),
-            Point2::new(2.0, 2.0),
-            Point2::new(0.0, 2.0),
+            Point2f64::new(0.0, 0.0),
+            Point2f64::new(2.0, 0.0),
+            Point2f64::new(2.0, 2.0),
+            Point2f64::new(0.0, 2.0),
         ];
 
         // Region 2: right square at height 3.0
         let vertices2 = [
-            Point2::new(2.0, 0.0),
-            Point2::new(4.0, 0.0),
-            Point2::new(4.0, 2.0),
-            Point2::new(2.0, 2.0),
+            Point2f64::new(2.0, 0.0),
+            Point2f64::new(4.0, 0.0),
+            Point2f64::new(4.0, 2.0),
+            Point2f64::new(2.0, 2.0),
         ];
 
         let mut regions = FloorRegions::new(
@@ -876,10 +876,10 @@ mod tests {
     fn test_polygon_3d_conversion_roundtrip() {
         // Create a simple Polygon3D
         let points = vec![
-            Point3::new(0.0, 0.0, 1.0),
-            Point3::new(1.0, 0.0, 1.5),
-            Point3::new(1.0, 1.0, 2.0),
-            Point3::new(0.0, 1.0, 1.5),
+            Point3f64::new(0.0, 0.0, 1.0),
+            Point3f64::new(1.0, 0.0, 1.5),
+            Point3f64::new(1.0, 1.0, 2.0),
+            Point3f64::new(0.0, 1.0, 1.5),
         ];
         let polygon_3d = Polygon3D::new(points.clone());
 
@@ -908,14 +908,12 @@ mod tests {
     }
     #[test]
     fn test_clockwise_ordering() {
-        use nalgebra::Point2;
-
         // Create a simple square
         let vertices = vec![
-            Point2::new(0.0, 0.0),
-            Point2::new(1.0, 0.0),
-            Point2::new(1.0, 1.0),
-            Point2::new(0.0, 1.0),
+            Point2f64::new(0.0, 0.0),
+            Point2f64::new(1.0, 0.0),
+            Point2f64::new(1.0, 1.0),
+            Point2f64::new(0.0, 1.0),
         ];
 
         let regions = FloorRegions::new(

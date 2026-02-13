@@ -1,6 +1,7 @@
 pub use crate::engine::{SketchEngine, SketchError, SketchModeBehaviour, StrokeAppendMode};
-pub use crate::model::{Point2f, Stroke};
+pub use crate::model::Stroke;
 
+pub use domain::points::Point2f32;
 pub use domain::sketch::EditTools;
 #[derive(Debug, Default)]
 pub struct Storey2DPerpWalls;
@@ -13,7 +14,7 @@ impl SketchModeBehaviour for Storey2DPerpWalls {
         close_epsilon: f32,
         snap_epsilon: f32,
         append_mode: &mut StrokeAppendMode,
-        start: Point2f,
+        start: Point2f32,
     ) -> Result<(), SketchError> {
         match stroke {
             None => {
@@ -66,7 +67,7 @@ impl SketchModeBehaviour for Storey2DPerpWalls {
         &mut self,
         stroke: &mut Option<Stroke>,
         append_mode: StrokeAppendMode,
-        point: Point2f,
+        point: Point2f32,
     ) -> Result<(), SketchError> {
         let stroke = stroke.as_mut().ok_or(SketchError::NoActiveStroke)?;
 

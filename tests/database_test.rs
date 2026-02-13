@@ -1,6 +1,6 @@
 use anyhow::Result;
 use chrono::NaiveDate;
-use nalgebra::Point2;
+use domain::points::Point2f64;
 use rusqlite::Connection;
 
 use datatypes::ber::ber_struct::Ber;
@@ -229,10 +229,10 @@ fn create_full_ber(id: ItemId) -> Ber {
             name: "Ground Floor".to_string(),
             floors: FloorRegions::new(
                 vec![
-                    Point2::new(0.0, 0.0),
-                    Point2::new(10.0, 0.0),
-                    Point2::new(10.0, 8.0),
-                    Point2::new(0.0, 8.0),
+                    Point2f64::new(0.0, 0.0),
+                    Point2f64::new(10.0, 0.0),
+                    Point2f64::new(10.0, 8.0),
+                    Point2f64::new(0.0, 8.0),
                 ],
                 0.0,
                 None,
