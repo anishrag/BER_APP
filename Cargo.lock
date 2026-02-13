@@ -1448,7 +1448,6 @@ dependencies = [
  "chrono",
  "domain",
  "geo",
- "nalgebra",
  "serde",
  "uuid",
 ]
@@ -2378,7 +2377,6 @@ dependencies = [
  "earcutr 0.5.0",
  "geo",
  "itertools 0.14.0",
- "nalgebra",
  "ordered-float",
  "uuid",
 ]
@@ -5606,7 +5604,6 @@ name = "sketch"
 version = "0.1.0"
 dependencies = [
  "domain",
- "nalgebra",
  "strum",
  "strum_macros",
 ]

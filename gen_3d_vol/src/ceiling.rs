@@ -5,7 +5,7 @@
 // 5. x further split by year
 // 6. x futher user splitting if required
 // external crates
-use domain::points::{Point2f64, Point3f64};
+use domain::points::{Point2f64, Point3f64, Vector2f64, Vector3f64};
 use earcutr::earcut;
 use geo::Polygon;
 use std::collections::HashMap;
@@ -816,7 +816,7 @@ impl TryFrom<CeilingRegion> for CeilingMesh {
     }
 }
 impl Plane {
-    fn new(normal: Vector3<f64>, d: f64) -> Self {
+    fn new(normal: Vector3f64, d: f64) -> Self {
         let norm = normal.norm();
         debug_assert!(norm.is_finite() && norm > 0.0);
 
@@ -848,15 +848,15 @@ impl Plane {
     fn from_triangle(verts: &[Point3f64; 3]) -> Self {
         let v0 = verts[1] - verts[0];
         let v1 = verts[2] - verts[0];
-        let normal = v0.cross(v1);
-        let d = -normal.dot(verts[0]);
+        let normal = v0.cross(&v1);
+        let d = -normal.dot(&verts[0].coords);
         Plane::new(normal, d)
     }
 }
 
 #[derive(Clone, Debug)]
 pub struct Plane {
-    normal: Vector3f64<f64>,
+    normal: Vector3f64,
     d: f64,
 }
 

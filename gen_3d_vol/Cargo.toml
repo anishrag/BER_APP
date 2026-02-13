@@ -9,6 +9,5 @@ domain = { path = "../domain" }
 earcutr = "0.5.0"
 geo = "0.32.0"
 itertools = "0.14.0"
-nalgebra = "0.34.1"
 ordered-float = "5.1.0"
 uuid = "1.19.0"

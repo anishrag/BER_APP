@@ -15,8 +15,8 @@ use super::types::{HasBaseRegion, Polygon3D, Polygon3DMultiZ, RegionBase, SplitL
 
 trait WallRegionManip {
     fn get_leftmost_floor_vertex(&self) -> Point3f64;
-    fn wall_horizontal_dir(&self) -> Vector3f64<f64>;
-    fn wall_plane_normal(&self) -> Vector3f64<f64>;
+    fn wall_horizontal_dir(&self) -> Vector3f64;
+    fn wall_plane_normal(&self) -> Vector3f64;
     fn get_dividing_line_equation(&self, split_along_xy: f64, split_along_z: f64) -> SplitLine3D;
 }
 
@@ -26,13 +26,13 @@ impl WallRegionManip for WallRegion {
         self.polygon.exterior[0]
     }
 
-    fn wall_horizontal_dir(&self) -> Vector3f64<f64> {
+    fn wall_horizontal_dir(&self) -> Vector3f64 {
         let p0 = self.polygon.exterior[0];
         let p1 = self.polygon.exterior[1];
         Vector3f64::new(p1.x - p0.x, p1.y - p0.y, 0.0)
     }
 
-    fn wall_plane_normal(&self) -> Vector3f64<f64> {
+    fn wall_plane_normal(&self) -> Vector3f64 {
         let p0 = self.polygon.exterior[0];
         let p1 = self.polygon.exterior[1];
         let p2 = self.polygon.exterior[2];
@@ -726,7 +726,7 @@ mod tests {
         }
     }
 
-    fn assert_unit(v: Vector3f64<f64>) {
+    fn assert_unit(v: Vector3f64) {
         assert!((v.norm() - 1.0).abs() < TOL);
     }
 
