@@ -101,9 +101,13 @@ impl AppController {
     }
 
     pub fn sketch_end_stroke(&mut self, point: Point2f) -> Result<(), String> {
-        self.sketch_engine
+        if let Some(stroke) = self
+            .sketch_engine
             .end_stroke()
-            .map_err(|e| format!("Failed to end stroke: {:?}", e));
+            .map_err(|e| format!("Failed to end stroke: {:?}", e))?
+        {
+            println!("Stroke completed with {} points", stroke.points.len());
+        }
         Ok(())
     }
 }
