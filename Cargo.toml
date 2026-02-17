@@ -21,6 +21,7 @@ nalgebra = { version = "0.34.1", features = ["serde-serialize"] }
 earcutr = "0.5.0"
 datatypes = { path = "datatypes" }
 domain = { path = "domain" }
+manip_2d_plan = { path = "manip_2d_plan" }
 sketch = { path = "sketch" }
 eframe = "0.33.3"
 egui = "0.33.3"
@@ -31,4 +32,4 @@ egui_field_editor = "0.2.2"
 egui_extras = { version = "0.33.3", features = ["datepicker"] }
 
 [workspace]
-members = ["datatypes", "gen_3d_vol", "sketch"]
+members = ["datatypes", "gen_3d_vol", "sketch", "domain", "manip_2d_plan"]

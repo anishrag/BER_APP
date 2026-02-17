@@ -625,6 +625,7 @@ dependencies = [
  "egui_field_editor",
  "geo",
  "log",
+ "manip_2d_plan",
  "nalgebra",
  "rusqlite",
  "serde",
@@ -1537,6 +1538,7 @@ dependencies = [
  "nalgebra",
  "serde",
  "strum",
+ "strum_macros",
 ]
 
 [[package]]
@@ -3828,6 +3830,21 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "62bb907fe88d54d8d9ce32a3cceab4218ed2f6b7d35617cafe9adf84e43919cb"
 dependencies = [
  "libc",
+]
+
+[[package]]
+name = "manip_2d_plan"
+version = "0.1.0"
+dependencies = [
+ "approx",
+ "domain",
+ "geo",
+ "geo-types",
+ "rstar 0.12.2",
+ "serde",
+ "strum",
+ "strum_macros",
+ "thiserror 2.0.18",
 ]
 
 [[package]]

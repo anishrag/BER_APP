@@ -8,12 +8,14 @@ use datatypes::ber::ber_struct::Ber;
 use datatypes::ber::common::ItemId;
 use domain::points::Point2f32;
 use domain::sketch::{DisplayMode, EditTools, SketchMode};
+use manip_2d_plan::FloorPlan;
 use sketch::model::Stroke;
 use sketch::SketchEngine;
 
 pub struct AppController {
     conn: Connection,
     sketch_engine: SketchEngine,
+    floor_plan: FloorPlan,
     loader_engine: DataLoader,
     //   processing_engine: ProcessingEngine,
 }
@@ -23,6 +25,7 @@ impl AppController {
         Self {
             conn,
             loader_engine: DataLoader::new(),
+            floor_plan: FloorPlan::default(),
             sketch_engine: SketchEngine::new(), //            processing_engine: ProcessingEngine::new(),
         }
     }
@@ -110,8 +113,9 @@ impl AppController {
             match self.sketch_engine.mode_behaviour.as_ref() {
                 // For example, if it's a Storey2DPerpWalls, we might want to convert the stroke into walls and add them to the floor plan
                 Storey2DPerpWalls => {
-                    //     let walls = convert_stroke_to_walls(stroke);
-                    //     self.floor_plan.add_walls(walls);
+                    self.floor_plan = FloorPlan::from_points_to_orthogonal(&stroke.points, 10.0)
+                        .map_err(|e| format!("Failed to add area: {:?}", e))?;
+                    println!("floor plan: {:?}", self.floor_plan);
                 }
                 _ => {}
             }

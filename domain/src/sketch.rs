@@ -1,4 +1,4 @@
-use strum::EnumIter;
+use strum_macros::EnumIter;
 
 #[derive(Default, Clone, Copy, PartialEq, EnumIter, Debug)]
 pub enum SketchMode {
