@@ -127,24 +127,36 @@ impl ParametricPlan {
     }
 
     /// Apply orthogonal constraints
-    /// For orthogonal plans, we reduce parameters by sharing coordinates along axes
+    /// For orthogonal plans, we reduce parameters by sharing coordinates along axes.
+    ///
+    /// Assumes V0's `x_expr` and `y_expr` are `Constant(_)` — this is the contract
+    /// from `from_points`, which pins V0 to the origin. Coordinates on other
+    /// vertices that match V0's constants (within tolerance) collapse to those
+    /// constants rather than getting fresh parameters. If V0 ever becomes
+    /// parameterized (e.g. to translate the whole plan), this dedup needs to
+    /// treat V0 like any other vertex instead of folding into its constants.
     pub fn apply_orthogonal_constraints(&mut self) -> Result<(), Error> {
-        // Group vertices by their x and y coordinates (within tolerance)
         let tolerance = 0.5;
 
-        // Evaluate current positions
         let positions: Vec<Point2f32> = self
             .vertices
             .iter()
             .map(|v| v.evaluate(&self.parameters))
             .collect();
 
-        // Find unique x and y values
+        // Capture V0's constants so matching x/y values on later vertices
+        // collapse to constants instead of becoming new parameters.
+        let v0_const_x = match &self.vertices[0].x_expr {
+            CoordinateExpression::Constant(v) => Some(*v),
+            _ => None,
+        };
+        let v0_const_y = match &self.vertices[0].y_expr {
+            CoordinateExpression::Constant(v) => Some(*v),
+            _ => None,
+        };
+
         let mut unique_x: Vec<(f32, ParameterId)> = Vec::new();
         let mut unique_y: Vec<(f32, ParameterId)> = Vec::new();
-
-        // First vertex is at origin (constant)
-        // Start assigning parameters for other vertices
         let mut new_vertices = vec![self.vertices[0].clone()];
         let mut param_id = 0;
         let mut new_parameters = HashMap::new();
@@ -152,38 +164,39 @@ impl ParametricPlan {
         for i in 1..positions.len() {
             let pos = &positions[i];
 
-            // Find or create parameter for x coordinate
-            let x_param = if let Some((_, pid)) = unique_x
+            // x: prefer V0's constant, then a previously-seen parameter, else a new one.
+            let x_expr = if let Some(c) = v0_const_x.filter(|c| (c - pos.x).abs() < tolerance) {
+                CoordinateExpression::Constant(c)
+            } else if let Some((_, pid)) = unique_x
                 .iter()
                 .find(|(val, _)| (val - pos.x).abs() < tolerance)
             {
-                *pid
+                CoordinateExpression::Parameter(*pid)
             } else {
                 let pid = param_id;
                 param_id += 1;
                 new_parameters.insert(pid, pos.x);
                 unique_x.push((pos.x, pid));
-                pid
+                CoordinateExpression::Parameter(pid)
             };
 
-            // Find or create parameter for y coordinate
-            let y_param = if let Some((_, pid)) = unique_y
+            // y: same logic, other axis.
+            let y_expr = if let Some(c) = v0_const_y.filter(|c| (c - pos.y).abs() < tolerance) {
+                CoordinateExpression::Constant(c)
+            } else if let Some((_, pid)) = unique_y
                 .iter()
                 .find(|(val, _)| (val - pos.y).abs() < tolerance)
             {
-                *pid
+                CoordinateExpression::Parameter(*pid)
             } else {
                 let pid = param_id;
                 param_id += 1;
                 new_parameters.insert(pid, pos.y);
                 unique_y.push((pos.y, pid));
-                pid
+                CoordinateExpression::Parameter(pid)
             };
 
-            new_vertices.push(ParametricVertex {
-                x_expr: CoordinateExpression::Parameter(x_param),
-                y_expr: CoordinateExpression::Parameter(y_param),
-            });
+            new_vertices.push(ParametricVertex { x_expr, y_expr });
         }
 
         self.vertices = new_vertices;
@@ -372,11 +385,6 @@ impl ParametricPlan {
 mod tests {
     use super::*;
 
-    // TODO: constraint solver collapses to 4 active params instead of the expected 2
-    // (width + height) for a rectangle. Either the solver isn't merging shared
-    // x-coords / shared y-coords, or this test's expectation was always optimistic.
-    // Re-enable after triaging — leaving #[ignore] so the gate can be enabled today.
-    #[ignore]
     #[test]
     fn test_parametric_rectangle() {
         // Create a rectangle
