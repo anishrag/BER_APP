@@ -104,6 +104,13 @@ impl AppController {
         self.current_record.as_ref().map(|r| r.data.clone())
     }
 
+    /// True when there's a completed orthogonal shape to act on. The UI uses
+    /// this to gate downstream edit tools (Select, Move, Extend, Trim, …)
+    /// behind the prerequisite "draw the orthogonal shape first."
+    pub fn has_floor_plan(&self) -> bool {
+        self.floor_plan.get_points().len() >= 3
+    }
+
     /// Project current in-memory state into `self.current_record` and persist.
     /// No-op when no BER is loaded. Called by handler methods that complete a
     /// logical user action (stroke end, wall drag end, etc.) — not from

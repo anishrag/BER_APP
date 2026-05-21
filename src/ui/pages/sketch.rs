@@ -48,6 +48,7 @@ impl SketchPage {
         current_storey_idx: usize,
         review: Option<&CollinearitySuggestion>,
         review_remaining: usize,
+        has_floor_plan: bool,
         mut on_event: F,
     ) where
         F: FnMut(UiEvent),
@@ -123,7 +124,7 @@ impl SketchPage {
                 // Bottom toolbar swaps between edit-tools and the collinearity review.
                 if reviewing {
                     Self::review_toolbar(ui, review_remaining, &mut on_event);
-                } else if let Some(new_tool) = Self::edit_toolbar(ui, edit_tool) {
+                } else if let Some(new_tool) = Self::edit_toolbar(ui, edit_tool, has_floor_plan) {
                     on_event(UiEvent::Sketch(SketchEvent::ChangeEditTool(new_tool)));
                 }
             });
@@ -181,15 +182,19 @@ impl SketchPage {
         change_display
     }
 
-    fn edit_toolbar(ui: &mut egui::Ui, tool: EditTools) -> Option<EditTools> {
+    fn edit_toolbar(ui: &mut egui::Ui, tool: EditTools, has_floor_plan: bool) -> Option<EditTools> {
         let mut change_tool: Option<EditTools> = None;
         ui.horizontal(|ui| {
             for tool_item in EditTools::iter() {
                 let selected = tool == tool_item;
-                if ui
-                    .selectable_label(selected, format!("{:?}", tool_item))
-                    .clicked()
-                {
+                // DrawPerpWalls is the prerequisite step — always available.
+                // Every other tool operates on an existing shape and is gated
+                // on `has_floor_plan` so the assessor can't pick them until
+                // the orthogonal outline is drawn.
+                let enabled = matches!(tool_item, EditTools::DrawPerpWalls) || has_floor_plan;
+                let label = egui::SelectableLabel::new(selected, format!("{:?}", tool_item));
+                let response = ui.add_enabled(enabled, label);
+                if response.clicked() {
                     change_tool = Some(tool_item);
                 }
             }

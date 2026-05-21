@@ -128,7 +128,16 @@ impl eframe::App for BerApp {
                 });
             }
             Page::Sketch => {
-                let (stroke, mode, edit_mode, display_mode, ber, review, review_remaining) = {
+                let (
+                    stroke,
+                    mode,
+                    edit_mode,
+                    display_mode,
+                    ber,
+                    review,
+                    review_remaining,
+                    has_floor_plan,
+                ) = {
                     let controller_ref = self.app_controller.borrow();
                     (
                         controller_ref.sketch_stroke(),
@@ -138,6 +147,7 @@ impl eframe::App for BerApp {
                         controller_ref.current_ber_clone(),
                         controller_ref.current_review_suggestion_clone(),
                         controller_ref.review_remaining(),
+                        controller_ref.has_floor_plan(),
                     )
                 };
 
@@ -156,6 +166,7 @@ impl eframe::App for BerApp {
                     current_storey_idx,
                     review.as_ref(),
                     review_remaining,
+                    has_floor_plan,
                     |event| match event {
                         UiEvent::Sketch(sketch_event) => match sketch_event {
                             SketchEvent::AddPoint(p) => controller
