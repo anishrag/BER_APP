@@ -8,6 +8,7 @@ use std::sync::mpsc::{channel, Receiver, Sender};
 use crate::controller::app_controller::AppController;
 use crate::ui::adapters::sketch_egui::pos2_to_point2f;
 use crate::ui::pages::events::{Page, UiEvent};
+use crate::ui::pages::new_ber::NewBerEvent;
 use crate::ui::pages::sketch::{EguiStroke, SketchEvent, SketchPage};
 use crate::ui::pages::{home::HomePage, new_ber::NewBerPage, splash::SplashPage};
 
@@ -127,18 +128,21 @@ impl eframe::App for BerApp {
                 });
             }
             Page::Sketch => {
-                let (stroke, mode, edit_mode, display_mode) = {
+                let (stroke, mode, edit_mode, display_mode, ber) = {
                     let controller_ref = self.app_controller.borrow();
                     (
                         controller_ref.sketch_stroke(),
                         controller_ref.sketch_mode(),
                         controller_ref.edit_mode(),
                         controller_ref.display_mode(),
+                        controller_ref.current_ber_clone(),
                     )
                 };
 
-                // 2️⃣ Convert to egui strokes via adapter
-                //let egui_strokes: EguiStroke = adapt_strokes(&strokes);
+                // TODO: track a real current_storey_idx on the controller once we
+                // support multi-storey navigation. For now we always edit storey 0.
+                let current_storey_idx = 0;
+
                 let controller = self.app_controller.clone();
                 SketchPage::render(
                     ui,
@@ -146,6 +150,8 @@ impl eframe::App for BerApp {
                     mode,
                     display_mode,
                     edit_mode,
+                    ber.as_ref(),
+                    current_storey_idx,
                     |event| match event {
                         UiEvent::Sketch(sketch_event) => match sketch_event {
                             SketchEvent::AddPoint(p) => controller
@@ -180,10 +186,33 @@ impl eframe::App for BerApp {
                 );
             }
             Page::NewBer => {
-                NewBerPage::render(ui, |event| match event {
-                    UiEvent::NavigateTo(p) => self.navigate_to(p),
+                // Collect intents from the form closure first, then act after the
+                // closure releases its borrow of self.new_ber_state.
+                let mut create_clicked = false;
+                let mut next_page: Option<Page> = None;
+
+                NewBerPage::render(ui, &mut self.new_ber_state, |event| match event {
+                    UiEvent::NavigateTo(p) => next_page = Some(p),
+                    UiEvent::NewBer(NewBerEvent::CreateClicked) => {
+                        create_clicked = true;
+                    }
                     _ => {}
                 });
+
+                if create_clicked {
+                    let name = std::mem::take(&mut self.new_ber_state.name);
+                    let date = self
+                        .new_ber_state
+                        .date_assessed
+                        .unwrap_or_else(|| chrono::Local::now().naive_local().date());
+                    self.app_controller.borrow_mut().create_ber(name, date);
+                    self.new_ber_state = NewBerState::default();
+                    next_page = Some(Page::Home);
+                }
+
+                if let Some(p) = next_page {
+                    self.navigate_to(p);
+                }
             }
             Page::KeyDeets => {
                 ui.heading("Key Details");

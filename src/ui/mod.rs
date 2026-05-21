@@ -1,6 +1,7 @@
 pub mod adapters;
 pub mod app;
 pub mod pages;
+pub mod render;
 
 use eframe::egui;
 use std::cell::RefCell;

@@ -67,6 +67,12 @@ impl AppController {
         repo.load(id).ok().map(|record| record.data)
     }
 
+    /// Snapshot of the BER currently being edited, for the UI to render.
+    /// Returns None if no BER has been created/loaded yet.
+    pub fn current_ber_clone(&self) -> Option<Ber> {
+        self.current_record.as_ref().map(|r| r.data.clone())
+    }
+
     /// Project current in-memory state into `self.current_record` and persist.
     /// No-op when no BER is loaded. Called by handler methods that complete a
     /// logical user action (stroke end, wall drag end, etc.) — not from
@@ -146,8 +152,12 @@ impl AppController {
             match self.sketch_engine.mode_behaviour.as_ref() {
                 // For example, if it's a Storey2DPerpWalls, we might want to convert the stroke into walls and add them to the floor plan
                 Storey2DPerpWalls => {
-                    self.floor_plan = FloorPlan::from_points_to_orthogonal(&stroke.points, 10.0)
-                        .map_err(|e| format!("Failed to add area: {:?}", e))?;
+                    self.floor_plan = FloorPlan::from_points_to_orthogonal(
+                        &stroke.points,
+                        10.0,
+                        stroke.is_closed,
+                    )
+                    .map_err(|e| format!("Failed to add area: {:?}", e))?;
                     println!("floor plan: {:?}", self.floor_plan);
                 }
                 _ => {}

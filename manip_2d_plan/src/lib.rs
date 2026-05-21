@@ -66,14 +66,57 @@ pub struct FloorPlan {
 }
 
 impl FloorPlan {
-    /// Create a floor plan from a hand-drawn stroke with orthogonal constraint
-    /// This automatically creates a parametric representation with H/V constraints applied
-    pub fn from_points_to_orthogonal(points: &[Point2f32], tolerance: f32) -> Result<Self, Error> {
-        let simplified = simplification::simplify_stroke(points, tolerance)?;
+    /// Create a floor plan from a hand-drawn stroke with orthogonal constraint.
+    /// Automatically creates a parametric representation with H/V constraints applied.
+    ///
+    /// `closed` indicates whether the stroke is an implicitly-closed polygon
+    /// (the assessor lifted near the start and `check_closed` fired). When
+    /// closed, RDP runs first to collapse collinear closing-edge drag points,
+    /// then we drop the final trailing vertex so the closing edge becomes
+    /// implicit and orthogonalization doesn't introduce a spurious corner.
+    pub fn from_points_to_orthogonal(
+        points: &[Point2f32],
+        tolerance: f32,
+        closed: bool,
+    ) -> Result<Self, Error> {
+        let mut simplified = simplification::simplify_stroke(points, tolerance)?;
+
+        if closed && simplified.len() > 3 {
+            // Drop the trailing drag point. RDP just collapsed everything along
+            // the closing edge into one segment; the remaining endpoint is
+            // along that edge, not a corner. Removing it lets the implicit
+            // edge from the new last vertex to first be axis-aligned by
+            // virtue of the user's drawing, with no spurious L-corner added
+            // during orthogonalization.
+            simplified.pop();
+        }
+
         let orthog_points = orthogonal::make_orthogonal(&simplified, tolerance)?;
 
+        // For a closed polygon, finalize the closing structure before the
+        // parametric layer sees it:
+        //   1. snap the implicit closing edge to be exactly axis-aligned
+        //   2. snap nearby walls onto the same coord (catches drawing wobble
+        //      where the user meant to align two walls but drew them slightly
+        //      offset — e.g. the upper bar of an L 12px off from the lower bar)
+        //   3. dedup any vertices the snap landed on top of each other
+        //   4. rotate so the first vertex sits at a real corner (handles the
+        //      "user started mid-wall" case — otherwise the start is collinear
+        //      and shows up as a spurious extra vertex)
+        //   5. run remove_collinear one more time to drop the previously-
+        //      anchored start, now demoted to a mid-list vertex
+        let final_points = if closed {
+            let snapped = orthogonal::snap_closing_edge(orthog_points, tolerance);
+            let aligned = orthogonal::snap_near_collinear_walls(snapped, 20.0);
+            let deduped = orthogonal::remove_duplicates(&aligned, tolerance);
+            let rotated = orthogonal::rotate_to_corner_start(deduped, tolerance);
+            orthogonal::remove_collinear(&rotated, tolerance)
+        } else {
+            orthog_points
+        };
+
         // Create parametric representation
-        let mut parametric = parametric::ParametricPlan::from_points(&orthog_points);
+        let mut parametric = parametric::ParametricPlan::from_points(&final_points);
 
         // Apply orthogonal constraints to reduce parameters
         parametric.apply_orthogonal_constraints()?;

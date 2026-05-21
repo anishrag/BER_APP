@@ -3,7 +3,9 @@ use egui::Pos2;
 use strum::IntoEnumIterator;
 
 use crate::ui::pages::events::UiEvent;
+use crate::ui::render;
 
+use datatypes::ber::ber_struct::Ber;
 use domain::sketch::{DisplayMode, EditTools, SketchMode};
 
 /// The UI-friendly version of a stroke
@@ -32,6 +34,8 @@ impl SketchPage {
         mode: SketchMode,
         display: DisplayMode,
         edit_tool: EditTools,
+        ber: Option<&Ber>,
+        current_storey_idx: usize,
         mut on_event: F,
     ) where
         F: FnMut(UiEvent),
@@ -63,31 +67,38 @@ impl SketchPage {
 
                 let painter = ui.painter_at(rect);
 
-                // Draw canvas background
+                // Canvas background
                 painter.rect_filled(rect, 0.0, egui::Color32::from_gray(30));
 
-                // Canvas input events
-                if response.drag_started() {
-                    if let Some(pos) = response.interact_pointer_pos() {
-                        let local_pos = pos - rect.left_top().to_vec2();
-                        on_event(UiEvent::Sketch(SketchEvent::StartStroke(local_pos)));
-                    }
-                }
-                if response.dragged() {
-                    if let Some(pos) = response.interact_pointer_pos() {
-                        let local_pos = pos - rect.left_top().to_vec2();
-                        on_event(UiEvent::Sketch(SketchEvent::AddPoint(local_pos)));
-                    }
-                }
-                if response.drag_stopped() {
-                    if let Some(pos) = response.interact_pointer_pos() {
-                        let local_pos = pos - rect.left_top().to_vec2();
-                        on_event(UiEvent::Sketch(SketchEvent::EndStroke(local_pos)));
-                    }
-                }
+                // BER view layer — what's persisted in the current BER record.
+                // Renders behind the in-flight stroke overlay.
+                render::render_ber(&painter, rect, ber, current_storey_idx, mode, display);
 
-                if let Some(stroke) = current {
-                    draw_stroke(&painter, rect, stroke);
+                // Stroke input only makes sense in the 2D top-down view. In the 3D
+                // modes, ignore canvas drags — the user is just inspecting.
+                if matches!(mode, SketchMode::Storey2D) {
+                    if response.drag_started() {
+                        if let Some(pos) = response.interact_pointer_pos() {
+                            let local_pos = pos - rect.left_top().to_vec2();
+                            on_event(UiEvent::Sketch(SketchEvent::StartStroke(local_pos)));
+                        }
+                    }
+                    if response.dragged() {
+                        if let Some(pos) = response.interact_pointer_pos() {
+                            let local_pos = pos - rect.left_top().to_vec2();
+                            on_event(UiEvent::Sketch(SketchEvent::AddPoint(local_pos)));
+                        }
+                    }
+                    if response.drag_stopped() {
+                        if let Some(pos) = response.interact_pointer_pos() {
+                            let local_pos = pos - rect.left_top().to_vec2();
+                            on_event(UiEvent::Sketch(SketchEvent::EndStroke(local_pos)));
+                        }
+                    }
+
+                    if let Some(stroke) = current {
+                        draw_stroke(&painter, rect, stroke);
+                    }
                 }
 
                 ui.separator();

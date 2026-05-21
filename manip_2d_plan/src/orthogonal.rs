@@ -20,13 +20,197 @@ pub fn make_orthogonal(points: &[Point2f32], tolerance: f32) -> Result<Vec<Point
     // Remove duplicate consecutive points
     let cleaned = remove_duplicates(&orthogonal_points, tolerance);
 
-    if cleaned.len() < 3 {
+    // Remove vertices whose two incident edges share the same axis (both
+    // vertical at the same x, or both horizontal at the same y). These show
+    // up when the user's stroke wobbled on a wall and `snap_to_orthogonal`
+    // axis-aligned both halves of the wobble to the same coordinate but kept
+    // them as separate vertices. Geometrically the middle vertex is redundant.
+    let collapsed = remove_collinear(&cleaned, tolerance);
+
+    if collapsed.len() < 3 {
         return Err(Error::OrthogonalError(
             "Too few points after orthogonalization".into(),
         ));
     }
 
-    Ok(cleaned)
+    Ok(collapsed)
+}
+
+/// Snap nearby x-coordinates (and y-coordinates) together so walls the user
+/// drew slightly offset land on the same coordinate. Catches typical sketch
+/// wobble (e.g. the upper and lower bar of an L drawn with a few-px offset)
+/// without affecting walls that are clearly separated.
+///
+/// Algorithm: sort each axis's values and form clusters where successive
+/// sorted values are within `snap_radius`. Every value in a cluster is then
+/// set to the cluster's mean. This is **single-linkage** clustering — a long
+/// sequence of close values can chain into one cluster. For floor-plan-scale
+/// input where walls are usually well-separated, this is fine; if you ever
+/// have many walls close together, revisit.
+pub fn snap_near_collinear_walls(mut points: Vec<Point2f32>, snap_radius: f32) -> Vec<Point2f32> {
+    if points.len() < 3 {
+        return points;
+    }
+
+    let x_reps = cluster_representatives(points.iter().map(|p| p.x), snap_radius);
+    for p in &mut points {
+        if let Some(rep) = x_reps.iter().find(|&&r| (r - p.x).abs() <= snap_radius) {
+            p.x = *rep;
+        }
+    }
+
+    let y_reps = cluster_representatives(points.iter().map(|p| p.y), snap_radius);
+    for p in &mut points {
+        if let Some(rep) = y_reps.iter().find(|&&r| (r - p.y).abs() <= snap_radius) {
+            p.y = *rep;
+        }
+    }
+
+    points
+}
+
+fn cluster_representatives(values: impl Iterator<Item = f32>, radius: f32) -> Vec<f32> {
+    let mut sorted: Vec<f32> = values.collect();
+    if sorted.is_empty() {
+        return Vec::new();
+    }
+    sorted.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+
+    let mut representatives = Vec::new();
+    let mut cluster: Vec<f32> = vec![sorted[0]];
+    for &v in &sorted[1..] {
+        if (v - cluster.last().unwrap()).abs() <= radius {
+            cluster.push(v);
+        } else {
+            representatives.push(cluster.iter().sum::<f32>() / cluster.len() as f32);
+            cluster = vec![v];
+        }
+    }
+    representatives.push(cluster.iter().sum::<f32>() / cluster.len() as f32);
+
+    representatives
+}
+
+/// Snap the last vertex's coordinates so the implicit closing edge back to
+/// the first vertex is exactly axis-aligned. Direction is dictated by the
+/// last explicit edge: a vertical last edge means the closing edge must be
+/// horizontal, so we set `last.y = first.y`; a horizontal last edge flips it.
+/// Should only be called when the polygon was implicitly closed (i.e. the
+/// `closed` flag is set in `from_points_to_orthogonal`).
+pub fn snap_closing_edge(mut points: Vec<Point2f32>, tolerance: f32) -> Vec<Point2f32> {
+    let n = points.len();
+    if n < 3 {
+        return points;
+    }
+
+    let last = points[n - 1];
+    let prev = points[n - 2];
+    let first = points[0];
+
+    let last_edge_vertical = (prev.x - last.x).abs() < tolerance;
+    let last_edge_horizontal = (prev.y - last.y).abs() < tolerance;
+
+    if last_edge_vertical {
+        // Closing edge runs horizontally — match y to first.
+        points[n - 1].y = first.y;
+    } else if last_edge_horizontal {
+        // Closing edge runs vertically — match x to first.
+        points[n - 1].x = first.x;
+    }
+    // If the last edge is neither (shouldn't happen post-orthogonal), leave alone.
+
+    // Snapping might land `last` on top of `first` or `prev`; drop the duplicate.
+    let n = points.len();
+    let new_last = points[n - 1];
+    if (new_last - first).norm() < tolerance {
+        points.pop();
+    } else if (new_last - points[n - 2]).norm() < tolerance {
+        points.pop();
+    }
+
+    points
+}
+
+/// Rotate the vertex list so the first vertex sits at a real corner
+/// (incident edges perpendicular). Necessary when the user started their
+/// sketch mid-wall — `ParametricPlan` treats the first vertex as the constant
+/// anchor, but a mid-wall start vertex is collinear with its neighbours and
+/// shows up as a spurious "extra" vertex in the parametric representation.
+///
+/// Walks the polygon cyclically from index 0 and picks the first corner.
+/// Returns the input unchanged if there are no corners (degenerate input).
+pub fn rotate_to_corner_start(mut points: Vec<Point2f32>, tolerance: f32) -> Vec<Point2f32> {
+    let n = points.len();
+    if n < 3 {
+        return points;
+    }
+
+    for offset in 0..n {
+        let prev = points[(offset + n - 1) % n];
+        let curr = points[offset];
+        let next = points[(offset + 1) % n];
+
+        let prev_horizontal = (prev.y - curr.y).abs() < tolerance;
+        let prev_vertical = (prev.x - curr.x).abs() < tolerance;
+        let next_horizontal = (curr.y - next.y).abs() < tolerance;
+        let next_vertical = (curr.x - next.x).abs() < tolerance;
+
+        let is_corner = (prev_horizontal && next_vertical) || (prev_vertical && next_horizontal);
+
+        if is_corner {
+            if offset > 0 {
+                points.rotate_left(offset);
+            }
+            return points;
+        }
+    }
+
+    // No corner found anywhere (degenerate). Leave alone.
+    points
+}
+
+/// Remove vertices whose two incident edges share an axis. Treats the polygon
+/// as cyclic so the implicit closing edge from the last vertex back to the
+/// first counts. Iterates until stable — chains of 3+ collinear points
+/// collapse fully.
+pub fn remove_collinear(points: &[Point2f32], tolerance: f32) -> Vec<Point2f32> {
+    if points.len() < 3 {
+        return points.to_vec();
+    }
+
+    let mut result = points.to_vec();
+
+    loop {
+        if result.len() < 3 {
+            break;
+        }
+        let n = result.len();
+        let mut to_remove: Option<usize> = None;
+        for i in 0..n {
+            let prev = result[(i + n - 1) % n];
+            let curr = result[i];
+            let next = result[(i + 1) % n];
+
+            let prev_horizontal = (prev.y - curr.y).abs() < tolerance;
+            let prev_vertical = (prev.x - curr.x).abs() < tolerance;
+            let next_horizontal = (curr.y - next.y).abs() < tolerance;
+            let next_vertical = (curr.x - next.x).abs() < tolerance;
+
+            if (prev_horizontal && next_horizontal) || (prev_vertical && next_vertical) {
+                to_remove = Some(i);
+                break;
+            }
+        }
+
+        match to_remove {
+            Some(i) => {
+                result.remove(i);
+            }
+            None => break,
+        }
+    }
+
+    result
 }
 
 /// Find the dominant angle in a set of points
@@ -152,8 +336,9 @@ fn snap_to_orthogonal(
     Ok(result)
 }
 
-/// Remove duplicate consecutive points
-fn remove_duplicates(points: &[Point2f32], tolerance: f32) -> Vec<Point2f32> {
+/// Remove duplicate consecutive points, plus a trailing duplicate of the
+/// first vertex if the polygon happens to close on itself exactly.
+pub fn remove_duplicates(points: &[Point2f32], tolerance: f32) -> Vec<Point2f32> {
     if points.is_empty() {
         return Vec::new();
     }
@@ -245,6 +430,211 @@ fn remove_duplicates(points: &[Point2f32], tolerance: f32) -> Vec<Point2f32> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn snap_closing_edge_aligns_horizontal_close() {
+        // Last edge is vertical (same x). Closing edge has y slip → snap y.
+        let pts = vec![
+            Point2f32::new(0.0, 0.0), // first
+            Point2f32::new(0.0, 100.0),
+            Point2f32::new(100.0, 100.0),
+            Point2f32::new(100.0, 3.0), // last
+        ];
+        let snapped = snap_closing_edge(pts, 0.5);
+        assert_eq!(snapped.len(), 4);
+        assert_eq!(snapped[3].y, 0.0);
+        assert_eq!(snapped[3].x, 100.0);
+    }
+
+    #[test]
+    fn snap_closing_edge_aligns_vertical_close() {
+        // Last edge is horizontal (same y). Closing edge has x slip → snap x.
+        let pts = vec![
+            Point2f32::new(0.0, 0.0), // first
+            Point2f32::new(100.0, 0.0),
+            Point2f32::new(100.0, 100.0),
+            Point2f32::new(3.0, 100.0), // last
+        ];
+        let snapped = snap_closing_edge(pts, 0.5);
+        assert_eq!(snapped.len(), 4);
+        assert_eq!(snapped[3].x, 0.0);
+        assert_eq!(snapped[3].y, 100.0);
+    }
+
+    #[test]
+    fn snap_closing_edge_drops_duplicate_when_snap_lands_on_first() {
+        // Last point already aligned with first; snap would put them on top of each other.
+        let pts = vec![
+            Point2f32::new(0.0, 0.0),
+            Point2f32::new(0.0, 100.0),
+            Point2f32::new(100.0, 100.0),
+            Point2f32::new(0.0, 3.0), // last edge horizontal (y=100→3? no, prev is (100,100))
+                                      // Actually with prev = (100, 100) and last = (0, 3), prev→last isn't axis-aligned.
+                                      // Adjust to make this test meaningful:
+        ];
+        // Reset with a case where snap creates a duplicate:
+        let pts = vec![
+            Point2f32::new(0.0, 0.0),
+            Point2f32::new(100.0, 0.0),
+            Point2f32::new(0.0, 0.0), // already at first — last edge horizontal, snap x→0 is no-op
+        ];
+        let snapped = snap_closing_edge(pts, 0.5);
+        // The last is already coincident with first; should be popped.
+        assert!(snapped.len() < 3 || snapped.last().unwrap() != &Point2f32::new(0.0, 0.0));
+    }
+
+    #[test]
+    fn snap_near_collinear_walls_merges_offset_walls() {
+        // L where the upper bar's left wall (x=95) is 13px off from the lower
+        // bar's left wall (x=108). Both should snap to a shared mean.
+        let pts = vec![
+            Point2f32::new(108.0, 124.0),
+            Point2f32::new(108.0, 680.0),
+            Point2f32::new(424.0, 680.0),
+            Point2f32::new(424.0, 534.0),
+            Point2f32::new(245.0, 534.0),
+            Point2f32::new(245.0, 35.0),
+            Point2f32::new(95.0, 35.0),
+            Point2f32::new(95.0, 124.0),
+        ];
+        let snapped = snap_near_collinear_walls(pts, 20.0);
+        // All four "left wall" x-values should now share the same coord.
+        let left_xs: Vec<f32> = snapped
+            .iter()
+            .filter(|p| p.x < 200.0)
+            .map(|p| p.x)
+            .collect();
+        let first = left_xs[0];
+        assert!(left_xs.iter().all(|&x| (x - first).abs() < 0.1));
+        // And they're between the originals (101.5 = midpoint of 95 and 108).
+        assert!((first - 101.5).abs() < 0.5);
+    }
+
+    #[test]
+    fn snap_near_collinear_walls_leaves_far_walls_alone() {
+        let pts = vec![
+            Point2f32::new(0.0, 0.0),
+            Point2f32::new(0.0, 100.0),
+            Point2f32::new(100.0, 100.0), // 100 away from the left walls
+            Point2f32::new(100.0, 0.0),
+        ];
+        let snapped = snap_near_collinear_walls(pts.clone(), 20.0);
+        assert_eq!(snapped, pts);
+    }
+
+    #[test]
+    fn rotate_to_corner_start_moves_mid_wall_start_to_corner() {
+        // L shape where vertex 0 is mid-wall: between (67, -2) and (67, 588).
+        let pts = vec![
+            Point2f32::new(67.0, 205.0), // <- mid-wall start (collinear with neighbors)
+            Point2f32::new(67.0, 588.0),
+            Point2f32::new(440.0, 588.0),
+            Point2f32::new(440.0, 420.0),
+            Point2f32::new(278.0, 420.0),
+            Point2f32::new(278.0, -2.0),
+            Point2f32::new(67.0, -2.0),
+        ];
+        let rotated = rotate_to_corner_start(pts, 0.5);
+        // Vertex 0 must now be a corner (perpendicular incident edges).
+        let n = rotated.len();
+        let prev = rotated[n - 1];
+        let curr = rotated[0];
+        let next = rotated[1];
+        let prev_h = (prev.y - curr.y).abs() < 0.5;
+        let prev_v = (prev.x - curr.x).abs() < 0.5;
+        let next_h = (curr.y - next.y).abs() < 0.5;
+        let next_v = (curr.x - next.x).abs() < 0.5;
+        assert!(
+            (prev_h && next_v) || (prev_v && next_h),
+            "new start is a corner"
+        );
+        // Old start (67, 205) should still be present in the rotated list.
+        assert!(rotated
+            .iter()
+            .any(|p| (p.x - 67.0).abs() < 0.5 && (p.y - 205.0).abs() < 0.5));
+    }
+
+    #[test]
+    fn rotate_then_remove_collinear_drops_mid_wall_start() {
+        // Full pipeline of the closure-finalization steps for the mid-wall start case.
+        let pts = vec![
+            Point2f32::new(67.0, 205.0), // mid-wall start
+            Point2f32::new(67.0, 588.0),
+            Point2f32::new(440.0, 588.0),
+            Point2f32::new(440.0, 420.0),
+            Point2f32::new(278.0, 420.0),
+            Point2f32::new(278.0, -2.0),
+            Point2f32::new(67.0, -2.0),
+        ];
+        let rotated = rotate_to_corner_start(pts, 0.5);
+        let cleaned = remove_collinear(&rotated, 0.5);
+        // The old mid-wall start should be gone, leaving the 6 real corners of the L.
+        assert_eq!(cleaned.len(), 6);
+        assert!(!cleaned
+            .iter()
+            .any(|p| (p.x - 67.0).abs() < 0.5 && (p.y - 205.0).abs() < 0.5));
+    }
+
+    #[test]
+    fn rotate_to_corner_start_no_op_when_already_at_corner() {
+        // Vertex 0 is already a corner — no rotation needed.
+        let pts = vec![
+            Point2f32::new(0.0, 0.0), // top-left corner
+            Point2f32::new(100.0, 0.0),
+            Point2f32::new(100.0, 100.0),
+            Point2f32::new(0.0, 100.0),
+        ];
+        let rotated = rotate_to_corner_start(pts.clone(), 0.5);
+        assert_eq!(rotated, pts);
+    }
+
+    #[test]
+    fn remove_collinear_collapses_wall_wobble() {
+        // Two consecutive vertical edges at x=10 with a redundant vertex between them.
+        let pts = vec![
+            Point2f32::new(0.0, 0.0),
+            Point2f32::new(10.0, 0.0),
+            Point2f32::new(10.0, 5.0), // <- redundant, sits on the right wall
+            Point2f32::new(10.0, 10.0),
+            Point2f32::new(0.0, 10.0),
+        ];
+        let cleaned = remove_collinear(&pts, 0.5);
+        assert_eq!(cleaned.len(), 4);
+        assert!(!cleaned
+            .iter()
+            .any(|p| (p.x - 10.0).abs() < 0.5 && (p.y - 5.0).abs() < 0.5));
+    }
+
+    #[test]
+    fn remove_collinear_preserves_l_shape() {
+        // An L has no collinear interior vertices — every corner has perpendicular edges.
+        let pts = vec![
+            Point2f32::new(0.0, 0.0),
+            Point2f32::new(100.0, 0.0),
+            Point2f32::new(100.0, 50.0),
+            Point2f32::new(50.0, 50.0),
+            Point2f32::new(50.0, 100.0),
+            Point2f32::new(0.0, 100.0),
+        ];
+        let cleaned = remove_collinear(&pts, 0.5);
+        assert_eq!(cleaned.len(), 6);
+    }
+
+    #[test]
+    fn remove_collinear_collapses_long_chain() {
+        // Five collinear points along the bottom — three are redundant.
+        let pts = vec![
+            Point2f32::new(0.0, 0.0),
+            Point2f32::new(25.0, 0.0),
+            Point2f32::new(50.0, 0.0),
+            Point2f32::new(75.0, 0.0),
+            Point2f32::new(100.0, 0.0),
+            Point2f32::new(100.0, 100.0),
+            Point2f32::new(0.0, 100.0),
+        ];
+        let cleaned = remove_collinear(&pts, 0.5);
+        assert_eq!(cleaned.len(), 4);
+    }
 
     #[test]
     fn test_find_dominant_angle() {
