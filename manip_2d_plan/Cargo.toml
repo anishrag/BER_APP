@@ -2,25 +2,15 @@
 name = "manip_2d_plan"
 version = "0.1.0"
 edition = "2021"
-authors = ["Your Name <your.email@example.com>"]
-description = "A library for simplifying and processing hand-drawn floor plan strokes into precise geometric plans"
+description = "Hand-drawn floor-plan strokes → orthogonal parametric polygons"
 license = "MIT OR Apache-2.0"
 
 [dependencies]
-# Core geometry and computational geometry
-geo = "0.32"      # Geometry types and algorithms
-geo-types = "0.7" # Shared geometry types
-rstar = "0.12"    # R-tree spatial index for efficient queries
-# Serialization (optional, but useful)
+geo = "0.32"
+geo-types = "0.7"
 serde = { version = "1.0", features = ["derive"], optional = true }
-# Error handling
 thiserror = "2.0"
 domain = { path = "../domain" }
-strum = "0.27.2"
-strum_macros = "0.27.2"
-
-[dev-dependencies]
-approx = "0.5" # For floating point comparisons in tests
 
 [features]
 default = []

@@ -3836,14 +3836,10 @@ dependencies = [
 name = "manip_2d_plan"
 version = "0.1.0"
 dependencies = [
- "approx",
  "domain",
  "geo",
  "geo-types",
- "rstar 0.12.2",
  "serde",
- "strum",
- "strum_macros",
  "thiserror 2.0.18",
 ]
 
