@@ -4,6 +4,14 @@ use crate::fresh_2d_perp::Storey2DPerpWalls;
 use crate::model::Stroke;
 use domain::points::Point2f32;
 use domain::sketch::{DisplayMode, EditTools, SketchMode};
+
+/// Distance (px) within which lifting the mouse near the stroke's start point
+/// auto-closes the polygon.
+pub const DEFAULT_CLOSE_EPSILON: f32 = 30.0;
+
+/// Distance (px) within which a new touch near an existing stroke's endpoint
+/// extends that stroke instead of starting a fresh one. Should be > [`DEFAULT_CLOSE_EPSILON`].
+pub const DEFAULT_SNAP_EPSILON: f32 = 100.0;
 pub trait SketchModeBehaviour: std::fmt::Debug {
     fn start_stroke(
         &mut self,
@@ -66,12 +74,12 @@ impl Default for SketchEngine {
     fn default() -> Self {
         Self {
             stroke: None,
-            mode_behaviour: Box::new(Storey2DPerpWalls::default()),
+            mode_behaviour: Box::new(Storey2DPerpWalls),
             mode: SketchMode::Storey2D,
             display: DisplayMode::FloorMapDims,
             edit_tool: EditTools::DrawPerpWalls,
-            close_epsilon: 8.0,
-            snap_epsilon: 100.0,
+            close_epsilon: DEFAULT_CLOSE_EPSILON,
+            snap_epsilon: DEFAULT_SNAP_EPSILON,
             append_mode: StrokeAppendMode::Forward,
         }
     }
@@ -79,16 +87,7 @@ impl Default for SketchEngine {
 
 impl SketchEngine {
     pub fn new() -> Self {
-        Self {
-            stroke: None,
-            mode_behaviour: Box::new(Storey2DPerpWalls),
-            mode: SketchMode::Storey2D,
-            display: DisplayMode::FloorMapDims,
-            edit_tool: EditTools::DrawPerpWalls,
-            close_epsilon: 8.0,
-            snap_epsilon: 100.0,
-            append_mode: StrokeAppendMode::Forward,
-        }
+        Self::default()
     }
 
     pub fn set_mode_behaviour(&mut self, behaviour: Box<dyn SketchModeBehaviour>) {

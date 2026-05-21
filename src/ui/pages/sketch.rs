@@ -150,7 +150,7 @@ impl SketchPage {
 }
 
 fn draw_stroke(painter: &egui::Painter, rect: egui::Rect, stroke: EguiStroke) {
-    if stroke.points.len() < 2 {
+    if stroke.points.is_empty() {
         return;
     }
 
@@ -160,5 +160,17 @@ fn draw_stroke(painter: &egui::Painter, rect: egui::Rect, stroke: EguiStroke) {
         .map(|p| egui::pos2(rect.left() + p.x, rect.top() + p.y))
         .collect();
 
-    painter.add(PathShape::line(points, stroke.stroke.clone()));
+    if points.len() >= 2 {
+        painter.add(PathShape::line(points.clone(), stroke.stroke.clone()));
+    }
+
+    // Endpoint markers — visible snap targets for continuing the stroke on the
+    // next touch (handled by Storey2DPerpWalls::start_stroke).
+    let snap_color = egui::Color32::from_rgb(255, 200, 60);
+    let first = *points.first().expect("non-empty checked above");
+    painter.circle_filled(first, 6.0, snap_color);
+    if points.len() >= 2 {
+        let last = *points.last().expect("non-empty checked above");
+        painter.circle_filled(last, 6.0, snap_color);
+    }
 }

@@ -156,10 +156,14 @@ impl eframe::App for BerApp {
                                 .borrow_mut()
                                 .sketch_end_stroke(pos2_to_point2f(p))
                                 .expect("Failed to end stroke"),
-                            SketchEvent::StartStroke(p) => controller
-                                .borrow_mut()
-                                .sketch_start_stroke(pos2_to_point2f(p))
-                                .expect("Failed to start stroke"),
+                            SketchEvent::StartStroke(p) => {
+                                if let Err(e) = controller
+                                    .borrow_mut()
+                                    .sketch_start_stroke(pos2_to_point2f(p))
+                                {
+                                    eprintln!("sketch_start_stroke: {}", e);
+                                }
+                            }
                             SketchEvent::ChangeMode(m) => {
                                 controller.borrow_mut().set_sketch_mode(m)
                             }
