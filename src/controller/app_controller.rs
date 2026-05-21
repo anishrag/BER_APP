@@ -6,18 +6,25 @@ use crate::engine::dataloader::DataLoader;
 use crate::engine::Db;
 use datatypes::ber::ber_struct::Ber;
 use datatypes::ber::common::ItemId;
-use domain::points::Point2f32;
+use datatypes::ber::structural::{FloorRegions, Storey};
+use domain::points::{Point2f32, Point2f64};
 use domain::sketch::{DisplayMode, EditTools, SketchMode};
 use manip_2d_plan::FloorPlan;
 use sketch::model::Stroke;
 use sketch::SketchEngine;
+
+/// Default storey ceiling height in meters, used as a placeholder until the UI
+/// collects it from the assessor.
+const DEFAULT_CEILING_HEIGHT_M: f64 = 2.4;
 
 pub struct AppController {
     conn: Db,
     sketch_engine: SketchEngine,
     floor_plan: FloorPlan,
     loader_engine: DataLoader,
-    //   processing_engine: ProcessingEngine,
+    /// The BER record being edited. `commit_to_ber` writes through this to SQLite.
+    /// `None` means no BER is loaded yet — sketches stay in-memory until a BER exists.
+    current_record: Option<BerRecord>,
 }
 
 impl AppController {
@@ -26,7 +33,8 @@ impl AppController {
             conn,
             loader_engine: DataLoader::new(),
             floor_plan: FloorPlan::default(),
-            sketch_engine: SketchEngine::new(), //            processing_engine: ProcessingEngine::new(),
+            sketch_engine: SketchEngine::new(),
+            current_record: None,
         }
     }
 
@@ -38,7 +46,7 @@ impl AppController {
         });
     }
 
-    pub fn create_ber(&self, name: String, date_assessed: NaiveDate) -> Ber {
+    pub fn create_ber(&mut self, name: String, date_assessed: NaiveDate) -> Ber {
         let ber = Ber::new();
         let record = BerRecord {
             id: ber.id,
@@ -47,8 +55,10 @@ impl AppController {
             data: ber.clone(),
         };
 
-        let repo = BerRepository::new(&self.conn);
-        repo.upsert(&record).unwrap();
+        BerRepository::new(&self.conn)
+            .upsert(&record)
+            .expect("upsert failed");
+        self.current_record = Some(record);
         ber
     }
 
@@ -57,15 +67,38 @@ impl AppController {
         repo.load(id).ok().map(|record| record.data)
     }
 
-    //     pub fn create_evidence_doc(&self, tx: Sender<(String, f32)>) {
-    //         let processing_engine = self.processing_engine.clone();
-    //         std::thread::spawn(move || {
-    //             let _ = processing_engine.generate_evidence_document(tx);
-    //         });
-    //     }
+    /// Project current in-memory state into `self.current_record` and persist.
+    /// No-op when no BER is loaded. Called by handler methods that complete a
+    /// logical user action (stroke end, wall drag end, etc.) — not from
+    /// incremental handlers like `sketch_add_point`.
+    fn commit_to_ber(&mut self) -> Result<(), String> {
+        let Some(record) = self.current_record.as_mut() else {
+            return Ok(());
+        };
+
+        if record.data.storeys.is_empty() {
+            record.data.storeys.push(Storey::default());
+        }
+
+        let points: Vec<Point2f64> = self
+            .floor_plan
+            .parametric
+            .get_points()
+            .iter()
+            .map(|p| Point2f64::new(p.x as f64, p.y as f64))
+            .collect();
+
+        if !points.is_empty() {
+            record.data.storeys[0].floors =
+                FloorRegions::new(points, DEFAULT_CEILING_HEIGHT_M, None, None, None);
+        }
+
+        BerRepository::new(&self.conn)
+            .upsert(record)
+            .map_err(|e| format!("upsert failed: {}", e))
+    }
 
     /// SKETCHING STUFF--------------------------------------------
-    ///
     pub fn sketch_stroke(&self) -> Option<Stroke> {
         self.sketch_engine.stroke.clone()
     }
@@ -103,7 +136,7 @@ impl AppController {
             .map_err(|e| format!("Failed to add point: {:?}", e))
     }
 
-    pub fn sketch_end_stroke(&mut self, point: Point2f32) -> Result<(), String> {
+    pub fn sketch_end_stroke(&mut self, _point: Point2f32) -> Result<(), String> {
         if let Some(stroke) = self
             .sketch_engine
             .end_stroke()
@@ -121,7 +154,9 @@ impl AppController {
             }
             println!("Stroke completed with {} points", stroke.points.len());
         }
-        Ok(())
+
+        // Stroke just settled → persist the new floor plan into the BER record.
+        self.commit_to_ber()
     }
 }
 

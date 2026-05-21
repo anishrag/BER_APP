@@ -278,7 +278,7 @@ pub struct Room {
     pub underfloor_heating: bool,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct Storey {
     pub id: ItemId,
     pub name: String, // e.g., "Ground Floor", "First Floor"

@@ -1,1 +1,8 @@
 target/
+
+# Local SQLite database files (per-machine, never checked in)
+bers.db
+bers.db-journal
+bers.db-wal
+bers.db-shm
+
