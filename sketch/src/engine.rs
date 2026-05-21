@@ -110,7 +110,12 @@ impl SketchEngine {
         // Here you would match on self.mode and set the appropriate behaviour
         // For example:
         match (self.mode, self.edit_tool) {
-            (SketchMode::Storey2D, EditTools::DrawPerpWalls) => {
+            // DrawPerpWalls and AddSection share the same stroke-capture
+            // behaviour — both draw an orthogonal polygon. The controller
+            // decides on stroke completion whether to replace the primary
+            // outline or append a new ring.
+            (SketchMode::Storey2D, EditTools::DrawPerpWalls)
+            | (SketchMode::Storey2D, EditTools::AddSection) => {
                 self.set_mode_behaviour(Box::new(Storey2DPerpWalls));
             }
             _ => (),

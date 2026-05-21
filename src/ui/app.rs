@@ -137,8 +137,11 @@ impl eframe::App for BerApp {
                     review,
                     review_remaining,
                     has_floor_plan,
+                    pending_redraw,
+                    view,
                 ) = {
                     let controller_ref = self.app_controller.borrow();
+                    let v = controller_ref.view();
                     (
                         controller_ref.sketch_stroke(),
                         controller_ref.sketch_mode(),
@@ -148,6 +151,12 @@ impl eframe::App for BerApp {
                         controller_ref.current_review_suggestion_clone(),
                         controller_ref.review_remaining(),
                         controller_ref.has_floor_plan(),
+                        controller_ref.has_pending_redraw(),
+                        crate::ui::render::ViewParams {
+                            zoom: v.zoom,
+                            offset_x: v.offset_x,
+                            offset_y: v.offset_y,
+                        },
                     )
                 };
 
@@ -167,6 +176,8 @@ impl eframe::App for BerApp {
                     review.as_ref(),
                     review_remaining,
                     has_floor_plan,
+                    pending_redraw,
+                    view,
                     |event| match event {
                         UiEvent::Sketch(sketch_event) => match sketch_event {
                             SketchEvent::AddPoint(p) => controller
@@ -204,6 +215,36 @@ impl eframe::App for BerApp {
                             }
                             SketchEvent::SkipAllCollinearity => {
                                 controller.borrow_mut().skip_all_review();
+                            }
+                            SketchEvent::ZoomView {
+                                factor,
+                                anchor_x,
+                                anchor_y,
+                                canvas_center_x,
+                                canvas_center_y,
+                            } => {
+                                controller.borrow_mut().zoom_view(
+                                    factor,
+                                    (anchor_x, anchor_y),
+                                    (canvas_center_x, canvas_center_y),
+                                );
+                            }
+                            SketchEvent::PanView { dx, dy } => {
+                                controller.borrow_mut().pan_view(dx, dy);
+                            }
+                            SketchEvent::ResetView => {
+                                controller.borrow_mut().reset_view();
+                            }
+                            SketchEvent::ReplaceStorey => {
+                                if let Err(e) = controller.borrow_mut().confirm_replace_storey() {
+                                    eprintln!("confirm_replace_storey: {}", e);
+                                }
+                            }
+                            SketchEvent::AddStoreyFromCurrent => {
+                                controller.borrow_mut().confirm_add_storey_from_current();
+                            }
+                            SketchEvent::IgnoreRedraw => {
+                                controller.borrow_mut().discard_pending_redraw();
                             }
                             _ => {}
                         },

@@ -37,11 +37,41 @@ pub struct CollinearityReview {
     /// any pair that's become "already determined" (yes-side via the live
     /// parametric state, no-side via the `rejections` list).
     pub cursor: usize,
-    /// Pairs the user explicitly said No to. Used for transitive skipping:
-    /// if (A,B) was rejected and (A,C) gets approved later (C joins A's
-    /// equivalence class), then asking (B,C) would be redundant — B is in
-    /// a class known not to be collinear with C's class.
-    pub rejections: Vec<(usize, usize, Axis)>,
+    /// Pairs the user explicitly said No to. Stored as full suggestions so
+    /// we have the ring indices available for transitive-rejection checking.
+    /// Reused for: if (A,B) was rejected and (A,C) gets approved later
+    /// (C joins A's equivalence class), then asking (B,C) is redundant.
+    pub rejections: Vec<CollinearitySuggestion>,
+}
+
+/// A completed stroke that's waiting for the user to confirm what to do with it.
+/// Populated when `DrawPerpWalls` finishes a stroke while a floor plan already
+/// exists — the controller doesn't apply the stroke until the user picks:
+/// Replace / Add-new-storey / Ignore.
+#[derive(Debug, Clone)]
+pub struct PendingRedraw {
+    pub stroke_points: Vec<Point2f32>,
+    pub closed: bool,
+}
+
+/// User-controlled view transform on the sketch canvas, on top of the
+/// auto-fit. `zoom = 1.0` and zero offset = pure auto-fit. The assessor uses
+/// this to zoom out (giving room to draw a disjoint section) or pan around.
+#[derive(Debug, Clone, Copy)]
+pub struct ViewTransform {
+    pub zoom: f32,
+    pub offset_x: f32,
+    pub offset_y: f32,
+}
+
+impl Default for ViewTransform {
+    fn default() -> Self {
+        Self {
+            zoom: 1.0,
+            offset_x: 0.0,
+            offset_y: 0.0,
+        }
+    }
 }
 
 pub struct AppController {
@@ -55,6 +85,11 @@ pub struct AppController {
     /// Pending "is this collinear?" questions for the current floor plan.
     /// `None` when there's nothing to ask.
     review: Option<CollinearityReview>,
+    /// A drawn-but-not-applied stroke awaiting the user's redraw decision.
+    /// Only set when DrawPerpWalls finishes a stroke and there's already a plan.
+    pending_redraw: Option<PendingRedraw>,
+    /// View transform layered on top of the canvas auto-fit (pan + zoom).
+    view: ViewTransform,
 }
 
 impl AppController {
@@ -66,7 +101,66 @@ impl AppController {
             sketch_engine: SketchEngine::new(),
             current_record: None,
             review: None,
+            pending_redraw: None,
+            view: ViewTransform::default(),
         }
+    }
+
+    /// Is there a pending DrawPerpWalls stroke awaiting the user's redraw decision?
+    pub fn has_pending_redraw(&self) -> bool {
+        self.pending_redraw.is_some()
+    }
+
+    /// User said: replace the current storey with the pending stroke.
+    pub fn confirm_replace_storey(&mut self) -> Result<(), String> {
+        let Some(pending) = self.pending_redraw.take() else {
+            return Ok(());
+        };
+        self.apply_drawperp_stroke(&pending.stroke_points, pending.closed)
+    }
+
+    /// User said: add a new storey using the pending stroke as its outline.
+    /// Stub — implementation deferred to the multi-storey feature.
+    pub fn confirm_add_storey_from_current(&mut self) {
+        if let Some(_pending) = self.pending_redraw.take() {
+            println!("Add new storey from current — TODO (stub for upcoming feature)");
+        }
+    }
+
+    /// User said: discard the pending stroke without doing anything.
+    pub fn discard_pending_redraw(&mut self) {
+        self.pending_redraw = None;
+    }
+
+    /// Current view transform (auto-fit + user pan/zoom).
+    pub fn view(&self) -> ViewTransform {
+        self.view
+    }
+
+    /// Multiply current zoom by `factor`, keeping `anchor` (canvas pixel pos)
+    /// stationary. Clamped to a reasonable range.
+    pub fn zoom_view(&mut self, factor: f32, anchor: (f32, f32), canvas_center: (f32, f32)) {
+        let old = self.view.zoom;
+        let new = (old * factor).clamp(0.1, 10.0);
+        let actual_factor = new / old;
+        // Anchor's pre-zoom position relative to center, scaled by the actual factor
+        // we applied, then re-anchored. Offset shifts so the anchor stays put.
+        let rel_x = anchor.0 - canvas_center.0 - self.view.offset_x;
+        let rel_y = anchor.1 - canvas_center.1 - self.view.offset_y;
+        self.view.offset_x += rel_x * (1.0 - actual_factor);
+        self.view.offset_y += rel_y * (1.0 - actual_factor);
+        self.view.zoom = new;
+    }
+
+    /// Translate the view by a canvas-pixel delta (positive = pan right/down).
+    pub fn pan_view(&mut self, delta_x: f32, delta_y: f32) {
+        self.view.offset_x += delta_x;
+        self.view.offset_y += delta_y;
+    }
+
+    /// Reset the view to pure auto-fit.
+    pub fn reset_view(&mut self) {
+        self.view = ViewTransform::default();
     }
 
     pub fn load_data_async(&self, tx: Sender<(String, f32)>) {
@@ -124,16 +218,27 @@ impl AppController {
             record.data.storeys.push(Storey::default());
         }
 
-        let points: Vec<Point2f64> = self
+        // Convert every polygon (ring) of the floor plan into a f64-typed
+        // polygon for the BER data model. One ring → one FloorRegion.
+        let polygons_f64: Vec<Vec<Point2f64>> = self
             .floor_plan
-            .get_points()
-            .iter()
-            .map(|p| Point2f64::new(p.x as f64, p.y as f64))
+            .polygons()
+            .into_iter()
+            .map(|ring| {
+                ring.into_iter()
+                    .map(|p| Point2f64::new(p.x as f64, p.y as f64))
+                    .collect()
+            })
             .collect();
 
-        if !points.is_empty() {
-            record.data.storeys[0].floors =
-                FloorRegions::new(points, DEFAULT_CEILING_HEIGHT_M, None, None, None);
+        if polygons_f64.iter().any(|p| p.len() >= 3) {
+            record.data.storeys[0].floors = FloorRegions::from_vertex_lists(
+                polygons_f64,
+                DEFAULT_CEILING_HEIGHT_M,
+                None,
+                None,
+                None,
+            );
         }
 
         BerRepository::new(&self.conn)
@@ -179,8 +284,8 @@ impl AppController {
             return Ok(());
         };
         println!(
-            "collinearity YES: edges {} & {} along {:?} (coords {:.2}, {:.2})",
-            sug.edge_a, sug.edge_b, sug.axis, sug.coord_a, sug.coord_b
+            "collinearity YES: ring {}/edge {} & ring {}/edge {} along {:?} (coords {:.2}, {:.2})",
+            sug.ring_a, sug.edge_a, sug.ring_b, sug.edge_b, sug.axis, sug.coord_a, sug.coord_b
         );
         self.floor_plan.apply_collinear_suggestion(&sug);
         println!(
@@ -197,11 +302,11 @@ impl AppController {
             return;
         };
         println!(
-            "collinearity NO:  edges {} & {} along {:?} (coords {:.2}, {:.2})",
-            sug.edge_a, sug.edge_b, sug.axis, sug.coord_a, sug.coord_b
+            "collinearity NO:  ring {}/edge {} & ring {}/edge {} along {:?} (coords {:.2}, {:.2})",
+            sug.ring_a, sug.edge_a, sug.ring_b, sug.edge_b, sug.axis, sug.coord_a, sug.coord_b
         );
         if let Some(review) = self.review.as_mut() {
-            review.rejections.push((sug.edge_a, sug.edge_b, sug.axis));
+            review.rejections.push(sug);
         }
         self.advance_review_cursor();
     }
@@ -254,37 +359,33 @@ impl AppController {
     fn review_should_skip(&self, sug: &CollinearitySuggestion) -> bool {
         if self
             .floor_plan
-            .edges_collinear(sug.edge_a, sug.edge_b, &sug.axis)
+            .edges_collinear(sug.ring_a, sug.edge_a, sug.ring_b, sug.edge_b, &sug.axis)
         {
             return true;
         }
         let Some(review) = self.review.as_ref() else {
             return false;
         };
-        // Transitive rejection: if any rejected (R_a, R_b) is such that the
-        // current pair (S_a, S_b) is "the same question" — i.e. {S_a, S_b}
-        // matches {R_a, R_b} up to the existing equivalence classes — skip.
-        for (rej_a, rej_b, rej_axis) in &review.rejections {
-            if *rej_axis != sug.axis {
+        // Transitive rejection: if any rejected pair is "the same question"
+        // as `sug` (i.e. each side matches a side of the rejection through
+        // existing equivalences), skip.
+        for rej in &review.rejections {
+            if rej.axis != sug.axis {
                 continue;
             }
-            let a_eq_a = self
-                .floor_plan
-                .edges_collinear(sug.edge_a, *rej_a, rej_axis)
-                || sug.edge_a == *rej_a;
-            let b_eq_b = self
-                .floor_plan
-                .edges_collinear(sug.edge_b, *rej_b, rej_axis)
-                || sug.edge_b == *rej_b;
-            let a_eq_b = self
-                .floor_plan
-                .edges_collinear(sug.edge_a, *rej_b, rej_axis)
-                || sug.edge_a == *rej_b;
-            let b_eq_a = self
-                .floor_plan
-                .edges_collinear(sug.edge_b, *rej_a, rej_axis)
-                || sug.edge_b == *rej_a;
-            if (a_eq_a && b_eq_b) || (a_eq_b && b_eq_a) {
+            let same = |sa: (usize, usize), ra: (usize, usize)| -> bool {
+                (sa.0 == ra.0 && sa.1 == ra.1)
+                    || self
+                        .floor_plan
+                        .edges_collinear(sa.0, sa.1, ra.0, ra.1, &rej.axis)
+            };
+            let sug_a = (sug.ring_a, sug.edge_a);
+            let sug_b = (sug.ring_b, sug.edge_b);
+            let rej_a = (rej.ring_a, rej.edge_a);
+            let rej_b = (rej.ring_b, rej.edge_b);
+            let aa_bb = same(sug_a, rej_a) && same(sug_b, rej_b);
+            let ab_ba = same(sug_a, rej_b) && same(sug_b, rej_a);
+            if aa_bb || ab_ba {
                 return true;
             }
         }
@@ -333,35 +434,88 @@ impl AppController {
     }
 
     pub fn sketch_end_stroke(&mut self, _point: Point2f32) -> Result<(), String> {
+        let edit_tool = self.sketch_engine.edit_tool;
         if let Some(stroke) = self
             .sketch_engine
             .end_stroke()
             .map_err(|e| format!("Failed to end stroke: {:?}", e))?
         {
-            // deal with stroke -- depends on the engine mode
-            match self.sketch_engine.mode_behaviour.as_ref() {
-                // For example, if it's a Storey2DPerpWalls, we might want to convert the stroke into walls and add them to the floor plan
-                Storey2DPerpWalls => {
-                    self.floor_plan = FloorPlan::from_points_to_orthogonal(
-                        &stroke.points,
-                        10.0,
-                        stroke.is_closed,
-                    )
-                    .map_err(|e| format!("Failed to add area: {:?}", e))?;
-                    println!("floor plan: {:?}", self.floor_plan);
-                }
-                _ => {}
-            }
             println!("Stroke completed with {} points", stroke.points.len());
+            match edit_tool {
+                EditTools::DrawPerpWalls => {
+                    // Drawing the primary outline.
+                    if self.floor_plan.ring_count() > 0 {
+                        // A plan already exists — don't silently overwrite.
+                        // Stash the stroke and let the UI ask the assessor
+                        // what to do (Replace / Add new storey / Ignore).
+                        self.pending_redraw = Some(PendingRedraw {
+                            stroke_points: stroke.points,
+                            closed: stroke.is_closed,
+                        });
+                    } else {
+                        // No existing plan — apply directly.
+                        self.apply_drawperp_stroke(&stroke.points, stroke.is_closed)?;
+                    }
+                }
+                EditTools::AddSection => {
+                    self.apply_addsection_stroke(&stroke.points, stroke.is_closed)?;
+                }
+                _ => {
+                    // Other tools don't consume the stroke at this layer yet.
+                }
+            }
         }
+        Ok(())
+    }
 
-        // Stroke just settled → persist the new floor plan into the BER record.
+    /// Apply a primary-outline stroke: replace the floor plan, persist, and
+    /// populate the collinearity review.
+    fn apply_drawperp_stroke(&mut self, points: &[Point2f32], closed: bool) -> Result<(), String> {
+        self.floor_plan = FloorPlan::from_points_to_orthogonal(points, 10.0, closed)
+            .map_err(|e| format!("Failed to draw outline: {:?}", e))?;
+        println!("floor plan: {:?}", self.floor_plan);
         self.commit_to_ber()?;
+        self.populate_collinearity_review();
+        Ok(())
+    }
 
-        // Detect near-collinear walls and populate the review if any.
-        let suggestions = self
+    /// Apply an AddSection stroke: append a ring (or replace if there's no
+    /// outline yet), persist, populate review.
+    fn apply_addsection_stroke(
+        &mut self,
+        points: &[Point2f32],
+        closed: bool,
+    ) -> Result<(), String> {
+        if self.floor_plan.ring_count() == 0 {
+            self.floor_plan = FloorPlan::from_points_to_orthogonal(points, 10.0, closed)
+                .map_err(|e| format!("Failed to draw outline: {:?}", e))?;
+        } else {
+            self.floor_plan
+                .add_polygon(points, 10.0, closed)
+                .map_err(|e| format!("Failed to add section: {:?}", e))?;
+        }
+        println!("floor plan (after AddSection): {:?}", self.floor_plan);
+        self.commit_to_ber()?;
+        self.populate_collinearity_review();
+        Ok(())
+    }
+
+    /// Detect near-collinear walls and populate the review if any.
+    ///
+    /// After AddSection appends a new ring, pairs entirely within older
+    /// rings were either resolved when those rings were drawn or were
+    /// intentionally left as distinct walls — don't re-ask. We only
+    /// surface pairs that involve the newly-added ring. For DrawPerpWalls
+    /// the floor_plan was just replaced with a single ring at index 0,
+    /// so the filter is a no-op.
+    fn populate_collinearity_review(&mut self) {
+        let newest_ring = self.floor_plan.ring_count().saturating_sub(1);
+        let suggestions: Vec<_> = self
             .floor_plan
-            .suggest_collinear(COLLINEARITY_MIN_SEPARATION, COLLINEARITY_MAX_SEPARATION);
+            .suggest_collinear(COLLINEARITY_MIN_SEPARATION, COLLINEARITY_MAX_SEPARATION)
+            .into_iter()
+            .filter(|s| s.ring_a == newest_ring || s.ring_b == newest_ring)
+            .collect();
         if !suggestions.is_empty() {
             self.review = Some(CollinearityReview {
                 suggestions,
@@ -369,8 +523,6 @@ impl AppController {
                 rejections: Vec::new(),
             });
         }
-
-        Ok(())
     }
 }
 

@@ -4,6 +4,7 @@ use strum::IntoEnumIterator;
 
 use crate::ui::pages::events::UiEvent;
 use crate::ui::render;
+use crate::ui::render::ViewParams;
 
 use datatypes::ber::ber_struct::Ber;
 use domain::sketch::{DisplayMode, EditTools, SketchMode};
@@ -32,6 +33,27 @@ pub enum SketchEvent {
     RejectCollinearity,
     /// User dismissed all remaining collinearity suggestions.
     SkipAllCollinearity,
+    /// User chose to replace the current storey with the pending stroke.
+    ReplaceStorey,
+    /// User chose to add a new storey from the pending stroke (stub feature).
+    AddStoreyFromCurrent,
+    /// User chose to discard the pending stroke.
+    IgnoreRedraw,
+    /// Scroll-wheel zoom about the given anchor (canvas pixel coords).
+    ZoomView {
+        factor: f32,
+        anchor_x: f32,
+        anchor_y: f32,
+        canvas_center_x: f32,
+        canvas_center_y: f32,
+    },
+    /// Right-drag pan delta (canvas pixels).
+    PanView {
+        dx: f32,
+        dy: f32,
+    },
+    /// Reset the view to pure auto-fit.
+    ResetView,
 }
 
 #[derive(Default)]
@@ -49,6 +71,8 @@ impl SketchPage {
         review: Option<&CollinearitySuggestion>,
         review_remaining: usize,
         has_floor_plan: bool,
+        pending_redraw: bool,
+        view: ViewParams,
         mut on_event: F,
     ) where
         F: FnMut(UiEvent),
@@ -74,9 +98,11 @@ impl SketchPage {
                 let canvas_height =
                     ui.available_height() - bottom_toolbar_height - separator_height;
 
+                // `click_and_drag` so middle/secondary drags register too
+                // (plain `drag` is biased toward primary-button drag).
                 let (rect, response) = ui.allocate_exact_size(
                     egui::Vec2::new(ui.available_width(), canvas_height),
-                    egui::Sense::drag(),
+                    egui::Sense::click_and_drag(),
                 );
 
                 let painter = ui.painter_at(rect);
@@ -91,23 +117,57 @@ impl SketchPage {
                     mode,
                     display,
                     review,
+                    view,
                 );
 
-                // Stroke input: only in 2D mode, and only when we're not in review.
-                if matches!(mode, SketchMode::Storey2D) && !reviewing {
-                    if response.drag_started() {
+                // Pan / zoom on the canvas.
+                //   - Scroll wheel  → zoom about the cursor
+                //   - Right-drag    → pan
+                if response.hovered() {
+                    let scroll_y = ui.input(|i| i.smooth_scroll_delta.y);
+                    if scroll_y.abs() > 0.0 {
+                        let factor = if scroll_y > 0.0 { 1.1 } else { 1.0 / 1.1 };
+                        let anchor = ui
+                            .input(|i| i.pointer.hover_pos())
+                            .unwrap_or_else(|| rect.center());
+                        on_event(UiEvent::Sketch(SketchEvent::ZoomView {
+                            factor,
+                            anchor_x: anchor.x,
+                            anchor_y: anchor.y,
+                            canvas_center_x: rect.center().x,
+                            canvas_center_y: rect.center().y,
+                        }));
+                    }
+                }
+                // Middle or right mouse drag pans the canvas. We deliberately
+                // skip primary (left) because that's the stroke-drawing button.
+                if response.dragged_by(egui::PointerButton::Middle)
+                    || response.dragged_by(egui::PointerButton::Secondary)
+                {
+                    let d = response.drag_delta();
+                    if d.x.abs() > 0.0 || d.y.abs() > 0.0 {
+                        on_event(UiEvent::Sketch(SketchEvent::PanView { dx: d.x, dy: d.y }));
+                    }
+                }
+
+                // Stroke input: only in 2D mode, and only when we're not in
+                // review or awaiting a redraw decision. (Pan/zoom still work.)
+                // Use the *_by(Primary) variants so middle/right drags (which pan)
+                // don't accidentally start a stroke.
+                if matches!(mode, SketchMode::Storey2D) && !reviewing && !pending_redraw {
+                    if response.drag_started_by(egui::PointerButton::Primary) {
                         if let Some(pos) = response.interact_pointer_pos() {
                             let local_pos = pos - rect.left_top().to_vec2();
                             on_event(UiEvent::Sketch(SketchEvent::StartStroke(local_pos)));
                         }
                     }
-                    if response.dragged() {
+                    if response.dragged_by(egui::PointerButton::Primary) {
                         if let Some(pos) = response.interact_pointer_pos() {
                             let local_pos = pos - rect.left_top().to_vec2();
                             on_event(UiEvent::Sketch(SketchEvent::AddPoint(local_pos)));
                         }
                     }
-                    if response.drag_stopped() {
+                    if response.drag_stopped_by(egui::PointerButton::Primary) {
                         if let Some(pos) = response.interact_pointer_pos() {
                             let local_pos = pos - rect.left_top().to_vec2();
                             on_event(UiEvent::Sketch(SketchEvent::EndStroke(local_pos)));
@@ -121,14 +181,61 @@ impl SketchPage {
 
                 ui.separator();
 
-                // Bottom toolbar swaps between edit-tools and the collinearity review.
-                if reviewing {
-                    Self::review_toolbar(ui, review_remaining, &mut on_event);
-                } else if let Some(new_tool) = Self::edit_toolbar(ui, edit_tool, has_floor_plan) {
-                    on_event(UiEvent::Sketch(SketchEvent::ChangeEditTool(new_tool)));
-                }
+                // Bottom toolbar — priority: pending redraw > collinearity review > edit tools.
+                // The "Fit" button (reset view) is always available alongside.
+                ui.horizontal(|ui| {
+                    if pending_redraw {
+                        Self::pending_redraw_toolbar(ui, &mut on_event);
+                    } else if reviewing {
+                        Self::review_toolbar(ui, review_remaining, &mut on_event);
+                    } else if let Some(new_tool) = Self::edit_toolbar(ui, edit_tool, has_floor_plan)
+                    {
+                        on_event(UiEvent::Sketch(SketchEvent::ChangeEditTool(new_tool)));
+                    }
+                    ui.separator();
+                    Self::fit_button(ui, &mut on_event);
+                });
             });
         });
+    }
+
+    fn fit_button<F: FnMut(UiEvent)>(ui: &mut egui::Ui, on_event: &mut F) {
+        if ui
+            .button("Fit")
+            .on_hover_text("Reset view (zoom/pan)")
+            .clicked()
+        {
+            on_event(UiEvent::Sketch(SketchEvent::ResetView));
+        }
+    }
+
+    fn pending_redraw_toolbar<F: FnMut(UiEvent)>(ui: &mut egui::Ui, on_event: &mut F) {
+        ui.label(
+            egui::RichText::new("A storey already exists. What should this new stroke do?")
+                .strong()
+                .color(egui::Color32::from_rgb(255, 200, 60)),
+        );
+        if ui
+            .button("Replace this storey")
+            .on_hover_text("Discard the current outline and replace it with this stroke")
+            .clicked()
+        {
+            on_event(UiEvent::Sketch(SketchEvent::ReplaceStorey));
+        }
+        if ui
+            .button("New storey from this")
+            .on_hover_text("Save current storey, start a new one from this stroke (coming soon)")
+            .clicked()
+        {
+            on_event(UiEvent::Sketch(SketchEvent::AddStoreyFromCurrent));
+        }
+        if ui
+            .button("Ignore")
+            .on_hover_text("Discard this stroke, keep the current storey")
+            .clicked()
+        {
+            on_event(UiEvent::Sketch(SketchEvent::IgnoreRedraw));
+        }
     }
 
     fn review_toolbar<F: FnMut(UiEvent)>(ui: &mut egui::Ui, remaining: usize, on_event: &mut F) {

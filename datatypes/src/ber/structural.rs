@@ -178,6 +178,47 @@ impl FloorRegions {
             regions: vec![region],
         }
     }
+
+    /// Create a FloorRegions containing one region per polygon. Used when a
+    /// storey has multiple disjoint floor areas (e.g. extension sections on
+    /// upper floors). All regions get the same height + construction defaults.
+    /// (Distinct from `from_polygons` — that one takes `&Polygon` slices for
+    /// gen_3d_vol's 3D-derived polygons; this one takes raw vertex lists
+    /// straight from the parametric layer.)
+    pub fn from_vertex_lists(
+        polygons: Vec<Vec<Point2f64>>,
+        height: f64,
+        construction_type: Option<FloorConstructionType>,
+        construction_makeup: Option<ConstructionMakeup>,
+        construction_phase: Option<ConstructionPhase>,
+    ) -> Self {
+        let ct = construction_type.unwrap_or_default();
+        let cm = construction_makeup.unwrap_or_default();
+        let cp = construction_phase.unwrap_or_default();
+
+        let regions = polygons
+            .into_iter()
+            .filter(|p| p.len() >= 3)
+            .map(|vertices| {
+                let polygon = Polygon::new(
+                    LineString::from(vertices.iter().map(|p| (p.x, p.y)).collect::<Vec<_>>()),
+                    vec![],
+                );
+                FloorRegion {
+                    polygon,
+                    height,
+                    construction_type: ct,
+                    base: RegionBase {
+                        construction_makeup: cm.clone(),
+                        construction_phase: cp.clone(),
+                        ..Default::default()
+                    },
+                }
+            })
+            .collect();
+
+        Self { regions }
+    }
 }
 /// A planar region of the floor
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]

@@ -30,6 +30,26 @@ use domain::sketch::{DisplayMode, SketchMode};
 use eframe::egui;
 use manip_2d_plan::CollinearitySuggestion;
 
+/// User-controlled view transform passed in from the controller. `zoom = 1.0`
+/// and zero offsets = pure auto-fit. Higher zoom enlarges; positive offset_x
+/// pans the view right.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct ViewParams {
+    pub zoom: f32,
+    pub offset_x: f32,
+    pub offset_y: f32,
+}
+
+impl ViewParams {
+    pub fn identity() -> Self {
+        Self {
+            zoom: 1.0,
+            offset_x: 0.0,
+            offset_y: 0.0,
+        }
+    }
+}
+
 /// Render the appropriate BER view into `rect`. Silent no-op if `ber` is None.
 /// `highlight` is the current collinearity-review suggestion (if any) — its
 /// two candidate edges get a bright overlay so the user sees what they're
@@ -42,6 +62,7 @@ pub fn render_ber(
     sketch_mode: SketchMode,
     display_mode: DisplayMode,
     highlight: Option<&CollinearitySuggestion>,
+    view: ViewParams,
 ) {
     let Some(ber) = ber else {
         painter.text(
@@ -57,20 +78,20 @@ pub fn render_ber(
     match sketch_mode {
         SketchMode::Storey2D => {
             if let Some(storey) = ber.storeys.get(current_storey_idx) {
-                storey_2d::render(painter, rect, storey, display_mode, highlight);
+                storey_2d::render(painter, rect, storey, display_mode, highlight, view);
             } else {
                 empty_storey_hint(painter, rect);
             }
         }
         SketchMode::Storey3D => {
             if let Some(storey) = ber.storeys.get(current_storey_idx) {
-                storey_3d::render(painter, rect, storey, display_mode);
+                storey_3d::render(painter, rect, storey, display_mode, view);
             } else {
                 empty_storey_hint(painter, rect);
             }
         }
         SketchMode::FullHouse => {
-            full_house_3d::render(painter, rect, ber, display_mode);
+            full_house_3d::render(painter, rect, ber, display_mode, view);
         }
     }
 }
@@ -106,20 +127,24 @@ pub(crate) mod style {
 }
 
 /// Linear 2D transform: source-space (meters/pixels) → screen-space (px).
-/// Preserves aspect ratio; centres the source bounding box inside the dest rect.
+/// Preserves aspect ratio; centres the source bounding box inside the dest
+/// rect. The user's pan/zoom (`ViewParams`) is folded in: `zoom` multiplies
+/// the auto-fit scale, and `offset_x/y` shift the final screen position.
 pub(crate) struct Transform2d {
     scale: f64,
     cx: f64, // dest centre x (px)
     cy: f64, // dest centre y (px)
     sx: f64, // source centre x
     sy: f64, // source centre y
+    user_offset_x: f64,
+    user_offset_y: f64,
 }
 
 impl Transform2d {
     pub fn apply(&self, x: f64, y: f64) -> egui::Pos2 {
         egui::pos2(
-            (self.cx + (x - self.sx) * self.scale) as f32,
-            (self.cy + (y - self.sy) * self.scale) as f32,
+            (self.cx + (x - self.sx) * self.scale + self.user_offset_x) as f32,
+            (self.cy + (y - self.sy) * self.scale + self.user_offset_y) as f32,
         )
     }
 
@@ -128,25 +153,29 @@ impl Transform2d {
     }
 }
 
-/// Compute a transform that fits a source bounding box inside `rect` with padding.
+/// Compute a transform that fits a source bounding box inside `rect` with
+/// padding, then applies the user's `view` transform (zoom + pan) on top.
 pub(crate) fn fit_transform(
     rect: egui::Rect,
     min_xy: (f64, f64),
     max_xy: (f64, f64),
+    view: ViewParams,
 ) -> Transform2d {
     let pad = 30.0_f32;
     let target_w = (rect.width() - 2.0 * pad).max(1.0);
     let target_h = (rect.height() - 2.0 * pad).max(1.0);
     let src_w = (max_xy.0 - min_xy.0).max(1e-6);
     let src_h = (max_xy.1 - min_xy.1).max(1e-6);
-    let scale = (target_w as f64 / src_w).min(target_h as f64 / src_h);
+    let auto_scale = (target_w as f64 / src_w).min(target_h as f64 / src_h);
 
     Transform2d {
-        scale,
+        scale: auto_scale * view.zoom as f64,
         cx: rect.center().x as f64,
         cy: rect.center().y as f64,
         sx: (min_xy.0 + max_xy.0) * 0.5,
         sy: (min_xy.1 + max_xy.1) * 0.5,
+        user_offset_x: view.offset_x as f64,
+        user_offset_y: view.offset_y as f64,
     }
 }
 

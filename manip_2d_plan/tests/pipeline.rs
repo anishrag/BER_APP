@@ -134,12 +134,12 @@ fn edges_collinear_reflects_apply_state() {
     let sug = suggestions.first().expect("at least one suggestion");
 
     assert!(
-        !plan.edges_collinear(sug.edge_a, sug.edge_b, &sug.axis),
+        !plan.edges_collinear(sug.ring_a, sug.edge_a, sug.ring_b, sug.edge_b, &sug.axis),
         "edges shouldn't be collinear before apply"
     );
     plan.apply_collinear_suggestion(sug);
     assert!(
-        plan.edges_collinear(sug.edge_a, sug.edge_b, &sug.axis),
+        plan.edges_collinear(sug.ring_a, sug.edge_a, sug.ring_b, sug.edge_b, &sug.axis),
         "edges should be collinear after apply"
     );
 }

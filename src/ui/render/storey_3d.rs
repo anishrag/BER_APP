@@ -12,18 +12,19 @@ use datatypes::ber::structural::{FloorRegion, Storey};
 use domain::sketch::DisplayMode;
 use eframe::egui;
 
-use super::{color_for, fit_transform, project_iso, style, Transform2d};
+use super::{color_for, fit_transform, project_iso, style, Transform2d, ViewParams};
 
 pub fn render(
     painter: &egui::Painter,
     rect: egui::Rect,
     storey: &Storey,
     display_mode: DisplayMode,
+    view: ViewParams,
 ) {
     let Some((min_xy, max_xy)) = projected_bb_for_storey(storey, 0.0) else {
         return;
     };
-    let t = fit_transform(rect, min_xy, max_xy);
+    let t = fit_transform(rect, min_xy, max_xy, view);
     render_at_z_offset(painter, &t, storey, display_mode, 0.0);
 }
 

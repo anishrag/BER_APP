@@ -8,9 +8,15 @@ use datatypes::ber::ber_struct::Ber;
 use domain::sketch::DisplayMode;
 use eframe::egui;
 
-use super::{fit_transform, storey_3d, style};
+use super::{fit_transform, storey_3d, style, ViewParams};
 
-pub fn render(painter: &egui::Painter, rect: egui::Rect, ber: &Ber, display_mode: DisplayMode) {
+pub fn render(
+    painter: &egui::Painter,
+    rect: egui::Rect,
+    ber: &Ber,
+    display_mode: DisplayMode,
+    view: ViewParams,
+) {
     if ber.storeys.is_empty() {
         painter.text(
             rect.center(),
@@ -58,7 +64,7 @@ pub fn render(painter: &egui::Painter, rect: egui::Rect, ber: &Ber, display_mode
         return;
     };
 
-    let t = fit_transform(rect, min_xy, max_xy);
+    let t = fit_transform(rect, min_xy, max_xy, view);
 
     // Second pass: render each storey using the shared transform.
     // Iterate top-down so lower storeys' floors don't paint over upper-storey walls

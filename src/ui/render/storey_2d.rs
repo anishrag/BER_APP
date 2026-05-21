@@ -13,7 +13,7 @@ use eframe::egui;
 use geo::Coord;
 use manip_2d_plan::CollinearitySuggestion;
 
-use super::{color_for, fit_transform, style, Transform2d};
+use super::{color_for, fit_transform, style, Transform2d, ViewParams};
 
 /// Render the storey. If `highlight` is set, the two edges named in the
 /// suggestion are drawn on top in a contrasting style so the user can see
@@ -24,12 +24,13 @@ pub fn render(
     storey: &Storey,
     display_mode: DisplayMode,
     highlight: Option<&CollinearitySuggestion>,
+    view: ViewParams,
 ) {
     let Some((min_xy, max_xy)) = bounding_box(storey) else {
         // The mod-level dispatch already prints "no floor plan yet"; nothing to do.
         return;
     };
-    let t = fit_transform(rect, min_xy, max_xy);
+    let t = fit_transform(rect, min_xy, max_xy, view);
 
     // Floors (background layer).
     for region in &storey.floors.regions {
@@ -84,18 +85,24 @@ pub fn render(
 
     // Collinearity-review highlight: paint the two candidate edges on top in
     // a bright contrasting color so the user can see what they're being asked.
+    // Each edge lives in a (possibly different) ring → look up the region by
+    // suggestion's ring index. Cross-ring suggestions highlight one edge in
+    // each polygon.
     if let Some(s) = highlight {
-        for region in &storey.floors.regions {
-            draw_highlight_edges(painter, &t, region, s);
+        if let Some(region) = storey.floors.regions.get(s.ring_a) {
+            draw_highlight_edge(painter, &t, region, s.edge_a);
+        }
+        if let Some(region) = storey.floors.regions.get(s.ring_b) {
+            draw_highlight_edge(painter, &t, region, s.edge_b);
         }
     }
 }
 
-fn draw_highlight_edges(
+fn draw_highlight_edge(
     painter: &egui::Painter,
     t: &Transform2d,
     region: &FloorRegion,
-    suggestion: &CollinearitySuggestion,
+    edge_start: usize,
 ) {
     let coords: Vec<Coord<f64>> = region.polygon.exterior().coords().cloned().collect();
     // The polygon's exterior may or may not include the closing duplicate;
@@ -112,16 +119,11 @@ fn draw_highlight_edges(
     let highlight = egui::Color32::from_rgb(255, 140, 30); // warm orange
     let stroke = egui::Stroke::new(4.0, highlight);
 
-    let mut draw_edge = |start_idx: usize| {
-        let a = coords[start_idx % n_unique];
-        let b = coords[(start_idx + 1) % n_unique];
-        let pa = t.apply(a.x, a.y);
-        let pb = t.apply(b.x, b.y);
-        painter.line_segment([pa, pb], stroke);
-    };
-
-    draw_edge(suggestion.edge_a);
-    draw_edge(suggestion.edge_b);
+    let a = coords[edge_start % n_unique];
+    let b = coords[(edge_start + 1) % n_unique];
+    let pa = t.apply(a.x, a.y);
+    let pb = t.apply(b.x, b.y);
+    painter.line_segment([pa, pb], stroke);
 }
 
 fn bounding_box(storey: &Storey) -> Option<((f64, f64), (f64, f64))> {

@@ -89,9 +89,48 @@ impl FloorPlan {
         Ok(Self { parametric })
     }
 
-    /// Concrete vertex positions of the floor plan's outer polygon, in order.
+    /// Add another disjoint polygon to this floor plan (e.g. an extension
+    /// section on an upper floor). The new polygon shares the same parameter
+    /// namespace as existing ones, so cross-polygon collinearity suggestions
+    /// and merges work uniformly across the whole plan.
+    pub fn add_polygon(
+        &mut self,
+        points: &[Point2f32],
+        tolerance: f32,
+        closed: bool,
+    ) -> Result<(), Error> {
+        let mut simplified = simplification::simplify_stroke(points, tolerance)?;
+        if closed && simplified.len() > 3 {
+            simplified.pop();
+        }
+        let orthog_points = orthogonal::make_orthogonal(&simplified, tolerance)?;
+        let final_points = if closed {
+            let snapped = orthogonal::snap_closing_edge(orthog_points, tolerance);
+            let rotated = orthogonal::rotate_to_corner_start(snapped, tolerance);
+            orthogonal::remove_collinear(&rotated, tolerance)
+        } else {
+            orthog_points
+        };
+
+        self.parametric.add_ring(&final_points);
+        self.parametric.apply_orthogonal_constraints()?;
+        Ok(())
+    }
+
+    /// Concrete vertex positions of the first polygon (backwards-compatible
+    /// for single-polygon callers). For multi-polygon access, use `polygons()`.
     pub fn get_points(&self) -> Vec<Point2f32> {
-        self.parametric.get_points()
+        self.parametric.ring_points(0)
+    }
+
+    /// All polygons' vertex positions, in ring order.
+    pub fn polygons(&self) -> Vec<Vec<Point2f32>> {
+        self.parametric.all_ring_points()
+    }
+
+    /// Number of polygons (rings) in this floor plan.
+    pub fn ring_count(&self) -> usize {
+        self.parametric.ring_count()
     }
 
     /// Number of independent parameters controlling the plan's geometry.
@@ -101,7 +140,8 @@ impl FloorPlan {
     }
 
     /// Detect pairs of axis-aligned edges that are close to being collinear
-    /// but currently aren't. See `ParametricPlan::suggest_collinear` for details.
+    /// but currently aren't. Suggestions can span rings (cross-polygon).
+    /// See `ParametricPlan::suggest_collinear` for details.
     pub fn suggest_collinear(
         &self,
         min_separation: f32,
@@ -118,7 +158,16 @@ impl FloorPlan {
     }
 
     /// Are these two edges currently collinear along the given axis?
-    pub fn edges_collinear(&self, edge_a: usize, edge_b: usize, axis: &Axis) -> bool {
-        self.parametric.edges_collinear(edge_a, edge_b, axis)
+    /// Takes ring indices so cross-polygon queries are possible.
+    pub fn edges_collinear(
+        &self,
+        ring_a: usize,
+        edge_a: usize,
+        ring_b: usize,
+        edge_b: usize,
+        axis: &Axis,
+    ) -> bool {
+        self.parametric
+            .edges_collinear(ring_a, edge_a, ring_b, edge_b, axis)
     }
 }
