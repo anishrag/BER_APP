@@ -119,7 +119,6 @@ impl AppController {
 
         let points: Vec<Point2f64> = self
             .floor_plan
-            .parametric
             .get_points()
             .iter()
             .map(|p| Point2f64::new(p.x as f64, p.y as f64))
@@ -179,7 +178,7 @@ impl AppController {
         self.floor_plan.apply_collinear_suggestion(&sug);
         println!(
             "  → active_parameter_count = {}",
-            self.floor_plan.parametric.active_parameter_count
+            self.floor_plan.active_parameter_count()
         );
         self.advance_review_cursor();
         self.commit_to_ber()

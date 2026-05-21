@@ -264,145 +264,18 @@ impl ParametricPlan {
         Ok(())
     }
 
-    /// Apply collinear constraints
-    /// When edges are collinear, they share the same coordinate on one axis
-    pub fn apply_collinear_constraint(&mut self, edge1: usize, edge2: usize) -> Result<(), Error> {
-        // Get the current positions
-        let positions: Vec<Point2f32> = self
-            .vertices
-            .iter()
-            .map(|v| v.evaluate(&self.parameters))
-            .collect();
-
-        if edge1 >= positions.len() || edge2 >= positions.len() {
-            return Err(Error::InvalidEdgeIndex(edge1.max(edge2)));
-        }
-
-        let next1 = (edge1 + 1) % positions.len();
-        let next2 = (edge2 + 1) % positions.len();
-
-        let p1 = &positions[edge1];
-        let p2 = &positions[next1];
-        let p3 = &positions[edge2];
-
-        // Determine if the line is more horizontal or vertical
-        let dx = p2.x - p1.x;
-        let dy = p2.y - p1.y;
-
-        if dx.abs() > dy.abs() {
-            // More horizontal - make y coordinates equal
-            // Edge2's start vertex should have same y as edge1's line
-            self.make_y_equal(edge2, edge1)?;
-        } else {
-            // More vertical - make x coordinates equal
-            self.make_x_equal(edge2, edge1)?;
-        }
-
-        Ok(())
-    }
-
-    /// Make the y coordinate of vertex v1 equal to vertex v2
-    fn make_y_equal(&mut self, v1: usize, v2: usize) -> Result<(), Error> {
-        if v1 >= self.vertices.len() || v2 >= self.vertices.len() {
-            return Err(Error::InvalidEdgeIndex(v1.max(v2)));
-        }
-
-        // Copy the y expression from v2 to v1
-        self.vertices[v1].y_expr = self.vertices[v2].y_expr.clone();
-
-        Ok(())
-    }
-
-    /// Make the x coordinate of vertex v1 equal to vertex v2
-    fn make_x_equal(&mut self, v1: usize, v2: usize) -> Result<(), Error> {
-        if v1 >= self.vertices.len() || v2 >= self.vertices.len() {
-            return Err(Error::InvalidEdgeIndex(v1.max(v2)));
-        }
-
-        // Copy the x expression from v2 to v1
-        self.vertices[v1].x_expr = self.vertices[v2].x_expr.clone();
-
-        Ok(())
-    }
-
-    /// Set a parameter value (e.g., setting a dimension)
+    /// Set a parameter value (used by tests today; the wall-drag UI will use
+    /// this when implemented).
     pub fn set_parameter(&mut self, param_id: ParameterId, value: f32) {
         self.parameters.insert(param_id, value);
     }
 
-    /// Get the current parameter value
-    pub fn get_parameter(&self, param_id: ParameterId) -> Option<f32> {
-        self.parameters.get(&param_id).copied()
-    }
-
-    /// Get all active parameter IDs
-    pub fn get_active_parameters(&self) -> Vec<ParameterId> {
-        let mut params: Vec<_> = self.parameters.keys().copied().collect();
-        params.sort();
-        params.truncate(self.active_parameter_count);
-        params
-    }
-
-    /// Get parameters that still need values
-    pub fn get_unset_parameters(&self) -> Vec<ParameterId> {
-        (0..self.active_parameter_count)
-            .filter(|id| !self.parameters.contains_key(id))
-            .collect()
-    }
-
-    /// Convert to a concrete polygon
+    /// Concrete vertex positions of the polygon.
     pub fn get_points(&self) -> Vec<Point2f32> {
-        let vertices: Vec<Point2f32> = self
-            .vertices
+        self.vertices
             .iter()
             .map(|v| v.evaluate(&self.parameters))
-            .collect();
-
-        vertices
-    }
-
-    /// Add a new vertex (for non-orthogonal features like chamfers)
-    /// Returns the new parameter IDs that were created
-    pub fn add_vertex_at(
-        &mut self,
-        index: usize,
-        position: Point2f32,
-    ) -> Result<(ParameterId, ParameterId), Error> {
-        if index > self.vertices.len() {
-            return Err(Error::InvalidEdgeIndex(index));
-        }
-
-        let x_param = self.next_param_id;
-        self.next_param_id += 1;
-        let y_param = self.next_param_id;
-        self.next_param_id += 1;
-
-        self.parameters.insert(x_param, position.x);
-        self.parameters.insert(y_param, position.y);
-
-        let new_vertex = ParametricVertex {
-            x_expr: CoordinateExpression::Parameter(x_param),
-            y_expr: CoordinateExpression::Parameter(y_param),
-        };
-
-        self.vertices.insert(index, new_vertex);
-        self.active_parameter_count += 2;
-
-        Ok((x_param, y_param))
-    }
-
-    /// Remove a vertex (and reclaim its parameters if not used elsewhere)
-    pub fn remove_vertex(&mut self, index: usize) -> Result<(), Error> {
-        if index >= self.vertices.len() {
-            return Err(Error::InvalidEdgeIndex(index));
-        }
-
-        self.vertices.remove(index);
-
-        // Note: We don't automatically reclaim parameters because they might be
-        // referenced by other vertices. Proper garbage collection would track references.
-
-        Ok(())
+            .collect()
     }
 
     /// Detect pairs of axis-aligned edges whose perpendicular coordinates are
@@ -525,38 +398,6 @@ impl ParametricPlan {
             }
         }
         self.active_parameter_count = used.len();
-    }
-
-    /// Get which parameter controls a specific edge length
-    pub fn get_edge_length_parameter(&self, edge_index: usize) -> Option<ParameterId> {
-        if edge_index >= self.vertices.len() {
-            return None;
-        }
-
-        let next_index = (edge_index + 1) % self.vertices.len();
-        let v1 = &self.vertices[edge_index];
-        let v2 = &self.vertices[next_index];
-
-        // For orthogonal edges, the length is controlled by a single parameter
-        // Check if it's horizontal or vertical
-
-        // If x coordinates are the same (vertical edge), length is controlled by y difference
-        if v1.x_expr == v2.x_expr {
-            // Vertical edge - look for the y parameter
-            match &v2.y_expr {
-                CoordinateExpression::Parameter(id) => Some(*id),
-                _ => None,
-            }
-        } else if v1.y_expr == v2.y_expr {
-            // Horizontal edge - look for the x parameter
-            match &v2.x_expr {
-                CoordinateExpression::Parameter(id) => Some(*id),
-                _ => None,
-            }
-        } else {
-            // Non-orthogonal edge - more complex
-            None
-        }
     }
 }
 
