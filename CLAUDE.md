@@ -22,6 +22,13 @@ Rust app for an Irish BER (Building Energy Rating) assessor, eventually targetin
 
 Rules 1–4 are enforced by `.claude/scripts/check-boundaries.sh`, which runs on Edit/Write and on Stop. More context in `.claude/rules/`.
 
+## Tests and push gate
+
+- `cargo test --workspace` is the test suite. Should be green at all times on `main`.
+- **One-time setup per clone:** `./scripts/setup-githooks.sh` (points `core.hooksPath` at `.githooks/`). After that, `git push` to `main` runs `cargo test --workspace` first and refuses on failure. Pushes to feature branches go through unblocked.
+- GitHub Actions (`.github/workflows/test.yml`) runs `cargo fmt --check`, `cargo test --workspace`, and the architecture boundary scan on every push and PR.
+- Bypass for emergencies only: `git push --no-verify` (skips the local gate; CI still gates on PR).
+
 ## Conventions
 
 - Use the `Point2*` / `Point3*` typedefs from `domain::points`, not raw `nalgebra::Point*` or tuples.

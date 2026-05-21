@@ -1,9 +1,9 @@
 use chrono::NaiveDate;
-use rusqlite::Connection;
 use std::sync::mpsc::Sender;
 
 use crate::engine::ber_repository::{BerRecord, BerRepository};
 use crate::engine::dataloader::DataLoader;
+use crate::engine::Db;
 use datatypes::ber::ber_struct::Ber;
 use datatypes::ber::common::ItemId;
 use domain::points::Point2f32;
@@ -13,7 +13,7 @@ use sketch::model::Stroke;
 use sketch::SketchEngine;
 
 pub struct AppController {
-    conn: Connection,
+    conn: Db,
     sketch_engine: SketchEngine,
     floor_plan: FloorPlan,
     loader_engine: DataLoader,
@@ -21,7 +21,7 @@ pub struct AppController {
 }
 
 impl AppController {
-    pub fn new(conn: Connection) -> Self {
+    pub fn new(conn: Db) -> Self {
         Self {
             conn,
             loader_engine: DataLoader::new(),

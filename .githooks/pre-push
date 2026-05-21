@@ -1,0 +1,34 @@
+#!/usr/bin/env bash
+# Block pushes to main if `cargo test --workspace` fails.
+# Pushes to non-main branches are allowed through (CI is the gate there).
+# Install once per clone: `./scripts/setup-githooks.sh`
+#
+# Bypass for emergencies: `git push --no-verify`
+
+set -uo pipefail
+
+protected_branch="refs/heads/main"
+pushing_to_protected=0
+
+# Git passes each ref-to-push on stdin: <local_ref> <local_sha> <remote_ref> <remote_sha>
+while read -r local_ref local_sha remote_ref remote_sha; do
+  if [[ "$remote_ref" == "$protected_branch" ]]; then
+    pushing_to_protected=1
+  fi
+done
+
+if [[ "$pushing_to_protected" -eq 0 ]]; then
+  exit 0
+fi
+
+echo "→ Pushing to main — running cargo test --workspace before allowing push..."
+
+if ! cargo test --workspace --quiet 2>&1; then
+  echo
+  echo "✗ Tests failed. Push to main blocked." >&2
+  echo "  Fix the failures, or bypass with: git push --no-verify (use sparingly)." >&2
+  exit 1
+fi
+
+echo "✓ Tests passed. Proceeding with push to main."
+exit 0
