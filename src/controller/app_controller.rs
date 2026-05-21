@@ -9,13 +9,40 @@ use datatypes::ber::common::ItemId;
 use datatypes::ber::structural::{FloorRegions, Storey};
 use domain::points::{Point2f32, Point2f64};
 use domain::sketch::{DisplayMode, EditTools, SketchMode};
-use manip_2d_plan::FloorPlan;
+use manip_2d_plan::{Axis, CollinearitySuggestion, FloorPlan};
 use sketch::model::Stroke;
 use sketch::SketchEngine;
 
 /// Default storey ceiling height in meters, used as a placeholder until the UI
 /// collects it from the assessor.
 const DEFAULT_CEILING_HEIGHT_M: f64 = 2.4;
+
+/// Range (in pixels) for what counts as "near-collinear, ask the user."
+/// `MIN_SEPARATION` is just above the parametric layer's dedup tolerance —
+/// pairs closer than this already share a coordinate expression (and are
+/// skipped by the detector). Anything from there up to `MAX_SEPARATION` is
+/// fair game to ask the user about; pairs farther than `MAX_SEPARATION` are
+/// treated as distinct walls.
+const COLLINEARITY_MIN_SEPARATION: f32 = 1.0;
+const COLLINEARITY_MAX_SEPARATION: f32 = 60.0;
+
+/// In-session state for the "is this pair of walls the same line?" review.
+/// Populated by `sketch_end_stroke` and consumed by `accept_current_review` /
+/// `reject_current_review`.
+#[derive(Debug, Default)]
+pub struct CollinearityReview {
+    /// All candidate pairs the detector returned for the current floor plan.
+    pub suggestions: Vec<CollinearitySuggestion>,
+    /// Index of the next suggestion to consider. We walk forward, skipping
+    /// any pair that's become "already determined" (yes-side via the live
+    /// parametric state, no-side via the `rejections` list).
+    pub cursor: usize,
+    /// Pairs the user explicitly said No to. Used for transitive skipping:
+    /// if (A,B) was rejected and (A,C) gets approved later (C joins A's
+    /// equivalence class), then asking (B,C) would be redundant — B is in
+    /// a class known not to be collinear with C's class.
+    pub rejections: Vec<(usize, usize, Axis)>,
+}
 
 pub struct AppController {
     conn: Db,
@@ -25,6 +52,9 @@ pub struct AppController {
     /// The BER record being edited. `commit_to_ber` writes through this to SQLite.
     /// `None` means no BER is loaded yet — sketches stay in-memory until a BER exists.
     current_record: Option<BerRecord>,
+    /// Pending "is this collinear?" questions for the current floor plan.
+    /// `None` when there's nothing to ask.
+    review: Option<CollinearityReview>,
 }
 
 impl AppController {
@@ -35,6 +65,7 @@ impl AppController {
             floor_plan: FloorPlan::default(),
             sketch_engine: SketchEngine::new(),
             current_record: None,
+            review: None,
         }
     }
 
@@ -104,6 +135,156 @@ impl AppController {
             .map_err(|e| format!("upsert failed: {}", e))
     }
 
+    /// COLLINEARITY REVIEW-------------------------------------------
+    /// The next collinearity suggestion the UI should ask the user about,
+    /// or None if there's nothing pending. Walks forward from the cursor,
+    /// skipping suggestions that have become "already determined" since the
+    /// list was generated (yes-side via the live parametric state, no-side
+    /// via the rejections list).
+    pub fn current_review_suggestion(&self) -> Option<&CollinearitySuggestion> {
+        let review = self.review.as_ref()?;
+        for sug in &review.suggestions[review.cursor..] {
+            if !self.review_should_skip(sug) {
+                return Some(sug);
+            }
+        }
+        None
+    }
+
+    /// Clone of the current suggestion, for cheap UI handoff without borrow gymnastics.
+    pub fn current_review_suggestion_clone(&self) -> Option<CollinearitySuggestion> {
+        self.current_review_suggestion().cloned()
+    }
+
+    /// Number of suggestions still to be considered (including the current).
+    pub fn review_remaining(&self) -> usize {
+        let Some(review) = self.review.as_ref() else {
+            return 0;
+        };
+        review.suggestions[review.cursor..]
+            .iter()
+            .filter(|s| !self.review_should_skip(s))
+            .count()
+    }
+
+    /// User said Yes: apply the suggestion, advance past it, commit.
+    pub fn accept_current_review(&mut self) -> Result<(), String> {
+        let Some(sug) = self.next_pending_suggestion() else {
+            return Ok(());
+        };
+        println!(
+            "collinearity YES: edges {} & {} along {:?} (coords {:.2}, {:.2})",
+            sug.edge_a, sug.edge_b, sug.axis, sug.coord_a, sug.coord_b
+        );
+        self.floor_plan.apply_collinear_suggestion(&sug);
+        println!(
+            "  → active_parameter_count = {}",
+            self.floor_plan.parametric.active_parameter_count
+        );
+        self.advance_review_cursor();
+        self.commit_to_ber()
+    }
+
+    /// User said No: record the rejection (for transitive skipping), advance past it.
+    pub fn reject_current_review(&mut self) {
+        let Some(sug) = self.next_pending_suggestion() else {
+            return;
+        };
+        println!(
+            "collinearity NO:  edges {} & {} along {:?} (coords {:.2}, {:.2})",
+            sug.edge_a, sug.edge_b, sug.axis, sug.coord_a, sug.coord_b
+        );
+        if let Some(review) = self.review.as_mut() {
+            review.rejections.push((sug.edge_a, sug.edge_b, sug.axis));
+        }
+        self.advance_review_cursor();
+    }
+
+    /// User said Skip-all: clear the entire review without applying anything.
+    pub fn skip_all_review(&mut self) {
+        self.review = None;
+    }
+
+    /// Internal: pop the next pending suggestion by cloning it (so callers
+    /// don't have to juggle borrows against `self`).
+    fn next_pending_suggestion(&self) -> Option<CollinearitySuggestion> {
+        self.current_review_suggestion().cloned()
+    }
+
+    /// Internal: move the cursor past the just-handled suggestion and any
+    /// that follow which are now resolved. Clears `self.review` when there's
+    /// nothing left to ask.
+    fn advance_review_cursor(&mut self) {
+        if let Some(review) = self.review.as_mut() {
+            review.cursor += 1;
+        } else {
+            return;
+        }
+        // Skip past any suggestions that are now resolved. We re-borrow each
+        // iteration so `review_should_skip` can immutably borrow `self` while
+        // we mutate `self.review`.
+        loop {
+            let next_sug = self
+                .review
+                .as_ref()
+                .and_then(|r| r.suggestions.get(r.cursor).cloned());
+            let Some(sug) = next_sug else {
+                self.review = None;
+                return;
+            };
+            if self.review_should_skip(&sug) {
+                if let Some(r) = self.review.as_mut() {
+                    r.cursor += 1;
+                }
+            } else {
+                return;
+            }
+        }
+    }
+
+    /// Check the live state to decide if a suggestion is already-resolved
+    /// (no need to ask). Either the two edges are already collinear, or the
+    /// pair is transitively rejected via an earlier No.
+    fn review_should_skip(&self, sug: &CollinearitySuggestion) -> bool {
+        if self
+            .floor_plan
+            .edges_collinear(sug.edge_a, sug.edge_b, &sug.axis)
+        {
+            return true;
+        }
+        let Some(review) = self.review.as_ref() else {
+            return false;
+        };
+        // Transitive rejection: if any rejected (R_a, R_b) is such that the
+        // current pair (S_a, S_b) is "the same question" — i.e. {S_a, S_b}
+        // matches {R_a, R_b} up to the existing equivalence classes — skip.
+        for (rej_a, rej_b, rej_axis) in &review.rejections {
+            if *rej_axis != sug.axis {
+                continue;
+            }
+            let a_eq_a = self
+                .floor_plan
+                .edges_collinear(sug.edge_a, *rej_a, rej_axis)
+                || sug.edge_a == *rej_a;
+            let b_eq_b = self
+                .floor_plan
+                .edges_collinear(sug.edge_b, *rej_b, rej_axis)
+                || sug.edge_b == *rej_b;
+            let a_eq_b = self
+                .floor_plan
+                .edges_collinear(sug.edge_a, *rej_b, rej_axis)
+                || sug.edge_a == *rej_b;
+            let b_eq_a = self
+                .floor_plan
+                .edges_collinear(sug.edge_b, *rej_a, rej_axis)
+                || sug.edge_b == *rej_a;
+            if (a_eq_a && b_eq_b) || (a_eq_b && b_eq_a) {
+                return true;
+            }
+        }
+        false
+    }
+
     /// SKETCHING STUFF--------------------------------------------
     pub fn sketch_stroke(&self) -> Option<Stroke> {
         self.sketch_engine.stroke.clone()
@@ -131,6 +312,9 @@ impl AppController {
     }
 
     pub fn sketch_start_stroke(&mut self, start: Point2f32) -> Result<(), String> {
+        // A new stroke invalidates any pending collinearity review — the
+        // polygon is about to change.
+        self.review = None;
         self.sketch_engine
             .start_stroke(start)
             .map_err(|e| format!("Failed to start stroke: {:?}", e))
@@ -166,7 +350,21 @@ impl AppController {
         }
 
         // Stroke just settled → persist the new floor plan into the BER record.
-        self.commit_to_ber()
+        self.commit_to_ber()?;
+
+        // Detect near-collinear walls and populate the review if any.
+        let suggestions = self
+            .floor_plan
+            .suggest_collinear(COLLINEARITY_MIN_SEPARATION, COLLINEARITY_MAX_SEPARATION);
+        if !suggestions.is_empty() {
+            self.review = Some(CollinearityReview {
+                suggestions,
+                cursor: 0,
+                rejections: Vec::new(),
+            });
+        }
+
+        Ok(())
     }
 }
 

@@ -52,6 +52,7 @@ mod simplification;
 // mod utils;
 
 pub use error::Error;
+pub use parametric::{Axis, CollinearitySuggestion};
 
 use domain::points::{Point2f32, Point2f64};
 use geo_types::{LineString, Point as GeoPoint, Polygon as GeoPolygon};
@@ -96,20 +97,22 @@ impl FloorPlan {
         // For a closed polygon, finalize the closing structure before the
         // parametric layer sees it:
         //   1. snap the implicit closing edge to be exactly axis-aligned
-        //   2. snap nearby walls onto the same coord (catches drawing wobble
-        //      where the user meant to align two walls but drew them slightly
-        //      offset — e.g. the upper bar of an L 12px off from the lower bar)
-        //   3. dedup any vertices the snap landed on top of each other
-        //   4. rotate so the first vertex sits at a real corner (handles the
+        //   2. rotate so the first vertex sits at a real corner (handles the
         //      "user started mid-wall" case — otherwise the start is collinear
         //      and shows up as a spurious extra vertex)
-        //   5. run remove_collinear one more time to drop the previously-
+        //   3. run remove_collinear one more time to drop the previously-
         //      anchored start, now demoted to a mid-list vertex
+        //
+        // Note: we deliberately do NOT auto-merge near-collinear walls here.
+        // Walls that are close but not adjacent in the polygon are left
+        // as separate, and the user gets asked about them via the
+        // `suggest_collinear` review. This keeps the parametric model honest
+        // about what the user actually drew. `snap_near_collinear_walls`
+        // remains available as a function for callers that want auto-merge
+        // back (e.g. a future "auto-clean" mode).
         let final_points = if closed {
             let snapped = orthogonal::snap_closing_edge(orthog_points, tolerance);
-            let aligned = orthogonal::snap_near_collinear_walls(snapped, 20.0);
-            let deduped = orthogonal::remove_duplicates(&aligned, tolerance);
-            let rotated = orthogonal::rotate_to_corner_start(deduped, tolerance);
+            let rotated = orthogonal::rotate_to_corner_start(snapped, tolerance);
             orthogonal::remove_collinear(&rotated, tolerance)
         } else {
             orthog_points
@@ -125,6 +128,28 @@ impl FloorPlan {
             parametric,
             //rooms: Vec::new(),
         })
+    }
+
+    /// Detect pairs of axis-aligned edges that are close to being collinear
+    /// but currently aren't. See `ParametricPlan::suggest_collinear` for details.
+    pub fn suggest_collinear(
+        &self,
+        min_separation: f32,
+        max_separation: f32,
+    ) -> Vec<CollinearitySuggestion> {
+        self.parametric
+            .suggest_collinear(min_separation, max_separation)
+    }
+
+    /// Apply a collinearity decision returned from `suggest_collinear`.
+    /// Merges the two edges so they share a single coordinate expression.
+    pub fn apply_collinear_suggestion(&mut self, suggestion: &CollinearitySuggestion) {
+        self.parametric.apply_collinear_suggestion(suggestion);
+    }
+
+    /// Are these two edges currently collinear along the given axis?
+    pub fn edges_collinear(&self, edge_a: usize, edge_b: usize, axis: &Axis) -> bool {
+        self.parametric.edges_collinear(edge_a, edge_b, axis)
     }
     //
     //     /// Create a floor plan from a hand-drawn stroke without orthogonal constraint

@@ -28,8 +28,12 @@ pub mod storey_3d;
 use datatypes::ber::ber_struct::Ber;
 use domain::sketch::{DisplayMode, SketchMode};
 use eframe::egui;
+use manip_2d_plan::CollinearitySuggestion;
 
 /// Render the appropriate BER view into `rect`. Silent no-op if `ber` is None.
+/// `highlight` is the current collinearity-review suggestion (if any) — its
+/// two candidate edges get a bright overlay so the user sees what they're
+/// being asked about. Only applies to the 2D view.
 pub fn render_ber(
     painter: &egui::Painter,
     rect: egui::Rect,
@@ -37,6 +41,7 @@ pub fn render_ber(
     current_storey_idx: usize,
     sketch_mode: SketchMode,
     display_mode: DisplayMode,
+    highlight: Option<&CollinearitySuggestion>,
 ) {
     let Some(ber) = ber else {
         painter.text(
@@ -52,7 +57,7 @@ pub fn render_ber(
     match sketch_mode {
         SketchMode::Storey2D => {
             if let Some(storey) = ber.storeys.get(current_storey_idx) {
-                storey_2d::render(painter, rect, storey, display_mode);
+                storey_2d::render(painter, rect, storey, display_mode, highlight);
             } else {
                 empty_storey_hint(painter, rect);
             }

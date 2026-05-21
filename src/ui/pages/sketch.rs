@@ -7,6 +7,7 @@ use crate::ui::render;
 
 use datatypes::ber::ber_struct::Ber;
 use domain::sketch::{DisplayMode, EditTools, SketchMode};
+use manip_2d_plan::CollinearitySuggestion;
 
 /// The UI-friendly version of a stroke
 pub struct EguiStroke {
@@ -22,12 +23,21 @@ pub enum SketchEvent {
     ChangeMode(SketchMode),
     ChangeDisplay(DisplayMode),
     ChangeEditTool(EditTools),
-    StrokeClosed { stroke_idx: usize },
+    StrokeClosed {
+        stroke_idx: usize,
+    },
+    /// User confirmed the current collinearity suggestion: walls are the same line.
+    AcceptCollinearity,
+    /// User rejected the current collinearity suggestion: walls are distinct.
+    RejectCollinearity,
+    /// User dismissed all remaining collinearity suggestions.
+    SkipAllCollinearity,
 }
 
 #[derive(Default)]
 pub struct SketchPage;
 impl SketchPage {
+    #[allow(clippy::too_many_arguments)]
     pub fn render<F>(
         ui: &mut egui::Ui,
         current: Option<EguiStroke>,
@@ -36,11 +46,14 @@ impl SketchPage {
         edit_tool: EditTools,
         ber: Option<&Ber>,
         current_storey_idx: usize,
+        review: Option<&CollinearitySuggestion>,
+        review_remaining: usize,
         mut on_event: F,
     ) where
         F: FnMut(UiEvent),
     {
-        // Allocate vertical layout manually
+        let reviewing = review.is_some();
+
         egui::CentralPanel::default().show_inside(ui, |ui| {
             ui.vertical(|ui| {
                 // --- Top toolbar: SketchMode ---
@@ -55,7 +68,7 @@ impl SketchPage {
 
                 ui.separator();
 
-                let bottom_toolbar_height = 30.0; // adjust if your toolbar is taller
+                let bottom_toolbar_height = 30.0;
                 let separator_height = ui.spacing().item_spacing.y;
                 let canvas_height =
                     ui.available_height() - bottom_toolbar_height - separator_height;
@@ -66,17 +79,21 @@ impl SketchPage {
                 );
 
                 let painter = ui.painter_at(rect);
-
-                // Canvas background
                 painter.rect_filled(rect, 0.0, egui::Color32::from_gray(30));
 
-                // BER view layer — what's persisted in the current BER record.
-                // Renders behind the in-flight stroke overlay.
-                render::render_ber(&painter, rect, ber, current_storey_idx, mode, display);
+                // BER view layer with optional collinearity highlight overlay.
+                render::render_ber(
+                    &painter,
+                    rect,
+                    ber,
+                    current_storey_idx,
+                    mode,
+                    display,
+                    review,
+                );
 
-                // Stroke input only makes sense in the 2D top-down view. In the 3D
-                // modes, ignore canvas drags — the user is just inspecting.
-                if matches!(mode, SketchMode::Storey2D) {
+                // Stroke input: only in 2D mode, and only when we're not in review.
+                if matches!(mode, SketchMode::Storey2D) && !reviewing {
                     if response.drag_started() {
                         if let Some(pos) = response.interact_pointer_pos() {
                             let local_pos = pos - rect.left_top().to_vec2();
@@ -103,11 +120,32 @@ impl SketchPage {
 
                 ui.separator();
 
-                // --- Bottom toolbar: EditTools ---
-                if let Some(new_tool) = Self::edit_toolbar(ui, edit_tool) {
+                // Bottom toolbar swaps between edit-tools and the collinearity review.
+                if reviewing {
+                    Self::review_toolbar(ui, review_remaining, &mut on_event);
+                } else if let Some(new_tool) = Self::edit_toolbar(ui, edit_tool) {
                     on_event(UiEvent::Sketch(SketchEvent::ChangeEditTool(new_tool)));
                 }
             });
+        });
+    }
+
+    fn review_toolbar<F: FnMut(UiEvent)>(ui: &mut egui::Ui, remaining: usize, on_event: &mut F) {
+        ui.horizontal(|ui| {
+            ui.label(
+                egui::RichText::new(format!("Same line? {} remaining", remaining))
+                    .strong()
+                    .color(egui::Color32::from_rgb(255, 200, 60)),
+            );
+            if ui.button("Yes").clicked() {
+                on_event(UiEvent::Sketch(SketchEvent::AcceptCollinearity));
+            }
+            if ui.button("No").clicked() {
+                on_event(UiEvent::Sketch(SketchEvent::RejectCollinearity));
+            }
+            if ui.button("Skip all").clicked() {
+                on_event(UiEvent::Sketch(SketchEvent::SkipAllCollinearity));
+            }
         });
     }
 

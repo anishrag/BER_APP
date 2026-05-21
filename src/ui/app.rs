@@ -128,7 +128,7 @@ impl eframe::App for BerApp {
                 });
             }
             Page::Sketch => {
-                let (stroke, mode, edit_mode, display_mode, ber) = {
+                let (stroke, mode, edit_mode, display_mode, ber, review, review_remaining) = {
                     let controller_ref = self.app_controller.borrow();
                     (
                         controller_ref.sketch_stroke(),
@@ -136,6 +136,8 @@ impl eframe::App for BerApp {
                         controller_ref.edit_mode(),
                         controller_ref.display_mode(),
                         controller_ref.current_ber_clone(),
+                        controller_ref.current_review_suggestion_clone(),
+                        controller_ref.review_remaining(),
                     )
                 };
 
@@ -152,6 +154,8 @@ impl eframe::App for BerApp {
                     edit_mode,
                     ber.as_ref(),
                     current_storey_idx,
+                    review.as_ref(),
+                    review_remaining,
                     |event| match event {
                         UiEvent::Sketch(sketch_event) => match sketch_event {
                             SketchEvent::AddPoint(p) => controller
@@ -178,6 +182,17 @@ impl eframe::App for BerApp {
                             }
                             SketchEvent::ChangeEditTool(m) => {
                                 controller.borrow_mut().set_edit_mode(m)
+                            }
+                            SketchEvent::AcceptCollinearity => {
+                                if let Err(e) = controller.borrow_mut().accept_current_review() {
+                                    eprintln!("accept_current_review: {}", e);
+                                }
+                            }
+                            SketchEvent::RejectCollinearity => {
+                                controller.borrow_mut().reject_current_review();
+                            }
+                            SketchEvent::SkipAllCollinearity => {
+                                controller.borrow_mut().skip_all_review();
                             }
                             _ => {}
                         },
