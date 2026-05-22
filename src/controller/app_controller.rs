@@ -95,6 +95,18 @@ pub struct WallPositions {
     pub wall_b: (f64, f64),
 }
 
+/// UI-friendly view of the post-drag measurement prompt: the wall the user
+/// just moved + the wall they're measuring distance *from* + the current
+/// distance value + which option is selected out of how many.
+#[derive(Debug, Clone, Copy)]
+pub struct EditDragPromptUiData {
+    pub moved_wall: WallPositions,
+    pub reference_wall: WallPositions,
+    pub current_distance: f32,
+    pub option_idx: usize,
+    pub option_count: usize,
+}
+
 /// UI-friendly snapshot of the current dimension prompt. `walls[0]` is the
 /// wall the prompt was generated for ("primary"); subsequent entries are
 /// other walls whose length expression is identical — the user can measure
@@ -155,6 +167,11 @@ pub struct AppController {
     /// click + whether a drag is currently in progress. Always reset when
     /// `edit_tool` switches away from `Edit`.
     edit_state: EditState,
+    /// Active post-drag measurement prompt. Set on mouse-up after a drag if
+    /// the plan is already dimensioned; cleared when the user applies or
+    /// cancels. The user types a distance + cycles through candidate
+    /// reference walls until they find one they can actually measure.
+    edit_drag_prompt: Option<EditDragPrompt>,
     /// View transform layered on top of the canvas auto-fit (pan + zoom).
     view: ViewTransform,
 }
@@ -166,6 +183,58 @@ pub struct EditState {
     pub selected_wall: Option<VertexId>,
     /// True while the user is holding the mouse button after clicking a wall.
     pub dragging: bool,
+    /// The parameter/constant value before the user started this drag —
+    /// snapshotted on mouse-down so Cancel on the post-drag prompt can
+    /// revert without re-loading the entire floor plan.
+    pub pre_drag_value: Option<f32>,
+    /// Kind of coord that the drag affects (parameter or anchor constant),
+    /// stashed so `edit_mouse_up` can populate the post-drag prompt.
+    pub pre_drag_kind: Option<MovedCoordKind>,
+}
+
+/// What kind of coordinate the just-moved wall is anchored to. The
+/// post-drag prompt applies the user's entered distance by mutating
+/// either a parameter (set_parameter) or a constant (shift_constant).
+#[derive(Debug, Clone, Copy)]
+pub enum MovedCoordKind {
+    Parameter(ParameterId),
+    /// The constant value as of mouse-down (`shift_constant` matches on
+    /// this value so it knows which vertices to update).
+    Constant(f32),
+}
+
+/// One candidate measurement for the post-drag prompt: "distance from this
+/// other wall to the moved one." The user can cycle through these to find
+/// one they can practically measure with a tape.
+#[derive(Debug, Clone)]
+pub struct MeasurementOption {
+    /// Reference wall's start-vertex id.
+    pub reference_wall_vid: VertexId,
+    /// Reference's perpendicular coord (the world-coord value the moved
+    /// wall is measured *from*).
+    pub reference_value: f32,
+    /// Sign of `(moved_value - reference_value)` at the time the prompt
+    /// was constructed. Preserved when the user enters a distance so the
+    /// moved wall stays on the same side of the reference as it was after
+    /// the drag.
+    pub sign: f32,
+    /// Current `|moved_value - reference_value|` (post-drag). Shown to the
+    /// user as the "current" measurement before they edit it.
+    pub current_distance: f32,
+}
+
+#[derive(Debug, Clone)]
+pub struct EditDragPrompt {
+    /// VertexId of the moved wall.
+    pub moved_wall_vid: VertexId,
+    /// Perpendicular axis the wall moves along.
+    pub axis: ParameterAxis,
+    /// Whether the moved coord is a Parameter or a Constant.
+    pub kind: MovedCoordKind,
+    /// Candidate measurements; the user cycles through them.
+    pub options: Vec<MeasurementOption>,
+    /// Index of the option currently being asked about.
+    pub current_idx: usize,
 }
 
 impl AppController {
@@ -180,6 +249,7 @@ impl AppController {
             pending_redraw: None,
             dimensioning: DimensionState::default(),
             edit_state: EditState::default(),
+            edit_drag_prompt: None,
             view: ViewTransform::default(),
         }
     }
@@ -209,7 +279,8 @@ impl AppController {
 
     /// Edit-mode primary-button press. Hit-test the world-coord position
     /// against all walls; if any wall is within `tol`, select it and start
-    /// a drag. Returns true if a wall was selected.
+    /// a drag. Snapshots the pre-drag value of the wall's controlling
+    /// coord so the post-drag prompt can revert on Cancel.
     pub fn edit_mouse_down(&mut self, world_x: f64, world_y: f64, tol: f64) -> bool {
         if !matches!(self.sketch_engine.edit_tool, EditTools::Edit) {
             return false;
@@ -222,6 +293,18 @@ impl AppController {
         let Some(vid) = self.floor_plan.vertex_id_at(ring, edge_start) else {
             return false;
         };
+        // Snapshot what kind of coord this wall is anchored to and its
+        // current value, so a Cancel on the post-drag prompt can revert.
+        if let Some((p, _axis)) = self.floor_plan.wall_movable_param(ring, edge_start) {
+            self.edit_state.pre_drag_value = self.floor_plan.parameter_value(p);
+            self.edit_state.pre_drag_kind = Some(MovedCoordKind::Parameter(p));
+        } else if let Some((c, _axis)) = self.floor_plan.wall_anchor_constant(ring, edge_start) {
+            self.edit_state.pre_drag_value = Some(c);
+            self.edit_state.pre_drag_kind = Some(MovedCoordKind::Constant(c));
+        } else {
+            self.edit_state.pre_drag_value = None;
+            self.edit_state.pre_drag_kind = None;
+        }
         self.edit_state.selected_wall = Some(vid);
         self.edit_state.dragging = true;
         true
@@ -263,18 +346,218 @@ impl AppController {
         }
     }
 
-    /// Edit-mode drag release. Persists the polygon and clears the drag
-    /// flag (but keeps the wall selected so the user can immediately
-    /// trigger a follow-up — e.g. a re-drag or a measurement prompt).
+    /// Edit-mode drag release. If the plan is already dimensioned (the
+    /// user has set at least one real-world dimension), populate a
+    /// post-drag measurement prompt instead of accepting the rough drop
+    /// position directly. Otherwise commit the drag as-is.
     pub fn edit_mouse_up(&mut self) -> Result<(), String> {
         if !self.edit_state.dragging {
             return Ok(());
         }
         self.edit_state.dragging = false;
-        self.commit_to_ber()?;
-        // TODO: trigger measurement prompt if the plan is dimensioned —
-        // see task #35.
+        if self.dimensioning.scale_set {
+            // Build the measurement-cycle prompt. The user types a distance
+            // and we apply it via set_parameter or shift_constant on Apply.
+            self.populate_edit_drag_prompt();
+            // Don't commit yet — wait for Apply / Cancel.
+        } else {
+            self.commit_to_ber()?;
+        }
         Ok(())
+    }
+
+    /// Construct the post-drag prompt: list every other parallel wall as
+    /// a candidate "measure distance from this reference" option, sorted
+    /// by traversal order so the same wall consistently shows up first.
+    fn populate_edit_drag_prompt(&mut self) {
+        let Some(vid) = self.edit_state.selected_wall else {
+            return;
+        };
+        let Some((ring, edge_start)) = self.floor_plan.find_vertex(vid) else {
+            return;
+        };
+        let Some(kind) = self.edit_state.pre_drag_kind else {
+            return;
+        };
+        let polygons = self.floor_plan.polygons();
+        let Some(ring_pts) = polygons.get(ring) else {
+            return;
+        };
+        let n = ring_pts.len();
+        if n < 2 {
+            return;
+        }
+        let a = ring_pts[edge_start];
+        let b = ring_pts[(edge_start + 1) % n];
+        // Axis-aligned wall: determine orientation. Tolerance against floats.
+        let dx = (b.x - a.x).abs();
+        let dy = (b.y - a.y).abs();
+        let is_vertical = dy > dx;
+        let axis = if is_vertical {
+            ParameterAxis::X
+        } else {
+            ParameterAxis::Y
+        };
+        let moved_value = if is_vertical { a.x } else { a.y };
+
+        let mut options: Vec<MeasurementOption> = Vec::new();
+        for (ri, r) in polygons.iter().enumerate() {
+            for i in 0..r.len() {
+                if ri == ring && i == edge_start {
+                    continue;
+                }
+                let p = r[i];
+                let q = r[(i + 1) % r.len()];
+                let pdx = (q.x - p.x).abs();
+                let pdy = (q.y - p.y).abs();
+                let other_is_vertical = pdy > pdx;
+                if other_is_vertical != is_vertical {
+                    continue;
+                }
+                let ref_value = if is_vertical { p.x } else { p.y };
+                let delta = moved_value - ref_value;
+                let distance = delta.abs();
+                if distance < 1e-3 {
+                    continue;
+                }
+                let Some(ref_vid) = self.floor_plan.vertex_id_at(ri, i) else {
+                    continue;
+                };
+                options.push(MeasurementOption {
+                    reference_wall_vid: ref_vid,
+                    reference_value: ref_value,
+                    sign: delta.signum(),
+                    current_distance: distance,
+                });
+            }
+        }
+        if options.is_empty() {
+            // Nothing parallel to the moved wall — can't form a measurement.
+            return;
+        }
+        self.edit_drag_prompt = Some(EditDragPrompt {
+            moved_wall_vid: vid,
+            axis,
+            kind,
+            options,
+            current_idx: 0,
+        });
+    }
+
+    /// Apply the user's entered distance from the current measurement
+    /// reference. Updates the moved wall's parameter (or shifts its
+    /// anchor constant) and clears the prompt.
+    pub fn apply_edit_drag(&mut self, distance: f32) -> Result<(), String> {
+        if !distance.is_finite() || distance < 0.0 {
+            return Err(format!(
+                "distance must be a non-negative number (got {})",
+                distance
+            ));
+        }
+        let prompt = self
+            .edit_drag_prompt
+            .clone()
+            .ok_or_else(|| "no active edit-drag prompt".to_string())?;
+        let Some(option) = prompt.options.get(prompt.current_idx).cloned() else {
+            return Err("invalid measurement index".into());
+        };
+        let new_value = option.reference_value + option.sign * distance;
+        match prompt.kind {
+            MovedCoordKind::Parameter(p) => {
+                self.floor_plan.set_parameter(p, new_value);
+            }
+            MovedCoordKind::Constant(old_value) => {
+                self.floor_plan
+                    .shift_constant(old_value, prompt.axis, new_value);
+            }
+        }
+        self.commit_to_ber()?;
+        self.edit_drag_prompt = None;
+        self.edit_state.pre_drag_value = None;
+        self.edit_state.pre_drag_kind = None;
+        Ok(())
+    }
+
+    /// Advance the prompt to the next candidate measurement. Wraps around
+    /// when the user reaches the end of the list. No-op if the prompt
+    /// isn't active.
+    pub fn cycle_edit_drag_measurement(&mut self) {
+        if let Some(p) = self.edit_drag_prompt.as_mut() {
+            if p.options.is_empty() {
+                return;
+            }
+            p.current_idx = (p.current_idx + 1) % p.options.len();
+        }
+    }
+
+    /// Cancel the post-drag prompt: revert the moved coord to its pre-drag
+    /// value and clear the prompt.
+    pub fn cancel_edit_drag(&mut self) -> Result<(), String> {
+        let (Some(pre_value), Some(kind)) = (
+            self.edit_state.pre_drag_value,
+            self.edit_state.pre_drag_kind,
+        ) else {
+            self.edit_drag_prompt = None;
+            return Ok(());
+        };
+        let prompt_axis = self.edit_drag_prompt.as_ref().map(|p| p.axis);
+        match kind {
+            MovedCoordKind::Parameter(p) => {
+                self.floor_plan.set_parameter(p, pre_value);
+            }
+            MovedCoordKind::Constant(_old_value) => {
+                if let Some(axis) = prompt_axis {
+                    // The current constant value may have been mutated by
+                    // the drag; look it up from the moved wall to find the
+                    // *current* constant, then shift back to pre_value.
+                    if let Some(vid) = self.edit_state.selected_wall {
+                        if let Some((ring, edge_start)) = self.floor_plan.find_vertex(vid) {
+                            if let Some((current_const, _)) =
+                                self.floor_plan.wall_anchor_constant(ring, edge_start)
+                            {
+                                self.floor_plan
+                                    .shift_constant(current_const, axis, pre_value);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        self.commit_to_ber()?;
+        self.edit_drag_prompt = None;
+        self.edit_state.pre_drag_value = None;
+        self.edit_state.pre_drag_kind = None;
+        Ok(())
+    }
+
+    /// Snapshot of the active post-drag prompt for the UI to render. Includes
+    /// the moved wall + the current reference wall + the distance value to
+    /// pre-populate the textbox with.
+    pub fn edit_drag_prompt_for_ui(&self) -> Option<EditDragPromptUiData> {
+        let prompt = self.edit_drag_prompt.as_ref()?;
+        let option = prompt.options.get(prompt.current_idx)?;
+        let (moved_ring, moved_edge) = self.floor_plan.find_vertex(prompt.moved_wall_vid)?;
+        let (ref_ring, ref_edge) = self.floor_plan.find_vertex(option.reference_wall_vid)?;
+        let polygons = self.floor_plan.polygons();
+        let moved_ring_pts = polygons.get(moved_ring)?;
+        let ref_ring_pts = polygons.get(ref_ring)?;
+        let moved_a = moved_ring_pts.get(moved_edge)?;
+        let moved_b = moved_ring_pts.get((moved_edge + 1) % moved_ring_pts.len())?;
+        let ref_a = ref_ring_pts.get(ref_edge)?;
+        let ref_b = ref_ring_pts.get((ref_edge + 1) % ref_ring_pts.len())?;
+        Some(EditDragPromptUiData {
+            moved_wall: WallPositions {
+                wall_a: (moved_a.x as f64, moved_a.y as f64),
+                wall_b: (moved_b.x as f64, moved_b.y as f64),
+            },
+            reference_wall: WallPositions {
+                wall_a: (ref_a.x as f64, ref_a.y as f64),
+                wall_b: (ref_b.x as f64, ref_b.y as f64),
+            },
+            current_distance: option.current_distance,
+            option_idx: prompt.current_idx,
+            option_count: prompt.options.len(),
+        })
     }
 
     /// Snapshot of the current dimension prompt for the UI to render, or

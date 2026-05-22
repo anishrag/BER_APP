@@ -2,7 +2,7 @@ use egui::epaint::{PathShape, PathStroke};
 use egui::Pos2;
 use strum::IntoEnumIterator;
 
-use crate::controller::app_controller::DimensionPromptUiData;
+use crate::controller::app_controller::{DimensionPromptUiData, EditDragPromptUiData};
 use crate::ui::pages::events::UiEvent;
 use crate::ui::render;
 use crate::ui::render::ViewParams;
@@ -149,6 +149,15 @@ pub enum SketchEvent {
     },
     /// Primary mouse release in Edit mode: commit + clear drag flag.
     EditMouseUp,
+    /// User entered a distance value in the post-drag prompt. The
+    /// controller applies it via the currently-selected measurement
+    /// option (parameter set / constant shift).
+    ApplyEditDrag(f32),
+    /// User clicked "Try another measurement" — advance to the next
+    /// candidate reference wall.
+    CycleEditDragMeasurement,
+    /// User cancelled the post-drag prompt — revert to pre-drag value.
+    CancelEditDrag,
     /// Scroll-wheel zoom about the given anchor (canvas pixel coords).
     ZoomView {
         factor: f32,
@@ -192,6 +201,9 @@ impl SketchPage {
         dim_error: Option<&str>,
         dimensioned_walls: &[(usize, usize)],
         edit_selected_wall: Option<((f64, f64), (f64, f64))>,
+        edit_drag_prompt: Option<EditDragPromptUiData>,
+        edit_drag_input: &mut String,
+        edit_drag_error: Option<&str>,
         view: ViewParams,
         mut on_event: F,
     ) where
@@ -257,6 +269,61 @@ impl SketchPage {
                             wb,
                         );
                     }
+                }
+
+                // Post-drag measurement prompt overlay:
+                //
+                //   * Reference wall highlighted in red (same as the moved
+                //     wall) so the user sees both walls involved.
+                //   * A cyan arrow drawn PERPENDICULAR to both walls,
+                //     spanning the actual distance being measured. For a
+                //     vertical wall pair, the arrow is horizontal; for a
+                //     horizontal wall pair, vertical.
+                if let Some(ep) = &edit_drag_prompt {
+                    render::render_equivalent_wall(
+                        &painter,
+                        rect,
+                        ber,
+                        current_storey_idx,
+                        mode,
+                        view,
+                        ep.reference_wall.wall_a,
+                        ep.reference_wall.wall_b,
+                    );
+                    // Two parallel axis-aligned walls. Build a virtual
+                    // arrow perpendicular to both at the midpoint of the
+                    // moved wall's parallel range. render_dimension_prompt
+                    // handles drawing the arrow + arrowheads; the
+                    // "interior offset" auto-detects None for non-vertex
+                    // points so the arrow lands directly on the line.
+                    let m_dx = (ep.moved_wall.wall_b.0 - ep.moved_wall.wall_a.0).abs();
+                    let m_dy = (ep.moved_wall.wall_b.1 - ep.moved_wall.wall_a.1).abs();
+                    let is_vertical = m_dy > m_dx;
+                    let (arrow_a, arrow_b) = if is_vertical {
+                        // Horizontal arrow at moved wall's midpoint y.
+                        let mid_y = (ep.moved_wall.wall_a.1 + ep.moved_wall.wall_b.1) * 0.5;
+                        (
+                            (ep.reference_wall.wall_a.0, mid_y),
+                            (ep.moved_wall.wall_a.0, mid_y),
+                        )
+                    } else {
+                        // Vertical arrow at moved wall's midpoint x.
+                        let mid_x = (ep.moved_wall.wall_a.0 + ep.moved_wall.wall_b.0) * 0.5;
+                        (
+                            (mid_x, ep.reference_wall.wall_a.1),
+                            (mid_x, ep.moved_wall.wall_a.1),
+                        )
+                    };
+                    render::render_dimension_prompt(
+                        &painter,
+                        rect,
+                        ber,
+                        current_storey_idx,
+                        mode,
+                        view,
+                        arrow_a,
+                        arrow_b,
+                    );
                 }
 
                 // Dimension-prompt overlay. Every wall the user can
@@ -355,10 +422,13 @@ impl SketchPage {
                 }
 
                 // Edit-mode primary input: click to select a wall, drag to
-                // translate it. Position is converted to world coords via
-                // the same fit_transform render uses so the hit-test
-                // matches what the user visually sees.
-                if primary_available && matches!(edit_tool, EditTools::Edit) {
+                // translate it. Suspended while a post-drag measurement
+                // prompt is up — that prompt has to be Apply / Cycle /
+                // Cancel first.
+                if primary_available
+                    && matches!(edit_tool, EditTools::Edit)
+                    && edit_drag_prompt.is_none()
+                {
                     if let (Some(b), Some((min_xy, max_xy))) = (
                         ber,
                         ber.and_then(|b| {
@@ -412,6 +482,14 @@ impl SketchPage {
                             dim_scale_set,
                             dim_input,
                             dim_error,
+                            &mut on_event,
+                        );
+                    } else if let Some(p) = edit_drag_prompt {
+                        Self::edit_drag_prompt_toolbar(
+                            ui,
+                            p,
+                            edit_drag_input,
+                            edit_drag_error,
                             &mut on_event,
                         );
                     } else if reviewing {
@@ -486,6 +564,63 @@ impl SketchPage {
         // Surface the last error inline so the user can correct without
         // losing what they typed.
         if let Some(err) = dim_error {
+            ui.label(
+                egui::RichText::new(format!("⚠ {}", err))
+                    .color(egui::Color32::from_rgb(255, 120, 90)),
+            );
+        }
+    }
+
+    fn edit_drag_prompt_toolbar<F: FnMut(UiEvent)>(
+        ui: &mut egui::Ui,
+        prompt: EditDragPromptUiData,
+        input: &mut String,
+        error: Option<&str>,
+        on_event: &mut F,
+    ) {
+        ui.label(
+            egui::RichText::new("Distance from highlighted reference wall (m):")
+                .strong()
+                .color(egui::Color32::from_rgb(60, 220, 255)),
+        );
+        ui.label(format!(
+            "(currently {:.2}, option {}/{})",
+            prompt.current_distance,
+            prompt.option_idx + 1,
+            prompt.option_count,
+        ));
+        let resp = ui.add(
+            egui::TextEdit::singleline(input)
+                .desired_width(80.0)
+                .hint_text("e.g. 3.5"),
+        );
+        let submit_pressed = resp.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
+        let apply_clicked = ui
+            .button("Apply")
+            .on_hover_text("Apply this distance")
+            .clicked();
+        if apply_clicked || submit_pressed {
+            if let Some(value) = parse_dimension_expression(input) {
+                on_event(UiEvent::Sketch(SketchEvent::ApplyEditDrag(value)));
+                input.clear();
+            }
+        }
+        if ui
+            .button("Different measurement")
+            .on_hover_text("Try another reference wall")
+            .clicked()
+        {
+            on_event(UiEvent::Sketch(SketchEvent::CycleEditDragMeasurement));
+        }
+        if ui
+            .button("Cancel")
+            .on_hover_text("Revert the wall to its position before this drag")
+            .clicked()
+        {
+            on_event(UiEvent::Sketch(SketchEvent::CancelEditDrag));
+            input.clear();
+        }
+        if let Some(err) = error {
             ui.label(
                 egui::RichText::new(format!("⚠ {}", err))
                     .color(egui::Color32::from_rgb(255, 120, 90)),

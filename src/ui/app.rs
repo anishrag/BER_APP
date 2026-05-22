@@ -30,6 +30,10 @@ pub struct SketchState {
     /// Last error from `apply_dimension`. Shown next to the textbox so the
     /// user can correct without losing what they typed.
     pub dimension_error: Option<String>,
+    /// Backing string for the Edit-drag measurement prompt's input.
+    pub edit_drag_input: String,
+    /// Last error from `apply_edit_drag` (or the cancel/cycle paths).
+    pub edit_drag_error: Option<String>,
 }
 
 pub struct SplashState {
@@ -151,6 +155,8 @@ impl eframe::App for BerApp {
                     dim_error,
                     dimensioned_walls,
                     edit_selected_wall,
+                    edit_drag_prompt,
+                    edit_drag_error,
                     view,
                 ) = {
                     let controller_ref = self.app_controller.borrow();
@@ -170,6 +176,8 @@ impl eframe::App for BerApp {
                         self.sketch_state.dimension_error.clone(),
                         controller_ref.walls_with_known_length(),
                         controller_ref.edit_selected_wall_positions(),
+                        controller_ref.edit_drag_prompt_for_ui(),
+                        self.sketch_state.edit_drag_error.clone(),
                         crate::ui::render::ViewParams {
                             zoom: v.zoom,
                             offset_x: v.offset_x,
@@ -201,6 +209,9 @@ impl eframe::App for BerApp {
                     dim_error.as_deref(),
                     &dimensioned_walls,
                     edit_selected_wall,
+                    edit_drag_prompt,
+                    &mut self.sketch_state.edit_drag_input,
+                    edit_drag_error.as_deref(),
                     view,
                     |event| match event {
                         UiEvent::Sketch(sketch_event) => match sketch_event {
@@ -301,6 +312,27 @@ impl eframe::App for BerApp {
                                 if let Err(e) = controller.borrow_mut().edit_mouse_up() {
                                     eprintln!("edit_mouse_up: {}", e);
                                 }
+                            }
+                            SketchEvent::ApplyEditDrag(value) => {
+                                match controller.borrow_mut().apply_edit_drag(value) {
+                                    Ok(()) => {
+                                        self.sketch_state.edit_drag_error = None;
+                                    }
+                                    Err(e) => {
+                                        eprintln!("apply_edit_drag: {}", e);
+                                        self.sketch_state.edit_drag_error = Some(e);
+                                    }
+                                }
+                            }
+                            SketchEvent::CycleEditDragMeasurement => {
+                                controller.borrow_mut().cycle_edit_drag_measurement();
+                                self.sketch_state.edit_drag_error = None;
+                            }
+                            SketchEvent::CancelEditDrag => {
+                                if let Err(e) = controller.borrow_mut().cancel_edit_drag() {
+                                    eprintln!("cancel_edit_drag: {}", e);
+                                }
+                                self.sketch_state.edit_drag_error = None;
                             }
                             _ => {}
                         },
