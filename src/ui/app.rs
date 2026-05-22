@@ -165,6 +165,8 @@ impl eframe::App for BerApp {
                     edit_drag_error,
                     vertex_drop_prompt,
                     vertex_drop_error,
+                    can_undo,
+                    can_redo,
                     view,
                 ) = {
                     let controller_ref = self.app_controller.borrow();
@@ -189,6 +191,8 @@ impl eframe::App for BerApp {
                         self.sketch_state.edit_drag_error.clone(),
                         controller_ref.vertex_drop_prompt_for_ui(),
                         self.sketch_state.vertex_drop_error.clone(),
+                        controller_ref.can_undo(),
+                        controller_ref.can_redo(),
                         crate::ui::render::ViewParams {
                             zoom: v.zoom,
                             offset_x: v.offset_x,
@@ -227,6 +231,8 @@ impl eframe::App for BerApp {
                     vertex_drop_prompt,
                     &mut self.sketch_state.vertex_drop_inputs,
                     vertex_drop_error.as_deref(),
+                    can_undo,
+                    can_redo,
                     view,
                     |event| match event {
                         UiEvent::Sketch(sketch_event) => match sketch_event {
@@ -367,6 +373,16 @@ impl eframe::App for BerApp {
                                         eprintln!("apply_vertex_measurement: {}", e);
                                         self.sketch_state.vertex_drop_error = Some(e);
                                     }
+                                }
+                            }
+                            SketchEvent::Undo => {
+                                if let Err(e) = controller.borrow_mut().undo() {
+                                    eprintln!("undo: {}", e);
+                                }
+                            }
+                            SketchEvent::Redo => {
+                                if let Err(e) = controller.borrow_mut().redo() {
+                                    eprintln!("redo: {}", e);
                                 }
                             }
                             SketchEvent::CancelVertexDrop => {

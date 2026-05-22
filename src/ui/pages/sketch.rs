@@ -176,6 +176,10 @@ pub enum SketchEvent {
     /// User cancelled the vertex-drop prompt — revert the inserted vertex
     /// to its pre-drag (initial click) position.
     CancelVertexDrop,
+    /// Undo the most recent data mutation.
+    Undo,
+    /// Re-apply the most recently undone mutation.
+    Redo,
     /// Scroll-wheel zoom about the given anchor (canvas pixel coords).
     ZoomView {
         factor: f32,
@@ -226,6 +230,8 @@ impl SketchPage {
         vertex_drop_prompt: Option<VertexDropPromptUiData>,
         vertex_drop_inputs: &mut [String; 4],
         vertex_drop_error: Option<&str>,
+        can_undo: bool,
+        can_redo: bool,
         view: ViewParams,
         mut on_event: F,
     ) where
@@ -606,9 +612,52 @@ impl SketchPage {
                     }
                     ui.separator();
                     Self::fit_button(ui, &mut on_event);
+                    ui.separator();
+                    Self::undo_redo_buttons(ui, can_undo, can_redo, &mut on_event);
                 });
+
+                // Keyboard shortcuts: Ctrl+Z undo, Ctrl+Shift+Z or Ctrl+Y redo.
+                // `consume_key` ensures the key event is claimed so it doesn't
+                // also fire as input into focused text boxes.
+                let (undo_pressed, redo_pressed) = ui.input_mut(|i| {
+                    let mods = i.modifiers;
+                    let ctrl = mods.ctrl || mods.mac_cmd;
+                    let z = ctrl && i.consume_key(mods, egui::Key::Z);
+                    let y = ctrl && i.consume_key(mods, egui::Key::Y);
+                    let undo = z && !mods.shift;
+                    let redo = (z && mods.shift) || y;
+                    (undo, redo)
+                });
+                if undo_pressed {
+                    on_event(UiEvent::Sketch(SketchEvent::Undo));
+                }
+                if redo_pressed {
+                    on_event(UiEvent::Sketch(SketchEvent::Redo));
+                }
             });
         });
+    }
+
+    fn undo_redo_buttons<F: FnMut(UiEvent)>(
+        ui: &mut egui::Ui,
+        can_undo: bool,
+        can_redo: bool,
+        on_event: &mut F,
+    ) {
+        if ui
+            .add_enabled(can_undo, egui::Button::new("↶ Undo"))
+            .on_hover_text("Undo (Ctrl+Z)")
+            .clicked()
+        {
+            on_event(UiEvent::Sketch(SketchEvent::Undo));
+        }
+        if ui
+            .add_enabled(can_redo, egui::Button::new("↷ Redo"))
+            .on_hover_text("Redo (Ctrl+Shift+Z or Ctrl+Y)")
+            .clicked()
+        {
+            on_event(UiEvent::Sketch(SketchEvent::Redo));
+        }
     }
 
     fn fit_button<F: FnMut(UiEvent)>(ui: &mut egui::Ui, on_event: &mut F) {

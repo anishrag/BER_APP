@@ -188,7 +188,7 @@ pub struct DimensionPromptUiData {
 /// dimension is entered the polygon is a pixel-scale notepad sketch; once the
 /// first dimension lands, the whole plan converts to real units (meters) and
 /// each subsequent dimension pins another parameter.
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Clone)]
 pub struct DimensionState {
     /// Parameter IDs the user has explicitly entered a length for.
     pub known_params: HashSet<ParameterId>,
@@ -240,12 +240,29 @@ pub struct AppController {
     /// insert+drag when the plan is dimensioned; up to 3 distances to
     /// neighbours that the user fills in to pin the vertex.
     vertex_drop_prompt: Option<VertexDropPrompt>,
+    /// Undo history. Each entry is a snapshot of the data state taken just
+    /// before a user-visible mutation. Undo restores the most recent;
+    /// cleared on new mutations.
+    history: Vec<HistorySnapshot>,
+    /// Redo stack. Populated by undo; cleared by any new mutation.
+    redo: Vec<HistorySnapshot>,
     /// View transform layered on top of the canvas auto-fit (pan + zoom).
     view: ViewTransform,
 }
 
+/// Snapshot of the data state for undo/redo. Includes the floor plan +
+/// dimensioning + edit-state — view (zoom/pan), prompts, and in-flight
+/// drag state are deliberately excluded so undo doesn't fight the user's
+/// current view or interrupt an in-progress prompt mid-flow.
+#[derive(Debug, Clone)]
+pub struct HistorySnapshot {
+    floor_plan: FloorPlan,
+    dimensioning: DimensionState,
+    edit_state: EditState,
+}
+
 /// Edit-mode click/drag state.
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Clone)]
 pub struct EditState {
     /// VertexId of the start vertex of the currently selected wall.
     pub selected_wall: Option<VertexId>,
@@ -266,6 +283,10 @@ pub struct EditState {
     /// Pre-drag world-coord position of a vertex drag. Used for revert
     /// if the user cancels the post-drop prompt.
     pub pre_drag_vertex_pos: Option<(f32, f32)>,
+    /// True once we've taken an undo snapshot for the current drag. Reset
+    /// on each mouse-down. Ensures only ONE snapshot per drag (not one
+    /// per mouse-move frame) so undo treats the whole drag as one action.
+    pub drag_snapshot_taken: bool,
 }
 
 /// What kind of coordinate the just-moved wall is anchored to. The
@@ -327,8 +348,84 @@ impl AppController {
             edit_state: EditState::default(),
             edit_drag_prompt: None,
             vertex_drop_prompt: None,
+            history: Vec::new(),
+            redo: Vec::new(),
             view: ViewTransform::default(),
         }
+    }
+
+    /// Snapshot the current data state just before a mutation. Push to
+    /// the history stack so undo can return here. Clears the redo stack
+    /// because any new mutation invalidates redo-able future states.
+    fn record_history(&mut self) {
+        let snap = self.current_history_snapshot();
+        self.push_history_snapshot(snap);
+    }
+
+    fn current_history_snapshot(&self) -> HistorySnapshot {
+        HistorySnapshot {
+            floor_plan: self.floor_plan.clone(),
+            dimensioning: self.dimensioning.clone(),
+            edit_state: self.edit_state.clone(),
+        }
+    }
+
+    fn push_history_snapshot(&mut self, snap: HistorySnapshot) {
+        self.history.push(snap);
+        const MAX_HISTORY: usize = 100;
+        if self.history.len() > MAX_HISTORY {
+            self.history.remove(0);
+        }
+        self.redo.clear();
+    }
+
+    /// Restore the most recent snapshot from history. Pushes the current
+    /// state to redo so it can be re-applied. No-op when history is empty.
+    pub fn undo(&mut self) -> Result<(), String> {
+        let Some(snap) = self.history.pop() else {
+            return Ok(());
+        };
+        // Save current state for redo.
+        self.redo.push(HistorySnapshot {
+            floor_plan: self.floor_plan.clone(),
+            dimensioning: self.dimensioning.clone(),
+            edit_state: self.edit_state.clone(),
+        });
+        self.floor_plan = snap.floor_plan;
+        self.dimensioning = snap.dimensioning;
+        self.edit_state = snap.edit_state;
+        // Any in-flight prompts no longer match the restored state — clear.
+        self.edit_drag_prompt = None;
+        self.vertex_drop_prompt = None;
+        // Push the restored polygon to BER so the canvas reflects it.
+        self.commit_to_ber()?;
+        Ok(())
+    }
+
+    /// Re-apply the last undone state. No-op if redo stack is empty.
+    pub fn redo(&mut self) -> Result<(), String> {
+        let Some(snap) = self.redo.pop() else {
+            return Ok(());
+        };
+        self.history.push(HistorySnapshot {
+            floor_plan: self.floor_plan.clone(),
+            dimensioning: self.dimensioning.clone(),
+            edit_state: self.edit_state.clone(),
+        });
+        self.floor_plan = snap.floor_plan;
+        self.dimensioning = snap.dimensioning;
+        self.edit_state = snap.edit_state;
+        self.edit_drag_prompt = None;
+        self.vertex_drop_prompt = None;
+        self.commit_to_ber()?;
+        Ok(())
+    }
+
+    pub fn can_undo(&self) -> bool {
+        !self.history.is_empty()
+    }
+    pub fn can_redo(&self) -> bool {
+        !self.redo.is_empty()
     }
 
     /// VertexId of the wall currently selected in Edit mode, if any. The UI
@@ -395,6 +492,7 @@ impl AppController {
         }
         self.edit_state.selected_wall = Some(vid);
         self.edit_state.dragging = true;
+        self.edit_state.drag_snapshot_taken = false;
         true
     }
 
@@ -409,6 +507,9 @@ impl AppController {
         let Some((ring, edge_start)) = self.floor_plan.hit_test_wall(world_x, world_y, tol) else {
             return false;
         };
+        // Snapshot before inserting the vertex — the whole insert + drag
+        // + prompt-apply sequence undoes as one action.
+        self.record_history();
         let new_vid = match self.floor_plan.insert_vertex_on_wall(
             ring,
             edge_start,
@@ -421,6 +522,10 @@ impl AppController {
         self.edit_state.selected_wall = None;
         self.edit_state.selected_vertex = Some(new_vid);
         self.edit_state.dragging = true;
+        // Drag snapshot already taken (covers the whole interaction
+        // starting with the insert); flag it so edit_mouse_drag doesn't
+        // take a second one.
+        self.edit_state.drag_snapshot_taken = true;
         self.edit_state.pre_drag_vertex_pos = Some((world_x as f32, world_y as f32));
         self.edit_state.pre_drag_value = None;
         self.edit_state.pre_drag_kind = None;
@@ -448,6 +553,13 @@ impl AppController {
     pub fn edit_mouse_drag(&mut self, world_x: f64, world_y: f64) {
         if !self.edit_state.dragging {
             return;
+        }
+        // Take a single undo snapshot at the very first mutation of the
+        // current drag. Subsequent frames don't re-snapshot — the whole
+        // drag undoes/redoes as one action.
+        if !self.edit_state.drag_snapshot_taken {
+            self.record_history();
+            self.edit_state.drag_snapshot_taken = true;
         }
         let mut did_mutate = false;
         // Vertex drag — free 2D.
@@ -737,8 +849,13 @@ impl AppController {
 
     /// Cancel the vertex-drop prompt. Reverts the vertex to its pre-drag
     /// position (the click point on the wall) and clears the prompt and
-    /// selection.
+    /// selection. Pops the drag's undo snapshot for the same reason as
+    /// `cancel_edit_drag`.
     pub fn cancel_vertex_drop(&mut self) -> Result<(), String> {
+        if self.edit_state.drag_snapshot_taken {
+            self.history.pop();
+            self.edit_state.drag_snapshot_taken = false;
+        }
         let Some(prompt) = self.vertex_drop_prompt.take() else {
             return Ok(());
         };
@@ -925,8 +1042,14 @@ impl AppController {
     }
 
     /// Cancel the post-drag prompt: revert the moved coord to its pre-drag
-    /// value and clear the prompt.
+    /// value and clear the prompt. Pops the drag's undo snapshot because
+    /// the action is effectively erased — no need for the user to undo
+    /// after they cancelled.
     pub fn cancel_edit_drag(&mut self) -> Result<(), String> {
+        if self.edit_state.drag_snapshot_taken {
+            self.history.pop();
+            self.edit_state.drag_snapshot_taken = false;
+        }
         let (Some(pre_value), Some(kind)) = (
             self.edit_state.pre_drag_value,
             self.edit_state.pre_drag_kind,
@@ -1106,6 +1229,10 @@ impl AppController {
                 value
             ));
         }
+        // Snapshot for undo. Only pushed at the very end on success — any
+        // early `return Err(...)` (including internal rollbacks) discards
+        // the snapshot.
+        let undo_snap = self.current_history_snapshot();
         let prompt = self
             .dimensioning
             .current_prompt
@@ -1274,6 +1401,7 @@ impl AppController {
             self.floor_plan.all_active_params().len(),
         );
         self.compute_next_dimension_prompt();
+        self.push_history_snapshot(undo_snap);
         Ok(())
     }
 
@@ -1588,6 +1716,7 @@ impl AppController {
     /// specific WALL is suppressed from future prompts; the param it would
     /// have set remains un-set — but other walls (if any) can still set it.
     pub fn skip_current_dimension(&mut self) {
+        self.record_history();
         if let Some(prompt) = self.dimensioning.current_prompt.take() {
             self.dimensioning
                 .skipped_walls
@@ -1879,6 +2008,7 @@ impl AppController {
         let Some(sug) = self.next_pending_suggestion() else {
             return Ok(());
         };
+        self.record_history();
         println!(
             "collinearity YES: ring {}/edge {} & ring {}/edge {} along {:?} (coords {:.2}, {:.2})",
             sug.ring_a, sug.edge_a, sug.ring_b, sug.edge_b, sug.axis, sug.coord_a, sug.coord_b
@@ -1899,6 +2029,7 @@ impl AppController {
         let Some(sug) = self.next_pending_suggestion() else {
             return;
         };
+        self.record_history();
         println!(
             "collinearity NO:  ring {}/edge {} & ring {}/edge {} along {:?} (coords {:.2}, {:.2})",
             sug.ring_a, sug.edge_a, sug.ring_b, sug.edge_b, sug.axis, sug.coord_a, sug.coord_b
@@ -2087,10 +2218,13 @@ impl AppController {
     /// populate the collinearity review. Resets dimensioning state — the new
     /// plan is a fresh pixel-scale sketch that hasn't been dimensioned yet.
     fn apply_drawperp_stroke(&mut self, points: &[Point2f32], closed: bool) -> Result<(), String> {
+        // Snapshot pre-stroke (may be empty / pre-dim) for undo.
+        let undo_snap = self.current_history_snapshot();
         self.floor_plan = FloorPlan::from_points_to_orthogonal(points, 10.0, closed)
             .map_err(|e| format!("Failed to draw outline: {:?}", e))?;
         println!("floor plan: {:?}", self.floor_plan);
         self.dimensioning = DimensionState::default();
+        self.push_history_snapshot(undo_snap);
         self.commit_to_ber()?;
         self.populate_collinearity_review();
         self.maybe_start_dimensioning();
@@ -2104,6 +2238,7 @@ impl AppController {
         points: &[Point2f32],
         closed: bool,
     ) -> Result<(), String> {
+        let undo_snap = self.current_history_snapshot();
         let had_outline = self.floor_plan.ring_count() > 0;
         if !had_outline {
             self.floor_plan = FloorPlan::from_points_to_orthogonal(points, 10.0, closed)
@@ -2130,6 +2265,7 @@ impl AppController {
         self.commit_to_ber()?;
         self.populate_collinearity_review();
         self.maybe_start_dimensioning();
+        self.push_history_snapshot(undo_snap);
         Ok(())
     }
 
