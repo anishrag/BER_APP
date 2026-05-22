@@ -34,6 +34,11 @@ pub struct SketchState {
     pub edit_drag_input: String,
     /// Last error from `apply_edit_drag` (or the cancel/cycle paths).
     pub edit_drag_error: Option<String>,
+    /// Backing strings for the vertex-drop prompt's up-to-4 text boxes.
+    /// Keyed by measurement index (matches `VertexMeasurementUiData.idx`).
+    pub vertex_drop_inputs: [String; 4],
+    /// Last error from `apply_vertex_measurement`.
+    pub vertex_drop_error: Option<String>,
 }
 
 pub struct SplashState {
@@ -155,8 +160,11 @@ impl eframe::App for BerApp {
                     dim_error,
                     dimensioned_walls,
                     edit_selected_wall,
+                    edit_selected_vertex,
                     edit_drag_prompt,
                     edit_drag_error,
+                    vertex_drop_prompt,
+                    vertex_drop_error,
                     view,
                 ) = {
                     let controller_ref = self.app_controller.borrow();
@@ -176,8 +184,11 @@ impl eframe::App for BerApp {
                         self.sketch_state.dimension_error.clone(),
                         controller_ref.walls_with_known_length(),
                         controller_ref.edit_selected_wall_positions(),
+                        controller_ref.edit_selected_vertex_position(),
                         controller_ref.edit_drag_prompt_for_ui(),
                         self.sketch_state.edit_drag_error.clone(),
+                        controller_ref.vertex_drop_prompt_for_ui(),
+                        self.sketch_state.vertex_drop_error.clone(),
                         crate::ui::render::ViewParams {
                             zoom: v.zoom,
                             offset_x: v.offset_x,
@@ -209,9 +220,13 @@ impl eframe::App for BerApp {
                     dim_error.as_deref(),
                     &dimensioned_walls,
                     edit_selected_wall,
+                    edit_selected_vertex,
                     edit_drag_prompt,
                     &mut self.sketch_state.edit_drag_input,
                     edit_drag_error.as_deref(),
+                    vertex_drop_prompt,
+                    &mut self.sketch_state.vertex_drop_inputs,
+                    vertex_drop_error.as_deref(),
                     view,
                     |event| match event {
                         UiEvent::Sketch(sketch_event) => match sketch_event {
@@ -333,6 +348,37 @@ impl eframe::App for BerApp {
                                     eprintln!("cancel_edit_drag: {}", e);
                                 }
                                 self.sketch_state.edit_drag_error = None;
+                            }
+                            SketchEvent::EditDoubleClick {
+                                world_x,
+                                world_y,
+                                tol,
+                            } => {
+                                controller
+                                    .borrow_mut()
+                                    .edit_double_click(world_x, world_y, tol);
+                            }
+                            SketchEvent::ApplyVertexMeasurement { idx, value } => {
+                                match controller.borrow_mut().apply_vertex_measurement(idx, value) {
+                                    Ok(()) => {
+                                        self.sketch_state.vertex_drop_error = None;
+                                    }
+                                    Err(e) => {
+                                        eprintln!("apply_vertex_measurement: {}", e);
+                                        self.sketch_state.vertex_drop_error = Some(e);
+                                    }
+                                }
+                            }
+                            SketchEvent::CancelVertexDrop => {
+                                // Note: the toolbar already cleared `inputs`
+                                // when the Cancel button was clicked; touching
+                                // `self.sketch_state.vertex_drop_inputs` here
+                                // would double-borrow it (the toolbar still
+                                // owns the &mut reference during the closure).
+                                if let Err(e) = controller.borrow_mut().cancel_vertex_drop() {
+                                    eprintln!("cancel_vertex_drop: {}", e);
+                                }
+                                self.sketch_state.vertex_drop_error = None;
                             }
                             _ => {}
                         },

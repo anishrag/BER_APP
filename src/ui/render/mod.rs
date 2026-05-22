@@ -400,6 +400,43 @@ pub fn render_equivalent_wall(
     painter.line_segment([a, b], stroke);
 }
 
+/// Draw a small filled marker at a world-coord point — used to highlight a
+/// vertex the user has just inserted in Edit mode (double-click) and is
+/// currently dragging. Red filled circle with a thin white outline so it's
+/// visible against either the polygon fill or the dark canvas background.
+pub fn render_vertex_marker(
+    painter: &egui::Painter,
+    rect: egui::Rect,
+    ber: Option<&Ber>,
+    current_storey_idx: usize,
+    sketch_mode: SketchMode,
+    view: ViewParams,
+    world_x: f64,
+    world_y: f64,
+) {
+    if !matches!(sketch_mode, SketchMode::Storey2D) {
+        return;
+    }
+    let Some(ber) = ber else {
+        return;
+    };
+    let Some(storey) = ber.storeys.get(current_storey_idx) else {
+        return;
+    };
+    let Some((min_xy, max_xy)) = storey_2d::bounding_box(storey) else {
+        return;
+    };
+    let t = fit_transform(rect, min_xy, max_xy, view);
+    let p = t.apply(world_x, world_y);
+    let radius = 6.0_f32;
+    painter.circle_filled(p, radius, egui::Color32::from_rgb(255, 80, 80));
+    painter.circle_stroke(
+        p,
+        radius,
+        egui::Stroke::new(1.5, egui::Color32::from_rgb(240, 240, 240)),
+    );
+}
+
 fn empty_storey_hint(painter: &egui::Painter, rect: egui::Rect) {
     painter.text(
         rect.center(),

@@ -107,6 +107,70 @@ pub struct EditDragPromptUiData {
     pub option_count: usize,
 }
 
+/// What kind of geometric constraint a vertex measurement represents.
+/// Axis = linear (|V.x - N.x| or |V.y - N.y|), pins one coord at a time.
+/// WallLength = euclidean |V - N|, a circle constraint that needs another
+/// measurement for full pinning (circle intersection / substitution).
+#[derive(Debug, Clone, Copy)]
+pub enum VertexMeasurementKind {
+    Axis(ParameterAxis),
+    WallLength,
+}
+
+/// One candidate measurement for the just-dropped vertex.
+#[derive(Debug, Clone)]
+pub struct VertexMeasurement {
+    pub kind: VertexMeasurementKind,
+    /// Neighbour vertex this measurement is from.
+    pub neighbor_vid: VertexId,
+    /// Live distance: axis → `|V.coord - N.coord|`, wall → `|V - N|`.
+    pub current_distance: f32,
+    /// For axis measurements: sign of `(V.coord - N.coord)` at populate
+    /// time. Preserved on apply so V ends up on the same side of N.
+    /// Unused for wall-length measurements (left as 1.0).
+    pub sign: f32,
+}
+
+/// Active post-vertex-drop prompt. After releasing a newly-inserted
+/// vertex, the user is shown text boxes for each relevant neighbour
+/// distance and fills them in to pin the vertex precisely.
+#[derive(Debug, Clone)]
+pub struct VertexDropPrompt {
+    /// The newly-inserted vertex.
+    pub vertex_vid: VertexId,
+    /// Candidate measurements — up to 5 typically (3 H/V de-duped + 2
+    /// wall-lengths to prev and next).
+    pub measurements: Vec<VertexMeasurement>,
+    /// Applied measurements (index into `measurements`, entered value)
+    /// in chronological order. The prompt is cleared once 2 are applied
+    /// — at that point the joint solve has fully pinned V's position.
+    pub applied: Vec<(usize, f32)>,
+}
+
+/// UI-friendly snapshot of a vertex-drop prompt. Holds vertex/neighbour
+/// world coords so the renderer can draw an arrow per active measurement
+/// and the UI can label each text box.
+#[derive(Debug, Clone)]
+pub struct VertexDropPromptUiData {
+    /// The newly-inserted vertex's world position.
+    pub vertex_pos: (f64, f64),
+    /// One entry per still-active measurement (axis not yet pinned).
+    pub active: Vec<VertexMeasurementUiData>,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct VertexMeasurementUiData {
+    /// Original index in `VertexDropPrompt.measurements` — used by Apply
+    /// to know which measurement the user is responding to.
+    pub idx: usize,
+    /// World position of the neighbour.
+    pub neighbor_pos: (f64, f64),
+    /// Kind of constraint this measurement represents.
+    pub kind: VertexMeasurementKind,
+    /// Live distance.
+    pub current_distance: f32,
+}
+
 /// UI-friendly snapshot of the current dimension prompt. `walls[0]` is the
 /// wall the prompt was generated for ("primary"); subsequent entries are
 /// other walls whose length expression is identical — the user can measure
@@ -172,6 +236,10 @@ pub struct AppController {
     /// cancels. The user types a distance + cycles through candidate
     /// reference walls until they find one they can actually measure.
     edit_drag_prompt: Option<EditDragPrompt>,
+    /// Active post-vertex-drop prompt. Set on mouse-up after a vertex
+    /// insert+drag when the plan is dimensioned; up to 3 distances to
+    /// neighbours that the user fills in to pin the vertex.
+    vertex_drop_prompt: Option<VertexDropPrompt>,
     /// View transform layered on top of the canvas auto-fit (pan + zoom).
     view: ViewTransform,
 }
@@ -181,15 +249,23 @@ pub struct AppController {
 pub struct EditState {
     /// VertexId of the start vertex of the currently selected wall.
     pub selected_wall: Option<VertexId>,
-    /// True while the user is holding the mouse button after clicking a wall.
+    /// VertexId of a free vertex the user inserted via double-click and
+    /// is currently dragging. Mutually exclusive with `selected_wall`.
+    pub selected_vertex: Option<VertexId>,
+    /// True while the user is holding the mouse button after clicking a wall
+    /// or double-clicking to insert a vertex.
     pub dragging: bool,
-    /// The parameter/constant value before the user started this drag —
+    /// The parameter/constant value before the user started a wall drag —
     /// snapshotted on mouse-down so Cancel on the post-drag prompt can
     /// revert without re-loading the entire floor plan.
     pub pre_drag_value: Option<f32>,
-    /// Kind of coord that the drag affects (parameter or anchor constant),
-    /// stashed so `edit_mouse_up` can populate the post-drag prompt.
+    /// Kind of coord that a wall drag affects (parameter or anchor
+    /// constant), stashed so `edit_mouse_up` can populate the post-drag
+    /// prompt.
     pub pre_drag_kind: Option<MovedCoordKind>,
+    /// Pre-drag world-coord position of a vertex drag. Used for revert
+    /// if the user cancels the post-drop prompt.
+    pub pre_drag_vertex_pos: Option<(f32, f32)>,
 }
 
 /// What kind of coordinate the just-moved wall is anchored to. The
@@ -250,6 +326,7 @@ impl AppController {
             dimensioning: DimensionState::default(),
             edit_state: EditState::default(),
             edit_drag_prompt: None,
+            vertex_drop_prompt: None,
             view: ViewTransform::default(),
         }
     }
@@ -275,6 +352,17 @@ impl AppController {
         let a = ring_pts.get(edge_start)?;
         let b = ring_pts.get((edge_start + 1) % n)?;
         Some(((a.x as f64, a.y as f64), (b.x as f64, b.y as f64)))
+    }
+
+    /// World-coord position of the currently selected Edit-mode vertex
+    /// (from double-click insert), or `None`. Used by the UI to render
+    /// a highlight marker on the inserted vertex.
+    pub fn edit_selected_vertex_position(&self) -> Option<(f64, f64)> {
+        let vid = self.edit_state.selected_vertex?;
+        let (ring, idx) = self.floor_plan.find_vertex(vid)?;
+        let polygons = self.floor_plan.polygons();
+        let p = polygons.get(ring)?.get(idx)?;
+        Some((p.x as f64, p.y as f64))
     }
 
     /// Edit-mode primary-button press. Hit-test the world-coord position
@@ -310,60 +398,406 @@ impl AppController {
         true
     }
 
-    /// Edit-mode drag update: translate the selected wall so its
-    /// perpendicular coord matches the cursor's world-coord position.
-    /// Handles both parameter-anchored walls (set_parameter) and
-    /// constant-anchored walls (shift the constant across every vertex
-    /// that references it — typical for the polygon's leftmost / bottom
-    /// walls that are tied to V0's origin).
+    /// Edit-mode double-click: insert a new vertex on the wall closest to
+    /// `(world_x, world_y)` (within `tol`), place it at the click point,
+    /// and start a free-2D drag on it. Returns true if a vertex was
+    /// inserted.
+    pub fn edit_double_click(&mut self, world_x: f64, world_y: f64, tol: f64) -> bool {
+        if !matches!(self.sketch_engine.edit_tool, EditTools::Edit) {
+            return false;
+        }
+        let Some((ring, edge_start)) = self.floor_plan.hit_test_wall(world_x, world_y, tol) else {
+            return false;
+        };
+        let new_vid = match self.floor_plan.insert_vertex_on_wall(
+            ring,
+            edge_start,
+            world_x as f32,
+            world_y as f32,
+        ) {
+            Some(v) => v,
+            None => return false,
+        };
+        self.edit_state.selected_wall = None;
+        self.edit_state.selected_vertex = Some(new_vid);
+        self.edit_state.dragging = true;
+        self.edit_state.pre_drag_vertex_pos = Some((world_x as f32, world_y as f32));
+        self.edit_state.pre_drag_value = None;
+        self.edit_state.pre_drag_kind = None;
+        // Push the new topology to BER so the renderer sees the split
+        // wall + new vertex immediately. Without this the polygon stays
+        // at its pre-insert shape during the drag and only one edge
+        // looks like it's following the cursor.
+        if let Err(e) = self.commit_to_ber() {
+            eprintln!("commit_to_ber after insert_vertex_on_wall: {}", e);
+        }
+        println!(
+            "vertex inserted: ring {}/edge {}+1 (vertex_id {}) at ({:.3}, {:.3})",
+            ring, edge_start, new_vid, world_x, world_y
+        );
+        true
+    }
+
+    /// Edit-mode drag update. Dispatches based on what's selected:
+    ///
+    /// * If a `selected_vertex` is set (from a double-click insert),
+    ///   updates both its x and y parameters to the cursor's world-coord
+    ///   position — free 2D drag.
+    /// * Otherwise translates the selected wall via `set_parameter` or
+    ///   `shift_constant` (same as before).
     pub fn edit_mouse_drag(&mut self, world_x: f64, world_y: f64) {
         if !self.edit_state.dragging {
             return;
         }
-        let Some(vid) = self.edit_state.selected_wall else {
-            return;
-        };
-        let Some((ring, edge_start)) = self.floor_plan.find_vertex(vid) else {
-            return;
-        };
-        // Parameter-anchored wall — most common case.
-        if let Some((param, axis)) = self.floor_plan.wall_movable_param(ring, edge_start) {
-            let new_value = match axis {
-                ParameterAxis::X => world_x as f32,
-                ParameterAxis::Y => world_y as f32,
-            };
-            self.floor_plan.set_parameter(param, new_value);
-            return;
+        let mut did_mutate = false;
+        // Vertex drag — free 2D.
+        if let Some(vid) = self.edit_state.selected_vertex {
+            if let Some((ring, idx)) = self.floor_plan.find_vertex(vid) {
+                let x_param = self.floor_plan.vertex_x_param(ring, idx);
+                let y_param = self.floor_plan.vertex_y_param(ring, idx);
+                if let (Some(xp), Some(yp)) = (x_param, y_param) {
+                    self.floor_plan.set_parameter(xp, world_x as f32);
+                    self.floor_plan.set_parameter(yp, world_y as f32);
+                    did_mutate = true;
+                }
+            }
+        } else if let Some(vid) = self.edit_state.selected_wall {
+            // Wall drag — translate perpendicular axis.
+            if let Some((ring, edge_start)) = self.floor_plan.find_vertex(vid) {
+                if let Some((param, axis)) = self.floor_plan.wall_movable_param(ring, edge_start) {
+                    let new_value = match axis {
+                        ParameterAxis::X => world_x as f32,
+                        ParameterAxis::Y => world_y as f32,
+                    };
+                    self.floor_plan.set_parameter(param, new_value);
+                    did_mutate = true;
+                } else if let Some((old_value, axis)) =
+                    self.floor_plan.wall_anchor_constant(ring, edge_start)
+                {
+                    let new_value = match axis {
+                        ParameterAxis::X => world_x as f32,
+                        ParameterAxis::Y => world_y as f32,
+                    };
+                    self.floor_plan.shift_constant(old_value, axis, new_value);
+                    did_mutate = true;
+                }
+            }
         }
-        // Constant-anchored wall — shift V0's anchor coord (and every
-        // vertex sharing it) to the new perpendicular position.
-        if let Some((old_value, axis)) = self.floor_plan.wall_anchor_constant(ring, edge_start) {
-            let new_value = match axis {
-                ParameterAxis::X => world_x as f32,
-                ParameterAxis::Y => world_y as f32,
-            };
-            self.floor_plan.shift_constant(old_value, axis, new_value);
+        // Push the live drag state to BER so the renderer sees the wall
+        // / vertex follow the cursor instead of snapping only on release.
+        if did_mutate {
+            if let Err(e) = self.commit_to_ber() {
+                eprintln!("commit_to_ber during edit_mouse_drag: {}", e);
+            }
         }
     }
 
-    /// Edit-mode drag release. If the plan is already dimensioned (the
-    /// user has set at least one real-world dimension), populate a
-    /// post-drag measurement prompt instead of accepting the rough drop
-    /// position directly. Otherwise commit the drag as-is.
+    /// Edit-mode drag release. Routes by what was being dragged:
+    ///
+    /// * Vertex drag → for now, just commits at the rough drop position.
+    ///   A post-drop measurement prompt (separate from the wall one) is
+    ///   a follow-up.
+    /// * Wall drag → if dimensioned, populate the post-drag prompt;
+    ///   otherwise commit directly.
     pub fn edit_mouse_up(&mut self) -> Result<(), String> {
         if !self.edit_state.dragging {
             return Ok(());
         }
         self.edit_state.dragging = false;
+        if self.edit_state.selected_vertex.is_some() {
+            self.commit_to_ber()?;
+            if self.dimensioning.scale_set {
+                self.populate_vertex_drop_prompt();
+            }
+            return Ok(());
+        }
         if self.dimensioning.scale_set {
-            // Build the measurement-cycle prompt. The user types a distance
-            // and we apply it via set_parameter or shift_constant on Apply.
             self.populate_edit_drag_prompt();
-            // Don't commit yet — wait for Apply / Cancel.
         } else {
             self.commit_to_ber()?;
         }
         Ok(())
+    }
+
+    /// Build the post-drop prompt for the just-inserted vertex: collect up
+    /// to 4 candidate distances (V to prev × {X,Y}, V to next × {X,Y}),
+    /// then de-duplicate axes where prev and next share that coord
+    /// (yielding 3 distinct measurements for the typical case).
+    fn populate_vertex_drop_prompt(&mut self) {
+        let Some(vid) = self.edit_state.selected_vertex else {
+            return;
+        };
+        let Some((ring, idx)) = self.floor_plan.find_vertex(vid) else {
+            return;
+        };
+        let polygons = self.floor_plan.polygons();
+        let Some(ring_pts) = polygons.get(ring) else {
+            return;
+        };
+        let n = ring_pts.len();
+        if n < 3 {
+            return;
+        }
+        let v = ring_pts[idx];
+        let prev_idx = (idx + n - 1) % n;
+        let next_idx = (idx + 1) % n;
+        let prev = ring_pts[prev_idx];
+        let next = ring_pts[next_idx];
+
+        let prev_vid = match self.floor_plan.vertex_id_at(ring, prev_idx) {
+            Some(v) => v,
+            None => return,
+        };
+        let next_vid = match self.floor_plan.vertex_id_at(ring, next_idx) {
+            Some(v) => v,
+            None => return,
+        };
+
+        let mut measurements: Vec<VertexMeasurement> = Vec::new();
+        let tol = 1e-3_f32;
+        // X-axis measurements. If prev.x == next.x (vertex inserted on a
+        // vertical wall), one measurement covers both.
+        let prev_dx = v.x - prev.x;
+        let next_dx = v.x - next.x;
+        if (prev.x - next.x).abs() < tol {
+            if prev_dx.abs() > tol {
+                measurements.push(VertexMeasurement {
+                    kind: VertexMeasurementKind::Axis(ParameterAxis::X),
+                    neighbor_vid: prev_vid,
+                    current_distance: prev_dx.abs(),
+                    sign: prev_dx.signum(),
+                });
+            }
+        } else {
+            if prev_dx.abs() > tol {
+                measurements.push(VertexMeasurement {
+                    kind: VertexMeasurementKind::Axis(ParameterAxis::X),
+                    neighbor_vid: prev_vid,
+                    current_distance: prev_dx.abs(),
+                    sign: prev_dx.signum(),
+                });
+            }
+            if next_dx.abs() > tol {
+                measurements.push(VertexMeasurement {
+                    kind: VertexMeasurementKind::Axis(ParameterAxis::X),
+                    neighbor_vid: next_vid,
+                    current_distance: next_dx.abs(),
+                    sign: next_dx.signum(),
+                });
+            }
+        }
+        // Y-axis: mirror of the above.
+        let prev_dy = v.y - prev.y;
+        let next_dy = v.y - next.y;
+        if (prev.y - next.y).abs() < tol {
+            if prev_dy.abs() > tol {
+                measurements.push(VertexMeasurement {
+                    kind: VertexMeasurementKind::Axis(ParameterAxis::Y),
+                    neighbor_vid: prev_vid,
+                    current_distance: prev_dy.abs(),
+                    sign: prev_dy.signum(),
+                });
+            }
+        } else {
+            if prev_dy.abs() > tol {
+                measurements.push(VertexMeasurement {
+                    kind: VertexMeasurementKind::Axis(ParameterAxis::Y),
+                    neighbor_vid: prev_vid,
+                    current_distance: prev_dy.abs(),
+                    sign: prev_dy.signum(),
+                });
+            }
+            if next_dy.abs() > tol {
+                measurements.push(VertexMeasurement {
+                    kind: VertexMeasurementKind::Axis(ParameterAxis::Y),
+                    neighbor_vid: next_vid,
+                    current_distance: next_dy.abs(),
+                    sign: next_dy.signum(),
+                });
+            }
+        }
+        // Wall-length measurements: Euclidean distance to each neighbour.
+        // The user may prefer measuring along a diagonal wall directly
+        // (the new wall they just created by moving V off-axis).
+        let prev_dist = ((v.x - prev.x).powi(2) + (v.y - prev.y).powi(2)).sqrt();
+        if prev_dist > tol {
+            measurements.push(VertexMeasurement {
+                kind: VertexMeasurementKind::WallLength,
+                neighbor_vid: prev_vid,
+                current_distance: prev_dist,
+                sign: 1.0,
+            });
+        }
+        let next_dist = ((v.x - next.x).powi(2) + (v.y - next.y).powi(2)).sqrt();
+        if next_dist > tol {
+            measurements.push(VertexMeasurement {
+                kind: VertexMeasurementKind::WallLength,
+                neighbor_vid: next_vid,
+                current_distance: next_dist,
+                sign: 1.0,
+            });
+        }
+
+        if measurements.is_empty() {
+            return;
+        }
+        self.vertex_drop_prompt = Some(VertexDropPrompt {
+            vertex_vid: vid,
+            measurements,
+            applied: Vec::new(),
+        });
+    }
+
+    /// Apply one measurement from the vertex-drop prompt. The first apply
+    /// snaps V to satisfy that one constraint; the second triggers a joint
+    /// solve over both, then the prompt is cleared. Supports any mix of
+    /// axis-aligned (linear) and wall-length (circular) measurements.
+    pub fn apply_vertex_measurement(&mut self, idx: usize, distance: f32) -> Result<(), String> {
+        if !distance.is_finite() || distance < 0.0 {
+            return Err(format!(
+                "distance must be a non-negative number (got {})",
+                distance
+            ));
+        }
+        let prompt = self
+            .vertex_drop_prompt
+            .clone()
+            .ok_or_else(|| "no active vertex-drop prompt".to_string())?;
+        let m = prompt
+            .measurements
+            .get(idx)
+            .cloned()
+            .ok_or_else(|| "invalid measurement index".to_string())?;
+        let vertex_vid = prompt.vertex_vid;
+        let (v_ring, v_idx) = self
+            .floor_plan
+            .find_vertex(vertex_vid)
+            .ok_or_else(|| "vertex no longer exists".to_string())?;
+        let polygons = self.floor_plan.polygons();
+        let v_pos = polygons
+            .get(v_ring)
+            .and_then(|r| r.get(v_idx))
+            .copied()
+            .ok_or_else(|| "vertex position unavailable".to_string())?;
+        let cur = (v_pos.x, v_pos.y);
+        let n_pos = self.neighbor_pos(m.neighbor_vid)?;
+
+        // First applied measurement → snap to its constraint alone.
+        // Subsequent applies → joint-solve the latest prior + this one.
+        let new_pos = if prompt.applied.is_empty() {
+            snap_single(&m, distance, n_pos, cur)
+        } else {
+            let (prior_idx, prior_val) = *prompt.applied.last().unwrap();
+            let prior_m = &prompt.measurements[prior_idx];
+            let prior_n_pos = self.neighbor_pos(prior_m.neighbor_vid)?;
+            joint_solve(prior_m, prior_val, prior_n_pos, &m, distance, n_pos, cur)
+        };
+
+        let x_p = self
+            .floor_plan
+            .vertex_x_param(v_ring, v_idx)
+            .ok_or_else(|| "vertex.x_expr isn't a parameter".to_string())?;
+        let y_p = self
+            .floor_plan
+            .vertex_y_param(v_ring, v_idx)
+            .ok_or_else(|| "vertex.y_expr isn't a parameter".to_string())?;
+        self.floor_plan.set_parameter(x_p, new_pos.0);
+        self.floor_plan.set_parameter(y_p, new_pos.1);
+        // Both params land in `known_params` so the new walls get length
+        // labels via the standard `walls_with_known_length` path.
+        self.dimensioning.known_params.insert(x_p);
+        self.dimensioning.known_params.insert(y_p);
+        self.commit_to_ber()?;
+
+        if let Some(p) = self.vertex_drop_prompt.as_mut() {
+            p.applied.push((idx, distance));
+            if p.applied.len() >= 2 {
+                self.vertex_drop_prompt = None;
+                self.edit_state.selected_vertex = None;
+                self.edit_state.pre_drag_vertex_pos = None;
+            }
+        }
+        Ok(())
+    }
+
+    /// World-coord position of a vertex by VertexId. Helper for the
+    /// vertex-drop prompt's solve.
+    fn neighbor_pos(&self, vid: VertexId) -> Result<(f32, f32), String> {
+        let (r, i) = self
+            .floor_plan
+            .find_vertex(vid)
+            .ok_or_else(|| "neighbour vertex no longer exists".to_string())?;
+        let polygons = self.floor_plan.polygons();
+        let p = polygons
+            .get(r)
+            .and_then(|ring| ring.get(i))
+            .ok_or_else(|| "neighbour position unavailable".to_string())?;
+        Ok((p.x, p.y))
+    }
+
+    /// Cancel the vertex-drop prompt. Reverts the vertex to its pre-drag
+    /// position (the click point on the wall) and clears the prompt and
+    /// selection.
+    pub fn cancel_vertex_drop(&mut self) -> Result<(), String> {
+        let Some(prompt) = self.vertex_drop_prompt.take() else {
+            return Ok(());
+        };
+        let Some((wx, wy)) = self.edit_state.pre_drag_vertex_pos else {
+            self.edit_state.selected_vertex = None;
+            return Ok(());
+        };
+        if let Some((v_ring, v_idx)) = self.floor_plan.find_vertex(prompt.vertex_vid) {
+            if let Some(xp) = self.floor_plan.vertex_x_param(v_ring, v_idx) {
+                self.floor_plan.set_parameter(xp, wx);
+            }
+            if let Some(yp) = self.floor_plan.vertex_y_param(v_ring, v_idx) {
+                self.floor_plan.set_parameter(yp, wy);
+            }
+        }
+        self.edit_state.selected_vertex = None;
+        self.edit_state.pre_drag_vertex_pos = None;
+        self.commit_to_ber()?;
+        Ok(())
+    }
+
+    /// Snapshot of the vertex-drop prompt for the UI. Includes all
+    /// measurements that haven't yet been applied (i.e. not in
+    /// `prompt.applied`), each with a live-recomputed distance and the
+    /// neighbour's current world position so the renderer can draw the
+    /// matching arrow.
+    pub fn vertex_drop_prompt_for_ui(&self) -> Option<VertexDropPromptUiData> {
+        let prompt = self.vertex_drop_prompt.as_ref()?;
+        let (v_ring, v_idx) = self.floor_plan.find_vertex(prompt.vertex_vid)?;
+        let polygons = self.floor_plan.polygons();
+        let v_ring_pts = polygons.get(v_ring)?;
+        let v = v_ring_pts.get(v_idx)?;
+        let applied_set: std::collections::HashSet<usize> =
+            prompt.applied.iter().map(|(i, _)| *i).collect();
+        let mut active: Vec<VertexMeasurementUiData> = Vec::new();
+        for (i, m) in prompt.measurements.iter().enumerate() {
+            if applied_set.contains(&i) {
+                continue;
+            }
+            let (n_ring, n_idx) = self.floor_plan.find_vertex(m.neighbor_vid)?;
+            let n = polygons.get(n_ring).and_then(|r| r.get(n_idx))?;
+            let live = match m.kind {
+                VertexMeasurementKind::Axis(ParameterAxis::X) => (v.x - n.x).abs(),
+                VertexMeasurementKind::Axis(ParameterAxis::Y) => (v.y - n.y).abs(),
+                VertexMeasurementKind::WallLength => {
+                    ((v.x - n.x).powi(2) + (v.y - n.y).powi(2)).sqrt()
+                }
+            };
+            active.push(VertexMeasurementUiData {
+                idx: i,
+                neighbor_pos: (n.x as f64, n.y as f64),
+                kind: m.kind,
+                current_distance: live,
+            });
+        }
+        Some(VertexDropPromptUiData {
+            vertex_pos: (v.x as f64, v.y as f64),
+            active,
+        })
     }
 
     /// Construct the post-drag prompt: list every other parallel wall as
@@ -1728,6 +2162,146 @@ impl AppController {
 /// For each edge in each ring, record `(sign_dx, sign_dy)` where dx, dy
 /// are the deltas from the edge's start vertex to its end vertex. Used by
 /// the direction-flip guard in `apply_dimension`.
+/// Snap V to satisfy a single measurement. The other coord defaults to the
+/// current vertex position (axis case) or is computed from the circle's
+/// closest-point projection (wall-length case).
+fn snap_single(
+    m: &VertexMeasurement,
+    distance: f32,
+    n_pos: (f32, f32),
+    cur: (f32, f32),
+) -> (f32, f32) {
+    match m.kind {
+        VertexMeasurementKind::Axis(ParameterAxis::X) => (n_pos.0 + m.sign * distance, cur.1),
+        VertexMeasurementKind::Axis(ParameterAxis::Y) => (cur.0, n_pos.1 + m.sign * distance),
+        VertexMeasurementKind::WallLength => project_to_circle(cur, n_pos, distance),
+    }
+}
+
+/// Solve for V given two measurements jointly. Handles every combination
+/// of axis / wall-length constraints. Falls back to overriding the prior
+/// constraint when the two are linearly dependent (e.g. two X axes) or
+/// when the system is infeasible (circles don't reach a fixed coord).
+fn joint_solve(
+    m1: &VertexMeasurement,
+    d1: f32,
+    n1: (f32, f32),
+    m2: &VertexMeasurement,
+    d2: f32,
+    n2: (f32, f32),
+    cur: (f32, f32),
+) -> (f32, f32) {
+    use VertexMeasurementKind::*;
+    match (m1.kind, m2.kind) {
+        (Axis(ParameterAxis::X), Axis(ParameterAxis::Y)) => {
+            (n1.0 + m1.sign * d1, n2.1 + m2.sign * d2)
+        }
+        (Axis(ParameterAxis::Y), Axis(ParameterAxis::X)) => {
+            (n2.0 + m2.sign * d2, n1.1 + m1.sign * d1)
+        }
+        (Axis(a1), Axis(a2)) if std::mem::discriminant(&a1) == std::mem::discriminant(&a2) => {
+            // Same axis applied twice — second overrides, other coord stays.
+            snap_single(m2, d2, n2, cur)
+        }
+        (Axis(_), Axis(_)) => snap_single(m2, d2, n2, cur),
+        (Axis(axis), WallLength) => solve_axis_wall(axis, m1.sign, d1, n1, n2, d2, cur),
+        (WallLength, Axis(axis)) => solve_axis_wall(axis, m2.sign, d2, n2, n1, d1, cur),
+        (WallLength, WallLength) => intersect_circles(n1, d1, n2, d2, cur),
+    }
+}
+
+/// Project `cur` onto a circle of radius `r` around `n`.
+fn project_to_circle(cur: (f32, f32), n: (f32, f32), r: f32) -> (f32, f32) {
+    let dx = cur.0 - n.0;
+    let dy = cur.1 - n.1;
+    let len = (dx * dx + dy * dy).sqrt();
+    if len < 1e-6 {
+        (n.0 + r, n.1)
+    } else {
+        let scale = r / len;
+        (n.0 + dx * scale, n.1 + dy * scale)
+    }
+}
+
+/// Solve V given one axis constraint + one circle constraint.
+/// axis_sign * axis_dist pins V's coord on the named axis (from
+/// `axis_neighbor`), then we solve the circle (centred at `circle_n`,
+/// radius `circle_r`) for the other coord. Two solutions in general;
+/// pick the one matching the current position's side.
+fn solve_axis_wall(
+    axis: ParameterAxis,
+    axis_sign: f32,
+    axis_dist: f32,
+    axis_neighbor: (f32, f32),
+    circle_n: (f32, f32),
+    circle_r: f32,
+    cur: (f32, f32),
+) -> (f32, f32) {
+    match axis {
+        ParameterAxis::X => {
+            let new_x = axis_neighbor.0 + axis_sign * axis_dist;
+            let dx_to_n = new_x - circle_n.0;
+            let dy_sq = circle_r * circle_r - dx_to_n * dx_to_n;
+            if dy_sq < 0.0 {
+                // Circle doesn't reach this X line — fall back to projection.
+                project_to_circle(cur, circle_n, circle_r)
+            } else {
+                let dy_abs = dy_sq.sqrt();
+                let sign_y = (cur.1 - circle_n.1).signum();
+                let sign_y = if sign_y == 0.0 { 1.0 } else { sign_y };
+                (new_x, circle_n.1 + sign_y * dy_abs)
+            }
+        }
+        ParameterAxis::Y => {
+            let new_y = axis_neighbor.1 + axis_sign * axis_dist;
+            let dy_to_n = new_y - circle_n.1;
+            let dx_sq = circle_r * circle_r - dy_to_n * dy_to_n;
+            if dx_sq < 0.0 {
+                project_to_circle(cur, circle_n, circle_r)
+            } else {
+                let dx_abs = dx_sq.sqrt();
+                let sign_x = (cur.0 - circle_n.0).signum();
+                let sign_x = if sign_x == 0.0 { 1.0 } else { sign_x };
+                (circle_n.0 + sign_x * dx_abs, new_y)
+            }
+        }
+    }
+}
+
+/// Intersect two circles (centres `n1`, `n2`; radii `r1`, `r2`). Returns
+/// the intersection point closest to `cur`. When circles don't intersect,
+/// falls back to `cur`.
+fn intersect_circles(
+    n1: (f32, f32),
+    r1: f32,
+    n2: (f32, f32),
+    r2: f32,
+    cur: (f32, f32),
+) -> (f32, f32) {
+    let dx = n2.0 - n1.0;
+    let dy = n2.1 - n1.1;
+    let d = (dx * dx + dy * dy).sqrt();
+    if d < 1e-6 || d > r1 + r2 + 1e-3 || d < (r1 - r2).abs() - 1e-3 {
+        return cur;
+    }
+    let a = (r1 * r1 - r2 * r2 + d * d) / (2.0 * d);
+    let h_sq = (r1 * r1 - a * a).max(0.0);
+    let h = h_sq.sqrt();
+    let mid_x = n1.0 + a * dx / d;
+    let mid_y = n1.1 + a * dy / d;
+    let perp_x = -dy / d * h;
+    let perp_y = dx / d * h;
+    let p1 = (mid_x + perp_x, mid_y + perp_y);
+    let p2 = (mid_x - perp_x, mid_y - perp_y);
+    let d1_sq = (p1.0 - cur.0).powi(2) + (p1.1 - cur.1).powi(2);
+    let d2_sq = (p2.0 - cur.0).powi(2) + (p2.1 - cur.1).powi(2);
+    if d1_sq < d2_sq {
+        p1
+    } else {
+        p2
+    }
+}
+
 fn snapshot_edge_signs(plan: &FloorPlan) -> Vec<Vec<(i8, i8)>> {
     plan.polygons()
         .iter()

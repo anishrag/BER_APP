@@ -2,7 +2,9 @@ use egui::epaint::{PathShape, PathStroke};
 use egui::Pos2;
 use strum::IntoEnumIterator;
 
-use crate::controller::app_controller::{DimensionPromptUiData, EditDragPromptUiData};
+use crate::controller::app_controller::{
+    DimensionPromptUiData, EditDragPromptUiData, VertexDropPromptUiData,
+};
 use crate::ui::pages::events::UiEvent;
 use crate::ui::render;
 use crate::ui::render::ViewParams;
@@ -158,6 +160,22 @@ pub enum SketchEvent {
     CycleEditDragMeasurement,
     /// User cancelled the post-drag prompt — revert to pre-drag value.
     CancelEditDrag,
+    /// Double-click in Edit mode: insert a new vertex on the wall closest
+    /// to the click point and start a free-2D drag on it.
+    EditDoubleClick {
+        world_x: f64,
+        world_y: f64,
+        tol: f64,
+    },
+    /// User entered a value in one of the vertex-drop prompt's text boxes.
+    /// `idx` is the measurement's index in `VertexDropPrompt.measurements`.
+    ApplyVertexMeasurement {
+        idx: usize,
+        value: f32,
+    },
+    /// User cancelled the vertex-drop prompt — revert the inserted vertex
+    /// to its pre-drag (initial click) position.
+    CancelVertexDrop,
     /// Scroll-wheel zoom about the given anchor (canvas pixel coords).
     ZoomView {
         factor: f32,
@@ -201,9 +219,13 @@ impl SketchPage {
         dim_error: Option<&str>,
         dimensioned_walls: &[(usize, usize)],
         edit_selected_wall: Option<((f64, f64), (f64, f64))>,
+        edit_selected_vertex: Option<(f64, f64)>,
         edit_drag_prompt: Option<EditDragPromptUiData>,
         edit_drag_input: &mut String,
         edit_drag_error: Option<&str>,
+        vertex_drop_prompt: Option<VertexDropPromptUiData>,
+        vertex_drop_inputs: &mut [String; 4],
+        vertex_drop_error: Option<&str>,
         view: ViewParams,
         mut on_event: F,
     ) where
@@ -256,6 +278,8 @@ impl SketchPage {
 
                 // Edit-mode selection highlight: paint the selected wall
                 // in red so the user sees which wall their drag is moving.
+                // The inserted-vertex marker (if any) takes precedence —
+                // both can't be selected at once.
                 if matches!(edit_tool, EditTools::Edit) {
                     if let Some((wa, wb)) = edit_selected_wall {
                         render::render_equivalent_wall(
@@ -267,6 +291,53 @@ impl SketchPage {
                             view,
                             wa,
                             wb,
+                        );
+                    }
+                    if let Some((vx, vy)) = edit_selected_vertex {
+                        render::render_vertex_marker(
+                            &painter,
+                            rect,
+                            ber,
+                            current_storey_idx,
+                            mode,
+                            view,
+                            vx,
+                            vy,
+                        );
+                    }
+                }
+
+                // Vertex-drop prompt: draw a perpendicular distance arrow
+                // for each still-active measurement (axis not yet pinned),
+                // so the user sees what each text box refers to.
+                if let Some(vp) = &vertex_drop_prompt {
+                    for m in &vp.active {
+                        use crate::controller::app_controller::VertexMeasurementKind;
+                        use manip_2d_plan::ParameterAxis;
+                        // Axis measurements get a perpendicular arrow at
+                        // the vertex's row/column. WallLength measurements
+                        // draw the arrow directly along the diagonal from
+                        // neighbour → vertex (= the new wall itself).
+                        let (arrow_a, arrow_b) = match m.kind {
+                            VertexMeasurementKind::Axis(ParameterAxis::X) => (
+                                (m.neighbor_pos.0, vp.vertex_pos.1),
+                                (vp.vertex_pos.0, vp.vertex_pos.1),
+                            ),
+                            VertexMeasurementKind::Axis(ParameterAxis::Y) => (
+                                (vp.vertex_pos.0, m.neighbor_pos.1),
+                                (vp.vertex_pos.0, vp.vertex_pos.1),
+                            ),
+                            VertexMeasurementKind::WallLength => (m.neighbor_pos, vp.vertex_pos),
+                        };
+                        render::render_dimension_prompt(
+                            &painter,
+                            rect,
+                            ber,
+                            current_storey_idx,
+                            mode,
+                            view,
+                            arrow_a,
+                            arrow_b,
                         );
                     }
                 }
@@ -428,7 +499,34 @@ impl SketchPage {
                 if primary_available
                     && matches!(edit_tool, EditTools::Edit)
                     && edit_drag_prompt.is_none()
+                    && vertex_drop_prompt.is_none()
                 {
+                    // Double-click first — egui fires this on the second
+                    // press of a quick double-press. We insert the vertex
+                    // and treat any subsequent drag movement as moving
+                    // the just-inserted vertex.
+                    if response.double_clicked_by(egui::PointerButton::Primary) {
+                        if let (Some(b), Some((min_xy, max_xy))) = (
+                            ber,
+                            ber.and_then(|b| {
+                                b.storeys
+                                    .get(current_storey_idx)
+                                    .and_then(crate::ui::render::storey_2d::bounding_box)
+                            }),
+                        ) {
+                            let _ = b;
+                            let t = crate::ui::render::fit_transform(rect, min_xy, max_xy, view);
+                            let tol_world = 12.0 / t.scale();
+                            if let Some(pos) = response.interact_pointer_pos() {
+                                let (wx, wy) = t.inverse(pos.x, pos.y);
+                                on_event(UiEvent::Sketch(SketchEvent::EditDoubleClick {
+                                    world_x: wx,
+                                    world_y: wy,
+                                    tol: tol_world,
+                                }));
+                            }
+                        }
+                    }
                     if let (Some(b), Some((min_xy, max_xy))) = (
                         ber,
                         ber.and_then(|b| {
@@ -490,6 +588,14 @@ impl SketchPage {
                             p,
                             edit_drag_input,
                             edit_drag_error,
+                            &mut on_event,
+                        );
+                    } else if let Some(vp) = &vertex_drop_prompt {
+                        Self::vertex_drop_prompt_toolbar(
+                            ui,
+                            vp,
+                            vertex_drop_inputs,
+                            vertex_drop_error,
                             &mut on_event,
                         );
                     } else if reviewing {
@@ -619,6 +725,68 @@ impl SketchPage {
         {
             on_event(UiEvent::Sketch(SketchEvent::CancelEditDrag));
             input.clear();
+        }
+        if let Some(err) = error {
+            ui.label(
+                egui::RichText::new(format!("⚠ {}", err))
+                    .color(egui::Color32::from_rgb(255, 120, 90)),
+            );
+        }
+    }
+
+    fn vertex_drop_prompt_toolbar<F: FnMut(UiEvent)>(
+        ui: &mut egui::Ui,
+        prompt: &VertexDropPromptUiData,
+        inputs: &mut [String; 4],
+        error: Option<&str>,
+        on_event: &mut F,
+    ) {
+        use crate::controller::app_controller::VertexMeasurementKind;
+        use manip_2d_plan::ParameterAxis;
+        ui.label(
+            egui::RichText::new("Place vertex — fill in any 2 distances (m):")
+                .strong()
+                .color(egui::Color32::from_rgb(60, 220, 255)),
+        );
+        // One column per active measurement. Each shows: kind label,
+        // current value for orientation, textbox, Apply button.
+        for m in &prompt.active {
+            let kind_label = match m.kind {
+                VertexMeasurementKind::Axis(ParameterAxis::X) => "H",
+                VertexMeasurementKind::Axis(ParameterAxis::Y) => "V",
+                VertexMeasurementKind::WallLength => "W",
+            };
+            ui.label(format!("{} ({:.2})", kind_label, m.current_distance));
+            // Use idx-based slot so inputs survive across frames + apply
+            // targets the right measurement. Cap at 4 slots.
+            let slot = m.idx.min(inputs.len() - 1);
+            let resp = ui.add(
+                egui::TextEdit::singleline(&mut inputs[slot])
+                    .desired_width(60.0)
+                    .hint_text("=?"),
+            );
+            let submitted = resp.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
+            let clicked = ui.button("✓").on_hover_text("Set this distance").clicked();
+            if clicked || submitted {
+                if let Some(v) = parse_dimension_expression(&inputs[slot]) {
+                    on_event(UiEvent::Sketch(SketchEvent::ApplyVertexMeasurement {
+                        idx: m.idx,
+                        value: v,
+                    }));
+                    inputs[slot].clear();
+                }
+            }
+            ui.separator();
+        }
+        if ui
+            .button("Cancel")
+            .on_hover_text("Revert the new vertex to its initial position")
+            .clicked()
+        {
+            on_event(UiEvent::Sketch(SketchEvent::CancelVertexDrop));
+            for s in inputs.iter_mut() {
+                s.clear();
+            }
         }
         if let Some(err) = error {
             ui.label(

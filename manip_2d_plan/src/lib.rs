@@ -260,6 +260,22 @@ impl FloorPlan {
         self.parametric.wall_movable_param(ring, edge_start)
     }
 
+    /// Insert a new vertex on the wall at `(ring, edge_start)`, placing it
+    /// at world position `(world_x, world_y)`. Splits one edge into two
+    /// and allocates two fresh parameters (one per axis) for the new
+    /// vertex. Returns its new `VertexId`, or `None` if the ring/edge
+    /// indices are out of range.
+    pub fn insert_vertex_on_wall(
+        &mut self,
+        ring: usize,
+        edge_start: usize,
+        world_x: f32,
+        world_y: f32,
+    ) -> Option<VertexId> {
+        self.parametric
+            .insert_vertex_on_wall(ring, edge_start, world_x, world_y)
+    }
+
     /// For a wall whose perpendicular coord is a constant (V0's anchor or
     /// similar), the current constant value and the axis it lives on.
     /// Edit-mode drag uses this together with `shift_constant` to translate

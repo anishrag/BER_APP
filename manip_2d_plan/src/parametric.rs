@@ -415,6 +415,48 @@ impl ParametricPlan {
         Ok(())
     }
 
+    /// Insert a new vertex into a ring at world position `(world_x, world_y)`,
+    /// splitting the wall whose start is at `edge_start` into two new walls.
+    /// The new vertex gets two fresh parameters for its x and y coords —
+    /// **not** shared with any neighbour — so it can be dragged freely in
+    /// 2D without snapping to axis-aligned. Returns the new VertexId.
+    ///
+    /// Caveat: after insertion the polygon is no longer guaranteed to be
+    /// axis-aligned. The two new edges adjacent to the inserted vertex may
+    /// be diagonal. `validate_simple` is still safe to call but its
+    /// self-intersection check assumes axis-aligned segments — false
+    /// positives/negatives are possible until the user pins the vertex
+    /// back onto a grid via the post-drop measurement prompt.
+    pub fn insert_vertex_on_wall(
+        &mut self,
+        ring: usize,
+        edge_start: usize,
+        world_x: f32,
+        world_y: f32,
+    ) -> Option<VertexId> {
+        if ring >= self.rings.len() {
+            return None;
+        }
+        if edge_start >= self.rings[ring].len() {
+            return None;
+        }
+        // Allocate two fresh parameters (independent x and y).
+        let new_x_param = self.next_param_id;
+        let new_y_param = self.next_param_id + 1;
+        self.next_param_id += 2;
+        self.parameters.insert(new_x_param, world_x);
+        self.parameters.insert(new_y_param, world_y);
+        let new_vid = self.alloc_vertex_id();
+        let new_vertex = ParametricVertex {
+            id: new_vid,
+            x_expr: CoordinateExpression::Parameter(new_x_param),
+            y_expr: CoordinateExpression::Parameter(new_y_param),
+        };
+        self.rings[ring].insert(edge_start + 1, new_vertex);
+        self.recompute_active_parameter_count();
+        Some(new_vid)
+    }
+
     /// For an axis-aligned wall whose perpendicular coord is a *constant*,
     /// return that constant value and the axis it lives on. These are the
     /// "anchor walls" tied to V0's position — moving them translates V0
