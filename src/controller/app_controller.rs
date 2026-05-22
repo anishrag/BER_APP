@@ -127,6 +127,12 @@ pub struct DimensionState {
     /// which length labels to render — only user-set walls show lengths;
     /// derived/un-set walls show no label.
     pub dimensioned_walls: Vec<VertexId>,
+    /// Walls the user explicitly skipped (by VertexId of the wall's start).
+    /// Skip is per-wall, not per-param: skipping wall A doesn't prevent the
+    /// user being asked about wall B even if both would set the same param.
+    /// A param controlled by a skipped wall just isn't pinned by that wall;
+    /// if no other wall can set it, the param stays un-dimensioned.
+    pub skipped_walls: HashSet<VertexId>,
 }
 
 pub struct AppController {
@@ -754,11 +760,23 @@ impl AppController {
         }
     }
 
-    /// Skip the current dimension prompt without entering a value. The prompt
-    /// is dropped; the next call to `maybe_start_dimensioning` will pick a
-    /// different wall (or stop, if no more single-unknown walls exist).
+    /// Skip the current dimension prompt without entering a value. The
+    /// specific WALL is suppressed from future prompts; the param it would
+    /// have set remains un-set — but other walls (if any) can still set it.
     pub fn skip_current_dimension(&mut self) {
-        if self.dimensioning.current_prompt.take().is_some() {
+        if let Some(prompt) = self.dimensioning.current_prompt.take() {
+            self.dimensioning
+                .skipped_walls
+                .insert(prompt.wall_start_vertex);
+            let (ring, edge) = self
+                .floor_plan
+                .find_vertex(prompt.wall_start_vertex)
+                .unwrap_or((0, 0));
+            println!(
+                "wall skipped: ring {}/edge {} (would have set P{}). \
+                 The heuristic will continue looking for other walls.",
+                ring, edge, prompt.controlled_param
+            );
             self.compute_next_dimension_prompt();
         }
     }
@@ -767,12 +785,22 @@ impl AppController {
     /// Picks the first wall whose length depends on exactly one unknown
     /// parameter; clears the prompt when every active param is known.
     fn compute_next_dimension_prompt(&mut self) {
+        // A wall is promptable when:
+        //   - It's not in `skipped_walls` (the user already passed on it).
+        //   - Its length depends on exactly one parameter not yet in
+        //     `known_params`, with the rest of its deps all known.
+        //
+        // Skip is per-WALL, not per-param. Skipping wall W (whose controlled
+        // param would have been P) doesn't preclude prompting wall W' that
+        // also sets P — the user might prefer to measure W' instead. If no
+        // other wall can cleanly set P, P stays un-dimensioned but the
+        // user is still asked about every other param via walls that don't
+        // depend on P.
         let active = self.floor_plan.all_active_params();
-        let unknown: HashSet<ParameterId> = active
-            .difference(&self.dimensioning.known_params)
-            .copied()
-            .collect();
-        if unknown.is_empty() {
+        let known = self.dimensioning.known_params.clone();
+        let to_ask: HashSet<ParameterId> =
+            active.into_iter().filter(|p| !known.contains(p)).collect();
+        if to_ask.is_empty() {
             self.dimensioning.current_prompt = None;
             return;
         }
@@ -780,23 +808,47 @@ impl AppController {
         let polygons = self.floor_plan.polygons();
         for (ring_idx, ring_points) in polygons.iter().enumerate() {
             for edge_start in 0..ring_points.len() {
+                // Skip walls the user has already passed on.
+                let Some(vid) = self.floor_plan.vertex_id_at(ring_idx, edge_start) else {
+                    continue;
+                };
+                if self.dimensioning.skipped_walls.contains(&vid) {
+                    continue;
+                }
+                // A wall is promptable iff exactly one of its deps is in
+                // `to_ask` and the rest are in `known`. Deps that aren't in
+                // either set (e.g. params whose only wall was skipped and
+                // never set) block this wall from being promptable.
                 let deps = self.floor_plan.wall_param_deps(ring_idx, edge_start);
-                let unknown_deps: Vec<_> =
-                    deps.into_iter().filter(|d| unknown.contains(d)).collect();
-                if unknown_deps.len() == 1 {
-                    if let Some(vid) = self.floor_plan.vertex_id_at(ring_idx, edge_start) {
-                        self.dimensioning.current_prompt = Some(DimensionPrompt {
-                            wall_start_vertex: vid,
-                            controlled_param: unknown_deps[0],
-                        });
-                        return;
+                let mut to_ask_count = 0usize;
+                let mut to_ask_param: Option<ParameterId> = None;
+                let mut blocked = false;
+                for d in &deps {
+                    if to_ask.contains(d) {
+                        to_ask_count += 1;
+                        to_ask_param = Some(*d);
+                    } else if !known.contains(d) {
+                        // dep is neither known nor in to_ask — shouldn't
+                        // happen, but be defensive.
+                        blocked = true;
+                        break;
                     }
+                }
+                if blocked {
+                    continue;
+                }
+                if to_ask_count == 1 {
+                    self.dimensioning.current_prompt = Some(DimensionPrompt {
+                        wall_start_vertex: vid,
+                        controlled_param: to_ask_param.unwrap(),
+                    });
+                    return;
                 }
             }
         }
-        // No single-unknown-dep wall found. For an axis-aligned polygon this
-        // shouldn't happen; if it does we just bail out and the UI shows no
-        // prompt. (Hook for future "multi-unknown" prompts goes here.)
+        // No promptable wall at all — every to_ask param is reachable only
+        // through walls the user has skipped, or via walls touching multiple
+        // un-set params. The remaining params stay un-dimensioned.
         self.dimensioning.current_prompt = None;
     }
 
