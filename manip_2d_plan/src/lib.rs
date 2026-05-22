@@ -249,6 +249,57 @@ impl FloorPlan {
         self.parametric.equivalent_length_walls(ring, edge_start)
     }
 
+    /// For an axis-aligned wall, the parameter that translates it under a
+    /// perpendicular drag and the axis that parameter controls. None if the
+    /// wall's perpendicular coord is a constant (anchored to V0).
+    pub fn wall_movable_param(
+        &self,
+        ring: usize,
+        edge_start: usize,
+    ) -> Option<(ParameterId, ParameterAxis)> {
+        self.parametric.wall_movable_param(ring, edge_start)
+    }
+
+    /// For a wall whose perpendicular coord is a constant (V0's anchor or
+    /// similar), the current constant value and the axis it lives on.
+    /// Edit-mode drag uses this together with `shift_constant` to translate
+    /// the polygon's anchor walls (leftmost / bottommost on an E, etc.).
+    pub fn wall_anchor_constant(
+        &self,
+        ring: usize,
+        edge_start: usize,
+    ) -> Option<(f32, ParameterAxis)> {
+        self.parametric.wall_anchor_constant(ring, edge_start)
+    }
+
+    /// Shift every vertex whose `axis`-coord equals `old_value` (within a
+    /// small tolerance) to `new_value`. Companion to `wall_anchor_constant`.
+    pub fn shift_constant(&mut self, old_value: f32, axis: ParameterAxis, new_value: f32) {
+        self.parametric.shift_constant(old_value, axis, new_value);
+    }
+
+    /// Hit-test a world-coord point against the polygon's walls. Returns
+    /// the `(ring, edge_start)` of the closest wall within `tol` (same
+    /// units as the polygon coords), or `None` if every wall is farther.
+    pub fn hit_test_wall(&self, world_x: f64, world_y: f64, tol: f64) -> Option<(usize, usize)> {
+        let polygons = self.polygons();
+        let mut best: Option<(f64, usize, usize)> = None;
+        for (ri, ring) in polygons.iter().enumerate() {
+            let n = ring.len();
+            for i in 0..n {
+                let a = ring[i];
+                let b = ring[(i + 1) % n];
+                let d = point_to_segment_distance(
+                    world_x, world_y, a.x as f64, a.y as f64, b.x as f64, b.y as f64,
+                );
+                if d <= tol && (best.is_none() || d < best.unwrap().0) {
+                    best = Some((d, ri, i));
+                }
+            }
+        }
+        best.map(|(_, r, e)| (r, e))
+    }
+
     /// The ParameterId controlling vertex `(ring, idx)`'s x coord, or None.
     pub fn vertex_x_param(&self, ring: usize, idx: usize) -> Option<ParameterId> {
         self.parametric.vertex_x_param(ring, idx)
@@ -321,4 +372,24 @@ impl FloorPlan {
         }
         Some(((min_x, min_y), (max_x, max_y)))
     }
+}
+
+/// Perpendicular distance from `(px, py)` to the line segment from
+/// `(ax, ay)` to `(bx, by)`. Returns the distance to the nearest endpoint
+/// when the point projects outside the segment.
+fn point_to_segment_distance(px: f64, py: f64, ax: f64, ay: f64, bx: f64, by: f64) -> f64 {
+    let abx = bx - ax;
+    let aby = by - ay;
+    let apx = px - ax;
+    let apy = py - ay;
+    let ab_len_sq = abx * abx + aby * aby;
+    if ab_len_sq < 1e-12 {
+        return (apx * apx + apy * apy).sqrt();
+    }
+    let t = ((apx * abx + apy * aby) / ab_len_sq).clamp(0.0, 1.0);
+    let proj_x = ax + t * abx;
+    let proj_y = ay + t * aby;
+    let dx = px - proj_x;
+    let dy = py - proj_y;
+    (dx * dx + dy * dy).sqrt()
 }

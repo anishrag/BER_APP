@@ -415,6 +415,95 @@ impl ParametricPlan {
         Ok(())
     }
 
+    /// For an axis-aligned wall whose perpendicular coord is a *constant*,
+    /// return that constant value and the axis it lives on. These are the
+    /// "anchor walls" tied to V0's position — moving them translates V0
+    /// and every other vertex sharing the same constant. Returns None for
+    /// parameter-anchored walls (use `wall_movable_param` for those).
+    pub fn wall_anchor_constant(
+        &self,
+        ring: usize,
+        edge_start: usize,
+    ) -> Option<(f32, ParameterAxis)> {
+        let r = self.rings.get(ring)?;
+        let n = r.len();
+        if n < 2 || edge_start >= n {
+            return None;
+        }
+        let v_a = &r[edge_start];
+        let v_b = &r[(edge_start + 1) % n];
+        if v_a.y_expr == v_b.y_expr {
+            if let CoordinateExpression::Constant(c) = v_a.y_expr {
+                return Some((c, ParameterAxis::Y));
+            }
+        } else if v_a.x_expr == v_b.x_expr {
+            if let CoordinateExpression::Constant(c) = v_a.x_expr {
+                return Some((c, ParameterAxis::X));
+            }
+        }
+        None
+    }
+
+    /// Update every vertex whose `axis`-coord matches `old_value` (within
+    /// 1e-3 tolerance) to `new_value`. Used by Edit-mode drag of an
+    /// anchor wall: the constant moves wholesale across the polygon, so
+    /// V0 and every vertex sharing its coord shift together.
+    pub fn shift_constant(&mut self, old_value: f32, axis: ParameterAxis, new_value: f32) {
+        let tol = 1e-3_f32;
+        for ring in &mut self.rings {
+            for v in ring {
+                match axis {
+                    ParameterAxis::X => {
+                        if let CoordinateExpression::Constant(c) = v.x_expr {
+                            if (c - old_value).abs() < tol {
+                                v.x_expr = CoordinateExpression::Constant(new_value);
+                            }
+                        }
+                    }
+                    ParameterAxis::Y => {
+                        if let CoordinateExpression::Constant(c) = v.y_expr {
+                            if (c - old_value).abs() < tol {
+                                v.y_expr = CoordinateExpression::Constant(new_value);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    /// For an axis-aligned wall, return the single parameter that controls
+    /// its perpendicular coord (the one that "translates" the wall under a
+    /// drag) — and which axis that parameter belongs to. Returns None if
+    /// the wall's perpendicular coord is a constant (i.e. anchored to V0's
+    /// position) or if the wall isn't axis-aligned (shouldn't occur after
+    /// orthogonalization).
+    pub fn wall_movable_param(
+        &self,
+        ring: usize,
+        edge_start: usize,
+    ) -> Option<(ParameterId, ParameterAxis)> {
+        let r = self.rings.get(ring)?;
+        let n = r.len();
+        if n < 2 || edge_start >= n {
+            return None;
+        }
+        let v_a = &r[edge_start];
+        let v_b = &r[(edge_start + 1) % n];
+        if v_a.y_expr == v_b.y_expr {
+            // Horizontal wall — perpendicular is Y.
+            if let CoordinateExpression::Parameter(p) = v_a.y_expr {
+                return Some((p, ParameterAxis::Y));
+            }
+        } else if v_a.x_expr == v_b.x_expr {
+            // Vertical wall — perpendicular is X.
+            if let CoordinateExpression::Parameter(p) = v_a.x_expr {
+                return Some((p, ParameterAxis::X));
+            }
+        }
+        None
+    }
+
     /// The ParameterId controlling a vertex's x coord, or None if it's a
     /// Constant. Used by linear-remap repair to identify which vertices'
     /// x-coords are "free" to be redistributed.

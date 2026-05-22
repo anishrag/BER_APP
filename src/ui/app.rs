@@ -150,6 +150,7 @@ impl eframe::App for BerApp {
                     dim_scale_set,
                     dim_error,
                     dimensioned_walls,
+                    edit_selected_wall,
                     view,
                 ) = {
                     let controller_ref = self.app_controller.borrow();
@@ -168,6 +169,7 @@ impl eframe::App for BerApp {
                         controller_ref.dimensioning_scale_set(),
                         self.sketch_state.dimension_error.clone(),
                         controller_ref.walls_with_known_length(),
+                        controller_ref.edit_selected_wall_positions(),
                         crate::ui::render::ViewParams {
                             zoom: v.zoom,
                             offset_x: v.offset_x,
@@ -198,6 +200,7 @@ impl eframe::App for BerApp {
                     dim_scale_set,
                     dim_error.as_deref(),
                     &dimensioned_walls,
+                    edit_selected_wall,
                     view,
                     |event| match event {
                         UiEvent::Sketch(sketch_event) => match sketch_event {
@@ -281,6 +284,23 @@ impl eframe::App for BerApp {
                             SketchEvent::SkipDimension => {
                                 controller.borrow_mut().skip_current_dimension();
                                 self.sketch_state.dimension_error = None;
+                            }
+                            SketchEvent::EditMouseDown {
+                                world_x,
+                                world_y,
+                                tol,
+                            } => {
+                                controller
+                                    .borrow_mut()
+                                    .edit_mouse_down(world_x, world_y, tol);
+                            }
+                            SketchEvent::EditMouseDrag { world_x, world_y } => {
+                                controller.borrow_mut().edit_mouse_drag(world_x, world_y);
+                            }
+                            SketchEvent::EditMouseUp => {
+                                if let Err(e) = controller.borrow_mut().edit_mouse_up() {
+                                    eprintln!("edit_mouse_up: {}", e);
+                                }
                             }
                             _ => {}
                         },

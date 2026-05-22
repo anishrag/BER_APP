@@ -452,6 +452,14 @@ impl Transform2d {
         )
     }
 
+    /// Inverse of `apply`: take a canvas-pixel point and return the
+    /// corresponding world-coord point. Used by Edit-mode hit-testing.
+    pub fn inverse(&self, px: f32, py: f32) -> (f64, f64) {
+        let x = (px as f64 - self.cx - self.user_offset_x) / self.scale + self.sx;
+        let y = (py as f64 - self.cy - self.user_offset_y) / self.scale + self.sy;
+        (x, y)
+    }
+
     pub fn scale(&self) -> f64 {
         self.scale
     }
@@ -459,7 +467,7 @@ impl Transform2d {
 
 /// Compute a transform that fits a source bounding box inside `rect` with
 /// padding, then applies the user's `view` transform (zoom + pan) on top.
-pub(crate) fn fit_transform(
+pub fn fit_transform(
     rect: egui::Rect,
     min_xy: (f64, f64),
     max_xy: (f64, f64),

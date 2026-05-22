@@ -110,12 +110,17 @@ impl SketchEngine {
         // Here you would match on self.mode and set the appropriate behaviour
         // For example:
         match (self.mode, self.edit_tool) {
-            // DrawPerpWalls and AddSection share the same stroke-capture
-            // behaviour — both draw an orthogonal polygon. The controller
-            // decides on stroke completion whether to replace the primary
-            // outline or append a new ring.
+            // DrawPerpWalls and AddDetachedSection share the same
+            // stroke-capture behaviour — both draw an orthogonal polygon.
+            // The controller decides on stroke completion whether to
+            // replace the primary outline or append a new ring.
             (SketchMode::Storey2D, EditTools::DrawPerpWalls)
-            | (SketchMode::Storey2D, EditTools::AddSection) => {
+            | (SketchMode::Storey2D, EditTools::AddDetachedSection) => {
+                self.set_mode_behaviour(Box::new(Storey2DPerpWalls));
+            }
+            // Edit mode doesn't capture freehand strokes — interaction
+            // happens via click/drag handled at the UI layer.
+            (SketchMode::Storey2D, EditTools::Edit) => {
                 self.set_mode_behaviour(Box::new(Storey2DPerpWalls));
             }
             _ => (),

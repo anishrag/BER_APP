@@ -151,8 +151,21 @@ pub struct AppController {
     pending_redraw: Option<PendingRedraw>,
     /// Tracks which parameters the user has dimensioned + the current prompt.
     dimensioning: DimensionState,
+    /// Edit-mode interaction state: which wall the user has selected via
+    /// click + whether a drag is currently in progress. Always reset when
+    /// `edit_tool` switches away from `Edit`.
+    edit_state: EditState,
     /// View transform layered on top of the canvas auto-fit (pan + zoom).
     view: ViewTransform,
+}
+
+/// Edit-mode click/drag state.
+#[derive(Debug, Default)]
+pub struct EditState {
+    /// VertexId of the start vertex of the currently selected wall.
+    pub selected_wall: Option<VertexId>,
+    /// True while the user is holding the mouse button after clicking a wall.
+    pub dragging: bool,
 }
 
 impl AppController {
@@ -166,8 +179,102 @@ impl AppController {
             review: None,
             pending_redraw: None,
             dimensioning: DimensionState::default(),
+            edit_state: EditState::default(),
             view: ViewTransform::default(),
         }
+    }
+
+    /// VertexId of the wall currently selected in Edit mode, if any. The UI
+    /// uses this to render the selection highlight.
+    pub fn edit_selected_wall(&self) -> Option<VertexId> {
+        self.edit_state.selected_wall
+    }
+
+    /// World-coord endpoints of the currently selected Edit-mode wall, or
+    /// `None` if nothing is selected. Returned in the same order the
+    /// polygon traverses (wall_a then wall_b).
+    pub fn edit_selected_wall_positions(&self) -> Option<((f64, f64), (f64, f64))> {
+        let vid = self.edit_state.selected_wall?;
+        let (ring, edge_start) = self.floor_plan.find_vertex(vid)?;
+        let polygons = self.floor_plan.polygons();
+        let ring_pts = polygons.get(ring)?;
+        let n = ring_pts.len();
+        if n < 2 {
+            return None;
+        }
+        let a = ring_pts.get(edge_start)?;
+        let b = ring_pts.get((edge_start + 1) % n)?;
+        Some(((a.x as f64, a.y as f64), (b.x as f64, b.y as f64)))
+    }
+
+    /// Edit-mode primary-button press. Hit-test the world-coord position
+    /// against all walls; if any wall is within `tol`, select it and start
+    /// a drag. Returns true if a wall was selected.
+    pub fn edit_mouse_down(&mut self, world_x: f64, world_y: f64, tol: f64) -> bool {
+        if !matches!(self.sketch_engine.edit_tool, EditTools::Edit) {
+            return false;
+        }
+        let Some((ring, edge_start)) = self.floor_plan.hit_test_wall(world_x, world_y, tol) else {
+            self.edit_state.selected_wall = None;
+            self.edit_state.dragging = false;
+            return false;
+        };
+        let Some(vid) = self.floor_plan.vertex_id_at(ring, edge_start) else {
+            return false;
+        };
+        self.edit_state.selected_wall = Some(vid);
+        self.edit_state.dragging = true;
+        true
+    }
+
+    /// Edit-mode drag update: translate the selected wall so its
+    /// perpendicular coord matches the cursor's world-coord position.
+    /// Handles both parameter-anchored walls (set_parameter) and
+    /// constant-anchored walls (shift the constant across every vertex
+    /// that references it — typical for the polygon's leftmost / bottom
+    /// walls that are tied to V0's origin).
+    pub fn edit_mouse_drag(&mut self, world_x: f64, world_y: f64) {
+        if !self.edit_state.dragging {
+            return;
+        }
+        let Some(vid) = self.edit_state.selected_wall else {
+            return;
+        };
+        let Some((ring, edge_start)) = self.floor_plan.find_vertex(vid) else {
+            return;
+        };
+        // Parameter-anchored wall — most common case.
+        if let Some((param, axis)) = self.floor_plan.wall_movable_param(ring, edge_start) {
+            let new_value = match axis {
+                ParameterAxis::X => world_x as f32,
+                ParameterAxis::Y => world_y as f32,
+            };
+            self.floor_plan.set_parameter(param, new_value);
+            return;
+        }
+        // Constant-anchored wall — shift V0's anchor coord (and every
+        // vertex sharing it) to the new perpendicular position.
+        if let Some((old_value, axis)) = self.floor_plan.wall_anchor_constant(ring, edge_start) {
+            let new_value = match axis {
+                ParameterAxis::X => world_x as f32,
+                ParameterAxis::Y => world_y as f32,
+            };
+            self.floor_plan.shift_constant(old_value, axis, new_value);
+        }
+    }
+
+    /// Edit-mode drag release. Persists the polygon and clears the drag
+    /// flag (but keeps the wall selected so the user can immediately
+    /// trigger a follow-up — e.g. a re-drag or a measurement prompt).
+    pub fn edit_mouse_up(&mut self) -> Result<(), String> {
+        if !self.edit_state.dragging {
+            return Ok(());
+        }
+        self.edit_state.dragging = false;
+        self.commit_to_ber()?;
+        // TODO: trigger measurement prompt if the plan is dimensioned —
+        // see task #35.
+        Ok(())
     }
 
     /// Snapshot of the current dimension prompt for the UI to render, or
@@ -1198,6 +1305,11 @@ impl AppController {
     }
 
     pub fn set_edit_mode(&mut self, mode: EditTools) {
+        if !matches!(mode, EditTools::Edit) {
+            // Leaving Edit mode clears the selection so a stale highlight
+            // doesn't carry over into the next tool.
+            self.edit_state = EditState::default();
+        }
         self.sketch_engine.set_edit_tools(mode);
     }
     pub fn edit_mode(&self) -> EditTools {
@@ -1243,7 +1355,7 @@ impl AppController {
                         self.apply_drawperp_stroke(&stroke.points, stroke.is_closed)?;
                     }
                 }
-                EditTools::AddSection => {
+                EditTools::AddDetachedSection => {
                     self.apply_addsection_stroke(&stroke.points, stroke.is_closed)?;
                 }
                 _ => {
@@ -1268,8 +1380,8 @@ impl AppController {
         Ok(())
     }
 
-    /// Apply an AddSection stroke: append a ring (or replace if there's no
-    /// outline yet), persist, populate review.
+    /// Apply an AddDetachedSection stroke: append a ring (or replace if
+    /// there's no outline yet), persist, populate review.
     fn apply_addsection_stroke(
         &mut self,
         points: &[Point2f32],
@@ -1294,7 +1406,10 @@ impl AppController {
             // are in meters. Mixed units will look wrong on the canvas until
             // a per-stroke pixels→meters conversion is added.
         }
-        println!("floor plan (after AddSection): {:?}", self.floor_plan);
+        println!(
+            "floor plan (after AddDetachedSection): {:?}",
+            self.floor_plan
+        );
         self.commit_to_ber()?;
         self.populate_collinearity_review();
         self.maybe_start_dimensioning();
@@ -1303,7 +1418,7 @@ impl AppController {
 
     /// Detect near-collinear walls and populate the review if any.
     ///
-    /// After AddSection appends a new ring, pairs entirely within older
+    /// After AddDetachedSection appends a new ring, pairs entirely within older
     /// rings were either resolved when those rings were drawn or were
     /// intentionally left as distinct walls — don't re-ask. We only
     /// surface pairs that involve the newly-added ring. For DrawPerpWalls

@@ -134,6 +134,21 @@ pub enum SketchEvent {
     AddStoreyFromCurrent,
     /// User chose to discard the pending stroke.
     IgnoreRedraw,
+    /// Primary mouse button pressed in Edit mode at the given world-coord
+    /// position. Hit-tests a wall and selects it if found.
+    EditMouseDown {
+        world_x: f64,
+        world_y: f64,
+        tol: f64,
+    },
+    /// Primary mouse drag in Edit mode: translate the selected wall so its
+    /// perpendicular coord matches `(world_x, world_y)`.
+    EditMouseDrag {
+        world_x: f64,
+        world_y: f64,
+    },
+    /// Primary mouse release in Edit mode: commit + clear drag flag.
+    EditMouseUp,
     /// Scroll-wheel zoom about the given anchor (canvas pixel coords).
     ZoomView {
         factor: f32,
@@ -176,6 +191,7 @@ impl SketchPage {
         dim_scale_set: bool,
         dim_error: Option<&str>,
         dimensioned_walls: &[(usize, usize)],
+        edit_selected_wall: Option<((f64, f64), (f64, f64))>,
         view: ViewParams,
         mut on_event: F,
     ) where
@@ -225,6 +241,23 @@ impl SketchPage {
                     dimensioned_walls,
                     view,
                 );
+
+                // Edit-mode selection highlight: paint the selected wall
+                // in red so the user sees which wall their drag is moving.
+                if matches!(edit_tool, EditTools::Edit) {
+                    if let Some((wa, wb)) = edit_selected_wall {
+                        render::render_equivalent_wall(
+                            &painter,
+                            rect,
+                            ber,
+                            current_storey_idx,
+                            mode,
+                            view,
+                            wa,
+                            wb,
+                        );
+                    }
+                }
 
                 // Dimension-prompt overlay. Every wall the user can
                 // equivalently measure (including the primary) is highlighted
@@ -287,15 +320,16 @@ impl SketchPage {
                     }
                 }
 
-                // Stroke input: only in 2D mode, and only when we're not in
-                // review or awaiting a redraw decision. (Pan/zoom still work.)
-                // Use the *_by(Primary) variants so middle/right drags (which pan)
-                // don't accidentally start a stroke.
-                if matches!(mode, SketchMode::Storey2D)
+                // Primary-button input: stroke drawing OR Edit-mode
+                // click/drag, depending on `edit_tool`. Both gated on
+                // 2D mode and "no overlay is open" (review / pending
+                // redraw / dim prompt take priority).
+                let primary_available = matches!(mode, SketchMode::Storey2D)
                     && !reviewing
                     && !pending_redraw
-                    && !dim_prompting
-                {
+                    && !dim_prompting;
+
+                if primary_available && !matches!(edit_tool, EditTools::Edit) {
                     if response.drag_started_by(egui::PointerButton::Primary) {
                         if let Some(pos) = response.interact_pointer_pos() {
                             let local_pos = pos - rect.left_top().to_vec2();
@@ -317,6 +351,49 @@ impl SketchPage {
 
                     if let Some(stroke) = current {
                         draw_stroke(&painter, rect, stroke);
+                    }
+                }
+
+                // Edit-mode primary input: click to select a wall, drag to
+                // translate it. Position is converted to world coords via
+                // the same fit_transform render uses so the hit-test
+                // matches what the user visually sees.
+                if primary_available && matches!(edit_tool, EditTools::Edit) {
+                    if let (Some(b), Some((min_xy, max_xy))) = (
+                        ber,
+                        ber.and_then(|b| {
+                            b.storeys
+                                .get(current_storey_idx)
+                                .and_then(crate::ui::render::storey_2d::bounding_box)
+                        }),
+                    ) {
+                        let _ = b; // keep `ber` referenced; binding-only.
+                        let t = crate::ui::render::fit_transform(rect, min_xy, max_xy, view);
+                        // World-coord tolerance corresponds to ~12 pixels
+                        // on screen at the current zoom.
+                        let tol_world = 12.0 / t.scale();
+                        if response.drag_started_by(egui::PointerButton::Primary) {
+                            if let Some(pos) = response.interact_pointer_pos() {
+                                let (wx, wy) = t.inverse(pos.x, pos.y);
+                                on_event(UiEvent::Sketch(SketchEvent::EditMouseDown {
+                                    world_x: wx,
+                                    world_y: wy,
+                                    tol: tol_world,
+                                }));
+                            }
+                        }
+                        if response.dragged_by(egui::PointerButton::Primary) {
+                            if let Some(pos) = response.interact_pointer_pos() {
+                                let (wx, wy) = t.inverse(pos.x, pos.y);
+                                on_event(UiEvent::Sketch(SketchEvent::EditMouseDrag {
+                                    world_x: wx,
+                                    world_y: wy,
+                                }));
+                            }
+                        }
+                        if response.drag_stopped_by(egui::PointerButton::Primary) {
+                            on_event(UiEvent::Sketch(SketchEvent::EditMouseUp));
+                        }
                     }
                 }
 
