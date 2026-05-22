@@ -242,13 +242,18 @@ impl AppController {
         );
 
         // Snapshot so we can roll back if the dimension produces an invalid
-        // (self-intersecting / collapsed) polygon. The parametric model alone
-        // doesn't enforce "all right-side vertical segments sum to the spine
-        // height" — that's an emergent property of the polygon being simple.
+        // (self-intersecting / collapsed / direction-flipped) polygon. The
+        // parametric model alone doesn't enforce "all right-side vertical
+        // segments sum to the spine height" — that's an emergent property
+        // of the polygon being simple. Likewise it doesn't enforce that
+        // edges keep going in the same direction; a parameter change can
+        // push a coord past a fixed boundary and flip an edge without
+        // producing a self-intersection.
         let snapshot = self.floor_plan.clone();
         let scale_set_before = self.dimensioning.scale_set;
         let known_params_before = self.dimensioning.known_params.clone();
         let dimensioned_walls_before = self.dimensioning.dimensioned_walls.clone();
+        let edge_signs_before = snapshot_edge_signs(&snapshot);
 
         // Optimistically mark the just-set param as known up front. The repair
         // logic only scales params NOT in `known_params`; if we delayed the
@@ -317,7 +322,7 @@ impl AppController {
                 "  polygon invalid post-apply ({:?}) — attempting repair on axis {:?}",
                 initial_err, dim_axis
             );
-            if !self.try_repair_unset_params_on_axis(dim_axis) {
+            if !self.try_repair_unset_params_on_axis(dim_axis, &snapshot) {
                 self.floor_plan = snapshot;
                 self.dimensioning.scale_set = scale_set_before;
                 self.dimensioning.known_params = known_params_before;
@@ -334,6 +339,31 @@ impl AppController {
                 ));
             }
             println!("  repair succeeded.");
+        }
+
+        // Direction-flip guard: even after a "simple" polygon validation,
+        // we still need to reject cases where a parameter change pushed an
+        // un-set coord past a known coord and silently inverted an edge.
+        // E.g. setting the bottom arm of a T to 10m can drop its top
+        // endpoint above the polygon's top edge — no edges cross, but the
+        // adjacent wall now goes "the wrong way" and visually the polygon
+        // has changed shape.
+        let edge_signs_after = snapshot_edge_signs(&self.floor_plan);
+        if let Some((r, e)) = find_flipped_edge(&edge_signs_before, &edge_signs_after) {
+            self.floor_plan = snapshot;
+            self.dimensioning.scale_set = scale_set_before;
+            self.dimensioning.known_params = known_params_before;
+            self.dimensioning.dimensioned_walls = dimensioned_walls_before;
+            println!(
+                "  → REJECTED: ring {}/edge {} would flip direction. Rolled back.",
+                r, e
+            );
+            return Err(format!(
+                "{} would invert ring {}/edge {} (its direction would flip — \
+                 that's a shape change, not a dimension adjustment). Try a \
+                 value that's consistent with the other walls already set.",
+                value, r, e
+            ));
         }
 
         // known_params already updated optimistically above.
@@ -359,31 +389,44 @@ impl AppController {
     }
 
     /// Try to repair an invalid polygon by redistributing un-set parameters
-    /// on the given axis. Walks ring 0's vertices to find maximal runs of
-    /// un-set coords bounded by known coords on both sides; within each run,
-    /// linearly distributes the un-set params evenly between the bounds
-    /// (preserving their polygon-traversal order).
+    /// on the given axis. Three strategies tried in order:
     ///
-    /// This handles cases where uniform scaling can't find a valid window —
-    /// e.g. for an E with bottom arm height fixed, the middle and top arms
-    /// need to fit in the narrow gap between the top edge (known constant)
-    /// and the bottom arm's top (the user-just-set param). Uniform scaling
-    /// from y=0 either undershoots (params still past the bound) or
-    /// overshoots (some params go above the polygon's top).
+    /// 1. **Distribute**: evenly between the bounding known coords. Works when
+    ///    un-set params naturally sit between the bounds — e.g. for an E,
+    ///    the top arms fit between the top constant and the user-set bottom
+    ///    arm's top.
     ///
-    /// Falls back to uniform scaling if linear remap doesn't yield a valid
-    /// polygon. Returns true if either approach succeeded. On failure leaves
-    /// `self.floor_plan` at the post-apply (still-invalid) state.
-    fn try_repair_unset_params_on_axis(&mut self, axis: ParameterAxis) -> bool {
+    /// 2. **Preserve offsets**: keep each un-set param's pre-apply distance
+    ///    from the lower bound. Works when the un-set params extend
+    ///    *outside* the bounds — e.g. a T whose shaft was dimensioned, the
+    ///    un-set top of the polygon needs to move *above* V0's constant.
+    ///
+    /// 3. **Uniform scale**: scale all un-set params by a decreasing factor.
+    ///    Last resort, handles a wide variety of cases at the cost of
+    ///    visually distorting the polygon.
+    ///
+    /// Returns `true` if any strategy produced a valid simple polygon.
+    /// Direction-flip rejection happens at the caller (apply_dimension).
+    fn try_repair_unset_params_on_axis(
+        &mut self,
+        axis: ParameterAxis,
+        snapshot: &FloorPlan,
+    ) -> bool {
         let post_apply = self.floor_plan.clone();
 
-        // First attempt: linear remap on ring 0.
+        // Strategy 1: distribute between bounds.
         if self.try_linear_remap_ring0(axis) {
             return true;
         }
         self.floor_plan = post_apply.clone();
 
-        // Fallback: uniform scaling (the original approach).
+        // Strategy 2: preserve pre-apply offsets from the lower bound.
+        if self.try_linear_remap_preserve_offsets(axis, snapshot) {
+            return true;
+        }
+        self.floor_plan = post_apply.clone();
+
+        // Strategy 3: uniform scaling.
         const FACTORS: &[f32] = &[0.9, 0.75, 0.55, 0.35, 0.2, 0.1];
         for &factor in FACTORS {
             self.floor_plan = post_apply.clone();
@@ -403,6 +446,102 @@ impl AppController {
 
         self.floor_plan = post_apply;
         false
+    }
+
+    /// Repair strategy 2: for each un-set parameter, set its new value to
+    /// `new_lower + (pre_value - pre_lower)` where `new_lower` is the
+    /// post-apply coord of the vertex just before the run and `pre_lower` /
+    /// `pre_value` are from the pre-apply snapshot. This preserves each
+    /// un-set param's distance from the "anchor" vertex preceding it in the
+    /// polygon's traversal — the polygon's shape relative to that anchor is
+    /// unchanged, just translated to accommodate the new user-set value.
+    fn try_linear_remap_preserve_offsets(
+        &mut self,
+        axis: ParameterAxis,
+        snapshot: &FloorPlan,
+    ) -> bool {
+        let polygons = self.floor_plan.polygons();
+        let snap_polys = snapshot.polygons();
+        let Some(ring) = polygons.first() else {
+            return false;
+        };
+        let Some(snap_ring) = snap_polys.first() else {
+            return false;
+        };
+        let n = ring.len();
+        if n < 4 || snap_ring.len() != n {
+            return false;
+        }
+
+        // Classify each vertex once. We can't use closures that borrow
+        // `self.floor_plan` immutably alongside `self.floor_plan.set_parameter`
+        // mutably below, so resolve everything up front into owned data.
+        let vertex_param: Vec<Option<ParameterId>> = (0..n)
+            .map(|i| match axis {
+                ParameterAxis::X => self.floor_plan.vertex_x_param(0, i),
+                ParameterAxis::Y => self.floor_plan.vertex_y_param(0, i),
+            })
+            .collect();
+        let is_unset = |i: usize| -> bool {
+            matches!(vertex_param[i], Some(p) if !self.dimensioning.known_params.contains(&p))
+        };
+        let coord_of = |pts: &[Point2f32], i: usize| -> f32 {
+            match axis {
+                ParameterAxis::X => pts[i].x,
+                ParameterAxis::Y => pts[i].y,
+            }
+        };
+
+        if is_unset(0) {
+            // V0 should be a constant (the polygon's anchor). Defensive bail.
+            return false;
+        }
+
+        // First pass: collect (param, new_value) assignments without mutating.
+        let mut assignments: Vec<(ParameterId, f32)> = Vec::new();
+        let mut i = 0;
+        while i < n {
+            if !is_unset(i) {
+                i += 1;
+                continue;
+            }
+            let start = i;
+            while i < n && is_unset(i) {
+                i += 1;
+            }
+            let end = i; // exclusive
+
+            let prev_idx = (start + n - 1) % n;
+            if is_unset(prev_idx) {
+                continue;
+            }
+
+            let new_lower = coord_of(ring, prev_idx);
+            let pre_lower = coord_of(snap_ring, prev_idx);
+
+            // Distinct un-set params in run order. For each, the pre-apply
+            // value comes from the snapshot vertex at the same position.
+            let mut applied: Vec<ParameterId> = Vec::new();
+            for j in start..end {
+                let Some(p) = vertex_param[j] else {
+                    continue;
+                };
+                if applied.contains(&p) {
+                    continue;
+                }
+                applied.push(p);
+                let pre_value = coord_of(snap_ring, j);
+                let offset = pre_value - pre_lower;
+                assignments.push((p, new_lower + offset));
+            }
+        }
+
+        // Second pass: apply.
+        for (p, value) in assignments {
+            self.floor_plan.set_parameter(p, value);
+        }
+
+        self.floor_plan.validate_simple().is_ok()
     }
 
     /// Linear-remap repair for ring 0. Walks vertices in polygon order, finds
@@ -1075,6 +1214,50 @@ impl AppController {
             });
         }
     }
+}
+
+/// For each edge in each ring, record `(sign_dx, sign_dy)` where dx, dy
+/// are the deltas from the edge's start vertex to its end vertex. Used by
+/// the direction-flip guard in `apply_dimension`.
+fn snapshot_edge_signs(plan: &FloorPlan) -> Vec<Vec<(i8, i8)>> {
+    plan.polygons()
+        .iter()
+        .map(|ring| {
+            let n = ring.len();
+            (0..n)
+                .map(|i| {
+                    let a = ring[i];
+                    let b = ring[(i + 1) % n];
+                    let sx = (b.x - a.x).signum() as i8;
+                    let sy = (b.y - a.y).signum() as i8;
+                    (sx, sy)
+                })
+                .collect()
+        })
+        .collect()
+}
+
+/// Returns the (ring_idx, edge_idx) of the first edge whose direction sign
+/// flipped between `before` and `after` (positive → negative or vice versa
+/// along either axis). Zero signs are ignored — they represent edges that
+/// were already degenerate in one direction, so a sign change there isn't
+/// a "flip", and `validate_simple` separately catches genuinely-collapsed
+/// edges.
+fn find_flipped_edge(before: &[Vec<(i8, i8)>], after: &[Vec<(i8, i8)>]) -> Option<(usize, usize)> {
+    for (ring_idx, (b_ring, a_ring)) in before.iter().zip(after.iter()).enumerate() {
+        if b_ring.len() != a_ring.len() {
+            return Some((ring_idx, 0));
+        }
+        for (edge_idx, (b_sign, a_sign)) in b_ring.iter().zip(a_ring.iter()).enumerate() {
+            if b_sign.0 != 0 && a_sign.0 != 0 && b_sign.0 != a_sign.0 {
+                return Some((ring_idx, edge_idx));
+            }
+            if b_sign.1 != 0 && a_sign.1 != 0 && b_sign.1 != a_sign.1 {
+                return Some((ring_idx, edge_idx));
+            }
+        }
+    }
+    None
 }
 
 /// Statistics about a floor plan
