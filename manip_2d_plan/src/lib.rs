@@ -16,7 +16,7 @@ mod parametric;
 mod simplification;
 
 pub use error::Error;
-pub use parametric::{Axis, CollinearitySuggestion, ParameterId, VertexId};
+pub use parametric::{Axis, CollinearitySuggestion, ParameterAxis, ParameterId, VertexId};
 
 use domain::points::Point2f32;
 
@@ -226,5 +226,40 @@ impl FloorPlan {
     ) -> Result<(), Error> {
         self.parametric
             .set_wall_length(ring, edge_start, new_length, unknown_param)
+    }
+
+    /// Validate that every ring is a simple axis-aligned polygon. Used after
+    /// applying a dimension to confirm the user's input is consistent with the
+    /// shape — e.g. for an E, the right-side vertical segments must collectively
+    /// span the same height as the spine.
+    pub fn validate_simple(&self) -> Result<(), Error> {
+        self.parametric.validate_simple()
+    }
+
+    /// Which Cartesian axis the given parameter controls.
+    pub fn param_axis(&self, p: ParameterId) -> Option<ParameterAxis> {
+        self.parametric.param_axis(p)
+    }
+
+    /// Multiply a single parameter's value by `factor`.
+    pub fn scale_parameter(&mut self, param: ParameterId, factor: f32) {
+        self.parametric.scale_parameter(param, factor);
+    }
+
+    /// Bounding box of the entire plan (across all rings) in current units.
+    pub fn bounding_box(&self) -> Option<((f32, f32), (f32, f32))> {
+        let mut iter = self.polygons().into_iter().flatten();
+        let first = iter.next()?;
+        let mut min_x = first.x;
+        let mut min_y = first.y;
+        let mut max_x = first.x;
+        let mut max_y = first.y;
+        for p in iter {
+            min_x = min_x.min(p.x);
+            min_y = min_y.min(p.y);
+            max_x = max_x.max(p.x);
+            max_y = max_y.max(p.y);
+        }
+        Some(((min_x, min_y), (max_x, max_y)))
     }
 }

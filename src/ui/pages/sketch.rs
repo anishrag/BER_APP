@@ -174,6 +174,7 @@ impl SketchPage {
         dim_prompt: Option<DimensionPromptUiData>,
         dim_input: &mut String,
         dim_scale_set: bool,
+        dim_error: Option<&str>,
         view: ViewParams,
         mut on_event: F,
     ) where
@@ -315,6 +316,7 @@ impl SketchPage {
                             p,
                             dim_scale_set,
                             dim_input,
+                            dim_error,
                             &mut on_event,
                         );
                     } else if reviewing {
@@ -345,6 +347,7 @@ impl SketchPage {
         prompt: DimensionPromptUiData,
         scale_set: bool,
         dim_input: &mut String,
+        dim_error: Option<&str>,
         on_event: &mut F,
     ) {
         let units = if scale_set {
@@ -384,6 +387,14 @@ impl SketchPage {
         {
             on_event(UiEvent::Sketch(SketchEvent::SkipDimension));
             dim_input.clear();
+        }
+        // Surface the last error inline so the user can correct without
+        // losing what they typed.
+        if let Some(err) = dim_error {
+            ui.label(
+                egui::RichText::new(format!("⚠ {}", err))
+                    .color(egui::Color32::from_rgb(255, 120, 90)),
+            );
         }
     }
 

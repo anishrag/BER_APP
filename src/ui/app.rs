@@ -27,6 +27,9 @@ pub struct SketchState {
     /// Backing string for the dimension prompt's text input. Lives across
     /// frames so the user's in-progress typing isn't lost on re-render.
     pub dimension_input: String,
+    /// Last error from `apply_dimension`. Shown next to the textbox so the
+    /// user can correct without losing what they typed.
+    pub dimension_error: Option<String>,
 }
 
 pub struct SplashState {
@@ -145,6 +148,7 @@ impl eframe::App for BerApp {
                     pending_redraw,
                     dim_prompt,
                     dim_scale_set,
+                    dim_error,
                     view,
                 ) = {
                     let controller_ref = self.app_controller.borrow();
@@ -161,6 +165,7 @@ impl eframe::App for BerApp {
                         controller_ref.has_pending_redraw(),
                         controller_ref.dimension_prompt_for_ui(),
                         controller_ref.dimensioning_scale_set(),
+                        self.sketch_state.dimension_error.clone(),
                         crate::ui::render::ViewParams {
                             zoom: v.zoom,
                             offset_x: v.offset_x,
@@ -189,6 +194,7 @@ impl eframe::App for BerApp {
                     dim_prompt,
                     &mut self.sketch_state.dimension_input,
                     dim_scale_set,
+                    dim_error.as_deref(),
                     view,
                     |event| match event {
                         UiEvent::Sketch(sketch_event) => match sketch_event {
@@ -259,12 +265,19 @@ impl eframe::App for BerApp {
                                 controller.borrow_mut().discard_pending_redraw();
                             }
                             SketchEvent::ApplyDimension(value) => {
-                                if let Err(e) = controller.borrow_mut().apply_dimension(value) {
-                                    eprintln!("apply_dimension: {}", e);
+                                match controller.borrow_mut().apply_dimension(value) {
+                                    Ok(()) => {
+                                        self.sketch_state.dimension_error = None;
+                                    }
+                                    Err(e) => {
+                                        eprintln!("apply_dimension: {}", e);
+                                        self.sketch_state.dimension_error = Some(e);
+                                    }
                                 }
                             }
                             SketchEvent::SkipDimension => {
                                 controller.borrow_mut().skip_current_dimension();
+                                self.sketch_state.dimension_error = None;
                             }
                             _ => {}
                         },

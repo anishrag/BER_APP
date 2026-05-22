@@ -41,6 +41,16 @@ pub enum Axis {
     Vertical,
 }
 
+/// Which Cartesian axis a parameter's value lives on. A parameter is used as
+/// either an `x_expr` or a `y_expr` (never both), so its axis is well-defined.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ParameterAxis {
+    /// Parameter controls an x-coordinate.
+    X,
+    /// Parameter controls a y-coordinate.
+    Y,
+}
+
 /// A suggestion that two edges (possibly in different rings of the same plan)
 /// are close enough to be considered the same line. The caller asks the user,
 /// then either applies (`apply_collinear_suggestion`) or discards.
@@ -327,6 +337,23 @@ impl ParametricPlan {
         }
     }
 
+    /// Check that every ring is a simple axis-aligned polygon: each edge has
+    /// positive length, and no pair of non-adjacent edges crosses or overlaps.
+    /// Returns the first failure reason, or `Ok(())` if every ring is simple.
+    pub fn validate_simple(&self) -> Result<(), Error> {
+        for (ring_idx, ring) in self.rings.iter().enumerate() {
+            let points: Vec<Point2f32> =
+                ring.iter().map(|v| v.evaluate(&self.parameters)).collect();
+            if let Err(reason) = check_simple_axis_aligned(&points) {
+                return Err(Error::DimensionError(format!(
+                    "ring {}: {}",
+                    ring_idx, reason
+                )));
+            }
+        }
+        Ok(())
+    }
+
     /// Change `unknown_param`'s value so the wall starting at `(ring, edge_start)`
     /// has length `new_length`. Preserves the wall's direction along its axis
     /// (which endpoint is greater).
@@ -386,6 +413,31 @@ impl ParametricPlan {
         }
 
         Ok(())
+    }
+
+    /// Which axis a parameter controls: `X` if it appears as some vertex's
+    /// `x_expr`, `Y` if it appears as some vertex's `y_expr`. `None` if the
+    /// parameter isn't currently referenced.
+    pub fn param_axis(&self, p: ParameterId) -> Option<ParameterAxis> {
+        for ring in &self.rings {
+            for v in ring {
+                if matches!(&v.x_expr, CoordinateExpression::Parameter(q) if *q == p) {
+                    return Some(ParameterAxis::X);
+                }
+                if matches!(&v.y_expr, CoordinateExpression::Parameter(q) if *q == p) {
+                    return Some(ParameterAxis::Y);
+                }
+            }
+        }
+        None
+    }
+
+    /// Multiply the value of `param` by `factor`. Only touches `parameters`;
+    /// the vertex expressions are unchanged. Used by aesthetic rescaling.
+    pub fn scale_parameter(&mut self, param: ParameterId, factor: f32) {
+        if let Some(v) = self.parameters.get_mut(&param) {
+            *v *= factor;
+        }
     }
 
     /// All ParameterIds currently referenced by any vertex.
@@ -643,6 +695,98 @@ struct EdgeInfo {
     start: usize,
     coord: f32,
     expr: CoordinateExpression,
+}
+
+/// Validate that `points` traced in order form a simple axis-aligned polygon:
+/// at least 4 vertices, every edge has positive length, no pair of non-adjacent
+/// edges crosses or overlaps. Returns the first failure reason.
+fn check_simple_axis_aligned(points: &[Point2f32]) -> Result<(), String> {
+    let n = points.len();
+    if n < 4 {
+        return Err(format!("only {} vertices (need at least 4)", n));
+    }
+    // 1. Every edge has nontrivial length. Tolerance is generous so we don't
+    //    spuriously reject the polygon at extreme zoom levels.
+    let min_len_sq = 1e-3_f32; // sub-millimetre at meter scale; well below any real wall
+    for i in 0..n {
+        let a = points[i];
+        let b = points[(i + 1) % n];
+        let dx = a.x - b.x;
+        let dy = a.y - b.y;
+        if dx * dx + dy * dy < min_len_sq {
+            return Err(format!("edge {} collapsed to zero length", i));
+        }
+    }
+    // 2. No two non-adjacent edges cross or overlap. Adjacent edges share an
+    //    endpoint by construction and are skipped.
+    for i in 0..n {
+        let a1 = points[i];
+        let a2 = points[(i + 1) % n];
+        for j in (i + 2)..n {
+            // The closing edge (n-1 → 0) is adjacent to edge 0 (0 → 1).
+            if i == 0 && j == n - 1 {
+                continue;
+            }
+            let b1 = points[j];
+            let b2 = points[(j + 1) % n];
+            if axis_aligned_segments_cross(a1, a2, b1, b2) {
+                return Err(format!("edges {} and {} cross", i, j));
+            }
+        }
+    }
+    Ok(())
+}
+
+fn axis_aligned_segments_cross(a1: Point2f32, a2: Point2f32, b1: Point2f32, b2: Point2f32) -> bool {
+    let eps = 1e-4_f32;
+    let a_horiz = (a1.y - a2.y).abs() < eps;
+    let b_horiz = (b1.y - b2.y).abs() < eps;
+
+    if a_horiz != b_horiz {
+        // Perpendicular pair. Cross iff the vertical's x lies strictly inside
+        // the horizontal's x range AND the horizontal's y lies strictly inside
+        // the vertical's y range. (Strict — shared endpoints on adjacent edges
+        // are already filtered by the caller, but T-junctions where one edge's
+        // endpoint touches the other's interior count as crossing.)
+        let (h1, h2, v1, v2) = if a_horiz {
+            (a1, a2, b1, b2)
+        } else {
+            (b1, b2, a1, a2)
+        };
+        let h_y = h1.y;
+        let h_min = h1.x.min(h2.x);
+        let h_max = h1.x.max(h2.x);
+        let v_x = v1.x;
+        let v_min = v1.y.min(v2.y);
+        let v_max = v1.y.max(v2.y);
+        return h_min < v_x && v_x < h_max && v_min < h_y && h_y < v_max;
+    }
+
+    // Parallel pair. Overlap iff collinear and ranges intersect.
+    let same_line = if a_horiz {
+        (a1.y - b1.y).abs() < eps
+    } else {
+        (a1.x - b1.x).abs() < eps
+    };
+    if !same_line {
+        return false;
+    }
+    let (a_min, a_max, b_min, b_max) = if a_horiz {
+        (
+            a1.x.min(a2.x),
+            a1.x.max(a2.x),
+            b1.x.min(b2.x),
+            b1.x.max(b2.x),
+        )
+    } else {
+        (
+            a1.y.min(a2.y),
+            a1.y.max(a2.y),
+            b1.y.min(b2.y),
+            b1.y.max(b2.y),
+        )
+    };
+    a_min < b_max && b_min < a_max
 }
 
 fn collect_pairs(
@@ -904,6 +1048,56 @@ mod tests {
         // Every length should halve.
         assert!((post_lengths.0 - pre_lengths.0 * 0.5).abs() < 0.01);
         assert!((post_lengths.1 - pre_lengths.1 * 0.5).abs() < 0.01);
+    }
+
+    #[test]
+    fn validate_simple_accepts_orthogonal_l() {
+        let plan = build_plan(&[
+            (0.0, 0.0),
+            (200.0, 0.0),
+            (200.0, 100.0),
+            (100.0, 100.0),
+            (100.0, 200.0),
+            (0.0, 200.0),
+        ]);
+        assert!(plan.validate_simple().is_ok());
+    }
+
+    #[test]
+    fn validate_simple_rejects_collapsed_edge() {
+        // A rectangle whose width parameter is set to ~0 has zero-length
+        // top and bottom edges — not a simple polygon any more.
+        let mut plan = build_plan(&[(0.0, 0.0), (200.0, 0.0), (200.0, 100.0), (0.0, 100.0)]);
+        plan.set_parameter(0, 0.0);
+        assert!(plan.validate_simple().is_err());
+    }
+
+    #[test]
+    fn validate_simple_rejects_self_intersection() {
+        // Construct an E-like polygon and break the right-side ordering so it
+        // self-intersects.
+        let mut plan = ParametricPlan::from_points(&[
+            Point2f32::new(0.0, 0.0),
+            Point2f32::new(50.0, 0.0),
+            Point2f32::new(50.0, 30.0),
+            Point2f32::new(20.0, 30.0),
+            Point2f32::new(20.0, 40.0),
+            Point2f32::new(50.0, 40.0),
+            Point2f32::new(50.0, 70.0),
+            Point2f32::new(0.0, 70.0),
+        ]);
+        plan.apply_orthogonal_constraints().unwrap();
+        assert!(plan.validate_simple().is_ok());
+
+        // Find a parameter controlling one of the right-side y coords and
+        // push it past another to force the polygon to fold over itself.
+        // Param 4 corresponds to y=40 in the original layout; setting it
+        // below y=30 (which is param 2) inverts the middle "gap".
+        plan.set_parameter(4, 20.0); // was 40, now 20 — below the y=30 baseline
+        assert!(
+            plan.validate_simple().is_err(),
+            "polygon should be invalid after inverting a y coord"
+        );
     }
 
     #[test]

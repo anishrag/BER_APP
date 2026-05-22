@@ -9,7 +9,9 @@ use datatypes::ber::common::ItemId;
 use datatypes::ber::structural::{FloorRegions, Storey};
 use domain::points::{Point2f32, Point2f64};
 use domain::sketch::{DisplayMode, EditTools, SketchMode};
-use manip_2d_plan::{Axis, CollinearitySuggestion, FloorPlan, ParameterId, VertexId};
+use manip_2d_plan::{
+    Axis, CollinearitySuggestion, FloorPlan, ParameterAxis, ParameterId, VertexId,
+};
 use sketch::model::Stroke;
 use sketch::SketchEngine;
 use std::collections::HashSet;
@@ -210,6 +212,13 @@ impl AppController {
             .find_vertex(prompt.wall_start_vertex)
             .ok_or_else(|| "prompt wall vertex no longer exists".to_string())?;
 
+        // Snapshot so we can roll back if the dimension produces an invalid
+        // (self-intersecting / collapsed) polygon. The parametric model alone
+        // doesn't enforce "all right-side vertical segments sum to the spine
+        // height" — that's an emergent property of the polygon being simple.
+        let snapshot = self.floor_plan.clone();
+        let scale_set_before = self.dimensioning.scale_set;
+
         if !self.dimensioning.scale_set {
             // First dimension — convert the whole plan from pixels to real units
             // in one stroke by scaling every parameter and constant uniformly.
@@ -226,17 +235,89 @@ impl AppController {
         } else {
             // Subsequent dimensions — adjust just the controlled parameter so
             // the wall takes the new length, preserving its direction along axis.
-            self.floor_plan
-                .set_wall_length(ring, edge_start, value, prompt.controlled_param)
-                .map_err(|e| format!("set_wall_length: {:?}", e))?;
+            if let Err(e) =
+                self.floor_plan
+                    .set_wall_length(ring, edge_start, value, prompt.controlled_param)
+            {
+                self.floor_plan = snapshot;
+                return Err(format!("set_wall_length: {:?}", e));
+            }
+        }
+
+        // Reject dimensions that would invalidate the polygon (e.g. an E whose
+        // right-side segments don't sum to the spine height — applying them
+        // collapses an edge or makes the polygon self-intersect).
+        if let Err(e) = self.floor_plan.validate_simple() {
+            self.floor_plan = snapshot;
+            self.dimensioning.scale_set = scale_set_before;
+            return Err(format!(
+                "{} is incompatible with the shape — the polygon would {:?}. \
+                 Try a value that's consistent with the other walls already set.",
+                value, e
+            ));
         }
 
         self.dimensioning
             .known_params
             .insert(prompt.controlled_param);
+        // Apply an aesthetic nudge if the polygon's aspect got extreme from
+        // this dimension. Only touches un-set parameters; user's set values
+        // stay exact.
+        self.aesthetic_rescale_if_needed();
         self.commit_to_ber()?;
         self.compute_next_dimension_prompt();
         Ok(())
+    }
+
+    /// If the polygon's aspect ratio is extreme (> ~5:1), scale the still-
+    /// unset parameters along the short axis to bring aspect back to ~3:1
+    /// (capped at 2× scaling). Reverts if the rescale would invalidate the
+    /// polygon. Pure aesthetics — the user's confirmed dimensions never move.
+    fn aesthetic_rescale_if_needed(&mut self) {
+        const TRIGGER_ASPECT: f32 = 5.0;
+        const TARGET_ASPECT: f32 = 3.0;
+        const MAX_FACTOR: f32 = 2.0;
+
+        let Some(((min_x, min_y), (max_x, max_y))) = self.floor_plan.bounding_box() else {
+            return;
+        };
+        let bw = max_x - min_x;
+        let bh = max_y - min_y;
+        if bw < 1e-3 || bh < 1e-3 {
+            return;
+        }
+        let aspect = bw.max(bh) / bw.min(bh);
+        if aspect <= TRIGGER_ASPECT {
+            return;
+        }
+
+        let factor = (aspect / TARGET_ASPECT).clamp(1.0, MAX_FACTOR);
+        // Scale the deficient axis: if the polygon is wider than tall, the
+        // short axis is Y — scale the un-set y-params.
+        let scale_y = bw > bh;
+
+        let snapshot = self.floor_plan.clone();
+        let active = self.floor_plan.all_active_params();
+        for p in active {
+            if self.dimensioning.known_params.contains(&p) {
+                continue;
+            }
+            let scale_this = match self.floor_plan.param_axis(p) {
+                Some(ParameterAxis::Y) => scale_y,
+                Some(ParameterAxis::X) => !scale_y,
+                None => false,
+            };
+            if scale_this {
+                self.floor_plan.scale_parameter(p, factor);
+            }
+        }
+
+        // If the rescale broke the polygon (e.g. pushed an un-set coord past
+        // a known one), revert. Better to keep the extreme aspect than to
+        // produce a self-intersecting shape.
+        if self.floor_plan.validate_simple().is_err() {
+            self.floor_plan = snapshot;
+        }
     }
 
     /// Skip the current dimension prompt without entering a value. The prompt
