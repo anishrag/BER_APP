@@ -26,6 +26,12 @@ use serde::{Deserialize, Serialize};
 
 pub type ParameterId = usize;
 
+/// A stable identifier for a vertex. Survives `apply_orthogonal_constraints`
+/// rebuilds and (eventually) other geometric edits — annotations attached
+/// to a vertex stay attached even as its position or coordinate expression
+/// changes. Assigned monotonically by the plan; never reused.
+pub type VertexId = u64;
+
 /// Axis along which a collinearity decision is being made.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Axis {
@@ -72,13 +78,18 @@ impl CoordinateExpression {
 #[derive(Debug, Clone)]
 #[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
 pub struct ParametricVertex {
+    /// Stable identity. Persists across `apply_orthogonal_constraints`,
+    /// collinearity merges, and (future) ring-edit operations. The `(ring,
+    /// index)` position can shift; the `id` doesn't.
+    pub id: VertexId,
     pub x_expr: CoordinateExpression,
     pub y_expr: CoordinateExpression,
 }
 
 impl ParametricVertex {
-    pub fn constant(x: f32, y: f32) -> Self {
+    pub fn constant(id: VertexId, x: f32, y: f32) -> Self {
         Self {
+            id,
             x_expr: CoordinateExpression::Constant(x),
             y_expr: CoordinateExpression::Constant(y),
         }
@@ -102,6 +113,9 @@ pub struct ParametricPlan {
     /// Number of distinct parameter IDs currently referenced across all rings.
     pub active_parameter_count: usize,
     next_param_id: ParameterId,
+    /// Next vertex ID to hand out. Monotonically increasing — IDs are never
+    /// reused even after vertices are removed (when remove operations exist).
+    next_vertex_id: VertexId,
 }
 
 impl ParametricPlan {
@@ -129,7 +143,8 @@ impl ParametricPlan {
 
         let start = if first_ring && self.rings.is_empty() {
             // First-ever vertex of the first ring is the constant origin.
-            ring.push(ParametricVertex::constant(points[0].x, points[0].y));
+            let id = self.alloc_vertex_id();
+            ring.push(ParametricVertex::constant(id, points[0].x, points[0].y));
             1
         } else {
             0
@@ -144,7 +159,9 @@ impl ParametricPlan {
             self.parameters.insert(x_param, p.x);
             self.parameters.insert(y_param, p.y);
 
+            let id = self.alloc_vertex_id();
             ring.push(ParametricVertex {
+                id,
                 x_expr: CoordinateExpression::Parameter(x_param),
                 y_expr: CoordinateExpression::Parameter(y_param),
             });
@@ -152,6 +169,33 @@ impl ParametricPlan {
 
         self.rings.push(ring);
         self.recompute_active_parameter_count();
+    }
+
+    fn alloc_vertex_id(&mut self) -> VertexId {
+        let id = self.next_vertex_id;
+        self.next_vertex_id += 1;
+        id
+    }
+
+    /// Look up a vertex by its stable ID. Returns `(ring_index, vertex_index)`
+    /// or `None` if the vertex no longer exists.
+    pub fn find_vertex(&self, id: VertexId) -> Option<(usize, usize)> {
+        for (ring_idx, ring) in self.rings.iter().enumerate() {
+            for (vert_idx, v) in ring.iter().enumerate() {
+                if v.id == id {
+                    return Some((ring_idx, vert_idx));
+                }
+            }
+        }
+        None
+    }
+
+    /// Get the stable ID of the vertex at `(ring, vertex_idx)`, if it exists.
+    pub fn vertex_id_at(&self, ring: usize, vertex_idx: usize) -> Option<VertexId> {
+        self.rings
+            .get(ring)
+            .and_then(|r| r.get(vertex_idx))
+            .map(|v| v.id)
     }
 
     /// Number of rings (closed polygons) in this plan.
@@ -218,7 +262,8 @@ impl ParametricPlan {
             let mut new_ring: Vec<ParametricVertex> = Vec::with_capacity(ring_positions.len());
 
             let start_index = if ring_idx == 0 {
-                // First ring: preserve V0 as constant.
+                // First ring: preserve V0 (constant origin) verbatim — its
+                // id, x_expr, y_expr all carry through unchanged.
                 new_ring.push(self.rings[0][0].clone());
                 1
             } else {
@@ -227,6 +272,8 @@ impl ParametricPlan {
 
             for i in start_index..ring_positions.len() {
                 let pos = &ring_positions[i];
+                // Preserve the existing vertex's stable id through the rebuild.
+                let old_id = self.rings[ring_idx][i].id;
 
                 let x_expr = if let Some(c) = v0_const_x.filter(|c| (c - pos.x).abs() < tolerance) {
                     CoordinateExpression::Constant(c)
@@ -258,7 +305,11 @@ impl ParametricPlan {
                     CoordinateExpression::Parameter(pid)
                 };
 
-                new_ring.push(ParametricVertex { x_expr, y_expr });
+                new_ring.push(ParametricVertex {
+                    id: old_id,
+                    x_expr,
+                    y_expr,
+                });
             }
 
             new_rings.push(new_ring);
@@ -560,6 +611,87 @@ mod tests {
         plan.apply_orthogonal_constraints().unwrap();
         assert_eq!(plan.ring_count(), 2);
         assert_eq!(plan.ring_points(1).len(), 4);
+    }
+
+    // -------- Stable-ID tests --------
+
+    #[test]
+    fn vertices_get_unique_monotonic_ids() {
+        let plan = build_plan(&[(0.0, 0.0), (10.0, 0.0), (10.0, 5.0), (0.0, 5.0)]);
+        let ids: Vec<_> = plan.rings[0].iter().map(|v| v.id).collect();
+        assert_eq!(ids, vec![0, 1, 2, 3]);
+        let unique: HashSet<_> = ids.iter().copied().collect();
+        assert_eq!(unique.len(), 4);
+    }
+
+    #[test]
+    fn add_ring_continues_id_sequence() {
+        let mut plan = build_plan(&[(0.0, 0.0), (10.0, 0.0), (10.0, 5.0), (0.0, 5.0)]);
+        plan.add_ring(&[
+            Point2f32::new(50.0, 50.0),
+            Point2f32::new(60.0, 50.0),
+            Point2f32::new(60.0, 55.0),
+            Point2f32::new(50.0, 55.0),
+        ]);
+        plan.apply_orthogonal_constraints().unwrap();
+
+        let r0: Vec<_> = plan.rings[0].iter().map(|v| v.id).collect();
+        let r1: Vec<_> = plan.rings[1].iter().map(|v| v.id).collect();
+        assert_eq!(r0, vec![0, 1, 2, 3]);
+        assert_eq!(r1, vec![4, 5, 6, 7]);
+        // All distinct across rings — the namespace is shared and monotonic.
+        let union: HashSet<_> = r0.iter().chain(r1.iter()).copied().collect();
+        assert_eq!(union.len(), 8);
+    }
+
+    #[test]
+    fn vertex_ids_survive_apply_orthogonal_constraints() {
+        // Capture ids before the rebuild, run it, verify ids match position-by-position.
+        let mut plan = ParametricPlan::from_points(&[
+            Point2f32::new(0.0, 0.0),
+            Point2f32::new(100.0, 0.0),
+            Point2f32::new(100.0, 50.0),
+            Point2f32::new(0.0, 50.0),
+        ]);
+        let before: Vec<_> = plan.rings[0].iter().map(|v| v.id).collect();
+        plan.apply_orthogonal_constraints().unwrap();
+        let after: Vec<_> = plan.rings[0].iter().map(|v| v.id).collect();
+        assert_eq!(before, after);
+    }
+
+    #[test]
+    fn vertex_ids_survive_collinearity_apply() {
+        let mut plan = build_plan(&[
+            (0.0, 0.0),
+            (100.0, 0.0),
+            (100.0, 50.0),
+            (200.0, 50.0),
+            (200.0, 80.0),
+            (0.0, 80.0),
+        ]);
+        let before: Vec<_> = plan.rings[0].iter().map(|v| v.id).collect();
+        let sug = plan
+            .suggest_collinear(20.0, 60.0)
+            .into_iter()
+            .next()
+            .expect("suggestion");
+        plan.apply_collinear_suggestion(&sug);
+        let after: Vec<_> = plan.rings[0].iter().map(|v| v.id).collect();
+        assert_eq!(
+            before, after,
+            "apply_collinear_suggestion must not mint new vertex IDs"
+        );
+    }
+
+    #[test]
+    fn find_vertex_round_trips() {
+        let plan = build_plan(&[(0.0, 0.0), (10.0, 0.0), (10.0, 5.0), (0.0, 5.0)]);
+        for (expected_ring, expected_idx) in [(0, 0), (0, 1), (0, 2), (0, 3)] {
+            let id = plan.vertex_id_at(expected_ring, expected_idx).unwrap();
+            let (r, v) = plan.find_vertex(id).unwrap();
+            assert_eq!((r, v), (expected_ring, expected_idx));
+        }
+        assert!(plan.find_vertex(99999).is_none());
     }
 
     #[test]
