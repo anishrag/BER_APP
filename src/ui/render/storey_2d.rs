@@ -24,6 +24,7 @@ pub fn render(
     storey: &Storey,
     display_mode: DisplayMode,
     highlight: Option<&CollinearitySuggestion>,
+    dimensioned_walls: &[(usize, usize)],
     view: ViewParams,
 ) {
     let Some((min_xy, max_xy)) = bounding_box(storey) else {
@@ -59,13 +60,23 @@ pub fn render(
         draw_door(painter, &t, door, display_mode);
     }
 
-    // Dimension labels on each floor edge.
+    // Dimension labels on user-dimensioned floor edges. Walls whose length
+    // is still derived from un-set pixel proportions get no label — the
+    // canvas only shows real, user-confirmed measurements.
     if matches!(
         display_mode,
         DisplayMode::FloorMapDims | DisplayMode::AllSurfaces
     ) {
-        for region in &storey.floors.regions {
-            draw_dimensions(painter, &t, region);
+        for (region_idx, region) in storey.floors.regions.iter().enumerate() {
+            // Edge indices in this region the user has dimensioned.
+            let labelled_edges: Vec<usize> = dimensioned_walls
+                .iter()
+                .filter(|(r, _)| *r == region_idx)
+                .map(|(_, e)| *e)
+                .collect();
+            if !labelled_edges.is_empty() {
+                draw_dimensions(painter, &t, region, &labelled_edges);
+            }
         }
     }
 
@@ -278,30 +289,42 @@ fn draw_door(painter: &egui::Painter, t: &Transform2d, door: &Door, display_mode
     ));
 }
 
-fn draw_dimensions(painter: &egui::Painter, t: &Transform2d, region: &FloorRegion) {
+fn draw_dimensions(
+    painter: &egui::Painter,
+    t: &Transform2d,
+    region: &FloorRegion,
+    edges_to_label: &[usize],
+) {
     let coords: Vec<Coord<f64>> = region.polygon.exterior().coords().cloned().collect();
     let n = coords.len();
     if n < 2 {
         return;
     }
-    for i in 0..(n - 1) {
-        let a = coords[i];
-        let b = coords[i + 1];
+    // `geo::Polygon::exterior` returns vertices with the first one repeated at
+    // the end to close the ring, so the actual edge count is `n - 1`.
+    let edge_count = n - 1;
+    for &edge_idx in edges_to_label {
+        if edge_idx >= edge_count {
+            continue;
+        }
+        let a = coords[edge_idx];
+        let b = coords[edge_idx + 1];
         let dx = b.x - a.x;
         let dy = b.y - a.y;
         let length = (dx * dx + dy * dy).sqrt();
-        if length < 1.0 {
+        if length < 1e-3 {
             continue;
         }
         let mid_x = (a.x + b.x) * 0.5;
         let mid_y = (a.y + b.y) * 0.5;
         let mid = t.apply(mid_x, mid_y);
-        // TODO: format as meters once a pixel→meter scale is set on the controller.
+        // Polygon is in meters after the first user dimension; before that,
+        // no walls are in `edges_to_label` so the unit label is always meters here.
         painter.text(
             mid,
             egui::Align2::CENTER_CENTER,
-            format!("{:.1}", length),
-            egui::FontId::monospace(10.0),
+            format!("{:.2} m", length),
+            egui::FontId::monospace(11.0),
             style::DIMENSION_TEXT,
         );
     }

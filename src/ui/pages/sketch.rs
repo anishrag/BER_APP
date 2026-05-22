@@ -175,6 +175,7 @@ impl SketchPage {
         dim_input: &mut String,
         dim_scale_set: bool,
         dim_error: Option<&str>,
+        dimensioned_walls: &[(usize, usize)],
         view: ViewParams,
         mut on_event: F,
     ) where
@@ -221,6 +222,7 @@ impl SketchPage {
                     mode,
                     display,
                     review,
+                    dimensioned_walls,
                     view,
                 );
 

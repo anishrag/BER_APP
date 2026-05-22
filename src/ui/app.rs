@@ -149,6 +149,7 @@ impl eframe::App for BerApp {
                     dim_prompt,
                     dim_scale_set,
                     dim_error,
+                    dimensioned_walls,
                     view,
                 ) = {
                     let controller_ref = self.app_controller.borrow();
@@ -166,6 +167,7 @@ impl eframe::App for BerApp {
                         controller_ref.dimension_prompt_for_ui(),
                         controller_ref.dimensioning_scale_set(),
                         self.sketch_state.dimension_error.clone(),
+                        controller_ref.dimensioned_walls(),
                         crate::ui::render::ViewParams {
                             zoom: v.zoom,
                             offset_x: v.offset_x,
@@ -195,6 +197,7 @@ impl eframe::App for BerApp {
                     &mut self.sketch_state.dimension_input,
                     dim_scale_set,
                     dim_error.as_deref(),
+                    &dimensioned_walls,
                     view,
                     |event| match event {
                         UiEvent::Sketch(sketch_event) => match sketch_event {

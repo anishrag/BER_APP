@@ -415,6 +415,31 @@ impl ParametricPlan {
         Ok(())
     }
 
+    /// The ParameterId controlling a vertex's x coord, or None if it's a
+    /// Constant. Used by linear-remap repair to identify which vertices'
+    /// x-coords are "free" to be redistributed.
+    pub fn vertex_x_param(&self, ring: usize, idx: usize) -> Option<ParameterId> {
+        let v = self.rings.get(ring)?.get(idx)?;
+        match &v.x_expr {
+            CoordinateExpression::Parameter(p) => Some(*p),
+            _ => None,
+        }
+    }
+
+    /// The ParameterId controlling a vertex's y coord, or None if it's a Constant.
+    pub fn vertex_y_param(&self, ring: usize, idx: usize) -> Option<ParameterId> {
+        let v = self.rings.get(ring)?.get(idx)?;
+        match &v.y_expr {
+            CoordinateExpression::Parameter(p) => Some(*p),
+            _ => None,
+        }
+    }
+
+    /// Current value of a parameter, or None if the parameter doesn't exist.
+    pub fn parameter_value(&self, p: ParameterId) -> Option<f32> {
+        self.parameters.get(&p).copied()
+    }
+
     /// Which axis a parameter controls: `X` if it appears as some vertex's
     /// `x_expr`, `Y` if it appears as some vertex's `y_expr`. `None` if the
     /// parameter isn't currently referenced.
@@ -1070,6 +1095,93 @@ mod tests {
         let mut plan = build_plan(&[(0.0, 0.0), (200.0, 0.0), (200.0, 100.0), (0.0, 100.0)]);
         plan.set_parameter(0, 0.0);
         assert!(plan.validate_simple().is_err());
+    }
+
+    #[test]
+    fn narrow_e_top_arms_fit_within_constant_bound() {
+        // Reproduces the user's E with three dims: spine=4m, bottom=3m,
+        // bottom-arm-right=3.5m. After these, the un-set top y-params should
+        // be distributable inside (Const_top_y, Param_bot_arm_top_y) — the
+        // 0.5m gap left by the user's dims.
+        let mut plan = ParametricPlan::from_points(&[
+            Point2f32::new(85.094, 127.395),
+            Point2f32::new(85.094, 774.020),
+            Point2f32::new(495.836, 774.020),
+            Point2f32::new(495.836, 652.023),
+            Point2f32::new(227.957, 652.023),
+            Point2f32::new(227.957, 469.094),
+            Point2f32::new(579.395, 469.094), // V6 — merged x
+            Point2f32::new(579.395, 409.094),
+            Point2f32::new(289.648, 409.094),
+            Point2f32::new(289.648, 290.633),
+            Point2f32::new(579.395, 290.633), // V10 — merged x (was 576.227)
+            Point2f32::new(579.395, 127.395), // V11 — merged x
+        ]);
+        plan.apply_orthogonal_constraints().unwrap();
+        // Dim 1: V0→V1 length = 4. Apply scale.
+        let l0 = plan.wall_length(0, 0).unwrap();
+        plan.scale_all(4.0 / l0);
+
+        // After dim 1, the param driving the scale is V1.y (the param of
+        // the wall whose length was set).
+        let spine_param: ParameterId = match &plan.rings[0][1].y_expr {
+            CoordinateExpression::Parameter(p) => *p,
+            _ => panic!("V1.y should be a parameter"),
+        };
+        let mut known: std::collections::HashSet<ParameterId> = std::collections::HashSet::new();
+        known.insert(spine_param);
+
+        // Dim 2: V1→V2 length = 3 (bottom horizontal).
+        let deps = plan.wall_param_deps(0, 1);
+        let p_bottom = deps[0];
+        plan.set_wall_length(0, 1, 3.0, p_bottom).unwrap();
+        known.insert(p_bottom);
+
+        // Dim 3: V2→V3 length = 3.5. controlled_param = the still-un-known dep.
+        let deps = plan.wall_param_deps(0, 2);
+        let p_arm = deps
+            .iter()
+            .copied()
+            .find(|p| !known.contains(p))
+            .expect("expected an un-known param dep");
+        plan.set_wall_length(0, 2, 3.5, p_arm).unwrap();
+        known.insert(p_arm);
+
+        // At this point validate should fail (un-set top y-params still at
+        // their scaled pixel values, which now exceed the bottom-arm top).
+        assert!(
+            plan.validate_simple().is_err(),
+            "post-dim-3 polygon should not validate yet"
+        );
+
+        // Now mimic the controller's linear-remap repair. Distribute the
+        // un-set Y-params between V4.y (1.29) and V11.y (0.788).
+        let v4_y = plan.rings[0][4].evaluate(&plan.parameters).y;
+        let v11_y = plan.rings[0][11].evaluate(&plan.parameters).y;
+
+        // Collect distinct un-set y-params in V5..V10 order.
+        let mut distinct: Vec<ParameterId> = Vec::new();
+        for i in 5..11 {
+            if let CoordinateExpression::Parameter(p) = &plan.rings[0][i].y_expr {
+                if !known.contains(p) && !distinct.contains(p) {
+                    distinct.push(*p);
+                }
+            }
+        }
+        assert_eq!(distinct.len(), 3, "expected 3 un-set y-params");
+
+        let step = (v11_y - v4_y) / (distinct.len() + 1) as f32;
+        for (idx, p) in distinct.iter().enumerate() {
+            let new_val = v4_y + step * (idx + 1) as f32;
+            plan.set_parameter(*p, new_val);
+        }
+
+        // After linear remap the polygon should validate simple.
+        assert!(
+            plan.validate_simple().is_ok(),
+            "polygon should validate after linear remap: {:?}",
+            plan.validate_simple()
+        );
     }
 
     #[test]

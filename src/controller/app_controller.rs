@@ -115,6 +115,11 @@ pub struct DimensionState {
     /// True once the first dimension is entered — from that point on the
     /// plan is in real units rather than pixels.
     pub scale_set: bool,
+    /// Walls the user has explicitly dimensioned, identified by the stable
+    /// VertexId of each wall's starting vertex. The UI uses this to decide
+    /// which length labels to render — only user-set walls show lengths;
+    /// derived/un-set walls show no label.
+    pub dimensioned_walls: Vec<VertexId>,
 }
 
 pub struct AppController {
@@ -170,6 +175,17 @@ impl AppController {
         self.dimensioning.scale_set
     }
 
+    /// Resolved positions (ring index, edge-start vertex index) of every wall
+    /// the user has explicitly dimensioned. The UI uses this to decide which
+    /// wall length labels to render — derived/un-set walls show no label.
+    pub fn dimensioned_walls(&self) -> Vec<(usize, usize)> {
+        self.dimensioning
+            .dimensioned_walls
+            .iter()
+            .filter_map(|vid| self.floor_plan.find_vertex(*vid))
+            .collect()
+    }
+
     /// Resolved view of the current prompt for the UI: world-coord endpoints
     /// + current length. None when there's no active prompt.
     pub fn dimension_prompt_for_ui(&self) -> Option<DimensionPromptUiData> {
@@ -212,12 +228,41 @@ impl AppController {
             .find_vertex(prompt.wall_start_vertex)
             .ok_or_else(|| "prompt wall vertex no longer exists".to_string())?;
 
+        let pre_length = self.floor_plan.wall_length(ring, edge_start);
+        println!(
+            "dimension #{}: ring {}/edge {} (vertex_id {}, param P{}) → {} m  [was {:.3}, scale_set={}]",
+            self.dimensioning.dimensioned_walls.len() + 1,
+            ring,
+            edge_start,
+            prompt.wall_start_vertex,
+            prompt.controlled_param,
+            value,
+            pre_length.unwrap_or(f32::NAN),
+            self.dimensioning.scale_set,
+        );
+
         // Snapshot so we can roll back if the dimension produces an invalid
         // (self-intersecting / collapsed) polygon. The parametric model alone
         // doesn't enforce "all right-side vertical segments sum to the spine
         // height" — that's an emergent property of the polygon being simple.
         let snapshot = self.floor_plan.clone();
         let scale_set_before = self.dimensioning.scale_set;
+        let known_params_before = self.dimensioning.known_params.clone();
+        let dimensioned_walls_before = self.dimensioning.dimensioned_walls.clone();
+
+        // Optimistically mark the just-set param as known up front. The repair
+        // logic only scales params NOT in `known_params`; if we delayed the
+        // insert until after the validate+repair, the repair would treat the
+        // user's param as un-set and scale it down — both clobbering the
+        // user's input and preventing convergence (the just-set wall and a
+        // sibling wall scale in lockstep, never resolving their overlap).
+        // On full rejection we'll roll back to `known_params_before`.
+        self.dimensioning
+            .known_params
+            .insert(prompt.controlled_param);
+        self.dimensioning
+            .dimensioned_walls
+            .push(prompt.wall_start_vertex);
 
         if !self.dimensioning.scale_set {
             // First dimension — convert the whole plan from pixels to real units
@@ -230,6 +275,7 @@ impl AppController {
                 return Err("wall has zero length, can't compute scale".into());
             }
             let scale = value / pixel_length;
+            println!("  first dimension — scaling whole plan by {:.6}", scale);
             self.floor_plan.scale_all(scale);
             self.dimensioning.scale_set = true;
         } else {
@@ -240,33 +286,223 @@ impl AppController {
                     .set_wall_length(ring, edge_start, value, prompt.controlled_param)
             {
                 self.floor_plan = snapshot;
+                self.dimensioning.known_params = known_params_before;
+                self.dimensioning.dimensioned_walls = dimensioned_walls_before;
+                println!("  → REJECTED (set_wall_length error): {:?}", e);
                 return Err(format!("set_wall_length: {:?}", e));
             }
+            println!(
+                "  set_wall_length: P{} = {:?}",
+                prompt.controlled_param,
+                self.floor_plan.parameter_value(prompt.controlled_param)
+            );
         }
 
-        // Reject dimensions that would invalidate the polygon (e.g. an E whose
-        // right-side segments don't sum to the spine height — applying them
-        // collapses an edge or makes the polygon self-intersect).
-        if let Err(e) = self.floor_plan.validate_simple() {
-            self.floor_plan = snapshot;
-            self.dimensioning.scale_set = scale_set_before;
-            return Err(format!(
-                "{} is incompatible with the shape — the polygon would {:?}. \
-                 Try a value that's consistent with the other walls already set.",
-                value, e
-            ));
+        // If the apply produced an invalid polygon, try to repair it by
+        // scaling the un-set parameters on the same axis as the dimensioned
+        // wall — the un-set walls are still "free" (their original pixel
+        // proportions were placeholders), so we can move them out of the way
+        // to accommodate the user's input. E.g. when the bottom-arm height
+        // of an E grows past where the middle arm currently sits, shrink the
+        // middle arm's un-set y-coords toward y=0 to make room.
+        //
+        // Only if no factor produces a valid polygon do we reject the input
+        // outright.
+        if let Err(initial_err) = self.floor_plan.validate_simple() {
+            let dim_axis = self
+                .floor_plan
+                .param_axis(prompt.controlled_param)
+                .unwrap_or(ParameterAxis::Y);
+            println!(
+                "  polygon invalid post-apply ({:?}) — attempting repair on axis {:?}",
+                initial_err, dim_axis
+            );
+            if !self.try_repair_unset_params_on_axis(dim_axis) {
+                self.floor_plan = snapshot;
+                self.dimensioning.scale_set = scale_set_before;
+                self.dimensioning.known_params = known_params_before;
+                self.dimensioning.dimensioned_walls = dimensioned_walls_before;
+                println!(
+                    "  → REJECTED: no repair found ({:?}). Rolled back.",
+                    initial_err
+                );
+                return Err(format!(
+                    "{} is incompatible with the shape — even shrinking the \
+                     un-set walls didn't yield a simple polygon ({:?}). Try \
+                     a value that's consistent with the other walls already set.",
+                    value, initial_err
+                ));
+            }
+            println!("  repair succeeded.");
         }
 
-        self.dimensioning
-            .known_params
-            .insert(prompt.controlled_param);
+        // known_params already updated optimistically above.
         // Apply an aesthetic nudge if the polygon's aspect got extreme from
         // this dimension. Only touches un-set parameters; user's set values
         // stay exact.
         self.aesthetic_rescale_if_needed();
         self.commit_to_ber()?;
+        let post_length = self.floor_plan.wall_length(ring, edge_start);
+        println!(
+            "  ✓ accepted. wall now {:.3} m. known params: {:?}. dimensioned walls: {}/{}",
+            post_length.unwrap_or(f32::NAN),
+            {
+                let mut k: Vec<_> = self.dimensioning.known_params.iter().copied().collect();
+                k.sort();
+                k
+            },
+            self.dimensioning.dimensioned_walls.len(),
+            self.floor_plan.all_active_params().len(),
+        );
         self.compute_next_dimension_prompt();
         Ok(())
+    }
+
+    /// Try to repair an invalid polygon by redistributing un-set parameters
+    /// on the given axis. Walks ring 0's vertices to find maximal runs of
+    /// un-set coords bounded by known coords on both sides; within each run,
+    /// linearly distributes the un-set params evenly between the bounds
+    /// (preserving their polygon-traversal order).
+    ///
+    /// This handles cases where uniform scaling can't find a valid window —
+    /// e.g. for an E with bottom arm height fixed, the middle and top arms
+    /// need to fit in the narrow gap between the top edge (known constant)
+    /// and the bottom arm's top (the user-just-set param). Uniform scaling
+    /// from y=0 either undershoots (params still past the bound) or
+    /// overshoots (some params go above the polygon's top).
+    ///
+    /// Falls back to uniform scaling if linear remap doesn't yield a valid
+    /// polygon. Returns true if either approach succeeded. On failure leaves
+    /// `self.floor_plan` at the post-apply (still-invalid) state.
+    fn try_repair_unset_params_on_axis(&mut self, axis: ParameterAxis) -> bool {
+        let post_apply = self.floor_plan.clone();
+
+        // First attempt: linear remap on ring 0.
+        if self.try_linear_remap_ring0(axis) {
+            return true;
+        }
+        self.floor_plan = post_apply.clone();
+
+        // Fallback: uniform scaling (the original approach).
+        const FACTORS: &[f32] = &[0.9, 0.75, 0.55, 0.35, 0.2, 0.1];
+        for &factor in FACTORS {
+            self.floor_plan = post_apply.clone();
+            let active = self.floor_plan.all_active_params();
+            for p in active {
+                if self.dimensioning.known_params.contains(&p) {
+                    continue;
+                }
+                if self.floor_plan.param_axis(p) == Some(axis) {
+                    self.floor_plan.scale_parameter(p, factor);
+                }
+            }
+            if self.floor_plan.validate_simple().is_ok() {
+                return true;
+            }
+        }
+
+        self.floor_plan = post_apply;
+        false
+    }
+
+    /// Linear-remap repair for ring 0. Walks vertices in polygon order, finds
+    /// maximal runs of vertices whose `axis`-coord is an un-set parameter
+    /// (bounded by vertices whose coord is known — either a constant or a
+    /// set parameter). For each run, redistributes the distinct un-set params
+    /// evenly within the bounding interval. Returns true if the resulting
+    /// polygon validates simple.
+    fn try_linear_remap_ring0(&mut self, axis: ParameterAxis) -> bool {
+        let polygons = self.floor_plan.polygons();
+        let Some(ring_positions) = polygons.first() else {
+            return false;
+        };
+        let n = ring_positions.len();
+        if n < 4 {
+            return false;
+        }
+
+        // Source of each vertex's relevant-axis coord: Known(value) or Unset(param, value).
+        #[derive(Clone, Copy)]
+        enum Source {
+            Known(f32),
+            Unset(ParameterId, f32),
+        }
+        let coord_of = |i: usize| -> f32 {
+            match axis {
+                ParameterAxis::X => ring_positions[i].x,
+                ParameterAxis::Y => ring_positions[i].y,
+            }
+        };
+        let param_of = |i: usize| -> Option<ParameterId> {
+            match axis {
+                ParameterAxis::X => self.floor_plan.vertex_x_param(0, i),
+                ParameterAxis::Y => self.floor_plan.vertex_y_param(0, i),
+            }
+        };
+        let seq: Vec<Source> = (0..n)
+            .map(|i| match param_of(i) {
+                Some(p) if !self.dimensioning.known_params.contains(&p) => {
+                    Source::Unset(p, coord_of(i))
+                }
+                _ => Source::Known(coord_of(i)),
+            })
+            .collect();
+
+        // Bail if the polygon starts with an un-set vertex — would need
+        // wrap-around handling. For ring 0 this shouldn't happen (V0 is
+        // always Constant by construction), but be defensive.
+        if matches!(seq[0], Source::Unset(_, _)) {
+            return false;
+        }
+
+        // Find each maximal run of un-set entries; for each, redistribute.
+        let mut i = 0;
+        while i < n {
+            if matches!(seq[i], Source::Known(_)) {
+                i += 1;
+                continue;
+            }
+            let start = i;
+            while i < n && matches!(seq[i], Source::Unset(_, _)) {
+                i += 1;
+            }
+            let end = i; // exclusive
+
+            let Source::Known(lower) = seq[(start + n - 1) % n] else {
+                // Two consecutive un-set runs separated by nothing — shouldn't
+                // happen given the loop structure, but be safe.
+                continue;
+            };
+            let Source::Known(upper) = seq[end % n] else {
+                continue;
+            };
+
+            // Distinct un-set params in polygon-traversal order.
+            let mut distinct: Vec<ParameterId> = Vec::new();
+            for s in &seq[start..end] {
+                if let Source::Unset(p, _) = s {
+                    if !distinct.contains(p) {
+                        distinct.push(*p);
+                    }
+                }
+            }
+            if distinct.is_empty() {
+                continue;
+            }
+
+            // Evenly distribute between `lower` and `upper` (exclusive of
+            // both bounds). `step` carries the sign — if upper < lower
+            // (polygon traverses from larger to smaller along this axis),
+            // step is negative and params decrease in order, which matches
+            // the un-set params' position in the traversal.
+            let step = (upper - lower) / (distinct.len() + 1) as f32;
+            for (idx, p) in distinct.iter().enumerate() {
+                let new_val = lower + step * (idx + 1) as f32;
+                self.floor_plan.set_parameter(*p, new_val);
+            }
+        }
+
+        self.floor_plan.validate_simple().is_ok()
     }
 
     /// If the polygon's aspect ratio is extreme (> ~5:1), scale the still-
@@ -374,6 +610,20 @@ impl AppController {
             || self.dimensioning.current_prompt.is_some()
         {
             return;
+        }
+        // Collapse any zero-length edges + collinear vertices that the
+        // collinearity review may have introduced (e.g. when the user marked
+        // a top-left nook's edges as collinear with the polygon's outer top
+        // edge, the nook's vertices end up at the same point as their
+        // neighbours). Done before dimensioning starts so we don't prompt
+        // for dimensions on degenerate walls. Only safe while scale isn't
+        // set — afterwards the parametric IDs are referenced by known_params
+        // and a rebuild would dangle them.
+        if !self.dimensioning.scale_set {
+            self.floor_plan.simplify_degenerate();
+            if let Err(e) = self.commit_to_ber() {
+                eprintln!("commit_to_ber after simplify_degenerate: {}", e);
+            }
         }
         self.compute_next_dimension_prompt();
     }

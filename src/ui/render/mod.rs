@@ -62,6 +62,9 @@ pub fn render_ber(
     sketch_mode: SketchMode,
     display_mode: DisplayMode,
     highlight: Option<&CollinearitySuggestion>,
+    // Walls the user has explicitly dimensioned, as (ring_idx, edge_start)
+    // tuples for the current storey. Other walls' length labels are suppressed.
+    dimensioned_walls: &[(usize, usize)],
     view: ViewParams,
 ) {
     let Some(ber) = ber else {
@@ -78,7 +81,15 @@ pub fn render_ber(
     match sketch_mode {
         SketchMode::Storey2D => {
             if let Some(storey) = ber.storeys.get(current_storey_idx) {
-                storey_2d::render(painter, rect, storey, display_mode, highlight, view);
+                storey_2d::render(
+                    painter,
+                    rect,
+                    storey,
+                    display_mode,
+                    highlight,
+                    dimensioned_walls,
+                    view,
+                );
             } else {
                 empty_storey_hint(painter, rect);
             }
@@ -96,9 +107,13 @@ pub fn render_ber(
     }
 }
 
-/// Overlay a double-headed arrow on the wall the user is being asked to
-/// dimension. Uses the same auto-fit + view transform as `render_ber`, so the
-/// arrow tracks the rendered polygon when the canvas zooms or pans.
+/// Overlay a double-headed arrow that represents the wall the user is being
+/// asked to dimension. The arrow is placed in the polygon's *interior*,
+/// parallel to and offset from the wall (by ~half the interior depth), so
+/// it's clearly visible against the rendered geometry. Dashed extension
+/// lines connect the arrow's endpoints to the wall's endpoints, so the user
+/// sees exactly which wall the prompt refers to. Uses the same auto-fit +
+/// view transform as `render_ber`, so the arrow tracks pan/zoom.
 pub fn render_dimension_prompt(
     painter: &egui::Painter,
     rect: egui::Rect,
@@ -123,14 +138,41 @@ pub fn render_dimension_prompt(
     };
     let t = fit_transform(rect, min_xy, max_xy, view);
 
-    let a = t.apply(wall_a.0, wall_a.1);
-    let b = t.apply(wall_b.0, wall_b.1);
+    // Find the polygon ring that contains the wall's endpoints, then compute
+    // a perpendicular interior offset so the arrow lands in the middle of
+    // the local interior. Falls back to drawing on the wall if no containing
+    // ring or interior depth is found.
+    let polygon_points = ring_containing_wall(storey, wall_a, wall_b);
+    let offset = polygon_points
+        .as_deref()
+        .and_then(|pts| interior_perpendicular_offset(pts, wall_a, wall_b))
+        .unwrap_or((0.0, 0.0));
+
+    let shifted_a = (wall_a.0 + offset.0, wall_a.1 + offset.1);
+    let shifted_b = (wall_b.0 + offset.0, wall_b.1 + offset.1);
+
+    let a_wall = t.apply(wall_a.0, wall_a.1);
+    let b_wall = t.apply(wall_b.0, wall_b.1);
+    let a = t.apply(shifted_a.0, shifted_a.1);
+    let b = t.apply(shifted_b.0, shifted_b.1);
 
     let color = egui::Color32::from_rgb(60, 220, 255);
-    let stroke = egui::Stroke::new(3.0, color);
-    painter.line_segment([a, b], stroke);
+    let arrow_stroke = egui::Stroke::new(3.0, color);
 
-    // Arrowheads at both ends — short lines at ±25° back along the wall.
+    // Dashed extension lines from each end of the wall to the arrow's
+    // matching endpoint. Only drawn when the offset is non-trivial — if the
+    // arrow's already on the wall there's nothing to extend.
+    if offset.0.abs() > 1e-3 || offset.1.abs() > 1e-3 {
+        let dash_color = egui::Color32::from_rgba_unmultiplied(60, 220, 255, 140);
+        let dash_stroke = egui::Stroke::new(1.5, dash_color);
+        draw_dashed_segment(painter, a_wall, a, dash_stroke);
+        draw_dashed_segment(painter, b_wall, b, dash_stroke);
+    }
+
+    // The arrow body.
+    painter.line_segment([a, b], arrow_stroke);
+
+    // Arrowheads at both ends — short lines at ±25° back along the arrow.
     let dx = b.x - a.x;
     let dy = b.y - a.y;
     let len = (dx * dx + dy * dy).sqrt().max(1.0);
@@ -146,8 +188,8 @@ pub fn render_dimension_prompt(
         b.x + head_len * (-ux * cos25 - uy * sin25),
         b.y + head_len * (ux * sin25 - uy * cos25),
     );
-    painter.line_segment([b, h1], stroke);
-    painter.line_segment([b, h2], stroke);
+    painter.line_segment([b, h1], arrow_stroke);
+    painter.line_segment([b, h2], arrow_stroke);
     let h3 = egui::pos2(
         a.x + head_len * (ux * cos25 - uy * sin25),
         a.y + head_len * (ux * sin25 + uy * cos25),
@@ -156,8 +198,170 @@ pub fn render_dimension_prompt(
         a.x + head_len * (ux * cos25 + uy * sin25),
         a.y + head_len * (-ux * sin25 + uy * cos25),
     );
-    painter.line_segment([a, h3], stroke);
-    painter.line_segment([a, h4], stroke);
+    painter.line_segment([a, h3], arrow_stroke);
+    painter.line_segment([a, h4], arrow_stroke);
+}
+
+/// Find the floor ring that contains both endpoints of the dimension wall.
+/// Returns the ring's vertices as `(x, y)` tuples, without the closing
+/// duplicate that `geo::LineString` keeps at the end.
+fn ring_containing_wall(
+    storey: &datatypes::ber::structural::Storey,
+    wall_a: (f64, f64),
+    wall_b: (f64, f64),
+) -> Option<Vec<(f64, f64)>> {
+    let eps = 1e-3_f64;
+    for region in &storey.floors.regions {
+        let mut coords: Vec<(f64, f64)> = region
+            .polygon
+            .exterior()
+            .coords()
+            .map(|c| (c.x, c.y))
+            .collect();
+        // Drop the closing duplicate that geo adds.
+        if coords.len() >= 2 && {
+            let first = coords[0];
+            let last = coords[coords.len() - 1];
+            (first.0 - last.0).abs() < eps && (first.1 - last.1).abs() < eps
+        } {
+            coords.pop();
+        }
+        let has = |p: (f64, f64)| {
+            coords
+                .iter()
+                .any(|q| (q.0 - p.0).abs() < eps && (q.1 - p.1).abs() < eps)
+        };
+        if has(wall_a) && has(wall_b) {
+            return Some(coords);
+        }
+    }
+    None
+}
+
+/// Compute the perpendicular offset (`dx`, `dy`) to apply to the wall so the
+/// arrow lands roughly in the middle of the local interior. Casts a
+/// perpendicular ray from the wall's midpoint toward the polygon's centroid
+/// and uses half the distance to the next perpendicular edge as the offset.
+/// Returns `None` if the wall isn't axis-aligned or no opposing edge is found.
+fn interior_perpendicular_offset(
+    polygon: &[(f64, f64)],
+    wall_a: (f64, f64),
+    wall_b: (f64, f64),
+) -> Option<(f64, f64)> {
+    let n = polygon.len();
+    if n < 4 {
+        return None;
+    }
+    let mid_x = (wall_a.0 + wall_b.0) * 0.5;
+    let mid_y = (wall_a.1 + wall_b.1) * 0.5;
+
+    let centroid_x: f64 = polygon.iter().map(|p| p.0).sum::<f64>() / n as f64;
+    let centroid_y: f64 = polygon.iter().map(|p| p.1).sum::<f64>() / n as f64;
+
+    let eps = 1e-4_f64;
+    let dx_w = wall_b.0 - wall_a.0;
+    let dy_w = wall_b.1 - wall_a.1;
+    let is_horizontal = dy_w.abs() < eps;
+    let is_vertical = dx_w.abs() < eps;
+    if !(is_horizontal ^ is_vertical) {
+        // Diagonal or degenerate wall — no axis-aligned interior offset.
+        return None;
+    }
+
+    if is_horizontal {
+        let direction = (centroid_y - mid_y).signum();
+        if direction == 0.0 {
+            return None;
+        }
+        let mut closest: Option<f64> = None;
+        for i in 0..n {
+            let a = polygon[i];
+            let b = polygon[(i + 1) % n];
+            if (a.1 - b.1).abs() > eps {
+                continue; // not horizontal
+            }
+            let x_min = a.0.min(b.0);
+            let x_max = a.0.max(b.0);
+            if mid_x < x_min - eps || mid_x > x_max + eps {
+                continue;
+            }
+            let edge_dy = a.1 - mid_y;
+            if edge_dy.abs() < eps {
+                continue; // the wall itself
+            }
+            if edge_dy.signum() != direction {
+                continue;
+            }
+            let dist = edge_dy.abs();
+            if closest.map_or(true, |d| dist < d) {
+                closest = Some(dist);
+            }
+        }
+        let depth = closest?;
+        Some((0.0, direction * depth * 0.5))
+    } else {
+        let direction = (centroid_x - mid_x).signum();
+        if direction == 0.0 {
+            return None;
+        }
+        let mut closest: Option<f64> = None;
+        for i in 0..n {
+            let a = polygon[i];
+            let b = polygon[(i + 1) % n];
+            if (a.0 - b.0).abs() > eps {
+                continue;
+            }
+            let y_min = a.1.min(b.1);
+            let y_max = a.1.max(b.1);
+            if mid_y < y_min - eps || mid_y > y_max + eps {
+                continue;
+            }
+            let edge_dx = a.0 - mid_x;
+            if edge_dx.abs() < eps {
+                continue;
+            }
+            if edge_dx.signum() != direction {
+                continue;
+            }
+            let dist = edge_dx.abs();
+            if closest.map_or(true, |d| dist < d) {
+                closest = Some(dist);
+            }
+        }
+        let depth = closest?;
+        Some((direction * depth * 0.5, 0.0))
+    }
+}
+
+/// Draw a dashed line between two screen points. ~6px dash, ~4px gap.
+fn draw_dashed_segment(
+    painter: &egui::Painter,
+    from: egui::Pos2,
+    to: egui::Pos2,
+    stroke: egui::Stroke,
+) {
+    let dx = to.x - from.x;
+    let dy = to.y - from.y;
+    let length = (dx * dx + dy * dy).sqrt();
+    if length < 1.0 {
+        return;
+    }
+    let dash = 6.0_f32;
+    let gap = 4.0_f32;
+    let cycle = dash + gap;
+    let n_cycles = (length / cycle).ceil() as usize;
+    let ux = dx / length;
+    let uy = dy / length;
+    for i in 0..n_cycles {
+        let t0 = (i as f32 * cycle).min(length);
+        let t1 = (t0 + dash).min(length);
+        if t1 <= t0 {
+            break;
+        }
+        let p0 = egui::pos2(from.x + ux * t0, from.y + uy * t0);
+        let p1 = egui::pos2(from.x + ux * t1, from.y + uy * t1);
+        painter.line_segment([p0, p1], stroke);
+    }
 }
 
 fn empty_storey_hint(painter: &egui::Painter, rect: egui::Rect) {

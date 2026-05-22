@@ -241,9 +241,60 @@ impl FloorPlan {
         self.parametric.param_axis(p)
     }
 
+    /// The ParameterId controlling vertex `(ring, idx)`'s x coord, or None.
+    pub fn vertex_x_param(&self, ring: usize, idx: usize) -> Option<ParameterId> {
+        self.parametric.vertex_x_param(ring, idx)
+    }
+
+    /// The ParameterId controlling vertex `(ring, idx)`'s y coord, or None.
+    pub fn vertex_y_param(&self, ring: usize, idx: usize) -> Option<ParameterId> {
+        self.parametric.vertex_y_param(ring, idx)
+    }
+
+    /// Current value of a parameter (in the plan's current units), or None.
+    pub fn parameter_value(&self, p: ParameterId) -> Option<f32> {
+        self.parametric.parameter_value(p)
+    }
+
     /// Multiply a single parameter's value by `factor`.
     pub fn scale_parameter(&mut self, param: ParameterId, factor: f32) {
         self.parametric.scale_parameter(param, factor);
+    }
+
+    /// Rebuild every ring with zero-length edges and collinear middle vertices
+    /// removed, then re-run the orthogonal-constraints pass so coordinate
+    /// expressions are clean. Used after the collinearity review has merged
+    /// edges that were "the same line" — the merges can leave duplicate
+    /// vertices (zero-length edges) and three-on-a-line vertices that
+    /// shouldn't appear in dimensioning prompts or downstream area calcs.
+    ///
+    /// Side effect: vertex IDs are reassigned (the parametric layer is rebuilt
+    /// from scratch). Only safe to call before dimensioning has started —
+    /// otherwise the controller's `known_params` set would dangle. Caller
+    /// is responsible for committing the simplified plan to the BER.
+    pub fn simplify_degenerate(&mut self) {
+        let tolerance: f32 = 0.5;
+        let new_rings: Vec<Vec<Point2f32>> = self
+            .polygons()
+            .into_iter()
+            .map(|ring| {
+                let deduped = orthogonal::remove_duplicates(&ring, tolerance);
+                orthogonal::remove_collinear(&deduped, tolerance)
+            })
+            .filter(|r| r.len() >= 3)
+            .collect();
+
+        if new_rings.is_empty() {
+            self.parametric = parametric::ParametricPlan::default();
+            return;
+        }
+
+        let mut new_parametric = parametric::ParametricPlan::from_points(&new_rings[0]);
+        for ring in new_rings.iter().skip(1) {
+            new_parametric.add_ring(ring);
+        }
+        let _ = new_parametric.apply_orthogonal_constraints();
+        self.parametric = new_parametric;
     }
 
     /// Bounding box of the entire plan (across all rings) in current units.
