@@ -167,7 +167,7 @@ impl eframe::App for BerApp {
                         controller_ref.dimension_prompt_for_ui(),
                         controller_ref.dimensioning_scale_set(),
                         self.sketch_state.dimension_error.clone(),
-                        controller_ref.dimensioned_walls(),
+                        controller_ref.walls_with_known_length(),
                         crate::ui::render::ViewParams {
                             zoom: v.zoom,
                             offset_x: v.offset_x,

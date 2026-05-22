@@ -241,6 +241,14 @@ impl FloorPlan {
         self.parametric.param_axis(p)
     }
 
+    /// All walls in the plan whose length expression matches the wall at
+    /// `(ring, edge_start)`. Returns `(ring, edge_start)` tuples including
+    /// the input wall. The UI uses this to show the user every wall they
+    /// can equivalently measure to satisfy a dimension prompt.
+    pub fn equivalent_length_walls(&self, ring: usize, edge_start: usize) -> Vec<(usize, usize)> {
+        self.parametric.equivalent_length_walls(ring, edge_start)
+    }
+
     /// The ParameterId controlling vertex `(ring, idx)`'s x coord, or None.
     pub fn vertex_x_param(&self, ring: usize, idx: usize) -> Option<ParameterId> {
         self.parametric.vertex_x_param(ring, idx)

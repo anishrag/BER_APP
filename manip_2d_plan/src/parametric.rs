@@ -440,6 +440,55 @@ impl ParametricPlan {
         self.parameters.get(&p).copied()
     }
 
+    /// Find every wall in the plan whose length expression is identical to
+    /// the wall at `(ring, edge_start)`. The length expression is the
+    /// multiset `{expr_a, expr_b}` of the two endpoint coords along the
+    /// wall's parallel axis. Returns `(ring_idx, edge_start)` tuples,
+    /// including the input wall itself. Used by the UI to show the user
+    /// all walls they can equivalently measure to satisfy the current
+    /// dimension prompt.
+    pub fn equivalent_length_walls(&self, ring: usize, edge_start: usize) -> Vec<(usize, usize)> {
+        let Some(target) = self.wall_length_exprs(ring, edge_start) else {
+            return vec![(ring, edge_start)];
+        };
+        let mut result = Vec::new();
+        for (ri, r) in self.rings.iter().enumerate() {
+            for i in 0..r.len() {
+                if let Some(exprs) = self.wall_length_exprs(ri, i) {
+                    if length_exprs_match(&target, &exprs) {
+                        result.push((ri, i));
+                    }
+                }
+            }
+        }
+        result
+    }
+
+    /// The pair of coord expressions whose absolute difference is the wall's
+    /// length. For a horizontal wall returns the two x_exprs; for a vertical
+    /// wall the two y_exprs. None for non-axis-aligned walls (shouldn't
+    /// occur post-orthogonalization).
+    fn wall_length_exprs(
+        &self,
+        ring: usize,
+        edge_start: usize,
+    ) -> Option<(CoordinateExpression, CoordinateExpression)> {
+        let r = self.rings.get(ring)?;
+        let n = r.len();
+        if n < 2 || edge_start >= n {
+            return None;
+        }
+        let v_a = &r[edge_start];
+        let v_b = &r[(edge_start + 1) % n];
+        if v_a.y_expr == v_b.y_expr {
+            Some((v_a.x_expr.clone(), v_b.x_expr.clone()))
+        } else if v_a.x_expr == v_b.x_expr {
+            Some((v_a.y_expr.clone(), v_b.y_expr.clone()))
+        } else {
+            None
+        }
+    }
+
     /// Which axis a parameter controls: `X` if it appears as some vertex's
     /// `x_expr`, `Y` if it appears as some vertex's `y_expr`. `None` if the
     /// parameter isn't currently referenced.
@@ -720,6 +769,16 @@ struct EdgeInfo {
     start: usize,
     coord: f32,
     expr: CoordinateExpression,
+}
+
+/// Two length-expression pairs match iff they represent the same multiset of
+/// coord expressions — order-insensitive comparison so a wall traversed
+/// "left to right" matches one traversed "right to left".
+fn length_exprs_match(
+    a: &(CoordinateExpression, CoordinateExpression),
+    b: &(CoordinateExpression, CoordinateExpression),
+) -> bool {
+    (a.0 == b.0 && a.1 == b.1) || (a.0 == b.1 && a.1 == b.0)
 }
 
 /// Validate that `points` traced in order form a simple axis-aligned polygon:
@@ -1408,6 +1467,67 @@ mod tests {
     // multiple vertices to the same point, leaving zero-length edges. The
     // FloorPlan::simplify_degenerate path strips those. We test the
     // underlying primitives here (which simplify_degenerate composes).
+
+    // -------- Length-equivalent wall discovery --------
+    //
+    // For a rectangle, top and bottom edges share the same length expression
+    // (Param(0) - Const), as do left and right (Param(1) - Const). The
+    // dimension prompt should be able to surface both walls of each pair so
+    // the user can measure whichever is most accessible.
+
+    #[test]
+    fn equivalent_length_walls_for_rectangle_returns_both_sides() {
+        let plan = build_plan(&[(0.0, 0.0), (100.0, 0.0), (100.0, 50.0), (0.0, 50.0)]);
+        // Top wall (V0→V1) is horizontal, length depends on Param(0) and
+        // Const(0). Bottom wall (V2→V3) has the same multiset of exprs.
+        let top = plan.equivalent_length_walls(0, 0);
+        assert!(
+            top.contains(&(0, 0)),
+            "top wall should be in its own equivs"
+        );
+        assert!(
+            top.contains(&(0, 2)),
+            "bottom wall should be equivalent to top: {:?}",
+            top
+        );
+        assert_eq!(top.len(), 2);
+
+        // Right wall (V1→V2) is vertical, length = Param(1) - Const.
+        // Left wall (V3→V0) is the same.
+        let right = plan.equivalent_length_walls(0, 1);
+        assert!(right.contains(&(0, 1)));
+        assert!(
+            right.contains(&(0, 3)),
+            "left wall should be equivalent to right: {:?}",
+            right
+        );
+        assert_eq!(right.len(), 2);
+    }
+
+    #[test]
+    fn equivalent_length_walls_for_l_shape_returns_only_self() {
+        // L-shape vertices: each wall has a unique length expression.
+        let plan = build_plan(&[
+            (0.0, 0.0),
+            (200.0, 0.0),
+            (200.0, 100.0),
+            (100.0, 100.0),
+            (100.0, 200.0),
+            (0.0, 200.0),
+        ]);
+        // Walk every wall — each should be equivalent to itself only.
+        for i in 0..6 {
+            let equivs = plan.equivalent_length_walls(0, i);
+            assert_eq!(
+                equivs.len(),
+                1,
+                "L wall {} should have no length-equivalents, got {:?}",
+                i,
+                equivs
+            );
+            assert_eq!(equivs[0], (0, i));
+        }
+    }
 
     #[test]
     fn remove_duplicates_collapses_stacked_vertices() {

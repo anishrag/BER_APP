@@ -88,16 +88,23 @@ pub struct DimensionPrompt {
     pub controlled_param: ParameterId,
 }
 
-/// UI-friendly snapshot of the current dimension prompt: the two endpoints of
-/// the wall the user is being asked to dimension, in world coordinates (same
-/// coord system as the rendered BER polygon). The renderer transforms these
-/// to canvas pixels via its `Transform2d`.
+/// World-coord endpoints of one wall.
 #[derive(Debug, Clone, Copy)]
-pub struct DimensionPromptUiData {
+pub struct WallPositions {
     pub wall_a: (f64, f64),
     pub wall_b: (f64, f64),
-    /// Current length of the wall in the plan's current units. Before the
-    /// first dimension lands this is in pixels; after, it's in meters.
+}
+
+/// UI-friendly snapshot of the current dimension prompt. `walls[0]` is the
+/// wall the prompt was generated for ("primary"); subsequent entries are
+/// other walls whose length expression is identical — the user can measure
+/// any of them and enter the same value. World coordinates here are the same
+/// coord system as the rendered BER polygon; the renderer transforms via
+/// its `Transform2d`.
+#[derive(Debug, Clone)]
+pub struct DimensionPromptUiData {
+    pub walls: Vec<WallPositions>,
+    /// Current length of the primary wall in the plan's current units.
     pub current_length: f32,
 }
 
@@ -186,23 +193,75 @@ impl AppController {
             .collect()
     }
 
+    /// Every wall whose length is currently *known* — meaning all parameters
+    /// in its length expression are in `known_params`. This is the superset
+    /// of `dimensioned_walls`: it also catches walls whose length is implied
+    /// by equality (e.g. the opposite side of a rectangle, after one side
+    /// was dimensioned) or by sums/differences of already-set parameters.
+    /// The UI uses this to label every wall whose length can be displayed.
+    pub fn walls_with_known_length(&self) -> Vec<(usize, usize)> {
+        let polygons = self.floor_plan.polygons();
+        let known = &self.dimensioning.known_params;
+        let mut result = Vec::new();
+        for (ri, ring) in polygons.iter().enumerate() {
+            for i in 0..ring.len() {
+                let deps = self.floor_plan.wall_param_deps(ri, i);
+                // Skip walls with no param deps — pre-first-dim, those are
+                // pixel-space artifacts and labeling them in meters would be
+                // misleading. Once at least one dim is set, scale_set is true.
+                if deps.is_empty() {
+                    continue;
+                }
+                if deps.iter().all(|p| known.contains(p)) {
+                    result.push((ri, i));
+                }
+            }
+        }
+        result
+    }
+
     /// Resolved view of the current prompt for the UI: world-coord endpoints
-    /// + current length. None when there's no active prompt.
+    /// of the primary wall + all length-equivalent walls + current length.
+    /// None when there's no active prompt.
     pub fn dimension_prompt_for_ui(&self) -> Option<DimensionPromptUiData> {
         let prompt = self.dimensioning.current_prompt.as_ref()?;
         let (ring, edge_start) = self.floor_plan.find_vertex(prompt.wall_start_vertex)?;
         let polygons = self.floor_plan.polygons();
-        let ring_pts = polygons.get(ring)?;
-        let n = ring_pts.len();
-        if n < 2 {
+        let current_length = self.floor_plan.wall_length(ring, edge_start)?;
+
+        // Equivalent walls = primary + any other walls with the same length
+        // expression. Ensure the primary is first.
+        let mut equiv = self.floor_plan.equivalent_length_walls(ring, edge_start);
+        if let Some(pos) = equiv.iter().position(|w| *w == (ring, edge_start)) {
+            if pos != 0 {
+                equiv.swap(0, pos);
+            }
+        } else {
+            equiv.insert(0, (ring, edge_start));
+        }
+
+        let walls: Vec<WallPositions> = equiv
+            .into_iter()
+            .filter_map(|(r, e)| {
+                let pts = polygons.get(r)?;
+                let nr = pts.len();
+                if nr < 2 {
+                    return None;
+                }
+                let pa = pts.get(e)?;
+                let pb = pts.get((e + 1) % nr)?;
+                Some(WallPositions {
+                    wall_a: (pa.x as f64, pa.y as f64),
+                    wall_b: (pb.x as f64, pb.y as f64),
+                })
+            })
+            .collect();
+
+        if walls.is_empty() {
             return None;
         }
-        let pa = ring_pts.get(edge_start)?;
-        let pb = ring_pts.get((edge_start + 1) % n)?;
-        let current_length = self.floor_plan.wall_length(ring, edge_start)?;
         Some(DimensionPromptUiData {
-            wall_a: (pa.x as f64, pa.y as f64),
-            wall_b: (pb.x as f64, pb.y as f64),
+            walls,
             current_length,
         })
     }

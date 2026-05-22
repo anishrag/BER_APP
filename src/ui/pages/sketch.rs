@@ -226,19 +226,35 @@ impl SketchPage {
                     view,
                 );
 
-                // Dimension-prompt overlay: a double-headed arrow on the wall
-                // we're currently asking the assessor about.
-                if let Some(p) = dim_prompt {
-                    render::render_dimension_prompt(
-                        &painter,
-                        rect,
-                        ber,
-                        current_storey_idx,
-                        mode,
-                        view,
-                        p.wall_a,
-                        p.wall_b,
-                    );
+                // Dimension-prompt overlay. Every wall the user can
+                // equivalently measure (including the primary) is highlighted
+                // in red. The primary additionally gets the cyan interior
+                // arrow + length label, drawn last so it sits on top.
+                if let Some(p) = &dim_prompt {
+                    for wall in &p.walls {
+                        render::render_equivalent_wall(
+                            &painter,
+                            rect,
+                            ber,
+                            current_storey_idx,
+                            mode,
+                            view,
+                            wall.wall_a,
+                            wall.wall_b,
+                        );
+                    }
+                    if let Some(primary) = p.walls.first() {
+                        render::render_dimension_prompt(
+                            &painter,
+                            rect,
+                            ber,
+                            current_storey_idx,
+                            mode,
+                            view,
+                            primary.wall_a,
+                            primary.wall_b,
+                        );
+                    }
                 }
 
                 // Pan / zoom on the canvas.

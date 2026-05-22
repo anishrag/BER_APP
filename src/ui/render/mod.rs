@@ -364,6 +364,42 @@ fn draw_dashed_segment(
     }
 }
 
+/// Highlight a wall that's length-equivalent to the primary dimension-prompt
+/// wall — a red line drawn directly on the wall, no arrowheads, no label.
+/// The primary's cyan interior arrow still owns the "this is the
+/// measurement" signal; this is just "these other walls would work too."
+pub fn render_equivalent_wall(
+    painter: &egui::Painter,
+    rect: egui::Rect,
+    ber: Option<&Ber>,
+    current_storey_idx: usize,
+    sketch_mode: SketchMode,
+    view: ViewParams,
+    wall_a: (f64, f64),
+    wall_b: (f64, f64),
+) {
+    if !matches!(sketch_mode, SketchMode::Storey2D) {
+        return;
+    }
+    let Some(ber) = ber else {
+        return;
+    };
+    let Some(storey) = ber.storeys.get(current_storey_idx) else {
+        return;
+    };
+    let Some((min_xy, max_xy)) = storey_2d::bounding_box(storey) else {
+        return;
+    };
+    let t = fit_transform(rect, min_xy, max_xy, view);
+
+    let a = t.apply(wall_a.0, wall_a.1);
+    let b = t.apply(wall_b.0, wall_b.1);
+
+    let color = egui::Color32::from_rgb(255, 80, 80);
+    let stroke = egui::Stroke::new(4.0, color);
+    painter.line_segment([a, b], stroke);
+}
+
 fn empty_storey_hint(painter: &egui::Painter, rect: egui::Rect) {
     painter.text(
         rect.center(),
