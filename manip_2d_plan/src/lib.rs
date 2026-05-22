@@ -16,7 +16,7 @@ mod parametric;
 mod simplification;
 
 pub use error::Error;
-pub use parametric::{Axis, CollinearitySuggestion};
+pub use parametric::{Axis, CollinearitySuggestion, ParameterId, VertexId};
 
 use domain::points::Point2f32;
 
@@ -169,5 +169,62 @@ impl FloorPlan {
     ) -> bool {
         self.parametric
             .edges_collinear(ring_a, edge_a, ring_b, edge_b, axis)
+    }
+
+    /// Get the stable ID of the vertex at `(ring, vertex_idx)`. Use this when
+    /// you need a reference that survives later edits (e.g. for dimension
+    /// prompts that should outlive intervening reflows).
+    pub fn vertex_id_at(&self, ring: usize, vertex_idx: usize) -> Option<VertexId> {
+        self.parametric.vertex_id_at(ring, vertex_idx)
+    }
+
+    /// Look up a vertex by stable ID. Returns `(ring_index, vertex_index)`.
+    pub fn find_vertex(&self, id: VertexId) -> Option<(usize, usize)> {
+        self.parametric.find_vertex(id)
+    }
+
+    /// Current length of the wall starting at `(ring, edge_start)` in
+    /// whatever units the plan is currently in (pixels before the first
+    /// dimension, real units after).
+    pub fn wall_length(&self, ring: usize, edge_start: usize) -> Option<f32> {
+        self.parametric.wall_length(ring, edge_start)
+    }
+
+    /// Parameter IDs the wall's length depends on. For an axis-aligned wall,
+    /// usually one (e.g. a wall whose start is at a constant and end is at
+    /// a parameter) or two (a wall between two parameter coordinates).
+    pub fn wall_param_deps(&self, ring: usize, edge_start: usize) -> Vec<ParameterId> {
+        self.parametric.wall_param_deps(ring, edge_start)
+    }
+
+    /// All parameter IDs currently referenced by any vertex.
+    pub fn all_active_params(&self) -> std::collections::HashSet<ParameterId> {
+        self.parametric.all_active_params()
+    }
+
+    /// Multiply every parameter value (and every constant) by `factor`. Used
+    /// when the first user-entered dimension converts the pixel-scale polygon
+    /// into real-world units uniformly.
+    pub fn scale_all(&mut self, factor: f32) {
+        self.parametric.scale_all(factor);
+    }
+
+    /// Set the value of a single parameter directly. Used to apply a user-
+    /// entered dimension to the unknown parameter a wall constrains.
+    pub fn set_parameter(&mut self, param_id: ParameterId, value: f32) {
+        self.parametric.set_parameter(param_id, value);
+    }
+
+    /// Change `unknown_param` so the wall has the given length. Returns an
+    /// error if the wall isn't axis-aligned or doesn't reference the param.
+    pub fn set_wall_length(
+        &mut self,
+        ring: usize,
+        edge_start: usize,
+        new_length: f32,
+        unknown_param: ParameterId,
+    ) -> Result<(), Error> {
+        self.parametric
+            .set_wall_length(ring, edge_start, new_length, unknown_param)
     }
 }

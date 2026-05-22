@@ -96,6 +96,70 @@ pub fn render_ber(
     }
 }
 
+/// Overlay a double-headed arrow on the wall the user is being asked to
+/// dimension. Uses the same auto-fit + view transform as `render_ber`, so the
+/// arrow tracks the rendered polygon when the canvas zooms or pans.
+pub fn render_dimension_prompt(
+    painter: &egui::Painter,
+    rect: egui::Rect,
+    ber: Option<&Ber>,
+    current_storey_idx: usize,
+    sketch_mode: SketchMode,
+    view: ViewParams,
+    wall_a: (f64, f64),
+    wall_b: (f64, f64),
+) {
+    if !matches!(sketch_mode, SketchMode::Storey2D) {
+        return;
+    }
+    let Some(ber) = ber else {
+        return;
+    };
+    let Some(storey) = ber.storeys.get(current_storey_idx) else {
+        return;
+    };
+    let Some((min_xy, max_xy)) = storey_2d::bounding_box(storey) else {
+        return;
+    };
+    let t = fit_transform(rect, min_xy, max_xy, view);
+
+    let a = t.apply(wall_a.0, wall_a.1);
+    let b = t.apply(wall_b.0, wall_b.1);
+
+    let color = egui::Color32::from_rgb(60, 220, 255);
+    let stroke = egui::Stroke::new(3.0, color);
+    painter.line_segment([a, b], stroke);
+
+    // Arrowheads at both ends — short lines at ±25° back along the wall.
+    let dx = b.x - a.x;
+    let dy = b.y - a.y;
+    let len = (dx * dx + dy * dy).sqrt().max(1.0);
+    let ux = dx / len;
+    let uy = dy / len;
+    let head_len = 12.0_f32.min(len * 0.25);
+    let (sin25, cos25) = (0.4226_f32, 0.9063_f32);
+    let h1 = egui::pos2(
+        b.x + head_len * (-ux * cos25 + uy * sin25),
+        b.y + head_len * (-ux * sin25 - uy * cos25),
+    );
+    let h2 = egui::pos2(
+        b.x + head_len * (-ux * cos25 - uy * sin25),
+        b.y + head_len * (ux * sin25 - uy * cos25),
+    );
+    painter.line_segment([b, h1], stroke);
+    painter.line_segment([b, h2], stroke);
+    let h3 = egui::pos2(
+        a.x + head_len * (ux * cos25 - uy * sin25),
+        a.y + head_len * (ux * sin25 + uy * cos25),
+    );
+    let h4 = egui::pos2(
+        a.x + head_len * (ux * cos25 + uy * sin25),
+        a.y + head_len * (-ux * sin25 + uy * cos25),
+    );
+    painter.line_segment([a, h3], stroke);
+    painter.line_segment([a, h4], stroke);
+}
+
 fn empty_storey_hint(painter: &egui::Painter, rect: egui::Rect) {
     painter.text(
         rect.center(),

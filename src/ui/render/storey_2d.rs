@@ -126,7 +126,7 @@ fn draw_highlight_edge(
     painter.line_segment([pa, pb], stroke);
 }
 
-fn bounding_box(storey: &Storey) -> Option<((f64, f64), (f64, f64))> {
+pub(crate) fn bounding_box(storey: &Storey) -> Option<((f64, f64), (f64, f64))> {
     let mut iter = storey
         .floors
         .regions

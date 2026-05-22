@@ -19,10 +19,14 @@ pub struct BerApp {
     // Page-specific state
     pub splash_state: SplashState,
     pub new_ber_state: NewBerState,
-    // Add other page states as needed
-    // pub sketch_state: SketchState,
-    // pub key_deets_state: KeyDeetsState,
-    // pub more_deets_state: MoreDeetsState,
+    pub sketch_state: SketchState,
+}
+
+#[derive(Default)]
+pub struct SketchState {
+    /// Backing string for the dimension prompt's text input. Lives across
+    /// frames so the user's in-progress typing isn't lost on re-render.
+    pub dimension_input: String,
 }
 
 pub struct SplashState {
@@ -58,6 +62,7 @@ impl BerApp {
             app_controller,
             splash_state: SplashState::default(),
             new_ber_state: NewBerState::default(),
+            sketch_state: SketchState::default(),
         }
     }
 
@@ -138,6 +143,8 @@ impl eframe::App for BerApp {
                     review_remaining,
                     has_floor_plan,
                     pending_redraw,
+                    dim_prompt,
+                    dim_scale_set,
                     view,
                 ) = {
                     let controller_ref = self.app_controller.borrow();
@@ -152,6 +159,8 @@ impl eframe::App for BerApp {
                         controller_ref.review_remaining(),
                         controller_ref.has_floor_plan(),
                         controller_ref.has_pending_redraw(),
+                        controller_ref.dimension_prompt_for_ui(),
+                        controller_ref.dimensioning_scale_set(),
                         crate::ui::render::ViewParams {
                             zoom: v.zoom,
                             offset_x: v.offset_x,
@@ -177,6 +186,9 @@ impl eframe::App for BerApp {
                     review_remaining,
                     has_floor_plan,
                     pending_redraw,
+                    dim_prompt,
+                    &mut self.sketch_state.dimension_input,
+                    dim_scale_set,
                     view,
                     |event| match event {
                         UiEvent::Sketch(sketch_event) => match sketch_event {
@@ -245,6 +257,14 @@ impl eframe::App for BerApp {
                             }
                             SketchEvent::IgnoreRedraw => {
                                 controller.borrow_mut().discard_pending_redraw();
+                            }
+                            SketchEvent::ApplyDimension(value) => {
+                                if let Err(e) = controller.borrow_mut().apply_dimension(value) {
+                                    eprintln!("apply_dimension: {}", e);
+                                }
+                            }
+                            SketchEvent::SkipDimension => {
+                                controller.borrow_mut().skip_current_dimension();
                             }
                             _ => {}
                         },

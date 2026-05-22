@@ -2,9 +2,104 @@ use egui::epaint::{PathShape, PathStroke};
 use egui::Pos2;
 use strum::IntoEnumIterator;
 
+use crate::controller::app_controller::DimensionPromptUiData;
 use crate::ui::pages::events::UiEvent;
 use crate::ui::render;
 use crate::ui::render::ViewParams;
+
+/// Parse a dimension expression. Supports:
+/// - A single positive number: `"4.2"`, `"0.5"`
+/// - Sums and differences of numbers: `"3.2 + 1.5"`, `"5 - 1.8 + 0.3"`
+/// - Optional leading `+`; a leading `-` is rejected since dimensions must
+///   be positive.
+///
+/// Whitespace is ignored. Returns `None` for malformed input or non-positive
+/// results.
+fn parse_dimension_expression(input: &str) -> Option<f32> {
+    let trimmed = input.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    let mut total: f32 = 0.0;
+    let mut sign: f32 = 1.0;
+    let mut current = String::new();
+    let mut started = false;
+    for ch in trimmed.chars() {
+        if ch.is_whitespace() {
+            continue;
+        }
+        if ch == '+' || ch == '-' {
+            if !started {
+                if ch == '-' {
+                    return None;
+                }
+                started = true;
+                continue;
+            }
+            if current.is_empty() {
+                return None;
+            }
+            let v: f32 = current.parse().ok()?;
+            total += sign * v;
+            sign = if ch == '+' { 1.0 } else { -1.0 };
+            current.clear();
+        } else {
+            current.push(ch);
+            started = true;
+        }
+    }
+    if current.is_empty() {
+        return None;
+    }
+    let v: f32 = current.parse().ok()?;
+    total += sign * v;
+    if total.is_finite() && total > 0.0 {
+        Some(total)
+    } else {
+        None
+    }
+}
+
+#[cfg(test)]
+mod expression_tests {
+    use super::parse_dimension_expression;
+
+    fn approx(a: f32, b: f32) -> bool {
+        (a - b).abs() < 1e-4
+    }
+
+    #[test]
+    fn single_number() {
+        assert!(approx(parse_dimension_expression("4.2").unwrap(), 4.2));
+        assert!(approx(parse_dimension_expression("  3  ").unwrap(), 3.0));
+    }
+
+    #[test]
+    fn sum_and_difference() {
+        assert!(approx(parse_dimension_expression("3 + 1.5").unwrap(), 4.5));
+        assert!(approx(parse_dimension_expression("5 - 1.8").unwrap(), 3.2));
+        assert!(approx(
+            parse_dimension_expression("2 + 3.5 - 0.3").unwrap(),
+            5.2
+        ));
+    }
+
+    #[test]
+    fn leading_plus_allowed_leading_minus_rejected() {
+        assert!(approx(parse_dimension_expression("+4.2").unwrap(), 4.2));
+        assert!(parse_dimension_expression("-4.2").is_none());
+    }
+
+    #[test]
+    fn malformed_inputs_rejected() {
+        assert!(parse_dimension_expression("").is_none());
+        assert!(parse_dimension_expression("3 +").is_none());
+        assert!(parse_dimension_expression("3 + + 2").is_none());
+        assert!(parse_dimension_expression("hello").is_none());
+        assert!(parse_dimension_expression("3 - 3").is_none()); // zero result
+        assert!(parse_dimension_expression("3 - 5").is_none()); // negative result
+    }
+}
 
 use datatypes::ber::ber_struct::Ber;
 use domain::sketch::{DisplayMode, EditTools, SketchMode};
@@ -54,6 +149,10 @@ pub enum SketchEvent {
     },
     /// Reset the view to pure auto-fit.
     ResetView,
+    /// User submitted a value for the current dimension prompt.
+    ApplyDimension(f32),
+    /// User skipped the current dimension prompt.
+    SkipDimension,
 }
 
 #[derive(Default)]
@@ -72,12 +171,16 @@ impl SketchPage {
         review_remaining: usize,
         has_floor_plan: bool,
         pending_redraw: bool,
+        dim_prompt: Option<DimensionPromptUiData>,
+        dim_input: &mut String,
+        dim_scale_set: bool,
         view: ViewParams,
         mut on_event: F,
     ) where
         F: FnMut(UiEvent),
     {
         let reviewing = review.is_some();
+        let dim_prompting = dim_prompt.is_some();
 
         egui::CentralPanel::default().show_inside(ui, |ui| {
             ui.vertical(|ui| {
@@ -120,6 +223,21 @@ impl SketchPage {
                     view,
                 );
 
+                // Dimension-prompt overlay: a double-headed arrow on the wall
+                // we're currently asking the assessor about.
+                if let Some(p) = dim_prompt {
+                    render::render_dimension_prompt(
+                        &painter,
+                        rect,
+                        ber,
+                        current_storey_idx,
+                        mode,
+                        view,
+                        p.wall_a,
+                        p.wall_b,
+                    );
+                }
+
                 // Pan / zoom on the canvas.
                 //   - Scroll wheel  → zoom about the cursor
                 //   - Right-drag    → pan
@@ -154,7 +272,11 @@ impl SketchPage {
                 // review or awaiting a redraw decision. (Pan/zoom still work.)
                 // Use the *_by(Primary) variants so middle/right drags (which pan)
                 // don't accidentally start a stroke.
-                if matches!(mode, SketchMode::Storey2D) && !reviewing && !pending_redraw {
+                if matches!(mode, SketchMode::Storey2D)
+                    && !reviewing
+                    && !pending_redraw
+                    && !dim_prompting
+                {
                     if response.drag_started_by(egui::PointerButton::Primary) {
                         if let Some(pos) = response.interact_pointer_pos() {
                             let local_pos = pos - rect.left_top().to_vec2();
@@ -181,11 +303,20 @@ impl SketchPage {
 
                 ui.separator();
 
-                // Bottom toolbar — priority: pending redraw > collinearity review > edit tools.
-                // The "Fit" button (reset view) is always available alongside.
+                // Bottom toolbar — priority: pending redraw > dimension prompt
+                // > collinearity review > edit tools. The "Fit" button (reset
+                // view) is always available alongside.
                 ui.horizontal(|ui| {
                     if pending_redraw {
                         Self::pending_redraw_toolbar(ui, &mut on_event);
+                    } else if let Some(p) = dim_prompt {
+                        Self::dimension_prompt_toolbar(
+                            ui,
+                            p,
+                            dim_scale_set,
+                            dim_input,
+                            &mut on_event,
+                        );
                     } else if reviewing {
                         Self::review_toolbar(ui, review_remaining, &mut on_event);
                     } else if let Some(new_tool) = Self::edit_toolbar(ui, edit_tool, has_floor_plan)
@@ -206,6 +337,53 @@ impl SketchPage {
             .clicked()
         {
             on_event(UiEvent::Sketch(SketchEvent::ResetView));
+        }
+    }
+
+    fn dimension_prompt_toolbar<F: FnMut(UiEvent)>(
+        ui: &mut egui::Ui,
+        prompt: DimensionPromptUiData,
+        scale_set: bool,
+        dim_input: &mut String,
+        on_event: &mut F,
+    ) {
+        let units = if scale_set {
+            "m"
+        } else {
+            "(first — sets scale)"
+        };
+        ui.label(
+            egui::RichText::new(format!("Length of highlighted wall {}:", units))
+                .strong()
+                .color(egui::Color32::from_rgb(60, 220, 255)),
+        );
+        // Show the current value for orientation. Useful especially for the
+        // first dimension — the assessor sees "looks like ~3.something m" and
+        // confirms with an exact measurement.
+        ui.label(format!("(currently {:.2})", prompt.current_length));
+        let resp = ui.add(
+            egui::TextEdit::singleline(dim_input)
+                .desired_width(80.0)
+                .hint_text("e.g. 4.2"),
+        );
+        let submit_pressed = resp.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
+        let apply_clicked = ui
+            .button("Apply")
+            .on_hover_text("Apply this dimension and move to the next")
+            .clicked();
+        if apply_clicked || submit_pressed {
+            if let Some(value) = parse_dimension_expression(dim_input) {
+                on_event(UiEvent::Sketch(SketchEvent::ApplyDimension(value)));
+                dim_input.clear();
+            }
+        }
+        if ui
+            .button("Skip")
+            .on_hover_text("Skip this dimension, ask about a different wall")
+            .clicked()
+        {
+            on_event(UiEvent::Sketch(SketchEvent::SkipDimension));
+            dim_input.clear();
         }
     }
 

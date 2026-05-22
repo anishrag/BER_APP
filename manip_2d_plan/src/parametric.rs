@@ -225,6 +225,185 @@ impl ParametricPlan {
         self.parameters.insert(param_id, value);
     }
 
+    /// Multiply every parameter value (and every constant coord, across all
+    /// rings) by `factor`. Used when the first user-entered dimension converts
+    /// the pixel-scale polygon into real-world units in one stroke.
+    ///
+    /// Constants aren't only on V0: `apply_orthogonal_constraints` may set
+    /// other vertices' coords to constants when they match V0's value
+    /// (e.g. a vertex sitting on the same horizontal line as V0 has its
+    /// y_expr collapsed to a constant). All of those need to scale too.
+    pub fn scale_all(&mut self, factor: f32) {
+        for v in self.parameters.values_mut() {
+            *v *= factor;
+        }
+        for ring in &mut self.rings {
+            for vertex in ring {
+                if let CoordinateExpression::Constant(c) = &mut vertex.x_expr {
+                    *c *= factor;
+                }
+                if let CoordinateExpression::Constant(c) = &mut vertex.y_expr {
+                    *c *= factor;
+                }
+            }
+        }
+    }
+
+    /// Current length of the wall starting at `(ring, edge_start)`. None if
+    /// the indices don't reference a valid edge.
+    pub fn wall_length(&self, ring: usize, edge_start: usize) -> Option<f32> {
+        let ring_vec = self.rings.get(ring)?;
+        let n = ring_vec.len();
+        if n < 2 || edge_start >= n {
+            return None;
+        }
+        let v_a = &ring_vec[edge_start];
+        let v_b = &ring_vec[(edge_start + 1) % n];
+        let pa = v_a.evaluate(&self.parameters);
+        let pb = v_b.evaluate(&self.parameters);
+        let dx = pa.x - pb.x;
+        let dy = pa.y - pb.y;
+        Some((dx * dx + dy * dy).sqrt())
+    }
+
+    /// ParameterIds the wall's length depends on. Empty if length is fully
+    /// determined by constants (very rare in practice — only when both
+    /// endpoints are V0-of-ring-0 derived). For an axis-aligned wall, length
+    /// depends only on the coords along the wall's parallel axis.
+    pub fn wall_param_deps(&self, ring: usize, edge_start: usize) -> Vec<ParameterId> {
+        let Some(ring_vec) = self.rings.get(ring) else {
+            return Vec::new();
+        };
+        let n = ring_vec.len();
+        if n < 2 || edge_start >= n {
+            return Vec::new();
+        }
+        let v_a = &ring_vec[edge_start];
+        let v_b = &ring_vec[(edge_start + 1) % n];
+
+        let mut deps: Vec<ParameterId> = Vec::new();
+        let mut push = |e: &CoordinateExpression| {
+            if let CoordinateExpression::Parameter(p) = e {
+                if !deps.contains(p) {
+                    deps.push(*p);
+                }
+            }
+        };
+
+        if v_a.y_expr == v_b.y_expr {
+            // Horizontal wall — length is along x.
+            push(&v_a.x_expr);
+            push(&v_b.x_expr);
+        } else if v_a.x_expr == v_b.x_expr {
+            // Vertical wall — length is along y.
+            push(&v_a.y_expr);
+            push(&v_b.y_expr);
+        } else {
+            // Non-axis-aligned (shouldn't happen post-orthogonalization).
+            push(&v_a.x_expr);
+            push(&v_a.y_expr);
+            push(&v_b.x_expr);
+            push(&v_b.y_expr);
+        }
+        deps
+    }
+
+    /// Is the wall starting at `(ring, edge_start)` horizontal (true), vertical (false),
+    /// or non-axis-aligned (None)?
+    pub fn wall_axis(&self, ring: usize, edge_start: usize) -> Option<Axis> {
+        let ring_vec = self.rings.get(ring)?;
+        let n = ring_vec.len();
+        if n < 2 || edge_start >= n {
+            return None;
+        }
+        let v_a = &ring_vec[edge_start];
+        let v_b = &ring_vec[(edge_start + 1) % n];
+        if v_a.y_expr == v_b.y_expr {
+            Some(Axis::Horizontal)
+        } else if v_a.x_expr == v_b.x_expr {
+            Some(Axis::Vertical)
+        } else {
+            None
+        }
+    }
+
+    /// Change `unknown_param`'s value so the wall starting at `(ring, edge_start)`
+    /// has length `new_length`. Preserves the wall's direction along its axis
+    /// (which endpoint is greater).
+    ///
+    /// The wall must be axis-aligned, must reference `unknown_param` at exactly
+    /// one of its endpoints along the wall's parallel axis, and the wall's
+    /// length must be non-zero.
+    pub fn set_wall_length(
+        &mut self,
+        ring: usize,
+        edge_start: usize,
+        new_length: f32,
+        unknown_param: ParameterId,
+    ) -> Result<(), Error> {
+        let ring_vec = self.rings.get(ring).ok_or(Error::InvalidEdgeIndex(ring))?;
+        let n = ring_vec.len();
+        if n < 2 || edge_start >= n {
+            return Err(Error::InvalidEdgeIndex(edge_start));
+        }
+        let v_a = &ring_vec[edge_start];
+        let v_b = &ring_vec[(edge_start + 1) % n];
+
+        // Which axis is the wall along? Pick the matching expr pair.
+        let (expr_a, expr_b): (&CoordinateExpression, &CoordinateExpression) =
+            if v_a.y_expr == v_b.y_expr {
+                (&v_a.x_expr, &v_b.x_expr)
+            } else if v_a.x_expr == v_b.x_expr {
+                (&v_a.y_expr, &v_b.y_expr)
+            } else {
+                return Err(Error::DimensionError(
+                    "wall isn't axis-aligned, can't set length".into(),
+                ));
+            };
+
+        let val_a = expr_a.evaluate(&self.parameters);
+        let val_b = expr_b.evaluate(&self.parameters);
+        let sign = if val_a >= val_b { 1.0 } else { -1.0 };
+
+        let unknown_in_a =
+            matches!(expr_a, CoordinateExpression::Parameter(p) if *p == unknown_param);
+        let unknown_in_b =
+            matches!(expr_b, CoordinateExpression::Parameter(p) if *p == unknown_param);
+
+        if unknown_in_a {
+            // expr_a = val_a (unknown). Want val_a - val_b = sign * new_length.
+            // So val_a = val_b + sign * new_length.
+            self.parameters
+                .insert(unknown_param, val_b + sign * new_length);
+        } else if unknown_in_b {
+            self.parameters
+                .insert(unknown_param, val_a - sign * new_length);
+        } else {
+            return Err(Error::DimensionError(format!(
+                "param {} doesn't appear in wall ({}, {})",
+                unknown_param, ring, edge_start
+            )));
+        }
+
+        Ok(())
+    }
+
+    /// All ParameterIds currently referenced by any vertex.
+    pub fn all_active_params(&self) -> HashSet<ParameterId> {
+        let mut used: HashSet<ParameterId> = HashSet::new();
+        for ring in &self.rings {
+            for v in ring {
+                if let CoordinateExpression::Parameter(id) = &v.x_expr {
+                    used.insert(*id);
+                }
+                if let CoordinateExpression::Parameter(id) = &v.y_expr {
+                    used.insert(*id);
+                }
+            }
+        }
+        used
+    }
+
     /// Walk every vertex across every ring, dedupe coordinates that match
     /// within tolerance, and rebuild the parameter namespace from scratch.
     /// Vertices that match `rings[0][0]`'s constants collapse to constants;
@@ -681,6 +860,63 @@ mod tests {
             before, after,
             "apply_collinear_suggestion must not mint new vertex IDs"
         );
+    }
+
+    // -------- Dimensioning primitives --------
+
+    #[test]
+    fn wall_length_for_axis_aligned_rectangle() {
+        let plan = build_plan(&[(0.0, 0.0), (200.0, 0.0), (200.0, 100.0), (0.0, 100.0)]);
+        // V0→V1 is horizontal, length 200; V1→V2 vertical, length 100.
+        assert!((plan.wall_length(0, 0).unwrap() - 200.0).abs() < 0.01);
+        assert!((plan.wall_length(0, 1).unwrap() - 100.0).abs() < 0.01);
+        // V2→V3 horizontal, length 200; V3→V0 vertical, length 100.
+        assert!((plan.wall_length(0, 2).unwrap() - 200.0).abs() < 0.01);
+        assert!((plan.wall_length(0, 3).unwrap() - 100.0).abs() < 0.01);
+    }
+
+    #[test]
+    fn wall_param_deps_for_rectangle() {
+        let plan = build_plan(&[(0.0, 0.0), (200.0, 0.0), (200.0, 100.0), (0.0, 100.0)]);
+        // Top wall depends on one x param (Param 0 = width).
+        let deps_top = plan.wall_param_deps(0, 0);
+        assert_eq!(deps_top.len(), 1);
+        // Right wall depends on one y param (Param 1 = height).
+        let deps_right = plan.wall_param_deps(0, 1);
+        assert_eq!(deps_right.len(), 1);
+        // The two should be different parameters.
+        assert_ne!(deps_top[0], deps_right[0]);
+    }
+
+    #[test]
+    fn scale_all_multiplies_every_param_and_origin() {
+        let mut plan = build_plan(&[(10.0, 20.0), (210.0, 20.0), (210.0, 120.0), (10.0, 120.0)]);
+        // Rectangle 200×100 with origin offset by (10, 20).
+        let pre_lengths = (
+            plan.wall_length(0, 0).unwrap(),
+            plan.wall_length(0, 1).unwrap(),
+        );
+        plan.scale_all(0.5);
+        let post_lengths = (
+            plan.wall_length(0, 0).unwrap(),
+            plan.wall_length(0, 1).unwrap(),
+        );
+        // Every length should halve.
+        assert!((post_lengths.0 - pre_lengths.0 * 0.5).abs() < 0.01);
+        assert!((post_lengths.1 - pre_lengths.1 * 0.5).abs() < 0.01);
+    }
+
+    #[test]
+    fn all_active_params_matches_active_count() {
+        let plan = build_plan(&[
+            (0.0, 0.0),
+            (100.0, 0.0),
+            (100.0, 50.0),
+            (200.0, 50.0),
+            (200.0, 80.0),
+            (0.0, 80.0),
+        ]);
+        assert_eq!(plan.all_active_params().len(), plan.active_parameter_count);
     }
 
     #[test]

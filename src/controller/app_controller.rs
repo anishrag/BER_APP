@@ -9,9 +9,10 @@ use datatypes::ber::common::ItemId;
 use datatypes::ber::structural::{FloorRegions, Storey};
 use domain::points::{Point2f32, Point2f64};
 use domain::sketch::{DisplayMode, EditTools, SketchMode};
-use manip_2d_plan::{Axis, CollinearitySuggestion, FloorPlan};
+use manip_2d_plan::{Axis, CollinearitySuggestion, FloorPlan, ParameterId, VertexId};
 use sketch::model::Stroke;
 use sketch::SketchEngine;
+use std::collections::HashSet;
 
 /// Default storey ceiling height in meters, used as a placeholder until the UI
 /// collects it from the assessor.
@@ -74,6 +75,46 @@ impl Default for ViewTransform {
     }
 }
 
+/// A single "what's the length of this wall?" question to put to the assessor.
+#[derive(Debug, Clone)]
+pub struct DimensionPrompt {
+    /// Stable identifier of the wall's starting vertex. Survives reflows so
+    /// the prompt can be carried across other operations without going stale.
+    pub wall_start_vertex: VertexId,
+    /// The currently-unknown parameter this wall constrains. Setting it from
+    /// the user's entered length is what "applying the dimension" does.
+    pub controlled_param: ParameterId,
+}
+
+/// UI-friendly snapshot of the current dimension prompt: the two endpoints of
+/// the wall the user is being asked to dimension, in world coordinates (same
+/// coord system as the rendered BER polygon). The renderer transforms these
+/// to canvas pixels via its `Transform2d`.
+#[derive(Debug, Clone, Copy)]
+pub struct DimensionPromptUiData {
+    pub wall_a: (f64, f64),
+    pub wall_b: (f64, f64),
+    /// Current length of the wall in the plan's current units. Before the
+    /// first dimension lands this is in pixels; after, it's in meters.
+    pub current_length: f32,
+}
+
+/// Tracks the user-confirmed dimensions on the floor plan. Before any
+/// dimension is entered the polygon is a pixel-scale notepad sketch; once the
+/// first dimension lands, the whole plan converts to real units (meters) and
+/// each subsequent dimension pins another parameter.
+#[derive(Debug, Default)]
+pub struct DimensionState {
+    /// Parameter IDs the user has explicitly entered a length for.
+    pub known_params: HashSet<ParameterId>,
+    /// Current "which wall do I ask about next?" prompt, or `None` when all
+    /// dimensions have been supplied (or there's nothing to dimension yet).
+    pub current_prompt: Option<DimensionPrompt>,
+    /// True once the first dimension is entered — from that point on the
+    /// plan is in real units rather than pixels.
+    pub scale_set: bool,
+}
+
 pub struct AppController {
     conn: Db,
     sketch_engine: SketchEngine,
@@ -88,6 +129,8 @@ pub struct AppController {
     /// A drawn-but-not-applied stroke awaiting the user's redraw decision.
     /// Only set when DrawPerpWalls finishes a stroke and there's already a plan.
     pending_redraw: Option<PendingRedraw>,
+    /// Tracks which parameters the user has dimensioned + the current prompt.
+    dimensioning: DimensionState,
     /// View transform layered on top of the canvas auto-fit (pan + zoom).
     view: ViewTransform,
 }
@@ -102,8 +145,156 @@ impl AppController {
             current_record: None,
             review: None,
             pending_redraw: None,
+            dimensioning: DimensionState::default(),
             view: ViewTransform::default(),
         }
+    }
+
+    /// Snapshot of the current dimension prompt for the UI to render, or
+    /// `None` when nothing is being asked.
+    pub fn current_dimension_prompt(&self) -> Option<DimensionPrompt> {
+        self.dimensioning.current_prompt.clone()
+    }
+
+    /// True when there's an active dimension prompt waiting for the user.
+    pub fn dimensioning_active(&self) -> bool {
+        self.dimensioning.current_prompt.is_some()
+    }
+
+    /// True once the user has entered at least one dimension. Until then the
+    /// polygon is in pixel space; after the first dimension lands, everything
+    /// converts to real units in one scale_all() pass.
+    pub fn dimensioning_scale_set(&self) -> bool {
+        self.dimensioning.scale_set
+    }
+
+    /// Resolved view of the current prompt for the UI: world-coord endpoints
+    /// + current length. None when there's no active prompt.
+    pub fn dimension_prompt_for_ui(&self) -> Option<DimensionPromptUiData> {
+        let prompt = self.dimensioning.current_prompt.as_ref()?;
+        let (ring, edge_start) = self.floor_plan.find_vertex(prompt.wall_start_vertex)?;
+        let polygons = self.floor_plan.polygons();
+        let ring_pts = polygons.get(ring)?;
+        let n = ring_pts.len();
+        if n < 2 {
+            return None;
+        }
+        let pa = ring_pts.get(edge_start)?;
+        let pb = ring_pts.get((edge_start + 1) % n)?;
+        let current_length = self.floor_plan.wall_length(ring, edge_start)?;
+        Some(DimensionPromptUiData {
+            wall_a: (pa.x as f64, pa.y as f64),
+            wall_b: (pb.x as f64, pb.y as f64),
+            current_length,
+        })
+    }
+
+    /// Apply the user's entered length for the current dimension prompt.
+    /// First entry: scale the whole plan so this wall has that length.
+    /// Subsequent entries: set the prompt's controlled parameter directly.
+    pub fn apply_dimension(&mut self, value: f32) -> Result<(), String> {
+        if !value.is_finite() || value <= 0.0 {
+            return Err(format!(
+                "dimension must be a positive number (got {})",
+                value
+            ));
+        }
+        let prompt = self
+            .dimensioning
+            .current_prompt
+            .clone()
+            .ok_or_else(|| "no active dimension prompt".to_string())?;
+
+        let (ring, edge_start) = self
+            .floor_plan
+            .find_vertex(prompt.wall_start_vertex)
+            .ok_or_else(|| "prompt wall vertex no longer exists".to_string())?;
+
+        if !self.dimensioning.scale_set {
+            // First dimension — convert the whole plan from pixels to real units
+            // in one stroke by scaling every parameter and constant uniformly.
+            let pixel_length = self
+                .floor_plan
+                .wall_length(ring, edge_start)
+                .ok_or_else(|| "couldn't read wall length".to_string())?;
+            if pixel_length < 1e-6 {
+                return Err("wall has zero length, can't compute scale".into());
+            }
+            let scale = value / pixel_length;
+            self.floor_plan.scale_all(scale);
+            self.dimensioning.scale_set = true;
+        } else {
+            // Subsequent dimensions — adjust just the controlled parameter so
+            // the wall takes the new length, preserving its direction along axis.
+            self.floor_plan
+                .set_wall_length(ring, edge_start, value, prompt.controlled_param)
+                .map_err(|e| format!("set_wall_length: {:?}", e))?;
+        }
+
+        self.dimensioning
+            .known_params
+            .insert(prompt.controlled_param);
+        self.commit_to_ber()?;
+        self.compute_next_dimension_prompt();
+        Ok(())
+    }
+
+    /// Skip the current dimension prompt without entering a value. The prompt
+    /// is dropped; the next call to `maybe_start_dimensioning` will pick a
+    /// different wall (or stop, if no more single-unknown walls exist).
+    pub fn skip_current_dimension(&mut self) {
+        if self.dimensioning.current_prompt.take().is_some() {
+            self.compute_next_dimension_prompt();
+        }
+    }
+
+    /// Recompute `current_prompt` based on which params are still unknown.
+    /// Picks the first wall whose length depends on exactly one unknown
+    /// parameter; clears the prompt when every active param is known.
+    fn compute_next_dimension_prompt(&mut self) {
+        let active = self.floor_plan.all_active_params();
+        let unknown: HashSet<ParameterId> = active
+            .difference(&self.dimensioning.known_params)
+            .copied()
+            .collect();
+        if unknown.is_empty() {
+            self.dimensioning.current_prompt = None;
+            return;
+        }
+
+        let polygons = self.floor_plan.polygons();
+        for (ring_idx, ring_points) in polygons.iter().enumerate() {
+            for edge_start in 0..ring_points.len() {
+                let deps = self.floor_plan.wall_param_deps(ring_idx, edge_start);
+                let unknown_deps: Vec<_> =
+                    deps.into_iter().filter(|d| unknown.contains(d)).collect();
+                if unknown_deps.len() == 1 {
+                    if let Some(vid) = self.floor_plan.vertex_id_at(ring_idx, edge_start) {
+                        self.dimensioning.current_prompt = Some(DimensionPrompt {
+                            wall_start_vertex: vid,
+                            controlled_param: unknown_deps[0],
+                        });
+                        return;
+                    }
+                }
+            }
+        }
+        // No single-unknown-dep wall found. For an axis-aligned polygon this
+        // shouldn't happen; if it does we just bail out and the UI shows no
+        // prompt. (Hook for future "multi-unknown" prompts goes here.)
+        self.dimensioning.current_prompt = None;
+    }
+
+    /// Kick off dimensioning if nothing else is in the way (no pending redraw,
+    /// no in-flight collinearity review). No-op otherwise.
+    fn maybe_start_dimensioning(&mut self) {
+        if self.review.is_some()
+            || self.pending_redraw.is_some()
+            || self.dimensioning.current_prompt.is_some()
+        {
+            return;
+        }
+        self.compute_next_dimension_prompt();
     }
 
     /// Is there a pending DrawPerpWalls stroke awaiting the user's redraw decision?
@@ -293,7 +484,9 @@ impl AppController {
             self.floor_plan.active_parameter_count()
         );
         self.advance_review_cursor();
-        self.commit_to_ber()
+        let result = self.commit_to_ber();
+        self.after_review_step();
+        result
     }
 
     /// User said No: record the rejection (for transitive skipping), advance past it.
@@ -309,11 +502,15 @@ impl AppController {
             review.rejections.push(sug);
         }
         self.advance_review_cursor();
+        self.after_review_step();
     }
 
     /// User said Skip-all: clear the entire review without applying anything.
+    /// Once the collinearity review is gone the controller picks up the
+    /// dimensioning flow, if there's anything to ask about.
     pub fn skip_all_review(&mut self) {
         self.review = None;
+        self.maybe_start_dimensioning();
     }
 
     /// Internal: pop the next pending suggestion by cloning it (so callers
@@ -350,6 +547,14 @@ impl AppController {
             } else {
                 return;
             }
+        }
+    }
+
+    /// Kick off dimensioning when the review naturally drains to None.
+    /// Called from accept/reject paths after `advance_review_cursor`.
+    fn after_review_step(&mut self) {
+        if self.review.is_none() {
+            self.maybe_start_dimensioning();
         }
     }
 
@@ -469,13 +674,16 @@ impl AppController {
     }
 
     /// Apply a primary-outline stroke: replace the floor plan, persist, and
-    /// populate the collinearity review.
+    /// populate the collinearity review. Resets dimensioning state — the new
+    /// plan is a fresh pixel-scale sketch that hasn't been dimensioned yet.
     fn apply_drawperp_stroke(&mut self, points: &[Point2f32], closed: bool) -> Result<(), String> {
         self.floor_plan = FloorPlan::from_points_to_orthogonal(points, 10.0, closed)
             .map_err(|e| format!("Failed to draw outline: {:?}", e))?;
         println!("floor plan: {:?}", self.floor_plan);
+        self.dimensioning = DimensionState::default();
         self.commit_to_ber()?;
         self.populate_collinearity_review();
+        self.maybe_start_dimensioning();
         Ok(())
     }
 
@@ -486,17 +694,29 @@ impl AppController {
         points: &[Point2f32],
         closed: bool,
     ) -> Result<(), String> {
-        if self.floor_plan.ring_count() == 0 {
+        let had_outline = self.floor_plan.ring_count() > 0;
+        if !had_outline {
             self.floor_plan = FloorPlan::from_points_to_orthogonal(points, 10.0, closed)
                 .map_err(|e| format!("Failed to draw outline: {:?}", e))?;
+            // Same as DrawPerpWalls when there was nothing: reset dimensioning.
+            self.dimensioning = DimensionState::default();
         } else {
             self.floor_plan
                 .add_polygon(points, 10.0, closed)
                 .map_err(|e| format!("Failed to add section: {:?}", e))?;
+            // Existing known_params remain valid — apply_orthogonal_constraints
+            // reuses param IDs for coords that match (ring 0's coords didn't
+            // change). The new ring contributes additional unknown params we'll
+            // pick up in the next dimensioning round.
+            // KNOWN LIMITATION: if dimensions were already set (scale_set),
+            // the new ring's vertex coords are in pixels while existing rings
+            // are in meters. Mixed units will look wrong on the canvas until
+            // a per-stroke pixels→meters conversion is added.
         }
         println!("floor plan (after AddSection): {:?}", self.floor_plan);
         self.commit_to_ber()?;
         self.populate_collinearity_review();
+        self.maybe_start_dimensioning();
         Ok(())
     }
 
