@@ -10,7 +10,8 @@ use datatypes::ber::structural::{FloorRegions, Storey};
 use domain::points::{Point2f32, Point2f64};
 use domain::sketch::{DisplayMode, EditTools, SketchMode};
 use manip_2d_plan::{
-    Axis, CollinearitySuggestion, FloorPlan, ParameterAxis, ParameterId, VertexId,
+    find_flipped_edge, intersect_circles, project_to_circle, solve_axis_wall, Axis,
+    CollinearitySuggestion, FloorPlan, ParameterAxis, ParameterId, VertexId,
 };
 use sketch::model::Stroke;
 use sketch::SketchEngine;
@@ -1269,7 +1270,7 @@ impl AppController {
         let scale_set_before = self.dimensioning.scale_set;
         let known_params_before = self.dimensioning.known_params.clone();
         let dimensioned_walls_before = self.dimensioning.dimensioned_walls.clone();
-        let edge_signs_before = snapshot_edge_signs(&snapshot);
+        let edge_signs_before = snapshot.edge_signs();
 
         // Optimistically mark the just-set param as known up front. The repair
         // logic only scales params NOT in `known_params`; if we delayed the
@@ -1338,7 +1339,11 @@ impl AppController {
                 "  polygon invalid post-apply ({:?}) — attempting repair on axis {:?}",
                 initial_err, dim_axis
             );
-            if !self.try_repair_unset_params_on_axis(dim_axis, &snapshot) {
+            if !self.floor_plan.repair_unset_params(
+                dim_axis,
+                &self.dimensioning.known_params,
+                &snapshot,
+            ) {
                 self.floor_plan = snapshot;
                 self.dimensioning.scale_set = scale_set_before;
                 self.dimensioning.known_params = known_params_before;
@@ -1364,7 +1369,7 @@ impl AppController {
         // endpoint above the polygon's top edge — no edges cross, but the
         // adjacent wall now goes "the wrong way" and visually the polygon
         // has changed shape.
-        let edge_signs_after = snapshot_edge_signs(&self.floor_plan);
+        let edge_signs_after = self.floor_plan.edge_signs();
         if let Some((r, e)) = find_flipped_edge(&edge_signs_before, &edge_signs_after) {
             self.floor_plan = snapshot;
             self.dimensioning.scale_set = scale_set_before;
@@ -1386,7 +1391,8 @@ impl AppController {
         // Apply an aesthetic nudge if the polygon's aspect got extreme from
         // this dimension. Only touches un-set parameters; user's set values
         // stay exact.
-        self.aesthetic_rescale_if_needed();
+        self.floor_plan
+            .aesthetic_rescale(&self.dimensioning.known_params);
         self.commit_to_ber()?;
         let post_length = self.floor_plan.wall_length(ring, edge_start);
         println!(
@@ -1403,313 +1409,6 @@ impl AppController {
         self.compute_next_dimension_prompt();
         self.push_history_snapshot(undo_snap);
         Ok(())
-    }
-
-    /// Try to repair an invalid polygon by redistributing un-set parameters
-    /// on the given axis. Three strategies tried in order:
-    ///
-    /// 1. **Distribute**: evenly between the bounding known coords. Works when
-    ///    un-set params naturally sit between the bounds — e.g. for an E,
-    ///    the top arms fit between the top constant and the user-set bottom
-    ///    arm's top.
-    ///
-    /// 2. **Preserve offsets**: keep each un-set param's pre-apply distance
-    ///    from the lower bound. Works when the un-set params extend
-    ///    *outside* the bounds — e.g. a T whose shaft was dimensioned, the
-    ///    un-set top of the polygon needs to move *above* V0's constant.
-    ///
-    /// 3. **Uniform scale**: scale all un-set params by a decreasing factor.
-    ///    Last resort, handles a wide variety of cases at the cost of
-    ///    visually distorting the polygon.
-    ///
-    /// Returns `true` if any strategy produced a valid simple polygon.
-    /// Direction-flip rejection happens at the caller (apply_dimension).
-    fn try_repair_unset_params_on_axis(
-        &mut self,
-        axis: ParameterAxis,
-        snapshot: &FloorPlan,
-    ) -> bool {
-        let post_apply = self.floor_plan.clone();
-
-        // Strategy 1: distribute between bounds.
-        if self.try_linear_remap_ring0(axis) {
-            return true;
-        }
-        self.floor_plan = post_apply.clone();
-
-        // Strategy 2: preserve pre-apply offsets from the lower bound.
-        if self.try_linear_remap_preserve_offsets(axis, snapshot) {
-            return true;
-        }
-        self.floor_plan = post_apply.clone();
-
-        // Strategy 3: uniform scaling.
-        const FACTORS: &[f32] = &[0.9, 0.75, 0.55, 0.35, 0.2, 0.1];
-        for &factor in FACTORS {
-            self.floor_plan = post_apply.clone();
-            let active = self.floor_plan.all_active_params();
-            for p in active {
-                if self.dimensioning.known_params.contains(&p) {
-                    continue;
-                }
-                if self.floor_plan.param_axis(p) == Some(axis) {
-                    self.floor_plan.scale_parameter(p, factor);
-                }
-            }
-            if self.floor_plan.validate_simple().is_ok() {
-                return true;
-            }
-        }
-
-        self.floor_plan = post_apply;
-        false
-    }
-
-    /// Repair strategy 2: for each un-set parameter, set its new value to
-    /// `new_lower + (pre_value - pre_lower)` where `new_lower` is the
-    /// post-apply coord of the vertex just before the run and `pre_lower` /
-    /// `pre_value` are from the pre-apply snapshot. This preserves each
-    /// un-set param's distance from the "anchor" vertex preceding it in the
-    /// polygon's traversal — the polygon's shape relative to that anchor is
-    /// unchanged, just translated to accommodate the new user-set value.
-    fn try_linear_remap_preserve_offsets(
-        &mut self,
-        axis: ParameterAxis,
-        snapshot: &FloorPlan,
-    ) -> bool {
-        let polygons = self.floor_plan.polygons();
-        let snap_polys = snapshot.polygons();
-        let Some(ring) = polygons.first() else {
-            return false;
-        };
-        let Some(snap_ring) = snap_polys.first() else {
-            return false;
-        };
-        let n = ring.len();
-        if n < 4 || snap_ring.len() != n {
-            return false;
-        }
-
-        // Classify each vertex once. We can't use closures that borrow
-        // `self.floor_plan` immutably alongside `self.floor_plan.set_parameter`
-        // mutably below, so resolve everything up front into owned data.
-        let vertex_param: Vec<Option<ParameterId>> = (0..n)
-            .map(|i| match axis {
-                ParameterAxis::X => self.floor_plan.vertex_x_param(0, i),
-                ParameterAxis::Y => self.floor_plan.vertex_y_param(0, i),
-            })
-            .collect();
-        let is_unset = |i: usize| -> bool {
-            matches!(vertex_param[i], Some(p) if !self.dimensioning.known_params.contains(&p))
-        };
-        let coord_of = |pts: &[Point2f32], i: usize| -> f32 {
-            match axis {
-                ParameterAxis::X => pts[i].x,
-                ParameterAxis::Y => pts[i].y,
-            }
-        };
-
-        if is_unset(0) {
-            // V0 should be a constant (the polygon's anchor). Defensive bail.
-            return false;
-        }
-
-        // First pass: collect (param, new_value) assignments without mutating.
-        let mut assignments: Vec<(ParameterId, f32)> = Vec::new();
-        let mut i = 0;
-        while i < n {
-            if !is_unset(i) {
-                i += 1;
-                continue;
-            }
-            let start = i;
-            while i < n && is_unset(i) {
-                i += 1;
-            }
-            let end = i; // exclusive
-
-            let prev_idx = (start + n - 1) % n;
-            if is_unset(prev_idx) {
-                continue;
-            }
-
-            let new_lower = coord_of(ring, prev_idx);
-            let pre_lower = coord_of(snap_ring, prev_idx);
-
-            // Distinct un-set params in run order. For each, the pre-apply
-            // value comes from the snapshot vertex at the same position.
-            let mut applied: Vec<ParameterId> = Vec::new();
-            for j in start..end {
-                let Some(p) = vertex_param[j] else {
-                    continue;
-                };
-                if applied.contains(&p) {
-                    continue;
-                }
-                applied.push(p);
-                let pre_value = coord_of(snap_ring, j);
-                let offset = pre_value - pre_lower;
-                assignments.push((p, new_lower + offset));
-            }
-        }
-
-        // Second pass: apply.
-        for (p, value) in assignments {
-            self.floor_plan.set_parameter(p, value);
-        }
-
-        self.floor_plan.validate_simple().is_ok()
-    }
-
-    /// Linear-remap repair for ring 0. Walks vertices in polygon order, finds
-    /// maximal runs of vertices whose `axis`-coord is an un-set parameter
-    /// (bounded by vertices whose coord is known — either a constant or a
-    /// set parameter). For each run, redistributes the distinct un-set params
-    /// evenly within the bounding interval. Returns true if the resulting
-    /// polygon validates simple.
-    fn try_linear_remap_ring0(&mut self, axis: ParameterAxis) -> bool {
-        let polygons = self.floor_plan.polygons();
-        let Some(ring_positions) = polygons.first() else {
-            return false;
-        };
-        let n = ring_positions.len();
-        if n < 4 {
-            return false;
-        }
-
-        // Source of each vertex's relevant-axis coord: Known(value) or Unset(param, value).
-        #[derive(Clone, Copy)]
-        enum Source {
-            Known(f32),
-            Unset(ParameterId, f32),
-        }
-        let coord_of = |i: usize| -> f32 {
-            match axis {
-                ParameterAxis::X => ring_positions[i].x,
-                ParameterAxis::Y => ring_positions[i].y,
-            }
-        };
-        let param_of = |i: usize| -> Option<ParameterId> {
-            match axis {
-                ParameterAxis::X => self.floor_plan.vertex_x_param(0, i),
-                ParameterAxis::Y => self.floor_plan.vertex_y_param(0, i),
-            }
-        };
-        let seq: Vec<Source> = (0..n)
-            .map(|i| match param_of(i) {
-                Some(p) if !self.dimensioning.known_params.contains(&p) => {
-                    Source::Unset(p, coord_of(i))
-                }
-                _ => Source::Known(coord_of(i)),
-            })
-            .collect();
-
-        // Bail if the polygon starts with an un-set vertex — would need
-        // wrap-around handling. For ring 0 this shouldn't happen (V0 is
-        // always Constant by construction), but be defensive.
-        if matches!(seq[0], Source::Unset(_, _)) {
-            return false;
-        }
-
-        // Find each maximal run of un-set entries; for each, redistribute.
-        let mut i = 0;
-        while i < n {
-            if matches!(seq[i], Source::Known(_)) {
-                i += 1;
-                continue;
-            }
-            let start = i;
-            while i < n && matches!(seq[i], Source::Unset(_, _)) {
-                i += 1;
-            }
-            let end = i; // exclusive
-
-            let Source::Known(lower) = seq[(start + n - 1) % n] else {
-                // Two consecutive un-set runs separated by nothing — shouldn't
-                // happen given the loop structure, but be safe.
-                continue;
-            };
-            let Source::Known(upper) = seq[end % n] else {
-                continue;
-            };
-
-            // Distinct un-set params in polygon-traversal order.
-            let mut distinct: Vec<ParameterId> = Vec::new();
-            for s in &seq[start..end] {
-                if let Source::Unset(p, _) = s {
-                    if !distinct.contains(p) {
-                        distinct.push(*p);
-                    }
-                }
-            }
-            if distinct.is_empty() {
-                continue;
-            }
-
-            // Evenly distribute between `lower` and `upper` (exclusive of
-            // both bounds). `step` carries the sign — if upper < lower
-            // (polygon traverses from larger to smaller along this axis),
-            // step is negative and params decrease in order, which matches
-            // the un-set params' position in the traversal.
-            let step = (upper - lower) / (distinct.len() + 1) as f32;
-            for (idx, p) in distinct.iter().enumerate() {
-                let new_val = lower + step * (idx + 1) as f32;
-                self.floor_plan.set_parameter(*p, new_val);
-            }
-        }
-
-        self.floor_plan.validate_simple().is_ok()
-    }
-
-    /// If the polygon's aspect ratio is extreme (> ~5:1), scale the still-
-    /// unset parameters along the short axis to bring aspect back to ~3:1
-    /// (capped at 2× scaling). Reverts if the rescale would invalidate the
-    /// polygon. Pure aesthetics — the user's confirmed dimensions never move.
-    fn aesthetic_rescale_if_needed(&mut self) {
-        const TRIGGER_ASPECT: f32 = 5.0;
-        const TARGET_ASPECT: f32 = 3.0;
-        const MAX_FACTOR: f32 = 2.0;
-
-        let Some(((min_x, min_y), (max_x, max_y))) = self.floor_plan.bounding_box() else {
-            return;
-        };
-        let bw = max_x - min_x;
-        let bh = max_y - min_y;
-        if bw < 1e-3 || bh < 1e-3 {
-            return;
-        }
-        let aspect = bw.max(bh) / bw.min(bh);
-        if aspect <= TRIGGER_ASPECT {
-            return;
-        }
-
-        let factor = (aspect / TARGET_ASPECT).clamp(1.0, MAX_FACTOR);
-        // Scale the deficient axis: if the polygon is wider than tall, the
-        // short axis is Y — scale the un-set y-params.
-        let scale_y = bw > bh;
-
-        let snapshot = self.floor_plan.clone();
-        let active = self.floor_plan.all_active_params();
-        for p in active {
-            if self.dimensioning.known_params.contains(&p) {
-                continue;
-            }
-            let scale_this = match self.floor_plan.param_axis(p) {
-                Some(ParameterAxis::Y) => scale_y,
-                Some(ParameterAxis::X) => !scale_y,
-                None => false,
-            };
-            if scale_this {
-                self.floor_plan.scale_parameter(p, factor);
-            }
-        }
-
-        // If the rescale broke the polygon (e.g. pushed an un-set coord past
-        // a known one), revert. Better to keep the extreme aspect than to
-        // produce a self-intersecting shape.
-        if self.floor_plan.validate_simple().is_err() {
-            self.floor_plan = snapshot;
-        }
     }
 
     /// Skip the current dimension prompt without entering a value. The
@@ -2410,142 +2109,6 @@ fn joint_solve(
         (WallLength, Axis(axis)) => solve_axis_wall(axis, m2.sign, d2, n2, n1, d1, cur),
         (WallLength, WallLength) => intersect_circles(n1, d1, n2, d2, cur),
     }
-}
-
-/// Project `cur` onto a circle of radius `r` around `n`.
-fn project_to_circle(cur: (f32, f32), n: (f32, f32), r: f32) -> (f32, f32) {
-    let dx = cur.0 - n.0;
-    let dy = cur.1 - n.1;
-    let len = (dx * dx + dy * dy).sqrt();
-    if len < 1e-6 {
-        (n.0 + r, n.1)
-    } else {
-        let scale = r / len;
-        (n.0 + dx * scale, n.1 + dy * scale)
-    }
-}
-
-/// Solve V given one axis constraint + one circle constraint.
-/// axis_sign * axis_dist pins V's coord on the named axis (from
-/// `axis_neighbor`), then we solve the circle (centred at `circle_n`,
-/// radius `circle_r`) for the other coord. Two solutions in general;
-/// pick the one matching the current position's side.
-fn solve_axis_wall(
-    axis: ParameterAxis,
-    axis_sign: f32,
-    axis_dist: f32,
-    axis_neighbor: (f32, f32),
-    circle_n: (f32, f32),
-    circle_r: f32,
-    cur: (f32, f32),
-) -> (f32, f32) {
-    match axis {
-        ParameterAxis::X => {
-            let new_x = axis_neighbor.0 + axis_sign * axis_dist;
-            let dx_to_n = new_x - circle_n.0;
-            let dy_sq = circle_r * circle_r - dx_to_n * dx_to_n;
-            if dy_sq < 0.0 {
-                // Circle doesn't reach this X line — fall back to projection.
-                project_to_circle(cur, circle_n, circle_r)
-            } else {
-                let dy_abs = dy_sq.sqrt();
-                let sign_y = (cur.1 - circle_n.1).signum();
-                let sign_y = if sign_y == 0.0 { 1.0 } else { sign_y };
-                (new_x, circle_n.1 + sign_y * dy_abs)
-            }
-        }
-        ParameterAxis::Y => {
-            let new_y = axis_neighbor.1 + axis_sign * axis_dist;
-            let dy_to_n = new_y - circle_n.1;
-            let dx_sq = circle_r * circle_r - dy_to_n * dy_to_n;
-            if dx_sq < 0.0 {
-                project_to_circle(cur, circle_n, circle_r)
-            } else {
-                let dx_abs = dx_sq.sqrt();
-                let sign_x = (cur.0 - circle_n.0).signum();
-                let sign_x = if sign_x == 0.0 { 1.0 } else { sign_x };
-                (circle_n.0 + sign_x * dx_abs, new_y)
-            }
-        }
-    }
-}
-
-/// Intersect two circles (centres `n1`, `n2`; radii `r1`, `r2`). Returns
-/// the intersection point closest to `cur`. When circles don't intersect,
-/// falls back to `cur`.
-fn intersect_circles(
-    n1: (f32, f32),
-    r1: f32,
-    n2: (f32, f32),
-    r2: f32,
-    cur: (f32, f32),
-) -> (f32, f32) {
-    let dx = n2.0 - n1.0;
-    let dy = n2.1 - n1.1;
-    let d = (dx * dx + dy * dy).sqrt();
-    if d < 1e-6 || d > r1 + r2 + 1e-3 || d < (r1 - r2).abs() - 1e-3 {
-        return cur;
-    }
-    let a = (r1 * r1 - r2 * r2 + d * d) / (2.0 * d);
-    let h_sq = (r1 * r1 - a * a).max(0.0);
-    let h = h_sq.sqrt();
-    let mid_x = n1.0 + a * dx / d;
-    let mid_y = n1.1 + a * dy / d;
-    let perp_x = -dy / d * h;
-    let perp_y = dx / d * h;
-    let p1 = (mid_x + perp_x, mid_y + perp_y);
-    let p2 = (mid_x - perp_x, mid_y - perp_y);
-    let d1_sq = (p1.0 - cur.0).powi(2) + (p1.1 - cur.1).powi(2);
-    let d2_sq = (p2.0 - cur.0).powi(2) + (p2.1 - cur.1).powi(2);
-    if d1_sq < d2_sq {
-        p1
-    } else {
-        p2
-    }
-}
-
-/// For each edge in each ring, record `(sign_dx, sign_dy)` where dx, dy
-/// are the deltas from the edge's start vertex to its end vertex. Used by
-/// the direction-flip guard in `apply_dimension`.
-fn snapshot_edge_signs(plan: &FloorPlan) -> Vec<Vec<(i8, i8)>> {
-    plan.polygons()
-        .iter()
-        .map(|ring| {
-            let n = ring.len();
-            (0..n)
-                .map(|i| {
-                    let a = ring[i];
-                    let b = ring[(i + 1) % n];
-                    let sx = (b.x - a.x).signum() as i8;
-                    let sy = (b.y - a.y).signum() as i8;
-                    (sx, sy)
-                })
-                .collect()
-        })
-        .collect()
-}
-
-/// Returns the (ring_idx, edge_idx) of the first edge whose direction sign
-/// flipped between `before` and `after` (positive → negative or vice versa
-/// along either axis). Zero signs are ignored — they represent edges that
-/// were already degenerate in one direction, so a sign change there isn't
-/// a "flip", and `validate_simple` separately catches genuinely-collapsed
-/// edges.
-fn find_flipped_edge(before: &[Vec<(i8, i8)>], after: &[Vec<(i8, i8)>]) -> Option<(usize, usize)> {
-    for (ring_idx, (b_ring, a_ring)) in before.iter().zip(after.iter()).enumerate() {
-        if b_ring.len() != a_ring.len() {
-            return Some((ring_idx, 0));
-        }
-        for (edge_idx, (b_sign, a_sign)) in b_ring.iter().zip(a_ring.iter()).enumerate() {
-            if b_sign.0 != 0 && a_sign.0 != 0 && b_sign.0 != a_sign.0 {
-                return Some((ring_idx, edge_idx));
-            }
-            if b_sign.1 != 0 && a_sign.1 != 0 && b_sign.1 != a_sign.1 {
-                return Some((ring_idx, edge_idx));
-            }
-        }
-    }
-    None
 }
 
 /// Statistics about a floor plan

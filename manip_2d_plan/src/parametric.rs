@@ -1022,6 +1022,297 @@ impl ParametricPlan {
         }
     }
 
+    /// For each edge in each ring, record `(sign_dx, sign_dy)` where dx, dy
+    /// are the deltas from the edge's start vertex to its end vertex. Feeds the
+    /// direction-flip guard (`crate::find_flipped_edge`): compare a snapshot
+    /// taken before a parameter change against one taken after.
+    pub fn edge_signs(&self) -> Vec<Vec<(i8, i8)>> {
+        self.all_ring_points()
+            .iter()
+            .map(|ring| {
+                let n = ring.len();
+                (0..n)
+                    .map(|i| {
+                        let a = ring[i];
+                        let b = ring[(i + 1) % n];
+                        ((b.x - a.x).signum() as i8, (b.y - a.y).signum() as i8)
+                    })
+                    .collect()
+            })
+            .collect()
+    }
+
+    /// Try to repair an invalid polygon by redistributing the parameters NOT in
+    /// `known` (the user-dimensioned ones) along `axis`. `snapshot` is the plan
+    /// as it was before the dimension that broke it. Three strategies in order
+    /// — distribute between bounds, preserve pre-apply offsets, then uniform
+    /// down-scaling — leaving the plan unchanged and returning `false` if none
+    /// yields a simple polygon. The direction-flip guard is the caller's job.
+    pub fn repair_unset_params(
+        &mut self,
+        axis: ParameterAxis,
+        known: &HashSet<ParameterId>,
+        snapshot: &ParametricPlan,
+    ) -> bool {
+        let post_apply = self.clone();
+
+        // Strategy 1: distribute evenly between the bounding known coords.
+        if self.linear_remap_ring0(axis, known) {
+            return true;
+        }
+        *self = post_apply.clone();
+
+        // Strategy 2: preserve each un-set param's pre-apply offset.
+        if self.linear_remap_preserve_offsets(axis, known, snapshot) {
+            return true;
+        }
+        *self = post_apply.clone();
+
+        // Strategy 3: uniform down-scaling of the un-set params (last resort).
+        const FACTORS: &[f32] = &[0.9, 0.75, 0.55, 0.35, 0.2, 0.1];
+        for &factor in FACTORS {
+            *self = post_apply.clone();
+            for p in self.all_active_params() {
+                if known.contains(&p) {
+                    continue;
+                }
+                if self.param_axis(p) == Some(axis) {
+                    self.scale_parameter(p, factor);
+                }
+            }
+            if self.validate_simple().is_ok() {
+                return true;
+            }
+        }
+
+        *self = post_apply;
+        false
+    }
+
+    /// Repair strategy 1. Walks ring 0 in order, finds maximal runs of vertices
+    /// whose `axis`-coord is an un-set parameter (bounded by vertices with a
+    /// known coord — a constant or a set parameter), and redistributes each
+    /// run's distinct un-set params evenly within the bounding interval.
+    /// Returns true if the result validates simple.
+    fn linear_remap_ring0(&mut self, axis: ParameterAxis, known: &HashSet<ParameterId>) -> bool {
+        let polygons = self.all_ring_points();
+        let Some(ring_positions) = polygons.first() else {
+            return false;
+        };
+        let n = ring_positions.len();
+        if n < 4 {
+            return false;
+        }
+
+        #[derive(Clone, Copy)]
+        enum Source {
+            Known(f32),
+            Unset(ParameterId, f32),
+        }
+        let coord_of = |i: usize| -> f32 {
+            match axis {
+                ParameterAxis::X => ring_positions[i].x,
+                ParameterAxis::Y => ring_positions[i].y,
+            }
+        };
+        let param_of = |i: usize| -> Option<ParameterId> {
+            match axis {
+                ParameterAxis::X => self.vertex_x_param(0, i),
+                ParameterAxis::Y => self.vertex_y_param(0, i),
+            }
+        };
+        let seq: Vec<Source> = (0..n)
+            .map(|i| match param_of(i) {
+                Some(p) if !known.contains(&p) => Source::Unset(p, coord_of(i)),
+                _ => Source::Known(coord_of(i)),
+            })
+            .collect();
+
+        // V0 of ring 0 is always a constant by construction; bail otherwise.
+        if matches!(seq[0], Source::Unset(_, _)) {
+            return false;
+        }
+
+        let mut i = 0;
+        while i < n {
+            if matches!(seq[i], Source::Known(_)) {
+                i += 1;
+                continue;
+            }
+            let start = i;
+            while i < n && matches!(seq[i], Source::Unset(_, _)) {
+                i += 1;
+            }
+            let end = i; // exclusive
+
+            let Source::Known(lower) = seq[(start + n - 1) % n] else {
+                continue;
+            };
+            let Source::Known(upper) = seq[end % n] else {
+                continue;
+            };
+
+            let mut distinct: Vec<ParameterId> = Vec::new();
+            for s in &seq[start..end] {
+                if let Source::Unset(p, _) = s {
+                    if !distinct.contains(p) {
+                        distinct.push(*p);
+                    }
+                }
+            }
+            if distinct.is_empty() {
+                continue;
+            }
+
+            // Even distribution between (lower, upper). `step` carries the sign
+            // so params decrease when the traversal runs high→low.
+            let step = (upper - lower) / (distinct.len() + 1) as f32;
+            for (idx, p) in distinct.iter().enumerate() {
+                self.set_parameter(*p, lower + step * (idx + 1) as f32);
+            }
+        }
+
+        self.validate_simple().is_ok()
+    }
+
+    /// Repair strategy 2: set each un-set parameter to `new_lower + (pre_value
+    /// - pre_lower)`, preserving its pre-apply distance from the anchor vertex
+    /// preceding its run. Works when un-set params extend *outside* the bounds.
+    /// `snapshot` is the pre-apply plan.
+    fn linear_remap_preserve_offsets(
+        &mut self,
+        axis: ParameterAxis,
+        known: &HashSet<ParameterId>,
+        snapshot: &ParametricPlan,
+    ) -> bool {
+        let polygons = self.all_ring_points();
+        let snap_polys = snapshot.all_ring_points();
+        let Some(ring) = polygons.first() else {
+            return false;
+        };
+        let Some(snap_ring) = snap_polys.first() else {
+            return false;
+        };
+        let n = ring.len();
+        if n < 4 || snap_ring.len() != n {
+            return false;
+        }
+
+        let vertex_param: Vec<Option<ParameterId>> = (0..n)
+            .map(|i| match axis {
+                ParameterAxis::X => self.vertex_x_param(0, i),
+                ParameterAxis::Y => self.vertex_y_param(0, i),
+            })
+            .collect();
+        let is_unset =
+            |i: usize| -> bool { matches!(vertex_param[i], Some(p) if !known.contains(&p)) };
+        let coord_of = |pts: &[Point2f32], i: usize| -> f32 {
+            match axis {
+                ParameterAxis::X => pts[i].x,
+                ParameterAxis::Y => pts[i].y,
+            }
+        };
+
+        if is_unset(0) {
+            return false;
+        }
+
+        let mut assignments: Vec<(ParameterId, f32)> = Vec::new();
+        let mut i = 0;
+        while i < n {
+            if !is_unset(i) {
+                i += 1;
+                continue;
+            }
+            let start = i;
+            while i < n && is_unset(i) {
+                i += 1;
+            }
+            let end = i; // exclusive
+
+            let prev_idx = (start + n - 1) % n;
+            if is_unset(prev_idx) {
+                continue;
+            }
+            let new_lower = coord_of(ring, prev_idx);
+            let pre_lower = coord_of(snap_ring, prev_idx);
+
+            let mut applied: Vec<ParameterId> = Vec::new();
+            for j in start..end {
+                let Some(p) = vertex_param[j] else {
+                    continue;
+                };
+                if applied.contains(&p) {
+                    continue;
+                }
+                applied.push(p);
+                let pre_value = coord_of(snap_ring, j);
+                assignments.push((p, new_lower + (pre_value - pre_lower)));
+            }
+        }
+
+        for (p, value) in assignments {
+            self.set_parameter(p, value);
+        }
+        self.validate_simple().is_ok()
+    }
+
+    /// If the polygon's aspect ratio is extreme (> ~5:1), scale the still-un-set
+    /// parameters (those not in `known`) on the short axis toward ~3:1 (capped
+    /// at 2×). Reverts if it would invalidate the polygon. Pure aesthetics —
+    /// the user's confirmed dimensions never move.
+    pub fn aesthetic_rescale(&mut self, known: &HashSet<ParameterId>) {
+        const TRIGGER_ASPECT: f32 = 5.0;
+        const TARGET_ASPECT: f32 = 3.0;
+        const MAX_FACTOR: f32 = 2.0;
+
+        let mut iter = self.all_ring_points().into_iter().flatten();
+        let Some(first) = iter.next() else {
+            return;
+        };
+        let (mut min_x, mut min_y, mut max_x, mut max_y) = (first.x, first.y, first.x, first.y);
+        for p in iter {
+            min_x = min_x.min(p.x);
+            min_y = min_y.min(p.y);
+            max_x = max_x.max(p.x);
+            max_y = max_y.max(p.y);
+        }
+        let bw = max_x - min_x;
+        let bh = max_y - min_y;
+        if bw < 1e-3 || bh < 1e-3 {
+            return;
+        }
+        let aspect = bw.max(bh) / bw.min(bh);
+        if aspect <= TRIGGER_ASPECT {
+            return;
+        }
+
+        let factor = (aspect / TARGET_ASPECT).clamp(1.0, MAX_FACTOR);
+        // Scale the deficient axis: wider-than-tall → short axis is Y.
+        let scale_y = bw > bh;
+
+        let snapshot = self.clone();
+        for p in self.all_active_params() {
+            if known.contains(&p) {
+                continue;
+            }
+            let scale_this = match self.param_axis(p) {
+                Some(ParameterAxis::Y) => scale_y,
+                Some(ParameterAxis::X) => !scale_y,
+                None => false,
+            };
+            if scale_this {
+                self.scale_parameter(p, factor);
+            }
+        }
+
+        // Revert if the rescale broke the polygon — better an extreme aspect
+        // than a self-intersecting shape.
+        if self.validate_simple().is_err() {
+            *self = snapshot;
+        }
+    }
+
     fn recompute_active_parameter_count(&mut self) {
         let mut used: HashSet<ParameterId> = HashSet::new();
         for ring in &self.rings {
@@ -1650,32 +1941,20 @@ mod tests {
             "post-dim-3 polygon should not validate yet"
         );
 
-        // Now mimic the controller's linear-remap repair. Distribute the
-        // un-set Y-params between V4.y (1.29) and V11.y (0.788).
-        let v4_y = plan.rings[0][4].evaluate(&plan.parameters).y;
-        let v11_y = plan.rings[0][11].evaluate(&plan.parameters).y;
-
-        // Collect distinct un-set y-params in V5..V10 order.
-        let mut distinct: Vec<ParameterId> = Vec::new();
-        for i in 5..11 {
-            if let CoordinateExpression::Parameter(p) = &plan.rings[0][i].y_expr {
-                if !known.contains(p) && !distinct.contains(p) {
-                    distinct.push(*p);
-                }
-            }
-        }
-        assert_eq!(distinct.len(), 3, "expected 3 un-set y-params");
-
-        let step = (v11_y - v4_y) / (distinct.len() + 1) as f32;
-        for (idx, p) in distinct.iter().enumerate() {
-            let new_val = v4_y + step * (idx + 1) as f32;
-            plan.set_parameter(*p, new_val);
-        }
-
-        // After linear remap the polygon should validate simple.
+        // Repair via the shipped routine. Strategy 1 (distribute un-set
+        // Y-params between the bounding known coords) is exactly what this
+        // scenario needs; the test used to re-implement that remap inline, but
+        // now it exercises the real `repair_unset_params`. (Strategy 1 succeeds
+        // first, so the `snapshot` arg — only consulted by strategy 2 — is just
+        // the current state.)
+        let snapshot = plan.clone();
+        assert!(
+            plan.repair_unset_params(ParameterAxis::Y, &known, &snapshot),
+            "repair_unset_params should yield a simple polygon"
+        );
         assert!(
             plan.validate_simple().is_ok(),
-            "polygon should validate after linear remap: {:?}",
+            "polygon should validate after repair: {:?}",
             plan.validate_simple()
         );
     }

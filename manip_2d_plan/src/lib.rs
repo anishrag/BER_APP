@@ -12,14 +12,17 @@
 
 mod error;
 mod extend;
+mod geom;
 mod orthogonal;
 mod parametric;
 mod simplification;
 
 pub use error::Error;
+pub use geom::{find_flipped_edge, intersect_circles, project_to_circle, solve_axis_wall};
 pub use parametric::{Axis, CollinearitySuggestion, ParameterAxis, ParameterId, VertexId};
 
 use domain::points::Point2f32;
+use std::collections::HashSet;
 
 /// A processed floor plan: orthogonal polygon as a parametric representation
 /// (shared coordinate expressions for collinear walls, one parameter per
@@ -497,6 +500,32 @@ impl FloorPlan {
             max_y = max_y.max(p.y);
         }
         Some(((min_x, min_y), (max_x, max_y)))
+    }
+
+    /// Per-edge direction signs, for the direction-flip guard. See
+    /// [`ParametricPlan::edge_signs`](parametric::ParametricPlan::edge_signs).
+    pub fn edge_signs(&self) -> Vec<Vec<(i8, i8)>> {
+        self.parametric.edge_signs()
+    }
+
+    /// Repair an invalid polygon by redistributing the parameters not in
+    /// `known` along `axis`. See
+    /// [`ParametricPlan::repair_unset_params`](parametric::ParametricPlan::repair_unset_params).
+    pub fn repair_unset_params(
+        &mut self,
+        axis: ParameterAxis,
+        known: &HashSet<ParameterId>,
+        snapshot: &FloorPlan,
+    ) -> bool {
+        self.parametric
+            .repair_unset_params(axis, known, &snapshot.parametric)
+    }
+
+    /// Nudge an extreme aspect ratio back toward ~3:1 by scaling un-set
+    /// parameters. See
+    /// [`ParametricPlan::aesthetic_rescale`](parametric::ParametricPlan::aesthetic_rescale).
+    pub fn aesthetic_rescale(&mut self, known: &HashSet<ParameterId>) {
+        self.parametric.aesthetic_rescale(known)
     }
 }
 
