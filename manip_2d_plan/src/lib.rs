@@ -586,6 +586,14 @@ mod serde_tests {
         let json = serde_json::to_string(&plan).expect("serialize");
         let back: FloorPlan = serde_json::from_str(&json).expect("deserialize");
 
+        // The private id counters MUST persist: if they reset, a post-reload
+        // edit would mint param/vertex ids that collide with existing ones and
+        // silently corrupt `known_params` / vertex identity.
+        assert!(
+            json.contains("next_param_id") && json.contains("next_vertex_id"),
+            "id counters must be serialized to prevent post-reload id collisions"
+        );
+
         assert_eq!(
             back.active_parameter_count(),
             params_before,
