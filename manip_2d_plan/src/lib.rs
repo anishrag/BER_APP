@@ -28,6 +28,7 @@ use std::collections::HashSet;
 /// (shared coordinate expressions for collinear walls, one parameter per
 /// independent dimension).
 #[derive(Debug, Clone, Default)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct FloorPlan {
     parametric: parametric::ParametricPlan,
 }
@@ -547,4 +548,59 @@ fn point_to_segment_distance(px: f64, py: f64, ax: f64, ay: f64, bx: f64, by: f6
     let dx = px - proj_x;
     let dy = py - proj_y;
     (dx * dx + dy * dy).sqrt()
+}
+
+#[cfg(all(test, feature = "serde"))]
+mod serde_tests {
+    use super::*;
+
+    fn p(x: f32, y: f32) -> Point2f32 {
+        Point2f32::new(x, y)
+    }
+
+    /// The persisted snapshot must preserve the parametric structure, not just
+    /// the points: collinearity equivalences are shared parameters, so the
+    /// active-parameter count (which drops when walls share a coord) is the
+    /// signal. A square has 2 params; after a porch extend it gains a few. The
+    /// round-trip must reproduce that exactly — otherwise reopening a saved BER
+    /// would lose the equivalences.
+    #[test]
+    fn floor_plan_json_roundtrip_preserves_parametric_structure() {
+        // Last point mimics the user's "lift near the start" drag point that
+        // `from_points_to_orthogonal` drops for an implicitly-closed stroke.
+        let square = vec![
+            p(0.0, 0.0),
+            p(10.0, 0.0),
+            p(10.0, 10.0),
+            p(0.0, 10.0),
+            p(0.2, 0.2),
+        ];
+        let mut plan = FloorPlan::from_points_to_orthogonal(&square, 0.5, true).unwrap();
+        // Porch out of the top edge — creates new shared-param equivalences.
+        let porch = vec![p(3.0, 0.0), p(3.0, -4.0), p(7.0, -4.0), p(7.0, 0.0)];
+        plan.extend(&porch).unwrap();
+
+        let params_before = plan.active_parameter_count();
+        let rings_before: Vec<usize> = plan.polygons().iter().map(|r| r.len()).collect();
+
+        let json = serde_json::to_string(&plan).expect("serialize");
+        let back: FloorPlan = serde_json::from_str(&json).expect("deserialize");
+
+        assert_eq!(
+            back.active_parameter_count(),
+            params_before,
+            "shared-parameter equivalences must survive the round-trip"
+        );
+        let rings_after: Vec<usize> = back.polygons().iter().map(|r| r.len()).collect();
+        assert_eq!(rings_after, rings_before);
+        // Geometry matches too (within f32 round-trip tolerance).
+        for (a, b) in back
+            .polygons()
+            .iter()
+            .flatten()
+            .zip(plan.polygons().iter().flatten())
+        {
+            assert!((a.x - b.x).abs() < 1e-3 && (a.y - b.y).abs() < 1e-3);
+        }
+    }
 }

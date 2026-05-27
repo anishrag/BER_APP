@@ -212,6 +212,26 @@ pub struct DimensionState {
     pub skipped_walls: HashSet<VertexId>,
 }
 
+/// Version stamp for the persisted sketch snapshot. Bump when `FloorPlan`'s
+/// serialized shape or the snapshot fields change in a backward-incompatible
+/// way — older snapshots then fail the version check and the editor rebuilds
+/// from the resolved `floors` geometry instead of crashing.
+const SKETCH_SNAPSHOT_VERSION: u32 = 1;
+
+/// The editable parametric state for one storey, serialized into
+/// `Storey.sketch_state` so reopening a BER restores every collinearity
+/// equivalence and entered dimension. Excludes the transient `current_prompt`
+/// (recomputed on load).
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+struct SketchSnapshot {
+    version: u32,
+    floor_plan: FloorPlan,
+    known_params: HashSet<ParameterId>,
+    scale_set: bool,
+    dimensioned_walls: Vec<VertexId>,
+    skipped_walls: HashSet<VertexId>,
+}
+
 pub struct AppController {
     conn: Db,
     sketch_engine: SketchEngine,
@@ -1616,6 +1636,77 @@ impl AppController {
         repo.load(id).ok().map(|record| record.data)
     }
 
+    /// Load an existing BER into the editor: sets it as the current record and
+    /// reconstructs the parametric sketch + dimensioning state from the stored
+    /// snapshot, so editing resumes with every collinearity equivalence and
+    /// entered dimension intact. If the snapshot is missing or from an older,
+    /// incompatible version, falls back to rebuilding a fresh parametric model
+    /// from the resolved `floors` geometry (equivalences/dimensions are then
+    /// lost — unavoidable for pre-snapshot records).
+    pub fn open_ber(&mut self, id: &ItemId) -> Result<(), String> {
+        let record = BerRepository::new(&self.conn)
+            .load(id)
+            .map_err(|e| format!("failed to load BER: {}", e))?;
+        self.restore_sketch_state(record.data.storeys.first());
+        self.current_record = Some(record);
+        self.view = ViewTransform::default();
+        self.edit_state = EditState::default();
+        self.review = None;
+        self.compute_next_dimension_prompt();
+        self.history.clear();
+        self.redo.clear();
+        Ok(())
+    }
+
+    /// Rebuild `self.floor_plan` + `self.dimensioning` from a storey's saved
+    /// state. Prefers the parametric snapshot; on absence/parse failure/version
+    /// mismatch, rebuilds from the resolved floor geometry (lossy).
+    fn restore_sketch_state(&mut self, storey: Option<&Storey>) {
+        self.dimensioning = DimensionState::default();
+        let Some(storey) = storey else {
+            self.floor_plan = FloorPlan::default();
+            return;
+        };
+
+        // Primary path: the parametric snapshot.
+        if let Some(json) = storey.sketch_state.as_deref() {
+            match serde_json::from_str::<SketchSnapshot>(json) {
+                Ok(snap) if snap.version == SKETCH_SNAPSHOT_VERSION => {
+                    self.floor_plan = snap.floor_plan;
+                    self.dimensioning.known_params = snap.known_params;
+                    self.dimensioning.scale_set = snap.scale_set;
+                    self.dimensioning.dimensioned_walls = snap.dimensioned_walls;
+                    self.dimensioning.skipped_walls = snap.skipped_walls;
+                    return;
+                }
+                Ok(snap) => eprintln!(
+                    "sketch snapshot version {} != {}, rebuilding from geometry",
+                    snap.version, SKETCH_SNAPSHOT_VERSION
+                ),
+                Err(e) => eprintln!("sketch snapshot parse failed ({}), rebuilding", e),
+            }
+        }
+
+        // Fallback: rebuild a fresh parametric model from the resolved floors.
+        // Equivalences and dimensions can't be recovered — they were never
+        // stored for this record.
+        let rings = storey.floors.to_vertex_lists();
+        let primary: Vec<Point2f32> = rings
+            .into_iter()
+            .find(|r| r.len() >= 3)
+            .map(|r| {
+                r.iter()
+                    .map(|p| Point2f32::new(p.x as f32, p.y as f32))
+                    .collect()
+            })
+            .unwrap_or_default();
+        self.floor_plan = if primary.len() >= 3 {
+            FloorPlan::from_points_to_orthogonal(&primary, 10.0, true).unwrap_or_default()
+        } else {
+            FloorPlan::default()
+        };
+    }
+
     /// Snapshot of the BER currently being edited, for the UI to render.
     /// Returns None if no BER has been created/loaded yet.
     pub fn current_ber_clone(&self) -> Option<Ber> {
@@ -1663,6 +1754,23 @@ impl AppController {
                 None,
                 None,
             );
+        }
+
+        // Persist the editable parametric model + dimensioning state alongside
+        // the resolved geometry, so reopening this BER keeps all collinearity
+        // equivalences and entered dimensions. `floors` above is the derived
+        // view; this snapshot is the source of truth for editing.
+        let snapshot = SketchSnapshot {
+            version: SKETCH_SNAPSHOT_VERSION,
+            floor_plan: self.floor_plan.clone(),
+            known_params: self.dimensioning.known_params.clone(),
+            scale_set: self.dimensioning.scale_set,
+            dimensioned_walls: self.dimensioning.dimensioned_walls.clone(),
+            skipped_walls: self.dimensioning.skipped_walls.clone(),
+        };
+        match serde_json::to_string(&snapshot) {
+            Ok(json) => record.data.storeys[0].sketch_state = Some(json),
+            Err(e) => eprintln!("failed to serialize sketch snapshot: {}", e),
         }
 
         BerRepository::new(&self.conn)

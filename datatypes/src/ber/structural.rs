@@ -219,6 +219,28 @@ impl FloorRegions {
 
         Self { regions }
     }
+
+    /// Exterior vertices of each region, one `Vec` per region. Drops the
+    /// closing coordinate that `geo` polygons repeat (last == first). Inverse
+    /// of `from_vertex_lists`; used by the editor to rebuild a parametric model
+    /// from resolved geometry when no sketch snapshot is available.
+    pub fn to_vertex_lists(&self) -> Vec<Vec<Point2f64>> {
+        self.regions
+            .iter()
+            .map(|r| {
+                let mut pts: Vec<Point2f64> = r
+                    .polygon
+                    .exterior()
+                    .coords()
+                    .map(|c| Point2f64::new(c.x, c.y))
+                    .collect();
+                if pts.len() > 1 && pts.first() == pts.last() {
+                    pts.pop();
+                }
+                pts
+            })
+            .collect()
+    }
 }
 /// A planar region of the floor
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -330,6 +352,15 @@ pub struct Storey {
     pub windows: Vec<Window>,
     pub doors: Vec<Door>,
     pub rooms: Vec<Room>,
+    /// Opaque serialized snapshot of the parametric sketch model + dimensioning
+    /// state for this storey, written by the editor so it can resume editing
+    /// with all collinearity equivalences and entered dimensions intact. The
+    /// `floors`/`walls` regions above are the *resolved* geometry derived from
+    /// it (used by non-editing consumers); this is the editable source. Held as
+    /// an opaque string so `datatypes` stays independent of the geometry
+    /// library. `None`/unparseable → the editor rebuilds from `floors`.
+    #[serde(default)]
+    pub sketch_state: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

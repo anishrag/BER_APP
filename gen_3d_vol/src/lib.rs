@@ -99,11 +99,7 @@ impl Gen3D {
     // ----------------------------------------------------------------------------------------------
     // --- Floor modification methods ---
     // ----------------------------------------------------------------------------------------------
-    pub fn raise_lower_floor_split(
-        &mut self,
-        vertices: Vec<Point2f64>,
-        split_height_change: f64,
-    ) {
+    pub fn raise_lower_floor_split(&mut self, vertices: Vec<Point2f64>, split_height_change: f64) {
         let polygon = Polygon::new(
             LineString::from(
                 vertices
