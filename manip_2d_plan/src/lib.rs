@@ -191,6 +191,175 @@ impl FloorPlan {
         self.parametric.splice_into_edge(0, &sequence)
     }
 
+    /// Trim the primary ring with a freehand cut `stroke`: the stroke is fitted
+    /// to a straight line, the smaller-area side is discarded, and the two
+    /// boundary crossings are joined by a single straight (generally diagonal,
+    /// i.e. NON-orthogonal) cut edge. This is how angled walls are introduced
+    /// after the orthogonal base is drawn.
+    ///
+    /// Robustness: the cut line is the total-least-squares fit of the whole
+    /// stroke (so a wavy hand-drawn line still gives a clean straight cut), and
+    /// when the fitted line crosses a concave outline more than twice we keep
+    /// the two crossings nearest where the stroke was actually drawn. A
+    /// crossing that lands within a small tolerance of a corner collapses that
+    /// would-be zero-length remnant, so a cut "through" a corner is accepted.
+    ///
+    /// Kept vertices keep their identity and parameters (so dimensions on the
+    /// surviving walls are preserved). Each crossing vertex sits on its host
+    /// edge — sharing that edge's perpendicular coordinate — but is free along
+    /// it; the cut edge shares neither coordinate, hence diagonal. The result
+    /// is a `ParametricPlan` that serializes like any other, so a trimmed
+    /// storey saves and reloads through the normal snapshot path. Returns the
+    /// newly-minted parameter IDs; errors (leaving the plan unchanged) if the
+    /// line doesn't cross the outline or the result isn't a simple polygon.
+    pub fn trim_by_stroke(&mut self, stroke: &[Point2f32]) -> Result<Vec<ParameterId>, Error> {
+        use crate::extend::SpliceElem;
+        if stroke.len() < 2 {
+            return Err(Error::TrimError(
+                "trim stroke needs at least 2 points".into(),
+            ));
+        }
+        let ring = self.parametric.ring_points(0);
+        let n = ring.len();
+        if n < 3 {
+            return Err(Error::TrimError("no polygon to trim".into()));
+        }
+
+        // Fit a straight line to the (possibly wavy) stroke.
+        let (c, dir) = geom::fit_line(stroke);
+        if dir.0.abs() < 1e-9 && dir.1.abs() < 1e-9 {
+            return Err(Error::TrimError("trim stroke is degenerate".into()));
+        }
+        let side = |p: Point2f32| -> f32 { dir.0 * (p.y - c.y) - dir.1 * (p.x - c.x) };
+        let along = |p: Point2f32| -> f32 { (p.x - c.x) * dir.0 + (p.y - c.y) * dir.1 };
+
+        let diag = self
+            .bounding_box()
+            .map(|((mnx, mny), (mxx, mxy))| ((mxx - mnx).powi(2) + (mxy - mny).powi(2)).sqrt())
+            .unwrap_or(0.0);
+        // Within this of a corner, the cut is treated as passing through it
+        // (the would-be zero-length remnant wall collapses).
+        let corner_tol = (diag * 0.02).max(1e-4);
+
+        // All crossings of the infinite fitted line with the outline.
+        let eps = 1e-6_f32;
+        let mut crossings: Vec<(usize, Point2f32, f32)> = Vec::new(); // (edge, pt, along)
+        for i in 0..n {
+            let a = ring[i];
+            let b = ring[(i + 1) % n];
+            let sa = side(a);
+            let sb = side(b);
+            if (sa > eps && sb < -eps) || (sa < -eps && sb > eps) {
+                let t = sa / (sa - sb);
+                let pt = Point2f32::new(a.x + t * (b.x - a.x), a.y + t * (b.y - a.y));
+                crossings.push((i, pt, along(pt)));
+            }
+        }
+        // Crossings that pass exactly through a vertex (the boundary changes
+        // side there — a transversal, not a tangent touch). The interior-edge
+        // loop above skips these (it needs strictly-opposite signs). Recording
+        // on the edge ENDING at the vertex lets the at-corner omission below
+        // reuse the existing corner, so a cut "through" a corner is accepted
+        // and leaves no zero-length remnant.
+        for v in 0..n {
+            if side(ring[v]).abs() < eps {
+                let sp = side(ring[(v + n - 1) % n]);
+                let sn = side(ring[(v + 1) % n]);
+                if (sp > eps && sn < -eps) || (sp < -eps && sn > eps) {
+                    crossings.push(((v + n - 1) % n, ring[v], along(ring[v])));
+                }
+            }
+        }
+        if crossings.len() < 2 {
+            return Err(Error::TrimError(format!(
+                "cut line must cross the outline (crossed {})",
+                crossings.len()
+            )));
+        }
+
+        // Keep the two crossings matching the stroke's drawn span — nearest the
+        // start projection and nearest the end projection. This ignores the
+        // extra crossings a concave outline produces far from the actual cut.
+        let a_start = along(*stroke.first().unwrap());
+        let a_end = along(*stroke.last().unwrap());
+        let nearest = |target: f32, skip: Option<usize>| -> usize {
+            let mut best = usize::MAX;
+            let mut best_d = f32::INFINITY;
+            for (i, cr) in crossings.iter().enumerate() {
+                if Some(i) == skip {
+                    continue;
+                }
+                let d = (cr.2 - target).abs();
+                if d < best_d {
+                    best_d = d;
+                    best = i;
+                }
+            }
+            best
+        };
+        let i0 = nearest(a_start, None);
+        let i1 = nearest(a_end, Some(i0));
+        let (e1, pa, _) = crossings[i0];
+        let (e2, pb, _) = crossings[i1];
+        if e1 == e2 {
+            return Err(Error::TrimError(
+                "cut enters and leaves through the same wall".into(),
+            ));
+        }
+
+        // Two candidate kept polygons (one per arc), closed by the straight cut
+        // edge; keep the larger. A boundary within `corner_tol` of its first
+        // kept vertex is omitted so an at-corner cut collapses cleanly.
+        let arc = |from_edge: usize, to_edge: usize, first: Point2f32, last: Point2f32| {
+            let mut seq: Vec<SpliceElem> = Vec::new();
+            let fk = ring[(from_edge + 1) % n];
+            if ((first.x - fk.x).powi(2) + (first.y - fk.y).powi(2)).sqrt() > corner_tol {
+                seq.push(SpliceElem::New(first));
+            }
+            let mut i = (from_edge + 1) % n;
+            loop {
+                seq.push(SpliceElem::Keep(i));
+                if i == to_edge {
+                    break;
+                }
+                i = (i + 1) % n;
+            }
+            let lk = ring[to_edge];
+            if ((last.x - lk.x).powi(2) + (last.y - lk.y).powi(2)).sqrt() > corner_tol {
+                seq.push(SpliceElem::New(last));
+            }
+            seq
+        };
+        let seq_a = arc(e1, e2, pa, pb);
+        let seq_b = arc(e2, e1, pb, pa);
+
+        let area_of = |seq: &[SpliceElem]| -> f32 {
+            let pts: Vec<Point2f32> = seq
+                .iter()
+                .map(|e| match e {
+                    SpliceElem::Keep(idx) => ring[*idx],
+                    SpliceElem::New(p) => *p,
+                })
+                .collect();
+            polygon_area(&pts).abs()
+        };
+        let chosen = if area_of(&seq_a) >= area_of(&seq_b) {
+            seq_a
+        } else {
+            seq_b
+        };
+        self.parametric.splice_into_edge(0, &chosen)
+    }
+
+    /// Convenience: trim along the straight line through two explicit points.
+    pub fn trim_by_line(
+        &mut self,
+        p0: Point2f32,
+        p1: Point2f32,
+    ) -> Result<Vec<ParameterId>, Error> {
+        self.trim_by_stroke(&[p0, p1])
+    }
+
     /// Concrete vertex positions of the first polygon (backwards-compatible
     /// for single-polygon callers). For multi-polygon access, use `polygons()`.
     pub fn get_points(&self) -> Vec<Point2f32> {
@@ -390,6 +559,19 @@ impl FloorPlan {
             .insert_vertex_on_wall(ring, edge_start, world_x, world_y)
     }
 
+    /// Whether the wall starting at `(ring, edge_start)` is horizontal,
+    /// vertical, or non-axis-aligned (`None`). See
+    /// [`ParametricPlan::wall_axis`](parametric::ParametricPlan::wall_axis).
+    pub fn wall_axis(&self, ring: usize, edge_start: usize) -> Option<Axis> {
+        self.parametric.wall_axis(ring, edge_start)
+    }
+
+    /// Remove the vertex at `(ring, idx)`, collapsing the walls around it. See
+    /// [`ParametricPlan::remove_vertex`](parametric::ParametricPlan::remove_vertex).
+    pub fn remove_vertex(&mut self, ring: usize, idx: usize) -> bool {
+        self.parametric.remove_vertex(ring, idx)
+    }
+
     /// For a wall whose perpendicular coord is a constant (V0's anchor or
     /// similar), the current constant value and the axis it lives on.
     /// Edit-mode drag uses this together with `shift_constant` to translate
@@ -530,6 +712,22 @@ impl FloorPlan {
     }
 }
 
+/// Signed area of a closed polygon (shoelace). Sign reflects winding;
+/// `trim_by_line` only uses the magnitude to pick the larger side.
+fn polygon_area(points: &[Point2f32]) -> f32 {
+    let n = points.len();
+    if n < 3 {
+        return 0.0;
+    }
+    let mut sum = 0.0_f32;
+    for i in 0..n {
+        let a = points[i];
+        let b = points[(i + 1) % n];
+        sum += a.x * b.y - b.x * a.y;
+    }
+    sum * 0.5
+}
+
 /// Perpendicular distance from `(px, py)` to the line segment from
 /// `(ax, ay)` to `(bx, by)`. Returns the distance to the nearest endpoint
 /// when the point projects outside the segment.
@@ -608,6 +806,183 @@ mod serde_tests {
             .flatten()
             .zip(plan.polygons().iter().flatten())
         {
+            assert!((a.x - b.x).abs() < 1e-3 && (a.y - b.y).abs() < 1e-3);
+        }
+    }
+}
+
+#[cfg(test)]
+mod trim_tests {
+    use super::*;
+
+    fn p(x: f32, y: f32) -> Point2f32 {
+        Point2f32::new(x, y)
+    }
+
+    fn unit_square_plan() -> FloorPlan {
+        // 5th point is the "lift near start" drag point dropped on close.
+        let stroke = vec![
+            p(0.0, 0.0),
+            p(10.0, 0.0),
+            p(10.0, 10.0),
+            p(0.0, 10.0),
+            p(0.2, 0.2),
+        ];
+        FloorPlan::from_points_to_orthogonal(&stroke, 0.5, true).unwrap()
+    }
+
+    fn diagonal_edge_count(plan: &FloorPlan) -> usize {
+        let ring = &plan.polygons()[0];
+        let n = ring.len();
+        let eps = 1e-3_f32;
+        (0..n)
+            .filter(|&i| {
+                let a = ring[i];
+                let b = ring[(i + 1) % n];
+                (a.x - b.x).abs() > eps && (a.y - b.y).abs() > eps
+            })
+            .count()
+    }
+
+    #[test]
+    fn trim_cuts_corner_into_a_diagonal_wall() {
+        let mut plan = unit_square_plan();
+        assert_eq!(diagonal_edge_count(&plan), 0, "square starts orthogonal");
+        // Cut across the top-right corner: right edge at y=4 to top edge at x=6.
+        plan.trim_by_line(p(10.0, 4.0), p(6.0, 0.0)).unwrap();
+
+        assert_eq!(
+            diagonal_edge_count(&plan),
+            1,
+            "the cut edge should be the one non-orthogonal wall"
+        );
+        assert_eq!(plan.polygons()[0].len(), 5, "4 corners − 1 + 2 crossings");
+        // Larger side kept: ~100 minus the small corner triangle (0.5*4*4=8).
+        assert!(plan.validate_simple().is_ok());
+    }
+
+    #[test]
+    fn trim_line_must_cross_the_outline() {
+        let mut plan = unit_square_plan();
+        // A line entirely outside the polygon never crosses.
+        assert!(plan.trim_by_line(p(20.0, 0.0), p(20.0, 10.0)).is_err());
+    }
+
+    fn u_shape_plan() -> FloorPlan {
+        // A U: a horizontal line at y=4 crosses its boundary FOUR times
+        // (x = 0, 2, 4, 6) — the concave case that broke the old endpoint line.
+        let stroke = vec![
+            p(0.0, 0.0),
+            p(6.0, 0.0),
+            p(6.0, 6.0),
+            p(4.0, 6.0),
+            p(4.0, 2.0),
+            p(2.0, 2.0),
+            p(2.0, 6.0),
+            p(0.0, 6.0),
+            p(0.1, 0.1),
+        ];
+        FloorPlan::from_points_to_orthogonal(&stroke, 0.3, true).unwrap()
+    }
+
+    #[test]
+    fn trim_picks_intended_two_of_four_crossings() {
+        let mut plan = u_shape_plan();
+        // Cut across the LEFT prong only (stroke spans x≈-1..3 at y≈4). The
+        // fitted line crosses 4 edges, but we keep the two nearest the drawn
+        // span (x=0 and x=2), not the far ones at x=4,6.
+        let res = plan.trim_by_stroke(&[p(-1.0, 4.0), p(3.0, 4.0)]);
+        assert!(
+            res.is_ok(),
+            "expected the left-prong cut to succeed: {:?}",
+            res
+        );
+        assert!(plan.validate_simple().is_ok());
+    }
+
+    #[test]
+    fn wavy_stroke_fits_to_the_same_cut_as_a_straight_one() {
+        let mut wavy = unit_square_plan();
+        let mut straight = unit_square_plan();
+        // Wavy stroke wobbling around the straight line (10,4)→(6,0).
+        let wavy_stroke = vec![
+            p(10.0, 4.0),
+            p(9.3, 2.8),
+            p(8.2, 2.4),
+            p(7.1, 1.2),
+            p(6.0, 0.0),
+        ];
+        wavy.trim_by_stroke(&wavy_stroke).unwrap();
+        straight.trim_by_line(p(10.0, 4.0), p(6.0, 0.0)).unwrap();
+        let wp = &wavy.polygons()[0];
+        let sp = &straight.polygons()[0];
+        assert_eq!(wp.len(), sp.len());
+        for (a, b) in wp.iter().zip(sp.iter()) {
+            assert!((a.x - b.x).abs() < 0.3 && (a.y - b.y).abs() < 0.3);
+        }
+    }
+
+    #[test]
+    fn remove_vertex_collapses_to_a_valid_polygon() {
+        // Collapsing a wall to zero removes a vertex; the result must stay a
+        // valid (here non-orthogonal) simple polygon and keep ≥3 vertices.
+        let mut plan = unit_square_plan();
+        assert!(plan.remove_vertex(0, 1));
+        assert_eq!(plan.polygons()[0].len(), 3);
+        assert!(plan.validate_simple().is_ok());
+        // Can't drop below a triangle.
+        assert!(!plan.remove_vertex(0, 0));
+    }
+
+    #[test]
+    fn trim_through_a_corner_is_accepted() {
+        // Cut from corner (0,0) to the right wall: the would-be remnant wall at
+        // the corner has length 0, which must be accepted (collapsed), not
+        // rejected. Reuses the corner vertex rather than a zero-length edge.
+        let mut plan = unit_square_plan();
+        let res = plan.trim_by_stroke(&[p(0.0, 0.0), p(10.0, 4.0)]);
+        assert!(res.is_ok(), "corner cut should be accepted: {:?}", res);
+        assert!(plan.validate_simple().is_ok());
+        assert_eq!(
+            diagonal_edge_count(&plan),
+            1,
+            "the cut is the diagonal wall"
+        );
+    }
+}
+
+#[cfg(all(test, feature = "serde"))]
+mod trim_serde_tests {
+    use super::*;
+
+    fn p(x: f32, y: f32) -> Point2f32 {
+        Point2f32::new(x, y)
+    }
+
+    #[test]
+    fn trimmed_storey_survives_json_roundtrip() {
+        let stroke = vec![
+            p(0.0, 0.0),
+            p(10.0, 0.0),
+            p(10.0, 10.0),
+            p(0.0, 10.0),
+            p(0.2, 0.2),
+        ];
+        let mut plan = FloorPlan::from_points_to_orthogonal(&stroke, 0.5, true).unwrap();
+        plan.trim_by_line(p(10.0, 4.0), p(6.0, 0.0)).unwrap();
+
+        let rings_before = plan.polygons();
+        let params_before = plan.active_parameter_count();
+
+        let json = serde_json::to_string(&plan).expect("serialize");
+        let back: FloorPlan = serde_json::from_str(&json).expect("deserialize");
+
+        assert_eq!(back.active_parameter_count(), params_before);
+        let rings_after = back.polygons();
+        assert_eq!(rings_after.len(), rings_before.len());
+        assert_eq!(rings_after[0].len(), rings_before[0].len());
+        // The diagonal cut edge comes back intact.
+        for (a, b) in rings_after[0].iter().zip(rings_before[0].iter()) {
             assert!((a.x - b.x).abs() < 1e-3 && (a.y - b.y).abs() < 1e-3);
         }
     }

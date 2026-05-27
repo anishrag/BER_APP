@@ -39,4 +39,7 @@ pub enum Error {
 
     #[error("Extend failed: {0}")]
     ExtendError(String),
+
+    #[error("Trim failed: {0}")]
+    TrimError(String),
 }

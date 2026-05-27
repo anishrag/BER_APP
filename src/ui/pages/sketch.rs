@@ -187,6 +187,11 @@ pub enum SketchEvent {
     ExtendStrokeWorld {
         points: Vec<(f32, f32)>,
     },
+    /// Trim-mode stroke completed: the captured stroke in *world* coords. Its
+    /// first and last points define the straight cut line.
+    TrimStrokeWorld {
+        points: Vec<(f32, f32)>,
+    },
     /// Scroll-wheel zoom about the given anchor (canvas pixel coords).
     ZoomView {
         factor: f32,
@@ -496,14 +501,16 @@ impl SketchPage {
                     if response.drag_stopped_by(egui::PointerButton::Primary) {
                         if let Some(pos) = response.interact_pointer_pos() {
                             let local_pos = pos - rect.left_top().to_vec2();
-                            // For Extend, the polygon may be in real
-                            // (meter) units while the stroke is in canvas
-                            // pixels. Convert each captured stroke point
-                            // to world coords via the fit transform and
-                            // send a dedicated event with world coords.
-                            // For other stroke tools, fall through to the
+                            // Extend and Trim both operate on the existing
+                            // polygon, which may be in real (meter) units while
+                            // the stroke is in canvas pixels. Convert each
+                            // captured stroke point to world coords via the fit
+                            // transform and send the tool's dedicated world-coord
+                            // event. Other stroke tools fall through to the
                             // normal EndStroke flow (canvas pixels).
-                            let extend_converted = if matches!(edit_tool, EditTools::Extend) {
+                            let needs_world =
+                                matches!(edit_tool, EditTools::Extend | EditTools::Trim);
+                            let world_converted = if needs_world {
                                 if let (Some(stroke), Some((min_xy, max_xy))) = (
                                     current.as_ref(),
                                     ber.and_then(|b| {
@@ -526,9 +533,16 @@ impl SketchPage {
                                             (wx as f32, wy as f32)
                                         })
                                         .collect();
-                                    on_event(UiEvent::Sketch(SketchEvent::ExtendStrokeWorld {
-                                        points: world_points,
-                                    }));
+                                    let event = if matches!(edit_tool, EditTools::Trim) {
+                                        SketchEvent::TrimStrokeWorld {
+                                            points: world_points,
+                                        }
+                                    } else {
+                                        SketchEvent::ExtendStrokeWorld {
+                                            points: world_points,
+                                        }
+                                    };
+                                    on_event(UiEvent::Sketch(event));
                                     true
                                 } else {
                                     false
@@ -536,7 +550,7 @@ impl SketchPage {
                             } else {
                                 false
                             };
-                            if !extend_converted {
+                            if !world_converted {
                                 on_event(UiEvent::Sketch(SketchEvent::EndStroke(local_pos)));
                             }
                         }

@@ -337,14 +337,22 @@ impl ParametricPlan {
         }
     }
 
-    /// Check that every ring is a simple axis-aligned polygon: each edge has
-    /// positive length, and no pair of non-adjacent edges crosses or overlaps.
-    /// Returns the first failure reason, or `Ok(())` if every ring is simple.
+    /// Check that every ring is a simple polygon: each edge has positive
+    /// length and no pair of non-adjacent edges crosses. Rings that are fully
+    /// axis-aligned use the (stricter, T-junction-aware) orthogonal check;
+    /// rings containing a non-axis-aligned edge — e.g. a diagonal produced by
+    /// Trim — fall back to the general any-orientation check. Returns the first
+    /// failure reason, or `Ok(())` if every ring is simple.
     pub fn validate_simple(&self) -> Result<(), Error> {
         for (ring_idx, ring) in self.rings.iter().enumerate() {
             let points: Vec<Point2f32> =
                 ring.iter().map(|v| v.evaluate(&self.parameters)).collect();
-            if let Err(reason) = check_simple_axis_aligned(&points) {
+            let result = if ring_is_axis_aligned(&points) {
+                check_simple_axis_aligned(&points)
+            } else {
+                check_simple_general(&points)
+            };
+            if let Err(reason) = result {
                 return Err(Error::DimensionError(format!(
                     "ring {}: {}",
                     ring_idx, reason
@@ -457,6 +465,24 @@ impl ParametricPlan {
         Some(new_vid)
     }
 
+    /// Remove the vertex at `(ring, idx)`, letting its two neighbours connect
+    /// directly. Used to collapse a wall dimensioned to zero length: the
+    /// vertex carrying the wall's adjustable parameter is dropped, so the wall
+    /// disappears and that parameter becomes unreferenced. All other vertices
+    /// keep their IDs and parameters. Returns false (no change) if the ring
+    /// would fall below 3 vertices or the index is out of range.
+    pub fn remove_vertex(&mut self, ring: usize, idx: usize) -> bool {
+        let Some(r) = self.rings.get_mut(ring) else {
+            return false;
+        };
+        if r.len() <= 3 || idx >= r.len() {
+            return false;
+        }
+        r.remove(idx);
+        self.recompute_active_parameter_count();
+        true
+    }
+
     /// Replace `ring` with a spliced version built from `sequence` (see
     /// `crate::extend::plan_splice_sequence`). `Keep(i)` slots clone the
     /// existing vertex verbatim — id, exprs, and parameter IDs all preserved.
@@ -517,11 +543,20 @@ impl ParametricPlan {
             let k = (j + 1) % m;
             let pj = point_at(j);
             let pk = point_at(k);
-            if (pj.y - pk.y).abs() <= (pj.x - pk.x).abs() {
+            let dx = (pj.x - pk.x).abs();
+            let dy = (pj.y - pk.y).abs();
+            // Only axis-aligned segments share a coordinate. A diagonal segment
+            // (both deltas significant — e.g. a Trim cut edge) shares neither,
+            // so its endpoints keep independent coordinates. `eps` is relative
+            // to the segment length so near-axis-aligned wobble still counts as
+            // aligned.
+            let eps = 1e-3_f32 * dx.max(dy);
+            if dy <= eps {
                 uf_union(&mut parent, node(j, Y), node(k, Y)); // horizontal seg
-            } else {
+            } else if dx <= eps {
                 uf_union(&mut parent, node(j, X), node(k, X)); // vertical seg
             }
+            // else: diagonal — no coordinate shared.
         }
 
         // Seed group expressions from kept vertices, then mint fresh params for
@@ -1042,33 +1077,55 @@ impl ParametricPlan {
             .collect()
     }
 
-    /// Try to repair an invalid polygon by redistributing the parameters NOT in
-    /// `known` (the user-dimensioned ones) along `axis`. `snapshot` is the plan
-    /// as it was before the dimension that broke it. Three strategies in order
-    /// — distribute between bounds, preserve pre-apply offsets, then uniform
-    /// down-scaling — leaving the plan unchanged and returning `false` if none
-    /// yields a simple polygon. The direction-flip guard is the caller's job.
+    /// Redistribute the parameters NOT in `known` (the user-dimensioned ones)
+    /// along `axis` so the plan is a simple polygon AND no edge has inverted
+    /// direction relative to `snapshot` (the plan before the dimension that
+    /// broke/inverted it). Keeping directions intact is what preserves the
+    /// drawn shape: when the user enters a large value, the un-set walls move
+    /// to accommodate it rather than an un-set wall flipping inside-out.
+    ///
+    /// Strategies, in order of how faithfully they keep the shape:
+    ///   1. **Preserve offsets** — each un-set wall keeps its distance from the
+    ///      anchor ahead of it, so the shape just translates/extends to fit a
+    ///      bigger value.
+    ///   2. **Distribute between bounds** — fit a run of un-set walls evenly
+    ///      into the gap between two fixed coords (needed when the run is
+    ///      bounded on both sides).
+    ///   3. **Uniform down-scaling** — last resort.
+    ///
+    /// Returns `false` (leaving the plan unchanged) if no strategy yields a
+    /// valid, inversion-free polygon — i.e. the value can't be honoured without
+    /// changing the shape's topology.
     pub fn repair_unset_params(
         &mut self,
         axis: ParameterAxis,
         known: &HashSet<ParameterId>,
         snapshot: &ParametricPlan,
     ) -> bool {
+        let orig_signs = snapshot.edge_signs();
         let post_apply = self.clone();
+        // A candidate is acceptable only if it's simple AND preserves every
+        // edge's direction (no inversion) versus the pre-apply shape.
+        let acceptable = |plan: &ParametricPlan| -> bool {
+            plan.validate_simple().is_ok()
+                && crate::find_flipped_edge(&orig_signs, &plan.edge_signs()).is_none()
+        };
 
-        // Strategy 1: distribute evenly between the bounding known coords.
-        if self.linear_remap_ring0(axis, known) {
+        // 1. Preserve offsets (most shape-faithful).
+        self.linear_remap_preserve_offsets(axis, known, snapshot);
+        if acceptable(self) {
             return true;
         }
         *self = post_apply.clone();
 
-        // Strategy 2: preserve each un-set param's pre-apply offset.
-        if self.linear_remap_preserve_offsets(axis, known, snapshot) {
+        // 2. Distribute between the bounding known coords.
+        self.linear_remap_ring0(axis, known);
+        if acceptable(self) {
             return true;
         }
         *self = post_apply.clone();
 
-        // Strategy 3: uniform down-scaling of the un-set params (last resort).
+        // 3. Uniform down-scaling of the un-set params (last resort).
         const FACTORS: &[f32] = &[0.9, 0.75, 0.55, 0.35, 0.2, 0.1];
         for &factor in FACTORS {
             *self = post_apply.clone();
@@ -1080,7 +1137,7 @@ impl ParametricPlan {
                     self.scale_parameter(p, factor);
                 }
             }
-            if self.validate_simple().is_ok() {
+            if acceptable(self) {
                 return true;
             }
         }
@@ -1368,6 +1425,105 @@ fn length_exprs_match(
     b: &(CoordinateExpression, CoordinateExpression),
 ) -> bool {
     (a.0 == b.0 && a.1 == b.1) || (a.0 == b.1 && a.1 == b.0)
+}
+
+/// Is every edge of `points` (as a closed ring) axis-aligned (horizontal or
+/// vertical) within a small tolerance? Picks which simple-polygon validator to
+/// run. A single diagonal edge (e.g. from Trim) makes this false.
+fn ring_is_axis_aligned(points: &[Point2f32]) -> bool {
+    let n = points.len();
+    if n < 2 {
+        return true;
+    }
+    let eps = 1e-3_f32;
+    (0..n).all(|i| {
+        let a = points[i];
+        let b = points[(i + 1) % n];
+        (a.x - b.x).abs() < eps || (a.y - b.y).abs() < eps
+    })
+}
+
+/// General simple-polygon check for rings that contain non-axis-aligned edges:
+/// at least 3 vertices, every edge has positive length, and no pair of
+/// non-adjacent edges properly intersects (crossings or interior touches).
+/// Accepts diagonal edges; the axis-aligned variant is a stricter, faster
+/// special case for orthogonal rings.
+fn check_simple_general(points: &[Point2f32]) -> Result<(), String> {
+    let n = points.len();
+    if n < 3 {
+        return Err(format!("only {} vertices (need at least 3)", n));
+    }
+    let min_len_sq = 1e-3_f32;
+    for i in 0..n {
+        let a = points[i];
+        let b = points[(i + 1) % n];
+        let dx = a.x - b.x;
+        let dy = a.y - b.y;
+        if dx * dx + dy * dy < min_len_sq {
+            return Err(format!("edge {} collapsed to zero length", i));
+        }
+    }
+    for i in 0..n {
+        let a1 = points[i];
+        let a2 = points[(i + 1) % n];
+        for j in (i + 2)..n {
+            // Skip the closing edge adjacent to edge 0.
+            if i == 0 && j == n - 1 {
+                continue;
+            }
+            let b1 = points[j];
+            let b2 = points[(j + 1) % n];
+            if segments_properly_intersect(a1, a2, b1, b2) {
+                return Err(format!("edges {} and {} intersect", i, j));
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Do two segments (a1,a2) and (b1,b2) intersect anywhere other than at a
+/// shared endpoint? Treats a vertex lying in the other segment's interior
+/// (T-junction) as an intersection. General orientation test (works for any
+/// edge direction), used by [`check_simple_general`].
+fn segments_properly_intersect(a1: Point2f32, a2: Point2f32, b1: Point2f32, b2: Point2f32) -> bool {
+    let eps = 1e-6_f32;
+    let cross = |ox: f32, oy: f32, px: f32, py: f32, qx: f32, qy: f32| -> f32 {
+        (px - ox) * (qy - oy) - (py - oy) * (qx - ox)
+    };
+    let d1 = cross(b1.x, b1.y, b2.x, b2.y, a1.x, a1.y);
+    let d2 = cross(b1.x, b1.y, b2.x, b2.y, a2.x, a2.y);
+    let d3 = cross(a1.x, a1.y, a2.x, a2.y, b1.x, b1.y);
+    let d4 = cross(a1.x, a1.y, a2.x, a2.y, b2.x, b2.y);
+
+    // Proper crossing: each segment straddles the other's supporting line.
+    if ((d1 > eps && d2 < -eps) || (d1 < -eps && d2 > eps))
+        && ((d3 > eps && d4 < -eps) || (d3 < -eps && d4 > eps))
+    {
+        return true;
+    }
+
+    // Collinear/touching: an endpoint lying within the other segment's span.
+    let on_seg = |px: f32, py: f32, qx: f32, qy: f32, rx: f32, ry: f32| -> bool {
+        // r is colinear with p→q (caller ensures) and lies strictly between.
+        let min_x = px.min(qx) - eps;
+        let max_x = px.max(qx) + eps;
+        let min_y = py.min(qy) - eps;
+        let max_y = py.max(qy) + eps;
+        rx > min_x && rx < max_x && ry > min_y && ry < max_y
+    };
+    if d1.abs() < eps && on_seg(b1.x, b1.y, b2.x, b2.y, a1.x, a1.y) {
+        return true;
+    }
+    if d2.abs() < eps && on_seg(b1.x, b1.y, b2.x, b2.y, a2.x, a2.y) {
+        return true;
+    }
+    if d3.abs() < eps && on_seg(a1.x, a1.y, a2.x, a2.y, b1.x, b1.y) {
+        return true;
+    }
+    if d4.abs() < eps && on_seg(a1.x, a1.y, a2.x, a2.y, b2.x, b2.y) {
+        return true;
+    }
+    false
 }
 
 /// Validate that `points` traced in order form a simple axis-aligned polygon:
@@ -1925,12 +2081,16 @@ mod tests {
         known.insert(p_bottom);
 
         // Dim 3: V2→V3 length = 3.5. controlled_param = the still-un-known dep.
+        // Snapshot the VALID pre-dim-3 state — that's the reference the real
+        // controller passes, and the directions there are the ones the repair
+        // must preserve (mirrors `apply_dimension` cloning before applying).
         let deps = plan.wall_param_deps(0, 2);
         let p_arm = deps
             .iter()
             .copied()
             .find(|p| !known.contains(p))
             .expect("expected an un-known param dep");
+        let snapshot = plan.clone();
         plan.set_wall_length(0, 2, 3.5, p_arm).unwrap();
         known.insert(p_arm);
 
@@ -1941,13 +2101,8 @@ mod tests {
             "post-dim-3 polygon should not validate yet"
         );
 
-        // Repair via the shipped routine. Strategy 1 (distribute un-set
-        // Y-params between the bounding known coords) is exactly what this
-        // scenario needs; the test used to re-implement that remap inline, but
-        // now it exercises the real `repair_unset_params`. (Strategy 1 succeeds
-        // first, so the `snapshot` arg — only consulted by strategy 2 — is just
-        // the current state.)
-        let snapshot = plan.clone();
+        // Repair via the shipped routine: it redistributes the un-set top
+        // Y-params to a valid, inversion-free arrangement (vs `snapshot`).
         assert!(
             plan.repair_unset_params(ParameterAxis::Y, &known, &snapshot),
             "repair_unset_params should yield a simple polygon"

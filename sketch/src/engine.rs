@@ -110,14 +110,14 @@ impl SketchEngine {
         // Here you would match on self.mode and set the appropriate behaviour
         // For example:
         match (self.mode, self.edit_tool) {
-            // DrawPerpWalls, AddDetachedSection, and Extend all share the
-            // same stroke-capture behaviour — they draw an orthogonal path.
-            // The controller decides on stroke completion whether to
-            // replace the primary outline, append a detached ring, or
-            // merge the stroke into the existing polygon.
+            // DrawPerpWalls, AddDetachedSection, Extend, and Trim all share the
+            // same freehand stroke-capture behaviour. The controller decides on
+            // stroke completion what to do: replace the primary outline, append
+            // a detached ring, merge an extend porch, or cut along a trim line.
             (SketchMode::Storey2D, EditTools::DrawPerpWalls)
             | (SketchMode::Storey2D, EditTools::AddDetachedSection)
-            | (SketchMode::Storey2D, EditTools::Extend) => {
+            | (SketchMode::Storey2D, EditTools::Extend)
+            | (SketchMode::Storey2D, EditTools::Trim) => {
                 self.set_mode_behaviour(Box::new(Storey2DPerpWalls));
             }
             // Edit mode doesn't capture freehand strokes — interaction

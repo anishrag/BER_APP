@@ -1244,9 +1244,11 @@ impl AppController {
     /// First entry: scale the whole plan so this wall has that length.
     /// Subsequent entries: set the prompt's controlled parameter directly.
     pub fn apply_dimension(&mut self, value: f32) -> Result<(), String> {
-        if !value.is_finite() || value <= 0.0 {
+        // Zero is allowed (and means "collapse this wall" — see below); only
+        // negative or non-finite values are rejected.
+        if !value.is_finite() || value < 0.0 {
             return Err(format!(
-                "dimension must be a positive number (got {})",
+                "dimension must be a non-negative number (got {})",
                 value
             ));
         }
@@ -1264,6 +1266,52 @@ impl AppController {
             .floor_plan
             .find_vertex(prompt.wall_start_vertex)
             .ok_or_else(|| "prompt wall vertex no longer exists".to_string())?;
+
+        // Zero length → collapse this wall: drop the endpoint carrying the
+        // wall's adjustable parameter so its two neighbours meet directly. This
+        // is how an assessor zeroes out a short remnant (e.g. after a Trim cut
+        // near a corner). The first dimension can't be zero (it sets scale).
+        if value == 0.0 {
+            if !self.dimensioning.scale_set {
+                return Err("the first dimension can't be zero".into());
+            }
+            let n = self
+                .floor_plan
+                .polygons()
+                .get(ring)
+                .map(|r| r.len())
+                .unwrap_or(0);
+            let target = [edge_start, (edge_start + 1) % n].into_iter().find(|&i| {
+                self.floor_plan.vertex_x_param(ring, i) == Some(prompt.controlled_param)
+                    || self.floor_plan.vertex_y_param(ring, i) == Some(prompt.controlled_param)
+            });
+            let Some(idx) = target else {
+                return Err("couldn't find the wall's adjustable vertex to collapse".into());
+            };
+            let mut trial = self.floor_plan.clone();
+            if !trial.remove_vertex(ring, idx) {
+                return Err("can't collapse — too few walls would remain".into());
+            }
+            if let Err(e) = trial.validate_simple() {
+                return Err(format!(
+                    "collapsing this wall to zero would break the shape ({:?})",
+                    e
+                ));
+            }
+            self.floor_plan = trial;
+            let active = self.floor_plan.all_active_params();
+            self.dimensioning
+                .known_params
+                .retain(|p| active.contains(p));
+            self.dimensioning
+                .dimensioned_walls
+                .retain(|vid| self.floor_plan.find_vertex(*vid).is_some());
+            println!("  ✓ collapsed wall to zero (removed ring {ring}/vertex {idx})");
+            self.commit_to_ber()?;
+            self.compute_next_dimension_prompt();
+            self.push_history_snapshot(undo_snap);
+            return Ok(());
+        }
 
         let pre_length = self.floor_plan.wall_length(ring, edge_start);
         println!(
@@ -1340,24 +1388,27 @@ impl AppController {
             );
         }
 
-        // If the apply produced an invalid polygon, try to repair it by
-        // scaling the un-set parameters on the same axis as the dimensioned
-        // wall — the un-set walls are still "free" (their original pixel
-        // proportions were placeholders), so we can move them out of the way
-        // to accommodate the user's input. E.g. when the bottom-arm height
-        // of an E grows past where the middle arm currently sits, shrink the
-        // middle arm's un-set y-coords toward y=0 to make room.
-        //
-        // Only if no factor produces a valid polygon do we reject the input
-        // outright.
-        if let Err(initial_err) = self.floor_plan.validate_simple() {
-            let dim_axis = self
-                .floor_plan
-                .param_axis(prompt.controlled_param)
-                .unwrap_or(ParameterAxis::Y);
+        // After applying the dimension the polygon may be invalid (self-
+        // intersecting / collapsed) OR simple-but-inverted: a large value can
+        // push an un-set wall past a fixed coord and flip its direction — a
+        // silent shape change. Both mean the un-set walls need redistributing.
+        // `repair_unset_params` moves ONLY the un-set walls to a valid,
+        // inversion-free arrangement, so the rest of the shape accommodates the
+        // value rather than a wall flipping inside-out. We reject only if no
+        // such arrangement exists (the value can't be honoured without changing
+        // the shape's topology) — never just because an un-set wall would have
+        // flipped, since that's exactly what the repair is for.
+        let dim_axis = self
+            .floor_plan
+            .param_axis(prompt.controlled_param)
+            .unwrap_or(ParameterAxis::Y);
+        let invalid = self.floor_plan.validate_simple().is_err();
+        let inverted =
+            find_flipped_edge(&edge_signs_before, &self.floor_plan.edge_signs()).is_some();
+        if invalid || inverted {
             println!(
-                "  polygon invalid post-apply ({:?}) — attempting repair on axis {:?}",
-                initial_err, dim_axis
+                "  post-apply needs repair (invalid={invalid}, inverted={inverted}) — \
+                 redistributing un-set walls on axis {dim_axis:?}"
             );
             if !self.floor_plan.repair_unset_params(
                 dim_axis,
@@ -1368,43 +1419,15 @@ impl AppController {
                 self.dimensioning.scale_set = scale_set_before;
                 self.dimensioning.known_params = known_params_before;
                 self.dimensioning.dimensioned_walls = dimensioned_walls_before;
-                println!(
-                    "  → REJECTED: no repair found ({:?}). Rolled back.",
-                    initial_err
-                );
+                println!("  → REJECTED: no shape-preserving fit found. Rolled back.");
                 return Err(format!(
-                    "{} is incompatible with the shape — even shrinking the \
-                     un-set walls didn't yield a simple polygon ({:?}). Try \
-                     a value that's consistent with the other walls already set.",
-                    value, initial_err
+                    "{} can't be set without changing the shape — there's no way to move \
+                     the un-set walls that keeps every wall's direction. Set the \
+                     neighbouring walls first, or pick a value that fits.",
+                    value
                 ));
             }
-            println!("  repair succeeded.");
-        }
-
-        // Direction-flip guard: even after a "simple" polygon validation,
-        // we still need to reject cases where a parameter change pushed an
-        // un-set coord past a known coord and silently inverted an edge.
-        // E.g. setting the bottom arm of a T to 10m can drop its top
-        // endpoint above the polygon's top edge — no edges cross, but the
-        // adjacent wall now goes "the wrong way" and visually the polygon
-        // has changed shape.
-        let edge_signs_after = self.floor_plan.edge_signs();
-        if let Some((r, e)) = find_flipped_edge(&edge_signs_before, &edge_signs_after) {
-            self.floor_plan = snapshot;
-            self.dimensioning.scale_set = scale_set_before;
-            self.dimensioning.known_params = known_params_before;
-            self.dimensioning.dimensioned_walls = dimensioned_walls_before;
-            println!(
-                "  → REJECTED: ring {}/edge {} would flip direction. Rolled back.",
-                r, e
-            );
-            return Err(format!(
-                "{} would invert ring {}/edge {} (its direction would flip — \
-                 that's a shape change, not a dimension adjustment). Try a \
-                 value that's consistent with the other walls already set.",
-                value, r, e
-            ));
+            println!("  repair succeeded (shape preserved).");
         }
 
         // known_params already updated optimistically above.
@@ -1485,6 +1508,13 @@ impl AppController {
                     continue;
                 };
                 if self.dimensioning.skipped_walls.contains(&vid) {
+                    continue;
+                }
+                // Skip non-axis-aligned walls (e.g. a diagonal from Trim):
+                // `set_wall_length` can only adjust H/V walls, so offering a
+                // diagonal would dead-end. Its endpoints get pinned by the
+                // axis-aligned cut walls on either side instead.
+                if self.floor_plan.wall_axis(ring_idx, edge_start).is_none() {
                     continue;
                 }
                 // A wall is promptable iff exactly one of its deps is in
@@ -1992,7 +2022,7 @@ impl AppController {
         // different points on the existing polygon). Take the raw stroke
         // out of the engine without running the close-check; other tools
         // still go through end_stroke which requires close.
-        let stroke_opt = if matches!(edit_tool, EditTools::Extend) {
+        let stroke_opt = if matches!(edit_tool, EditTools::Extend | EditTools::Trim) {
             self.sketch_engine.take_stroke_raw()
         } else {
             self.sketch_engine
@@ -2025,6 +2055,11 @@ impl AppController {
                         // For now just log; in future we'll surface this
                         // to the UI alongside the dimension error.
                         eprintln!("apply_extend_stroke: {}", e);
+                    }
+                }
+                EditTools::Trim => {
+                    if let Err(e) = self.apply_trim_stroke(&stroke.points) {
+                        eprintln!("apply_trim_stroke: {}", e);
                     }
                 }
                 _ => {
@@ -2140,6 +2175,46 @@ impl AppController {
         // Kicks off dimensioning for the porch's new walls — but defers while a
         // collinearity review is pending (it returns early when `review` is set;
         // resolving the review then starts dimensioning).
+        self.maybe_start_dimensioning();
+        self.push_history_snapshot(undo_snap);
+        Ok(())
+    }
+
+    /// Entry point for Trim strokes from the UI (world coords, like Extend).
+    /// The stroke's first and last points define the straight cut line.
+    pub fn apply_trim_stroke_event(&mut self, world_points: &[(f32, f32)]) {
+        let _ = self.sketch_engine.take_stroke_raw();
+        let pts: Vec<Point2f32> = world_points
+            .iter()
+            .map(|(x, y)| Point2f32::new(*x, *y))
+            .collect();
+        println!("Trim stroke (world coords): {} points", pts.len());
+        if let Err(e) = self.apply_trim_stroke(&pts) {
+            eprintln!("apply_trim_stroke: {}", e);
+        }
+    }
+
+    /// Apply a Trim: cut the outline along the line through the stroke's
+    /// endpoints, discarding the smaller side. The geometry lives in
+    /// `FloorPlan::trim_by_line`; here we only orchestrate app state. Surviving
+    /// walls keep their parameters (so their dimensions hold); the new diagonal
+    /// cut wall is non-orthogonal and isn't axis-dimensioned. No collinearity
+    /// review — a diagonal edge has no axis-collinearity to resolve.
+    fn apply_trim_stroke(&mut self, points: &[Point2f32]) -> Result<(), String> {
+        if points.len() < 2 {
+            return Err("trim stroke needs at least 2 points".into());
+        }
+        let undo_snap = self.current_history_snapshot();
+        let minted = self
+            .floor_plan
+            .trim_by_stroke(points)
+            .map_err(|e| format!("{}", e))?;
+        println!("Trim: {} new param(s) {:?}", minted.len(), minted);
+        let active = self.floor_plan.all_active_params();
+        self.dimensioning
+            .known_params
+            .retain(|p| active.contains(p));
+        self.commit_to_ber()?;
         self.maybe_start_dimensioning();
         self.push_history_snapshot(undo_snap);
         Ok(())
