@@ -113,7 +113,7 @@ pub struct EguiStroke {
     pub stroke: PathStroke,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum SketchEvent {
     StartStroke(Pos2),
     AddPoint(Pos2),
@@ -180,6 +180,13 @@ pub enum SketchEvent {
     Undo,
     /// Re-apply the most recently undone mutation.
     Redo,
+    /// Extend-mode stroke completed: the user's captured stroke,
+    /// converted to *world* coords via the current fit transform so the
+    /// controller can compare it against the polygon (which is in real
+    /// units post-dim or in pixel-derived units pre-dim).
+    ExtendStrokeWorld {
+        points: Vec<(f32, f32)>,
+    },
     /// Scroll-wheel zoom about the given anchor (canvas pixel coords).
     ZoomView {
         factor: f32,
@@ -489,7 +496,49 @@ impl SketchPage {
                     if response.drag_stopped_by(egui::PointerButton::Primary) {
                         if let Some(pos) = response.interact_pointer_pos() {
                             let local_pos = pos - rect.left_top().to_vec2();
-                            on_event(UiEvent::Sketch(SketchEvent::EndStroke(local_pos)));
+                            // For Extend, the polygon may be in real
+                            // (meter) units while the stroke is in canvas
+                            // pixels. Convert each captured stroke point
+                            // to world coords via the fit transform and
+                            // send a dedicated event with world coords.
+                            // For other stroke tools, fall through to the
+                            // normal EndStroke flow (canvas pixels).
+                            let extend_converted = if matches!(edit_tool, EditTools::Extend) {
+                                if let (Some(stroke), Some((min_xy, max_xy))) = (
+                                    current.as_ref(),
+                                    ber.and_then(|b| {
+                                        b.storeys
+                                            .get(current_storey_idx)
+                                            .and_then(crate::ui::render::storey_2d::bounding_box)
+                                    }),
+                                ) {
+                                    let t = crate::ui::render::fit_transform(
+                                        rect, min_xy, max_xy, view,
+                                    );
+                                    let topleft = rect.left_top();
+                                    let world_points: Vec<(f32, f32)> = stroke
+                                        .points
+                                        .iter()
+                                        .map(|p| {
+                                            let abs_x = p.x + topleft.x;
+                                            let abs_y = p.y + topleft.y;
+                                            let (wx, wy) = t.inverse(abs_x, abs_y);
+                                            (wx as f32, wy as f32)
+                                        })
+                                        .collect();
+                                    on_event(UiEvent::Sketch(SketchEvent::ExtendStrokeWorld {
+                                        points: world_points,
+                                    }));
+                                    true
+                                } else {
+                                    false
+                                }
+                            } else {
+                                false
+                            };
+                            if !extend_converted {
+                                on_event(UiEvent::Sketch(SketchEvent::EndStroke(local_pos)));
+                            }
                         }
                     }
 

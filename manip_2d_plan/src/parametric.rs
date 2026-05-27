@@ -457,6 +457,148 @@ impl ParametricPlan {
         Some(new_vid)
     }
 
+    /// Replace `ring` with a spliced version built from `sequence` (see
+    /// `crate::extend::plan_splice_sequence`). `Keep(i)` slots clone the
+    /// existing vertex verbatim — id, exprs, and parameter IDs all preserved.
+    /// `New(p)` slots become fresh vertices whose coordinate expressions are
+    /// resolved by matching `p`'s coords against the *kept* vertices' coords
+    /// (within `tol`): a match reuses that existing expression (so an attach
+    /// point on a kept edge reuses the edge's perpendicular expr, and porch
+    /// walls collinear with kept walls share a parameter); otherwise a fresh
+    /// parameter is minted.
+    ///
+    /// Because existing vertices are never rewritten, every previously-known
+    /// parameter ID stays valid — the caller's dimensioning state survives.
+    /// Returns the newly-minted parameter IDs (the porch's un-dimensioned
+    /// degrees of freedom). Errors (leaving the plan unchanged) if the spliced
+    /// ring isn't a simple axis-aligned polygon.
+    pub fn splice_into_edge(
+        &mut self,
+        ring: usize,
+        sequence: &[crate::extend::SpliceElem],
+    ) -> Result<Vec<ParameterId>, Error> {
+        use crate::extend::SpliceElem;
+        let old = self
+            .rings
+            .get(ring)
+            .ok_or(Error::InvalidEdgeIndex(ring))?
+            .clone();
+        let m = sequence.len();
+        if m < 3 {
+            return Err(Error::ExtendError(
+                "spliced ring would have fewer than 3 vertices".into(),
+            ));
+        }
+
+        // Concrete position of each sequence slot, for orientation tests.
+        let point_at = |j: usize| -> Point2f32 {
+            match &sequence[j] {
+                SpliceElem::Keep(i) => old[*i].evaluate(&self.parameters),
+                SpliceElem::New(p) => *p,
+            }
+        };
+
+        // Coordinate sharing is established ONLY through actual segment
+        // adjacency, never by global value matching. Each axis-aligned segment
+        // forces its two endpoints to share the coordinate that's constant
+        // along it (horizontal → shared y, vertical → shared x). We union those
+        // coordinate "nodes"; each resulting group becomes one expression. A
+        // group containing a kept vertex inherits that vertex's expression (so
+        // attach points reuse their edge's perpendicular expr, and porch walls
+        // that run along a kept wall reuse it); a group of only-new coordinates
+        // mints one fresh parameter. Crucially, a porch wall is never merged
+        // with a distant wall just because they sit at the same coordinate —
+        // that stays the user's explicit collinearity decision.
+        const X: usize = 0;
+        const Y: usize = 1;
+        let node = |j: usize, axis: usize| j * 2 + axis;
+        let mut parent: Vec<usize> = (0..2 * m).collect();
+        for j in 0..m {
+            let k = (j + 1) % m;
+            let pj = point_at(j);
+            let pk = point_at(k);
+            if (pj.y - pk.y).abs() <= (pj.x - pk.x).abs() {
+                uf_union(&mut parent, node(j, Y), node(k, Y)); // horizontal seg
+            } else {
+                uf_union(&mut parent, node(j, X), node(k, X)); // vertical seg
+            }
+        }
+
+        // Seed group expressions from kept vertices, then mint fresh params for
+        // any group of purely-new coordinates.
+        let mut group_expr: HashMap<usize, CoordinateExpression> = HashMap::new();
+        for j in 0..m {
+            if let SpliceElem::Keep(i) = &sequence[j] {
+                let v = &old[*i];
+                let rx = uf_find(&mut parent, node(j, X));
+                group_expr.entry(rx).or_insert_with(|| v.x_expr.clone());
+                let ry = uf_find(&mut parent, node(j, Y));
+                group_expr.entry(ry).or_insert_with(|| v.y_expr.clone());
+            }
+        }
+        let mut minted: Vec<ParameterId> = Vec::new();
+        let mut minted_vals: Vec<(ParameterId, f32)> = Vec::new();
+        let mut next_param = self.next_param_id;
+        for j in 0..m {
+            if let SpliceElem::New(p) = &sequence[j] {
+                for (axis, val) in [(X, p.x), (Y, p.y)] {
+                    let r = uf_find(&mut parent, node(j, axis));
+                    if !group_expr.contains_key(&r) {
+                        let pid = next_param;
+                        next_param += 1;
+                        group_expr.insert(r, CoordinateExpression::Parameter(pid));
+                        minted.push(pid);
+                        minted_vals.push((pid, val));
+                    }
+                }
+            }
+        }
+
+        // Assemble the candidate ring: kept slots verbatim, new slots from
+        // their groups with fresh vertex ids.
+        let mut next_vid = self.next_vertex_id;
+        let mut new_ring: Vec<ParametricVertex> = Vec::with_capacity(m);
+        for j in 0..m {
+            match &sequence[j] {
+                SpliceElem::Keep(i) => new_ring.push(old[*i].clone()),
+                SpliceElem::New(_) => {
+                    let rx = uf_find(&mut parent, node(j, X));
+                    let ry = uf_find(&mut parent, node(j, Y));
+                    new_ring.push(ParametricVertex {
+                        id: next_vid,
+                        x_expr: group_expr[&rx].clone(),
+                        y_expr: group_expr[&ry].clone(),
+                    });
+                    next_vid += 1;
+                }
+            }
+        }
+
+        // Validate the candidate against existing + minted params, without
+        // mutating `self`, so a rejected splice leaves the plan pristine.
+        let mut params_eval = self.parameters.clone();
+        for (id, val) in &minted_vals {
+            params_eval.insert(*id, *val);
+        }
+        let pts: Vec<Point2f32> = new_ring.iter().map(|v| v.evaluate(&params_eval)).collect();
+        if let Err(reason) = check_simple_axis_aligned(&pts) {
+            return Err(Error::ExtendError(format!(
+                "spliced ring {} isn't simple: {}",
+                ring, reason
+            )));
+        }
+
+        // Commit.
+        for (id, val) in minted_vals {
+            self.parameters.insert(id, val);
+        }
+        self.next_param_id = next_param;
+        self.next_vertex_id = next_vid;
+        self.rings[ring] = new_ring;
+        self.recompute_active_parameter_count();
+        Ok(minted)
+    }
+
     /// For an axis-aligned wall whose perpendicular coord is a *constant*,
     /// return that constant value and the axis it lives on. These are the
     /// "anchor walls" tied to V0's position — moving them translates V0
@@ -760,8 +902,9 @@ impl ParametricPlan {
     }
 
     /// Detect pairs of axis-aligned edges — possibly in different rings —
-    /// whose perpendicular coordinates differ by `(min_separation, max_separation]`.
-    /// Pairs already sharing a coordinate expression are skipped (already collinear).
+    /// whose perpendicular coordinates differ by `[min_separation, max_separation]`.
+    /// Pairs already sharing a coordinate expression are skipped (already collinear);
+    /// coincident pairs with *distinct* expressions are still reported.
     pub fn suggest_collinear(
         &self,
         min_separation: f32,
@@ -902,6 +1045,30 @@ struct EdgeInfo {
     expr: CoordinateExpression,
 }
 
+/// Union-find find-with-path-compression over coordinate nodes, used by
+/// `splice_into_edge` to group coordinates linked by axis-aligned segments.
+fn uf_find(parent: &mut [usize], x: usize) -> usize {
+    let mut root = x;
+    while parent[root] != root {
+        root = parent[root];
+    }
+    let mut cur = x;
+    while parent[cur] != root {
+        let next = parent[cur];
+        parent[cur] = root;
+        cur = next;
+    }
+    root
+}
+
+fn uf_union(parent: &mut [usize], a: usize, b: usize) {
+    let ra = uf_find(parent, a);
+    let rb = uf_find(parent, b);
+    if ra != rb {
+        parent[ra] = rb;
+    }
+}
+
 /// Two length-expression pairs match iff they represent the same multiset of
 /// coord expressions — order-insensitive comparison so a wall traversed
 /// "left to right" matches one traversed "right to left".
@@ -1017,7 +1184,12 @@ fn collect_pairs(
                 continue; // already collinear
             }
             let diff = (edges[i].coord - edges[j].coord).abs();
-            if diff > min_separation && diff <= max_separation {
+            // Inclusive lower bound: walls at the SAME coordinate (diff == 0)
+            // but with independent expressions are still distinct parameters,
+            // so they're surfaced for the user to confirm rather than assumed
+            // either way. (Walls that already share an expression were skipped
+            // above.)
+            if diff >= min_separation && diff <= max_separation {
                 out.push(CollinearitySuggestion {
                     ring_a: edges[i].ring,
                     edge_a: edges[i].start,
@@ -1109,6 +1281,140 @@ mod tests {
         assert!(!plan.edges_collinear(sug.ring_a, sug.edge_a, sug.ring_b, sug.edge_b, &sug.axis));
         plan.apply_collinear_suggestion(sug);
         assert!(plan.edges_collinear(sug.ring_a, sug.edge_a, sug.ring_b, sug.edge_b, &sug.axis));
+    }
+
+    #[test]
+    fn splice_same_edge_bump_preserves_existing_params() {
+        use crate::extend::plan_splice_sequence;
+        // 10x5 rectangle. After constraints: width param on V1.x, height on V2.y.
+        let mut plan = build_plan(&[(0.0, 0.0), (10.0, 0.0), (10.0, 5.0), (0.0, 5.0)]);
+        let pw = match &plan.rings[0][1].x_expr {
+            CoordinateExpression::Parameter(p) => *p,
+            _ => panic!("V1.x should be a parameter (width)"),
+        };
+        let ph = match &plan.rings[0][2].y_expr {
+            CoordinateExpression::Parameter(p) => *p,
+            _ => panic!("V2.y should be a parameter (height)"),
+        };
+        let pw_val = plan.parameter_value(pw).unwrap();
+        let ph_val = plan.parameter_value(ph).unwrap();
+        let ids_before: Vec<_> = plan.rings[0].iter().map(|v| v.id).collect();
+
+        // Porch bumping out of the top edge (edge 0, y=0), going to y=-4.
+        let ring = plan.ring_points(0);
+        let ortho = vec![
+            Point2f32::new(3.0, 0.0),
+            Point2f32::new(3.0, -4.0),
+            Point2f32::new(7.0, -4.0),
+            Point2f32::new(7.0, 0.0),
+        ];
+        let seq = plan_splice_sequence(&ring, 0, 0.3, 0, 0.7, &ortho);
+        let minted = plan.splice_into_edge(0, &seq).expect("splice ok");
+
+        // Three new dof: two porch-side x's and the porch-depth y. (The two
+        // attach points reuse the top edge's constant y, so no param there.)
+        assert_eq!(minted.len(), 3, "minted: {:?}", minted);
+        // Existing width/height params survive, unchanged, still referenced.
+        let active = plan.all_active_params();
+        assert!(active.contains(&pw) && active.contains(&ph));
+        assert_eq!(plan.parameter_value(pw).unwrap(), pw_val);
+        assert_eq!(plan.parameter_value(ph).unwrap(), ph_val);
+        // Minted params are genuinely new, not the existing ones.
+        assert!(!minted.contains(&pw) && !minted.contains(&ph));
+        // The four original vertex IDs are still present (identity preserved).
+        for id in ids_before {
+            assert!(plan.find_vertex(id).is_some(), "lost vertex id {}", id);
+        }
+        // Ring grew by 4 (2 attach + 2 porch corners) and is a valid polygon.
+        assert_eq!(plan.rings[0].len(), 8);
+        assert!(plan.validate_simple().is_ok());
+    }
+
+    #[test]
+    fn splice_two_porches_same_depth_get_distinct_params() {
+        use crate::extend::plan_splice_sequence;
+        let mut plan = build_plan(&[(0.0, 0.0), (10.0, 0.0), (10.0, 10.0), (0.0, 10.0)]);
+
+        // Porch 1 on the top edge (edge 0), x in [2,4], depth y=-5.
+        let ring = plan.ring_points(0);
+        let ortho1 = vec![
+            Point2f32::new(2.0, 0.0),
+            Point2f32::new(2.0, -5.0),
+            Point2f32::new(4.0, -5.0),
+            Point2f32::new(4.0, 0.0),
+        ];
+        let seq1 = plan_splice_sequence(&ring, 0, 0.2, 0, 0.4, &ortho1);
+        let minted1 = plan.splice_into_edge(0, &seq1).unwrap();
+        let depth1 = *minted1
+            .iter()
+            .find(|p| (plan.parameter_value(**p).unwrap() + 5.0).abs() < 1e-3)
+            .expect("porch 1 depth param");
+
+        // Porch 2 also on the (now-split) top edge, further right, SAME depth -5.
+        let ring2 = plan.ring_points(0);
+        let n = ring2.len();
+        let edge = (0..n)
+            .find(|&i| {
+                let a = ring2[i];
+                let b = ring2[(i + 1) % n];
+                a.y.abs() < 1e-3 && b.y.abs() < 1e-3 && a.x < b.x && a.x >= 4.0 - 1e-3
+            })
+            .expect("right portion of the top edge");
+        let ortho2 = vec![
+            Point2f32::new(6.0, 0.0),
+            Point2f32::new(6.0, -5.0),
+            Point2f32::new(8.0, -5.0),
+            Point2f32::new(8.0, 0.0),
+        ];
+        let seq2 = plan_splice_sequence(&ring2, edge, 0.2, edge, 0.6, &ortho2);
+        let minted2 = plan.splice_into_edge(0, &seq2).unwrap();
+        let depth2 = *minted2
+            .iter()
+            .find(|p| (plan.parameter_value(**p).unwrap() + 5.0).abs() < 1e-3)
+            .expect("porch 2 depth param");
+
+        // The two porches sit at the same depth value but must NOT share a
+        // parameter — the splice never merges by coordinate value, only by
+        // segment adjacency. Dragging one porch's depth must not move the other.
+        assert_ne!(
+            depth1, depth2,
+            "porches at the same depth must keep independent params"
+        );
+        assert!(plan.validate_simple().is_ok());
+
+        // ...but because they're coincident-yet-independent, the detector
+        // (inclusive lower bound) surfaces them as a collinearity candidate so
+        // the user can decide — it isn't assumed either way.
+        let suggestions = plan.suggest_collinear(0.0, 1000.0);
+        assert!(
+            suggestions
+                .iter()
+                .any(|s| (s.coord_a + 5.0).abs() < 1e-3 && (s.coord_b + 5.0).abs() < 1e-3),
+            "two coincident porch fronts (y=-5) should be suggested as collinear"
+        );
+    }
+
+    #[test]
+    fn splice_cross_edge_removes_corner_vertex() {
+        use crate::extend::plan_splice_sequence;
+        let mut plan = build_plan(&[(0.0, 0.0), (10.0, 0.0), (10.0, 10.0), (0.0, 10.0)]);
+        // Vertex 1 is the corner at (10,0). Chamfer it: attach on edge 0 and
+        // edge 1, replacing the corner.
+        let corner_id = plan.rings[0][1].id;
+        let ring = plan.ring_points(0);
+        let ortho = vec![
+            Point2f32::new(6.0, 0.0),
+            Point2f32::new(6.0, 4.0),
+            Point2f32::new(10.0, 4.0),
+        ];
+        let seq = plan_splice_sequence(&ring, 0, 0.6, 1, 0.4, &ortho);
+        plan.splice_into_edge(0, &seq).expect("splice ok");
+        // The corner vertex is gone; the polygon stays valid.
+        assert!(
+            plan.find_vertex(corner_id).is_none(),
+            "spanned corner should be removed"
+        );
+        assert!(plan.validate_simple().is_ok());
     }
 
     #[test]

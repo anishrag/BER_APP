@@ -36,4 +36,7 @@ pub enum Error {
 
     #[error("Geometry error: {0}")]
     GeometryError(String),
+
+    #[error("Extend failed: {0}")]
+    ExtendError(String),
 }

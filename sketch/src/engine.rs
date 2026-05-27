@@ -110,12 +110,14 @@ impl SketchEngine {
         // Here you would match on self.mode and set the appropriate behaviour
         // For example:
         match (self.mode, self.edit_tool) {
-            // DrawPerpWalls and AddDetachedSection share the same
-            // stroke-capture behaviour — both draw an orthogonal polygon.
+            // DrawPerpWalls, AddDetachedSection, and Extend all share the
+            // same stroke-capture behaviour — they draw an orthogonal path.
             // The controller decides on stroke completion whether to
-            // replace the primary outline or append a new ring.
+            // replace the primary outline, append a detached ring, or
+            // merge the stroke into the existing polygon.
             (SketchMode::Storey2D, EditTools::DrawPerpWalls)
-            | (SketchMode::Storey2D, EditTools::AddDetachedSection) => {
+            | (SketchMode::Storey2D, EditTools::AddDetachedSection)
+            | (SketchMode::Storey2D, EditTools::Extend) => {
                 self.set_mode_behaviour(Box::new(Storey2DPerpWalls));
             }
             // Edit mode doesn't capture freehand strokes — interaction
@@ -145,5 +147,13 @@ impl SketchEngine {
     pub fn end_stroke(&mut self) -> Result<Option<Stroke>, SketchError> {
         self.mode_behaviour
             .end_stroke(&mut self.stroke, self.close_epsilon)
+    }
+
+    /// Take the current stroke out of the engine without running the
+    /// "did the user close the loop?" check. Used by the Extend tool,
+    /// whose strokes start and end at *different* points on an existing
+    /// polygon — they're not supposed to self-close.
+    pub fn take_stroke_raw(&mut self) -> Option<Stroke> {
+        self.stroke.take()
     }
 }

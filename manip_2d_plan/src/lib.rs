@@ -11,6 +11,7 @@
 //! (`suggest_collinear`) and apply user decisions (`apply_collinear_suggestion`).
 
 mod error;
+mod extend;
 mod orthogonal;
 mod parametric;
 mod simplification;
@@ -117,6 +118,75 @@ impl FloorPlan {
         Ok(())
     }
 
+    /// Splice a freehand "extend" stroke into the primary ring (ring 0),
+    /// preserving the parametric model. The stroke's endpoints snap to the
+    /// perimeter; the SHORTER arc between them is replaced by the
+    /// orthogonalized porch. Same-edge strokes bump a single wall out;
+    /// cross-edge strokes drop the spanned corner.
+    ///
+    /// Every untouched vertex keeps its identity and parameter IDs, so the
+    /// caller's dimensioning state stays valid — only the porch's new walls
+    /// are un-dimensioned. Returns the newly-minted parameter IDs. The plan is
+    /// left unchanged on error (endpoints too far, degenerate, or the result
+    /// would self-intersect). All tolerances scale with the plan's bounding-box
+    /// diagonal, so this works in pixel units (pre-dimensioning) or metres
+    /// (post-dimensioning) alike.
+    pub fn extend(&mut self, stroke: &[Point2f32]) -> Result<Vec<ParameterId>, Error> {
+        if stroke.len() < 3 {
+            return Err(Error::InsufficientPoints);
+        }
+        let ring = self.parametric.ring_points(0);
+        if ring.len() < 3 {
+            return Err(Error::ExtendError(
+                "no existing polygon to attach to".into(),
+            ));
+        }
+        // Tolerances scaled to the polygon's size.
+        let diag = self
+            .bounding_box()
+            .map(|((mnx, mny), (mxx, mxy))| ((mxx - mnx).powi(2) + (mxy - mny).powi(2)).sqrt())
+            .unwrap_or(0.0);
+        let vertex_tol = (diag * 0.04).max(1e-4); // snap-to-vertex radius
+        let max_tol = (diag * 0.25).max(1e-3); // max reach to the polygon
+        let merge_tol = if diag > 0.0 {
+            (diag * 0.01).max(1e-4) // orthogonalize + coord-dedup
+        } else {
+            10.0
+        };
+
+        let start = *stroke.first().unwrap();
+        let end = *stroke.last().unwrap();
+        let (s_edge, s_t, s_dist, _) = extend::snap_to_polygon(&ring, start, vertex_tol);
+        let (e_edge, e_t, e_dist, _) = extend::snap_to_polygon(&ring, end, vertex_tol);
+        if s_dist > max_tol || e_dist > max_tol {
+            return Err(Error::ExtendError(format!(
+                "stroke endpoints too far from the polygon (start={:.3}, end={:.3}, max={:.3})",
+                s_dist, e_dist, max_tol
+            )));
+        }
+        if s_edge == e_edge && (s_t - e_t).abs() < 1e-3 {
+            return Err(Error::ExtendError(
+                "stroke starts and ends at the same point".into(),
+            ));
+        }
+
+        // Orthogonalize the freehand porch, then pin its endpoints exactly
+        // onto their attach edges so the attach vertices share the edges'
+        // perpendicular coordinate expressions in the splice.
+        let mut ortho = extend::orthogonalize_open_path(stroke, merge_tol)?;
+        if ortho.len() < 2 {
+            return Err(Error::ExtendError(
+                "porch collapsed after orthogonalization".into(),
+            ));
+        }
+        let last = ortho.len() - 1;
+        extend::pin_to_edge(&mut ortho[0], &ring, s_edge);
+        extend::pin_to_edge(&mut ortho[last], &ring, e_edge);
+
+        let sequence = extend::plan_splice_sequence(&ring, s_edge, s_t, e_edge, e_t, &ortho);
+        self.parametric.splice_into_edge(0, &sequence)
+    }
+
     /// Concrete vertex positions of the first polygon (backwards-compatible
     /// for single-polygon callers). For multi-polygon access, use `polygons()`.
     pub fn get_points(&self) -> Vec<Point2f32> {
@@ -149,6 +219,46 @@ impl FloorPlan {
     ) -> Vec<CollinearitySuggestion> {
         self.parametric
             .suggest_collinear(min_separation, max_separation)
+    }
+
+    /// Collinearity suggestions that involve at least one of `new_params` —
+    /// the walls a just-applied [`extend`](Self::extend) added. Lets the caller
+    /// ask whether a freshly-drawn wall lines up with an existing one, WITHOUT
+    /// re-surfacing pairs among the pre-existing walls. Separation thresholds
+    /// scale with the bounding-box diagonal, so it behaves the same in pixel
+    /// units (pre-dimensioning) and metres (post-dimensioning).
+    pub fn collinear_suggestions_for_params(
+        &self,
+        new_params: &[ParameterId],
+    ) -> Vec<CollinearitySuggestion> {
+        let diag = self
+            .bounding_box()
+            .map(|((mnx, mny), (mxx, mxy))| ((mxx - mnx).powi(2) + (mxy - mny).powi(2)).sqrt())
+            .unwrap_or(0.0);
+        if diag <= 0.0 {
+            return Vec::new();
+        }
+        // No lower bound: freehand drawing isn't precise, so two walls landing
+        // close together — even exactly coincident — is chance, not intent.
+        // Those are still independent parameters, so we ask rather than assume
+        // (`suggest_collinear` only auto-skips walls that already SHARE an
+        // expression, i.e. are already the same parameter). Beyond ~12% of the
+        // diagonal the walls are clearly distinct — that stays the upper cutoff.
+        let min_sep = 0.0;
+        let max_sep = (diag * 0.12).max(1e-3);
+        let new: std::collections::HashSet<ParameterId> = new_params.iter().copied().collect();
+        self.parametric
+            .suggest_collinear(min_sep, max_sep)
+            .into_iter()
+            .filter(|s| {
+                let involves = |ring: usize, edge: usize| {
+                    self.parametric
+                        .wall_movable_param(ring, edge)
+                        .is_some_and(|(p, _)| new.contains(&p))
+                };
+                involves(s.ring_a, s.edge_a) || involves(s.ring_b, s.edge_b)
+            })
+            .collect()
     }
 
     /// Apply a collinearity decision returned from `suggest_collinear`.

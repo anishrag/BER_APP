@@ -2181,11 +2181,18 @@ impl AppController {
 
     pub fn sketch_end_stroke(&mut self, _point: Point2f32) -> Result<(), String> {
         let edit_tool = self.sketch_engine.edit_tool;
-        if let Some(stroke) = self
-            .sketch_engine
-            .end_stroke()
-            .map_err(|e| format!("Failed to end stroke: {:?}", e))?
-        {
+        // Extend strokes don't need to self-close (they start and end at
+        // different points on the existing polygon). Take the raw stroke
+        // out of the engine without running the close-check; other tools
+        // still go through end_stroke which requires close.
+        let stroke_opt = if matches!(edit_tool, EditTools::Extend) {
+            self.sketch_engine.take_stroke_raw()
+        } else {
+            self.sketch_engine
+                .end_stroke()
+                .map_err(|e| format!("Failed to end stroke: {:?}", e))?
+        };
+        if let Some(stroke) = stroke_opt {
             println!("Stroke completed with {} points", stroke.points.len());
             match edit_tool {
                 EditTools::DrawPerpWalls => {
@@ -2205,6 +2212,13 @@ impl AppController {
                 }
                 EditTools::AddDetachedSection => {
                     self.apply_addsection_stroke(&stroke.points, stroke.is_closed)?;
+                }
+                EditTools::Extend => {
+                    if let Err(e) = self.apply_extend_stroke(&stroke.points) {
+                        // For now just log; in future we'll surface this
+                        // to the UI alongside the dimension error.
+                        eprintln!("apply_extend_stroke: {}", e);
+                    }
                 }
                 _ => {
                     // Other tools don't consume the stroke at this layer yet.
@@ -2269,6 +2283,61 @@ impl AppController {
         Ok(())
     }
 
+    /// Entry point for Extend strokes from the UI. The stroke comes in as
+    /// (f32, f32) world-coord pairs (already converted from canvas pixels
+    /// by sketch.rs via `fit_transform.inverse`). Clears any leftover
+    /// canvas-pixel stroke from the sketch engine, then forwards to the
+    /// merge logic.
+    pub fn apply_extend_stroke_event(&mut self, world_points: &[(f32, f32)]) {
+        let _ = self.sketch_engine.take_stroke_raw();
+        let pts: Vec<Point2f32> = world_points
+            .iter()
+            .map(|(x, y)| Point2f32::new(*x, *y))
+            .collect();
+        println!("Extend stroke (world coords): {} points", pts.len());
+        if let Err(e) = self.apply_extend_stroke(&pts) {
+            eprintln!("apply_extend_stroke: {}", e);
+        }
+    }
+
+    /// Apply an Extend stroke. The geometry — snapping, orthogonalizing, and
+    /// splicing the porch into the parametric plan — lives in
+    /// `FloorPlan::extend`; here we only orchestrate app state. Because the
+    /// splice preserves existing vertex/parameter IDs, the dimensioning state
+    /// stays valid: we keep `known_params` (dropping only any that a cross-edge
+    /// cut removed) instead of resetting, so the user is asked to dimension
+    /// just the porch's new walls.
+    fn apply_extend_stroke(&mut self, points: &[Point2f32]) -> Result<(), String> {
+        let undo_snap = self.current_history_snapshot();
+        let minted = self
+            .floor_plan
+            .extend(points)
+            .map_err(|e| format!("{}", e))?;
+        println!("Extend: {} new param(s) {:?}", minted.len(), minted);
+        let active = self.floor_plan.all_active_params();
+        self.dimensioning
+            .known_params
+            .retain(|p| active.contains(p));
+        self.commit_to_ber()?;
+        // Ask about collinearity ONLY for the porch's new walls — e.g. whether
+        // a new porch front lines up with an earlier one. We never assume it;
+        // and we don't re-surface pairs among the pre-existing walls.
+        let suggestions = self.floor_plan.collinear_suggestions_for_params(&minted);
+        if !suggestions.is_empty() {
+            self.review = Some(CollinearityReview {
+                suggestions,
+                cursor: 0,
+                rejections: Vec::new(),
+            });
+        }
+        // Kicks off dimensioning for the porch's new walls — but defers while a
+        // collinearity review is pending (it returns early when `review` is set;
+        // resolving the review then starts dimensioning).
+        self.maybe_start_dimensioning();
+        self.push_history_snapshot(undo_snap);
+        Ok(())
+    }
+
     /// Detect near-collinear walls and populate the review if any.
     ///
     /// After AddDetachedSection appends a new ring, pairs entirely within older
@@ -2295,9 +2364,6 @@ impl AppController {
     }
 }
 
-/// For each edge in each ring, record `(sign_dx, sign_dy)` where dx, dy
-/// are the deltas from the edge's start vertex to its end vertex. Used by
-/// the direction-flip guard in `apply_dimension`.
 /// Snap V to satisfy a single measurement. The other coord defaults to the
 /// current vertex position (axis case) or is computed from the circle's
 /// closest-point projection (wall-length case).
@@ -2438,6 +2504,9 @@ fn intersect_circles(
     }
 }
 
+/// For each edge in each ring, record `(sign_dx, sign_dy)` where dx, dy
+/// are the deltas from the edge's start vertex to its end vertex. Used by
+/// the direction-flip guard in `apply_dimension`.
 fn snapshot_edge_signs(plan: &FloorPlan) -> Vec<Vec<(i8, i8)>> {
     plan.polygons()
         .iter()

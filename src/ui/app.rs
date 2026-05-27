@@ -380,6 +380,9 @@ impl eframe::App for BerApp {
                                     eprintln!("undo: {}", e);
                                 }
                             }
+                            SketchEvent::ExtendStrokeWorld { points } => {
+                                controller.borrow_mut().apply_extend_stroke_event(&points);
+                            }
                             SketchEvent::Redo => {
                                 if let Err(e) = controller.borrow_mut().redo() {
                                     eprintln!("redo: {}", e);
