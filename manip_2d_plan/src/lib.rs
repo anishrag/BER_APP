@@ -368,7 +368,9 @@ impl FloorPlan {
         if path.len() < 2 {
             return Err(err("path collapsed".into()));
         }
-        self.splice_cleaned(&path, keep_larger)
+        // Ortho/line extend & trim keep their existing attach behaviour (no
+        // corner reuse) — only the freeform curve flow opts in.
+        self.splice_cleaned(&path, keep_larger, false)
     }
 
     /// Splice an already-clean `path` (no further simplification) onto the
@@ -381,6 +383,7 @@ impl FloorPlan {
         &mut self,
         path: &[Point2f32],
         keep_larger: bool,
+        reuse_corners: bool,
     ) -> Result<Vec<ParameterId>, Error> {
         let err = |m: String| {
             if keep_larger {
@@ -405,10 +408,11 @@ impl FloorPlan {
 
         // Snap the path's endpoints to find the attach edges, then pin them onto
         // those edges so they share the edges' perpendicular coordinate exprs.
+        // `snapped*` is true when the endpoint landed on an existing CORNER.
         let start = path[0];
         let end = path[path.len() - 1];
-        let (e1, t1, s_dist, _) = extend::snap_to_polygon(&ring, start, vertex_tol);
-        let (e2, t2, e_dist, _) = extend::snap_to_polygon(&ring, end, vertex_tol);
+        let (e1, t1, s_dist, snapped1) = extend::snap_to_polygon(&ring, start, vertex_tol);
+        let (e2, t2, e_dist, snapped2) = extend::snap_to_polygon(&ring, end, vertex_tol);
         if s_dist > max_tol || e_dist > max_tol {
             return Err(err(format!(
                 "endpoints too far from the outline (start={:.3}, end={:.3}, max={:.3})",
@@ -424,7 +428,7 @@ impl FloorPlan {
         extend::pin_to_edge(&mut path[0], &ring, e1);
         extend::pin_to_edge(&mut path[last], &ring, e2);
 
-        let chosen = if keep_larger {
+        let mut chosen = if keep_larger {
             // Trim: build both arc-replacements; keep whichever leaves more area.
             let area_of = |seq: &[crate::extend::SpliceElem]| -> f32 {
                 let pts: Vec<Point2f32> = seq
@@ -447,6 +451,30 @@ impl FloorPlan {
             // Extend: replace the SHORTER arc with the path (adds the feature).
             extend::plan_splice_sequence(&ring, e1, t1, e2, t2, &path)
         };
+
+        // Corner reuse (curve flow only). When an attach endpoint snaps onto an
+        // EXISTING corner vertex, reuse that vertex instead of splicing a new
+        // point. Otherwise — for a curve drawn across a corner — the new point
+        // gets pinned to the deleted wall's perpendicular and ends up a
+        // free-floating vertex (both coords independent) that the dimensioning
+        // solver can't isolate, so the curve never finishes. Reusing the corner
+        // attaches the curve AT the corner (the corner's own, already-known
+        // params), no new param to dimension. To attach a curve away from a
+        // corner, draw its endpoint clearly off the corner. Only `begin_arc`
+        // opts in; extend/trim keep their existing behaviour.
+        if reuse_corners {
+            let a1 = path[0];
+            let a2 = path[last];
+            for el in chosen.iter_mut() {
+                if let crate::extend::SpliceElem::New(pt) = el {
+                    if snapped1 && *pt == a1 {
+                        *el = crate::extend::SpliceElem::Keep(e1);
+                    } else if snapped2 && *pt == a2 {
+                        *el = crate::extend::SpliceElem::Keep(e2);
+                    }
+                }
+            }
+        }
         self.parametric.splice_into_edge(0, &chosen)
     }
 
@@ -471,9 +499,10 @@ impl FloorPlan {
         }
         let bulge_ratio = geom::stroke_sagitta(stroke) / chord;
         // Splice the straight chord (no bulge): inserts the two endpoints as
-        // pinned vertices without changing the shape (the chord lies along the
-        // attach wall). Reuses the extend (shorter-arc) splice tail.
-        self.splice_cleaned(&[p1, p2], false)?;
+        // pinned vertices. `reuse_corners` makes an endpoint that lands on an
+        // existing corner reuse that corner vertex (attaching the curve at the
+        // corner) rather than splicing a free-floating point.
+        self.splice_cleaned(&[p1, p2], false, true)?;
         let v1 = self
             .vertex_near(p1)
             .ok_or_else(|| Error::ExtendError("lost arc start vertex".into()))?;
@@ -1075,6 +1104,67 @@ mod serde_tests {
         Point2f32::new(x, y)
     }
 
+    /// A baked (faceted) curve is just extra straight-edged vertices + params in
+    /// the parametric model, so saving and reopening a BER must reproduce the
+    /// curve — facets, geometry, and parameter count — not a straight line.
+    #[test]
+    fn baked_curve_survives_json_roundtrip() {
+        let square = vec![
+            p(0.0, 0.0),
+            p(10.0, 0.0),
+            p(10.0, 10.0),
+            p(0.0, 10.0),
+            p(0.2, 0.2),
+        ];
+        let mut plan = FloorPlan::from_points_to_orthogonal(&square, 0.5, true).unwrap();
+        let arc = vec![
+            p(3.0, 10.0),
+            p(4.0, 11.0),
+            p(5.0, 11.5),
+            p(6.0, 11.0),
+            p(7.0, 10.0),
+        ];
+        let (v1, v2, bulge) = plan.begin_arc(&arc).unwrap();
+        plan.finish_arc(v1, v2, bulge).unwrap();
+
+        let diag = |pl: &FloorPlan| {
+            let r = &pl.polygons()[0];
+            let n = r.len();
+            (0..n)
+                .filter(|&i| {
+                    let (a, b) = (r[i], r[(i + 1) % n]);
+                    (a.x - b.x).abs() > 1e-3 && (a.y - b.y).abs() > 1e-3
+                })
+                .count()
+        };
+        let verts_before = plan.polygons()[0].len();
+        let params_before = plan.active_parameter_count();
+        let diag_before = diag(&plan);
+        assert!(
+            diag_before >= 2,
+            "precondition: the curve baked into facets"
+        );
+
+        let json = serde_json::to_string(&plan).expect("serialize");
+        let back: FloorPlan = serde_json::from_str(&json).expect("deserialize");
+
+        assert_eq!(
+            back.polygons()[0].len(),
+            verts_before,
+            "facet vertices kept"
+        );
+        assert_eq!(back.active_parameter_count(), params_before);
+        assert_eq!(diag(&back), diag_before, "the curve's facets must survive");
+        for (a, b) in back
+            .polygons()
+            .iter()
+            .flatten()
+            .zip(plan.polygons().iter().flatten())
+        {
+            assert!((a.x - b.x).abs() < 1e-3 && (a.y - b.y).abs() < 1e-3);
+        }
+    }
+
     /// The persisted snapshot must preserve the parametric structure, not just
     /// the points: collinearity equivalences are shared parameters, so the
     /// active-parameter count (which drops when walls share a coord) is the
@@ -1148,6 +1238,79 @@ mod trim_tests {
             p(0.2, 0.2),
         ];
         FloorPlan::from_points_to_orthogonal(&stroke, 0.5, true).unwrap()
+    }
+
+    /// The reported use case: an L (3/4 of a square, reflex corner) with a
+    /// curve rounding the bottom-right notch — drawn from near the bottom corner
+    /// (v5) to near the right corner (v3). Each endpoint lands on an existing
+    /// corner, so it REUSES that corner vertex (its already-known params) rather
+    /// than splicing a new point. Without that, an endpoint at a corner whose
+    /// wall the curve deletes would float free and the dimensioning would stall.
+    ///
+    /// The L is sized so the deleted notch-top wall (length 5) is longer than
+    /// the surviving right wall (length 1): an endpoint near v3 sits close
+    /// enough to drop v3 yet far enough off the right wall to float — exactly
+    /// the case corner-reuse turns into a clean attach.
+    #[test]
+    fn corner_curve_reuses_corner_vertices_and_bakes() {
+        use std::collections::HashSet;
+        let l = vec![
+            p(0.0, 0.0),   // v0
+            p(0.0, 5.0),   // v1
+            p(6.0, 5.0),   // v2
+            p(6.0, 4.0),   // v3  (right wall v2→v3 is SHORT, length 1)
+            p(1.0, 4.0),   // v4  (notch-top v3→v4 is WIDE, length 5)
+            p(1.0, 0.0),   // v5
+            p(0.02, 0.02), // lift-near-start drag point, dropped on close
+        ];
+        let mut plan = FloorPlan::from_points_to_orthogonal(&l, 0.05, true).unwrap();
+        let old_vids: HashSet<VertexId> = (0..plan.polygons()[0].len())
+            .filter_map(|i| plan.vertex_id_at(0, i))
+            .collect();
+        let known: HashSet<ParameterId> = plan.all_active_params();
+
+        // Arc rounding the notch: start near corner v5 (bottom), end ~3mm from
+        // corner v3 (right). Both endpoints land on existing corners.
+        let arc = vec![
+            p(0.95, 0.0),
+            p(2.5, 1.2),
+            p(4.2, 2.4),
+            p(5.5, 3.4),
+            p(5.997, 4.0),
+        ];
+        let (v1, v2, bulge) = plan.begin_arc(&arc).unwrap();
+
+        // Option #2: each endpoint REUSES the existing corner vertex — no new
+        // floating param, the curve attaches AT the corner.
+        assert!(
+            old_vids.contains(&v1),
+            "start endpoint should reuse an existing corner vertex, got {v1}"
+        );
+        assert!(
+            old_vids.contains(&v2),
+            "end endpoint should reuse an existing corner vertex, got {v2}"
+        );
+
+        // Both attach points are existing corners (known params), so the curve
+        // is fully constrained immediately — nothing to dimension.
+        let (_, i1) = plan.find_vertex(v1).unwrap();
+        let (_, i2) = plan.find_vertex(v2).unwrap();
+        let n = plan.polygons()[0].len();
+        let edge_start = if (i1 + 1) % n == i2 { i1 } else { i2 };
+        let deps = plan.wall_param_deps(0, edge_start);
+        assert!(
+            deps.iter().all(|q| known.contains(q)),
+            "a corner-to-corner placeholder is already known; deps={deps:?} known={known:?}"
+        );
+
+        // It bakes into a real faceted curve, leaving a valid polygon.
+        plan.finish_arc(v1, v2, bulge).unwrap();
+        assert!(plan.validate_simple().is_ok());
+        assert!(
+            diagonal_edge_count(&plan) >= 2,
+            "the rounded corner should bake into facets, got {}",
+            diagonal_edge_count(&plan)
+        );
     }
 
     fn diagonal_edge_count(plan: &FloorPlan) -> usize {

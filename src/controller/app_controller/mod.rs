@@ -599,6 +599,10 @@ impl AppController {
     /// mismatch, rebuilds from the resolved floor geometry (lossy).
     fn restore_sketch_state(&mut self, storey: Option<&Storey>) {
         self.dimensioning = DimensionState::default();
+        // A provisional arc is transient and tied to the OUTGOING plan's
+        // vertices; loading a record must not carry a stale one over (it would
+        // dangle / render a phantom preview against the new geometry).
+        self.pending_arc = None;
         let Some(storey) = storey else {
             self.floor_plan = FloorPlan::default();
             return;
@@ -1151,9 +1155,33 @@ impl AppController {
     /// its two endpoints onto the outline (a straight placeholder; the shape is
     /// unchanged). We suppress that placeholder edge from dimensioning prompts —
     /// so only the two attach stubs are asked about — and stash the arc in
-    /// `pending_arc`. Once both stubs are dimensioned, `maybe_finish_pending_arc`
-    /// bakes the curve in. Nothing about the geometry changes until then.
+    /// `pending_arc`. Once both stubs are dimensioned (or both endpoints reused
+    /// corners, so there's nothing to dimension), the UI offers a radius slider
+    /// ([`pending_arc_bulge`](Self::pending_arc_bulge)); accepting it
+    /// ([`commit_pending_arc`](Self::commit_pending_arc)) bakes the curve in.
+    /// Nothing about the geometry changes until then.
     fn begin_arc_stroke(&mut self, points: &[Point2f32]) -> Result<(), String> {
+        // ---- CURVE DEBUG (temporary): everything needed to reproduce ----
+        // Plan + dimensioning state BEFORE the curve, so the exact dimensioned
+        // shape can be reconstructed in a test.
+        println!("=== CURVE DEBUG: begin_arc_stroke ===");
+        println!("  plan BEFORE: {:?}", self.floor_plan);
+        {
+            let mut k: Vec<_> = self.dimensioning.known_params.iter().copied().collect();
+            k.sort();
+            println!(
+                "  known_params={:?} scale_set={}",
+                k, self.dimensioning.scale_set
+            );
+        }
+        // The raw stroke, as a paste-able Rust literal.
+        print!("  stroke ({} pts): vec![", points.len());
+        for p in points {
+            print!("p({:.3},{:.3}),", p.x, p.y);
+        }
+        println!("]");
+        // ---- end debug header ----
+
         let undo_snap = self.current_history_snapshot();
         let (start, end, bulge_ratio) = self
             .floor_plan
@@ -1176,6 +1204,41 @@ impl AppController {
         self.dimensioning
             .known_params
             .retain(|p| active.contains(p));
+
+        // ---- CURVE DEBUG (temporary): the spliced structure ----
+        println!(
+            "  begin: start_vid={} end_vid={} bulge={:.3} skip_vid={:?}",
+            start,
+            end,
+            bulge_ratio,
+            self.placeholder_skip_vertex(start, end)
+        );
+        if let (Some((r, is)), Some((_, ie))) = (
+            self.floor_plan.find_vertex(start),
+            self.floor_plan.find_vertex(end),
+        ) {
+            println!("  start at ring{r}/idx{is}, end at idx{ie}");
+        }
+        {
+            let mut a: Vec<_> = active.iter().copied().collect();
+            a.sort();
+            let mut k: Vec<_> = self.dimensioning.known_params.iter().copied().collect();
+            k.sort();
+            println!("  active_params={a:?} known_after_retain={k:?}");
+        }
+        let ring = self.floor_plan.polygons()[0].clone();
+        for e in 0..ring.len() {
+            println!(
+                "  edge {e} {:?}->{:?} axis={:?} deps={:?}",
+                (ring[e].x, ring[e].y),
+                (ring[(e + 1) % ring.len()].x, ring[(e + 1) % ring.len()].y),
+                self.floor_plan.wall_axis(0, e),
+                self.floor_plan.wall_param_deps(0, e),
+            );
+        }
+        println!("=== end CURVE DEBUG ===");
+        // ---- end debug ----
+
         self.commit_to_ber()?;
         self.maybe_start_dimensioning();
         self.push_history_snapshot(undo_snap);
@@ -1235,52 +1298,62 @@ impl AppController {
                 .all(|p| self.dimensioning.known_params.contains(p))
     }
 
-    /// Bake the provisional arc into the model once its attach lines are set.
-    /// Called after a dimension is applied; a no-op until both stubs are known.
-    /// Runs within the triggering dimension's undo step, so undoing that
-    /// dimension also un-bakes the arc.
-    fn maybe_finish_pending_arc(&mut self) {
-        let Some(pa) = self.pending_arc.clone() else {
-            return;
-        };
-        if !self.pending_arc_ready(&pa) {
-            // Still waiting on one of the two attach dimensions — stay provisional.
-            return;
+    /// The provisional curve's current bulge (signed sagitta / chord), but only
+    /// once it's ready to have its radius tuned: a pending arc whose attach
+    /// lines are all set, with no dimension prompt outstanding. The UI binds a
+    /// radius slider to this; `None` hides the slider (still drawing /
+    /// dimensioning the attach lines).
+    pub fn pending_arc_bulge(&self) -> Option<f32> {
+        let pa = self.pending_arc.as_ref()?;
+        if self.dimensioning.current_prompt.is_some() || !self.pending_arc_ready(pa) {
+            return None;
         }
+        Some(pa.bulge_ratio)
+    }
+
+    /// Set the provisional curve's bulge from the radius slider (clamped). Just
+    /// updates the amber preview; commit happens on accept. No-op with no arc.
+    pub fn set_pending_arc_bulge(&mut self, ratio: f32) {
+        if let Some(pa) = self.pending_arc.as_mut() {
+            pa.bulge_ratio = ratio.clamp(-1.5, 1.5);
+        }
+    }
+
+    /// Accept the provisional curve at its current radius: facet the arc into
+    /// the plan and LOCK the facet params (so later dimensioning of other walls
+    /// can't let `repair`/`aesthetic_rescale` redistribute the facet vertices
+    /// and flatten the curve). Clears the pending arc. If faceting fails the arc
+    /// is dropped (the straight placeholder remains) rather than left stuck.
+    pub fn commit_pending_arc(&mut self) -> Result<(), String> {
+        let Some(pa) = self.pending_arc.clone() else {
+            return Ok(());
+        };
+        let undo_snap = self.current_history_snapshot();
         let facet_params = match self.floor_plan.finish_arc(pa.start, pa.end, pa.bulge_ratio) {
             Ok(params) => params,
             Err(e) => {
-                // The attach lines ARE both set (we're past `pending_arc_ready`),
-                // so there's nothing left for the user to do that would make this
-                // succeed — retrying every subsequent dimension would just fail
-                // again and keep the preview stuck on screen. Give up on the arc:
-                // clear it (dropping the overlay) and leave the straight,
-                // already-dimensioned placeholder edge as the fallback.
                 eprintln!(
-                    "finish_arc failed ({e}); keeping the straight placeholder edge \
-                     and dropping the provisional curve. bulge={:.3}",
+                    "finish_arc failed ({e}); dropping the provisional curve, keeping \
+                     the straight placeholder. bulge={:.3}",
                     pa.bulge_ratio
                 );
                 self.pending_arc = None;
-                return;
+                self.push_history_snapshot(undo_snap);
+                return Ok(());
             }
         };
-        // Lock the arc: its shape is now fixed, so mark the facet vertices'
-        // params known. Otherwise a LATER dimension of some other wall would
-        // treat them as free and `repair`/`aesthetic_rescale` could redistribute
-        // them — flattening the curve back into a straight line.
         self.dimensioning
             .known_params
             .extend(facet_params.iter().copied());
         self.pending_arc = None;
         println!(
-            "Curve: attach lines set — arc faceted into the plan ({} facet params locked, bulge {:.3})",
-            facet_params.len(),
-            pa.bulge_ratio
+            "Curve: committed at bulge {:.3} ({} facet params locked)",
+            pa.bulge_ratio,
+            facet_params.len()
         );
-        if let Err(e) = self.commit_to_ber() {
-            eprintln!("commit_to_ber after finish_arc: {}", e);
-        }
+        self.commit_to_ber()?;
+        self.push_history_snapshot(undo_snap);
+        Ok(())
     }
 
     /// World-coord points of the provisional arc preview, if one is mid-flow.
@@ -1623,7 +1696,7 @@ mod trim_collapse_tests {
         );
 
         // Dimension every prompted wall: each must be an axis-aligned stub, never
-        // a facet. Two stubs get set, then the arc bakes itself in.
+        // a facet. Two stubs get set; the arc stays provisional (not auto-baked).
         let mut dimensioned = 0;
         for _ in 0..10 {
             let Some(prompt) = c.current_dimension_prompt() else {
@@ -1637,19 +1710,32 @@ mod trim_collapse_tests {
             c.apply_dimension(2.0).expect("dimension an attach stub");
             dimensioned += 1;
         }
-
-        // Both attach lines set → arc baked in: facets present, area grew, and
-        // the result is a valid simple polygon.
         assert_eq!(
             dimensioned, 2,
             "exactly the two attach stubs are dimensioned"
         );
+
+        // Attach lines set, but the curve is NOT committed yet — it waits for
+        // the radius to be accepted. The radius slider is now available, and
+        // it's still a straight provisional placeholder (no facets).
+        assert!(c.pending_arc.is_some(), "arc not auto-committed");
+        assert_eq!(diag_edges(&c), 0, "still a straight placeholder pre-commit");
+        let bulge0 = c
+            .pending_arc_bulge()
+            .expect("radius slider is available once attach lines are set");
+
+        // Adjust the radius (slider), then accept.
+        c.set_pending_arc_bulge(bulge0 + 0.3);
+        assert!((c.pending_arc_bulge().unwrap() - (bulge0 + 0.3)).abs() < 1e-4);
+        c.commit_pending_arc().expect("commit the curve");
+
+        // Now baked: facets present, area grew, valid simple polygon.
         assert!(
             c.pending_arc.is_none(),
-            "arc committed after both dimensions"
+            "arc committed after accepting radius"
         );
         assert!(c.floor_plan.validate_simple().is_ok());
-        assert!(diag_edges(&c) >= 2, "arc faceted after dimensioning");
+        assert!(diag_edges(&c) >= 2, "arc faceted after commit");
         assert!(
             ring_area(&c) > area0 + 1.0,
             "outward arc adds area once baked"

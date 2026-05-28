@@ -160,6 +160,7 @@ impl eframe::App for BerApp {
                     dim_error,
                     dimensioned_walls,
                     arc_preview,
+                    curve_bulge,
                     edit_selected_wall,
                     edit_selected_vertex,
                     edit_drag_prompt,
@@ -187,6 +188,7 @@ impl eframe::App for BerApp {
                         self.sketch_state.dimension_error.clone(),
                         controller_ref.walls_with_known_length(),
                         controller_ref.pending_arc_preview(),
+                        controller_ref.pending_arc_bulge(),
                         controller_ref.edit_selected_wall_positions(),
                         controller_ref.edit_selected_vertex_position(),
                         controller_ref.edit_drag_prompt_for_ui(),
@@ -226,6 +228,7 @@ impl eframe::App for BerApp {
                     dim_error.as_deref(),
                     &dimensioned_walls,
                     arc_preview.as_deref(),
+                    curve_bulge,
                     edit_selected_wall,
                     edit_selected_vertex,
                     edit_drag_prompt,
@@ -319,6 +322,14 @@ impl eframe::App for BerApp {
                             SketchEvent::SkipDimension => {
                                 controller.borrow_mut().skip_current_dimension();
                                 self.sketch_state.dimension_error = None;
+                            }
+                            SketchEvent::SetCurveBulge(ratio) => {
+                                controller.borrow_mut().set_pending_arc_bulge(ratio);
+                            }
+                            SketchEvent::CommitCurve => {
+                                if let Err(e) = controller.borrow_mut().commit_pending_arc() {
+                                    eprintln!("commit_pending_arc: {}", e);
+                                }
                             }
                             SketchEvent::EditMouseDown {
                                 world_x,

@@ -221,6 +221,11 @@ pub enum SketchEvent {
     ApplyDimension(f32),
     /// User skipped the current dimension prompt.
     SkipDimension,
+    /// User dragged the curve-radius slider: set the provisional arc's bulge
+    /// (signed sagitta / chord). Updates the amber preview live.
+    SetCurveBulge(f32),
+    /// User accepted the provisional curve's radius — bake it into the plan.
+    CommitCurve,
 }
 
 #[derive(Default)]
@@ -247,6 +252,9 @@ impl SketchPage {
         // World-coord points of a provisional ExtendCurve/TrimCurve arc awaiting
         // its attach dimensions, drawn as an amber preview overlay.
         arc_preview: Option<&[(f64, f64)]>,
+        // Current bulge of a provisional curve that's ready to have its radius
+        // tuned (attach lines set). `Some` shows the radius slider toolbar.
+        curve_bulge: Option<f32>,
         edit_selected_wall: Option<((f64, f64), (f64, f64))>,
         edit_selected_vertex: Option<(f64, f64)>,
         edit_drag_prompt: Option<EditDragPromptUiData>,
@@ -683,6 +691,8 @@ impl SketchPage {
                 ui.horizontal(|ui| {
                     if pending_redraw {
                         Self::pending_redraw_toolbar(ui, &mut on_event);
+                    } else if let Some(bulge) = curve_bulge {
+                        Self::curve_radius_toolbar(ui, bulge, &mut on_event);
                     } else if let Some(p) = dim_prompt {
                         Self::dimension_prompt_toolbar(
                             ui,
@@ -946,6 +956,36 @@ impl SketchPage {
                 egui::RichText::new(format!("⚠ {}", err))
                     .color(egui::Color32::from_rgb(255, 120, 90)),
             );
+        }
+    }
+
+    /// Radius/bulge slider for a provisional curve whose attach lines are set.
+    /// Dragging it reshapes the amber preview live; "Accept curve" bakes it in.
+    /// `bulge` is the signed sagitta / chord (0 = flat, larger = more curved).
+    fn curve_radius_toolbar<F: FnMut(UiEvent)>(ui: &mut egui::Ui, bulge: f32, on_event: &mut F) {
+        ui.label(
+            egui::RichText::new("Curve radius:")
+                .strong()
+                .color(egui::Color32::from_rgb(255, 200, 60)),
+        );
+        let mut b = bulge;
+        if ui
+            .add(
+                egui::Slider::new(&mut b, -1.5..=1.5)
+                    .text("bulge")
+                    .show_value(false),
+            )
+            .on_hover_text("Drag to flatten (toward 0) or deepen the curve; sign flips the side")
+            .changed()
+        {
+            on_event(UiEvent::Sketch(SketchEvent::SetCurveBulge(b)));
+        }
+        if ui
+            .button("Accept curve")
+            .on_hover_text("Bake the curve into the plan at this radius")
+            .clicked()
+        {
+            on_event(UiEvent::Sketch(SketchEvent::CommitCurve));
         }
     }
 
