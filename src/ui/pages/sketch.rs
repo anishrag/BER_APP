@@ -10,13 +10,14 @@ use crate::ui::render;
 use crate::ui::render::ViewParams;
 
 /// Parse a dimension expression. Supports:
-/// - A single positive number: `"4.2"`, `"0.5"`
+/// - A single non-negative number: `"4.2"`, `"0.5"`, `"0"`
 /// - Sums and differences of numbers: `"3.2 + 1.5"`, `"5 - 1.8 + 0.3"`
-/// - Optional leading `+`; a leading `-` is rejected since dimensions must
-///   be positive.
+/// - Optional leading `+`; a leading `-` is rejected since dimensions can't
+///   be negative.
 ///
-/// Whitespace is ignored. Returns `None` for malformed input or non-positive
-/// results.
+/// Zero is accepted — it collapses the wall (used to zero a trim remnant so a
+/// cut snaps onto a corner). Whitespace is ignored. Returns `None` for
+/// malformed input or a negative result.
 fn parse_dimension_expression(input: &str) -> Option<f32> {
     let trimmed = input.trim();
     if trimmed.is_empty() {
@@ -55,7 +56,9 @@ fn parse_dimension_expression(input: &str) -> Option<f32> {
     }
     let v: f32 = current.parse().ok()?;
     total += sign * v;
-    if total.is_finite() && total > 0.0 {
+    // Zero is allowed: entering 0 collapses the wall (e.g. zeroing a trim
+    // remnant to snap a cut onto a corner). Negatives are still rejected.
+    if total.is_finite() && total >= 0.0 {
         Some(total)
     } else {
         None
@@ -98,8 +101,15 @@ mod expression_tests {
         assert!(parse_dimension_expression("3 +").is_none());
         assert!(parse_dimension_expression("3 + + 2").is_none());
         assert!(parse_dimension_expression("hello").is_none());
-        assert!(parse_dimension_expression("3 - 3").is_none()); // zero result
         assert!(parse_dimension_expression("3 - 5").is_none()); // negative result
+    }
+
+    #[test]
+    fn zero_accepted_for_collapsing_a_wall() {
+        // 0 is a valid dimension: it collapses the wall (e.g. zero a trim
+        // remnant). Only negatives are rejected.
+        assert!(approx(parse_dimension_expression("0").unwrap(), 0.0));
+        assert!(approx(parse_dimension_expression("3 - 3").unwrap(), 0.0));
     }
 }
 

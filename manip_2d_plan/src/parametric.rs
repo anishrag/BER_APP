@@ -363,12 +363,14 @@ impl ParametricPlan {
     }
 
     /// Change `unknown_param`'s value so the wall starting at `(ring, edge_start)`
-    /// has length `new_length`. Preserves the wall's direction along its axis
-    /// (which endpoint is greater).
+    /// has length `new_length`, preserving the wall's direction.
     ///
-    /// The wall must be axis-aligned, must reference `unknown_param` at exactly
-    /// one of its endpoints along the wall's parallel axis, and the wall's
-    /// length must be non-zero.
+    /// For an axis-aligned wall the unknown must be one endpoint's coordinate
+    /// along the wall's parallel axis. For a non-axis-aligned (diagonal) wall —
+    /// e.g. a Trim cut edge — the unknown is one endpoint coordinate and we
+    /// solve `Δx² + Δy² = new_length²` for it (the other three coords fixed),
+    /// keeping its current sign. Errors if `new_length` is shorter than the
+    /// wall's perpendicular offset (no diagonal of that length fits).
     pub fn set_wall_length(
         &mut self,
         ring: usize,
@@ -384,17 +386,58 @@ impl ParametricPlan {
         let v_a = &ring_vec[edge_start];
         let v_b = &ring_vec[(edge_start + 1) % n];
 
-        // Which axis is the wall along? Pick the matching expr pair.
-        let (expr_a, expr_b): (&CoordinateExpression, &CoordinateExpression) =
-            if v_a.y_expr == v_b.y_expr {
-                (&v_a.x_expr, &v_b.x_expr)
-            } else if v_a.x_expr == v_b.x_expr {
-                (&v_a.y_expr, &v_b.y_expr)
+        // Which axis is the wall along? Pick the matching expr pair. A
+        // non-axis-aligned wall (neither coord shared) is solved as a diagonal.
+        let (expr_a, expr_b): (&CoordinateExpression, &CoordinateExpression) = if v_a.y_expr
+            == v_b.y_expr
+        {
+            (&v_a.x_expr, &v_b.x_expr)
+        } else if v_a.x_expr == v_b.x_expr {
+            (&v_a.y_expr, &v_b.y_expr)
+        } else {
+            // Diagonal: exactly one endpoint coordinate is `unknown_param`.
+            let is = |e: &CoordinateExpression| matches!(e, CoordinateExpression::Parameter(p) if *p == unknown_param);
+            let (unknown_in_x, on_a) = if is(&v_a.x_expr) {
+                (true, true)
+            } else if is(&v_b.x_expr) {
+                (true, false)
+            } else if is(&v_a.y_expr) {
+                (false, true)
+            } else if is(&v_b.y_expr) {
+                (false, false)
             } else {
-                return Err(Error::DimensionError(
-                    "wall isn't axis-aligned, can't set length".into(),
-                ));
+                return Err(Error::DimensionError(format!(
+                    "param {} doesn't appear in diagonal wall ({}, {})",
+                    unknown_param, ring, edge_start
+                )));
             };
+            let pa = v_a.evaluate(&self.parameters);
+            let pb = v_b.evaluate(&self.parameters);
+            let dx = pb.x - pa.x;
+            let dy = pb.y - pa.y;
+            // The axis NOT containing the unknown is fixed; solve the other.
+            let fixed = if unknown_in_x { dy } else { dx };
+            let rem = new_length * new_length - fixed * fixed;
+            if rem < 0.0 {
+                return Err(Error::DimensionError(format!(
+                    "{:.3} is shorter than the wall's perpendicular offset \
+                         ({:.3}) — no diagonal of that length fits",
+                    new_length,
+                    fixed.abs()
+                )));
+            }
+            let mag = rem.sqrt();
+            let cur_delta = if unknown_in_x { dx } else { dy };
+            let signed = if cur_delta < 0.0 { -mag } else { mag };
+            let new_val = match (unknown_in_x, on_a) {
+                (true, true) => pb.x - signed,   // unknown is Va.x
+                (true, false) => pa.x + signed,  // unknown is Vb.x
+                (false, true) => pb.y - signed,  // unknown is Va.y
+                (false, false) => pa.y + signed, // unknown is Vb.y
+            };
+            self.parameters.insert(unknown_param, new_val);
+            return Ok(());
+        };
 
         let val_a = expr_a.evaluate(&self.parameters);
         let val_b = expr_b.evaluate(&self.parameters);

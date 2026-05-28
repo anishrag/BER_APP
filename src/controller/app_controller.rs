@@ -1269,8 +1269,9 @@ impl AppController {
 
         // Zero length → collapse this wall: drop the endpoint carrying the
         // wall's adjustable parameter so its two neighbours meet directly. This
-        // is how an assessor zeroes out a short remnant (e.g. after a Trim cut
-        // near a corner). The first dimension can't be zero (it sets scale).
+        // is ONLY allowed for a TRIM remnant — zeroing a regular wall would
+        // silently delete a wall of the drawn shape, so that's rejected.
+        // The first dimension can't be zero (it sets scale).
         if value == 0.0 {
             if !self.dimensioning.scale_set {
                 return Err("the first dimension can't be zero".into());
@@ -1288,6 +1289,18 @@ impl AppController {
             let Some(idx) = target else {
                 return Err("couldn't find the wall's adjustable vertex to collapse".into());
             };
+            // Only collapse a trim cut: the vertex being removed must be a cut
+            // point — adjacent to a non-orthogonal (diagonal) cut edge. A normal
+            // corner has two axis-aligned walls, so zeroing it is rejected.
+            let prev_edge = (idx + n - 1) % n;
+            let is_trim_cut = self.floor_plan.wall_axis(ring, idx).is_none()
+                || self.floor_plan.wall_axis(ring, prev_edge).is_none();
+            if !is_trim_cut {
+                return Err(
+                    "0 can only collapse a trim cut wall — a regular wall can't be set to zero"
+                        .into(),
+                );
+            }
             let mut trial = self.floor_plan.clone();
             if !trial.remove_vertex(ring, idx) {
                 return Err("can't collapse — too few walls would remain".into());
@@ -1508,13 +1521,6 @@ impl AppController {
                     continue;
                 };
                 if self.dimensioning.skipped_walls.contains(&vid) {
-                    continue;
-                }
-                // Skip non-axis-aligned walls (e.g. a diagonal from Trim):
-                // `set_wall_length` can only adjust H/V walls, so offering a
-                // diagonal would dead-end. Its endpoints get pinned by the
-                // axis-aligned cut walls on either side instead.
-                if self.floor_plan.wall_axis(ring_idx, edge_start).is_none() {
                     continue;
                 }
                 // A wall is promptable iff exactly one of its deps is in
@@ -2300,4 +2306,167 @@ pub struct FloorPlanStats {
     pub perimeter: f32,
     pub area: f32,
     pub num_vertices: usize,
+}
+
+#[cfg(test)]
+mod trim_collapse_tests {
+    use super::*;
+
+    /// The assessor's flow: draw a square, trim a corner, then zero the two
+    /// remnant cut walls so the cuts snap onto corners — leaving a triangle.
+    /// Exercises the real controller path: `compute_next_dimension_prompt`
+    /// picks each axis-aligned remnant wall, and `apply_dimension(0.0)`
+    /// collapses it (the diagonal cut wall is never offered).
+    #[test]
+    fn trim_corner_then_zero_remnants_makes_a_triangle() {
+        let mut c = AppController::new(crate::engine::open_db(":memory:").unwrap());
+
+        // A 10x10 square (5th point is the lift-near-start drag point).
+        let square = vec![
+            Point2f32::new(0.0, 0.0),
+            Point2f32::new(10.0, 0.0),
+            Point2f32::new(10.0, 10.0),
+            Point2f32::new(0.0, 10.0),
+            Point2f32::new(0.2, 0.2),
+        ];
+        c.floor_plan = FloorPlan::from_points_to_orthogonal(&square, 0.5, true).unwrap();
+        // Treat it as fully dimensioned: scale set, both square params known.
+        c.dimensioning.scale_set = true;
+        c.dimensioning.known_params = c.floor_plan.all_active_params();
+
+        // Trim off the top-right corner: right edge at y=5 to top edge at x=5.
+        c.floor_plan
+            .trim_by_stroke(&[Point2f32::new(10.0, 5.0), Point2f32::new(5.0, 10.0)])
+            .unwrap();
+        assert_eq!(
+            c.floor_plan.polygons()[0].len(),
+            5,
+            "corner cut should leave a pentagon"
+        );
+
+        // Zero the two remnant cut walls. Each apply_dimension(0.0) collapses
+        // one cut vertex; the diagonal is never prompted (non-axis-aligned).
+        for step in 0..2 {
+            c.compute_next_dimension_prompt();
+            assert!(
+                c.dimensioning.current_prompt.is_some(),
+                "expected a promptable remnant wall at step {step}"
+            );
+            c.apply_dimension(0.0)
+                .unwrap_or_else(|e| panic!("zero-collapse failed at step {step}: {e}"));
+        }
+
+        let ring = &c.floor_plan.polygons()[0];
+        assert_eq!(
+            ring.len(),
+            3,
+            "zeroing both remnants should yield a triangle"
+        );
+        assert!(c.floor_plan.validate_simple().is_ok());
+        // The triangle is the square minus the cut corner: (0,0),(10,0),(0,10).
+        for corner in [(0.0, 0.0), (10.0, 0.0), (0.0, 10.0)] {
+            assert!(
+                ring.iter()
+                    .any(|p| (p.x - corner.0).abs() < 1e-3 && (p.y - corner.1).abs() < 1e-3),
+                "triangle should keep corner {corner:?}"
+            );
+        }
+    }
+
+    /// Zeroing a regular (orthogonal) wall is rejected — only a trim cut wall
+    /// can be collapsed. Guards against silently deleting a drawn wall.
+    #[test]
+    fn zero_rejected_for_a_regular_wall() {
+        let mut c = AppController::new(crate::engine::open_db(":memory:").unwrap());
+        let square = vec![
+            Point2f32::new(0.0, 0.0),
+            Point2f32::new(10.0, 0.0),
+            Point2f32::new(10.0, 10.0),
+            Point2f32::new(0.0, 10.0),
+            Point2f32::new(0.2, 0.2),
+        ];
+        c.floor_plan = FloorPlan::from_points_to_orthogonal(&square, 0.5, true).unwrap();
+        // Scaled, but no walls dimensioned yet — so a plain orthogonal wall is
+        // promptable. (No trim, so no diagonal cut edge anywhere.)
+        c.dimensioning.scale_set = true;
+        c.compute_next_dimension_prompt();
+        assert!(c.dimensioning.current_prompt.is_some());
+
+        let err = c
+            .apply_dimension(0.0)
+            .expect_err("0 on a regular wall must be rejected");
+        assert!(err.contains("trim cut"), "unexpected error: {err}");
+        // Shape untouched.
+        assert_eq!(c.floor_plan.polygons()[0].len(), 4);
+    }
+
+    /// After a corner trim there are 3 undimensioned segments (2 axis-aligned
+    /// remnants + the diagonal cut) but only 2 degrees of freedom. The assessor
+    /// must be able to dimension ANY two — including the diagonal — since in the
+    /// field they may only be able to measure certain ones. This sets one
+    /// remnant, then dimensions the diagonal itself, and checks the diagonal
+    /// ends up the requested length.
+    #[test]
+    fn diagonal_cut_wall_is_dimensionable() {
+        let mut c = AppController::new(crate::engine::open_db(":memory:").unwrap());
+        let square = vec![
+            Point2f32::new(0.0, 0.0),
+            Point2f32::new(10.0, 0.0),
+            Point2f32::new(10.0, 10.0),
+            Point2f32::new(0.0, 10.0),
+            Point2f32::new(0.2, 0.2),
+        ];
+        c.floor_plan = FloorPlan::from_points_to_orthogonal(&square, 0.5, true).unwrap();
+        c.dimensioning.scale_set = true;
+        c.dimensioning.known_params = c.floor_plan.all_active_params();
+
+        // Trim the top-right corner: right edge at y=5 to top edge at x=5.
+        c.floor_plan
+            .trim_by_stroke(&[Point2f32::new(10.0, 5.0), Point2f32::new(5.0, 10.0)])
+            .unwrap();
+
+        // Set the first prompted (axis-aligned) remnant to a known length.
+        c.compute_next_dimension_prompt();
+        assert!(c.dimensioning.current_prompt.is_some());
+        c.apply_dimension(4.0).expect("set first remnant");
+
+        // Now cycle prompts to the diagonal (non-axis-aligned), skipping any
+        // remaining axis-aligned remnant, and dimension it to 7.0.
+        let mut dimensioned_diagonal = false;
+        for _ in 0..5 {
+            c.compute_next_dimension_prompt();
+            let Some(prompt) = c.dimensioning.current_prompt.clone() else {
+                break;
+            };
+            let (ring, edge) = c.floor_plan.find_vertex(prompt.wall_start_vertex).unwrap();
+            if c.floor_plan.wall_axis(ring, edge).is_none() {
+                c.apply_dimension(7.0).expect("dimension the diagonal");
+                dimensioned_diagonal = true;
+                break;
+            }
+            c.skip_current_dimension();
+        }
+        assert!(
+            dimensioned_diagonal,
+            "the diagonal cut wall should be offered and settable"
+        );
+
+        // Verify the polygon's one diagonal edge is ~7.0 long.
+        let ring = &c.floor_plan.polygons()[0];
+        let n = ring.len();
+        let mut diag_len = None;
+        for i in 0..n {
+            let a = ring[i];
+            let b = ring[(i + 1) % n];
+            if (a.x - b.x).abs() > 1e-3 && (a.y - b.y).abs() > 1e-3 {
+                diag_len = Some(((a.x - b.x).powi(2) + (a.y - b.y).powi(2)).sqrt());
+            }
+        }
+        let diag_len = diag_len.expect("a diagonal edge");
+        assert!(
+            (diag_len - 7.0).abs() < 1e-2,
+            "diagonal should be 7.0, got {diag_len}"
+        );
+        assert!(c.floor_plan.validate_simple().is_ok());
+    }
 }
