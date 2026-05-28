@@ -122,73 +122,21 @@ impl FloorPlan {
         Ok(())
     }
 
-    /// Splice a freehand "extend" stroke into the primary ring (ring 0),
-    /// preserving the parametric model. The stroke's endpoints snap to the
-    /// perimeter; the SHORTER arc between them is replaced by the
-    /// orthogonalized porch. Same-edge strokes bump a single wall out;
-    /// cross-edge strokes drop the spanned corner.
-    ///
-    /// Every untouched vertex keeps its identity and parameter IDs, so the
-    /// caller's dimensioning state stays valid — only the porch's new walls
-    /// are un-dimensioned. Returns the newly-minted parameter IDs. The plan is
-    /// left unchanged on error (endpoints too far, degenerate, or the result
-    /// would self-intersect). All tolerances scale with the plan's bounding-box
-    /// diagonal, so this works in pixel units (pre-dimensioning) or metres
-    /// (post-dimensioning) alike.
-    pub fn extend(&mut self, stroke: &[Point2f32]) -> Result<Vec<ParameterId>, Error> {
-        if stroke.len() < 3 {
-            return Err(Error::InsufficientPoints);
-        }
-        let ring = self.parametric.ring_points(0);
-        if ring.len() < 3 {
-            return Err(Error::ExtendError(
-                "no existing polygon to attach to".into(),
-            ));
-        }
-        // Tolerances scaled to the polygon's size.
-        let diag = self
-            .bounding_box()
-            .map(|((mnx, mny), (mxx, mxy))| ((mxx - mnx).powi(2) + (mxy - mny).powi(2)).sqrt())
-            .unwrap_or(0.0);
-        let vertex_tol = (diag * 0.04).max(1e-4); // snap-to-vertex radius
-        let max_tol = (diag * 0.25).max(1e-3); // max reach to the polygon
-        let merge_tol = if diag > 0.0 {
-            (diag * 0.01).max(1e-4) // orthogonalize + coord-dedup
-        } else {
-            10.0
-        };
+    /// Extend the primary ring by splicing a drawn path onto a wall, *adding*
+    /// the enclosed area (the SHORTER arc between the attach points is replaced
+    /// by the path). `extend_ortho` orthogonalizes the path (a stepped porch);
+    /// see [`extend_curve`](Self::extend_curve) for a faceted arc. Untouched
+    /// vertices keep their identity/parameters; returns the newly-minted
+    /// parameter IDs. See [`splice_path`](Self::splice_path) for the mechanics.
+    pub fn extend_ortho(&mut self, stroke: &[Point2f32]) -> Result<Vec<ParameterId>, Error> {
+        self.splice_path(stroke, true, false)
+    }
 
-        let start = *stroke.first().unwrap();
-        let end = *stroke.last().unwrap();
-        let (s_edge, s_t, s_dist, _) = extend::snap_to_polygon(&ring, start, vertex_tol);
-        let (e_edge, e_t, e_dist, _) = extend::snap_to_polygon(&ring, end, vertex_tol);
-        if s_dist > max_tol || e_dist > max_tol {
-            return Err(Error::ExtendError(format!(
-                "stroke endpoints too far from the polygon (start={:.3}, end={:.3}, max={:.3})",
-                s_dist, e_dist, max_tol
-            )));
-        }
-        if s_edge == e_edge && (s_t - e_t).abs() < 1e-3 {
-            return Err(Error::ExtendError(
-                "stroke starts and ends at the same point".into(),
-            ));
-        }
-
-        // Orthogonalize the freehand porch, then pin its endpoints exactly
-        // onto their attach edges so the attach vertices share the edges'
-        // perpendicular coordinate expressions in the splice.
-        let mut ortho = extend::orthogonalize_open_path(stroke, merge_tol)?;
-        if ortho.len() < 2 {
-            return Err(Error::ExtendError(
-                "porch collapsed after orthogonalization".into(),
-            ));
-        }
-        let last = ortho.len() - 1;
-        extend::pin_to_edge(&mut ortho[0], &ring, s_edge);
-        extend::pin_to_edge(&mut ortho[last], &ring, e_edge);
-
-        let sequence = extend::plan_splice_sequence(&ring, s_edge, s_t, e_edge, e_t, &ortho);
-        self.parametric.splice_into_edge(0, &sequence)
+    /// Extend a wall with a faceted freeform CURVE (adds area): the drawn arc is
+    /// RDP-simplified into a short polyline and spliced onto the shorter arc.
+    /// The facet walls aren't individually dimensioned and scale with the plan.
+    pub fn extend_curve(&mut self, stroke: &[Point2f32]) -> Result<Vec<ParameterId>, Error> {
+        self.splice_path(stroke, false, false)
     }
 
     /// Trim the primary ring with a freehand cut `stroke`: the stroke is fitted
@@ -360,22 +308,93 @@ impl FloorPlan {
         self.trim_by_stroke(&[p0, p1])
     }
 
-    /// Trim with an orthogonal cut PATH (like Extend, but removing area). The
-    /// stroke is orthogonalized, its two endpoints attach to the outline, and
-    /// the smaller-area side is discarded — replaced by the stepped cut path.
-    /// This carves an orthogonal notch/chamfer instead of the straight diagonal
-    /// that [`trim_by_stroke`](Self::trim_by_stroke) cuts.
-    ///
-    /// Like Extend it preserves kept vertices' identity/parameters and splices
-    /// the path in; like line-trim it keeps the larger-area side (rather than
-    /// Extend's shorter-arc rule). Returns the newly-minted parameter IDs;
-    /// errors (plan unchanged) if the endpoints don't reach the outline or the
-    /// result isn't a simple polygon.
-    pub fn trim_by_polygon(&mut self, stroke: &[Point2f32]) -> Result<Vec<ParameterId>, Error> {
+    /// Trim with an orthogonal cut PATH (removing area): the stroke is
+    /// orthogonalized, its endpoints attach to the outline, and the
+    /// smaller-area side is replaced by the stepped cut — an orthogonal
+    /// notch/chamfer (vs the straight diagonal [`trim_by_stroke`](Self::trim_by_stroke)
+    /// cuts). See [`splice_path`](Self::splice_path).
+    pub fn trim_ortho(&mut self, stroke: &[Point2f32]) -> Result<Vec<ParameterId>, Error> {
+        self.splice_path(stroke, true, true)
+    }
+
+    /// Trim a wall with a faceted freeform CURVE (removing area): the drawn arc
+    /// is RDP-simplified into a short polyline and the smaller-area side is
+    /// replaced by it — e.g. a wall recessed around a tower. Facet walls aren't
+    /// individually dimensioned and scale with the plan.
+    pub fn trim_curve(&mut self, stroke: &[Point2f32]) -> Result<Vec<ParameterId>, Error> {
+        self.splice_path(stroke, false, true)
+    }
+
+    /// Shared mechanics for the four path-splice operations
+    /// ([`extend_ortho`](Self::extend_ortho), [`extend_curve`](Self::extend_curve),
+    /// [`trim_ortho`](Self::trim_ortho), [`trim_curve`](Self::trim_curve)). Snaps
+    /// the stroke's endpoints to the outline, cleans the path (`orthogonalize` →
+    /// stepped H/V; else RDP-faceted curve), pins the endpoints onto their
+    /// edges, and splices the path in — replacing the SHORTER arc when extending
+    /// (`!keep_larger`, adds area) or the smaller-area side when trimming
+    /// (`keep_larger`, removes area). Untouched vertices keep their identity and
+    /// parameters; returns the newly-minted parameter IDs. The plan is left
+    /// unchanged on error. Tolerances scale with the bounding-box diagonal, so
+    /// it works in pixels (pre-dimensioning) or metres (post-dimensioning).
+    fn splice_path(
+        &mut self,
+        stroke: &[Point2f32],
+        orthogonalize: bool,
+        keep_larger: bool,
+    ) -> Result<Vec<ParameterId>, Error> {
+        let err = |m: String| {
+            if keep_larger {
+                Error::TrimError(m)
+            } else {
+                Error::ExtendError(m)
+            }
+        };
+        let diag = self
+            .bounding_box()
+            .map(|((mnx, mny), (mxx, mxy))| ((mxx - mnx).powi(2) + (mxy - mny).powi(2)).sqrt())
+            .unwrap_or(0.0);
+        let merge_tol = if diag > 0.0 {
+            (diag * 0.01).max(1e-4)
+        } else {
+            10.0
+        };
+        // Orthogonalize (Ortho tools) snaps to H/V; simplify (Curve tools) just
+        // RDP-facets the hand-drawn arc, keeping its curvature.
+        let path = if orthogonalize {
+            extend::orthogonalize_open_path(stroke, merge_tol)?
+        } else {
+            simplification::simplify_stroke(stroke, merge_tol)?
+        };
+        if path.len() < 2 {
+            return Err(err("path collapsed".into()));
+        }
+        self.splice_cleaned(&path, keep_larger)
+    }
+
+    /// Splice an already-clean `path` (no further simplification) onto the
+    /// primary ring: snap its endpoints to the outline, pin them onto their
+    /// attach edges, and replace the SHORTER arc when extending
+    /// (`!keep_larger`) or the smaller-area side when trimming (`keep_larger`).
+    /// The shared tail of every path-splice — `splice_path` cleans first, the
+    /// arc flow ([`begin_arc`](Self::begin_arc)) feeds it a ready 2-point chord.
+    fn splice_cleaned(
+        &mut self,
+        path: &[Point2f32],
+        keep_larger: bool,
+    ) -> Result<Vec<ParameterId>, Error> {
+        let err = |m: String| {
+            if keep_larger {
+                Error::TrimError(m)
+            } else {
+                Error::ExtendError(m)
+            }
+        };
         let ring = self.parametric.ring_points(0);
-        let n = ring.len();
-        if n < 3 {
-            return Err(Error::TrimError("no polygon to trim".into()));
+        if ring.len() < 3 {
+            return Err(err("no existing polygon to modify".into()));
+        }
+        if path.len() < 2 {
+            return Err(err("path collapsed".into()));
         }
         let diag = self
             .bounding_box()
@@ -383,58 +402,183 @@ impl FloorPlan {
             .unwrap_or(0.0);
         let vertex_tol = (diag * 0.04).max(1e-4);
         let max_tol = (diag * 0.25).max(1e-3);
-        let merge_tol = if diag > 0.0 {
-            (diag * 0.01).max(1e-4)
-        } else {
-            10.0
-        };
 
-        // Snap the RAW stroke endpoints to find the attach edges (mirrors
-        // Extend), then orthogonalize and pin the path's endpoints onto those
-        // edges so they share the edges' perpendicular coordinate expressions.
-        let start = *stroke.first().ok_or(Error::InsufficientPoints)?;
-        let end = *stroke.last().ok_or(Error::InsufficientPoints)?;
+        // Snap the path's endpoints to find the attach edges, then pin them onto
+        // those edges so they share the edges' perpendicular coordinate exprs.
+        let start = path[0];
+        let end = path[path.len() - 1];
         let (e1, t1, s_dist, _) = extend::snap_to_polygon(&ring, start, vertex_tol);
         let (e2, t2, e_dist, _) = extend::snap_to_polygon(&ring, end, vertex_tol);
         if s_dist > max_tol || e_dist > max_tol {
-            return Err(Error::TrimError(format!(
-                "cut endpoints too far from the outline (start={:.3}, end={:.3}, max={:.3})",
+            return Err(err(format!(
+                "endpoints too far from the outline (start={:.3}, end={:.3}, max={:.3})",
                 s_dist, e_dist, max_tol
             )));
         }
         if e1 == e2 && (t1 - t2).abs() < 1e-3 {
-            return Err(Error::TrimError(
-                "cut starts and ends at the same point".into(),
-            ));
+            return Err(err("stroke starts and ends at the same point".into()));
         }
 
-        let mut ortho = extend::orthogonalize_open_path(stroke, merge_tol)?;
-        if ortho.len() < 2 {
-            return Err(Error::TrimError("cut path collapsed".into()));
-        }
-        let last = ortho.len() - 1;
-        extend::pin_to_edge(&mut ortho[0], &ring, e1);
-        extend::pin_to_edge(&mut ortho[last], &ring, e2);
+        let mut path = path.to_vec();
+        let last = path.len() - 1;
+        extend::pin_to_edge(&mut path[0], &ring, e1);
+        extend::pin_to_edge(&mut path[last], &ring, e2);
 
-        // Build both arc-replacements and keep whichever leaves the larger area.
-        let area_of = |seq: &[crate::extend::SpliceElem]| -> f32 {
-            let pts: Vec<Point2f32> = seq
-                .iter()
-                .map(|e| match e {
-                    crate::extend::SpliceElem::Keep(idx) => ring[*idx],
-                    crate::extend::SpliceElem::New(p) => *p,
-                })
-                .collect();
-            polygon_area(&pts).abs()
-        };
-        let seq_a = extend::splice_sequence(&ring, e1, t1, e2, t2, &ortho, true);
-        let seq_b = extend::splice_sequence(&ring, e1, t1, e2, t2, &ortho, false);
-        let chosen = if area_of(&seq_a) >= area_of(&seq_b) {
-            seq_a
+        let chosen = if keep_larger {
+            // Trim: build both arc-replacements; keep whichever leaves more area.
+            let area_of = |seq: &[crate::extend::SpliceElem]| -> f32 {
+                let pts: Vec<Point2f32> = seq
+                    .iter()
+                    .map(|e| match e {
+                        crate::extend::SpliceElem::Keep(idx) => ring[*idx],
+                        crate::extend::SpliceElem::New(pp) => *pp,
+                    })
+                    .collect();
+                polygon_area(&pts).abs()
+            };
+            let seq_a = extend::splice_sequence(&ring, e1, t1, e2, t2, &path, true);
+            let seq_b = extend::splice_sequence(&ring, e1, t1, e2, t2, &path, false);
+            if area_of(&seq_a) >= area_of(&seq_b) {
+                seq_a
+            } else {
+                seq_b
+            }
         } else {
-            seq_b
+            // Extend: replace the SHORTER arc with the path (adds the feature).
+            extend::plan_splice_sequence(&ring, e1, t1, e2, t2, &path)
         };
         self.parametric.splice_into_edge(0, &chosen)
+    }
+
+    /// Begin a PROVISIONAL curved wall. Fits the freehand `stroke` to a circular
+    /// arc (chord + signed bulge), then splices ONLY the two endpoints onto the
+    /// outline as pinned vertices — a straight placeholder edge between them,
+    /// leaving the shape otherwise UNCHANGED. Returns `(start_vertex,
+    /// end_vertex, bulge_ratio)` where `bulge_ratio` is the signed sagitta as a
+    /// fraction of the chord (left of start→end), so it survives both the
+    /// pixel→metre rescale and any move of the endpoints (the bulge scales with
+    /// the chord). The caller dimensions the two attach stubs through the normal
+    /// flow, then calls [`finish_arc`](Self::finish_arc) to bake the arc in —
+    /// nothing about the geometry changes until then.
+    pub fn begin_arc(&mut self, stroke: &[Point2f32]) -> Result<(VertexId, VertexId, f32), Error> {
+        let p1 = *stroke.first().ok_or(Error::InsufficientPoints)?;
+        let p2 = *stroke.last().ok_or(Error::InsufficientPoints)?;
+        let dx = p2.x - p1.x;
+        let dy = p2.y - p1.y;
+        let chord = (dx * dx + dy * dy).sqrt();
+        if chord < 1e-4 {
+            return Err(Error::ExtendError("curve endpoints coincide".into()));
+        }
+        let bulge_ratio = geom::stroke_sagitta(stroke) / chord;
+        // Splice the straight chord (no bulge): inserts the two endpoints as
+        // pinned vertices without changing the shape (the chord lies along the
+        // attach wall). Reuses the extend (shorter-arc) splice tail.
+        self.splice_cleaned(&[p1, p2], false)?;
+        let v1 = self
+            .vertex_near(p1)
+            .ok_or_else(|| Error::ExtendError("lost arc start vertex".into()))?;
+        let v2 = self
+            .vertex_near(p2)
+            .ok_or_else(|| Error::ExtendError("lost arc end vertex".into()))?;
+        Ok((v1, v2, bulge_ratio))
+    }
+
+    /// Bake a provisional arc (from [`begin_arc`](Self::begin_arc)) into the
+    /// model now that its endpoints are positioned: facet the circular arc
+    /// between `v1` and `v2` (bulge = `bulge_ratio` × the current chord) and
+    /// replace the straight placeholder edge with the facet vertices. The two
+    /// endpoints (and their dimensioned attach stubs) are kept untouched; only
+    /// the placeholder edge is subdivided. A near-straight arc is left flat.
+    ///
+    /// Returns the freshly-minted parameter IDs of the facet vertices. The
+    /// caller should treat these as KNOWN (locked): the curve's shape is fully
+    /// determined once its attach lines are set, so the dimensioning solver must
+    /// not later redistribute the facet vertices (`repair`/`aesthetic_rescale`
+    /// only move un-set params) — doing so would flatten the arc back to a line.
+    pub fn finish_arc(
+        &mut self,
+        v1: VertexId,
+        v2: VertexId,
+        bulge_ratio: f32,
+    ) -> Result<Vec<ParameterId>, Error> {
+        use crate::extend::SpliceElem;
+        let (r1, i1) = self
+            .find_vertex(v1)
+            .ok_or_else(|| Error::ExtendError("arc start vertex gone".into()))?;
+        let (r2, i2) = self
+            .find_vertex(v2)
+            .ok_or_else(|| Error::ExtendError("arc end vertex gone".into()))?;
+        if r1 != r2 {
+            return Err(Error::ExtendError(
+                "arc endpoints on different rings".into(),
+            ));
+        }
+        let ring = self.parametric.ring_points(r1);
+        let n = ring.len();
+        let p1 = ring[i1];
+        let p2 = ring[i2];
+        let chord = ((p2.x - p1.x).powi(2) + (p2.y - p1.y).powi(2)).sqrt();
+        let facets = geom::circular_arc_points(p1, p2, bulge_ratio * chord, 5.0);
+        if facets.len() <= 2 {
+            return Ok(Vec::new()); // ~straight: leave the flat placeholder edge.
+        }
+        let interior = &facets[1..facets.len() - 1];
+
+        // The placeholder is the edge joining v1 and v2 directly; find its ring
+        // direction so the facets are inserted in between in the right order.
+        let (start_idx, forward) = if (i1 + 1) % n == i2 {
+            (i1, true) // ring goes v1 → v2
+        } else if (i2 + 1) % n == i1 {
+            (i2, false) // ring goes v2 → v1
+        } else {
+            return Err(Error::ExtendError(
+                "arc endpoints are no longer adjacent".into(),
+            ));
+        };
+        let mut seq: Vec<SpliceElem> = Vec::with_capacity(n + interior.len());
+        for idx in 0..n {
+            seq.push(SpliceElem::Keep(idx));
+            if idx == start_idx {
+                if forward {
+                    seq.extend(interior.iter().map(|f| SpliceElem::New(*f)));
+                } else {
+                    seq.extend(interior.iter().rev().map(|f| SpliceElem::New(*f)));
+                }
+            }
+        }
+        self.parametric.splice_into_edge(r1, &seq)
+    }
+
+    /// World-space facet points of a provisional arc (between two pinned
+    /// endpoints), for drawing the preview before it's committed. Uses the same
+    /// sampling [`finish_arc`](Self::finish_arc) will. `None` if a vertex is gone.
+    pub fn arc_preview(
+        &self,
+        v1: VertexId,
+        v2: VertexId,
+        bulge_ratio: f32,
+    ) -> Option<Vec<Point2f32>> {
+        let (_, i1) = self.find_vertex(v1)?;
+        let (_, i2) = self.find_vertex(v2)?;
+        let ring = self.parametric.ring_points(0);
+        let p1 = *ring.get(i1)?;
+        let p2 = *ring.get(i2)?;
+        let chord = ((p2.x - p1.x).powi(2) + (p2.y - p1.y).powi(2)).sqrt();
+        Some(geom::circular_arc_points(p1, p2, bulge_ratio * chord, 5.0))
+    }
+
+    /// `VertexId` of the primary ring's vertex closest to `pt` (used to recover
+    /// the endpoints `begin_arc` just spliced in by their pinned position).
+    fn vertex_near(&self, pt: Point2f32) -> Option<VertexId> {
+        let ring = self.parametric.ring_points(0);
+        let mut best: Option<(f32, usize)> = None;
+        for (i, v) in ring.iter().enumerate() {
+            let d = (v.x - pt.x).powi(2) + (v.y - pt.y).powi(2);
+            if best.is_none_or(|(bd, _)| d < bd) {
+                best = Some((d, i));
+            }
+        }
+        best.and_then(|(_, i)| self.vertex_id_at(0, i))
     }
 
     /// Concrete vertex positions of the first polygon (backwards-compatible
@@ -472,7 +616,7 @@ impl FloorPlan {
     }
 
     /// Collinearity suggestions that involve at least one of `new_params` —
-    /// the walls a just-applied [`extend`](Self::extend) added. Lets the caller
+    /// the walls a just-applied extend/trim added. Lets the caller
     /// ask whether a freshly-drawn wall lines up with an existing one, WITHOUT
     /// re-surfacing pairs among the pre-existing walls. Separation thresholds
     /// scale with the bounding-box diagonal, so it behaves the same in pixel
@@ -709,6 +853,21 @@ impl FloorPlan {
                 if skipped.contains(&vid) {
                     continue;
                 }
+                // Don't prompt facet walls of a curve. A non-axis-aligned wall
+                // is dimensionable (a Trim diagonal) only when it's ISOLATED —
+                // both neighbours axis-aligned. A curve is a RUN of consecutive
+                // non-axis-aligned facets, so each facet has a non-aligned
+                // neighbour; those aren't individually dimensioned.
+                if self.wall_axis(ring_idx, edge_start).is_none() {
+                    let len = ring_points.len();
+                    let prev = (edge_start + len - 1) % len;
+                    let next = (edge_start + 1) % len;
+                    if self.wall_axis(ring_idx, prev).is_none()
+                        || self.wall_axis(ring_idx, next).is_none()
+                    {
+                        continue;
+                    }
+                }
                 // Promptable iff exactly one dep is in `to_ask` and the rest are
                 // known. A dep that's neither blocks this wall (its only setter
                 // was skipped / never set).
@@ -936,7 +1095,7 @@ mod serde_tests {
         let mut plan = FloorPlan::from_points_to_orthogonal(&square, 0.5, true).unwrap();
         // Porch out of the top edge — creates new shared-param equivalences.
         let porch = vec![p(3.0, 0.0), p(3.0, -4.0), p(7.0, -4.0), p(7.0, 0.0)];
-        plan.extend(&porch).unwrap();
+        plan.extend_ortho(&porch).unwrap();
 
         let params_before = plan.active_parameter_count();
         let rings_before: Vec<usize> = plan.polygons().iter().map(|r| r.len()).collect();
@@ -1118,7 +1277,7 @@ mod trim_tests {
 
         // Rectangular notch into the top edge (y=10), down to y=7, x in [3,7].
         let notch = vec![p(3.0, 10.0), p(3.0, 7.0), p(7.0, 7.0), p(7.0, 10.0)];
-        plan.trim_by_polygon(&notch).unwrap();
+        plan.trim_ortho(&notch).unwrap();
 
         let after = polygon_area(&plan.polygons()[0]).abs();
         assert!(
@@ -1144,6 +1303,172 @@ mod trim_tests {
             0,
             "an ortho notch has no diagonal"
         );
+    }
+
+    #[test]
+    fn curve_bulging_out_adds_a_faceted_arc() {
+        let mut plan = unit_square_plan(); // 10x10, area 100
+        let before = polygon_area(&plan.polygons()[0]).abs();
+        // An arc bulging OUT of the top edge (y=10), apex ~(5,12).
+        let arc = vec![
+            p(3.0, 10.0),
+            p(3.6, 11.0),
+            p(4.3, 11.7),
+            p(5.0, 12.0),
+            p(5.7, 11.7),
+            p(6.4, 11.0),
+            p(7.0, 10.0),
+        ];
+        plan.extend_curve(&arc).unwrap();
+
+        let after = polygon_area(&plan.polygons()[0]).abs();
+        assert!(
+            after > before,
+            "outward curve adds area ({after} vs {before})"
+        );
+        assert!(plan.validate_simple().is_ok());
+        // Captured as a run of facets (>=2 non-axis-aligned edges).
+        assert!(
+            diagonal_edge_count(&plan) >= 2,
+            "curve should be multiple facets, got {}",
+            diagonal_edge_count(&plan)
+        );
+    }
+
+    #[test]
+    fn provisional_arc_is_inert_until_finished() {
+        let mut plan = unit_square_plan(); // 10x10, area 100
+        let before = polygon_area(&plan.polygons()[0]).abs();
+        let n_before = plan.polygons()[0].len();
+        // Outward arc on the top edge, apex ~(5,12).
+        let arc = vec![
+            p(3.0, 10.0),
+            p(3.6, 11.0),
+            p(5.0, 12.0),
+            p(6.4, 11.0),
+            p(7.0, 10.0),
+        ];
+        let (v1, v2, bulge) = plan.begin_arc(&arc).unwrap();
+        // begin_arc only splits the top edge — shape (area) is unchanged, but
+        // the two endpoints now exist as vertices (2 more than before).
+        let after_begin = polygon_area(&plan.polygons()[0]).abs();
+        assert!(
+            (after_begin - before).abs() < 1e-2,
+            "begin_arc must not change the area ({after_begin} vs {before})"
+        );
+        assert_eq!(plan.polygons()[0].len(), n_before + 2);
+        assert_eq!(
+            diagonal_edge_count(&plan),
+            0,
+            "still orthogonal while provisional"
+        );
+        assert!(bulge > 0.0, "outward bulge is positive (left of start→end)");
+        // The preview is a multi-point arc bulging out past the top edge.
+        let preview = plan.arc_preview(v1, v2, bulge).unwrap();
+        assert!(preview.len() > 2 && preview.iter().any(|q| q.y > 10.5));
+
+        // Finishing bakes the arc in: area grows and facets appear.
+        plan.finish_arc(v1, v2, bulge).unwrap();
+        let after_finish = polygon_area(&plan.polygons()[0]).abs();
+        assert!(
+            after_finish > before + 1.0,
+            "finish_arc adds the bulge area ({after_finish} vs {before})"
+        );
+        assert!(plan.validate_simple().is_ok());
+        assert!(
+            diagonal_edge_count(&plan) >= 2,
+            "baked arc is a run of facets, got {}",
+            diagonal_edge_count(&plan)
+        );
+    }
+
+    #[test]
+    fn small_scale_arc_facets_arent_rejected_as_collapsed() {
+        // Regression for the reported extend-curve bug: on a small (metre-scale)
+        // plan the faceted arc's edges are only a couple of cm — below the OLD
+        // 3cm "collapsed edge" floor, which wrongly rejected the splice and left
+        // the curve as a straight placeholder line.
+        let mut plan = unit_square_plan(); // 10x10
+        plan.scale_all(0.1); // 1m x 1m — walls ~1m, like the user's plan
+        let before = polygon_area(&plan.polygons()[0]).abs();
+        // Shallow outward bump on the top edge (y≈1), apex ~(0.5, 1.06).
+        let arc = vec![
+            p(0.3, 1.0),
+            p(0.4, 1.04),
+            p(0.5, 1.06),
+            p(0.6, 1.04),
+            p(0.7, 1.0),
+        ];
+        let (v1, v2, bulge) = plan.begin_arc(&arc).unwrap();
+        let baked = plan.finish_arc(v1, v2, bulge);
+        assert!(
+            baked.is_ok(),
+            "a small-scale arc's cm facets must splice, not be rejected: {:?}",
+            baked
+        );
+        assert!(
+            diagonal_edge_count(&plan) >= 2,
+            "curve should bake into facets, got {}",
+            diagonal_edge_count(&plan)
+        );
+        assert!(
+            polygon_area(&plan.polygons()[0]).abs() > before,
+            "outward arc adds area"
+        );
+        assert!(plan.validate_simple().is_ok());
+    }
+
+    #[test]
+    fn provisional_arc_inward_carves_a_recess_on_finish() {
+        // TrimCurve uses the same begin/finish path; an inward (negative) bulge
+        // carves area rather than adding it — no separate keep-larger step.
+        let mut plan = unit_square_plan();
+        let before = polygon_area(&plan.polygons()[0]).abs();
+        // Arc dipping INTO the square from the top edge, apex ~(5,8).
+        let arc = vec![
+            p(3.0, 10.0),
+            p(3.6, 9.0),
+            p(5.0, 8.0),
+            p(6.4, 9.0),
+            p(7.0, 10.0),
+        ];
+        let (v1, v2, bulge) = plan.begin_arc(&arc).unwrap();
+        assert!(bulge < 0.0, "inward bulge is negative (right of start→end)");
+        assert!((polygon_area(&plan.polygons()[0]).abs() - before).abs() < 1e-2);
+
+        plan.finish_arc(v1, v2, bulge).unwrap();
+        let after = polygon_area(&plan.polygons()[0]).abs();
+        assert!(
+            after < before - 1.0,
+            "inward arc removes area ({after} vs {before})"
+        );
+        assert!(plan.validate_simple().is_ok());
+        assert!(diagonal_edge_count(&plan) >= 2);
+    }
+
+    #[test]
+    fn curve_bulging_in_carves_a_faceted_recess() {
+        let mut plan = unit_square_plan();
+        let before = polygon_area(&plan.polygons()[0]).abs();
+        // An arc dipping INTO the square from the top edge, apex ~(5,8).
+        let arc = vec![
+            p(3.0, 10.0),
+            p(3.6, 9.0),
+            p(4.3, 8.3),
+            p(5.0, 8.0),
+            p(5.7, 8.3),
+            p(6.4, 9.0),
+            p(7.0, 10.0),
+        ];
+        plan.trim_curve(&arc).unwrap();
+
+        let after = polygon_area(&plan.polygons()[0]).abs();
+        assert!(
+            after < before,
+            "inward curve removes area ({after} vs {before})"
+        );
+        assert!(plan.validate_simple().is_ok());
+        assert!(diagonal_edge_count(&plan) >= 2);
     }
 }
 

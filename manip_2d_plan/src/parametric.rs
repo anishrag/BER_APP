@@ -1545,7 +1545,10 @@ fn check_simple_general(points: &[Point2f32]) -> Result<(), String> {
     if n < 3 {
         return Err(format!("only {} vertices (need at least 3)", n));
     }
-    let min_len_sq = 1e-3_f32;
+    // ~1mm minimum edge: well below any real wall AND below the short facets of
+    // a faceted curve (which can be a couple of cm on a small, metre-scale
+    // plan), yet still catches a genuinely collapsed (near-coincident) edge.
+    let min_len_sq = 1e-6_f32;
     for i in 0..n {
         let a = points[i];
         let b = points[(i + 1) % n];
@@ -1628,7 +1631,11 @@ fn check_simple_axis_aligned(points: &[Point2f32]) -> Result<(), String> {
     }
     // 1. Every edge has nontrivial length. Tolerance is generous so we don't
     //    spuriously reject the polygon at extreme zoom levels.
-    let min_len_sq = 1e-3_f32; // sub-millimetre at meter scale; well below any real wall
+    // ~1mm minimum edge: well below any real wall AND below the short facets of
+    // a faceted curve (a couple of cm on a small, metre-scale plan), yet still
+    // catches a genuinely collapsed (near-coincident) edge. NB: the old 1e-3
+    // here meant a 3cm floor, which wrongly rejected legitimate curve facets.
+    let min_len_sq = 1e-6_f32;
     for i in 0..n {
         let a = points[i];
         let b = points[(i + 1) % n];

@@ -142,6 +142,7 @@ impl AppController {
                 .dimensioned_walls
                 .retain(|vid| self.floor_plan.find_vertex(*vid).is_some());
             self.commit_to_ber()?;
+            self.maybe_finish_pending_arc();
             self.compute_next_dimension_prompt();
             self.push_history_snapshot(undo_snap);
             return Ok(());
@@ -271,6 +272,9 @@ impl AppController {
         self.floor_plan
             .aesthetic_rescale(&self.dimensioning.known_params);
         self.commit_to_ber()?;
+        // If this dimension was the second attach line of a provisional curve,
+        // both endpoints are now fixed — bake the faceted arc in.
+        self.maybe_finish_pending_arc();
         let post_length = self.floor_plan.wall_length(ring, edge_start);
         println!(
             "  ✓ accepted. wall now {:.3} m. known params: {:?}. dimensioned walls: {}/{}",

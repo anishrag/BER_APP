@@ -400,6 +400,43 @@ pub fn render_equivalent_wall(
     painter.line_segment([a, b], stroke);
 }
 
+/// Draw a PROVISIONAL arc preview: a polyline through `points` (world coords)
+/// in a bright amber, with endpoint markers where it attaches to the wall.
+/// Used while an `ExtendCurve`/`TrimCurve` arc is held pending its two attach
+/// dimensions — the model still holds a straight placeholder edge underneath,
+/// so this overlay is the only hint of the curve to come.
+pub fn render_arc_preview(
+    painter: &egui::Painter,
+    rect: egui::Rect,
+    ber: Option<&Ber>,
+    current_storey_idx: usize,
+    sketch_mode: SketchMode,
+    view: ViewParams,
+    points: &[(f64, f64)],
+) {
+    if !matches!(sketch_mode, SketchMode::Storey2D) || points.len() < 2 {
+        return;
+    }
+    let Some(ber) = ber else {
+        return;
+    };
+    let Some(storey) = ber.storeys.get(current_storey_idx) else {
+        return;
+    };
+    let Some((min_xy, max_xy)) = storey_2d::bounding_box(storey) else {
+        return;
+    };
+    let t = fit_transform(rect, min_xy, max_xy, view);
+    let screen: Vec<egui::Pos2> = points.iter().map(|(x, y)| t.apply(*x, *y)).collect();
+    let amber = egui::Color32::from_rgb(255, 200, 60);
+    let stroke = egui::Stroke::new(3.0, amber);
+    for w in screen.windows(2) {
+        painter.line_segment([w[0], w[1]], stroke);
+    }
+    painter.circle_filled(screen[0], 4.0, amber);
+    painter.circle_filled(screen[screen.len() - 1], 4.0, amber);
+}
+
 /// Draw a small filled marker at a world-coord point — used to highlight a
 /// vertex the user has just inserted in Edit mode (double-click) and is
 /// currently dragging. Red filled circle with a thin white outline so it's

@@ -116,9 +116,11 @@ impl SketchEngine {
             // a detached ring, merge an extend porch, or cut along a trim line.
             (SketchMode::Storey2D, EditTools::DrawPerpWalls)
             | (SketchMode::Storey2D, EditTools::AddDetachedSection)
-            | (SketchMode::Storey2D, EditTools::Extend)
+            | (SketchMode::Storey2D, EditTools::ExtendOrtho)
+            | (SketchMode::Storey2D, EditTools::ExtendCurve)
             | (SketchMode::Storey2D, EditTools::Trim)
-            | (SketchMode::Storey2D, EditTools::TrimOrtho) => {
+            | (SketchMode::Storey2D, EditTools::TrimOrtho)
+            | (SketchMode::Storey2D, EditTools::TrimCurve) => {
                 self.set_mode_behaviour(Box::new(Storey2DPerpWalls));
             }
             // Edit mode doesn't capture freehand strokes — interaction

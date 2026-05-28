@@ -64,6 +64,24 @@ pub struct PendingRedraw {
     pub closed: bool,
 }
 
+/// A PROVISIONAL curved wall (`ExtendCurve` / `TrimCurve`): the freehand stroke
+/// fitted to a circular arc and held un-baked. `FloorPlan::begin_arc` has
+/// spliced the two endpoints onto the outline as pinned vertices, leaving a
+/// straight placeholder edge (shape unchanged). The user dimensions the two
+/// attach stubs through the normal prompt flow; once both are known,
+/// `finish_arc` facets the arc between them and this clears. The placeholder
+/// edge's start vertex is in `skipped_walls`, so only the stubs are prompted.
+#[derive(Debug, Clone)]
+struct PendingArc {
+    /// Endpoint at the stroke's start (drawn first).
+    start: VertexId,
+    /// Endpoint at the stroke's end (drawn last).
+    end: VertexId,
+    /// Signed sagitta / chord (left of start→end). Scale-invariant: survives
+    /// the pixel→metre rescale and any move of the endpoints by dimensioning.
+    bulge_ratio: f32,
+}
+
 /// User-controlled view transform on the sketch canvas, on top of the
 /// auto-fit. `zoom = 1.0` and zero offset = pure auto-fit. The assessor uses
 /// this to zoom out (giving room to draw a disjoint section) or pan around.
@@ -252,6 +270,9 @@ pub struct AppController {
     /// A drawn-but-not-applied stroke awaiting the user's redraw decision.
     /// Only set when DrawPerpWalls finishes a stroke and there's already a plan.
     pending_redraw: Option<PendingRedraw>,
+    /// A provisional curved wall awaiting its two attach dimensions before being
+    /// faceted into the model. `None` when no curve is mid-flow.
+    pending_arc: Option<PendingArc>,
     /// Tracks which parameters the user has dimensioned + the current prompt.
     dimensioning: DimensionState,
     /// Edit-mode interaction state: which wall the user has selected via
@@ -286,6 +307,10 @@ pub struct HistorySnapshot {
     floor_plan: FloorPlan,
     dimensioning: DimensionState,
     edit_state: EditState,
+    /// A mid-flow provisional arc is part of the undoable state: undoing the
+    /// stroke that began it must clear it; undoing a dimension that finished it
+    /// must restore it.
+    pending_arc: Option<PendingArc>,
 }
 
 /// Edit-mode click/drag state.
@@ -371,6 +396,7 @@ impl AppController {
             current_record: None,
             review: None,
             pending_redraw: None,
+            pending_arc: None,
             dimensioning: DimensionState::default(),
             edit_state: EditState::default(),
             edit_drag_prompt: None,
@@ -394,6 +420,7 @@ impl AppController {
             floor_plan: self.floor_plan.clone(),
             dimensioning: self.dimensioning.clone(),
             edit_state: self.edit_state.clone(),
+            pending_arc: self.pending_arc.clone(),
         }
     }
 
@@ -417,10 +444,12 @@ impl AppController {
             floor_plan: self.floor_plan.clone(),
             dimensioning: self.dimensioning.clone(),
             edit_state: self.edit_state.clone(),
+            pending_arc: self.pending_arc.clone(),
         });
         self.floor_plan = snap.floor_plan;
         self.dimensioning = snap.dimensioning;
         self.edit_state = snap.edit_state;
+        self.pending_arc = snap.pending_arc;
         // Any in-flight prompts no longer match the restored state — clear.
         self.edit_drag_prompt = None;
         self.vertex_drop_prompt = None;
@@ -438,10 +467,12 @@ impl AppController {
             floor_plan: self.floor_plan.clone(),
             dimensioning: self.dimensioning.clone(),
             edit_state: self.edit_state.clone(),
+            pending_arc: self.pending_arc.clone(),
         });
         self.floor_plan = snap.floor_plan;
         self.dimensioning = snap.dimensioning;
         self.edit_state = snap.edit_state;
+        self.pending_arc = snap.pending_arc;
         self.edit_drag_prompt = None;
         self.vertex_drop_prompt = None;
         self.commit_to_ber()?;
@@ -899,7 +930,11 @@ impl AppController {
         // still go through end_stroke which requires close.
         let stroke_opt = if matches!(
             edit_tool,
-            EditTools::Extend | EditTools::Trim | EditTools::TrimOrtho
+            EditTools::ExtendOrtho
+                | EditTools::ExtendCurve
+                | EditTools::Trim
+                | EditTools::TrimOrtho
+                | EditTools::TrimCurve
         ) {
             self.sketch_engine.take_stroke_raw()
         } else {
@@ -928,14 +963,14 @@ impl AppController {
                 EditTools::AddDetachedSection => {
                     self.apply_addsection_stroke(&stroke.points, stroke.is_closed)?;
                 }
-                EditTools::Extend => {
+                EditTools::ExtendOrtho | EditTools::ExtendCurve => {
                     if let Err(e) = self.apply_extend_stroke(&stroke.points) {
                         // For now just log; in future we'll surface this
                         // to the UI alongside the dimension error.
                         eprintln!("apply_extend_stroke: {}", e);
                     }
                 }
-                EditTools::Trim | EditTools::TrimOrtho => {
+                EditTools::Trim | EditTools::TrimOrtho | EditTools::TrimCurve => {
                     if let Err(e) = self.apply_trim_stroke(&stroke.points) {
                         eprintln!("apply_trim_stroke: {}", e);
                     }
@@ -1021,17 +1056,23 @@ impl AppController {
     }
 
     /// Apply an Extend stroke. The geometry — snapping, orthogonalizing, and
-    /// splicing the porch into the parametric plan — lives in
-    /// `FloorPlan::extend`; here we only orchestrate app state. Because the
-    /// splice preserves existing vertex/parameter IDs, the dimensioning state
-    /// stays valid: we keep `known_params` (dropping only any that a cross-edge
-    /// cut removed) instead of resetting, so the user is asked to dimension
-    /// just the porch's new walls.
+    /// splicing the path into the parametric plan — lives in `FloorPlan`; here
+    /// we only orchestrate app state. Dispatches by the active tool: `ExtendOrtho`
+    /// adds a stepped porch, `ExtendCurve` a faceted arc. Because the splice
+    /// preserves existing vertex/parameter IDs, the dimensioning state stays
+    /// valid: we keep `known_params` (dropping only any that were removed)
+    /// instead of resetting, so the user is asked to dimension just the new
+    /// walls.
     fn apply_extend_stroke(&mut self, points: &[Point2f32]) -> Result<(), String> {
+        // ExtendCurve defers: hold a provisional arc until its attach lines are
+        // dimensioned (see `begin_arc_stroke`), rather than faceting now.
+        if self.sketch_engine.edit_tool == EditTools::ExtendCurve {
+            return self.begin_arc_stroke(points);
+        }
         let undo_snap = self.current_history_snapshot();
         let minted = self
             .floor_plan
-            .extend(points)
+            .extend_ortho(points)
             .map_err(|e| format!("{}", e))?;
         println!("Extend: {} new param(s) {:?}", minted.len(), minted);
         let active = self.floor_plan.all_active_params();
@@ -1073,20 +1114,25 @@ impl AppController {
     }
 
     /// Apply a Trim, discarding the smaller side. Dispatches by the active
-    /// tool: `Trim` cuts a straight (possibly diagonal) line through the
-    /// outline; `TrimOrtho` carves an orthogonal stepped cut (the path is
-    /// orthogonalized and spliced like Extend, but removing area). The geometry
-    /// lives in `FloorPlan::trim_by_stroke` / `trim_by_polygon`; here we only
-    /// orchestrate app state. Surviving walls keep their parameters.
+    /// tool: `Trim` cuts a straight (possibly diagonal) line; `TrimOrtho` carves
+    /// an orthogonal stepped cut; `TrimCurve` carves a faceted curved recess.
+    /// The geometry lives in `FloorPlan::trim_by_stroke` / `trim_ortho` /
+    /// `trim_curve`; here we only orchestrate app state. Surviving walls keep
+    /// their parameters.
     fn apply_trim_stroke(&mut self, points: &[Point2f32]) -> Result<(), String> {
         if points.len() < 2 {
             return Err("trim stroke needs at least 2 points".into());
         }
+        // TrimCurve defers like ExtendCurve: a provisional arc dimensioned by
+        // its attach lines, then faceted in. The drawn bulge direction (inward)
+        // is what carves the recess — no separate keep-larger step needed.
+        if self.sketch_engine.edit_tool == EditTools::TrimCurve {
+            return self.begin_arc_stroke(points);
+        }
         let undo_snap = self.current_history_snapshot();
-        let minted = if matches!(self.sketch_engine.edit_tool, EditTools::TrimOrtho) {
-            self.floor_plan.trim_by_polygon(points)
-        } else {
-            self.floor_plan.trim_by_stroke(points)
+        let minted = match self.sketch_engine.edit_tool {
+            EditTools::TrimOrtho => self.floor_plan.trim_ortho(points),
+            _ => self.floor_plan.trim_by_stroke(points),
         }
         .map_err(|e| format!("{}", e))?;
         println!("Trim: {} new param(s) {:?}", minted.len(), minted);
@@ -1098,6 +1144,154 @@ impl AppController {
         self.maybe_start_dimensioning();
         self.push_history_snapshot(undo_snap);
         Ok(())
+    }
+
+    /// Begin a provisional curved wall (shared by `ExtendCurve`/`TrimCurve`).
+    /// `FloorPlan::begin_arc` fits the stroke to a circular arc and splices only
+    /// its two endpoints onto the outline (a straight placeholder; the shape is
+    /// unchanged). We suppress that placeholder edge from dimensioning prompts —
+    /// so only the two attach stubs are asked about — and stash the arc in
+    /// `pending_arc`. Once both stubs are dimensioned, `maybe_finish_pending_arc`
+    /// bakes the curve in. Nothing about the geometry changes until then.
+    fn begin_arc_stroke(&mut self, points: &[Point2f32]) -> Result<(), String> {
+        let undo_snap = self.current_history_snapshot();
+        let (start, end, bulge_ratio) = self
+            .floor_plan
+            .begin_arc(points)
+            .map_err(|e| format!("{}", e))?;
+        // Don't prompt the straight placeholder edge — only its attach stubs.
+        if let Some(skip) = self.placeholder_skip_vertex(start, end) {
+            self.dimensioning.skipped_walls.insert(skip);
+        }
+        self.pending_arc = Some(PendingArc {
+            start,
+            end,
+            bulge_ratio,
+        });
+        println!(
+            "Curve: provisional arc (bulge ratio {:.3}); dimension the two attach lines to bake it in",
+            bulge_ratio
+        );
+        let active = self.floor_plan.all_active_params();
+        self.dimensioning
+            .known_params
+            .retain(|p| active.contains(p));
+        self.commit_to_ber()?;
+        self.maybe_start_dimensioning();
+        self.push_history_snapshot(undo_snap);
+        Ok(())
+    }
+
+    /// The provisional arc's placeholder edge connects `start` and `end`
+    /// directly; return whichever is that edge's RING-START vertex (the one
+    /// `next_promptable_wall` keys the placeholder wall by), so it can be
+    /// skipped. `None` if the two are no longer adjacent on one ring.
+    fn placeholder_skip_vertex(&self, start: VertexId, end: VertexId) -> Option<VertexId> {
+        let (r1, is) = self.floor_plan.find_vertex(start)?;
+        let (r2, ie) = self.floor_plan.find_vertex(end)?;
+        if r1 != r2 {
+            return None;
+        }
+        let n = self.floor_plan.polygons().get(r1)?.len();
+        if n == 0 {
+            return None;
+        }
+        if (is + 1) % n == ie {
+            Some(start)
+        } else if (ie + 1) % n == is {
+            Some(end)
+        } else {
+            None
+        }
+    }
+
+    /// True once both of the provisional arc's attach stubs are dimensioned —
+    /// i.e. every parameter the placeholder edge's length depends on is known,
+    /// fixing both endpoints. That's the cue to facet the arc in.
+    fn pending_arc_ready(&self, pa: &PendingArc) -> bool {
+        let (Some((r1, is)), Some((r2, ie))) = (
+            self.floor_plan.find_vertex(pa.start),
+            self.floor_plan.find_vertex(pa.end),
+        ) else {
+            return false;
+        };
+        if r1 != r2 {
+            return false;
+        }
+        let Some(n) = self.floor_plan.polygons().get(r1).map(|p| p.len()) else {
+            return false;
+        };
+        let edge_start = if (is + 1) % n == ie {
+            is
+        } else if (ie + 1) % n == is {
+            ie
+        } else {
+            return false;
+        };
+        let deps = self.floor_plan.wall_param_deps(r1, edge_start);
+        !deps.is_empty()
+            && deps
+                .iter()
+                .all(|p| self.dimensioning.known_params.contains(p))
+    }
+
+    /// Bake the provisional arc into the model once its attach lines are set.
+    /// Called after a dimension is applied; a no-op until both stubs are known.
+    /// Runs within the triggering dimension's undo step, so undoing that
+    /// dimension also un-bakes the arc.
+    fn maybe_finish_pending_arc(&mut self) {
+        let Some(pa) = self.pending_arc.clone() else {
+            return;
+        };
+        if !self.pending_arc_ready(&pa) {
+            // Still waiting on one of the two attach dimensions — stay provisional.
+            return;
+        }
+        let facet_params = match self.floor_plan.finish_arc(pa.start, pa.end, pa.bulge_ratio) {
+            Ok(params) => params,
+            Err(e) => {
+                // The attach lines ARE both set (we're past `pending_arc_ready`),
+                // so there's nothing left for the user to do that would make this
+                // succeed — retrying every subsequent dimension would just fail
+                // again and keep the preview stuck on screen. Give up on the arc:
+                // clear it (dropping the overlay) and leave the straight,
+                // already-dimensioned placeholder edge as the fallback.
+                eprintln!(
+                    "finish_arc failed ({e}); keeping the straight placeholder edge \
+                     and dropping the provisional curve. bulge={:.3}",
+                    pa.bulge_ratio
+                );
+                self.pending_arc = None;
+                return;
+            }
+        };
+        // Lock the arc: its shape is now fixed, so mark the facet vertices'
+        // params known. Otherwise a LATER dimension of some other wall would
+        // treat them as free and `repair`/`aesthetic_rescale` could redistribute
+        // them — flattening the curve back into a straight line.
+        self.dimensioning
+            .known_params
+            .extend(facet_params.iter().copied());
+        self.pending_arc = None;
+        println!(
+            "Curve: attach lines set — arc faceted into the plan ({} facet params locked, bulge {:.3})",
+            facet_params.len(),
+            pa.bulge_ratio
+        );
+        if let Err(e) = self.commit_to_ber() {
+            eprintln!("commit_to_ber after finish_arc: {}", e);
+        }
+    }
+
+    /// World-coord points of the provisional arc preview, if one is mid-flow.
+    /// The UI draws this as an overlay; the model still holds the straight
+    /// placeholder until the attach dimensions are entered.
+    pub fn pending_arc_preview(&self) -> Option<Vec<(f64, f64)>> {
+        let pa = self.pending_arc.as_ref()?;
+        let pts = self
+            .floor_plan
+            .arc_preview(pa.start, pa.end, pa.bulge_ratio)?;
+        Some(pts.iter().map(|p| (p.x as f64, p.y as f64)).collect())
     }
 
     /// Detect near-collinear walls and populate the review if any.
@@ -1358,5 +1552,130 @@ mod trim_collapse_tests {
         });
         assert!(!has_diag, "an orthogonal notch must have no diagonal edge");
         assert!(c.floor_plan.validate_simple().is_ok());
+    }
+
+    fn diag_edges(c: &AppController) -> usize {
+        let ring = &c.floor_plan.polygons()[0];
+        let n = ring.len();
+        (0..n)
+            .filter(|&i| {
+                let (a, b) = (ring[i], ring[(i + 1) % n]);
+                (a.x - b.x).abs() > 1e-3 && (a.y - b.y).abs() > 1e-3
+            })
+            .count()
+    }
+
+    fn ring_area(c: &AppController) -> f32 {
+        let ring = &c.floor_plan.polygons()[0];
+        let n = ring.len();
+        let mut sum = 0.0_f32;
+        for i in 0..n {
+            let (a, b) = (ring[i], ring[(i + 1) % n]);
+            sum += a.x * b.y - b.x * a.y;
+        }
+        (sum * 0.5).abs()
+    }
+
+    /// The curve tools defer: drawing the arc only splits the wall (no shape
+    /// change); the user then dimensions the two attach stubs through the normal
+    /// prompt flow — only axis-aligned stubs are ever offered, never a facet —
+    /// and ONLY THEN is the circular arc faceted into the plan.
+    #[test]
+    fn curve_arc_is_provisional_until_attach_lines_are_dimensioned() {
+        let mut c = AppController::new(crate::engine::open_db(":memory:").unwrap());
+        let square = vec![
+            Point2f32::new(0.0, 0.0),
+            Point2f32::new(10.0, 0.0),
+            Point2f32::new(10.0, 10.0),
+            Point2f32::new(0.0, 10.0),
+            Point2f32::new(0.2, 0.2),
+        ];
+        c.floor_plan = FloorPlan::from_points_to_orthogonal(&square, 0.5, true).unwrap();
+        c.dimensioning.scale_set = true;
+        c.dimensioning.known_params = c.floor_plan.all_active_params();
+        let area0 = ring_area(&c);
+
+        c.set_edit_mode(EditTools::ExtendCurve);
+        // An arc bulging out of the top edge.
+        let arc = vec![
+            Point2f32::new(3.0, 10.0),
+            Point2f32::new(3.6, 11.0),
+            Point2f32::new(4.3, 11.7),
+            Point2f32::new(5.0, 12.0),
+            Point2f32::new(5.7, 11.7),
+            Point2f32::new(6.4, 11.0),
+            Point2f32::new(7.0, 10.0),
+        ];
+        c.apply_extend_stroke(&arc).expect("begin provisional arc");
+
+        // Provisional: arc held, shape UNCHANGED (no facets, area the same), but
+        // a preview is available and a dimension prompt is waiting.
+        assert!(c.pending_arc.is_some(), "arc should be held provisional");
+        assert_eq!(diag_edges(&c), 0, "no facets while provisional");
+        assert!(
+            (ring_area(&c) - area0).abs() < 0.5,
+            "begin must not change the shape"
+        );
+        assert!(c.pending_arc_preview().is_some(), "preview available");
+        assert!(
+            c.dimensioning_active(),
+            "the attach stubs should be prompted"
+        );
+
+        // Dimension every prompted wall: each must be an axis-aligned stub, never
+        // a facet. Two stubs get set, then the arc bakes itself in.
+        let mut dimensioned = 0;
+        for _ in 0..10 {
+            let Some(prompt) = c.current_dimension_prompt() else {
+                break;
+            };
+            let (ring, edge) = c.floor_plan.find_vertex(prompt.wall_start_vertex).unwrap();
+            assert!(
+                c.floor_plan.wall_axis(ring, edge).is_some(),
+                "a curve facet must never be offered for dimensioning"
+            );
+            c.apply_dimension(2.0).expect("dimension an attach stub");
+            dimensioned += 1;
+        }
+
+        // Both attach lines set → arc baked in: facets present, area grew, and
+        // the result is a valid simple polygon.
+        assert_eq!(
+            dimensioned, 2,
+            "exactly the two attach stubs are dimensioned"
+        );
+        assert!(
+            c.pending_arc.is_none(),
+            "arc committed after both dimensions"
+        );
+        assert!(c.floor_plan.validate_simple().is_ok());
+        assert!(diag_edges(&c) >= 2, "arc faceted after dimensioning");
+        assert!(
+            ring_area(&c) > area0 + 1.0,
+            "outward arc adds area once baked"
+        );
+
+        // The baked arc's facet params must be LOCKED (known). Otherwise a later
+        // dimension elsewhere would treat them as free and `repair` /
+        // `aesthetic_rescale` could redistribute the facet vertices — flattening
+        // the curve back into a straight line (the reported extend-curve bug).
+        let active = c.floor_plan.all_active_params();
+        assert!(
+            active
+                .iter()
+                .all(|p| c.dimensioning.known_params.contains(p)),
+            "every facet param of a baked arc must be locked into known_params"
+        );
+
+        // Concretely: a subsequent aesthetic rescale (which only ever touches
+        // un-set params) must leave the curved shape untouched.
+        let area_before_rescale = ring_area(&c);
+        let diag_before = diag_edges(&c);
+        c.floor_plan.aesthetic_rescale(&c.dimensioning.known_params);
+        assert_eq!(diag_edges(&c), diag_before, "rescale must not drop facets");
+        assert!(
+            (ring_area(&c) - area_before_rescale).abs() < 1e-3,
+            "a locked arc must survive aesthetic rescale unchanged"
+        );
     }
 }

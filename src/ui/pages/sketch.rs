@@ -244,6 +244,9 @@ impl SketchPage {
         dim_scale_set: bool,
         dim_error: Option<&str>,
         dimensioned_walls: &[(usize, usize)],
+        // World-coord points of a provisional ExtendCurve/TrimCurve arc awaiting
+        // its attach dimensions, drawn as an amber preview overlay.
+        arc_preview: Option<&[(f64, f64)]>,
         edit_selected_wall: Option<((f64, f64), (f64, f64))>,
         edit_selected_vertex: Option<(f64, f64)>,
         edit_drag_prompt: Option<EditDragPromptUiData>,
@@ -456,6 +459,20 @@ impl SketchPage {
                     }
                 }
 
+                // Provisional curved-wall preview (amber arc) drawn on top, so
+                // the user sees the curve while dimensioning its attach lines.
+                if let Some(pts) = arc_preview {
+                    render::render_arc_preview(
+                        &painter,
+                        rect,
+                        ber,
+                        current_storey_idx,
+                        mode,
+                        view,
+                        pts,
+                    );
+                }
+
                 // Pan / zoom on the canvas.
                 //   - Scroll wheel  → zoom about the cursor
                 //   - Right-drag    → pan
@@ -520,7 +537,11 @@ impl SketchPage {
                             // normal EndStroke flow (canvas pixels).
                             let needs_world = matches!(
                                 edit_tool,
-                                EditTools::Extend | EditTools::Trim | EditTools::TrimOrtho
+                                EditTools::ExtendOrtho
+                                    | EditTools::ExtendCurve
+                                    | EditTools::Trim
+                                    | EditTools::TrimOrtho
+                                    | EditTools::TrimCurve
                             );
                             let world_converted = if needs_world {
                                 if let (Some(stroke), Some((min_xy, max_xy))) = (
@@ -545,12 +566,14 @@ impl SketchPage {
                                             (wx as f32, wy as f32)
                                         })
                                         .collect();
-                                    // Trim and TrimOrtho both send TrimStrokeWorld;
-                                    // the controller dispatches line vs ortho by
-                                    // the active tool.
+                                    // Trims send TrimStrokeWorld, extends send
+                                    // ExtendStrokeWorld; the controller dispatches
+                                    // the exact variant by the active tool.
                                     let event = if matches!(
                                         edit_tool,
-                                        EditTools::Trim | EditTools::TrimOrtho
+                                        EditTools::Trim
+                                            | EditTools::TrimOrtho
+                                            | EditTools::TrimCurve
                                     ) {
                                         SketchEvent::TrimStrokeWorld {
                                             points: world_points,
