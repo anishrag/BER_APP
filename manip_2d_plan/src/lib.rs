@@ -1461,6 +1461,46 @@ mod trim_tests {
     }
 
     #[test]
+    fn skipping_a_wall_keeps_prompting_others_and_the_same_param_elsewhere() {
+        use std::collections::HashSet;
+        // SKIP must be per-WALL, not per-parameter. Skipping a wall must not halt
+        // the prompt loop, and a parameter the skipped wall would have set is
+        // still offered via another wall that also controls it (e.g. the
+        // opposite side of a rectangle). The user hit this twice: "I skip the
+        // second of three and it won't ask me for the third / the derivable one."
+        let plan = unit_square_plan(); // 2 params, each shared by an opposite pair
+        let none: HashSet<VertexId> = HashSet::new();
+        let nothing: HashSet<ParameterId> = HashSet::new();
+
+        let (first_vid, first_param) = plan
+            .next_promptable_wall(&nothing, &none)
+            .expect("a wall should be promptable initially");
+
+        // Skipping that wall does NOT stop the loop — another wall is offered.
+        let mut skipped = HashSet::new();
+        skipped.insert(first_vid);
+        let (second_vid, _) = plan
+            .next_promptable_wall(&nothing, &skipped)
+            .expect("skipping one wall must not halt prompting");
+        assert_ne!(second_vid, first_vid);
+
+        // The skipped wall's parameter is still reachable through another wall
+        // that controls it: with every OTHER parameter known, the opposite wall
+        // is offered to set it (so a skipped value the user can measure
+        // elsewhere is still asked for).
+        let mut known: HashSet<ParameterId> = plan.all_active_params();
+        known.remove(&first_param);
+        let (vid, param) = plan
+            .next_promptable_wall(&known, &skipped)
+            .expect("the opposite wall should still set the skipped param");
+        assert_eq!(
+            param, first_param,
+            "same param, reached via a different wall"
+        );
+        assert_ne!(vid, first_vid);
+    }
+
+    #[test]
     fn trim_cuts_corner_into_a_diagonal_wall() {
         let mut plan = unit_square_plan();
         assert_eq!(diagonal_edge_count(&plan), 0, "square starts orthogonal");

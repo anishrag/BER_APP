@@ -1845,6 +1845,39 @@ mod tests {
     }
 
     #[test]
+    fn suggest_collinear_has_no_lower_bound_so_near_coincident_walls_are_asked() {
+        // Hand drawing is imprecise, so walls landing very close together — even
+        // exactly coincident — are chance, not a declared intent, and must still
+        // be surfaced for the user to confirm. With `min_separation = 0` a 3px
+        // gap is flagged; the old lower threshold silently missed it. (User:
+        // "remove the 0.4% threshold" / "even identical walls should be asked".)
+        let mut plan = ParametricPlan::from_points(&[
+            Point2f32::new(0.0, 0.0),
+            Point2f32::new(100.0, 0.0),
+            Point2f32::new(100.0, 5.0),
+            Point2f32::new(0.0, 5.0),
+        ]);
+        plan.add_ring(&[
+            Point2f32::new(200.0, 8.0),
+            Point2f32::new(300.0, 8.0),
+            Point2f32::new(300.0, 12.0),
+            Point2f32::new(200.0, 12.0),
+        ]);
+        plan.apply_orthogonal_constraints().unwrap();
+        // The two tops are 3px apart (y=5 vs y=8) — distinct params, near-coincident.
+        let with_floor = plan.suggest_collinear(20.0, 60.0);
+        assert!(
+            with_floor.iter().all(|s| s.ring_a == s.ring_b),
+            "a 20px lower bound must miss the 3px-apart tops, got {with_floor:?}"
+        );
+        let no_floor = plan.suggest_collinear(0.0, 60.0);
+        assert!(
+            no_floor.iter().any(|s| s.ring_a != s.ring_b),
+            "with no lower bound the near-coincident tops must be flagged, got {no_floor:?}"
+        );
+    }
+
+    #[test]
     fn apply_collinear_suggestion_reduces_parameter_count() {
         let mut plan = build_plan(&[
             (0.0, 0.0),

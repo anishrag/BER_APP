@@ -1729,6 +1729,63 @@ mod trim_collapse_tests {
         (sum * 0.5).abs()
     }
 
+    /// Dragging a wall in Edit mode must prompt for a distance PERPENDICULAR to
+    /// the wall: a vertical wall is measured horizontally (axis X), a horizontal
+    /// wall vertically (axis Y). (User: "moving the E's left wall showed me a
+    /// vertical dimension; it should be horizontal.")
+    #[test]
+    fn dragging_a_wall_measures_perpendicular_to_it() {
+        let make = || {
+            let mut c = AppController::new(crate::engine::open_db(":memory:").unwrap());
+            let square = vec![
+                Point2f32::new(0.0, 0.0),
+                Point2f32::new(10.0, 0.0),
+                Point2f32::new(10.0, 10.0),
+                Point2f32::new(0.0, 10.0),
+                Point2f32::new(0.2, 0.2),
+            ];
+            c.floor_plan = FloorPlan::from_points_to_orthogonal(&square, 0.5, true).unwrap();
+            // The drag prompt only appears once the plan is dimensioned.
+            c.dimensioning.scale_set = true;
+            c.dimensioning.known_params = c.floor_plan.all_active_params();
+            c.set_edit_mode(EditTools::Edit);
+            c
+        };
+
+        // Left (vertical) wall at x=0 → measured along X.
+        let mut c = make();
+        assert!(c.edit_mouse_down(0.0, 5.0, 1.0), "should hit the left wall");
+        c.edit_mouse_drag(0.5, 5.0); // nudge it horizontally
+        c.edit_mouse_up().unwrap();
+        let p = c
+            .edit_drag_prompt
+            .as_ref()
+            .expect("a measurement prompt after dragging a wall");
+        assert_eq!(
+            p.axis,
+            ParameterAxis::X,
+            "a vertical wall is measured horizontally"
+        );
+
+        // Bottom (horizontal) wall at y=0 → measured along Y.
+        let mut c = make();
+        assert!(
+            c.edit_mouse_down(5.0, 0.0, 1.0),
+            "should hit the bottom wall"
+        );
+        c.edit_mouse_drag(5.0, 0.5);
+        c.edit_mouse_up().unwrap();
+        let p = c
+            .edit_drag_prompt
+            .as_ref()
+            .expect("a measurement prompt after dragging a wall");
+        assert_eq!(
+            p.axis,
+            ParameterAxis::Y,
+            "a horizontal wall is measured vertically"
+        );
+    }
+
     /// The curve tools defer: drawing the arc only splits the wall (no shape
     /// change); the user then dimensions the two attach stubs through the normal
     /// prompt flow — only axis-aligned stubs are ever offered, never a facet —
