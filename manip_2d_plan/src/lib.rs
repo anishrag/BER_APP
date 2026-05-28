@@ -649,6 +649,89 @@ impl FloorPlan {
         self.parametric.remove_vertex(ring, idx)
     }
 
+    /// Collapse a trim cut wall to zero (the wall identified by `edge_start` /
+    /// `controlled_param`). See
+    /// [`ParametricPlan::collapse_trim_wall`](parametric::ParametricPlan::collapse_trim_wall).
+    pub fn collapse_trim_wall(
+        &mut self,
+        ring: usize,
+        edge_start: usize,
+        controlled_param: ParameterId,
+    ) -> Result<(), Error> {
+        self.parametric
+            .collapse_trim_wall(ring, edge_start, controlled_param)
+    }
+
+    /// Every wall whose length is fully determined by `known` parameters — all
+    /// the parameters in its length expression are known. A superset of the
+    /// user-dimensioned walls (also catches lengths implied by shared
+    /// parameters, e.g. the opposite side of a rectangle). Walls with no
+    /// parameter deps (pre-dimensioning pixel artefacts) are excluded.
+    pub fn walls_with_known_length(&self, known: &HashSet<ParameterId>) -> Vec<(usize, usize)> {
+        let polygons = self.polygons();
+        let mut result = Vec::new();
+        for (ri, ring) in polygons.iter().enumerate() {
+            for i in 0..ring.len() {
+                let deps = self.wall_param_deps(ri, i);
+                if !deps.is_empty() && deps.iter().all(|p| known.contains(p)) {
+                    result.push((ri, i));
+                }
+            }
+        }
+        result
+    }
+
+    /// Pick the next wall to ask the user to dimension: the first wall (in ring
+    /// order) whose length depends on exactly ONE not-yet-`known` parameter
+    /// (the rest known) and whose start vertex isn't in `skipped`. Returns
+    /// `(start vertex id, the one unknown parameter)`, or `None` when every
+    /// active parameter is known or no clean single-unknown wall remains. The
+    /// caller decides what to do with the result (the dimensioning workflow).
+    pub fn next_promptable_wall(
+        &self,
+        known: &HashSet<ParameterId>,
+        skipped: &HashSet<VertexId>,
+    ) -> Option<(VertexId, ParameterId)> {
+        let to_ask: HashSet<ParameterId> = self
+            .all_active_params()
+            .into_iter()
+            .filter(|p| !known.contains(p))
+            .collect();
+        if to_ask.is_empty() {
+            return None;
+        }
+        let polygons = self.polygons();
+        for (ring_idx, ring_points) in polygons.iter().enumerate() {
+            for edge_start in 0..ring_points.len() {
+                let Some(vid) = self.vertex_id_at(ring_idx, edge_start) else {
+                    continue;
+                };
+                if skipped.contains(&vid) {
+                    continue;
+                }
+                // Promptable iff exactly one dep is in `to_ask` and the rest are
+                // known. A dep that's neither blocks this wall (its only setter
+                // was skipped / never set).
+                let mut to_ask_count = 0usize;
+                let mut to_ask_param: Option<ParameterId> = None;
+                let mut blocked = false;
+                for d in self.wall_param_deps(ring_idx, edge_start) {
+                    if to_ask.contains(&d) {
+                        to_ask_count += 1;
+                        to_ask_param = Some(d);
+                    } else if !known.contains(&d) {
+                        blocked = true;
+                        break;
+                    }
+                }
+                if !blocked && to_ask_count == 1 {
+                    return Some((vid, to_ask_param.unwrap()));
+                }
+            }
+        }
+        None
+    }
+
     /// For a wall whose perpendicular coord is a constant (V0's anchor or
     /// similar), the current constant value and the axis it lives on.
     /// Edit-mode drag uses this together with `shift_constant` to translate

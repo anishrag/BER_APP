@@ -526,6 +526,55 @@ impl ParametricPlan {
         true
     }
 
+    /// Collapse a TRIM cut wall to zero by removing its cut-point vertex.
+    /// `controlled_param` identifies the wall's adjustable endpoint (the cut
+    /// point). Only allowed when that vertex is a genuine trim cut — adjacent to
+    /// a non-orthogonal (diagonal) edge; a regular orthogonal corner is rejected
+    /// (zeroing it would silently delete a drawn wall). Transactional: validates
+    /// the result and leaves the plan unchanged on any error.
+    pub fn collapse_trim_wall(
+        &mut self,
+        ring: usize,
+        edge_start: usize,
+        controlled_param: ParameterId,
+    ) -> Result<(), Error> {
+        let n = self
+            .rings
+            .get(ring)
+            .ok_or(Error::InvalidEdgeIndex(ring))?
+            .len();
+        // The adjustable endpoint of the wall is the one carrying the param.
+        let idx = [edge_start, (edge_start + 1) % n]
+            .into_iter()
+            .find(|&i| {
+                self.vertex_x_param(ring, i) == Some(controlled_param)
+                    || self.vertex_y_param(ring, i) == Some(controlled_param)
+            })
+            .ok_or_else(|| Error::TrimError("wall's adjustable vertex not found".into()))?;
+        // A trim cut point is adjacent to a diagonal edge; a normal corner has
+        // two axis-aligned walls.
+        let prev_edge = (idx + n - 1) % n;
+        let is_trim_cut =
+            self.wall_axis(ring, idx).is_none() || self.wall_axis(ring, prev_edge).is_none();
+        if !is_trim_cut {
+            return Err(Error::TrimError(
+                "0 can only collapse a trim cut wall — a regular wall can't be set to zero".into(),
+            ));
+        }
+        let saved = self.rings[ring].clone();
+        if !self.remove_vertex(ring, idx) {
+            return Err(Error::TrimError(
+                "can't collapse — too few walls would remain".into(),
+            ));
+        }
+        if let Err(e) = self.validate_simple() {
+            self.rings[ring] = saved;
+            self.recompute_active_parameter_count();
+            return Err(e);
+        }
+        Ok(())
+    }
+
     /// Replace `ring` with a spliced version built from `sequence` (see
     /// `crate::extend::plan_splice_sequence`). `Keep(i)` slots clone the
     /// existing vertex verbatim — id, exprs, and parameter IDs all preserved.
