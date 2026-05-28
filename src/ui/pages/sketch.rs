@@ -518,8 +518,10 @@ impl SketchPage {
                             // transform and send the tool's dedicated world-coord
                             // event. Other stroke tools fall through to the
                             // normal EndStroke flow (canvas pixels).
-                            let needs_world =
-                                matches!(edit_tool, EditTools::Extend | EditTools::Trim);
+                            let needs_world = matches!(
+                                edit_tool,
+                                EditTools::Extend | EditTools::Trim | EditTools::TrimOrtho
+                            );
                             let world_converted = if needs_world {
                                 if let (Some(stroke), Some((min_xy, max_xy))) = (
                                     current.as_ref(),
@@ -543,7 +545,13 @@ impl SketchPage {
                                             (wx as f32, wy as f32)
                                         })
                                         .collect();
-                                    let event = if matches!(edit_tool, EditTools::Trim) {
+                                    // Trim and TrimOrtho both send TrimStrokeWorld;
+                                    // the controller dispatches line vs ortho by
+                                    // the active tool.
+                                    let event = if matches!(
+                                        edit_tool,
+                                        EditTools::Trim | EditTools::TrimOrtho
+                                    ) {
                                         SketchEvent::TrimStrokeWorld {
                                             points: world_points,
                                         }

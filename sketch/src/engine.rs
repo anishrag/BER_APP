@@ -117,7 +117,8 @@ impl SketchEngine {
             (SketchMode::Storey2D, EditTools::DrawPerpWalls)
             | (SketchMode::Storey2D, EditTools::AddDetachedSection)
             | (SketchMode::Storey2D, EditTools::Extend)
-            | (SketchMode::Storey2D, EditTools::Trim) => {
+            | (SketchMode::Storey2D, EditTools::Trim)
+            | (SketchMode::Storey2D, EditTools::TrimOrtho) => {
                 self.set_mode_behaviour(Box::new(Storey2DPerpWalls));
             }
             // Edit mode doesn't capture freehand strokes — interaction

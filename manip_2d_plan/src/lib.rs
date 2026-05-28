@@ -360,6 +360,83 @@ impl FloorPlan {
         self.trim_by_stroke(&[p0, p1])
     }
 
+    /// Trim with an orthogonal cut PATH (like Extend, but removing area). The
+    /// stroke is orthogonalized, its two endpoints attach to the outline, and
+    /// the smaller-area side is discarded — replaced by the stepped cut path.
+    /// This carves an orthogonal notch/chamfer instead of the straight diagonal
+    /// that [`trim_by_stroke`](Self::trim_by_stroke) cuts.
+    ///
+    /// Like Extend it preserves kept vertices' identity/parameters and splices
+    /// the path in; like line-trim it keeps the larger-area side (rather than
+    /// Extend's shorter-arc rule). Returns the newly-minted parameter IDs;
+    /// errors (plan unchanged) if the endpoints don't reach the outline or the
+    /// result isn't a simple polygon.
+    pub fn trim_by_polygon(&mut self, stroke: &[Point2f32]) -> Result<Vec<ParameterId>, Error> {
+        let ring = self.parametric.ring_points(0);
+        let n = ring.len();
+        if n < 3 {
+            return Err(Error::TrimError("no polygon to trim".into()));
+        }
+        let diag = self
+            .bounding_box()
+            .map(|((mnx, mny), (mxx, mxy))| ((mxx - mnx).powi(2) + (mxy - mny).powi(2)).sqrt())
+            .unwrap_or(0.0);
+        let vertex_tol = (diag * 0.04).max(1e-4);
+        let max_tol = (diag * 0.25).max(1e-3);
+        let merge_tol = if diag > 0.0 {
+            (diag * 0.01).max(1e-4)
+        } else {
+            10.0
+        };
+
+        // Snap the RAW stroke endpoints to find the attach edges (mirrors
+        // Extend), then orthogonalize and pin the path's endpoints onto those
+        // edges so they share the edges' perpendicular coordinate expressions.
+        let start = *stroke.first().ok_or(Error::InsufficientPoints)?;
+        let end = *stroke.last().ok_or(Error::InsufficientPoints)?;
+        let (e1, t1, s_dist, _) = extend::snap_to_polygon(&ring, start, vertex_tol);
+        let (e2, t2, e_dist, _) = extend::snap_to_polygon(&ring, end, vertex_tol);
+        if s_dist > max_tol || e_dist > max_tol {
+            return Err(Error::TrimError(format!(
+                "cut endpoints too far from the outline (start={:.3}, end={:.3}, max={:.3})",
+                s_dist, e_dist, max_tol
+            )));
+        }
+        if e1 == e2 && (t1 - t2).abs() < 1e-3 {
+            return Err(Error::TrimError(
+                "cut starts and ends at the same point".into(),
+            ));
+        }
+
+        let mut ortho = extend::orthogonalize_open_path(stroke, merge_tol)?;
+        if ortho.len() < 2 {
+            return Err(Error::TrimError("cut path collapsed".into()));
+        }
+        let last = ortho.len() - 1;
+        extend::pin_to_edge(&mut ortho[0], &ring, e1);
+        extend::pin_to_edge(&mut ortho[last], &ring, e2);
+
+        // Build both arc-replacements and keep whichever leaves the larger area.
+        let area_of = |seq: &[crate::extend::SpliceElem]| -> f32 {
+            let pts: Vec<Point2f32> = seq
+                .iter()
+                .map(|e| match e {
+                    crate::extend::SpliceElem::Keep(idx) => ring[*idx],
+                    crate::extend::SpliceElem::New(p) => *p,
+                })
+                .collect();
+            polygon_area(&pts).abs()
+        };
+        let seq_a = extend::splice_sequence(&ring, e1, t1, e2, t2, &ortho, true);
+        let seq_b = extend::splice_sequence(&ring, e1, t1, e2, t2, &ortho, false);
+        let chosen = if area_of(&seq_a) >= area_of(&seq_b) {
+            seq_a
+        } else {
+            seq_b
+        };
+        self.parametric.splice_into_edge(0, &chosen)
+    }
+
     /// Concrete vertex positions of the first polygon (backwards-compatible
     /// for single-polygon callers). For multi-polygon access, use `polygons()`.
     pub fn get_points(&self) -> Vec<Point2f32> {
@@ -947,6 +1024,42 @@ mod trim_tests {
             diagonal_edge_count(&plan),
             1,
             "the cut is the diagonal wall"
+        );
+    }
+
+    #[test]
+    fn trim_by_polygon_carves_an_orthogonal_notch() {
+        let mut plan = unit_square_plan(); // 10x10, area 100
+        let before = polygon_area(&plan.polygons()[0]).abs();
+        assert!((before - 100.0).abs() < 1.0);
+
+        // Rectangular notch into the top edge (y=10), down to y=7, x in [3,7].
+        let notch = vec![p(3.0, 10.0), p(3.0, 7.0), p(7.0, 7.0), p(7.0, 10.0)];
+        plan.trim_by_polygon(&notch).unwrap();
+
+        let after = polygon_area(&plan.polygons()[0]).abs();
+        assert!(
+            after < before,
+            "notch should remove area ({after} vs {before})"
+        );
+        assert!(
+            (before - after - 12.0).abs() < 1.0,
+            "should remove ~12 (4x3); removed {}",
+            before - after
+        );
+        assert!(plan.validate_simple().is_ok());
+        // The notch's inner corners are present, and it stays orthogonal.
+        let ring = &plan.polygons()[0];
+        assert!(ring
+            .iter()
+            .any(|q| (q.x - 3.0).abs() < 1e-2 && (q.y - 7.0).abs() < 1e-2));
+        assert!(ring
+            .iter()
+            .any(|q| (q.x - 7.0).abs() < 1e-2 && (q.y - 7.0).abs() < 1e-2));
+        assert_eq!(
+            diagonal_edge_count(&plan),
+            0,
+            "an ortho notch has no diagonal"
         );
     }
 }

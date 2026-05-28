@@ -34,5 +34,12 @@ pub enum EditTools {
     /// older Select + Move tools.
     Edit,
     Extend,
+    /// Trim with a straight cut line: the line crosses the outline, the smaller
+    /// side is discarded, and the cut is a single (possibly diagonal) edge.
     Trim,
+    /// Trim with an orthogonal cut path (like Extend, but removing area): the
+    /// drawn path is orthogonalized, its endpoints attach to the outline, and
+    /// the smaller side is replaced by the stepped cut — carving a notch or
+    /// orthogonal chamfer rather than a diagonal.
+    TrimOrtho,
 }

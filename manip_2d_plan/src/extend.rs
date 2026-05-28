@@ -114,15 +114,12 @@ pub fn pin_to_edge(p: &mut Point2f32, ring: &[Point2f32], edge: usize) {
     }
 }
 
-/// Plan how an extend stroke splices into `ring`. Computes the perimeter arc
-/// between the two attach points both ways and replaces the SHORTER one with
-/// the stroke. Returns the new ring as an ordered list of [`SpliceElem`]s:
-/// existing vertices on the preserved arc are `Keep(idx)`; the two attach
-/// points (`ortho_path`'s endpoints) and the porch interior are `New`.
-///
-/// Works for same-edge bumps (no vertices removed — the edge is split) and
-/// cross-edge corner replacements (the spanned corner vertices are dropped).
-/// The stroke is oriented automatically to match the traversal direction.
+/// Plan how an extend stroke splices into `ring`, replacing the SHORTER of the
+/// two perimeter arcs between the attach points with the stroke. Returns the
+/// new ring as an ordered list of [`SpliceElem`]s: preserved vertices are
+/// `Keep(idx)`; the two attach points (`ortho_path`'s endpoints) and the porch
+/// interior are `New`. Same-edge bumps split the edge; cross-edge replacements
+/// drop the spanned corner(s). The stroke orients automatically.
 pub fn plan_splice_sequence(
     ring: &[Point2f32],
     e1: usize,
@@ -142,18 +139,39 @@ pub fn plan_splice_sequence(
     let total: f32 = edge_lens.iter().sum();
     let pos_of =
         |e: usize, t: f32| -> f32 { edge_lens[..e].iter().sum::<f32>() + t * edge_lens[e] };
-    let pos1 = pos_of(e1, t1);
-    let pos2 = pos_of(e2, t2);
-    let arc_1_to_2 = if pos2 >= pos1 {
-        pos2 - pos1
-    } else {
-        pos2 - pos1 + total
+    let arc_1_to_2 = {
+        let (pos1, pos2) = (pos_of(e1, t1), pos_of(e2, t2));
+        if pos2 >= pos1 {
+            pos2 - pos1
+        } else {
+            pos2 - pos1 + total
+        }
     };
-    let arc_2_to_1 = total - arc_1_to_2;
-    let cut_is_forward_1_to_2 = arc_1_to_2 <= arc_2_to_1;
+    // Extend replaces the shorter arc with the porch.
+    let replace_arc_1_to_2 = arc_1_to_2 <= total - arc_1_to_2;
+    splice_sequence(ring, e1, t1, e2, t2, ortho_path, replace_arc_1_to_2)
+}
 
-    // Attach points are the (already pinned-to-edge) endpoints of the
-    // orthogonalized porch; everything between is porch interior.
+/// Build the spliced ring, replacing one specified arc between the attach
+/// points with `ortho_path`. `replace_arc_1_to_2 = true` replaces the arc that
+/// runs forward from attach 1 to attach 2 (preserving the complementary arc);
+/// `false` replaces the other. Preserved vertices are `Keep(idx)`; the two
+/// attach points and the path interior are `New`.
+///
+/// Extend always replaces the SHORTER arc (via `plan_splice_sequence`); Trim
+/// builds both and keeps whichever leaves the larger-area polygon.
+pub fn splice_sequence(
+    ring: &[Point2f32],
+    e1: usize,
+    t1: f32,
+    e2: usize,
+    t2: f32,
+    ortho_path: &[Point2f32],
+    replace_arc_1_to_2: bool,
+) -> Vec<SpliceElem> {
+    let n = ring.len();
+    // Attach points are the (pinned-to-edge) endpoints of the orthogonalized
+    // path; everything between is path interior.
     let attach1 = *ortho_path.first().expect("ortho_path non-empty");
     let attach2 = *ortho_path.last().expect("ortho_path non-empty");
     let interior = if ortho_path.len() > 2 {
@@ -163,9 +181,9 @@ pub fn plan_splice_sequence(
     };
 
     // Walk forward from edge `se` (just past it) to edge `ee`, collecting the
-    // indices of the existing ring vertices that lie on the PRESERVED arc.
-    // `et > 0` means the end attach point lies past `ring[ee]`, so `ring[ee]`
-    // is on the preserved side and is included.
+    // indices of the existing ring vertices on the PRESERVED arc. `et > 0`
+    // means the end attach point lies past `ring[ee]`, so `ring[ee]` is on the
+    // preserved side and is included.
     let walk_forward = |se: usize, st: f32, ee: usize, et: f32| -> Vec<usize> {
         let mut out = Vec::new();
         let eps = 1e-3_f32;
@@ -188,7 +206,7 @@ pub fn plan_splice_sequence(
     };
 
     let mut seq: Vec<SpliceElem> = Vec::with_capacity(n + ortho_path.len());
-    if cut_is_forward_1_to_2 {
+    if replace_arc_1_to_2 {
         // Replace forward 1→2 arc; preserved arc walked forward 2→1.
         seq.push(SpliceElem::New(attach2));
         for i in walk_forward(e2, t2, e1, t1) {
@@ -200,7 +218,7 @@ pub fn plan_splice_sequence(
         }
     } else {
         // Replace backward (wrap) arc; preserved arc walked forward 1→2,
-        // stroke reversed (attach2 → attach1).
+        // path reversed (attach2 → attach1).
         seq.push(SpliceElem::New(attach1));
         for i in walk_forward(e1, t1, e2, t2) {
             seq.push(SpliceElem::Keep(i));

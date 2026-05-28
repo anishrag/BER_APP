@@ -2028,7 +2028,10 @@ impl AppController {
         // different points on the existing polygon). Take the raw stroke
         // out of the engine without running the close-check; other tools
         // still go through end_stroke which requires close.
-        let stroke_opt = if matches!(edit_tool, EditTools::Extend | EditTools::Trim) {
+        let stroke_opt = if matches!(
+            edit_tool,
+            EditTools::Extend | EditTools::Trim | EditTools::TrimOrtho
+        ) {
             self.sketch_engine.take_stroke_raw()
         } else {
             self.sketch_engine
@@ -2063,7 +2066,7 @@ impl AppController {
                         eprintln!("apply_extend_stroke: {}", e);
                     }
                 }
-                EditTools::Trim => {
+                EditTools::Trim | EditTools::TrimOrtho => {
                     if let Err(e) = self.apply_trim_stroke(&stroke.points) {
                         eprintln!("apply_trim_stroke: {}", e);
                     }
@@ -2200,21 +2203,23 @@ impl AppController {
         }
     }
 
-    /// Apply a Trim: cut the outline along the line through the stroke's
-    /// endpoints, discarding the smaller side. The geometry lives in
-    /// `FloorPlan::trim_by_line`; here we only orchestrate app state. Surviving
-    /// walls keep their parameters (so their dimensions hold); the new diagonal
-    /// cut wall is non-orthogonal and isn't axis-dimensioned. No collinearity
-    /// review — a diagonal edge has no axis-collinearity to resolve.
+    /// Apply a Trim, discarding the smaller side. Dispatches by the active
+    /// tool: `Trim` cuts a straight (possibly diagonal) line through the
+    /// outline; `TrimOrtho` carves an orthogonal stepped cut (the path is
+    /// orthogonalized and spliced like Extend, but removing area). The geometry
+    /// lives in `FloorPlan::trim_by_stroke` / `trim_by_polygon`; here we only
+    /// orchestrate app state. Surviving walls keep their parameters.
     fn apply_trim_stroke(&mut self, points: &[Point2f32]) -> Result<(), String> {
         if points.len() < 2 {
             return Err("trim stroke needs at least 2 points".into());
         }
         let undo_snap = self.current_history_snapshot();
-        let minted = self
-            .floor_plan
-            .trim_by_stroke(points)
-            .map_err(|e| format!("{}", e))?;
+        let minted = if matches!(self.sketch_engine.edit_tool, EditTools::TrimOrtho) {
+            self.floor_plan.trim_by_polygon(points)
+        } else {
+            self.floor_plan.trim_by_stroke(points)
+        }
+        .map_err(|e| format!("{}", e))?;
         println!("Trim: {} new param(s) {:?}", minted.len(), minted);
         let active = self.floor_plan.all_active_params();
         self.dimensioning
@@ -2467,6 +2472,70 @@ mod trim_collapse_tests {
             (diag_len - 7.0).abs() < 1e-2,
             "diagonal should be 7.0, got {diag_len}"
         );
+        assert!(c.floor_plan.validate_simple().is_ok());
+    }
+
+    /// The TrimOrtho tool routes to the orthogonal-polygon trim: a stepped cut
+    /// path carves a notch (area removed, extra vertices, stays orthogonal) —
+    /// not the straight line cut the plain Trim tool would attempt.
+    #[test]
+    fn trim_ortho_tool_carves_an_orthogonal_notch() {
+        let mut c = AppController::new(crate::engine::open_db(":memory:").unwrap());
+        let square = vec![
+            Point2f32::new(0.0, 0.0),
+            Point2f32::new(10.0, 0.0),
+            Point2f32::new(10.0, 10.0),
+            Point2f32::new(0.0, 10.0),
+            Point2f32::new(0.2, 0.2),
+        ];
+        c.floor_plan = FloorPlan::from_points_to_orthogonal(&square, 0.5, true).unwrap();
+        c.dimensioning.scale_set = true;
+        c.dimensioning.known_params = c.floor_plan.all_active_params();
+
+        let area = |c: &AppController| -> f32 {
+            let r = &c.floor_plan.polygons()[0];
+            let n = r.len();
+            (0..n)
+                .map(|i| {
+                    let (a, b) = (r[i], r[(i + 1) % n]);
+                    a.x * b.y - b.x * a.y
+                })
+                .sum::<f32>()
+                .abs()
+                * 0.5
+        };
+        let before = area(&c);
+
+        c.set_edit_mode(EditTools::TrimOrtho);
+        // Rectangular notch into the top edge (y=10), down to y=7, x in [3,7].
+        let notch = vec![
+            Point2f32::new(3.0, 10.0),
+            Point2f32::new(3.0, 7.0),
+            Point2f32::new(7.0, 7.0),
+            Point2f32::new(7.0, 10.0),
+        ];
+        c.apply_trim_stroke(&notch)
+            .expect("ortho trim should succeed");
+
+        let after = area(&c);
+        assert!(
+            after < before,
+            "notch should remove area ({after} vs {before})"
+        );
+        assert!(
+            (before - after - 12.0).abs() < 1.0,
+            "should remove ~12 (4x3); removed {}",
+            before - after
+        );
+        let ring = &c.floor_plan.polygons()[0];
+        assert!(ring.len() > 4, "notch adds vertices");
+        // Orthogonal notch — no diagonal edge.
+        let n = ring.len();
+        let has_diag = (0..n).any(|i| {
+            let (a, b) = (ring[i], ring[(i + 1) % n]);
+            (a.x - b.x).abs() > 1e-3 && (a.y - b.y).abs() > 1e-3
+        });
+        assert!(!has_diag, "an orthogonal notch must have no diagonal edge");
         assert!(c.floor_plan.validate_simple().is_ok());
     }
 }
