@@ -368,9 +368,7 @@ impl FloorPlan {
         if path.len() < 2 {
             return Err(err("path collapsed".into()));
         }
-        // Ortho/line extend & trim keep their existing attach behaviour (no
-        // corner reuse) — only the freeform curve flow opts in.
-        self.splice_cleaned(&path, keep_larger, false)
+        self.splice_cleaned(&path, keep_larger)
     }
 
     /// Splice an already-clean `path` (no further simplification) onto the
@@ -383,7 +381,6 @@ impl FloorPlan {
         &mut self,
         path: &[Point2f32],
         keep_larger: bool,
-        reuse_corners: bool,
     ) -> Result<Vec<ParameterId>, Error> {
         let err = |m: String| {
             if keep_larger {
@@ -452,28 +449,71 @@ impl FloorPlan {
             extend::plan_splice_sequence(&ring, e1, t1, e2, t2, &path)
         };
 
-        // Corner reuse (curve flow only). When an attach endpoint snaps onto an
-        // EXISTING corner vertex, reuse that vertex instead of splicing a new
-        // point. Otherwise — for a curve drawn across a corner — the new point
-        // gets pinned to the deleted wall's perpendicular and ends up a
+        // Corner reuse. When an attach endpoint snaps onto an EXISTING corner
+        // vertex, reuse that vertex (Keep) instead of splicing a new point.
+        // Otherwise the new point — pinned to one wall's perpendicular while its
+        // surviving neighbour sits on the PERPENDICULAR wall — becomes a
         // free-floating vertex (both coords independent) that the dimensioning
-        // solver can't isolate, so the curve never finishes. Reusing the corner
-        // attaches the curve AT the corner (the corner's own, already-known
-        // params), no new param to dimension. To attach a curve away from a
-        // corner, draw its endpoint clearly off the corner. Only `begin_arc`
-        // opts in; extend/trim keep their existing behaviour.
-        if reuse_corners {
-            let a1 = path[0];
-            let a2 = path[last];
-            for el in chosen.iter_mut() {
-                if let crate::extend::SpliceElem::New(pt) = el {
-                    if snapped1 && *pt == a1 {
-                        *el = crate::extend::SpliceElem::Keep(e1);
-                    } else if snapped2 && *pt == a2 {
-                        *el = crate::extend::SpliceElem::Keep(e2);
-                    }
+        // solver can never isolate (it only prompts walls with exactly one
+        // unknown). That strands a curve drawn across a corner, and makes an
+        // orthogonal porch attached AT a corner over-parametrise and bend the
+        // (already-fixed) wall it joins. Reusing the corner attaches at it, with
+        // the corner's own already-known params and no extra param. Draw the
+        // endpoint clearly off a corner to attach elsewhere. The guard avoids a
+        // duplicate Keep when the corner happens to survive in the splice walk.
+        use crate::extend::SpliceElem;
+        let kept: std::collections::HashSet<usize> = chosen
+            .iter()
+            .filter_map(|el| match el {
+                SpliceElem::Keep(i) => Some(*i),
+                SpliceElem::New(_) => None,
+            })
+            .collect();
+        let a1 = path[0];
+        let a2 = path[last];
+        let m = chosen.len();
+        // Plan the reuses (and the realignment each implies) first, then apply —
+        // so we don't borrow `chosen` mutably while reading neighbours.
+        let mut ops: Vec<(usize, SpliceElem)> = Vec::new();
+        for j in 0..m {
+            let SpliceElem::New(pt) = chosen[j] else {
+                continue;
+            };
+            let corner = if snapped1 && pt == a1 && !kept.contains(&e1) {
+                Some(e1)
+            } else if snapped2 && pt == a2 && !kept.contains(&e2) {
+                Some(e2)
+            } else {
+                None
+            };
+            let Some(e) = corner else { continue };
+            let c = ring[e];
+            ops.push((j, SpliceElem::Keep(e)));
+            // The path was orthogonalized to the DRAWN endpoint; snapping that
+            // endpoint to the corner can leave the adjacent porch-wall point off
+            // the corner's line, tilting the wall. Pull that neighbour onto the
+            // corner's shared coordinate so the wall stays axis-aligned. Skip the
+            // OTHER attach endpoint (a curve's chord, deliberately diagonal) and
+            // any genuinely-diagonal neighbour.
+            for nb in [(j + m - 1) % m, (j + 1) % m] {
+                let SpliceElem::New(npt) = chosen[nb] else {
+                    continue;
+                };
+                if npt == a1 || npt == a2 {
+                    continue;
+                }
+                let mut np = npt;
+                if (pt.x - npt.x).abs() < 1e-3 {
+                    np.x = c.x; // vertical porch wall → share the corner's x
+                    ops.push((nb, SpliceElem::New(np)));
+                } else if (pt.y - npt.y).abs() < 1e-3 {
+                    np.y = c.y; // horizontal porch wall → share the corner's y
+                    ops.push((nb, SpliceElem::New(np)));
                 }
             }
+        }
+        for (idx, val) in ops {
+            chosen[idx] = val;
         }
         self.parametric.splice_into_edge(0, &chosen)
     }
@@ -499,10 +539,9 @@ impl FloorPlan {
         }
         let bulge_ratio = geom::stroke_sagitta(stroke) / chord;
         // Splice the straight chord (no bulge): inserts the two endpoints as
-        // pinned vertices. `reuse_corners` makes an endpoint that lands on an
-        // existing corner reuse that corner vertex (attaching the curve at the
-        // corner) rather than splicing a free-floating point.
-        self.splice_cleaned(&[p1, p2], false, true)?;
+        // pinned vertices. An endpoint landing on an existing corner reuses that
+        // corner vertex (see `splice_cleaned`) rather than floating a new point.
+        self.splice_cleaned(&[p1, p2], false)?;
         let v1 = self
             .vertex_near(p1)
             .ok_or_else(|| Error::ExtendError("lost arc start vertex".into()))?;
@@ -820,6 +859,15 @@ impl FloorPlan {
     /// [`ParametricPlan::remove_vertex`](parametric::ParametricPlan::remove_vertex).
     pub fn remove_vertex(&mut self, ring: usize, idx: usize) -> bool {
         self.parametric.remove_vertex(ring, idx)
+    }
+
+    /// Drop spurious collinear vertices the outline doesn't need (e.g. the
+    /// corner a flush porch leaves mid-wall), keeping any in `preserve` (marked
+    /// subdivision points such as a flooring-type boundary). Surviving vertices
+    /// keep their IDs/params; returns the removed vertex IDs. See
+    /// [`ParametricPlan::remove_collinear_vertices`](parametric::ParametricPlan::remove_collinear_vertices).
+    pub fn remove_collinear_vertices(&mut self, preserve: &HashSet<VertexId>) -> Vec<VertexId> {
+        self.parametric.remove_collinear_vertices(preserve)
     }
 
     /// Collapse a trim cut wall to zero (the wall identified by `edge_start` /
@@ -1324,6 +1372,92 @@ mod trim_tests {
                 (a.x - b.x).abs() > eps && (a.y - b.y).abs() > eps
             })
             .count()
+    }
+
+    #[test]
+    fn ortho_porch_at_a_corner_reuses_it_and_stays_orthogonal() {
+        // A porch (orthogonal bump) added with ONE endpoint on an existing
+        // square corner must reuse that corner — otherwise the corner endpoint
+        // floats free, over-parametrises, and dimensioning bends the (fixed)
+        // wall it joins. The porch is drawn FREEHAND-WONKY (as a stylus would):
+        // orthogonalize cleans it to the drawn endpoint, then reusing the corner
+        // must also pull the adjacent porch-wall point onto the corner so that
+        // wall stays vertical. With both, the porch needs only 2 new params (its
+        // other attach position + its depth) and everything stays orthogonal.
+        let mut plan = unit_square_plan(); // corners incl. (10,10)
+        let before = polygon_area(&plan.polygons()[0]).abs();
+        // One end NEAR corner (10,10) but drawn a touch off; the rest wobbly.
+        let porch = vec![p(10.3, 10.2), p(10.1, 14.1), p(5.8, 13.9), p(6.1, 10.3)];
+        let minted = plan.extend_ortho(&porch).unwrap();
+
+        assert_eq!(
+            minted.len(),
+            2,
+            "a corner-anchored ortho porch needs exactly 2 params (depth + far attach), got {}",
+            minted.len()
+        );
+        assert!(plan.validate_simple().is_ok());
+        assert_eq!(
+            diagonal_edge_count(&plan),
+            0,
+            "the porch and square must stay orthogonal (no tilted wall at the reused corner)"
+        );
+        assert!(
+            polygon_area(&plan.polygons()[0]).abs() > before,
+            "the porch adds area"
+        );
+        // The square corner (10,10) is preserved (reused), not replaced.
+        assert!(plan.polygons()[0]
+            .iter()
+            .any(|q| (q.x - 10.0).abs() < 1e-3 && (q.y - 10.0).abs() < 1e-3));
+    }
+
+    #[test]
+    fn remove_collinear_drops_flush_corner_but_keeps_preserved() {
+        use std::collections::HashSet;
+        // Freehand porch flush at corner (10,10): leaves that corner collinear
+        // on the right wall (10,0)-(10,~14). It's spurious for the envelope.
+        let mut plan = unit_square_plan();
+        let porch = vec![p(10.3, 10.2), p(10.1, 14.1), p(5.8, 13.9), p(6.1, 10.3)];
+        plan.extend_ortho(&porch).unwrap();
+        let n_before = plan.polygons()[0].len();
+        let area_before = polygon_area(&plan.polygons()[0]).abs();
+
+        // Find the collinear corner's id.
+        let corner_vid = {
+            let pts = plan.polygons()[0].clone();
+            let i = pts
+                .iter()
+                .position(|q| (q.x - 10.0).abs() < 1e-3 && (q.y - 10.0).abs() < 1e-3)
+                .expect("reused corner present");
+            plan.vertex_id_at(0, i).unwrap()
+        };
+
+        // Preserved → kept even though collinear (a future flooring boundary).
+        let mut preserve = HashSet::new();
+        preserve.insert(corner_vid);
+        assert!(
+            plan.remove_collinear_vertices(&preserve).is_empty(),
+            "a preserved collinear vertex must be kept"
+        );
+        assert_eq!(plan.polygons()[0].len(), n_before);
+
+        // Not preserved → the flush corner is dropped, envelope unchanged.
+        let removed = plan.remove_collinear_vertices(&HashSet::new());
+        assert_eq!(
+            removed,
+            vec![corner_vid],
+            "exactly the flush corner is removed"
+        );
+        assert_eq!(plan.polygons()[0].len(), n_before - 1);
+        assert!(plan.validate_simple().is_ok());
+        assert_eq!(diagonal_edge_count(&plan), 0, "stays orthogonal");
+        assert!(
+            (polygon_area(&plan.polygons()[0]).abs() - area_before).abs() < 1e-2,
+            "removing a collinear vertex must not change the shape"
+        );
+        // Idempotent — nothing collinear remains.
+        assert!(plan.remove_collinear_vertices(&HashSet::new()).is_empty());
     }
 
     #[test]

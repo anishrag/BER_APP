@@ -1079,10 +1079,11 @@ impl AppController {
             .extend_ortho(points)
             .map_err(|e| format!("{}", e))?;
         println!("Extend: {} new param(s) {:?}", minted.len(), minted);
-        let active = self.floor_plan.all_active_params();
-        self.dimensioning
-            .known_params
-            .retain(|p| active.contains(p));
+        // The porch is a fix-up to the ENVELOPE — once spliced, that it was a
+        // "porch" is irrelevant. Drop any vertex it left collinear (e.g. a
+        // corner a flush porch turned into a mid-wall point) so the outline
+        // stays minimal, then re-sync dimensioning state.
+        self.clean_envelope_collinear();
         self.commit_to_ber()?;
         // Ask about collinearity ONLY for the porch's new walls — e.g. whether
         // a new porch front lines up with an earlier one. We never assume it;
@@ -1140,14 +1141,43 @@ impl AppController {
         }
         .map_err(|e| format!("{}", e))?;
         println!("Trim: {} new param(s) {:?}", minted.len(), minted);
-        let active = self.floor_plan.all_active_params();
-        self.dimensioning
-            .known_params
-            .retain(|p| active.contains(p));
+        self.clean_envelope_collinear();
         self.commit_to_ber()?;
         self.maybe_start_dimensioning();
         self.push_history_snapshot(undo_snap);
         Ok(())
+    }
+
+    /// After a committed extend/trim splice, drop the collinear vertices it left
+    /// redundant — what matters is the resulting ENVELOPE, not that a porch was
+    /// added separately. (A flush porch turns its attach corner into a mid-wall
+    /// point; that's spurious.) Surviving vertices keep their IDs, so we just
+    /// re-sync the dimensioning state to the params/vertices that remain.
+    ///
+    /// `preserve` is where deliberately-placed subdivision vertices go — e.g. a
+    /// point marking a change of flooring type along an otherwise-straight wall,
+    /// which is collinear but NOT spurious. None exist yet, so it's empty; when
+    /// that feature lands, those vertex IDs are passed here and kept.
+    fn clean_envelope_collinear(&mut self) {
+        let preserve: HashSet<VertexId> = HashSet::new();
+        let removed = self.floor_plan.remove_collinear_vertices(&preserve);
+        if !removed.is_empty() {
+            println!(
+                "Cleanup: removed {} spurious collinear vertex/vertices {:?}",
+                removed.len(),
+                removed
+            );
+        }
+        let active = self.floor_plan.all_active_params();
+        self.dimensioning
+            .known_params
+            .retain(|p| active.contains(p));
+        self.dimensioning
+            .dimensioned_walls
+            .retain(|v| self.floor_plan.find_vertex(*v).is_some());
+        self.dimensioning
+            .skipped_walls
+            .retain(|v| self.floor_plan.find_vertex(*v).is_some());
     }
 
     /// Begin a provisional curved wall (shared by `ExtendCurve`/`TrimCurve`).
@@ -1636,6 +1666,56 @@ mod trim_collapse_tests {
                 (a.x - b.x).abs() > 1e-3 && (a.y - b.y).abs() > 1e-3
             })
             .count()
+    }
+
+    /// Extending a porch flush at a corner leaves that corner mid-wall
+    /// (collinear). Since only the envelope matters, the controller cleans it
+    /// up after the splice — so the outline has no spurious collinear vertex.
+    #[test]
+    fn extend_porch_at_corner_cleans_the_spurious_vertex() {
+        let mut c = AppController::new(crate::engine::open_db(":memory:").unwrap());
+        let square = vec![
+            Point2f32::new(0.0, 0.0),
+            Point2f32::new(10.0, 0.0),
+            Point2f32::new(10.0, 10.0),
+            Point2f32::new(0.0, 10.0),
+            Point2f32::new(0.2, 0.2),
+        ];
+        c.floor_plan = FloorPlan::from_points_to_orthogonal(&square, 0.5, true).unwrap();
+        c.dimensioning.scale_set = true;
+        c.dimensioning.known_params = c.floor_plan.all_active_params();
+        c.set_edit_mode(EditTools::ExtendOrtho);
+        // Freehand porch flush at corner (10,10).
+        let porch = vec![
+            Point2f32::new(10.3, 10.2),
+            Point2f32::new(10.1, 14.1),
+            Point2f32::new(5.8, 13.9),
+            Point2f32::new(6.1, 10.3),
+        ];
+        c.apply_extend_stroke(&porch).unwrap();
+
+        let ring = &c.floor_plan.polygons()[0];
+        // The flush corner is gone — the right wall is one straight segment.
+        assert!(
+            !ring
+                .iter()
+                .any(|q| (q.x - 10.0).abs() < 1e-2 && (q.y - 10.0).abs() < 1e-2),
+            "the flush corner should be cleaned from the envelope, ring={ring:?}"
+        );
+        assert_eq!(diag_edges(&c), 0, "envelope stays orthogonal");
+        assert!(c.floor_plan.validate_simple().is_ok());
+        // No collinear vertex remains.
+        let n = ring.len();
+        let collinear = (0..n)
+            .filter(|&i| {
+                let (pr, cu, nx) = (ring[(i + n - 1) % n], ring[i], ring[(i + 1) % n]);
+                let (ux, uy) = (cu.x - pr.x, cu.y - pr.y);
+                let (vx, vy) = (nx.x - cu.x, nx.y - cu.y);
+                let len = ((ux * ux + uy * uy).sqrt() * (vx * vx + vy * vy).sqrt()).max(1e-9);
+                (ux * vy - uy * vx).abs() / len < 1e-3 && (ux * vx + uy * vy) > 0.0
+            })
+            .count();
+        assert_eq!(collinear, 0, "no spurious collinear vertices remain");
     }
 
     fn ring_area(c: &AppController) -> f32 {

@@ -526,6 +526,42 @@ impl ParametricPlan {
         true
     }
 
+    /// Drop vertices the outline doesn't need: points sitting collinear between
+    /// their neighbours, which a splice can leave behind (e.g. a porch attached
+    /// flush at a corner turns that corner into a mid-wall point). Vertices in
+    /// `preserve` are kept even when collinear — for deliberately-placed
+    /// subdivision points along a straight wall (a change of flooring type, an
+    /// opening, etc.). Surviving vertices keep their IDs/expressions, and the
+    /// merged wall stays axis-aligned because its endpoints already shared the
+    /// coordinate; the caller should re-sync its dimensioning state to the
+    /// remaining active parameters. Returns the removed vertex IDs.
+    pub fn remove_collinear_vertices(&mut self, preserve: &HashSet<VertexId>) -> Vec<VertexId> {
+        let mut removed = Vec::new();
+        for ring_idx in 0..self.rings.len() {
+            // Re-scan after each removal — indices shift and a removal can make
+            // a neighbour newly collinear.
+            loop {
+                let n = self.rings[ring_idx].len();
+                if n <= 3 {
+                    break;
+                }
+                let pts = self.ring_points(ring_idx);
+                let target = (0..n).find(|&i| {
+                    !preserve.contains(&self.rings[ring_idx][i].id)
+                        && is_collinear_vertex(pts[(i + n - 1) % n], pts[i], pts[(i + 1) % n])
+                });
+                let Some(i) = target else { break };
+                let vid = self.rings[ring_idx][i].id;
+                if self.remove_vertex(ring_idx, i) {
+                    removed.push(vid);
+                } else {
+                    break;
+                }
+            }
+        }
+        removed
+    }
+
     /// Collapse a TRIM cut wall to zero by removing its cut-point vertex.
     /// `controlled_param` identifies the wall's adjustable endpoint (the cut
     /// point). Only allowed when that vertex is a genuine trim cut — adjacent to
@@ -1537,9 +1573,28 @@ fn ring_is_axis_aligned(points: &[Point2f32]) -> bool {
 
 /// General simple-polygon check for rings that contain non-axis-aligned edges:
 /// at least 3 vertices, every edge has positive length, and no pair of
-/// non-adjacent edges properly intersects (crossings or interior touches).
-/// Accepts diagonal edges; the axis-aligned variant is a stricter, faster
-/// special case for orthogonal rings.
+/// Whether `cur` lies on — and strictly between the ends of — the straight
+/// line from `prev` to `next`, so removing it wouldn't change the outline.
+/// Uses the normalized cross product (≈ |sin| of the turn angle), so it's
+/// scale-free and rejects a genuine curve facet (which turns by several
+/// degrees); the positive dot product excludes a spike/fold doubling back.
+fn is_collinear_vertex(prev: Point2f32, cur: Point2f32, next: Point2f32) -> bool {
+    let (ux, uy) = (cur.x - prev.x, cur.y - prev.y);
+    let (vx, vy) = (next.x - cur.x, next.y - cur.y);
+    let lu = (ux * ux + uy * uy).sqrt();
+    let lv = (vx * vx + vy * vy).sqrt();
+    if lu < 1e-9 || lv < 1e-9 {
+        return false;
+    }
+    let sin_turn = (ux * vy - uy * vx).abs() / (lu * lv);
+    let dot = ux * vx + uy * vy;
+    sin_turn <= 1e-3 && dot > 0.0
+}
+
+/// Simplicity check that tolerates diagonal edges: errors if any two
+/// non-adjacent edges properly intersect (crossings or interior touches).
+/// The axis-aligned variant is a stricter, faster special case for orthogonal
+/// rings.
 fn check_simple_general(points: &[Point2f32]) -> Result<(), String> {
     let n = points.len();
     if n < 3 {
