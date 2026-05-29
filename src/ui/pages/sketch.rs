@@ -3,11 +3,13 @@ use egui::Pos2;
 use strum::IntoEnumIterator;
 
 use crate::controller::app_controller::{
-    DimensionPromptUiData, EditDragPromptUiData, VertexDropPromptUiData,
+    DimensionPromptUiData, EditDragPromptUiData, ExposureSelection, VertexDropPromptUiData,
+    WallExposureView,
 };
 use crate::ui::pages::events::UiEvent;
 use crate::ui::render;
 use crate::ui::render::ViewParams;
+use datatypes::ber::structural::WallExposure;
 
 /// Parse a dimension expression. Supports:
 /// - A single non-negative number: `"4.2"`, `"0.5"`, `"0"`
@@ -240,6 +242,34 @@ pub enum SketchEvent {
         world_x: f64,
         world_y: f64,
     },
+    /// Toggle wall-exposure mode: when on, tapping an outline wall selects it
+    /// (and the section handles), the type buttons mark the selected range.
+    SetExposureMode(bool),
+    /// Primary press in exposure mode: grab a selection handle if near one,
+    /// else select the wall under the pointer.
+    ExposurePointerDown {
+        world_x: f64,
+        world_y: f64,
+        tol: f64,
+    },
+    /// Drag the grabbed selection handle along the wall.
+    ExposurePointerDrag {
+        world_x: f64,
+        world_y: f64,
+    },
+    /// Release the selection handle.
+    ExposurePointerUp,
+    /// Set the section selection range directly (typed-distance path).
+    SetExposureSectionRange {
+        start_m: f32,
+        end_m: f32,
+    },
+    /// Assign an exposure type to the current section selection.
+    SetWallExposure(WallExposure),
+    /// Remove all exposure sections from the selected wall.
+    ClearWallExposure,
+    /// Mark every outline wall not yet set as exposed.
+    SetAllRemainingExposed,
 }
 
 #[derive(Default)]
@@ -280,6 +310,14 @@ impl SketchPage {
         // The two candidate regions of a pending cut (world coords); when
         // non-empty the user taps one to pick it as the living area.
         pending_cut_regions: &[Vec<(f64, f64)>],
+        // Wall-exposure mode + the outline perimeter walls (world coords) with
+        // their exposure sections, the current section selection on the selected
+        // wall, and the typed start/end input buffers.
+        exposure_mode: bool,
+        exposure_walls: &[WallExposureView],
+        exposure_selection: Option<ExposureSelection>,
+        exposure_start_input: &mut String,
+        exposure_end_input: &mut String,
         edit_selected_wall: Option<((f64, f64), (f64, f64))>,
         edit_selected_vertex: Option<(f64, f64)>,
         edit_drag_prompt: Option<EditDragPromptUiData>,
@@ -364,6 +402,20 @@ impl SketchPage {
                     mode,
                     view,
                     pending_cut_regions,
+                );
+
+                // Wall exposure: colour each outline wall by its heat-loss class
+                // (brighter in exposure mode; the selected wall is haloed).
+                render::render_wall_exposure(
+                    &painter,
+                    rect,
+                    ber,
+                    current_storey_idx,
+                    mode,
+                    view,
+                    exposure_walls,
+                    exposure_selection.as_ref(),
+                    exposure_mode,
                 );
 
                 // Edit-mode selection highlight: paint the selected wall
@@ -585,6 +637,54 @@ impl SketchPage {
                     }
                 }
 
+                // Exposure mode: a tap selects the wall under the pointer; a
+                // primary drag near a selection handle slides that handle along
+                // the wall. Takes priority over stroke/edit input (suppressed via
+                // `primary_available` above).
+                if exposure_mode && !cut_pending {
+                    if let Some((min_xy, max_xy)) = ber.and_then(|b| {
+                        b.storeys
+                            .get(current_storey_idx)
+                            .and_then(crate::ui::render::storey_2d::bounding_box)
+                    }) {
+                        let t = crate::ui::render::fit_transform(rect, min_xy, max_xy, view);
+                        let tol_world = (12.0 / t.scale()) as f64;
+                        if response.drag_started_by(egui::PointerButton::Primary) {
+                            if let Some(pos) = response.interact_pointer_pos() {
+                                let (wx, wy) = t.inverse(pos.x, pos.y);
+                                on_event(UiEvent::Sketch(SketchEvent::ExposurePointerDown {
+                                    world_x: wx,
+                                    world_y: wy,
+                                    tol: tol_world,
+                                }));
+                            }
+                        }
+                        if response.dragged_by(egui::PointerButton::Primary) {
+                            if let Some(pos) = response.interact_pointer_pos() {
+                                let (wx, wy) = t.inverse(pos.x, pos.y);
+                                on_event(UiEvent::Sketch(SketchEvent::ExposurePointerDrag {
+                                    world_x: wx,
+                                    world_y: wy,
+                                }));
+                            }
+                        }
+                        if response.drag_stopped_by(egui::PointerButton::Primary) {
+                            on_event(UiEvent::Sketch(SketchEvent::ExposurePointerUp));
+                        }
+                        // A plain tap (no drag) still selects the wall under it.
+                        if response.clicked_by(egui::PointerButton::Primary) {
+                            if let Some(pos) = response.interact_pointer_pos() {
+                                let (wx, wy) = t.inverse(pos.x, pos.y);
+                                on_event(UiEvent::Sketch(SketchEvent::ExposurePointerDown {
+                                    world_x: wx,
+                                    world_y: wy,
+                                    tol: tol_world,
+                                }));
+                            }
+                        }
+                    }
+                }
+
                 // Primary-button input: stroke drawing OR Edit-mode
                 // click/drag, depending on `edit_tool`. Both gated on
                 // 2D mode and "no overlay is open" (review / pending
@@ -593,7 +693,8 @@ impl SketchPage {
                     && !reviewing
                     && !pending_redraw
                     && !dim_prompting
-                    && !cut_pending;
+                    && !cut_pending
+                    && !exposure_mode;
 
                 if primary_available && !matches!(edit_tool, EditTools::Edit) {
                     if response.drag_started_by(egui::PointerButton::Primary) {
@@ -805,6 +906,15 @@ impl SketchPage {
                         );
                     } else if reviewing {
                         Self::review_toolbar(ui, review_remaining, &mut on_event);
+                    } else if exposure_mode {
+                        Self::exposure_toolbar(
+                            ui,
+                            exposure_walls,
+                            exposure_selection.as_ref(),
+                            exposure_start_input,
+                            exposure_end_input,
+                            &mut on_event,
+                        );
                     } else if let Some(new_tool) = Self::edit_toolbar(ui, edit_tool, has_floor_plan)
                     {
                         on_event(UiEvent::Sketch(SketchEvent::ChangeEditTool(new_tool)));
@@ -823,6 +933,19 @@ impl SketchPage {
                             .changed()
                         {
                             on_event(UiEvent::Sketch(SketchEvent::SetLivingAreaMode(la)));
+                        }
+                        // Wall-exposure mode toggle: classify the envelope walls
+                        // for heat loss (exposed / semi-exposed / non-heat-loss).
+                        let mut ex = exposure_mode;
+                        if ui
+                            .toggle_value(&mut ex, "🌡 Exposure")
+                            .on_hover_text(
+                                "Mark each storey wall's heat-loss exposure: tap a wall, \
+                                 then pick exposed / semi-exposed / non-heat-loss",
+                            )
+                            .changed()
+                        {
+                            on_event(UiEvent::Sketch(SketchEvent::SetExposureMode(ex)));
                         }
                     }
                     ui.separator();
@@ -1134,6 +1257,91 @@ impl SketchPage {
             }
             if ui.button("Skip all").clicked() {
                 on_event(UiEvent::Sketch(SketchEvent::SkipAllCollinearity));
+            }
+        });
+    }
+
+    /// Wall-exposure mode toolbar. With a wall selected: a section selection
+    /// `start–end` (live with the drag handles) plus typed start/end inputs, the
+    /// three type buttons that paint the current selection, and "Clear wall".
+    /// Always: "Set remaining → Exposed" bulk-marks every still-unset wall.
+    fn exposure_toolbar<F: FnMut(UiEvent)>(
+        ui: &mut egui::Ui,
+        walls: &[WallExposureView],
+        selection: Option<&ExposureSelection>,
+        start_input: &mut String,
+        end_input: &mut String,
+        on_event: &mut F,
+    ) {
+        let unset = walls.iter().filter(|w| w.sections.is_empty()).count();
+        ui.horizontal(|ui| {
+            if let Some(sel) = selection {
+                let (lo, hi) = (sel.start_m.min(sel.end_m), sel.start_m.max(sel.end_m));
+                ui.label(
+                    egui::RichText::new(format!(
+                        "Section {lo:.2}–{hi:.2} m (wall {:.2} m):",
+                        sel.length_m
+                    ))
+                    .strong(),
+                );
+                ui.label("start");
+                let rs = ui.add(
+                    egui::TextEdit::singleline(start_input)
+                        .desired_width(46.0)
+                        .hint_text(format!("{lo:.2}")),
+                );
+                ui.label("end");
+                let re = ui.add(
+                    egui::TextEdit::singleline(end_input)
+                        .desired_width(46.0)
+                        .hint_text(format!("{hi:.2}")),
+                );
+                let enter = (rs.lost_focus() || re.lost_focus())
+                    && ui.input(|i| i.key_pressed(egui::Key::Enter));
+                if ui.button("Set range").clicked() || enter {
+                    let s = parse_dimension_expression(start_input).unwrap_or(lo);
+                    let e = parse_dimension_expression(end_input).unwrap_or(hi);
+                    on_event(UiEvent::Sketch(SketchEvent::SetExposureSectionRange {
+                        start_m: s,
+                        end_m: e,
+                    }));
+                    start_input.clear();
+                    end_input.clear();
+                }
+                ui.separator();
+                if ui.button("Exposed").clicked() {
+                    on_event(UiEvent::Sketch(SketchEvent::SetWallExposure(
+                        WallExposure::Exposed,
+                    )));
+                }
+                if ui.button("Semi-exposed").clicked() {
+                    on_event(UiEvent::Sketch(SketchEvent::SetWallExposure(
+                        WallExposure::SemiExposed,
+                    )));
+                }
+                if ui.button("Non-heat-loss").clicked() {
+                    on_event(UiEvent::Sketch(SketchEvent::SetWallExposure(
+                        WallExposure::NonHeatLoss,
+                    )));
+                }
+                if ui.button("Clear wall").clicked() {
+                    on_event(UiEvent::Sketch(SketchEvent::ClearWallExposure));
+                }
+            } else {
+                ui.label(
+                    egui::RichText::new("Tap a wall to mark its exposure")
+                        .color(egui::Color32::from_rgb(255, 200, 60)),
+                );
+            }
+            ui.separator();
+            if ui
+                .add_enabled(
+                    unset > 0,
+                    egui::Button::new(format!("Set remaining {unset} → Exposed")),
+                )
+                .clicked()
+            {
+                on_event(UiEvent::Sketch(SketchEvent::SetAllRemainingExposed));
             }
         });
     }

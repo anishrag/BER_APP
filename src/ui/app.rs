@@ -39,6 +39,9 @@ pub struct SketchState {
     pub vertex_drop_inputs: [String; 4],
     /// Last error from `apply_vertex_measurement`.
     pub vertex_drop_error: Option<String>,
+    /// Backing strings for the exposure section's typed start/end inputs.
+    pub exposure_start_input: String,
+    pub exposure_end_input: String,
 }
 
 pub struct SplashState {
@@ -166,6 +169,9 @@ impl eframe::App for BerApp {
                     living_area_wall_labels,
                     active_living_area,
                     pending_cut_regions,
+                    exposure_mode,
+                    exposure_walls,
+                    exposure_selection,
                     edit_selected_wall,
                     edit_selected_vertex,
                     edit_drag_prompt,
@@ -199,6 +205,9 @@ impl eframe::App for BerApp {
                         controller_ref.living_area_wall_labels(),
                         controller_ref.active_living_area_index(),
                         controller_ref.pending_cut_regions(),
+                        controller_ref.exposure_mode(),
+                        controller_ref.wall_exposure_views(),
+                        controller_ref.exposure_selection(),
                         controller_ref.edit_selected_wall_positions(),
                         controller_ref.edit_selected_vertex_position(),
                         controller_ref.edit_drag_prompt_for_ui(),
@@ -244,6 +253,11 @@ impl eframe::App for BerApp {
                     &living_area_wall_labels,
                     active_living_area,
                     &pending_cut_regions,
+                    exposure_mode,
+                    &exposure_walls,
+                    exposure_selection,
+                    &mut self.sketch_state.exposure_start_input,
+                    &mut self.sketch_state.exposure_end_input,
                     edit_selected_wall,
                     edit_selected_vertex,
                     edit_drag_prompt,
@@ -358,6 +372,40 @@ impl eframe::App for BerApp {
                                 controller
                                     .borrow_mut()
                                     .choose_cut_region(world_x as f32, world_y as f32);
+                            }
+                            SketchEvent::SetExposureMode(on) => {
+                                controller.borrow_mut().set_exposure_mode(on);
+                            }
+                            SketchEvent::ExposurePointerDown {
+                                world_x,
+                                world_y,
+                                tol,
+                            } => {
+                                controller
+                                    .borrow_mut()
+                                    .exposure_pointer_down(world_x, world_y, tol);
+                            }
+                            SketchEvent::ExposurePointerDrag { world_x, world_y } => {
+                                controller
+                                    .borrow_mut()
+                                    .exposure_pointer_drag(world_x, world_y);
+                            }
+                            SketchEvent::ExposurePointerUp => {
+                                controller.borrow_mut().exposure_pointer_up();
+                            }
+                            SketchEvent::SetExposureSectionRange { start_m, end_m } => {
+                                controller
+                                    .borrow_mut()
+                                    .set_exposure_section_range(start_m, end_m);
+                            }
+                            SketchEvent::SetWallExposure(exposure) => {
+                                controller.borrow_mut().set_wall_exposure(exposure);
+                            }
+                            SketchEvent::ClearWallExposure => {
+                                controller.borrow_mut().clear_wall_exposure();
+                            }
+                            SketchEvent::SetAllRemainingExposed => {
+                                controller.borrow_mut().set_all_remaining_exposed();
                             }
                             SketchEvent::EditMouseDown {
                                 world_x,

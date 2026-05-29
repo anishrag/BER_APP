@@ -25,7 +25,9 @@ pub mod full_house_3d;
 pub mod storey_2d;
 pub mod storey_3d;
 
+use crate::controller::app_controller::{ExposureSelection, WallExposureView};
 use datatypes::ber::ber_struct::Ber;
+use datatypes::ber::structural::WallExposure;
 use domain::sketch::{DisplayMode, SketchMode};
 use eframe::egui;
 use manip_2d_plan::CollinearitySuggestion;
@@ -563,6 +565,113 @@ pub fn render_living_areas(
                     egui::Color32::from_rgb(120, 240, 160),
                 );
             }
+        }
+    }
+}
+
+/// Colour each outline wall's exposure SECTIONS: orange = exposed, amber =
+/// semi-exposed, slate-blue = non-heat-loss. In exposure mode every wall is
+/// shown faint grey first (so un-marked gaps read as grey), the selected wall's
+/// two section handles are drawn, and a legend is shown. Outside the mode only
+/// the coloured sections are drawn.
+#[allow(clippy::too_many_arguments)]
+pub fn render_wall_exposure(
+    painter: &egui::Painter,
+    rect: egui::Rect,
+    ber: Option<&Ber>,
+    current_storey_idx: usize,
+    sketch_mode: SketchMode,
+    view: ViewParams,
+    walls: &[WallExposureView],
+    selection: Option<&ExposureSelection>,
+    exposure_mode: bool,
+) {
+    if !matches!(sketch_mode, SketchMode::Storey2D) || walls.is_empty() {
+        return;
+    }
+    let any_set = walls.iter().any(|w| !w.sections.is_empty());
+    if !exposure_mode && !any_set {
+        return;
+    }
+    let Some(ber) = ber else {
+        return;
+    };
+    let Some(storey) = ber.storeys.get(current_storey_idx) else {
+        return;
+    };
+    let Some((min_xy, max_xy)) = storey_2d::bounding_box(storey) else {
+        return;
+    };
+    let t = fit_transform(rect, min_xy, max_xy, view);
+
+    let exposed = egui::Color32::from_rgb(255, 140, 40);
+    let semi = egui::Color32::from_rgb(240, 205, 40);
+    let non = egui::Color32::from_rgb(95, 145, 215);
+    let grey = egui::Color32::from_rgb(150, 150, 150);
+    let width = if exposure_mode { 5.0 } else { 3.5 };
+    let color_of = |e: WallExposure| match e {
+        WallExposure::Exposed => exposed,
+        WallExposure::SemiExposed => semi,
+        WallExposure::NonHeatLoss => non,
+    };
+    // Point at distance `d` (metres) along wall a→b of length `len`, in screen.
+    let along = |a: (f64, f64), b: (f64, f64), len: f32, d: f32| {
+        let f = if len > 1e-6 { (d / len) as f64 } else { 0.0 };
+        t.apply(a.0 + f * (b.0 - a.0), a.1 + f * (b.1 - a.1))
+    };
+
+    for w in walls {
+        // Faint full wall in mode, so un-marked gaps stay visible under the
+        // coloured sections drawn on top.
+        if exposure_mode {
+            painter.line_segment(
+                [t.apply(w.a.0, w.a.1), t.apply(w.b.0, w.b.1)],
+                egui::Stroke::new(width, grey),
+            );
+        }
+        for s in &w.sections {
+            let pa = along(w.a, w.b, w.length_m, s.start_m);
+            let pb = along(w.a, w.b, w.length_m, s.end_m);
+            painter.line_segment([pa, pb], egui::Stroke::new(width, color_of(s.exposure)));
+        }
+    }
+
+    // Selected wall's section handles.
+    if let Some(sel) = selection {
+        let hs = along(sel.a, sel.b, sel.length_m, sel.start_m);
+        let he = along(sel.a, sel.b, sel.length_m, sel.end_m);
+        for p in [hs, he] {
+            painter.circle_filled(p, 6.0, egui::Color32::WHITE);
+            painter.circle_stroke(
+                p,
+                6.0,
+                egui::Stroke::new(2.0, egui::Color32::from_rgb(40, 40, 40)),
+            );
+        }
+    }
+
+    if exposure_mode {
+        let legend = [
+            ("Exposed", exposed),
+            ("Semi-exposed", semi),
+            ("Non-heat-loss", non),
+            ("Unset", grey),
+        ];
+        let mut y = rect.top() + 10.0;
+        for (label, color) in legend {
+            let p = egui::pos2(rect.left() + 12.0, y);
+            painter.line_segment(
+                [p, egui::pos2(p.x + 22.0, p.y)],
+                egui::Stroke::new(4.0, color),
+            );
+            painter.text(
+                egui::pos2(p.x + 28.0, p.y),
+                egui::Align2::LEFT_CENTER,
+                label,
+                egui::FontId::proportional(12.0),
+                color,
+            );
+            y += 18.0;
         }
     }
 }

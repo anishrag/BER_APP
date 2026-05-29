@@ -6,7 +6,10 @@
 // record/persistence, collinearity review, sketch/stroke handling).
 mod dimensioning;
 mod editing;
+mod exposure;
 mod living_areas;
+
+pub use exposure::{ExposureSection, ExposureSelection, SectionHandle, WallExposureView};
 
 use chrono::NaiveDate;
 use std::sync::mpsc::Sender;
@@ -16,13 +19,13 @@ use crate::engine::dataloader::DataLoader;
 use crate::engine::Db;
 use datatypes::ber::ber_struct::Ber;
 use datatypes::ber::common::ItemId;
-use datatypes::ber::structural::{FloorRegions, Storey};
+use datatypes::ber::structural::{FloorRegions, Storey, WallExposure, WallRegions};
 use domain::points::{Point2f32, Point2f64};
 use domain::sketch::{DisplayMode, EditTools, SketchMode};
 use manip_2d_plan::{CollinearitySuggestion, FloorPlan, ParameterAxis, ParameterId, VertexId};
 use sketch::model::Stroke;
 use sketch::SketchEngine;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 /// Default storey ceiling height in meters, used as a placeholder until the UI
 /// collects it from the assessor.
@@ -261,6 +264,12 @@ struct SketchSnapshot {
     /// pre-living-area snapshots still load (as a storey with no living areas).
     #[serde(default)]
     living_areas: Vec<ShapeSnapshot>,
+    // NB: wall exposure is NOT stored here — `Storey.walls` (the derived
+    // `WallRegions`, part of the serialized `Ber`) is the single source of
+    // truth for it. The editor's runtime section model is reconstructed from
+    // those regions on load (see `restore_sketch_state`). `sketch_state` only
+    // holds what the resolved BER geometry can't represent (the parametric
+    // model, collinearity equivalences, dimensioning).
 }
 
 /// Serializable per-shape sketch state — the outline and each living area share
@@ -354,6 +363,24 @@ pub struct AppController {
     /// living area (rather than replacing the outline), and the other tools act
     /// on the most-recent living area. Toggled by the UI.
     living_area_mode: bool,
+    /// True when the editor is in wall-exposure mode: tapping an outline wall
+    /// selects it, and the type buttons mark it exposed/semi/non-heat-loss.
+    /// Toggled by the UI.
+    exposure_mode: bool,
+    /// In exposure mode, the outline wall (by stable start `VertexId`) the user
+    /// last tapped — the target of the next type assignment. `None` when none
+    /// is selected.
+    selected_exposure_wall: Option<VertexId>,
+    /// Current section selection `(start_m, end_m)` on the selected wall (metres
+    /// from its start vertex), set by tapping a wall (defaults to the whole
+    /// wall), dragging a handle, or typing. Transient — not persisted/undone.
+    exposure_sel: Option<(f32, f32)>,
+    /// Which selection handle a canvas drag is currently moving. Transient.
+    exposure_drag: Option<SectionHandle>,
+    /// Exposure SECTIONS of each OUTLINE perimeter wall, keyed by the wall's
+    /// stable start `VertexId` (survives edits). Un-marked length defaults to
+    /// `Exposed` when derived into BER `WallRegions`.
+    wall_sections: HashMap<VertexId, Vec<ExposureSection>>,
     /// A straight CUT line has split the storey into two candidate regions; the
     /// user picks which becomes the living area by tapping inside it. Transient
     /// (not persisted / not in undo history); `None` when nothing is awaiting a
@@ -402,6 +429,8 @@ pub struct HistorySnapshot {
     living_areas: Vec<ShapeSlot>,
     active: ActiveShape,
     living_area_mode: bool,
+    /// Per-wall exposure sections, so marking/clearing exposure is undoable.
+    wall_sections: HashMap<VertexId, Vec<ExposureSection>>,
 }
 
 /// Edit-mode click/drag state.
@@ -493,6 +522,11 @@ impl AppController {
             outline: ShapeSlot::default(),
             living_areas: Vec::new(),
             living_area_mode: false,
+            exposure_mode: false,
+            selected_exposure_wall: None,
+            exposure_sel: None,
+            exposure_drag: None,
+            wall_sections: HashMap::new(),
             pending_cut: None,
             edit_state: EditState::default(),
             edit_drag_prompt: None,
@@ -521,6 +555,7 @@ impl AppController {
             living_areas: self.living_areas.clone(),
             active: self.active,
             living_area_mode: self.living_area_mode,
+            wall_sections: self.wall_sections.clone(),
         }
     }
 
@@ -533,6 +568,7 @@ impl AppController {
         self.living_areas = snap.living_areas;
         self.active = snap.active;
         self.living_area_mode = snap.living_area_mode;
+        self.wall_sections = snap.wall_sections;
         // In-flight prompts no longer match the restored state — clear.
         self.edit_drag_prompt = None;
         self.vertex_drop_prompt = None;
@@ -701,6 +737,11 @@ impl AppController {
         self.living_areas = Vec::new();
         self.active = ActiveShape::Outline;
         self.living_area_mode = false;
+        self.exposure_mode = false;
+        self.selected_exposure_wall = None;
+        self.exposure_sel = None;
+        self.exposure_drag = None;
+        self.wall_sections = HashMap::new();
         self.outline = ShapeSlot::default();
         let Some(storey) = storey else {
             self.floor_plan = FloorPlan::default();
@@ -726,6 +767,10 @@ impl AppController {
                             current_prompt: None,
                         },
                     };
+                    // Exposure isn't in the snapshot — reconstruct the runtime
+                    // section model from the persisted `WallRegions` (the source
+                    // of truth). Walls with no region stay unset.
+                    self.wall_sections = self.sections_from_wall_regions(&storey.walls);
                     self.floor_plan = self.outline.floor_plan.clone();
                     self.dimensioning = self.outline.dimensioning.clone();
                     return;
@@ -760,6 +805,9 @@ impl AppController {
             floor_plan: self.floor_plan.clone(),
             dimensioning: self.dimensioning.clone(),
         };
+        // Recover exposure from any persisted wall regions (geometry-matched to
+        // the rebuilt walls).
+        self.wall_sections = self.sections_from_wall_regions(&storey.walls);
     }
 
     /// Snapshot of the BER currently being edited, for the UI to render.
@@ -801,6 +849,39 @@ impl AppController {
             })
             .collect();
 
+        // Derive the heat-loss walls from the outline perimeter. ONLY walls the
+        // user has marked become regions — an un-marked wall produces NO region
+        // (it stays "unset", and `WallRegions` is the single source of truth, so
+        // that distinction survives reload). A marked wall is split into one
+        // vertical `WallRegion` per section (sub-segment endpoints interpolated
+        // by distance) extruded to `DEFAULT_CEILING_HEIGHT_M` — the same
+        // provisional height floors use — until real heights are entered.
+        // Computed before the mutable `record` borrow below.
+        let wall_segments: Vec<(Point2f64, Point2f64, WallExposure)> = self
+            .outline
+            .floor_plan
+            .perimeter_walls()
+            .into_iter()
+            .flat_map(|(vid, a, b)| {
+                let sections = match self.wall_sections.get(&vid) {
+                    Some(s) if !s.is_empty() => s,
+                    _ => return Vec::new(), // un-marked wall → no region
+                };
+                let len = ((b.x - a.x).powi(2) + (b.y - a.y).powi(2)).sqrt();
+                let lerp = move |d: f32| {
+                    let t = if len > 1e-6 { d / len } else { 0.0 };
+                    Point2f64::new(
+                        (a.x + t * (b.x - a.x)) as f64,
+                        (a.y + t * (b.y - a.y)) as f64,
+                    )
+                };
+                exposure::wall_coverage(len, sections)
+                    .into_iter()
+                    .map(move |(s, e, exposure)| (lerp(s), lerp(e), exposure))
+                    .collect::<Vec<_>>()
+            })
+            .collect();
+
         // Persist the editable parametric model + dimensioning of the outline
         // AND every living area, so reopening keeps equivalences, dimensions,
         // and all drawn living areas. `floors` is the derived view; this
@@ -828,6 +909,18 @@ impl AppController {
                 None,
                 None,
             );
+        }
+        if !wall_segments.is_empty() {
+            // Re-derive preserving fabric properties: split pieces inherit the
+            // construction of the region they were carved from; only exposure
+            // changes per section.
+            let walls = WallRegions::rebuild_preserving(
+                wall_segments,
+                &record.data.storeys[0].walls,
+                0.0,
+                DEFAULT_CEILING_HEIGHT_M,
+            );
+            record.data.storeys[0].walls = walls;
         }
         match json {
             Ok(j) => record.data.storeys[0].sketch_state = Some(j),
@@ -2336,6 +2429,341 @@ mod trim_collapse_tests {
             1,
             "only the cut wall's parameter remains to dimension (total={total}, known={known})"
         );
+    }
+
+    /// Helper: a 10×10 dimensioned storey with a BER record, ready for exposure
+    /// marking. Returns the controller.
+    #[cfg(test)]
+    fn dimensioned_square_controller() -> AppController {
+        let p = |x: f32, y: f32| Point2f32::new(x, y);
+        let mut c = AppController::new(crate::engine::open_db(":memory:").unwrap());
+        let _ = c.create_ber(
+            "T".into(),
+            chrono::NaiveDate::from_ymd_opt(2026, 1, 1).unwrap(),
+        );
+        c.floor_plan = FloorPlan::from_points_to_orthogonal(
+            &[
+                p(0., 0.),
+                p(10., 0.),
+                p(10., 10.),
+                p(0., 10.),
+                p(0.05, 0.05),
+            ],
+            0.1,
+            true,
+        )
+        .unwrap();
+        c.dimensioning.scale_set = true;
+        c.dimensioning.known_params = c.floor_plan.all_active_params();
+        c.commit_to_ber().unwrap();
+        c
+    }
+
+    /// Tapping a wall in exposure mode selects it (whole-wall selection);
+    /// assigning a type stores a full-length section AND derives a BER
+    /// `WallRegion` (vertical plane, default ceiling height) of that exposure.
+    /// Unmarked walls default to `Exposed`.
+    #[test]
+    fn marking_a_wall_sets_exposure_and_derives_a_ber_wall() {
+        let mut c = dimensioned_square_controller();
+        let walls = c.outline.floor_plan.perimeter_walls();
+        assert!(walls.len() >= 4, "square has 4 perimeter walls");
+        let (vid0, a0, b0) = walls[0];
+        let mid = ((a0.x + b0.x) * 0.5, (a0.y + b0.y) * 0.5);
+
+        c.set_exposure_mode(true);
+        c.exposure_pointer_down(mid.0 as f64, mid.1 as f64, 0.5);
+        assert_eq!(c.selected_exposure_wall, Some(vid0), "tap selects the wall");
+        c.set_wall_exposure(WallExposure::SemiExposed);
+        let secs = c.wall_sections.get(&vid0).expect("wall0 has a section");
+        assert_eq!(secs.len(), 1);
+        assert_eq!(secs[0].exposure, WallExposure::SemiExposed);
+
+        // Only the MARKED wall derives a region — un-marked walls produce none.
+        let storey = &c.current_record.as_ref().unwrap().data.storeys[0];
+        assert_eq!(storey.walls.regions.len(), 1, "only the marked wall");
+        let _ = walls;
+        let w0 = &storey.walls.regions[0];
+        assert_eq!(w0.exposure, WallExposure::SemiExposed);
+        assert_eq!(w0.polygon.exterior.len(), 4, "vertical plane = 4 vertices");
+        assert!(w0.polygon.exterior.iter().any(|q| q.z == 0.0));
+        assert!(w0
+            .polygon
+            .exterior
+            .iter()
+            .any(|q| (q.z - DEFAULT_CEILING_HEIGHT_M).abs() < 1e-9));
+    }
+
+    /// A section over PART of a wall derives several regions: the marked range
+    /// plus the un-marked remainder as Exposed, sub-segment lengths summing to
+    /// the wall length.
+    #[test]
+    fn mid_wall_section_splits_into_multiple_regions() {
+        let mut c = dimensioned_square_controller();
+        let (vid0, a0, b0) = c.outline.floor_plan.perimeter_walls()[0];
+        let mid = ((a0.x + b0.x) * 0.5, (a0.y + b0.y) * 0.5);
+        let len = ((b0.x - a0.x).powi(2) + (b0.y - a0.y).powi(2)).sqrt();
+
+        c.set_exposure_mode(true);
+        c.exposure_pointer_down(mid.0 as f64, mid.1 as f64, 0.5);
+        assert_eq!(c.selected_exposure_wall, Some(vid0));
+        // Mark the middle [0.2L, 0.5L] semi-exposed (typed-range path).
+        c.set_exposure_section_range(len * 0.2, len * 0.5);
+        c.set_wall_exposure(WallExposure::SemiExposed);
+        // The wall is materialized into 3 explicit sections: Exposed, Semi,
+        // Exposed (the leftovers become their own sections).
+        let secs = c.wall_sections.get(&vid0).expect("wall0 has sections");
+        assert_eq!(secs.len(), 3);
+        assert_eq!(secs[0].exposure, WallExposure::Exposed);
+        assert_eq!(secs[1].exposure, WallExposure::SemiExposed);
+        assert_eq!(secs[2].exposure, WallExposure::Exposed);
+
+        // wall0 is derived first → its 3 sub-regions are regions[0..3].
+        let r = &c.current_record.as_ref().unwrap().data.storeys[0]
+            .walls
+            .regions;
+        assert!(r.len() >= 3);
+        assert_eq!(r[0].exposure, WallExposure::Exposed);
+        assert_eq!(r[1].exposure, WallExposure::SemiExposed);
+        assert_eq!(r[2].exposure, WallExposure::Exposed);
+        let base = |reg: &datatypes::ber::structural::WallRegion| {
+            let e = &reg.polygon.exterior;
+            ((e[1].x - e[0].x).powi(2) + (e[1].y - e[0].y).powi(2)).sqrt()
+        };
+        let l = len as f64;
+        assert!((base(&r[0]) - l * 0.2).abs() < 0.02, "{}", base(&r[0]));
+        assert!((base(&r[1]) - l * 0.3).abs() < 0.02, "{}", base(&r[1]));
+        assert!((base(&r[2]) - l * 0.5).abs() < 0.02, "{}", base(&r[2]));
+    }
+
+    /// Splitting a wall preserves its fabric properties: each piece inherits the
+    /// construction of the region it was carved from; only exposure changes.
+    #[test]
+    fn wall_construction_is_preserved_when_splitting() {
+        use datatypes::ber::structural::WallConstructionType;
+        let mut c = dimensioned_square_controller();
+        let (_, a0, b0) = c.outline.floor_plan.perimeter_walls()[0];
+        let mid = ((a0.x + b0.x) * 0.5, (a0.y + b0.y) * 0.5);
+        let len = ((b0.x - a0.x).powi(2) + (b0.y - a0.y).powi(2)).sqrt();
+
+        c.set_exposure_mode(true);
+        // Mark wall0 whole so it derives to a region we can set a property on.
+        c.exposure_pointer_down(mid.0 as f64, mid.1 as f64, 0.5);
+        c.set_wall_exposure(WallExposure::Exposed);
+        // Set a construction + description on wall0's region (derived first).
+        {
+            let walls = &mut c.current_record.as_mut().unwrap().data.storeys[0].walls;
+            walls.regions[0].construction_type = WallConstructionType::CavityWall;
+            walls.regions[0].base.description = Some("party".into());
+        }
+
+        // Split wall0: mark the middle semi-exposed.
+        c.exposure_pointer_down(mid.0 as f64, mid.1 as f64, 0.5);
+        c.set_exposure_section_range(len * 0.2, len * 0.5);
+        c.set_wall_exposure(WallExposure::SemiExposed);
+
+        // wall0 is now 3 regions (derived first) — all inherit the construction.
+        let r = &c.current_record.as_ref().unwrap().data.storeys[0]
+            .walls
+            .regions;
+        for i in 0..3 {
+            assert_eq!(
+                r[i].construction_type,
+                WallConstructionType::CavityWall,
+                "piece {i} keeps construction"
+            );
+            assert_eq!(r[i].base.description.as_deref(), Some("party"), "piece {i}");
+        }
+        assert_eq!(r[1].exposure, WallExposure::SemiExposed, "middle is semi");
+    }
+
+    /// After splitting a wall, tapping a leftover piece selects just that piece
+    /// (the coverage range under the tap), not the whole wall.
+    #[test]
+    fn tapping_a_split_wall_selects_the_piece_under_the_tap() {
+        let mut c = dimensioned_square_controller();
+        let (_, a0, b0) = c.outline.floor_plan.perimeter_walls()[0];
+        let len = ((b0.x - a0.x).powi(2) + (b0.y - a0.y).powi(2)).sqrt();
+        let along = |d: f32| {
+            let t = d / len;
+            (a0.x + t * (b0.x - a0.x), a0.y + t * (b0.y - a0.y))
+        };
+
+        c.set_exposure_mode(true);
+        // Select the whole wall, mark the middle [0.4L, 0.6L] semi-exposed.
+        let mid = along(len * 0.5);
+        c.exposure_pointer_down(mid.0 as f64, mid.1 as f64, 0.5);
+        c.set_exposure_section_range(len * 0.4, len * 0.6);
+        c.set_wall_exposure(WallExposure::SemiExposed);
+
+        // Tap the LEFT leftover piece → selects (0, 0.4L), not the whole wall.
+        let left = along(len * 0.1);
+        c.exposure_pointer_down(left.0 as f64, left.1 as f64, 0.5);
+        let sel = c.exposure_selection().expect("a piece is selected");
+        assert!(
+            sel.start_m.abs() < 0.05,
+            "left piece starts at 0: {}",
+            sel.start_m
+        );
+        assert!(
+            (sel.end_m - len * 0.4).abs() < 0.05,
+            "left piece ends at the section start: {}",
+            sel.end_m
+        );
+
+        // Tap the semi piece → selects (0.4L, 0.6L).
+        let centre = along(len * 0.5);
+        c.exposure_pointer_down(centre.0 as f64, centre.1 as f64, 0.5);
+        let sel2 = c.exposure_selection().unwrap();
+        assert!((sel2.start_m - len * 0.4).abs() < 0.05);
+        assert!((sel2.end_m - len * 0.6).abs() < 0.05);
+    }
+
+    /// Dragging a selection handle moves that end of the section selection.
+    #[test]
+    fn drag_updates_the_section_selection() {
+        let mut c = dimensioned_square_controller();
+        let (_, a0, b0) = c.outline.floor_plan.perimeter_walls()[0];
+        let mid = ((a0.x + b0.x) * 0.5, (a0.y + b0.y) * 0.5);
+        let len = ((b0.x - a0.x).powi(2) + (b0.y - a0.y).powi(2)).sqrt();
+
+        c.set_exposure_mode(true);
+        c.exposure_pointer_down(mid.0 as f64, mid.1 as f64, 0.5); // select, sel = (0, len)
+        let sel0 = c.exposure_selection().expect("a wall is selected");
+        assert!(
+            (sel0.end_m - len).abs() < 0.01,
+            "end starts at the far corner"
+        );
+        // Grab the END handle (at the far corner) and drag it to the midpoint.
+        c.exposure_pointer_down(b0.x as f64, b0.y as f64, 0.5);
+        c.exposure_pointer_drag(mid.0 as f64, mid.1 as f64);
+        let sel1 = c.exposure_selection().unwrap();
+        assert!(
+            (sel1.end_m - len * 0.5).abs() < 0.1,
+            "dragged end to mid: {}",
+            sel1.end_m
+        );
+        c.exposure_pointer_up();
+    }
+
+    /// Exposure is reconstructed on reload from the persisted `WallRegions`
+    /// (the single source of truth) — NOT duplicated into `sketch_state`. A
+    /// marked wall comes back; un-marked walls stay unset.
+    #[test]
+    fn exposure_reconstructs_from_wall_regions_on_reload() {
+        let mut c = dimensioned_square_controller();
+        let walls = c.outline.floor_plan.perimeter_walls();
+        let (vid0, a0, b0) = walls[0];
+        let mid = ((a0.x + b0.x) * 0.5, (a0.y + b0.y) * 0.5);
+        c.set_exposure_mode(true);
+        c.exposure_pointer_down(mid.0 as f64, mid.1 as f64, 0.5);
+        c.set_wall_exposure(WallExposure::NonHeatLoss); // mark only wall0
+
+        let storey = c.current_record.as_ref().unwrap().data.storeys[0].clone();
+        // Exposure is NOT written into the parametric snapshot.
+        assert!(
+            !storey
+                .sketch_state
+                .as_ref()
+                .unwrap()
+                .contains("NonHeatLoss"),
+            "exposure isn't duplicated into sketch_state"
+        );
+
+        c.wall_sections.clear();
+        c.restore_sketch_state(Some(&storey));
+        // wall0 reconstructed from its region…
+        let secs = c
+            .wall_sections
+            .get(&vid0)
+            .expect("reconstructed from walls");
+        assert_eq!(secs.len(), 1);
+        assert_eq!(secs[0].exposure, WallExposure::NonHeatLoss);
+        // …and the un-marked walls stay unset (no region → no entry).
+        for (vid, _, _) in &walls {
+            if *vid != vid0 {
+                assert!(
+                    c.wall_sections.get(vid).is_none(),
+                    "un-marked wall stays unset on reload"
+                );
+            }
+        }
+    }
+
+    /// A split wall's sections reconstruct exactly from its regions on reload.
+    #[test]
+    fn split_wall_sections_reconstruct_on_reload() {
+        let mut c = dimensioned_square_controller();
+        let (vid0, a0, b0) = c.outline.floor_plan.perimeter_walls()[0];
+        let mid = ((a0.x + b0.x) * 0.5, (a0.y + b0.y) * 0.5);
+        let len = ((b0.x - a0.x).powi(2) + (b0.y - a0.y).powi(2)).sqrt();
+        c.set_exposure_mode(true);
+        c.exposure_pointer_down(mid.0 as f64, mid.1 as f64, 0.5);
+        c.set_exposure_section_range(len * 0.2, len * 0.5);
+        c.set_wall_exposure(WallExposure::SemiExposed); // → 3 sections
+
+        let storey = c.current_record.as_ref().unwrap().data.storeys[0].clone();
+        c.wall_sections.clear();
+        c.restore_sketch_state(Some(&storey));
+        let secs = c.wall_sections.get(&vid0).expect("reconstructed");
+        assert_eq!(secs.len(), 3);
+        assert_eq!(secs[0].exposure, WallExposure::Exposed);
+        assert_eq!(secs[1].exposure, WallExposure::SemiExposed);
+        assert_eq!(secs[2].exposure, WallExposure::Exposed);
+        assert!(
+            (secs[1].start_m - len * 0.2).abs() < 0.02,
+            "{}",
+            secs[1].start_m
+        );
+        assert!(
+            (secs[1].end_m - len * 0.5).abs() < 0.02,
+            "{}",
+            secs[1].end_m
+        );
+    }
+
+    /// "Set remaining → Exposed" fills only walls with no sections yet, leaving
+    /// already-marked walls (semi/non) untouched.
+    #[test]
+    fn set_all_remaining_fills_only_unset_walls() {
+        let mut c = dimensioned_square_controller();
+        let walls = c.outline.floor_plan.perimeter_walls();
+        let (vid0, a0, b0) = walls[0];
+        let mid = ((a0.x + b0.x) * 0.5, (a0.y + b0.y) * 0.5);
+        c.set_exposure_mode(true);
+        c.exposure_pointer_down(mid.0 as f64, mid.1 as f64, 0.5);
+        c.set_wall_exposure(WallExposure::SemiExposed);
+
+        c.set_all_remaining_exposed();
+        assert_eq!(c.wall_sections.len(), walls.len(), "every wall now set");
+        assert_eq!(
+            c.wall_sections.get(&vid0).map(|s| s[0].exposure),
+            Some(WallExposure::SemiExposed),
+            "the marked wall keeps its type"
+        );
+        for (vid, _, _) in &walls {
+            if *vid != vid0 {
+                assert_eq!(
+                    c.wall_sections.get(vid).map(|s| s[0].exposure),
+                    Some(WallExposure::Exposed)
+                );
+            }
+        }
+    }
+
+    /// Assigning an exposure is undoable.
+    #[test]
+    fn undo_reverts_an_exposure_marking() {
+        let mut c = dimensioned_square_controller();
+        let (_, a0, b0) = c.outline.floor_plan.perimeter_walls()[0];
+        let mid = ((a0.x + b0.x) * 0.5, (a0.y + b0.y) * 0.5);
+        c.set_exposure_mode(true);
+        c.exposure_pointer_down(mid.0 as f64, mid.1 as f64, 0.5);
+        assert!(c.wall_sections.is_empty());
+        c.set_wall_exposure(WallExposure::NonHeatLoss);
+        assert_eq!(c.wall_sections.len(), 1);
+        c.undo().unwrap();
+        assert!(c.wall_sections.is_empty(), "undo clears the marking");
     }
 
     /// Guardrail: a dimension that would push a living area OUTSIDE the storey

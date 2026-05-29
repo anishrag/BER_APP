@@ -5,7 +5,7 @@ use serde::{Deserialize, Serialize};
 use super::common::{ConstructionPhase, Item, ItemId, Photo};
 use super::fenestration::{Door, Window};
 
-use domain::points::{Point2f64, Point3f64};
+use domain::points::{point_to_segment_distance, Point2f64, Point3f64};
 #[derive(Debug, Default, Clone, Serialize, Deserialize)]
 pub struct Opes {
     pub doors: Vec<ItemId>,   // references to Door IDs
@@ -326,6 +326,73 @@ pub struct WallRegions {
     pub regions: Vec<WallRegion>,
 }
 
+impl WallRegions {
+    /// Re-derive the storey's walls from `segments` (each a footprint edge
+    /// `(a, b)` with its thermal `exposure`), PRESERVING fabric properties from
+    /// the `previous` regions. Each segment becomes a vertical rectangular plane
+    /// rising from `base_z` to `base_z + height` (4 vertices: a-bottom, b-bottom,
+    /// b-top, a-top). Its construction (`construction_type`, `construction_makeup`,
+    /// `construction_phase`, `description`) is inherited from whichever previous
+    /// region covered the segment's midpoint — so when a wall is split into
+    /// pieces, each piece inherits the parent wall's properties and only the
+    /// `exposure` differs. A fresh segment (no covering region) gets defaults.
+    ///
+    /// NB: per-region `id`, `opes` (openings) and `photos` are NOT carried over
+    /// (they're positional — ambiguous to split); they reset until there's an
+    /// openings model that knows which piece each belongs to.
+    pub fn rebuild_preserving(
+        segments: Vec<(Point2f64, Point2f64, WallExposure)>,
+        previous: &WallRegions,
+        base_z: f64,
+        height: f64,
+    ) -> Self {
+        let top = base_z + height;
+        let regions = segments
+            .into_iter()
+            .map(|(a, b, exposure)| {
+                let polygon = Polygon3D::new(vec![
+                    Point3f64::new(a.x, a.y, base_z),
+                    Point3f64::new(b.x, b.y, base_z),
+                    Point3f64::new(b.x, b.y, top),
+                    Point3f64::new(a.x, a.y, top),
+                ]);
+                let mid = Point2f64::new((a.x + b.x) * 0.5, (a.y + b.y) * 0.5);
+                match previous.region_covering(mid) {
+                    Some(src) => WallRegion {
+                        base: RegionBase {
+                            construction_makeup: src.base.construction_makeup.clone(),
+                            construction_phase: src.base.construction_phase.clone(),
+                            description: src.base.description.clone(),
+                            ..RegionBase::default()
+                        },
+                        polygon,
+                        construction_type: src.construction_type,
+                        exposure,
+                    },
+                    None => WallRegion {
+                        base: RegionBase::default(),
+                        polygon,
+                        construction_type: WallConstructionType::Uninitialised,
+                        exposure,
+                    },
+                }
+            })
+            .collect();
+        Self { regions }
+    }
+
+    /// The region whose base edge (the wall footprint) passes through `p`, used
+    /// to inherit fabric properties when re-deriving. `None` if no region covers
+    /// the point (e.g. a freshly drawn wall).
+    pub fn region_covering(&self, p: Point2f64) -> Option<&WallRegion> {
+        self.regions.iter().find(|r| {
+            let e = &r.polygon.exterior;
+            e.len() >= 2
+                && point_to_segment_distance(p.x, p.y, e[0].x, e[0].y, e[1].x, e[1].y) < 1e-2
+        })
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Room {
     pub id: ItemId,
@@ -386,4 +453,70 @@ pub struct ThermalMassInfo {
     pub partition_walls: ThermalMassCategoryEnum,
     pub external_walls: ThermalMassCategoryEnum,
     pub separating_walls: ThermalMassCategoryEnum,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn rebuild_makes_vertical_planes_with_exposure() {
+        let a = Point2f64::new(0.0, 0.0);
+        let b = Point2f64::new(4.0, 0.0);
+        let walls = WallRegions::rebuild_preserving(
+            vec![(a, b, WallExposure::SemiExposed)],
+            &WallRegions::default(),
+            0.0,
+            2.4,
+        );
+        assert_eq!(walls.regions.len(), 1);
+        let w = &walls.regions[0];
+        assert_eq!(w.exposure, WallExposure::SemiExposed);
+        assert_eq!(w.construction_type, WallConstructionType::Uninitialised);
+        // 4 vertices: base edge then top edge, vertical plane 0 -> 2.4.
+        let ext = &w.polygon.exterior;
+        assert_eq!(ext.len(), 4);
+        assert_eq!((ext[0].x, ext[0].y, ext[0].z), (0.0, 0.0, 0.0));
+        assert_eq!((ext[1].x, ext[1].y, ext[1].z), (4.0, 0.0, 0.0));
+        assert_eq!((ext[2].x, ext[2].y, ext[2].z), (4.0, 0.0, 2.4));
+        assert_eq!((ext[3].x, ext[3].y, ext[3].z), (0.0, 0.0, 2.4));
+    }
+
+    #[test]
+    fn rebuild_inherits_construction_from_covering_region_when_split() {
+        let a = Point2f64::new(0.0, 0.0);
+        let b = Point2f64::new(10.0, 0.0);
+        // A whole-wall region with a non-default construction.
+        let mut previous = WallRegions::rebuild_preserving(
+            vec![(a, b, WallExposure::Exposed)],
+            &WallRegions::default(),
+            0.0,
+            2.4,
+        );
+        previous.regions[0].construction_type = WallConstructionType::CavityWall;
+        previous.regions[0].base.description = Some("party wall".into());
+
+        // Split it into 3 pieces; each should inherit the construction.
+        let split = WallRegions::rebuild_preserving(
+            vec![
+                (a, Point2f64::new(2.0, 0.0), WallExposure::Exposed),
+                (
+                    Point2f64::new(2.0, 0.0),
+                    Point2f64::new(5.0, 0.0),
+                    WallExposure::SemiExposed,
+                ),
+                (Point2f64::new(5.0, 0.0), b, WallExposure::Exposed),
+            ],
+            &previous,
+            0.0,
+            2.4,
+        );
+        assert_eq!(split.regions.len(), 3);
+        for r in &split.regions {
+            assert_eq!(r.construction_type, WallConstructionType::CavityWall);
+            assert_eq!(r.base.description.as_deref(), Some("party wall"));
+        }
+        // Exposure still set per piece.
+        assert_eq!(split.regions[1].exposure, WallExposure::SemiExposed);
+    }
 }

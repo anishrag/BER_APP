@@ -1677,6 +1677,25 @@ impl FloorPlan {
         self.parametric.find_vertex(id)
     }
 
+    /// The outline perimeter as walls: for ring 0, each edge's stable start
+    /// `VertexId` together with its two endpoint coordinates `(a, b)`, in ring
+    /// order. The editor uses this to derive heat-loss wall regions and to key
+    /// per-wall annotations (e.g. exposure) by the stable id, which survives
+    /// edits.
+    pub fn perimeter_walls(&self) -> Vec<(VertexId, Point2f32, Point2f32)> {
+        let ring = self.get_points();
+        let n = ring.len();
+        if n < 2 {
+            return Vec::new();
+        }
+        (0..n)
+            .filter_map(|i| {
+                self.vertex_id_at(0, i)
+                    .map(|vid| (vid, ring[i], ring[(i + 1) % n]))
+            })
+            .collect()
+    }
+
     /// Current length of the wall starting at `(ring, edge_start)` in
     /// whatever units the plan is currently in (pixels before the first
     /// dimension, real units after).
@@ -1919,7 +1938,7 @@ impl FloorPlan {
             for i in 0..n {
                 let a = ring[i];
                 let b = ring[(i + 1) % n];
-                let d = point_to_segment_distance(
+                let d = domain::points::point_to_segment_distance(
                     world_x, world_y, a.x as f64, a.y as f64, b.x as f64, b.y as f64,
                 );
                 if d <= tol && (best.is_none() || d < best.unwrap().0) {
@@ -2088,26 +2107,6 @@ fn snap_open_fixed_ends(pts: &[Point2f32], tol: f32) -> Vec<Point2f32> {
     }
     out.push(last);
     out
-}
-
-/// Perpendicular distance from `(px, py)` to the line segment from
-/// `(ax, ay)` to `(bx, by)`. Returns the distance to the nearest endpoint
-/// when the point projects outside the segment.
-fn point_to_segment_distance(px: f64, py: f64, ax: f64, ay: f64, bx: f64, by: f64) -> f64 {
-    let abx = bx - ax;
-    let aby = by - ay;
-    let apx = px - ax;
-    let apy = py - ay;
-    let ab_len_sq = abx * abx + aby * aby;
-    if ab_len_sq < 1e-12 {
-        return (apx * apx + apy * apy).sqrt();
-    }
-    let t = ((apx * abx + apy * aby) / ab_len_sq).clamp(0.0, 1.0);
-    let proj_x = ax + t * abx;
-    let proj_y = ay + t * aby;
-    let dx = px - proj_x;
-    let dy = py - proj_y;
-    (dx * dx + dy * dy).sqrt()
 }
 
 #[cfg(all(test, feature = "serde"))]

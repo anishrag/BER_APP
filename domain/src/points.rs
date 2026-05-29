@@ -10,3 +10,24 @@ pub type Vector2f64 = nalgebra::Vector2<f64>;
 
 pub type Point2f32 = nalgebra::Point2<f32>;
 pub type Vector2f32 = nalgebra::Vector2<f32>;
+
+/// Distance from point `(px, py)` to the segment `(ax, ay)→(bx, by)`. Returns
+/// the nearest-endpoint distance when the point projects outside the segment
+/// (so it doubles as an on-segment test: `... < tol` is true only for points
+/// within `tol` of the segment AND inside its span). Shared 2D vector math.
+pub fn point_to_segment_distance(px: f64, py: f64, ax: f64, ay: f64, bx: f64, by: f64) -> f64 {
+    let abx = bx - ax;
+    let aby = by - ay;
+    let apx = px - ax;
+    let apy = py - ay;
+    let ab_len_sq = abx * abx + aby * aby;
+    if ab_len_sq < 1e-12 {
+        return (apx * apx + apy * apy).sqrt();
+    }
+    let t = ((apx * abx + apy * aby) / ab_len_sq).clamp(0.0, 1.0);
+    let proj_x = ax + t * abx;
+    let proj_y = ay + t * aby;
+    let dx = px - proj_x;
+    let dy = py - proj_y;
+    (dx * dx + dy * dy).sqrt()
+}
