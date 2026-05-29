@@ -7,15 +7,26 @@ use std::f32::consts::PI;
 
 /// Convert a simplified stroke to an orthogonal polygon and generate base constraints
 pub fn make_orthogonal(points: &[Point2f32], tolerance: f32) -> Result<Vec<Point2f32>, Error> {
+    make_orthogonal_at(points, tolerance, find_dominant_angle(points))
+}
+
+/// Like [`make_orthogonal`] but snaps to a grid aligned with a GIVEN
+/// `base_angle` instead of the stroke's own dominant angle. Used for shapes
+/// whose reference frame is fixed externally — e.g. a living area inside an
+/// axis-aligned storey must snap to the storey's axes (`base_angle = 0`), so a
+/// room drawn partly along a diagonal boundary doesn't tilt the whole shape to
+/// 45°. (The boundary wall is then pulled onto the diagonal separately.)
+pub fn make_orthogonal_at(
+    points: &[Point2f32],
+    tolerance: f32,
+    base_angle: f32,
+) -> Result<Vec<Point2f32>, Error> {
     if points.len() < 3 {
         return Err(Error::InsufficientPoints);
     }
 
-    // First, determine the dominant directions
-    let dominant_angle = find_dominant_angle(points);
-
-    // Snap all points to horizontal/vertical grid aligned with dominant angle
-    let orthogonal_points = snap_to_orthogonal(&points, dominant_angle, tolerance)?;
+    // Snap all points to horizontal/vertical grid aligned with the given angle.
+    let orthogonal_points = snap_to_orthogonal(&points, base_angle, tolerance)?;
 
     // Remove duplicate consecutive points
     let cleaned = remove_duplicates(&orthogonal_points, tolerance);

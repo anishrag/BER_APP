@@ -270,6 +270,35 @@ impl AppController {
         // stay exact.
         self.floor_plan
             .aesthetic_rescale(&self.dimensioning.known_params);
+
+        // Guardrail: a living-area dimension must not push the room OUTSIDE the
+        // storey. (The storey outline itself has nothing to be inside of.)
+        if self.active != ActiveShape::Outline {
+            let tol = self
+                .outline
+                .floor_plan
+                .bounding_box()
+                .map(|((mnx, mny), (mxx, mxy))| {
+                    (((mxx - mnx).powi(2) + (mxy - mny).powi(2)).sqrt() * 0.01).max(1e-3)
+                })
+                .unwrap_or(1e-3);
+            if self
+                .outline
+                .floor_plan
+                .any_point_outside(&self.floor_plan, tol)
+            {
+                self.floor_plan = snapshot;
+                self.dimensioning.scale_set = scale_set_before;
+                self.dimensioning.known_params = known_params_before;
+                self.dimensioning.dimensioned_walls = dimensioned_walls_before;
+                println!("  → REJECTED: would push the living area outside the storey.");
+                return Err(format!(
+                    "{} would push the living area outside the storey — it must stay \
+                     inside the floor plan. Pick a value that fits.",
+                    value
+                ));
+            }
+        }
         self.commit_to_ber()?;
         let post_length = self.floor_plan.wall_length(ring, edge_start);
         println!(
@@ -283,6 +312,7 @@ impl AppController {
             self.dimensioning.dimensioned_walls.len(),
             self.floor_plan.all_active_params().len(),
         );
+        self.warn_if_non_orthogonal("dimension");
         self.compute_next_dimension_prompt();
         self.push_history_snapshot(undo_snap);
         Ok(())

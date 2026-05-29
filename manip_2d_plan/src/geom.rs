@@ -250,9 +250,149 @@ pub fn circular_arc_points(
     pts
 }
 
+/// Twice the signed shoelace area of a ring (sign = winding); callers that
+/// only compare magnitudes use `.abs()`.
+fn ring_signed_area2(pts: &[Point2f32]) -> f32 {
+    let n = pts.len();
+    if n < 3 {
+        return 0.0;
+    }
+    let mut s = 0.0;
+    for i in 0..n {
+        let a = pts[i];
+        let b = pts[(i + 1) % n];
+        s += a.x * b.y - b.x * a.y;
+    }
+    s
+}
+
+/// If segments `a1→a2` and `b1→b2` cross at a single interior point (not at a
+/// shared endpoint, not collinear), return that point. Mirrors the "proper
+/// crossing" case of the polygon simplicity check, but yields the point so the
+/// crossing can be resolved.
+fn segment_crossing(
+    a1: Point2f32,
+    a2: Point2f32,
+    b1: Point2f32,
+    b2: Point2f32,
+) -> Option<Point2f32> {
+    let rx = a2.x - a1.x;
+    let ry = a2.y - a1.y;
+    let sx = b2.x - b1.x;
+    let sy = b2.y - b1.y;
+    let denom = rx * sy - ry * sx;
+    if denom.abs() < 1e-9 {
+        return None; // parallel or collinear
+    }
+    let qpx = b1.x - a1.x;
+    let qpy = b1.y - a1.y;
+    let t = (qpx * sy - qpy * sx) / denom;
+    let u = (qpx * ry - qpy * rx) / denom;
+    let m = 1e-6;
+    if t > m && t < 1.0 - m && u > m && u < 1.0 - m {
+        Some(Point2f32::new(a1.x + t * rx, a1.y + t * ry))
+    } else {
+        None
+    }
+}
+
+/// Remove self-intersections from a closed ring, returning a simple
+/// (non-self-crossing) ring. When two non-adjacent edges cross, the ring folds
+/// into two loops sharing the crossing point; we keep the larger-area loop and
+/// discard the smaller "ear" the fold created, repeating until simple. Returns
+/// the ring unchanged when it's already simple (or can't be reduced).
+///
+/// Used to repair a sub-area whose assembly placed a vertex past an adjacent
+/// wall (e.g. a boundary-hugging loop whose diagonal endpoint landed outside
+/// the room's own side wall), instead of emitting the crossed shape.
+pub fn untangle_ring(points: &[Point2f32]) -> Vec<Point2f32> {
+    let mut ring: Vec<Point2f32> = points.to_vec();
+    // Each pass resolves one crossing (shrinking the ring), so the loop is
+    // bounded by the vertex count.
+    for _ in 0..points.len().max(4) {
+        let n = ring.len();
+        if n < 4 {
+            return ring;
+        }
+        let mut found: Option<(usize, usize, Point2f32)> = None;
+        'scan: for i in 0..n {
+            let a1 = ring[i];
+            let a2 = ring[(i + 1) % n];
+            for j in (i + 2)..n {
+                // The closing edge (n-1 → 0) is adjacent to edge 0; skip it.
+                if i == 0 && j == n - 1 {
+                    continue;
+                }
+                if let Some(x) = segment_crossing(a1, a2, ring[j], ring[(j + 1) % n]) {
+                    found = Some((i, j, x));
+                    break 'scan;
+                }
+            }
+        }
+        let Some((i, j, x)) = found else {
+            return ring; // already simple
+        };
+        // Split at X into two loops, both starting at the crossing:
+        //   loop A = X, ring[i+1 ..= j]
+        //   loop B = X, ring[j+1 ..], ring[0 ..= i]
+        let mut loop_a = vec![x];
+        loop_a.extend_from_slice(&ring[i + 1..=j]);
+        let mut loop_b = vec![x];
+        loop_b.extend_from_slice(&ring[j + 1..n]);
+        loop_b.extend_from_slice(&ring[0..=i]);
+        ring = if ring_signed_area2(&loop_a).abs() >= ring_signed_area2(&loop_b).abs() {
+            loop_a
+        } else {
+            loop_b
+        };
+    }
+    ring
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn untangle_removes_a_self_crossing() {
+        let p = |x, y| Point2f32::new(x, y);
+        // The reported fold: the diagonal's bottom corner (x=2.75) sits LEFT of
+        // the room's left wall (x=2.781), so the diagonal (edge 0) crosses the
+        // left wall (edge 3).
+        let crossed = vec![
+            p(2.750228, 1.0471573),
+            p(3.650228, 2.0471573),
+            p(3.650228, 3.0471573),
+            p(2.7811332, 3.0471573),
+            p(2.7811332, 1.0471573),
+        ];
+        let fixed = untangle_ring(&crossed);
+        // No non-adjacent edge pair crosses any more.
+        let n = fixed.len();
+        assert!(n >= 3, "kept a polygon: {fixed:?}");
+        for i in 0..n {
+            for j in (i + 2)..n {
+                if i == 0 && j == n - 1 {
+                    continue;
+                }
+                assert!(
+                    segment_crossing(fixed[i], fixed[(i + 1) % n], fixed[j], fixed[(j + 1) % n])
+                        .is_none(),
+                    "edges {i} and {j} still cross in {fixed:?}"
+                );
+            }
+        }
+        // Kept the big room body (the three outer corners + the crossing point),
+        // dropped the tiny bottom ear the fold created.
+        assert!(fixed.len() <= 4, "kept the larger loop: {fixed:?}");
+    }
+
+    #[test]
+    fn untangle_leaves_a_simple_ring_untouched() {
+        let p = |x, y| Point2f32::new(x, y);
+        let square = vec![p(0.0, 0.0), p(4.0, 0.0), p(4.0, 4.0), p(0.0, 4.0)];
+        assert_eq!(untangle_ring(&square), square);
+    }
 
     #[test]
     fn project_to_circle_lands_on_radius() {

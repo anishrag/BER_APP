@@ -47,6 +47,21 @@ impl FloorPlan {
         tolerance: f32,
         closed: bool,
     ) -> Result<Self, Error> {
+        Self::from_points_oriented(points, tolerance, closed, None)
+    }
+
+    /// Like [`from_points_to_orthogonal`](Self::from_points_to_orthogonal) but
+    /// orthogonalizes to a FIXED `base_angle` rather than the stroke's own
+    /// dominant angle. `None` = use the dominant angle (the storey-outline
+    /// default); `Some(0.0)` = snap to the world axes — used for living areas so
+    /// a room drawn partly along a diagonal boundary keeps axis-aligned interior
+    /// walls instead of tilting the whole shape to that diagonal's angle.
+    fn from_points_oriented(
+        points: &[Point2f32],
+        tolerance: f32,
+        closed: bool,
+        base_angle: Option<f32>,
+    ) -> Result<Self, Error> {
         let mut simplified = simplification::simplify_stroke(points, tolerance)?;
 
         if closed && simplified.len() > 3 {
@@ -59,7 +74,10 @@ impl FloorPlan {
             simplified.pop();
         }
 
-        let orthog_points = orthogonal::make_orthogonal(&simplified, tolerance)?;
+        let orthog_points = match base_angle {
+            Some(a) => orthogonal::make_orthogonal_at(&simplified, tolerance, a)?,
+            None => orthogonal::make_orthogonal(&simplified, tolerance)?,
+        };
 
         // For a closed polygon, finalize the closing structure before the
         // parametric layer sees it:
@@ -80,7 +98,14 @@ impl FloorPlan {
         let final_points = if closed {
             let snapped = orthogonal::snap_closing_edge(orthog_points, tolerance);
             let rotated = orthogonal::rotate_to_corner_start(snapped, tolerance);
-            orthogonal::remove_collinear(&rotated, tolerance)
+            let cleaned = orthogonal::remove_collinear(&rotated, tolerance);
+            // The first `snap_closing_edge` axis-aligns the closing edge of the
+            // PRE-rotation vertex order; `rotate_to_corner_start` then makes a
+            // different vertex first, so the FINAL closing edge (last→first) can
+            // be left diagonal — the "top wall isn't orthogonal" symptom. Snap
+            // it once more on the final order so the closing edge is guaranteed
+            // axis-aligned regardless of where the stroke started.
+            orthogonal::snap_closing_edge(cleaned, tolerance)
         } else {
             orthog_points
         };
@@ -112,7 +137,14 @@ impl FloorPlan {
         let final_points = if closed {
             let snapped = orthogonal::snap_closing_edge(orthog_points, tolerance);
             let rotated = orthogonal::rotate_to_corner_start(snapped, tolerance);
-            orthogonal::remove_collinear(&rotated, tolerance)
+            let cleaned = orthogonal::remove_collinear(&rotated, tolerance);
+            // The first `snap_closing_edge` axis-aligns the closing edge of the
+            // PRE-rotation vertex order; `rotate_to_corner_start` then makes a
+            // different vertex first, so the FINAL closing edge (last→first) can
+            // be left diagonal — the "top wall isn't orthogonal" symptom. Snap
+            // it once more on the final order so the closing edge is guaranteed
+            // axis-aligned regardless of where the stroke started.
+            orthogonal::snap_closing_edge(cleaned, tolerance)
         } else {
             orthog_points
         };
@@ -120,6 +152,765 @@ impl FloorPlan {
         self.parametric.add_ring(&final_points);
         self.parametric.apply_orthogonal_constraints()?;
         Ok(())
+    }
+
+    /// Build a plan from an already-clean, closed, axis-aligned ring — no
+    /// freehand simplification, closing-edge snap, or corner rotation (those
+    /// assume a raw stroke with a trailing drag point, which would drop a real
+    /// vertex here). Used when the caller has constructed exact ring points,
+    /// e.g. carving a sub-area off an existing outline.
+    fn from_clean_ring(points: &[Point2f32]) -> Result<Self, Error> {
+        let mut parametric = parametric::ParametricPlan::from_points(points);
+        parametric.apply_orthogonal_constraints()?;
+        Ok(Self { parametric })
+    }
+
+    /// Carve a sub-area (a living space) out of THIS plan's outline from an
+    /// OPEN drawn path. The path supplies the sub-area's new interior walls;
+    /// its two endpoints snap onto the outline and the area is closed along the
+    /// SHORTER outline arc between them — the walls it SHARES with the storey,
+    /// so the user needn't redraw them. The result is an INDEPENDENT orthogonal
+    /// `FloorPlan` (placement isn't preserved; every wall, shared or drawn,
+    /// dimensions like any other).
+    ///
+    /// If the endpoints don't both reach the outline (a free-standing interior
+    /// room), the path is simply closed into its own loop instead.
+    pub fn carve_subarea(&self, path: &[Point2f32], tolerance: f32) -> Result<Self, Error> {
+        let ring = self.parametric.ring_points(0);
+        let diag = self
+            .bounding_box()
+            .map(|((mnx, mny), (mxx, mxy))| ((mxx - mnx).powi(2) + (mxy - mny).powi(2)).sqrt())
+            .unwrap_or(0.0);
+
+        // Did the user draw a CLOSED loop (all the walls) or an OPEN path (just
+        // the new interior walls, ends meant to meet the house)? A closed loop
+        // has its first and last points nearly coincident relative to its own
+        // extent. Carve (snap endpoints + fill the shared outline arc) is only
+        // for the OPEN case; a closed loop becomes a full ring whose walls are
+        // then snapped onto any house wall they run along.
+        let drawn_closed = {
+            let (mut dx0, mut dy0, mut dx1, mut dy1) = (f32::MAX, f32::MAX, f32::MIN, f32::MIN);
+            for q in path {
+                dx0 = dx0.min(q.x);
+                dy0 = dy0.min(q.y);
+                dx1 = dx1.max(q.x);
+                dy1 = dy1.max(q.y);
+            }
+            let dd = ((dx1 - dx0).powi(2) + (dy1 - dy0).powi(2)).sqrt();
+            let ends_gap = path
+                .first()
+                .zip(path.last())
+                .map(|(f, l)| ((f.x - l.x).powi(2) + (f.y - l.y).powi(2)).sqrt())
+                .unwrap_or(0.0);
+            ends_gap < dd * 0.15
+        };
+
+        // Try to carve against the outline (shared walls). Returns the closed
+        // ring points, or `None` to fall back to a free-standing room (a closed
+        // loop, nothing to share with, or the endpoints don't both reach the
+        // outline).
+        let carve_points = || -> Result<Option<Vec<Point2f32>>, Error> {
+            if drawn_closed || ring.len() < 3 || path.len() < 2 {
+                return Ok(None);
+            }
+            // Simplify, then orthogonalize. A path with interior corners (≥3
+            // points) becomes a stepped run of walls; a path that collapses to a
+            // single segment is a straight CUT line splitting the outline into
+            // two regions — keep it, snapping the cut to its nearest axis so the
+            // new wall is clean (the usual vertical/horizontal cut).
+            // `simplify_stroke` rejects a <3-point result, so a straight cut
+            // surfaces as `InsufficientPoints`; treat that as the cut endpoints.
+            let simplified = match simplification::simplify_stroke(path, tolerance) {
+                Ok(s) => s,
+                Err(Error::InsufficientPoints) => vec![path[0], path[path.len() - 1]],
+                Err(e) => return Err(e),
+            };
+            let mut opath = if simplified.len() >= 3 {
+                // Orthogonalize to the storey's axes (0°), not the stroke's
+                // dominant angle — keeps interior walls axis-aligned even when
+                // the path runs along a diagonal boundary.
+                orthogonal::make_orthogonal_at(&simplified, tolerance, 0.0)?
+            } else if simplified.len() == 2 {
+                let (a, b) = (simplified[0], simplified[1]);
+                if (a.x - b.x).abs() <= (a.y - b.y).abs() {
+                    let x = (a.x + b.x) * 0.5; // near-vertical → vertical cut
+                    vec![Point2f32::new(x, a.y), Point2f32::new(x, b.y)]
+                } else {
+                    let y = (a.y + b.y) * 0.5; // near-horizontal → horizontal cut
+                    vec![Point2f32::new(a.x, y), Point2f32::new(b.x, y)]
+                }
+            } else {
+                return Ok(None);
+            };
+            if opath.len() < 2 {
+                return Ok(None);
+            }
+            let vertex_tol = (diag * 0.04).max(1e-4);
+            // "Reaches the outline" threshold: an endpoint within this of a wall
+            // shares it; otherwise the area free-floats.
+            let reach_tol = (diag * 0.06).max(1e-3);
+            let start = opath[0];
+            let end = opath[opath.len() - 1];
+            let (e1, t1, d1, _) = extend::snap_to_polygon(&ring, start, vertex_tol);
+            let (e2, t2, d2, _) = extend::snap_to_polygon(&ring, end, vertex_tol);
+            let same_point = e1 == e2 && (t1 - t2).abs() < 1e-3;
+            if d1 > reach_tol || d2 > reach_tol || same_point {
+                return Ok(None);
+            }
+            let last = opath.len() - 1;
+            extend::pin_to_edge(&mut opath[0], &ring, e1);
+            extend::pin_to_edge(&mut opath[last], &ring, e2);
+
+            // Keep the SHORTER outline arc (the corner/alcove the path cuts
+            // off): replace the LONGER arc with the path.
+            let n = ring.len();
+            let edge_lens: Vec<f32> = (0..n)
+                .map(|i| {
+                    let a = ring[i];
+                    let b = ring[(i + 1) % n];
+                    ((b.x - a.x).powi(2) + (b.y - a.y).powi(2)).sqrt()
+                })
+                .collect();
+            let total: f32 = edge_lens.iter().sum();
+            let pos_of = |e: usize, t: f32| edge_lens[..e].iter().sum::<f32>() + t * edge_lens[e];
+            let (pos1, pos2) = (pos_of(e1, t1), pos_of(e2, t2));
+            let arc_1_to_2 = if pos2 >= pos1 {
+                pos2 - pos1
+            } else {
+                pos2 - pos1 + total
+            };
+            let replace_arc_1_to_2 = arc_1_to_2 > total - arc_1_to_2;
+
+            let seq = extend::splice_sequence(&ring, e1, t1, e2, t2, &opath, replace_arc_1_to_2);
+            let carved: Vec<Point2f32> = seq
+                .iter()
+                .map(|el| match el {
+                    extend::SpliceElem::Keep(i) => ring[*i],
+                    extend::SpliceElem::New(p) => *p,
+                })
+                .collect();
+            if carved.len() < 3 {
+                return Ok(None);
+            }
+            Ok(Some(carved))
+        };
+
+        let pts = match carve_points()? {
+            Some(c) => c,
+            None => {
+                // A closed loop hugging a DIAGONAL boundary: keep the diagonal
+                // verbatim, orthogonalize only the interior (snap-before-ortho).
+                // The diagonal is already placed, so skip the wall-snap pass.
+                if let Some(p) = self.boundary_aware_loop_points(path, tolerance) {
+                    // Axis-snap the interior walls onto the storey (so e.g. a
+                    // far wall lands on the storey edge), but keep the diagonal
+                    // snap OFF so the verbatim diagonal isn't disturbed.
+                    return self.build_subarea_region(&p, true, false);
+                }
+                // Free-standing interior room: close the drawn path into its own
+                // loop, orthogonalized to the storey's axes (0°) — not the
+                // stroke's dominant angle — so interior walls stay axis-aligned.
+                Self::from_points_oriented(path, tolerance, true, Some(0.0))?.get_points()
+            }
+        };
+        self.build_subarea_region(&pts, true, true)
+    }
+
+    /// Finalize a candidate sub-area ring: optionally snap walls onto the
+    /// outline, strip collapse remnants, anchor at a shared corner, and
+    /// parametrize. Shared tail of carve / cut region construction.
+    ///
+    /// `snap_to_outline` pulls drawn walls onto nearby outline walls — wanted
+    /// for a freehand room, but NOT for a cut, whose endpoints are already the
+    /// exact line/boundary crossings (snapping would drag them to a nearby
+    /// corner/diagonal).
+    ///
+    /// Strips the coincident / collinear remnants left when the orthogonalizer
+    /// collapses a sub-threshold feature (e.g. a too-shallow nook) onto a wall:
+    /// those zero-length walls make `validate_simple` reject the shape and block
+    /// dimensioning. The tolerance is keyed off the SUB-AREA's own size — NOT
+    /// the outline's — so a small room inside a big house is cleaned at its own
+    /// scale, matching how the storey outline is cleaned at the storey's scale.
+    /// Kept tiny (0.5% of the area's diagonal) so it only removes genuine
+    /// collapse remnants and never a real (≥~10%) nook.
+    fn build_subarea_region(
+        &self,
+        pts: &[Point2f32],
+        snap_axis: bool,
+        snap_diagonal: bool,
+    ) -> Result<Self, Error> {
+        let (mut amnx, mut amny, mut amxx, mut amxy) = (f32::MAX, f32::MAX, f32::MIN, f32::MIN);
+        for q in pts {
+            amnx = amnx.min(q.x);
+            amny = amny.min(q.y);
+            amxx = amxx.max(q.x);
+            amxy = amxy.max(q.y);
+        }
+        let area_diag = ((amxx - amnx).powi(2) + (amxy - amny).powi(2)).sqrt();
+
+        // Correct any drawn wall that runs close to (and overlaps) a parallel
+        // house wall onto it — so a sub-area drawn as a FULL loop, with some of
+        // its walls meant to sit on the storey, lands exactly on those walls.
+        // `snap_diagonal` projects vertices onto diagonal house walls too; it's
+        // off when a diagonal is already placed verbatim (boundary-aware loop /
+        // cut) so the axis snap can still pull other walls onto the storey
+        // without disturbing that diagonal.
+        let snapped = if snap_axis {
+            let snap_tol = (area_diag * 0.06).max(1e-3);
+            self.snap_walls_to_outline(pts, snap_tol, snap_diagonal)
+        } else {
+            pts.to_vec()
+        };
+
+        let clean_tol = (area_diag * 0.005).max(1e-4);
+        let deduped = orthogonal::remove_duplicates(&snapped, clean_tol);
+        let cleaned = orthogonal::remove_collinear(&deduped, clean_tol);
+        // Un-intersect: if the assembled ring folds over itself (e.g. the
+        // boundary-aware loop placed a diagonal endpoint past an adjacent wall),
+        // split it at the crossing and keep the larger loop, rather than
+        // emitting a self-crossing shape. Re-clean to drop the inserted
+        // crossing vertex if it lands collinear.
+        let untangled = geom::untangle_ring(&cleaned);
+        let cleaned = orthogonal::remove_collinear(
+            &orthogonal::remove_duplicates(&untangled, clean_tol),
+            clean_tol,
+        );
+        if cleaned.len() < 3 {
+            return Err(Error::ExtendError("living area collapsed to a line".into()));
+        }
+
+        // Anchor the ring at a vertex coinciding with an outline CORNER (a
+        // house corner shared with the storey), so the parametric origin
+        // constant lands there — making the two shared walls meeting at it
+        // fixed/const and leaving the DRAWN walls as free parameters the user
+        // can dimension. Without this the origin can land on a drawn wall (e.g.
+        // a cut), baking its position as a constant the user can't set. A cut
+        // endpoint sits mid-wall (not a corner), so it's NOT chosen. A
+        // free-standing room (no shared corner) keeps its order.
+        let outline = self.parametric.ring_points(0);
+        let eps = (area_diag * 0.002).max(1e-4);
+        let cleaned = match cleaned.iter().position(|&p| {
+            outline
+                .iter()
+                .any(|o| (o.x - p.x).abs() < eps && (o.y - p.y).abs() < eps)
+        }) {
+            Some(k) if k > 0 => {
+                let mut r = cleaned[k..].to_vec();
+                r.extend_from_slice(&cleaned[..k]);
+                r
+            }
+            _ => cleaned,
+        };
+        Self::from_clean_ring(&cleaned)
+    }
+
+    /// If a CLOSED-loop sub-area stroke HUGS a non-axis-aligned outline edge (a
+    /// diagonal) for a run of points, build the ring with that diagonal kept
+    /// VERBATIM and only the interior orthogonalized — i.e. snap to the boundary
+    /// *before* orthogonalizing, and lock it, so the diagonal is followed fully
+    /// (orthogonalizing it first would flatten it irreversibly).
+    ///
+    /// Returns `None` when no such run exists, so the caller orthogonalizes
+    /// normally — axis-only outlines and non-hugging strokes are untouched.
+    fn boundary_aware_loop_points(
+        &self,
+        path: &[Point2f32],
+        tolerance: f32,
+    ) -> Option<Vec<Point2f32>> {
+        let ring = self.parametric.ring_points(0);
+        let no = ring.len();
+        if no < 3 {
+            return None;
+        }
+        let eps = 1e-3_f32;
+        // Diagonal (non-axis-aligned) outline edges.
+        let diags: Vec<(usize, Point2f32, Point2f32)> = (0..no)
+            .map(|i| (i, ring[i], ring[(i + 1) % no]))
+            .filter(|(_, a, b)| (a.x - b.x).abs() >= eps && (a.y - b.y).abs() >= eps)
+            .collect();
+        if diags.is_empty() {
+            return None;
+        }
+        let mut simp = simplification::simplify_stroke(path, tolerance).ok()?;
+        if simp.len() > 3 {
+            let (f, l) = (simp[0], *simp.last().unwrap());
+            if ((f.x - l.x).powi(2) + (f.y - l.y).powi(2)).sqrt() < tolerance {
+                simp.pop();
+            }
+        }
+        let m = simp.len();
+        if m < 4 {
+            return None;
+        }
+        let (mut mnx, mut mny, mut mxx, mut mxy) = (f32::MAX, f32::MAX, f32::MIN, f32::MIN);
+        for p in &simp {
+            mnx = mnx.min(p.x);
+            mny = mny.min(p.y);
+            mxx = mxx.max(p.x);
+            mxy = mxy.max(p.y);
+        }
+        let btol = (((mxx - mnx).powi(2) + (mxy - mny).powi(2)).sqrt() * 0.1).max(1e-3);
+
+        // Project p onto edge (a,b), clamped; returns (point, t, dist).
+        let proj_onto = |p: Point2f32, a: Point2f32, b: Point2f32| {
+            let (dx, dy) = (b.x - a.x, b.y - a.y);
+            let l2 = dx * dx + dy * dy;
+            let t = if l2 < eps {
+                0.0
+            } else {
+                ((p.x - a.x) * dx + (p.y - a.y) * dy) / l2
+            };
+            let tc = t.clamp(0.0, 1.0);
+            let q = Point2f32::new(a.x + tc * dx, a.y + tc * dy);
+            (q, t, ((p.x - q.x).powi(2) + (p.y - q.y).powi(2)).sqrt())
+        };
+
+        // For each simplified point, the nearest diagonal it lies alongside.
+        let near: Vec<Option<usize>> = simp
+            .iter()
+            .map(|&p| {
+                let mut best: Option<(f32, usize)> = None;
+                for (ei, a, b) in &diags {
+                    let (q, t, d) = proj_onto(p, *a, *b);
+                    let _ = q;
+                    if (-0.05..=1.05).contains(&t)
+                        && d <= btol
+                        && best.map_or(true, |(bd, _)| d < bd)
+                    {
+                        best = Some((d, *ei));
+                    }
+                }
+                best.map(|(_, ei)| ei)
+            })
+            .collect();
+
+        // Longest cyclic run of points on the SAME diagonal edge.
+        let (mut best_start, mut best_len, mut best_edge) = (0usize, 0usize, 0usize);
+        for start in 0..m {
+            let Some(e) = near[start] else { continue };
+            let mut len = 0;
+            while len < m && near[(start + len) % m] == Some(e) {
+                len += 1;
+            }
+            if len > best_len {
+                best_len = len;
+                best_start = start;
+                best_edge = e;
+            }
+        }
+        if best_len < 2 || best_len >= m - 1 {
+            return None; // no diagonal run, or (nearly) the whole loop
+        }
+
+        // Rotate so the run starts at index 0; the diagonal endpoints A, B are
+        // its first/last points projected onto the diagonal. The rest is interior.
+        let rot: Vec<Point2f32> = (0..m).map(|i| simp[(best_start + i) % m]).collect();
+        // `best_edge` is an OUTLINE edge index (stored in `near`); read it from
+        // the ring directly.
+        let (da, db) = (ring[best_edge], ring[(best_edge + 1) % no]);
+        // Project the run's first/last points onto the diagonal; if a projection
+        // lands near a diagonal ENDPOINT (the corner where the run reached it),
+        // snap it exactly there so the follow covers the full diagonal — the
+        // interior walls then meet the diagonal at its corner, not mid-way.
+        let snap_to_end = |q: Point2f32| -> Point2f32 {
+            let dda = ((q.x - da.x).powi(2) + (q.y - da.y).powi(2)).sqrt();
+            let ddb = ((q.x - db.x).powi(2) + (q.y - db.y).powi(2)).sqrt();
+            if dda <= btol && dda <= ddb {
+                da
+            } else if ddb <= btol {
+                db
+            } else {
+                q
+            }
+        };
+        let a_proj = snap_to_end(proj_onto(rot[0], da, db).0);
+        let b_proj = snap_to_end(proj_onto(rot[best_len - 1], da, db).0);
+        if ((a_proj.x - b_proj.x).powi(2) + (a_proj.y - b_proj.y).powi(2)).sqrt() < 1e-3 {
+            return None; // run collapsed to a point
+        }
+
+        // Interior path B → (drawn interior) → A, orthogonalized with A, B fixed.
+        let mut interior_in = vec![b_proj];
+        interior_in.extend_from_slice(&rot[best_len..m]);
+        interior_in.push(a_proj);
+        let ortho = snap_open_fixed_ends(&interior_in, tolerance);
+        if ortho.len() < 2 {
+            return None;
+        }
+        // Ring: A → B (the diagonal, verbatim) → orthogonalized interior → A.
+        let mut out = vec![a_proj, b_proj];
+        out.extend_from_slice(&ortho[1..ortho.len() - 1]);
+        if out.len() < 3 {
+            return None;
+        }
+        Some(out)
+    }
+
+    /// Split the outline with a single straight CUT line into its TWO regions,
+    /// returned as independent `FloorPlan`s (so the caller can let the user pick
+    /// which side becomes the living area). Returns `None` when the stroke
+    /// isn't a straight cut whose ends reach two distinct points of the outline
+    /// (the caller then falls back to [`carve_subarea`](Self::carve_subarea)).
+    pub fn split_by_cut(
+        &self,
+        path: &[Point2f32],
+        tolerance: f32,
+    ) -> Result<Option<(Self, Self)>, Error> {
+        let ring = self.parametric.ring_points(0);
+        if ring.len() < 3 || path.len() < 2 {
+            return Ok(None);
+        }
+        let _ = tolerance;
+        // A cut is a THIN, OPEN stroke — a roughly axis-aligned line crossing
+        // the storey (not a loop, not a 2D region). Detect it from the bounding
+        // box so a hand-drawn line with wobble still counts (RDP may leave it
+        // with more than two points, which a strict "simplifies to 2" test
+        // would wrongly reject — sending it to the carve path, where it fails).
+        let (mut mnx, mut mny, mut mxx, mut mxy) = (f32::MAX, f32::MAX, f32::MIN, f32::MIN);
+        let (mut sx, mut sy) = (0.0f32, 0.0f32);
+        for p in path {
+            mnx = mnx.min(p.x);
+            mny = mny.min(p.y);
+            mxx = mxx.max(p.x);
+            mxy = mxy.max(p.y);
+            sx += p.x;
+            sy += p.y;
+        }
+        let (w, h) = (mxx - mnx, mxy - mny);
+        let span = w.max(h);
+        if span < 1e-6 {
+            return Ok(None);
+        }
+        let (a, b) = (path[0], path[path.len() - 1]);
+        let ends_gap = ((a.x - b.x).powi(2) + (a.y - b.y).powi(2)).sqrt();
+        let thin = w.min(h) <= span * 0.3; // within ~17° of an axis
+        let open = ends_gap > span * 0.5; // a line, not a loop
+        if !(thin && open) {
+            return Ok(None); // a 2D region / loop → carve, not cut
+        }
+
+        // Axis-snap the cut to a vertical or horizontal line (whichever the
+        // stroke runs along), then find where that line CROSSES the outline
+        // boundary — those crossings are the cut endpoints, landing exactly on
+        // whichever segment/diagonal the line actually cuts. (Snapping the drawn
+        // endpoints to the nearest edge mis-clamps near a corner where a segment
+        // meets a diagonal.)
+        let vertical = h >= w;
+        let line_coord = if vertical {
+            sx / path.len() as f32
+        } else {
+            sy / path.len() as f32
+        };
+        let n = ring.len();
+        let mut crossings: Vec<(usize, f32, Point2f32)> = Vec::new();
+        for i in 0..n {
+            let p = ring[i];
+            let q = ring[(i + 1) % n];
+            let (pc, qc) = if vertical { (p.x, q.x) } else { (p.y, q.y) };
+            if (pc - qc).abs() < 1e-6 {
+                continue; // edge runs parallel to the cut — no single crossing
+            }
+            let t = (line_coord - pc) / (qc - pc);
+            if !(0.0..=1.0).contains(&t) {
+                continue;
+            }
+            crossings.push((
+                i,
+                t,
+                Point2f32::new(p.x + t * (q.x - p.x), p.y + t * (q.y - p.y)),
+            ));
+        }
+        if crossings.len() < 2 {
+            return Ok(None);
+        }
+        // The two crossings nearest the drawn endpoints (robust even if a
+        // non-convex outline is crossed more than twice).
+        let dist2 = |u: Point2f32, v: Point2f32| (u.x - v.x).powi(2) + (u.y - v.y).powi(2);
+        let near_a = *crossings
+            .iter()
+            .min_by(|c1, c2| dist2(c1.2, a).total_cmp(&dist2(c2.2, a)))
+            .unwrap();
+        let near_b = match crossings
+            .iter()
+            .filter(|c| !(c.0 == near_a.0 && (c.1 - near_a.1).abs() < 1e-4))
+            .min_by(|c1, c2| dist2(c1.2, b).total_cmp(&dist2(c2.2, b)))
+        {
+            Some(c) => *c,
+            None => return Ok(None),
+        };
+        let (e1, t1, e2, t2) = (near_a.0, near_a.1, near_b.0, near_b.1);
+        let opath = vec![near_a.2, near_b.2];
+
+        // The two regions = the cut plus each of the outline's two arcs.
+        let region = |replace_arc_1_to_2: bool| -> Result<Self, Error> {
+            let seq = extend::splice_sequence(&ring, e1, t1, e2, t2, &opath, replace_arc_1_to_2);
+            let pts: Vec<Point2f32> = seq
+                .iter()
+                .map(|el| match el {
+                    extend::SpliceElem::Keep(i) => ring[*i],
+                    extend::SpliceElem::New(p) => *p,
+                })
+                .collect();
+            if pts.len() < 3 {
+                return Err(Error::ExtendError("cut region collapsed".into()));
+            }
+            // No wall-snapping: the cut endpoints are exact line/boundary
+            // crossings and the arc is the outline verbatim.
+            self.build_subarea_region(&pts, false, false)
+        };
+        Ok(Some((region(true)?, region(false)?)))
+    }
+
+    /// Correct each axis-aligned edge of `pts` (a candidate sub-area ring) that
+    /// runs close to — and overlaps — a PARALLEL wall of this plan's outline,
+    /// snapping that edge's perpendicular coordinate exactly onto the outline
+    /// wall. Lets the user draw a living area as a full closed loop and have the
+    /// walls they meant to share with the storey land on it. Coordinate snaps
+    /// are applied to every vertex sharing the coord, so the ring stays a clean
+    /// orthogonal polygon. `tol` is the max perpendicular gap that still snaps.
+    ///
+    /// A second pass handles NON-axis-aligned (diagonal) outline walls — e.g. a
+    /// trim cut: any sub-area vertex lying within `tol` of a diagonal outline
+    /// edge is projected onto that edge's line, so a wall drawn near the
+    /// diagonal follows it (relaxing orthogonality to match the storey). The
+    /// pass is a no-op when the outline is fully rectilinear.
+    fn snap_walls_to_outline(
+        &self,
+        pts: &[Point2f32],
+        tol: f32,
+        do_diagonal: bool,
+    ) -> Vec<Point2f32> {
+        let ring = self.parametric.ring_points(0);
+        let no = ring.len();
+        if no < 3 || pts.len() < 3 {
+            return pts.to_vec();
+        }
+        let eps = 1e-3_f32;
+        // Outline walls split by axis: vertical = (x, ylo, yhi); horizontal =
+        // (y, xlo, xhi).
+        let mut vert: Vec<(f32, f32, f32)> = Vec::new();
+        let mut horiz: Vec<(f32, f32, f32)> = Vec::new();
+        for i in 0..no {
+            let a = ring[i];
+            let b = ring[(i + 1) % no];
+            if (a.x - b.x).abs() < eps {
+                vert.push((a.x, a.y.min(b.y), a.y.max(b.y)));
+            } else if (a.y - b.y).abs() < eps {
+                horiz.push((a.y, a.x.min(b.x), a.x.max(b.x)));
+            }
+        }
+        // For each sub-area edge, find the nearest parallel, overlapping outline
+        // wall within `tol`; record a coordinate remap.
+        let n = pts.len();
+        let mut remap_x: Vec<(f32, f32)> = Vec::new();
+        let mut remap_y: Vec<(f32, f32)> = Vec::new();
+        let overlaps = |alo: f32, ahi: f32, blo: f32, bhi: f32| ahi.min(bhi) - alo.max(blo) > eps;
+        for i in 0..n {
+            let a = pts[i];
+            let b = pts[(i + 1) % n];
+            if (a.x - b.x).abs() < eps {
+                let (lo, hi) = (a.y.min(b.y), a.y.max(b.y));
+                if let Some((ox, _, _)) = vert
+                    .iter()
+                    .filter(|(ox, ylo, yhi)| {
+                        (ox - a.x).abs() <= tol && overlaps(lo, hi, *ylo, *yhi)
+                    })
+                    .min_by(|u, v| (u.0 - a.x).abs().total_cmp(&(v.0 - a.x).abs()))
+                {
+                    if (ox - a.x).abs() > eps {
+                        remap_x.push((a.x, *ox));
+                    }
+                }
+            } else if (a.y - b.y).abs() < eps {
+                let (lo, hi) = (a.x.min(b.x), a.x.max(b.x));
+                if let Some((oy, _, _)) = horiz
+                    .iter()
+                    .filter(|(oy, xlo, xhi)| {
+                        (oy - a.y).abs() <= tol && overlaps(lo, hi, *xlo, *xhi)
+                    })
+                    .min_by(|u, v| (u.0 - a.y).abs().total_cmp(&(v.0 - a.y).abs()))
+                {
+                    if (oy - a.y).abs() > eps {
+                        remap_y.push((a.y, *oy));
+                    }
+                }
+            }
+        }
+        let mut out = pts.to_vec();
+        for p in &mut out {
+            if let Some((_, to)) = remap_x.iter().find(|(from, _)| (p.x - from).abs() < eps) {
+                p.x = *to;
+            }
+            if let Some((_, to)) = remap_y.iter().find(|(from, _)| (p.y - from).abs() < eps) {
+                p.y = *to;
+            }
+        }
+
+        // Diagonal pass: project sub-area vertices lying close to a NON-axis-
+        // aligned outline edge onto that edge's line, so a wall drawn near a
+        // diagonal house wall (e.g. a trim cut) follows it. Forcing the interior
+        // to the storey axes turns a wall drawn ALONG the diagonal into a
+        // stair-step whose corners sit a little off the line, so this pass uses
+        // a more generous reach than the axis snap to pull them on.
+        let diag_tol = tol * 2.5;
+        let diagonals: Vec<(Point2f32, Point2f32)> = if do_diagonal {
+            (0..no)
+                .map(|i| (ring[i], ring[(i + 1) % no]))
+                .filter(|(a, b)| (a.x - b.x).abs() >= eps && (a.y - b.y).abs() >= eps)
+                .collect()
+        } else {
+            Vec::new()
+        };
+        if !diagonals.is_empty() {
+            for p in &mut out {
+                let mut best: Option<(f32, Point2f32)> = None;
+                for (a, b) in &diagonals {
+                    let (dx, dy) = (b.x - a.x, b.y - a.y);
+                    let len_sq = dx * dx + dy * dy;
+                    if len_sq < eps {
+                        continue;
+                    }
+                    let t = ((p.x - a.x) * dx + (p.y - a.y) * dy) / len_sq;
+                    if !(-0.1..=1.1).contains(&t) {
+                        continue; // not alongside this segment
+                    }
+                    let tc = t.clamp(0.0, 1.0);
+                    let proj = Point2f32::new(a.x + tc * dx, a.y + tc * dy);
+                    let d = ((p.x - proj.x).powi(2) + (p.y - proj.y).powi(2)).sqrt();
+                    if d <= diag_tol && best.map_or(true, |(bd, _)| d < bd) {
+                        best = Some((d, proj));
+                    }
+                }
+                if let Some((_, proj)) = best {
+                    *p = proj;
+                }
+            }
+        }
+        out
+    }
+
+    /// Parameters of `area` that are PINNED by this outline — fixed by the
+    /// floor plan, so the caller marks them KNOWN and dimensioning only asks
+    /// about the walls the user actually drew:
+    ///  - the perpendicular coordinate of each axis-aligned `area` wall lying
+    ///    on a parallel outline wall (a snapped/shared straight wall), and
+    ///  - both coordinates of each `area` vertex coinciding with an outline
+    ///    CORNER (a house corner) — which in particular fixes a shared
+    ///    DIAGONAL wall, whose endpoints are corners, so its length isn't
+    ///    prompted.
+    ///
+    /// (A coordinate that's a constant needs no entry — it's already fixed.)
+    pub fn params_pinned_to_outline(
+        &self,
+        area: &FloorPlan,
+    ) -> std::collections::HashSet<ParameterId> {
+        let mut pinned = std::collections::HashSet::new();
+        let outline = self.parametric.ring_points(0);
+        let no = outline.len();
+        let apts = area.get_points();
+        let n = apts.len();
+        if no < 3 || n < 3 {
+            return pinned;
+        }
+        let eps = 1e-3_f32;
+        // Outline walls by axis: vertical (x, ylo, yhi); horizontal (y, xlo, xhi).
+        let mut vert: Vec<(f32, f32, f32)> = Vec::new();
+        let mut horiz: Vec<(f32, f32, f32)> = Vec::new();
+        for i in 0..no {
+            let a = outline[i];
+            let b = outline[(i + 1) % no];
+            if (a.x - b.x).abs() < eps {
+                vert.push((a.x, a.y.min(b.y), a.y.max(b.y)));
+            } else if (a.y - b.y).abs() < eps {
+                horiz.push((a.y, a.x.min(b.x), a.x.max(b.x)));
+            }
+        }
+        let overlaps = |alo: f32, ahi: f32, blo: f32, bhi: f32| ahi.min(bhi) - alo.max(blo) > eps;
+        for i in 0..n {
+            let a = apts[i];
+            let b = apts[(i + 1) % n];
+            if (a.x - b.x).abs() < eps {
+                let (lo, hi) = (a.y.min(b.y), a.y.max(b.y));
+                if vert
+                    .iter()
+                    .any(|(x, ylo, yhi)| (x - a.x).abs() < eps && overlaps(lo, hi, *ylo, *yhi))
+                {
+                    if let Some(pid) = area.vertex_x_param(0, i) {
+                        pinned.insert(pid);
+                    }
+                }
+            } else if (a.y - b.y).abs() < eps {
+                let (lo, hi) = (a.x.min(b.x), a.x.max(b.x));
+                if horiz
+                    .iter()
+                    .any(|(y, xlo, xhi)| (y - a.y).abs() < eps && overlaps(lo, hi, *xlo, *xhi))
+                {
+                    if let Some(pid) = area.vertex_y_param(0, i) {
+                        pinned.insert(pid);
+                    }
+                }
+            }
+        }
+        // Vertices coinciding with an outline corner are fully fixed by the
+        // storey — pin both coordinates. This fixes a shared DIAGONAL wall
+        // (endpoints are corners), so its length isn't prompted; only the
+        // genuinely-drawn walls (e.g. a cut) remain to dimension.
+        for i in 0..n {
+            let v = apts[i];
+            if outline
+                .iter()
+                .any(|o| (o.x - v.x).abs() < eps && (o.y - v.y).abs() < eps)
+            {
+                if let Some(pid) = area.vertex_x_param(0, i) {
+                    pinned.insert(pid);
+                }
+                if let Some(pid) = area.vertex_y_param(0, i) {
+                    pinned.insert(pid);
+                }
+            }
+        }
+        // A region edge lying ON an outline DIAGONAL edge (a wall the room
+        // shares with a diagonal storey wall, e.g. one it was drawn hugging) is
+        // fixed by the house — pin both its endpoints' coordinates so the
+        // diagonal's length isn't prompted. Its endpoints may sit mid-diagonal
+        // (not corners), which the corner pass above wouldn't catch.
+        let on_seg = |v: Point2f32, a: Point2f32, b: Point2f32| {
+            let (dx, dy) = (b.x - a.x, b.y - a.y);
+            let l2 = dx * dx + dy * dy;
+            if l2 < 1e-9 {
+                return false;
+            }
+            let t = ((v.x - a.x) * dx + (v.y - a.y) * dy) / l2;
+            if !(-0.02..=1.02).contains(&t) {
+                return false;
+            }
+            let (qx, qy) = (a.x + t * dx, a.y + t * dy);
+            (v.x - qx).abs() < eps && (v.y - qy).abs() < eps
+        };
+        for i in 0..n {
+            let (a, b) = (apts[i], apts[(i + 1) % n]);
+            if (a.x - b.x).abs() < eps || (a.y - b.y).abs() < eps {
+                continue; // axis-aligned region edge — handled above
+            }
+            let on_diagonal = (0..no).any(|j| {
+                let (oa, ob) = (outline[j], outline[(j + 1) % no]);
+                (oa.x - ob.x).abs() >= eps
+                    && (oa.y - ob.y).abs() >= eps
+                    && on_seg(a, oa, ob)
+                    && on_seg(b, oa, ob)
+            });
+            if on_diagonal {
+                for idx in [i, (i + 1) % n] {
+                    if let Some(pid) = area.vertex_x_param(0, idx) {
+                        pinned.insert(pid);
+                    }
+                    if let Some(pid) = area.vertex_y_param(0, idx) {
+                        pinned.insert(pid);
+                    }
+                }
+            }
+        }
+        pinned
     }
 
     /// Extend the primary ring by splicing a drawn path onto a wall, *adding*
@@ -660,6 +1451,137 @@ impl FloorPlan {
         self.parametric.all_ring_points()
     }
 
+    /// Whether `(x, y)` lies inside the primary ring (ray-casting). Used to
+    /// hit-test which candidate region a tap landed in.
+    pub fn contains_point(&self, x: f32, y: f32) -> bool {
+        let ring = self.parametric.ring_points(0);
+        let n = ring.len();
+        if n < 3 {
+            return false;
+        }
+        let mut inside = false;
+        let mut j = n - 1;
+        for i in 0..n {
+            let (a, b) = (ring[i], ring[j]);
+            if (a.y > y) != (b.y > y) {
+                let xc = a.x + (y - a.y) / (b.y - a.y) * (b.x - a.x);
+                if x < xc {
+                    inside = !inside;
+                }
+            }
+            j = i;
+        }
+        inside
+    }
+
+    /// Clamp each point that lies OUTSIDE this plan's outline back onto its
+    /// boundary (nearest point on any edge); points already inside are left as
+    /// drawn. A containment guardrail: snap a drawn sub-area back inside the
+    /// storey before anything else processes it, so a stroke that strays out is
+    /// brought to the boundary rather than producing geometry outside the house.
+    pub fn clamp_inside(&self, points: &[Point2f32]) -> Vec<Point2f32> {
+        let ring = self.parametric.ring_points(0);
+        let n = ring.len();
+        if n < 3 {
+            return points.to_vec();
+        }
+        points
+            .iter()
+            .map(|&p| {
+                if self.contains_point(p.x, p.y) {
+                    return p;
+                }
+                let mut best = p;
+                let mut best_d = f32::MAX;
+                for i in 0..n {
+                    let (a, b) = (ring[i], ring[(i + 1) % n]);
+                    let (dx, dy) = (b.x - a.x, b.y - a.y);
+                    let l2 = dx * dx + dy * dy;
+                    let t = if l2 < 1e-9 {
+                        0.0
+                    } else {
+                        (((p.x - a.x) * dx + (p.y - a.y) * dy) / l2).clamp(0.0, 1.0)
+                    };
+                    let q = Point2f32::new(a.x + t * dx, a.y + t * dy);
+                    let d = (p.x - q.x).powi(2) + (p.y - q.y).powi(2);
+                    if d < best_d {
+                        best_d = d;
+                        best = q;
+                    }
+                }
+                best
+            })
+            .collect()
+    }
+
+    /// Whether any vertex or edge-midpoint of `area` lies clearly OUTSIDE this
+    /// plan's outline — farther than `tol` beyond the boundary. Points on a
+    /// shared wall (distance ~0) don't count. Used as a dimensioning guardrail:
+    /// reject a dimension that would push a living area out of the storey.
+    pub fn any_point_outside(&self, area: &FloorPlan, tol: f32) -> bool {
+        let ring = self.parametric.ring_points(0);
+        let no = ring.len();
+        if no < 3 {
+            return false;
+        }
+        let dist_outside = |p: Point2f32| -> f32 {
+            if self.contains_point(p.x, p.y) {
+                return 0.0;
+            }
+            let mut best = f32::MAX;
+            for i in 0..no {
+                let (a, b) = (ring[i], ring[(i + 1) % no]);
+                let (dx, dy) = (b.x - a.x, b.y - a.y);
+                let l2 = dx * dx + dy * dy;
+                let t = if l2 < 1e-9 {
+                    0.0
+                } else {
+                    (((p.x - a.x) * dx + (p.y - a.y) * dy) / l2).clamp(0.0, 1.0)
+                };
+                let (qx, qy) = (a.x + t * dx, a.y + t * dy);
+                best = best.min((p.x - qx).powi(2) + (p.y - qy).powi(2));
+            }
+            best.sqrt()
+        };
+        let pts = area.get_points();
+        let n = pts.len();
+        if n < 3 {
+            return false;
+        }
+        for i in 0..n {
+            let a = pts[i];
+            let b = pts[(i + 1) % n];
+            let mid = Point2f32::new((a.x + b.x) * 0.5, (a.y + b.y) * 0.5);
+            if dist_outside(a) > tol || dist_outside(mid) > tol {
+                return true;
+            }
+        }
+        false
+    }
+
+    /// Edges that are neither horizontal nor vertical (off by more than 1mm on
+    /// BOTH axes) — i.e. visibly slanted "not straight" walls. Returns
+    /// `(ring, edge_start, a, b)` for each. Empty when the plan is fully
+    /// orthogonal. A diagnostic for confirming orthogonality.
+    pub fn non_orthogonal_edges(&self) -> Vec<(usize, usize, Point2f32, Point2f32)> {
+        let eps = 1e-3_f32;
+        let mut out = Vec::new();
+        for (r, ring) in self.parametric.all_ring_points().into_iter().enumerate() {
+            let n = ring.len();
+            if n < 3 {
+                continue;
+            }
+            for i in 0..n {
+                let a = ring[i];
+                let b = ring[(i + 1) % n];
+                if (a.x - b.x).abs() >= eps && (a.y - b.y).abs() >= eps {
+                    out.push((r, i, a, b));
+                }
+            }
+        }
+        out
+    }
+
     /// Number of polygons (rings) in this floor plan.
     pub fn ring_count(&self) -> usize {
         self.parametric.ring_count()
@@ -1124,6 +2046,50 @@ fn polygon_area(points: &[Point2f32]) -> f32 {
     sum * 0.5
 }
 
+/// Orthogonalize an OPEN path to the world axes while keeping the first and
+/// last points FIXED (they're locked to a boundary). Interior points snap to
+/// horizontal/vertical relative to the running corner; a corner is inserted if
+/// needed so the final segment reaches the fixed last point axis-aligned. Used
+/// to orthogonalize a sub-area's interior between two points pinned on a
+/// diagonal boundary, without disturbing that boundary.
+fn snap_open_fixed_ends(pts: &[Point2f32], tol: f32) -> Vec<Point2f32> {
+    let n = pts.len();
+    if n < 2 {
+        return pts.to_vec();
+    }
+    let mut out = vec![pts[0]];
+    let mut cur = pts[0];
+    for nx in &pts[1..n - 1] {
+        let (dx, dy) = (nx.x - cur.x, nx.y - cur.y);
+        let snapped = if dx.abs() > dy.abs() {
+            Point2f32::new(nx.x, cur.y) // horizontal step
+        } else {
+            Point2f32::new(cur.x, nx.y) // vertical step
+        };
+        out.push(snapped);
+        cur = snapped;
+    }
+    let last = pts[n - 1];
+    // Connect the running corner to the fixed last point. If both deltas are
+    // significant, insert a corner; if it's only slightly off one axis, pull
+    // the last interior corner exactly onto that axis so the closing wall is
+    // truly horizontal/vertical (the last point is fixed on the boundary).
+    let (dx, dy) = ((last.x - cur.x).abs(), (last.y - cur.y).abs());
+    if dx > tol && dy > tol {
+        out.push(Point2f32::new(last.x, cur.y));
+    } else if dy <= tol && dy > f32::EPSILON {
+        if let Some(c) = out.last_mut() {
+            c.y = last.y; // make the closing segment exactly horizontal
+        }
+    } else if dx <= tol && dx > f32::EPSILON {
+        if let Some(c) = out.last_mut() {
+            c.x = last.x; // exactly vertical
+        }
+    }
+    out.push(last);
+    out
+}
+
 /// Perpendicular distance from `(px, py)` to the line segment from
 /// `(ax, ay)` to `(bx, by)`. Returns the distance to the nearest endpoint
 /// when the point projects outside the segment.
@@ -1286,6 +2252,196 @@ mod trim_tests {
             p(0.2, 0.2),
         ];
         FloorPlan::from_points_to_orthogonal(&stroke, 0.5, true).unwrap()
+    }
+
+    /// A living area in a corner of the storey: the user draws only the two
+    /// NEW interior walls (an open L from the left wall across to the bottom
+    /// wall); the two shared house walls are filled in along the outline, so
+    /// the result is a self-contained quad hugging the corner.
+    #[test]
+    fn carve_subarea_shares_corner_walls_with_the_outline() {
+        let outline = unit_square_plan();
+        let path = vec![p(0.0, 4.0), p(4.0, 4.0), p(4.0, 0.0)];
+        let room = outline.carve_subarea(&path, 0.5).unwrap();
+        assert_eq!(room.ring_count(), 1);
+        let poly = room.polygons()[0].clone();
+        assert_eq!(
+            poly.len(),
+            4,
+            "corner room is a quad: 2 drawn + 2 shared walls"
+        );
+        let area = polygon_area(&poly).abs();
+        assert!(
+            (area - 16.0).abs() < 0.5,
+            "4x4 corner room (~16), got {area}"
+        );
+        assert!(
+            poly.iter().any(|v| v.x.abs() < 0.05 && v.y.abs() < 0.05),
+            "it reuses the storey corner (0,0): {poly:?}"
+        );
+        // Two walls lie on the outline (x==0 and y==0).
+        assert!(poly.iter().filter(|v| v.x.abs() < 0.05).count() >= 2);
+        assert!(poly.iter().filter(|v| v.y.abs() < 0.05).count() >= 2);
+        room.validate_simple().unwrap();
+    }
+
+    /// A living area drawn away from every wall doesn't share anything — it
+    /// closes into a free-standing interior room.
+    #[test]
+    fn carve_subarea_interior_path_becomes_a_freestanding_room() {
+        let outline = unit_square_plan();
+        let path = vec![
+            p(3.0, 3.0),
+            p(6.0, 3.0),
+            p(6.0, 6.0),
+            p(3.0, 6.0),
+            p(3.1, 3.1),
+        ];
+        let room = outline.carve_subarea(&path, 0.3).unwrap();
+        assert_eq!(room.ring_count(), 1);
+        assert!(room.polygons()[0].len() >= 4);
+        let area = polygon_area(&room.polygons()[0]).abs();
+        assert!(
+            (area - 9.0).abs() < 1.0,
+            "3x3 interior room (~9), got {area}"
+        );
+        room.validate_simple().unwrap();
+    }
+
+    /// Confirms the reported cause: if the top (closing) wall's perpendicular
+    /// coordinate ends up off the anchor, the parametric build leaves it as a
+    /// FREE parameter rather than tying it to the anchor — so the shape looks
+    /// ~orthogonal but that free param can DRIFT when dimensioning nudges un-set
+    /// params ("orthogonal until dimensioned, then less orthogonal"). The full
+    /// `from_points_to_orthogonal` pipeline snaps the closing edge so the coord
+    /// is tied (axis-aligned, no orphan free parameter).
+    #[test]
+    fn closing_edge_coord_is_tied_not_left_as_a_free_parameter() {
+        // Staircase whose top (closing) wall is ~7 units off horizontal
+        // (v7.y=284 vs v0.y=291).
+        let stair8 = vec![
+            p(73.0, 291.0),
+            p(73.0, 619.0),
+            p(202.0, 619.0),
+            p(202.0, 711.0),
+            p(397.0, 711.0),
+            p(397.0, 615.0),
+            p(621.0, 615.0),
+            p(621.0, 284.0),
+        ];
+
+        // No-snap parametrize (what the orthogonalizer effectively produced for
+        // the noisy stroke): the closing edge stays diagonal — its perpendicular
+        // coord is a free parameter 7 units off the anchor.
+        let untied = FloorPlan::from_clean_ring(&stair8).unwrap();
+        let up = untied.polygons()[0].clone();
+        let un = up.len();
+        let untied_off = (up[un - 1].y - up[0].y)
+            .abs()
+            .min((up[un - 1].x - up[0].x).abs());
+        assert!(
+            untied_off > 1.0,
+            "without the closing-edge snap the top wall is left diagonal \
+             (free param, not tied): off={untied_off}"
+        );
+
+        // Full pipeline (with the closing-edge guarantee): the top wall is
+        // snapped axis-aligned, so its coord ties to the anchor — no orphan
+        // free param to drift.
+        let mut stroke = stair8.clone();
+        stroke.push(p(74.0, 290.0)); // trailing "lift near start" drag point
+        let fixed = FloorPlan::from_points_to_orthogonal(&stroke, 8.0, true).unwrap();
+        let fp = fixed.polygons()[0].clone();
+        let m = fp.len();
+        let fixed_off = (fp[m - 1].y - fp[0].y)
+            .abs()
+            .min((fp[m - 1].x - fp[0].x).abs());
+        assert!(
+            fixed_off < 1e-3,
+            "the closing edge is snapped axis-aligned: off={fixed_off}"
+        );
+        fixed.validate_simple().unwrap();
+    }
+
+    /// Regression: a small room with a clear nook drawn inside a BIG house must
+    /// keep the nook. The cleanup that strips collapse-remnants is scaled to the
+    /// SUB-AREA's own size, not the house's — so the nook isn't wrongly erased
+    /// just because the storey is large. (With the house-scaled tolerance this
+    /// nook was flattened to a plain quad.)
+    #[test]
+    fn carve_subarea_keeps_a_real_nook_in_a_big_house() {
+        let big_house = FloorPlan::from_points_to_orthogonal(
+            &[
+                p(0.0, 0.0),
+                p(60.0, 0.0),
+                p(60.0, 60.0),
+                p(0.0, 60.0),
+                p(0.5, 0.5),
+            ],
+            1.0,
+            true,
+        )
+        .unwrap();
+        // ~2m square room with a 0.3m-deep nook (15% of the side), free-standing.
+        let path = vec![
+            p(10.0, 10.0),
+            p(12.0, 10.0),
+            p(12.0, 10.7),
+            p(12.3, 10.7),
+            p(12.3, 11.3),
+            p(12.0, 11.3),
+            p(12.0, 12.0),
+            p(10.0, 12.0),
+            p(10.1, 10.1),
+        ];
+        let (mut mnx, mut mny, mut mxx, mut mxy) = (f32::MAX, f32::MAX, f32::MIN, f32::MIN);
+        for q in &path {
+            mnx = mnx.min(q.x);
+            mny = mny.min(q.y);
+            mxx = mxx.max(q.x);
+            mxy = mxy.max(q.y);
+        }
+        let tol = ((mxx - mnx).powi(2) + (mxy - mny).powi(2)).sqrt() * 0.02;
+        let room = big_house.carve_subarea(&path, tol).unwrap();
+        assert!(
+            room.polygons()[0].len() > 4,
+            "the nook survives even though the house is large: {:?}",
+            room.polygons()[0]
+        );
+        room.validate_simple().unwrap();
+    }
+
+    /// Drawing a living area as a FULL closed loop: walls drawn close to a
+    /// parallel house wall get corrected onto it, while interior walls are left
+    /// alone. Here the left + bottom walls are drawn ~0.15 off the storey's
+    /// left/bottom walls and must snap to x=0 / y=0.
+    #[test]
+    fn full_loop_living_area_walls_snap_onto_nearby_house_walls() {
+        let outline = unit_square_plan(); // 10x10, corner at (0,0)
+        let path = vec![
+            p(0.15, 0.12), // near corner (0,0)
+            p(4.0, 0.12),  // bottom wall, ~0.12 above the storey's y=0 wall
+            p(4.0, 4.0),   // right wall — interior, far from any house wall
+            p(0.15, 4.0),  // left wall, ~0.15 right of the storey's x=0 wall
+            p(0.16, 0.13), // close
+        ];
+        let room = outline.carve_subarea(&path, 0.1).unwrap();
+        let poly = room.polygons()[0].clone();
+        assert!(
+            poly.iter().any(|v| v.x.abs() < 0.01),
+            "left wall snapped onto the storey wall x=0: {poly:?}"
+        );
+        assert!(
+            poly.iter().any(|v| v.y.abs() < 0.01),
+            "bottom wall snapped onto the storey wall y=0: {poly:?}"
+        );
+        // Interior walls untouched (still near x=4 / y=4, not pulled to x=10/y=10).
+        assert!(
+            poly.iter().any(|v| (v.x - 4.0).abs() < 0.2),
+            "interior right wall left alone: {poly:?}"
+        );
+        assert!(room.non_orthogonal_edges().is_empty(), "stays orthogonal");
+        room.validate_simple().unwrap();
     }
 
     /// The reported use case: an L (3/4 of a square, reflex corner) with a
@@ -1843,5 +2999,530 @@ mod trim_serde_tests {
         for (a, b) in rings_after[0].iter().zip(rings_before[0].iter()) {
             assert!((a.x - b.x).abs() < 1e-3 && (a.y - b.y).abs() < 1e-3);
         }
+    }
+}
+
+#[cfg(test)]
+mod cut_line_tests {
+    use super::*;
+    fn p(x: f32, y: f32) -> Point2f32 {
+        Point2f32::new(x, y)
+    }
+
+    /// Drawing a single straight CUT line across the storey (endpoints on two
+    /// walls) splits it and takes one side as the living area — rather than
+    /// erroring as "too few points". Picks the smaller region (shorter arc).
+    #[test]
+    fn cut_line_splits_off_a_region() {
+        let outline = FloorPlan::from_points_to_orthogonal(
+            &[p(0., 0.), p(10., 0.), p(10., 6.), p(0., 6.), p(0.1, 0.1)],
+            0.2,
+            true,
+        )
+        .unwrap();
+        // a near-vertical cut from the bottom wall to the top wall at x~3,
+        // delivered as a noisy multi-point stroke (collapses to a straight line)
+        let stroke = vec![p(3.0, 0.05), p(3.02, 2.0), p(2.98, 4.0), p(3.0, 5.95)];
+        let room = outline.carve_subarea(&stroke, 0.1).unwrap();
+        let poly = room.polygons()[0].clone();
+        assert_eq!(poly.len(), 4, "cut yields a quad region: {poly:?}");
+        assert!(
+            poly.iter().any(|v| v.x.abs() < 0.05),
+            "includes storey wall x=0"
+        );
+        assert!(
+            poly.iter().any(|v| (v.x - 3.0).abs() < 0.2),
+            "bounded by the cut at x~3"
+        );
+        let area = polygon_area(&poly).abs();
+        assert!(
+            (area - 18.0).abs() < 1.0,
+            "smaller (left) region ~3x6=18, got {area}"
+        );
+        assert!(room.non_orthogonal_edges().is_empty());
+        room.validate_simple().unwrap();
+    }
+
+    /// `split_by_cut` returns BOTH regions of a cut so the caller can let the
+    /// user pick. The two areas are complementary (together ~= the whole storey)
+    /// and both orthogonal here.
+    #[test]
+    fn split_by_cut_returns_both_regions() {
+        let outline = FloorPlan::from_points_to_orthogonal(
+            &[p(0., 0.), p(10., 0.), p(10., 6.), p(0., 6.), p(0.1, 0.1)],
+            0.2,
+            true,
+        )
+        .unwrap();
+        let stroke = vec![p(3.0, 0.05), p(3.0, 5.95)];
+        let (a, b) = outline.split_by_cut(&stroke, 0.1).unwrap().unwrap();
+        let area_a = polygon_area(&a.polygons()[0]).abs();
+        let area_b = polygon_area(&b.polygons()[0]).abs();
+        // 3x6 + 7x6 == 60 (the whole 10x6 storey).
+        assert!((area_a + area_b - 60.0).abs() < 1.0, "{area_a} + {area_b}");
+        assert!(
+            ((area_a - 18.0).abs() < 1.0 && (area_b - 42.0).abs() < 1.0)
+                || ((area_a - 42.0).abs() < 1.0 && (area_b - 18.0).abs() < 1.0),
+            "regions are the 18 and 42 halves: {area_a}, {area_b}"
+        );
+        a.validate_simple().unwrap();
+        b.validate_simple().unwrap();
+
+        // A stroke with interior corners is NOT a straight cut.
+        let bent = vec![p(3.0, 0.05), p(3.0, 3.0), p(6.0, 3.0), p(6.0, 5.95)];
+        assert!(outline.split_by_cut(&bent, 0.1).unwrap().is_none());
+    }
+
+    /// Reproduces the reported bug: a storey with diagonal trim-cut corners. A
+    /// vertical cut near a corner must land on the HORIZONTAL top/bottom
+    /// segments it crosses — not clamp to the adjacent diagonal — and stay
+    /// vertical.
+    #[test]
+    fn cut_lands_on_crossed_segments_not_a_nearby_diagonal() {
+        // Hexagon: 2x2-ish with both bottom corners cut diagonally.
+        let outline = FloorPlan::from_clean_ring(&[
+            p(1.29, 0.97),
+            p(0.99, 0.97),
+            p(0.39, 1.67),
+            p(0.39, 2.97),
+            p(2.39, 2.97),
+            p(2.39, 1.57),
+        ])
+        .unwrap();
+        assert_eq!(
+            outline.non_orthogonal_edges().len(),
+            2,
+            "two diagonal corners"
+        );
+        // Vertical cut at x~1.1 — crosses the bottom segment (y=0.97) and the
+        // top (y=2.97); the diagonal next to the corner is NOT crossed.
+        let stroke = vec![p(1.1, 1.0), p(1.1, 2.0), p(1.1, 2.9)];
+        let (ra, rb) = outline.split_by_cut(&stroke, 0.05).unwrap().unwrap();
+        let has = |r: &FloorPlan, w: (f32, f32)| {
+            r.polygons()[0]
+                .iter()
+                .any(|v| (v.x - w.0).abs() < 0.06 && (v.y - w.1).abs() < 0.06)
+        };
+        assert!(
+            has(&ra, (1.1, 0.97)) || has(&rb, (1.1, 0.97)),
+            "cut hits the bottom SEGMENT at (1.1, 0.97), not the diagonal: {:?} {:?}",
+            ra.polygons()[0],
+            rb.polygons()[0]
+        );
+        assert!(
+            has(&ra, (1.1, 2.97)) || has(&rb, (1.1, 2.97)),
+            "cut hits the top segment at (1.1, 2.97)"
+        );
+        // The cut endpoint did NOT get dragged onto the corner (0.99, 0.97).
+        assert!(
+            !has(&ra, (0.99, 0.97)) || !has(&rb, (0.99, 0.97)),
+            "the cut endpoint isn't clamped to the diagonal corner"
+        );
+    }
+
+    /// Reproduces the reported failure: a hand-drawn near-vertical cut with
+    /// wobble (so RDP leaves >2 points). It must still be recognized as a cut
+    /// (thin + open), not rejected and sent to carve where it errors.
+    #[test]
+    fn wobbly_near_vertical_cut_is_still_a_cut() {
+        let outline = FloorPlan::from_clean_ring(&[
+            p(0.74, 0.814),
+            p(0.44, 0.814),
+            p(0.24, 1.314),
+            p(0.24, 1.814),
+            p(1.24, 1.814),
+            p(1.24, 1.314),
+        ])
+        .unwrap();
+        // y sweeps top→bottom; x wobbles around 0.53 (won't simplify to 2 pts).
+        let mut stroke = Vec::new();
+        let mut y = 0.82;
+        let mut i = 0;
+        while y < 1.81 {
+            let wob = if i % 2 == 0 { 0.05 } else { -0.04 };
+            stroke.push(p(0.53 + wob, y));
+            y += 0.05;
+            i += 1;
+        }
+        let res = outline.split_by_cut(&stroke, 0.02).unwrap();
+        assert!(res.is_some(), "wobbly vertical line recognized as a cut");
+        let (ra, rb) = res.unwrap();
+        let has = |r: &FloorPlan, w: (f32, f32)| {
+            r.polygons()[0]
+                .iter()
+                .any(|v| (v.x - w.0).abs() < 0.08 && (v.y - w.1).abs() < 0.08)
+        };
+        assert!(
+            has(&ra, (0.53, 0.814)) || has(&rb, (0.53, 0.814)),
+            "cut hits the bottom segment"
+        );
+        assert!(
+            has(&ra, (0.53, 1.814)) || has(&rb, (0.53, 1.814)),
+            "cut hits the top segment"
+        );
+    }
+
+    /// When a cut region inherits a shared DIAGONAL wall from the storey, that
+    /// diagonal is PINNED (fixed by the house) — so only the cut wall remains
+    /// to dimension, not the diagonal.
+    #[test]
+    fn shared_diagonal_in_a_cut_region_is_pinned() {
+        // Square with the bottom-right corner cut diagonally: diagonal (1,0)→(2,1).
+        let outline = FloorPlan::from_clean_ring(&[
+            p(0.0, 0.0),
+            p(1.0, 0.0),
+            p(2.0, 1.0),
+            p(2.0, 2.0),
+            p(0.0, 2.0),
+        ])
+        .unwrap();
+        assert_eq!(outline.non_orthogonal_edges().len(), 1, "one diagonal");
+        // Vertical cut at x~0.5: the RIGHT region keeps the diagonal.
+        let stroke = vec![p(0.5, 0.1), p(0.5, 1.0), p(0.5, 1.9)];
+        let (ra, rb) = outline.split_by_cut(&stroke, 0.02).unwrap().unwrap();
+        let diag_region = if !ra.non_orthogonal_edges().is_empty() {
+            &ra
+        } else {
+            &rb
+        };
+        assert!(
+            !diag_region.non_orthogonal_edges().is_empty(),
+            "the right region kept the diagonal"
+        );
+        let total = diag_region.all_active_params().len();
+        let pinned = outline.params_pinned_to_outline(diag_region).len();
+        assert_eq!(
+            total - pinned,
+            1,
+            "only the cut wall is free; the shared diagonal is pinned \
+             (total={total}, pinned={pinned})"
+        );
+    }
+}
+
+#[cfg(test)]
+mod diagonal_snap_tests {
+    use super::*;
+    fn p(x: f32, y: f32) -> Point2f32 {
+        Point2f32::new(x, y)
+    }
+
+    /// Outline with a DIAGONAL wall: a 10x10 square with the top-right corner
+    /// cut off along the line x+y=16, i.e. edge (10,6)->(6,10).
+    fn diag_outline() -> FloorPlan {
+        let fp = FloorPlan::from_clean_ring(&[
+            p(0., 0.),
+            p(10., 0.),
+            p(10., 6.),
+            p(6., 10.),
+            p(0., 10.),
+        ])
+        .unwrap();
+        assert!(
+            !fp.non_orthogonal_edges().is_empty(),
+            "the outline keeps its diagonal edge"
+        );
+        fp
+    }
+
+    /// Two living-area walls drawn just inside a diagonal house wall are pulled
+    /// ONTO it, so the wall between them follows the diagonal (orthogonality
+    /// relaxed to match the storey).
+    #[test]
+    fn walls_near_a_diagonal_outline_wall_snap_onto_it() {
+        let outline = diag_outline();
+        // Ring with two vertices ~0.35 off the diagonal line x+y=16.
+        let pts = vec![p(4.0, 4.0), p(8.5, 7.0), p(7.0, 8.5), p(4.0, 8.0)];
+        let snapped = outline.snap_walls_to_outline(&pts, 0.8, true);
+        // The two near-diagonal vertices now lie on x+y=16.
+        assert!(
+            (snapped[1].x + snapped[1].y - 16.0).abs() < 0.05,
+            "v1 on the diagonal: {:?}",
+            snapped[1]
+        );
+        assert!(
+            (snapped[2].x + snapped[2].y - 16.0).abs() < 0.05,
+            "v2 on the diagonal: {:?}",
+            snapped[2]
+        );
+        // Vertices far from the diagonal are untouched.
+        assert_eq!(snapped[0], p(4.0, 4.0));
+        assert_eq!(snapped[3], p(4.0, 8.0));
+    }
+
+    /// The diagonal snap reaches FURTHER than the axis snap, because forcing
+    /// the interior to the storey axes leaves a wall drawn along the diagonal a
+    /// little off the line. A vertex past the axis tolerance is still pulled on.
+    #[test]
+    fn diagonal_snap_reaches_past_the_axis_tolerance() {
+        let outline = diag_outline(); // diagonal x+y=16
+                                      // Two vertices ~0.35 off the diagonal — beyond the 0.2 axis tol but
+                                      // within the diagonal reach (2.5x = 0.5).
+        let pts = vec![p(4.0, 4.0), p(8.0, 7.5), p(7.5, 8.0), p(4.0, 8.0)];
+        let snapped = outline.snap_walls_to_outline(&pts, 0.2, true);
+        assert!(
+            (snapped[1].x + snapped[1].y - 16.0).abs() < 0.05,
+            "pulled onto the diagonal despite being past the axis tol: {:?}",
+            snapped[1]
+        );
+        assert!(
+            (snapped[2].x + snapped[2].y - 16.0).abs() < 0.05,
+            "ditto: {:?}",
+            snapped[2]
+        );
+        // The far interior vertices are untouched.
+        assert_eq!(snapped[0], p(4.0, 4.0));
+        assert_eq!(snapped[3], p(4.0, 8.0));
+    }
+
+    /// End to end: a closed-loop living area whose corner is drawn near the
+    /// diagonal house wall snaps onto it and stays a valid shape.
+    #[test]
+    fn closed_loop_living_area_corner_follows_the_diagonal() {
+        let outline = diag_outline();
+        let stroke = vec![
+            p(4.0, 4.0),
+            p(8.6, 4.0),
+            p(8.6, 7.1), // top-right corner ~0.2 off the diagonal
+            p(4.0, 7.1),
+            p(4.1, 4.1),
+        ];
+        let room = outline.carve_subarea(&stroke, 0.15).unwrap();
+        let poly = room.polygons()[0].clone();
+        assert!(
+            poly.iter().any(|v| (v.x + v.y - 16.0).abs() < 0.1),
+            "the near-diagonal corner snapped onto x+y=16: {poly:?}"
+        );
+        room.validate_simple().unwrap();
+    }
+}
+
+#[cfg(test)]
+mod boundary_loop_tests {
+    use super::*;
+    fn p(x: f32, y: f32) -> Point2f32 {
+        Point2f32::new(x, y)
+    }
+
+    /// A closed-loop room drawn hugging a diagonal boundary follows the diagonal
+    /// the FULL way (kept verbatim), with axis-aligned interior walls — the only
+    /// non-orthogonal edge is the diagonal itself.
+    #[test]
+    fn closed_loop_follows_a_diagonal_boundary_fully() {
+        let outline = FloorPlan::from_clean_ring(&[
+            p(0.903, 0.554),
+            p(0.403, 0.554),
+            p(0.203, 0.954),
+            p(0.203, 1.554),
+            p(1.203, 1.554),
+            p(1.203, 1.054),
+        ])
+        .unwrap();
+        // Hug the v5->v0 diagonal (slightly off), then interior axis walls back.
+        let stroke = vec![
+            p(0.91, 0.56),
+            p(1.0, 0.71),
+            p(1.1, 0.88),
+            p(1.19, 1.04),
+            p(1.19, 1.3),
+            p(0.7, 1.3),
+            p(0.7, 0.56),
+            p(0.91, 0.57),
+        ];
+        let room = outline.carve_subarea(&stroke, 0.02).unwrap();
+        // Exactly one non-orthogonal edge — the diagonal — and it spans the whole
+        // diagonal (from ~v0 (0.903,0.554) to ~v5 (1.203,1.054)).
+        let bad = room.non_orthogonal_edges();
+        assert_eq!(
+            bad.len(),
+            1,
+            "only the diagonal is non-orthogonal: {:?}",
+            room.polygons()[0]
+        );
+        let (_, _, a, b) = bad[0];
+        let on_diag = |v: Point2f32| (v.y - 0.554 - 1.6667 * (v.x - 0.903)).abs() < 0.02;
+        assert!(
+            on_diag(a) && on_diag(b),
+            "the wall lies on the diagonal line"
+        );
+        let span = ((a.x - b.x).powi(2) + (a.y - b.y).powi(2)).sqrt();
+        assert!(
+            span > 0.5,
+            "it follows the diagonal the full way (~0.58), got {span}"
+        );
+        // The follow reaches the diagonal's actual corners v0 (0.903,0.554) and
+        // v5 (1.203,1.054) — not stopping short mid-diagonal.
+        let at = |v: Point2f32, w: (f32, f32)| (v.x - w.0).abs() < 0.02 && (v.y - w.1).abs() < 0.02;
+        assert!(
+            (at(a, (0.903, 0.554)) && at(b, (1.203, 1.054)))
+                || (at(a, (1.203, 1.054)) && at(b, (0.903, 0.554))),
+            "diagonal runs corner-to-corner: {a:?}..{b:?}"
+        );
+        room.validate_simple().unwrap();
+
+        // The shared diagonal wall is PINNED (fixed by the house), so it won't
+        // be prompted for dimensioning — only the interior walls are free.
+        let pinned = outline.params_pinned_to_outline(&room);
+        let (_, e, _, _) = bad[0];
+        let nn = room.polygons()[0].len();
+        for idx in [e, (e + 1) % nn] {
+            if let Some(pp) = room.vertex_x_param(0, idx) {
+                assert!(pinned.contains(&pp), "diagonal endpoint x param is pinned");
+            }
+            if let Some(pp) = room.vertex_y_param(0, idx) {
+                assert!(pinned.contains(&pp), "diagonal endpoint y param is pinned");
+            }
+        }
+    }
+
+    /// Guard: an axis-only storey (no diagonal) never takes the boundary-aware
+    /// path — a closed-loop room stays a plain axis-aligned shape.
+    #[test]
+    fn axis_only_storey_is_unaffected_by_boundary_path() {
+        let outline = FloorPlan::from_points_to_orthogonal(
+            &[p(0., 0.), p(10., 0.), p(10., 10.), p(0., 10.), p(0.2, 0.2)],
+            0.5,
+            true,
+        )
+        .unwrap();
+        let stroke = vec![p(2., 2.), p(6., 2.), p(6., 6.), p(2., 6.), p(2.1, 2.1)];
+        let room = outline.carve_subarea(&stroke, 0.1).unwrap();
+        assert!(room.non_orthogonal_edges().is_empty(), "stays orthogonal");
+    }
+}
+
+#[cfg(test)]
+mod farwall_tests {
+    use super::*;
+    fn p(x: f32, y: f32) -> Point2f32 {
+        Point2f32::new(x, y)
+    }
+
+    /// A boundary-aware room (hugging a diagonal) still has its OTHER walls
+    /// snapped onto the storey: a far wall drawn just past the storey edge is
+    /// pulled onto it, while the verbatim diagonal is left untouched.
+    #[test]
+    fn boundary_aware_room_still_snaps_its_axis_walls() {
+        let outline = FloorPlan::from_clean_ring(&[
+            p(2.677, 1.772),
+            p(2.377, 1.772),
+            p(0.377, 3.772),
+            p(0.377, 4.772),
+            p(3.377, 4.772),
+            p(3.377, 2.772),
+        ])
+        .unwrap();
+        // hug the v5->v0 diagonal, then a far wall ~28mm PAST the storey top (4.772).
+        let stroke = vec![
+            p(2.69, 1.79),
+            p(2.9, 2.08),
+            p(3.1, 2.37),
+            p(3.37, 2.76),
+            p(3.40, 3.5),
+            p(3.40, 4.80),
+            p(2.68, 4.80),
+            p(2.68, 2.5),
+            p(2.70, 1.80),
+        ];
+        let room = outline.carve_subarea(&stroke, 0.04).unwrap();
+        // the diagonal follows fully (single non-orthogonal edge)
+        assert_eq!(
+            room.non_orthogonal_edges().len(),
+            1,
+            "diagonal only: {:?}",
+            room.polygons()[0]
+        );
+        // the far wall snapped down onto the storey top (4.772), not left at 4.80
+        let max_y = room.polygons()[0]
+            .iter()
+            .map(|v| v.y)
+            .fold(f32::MIN, f32::max);
+        assert!(
+            (max_y - 4.772).abs() < 0.01,
+            "far wall snapped to the storey edge, got {max_y}"
+        );
+        room.validate_simple().unwrap();
+    }
+}
+
+#[cfg(test)]
+mod guardrail_tests {
+    use super::*;
+    fn p(x: f32, y: f32) -> Point2f32 {
+        Point2f32::new(x, y)
+    }
+
+    #[test]
+    fn clamp_inside_pulls_outside_points_to_the_boundary() {
+        let outline = FloorPlan::from_points_to_orthogonal(
+            &[p(0., 0.), p(10., 0.), p(10., 10.), p(0., 10.), p(0.2, 0.2)],
+            0.5,
+            true,
+        )
+        .unwrap();
+        let clamped = outline.clamp_inside(&[p(5., 5.), p(15., 5.), p(5., -3.)]);
+        assert_eq!(clamped[0], p(5., 5.), "inside point unchanged");
+        assert!(
+            (clamped[1].x - 10.0).abs() < 0.05 && (clamped[1].y - 5.0).abs() < 0.05,
+            "right overshoot snaps to (10,5): {:?}",
+            clamped[1]
+        );
+        assert!(
+            clamped[2].y.abs() < 0.05 && (clamped[2].x - 5.0).abs() < 0.05,
+            "bottom overshoot snaps to (5,0): {:?}",
+            clamped[2]
+        );
+    }
+
+    #[test]
+    fn any_point_outside_flags_a_room_poking_out() {
+        let outline = FloorPlan::from_points_to_orthogonal(
+            &[p(0., 0.), p(10., 0.), p(10., 10.), p(0., 10.), p(0.2, 0.2)],
+            0.5,
+            true,
+        )
+        .unwrap();
+        let inside =
+            FloorPlan::from_clean_ring(&[p(2., 2.), p(6., 2.), p(6., 6.), p(2., 6.)]).unwrap();
+        assert!(
+            !outline.any_point_outside(&inside, 0.05),
+            "fully-inside room is fine"
+        );
+        let poking =
+            FloorPlan::from_clean_ring(&[p(8., 2.), p(13., 2.), p(13., 6.), p(8., 6.)]).unwrap();
+        assert!(
+            outline.any_point_outside(&poking, 0.05),
+            "room past x=10 is flagged"
+        );
+    }
+
+    /// A self-crossing sub-area ring (the reported fold: a boundary diagonal
+    /// whose corner falls left of the room's own left wall) is un-intersected
+    /// into a simple plan rather than emitted broken.
+    #[test]
+    fn self_crossing_subarea_ring_is_untangled_into_a_simple_plan() {
+        let crossed = [
+            p(2.750228, 1.0471573),
+            p(3.650228, 2.0471573),
+            p(3.650228, 3.0471573),
+            p(2.7811332, 3.0471573),
+            p(2.7811332, 1.0471573),
+        ];
+        // As drawn, the ring self-intersects.
+        assert!(
+            FloorPlan::from_clean_ring(&crossed)
+                .unwrap()
+                .validate_simple()
+                .is_err(),
+            "the raw ring crosses itself"
+        );
+        // After un-intersecting, the real simplicity checker is satisfied.
+        let fixed = geom::untangle_ring(&crossed);
+        let plan = FloorPlan::from_clean_ring(&fixed).unwrap();
+        assert!(
+            plan.validate_simple().is_ok(),
+            "untangled ring is simple: {:?}",
+            plan.validate_simple()
+        );
     }
 }

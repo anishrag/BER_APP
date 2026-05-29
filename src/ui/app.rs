@@ -161,6 +161,11 @@ impl eframe::App for BerApp {
                     dimensioned_walls,
                     arc_preview,
                     curve_bulge,
+                    living_area_mode,
+                    living_area_polygons,
+                    living_area_wall_labels,
+                    active_living_area,
+                    pending_cut_regions,
                     edit_selected_wall,
                     edit_selected_vertex,
                     edit_drag_prompt,
@@ -189,6 +194,11 @@ impl eframe::App for BerApp {
                         controller_ref.walls_with_known_length(),
                         controller_ref.pending_arc_preview(),
                         controller_ref.pending_arc_bulge(),
+                        controller_ref.living_area_mode(),
+                        controller_ref.living_area_polygons(),
+                        controller_ref.living_area_wall_labels(),
+                        controller_ref.active_living_area_index(),
+                        controller_ref.pending_cut_regions(),
                         controller_ref.edit_selected_wall_positions(),
                         controller_ref.edit_selected_vertex_position(),
                         controller_ref.edit_drag_prompt_for_ui(),
@@ -229,6 +239,11 @@ impl eframe::App for BerApp {
                     &dimensioned_walls,
                     arc_preview.as_deref(),
                     curve_bulge,
+                    living_area_mode,
+                    &living_area_polygons,
+                    &living_area_wall_labels,
+                    active_living_area,
+                    &pending_cut_regions,
                     edit_selected_wall,
                     edit_selected_vertex,
                     edit_drag_prompt,
@@ -330,6 +345,19 @@ impl eframe::App for BerApp {
                                 if let Err(e) = controller.borrow_mut().commit_pending_arc() {
                                     eprintln!("commit_pending_arc: {}", e);
                                 }
+                            }
+                            SketchEvent::SetLivingAreaMode(on) => {
+                                controller.borrow_mut().set_living_area_mode(on);
+                            }
+                            SketchEvent::LivingAreaStrokeWorld { points } => {
+                                controller
+                                    .borrow_mut()
+                                    .apply_living_area_stroke_event(&points);
+                            }
+                            SketchEvent::ChooseCutRegion { world_x, world_y } => {
+                                controller
+                                    .borrow_mut()
+                                    .choose_cut_region(world_x as f32, world_y as f32);
                             }
                             SketchEvent::EditMouseDown {
                                 world_x,

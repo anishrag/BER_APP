@@ -978,7 +978,33 @@ impl ParametricPlan {
         if self.rings.is_empty() {
             return Ok(());
         }
-        let tolerance = 0.5;
+        // Merge coordinates that are "the same" up to drawing/rounding noise.
+        // The tolerance is RELATIVE to the plan's extent so it behaves the same
+        // whether coords are in sketch pixels (~hundreds) or dimensioned metres
+        // (~single digits). A fixed absolute tolerance (the old 0.5, tuned for
+        // pixel sketches) is fine for a pixel-scale outline but at metre scale
+        // merges away real features — e.g. a 0.4m nook on a living area drawn
+        // inside a dimensioned storey. At 0.05% of the diagonal it reproduces
+        // the old ~0.5 for a typical pixel sketch (~1000-unit diagonal) while
+        // only collapsing float noise at metre scale.
+        let diag = {
+            let pts = self.all_ring_points();
+            let (mut mnx, mut mny, mut mxx, mut mxy) = (f32::MAX, f32::MAX, f32::MIN, f32::MIN);
+            for ring in &pts {
+                for q in ring {
+                    mnx = mnx.min(q.x);
+                    mny = mny.min(q.y);
+                    mxx = mxx.max(q.x);
+                    mxy = mxy.max(q.y);
+                }
+            }
+            if mxx >= mnx {
+                ((mxx - mnx).powi(2) + (mxy - mny).powi(2)).sqrt()
+            } else {
+                0.0
+            }
+        };
+        let tolerance = (diag * 0.0005).max(1e-4);
 
         // V0 of ring 0 stays as-is (the global origin constant).
         let v0_const_x = match &self.rings[0][0].x_expr {

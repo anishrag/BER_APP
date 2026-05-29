@@ -6,6 +6,7 @@
 // record/persistence, collinearity review, sketch/stroke handling).
 mod dimensioning;
 mod editing;
+mod living_areas;
 
 use chrono::NaiveDate;
 use std::sync::mpsc::Sender;
@@ -254,6 +255,69 @@ struct SketchSnapshot {
     scale_set: bool,
     dimensioned_walls: Vec<VertexId>,
     skipped_walls: HashSet<VertexId>,
+    /// Potential living-area sub-shapes drawn inside the storey (largest is the
+    /// living area; all are kept). Each is its own parametric sketch +
+    /// dimensioning, drawn the same way as the outline. `#[serde(default)]` so
+    /// pre-living-area snapshots still load (as a storey with no living areas).
+    #[serde(default)]
+    living_areas: Vec<ShapeSnapshot>,
+}
+
+/// Serializable per-shape sketch state — the outline and each living area share
+/// this shape. Mirror of [`ShapeSlot`] minus the transient `current_prompt`.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+struct ShapeSnapshot {
+    floor_plan: FloorPlan,
+    known_params: HashSet<ParameterId>,
+    scale_set: bool,
+    dimensioned_walls: Vec<VertexId>,
+    skipped_walls: HashSet<VertexId>,
+}
+
+/// In-memory state for one editable shape (the storey outline or a living
+/// area): its parametric plan plus the dimensioning progress against it. The
+/// active shape's slot is mirrored live in `AppController::floor_plan` /
+/// `dimensioning`; the inactive shapes rest in their slots until activated.
+#[derive(Debug, Clone, Default)]
+struct ShapeSlot {
+    floor_plan: FloorPlan,
+    dimensioning: DimensionState,
+}
+
+impl ShapeSlot {
+    fn to_snapshot(&self) -> ShapeSnapshot {
+        ShapeSnapshot {
+            floor_plan: self.floor_plan.clone(),
+            known_params: self.dimensioning.known_params.clone(),
+            scale_set: self.dimensioning.scale_set,
+            dimensioned_walls: self.dimensioning.dimensioned_walls.clone(),
+            skipped_walls: self.dimensioning.skipped_walls.clone(),
+        }
+    }
+
+    fn from_snapshot(s: ShapeSnapshot) -> Self {
+        ShapeSlot {
+            floor_plan: s.floor_plan,
+            dimensioning: DimensionState {
+                known_params: s.known_params,
+                scale_set: s.scale_set,
+                dimensioned_walls: s.dimensioned_walls,
+                skipped_walls: s.skipped_walls,
+                current_prompt: None,
+            },
+        }
+    }
+}
+
+/// Which shape the editor is currently acting on. `floor_plan`/`dimensioning`
+/// mirror this one; switching saves the live state back to its slot and loads
+/// the target's.
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum ActiveShape {
+    /// The storey outline (the primary footprint).
+    Outline,
+    /// The living area at this index in `living_areas`.
+    LivingArea(usize),
 }
 
 pub struct AppController {
@@ -274,7 +338,27 @@ pub struct AppController {
     /// faceted into the model. `None` when no curve is mid-flow.
     pending_arc: Option<PendingArc>,
     /// Tracks which parameters the user has dimensioned + the current prompt.
+    /// Mirrors the ACTIVE shape (see `active`); switching shapes swaps this and
+    /// `floor_plan` in/out of the shape slots.
     dimensioning: DimensionState,
+    /// Which shape `floor_plan`/`dimensioning` currently mirror.
+    active: ActiveShape,
+    /// Saved state of the storey outline (stale while a living area is active;
+    /// `sync_active` refreshes it from the live buffer before it's read).
+    outline: ShapeSlot,
+    /// Potential living-area sub-shapes, drawn inside the storey the same way as
+    /// the outline. The most-recent is the one the tools edit; the largest is
+    /// chosen as THE living area later, but all are kept.
+    living_areas: Vec<ShapeSlot>,
+    /// True when the editor is in living-area mode: `DrawPerpWalls` starts a new
+    /// living area (rather than replacing the outline), and the other tools act
+    /// on the most-recent living area. Toggled by the UI.
+    living_area_mode: bool,
+    /// A straight CUT line has split the storey into two candidate regions; the
+    /// user picks which becomes the living area by tapping inside it. Transient
+    /// (not persisted / not in undo history); `None` when nothing is awaiting a
+    /// choice.
+    pending_cut: Option<[ShapeSlot; 2]>,
     /// Edit-mode interaction state: which wall the user has selected via
     /// click + whether a drag is currently in progress. Always reset when
     /// `edit_tool` switches away from `Edit`.
@@ -304,6 +388,7 @@ pub struct AppController {
 /// current view or interrupt an in-progress prompt mid-flow.
 #[derive(Debug, Clone)]
 pub struct HistorySnapshot {
+    /// Live buffer of the active shape.
     floor_plan: FloorPlan,
     dimensioning: DimensionState,
     edit_state: EditState,
@@ -311,6 +396,12 @@ pub struct HistorySnapshot {
     /// stroke that began it must clear it; undoing a dimension that finished it
     /// must restore it.
     pending_arc: Option<PendingArc>,
+    /// All shapes + which is active, so undo restores the right one (drawing or
+    /// dimensioning a living area, switching shapes, etc. are all undoable).
+    outline: ShapeSlot,
+    living_areas: Vec<ShapeSlot>,
+    active: ActiveShape,
+    living_area_mode: bool,
 }
 
 /// Edit-mode click/drag state.
@@ -398,6 +489,11 @@ impl AppController {
             pending_redraw: None,
             pending_arc: None,
             dimensioning: DimensionState::default(),
+            active: ActiveShape::Outline,
+            outline: ShapeSlot::default(),
+            living_areas: Vec::new(),
+            living_area_mode: false,
+            pending_cut: None,
             edit_state: EditState::default(),
             edit_drag_prompt: None,
             vertex_drop_prompt: None,
@@ -421,7 +517,25 @@ impl AppController {
             dimensioning: self.dimensioning.clone(),
             edit_state: self.edit_state.clone(),
             pending_arc: self.pending_arc.clone(),
+            outline: self.outline.clone(),
+            living_areas: self.living_areas.clone(),
+            active: self.active,
+            living_area_mode: self.living_area_mode,
         }
+    }
+
+    fn restore_history_snapshot(&mut self, snap: HistorySnapshot) {
+        self.floor_plan = snap.floor_plan;
+        self.dimensioning = snap.dimensioning;
+        self.edit_state = snap.edit_state;
+        self.pending_arc = snap.pending_arc;
+        self.outline = snap.outline;
+        self.living_areas = snap.living_areas;
+        self.active = snap.active;
+        self.living_area_mode = snap.living_area_mode;
+        // In-flight prompts no longer match the restored state — clear.
+        self.edit_drag_prompt = None;
+        self.vertex_drop_prompt = None;
     }
 
     fn push_history_snapshot(&mut self, snap: HistorySnapshot) {
@@ -439,20 +553,9 @@ impl AppController {
         let Some(snap) = self.history.pop() else {
             return Ok(());
         };
-        // Save current state for redo.
-        self.redo.push(HistorySnapshot {
-            floor_plan: self.floor_plan.clone(),
-            dimensioning: self.dimensioning.clone(),
-            edit_state: self.edit_state.clone(),
-            pending_arc: self.pending_arc.clone(),
-        });
-        self.floor_plan = snap.floor_plan;
-        self.dimensioning = snap.dimensioning;
-        self.edit_state = snap.edit_state;
-        self.pending_arc = snap.pending_arc;
-        // Any in-flight prompts no longer match the restored state — clear.
-        self.edit_drag_prompt = None;
-        self.vertex_drop_prompt = None;
+        let cur = self.current_history_snapshot();
+        self.redo.push(cur);
+        self.restore_history_snapshot(snap);
         // Push the restored polygon to BER so the canvas reflects it.
         self.commit_to_ber()?;
         Ok(())
@@ -463,18 +566,9 @@ impl AppController {
         let Some(snap) = self.redo.pop() else {
             return Ok(());
         };
-        self.history.push(HistorySnapshot {
-            floor_plan: self.floor_plan.clone(),
-            dimensioning: self.dimensioning.clone(),
-            edit_state: self.edit_state.clone(),
-            pending_arc: self.pending_arc.clone(),
-        });
-        self.floor_plan = snap.floor_plan;
-        self.dimensioning = snap.dimensioning;
-        self.edit_state = snap.edit_state;
-        self.pending_arc = snap.pending_arc;
-        self.edit_drag_prompt = None;
-        self.vertex_drop_prompt = None;
+        let cur = self.current_history_snapshot();
+        self.history.push(cur);
+        self.restore_history_snapshot(snap);
         self.commit_to_ber()?;
         Ok(())
     }
@@ -603,6 +697,11 @@ impl AppController {
         // vertices; loading a record must not carry a stale one over (it would
         // dangle / render a phantom preview against the new geometry).
         self.pending_arc = None;
+        // Loading always starts on the outline with no living areas carried over.
+        self.living_areas = Vec::new();
+        self.active = ActiveShape::Outline;
+        self.living_area_mode = false;
+        self.outline = ShapeSlot::default();
         let Some(storey) = storey else {
             self.floor_plan = FloorPlan::default();
             return;
@@ -612,11 +711,23 @@ impl AppController {
         if let Some(json) = storey.sketch_state.as_deref() {
             match serde_json::from_str::<SketchSnapshot>(json) {
                 Ok(snap) if snap.version == SKETCH_SNAPSHOT_VERSION => {
-                    self.floor_plan = snap.floor_plan;
-                    self.dimensioning.known_params = snap.known_params;
-                    self.dimensioning.scale_set = snap.scale_set;
-                    self.dimensioning.dimensioned_walls = snap.dimensioned_walls;
-                    self.dimensioning.skipped_walls = snap.skipped_walls;
+                    self.living_areas = snap
+                        .living_areas
+                        .into_iter()
+                        .map(ShapeSlot::from_snapshot)
+                        .collect();
+                    self.outline = ShapeSlot {
+                        floor_plan: snap.floor_plan,
+                        dimensioning: DimensionState {
+                            known_params: snap.known_params,
+                            scale_set: snap.scale_set,
+                            dimensioned_walls: snap.dimensioned_walls,
+                            skipped_walls: snap.skipped_walls,
+                            current_prompt: None,
+                        },
+                    };
+                    self.floor_plan = self.outline.floor_plan.clone();
+                    self.dimensioning = self.outline.dimensioning.clone();
                     return;
                 }
                 Ok(snap) => eprintln!(
@@ -645,6 +756,10 @@ impl AppController {
         } else {
             FloorPlan::default()
         };
+        self.outline = ShapeSlot {
+            floor_plan: self.floor_plan.clone(),
+            dimensioning: self.dimensioning.clone(),
+        };
     }
 
     /// Snapshot of the BER currently being edited, for the UI to render.
@@ -665,17 +780,17 @@ impl AppController {
     /// logical user action (stroke end, wall drag end, etc.) — not from
     /// incremental handlers like `sketch_add_point`.
     fn commit_to_ber(&mut self) -> Result<(), String> {
-        let Some(record) = self.current_record.as_mut() else {
+        if self.current_record.is_none() {
             return Ok(());
-        };
-
-        if record.data.storeys.is_empty() {
-            record.data.storeys.push(Storey::default());
         }
+        // Flush the live buffer into the active shape's slot, so `outline` and
+        // `living_areas` are current regardless of which shape is being edited.
+        self.sync_active();
 
-        // Convert every polygon (ring) of the floor plan into a f64-typed
-        // polygon for the BER data model. One ring → one FloorRegion.
+        // The storey footprint is always the OUTLINE (never a living area, even
+        // when one is active). One ring → one FloorRegion.
         let polygons_f64: Vec<Vec<Point2f64>> = self
+            .outline
             .floor_plan
             .polygons()
             .into_iter()
@@ -686,6 +801,25 @@ impl AppController {
             })
             .collect();
 
+        // Persist the editable parametric model + dimensioning of the outline
+        // AND every living area, so reopening keeps equivalences, dimensions,
+        // and all drawn living areas. `floors` is the derived view; this
+        // snapshot is the source of truth for editing.
+        let snapshot = SketchSnapshot {
+            version: SKETCH_SNAPSHOT_VERSION,
+            floor_plan: self.outline.floor_plan.clone(),
+            known_params: self.outline.dimensioning.known_params.clone(),
+            scale_set: self.outline.dimensioning.scale_set,
+            dimensioned_walls: self.outline.dimensioning.dimensioned_walls.clone(),
+            skipped_walls: self.outline.dimensioning.skipped_walls.clone(),
+            living_areas: self.living_areas.iter().map(|s| s.to_snapshot()).collect(),
+        };
+        let json = serde_json::to_string(&snapshot);
+
+        let record = self.current_record.as_mut().unwrap();
+        if record.data.storeys.is_empty() {
+            record.data.storeys.push(Storey::default());
+        }
         if polygons_f64.iter().any(|p| p.len() >= 3) {
             record.data.storeys[0].floors = FloorRegions::from_vertex_lists(
                 polygons_f64,
@@ -695,21 +829,8 @@ impl AppController {
                 None,
             );
         }
-
-        // Persist the editable parametric model + dimensioning state alongside
-        // the resolved geometry, so reopening this BER keeps all collinearity
-        // equivalences and entered dimensions. `floors` above is the derived
-        // view; this snapshot is the source of truth for editing.
-        let snapshot = SketchSnapshot {
-            version: SKETCH_SNAPSHOT_VERSION,
-            floor_plan: self.floor_plan.clone(),
-            known_params: self.dimensioning.known_params.clone(),
-            scale_set: self.dimensioning.scale_set,
-            dimensioned_walls: self.dimensioning.dimensioned_walls.clone(),
-            skipped_walls: self.dimensioning.skipped_walls.clone(),
-        };
-        match serde_json::to_string(&snapshot) {
-            Ok(json) => record.data.storeys[0].sketch_state = Some(json),
+        match json {
+            Ok(j) => record.data.storeys[0].sketch_state = Some(j),
             Err(e) => eprintln!("failed to serialize sketch snapshot: {}", e),
         }
 
@@ -990,12 +1111,37 @@ impl AppController {
     /// Apply a primary-outline stroke: replace the floor plan, persist, and
     /// populate the collinearity review. Resets dimensioning state — the new
     /// plan is a fresh pixel-scale sketch that hasn't been dimensioned yet.
+    /// Diagnostic: log any non-orthogonal (slanted) edge of the active shape.
+    /// A no-op when fully orthogonal. Called after operations that should leave
+    /// the shape rectilinear (draw / extend-ortho / carve / dimension) so a
+    /// "wall isn't straight" report shows up in the log with the exact edge.
+    /// (A plain `Trim` may create a deliberate diagonal cut, so it's not checked.)
+    pub(crate) fn warn_if_non_orthogonal(&self, ctx: &str) {
+        let bad = self.floor_plan.non_orthogonal_edges();
+        if bad.is_empty() {
+            return;
+        }
+        eprintln!("⚠ NON-ORTHOGONAL edge(s) after {ctx} ({}):", bad.len());
+        for (r, e, a, b) in &bad {
+            eprintln!(
+                "    ring {r} edge {e}: ({:.3},{:.3})→({:.3},{:.3})  dx={:.4} dy={:.4}",
+                a.x,
+                a.y,
+                b.x,
+                b.y,
+                (a.x - b.x).abs(),
+                (a.y - b.y).abs()
+            );
+        }
+    }
+
     fn apply_drawperp_stroke(&mut self, points: &[Point2f32], closed: bool) -> Result<(), String> {
         // Snapshot pre-stroke (may be empty / pre-dim) for undo.
         let undo_snap = self.current_history_snapshot();
         self.floor_plan = FloorPlan::from_points_to_orthogonal(points, 10.0, closed)
             .map_err(|e| format!("Failed to draw outline: {:?}", e))?;
         println!("floor plan: {:?}", self.floor_plan);
+        self.warn_if_non_orthogonal("draw outline");
         self.dimensioning = DimensionState::default();
         self.push_history_snapshot(undo_snap);
         self.commit_to_ber()?;
@@ -1079,6 +1225,7 @@ impl AppController {
             .extend_ortho(points)
             .map_err(|e| format!("{}", e))?;
         println!("Extend: {} new param(s) {:?}", minted.len(), minted);
+        self.warn_if_non_orthogonal("extend");
         // The porch is a fix-up to the ENVELOPE — once spliced, that it was a
         // "porch" is irrelevant. Drop any vertex it left collinear (e.g. a
         // corner a flush porch turned into a mid-wall point) so the outline
@@ -1784,6 +1931,506 @@ mod trim_collapse_tests {
             ParameterAxis::Y,
             "a horizontal wall is measured vertically"
         );
+    }
+
+    /// Drawing a living area inside a dimensioned storey: it inherits the
+    /// storey's scale (no recalibration), becomes the active shape, is stored,
+    /// and the storey outline is untouched when you switch back.
+    #[test]
+    fn living_area_inherits_scale_is_stored_and_leaves_outline_intact() {
+        let mut c = AppController::new(crate::engine::open_db(":memory:").unwrap());
+        let square = vec![
+            Point2f32::new(0.0, 0.0),
+            Point2f32::new(10.0, 0.0),
+            Point2f32::new(10.0, 10.0),
+            Point2f32::new(0.0, 10.0),
+            Point2f32::new(0.2, 0.2),
+        ];
+        c.floor_plan = FloorPlan::from_points_to_orthogonal(&square, 0.5, true).unwrap();
+        c.dimensioning.scale_set = true; // storey is dimensioned (metres)
+        c.dimensioning.known_params = c.floor_plan.all_active_params();
+        let outline_verts = c.floor_plan.polygons()[0].len();
+
+        // Enter living-area mode and draw a sub-area inside the storey.
+        c.set_living_area_mode(true);
+        assert!(c.living_area_mode());
+        let la: Vec<(f32, f32)> = vec![(2.0, 2.0), (6.0, 2.0), (6.0, 6.0), (2.0, 6.0), (2.1, 2.1)];
+        c.apply_living_area_stroke_event(&la);
+
+        assert_eq!(c.living_area_count(), 1, "the living area is stored");
+        assert_eq!(
+            c.active_living_area_index(),
+            Some(0),
+            "it's the active shape"
+        );
+        // Inherits the storey scale — no first-dimension calibration step.
+        assert!(
+            c.dimensioning_scale_set(),
+            "a living area inside a dimensioned storey inherits its scale"
+        );
+        assert!(
+            c.floor_plan.polygons()[0].len() >= 4,
+            "a sub-area was drawn"
+        );
+        assert_eq!(c.living_area_polygons().len(), 1, "renderable");
+
+        // Switch back to the outline: it's restored exactly, area still stored.
+        c.set_living_area_mode(false);
+        assert_eq!(c.active_living_area_index(), None);
+        assert_eq!(
+            c.floor_plan.polygons()[0].len(),
+            outline_verts,
+            "the storey outline is untouched by drawing a living area"
+        );
+        assert_eq!(c.living_area_count(), 1, "the living area is still kept");
+    }
+
+    /// Living areas are persisted in the sketch snapshot and come back on
+    /// reopen (alongside the outline + its dimensions).
+    #[test]
+    fn living_areas_survive_save_and_reopen() {
+        let mut c = AppController::new(crate::engine::open_db(":memory:").unwrap());
+        let ber = c.create_ber(
+            "T".into(),
+            chrono::NaiveDate::from_ymd_opt(2026, 1, 1).unwrap(),
+        );
+        let square = vec![
+            Point2f32::new(0.0, 0.0),
+            Point2f32::new(10.0, 0.0),
+            Point2f32::new(10.0, 10.0),
+            Point2f32::new(0.0, 10.0),
+            Point2f32::new(0.2, 0.2),
+        ];
+        c.floor_plan = FloorPlan::from_points_to_orthogonal(&square, 0.5, true).unwrap();
+        c.dimensioning.scale_set = true;
+        c.dimensioning.known_params = c.floor_plan.all_active_params();
+        c.commit_to_ber().unwrap();
+
+        c.set_living_area_mode(true);
+        c.apply_living_area_stroke_event(&[
+            (2.0, 2.0),
+            (6.0, 2.0),
+            (6.0, 6.0),
+            (2.0, 6.0),
+            (2.1, 2.1),
+        ]);
+        assert_eq!(c.living_area_count(), 1);
+
+        // Reopen from the DB (same connection): the living area is restored.
+        c.open_ber(&ber.id).unwrap();
+        assert_eq!(
+            c.living_area_count(),
+            1,
+            "the living area survives save + reopen"
+        );
+        assert_eq!(
+            c.active_living_area_index(),
+            None,
+            "reopen starts on the storey outline"
+        );
+        assert_eq!(
+            c.living_area_polygons().len(),
+            1,
+            "still renderable after reopen"
+        );
+    }
+
+    /// Reproduces the reported "stuck dimensioning a living area" bug: a
+    /// free-standing interior square living area should accept its first
+    /// dimension (it inherits the storey scale, so dimension #1 sets a wall
+    /// directly — no calibration step).
+    #[test]
+    fn dimensioning_a_living_area_square_accepts_the_first_wall() {
+        let mut c = AppController::new(crate::engine::open_db(":memory:").unwrap());
+        let ber = c.create_ber(
+            "T".into(),
+            chrono::NaiveDate::from_ymd_opt(2026, 1, 1).unwrap(),
+        );
+        let _ = ber;
+        // 2m x 2m storey outline, already in metres + fully dimensioned.
+        let square = vec![
+            Point2f32::new(0.0, 0.0),
+            Point2f32::new(2.0, 0.0),
+            Point2f32::new(2.0, 2.0),
+            Point2f32::new(0.0, 2.0),
+            Point2f32::new(0.05, 0.05),
+        ];
+        c.floor_plan = FloorPlan::from_points_to_orthogonal(&square, 0.1, true).unwrap();
+        c.dimensioning.scale_set = true;
+        c.dimensioning.known_params = c.floor_plan.all_active_params();
+
+        c.set_living_area_mode(true);
+        // ~0.9m square, interior (doesn't reach the walls).
+        c.apply_living_area_stroke_event(&[
+            (0.5, 0.5),
+            (1.4, 0.5),
+            (1.4, 1.4),
+            (0.5, 1.4),
+            (0.55, 0.55),
+        ]);
+        assert_eq!(c.living_area_count(), 1, "living area drawn");
+        assert!(
+            c.dimensioning_active(),
+            "it should be prompting to dimension the new area"
+        );
+        let r = c.apply_dimension(0.9);
+        assert!(r.is_ok(), "first living-area dimension should apply: {r:?}");
+    }
+
+    /// The reported case: a living area drawn as a square with a nook, in a
+    /// dimensioned (metre-scale) storey. The orthogonalizer's coordinate-merge
+    /// is scale-relative, so the nook is PRESERVED (it isn't merged away by a
+    /// pixel-scale absolute tolerance), and the resulting shape is a valid
+    /// polygon that dimensions cleanly — not the old "stuck" zero-length-wall
+    /// case.
+    #[test]
+    fn living_area_keeps_a_nook_and_dimensions_cleanly() {
+        let mut c = AppController::new(crate::engine::open_db(":memory:").unwrap());
+        let _ = c.create_ber(
+            "T".into(),
+            chrono::NaiveDate::from_ymd_opt(2026, 1, 1).unwrap(),
+        );
+        let square = vec![
+            Point2f32::new(0.0, 0.0),
+            Point2f32::new(2.6, 0.0),
+            Point2f32::new(2.6, 2.0),
+            Point2f32::new(0.0, 2.0),
+            Point2f32::new(0.05, 0.05),
+        ];
+        c.floor_plan = FloorPlan::from_points_to_orthogonal(&square, 0.1, true).unwrap();
+        c.dimensioning.scale_set = true;
+        c.dimensioning.known_params = c.floor_plan.all_active_params();
+
+        c.set_living_area_mode(true);
+        // ~0.9m square with a nook off the right side, offset into the storey.
+        c.apply_living_area_stroke_event(&[
+            (1.1, 0.5),
+            (2.0, 0.5),
+            (2.0, 0.8),
+            (2.07, 0.8), // nook out
+            (2.07, 0.95),
+            (2.0, 0.95),
+            (2.0, 1.4),
+            (1.1, 1.4),
+            (1.12, 0.52),
+        ]);
+        assert_eq!(c.living_area_count(), 1);
+        let poly = c.living_area_polygons()[0].clone();
+        assert!(
+            poly.len() > 4,
+            "the nook is preserved (not flattened by a pixel-scale tolerance): {poly:?}"
+        );
+        assert!(
+            poly.iter().any(|(x, _)| (*x - 2.07).abs() < 0.02),
+            "the nook's outer edge survives: {poly:?}"
+        );
+        assert!(c.dimensioning_active(), "prompts to dimension the area");
+        let r = c.apply_dimension(0.93);
+        assert!(
+            r.is_ok(),
+            "the living area dimensions without rejection: {r:?}"
+        );
+    }
+
+    /// Drawing a living area against the house walls (an OPEN path whose ends
+    /// reach the outline) produces a corner room that shares those walls — this
+    /// is the path that previously drew nothing (the stroke was force-closed
+    /// into a degenerate loop and rejected). Entering living-area mode also arms
+    /// the draw tool so the stroke routes to a new area.
+    #[test]
+    fn living_area_against_a_corner_shares_house_walls_and_renders() {
+        let mut c = AppController::new(crate::engine::open_db(":memory:").unwrap());
+        let square = vec![
+            Point2f32::new(0.0, 0.0),
+            Point2f32::new(10.0, 0.0),
+            Point2f32::new(10.0, 10.0),
+            Point2f32::new(0.0, 10.0),
+            Point2f32::new(0.2, 0.2),
+        ];
+        c.floor_plan = FloorPlan::from_points_to_orthogonal(&square, 0.5, true).unwrap();
+        c.dimensioning.scale_set = true;
+        c.dimensioning.known_params = c.floor_plan.all_active_params();
+
+        c.set_living_area_mode(true);
+        assert_eq!(
+            c.edit_mode(),
+            EditTools::DrawPerpWalls,
+            "entering living-area mode arms the draw tool"
+        );
+        // Open L against the left + bottom walls: only the 2 NEW interior walls.
+        c.apply_living_area_stroke_event(&[(0.0, 4.0), (4.0, 4.0), (4.0, 0.0)]);
+
+        assert_eq!(
+            c.living_area_count(),
+            1,
+            "the corner living area is created"
+        );
+        let polys = c.living_area_polygons();
+        assert_eq!(polys.len(), 1, "and it's renderable (was drawing nothing)");
+        assert_eq!(polys[0].len(), 4, "quad: 2 drawn + 2 shared house walls");
+        assert!(
+            polys[0]
+                .iter()
+                .any(|(x, y)| x.abs() < 0.05 && y.abs() < 0.05),
+            "shares the storey corner (0,0): {:?}",
+            polys[0]
+        );
+    }
+
+    /// A shared-wall (carved) living area must keep its FULL shape when saved —
+    /// including the vertices that lie on the house walls (the shared corner and
+    /// the snap points) — so it round-trips through the DB intact rather than
+    /// losing the house-side boundary.
+    #[test]
+    fn shared_wall_living_area_keeps_house_vertices_on_save() {
+        let mut c = AppController::new(crate::engine::open_db(":memory:").unwrap());
+        let ber = c.create_ber(
+            "T".into(),
+            chrono::NaiveDate::from_ymd_opt(2026, 1, 1).unwrap(),
+        );
+        let square = vec![
+            Point2f32::new(0.0, 0.0),
+            Point2f32::new(10.0, 0.0),
+            Point2f32::new(10.0, 10.0),
+            Point2f32::new(0.0, 10.0),
+            Point2f32::new(0.2, 0.2),
+        ];
+        c.floor_plan = FloorPlan::from_points_to_orthogonal(&square, 0.5, true).unwrap();
+        c.dimensioning.scale_set = true;
+        c.dimensioning.known_params = c.floor_plan.all_active_params();
+        c.commit_to_ber().unwrap();
+
+        c.set_living_area_mode(true);
+        // Corner room: only the two interior walls drawn; the left + bottom house
+        // walls (and the (0,0) corner) are filled in by the carve.
+        c.apply_living_area_stroke_event(&[(0.0, 4.0), (4.0, 4.0), (4.0, 0.0)]);
+        let before = c.living_area_polygons()[0].clone();
+        assert_eq!(before.len(), 4, "full closed shape before save: {before:?}");
+
+        // Save + reopen from the DB.
+        c.open_ber(&ber.id).unwrap();
+        let after = c.living_area_polygons()[0].clone();
+        assert_eq!(
+            after.len(),
+            4,
+            "the full shape (incl. house-wall vertices) survives save+reopen: {after:?}"
+        );
+        // The shared corner (0,0) and the two snap points on the house walls
+        // are all still present.
+        for want in [(0.0, 0.0), (0.0, 4.0), (4.0, 0.0)] {
+            assert!(
+                after
+                    .iter()
+                    .any(|(x, y)| (x - want.0).abs() < 0.1 && (y - want.1).abs() < 0.1),
+                "house-wall vertex {want:?} retained: {after:?}"
+            );
+        }
+    }
+
+    /// Drawing a single cut line splits the storey into two candidate regions
+    /// and waits for the user to tap one — which then becomes the living area.
+    /// Tapping the left side keeps the left region; tapping outside cancels.
+    #[test]
+    fn cut_line_offers_both_regions_then_keeps_the_tapped_one() {
+        let mut c = AppController::new(crate::engine::open_db(":memory:").unwrap());
+        let _ = c.create_ber(
+            "T".into(),
+            chrono::NaiveDate::from_ymd_opt(2026, 1, 1).unwrap(),
+        );
+        // 10m x 6m storey, in metres + dimensioned.
+        c.floor_plan = FloorPlan::from_points_to_orthogonal(
+            &[
+                Point2f32::new(0.0, 0.0),
+                Point2f32::new(10.0, 0.0),
+                Point2f32::new(10.0, 6.0),
+                Point2f32::new(0.0, 6.0),
+                Point2f32::new(0.1, 0.1),
+            ],
+            0.2,
+            true,
+        )
+        .unwrap();
+        c.dimensioning.scale_set = true;
+        c.dimensioning.known_params = c.floor_plan.all_active_params();
+        c.commit_to_ber().unwrap();
+
+        c.set_living_area_mode(true);
+        // A vertical cut at x~3 (drawn as a noisy near-straight stroke).
+        c.apply_living_area_stroke_event(&[(3.0, 0.05), (3.0, 2.0), (3.0, 5.95)]);
+        assert!(c.cut_pick_pending(), "the cut is awaiting a pick");
+        assert_eq!(c.living_area_count(), 0, "nothing committed until picked");
+        assert_eq!(c.pending_cut_regions().len(), 2, "two candidate regions");
+
+        // Tap outside both regions → cancels (no area, no pending).
+        c.choose_cut_region(50.0, 50.0);
+        assert!(!c.cut_pick_pending());
+        assert_eq!(c.living_area_count(), 0);
+
+        // Redraw the cut and tap the LEFT region (x<3) → keeps the left ~3x6=18.
+        c.apply_living_area_stroke_event(&[(3.0, 0.05), (3.0, 2.0), (3.0, 5.95)]);
+        assert!(c.cut_pick_pending());
+        c.choose_cut_region(1.0, 3.0);
+        assert!(!c.cut_pick_pending());
+        assert_eq!(
+            c.living_area_count(),
+            1,
+            "the tapped region became the area"
+        );
+        let poly = c.living_area_polygons()[0].clone();
+        let area: f64 = {
+            let n = poly.len();
+            let mut s = 0.0;
+            for i in 0..n {
+                let (x1, y1) = poly[i];
+                let (x2, y2) = poly[(i + 1) % n];
+                s += x1 * y2 - x2 * y1;
+            }
+            (s / 2.0).abs()
+        };
+        assert!(
+            (area - 18.0).abs() < 1.0,
+            "kept the left region (~18 m²): {area}"
+        );
+    }
+
+    /// Walls of a living area that lie on the storey are PINNED (their
+    /// parameter pre-known), so dimensioning only asks about the walls the user
+    /// drew. A left cut-region shares the storey's left/top/bottom walls; only
+    /// the cut wall's position remains to set.
+    #[test]
+    fn snapped_walls_are_pinned_so_only_drawn_walls_dimension() {
+        let mut c = AppController::new(crate::engine::open_db(":memory:").unwrap());
+        let _ = c.create_ber(
+            "T".into(),
+            chrono::NaiveDate::from_ymd_opt(2026, 1, 1).unwrap(),
+        );
+        c.floor_plan = FloorPlan::from_points_to_orthogonal(
+            &[
+                Point2f32::new(0.0, 0.0),
+                Point2f32::new(10.0, 0.0),
+                Point2f32::new(10.0, 6.0),
+                Point2f32::new(0.0, 6.0),
+                Point2f32::new(0.1, 0.1),
+            ],
+            0.2,
+            true,
+        )
+        .unwrap();
+        c.dimensioning.scale_set = true;
+        c.dimensioning.known_params = c.floor_plan.all_active_params();
+        c.commit_to_ber().unwrap();
+
+        c.set_living_area_mode(true);
+        c.apply_living_area_stroke_event(&[(3.0, 0.05), (3.0, 2.0), (3.0, 5.95)]);
+        c.choose_cut_region(1.0, 3.0); // left region: shares left/top/bottom house walls
+        assert_eq!(c.living_area_count(), 1);
+
+        let total = c.floor_plan.all_active_params().len();
+        let known = c.dimensioning.known_params.len();
+        assert!(
+            known >= 1,
+            "a shared wall's parameter is pre-known (total={total}, known={known})"
+        );
+        assert_eq!(
+            total - known,
+            1,
+            "only the cut wall's parameter remains to dimension (total={total}, known={known})"
+        );
+    }
+
+    /// Guardrail: a dimension that would push a living area OUTSIDE the storey
+    /// is rejected (and rolled back), like an invalid-shape dimension.
+    #[test]
+    fn dimension_pushing_living_area_outside_is_rejected() {
+        let mut c = AppController::new(crate::engine::open_db(":memory:").unwrap());
+        let _ = c.create_ber(
+            "T".into(),
+            chrono::NaiveDate::from_ymd_opt(2026, 1, 1).unwrap(),
+        );
+        // 10m x 10m storey, dimensioned.
+        c.floor_plan = FloorPlan::from_points_to_orthogonal(
+            &[
+                Point2f32::new(0.0, 0.0),
+                Point2f32::new(10.0, 0.0),
+                Point2f32::new(10.0, 10.0),
+                Point2f32::new(0.0, 10.0),
+                Point2f32::new(0.05, 0.05),
+            ],
+            0.1,
+            true,
+        )
+        .unwrap();
+        c.dimensioning.scale_set = true;
+        c.dimensioning.known_params = c.floor_plan.all_active_params();
+        c.commit_to_ber().unwrap();
+
+        c.set_living_area_mode(true);
+        // ~2m room near the right edge (x in [6,8]).
+        c.apply_living_area_stroke_event(&[
+            (6.0, 3.0),
+            (8.0, 3.0),
+            (8.0, 5.0),
+            (6.0, 5.0),
+            (6.1, 3.1),
+        ]);
+        assert_eq!(c.living_area_count(), 1);
+        assert!(c.dimensioning_active());
+        let before = c.floor_plan.polygons()[0].clone();
+        // 9m wall on a room that starts at x=6 / y=3 would reach past the 10m
+        // storey — must be rejected, and the shape left unchanged.
+        let r = c.apply_dimension(9.0);
+        assert!(
+            r.is_err(),
+            "a dimension pushing the room outside the storey is rejected: {r:?}"
+        );
+        assert_eq!(
+            c.floor_plan.polygons()[0],
+            before,
+            "the rejected dimension is rolled back"
+        );
+    }
+
+    /// A carved living area must be — and STAY — orthogonal: every edge
+    /// horizontal or vertical, right after carving and through dimensioning.
+    /// (A slanted edge here is the "left line isn't straight" report.)
+    #[test]
+    fn carved_living_area_stays_orthogonal_through_dimensioning() {
+        let mut c = AppController::new(crate::engine::open_db(":memory:").unwrap());
+        let _ = c.create_ber(
+            "T".into(),
+            chrono::NaiveDate::from_ymd_opt(2026, 1, 1).unwrap(),
+        );
+        let square = vec![
+            Point2f32::new(0.0, 0.0),
+            Point2f32::new(10.0, 0.0),
+            Point2f32::new(10.0, 10.0),
+            Point2f32::new(0.0, 10.0),
+            Point2f32::new(0.2, 0.2),
+        ];
+        c.floor_plan = FloorPlan::from_points_to_orthogonal(&square, 0.5, true).unwrap();
+        c.dimensioning.scale_set = true;
+        c.dimensioning.known_params = c.floor_plan.all_active_params();
+        c.commit_to_ber().unwrap();
+
+        c.set_living_area_mode(true);
+        c.apply_living_area_stroke_event(&[(0.0, 4.0), (4.0, 4.0), (4.0, 0.0)]);
+        assert_eq!(c.living_area_count(), 1);
+        assert!(
+            c.floor_plan.non_orthogonal_edges().is_empty(),
+            "carved living area orthogonal right after carve: {:?}",
+            c.floor_plan.non_orthogonal_edges()
+        );
+
+        let mut guard = 0;
+        while c.dimensioning_active() && guard < 20 {
+            guard += 1;
+            let _ = c.apply_dimension(2.5);
+            assert!(
+                c.floor_plan.non_orthogonal_edges().is_empty(),
+                "still orthogonal after dimension #{guard}: {:?}",
+                c.floor_plan.non_orthogonal_edges()
+            );
+        }
     }
 
     /// The curve tools defer: drawing the arc only splits the wall (no shape

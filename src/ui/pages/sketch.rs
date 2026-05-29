@@ -226,6 +226,20 @@ pub enum SketchEvent {
     SetCurveBulge(f32),
     /// User accepted the provisional curve's radius — bake it into the plan.
     CommitCurve,
+    /// Toggle living-area mode: when on, DrawPerpWalls draws a new living-area
+    /// sub-shape and the other tools edit the most-recent one.
+    SetLivingAreaMode(bool),
+    /// A living-area DrawPerpWalls stroke (world coords) — starts a new living
+    /// area inside the storey, drawn like the outline.
+    LivingAreaStrokeWorld {
+        points: Vec<(f32, f32)>,
+    },
+    /// Tap (world coords) picking which region of a pending cut becomes the
+    /// living area. A tap outside both candidate regions cancels.
+    ChooseCutRegion {
+        world_x: f64,
+        world_y: f64,
+    },
 }
 
 #[derive(Default)]
@@ -255,6 +269,17 @@ impl SketchPage {
         // Current bulge of a provisional curve that's ready to have its radius
         // tuned (attach lines set). `Some` shows the radius slider toolbar.
         curve_bulge: Option<f32>,
+        // Living-area drawing mode + the resolved living-area outlines (world
+        // coords) to overlay in a distinct colour; `active_living_area` is the
+        // one currently edited (highlighted).
+        living_area_mode: bool,
+        living_area_polygons: &[Vec<(f64, f64)>],
+        // Per area: known-length walls as (start, end, length) world coords.
+        living_area_wall_labels: &[Vec<((f64, f64), (f64, f64), f32)>],
+        active_living_area: Option<usize>,
+        // The two candidate regions of a pending cut (world coords); when
+        // non-empty the user taps one to pick it as the living area.
+        pending_cut_regions: &[Vec<(f64, f64)>],
         edit_selected_wall: Option<((f64, f64), (f64, f64))>,
         edit_selected_vertex: Option<(f64, f64)>,
         edit_drag_prompt: Option<EditDragPromptUiData>,
@@ -313,6 +338,32 @@ impl SketchPage {
                     review,
                     dimensioned_walls,
                     view,
+                );
+
+                // Living-area sub-shapes overlaid in green (active brighter),
+                // with length labels on their known walls (like the storey).
+                render::render_living_areas(
+                    &painter,
+                    rect,
+                    ber,
+                    current_storey_idx,
+                    mode,
+                    display,
+                    view,
+                    living_area_polygons,
+                    living_area_wall_labels,
+                    active_living_area,
+                );
+
+                // Pending cut: show both candidate regions to tap between.
+                render::render_cut_candidates(
+                    &painter,
+                    rect,
+                    ber,
+                    current_storey_idx,
+                    mode,
+                    view,
+                    pending_cut_regions,
                 );
 
                 // Edit-mode selection highlight: paint the selected wall
@@ -511,14 +562,38 @@ impl SketchPage {
                     }
                 }
 
+                // Pending cut: a primary click picks which candidate region to
+                // keep as the living area. Takes priority over stroke/edit input.
+                let cut_pending = !pending_cut_regions.is_empty();
+                if cut_pending {
+                    if response.clicked_by(egui::PointerButton::Primary) {
+                        if let (Some(pos), Some((min_xy, max_xy))) = (
+                            response.interact_pointer_pos(),
+                            ber.and_then(|b| {
+                                b.storeys
+                                    .get(current_storey_idx)
+                                    .and_then(crate::ui::render::storey_2d::bounding_box)
+                            }),
+                        ) {
+                            let t = crate::ui::render::fit_transform(rect, min_xy, max_xy, view);
+                            let (wx, wy) = t.inverse(pos.x, pos.y);
+                            on_event(UiEvent::Sketch(SketchEvent::ChooseCutRegion {
+                                world_x: wx,
+                                world_y: wy,
+                            }));
+                        }
+                    }
+                }
+
                 // Primary-button input: stroke drawing OR Edit-mode
                 // click/drag, depending on `edit_tool`. Both gated on
                 // 2D mode and "no overlay is open" (review / pending
-                // redraw / dim prompt take priority).
+                // redraw / dim prompt / cut-pick take priority).
                 let primary_available = matches!(mode, SketchMode::Storey2D)
                     && !reviewing
                     && !pending_redraw
-                    && !dim_prompting;
+                    && !dim_prompting
+                    && !cut_pending;
 
                 if primary_available && !matches!(edit_tool, EditTools::Edit) {
                     if response.drag_started_by(egui::PointerButton::Primary) {
@@ -543,14 +618,19 @@ impl SketchPage {
                             // transform and send the tool's dedicated world-coord
                             // event. Other stroke tools fall through to the
                             // normal EndStroke flow (canvas pixels).
-                            let needs_world = matches!(
-                                edit_tool,
-                                EditTools::ExtendOrtho
-                                    | EditTools::ExtendCurve
-                                    | EditTools::Trim
-                                    | EditTools::TrimOrtho
-                                    | EditTools::TrimCurve
-                            );
+                            // A living-area DrawPerpWalls is drawn in the storey's
+                            // (metre) space too, so it also needs world coords.
+                            let living_area_draw =
+                                living_area_mode && matches!(edit_tool, EditTools::DrawPerpWalls);
+                            let needs_world = living_area_draw
+                                || matches!(
+                                    edit_tool,
+                                    EditTools::ExtendOrtho
+                                        | EditTools::ExtendCurve
+                                        | EditTools::Trim
+                                        | EditTools::TrimOrtho
+                                        | EditTools::TrimCurve
+                                );
                             let world_converted = if needs_world {
                                 if let (Some(stroke), Some((min_xy, max_xy))) = (
                                     current.as_ref(),
@@ -574,10 +654,15 @@ impl SketchPage {
                                             (wx as f32, wy as f32)
                                         })
                                         .collect();
-                                    // Trims send TrimStrokeWorld, extends send
+                                    // Living-area draw starts a new sub-shape;
+                                    // trims send TrimStrokeWorld, extends send
                                     // ExtendStrokeWorld; the controller dispatches
                                     // the exact variant by the active tool.
-                                    let event = if matches!(
+                                    let event = if living_area_draw {
+                                        SketchEvent::LivingAreaStrokeWorld {
+                                            points: world_points,
+                                        }
+                                    } else if matches!(
                                         edit_tool,
                                         EditTools::Trim
                                             | EditTools::TrimOrtho
@@ -723,6 +808,22 @@ impl SketchPage {
                     } else if let Some(new_tool) = Self::edit_toolbar(ui, edit_tool, has_floor_plan)
                     {
                         on_event(UiEvent::Sketch(SketchEvent::ChangeEditTool(new_tool)));
+                    }
+                    ui.separator();
+                    // Living-area mode toggle: draw potential living spaces
+                    // inside the storey. Only meaningful once an outline exists.
+                    if has_floor_plan {
+                        let mut la = living_area_mode;
+                        if ui
+                            .toggle_value(&mut la, "🏠 Living areas")
+                            .on_hover_text(
+                                "Draw potential living-space sub-areas inside the storey \
+                                 (drawn & dimensioned the same way; largest chosen later)",
+                            )
+                            .changed()
+                        {
+                            on_event(UiEvent::Sketch(SketchEvent::SetLivingAreaMode(la)));
+                        }
                     }
                     ui.separator();
                     Self::fit_button(ui, &mut on_event);

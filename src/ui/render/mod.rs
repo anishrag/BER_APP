@@ -437,6 +437,136 @@ pub fn render_arc_preview(
     painter.circle_filled(screen[screen.len() - 1], 4.0, amber);
 }
 
+/// Draw the living-area sub-shapes over the storey in a distinct green, each as
+/// a closed outline. The `active` one (the most-recent, currently edited) is
+/// drawn brighter and thicker so it's clear which the tools act on.
+/// Draw the two candidate regions of a pending cut — distinct thick colours
+/// with a label at each centroid — so the user can see which side is which and
+/// tap the one they want to keep as the living area.
+pub fn render_cut_candidates(
+    painter: &egui::Painter,
+    rect: egui::Rect,
+    ber: Option<&Ber>,
+    current_storey_idx: usize,
+    sketch_mode: SketchMode,
+    view: ViewParams,
+    regions: &[Vec<(f64, f64)>],
+) {
+    if !matches!(sketch_mode, SketchMode::Storey2D) || regions.is_empty() {
+        return;
+    }
+    let Some(ber) = ber else {
+        return;
+    };
+    let Some(storey) = ber.storeys.get(current_storey_idx) else {
+        return;
+    };
+    let Some((min_xy, max_xy)) = storey_2d::bounding_box(storey) else {
+        return;
+    };
+    let t = fit_transform(rect, min_xy, max_xy, view);
+    let colors = [
+        egui::Color32::from_rgb(255, 180, 40), // amber
+        egui::Color32::from_rgb(40, 190, 255), // cyan
+    ];
+    let labels = ["tap ①", "tap ②"];
+    for (i, region) in regions.iter().enumerate() {
+        if region.len() < 3 {
+            continue;
+        }
+        let pts: Vec<egui::Pos2> = region.iter().map(|(x, y)| t.apply(*x, *y)).collect();
+        let color = colors[i % colors.len()];
+        let n = pts.len();
+        for k in 0..n {
+            painter.line_segment([pts[k], pts[(k + 1) % n]], egui::Stroke::new(4.0, color));
+        }
+        // Label at the centroid (the two centroids sit on opposite sides of the
+        // cut, so they disambiguate the overlapping shared boundary).
+        let (mut cx, mut cy) = (0.0f32, 0.0f32);
+        for p in &pts {
+            cx += p.x;
+            cy += p.y;
+        }
+        let c = egui::pos2(cx / n as f32, cy / n as f32);
+        painter.text(
+            c,
+            egui::Align2::CENTER_CENTER,
+            labels[i % labels.len()],
+            egui::FontId::proportional(14.0),
+            color,
+        );
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn render_living_areas(
+    painter: &egui::Painter,
+    rect: egui::Rect,
+    ber: Option<&Ber>,
+    current_storey_idx: usize,
+    sketch_mode: SketchMode,
+    display_mode: DisplayMode,
+    view: ViewParams,
+    polygons: &[Vec<(f64, f64)>],
+    // Per area, the known-length walls as (start, end, length) in world coords.
+    wall_labels: &[Vec<((f64, f64), (f64, f64), f32)>],
+    active: Option<usize>,
+) {
+    if !matches!(sketch_mode, SketchMode::Storey2D) || polygons.is_empty() {
+        return;
+    }
+    let Some(ber) = ber else {
+        return;
+    };
+    let Some(storey) = ber.storeys.get(current_storey_idx) else {
+        return;
+    };
+    let Some((min_xy, max_xy)) = storey_2d::bounding_box(storey) else {
+        return;
+    };
+    let t = fit_transform(rect, min_xy, max_xy, view);
+    for (i, poly) in polygons.iter().enumerate() {
+        if poly.len() < 3 {
+            continue;
+        }
+        let is_active = active == Some(i);
+        let pts: Vec<egui::Pos2> = poly.iter().map(|(x, y)| t.apply(*x, *y)).collect();
+        let (color, width) = if is_active {
+            (egui::Color32::from_rgb(80, 230, 130), 3.0)
+        } else {
+            (egui::Color32::from_rgb(60, 170, 100), 2.0)
+        };
+        let stroke = egui::Stroke::new(width, color);
+        let n = pts.len();
+        for k in 0..n {
+            painter.line_segment([pts[k], pts[(k + 1) % n]], stroke);
+        }
+    }
+
+    // Length labels on each living area's known walls — same gating and look as
+    // the storey's dimension labels.
+    if matches!(
+        display_mode,
+        DisplayMode::FloorMapDims | DisplayMode::AllSurfaces
+    ) {
+        for area in wall_labels {
+            for (a, b, len) in area {
+                if *len < 1e-3 {
+                    continue;
+                }
+                let mid = t.apply((a.0 + b.0) * 0.5, (a.1 + b.1) * 0.5);
+                painter.text(
+                    mid,
+                    egui::Align2::CENTER_CENTER,
+                    format!("{len:.2} m"),
+                    egui::FontId::monospace(11.0),
+                    egui::Color32::from_rgb(120, 240, 160),
+                );
+            }
+        }
+    }
+}
+
 /// Draw a small filled marker at a world-coord point — used to highlight a
 /// vertex the user has just inserted in Edit mode (double-click) and is
 /// currently dragging. Red filled circle with a thin white outline so it's
