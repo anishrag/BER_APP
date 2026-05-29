@@ -236,6 +236,9 @@ pub enum SketchEvent {
     LivingAreaStrokeWorld {
         points: Vec<(f32, f32)>,
     },
+    /// Delete the living area at the given index (living areas are non-editable;
+    /// redraw to change).
+    DeleteLivingArea(usize),
     /// Tap (world coords) picking which region of a pending cut becomes the
     /// living area. A tap outside both candidate regions cancels.
     ChooseCutRegion {
@@ -933,6 +936,19 @@ impl SketchPage {
                             .changed()
                         {
                             on_event(UiEvent::Sketch(SketchEvent::SetLivingAreaMode(la)));
+                        }
+                        // In living-area mode, delete the active area (living
+                        // areas are non-editable — redraw to change).
+                        if living_area_mode {
+                            if let Some(idx) = active_living_area {
+                                if ui
+                                    .button("🗑 Delete area")
+                                    .on_hover_text("Delete this living area (redraw to change one)")
+                                    .clicked()
+                                {
+                                    on_event(UiEvent::Sketch(SketchEvent::DeleteLivingArea(idx)));
+                                }
+                            }
                         }
                         // Wall-exposure mode toggle: classify the envelope walls
                         // for heat loss (exposed / semi-exposed / non-heat-loss).

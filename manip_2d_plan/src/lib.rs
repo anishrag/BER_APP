@@ -158,8 +158,9 @@ impl FloorPlan {
     /// freehand simplification, closing-edge snap, or corner rotation (those
     /// assume a raw stroke with a trailing drag point, which would drop a real
     /// vertex here). Used when the caller has constructed exact ring points,
-    /// e.g. carving a sub-area off an existing outline.
-    fn from_clean_ring(points: &[Point2f32]) -> Result<Self, Error> {
+    /// e.g. carving a sub-area off an existing outline, or rebuilding a
+    /// living area from its resolved (already-clean) polygon on load.
+    pub fn from_clean_ring(points: &[Point2f32]) -> Result<Self, Error> {
         let mut parametric = parametric::ParametricPlan::from_points(points);
         parametric.apply_orthogonal_constraints()?;
         Ok(Self { parametric })

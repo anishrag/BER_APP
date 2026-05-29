@@ -10,6 +10,7 @@ mod exposure;
 mod living_areas;
 
 pub use exposure::{ExposureSection, ExposureSelection, SectionHandle, WallExposureView};
+use living_areas::{reconstruct_living_areas, shape_finalised};
 
 use chrono::NaiveDate;
 use std::sync::mpsc::Sender;
@@ -240,48 +241,14 @@ pub struct DimensionState {
     pub skipped_walls: HashSet<VertexId>,
 }
 
-/// Version stamp for the persisted sketch snapshot. Bump when `FloorPlan`'s
-/// serialized shape or the snapshot fields change in a backward-incompatible
-/// way — older snapshots then fail the version check and the editor rebuilds
-/// from the resolved `floors` geometry instead of crashing.
-const SKETCH_SNAPSHOT_VERSION: u32 = 1;
-
-/// The editable parametric state for one storey, serialized into
-/// `Storey.sketch_state` so reopening a BER restores every collinearity
-/// equivalence and entered dimension. Excludes the transient `current_prompt`
-/// (recomputed on load).
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-struct SketchSnapshot {
-    version: u32,
-    floor_plan: FloorPlan,
-    known_params: HashSet<ParameterId>,
-    scale_set: bool,
-    dimensioned_walls: Vec<VertexId>,
-    skipped_walls: HashSet<VertexId>,
-    /// Potential living-area sub-shapes drawn inside the storey (largest is the
-    /// living area; all are kept). Each is its own parametric sketch +
-    /// dimensioning, drawn the same way as the outline. `#[serde(default)]` so
-    /// pre-living-area snapshots still load (as a storey with no living areas).
-    #[serde(default)]
-    living_areas: Vec<ShapeSnapshot>,
-    // NB: wall exposure is NOT stored here — `Storey.walls` (the derived
-    // `WallRegions`, part of the serialized `Ber`) is the single source of
-    // truth for it. The editor's runtime section model is reconstructed from
-    // those regions on load (see `restore_sketch_state`). `sketch_state` only
-    // holds what the resolved BER geometry can't represent (the parametric
-    // model, collinearity equivalences, dimensioning).
-}
-
-/// Serializable per-shape sketch state — the outline and each living area share
-/// this shape. Mirror of [`ShapeSlot`] minus the transient `current_prompt`.
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-struct ShapeSnapshot {
-    floor_plan: FloorPlan,
-    known_params: HashSet<ParameterId>,
-    scale_set: bool,
-    dimensioned_walls: Vec<VertexId>,
-    skipped_walls: HashSet<VertexId>,
-}
+// There is NO persisted sketch snapshot. The DB stores only finalised
+// (complete, metre-scale) resolved geometry — `Storey.floors` (outline),
+// `Storey.living_areas`, and `Storey.walls` (exposure). On reload the editor
+// rebuilds everything from those resolved points (see `restore_sketch_state`):
+// the outline's parametric model is re-derived (re-edit fidelity — shared
+// params, collinearity equivalences, curve arcs — is deliberately not
+// preserved), living areas are rebuilt non-editable, and exposure is recovered
+// from the wall regions.
 
 /// In-memory state for one editable shape (the storey outline or a living
 /// area): its parametric plan plus the dimensioning progress against it. The
@@ -291,31 +258,6 @@ struct ShapeSnapshot {
 struct ShapeSlot {
     floor_plan: FloorPlan,
     dimensioning: DimensionState,
-}
-
-impl ShapeSlot {
-    fn to_snapshot(&self) -> ShapeSnapshot {
-        ShapeSnapshot {
-            floor_plan: self.floor_plan.clone(),
-            known_params: self.dimensioning.known_params.clone(),
-            scale_set: self.dimensioning.scale_set,
-            dimensioned_walls: self.dimensioning.dimensioned_walls.clone(),
-            skipped_walls: self.dimensioning.skipped_walls.clone(),
-        }
-    }
-
-    fn from_snapshot(s: ShapeSnapshot) -> Self {
-        ShapeSlot {
-            floor_plan: s.floor_plan,
-            dimensioning: DimensionState {
-                known_params: s.known_params,
-                scale_set: s.scale_set,
-                dimensioned_walls: s.dimensioned_walls,
-                skipped_walls: s.skipped_walls,
-                current_prompt: None,
-            },
-        }
-    }
 }
 
 /// Which shape the editor is currently acting on. `floor_plan`/`dimensioning`
@@ -724,16 +666,19 @@ impl AppController {
         Ok(())
     }
 
-    /// Rebuild `self.floor_plan` + `self.dimensioning` from a storey's saved
-    /// state. Prefers the parametric snapshot; on absence/parse failure/version
-    /// mismatch, rebuilds from the resolved floor geometry (lossy).
+    /// Rebuild the editor state from a storey's RESOLVED geometry. There is no
+    /// parametric snapshot — the DB holds only finalised, metre-scale geometry,
+    /// so this is unambiguous. The outline is rebuilt from its floor polygon
+    /// (exact points, marked complete + metric so it isn't re-prompted); living
+    /// areas are rebuilt non-editable; wall exposure is recovered from the wall
+    /// regions. Re-edit fidelity (shared params, collinearity equivalences,
+    /// curve arcs) is intentionally not preserved — drawing tools work from the
+    /// loaded points.
     fn restore_sketch_state(&mut self, storey: Option<&Storey>) {
         self.dimensioning = DimensionState::default();
         // A provisional arc is transient and tied to the OUTGOING plan's
-        // vertices; loading a record must not carry a stale one over (it would
-        // dangle / render a phantom preview against the new geometry).
+        // vertices; loading a record must not carry a stale one over.
         self.pending_arc = None;
-        // Loading always starts on the outline with no living areas carried over.
         self.living_areas = Vec::new();
         self.active = ActiveShape::Outline;
         self.living_area_mode = false;
@@ -748,46 +693,10 @@ impl AppController {
             return;
         };
 
-        // Primary path: the parametric snapshot.
-        if let Some(json) = storey.sketch_state.as_deref() {
-            match serde_json::from_str::<SketchSnapshot>(json) {
-                Ok(snap) if snap.version == SKETCH_SNAPSHOT_VERSION => {
-                    self.living_areas = snap
-                        .living_areas
-                        .into_iter()
-                        .map(ShapeSlot::from_snapshot)
-                        .collect();
-                    self.outline = ShapeSlot {
-                        floor_plan: snap.floor_plan,
-                        dimensioning: DimensionState {
-                            known_params: snap.known_params,
-                            scale_set: snap.scale_set,
-                            dimensioned_walls: snap.dimensioned_walls,
-                            skipped_walls: snap.skipped_walls,
-                            current_prompt: None,
-                        },
-                    };
-                    // Exposure isn't in the snapshot — reconstruct the runtime
-                    // section model from the persisted `WallRegions` (the source
-                    // of truth). Walls with no region stay unset.
-                    self.wall_sections = self.sections_from_wall_regions(&storey.walls);
-                    self.floor_plan = self.outline.floor_plan.clone();
-                    self.dimensioning = self.outline.dimensioning.clone();
-                    return;
-                }
-                Ok(snap) => eprintln!(
-                    "sketch snapshot version {} != {}, rebuilding from geometry",
-                    snap.version, SKETCH_SNAPSHOT_VERSION
-                ),
-                Err(e) => eprintln!("sketch snapshot parse failed ({}), rebuilding", e),
-            }
-        }
-
-        // Fallback: rebuild a fresh parametric model from the resolved floors.
-        // Equivalences and dimensions can't be recovered — they were never
-        // stored for this record.
-        let rings = storey.floors.to_vertex_lists();
-        let primary: Vec<Point2f32> = rings
+        // Outline: rebuild from the resolved floor polygon, exact points.
+        let primary: Vec<Point2f32> = storey
+            .floors
+            .to_vertex_lists()
             .into_iter()
             .find(|r| r.len() >= 3)
             .map(|r| {
@@ -796,17 +705,25 @@ impl AppController {
                     .collect()
             })
             .unwrap_or_default();
-        self.floor_plan = if primary.len() >= 3 {
-            FloorPlan::from_points_to_orthogonal(&primary, 10.0, true).unwrap_or_default()
+        if primary.len() >= 3 {
+            self.floor_plan = FloorPlan::from_clean_ring(&primary).unwrap_or_default();
+            // Loaded geometry is finalised: metre scale set, nothing to dimension.
+            self.dimensioning = DimensionState {
+                known_params: self.floor_plan.all_active_params(),
+                scale_set: true,
+                dimensioned_walls: Vec::new(),
+                skipped_walls: HashSet::new(),
+                current_prompt: None,
+            };
         } else {
-            FloorPlan::default()
-        };
+            self.floor_plan = FloorPlan::default();
+            self.dimensioning = DimensionState::default();
+        }
         self.outline = ShapeSlot {
             floor_plan: self.floor_plan.clone(),
             dimensioning: self.dimensioning.clone(),
         };
-        // Recover exposure from any persisted wall regions (geometry-matched to
-        // the rebuilt walls).
+        self.living_areas = reconstruct_living_areas(&storey.living_areas);
         self.wall_sections = self.sections_from_wall_regions(&storey.walls);
     }
 
@@ -882,21 +799,28 @@ impl AppController {
             })
             .collect();
 
-        // Persist the editable parametric model + dimensioning of the outline
-        // AND every living area, so reopening keeps equivalences, dimensions,
-        // and all drawn living areas. `floors` is the derived view; this
-        // snapshot is the source of truth for editing.
-        let snapshot = SketchSnapshot {
-            version: SKETCH_SNAPSHOT_VERSION,
-            floor_plan: self.outline.floor_plan.clone(),
-            known_params: self.outline.dimensioning.known_params.clone(),
-            scale_set: self.outline.dimensioning.scale_set,
-            dimensioned_walls: self.outline.dimensioning.dimensioned_walls.clone(),
-            skipped_walls: self.outline.dimensioning.skipped_walls.clone(),
-            living_areas: self.living_areas.iter().map(|s| s.to_snapshot()).collect(),
-        };
-        let json = serde_json::to_string(&snapshot);
+        // Resolved living-area polygons (each slot is current after sync_active).
+        // Stored in `Storey.living_areas`, NOT the snapshot — they're
+        // non-editable on reload, so their resolved geometry suffices.
+        let living_area_lists: Vec<Vec<Point2f64>> = self
+            .living_areas
+            .iter()
+            .map(|slot| {
+                slot.floor_plan
+                    .get_points()
+                    .into_iter()
+                    .map(|p| Point2f64::new(p.x as f64, p.y as f64))
+                    .collect()
+            })
+            .collect();
 
+        // In-memory: write the FULL resolved geometry (dimensioned or not) into
+        // `current_record` so the canvas — which renders `current_ber_clone` —
+        // stays live. The DB write (`persist`) then filters this down to the
+        // FINALISED parts only, so the database never holds pixel/incomplete
+        // geometry. There's no parametric snapshot: the outline is the only
+        // thing that needs lossless re-edit, and we've traded that away (reload
+        // rebuilds everything from these resolved points).
         let record = self.current_record.as_mut().unwrap();
         if record.data.storeys.is_empty() {
             record.data.storeys.push(Storey::default());
@@ -910,26 +834,77 @@ impl AppController {
                 None,
             );
         }
-        if !wall_segments.is_empty() {
-            // Re-derive preserving fabric properties: split pieces inherit the
-            // construction of the region they were carved from; only exposure
-            // changes per section.
-            let walls = WallRegions::rebuild_preserving(
-                wall_segments,
-                &record.data.storeys[0].walls,
-                0.0,
-                DEFAULT_CEILING_HEIGHT_M,
-            );
-            record.data.storeys[0].walls = walls;
-        }
-        match json {
-            Ok(j) => record.data.storeys[0].sketch_state = Some(j),
-            Err(e) => eprintln!("failed to serialize sketch snapshot: {}", e),
-        }
+        record.data.storeys[0].living_areas = FloorRegions::from_vertex_lists(
+            living_area_lists,
+            DEFAULT_CEILING_HEIGHT_M,
+            None,
+            None,
+            None,
+        );
+        // Re-derive walls from exposure (empty when nothing is marked),
+        // preserving the fabric properties of the region a split came from.
+        record.data.storeys[0].walls = WallRegions::rebuild_preserving(
+            wall_segments,
+            &record.data.storeys[0].walls,
+            0.0,
+            DEFAULT_CEILING_HEIGHT_M,
+        );
 
+        self.persist()
+    }
+
+    /// Write a FINALISED copy of the current record to the DB. Components that
+    /// aren't fully dimensioned — and thus may still be in pixel units — are
+    /// dropped from what's SAVED (never from memory). So the database only ever
+    /// holds complete, metric geometry, and reloading it "as points" is
+    /// unambiguous. Triggered on every commit; the DB simply gains each part as
+    /// it becomes finalised.
+    fn persist(&self) -> Result<(), String> {
+        let Some(record) = &self.current_record else {
+            return Ok(());
+        };
+        let mut out = record.clone();
+        if let Some(storey) = out.data.storeys.get_mut(0) {
+            if self.outline_finalised() {
+                // Outline is metric + fully dimensioned → keep its floors/walls,
+                // and persist only the living areas that are themselves done.
+                let lists: Vec<Vec<Point2f64>> = self
+                    .living_areas
+                    .iter()
+                    .filter(|s| shape_finalised(&s.dimensioning, &s.floor_plan))
+                    .map(|s| {
+                        s.floor_plan
+                            .get_points()
+                            .into_iter()
+                            .map(|p| Point2f64::new(p.x as f64, p.y as f64))
+                            .collect()
+                    })
+                    .collect();
+                storey.living_areas = FloorRegions::from_vertex_lists(
+                    lists,
+                    DEFAULT_CEILING_HEIGHT_M,
+                    None,
+                    None,
+                    None,
+                );
+            } else {
+                // Outline not finalised → persist no geometry yet (it's likely
+                // still in pixels; living areas can't be metric before it is).
+                storey.floors = FloorRegions::default();
+                storey.walls = WallRegions::default();
+                storey.living_areas = FloorRegions::default();
+            }
+        }
         BerRepository::new(&self.conn)
-            .upsert(record)
+            .upsert(&out)
             .map_err(|e| format!("upsert failed: {}", e))
+    }
+
+    /// The outline is finalised when its metre scale is set AND no wall is left
+    /// to dimension — i.e. its resolved geometry is complete and in metres.
+    fn outline_finalised(&self) -> bool {
+        self.outline.dimensioning.scale_set
+            && shape_finalised(&self.outline.dimensioning, &self.outline.floor_plan)
     }
 
     /// COLLINEARITY REVIEW-------------------------------------------
@@ -2032,6 +2007,10 @@ mod trim_collapse_tests {
     #[test]
     fn living_area_inherits_scale_is_stored_and_leaves_outline_intact() {
         let mut c = AppController::new(crate::engine::open_db(":memory:").unwrap());
+        let _ = c.create_ber(
+            "T".into(),
+            chrono::NaiveDate::from_ymd_opt(2026, 1, 1).unwrap(),
+        );
         let square = vec![
             Point2f32::new(0.0, 0.0),
             Point2f32::new(10.0, 0.0),
@@ -2078,8 +2057,9 @@ mod trim_collapse_tests {
         assert_eq!(c.living_area_count(), 1, "the living area is still kept");
     }
 
-    /// Living areas are persisted in the sketch snapshot and come back on
-    /// reopen (alongside the outline + its dimensions).
+    /// A fully-dimensioned living area is persisted as resolved geometry and
+    /// comes back on reopen (alongside the outline). Un-dimensioned areas are
+    /// NOT written to the DB — only finalised geometry is.
     #[test]
     fn living_areas_survive_save_and_reopen() {
         let mut c = AppController::new(crate::engine::open_db(":memory:").unwrap());
@@ -2108,6 +2088,10 @@ mod trim_collapse_tests {
             (2.1, 2.1),
         ]);
         assert_eq!(c.living_area_count(), 1);
+        // Finalise the living area (mark every wall dimensioned) so it's written
+        // to the DB — only finalised geometry is persisted.
+        c.dimensioning.known_params = c.floor_plan.all_active_params();
+        c.commit_to_ber().unwrap();
 
         // Reopen from the DB (same connection): the living area is restored.
         c.open_ber(&ber.id).unwrap();
@@ -2125,6 +2109,86 @@ mod trim_collapse_tests {
             c.living_area_polygons().len(),
             1,
             "still renderable after reopen"
+        );
+    }
+
+    /// An un-dimensioned outline is still in pixels, not metres, so it is NOT
+    /// written to the DB — only a finalised (scale-set, fully dimensioned)
+    /// outline persists. (The in-memory copy keeps it, for rendering.)
+    #[test]
+    fn undimensioned_outline_is_not_persisted() {
+        let mut c = AppController::new(crate::engine::open_db(":memory:").unwrap());
+        let ber = c.create_ber(
+            "T".into(),
+            chrono::NaiveDate::from_ymd_opt(2026, 1, 1).unwrap(),
+        );
+        // Draw an outline but leave it un-dimensioned (scale never set).
+        c.floor_plan = FloorPlan::from_points_to_orthogonal(
+            &[
+                Point2f32::new(0., 0.),
+                Point2f32::new(10., 0.),
+                Point2f32::new(10., 10.),
+                Point2f32::new(0., 10.),
+                Point2f32::new(0.2, 0.2),
+            ],
+            0.5,
+            true,
+        )
+        .unwrap();
+        c.commit_to_ber().unwrap();
+
+        // Reopen from the DB: nothing was persisted (the outline wasn't final).
+        c.open_ber(&ber.id).unwrap();
+        assert!(
+            c.outline.floor_plan.get_points().is_empty(),
+            "an un-dimensioned outline isn't written to the DB"
+        );
+    }
+
+    /// A living area drawn but not dimensioned is excluded from the DB write
+    /// (kept in memory); the dimensioned outline around it still persists.
+    #[test]
+    fn undimensioned_living_area_is_not_persisted() {
+        let mut c = AppController::new(crate::engine::open_db(":memory:").unwrap());
+        let ber = c.create_ber(
+            "T".into(),
+            chrono::NaiveDate::from_ymd_opt(2026, 1, 1).unwrap(),
+        );
+        c.floor_plan = FloorPlan::from_points_to_orthogonal(
+            &[
+                Point2f32::new(0., 0.),
+                Point2f32::new(10., 0.),
+                Point2f32::new(10., 10.),
+                Point2f32::new(0., 10.),
+                Point2f32::new(0.2, 0.2),
+            ],
+            0.5,
+            true,
+        )
+        .unwrap();
+        c.dimensioning.scale_set = true;
+        c.dimensioning.known_params = c.floor_plan.all_active_params();
+        c.commit_to_ber().unwrap();
+
+        c.set_living_area_mode(true);
+        c.apply_living_area_stroke_event(&[
+            (2.0, 2.0),
+            (6.0, 2.0),
+            (6.0, 6.0),
+            (2.0, 6.0),
+            (2.1, 2.1),
+        ]);
+        assert_eq!(c.living_area_count(), 1, "drawn (in memory)");
+
+        c.open_ber(&ber.id).unwrap();
+        assert_eq!(
+            c.living_area_count(),
+            0,
+            "un-dimensioned living area isn't persisted"
+        );
+        assert!(
+            !c.outline.floor_plan.get_points().is_empty(),
+            "but the dimensioned outline is"
         );
     }
 
@@ -2233,6 +2297,10 @@ mod trim_collapse_tests {
     #[test]
     fn living_area_against_a_corner_shares_house_walls_and_renders() {
         let mut c = AppController::new(crate::engine::open_db(":memory:").unwrap());
+        let _ = c.create_ber(
+            "T".into(),
+            chrono::NaiveDate::from_ymd_opt(2026, 1, 1).unwrap(),
+        );
         let square = vec![
             Point2f32::new(0.0, 0.0),
             Point2f32::new(10.0, 0.0),
@@ -2299,6 +2367,9 @@ mod trim_collapse_tests {
         c.apply_living_area_stroke_event(&[(0.0, 4.0), (4.0, 4.0), (4.0, 0.0)]);
         let before = c.living_area_polygons()[0].clone();
         assert_eq!(before.len(), 4, "full closed shape before save: {before:?}");
+        // Finalise it so it's persisted (only finalised geometry is written).
+        c.dimensioning.known_params = c.floor_plan.all_active_params();
+        c.commit_to_ber().unwrap();
 
         // Save + reopen from the DB.
         c.open_ber(&ber.id).unwrap();
@@ -2457,6 +2528,69 @@ mod trim_collapse_tests {
         c.dimensioning.known_params = c.floor_plan.all_active_params();
         c.commit_to_ber().unwrap();
         c
+    }
+
+    /// Living areas persist as resolved polygons in `Storey.living_areas` (part
+    /// of the `Ber` struct), NOT in `sketch_state`, and are rebuilt from there
+    /// on reload.
+    #[test]
+    fn living_areas_persist_in_ber_and_reload() {
+        let mut c = dimensioned_square_controller();
+        c.set_living_area_mode(true);
+        c.apply_living_area_stroke_event(&[
+            (2.0, 2.0),
+            (6.0, 2.0),
+            (6.0, 6.0),
+            (2.0, 6.0),
+            (2.1, 2.1),
+        ]);
+        assert_eq!(c.living_area_count(), 1, "one living area drawn");
+
+        let storey = c.current_record.as_ref().unwrap().data.storeys[0].clone();
+        assert_eq!(
+            storey.living_areas.regions.len(),
+            1,
+            "persisted into Storey.living_areas"
+        );
+
+        // Reload from the full storey → the living area is rebuilt.
+        c.restore_sketch_state(Some(&storey));
+        assert_eq!(c.living_area_count(), 1, "rebuilt on reload");
+
+        // Source is Storey.living_areas, not sketch_state: clear the regions but
+        // keep sketch_state → no living areas come back.
+        let mut storey_no_la = storey.clone();
+        storey_no_la.living_areas = FloorRegions::default();
+        c.restore_sketch_state(Some(&storey_no_la));
+        assert_eq!(
+            c.living_area_count(),
+            0,
+            "sketch_state doesn't carry living areas"
+        );
+    }
+
+    /// Deleting a living area removes it from the editor and the `Ber` struct.
+    #[test]
+    fn delete_living_area_removes_it() {
+        let mut c = dimensioned_square_controller();
+        c.set_living_area_mode(true);
+        c.apply_living_area_stroke_event(&[
+            (2.0, 2.0),
+            (6.0, 2.0),
+            (6.0, 6.0),
+            (2.0, 6.0),
+            (2.1, 2.1),
+        ]);
+        assert_eq!(c.living_area_count(), 1);
+
+        c.delete_living_area(0);
+        assert_eq!(c.living_area_count(), 0, "removed from the editor");
+        let storey = &c.current_record.as_ref().unwrap().data.storeys[0];
+        assert_eq!(
+            storey.living_areas.regions.len(),
+            0,
+            "removed from the Ber struct"
+        );
     }
 
     /// Tapping a wall in exposure mode selects it (whole-wall selection);
@@ -2652,49 +2786,28 @@ mod trim_collapse_tests {
     #[test]
     fn exposure_reconstructs_from_wall_regions_on_reload() {
         let mut c = dimensioned_square_controller();
-        let walls = c.outline.floor_plan.perimeter_walls();
-        let (vid0, a0, b0) = walls[0];
+        let (_, a0, b0) = c.outline.floor_plan.perimeter_walls()[0];
         let mid = ((a0.x + b0.x) * 0.5, (a0.y + b0.y) * 0.5);
         c.set_exposure_mode(true);
         c.exposure_pointer_down(mid.0 as f64, mid.1 as f64, 0.5);
-        c.set_wall_exposure(WallExposure::NonHeatLoss); // mark only wall0
+        c.set_wall_exposure(WallExposure::NonHeatLoss); // mark only one wall
 
         let storey = c.current_record.as_ref().unwrap().data.storeys[0].clone();
-        // Exposure is NOT written into the parametric snapshot.
-        assert!(
-            !storey
-                .sketch_state
-                .as_ref()
-                .unwrap()
-                .contains("NonHeatLoss"),
-            "exposure isn't duplicated into sketch_state"
-        );
-
         c.wall_sections.clear();
         c.restore_sketch_state(Some(&storey));
-        // wall0 reconstructed from its region…
-        let secs = c
-            .wall_sections
-            .get(&vid0)
-            .expect("reconstructed from walls");
+        // Vertex ids are reassigned on reload (rebuilt from points), so check by
+        // count: exactly one wall reconstructed, the rest unset.
+        assert_eq!(c.wall_sections.len(), 1, "one wall marked; rest unset");
+        let secs = c.wall_sections.values().next().unwrap();
         assert_eq!(secs.len(), 1);
         assert_eq!(secs[0].exposure, WallExposure::NonHeatLoss);
-        // …and the un-marked walls stay unset (no region → no entry).
-        for (vid, _, _) in &walls {
-            if *vid != vid0 {
-                assert!(
-                    c.wall_sections.get(vid).is_none(),
-                    "un-marked wall stays unset on reload"
-                );
-            }
-        }
     }
 
     /// A split wall's sections reconstruct exactly from its regions on reload.
     #[test]
     fn split_wall_sections_reconstruct_on_reload() {
         let mut c = dimensioned_square_controller();
-        let (vid0, a0, b0) = c.outline.floor_plan.perimeter_walls()[0];
+        let (_, a0, b0) = c.outline.floor_plan.perimeter_walls()[0];
         let mid = ((a0.x + b0.x) * 0.5, (a0.y + b0.y) * 0.5);
         let len = ((b0.x - a0.x).powi(2) + (b0.y - a0.y).powi(2)).sqrt();
         c.set_exposure_mode(true);
@@ -2705,7 +2818,8 @@ mod trim_collapse_tests {
         let storey = c.current_record.as_ref().unwrap().data.storeys[0].clone();
         c.wall_sections.clear();
         c.restore_sketch_state(Some(&storey));
-        let secs = c.wall_sections.get(&vid0).expect("reconstructed");
+        assert_eq!(c.wall_sections.len(), 1, "one split wall reconstructed");
+        let secs = c.wall_sections.values().next().unwrap();
         assert_eq!(secs.len(), 3);
         assert_eq!(secs[0].exposure, WallExposure::Exposed);
         assert_eq!(secs[1].exposure, WallExposure::SemiExposed);

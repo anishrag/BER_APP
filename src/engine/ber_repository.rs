@@ -5,7 +5,7 @@ use serde_json;
 use datatypes::ber::ber_struct::Ber;
 use datatypes::ber::common::ItemId;
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct BerRecord {
     pub id: ItemId,
     pub name: String,

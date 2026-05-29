@@ -244,7 +244,7 @@ fn create_full_ber(id: ItemId) -> Ber {
             windows: vec![],
             doors: vec![],
             rooms: vec![],
-            sketch_state: None,
+            living_areas: Default::default(),
         },
         Storey {
             id: ItemId::default(),
@@ -256,7 +256,7 @@ fn create_full_ber(id: ItemId) -> Ber {
             windows: vec![],
             doors: vec![],
             rooms: vec![],
-            sketch_state: None,
+            living_areas: Default::default(),
         },
     ];
 

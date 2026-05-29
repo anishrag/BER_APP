@@ -98,24 +98,23 @@ impl AppController {
         }
     }
 
-    /// Resolved outlines (world coords) of every living area, for rendering them
-    /// over the storey in a distinct colour. The active living area is read from
-    /// the live buffer (it may be ahead of its slot).
+    /// Resolved outlines (world coords) of every living area, for rendering
+    /// them over the storey in a distinct colour. Read from the in-memory
+    /// `Storey.living_areas` (the `Ber` struct in `current_record`): BER data
+    /// rendered from BER. `commit_to_ber` keeps it per-frame current.
     pub fn living_area_polygons(&self) -> Vec<Vec<(f64, f64)>> {
-        self.living_areas
-            .iter()
-            .enumerate()
-            .map(|(i, slot)| {
-                let plan = if self.active == ActiveShape::LivingArea(i) {
-                    &self.floor_plan
-                } else {
-                    &slot.floor_plan
-                };
-                plan.get_points()
-                    .iter()
-                    .map(|p| (p.x as f64, p.y as f64))
-                    .collect()
-            })
+        let Some(storey) = self
+            .current_record
+            .as_ref()
+            .and_then(|r| r.data.storeys.first())
+        else {
+            return Vec::new();
+        };
+        storey
+            .living_areas
+            .to_vertex_lists()
+            .into_iter()
+            .map(|verts| verts.into_iter().map(|p| (p.x, p.y)).collect())
             .collect()
     }
 
@@ -364,4 +363,62 @@ impl AppController {
     pub fn cancel_pending_cut(&mut self) {
         self.pending_cut = None;
     }
+
+    /// Delete the living area at `index` (living areas are non-editable — to
+    /// change one, delete and redraw). Undoable; persists.
+    pub fn delete_living_area(&mut self, index: usize) {
+        if index >= self.living_areas.len() {
+            return;
+        }
+        let undo_snap = self.current_history_snapshot();
+        // Detach from any active living area before mutating the list, so the
+        // live buffer + `active` index stay valid.
+        self.activate_shape(ActiveShape::Outline);
+        self.living_areas.remove(index);
+        // Keep working on the most-recent remaining area if still in LA mode.
+        if self.living_area_mode && !self.living_areas.is_empty() {
+            self.activate_shape(ActiveShape::LivingArea(self.living_areas.len() - 1));
+        }
+        let _ = self.commit_to_ber();
+        self.push_history_snapshot(undo_snap);
+    }
+}
+
+/// A shape is finalised — nothing left to dimension — when it has no wall the
+/// dimensioning loop would still prompt for. (The caller also checks the metre
+/// scale for the outline; living areas inherit it.)
+pub(super) fn shape_finalised(dim: &DimensionState, plan: &FloorPlan) -> bool {
+    plan.next_promptable_wall(&dim.known_params, &dim.skipped_walls)
+        .is_none()
+}
+
+/// Rebuild the runtime living-area slots from their resolved polygons on load.
+/// Living areas are non-editable, so each is reconstructed from exact points
+/// (`from_clean_ring`) with a COMPLETE dimensioning state (metre scale already
+/// set, all params known) — they render and can be deleted, but aren't
+/// re-dimensioned. Degenerate (<3-vertex) polygons are skipped.
+pub(super) fn reconstruct_living_areas(areas: &FloorRegions) -> Vec<ShapeSlot> {
+    areas
+        .to_vertex_lists()
+        .into_iter()
+        .filter(|verts| verts.len() >= 3)
+        .filter_map(|verts| {
+            let pts: Vec<Point2f32> = verts
+                .iter()
+                .map(|p| Point2f32::new(p.x as f32, p.y as f32))
+                .collect();
+            let plan = FloorPlan::from_clean_ring(&pts).ok()?;
+            let known_params = plan.all_active_params();
+            Some(ShapeSlot {
+                floor_plan: plan,
+                dimensioning: DimensionState {
+                    known_params,
+                    scale_set: true,
+                    dimensioned_walls: Vec::new(),
+                    skipped_walls: HashSet::new(),
+                    current_prompt: None,
+                },
+            })
+        })
+        .collect()
 }

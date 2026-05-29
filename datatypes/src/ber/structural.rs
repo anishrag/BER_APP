@@ -419,15 +419,16 @@ pub struct Storey {
     pub windows: Vec<Window>,
     pub doors: Vec<Door>,
     pub rooms: Vec<Room>,
-    /// Opaque serialized snapshot of the parametric sketch model + dimensioning
-    /// state for this storey, written by the editor so it can resume editing
-    /// with all collinearity equivalences and entered dimensions intact. The
-    /// `floors`/`walls` regions above are the *resolved* geometry derived from
-    /// it (used by non-editing consumers); this is the editable source. Held as
-    /// an opaque string so `datatypes` stays independent of the geometry
-    /// library. `None`/unparseable → the editor rebuilds from `floors`.
+    /// Candidate living-space sub-areas inside the storey (the largest is chosen
+    /// as THE living area later). Stored as resolved floor polygons — they're
+    /// non-editable on reload (redraw to change), so unlike the outline they
+    /// need no parametric snapshot. `#[serde(default)]` so older records load.
     #[serde(default)]
-    pub sketch_state: Option<String>,
+    pub living_areas: FloorRegions,
+    // No editable sketch snapshot is stored: the resolved geometry above
+    // (`floors`/`walls`/`living_areas`) is the only persisted representation,
+    // and the editor rebuilds its working state from it on load. The DB only
+    // ever holds finalised (complete, metre-scale) geometry.
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

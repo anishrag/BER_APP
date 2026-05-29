@@ -368,6 +368,9 @@ impl eframe::App for BerApp {
                                     .borrow_mut()
                                     .apply_living_area_stroke_event(&points);
                             }
+                            SketchEvent::DeleteLivingArea(index) => {
+                                controller.borrow_mut().delete_living_area(index);
+                            }
                             SketchEvent::ChooseCutRegion { world_x, world_y } => {
                                 controller
                                     .borrow_mut()
