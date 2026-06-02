@@ -199,6 +199,14 @@ pub enum SketchEvent {
     ExtendStrokeWorld {
         points: Vec<(f32, f32)>,
     },
+    /// First outline stroke of a NEW upper storey, captured in *world*
+    /// (previous-storey metre) coords rather than canvas pixels — so endpoints
+    /// can snap onto the previous storey's outline and shared walls inherit
+    /// their known lengths. Closedness is decided controller-side from the
+    /// engine's pixel close-check, so no `closed` flag rides along.
+    OutlineStrokeWorld {
+        points: Vec<(f32, f32)>,
+    },
     /// Trim-mode stroke completed: the captured stroke in *world* coords. Its
     /// first and last points define the straight cut line.
     TrimStrokeWorld {
@@ -273,6 +281,12 @@ pub enum SketchEvent {
     ClearWallExposure,
     /// Mark every outline wall not yet set as exposed.
     SetAllRemainingExposed,
+    /// Switch the editor onto a specific storey, or `None` for the read-only
+    /// "All storeys" overview tab.
+    SetCurrentStorey(Option<usize>),
+    /// Append a fresh empty storey and switch the editor onto it (method 2:
+    /// the previous storey is shown as a watermark while the new one is drawn).
+    AddStorey,
 }
 
 #[derive(Default)]
@@ -286,7 +300,7 @@ impl SketchPage {
         display: DisplayMode,
         edit_tool: EditTools,
         ber: Option<&Ber>,
-        current_storey_idx: usize,
+        current_storey_idx: Option<usize>,
         review: Option<&CollinearitySuggestion>,
         review_remaining: usize,
         has_floor_plan: bool,
@@ -341,7 +355,11 @@ impl SketchPage {
 
         egui::CentralPanel::default().show_inside(ui, |ui| {
             ui.vertical(|ui| {
-                // --- Top toolbar: SketchMode ---
+                // --- Top toolbar: Storey tabs (storey navigation is above the
+                // view-mode choice — picking a storey is the higher-level axis).
+                Self::storey_tabs(ui, ber, current_storey_idx, &mut on_event);
+
+                // --- Mode toolbar: SketchMode (per-storey view choice) ---
                 if let Some(new_mode) = Self::mode_toolbar(ui, mode) {
                     on_event(UiEvent::Sketch(SketchEvent::ChangeMode(new_mode)));
                 }
@@ -626,7 +644,7 @@ impl SketchPage {
                             response.interact_pointer_pos(),
                             ber.and_then(|b| {
                                 b.storeys
-                                    .get(current_storey_idx)
+                                    .get(current_storey_idx?)
                                     .and_then(crate::ui::render::storey_2d::bounding_box)
                             }),
                         ) {
@@ -647,7 +665,7 @@ impl SketchPage {
                 if exposure_mode && !cut_pending {
                     if let Some((min_xy, max_xy)) = ber.and_then(|b| {
                         b.storeys
-                            .get(current_storey_idx)
+                            .get(current_storey_idx?)
                             .and_then(crate::ui::render::storey_2d::bounding_box)
                     }) {
                         let t = crate::ui::render::fit_transform(rect, min_xy, max_xy, view);
@@ -726,7 +744,19 @@ impl SketchPage {
                             // (metre) space too, so it also needs world coords.
                             let living_area_draw =
                                 living_area_mode && matches!(edit_tool, EditTools::DrawPerpWalls);
+                            // First outline of a fresh upper storey: drawn over
+                            // the previous-storey watermark, so it must be
+                            // captured in that storey's metre space (mirrors the
+                            // watermark predicate in render::render_ber).
+                            let outline_on_watermark =
+                                matches!(edit_tool, EditTools::DrawPerpWalls)
+                                    && !living_area_mode
+                                    && matches!(current_storey_idx, Some(i) if i > 0)
+                                    && ber
+                                        .and_then(|b| b.storeys.get(current_storey_idx?))
+                                        .is_some_and(|s| s.floors.regions.is_empty());
                             let needs_world = living_area_draw
+                                || outline_on_watermark
                                 || matches!(
                                     edit_tool,
                                     EditTools::ExtendOrtho
@@ -739,9 +769,10 @@ impl SketchPage {
                                 if let (Some(stroke), Some((min_xy, max_xy))) = (
                                     current.as_ref(),
                                     ber.and_then(|b| {
-                                        b.storeys
-                                            .get(current_storey_idx)
-                                            .and_then(crate::ui::render::storey_2d::bounding_box)
+                                        crate::ui::render::fit_bbox_for_storey(
+                                            b,
+                                            current_storey_idx?,
+                                        )
                                     }),
                                 ) {
                                     let t = crate::ui::render::fit_transform(
@@ -759,11 +790,17 @@ impl SketchPage {
                                         })
                                         .collect();
                                     // Living-area draw starts a new sub-shape;
-                                    // trims send TrimStrokeWorld, extends send
+                                    // an outline-on-watermark sends
+                                    // OutlineStrokeWorld; trims send
+                                    // TrimStrokeWorld, extends send
                                     // ExtendStrokeWorld; the controller dispatches
                                     // the exact variant by the active tool.
                                     let event = if living_area_draw {
                                         SketchEvent::LivingAreaStrokeWorld {
+                                            points: world_points,
+                                        }
+                                    } else if outline_on_watermark {
+                                        SketchEvent::OutlineStrokeWorld {
                                             points: world_points,
                                         }
                                     } else if matches!(
@@ -789,6 +826,28 @@ impl SketchPage {
                                 false
                             };
                             if !world_converted {
+                                // Diagnostic: an outline-on-watermark stroke that
+                                // can't convert to world coords falls back to the
+                                // pixel path (no snap, re-scales from scratch).
+                                // Surface WHY so the failure isn't silent.
+                                if outline_on_watermark {
+                                    let has_stroke = current.is_some();
+                                    let has_bbox = ber
+                                        .and_then(|b| {
+                                            crate::ui::render::fit_bbox_for_storey(
+                                                b,
+                                                current_storey_idx?,
+                                            )
+                                        })
+                                        .is_some();
+                                    eprintln!(
+                                        "[new-storey] WARNING: outline-on-watermark stroke could \
+                                         NOT convert to world coords (stroke present={has_stroke}, \
+                                         fit bbox present={has_bbox}) — falling back to the pixel \
+                                         path. If bbox is missing, the previous storey has no \
+                                         committed floor outline to anchor the transform."
+                                    );
+                                }
                                 on_event(UiEvent::Sketch(SketchEvent::EndStroke(local_pos)));
                             }
                         }
@@ -817,7 +876,7 @@ impl SketchPage {
                             ber,
                             ber.and_then(|b| {
                                 b.storeys
-                                    .get(current_storey_idx)
+                                    .get(current_storey_idx?)
                                     .and_then(crate::ui::render::storey_2d::bounding_box)
                             }),
                         ) {
@@ -838,7 +897,7 @@ impl SketchPage {
                         ber,
                         ber.and_then(|b| {
                             b.storeys
-                                .get(current_storey_idx)
+                                .get(current_storey_idx?)
                                 .and_then(crate::ui::render::storey_2d::bounding_box)
                         }),
                     ) {
@@ -877,7 +936,19 @@ impl SketchPage {
                 // Bottom toolbar — priority: pending redraw > dimension prompt
                 // > collinearity review > edit tools. The "Fit" button (reset
                 // view) is always available alongside.
+                //
+                // The All-storeys tab (`current_storey_idx == None`) is read-only,
+                // so drawing/edit tools are hidden — only the Fit button stays.
                 ui.horizontal(|ui| {
+                    if current_storey_idx.is_none() {
+                        ui.label(
+                            egui::RichText::new("Pick a storey tab to edit.")
+                                .color(egui::Color32::from_rgb(180, 180, 180)),
+                        );
+                        ui.separator();
+                        Self::fit_button(ui, &mut on_event);
+                        return;
+                    }
                     if pending_redraw {
                         Self::pending_redraw_toolbar(ui, &mut on_event);
                     } else if let Some(bulge) = curve_bulge {
@@ -1358,6 +1429,54 @@ impl SketchPage {
                 .clicked()
             {
                 on_event(UiEvent::Sketch(SketchEvent::SetAllRemainingExposed));
+            }
+        });
+    }
+
+    /// Horizontal row of tabs for storey navigation:
+    /// `[All]` `[Storey 1]` `[Storey 2]` … `[+ Add new]`.
+    /// `[All]` (read-only overview) sets `current_storey_idx = None`; each
+    /// storey tab sets `Some(i)`; `[+ Add new]` triggers `AddStorey`.
+    fn storey_tabs<F: FnMut(UiEvent)>(
+        ui: &mut egui::Ui,
+        ber: Option<&Ber>,
+        current_storey_idx: Option<usize>,
+        on_event: &mut F,
+    ) {
+        let storeys = ber.map(|b| b.storeys.as_slice()).unwrap_or(&[]);
+        ui.horizontal(|ui| {
+            // All-storeys tab. Selected when `current_storey_idx == None`.
+            if ui
+                .selectable_label(current_storey_idx.is_none(), "All")
+                .on_hover_text("Read-only overview of every storey")
+                .clicked()
+                && current_storey_idx.is_some()
+            {
+                on_event(UiEvent::Sketch(SketchEvent::SetCurrentStorey(None)));
+            }
+            for (i, storey) in storeys.iter().enumerate() {
+                let label = if storey.name.is_empty() {
+                    format!("Storey {}", storey.storey_number + 1)
+                } else {
+                    storey.name.clone()
+                };
+                let selected = current_storey_idx == Some(i);
+                if ui.selectable_label(selected, label).clicked() && !selected {
+                    on_event(UiEvent::Sketch(SketchEvent::SetCurrentStorey(Some(i))));
+                }
+            }
+            // "+ Add new" — always last. Disabled (the button still draws but
+            // does nothing) when no BER is loaded so no storey can be created.
+            let enabled = ber.is_some();
+            if ui
+                .add_enabled(enabled, egui::Button::new("+ Add new"))
+                .on_hover_text(
+                    "Add a new storey. Draw it with the previous storey shown faintly \
+                     as a guide; endpoints snap onto it.",
+                )
+                .clicked()
+            {
+                on_event(UiEvent::Sketch(SketchEvent::AddStorey));
             }
         });
     }

@@ -547,8 +547,22 @@ impl ParametricPlan {
                 }
                 let pts = self.ring_points(ring_idx);
                 let target = (0..n).find(|&i| {
-                    !preserve.contains(&self.rings[ring_idx][i].id)
-                        && is_collinear_vertex(pts[(i + n - 1) % n], pts[i], pts[(i + 1) % n])
+                    if preserve.contains(&self.rings[ring_idx][i].id) {
+                        return false;
+                    }
+                    let prev = pts[(i + n - 1) % n];
+                    let cur = pts[i];
+                    let next = pts[(i + 1) % n];
+                    // A vertex coincident with a neighbour (its adjacent edge
+                    // collapsed to zero length — e.g. a spurious step whose two
+                    // parallel sides were just merged collinear) is redundant:
+                    // dropping it removes the degenerate wall without changing
+                    // the shape. `is_collinear_vertex` deliberately ignores this
+                    // case (it bails on a zero-length neighbour), so handle it
+                    // here — otherwise the coincident pair survives and gets
+                    // prompted as an un-settable zero-length dimension.
+                    let coincident = (cur.x - next.x).abs() < 1e-4 && (cur.y - next.y).abs() < 1e-4;
+                    coincident || is_collinear_vertex(prev, cur, next)
                 });
                 let Some(i) = target else { break };
                 let vid = self.rings[ring_idx][i].id;

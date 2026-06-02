@@ -23,7 +23,9 @@ use datatypes::ber::common::ItemId;
 use datatypes::ber::structural::{FloorRegions, Storey, WallExposure, WallRegions};
 use domain::points::{Point2f32, Point2f64};
 use domain::sketch::{DisplayMode, EditTools, SketchMode};
-use manip_2d_plan::{CollinearitySuggestion, FloorPlan, ParameterAxis, ParameterId, VertexId};
+use manip_2d_plan::{
+    Axis, CollinearitySuggestion, FloorPlan, ParameterAxis, ParameterId, VertexId,
+};
 use sketch::model::Stroke;
 use sketch::SketchEngine;
 use std::collections::{HashMap, HashSet};
@@ -32,14 +34,17 @@ use std::collections::{HashMap, HashSet};
 /// collects it from the assessor.
 const DEFAULT_CEILING_HEIGHT_M: f64 = 2.4;
 
-/// Range (in pixels) for what counts as "near-collinear, ask the user."
-/// `MIN_SEPARATION` is just above the parametric layer's dedup tolerance —
-/// pairs closer than this already share a coordinate expression (and are
-/// skipped by the detector). Anything from there up to `MAX_SEPARATION` is
-/// fair game to ask the user about; pairs farther than `MAX_SEPARATION` are
-/// treated as distinct walls.
-const COLLINEARITY_MIN_SEPARATION: f32 = 1.0;
-const COLLINEARITY_MAX_SEPARATION: f32 = 60.0;
+/// Range for what counts as "near-collinear, ask the user", expressed as a
+/// FRACTION of the floor plan's bounding-box diagonal (not absolute units).
+/// The plan is in canvas pixels before the first dimension and in metres after,
+/// so a fixed absolute range would over-ask on a metre-scale plan (a 60-unit
+/// gap spans the whole house) — these ratios behave the same at either scale.
+/// `MIN` sits just above the parametric layer's dedup tolerance (≈ diag*0.0005),
+/// so pairs that already share a coordinate are skipped; anything up to `MAX` is
+/// fair game; pairs farther apart are distinct walls. The fractions reproduce
+/// the previous pixel tuning (≈1px / ≈60px on a ~700px sketch).
+const COLLINEARITY_MIN_SEPARATION_RATIO: f32 = 0.0015;
+const COLLINEARITY_MAX_SEPARATION_RATIO: f32 = 0.09;
 
 /// In-session state for the "is this pair of walls the same line?" review.
 /// Populated by `sketch_end_stroke` and consumed by `accept_current_review` /
@@ -244,7 +249,7 @@ pub struct DimensionState {
 // There is NO persisted sketch snapshot. The DB stores only finalised
 // (complete, metre-scale) resolved geometry — `Storey.floors` (outline),
 // `Storey.living_areas`, and `Storey.walls` (exposure). On reload the editor
-// rebuilds everything from those resolved points (see `restore_sketch_state`):
+// rebuilds everything from those resolved points (see `load_storey_into_editor`):
 // the outline's parametric model is re-derived (re-edit fidelity — shared
 // params, collinearity equivalences, curve arcs — is deliberately not
 // preserved), living areas are rebuilt non-editable, and exposure is recovered
@@ -279,6 +284,13 @@ pub struct AppController {
     /// The BER record being edited. `commit_to_ber` writes through this to SQLite.
     /// `None` means no BER is loaded yet — sketches stay in-memory until a BER exists.
     current_record: Option<BerRecord>,
+    /// Which storey of `current_record` the editor is acting on. `Some(i)` =
+    /// editing storey `i`; `None` = the "All storeys" view (read-only overview,
+    /// no drawing/editing). Default `Some(0)` on create/open. Editor state
+    /// (outline / living_areas / wall_sections / dimensioning) belongs to this
+    /// storey; switching storey commits the live state into `current_record`
+    /// and rebuilds the editor from the target storey via `load_storey_into_editor`.
+    current_storey_idx: Option<usize>,
     /// Pending "is this collinear?" questions for the current floor plan.
     /// `None` when there's nothing to ask.
     review: Option<CollinearityReview>,
@@ -456,6 +468,7 @@ impl AppController {
             floor_plan: FloorPlan::default(),
             sketch_engine: SketchEngine::new(),
             current_record: None,
+            current_storey_idx: None,
             review: None,
             pending_redraw: None,
             pending_arc: None,
@@ -636,6 +649,9 @@ impl AppController {
             .upsert(&record)
             .expect("upsert failed");
         self.current_record = Some(record);
+        // A freshly created BER starts on its first storey (which `commit_to_ber`
+        // lazily appends on the first stroke).
+        self.current_storey_idx = Some(0);
         ber
     }
 
@@ -655,12 +671,102 @@ impl AppController {
         let record = BerRepository::new(&self.conn)
             .load(id)
             .map_err(|e| format!("failed to load BER: {}", e))?;
-        self.restore_sketch_state(record.data.storeys.first());
+        // A reopened BER always lands on storey 0 (multi-storey navigation
+        // doesn't persist the per-session cursor — by design, see plan).
+        self.current_storey_idx = Some(0);
+        self.load_storey_into_editor(record.data.storeys.first());
         self.current_record = Some(record);
         self.view = ViewTransform::default();
         self.edit_state = EditState::default();
         self.review = None;
         self.compute_next_dimension_prompt();
+        self.history.clear();
+        self.redo.clear();
+        Ok(())
+    }
+
+    /// Which storey the editor is currently acting on. `Some(i)` = storey `i`
+    /// is being edited; `None` = the "All storeys" overview (read-only, no
+    /// drawing). Default `Some(0)` on create/open.
+    pub fn current_storey_idx(&self) -> Option<usize> {
+        self.current_storey_idx
+    }
+
+    /// Switch which storey the editor acts on. Commits the live editor state
+    /// to its current storey, then loads the target (`None` for the read-only
+    /// All-storeys overview). No-op when already on `target`.
+    pub fn set_current_storey(&mut self, target: Option<usize>) -> Result<(), String> {
+        if self.current_storey_idx == target {
+            return Ok(());
+        }
+        // Save the current storey first so its in-memory state is current.
+        self.commit_to_ber()?;
+        self.current_storey_idx = target;
+        // Clear transient per-storey state — none of it carries across a switch.
+        self.view = ViewTransform::default();
+        self.edit_state = EditState::default();
+        self.review = None;
+        self.pending_arc = None;
+        self.pending_cut = None;
+        self.pending_redraw = None;
+        self.edit_drag_prompt = None;
+        self.vertex_drop_prompt = None;
+        let storey = target.and_then(|i| {
+            self.current_record
+                .as_ref()
+                .and_then(|r| r.data.storeys.get(i).cloned())
+        });
+        self.load_storey_into_editor(storey.as_ref());
+        self.compute_next_dimension_prompt();
+        // Undo/redo is per-editing-session of one storey — don't carry across.
+        self.history.clear();
+        self.redo.clear();
+        Ok(())
+    }
+
+    /// Append a fresh empty `Storey` to the current BER and switch the editor
+    /// onto it. The previous storey is committed first; the new one starts
+    /// with an empty outline, no living areas, no wall sections, and a fresh
+    /// dimensioning state (scale calibrates again on its first dimension).
+    /// Errors if no BER is loaded.
+    pub fn add_storey(&mut self) -> Result<(), String> {
+        if self.current_record.is_none() {
+            return Err("no BER loaded".into());
+        }
+        // Save whatever storey is live before leaving it.
+        self.commit_to_ber()?;
+        let new_idx = {
+            let record = self.current_record.as_mut().unwrap();
+            let n = record.data.storeys.len();
+            record.data.storeys.push(Storey {
+                storey_number: n as i32,
+                name: format!("Storey {}", n + 1),
+                ..Default::default()
+            });
+            n
+        };
+        println!(
+            "[new-storey] add_storey: appended storey {} (now editing it, zoomed out for drawing room)",
+            new_idx
+        );
+        self.current_storey_idx = Some(new_idx);
+        // Start zoomed out so the previous-storey watermark doesn't fill the
+        // canvas — the assessor needs room to draw a footprint that extends
+        // BEYOND it (e.g. over a ground-floor garage). `Fit` resets to full-fit.
+        self.view = ViewTransform {
+            zoom: 0.7,
+            ..ViewTransform::default()
+        };
+        self.edit_state = EditState::default();
+        self.review = None;
+        self.pending_arc = None;
+        self.pending_cut = None;
+        self.pending_redraw = None;
+        self.edit_drag_prompt = None;
+        self.vertex_drop_prompt = None;
+        // Fresh, empty editor — scale_set false so the first wall dimensioned on
+        // the new storey calibrates its scale (independent of any prior storey).
+        self.load_storey_into_editor(None);
         self.history.clear();
         self.redo.clear();
         Ok(())
@@ -674,7 +780,7 @@ impl AppController {
     /// regions. Re-edit fidelity (shared params, collinearity equivalences,
     /// curve arcs) is intentionally not preserved — drawing tools work from the
     /// loaded points.
-    fn restore_sketch_state(&mut self, storey: Option<&Storey>) {
+    fn load_storey_into_editor(&mut self, storey: Option<&Storey>) {
         self.dimensioning = DimensionState::default();
         // A provisional arc is transient and tied to the OUTGOING plan's
         // vertices; loading a record must not carry a stale one over.
@@ -821,12 +927,17 @@ impl AppController {
         // geometry. There's no parametric snapshot: the outline is the only
         // thing that needs lossless re-edit, and we've traded that away (reload
         // rebuilds everything from these resolved points).
+        let idx = self.current_storey_idx.unwrap_or(0);
         let record = self.current_record.as_mut().unwrap();
-        if record.data.storeys.is_empty() {
+        // Ensure the target storey exists. The single-storey case (idx 0,
+        // empty vec) lazy-creates here; multi-storey flows always push a
+        // storey via `add_storey` before pointing `current_storey_idx` at it,
+        // so this loop only ever runs once in practice.
+        while record.data.storeys.len() <= idx {
             record.data.storeys.push(Storey::default());
         }
         if polygons_f64.iter().any(|p| p.len() >= 3) {
-            record.data.storeys[0].floors = FloorRegions::from_vertex_lists(
+            record.data.storeys[idx].floors = FloorRegions::from_vertex_lists(
                 polygons_f64,
                 DEFAULT_CEILING_HEIGHT_M,
                 None,
@@ -834,7 +945,7 @@ impl AppController {
                 None,
             );
         }
-        record.data.storeys[0].living_areas = FloorRegions::from_vertex_lists(
+        record.data.storeys[idx].living_areas = FloorRegions::from_vertex_lists(
             living_area_lists,
             DEFAULT_CEILING_HEIGHT_M,
             None,
@@ -843,9 +954,9 @@ impl AppController {
         );
         // Re-derive walls from exposure (empty when nothing is marked),
         // preserving the fabric properties of the region a split came from.
-        record.data.storeys[0].walls = WallRegions::rebuild_preserving(
+        record.data.storeys[idx].walls = WallRegions::rebuild_preserving(
             wall_segments,
-            &record.data.storeys[0].walls,
+            &record.data.storeys[idx].walls,
             0.0,
             DEFAULT_CEILING_HEIGHT_M,
         );
@@ -864,7 +975,8 @@ impl AppController {
             return Ok(());
         };
         let mut out = record.clone();
-        if let Some(storey) = out.data.storeys.get_mut(0) {
+        let idx = self.current_storey_idx.unwrap_or(0);
+        if let Some(storey) = out.data.storeys.get_mut(idx) {
             if self.outline_finalised() {
                 // Outline is metric + fully dimensioned → keep its floors/walls,
                 // and persist only the living areas that are themselves done.
@@ -982,7 +1094,7 @@ impl AppController {
     /// dimensioning flow, if there's anything to ask about.
     pub fn skip_all_review(&mut self) {
         self.review = None;
-        self.maybe_start_dimensioning();
+        self.finish_review();
     }
 
     /// Internal: pop the next pending suggestion by cloning it (so callers
@@ -1026,8 +1138,22 @@ impl AppController {
     /// Called from accept/reject paths after `advance_review_cursor`.
     fn after_review_step(&mut self) {
         if self.review.is_none() {
-            self.maybe_start_dimensioning();
+            self.finish_review();
         }
+    }
+
+    /// Wrap up once the collinearity review is done (drained or skipped).
+    /// Accepting "same line" merges two edges onto one coordinate, which leaves
+    /// the vertex between them as a redundant straight-through point — drop
+    /// those spurious collinear vertices (preserving deliberate subdivisions)
+    /// so the user isn't later prompted for a length that can't be set without
+    /// changing the shape. Then commit the cleaned outline and start dimensioning.
+    fn finish_review(&mut self) {
+        self.clean_envelope_collinear();
+        if let Err(e) = self.commit_to_ber() {
+            eprintln!("commit_to_ber after collinearity review: {}", e);
+        }
+        self.maybe_start_dimensioning();
     }
 
     /// Check the live state to decide if a suggestion is already-resolved
@@ -1038,6 +1164,18 @@ impl AppController {
             .floor_plan
             .edges_collinear(sug.ring_a, sug.edge_a, sug.ring_b, sug.edge_b, &sug.axis)
         {
+            return true;
+        }
+        // A prior "same line" accept can collapse one of this pair's edges to
+        // zero length (e.g. the short connector of a nib whose two parallel
+        // sides were just merged). Asking about a degenerate edge is meaningless
+        // — skip it; the end-of-review cleanup drops the vertex entirely.
+        let degenerate = |ring, edge| {
+            self.floor_plan
+                .wall_length(ring, edge)
+                .map_or(true, |l| l < 1e-3)
+        };
+        if degenerate(sug.ring_a, sug.edge_a) || degenerate(sug.ring_b, sug.edge_b) {
             return true;
         }
         let Some(review) = self.review.as_ref() else {
@@ -1206,11 +1344,200 @@ impl AppController {
     fn apply_drawperp_stroke(&mut self, points: &[Point2f32], closed: bool) -> Result<(), String> {
         // Snapshot pre-stroke (may be empty / pre-dim) for undo.
         let undo_snap = self.current_history_snapshot();
+        println!(
+            "[new-storey] PIXEL outline path: storey={:?}, {} points (this is the from-scratch \
+             pixel path)",
+            self.current_storey_idx,
+            points.len()
+        );
+        if matches!(self.current_storey_idx, Some(i) if i > 0) {
+            eprintln!(
+                "[new-storey] WARNING: pixel path on upper storey {:?} — the world/snap path did \
+                 NOT trigger (expected the previous storey's watermark + metre-space capture). The \
+                 outline won't snap to the storey below and will re-scale from scratch.",
+                self.current_storey_idx
+            );
+        }
+        // Method-2 snap: when this is the FIRST stroke on a new upper storey
+        // and a previous storey exists, snap each freehand point onto the
+        // previous storey's outline so the new footprint reuses those exact
+        // coordinates wherever the user drew close. Threshold scales to the
+        // previous storey's diagonal (see `snap_to_previous_storey_outline`).
+        let snapped_owned = self.snap_to_previous_storey_outline(points);
+        let points: &[Point2f32] = snapped_owned.as_deref().unwrap_or(points);
         self.floor_plan = FloorPlan::from_points_to_orthogonal(points, 10.0, closed)
             .map_err(|e| format!("Failed to draw outline: {:?}", e))?;
         println!("floor plan: {:?}", self.floor_plan);
         self.warn_if_non_orthogonal("draw outline");
         self.dimensioning = DimensionState::default();
+        self.push_history_snapshot(undo_snap);
+        self.commit_to_ber()?;
+        self.populate_collinearity_review();
+        self.maybe_start_dimensioning();
+        Ok(())
+    }
+
+    /// If the editor is on a NEW storey (current outline empty) and a previous
+    /// storey exists, snap each stroke point that lands within ~6% of the
+    /// previous outline's diagonal onto that outline. Returns `None` (caller
+    /// uses the raw stroke as-is) when no snap applies — first storey, no
+    /// previous geometry, or current storey already has an outline.
+    fn snap_to_previous_storey_outline(&self, points: &[Point2f32]) -> Option<Vec<Point2f32>> {
+        // Only on a fresh storey — once an outline exists this is a redraw, not
+        // a method-2 trace, and we don't want to silently snap the user's stroke.
+        if self.floor_plan.ring_count() > 0 {
+            return None;
+        }
+        let ring = self.previous_storey_ring()?;
+        // ~8% of the previous diagonal: forgiving enough that a wall the user
+        // drew "close" to the storey below lands on it, yet far below the depth
+        // of a real extension (e.g. a garage bump-out), which stays un-snapped.
+        let tol = (Self::ring_diagonal(&ring) * 0.08).max(1e-3);
+        let snapped = manip_2d_plan::snap_stroke_to_ring(points, &ring, tol);
+        let moved = points
+            .iter()
+            .zip(snapped.iter())
+            .filter(|(a, b)| (a.x - b.x).abs() > 1e-4 || (a.y - b.y).abs() > 1e-4)
+            .count();
+        println!(
+            "[new-storey] snap to previous outline: tol {:.3} m, {}/{} points pulled onto it",
+            tol,
+            moved,
+            points.len()
+        );
+        Some(snapped)
+    }
+
+    /// The previous storey's outline ring as `Point2f32` (world/metre coords),
+    /// or `None` when the editor is on storey 0 / there's no previous geometry.
+    /// Used both to snap a new storey's stroke onto it and to build a reference
+    /// `FloorPlan` for pinning shared walls.
+    fn previous_storey_ring(&self) -> Option<Vec<Point2f32>> {
+        let idx = self.current_storey_idx?;
+        if idx == 0 {
+            return None;
+        }
+        let prev = self.current_record.as_ref()?.data.storeys.get(idx - 1)?;
+        let ring_f64 = prev
+            .floors
+            .to_vertex_lists()
+            .into_iter()
+            .find(|r| r.len() >= 3)?;
+        Some(
+            ring_f64
+                .into_iter()
+                .map(|p| Point2f32::new(p.x as f32, p.y as f32))
+                .collect(),
+        )
+    }
+
+    /// Bounding-box diagonal of a ring (used to scale snap / simplification
+    /// tolerances to the previous storey's size).
+    fn ring_diagonal(ring: &[Point2f32]) -> f32 {
+        let (mut min_x, mut min_y, mut max_x, mut max_y) = (f32::MAX, f32::MAX, f32::MIN, f32::MIN);
+        for p in ring {
+            min_x = min_x.min(p.x);
+            min_y = min_y.min(p.y);
+            max_x = max_x.max(p.x);
+            max_y = max_y.max(p.y);
+        }
+        ((max_x - min_x).powi(2) + (max_y - min_y).powi(2)).sqrt()
+    }
+
+    /// Apply the FIRST outline stroke of a new upper storey, captured in the
+    /// previous storey's *world* (metre) space (see [`SketchEvent::OutlineStrokeWorld`]).
+    ///
+    /// Because the stroke is already in metres, the new storey inherits scale
+    /// for free: endpoints snap onto the previous outline, and every wall the
+    /// new footprint *shares* with the previous storey is pinned (via
+    /// [`FloorPlan::params_pinned_to_outline`]) so it isn't re-prompted — only
+    /// the genuinely-new walls (e.g. a garage the upper storey extends over)
+    /// remain to dimension. The geometry (snap, orthogonalize, pin) all lives
+    /// in `manip_2d_plan`; here we only sequence it.
+    pub fn apply_outline_stroke_world(&mut self, world_points: &[(f32, f32)]) {
+        println!(
+            "[new-storey] WORLD outline path: storey={:?}, {} world points",
+            self.current_storey_idx,
+            world_points.len()
+        );
+        // Run the engine's pixel-based close-check to learn whether the user
+        // closed the loop; the pixel points themselves are discarded in favour
+        // of the world points the UI already converted.
+        let closed = match self.sketch_engine.end_stroke() {
+            Ok(Some(stroke)) => stroke.is_closed,
+            Ok(None) => {
+                println!("[new-storey] no stroke in engine — nothing to apply");
+                return;
+            }
+            Err(e) => {
+                eprintln!("[new-storey] end_stroke failed: {:?}", e);
+                return;
+            }
+        };
+        if let Err(e) = self.apply_outline_world_inner(world_points, closed) {
+            eprintln!("[new-storey] apply_outline_stroke_world failed: {}", e);
+        }
+    }
+
+    fn apply_outline_world_inner(
+        &mut self,
+        world_points: &[(f32, f32)],
+        closed: bool,
+    ) -> Result<(), String> {
+        let pts: Vec<Point2f32> = world_points
+            .iter()
+            .map(|(x, y)| Point2f32::new(*x, *y))
+            .collect();
+        // Snap to the previous outline (meaningful now that both are metres),
+        // then build a reference plan from that same ring for pinning.
+        let snapped = self
+            .snap_to_previous_storey_outline(&pts)
+            .unwrap_or_else(|| pts.clone());
+        let prev_ring = self
+            .previous_storey_ring()
+            .ok_or_else(|| "no previous storey to draw on".to_string())?;
+        // Metre-scale RDP tolerance: the pixel-tuned 10.0 used for fresh sketches
+        // would collapse a real outline. ~1% of the previous diagonal smooths
+        // freehand jitter without eating real corners.
+        let tol = (Self::ring_diagonal(&prev_ring) * 0.01).max(0.05);
+        println!(
+            "[new-storey] closed={}, prev_ring {} verts (diag {:.2} m), RDP tol {:.3} m",
+            closed,
+            prev_ring.len(),
+            Self::ring_diagonal(&prev_ring),
+            tol
+        );
+
+        let undo_snap = self.current_history_snapshot();
+        // Orthogonalize to the WORLD axes (not the stroke's dominant angle): the
+        // new storey lives in the previous storey's axis-aligned frame, so a
+        // slightly-rotated freehand trace must not tilt it — otherwise walls
+        // snapped onto the storey below wouldn't stay aligned with it.
+        self.floor_plan = FloorPlan::from_points_to_world_orthogonal(&snapped, tol, closed)
+            .map_err(|e| format!("Failed to draw outline: {:?}", e))?;
+        self.warn_if_non_orthogonal("draw outline (world)");
+
+        // The outline is already in metres, so scale is set; pin the walls
+        // shared with the previous storey so dimensioning prompts only the new
+        // ones. Set this BEFORE maybe_start_dimensioning so it doesn't run the
+        // degenerate-cleanup rebuild (which would dangle the pinned param IDs).
+        let prev_plan = FloorPlan::from_clean_ring(&prev_ring)
+            .map_err(|e| format!("Failed to build reference outline: {:?}", e))?;
+        self.dimensioning = DimensionState::default();
+        self.dimensioning.scale_set = true;
+        self.dimensioning.known_params = prev_plan.params_pinned_to_outline(&self.floor_plan);
+        let active = self.floor_plan.all_active_params();
+        println!(
+            "[new-storey] built outline: {} verts, scale_set=true, pinned {} of {} active params \
+             ({} new wall param(s) left to dimension)",
+            self.floor_plan.get_points().len(),
+            self.dimensioning.known_params.len(),
+            active.len(),
+            active
+                .len()
+                .saturating_sub(self.dimensioning.known_params.len()),
+        );
+
         self.push_history_snapshot(undo_snap);
         self.commit_to_ber()?;
         self.populate_collinearity_review();
@@ -1621,13 +1948,70 @@ impl AppController {
     /// the floor_plan was just replaced with a single ring at index 0,
     /// so the filter is a no-op.
     fn populate_collinearity_review(&mut self) {
+        // Separations scale to the plan's extent so the same review behaviour
+        // holds whether the plan is in pixels (pre-dimension) or metres (an
+        // upper storey drawn in world coords). A fixed range tuned for pixels
+        // would treat every wall in a metre-scale storey as near-collinear.
+        let diag = self
+            .floor_plan
+            .bounding_box()
+            .map(|((mnx, mny), (mxx, mxy))| ((mxx - mnx).powi(2) + (mxy - mny).powi(2)).sqrt())
+            .unwrap_or(0.0);
+        let min_sep = (diag * COLLINEARITY_MIN_SEPARATION_RATIO).max(1e-4);
+        let max_sep = diag * COLLINEARITY_MAX_SEPARATION_RATIO;
         let newest_ring = self.floor_plan.ring_count().saturating_sub(1);
+        // When this storey was drawn over a previous one, prefer to KEEP the
+        // line that lies on the previous storey's outline as the merge target,
+        // so a near-collinear pair collapses onto the storey-below base rather
+        // than onto a spurious slipped-nib offset. `apply_collinear_suggestion`
+        // rewrites edge B onto edge A, so the wall on the previous outline must
+        // be edge A. We measure each side's distance to the nearest parallel
+        // edge of the previous ring and put the closer one in the A slot.
+        let prev_ring = self.previous_storey_ring();
+        let dist_to_prev = |coord: f32, axis: &Axis| -> f32 {
+            let Some(ring) = prev_ring.as_ref() else {
+                return f32::MAX;
+            };
+            let n = ring.len();
+            let mut best = f32::MAX;
+            for i in 0..n {
+                let (a, b) = (ring[i], ring[(i + 1) % n]);
+                match axis {
+                    // A horizontal previous edge anchors a horizontal pair's y;
+                    // a vertical one anchors a vertical pair's x.
+                    Axis::Horizontal if (a.y - b.y).abs() < 1e-3 => {
+                        best = best.min((coord - a.y).abs())
+                    }
+                    Axis::Vertical if (a.x - b.x).abs() < 1e-3 => {
+                        best = best.min((coord - a.x).abs())
+                    }
+                    _ => {}
+                }
+            }
+            best
+        };
         let suggestions: Vec<_> = self
             .floor_plan
-            .suggest_collinear(COLLINEARITY_MIN_SEPARATION, COLLINEARITY_MAX_SEPARATION)
+            .suggest_collinear(min_sep, max_sep)
             .into_iter()
             .filter(|s| s.ring_a == newest_ring || s.ring_b == newest_ring)
+            .map(|mut s| {
+                if dist_to_prev(s.coord_b, &s.axis) < dist_to_prev(s.coord_a, &s.axis) {
+                    std::mem::swap(&mut s.ring_a, &mut s.ring_b);
+                    std::mem::swap(&mut s.edge_a, &mut s.edge_b);
+                    std::mem::swap(&mut s.coord_a, &mut s.coord_b);
+                }
+                s
+            })
             .collect();
+        println!(
+            "[new-storey] collinearity scan: plan diag {:.2}, sep range [{:.3}, {:.3}] → {} \
+             near-collinear pair(s) to review",
+            diag,
+            min_sep,
+            max_sep,
+            suggestions.len()
+        );
         if !suggestions.is_empty() {
             self.review = Some(CollinearityReview {
                 suggestions,
@@ -2554,14 +2938,14 @@ mod trim_collapse_tests {
         );
 
         // Reload from the full storey → the living area is rebuilt.
-        c.restore_sketch_state(Some(&storey));
+        c.load_storey_into_editor(Some(&storey));
         assert_eq!(c.living_area_count(), 1, "rebuilt on reload");
 
         // Source is Storey.living_areas, not sketch_state: clear the regions but
         // keep sketch_state → no living areas come back.
         let mut storey_no_la = storey.clone();
         storey_no_la.living_areas = FloorRegions::default();
-        c.restore_sketch_state(Some(&storey_no_la));
+        c.load_storey_into_editor(Some(&storey_no_la));
         assert_eq!(
             c.living_area_count(),
             0,
@@ -2794,7 +3178,7 @@ mod trim_collapse_tests {
 
         let storey = c.current_record.as_ref().unwrap().data.storeys[0].clone();
         c.wall_sections.clear();
-        c.restore_sketch_state(Some(&storey));
+        c.load_storey_into_editor(Some(&storey));
         // Vertex ids are reassigned on reload (rebuilt from points), so check by
         // count: exactly one wall reconstructed, the rest unset.
         assert_eq!(c.wall_sections.len(), 1, "one wall marked; rest unset");
@@ -2817,7 +3201,7 @@ mod trim_collapse_tests {
 
         let storey = c.current_record.as_ref().unwrap().data.storeys[0].clone();
         c.wall_sections.clear();
-        c.restore_sketch_state(Some(&storey));
+        c.load_storey_into_editor(Some(&storey));
         assert_eq!(c.wall_sections.len(), 1, "one split wall reconstructed");
         let secs = c.wall_sections.values().next().unwrap();
         assert_eq!(secs.len(), 3);
@@ -3089,5 +3473,420 @@ mod trim_collapse_tests {
             (ring_area(&c) - area_before_rescale).abs() < 1e-3,
             "a locked arc must survive aesthetic rescale unchanged"
         );
+    }
+
+    // ----- multi-storey navigation -----------------------------------------
+
+    /// Drop a dimensioned 10x10 square outline into whichever storey is current.
+    /// Used by the multi-storey tests to set each storey up identically.
+    fn finalise_current_storey_as_square(c: &mut AppController, side: f32) {
+        let p = |x: f32, y: f32| Point2f32::new(x, y);
+        c.floor_plan = FloorPlan::from_points_to_orthogonal(
+            &[
+                p(0., 0.),
+                p(side, 0.),
+                p(side, side),
+                p(0., side),
+                p(0.05, 0.05),
+            ],
+            0.1,
+            true,
+        )
+        .unwrap();
+        c.dimensioning.scale_set = true;
+        c.dimensioning.known_params = c.floor_plan.all_active_params();
+        c.commit_to_ber().unwrap();
+    }
+
+    /// `add_storey` appends a fresh empty storey and moves the editor onto it.
+    #[test]
+    fn add_storey_appends_and_switches() {
+        let mut c = dimensioned_square_controller();
+        assert_eq!(c.current_storey_idx(), Some(0));
+        assert_eq!(c.current_record.as_ref().unwrap().data.storeys.len(), 1);
+
+        c.add_storey().expect("add_storey");
+        assert_eq!(c.current_storey_idx(), Some(1), "switched onto new storey");
+        assert_eq!(
+            c.current_record.as_ref().unwrap().data.storeys.len(),
+            2,
+            "new storey appended"
+        );
+        // The new storey is empty (no outline, no living areas, no walls); the
+        // editor scale resets so the first dimension calibrates afresh.
+        assert_eq!(c.floor_plan.ring_count(), 0, "editor on a blank storey");
+        assert!(
+            !c.dimensioning.scale_set,
+            "scale resets so the new storey calibrates fresh"
+        );
+        assert_eq!(c.living_area_count(), 0);
+        assert!(c.wall_sections.is_empty());
+    }
+
+    /// Switching storeys round-trips each storey's geometry through the editor:
+    /// dimensioning the first, adding & dimensioning the second, then switching
+    /// back leaves both intact in `current_record.data.storeys`.
+    #[test]
+    fn switching_storeys_preserves_each_storeys_geometry() {
+        let mut c = dimensioned_square_controller(); // storey 0 = 10x10
+        let storey0_polys = c.current_record.as_ref().unwrap().data.storeys[0]
+            .floors
+            .to_vertex_lists();
+        assert!(!storey0_polys.is_empty(), "storey 0 has a polygon");
+
+        c.add_storey().unwrap();
+        finalise_current_storey_as_square(&mut c, 6.0); // storey 1 = 6x6
+        let storeys_after = c.current_record.as_ref().unwrap().data.storeys.clone();
+        assert_eq!(storeys_after.len(), 2);
+        let storey1_polys = storeys_after[1].floors.to_vertex_lists();
+        assert!(!storey1_polys.is_empty(), "storey 1 has a polygon");
+
+        // Switch back to storey 0 — its previously-committed geometry survives.
+        c.set_current_storey(Some(0)).unwrap();
+        assert_eq!(c.current_storey_idx(), Some(0));
+        let storeys_back = c.current_record.as_ref().unwrap().data.storeys.clone();
+        assert_eq!(storeys_back.len(), 2, "no storey lost on switch");
+        assert_eq!(
+            storeys_back[0].floors.to_vertex_lists(),
+            storey0_polys,
+            "storey 0's footprint preserved"
+        );
+        assert_eq!(
+            storeys_back[1].floors.to_vertex_lists(),
+            storey1_polys,
+            "storey 1's footprint preserved"
+        );
+        // The editor now mirrors storey 0 again.
+        assert_eq!(c.floor_plan.ring_count(), 1);
+        assert!(c.dimensioning.scale_set);
+    }
+
+    /// All-storeys tab: `set_current_storey(None)` leaves the editor in a
+    /// read-only state — the live floor_plan is empty (no shape to edit on)
+    /// and the storeys list is preserved.
+    #[test]
+    fn switching_to_all_storeys_clears_editor_and_keeps_data() {
+        let mut c = dimensioned_square_controller();
+        c.add_storey().unwrap();
+        finalise_current_storey_as_square(&mut c, 6.0);
+        let snapshot = c.current_record.as_ref().unwrap().data.storeys.clone();
+
+        c.set_current_storey(None).unwrap();
+        assert_eq!(c.current_storey_idx(), None);
+        assert_eq!(c.floor_plan.ring_count(), 0, "no live shape on All tab");
+        assert_eq!(
+            c.current_record.as_ref().unwrap().data.storeys.len(),
+            snapshot.len(),
+            "every storey still present"
+        );
+        // Returning to a specific storey rehydrates the editor from its geometry.
+        c.set_current_storey(Some(1)).unwrap();
+        assert_eq!(c.floor_plan.ring_count(), 1);
+    }
+
+    /// Method-2 snap: on the FIRST stroke of a new upper storey, freehand points
+    /// drawn near the previous storey's outline get pulled onto it. We check
+    /// the helper directly (the stroke→pixel canvas conversion in
+    /// `apply_drawperp_stroke` is wrapped around a 10-unit RDP simplification
+    /// tolerance — large-scale coords keep the corners alive through that).
+    #[test]
+    fn first_stroke_on_new_storey_snaps_to_previous_outline() {
+        let mut c = dimensioned_square_controller(); // storey 0 = 10x10
+        c.add_storey().unwrap();
+        // Endpoints near (but not on) the previous outline's corners. The
+        // snap tolerance scales to the previous diagonal (~6%), so 10x10 →
+        // tol ≈ 0.85; any point within that lands on the outline exactly.
+        let p = |x: f32, y: f32| Point2f32::new(x, y);
+        let stroke = vec![
+            p(0.2, 0.2), // near (0, 0) — snaps to (0, 0)
+            p(9.8, 0.2), // near (10, 0) — snaps to (10, 0)
+            p(9.8, 5.0), // near right wall at y=5 — snaps to x=10
+            p(9.8, 9.8), // near (10, 10) — snaps to (10, 10)
+            p(0.2, 9.8), // near (0, 10) — snaps to (0, 10)
+            p(0.3, 0.3), // near (0, 0)
+        ];
+        let snapped = c
+            .snap_to_previous_storey_outline(&stroke)
+            .expect("snap helper engaged");
+        // Endpoints aligned to the previous outline's corners exactly.
+        let approx = |a: f32, b: f32| (a - b).abs() < 1e-3;
+        assert!(approx(snapped[1].x, 10.0), "{:?}", snapped[1]);
+        assert!(approx(snapped[1].y, 0.0));
+        assert!(approx(snapped[3].x, 10.0), "{:?}", snapped[3]);
+        assert!(approx(snapped[3].y, 10.0));
+        // Mid-wall point pulled onto x=10, leaving y untouched.
+        assert!(approx(snapped[2].x, 10.0), "{:?}", snapped[2]);
+        assert!(approx(snapped[2].y, 5.0));
+    }
+
+    /// Without a previous storey to snap to, the helper returns `None`. Storey 0
+    /// has no watermark.
+    #[test]
+    fn first_stroke_on_storey_0_does_not_snap() {
+        let c = dimensioned_square_controller(); // storey 0 only
+        let p = |x: f32, y: f32| Point2f32::new(x, y);
+        let stroke = vec![p(0.2, 0.2), p(9.7, 0.2)];
+        // On storey 0 there's no previous outline → helper returns None.
+        assert!(c.snap_to_previous_storey_outline(&stroke).is_none());
+    }
+
+    /// A new upper storey drawn (in world coords) tracing the SAME footprint as
+    /// the storey below inherits scale and pins every shared wall — so it's
+    /// fully resolved with no dimension prompt.
+    #[test]
+    fn outline_world_inherits_scale_and_pins_shared_walls() {
+        let mut c = dimensioned_square_controller(); // storey 0 = 10x10 (metres)
+        c.add_storey().unwrap();
+        // Trace the 10x10 freehand-style (a little off each corner) so the snap
+        // pulls the endpoints onto the previous outline.
+        let world = vec![(0.2, 0.2), (9.8, 0.2), (9.8, 9.8), (0.2, 9.8), (0.3, 0.3)];
+        c.apply_outline_world_inner(&world, true)
+            .expect("apply world outline");
+
+        assert_eq!(c.floor_plan.ring_count(), 1, "outline built");
+        assert!(
+            c.dimensioning.scale_set,
+            "geometry is already metres → scale inherited"
+        );
+        assert!(
+            !c.dimensioning.known_params.is_empty(),
+            "shared walls pinned"
+        );
+        // Footprint ≈ the 10x10 below.
+        let area = ring_area(&c);
+        assert!(
+            (area - 100.0).abs() < 2.0,
+            "footprint ≈ 100 m² (got {area})"
+        );
+        // Every wall coincides with the storey below → nothing left to ask.
+        assert!(
+            c.dimensioning.current_prompt.is_none(),
+            "all walls shared → no dimension prompt"
+        );
+    }
+
+    /// The core feature: an upper storey that extends past the storey below
+    /// (a bump-out over a ground-floor garage). The walls it shares with the
+    /// storey below are pinned; the genuinely-new garage walls are NOT, so the
+    /// assessor is still prompted to dimension them.
+    #[test]
+    fn garage_extension_leaves_new_wall_unpinned() {
+        let mut c = dimensioned_square_controller(); // storey 0 = 10x10
+        c.add_storey().unwrap();
+        // Hug three sides of the 10x10, but bump out a 3x3 garage past x=10
+        // between y=4 and y=7. Shared-wall points are a touch off (snap pulls
+        // them in); garage corners are exact and well outside the snap radius.
+        let world = vec![
+            (0.2, 0.2),  // → (0,0)
+            (9.8, 0.2),  // → (10,0)
+            (9.8, 4.0),  // → x=10 on the right wall
+            (13.0, 4.0), // garage corner (new)
+            (13.0, 7.0), // garage corner (new)
+            (9.8, 7.0),  // → x=10 on the right wall
+            (9.8, 9.8),  // → (10,10)
+            (0.2, 9.8),  // → (0,10)
+            (0.3, 0.3),  // → (0,0)
+        ];
+        c.apply_outline_world_inner(&world, true)
+            .expect("apply world outline");
+
+        assert_eq!(c.floor_plan.ring_count(), 1);
+        assert!(c.dimensioning.scale_set);
+        assert!(
+            !c.dimensioning.known_params.is_empty(),
+            "shared walls pinned"
+        );
+        // Footprint is bigger than the 100 m² below (gained the garage bump).
+        let area = ring_area(&c);
+        assert!(area > 105.0, "extended footprint > 100 m² (got {area})");
+        // The genuinely-new (garage) walls are NOT pinned: some active param is
+        // still unknown, so the assessor will be asked to dimension it (after
+        // any collinearity review that the new corners trigger).
+        let active = c.floor_plan.all_active_params();
+        assert!(
+            active
+                .iter()
+                .any(|p| !c.dimensioning.known_params.contains(p)),
+            "a new (garage) wall's parameter is left unpinned to dimension \
+             (active={}, known={})",
+            active.len(),
+            c.dimensioning.known_params.len()
+        );
+    }
+
+    /// Collinearity separations scale to the plan's units: a clean 10x10 *metre*
+    /// square has its opposite walls 10 m apart — far beyond the near-collinear
+    /// range — so nothing is flagged. (With the old fixed pixel range a 10 m gap
+    /// looked "near-collinear" and every parallel wall pair was asked about.)
+    #[test]
+    fn collinearity_range_scales_to_metre_plan() {
+        let mut c = dimensioned_square_controller(); // 10x10 metre square
+        c.review = None;
+        c.populate_collinearity_review();
+        assert!(
+            c.review.is_none(),
+            "a clean metre-scale square must not flag every wall as collinear"
+        );
+    }
+
+    /// Accepting a collinearity decision drops the now-redundant vertex. A
+    /// spurious "step" (from mouse jitter) flagged near-collinear collapses to a
+    /// clean wall once accepted — the straight-through vertices are removed, so
+    /// the user is never asked for a length that can't be set without changing
+    /// the shape. Runs with `scale_set = true` (the storey is already in metres,
+    /// as an upper storey is) so the `simplify_degenerate` safety net is skipped
+    /// and the cleanup must collapse the zero-length step edge itself.
+    #[test]
+    fn accepting_collinearity_removes_spurious_step_vertices() {
+        let p = |x: f32, y: f32| Point2f32::new(x, y);
+        let mut c = dimensioned_square_controller();
+        // A 10x10 whose bottom wall has a spurious 0.3 m step (two horizontals
+        // at y=0 and y=0.3 joined by a tiny vertical) — six vertices.
+        c.floor_plan = FloorPlan::from_clean_ring(&[
+            p(0., 0.),
+            p(5., 0.),
+            p(5., 0.3),
+            p(10., 0.3),
+            p(10., 10.),
+            p(0., 10.),
+        ])
+        .unwrap();
+        // Already metric (like an upper storey drawn in world coords): scale set,
+        // every current param known. This is the path where `simplify_degenerate`
+        // is NOT run, so only the collinear/coincident cleanup can remove the step.
+        c.dimensioning = DimensionState::default();
+        c.dimensioning.scale_set = true;
+        c.dimensioning.known_params = c.floor_plan.all_active_params();
+        assert_eq!(c.floor_plan.polygons()[0].len(), 6, "starts with the step");
+
+        c.populate_collinearity_review();
+        assert!(c.review.is_some(), "the near-collinear step is flagged");
+
+        // Accept every pending suggestion (the step's two horizontals = 1 pair).
+        while c.review.is_some() {
+            c.accept_current_review().unwrap();
+        }
+
+        // The step's redundant vertices are gone → back to a clean 4-corner box.
+        assert_eq!(
+            c.floor_plan.polygons()[0].len(),
+            4,
+            "spurious step vertices removed after collinearity accept"
+        );
+        let area = ring_area(&c);
+        assert!(
+            (area - 100.0).abs() < 1.0,
+            "outline is a clean 10x10 (got {area})"
+        );
+    }
+
+    /// Reproduces the field report: a new upper storey traced over the one below
+    /// with an exaggerated "nib" bumping off the base (a slipped pen). Two fixes
+    /// are exercised together:
+    ///   1. The near-collinear horizontals collapse onto the PREVIOUS storey's
+    ///      base (y=0), not the nib's offset line (y=1.2) — so the footprint
+    ///      stays at ~100 m² rather than shrinking to ~88.
+    ///   2. Once that merge collapses the nib's connectors to zero length, the
+    ///      review's leftover vertical suggestion about them is auto-skipped, so
+    ///      the user isn't asked about a line that no longer exists.
+    #[test]
+    fn nib_collapses_onto_previous_base_and_skips_degenerate_connector() {
+        let mut c = dimensioned_square_controller(); // storey 0 = 10x10, base y=0
+        c.add_storey().unwrap();
+        // Base mostly on y=0, with a 0.3-wide nib bumping up to y=1.2 between
+        // x=4.0 and x=4.3. The 1.2 m bump clears the snap tolerance (so it
+        // survives as a near-collinear question) but stays within range.
+        let world = vec![
+            (0.0, 0.0),
+            (4.0, 0.0),
+            (4.0, 1.2),
+            (4.3, 1.2),
+            (4.3, 0.0),
+            (10.0, 0.0),
+            (10.0, 10.0),
+            (0.0, 10.0),
+            (0.05, 0.05),
+        ];
+        c.apply_outline_world_inner(&world, true)
+            .expect("apply world outline");
+
+        let n = c.review.as_ref().map_or(0, |r| r.suggestions.len());
+        assert!(
+            n >= 2,
+            "the nib creates a horizontal (base/top) and a vertical (connectors) pair (got {n})"
+        );
+
+        // Accept the first (horizontal) pair.
+        c.accept_current_review().unwrap();
+        // The connectors are now zero-length, so the remaining vertical
+        // suggestion about them is auto-skipped → the review is already done.
+        assert!(
+            c.review.is_none(),
+            "degenerate-connector suggestion auto-skipped after the merge"
+        );
+
+        // Nib gone, clean 4-corner box, and crucially the base sat DOWN onto
+        // y=0 (area ~100) instead of UP onto the nib line (which would give ~88).
+        assert_eq!(
+            c.floor_plan.polygons()[0].len(),
+            4,
+            "nib removed, clean box"
+        );
+        let area = ring_area(&c);
+        assert!(
+            (area - 100.0).abs() < 1.0,
+            "collapsed onto the previous base (y=0) → ~100 m² (got {area})"
+        );
+    }
+
+    /// A new upper storey starts zoomed out so the previous-storey watermark
+    /// leaves room to draw a larger footprint; storey 0 fits normally.
+    #[test]
+    fn add_storey_zooms_out() {
+        let mut c = dimensioned_square_controller();
+        assert_eq!(c.view().zoom, 1.0, "storey 0 fits normally");
+        c.add_storey().unwrap();
+        assert!(
+            c.view().zoom < 1.0,
+            "new storey zoomed out to leave drawing room (got {})",
+            c.view().zoom
+        );
+    }
+
+    /// Two-storey DB round-trip: both finalised storeys come back on reopen.
+    #[test]
+    fn two_storey_db_round_trip() {
+        let mut c = AppController::new(crate::engine::open_db(":memory:").unwrap());
+        let ber = c.create_ber(
+            "T".into(),
+            chrono::NaiveDate::from_ymd_opt(2026, 1, 1).unwrap(),
+        );
+        finalise_current_storey_as_square(&mut c, 10.0);
+        c.add_storey().unwrap();
+        finalise_current_storey_as_square(&mut c, 6.0);
+
+        c.open_ber(&ber.id).expect("reload");
+        let storeys = &c.current_record.as_ref().unwrap().data.storeys;
+        assert_eq!(storeys.len(), 2, "both storeys reloaded");
+        let s0 = storeys[0].floors.to_vertex_lists();
+        let s1 = storeys[1].floors.to_vertex_lists();
+        assert!(!s0.is_empty(), "storey 0 has a footprint");
+        assert!(!s1.is_empty(), "storey 1 has a footprint");
+        // Areas (signed shoelace, abs) — 10x10 ≈ 100, 6x6 ≈ 36.
+        let area_of = |ring: &Vec<Point2f64>| {
+            let mut a = 0.0;
+            let n = ring.len();
+            for i in 0..n {
+                let j = (i + 1) % n;
+                a += ring[i].x * ring[j].y - ring[j].x * ring[i].y;
+            }
+            (a * 0.5).abs()
+        };
+        let a0 = area_of(&s0[0]);
+        let a1 = area_of(&s1[0]);
+        assert!((a0 - 100.0).abs() < 1.0, "storey 0 ~ 100 m² (got {a0})");
+        assert!((a1 - 36.0).abs() < 1.0, "storey 1 ~ 36 m² (got {a1})");
+        // After reopen the editor lands on storey 0 by default.
+        assert_eq!(c.current_storey_idx(), Some(0));
     }
 }

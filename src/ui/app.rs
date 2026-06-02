@@ -224,9 +224,7 @@ impl eframe::App for BerApp {
                     )
                 };
 
-                // TODO: track a real current_storey_idx on the controller once we
-                // support multi-storey navigation. For now we always edit storey 0.
-                let current_storey_idx = 0;
+                let current_storey_idx = self.app_controller.borrow().current_storey_idx();
 
                 let controller = self.app_controller.clone();
                 SketchPage::render(
@@ -410,6 +408,16 @@ impl eframe::App for BerApp {
                             SketchEvent::SetAllRemainingExposed => {
                                 controller.borrow_mut().set_all_remaining_exposed();
                             }
+                            SketchEvent::SetCurrentStorey(target) => {
+                                if let Err(e) = controller.borrow_mut().set_current_storey(target) {
+                                    eprintln!("set_current_storey: {}", e);
+                                }
+                            }
+                            SketchEvent::AddStorey => {
+                                if let Err(e) = controller.borrow_mut().add_storey() {
+                                    eprintln!("add_storey: {}", e);
+                                }
+                            }
                             SketchEvent::EditMouseDown {
                                 world_x,
                                 world_y,
@@ -475,6 +483,9 @@ impl eframe::App for BerApp {
                             }
                             SketchEvent::ExtendStrokeWorld { points } => {
                                 controller.borrow_mut().apply_extend_stroke_event(&points);
+                            }
+                            SketchEvent::OutlineStrokeWorld { points } => {
+                                controller.borrow_mut().apply_outline_stroke_world(&points);
                             }
                             SketchEvent::TrimStrokeWorld { points } => {
                                 controller.borrow_mut().apply_trim_stroke_event(&points);

@@ -18,6 +18,7 @@ mod parametric;
 mod simplification;
 
 pub use error::Error;
+pub use extend::snap_stroke_to_ring;
 pub use geom::{find_flipped_edge, intersect_circles, project_to_circle, solve_axis_wall};
 pub use parametric::{Axis, CollinearitySuggestion, ParameterAxis, ParameterId, VertexId};
 
@@ -48,6 +49,21 @@ impl FloorPlan {
         closed: bool,
     ) -> Result<Self, Error> {
         Self::from_points_oriented(points, tolerance, closed, None)
+    }
+
+    /// Like [`from_points_to_orthogonal`](Self::from_points_to_orthogonal) but
+    /// orthogonalizes to the WORLD axes (base angle 0) rather than the stroke's
+    /// own dominant angle. Use when the stroke is drawn inside an existing world
+    /// frame — e.g. a new storey traced over the previous storey and snapped to
+    /// its axis-aligned outline. Keeping the dominant-angle default would let a
+    /// slightly-rotated freehand trace tilt the whole storey off that frame, so
+    /// walls meant to coincide with the storey below wouldn't line up.
+    pub fn from_points_to_world_orthogonal(
+        points: &[Point2f32],
+        tolerance: f32,
+        closed: bool,
+    ) -> Result<Self, Error> {
+        Self::from_points_oriented(points, tolerance, closed, Some(0.0))
     }
 
     /// Like [`from_points_to_orthogonal`](Self::from_points_to_orthogonal) but
@@ -2240,6 +2256,43 @@ mod trim_tests {
 
     fn p(x: f32, y: f32) -> Point2f32 {
         Point2f32::new(x, y)
+    }
+
+    /// `from_points_to_world_orthogonal` aligns a rotated trace to the world
+    /// axes, so every edge ends up horizontal or vertical — unlike the
+    /// dominant-angle default, which (beyond its ~15° axis-snap window) keeps
+    /// the whole shape tilted. This is what guarantees a new storey stays
+    /// aligned with the (axis-aligned) storey below regardless of trace angle.
+    #[test]
+    fn world_orthogonal_removes_a_tilt() {
+        // A ~10x10 square rotated ~20° about the origin — beyond the dominant-
+        // angle path's 15° snap-to-axis window, so the two paths diverge.
+        let theta = 0.35_f32; // ~20°
+        let (c, s) = (theta.cos(), theta.sin());
+        let rot = |x: f32, y: f32| p(x * c - y * s, x * s + y * c);
+        let stroke = vec![
+            rot(0.0, 0.0),
+            rot(10.0, 0.0),
+            rot(10.0, 10.0),
+            rot(0.0, 10.0),
+            rot(0.1, 0.1),
+        ];
+
+        // Dominant-angle orthogonalization keeps the tilt → edges aren't on the
+        // world axes.
+        let tilted = FloorPlan::from_points_to_orthogonal(&stroke, 0.1, true).unwrap();
+        assert!(
+            !tilted.non_orthogonal_edges().is_empty(),
+            "dominant-angle orthogonalization preserves the tilt"
+        );
+
+        // World orthogonalization flattens it onto the world axes.
+        let flat = FloorPlan::from_points_to_world_orthogonal(&stroke, 0.1, true).unwrap();
+        assert!(
+            flat.non_orthogonal_edges().is_empty(),
+            "world orthogonalization aligns every edge to the world axes: {:?}",
+            flat.non_orthogonal_edges()
+        );
     }
 
     fn unit_square_plan() -> FloorPlan {

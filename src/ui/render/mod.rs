@@ -1,9 +1,10 @@
 //! Renders the persisted BER state as 2D / 3D views in the sketch canvas.
 //!
-//! Three rendering paths, selected by [`SketchMode`]:
-//!   - `Storey2D`  — top-down 2D plan of the current storey
-//!   - `Storey3D`  — axonometric 3D of the current storey
-//!   - `FullHouse` — axonometric 3D of all storeys stacked
+//! Four rendering paths, selected by [`SketchMode`] × current-storey:
+//!   - `Storey2D`, `Some(i)`  — top-down 2D plan of storey `i`
+//!   - `Storey3D`, `Some(i)`  — axonometric 3D of storey `i`
+//!   - `Storey2D`, `None`     — side-by-side row of all storeys in 2D
+//!   - `Storey3D`, `None`     — axonometric 3D of all storeys stacked
 //!
 //! Each view honours [`DisplayMode`] by highlighting one surface category and
 //! fading the others:
@@ -21,6 +22,7 @@
 //! dimension labels print the raw polygon distance — they'll become meters
 //! once the assessor sets a scale.
 
+pub mod all_storeys_2d;
 pub mod full_house_3d;
 pub mod storey_2d;
 pub mod storey_3d;
@@ -55,12 +57,14 @@ impl ViewParams {
 /// Render the appropriate BER view into `rect`. Silent no-op if `ber` is None.
 /// `highlight` is the current collinearity-review suggestion (if any) — its
 /// two candidate edges get a bright overlay so the user sees what they're
-/// being asked about. Only applies to the 2D view.
+/// being asked about. Only applies to a single-storey 2D view.
+///
+/// `current_storey_idx == None` → All-storeys overview (2D row, or 3D stack).
 pub fn render_ber(
     painter: &egui::Painter,
     rect: egui::Rect,
     ber: Option<&Ber>,
-    current_storey_idx: usize,
+    current_storey_idx: Option<usize>,
     sketch_mode: SketchMode,
     display_mode: DisplayMode,
     highlight: Option<&CollinearitySuggestion>,
@@ -80,9 +84,18 @@ pub fn render_ber(
         return;
     };
 
-    match sketch_mode {
-        SketchMode::Storey2D => {
-            if let Some(storey) = ber.storeys.get(current_storey_idx) {
+    match (sketch_mode, current_storey_idx) {
+        (SketchMode::Storey2D, Some(i)) => {
+            if let Some(storey) = ber.storeys.get(i) {
+                // Watermark: on any upper storey, draw the previous storey's
+                // outline as a faint guide — both while tracing the new outline
+                // and afterwards while dimensioning it, so the assessor keeps
+                // the storey-below footprint as a reference throughout (method 2).
+                let watermark = if i > 0 {
+                    ber.storeys.get(i - 1).and_then(previous_outline_ring)
+                } else {
+                    None
+                };
                 storey_2d::render(
                     painter,
                     rect,
@@ -91,19 +104,23 @@ pub fn render_ber(
                     highlight,
                     dimensioned_walls,
                     view,
+                    watermark.as_deref(),
                 );
             } else {
                 empty_storey_hint(painter, rect);
             }
         }
-        SketchMode::Storey3D => {
-            if let Some(storey) = ber.storeys.get(current_storey_idx) {
+        (SketchMode::Storey3D, Some(i)) => {
+            if let Some(storey) = ber.storeys.get(i) {
                 storey_3d::render(painter, rect, storey, display_mode, view);
             } else {
                 empty_storey_hint(painter, rect);
             }
         }
-        SketchMode::FullHouse => {
+        (SketchMode::Storey2D, None) => {
+            all_storeys_2d::render(painter, rect, ber, display_mode, view);
+        }
+        (SketchMode::Storey3D, None) => {
             full_house_3d::render(painter, rect, ber, display_mode, view);
         }
     }
@@ -120,7 +137,7 @@ pub fn render_dimension_prompt(
     painter: &egui::Painter,
     rect: egui::Rect,
     ber: Option<&Ber>,
-    current_storey_idx: usize,
+    current_storey_idx: Option<usize>,
     sketch_mode: SketchMode,
     view: ViewParams,
     wall_a: (f64, f64),
@@ -132,7 +149,7 @@ pub fn render_dimension_prompt(
     let Some(ber) = ber else {
         return;
     };
-    let Some(storey) = ber.storeys.get(current_storey_idx) else {
+    let Some(storey) = current_storey_idx.and_then(|i| ber.storeys.get(i)) else {
         return;
     };
     let Some((min_xy, max_xy)) = storey_2d::bounding_box(storey) else {
@@ -336,7 +353,7 @@ fn interior_perpendicular_offset(
 }
 
 /// Draw a dashed line between two screen points. ~6px dash, ~4px gap.
-fn draw_dashed_segment(
+pub(crate) fn draw_dashed_segment(
     painter: &egui::Painter,
     from: egui::Pos2,
     to: egui::Pos2,
@@ -374,7 +391,7 @@ pub fn render_equivalent_wall(
     painter: &egui::Painter,
     rect: egui::Rect,
     ber: Option<&Ber>,
-    current_storey_idx: usize,
+    current_storey_idx: Option<usize>,
     sketch_mode: SketchMode,
     view: ViewParams,
     wall_a: (f64, f64),
@@ -386,7 +403,7 @@ pub fn render_equivalent_wall(
     let Some(ber) = ber else {
         return;
     };
-    let Some(storey) = ber.storeys.get(current_storey_idx) else {
+    let Some(storey) = current_storey_idx.and_then(|i| ber.storeys.get(i)) else {
         return;
     };
     let Some((min_xy, max_xy)) = storey_2d::bounding_box(storey) else {
@@ -411,7 +428,7 @@ pub fn render_arc_preview(
     painter: &egui::Painter,
     rect: egui::Rect,
     ber: Option<&Ber>,
-    current_storey_idx: usize,
+    current_storey_idx: Option<usize>,
     sketch_mode: SketchMode,
     view: ViewParams,
     points: &[(f64, f64)],
@@ -422,7 +439,7 @@ pub fn render_arc_preview(
     let Some(ber) = ber else {
         return;
     };
-    let Some(storey) = ber.storeys.get(current_storey_idx) else {
+    let Some(storey) = current_storey_idx.and_then(|i| ber.storeys.get(i)) else {
         return;
     };
     let Some((min_xy, max_xy)) = storey_2d::bounding_box(storey) else {
@@ -449,7 +466,7 @@ pub fn render_cut_candidates(
     painter: &egui::Painter,
     rect: egui::Rect,
     ber: Option<&Ber>,
-    current_storey_idx: usize,
+    current_storey_idx: Option<usize>,
     sketch_mode: SketchMode,
     view: ViewParams,
     regions: &[Vec<(f64, f64)>],
@@ -460,7 +477,7 @@ pub fn render_cut_candidates(
     let Some(ber) = ber else {
         return;
     };
-    let Some(storey) = ber.storeys.get(current_storey_idx) else {
+    let Some(storey) = current_storey_idx.and_then(|i| ber.storeys.get(i)) else {
         return;
     };
     let Some((min_xy, max_xy)) = storey_2d::bounding_box(storey) else {
@@ -505,7 +522,7 @@ pub fn render_living_areas(
     painter: &egui::Painter,
     rect: egui::Rect,
     ber: Option<&Ber>,
-    current_storey_idx: usize,
+    current_storey_idx: Option<usize>,
     sketch_mode: SketchMode,
     display_mode: DisplayMode,
     view: ViewParams,
@@ -520,7 +537,7 @@ pub fn render_living_areas(
     let Some(ber) = ber else {
         return;
     };
-    let Some(storey) = ber.storeys.get(current_storey_idx) else {
+    let Some(storey) = current_storey_idx.and_then(|i| ber.storeys.get(i)) else {
         return;
     };
     let Some((min_xy, max_xy)) = storey_2d::bounding_box(storey) else {
@@ -579,7 +596,7 @@ pub fn render_wall_exposure(
     painter: &egui::Painter,
     rect: egui::Rect,
     ber: Option<&Ber>,
-    current_storey_idx: usize,
+    current_storey_idx: Option<usize>,
     sketch_mode: SketchMode,
     view: ViewParams,
     walls: &[WallExposureView],
@@ -596,7 +613,7 @@ pub fn render_wall_exposure(
     let Some(ber) = ber else {
         return;
     };
-    let Some(storey) = ber.storeys.get(current_storey_idx) else {
+    let Some(storey) = current_storey_idx.and_then(|i| ber.storeys.get(i)) else {
         return;
     };
     let Some((min_xy, max_xy)) = storey_2d::bounding_box(storey) else {
@@ -684,7 +701,7 @@ pub fn render_vertex_marker(
     painter: &egui::Painter,
     rect: egui::Rect,
     ber: Option<&Ber>,
-    current_storey_idx: usize,
+    current_storey_idx: Option<usize>,
     sketch_mode: SketchMode,
     view: ViewParams,
     world_x: f64,
@@ -696,7 +713,7 @@ pub fn render_vertex_marker(
     let Some(ber) = ber else {
         return;
     };
-    let Some(storey) = ber.storeys.get(current_storey_idx) else {
+    let Some(storey) = current_storey_idx.and_then(|i| ber.storeys.get(i)) else {
         return;
     };
     let Some((min_xy, max_xy)) = storey_2d::bounding_box(storey) else {
@@ -711,6 +728,69 @@ pub fn render_vertex_marker(
         radius,
         egui::Stroke::new(1.5, egui::Color32::from_rgb(240, 240, 240)),
     );
+}
+
+/// Extract the primary floor ring of `storey` as `(x, y)` tuples (no closing
+/// duplicate). Used by `render_ber` to supply a previous-storey watermark to
+/// `storey_2d::render`. `None` if the storey has no floor regions yet.
+fn previous_outline_ring(storey: &datatypes::ber::structural::Storey) -> Option<Vec<(f64, f64)>> {
+    let region = storey.floors.regions.first()?;
+    let mut coords: Vec<(f64, f64)> = region
+        .polygon
+        .exterior()
+        .coords()
+        .map(|c| (c.x, c.y))
+        .collect();
+    let eps = 1e-9;
+    if coords.len() >= 2 {
+        let first = coords[0];
+        let last = coords[coords.len() - 1];
+        if (first.0 - last.0).abs() < eps && (first.1 - last.1).abs() < eps {
+            coords.pop();
+        }
+    }
+    if coords.len() < 3 {
+        return None;
+    }
+    Some(coords)
+}
+
+/// Union of two optional bounding boxes (min/max corner pairs).
+pub(crate) fn union_bbox(
+    a: Option<((f64, f64), (f64, f64))>,
+    b: Option<((f64, f64), (f64, f64))>,
+) -> Option<((f64, f64), (f64, f64))> {
+    match (a, b) {
+        (Some(a), Some(b)) => Some((
+            (a.0 .0.min(b.0 .0), a.0 .1.min(b.0 .1)),
+            (a.1 .0.max(b.1 .0), a.1 .1.max(b.1 .1)),
+        )),
+        (Some(x), None) | (None, Some(x)) => Some(x),
+        (None, None) => None,
+    }
+}
+
+/// The bounding box used to auto-fit storey `idx` on the canvas: the storey's
+/// own floor bbox unioned with the previous-storey watermark (drawn only while
+/// this storey is still empty). Mirrors the union in [`storey_2d::render`] so
+/// non-render callers that need the on-screen transform — notably the
+/// stroke→world conversion when drawing a new storey over the watermark — agree
+/// with what was actually drawn. `None` if there's nothing to fit.
+pub(crate) fn fit_bbox_for_storey(ber: &Ber, idx: usize) -> Option<((f64, f64), (f64, f64))> {
+    let storey = ber.storeys.get(idx)?;
+    let storey_bb = storey_2d::bounding_box(storey);
+    // Match render_ber: the previous-storey watermark is part of the fit on any
+    // upper storey (both empty and during dimensioning), so callers that invert
+    // the on-screen transform agree with what was drawn.
+    let watermark_bb = if idx > 0 {
+        ber.storeys
+            .get(idx - 1)
+            .and_then(previous_outline_ring)
+            .and_then(|r| storey_2d::ring_bbox(&r))
+    } else {
+        None
+    };
+    union_bbox(storey_bb, watermark_bb)
 }
 
 fn empty_storey_hint(painter: &egui::Painter, rect: egui::Rect) {

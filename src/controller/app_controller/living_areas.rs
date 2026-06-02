@@ -103,10 +103,11 @@ impl AppController {
     /// `Storey.living_areas` (the `Ber` struct in `current_record`): BER data
     /// rendered from BER. `commit_to_ber` keeps it per-frame current.
     pub fn living_area_polygons(&self) -> Vec<Vec<(f64, f64)>> {
+        let idx = self.current_storey_idx.unwrap_or(0);
         let Some(storey) = self
             .current_record
             .as_ref()
-            .and_then(|r| r.data.storeys.first())
+            .and_then(|r| r.data.storeys.get(idx))
         else {
             return Vec::new();
         };

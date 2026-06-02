@@ -5,7 +5,6 @@ pub enum SketchMode {
     #[default]
     Storey2D,
     Storey3D,
-    FullHouse,
 }
 
 #[derive(Default, Clone, Copy, PartialEq, EnumIter, Debug)]

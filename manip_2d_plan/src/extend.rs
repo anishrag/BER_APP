@@ -83,6 +83,38 @@ pub fn snap_to_polygon(
     (best.0, best.1, best.2, false)
 }
 
+/// Snap each point of `stroke` onto `ring`'s perimeter when within `snap_tol`,
+/// leaving points farther away untouched. Used by the multi-storey "draw on
+/// top of the previous storey" flow so endpoints land exactly on the previous
+/// outline (so the new storey's footprint reuses those coordinates verbatim).
+/// `snap_to_polygon` already handles closest-vertex vs closest-edge — we just
+/// project to the returned `(edge, t)` when the gap is within tolerance.
+pub fn snap_stroke_to_ring(
+    stroke: &[Point2f32],
+    ring: &[Point2f32],
+    snap_tol: f32,
+) -> Vec<Point2f32> {
+    if ring.len() < 2 {
+        return stroke.to_vec();
+    }
+    let n = ring.len();
+    stroke
+        .iter()
+        .map(|p| {
+            let (edge, t, dist, on_vertex) = snap_to_polygon(ring, *p, snap_tol);
+            if dist > snap_tol {
+                return *p;
+            }
+            let a = ring[edge % n];
+            if on_vertex {
+                return a;
+            }
+            let b = ring[(edge + 1) % n];
+            Point2f32::new(a.x + t * (b.x - a.x), a.y + t * (b.y - a.y))
+        })
+        .collect()
+}
+
 /// Orthogonalize an *open* porch stroke into a clean axis-aligned polyline.
 /// Unlike `FloorPlan::from_points_to_orthogonal` this does no closing-edge
 /// snap or corner rotation — the path stays open, so its first and last

@@ -13,11 +13,17 @@ use eframe::egui;
 use geo::Coord;
 use manip_2d_plan::CollinearitySuggestion;
 
-use super::{color_for, fit_transform, style, Transform2d, ViewParams};
+use super::{color_for, draw_dashed_segment, fit_transform, style, Transform2d, ViewParams};
 
 /// Render the storey. If `highlight` is set, the two edges named in the
 /// suggestion are drawn on top in a contrasting style so the user can see
 /// which walls are being asked about.
+///
+/// `watermark_ring` is an optional outline (the PREVIOUS storey's footprint)
+/// drawn first in a faint grey dashed style — a drawing aid when starting a
+/// new storey on top of an existing one. It also contributes to the fit
+/// bounding box, so an empty current storey still gets a sensible auto-fit.
+#[allow(clippy::too_many_arguments)]
 pub fn render(
     painter: &egui::Painter,
     rect: egui::Rect,
@@ -26,12 +32,24 @@ pub fn render(
     highlight: Option<&CollinearitySuggestion>,
     dimensioned_walls: &[(usize, usize)],
     view: ViewParams,
+    watermark_ring: Option<&[(f64, f64)]>,
 ) {
-    let Some((min_xy, max_xy)) = bounding_box(storey) else {
+    // Build the fit bbox from BOTH the storey and the watermark — a new (empty)
+    // storey has no bbox of its own; the previous-storey watermark supplies one
+    // so the canvas isn't blank-with-a-floating-watermark.
+    let storey_bb = bounding_box(storey);
+    let watermark_bb = watermark_ring.and_then(ring_bbox);
+    let bb = super::union_bbox(storey_bb, watermark_bb);
+    let Some((min_xy, max_xy)) = bb else {
         // The mod-level dispatch already prints "no floor plan yet"; nothing to do.
         return;
     };
     let t = fit_transform(rect, min_xy, max_xy, view);
+
+    // Watermark FIRST so the live geometry paints on top.
+    if let Some(ring) = watermark_ring {
+        draw_watermark_ring(painter, &t, ring);
+    }
 
     // Floors (background layer).
     for region in &storey.floors.regions {
@@ -135,6 +153,35 @@ fn draw_highlight_edge(
     let pa = t.apply(a.x, a.y);
     let pb = t.apply(b.x, b.y);
     painter.line_segment([pa, pb], stroke);
+}
+
+pub(crate) fn ring_bbox(ring: &[(f64, f64)]) -> Option<((f64, f64), (f64, f64))> {
+    let mut it = ring.iter();
+    let first = *it.next()?;
+    let (mut min_x, mut min_y) = first;
+    let (mut max_x, mut max_y) = first;
+    for &(x, y) in it {
+        min_x = min_x.min(x);
+        max_x = max_x.max(x);
+        min_y = min_y.min(y);
+        max_y = max_y.max(y);
+    }
+    Some(((min_x, min_y), (max_x, max_y)))
+}
+
+/// Faint grey dashed outline of the previous storey, drawn behind the live
+/// geometry as a drawing aid when starting a new storey on top.
+fn draw_watermark_ring(painter: &egui::Painter, t: &Transform2d, ring: &[(f64, f64)]) {
+    if ring.len() < 2 {
+        return;
+    }
+    let grey = egui::Color32::from_rgb(150, 150, 150);
+    let stroke = egui::Stroke::new(2.0, grey);
+    let pts: Vec<egui::Pos2> = ring.iter().map(|(x, y)| t.apply(*x, *y)).collect();
+    let n = pts.len();
+    for k in 0..n {
+        draw_dashed_segment(painter, pts[k], pts[(k + 1) % n], stroke);
+    }
 }
 
 pub(crate) fn bounding_box(storey: &Storey) -> Option<((f64, f64), (f64, f64))> {

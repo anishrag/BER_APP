@@ -350,10 +350,11 @@ impl AppController {
     /// is what this method then reads back. Selection is interaction state and
     /// stays live (`selected_exposure_wall` keyed by `VertexId`).
     pub fn wall_exposure_views(&self) -> Vec<WallExposureView> {
+        let idx = self.current_storey_idx.unwrap_or(0);
         let sections_by_vid = self
             .current_record
             .as_ref()
-            .and_then(|r| r.data.storeys.first())
+            .and_then(|r| r.data.storeys.get(idx))
             .map(|s| self.sections_from_wall_regions(&s.walls))
             .unwrap_or_default();
         self.outline
