@@ -12,6 +12,14 @@ use crate::ui::pages::new_ber::NewBerEvent;
 use crate::ui::pages::sketch::{EguiStroke, SketchEvent, SketchPage};
 use crate::ui::pages::{home::HomePage, new_ber::NewBerPage, splash::SplashPage};
 
+/// Surface a controller call's error (if any) to stderr with a label. Used by
+/// the event-dispatch arms whose only failure handling is to log.
+fn log_err(label: &str, result: Result<(), String>) {
+    if let Err(e) = result {
+        eprintln!("{label}: {e}");
+    }
+}
+
 pub struct BerApp {
     pub current_page: Page,
     pub app_controller: Rc<RefCell<AppController>>,
@@ -277,14 +285,12 @@ impl eframe::App for BerApp {
                                 .borrow_mut()
                                 .sketch_end_stroke(pos2_to_point2f(p))
                                 .expect("Failed to end stroke"),
-                            SketchEvent::StartStroke(p) => {
-                                if let Err(e) = controller
+                            SketchEvent::StartStroke(p) => log_err(
+                                "sketch_start_stroke",
+                                controller
                                     .borrow_mut()
-                                    .sketch_start_stroke(pos2_to_point2f(p))
-                                {
-                                    eprintln!("sketch_start_stroke: {}", e);
-                                }
-                            }
+                                    .sketch_start_stroke(pos2_to_point2f(p)),
+                            ),
                             SketchEvent::ChangeMode(m) => {
                                 controller.borrow_mut().set_sketch_mode(m)
                             }
@@ -295,9 +301,10 @@ impl eframe::App for BerApp {
                                 controller.borrow_mut().set_edit_mode(m)
                             }
                             SketchEvent::AcceptCollinearity => {
-                                if let Err(e) = controller.borrow_mut().accept_current_review() {
-                                    eprintln!("accept_current_review: {}", e);
-                                }
+                                log_err(
+                                    "accept_current_review",
+                                    controller.borrow_mut().accept_current_review(),
+                                );
                             }
                             SketchEvent::RejectCollinearity => {
                                 controller.borrow_mut().reject_current_review();
@@ -325,9 +332,10 @@ impl eframe::App for BerApp {
                                 controller.borrow_mut().reset_view();
                             }
                             SketchEvent::ReplaceStorey => {
-                                if let Err(e) = controller.borrow_mut().confirm_replace_storey() {
-                                    eprintln!("confirm_replace_storey: {}", e);
-                                }
+                                log_err(
+                                    "confirm_replace_storey",
+                                    controller.borrow_mut().confirm_replace_storey(),
+                                );
                             }
                             SketchEvent::AddStoreyFromCurrent => {
                                 controller.borrow_mut().confirm_add_storey_from_current();
@@ -354,9 +362,10 @@ impl eframe::App for BerApp {
                                 controller.borrow_mut().set_pending_arc_bulge(ratio);
                             }
                             SketchEvent::CommitCurve => {
-                                if let Err(e) = controller.borrow_mut().commit_pending_arc() {
-                                    eprintln!("commit_pending_arc: {}", e);
-                                }
+                                log_err(
+                                    "commit_pending_arc",
+                                    controller.borrow_mut().commit_pending_arc(),
+                                );
                             }
                             SketchEvent::SetLivingAreaMode(on) => {
                                 controller.borrow_mut().set_living_area_mode(on);
@@ -409,14 +418,13 @@ impl eframe::App for BerApp {
                                 controller.borrow_mut().set_all_remaining_exposed();
                             }
                             SketchEvent::SetCurrentStorey(target) => {
-                                if let Err(e) = controller.borrow_mut().set_current_storey(target) {
-                                    eprintln!("set_current_storey: {}", e);
-                                }
+                                log_err(
+                                    "set_current_storey",
+                                    controller.borrow_mut().set_current_storey(target),
+                                );
                             }
                             SketchEvent::AddStorey => {
-                                if let Err(e) = controller.borrow_mut().add_storey() {
-                                    eprintln!("add_storey: {}", e);
-                                }
+                                log_err("add_storey", controller.borrow_mut().add_storey());
                             }
                             SketchEvent::EditMouseDown {
                                 world_x,
@@ -431,9 +439,7 @@ impl eframe::App for BerApp {
                                 controller.borrow_mut().edit_mouse_drag(world_x, world_y);
                             }
                             SketchEvent::EditMouseUp => {
-                                if let Err(e) = controller.borrow_mut().edit_mouse_up() {
-                                    eprintln!("edit_mouse_up: {}", e);
-                                }
+                                log_err("edit_mouse_up", controller.borrow_mut().edit_mouse_up());
                             }
                             SketchEvent::ApplyEditDrag(value) => {
                                 match controller.borrow_mut().apply_edit_drag(value) {
@@ -451,9 +457,10 @@ impl eframe::App for BerApp {
                                 self.sketch_state.edit_drag_error = None;
                             }
                             SketchEvent::CancelEditDrag => {
-                                if let Err(e) = controller.borrow_mut().cancel_edit_drag() {
-                                    eprintln!("cancel_edit_drag: {}", e);
-                                }
+                                log_err(
+                                    "cancel_edit_drag",
+                                    controller.borrow_mut().cancel_edit_drag(),
+                                );
                                 self.sketch_state.edit_drag_error = None;
                             }
                             SketchEvent::EditDoubleClick {
@@ -477,9 +484,7 @@ impl eframe::App for BerApp {
                                 }
                             }
                             SketchEvent::Undo => {
-                                if let Err(e) = controller.borrow_mut().undo() {
-                                    eprintln!("undo: {}", e);
-                                }
+                                log_err("undo", controller.borrow_mut().undo());
                             }
                             SketchEvent::ExtendStrokeWorld { points } => {
                                 controller.borrow_mut().apply_extend_stroke_event(&points);
@@ -491,9 +496,7 @@ impl eframe::App for BerApp {
                                 controller.borrow_mut().apply_trim_stroke_event(&points);
                             }
                             SketchEvent::Redo => {
-                                if let Err(e) = controller.borrow_mut().redo() {
-                                    eprintln!("redo: {}", e);
-                                }
+                                log_err("redo", controller.borrow_mut().redo());
                             }
                             SketchEvent::CancelVertexDrop => {
                                 // Note: the toolbar already cleared `inputs`
@@ -501,9 +504,10 @@ impl eframe::App for BerApp {
                                 // `self.sketch_state.vertex_drop_inputs` here
                                 // would double-borrow it (the toolbar still
                                 // owns the &mut reference during the closure).
-                                if let Err(e) = controller.borrow_mut().cancel_vertex_drop() {
-                                    eprintln!("cancel_vertex_drop: {}", e);
-                                }
+                                log_err(
+                                    "cancel_vertex_drop",
+                                    controller.borrow_mut().cancel_vertex_drop(),
+                                );
                                 self.sketch_state.vertex_drop_error = None;
                             }
                             _ => {}

@@ -1341,6 +1341,17 @@ impl AppController {
         }
     }
 
+    /// Common tail after a stroke mutates the plan: persist, surface any
+    /// collinearity questions, then (re)start dimensioning on the result.
+    /// Callers snapshot history (`push_history_snapshot`) BEFORE calling this, so
+    /// an undo entry exists even if the commit fails.
+    fn commit_review_redimension(&mut self) -> Result<(), String> {
+        self.commit_to_ber()?;
+        self.populate_collinearity_review();
+        self.maybe_start_dimensioning();
+        Ok(())
+    }
+
     fn apply_drawperp_stroke(&mut self, points: &[Point2f32], closed: bool) -> Result<(), String> {
         // Snapshot pre-stroke (may be empty / pre-dim) for undo.
         let undo_snap = self.current_history_snapshot();
@@ -1371,10 +1382,7 @@ impl AppController {
         self.warn_if_non_orthogonal("draw outline");
         self.dimensioning = DimensionState::default();
         self.push_history_snapshot(undo_snap);
-        self.commit_to_ber()?;
-        self.populate_collinearity_review();
-        self.maybe_start_dimensioning();
-        Ok(())
+        self.commit_review_redimension()
     }
 
     /// If the editor is on a NEW storey (current outline empty) and a previous
@@ -1392,7 +1400,7 @@ impl AppController {
         // ~8% of the previous diagonal: forgiving enough that a wall the user
         // drew "close" to the storey below lands on it, yet far below the depth
         // of a real extension (e.g. a garage bump-out), which stays un-snapped.
-        let tol = (Self::ring_diagonal(&ring) * 0.08).max(1e-3);
+        let tol = (manip_2d_plan::ring_diagonal(&ring) * 0.08).max(1e-3);
         let snapped = manip_2d_plan::snap_stroke_to_ring(points, &ring, tol);
         let moved = points
             .iter()
@@ -1429,19 +1437,6 @@ impl AppController {
                 .map(|p| Point2f32::new(p.x as f32, p.y as f32))
                 .collect(),
         )
-    }
-
-    /// Bounding-box diagonal of a ring (used to scale snap / simplification
-    /// tolerances to the previous storey's size).
-    fn ring_diagonal(ring: &[Point2f32]) -> f32 {
-        let (mut min_x, mut min_y, mut max_x, mut max_y) = (f32::MAX, f32::MAX, f32::MIN, f32::MIN);
-        for p in ring {
-            min_x = min_x.min(p.x);
-            min_y = min_y.min(p.y);
-            max_x = max_x.max(p.x);
-            max_y = max_y.max(p.y);
-        }
-        ((max_x - min_x).powi(2) + (max_y - min_y).powi(2)).sqrt()
     }
 
     /// Apply the FIRST outline stroke of a new upper storey, captured in the
@@ -1499,12 +1494,13 @@ impl AppController {
         // Metre-scale RDP tolerance: the pixel-tuned 10.0 used for fresh sketches
         // would collapse a real outline. ~1% of the previous diagonal smooths
         // freehand jitter without eating real corners.
-        let tol = (Self::ring_diagonal(&prev_ring) * 0.01).max(0.05);
+        let prev_diag = manip_2d_plan::ring_diagonal(&prev_ring);
+        let tol = (prev_diag * 0.01).max(0.05);
         println!(
             "[new-storey] closed={}, prev_ring {} verts (diag {:.2} m), RDP tol {:.3} m",
             closed,
             prev_ring.len(),
-            Self::ring_diagonal(&prev_ring),
+            prev_diag,
             tol
         );
 
@@ -1539,10 +1535,7 @@ impl AppController {
         );
 
         self.push_history_snapshot(undo_snap);
-        self.commit_to_ber()?;
-        self.populate_collinearity_review();
-        self.maybe_start_dimensioning();
-        Ok(())
+        self.commit_review_redimension()
     }
 
     /// Apply an AddDetachedSection stroke: append a ring (or replace if
@@ -1576,11 +1569,10 @@ impl AppController {
             "floor plan (after AddDetachedSection): {:?}",
             self.floor_plan
         );
-        self.commit_to_ber()?;
-        self.populate_collinearity_review();
-        self.maybe_start_dimensioning();
+        // History snapshotted BEFORE the commit (consistent with the other
+        // apply_* methods) so an undo entry exists even if the commit fails.
         self.push_history_snapshot(undo_snap);
-        Ok(())
+        self.commit_review_redimension()
     }
 
     /// Entry point for Extend strokes from the UI. The stroke comes in as
@@ -1626,10 +1618,13 @@ impl AppController {
         // corner a flush porch turned into a mid-wall point) so the outline
         // stays minimal, then re-sync dimensioning state.
         self.clean_envelope_collinear();
+        // History snapshotted before the commit (consistent across apply_*).
+        self.push_history_snapshot(undo_snap);
         self.commit_to_ber()?;
         // Ask about collinearity ONLY for the porch's new walls — e.g. whether
         // a new porch front lines up with an earlier one. We never assume it;
-        // and we don't re-surface pairs among the pre-existing walls.
+        // and we don't re-surface pairs among the pre-existing walls. (Extend
+        // uses this param-scoped review, so it can't share `commit_review_redimension`.)
         let suggestions = self.floor_plan.collinear_suggestions_for_params(&minted);
         if !suggestions.is_empty() {
             self.review = Some(CollinearityReview {
@@ -1642,7 +1637,6 @@ impl AppController {
         // collinearity review is pending (it returns early when `review` is set;
         // resolving the review then starts dimensioning).
         self.maybe_start_dimensioning();
-        self.push_history_snapshot(undo_snap);
         Ok(())
     }
 
@@ -1684,9 +1678,11 @@ impl AppController {
         .map_err(|e| format!("{}", e))?;
         println!("Trim: {} new param(s) {:?}", minted.len(), minted);
         self.clean_envelope_collinear();
+        // History snapshotted before the commit (consistent across apply_*). A
+        // plain Trim never asks about collinearity, so no review step here.
+        self.push_history_snapshot(undo_snap);
         self.commit_to_ber()?;
         self.maybe_start_dimensioning();
-        self.push_history_snapshot(undo_snap);
         Ok(())
     }
 
@@ -1710,16 +1706,7 @@ impl AppController {
                 removed
             );
         }
-        let active = self.floor_plan.all_active_params();
-        self.dimensioning
-            .known_params
-            .retain(|p| active.contains(p));
-        self.dimensioning
-            .dimensioned_walls
-            .retain(|v| self.floor_plan.find_vertex(*v).is_some());
-        self.dimensioning
-            .skipped_walls
-            .retain(|v| self.floor_plan.find_vertex(*v).is_some());
+        self.resync_dimensioning_to_plan();
     }
 
     /// Begin a provisional curved wall (shared by `ExtendCurve`/`TrimCurve`).
@@ -1772,10 +1759,7 @@ impl AppController {
             "Curve: provisional arc (bulge ratio {:.3}); dimension the two attach lines to bake it in",
             bulge_ratio
         );
-        let active = self.floor_plan.all_active_params();
-        self.dimensioning
-            .known_params
-            .retain(|p| active.contains(p));
+        self.resync_dimensioning_to_plan();
 
         // ---- CURVE DEBUG (temporary): the spliced structure ----
         println!(
@@ -1792,7 +1776,7 @@ impl AppController {
             println!("  start at ring{r}/idx{is}, end at idx{ie}");
         }
         {
-            let mut a: Vec<_> = active.iter().copied().collect();
+            let mut a: Vec<_> = self.floor_plan.all_active_params().into_iter().collect();
             a.sort();
             let mut k: Vec<_> = self.dimensioning.known_params.iter().copied().collect();
             k.sort();
@@ -1952,11 +1936,7 @@ impl AppController {
         // holds whether the plan is in pixels (pre-dimension) or metres (an
         // upper storey drawn in world coords). A fixed range tuned for pixels
         // would treat every wall in a metre-scale storey as near-collinear.
-        let diag = self
-            .floor_plan
-            .bounding_box()
-            .map(|((mnx, mny), (mxx, mxy))| ((mxx - mnx).powi(2) + (mxy - mny).powi(2)).sqrt())
-            .unwrap_or(0.0);
+        let diag = self.floor_plan.bounding_box_diagonal();
         let min_sep = (diag * COLLINEARITY_MIN_SEPARATION_RATIO).max(1e-4);
         let max_sep = diag * COLLINEARITY_MAX_SEPARATION_RATIO;
         let newest_ring = self.floor_plan.ring_count().saturating_sub(1);
@@ -3836,6 +3816,37 @@ mod trim_collapse_tests {
         assert!(
             (area - 100.0).abs() < 1.0,
             "collapsed onto the previous base (y=0) → ~100 m² (got {area})"
+        );
+    }
+
+    /// `resync_dimensioning_to_plan` (the consolidated post-topology-change
+    /// cleanup) drops dimensioning state that no longer refers to a live
+    /// param/vertex, and keeps the rest.
+    #[test]
+    fn resync_dimensioning_drops_stale_params_and_vertices() {
+        let mut c = dimensioned_square_controller();
+        let active = c.floor_plan.all_active_params();
+        assert!(!active.is_empty(), "the square has active params");
+
+        // Seed real state + bogus entries (ParameterId/VertexId are usize/u64).
+        c.dimensioning.known_params = active.clone();
+        c.dimensioning.known_params.insert(99_999); // not an active param
+        c.dimensioning.dimensioned_walls = vec![123_456]; // not a live vertex
+        c.dimensioning.skipped_walls = std::iter::once(123_456).collect();
+
+        c.resync_dimensioning_to_plan();
+
+        assert_eq!(
+            c.dimensioning.known_params, active,
+            "stale param pruned, real ones kept"
+        );
+        assert!(
+            c.dimensioning.dimensioned_walls.is_empty(),
+            "stale dimensioned wall pruned"
+        );
+        assert!(
+            c.dimensioning.skipped_walls.is_empty(),
+            "stale skipped wall pruned"
         );
     }
 

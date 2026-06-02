@@ -19,7 +19,10 @@ mod simplification;
 
 pub use error::Error;
 pub use extend::snap_stroke_to_ring;
-pub use geom::{find_flipped_edge, intersect_circles, project_to_circle, solve_axis_wall};
+pub use geom::{
+    bbox_diagonal as ring_diagonal, find_flipped_edge, intersect_circles, project_to_circle,
+    solve_axis_wall,
+};
 pub use parametric::{Axis, CollinearitySuggestion, ParameterAxis, ParameterId, VertexId};
 
 use domain::points::Point2f32;
@@ -95,33 +98,10 @@ impl FloorPlan {
             None => orthogonal::make_orthogonal(&simplified, tolerance)?,
         };
 
-        // For a closed polygon, finalize the closing structure before the
-        // parametric layer sees it:
-        //   1. snap the implicit closing edge to be exactly axis-aligned
-        //   2. rotate so the first vertex sits at a real corner (handles the
-        //      "user started mid-wall" case — otherwise the start is collinear
-        //      and shows up as a spurious extra vertex)
-        //   3. run remove_collinear one more time to drop the previously-
-        //      anchored start, now demoted to a mid-list vertex
-        //
-        // Note: we deliberately do NOT auto-merge near-collinear walls here.
-        // Walls that are close but not adjacent in the polygon are left
-        // as separate, and the user gets asked about them via the
-        // `suggest_collinear` review. This keeps the parametric model honest
-        // about what the user actually drew. `snap_near_collinear_walls`
-        // remains available as a function for callers that want auto-merge
-        // back (e.g. a future "auto-clean" mode).
+        // For a closed polygon, finalize the closing structure (see
+        // `finalize_closed_ring`) before the parametric layer sees it.
         let final_points = if closed {
-            let snapped = orthogonal::snap_closing_edge(orthog_points, tolerance);
-            let rotated = orthogonal::rotate_to_corner_start(snapped, tolerance);
-            let cleaned = orthogonal::remove_collinear(&rotated, tolerance);
-            // The first `snap_closing_edge` axis-aligns the closing edge of the
-            // PRE-rotation vertex order; `rotate_to_corner_start` then makes a
-            // different vertex first, so the FINAL closing edge (last→first) can
-            // be left diagonal — the "top wall isn't orthogonal" symptom. Snap
-            // it once more on the final order so the closing edge is guaranteed
-            // axis-aligned regardless of where the stroke started.
-            orthogonal::snap_closing_edge(cleaned, tolerance)
+            finalize_closed_ring(orthog_points, tolerance)
         } else {
             orthog_points
         };
@@ -151,16 +131,7 @@ impl FloorPlan {
         }
         let orthog_points = orthogonal::make_orthogonal(&simplified, tolerance)?;
         let final_points = if closed {
-            let snapped = orthogonal::snap_closing_edge(orthog_points, tolerance);
-            let rotated = orthogonal::rotate_to_corner_start(snapped, tolerance);
-            let cleaned = orthogonal::remove_collinear(&rotated, tolerance);
-            // The first `snap_closing_edge` axis-aligns the closing edge of the
-            // PRE-rotation vertex order; `rotate_to_corner_start` then makes a
-            // different vertex first, so the FINAL closing edge (last→first) can
-            // be left diagonal — the "top wall isn't orthogonal" symptom. Snap
-            // it once more on the final order so the closing edge is guaranteed
-            // axis-aligned regardless of where the stroke started.
-            orthogonal::snap_closing_edge(cleaned, tolerance)
+            finalize_closed_ring(orthog_points, tolerance)
         } else {
             orthog_points
         };
@@ -194,10 +165,7 @@ impl FloorPlan {
     /// room), the path is simply closed into its own loop instead.
     pub fn carve_subarea(&self, path: &[Point2f32], tolerance: f32) -> Result<Self, Error> {
         let ring = self.parametric.ring_points(0);
-        let diag = self
-            .bounding_box()
-            .map(|((mnx, mny), (mxx, mxy))| ((mxx - mnx).powi(2) + (mxy - mny).powi(2)).sqrt())
-            .unwrap_or(0.0);
+        let diag = self.bounding_box_diagonal();
 
         // Did the user draw a CLOSED loop (all the walls) or an OPEN path (just
         // the new interior walls, ends meant to meet the house)? A closed loop
@@ -206,14 +174,7 @@ impl FloorPlan {
         // for the OPEN case; a closed loop becomes a full ring whose walls are
         // then snapped onto any house wall they run along.
         let drawn_closed = {
-            let (mut dx0, mut dy0, mut dx1, mut dy1) = (f32::MAX, f32::MAX, f32::MIN, f32::MIN);
-            for q in path {
-                dx0 = dx0.min(q.x);
-                dy0 = dy0.min(q.y);
-                dx1 = dx1.max(q.x);
-                dy1 = dy1.max(q.y);
-            }
-            let dd = ((dx1 - dx0).powi(2) + (dy1 - dy0).powi(2)).sqrt();
+            let dd = geom::bbox_diagonal(path);
             let ends_gap = path
                 .first()
                 .zip(path.last())
@@ -356,14 +317,7 @@ impl FloorPlan {
         snap_axis: bool,
         snap_diagonal: bool,
     ) -> Result<Self, Error> {
-        let (mut amnx, mut amny, mut amxx, mut amxy) = (f32::MAX, f32::MAX, f32::MIN, f32::MIN);
-        for q in pts {
-            amnx = amnx.min(q.x);
-            amny = amny.min(q.y);
-            amxx = amxx.max(q.x);
-            amxy = amxy.max(q.y);
-        }
-        let area_diag = ((amxx - amnx).powi(2) + (amxy - amny).powi(2)).sqrt();
+        let area_diag = geom::bbox_diagonal(pts);
 
         // Correct any drawn wall that runs close to (and overlaps) a parallel
         // house wall onto it — so a sub-area drawn as a FULL loop, with some of
@@ -459,28 +413,7 @@ impl FloorPlan {
         if m < 4 {
             return None;
         }
-        let (mut mnx, mut mny, mut mxx, mut mxy) = (f32::MAX, f32::MAX, f32::MIN, f32::MIN);
-        for p in &simp {
-            mnx = mnx.min(p.x);
-            mny = mny.min(p.y);
-            mxx = mxx.max(p.x);
-            mxy = mxy.max(p.y);
-        }
-        let btol = (((mxx - mnx).powi(2) + (mxy - mny).powi(2)).sqrt() * 0.1).max(1e-3);
-
-        // Project p onto edge (a,b), clamped; returns (point, t, dist).
-        let proj_onto = |p: Point2f32, a: Point2f32, b: Point2f32| {
-            let (dx, dy) = (b.x - a.x, b.y - a.y);
-            let l2 = dx * dx + dy * dy;
-            let t = if l2 < eps {
-                0.0
-            } else {
-                ((p.x - a.x) * dx + (p.y - a.y) * dy) / l2
-            };
-            let tc = t.clamp(0.0, 1.0);
-            let q = Point2f32::new(a.x + tc * dx, a.y + tc * dy);
-            (q, t, ((p.x - q.x).powi(2) + (p.y - q.y).powi(2)).sqrt())
-        };
+        let btol = (geom::bbox_diagonal(&simp) * 0.1).max(1e-3);
 
         // For each simplified point, the nearest diagonal it lies alongside.
         let near: Vec<Option<usize>> = simp
@@ -488,8 +421,7 @@ impl FloorPlan {
             .map(|&p| {
                 let mut best: Option<(f32, usize)> = None;
                 for (ei, a, b) in &diags {
-                    let (q, t, d) = proj_onto(p, *a, *b);
-                    let _ = q;
+                    let (_q, t, d) = geom::project_point_to_segment(p, *a, *b);
                     if (-0.05..=1.05).contains(&t)
                         && d <= btol
                         && best.map_or(true, |(bd, _)| d < bd)
@@ -540,8 +472,8 @@ impl FloorPlan {
                 q
             }
         };
-        let a_proj = snap_to_end(proj_onto(rot[0], da, db).0);
-        let b_proj = snap_to_end(proj_onto(rot[best_len - 1], da, db).0);
+        let a_proj = snap_to_end(geom::project_point_to_segment(rot[0], da, db).0);
+        let b_proj = snap_to_end(geom::project_point_to_segment(rot[best_len - 1], da, db).0);
         if ((a_proj.x - b_proj.x).powi(2) + (a_proj.y - b_proj.y).powi(2)).sqrt() < 1e-3 {
             return None; // run collapsed to a point
         }
@@ -782,18 +714,10 @@ impl FloorPlan {
             for p in &mut out {
                 let mut best: Option<(f32, Point2f32)> = None;
                 for (a, b) in &diagonals {
-                    let (dx, dy) = (b.x - a.x, b.y - a.y);
-                    let len_sq = dx * dx + dy * dy;
-                    if len_sq < eps {
-                        continue;
-                    }
-                    let t = ((p.x - a.x) * dx + (p.y - a.y) * dy) / len_sq;
+                    let (proj, t, d) = geom::project_point_to_segment(*p, *a, *b);
                     if !(-0.1..=1.1).contains(&t) {
                         continue; // not alongside this segment
                     }
-                    let tc = t.clamp(0.0, 1.0);
-                    let proj = Point2f32::new(a.x + tc * dx, a.y + tc * dy);
-                    let d = ((p.x - proj.x).powi(2) + (p.y - proj.y).powi(2)).sqrt();
                     if d <= diag_tol && best.map_or(true, |(bd, _)| d < bd) {
                         best = Some((d, proj));
                     }
@@ -989,10 +913,7 @@ impl FloorPlan {
         let side = |p: Point2f32| -> f32 { dir.0 * (p.y - c.y) - dir.1 * (p.x - c.x) };
         let along = |p: Point2f32| -> f32 { (p.x - c.x) * dir.0 + (p.y - c.y) * dir.1 };
 
-        let diag = self
-            .bounding_box()
-            .map(|((mnx, mny), (mxx, mxy))| ((mxx - mnx).powi(2) + (mxy - mny).powi(2)).sqrt())
-            .unwrap_or(0.0);
+        let diag = self.bounding_box_diagonal();
         // Within this of a corner, the cut is treated as passing through it
         // (the would-be zero-length remnant wall collapses).
         let corner_tol = (diag * 0.02).max(1e-4);
@@ -1157,10 +1078,7 @@ impl FloorPlan {
                 Error::ExtendError(m)
             }
         };
-        let diag = self
-            .bounding_box()
-            .map(|((mnx, mny), (mxx, mxy))| ((mxx - mnx).powi(2) + (mxy - mny).powi(2)).sqrt())
-            .unwrap_or(0.0);
+        let diag = self.bounding_box_diagonal();
         let merge_tol = if diag > 0.0 {
             (diag * 0.01).max(1e-4)
         } else {
@@ -1204,10 +1122,7 @@ impl FloorPlan {
         if path.len() < 2 {
             return Err(err("path collapsed".into()));
         }
-        let diag = self
-            .bounding_box()
-            .map(|((mnx, mny), (mxx, mxy))| ((mxx - mnx).powi(2) + (mxy - mny).powi(2)).sqrt())
-            .unwrap_or(0.0);
+        let diag = self.bounding_box_diagonal();
         let vertex_tol = (diag * 0.04).max(1e-4);
         let max_tol = (diag * 0.25).max(1e-3);
 
@@ -1512,15 +1427,7 @@ impl FloorPlan {
                 let mut best_d = f32::MAX;
                 for i in 0..n {
                     let (a, b) = (ring[i], ring[(i + 1) % n]);
-                    let (dx, dy) = (b.x - a.x, b.y - a.y);
-                    let l2 = dx * dx + dy * dy;
-                    let t = if l2 < 1e-9 {
-                        0.0
-                    } else {
-                        (((p.x - a.x) * dx + (p.y - a.y) * dy) / l2).clamp(0.0, 1.0)
-                    };
-                    let q = Point2f32::new(a.x + t * dx, a.y + t * dy);
-                    let d = (p.x - q.x).powi(2) + (p.y - q.y).powi(2);
+                    let (q, _t, d) = geom::project_point_to_segment(p, a, b);
                     if d < best_d {
                         best_d = d;
                         best = q;
@@ -1548,17 +1455,10 @@ impl FloorPlan {
             let mut best = f32::MAX;
             for i in 0..no {
                 let (a, b) = (ring[i], ring[(i + 1) % no]);
-                let (dx, dy) = (b.x - a.x, b.y - a.y);
-                let l2 = dx * dx + dy * dy;
-                let t = if l2 < 1e-9 {
-                    0.0
-                } else {
-                    (((p.x - a.x) * dx + (p.y - a.y) * dy) / l2).clamp(0.0, 1.0)
-                };
-                let (qx, qy) = (a.x + t * dx, a.y + t * dy);
-                best = best.min((p.x - qx).powi(2) + (p.y - qy).powi(2));
+                let (_q, _t, d) = geom::project_point_to_segment(p, a, b);
+                best = best.min(d);
             }
-            best.sqrt()
+            best
         };
         let pts = area.get_points();
         let n = pts.len();
@@ -1632,10 +1532,7 @@ impl FloorPlan {
         &self,
         new_params: &[ParameterId],
     ) -> Vec<CollinearitySuggestion> {
-        let diag = self
-            .bounding_box()
-            .map(|((mnx, mny), (mxx, mxy))| ((mxx - mnx).powi(2) + (mxy - mny).powi(2)).sqrt())
-            .unwrap_or(0.0);
+        let diag = self.bounding_box_diagonal();
         if diag <= 0.0 {
             return Vec::new();
         }
@@ -2024,19 +1921,16 @@ impl FloorPlan {
 
     /// Bounding box of the entire plan (across all rings) in current units.
     pub fn bounding_box(&self) -> Option<((f32, f32), (f32, f32))> {
-        let mut iter = self.polygons().into_iter().flatten();
-        let first = iter.next()?;
-        let mut min_x = first.x;
-        let mut min_y = first.y;
-        let mut max_x = first.x;
-        let mut max_y = first.y;
-        for p in iter {
-            min_x = min_x.min(p.x);
-            min_y = min_y.min(p.y);
-            max_x = max_x.max(p.x);
-            max_y = max_y.max(p.y);
-        }
-        Some(((min_x, min_y), (max_x, max_y)))
+        let pts: Vec<Point2f32> = self.polygons().into_iter().flatten().collect();
+        geom::bbox(&pts)
+    }
+
+    /// Diagonal of this plan's bounding box (0.0 when empty). The canonical
+    /// "overall size" used to scale tolerances; callers in the app layer reach
+    /// it via this method or the free [`ring_diagonal`] over a raw ring.
+    pub fn bounding_box_diagonal(&self) -> f32 {
+        let pts: Vec<Point2f32> = self.polygons().into_iter().flatten().collect();
+        geom::bbox_diagonal(&pts)
     }
 
     /// Per-edge direction signs, for the direction-flip guard. See
@@ -2069,17 +1963,28 @@ impl FloorPlan {
 /// Signed area of a closed polygon (shoelace). Sign reflects winding;
 /// `trim_by_line` only uses the magnitude to pick the larger side.
 fn polygon_area(points: &[Point2f32]) -> f32 {
-    let n = points.len();
-    if n < 3 {
-        return 0.0;
-    }
-    let mut sum = 0.0_f32;
-    for i in 0..n {
-        let a = points[i];
-        let b = points[(i + 1) % n];
-        sum += a.x * b.y - b.x * a.y;
-    }
-    sum * 0.5
+    geom::ring_signed_area2(points) * 0.5
+}
+
+/// Finalize a CLOSED, orthogonalized ring before the parametric layer sees it:
+///   1. `snap_closing_edge` — axis-align the implicit closing edge,
+///   2. `rotate_to_corner_start` — make the first vertex a real corner (handles
+///      the "user started mid-wall" case, which would otherwise leave a spurious
+///      extra vertex),
+///   3. `remove_collinear` — drop the previously-anchored start, now a mid-list
+///      collinear vertex,
+///   4. `snap_closing_edge` again — the rotation in step 2 changed which vertex
+///      is first, so re-snap on the final order to guarantee the closing edge is
+///      axis-aligned (otherwise the top wall can read as non-orthogonal).
+///
+/// We deliberately do NOT auto-merge near-collinear walls here — those are left
+/// for the `suggest_collinear` review so the model stays honest about what the
+/// user drew.
+fn finalize_closed_ring(orthog_points: Vec<Point2f32>, tolerance: f32) -> Vec<Point2f32> {
+    let snapped = orthogonal::snap_closing_edge(orthog_points, tolerance);
+    let rotated = orthogonal::rotate_to_corner_start(snapped, tolerance);
+    let cleaned = orthogonal::remove_collinear(&rotated, tolerance);
+    orthogonal::snap_closing_edge(cleaned, tolerance)
 }
 
 /// Orthogonalize an OPEN path to the world axes while keeping the first and

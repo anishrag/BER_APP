@@ -134,13 +134,7 @@ impl AppController {
                 .collapse_trim_wall(ring, edge_start, prompt.controlled_param)
                 .map_err(|e| format!("{}", e))?;
             // Prune dimensioning state for the removed wall/param.
-            let active = self.floor_plan.all_active_params();
-            self.dimensioning
-                .known_params
-                .retain(|p| active.contains(p));
-            self.dimensioning
-                .dimensioned_walls
-                .retain(|vid| self.floor_plan.find_vertex(*vid).is_some());
+            self.resync_dimensioning_to_plan();
             self.commit_to_ber()?;
             self.compute_next_dimension_prompt();
             self.push_history_snapshot(undo_snap);
@@ -274,14 +268,7 @@ impl AppController {
         // Guardrail: a living-area dimension must not push the room OUTSIDE the
         // storey. (The storey outline itself has nothing to be inside of.)
         if self.active != ActiveShape::Outline {
-            let tol = self
-                .outline
-                .floor_plan
-                .bounding_box()
-                .map(|((mnx, mny), (mxx, mxy))| {
-                    (((mxx - mnx).powi(2) + (mxy - mny).powi(2)).sqrt() * 0.01).max(1e-3)
-                })
-                .unwrap_or(1e-3);
+            let tol = (self.outline.floor_plan.bounding_box_diagonal() * 0.01).max(1e-3);
             if self
                 .outline
                 .floor_plan
@@ -384,5 +371,23 @@ impl AppController {
             }
         }
         self.compute_next_dimension_prompt();
+    }
+
+    /// After a topology change (trim-collapse, collinear-merge cleanup, arc
+    /// splice), drop dimensioning state that no longer refers to a live
+    /// param/vertex: `known_params` to currently-active params, and
+    /// `dimensioned_walls` / `skipped_walls` to vertices that still exist. Safe
+    /// to over-call — pruning an already-valid set is a no-op.
+    pub(super) fn resync_dimensioning_to_plan(&mut self) {
+        let active = self.floor_plan.all_active_params();
+        self.dimensioning
+            .known_params
+            .retain(|p| active.contains(p));
+        self.dimensioning
+            .dimensioned_walls
+            .retain(|v| self.floor_plan.find_vertex(*v).is_some());
+        self.dimensioning
+            .skipped_walls
+            .retain(|v| self.floor_plan.find_vertex(*v).is_some());
     }
 }

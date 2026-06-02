@@ -144,19 +144,10 @@ pub fn render_dimension_prompt(
     wall_a: (f64, f64),
     wall_b: (f64, f64),
 ) {
-    if !matches!(sketch_mode, SketchMode::Storey2D) {
-        return;
-    }
-    let Some(ber) = ber else {
+    let Some((storey, t)) = storey_transform(rect, ber, current_storey_idx, sketch_mode, view)
+    else {
         return;
     };
-    let Some(storey) = current_storey_idx.and_then(|i| ber.storeys.get(i)) else {
-        return;
-    };
-    let Some((min_xy, max_xy)) = storey_2d::bounding_box(storey) else {
-        return;
-    };
-    let t = fit_transform(rect, min_xy, max_xy, view);
 
     // Find the polygon ring that contains the wall's endpoints, then compute
     // a perpendicular interior offset so the arrow lands in the middle of
@@ -398,19 +389,10 @@ pub fn render_equivalent_wall(
     wall_a: (f64, f64),
     wall_b: (f64, f64),
 ) {
-    if !matches!(sketch_mode, SketchMode::Storey2D) {
-        return;
-    }
-    let Some(ber) = ber else {
+    let Some((_storey, t)) = storey_transform(rect, ber, current_storey_idx, sketch_mode, view)
+    else {
         return;
     };
-    let Some(storey) = current_storey_idx.and_then(|i| ber.storeys.get(i)) else {
-        return;
-    };
-    let Some((min_xy, max_xy)) = storey_2d::bounding_box(storey) else {
-        return;
-    };
-    let t = fit_transform(rect, min_xy, max_xy, view);
 
     let a = t.apply(wall_a.0, wall_a.1);
     let b = t.apply(wall_b.0, wall_b.1);
@@ -434,19 +416,13 @@ pub fn render_arc_preview(
     view: ViewParams,
     points: &[(f64, f64)],
 ) {
-    if !matches!(sketch_mode, SketchMode::Storey2D) || points.len() < 2 {
+    if points.len() < 2 {
         return;
     }
-    let Some(ber) = ber else {
+    let Some((_storey, t)) = storey_transform(rect, ber, current_storey_idx, sketch_mode, view)
+    else {
         return;
     };
-    let Some(storey) = current_storey_idx.and_then(|i| ber.storeys.get(i)) else {
-        return;
-    };
-    let Some((min_xy, max_xy)) = storey_2d::bounding_box(storey) else {
-        return;
-    };
-    let t = fit_transform(rect, min_xy, max_xy, view);
     let screen: Vec<egui::Pos2> = points.iter().map(|(x, y)| t.apply(*x, *y)).collect();
     let amber = egui::Color32::from_rgb(255, 200, 60);
     let stroke = egui::Stroke::new(3.0, amber);
@@ -472,19 +448,13 @@ pub fn render_cut_candidates(
     view: ViewParams,
     regions: &[Vec<(f64, f64)>],
 ) {
-    if !matches!(sketch_mode, SketchMode::Storey2D) || regions.is_empty() {
+    if regions.is_empty() {
         return;
     }
-    let Some(ber) = ber else {
+    let Some((_storey, t)) = storey_transform(rect, ber, current_storey_idx, sketch_mode, view)
+    else {
         return;
     };
-    let Some(storey) = current_storey_idx.and_then(|i| ber.storeys.get(i)) else {
-        return;
-    };
-    let Some((min_xy, max_xy)) = storey_2d::bounding_box(storey) else {
-        return;
-    };
-    let t = fit_transform(rect, min_xy, max_xy, view);
     let colors = [
         egui::Color32::from_rgb(255, 180, 40), // amber
         egui::Color32::from_rgb(40, 190, 255), // cyan
@@ -532,19 +502,13 @@ pub fn render_living_areas(
     wall_labels: &[Vec<((f64, f64), (f64, f64), f32)>],
     active: Option<usize>,
 ) {
-    if !matches!(sketch_mode, SketchMode::Storey2D) || polygons.is_empty() {
+    if polygons.is_empty() {
         return;
     }
-    let Some(ber) = ber else {
+    let Some((_storey, t)) = storey_transform(rect, ber, current_storey_idx, sketch_mode, view)
+    else {
         return;
     };
-    let Some(storey) = current_storey_idx.and_then(|i| ber.storeys.get(i)) else {
-        return;
-    };
-    let Some((min_xy, max_xy)) = storey_2d::bounding_box(storey) else {
-        return;
-    };
-    let t = fit_transform(rect, min_xy, max_xy, view);
     for (i, poly) in polygons.iter().enumerate() {
         if poly.len() < 3 {
             continue;
@@ -604,23 +568,17 @@ pub fn render_wall_exposure(
     selection: Option<&ExposureSelection>,
     exposure_mode: bool,
 ) {
-    if !matches!(sketch_mode, SketchMode::Storey2D) || walls.is_empty() {
+    if walls.is_empty() {
         return;
     }
     let any_set = walls.iter().any(|w| !w.sections.is_empty());
     if !exposure_mode && !any_set {
         return;
     }
-    let Some(ber) = ber else {
+    let Some((_storey, t)) = storey_transform(rect, ber, current_storey_idx, sketch_mode, view)
+    else {
         return;
     };
-    let Some(storey) = current_storey_idx.and_then(|i| ber.storeys.get(i)) else {
-        return;
-    };
-    let Some((min_xy, max_xy)) = storey_2d::bounding_box(storey) else {
-        return;
-    };
-    let t = fit_transform(rect, min_xy, max_xy, view);
 
     let exposed = egui::Color32::from_rgb(255, 140, 40);
     let semi = egui::Color32::from_rgb(240, 205, 40);
@@ -708,19 +666,10 @@ pub fn render_vertex_marker(
     world_x: f64,
     world_y: f64,
 ) {
-    if !matches!(sketch_mode, SketchMode::Storey2D) {
-        return;
-    }
-    let Some(ber) = ber else {
+    let Some((_storey, t)) = storey_transform(rect, ber, current_storey_idx, sketch_mode, view)
+    else {
         return;
     };
-    let Some(storey) = current_storey_idx.and_then(|i| ber.storeys.get(i)) else {
-        return;
-    };
-    let Some((min_xy, max_xy)) = storey_2d::bounding_box(storey) else {
-        return;
-    };
-    let t = fit_transform(rect, min_xy, max_xy, view);
     let p = t.apply(world_x, world_y);
     let radius = 6.0_f32;
     painter.circle_filled(p, radius, egui::Color32::from_rgb(255, 80, 80));
@@ -875,7 +824,7 @@ pub(crate) fn auto_fit_scale(rect: egui::Rect, min_xy: (f64, f64), max_xy: (f64,
 
 /// Compute a transform that fits a source bounding box inside `rect` with
 /// padding, then applies the user's `view` transform (zoom + pan) on top.
-pub fn fit_transform(
+pub(crate) fn fit_transform(
     rect: egui::Rect,
     min_xy: (f64, f64),
     max_xy: (f64, f64),
@@ -892,6 +841,26 @@ pub fn fit_transform(
         user_offset_x: view.offset_x as f64,
         user_offset_y: view.offset_y as f64,
     }
+}
+
+/// Shared preamble for the single-storey `render_*` overlays: requires 2D mode,
+/// a loaded BER, a selected storey, and a fittable bbox — then returns that
+/// storey together with its fit transform. Each overlay adds its own
+/// collection-empty early-out on top. `None` means "nothing to draw, return".
+fn storey_transform(
+    rect: egui::Rect,
+    ber: Option<&Ber>,
+    current_storey_idx: Option<usize>,
+    sketch_mode: SketchMode,
+    view: ViewParams,
+) -> Option<(&datatypes::ber::structural::Storey, Transform2d)> {
+    if !matches!(sketch_mode, SketchMode::Storey2D) {
+        return None;
+    }
+    let ber = ber?;
+    let storey = current_storey_idx.and_then(|i| ber.storeys.get(i))?;
+    let (min_xy, max_xy) = storey_2d::bounding_box(storey)?;
+    Some((storey, fit_transform(rect, min_xy, max_xy, view)))
 }
 
 /// True isometric projection: rotate around vertical, tilt back, z is up.

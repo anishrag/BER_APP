@@ -250,9 +250,57 @@ pub fn circular_arc_points(
     pts
 }
 
+/// Axis-aligned bounding box of a point set, as `((min_x,min_y),(max_x,max_y))`.
+/// `None` for an empty slice. The single source for every bbox computation over
+/// `Point2f32` in this crate.
+pub(crate) fn bbox(points: &[Point2f32]) -> Option<((f32, f32), (f32, f32))> {
+    let mut it = points.iter();
+    let first = it.next()?;
+    let (mut min_x, mut min_y) = (first.x, first.y);
+    let (mut max_x, mut max_y) = (first.x, first.y);
+    for p in it {
+        min_x = min_x.min(p.x);
+        min_y = min_y.min(p.y);
+        max_x = max_x.max(p.x);
+        max_y = max_y.max(p.y);
+    }
+    Some(((min_x, min_y), (max_x, max_y)))
+}
+
+/// Diagonal length of a point set's bounding box. `0.0` for fewer than two
+/// points. Used throughout to scale tolerances to a shape's overall size.
+pub fn bbox_diagonal(points: &[Point2f32]) -> f32 {
+    match bbox(points) {
+        Some(((mnx, mny), (mxx, mxy))) => ((mxx - mnx).powi(2) + (mxy - mny).powi(2)).sqrt(),
+        None => 0.0,
+    }
+}
+
+/// Nearest point on segment `a→b` to `p`. Returns the clamped on-segment point,
+/// the UNCLAMPED parameter `t` (so callers can tell whether the foot fell beyond
+/// an endpoint), and the distance from `p` to that on-segment point. A
+/// degenerate (zero-length) segment returns `a` at `t = 0`.
+pub(crate) fn project_point_to_segment(
+    p: Point2f32,
+    a: Point2f32,
+    b: Point2f32,
+) -> (Point2f32, f32, f32) {
+    let (dx, dy) = (b.x - a.x, b.y - a.y);
+    let l2 = dx * dx + dy * dy;
+    if l2 < 1e-9 {
+        let d = ((p.x - a.x).powi(2) + (p.y - a.y).powi(2)).sqrt();
+        return (a, 0.0, d);
+    }
+    let t = ((p.x - a.x) * dx + (p.y - a.y) * dy) / l2;
+    let tc = t.clamp(0.0, 1.0);
+    let q = Point2f32::new(a.x + tc * dx, a.y + tc * dy);
+    let d = ((p.x - q.x).powi(2) + (p.y - q.y).powi(2)).sqrt();
+    (q, t, d)
+}
+
 /// Twice the signed shoelace area of a ring (sign = winding); callers that
 /// only compare magnitudes use `.abs()`.
-fn ring_signed_area2(pts: &[Point2f32]) -> f32 {
+pub(crate) fn ring_signed_area2(pts: &[Point2f32]) -> f32 {
     let n = pts.len();
     if n < 3 {
         return 0.0;
@@ -392,6 +440,45 @@ mod tests {
         let p = |x, y| Point2f32::new(x, y);
         let square = vec![p(0.0, 0.0), p(4.0, 0.0), p(4.0, 4.0), p(0.0, 4.0)];
         assert_eq!(untangle_ring(&square), square);
+    }
+
+    #[test]
+    fn bbox_and_diagonal() {
+        let pts = vec![p(1.0, 2.0), p(4.0, 2.0), p(4.0, 6.0), p(1.0, 6.0)];
+        assert_eq!(bbox(&pts), Some(((1.0, 2.0), (4.0, 6.0))));
+        // 3x4 box → diagonal 5.
+        assert!((bbox_diagonal(&pts) - 5.0).abs() < 1e-5);
+        assert_eq!(bbox(&[]), None);
+        assert_eq!(bbox_diagonal(&[]), 0.0);
+        assert_eq!(bbox_diagonal(&[p(3.0, 3.0)]), 0.0);
+    }
+
+    #[test]
+    fn project_point_to_segment_interior_endpoints_and_degenerate() {
+        let a = p(0.0, 0.0);
+        let b = p(10.0, 0.0);
+        // Interior foot: perpendicular distance, t in (0,1), point on the segment.
+        let (q, t, d) = project_point_to_segment(p(3.0, 4.0), a, b);
+        assert!((q.x - 3.0).abs() < 1e-5 && q.y.abs() < 1e-5);
+        assert!((t - 0.3).abs() < 1e-5);
+        assert!((d - 4.0).abs() < 1e-5);
+        // Beyond b: clamps to b, but t reports the overshoot (>1).
+        let (q2, t2, _) = project_point_to_segment(p(15.0, 0.0), a, b);
+        assert!((q2.x - 10.0).abs() < 1e-5 && t2 > 1.0);
+        // Before a: clamps to a, t < 0.
+        let (q3, t3, _) = project_point_to_segment(p(-5.0, 1.0), a, b);
+        assert!(q3.x.abs() < 1e-5 && t3 < 0.0);
+        // Degenerate segment: returns a at t=0.
+        let (q4, t4, d4) = project_point_to_segment(p(2.0, 0.0), a, a);
+        assert!(q4 == a && t4 == 0.0 && (d4 - 2.0).abs() < 1e-5);
+    }
+
+    #[test]
+    fn ring_signed_area2_is_twice_shoelace() {
+        // 3x4 rectangle, area 12 → 2x = 24 (CCW positive).
+        let r = vec![p(0.0, 0.0), p(3.0, 0.0), p(3.0, 4.0), p(0.0, 4.0)];
+        assert!((ring_signed_area2(&r).abs() - 24.0).abs() < 1e-4);
+        assert_eq!(ring_signed_area2(&[p(0.0, 0.0), p(1.0, 1.0)]), 0.0);
     }
 
     #[test]

@@ -64,20 +64,14 @@ pub fn snap_to_polygon(
     for i in 0..n {
         let a = ring[i];
         let b = ring[(i + 1) % n];
-        let abx = b.x - a.x;
-        let aby = b.y - a.y;
-        let len_sq = abx * abx + aby * aby;
-        if len_sq < 1e-6 {
-            continue;
+        if (a.x - b.x).powi(2) + (a.y - b.y).powi(2) < 1e-6 {
+            continue; // degenerate edge
         }
-        let apx = pt.x - a.x;
-        let apy = pt.y - a.y;
-        let t = ((apx * abx + apy * aby) / len_sq).clamp(0.0, 1.0);
-        let proj_x = a.x + t * abx;
-        let proj_y = a.y + t * aby;
-        let dist = ((pt.x - proj_x).powi(2) + (pt.y - proj_y).powi(2)).sqrt();
+        // `snap_to_polygon` returns a CLAMPED edge parameter (callers rebuild the
+        // point from it), so clamp the shared helper's unclamped `t`.
+        let (_q, t, dist) = crate::geom::project_point_to_segment(pt, a, b);
         if dist < best.2 {
-            best = (i, t, dist);
+            best = (i, t.clamp(0.0, 1.0), dist);
         }
     }
     (best.0, best.1, best.2, false)

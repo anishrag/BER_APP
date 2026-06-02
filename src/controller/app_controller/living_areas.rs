@@ -176,8 +176,7 @@ impl AppController {
             max_x = max_x.max(p.x);
             max_y = max_y.max(p.y);
         }
-        let diag = ((max_x - min_x).powi(2) + (max_y - min_y).powi(2)).sqrt();
-        let tol = (diag * 0.02).max(1e-3);
+        let tol = (manip_2d_plan::ring_diagonal(world_points) * 0.02).max(1e-3);
 
         // Save whatever's active first, so the outline we carve against is
         // current (and the active living area's edits aren't lost).
@@ -284,14 +283,7 @@ impl AppController {
         let pts = self.outline.floor_plan.clamp_inside(&pts);
 
         // Tolerance scaled to the drawn extent (matches start_new_living_area).
-        let (mut mnx, mut mny, mut mxx, mut mxy) = (f32::MAX, f32::MAX, f32::MIN, f32::MIN);
-        for p in &pts {
-            mnx = mnx.min(p.x);
-            mny = mny.min(p.y);
-            mxx = mxx.max(p.x);
-            mxy = mxy.max(p.y);
-        }
-        let tol = (((mxx - mnx).powi(2) + (mxy - mny).powi(2)).sqrt() * 0.02).max(1e-3);
+        let tol = (manip_2d_plan::ring_diagonal(&pts) * 0.02).max(1e-3);
 
         // A straight cut → offer both halves to pick from. Each region's walls
         // along the storey are pinned (pre-known); only the cut wall is set.

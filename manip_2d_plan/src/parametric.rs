@@ -1001,23 +1001,8 @@ impl ParametricPlan {
         // inside a dimensioned storey. At 0.05% of the diagonal it reproduces
         // the old ~0.5 for a typical pixel sketch (~1000-unit diagonal) while
         // only collapsing float noise at metre scale.
-        let diag = {
-            let pts = self.all_ring_points();
-            let (mut mnx, mut mny, mut mxx, mut mxy) = (f32::MAX, f32::MAX, f32::MIN, f32::MIN);
-            for ring in &pts {
-                for q in ring {
-                    mnx = mnx.min(q.x);
-                    mny = mny.min(q.y);
-                    mxx = mxx.max(q.x);
-                    mxy = mxy.max(q.y);
-                }
-            }
-            if mxx >= mnx {
-                ((mxx - mnx).powi(2) + (mxy - mny).powi(2)).sqrt()
-            } else {
-                0.0
-            }
-        };
+        let all_pts: Vec<Point2f32> = self.all_ring_points().into_iter().flatten().collect();
+        let diag = crate::geom::bbox_diagonal(&all_pts);
         let tolerance = (diag * 0.0005).max(1e-4);
 
         // V0 of ring 0 stays as-is (the global origin constant).
@@ -1635,14 +1620,20 @@ fn is_collinear_vertex(prev: Point2f32, cur: Point2f32, next: Point2f32) -> bool
 /// non-adjacent edges properly intersect (crossings or interior touches).
 /// The axis-aligned variant is a stricter, faster special case for orthogonal
 /// rings.
-fn check_simple_general(points: &[Point2f32]) -> Result<(), String> {
+/// Shared simplicity check: at least `min_verts` vertices, every edge longer
+/// than ~1mm, and no pair of non-adjacent edges crossing per `crosses`. The
+/// `min_len_sq` floor sits below any real wall AND below the short facets of a
+/// faceted curve, yet still catches a genuinely collapsed (near-coincident)
+/// edge. The two public validators differ only in `min_verts` + the predicate.
+fn check_simple_with(
+    points: &[Point2f32],
+    min_verts: usize,
+    crosses: impl Fn(Point2f32, Point2f32, Point2f32, Point2f32) -> bool,
+) -> Result<(), String> {
     let n = points.len();
-    if n < 3 {
-        return Err(format!("only {} vertices (need at least 3)", n));
+    if n < min_verts {
+        return Err(format!("only {} vertices (need at least {})", n, min_verts));
     }
-    // ~1mm minimum edge: well below any real wall AND below the short facets of
-    // a faceted curve (which can be a couple of cm on a small, metre-scale
-    // plan), yet still catches a genuinely collapsed (near-coincident) edge.
     let min_len_sq = 1e-6_f32;
     for i in 0..n {
         let a = points[i];
@@ -1657,18 +1648,22 @@ fn check_simple_general(points: &[Point2f32]) -> Result<(), String> {
         let a1 = points[i];
         let a2 = points[(i + 1) % n];
         for j in (i + 2)..n {
-            // Skip the closing edge adjacent to edge 0.
+            // The closing edge (n-1 → 0) is adjacent to edge 0; skip that pair.
             if i == 0 && j == n - 1 {
                 continue;
             }
             let b1 = points[j];
             let b2 = points[(j + 1) % n];
-            if segments_properly_intersect(a1, a2, b1, b2) {
+            if crosses(a1, a2, b1, b2) {
                 return Err(format!("edges {} and {} intersect", i, j));
             }
         }
     }
     Ok(())
+}
+
+fn check_simple_general(points: &[Point2f32]) -> Result<(), String> {
+    check_simple_with(points, 3, segments_properly_intersect)
 }
 
 /// Do two segments (a1,a2) and (b1,b2) intersect anywhere other than at a
@@ -1720,44 +1715,7 @@ fn segments_properly_intersect(a1: Point2f32, a2: Point2f32, b1: Point2f32, b2: 
 /// at least 4 vertices, every edge has positive length, no pair of non-adjacent
 /// edges crosses or overlaps. Returns the first failure reason.
 fn check_simple_axis_aligned(points: &[Point2f32]) -> Result<(), String> {
-    let n = points.len();
-    if n < 4 {
-        return Err(format!("only {} vertices (need at least 4)", n));
-    }
-    // 1. Every edge has nontrivial length. Tolerance is generous so we don't
-    //    spuriously reject the polygon at extreme zoom levels.
-    // ~1mm minimum edge: well below any real wall AND below the short facets of
-    // a faceted curve (a couple of cm on a small, metre-scale plan), yet still
-    // catches a genuinely collapsed (near-coincident) edge. NB: the old 1e-3
-    // here meant a 3cm floor, which wrongly rejected legitimate curve facets.
-    let min_len_sq = 1e-6_f32;
-    for i in 0..n {
-        let a = points[i];
-        let b = points[(i + 1) % n];
-        let dx = a.x - b.x;
-        let dy = a.y - b.y;
-        if dx * dx + dy * dy < min_len_sq {
-            return Err(format!("edge {} collapsed to zero length", i));
-        }
-    }
-    // 2. No two non-adjacent edges cross or overlap. Adjacent edges share an
-    //    endpoint by construction and are skipped.
-    for i in 0..n {
-        let a1 = points[i];
-        let a2 = points[(i + 1) % n];
-        for j in (i + 2)..n {
-            // The closing edge (n-1 → 0) is adjacent to edge 0 (0 → 1).
-            if i == 0 && j == n - 1 {
-                continue;
-            }
-            let b1 = points[j];
-            let b2 = points[(j + 1) % n];
-            if axis_aligned_segments_cross(a1, a2, b1, b2) {
-                return Err(format!("edges {} and {} cross", i, j));
-            }
-        }
-    }
-    Ok(())
+    check_simple_with(points, 4, axis_aligned_segments_cross)
 }
 
 fn axis_aligned_segments_cross(a1: Point2f32, a2: Point2f32, b1: Point2f32, b2: Point2f32) -> bool {
@@ -1854,6 +1812,41 @@ mod tests {
         let mut plan = ParametricPlan::from_points(&pts);
         plan.apply_orthogonal_constraints().unwrap();
         plan
+    }
+
+    // Guard for the consolidated `check_simple_with` skeleton (#5): both the
+    // general and axis-aligned validators must accept a clean square and reject
+    // too-few vertices, a collapsed edge, and a self-crossing "bow-tie".
+    #[test]
+    fn check_simple_validators_accept_and_reject() {
+        let pt = |x: f32, y: f32| Point2f32::new(x, y);
+        let square = vec![pt(0., 0.), pt(4., 0.), pt(4., 4.), pt(0., 4.)];
+        assert!(check_simple_axis_aligned(&square).is_ok());
+        assert!(check_simple_general(&square).is_ok());
+
+        // Too few vertices: axis-aligned needs 4, general needs 3.
+        let tri = vec![pt(0., 0.), pt(4., 0.), pt(4., 4.)];
+        assert!(
+            check_simple_axis_aligned(&tri).is_err(),
+            "axis-aligned needs ≥4"
+        );
+        assert!(
+            check_simple_general(&tri).is_ok(),
+            "general accepts a triangle"
+        );
+        assert!(check_simple_general(&[pt(0., 0.), pt(1., 0.)]).is_err());
+
+        // A collapsed (zero-length) edge is rejected by both.
+        let collapsed = vec![pt(0., 0.), pt(0., 0.), pt(4., 0.), pt(4., 4.), pt(0., 4.)];
+        assert!(check_simple_axis_aligned(&collapsed).is_err());
+        assert!(check_simple_general(&collapsed).is_err());
+
+        // A bow-tie (edges 0–1 and 2–3 cross) is rejected by the general check.
+        let bowtie = vec![pt(0., 0.), pt(4., 4.), pt(4., 0.), pt(0., 4.)];
+        assert!(
+            check_simple_general(&bowtie).is_err(),
+            "self-crossing rejected"
+        );
     }
 
     #[test]

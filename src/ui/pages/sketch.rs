@@ -640,16 +640,9 @@ impl SketchPage {
                 let cut_pending = !pending_cut_regions.is_empty();
                 if cut_pending {
                     if response.clicked_by(egui::PointerButton::Primary) {
-                        if let (Some(pos), Some((min_xy, max_xy))) = (
-                            response.interact_pointer_pos(),
-                            ber.and_then(|b| {
-                                b.storeys
-                                    .get(current_storey_idx?)
-                                    .and_then(crate::ui::render::storey_2d::bounding_box)
-                            }),
-                        ) {
-                            let t = crate::ui::render::fit_transform(rect, min_xy, max_xy, view);
-                            let (wx, wy) = t.inverse(pos.x, pos.y);
+                        if let Some((wx, wy)) = response.interact_pointer_pos().and_then(|pos| {
+                            screen_to_world(ber, current_storey_idx, rect, view, pos)
+                        }) {
                             on_event(UiEvent::Sketch(SketchEvent::ChooseCutRegion {
                                 world_x: wx,
                                 world_y: wy,
@@ -663,12 +656,7 @@ impl SketchPage {
                 // the wall. Takes priority over stroke/edit input (suppressed via
                 // `primary_available` above).
                 if exposure_mode && !cut_pending {
-                    if let Some((min_xy, max_xy)) = ber.and_then(|b| {
-                        b.storeys
-                            .get(current_storey_idx?)
-                            .and_then(crate::ui::render::storey_2d::bounding_box)
-                    }) {
-                        let t = crate::ui::render::fit_transform(rect, min_xy, max_xy, view);
+                    if let Some(t) = canvas_transform(ber, current_storey_idx, rect, view, false) {
                         let tol_world = (12.0 / t.scale()) as f64;
                         if response.drag_started_by(egui::PointerButton::Primary) {
                             if let Some(pos) = response.interact_pointer_pos() {
@@ -766,18 +754,13 @@ impl SketchPage {
                                         | EditTools::TrimCurve
                                 );
                             let world_converted = if needs_world {
-                                if let (Some(stroke), Some((min_xy, max_xy))) = (
+                                // Outline capture must invert the SAME transform
+                                // the watermark was drawn with (bbox includes the
+                                // previous storey), hence `watermark = true`.
+                                if let (Some(stroke), Some(t)) = (
                                     current.as_ref(),
-                                    ber.and_then(|b| {
-                                        crate::ui::render::fit_bbox_for_storey(
-                                            b,
-                                            current_storey_idx?,
-                                        )
-                                    }),
+                                    canvas_transform(ber, current_storey_idx, rect, view, true),
                                 ) {
-                                    let t = crate::ui::render::fit_transform(
-                                        rect, min_xy, max_xy, view,
-                                    );
                                     let topleft = rect.left_top();
                                     let world_points: Vec<(f32, f32)> = stroke
                                         .points
@@ -832,14 +815,9 @@ impl SketchPage {
                                 // Surface WHY so the failure isn't silent.
                                 if outline_on_watermark {
                                     let has_stroke = current.is_some();
-                                    let has_bbox = ber
-                                        .and_then(|b| {
-                                            crate::ui::render::fit_bbox_for_storey(
-                                                b,
-                                                current_storey_idx?,
-                                            )
-                                        })
-                                        .is_some();
+                                    let has_bbox =
+                                        canvas_transform(ber, current_storey_idx, rect, view, true)
+                                            .is_some();
                                     eprintln!(
                                         "[new-storey] WARNING: outline-on-watermark stroke could \
                                          NOT convert to world coords (stroke present={has_stroke}, \
@@ -867,22 +845,17 @@ impl SketchPage {
                     && edit_drag_prompt.is_none()
                     && vertex_drop_prompt.is_none()
                 {
-                    // Double-click first — egui fires this on the second
-                    // press of a quick double-press. We insert the vertex
-                    // and treat any subsequent drag movement as moving
-                    // the just-inserted vertex.
-                    if response.double_clicked_by(egui::PointerButton::Primary) {
-                        if let (Some(b), Some((min_xy, max_xy))) = (
-                            ber,
-                            ber.and_then(|b| {
-                                b.storeys
-                                    .get(current_storey_idx?)
-                                    .and_then(crate::ui::render::storey_2d::bounding_box)
-                            }),
-                        ) {
-                            let _ = b;
-                            let t = crate::ui::render::fit_transform(rect, min_xy, max_xy, view);
-                            let tol_world = 12.0 / t.scale();
+                    // One transform for both the double-click vertex-insert and
+                    // the click/drag below (same storey, same frame).
+                    if let Some(t) = canvas_transform(ber, current_storey_idx, rect, view, false) {
+                        // World-coord tolerance corresponds to ~12 pixels
+                        // on screen at the current zoom.
+                        let tol_world = 12.0 / t.scale();
+                        // Double-click first — egui fires this on the second
+                        // press of a quick double-press. We insert the vertex
+                        // and treat any subsequent drag movement as moving the
+                        // just-inserted vertex.
+                        if response.double_clicked_by(egui::PointerButton::Primary) {
                             if let Some(pos) = response.interact_pointer_pos() {
                                 let (wx, wy) = t.inverse(pos.x, pos.y);
                                 on_event(UiEvent::Sketch(SketchEvent::EditDoubleClick {
@@ -892,20 +865,6 @@ impl SketchPage {
                                 }));
                             }
                         }
-                    }
-                    if let (Some(b), Some((min_xy, max_xy))) = (
-                        ber,
-                        ber.and_then(|b| {
-                            b.storeys
-                                .get(current_storey_idx?)
-                                .and_then(crate::ui::render::storey_2d::bounding_box)
-                        }),
-                    ) {
-                        let _ = b; // keep `ber` referenced; binding-only.
-                        let t = crate::ui::render::fit_transform(rect, min_xy, max_xy, view);
-                        // World-coord tolerance corresponds to ~12 pixels
-                        // on screen at the current zoom.
-                        let tol_world = 12.0 / t.scale();
                         if response.drag_started_by(egui::PointerButton::Primary) {
                             if let Some(pos) = response.interact_pointer_pos() {
                                 let (wx, wy) = t.inverse(pos.x, pos.y);
@@ -1532,6 +1491,40 @@ impl SketchPage {
         });
         change_tool
     }
+}
+
+/// The current storey's screen↔world transform for the 2D canvas, or `None`
+/// when there's no BER / storey / fittable bbox. `watermark = true` fits the
+/// previous-storey watermark in too (used while capturing a new upper storey's
+/// outline, matching what's drawn); `false` fits just the storey's own footprint
+/// (the usual pointer hit-testing). Single source for the canvas's transform so
+/// every interaction inverts the same mapping the renderer used.
+fn canvas_transform(
+    ber: Option<&Ber>,
+    current_storey_idx: Option<usize>,
+    rect: egui::Rect,
+    view: ViewParams,
+    watermark: bool,
+) -> Option<render::Transform2d> {
+    let b = ber?;
+    let i = current_storey_idx?;
+    let (min_xy, max_xy) = if watermark {
+        render::fit_bbox_for_storey(b, i)?
+    } else {
+        b.storeys.get(i).and_then(render::storey_2d::bounding_box)?
+    };
+    Some(render::fit_transform(rect, min_xy, max_xy, view))
+}
+
+/// World coords of a canvas-pixel position via the storey's own fit transform.
+fn screen_to_world(
+    ber: Option<&Ber>,
+    current_storey_idx: Option<usize>,
+    rect: egui::Rect,
+    view: ViewParams,
+    pos: egui::Pos2,
+) -> Option<(f64, f64)> {
+    canvas_transform(ber, current_storey_idx, rect, view, false).map(|t| t.inverse(pos.x, pos.y))
 }
 
 fn draw_stroke(painter: &egui::Painter, rect: egui::Rect, stroke: EguiStroke) {
