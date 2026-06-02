@@ -105,6 +105,7 @@ pub fn render_ber(
                     dimensioned_walls,
                     view,
                     watermark.as_deref(),
+                    None,
                 );
             } else {
                 empty_storey_hint(painter, rect);
@@ -858,6 +859,20 @@ impl Transform2d {
     }
 }
 
+/// The pre-zoom world→pixel scale that fits `min_xy..max_xy` inside `rect` with
+/// padding (aspect-ratio preserving). Exposed so callers that need several
+/// sub-views to share one scale — e.g. the "All storeys" overview, where a
+/// common scale lets the reader compare storey sizes — can compute the shared
+/// value before building each transform.
+pub(crate) fn auto_fit_scale(rect: egui::Rect, min_xy: (f64, f64), max_xy: (f64, f64)) -> f64 {
+    let pad = 30.0_f32;
+    let target_w = (rect.width() - 2.0 * pad).max(1.0);
+    let target_h = (rect.height() - 2.0 * pad).max(1.0);
+    let src_w = (max_xy.0 - min_xy.0).max(1e-6);
+    let src_h = (max_xy.1 - min_xy.1).max(1e-6);
+    (target_w as f64 / src_w).min(target_h as f64 / src_h)
+}
+
 /// Compute a transform that fits a source bounding box inside `rect` with
 /// padding, then applies the user's `view` transform (zoom + pan) on top.
 pub fn fit_transform(
@@ -866,12 +881,7 @@ pub fn fit_transform(
     max_xy: (f64, f64),
     view: ViewParams,
 ) -> Transform2d {
-    let pad = 30.0_f32;
-    let target_w = (rect.width() - 2.0 * pad).max(1.0);
-    let target_h = (rect.height() - 2.0 * pad).max(1.0);
-    let src_w = (max_xy.0 - min_xy.0).max(1e-6);
-    let src_h = (max_xy.1 - min_xy.1).max(1e-6);
-    let auto_scale = (target_w as f64 / src_w).min(target_h as f64 / src_h);
+    let auto_scale = auto_fit_scale(rect, min_xy, max_xy);
 
     Transform2d {
         scale: auto_scale * view.zoom as f64,
@@ -904,5 +914,111 @@ pub(crate) fn color_for(
         DisplayMode::AllSurfaces | DisplayMode::FloorMapDims => base,
         other if other == target => base,
         _ => style::faded(base),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The fit scale is inversely proportional to footprint size, so a storey
+    /// twice as large fits at half the scale. This is what lets the "All
+    /// storeys" overview share one scale and still show relative sizes: taking
+    /// the min (largest storey's) scale renders the big one full-cell and a
+    /// half-size storey at half the pixels.
+    #[test]
+    fn auto_fit_scale_is_inverse_to_footprint_size() {
+        let rect = egui::Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(200.0, 200.0));
+        let small = auto_fit_scale(rect, (0.0, 0.0), (10.0, 10.0));
+        let big = auto_fit_scale(rect, (0.0, 0.0), (20.0, 20.0));
+        assert!(
+            small > big,
+            "the larger footprint must fit at a smaller scale"
+        );
+        assert!(
+            (small - 2.0 * big).abs() < 1e-6,
+            "doubling the footprint halves the fit scale (small={small}, big={big})"
+        );
+    }
+
+    /// Reproduces the session figures in the "All storeys" overview: storey 0 is
+    /// a 1×1 m square; storey 1 is a larger L (bbox 3×1 m, 6 vertices, sharing
+    /// the base at y=0) reflecting the 3 m / 0.5 m walls drawn over it. Both
+    /// cells are driven by the GLOBAL bbox, so the overview must:
+    ///   1. render both at ONE shared scale (relative sizes read true),
+    ///   2. align them — a point on the shared base lands at the same pixel Y
+    ///      in each cell (no more per-cell vertical centering).
+    #[test]
+    fn all_storeys_overview_shares_scale_and_aligns_base() {
+        use datatypes::ber::structural::{FloorRegions, Storey};
+        use domain::points::Point2f64;
+
+        let pt = |x: f64, y: f64| Point2f64::new(x, y);
+        let floors = |verts: Vec<Point2f64>| {
+            FloorRegions::from_vertex_lists(vec![verts], 2.4, None, None, None)
+        };
+        let storeys = [
+            Storey {
+                floors: floors(vec![pt(0., 0.), pt(1., 0.), pt(1., 1.), pt(0., 1.)]),
+                ..Default::default()
+            },
+            Storey {
+                // L-shape: 3 m bottom wall, a 0.5 m step, back to the 1×1 corner.
+                floors: floors(vec![
+                    pt(0., 0.),
+                    pt(3., 0.),
+                    pt(3., 0.5),
+                    pt(1., 0.5),
+                    pt(1., 1.),
+                    pt(0., 1.),
+                ]),
+                ..Default::default()
+            },
+        ];
+
+        // Same fit math as `all_storeys_2d::render`: one global bbox per cell.
+        let global = storeys
+            .iter()
+            .filter_map(storey_2d::bounding_box)
+            .fold(None, |acc, bb| union_bbox(acc, Some(bb)))
+            .expect("non-empty");
+        assert_eq!(
+            global,
+            ((0.0, 0.0), (3.0, 1.0)),
+            "global bbox spans both storeys"
+        );
+
+        let cell0 = egui::Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(200.0, 200.0));
+        let cell1 = egui::Rect::from_min_size(egui::pos2(200.0, 0.0), egui::vec2(200.0, 200.0));
+        let view = ViewParams::identity();
+        let t0 = fit_transform(cell0, global.0, global.1, view);
+        let t1 = fit_transform(cell1, global.0, global.1, view);
+
+        // (1) Shared scale: 1 m is the same number of pixels in both cells.
+        assert!(
+            (t0.scale() - t1.scale()).abs() < 1e-9,
+            "cells share one scale (t0={}, t1={})",
+            t0.scale(),
+            t1.scale()
+        );
+
+        // (2) Aligned: a point on the shared base (y=0) lands at the same pixel Y
+        // in both cells — storeys line up by their base, not floating centered.
+        let base0 = t0.apply(0.5, 0.0);
+        let base1 = t1.apply(0.5, 0.0);
+        assert!(
+            (base0.y - base1.y).abs() < 1e-3,
+            "shared base aligns across cells (y0={}, y1={})",
+            base0.y,
+            base1.y
+        );
+
+        // (3) Relative sizes read true: storey 1's 3 m wall spans 3× the pixels
+        // of storey 0's 1 m wall at the shared scale.
+        let span = |t: &Transform2d, w: f64| (t.apply(w, 0.0).x - t.apply(0.0, 0.0).x).abs();
+        assert!(
+            (span(&t0, 3.0) - 3.0 * span(&t0, 1.0)).abs() < 1e-3,
+            "3 m reads as 3× the pixels of 1 m"
+        );
     }
 }

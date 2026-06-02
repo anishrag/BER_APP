@@ -34,13 +34,27 @@ pub fn render(
     let n = ber.storeys.len() as f32;
     let label_h = 18.0_f32;
     let sub_w = rect.width() / n;
+    let plan_h = rect.height() - label_h;
+
+    // One shared fit box for every cell: the GLOBAL bbox (union of all storeys).
+    // Fitting each cell to this common frame — rather than to each storey's own
+    // footprint — gives every cell the SAME world→pixel scale AND the SAME world
+    // anchor. So relative sizes read true (a half-size storey is half-size) and
+    // shared geometry lines up across cells (e.g. each storey's base sits at the
+    // same height) instead of every footprint floating centered in its own cell.
+    let global_bbox = ber
+        .storeys
+        .iter()
+        .filter_map(|s| storey_2d::bounding_box(s))
+        .fold(None, |acc, bb| super::union_bbox(acc, Some(bb)));
+
     for (i, storey) in ber.storeys.iter().enumerate() {
         let left = rect.left() + sub_w * i as f32;
         let label_rect =
             egui::Rect::from_min_size(egui::pos2(left, rect.top()), egui::vec2(sub_w, label_h));
         let plan_rect = egui::Rect::from_min_size(
             egui::pos2(left, rect.top() + label_h),
-            egui::vec2(sub_w, rect.height() - label_h),
+            egui::vec2(sub_w, plan_h),
         );
         let label = if storey.name.is_empty() {
             format!("Storey {}", storey.storey_number + 1)
@@ -56,7 +70,8 @@ pub fn render(
         );
         // No collinearity highlight + no dimension labels in the overview —
         // those are edit-time signals tied to the active storey's controller
-        // state, which isn't meaningful here.
+        // state, which isn't meaningful here. The global bbox override gives the
+        // shared scale + alignment.
         storey_2d::render(
             painter,
             plan_rect,
@@ -66,6 +81,7 @@ pub fn render(
             &[],
             view,
             None,
+            global_bbox,
         );
     }
 }

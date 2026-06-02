@@ -23,6 +23,12 @@ use super::{color_for, draw_dashed_segment, fit_transform, style, Transform2d, V
 /// drawn first in a faint grey dashed style — a drawing aid when starting a
 /// new storey on top of an existing one. It also contributes to the fit
 /// bounding box, so an empty current storey still gets a sensible auto-fit.
+///
+/// `fit_bbox_override`, when set, is used as the fit bounding box instead of the
+/// storey's own (∪ watermark). The "All storeys" overview passes the GLOBAL
+/// bbox (union of every storey) here so all cells share one world→pixel mapping
+/// — same scale AND same anchor — making relative sizes and shared walls line
+/// up across cells rather than each storey floating centered in its own cell.
 #[allow(clippy::too_many_arguments)]
 pub fn render(
     painter: &egui::Painter,
@@ -33,13 +39,20 @@ pub fn render(
     dimensioned_walls: &[(usize, usize)],
     view: ViewParams,
     watermark_ring: Option<&[(f64, f64)]>,
+    fit_bbox_override: Option<((f64, f64), (f64, f64))>,
 ) {
     // Build the fit bbox from BOTH the storey and the watermark — a new (empty)
     // storey has no bbox of its own; the previous-storey watermark supplies one
-    // so the canvas isn't blank-with-a-floating-watermark.
-    let storey_bb = bounding_box(storey);
-    let watermark_bb = watermark_ring.and_then(ring_bbox);
-    let bb = super::union_bbox(storey_bb, watermark_bb);
+    // so the canvas isn't blank-with-a-floating-watermark. An explicit override
+    // (the All-storeys global bbox) wins over both.
+    let bb = match fit_bbox_override {
+        Some(o) => Some(o),
+        None => {
+            let storey_bb = bounding_box(storey);
+            let watermark_bb = watermark_ring.and_then(ring_bbox);
+            super::union_bbox(storey_bb, watermark_bb)
+        }
+    };
     let Some((min_xy, max_xy)) = bb else {
         // The mod-level dispatch already prints "no floor plan yet"; nothing to do.
         return;
