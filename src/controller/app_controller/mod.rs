@@ -46,6 +46,18 @@ const DEFAULT_CEILING_HEIGHT_M: f64 = 2.4;
 const COLLINEARITY_MIN_SEPARATION_RATIO: f32 = 0.0015;
 const COLLINEARITY_MAX_SEPARATION_RATIO: f32 = 0.09;
 
+/// Print a stroke as a `vec![p(x,y), …]` literal (matching the curve-debug
+/// dumps) so a whole session can be copy-pasted into a bit-for-bit integration
+/// test. Coordinates are whatever the caller passes — pixels for the initial
+/// outline draw, metres for the world-coord extend/trim strokes.
+fn dump_stroke(label: &str, pts: &[Point2f32]) {
+    let body: String = pts
+        .iter()
+        .map(|p| format!("p({:.3},{:.3}),", p.x, p.y))
+        .collect();
+    println!("  {label} stroke ({} pts): vec![{body}]", pts.len());
+}
+
 /// In-session state for the "is this pair of walls the same line?" review.
 /// Populated by `sketch_end_stroke` and consumed by `accept_current_review` /
 /// `reject_current_review`.
@@ -1355,6 +1367,7 @@ impl AppController {
     fn apply_drawperp_stroke(&mut self, points: &[Point2f32], closed: bool) -> Result<(), String> {
         // Snapshot pre-stroke (may be empty / pre-dim) for undo.
         let undo_snap = self.current_history_snapshot();
+        dump_stroke("draw-outline", points);
         println!(
             "[new-storey] PIXEL outline path: storey={:?}, {} points (this is the from-scratch \
              pixel path)",
@@ -1455,6 +1468,13 @@ impl AppController {
             self.current_storey_idx,
             world_points.len()
         );
+        dump_stroke(
+            "new-storey",
+            &world_points
+                .iter()
+                .map(|(x, y)| Point2f32::new(*x, *y))
+                .collect::<Vec<_>>(),
+        );
         // Run the engine's pixel-based close-check to learn whether the user
         // closed the loop; the pixel points themselves are discarded in favour
         // of the world points the UI already converted.
@@ -1505,22 +1525,112 @@ impl AppController {
         );
 
         let undo_snap = self.current_history_snapshot();
-        // Orthogonalize to the WORLD axes (not the stroke's dominant angle): the
-        // new storey lives in the previous storey's axis-aligned frame, so a
-        // slightly-rotated freehand trace must not tilt it — otherwise walls
-        // snapped onto the storey below wouldn't stay aligned with it.
+        let prev_plan = FloorPlan::from_clean_ring(&prev_ring)
+            .map_err(|e| format!("Failed to build reference outline: {:?}", e))?;
+
+        // Does the trace merely REPRODUCE the previous outline (following the
+        // boundary, with at most hand slop), or is there a SUSTAINED new excursion
+        // (an extension)? If there's no run of consecutive points sitting clearly
+        // off the boundary, copy the previous outline VERBATIM — carrying its
+        // exact linear representation up, curves and all, instead of
+        // orthogonalizing and squaring them off. A real extension (a sustained run
+        // of points well off the boundary) takes the orthogonalize path, which
+        // adds the new walls (squaring off only the freshly-drawn part).
+        //
+        // `NEW_WALL_TOL_M` is ABSOLUTE metres (this path is always metre-scale)
+        // and deliberately MUCH looser than the snap tolerance: tracing a curve
+        // freehand strays past the snap radius but stays within ~1 m of the
+        // boundary — that's still "following", not a new wall. Two-plus
+        // consecutive points beyond it are a genuine feature (a garage, a nib).
+        const NEW_WALL_TOL_M: f32 = 1.0;
+        // Measure reproduce-ness on the RAW trace, NOT the snapped one: the snap
+        // (radius ~0.08·diag) has already pulled a shallow setback wall ONTO the
+        // boundary, which would erase the very divergence we're testing for. A
+        // faithful trace strays only by hand slop (~0.1 m), so raw still reads as
+        // a reproduce; a deliberate setback shows up.
+        let off_run = prev_plan.longest_offring_run(&pts, NEW_WALL_TOL_M);
+        // A reproduce must ALSO cover the whole previous perimeter — a trace that
+        // SKIPS a chunk (stops early on a side, cuts a bulge off, overhangs a
+        // cut-out) isn't a reproduce. `cover_tol` is tighter than the snap radius
+        // (and capped in absolute metres) so a ~0.4 m setback on a small storey
+        // registers as unvisited rather than being absorbed as slop; faithful
+        // curve tracing stays well within it.
+        let cover_tol = (prev_diag * 0.05).clamp(0.05, 0.3);
+        let uncovered = prev_plan.uncovered_perimeter_run(&pts, cover_tol);
+        let uncovered_limit = prev_diag * 0.06;
+        let reproduces_outline = off_run < 2 && uncovered < uncovered_limit;
+        println!(
+            "[new-storey] reproduce check: longest off-ring run = {} pts (> {:.2} m off), \
+             largest unvisited boundary span = {:.2} m (limit {:.2} m) → {}",
+            off_run,
+            NEW_WALL_TOL_M,
+            uncovered,
+            uncovered_limit,
+            if reproduces_outline {
+                "REPRODUCE (copy verbatim, curves kept)"
+            } else {
+                "ORTHOGONALIZE (different storey — new walls / skipped boundary)"
+            }
+        );
+        self.dimensioning = DimensionState::default();
+        self.dimensioning.scale_set = true;
+        if reproduces_outline {
+            // Verbatim copy: the whole outline is shared → every param is known,
+            // nothing to dimension. The curve survives unchanged.
+            self.floor_plan = prev_plan;
+            self.dimensioning.known_params = self.floor_plan.all_active_params();
+            println!(
+                "[new-storey] trace reproduces the previous outline → copied verbatim ({} verts, curve preserved)",
+                self.floor_plan.get_points().len()
+            );
+            self.push_history_snapshot(undo_snap);
+            return self.commit_review_redimension();
+        }
+
+        // Partial-reproduce path: the storey is MOSTLY the one below but differs
+        // over a short run (a setback, an overhang). Splice — follow the previous
+        // outline VERBATIM (curves and all) where the trace hugs it, and square
+        // off only the diverging walls. Pass the RAW (un-snapped) trace so a
+        // diverging wall keeps its drawn position. Falls through to the
+        // whole-trace orthogonalize below if the trace doesn't decompose cleanly.
+        if let Some(spliced) = prev_plan.outline_following_trace(&pts, cover_tol, tol) {
+            match FloorPlan::from_clean_ring(&spliced) {
+                Ok(fp) => {
+                    self.floor_plan = fp;
+                    self.warn_if_non_orthogonal("draw outline (world, spliced)");
+                    self.dimensioning.known_params =
+                        prev_plan.params_pinned_to_outline(&self.floor_plan);
+                    let active = self.floor_plan.all_active_params();
+                    println!(
+                        "[new-storey] spliced outline: followed the previous boundary and squared \
+                         off only the new walls → {} verts, pinned {} of {} active params \
+                         ({} new wall param(s) left to dimension)",
+                        self.floor_plan.get_points().len(),
+                        self.dimensioning.known_params.len(),
+                        active.len(),
+                        active
+                            .len()
+                            .saturating_sub(self.dimensioning.known_params.len()),
+                    );
+                    self.push_history_snapshot(undo_snap);
+                    return self.commit_review_redimension();
+                }
+                Err(e) => println!(
+                    "[new-storey] splice built {} verts but they're not a simple ring ({:?}) \
+                     → falling back to orthogonalize",
+                    spliced.len(),
+                    e
+                ),
+            }
+        }
+
+        // Extension path: orthogonalize to the WORLD axes (not the stroke's
+        // dominant angle) so a slightly-rotated freehand trace can't tilt the
+        // storey off the frame below; pin the walls shared with the previous
+        // storey so dimensioning prompts only the genuinely-new ones.
         self.floor_plan = FloorPlan::from_points_to_world_orthogonal(&snapped, tol, closed)
             .map_err(|e| format!("Failed to draw outline: {:?}", e))?;
         self.warn_if_non_orthogonal("draw outline (world)");
-
-        // The outline is already in metres, so scale is set; pin the walls
-        // shared with the previous storey so dimensioning prompts only the new
-        // ones. Set this BEFORE maybe_start_dimensioning so it doesn't run the
-        // degenerate-cleanup rebuild (which would dangle the pinned param IDs).
-        let prev_plan = FloorPlan::from_clean_ring(&prev_ring)
-            .map_err(|e| format!("Failed to build reference outline: {:?}", e))?;
-        self.dimensioning = DimensionState::default();
-        self.dimensioning.scale_set = true;
         self.dimensioning.known_params = prev_plan.params_pinned_to_outline(&self.floor_plan);
         let active = self.floor_plan.all_active_params();
         println!(
@@ -1587,6 +1697,7 @@ impl AppController {
             .map(|(x, y)| Point2f32::new(*x, *y))
             .collect();
         println!("Extend stroke (world coords): {} points", pts.len());
+        dump_stroke("extend", &pts);
         if let Err(e) = self.apply_extend_stroke(&pts) {
             eprintln!("apply_extend_stroke: {}", e);
         }
@@ -1649,6 +1760,7 @@ impl AppController {
             .map(|(x, y)| Point2f32::new(*x, *y))
             .collect();
         println!("Trim stroke (world coords): {} points", pts.len());
+        dump_stroke("trim", &pts);
         if let Err(e) = self.apply_trim_stroke(&pts) {
             eprintln!("apply_trim_stroke: {}", e);
         }
@@ -2683,7 +2795,11 @@ mod trim_collapse_tests {
             "entering living-area mode arms the draw tool"
         );
         // Open L against the left + bottom walls: only the 2 NEW interior walls.
+        // An edge-to-edge stroke divides the storey, so it offers both regions to
+        // pick — tap inside the corner to keep that one.
         c.apply_living_area_stroke_event(&[(0.0, 4.0), (4.0, 4.0), (4.0, 0.0)]);
+        assert!(c.cut_pick_pending(), "the dividing L offers a region pick");
+        c.choose_cut_region(2.0, 2.0);
 
         assert_eq!(
             c.living_area_count(),
@@ -2727,8 +2843,10 @@ mod trim_collapse_tests {
 
         c.set_living_area_mode(true);
         // Corner room: only the two interior walls drawn; the left + bottom house
-        // walls (and the (0,0) corner) are filled in by the carve.
+        // walls (and the (0,0) corner) are filled in. The edge-to-edge stroke
+        // offers a region pick — tap inside the corner.
         c.apply_living_area_stroke_event(&[(0.0, 4.0), (4.0, 4.0), (4.0, 0.0)]);
+        c.choose_cut_region(2.0, 2.0);
         let before = c.living_area_polygons()[0].clone();
         assert_eq!(before.len(), 4, "full closed shape before save: {before:?}");
         // Finalise it so it's persisted (only finalised geometry is written).
@@ -3320,6 +3438,7 @@ mod trim_collapse_tests {
 
         c.set_living_area_mode(true);
         c.apply_living_area_stroke_event(&[(0.0, 4.0), (4.0, 4.0), (4.0, 0.0)]);
+        c.choose_cut_region(2.0, 2.0); // edge-to-edge stroke → pick the corner region
         assert_eq!(c.living_area_count(), 1);
         assert!(
             c.floor_plan.non_orthogonal_edges().is_empty(),
@@ -3645,6 +3764,117 @@ mod trim_collapse_tests {
         );
     }
 
+    /// A storey ~5 m across with a curved LEFT wall and a bulged RIGHT side.
+    /// Used to check the new-storey reproduce/splice decision at a realistic
+    /// small scale (where the snap radius is a large fraction of the plan).
+    fn bulged_storey_controller() -> AppController {
+        let p = |x: f32, y: f32| Point2f32::new(x, y);
+        let mut c = AppController::new(crate::engine::open_db(":memory:").unwrap());
+        let _ = c.create_ber(
+            "T".into(),
+            chrono::NaiveDate::from_ymd_opt(2026, 1, 1).unwrap(),
+        );
+        c.floor_plan = FloorPlan::from_clean_ring(&[
+            p(0., 0.),
+            p(3., 0.),
+            p(3.5, 1.5), // right side bulges OUT to x=3.5
+            p(3., 3.),
+            p(0., 3.),
+            p(-0.2, 2.2), // left side is a 3-facet curve bulging out
+            p(-0.3, 1.5),
+            p(-0.2, 0.8),
+        ])
+        .unwrap();
+        c.dimensioning.scale_set = true;
+        c.dimensioning.known_params = c.floor_plan.all_active_params();
+        c.commit_to_ber().unwrap();
+        c
+    }
+
+    /// A second storey that runs a STRAIGHT wall where the storey below bulges
+    /// out (a ~0.5 m setback) must NOT be mistaken for a faithful reproduction —
+    /// even though the setback is small relative to the snap radius. The curve on
+    /// the OTHER side, which the trace did follow, is preserved (spliced
+    /// verbatim, not squared). A genuinely faithful trace still reproduces.
+    #[test]
+    fn second_storey_setback_over_a_bulge_is_not_a_reproduce() {
+        let sample = |a: (f32, f32), b: (f32, f32), out: &mut Vec<(f32, f32)>| {
+            let steps = 30;
+            for s in 0..steps {
+                let f = s as f32 / steps as f32;
+                out.push((a.0 + f * (b.0 - a.0), a.1 + f * (b.1 - a.1)));
+            }
+        };
+        // Faithful trace: follow every wall, bulge and curve included.
+        let mut faithful = Vec::new();
+        for (a, b) in [
+            ((0., 0.), (3., 0.)),
+            ((3., 0.), (3.5, 1.5)),
+            ((3.5, 1.5), (3., 3.)),
+            ((3., 3.), (0., 3.)),
+            ((0., 3.), (-0.2, 2.2)),
+            ((-0.2, 2.2), (-0.3, 1.5)),
+            ((-0.3, 1.5), (-0.2, 0.8)),
+            ((-0.2, 0.8), (0., 0.)),
+        ] {
+            sample(a, b, &mut faithful);
+        }
+        faithful.push((0., 0.));
+
+        let mut cf = bulged_storey_controller();
+        let area0 = ring_area(&cf);
+        cf.add_storey().unwrap();
+        cf.apply_outline_world_inner(&faithful, true).unwrap();
+        assert!(
+            (ring_area(&cf) - area0).abs() < 0.2,
+            "a faithful trace reproduces the storey below verbatim"
+        );
+
+        // Setback trace: identical EXCEPT the right side is a straight wall at
+        // x=2.5 — a MID-span setback (not at the storey-below's corners), cutting
+        // off the bulge.
+        let mut setback = Vec::new();
+        for (a, b) in [
+            ((0., 0.), (2.5, 0.)),
+            ((2.5, 0.), (2.5, 3.)), // straight, set back from the bulge
+            ((2.5, 3.), (0., 3.)),
+            ((0., 3.), (-0.2, 2.2)),
+            ((-0.2, 2.2), (-0.3, 1.5)),
+            ((-0.3, 1.5), (-0.2, 0.8)),
+            ((-0.2, 0.8), (0., 0.)),
+        ] {
+            sample(a, b, &mut setback);
+        }
+        setback.push((0., 0.));
+
+        let mut cs = bulged_storey_controller();
+        cs.add_storey().unwrap();
+        cs.apply_outline_world_inner(&setback, true).unwrap();
+        // The mid-span setback wall is NEW — its position must be queried, not
+        // accepted as drawn (the parametric origin must land on a shared corner,
+        // not the new wall, or its position freezes as a constant).
+        assert!(
+            cs.dimensioning.current_prompt.is_some(),
+            "the new set-back wall's position is offered for dimensioning"
+        );
+        let pts = cs.floor_plan.get_points();
+        // The bulge apex is gone — the right wall was straightened.
+        assert!(
+            !pts.iter().any(|q| (q.x - 3.5).abs() < 0.2),
+            "the bulge the trace cut off is not reproduced"
+        );
+        // The LEFT curve the trace DID follow is preserved (diagonal facets kept).
+        assert!(
+            !cs.floor_plan.non_orthogonal_edges().is_empty(),
+            "the followed left curve is spliced verbatim, not squared off"
+        );
+        assert!(
+            ring_area(&cs) < area0 - 0.3,
+            "cutting the bulge reduced the footprint (got {} vs {area0})",
+            ring_area(&cs)
+        );
+    }
+
     /// The core feature: an upper storey that extends past the storey below
     /// (a bump-out over a ground-floor garage). The walls it shares with the
     /// storey below are pinned; the genuinely-new garage walls are NOT, so the
@@ -3816,6 +4046,155 @@ mod trim_collapse_tests {
         assert!(
             (area - 100.0).abs() < 1.0,
             "collapsed onto the previous base (y=0) → ~100 m² (got {area})"
+        );
+    }
+
+    /// Sample a vertex ring into a DENSE closed trace (~`step` spacing), the way
+    /// a real freehand outline stroke arrives — hundreds of points, not just the
+    /// corners. The new-storey reproduce/coverage check measures how closely the
+    /// trace hugs the boundary, which only behaves like real input when the trace
+    /// is sampled, not corner-to-corner.
+    fn densify_ring(verts: &[Point2f32], step: f32) -> Vec<(f32, f32)> {
+        let n = verts.len();
+        let mut out = Vec::new();
+        for i in 0..n {
+            let (a, b) = (verts[i], verts[(i + 1) % n]);
+            let len = ((a.x - b.x).powi(2) + (a.y - b.y).powi(2)).sqrt();
+            let nsamp = (len / step).ceil().max(1.0) as usize;
+            for s in 0..nsamp {
+                let f = s as f32 / nsamp as f32;
+                out.push((a.x + f * (b.x - a.x), a.y + f * (b.y - a.y)));
+            }
+        }
+        out.push((verts[0].x, verts[0].y));
+        out
+    }
+
+    /// Building a new storey by tracing over a storey that has a CURVED wall
+    /// copies that storey's exact (faceted) linear representation up — the curve
+    /// is preserved, not squared off into right angles. Reproduces the manual
+    /// session: storey 0 has a 3-facet rounded corner; the new storey traces the
+    /// same outline.
+    #[test]
+    fn new_storey_over_curved_storey_copies_curve_verbatim() {
+        let p = |x: f32, y: f32| Point2f32::new(x, y);
+        let mut c = AppController::new(crate::engine::open_db(":memory:").unwrap());
+        let _ = c.create_ber(
+            "T".into(),
+            chrono::NaiveDate::from_ymd_opt(2026, 1, 1).unwrap(),
+        );
+        // Storey 0: a 4x3 box whose top-right corner is rounded by 3 facets.
+        let curved = vec![
+            p(0., 0.),
+            p(4., 0.),
+            p(4., 2.0),
+            p(3.7, 2.6),
+            p(3.2, 2.9),
+            p(2.5, 3.0),
+            p(0., 3.0),
+        ];
+        c.floor_plan = FloorPlan::from_clean_ring(&curved).unwrap();
+        c.dimensioning.scale_set = true;
+        c.dimensioning.known_params = c.floor_plan.all_active_params();
+        c.commit_to_ber().unwrap();
+        let prev_nonortho = c.floor_plan.non_orthogonal_edges().len();
+        assert!(
+            prev_nonortho >= 2,
+            "storey 0 has a curved (non-orthogonal) run"
+        );
+
+        c.add_storey().unwrap();
+        // Trace the same outline DENSELY (as a real freehand stroke is), reproducing
+        // it with no real excursion.
+        let trace = densify_ring(&curved, 0.1);
+        c.apply_outline_world_inner(&trace, true).unwrap();
+
+        // The curve is carried up VERBATIM (not squared off): same number of
+        // non-orthogonal facet edges, every param pinned, nothing to dimension.
+        assert_eq!(
+            c.floor_plan.non_orthogonal_edges().len(),
+            prev_nonortho,
+            "curve facets preserved in the new storey (not squared off)"
+        );
+        assert!(c.dimensioning.scale_set);
+        assert!(
+            c.dimensioning.current_prompt.is_none(),
+            "whole outline shared → nothing to dimension"
+        );
+        let area = ring_area(&c);
+        let prev_area = {
+            let n = curved.len();
+            let mut a = 0.0;
+            for i in 0..n {
+                let j = (i + 1) % n;
+                a += curved[i].x * curved[j].y - curved[j].x * curved[i].y;
+            }
+            (a * 0.5).abs()
+        };
+        assert!(
+            (area - prev_area).abs() < 0.5,
+            "footprint matches the storey below (got {area}, expected {prev_area})"
+        );
+    }
+
+    /// Full process, the part that was broken: a finished (dimensioned, curved)
+    /// first storey, then a second storey traced over it with realistic hand
+    /// SLOP — points that stray past the snap radius (so they don't snap exactly)
+    /// but stay within the new-wall tolerance. That's loose tracing, not a new
+    /// wall, so the curve must still be followed verbatim. (The old
+    /// max-distance reproduce check mistook the stray for an excursion and
+    /// squared the curve off.)
+    #[test]
+    fn second_storey_follows_curve_despite_trace_slop() {
+        let p = |x: f32, y: f32| Point2f32::new(x, y);
+        let mut c = AppController::new(crate::engine::open_db(":memory:").unwrap());
+        let _ = c.create_ber(
+            "T".into(),
+            chrono::NaiveDate::from_ymd_opt(2026, 1, 1).unwrap(),
+        );
+        // Finished first storey: a 4x3 box with a 3-facet rounded corner.
+        let curved = vec![
+            p(0., 0.),
+            p(4., 0.),
+            p(4., 2.0),
+            p(3.7, 2.6),
+            p(3.2, 2.9),
+            p(2.5, 3.0),
+            p(0., 3.0),
+        ];
+        c.floor_plan = FloorPlan::from_clean_ring(&curved).unwrap();
+        c.dimensioning.scale_set = true;
+        c.dimensioning.known_params = c.floor_plan.all_active_params();
+        c.commit_to_ber().unwrap();
+        let curve_edges = c.floor_plan.non_orthogonal_edges().len();
+        assert!(curve_edges >= 2, "first storey has the curved run");
+        assert!(
+            c.dimensioning.current_prompt.is_none(),
+            "first storey fully dimensioned"
+        );
+
+        c.add_storey().unwrap();
+        // Trace the SAME outline densely, but TWO isolated points stray ~0.7 m off
+        // the boundary — past the snap radius (~0.4 m here), within the new-wall
+        // tolerance (1 m), with on-boundary neighbours either side. Hand jitter,
+        // not a sustained new wall, so the curve must still be followed verbatim.
+        let mut trace = densify_ring(&curved, 0.1);
+        let q = trace.len() / 4;
+        trace[q] = (trace[q].0, trace[q].1 - 0.7); // a point on the bottom strays down
+        let q3 = trace.len() * 3 / 4;
+        trace[q3] = (trace[q3].0 - 0.7, trace[q3].1); // a point on the left strays out
+        c.apply_outline_world_inner(&trace, true)
+            .expect("apply world outline");
+
+        // Curve followed verbatim; whole outline shared → nothing to dimension.
+        assert_eq!(
+            c.floor_plan.non_orthogonal_edges().len(),
+            curve_edges,
+            "the curve is followed despite slop (not squared off)"
+        );
+        assert!(
+            c.dimensioning.current_prompt.is_none(),
+            "whole outline shared → no dimension prompt"
         );
     }
 

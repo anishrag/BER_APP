@@ -858,8 +858,13 @@ fn storey_transform(
         return None;
     }
     let ber = ber?;
-    let storey = current_storey_idx.and_then(|i| ber.storeys.get(i))?;
-    let (min_xy, max_xy) = storey_2d::bounding_box(storey)?;
+    let idx = current_storey_idx?;
+    let storey = ber.storeys.get(idx)?;
+    // Use the SAME fit box the plan was drawn with — storey ∪ previous-storey
+    // watermark on any upper storey. Fitting the storey alone here (while the
+    // plan fit includes the watermark) gives the dimension-prompt arrow a
+    // different scale/origin than the geometry, so it lands off the wall.
+    let (min_xy, max_xy) = fit_bbox_for_storey(ber, idx)?;
     Some((storey, fit_transform(rect, min_xy, max_xy, view)))
 }
 

@@ -275,6 +275,7 @@ impl AppController {
         if pts.len() < 2 {
             return;
         }
+        dump_stroke("living-area", &pts);
         // Save the live buffer so the outline we clamp/split/carve against is
         // current.
         self.sync_active();

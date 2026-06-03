@@ -121,11 +121,14 @@ pub fn orthogonalize_open_path(
     crate::orthogonal::make_orthogonal(&simplified, tolerance)
 }
 
-/// Force a point's perpendicular coordinate onto an axis-aligned edge of
-/// `ring`, so a near-edge point sits exactly on the edge's line. For a
-/// horizontal edge that means matching the edge's `y`; for a vertical edge,
-/// its `x`. Used to pin an extend stroke's attach points onto their edges so
-/// they pick up the edge's perpendicular coordinate expression in the splice.
+/// Pin a near-edge point exactly onto an edge of `ring` by projecting it onto
+/// that edge's LINE — so it sits on the boundary while keeping its position
+/// along the edge. For an axis-aligned edge this is exactly "match the edge's
+/// perpendicular coordinate" (a horizontal edge fixes `y`, a vertical one `x`);
+/// for a DIAGONAL edge (a curve facet) it projects onto the slanted line rather
+/// than snapping to an axis, which would drag the point off the boundary. Used
+/// to pin attach/cut endpoints onto their edges so they line up with the spliced
+/// boundary — extend strokes attach to axis walls, a cut may reach a curve.
 pub fn pin_to_edge(p: &mut Point2f32, ring: &[Point2f32], edge: usize) {
     let n = ring.len();
     if n < 2 {
@@ -133,11 +136,17 @@ pub fn pin_to_edge(p: &mut Point2f32, ring: &[Point2f32], edge: usize) {
     }
     let a = ring[edge % n];
     let b = ring[(edge + 1) % n];
-    if (a.y - b.y).abs() <= (a.x - b.x).abs() {
-        p.y = a.y; // horizontal edge — perpendicular coord is y
-    } else {
-        p.x = a.x; // vertical edge — perpendicular coord is x
+    let (dx, dy) = (b.x - a.x, b.y - a.y);
+    let len2 = dx * dx + dy * dy;
+    if len2 < 1e-12 {
+        return; // degenerate edge — nothing to pin onto
     }
+    // Foot of the perpendicular from `p` to the line through a→b. For an axis
+    // edge this reduces to setting just the perpendicular coordinate (the
+    // parallel one projects back to itself), so axis behaviour is unchanged.
+    let t = ((p.x - a.x) * dx + (p.y - a.y) * dy) / len2;
+    p.x = a.x + t * dx;
+    p.y = a.y + t * dy;
 }
 
 /// Plan how an extend stroke splices into `ring`, replacing the SHORTER of the

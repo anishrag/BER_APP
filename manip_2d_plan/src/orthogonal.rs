@@ -180,6 +180,17 @@ pub fn rotate_to_corner_start(mut points: Vec<Point2f32>, tolerance: f32) -> Vec
     points
 }
 
+/// Tolerance for collinear removal over VERBATIM geometry — a ring that already
+/// contains intended outline/curve vertices (the carve/cut sub-area path), where
+/// only EXACTLY axis-aligned (≈0 off-axis) vertices should collapse. It must be
+/// tight: a curve's first/last facet is nearly tangent to the adjoining straight
+/// wall (a small off-axis delta), and a looser tolerance would mistake it for a
+/// collinear continuation and drop the curve-start corner. This is distinct from
+/// the freehand-orthogonalization callers (`make_orthogonal_at`,
+/// `finalize_closed_ring`), which deliberately pass the looser RDP `tolerance` to
+/// merge hand-drawn jitter while a stroke is being snapped to the axes.
+pub(crate) const EXACT_COLLINEAR_TOL: f32 = 1e-3;
+
 /// Remove vertices whose two incident edges share an axis. Treats the polygon
 /// as cyclic so the implicit closing edge from the last vertex back to the
 /// first counts. Iterates until stable — chains of 3+ collinear points

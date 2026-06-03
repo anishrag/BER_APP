@@ -334,8 +334,13 @@ impl FloorPlan {
         };
 
         let clean_tol = (area_diag * 0.005).max(1e-4);
+        // De-dup uses the loose tolerance (merge coincident jitter), but collinear
+        // removal uses `EXACT_COLLINEAR_TOL` because this ring contains VERBATIM
+        // outline/curve geometry — see that constant's docs for why a loose
+        // tolerance would drop a curve-start corner.
+        let collinear_tol = orthogonal::EXACT_COLLINEAR_TOL;
         let deduped = orthogonal::remove_duplicates(&snapped, clean_tol);
-        let cleaned = orthogonal::remove_collinear(&deduped, clean_tol);
+        let cleaned = orthogonal::remove_collinear(&deduped, collinear_tol);
         // Un-intersect: if the assembled ring folds over itself (e.g. the
         // boundary-aware loop placed a diagonal endpoint past an adjacent wall),
         // split it at the crossing and keep the larger loop, rather than
@@ -344,7 +349,7 @@ impl FloorPlan {
         let untangled = geom::untangle_ring(&cleaned);
         let cleaned = orthogonal::remove_collinear(
             &orthogonal::remove_duplicates(&untangled, clean_tol),
-            clean_tol,
+            collinear_tol,
         );
         if cleaned.len() < 3 {
             return Err(Error::ExtendError("living area collapsed to a line".into()));
@@ -495,11 +500,14 @@ impl FloorPlan {
         Some(out)
     }
 
-    /// Split the outline with a single straight CUT line into its TWO regions,
-    /// returned as independent `FloorPlan`s (so the caller can let the user pick
-    /// which side becomes the living area). Returns `None` when the stroke
-    /// isn't a straight cut whose ends reach two distinct points of the outline
-    /// (the caller then falls back to [`carve_subarea`](Self::carve_subarea)).
+    /// Split the outline with a CUT stroke into its TWO regions, returned as
+    /// independent `FloorPlan`s (so the caller can let the user pick which side
+    /// becomes the living area). The cut may be a straight line OR a STEPPED
+    /// (orthogonal, multi-leg) path — it's orthogonalized to the storey axes and
+    /// followed verbatim, so an L-shaped cut keeps its bend instead of being
+    /// flattened to a single axis. Returns `None` when the stroke is a loop, or
+    /// its two ends don't both reach the outline at distinct points (the caller
+    /// then falls back to [`carve_subarea`](Self::carve_subarea)).
     pub fn split_by_cut(
         &self,
         path: &[Point2f32],
@@ -509,88 +517,69 @@ impl FloorPlan {
         if ring.len() < 3 || path.len() < 2 {
             return Ok(None);
         }
-        let _ = tolerance;
-        // A cut is a THIN, OPEN stroke — a roughly axis-aligned line crossing
-        // the storey (not a loop, not a 2D region). Detect it from the bounding
-        // box so a hand-drawn line with wobble still counts (RDP may leave it
-        // with more than two points, which a strict "simplifies to 2" test
-        // would wrongly reject — sending it to the carve path, where it fails).
-        let (mut mnx, mut mny, mut mxx, mut mxy) = (f32::MAX, f32::MAX, f32::MIN, f32::MIN);
-        let (mut sx, mut sy) = (0.0f32, 0.0f32);
-        for p in path {
-            mnx = mnx.min(p.x);
-            mny = mny.min(p.y);
-            mxx = mxx.max(p.x);
-            mxy = mxy.max(p.y);
-            sx += p.x;
-            sy += p.y;
-        }
-        let (w, h) = (mxx - mnx, mxy - mny);
-        let span = w.max(h);
+        let diag = self.bounding_box_diagonal();
+        // A cut is an OPEN stroke (ends far apart) that divides the storey edge to
+        // edge — straight, stepped, or a balanced L (any number of orthogonal
+        // legs). A CLOSED loop (ends nearly meeting) is a drawn room → carve.
+        // Whether the open stroke actually reaches two DISTINCT outline edges is
+        // decided by the snap/reach check below; a free-standing interior path
+        // that doesn't reach the outline returns `None` and the caller carves.
+        let Some(((bnx, bny), (bxx, bxy))) = geom::bbox(path) else {
+            return Ok(None);
+        };
+        let span = (bxx - bnx).max(bxy - bny);
         if span < 1e-6 {
             return Ok(None);
         }
         let (a, b) = (path[0], path[path.len() - 1]);
         let ends_gap = ((a.x - b.x).powi(2) + (a.y - b.y).powi(2)).sqrt();
-        let thin = w.min(h) <= span * 0.3; // within ~17° of an axis
-        let open = ends_gap > span * 0.5; // a line, not a loop
-        if !(thin && open) {
-            return Ok(None); // a 2D region / loop → carve, not cut
+        if ends_gap <= span * 0.5 {
+            return Ok(None); // a loop / 2D blob → carve, not cut
         }
 
-        // Axis-snap the cut to a vertical or horizontal line (whichever the
-        // stroke runs along), then find where that line CROSSES the outline
-        // boundary — those crossings are the cut endpoints, landing exactly on
-        // whichever segment/diagonal the line actually cuts. (Snapping the drawn
-        // endpoints to the nearest edge mis-clamps near a corner where a segment
-        // meets a diagonal.)
-        let vertical = h >= w;
-        let line_coord = if vertical {
-            sx / path.len() as f32
-        } else {
-            sy / path.len() as f32
+        // Orthogonalize the cut to the storey axes. A path with a corner (≥3
+        // points) becomes a clean stepped polyline (the bend is KEPT); a straight
+        // cut collapses to two points snapped to the nearer axis. Simplify with a
+        // COARSE tolerance (relative to the cut's span) so hand wobble is dropped
+        // as noise — a real step is large relative to the span and survives,
+        // whereas a fixed fine tolerance would orthogonalize wobble into a
+        // spurious staircase.
+        let cut_tol = (span * 0.1).max(tolerance);
+        let simplified = match simplification::simplify_stroke(path, cut_tol) {
+            Ok(s) => s,
+            Err(Error::InsufficientPoints) => vec![path[0], path[path.len() - 1]],
+            Err(e) => return Err(e),
         };
-        let n = ring.len();
-        let mut crossings: Vec<(usize, f32, Point2f32)> = Vec::new();
-        for i in 0..n {
-            let p = ring[i];
-            let q = ring[(i + 1) % n];
-            let (pc, qc) = if vertical { (p.x, q.x) } else { (p.y, q.y) };
-            if (pc - qc).abs() < 1e-6 {
-                continue; // edge runs parallel to the cut — no single crossing
+        let mut opath = if simplified.len() >= 3 {
+            orthogonal::make_orthogonal_at(&simplified, cut_tol, 0.0)?
+        } else {
+            let (s, e) = (simplified[0], simplified[simplified.len() - 1]);
+            if (s.x - e.x).abs() <= (s.y - e.y).abs() {
+                let x = (s.x + e.x) * 0.5; // near-vertical → vertical cut
+                vec![Point2f32::new(x, s.y), Point2f32::new(x, e.y)]
+            } else {
+                let y = (s.y + e.y) * 0.5; // near-horizontal → horizontal cut
+                vec![Point2f32::new(s.x, y), Point2f32::new(e.x, y)]
             }
-            let t = (line_coord - pc) / (qc - pc);
-            if !(0.0..=1.0).contains(&t) {
-                continue;
-            }
-            crossings.push((
-                i,
-                t,
-                Point2f32::new(p.x + t * (q.x - p.x), p.y + t * (q.y - p.y)),
-            ));
-        }
-        if crossings.len() < 2 {
+        };
+        if opath.len() < 2 {
             return Ok(None);
         }
-        // The two crossings nearest the drawn endpoints (robust even if a
-        // non-convex outline is crossed more than twice).
-        let dist2 = |u: Point2f32, v: Point2f32| (u.x - v.x).powi(2) + (u.y - v.y).powi(2);
-        let near_a = *crossings
-            .iter()
-            .min_by(|c1, c2| dist2(c1.2, a).total_cmp(&dist2(c2.2, a)))
-            .unwrap();
-        let near_b = match crossings
-            .iter()
-            .filter(|c| !(c.0 == near_a.0 && (c.1 - near_a.1).abs() < 1e-4))
-            .min_by(|c1, c2| dist2(c1.2, b).total_cmp(&dist2(c2.2, b)))
-        {
-            Some(c) => *c,
-            None => return Ok(None),
-        };
-        let (e1, t1, e2, t2) = (near_a.0, near_a.1, near_b.0, near_b.1);
-        let opath = vec![near_a.2, near_b.2];
 
-        // The two regions = the cut plus each of the outline's two arcs.
+        // Both endpoints must reach the outline at two DISTINCT points; snap them
+        // exactly onto it so the cut divides the boundary cleanly.
+        let vertex_tol = (diag * 0.04).max(1e-4);
+        let reach_tol = (diag * 0.06).max(1e-3);
+        let last = opath.len() - 1;
+        let (e1, t1, d1, _) = extend::snap_to_polygon(&ring, opath[0], vertex_tol);
+        let (e2, t2, d2, _) = extend::snap_to_polygon(&ring, opath[last], vertex_tol);
+        if d1 > reach_tol || d2 > reach_tol || (e1 == e2 && (t1 - t2).abs() < 1e-3) {
+            return Ok(None);
+        }
+        extend::pin_to_edge(&mut opath[0], &ring, e1);
+        extend::pin_to_edge(&mut opath[last], &ring, e2);
+
+        // The two regions = the cut polyline + each of the outline's two arcs.
         let region = |replace_arc_1_to_2: bool| -> Result<Self, Error> {
             let seq = extend::splice_sequence(&ring, e1, t1, e2, t2, &opath, replace_arc_1_to_2);
             let pts: Vec<Point2f32> = seq
@@ -603,8 +592,8 @@ impl FloorPlan {
             if pts.len() < 3 {
                 return Err(Error::ExtendError("cut region collapsed".into()));
             }
-            // No wall-snapping: the cut endpoints are exact line/boundary
-            // crossings and the arc is the outline verbatim.
+            // No axis wall-snapping: the cut endpoints are pinned to the boundary
+            // and the kept arc is the outline verbatim (curves included).
             self.build_subarea_region(&pts, false, false)
         };
         Ok(Some((region(true)?, region(false)?)))
@@ -848,6 +837,42 @@ impl FloorPlan {
                     if let Some(pid) = area.vertex_y_param(0, idx) {
                         pinned.insert(pid);
                     }
+                }
+            }
+        }
+        // Per-VERTEX curve/diagonal pin: a region vertex sitting ON a
+        // non-axis-aligned outline edge (a CURVE facet or a diagonal) is fixed by
+        // that boundary, so pin both its coords. The edge-based diagonal pass
+        // above needs BOTH endpoints of one region edge on ONE outline edge — a
+        // curve defeats that, since consecutive region vertices sit on DIFFERENT
+        // facets. A slightly generous tolerance absorbs the minor perturbation
+        // the sub-area carve introduces along a faceted wall.
+        let facet_tol = (geom::bbox_diagonal(&outline) * 0.01).max(eps);
+        let on_seg_tol = |v: Point2f32, a: Point2f32, b: Point2f32| {
+            let (dx, dy) = (b.x - a.x, b.y - a.y);
+            let l2 = dx * dx + dy * dy;
+            if l2 < 1e-9 {
+                return false;
+            }
+            let t = ((v.x - a.x) * dx + (v.y - a.y) * dy) / l2;
+            if !(-0.02..=1.02).contains(&t) {
+                return false;
+            }
+            let (qx, qy) = (a.x + t * dx, a.y + t * dy);
+            (v.x - qx).abs() < facet_tol && (v.y - qy).abs() < facet_tol
+        };
+        for i in 0..n {
+            let v = apts[i];
+            let on_facet = (0..no).any(|j| {
+                let (oa, ob) = (outline[j], outline[(j + 1) % no]);
+                (oa.x - ob.x).abs() >= eps && (oa.y - ob.y).abs() >= eps && on_seg_tol(v, oa, ob)
+            });
+            if on_facet {
+                if let Some(pid) = area.vertex_x_param(0, i) {
+                    pinned.insert(pid);
+                }
+                if let Some(pid) = area.vertex_y_param(0, i) {
+                    pinned.insert(pid);
                 }
             }
         }
@@ -1474,6 +1499,431 @@ impl FloorPlan {
             }
         }
         false
+    }
+
+    /// Longest run of CONSECUTIVE `points` lying farther than `off_tol` from this
+    /// plan's outline ring (cyclic — the trace is a closed loop). Used by the
+    /// new-storey flow to tell a trace that FOLLOWS this boundary (only isolated
+    /// or short strays — hand slop, e.g. tracing a curve loosely → short run)
+    /// from one with a SUSTAINED excursion such as an extension (a long run of
+    /// points well off the boundary). A run-of-points test is robust where a
+    /// max-distance test isn't: one deep stray near a curve doesn't look like a
+    /// new wall, but several consecutive points clearly off the boundary do.
+    pub fn longest_offring_run(&self, points: &[Point2f32], off_tol: f32) -> usize {
+        let ring = self.parametric.ring_points(0);
+        let n = ring.len();
+        let m = points.len();
+        if n < 2 || m == 0 {
+            return 0;
+        }
+        let off: Vec<bool> = points
+            .iter()
+            .map(|p| {
+                let d = (0..n)
+                    .map(|i| geom::project_point_to_segment(*p, ring[i], ring[(i + 1) % n]).2)
+                    .fold(f32::MAX, f32::min);
+                d > off_tol
+            })
+            .collect();
+        if off.iter().all(|&b| b) {
+            return m;
+        }
+        let (mut best, mut cur) = (0usize, 0usize);
+        for k in 0..2 * m {
+            if off[k % m] {
+                cur += 1;
+                best = best.max(cur);
+            } else {
+                cur = 0;
+            }
+        }
+        best.min(m)
+    }
+
+    /// Longest contiguous span (by arc length) of this plan's outline that the
+    /// trace `points` did NOT follow — every point of it is farther than
+    /// `cover_tol` from the trace. Complements [`longest_offring_run`]: that
+    /// catches a trace going OUTSIDE the boundary (an extension); this catches
+    /// one that SKIPS part of it (stops early on a side, cuts a bulge off with a
+    /// straight wall, overhangs a cut-out). A reproduce must do neither. Cyclic;
+    /// `0.0` when fully followed.
+    ///
+    /// Works by SAMPLING the outline along its length and measuring each sample's
+    /// distance to the trace — NOT "is any trace point near this edge", which a
+    /// single trace point sitting on the edge's far ENDPOINT would satisfy even
+    /// when the trace never follows the edge's body (e.g. a straight wall meeting
+    /// a bulge only at the shared corners).
+    pub fn uncovered_perimeter_run(&self, points: &[Point2f32], cover_tol: f32) -> f32 {
+        let ring = self.parametric.ring_points(0);
+        let n = ring.len();
+        if n < 3 || points.is_empty() {
+            return 0.0;
+        }
+        let dist = |a: Point2f32, b: Point2f32| ((a.x - b.x).powi(2) + (a.y - b.y).powi(2)).sqrt();
+        // Distance from an outline sample to the nearest trace point.
+        let to_trace =
+            |q: Point2f32| -> f32 { points.iter().map(|p| dist(*p, q)).fold(f32::MAX, f32::min) };
+        // Sample each edge at ~cover_tol spacing; record (covered, arc length).
+        let step = cover_tol.max(1e-3);
+        let mut cov: Vec<(bool, f32)> = Vec::new();
+        for i in 0..n {
+            let (a, b) = (ring[i], ring[(i + 1) % n]);
+            let len = dist(a, b);
+            if len < 1e-6 {
+                continue;
+            }
+            let nsamp = (len / step).ceil().max(1.0) as usize;
+            let seg = len / nsamp as f32;
+            for s in 0..nsamp {
+                let f = (s as f32 + 0.5) / nsamp as f32;
+                let q = Point2f32::new(a.x + f * (b.x - a.x), a.y + f * (b.y - a.y));
+                cov.push((to_trace(q) <= cover_tol, seg));
+            }
+        }
+        if cov.is_empty() || cov.iter().all(|(c, _)| *c) {
+            return 0.0;
+        }
+        let total: f32 = cov.iter().map(|(_, l)| *l).sum();
+        if cov.iter().all(|(c, _)| !*c) {
+            return total;
+        }
+        let k = cov.len();
+        let (mut best, mut cur) = (0.0f32, 0.0f32);
+        for idx in 0..2 * k {
+            let (c, l) = cov[idx % k];
+            if c {
+                cur = 0.0;
+            } else {
+                cur += l;
+                best = best.max(cur);
+            }
+        }
+        best.min(total)
+    }
+
+    /// Build a new-storey outline that FOLLOWS this plan's outline where the
+    /// trace hugs it — copying the boundary VERBATIM, curve facets and all —
+    /// and replaces ONLY the spans where the trace diverges with orthogonalized
+    /// new walls. This is the partial-reproduce case: a storey that's mostly the
+    /// one below but differs over a short run (a setback, an overhang). Without
+    /// it, any divergence forces the WHOLE trace through orthogonalization, which
+    /// squares off curves the assessor carefully traced.
+    ///
+    /// `trace` is the RAW (un-snapped) freehand outline in this plan's metre
+    /// space — raw so a diverging wall keeps the drawn position, not a snapped-
+    /// onto-the-boundary one. A point within `follow_tol` of the boundary that
+    /// advances smoothly along it is "following"; a point off the boundary, or
+    /// one whose projected position jumps (a wall cutting across), is "free".
+    /// Following runs emit this plan's own vertices; free runs are orthogonalized
+    /// with `ortho_tol`. Returns `None` — caller falls back to a whole-trace
+    /// orthogonalize — when the trace doesn't split into a clean follow/diverge
+    /// alternation (all-following is a pure reproduce; none-following is a wholly
+    /// new shape; neither belongs here).
+    pub fn outline_following_trace(
+        &self,
+        trace: &[Point2f32],
+        follow_tol: f32,
+        ortho_tol: f32,
+    ) -> Option<Vec<Point2f32>> {
+        let ring = self.parametric.ring_points(0);
+        let n = ring.len();
+        if n < 3 || trace.len() < 4 {
+            return None;
+        }
+        let dist2 = |a: Point2f32, b: Point2f32| (a.x - b.x).powi(2) + (a.y - b.y).powi(2);
+        let elen: Vec<f32> = (0..n)
+            .map(|i| dist2(ring[i], ring[(i + 1) % n]).sqrt())
+            .collect();
+        let mut cum = vec![0.0f32; n];
+        for i in 1..n {
+            cum[i] = cum[i - 1] + elen[i - 1];
+        }
+        let perim = cum[n - 1] + elen[n - 1];
+        if perim <= 1e-4 {
+            return None;
+        }
+        // Project a point onto the nearest edge → (perimeter position, distance).
+        let project = |p: Point2f32| -> (f32, f32) {
+            let mut best = (0usize, 0.0f32, f32::MAX);
+            for i in 0..n {
+                let (_q, t, d) = geom::project_point_to_segment(p, ring[i], ring[(i + 1) % n]);
+                if d < best.2 {
+                    best = (i, t.clamp(0.0, 1.0), d);
+                }
+            }
+            (cum[best.0] + best.1 * elen[best.0], best.2)
+        };
+        // (perimeter pos, distance to boundary, raw point)
+        let mut sn: Vec<(f32, f32, Point2f32)> = trace
+            .iter()
+            .map(|&p| {
+                let (pos, d) = project(p);
+                (pos, d, p)
+            })
+            .collect();
+        let m = sn.len();
+        // Signed minimal circular delta a→b, in [-perim/2, perim/2].
+        let fwd = |a: f32, b: f32| -> f32 {
+            let mut d = b - a;
+            while d > perim * 0.5 {
+                d -= perim;
+            }
+            while d < -perim * 0.5 {
+                d += perim;
+            }
+            d
+        };
+        // Orient the trace so it advances FORWARD along the boundary.
+        let mut net = 0.0;
+        for k in 0..m - 1 {
+            if sn[k].1 <= follow_tol && sn[k + 1].1 <= follow_tol {
+                net += fwd(sn[k].0, sn[k + 1].0);
+            }
+        }
+        if net < 0.0 {
+            sn.reverse();
+        }
+        let _ = &fwd; // (direction already applied above)
+                      // Classify per-SEGMENT, not per-point: the segment from point k to k+1
+                      // "follows" the boundary when both endpoints AND its midpoint hug it. A
+                      // long straight chord sampled sparsely stays on its edge (midpoint on the
+                      // edge → following); a chord that cuts ACROSS (an overhang over a notch,
+                      // a setback) leaves the boundary at the midpoint → free. This is robust
+                      // to sampling density, where a per-point "smooth advance" test is not.
+        let seg_on = |k: usize| -> bool {
+            let a = sn[k].2;
+            let b = sn[(k + 1) % m].2;
+            if sn[k].1 > follow_tol || sn[(k + 1) % m].1 > follow_tol {
+                return false;
+            }
+            let mid = Point2f32::new((a.x + b.x) * 0.5, (a.y + b.y) * 0.5);
+            project(mid).1 <= follow_tol
+        };
+        let mut on: Vec<bool> = (0..m).map(seg_on).collect();
+        // Smooth out brief FOLLOWING grazes: a SHORT run of "following" segments
+        // flanked by diverging segments is a new wall momentarily running near
+        // the boundary (e.g. a cut wall passing within tolerance of an interior
+        // edge), NOT a real shared wall. Left split, it breaks one new wall into
+        // two — injecting a spurious vertex and extra dimension prompts. Flip
+        // such a run to diverging so the new wall stays one piece. (Rotate a free
+        // segment to index 0 first so no following run wraps the seam.)
+        if let Some(f0) = (0..m).find(|&k| !on[k]) {
+            sn.rotate_left(f0);
+            on.rotate_left(f0);
+            let seg_len = |k: usize| -> f32 {
+                let a = sn[k].2;
+                let b = sn[(k + 1) % m].2;
+                ((a.x - b.x).powi(2) + (a.y - b.y).powi(2)).sqrt()
+            };
+            // A graze runs roughly `feature + 2·follow_tol` long (the wall reads
+            // as "following" for ~follow_tol either side of where it's actually
+            // close), so the threshold must scale with follow_tol — a fixed
+            // fraction of the diagonal is too small. A real shared wall shorter
+            // than this, flanked by two new walls, would also be flipped (then
+            // dimensioned) — an acceptable trade vs. a split-in-two wall.
+            let graze_max = follow_tol * 3.5;
+            let mut i = 0;
+            while i < m {
+                if on[i] {
+                    let s = i;
+                    let mut e = i;
+                    while e + 1 < m && on[e + 1] {
+                        e += 1;
+                    }
+                    let len: f32 = (s..=e).map(seg_len).sum();
+                    if len < graze_max {
+                        for k in s..=e {
+                            on[k] = false;
+                        }
+                    }
+                    i = e + 1;
+                } else {
+                    i += 1;
+                }
+            }
+        }
+        let n_follow = on.iter().filter(|&&f| f).count();
+        println!(
+            "[splice] {m} trace segs: {n_follow} follow the boundary, {} diverge \
+             (follow_tol {follow_tol:.3} m)",
+            m - n_follow
+        );
+        // Need BOTH a following and a free segment to splice; else this isn't
+        // ours (all-on is a pure reproduce; none-on is a wholly new shape).
+        if !on.iter().any(|&f| f) || on.iter().all(|&f| f) {
+            println!(
+                "[splice] declined: {}",
+                if n_follow == 0 {
+                    "no segment follows the boundary (wholly new shape)"
+                } else {
+                    "every segment follows the boundary (a reproduce)"
+                }
+            );
+            return None;
+        }
+        // Rotate so segment 0 starts a following run (its point preceded by a
+        // free segment), so runs alternate starting on and ending free.
+        let start = match (0..m).find(|&k| on[k] && !on[(k + m - 1) % m]) {
+            Some(s) => s,
+            None => {
+                println!("[splice] declined: no free→follow boundary found");
+                return None;
+            }
+        };
+        sn.rotate_left(start);
+        on.rotate_left(start);
+        // Maximal alternating SEGMENT runs: (is_following, seg_start, seg_end).
+        let mut runs: Vec<(bool, usize, usize)> = Vec::new();
+        let mut i = 0;
+        while i < m {
+            let f = on[i];
+            let mut j = i;
+            while j + 1 < m && on[j + 1] == f {
+                j += 1;
+            }
+            runs.push((f, i, j));
+            i = j + 1;
+        }
+        // Point on the ring at perimeter position `pos`.
+        let r_point_at = |pos: f32| -> Point2f32 {
+            let pos = pos.rem_euclid(perim);
+            for i in 0..n {
+                if pos >= cum[i] - 1e-4 && pos <= cum[i] + elen[i] + 1e-4 {
+                    let t = if elen[i] > 1e-6 {
+                        ((pos - cum[i]) / elen[i]).clamp(0.0, 1.0)
+                    } else {
+                        0.0
+                    };
+                    let (a, b) = (ring[i], ring[(i + 1) % n]);
+                    return Point2f32::new(a.x + t * (b.x - a.x), a.y + t * (b.y - a.y));
+                }
+            }
+            ring[0]
+        };
+        // Ring vertices strictly inside the forward arc (p_from, p_to), in order
+        // — but ONLY the ones the trace actually VISITED. A vertex with no trace
+        // point within `follow_tol` is boundary the run's perimeter span wrapped
+        // OVER (a graze near an interior feature can make the projected position
+        // jump, so the forward span sweeps past walls the trace never traced).
+        // Emitting those would pull unvisited boundary (e.g. the storey-below's
+        // far side) into the new storey.
+        let ft2 = follow_tol * follow_tol;
+        let visited = |q: Point2f32| -> bool {
+            sn.iter()
+                .any(|s| (s.2.x - q.x).powi(2) + (s.2.y - q.y).powi(2) <= ft2)
+        };
+        let arc_vertices = |p_from: f32, p_to: f32| -> Vec<Point2f32> {
+            let span = (p_to - p_from).rem_euclid(perim);
+            let mut v: Vec<(f32, Point2f32)> = Vec::new();
+            for j in 0..n {
+                let d = (cum[j] - p_from).rem_euclid(perim);
+                if d > 1e-4 && d < span - 1e-4 && visited(ring[j]) {
+                    v.push((d, ring[j]));
+                }
+            }
+            v.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap());
+            v.into_iter().map(|(_, p)| p).collect()
+        };
+        // Splice: a following segment-run [sa..=sb] spans points sa..(sb+1) — emit
+        // the ring's own vertices over that arc (curve facets verbatim). A free
+        // run's interior points sa+1..=sb are the new wall — orthogonalize them,
+        // anchored to the ring points where the trace left and rejoins.
+        let mut out: Vec<Point2f32> = Vec::new();
+        for &(f, sa, sb) in &runs {
+            if f {
+                let (p_from, p_to) = (sn[sa].0, sn[(sb + 1) % m].0);
+                out.push(r_point_at(p_from));
+                out.extend(arc_vertices(p_from, p_to));
+                out.push(r_point_at(p_to));
+            } else {
+                let prev_pt = *out.last().unwrap_or(&r_point_at(sn[sa].0));
+                let next_pt = r_point_at(sn[(sb + 1) % m].0);
+                let mut seg = Vec::with_capacity(sb - sa + 2);
+                seg.push(prev_pt);
+                for k in (sa + 1)..=sb {
+                    seg.push(sn[k].2);
+                }
+                seg.push(next_pt);
+                // Orthogonalize this new wall in isolation. If it can't be
+                // (too few/degenerate points), connect the anchors straight —
+                // ONE bad run must not abort the whole splice.
+                let ortho = crate::extend::orthogonalize_open_path(&seg, ortho_tol)
+                    .unwrap_or_else(|_| vec![prev_pt, next_pt]);
+                // Interior vertices only — the endpoints belong to the arcs.
+                let upto = ortho.len().saturating_sub(1);
+                for p in ortho.iter().take(upto).skip(1) {
+                    out.push(*p);
+                }
+            }
+        }
+        // Square off the NEW walls. A free run that's a single straight wall is
+        // emitted between its two boundary anchors, which generally DON'T share a
+        // coordinate (they're wherever the trace left and rejoined) — so the wall
+        // comes out slightly tilted, and dimensioning an adjacent wall later flips
+        // its lean ("inverted on axis"). Snap any LONG, nearly-axis-aligned edge
+        // onto its axis (both endpoints share the perpendicular coord). The
+        // `long` gate protects the curve: its facets are short, so they're never
+        // snapped even though each is near-axis.
+        let (mut lo, mut hi) = (out[0], out[0]);
+        for p in &out {
+            lo = Point2f32::new(lo.x.min(p.x), lo.y.min(p.y));
+            hi = Point2f32::new(hi.x.max(p.x), hi.y.max(p.y));
+        }
+        let odiag = ((hi.x - lo.x).powi(2) + (hi.y - lo.y).powi(2)).sqrt();
+        let axis_tol = (odiag * 0.06).max(0.02);
+        let long = odiag * 0.2;
+        let k = out.len();
+        for i in 0..k {
+            let (a, b) = (out[i], out[(i + 1) % k]);
+            let (dx, dy) = ((a.x - b.x).abs(), (a.y - b.y).abs());
+            if dx < axis_tol && dy > long {
+                let mx = (a.x + b.x) * 0.5; // near-vertical → share x
+                out[i].x = mx;
+                out[(i + 1) % k].x = mx;
+            } else if dy < axis_tol && dx > long {
+                let my = (a.y + b.y) * 0.5; // near-horizontal → share y
+                out[i].y = my;
+                out[(i + 1) % k].y = my;
+            }
+        }
+        // Drop consecutive coincident vertices (arc endpoints meeting walls), and
+        // any closing duplicate.
+        let mut cleaned: Vec<Point2f32> = Vec::with_capacity(out.len());
+        for p in out {
+            if cleaned.last().map_or(true, |q| dist2(*q, p) > 1e-6) {
+                cleaned.push(p);
+            }
+        }
+        while cleaned.len() >= 2 && dist2(cleaned[0], *cleaned.last().unwrap()) <= 1e-6 {
+            cleaned.pop();
+        }
+        if cleaned.len() < 3 {
+            println!(
+                "[splice] declined: spliced ring collapsed to {} verts",
+                cleaned.len()
+            );
+            return None;
+        }
+        // Re-root the ring so vertex 0 — which becomes the parametric model's
+        // fixed CONSTANT origin — lands on a vertex SHARED with the previous
+        // outline (a genuinely fixed corner), never a NEW-WALL junction. A new
+        // wall's junction sits mid-shared-wall; if it were the origin its position
+        // would be frozen as a constant and couldn't be dimensioned. (Same intent
+        // as `build_subarea_region`'s corner-anchor step.)
+        if let Some(rk) = cleaned
+            .iter()
+            .position(|p| ring.iter().any(|o| dist2(*o, *p) < 1e-4))
+        {
+            cleaned.rotate_left(rk);
+        }
+        println!(
+            "[splice] built {} verts from {} runs ({} following, {} new-wall)",
+            cleaned.len(),
+            runs.len(),
+            runs.iter().filter(|r| r.0).count(),
+            runs.iter().filter(|r| !r.0).count(),
+        );
+        Some(cleaned)
     }
 
     /// Edges that are neither horizontal nor vertical (off by more than 1mm on
@@ -2161,6 +2611,375 @@ mod trim_tests {
 
     fn p(x: f32, y: f32) -> Point2f32 {
         Point2f32::new(x, y)
+    }
+
+    /// `outline_following_trace` keeps a CURVE the trace followed (the boundary
+    /// is copied verbatim there) while squaring off only a wall the trace added —
+    /// the partial-reproduce a whole-trace orthogonalize would have flattened.
+    #[test]
+    fn outline_following_trace_keeps_curve_and_squares_new_wall() {
+        // Previous storey: a box whose RIGHT side bulges out via diagonal facets
+        // (a persisted "curve"); everything else axis-aligned.
+        let prev_ring = vec![
+            p(0., 0.),
+            p(4., 0.),
+            p(4.3, 1.),
+            p(4.5, 2.),
+            p(4.3, 3.),
+            p(4., 4.),
+            p(0., 4.),
+        ];
+        let prev = FloorPlan::from_clean_ring(&prev_ring).unwrap();
+
+        // Trace: hug the whole outline, but on the BOTTOM edge dip into a 1 m-deep
+        // porch bump (a genuinely-new wall well off the boundary).
+        let sample = |a: Point2f32, b: Point2f32, out: &mut Vec<Point2f32>| {
+            let steps = 24;
+            for s in 0..steps {
+                let f = s as f32 / steps as f32;
+                out.push(p(a.x + f * (b.x - a.x), a.y + f * (b.y - a.y)));
+            }
+        };
+        let mut trace = Vec::new();
+        // bottom with a downward bump between x=1.5 and x=2.5
+        sample(p(0., 0.), p(1.5, 0.), &mut trace);
+        sample(p(1.5, 0.), p(1.5, -1.0), &mut trace);
+        sample(p(1.5, -1.0), p(2.5, -1.0), &mut trace);
+        sample(p(2.5, -1.0), p(2.5, 0.), &mut trace);
+        sample(p(2.5, 0.), p(4., 0.), &mut trace);
+        // up the curved right side, across the top, down the left — verbatim path
+        sample(p(4., 0.), p(4.3, 1.), &mut trace);
+        sample(p(4.3, 1.), p(4.5, 2.), &mut trace);
+        sample(p(4.5, 2.), p(4.3, 3.), &mut trace);
+        sample(p(4.3, 3.), p(4., 4.), &mut trace);
+        sample(p(4., 4.), p(0., 4.), &mut trace);
+        sample(p(0., 4.), p(0., 0.), &mut trace);
+
+        let out = prev
+            .outline_following_trace(&trace, 0.3, 0.05)
+            .expect("a follow/diverge trace should splice");
+        let spliced = FloorPlan::from_clean_ring(&out).unwrap();
+
+        // The curve survived: a diagonal (non-axis-aligned) edge remains.
+        assert!(
+            !spliced.non_orthogonal_edges().is_empty(),
+            "the followed curve facets must be preserved verbatim, not squared off"
+        );
+        // The bulge vertices are carried up verbatim.
+        let pts = spliced.get_points();
+        assert!(
+            pts.iter()
+                .any(|q| (q.x - 4.5).abs() < 1e-3 && (q.y - 2.0).abs() < 1e-3),
+            "the curve apex (4.5, 2.0) is copied from the storey below"
+        );
+        // The new porch bump is present (a wall well below the boundary).
+        assert!(
+            pts.iter().any(|q| q.y < -0.3),
+            "the diverging porch wall is kept (squared off, but present)"
+        );
+
+        // Contrast: a pure full-follow (no bump) is NOT ours — it's a reproduce.
+        let mut full = Vec::new();
+        sample(p(0., 0.), p(4., 0.), &mut full);
+        sample(p(4., 0.), p(4.3, 1.), &mut full);
+        sample(p(4.3, 1.), p(4.5, 2.), &mut full);
+        sample(p(4.5, 2.), p(4.3, 3.), &mut full);
+        sample(p(4.3, 3.), p(4., 4.), &mut full);
+        sample(p(4., 4.), p(0., 4.), &mut full);
+        sample(p(0., 4.), p(0., 0.), &mut full);
+        assert!(
+            prev.outline_following_trace(&full, 0.3, 0.05).is_none(),
+            "an all-following trace is a pure reproduce, not a splice"
+        );
+    }
+
+    /// A single cut wall that GRAZES an interior step of the storey below (runs
+    /// close and parallel to it for a stretch) must stay ONE wall — not split
+    /// into two by the brief "following" graze, which would inject a spurious
+    /// vertex and turn one dimension into three.
+    #[test]
+    fn outline_following_trace_keeps_a_grazing_cut_wall_whole() {
+        // Storey below: a box with the LEFT side curved, and a SMALL step on the
+        // right (an interior vertical edge at x=2.7, y 1.4→1.7).
+        let prev = FloorPlan::from_clean_ring(&[
+            p(0., 0.),
+            p(3., 0.),
+            p(3., 1.4),
+            p(2.7, 1.4),
+            p(2.7, 1.7),
+            p(3., 1.7),
+            p(3., 3.),
+            p(0., 3.),
+            p(-0.25, 2.2),
+            p(-0.35, 1.5),
+            p(-0.25, 0.8),
+        ])
+        .unwrap();
+
+        let sample = |a: Point2f32, b: Point2f32, out: &mut Vec<Point2f32>| {
+            for s in 0..40 {
+                let f = s as f32 / 40.0;
+                out.push(p(a.x + f * (b.x - a.x), a.y + f * (b.y - a.y)));
+            }
+        };
+        // Cut at x=2.6 — 0.1 m left of the step, so the wall grazes it for
+        // y 1.4→1.7 (within the follow tolerance).
+        let mut trace = Vec::new();
+        sample(p(0., 0.), p(2.6, 0.), &mut trace);
+        sample(p(2.6, 0.), p(2.6, 3.), &mut trace);
+        sample(p(2.6, 3.), p(0., 3.), &mut trace);
+        sample(p(0., 3.), p(-0.25, 2.2), &mut trace);
+        sample(p(-0.25, 2.2), p(-0.35, 1.5), &mut trace);
+        sample(p(-0.35, 1.5), p(-0.25, 0.8), &mut trace);
+        sample(p(-0.25, 0.8), p(0., 0.), &mut trace);
+
+        let out = prev
+            .outline_following_trace(&trace, 0.3, 0.05)
+            .expect("a cut past a step still splices");
+        let n = out.len();
+        // Exactly ONE long vertical wall (the cut) — not two split by the graze.
+        let cut_walls = (0..n)
+            .filter(|&i| {
+                let (a, b) = (out[i], out[(i + 1) % n]);
+                (a.x - b.x).abs() < 0.05 && (a.y - b.y).abs() > 1.5
+            })
+            .count();
+        assert_eq!(cut_walls, 1, "the grazing cut wall stays one piece");
+    }
+
+    /// A new wall that CROSSES interior edges of the storey below (e.g. a cut
+    /// that passes over a notch) must stay one clean wall — no spurious vertex
+    /// injected at each crossing, and the notch's interior vertices (which the
+    /// trace never visited) must not be pulled in.
+    #[test]
+    fn outline_following_trace_no_vertex_where_new_wall_crosses_below_storey() {
+        // Storey below: a box with a NOTCH on the right (interior horizontal
+        // edges at y=1 and y=2, x 2→4) and a curved LEFT side.
+        let prev = FloorPlan::from_clean_ring(&[
+            p(0., 0.),
+            p(4., 0.),
+            p(4., 1.),
+            p(2., 1.),
+            p(2., 2.),
+            p(4., 2.),
+            p(4., 3.),
+            p(0., 3.),
+            p(-0.25, 2.2),
+            p(-0.35, 1.5),
+            p(-0.25, 0.8),
+        ])
+        .unwrap();
+
+        let sample = |a: Point2f32, b: Point2f32, out: &mut Vec<Point2f32>| {
+            for s in 0..40 {
+                let f = s as f32 / 40.0;
+                out.push(p(a.x + f * (b.x - a.x), a.y + f * (b.y - a.y)));
+            }
+        };
+        // Cut straight up at x=3 — crosses the notch edges at (3,1) and (3,2).
+        let mut trace = Vec::new();
+        sample(p(0., 0.), p(3., 0.), &mut trace);
+        sample(p(3., 0.), p(3., 3.), &mut trace);
+        sample(p(3., 3.), p(0., 3.), &mut trace);
+        sample(p(0., 3.), p(-0.25, 2.2), &mut trace);
+        sample(p(-0.25, 2.2), p(-0.35, 1.5), &mut trace);
+        sample(p(-0.35, 1.5), p(-0.25, 0.8), &mut trace);
+        sample(p(-0.25, 0.8), p(0., 0.), &mut trace);
+
+        let out = prev
+            .outline_following_trace(&trace, 0.3, 0.05)
+            .expect("a cut over a notch still splices");
+        let n = out.len();
+        // No vertex at the crossings (3,1) / (3,2) — the cut wall isn't split.
+        for cross in [(3.0_f32, 1.0_f32), (3.0, 2.0)] {
+            assert!(
+                !out.iter()
+                    .any(|q| (q.x - cross.0).abs() < 0.1 && (q.y - cross.1).abs() < 0.1),
+                "no spurious vertex at the crossing {cross:?}"
+            );
+        }
+        // The notch's interior corners (x=2) were never traced → not pulled in.
+        assert!(
+            !out.iter()
+                .any(|q| (q.x - 2.0).abs() < 0.1 && (q.y - 1.0).abs() < 0.2),
+            "the unvisited notch interior is not included"
+        );
+        // The cut is still exactly ONE long vertical wall.
+        let cut_walls = (0..n)
+            .filter(|&i| {
+                let (a, b) = (out[i], out[(i + 1) % n]);
+                (a.x - b.x).abs() < 0.05 && (a.y - b.y).abs() > 1.5
+            })
+            .count();
+        assert_eq!(cut_walls, 1, "the cut crossing the notch stays one wall");
+    }
+
+    /// A new wall drawn TILTED (its two ends, where the trace left and rejoined
+    /// the boundary, don't share a coordinate) is squared onto its axis — so
+    /// dimensioning an adjacent wall later doesn't flip its lean and get rejected.
+    #[test]
+    fn outline_following_trace_squares_a_tilted_new_wall() {
+        // 3x3 box with a curved LEFT side (diagonal facets to preserve).
+        let prev = FloorPlan::from_clean_ring(&[
+            p(0., 0.),
+            p(3., 0.),
+            p(3., 3.),
+            p(0., 3.),
+            p(-0.25, 2.2),
+            p(-0.35, 1.5),
+            p(-0.25, 0.8),
+        ])
+        .unwrap();
+
+        let sample = |a: Point2f32, b: Point2f32, out: &mut Vec<Point2f32>| {
+            for s in 0..24 {
+                let f = s as f32 / 24.0;
+                out.push(p(a.x + f * (b.x - a.x), a.y + f * (b.y - a.y)));
+            }
+        };
+        // Follow the bottom, then a clearly-set-back right wall drawn with a
+        // TILT (x=2.5 at the bottom, x=2.6 at the top), then the top and the
+        // curved left side.
+        let mut trace = Vec::new();
+        sample(p(0., 0.), p(2.5, 0.), &mut trace);
+        sample(p(2.5, 0.), p(2.6, 3.), &mut trace);
+        sample(p(2.6, 3.), p(0., 3.), &mut trace);
+        sample(p(0., 3.), p(-0.25, 2.2), &mut trace);
+        sample(p(-0.25, 2.2), p(-0.35, 1.5), &mut trace);
+        sample(p(-0.35, 1.5), p(-0.25, 0.8), &mut trace);
+        sample(p(-0.25, 0.8), p(0., 0.), &mut trace);
+
+        let out = prev
+            .outline_following_trace(&trace, 0.3, 0.05)
+            .expect("a set-back right wall splices");
+        let n = out.len();
+        // The long near-vertical new wall is now EXACTLY vertical (dx≈0).
+        let tilted = (0..n).any(|i| {
+            let (a, b) = (out[i], out[(i + 1) % n]);
+            let (dx, dy) = ((a.x - b.x).abs(), (a.y - b.y).abs());
+            dy > 2.0 && dx > 1e-3 // a long vertical-ish wall still off-axis
+        });
+        assert!(!tilted, "the new wall was squared onto its axis");
+        // The left curve is still there.
+        assert!(
+            !FloorPlan::from_clean_ring(&out)
+                .unwrap()
+                .non_orthogonal_edges()
+                .is_empty(),
+            "the followed curve is preserved"
+        );
+    }
+
+    /// `uncovered_perimeter_run` flags a side of the outline the trace never
+    /// visited — what tells a real reproduce from a smaller storey that stops
+    /// early on a side (even when its new walls snap onto the outline elsewhere).
+    #[test]
+    fn uncovered_perimeter_run_detects_a_skipped_side() {
+        let outline =
+            FloorPlan::from_clean_ring(&[p(0., 0.), p(10., 0.), p(10., 10.), p(0., 10.)]).unwrap();
+        // Cover bottom, right, top — but NOT the left wall (x=0). Stay off the
+        // corners so the left edge truly has nothing within tolerance.
+        let mut pts = Vec::new();
+        for k in 1..20 {
+            let f = k as f32 * 0.5;
+            pts.push(p(f, 0.0)); // bottom
+            pts.push(p(10.0, f)); // right
+            pts.push(p(f, 10.0)); // top
+        }
+        let un = outline.uncovered_perimeter_run(&pts, 0.3);
+        assert!(
+            (un - 10.0).abs() < 1.0,
+            "the unvisited left wall (~10 m) is the gap, got {un}"
+        );
+        // Now trace the left wall too → fully covered.
+        for k in 1..20 {
+            pts.push(p(0.0, k as f32 * 0.5));
+        }
+        assert!(
+            outline.uncovered_perimeter_run(&pts, 0.3) < 1.0,
+            "fully covered now"
+        );
+    }
+
+    /// A living area cut from a storey with a CURVED wall must follow the whole
+    /// curve — including the curve-START corner where the straight wall meets the
+    /// first (gentle, near-tangent) facet. That facet's small off-axis delta was
+    /// previously mistaken for "collinear" with the straight wall and the corner
+    /// dropped, so the region skipped a vertex and stopped hugging the boundary.
+    #[test]
+    fn cut_region_follows_curve_including_the_start_vertex() {
+        // Box whose top-left is a curve down to (0, 2.5); the LAST facet
+        // (0.015,2.6)->(0,2.5) is nearly tangent to the straight left wall below.
+        let outline = FloorPlan::from_clean_ring(&[
+            p(0., 0.),
+            p(4., 0.),
+            p(4., 4.),
+            p(1., 4.),
+            p(0.5, 3.6),
+            p(0.2, 3.0),
+            p(0.015, 2.6),
+            p(0., 2.5),
+        ])
+        .unwrap();
+        // Sanity: the outline itself keeps the curve-start corner.
+        let has = |r: &[Point2f32], x: f32, y: f32| {
+            r.iter()
+                .any(|q| (q.x - x).abs() < 2e-2 && (q.y - y).abs() < 2e-2)
+        };
+        assert!(
+            has(&outline.get_points(), 0.0, 2.5),
+            "outline keeps the curve-start corner"
+        );
+        // Vertical cut at x=2 → left (curved) region + right region.
+        let cut = vec![p(2., 0.2), p(2., 3.8)];
+        let (ra, rb) = outline
+            .split_by_cut(&cut, 0.05)
+            .unwrap()
+            .expect("vertical cut splits the storey");
+        // The region carrying the curve must still include the curve-start corner.
+        let left = if has(&ra.get_points(), 1.0, 4.0) {
+            ra.get_points()
+        } else {
+            rb.get_points()
+        };
+        assert!(has(&left, 1.0, 4.0), "curved region has a curve point");
+        assert!(
+            has(&left, 0.0, 2.5),
+            "curved region includes the curve-start corner (not skipped): {left:?}"
+        );
+    }
+
+    /// A living-area vertex that sits MID-facet on the storey's curved/slanted
+    /// boundary is pinned (so the curve-following wall isn't prompted) even
+    /// though it's neither an outline corner nor part of a region edge lying on a
+    /// single outline diagonal — the cases the older passes handle.
+    #[test]
+    fn params_pinned_includes_a_vertex_on_a_curve_facet() {
+        // Outline: box with a slanted (faceted) top-right edge (4,3)->(2,4).
+        let outline =
+            FloorPlan::from_clean_ring(&[p(0., 0.), p(4., 0.), p(4., 3.), p(2., 4.), p(0., 4.)])
+                .unwrap();
+        // Area whose top-right corner sits MID-facet at (3, 3.5); its other
+        // corners are free interior points and its edges there are axis-aligned,
+        // so only the per-vertex facet pass can pin it.
+        let area =
+            FloorPlan::from_clean_ring(&[p(1., 2.), p(3., 2.), p(3., 3.5), p(1., 3.5)]).unwrap();
+        let pts = area.get_points();
+        let idx = pts
+            .iter()
+            .position(|q| (q.x - 3.0).abs() < 1e-3 && (q.y - 3.5).abs() < 1e-3)
+            .expect("area has the mid-facet vertex");
+        let pinned = outline.params_pinned_to_outline(&area);
+        let xp = area.vertex_x_param(0, idx);
+        let yp = area.vertex_y_param(0, idx);
+        assert!(
+            xp.is_some_and(|p| pinned.contains(&p)),
+            "mid-facet vertex's x param is pinned"
+        );
+        assert!(
+            yp.is_some_and(|p| pinned.contains(&p)),
+            "mid-facet vertex's y param is pinned"
+        );
     }
 
     /// `from_points_to_world_orthogonal` aligns a rotated trace to the world
@@ -3026,9 +3845,84 @@ mod cut_line_tests {
         a.validate_simple().unwrap();
         b.validate_simple().unwrap();
 
-        // A stroke with interior corners is NOT a straight cut.
+        // A balanced L stroke is also a cut (offers both regions to pick),
+        // following its bend rather than flattening — see `stepped_cut_follows_its_jog`.
         let bent = vec![p(3.0, 0.05), p(3.0, 3.0), p(6.0, 3.0), p(6.0, 5.95)];
-        assert!(outline.split_by_cut(&bent, 0.1).unwrap().is_none());
+        assert!(outline.split_by_cut(&bent, 0.1).unwrap().is_some());
+    }
+
+    /// A cut whose endpoint lands on a DIAGONAL outline wall (a curve facet)
+    /// must meet that wall ON it — not be dragged onto an axis. Reproduces the
+    /// report that one of the two offered regions "didn't follow the boundary":
+    /// `pin_to_edge` axis-snapped a cut endpoint sitting on a diagonal facet,
+    /// pulling it off the boundary for the region that keeps that arc.
+    #[test]
+    fn cut_endpoint_on_a_diagonal_wall_stays_on_it() {
+        // House with a slanted (diagonal) roof wall from (6,4) to (3,7).
+        let outline =
+            FloorPlan::from_clean_ring(&[p(0., 0.), p(6., 0.), p(6., 4.), p(3., 7.), p(0., 4.)])
+                .unwrap();
+        // Vertical cut from the bottom up to the diagonal: at x≈4 the diagonal
+        // sits at y=6, so the top endpoint must land near (4, 6) — NOT (4, 4),
+        // where an axis-snap of the (more-horizontal-than-vertical) diagonal
+        // would drop it.
+        let stroke = vec![p(4.0, 0.05), p(4.0, 5.9)];
+        let (a, b) = outline
+            .split_by_cut(&stroke, 0.1)
+            .unwrap()
+            .expect("a vertical cut reaching the diagonal is a cut");
+        let on_diag = |r: &FloorPlan| {
+            r.polygons()[0]
+                .iter()
+                .any(|v| (v.x - 4.0).abs() < 0.2 && (v.y - 6.0).abs() < 0.25)
+        };
+        assert!(
+            on_diag(&a) && on_diag(&b),
+            "both regions meet the cut ON the diagonal (~4,6), not axis-snapped to (4,4)"
+        );
+        a.validate_simple().unwrap();
+        b.validate_simple().unwrap();
+    }
+
+    /// A THIN cut with a real orthogonal STEP (one dominant axis plus a short
+    /// jog) is followed verbatim — the bend is kept, not flattened to a single
+    /// axis line. Reproduces the report where an ortho cut "ignored the
+    /// horizontal leg and split vertically".
+    #[test]
+    fn stepped_cut_follows_its_jog() {
+        let outline = FloorPlan::from_points_to_orthogonal(
+            &[p(0., 0.), p(10., 0.), p(10., 6.), p(0., 6.), p(0.1, 0.1)],
+            0.2,
+            true,
+        )
+        .unwrap();
+        // Up the bottom at x=3 to y=4, jog right to x=4, up to the top — thin
+        // overall (1 m jog on a 6 m cut) but the jog is real.
+        let stepped = vec![p(3.0, 0.05), p(3.0, 4.0), p(4.0, 4.0), p(4.0, 5.95)];
+        let (a, b) = outline
+            .split_by_cut(&stepped, 0.1)
+            .unwrap()
+            .expect("a thin stepped stroke is still a cut");
+        let has = |r: &FloorPlan, x: f32, y: f32| {
+            r.polygons()[0]
+                .iter()
+                .any(|v| (v.x - x).abs() < 0.15 && (v.y - y).abs() < 0.15)
+        };
+        // One region carries the cut polyline → it must contain BOTH step corners
+        // (3,4) and (4,4); a flattened single-axis cut would have neither.
+        let region = if has(&a, 3.0, 4.0) { &a } else { &b };
+        assert!(
+            has(region, 3.0, 4.0) && has(region, 4.0, 4.0),
+            "the cut follows its jog (keeps both step corners)"
+        );
+        // Regions still tile the whole storey.
+        let total = polygon_area(&a.polygons()[0]).abs() + polygon_area(&b.polygons()[0]).abs();
+        assert!(
+            (total - 60.0).abs() < 1.0,
+            "regions tile the 10x6 storey: {total}"
+        );
+        a.validate_simple().unwrap();
+        b.validate_simple().unwrap();
     }
 
     /// Reproduces the reported bug: a storey with diagonal trim-cut corners. A
