@@ -939,29 +939,33 @@ impl AppController {
         while record.data.storeys.len() <= idx {
             record.data.storeys.push(Storey::default());
         }
-        if polygons_f64.iter().any(|p| p.len() >= 3) {
-            record.data.storeys[idx].floors = FloorRegions::from_vertex_lists(
-                polygons_f64,
-                DEFAULT_CEILING_HEIGHT_M,
-                None,
-                None,
-                None,
-            );
-        }
-        record.data.storeys[idx].living_areas = FloorRegions::from_vertex_lists(
-            living_area_lists,
-            DEFAULT_CEILING_HEIGHT_M,
-            None,
-            None,
-            None,
+        // Fresh geometry points at the default (unset) shared constructions; a
+        // marked wall that gets split inherits its source region's construction
+        // via `rebuild_preserving`, so only genuinely-new walls land on this one.
+        let floor_cid = record.data.ensure_floor_construction(
+            Default::default(),
+            Default::default(),
+            Default::default(),
         );
+        let wall_cid = record.data.ensure_wall_construction(
+            Default::default(),
+            Default::default(),
+            Default::default(),
+        );
+        if polygons_f64.iter().any(|p| p.len() >= 3) {
+            record.data.storeys[idx].floors =
+                FloorRegions::from_vertex_lists(polygons_f64, DEFAULT_CEILING_HEIGHT_M, floor_cid);
+        }
+        record.data.storeys[idx].living_areas =
+            FloorRegions::from_vertex_lists(living_area_lists, DEFAULT_CEILING_HEIGHT_M, floor_cid);
         // Re-derive walls from exposure (empty when nothing is marked),
-        // preserving the fabric properties of the region a split came from.
+        // preserving the construction link of the region a split came from.
         record.data.storeys[idx].walls = WallRegions::rebuild_preserving(
             wall_segments,
             &record.data.storeys[idx].walls,
             0.0,
             DEFAULT_CEILING_HEIGHT_M,
+            wall_cid,
         );
 
         self.persist()
@@ -979,36 +983,38 @@ impl AppController {
         };
         let mut out = record.clone();
         let idx = self.current_storey_idx.unwrap_or(0);
-        if let Some(storey) = out.data.storeys.get_mut(idx) {
-            if self.outline_finalised() {
-                // Outline is metric + fully dimensioned → keep its floors/walls,
-                // and persist only the living areas that are themselves done.
-                let lists: Vec<Vec<Point2f64>> = self
-                    .living_areas
-                    .iter()
-                    .filter(|s| shape_finalised(&s.dimensioning, &s.floor_plan))
-                    .map(|s| {
-                        s.floor_plan
-                            .get_points()
-                            .into_iter()
-                            .map(|p| Point2f64::new(p.x as f64, p.y as f64))
-                            .collect()
-                    })
-                    .collect();
-                storey.living_areas = FloorRegions::from_vertex_lists(
-                    lists,
-                    DEFAULT_CEILING_HEIGHT_M,
-                    None,
-                    None,
-                    None,
-                );
-            } else {
-                // Outline not finalised → persist no geometry yet (it's likely
-                // still in pixels; living areas can't be metric before it is).
-                storey.floors = FloorRegions::default();
-                storey.walls = WallRegions::default();
-                storey.living_areas = FloorRegions::default();
+        if self.outline_finalised() {
+            // Outline is metric + fully dimensioned → keep its floors/walls,
+            // and persist only the living areas that are themselves done.
+            let lists: Vec<Vec<Point2f64>> = self
+                .living_areas
+                .iter()
+                .filter(|s| shape_finalised(&s.dimensioning, &s.floor_plan))
+                .map(|s| {
+                    s.floor_plan
+                        .get_points()
+                        .into_iter()
+                        .map(|p| Point2f64::new(p.x as f64, p.y as f64))
+                        .collect()
+                })
+                .collect();
+            // `ensure_*` borrows `out.data`, so resolve the id before the
+            // storey borrow below.
+            let floor_cid = out.data.ensure_floor_construction(
+                Default::default(),
+                Default::default(),
+                Default::default(),
+            );
+            if let Some(storey) = out.data.storeys.get_mut(idx) {
+                storey.living_areas =
+                    FloorRegions::from_vertex_lists(lists, DEFAULT_CEILING_HEIGHT_M, floor_cid);
             }
+        } else if let Some(storey) = out.data.storeys.get_mut(idx) {
+            // Outline not finalised → persist no geometry yet (it's likely
+            // still in pixels; living areas can't be metric before it is).
+            storey.floors = FloorRegions::default();
+            storey.walls = WallRegions::default();
+            storey.living_areas = FloorRegions::default();
         }
         BerRepository::new(&self.conn)
             .upsert(&out)
@@ -3156,33 +3162,51 @@ mod trim_collapse_tests {
         let len = ((b0.x - a0.x).powi(2) + (b0.y - a0.y).powi(2)).sqrt();
 
         c.set_exposure_mode(true);
-        // Mark wall0 whole so it derives to a region we can set a property on.
+        // Mark wall0 whole so it derives to a region we can attach a construction to.
         c.exposure_pointer_down(mid.0 as f64, mid.1 as f64, 0.5);
         c.set_wall_exposure(WallExposure::Exposed);
-        // Set a construction + description on wall0's region (derived first).
-        {
-            let walls = &mut c.current_record.as_mut().unwrap().data.storeys[0].walls;
-            walls.regions[0].construction_type = WallConstructionType::CavityWall;
-            walls.regions[0].base.description = Some("party".into());
-        }
+        // Point wall0's region at a known (non-default) shared construction, and
+        // give that construction a description.
+        let cid = {
+            let record = c.current_record.as_mut().unwrap();
+            let cid = record.data.ensure_wall_construction(
+                WallConstructionType::CavityWall,
+                Default::default(),
+                Default::default(),
+            );
+            record
+                .data
+                .wall_constructions
+                .iter_mut()
+                .find(|wc| wc.base.id == cid)
+                .unwrap()
+                .base
+                .description = Some("party".into());
+            record.data.storeys[0].walls.regions[0].construction_id = cid;
+            cid
+        };
 
         // Split wall0: mark the middle semi-exposed.
         c.exposure_pointer_down(mid.0 as f64, mid.1 as f64, 0.5);
         c.set_exposure_section_range(len * 0.2, len * 0.5);
         c.set_wall_exposure(WallExposure::SemiExposed);
 
-        // wall0 is now 3 regions (derived first) — all inherit the construction.
-        let r = &c.current_record.as_ref().unwrap().data.storeys[0]
-            .walls
-            .regions;
+        // wall0 is now 3 regions (derived first) — all inherit the SAME shared
+        // construction id; only exposure differs.
+        let record = c.current_record.as_ref().unwrap();
+        let r = &record.data.storeys[0].walls.regions;
         for i in 0..3 {
-            assert_eq!(
-                r[i].construction_type,
-                WallConstructionType::CavityWall,
-                "piece {i} keeps construction"
-            );
-            assert_eq!(r[i].base.description.as_deref(), Some("party"), "piece {i}");
+            assert_eq!(r[i].construction_id, cid, "piece {i} keeps construction");
         }
+        // The shared construction still carries its type + description.
+        let wc = record
+            .data
+            .wall_constructions
+            .iter()
+            .find(|wc| wc.base.id == cid)
+            .unwrap();
+        assert_eq!(wc.construction_type, WallConstructionType::CavityWall);
+        assert_eq!(wc.base.description.as_deref(), Some("party"));
         assert_eq!(r[1].exposure, WallExposure::SemiExposed, "middle is semi");
     }
 

@@ -2,6 +2,7 @@
 use geo::{Coord, LineString, Polygon};
 use serde::{Deserialize, Serialize};
 
+use super::ber_struct::Ber;
 use super::common::{ConstructionPhase, Item, ItemId, Photo};
 use super::fenestration::{Door, Window};
 
@@ -74,19 +75,20 @@ pub enum FloorConstructionType {
 }
 
 /// Construction types (example: 5-6 options)
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub enum CeilingConstructionType {
     FlatRoof,
     SlopedInsOnRafter,
     SlopedInsOnCeiling,
     SlopedInsOnCeilingAndRafter,
     NonHeatLossCeiling,
+    #[default]
     Uninitialised,
     Other,
 }
 
 /// Wall construction types
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub enum WallConstructionType {
     CavityWall,
     FilledCavityWall,
@@ -94,6 +96,7 @@ pub enum WallConstructionType {
     TimberConstruction,
     ICF,
     Floor,
+    #[default]
     Uninitialised,
 }
 
@@ -116,17 +119,21 @@ pub struct RoofData {
     pub construction_type: CeilingConstructionType,
 }
 
+/// Shared construction identity + fabric properties. A handful of these exist
+/// per dwelling (e.g. "300mm filled cavity, original"); many regions reference
+/// one by `construction_id`. Geometry (polygon, exposure, openings) lives on the
+/// *region*, not here — so splitting a wall into exposure sections, or reusing
+/// the same make-up on several storeys, keeps a single shared construction.
 #[derive(Clone, Debug, Serialize, Deserialize, Default)]
-pub struct RegionBase {
+pub struct ConstructionBase {
     pub id: ItemId,
     pub construction_makeup: ConstructionMakeup,
     pub construction_phase: ConstructionPhase,
-    pub opes: Opes,
     pub photos: Vec<Photo>,
     pub description: Option<String>,
 }
 
-impl RegionBase {
+impl ConstructionBase {
     pub fn clone_with_new_id(&self) -> Self {
         Self {
             id: ItemId::default(),
@@ -134,13 +141,126 @@ impl RegionBase {
         }
     }
 }
-/// A planar region of the floor
+
+/// A wall construction shared by one or more `WallRegion`s.
+#[derive(Clone, Debug, Serialize, Deserialize, Default)]
+pub struct WallConstruction {
+    pub base: ConstructionBase,
+    pub construction_type: WallConstructionType,
+}
+
+/// A floor construction shared by one or more `FloorRegion`s.
+#[derive(Clone, Debug, Serialize, Deserialize, Default)]
+pub struct FloorConstruction {
+    pub base: ConstructionBase,
+    pub construction_type: FloorConstructionType,
+}
+
+/// A ceiling/roof construction shared by one or more `CeilingRegion`s.
+#[derive(Clone, Debug, Serialize, Deserialize, Default)]
+pub struct CeilingConstruction {
+    pub base: ConstructionBase,
+    pub construction_type: CeilingConstructionType,
+}
+
+/// House-level construction registry. Regions reference a construction by id;
+/// these find-or-create it so many regions share one entry instead of
+/// duplicating fabric (the inverse — grouping for DEAP export — then just reads
+/// back the shared constructions).
+impl Ber {
+    /// Find a wall construction matching `(construction_type, makeup, phase)`,
+    /// else create and append one. Returns its id.
+    pub fn ensure_wall_construction(
+        &mut self,
+        construction_type: WallConstructionType,
+        makeup: ConstructionMakeup,
+        phase: ConstructionPhase,
+    ) -> ItemId {
+        if let Some(c) = self.wall_constructions.iter().find(|c| {
+            c.construction_type == construction_type
+                && c.base.construction_makeup == makeup
+                && c.base.construction_phase == phase
+        }) {
+            return c.base.id;
+        }
+        let c = WallConstruction {
+            base: ConstructionBase {
+                construction_makeup: makeup,
+                construction_phase: phase,
+                ..Default::default()
+            },
+            construction_type,
+        };
+        let id = c.base.id;
+        self.wall_constructions.push(c);
+        id
+    }
+
+    /// Find a floor construction matching `(construction_type, makeup, phase)`,
+    /// else create and append one. Returns its id.
+    pub fn ensure_floor_construction(
+        &mut self,
+        construction_type: FloorConstructionType,
+        makeup: ConstructionMakeup,
+        phase: ConstructionPhase,
+    ) -> ItemId {
+        if let Some(c) = self.floor_constructions.iter().find(|c| {
+            c.construction_type == construction_type
+                && c.base.construction_makeup == makeup
+                && c.base.construction_phase == phase
+        }) {
+            return c.base.id;
+        }
+        let c = FloorConstruction {
+            base: ConstructionBase {
+                construction_makeup: makeup,
+                construction_phase: phase,
+                ..Default::default()
+            },
+            construction_type,
+        };
+        let id = c.base.id;
+        self.floor_constructions.push(c);
+        id
+    }
+
+    /// Find a ceiling construction matching `(construction_type, makeup, phase)`,
+    /// else create and append one. Returns its id.
+    pub fn ensure_ceiling_construction(
+        &mut self,
+        construction_type: CeilingConstructionType,
+        makeup: ConstructionMakeup,
+        phase: ConstructionPhase,
+    ) -> ItemId {
+        if let Some(c) = self.ceiling_constructions.iter().find(|c| {
+            c.construction_type == construction_type
+                && c.base.construction_makeup == makeup
+                && c.base.construction_phase == phase
+        }) {
+            return c.base.id;
+        }
+        let c = CeilingConstruction {
+            base: ConstructionBase {
+                construction_makeup: makeup,
+                construction_phase: phase,
+                ..Default::default()
+            },
+            construction_type,
+        };
+        let id = c.base.id;
+        self.ceiling_constructions.push(c);
+        id
+    }
+}
+/// A planar region of the floor — pure geometry. Its fabric (construction
+/// type/make-up/phase, photos, description) lives on the `FloorConstruction`
+/// referenced by `construction_id`.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct FloorRegion {
+    pub id: ItemId,
     pub polygon: Polygon<f64>, // 2D polygon boundary
     pub height: f64,           // height per vertex
-    pub construction_type: FloorConstructionType,
-    pub base: RegionBase,
+    pub construction_id: ItemId,
 }
 
 /// A planar region of the floor
@@ -150,28 +270,18 @@ pub struct FloorRegions {
 }
 
 impl FloorRegions {
-    /// Create a new FloorRegions
-    pub fn new(
-        vertices: Vec<Point2f64>,
-        height: f64,
-        construction_type: Option<FloorConstructionType>,
-        construction_makeup: Option<ConstructionMakeup>,
-        construction_phase: Option<ConstructionPhase>,
-    ) -> Self {
+    /// Create a `FloorRegions` with a single region referencing `construction_id`.
+    pub fn new(vertices: Vec<Point2f64>, height: f64, construction_id: ItemId) -> Self {
         let polygon = Polygon::new(
             LineString::from(vertices.iter().map(|p| (p.x, p.y)).collect::<Vec<_>>()),
             vec![],
         );
 
         let region = FloorRegion {
+            id: ItemId::default(),
             polygon,
             height,
-            construction_type: construction_type.unwrap_or_default(),
-            base: RegionBase {
-                construction_makeup: construction_makeup.unwrap_or_default(),
-                construction_phase: construction_phase.unwrap_or_default(),
-                ..Default::default()
-            },
+            construction_id,
         };
 
         Self {
@@ -181,21 +291,15 @@ impl FloorRegions {
 
     /// Create a FloorRegions containing one region per polygon. Used when a
     /// storey has multiple disjoint floor areas (e.g. extension sections on
-    /// upper floors). All regions get the same height + construction defaults.
+    /// upper floors). All regions share the same height and `construction_id`.
     /// (Distinct from `from_polygons` — that one takes `&Polygon` slices for
     /// gen_3d_vol's 3D-derived polygons; this one takes raw vertex lists
     /// straight from the parametric layer.)
     pub fn from_vertex_lists(
         polygons: Vec<Vec<Point2f64>>,
         height: f64,
-        construction_type: Option<FloorConstructionType>,
-        construction_makeup: Option<ConstructionMakeup>,
-        construction_phase: Option<ConstructionPhase>,
+        construction_id: ItemId,
     ) -> Self {
-        let ct = construction_type.unwrap_or_default();
-        let cm = construction_makeup.unwrap_or_default();
-        let cp = construction_phase.unwrap_or_default();
-
         let regions = polygons
             .into_iter()
             .filter(|p| p.len() >= 3)
@@ -205,14 +309,10 @@ impl FloorRegions {
                     vec![],
                 );
                 FloorRegion {
+                    id: ItemId::default(),
                     polygon,
                     height,
-                    construction_type: ct,
-                    base: RegionBase {
-                        construction_makeup: cm.clone(),
-                        construction_phase: cp.clone(),
-                        ..Default::default()
-                    },
+                    construction_id,
                 }
             })
             .collect();
@@ -248,26 +348,14 @@ pub struct CeilingRegions {
     pub regions: Vec<CeilingRegion>, // height per vertex
 }
 impl CeilingRegions {
-    /// Create a new CeilingRegions
-    pub fn new(
-        vertices: Vec<Point3f64>,
-        construction_type: Option<CeilingConstructionType>,
-        construction_makeup: Option<ConstructionMakeup>,
-        construction_phase: Option<ConstructionPhase>,
-    ) -> Self {
+    /// Create a `CeilingRegions` with a single region referencing `construction_id`.
+    pub fn new(vertices: Vec<Point3f64>, construction_id: ItemId) -> Self {
         Self {
             regions: vec![CeilingRegion {
+                id: ItemId::default(),
                 polygon: Polygon3D::new(vertices),
-                construction_type: construction_type
-                    .unwrap_or(CeilingConstructionType::Uninitialised),
-                base: RegionBase {
-                    id: ItemId::default(),
-                    construction_makeup: construction_makeup.unwrap_or_default(),
-                    construction_phase: construction_phase.unwrap_or(ConstructionPhase::Original),
-                    opes: Opes::default(),
-                    photos: Vec::new(),
-                    description: None,
-                },
+                opes: Opes::default(),
+                construction_id,
             }],
         }
     }
@@ -292,32 +380,38 @@ impl From<Polygon3D> for Polygon<f64> {
         Polygon::new(LineString::from(coords_2d), vec![])
     }
 }
-/// A planar region of the ceiling
+/// A planar region of the ceiling — pure geometry + openings (roof lights /
+/// attic hatch). Fabric lives on the `CeilingConstruction` it references.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct CeilingRegion {
-    pub base: RegionBase,
+    pub id: ItemId,
     pub polygon: Polygon3D, // 2D polygon boundary
-    pub construction_type: CeilingConstructionType,
+    pub opes: Opes,
+    pub construction_id: ItemId,
 }
 
 impl Default for FloorRegion {
     fn default() -> Self {
         Self {
+            id: ItemId::default(),
             polygon: Polygon::new(LineString::new(vec![]), vec![]),
             height: f64::default(),
-            construction_type: FloorConstructionType::default(),
-            base: RegionBase::default(),
+            construction_id: ItemId::default(),
         }
     }
 }
 
-/// A vertical planar wall region
+/// A vertical planar wall region — pure geometry + exposure + openings. Its
+/// fabric (construction type/make-up/phase, photos, description) lives on the
+/// `WallConstruction` referenced by `construction_id`; exposure stays here so a
+/// single construction can be split into exposed / semi-exposed sections.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct WallRegion {
-    pub base: RegionBase,
+    pub id: ItemId,
     pub polygon: Polygon3D, // 3D polygon (vertical plane, typically 4 vertices)
-    pub construction_type: WallConstructionType,
     pub exposure: WallExposure,
+    pub opes: Opes,
+    pub construction_id: ItemId,
 }
 
 /// Collection of wall regions
@@ -328,23 +422,25 @@ pub struct WallRegions {
 
 impl WallRegions {
     /// Re-derive the storey's walls from `segments` (each a footprint edge
-    /// `(a, b)` with its thermal `exposure`), PRESERVING fabric properties from
-    /// the `previous` regions. Each segment becomes a vertical rectangular plane
-    /// rising from `base_z` to `base_z + height` (4 vertices: a-bottom, b-bottom,
-    /// b-top, a-top). Its construction (`construction_type`, `construction_makeup`,
-    /// `construction_phase`, `description`) is inherited from whichever previous
-    /// region covered the segment's midpoint — so when a wall is split into
-    /// pieces, each piece inherits the parent wall's properties and only the
-    /// `exposure` differs. A fresh segment (no covering region) gets defaults.
+    /// `(a, b)` with its thermal `exposure`), PRESERVING the construction link
+    /// from the `previous` regions. Each segment becomes a vertical rectangular
+    /// plane rising from `base_z` to `base_z + height` (4 vertices: a-bottom,
+    /// b-bottom, b-top, a-top). Its `construction_id` is inherited from whichever
+    /// previous region covered the segment's midpoint — so when a wall is split
+    /// into pieces, each piece keeps the parent's (shared) construction and only
+    /// the `exposure` differs. A fresh segment (no covering region) gets
+    /// `default_construction_id` (the caller supplies the id of an
+    /// "uninitialised" construction it has ensured exists in the BER).
     ///
-    /// NB: per-region `id`, `opes` (openings) and `photos` are NOT carried over
-    /// (they're positional — ambiguous to split); they reset until there's an
-    /// openings model that knows which piece each belongs to.
+    /// NB: per-region `id` and `opes` (openings) are NOT carried over (they're
+    /// positional — ambiguous to split); they reset until there's an openings
+    /// model that knows which piece each belongs to.
     pub fn rebuild_preserving(
         segments: Vec<(Point2f64, Point2f64, WallExposure)>,
         previous: &WallRegions,
         base_z: f64,
         height: f64,
+        default_construction_id: ItemId,
     ) -> Self {
         let top = base_z + height;
         let regions = segments
@@ -357,24 +453,16 @@ impl WallRegions {
                     Point3f64::new(a.x, a.y, top),
                 ]);
                 let mid = Point2f64::new((a.x + b.x) * 0.5, (a.y + b.y) * 0.5);
-                match previous.region_covering(mid) {
-                    Some(src) => WallRegion {
-                        base: RegionBase {
-                            construction_makeup: src.base.construction_makeup.clone(),
-                            construction_phase: src.base.construction_phase.clone(),
-                            description: src.base.description.clone(),
-                            ..RegionBase::default()
-                        },
-                        polygon,
-                        construction_type: src.construction_type,
-                        exposure,
-                    },
-                    None => WallRegion {
-                        base: RegionBase::default(),
-                        polygon,
-                        construction_type: WallConstructionType::Uninitialised,
-                        exposure,
-                    },
+                let construction_id = match previous.region_covering(mid) {
+                    Some(src) => src.construction_id,
+                    None => default_construction_id,
+                };
+                WallRegion {
+                    id: ItemId::default(),
+                    polygon,
+                    exposure,
+                    opes: Opes::default(),
+                    construction_id,
                 }
             })
             .collect();
@@ -464,16 +552,19 @@ mod tests {
     fn rebuild_makes_vertical_planes_with_exposure() {
         let a = Point2f64::new(0.0, 0.0);
         let b = Point2f64::new(4.0, 0.0);
+        let default_cid = ItemId::default();
         let walls = WallRegions::rebuild_preserving(
             vec![(a, b, WallExposure::SemiExposed)],
             &WallRegions::default(),
             0.0,
             2.4,
+            default_cid,
         );
         assert_eq!(walls.regions.len(), 1);
         let w = &walls.regions[0];
         assert_eq!(w.exposure, WallExposure::SemiExposed);
-        assert_eq!(w.construction_type, WallConstructionType::Uninitialised);
+        // Fresh segment (no covering region) takes the supplied default.
+        assert_eq!(w.construction_id, default_cid);
         // 4 vertices: base edge then top edge, vertical plane 0 -> 2.4.
         let ext = &w.polygon.exterior;
         assert_eq!(ext.len(), 4);
@@ -484,20 +575,23 @@ mod tests {
     }
 
     #[test]
-    fn rebuild_inherits_construction_from_covering_region_when_split() {
+    fn rebuild_inherits_construction_id_from_covering_region_when_split() {
         let a = Point2f64::new(0.0, 0.0);
         let b = Point2f64::new(10.0, 0.0);
-        // A whole-wall region with a non-default construction.
-        let mut previous = WallRegions::rebuild_preserving(
+        // A whole-wall region pointing at some shared construction.
+        let orig_cid = ItemId::default();
+        let previous = WallRegions::rebuild_preserving(
             vec![(a, b, WallExposure::Exposed)],
             &WallRegions::default(),
             0.0,
             2.4,
+            orig_cid,
         );
-        previous.regions[0].construction_type = WallConstructionType::CavityWall;
-        previous.regions[0].base.description = Some("party wall".into());
+        assert_eq!(previous.regions[0].construction_id, orig_cid);
 
-        // Split it into 3 pieces; each should inherit the construction.
+        // Split it into 3 pieces; each should inherit the covered construction,
+        // NOT the fresh default passed for uncovered segments.
+        let fresh_cid = ItemId::default();
         let split = WallRegions::rebuild_preserving(
             vec![
                 (a, Point2f64::new(2.0, 0.0), WallExposure::Exposed),
@@ -511,11 +605,11 @@ mod tests {
             &previous,
             0.0,
             2.4,
+            fresh_cid,
         );
         assert_eq!(split.regions.len(), 3);
         for r in &split.regions {
-            assert_eq!(r.construction_type, WallConstructionType::CavityWall);
-            assert_eq!(r.base.description.as_deref(), Some("party wall"));
+            assert_eq!(r.construction_id, orig_cid);
         }
         // Exposure still set per piece.
         assert_eq!(split.regions[1].exposure, WallExposure::SemiExposed);

@@ -197,6 +197,9 @@ fn create_minimal_ber(id: ItemId) -> Ber {
         sheltered_sides: 2.0,
         number_of_storeys: 2,
         storeys: vec![],
+        wall_constructions: vec![],
+        floor_constructions: vec![],
+        ceiling_constructions: vec![],
         thermal_mass_info: ThermalMassInfo {
             id: ItemId::default(),
             floors: ThermalMassCategoryEnum::Medium,
@@ -222,6 +225,10 @@ fn create_full_ber(id: ItemId) -> Ber {
         .collect(),
     };
 
+    // Shared floor construction the ground-floor region points at.
+    let floor_cid =
+        ber.ensure_floor_construction(Default::default(), Default::default(), Default::default());
+
     ber.storeys = vec![
         Storey {
             id: ItemId::default(),
@@ -235,9 +242,7 @@ fn create_full_ber(id: ItemId) -> Ber {
                     Point2f64::new(0.0, 8.0),
                 ],
                 0.0,
-                None,
-                None,
-                None,
+                floor_cid,
             ),
             walls: Default::default(),
             roofs: Default::default(),

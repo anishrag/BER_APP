@@ -924,12 +924,13 @@ mod tests {
     ///      in each cell (no more per-cell vertical centering).
     #[test]
     fn all_storeys_overview_shares_scale_and_aligns_base() {
+        use datatypes::ber::common::ItemId;
         use datatypes::ber::structural::{FloorRegions, Storey};
         use domain::points::Point2f64;
 
         let pt = |x: f64, y: f64| Point2f64::new(x, y);
         let floors = |verts: Vec<Point2f64>| {
-            FloorRegions::from_vertex_lists(vec![verts], 2.4, None, None, None)
+            FloorRegions::from_vertex_lists(vec![verts], 2.4, ItemId::default())
         };
         let storeys = [
             Storey {

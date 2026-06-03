@@ -1,8 +1,7 @@
 // standard includes
-use datatypes::ber::common::{ConstructionPhase, ItemId};
+use datatypes::ber::common::ItemId;
 use datatypes::ber::structural::{
-    CeilingRegions, ConstructionMakeup, FloorRegions, WallConstructionType, WallExposure,
-    WallRegion, WallRegions,
+    CeilingRegions, FloorRegions, Opes, WallExposure, WallRegion, WallRegions,
 };
 use domain::points::{Point2f64, Point3f64, Vector2f64, Vector3f64};
 use geo::Polygon;
@@ -11,7 +10,7 @@ use geo::Polygon;
 use super::ceiling::CeilingRegionsManip;
 use super::floor::FloorRegionsManip;
 use super::geometry::{Geometry, MergeableRegion};
-use super::types::{HasBaseRegion, Polygon3D, Polygon3DMultiZ, RegionBase, SplitLine3D, EPSILON};
+use super::types::{HasRegionId, Polygon3D, Polygon3DMultiZ, SplitLine3D, EPSILON};
 
 trait WallRegionManip {
     fn get_leftmost_floor_vertex(&self) -> Point3f64;
@@ -78,7 +77,7 @@ impl MergeableRegion for WallRegion {
     type Geometry = Polygon3D; // or Vec<Vertex> if you use vertex list
 
     fn id(&self) -> ItemId {
-        self.base.id
+        self.id
     }
 
     fn geometry(&self) -> &Self::Geometry {
@@ -86,18 +85,19 @@ impl MergeableRegion for WallRegion {
     }
 
     fn is_merge_compatible(&self, other: &Self) -> bool {
-        self.construction_type == other.construction_type
-            && self.base.construction_makeup == other.base.construction_makeup
-            && self.base.construction_phase == other.base.construction_phase
-            && self.exposure == other.exposure
+        // Same construction (fabric is behind `construction_id`) AND exposure
+        // (exposure stays on the region so one construction can split into
+        // exposed / semi-exposed sections).
+        self.construction_id == other.construction_id && self.exposure == other.exposure
     }
 
     fn with_geometry(&self, geometry: Self::Geometry) -> Self {
         WallRegion {
+            id: self.id,
             polygon: geometry,
-            construction_type: self.construction_type,
-            base: self.base.clone(),
             exposure: self.exposure,
+            opes: self.opes.clone(),
+            construction_id: self.construction_id,
         }
     }
 }
@@ -115,33 +115,27 @@ pub trait WallRegionsManip {
     fn add_from_floor_discontinuities(
         &mut self,
         floor_regions: &FloorRegions,
-        default_construction_type: Option<WallConstructionType>,
-        default_construction_makeup: Option<ConstructionMakeup>,
+        construction_id: ItemId,
         default_exposure: Option<WallExposure>,
     );
     fn add_from_ceiling_discontinuities(
         &mut self,
         ceiling_regions: &CeilingRegions,
-        default_construction_type: Option<WallConstructionType>,
-        default_construction_makeup: Option<ConstructionMakeup>,
+        construction_id: ItemId,
         default_exposure: Option<WallExposure>,
     );
     fn add_from_exterior_perimeter(
         &mut self,
         floor_regions: &FloorRegions,
         ceiling_regions: &CeilingRegions,
-        default_construction_type: Option<WallConstructionType>,
-        default_construction_makeup: Option<ConstructionMakeup>,
-        default_construction_phase: Option<ConstructionPhase>,
+        construction_id: ItemId,
         default_exposure: Option<WallExposure>,
     );
     fn merge(&mut self, other: WallRegions);
     fn modify_walls_in_region(
         &mut self,
         polygon_2d: &Polygon<f64>,
-        construction_type: Option<WallConstructionType>,
-        construction_makeup: Option<ConstructionMakeup>,
-        construction_phase: Option<ConstructionPhase>,
+        construction_id: Option<ItemId>,
         exposure: Option<WallExposure>,
     );
     fn check_floor_ceiling_aligned(
@@ -162,7 +156,7 @@ pub struct BoundaryVertex {
 impl WallRegionsManip for WallRegions {
     /// Create a new empty WallRegions
     fn get_wall_region_by_id_mut(&mut self, id: &ItemId) -> Option<&mut WallRegion> {
-        self.regions.iter_mut().find(|region| &region.base.id == id)
+        self.regions.iter_mut().find(|region| &region.id == id)
     }
 
     fn split_wall_region<F>(
@@ -194,7 +188,7 @@ impl WallRegionsManip for WallRegions {
 
         for split_polygon in split_polygons.iter().skip(1) {
             let mut new_wall_region = wall_region_clone.clone();
-            new_wall_region.base.id = ItemId::default();
+            new_wall_region.id = ItemId::default();
             new_wall_region.polygon = split_polygon.clone();
 
             update_new_region(&mut new_wall_region);
@@ -207,8 +201,7 @@ impl WallRegionsManip for WallRegions {
     fn add_from_floor_discontinuities(
         &mut self,
         floor_regions: &FloorRegions,
-        default_construction_type: Option<WallConstructionType>,
-        default_construction_makeup: Option<ConstructionMakeup>,
+        construction_id: ItemId,
         default_exposure: Option<WallExposure>,
     ) {
         // Find all edges between different floor regions
@@ -237,28 +230,12 @@ impl WallRegionsManip for WallRegions {
                         Point3f64::new(p1.0, p1.1, z1_b),
                     ];
 
-                    // Determine construction phase (use the later one or the first region's)
-                    let construction_phase = match (
-                        &region_a.base.construction_phase,
-                        &region_b.base.construction_phase,
-                    ) {
-                        (a, b) if a == b => a.clone(),
-                        _ => ConstructionPhase::Original,
-                    };
-
                     self.regions.push(WallRegion {
+                        id: ItemId::default(),
                         polygon: Polygon3D::new(vertices),
-                        construction_type: default_construction_type
-                            .unwrap_or(WallConstructionType::Uninitialised),
-                        base: RegionBase {
-                            id: ItemId::default(),
-                            construction_phase,
-                            construction_makeup: default_construction_makeup
-                                .clone()
-                                .unwrap_or_default(),
-                            ..Default::default()
-                        },
                         exposure: default_exposure.unwrap_or(WallExposure::Exposed),
+                        opes: Opes::default(),
+                        construction_id,
                     });
                 }
             }
@@ -269,8 +246,7 @@ impl WallRegionsManip for WallRegions {
     fn add_from_ceiling_discontinuities(
         &mut self,
         ceiling_regions: &CeilingRegions,
-        default_construction_type: Option<WallConstructionType>,
-        default_construction_makeup: Option<ConstructionMakeup>,
+        construction_id: ItemId,
         default_exposure: Option<WallExposure>,
     ) {
         // Find all edges between different ceiling regions
@@ -294,28 +270,12 @@ impl WallRegionsManip for WallRegions {
                     // Create vertical wall between the two ceiling heights
                     let vertices = vec![p1_a, p2_a, p2_b, p1_b];
 
-                    // Determine construction phase
-                    let construction_phase = match (
-                        &region_a.base.construction_phase,
-                        &region_b.base.construction_phase,
-                    ) {
-                        (a, b) if a == b => a.clone(),
-                        _ => ConstructionPhase::Original,
-                    };
-
                     self.regions.push(WallRegion {
+                        id: ItemId::default(),
                         polygon: Polygon3D::new(vertices),
-                        construction_type: default_construction_type
-                            .unwrap_or(WallConstructionType::Uninitialised),
-                        base: RegionBase {
-                            id: ItemId::default(),
-                            construction_makeup: default_construction_makeup
-                                .clone()
-                                .unwrap_or_default(),
-                            construction_phase,
-                            ..Default::default()
-                        },
                         exposure: default_exposure.unwrap_or(WallExposure::NonHeatLoss),
+                        opes: Opes::default(),
+                        construction_id,
                     });
                 }
             }
@@ -430,9 +390,7 @@ impl WallRegionsManip for WallRegions {
         &mut self,
         floor_regions: &FloorRegions,
         ceiling_regions: &CeilingRegions,
-        default_construction_type: Option<WallConstructionType>,
-        default_construction_makeup: Option<ConstructionMakeup>,
-        default_construction_phase: Option<ConstructionPhase>,
+        construction_id: ItemId,
         default_exposure: Option<WallExposure>,
     ) {
         let floor_boundary = floor_regions.get_clockwise_3d_polygon_starting_closest_to_origin();
@@ -460,30 +418,12 @@ impl WallRegionsManip for WallRegions {
                             Point3f64::new(next_bv.point.x, next_bv.point.y, ch),
                             Point3f64::new(bv.point.x, bv.point.y, ch),
                         ];
-                        // Determine construction phase
-                        let construction_phase =
-                            default_construction_phase.clone().unwrap_or_else(|| {
-                                determine_construction_phase_for_exterior_wall(
-                                    floor_regions,
-                                    ceiling_regions,
-                                    &vertices[0],
-                                    &vertices[1],
-                                )
-                                .unwrap_or(ConstructionPhase::Original)
-                            });
                         self.regions.push(WallRegion {
+                            id: ItemId::default(),
                             polygon: Polygon3D::new(vertices),
-                            construction_type: default_construction_type
-                                .unwrap_or(WallConstructionType::Uninitialised),
-                            base: RegionBase {
-                                id: ItemId::default(),
-                                construction_makeup: default_construction_makeup
-                                    .clone()
-                                    .unwrap_or_default(),
-                                construction_phase,
-                                ..Default::default()
-                            },
                             exposure: default_exposure.unwrap_or(WallExposure::Exposed),
+                            opes: Opes::default(),
+                            construction_id,
                         });
                     }
                 }
@@ -499,22 +439,14 @@ impl WallRegionsManip for WallRegions {
     fn modify_walls_in_region(
         &mut self,
         polygon_2d: &Polygon<f64>,
-        construction_type: Option<WallConstructionType>,
-        construction_makeup: Option<ConstructionMakeup>,
-        construction_phase: Option<ConstructionPhase>,
+        construction_id: Option<ItemId>,
         exposure: Option<WallExposure>,
     ) {
         for region in &mut self.regions {
             // Check if wall intersects with the 2D polygon
             if wall_intersects_polygon_2d(&region.polygon, polygon_2d) {
-                if let Some(ct) = construction_type {
-                    region.construction_type = ct;
-                }
-                if let Some(cl) = &construction_makeup {
-                    region.base.construction_makeup = cl.clone();
-                }
-                if let Some(cp) = &construction_phase {
-                    region.base.construction_phase = cp.clone();
+                if let Some(cid) = construction_id {
+                    region.construction_id = cid;
                 }
                 if let Some(exp) = exposure {
                     region.exposure = exp;
@@ -609,55 +541,6 @@ fn points_equal_3d_xy(a: &Point3f64, b: &Point3f64) -> bool {
     (a.x - b.x).abs() < EPSILON && (a.y - b.y).abs() < EPSILON
 }
 
-fn point_in_polygon_3d(polygon: &Polygon3D, x: f64, y: f64) -> bool {
-    // Ray casting algorithm in 2D
-    let mut inside = false;
-    let verts = &polygon.exterior;
-
-    for i in 0..verts.len() {
-        let j = (i + 1) % verts.len();
-        let vi = &verts[i];
-        let vj = &verts[j];
-
-        if ((vi.y > y) != (vj.y > y)) && (x < (vj.x - vi.x) * (y - vi.y) / (vj.y - vi.y) + vi.x) {
-            inside = !inside;
-        }
-    }
-
-    inside
-}
-
-fn determine_construction_phase_for_exterior_wall(
-    floor_regions: &FloorRegions,
-    ceiling_regions: &CeilingRegions,
-    v1: &Point3f64,
-    v2: &Point3f64,
-) -> Option<ConstructionPhase> {
-    // Find floor and ceiling regions that contain the edge midpoint
-    let mid_x = (v1.x + v2.x) / 2.0;
-    let mid_y = (v1.y + v2.y) / 2.0;
-
-    let floor_phase = floor_regions
-        .regions
-        .iter()
-        .find(|r| point_in_polygon_2d(&r.polygon, mid_x, mid_y))
-        .map(|r| r.base.construction_phase.clone());
-
-    let ceiling_phase = ceiling_regions
-        .regions
-        .iter()
-        .find(|r| point_in_polygon_3d(&r.polygon, mid_x, mid_y))
-        .map(|r| r.base.construction_phase.clone());
-
-    // If both phases match, use that; otherwise return floor phase
-    match (floor_phase, ceiling_phase) {
-        (Some(fp), Some(cp)) if fp == cp => Some(fp),
-        (Some(fp), _) => Some(fp),
-        (_, Some(cp)) => Some(cp),
-        _ => None,
-    }
-}
-
 fn point_in_polygon_2d(polygon: &Polygon<f64>, x: f64, y: f64) -> bool {
     let point = geo::Point::new(x, y);
     use geo::Contains;
@@ -674,9 +557,9 @@ fn wall_intersects_polygon_2d(wall: &Polygon3D, polygon_2d: &Polygon<f64>) -> bo
     false
 }
 
-impl HasBaseRegion for WallRegion {
-    fn base_mut(&mut self) -> &mut RegionBase {
-        &mut self.base
+impl HasRegionId for WallRegion {
+    fn id_mut(&mut self) -> &mut ItemId {
+        &mut self.id
     }
 }
 
@@ -693,19 +576,16 @@ mod tests {
 
     fn simple_wall() -> WallRegion {
         WallRegion {
+            id: ItemId::default(),
             polygon: Polygon3D::new(vec![
                 Point3f64::new(0.0, 0.0, 0.0),
                 Point3f64::new(4.0, 0.0, 0.0),
                 Point3f64::new(4.0, 0.0, 3.0),
                 Point3f64::new(0.0, 0.0, 3.0),
             ]),
-            construction_type: WallConstructionType::Uninitialised,
-            base: RegionBase {
-                id: ItemId::default(),
-                construction_phase: ConstructionPhase::Original,
-                ..Default::default()
-            },
             exposure: WallExposure::Exposed,
+            opes: Opes::default(),
+            construction_id: ItemId::default(),
         }
     }
 
@@ -784,24 +664,24 @@ mod tests {
     #[test]
     fn merge_compatible_when_all_fields_match() {
         let a = simple_wall();
-        let b = simple_wall();
+        // Same construction (shared id) + same exposure ⇒ compatible. (Each
+        // `simple_wall()` gets a fresh random `construction_id`, so clone to
+        // share it.)
+        let b = a.clone();
         assert!(a.is_merge_compatible(&b));
     }
 
     #[test]
     fn merge_incompatible_if_any_field_differs() {
-        let mut a = simple_wall();
-        let mut b = simple_wall();
+        let a = simple_wall();
+        let mut b = a.clone(); // start fully compatible, then vary one field
 
         b.exposure = WallExposure::NonHeatLoss;
         assert!(!a.is_merge_compatible(&b));
 
         b.exposure = a.exposure;
-        b.construction_type = WallConstructionType::TimberConstruction;
-        assert!(!a.is_merge_compatible(&b));
-
-        b.construction_type = a.construction_type;
-        b.base.construction_phase = ConstructionPhase::Extension1;
+        // A different construction now means a different `construction_id`.
+        b.construction_id = ItemId::default();
         assert!(!a.is_merge_compatible(&b));
     }
 
@@ -819,8 +699,7 @@ mod tests {
 
         assert_eq!(w2.polygon.exterior, new_poly.exterior);
         assert_eq!(w2.exposure, wall.exposure);
-        assert_eq!(w2.construction_type, wall.construction_type);
-        assert_eq!(w2.base.construction_phase, wall.base.construction_phase);
+        assert_eq!(w2.construction_id, wall.construction_id);
     }
 
     /* ---------------------------------------------------------------------
@@ -830,7 +709,7 @@ mod tests {
     #[test]
     fn get_wall_region_by_id_mut_returns_correct_region() {
         let mut walls = simple_wall_regions();
-        let id = walls.regions[0].base.id;
+        let id = walls.regions[0].id;
 
         let r = walls.get_wall_region_by_id_mut(&id).unwrap();
         r.exposure = WallExposure::NonHeatLoss;
@@ -841,7 +720,7 @@ mod tests {
     #[test]
     fn split_wall_region_creates_multiple_regions() {
         let mut walls = simple_wall_regions();
-        let id = walls.regions[0].base.id;
+        let id = walls.regions[0].id;
 
         walls.split_wall_region(id, 2.0, 0.0, |_| {});
 
@@ -925,6 +804,8 @@ mod tests {
     #[test]
     fn modify_walls_only_affects_intersecting_walls() {
         let mut walls = simple_wall_regions();
+        let original_cid = walls.regions[0].construction_id;
+        let new_cid = ItemId::default();
 
         let selection = polygon![
             (x: -1.0, y: -1.0),
@@ -933,26 +814,19 @@ mod tests {
             (x: -1.0, y:  1.0),
         ];
 
-        walls.modify_walls_in_region(
-            &selection,
-            Some(WallConstructionType::TimberConstruction),
-            None,
-            Some(ConstructionPhase::Extension1),
-            Some(WallExposure::NonHeatLoss),
-        );
+        walls.modify_walls_in_region(&selection, Some(new_cid), Some(WallExposure::NonHeatLoss));
 
         let w = &walls.regions[0];
-        assert_eq!(
-            w.construction_type,
-            WallConstructionType::TimberConstruction
-        );
-        assert_eq!(w.base.construction_phase, ConstructionPhase::Extension1);
+        // Construction is re-pointed (fabric now lives behind `construction_id`).
+        assert_eq!(w.construction_id, new_cid);
+        assert_ne!(w.construction_id, original_cid);
         assert_eq!(w.exposure, WallExposure::NonHeatLoss);
     }
 
     #[test]
     fn modify_walls_noop_when_no_intersection() {
         let mut walls = simple_wall_regions();
+        let original_cid = walls.regions[0].construction_id;
 
         let selection = polygon![
             (x: 10.0, y: 10.0),
@@ -961,18 +835,10 @@ mod tests {
             (x: 10.0, y: 12.0),
         ];
 
-        walls.modify_walls_in_region(
-            &selection,
-            Some(WallConstructionType::TimberConstruction),
-            None,
-            None,
-            None,
-        );
+        walls.modify_walls_in_region(&selection, Some(ItemId::default()), None);
 
-        assert_eq!(
-            walls.regions[0].construction_type,
-            WallConstructionType::Uninitialised
-        );
+        // No overlap → construction left untouched.
+        assert_eq!(walls.regions[0].construction_id, original_cid);
     }
 
     /* ---------------------------------------------------------------------

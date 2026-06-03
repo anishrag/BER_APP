@@ -1,7 +1,9 @@
 use serde::{Deserialize, Serialize};
 
 use super::common::{ConstructionPhases, ItemId, Photo};
-use super::structural::{Storey, ThermalMassInfo};
+use super::structural::{
+    CeilingConstruction, FloorConstruction, Storey, ThermalMassInfo, WallConstruction,
+};
 use super::systems::{HeatingSystem, SolarElements, VentilationSystem};
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -15,6 +17,16 @@ pub struct Ber {
     pub sheltered_sides: f32,
     pub number_of_storeys: i32,
     pub storeys: Vec<Storey>,
+    /// Shared wall/floor/ceiling constructions ("a few per house"). Storey
+    /// regions reference these by `construction_id`; grouping for DEAP export
+    /// collapses regions onto their shared construction. `#[serde(default)]` so
+    /// records written before the split still load.
+    #[serde(default)]
+    pub wall_constructions: Vec<WallConstruction>,
+    #[serde(default)]
+    pub floor_constructions: Vec<FloorConstruction>,
+    #[serde(default)]
+    pub ceiling_constructions: Vec<CeilingConstruction>,
     pub thermal_mass_info: ThermalMassInfo,
     pub orientation_deg: f32,
     pub solar: Vec<SolarElements>,

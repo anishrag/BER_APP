@@ -1,5 +1,5 @@
 use datatypes::ber::common::ItemId;
-pub use datatypes::ber::structural::{Polygon3D, RegionBase};
+pub use datatypes::ber::structural::Polygon3D;
 use domain::points::{Point2f64, Point3f64, Vector3f64};
 
 pub const EPSILON: f64 = 1e-9;
@@ -238,8 +238,12 @@ pub enum RegionType {
     Ceiling,
 }
 
-pub trait HasBaseRegion {
-    fn base_mut(&mut self) -> &mut RegionBase;
+/// A region whose identity (`ItemId`) lives directly on the region. Construction
+/// fabric used to live on a `RegionBase` alongside the id; after the datatypes
+/// split the region carries only `id` + `construction_id`, so this trait just
+/// exposes the id for `CloneWithNewId`.
+pub trait HasRegionId {
+    fn id_mut(&mut self) -> &mut ItemId;
 }
 
 pub trait CloneWithNewId {
@@ -248,11 +252,11 @@ pub trait CloneWithNewId {
 
 impl<T> CloneWithNewId for T
 where
-    T: Clone + HasBaseRegion,
+    T: Clone + HasRegionId,
 {
     fn clone_with_new_id(&self) -> Self {
         let mut new_region = self.clone();
-        new_region.base_mut().id = ItemId::default();
+        *new_region.id_mut() = ItemId::default();
         new_region
     }
 }

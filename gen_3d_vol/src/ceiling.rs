@@ -11,16 +11,12 @@ use geo::Polygon;
 use std::collections::HashMap;
 use std::convert::TryFrom;
 // crate includes
-use datatypes::ber::common::{ConstructionPhase, ItemId};
-use datatypes::ber::structural::{
-    CeilingConstructionType, CeilingRegion, CeilingRegions, ConstructionMakeup,
-};
+use datatypes::ber::common::ItemId;
+use datatypes::ber::structural::{CeilingRegion, CeilingRegions, Opes};
 
 // local includes
 use super::geometry::{point_in_triangle_2d, point_on_segment_2d, Geometry, MergeableRegion};
-use super::types::{
-    DirectedEdge3D, HasBaseRegion, Point3Ext, Polygon3D, Polygon3DMultiZ, RegionBase, EPSILON,
-};
+use super::types::{DirectedEdge3D, HasRegionId, Point3Ext, Polygon3D, Polygon3DMultiZ, EPSILON};
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 struct Edge2D {
@@ -91,7 +87,7 @@ impl MergeableRegion for CeilingRegion {
     type Geometry = Polygon3D; // or Vec<Vertex> if you use vertex list
 
     fn id(&self) -> ItemId {
-        self.base.id
+        self.id
     }
 
     fn geometry(&self) -> &Self::Geometry {
@@ -99,34 +95,26 @@ impl MergeableRegion for CeilingRegion {
     }
 
     fn is_merge_compatible(&self, other: &Self) -> bool {
-        self.construction_type == other.construction_type
-            && self.base.construction_makeup == other.base.construction_makeup
-            && self.base.construction_phase == other.base.construction_phase
+        // Same construction (fabric lives behind `construction_id`).
+        self.construction_id == other.construction_id
     }
 
     fn with_geometry(&self, geometry: Self::Geometry) -> Self {
         CeilingRegion {
+            id: ItemId::default(),
             polygon: geometry,
-            construction_type: self.construction_type,
-            base: self.base.clone(),
+            opes: self.opes.clone(),
+            construction_id: self.construction_id,
         }
     }
 }
 
 pub trait CeilingRegionsManip {
     fn insert_vertex(&mut self, p: Point2f64, height: f64) -> Result<(), CeilingRegionError>;
-    fn modify_polygon_construction_phase(
-        &mut self,
-        polygon: Polygon<f64>,
-        construction_phase: ConstructionPhase,
-    );
-    fn modify_polygon_all_fields(
-        &mut self,
-        polygon: Polygon<f64>,
-        construction_type: Option<CeilingConstructionType>,
-        construction_makeup: Option<ConstructionMakeup>,
-        construction_phase: Option<ConstructionPhase>,
-    );
+    /// Re-point the ceiling regions overlapping `polygon` at `construction_id`,
+    /// splitting geometry along the polygon boundary. The caller (the `Gen3D`
+    /// wrapper) resolves the desired construction to an id first.
+    fn set_polygon_construction(&mut self, polygon: Polygon<f64>, construction_id: ItemId);
     fn modify_polygon_increase_height(&mut self, polygon: Polygon<f64>, delta_height: f64);
     fn get_clockwise_3d_polygon_starting_closest_to_origin(&self) -> Polygon3DMultiZ;
     fn get_all_heights(p: Point2f64) -> Vec<(f64)>;
@@ -204,33 +192,9 @@ impl CeilingRegionsManip for CeilingRegions {
         Ok(())
     }
 
-    fn modify_polygon_construction_phase(
-        &mut self,
-        polygon: Polygon<f64>,
-        construction_phase: ConstructionPhase,
-    ) {
+    fn set_polygon_construction(&mut self, polygon: Polygon<f64>, construction_id: ItemId) {
         self.modify_polygon(polygon, |r| {
-            r.base.construction_phase = construction_phase.clone();
-        });
-    }
-
-    fn modify_polygon_all_fields(
-        &mut self,
-        polygon: Polygon<f64>,
-        construction_type: Option<CeilingConstructionType>,
-        construction_makeup: Option<ConstructionMakeup>,
-        construction_phase: Option<ConstructionPhase>,
-    ) {
-        self.modify_polygon(polygon, |r| {
-            if let Some(ct) = construction_type {
-                r.construction_type = ct;
-            }
-            if let Some(cl) = construction_makeup.clone() {
-                r.base.construction_makeup = cl;
-            }
-            if let Some(cp) = construction_phase.clone() {
-                r.base.construction_phase = cp;
-            }
+            r.construction_id = construction_id;
         });
     }
 
@@ -404,20 +368,14 @@ impl CeilingRegionsManipPrivate for CeilingRegions {
             let remainder = region.polygon.difference(&polygon);
             regions_to_remove.push(idx);
 
-            let mut id = region.base.id;
+            let mut id = region.id;
             // remainder
             for poly in remainder.polygons {
                 new_regions.push(CeilingRegion {
+                    id,
                     polygon: poly,
-                    construction_type: region.construction_type,
-                    base: RegionBase {
-                        id,
-                        construction_makeup: region.base.construction_makeup.clone(),
-                        construction_phase: region.base.construction_phase.clone(),
-                        opes: region.base.opes.clone(),
-                        photos: region.base.photos.clone(),
-                        description: region.base.description.clone(),
-                    },
+                    opes: region.opes.clone(),
+                    construction_id: region.construction_id,
                 });
                 id = ItemId::default();
             }
@@ -449,7 +407,9 @@ pub enum VertexInsertionError {
 #[derive(Debug)]
 pub struct CeilingMesh {
     pub triangles: Vec<CeilingTriangle>,
-    pub construction_phase: ConstructionPhase,
+    /// Construction inherited from the source region; carried through the
+    /// triangulate → re-polygonise round trip so resulting regions keep it.
+    pub construction_id: ItemId,
 }
 impl CeilingMesh {
     pub fn add_new_vertex_with_height(
@@ -770,7 +730,7 @@ impl TryFrom<&CeilingRegion> for CeilingMesh {
 
         Ok(CeilingMesh {
             triangles,
-            construction_phase: ceiling_region.base.construction_phase.clone(),
+            construction_id: ceiling_region.construction_id,
         })
     }
 }
@@ -811,7 +771,7 @@ impl TryFrom<CeilingRegion> for CeilingMesh {
 
         Ok(CeilingMesh {
             triangles,
-            construction_phase: ceiling_region.base.construction_phase.clone(),
+            construction_id: ceiling_region.construction_id,
         })
     }
 }
@@ -880,14 +840,10 @@ impl From<CeilingMesh> for CeilingRegionConversion {
                 match CeilingMesh::boundary_polygon(&connected) {
                     Some(polygon) => {
                         regions.push(CeilingRegion {
+                            id: ItemId::default(),
                             polygon,
-                            construction_type: CeilingConstructionType::Uninitialised,
-                            base: RegionBase {
-                                id: ItemId::default(),
-                                construction_phase: mesh.construction_phase.clone(),
-                                construction_makeup: ConstructionMakeup::default(),
-                                ..Default::default()
-                            },
+                            opes: Opes::default(),
+                            construction_id: mesh.construction_id,
                         });
                     }
                     None => {
@@ -904,9 +860,9 @@ impl From<CeilingMesh> for CeilingRegionConversion {
     }
 }
 
-impl HasBaseRegion for CeilingRegion {
-    fn base_mut(&mut self) -> &mut RegionBase {
-        &mut self.base
+impl HasRegionId for CeilingRegion {
+    fn id_mut(&mut self) -> &mut ItemId {
+        &mut self.id
     }
 }
 
@@ -916,19 +872,15 @@ mod tests {
     // Helper function to create a square region
     fn create_square_region(z: f64) -> CeilingRegion {
         CeilingRegion {
+            id: ItemId::default(),
             polygon: Polygon3D::new(vec![
                 Point3f64::new(0.0, 0.0, z),
                 Point3f64::new(1.0, 0.0, z),
                 Point3f64::new(1.0, 1.0, z),
                 Point3f64::new(0.0, 1.0, z),
             ]),
-            construction_type: CeilingConstructionType::Uninitialised,
-            base: RegionBase {
-                id: ItemId::default(),
-                construction_makeup: ConstructionMakeup::default(),
-                construction_phase: ConstructionPhase::Original,
-                ..Default::default()
-            },
+            opes: Opes::default(),
+            construction_id: ItemId::default(),
         }
     }
     #[test]
@@ -982,17 +934,12 @@ mod tests {
             Point3f64::new(0.5, 1.0, 0.0),
         ];
 
-        let regions = CeilingRegions::new(vertices, None, None, None);
+        let cid = ItemId::default();
+        let regions = CeilingRegions::new(vertices, cid);
 
         assert_eq!(regions.regions.len(), 1);
-        assert_eq!(
-            regions.regions[0].construction_type,
-            CeilingConstructionType::Uninitialised
-        );
-        assert_eq!(
-            regions.regions[0].base.construction_phase,
-            ConstructionPhase::Original
-        );
+        // Fabric lives behind `construction_id`; the region just references it.
+        assert_eq!(regions.regions[0].construction_id, cid);
     }
 
     #[test]
@@ -1004,7 +951,7 @@ mod tests {
             Point3f64::new(0.0, 1.0, 0.0),
         ];
 
-        let mut regions = CeilingRegions::new(vertices, None, None, None);
+        let mut regions = CeilingRegions::new(vertices, ItemId::default());
 
         // Create a polygon that overlaps
         let poly = geo::Polygon::new(
@@ -1110,17 +1057,13 @@ mod tests {
     #[test]
     fn test_ceiling_mesh_try_from_invalid_region() {
         let region = CeilingRegion {
+            id: ItemId::default(),
             polygon: Polygon3D::new(vec![
                 Point3f64::new(0.0, 0.0, 0.0),
                 Point3f64::new(1.0, 0.0, 0.0),
             ]), // Only 2 vertices
-            construction_type: CeilingConstructionType::Uninitialised,
-            base: RegionBase {
-                id: ItemId::default(),
-                construction_makeup: ConstructionMakeup::default(),
-                construction_phase: ConstructionPhase::Original,
-                ..Default::default()
-            },
+            opes: Opes::default(),
+            construction_id: ItemId::default(),
         };
 
         let mesh = CeilingMesh::try_from(region);
@@ -1131,7 +1074,7 @@ mod tests {
     fn test_add_vertex_empty_mesh() {
         let mut mesh = CeilingMesh {
             triangles: vec![],
-            construction_phase: ConstructionPhase::Original,
+            construction_id: ItemId::default(),
         };
 
         let result = mesh.add_new_vertex_with_height(0.5, 0.5, 1.0);
@@ -1243,7 +1186,7 @@ mod tests {
     }
 
     #[test]
-    fn test_modify_polygon_construction_phase() {
+    fn test_set_polygon_construction() {
         let vertices = vec![
             Point3f64::new(0.0, 0.0, 0.0),
             Point3f64::new(1.0, 0.0, 0.0),
@@ -1251,7 +1194,8 @@ mod tests {
             Point3f64::new(0.0, 1.0, 0.0),
         ];
 
-        let mut regions = CeilingRegions::new(vertices, None, None, None);
+        let mut regions = CeilingRegions::new(vertices, ItemId::default());
+        let new_cid = ItemId::default();
 
         let poly = geo::Polygon::new(
             geo::LineString::from(vec![
@@ -1264,15 +1208,9 @@ mod tests {
             vec![],
         );
 
-        regions.modify_polygon_construction_phase(
-            poly,
-            ConstructionPhase::Other("NewPhase".to_string()),
-        );
+        regions.set_polygon_construction(poly, new_cid);
 
-        assert_eq!(
-            regions.regions[0].base.construction_phase,
-            ConstructionPhase::Other("NewPhase".to_string())
-        );
+        assert_eq!(regions.regions[0].construction_id, new_cid);
     }
 
     #[test]
@@ -1307,30 +1245,25 @@ mod tests {
     }
 
     #[test]
-    fn test_conversion_preserves_construction_phase() {
+    fn test_conversion_preserves_construction_id() {
+        let cid = ItemId::default();
         let region = CeilingRegion {
+            id: ItemId::default(),
             polygon: Polygon3D::new(vec![
                 Point3f64::new(0.0, 0.0, 0.0),
                 Point3f64::new(1.0, 0.0, 0.0),
                 Point3f64::new(1.0, 1.0, 0.0),
                 Point3f64::new(0.0, 1.0, 0.0),
             ]),
-            construction_type: CeilingConstructionType::Uninitialised,
-            base: RegionBase {
-                id: ItemId::default(),
-                construction_makeup: ConstructionMakeup::default(),
-                construction_phase: ConstructionPhase::Other("TestPhase".to_string()),
-                ..Default::default()
-            },
+            opes: Opes::default(),
+            construction_id: cid,
         };
 
         let mesh = CeilingMesh::try_from(region).unwrap();
         let conversion: CeilingRegionConversion = mesh.into();
 
-        assert_eq!(
-            conversion.regions[0].base.construction_phase,
-            ConstructionPhase::Other("TestPhase".to_string())
-        );
+        // The triangulate → re-polygonise round trip preserves the construction.
+        assert_eq!(conversion.regions[0].construction_id, cid);
     }
 
     #[test]
@@ -1342,7 +1275,7 @@ mod tests {
             Point3f64::new(0.0, 1.0, 2.5),
         ];
 
-        let ceilings = CeilingRegions::new(vertices, None, None, None);
+        let ceilings = CeilingRegions::new(vertices, ItemId::default());
         let polygon_3d = ceilings.get_clockwise_3d_polygon_starting_closest_to_origin();
 
         // Should have 4 vertices
@@ -1364,7 +1297,7 @@ mod tests {
             Point3f64::new(0.0, 1.0, 2.5),
         ];
 
-        let ceilings = CeilingRegions::new(vertices, None, None, None);
+        let ceilings = CeilingRegions::new(vertices, ItemId::default());
         let polygon_3d = ceilings.get_clockwise_3d_polygon_starting_closest_to_origin();
 
         assert_eq!(polygon_3d.exterior.len(), 4);
@@ -1404,16 +1337,12 @@ mod tests {
             Point3f64::new(1.0, 1.0, 2.5),
         ];
 
-        let mut ceilings = CeilingRegions::new(region1, None, None, None);
+        let mut ceilings = CeilingRegions::new(region1, ItemId::default());
         ceilings.regions.push(CeilingRegion {
+            id: ItemId::default(),
             polygon: Polygon3D::new(region2),
-            construction_type: CeilingConstructionType::Uninitialised,
-            base: RegionBase {
-                id: ItemId::default(),
-                construction_makeup: ConstructionMakeup::default(),
-                construction_phase: ConstructionPhase::Original,
-                ..Default::default()
-            },
+            opes: Opes::default(),
+            construction_id: ItemId::default(),
         });
 
         println!("{:#?}", ceilings);
