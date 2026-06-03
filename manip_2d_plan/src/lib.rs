@@ -28,6 +28,43 @@ pub use parametric::{Axis, CollinearitySuggestion, ParameterAxis, ParameterId, V
 use domain::points::Point2f32;
 use std::collections::HashSet;
 
+/// Dimensionless tuning knobs for [`FloorPlan::outline_following_trace`] (the
+/// new-storey splice). Defaults reproduce the values used before these were
+/// extracted; the app overrides them from `tuning.yaml`.
+#[derive(Debug, Clone)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "serde", serde(default))]
+pub struct SpliceTuning {
+    /// A STRAIGHT boundary wall is "followed" only within `follow_tol * this`, so
+    /// a roughly-straight wall drawn a little off it keeps its own straight line
+    /// instead of clinging onto the boundary. CURVE facets always use the full
+    /// `follow_tol` (so freehand-traced curves stay preserved).
+    pub straight_cling_factor: f32,
+    /// A "following" graze shorter than `follow_tol * this`, flanked by diverging
+    /// runs, is flipped to diverging — keeps a new wall that brushes an interior
+    /// edge in one piece instead of splitting it.
+    pub graze_smoothing_factor: f32,
+    /// New-wall squaring: an edge is "near-axis" when its off-axis delta is below
+    /// `(diag * axis_tol_ratio).max(axis_tol_floor)`.
+    pub axis_tol_ratio: f32,
+    pub axis_tol_floor: f32,
+    /// New-wall squaring: snap only when the long side exceeds `aspect ×` the
+    /// short side (clearly an axis wall, not a diagonal curve facet).
+    pub aspect: f32,
+}
+
+impl Default for SpliceTuning {
+    fn default() -> Self {
+        Self {
+            straight_cling_factor: 0.4,
+            graze_smoothing_factor: 3.5,
+            axis_tol_ratio: 0.06,
+            axis_tol_floor: 0.05,
+            aspect: 6.0,
+        }
+    }
+}
+
 /// A processed floor plan: orthogonal polygon as a parametric representation
 /// (shared coordinate expressions for collinear walls, one parameter per
 /// independent dimension).
@@ -1624,6 +1661,7 @@ impl FloorPlan {
         trace: &[Point2f32],
         follow_tol: f32,
         ortho_tol: f32,
+        tuning: &SpliceTuning,
     ) -> Option<Vec<Point2f32>> {
         let ring = self.parametric.ring_points(0);
         let n = ring.len();
@@ -1642,8 +1680,9 @@ impl FloorPlan {
         if perim <= 1e-4 {
             return None;
         }
-        // Project a point onto the nearest edge → (perimeter position, distance).
-        let project = |p: Point2f32| -> (f32, f32) {
+        // Project a point onto the nearest edge → (perimeter position, distance,
+        // nearest edge index).
+        let project = |p: Point2f32| -> (f32, f32, usize) {
             let mut best = (0usize, 0.0f32, f32::MAX);
             for i in 0..n {
                 let (_q, t, d) = geom::project_point_to_segment(p, ring[i], ring[(i + 1) % n]);
@@ -1651,14 +1690,28 @@ impl FloorPlan {
                     best = (i, t.clamp(0.0, 1.0), d);
                 }
             }
-            (cum[best.0] + best.1 * elen[best.0], best.2)
+            (cum[best.0] + best.1 * elen[best.0], best.2, best.0)
         };
-        // (perimeter pos, distance to boundary, raw point)
-        let mut sn: Vec<(f32, f32, Point2f32)> = trace
+        // How close the trace must be to COUNT as following a given edge. We cling
+        // TIGHTLY to a STRAIGHT wall (only when nearly touching) so a wall drawn
+        // roughly straight but a little off it keeps its own line rather than
+        // being yanked onto the boundary — but stay GENEROUS on a CURVE facet (a
+        // non-axis edge), so a freehand-traced curve is preserved.
+        let tol_at = |e: usize| -> f32 {
+            let (a, b) = (ring[e], ring[(e + 1) % n]);
+            let straight = (a.x - b.x).abs() < 1e-3 || (a.y - b.y).abs() < 1e-3;
+            if straight {
+                follow_tol * tuning.straight_cling_factor
+            } else {
+                follow_tol
+            }
+        };
+        // (perimeter pos, distance to boundary, raw point, nearest edge index)
+        let mut sn: Vec<(f32, f32, Point2f32, usize)> = trace
             .iter()
             .map(|&p| {
-                let (pos, d) = project(p);
-                (pos, d, p)
+                let (pos, d, e) = project(p);
+                (pos, d, p, e)
             })
             .collect();
         let m = sn.len();
@@ -1676,7 +1729,7 @@ impl FloorPlan {
         // Orient the trace so it advances FORWARD along the boundary.
         let mut net = 0.0;
         for k in 0..m - 1 {
-            if sn[k].1 <= follow_tol && sn[k + 1].1 <= follow_tol {
+            if sn[k].1 <= tol_at(sn[k].3) && sn[k + 1].1 <= tol_at(sn[k + 1].3) {
                 net += fwd(sn[k].0, sn[k + 1].0);
             }
         }
@@ -1693,11 +1746,12 @@ impl FloorPlan {
         let seg_on = |k: usize| -> bool {
             let a = sn[k].2;
             let b = sn[(k + 1) % m].2;
-            if sn[k].1 > follow_tol || sn[(k + 1) % m].1 > follow_tol {
+            if sn[k].1 > tol_at(sn[k].3) || sn[(k + 1) % m].1 > tol_at(sn[(k + 1) % m].3) {
                 return false;
             }
             let mid = Point2f32::new((a.x + b.x) * 0.5, (a.y + b.y) * 0.5);
-            project(mid).1 <= follow_tol
+            let (_, md, me) = project(mid);
+            md <= tol_at(me)
         };
         let mut on: Vec<bool> = (0..m).map(seg_on).collect();
         // Smooth out brief FOLLOWING grazes: a SHORT run of "following" segments
@@ -1721,7 +1775,7 @@ impl FloorPlan {
             // fraction of the diagonal is too small. A real shared wall shorter
             // than this, flanked by two new walls, would also be flipped (then
             // dimensioned) — an acceptable trade vs. a split-in-two wall.
-            let graze_max = follow_tol * 3.5;
+            let graze_max = follow_tol * tuning.graze_smoothing_factor;
             let mut i = 0;
             while i < m {
                 if on[i] {
@@ -1873,7 +1927,7 @@ impl FloorPlan {
             hi = Point2f32::new(hi.x.max(p.x), hi.y.max(p.y));
         }
         let odiag = ((hi.x - lo.x).powi(2) + (hi.y - lo.y).powi(2)).sqrt();
-        let axis_tol = (odiag * 0.06).max(0.05);
+        let axis_tol = (odiag * tuning.axis_tol_ratio).max(tuning.axis_tol_floor);
         let k = out.len();
         for i in 0..k {
             let j = (i + 1) % k;
@@ -1882,11 +1936,11 @@ impl FloorPlan {
             }
             let (a, b) = (out[i].0, out[j].0);
             let (dx, dy) = ((a.x - b.x).abs(), (a.y - b.y).abs());
-            if dx < axis_tol && dy > axis_tol && dy > dx * 6.0 {
+            if dx < axis_tol && dy > axis_tol && dy > dx * tuning.aspect {
                 let mx = (a.x + b.x) * 0.5; // near-vertical → share x
                 out[i].0.x = mx;
                 out[j].0.x = mx;
-            } else if dy < axis_tol && dx > axis_tol && dx > dy * 6.0 {
+            } else if dy < axis_tol && dx > axis_tol && dx > dy * tuning.aspect {
                 let my = (a.y + b.y) * 0.5; // near-horizontal → share y
                 out[i].0.y = my;
                 out[j].0.y = my;
@@ -2663,7 +2717,7 @@ mod trim_tests {
         sample(p(0., 4.), p(0., 0.), &mut trace);
 
         let out = prev
-            .outline_following_trace(&trace, 0.3, 0.05)
+            .outline_following_trace(&trace, 0.3, 0.05, &SpliceTuning::default())
             .expect("a follow/diverge trace should splice");
         let spliced = FloorPlan::from_clean_ring(&out).unwrap();
 
@@ -2695,7 +2749,8 @@ mod trim_tests {
         sample(p(4., 4.), p(0., 4.), &mut full);
         sample(p(0., 4.), p(0., 0.), &mut full);
         assert!(
-            prev.outline_following_trace(&full, 0.3, 0.05).is_none(),
+            prev.outline_following_trace(&full, 0.3, 0.05, &SpliceTuning::default())
+                .is_none(),
             "an all-following trace is a pure reproduce, not a splice"
         );
     }
@@ -2741,7 +2796,7 @@ mod trim_tests {
         sample(p(-0.25, 0.8), p(0., 0.), &mut trace);
 
         let out = prev
-            .outline_following_trace(&trace, 0.3, 0.05)
+            .outline_following_trace(&trace, 0.3, 0.05, &SpliceTuning::default())
             .expect("a cut past a step still splices");
         let n = out.len();
         // Exactly ONE long vertical wall (the cut) — not two split by the graze.
@@ -2794,7 +2849,7 @@ mod trim_tests {
         sample(p(-0.25, 0.8), p(0., 0.), &mut trace);
 
         let out = prev
-            .outline_following_trace(&trace, 0.3, 0.05)
+            .outline_following_trace(&trace, 0.3, 0.05, &SpliceTuning::default())
             .expect("a cut over a notch still splices");
         let n = out.len();
         // No vertex at the crossings (3,1) / (3,2) — the cut wall isn't split.
@@ -2857,7 +2912,7 @@ mod trim_tests {
         sample(p(-0.25, 0.8), p(0., 0.), &mut trace);
 
         let out = prev
-            .outline_following_trace(&trace, 0.3, 0.05)
+            .outline_following_trace(&trace, 0.3, 0.05, &SpliceTuning::default())
             .expect("a set-back right wall splices");
         let n = out.len();
         // The long near-vertical new wall is now EXACTLY vertical (dx≈0).

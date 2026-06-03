@@ -1,6 +1,7 @@
 use std::cell::RefCell;
 use std::rc::Rc;
 
+mod config;
 mod controller;
 mod engine;
 mod ui;

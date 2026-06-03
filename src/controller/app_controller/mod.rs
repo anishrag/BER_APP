@@ -34,18 +34,6 @@ use std::collections::{HashMap, HashSet};
 /// collects it from the assessor.
 const DEFAULT_CEILING_HEIGHT_M: f64 = 2.4;
 
-/// Range for what counts as "near-collinear, ask the user", expressed as a
-/// FRACTION of the floor plan's bounding-box diagonal (not absolute units).
-/// The plan is in canvas pixels before the first dimension and in metres after,
-/// so a fixed absolute range would over-ask on a metre-scale plan (a 60-unit
-/// gap spans the whole house) — these ratios behave the same at either scale.
-/// `MIN` sits just above the parametric layer's dedup tolerance (≈ diag*0.0005),
-/// so pairs that already share a coordinate are skipped; anything up to `MAX` is
-/// fair game; pairs farther apart are distinct walls. The fractions reproduce
-/// the previous pixel tuning (≈1px / ≈60px on a ~700px sketch).
-const COLLINEARITY_MIN_SEPARATION_RATIO: f32 = 0.0015;
-const COLLINEARITY_MAX_SEPARATION_RATIO: f32 = 0.09;
-
 /// Print a stroke as a `vec![p(x,y), …]` literal (matching the curve-debug
 /// dumps) so a whole session can be copy-pasted into a bit-for-bit integration
 /// test. Coordinates are whatever the caller passes — pixels for the initial
@@ -373,6 +361,8 @@ pub struct AppController {
     redo: Vec<HistorySnapshot>,
     /// View transform layered on top of the canvas auto-fit (pan + zoom).
     view: ViewTransform,
+    /// Runtime thresholds loaded from `tuning.yaml` (new-storey + collinearity).
+    tuning: crate::config::Tuning,
 }
 
 /// Snapshot of the data state for undo/redo. Includes the floor plan +
@@ -501,6 +491,7 @@ impl AppController {
             history: Vec::new(),
             redo: Vec::new(),
             view: ViewTransform::default(),
+            tuning: crate::config::Tuning::load(),
         }
     }
 
@@ -766,7 +757,7 @@ impl AppController {
         // canvas — the assessor needs room to draw a footprint that extends
         // BEYOND it (e.g. over a ground-floor garage). `Fit` resets to full-fit.
         self.view = ViewTransform {
-            zoom: 0.7,
+            zoom: self.tuning.new_storey.add_storey_zoom,
             ..ViewTransform::default()
         };
         self.edit_state = EditState::default();
@@ -1413,7 +1404,8 @@ impl AppController {
         // ~8% of the previous diagonal: forgiving enough that a wall the user
         // drew "close" to the storey below lands on it, yet far below the depth
         // of a real extension (e.g. a garage bump-out), which stays un-snapped.
-        let tol = (manip_2d_plan::ring_diagonal(&ring) * 0.08).max(1e-3);
+        let tol =
+            (manip_2d_plan::ring_diagonal(&ring) * self.tuning.new_storey.snap_tol_ratio).max(1e-3);
         let snapped = manip_2d_plan::snap_stroke_to_ring(points, &ring, tol);
         let moved = points
             .iter()
@@ -1515,7 +1507,8 @@ impl AppController {
         // would collapse a real outline. ~1% of the previous diagonal smooths
         // freehand jitter without eating real corners.
         let prev_diag = manip_2d_plan::ring_diagonal(&prev_ring);
-        let tol = (prev_diag * 0.01).max(0.05);
+        let ns = self.tuning.new_storey.clone();
+        let tol = (prev_diag * ns.rdp_tol_ratio).max(ns.rdp_tol_floor);
         println!(
             "[new-storey] closed={}, prev_ring {} verts (diag {:.2} m), RDP tol {:.3} m",
             closed,
@@ -1542,28 +1535,28 @@ impl AppController {
         // freehand strays past the snap radius but stays within ~1 m of the
         // boundary — that's still "following", not a new wall. Two-plus
         // consecutive points beyond it are a genuine feature (a garage, a nib).
-        const NEW_WALL_TOL_M: f32 = 1.0;
+        let new_wall_tol_m = ns.new_wall_off_tol_m;
         // Measure reproduce-ness on the RAW trace, NOT the snapped one: the snap
-        // (radius ~0.08·diag) has already pulled a shallow setback wall ONTO the
-        // boundary, which would erase the very divergence we're testing for. A
-        // faithful trace strays only by hand slop (~0.1 m), so raw still reads as
-        // a reproduce; a deliberate setback shows up.
-        let off_run = prev_plan.longest_offring_run(&pts, NEW_WALL_TOL_M);
+        // has already pulled a shallow setback wall ONTO the boundary, which would
+        // erase the very divergence we're testing for. A faithful trace strays
+        // only by hand slop, so raw still reads as a reproduce; a deliberate
+        // setback shows up.
+        let off_run = prev_plan.longest_offring_run(&pts, new_wall_tol_m);
         // A reproduce must ALSO cover the whole previous perimeter — a trace that
         // SKIPS a chunk (stops early on a side, cuts a bulge off, overhangs a
         // cut-out) isn't a reproduce. `cover_tol` is tighter than the snap radius
-        // (and capped in absolute metres) so a ~0.4 m setback on a small storey
-        // registers as unvisited rather than being absorbed as slop; faithful
-        // curve tracing stays well within it.
-        let cover_tol = (prev_diag * 0.05).clamp(0.05, 0.3);
+        // (and capped in absolute metres) so a small setback registers as
+        // unvisited rather than being absorbed as slop; faithful curve tracing
+        // stays well within it.
+        let cover_tol = (prev_diag * ns.cover_tol_ratio).clamp(ns.cover_tol_min, ns.cover_tol_max);
         let uncovered = prev_plan.uncovered_perimeter_run(&pts, cover_tol);
-        let uncovered_limit = prev_diag * 0.06;
+        let uncovered_limit = prev_diag * ns.uncovered_limit_ratio;
         let reproduces_outline = off_run < 2 && uncovered < uncovered_limit;
         println!(
             "[new-storey] reproduce check: longest off-ring run = {} pts (> {:.2} m off), \
              largest unvisited boundary span = {:.2} m (limit {:.2} m) → {}",
             off_run,
-            NEW_WALL_TOL_M,
+            new_wall_tol_m,
             uncovered,
             uncovered_limit,
             if reproduces_outline {
@@ -1593,7 +1586,7 @@ impl AppController {
         // off only the diverging walls. Pass the RAW (un-snapped) trace so a
         // diverging wall keeps its drawn position. Falls through to the
         // whole-trace orthogonalize below if the trace doesn't decompose cleanly.
-        if let Some(spliced) = prev_plan.outline_following_trace(&pts, cover_tol, tol) {
+        if let Some(spliced) = prev_plan.outline_following_trace(&pts, cover_tol, tol, &ns.splice) {
             match FloorPlan::from_clean_ring(&spliced) {
                 Ok(fp) => {
                     self.floor_plan = fp;
@@ -2049,8 +2042,8 @@ impl AppController {
         // upper storey drawn in world coords). A fixed range tuned for pixels
         // would treat every wall in a metre-scale storey as near-collinear.
         let diag = self.floor_plan.bounding_box_diagonal();
-        let min_sep = (diag * COLLINEARITY_MIN_SEPARATION_RATIO).max(1e-4);
-        let max_sep = diag * COLLINEARITY_MAX_SEPARATION_RATIO;
+        let min_sep = (diag * self.tuning.collinearity.min_separation_ratio).max(1e-4);
+        let max_sep = diag * self.tuning.collinearity.max_separation_ratio;
         let newest_ring = self.floor_plan.ring_count().saturating_sub(1);
         // When this storey was drawn over a previous one, prefer to KEEP the
         // line that lies on the previous storey's outline as the merge target,
