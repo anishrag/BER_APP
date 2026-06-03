@@ -1828,15 +1828,17 @@ impl FloorPlan {
         // the ring's own vertices over that arc (curve facets verbatim). A free
         // run's interior points sa+1..=sb are the new wall — orthogonalize them,
         // anchored to the ring points where the trace left and rejoins.
-        let mut out: Vec<Point2f32> = Vec::new();
+        // Each vertex is tagged `is_curve` = it's a VERBATIM facet vertex of a
+        // followed arc (part of a curve). Anchors and new-wall vertices are not.
+        let mut out: Vec<(Point2f32, bool)> = Vec::new();
         for &(f, sa, sb) in &runs {
             if f {
                 let (p_from, p_to) = (sn[sa].0, sn[(sb + 1) % m].0);
-                out.push(r_point_at(p_from));
-                out.extend(arc_vertices(p_from, p_to));
-                out.push(r_point_at(p_to));
+                out.push((r_point_at(p_from), false));
+                out.extend(arc_vertices(p_from, p_to).into_iter().map(|p| (p, true)));
+                out.push((r_point_at(p_to), false));
             } else {
-                let prev_pt = *out.last().unwrap_or(&r_point_at(sn[sa].0));
+                let prev_pt = out.last().map(|(p, _)| *p).unwrap_or(r_point_at(sn[sa].0));
                 let next_pt = r_point_at(sn[(sb + 1) % m].0);
                 let mut seg = Vec::with_capacity(sb - sa + 2);
                 seg.push(prev_pt);
@@ -1852,49 +1854,53 @@ impl FloorPlan {
                 // Interior vertices only — the endpoints belong to the arcs.
                 let upto = ortho.len().saturating_sub(1);
                 for p in ortho.iter().take(upto).skip(1) {
-                    out.push(*p);
+                    out.push((*p, false));
                 }
             }
         }
-        // Square off the NEW walls. A free run that's a single straight wall is
-        // emitted between its two boundary anchors, which generally DON'T share a
-        // coordinate (they're wherever the trace left and rejoined) — so the wall
-        // comes out slightly tilted, and dimensioning an adjacent wall later flips
-        // its lean ("inverted on axis"). Snap any LONG, nearly-axis-aligned edge
-        // onto its axis (both endpoints share the perpendicular coord). The
-        // `long` gate protects the curve: its facets are short, so they're never
-        // snapped even though each is near-axis.
-        let (mut lo, mut hi) = (out[0], out[0]);
-        for p in &out {
+        // Square off the NEW walls. A free run emitted between two boundary
+        // anchors that DON'T share a coordinate comes out slightly tilted; left
+        // tilted, dimensioning a neighbour later flips its lean ("inverted on
+        // axis"). Snap a nearly-axis-aligned edge onto its axis — but NEVER a
+        // curve facet (both endpoints tagged `is_curve`), and only when the edge
+        // is clearly meant to be axis-aligned (high aspect ratio), so a short
+        // diagonal facet at a curve's tangent is left alone. The curve-facet tag
+        // (not a length gate) is what protects the curve, so this catches a short
+        // new wall on a small storey that a `> 0.2·diag` length gate would miss.
+        let (mut lo, mut hi) = (out[0].0, out[0].0);
+        for (p, _) in &out {
             lo = Point2f32::new(lo.x.min(p.x), lo.y.min(p.y));
             hi = Point2f32::new(hi.x.max(p.x), hi.y.max(p.y));
         }
         let odiag = ((hi.x - lo.x).powi(2) + (hi.y - lo.y).powi(2)).sqrt();
-        let axis_tol = (odiag * 0.06).max(0.02);
-        let long = odiag * 0.2;
+        let axis_tol = (odiag * 0.06).max(0.05);
         let k = out.len();
         for i in 0..k {
-            let (a, b) = (out[i], out[(i + 1) % k]);
+            let j = (i + 1) % k;
+            if out[i].1 && out[j].1 {
+                continue; // a curve facet — keep it verbatim
+            }
+            let (a, b) = (out[i].0, out[j].0);
             let (dx, dy) = ((a.x - b.x).abs(), (a.y - b.y).abs());
-            if dx < axis_tol && dy > long {
+            if dx < axis_tol && dy > axis_tol && dy > dx * 6.0 {
                 let mx = (a.x + b.x) * 0.5; // near-vertical → share x
-                out[i].x = mx;
-                out[(i + 1) % k].x = mx;
-            } else if dy < axis_tol && dx > long {
+                out[i].0.x = mx;
+                out[j].0.x = mx;
+            } else if dy < axis_tol && dx > axis_tol && dx > dy * 6.0 {
                 let my = (a.y + b.y) * 0.5; // near-horizontal → share y
-                out[i].y = my;
-                out[(i + 1) % k].y = my;
+                out[i].0.y = my;
+                out[j].0.y = my;
             }
         }
         // Drop consecutive coincident vertices (arc endpoints meeting walls), and
         // any closing duplicate.
-        let mut cleaned: Vec<Point2f32> = Vec::with_capacity(out.len());
-        for p in out {
-            if cleaned.last().map_or(true, |q| dist2(*q, p) > 1e-6) {
-                cleaned.push(p);
+        let mut cleaned: Vec<(Point2f32, bool)> = Vec::with_capacity(out.len());
+        for v in out {
+            if cleaned.last().map_or(true, |(q, _)| dist2(*q, v.0) > 1e-6) {
+                cleaned.push(v);
             }
         }
-        while cleaned.len() >= 2 && dist2(cleaned[0], *cleaned.last().unwrap()) <= 1e-6 {
+        while cleaned.len() >= 2 && dist2(cleaned[0].0, cleaned.last().unwrap().0) <= 1e-6 {
             cleaned.pop();
         }
         if cleaned.len() < 3 {
@@ -1912,10 +1918,11 @@ impl FloorPlan {
         // as `build_subarea_region`'s corner-anchor step.)
         if let Some(rk) = cleaned
             .iter()
-            .position(|p| ring.iter().any(|o| dist2(*o, *p) < 1e-4))
+            .position(|(p, _)| ring.iter().any(|o| dist2(*o, *p) < 1e-4))
         {
             cleaned.rotate_left(rk);
         }
+        let cleaned: Vec<Point2f32> = cleaned.into_iter().map(|(p, _)| p).collect();
         println!(
             "[splice] built {} verts from {} runs ({} following, {} new-wall)",
             cleaned.len(),
