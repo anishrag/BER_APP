@@ -176,6 +176,7 @@ fn create_minimal_ber(id: ItemId) -> Ber {
         eircode: "D01TEST".to_string(),
         construction_phases: ConstructionPhases {
             years: [(ConstructionPhase::Original, 2000)].into_iter().collect(),
+            nicknames: Default::default(),
         },
         heating_system: HeatingSystem {
             id: ItemId::default(),
@@ -223,6 +224,7 @@ fn create_full_ber(id: ItemId) -> Ber {
         ]
         .into_iter()
         .collect(),
+        nicknames: Default::default(),
     };
 
     // Shared floor construction the ground-floor region points at.

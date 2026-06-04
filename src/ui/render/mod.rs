@@ -488,6 +488,51 @@ pub fn render_cut_candidates(
     }
 }
 
+/// Render committed construction-phase areas: each ring tinted purple with its
+/// phase label at the centroid, so the assessor sees which footprint carries
+/// which year. `regions` is `(ring_world_coords, label)`.
+pub fn render_phase_regions(
+    painter: &egui::Painter,
+    rect: egui::Rect,
+    ber: Option<&Ber>,
+    current_storey_idx: Option<usize>,
+    sketch_mode: SketchMode,
+    view: ViewParams,
+    regions: &[(Vec<(f64, f64)>, String)],
+) {
+    if regions.is_empty() {
+        return;
+    }
+    let Some((_storey, t)) = storey_transform(rect, ber, current_storey_idx, sketch_mode, view)
+    else {
+        return;
+    };
+    let color = egui::Color32::from_rgb(200, 120, 255); // purple
+    for (region, label) in regions {
+        if region.len() < 3 {
+            continue;
+        }
+        let pts: Vec<egui::Pos2> = region.iter().map(|(x, y)| t.apply(*x, *y)).collect();
+        let n = pts.len();
+        for k in 0..n {
+            painter.line_segment([pts[k], pts[(k + 1) % n]], egui::Stroke::new(3.0, color));
+        }
+        let (mut cx, mut cy) = (0.0f32, 0.0f32);
+        for p in &pts {
+            cx += p.x;
+            cy += p.y;
+        }
+        let c = egui::pos2(cx / n as f32, cy / n as f32);
+        painter.text(
+            c,
+            egui::Align2::CENTER_CENTER,
+            label,
+            egui::FontId::proportional(14.0),
+            color,
+        );
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 pub fn render_living_areas(
     painter: &egui::Painter,
@@ -684,6 +729,15 @@ pub fn render_vertex_marker(
 /// duplicate). Used by `render_ber` to supply a previous-storey watermark to
 /// `storey_2d::render`. `None` if the storey has no floor regions yet.
 fn previous_outline_ring(storey: &datatypes::ber::structural::Storey) -> Option<Vec<(f64, f64)>> {
+    // When the floor is split into phase zones, merge them back to the full
+    // footprint; otherwise the single region IS the footprint.
+    if storey.floors.regions.len() > 1 {
+        let ring = storey.floors.merged_outline();
+        if ring.len() < 3 {
+            return None;
+        }
+        return Some(ring.into_iter().map(|p| (p.x, p.y)).collect());
+    }
     let region = storey.floors.regions.first()?;
     let mut coords: Vec<(f64, f64)> = region
         .polygon

@@ -8,9 +8,10 @@ use std::sync::mpsc::{channel, Receiver, Sender};
 use crate::controller::app_controller::AppController;
 use crate::ui::adapters::sketch_egui::pos2_to_point2f;
 use crate::ui::pages::events::{Page, UiEvent};
-use crate::ui::pages::new_ber::NewBerEvent;
+use crate::ui::pages::new_ber::{parse_year, NewBerEvent};
 use crate::ui::pages::sketch::{EguiStroke, SketchEvent, SketchPage};
 use crate::ui::pages::{home::HomePage, new_ber::NewBerPage, splash::SplashPage};
+use datatypes::ber::common::{ConstructionPhase, ConstructionPhases};
 
 /// Surface a controller call's error (if any) to stderr with a label. Used by
 /// the event-dispatch arms whose only failure handling is to log.
@@ -76,6 +77,41 @@ pub struct NewBerState {
     pub date_str: String,
     pub date_assessed: Option<NaiveDate>,
     pub date_error: Option<String>,
+    /// Year the house was built (→ `ConstructionPhase::Original`).
+    pub construction_year: String,
+    /// Extensions (→ `Extension1..4`), in order added. Capped at 4. Each has a
+    /// user nickname ("Back extension") + a build year.
+    pub extensions: Vec<ExtensionInput>,
+}
+
+/// One extension row on the New-BER form: a descriptive nickname and a year.
+#[derive(Default)]
+pub struct ExtensionInput {
+    pub nickname: String,
+    pub year: String,
+}
+
+/// Build the BER's construction phases from the New-BER form: the house year →
+/// `Original`, each valid extension year → `Extension1..4`. Unparseable/blank
+/// entries are skipped (the house year is gated by `can_create`).
+fn collect_construction_phases(state: &NewBerState) -> ConstructionPhases {
+    let mut phases = ConstructionPhases::default();
+    if let Some(y) = parse_year(&state.construction_year) {
+        phases.set_year(ConstructionPhase::Original, y);
+    }
+    let variants = [
+        ConstructionPhase::Extension1,
+        ConstructionPhase::Extension2,
+        ConstructionPhase::Extension3,
+        ConstructionPhase::Extension4,
+    ];
+    for (variant, ext) in variants.into_iter().zip(state.extensions.iter()) {
+        if let Some(y) = parse_year(&ext.year) {
+            phases.set_year(variant.clone(), y);
+            phases.set_nickname(variant, ext.nickname.clone());
+        }
+    }
+    phases
 }
 
 impl BerApp {
@@ -188,6 +224,12 @@ impl eframe::App for BerApp {
                     vertex_drop_error,
                     can_undo,
                     can_redo,
+                    phase_mode,
+                    phase_region_polygons,
+                    pending_phase_polygon,
+                    pending_phase_cut_regions,
+                    phase_choices,
+                    phase_pick_pending,
                     view,
                 ) = {
                     let controller_ref = self.app_controller.borrow();
@@ -224,6 +266,12 @@ impl eframe::App for BerApp {
                         self.sketch_state.vertex_drop_error.clone(),
                         controller_ref.can_undo(),
                         controller_ref.can_redo(),
+                        controller_ref.phase_mode(),
+                        controller_ref.phase_region_polygons(),
+                        controller_ref.pending_phase_polygon(),
+                        controller_ref.pending_phase_cut_regions(),
+                        controller_ref.construction_phase_choices(),
+                        controller_ref.phase_pick_pending(),
                         crate::ui::render::ViewParams {
                             zoom: v.zoom,
                             offset_x: v.offset_x,
@@ -264,6 +312,12 @@ impl eframe::App for BerApp {
                     exposure_selection,
                     &mut self.sketch_state.exposure_start_input,
                     &mut self.sketch_state.exposure_end_input,
+                    phase_mode,
+                    &phase_region_polygons,
+                    &pending_phase_polygon,
+                    &pending_phase_cut_regions,
+                    &phase_choices,
+                    phase_pick_pending,
                     edit_selected_wall,
                     edit_selected_vertex,
                     edit_drag_prompt,
@@ -382,6 +436,28 @@ impl eframe::App for BerApp {
                                 controller
                                     .borrow_mut()
                                     .choose_cut_region(world_x as f32, world_y as f32);
+                            }
+                            SketchEvent::SetPhaseMode(on) => {
+                                controller.borrow_mut().set_phase_mode(on);
+                            }
+                            SketchEvent::PhaseRegionStrokeWorld { points } => {
+                                controller
+                                    .borrow_mut()
+                                    .apply_phase_region_stroke_event(&points);
+                            }
+                            SketchEvent::AssignPhase(phase) => {
+                                controller.borrow_mut().assign_phase_to_pending(phase);
+                            }
+                            SketchEvent::ChoosePhaseCutRegion { world_x, world_y } => {
+                                controller
+                                    .borrow_mut()
+                                    .choose_phase_cut_region(world_x as f32, world_y as f32);
+                            }
+                            SketchEvent::CancelPendingPhase => {
+                                controller.borrow_mut().cancel_pending_phase();
+                            }
+                            SketchEvent::DeletePhaseRegion(index) => {
+                                controller.borrow_mut().delete_phase_region(index);
                             }
                             SketchEvent::SetExposureMode(on) => {
                                 controller.borrow_mut().set_exposure_mode(on);
@@ -536,7 +612,12 @@ impl eframe::App for BerApp {
                         .new_ber_state
                         .date_assessed
                         .unwrap_or_else(|| chrono::Local::now().naive_local().date());
-                    self.app_controller.borrow_mut().create_ber(name, date);
+                    let phases = collect_construction_phases(&self.new_ber_state);
+                    {
+                        let mut ctrl = self.app_controller.borrow_mut();
+                        ctrl.create_ber(name, date);
+                        ctrl.set_construction_phases(phases);
+                    }
                     self.new_ber_state = NewBerState::default();
                     next_page = Some(Page::Home);
                 }

@@ -21,7 +21,7 @@ pub use error::Error;
 pub use extend::snap_stroke_to_ring;
 pub use geom::{
     bbox_diagonal as ring_diagonal, find_flipped_edge, intersect_circles, project_to_circle,
-    solve_axis_wall,
+    ring_contains_point, solve_axis_wall,
 };
 pub use parametric::{Axis, CollinearitySuggestion, ParameterAxis, ParameterId, VertexId};
 

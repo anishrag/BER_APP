@@ -54,11 +54,32 @@ pub enum ConstructionPhase {
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct ConstructionPhases {
     pub years: HashMap<ConstructionPhase, Year>,
+    /// User-given nicknames per phase (e.g. "Back extension", "over garage") —
+    /// what the UI shows instead of "Extension 1". Optional per phase.
+    #[serde(default)]
+    pub nicknames: HashMap<ConstructionPhase, String>,
 }
 
 impl ConstructionPhases {
     pub fn new(years: HashMap<ConstructionPhase, Year>) -> Self {
-        Self { years }
+        Self {
+            years,
+            nicknames: HashMap::new(),
+        }
+    }
+
+    /// Set (or clear, if empty) the nickname for `phase`.
+    pub fn set_nickname(&mut self, phase: ConstructionPhase, nickname: String) {
+        if nickname.trim().is_empty() {
+            self.nicknames.remove(&phase);
+        } else {
+            self.nicknames.insert(phase, nickname);
+        }
+    }
+
+    /// The nickname for `phase`, if one was given.
+    pub fn nickname_of(&self, phase: &ConstructionPhase) -> Option<&str> {
+        self.nicknames.get(phase).map(|s| s.as_str())
     }
 
     pub fn get_year(&self, phase: ConstructionPhase) -> Year {
@@ -66,6 +87,39 @@ impl ConstructionPhases {
             .get(&phase)
             .copied()
             .expect("Phase not found in construction years")
+    }
+
+    /// Non-panicking lookup of a phase's year, if one has been set.
+    pub fn year_of(&self, phase: &ConstructionPhase) -> Option<Year> {
+        self.years.get(phase).copied()
+    }
+
+    /// Set (or replace) the year for `phase`.
+    pub fn set_year(&mut self, phase: ConstructionPhase, year: Year) {
+        self.years.insert(phase, year);
+    }
+
+    /// The phases that have a year set, in canonical order (Original, then
+    /// Extension1..4, then any `Other`). This is the list the assessor may
+    /// assign to an area — only construction dates entered up front are
+    /// selectable.
+    pub fn defined_phases(&self) -> Vec<ConstructionPhase> {
+        let mut out: Vec<ConstructionPhase> = [
+            ConstructionPhase::Original,
+            ConstructionPhase::Extension1,
+            ConstructionPhase::Extension2,
+            ConstructionPhase::Extension3,
+            ConstructionPhase::Extension4,
+        ]
+        .into_iter()
+        .filter(|p| self.years.contains_key(p))
+        .collect();
+        for k in self.years.keys() {
+            if matches!(k, ConstructionPhase::Other(_)) {
+                out.push(k.clone());
+            }
+        }
+        out
     }
 }
 

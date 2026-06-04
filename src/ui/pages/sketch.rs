@@ -9,6 +9,7 @@ use crate::controller::app_controller::{
 use crate::ui::pages::events::UiEvent;
 use crate::ui::render;
 use crate::ui::render::ViewParams;
+use datatypes::ber::common::ConstructionPhase;
 use datatypes::ber::structural::WallExposure;
 
 /// Parse a dimension expression. Supports:
@@ -253,6 +254,25 @@ pub enum SketchEvent {
         world_x: f64,
         world_y: f64,
     },
+    /// Toggle construction-phase tagging mode: when on, DrawPerpWalls carves an
+    /// area to assign a construction phase (year of construction) to.
+    SetPhaseMode(bool),
+    /// A phase-tagging DrawPerpWalls stroke (world coords) — carves an area (or
+    /// cuts the storey) to be tagged with a construction phase.
+    PhaseRegionStrokeWorld {
+        points: Vec<(f32, f32)>,
+    },
+    /// User picked a construction phase for the pending carved area.
+    AssignPhase(ConstructionPhase),
+    /// Tap (world coords) picking which region of a pending phase cut to tag.
+    ChoosePhaseCutRegion {
+        world_x: f64,
+        world_y: f64,
+    },
+    /// Discard the half-finished phase pick without tagging.
+    CancelPendingPhase,
+    /// Delete the current storey's phase region at the given index.
+    DeletePhaseRegion(usize),
     /// Toggle wall-exposure mode: when on, tapping an outline wall selects it
     /// (and the section handles), the type buttons mark the selected range.
     SetExposureMode(bool),
@@ -335,6 +355,16 @@ impl SketchPage {
         exposure_selection: Option<ExposureSelection>,
         exposure_start_input: &mut String,
         exposure_end_input: &mut String,
+        // Construction-phase (year-of-construction) tagging: mode flag, the
+        // committed regions `(ring, label)` to tint, the carved area awaiting a
+        // phase pick, the cut candidates to tap between, the phase choices for
+        // the picker, and whether a pick is currently pending.
+        phase_mode: bool,
+        phase_region_polygons: &[(Vec<(f64, f64)>, String)],
+        pending_phase_polygon: &[(f64, f64)],
+        pending_phase_cut_regions: &[Vec<(f64, f64)>],
+        phase_choices: &[(ConstructionPhase, String)],
+        phase_pick_pending: bool,
         edit_selected_wall: Option<((f64, f64), (f64, f64))>,
         edit_selected_vertex: Option<(f64, f64)>,
         edit_drag_prompt: Option<EditDragPromptUiData>,
@@ -424,6 +454,38 @@ impl SketchPage {
                     view,
                     pending_cut_regions,
                 );
+
+                // Construction-phase areas: committed regions (purple, labelled),
+                // plus the pending carved area / cut candidates while picking.
+                render::render_phase_regions(
+                    &painter,
+                    rect,
+                    ber,
+                    current_storey_idx,
+                    mode,
+                    view,
+                    phase_region_polygons,
+                );
+                render::render_cut_candidates(
+                    &painter,
+                    rect,
+                    ber,
+                    current_storey_idx,
+                    mode,
+                    view,
+                    pending_phase_cut_regions,
+                );
+                if pending_phase_polygon.len() >= 3 {
+                    render::render_phase_regions(
+                        &painter,
+                        rect,
+                        ber,
+                        current_storey_idx,
+                        mode,
+                        view,
+                        std::slice::from_ref(&(pending_phase_polygon.to_vec(), "?".to_string())),
+                    );
+                }
 
                 // Wall exposure: colour each outline wall by its heat-loss class
                 // (brighter in exposure mode; the selected wall is haloed).
@@ -651,6 +713,22 @@ impl SketchPage {
                     }
                 }
 
+                // Pending PHASE cut: a primary click picks which candidate region
+                // to tag with a construction phase. Mirrors the living-area cut.
+                let phase_cut_pending = !pending_phase_cut_regions.is_empty();
+                if phase_cut_pending {
+                    if response.clicked_by(egui::PointerButton::Primary) {
+                        if let Some((wx, wy)) = response.interact_pointer_pos().and_then(|pos| {
+                            screen_to_world(ber, current_storey_idx, rect, view, pos)
+                        }) {
+                            on_event(UiEvent::Sketch(SketchEvent::ChoosePhaseCutRegion {
+                                world_x: wx,
+                                world_y: wy,
+                            }));
+                        }
+                    }
+                }
+
                 // Exposure mode: a tap selects the wall under the pointer; a
                 // primary drag near a selection handle slides that handle along
                 // the wall. Takes priority over stroke/edit input (suppressed via
@@ -703,6 +781,8 @@ impl SketchPage {
                     && !pending_redraw
                     && !dim_prompting
                     && !cut_pending
+                    && !phase_cut_pending
+                    && !phase_pick_pending
                     && !exposure_mode;
 
                 if primary_available && !matches!(edit_tool, EditTools::Edit) {
@@ -732,6 +812,10 @@ impl SketchPage {
                             // (metre) space too, so it also needs world coords.
                             let living_area_draw =
                                 living_area_mode && matches!(edit_tool, EditTools::DrawPerpWalls);
+                            // Construction-phase tagging draws in the storey's
+                            // metre space too (carve an area to assign a year).
+                            let phase_draw =
+                                phase_mode && matches!(edit_tool, EditTools::DrawPerpWalls);
                             // First outline of a fresh upper storey: drawn over
                             // the previous-storey watermark, so it must be
                             // captured in that storey's metre space (mirrors the
@@ -739,11 +823,13 @@ impl SketchPage {
                             let outline_on_watermark =
                                 matches!(edit_tool, EditTools::DrawPerpWalls)
                                     && !living_area_mode
+                                    && !phase_mode
                                     && matches!(current_storey_idx, Some(i) if i > 0)
                                     && ber
                                         .and_then(|b| b.storeys.get(current_storey_idx?))
                                         .is_some_and(|s| s.floors.regions.is_empty());
                             let needs_world = living_area_draw
+                                || phase_draw
                                 || outline_on_watermark
                                 || matches!(
                                     edit_tool,
@@ -780,6 +866,10 @@ impl SketchPage {
                                     // the exact variant by the active tool.
                                     let event = if living_area_draw {
                                         SketchEvent::LivingAreaStrokeWorld {
+                                            points: world_points,
+                                        }
+                                    } else if phase_draw {
+                                        SketchEvent::PhaseRegionStrokeWorld {
                                             points: world_points,
                                         }
                                     } else if outline_on_watermark {
@@ -992,6 +1082,31 @@ impl SketchPage {
                             .changed()
                         {
                             on_event(UiEvent::Sketch(SketchEvent::SetExposureMode(ex)));
+                        }
+                        // Construction-phase (year-of-construction) tagging:
+                        // select an area, assign it one of the dates entered up
+                        // front. Only useful once dates exist (picker non-empty).
+                        if !phase_choices.is_empty() {
+                            let mut ph = phase_mode;
+                            if ui
+                                .toggle_value(&mut ph, "📅 Construction year")
+                                .on_hover_text(
+                                    "Tag an area with its year of construction: draw an \
+                                     area (like a living area), then pick the year",
+                                )
+                                .changed()
+                            {
+                                on_event(UiEvent::Sketch(SketchEvent::SetPhaseMode(ph)));
+                            }
+                            if phase_mode {
+                                Self::phase_toolbar(
+                                    ui,
+                                    phase_choices,
+                                    phase_region_polygons,
+                                    phase_pick_pending,
+                                    &mut on_event,
+                                );
+                            }
                         }
                     }
                     ui.separator();
@@ -1311,6 +1426,45 @@ impl SketchPage {
     /// `start–end` (live with the drag handles) plus typed start/end inputs, the
     /// three type buttons that paint the current selection, and "Clear wall".
     /// Always: "Set remaining → Exposed" bulk-marks every still-unset wall.
+    /// Construction-phase tagging controls. While a carved area is pending,
+    /// shows the year picker (one button per defined phase) + Cancel; otherwise
+    /// lists the committed phase regions with delete buttons.
+    fn phase_toolbar<F: FnMut(UiEvent)>(
+        ui: &mut egui::Ui,
+        choices: &[(ConstructionPhase, String)],
+        regions: &[(Vec<(f64, f64)>, String)],
+        pick_pending: bool,
+        on_event: &mut F,
+    ) {
+        if pick_pending {
+            ui.label(egui::RichText::new("Assign year to area:").strong());
+            ui.horizontal_wrapped(|ui| {
+                for (phase, label) in choices {
+                    if ui.button(label).clicked() {
+                        on_event(UiEvent::Sketch(SketchEvent::AssignPhase(phase.clone())));
+                    }
+                }
+                if ui.button("Cancel").clicked() {
+                    on_event(UiEvent::Sketch(SketchEvent::CancelPendingPhase));
+                }
+            });
+        } else {
+            ui.label("Draw an area to tag its year of construction.");
+            for (i, (_ring, label)) in regions.iter().enumerate() {
+                ui.horizontal(|ui| {
+                    ui.label(label);
+                    if ui
+                        .button("🗑")
+                        .on_hover_text("Delete this phase area")
+                        .clicked()
+                    {
+                        on_event(UiEvent::Sketch(SketchEvent::DeletePhaseRegion(i)));
+                    }
+                });
+            }
+        }
+    }
+
     fn exposure_toolbar<F: FnMut(UiEvent)>(
         ui: &mut egui::Ui,
         walls: &[WallExposureView],

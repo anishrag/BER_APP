@@ -8,9 +8,11 @@ mod dimensioning;
 mod editing;
 mod exposure;
 mod living_areas;
+mod phase_regions;
 
 pub use exposure::{ExposureSection, ExposureSelection, SectionHandle, WallExposureView};
 use living_areas::{reconstruct_living_areas, shape_finalised};
+use phase_regions::{resolved_phase, PhaseRegion};
 
 use chrono::NaiveDate;
 use std::sync::mpsc::Sender;
@@ -19,7 +21,7 @@ use crate::engine::ber_repository::{BerRecord, BerRepository};
 use crate::engine::dataloader::DataLoader;
 use crate::engine::Db;
 use datatypes::ber::ber_struct::Ber;
-use datatypes::ber::common::ItemId;
+use datatypes::ber::common::{ConstructionPhase, ConstructionPhases, ItemId};
 use datatypes::ber::structural::{FloorRegions, Storey, WallExposure, WallRegions};
 use domain::points::{Point2f32, Point2f64};
 use domain::sketch::{DisplayMode, EditTools, SketchMode};
@@ -340,6 +342,20 @@ pub struct AppController {
     /// (not persisted / not in undo history); `None` when nothing is awaiting a
     /// choice.
     pending_cut: Option<[ShapeSlot; 2]>,
+    /// True when the editor is tagging construction-phase areas (year of
+    /// construction). Routes `DrawPerpWalls` to phase carving; mutually
+    /// exclusive with living-area / exposure modes. Toggled by the UI.
+    phase_mode: bool,
+    /// Session-only construction-phase areas, keyed by storey index. NOT
+    /// persisted in the BER — they stamp surfaces' phase at commit; the durable
+    /// record is each surface's `construction_id`. See `phase_regions.rs`.
+    phase_regions: HashMap<usize, Vec<PhaseRegion>>,
+    /// A carved phase area awaiting its phase pick (world-coord ring). The UI
+    /// shows the phase picker while this is `Some`. Transient.
+    pending_phase_polygon: Option<Vec<Point2f32>>,
+    /// A phase cut split the storey into two candidate regions; the user taps
+    /// one, which then becomes `pending_phase_polygon`. Transient.
+    pending_phase_cut: Option<[Vec<Point2f32>; 2]>,
     /// Edit-mode interaction state: which wall the user has selected via
     /// click + whether a drag is currently in progress. Always reset when
     /// `edit_tool` switches away from `Edit`.
@@ -485,6 +501,10 @@ impl AppController {
             exposure_drag: None,
             wall_sections: HashMap::new(),
             pending_cut: None,
+            phase_mode: false,
+            phase_regions: HashMap::new(),
+            pending_phase_polygon: None,
+            pending_phase_cut: None,
             edit_state: EditState::default(),
             edit_drag_prompt: None,
             vertex_drop_prompt: None,
@@ -658,6 +678,16 @@ impl AppController {
         ber
     }
 
+    /// Set the BER's construction phases (house + extension years). These are the
+    /// only phases the assessor can later assign to an area; captured up front on
+    /// the New-BER form. No-op when no BER is loaded. Persists.
+    pub fn set_construction_phases(&mut self, phases: ConstructionPhases) {
+        if let Some(record) = self.current_record.as_mut() {
+            record.data.construction_phases = phases;
+        }
+        let _ = self.persist();
+    }
+
     pub fn get_ber(&self, id: &ItemId) -> Option<Ber> {
         let repo = BerRepository::new(&self.conn);
         repo.load(id).ok().map(|record| record.data)
@@ -679,6 +709,10 @@ impl AppController {
         self.current_storey_idx = Some(0);
         self.load_storey_into_editor(record.data.storeys.first());
         self.current_record = Some(record);
+        // Phase areas are session-only — rebuild them from the loaded storey's
+        // tagged floor regions so the partition stays reproducible.
+        self.phase_regions.clear();
+        self.reconstruct_phase_regions_for(0);
         self.view = ViewTransform::default();
         self.edit_state = EditState::default();
         self.review = None;
@@ -720,6 +754,13 @@ impl AppController {
                 .and_then(|r| r.data.storeys.get(i).cloned())
         });
         self.load_storey_into_editor(storey.as_ref());
+        // Rebuild the target storey's phase areas from its tagged floor regions
+        // (unless this session already has them) so its partition is reproducible.
+        if let Some(i) = target {
+            if !self.phase_regions.contains_key(&i) {
+                self.reconstruct_phase_regions_for(i);
+            }
+        }
         self.compute_next_dimension_prompt();
         // Undo/redo is per-editing-session of one storey — don't carry across.
         self.history.clear();
@@ -802,18 +843,31 @@ impl AppController {
             return;
         };
 
-        // Outline: rebuild from the resolved floor polygon, exact points.
-        let primary: Vec<Point2f32> = storey
-            .floors
-            .to_vertex_lists()
-            .into_iter()
-            .find(|r| r.len() >= 3)
-            .map(|r| {
-                r.iter()
-                    .map(|p| Point2f32::new(p.x as f32, p.y as f32))
-                    .collect()
-            })
-            .unwrap_or_default();
+        // Outline: rebuild from the resolved floor footprint. A SINGLE region is
+        // the whole footprint — use its exact stored points (no geo, so it
+        // round-trips). Only when the floor is split into several phase zones do
+        // we MERGE them back into one outline ring (the first region would be
+        // just one zone).
+        let primary: Vec<Point2f32> = if storey.floors.regions.len() > 1 {
+            storey
+                .floors
+                .merged_outline()
+                .into_iter()
+                .map(|p| Point2f32::new(p.x as f32, p.y as f32))
+                .collect()
+        } else {
+            storey
+                .floors
+                .to_vertex_lists()
+                .into_iter()
+                .find(|r| r.len() >= 3)
+                .map(|r| {
+                    r.iter()
+                        .map(|p| Point2f32::new(p.x as f32, p.y as f32))
+                        .collect()
+                })
+                .unwrap_or_default()
+        };
         if primary.len() >= 3 {
             self.floor_plan = FloorPlan::from_clean_ring(&primary).unwrap_or_default();
             // Loaded geometry is finalised: metre scale set, nothing to dimension.
@@ -931,6 +985,24 @@ impl AppController {
         // thing that needs lossless re-edit, and we've traded that away (reload
         // rebuilds everything from these resolved points).
         let idx = self.current_storey_idx.unwrap_or(0);
+        // Phase areas for this storey (world/metre rings + phase), cloned before
+        // the mutable record borrow — they drive the floor PARTITION below.
+        let phase_area_rings: Vec<(Vec<Point2f64>, ConstructionPhase)> = self
+            .phase_regions
+            .get(&idx)
+            .map(|rs| {
+                rs.iter()
+                    .map(|r| {
+                        let ring = r
+                            .polygon
+                            .iter()
+                            .map(|p| Point2f64::new(p.x as f64, p.y as f64))
+                            .collect();
+                        (ring, r.phase.clone())
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
         let record = self.current_record.as_mut().unwrap();
         // Ensure the target storey exists. The single-storey case (idx 0,
         // empty vec) lazy-creates here; multi-storey flows always push a
@@ -939,9 +1011,8 @@ impl AppController {
         while record.data.storeys.len() <= idx {
             record.data.storeys.push(Storey::default());
         }
-        // Fresh geometry points at the default (unset) shared constructions; a
-        // marked wall that gets split inherits its source region's construction
-        // via `rebuild_preserving`, so only genuinely-new walls land on this one.
+        // `floor_cid` is the default (unset, `Original`) floor construction — the
+        // partition's REMAINDER (untagged) and living areas use it.
         let floor_cid = record.data.ensure_floor_construction(
             Default::default(),
             Default::default(),
@@ -952,9 +1023,43 @@ impl AppController {
             Default::default(),
             Default::default(),
         );
+        // Resolve each phase area's floor construction (default type/make-up,
+        // that area's phase), then PARTITION each outline ring by those areas so
+        // the storey floor splits into one region per phase zone + the remainder.
+        let areas_with_cids: Vec<(Vec<Point2f64>, ItemId)> = phase_area_rings
+            .iter()
+            .map(|(ring, phase)| {
+                let cid = record.data.ensure_floor_construction(
+                    Default::default(),
+                    Default::default(),
+                    phase.clone(),
+                );
+                (ring.clone(), cid)
+            })
+            .collect();
         if polygons_f64.iter().any(|p| p.len() >= 3) {
-            record.data.storeys[idx].floors =
-                FloorRegions::from_vertex_lists(polygons_f64, DEFAULT_CEILING_HEIGHT_M, floor_cid);
+            record.data.storeys[idx].floors = if areas_with_cids.is_empty() {
+                // No phase zones → keep the whole-outline floor verbatim (NO geo
+                // boolean ops, so the stored points round-trip exactly and the
+                // rebuilt outline isn't re-normalised — which broke collinearity).
+                FloorRegions::from_vertex_lists(polygons_f64, DEFAULT_CEILING_HEIGHT_M, floor_cid)
+            } else {
+                // Tagged → partition each outline ring into phase zones.
+                let mut regions = Vec::new();
+                for ring in &polygons_f64 {
+                    if ring.len() < 3 {
+                        continue;
+                    }
+                    let part = FloorRegions::partition(
+                        ring,
+                        &areas_with_cids,
+                        floor_cid,
+                        DEFAULT_CEILING_HEIGHT_M,
+                    );
+                    regions.extend(part.regions);
+                }
+                FloorRegions { regions }
+            };
         }
         record.data.storeys[idx].living_areas =
             FloorRegions::from_vertex_lists(living_area_lists, DEFAULT_CEILING_HEIGHT_M, floor_cid);
@@ -968,7 +1073,113 @@ impl AppController {
             wall_cid,
         );
 
+        // Floors are already phase-correct from the partition; this stamps the
+        // phase onto the just-rebuilt WALLS from the same session areas.
+        self.resolve_storey_phases(idx);
+
         self.persist()
+    }
+
+    /// Stamp the construction PHASE onto storey `idx`'s WALLS from the session
+    /// phase areas (floors are already phase-correct from the commit-time
+    /// partition). Per wall, by its base midpoint: a phase area containing it
+    /// WINS (latest first); else the wall keeps its existing non-`Original` phase
+    /// (rebuild inherited it); else `Original`. Type/make-up are preserved — only
+    /// the phase axis changes, so the construction is re-`ensure`d with the same
+    /// `(type, makeup)`.
+    fn resolve_storey_phases(&mut self, idx: usize) {
+        // Clone the storey's phase polygons so we don't borrow `self` while the
+        // record is mutably borrowed below.
+        let phase_polys: Vec<(Vec<Point2f32>, ConstructionPhase)> = self
+            .phase_regions
+            .get(&idx)
+            .map(|rs| {
+                rs.iter()
+                    .map(|r| (r.polygon.clone(), r.phase.clone()))
+                    .collect()
+            })
+            .unwrap_or_default();
+        let Some(record) = self.current_record.as_mut() else {
+            return;
+        };
+        let ber = &mut record.data;
+        if ber.storeys.len() <= idx {
+            return;
+        }
+
+        // WALLS: `rebuild_preserving` already carried each wall's construction
+        // (and phase) across; apply the polygon override on top.
+        let n_walls = ber.storeys[idx].walls.regions.len();
+        for i in 0..n_walls {
+            let Some(mid) = ber.storeys[idx].walls.regions[i].base_midpoint() else {
+                continue;
+            };
+            let cur_cid = ber.storeys[idx].walls.regions[i].construction_id;
+            let (ty, makeup, cur_phase) = match ber.wall_construction(cur_cid) {
+                Some(c) => (
+                    c.construction_type,
+                    c.base.construction_makeup.clone(),
+                    c.base.construction_phase.clone(),
+                ),
+                None => (
+                    Default::default(),
+                    Default::default(),
+                    ConstructionPhase::Original,
+                ),
+            };
+            let new_phase =
+                resolved_phase(&phase_polys, mid.x as f32, mid.y as f32, cur_phase.clone());
+            if new_phase != cur_phase {
+                let cid = ber.ensure_wall_construction(ty, makeup, new_phase);
+                ber.storeys[idx].walls.regions[i].construction_id = cid;
+            }
+        }
+    }
+
+    /// Rebuild the session phase areas for storey `idx` from its persisted floor
+    /// regions (each non-`Original` floor region → a phase area). Phase areas are
+    /// session-only, so on reload they'd otherwise be empty and the NEXT commit
+    /// would re-partition with no areas — wiping the split. Reconstructing here
+    /// keeps the partition reproducible and lets a new selection still snap to the
+    /// existing zones. No-op when nothing is tagged.
+    fn reconstruct_phase_regions_for(&mut self, idx: usize) {
+        let Some(record) = self.current_record.as_ref() else {
+            return;
+        };
+        let Some(storey) = record.data.storeys.get(idx) else {
+            return;
+        };
+        let mut regions: Vec<PhaseRegion> = Vec::new();
+        for fr in &storey.floors.regions {
+            let phase = record
+                .data
+                .floor_construction(fr.construction_id)
+                .map(|c| c.base.construction_phase.clone())
+                .unwrap_or(ConstructionPhase::Original);
+            if phase == ConstructionPhase::Original {
+                continue;
+            }
+            let mut ring: Vec<Point2f32> = fr
+                .polygon
+                .exterior()
+                .coords()
+                .map(|c| Point2f32::new(c.x as f32, c.y as f32))
+                .collect();
+            if ring.len() > 1 && ring.first() == ring.last() {
+                ring.pop();
+            }
+            if ring.len() >= 3 {
+                regions.push(PhaseRegion {
+                    polygon: ring,
+                    phase,
+                });
+            }
+        }
+        if regions.is_empty() {
+            self.phase_regions.remove(&idx);
+        } else {
+            self.phase_regions.insert(idx, regions);
+        }
     }
 
     /// Write a FINALISED copy of the current record to the DB. Components that
@@ -1437,11 +1648,19 @@ impl AppController {
             return None;
         }
         let prev = self.current_record.as_ref()?.data.storeys.get(idx - 1)?;
-        let ring_f64 = prev
-            .floors
-            .to_vertex_lists()
-            .into_iter()
-            .find(|r| r.len() >= 3)?;
+        // Merge phase zones back to the full footprint when the previous storey
+        // is split; otherwise the single region IS the footprint.
+        let ring_f64 = if prev.floors.regions.len() > 1 {
+            prev.floors.merged_outline()
+        } else {
+            prev.floors
+                .to_vertex_lists()
+                .into_iter()
+                .find(|r| r.len() >= 3)?
+        };
+        if ring_f64.len() < 3 {
+            return None;
+        }
         Some(
             ring_f64
                 .into_iter()
@@ -3208,6 +3427,278 @@ mod trim_collapse_tests {
         assert_eq!(wc.construction_type, WallConstructionType::CavityWall);
         assert_eq!(wc.base.description.as_deref(), Some("party"));
         assert_eq!(r[1].exposure, WallExposure::SemiExposed, "middle is semi");
+    }
+
+    /// A wall's resolved construction phase, via its region's `construction_id`.
+    fn wall_phase(c: &AppController, region_idx: usize) -> ConstructionPhase {
+        let rec = c.current_record.as_ref().unwrap();
+        let cid = rec.data.storeys[0].walls.regions[region_idx].construction_id;
+        rec.data
+            .wall_construction(cid)
+            .unwrap()
+            .base
+            .construction_phase
+            .clone()
+    }
+
+    /// Construction phases entered up front are stored on the BER and surface as
+    /// labelled tagging choices.
+    #[test]
+    fn set_construction_phases_populates_choices() {
+        use datatypes::ber::common::ConstructionPhases;
+        let mut c = dimensioned_square_controller();
+        let mut phases = ConstructionPhases::default();
+        phases.set_year(ConstructionPhase::Original, 1985);
+        phases.set_year(ConstructionPhase::Extension1, 2008);
+        c.set_construction_phases(phases);
+
+        let choices = c.construction_phase_choices();
+        assert_eq!(choices.len(), 2, "two phases offered");
+        assert_eq!(choices[0].0, ConstructionPhase::Original);
+        assert!(choices[0].1.contains("1985"), "label carries the year");
+        assert_eq!(choices[1].0, ConstructionPhase::Extension1);
+        assert!(choices[1].1.contains("2008"));
+    }
+
+    /// A phase polygon stamps its phase onto walls whose midpoint falls inside it;
+    /// walls outside stay `Original`.
+    #[test]
+    fn phase_polygon_stamps_contained_walls() {
+        let p = |x: f32, y: f32| Point2f32::new(x, y);
+        let mut c = dimensioned_square_controller();
+        c.set_all_remaining_exposed(); // all 4 perimeter walls → regions
+                                       // Tag the right side (x >= 6) as Extension1.
+        c.phase_regions.entry(0).or_default().push(PhaseRegion {
+            polygon: vec![p(6., -1.), p(12., -1.), p(12., 12.), p(6., 12.)],
+            phase: ConstructionPhase::Extension1,
+        });
+        c.commit_to_ber().unwrap();
+
+        let rec = c.current_record.as_ref().unwrap();
+        let walls = rec.data.storeys[0].walls.regions.clone();
+        assert!(!walls.is_empty(), "walls became regions");
+        for (i, w) in walls.iter().enumerate() {
+            let mid = w.base_midpoint().unwrap();
+            let phase = wall_phase(&c, i);
+            if mid.x >= 6.0 {
+                assert_eq!(
+                    phase,
+                    ConstructionPhase::Extension1,
+                    "wall {i} (right) tagged"
+                );
+            } else {
+                assert_eq!(
+                    phase,
+                    ConstructionPhase::Original,
+                    "wall {i} (other) original"
+                );
+            }
+        }
+    }
+
+    /// A floor phase area splits the storey floor into multiple regions, each
+    /// carrying its own phase (tagged zone + remainder).
+    #[test]
+    fn phase_area_splits_floor_into_regions() {
+        let p = |x: f32, y: f32| Point2f32::new(x, y);
+        let mut c = dimensioned_square_controller();
+        c.phase_regions.entry(0).or_default().push(PhaseRegion {
+            polygon: vec![p(5., 0.), p(10., 0.), p(10., 10.), p(5., 10.)],
+            phase: ConstructionPhase::Extension1,
+        });
+        c.commit_to_ber().unwrap();
+        let rec = c.current_record.as_ref().unwrap();
+        let floors = &rec.data.storeys[0].floors.regions;
+        assert_eq!(floors.len(), 2, "floor split into tagged zone + remainder");
+        let phases: Vec<ConstructionPhase> = floors
+            .iter()
+            .map(|f| {
+                rec.data
+                    .floor_construction(f.construction_id)
+                    .unwrap()
+                    .base
+                    .construction_phase
+                    .clone()
+            })
+            .collect();
+        assert!(phases.contains(&ConstructionPhase::Extension1));
+        assert!(phases.contains(&ConstructionPhase::Original));
+    }
+
+    /// The floor split survives a DB round-trip: reopening rebuilds the split
+    /// regions, reconstructs the session phase areas, and the editor outline is
+    /// re-merged from the zones (one clean footprint, not a single zone).
+    #[test]
+    fn phase_split_survives_reload() {
+        let p = |x: f32, y: f32| Point2f32::new(x, y);
+        let mut c = dimensioned_square_controller();
+        c.phase_regions.entry(0).or_default().push(PhaseRegion {
+            polygon: vec![p(5., 0.), p(10., 0.), p(10., 10.), p(5., 10.)],
+            phase: ConstructionPhase::Extension1,
+        });
+        c.commit_to_ber().unwrap();
+        let id = c.current_record.as_ref().unwrap().id;
+
+        c.open_ber(&id).unwrap();
+        let floors = &c.current_record.as_ref().unwrap().data.storeys[0]
+            .floors
+            .regions;
+        assert_eq!(floors.len(), 2, "split persisted + reloaded");
+        assert!(
+            c.phase_regions.get(&0).is_some_and(|v| !v.is_empty()),
+            "phase areas reconstructed from floor regions"
+        );
+        // Outline merged back to the full 10x10 footprint (~100 m²), cleaned to
+        // 4 corners (no phantom vertex at the dissolved seam) — not a single zone.
+        let pts = c.outline.floor_plan.get_points();
+        assert_eq!(pts.len(), 4, "merged outline is a clean rectangle");
+        let n = pts.len();
+        let mut a2 = 0.0f32;
+        for i in 0..n {
+            let (p, q) = (pts[i], pts[(i + 1) % n]);
+            a2 += p.x * q.y - q.x * p.y;
+        }
+        let area = (a2.abs() / 2.0) as f64;
+        assert!(
+            (area - 100.0).abs() < 1.0,
+            "merged outline ~100 m², got {area}"
+        );
+    }
+
+    /// REGRESSION: an UNTAGGED storey's outline must survive commit→reload
+    /// unchanged — no `geo` re-normalisation. When the partition + merged-outline
+    /// ran unconditionally (even with no phase zones), the rebuilt ring was
+    /// distorted, which inflated the plan extent and made the collinearity review
+    /// flag far-apart (opposite-side) walls. An L-shape exercises the concave
+    /// case geo is most likely to mangle.
+    #[test]
+    fn untagged_outline_survives_reload_without_distortion() {
+        let p = |x: f32, y: f32| Point2f32::new(x, y);
+        let mut c = AppController::new(crate::engine::open_db(":memory:").unwrap());
+        let _ = c.create_ber(
+            "T".into(),
+            chrono::NaiveDate::from_ymd_opt(2026, 1, 1).unwrap(),
+        );
+        c.floor_plan = FloorPlan::from_points_to_orthogonal(
+            &[
+                p(0., 0.),
+                p(10., 0.),
+                p(10., 6.),
+                p(4., 6.),
+                p(4., 10.),
+                p(0., 10.),
+                p(0.05, 0.05),
+            ],
+            0.1,
+            true,
+        )
+        .unwrap();
+        c.dimensioning.scale_set = true;
+        c.dimensioning.known_params = c.floor_plan.all_active_params();
+        c.commit_to_ber().unwrap();
+        let before = c.outline.floor_plan.get_points();
+        // Untagged → exactly one floor region (no split).
+        assert_eq!(
+            c.current_record.as_ref().unwrap().data.storeys[0]
+                .floors
+                .regions
+                .len(),
+            1,
+            "untagged storey stays a single floor region"
+        );
+
+        let id = c.current_record.as_ref().unwrap().id;
+        c.open_ber(&id).unwrap();
+        let after = c.outline.floor_plan.get_points();
+
+        assert_eq!(
+            before.len(),
+            after.len(),
+            "vertex count preserved across reload (no geo-introduced/dropped corners): \
+             before {before:?} after {after:?}"
+        );
+        for b in &before {
+            assert!(
+                after
+                    .iter()
+                    .any(|a| (a.x - b.x).abs() < 1e-3 && (a.y - b.y).abs() < 1e-3),
+                "vertex {b:?} missing/moved after reload; got {after:?}"
+            );
+        }
+    }
+
+    /// A later phase polygon overwrites an existing non-`Original` phase under it
+    /// (polygon always wins; latest tag first).
+    #[test]
+    fn polygon_overwrites_existing_phase() {
+        let p = |x: f32, y: f32| Point2f32::new(x, y);
+        let right = vec![p(6., -1.), p(12., -1.), p(12., 12.), p(6., 12.)];
+        let mut c = dimensioned_square_controller();
+        c.set_all_remaining_exposed();
+        let regions = c.phase_regions.entry(0).or_default();
+        regions.push(PhaseRegion {
+            polygon: right.clone(),
+            phase: ConstructionPhase::Extension2,
+        });
+        c.commit_to_ber().unwrap();
+        // Now tag the SAME area Extension1 — must override the Extension2.
+        c.phase_regions.entry(0).or_default().push(PhaseRegion {
+            polygon: right,
+            phase: ConstructionPhase::Extension1,
+        });
+        c.commit_to_ber().unwrap();
+
+        let walls = c.current_record.as_ref().unwrap().data.storeys[0]
+            .walls
+            .regions
+            .clone();
+        let right_idx = walls
+            .iter()
+            .position(|w| w.base_midpoint().unwrap().x >= 6.0)
+            .unwrap();
+        assert_eq!(wall_phase(&c, right_idx), ConstructionPhase::Extension1);
+    }
+
+    /// Once a wall is tagged, removing the polygon does NOT revert it — a surface
+    /// keeps its non-`Original` phase when no polygon covers it (the durable
+    /// record is `construction_id`). This is the reload-safety guarantee.
+    #[test]
+    fn preserve_existing_phase_when_no_polygon() {
+        let p = |x: f32, y: f32| Point2f32::new(x, y);
+        let mut c = dimensioned_square_controller();
+        c.set_all_remaining_exposed();
+        c.phase_regions.entry(0).or_default().push(PhaseRegion {
+            polygon: vec![p(6., -1.), p(12., -1.), p(12., 12.), p(6., 12.)],
+            phase: ConstructionPhase::Extension1,
+        });
+        c.commit_to_ber().unwrap();
+        let walls = c.current_record.as_ref().unwrap().data.storeys[0]
+            .walls
+            .regions
+            .clone();
+        let right_idx = walls
+            .iter()
+            .position(|w| w.base_midpoint().unwrap().x >= 6.0)
+            .unwrap();
+        let left_idx = walls
+            .iter()
+            .position(|w| w.base_midpoint().unwrap().x < 6.0)
+            .unwrap();
+        assert_eq!(wall_phase(&c, right_idx), ConstructionPhase::Extension1);
+
+        // Drop all polygons (as a reload/new session would) and re-commit.
+        c.phase_regions.clear();
+        c.commit_to_ber().unwrap();
+        assert_eq!(
+            wall_phase(&c, right_idx),
+            ConstructionPhase::Extension1,
+            "tagged wall keeps its phase with no polygon"
+        );
+        assert_eq!(
+            wall_phase(&c, left_idx),
+            ConstructionPhase::Original,
+            "untagged wall stays original"
+        );
     }
 
     /// After splitting a wall, tapping a leftover piece selects just that piece

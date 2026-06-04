@@ -1,5 +1,5 @@
 // src/data/structural.rs
-use geo::{Coord, LineString, Polygon};
+use geo::{Contains, Coord, LineString, MultiPolygon, Point as GeoPoint, Polygon};
 use serde::{Deserialize, Serialize};
 
 use super::ber_struct::Ber;
@@ -251,6 +251,21 @@ impl Ber {
         self.ceiling_constructions.push(c);
         id
     }
+
+    /// Resolve a wall construction by id (the inverse of `ensure_*`).
+    pub fn wall_construction(&self, id: ItemId) -> Option<&WallConstruction> {
+        self.wall_constructions.iter().find(|c| c.base.id == id)
+    }
+
+    /// Resolve a floor construction by id.
+    pub fn floor_construction(&self, id: ItemId) -> Option<&FloorConstruction> {
+        self.floor_constructions.iter().find(|c| c.base.id == id)
+    }
+
+    /// Resolve a ceiling construction by id.
+    pub fn ceiling_construction(&self, id: ItemId) -> Option<&CeilingConstruction> {
+        self.ceiling_constructions.iter().find(|c| c.base.id == id)
+    }
 }
 /// A planar region of the floor — pure geometry. Its fabric (construction
 /// type/make-up/phase, photos, description) lives on the `FloorConstruction`
@@ -341,6 +356,188 @@ impl FloorRegions {
             })
             .collect()
     }
+
+    /// The region whose polygon contains `p`, used to inherit a floor's fabric
+    /// (incl. construction phase) when re-deriving geometry. `None` if `p` is in
+    /// no region.
+    pub fn region_containing(&self, p: Point2f64) -> Option<&FloorRegion> {
+        self.regions
+            .iter()
+            .find(|r| r.polygon.contains(&GeoPoint::new(p.x, p.y)))
+    }
+
+    /// The storey footprint as a single ring — the UNION of all floor regions'
+    /// polygons (the inverse of `partition`: merge the phase zones back into one
+    /// outline). Collinear vertices left where two zones' shared edge dissolved
+    /// are stripped, so the rebuilt parametric outline doesn't gain phantom
+    /// walls. Returns the largest resulting ring (a storey is normally one
+    /// contiguous footprint); empty when there are no regions.
+    pub fn merged_outline(&self) -> Vec<Point2f64> {
+        use geo::bool_ops::BooleanOps;
+        use geo::Area;
+        let mut acc: Option<MultiPolygon<f64>> = None;
+        for r in &self.regions {
+            if r.polygon.exterior().0.len() < 4 {
+                continue;
+            }
+            acc = Some(match acc {
+                None => MultiPolygon::new(vec![r.polygon.clone()]),
+                Some(mp) => mp.union(&r.polygon),
+            });
+        }
+        let Some(mp) = acc else {
+            return Vec::new();
+        };
+        let Some(best) = mp.0.iter().max_by(|a, b| {
+            a.unsigned_area()
+                .partial_cmp(&b.unsigned_area())
+                .unwrap_or(std::cmp::Ordering::Equal)
+        }) else {
+            return Vec::new();
+        };
+        let mut ring: Vec<Point2f64> = best
+            .exterior()
+            .coords()
+            .map(|c| Point2f64::new(c.x, c.y))
+            .collect();
+        if ring.len() > 1 && ring.first() == ring.last() {
+            ring.pop();
+        }
+        strip_collinear(&ring)
+    }
+
+    /// Partition `outline` into floor regions by a set of construction-phase
+    /// `areas` (each a ring + the construction id to stamp on it). Every area is
+    /// clipped to the outline and to the parts NOT already claimed by an earlier
+    /// area (so a later selection abuts — "collapses to" — an existing one rather
+    /// than overlapping it); the leftover gets `remainder_construction_id`. A
+    /// boolean op can split one area into several pieces (MultiPolygon), so this
+    /// yields one `FloorRegion` per resulting piece. Empty `areas` → a single
+    /// region for the whole outline (the common, untagged case). Reusable for
+    /// ceilings later (same partition over the same rings).
+    pub fn partition(
+        outline: &[Point2f64],
+        areas: &[(Vec<Point2f64>, ItemId)],
+        remainder_construction_id: ItemId,
+        height: f64,
+    ) -> Self {
+        use geo::bool_ops::BooleanOps;
+        if outline.len() < 3 {
+            return Self::default();
+        }
+        let to_poly = |ring: &[Point2f64]| {
+            Polygon::new(
+                LineString::from(ring.iter().map(|p| (p.x, p.y)).collect::<Vec<_>>()),
+                vec![],
+            )
+        };
+        let mk = |poly: &Polygon<f64>, cid: ItemId| FloorRegion {
+            id: ItemId::default(),
+            polygon: poly.clone(),
+            height,
+            construction_id: cid,
+        };
+        let outline_poly = to_poly(outline);
+        let mut regions: Vec<FloorRegion> = Vec::new();
+        let mut claimed: MultiPolygon<f64> = MultiPolygon::new(vec![]);
+        for (ring, cid) in areas {
+            if ring.len() < 3 {
+                continue;
+            }
+            let inside = outline_poly.intersection(&to_poly(ring));
+            let piece = inside.difference(&claimed);
+            for poly in &piece.0 {
+                regions.push(mk(poly, *cid));
+            }
+            claimed = claimed.union(&piece);
+        }
+        let remainder = outline_poly.difference(&claimed);
+        for poly in &remainder.0 {
+            regions.push(mk(poly, remainder_construction_id));
+        }
+        Self { regions }
+    }
+}
+
+/// The largest piece of `ring` clipped to stay inside `boundary` (both simple
+/// rings) — used to keep a drawn construction-phase area strictly within the
+/// storey outline, regardless of how the freehand carve bulged. Returns an empty
+/// ring if they don't overlap. Collinear vertices introduced at the clip are
+/// stripped so the result stays a clean orthogonal area.
+pub fn clip_ring_to_boundary(ring: &[Point2f64], boundary: &[Point2f64]) -> Vec<Point2f64> {
+    use geo::bool_ops::BooleanOps;
+    use geo::Area;
+    if ring.len() < 3 || boundary.len() < 3 {
+        return Vec::new();
+    }
+    let to_poly = |r: &[Point2f64]| {
+        Polygon::new(
+            LineString::from(r.iter().map(|p| (p.x, p.y)).collect::<Vec<_>>()),
+            vec![],
+        )
+    };
+    let clipped = to_poly(ring).intersection(&to_poly(boundary));
+    let Some(best) = clipped.0.iter().max_by(|a, b| {
+        a.unsigned_area()
+            .partial_cmp(&b.unsigned_area())
+            .unwrap_or(std::cmp::Ordering::Equal)
+    }) else {
+        return Vec::new();
+    };
+    let mut out: Vec<Point2f64> = best
+        .exterior()
+        .coords()
+        .map(|c| Point2f64::new(c.x, c.y))
+        .collect();
+    if out.len() > 1 && out.first() == out.last() {
+        out.pop();
+    }
+    strip_collinear(&out)
+}
+
+/// Drop vertices that lie on the straight line between their neighbours (within
+/// a small cross-product tolerance) — used to clean a merged outline ring.
+fn strip_collinear(ring: &[Point2f64]) -> Vec<Point2f64> {
+    let n = ring.len();
+    if n < 3 {
+        return ring.to_vec();
+    }
+    let mut out = Vec::with_capacity(n);
+    for i in 0..n {
+        let prev = ring[(i + n - 1) % n];
+        let cur = ring[i];
+        let next = ring[(i + 1) % n];
+        let cross = (cur.x - prev.x) * (next.y - prev.y) - (cur.y - prev.y) * (next.x - prev.x);
+        if cross.abs() > 1e-9 {
+            out.push(cur);
+        }
+    }
+    if out.len() >= 3 {
+        out
+    } else {
+        ring.to_vec()
+    }
+}
+
+impl FloorRegion {
+    /// A representative point of the region — the centroid of its exterior
+    /// vertices. Used to hit-test which construction-phase area a floor falls in.
+    /// (For a convex/whole-storey floor this lies inside; concave floors may need
+    /// splitting before per-part phase assignment — deferred.)
+    pub fn representative_point(&self) -> Point2f64 {
+        let mut coords: Vec<Coord<f64>> = self.polygon.exterior().coords().copied().collect();
+        if coords.len() > 1 && coords.first() == coords.last() {
+            coords.pop();
+        }
+        if coords.is_empty() {
+            return Point2f64::new(0.0, 0.0);
+        }
+        let (sx, sy) = coords
+            .iter()
+            .fold((0.0, 0.0), |(ax, ay), c| (ax + c.x, ay + c.y));
+        let n = coords.len() as f64;
+        Point2f64::new(sx / n, sy / n)
+    }
 }
 /// A planar region of the floor
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -412,6 +609,16 @@ pub struct WallRegion {
     pub exposure: WallExposure,
     pub opes: Opes,
     pub construction_id: ItemId,
+}
+
+impl WallRegion {
+    /// Midpoint of the wall's base edge (footprint), in plan (2D). Used to
+    /// hit-test which construction-phase area the wall falls in. `None` for a
+    /// degenerate polygon with fewer than two vertices.
+    pub fn base_midpoint(&self) -> Option<Point2f64> {
+        let e = &self.polygon.exterior;
+        (e.len() >= 2).then(|| Point2f64::new((e[0].x + e[1].x) * 0.5, (e[0].y + e[1].y) * 0.5))
+    }
 }
 
 /// Collection of wall regions
@@ -547,6 +754,115 @@ pub struct ThermalMassInfo {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn square(x0: f64, y0: f64, x1: f64, y1: f64) -> Vec<Point2f64> {
+        vec![
+            Point2f64::new(x0, y0),
+            Point2f64::new(x1, y0),
+            Point2f64::new(x1, y1),
+            Point2f64::new(x0, y1),
+        ]
+    }
+
+    #[test]
+    fn clip_ring_keeps_only_the_inside_part() {
+        use geo::Area;
+        let outline = square(0.0, 0.0, 10.0, 10.0);
+        // Area straddles the right edge: x from 6 to 14 (half outside).
+        let drawn = square(6.0, 2.0, 14.0, 8.0);
+        let clipped = clip_ring_to_boundary(&drawn, &outline);
+        assert!(clipped.len() >= 3, "non-empty clip");
+        let poly = Polygon::new(
+            LineString::from(clipped.iter().map(|p| (p.x, p.y)).collect::<Vec<_>>()),
+            vec![],
+        );
+        // Inside part is x∈[6,10], y∈[2,8] = 4 × 6 = 24 (the x>10 half is gone).
+        assert!(
+            (poly.unsigned_area() - 24.0).abs() < 1e-6,
+            "clipped to the inside 4x6, got {}",
+            poly.unsigned_area()
+        );
+        // Every vertex is within the outline bounds.
+        for p in &clipped {
+            assert!(p.x <= 10.0 + 1e-6 && p.x >= -1e-6, "x {} inside", p.x);
+        }
+    }
+
+    #[test]
+    fn partition_with_no_areas_is_one_region() {
+        let outline = square(0.0, 0.0, 10.0, 10.0);
+        let rem = ItemId::default();
+        let fr = FloorRegions::partition(&outline, &[], rem, 2.4);
+        assert_eq!(fr.regions.len(), 1);
+        assert_eq!(fr.regions[0].construction_id, rem);
+    }
+
+    #[test]
+    fn partition_splits_outline_into_area_and_remainder() {
+        use geo::Area;
+        let outline = square(0.0, 0.0, 10.0, 10.0);
+        let area_cid = ItemId::default();
+        let rem_cid = ItemId::default();
+        // Right half [5,10] tagged.
+        let fr = FloorRegions::partition(
+            &outline,
+            &[(square(5.0, 0.0, 10.0, 10.0), area_cid)],
+            rem_cid,
+            2.4,
+        );
+        assert_eq!(fr.regions.len(), 2, "area piece + remainder");
+        let area_region = fr
+            .regions
+            .iter()
+            .find(|r| r.construction_id == area_cid)
+            .expect("tagged piece exists");
+        let rem_region = fr
+            .regions
+            .iter()
+            .find(|r| r.construction_id == rem_cid)
+            .expect("remainder exists");
+        assert!((area_region.polygon.unsigned_area() - 50.0).abs() < 1e-6);
+        assert!((rem_region.polygon.unsigned_area() - 50.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn partition_second_area_abuts_the_first() {
+        let outline = square(0.0, 0.0, 10.0, 10.0);
+        let a = ItemId::default();
+        let b = ItemId::default();
+        let rem = ItemId::default();
+        // Two OVERLAPPING areas; the second yields to the first in the overlap.
+        let fr = FloorRegions::partition(
+            &outline,
+            &[
+                (square(0.0, 0.0, 6.0, 10.0), a),  // left 0..6
+                (square(4.0, 0.0, 10.0, 10.0), b), // right 4..10 (overlaps 4..6)
+            ],
+            rem,
+            2.4,
+        );
+        use geo::Area;
+        let area_a: f64 = fr
+            .regions
+            .iter()
+            .filter(|r| r.construction_id == a)
+            .map(|r| r.polygon.unsigned_area())
+            .sum();
+        let area_b: f64 = fr
+            .regions
+            .iter()
+            .filter(|r| r.construction_id == b)
+            .map(|r| r.polygon.unsigned_area())
+            .sum();
+        assert!(
+            (area_a - 60.0).abs() < 1e-6,
+            "first area keeps its full 0..6"
+        );
+        assert!(
+            (area_b - 40.0).abs() < 1e-6,
+            "second yields the 4..6 overlap → 6..10 only"
+        );
+    }
 
     #[test]
     fn rebuild_makes_vertical_planes_with_exposure() {

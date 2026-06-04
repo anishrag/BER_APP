@@ -314,6 +314,30 @@ pub(crate) fn ring_signed_area2(pts: &[Point2f32]) -> f32 {
     s
 }
 
+/// Whether `(x, y)` lies inside the closed ring `pts` (ray-casting / even-odd
+/// rule). The ring is taken as implicitly closed (last vertex joins first); a
+/// repeated closing vertex is harmless. Degenerate rings (<3 vertices) contain
+/// nothing.
+pub fn ring_contains_point(pts: &[Point2f32], x: f32, y: f32) -> bool {
+    let n = pts.len();
+    if n < 3 {
+        return false;
+    }
+    let mut inside = false;
+    let mut j = n - 1;
+    for i in 0..n {
+        let (a, b) = (pts[i], pts[j]);
+        if (a.y > y) != (b.y > y) {
+            let xc = a.x + (y - a.y) / (b.y - a.y) * (b.x - a.x);
+            if x < xc {
+                inside = !inside;
+            }
+        }
+        j = i;
+    }
+    inside
+}
+
 /// If segments `a1→a2` and `b1→b2` cross at a single interior point (not at a
 /// shared endpoint, not collinear), return that point. Mirrors the "proper
 /// crossing" case of the polygon simplicity check, but yields the point so the
