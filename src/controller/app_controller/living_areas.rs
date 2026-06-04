@@ -176,7 +176,8 @@ impl AppController {
             max_x = max_x.max(p.x);
             max_y = max_y.max(p.y);
         }
-        let tol = (manip_2d_plan::ring_diagonal(world_points) * 0.02).max(1e-3);
+        let tol = (manip_2d_plan::ring_diagonal(world_points) * self.tuning.subarea.rdp_tol_ratio)
+            .max(self.tuning.subarea.rdp_tol_floor);
 
         // Save whatever's active first, so the outline we carve against is
         // current (and the active living area's edits aren't lost).
@@ -199,7 +200,7 @@ impl AppController {
         let plan = self
             .outline
             .floor_plan
-            .carve_subarea(world_points, tol)
+            .carve_subarea(world_points, tol, &self.tuning.subarea)
             .map_err(|e| format!("Failed to draw living area: {:?}", e))?;
         println!("  → living-area plan: {:?}", plan);
         let bad = plan.non_orthogonal_edges();
@@ -281,14 +282,22 @@ impl AppController {
         self.sync_active();
         // Guardrail FIRST: snap any part of the stroke drawn OUTSIDE the storey
         // back onto its boundary, before anything else looks at it.
-        let pts = self.outline.floor_plan.clamp_inside(&pts);
+        let pts = self
+            .outline
+            .floor_plan
+            .clip_stroke_inside(&pts, self.tuning.subarea.close_gap_m);
 
         // Tolerance scaled to the drawn extent (matches start_new_living_area).
-        let tol = (manip_2d_plan::ring_diagonal(&pts) * 0.02).max(1e-3);
+        let tol = (manip_2d_plan::ring_diagonal(&pts) * self.tuning.subarea.rdp_tol_ratio)
+            .max(self.tuning.subarea.rdp_tol_floor);
 
         // A straight cut → offer both halves to pick from. Each region's walls
         // along the storey are pinned (pre-known); only the cut wall is set.
-        match self.outline.floor_plan.split_by_cut(&pts, tol) {
+        match self
+            .outline
+            .floor_plan
+            .split_by_cut(&pts, tol, &self.tuning.subarea)
+        {
             Ok(Some((a, b))) => {
                 println!("── cut splits the storey into two regions — tap one to keep ──");
                 self.pending_cut = Some([self.living_area_slot(a), self.living_area_slot(b)]);

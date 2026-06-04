@@ -57,21 +57,69 @@ impl AppController {
         if pts.len() < 2 {
             return;
         }
+        // Paste-ready stroke dump (matches the living-area / curve-debug dumps).
+        dump_stroke("phase-area", &pts);
         // Make the outline we carve/split against current.
         self.sync_active();
-        let pts = self.outline.floor_plan.clamp_inside(&pts);
-        let tol = (manip_2d_plan::ring_diagonal(&pts) * 0.02).max(1e-3);
+        let pts = self
+            .outline
+            .floor_plan
+            .clip_stroke_inside(&pts, self.tuning.subarea.close_gap_m);
+        let tol = (manip_2d_plan::ring_diagonal(&pts) * self.tuning.subarea.rdp_tol_ratio)
+            .max(self.tuning.subarea.rdp_tol_floor);
 
-        match self.outline.floor_plan.split_by_cut(&pts, tol) {
+        // Diagnostic logging for phase-area sketches (mirrors the living-area
+        // block): the clamped stroke, the outline carved against, the branch
+        // taken, and the resulting plan + orthogonality. Paste when a phase area
+        // comes out wrong.
+        let (mut min_x, mut min_y, mut max_x, mut max_y) = (f32::MAX, f32::MAX, f32::MIN, f32::MIN);
+        for p in &pts {
+            min_x = min_x.min(p.x);
+            min_y = min_y.min(p.y);
+            max_x = max_x.max(p.x);
+            max_y = max_y.max(p.y);
+        }
+        println!("── construction-phase sketch ───────────────────────");
+        println!(
+            "  drawn: {} pts (clamped)  extent x[{:.2}, {:.2}] y[{:.2}, {:.2}]  tol={:.3}",
+            pts.len(),
+            min_x,
+            max_x,
+            min_y,
+            max_y,
+            tol
+        );
+        println!("  stroke pts: {:?}", pts);
+        println!("  outline ring: {:?}", self.outline.floor_plan.get_points());
+
+        match self
+            .outline
+            .floor_plan
+            .split_by_cut(&pts, tol, &self.tuning.subarea)
+        {
             Ok(Some((a, b))) => {
+                println!("  → phase cut splits the storey into two regions — tap one to keep");
+                println!("────────────────────────────────────────────────────");
                 self.pending_phase_cut = Some([a.get_points(), b.get_points()]);
                 return;
             }
             Ok(None) => {}
             Err(e) => eprintln!("phase split_by_cut: {:?}", e),
         }
-        match self.outline.floor_plan.carve_subarea(&pts, tol) {
+        match self
+            .outline
+            .floor_plan
+            .carve_subarea(&pts, tol, &self.tuning.subarea)
+        {
             Ok(plan) => {
+                println!("  → phase-area plan: {:?}", plan);
+                let bad = plan.non_orthogonal_edges();
+                if bad.is_empty() {
+                    println!("  → orthogonal ✓");
+                } else {
+                    println!("  → ⚠ NON-ORTHOGONAL edges: {:?}", bad);
+                }
+                println!("────────────────────────────────────────────────────");
                 if let Err(e) = plan.validate_simple() {
                     eprintln!("phase area rejected (walls cross): {:?}", e);
                     return;
@@ -81,7 +129,10 @@ impl AppController {
                 // the storey — no clip needed.
                 self.pending_phase_polygon = Some(plan.get_points());
             }
-            Err(e) => eprintln!("phase carve_subarea: {:?}", e),
+            Err(e) => {
+                println!("────────────────────────────────────────────────────");
+                eprintln!("phase carve_subarea: {:?}", e);
+            }
         }
     }
 

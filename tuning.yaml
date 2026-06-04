@@ -57,3 +57,33 @@ collinearity:
   # between them is between min and max (fractions of the plan diagonal).
   min_separation_ratio: 0.0015
   max_separation_ratio: 0.09
+
+subarea:
+  # Living-area / construction-phase-area carve.
+  # A stroke is a CLOSED loop when its first and last points are within this
+  # many metres (sub-areas are drawn on a dimensioned outline -> absolute).
+  close_gap_m: 0.7
+
+  # Boundary-follow classifier band (fractions of the plan diagonal): a stroke
+  # point hugs the wall when within on_ratio of it, and has left past off_ratio
+  # (off_ratio > on_ratio = hysteresis). Higher on_ratio snaps to the wall more
+  # eagerly -- catches loose curve-hugs, but pins interior walls drawn near it.
+  on_ratio: 0.035
+  off_ratio: 0.09
+
+  # RDP / orthogonalization tolerance for the carve, as
+  # (stroke_diag * rdp_tol_ratio).max(rdp_tol_floor) metres. Higher = the
+  # freehand stroke is simplified more coarsely.
+  rdp_tol_ratio: 0.02
+  rdp_tol_floor: 0.001
+
+  # Straight-cut simplify/orthogonalize tolerance = cut_simplify_ratio * the
+  # cut's longest extent (drops wobble), but CEILINGED at cut_simplify_ceil_m
+  # metres so a corner that size or larger is always kept even on a long cut.
+  cut_simplify_ratio: 0.1
+  cut_simplify_ceil_m: 0.7
+
+  # Cut endpoints: snap onto an outline vertex within diag * cut_vertex_tol_ratio;
+  # accept the cut only if both ends reach the outline within diag * cut_reach_tol_ratio.
+  cut_vertex_tol_ratio: 0.03
+  cut_reach_tol_ratio: 0.06

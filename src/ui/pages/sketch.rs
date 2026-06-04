@@ -193,6 +193,9 @@ pub enum SketchEvent {
     Undo,
     /// Re-apply the most recently undone mutation.
     Redo,
+    /// DEV: save the current plan to the checkpoint file (reloaded on a
+    /// `BER_CHECKPOINT=1` launch).
+    SaveCheckpoint,
     /// Extend-mode stroke completed: the user's captured stroke,
     /// converted to *world* coords via the current fit transform so the
     /// controller can compare it against the polygon (which is in real
@@ -1156,6 +1159,15 @@ impl SketchPage {
             .clicked()
         {
             on_event(UiEvent::Sketch(SketchEvent::Redo));
+        }
+        if ui
+            .button("📌 Checkpoint")
+            .on_hover_text(
+                "DEV: save this plan as the checkpoint, reloaded on `BER_CHECKPOINT=1 cargo run`",
+            )
+            .clicked()
+        {
+            on_event(UiEvent::Sketch(SketchEvent::SaveCheckpoint));
         }
     }
 

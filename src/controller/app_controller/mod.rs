@@ -722,6 +722,45 @@ impl AppController {
         Ok(())
     }
 
+    /// DEV: write the current in-memory BER to the checkpoint file so the next
+    /// `BER_CHECKPOINT=1 cargo run` reloads this exact plan instead of you
+    /// redrawing it. No-op (error) when no BER is loaded.
+    pub fn save_checkpoint(&mut self) -> Result<(), String> {
+        // Flush the live editor buffer into `current_record` first, so the
+        // checkpoint captures what's on screen right now.
+        self.commit_to_ber()?;
+        let record = self.current_record.as_ref().ok_or("no BER loaded")?;
+        crate::engine::checkpoint::save(&record.data, crate::engine::checkpoint::DEFAULT_PATH)
+    }
+
+    /// DEV: load the checkpoint file (if present) into the editor and return
+    /// whether it succeeded. Mirrors `open_ber`'s reconstruction. Called on
+    /// startup when `BER_CHECKPOINT` is set.
+    pub fn load_checkpoint(&mut self) -> bool {
+        let Some(ber) = crate::engine::checkpoint::load(crate::engine::checkpoint::DEFAULT_PATH)
+        else {
+            return false;
+        };
+        let record = BerRecord {
+            id: ber.id,
+            name: "checkpoint".to_string(),
+            date_assessed: chrono::Local::now().naive_local().date(),
+            data: ber,
+        };
+        self.current_storey_idx = Some(0);
+        self.load_storey_into_editor(record.data.storeys.first());
+        self.current_record = Some(record);
+        self.phase_regions.clear();
+        self.reconstruct_phase_regions_for(0);
+        self.view = ViewTransform::default();
+        self.edit_state = EditState::default();
+        self.review = None;
+        self.compute_next_dimension_prompt();
+        self.history.clear();
+        self.redo.clear();
+        true
+    }
+
     /// Which storey the editor is currently acting on. `Some(i)` = storey `i`
     /// is being edited; `None` = the "All storeys" overview (read-only, no
     /// drawing). Default `Some(0)` on create/open.

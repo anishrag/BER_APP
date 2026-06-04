@@ -10,9 +10,11 @@
 //! the side you actually drew along (no "shorter arc" porch-drop), and never
 //! needs a clip afterward.
 //!
-//! SPIKE: this is the segmentation only, exercised by tests. Wiring it into
-//! `carve_subarea` (snap on-boundary → outline sub-path, orthogonalize interior,
-//! stitch) is the next step.
+//! This is the SOLE closed-loop carve path: it follows the real outline wherever
+//! the stroke hugged it — corners, diagonals and curve facets walked in order —
+//! and orthogonalizes the interior with cut-style steps. (It replaced the old
+//! `boundary_aware_loop_points` diagonal special case, which could only follow a
+//! single slanted edge.)
 #![allow(dead_code)]
 
 use crate::geom;
@@ -124,6 +126,29 @@ pub(crate) fn runs(classes: &[PointClass]) -> Vec<Run> {
         }
     }
     out
+}
+
+/// Rotate a CLOSED-loop stroke so it starts at a boundary↔interior transition.
+/// A loop can start mid-run, which would split one continuous on-boundary run
+/// into a head + a tail (the two never get stitched, breaking the geometry).
+/// Starting at a transition keeps every run whole. Returns the stroke unchanged
+/// when there's no transition (all on-boundary — "draw around the whole thing" —
+/// or all interior).
+pub(crate) fn rotate_to_transition(stroke: &[Point2f32], classes: &[PointClass]) -> Vec<Point2f32> {
+    let n = stroke.len();
+    if n < 2 || classes.len() != n {
+        return stroke.to_vec();
+    }
+    let is_on = |c: PointClass| matches!(c, PointClass::OnBoundary { .. });
+    let start = (0..n).find(|&i| is_on(classes[i]) != is_on(classes[(i + n - 1) % n]));
+    match start {
+        Some(s) if s > 0 => {
+            let mut out = stroke[s..].to_vec();
+            out.extend_from_slice(&stroke[..s]);
+            out
+        }
+        _ => stroke.to_vec(),
+    }
 }
 
 /// Project `p` onto outline `edge` (clamped to the segment).
@@ -238,7 +263,9 @@ pub(crate) fn build_region_ring(
                 let mut input = vec![pin_start];
                 input.extend_from_slice(&simplified);
                 input.push(pin_end);
-                let ortho = crate::snap_open_fixed_ends(&input, tol);
+                // Stepped close (not pull): the pinned ends can sit on a diagonal,
+                // where pulling a vertex off-axis would tilt the interior wall.
+                let ortho = crate::snap_open_fixed_ends_stepped(&input);
                 push_ring(&mut ring, &ortho);
             }
         }
@@ -485,6 +512,103 @@ mod tests {
             (ring_area(&ring) - 18.0).abs() < 1.5,
             "strip ≈ 18 m², got {}",
             ring_area(&ring)
+        );
+    }
+
+    /// REGRESSION (the notch bug): drawing a loop AROUND the whole outline — all
+    /// boundary, no interior cut — must reproduce the full outline including a
+    /// notch, NOT collapse to a box.
+    #[test]
+    fn draw_around_whole_outline_keeps_the_notch() {
+        // 10x10 square with a [7,10]x[3,6] notch cut out of the right side.
+        let outline = vec![
+            p(0., 0.),
+            p(10., 0.),
+            p(10., 3.),
+            p(7., 3.),
+            p(7., 6.),
+            p(10., 6.),
+            p(10., 10.),
+            p(0., 10.),
+        ];
+        let stroke = vec![
+            p(0.5, 0.),
+            p(5., 0.),
+            p(9., 0.), // bottom
+            p(10., 1.),
+            p(10., 2.5), // right-lower
+            p(9., 3.),
+            p(7.5, 3.), // notch bottom
+            p(7., 4.),
+            p(7., 5.5), // notch back
+            p(8., 6.),
+            p(9.5, 6.), // notch top
+            p(10., 7.),
+            p(10., 9.5), // right-upper
+            p(9., 10.),
+            p(5., 10.),
+            p(1., 10.), // top
+            p(0., 9.),
+            p(0., 5.),
+            p(0., 1.), // left
+        ];
+        let classes = classify_points(&outline, &stroke, 0.5, 1.5);
+        assert!(
+            classes
+                .iter()
+                .all(|c| matches!(c, PointClass::OnBoundary { .. })),
+            "the whole trace hugs the boundary: {classes:?}"
+        );
+        let ring = build_region_ring(&outline, &stroke, &runs(&classes), 0.3);
+        assert!(
+            (ring_area(&ring) - 91.0).abs() < 3.0,
+            "L-shape ≈ 91 m² (notch kept), got {} — a box would be 100 (ring {:?})",
+            ring_area(&ring),
+            ring
+        );
+        assert!(
+            has_vertex(&ring, 7.0, 3.0) && has_vertex(&ring, 7.0, 6.0),
+            "notch corners preserved: {:?}",
+            ring
+        );
+    }
+
+    /// `build_region_ring` reproduces a DIAGONAL edge when the whole loop hugs
+    /// the boundary (it walks the real outline vertices). NB: the live carve
+    /// still routes diagonal *rooms* through `boundary_aware_loop_points`, which
+    /// is more robust on small slanted-wall rooms — this just documents that the
+    /// general builder handles a diagonal in the simple draw-around case.
+    #[test]
+    fn draw_around_diagonal_outline_keeps_the_diagonal() {
+        // Square with the top-right corner cut by a diagonal (10,7)->(7,10).
+        let outline = vec![p(0., 0.), p(10., 0.), p(10., 7.), p(7., 10.), p(0., 10.)];
+        let stroke = vec![
+            p(1., 0.),
+            p(5., 0.),
+            p(9., 0.), // bottom
+            p(10., 2.),
+            p(10., 5.), // right
+            p(9.25, 7.75),
+            p(8.5, 8.5),
+            p(7.75, 9.25), // along the diagonal
+            p(5., 10.),
+            p(2., 10.), // top
+            p(0., 7.),
+            p(0., 3.),
+            p(0., 0.5), // left
+        ];
+        let classes = classify_points(&outline, &stroke, 0.6, 1.6);
+        let ring = build_region_ring(&outline, &stroke, &runs(&classes), 0.3);
+        assert!(
+            (ring_area(&ring) - 95.5).abs() < 3.0,
+            "pentagon ≈ 95.5 m² (diagonal kept), got {} (ring {:?})",
+            ring_area(&ring),
+            ring
+        );
+        assert!(
+            has_vertex(&ring, 10.0, 7.0) && has_vertex(&ring, 7.0, 10.0),
+            "diagonal endpoints preserved (not flattened): {:?}",
+            ring
         );
     }
 }

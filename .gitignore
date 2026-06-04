@@ -6,3 +6,6 @@ bers.db-journal
 bers.db-wal
 bers.db-shm
 
+# Dev checkpoint (a saved test plan reloaded via BER_CHECKPOINT=1; per-machine)
+checkpoint.json
+

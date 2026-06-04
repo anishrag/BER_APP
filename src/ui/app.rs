@@ -116,8 +116,17 @@ fn collect_construction_phases(state: &NewBerState) -> ConstructionPhases {
 
 impl BerApp {
     pub fn new(app_controller: Rc<RefCell<AppController>>) -> Self {
+        // DEV: `BER_CHECKPOINT=1 cargo run` loads the saved checkpoint plan and
+        // jumps straight to the sketch page, so a test case needn't be redrawn.
+        let current_page = if std::env::var("BER_CHECKPOINT").is_ok()
+            && app_controller.borrow_mut().load_checkpoint()
+        {
+            Page::Sketch
+        } else {
+            Page::Splash
+        };
         Self {
-            current_page: Page::Splash,
+            current_page,
             app_controller,
             splash_state: SplashState::default(),
             new_ber_state: NewBerState::default(),
@@ -573,6 +582,12 @@ impl eframe::App for BerApp {
                             }
                             SketchEvent::Redo => {
                                 log_err("redo", controller.borrow_mut().redo());
+                            }
+                            SketchEvent::SaveCheckpoint => {
+                                log_err(
+                                    "save_checkpoint",
+                                    controller.borrow_mut().save_checkpoint(),
+                                );
                             }
                             SketchEvent::CancelVertexDrop => {
                                 // Note: the toolbar already cleared `inputs`
