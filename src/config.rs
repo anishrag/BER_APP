@@ -158,10 +158,12 @@ mod tests {
         assert_eq!(t.subarea.close_gap_m, d.subarea.close_gap_m);
         assert_eq!(t.subarea.on_ratio, d.subarea.on_ratio);
         assert_eq!(t.subarea.off_ratio, d.subarea.off_ratio);
+        assert_eq!(t.subarea.on_tol_ceil_m, d.subarea.on_tol_ceil_m);
+        assert_eq!(t.subarea.off_tol_ceil_m, d.subarea.off_tol_ceil_m);
         assert_eq!(t.subarea.rdp_tol_ratio, d.subarea.rdp_tol_ratio);
         assert_eq!(t.subarea.rdp_tol_floor, d.subarea.rdp_tol_floor);
-        assert_eq!(t.subarea.cut_simplify_ratio, d.subarea.cut_simplify_ratio);
-        assert_eq!(t.subarea.cut_simplify_ceil_m, d.subarea.cut_simplify_ceil_m);
+        assert_eq!(t.subarea.simplify_ratio, d.subarea.simplify_ratio);
+        assert_eq!(t.subarea.simplify_ceil_m, d.subarea.simplify_ceil_m);
         assert_eq!(
             t.subarea.cut_vertex_tol_ratio,
             d.subarea.cut_vertex_tol_ratio

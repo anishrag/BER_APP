@@ -4,6 +4,29 @@ use domain::points::Point2f32;
 use geo::Simplify;
 use geo::{Coord, LineString};
 
+/// RDP-simplify an OPEN polyline (e.g. one interior wall of a carve), allowing a
+/// 2-point result. Unlike [`simplify_stroke`] — which is for CLOSED rings and
+/// errors below 3 points — a straight wall here MUST be allowed to collapse to
+/// its two endpoints; otherwise the caller keeps the raw wander and staircases
+/// it. Returns the input unchanged when there's nothing to simplify (<3 points).
+pub fn simplify_open(points: &[Point2f32], tolerance: f32) -> Vec<Point2f32> {
+    if points.len() < 3 {
+        return points.to_vec();
+    }
+    let coords: Vec<Coord> = points
+        .iter()
+        .map(|p| Coord {
+            x: p.x as f64,
+            y: p.y as f64,
+        })
+        .collect();
+    LineString::from(coords)
+        .simplify(tolerance as f64)
+        .points()
+        .map(|c| Point2f32::from([c.x() as f32, c.y() as f32]))
+        .collect()
+}
+
 /// Simplify a stroke using the Ramer-Douglas-Peucker algorithm
 pub fn simplify_stroke(points: &[Point2f32], tolerance: f32) -> Result<Vec<Point2f32>, Error> {
     if points.len() < 3 {

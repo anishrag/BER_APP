@@ -78,24 +78,30 @@ pub struct SubareaTuning {
     /// many METRES (sub-areas are drawn on a dimensioned outline, so absolute).
     pub close_gap_m: f32,
     /// Boundary-follow classifier: a stroke point counts as ON the outline when
-    /// within `diag * on_ratio` of it, and as having LEFT when past
-    /// `diag * off_ratio` (hysteresis band; `off_ratio > on_ratio`). Higher =
-    /// snaps to the wall more eagerly (catches loose hugs, but pins near-wall
-    /// interior walls).
+    /// within `on_tol` of it, and as having LEFT when past `off_tol` (hysteresis
+    /// band; `off_tol > on_tol`). The tolerances are `diag * on_ratio` /
+    /// `diag * off_ratio` but CEILINGED at `on_tol_ceil_m` / `off_tol_ceil_m`
+    /// metres: without the ceiling a large region inflates them (a 5 m region →
+    /// 0.44 m `off_tol`) so an interior wall drawn ~0.4 m off a wall never
+    /// "leaves" the boundary and gets swallowed into it. The ceiling keeps the
+    /// snap band at hand-precision regardless of region size.
     pub on_ratio: f32,
     pub off_ratio: f32,
+    pub on_tol_ceil_m: f32,
+    pub off_tol_ceil_m: f32,
     /// RDP / orthogonalization tolerance for the carve, as
     /// `(stroke_diag * rdp_tol_ratio).max(rdp_tol_floor)` (metres). Higher =
     /// the freehand stroke is simplified more coarsely.
     pub rdp_tol_ratio: f32,
     pub rdp_tol_floor: f32,
-    /// A straight-cut stroke is simplified/orthogonalized with a COARSE
-    /// tolerance `cut_simplify_ratio * span` (span = the cut's longest extent)
-    /// so hand wobble is dropped — but CEILINGED at `cut_simplify_ceil_m` metres
-    /// so a real corner of that size or larger is ALWAYS kept, no matter how long
-    /// the cut is.
-    pub cut_simplify_ratio: f32,
-    pub cut_simplify_ceil_m: f32,
+    /// COARSE "drop hand-wander" simplify tolerance, `simplify_ratio * extent`,
+    /// CEILINGED at `simplify_ceil_m` metres (and floored at the fine carve tol).
+    /// Used BOTH by the straight cut (extent = the cut's longest span) and by the
+    /// carve's interior join (extent = the run's diagonal): a roughly-straight
+    /// wall collapses to a clean line instead of staircasing, while a real step ≥
+    /// the ceiling always survives. See [`SubareaTuning::coarse_simplify_tol`].
+    pub simplify_ratio: f32,
+    pub simplify_ceil_m: f32,
     /// A cut endpoint snaps onto an outline VERTEX within `diag * cut_vertex_tol_ratio`,
     /// and the cut is only accepted if both ends REACH the outline within
     /// `diag * cut_reach_tol_ratio`.
@@ -109,13 +115,29 @@ impl Default for SubareaTuning {
             close_gap_m: 0.7,
             on_ratio: 0.035,
             off_ratio: 0.09,
+            on_tol_ceil_m: 0.1,
+            off_tol_ceil_m: 0.25,
             rdp_tol_ratio: 0.02,
             rdp_tol_floor: 0.001,
-            cut_simplify_ratio: 0.1,
-            cut_simplify_ceil_m: 0.7,
+            simplify_ratio: 0.1,
+            simplify_ceil_m: 0.7,
             cut_vertex_tol_ratio: 0.03,
             cut_reach_tol_ratio: 0.06,
         }
+    }
+}
+
+impl SubareaTuning {
+    /// The COARSE simplify tolerance for a sub-area stroke of size `extent`
+    /// (metres): `(extent * simplify_ratio).max(floor).min(simplify_ceil_m)`.
+    /// `floor` is the fine carve/cut RDP tolerance — the coarse value never goes
+    /// below it. Single source for both the straight-cut simplify and the carve's
+    /// interior-join simplify, so "drop hand-wander but keep real steps" is tuned
+    /// in one place.
+    pub(crate) fn coarse_simplify_tol(&self, extent: f32, floor: f32) -> f32 {
+        (extent * self.simplify_ratio)
+            .max(floor)
+            .min(self.simplify_ceil_m)
     }
 }
 
@@ -291,14 +313,9 @@ impl FloorPlan {
             // points) becomes a stepped run of walls; a path that collapses to a
             // single segment is a straight CUT line splitting the outline into
             // two regions — keep it, snapping the cut to its nearest axis so the
-            // new wall is clean (the usual vertical/horizontal cut).
-            // `simplify_stroke` rejects a <3-point result, so a straight cut
-            // surfaces as `InsufficientPoints`; treat that as the cut endpoints.
-            let simplified = match simplification::simplify_stroke(path, tolerance) {
-                Ok(s) => s,
-                Err(Error::InsufficientPoints) => vec![path[0], path[path.len() - 1]],
-                Err(e) => return Err(e),
-            };
+            // new wall is clean (the usual vertical/horizontal cut). Open-polyline
+            // RDP, so a straight cut collapses to its two endpoints.
+            let simplified = simplification::simplify_open(path, tolerance);
             let mut opath = if simplified.len() >= 3 {
                 // Orthogonalize to the storey's axes (0°), not the stroke's
                 // dominant angle — keeps interior walls axis-aligned even when
@@ -380,8 +397,10 @@ impl FloorPlan {
                 // follows the boundary instead of free-floating into a box, and
                 // handles slanted/curved walls, so there's no separate diagonal
                 // path.
-                let on_tol = (diag * tuning.on_ratio).max(1e-3);
-                let off_tol = (diag * tuning.off_ratio).max(1e-3);
+                let on_tol = (diag * tuning.on_ratio).max(1e-3).min(tuning.on_tol_ceil_m);
+                let off_tol = (diag * tuning.off_ratio)
+                    .max(1e-3)
+                    .min(tuning.off_tol_ceil_m);
                 // Rotate the loop to start at a boundary↔interior transition, so a
                 // run that wraps past the stroke's start/end stays one run.
                 let classes0 = boundary_follow::classify_points(&ring, path, on_tol, off_tol);
@@ -395,7 +414,7 @@ impl FloorPlan {
                     // Follows the outline wherever it was hugged — including the
                     // whole-boundary case (draw around the whole storey), which
                     // reproduces the full outline (notches/diagonals included).
-                    boundary_follow::build_region_ring(&ring, &rot, &bruns, tolerance)
+                    boundary_follow::build_region_ring(&ring, &rot, &bruns, tolerance, tuning)
                 } else {
                     // Never touches a wall → genuine free-standing interior room:
                     // close the drawn loop into its own orthogonal polygon.
@@ -541,17 +560,14 @@ impl FloorPlan {
         // as noise — a real step is large relative to the span and survives,
         // whereas a fixed fine tolerance would orthogonalize wobble into a
         // spurious staircase.
-        // Coarse (drops wobble) BUT ceilinged, so a corner >= cut_simplify_ceil_m
-        // is always kept even on a long cut (where the ratio alone would inflate
-        // the tolerance past a real corner).
-        let cut_tol = (span * tuning.cut_simplify_ratio)
-            .max(tolerance)
-            .min(tuning.cut_simplify_ceil_m);
-        let simplified = match simplification::simplify_stroke(path, cut_tol) {
-            Ok(s) => s,
-            Err(Error::InsufficientPoints) => vec![path[0], path[path.len() - 1]],
-            Err(e) => return Err(e),
-        };
+        // Coarse (drops wobble) BUT ceilinged, so a corner ≥ the ceiling is always
+        // kept even on a long cut (where the ratio alone would inflate the
+        // tolerance past a real corner). Shared with the carve interior join.
+        let cut_tol = tuning.coarse_simplify_tol(span, tolerance);
+        // Open-polyline RDP (allows a 2-point collapse to the endpoints) — same
+        // simplify the carve interior uses. A straight cut collapses to its two
+        // ends; a stepped cut keeps the step.
+        let simplified = simplification::simplify_open(path, cut_tol);
         // A straight cut between two points, snapped to the nearer axis.
         let straight = |s: Point2f32, e: Point2f32| {
             if (s.x - e.x).abs() <= (s.y - e.y).abs() {
@@ -1605,6 +1621,52 @@ impl FloorPlan {
             .map(|c| Point2f32::new(c.x() as f32, c.y() as f32))
             .collect();
         (ring.len() >= 4).then_some(ring)
+    }
+
+    /// This plan MINUS the union of `holes`, as the largest remaining piece's
+    /// boundary (a fresh `FloorPlan`). Carving a sub-area against this — instead
+    /// of the raw outline — makes it snap to the holes' shared edges AND keeps it
+    /// from overlapping them (the region excludes them), so e.g. a new
+    /// construction phase tiles cleanly against the phases already drawn. `None`
+    /// when nothing meaningful remains. NB: a subtraction that punches an interior
+    /// HOLE keeps only the exterior boundary (phase areas tile from the edges in
+    /// practice; an enclosed leftover is rare and deferred).
+    pub fn subtract(&self, holes: &[Vec<Point2f32>]) -> Option<FloorPlan> {
+        use geo::bool_ops::BooleanOps;
+        use geo::Area;
+        let to_poly = |pts: &[Point2f32]| -> geo::Polygon<f64> {
+            geo::Polygon::new(
+                geo::LineString::from(
+                    pts.iter()
+                        .map(|p| (p.x as f64, p.y as f64))
+                        .collect::<Vec<_>>(),
+                ),
+                vec![],
+            )
+        };
+        let mut region: geo::MultiPolygon<f64> =
+            geo::MultiPolygon::new(vec![to_poly(&self.parametric.ring_points(0))]);
+        for h in holes {
+            if h.len() >= 3 {
+                region = region.difference(&geo::MultiPolygon::new(vec![to_poly(h)]));
+            }
+        }
+        let best = region.0.into_iter().max_by(|a, b| {
+            a.unsigned_area()
+                .partial_cmp(&b.unsigned_area())
+                .unwrap_or(std::cmp::Ordering::Equal)
+        })?;
+        let mut ring: Vec<Point2f32> = best
+            .exterior()
+            .points()
+            .map(|c| Point2f32::new(c.x() as f32, c.y() as f32))
+            .collect();
+        if ring.len() > 1 && ring.first() == ring.last() {
+            ring.pop();
+        }
+        (ring.len() >= 3)
+            .then(|| FloorPlan::from_clean_ring(&ring).ok())
+            .flatten()
     }
 
     /// Whether any vertex or edge-midpoint of `area` lies clearly OUTSIDE this
@@ -4204,6 +4266,36 @@ mod cut_line_tests {
         b.validate_simple().unwrap();
     }
 
+    /// `subtract` (the "available region" for a new phase): the outline minus an
+    /// existing phase leaves the remaining space, whose boundary is the shared
+    /// edge — so a new phase carved against it snaps to that edge and can't
+    /// overlap the old phase.
+    #[test]
+    fn subtract_leaves_the_available_region_with_the_shared_edge() {
+        // 10×10 storey minus a 10×4 strip along the bottom → a 10×6 top region.
+        let outline =
+            FloorPlan::from_clean_ring(&[p(0., 0.), p(10., 0.), p(10., 10.), p(0., 10.)]).unwrap();
+        let phase = vec![p(0., 0.), p(10., 0.), p(10., 4.), p(0., 4.)];
+        let avail = outline.subtract(&[phase]).expect("a region remains");
+        let pts = avail.get_points();
+        assert!(
+            geom::ring_contains_point(&pts, 5.0, 7.0),
+            "top strip kept: {:?}",
+            pts
+        );
+        assert!(
+            !geom::ring_contains_point(&pts, 5.0, 2.0),
+            "the existing phase (bottom strip) is excluded: {:?}",
+            pts
+        );
+        // The shared edge y=4 is now part of the available region's boundary.
+        assert!(
+            pts.iter().any(|p| (p.y - 4.0).abs() < 1e-3),
+            "shared edge y=4 present: {:?}",
+            pts
+        );
+    }
+
     /// First-stage clip: a closed loop drawn STRAIGHT across a trimmed-out notch
     /// must be routed AROUND the void (the notch stays excluded), not bridged.
     #[test]
@@ -4487,9 +4579,9 @@ mod diagonal_snap_tests {
         let outline = diag_outline();
         let stroke = vec![
             p(4.0, 4.0),
-            p(8.6, 4.0),
-            p(8.6, 7.1), // top-right corner ~0.2 off the diagonal
-            p(4.0, 7.1),
+            p(8.7, 4.0),
+            p(8.7, 7.2), // top-right corner ~0.07 m off the diagonal (within the
+            p(4.0, 7.2), // capped on_tol — a realistic hug, not 0.2 m of slop)
             p(4.1, 4.1),
         ];
         let room = outline
@@ -4709,6 +4801,388 @@ mod farwall_tests {
         assert!(
             has(8.5, 8.) && has(6., 9.5),
             "interior facet corners preserved: {:?}",
+            room.polygons()[0]
+        );
+    }
+
+    /// Real captured closed-loop phase-area stroke (rectangle storey, a roughly
+    /// vertical right wall with hand-wander) that STILL staircased after the
+    /// coarse-simplify fix — used to trace why and lock the fix.
+    #[test]
+    fn captured_closed_loop_right_wall_does_not_staircase() {
+        // Available region = the storey rectangle.
+        let outline = FloorPlan::from_clean_ring(&[
+            p(0.20660417, 0.3034812),
+            p(0.20660417, 1.3034812),
+            p(1.2066041, 1.3034812),
+            p(1.2066041, 0.3034812),
+        ])
+        .unwrap();
+        let stroke = vec![
+            p(0.20660417, 0.6848957),
+            p(0.20660417, 0.49920377),
+            p(0.20739083, 0.49625444),
+            p(0.21089205, 0.48136163),
+            p(0.2126446, 0.46646878),
+            p(0.21439716, 0.44106454),
+            p(0.21527344, 0.427048),
+            p(0.21614972, 0.41653267),
+            p(0.217026, 0.40251613),
+            p(0.21877855, 0.39288098),
+            p(0.2205311, 0.3832458),
+            p(0.22140738, 0.37360674),
+            p(0.22228366, 0.36835298),
+            p(0.22403622, 0.35783765),
+            p(0.22490859, 0.35083133),
+            p(0.22490859, 0.3315649),
+            p(0.22403622, 0.32893607),
+            p(0.22403622, 0.3271835),
+            p(0.22315994, 0.32631114),
+            p(0.2223148, 0.325466),
+            p(0.2223148, 0.3246871),
+            p(0.22146969, 0.3238459),
+            p(0.22146969, 0.32299298),
+            p(0.22059731, 0.3212443),
+            p(0.21796848, 0.31598663),
+            p(0.21621592, 0.31423408),
+            p(0.21533965, 0.31248152),
+            p(0.21358709, 0.3098566),
+            p(0.21095826, 0.30635148),
+            p(0.2092057, 0.30459893),
+            p(0.20836864, 0.3034812),
+            p(0.64503497, 0.3034812),
+            p(0.6417674, 0.32716405),
+            p(0.6391386, 0.34030432),
+            p(0.6391386, 0.37008995),
+            p(0.64089113, 0.38060528),
+            p(0.6426437, 0.39111674),
+            p(0.64965, 0.41126722),
+            p(0.6540314, 0.4235312),
+            p(0.6566602, 0.43404263),
+            p(0.6575365, 0.4428015),
+            p(0.6575365, 0.45594567),
+            p(0.65841275, 0.46558082),
+            p(0.65928906, 0.47609228),
+            p(0.6601653, 0.48134995),
+            p(0.661914, 0.4874839),
+            p(0.66366655, 0.49799532),
+            p(0.6654191, 0.50412536),
+            p(0.66717166, 0.51025933),
+            p(0.6689242, 0.51639324),
+            p(0.6724293, 0.52515215),
+            p(0.6750582, 0.53216237),
+            p(0.6803119, 0.5444263),
+            p(0.683817, 0.5531852),
+            p(0.6864459, 0.561948),
+            p(0.6890747, 0.5689543),
+            p(0.689951, 0.57158315),
+            p(0.689951, 0.5733357),
+            p(0.69082725, 0.57508826),
+            p(0.69082725, 0.5785934),
+            p(0.69170356, 0.5812183),
+            p(0.69170356, 0.5847234),
+            p(0.69082725, 0.59173363),
+            p(0.689951, 0.59874),
+            p(0.6890747, 0.61450905),
+            p(0.68819845, 0.6337833),
+            p(0.68732214, 0.6477998),
+            p(0.68732214, 0.7038699),
+            p(0.68819845, 0.7117525),
+            p(0.6890747, 0.71701014),
+            p(0.6890747, 0.7538021),
+            p(0.689951, 0.7590598),
+            p(0.69082725, 0.76431745),
+            p(0.69082725, 0.7713238),
+            p(0.69257593, 0.7774577),
+            p(0.6943285, 0.78358775),
+            p(0.69608104, 0.7897217),
+            p(0.6969573, 0.79585564),
+            p(0.6969573, 0.802862),
+            p(0.6978336, 0.80811965),
+            p(0.69958615, 0.81512594),
+            p(0.69958615, 0.81950736),
+            p(0.7004624, 0.8238887),
+            p(0.70221496, 0.8317713),
+            p(0.70309126, 0.8379053),
+            p(0.7039675, 0.843159),
+            p(0.7039675, 0.8563032),
+            p(0.70572007, 0.86243325),
+            p(0.708345, 0.87207234),
+            p(0.7118501, 0.8878414),
+            p(0.71360266, 0.895724),
+            p(0.7153552, 0.90098166),
+            p(0.7162315, 0.9071117),
+            p(0.7171078, 0.9106168),
+            p(0.7171078, 0.9211283),
+            p(0.7188603, 0.92989105),
+            p(0.7206129, 0.94741267),
+            p(0.7214892, 0.9596767),
+            p(0.72236544, 0.9719407),
+            p(0.7241141, 0.9920912),
+            p(0.72499037, 1.0026026),
+            p(0.7258667, 1.013114),
+            p(0.7258667, 1.1077286),
+            p(0.7267429, 1.1173676),
+            p(0.72761923, 1.1261265),
+            p(0.7284955, 1.1348894),
+            p(0.7284955, 1.1506585),
+            p(0.7293718, 1.155036),
+            p(0.7293718, 1.1602936),
+            p(0.73024803, 1.1681762),
+            p(0.73112434, 1.1751864),
+            p(0.73112434, 1.1892029),
+            p(0.7320006, 1.1953369),
+            p(0.7320006, 1.2303764),
+            p(0.73112434, 1.2382628),
+            p(0.73024803, 1.2435205),
+            p(0.7293718, 1.247898),
+            p(0.72761923, 1.2531556),
+            p(0.7258667, 1.2645433),
+            p(0.7241141, 1.2715535),
+            p(0.72236544, 1.2803124),
+            p(0.7214892, 1.2838175),
+            p(0.7214892, 1.2855701),
+            p(0.7206129, 1.288199),
+            p(0.7206129, 1.3034812),
+            p(0.20660417, 1.3034812),
+            p(0.20660417, 1.286601),
+            p(0.2075544, 1.2818508),
+            p(0.21018323, 1.2617003),
+            p(0.2119319, 1.2503126),
+            p(0.21368445, 1.236296),
+            p(0.21543701, 1.2170218),
+            p(0.21631329, 1.2065104),
+            p(0.21631329, 1.1942425),
+            p(0.21718957, 1.180226),
+            p(0.21718957, 1.1627043),
+            p(0.21806584, 1.1548218),
+            p(0.21806584, 1.1241598),
+            p(0.21718957, 1.1197784),
+            p(0.21631329, 1.1127721),
+            p(0.21456073, 1.1005042),
+            p(0.21368445, 1.0926216),
+            p(0.21280818, 1.087364),
+            p(0.2119319, 1.0821102),
+            p(0.21105562, 1.0794814),
+            p(0.21018323, 1.0751),
+            p(0.20930696, 1.0645885),
+            p(0.20930696, 1.0505719),
+            p(0.20843068, 1.0426855),
+            p(0.2075544, 1.0356791),
+            p(0.20667812, 1.0269164),
+            p(0.20660417, 1.02614),
+            p(0.20660417, 0.9554978),
+            p(0.2109271, 0.9457692),
+            p(0.21355593, 0.9291238),
+            p(0.2144361, 0.90980285),
+            p(0.2144361, 0.88610834),
+            p(0.21531238, 0.8685906),
+            p(0.21619256, 0.8509248),
+            p(0.21794511, 0.8272692),
+            p(0.21794511, 0.7878484),
+            p(0.21706884, 0.7764607),
+            p(0.21532017, 0.7659454),
+            p(0.21444389, 0.75455767),
+            p(0.21356761, 0.7449225),
+            p(0.21181506, 0.73178226),
+            p(0.2100625, 0.7151369),
+            p(0.20918623, 0.70812666),
+            p(0.20830995, 0.70199656),
+            p(0.20743367, 0.69235754),
+            p(0.20660417, 0.6848957),
+        ];
+        let room = outline
+            .carve_subarea(&stroke, 0.023, &SubareaTuning::default())
+            .unwrap();
+        let n = room.polygons()[0].len();
+        // A clean shape (left wall + bottom + one right wall + top) is a handful of
+        // vertices; the staircase is ~24.
+        assert!(
+            n <= 8,
+            "right wall should be ONE wall, not a staircase — got {n} verts: {:?}",
+            room.polygons()[0]
+        );
+    }
+
+    /// Real captured stroke on a LARGE notched region: the trace turns down the
+    /// `x=2.45` boundary to the bottom (`y≈0.57`) and back up an interior wall
+    /// ~0.42 m off that boundary. With an uncapped `off_tol` (≈0.44 m on this 5 m
+    /// region) the interior wall was misclassified as still-hugging, so the whole
+    /// bottom collapsed into one boundary run and got dropped. The `off_tol`
+    /// ceiling fixes it — the carve must follow down to the bottom.
+    #[test]
+    fn captured_large_region_follows_boundary_down_not_dropping_the_bottom() {
+        let outline = FloorPlan::from_clean_ring(&[
+            p(2.9498644, 0.57119596),
+            p(2.4498644, 0.57119596),
+            p(2.4498644, 1.571196),
+            p(1.5498644, 1.571196),
+            p(1.5498644, 2.571196),
+            p(1.5524862, 2.653201),
+            p(1.5618532, 2.7347114),
+            p(1.5779015, 2.8151736),
+            p(1.6005222, 2.8940406),
+            p(1.6295614, 2.9707766),
+            p(1.6648219, 3.04486),
+            p(1.7060641, 3.1157875),
+            p(1.753008, 3.1830778),
+            p(1.8053343, 3.246273),
+            p(1.8626876, 3.304944),
+            p(1.9246782, 3.3586922),
+            p(1.9908849, 3.4071522),
+            p(2.0608578, 3.4499946),
+            p(2.1341214, 3.4869287),
+            p(2.210178, 3.5177028),
+            p(2.288511, 3.542109),
+            p(2.3685877, 3.5599804),
+            p(2.4498644, 3.571196),
+            p(3.4498644, 3.571196),
+            p(3.4498644, 3.071196),
+            p(4.149864, 3.071196),
+            p(4.149864, 3.571196),
+            p(5.4498644, 3.571196),
+            p(5.4498644, 2.871196),
+            p(4.8498645, 2.571196),
+            p(3.4498644, 2.571196),
+            p(3.4498644, 1.2711961),
+            p(3.455425, 1.2186667),
+            p(3.455425, 1.1658543),
+            p(3.455425, 1.1131439),
+            p(3.4451103, 1.0609193),
+            p(3.432757, 1.0095611),
+            p(3.4160693, 0.95944345),
+            p(3.3951683, 0.9109312),
+            p(3.3702068, 0.86437833),
+            p(3.3413663, 0.8201233),
+            p(3.3088572, 0.7784889),
+            p(3.2729163, 0.7397783),
+            p(3.2338052, 0.7042736),
+            p(3.1918087, 0.67223334),
+            p(3.147233, 0.643891),
+            p(3.100403, 0.6194531),
+            p(3.0516596, 0.5990976),
+            p(3.001358, 0.5829727),
+        ])
+        .unwrap();
+        let stroke = vec![
+            p(1.5498644, 1.7808472),
+            p(1.5498644, 1.633819),
+            p(1.550369, 1.6333144),
+            p(1.550369, 1.6043855),
+            p(1.5563511, 1.5924214),
+            p(1.5563511, 1.5780505),
+            p(1.5623331, 1.5720683),
+            p(1.5627693, 1.571196),
+            p(1.6597829, 1.571196),
+            p(1.6670659, 1.5726526),
+            p(1.685421, 1.5756435),
+            p(1.7256362, 1.5823617),
+            p(2.1899698, 1.5823617),
+            p(2.2134774, 1.5722203),
+            p(2.2180953, 1.571196),
+            p(2.4498644, 1.571196),
+            p(2.4498644, 0.87536216),
+            p(2.450376, 0.87382716),
+            p(2.450376, 0.7153027),
+            p(2.4498644, 0.71453524),
+            p(2.4498644, 0.57119596),
+            p(2.8067522, 0.57119596),
+            p(2.8067522, 0.57860345),
+            p(2.8127344, 0.57860345),
+            p(2.8127344, 0.58372086),
+            p(2.8157253, 0.58372086),
+            p(2.8187165, 0.58970296),
+            p(2.8187165, 0.6443593),
+            p(2.8246984, 0.6563234),
+            p(2.8246984, 0.67127854),
+            p(2.829886, 0.67127854),
+            p(2.829886, 0.69221574),
+            p(2.8332393, 0.7151041),
+            p(2.8405883, 0.7482624),
+            p(2.84414, 0.792567),
+            p(2.84414, 1.5452543),
+            p(2.8501222, 1.5572184),
+            p(2.8501222, 1.5721736),
+            p(2.8561041, 1.5841377),
+            p(2.8561041, 1.6220746),
+            p(2.8622382, 1.6404881),
+            p(2.8654277, 1.6666245),
+            p(2.868419, 1.6845707),
+            p(2.868419, 1.7682494),
+            p(2.87141, 1.7802135),
+            p(2.8744009, 1.7861955),
+            p(2.8744009, 2.0234797),
+            p(2.867484, 2.0511117),
+            p(2.867484, 2.0992837),
+            p(2.8734663, 2.1112478),
+            p(2.8734663, 2.1561131),
+            p(2.867484, 2.1620953),
+            p(2.867484, 2.2817364),
+            p(2.8615022, 2.2966914),
+            p(2.8615022, 2.433706),
+            p(2.867484, 2.4426792),
+            p(2.867484, 2.4614198),
+            p(2.8734663, 2.476375),
+            p(2.8734663, 2.5122674),
+            p(2.8794482, 2.5242314),
+            p(2.8854303, 2.5332046),
+            p(2.8854303, 2.760137),
+            p(2.8824394, 2.7691102),
+            p(2.8794482, 2.7750921),
+            p(2.8794482, 2.8470404),
+            p(2.8725314, 2.8747191),
+            p(2.8693535, 2.9051435),
+            p(2.8661873, 2.9271789),
+            p(2.8661873, 2.951107),
+            p(2.8602052, 2.9600801),
+            p(2.8602052, 3.1311762),
+            p(2.8572142, 3.161624),
+            p(2.8542233, 3.173588),
+            p(2.8542233, 3.1885433),
+            p(2.851232, 3.1975164),
+            p(2.848241, 3.2034984),
+            p(2.848241, 3.3530498),
+            p(2.8422592, 3.370996),
+            p(2.8422592, 3.4547446),
+            p(2.848241, 3.4667087),
+            p(2.848241, 3.571196),
+            p(2.4498644, 3.571196),
+            p(2.3685877, 3.5599804),
+            p(2.288511, 3.542109),
+            p(2.210178, 3.5177028),
+            p(2.1341214, 3.4869287),
+            p(2.0608578, 3.4499946),
+            p(1.9908849, 3.4071522),
+            p(1.9246782, 3.3586922),
+            p(1.8626876, 3.304944),
+            p(1.8053343, 3.246273),
+            p(1.753008, 3.1830778),
+            p(1.7060641, 3.1157875),
+            p(1.6648219, 3.04486),
+            p(1.6295614, 2.9707766),
+            p(1.6005222, 2.8940406),
+            p(1.5779015, 2.8151736),
+            p(1.5618532, 2.7347114),
+            p(1.5524862, 2.653201),
+            p(1.5498644, 2.571196),
+            p(1.5498644, 1.9148959),
+            p(1.550369, 1.9138867),
+            p(1.550369, 1.8989315),
+            p(1.5563511, 1.8869674),
+            p(1.5563511, 1.8067939),
+            p(1.550369, 1.7948298),
+            p(1.550369, 1.7828656),
+            p(1.5498644, 1.7808472),
+        ];
+        let room = outline
+            .carve_subarea(&stroke, 0.066, &SubareaTuning::default())
+            .unwrap();
+        room.validate_simple().unwrap();
+        // The phase follows x=2.45 down to the bottom (~y=0.57); the bug stopped at
+        // y=1.571 (top strip only).
+        assert!(
+            room.polygons()[0].iter().any(|v| v.y < 0.7),
+            "must follow the boundary down to the bottom, not drop it: {:?}",
             room.polygons()[0]
         );
     }

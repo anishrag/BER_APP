@@ -91,12 +91,24 @@ impl AppController {
         }
         // Paste-ready stroke dump (matches the living-area / curve-debug dumps).
         dump_stroke("phase-area", &pts);
-        // Make the outline we carve/split against current.
+        // Make the outline current, then carve against the AVAILABLE region —
+        // the outline MINUS the phases already drawn. Carving against it makes the
+        // new phase snap to the neighbours' shared edges (and the outline) and
+        // keeps it from overlapping them, so the phases tile with no gaps and the
+        // shared walls land on the same coordinates (pre-known, not re-dimensioned).
         self.sync_active();
-        let pts = self
+        let idx = self.current_storey_idx.unwrap_or(0);
+        let phase_rings: Vec<Vec<Point2f32>> = self
+            .phase_regions
+            .get(&idx)
+            .map(|rs| rs.iter().map(|r| r.polygon.clone()).collect())
+            .unwrap_or_default();
+        let boundary = self
             .outline
             .floor_plan
-            .clip_stroke_inside(&pts, self.tuning.subarea.close_gap_m);
+            .subtract(&phase_rings)
+            .unwrap_or_else(|| self.outline.floor_plan.clone());
+        let pts = boundary.clip_stroke_inside(&pts, self.tuning.subarea.close_gap_m);
         let tol = (manip_2d_plan::ring_diagonal(&pts) * self.tuning.subarea.rdp_tol_ratio)
             .max(self.tuning.subarea.rdp_tol_floor);
 
@@ -122,28 +134,21 @@ impl AppController {
             tol
         );
         println!("  stroke pts: {:?}", pts);
-        println!("  outline ring: {:?}", self.outline.floor_plan.get_points());
+        println!("  available region: {:?}", boundary.get_points());
 
-        match self
-            .outline
-            .floor_plan
-            .split_by_cut(&pts, tol, &self.tuning.subarea)
-        {
+        match boundary.split_by_cut(&pts, tol, &self.tuning.subarea) {
             Ok(Some((a, b))) => {
                 println!("  → phase cut splits the storey into two regions — tap one to keep");
                 println!("────────────────────────────────────────────────────");
-                self.pending_phase_cut =
-                    Some([self.pinned_subarea_slot(a), self.pinned_subarea_slot(b)]);
+                let sa = self.pinned_subarea_slot(&boundary, a);
+                let sb = self.pinned_subarea_slot(&boundary, b);
+                self.pending_phase_cut = Some([sa, sb]);
                 return;
             }
             Ok(None) => {}
             Err(e) => eprintln!("phase split_by_cut: {:?}", e),
         }
-        match self
-            .outline
-            .floor_plan
-            .carve_subarea(&pts, tol, &self.tuning.subarea)
-        {
+        match boundary.carve_subarea(&pts, tol, &self.tuning.subarea) {
             Ok(plan) => {
                 println!("  → phase-area plan: {:?}", plan);
                 let bad = plan.non_orthogonal_edges();
@@ -161,7 +166,7 @@ impl AppController {
                 // dimensions the drawn walls, THEN picks a phase. The exact
                 // boundary matters — it decides which surfaces are in the phase.
                 let undo_snap = self.current_history_snapshot();
-                let slot = self.pinned_subarea_slot(plan);
+                let slot = self.pinned_subarea_slot(&boundary, plan);
                 self.begin_phase_area_dimensioning(slot, undo_snap);
             }
             Err(e) => {

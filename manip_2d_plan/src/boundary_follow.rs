@@ -223,6 +223,7 @@ pub(crate) fn build_region_ring(
     stroke: &[Point2f32],
     runs: &[Run],
     tol: f32,
+    tuning: &crate::SubareaTuning,
 ) -> Vec<Point2f32> {
     // Entry/exit (projected onto the boundary) for each on-boundary run.
     let bverts: Vec<Option<(Point2f32, Point2f32, Vec<usize>)>> = runs
@@ -255,11 +256,17 @@ pub(crate) fn build_region_ring(
                     .map(|(entry, _)| entry)
                     .unwrap_or(stroke[*end]);
                 // RDP-simplify the raw freehand interior BEFORE orthogonalizing —
-                // `snap_open_fixed_ends` emits one step PER POINT, so feeding it
-                // hundreds of stroke points would staircase a straight cut.
+                // `snap_open_fixed_ends` emits one step PER POINT. Use the COARSE
+                // "drop hand-wander" tolerance (shared with the straight cut) so a
+                // roughly-straight wall collapses to a clean line instead of
+                // staircasing, while a real step ≥ the ceiling survives.
+                // Open-polyline simplify: a straight wall MUST be allowed to
+                // collapse to 2 points. `simplify_stroke` errors below 3 (it's for
+                // closed rings), and the old fallback then kept the raw wander and
+                // staircased it.
                 let raw = &stroke[*start..=*end];
-                let simplified = crate::simplification::simplify_stroke(raw, tol)
-                    .unwrap_or_else(|_| raw.to_vec());
+                let coarse = tuning.coarse_simplify_tol(geom::bbox_diagonal(raw), tol);
+                let simplified = crate::simplification::simplify_open(raw, coarse);
                 let mut input = vec![pin_start];
                 input.extend_from_slice(&simplified);
                 input.push(pin_end);
@@ -394,7 +401,13 @@ mod tests {
             p(2., 2.),
         ];
         let classes = classify_points(&outline, &stroke, 0.5, 1.5);
-        let ring = build_region_ring(&outline, &stroke, &runs(&classes), 0.3);
+        let ring = build_region_ring(
+            &outline,
+            &stroke,
+            &runs(&classes),
+            0.3,
+            &crate::SubareaTuning::default(),
+        );
         assert!(
             (ring_area(&ring) - 18.0).abs() < 0.5,
             "strip [2,8]x[0,3] ≈ 18 m², got {} (ring {:?})",
@@ -428,7 +441,13 @@ mod tests {
             p(4., 2.),
         ];
         let classes = classify_points(&outline, &stroke, 0.5, 1.5);
-        let ring = build_region_ring(&outline, &stroke, &runs(&classes), 0.3);
+        let ring = build_region_ring(
+            &outline,
+            &stroke,
+            &runs(&classes),
+            0.3,
+            &crate::SubareaTuning::default(),
+        );
         assert!(
             (ring_area(&ring) - 24.0).abs() < 0.5,
             "corner rect [4,10]x[0,4] ≈ 24 m², got {} (ring {:?})",
@@ -501,7 +520,13 @@ mod tests {
             stroke.push(p(2.0, 3.0 - 2.6 * k as f32 / 20.0));
         }
         let classes = classify_points(&outline, &stroke, 0.5, 1.5);
-        let ring = build_region_ring(&outline, &stroke, &runs(&classes), 0.3);
+        let ring = build_region_ring(
+            &outline,
+            &stroke,
+            &runs(&classes),
+            0.3,
+            &crate::SubareaTuning::default(),
+        );
         assert!(
             ring.len() <= 8,
             "dense interior collapses to a clean cut, got {} vertices: {:?}",
@@ -559,7 +584,13 @@ mod tests {
                 .all(|c| matches!(c, PointClass::OnBoundary { .. })),
             "the whole trace hugs the boundary: {classes:?}"
         );
-        let ring = build_region_ring(&outline, &stroke, &runs(&classes), 0.3);
+        let ring = build_region_ring(
+            &outline,
+            &stroke,
+            &runs(&classes),
+            0.3,
+            &crate::SubareaTuning::default(),
+        );
         assert!(
             (ring_area(&ring) - 91.0).abs() < 3.0,
             "L-shape ≈ 91 m² (notch kept), got {} — a box would be 100 (ring {:?})",
@@ -598,7 +629,13 @@ mod tests {
             p(0., 0.5), // left
         ];
         let classes = classify_points(&outline, &stroke, 0.6, 1.6);
-        let ring = build_region_ring(&outline, &stroke, &runs(&classes), 0.3);
+        let ring = build_region_ring(
+            &outline,
+            &stroke,
+            &runs(&classes),
+            0.3,
+            &crate::SubareaTuning::default(),
+        );
         assert!(
             (ring_area(&ring) - 95.5).abs() < 3.0,
             "pentagon ≈ 95.5 m² (diagonal kept), got {} (ring {:?})",

@@ -221,17 +221,20 @@ impl AppController {
                 e
             ));
         }
-        let slot = self.pinned_subarea_slot(plan);
+        let boundary = self.outline.floor_plan.clone();
+        let slot = self.pinned_subarea_slot(&boundary, plan);
         self.commit_new_living_area(slot, undo_snap);
         Ok(())
     }
 
-    /// Build a `ShapeSlot` for a freshly-constructed living-area plan: inherit
-    /// the storey's scale, and pre-mark as KNOWN the parameters pinned to the
-    /// outline (walls snapped onto the storey) — so dimensioning only asks
-    /// about the walls the user actually drew.
-    pub(super) fn pinned_subarea_slot(&self, plan: FloorPlan) -> ShapeSlot {
-        let pinned = self.outline.floor_plan.params_pinned_to_outline(&plan);
+    /// Build a `ShapeSlot` for a freshly-constructed sub-area plan: inherit the
+    /// storey's scale, and pre-mark as KNOWN the parameters pinned to `boundary`
+    /// (walls snapped onto it) — so dimensioning only asks about the walls the
+    /// user actually drew. `boundary` is the storey outline for a living area, or
+    /// the available region (outline minus existing phases) for a phase area, so a
+    /// wall shared with a neighbour phase is pre-known too.
+    pub(super) fn pinned_subarea_slot(&self, boundary: &FloorPlan, plan: FloorPlan) -> ShapeSlot {
+        let pinned = boundary.params_pinned_to_outline(&plan);
         if !pinned.is_empty() {
             println!("  pinned-to-outline params (pre-known): {:?}", pinned);
         }
@@ -302,7 +305,11 @@ impl AppController {
         {
             Ok(Some((a, b))) => {
                 println!("── cut splits the storey into two regions — tap one to keep ──");
-                self.pending_cut = Some([self.pinned_subarea_slot(a), self.pinned_subarea_slot(b)]);
+                let boundary = self.outline.floor_plan.clone();
+                self.pending_cut = Some([
+                    self.pinned_subarea_slot(&boundary, a),
+                    self.pinned_subarea_slot(&boundary, b),
+                ]);
                 return;
             }
             Ok(None) => {}

@@ -70,6 +70,11 @@ subarea:
   # eagerly -- catches loose curve-hugs, but pins interior walls drawn near it.
   on_ratio: 0.035
   off_ratio: 0.09
+  # Absolute ceilings (metres) on the band above, so a LARGE region doesn't
+  # inflate it: a 5 m region would give off_tol 0.44 m, swallowing an interior
+  # wall drawn ~0.4 m off a wall. Caps keep the snap band at hand-precision.
+  on_tol_ceil_m: 0.1
+  off_tol_ceil_m: 0.25
 
   # RDP / orthogonalization tolerance for the carve, as
   # (stroke_diag * rdp_tol_ratio).max(rdp_tol_floor) metres. Higher = the
@@ -80,8 +85,8 @@ subarea:
   # Straight-cut simplify/orthogonalize tolerance = cut_simplify_ratio * the
   # cut's longest extent (drops wobble), but CEILINGED at cut_simplify_ceil_m
   # metres so a corner that size or larger is always kept even on a long cut.
-  cut_simplify_ratio: 0.1
-  cut_simplify_ceil_m: 0.7
+  simplify_ratio: 0.1
+  simplify_ceil_m: 0.7
 
   # Cut endpoints: snap onto an outline vertex within diag * cut_vertex_tol_ratio;
   # accept the cut only if both ends reach the outline within diag * cut_reach_tol_ratio.
