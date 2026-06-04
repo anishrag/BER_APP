@@ -276,6 +276,9 @@ enum ActiveShape {
     Outline,
     /// The living area at this index in `living_areas`.
     LivingArea(usize),
+    /// The in-flight construction-phase area being dimensioned (held in
+    /// `phase_shape`). There's only ever one at a time, so no index.
+    PhaseArea,
 }
 
 pub struct AppController {
@@ -350,12 +353,16 @@ pub struct AppController {
     /// persisted in the BER — they stamp surfaces' phase at commit; the durable
     /// record is each surface's `construction_id`. See `phase_regions.rs`.
     phase_regions: HashMap<usize, Vec<PhaseRegion>>,
-    /// A carved phase area awaiting its phase pick (world-coord ring). The UI
-    /// shows the phase picker while this is `Some`. Transient.
-    pending_phase_polygon: Option<Vec<Point2f32>>,
-    /// A phase cut split the storey into two candidate regions; the user taps
-    /// one, which then becomes `pending_phase_polygon`. Transient.
-    pending_phase_cut: Option<[Vec<Point2f32>; 2]>,
+    /// The construction-phase area currently being DIMENSIONED (a sub-shape, like
+    /// a living area, but tagged with a phase at the end rather than kept). While
+    /// `Some` the editor's `active == PhaseArea`; once its walls are dimensioned
+    /// the UI shows the phase picker, and assigning a phase stores its dimensioned
+    /// ring as a `PhaseRegion` and clears this. Transient (not persisted).
+    phase_shape: Option<ShapeSlot>,
+    /// A phase cut split the storey into two candidate regions (each a
+    /// dimensionable slot); the user taps one, which becomes `phase_shape` and is
+    /// then dimensioned. Transient.
+    pending_phase_cut: Option<[ShapeSlot; 2]>,
     /// Edit-mode interaction state: which wall the user has selected via
     /// click + whether a drag is currently in progress. Always reset when
     /// `edit_tool` switches away from `Edit`.
@@ -399,6 +406,9 @@ pub struct HistorySnapshot {
     /// dimensioning a living area, switching shapes, etc. are all undoable).
     outline: ShapeSlot,
     living_areas: Vec<ShapeSlot>,
+    /// The in-flight phase area, so undoing a phase-area dimension restores the
+    /// right buffer (mirrors `living_areas`).
+    phase_shape: Option<ShapeSlot>,
     active: ActiveShape,
     living_area_mode: bool,
     /// Per-wall exposure sections, so marking/clearing exposure is undoable.
@@ -503,7 +513,7 @@ impl AppController {
             pending_cut: None,
             phase_mode: false,
             phase_regions: HashMap::new(),
-            pending_phase_polygon: None,
+            phase_shape: None,
             pending_phase_cut: None,
             edit_state: EditState::default(),
             edit_drag_prompt: None,
@@ -531,6 +541,7 @@ impl AppController {
             pending_arc: self.pending_arc.clone(),
             outline: self.outline.clone(),
             living_areas: self.living_areas.clone(),
+            phase_shape: self.phase_shape.clone(),
             active: self.active,
             living_area_mode: self.living_area_mode,
             wall_sections: self.wall_sections.clone(),
@@ -544,6 +555,7 @@ impl AppController {
         self.pending_arc = snap.pending_arc;
         self.outline = snap.outline;
         self.living_areas = snap.living_areas;
+        self.phase_shape = snap.phase_shape;
         self.active = snap.active;
         self.living_area_mode = snap.living_area_mode;
         self.wall_sections = snap.wall_sections;
@@ -869,6 +881,9 @@ impl AppController {
         // vertices; loading a record must not carry a stale one over.
         self.pending_arc = None;
         self.living_areas = Vec::new();
+        // Any in-flight phase area belongs to the OUTGOING storey — abandon it.
+        self.phase_shape = None;
+        self.pending_phase_cut = None;
         self.active = ActiveShape::Outline;
         self.living_area_mode = false;
         self.exposure_mode = false;
@@ -2965,6 +2980,83 @@ mod trim_collapse_tests {
         );
         let r = c.apply_dimension(0.9);
         assert!(r.is_ok(), "first living-area dimension should apply: {r:?}");
+    }
+
+    /// A construction-phase area must be DIMENSIONED before its phase is
+    /// assigned (the exact boundary decides which surfaces are in the phase). So:
+    /// carve → dimension the drawn walls → only THEN the phase picker → assign
+    /// stores the dimensioned ring and returns to the outline.
+    #[test]
+    fn phase_area_is_dimensioned_before_its_phase_is_assigned() {
+        let mut c = AppController::new(crate::engine::open_db(":memory:").unwrap());
+        c.create_ber(
+            "T".into(),
+            chrono::NaiveDate::from_ymd_opt(2026, 1, 1).unwrap(),
+        );
+        // 2x2 dimensioned storey.
+        let square = vec![
+            Point2f32::new(0.0, 0.0),
+            Point2f32::new(2.0, 0.0),
+            Point2f32::new(2.0, 2.0),
+            Point2f32::new(0.0, 2.0),
+            Point2f32::new(0.05, 0.05),
+        ];
+        c.floor_plan = FloorPlan::from_points_to_orthogonal(&square, 0.1, true).unwrap();
+        c.dimensioning.scale_set = true;
+        c.dimensioning.known_params = c.floor_plan.all_active_params();
+        c.sync_active(); // flush into the outline slot so phase carves against it
+
+        // Define a construction phase.
+        let mut phases = ConstructionPhases::default();
+        phases.set_year(ConstructionPhase::Extension1, 2008);
+        c.set_construction_phases(phases);
+
+        // Draw an interior phase area (a ~0.9m square that doesn't reach a wall).
+        c.set_phase_mode(true);
+        c.apply_phase_region_stroke_event(&[
+            (0.5, 0.5),
+            (1.4, 0.5),
+            (1.4, 1.4),
+            (0.5, 1.4),
+            (0.55, 0.55),
+        ]);
+
+        // It must prompt for dimensions — NOT be immediately pickable.
+        assert!(
+            c.dimensioning_active(),
+            "phase area prompts to be dimensioned"
+        );
+        assert!(!c.phase_pick_pending(), "no phase pick until dimensioned");
+
+        // Dimension every drawn wall.
+        let mut guard = 0;
+        while c.dimensioning_active() && guard < 12 {
+            c.apply_dimension(0.9).expect("dimension applies");
+            guard += 1;
+        }
+        assert!(c.phase_pick_pending(), "now the phase picker shows");
+        assert!(
+            c.pending_phase_polygon().len() >= 4,
+            "dimensioned ring available: {:?}",
+            c.pending_phase_polygon()
+        );
+
+        // Assign the phase → stored region, back to the outline.
+        c.assign_phase_to_pending(ConstructionPhase::Extension1);
+        assert!(!c.phase_pick_pending(), "pick consumed");
+        assert_eq!(
+            c.phase_region_polygons().len(),
+            1,
+            "the dimensioned phase area is stored: {:?}",
+            c.phase_region_polygons()
+        );
+        // And the outline is the active buffer again, intact (the 2x2 square).
+        assert_eq!(
+            c.floor_plan.get_points().len(),
+            4,
+            "outline restored as the live buffer: {:?}",
+            c.floor_plan.get_points()
+        );
     }
 
     /// The reported case: a living area drawn as a square with a nook, in a

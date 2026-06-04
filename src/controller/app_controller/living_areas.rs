@@ -27,14 +27,16 @@ impl AppController {
                     *s = slot;
                 }
             }
+            ActiveShape::PhaseArea => self.phase_shape = Some(slot),
         }
     }
 
     /// Load the active shape's slot into the live buffer.
-    fn load_active_into_buffer(&mut self) {
+    pub(super) fn load_active_into_buffer(&mut self) {
         let slot = match self.active {
             ActiveShape::Outline => self.outline.clone(),
             ActiveShape::LivingArea(i) => self.living_areas.get(i).cloned().unwrap_or_default(),
+            ActiveShape::PhaseArea => self.phase_shape.clone().unwrap_or_default(),
         };
         self.floor_plan = slot.floor_plan;
         self.dimensioning = slot.dimensioning;
@@ -94,7 +96,7 @@ impl AppController {
     pub fn active_living_area_index(&self) -> Option<usize> {
         match self.active {
             ActiveShape::LivingArea(i) => Some(i),
-            ActiveShape::Outline => None,
+            ActiveShape::Outline | ActiveShape::PhaseArea => None,
         }
     }
 
@@ -219,7 +221,7 @@ impl AppController {
                 e
             ));
         }
-        let slot = self.living_area_slot(plan);
+        let slot = self.pinned_subarea_slot(plan);
         self.commit_new_living_area(slot, undo_snap);
         Ok(())
     }
@@ -228,7 +230,7 @@ impl AppController {
     /// the storey's scale, and pre-mark as KNOWN the parameters pinned to the
     /// outline (walls snapped onto the storey) — so dimensioning only asks
     /// about the walls the user actually drew.
-    fn living_area_slot(&self, plan: FloorPlan) -> ShapeSlot {
+    pub(super) fn pinned_subarea_slot(&self, plan: FloorPlan) -> ShapeSlot {
         let pinned = self.outline.floor_plan.params_pinned_to_outline(&plan);
         if !pinned.is_empty() {
             println!("  pinned-to-outline params (pre-known): {:?}", pinned);
@@ -300,7 +302,7 @@ impl AppController {
         {
             Ok(Some((a, b))) => {
                 println!("── cut splits the storey into two regions — tap one to keep ──");
-                self.pending_cut = Some([self.living_area_slot(a), self.living_area_slot(b)]);
+                self.pending_cut = Some([self.pinned_subarea_slot(a), self.pinned_subarea_slot(b)]);
                 return;
             }
             Ok(None) => {}

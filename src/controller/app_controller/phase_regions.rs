@@ -33,14 +33,46 @@ impl AppController {
     /// half-finished pick.
     pub fn set_phase_mode(&mut self, on: bool) {
         self.phase_mode = on;
-        self.pending_phase_polygon = None;
-        self.pending_phase_cut = None;
+        self.abandon_phase_shape();
         if on {
             self.living_area_mode = false;
             self.exposure_mode = false;
             self.activate_shape(ActiveShape::Outline);
             self.set_edit_mode(EditTools::DrawPerpWalls);
         }
+    }
+
+    /// Discard the in-flight phase area (if any) and return to the outline,
+    /// dropping its half-dimensioned buffer (we DON'T sync it back). Used to
+    /// cancel a pick or leave phase mode.
+    fn abandon_phase_shape(&mut self) {
+        self.phase_shape = None;
+        self.pending_phase_cut = None;
+        if self.active == ActiveShape::PhaseArea {
+            self.active = ActiveShape::Outline;
+            self.load_active_into_buffer();
+            self.pending_arc = None;
+            self.edit_drag_prompt = None;
+            self.vertex_drop_prompt = None;
+            self.edit_state = EditState::default();
+            self.compute_next_dimension_prompt();
+        }
+    }
+
+    /// Make a carved phase area the ACTIVE shape and start dimensioning its
+    /// drawn walls (mirrors `commit_new_living_area`, minus the persist — a phase
+    /// area only stamps surfaces once its phase is assigned). The outline-pinned
+    /// walls are pre-known (in the slot's `known_params`), so only the walls the
+    /// user actually drew are prompted.
+    fn begin_phase_area_dimensioning(&mut self, slot: ShapeSlot, undo_snap: HistorySnapshot) {
+        self.phase_shape = Some(slot);
+        self.active = ActiveShape::PhaseArea;
+        self.pending_phase_cut = None;
+        self.load_active_into_buffer();
+        self.pending_arc = None;
+        self.edit_state = EditState::default();
+        self.maybe_start_dimensioning();
+        self.push_history_snapshot(undo_snap);
     }
 
     /// UI entry point: a phase-tagging `DrawPerpWalls` stroke in world coords
@@ -100,7 +132,8 @@ impl AppController {
             Ok(Some((a, b))) => {
                 println!("  → phase cut splits the storey into two regions — tap one to keep");
                 println!("────────────────────────────────────────────────────");
-                self.pending_phase_cut = Some([a.get_points(), b.get_points()]);
+                self.pending_phase_cut =
+                    Some([self.pinned_subarea_slot(a), self.pinned_subarea_slot(b)]);
                 return;
             }
             Ok(None) => {}
@@ -124,10 +157,12 @@ impl AppController {
                     eprintln!("phase area rejected (walls cross): {:?}", e);
                     return;
                 }
-                // `carve_subarea` now follows the boundary (open-path splice or
-                // the two-pass boundary-aware loop), so the area is already inside
-                // the storey — no clip needed.
-                self.pending_phase_polygon = Some(plan.get_points());
+                // Become a dimensionable shape (like a living area): the user
+                // dimensions the drawn walls, THEN picks a phase. The exact
+                // boundary matters — it decides which surfaces are in the phase.
+                let undo_snap = self.current_history_snapshot();
+                let slot = self.pinned_subarea_slot(plan);
+                self.begin_phase_area_dimensioning(slot, undo_snap);
             }
             Err(e) => {
                 println!("────────────────────────────────────────────────────");
@@ -136,19 +171,28 @@ impl AppController {
         }
     }
 
-    /// True while a carved area is awaiting its phase pick (the UI shows the
-    /// phase picker, populated from [`construction_phases`](Self::construction_phases)).
+    /// True once the in-flight phase area is fully DIMENSIONED and awaiting its
+    /// phase pick (the UI shows the phase picker). While dimensioning is still in
+    /// progress the dimension prompt shows instead.
     pub fn phase_pick_pending(&self) -> bool {
-        self.pending_phase_polygon.is_some()
+        self.active == ActiveShape::PhaseArea
+            && self.dimensioning.current_prompt.is_none()
+            && self.floor_plan.get_points().len() >= 3
     }
 
-    /// The pending area's ring (world coords) for the UI to highlight while the
-    /// user picks a phase. Empty when nothing is pending.
+    /// The in-flight phase area's ring (world coords) for the UI to highlight —
+    /// the LIVE dimensioned buffer, so it tracks dimensioning. Empty when no
+    /// phase area is active.
     pub fn pending_phase_polygon(&self) -> Vec<(f64, f64)> {
-        self.pending_phase_polygon
-            .as_ref()
-            .map(|ring| ring.iter().map(|p| (p.x as f64, p.y as f64)).collect())
-            .unwrap_or_default()
+        if self.active == ActiveShape::PhaseArea {
+            self.floor_plan
+                .get_points()
+                .iter()
+                .map(|p| (p.x as f64, p.y as f64))
+                .collect()
+        } else {
+            Vec::new()
+        }
     }
 
     /// The two candidate regions of a pending phase cut (world coords), for the
@@ -159,48 +203,64 @@ impl AppController {
             .map(|regions| {
                 regions
                     .iter()
-                    .map(|ring| ring.iter().map(|p| (p.x as f64, p.y as f64)).collect())
+                    .map(|slot| {
+                        slot.floor_plan
+                            .get_points()
+                            .iter()
+                            .map(|p| (p.x as f64, p.y as f64))
+                            .collect()
+                    })
                     .collect()
             })
             .unwrap_or_default()
     }
 
     /// Pick the pending-cut region containing `(world_x, world_y)`; it becomes
-    /// the pending area awaiting a phase. A tap outside both cancels. No-op if
-    /// no cut is pending.
+    /// the active phase area and starts dimensioning. A tap outside both cancels.
+    /// No-op if no cut is pending.
     pub fn choose_phase_cut_region(&mut self, world_x: f32, world_y: f32) {
         let Some([a, b]) = self.pending_phase_cut.take() else {
             return;
         };
-        let chosen = if manip_2d_plan::ring_contains_point(&a, world_x, world_y) {
+        let chosen = if a.floor_plan.contains_point(world_x, world_y) {
             Some(a)
-        } else if manip_2d_plan::ring_contains_point(&b, world_x, world_y) {
+        } else if b.floor_plan.contains_point(world_x, world_y) {
             Some(b)
         } else {
             None // tapped outside both → cancel
         };
-        self.pending_phase_polygon = chosen;
+        if let Some(slot) = chosen {
+            let undo_snap = self.current_history_snapshot();
+            self.begin_phase_area_dimensioning(slot, undo_snap);
+        }
     }
 
-    /// Assign `phase` to the pending area: store it as a session phase region for
-    /// the current storey and re-commit, which re-resolves every surface's phase
-    /// (the new polygon stamps anything inside it, retroactively included).
+    /// Assign `phase` to the just-dimensioned phase area: store its DIMENSIONED
+    /// ring as a session phase region and re-commit, which re-resolves every
+    /// surface's phase (the new polygon stamps anything inside it). Then return to
+    /// the outline.
     pub fn assign_phase_to_pending(&mut self, phase: ConstructionPhase) {
-        let Some(polygon) = self.pending_phase_polygon.take() else {
+        if self.active != ActiveShape::PhaseArea {
             return;
-        };
+        }
+        // The live buffer IS the dimensioned phase area; its resolved ring is what
+        // we store (metre-precise, so surface containment is accurate).
+        let polygon = self.floor_plan.get_points();
+        if polygon.len() < 3 {
+            return;
+        }
         let idx = self.current_storey_idx.unwrap_or(0);
         self.phase_regions
             .entry(idx)
             .or_default()
             .push(PhaseRegion { polygon, phase });
+        self.abandon_phase_shape(); // discard the live buffer, return to outline
         let _ = self.commit_to_ber();
     }
 
-    /// Discard a half-finished phase pick (carved area or cut) without tagging.
+    /// Discard the in-flight phase area / pending cut without tagging.
     pub fn cancel_pending_phase(&mut self) {
-        self.pending_phase_polygon = None;
-        self.pending_phase_cut = None;
+        self.abandon_phase_shape();
     }
 
     /// The current storey's committed phase regions, as `(ring, label)` in world

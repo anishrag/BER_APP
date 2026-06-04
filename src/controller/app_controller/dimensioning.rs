@@ -265,8 +265,9 @@ impl AppController {
         self.floor_plan
             .aesthetic_rescale(&self.dimensioning.known_params);
 
-        // Guardrail: a living-area dimension must not push the room OUTSIDE the
-        // storey. (The storey outline itself has nothing to be inside of.)
+        // Guardrail: a SUB-AREA dimension (living area or construction-phase area)
+        // must not push it OUTSIDE the storey. (The storey outline itself has
+        // nothing to be inside of.)
         if self.active != ActiveShape::Outline {
             let tol = (self.outline.floor_plan.bounding_box_diagonal() * 0.01).max(1e-3);
             if self
@@ -278,9 +279,9 @@ impl AppController {
                 self.dimensioning.scale_set = scale_set_before;
                 self.dimensioning.known_params = known_params_before;
                 self.dimensioning.dimensioned_walls = dimensioned_walls_before;
-                println!("  → REJECTED: would push the living area outside the storey.");
+                println!("  → REJECTED: would push the sub-area outside the storey.");
                 return Err(format!(
-                    "{} would push the living area outside the storey — it must stay \
+                    "{} would push the area outside the storey — it must stay \
                      inside the floor plan. Pick a value that fits.",
                     value
                 ));
