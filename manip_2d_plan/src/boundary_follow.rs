@@ -58,10 +58,99 @@ fn nearest_edge(outline: &[Point2f32], p: Point2f32) -> (usize, f32) {
     best
 }
 
-/// Classify each stroke point as on-boundary / interior, using a hysteresis band
-/// `[on_tol, off_tol]` (with `off_tol > on_tol`): once hugging the wall, a point
-/// only counts as having LEFT when it strays past `off_tol`; once interior, it
-/// only RE-JOINS within `on_tol`. That keeps a noisy near-wall stroke as one run.
+/// Insert points along any segment longer than `max_spacing` so the stroke is
+/// sampled at least that finely. The classifier looks at POINTS, so a sparse
+/// stroke (e.g. a clipped/simplified interior wall represented by just its two
+/// ends) can leap across the interior between two boundary edges without any
+/// sample landing in the middle — making the run hug NON-ADJACENT edges, which
+/// `outline_subpath` then bridges with a spurious diagonal. Densifying first
+/// guarantees the interior stretch is seen and the run splits correctly. The
+/// extra points are dropped again by the interior RDP simplify.
+pub(crate) fn densify(path: &[Point2f32], max_spacing: f32) -> Vec<Point2f32> {
+    if path.len() < 2 || !(max_spacing > 0.0) {
+        return path.to_vec();
+    }
+    let mut out = Vec::with_capacity(path.len());
+    for w in path.windows(2) {
+        let (a, b) = (w[0], w[1]);
+        out.push(a);
+        let len = ((b.x - a.x).powi(2) + (b.y - a.y).powi(2)).sqrt();
+        let n = (len / max_spacing).floor() as usize;
+        for i in 1..n {
+            let t = i as f32 / n as f32;
+            out.push(Point2f32::new(a.x + (b.x - a.x) * t, a.y + (b.y - a.y) * t));
+        }
+    }
+    out.push(path[path.len() - 1]);
+    out
+}
+
+/// Unit direction of `stroke` at index `i`, centred over a `±w` window so hand
+/// wobble doesn't flip it. `None` if the window is degenerate (coincident points).
+fn stroke_dir(stroke: &[Point2f32], i: usize, w: usize) -> Option<(f32, f32)> {
+    let n = stroke.len();
+    if n < 2 {
+        return None;
+    }
+    let a = i.saturating_sub(w);
+    let b = (i + w).min(n - 1);
+    let (dx, dy) = (stroke[b].x - stroke[a].x, stroke[b].y - stroke[a].y);
+    let len = (dx * dx + dy * dy).sqrt();
+    (len > 1e-6).then(|| (dx / len, dy / len))
+}
+
+/// Unit direction of outline `edge`.
+fn edge_dir(outline: &[Point2f32], edge: usize) -> (f32, f32) {
+    let n = outline.len();
+    let (a, b) = (outline[edge], outline[(edge + 1) % n]);
+    let (dx, dy) = (b.x - a.x, b.y - a.y);
+    let len = (dx * dx + dy * dy).sqrt().max(1e-6);
+    (dx / len, dy / len)
+}
+
+/// Whether the stroke at `i` is HUGGING the nearest edge rather than CROSSING it.
+/// Distance alone can't tell a wall you trace ALONG from an interior wall you draw
+/// BETWEEN two close house walls — both sit "near a wall". The discriminator is
+/// direction: hugging runs PARALLEL to the edge; a crossing runs across it. Near a
+/// CORNER (within `on_tol` of two+ edges) the stroke is genuinely on the boundary
+/// whatever way it points, so we keep it regardless. No direction info (coincident
+/// window) falls back to "hug" so a static point doesn't spuriously split a run.
+fn hugging(
+    outline: &[Point2f32],
+    stroke: &[Point2f32],
+    i: usize,
+    edge: usize,
+    on_tol: f32,
+) -> bool {
+    let p = stroke[i];
+    let m = outline.len();
+    let near = (0..m)
+        .filter(|&e| {
+            geom::project_point_to_segment(p, outline[e], outline[(e + 1) % m]).2 <= on_tol
+        })
+        .count();
+    if near >= 2 {
+        return true; // at a corner — on the boundary regardless of heading
+    }
+    match stroke_dir(stroke, i, 2) {
+        Some(sd) => {
+            let ed = edge_dir(outline, edge);
+            // Within ~60° of parallel still counts as a hug: a real trace rounding
+            // a corner has its window straddle the turn (≈45°), while a crossing
+            // wall is near-perpendicular (≈0). Lenient enough for corners, strict
+            // enough to reject an axis wall drawn across an axis boundary.
+            (sd.0 * ed.0 + sd.1 * ed.1).abs() >= 0.50
+        }
+        None => true,
+    }
+}
+
+/// Classify each stroke point as on-boundary / interior. A point is on-boundary
+/// when it is within the hysteresis band `[on_tol, off_tol]` (`off_tol > on_tol`)
+/// of an outline edge AND the stroke there HUGS that edge (runs along it) rather
+/// than CROSSES it — see [`hugging`]. The hysteresis keeps a noisy near-wall hug
+/// as one run; the hug test stops an interior wall drawn close to (but across) a
+/// house wall from being mistaken for boundary.
 pub(crate) fn classify_points(
     outline: &[Point2f32],
     stroke: &[Point2f32],
@@ -71,16 +160,17 @@ pub(crate) fn classify_points(
     let mut out = Vec::with_capacity(stroke.len());
     let mut on = false;
     let mut started = false;
-    for &p in stroke {
-        let (edge, d) = nearest_edge(outline, p);
+    for i in 0..stroke.len() {
+        let (edge, d) = nearest_edge(outline, stroke[i]);
+        let along = hugging(outline, stroke, i, edge, on_tol);
         if !started {
-            on = d <= on_tol;
+            on = d <= on_tol && along;
             started = true;
         } else if on {
-            if d > off_tol {
+            if d > off_tol || !along {
                 on = false;
             }
-        } else if d <= on_tol {
+        } else if d <= on_tol && along {
             on = true;
         }
         out.push(if on {

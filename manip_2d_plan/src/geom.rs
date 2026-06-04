@@ -370,6 +370,54 @@ fn segment_crossing(
 
 /// Remove self-intersections from a closed ring, returning a simple
 /// (non-self-crossing) ring. When two non-adjacent edges cross, the ring folds
+/// Replace any TILTED ring edge that does NOT lie on an outline edge with an
+/// orthogonal L (a corner aligned with the edge ENTERING it). A sub-area's only
+/// legitimate non-axis edges are the house walls it reproduces VERBATIM (a
+/// diagonal or curved storey wall); every other diagonal is an artifact — a
+/// boundary-follow that hopped between two non-adjacent edges, or an interior
+/// wall meeting the boundary slightly off-level — and the assessor wants those
+/// squared off. An edge whose BOTH ends lie within `tol` of one outline edge is
+/// such a verbatim wall and is left untouched; anything else tilted gets the
+/// corner. `tol` is small (a few mm) so a real off-level join is squared but
+/// float noise on a verbatim edge isn't.
+pub fn orthogonalize_off_boundary(
+    ring: &[Point2f32],
+    outline: &[Point2f32],
+    tol: f32,
+) -> Vec<Point2f32> {
+    let n = ring.len();
+    if n < 3 {
+        return ring.to_vec();
+    }
+    let eps = 1e-3;
+    let on_one_outline_edge = |a: Point2f32, b: Point2f32| -> bool {
+        let m = outline.len();
+        (0..m).any(|i| {
+            let (p, q) = (outline[i], outline[(i + 1) % m]);
+            project_point_to_segment(a, p, q).2 < tol && project_point_to_segment(b, p, q).2 < tol
+        })
+    };
+    let mut out: Vec<Point2f32> = Vec::with_capacity(n + 4);
+    for i in 0..n {
+        let a = ring[i];
+        let b = ring[(i + 1) % n];
+        out.push(a);
+        let tilted = (a.x - b.x).abs() > eps && (a.y - b.y).abs() > eps;
+        if tilted && !on_one_outline_edge(a, b) {
+            // Insert a corner aligned with the edge ENTERING `a`: if that edge is
+            // vertical (shares a.x) keep a.x for the first leg, else keep a.y.
+            let prev = ring[(i + n - 1) % n];
+            let c = if (prev.x - a.x).abs() <= (prev.y - a.y).abs() {
+                Point2f32::new(a.x, b.y)
+            } else {
+                Point2f32::new(b.x, a.y)
+            };
+            out.push(c);
+        }
+    }
+    out
+}
+
 /// into two loops sharing the crossing point; we keep the larger-area loop and
 /// discard the smaller "ear" the fold created, repeating until simple. Returns
 /// the ring unchanged when it's already simple (or can't be reduced).

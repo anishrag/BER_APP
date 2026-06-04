@@ -401,6 +401,14 @@ impl FloorPlan {
                 let off_tol = (diag * tuning.off_ratio)
                     .max(1e-3)
                     .min(tuning.off_tol_ceil_m);
+                // Densify first: the classifier samples POINTS, so a sparse
+                // clipped/simplified stroke could leap across the interior between
+                // two boundary edges undetected (hugging non-adjacent edges, which
+                // outline_subpath then bridges with a spurious diagonal). Sample at
+                // `on_tol` so the interior stretch is always seen; the extra points
+                // are dropped again by the interior RDP simplify.
+                let dpath = boundary_follow::densify(path, on_tol);
+                let path = &dpath[..];
                 // Rotate the loop to start at a boundary↔interior transition, so a
                 // run that wraps past the stroke's start/end stays one run.
                 let classes0 = boundary_follow::classify_points(&ring, path, on_tol, off_tol);
@@ -486,6 +494,14 @@ impl FloorPlan {
             &orthogonal::remove_duplicates(&untangled, clean_tol),
             collinear_tol,
         );
+        // Square off any spurious diagonal — a tilted edge NOT on a verbatim house
+        // wall (a boundary hop, or an interior wall meeting the boundary
+        // off-level). Runs AFTER the dedup so the inserted corner survives; a
+        // final collinear pass (exact tol, no dedup) drops only truly-redundant
+        // vertices, and untangle repairs any crossing the corner introduces.
+        let squared =
+            geom::orthogonalize_off_boundary(&cleaned, &self.parametric.ring_points(0), 0.003);
+        let cleaned = orthogonal::remove_collinear(&geom::untangle_ring(&squared), collinear_tol);
         if cleaned.len() < 3 {
             return Err(Error::ExtendError("living area collapsed to a line".into()));
         }
@@ -5031,6 +5047,198 @@ mod farwall_tests {
             n <= 8,
             "right wall should be ONE wall, not a staircase — got {n} verts: {:?}",
             room.polygons()[0]
+        );
+    }
+
+    /// Captured stroke whose interior wall is SPARSE in the clipped stroke (it
+    /// leaps x=2.79→3.24 with no point between). Without densifying, the
+    /// classifier never sees the interior midpoint, keeps the run on-boundary
+    /// across NON-ADJACENT edges (0→19), and `outline_subpath` bridges them with a
+    /// spurious diagonal — the result was a degenerate hexagon. With densify the
+    /// run splits (wall → interior) and the carve follows the left edge DOWN to
+    /// the wall and across it.
+    #[test]
+    fn sparse_interior_wall_is_not_misread_as_a_boundary_diagonal() {
+        let outline = FloorPlan::from_clean_ring(&[
+            p(2.7498643, 3.0717998),
+            p(2.7498643, 0.57119596),
+            p(2.9498644, 0.57119596),
+            p(3.001358, 0.5829727),
+            p(3.0516596, 0.5990976),
+            p(3.100403, 0.6194531),
+            p(3.147233, 0.643891),
+            p(3.1918087, 0.67223334),
+            p(3.2338052, 0.7042736),
+            p(3.2729163, 0.7397783),
+            p(3.3088572, 0.7784889),
+            p(3.3413663, 0.8201233),
+            p(3.3702068, 0.86437833),
+            p(3.3951683, 0.9109312),
+            p(3.4160693, 0.95944345),
+            p(3.432757, 1.0095611),
+            p(3.4451103, 1.0609193),
+            p(3.455425, 1.1131439),
+            p(3.455425, 1.2186667),
+            p(3.4498644, 1.2711961),
+            p(3.4498644, 2.571196),
+            p(4.8498645, 2.571196),
+            p(5.4498644, 2.871196),
+            p(5.4498644, 3.571196),
+            p(4.149864, 3.571196),
+            p(4.149864, 3.0717998),
+            p(3.4498644, 3.0717998),
+        ])
+        .unwrap();
+        let stroke = vec![
+            p(2.7498643, 3.0717998),
+            p(2.7498643, 2.5600302),
+            p(2.7844014, 2.5600302),
+            p(2.7870536, 2.5626826),
+            p(2.7897058, 2.565323),
+            p(3.2355206, 2.565323),
+            p(3.250476, 2.559341),
+            p(3.3299718, 2.559341),
+            p(3.338945, 2.55635),
+            p(3.3449268, 2.553359),
+            p(3.380819, 2.553359),
+            p(3.3927834, 2.5473769),
+            p(3.4431868, 2.5473769),
+            p(3.445839, 2.5447247),
+            p(3.448386, 2.5421894),
+            p(3.4498644, 2.5421894),
+            p(3.4498644, 2.571196),
+            p(4.8498645, 2.571196),
+            p(5.4498644, 2.871196),
+            p(5.4498644, 3.571196),
+            p(4.149864, 3.571196),
+            p(4.149864, 3.0717998),
+            p(2.7498643, 3.0717998),
+        ];
+        let room = outline
+            .carve_subarea(&stroke, 0.058, &SubareaTuning::default())
+            .unwrap();
+        room.validate_simple().unwrap();
+        let poly = room.polygons()[0].clone();
+        // The carve follows the left wall DOWN to the interior wall (≈2.75, 2.565)
+        // and across it — NOT a corner-to-corner diagonal from (2.75, 3.07).
+        assert!(
+            poly.iter()
+                .any(|v| (v.x - 2.75).abs() < 0.05 && (v.y - 2.565).abs() < 0.05),
+            "left edge followed down to the interior wall: {poly:?}"
+        );
+        // NOTHING is non-orthogonal except where it follows a verbatim house wall
+        // (here, the storey's own diagonal corner near x∈[4.85, 5.45]).
+        let spurious = room
+            .non_orthogonal_edges()
+            .into_iter()
+            .find(|(_, _, a, b)| {
+                let on_storey_diag = |p: &Point2f32| p.x > 4.8 && p.x < 5.5;
+                !(on_storey_diag(a) || on_storey_diag(b))
+            });
+        assert!(
+            spurious.is_none(),
+            "every non-axis edge is on the storey diagonal: {spurious:?}"
+        );
+    }
+
+    /// Captured LAST-phase stroke whose interior wall runs between two CLOSE
+    /// boundary edges (gap < off_tol), so densify can't split it — the run hops
+    /// non-adjacent edges and produced a `(3.25,2.671)→(3.45,2.571)` diagonal. The
+    /// orthogonalize-off-boundary pass squares it into "down, then right along the
+    /// boundary". Everything must be orthogonal except the storey's own diagonal.
+    #[test]
+    fn last_phase_close_walls_squares_the_diagonal() {
+        let outline = FloorPlan::from_clean_ring(&[
+            p(2.7498643, 2.671196),
+            p(2.7498643, 0.57119596),
+            p(2.9498644, 0.57119596),
+            p(3.001358, 0.5829727),
+            p(3.0516596, 0.5990976),
+            p(3.100403, 0.6194531),
+            p(3.147233, 0.643891),
+            p(3.1918087, 0.67223334),
+            p(3.2338052, 0.7042736),
+            p(3.2729163, 0.7397783),
+            p(3.3088572, 0.7784889),
+            p(3.3413663, 0.8201233),
+            p(3.3702068, 0.86437833),
+            p(3.3951683, 0.9109312),
+            p(3.4160693, 0.95944345),
+            p(3.432757, 1.0095611),
+            p(3.4451103, 1.0609193),
+            p(3.455425, 1.1131439),
+            p(3.455425, 1.2186667),
+            p(3.4498644, 1.2711961),
+            p(3.4498644, 2.571196),
+            p(4.8498645, 2.571196),
+            p(5.4498644, 2.871196),
+            p(5.4498644, 3.571196),
+            p(4.149864, 3.571196),
+            p(4.149864, 3.071196),
+            p(3.4498644, 3.071196),
+            p(3.4498644, 3.571196),
+            p(3.2498643, 3.571196),
+            p(3.2498643, 2.671196),
+        ])
+        .unwrap();
+        let stroke = vec![
+            p(3.2101789, 2.671196),
+            p(3.2101789, 2.662321),
+            p(3.2161608, 2.653348),
+            p(3.2161608, 2.6355538),
+            p(3.230263, 2.6355538),
+            p(3.239236, 2.6415358),
+            p(3.242227, 2.6505089),
+            p(3.2452183, 2.6534998),
+            p(3.2478938, 2.6534998),
+            p(3.2624984, 2.659482),
+            p(3.6176946, 2.659482),
+            p(3.655281, 2.6669946),
+            p(3.6791158, 2.6737478),
+            p(3.7007773, 2.6799169),
+            p(3.7368448, 2.6870556),
+            p(3.8286088, 2.6972437),
+            p(3.9333413, 2.7082615),
+            p(4.0183287, 2.713227),
+            p(4.127583, 2.7349236),
+            p(4.258826, 2.7587817),
+            p(4.3691435, 2.7703369),
+            p(4.452191, 2.785035),
+            p(4.4612694, 2.7910755),
+            p(4.5935173, 2.7910755),
+            p(4.6897907, 2.7817168),
+            p(4.766272, 2.7817168),
+            p(4.768971, 2.779018),
+            p(4.771682, 2.7763073),
+            p(4.808193, 2.7700565),
+            p(5.2475853, 2.7700565),
+            p(5.4498644, 2.871196),
+            p(5.4498644, 3.571196),
+            p(4.149864, 3.571196),
+            p(4.149864, 3.071196),
+            p(3.4498644, 3.071196),
+            p(3.4498644, 3.571196),
+            p(3.257895, 3.571196),
+            p(3.257895, 3.5598278),
+            p(3.2519128, 3.5598278),
+            p(3.2498643, 3.5577793),
+            p(3.2498643, 2.671196),
+            p(3.2101789, 2.671196),
+        ];
+        let room = outline
+            .carve_subarea(&stroke, 0.049, &SubareaTuning::default())
+            .unwrap();
+        room.validate_simple().unwrap();
+        let spurious = room
+            .non_orthogonal_edges()
+            .into_iter()
+            .find(|(_, _, a, b)| {
+                let on_storey_diag = |p: &Point2f32| p.x > 4.8 && p.x < 5.5;
+                !(on_storey_diag(a) || on_storey_diag(b))
+            });
+        assert!(
+            spurious.is_none(),
+            "no spurious diagonal — squared to an orthogonal L: {spurious:?}"
         );
     }
 
