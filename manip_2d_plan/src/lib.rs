@@ -698,9 +698,13 @@ impl FloorPlan {
             if pts.len() < 3 {
                 return Err(Error::ExtendError("cut region collapsed".into()));
             }
-            // No axis wall-snapping: the cut endpoints are pinned to the boundary
-            // and the kept arc is the outline verbatim (curves included).
-            self.build_subarea_region(&pts, false, false)
+            // Axis wall-snap (the SAME `snap_walls_to_outline` the carve uses): a
+            // cut leg drawn near a PARALLEL boundary edge — the outline OR a
+            // neighbour phase's shared edge in the available region — lands exactly
+            // on it, so cut-based phases tile like carved ones. The kept arc is
+            // already on the outline so its snap is a no-op, and `snap_diagonal =
+            // false` leaves verbatim curves/diagonals untouched.
+            self.build_subarea_region(&pts, true, false)
         };
         Ok(Some((region(true)?, region(false)?)))
     }
@@ -4198,6 +4202,32 @@ mod cut_line_tests {
             b.non_orthogonal_edges().is_empty(),
             "region B stays orthogonal: {:?}",
             b.non_orthogonal_edges()
+        );
+    }
+
+    /// A cut leg drawn just off a PARALLEL boundary edge (e.g. a neighbour phase's
+    /// shared edge in the available region) snaps ONTO it — the same
+    /// `snap_walls_to_outline` the carve uses — so cut-based phases tile with no
+    /// sliver. The drawn leg at x=2.66 must NOT survive; it lands on x=2.65.
+    #[test]
+    fn cut_leg_snaps_onto_a_parallel_boundary_edge() {
+        let region =
+            FloorPlan::from_clean_ring(&[p(2.65, 0.5), p(5.45, 0.5), p(5.45, 3.57), p(2.65, 3.57)])
+                .unwrap();
+        // L-cut: down a leg ~1 cm right of the left edge, then right to the far edge.
+        let cut = vec![p(2.66, 3.57), p(2.66, 2.0), p(5.45, 2.0)];
+        let (a, b) = region
+            .split_by_cut(&cut, 0.05, &SubareaTuning::default())
+            .unwrap()
+            .expect("the L still splits the region");
+        a.validate_simple().unwrap();
+        b.validate_simple().unwrap();
+        let at_drawn = |r: &FloorPlan| r.polygons()[0].iter().any(|v| (v.x - 2.66).abs() < 4e-3);
+        assert!(
+            !at_drawn(&a) && !at_drawn(&b),
+            "leg snapped to x=2.65, not left at the drawn x=2.66: {:?} {:?}",
+            a.polygons()[0],
+            b.polygons()[0]
         );
     }
 
