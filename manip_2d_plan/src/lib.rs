@@ -552,10 +552,8 @@ impl FloorPlan {
             Err(Error::InsufficientPoints) => vec![path[0], path[path.len() - 1]],
             Err(e) => return Err(e),
         };
-        let mut opath = if simplified.len() >= 3 {
-            orthogonal::make_orthogonal_at(&simplified, cut_tol, 0.0)?
-        } else {
-            let (s, e) = (simplified[0], simplified[simplified.len() - 1]);
+        // A straight cut between two points, snapped to the nearer axis.
+        let straight = |s: Point2f32, e: Point2f32| {
             if (s.x - e.x).abs() <= (s.y - e.y).abs() {
                 let x = (s.x + e.x) * 0.5; // near-vertical → vertical cut
                 vec![Point2f32::new(x, s.y), Point2f32::new(x, e.y)]
@@ -563,6 +561,19 @@ impl FloorPlan {
                 let y = (s.y + e.y) * 0.5; // near-horizontal → horizontal cut
                 vec![Point2f32::new(s.x, y), Point2f32::new(e.x, y)]
             }
+        };
+        let (s0, e0) = (simplified[0], simplified[simplified.len() - 1]);
+        let mut opath = if simplified.len() >= 3 {
+            // Orthogonalization can COLLAPSE a shallow/drifting step: RDP may keep
+            // only one corner of the jog, leaving a near-straight "<" that squares
+            // to a single line (<3 points). Fall back to a straight cut rather than
+            // failing the whole split (which would dump the user into the carve).
+            match orthogonal::make_orthogonal_at(&simplified, cut_tol, 0.0) {
+                Ok(o) if o.len() >= 2 => o,
+                _ => straight(s0, e0),
+            }
+        } else {
+            straight(s0, e0)
         };
         if opath.len() < 2 {
             return Ok(None);
@@ -593,67 +604,70 @@ impl FloorPlan {
             extend::pin_to_edge(&mut opath[last], &ring, e2);
         }
 
-        // Keep the cut ORTHOGONAL even when an endpoint snapped to a vertex/edge
-        // that pulled its terminal leg off-axis: insert a corner so the leg meets
-        // the boundary with a vertical+horizontal STEP instead of a tilted line.
-        // The corner keeps the leg's pre-snap axis (toward the neighbour) and
-        // adds the short perpendicular step out to the pinned endpoint.
-        if opath.len() >= 3 {
-            let eps = 1e-3;
-            let step = |p: Point2f32, q: Point2f32, pre: Point2f32| -> Option<Point2f32> {
-                if (p.x - q.x).abs() <= eps || (p.y - q.y).abs() <= eps {
-                    return None; // already axis-aligned
-                }
-                // Vertical leg (pre-snap endpoint shared the neighbour's x) →
-                // keep x toward `q`, step in y out to `p`; else the mirror.
-                if (pre.x - q.x).abs() < (pre.y - q.y).abs() {
-                    Some(Point2f32::new(q.x, p.y))
-                } else {
-                    Some(Point2f32::new(p.x, q.y))
-                }
-            };
-            // END first so the START indices stay valid.
-            let n = opath.len();
-            if let Some(c) = step(opath[n - 1], opath[n - 2], pre_last) {
-                opath.insert(n - 1, c);
-            }
-            if let Some(c) = step(opath[0], opath[1], pre0) {
-                opath.insert(1, c);
-            }
-        } else {
-            // STRAIGHT 2-point cut. If snapping an end onto a VERTEX tilted it (the
-            // vertex's axis-coordinate differs from where the cut was), re-align the
-            // OTHER end onto the vertex so the cut stays axis-aligned. That end sits
-            // on an edge PERPENDICULAR to the cut, so it can slide along it to match
-            // — and the cut's position is then fixed by the vertex, leaving no free
-            // parameter to dimension. (A single short STEP would tilt-free it too,
-            // but aligning is cleaner and is what "snap to the vertex" should mean.)
-            let eps = 1e-3;
-            let (dx, dy) = (
-                (opath[0].x - opath[last].x).abs(),
-                (opath[0].y - opath[last].y).abs(),
+        // Keep the cut ORTHOGONAL after the snap, in two passes over its two ends.
+        // A snap can tilt a terminal leg only when the endpoint moved OFF the leg's
+        // rail (its shared axis coordinate); the fix depends on WHY it moved:
+        //
+        //  1. ALIGN — the end landed on an INTERIOR-FACING vertex (no outline edge
+        //     parallel to the leg there). Shift the inward neighbour onto that
+        //     vertex's rail, so the leg is axis-aligned THROUGH the vertex. The
+        //     cut's position is then fixed by the vertex (both ends share one
+        //     parameter), leaving nothing to dimension on that wall.
+        //  2. STEP — the end landed on an edge/corner whose wall runs PARALLEL to
+        //     the leg, where aligning would lay the cut on top of that wall. Keep
+        //     the leg's rail and add a short perpendicular jog out to the endpoint.
+        let eps = 1e-3;
+        let nverts = ring.len();
+        let tilted =
+            |a: Point2f32, b: Point2f32| (a.x - b.x).abs() > eps && (a.y - b.y).abs() > eps;
+        // A leg is vertical when its PRE-snap endpoint shared the neighbour's x.
+        let leg_vertical = |pre: Point2f32, c: Point2f32| (pre.x - c.x).abs() < (pre.y - c.y).abs();
+        let faces_interior = |vi: usize, vertical: bool| {
+            let (v, p, q) = (
+                ring[vi],
+                ring[(vi + nverts - 1) % nverts],
+                ring[(vi + 1) % nverts],
             );
-            if dx > eps && dy > eps {
-                let vertical = dy >= dx; // vertical cut shares x; horizontal shares y
-                let edge_horizontal = |e: usize| {
-                    let (a, b) = (ring[e], ring[(e + 1) % ring.len()]);
-                    (a.y - b.y).abs() < (a.x - b.x).abs()
-                };
-                if v1 && !v2 && vertical == edge_horizontal(e2) {
+            if vertical {
+                (p.x - v.x).abs() > eps && (q.x - v.x).abs() > eps
+            } else {
+                (p.y - v.y).abs() > eps && (q.y - v.y).abs() > eps
+            }
+        };
+        // PASS 1: align onto interior-facing vertices (no insertions → stable
+        // indices). For a straight cut whose other end is the anchored vertex, this
+        // shifts THIS end onto it; for a multi-leg cut it shifts the free corner.
+        for (e_idx, c_idx, is_v, vi, pre) in [
+            (0usize, 1usize.min(last), v1, e1, pre0),
+            (last, last.saturating_sub(1), v2, e2, pre_last),
+        ] {
+            if is_v && tilted(opath[e_idx], opath[c_idx]) {
+                let vertical = leg_vertical(pre, opath[c_idx]);
+                if faces_interior(vi, vertical) {
                     if vertical {
-                        opath[last].x = opath[0].x;
+                        opath[c_idx].x = opath[e_idx].x;
                     } else {
-                        opath[last].y = opath[0].y;
-                    }
-                } else if v2 && !v1 && vertical == edge_horizontal(e1) {
-                    if vertical {
-                        opath[0].x = opath[last].x;
-                    } else {
-                        opath[0].y = opath[last].y;
+                        opath[c_idx].y = opath[e_idx].y;
                     }
                 }
             }
         }
+        // PASS 2: step whatever is still tilted. END first so START indices hold.
+        let step = |opath: &mut Vec<Point2f32>, e_idx: usize, c_idx: usize, pre: Point2f32| {
+            if tilted(opath[e_idx], opath[c_idx]) {
+                let (e, c) = (opath[e_idx], opath[c_idx]);
+                let corner = if leg_vertical(pre, c) {
+                    Point2f32::new(c.x, e.y) // vertical leg toward c, jog in x to e
+                } else {
+                    Point2f32::new(e.x, c.y)
+                };
+                let ins = if e_idx > c_idx { e_idx } else { c_idx };
+                opath.insert(ins, corner);
+            }
+        };
+        let m = opath.len();
+        step(&mut opath, m - 1, m - 2, pre_last);
+        step(&mut opath, 0, 1, pre0);
 
         // The two regions = the cut polyline + each of the outline's two arcs.
         let region = |replace_arc_1_to_2: bool| -> Result<Self, Error> {
@@ -4171,6 +4185,23 @@ mod cut_line_tests {
             "cut spans the vertex at x=6: {:?}",
             left.polygons()[0]
         );
+    }
+
+    /// A cut stroke that ORTHOGONALIZES to a single line (a shallow "<" whose jog
+    /// RDP half-drops) must degrade to a straight cut, NOT error out of the split
+    /// — erroring would dump a stepped-cut attempt into the carve path.
+    #[test]
+    fn cut_that_squares_to_a_line_falls_back_to_a_straight_cut() {
+        let outline =
+            FloorPlan::from_clean_ring(&[p(0., 0.), p(10., 0.), p(10., 10.), p(0., 10.)]).unwrap();
+        // Down-left then up-right: snap_to_orthogonal makes both legs vertical at
+        // the same x, remove_collinear drops the middle → <3 points.
+        let stroke = vec![p(5., 0.2), p(4., 5.), p(5.5, 9.8)];
+        let res = outline.split_by_cut(&stroke, 0.1, &SubareaTuning::default());
+        assert!(res.is_ok(), "split must not error: {:?}", res);
+        let (a, b) = res.unwrap().expect("still splits into two regions");
+        a.validate_simple().unwrap();
+        b.validate_simple().unwrap();
     }
 
     /// First-stage clip: a closed loop drawn STRAIGHT across a trimmed-out notch
