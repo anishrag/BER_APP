@@ -10,6 +10,7 @@
 //! After the plan is built, callers can ask for collinearity suggestions
 //! (`suggest_collinear`) and apply user decisions (`apply_collinear_suggestion`).
 
+mod boundary_follow;
 mod error;
 mod extend;
 mod geom;
@@ -322,10 +323,30 @@ impl FloorPlan {
                     // snap OFF so the verbatim diagonal isn't disturbed.
                     return self.build_subarea_region(&p, true, false);
                 }
-                // Free-standing interior room: close the drawn path into its own
-                // loop, orthogonalized to the storey's axes (0°) — not the
-                // stroke's dominant angle — so interior walls stay axis-aligned.
-                Self::from_points_oriented(path, tolerance, true, Some(0.0))?.get_points()
+                // Two-pass boundary-aware carve (works on rectilinear plans):
+                // classify the loop into runs that HUG the outline and runs that
+                // CUT through the interior, then rebuild it so the hugging runs
+                // follow the real wall (corners kept) and only the interior is
+                // orthogonalized. This is what makes "draw around the area"
+                // follow the boundary instead of free-floating into a box.
+                let on_tol = (diag * 0.05).max(1e-3);
+                let off_tol = (diag * 0.12).max(1e-3);
+                let classes = boundary_follow::classify_points(&ring, path, on_tol, off_tol);
+                let bruns = boundary_follow::runs(&classes);
+                let hugs_wall = bruns
+                    .iter()
+                    .any(|r| matches!(r, boundary_follow::Run::OnBoundary { .. }));
+                let cuts_interior = bruns
+                    .iter()
+                    .any(|r| matches!(r, boundary_follow::Run::Interior { .. }));
+                if hugs_wall && cuts_interior {
+                    boundary_follow::build_region_ring(&ring, path, &bruns, tolerance)
+                } else {
+                    // Never touches a wall (genuine free-standing interior room),
+                    // or all boundary with no cut: close the drawn loop into its
+                    // own orthogonal polygon.
+                    Self::from_points_oriented(path, tolerance, true, Some(0.0))?.get_points()
+                }
             }
         };
         self.build_subarea_region(&pts, true, true)

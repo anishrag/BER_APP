@@ -459,42 +459,6 @@ impl FloorRegions {
     }
 }
 
-/// The largest piece of `ring` clipped to stay inside `boundary` (both simple
-/// rings) — used to keep a drawn construction-phase area strictly within the
-/// storey outline, regardless of how the freehand carve bulged. Returns an empty
-/// ring if they don't overlap. Collinear vertices introduced at the clip are
-/// stripped so the result stays a clean orthogonal area.
-pub fn clip_ring_to_boundary(ring: &[Point2f64], boundary: &[Point2f64]) -> Vec<Point2f64> {
-    use geo::bool_ops::BooleanOps;
-    use geo::Area;
-    if ring.len() < 3 || boundary.len() < 3 {
-        return Vec::new();
-    }
-    let to_poly = |r: &[Point2f64]| {
-        Polygon::new(
-            LineString::from(r.iter().map(|p| (p.x, p.y)).collect::<Vec<_>>()),
-            vec![],
-        )
-    };
-    let clipped = to_poly(ring).intersection(&to_poly(boundary));
-    let Some(best) = clipped.0.iter().max_by(|a, b| {
-        a.unsigned_area()
-            .partial_cmp(&b.unsigned_area())
-            .unwrap_or(std::cmp::Ordering::Equal)
-    }) else {
-        return Vec::new();
-    };
-    let mut out: Vec<Point2f64> = best
-        .exterior()
-        .coords()
-        .map(|c| Point2f64::new(c.x, c.y))
-        .collect();
-    if out.len() > 1 && out.first() == out.last() {
-        out.pop();
-    }
-    strip_collinear(&out)
-}
-
 /// Drop vertices that lie on the straight line between their neighbours (within
 /// a small cross-product tolerance) — used to clean a merged outline ring.
 fn strip_collinear(ring: &[Point2f64]) -> Vec<Point2f64> {
@@ -762,30 +726,6 @@ mod tests {
             Point2f64::new(x1, y1),
             Point2f64::new(x0, y1),
         ]
-    }
-
-    #[test]
-    fn clip_ring_keeps_only_the_inside_part() {
-        use geo::Area;
-        let outline = square(0.0, 0.0, 10.0, 10.0);
-        // Area straddles the right edge: x from 6 to 14 (half outside).
-        let drawn = square(6.0, 2.0, 14.0, 8.0);
-        let clipped = clip_ring_to_boundary(&drawn, &outline);
-        assert!(clipped.len() >= 3, "non-empty clip");
-        let poly = Polygon::new(
-            LineString::from(clipped.iter().map(|p| (p.x, p.y)).collect::<Vec<_>>()),
-            vec![],
-        );
-        // Inside part is x∈[6,10], y∈[2,8] = 4 × 6 = 24 (the x>10 half is gone).
-        assert!(
-            (poly.unsigned_area() - 24.0).abs() < 1e-6,
-            "clipped to the inside 4x6, got {}",
-            poly.unsigned_area()
-        );
-        // Every vertex is within the outline bounds.
-        for p in &clipped {
-            assert!(p.x <= 10.0 + 1e-6 && p.x >= -1e-6, "x {} inside", p.x);
-        }
     }
 
     #[test]

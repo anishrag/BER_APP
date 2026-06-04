@@ -76,37 +76,13 @@ impl AppController {
                     eprintln!("phase area rejected (walls cross): {:?}", e);
                     return;
                 }
-                // Guarantee the area stays INSIDE the storey: clamping the stroke
-                // points isn't enough (the free-room carve / orthogonalisation can
-                // still bulge out), so clip the finished polygon to the outline.
-                let clipped = self.clip_area_to_outline(&plan.get_points());
-                if clipped.len() >= 3 {
-                    self.pending_phase_polygon = Some(clipped);
-                }
+                // `carve_subarea` now follows the boundary (open-path splice or
+                // the two-pass boundary-aware loop), so the area is already inside
+                // the storey — no clip needed.
+                self.pending_phase_polygon = Some(plan.get_points());
             }
             Err(e) => eprintln!("phase carve_subarea: {:?}", e),
         }
-    }
-
-    /// Clip a drawn area ring to the current storey outline, returning the
-    /// largest piece strictly inside it (world coords). Bridges the editor's
-    /// `f32` rings to the `f64` geo clip in `datatypes`.
-    fn clip_area_to_outline(&self, area: &[Point2f32]) -> Vec<Point2f32> {
-        let outline: Vec<Point2f64> = self
-            .outline
-            .floor_plan
-            .get_points()
-            .iter()
-            .map(|p| Point2f64::new(p.x as f64, p.y as f64))
-            .collect();
-        let area_f64: Vec<Point2f64> = area
-            .iter()
-            .map(|p| Point2f64::new(p.x as f64, p.y as f64))
-            .collect();
-        datatypes::ber::structural::clip_ring_to_boundary(&area_f64, &outline)
-            .into_iter()
-            .map(|p| Point2f32::new(p.x as f32, p.y as f32))
-            .collect()
     }
 
     /// True while a carved area is awaiting its phase pick (the UI shows the
