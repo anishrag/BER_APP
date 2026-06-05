@@ -12,6 +12,168 @@ use domain::points::Point2f32;
 #[cfg(test)]
 use crate::polygon_area;
 
+// ── Outline clipping & subtraction (pre-carve geometry) ─────────────────────
+// Free geometry over the outline ring: clamp/clip a freehand stroke inside the
+// storey, and subtract already-placed regions to get the available area to carve
+// against. Exposed via thin FloorPlan facades (see lib.rs).
+/// Whether `(x, y)` lies inside the primary ring (ray-casting). Used to
+/// hit-test which candidate region a tap landed in.
+pub(crate) fn contains_point(outline: &[Point2f32], x: f32, y: f32) -> bool {
+    let ring = outline;
+    let n = ring.len();
+    if n < 3 {
+        return false;
+    }
+    let mut inside = false;
+    let mut j = n - 1;
+    for i in 0..n {
+        let (a, b) = (ring[i], ring[j]);
+        if (a.y > y) != (b.y > y) {
+            let xc = a.x + (y - a.y) / (b.y - a.y) * (b.x - a.x);
+            if x < xc {
+                inside = !inside;
+            }
+        }
+        j = i;
+    }
+    inside
+}
+
+/// Clamp each point that lies OUTSIDE this plan's outline back onto its
+/// boundary (nearest point on any edge); points already inside are left as
+/// drawn. A containment guardrail: snap a drawn sub-area back inside the
+/// storey before anything else processes it, so a stroke that strays out is
+/// brought to the boundary rather than producing geometry outside the house.
+pub(crate) fn clamp_inside(outline: &[Point2f32], points: &[Point2f32]) -> Vec<Point2f32> {
+    let ring = outline;
+    let n = ring.len();
+    if n < 3 {
+        return points.to_vec();
+    }
+    points
+        .iter()
+        .map(|&p| {
+            if contains_point(outline, p.x, p.y) {
+                return p;
+            }
+            let mut best = p;
+            let mut best_d = f32::MAX;
+            for i in 0..n {
+                let (a, b) = (ring[i], ring[(i + 1) % n]);
+                let (q, _t, d) = geom::project_point_to_segment(p, a, b);
+                if d < best_d {
+                    best_d = d;
+                    best = q;
+                }
+            }
+            best
+        })
+        .collect()
+}
+
+/// First-stage clip of a freehand sub-area stroke ONTO the storey, run before
+/// any simplification. A CLOSED loop is intersected with the outline polygon,
+/// so the loop is routed AROUND concavities (a trimmed-out notch is removed
+/// from the area, not bridged) — unlike the per-point [`clamp_inside`], which
+/// collapses a stroke drawn across a notch onto its corners. An OPEN path (or
+/// a failed/degenerate clip) falls back to `clamp_inside`. `close_gap_m` is
+/// the closed-loop threshold (see [`SubareaTuning::close_gap_m`]).
+pub(crate) fn clip_stroke_inside(
+    outline: &[Point2f32],
+    points: &[Point2f32],
+    close_gap_m: f32,
+) -> Vec<Point2f32> {
+    let closed = points.len() >= 3
+        && points
+            .first()
+            .zip(points.last())
+            .map(|(a, b)| ((a.x - b.x).powi(2) + (a.y - b.y).powi(2)).sqrt() < close_gap_m)
+            .unwrap_or(false);
+    if closed {
+        if let Some(clipped) = clip_loop_to_outline(outline, points) {
+            return clipped;
+        }
+    }
+    clamp_inside(outline, points)
+}
+
+/// Intersect a closed freehand loop with the outline polygon and return the
+/// largest resulting piece's boundary (the loop clipped to the storey, voids
+/// removed). `None` if the intersection is empty or degenerate.
+fn clip_loop_to_outline(outline: &[Point2f32], loop_pts: &[Point2f32]) -> Option<Vec<Point2f32>> {
+    use geo::bool_ops::BooleanOps;
+    use geo::Area;
+    let to_poly = |pts: &[Point2f32]| -> geo::Polygon<f64> {
+        geo::Polygon::new(
+            geo::LineString::from(
+                pts.iter()
+                    .map(|p| (p.x as f64, p.y as f64))
+                    .collect::<Vec<_>>(),
+            ),
+            vec![],
+        )
+    };
+    let outline = to_poly(outline);
+    let stroke = to_poly(loop_pts);
+    let clipped = stroke.intersection(&outline);
+    let best = clipped.0.into_iter().max_by(|a, b| {
+        a.unsigned_area()
+            .partial_cmp(&b.unsigned_area())
+            .unwrap_or(std::cmp::Ordering::Equal)
+    })?;
+    let ring: Vec<Point2f32> = best
+        .exterior()
+        .points()
+        .map(|c| Point2f32::new(c.x() as f32, c.y() as f32))
+        .collect();
+    (ring.len() >= 4).then_some(ring)
+}
+
+/// This plan MINUS the union of `holes`, as the largest remaining piece's
+/// boundary (a fresh `FloorPlan`). Carving a sub-area against this — instead
+/// of the raw outline — makes it snap to the holes' shared edges AND keeps it
+/// from overlapping them (the region excludes them), so e.g. a new
+/// construction phase tiles cleanly against the phases already drawn. `None`
+/// when nothing meaningful remains. NB: a subtraction that punches an interior
+/// HOLE keeps only the exterior boundary (phase areas tile from the edges in
+/// practice; an enclosed leftover is rare and deferred).
+pub(crate) fn subtract(outline: &[Point2f32], holes: &[Vec<Point2f32>]) -> Option<FloorPlan> {
+    use geo::bool_ops::BooleanOps;
+    use geo::Area;
+    let to_poly = |pts: &[Point2f32]| -> geo::Polygon<f64> {
+        geo::Polygon::new(
+            geo::LineString::from(
+                pts.iter()
+                    .map(|p| (p.x as f64, p.y as f64))
+                    .collect::<Vec<_>>(),
+            ),
+            vec![],
+        )
+    };
+    let mut region: geo::MultiPolygon<f64> = geo::MultiPolygon::new(vec![to_poly(outline)]);
+    for h in holes {
+        if h.len() >= 3 {
+            region = region.difference(&geo::MultiPolygon::new(vec![to_poly(h)]));
+        }
+    }
+    let best = region.0.into_iter().max_by(|a, b| {
+        a.unsigned_area()
+            .partial_cmp(&b.unsigned_area())
+            .unwrap_or(std::cmp::Ordering::Equal)
+    })?;
+    let mut ring: Vec<Point2f32> = best
+        .exterior()
+        .points()
+        .map(|c| Point2f32::new(c.x() as f32, c.y() as f32))
+        .collect();
+    if ring.len() > 1 && ring.first() == ring.last() {
+        ring.pop();
+    }
+    (ring.len() >= 3)
+        .then(|| FloorPlan::from_clean_ring(&ring).ok())
+        .flatten()
+}
+
 /// `FloorPlan`'s public carving API — thin facades over the free functions
 /// below. The carve is geometry over an outline RING, so the real work takes a
 /// `&[Point2f32]`; these methods just hand it `self`'s outline.
