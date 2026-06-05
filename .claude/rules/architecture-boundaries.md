@@ -12,7 +12,15 @@ These are hard rules. The boundary script at `.claude/scripts/check-boundaries.s
 
 **Why:** Earlier in this project's life the UI toolkit changed (slint → egui), and we want the option open. By keeping every other crate UI-agnostic, swapping the UI layer later (e.g. to Slint for iOS, or to a native Android shell calling Rust as a library) is a contained rewrite of `src/ui/` rather than a full project rewrite. Today that confinement is intact and worth preserving.
 
-**How to apply:** Render code, egui types, and widget handling stay in `src/ui/`. The controller (`src/controller/`) and engine (`src/engine/`) communicate with UI only via owned data and the `UiEvent` enum. Workspace crates (`datatypes`, `domain`, `sketch`, `manip_2d_plan`, `gen_3d_vol`) never see an egui type.
+**How to apply:** Render code, egui types, and widget handling stay in `src/ui/`. The controller (`src/controller/`) and engine (`src/engine/`) communicate with UI only via owned data and the `UiEvent` enum. Workspace crates (`datatypes`, `domain`, `sketch`, `manip_2d_plan`, `document`, `gen_3d_vol`) never see an egui type.
+
+## `document/` is the editing model — UI-free and DB-free
+
+**Rule:** `document/` (the editable storey model the controller drives) imports neither UI deps (`egui`/`eframe`/`egui_*`, covered by the rule above) nor `rusqlite` (covered by the DB rule below). It must keep building standalone: `cargo build -p document`.
+
+**Why:** `document` is the part you'd reuse to swap the UI or call Rust as a library from a native shell — it only works if it stays free of the app's UI and DB. Editing *logic* (model mutation over a storey's shapes) lives here as `Document` methods; the controller is the thin shell that wraps them with undo, persistence, and UI plumbing.
+
+**How to apply:** New editing logic that only reads/mutates the storey model goes in `document` (in the matching submodule — `dimensioning.rs`, `exposure.rs`, `edit.rs`, or core `lib.rs`). The controller calls it and owns the shell concerns. The scan already blocks egui/rusqlite here via the two rules above.
 
 ## `nalgebra` confined to `domain/**`
 

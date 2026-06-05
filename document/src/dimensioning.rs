@@ -48,7 +48,7 @@ impl Document {
         }
 
         let pre_length = self.floor_plan.wall_length(ring, edge_start);
-        println!(
+        log::debug!(
             "dimension #{}: ring {}/edge {} (vertex_id {}, param P{}) → {} m  [was {:.3}, scale_set={}]",
             self.dimensioning.dimensioned_walls.len() + 1,
             ring,
@@ -90,7 +90,7 @@ impl Document {
                 return Err("wall has zero length, can't compute scale".into());
             }
             let scale = value / pixel_length;
-            println!("  first dimension — scaling whole plan by {:.6}", scale);
+            log::debug!("  first dimension — scaling whole plan by {:.6}", scale);
             self.floor_plan.scale_all(scale);
             self.dimensioning.scale_set = true;
         } else {
@@ -102,10 +102,10 @@ impl Document {
                 self.floor_plan = snapshot;
                 self.dimensioning.known_params = known_params_before;
                 self.dimensioning.dimensioned_walls = dimensioned_walls_before;
-                println!("  → REJECTED (set_wall_length error): {:?}", e);
+                log::warn!("  → REJECTED (set_wall_length error): {:?}", e);
                 return Err(format!("set_wall_length: {:?}", e));
             }
-            println!(
+            log::debug!(
                 "  set_wall_length: P{} = {:?}",
                 prompt.controlled_param,
                 self.floor_plan.parameter_value(prompt.controlled_param)
@@ -122,7 +122,7 @@ impl Document {
         let inverted =
             find_flipped_edge(&edge_signs_before, &self.floor_plan.edge_signs()).is_some();
         if invalid || inverted {
-            println!(
+            log::debug!(
                 "  post-apply needs repair (invalid={invalid}, inverted={inverted}) — \
                  redistributing un-set walls on axis {dim_axis:?}"
             );
@@ -135,7 +135,7 @@ impl Document {
                 self.dimensioning.scale_set = scale_set_before;
                 self.dimensioning.known_params = known_params_before;
                 self.dimensioning.dimensioned_walls = dimensioned_walls_before;
-                println!("  → REJECTED: no shape-preserving fit found. Rolled back.");
+                log::warn!("  → REJECTED: no shape-preserving fit found. Rolled back.");
                 return Err(format!(
                     "{} can't be set without changing the shape — there's no way to move \
                      the un-set walls that keeps every wall's direction. Set the \
@@ -143,7 +143,7 @@ impl Document {
                     value
                 ));
             }
-            println!("  repair succeeded (shape preserved).");
+            log::debug!("  repair succeeded (shape preserved).");
         }
 
         // Aesthetic nudge (un-set params only; user's values stay exact).
@@ -162,7 +162,7 @@ impl Document {
                 self.dimensioning.scale_set = scale_set_before;
                 self.dimensioning.known_params = known_params_before;
                 self.dimensioning.dimensioned_walls = dimensioned_walls_before;
-                println!("  → REJECTED: would push the sub-area outside the storey.");
+                log::warn!("  → REJECTED: would push the sub-area outside the storey.");
                 return Err(format!(
                     "{} would push the area outside the storey — it must stay \
                      inside the floor plan. Pick a value that fits.",
@@ -171,7 +171,7 @@ impl Document {
             }
         }
         let post_length = self.floor_plan.wall_length(ring, edge_start);
-        println!(
+        log::debug!(
             "  ✓ accepted. wall now {:.3} m. known params: {:?}. dimensioned walls: {}/{}",
             post_length.unwrap_or(f32::NAN),
             {
@@ -197,10 +197,12 @@ impl Document {
                 .floor_plan
                 .find_vertex(prompt.wall_start_vertex)
                 .unwrap_or((0, 0));
-            println!(
+            log::debug!(
                 "wall skipped: ring {}/edge {} (would have set P{}). \
                  The heuristic will continue looking for other walls.",
-                ring, edge, prompt.controlled_param
+                ring,
+                edge,
+                prompt.controlled_param
             );
             self.recompute_prompt();
         }

@@ -530,7 +530,7 @@ pub(crate) fn outline_following_trace(
         }
     }
     let n_follow = on.iter().filter(|&&f| f).count();
-    println!(
+    log::debug!(
         "[splice] {m} trace segs: {n_follow} follow the boundary, {} diverge \
              (follow_tol {follow_tol:.3} m)",
         m - n_follow
@@ -538,7 +538,7 @@ pub(crate) fn outline_following_trace(
     // Need BOTH a following and a free segment to splice; else this isn't
     // ours (all-on is a pure reproduce; none-on is a wholly new shape).
     if !on.iter().any(|&f| f) || on.iter().all(|&f| f) {
-        println!(
+        log::debug!(
             "[splice] declined: {}",
             if n_follow == 0 {
                 "no segment follows the boundary (wholly new shape)"
@@ -553,7 +553,7 @@ pub(crate) fn outline_following_trace(
     let start = match (0..m).find(|&k| on[k] && !on[(k + m - 1) % m]) {
         Some(s) => s,
         None => {
-            println!("[splice] declined: no free→follow boundary found");
+            log::debug!("[splice] declined: no free→follow boundary found");
             return None;
         }
     };
@@ -691,7 +691,7 @@ pub(crate) fn outline_following_trace(
         cleaned.pop();
     }
     if cleaned.len() < 3 {
-        println!(
+        log::debug!(
             "[splice] declined: spliced ring collapsed to {} verts",
             cleaned.len()
         );
@@ -710,7 +710,7 @@ pub(crate) fn outline_following_trace(
         cleaned.rotate_left(rk);
     }
     let cleaned: Vec<Point2f32> = cleaned.into_iter().map(|(p, _)| p).collect();
-    println!(
+    log::debug!(
         "[splice] built {} verts from {} runs ({} following, {} new-wall)",
         cleaned.len(),
         runs.len(),
