@@ -345,23 +345,15 @@ pub(crate) fn build_region_ring(
                 let pin_end = neighbor_boundary(&bverts, i, 1)
                     .map(|(entry, _)| entry)
                     .unwrap_or(stroke[*end]);
-                // RDP-simplify the raw freehand interior BEFORE orthogonalizing —
-                // `snap_open_fixed_ends` emits one step PER POINT. Use the COARSE
-                // "drop hand-wander" tolerance (shared with the straight cut) so a
-                // roughly-straight wall collapses to a clean line instead of
-                // staircasing, while a real step ≥ the ceiling survives.
-                // Open-polyline simplify: a straight wall MUST be allowed to
-                // collapse to 2 points. `simplify_stroke` errors below 3 (it's for
-                // closed rings), and the old fallback then kept the raw wander and
-                // staircased it.
+                // Coarse open-polyline RDP (allow a 2-point collapse) so a roughly
+                // straight wall is a clean line, not a staircase; then orthogonalize
+                // with the pinned ends.
                 let raw = &stroke[*start..=*end];
                 let coarse = tuning.coarse_simplify_tol(geom::bbox_diagonal(raw), tol);
                 let simplified = crate::simplification::simplify_open(raw, coarse);
                 let mut input = vec![pin_start];
                 input.extend_from_slice(&simplified);
                 input.push(pin_end);
-                // Stepped close (not pull): the pinned ends can sit on a diagonal,
-                // where pulling a vertex off-axis would tilt the interior wall.
                 let ortho = crate::snap_open_fixed_ends_stepped(&input);
                 push_ring(&mut ring, &ortho);
             }
