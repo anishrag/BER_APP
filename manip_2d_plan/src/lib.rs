@@ -22,6 +22,7 @@ mod query;
 mod simplification;
 mod trim;
 
+pub use carve::SubareaOutcome;
 pub use error::Error;
 pub use extend::snap_stroke_to_ring;
 pub use geom::{

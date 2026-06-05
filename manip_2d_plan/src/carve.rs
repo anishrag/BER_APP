@@ -235,6 +235,44 @@ impl FloorPlan {
     ) -> Result<Option<(Self, Self)>, Error> {
         split_cut(&self.parametric.ring_points(0), path, tolerance, tuning)
     }
+
+    /// Resolve a freehand sub-area stroke against this outline in one step —
+    /// clip, then cut or carve. See [`carve_or_cut`].
+    pub fn carve_or_cut(
+        &self,
+        stroke: &[Point2f32],
+        tuning: &SubareaTuning,
+    ) -> Result<SubareaOutcome, Error> {
+        carve_or_cut(&self.parametric.ring_points(0), stroke, tuning)
+    }
+}
+
+/// What a freehand sub-area stroke resolved to.
+pub enum SubareaOutcome {
+    /// A straight cut split the outline into two regions — the caller lets the
+    /// user pick which becomes the sub-area.
+    Cut(FloorPlan, FloorPlan),
+    /// A single carved sub-area.
+    Area(FloorPlan),
+}
+
+/// Resolve a freehand sub-area stroke against `outline`: clip it onto the storey
+/// ([`clip_stroke_inside`]), then either split it (a straight cut → two regions,
+/// [`split_cut`]) or carve it (anything else → one area, [`sub_area`]). The carve
+/// tolerance is derived from the clipped stroke + `tuning`, so the caller passes
+/// neither a pre-clipped stroke nor a tolerance — the whole clip→tol→cut/carve
+/// pipeline lives here, not in the caller.
+pub(crate) fn carve_or_cut(
+    outline: &[Point2f32],
+    stroke: &[Point2f32],
+    tuning: &SubareaTuning,
+) -> Result<SubareaOutcome, Error> {
+    let pts = clip_stroke_inside(outline, stroke, tuning.close_gap_m);
+    let tol = (geom::bbox_diagonal(&pts) * tuning.rdp_tol_ratio).max(tuning.rdp_tol_floor);
+    match split_cut(outline, &pts, tol, tuning)? {
+        Some((a, b)) => Ok(SubareaOutcome::Cut(a, b)),
+        None => Ok(SubareaOutcome::Area(sub_area(outline, &pts, tol, tuning)?)),
+    }
 }
 
 /// Carve a sub-area (a living space) out of an OUTLINE RING from an OPEN drawn

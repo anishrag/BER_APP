@@ -26,7 +26,7 @@ use datatypes::ber::structural::{FloorRegions, Storey, WallExposure, WallRegions
 use domain::points::{Point2f32, Point2f64};
 use domain::sketch::{DisplayMode, EditTools, SketchMode};
 use manip_2d_plan::{
-    Axis, CollinearitySuggestion, FloorPlan, ParameterAxis, ParameterId, VertexId,
+    Axis, CollinearitySuggestion, FloorPlan, ParameterAxis, ParameterId, SubareaOutcome, VertexId,
 };
 use sketch::model::Stroke;
 use sketch::SketchEngine;

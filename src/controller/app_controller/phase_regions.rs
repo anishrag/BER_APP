@@ -108,48 +108,20 @@ impl AppController {
             .floor_plan
             .subtract(&phase_rings)
             .unwrap_or_else(|| self.outline.floor_plan.clone());
-        let pts = boundary.clip_stroke_inside(&pts, self.tuning.subarea.close_gap_m);
-        let tol = (manip_2d_plan::ring_diagonal(&pts) * self.tuning.subarea.rdp_tol_ratio)
-            .max(self.tuning.subarea.rdp_tol_floor);
-
-        // Diagnostic logging for phase-area sketches (mirrors the living-area
-        // block): the clamped stroke, the outline carved against, the branch
-        // taken, and the resulting plan + orthogonality. Paste when a phase area
-        // comes out wrong.
-        let (mut min_x, mut min_y, mut max_x, mut max_y) = (f32::MAX, f32::MAX, f32::MIN, f32::MIN);
-        for p in &pts {
-            min_x = min_x.min(p.x);
-            min_y = min_y.min(p.y);
-            max_x = max_x.max(p.x);
-            max_y = max_y.max(p.y);
-        }
         println!("── construction-phase sketch ───────────────────────");
-        println!(
-            "  drawn: {} pts (clamped)  extent x[{:.2}, {:.2}] y[{:.2}, {:.2}]  tol={:.3}",
-            pts.len(),
-            min_x,
-            max_x,
-            min_y,
-            max_y,
-            tol
-        );
-        println!("  stroke pts: {:?}", pts);
         println!("  available region: {:?}", boundary.get_points());
 
-        match boundary.split_by_cut(&pts, tol, &self.tuning.subarea) {
-            Ok(Some((a, b))) => {
+        // One call does clip → tol → cut-or-carve against the available region;
+        // we only dispatch the outcome.
+        match boundary.carve_or_cut(&pts, &self.tuning.subarea) {
+            Ok(SubareaOutcome::Cut(a, b)) => {
                 println!("  → phase cut splits the storey into two regions — tap one to keep");
                 println!("────────────────────────────────────────────────────");
                 let sa = self.pinned_subarea_slot(&boundary, a);
                 let sb = self.pinned_subarea_slot(&boundary, b);
                 self.pending_phase_cut = Some([sa, sb]);
-                return;
             }
-            Ok(None) => {}
-            Err(e) => eprintln!("phase split_by_cut: {:?}", e),
-        }
-        match boundary.carve_subarea(&pts, tol, &self.tuning.subarea) {
-            Ok(plan) => {
+            Ok(SubareaOutcome::Area(plan)) => {
                 println!("  → phase-area plan: {:?}", plan);
                 let bad = plan.non_orthogonal_edges();
                 if bad.is_empty() {
@@ -171,7 +143,7 @@ impl AppController {
             }
             Err(e) => {
                 println!("────────────────────────────────────────────────────");
-                eprintln!("phase carve_subarea: {:?}", e);
+                eprintln!("phase carve_or_cut: {:?}", e);
             }
         }
     }

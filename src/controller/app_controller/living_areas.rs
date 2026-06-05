@@ -155,55 +155,18 @@ impl AppController {
             .collect()
     }
 
-    /// Start a NEW living area from a freehand stroke (world coords), drawn the
-    /// same way as the storey outline. The stroke is an OPEN path: its
-    /// endpoints snap onto the storey outline and the area is closed along the
-    /// shared house walls (so they aren't redrawn). A stroke that doesn't reach
-    /// the outline becomes a free-standing interior room instead. It inherits
-    /// the storey's scale (a living area inside a dimensioned storey is already
-    /// in metres — no re-calibration; dimensioning only sets its walls),
-    /// becomes the active shape, and is appended to the list. Then prompts to
-    /// dimension its walls.
-    pub fn start_new_living_area(&mut self, world_points: &[Point2f32]) -> Result<(), String> {
-        if world_points.len() < 3 {
-            return Err("living-area stroke needs at least 3 points".into());
-        }
+    /// Commit a freshly-carved living-area `plan` — the [`Area`] outcome of
+    /// `carve_or_cut`. Validates the geometry, inherits the storey's scale,
+    /// pre-marks the walls shared with the outline as known (so dimensioning only
+    /// asks about the drawn walls), makes it the active shape, appends it, and
+    /// starts dimensioning. Returns a user-facing message if the region
+    /// self-crosses. (The clip/carve geometry lives in `manip_2d_plan`; this owns
+    /// only the commit workflow.)
+    ///
+    /// [`Area`]: manip_2d_plan::SubareaOutcome::Area
+    fn commit_living_area_plan(&mut self, plan: FloorPlan) -> Result<(), String> {
         let undo_snap = self.current_history_snapshot();
-        // RDP tolerance scaled to the drawn extent, so it's sensible whether the
-        // storey is in metres (dimensioned) or still pixels.
-        let (mut min_x, mut min_y, mut max_x, mut max_y) = (f32::MAX, f32::MAX, f32::MIN, f32::MIN);
-        for p in world_points {
-            min_x = min_x.min(p.x);
-            min_y = min_y.min(p.y);
-            max_x = max_x.max(p.x);
-            max_y = max_y.max(p.y);
-        }
-        let tol = (manip_2d_plan::ring_diagonal(world_points) * self.tuning.subarea.rdp_tol_ratio)
-            .max(self.tuning.subarea.rdp_tol_floor);
-
-        // Save whatever's active first, so the outline we carve against is
-        // current (and the active living area's edits aren't lost).
-        self.sync_active();
-        // Diagnostic logging for living-area sketches (paste this when a sketch
-        // comes out wrong): the raw stroke, the outline we snap/carve against,
-        // and the resulting parametric plan.
-        println!("── living-area sketch ──────────────────────────────");
-        println!(
-            "  drawn: {} pts  extent x[{:.2}, {:.2}] y[{:.2}, {:.2}]  tol={:.3}",
-            world_points.len(),
-            min_x,
-            max_x,
-            min_y,
-            max_y,
-            tol
-        );
-        println!("  stroke pts: {:?}", world_points);
-        println!("  outline ring: {:?}", self.outline.floor_plan.get_points());
-        let plan = self
-            .outline
-            .floor_plan
-            .carve_subarea(world_points, tol, &self.tuning.subarea)
-            .map_err(|e| format!("Failed to draw living area: {:?}", e))?;
+        println!("── living-area plan ─────────────────────────────────");
         println!("  → living-area plan: {:?}", plan);
         let bad = plan.non_orthogonal_edges();
         if bad.is_empty() {
@@ -212,9 +175,8 @@ impl AppController {
             println!("  → ⚠ NON-ORTHOGONAL edges: {:?}", bad);
         }
         println!("────────────────────────────────────────────────────");
-        // Fallback guardrail: the geometry layer un-intersects a folded ring
-        // (`untangle_ring`), so this should rarely fire — but if a self-crossing
-        // somehow survives, refuse it rather than commit bad geometry.
+        // Fallback guardrail: the geometry layer un-intersects a folded ring, so
+        // this rarely fires — but refuse a survivor rather than commit bad geometry.
         if let Err(e) = plan.validate_simple() {
             return Err(format!(
                 "the living area's walls cross ({:?}) — redraw it so it doesn't fold over itself",
@@ -282,43 +244,31 @@ impl AppController {
             return;
         }
         dump_stroke("living-area", &pts);
-        // Save the live buffer so the outline we clamp/split/carve against is
-        // current.
+        // Save the live buffer so the outline we carve against is current.
         self.sync_active();
-        // Guardrail FIRST: snap any part of the stroke drawn OUTSIDE the storey
-        // back onto its boundary, before anything else looks at it.
-        let pts = self
-            .outline
-            .floor_plan
-            .clip_stroke_inside(&pts, self.tuning.subarea.close_gap_m);
-
-        // Tolerance scaled to the drawn extent (matches start_new_living_area).
-        let tol = (manip_2d_plan::ring_diagonal(&pts) * self.tuning.subarea.rdp_tol_ratio)
-            .max(self.tuning.subarea.rdp_tol_floor);
-
-        // A straight cut → offer both halves to pick from. Each region's walls
-        // along the storey are pinned (pre-known); only the cut wall is set.
+        // One call into `manip_2d_plan` does clip → tol → cut-or-carve; we only
+        // dispatch the outcome to the right workflow.
         match self
             .outline
             .floor_plan
-            .split_by_cut(&pts, tol, &self.tuning.subarea)
+            .carve_or_cut(&pts, &self.tuning.subarea)
         {
-            Ok(Some((a, b))) => {
+            // A straight cut → offer both halves to pick from. Each region's walls
+            // along the storey are pinned (pre-known); only the cut wall is set.
+            Ok(SubareaOutcome::Cut(a, b)) => {
                 println!("── cut splits the storey into two regions — tap one to keep ──");
                 let boundary = self.outline.floor_plan.clone();
                 self.pending_cut = Some([
                     self.pinned_subarea_slot(&boundary, a),
                     self.pinned_subarea_slot(&boundary, b),
                 ]);
-                return;
             }
-            Ok(None) => {}
-            Err(e) => {
-                eprintln!("split_by_cut: {:?}", e);
+            Ok(SubareaOutcome::Area(plan)) => {
+                if let Err(e) = self.commit_living_area_plan(plan) {
+                    eprintln!("living area: {}", e);
+                }
             }
-        }
-        if let Err(e) = self.start_new_living_area(&pts) {
-            eprintln!("start_new_living_area: {}", e);
+            Err(e) => eprintln!("living-area carve_or_cut: {:?}", e),
         }
     }
 
