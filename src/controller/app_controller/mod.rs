@@ -10,9 +10,16 @@ mod exposure;
 mod living_areas;
 mod phase_regions;
 
-pub use exposure::{ExposureSection, ExposureSelection, SectionHandle, WallExposureView};
+pub use document::ExposureSection;
+pub use exposure::{ExposureSelection, SectionHandle, WallExposureView};
 use living_areas::{reconstruct_living_areas, shape_finalised};
 use phase_regions::{resolved_phase, PhaseRegion};
+
+use document::{
+    ActiveShape, DimensionPrompt, DimensionState, Document, EditState, MovedCoordKind, PendingArc,
+    ShapeSlot,
+};
+// `ExposureSection` is re-exported above (the controller's public surface).
 
 use chrono::NaiveDate;
 use std::sync::mpsc::Sender;
@@ -26,7 +33,7 @@ use datatypes::ber::structural::{FloorRegions, Storey, WallExposure, WallRegions
 use domain::points::{Point2f32, Point2f64};
 use domain::sketch::{DisplayMode, EditTools, SketchMode};
 use manip_2d_plan::{
-    Axis, CollinearitySuggestion, FloorPlan, ParameterAxis, ParameterId, SubareaOutcome, VertexId,
+    Axis, CollinearitySuggestion, FloorPlan, ParameterAxis, SubareaOutcome, VertexId,
 };
 use sketch::model::Stroke;
 use sketch::SketchEngine;
@@ -76,24 +83,6 @@ pub struct PendingRedraw {
     pub closed: bool,
 }
 
-/// A PROVISIONAL curved wall (`ExtendCurve` / `TrimCurve`): the freehand stroke
-/// fitted to a circular arc and held un-baked. `FloorPlan::begin_arc` has
-/// spliced the two endpoints onto the outline as pinned vertices, leaving a
-/// straight placeholder edge (shape unchanged). The user dimensions the two
-/// attach stubs through the normal prompt flow; once both are known,
-/// `finish_arc` facets the arc between them and this clears. The placeholder
-/// edge's start vertex is in `skipped_walls`, so only the stubs are prompted.
-#[derive(Debug, Clone)]
-struct PendingArc {
-    /// Endpoint at the stroke's start (drawn first).
-    start: VertexId,
-    /// Endpoint at the stroke's end (drawn last).
-    end: VertexId,
-    /// Signed sagitta / chord (left of start→end). Scale-invariant: survives
-    /// the pixel→metre rescale and any move of the endpoints by dimensioning.
-    bulge_ratio: f32,
-}
-
 /// User-controlled view transform on the sketch canvas, on top of the
 /// auto-fit. `zoom = 1.0` and zero offset = pure auto-fit. The assessor uses
 /// this to zoom out (giving room to draw a disjoint section) or pan around.
@@ -112,17 +101,6 @@ impl Default for ViewTransform {
             offset_y: 0.0,
         }
     }
-}
-
-/// A single "what's the length of this wall?" question to put to the assessor.
-#[derive(Debug, Clone)]
-pub struct DimensionPrompt {
-    /// Stable identifier of the wall's starting vertex. Survives reflows so
-    /// the prompt can be carried across other operations without going stale.
-    pub wall_start_vertex: VertexId,
-    /// The currently-unknown parameter this wall constrains. Setting it from
-    /// the user's entered length is what "applying the dimension" does.
-    pub controlled_param: ParameterId,
 }
 
 /// World-coord endpoints of one wall.
@@ -221,33 +199,6 @@ pub struct DimensionPromptUiData {
     pub current_length: f32,
 }
 
-/// Tracks the user-confirmed dimensions on the floor plan. Before any
-/// dimension is entered the polygon is a pixel-scale notepad sketch; once the
-/// first dimension lands, the whole plan converts to real units (meters) and
-/// each subsequent dimension pins another parameter.
-#[derive(Debug, Default, Clone)]
-pub struct DimensionState {
-    /// Parameter IDs the user has explicitly entered a length for.
-    pub known_params: HashSet<ParameterId>,
-    /// Current "which wall do I ask about next?" prompt, or `None` when all
-    /// dimensions have been supplied (or there's nothing to dimension yet).
-    pub current_prompt: Option<DimensionPrompt>,
-    /// True once the first dimension is entered — from that point on the
-    /// plan is in real units rather than pixels.
-    pub scale_set: bool,
-    /// Walls the user has explicitly dimensioned, identified by the stable
-    /// VertexId of each wall's starting vertex. The UI uses this to decide
-    /// which length labels to render — only user-set walls show lengths;
-    /// derived/un-set walls show no label.
-    pub dimensioned_walls: Vec<VertexId>,
-    /// Walls the user explicitly skipped (by VertexId of the wall's start).
-    /// Skip is per-wall, not per-param: skipping wall A doesn't prevent the
-    /// user being asked about wall B even if both would set the same param.
-    /// A param controlled by a skipped wall just isn't pinned by that wall;
-    /// if no other wall can set it, the param stays un-dimensioned.
-    pub skipped_walls: HashSet<VertexId>,
-}
-
 // There is NO persisted sketch snapshot. The DB stores only finalised
 // (complete, metre-scale) resolved geometry — `Storey.floors` (outline),
 // `Storey.living_areas`, and `Storey.walls` (exposure). On reload the editor
@@ -257,34 +208,9 @@ pub struct DimensionState {
 // preserved), living areas are rebuilt non-editable, and exposure is recovered
 // from the wall regions.
 
-/// In-memory state for one editable shape (the storey outline or a living
-/// area): its parametric plan plus the dimensioning progress against it. The
-/// active shape's slot is mirrored live in `AppController::floor_plan` /
-/// `dimensioning`; the inactive shapes rest in their slots until activated.
-#[derive(Debug, Clone, Default)]
-struct ShapeSlot {
-    floor_plan: FloorPlan,
-    dimensioning: DimensionState,
-}
-
-/// Which shape the editor is currently acting on. `floor_plan`/`dimensioning`
-/// mirror this one; switching saves the live state back to its slot and loads
-/// the target's.
-#[derive(Debug, Clone, Copy, PartialEq)]
-enum ActiveShape {
-    /// The storey outline (the primary footprint).
-    Outline,
-    /// The living area at this index in `living_areas`.
-    LivingArea(usize),
-    /// The in-flight construction-phase area being dimensioned (held in
-    /// `phase_shape`). There's only ever one at a time, so no index.
-    PhaseArea,
-}
-
 pub struct AppController {
     conn: Db,
     sketch_engine: SketchEngine,
-    floor_plan: FloorPlan,
     loader_engine: DataLoader,
     /// The BER record being edited. `commit_to_ber` writes through this to SQLite.
     /// `None` means no BER is loaded yet — sketches stay in-memory until a BER exists.
@@ -302,22 +228,12 @@ pub struct AppController {
     /// A drawn-but-not-applied stroke awaiting the user's redraw decision.
     /// Only set when DrawPerpWalls finishes a stroke and there's already a plan.
     pending_redraw: Option<PendingRedraw>,
-    /// A provisional curved wall awaiting its two attach dimensions before being
-    /// faceted into the model. `None` when no curve is mid-flow.
-    pending_arc: Option<PendingArc>,
-    /// Tracks which parameters the user has dimensioned + the current prompt.
-    /// Mirrors the ACTIVE shape (see `active`); switching shapes swaps this and
-    /// `floor_plan` in/out of the shape slots.
-    dimensioning: DimensionState,
-    /// Which shape `floor_plan`/`dimensioning` currently mirror.
-    active: ActiveShape,
-    /// Saved state of the storey outline (stale while a living area is active;
-    /// `sync_active` refreshes it from the live buffer before it's read).
-    outline: ShapeSlot,
-    /// Potential living-area sub-shapes, drawn inside the storey the same way as
-    /// the outline. The most-recent is the one the tools edit; the largest is
-    /// chosen as THE living area later, but all are kept.
-    living_areas: Vec<ShapeSlot>,
+    /// The editable storey model: the outline + its living areas + an in-flight
+    /// phase area, which one is active, AND the live editing buffer (the active
+    /// shape checked out — `floor_plan`/`dimensioning`/`edit_state`/`pending_arc`).
+    /// `sync_active`/`load_active_into_buffer` move state between the buffer and
+    /// the slots. This is the UI-free, DB-free model the controller edits.
+    document: Document,
     /// True when the editor is in living-area mode: `DrawPerpWalls` starts a new
     /// living area (rather than replacing the outline), and the other tools act
     /// on the most-recent living area. Toggled by the UI.
@@ -336,10 +252,6 @@ pub struct AppController {
     exposure_sel: Option<(f32, f32)>,
     /// Which selection handle a canvas drag is currently moving. Transient.
     exposure_drag: Option<SectionHandle>,
-    /// Exposure SECTIONS of each OUTLINE perimeter wall, keyed by the wall's
-    /// stable start `VertexId` (survives edits). Un-marked length defaults to
-    /// `Exposed` when derived into BER `WallRegions`.
-    wall_sections: HashMap<VertexId, Vec<ExposureSection>>,
     /// A straight CUT line has split the storey into two candidate regions; the
     /// user picks which becomes the living area by tapping inside it. Transient
     /// (not persisted / not in undo history); `None` when nothing is awaiting a
@@ -353,20 +265,10 @@ pub struct AppController {
     /// persisted in the BER — they stamp surfaces' phase at commit; the durable
     /// record is each surface's `construction_id`. See `phase_regions.rs`.
     phase_regions: HashMap<usize, Vec<PhaseRegion>>,
-    /// The construction-phase area currently being DIMENSIONED (a sub-shape, like
-    /// a living area, but tagged with a phase at the end rather than kept). While
-    /// `Some` the editor's `active == PhaseArea`; once its walls are dimensioned
-    /// the UI shows the phase picker, and assigning a phase stores its dimensioned
-    /// ring as a `PhaseRegion` and clears this. Transient (not persisted).
-    phase_shape: Option<ShapeSlot>,
     /// A phase cut split the storey into two candidate regions (each a
     /// dimensionable slot); the user taps one, which becomes `phase_shape` and is
     /// then dimensioned. Transient.
     pending_phase_cut: Option<[ShapeSlot; 2]>,
-    /// Edit-mode interaction state: which wall the user has selected via
-    /// click + whether a drag is currently in progress. Always reset when
-    /// `edit_tool` switches away from `Edit`.
-    edit_state: EditState,
     /// Active post-drag measurement prompt. Set on mouse-up after a drag if
     /// the plan is already dimensioned; cleared when the user applies or
     /// cancels. The user types a distance + cycles through candidate
@@ -388,70 +290,19 @@ pub struct AppController {
     tuning: crate::config::Tuning,
 }
 
-/// Snapshot of the data state for undo/redo. Includes the floor plan +
-/// dimensioning + edit-state — view (zoom/pan), prompts, and in-flight
-/// drag state are deliberately excluded so undo doesn't fight the user's
-/// current view or interrupt an in-progress prompt mid-flow.
+/// Snapshot of the editable state for undo/redo: the whole `Document` (shapes +
+/// live editing buffer + exposure) plus the living-area mode flag. View
+/// (zoom/pan), in-flight prompts, and drag state are deliberately excluded so
+/// undo doesn't fight the user's current view or interrupt a prompt mid-flow.
 #[derive(Debug, Clone)]
 pub struct HistorySnapshot {
-    /// Live buffer of the active shape.
-    floor_plan: FloorPlan,
-    dimensioning: DimensionState,
-    edit_state: EditState,
-    /// A mid-flow provisional arc is part of the undoable state: undoing the
-    /// stroke that began it must clear it; undoing a dimension that finished it
-    /// must restore it.
-    pending_arc: Option<PendingArc>,
-    /// All shapes + which is active, so undo restores the right one (drawing or
-    /// dimensioning a living area, switching shapes, etc. are all undoable).
-    outline: ShapeSlot,
-    living_areas: Vec<ShapeSlot>,
-    /// The in-flight phase area, so undoing a phase-area dimension restores the
-    /// right buffer (mirrors `living_areas`).
-    phase_shape: Option<ShapeSlot>,
-    active: ActiveShape,
+    /// The whole editable document. Undo is a `Document` clone/restore; this is
+    /// the seam the snapshot has always followed (it once listed these fields by
+    /// hand — floor plan, dimensioning, edit state, arc, shapes, exposure).
+    document: Document,
+    /// The living-area MODE flag (a UI tab toggle) is session state kept OUT of
+    /// `Document`, but undo restores it so a draw/undo also round-trips the tab.
     living_area_mode: bool,
-    /// Per-wall exposure sections, so marking/clearing exposure is undoable.
-    wall_sections: HashMap<VertexId, Vec<ExposureSection>>,
-}
-
-/// Edit-mode click/drag state.
-#[derive(Debug, Default, Clone)]
-pub struct EditState {
-    /// VertexId of the start vertex of the currently selected wall.
-    pub selected_wall: Option<VertexId>,
-    /// VertexId of a free vertex the user inserted via double-click and
-    /// is currently dragging. Mutually exclusive with `selected_wall`.
-    pub selected_vertex: Option<VertexId>,
-    /// True while the user is holding the mouse button after clicking a wall
-    /// or double-clicking to insert a vertex.
-    pub dragging: bool,
-    /// The parameter/constant value before the user started a wall drag —
-    /// snapshotted on mouse-down so Cancel on the post-drag prompt can
-    /// revert without re-loading the entire floor plan.
-    pub pre_drag_value: Option<f32>,
-    /// Kind of coord that a wall drag affects (parameter or anchor
-    /// constant), stashed so `edit_mouse_up` can populate the post-drag
-    /// prompt.
-    pub pre_drag_kind: Option<MovedCoordKind>,
-    /// Pre-drag world-coord position of a vertex drag. Used for revert
-    /// if the user cancels the post-drop prompt.
-    pub pre_drag_vertex_pos: Option<(f32, f32)>,
-    /// True once we've taken an undo snapshot for the current drag. Reset
-    /// on each mouse-down. Ensures only ONE snapshot per drag (not one
-    /// per mouse-move frame) so undo treats the whole drag as one action.
-    pub drag_snapshot_taken: bool,
-}
-
-/// What kind of coordinate the just-moved wall is anchored to. The
-/// post-drag prompt applies the user's entered distance by mutating
-/// either a parameter (set_parameter) or a constant (shift_constant).
-#[derive(Debug, Clone, Copy)]
-pub enum MovedCoordKind {
-    Parameter(ParameterId),
-    /// The constant value as of mouse-down (`shift_constant` matches on
-    /// this value so it knows which vertices to update).
-    Constant(f32),
 }
 
 /// One candidate measurement for the post-drag prompt: "distance from this
@@ -493,29 +344,21 @@ impl AppController {
         Self {
             conn,
             loader_engine: DataLoader::new(),
-            floor_plan: FloorPlan::default(),
             sketch_engine: SketchEngine::new(),
             current_record: None,
             current_storey_idx: None,
             review: None,
             pending_redraw: None,
-            pending_arc: None,
-            dimensioning: DimensionState::default(),
-            active: ActiveShape::Outline,
-            outline: ShapeSlot::default(),
-            living_areas: Vec::new(),
+            document: Document::default(),
             living_area_mode: false,
             exposure_mode: false,
             selected_exposure_wall: None,
             exposure_sel: None,
             exposure_drag: None,
-            wall_sections: HashMap::new(),
             pending_cut: None,
             phase_mode: false,
             phase_regions: HashMap::new(),
-            phase_shape: None,
             pending_phase_cut: None,
-            edit_state: EditState::default(),
             edit_drag_prompt: None,
             vertex_drop_prompt: None,
             history: Vec::new(),
@@ -535,30 +378,14 @@ impl AppController {
 
     fn current_history_snapshot(&self) -> HistorySnapshot {
         HistorySnapshot {
-            floor_plan: self.floor_plan.clone(),
-            dimensioning: self.dimensioning.clone(),
-            edit_state: self.edit_state.clone(),
-            pending_arc: self.pending_arc.clone(),
-            outline: self.outline.clone(),
-            living_areas: self.living_areas.clone(),
-            phase_shape: self.phase_shape.clone(),
-            active: self.active,
+            document: self.document.clone(),
             living_area_mode: self.living_area_mode,
-            wall_sections: self.wall_sections.clone(),
         }
     }
 
     fn restore_history_snapshot(&mut self, snap: HistorySnapshot) {
-        self.floor_plan = snap.floor_plan;
-        self.dimensioning = snap.dimensioning;
-        self.edit_state = snap.edit_state;
-        self.pending_arc = snap.pending_arc;
-        self.outline = snap.outline;
-        self.living_areas = snap.living_areas;
-        self.phase_shape = snap.phase_shape;
-        self.active = snap.active;
+        self.document = snap.document;
         self.living_area_mode = snap.living_area_mode;
-        self.wall_sections = snap.wall_sections;
         // In-flight prompts no longer match the restored state — clear.
         self.edit_drag_prompt = None;
         self.vertex_drop_prompt = None;
@@ -726,7 +553,7 @@ impl AppController {
         self.phase_regions.clear();
         self.reconstruct_phase_regions_for(0);
         self.view = ViewTransform::default();
-        self.edit_state = EditState::default();
+        self.document.edit_state = EditState::default();
         self.review = None;
         self.compute_next_dimension_prompt();
         self.history.clear();
@@ -765,7 +592,7 @@ impl AppController {
         self.phase_regions.clear();
         self.reconstruct_phase_regions_for(0);
         self.view = ViewTransform::default();
-        self.edit_state = EditState::default();
+        self.document.edit_state = EditState::default();
         self.review = None;
         self.compute_next_dimension_prompt();
         self.history.clear();
@@ -792,9 +619,9 @@ impl AppController {
         self.current_storey_idx = target;
         // Clear transient per-storey state — none of it carries across a switch.
         self.view = ViewTransform::default();
-        self.edit_state = EditState::default();
+        self.document.edit_state = EditState::default();
         self.review = None;
-        self.pending_arc = None;
+        self.document.pending_arc = None;
         self.pending_cut = None;
         self.pending_redraw = None;
         self.edit_drag_prompt = None;
@@ -852,9 +679,9 @@ impl AppController {
             zoom: self.tuning.new_storey.add_storey_zoom,
             ..ViewTransform::default()
         };
-        self.edit_state = EditState::default();
+        self.document.edit_state = EditState::default();
         self.review = None;
-        self.pending_arc = None;
+        self.document.pending_arc = None;
         self.pending_cut = None;
         self.pending_redraw = None;
         self.edit_drag_prompt = None;
@@ -876,24 +703,24 @@ impl AppController {
     /// curve arcs) is intentionally not preserved — drawing tools work from the
     /// loaded points.
     fn load_storey_into_editor(&mut self, storey: Option<&Storey>) {
-        self.dimensioning = DimensionState::default();
+        self.document.dimensioning = DimensionState::default();
         // A provisional arc is transient and tied to the OUTGOING plan's
         // vertices; loading a record must not carry a stale one over.
-        self.pending_arc = None;
-        self.living_areas = Vec::new();
+        self.document.pending_arc = None;
+        self.document.living_areas = Vec::new();
         // Any in-flight phase area belongs to the OUTGOING storey — abandon it.
-        self.phase_shape = None;
+        self.document.phase_shape = None;
         self.pending_phase_cut = None;
-        self.active = ActiveShape::Outline;
+        self.document.active = ActiveShape::Outline;
         self.living_area_mode = false;
         self.exposure_mode = false;
         self.selected_exposure_wall = None;
         self.exposure_sel = None;
         self.exposure_drag = None;
-        self.wall_sections = HashMap::new();
-        self.outline = ShapeSlot::default();
+        self.document.wall_sections = HashMap::new();
+        self.document.outline = ShapeSlot::default();
         let Some(storey) = storey else {
-            self.floor_plan = FloorPlan::default();
+            self.document.floor_plan = FloorPlan::default();
             return;
         };
 
@@ -923,25 +750,25 @@ impl AppController {
                 .unwrap_or_default()
         };
         if primary.len() >= 3 {
-            self.floor_plan = FloorPlan::from_clean_ring(&primary).unwrap_or_default();
+            self.document.floor_plan = FloorPlan::from_clean_ring(&primary).unwrap_or_default();
             // Loaded geometry is finalised: metre scale set, nothing to dimension.
-            self.dimensioning = DimensionState {
-                known_params: self.floor_plan.all_active_params(),
+            self.document.dimensioning = DimensionState {
+                known_params: self.document.floor_plan.all_active_params(),
                 scale_set: true,
                 dimensioned_walls: Vec::new(),
                 skipped_walls: HashSet::new(),
                 current_prompt: None,
             };
         } else {
-            self.floor_plan = FloorPlan::default();
-            self.dimensioning = DimensionState::default();
+            self.document.floor_plan = FloorPlan::default();
+            self.document.dimensioning = DimensionState::default();
         }
-        self.outline = ShapeSlot {
-            floor_plan: self.floor_plan.clone(),
-            dimensioning: self.dimensioning.clone(),
+        self.document.outline = ShapeSlot {
+            floor_plan: self.document.floor_plan.clone(),
+            dimensioning: self.document.dimensioning.clone(),
         };
-        self.living_areas = reconstruct_living_areas(&storey.living_areas);
-        self.wall_sections = self.sections_from_wall_regions(&storey.walls);
+        self.document.living_areas = reconstruct_living_areas(&storey.living_areas);
+        self.document.wall_sections = self.sections_from_wall_regions(&storey.walls);
     }
 
     /// Snapshot of the BER currently being edited, for the UI to render.
@@ -954,7 +781,7 @@ impl AppController {
     /// this to gate downstream edit tools (Select, Move, Extend, Trim, …)
     /// behind the prerequisite "draw the orthogonal shape first."
     pub fn has_floor_plan(&self) -> bool {
-        self.floor_plan.get_points().len() >= 3
+        self.document.floor_plan.get_points().len() >= 3
     }
 
     /// Project current in-memory state into `self.current_record` and persist.
@@ -972,6 +799,7 @@ impl AppController {
         // The storey footprint is always the OUTLINE (never a living area, even
         // when one is active). One ring → one FloorRegion.
         let polygons_f64: Vec<Vec<Point2f64>> = self
+            .document
             .outline
             .floor_plan
             .polygons()
@@ -992,12 +820,13 @@ impl AppController {
         // provisional height floors use — until real heights are entered.
         // Computed before the mutable `record` borrow below.
         let wall_segments: Vec<(Point2f64, Point2f64, WallExposure)> = self
+            .document
             .outline
             .floor_plan
             .perimeter_walls()
             .into_iter()
             .flat_map(|(vid, a, b)| {
-                let sections = match self.wall_sections.get(&vid) {
+                let sections = match self.document.wall_sections.get(&vid) {
                     Some(s) if !s.is_empty() => s,
                     _ => return Vec::new(), // un-marked wall → no region
                 };
@@ -1020,6 +849,7 @@ impl AppController {
         // Stored in `Storey.living_areas`, NOT the snapshot — they're
         // non-editable on reload, so their resolved geometry suffices.
         let living_area_lists: Vec<Vec<Point2f64>> = self
+            .document
             .living_areas
             .iter()
             .map(|slot| {
@@ -1252,6 +1082,7 @@ impl AppController {
             // Outline is metric + fully dimensioned → keep its floors/walls,
             // and persist only the living areas that are themselves done.
             let lists: Vec<Vec<Point2f64>> = self
+                .document
                 .living_areas
                 .iter()
                 .filter(|s| shape_finalised(&s.dimensioning, &s.floor_plan))
@@ -1289,8 +1120,11 @@ impl AppController {
     /// The outline is finalised when its metre scale is set AND no wall is left
     /// to dimension — i.e. its resolved geometry is complete and in metres.
     fn outline_finalised(&self) -> bool {
-        self.outline.dimensioning.scale_set
-            && shape_finalised(&self.outline.dimensioning, &self.outline.floor_plan)
+        self.document.outline.dimensioning.scale_set
+            && shape_finalised(
+                &self.document.outline.dimensioning,
+                &self.document.outline.floor_plan,
+            )
     }
 
     /// COLLINEARITY REVIEW-------------------------------------------
@@ -1335,10 +1169,10 @@ impl AppController {
             "collinearity YES: ring {}/edge {} & ring {}/edge {} along {:?} (coords {:.2}, {:.2})",
             sug.ring_a, sug.edge_a, sug.ring_b, sug.edge_b, sug.axis, sug.coord_a, sug.coord_b
         );
-        self.floor_plan.apply_collinear_suggestion(&sug);
+        self.document.floor_plan.apply_collinear_suggestion(&sug);
         println!(
             "  → active_parameter_count = {}",
-            self.floor_plan.active_parameter_count()
+            self.document.floor_plan.active_parameter_count()
         );
         self.advance_review_cursor();
         let result = self.commit_to_ber();
@@ -1435,6 +1269,7 @@ impl AppController {
     /// pair is transitively rejected via an earlier No.
     fn review_should_skip(&self, sug: &CollinearitySuggestion) -> bool {
         if self
+            .document
             .floor_plan
             .edges_collinear(sug.ring_a, sug.edge_a, sug.ring_b, sug.edge_b, &sug.axis)
         {
@@ -1445,7 +1280,8 @@ impl AppController {
         // sides were just merged). Asking about a degenerate edge is meaningless
         // — skip it; the end-of-review cleanup drops the vertex entirely.
         let degenerate = |ring, edge| {
-            self.floor_plan
+            self.document
+                .floor_plan
                 .wall_length(ring, edge)
                 .map_or(true, |l| l < 1e-3)
         };
@@ -1465,6 +1301,7 @@ impl AppController {
             let same = |sa: (usize, usize), ra: (usize, usize)| -> bool {
                 (sa.0 == ra.0 && sa.1 == ra.1)
                     || self
+                        .document
                         .floor_plan
                         .edges_collinear(sa.0, sa.1, ra.0, ra.1, &rej.axis)
             };
@@ -1504,7 +1341,7 @@ impl AppController {
         if !matches!(mode, EditTools::Edit) {
             // Leaving Edit mode clears the selection so a stale highlight
             // doesn't carry over into the next tool.
-            self.edit_state = EditState::default();
+            self.document.edit_state = EditState::default();
         }
         self.sketch_engine.set_edit_tools(mode);
     }
@@ -1552,7 +1389,7 @@ impl AppController {
             match edit_tool {
                 EditTools::DrawPerpWalls => {
                     // Drawing the primary outline.
-                    if self.floor_plan.ring_count() > 0 {
+                    if self.document.floor_plan.ring_count() > 0 {
                         // A plan already exists — don't silently overwrite.
                         // Stash the stroke and let the UI ask the assessor
                         // what to do (Replace / Add new storey / Ignore).
@@ -1597,7 +1434,7 @@ impl AppController {
     /// "wall isn't straight" report shows up in the log with the exact edge.
     /// (A plain `Trim` may create a deliberate diagonal cut, so it's not checked.)
     pub(crate) fn warn_if_non_orthogonal(&self, ctx: &str) {
-        let bad = self.floor_plan.non_orthogonal_edges();
+        let bad = self.document.floor_plan.non_orthogonal_edges();
         if bad.is_empty() {
             return;
         }
@@ -1651,11 +1488,11 @@ impl AppController {
         // previous storey's diagonal (see `snap_to_previous_storey_outline`).
         let snapped_owned = self.snap_to_previous_storey_outline(points);
         let points: &[Point2f32] = snapped_owned.as_deref().unwrap_or(points);
-        self.floor_plan = FloorPlan::from_points_to_orthogonal(points, 10.0, closed)
+        self.document.floor_plan = FloorPlan::from_points_to_orthogonal(points, 10.0, closed)
             .map_err(|e| format!("Failed to draw outline: {:?}", e))?;
-        println!("floor plan: {:?}", self.floor_plan);
+        println!("floor plan: {:?}", self.document.floor_plan);
         self.warn_if_non_orthogonal("draw outline");
-        self.dimensioning = DimensionState::default();
+        self.document.dimensioning = DimensionState::default();
         self.push_history_snapshot(undo_snap);
         self.commit_review_redimension()
     }
@@ -1668,7 +1505,7 @@ impl AppController {
     fn snap_to_previous_storey_outline(&self, points: &[Point2f32]) -> Option<Vec<Point2f32>> {
         // Only on a fresh storey — once an outline exists this is a redraw, not
         // a method-2 trace, and we don't want to silently snap the user's stroke.
-        if self.floor_plan.ring_count() > 0 {
+        if self.document.floor_plan.ring_count() > 0 {
             return None;
         }
         let ring = self.previous_storey_ring()?;
@@ -1844,16 +1681,16 @@ impl AppController {
                 "ORTHOGONALIZE (different storey — new walls / skipped boundary)"
             }
         );
-        self.dimensioning = DimensionState::default();
-        self.dimensioning.scale_set = true;
+        self.document.dimensioning = DimensionState::default();
+        self.document.dimensioning.scale_set = true;
         if reproduces_outline {
             // Verbatim copy: the whole outline is shared → every param is known,
             // nothing to dimension. The curve survives unchanged.
-            self.floor_plan = prev_plan;
-            self.dimensioning.known_params = self.floor_plan.all_active_params();
+            self.document.floor_plan = prev_plan;
+            self.document.dimensioning.known_params = self.document.floor_plan.all_active_params();
             println!(
                 "[new-storey] trace reproduces the previous outline → copied verbatim ({} verts, curve preserved)",
-                self.floor_plan.get_points().len()
+                self.document.floor_plan.get_points().len()
             );
             self.push_history_snapshot(undo_snap);
             return self.commit_review_redimension();
@@ -1868,21 +1705,21 @@ impl AppController {
         if let Some(spliced) = prev_plan.outline_following_trace(&pts, cover_tol, tol, &ns.splice) {
             match FloorPlan::from_clean_ring(&spliced) {
                 Ok(fp) => {
-                    self.floor_plan = fp;
+                    self.document.floor_plan = fp;
                     self.warn_if_non_orthogonal("draw outline (world, spliced)");
-                    self.dimensioning.known_params =
-                        prev_plan.params_pinned_to_outline(&self.floor_plan);
-                    let active = self.floor_plan.all_active_params();
+                    self.document.dimensioning.known_params =
+                        prev_plan.params_pinned_to_outline(&self.document.floor_plan);
+                    let active = self.document.floor_plan.all_active_params();
                     println!(
                         "[new-storey] spliced outline: followed the previous boundary and squared \
                          off only the new walls → {} verts, pinned {} of {} active params \
                          ({} new wall param(s) left to dimension)",
-                        self.floor_plan.get_points().len(),
-                        self.dimensioning.known_params.len(),
+                        self.document.floor_plan.get_points().len(),
+                        self.document.dimensioning.known_params.len(),
                         active.len(),
                         active
                             .len()
-                            .saturating_sub(self.dimensioning.known_params.len()),
+                            .saturating_sub(self.document.dimensioning.known_params.len()),
                     );
                     self.push_history_snapshot(undo_snap);
                     return self.commit_review_redimension();
@@ -1900,20 +1737,22 @@ impl AppController {
         // dominant angle) so a slightly-rotated freehand trace can't tilt the
         // storey off the frame below; pin the walls shared with the previous
         // storey so dimensioning prompts only the genuinely-new ones.
-        self.floor_plan = FloorPlan::from_points_to_world_orthogonal(&snapped, tol, closed)
-            .map_err(|e| format!("Failed to draw outline: {:?}", e))?;
+        self.document.floor_plan =
+            FloorPlan::from_points_to_world_orthogonal(&snapped, tol, closed)
+                .map_err(|e| format!("Failed to draw outline: {:?}", e))?;
         self.warn_if_non_orthogonal("draw outline (world)");
-        self.dimensioning.known_params = prev_plan.params_pinned_to_outline(&self.floor_plan);
-        let active = self.floor_plan.all_active_params();
+        self.document.dimensioning.known_params =
+            prev_plan.params_pinned_to_outline(&self.document.floor_plan);
+        let active = self.document.floor_plan.all_active_params();
         println!(
             "[new-storey] built outline: {} verts, scale_set=true, pinned {} of {} active params \
              ({} new wall param(s) left to dimension)",
-            self.floor_plan.get_points().len(),
-            self.dimensioning.known_params.len(),
+            self.document.floor_plan.get_points().len(),
+            self.document.dimensioning.known_params.len(),
             active.len(),
             active
                 .len()
-                .saturating_sub(self.dimensioning.known_params.len()),
+                .saturating_sub(self.document.dimensioning.known_params.len()),
         );
 
         self.push_history_snapshot(undo_snap);
@@ -1928,14 +1767,15 @@ impl AppController {
         closed: bool,
     ) -> Result<(), String> {
         let undo_snap = self.current_history_snapshot();
-        let had_outline = self.floor_plan.ring_count() > 0;
+        let had_outline = self.document.floor_plan.ring_count() > 0;
         if !had_outline {
-            self.floor_plan = FloorPlan::from_points_to_orthogonal(points, 10.0, closed)
+            self.document.floor_plan = FloorPlan::from_points_to_orthogonal(points, 10.0, closed)
                 .map_err(|e| format!("Failed to draw outline: {:?}", e))?;
             // Same as DrawPerpWalls when there was nothing: reset dimensioning.
-            self.dimensioning = DimensionState::default();
+            self.document.dimensioning = DimensionState::default();
         } else {
-            self.floor_plan
+            self.document
+                .floor_plan
                 .add_polygon(points, 10.0, closed)
                 .map_err(|e| format!("Failed to add section: {:?}", e))?;
             // Existing known_params remain valid — apply_orthogonal_constraints
@@ -1949,7 +1789,7 @@ impl AppController {
         }
         println!(
             "floor plan (after AddDetachedSection): {:?}",
-            self.floor_plan
+            self.document.floor_plan
         );
         // History snapshotted BEFORE the commit (consistent with the other
         // apply_* methods) so an undo entry exists even if the commit fails.
@@ -1991,6 +1831,7 @@ impl AppController {
         }
         let undo_snap = self.current_history_snapshot();
         let minted = self
+            .document
             .floor_plan
             .extend_ortho(points)
             .map_err(|e| format!("{}", e))?;
@@ -2008,7 +1849,10 @@ impl AppController {
         // a new porch front lines up with an earlier one. We never assume it;
         // and we don't re-surface pairs among the pre-existing walls. (Extend
         // uses this param-scoped review, so it can't share `commit_review_redimension`.)
-        let suggestions = self.floor_plan.collinear_suggestions_for_params(&minted);
+        let suggestions = self
+            .document
+            .floor_plan
+            .collinear_suggestions_for_params(&minted);
         if !suggestions.is_empty() {
             self.review = Some(CollinearityReview {
                 suggestions,
@@ -2056,8 +1900,8 @@ impl AppController {
         }
         let undo_snap = self.current_history_snapshot();
         let minted = match self.sketch_engine.edit_tool {
-            EditTools::TrimOrtho => self.floor_plan.trim_ortho(points),
-            _ => self.floor_plan.trim_by_stroke(points),
+            EditTools::TrimOrtho => self.document.floor_plan.trim_ortho(points),
+            _ => self.document.floor_plan.trim_by_stroke(points),
         }
         .map_err(|e| format!("{}", e))?;
         println!("Trim: {} new param(s) {:?}", minted.len(), minted);
@@ -2082,7 +1926,10 @@ impl AppController {
     /// that feature lands, those vertex IDs are passed here and kept.
     fn clean_envelope_collinear(&mut self) {
         let preserve: HashSet<VertexId> = HashSet::new();
-        let removed = self.floor_plan.remove_collinear_vertices(&preserve);
+        let removed = self
+            .document
+            .floor_plan
+            .remove_collinear_vertices(&preserve);
         if !removed.is_empty() {
             println!(
                 "Cleanup: removed {} spurious collinear vertex/vertices {:?}",
@@ -2108,13 +1955,19 @@ impl AppController {
         // Plan + dimensioning state BEFORE the curve, so the exact dimensioned
         // shape can be reconstructed in a test.
         println!("=== CURVE DEBUG: begin_arc_stroke ===");
-        println!("  plan BEFORE: {:?}", self.floor_plan);
+        println!("  plan BEFORE: {:?}", self.document.floor_plan);
         {
-            let mut k: Vec<_> = self.dimensioning.known_params.iter().copied().collect();
+            let mut k: Vec<_> = self
+                .document
+                .dimensioning
+                .known_params
+                .iter()
+                .copied()
+                .collect();
             k.sort();
             println!(
                 "  known_params={:?} scale_set={}",
-                k, self.dimensioning.scale_set
+                k, self.document.dimensioning.scale_set
             );
         }
         // The raw stroke, as a paste-able Rust literal.
@@ -2127,14 +1980,15 @@ impl AppController {
 
         let undo_snap = self.current_history_snapshot();
         let (start, end, bulge_ratio) = self
+            .document
             .floor_plan
             .begin_arc(points)
             .map_err(|e| format!("{}", e))?;
         // Don't prompt the straight placeholder edge — only its attach stubs.
         if let Some(skip) = self.placeholder_skip_vertex(start, end) {
-            self.dimensioning.skipped_walls.insert(skip);
+            self.document.dimensioning.skipped_walls.insert(skip);
         }
-        self.pending_arc = Some(PendingArc {
+        self.document.pending_arc = Some(PendingArc {
             start,
             end,
             bulge_ratio,
@@ -2154,26 +2008,37 @@ impl AppController {
             self.placeholder_skip_vertex(start, end)
         );
         if let (Some((r, is)), Some((_, ie))) = (
-            self.floor_plan.find_vertex(start),
-            self.floor_plan.find_vertex(end),
+            self.document.floor_plan.find_vertex(start),
+            self.document.floor_plan.find_vertex(end),
         ) {
             println!("  start at ring{r}/idx{is}, end at idx{ie}");
         }
         {
-            let mut a: Vec<_> = self.floor_plan.all_active_params().into_iter().collect();
+            let mut a: Vec<_> = self
+                .document
+                .floor_plan
+                .all_active_params()
+                .into_iter()
+                .collect();
             a.sort();
-            let mut k: Vec<_> = self.dimensioning.known_params.iter().copied().collect();
+            let mut k: Vec<_> = self
+                .document
+                .dimensioning
+                .known_params
+                .iter()
+                .copied()
+                .collect();
             k.sort();
             println!("  active_params={a:?} known_after_retain={k:?}");
         }
-        let ring = self.floor_plan.polygons()[0].clone();
+        let ring = self.document.floor_plan.polygons()[0].clone();
         for e in 0..ring.len() {
             println!(
                 "  edge {e} {:?}->{:?} axis={:?} deps={:?}",
                 (ring[e].x, ring[e].y),
                 (ring[(e + 1) % ring.len()].x, ring[(e + 1) % ring.len()].y),
-                self.floor_plan.wall_axis(0, e),
-                self.floor_plan.wall_param_deps(0, e),
+                self.document.floor_plan.wall_axis(0, e),
+                self.document.floor_plan.wall_param_deps(0, e),
             );
         }
         println!("=== end CURVE DEBUG ===");
@@ -2190,12 +2055,12 @@ impl AppController {
     /// `next_promptable_wall` keys the placeholder wall by), so it can be
     /// skipped. `None` if the two are no longer adjacent on one ring.
     fn placeholder_skip_vertex(&self, start: VertexId, end: VertexId) -> Option<VertexId> {
-        let (r1, is) = self.floor_plan.find_vertex(start)?;
-        let (r2, ie) = self.floor_plan.find_vertex(end)?;
+        let (r1, is) = self.document.floor_plan.find_vertex(start)?;
+        let (r2, ie) = self.document.floor_plan.find_vertex(end)?;
         if r1 != r2 {
             return None;
         }
-        let n = self.floor_plan.polygons().get(r1)?.len();
+        let n = self.document.floor_plan.polygons().get(r1)?.len();
         if n == 0 {
             return None;
         }
@@ -2213,15 +2078,15 @@ impl AppController {
     /// fixing both endpoints. That's the cue to facet the arc in.
     fn pending_arc_ready(&self, pa: &PendingArc) -> bool {
         let (Some((r1, is)), Some((r2, ie))) = (
-            self.floor_plan.find_vertex(pa.start),
-            self.floor_plan.find_vertex(pa.end),
+            self.document.floor_plan.find_vertex(pa.start),
+            self.document.floor_plan.find_vertex(pa.end),
         ) else {
             return false;
         };
         if r1 != r2 {
             return false;
         }
-        let Some(n) = self.floor_plan.polygons().get(r1).map(|p| p.len()) else {
+        let Some(n) = self.document.floor_plan.polygons().get(r1).map(|p| p.len()) else {
             return false;
         };
         let edge_start = if (is + 1) % n == ie {
@@ -2231,11 +2096,11 @@ impl AppController {
         } else {
             return false;
         };
-        let deps = self.floor_plan.wall_param_deps(r1, edge_start);
+        let deps = self.document.floor_plan.wall_param_deps(r1, edge_start);
         !deps.is_empty()
             && deps
                 .iter()
-                .all(|p| self.dimensioning.known_params.contains(p))
+                .all(|p| self.document.dimensioning.known_params.contains(p))
     }
 
     /// The provisional curve's current bulge (signed sagitta / chord), but only
@@ -2244,8 +2109,8 @@ impl AppController {
     /// radius slider to this; `None` hides the slider (still drawing /
     /// dimensioning the attach lines).
     pub fn pending_arc_bulge(&self) -> Option<f32> {
-        let pa = self.pending_arc.as_ref()?;
-        if self.dimensioning.current_prompt.is_some() || !self.pending_arc_ready(pa) {
+        let pa = self.document.pending_arc.as_ref()?;
+        if self.document.dimensioning.current_prompt.is_some() || !self.pending_arc_ready(pa) {
             return None;
         }
         Some(pa.bulge_ratio)
@@ -2254,7 +2119,7 @@ impl AppController {
     /// Set the provisional curve's bulge from the radius slider (clamped). Just
     /// updates the amber preview; commit happens on accept. No-op with no arc.
     pub fn set_pending_arc_bulge(&mut self, ratio: f32) {
-        if let Some(pa) = self.pending_arc.as_mut() {
+        if let Some(pa) = self.document.pending_arc.as_mut() {
             pa.bulge_ratio = ratio.clamp(-1.5, 1.5);
         }
     }
@@ -2265,27 +2130,33 @@ impl AppController {
     /// and flatten the curve). Clears the pending arc. If faceting fails the arc
     /// is dropped (the straight placeholder remains) rather than left stuck.
     pub fn commit_pending_arc(&mut self) -> Result<(), String> {
-        let Some(pa) = self.pending_arc.clone() else {
+        let Some(pa) = self.document.pending_arc.clone() else {
             return Ok(());
         };
         let undo_snap = self.current_history_snapshot();
-        let facet_params = match self.floor_plan.finish_arc(pa.start, pa.end, pa.bulge_ratio) {
-            Ok(params) => params,
-            Err(e) => {
-                eprintln!(
-                    "finish_arc failed ({e}); dropping the provisional curve, keeping \
+        let facet_params =
+            match self
+                .document
+                .floor_plan
+                .finish_arc(pa.start, pa.end, pa.bulge_ratio)
+            {
+                Ok(params) => params,
+                Err(e) => {
+                    eprintln!(
+                        "finish_arc failed ({e}); dropping the provisional curve, keeping \
                      the straight placeholder. bulge={:.3}",
-                    pa.bulge_ratio
-                );
-                self.pending_arc = None;
-                self.push_history_snapshot(undo_snap);
-                return Ok(());
-            }
-        };
-        self.dimensioning
+                        pa.bulge_ratio
+                    );
+                    self.document.pending_arc = None;
+                    self.push_history_snapshot(undo_snap);
+                    return Ok(());
+                }
+            };
+        self.document
+            .dimensioning
             .known_params
             .extend(facet_params.iter().copied());
-        self.pending_arc = None;
+        self.document.pending_arc = None;
         println!(
             "Curve: committed at bulge {:.3} ({} facet params locked)",
             pa.bulge_ratio,
@@ -2300,8 +2171,9 @@ impl AppController {
     /// The UI draws this as an overlay; the model still holds the straight
     /// placeholder until the attach dimensions are entered.
     pub fn pending_arc_preview(&self) -> Option<Vec<(f64, f64)>> {
-        let pa = self.pending_arc.as_ref()?;
+        let pa = self.document.pending_arc.as_ref()?;
         let pts = self
+            .document
             .floor_plan
             .arc_preview(pa.start, pa.end, pa.bulge_ratio)?;
         Some(pts.iter().map(|p| (p.x as f64, p.y as f64)).collect())
@@ -2320,10 +2192,10 @@ impl AppController {
         // holds whether the plan is in pixels (pre-dimension) or metres (an
         // upper storey drawn in world coords). A fixed range tuned for pixels
         // would treat every wall in a metre-scale storey as near-collinear.
-        let diag = self.floor_plan.bounding_box_diagonal();
+        let diag = self.document.floor_plan.bounding_box_diagonal();
         let min_sep = (diag * self.tuning.collinearity.min_separation_ratio).max(1e-4);
         let max_sep = diag * self.tuning.collinearity.max_separation_ratio;
-        let newest_ring = self.floor_plan.ring_count().saturating_sub(1);
+        let newest_ring = self.document.floor_plan.ring_count().saturating_sub(1);
         // When this storey was drawn over a previous one, prefer to KEEP the
         // line that lies on the previous storey's outline as the merge target,
         // so a near-collinear pair collapses onto the storey-below base rather
@@ -2355,6 +2227,7 @@ impl AppController {
             best
         };
         let suggestions: Vec<_> = self
+            .document
             .floor_plan
             .suggest_collinear(min_sep, max_sep)
             .into_iter()
@@ -2398,6 +2271,29 @@ pub struct FloorPlanStats {
 mod trim_collapse_tests {
     use super::*;
 
+    /// R3 regression: `activate_shape` with the CURRENT shape as target is a
+    /// no-op — its early-return must NOT clear transient interaction state.
+    /// (Switching to a *different* shape does clear it; this pins the no-switch
+    /// path so the document extraction can't silently change that behaviour.)
+    #[test]
+    fn activate_shape_same_target_is_a_noop_for_transient_state() {
+        let mut c = AppController::new(crate::engine::open_db(":memory:").unwrap());
+        assert_eq!(c.document.active, ActiveShape::Outline); // default active shape
+                                                             // Seed transient state that a real shape-switch would clear.
+        c.pending_cut = Some([ShapeSlot::default(), ShapeSlot::default()]);
+        c.document.edit_state.dragging = true;
+        // Re-activating the SAME shape must leave it all intact.
+        c.activate_shape(ActiveShape::Outline);
+        assert!(
+            c.pending_cut.is_some(),
+            "activate_shape(current) must not clear pending_cut"
+        );
+        assert!(
+            c.document.edit_state.dragging,
+            "activate_shape(current) must not reset edit_state"
+        );
+    }
+
     /// The assessor's flow: draw a square, trim a corner, then zero the two
     /// remnant cut walls so the cuts snap onto corners — leaving a triangle.
     /// Exercises the real controller path: `compute_next_dimension_prompt`
@@ -2415,17 +2311,18 @@ mod trim_collapse_tests {
             Point2f32::new(0.0, 10.0),
             Point2f32::new(0.2, 0.2),
         ];
-        c.floor_plan = FloorPlan::from_points_to_orthogonal(&square, 0.5, true).unwrap();
+        c.document.floor_plan = FloorPlan::from_points_to_orthogonal(&square, 0.5, true).unwrap();
         // Treat it as fully dimensioned: scale set, both square params known.
-        c.dimensioning.scale_set = true;
-        c.dimensioning.known_params = c.floor_plan.all_active_params();
+        c.document.dimensioning.scale_set = true;
+        c.document.dimensioning.known_params = c.document.floor_plan.all_active_params();
 
         // Trim off the top-right corner: right edge at y=5 to top edge at x=5.
-        c.floor_plan
+        c.document
+            .floor_plan
             .trim_by_stroke(&[Point2f32::new(10.0, 5.0), Point2f32::new(5.0, 10.0)])
             .unwrap();
         assert_eq!(
-            c.floor_plan.polygons()[0].len(),
+            c.document.floor_plan.polygons()[0].len(),
             5,
             "corner cut should leave a pentagon"
         );
@@ -2435,20 +2332,20 @@ mod trim_collapse_tests {
         for step in 0..2 {
             c.compute_next_dimension_prompt();
             assert!(
-                c.dimensioning.current_prompt.is_some(),
+                c.document.dimensioning.current_prompt.is_some(),
                 "expected a promptable remnant wall at step {step}"
             );
             c.apply_dimension(0.0)
                 .unwrap_or_else(|e| panic!("zero-collapse failed at step {step}: {e}"));
         }
 
-        let ring = &c.floor_plan.polygons()[0];
+        let ring = &c.document.floor_plan.polygons()[0];
         assert_eq!(
             ring.len(),
             3,
             "zeroing both remnants should yield a triangle"
         );
-        assert!(c.floor_plan.validate_simple().is_ok());
+        assert!(c.document.floor_plan.validate_simple().is_ok());
         // The triangle is the square minus the cut corner: (0,0),(10,0),(0,10).
         for corner in [(0.0, 0.0), (10.0, 0.0), (0.0, 10.0)] {
             assert!(
@@ -2471,19 +2368,19 @@ mod trim_collapse_tests {
             Point2f32::new(0.0, 10.0),
             Point2f32::new(0.2, 0.2),
         ];
-        c.floor_plan = FloorPlan::from_points_to_orthogonal(&square, 0.5, true).unwrap();
+        c.document.floor_plan = FloorPlan::from_points_to_orthogonal(&square, 0.5, true).unwrap();
         // Scaled, but no walls dimensioned yet — so a plain orthogonal wall is
         // promptable. (No trim, so no diagonal cut edge anywhere.)
-        c.dimensioning.scale_set = true;
+        c.document.dimensioning.scale_set = true;
         c.compute_next_dimension_prompt();
-        assert!(c.dimensioning.current_prompt.is_some());
+        assert!(c.document.dimensioning.current_prompt.is_some());
 
         let err = c
             .apply_dimension(0.0)
             .expect_err("0 on a regular wall must be rejected");
         assert!(err.contains("trim cut"), "unexpected error: {err}");
         // Shape untouched.
-        assert_eq!(c.floor_plan.polygons()[0].len(), 4);
+        assert_eq!(c.document.floor_plan.polygons()[0].len(), 4);
     }
 
     /// After a corner trim there are 3 undimensioned segments (2 axis-aligned
@@ -2502,18 +2399,19 @@ mod trim_collapse_tests {
             Point2f32::new(0.0, 10.0),
             Point2f32::new(0.2, 0.2),
         ];
-        c.floor_plan = FloorPlan::from_points_to_orthogonal(&square, 0.5, true).unwrap();
-        c.dimensioning.scale_set = true;
-        c.dimensioning.known_params = c.floor_plan.all_active_params();
+        c.document.floor_plan = FloorPlan::from_points_to_orthogonal(&square, 0.5, true).unwrap();
+        c.document.dimensioning.scale_set = true;
+        c.document.dimensioning.known_params = c.document.floor_plan.all_active_params();
 
         // Trim the top-right corner: right edge at y=5 to top edge at x=5.
-        c.floor_plan
+        c.document
+            .floor_plan
             .trim_by_stroke(&[Point2f32::new(10.0, 5.0), Point2f32::new(5.0, 10.0)])
             .unwrap();
 
         // Set the first prompted (axis-aligned) remnant to a known length.
         c.compute_next_dimension_prompt();
-        assert!(c.dimensioning.current_prompt.is_some());
+        assert!(c.document.dimensioning.current_prompt.is_some());
         c.apply_dimension(4.0).expect("set first remnant");
 
         // Now cycle prompts to the diagonal (non-axis-aligned), skipping any
@@ -2521,11 +2419,15 @@ mod trim_collapse_tests {
         let mut dimensioned_diagonal = false;
         for _ in 0..5 {
             c.compute_next_dimension_prompt();
-            let Some(prompt) = c.dimensioning.current_prompt.clone() else {
+            let Some(prompt) = c.document.dimensioning.current_prompt.clone() else {
                 break;
             };
-            let (ring, edge) = c.floor_plan.find_vertex(prompt.wall_start_vertex).unwrap();
-            if c.floor_plan.wall_axis(ring, edge).is_none() {
+            let (ring, edge) = c
+                .document
+                .floor_plan
+                .find_vertex(prompt.wall_start_vertex)
+                .unwrap();
+            if c.document.floor_plan.wall_axis(ring, edge).is_none() {
                 c.apply_dimension(7.0).expect("dimension the diagonal");
                 dimensioned_diagonal = true;
                 break;
@@ -2538,7 +2440,7 @@ mod trim_collapse_tests {
         );
 
         // Verify the polygon's one diagonal edge is ~7.0 long.
-        let ring = &c.floor_plan.polygons()[0];
+        let ring = &c.document.floor_plan.polygons()[0];
         let n = ring.len();
         let mut diag_len = None;
         for i in 0..n {
@@ -2553,7 +2455,7 @@ mod trim_collapse_tests {
             (diag_len - 7.0).abs() < 1e-2,
             "diagonal should be 7.0, got {diag_len}"
         );
-        assert!(c.floor_plan.validate_simple().is_ok());
+        assert!(c.document.floor_plan.validate_simple().is_ok());
     }
 
     /// The TrimOrtho tool routes to the orthogonal-polygon trim: a stepped cut
@@ -2569,12 +2471,12 @@ mod trim_collapse_tests {
             Point2f32::new(0.0, 10.0),
             Point2f32::new(0.2, 0.2),
         ];
-        c.floor_plan = FloorPlan::from_points_to_orthogonal(&square, 0.5, true).unwrap();
-        c.dimensioning.scale_set = true;
-        c.dimensioning.known_params = c.floor_plan.all_active_params();
+        c.document.floor_plan = FloorPlan::from_points_to_orthogonal(&square, 0.5, true).unwrap();
+        c.document.dimensioning.scale_set = true;
+        c.document.dimensioning.known_params = c.document.floor_plan.all_active_params();
 
         let area = |c: &AppController| -> f32 {
-            let r = &c.floor_plan.polygons()[0];
+            let r = &c.document.floor_plan.polygons()[0];
             let n = r.len();
             (0..n)
                 .map(|i| {
@@ -2608,7 +2510,7 @@ mod trim_collapse_tests {
             "should remove ~12 (4x3); removed {}",
             before - after
         );
-        let ring = &c.floor_plan.polygons()[0];
+        let ring = &c.document.floor_plan.polygons()[0];
         assert!(ring.len() > 4, "notch adds vertices");
         // Orthogonal notch — no diagonal edge.
         let n = ring.len();
@@ -2617,11 +2519,11 @@ mod trim_collapse_tests {
             (a.x - b.x).abs() > 1e-3 && (a.y - b.y).abs() > 1e-3
         });
         assert!(!has_diag, "an orthogonal notch must have no diagonal edge");
-        assert!(c.floor_plan.validate_simple().is_ok());
+        assert!(c.document.floor_plan.validate_simple().is_ok());
     }
 
     fn diag_edges(c: &AppController) -> usize {
-        let ring = &c.floor_plan.polygons()[0];
+        let ring = &c.document.floor_plan.polygons()[0];
         let n = ring.len();
         (0..n)
             .filter(|&i| {
@@ -2644,9 +2546,9 @@ mod trim_collapse_tests {
             Point2f32::new(0.0, 10.0),
             Point2f32::new(0.2, 0.2),
         ];
-        c.floor_plan = FloorPlan::from_points_to_orthogonal(&square, 0.5, true).unwrap();
-        c.dimensioning.scale_set = true;
-        c.dimensioning.known_params = c.floor_plan.all_active_params();
+        c.document.floor_plan = FloorPlan::from_points_to_orthogonal(&square, 0.5, true).unwrap();
+        c.document.dimensioning.scale_set = true;
+        c.document.dimensioning.known_params = c.document.floor_plan.all_active_params();
         c.set_edit_mode(EditTools::ExtendOrtho);
         // Freehand porch flush at corner (10,10).
         let porch = vec![
@@ -2657,7 +2559,7 @@ mod trim_collapse_tests {
         ];
         c.apply_extend_stroke(&porch).unwrap();
 
-        let ring = &c.floor_plan.polygons()[0];
+        let ring = &c.document.floor_plan.polygons()[0];
         // The flush corner is gone — the right wall is one straight segment.
         assert!(
             !ring
@@ -2666,7 +2568,7 @@ mod trim_collapse_tests {
             "the flush corner should be cleaned from the envelope, ring={ring:?}"
         );
         assert_eq!(diag_edges(&c), 0, "envelope stays orthogonal");
-        assert!(c.floor_plan.validate_simple().is_ok());
+        assert!(c.document.floor_plan.validate_simple().is_ok());
         // No collinear vertex remains.
         let n = ring.len();
         let collinear = (0..n)
@@ -2682,7 +2584,7 @@ mod trim_collapse_tests {
     }
 
     fn ring_area(c: &AppController) -> f32 {
-        let ring = &c.floor_plan.polygons()[0];
+        let ring = &c.document.floor_plan.polygons()[0];
         let n = ring.len();
         let mut sum = 0.0_f32;
         for i in 0..n {
@@ -2707,10 +2609,11 @@ mod trim_collapse_tests {
                 Point2f32::new(0.0, 10.0),
                 Point2f32::new(0.2, 0.2),
             ];
-            c.floor_plan = FloorPlan::from_points_to_orthogonal(&square, 0.5, true).unwrap();
+            c.document.floor_plan =
+                FloorPlan::from_points_to_orthogonal(&square, 0.5, true).unwrap();
             // The drag prompt only appears once the plan is dimensioned.
-            c.dimensioning.scale_set = true;
-            c.dimensioning.known_params = c.floor_plan.all_active_params();
+            c.document.dimensioning.scale_set = true;
+            c.document.dimensioning.known_params = c.document.floor_plan.all_active_params();
             c.set_edit_mode(EditTools::Edit);
             c
         };
@@ -2766,10 +2669,10 @@ mod trim_collapse_tests {
             Point2f32::new(0.0, 10.0),
             Point2f32::new(0.2, 0.2),
         ];
-        c.floor_plan = FloorPlan::from_points_to_orthogonal(&square, 0.5, true).unwrap();
-        c.dimensioning.scale_set = true; // storey is dimensioned (metres)
-        c.dimensioning.known_params = c.floor_plan.all_active_params();
-        let outline_verts = c.floor_plan.polygons()[0].len();
+        c.document.floor_plan = FloorPlan::from_points_to_orthogonal(&square, 0.5, true).unwrap();
+        c.document.dimensioning.scale_set = true; // storey is dimensioned (metres)
+        c.document.dimensioning.known_params = c.document.floor_plan.all_active_params();
+        let outline_verts = c.document.floor_plan.polygons()[0].len();
 
         // Enter living-area mode and draw a sub-area inside the storey.
         c.set_living_area_mode(true);
@@ -2789,7 +2692,7 @@ mod trim_collapse_tests {
             "a living area inside a dimensioned storey inherits its scale"
         );
         assert!(
-            c.floor_plan.polygons()[0].len() >= 4,
+            c.document.floor_plan.polygons()[0].len() >= 4,
             "a sub-area was drawn"
         );
         assert_eq!(c.living_area_polygons().len(), 1, "renderable");
@@ -2798,7 +2701,7 @@ mod trim_collapse_tests {
         c.set_living_area_mode(false);
         assert_eq!(c.active_living_area_index(), None);
         assert_eq!(
-            c.floor_plan.polygons()[0].len(),
+            c.document.floor_plan.polygons()[0].len(),
             outline_verts,
             "the storey outline is untouched by drawing a living area"
         );
@@ -2822,9 +2725,9 @@ mod trim_collapse_tests {
             Point2f32::new(0.0, 10.0),
             Point2f32::new(0.2, 0.2),
         ];
-        c.floor_plan = FloorPlan::from_points_to_orthogonal(&square, 0.5, true).unwrap();
-        c.dimensioning.scale_set = true;
-        c.dimensioning.known_params = c.floor_plan.all_active_params();
+        c.document.floor_plan = FloorPlan::from_points_to_orthogonal(&square, 0.5, true).unwrap();
+        c.document.dimensioning.scale_set = true;
+        c.document.dimensioning.known_params = c.document.floor_plan.all_active_params();
         c.commit_to_ber().unwrap();
 
         c.set_living_area_mode(true);
@@ -2838,7 +2741,7 @@ mod trim_collapse_tests {
         assert_eq!(c.living_area_count(), 1);
         // Finalise the living area (mark every wall dimensioned) so it's written
         // to the DB — only finalised geometry is persisted.
-        c.dimensioning.known_params = c.floor_plan.all_active_params();
+        c.document.dimensioning.known_params = c.document.floor_plan.all_active_params();
         c.commit_to_ber().unwrap();
 
         // Reopen from the DB (same connection): the living area is restored.
@@ -2871,7 +2774,7 @@ mod trim_collapse_tests {
             chrono::NaiveDate::from_ymd_opt(2026, 1, 1).unwrap(),
         );
         // Draw an outline but leave it un-dimensioned (scale never set).
-        c.floor_plan = FloorPlan::from_points_to_orthogonal(
+        c.document.floor_plan = FloorPlan::from_points_to_orthogonal(
             &[
                 Point2f32::new(0., 0.),
                 Point2f32::new(10., 0.),
@@ -2888,7 +2791,7 @@ mod trim_collapse_tests {
         // Reopen from the DB: nothing was persisted (the outline wasn't final).
         c.open_ber(&ber.id).unwrap();
         assert!(
-            c.outline.floor_plan.get_points().is_empty(),
+            c.document.outline.floor_plan.get_points().is_empty(),
             "an un-dimensioned outline isn't written to the DB"
         );
     }
@@ -2902,7 +2805,7 @@ mod trim_collapse_tests {
             "T".into(),
             chrono::NaiveDate::from_ymd_opt(2026, 1, 1).unwrap(),
         );
-        c.floor_plan = FloorPlan::from_points_to_orthogonal(
+        c.document.floor_plan = FloorPlan::from_points_to_orthogonal(
             &[
                 Point2f32::new(0., 0.),
                 Point2f32::new(10., 0.),
@@ -2914,8 +2817,8 @@ mod trim_collapse_tests {
             true,
         )
         .unwrap();
-        c.dimensioning.scale_set = true;
-        c.dimensioning.known_params = c.floor_plan.all_active_params();
+        c.document.dimensioning.scale_set = true;
+        c.document.dimensioning.known_params = c.document.floor_plan.all_active_params();
         c.commit_to_ber().unwrap();
 
         c.set_living_area_mode(true);
@@ -2935,7 +2838,7 @@ mod trim_collapse_tests {
             "un-dimensioned living area isn't persisted"
         );
         assert!(
-            !c.outline.floor_plan.get_points().is_empty(),
+            !c.document.outline.floor_plan.get_points().is_empty(),
             "but the dimensioned outline is"
         );
     }
@@ -2960,9 +2863,9 @@ mod trim_collapse_tests {
             Point2f32::new(0.0, 2.0),
             Point2f32::new(0.05, 0.05),
         ];
-        c.floor_plan = FloorPlan::from_points_to_orthogonal(&square, 0.1, true).unwrap();
-        c.dimensioning.scale_set = true;
-        c.dimensioning.known_params = c.floor_plan.all_active_params();
+        c.document.floor_plan = FloorPlan::from_points_to_orthogonal(&square, 0.1, true).unwrap();
+        c.document.dimensioning.scale_set = true;
+        c.document.dimensioning.known_params = c.document.floor_plan.all_active_params();
 
         c.set_living_area_mode(true);
         // ~0.9m square, interior (doesn't reach the walls).
@@ -3001,9 +2904,9 @@ mod trim_collapse_tests {
             Point2f32::new(0.0, 2.0),
             Point2f32::new(0.05, 0.05),
         ];
-        c.floor_plan = FloorPlan::from_points_to_orthogonal(&square, 0.1, true).unwrap();
-        c.dimensioning.scale_set = true;
-        c.dimensioning.known_params = c.floor_plan.all_active_params();
+        c.document.floor_plan = FloorPlan::from_points_to_orthogonal(&square, 0.1, true).unwrap();
+        c.document.dimensioning.scale_set = true;
+        c.document.dimensioning.known_params = c.document.floor_plan.all_active_params();
         c.sync_active(); // flush into the outline slot so phase carves against it
 
         // Define a construction phase.
@@ -3052,10 +2955,10 @@ mod trim_collapse_tests {
         );
         // And the outline is the active buffer again, intact (the 2x2 square).
         assert_eq!(
-            c.floor_plan.get_points().len(),
+            c.document.floor_plan.get_points().len(),
             4,
             "outline restored as the live buffer: {:?}",
-            c.floor_plan.get_points()
+            c.document.floor_plan.get_points()
         );
     }
 
@@ -3079,9 +2982,9 @@ mod trim_collapse_tests {
             Point2f32::new(0.0, 2.0),
             Point2f32::new(0.05, 0.05),
         ];
-        c.floor_plan = FloorPlan::from_points_to_orthogonal(&square, 0.1, true).unwrap();
-        c.dimensioning.scale_set = true;
-        c.dimensioning.known_params = c.floor_plan.all_active_params();
+        c.document.floor_plan = FloorPlan::from_points_to_orthogonal(&square, 0.1, true).unwrap();
+        c.document.dimensioning.scale_set = true;
+        c.document.dimensioning.known_params = c.document.floor_plan.all_active_params();
 
         c.set_living_area_mode(true);
         // ~0.9m square with a nook off the right side, offset into the storey.
@@ -3133,9 +3036,9 @@ mod trim_collapse_tests {
             Point2f32::new(0.0, 10.0),
             Point2f32::new(0.2, 0.2),
         ];
-        c.floor_plan = FloorPlan::from_points_to_orthogonal(&square, 0.5, true).unwrap();
-        c.dimensioning.scale_set = true;
-        c.dimensioning.known_params = c.floor_plan.all_active_params();
+        c.document.floor_plan = FloorPlan::from_points_to_orthogonal(&square, 0.5, true).unwrap();
+        c.document.dimensioning.scale_set = true;
+        c.document.dimensioning.known_params = c.document.floor_plan.all_active_params();
 
         c.set_living_area_mode(true);
         assert_eq!(
@@ -3185,9 +3088,9 @@ mod trim_collapse_tests {
             Point2f32::new(0.0, 10.0),
             Point2f32::new(0.2, 0.2),
         ];
-        c.floor_plan = FloorPlan::from_points_to_orthogonal(&square, 0.5, true).unwrap();
-        c.dimensioning.scale_set = true;
-        c.dimensioning.known_params = c.floor_plan.all_active_params();
+        c.document.floor_plan = FloorPlan::from_points_to_orthogonal(&square, 0.5, true).unwrap();
+        c.document.dimensioning.scale_set = true;
+        c.document.dimensioning.known_params = c.document.floor_plan.all_active_params();
         c.commit_to_ber().unwrap();
 
         c.set_living_area_mode(true);
@@ -3199,7 +3102,7 @@ mod trim_collapse_tests {
         let before = c.living_area_polygons()[0].clone();
         assert_eq!(before.len(), 4, "full closed shape before save: {before:?}");
         // Finalise it so it's persisted (only finalised geometry is written).
-        c.dimensioning.known_params = c.floor_plan.all_active_params();
+        c.document.dimensioning.known_params = c.document.floor_plan.all_active_params();
         c.commit_to_ber().unwrap();
 
         // Save + reopen from the DB.
@@ -3233,7 +3136,7 @@ mod trim_collapse_tests {
             chrono::NaiveDate::from_ymd_opt(2026, 1, 1).unwrap(),
         );
         // 10m x 6m storey, in metres + dimensioned.
-        c.floor_plan = FloorPlan::from_points_to_orthogonal(
+        c.document.floor_plan = FloorPlan::from_points_to_orthogonal(
             &[
                 Point2f32::new(0.0, 0.0),
                 Point2f32::new(10.0, 0.0),
@@ -3245,8 +3148,8 @@ mod trim_collapse_tests {
             true,
         )
         .unwrap();
-        c.dimensioning.scale_set = true;
-        c.dimensioning.known_params = c.floor_plan.all_active_params();
+        c.document.dimensioning.scale_set = true;
+        c.document.dimensioning.known_params = c.document.floor_plan.all_active_params();
         c.commit_to_ber().unwrap();
 
         c.set_living_area_mode(true);
@@ -3299,7 +3202,7 @@ mod trim_collapse_tests {
             "T".into(),
             chrono::NaiveDate::from_ymd_opt(2026, 1, 1).unwrap(),
         );
-        c.floor_plan = FloorPlan::from_points_to_orthogonal(
+        c.document.floor_plan = FloorPlan::from_points_to_orthogonal(
             &[
                 Point2f32::new(0.0, 0.0),
                 Point2f32::new(10.0, 0.0),
@@ -3311,8 +3214,8 @@ mod trim_collapse_tests {
             true,
         )
         .unwrap();
-        c.dimensioning.scale_set = true;
-        c.dimensioning.known_params = c.floor_plan.all_active_params();
+        c.document.dimensioning.scale_set = true;
+        c.document.dimensioning.known_params = c.document.floor_plan.all_active_params();
         c.commit_to_ber().unwrap();
 
         c.set_living_area_mode(true);
@@ -3320,8 +3223,8 @@ mod trim_collapse_tests {
         c.choose_cut_region(1.0, 3.0); // left region: shares left/top/bottom house walls
         assert_eq!(c.living_area_count(), 1);
 
-        let total = c.floor_plan.all_active_params().len();
-        let known = c.dimensioning.known_params.len();
+        let total = c.document.floor_plan.all_active_params().len();
+        let known = c.document.dimensioning.known_params.len();
         assert!(
             known >= 1,
             "a shared wall's parameter is pre-known (total={total}, known={known})"
@@ -3343,7 +3246,7 @@ mod trim_collapse_tests {
             "T".into(),
             chrono::NaiveDate::from_ymd_opt(2026, 1, 1).unwrap(),
         );
-        c.floor_plan = FloorPlan::from_points_to_orthogonal(
+        c.document.floor_plan = FloorPlan::from_points_to_orthogonal(
             &[
                 p(0., 0.),
                 p(10., 0.),
@@ -3355,8 +3258,8 @@ mod trim_collapse_tests {
             true,
         )
         .unwrap();
-        c.dimensioning.scale_set = true;
-        c.dimensioning.known_params = c.floor_plan.all_active_params();
+        c.document.dimensioning.scale_set = true;
+        c.document.dimensioning.known_params = c.document.floor_plan.all_active_params();
         c.commit_to_ber().unwrap();
         c
     }
@@ -3431,7 +3334,7 @@ mod trim_collapse_tests {
     #[test]
     fn marking_a_wall_sets_exposure_and_derives_a_ber_wall() {
         let mut c = dimensioned_square_controller();
-        let walls = c.outline.floor_plan.perimeter_walls();
+        let walls = c.document.outline.floor_plan.perimeter_walls();
         assert!(walls.len() >= 4, "square has 4 perimeter walls");
         let (vid0, a0, b0) = walls[0];
         let mid = ((a0.x + b0.x) * 0.5, (a0.y + b0.y) * 0.5);
@@ -3440,7 +3343,11 @@ mod trim_collapse_tests {
         c.exposure_pointer_down(mid.0 as f64, mid.1 as f64, 0.5);
         assert_eq!(c.selected_exposure_wall, Some(vid0), "tap selects the wall");
         c.set_wall_exposure(WallExposure::SemiExposed);
-        let secs = c.wall_sections.get(&vid0).expect("wall0 has a section");
+        let secs = c
+            .document
+            .wall_sections
+            .get(&vid0)
+            .expect("wall0 has a section");
         assert_eq!(secs.len(), 1);
         assert_eq!(secs[0].exposure, WallExposure::SemiExposed);
 
@@ -3465,7 +3372,7 @@ mod trim_collapse_tests {
     #[test]
     fn mid_wall_section_splits_into_multiple_regions() {
         let mut c = dimensioned_square_controller();
-        let (vid0, a0, b0) = c.outline.floor_plan.perimeter_walls()[0];
+        let (vid0, a0, b0) = c.document.outline.floor_plan.perimeter_walls()[0];
         let mid = ((a0.x + b0.x) * 0.5, (a0.y + b0.y) * 0.5);
         let len = ((b0.x - a0.x).powi(2) + (b0.y - a0.y).powi(2)).sqrt();
 
@@ -3477,7 +3384,11 @@ mod trim_collapse_tests {
         c.set_wall_exposure(WallExposure::SemiExposed);
         // The wall is materialized into 3 explicit sections: Exposed, Semi,
         // Exposed (the leftovers become their own sections).
-        let secs = c.wall_sections.get(&vid0).expect("wall0 has sections");
+        let secs = c
+            .document
+            .wall_sections
+            .get(&vid0)
+            .expect("wall0 has sections");
         assert_eq!(secs.len(), 3);
         assert_eq!(secs[0].exposure, WallExposure::Exposed);
         assert_eq!(secs[1].exposure, WallExposure::SemiExposed);
@@ -3507,7 +3418,7 @@ mod trim_collapse_tests {
     fn wall_construction_is_preserved_when_splitting() {
         use datatypes::ber::structural::WallConstructionType;
         let mut c = dimensioned_square_controller();
-        let (_, a0, b0) = c.outline.floor_plan.perimeter_walls()[0];
+        let (_, a0, b0) = c.document.outline.floor_plan.perimeter_walls()[0];
         let mid = ((a0.x + b0.x) * 0.5, (a0.y + b0.y) * 0.5);
         let len = ((b0.x - a0.x).powi(2) + (b0.y - a0.y).powi(2)).sqrt();
 
@@ -3681,7 +3592,7 @@ mod trim_collapse_tests {
         );
         // Outline merged back to the full 10x10 footprint (~100 m²), cleaned to
         // 4 corners (no phantom vertex at the dissolved seam) — not a single zone.
-        let pts = c.outline.floor_plan.get_points();
+        let pts = c.document.outline.floor_plan.get_points();
         assert_eq!(pts.len(), 4, "merged outline is a clean rectangle");
         let n = pts.len();
         let mut a2 = 0.0f32;
@@ -3710,7 +3621,7 @@ mod trim_collapse_tests {
             "T".into(),
             chrono::NaiveDate::from_ymd_opt(2026, 1, 1).unwrap(),
         );
-        c.floor_plan = FloorPlan::from_points_to_orthogonal(
+        c.document.floor_plan = FloorPlan::from_points_to_orthogonal(
             &[
                 p(0., 0.),
                 p(10., 0.),
@@ -3724,10 +3635,10 @@ mod trim_collapse_tests {
             true,
         )
         .unwrap();
-        c.dimensioning.scale_set = true;
-        c.dimensioning.known_params = c.floor_plan.all_active_params();
+        c.document.dimensioning.scale_set = true;
+        c.document.dimensioning.known_params = c.document.floor_plan.all_active_params();
         c.commit_to_ber().unwrap();
-        let before = c.outline.floor_plan.get_points();
+        let before = c.document.outline.floor_plan.get_points();
         // Untagged → exactly one floor region (no split).
         assert_eq!(
             c.current_record.as_ref().unwrap().data.storeys[0]
@@ -3740,7 +3651,7 @@ mod trim_collapse_tests {
 
         let id = c.current_record.as_ref().unwrap().id;
         c.open_ber(&id).unwrap();
-        let after = c.outline.floor_plan.get_points();
+        let after = c.document.outline.floor_plan.get_points();
 
         assert_eq!(
             before.len(),
@@ -3837,7 +3748,7 @@ mod trim_collapse_tests {
     #[test]
     fn tapping_a_split_wall_selects_the_piece_under_the_tap() {
         let mut c = dimensioned_square_controller();
-        let (_, a0, b0) = c.outline.floor_plan.perimeter_walls()[0];
+        let (_, a0, b0) = c.document.outline.floor_plan.perimeter_walls()[0];
         let len = ((b0.x - a0.x).powi(2) + (b0.y - a0.y).powi(2)).sqrt();
         let along = |d: f32| {
             let t = d / len;
@@ -3878,7 +3789,7 @@ mod trim_collapse_tests {
     #[test]
     fn drag_updates_the_section_selection() {
         let mut c = dimensioned_square_controller();
-        let (_, a0, b0) = c.outline.floor_plan.perimeter_walls()[0];
+        let (_, a0, b0) = c.document.outline.floor_plan.perimeter_walls()[0];
         let mid = ((a0.x + b0.x) * 0.5, (a0.y + b0.y) * 0.5);
         let len = ((b0.x - a0.x).powi(2) + (b0.y - a0.y).powi(2)).sqrt();
 
@@ -3907,19 +3818,23 @@ mod trim_collapse_tests {
     #[test]
     fn exposure_reconstructs_from_wall_regions_on_reload() {
         let mut c = dimensioned_square_controller();
-        let (_, a0, b0) = c.outline.floor_plan.perimeter_walls()[0];
+        let (_, a0, b0) = c.document.outline.floor_plan.perimeter_walls()[0];
         let mid = ((a0.x + b0.x) * 0.5, (a0.y + b0.y) * 0.5);
         c.set_exposure_mode(true);
         c.exposure_pointer_down(mid.0 as f64, mid.1 as f64, 0.5);
         c.set_wall_exposure(WallExposure::NonHeatLoss); // mark only one wall
 
         let storey = c.current_record.as_ref().unwrap().data.storeys[0].clone();
-        c.wall_sections.clear();
+        c.document.wall_sections.clear();
         c.load_storey_into_editor(Some(&storey));
         // Vertex ids are reassigned on reload (rebuilt from points), so check by
         // count: exactly one wall reconstructed, the rest unset.
-        assert_eq!(c.wall_sections.len(), 1, "one wall marked; rest unset");
-        let secs = c.wall_sections.values().next().unwrap();
+        assert_eq!(
+            c.document.wall_sections.len(),
+            1,
+            "one wall marked; rest unset"
+        );
+        let secs = c.document.wall_sections.values().next().unwrap();
         assert_eq!(secs.len(), 1);
         assert_eq!(secs[0].exposure, WallExposure::NonHeatLoss);
     }
@@ -3928,7 +3843,7 @@ mod trim_collapse_tests {
     #[test]
     fn split_wall_sections_reconstruct_on_reload() {
         let mut c = dimensioned_square_controller();
-        let (_, a0, b0) = c.outline.floor_plan.perimeter_walls()[0];
+        let (_, a0, b0) = c.document.outline.floor_plan.perimeter_walls()[0];
         let mid = ((a0.x + b0.x) * 0.5, (a0.y + b0.y) * 0.5);
         let len = ((b0.x - a0.x).powi(2) + (b0.y - a0.y).powi(2)).sqrt();
         c.set_exposure_mode(true);
@@ -3937,10 +3852,14 @@ mod trim_collapse_tests {
         c.set_wall_exposure(WallExposure::SemiExposed); // → 3 sections
 
         let storey = c.current_record.as_ref().unwrap().data.storeys[0].clone();
-        c.wall_sections.clear();
+        c.document.wall_sections.clear();
         c.load_storey_into_editor(Some(&storey));
-        assert_eq!(c.wall_sections.len(), 1, "one split wall reconstructed");
-        let secs = c.wall_sections.values().next().unwrap();
+        assert_eq!(
+            c.document.wall_sections.len(),
+            1,
+            "one split wall reconstructed"
+        );
+        let secs = c.document.wall_sections.values().next().unwrap();
         assert_eq!(secs.len(), 3);
         assert_eq!(secs[0].exposure, WallExposure::Exposed);
         assert_eq!(secs[1].exposure, WallExposure::SemiExposed);
@@ -3962,7 +3881,7 @@ mod trim_collapse_tests {
     #[test]
     fn set_all_remaining_fills_only_unset_walls() {
         let mut c = dimensioned_square_controller();
-        let walls = c.outline.floor_plan.perimeter_walls();
+        let walls = c.document.outline.floor_plan.perimeter_walls();
         let (vid0, a0, b0) = walls[0];
         let mid = ((a0.x + b0.x) * 0.5, (a0.y + b0.y) * 0.5);
         c.set_exposure_mode(true);
@@ -3970,16 +3889,20 @@ mod trim_collapse_tests {
         c.set_wall_exposure(WallExposure::SemiExposed);
 
         c.set_all_remaining_exposed();
-        assert_eq!(c.wall_sections.len(), walls.len(), "every wall now set");
         assert_eq!(
-            c.wall_sections.get(&vid0).map(|s| s[0].exposure),
+            c.document.wall_sections.len(),
+            walls.len(),
+            "every wall now set"
+        );
+        assert_eq!(
+            c.document.wall_sections.get(&vid0).map(|s| s[0].exposure),
             Some(WallExposure::SemiExposed),
             "the marked wall keeps its type"
         );
         for (vid, _, _) in &walls {
             if *vid != vid0 {
                 assert_eq!(
-                    c.wall_sections.get(vid).map(|s| s[0].exposure),
+                    c.document.wall_sections.get(vid).map(|s| s[0].exposure),
                     Some(WallExposure::Exposed)
                 );
             }
@@ -3990,15 +3913,18 @@ mod trim_collapse_tests {
     #[test]
     fn undo_reverts_an_exposure_marking() {
         let mut c = dimensioned_square_controller();
-        let (_, a0, b0) = c.outline.floor_plan.perimeter_walls()[0];
+        let (_, a0, b0) = c.document.outline.floor_plan.perimeter_walls()[0];
         let mid = ((a0.x + b0.x) * 0.5, (a0.y + b0.y) * 0.5);
         c.set_exposure_mode(true);
         c.exposure_pointer_down(mid.0 as f64, mid.1 as f64, 0.5);
-        assert!(c.wall_sections.is_empty());
+        assert!(c.document.wall_sections.is_empty());
         c.set_wall_exposure(WallExposure::NonHeatLoss);
-        assert_eq!(c.wall_sections.len(), 1);
+        assert_eq!(c.document.wall_sections.len(), 1);
         c.undo().unwrap();
-        assert!(c.wall_sections.is_empty(), "undo clears the marking");
+        assert!(
+            c.document.wall_sections.is_empty(),
+            "undo clears the marking"
+        );
     }
 
     /// Guardrail: a dimension that would push a living area OUTSIDE the storey
@@ -4011,7 +3937,7 @@ mod trim_collapse_tests {
             chrono::NaiveDate::from_ymd_opt(2026, 1, 1).unwrap(),
         );
         // 10m x 10m storey, dimensioned.
-        c.floor_plan = FloorPlan::from_points_to_orthogonal(
+        c.document.floor_plan = FloorPlan::from_points_to_orthogonal(
             &[
                 Point2f32::new(0.0, 0.0),
                 Point2f32::new(10.0, 0.0),
@@ -4023,8 +3949,8 @@ mod trim_collapse_tests {
             true,
         )
         .unwrap();
-        c.dimensioning.scale_set = true;
-        c.dimensioning.known_params = c.floor_plan.all_active_params();
+        c.document.dimensioning.scale_set = true;
+        c.document.dimensioning.known_params = c.document.floor_plan.all_active_params();
         c.commit_to_ber().unwrap();
 
         c.set_living_area_mode(true);
@@ -4038,7 +3964,7 @@ mod trim_collapse_tests {
         ]);
         assert_eq!(c.living_area_count(), 1);
         assert!(c.dimensioning_active());
-        let before = c.floor_plan.polygons()[0].clone();
+        let before = c.document.floor_plan.polygons()[0].clone();
         // 9m wall on a room that starts at x=6 / y=3 would reach past the 10m
         // storey — must be rejected, and the shape left unchanged.
         let r = c.apply_dimension(9.0);
@@ -4047,7 +3973,7 @@ mod trim_collapse_tests {
             "a dimension pushing the room outside the storey is rejected: {r:?}"
         );
         assert_eq!(
-            c.floor_plan.polygons()[0],
+            c.document.floor_plan.polygons()[0],
             before,
             "the rejected dimension is rolled back"
         );
@@ -4070,9 +3996,9 @@ mod trim_collapse_tests {
             Point2f32::new(0.0, 10.0),
             Point2f32::new(0.2, 0.2),
         ];
-        c.floor_plan = FloorPlan::from_points_to_orthogonal(&square, 0.5, true).unwrap();
-        c.dimensioning.scale_set = true;
-        c.dimensioning.known_params = c.floor_plan.all_active_params();
+        c.document.floor_plan = FloorPlan::from_points_to_orthogonal(&square, 0.5, true).unwrap();
+        c.document.dimensioning.scale_set = true;
+        c.document.dimensioning.known_params = c.document.floor_plan.all_active_params();
         c.commit_to_ber().unwrap();
 
         c.set_living_area_mode(true);
@@ -4080,9 +4006,9 @@ mod trim_collapse_tests {
         c.choose_cut_region(2.0, 2.0); // edge-to-edge stroke → pick the corner region
         assert_eq!(c.living_area_count(), 1);
         assert!(
-            c.floor_plan.non_orthogonal_edges().is_empty(),
+            c.document.floor_plan.non_orthogonal_edges().is_empty(),
             "carved living area orthogonal right after carve: {:?}",
-            c.floor_plan.non_orthogonal_edges()
+            c.document.floor_plan.non_orthogonal_edges()
         );
 
         let mut guard = 0;
@@ -4090,9 +4016,9 @@ mod trim_collapse_tests {
             guard += 1;
             let _ = c.apply_dimension(2.5);
             assert!(
-                c.floor_plan.non_orthogonal_edges().is_empty(),
+                c.document.floor_plan.non_orthogonal_edges().is_empty(),
                 "still orthogonal after dimension #{guard}: {:?}",
-                c.floor_plan.non_orthogonal_edges()
+                c.document.floor_plan.non_orthogonal_edges()
             );
         }
     }
@@ -4111,9 +4037,9 @@ mod trim_collapse_tests {
             Point2f32::new(0.0, 10.0),
             Point2f32::new(0.2, 0.2),
         ];
-        c.floor_plan = FloorPlan::from_points_to_orthogonal(&square, 0.5, true).unwrap();
-        c.dimensioning.scale_set = true;
-        c.dimensioning.known_params = c.floor_plan.all_active_params();
+        c.document.floor_plan = FloorPlan::from_points_to_orthogonal(&square, 0.5, true).unwrap();
+        c.document.dimensioning.scale_set = true;
+        c.document.dimensioning.known_params = c.document.floor_plan.all_active_params();
         let area0 = ring_area(&c);
 
         c.set_edit_mode(EditTools::ExtendCurve);
@@ -4131,7 +4057,10 @@ mod trim_collapse_tests {
 
         // Provisional: arc held, shape UNCHANGED (no facets, area the same), but
         // a preview is available and a dimension prompt is waiting.
-        assert!(c.pending_arc.is_some(), "arc should be held provisional");
+        assert!(
+            c.document.pending_arc.is_some(),
+            "arc should be held provisional"
+        );
         assert_eq!(diag_edges(&c), 0, "no facets while provisional");
         assert!(
             (ring_area(&c) - area0).abs() < 0.5,
@@ -4150,9 +4079,13 @@ mod trim_collapse_tests {
             let Some(prompt) = c.current_dimension_prompt() else {
                 break;
             };
-            let (ring, edge) = c.floor_plan.find_vertex(prompt.wall_start_vertex).unwrap();
+            let (ring, edge) = c
+                .document
+                .floor_plan
+                .find_vertex(prompt.wall_start_vertex)
+                .unwrap();
             assert!(
-                c.floor_plan.wall_axis(ring, edge).is_some(),
+                c.document.floor_plan.wall_axis(ring, edge).is_some(),
                 "a curve facet must never be offered for dimensioning"
             );
             c.apply_dimension(2.0).expect("dimension an attach stub");
@@ -4166,7 +4099,7 @@ mod trim_collapse_tests {
         // Attach lines set, but the curve is NOT committed yet — it waits for
         // the radius to be accepted. The radius slider is now available, and
         // it's still a straight provisional placeholder (no facets).
-        assert!(c.pending_arc.is_some(), "arc not auto-committed");
+        assert!(c.document.pending_arc.is_some(), "arc not auto-committed");
         assert_eq!(diag_edges(&c), 0, "still a straight placeholder pre-commit");
         let bulge0 = c
             .pending_arc_bulge()
@@ -4179,10 +4112,10 @@ mod trim_collapse_tests {
 
         // Now baked: facets present, area grew, valid simple polygon.
         assert!(
-            c.pending_arc.is_none(),
+            c.document.pending_arc.is_none(),
             "arc committed after accepting radius"
         );
-        assert!(c.floor_plan.validate_simple().is_ok());
+        assert!(c.document.floor_plan.validate_simple().is_ok());
         assert!(diag_edges(&c) >= 2, "arc faceted after commit");
         assert!(
             ring_area(&c) > area0 + 1.0,
@@ -4193,11 +4126,11 @@ mod trim_collapse_tests {
         // dimension elsewhere would treat them as free and `repair` /
         // `aesthetic_rescale` could redistribute the facet vertices — flattening
         // the curve back into a straight line (the reported extend-curve bug).
-        let active = c.floor_plan.all_active_params();
+        let active = c.document.floor_plan.all_active_params();
         assert!(
             active
                 .iter()
-                .all(|p| c.dimensioning.known_params.contains(p)),
+                .all(|p| c.document.dimensioning.known_params.contains(p)),
             "every facet param of a baked arc must be locked into known_params"
         );
 
@@ -4205,7 +4138,9 @@ mod trim_collapse_tests {
         // un-set params) must leave the curved shape untouched.
         let area_before_rescale = ring_area(&c);
         let diag_before = diag_edges(&c);
-        c.floor_plan.aesthetic_rescale(&c.dimensioning.known_params);
+        c.document
+            .floor_plan
+            .aesthetic_rescale(&c.document.dimensioning.known_params);
         assert_eq!(diag_edges(&c), diag_before, "rescale must not drop facets");
         assert!(
             (ring_area(&c) - area_before_rescale).abs() < 1e-3,
@@ -4219,7 +4154,7 @@ mod trim_collapse_tests {
     /// Used by the multi-storey tests to set each storey up identically.
     fn finalise_current_storey_as_square(c: &mut AppController, side: f32) {
         let p = |x: f32, y: f32| Point2f32::new(x, y);
-        c.floor_plan = FloorPlan::from_points_to_orthogonal(
+        c.document.floor_plan = FloorPlan::from_points_to_orthogonal(
             &[
                 p(0., 0.),
                 p(side, 0.),
@@ -4231,8 +4166,8 @@ mod trim_collapse_tests {
             true,
         )
         .unwrap();
-        c.dimensioning.scale_set = true;
-        c.dimensioning.known_params = c.floor_plan.all_active_params();
+        c.document.dimensioning.scale_set = true;
+        c.document.dimensioning.known_params = c.document.floor_plan.all_active_params();
         c.commit_to_ber().unwrap();
     }
 
@@ -4252,13 +4187,17 @@ mod trim_collapse_tests {
         );
         // The new storey is empty (no outline, no living areas, no walls); the
         // editor scale resets so the first dimension calibrates afresh.
-        assert_eq!(c.floor_plan.ring_count(), 0, "editor on a blank storey");
+        assert_eq!(
+            c.document.floor_plan.ring_count(),
+            0,
+            "editor on a blank storey"
+        );
         assert!(
-            !c.dimensioning.scale_set,
+            !c.document.dimensioning.scale_set,
             "scale resets so the new storey calibrates fresh"
         );
         assert_eq!(c.living_area_count(), 0);
-        assert!(c.wall_sections.is_empty());
+        assert!(c.document.wall_sections.is_empty());
     }
 
     /// Switching storeys round-trips each storey's geometry through the editor:
@@ -4295,8 +4234,8 @@ mod trim_collapse_tests {
             "storey 1's footprint preserved"
         );
         // The editor now mirrors storey 0 again.
-        assert_eq!(c.floor_plan.ring_count(), 1);
-        assert!(c.dimensioning.scale_set);
+        assert_eq!(c.document.floor_plan.ring_count(), 1);
+        assert!(c.document.dimensioning.scale_set);
     }
 
     /// All-storeys tab: `set_current_storey(None)` leaves the editor in a
@@ -4311,7 +4250,11 @@ mod trim_collapse_tests {
 
         c.set_current_storey(None).unwrap();
         assert_eq!(c.current_storey_idx(), None);
-        assert_eq!(c.floor_plan.ring_count(), 0, "no live shape on All tab");
+        assert_eq!(
+            c.document.floor_plan.ring_count(),
+            0,
+            "no live shape on All tab"
+        );
         assert_eq!(
             c.current_record.as_ref().unwrap().data.storeys.len(),
             snapshot.len(),
@@ -4319,7 +4262,7 @@ mod trim_collapse_tests {
         );
         // Returning to a specific storey rehydrates the editor from its geometry.
         c.set_current_storey(Some(1)).unwrap();
-        assert_eq!(c.floor_plan.ring_count(), 1);
+        assert_eq!(c.document.floor_plan.ring_count(), 1);
     }
 
     /// Method-2 snap: on the FIRST stroke of a new upper storey, freehand points
@@ -4381,13 +4324,13 @@ mod trim_collapse_tests {
         c.apply_outline_world_inner(&world, true)
             .expect("apply world outline");
 
-        assert_eq!(c.floor_plan.ring_count(), 1, "outline built");
+        assert_eq!(c.document.floor_plan.ring_count(), 1, "outline built");
         assert!(
-            c.dimensioning.scale_set,
+            c.document.dimensioning.scale_set,
             "geometry is already metres → scale inherited"
         );
         assert!(
-            !c.dimensioning.known_params.is_empty(),
+            !c.document.dimensioning.known_params.is_empty(),
             "shared walls pinned"
         );
         // Footprint ≈ the 10x10 below.
@@ -4398,7 +4341,7 @@ mod trim_collapse_tests {
         );
         // Every wall coincides with the storey below → nothing left to ask.
         assert!(
-            c.dimensioning.current_prompt.is_none(),
+            c.document.dimensioning.current_prompt.is_none(),
             "all walls shared → no dimension prompt"
         );
     }
@@ -4413,7 +4356,7 @@ mod trim_collapse_tests {
             "T".into(),
             chrono::NaiveDate::from_ymd_opt(2026, 1, 1).unwrap(),
         );
-        c.floor_plan = FloorPlan::from_clean_ring(&[
+        c.document.floor_plan = FloorPlan::from_clean_ring(&[
             p(0., 0.),
             p(3., 0.),
             p(3.5, 1.5), // right side bulges OUT to x=3.5
@@ -4424,8 +4367,8 @@ mod trim_collapse_tests {
             p(-0.2, 0.8),
         ])
         .unwrap();
-        c.dimensioning.scale_set = true;
-        c.dimensioning.known_params = c.floor_plan.all_active_params();
+        c.document.dimensioning.scale_set = true;
+        c.document.dimensioning.known_params = c.document.floor_plan.all_active_params();
         c.commit_to_ber().unwrap();
         c
     }
@@ -4493,10 +4436,10 @@ mod trim_collapse_tests {
         // accepted as drawn (the parametric origin must land on a shared corner,
         // not the new wall, or its position freezes as a constant).
         assert!(
-            cs.dimensioning.current_prompt.is_some(),
+            cs.document.dimensioning.current_prompt.is_some(),
             "the new set-back wall's position is offered for dimensioning"
         );
-        let pts = cs.floor_plan.get_points();
+        let pts = cs.document.floor_plan.get_points();
         // The bulge apex is gone — the right wall was straightened.
         assert!(
             !pts.iter().any(|q| (q.x - 3.5).abs() < 0.2),
@@ -4504,7 +4447,7 @@ mod trim_collapse_tests {
         );
         // The LEFT curve the trace DID follow is preserved (diagonal facets kept).
         assert!(
-            !cs.floor_plan.non_orthogonal_edges().is_empty(),
+            !cs.document.floor_plan.non_orthogonal_edges().is_empty(),
             "the followed left curve is spliced verbatim, not squared off"
         );
         assert!(
@@ -4539,10 +4482,10 @@ mod trim_collapse_tests {
         c.apply_outline_world_inner(&world, true)
             .expect("apply world outline");
 
-        assert_eq!(c.floor_plan.ring_count(), 1);
-        assert!(c.dimensioning.scale_set);
+        assert_eq!(c.document.floor_plan.ring_count(), 1);
+        assert!(c.document.dimensioning.scale_set);
         assert!(
-            !c.dimensioning.known_params.is_empty(),
+            !c.document.dimensioning.known_params.is_empty(),
             "shared walls pinned"
         );
         // Footprint is bigger than the 100 m² below (gained the garage bump).
@@ -4551,15 +4494,15 @@ mod trim_collapse_tests {
         // The genuinely-new (garage) walls are NOT pinned: some active param is
         // still unknown, so the assessor will be asked to dimension it (after
         // any collinearity review that the new corners trigger).
-        let active = c.floor_plan.all_active_params();
+        let active = c.document.floor_plan.all_active_params();
         assert!(
             active
                 .iter()
-                .any(|p| !c.dimensioning.known_params.contains(p)),
+                .any(|p| !c.document.dimensioning.known_params.contains(p)),
             "a new (garage) wall's parameter is left unpinned to dimension \
              (active={}, known={})",
             active.len(),
-            c.dimensioning.known_params.len()
+            c.document.dimensioning.known_params.len()
         );
     }
 
@@ -4591,7 +4534,7 @@ mod trim_collapse_tests {
         let mut c = dimensioned_square_controller();
         // A 10x10 whose bottom wall has a spurious 0.3 m step (two horizontals
         // at y=0 and y=0.3 joined by a tiny vertical) — six vertices.
-        c.floor_plan = FloorPlan::from_clean_ring(&[
+        c.document.floor_plan = FloorPlan::from_clean_ring(&[
             p(0., 0.),
             p(5., 0.),
             p(5., 0.3),
@@ -4603,10 +4546,14 @@ mod trim_collapse_tests {
         // Already metric (like an upper storey drawn in world coords): scale set,
         // every current param known. This is the path where `simplify_degenerate`
         // is NOT run, so only the collinear/coincident cleanup can remove the step.
-        c.dimensioning = DimensionState::default();
-        c.dimensioning.scale_set = true;
-        c.dimensioning.known_params = c.floor_plan.all_active_params();
-        assert_eq!(c.floor_plan.polygons()[0].len(), 6, "starts with the step");
+        c.document.dimensioning = DimensionState::default();
+        c.document.dimensioning.scale_set = true;
+        c.document.dimensioning.known_params = c.document.floor_plan.all_active_params();
+        assert_eq!(
+            c.document.floor_plan.polygons()[0].len(),
+            6,
+            "starts with the step"
+        );
 
         c.populate_collinearity_review();
         assert!(c.review.is_some(), "the near-collinear step is flagged");
@@ -4618,7 +4565,7 @@ mod trim_collapse_tests {
 
         // The step's redundant vertices are gone → back to a clean 4-corner box.
         assert_eq!(
-            c.floor_plan.polygons()[0].len(),
+            c.document.floor_plan.polygons()[0].len(),
             4,
             "spurious step vertices removed after collinearity accept"
         );
@@ -4677,7 +4624,7 @@ mod trim_collapse_tests {
         // Nib gone, clean 4-corner box, and crucially the base sat DOWN onto
         // y=0 (area ~100) instead of UP onto the nib line (which would give ~88).
         assert_eq!(
-            c.floor_plan.polygons()[0].len(),
+            c.document.floor_plan.polygons()[0].len(),
             4,
             "nib removed, clean box"
         );
@@ -4732,11 +4679,11 @@ mod trim_collapse_tests {
             p(2.5, 3.0),
             p(0., 3.0),
         ];
-        c.floor_plan = FloorPlan::from_clean_ring(&curved).unwrap();
-        c.dimensioning.scale_set = true;
-        c.dimensioning.known_params = c.floor_plan.all_active_params();
+        c.document.floor_plan = FloorPlan::from_clean_ring(&curved).unwrap();
+        c.document.dimensioning.scale_set = true;
+        c.document.dimensioning.known_params = c.document.floor_plan.all_active_params();
         c.commit_to_ber().unwrap();
-        let prev_nonortho = c.floor_plan.non_orthogonal_edges().len();
+        let prev_nonortho = c.document.floor_plan.non_orthogonal_edges().len();
         assert!(
             prev_nonortho >= 2,
             "storey 0 has a curved (non-orthogonal) run"
@@ -4751,13 +4698,13 @@ mod trim_collapse_tests {
         // The curve is carried up VERBATIM (not squared off): same number of
         // non-orthogonal facet edges, every param pinned, nothing to dimension.
         assert_eq!(
-            c.floor_plan.non_orthogonal_edges().len(),
+            c.document.floor_plan.non_orthogonal_edges().len(),
             prev_nonortho,
             "curve facets preserved in the new storey (not squared off)"
         );
-        assert!(c.dimensioning.scale_set);
+        assert!(c.document.dimensioning.scale_set);
         assert!(
-            c.dimensioning.current_prompt.is_none(),
+            c.document.dimensioning.current_prompt.is_none(),
             "whole outline shared → nothing to dimension"
         );
         let area = ring_area(&c);
@@ -4801,14 +4748,14 @@ mod trim_collapse_tests {
             p(2.5, 3.0),
             p(0., 3.0),
         ];
-        c.floor_plan = FloorPlan::from_clean_ring(&curved).unwrap();
-        c.dimensioning.scale_set = true;
-        c.dimensioning.known_params = c.floor_plan.all_active_params();
+        c.document.floor_plan = FloorPlan::from_clean_ring(&curved).unwrap();
+        c.document.dimensioning.scale_set = true;
+        c.document.dimensioning.known_params = c.document.floor_plan.all_active_params();
         c.commit_to_ber().unwrap();
-        let curve_edges = c.floor_plan.non_orthogonal_edges().len();
+        let curve_edges = c.document.floor_plan.non_orthogonal_edges().len();
         assert!(curve_edges >= 2, "first storey has the curved run");
         assert!(
-            c.dimensioning.current_prompt.is_none(),
+            c.document.dimensioning.current_prompt.is_none(),
             "first storey fully dimensioned"
         );
 
@@ -4827,12 +4774,12 @@ mod trim_collapse_tests {
 
         // Curve followed verbatim; whole outline shared → nothing to dimension.
         assert_eq!(
-            c.floor_plan.non_orthogonal_edges().len(),
+            c.document.floor_plan.non_orthogonal_edges().len(),
             curve_edges,
             "the curve is followed despite slop (not squared off)"
         );
         assert!(
-            c.dimensioning.current_prompt.is_none(),
+            c.document.dimensioning.current_prompt.is_none(),
             "whole outline shared → no dimension prompt"
         );
     }
@@ -4843,27 +4790,27 @@ mod trim_collapse_tests {
     #[test]
     fn resync_dimensioning_drops_stale_params_and_vertices() {
         let mut c = dimensioned_square_controller();
-        let active = c.floor_plan.all_active_params();
+        let active = c.document.floor_plan.all_active_params();
         assert!(!active.is_empty(), "the square has active params");
 
         // Seed real state + bogus entries (ParameterId/VertexId are usize/u64).
-        c.dimensioning.known_params = active.clone();
-        c.dimensioning.known_params.insert(99_999); // not an active param
-        c.dimensioning.dimensioned_walls = vec![123_456]; // not a live vertex
-        c.dimensioning.skipped_walls = std::iter::once(123_456).collect();
+        c.document.dimensioning.known_params = active.clone();
+        c.document.dimensioning.known_params.insert(99_999); // not an active param
+        c.document.dimensioning.dimensioned_walls = vec![123_456]; // not a live vertex
+        c.document.dimensioning.skipped_walls = std::iter::once(123_456).collect();
 
         c.resync_dimensioning_to_plan();
 
         assert_eq!(
-            c.dimensioning.known_params, active,
+            c.document.dimensioning.known_params, active,
             "stale param pruned, real ones kept"
         );
         assert!(
-            c.dimensioning.dimensioned_walls.is_empty(),
+            c.document.dimensioning.dimensioned_walls.is_empty(),
             "stale dimensioned wall pruned"
         );
         assert!(
-            c.dimensioning.skipped_walls.is_empty(),
+            c.document.dimensioning.skipped_walls.is_empty(),
             "stale skipped wall pruned"
         );
     }

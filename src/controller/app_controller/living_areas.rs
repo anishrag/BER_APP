@@ -16,30 +16,12 @@ impl AppController {
     /// of whatever shape is currently active, so the slots are current before
     /// they're read (persist / switch / snapshot).
     pub(super) fn sync_active(&mut self) {
-        let slot = ShapeSlot {
-            floor_plan: self.floor_plan.clone(),
-            dimensioning: self.dimensioning.clone(),
-        };
-        match self.active {
-            ActiveShape::Outline => self.outline = slot,
-            ActiveShape::LivingArea(i) => {
-                if let Some(s) = self.living_areas.get_mut(i) {
-                    *s = slot;
-                }
-            }
-            ActiveShape::PhaseArea => self.phase_shape = Some(slot),
-        }
+        self.document.sync_active();
     }
 
     /// Load the active shape's slot into the live buffer.
     pub(super) fn load_active_into_buffer(&mut self) {
-        let slot = match self.active {
-            ActiveShape::Outline => self.outline.clone(),
-            ActiveShape::LivingArea(i) => self.living_areas.get(i).cloned().unwrap_or_default(),
-            ActiveShape::PhaseArea => self.phase_shape.clone().unwrap_or_default(),
-        };
-        self.floor_plan = slot.floor_plan;
-        self.dimensioning = slot.dimensioning;
+        self.document.load_active_into_buffer();
     }
 
     /// Switch which shape the editor acts on: save the current live buffer to
@@ -47,17 +29,17 @@ impl AppController {
     /// dimension prompt is in `dimensioning`; provisional arc + edit/drag
     /// prompts are abandoned on a switch).
     pub(super) fn activate_shape(&mut self, target: ActiveShape) {
-        if self.active == target {
+        if self.document.active == target {
             return;
         }
         self.sync_active();
-        self.active = target;
+        self.document.active = target;
         self.load_active_into_buffer();
-        self.pending_arc = None;
+        self.document.pending_arc = None;
         self.pending_cut = None;
         self.edit_drag_prompt = None;
         self.vertex_drop_prompt = None;
-        self.edit_state = EditState::default();
+        self.document.edit_state = EditState::default();
         self.compute_next_dimension_prompt();
     }
 
@@ -77,8 +59,10 @@ impl AppController {
             // Drop straight into draw mode so a stroke makes a new living area
             // without the user also having to pick the tool.
             self.set_edit_mode(EditTools::DrawPerpWalls);
-            if !self.living_areas.is_empty() {
-                self.activate_shape(ActiveShape::LivingArea(self.living_areas.len() - 1));
+            if !self.document.living_areas.is_empty() {
+                self.activate_shape(ActiveShape::LivingArea(
+                    self.document.living_areas.len() - 1,
+                ));
             }
             // else: nothing to edit yet — the next DrawPerpWalls creates the
             // first living area (the outline stays active until then).
@@ -89,12 +73,12 @@ impl AppController {
 
     /// Number of living areas drawn so far.
     pub fn living_area_count(&self) -> usize {
-        self.living_areas.len()
+        self.document.living_areas.len()
     }
 
     /// Index of the living area the tools currently act on, if any.
     pub fn active_living_area_index(&self) -> Option<usize> {
-        match self.active {
+        match self.document.active {
             ActiveShape::LivingArea(i) => Some(i),
             ActiveShape::Outline | ActiveShape::PhaseArea => None,
         }
@@ -127,12 +111,13 @@ impl AppController {
     /// read from the live buffer + its dimensioning; the others from their
     /// slots. Index-aligned with [`living_area_polygons`](Self::living_area_polygons).
     pub fn living_area_wall_labels(&self) -> Vec<Vec<((f64, f64), (f64, f64), f32)>> {
-        self.living_areas
+        self.document
+            .living_areas
             .iter()
             .enumerate()
             .map(|(i, slot)| {
-                let (plan, dim) = if self.active == ActiveShape::LivingArea(i) {
-                    (&self.floor_plan, &self.dimensioning)
+                let (plan, dim) = if self.document.active == ActiveShape::LivingArea(i) {
+                    (&self.document.floor_plan, &self.document.dimensioning)
                 } else {
                     (&slot.floor_plan, &slot.dimensioning)
                 };
@@ -183,7 +168,7 @@ impl AppController {
                 e
             ));
         }
-        let boundary = self.outline.floor_plan.clone();
+        let boundary = self.document.outline.floor_plan.clone();
         let slot = self.pinned_subarea_slot(&boundary, plan);
         self.commit_new_living_area(slot, undo_snap);
         Ok(())
@@ -196,31 +181,27 @@ impl AppController {
     /// the available region (outline minus existing phases) for a phase area, so a
     /// wall shared with a neighbour phase is pre-known too.
     pub(super) fn pinned_subarea_slot(&self, boundary: &FloorPlan, plan: FloorPlan) -> ShapeSlot {
-        let pinned = boundary.params_pinned_to_outline(&plan);
-        if !pinned.is_empty() {
-            println!("  pinned-to-outline params (pre-known): {:?}", pinned);
+        let slot = self.document.pinned_slot_for(boundary, plan);
+        if !slot.dimensioning.known_params.is_empty() {
+            println!(
+                "  pinned-to-outline params (pre-known): {:?}",
+                slot.dimensioning.known_params
+            );
         }
-        ShapeSlot {
-            dimensioning: DimensionState {
-                scale_set: self.outline.dimensioning.scale_set,
-                known_params: pinned,
-                ..Default::default()
-            },
-            floor_plan: plan,
-        }
+        slot
     }
 
     /// Append `slot` as a new living area, make it active, persist, and start
     /// dimensioning it. Shared by a freehand draw and a cut-region pick.
     fn commit_new_living_area(&mut self, slot: ShapeSlot, undo_snap: HistorySnapshot) {
-        self.living_areas.push(slot);
-        let idx = self.living_areas.len() - 1;
-        self.active = ActiveShape::LivingArea(idx);
+        self.document.living_areas.push(slot);
+        let idx = self.document.living_areas.len() - 1;
+        self.document.active = ActiveShape::LivingArea(idx);
         self.living_area_mode = true;
         self.pending_cut = None;
         self.load_active_into_buffer();
-        self.pending_arc = None;
-        self.edit_state = EditState::default();
+        self.document.pending_arc = None;
+        self.document.edit_state = EditState::default();
         let _ = self.commit_to_ber();
         self.warn_if_non_orthogonal("draw living area");
         // Dimension the new area's walls (no scale calibration — inherited).
@@ -249,15 +230,14 @@ impl AppController {
         // One call into `manip_2d_plan` does clip → tol → cut-or-carve; we only
         // dispatch the outcome to the right workflow.
         match self
-            .outline
-            .floor_plan
-            .carve_or_cut(&pts, &self.tuning.subarea)
+            .document
+            .carve_or_cut_against_outline(&pts, &self.tuning.subarea)
         {
             // A straight cut → offer both halves to pick from. Each region's walls
             // along the storey are pinned (pre-known); only the cut wall is set.
             Ok(SubareaOutcome::Cut(a, b)) => {
                 println!("── cut splits the storey into two regions — tap one to keep ──");
-                let boundary = self.outline.floor_plan.clone();
+                let boundary = self.document.outline.floor_plan.clone();
                 self.pending_cut = Some([
                     self.pinned_subarea_slot(&boundary, a),
                     self.pinned_subarea_slot(&boundary, b),
@@ -329,17 +309,19 @@ impl AppController {
     /// Delete the living area at `index` (living areas are non-editable — to
     /// change one, delete and redraw). Undoable; persists.
     pub fn delete_living_area(&mut self, index: usize) {
-        if index >= self.living_areas.len() {
+        if index >= self.document.living_areas.len() {
             return;
         }
         let undo_snap = self.current_history_snapshot();
         // Detach from any active living area before mutating the list, so the
         // live buffer + `active` index stay valid.
         self.activate_shape(ActiveShape::Outline);
-        self.living_areas.remove(index);
+        self.document.living_areas.remove(index);
         // Keep working on the most-recent remaining area if still in LA mode.
-        if self.living_area_mode && !self.living_areas.is_empty() {
-            self.activate_shape(ActiveShape::LivingArea(self.living_areas.len() - 1));
+        if self.living_area_mode && !self.document.living_areas.is_empty() {
+            self.activate_shape(ActiveShape::LivingArea(
+                self.document.living_areas.len() - 1,
+            ));
         }
         let _ = self.commit_to_ber();
         self.push_history_snapshot(undo_snap);

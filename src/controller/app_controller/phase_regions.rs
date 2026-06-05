@@ -46,15 +46,15 @@ impl AppController {
     /// dropping its half-dimensioned buffer (we DON'T sync it back). Used to
     /// cancel a pick or leave phase mode.
     fn abandon_phase_shape(&mut self) {
-        self.phase_shape = None;
+        self.document.phase_shape = None;
         self.pending_phase_cut = None;
-        if self.active == ActiveShape::PhaseArea {
-            self.active = ActiveShape::Outline;
+        if self.document.active == ActiveShape::PhaseArea {
+            self.document.active = ActiveShape::Outline;
             self.load_active_into_buffer();
-            self.pending_arc = None;
+            self.document.pending_arc = None;
             self.edit_drag_prompt = None;
             self.vertex_drop_prompt = None;
-            self.edit_state = EditState::default();
+            self.document.edit_state = EditState::default();
             self.compute_next_dimension_prompt();
         }
     }
@@ -65,12 +65,12 @@ impl AppController {
     /// walls are pre-known (in the slot's `known_params`), so only the walls the
     /// user actually drew are prompted.
     fn begin_phase_area_dimensioning(&mut self, slot: ShapeSlot, undo_snap: HistorySnapshot) {
-        self.phase_shape = Some(slot);
-        self.active = ActiveShape::PhaseArea;
+        self.document.phase_shape = Some(slot);
+        self.document.active = ActiveShape::PhaseArea;
         self.pending_phase_cut = None;
         self.load_active_into_buffer();
-        self.pending_arc = None;
-        self.edit_state = EditState::default();
+        self.document.pending_arc = None;
+        self.document.edit_state = EditState::default();
         self.maybe_start_dimensioning();
         self.push_history_snapshot(undo_snap);
     }
@@ -103,11 +103,7 @@ impl AppController {
             .get(&idx)
             .map(|rs| rs.iter().map(|r| r.polygon.clone()).collect())
             .unwrap_or_default();
-        let boundary = self
-            .outline
-            .floor_plan
-            .subtract(&phase_rings)
-            .unwrap_or_else(|| self.outline.floor_plan.clone());
+        let boundary = self.document.available_region(&phase_rings);
         println!("── construction-phase sketch ───────────────────────");
         println!("  available region: {:?}", boundary.get_points());
 
@@ -152,17 +148,18 @@ impl AppController {
     /// phase pick (the UI shows the phase picker). While dimensioning is still in
     /// progress the dimension prompt shows instead.
     pub fn phase_pick_pending(&self) -> bool {
-        self.active == ActiveShape::PhaseArea
-            && self.dimensioning.current_prompt.is_none()
-            && self.floor_plan.get_points().len() >= 3
+        self.document.active == ActiveShape::PhaseArea
+            && self.document.dimensioning.current_prompt.is_none()
+            && self.document.floor_plan.get_points().len() >= 3
     }
 
     /// The in-flight phase area's ring (world coords) for the UI to highlight —
     /// the LIVE dimensioned buffer, so it tracks dimensioning. Empty when no
     /// phase area is active.
     pub fn pending_phase_polygon(&self) -> Vec<(f64, f64)> {
-        if self.active == ActiveShape::PhaseArea {
-            self.floor_plan
+        if self.document.active == ActiveShape::PhaseArea {
+            self.document
+                .floor_plan
                 .get_points()
                 .iter()
                 .map(|p| (p.x as f64, p.y as f64))
@@ -217,12 +214,12 @@ impl AppController {
     /// surface's phase (the new polygon stamps anything inside it). Then return to
     /// the outline.
     pub fn assign_phase_to_pending(&mut self, phase: ConstructionPhase) {
-        if self.active != ActiveShape::PhaseArea {
+        if self.document.active != ActiveShape::PhaseArea {
             return;
         }
         // The live buffer IS the dimensioned phase area; its resolved ring is what
         // we store (metre-precise, so surface containment is accurate).
-        let polygon = self.floor_plan.get_points();
+        let polygon = self.document.floor_plan.get_points();
         if polygon.len() < 3 {
             return;
         }

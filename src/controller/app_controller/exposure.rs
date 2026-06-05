@@ -17,16 +17,6 @@
 //! (`WallRegion.polygon` is an arbitrary `Polygon3D`) already allows it.
 use super::*;
 
-/// One exposure piece along a wall: the range `[start_m, end_m]` (metres from
-/// the wall's start vertex) and its heat-loss class. Independent and
-/// single-exposure; per wall they're kept sorted and non-overlapping.
-#[derive(Debug, Clone, Copy, PartialEq, serde::Serialize, serde::Deserialize)]
-pub struct ExposureSection {
-    pub start_m: f32,
-    pub end_m: f32,
-    pub exposure: WallExposure,
-}
-
 /// Which end of the current selection a drag is moving.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SectionHandle {
@@ -155,7 +145,7 @@ impl AppController {
         if on {
             // Flush the live buffer to its slot first: `activate_shape(Outline)`
             // early-returns without syncing when the outline is already active,
-            // which would leave `self.outline.floor_plan` stale (the renderer
+            // which would leave `self.document.outline.floor_plan` stale (the renderer
             // reads it). Then leave living-area mode and act on the outline.
             self.sync_active();
             self.set_living_area_mode(false);
@@ -165,7 +155,8 @@ impl AppController {
     /// Endpoints + length of the selected wall, if any.
     fn selected_wall_geom(&self) -> Option<(Point2f32, Point2f32, f32)> {
         let vid = self.selected_exposure_wall?;
-        self.outline
+        self.document
+            .outline
             .floor_plan
             .perimeter_walls()
             .into_iter()
@@ -202,15 +193,19 @@ impl AppController {
         //    marked section or an un-marked gap) containing the tapped distance.
         //    So once a wall is split, tapping a leftover piece selects only that
         //    piece, not the whole wall.
-        match self.floor_plan.hit_test_wall(world_x, world_y, tol) {
+        match self
+            .document
+            .floor_plan
+            .hit_test_wall(world_x, world_y, tol)
+        {
             Some((0, edge_start)) => {
-                self.selected_exposure_wall = self.floor_plan.vertex_id_at(0, edge_start);
+                self.selected_exposure_wall = self.document.floor_plan.vertex_id_at(0, edge_start);
                 self.exposure_drag = None;
                 self.exposure_sel = if let Some((a, b, len)) = self.selected_wall_geom() {
                     let d = project_distance(a, b, len, world_x as f32, world_y as f32);
                     let range = match self
                         .selected_exposure_wall
-                        .and_then(|v| self.wall_sections.get(&v))
+                        .and_then(|v| self.document.wall_sections.get(&v))
                     {
                         Some(secs) => range_at(len, secs, d),
                         None => (0.0, len),
@@ -278,7 +273,7 @@ impl AppController {
             return;
         };
         let undo_snap = self.current_history_snapshot();
-        let sections = self.wall_sections.entry(vid).or_default();
+        let sections = self.document.wall_sections.entry(vid).or_default();
         paint_section(sections, s, e, exposure);
         // Fill the gaps so the wall is fully partitioned into explicit sections.
         *sections = wall_coverage(len, sections)
@@ -299,11 +294,11 @@ impl AppController {
         let Some(vid) = self.selected_exposure_wall else {
             return;
         };
-        if !self.wall_sections.contains_key(&vid) {
+        if !self.document.wall_sections.contains_key(&vid) {
             return;
         }
         let undo_snap = self.current_history_snapshot();
-        self.wall_sections.remove(&vid);
+        self.document.wall_sections.remove(&vid);
         let _ = self.commit_to_ber();
         self.push_history_snapshot(undo_snap);
     }
@@ -314,11 +309,17 @@ impl AppController {
     pub fn set_all_remaining_exposed(&mut self) {
         self.sync_active();
         let unset: Vec<(VertexId, f32)> = self
+            .document
             .outline
             .floor_plan
             .perimeter_walls()
             .into_iter()
-            .filter(|(vid, _, _)| self.wall_sections.get(vid).map_or(true, |s| s.is_empty()))
+            .filter(|(vid, _, _)| {
+                self.document
+                    .wall_sections
+                    .get(vid)
+                    .map_or(true, |s| s.is_empty())
+            })
             .map(|(vid, a, b)| (vid, wall_len(a, b)))
             .collect();
         if unset.is_empty() {
@@ -326,7 +327,7 @@ impl AppController {
         }
         let undo_snap = self.current_history_snapshot();
         for (vid, len) in unset {
-            self.wall_sections.insert(
+            self.document.wall_sections.insert(
                 vid,
                 vec![ExposureSection {
                     start_m: 0.0,
@@ -357,7 +358,8 @@ impl AppController {
             .and_then(|r| r.data.storeys.get(idx))
             .map(|s| self.sections_from_wall_regions(&s.walls))
             .unwrap_or_default();
-        self.outline
+        self.document
+            .outline
             .floor_plan
             .perimeter_walls()
             .into_iter()
@@ -394,7 +396,7 @@ impl AppController {
         &self,
         walls: &WallRegions,
     ) -> HashMap<VertexId, Vec<ExposureSection>> {
-        let perim = self.outline.floor_plan.perimeter_walls();
+        let perim = self.document.outline.floor_plan.perimeter_walls();
         let mut out: HashMap<VertexId, Vec<ExposureSection>> = HashMap::new();
         for region in &walls.regions {
             let ext = &region.polygon.exterior;

@@ -8,16 +8,16 @@ impl AppController {
     /// VertexId of the wall currently selected in Edit mode, if any. The UI
     /// uses this to render the selection highlight.
     pub fn edit_selected_wall(&self) -> Option<VertexId> {
-        self.edit_state.selected_wall
+        self.document.edit_state.selected_wall
     }
 
     /// World-coord endpoints of the currently selected Edit-mode wall, or
     /// `None` if nothing is selected. Returned in the same order the
     /// polygon traverses (wall_a then wall_b).
     pub fn edit_selected_wall_positions(&self) -> Option<((f64, f64), (f64, f64))> {
-        let vid = self.edit_state.selected_wall?;
-        let (ring, edge_start) = self.floor_plan.find_vertex(vid)?;
-        let polygons = self.floor_plan.polygons();
+        let vid = self.document.edit_state.selected_wall?;
+        let (ring, edge_start) = self.document.floor_plan.find_vertex(vid)?;
+        let polygons = self.document.floor_plan.polygons();
         let ring_pts = polygons.get(ring)?;
         let n = ring_pts.len();
         if n < 2 {
@@ -32,9 +32,9 @@ impl AppController {
     /// (from double-click insert), or `None`. Used by the UI to render
     /// a highlight marker on the inserted vertex.
     pub fn edit_selected_vertex_position(&self) -> Option<(f64, f64)> {
-        let vid = self.edit_state.selected_vertex?;
-        let (ring, idx) = self.floor_plan.find_vertex(vid)?;
-        let polygons = self.floor_plan.polygons();
+        let vid = self.document.edit_state.selected_vertex?;
+        let (ring, idx) = self.document.floor_plan.find_vertex(vid)?;
+        let polygons = self.document.floor_plan.polygons();
         let p = polygons.get(ring)?.get(idx)?;
         Some((p.x as f64, p.y as f64))
     }
@@ -47,29 +47,41 @@ impl AppController {
         if !matches!(self.sketch_engine.edit_tool, EditTools::Edit) {
             return false;
         }
-        let Some((ring, edge_start)) = self.floor_plan.hit_test_wall(world_x, world_y, tol) else {
-            self.edit_state.selected_wall = None;
-            self.edit_state.dragging = false;
+        let Some((ring, edge_start)) = self
+            .document
+            .floor_plan
+            .hit_test_wall(world_x, world_y, tol)
+        else {
+            self.document.edit_state.selected_wall = None;
+            self.document.edit_state.dragging = false;
             return false;
         };
-        let Some(vid) = self.floor_plan.vertex_id_at(ring, edge_start) else {
+        let Some(vid) = self.document.floor_plan.vertex_id_at(ring, edge_start) else {
             return false;
         };
         // Snapshot what kind of coord this wall is anchored to and its
         // current value, so a Cancel on the post-drag prompt can revert.
-        if let Some((p, _axis)) = self.floor_plan.wall_movable_param(ring, edge_start) {
-            self.edit_state.pre_drag_value = self.floor_plan.parameter_value(p);
-            self.edit_state.pre_drag_kind = Some(MovedCoordKind::Parameter(p));
-        } else if let Some((c, _axis)) = self.floor_plan.wall_anchor_constant(ring, edge_start) {
-            self.edit_state.pre_drag_value = Some(c);
-            self.edit_state.pre_drag_kind = Some(MovedCoordKind::Constant(c));
+        if let Some((p, _axis)) = self
+            .document
+            .floor_plan
+            .wall_movable_param(ring, edge_start)
+        {
+            self.document.edit_state.pre_drag_value = self.document.floor_plan.parameter_value(p);
+            self.document.edit_state.pre_drag_kind = Some(MovedCoordKind::Parameter(p));
+        } else if let Some((c, _axis)) = self
+            .document
+            .floor_plan
+            .wall_anchor_constant(ring, edge_start)
+        {
+            self.document.edit_state.pre_drag_value = Some(c);
+            self.document.edit_state.pre_drag_kind = Some(MovedCoordKind::Constant(c));
         } else {
-            self.edit_state.pre_drag_value = None;
-            self.edit_state.pre_drag_kind = None;
+            self.document.edit_state.pre_drag_value = None;
+            self.document.edit_state.pre_drag_kind = None;
         }
-        self.edit_state.selected_wall = Some(vid);
-        self.edit_state.dragging = true;
-        self.edit_state.drag_snapshot_taken = false;
+        self.document.edit_state.selected_wall = Some(vid);
+        self.document.edit_state.dragging = true;
+        self.document.edit_state.drag_snapshot_taken = false;
         true
     }
 
@@ -81,13 +93,17 @@ impl AppController {
         if !matches!(self.sketch_engine.edit_tool, EditTools::Edit) {
             return false;
         }
-        let Some((ring, edge_start)) = self.floor_plan.hit_test_wall(world_x, world_y, tol) else {
+        let Some((ring, edge_start)) = self
+            .document
+            .floor_plan
+            .hit_test_wall(world_x, world_y, tol)
+        else {
             return false;
         };
         // Snapshot before inserting the vertex — the whole insert + drag
         // + prompt-apply sequence undoes as one action.
         self.record_history();
-        let new_vid = match self.floor_plan.insert_vertex_on_wall(
+        let new_vid = match self.document.floor_plan.insert_vertex_on_wall(
             ring,
             edge_start,
             world_x as f32,
@@ -96,16 +112,16 @@ impl AppController {
             Some(v) => v,
             None => return false,
         };
-        self.edit_state.selected_wall = None;
-        self.edit_state.selected_vertex = Some(new_vid);
-        self.edit_state.dragging = true;
+        self.document.edit_state.selected_wall = None;
+        self.document.edit_state.selected_vertex = Some(new_vid);
+        self.document.edit_state.dragging = true;
         // Drag snapshot already taken (covers the whole interaction
         // starting with the insert); flag it so edit_mouse_drag doesn't
         // take a second one.
-        self.edit_state.drag_snapshot_taken = true;
-        self.edit_state.pre_drag_vertex_pos = Some((world_x as f32, world_y as f32));
-        self.edit_state.pre_drag_value = None;
-        self.edit_state.pre_drag_kind = None;
+        self.document.edit_state.drag_snapshot_taken = true;
+        self.document.edit_state.pre_drag_vertex_pos = Some((world_x as f32, world_y as f32));
+        self.document.edit_state.pre_drag_value = None;
+        self.document.edit_state.pre_drag_kind = None;
         // Push the new topology to BER so the renderer sees the split
         // wall + new vertex immediately. Without this the polygon stays
         // at its pre-insert shape during the drag and only one edge
@@ -128,46 +144,54 @@ impl AppController {
     /// * Otherwise translates the selected wall via `set_parameter` or
     ///   `shift_constant` (same as before).
     pub fn edit_mouse_drag(&mut self, world_x: f64, world_y: f64) {
-        if !self.edit_state.dragging {
+        if !self.document.edit_state.dragging {
             return;
         }
         // Take a single undo snapshot at the very first mutation of the
         // current drag. Subsequent frames don't re-snapshot — the whole
         // drag undoes/redoes as one action.
-        if !self.edit_state.drag_snapshot_taken {
+        if !self.document.edit_state.drag_snapshot_taken {
             self.record_history();
-            self.edit_state.drag_snapshot_taken = true;
+            self.document.edit_state.drag_snapshot_taken = true;
         }
         let mut did_mutate = false;
         // Vertex drag — free 2D.
-        if let Some(vid) = self.edit_state.selected_vertex {
-            if let Some((ring, idx)) = self.floor_plan.find_vertex(vid) {
-                let x_param = self.floor_plan.vertex_x_param(ring, idx);
-                let y_param = self.floor_plan.vertex_y_param(ring, idx);
+        if let Some(vid) = self.document.edit_state.selected_vertex {
+            if let Some((ring, idx)) = self.document.floor_plan.find_vertex(vid) {
+                let x_param = self.document.floor_plan.vertex_x_param(ring, idx);
+                let y_param = self.document.floor_plan.vertex_y_param(ring, idx);
                 if let (Some(xp), Some(yp)) = (x_param, y_param) {
-                    self.floor_plan.set_parameter(xp, world_x as f32);
-                    self.floor_plan.set_parameter(yp, world_y as f32);
+                    self.document.floor_plan.set_parameter(xp, world_x as f32);
+                    self.document.floor_plan.set_parameter(yp, world_y as f32);
                     did_mutate = true;
                 }
             }
-        } else if let Some(vid) = self.edit_state.selected_wall {
+        } else if let Some(vid) = self.document.edit_state.selected_wall {
             // Wall drag — translate perpendicular axis.
-            if let Some((ring, edge_start)) = self.floor_plan.find_vertex(vid) {
-                if let Some((param, axis)) = self.floor_plan.wall_movable_param(ring, edge_start) {
-                    let new_value = match axis {
-                        ParameterAxis::X => world_x as f32,
-                        ParameterAxis::Y => world_y as f32,
-                    };
-                    self.floor_plan.set_parameter(param, new_value);
-                    did_mutate = true;
-                } else if let Some((old_value, axis)) =
-                    self.floor_plan.wall_anchor_constant(ring, edge_start)
+            if let Some((ring, edge_start)) = self.document.floor_plan.find_vertex(vid) {
+                if let Some((param, axis)) = self
+                    .document
+                    .floor_plan
+                    .wall_movable_param(ring, edge_start)
                 {
                     let new_value = match axis {
                         ParameterAxis::X => world_x as f32,
                         ParameterAxis::Y => world_y as f32,
                     };
-                    self.floor_plan.shift_constant(old_value, axis, new_value);
+                    self.document.floor_plan.set_parameter(param, new_value);
+                    did_mutate = true;
+                } else if let Some((old_value, axis)) = self
+                    .document
+                    .floor_plan
+                    .wall_anchor_constant(ring, edge_start)
+                {
+                    let new_value = match axis {
+                        ParameterAxis::X => world_x as f32,
+                        ParameterAxis::Y => world_y as f32,
+                    };
+                    self.document
+                        .floor_plan
+                        .shift_constant(old_value, axis, new_value);
                     did_mutate = true;
                 }
             }
@@ -189,18 +213,18 @@ impl AppController {
     /// * Wall drag → if dimensioned, populate the post-drag prompt;
     ///   otherwise commit directly.
     pub fn edit_mouse_up(&mut self) -> Result<(), String> {
-        if !self.edit_state.dragging {
+        if !self.document.edit_state.dragging {
             return Ok(());
         }
-        self.edit_state.dragging = false;
-        if self.edit_state.selected_vertex.is_some() {
+        self.document.edit_state.dragging = false;
+        if self.document.edit_state.selected_vertex.is_some() {
             self.commit_to_ber()?;
-            if self.dimensioning.scale_set {
+            if self.document.dimensioning.scale_set {
                 self.populate_vertex_drop_prompt();
             }
             return Ok(());
         }
-        if self.dimensioning.scale_set {
+        if self.document.dimensioning.scale_set {
             self.populate_edit_drag_prompt();
         } else {
             self.commit_to_ber()?;
@@ -213,13 +237,13 @@ impl AppController {
     /// then de-duplicate axes where prev and next share that coord
     /// (yielding 3 distinct measurements for the typical case).
     fn populate_vertex_drop_prompt(&mut self) {
-        let Some(vid) = self.edit_state.selected_vertex else {
+        let Some(vid) = self.document.edit_state.selected_vertex else {
             return;
         };
-        let Some((ring, idx)) = self.floor_plan.find_vertex(vid) else {
+        let Some((ring, idx)) = self.document.floor_plan.find_vertex(vid) else {
             return;
         };
-        let polygons = self.floor_plan.polygons();
+        let polygons = self.document.floor_plan.polygons();
         let Some(ring_pts) = polygons.get(ring) else {
             return;
         };
@@ -233,11 +257,11 @@ impl AppController {
         let prev = ring_pts[prev_idx];
         let next = ring_pts[next_idx];
 
-        let prev_vid = match self.floor_plan.vertex_id_at(ring, prev_idx) {
+        let prev_vid = match self.document.floor_plan.vertex_id_at(ring, prev_idx) {
             Some(v) => v,
             None => return,
         };
-        let next_vid = match self.floor_plan.vertex_id_at(ring, next_idx) {
+        let next_vid = match self.document.floor_plan.vertex_id_at(ring, next_idx) {
             Some(v) => v,
             None => return,
         };
@@ -359,10 +383,11 @@ impl AppController {
             .ok_or_else(|| "invalid measurement index".to_string())?;
         let vertex_vid = prompt.vertex_vid;
         let (v_ring, v_idx) = self
+            .document
             .floor_plan
             .find_vertex(vertex_vid)
             .ok_or_else(|| "vertex no longer exists".to_string())?;
-        let polygons = self.floor_plan.polygons();
+        let polygons = self.document.floor_plan.polygons();
         let v_pos = polygons
             .get(v_ring)
             .and_then(|r| r.get(v_idx))
@@ -383,27 +408,29 @@ impl AppController {
         };
 
         let x_p = self
+            .document
             .floor_plan
             .vertex_x_param(v_ring, v_idx)
             .ok_or_else(|| "vertex.x_expr isn't a parameter".to_string())?;
         let y_p = self
+            .document
             .floor_plan
             .vertex_y_param(v_ring, v_idx)
             .ok_or_else(|| "vertex.y_expr isn't a parameter".to_string())?;
-        self.floor_plan.set_parameter(x_p, new_pos.0);
-        self.floor_plan.set_parameter(y_p, new_pos.1);
+        self.document.floor_plan.set_parameter(x_p, new_pos.0);
+        self.document.floor_plan.set_parameter(y_p, new_pos.1);
         // Both params land in `known_params` so the new walls get length
         // labels via the standard `walls_with_known_length` path.
-        self.dimensioning.known_params.insert(x_p);
-        self.dimensioning.known_params.insert(y_p);
+        self.document.dimensioning.known_params.insert(x_p);
+        self.document.dimensioning.known_params.insert(y_p);
         self.commit_to_ber()?;
 
         if let Some(p) = self.vertex_drop_prompt.as_mut() {
             p.applied.push((idx, distance));
             if p.applied.len() >= 2 {
                 self.vertex_drop_prompt = None;
-                self.edit_state.selected_vertex = None;
-                self.edit_state.pre_drag_vertex_pos = None;
+                self.document.edit_state.selected_vertex = None;
+                self.document.edit_state.pre_drag_vertex_pos = None;
             }
         }
         Ok(())
@@ -413,10 +440,11 @@ impl AppController {
     /// vertex-drop prompt's solve.
     fn neighbor_pos(&self, vid: VertexId) -> Result<(f32, f32), String> {
         let (r, i) = self
+            .document
             .floor_plan
             .find_vertex(vid)
             .ok_or_else(|| "neighbour vertex no longer exists".to_string())?;
-        let polygons = self.floor_plan.polygons();
+        let polygons = self.document.floor_plan.polygons();
         let p = polygons
             .get(r)
             .and_then(|ring| ring.get(i))
@@ -429,27 +457,27 @@ impl AppController {
     /// selection. Pops the drag's undo snapshot for the same reason as
     /// `cancel_edit_drag`.
     pub fn cancel_vertex_drop(&mut self) -> Result<(), String> {
-        if self.edit_state.drag_snapshot_taken {
+        if self.document.edit_state.drag_snapshot_taken {
             self.history.pop();
-            self.edit_state.drag_snapshot_taken = false;
+            self.document.edit_state.drag_snapshot_taken = false;
         }
         let Some(prompt) = self.vertex_drop_prompt.take() else {
             return Ok(());
         };
-        let Some((wx, wy)) = self.edit_state.pre_drag_vertex_pos else {
-            self.edit_state.selected_vertex = None;
+        let Some((wx, wy)) = self.document.edit_state.pre_drag_vertex_pos else {
+            self.document.edit_state.selected_vertex = None;
             return Ok(());
         };
-        if let Some((v_ring, v_idx)) = self.floor_plan.find_vertex(prompt.vertex_vid) {
-            if let Some(xp) = self.floor_plan.vertex_x_param(v_ring, v_idx) {
-                self.floor_plan.set_parameter(xp, wx);
+        if let Some((v_ring, v_idx)) = self.document.floor_plan.find_vertex(prompt.vertex_vid) {
+            if let Some(xp) = self.document.floor_plan.vertex_x_param(v_ring, v_idx) {
+                self.document.floor_plan.set_parameter(xp, wx);
             }
-            if let Some(yp) = self.floor_plan.vertex_y_param(v_ring, v_idx) {
-                self.floor_plan.set_parameter(yp, wy);
+            if let Some(yp) = self.document.floor_plan.vertex_y_param(v_ring, v_idx) {
+                self.document.floor_plan.set_parameter(yp, wy);
             }
         }
-        self.edit_state.selected_vertex = None;
-        self.edit_state.pre_drag_vertex_pos = None;
+        self.document.edit_state.selected_vertex = None;
+        self.document.edit_state.pre_drag_vertex_pos = None;
         self.commit_to_ber()?;
         Ok(())
     }
@@ -461,8 +489,8 @@ impl AppController {
     /// matching arrow.
     pub fn vertex_drop_prompt_for_ui(&self) -> Option<VertexDropPromptUiData> {
         let prompt = self.vertex_drop_prompt.as_ref()?;
-        let (v_ring, v_idx) = self.floor_plan.find_vertex(prompt.vertex_vid)?;
-        let polygons = self.floor_plan.polygons();
+        let (v_ring, v_idx) = self.document.floor_plan.find_vertex(prompt.vertex_vid)?;
+        let polygons = self.document.floor_plan.polygons();
         let v_ring_pts = polygons.get(v_ring)?;
         let v = v_ring_pts.get(v_idx)?;
         let applied_set: std::collections::HashSet<usize> =
@@ -472,7 +500,7 @@ impl AppController {
             if applied_set.contains(&i) {
                 continue;
             }
-            let (n_ring, n_idx) = self.floor_plan.find_vertex(m.neighbor_vid)?;
+            let (n_ring, n_idx) = self.document.floor_plan.find_vertex(m.neighbor_vid)?;
             let n = polygons.get(n_ring).and_then(|r| r.get(n_idx))?;
             let live = match m.kind {
                 VertexMeasurementKind::Axis(ParameterAxis::X) => (v.x - n.x).abs(),
@@ -498,16 +526,16 @@ impl AppController {
     /// a candidate "measure distance from this reference" option, sorted
     /// by traversal order so the same wall consistently shows up first.
     fn populate_edit_drag_prompt(&mut self) {
-        let Some(vid) = self.edit_state.selected_wall else {
+        let Some(vid) = self.document.edit_state.selected_wall else {
             return;
         };
-        let Some((ring, edge_start)) = self.floor_plan.find_vertex(vid) else {
+        let Some((ring, edge_start)) = self.document.floor_plan.find_vertex(vid) else {
             return;
         };
-        let Some(kind) = self.edit_state.pre_drag_kind else {
+        let Some(kind) = self.document.edit_state.pre_drag_kind else {
             return;
         };
-        let polygons = self.floor_plan.polygons();
+        let polygons = self.document.floor_plan.polygons();
         let Some(ring_pts) = polygons.get(ring) else {
             return;
         };
@@ -548,7 +576,7 @@ impl AppController {
                 if distance < 1e-3 {
                     continue;
                 }
-                let Some(ref_vid) = self.floor_plan.vertex_id_at(ri, i) else {
+                let Some(ref_vid) = self.document.floor_plan.vertex_id_at(ri, i) else {
                     continue;
                 };
                 options.push(MeasurementOption {
@@ -592,17 +620,18 @@ impl AppController {
         let new_value = option.reference_value + option.sign * distance;
         match prompt.kind {
             MovedCoordKind::Parameter(p) => {
-                self.floor_plan.set_parameter(p, new_value);
+                self.document.floor_plan.set_parameter(p, new_value);
             }
             MovedCoordKind::Constant(old_value) => {
-                self.floor_plan
+                self.document
+                    .floor_plan
                     .shift_constant(old_value, prompt.axis, new_value);
             }
         }
         self.commit_to_ber()?;
         self.edit_drag_prompt = None;
-        self.edit_state.pre_drag_value = None;
-        self.edit_state.pre_drag_kind = None;
+        self.document.edit_state.pre_drag_value = None;
+        self.document.edit_state.pre_drag_kind = None;
         Ok(())
     }
 
@@ -623,13 +652,13 @@ impl AppController {
     /// the action is effectively erased — no need for the user to undo
     /// after they cancelled.
     pub fn cancel_edit_drag(&mut self) -> Result<(), String> {
-        if self.edit_state.drag_snapshot_taken {
+        if self.document.edit_state.drag_snapshot_taken {
             self.history.pop();
-            self.edit_state.drag_snapshot_taken = false;
+            self.document.edit_state.drag_snapshot_taken = false;
         }
         let (Some(pre_value), Some(kind)) = (
-            self.edit_state.pre_drag_value,
-            self.edit_state.pre_drag_kind,
+            self.document.edit_state.pre_drag_value,
+            self.document.edit_state.pre_drag_kind,
         ) else {
             self.edit_drag_prompt = None;
             return Ok(());
@@ -637,20 +666,26 @@ impl AppController {
         let prompt_axis = self.edit_drag_prompt.as_ref().map(|p| p.axis);
         match kind {
             MovedCoordKind::Parameter(p) => {
-                self.floor_plan.set_parameter(p, pre_value);
+                self.document.floor_plan.set_parameter(p, pre_value);
             }
             MovedCoordKind::Constant(_old_value) => {
                 if let Some(axis) = prompt_axis {
                     // The current constant value may have been mutated by
                     // the drag; look it up from the moved wall to find the
                     // *current* constant, then shift back to pre_value.
-                    if let Some(vid) = self.edit_state.selected_wall {
-                        if let Some((ring, edge_start)) = self.floor_plan.find_vertex(vid) {
-                            if let Some((current_const, _)) =
-                                self.floor_plan.wall_anchor_constant(ring, edge_start)
+                    if let Some(vid) = self.document.edit_state.selected_wall {
+                        if let Some((ring, edge_start)) = self.document.floor_plan.find_vertex(vid)
+                        {
+                            if let Some((current_const, _)) = self
+                                .document
+                                .floor_plan
+                                .wall_anchor_constant(ring, edge_start)
                             {
-                                self.floor_plan
-                                    .shift_constant(current_const, axis, pre_value);
+                                self.document.floor_plan.shift_constant(
+                                    current_const,
+                                    axis,
+                                    pre_value,
+                                );
                             }
                         }
                     }
@@ -659,8 +694,8 @@ impl AppController {
         }
         self.commit_to_ber()?;
         self.edit_drag_prompt = None;
-        self.edit_state.pre_drag_value = None;
-        self.edit_state.pre_drag_kind = None;
+        self.document.edit_state.pre_drag_value = None;
+        self.document.edit_state.pre_drag_kind = None;
         Ok(())
     }
 
@@ -670,9 +705,15 @@ impl AppController {
     pub fn edit_drag_prompt_for_ui(&self) -> Option<EditDragPromptUiData> {
         let prompt = self.edit_drag_prompt.as_ref()?;
         let option = prompt.options.get(prompt.current_idx)?;
-        let (moved_ring, moved_edge) = self.floor_plan.find_vertex(prompt.moved_wall_vid)?;
-        let (ref_ring, ref_edge) = self.floor_plan.find_vertex(option.reference_wall_vid)?;
-        let polygons = self.floor_plan.polygons();
+        let (moved_ring, moved_edge) = self
+            .document
+            .floor_plan
+            .find_vertex(prompt.moved_wall_vid)?;
+        let (ref_ring, ref_edge) = self
+            .document
+            .floor_plan
+            .find_vertex(option.reference_wall_vid)?;
+        let polygons = self.document.floor_plan.polygons();
         let moved_ring_pts = polygons.get(moved_ring)?;
         let ref_ring_pts = polygons.get(ref_ring)?;
         let moved_a = moved_ring_pts.get(moved_edge)?;
