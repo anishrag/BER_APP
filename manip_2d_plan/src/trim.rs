@@ -732,10 +732,10 @@ mod trim_tests {
         );
         // Vertical cut at x=2 → left (curved) region + right region.
         let cut = vec![p(2., 0.2), p(2., 3.8)];
-        let (ra, rb) = outline
-            .split_by_cut(&cut, 0.05, &SubareaTuning::default())
-            .unwrap()
-            .expect("vertical cut splits the storey");
+        let (ra, rb) =
+            crate::carve::split_cut(&outline.get_points(), &cut, 0.05, &SubareaTuning::default())
+                .unwrap()
+                .expect("vertical cut splits the storey");
         // The region carrying the curve must still include the curve-start corner.
         let left = if has(&ra.get_points(), 1.0, 4.0) {
             ra.get_points()
@@ -836,12 +836,12 @@ mod trim_tests {
     /// wall); the two shared house walls are filled in along the outline, so
     /// the result is a self-contained quad hugging the corner.
     #[test]
-    fn carve_subarea_shares_corner_walls_with_the_outline() {
+    fn sub_area_shares_corner_walls_with_the_outline() {
         let outline = unit_square_plan();
         let path = vec![p(0.0, 4.0), p(4.0, 4.0), p(4.0, 0.0)];
-        let room = outline
-            .carve_subarea(&path, 0.5, &SubareaTuning::default())
-            .unwrap();
+        let room =
+            crate::carve::sub_area(&outline.get_points(), &path, 0.5, &SubareaTuning::default())
+                .unwrap();
         assert_eq!(room.ring_count(), 1);
         let poly = room.polygons()[0].clone();
         assert_eq!(
@@ -867,7 +867,7 @@ mod trim_tests {
     /// A living area drawn away from every wall doesn't share anything — it
     /// closes into a free-standing interior room.
     #[test]
-    fn carve_subarea_interior_path_becomes_a_freestanding_room() {
+    fn sub_area_interior_path_becomes_a_freestanding_room() {
         let outline = unit_square_plan();
         let path = vec![
             p(3.0, 3.0),
@@ -876,9 +876,9 @@ mod trim_tests {
             p(3.0, 6.0),
             p(3.1, 3.1),
         ];
-        let room = outline
-            .carve_subarea(&path, 0.3, &SubareaTuning::default())
-            .unwrap();
+        let room =
+            crate::carve::sub_area(&outline.get_points(), &path, 0.3, &SubareaTuning::default())
+                .unwrap();
         assert_eq!(room.ring_count(), 1);
         assert!(room.polygons()[0].len() >= 4);
         let area = polygon_area(&room.polygons()[0]).abs();
@@ -950,7 +950,7 @@ mod trim_tests {
     /// just because the storey is large. (With the house-scaled tolerance this
     /// nook was flattened to a plain quad.)
     #[test]
-    fn carve_subarea_keeps_a_real_nook_in_a_big_house() {
+    fn sub_area_keeps_a_real_nook_in_a_big_house() {
         let big_house = FloorPlan::from_points_to_orthogonal(
             &[
                 p(0.0, 0.0),
@@ -983,9 +983,13 @@ mod trim_tests {
             mxy = mxy.max(q.y);
         }
         let tol = ((mxx - mnx).powi(2) + (mxy - mny).powi(2)).sqrt() * 0.02;
-        let room = big_house
-            .carve_subarea(&path, tol, &SubareaTuning::default())
-            .unwrap();
+        let room = crate::carve::sub_area(
+            &big_house.get_points(),
+            &path,
+            tol,
+            &SubareaTuning::default(),
+        )
+        .unwrap();
         assert!(
             room.polygons()[0].len() > 4,
             "the nook survives even though the house is large: {:?}",
@@ -1008,9 +1012,9 @@ mod trim_tests {
             p(0.15, 4.0),  // left wall, ~0.15 right of the storey's x=0 wall
             p(0.16, 0.13), // close
         ];
-        let room = outline
-            .carve_subarea(&path, 0.1, &SubareaTuning::default())
-            .unwrap();
+        let room =
+            crate::carve::sub_area(&outline.get_points(), &path, 0.1, &SubareaTuning::default())
+                .unwrap();
         let poly = room.polygons()[0].clone();
         assert!(
             poly.iter().any(|v| v.x.abs() < 0.01),

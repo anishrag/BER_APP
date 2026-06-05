@@ -19,6 +19,7 @@ mod geom;
 mod orthogonal;
 mod parametric;
 mod query;
+mod region;
 mod simplification;
 mod trim;
 
@@ -70,7 +71,7 @@ impl Default for SpliceTuning {
     }
 }
 
-/// Tuning for sub-area carves ([`FloorPlan::carve_subarea`] — living areas and
+/// Tuning for sub-area carves ([`FloorPlan::carve_or_cut`] — living areas and
 /// construction-phase areas): the closed-loop gap and the boundary-follow
 /// classifier band. Defaults reproduce the values used before extraction; the
 /// app overrides them from `tuning.yaml`.
@@ -441,34 +442,8 @@ impl FloorPlan {
         self.parametric.all_ring_points()
     }
 
-    /// Whether `(x, y)` lies inside the primary ring — see [`carve::contains_point`].
-    pub fn contains_point(&self, x: f32, y: f32) -> bool {
-        carve::contains_point(&self.parametric.ring_points(0), x, y)
-    }
-
-    /// Clamp points that stray outside the outline back onto it — see
-    /// [`carve::clamp_inside`].
-    pub fn clamp_inside(&self, points: &[Point2f32]) -> Vec<Point2f32> {
-        carve::clamp_inside(&self.parametric.ring_points(0), points)
-    }
-
-    /// First-stage clip of a freehand sub-area stroke onto the storey — see
-    /// [`carve::clip_stroke_inside`].
-    pub fn clip_stroke_inside(&self, points: &[Point2f32], close_gap_m: f32) -> Vec<Point2f32> {
-        carve::clip_stroke_inside(&self.parametric.ring_points(0), points, close_gap_m)
-    }
-
-    /// This plan MINUS the union of `holes`, as a fresh `FloorPlan` — see
-    /// [`carve::subtract`].
-    pub fn subtract(&self, holes: &[Vec<Point2f32>]) -> Option<FloorPlan> {
-        carve::subtract(&self.parametric.ring_points(0), holes)
-    }
-
-    /// Whether any vertex/edge-midpoint of `area` lies clearly outside this
-    /// plan's outline — see [`carve::any_point_outside`].
-    pub fn any_point_outside(&self, area: &FloorPlan, tol: f32) -> bool {
-        carve::any_point_outside(&self.parametric.ring_points(0), &area.get_points(), tol)
-    }
+    // `contains_point` / `clamp_inside` / `clip_stroke_inside` / `subtract` /
+    // `any_point_outside` are region operations — see the `region` module.
 
     /// Longest run of consecutive `points` off this plan's outline ring — see
     /// [`extend::longest_offring_run`].

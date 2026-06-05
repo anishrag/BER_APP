@@ -307,7 +307,7 @@ fn push_ring(ring: &mut Vec<Point2f32>, pts: &[Point2f32]) {
 /// orthogonalized between the bounding transition vertices (which sit on the
 /// boundary). The result follows the storey edge exactly where you drew along
 /// it, so it needs no clip afterward. (Open paths + the all-interior free-room
-/// case are handled when this is wired into `carve_subarea`.)
+/// case are handled when this is wired into `carve_or_cut`.)
 pub(crate) fn build_region_ring(
     outline: &[Point2f32],
     stroke: &[Point2f32],
@@ -378,13 +378,7 @@ mod tests {
     }
 
     fn ring_area(ring: &[Point2f32]) -> f32 {
-        let n = ring.len();
-        let mut a2 = 0.0;
-        for i in 0..n {
-            let (u, v) = (ring[i], ring[(i + 1) % n]);
-            a2 += u.x * v.y - v.x * u.y;
-        }
-        a2.abs() / 2.0
+        crate::geom::ring_signed_area2(ring).abs() / 2.0
     }
 
     fn has_vertex(ring: &[Point2f32], x: f32, y: f32) -> bool {
