@@ -44,89 +44,6 @@ pub struct ExposureSelection {
     pub length_m: f32,
 }
 
-/// Paint `[start, end]` of a wall with `exposure`: the new mark WINS over any
-/// overlap (existing sections are trimmed to their non-overlapping remnants),
-/// then the new section is inserted and the list re-sorted. No merging of
-/// adjacent same-type ranges — each stays its own region.
-fn paint_section(
-    sections: &mut Vec<ExposureSection>,
-    start: f32,
-    end: f32,
-    exposure: WallExposure,
-) {
-    let (s, e) = if start <= end {
-        (start, end)
-    } else {
-        (end, start)
-    };
-    if e - s < 1e-4 {
-        return; // zero-length selection paints nothing
-    }
-    let mut out: Vec<ExposureSection> = Vec::new();
-    for sec in sections.iter() {
-        if sec.end_m <= s || sec.start_m >= e {
-            out.push(*sec); // no overlap
-            continue;
-        }
-        if sec.start_m < s - 1e-4 {
-            out.push(ExposureSection {
-                start_m: sec.start_m,
-                end_m: s,
-                exposure: sec.exposure,
-            });
-        }
-        if sec.end_m > e + 1e-4 {
-            out.push(ExposureSection {
-                start_m: e,
-                end_m: sec.end_m,
-                exposure: sec.exposure,
-            });
-        }
-        // The overlapped middle is dropped — the new mark wins.
-    }
-    out.push(ExposureSection {
-        start_m: s,
-        end_m: e,
-        exposure,
-    });
-    out.sort_by(|a, b| {
-        a.start_m
-            .partial_cmp(&b.start_m)
-            .unwrap_or(std::cmp::Ordering::Equal)
-    });
-    *sections = out;
-}
-
-/// Full coverage of a wall of length `len` as `(start, end, exposure)` ranges:
-/// the set sections in order, with every gap (and the whole wall when there are
-/// no sections) filled with `Exposed`. Used to derive one BER `WallRegion` per
-/// range.
-pub(crate) fn wall_coverage(
-    len: f32,
-    sections: &[ExposureSection],
-) -> Vec<(f32, f32, WallExposure)> {
-    let mut out: Vec<(f32, f32, WallExposure)> = Vec::new();
-    let mut cursor = 0.0_f32;
-    for sec in sections {
-        let s = sec.start_m.clamp(0.0, len);
-        let e = sec.end_m.clamp(0.0, len);
-        if s > cursor + 1e-4 {
-            out.push((cursor, s, WallExposure::Exposed)); // gap before this section
-        }
-        if e > s + 1e-4 {
-            out.push((s, e, sec.exposure));
-            cursor = e;
-        }
-    }
-    if cursor < len - 1e-4 {
-        out.push((cursor, len, WallExposure::Exposed)); // trailing gap
-    }
-    if out.is_empty() {
-        out.push((0.0, len, WallExposure::Exposed)); // no sections → all exposed
-    }
-    out
-}
-
 impl AppController {
     /// True when the editor is in wall-exposure mode (drives the UI toggle and
     /// routes a canvas tap/drag to wall selection rather than drawing).
@@ -273,17 +190,7 @@ impl AppController {
             return;
         };
         let undo_snap = self.current_history_snapshot();
-        let sections = self.document.wall_sections.entry(vid).or_default();
-        paint_section(sections, s, e, exposure);
-        // Fill the gaps so the wall is fully partitioned into explicit sections.
-        *sections = wall_coverage(len, sections)
-            .into_iter()
-            .map(|(start_m, end_m, exposure)| ExposureSection {
-                start_m,
-                end_m,
-                exposure,
-            })
-            .collect();
+        self.document.set_wall_section(vid, s, e, len, exposure);
         let _ = self.commit_to_ber();
         self.push_history_snapshot(undo_snap);
     }
@@ -298,7 +205,7 @@ impl AppController {
             return;
         }
         let undo_snap = self.current_history_snapshot();
-        self.document.wall_sections.remove(&vid);
+        self.document.clear_wall_section(vid);
         let _ = self.commit_to_ber();
         self.push_history_snapshot(undo_snap);
     }
@@ -308,36 +215,11 @@ impl AppController {
     /// Undoable; persists immediately. No-op if nothing changes.
     pub fn set_all_remaining_exposed(&mut self) {
         self.sync_active();
-        let unset: Vec<(VertexId, f32)> = self
-            .document
-            .outline
-            .floor_plan
-            .perimeter_walls()
-            .into_iter()
-            .filter(|(vid, _, _)| {
-                self.document
-                    .wall_sections
-                    .get(vid)
-                    .map_or(true, |s| s.is_empty())
-            })
-            .map(|(vid, a, b)| (vid, wall_len(a, b)))
-            .collect();
-        if unset.is_empty() {
-            return;
-        }
         let undo_snap = self.current_history_snapshot();
-        for (vid, len) in unset {
-            self.document.wall_sections.insert(
-                vid,
-                vec![ExposureSection {
-                    start_m: 0.0,
-                    end_m: len,
-                    exposure: WallExposure::Exposed,
-                }],
-            );
+        if self.document.set_all_remaining_exposed() {
+            let _ = self.commit_to_ber();
+            self.push_history_snapshot(undo_snap);
         }
-        let _ = self.commit_to_ber();
-        self.push_history_snapshot(undo_snap);
     }
 
     /// The outline perimeter walls with their sections + selection state, for
@@ -442,7 +324,7 @@ impl AppController {
 /// containing distance `d` along a wall of length `len`. Lets a tap select just
 /// the piece under it rather than the whole wall.
 fn range_at(len: f32, sections: &[ExposureSection], d: f32) -> (f32, f32) {
-    for (s, e, _) in wall_coverage(len, sections) {
+    for (s, e, _) in document::wall_coverage(len, sections) {
         if d >= s - 1e-4 && d <= e + 1e-4 {
             return (s, e);
         }
@@ -469,70 +351,4 @@ fn project_distance(a: Point2f32, b: Point2f32, len: f32, px: f32, py: f32) -> f
     }
     let dot = (px - a.x) * (b.x - a.x) + (py - a.y) * (b.y - a.y);
     (dot / len).clamp(0.0, len)
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn sec(start: f32, end: f32, e: WallExposure) -> ExposureSection {
-        ExposureSection {
-            start_m: start,
-            end_m: end,
-            exposure: e,
-        }
-    }
-
-    #[test]
-    fn paint_mid_range_splits_into_three() {
-        let mut s = vec![sec(0.0, 5.0, WallExposure::Exposed)];
-        paint_section(&mut s, 2.0, 3.0, WallExposure::SemiExposed);
-        assert_eq!(s.len(), 3);
-        assert_eq!(s[0], sec(0.0, 2.0, WallExposure::Exposed));
-        assert_eq!(s[1], sec(2.0, 3.0, WallExposure::SemiExposed));
-        assert_eq!(s[2], sec(3.0, 5.0, WallExposure::Exposed));
-    }
-
-    #[test]
-    fn paint_whole_wall_is_one_section() {
-        let mut s = Vec::new();
-        paint_section(&mut s, 0.0, 4.0, WallExposure::NonHeatLoss);
-        assert_eq!(s, vec![sec(0.0, 4.0, WallExposure::NonHeatLoss)]);
-    }
-
-    #[test]
-    fn overlapping_repaint_overrides_the_overlap() {
-        let mut s = vec![sec(0.0, 4.0, WallExposure::Exposed)];
-        paint_section(&mut s, 1.0, 2.0, WallExposure::SemiExposed);
-        // now exposed[0,1], semi[1,2], exposed[2,4]
-        paint_section(&mut s, 1.5, 3.0, WallExposure::NonHeatLoss);
-        // semi shrinks to [1,1.5], the [1.5,2] exposed-middle... actually [1.5,3]
-        // wins: exposed[0,1], semi[1,1.5], non[1.5,3], exposed[3,4]
-        assert_eq!(s[0], sec(0.0, 1.0, WallExposure::Exposed));
-        assert_eq!(s[1], sec(1.0, 1.5, WallExposure::SemiExposed));
-        assert_eq!(s[2], sec(1.5, 3.0, WallExposure::NonHeatLoss));
-        assert_eq!(s[3], sec(3.0, 4.0, WallExposure::Exposed));
-    }
-
-    #[test]
-    fn coverage_fills_gaps_with_exposed() {
-        let s = vec![sec(2.0, 3.0, WallExposure::SemiExposed)];
-        let cov = wall_coverage(5.0, &s);
-        assert_eq!(
-            cov,
-            vec![
-                (0.0, 2.0, WallExposure::Exposed),
-                (2.0, 3.0, WallExposure::SemiExposed),
-                (3.0, 5.0, WallExposure::Exposed),
-            ]
-        );
-    }
-
-    #[test]
-    fn coverage_of_no_sections_is_all_exposed() {
-        assert_eq!(
-            wall_coverage(4.0, &[]),
-            vec![(0.0, 4.0, WallExposure::Exposed)]
-        );
-    }
 }

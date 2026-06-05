@@ -838,7 +838,7 @@ impl AppController {
                         (a.y + t * (b.y - a.y)) as f64,
                     )
                 };
-                exposure::wall_coverage(len, sections)
+                document::wall_coverage(len, sections)
                     .into_iter()
                     .map(move |(s, e, exposure)| (lerp(s), lerp(e), exposure))
                     .collect::<Vec<_>>()

@@ -65,12 +65,8 @@ impl AppController {
     /// walls are pre-known (in the slot's `known_params`), so only the walls the
     /// user actually drew are prompted.
     fn begin_phase_area_dimensioning(&mut self, slot: ShapeSlot, undo_snap: HistorySnapshot) {
-        self.document.phase_shape = Some(slot);
-        self.document.active = ActiveShape::PhaseArea;
+        self.document.begin_phase_area(slot);
         self.pending_phase_cut = None;
-        self.load_active_into_buffer();
-        self.document.pending_arc = None;
-        self.document.edit_state = EditState::default();
         self.maybe_start_dimensioning();
         self.push_history_snapshot(undo_snap);
     }

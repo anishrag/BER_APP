@@ -194,14 +194,9 @@ impl AppController {
     /// Append `slot` as a new living area, make it active, persist, and start
     /// dimensioning it. Shared by a freehand draw and a cut-region pick.
     fn commit_new_living_area(&mut self, slot: ShapeSlot, undo_snap: HistorySnapshot) {
-        self.document.living_areas.push(slot);
-        let idx = self.document.living_areas.len() - 1;
-        self.document.active = ActiveShape::LivingArea(idx);
+        self.document.add_active_living_area(slot);
         self.living_area_mode = true;
         self.pending_cut = None;
-        self.load_active_into_buffer();
-        self.document.pending_arc = None;
-        self.document.edit_state = EditState::default();
         let _ = self.commit_to_ber();
         self.warn_if_non_orthogonal("draw living area");
         // Dimension the new area's walls (no scale calibration — inherited).

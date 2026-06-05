@@ -154,51 +154,9 @@ impl AppController {
             self.record_history();
             self.document.edit_state.drag_snapshot_taken = true;
         }
-        let mut did_mutate = false;
-        // Vertex drag — free 2D.
-        if let Some(vid) = self.document.edit_state.selected_vertex {
-            if let Some((ring, idx)) = self.document.floor_plan.find_vertex(vid) {
-                let x_param = self.document.floor_plan.vertex_x_param(ring, idx);
-                let y_param = self.document.floor_plan.vertex_y_param(ring, idx);
-                if let (Some(xp), Some(yp)) = (x_param, y_param) {
-                    self.document.floor_plan.set_parameter(xp, world_x as f32);
-                    self.document.floor_plan.set_parameter(yp, world_y as f32);
-                    did_mutate = true;
-                }
-            }
-        } else if let Some(vid) = self.document.edit_state.selected_wall {
-            // Wall drag — translate perpendicular axis.
-            if let Some((ring, edge_start)) = self.document.floor_plan.find_vertex(vid) {
-                if let Some((param, axis)) = self
-                    .document
-                    .floor_plan
-                    .wall_movable_param(ring, edge_start)
-                {
-                    let new_value = match axis {
-                        ParameterAxis::X => world_x as f32,
-                        ParameterAxis::Y => world_y as f32,
-                    };
-                    self.document.floor_plan.set_parameter(param, new_value);
-                    did_mutate = true;
-                } else if let Some((old_value, axis)) = self
-                    .document
-                    .floor_plan
-                    .wall_anchor_constant(ring, edge_start)
-                {
-                    let new_value = match axis {
-                        ParameterAxis::X => world_x as f32,
-                        ParameterAxis::Y => world_y as f32,
-                    };
-                    self.document
-                        .floor_plan
-                        .shift_constant(old_value, axis, new_value);
-                    did_mutate = true;
-                }
-            }
-        }
         // Push the live drag state to BER so the renderer sees the wall
         // / vertex follow the cursor instead of snapping only on release.
-        if did_mutate {
+        if self.document.drag_active_to(world_x, world_y) {
             if let Err(e) = self.commit_to_ber() {
                 eprintln!("commit_to_ber during edit_mouse_drag: {}", e);
             }
