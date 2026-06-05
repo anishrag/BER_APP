@@ -174,6 +174,44 @@ pub(crate) fn subtract(outline: &[Point2f32], holes: &[Vec<Point2f32>]) -> Optio
         .flatten()
 }
 
+/// Whether any vertex or edge-midpoint of `area` lies clearly OUTSIDE this
+/// plan's outline — farther than `tol` beyond the boundary. Points on a
+/// shared wall (distance ~0) don't count. Used as a dimensioning guardrail:
+/// reject a dimension that would push a living area out of the storey.
+pub(crate) fn any_point_outside(outline: &[Point2f32], area: &[Point2f32], tol: f32) -> bool {
+    let ring = outline;
+    let no = ring.len();
+    if no < 3 {
+        return false;
+    }
+    let dist_outside = |p: Point2f32| -> f32 {
+        if contains_point(outline, p.x, p.y) {
+            return 0.0;
+        }
+        let mut best = f32::MAX;
+        for i in 0..no {
+            let (a, b) = (ring[i], ring[(i + 1) % no]);
+            let (_q, _t, d) = geom::project_point_to_segment(p, a, b);
+            best = best.min(d);
+        }
+        best
+    };
+    let pts = area;
+    let n = pts.len();
+    if n < 3 {
+        return false;
+    }
+    for i in 0..n {
+        let a = pts[i];
+        let b = pts[(i + 1) % n];
+        let mid = Point2f32::new((a.x + b.x) * 0.5, (a.y + b.y) * 0.5);
+        if dist_outside(a) > tol || dist_outside(mid) > tol {
+            return true;
+        }
+    }
+    false
+}
+
 /// `FloorPlan`'s public carving API — thin facades over the free functions
 /// below. The carve is geometry over an outline RING, so the real work takes a
 /// `&[Point2f32]`; these methods just hand it `self`'s outline.
