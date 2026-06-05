@@ -37,7 +37,7 @@ fn nearest_on_ring(ring: &[Point2f32], p: Point2f32) -> (Point2f32, f32) {
 /// point on any edge); points already inside are left as drawn. A containment
 /// guardrail: bring a stroke that strays out back to the boundary rather than
 /// producing geometry outside the house.
-pub(crate) fn clamp_inside(outline: &[Point2f32], points: &[Point2f32]) -> Vec<Point2f32> {
+fn clamp_inside(outline: &[Point2f32], points: &[Point2f32]) -> Vec<Point2f32> {
     if outline.len() < 3 {
         return points.to_vec();
     }
@@ -106,7 +106,7 @@ fn clip_loop_to_outline(outline: &[Point2f32], loop_pts: &[Point2f32]) -> Option
 /// phases already drawn. `None` when nothing meaningful remains. NB: a
 /// subtraction that punches an interior HOLE keeps only the exterior boundary
 /// (phase areas tile from the edges in practice; an enclosed leftover is rare).
-pub(crate) fn subtract(outline: &[Point2f32], holes: &[Vec<Point2f32>]) -> Option<FloorPlan> {
+fn subtract(outline: &[Point2f32], holes: &[Vec<Point2f32>]) -> Option<FloorPlan> {
     use geo::bool_ops::BooleanOps;
     use geo::Area;
     let mut region: geo::MultiPolygon<f64> = geo::MultiPolygon::new(vec![to_poly(outline)]);
@@ -137,7 +137,7 @@ pub(crate) fn subtract(outline: &[Point2f32], holes: &[Vec<Point2f32>]) -> Optio
 /// — farther than `tol` beyond the boundary. Points on a shared wall (distance
 /// ~0) don't count. Used as a dimensioning guardrail: reject a dimension that
 /// would push a living area out of the storey.
-pub(crate) fn any_point_outside(outline: &[Point2f32], area: &[Point2f32], tol: f32) -> bool {
+fn any_point_outside(outline: &[Point2f32], area: &[Point2f32], tol: f32) -> bool {
     if outline.len() < 3 || area.len() < 3 {
         return false;
     }

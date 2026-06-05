@@ -43,7 +43,7 @@ pub enum SubareaOutcome {
 /// tolerance is derived from the clipped stroke + `tuning`, so the caller passes
 /// neither a pre-clipped stroke nor a tolerance — the whole clip→tol→cut/carve
 /// pipeline lives here, not in the caller.
-pub(crate) fn carve_or_cut(
+fn carve_or_cut(
     outline: &[Point2f32],
     stroke: &[Point2f32],
     tuning: &SubareaTuning,
@@ -63,6 +63,12 @@ pub(crate) fn carve_or_cut(
 /// orthogonal `FloorPlan` (placement isn't preserved). If the endpoints don't
 /// both reach the outline (a free-standing interior room), the path is closed
 /// into its own loop instead.
+///
+/// `pub(crate)` (not private) only so the carve-path / split-path unit tests in
+/// `trim.rs` can drive it directly — they need an explicit tolerance and to
+/// exercise each branch in isolation, which `carve_or_cut` doesn't expose. NOT
+/// public API; the sole public entry is `FloorPlan::carve_or_cut`. (Same for
+/// `split_cut`.)
 pub(crate) fn sub_area(
     outline: &[Point2f32],
     path: &[Point2f32],
@@ -395,9 +401,6 @@ pub(crate) fn split_cut(
     } else {
         straight(s0, e0)
     };
-    if opath.len() < 2 {
-        return Ok(None);
-    }
 
     // Both endpoints must reach the outline at two DISTINCT points; snap them
     // exactly onto it so the cut divides the boundary cleanly.

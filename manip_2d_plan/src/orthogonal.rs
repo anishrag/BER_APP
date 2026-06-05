@@ -3,7 +3,6 @@
 use domain::points::Point2f32;
 
 use crate::Error;
-use std::f32::consts::PI;
 
 /// Convert a simplified stroke to an orthogonal polygon and generate base constraints
 pub fn make_orthogonal(points: &[Point2f32], tolerance: f32) -> Result<Vec<Point2f32>, Error> {
@@ -45,61 +44,6 @@ pub fn make_orthogonal_at(
     }
 
     Ok(collapsed)
-}
-
-/// Snap nearby x-coordinates (and y-coordinates) together so walls the user
-/// drew slightly offset land on the same coordinate. Catches typical sketch
-/// wobble (e.g. the upper and lower bar of an L drawn with a few-px offset)
-/// without affecting walls that are clearly separated.
-///
-/// Algorithm: sort each axis's values and form clusters where successive
-/// sorted values are within `snap_radius`. Every value in a cluster is then
-/// set to the cluster's mean. This is **single-linkage** clustering — a long
-/// sequence of close values can chain into one cluster. For floor-plan-scale
-/// input where walls are usually well-separated, this is fine; if you ever
-/// have many walls close together, revisit.
-pub fn snap_near_collinear_walls(mut points: Vec<Point2f32>, snap_radius: f32) -> Vec<Point2f32> {
-    if points.len() < 3 {
-        return points;
-    }
-
-    let x_reps = cluster_representatives(points.iter().map(|p| p.x), snap_radius);
-    for p in &mut points {
-        if let Some(rep) = x_reps.iter().find(|&&r| (r - p.x).abs() <= snap_radius) {
-            p.x = *rep;
-        }
-    }
-
-    let y_reps = cluster_representatives(points.iter().map(|p| p.y), snap_radius);
-    for p in &mut points {
-        if let Some(rep) = y_reps.iter().find(|&&r| (r - p.y).abs() <= snap_radius) {
-            p.y = *rep;
-        }
-    }
-
-    points
-}
-
-fn cluster_representatives(values: impl Iterator<Item = f32>, radius: f32) -> Vec<f32> {
-    let mut sorted: Vec<f32> = values.collect();
-    if sorted.is_empty() {
-        return Vec::new();
-    }
-    sorted.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
-
-    let mut representatives = Vec::new();
-    let mut cluster: Vec<f32> = vec![sorted[0]];
-    for &v in &sorted[1..] {
-        if (v - cluster.last().unwrap()).abs() <= radius {
-            cluster.push(v);
-        } else {
-            representatives.push(cluster.iter().sum::<f32>() / cluster.len() as f32);
-            cluster = vec![v];
-        }
-    }
-    representatives.push(cluster.iter().sum::<f32>() / cluster.len() as f32);
-
-    representatives
 }
 
 /// Snap the last vertex's coordinates so the implicit closing edge back to
@@ -250,23 +194,11 @@ fn find_dominant_angle(points: &[Point2f32]) -> f32 {
         angles.push(angle);
     }
 
-    // Normalize angles to [0, PI/2] quadrant
-    let normalized: Vec<f32> = angles
-        .iter()
-        .map(|&a| {
-            let mut norm = a.abs();
-            while norm > PI / 2.0 {
-                norm -= PI / 2.0;
-            }
-            norm
-        })
-        .collect();
-
     // Find the angle with the longest total length
     let mut best_angle = 0.0;
     let mut best_weight = 0.0;
 
-    for (i, &angle) in normalized.iter().enumerate() {
+    for i in 0..angles.len() {
         let dx = points[i + 1].x - points[i].x;
         let dy = points[i + 1].y - points[i].y;
         let length = (dx * dx + dy * dy).sqrt();
@@ -503,45 +435,6 @@ mod tests {
         let snapped = snap_closing_edge(pts, 0.5);
         // The last is already coincident with first; should be popped.
         assert!(snapped.len() < 3 || snapped.last().unwrap() != &Point2f32::new(0.0, 0.0));
-    }
-
-    #[test]
-    fn snap_near_collinear_walls_merges_offset_walls() {
-        // L where the upper bar's left wall (x=95) is 13px off from the lower
-        // bar's left wall (x=108). Both should snap to a shared mean.
-        let pts = vec![
-            Point2f32::new(108.0, 124.0),
-            Point2f32::new(108.0, 680.0),
-            Point2f32::new(424.0, 680.0),
-            Point2f32::new(424.0, 534.0),
-            Point2f32::new(245.0, 534.0),
-            Point2f32::new(245.0, 35.0),
-            Point2f32::new(95.0, 35.0),
-            Point2f32::new(95.0, 124.0),
-        ];
-        let snapped = snap_near_collinear_walls(pts, 20.0);
-        // All four "left wall" x-values should now share the same coord.
-        let left_xs: Vec<f32> = snapped
-            .iter()
-            .filter(|p| p.x < 200.0)
-            .map(|p| p.x)
-            .collect();
-        let first = left_xs[0];
-        assert!(left_xs.iter().all(|&x| (x - first).abs() < 0.1));
-        // And they're between the originals (101.5 = midpoint of 95 and 108).
-        assert!((first - 101.5).abs() < 0.5);
-    }
-
-    #[test]
-    fn snap_near_collinear_walls_leaves_far_walls_alone() {
-        let pts = vec![
-            Point2f32::new(0.0, 0.0),
-            Point2f32::new(0.0, 100.0),
-            Point2f32::new(100.0, 100.0), // 100 away from the left walls
-            Point2f32::new(100.0, 0.0),
-        ];
-        let snapped = snap_near_collinear_walls(pts.clone(), 20.0);
-        assert_eq!(snapped, pts);
     }
 
     #[test]

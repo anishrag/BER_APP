@@ -1317,7 +1317,7 @@ impl ParametricPlan {
         #[derive(Clone, Copy)]
         enum Source {
             Known(f32),
-            Unset(ParameterId, f32),
+            Unset(ParameterId),
         }
         let coord_of = |i: usize| -> f32 {
             match axis {
@@ -1333,13 +1333,13 @@ impl ParametricPlan {
         };
         let seq: Vec<Source> = (0..n)
             .map(|i| match param_of(i) {
-                Some(p) if !known.contains(&p) => Source::Unset(p, coord_of(i)),
+                Some(p) if !known.contains(&p) => Source::Unset(p),
                 _ => Source::Known(coord_of(i)),
             })
             .collect();
 
         // V0 of ring 0 is always a constant by construction; bail otherwise.
-        if matches!(seq[0], Source::Unset(_, _)) {
+        if matches!(seq[0], Source::Unset(_)) {
             return false;
         }
 
@@ -1350,7 +1350,7 @@ impl ParametricPlan {
                 continue;
             }
             let start = i;
-            while i < n && matches!(seq[i], Source::Unset(_, _)) {
+            while i < n && matches!(seq[i], Source::Unset(_)) {
                 i += 1;
             }
             let end = i; // exclusive
@@ -1364,7 +1364,7 @@ impl ParametricPlan {
 
             let mut distinct: Vec<ParameterId> = Vec::new();
             for s in &seq[start..end] {
-                if let Source::Unset(p, _) = s {
+                if let Source::Unset(p) = s {
                     if !distinct.contains(p) {
                         distinct.push(*p);
                     }
