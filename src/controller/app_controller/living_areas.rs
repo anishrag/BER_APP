@@ -149,7 +149,11 @@ impl AppController {
     /// only the commit workflow.)
     ///
     /// [`Area`]: manip_2d_plan::SubareaOutcome::Area
-    fn commit_living_area_plan(&mut self, plan: FloorPlan) -> Result<(), String> {
+    fn commit_living_area_plan(
+        &mut self,
+        boundary: &FloorPlan,
+        plan: FloorPlan,
+    ) -> Result<(), String> {
         let undo_snap = self.current_history_snapshot();
         println!("── living-area plan ─────────────────────────────────");
         println!("  → living-area plan: {:?}", plan);
@@ -168,8 +172,7 @@ impl AppController {
                 e
             ));
         }
-        let boundary = self.document.outline.floor_plan.clone();
-        let slot = self.pinned_subarea_slot(&boundary, plan);
+        let slot = self.pinned_subarea_slot(boundary, plan);
         self.commit_new_living_area(slot, undo_snap);
         Ok(())
     }
@@ -222,24 +225,33 @@ impl AppController {
         dump_stroke("living-area", &pts);
         // Save the live buffer so the outline we carve against is current.
         self.sync_active();
-        // One call into `manip_2d_plan` does clip → tol → cut-or-carve; we only
-        // dispatch the outcome to the right workflow.
+        // Living areas never overlap: carve against the outline MINUS the existing
+        // living areas (the available region), so a new one tiles against them and
+        // snaps to their shared walls. The available region may be disconnected;
+        // the cut runs against the piece the stroke is in.
+        let holes: Vec<Vec<Point2f32>> = self
+            .document
+            .living_areas
+            .iter()
+            .map(|s| s.floor_plan.get_points())
+            .collect();
+        // One call into `document` does subtract → pick piece → clip → cut-or-carve;
+        // we only dispatch the outcome to the right workflow.
         match self
             .document
-            .carve_or_cut_against_outline(&pts, &self.tuning.subarea)
+            .carve_or_cut_in_available(&pts, &holes, &self.tuning.subarea)
         {
             // A straight cut → offer both halves to pick from. Each region's walls
-            // along the storey are pinned (pre-known); only the cut wall is set.
-            Ok(SubareaOutcome::Cut(a, b)) => {
-                println!("── cut splits the storey into two regions — tap one to keep ──");
-                let boundary = self.document.outline.floor_plan.clone();
+            // along the boundary are pinned (pre-known); only the cut wall is set.
+            Ok((boundary, SubareaOutcome::Cut(a, b))) => {
+                println!("── cut splits the available region into two — tap one to keep ──");
                 self.pending_cut = Some([
                     self.pinned_subarea_slot(&boundary, a),
                     self.pinned_subarea_slot(&boundary, b),
                 ]);
             }
-            Ok(SubareaOutcome::Area(plan)) => {
-                if let Err(e) = self.commit_living_area_plan(plan) {
+            Ok((boundary, SubareaOutcome::Area(plan))) => {
+                if let Err(e) = self.commit_living_area_plan(&boundary, plan) {
                     eprintln!("living area: {}", e);
                 }
             }

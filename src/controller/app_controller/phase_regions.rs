@@ -99,21 +99,23 @@ impl AppController {
             .get(&idx)
             .map(|rs| rs.iter().map(|r| r.polygon.clone()).collect())
             .unwrap_or_default();
-        let boundary = self.document.available_region(&phase_rings);
         println!("── construction-phase sketch ───────────────────────");
-        println!("  available region: {:?}", boundary.get_points());
 
-        // One call does clip → tol → cut-or-carve against the available region;
-        // we only dispatch the outcome.
-        match boundary.carve_or_cut(&pts, &self.tuning.subarea) {
-            Ok(SubareaOutcome::Cut(a, b)) => {
-                println!("  → phase cut splits the storey into two regions — tap one to keep");
+        // One call does subtract → pick piece → clip → cut-or-carve against the
+        // available region (outline minus the phases already drawn); we only
+        // dispatch the outcome. The chosen piece comes back for wall pinning.
+        match self
+            .document
+            .carve_or_cut_in_available(&pts, &phase_rings, &self.tuning.subarea)
+        {
+            Ok((boundary, SubareaOutcome::Cut(a, b))) => {
+                println!("  → phase cut splits the available region into two — tap one to keep");
                 println!("────────────────────────────────────────────────────");
                 let sa = self.pinned_subarea_slot(&boundary, a);
                 let sb = self.pinned_subarea_slot(&boundary, b);
                 self.pending_phase_cut = Some([sa, sb]);
             }
-            Ok(SubareaOutcome::Area(plan)) => {
+            Ok((boundary, SubareaOutcome::Area(plan))) => {
                 println!("  → phase-area plan: {:?}", plan);
                 let bad = plan.non_orthogonal_edges();
                 if bad.is_empty() {

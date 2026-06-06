@@ -21,6 +21,7 @@ mod parametric;
 mod query;
 mod region;
 mod simplification;
+mod splice;
 mod trim;
 
 pub use carve::SubareaOutcome;

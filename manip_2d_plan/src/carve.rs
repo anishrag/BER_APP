@@ -6,7 +6,7 @@
 //! `&[Point2f32]`. `FloorPlan::carve_or_cut` is the single public entry — a thin
 //! facade that clips the stroke, then routes to `split_cut` or `sub_area`.
 use crate::boundary_follow::{self, Run};
-use crate::{extend, geom, orthogonal, region, simplification};
+use crate::{geom, orthogonal, region, simplification, splice};
 use crate::{Error, FloorPlan, SubareaTuning};
 use domain::points::Point2f32;
 // Shared crate-root test helper, used by the carve test modules via `super::*`.
@@ -478,7 +478,7 @@ fn cut_outline(
     let place = |opath: &mut Vec<Point2f32>, e_idx: usize, n_idx: usize| -> Option<(usize, f32)> {
         let end = opath[e_idx];
         let neighbour = opath[n_idx];
-        let (edge, t_snap, d, is_vertex) = extend::snap_to_polygon(ring, end, vertex_tol);
+        let (edge, t_snap, d, is_vertex) = geom::snap_to_polygon(ring, end, vertex_tol);
         if d > reach_tol {
             return None;
         }
@@ -513,13 +513,13 @@ fn cut_outline(
                 Some((edge, t))
             }
             None => {
-                extend::pin_to_edge(&mut opath[e_idx], ring, edge);
+                geom::pin_to_edge(&mut opath[e_idx], ring, edge);
                 Some((edge, t_snap))
             }
         }
     };
 
-    let drawn_reaches = |p: Point2f32| extend::snap_to_polygon(ring, p, vertex_tol).2 <= reach_tol;
+    let drawn_reaches = |p: Point2f32| geom::snap_to_polygon(ring, p, vertex_tol).2 <= reach_tol;
     let drawn_reached_both = drawn_reaches(path[0]) && drawn_reaches(path[path.len() - 1]);
     let p1 = place(&mut opath, 0, 1usize.min(last));
     let p2 = place(&mut opath, last, last.saturating_sub(1));
@@ -609,8 +609,8 @@ fn solve_straight_cut(
     reach_tol: f32,
 ) -> Result<Option<CutPlan>, Error> {
     let n = ring.len();
-    let (e1, _, dd1, _) = extend::snap_to_polygon(ring, d0, vertex_tol);
-    let (e2, _, dd2, _) = extend::snap_to_polygon(ring, d1, vertex_tol);
+    let (e1, _, dd1, _) = geom::snap_to_polygon(ring, d0, vertex_tol);
+    let (e2, _, dd2, _) = geom::snap_to_polygon(ring, d1, vertex_tol);
     if dd1 > reach_tol || dd2 > reach_tol {
         return Ok(None); // doesn't reach → let the caller carve
     }
@@ -671,7 +671,7 @@ fn cut_region(
     plan: &CutPlan,
     replace_arc_1_to_2: bool,
 ) -> Result<FloorPlan, Error> {
-    let seq = extend::splice_sequence(
+    let seq = splice::splice_sequence(
         outline,
         plan.e1,
         plan.t1,
@@ -683,8 +683,8 @@ fn cut_region(
     let pts: Vec<Point2f32> = seq
         .iter()
         .map(|el| match el {
-            extend::SpliceElem::Keep(i) => outline[*i],
-            extend::SpliceElem::New(p) => *p,
+            splice::SpliceElem::Keep(i) => outline[*i],
+            splice::SpliceElem::New(p) => *p,
         })
         .collect();
     if pts.len() < 3 {

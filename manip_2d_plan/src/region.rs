@@ -99,38 +99,47 @@ fn clip_loop_to_outline(outline: &[Point2f32], loop_pts: &[Point2f32]) -> Option
     (ring.len() >= 4).then_some(ring)
 }
 
-/// `outline` MINUS the union of `holes`, as the largest remaining piece's
-/// boundary (a fresh `FloorPlan`). Carving a sub-area against this — instead of
-/// the raw outline — makes it snap to the holes' shared edges AND keeps it from
-/// overlapping them, so e.g. a new construction phase tiles cleanly against the
-/// phases already drawn. `None` when nothing meaningful remains. NB: a
-/// subtraction that punches an interior HOLE keeps only the exterior boundary
-/// (phase areas tile from the edges in practice; an enclosed leftover is rare).
-fn subtract(outline: &[Point2f32], holes: &[Vec<Point2f32>]) -> Option<FloorPlan> {
+/// `outline` MINUS the union of `holes`, as EVERY remaining piece (each a fresh
+/// `FloorPlan`). Carving a sub-area against the relevant piece — instead of the
+/// raw outline — makes it snap to the holes' shared edges AND keeps it from
+/// overlapping them, so a new phase/living area tiles cleanly against the ones
+/// already drawn. The result can be DISCONNECTED (a hole spanning the region
+/// leaves separate pieces), so the caller picks the one the cut is in. NB: a
+/// subtraction that punches an interior HOLE keeps only the exterior boundary.
+fn subtract_all(outline: &[Point2f32], holes: &[Vec<Point2f32>]) -> Vec<FloorPlan> {
     use geo::bool_ops::BooleanOps;
-    use geo::Area;
     let mut region: geo::MultiPolygon<f64> = geo::MultiPolygon::new(vec![to_poly(outline)]);
     for h in holes {
         if h.len() >= 3 {
             region = region.difference(&geo::MultiPolygon::new(vec![to_poly(h)]));
         }
     }
-    let best = region.0.into_iter().max_by(|a, b| {
-        a.unsigned_area()
-            .partial_cmp(&b.unsigned_area())
-            .unwrap_or(std::cmp::Ordering::Equal)
-    })?;
-    let mut ring: Vec<Point2f32> = best
-        .exterior()
-        .points()
-        .map(|c| Point2f32::new(c.x() as f32, c.y() as f32))
-        .collect();
-    if ring.len() > 1 && ring.first() == ring.last() {
-        ring.pop();
-    }
-    (ring.len() >= 3)
-        .then(|| FloorPlan::from_clean_ring(&ring).ok())
-        .flatten()
+    region
+        .0
+        .into_iter()
+        .filter_map(|poly| {
+            let mut ring: Vec<Point2f32> = poly
+                .exterior()
+                .points()
+                .map(|c| Point2f32::new(c.x() as f32, c.y() as f32))
+                .collect();
+            if ring.len() > 1 && ring.first() == ring.last() {
+                ring.pop();
+            }
+            (ring.len() >= 3)
+                .then(|| FloorPlan::from_clean_ring(&ring).ok())
+                .flatten()
+        })
+        .collect()
+}
+
+/// The single LARGEST piece of `outline` minus `holes` — see [`subtract_all`].
+fn subtract(outline: &[Point2f32], holes: &[Vec<Point2f32>]) -> Option<FloorPlan> {
+    subtract_all(outline, holes).into_iter().max_by(|a, b| {
+        geom::ring_signed_area2(&a.get_points())
+            .abs()
+            .total_cmp(&geom::ring_signed_area2(&b.get_points()).abs())
+    })
 }
 
 /// Whether any vertex or edge-midpoint of `area` lies clearly OUTSIDE `outline`
@@ -187,6 +196,12 @@ impl FloorPlan {
         subtract(&self.parametric.ring_points(0), holes)
     }
 
+    /// EVERY piece of this plan minus `holes` — the available region can be
+    /// disconnected; see [`subtract_all`].
+    pub fn subtract_all(&self, holes: &[Vec<Point2f32>]) -> Vec<FloorPlan> {
+        subtract_all(&self.parametric.ring_points(0), holes)
+    }
+
     /// Whether any vertex/edge-midpoint of `area` lies clearly outside this
     /// plan's outline — see [`any_point_outside`].
     pub fn any_point_outside(&self, area: &FloorPlan, tol: f32) -> bool {
@@ -230,6 +245,27 @@ mod tests {
             "shared edge y=4 present: {:?}",
             pts
         );
+    }
+
+    /// `subtract_all`: when an existing region splits the available space into
+    /// DISCONNECTED pieces, every piece comes back (not just the largest, as
+    /// `subtract` returns) — the caller picks the one its cut is in.
+    #[test]
+    fn subtract_all_returns_every_disconnected_piece() {
+        // A 10×2 strip with a vertical bar through the middle → two separate pieces.
+        let outline = vec![p(0., 0.), p(10., 0.), p(10., 2.), p(0., 2.)];
+        let holes = [vec![p(4., -1.), p(6., -1.), p(6., 3.), p(4., 3.)]];
+        let pieces = subtract_all(&outline, &holes);
+        assert_eq!(pieces.len(), 2, "the bar splits the strip into two pieces");
+        // a left piece and a right piece, on opposite sides of the bar
+        assert!(pieces
+            .iter()
+            .any(|fp| geom::ring_contains_point(&fp.get_points(), 2.0, 1.0)));
+        assert!(pieces
+            .iter()
+            .any(|fp| geom::ring_contains_point(&fp.get_points(), 8.0, 1.0)));
+        // `subtract` (largest only) still returns a single piece.
+        assert!(subtract(&outline, &holes).is_some());
     }
 
     /// First-stage clip: a closed loop drawn STRAIGHT across a trimmed-out notch

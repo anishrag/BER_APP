@@ -381,9 +381,42 @@ pub fn remove_duplicates(points: &[Point2f32], tolerance: f32) -> Vec<Point2f32>
 //     Ok(Polygon::new(vertices))
 // }
 //
+
+/// Orthogonalize an *open* porch stroke into a clean axis-aligned polyline.
+/// Unlike `FloorPlan::from_points_to_orthogonal` this does no closing-edge
+/// snap or corner rotation — the path stays open, so its first and last
+/// points remain the two attach points.
+pub(crate) fn orthogonalize_open_path(
+    points: &[Point2f32],
+    tolerance: f32,
+) -> Result<Vec<Point2f32>, Error> {
+    let simplified = crate::simplification::simplify_stroke(points, tolerance)?;
+    make_orthogonal(&simplified, tolerance)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn orthogonalize_open_path_keeps_endpoints() {
+        let p = |x, y| Point2f32::new(x, y);
+        // A roughly-orthogonal porch with slight wobble: out and back.
+        let stroke = vec![
+            p(3.0, 0.1),
+            p(3.1, -2.0),
+            p(2.9, -4.0),
+            p(7.0, -4.1),
+            p(7.1, -2.0),
+            p(6.9, 0.0),
+        ];
+        let ortho = orthogonalize_open_path(&stroke, 0.5).expect("orthogonalize");
+        assert!(ortho.len() >= 4, "expected a clean porch outline");
+        // First and last stay near the stroke's endpoints (open path: no
+        // closing-edge snap collapsing them).
+        assert!((ortho.first().unwrap().x - 3.0).abs() < 1.5);
+        assert!((ortho.last().unwrap().x - 7.0).abs() < 1.5);
+    }
 
     #[test]
     fn snap_closing_edge_aligns_horizontal_close() {

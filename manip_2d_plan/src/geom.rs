@@ -298,6 +298,77 @@ pub(crate) fn project_point_to_segment(
     (q, t, d)
 }
 
+/// Snap a point to a polygon's perimeter: the closest vertex if any is within
+/// `vertex_tol`, else the closest point on the closest edge. Returns
+/// `(edge_idx, t, distance, snapped_to_vertex)` with `t` CLAMPED to `[0, 1]`
+/// (callers rebuild the point from it). When snapping to vertex `i`, returns
+/// `(i, 0.0, dist, true)` — treating vertex `i` as the start of edge `i`.
+pub(crate) fn snap_to_polygon(
+    ring: &[Point2f32],
+    pt: Point2f32,
+    vertex_tol: f32,
+) -> (usize, f32, f32, bool) {
+    let n = ring.len();
+    if n < 2 {
+        return (0, 0.0, f32::INFINITY, false);
+    }
+    // Closest vertex.
+    let mut closest_v: (usize, f32) = (0, f32::INFINITY);
+    for i in 0..n {
+        let dx = ring[i].x - pt.x;
+        let dy = ring[i].y - pt.y;
+        let d = (dx * dx + dy * dy).sqrt();
+        if d < closest_v.1 {
+            closest_v = (i, d);
+        }
+    }
+    if closest_v.1 <= vertex_tol {
+        return (closest_v.0, 0.0, closest_v.1, true);
+    }
+    // Otherwise closest point on an edge.
+    let mut best: (usize, f32, f32) = (0, 0.0, f32::INFINITY);
+    for i in 0..n {
+        let a = ring[i];
+        let b = ring[(i + 1) % n];
+        if (a.x - b.x).powi(2) + (a.y - b.y).powi(2) < 1e-6 {
+            continue; // degenerate edge
+        }
+        let (_q, t, dist) = project_point_to_segment(pt, a, b);
+        if dist < best.2 {
+            best = (i, t.clamp(0.0, 1.0), dist);
+        }
+    }
+    (best.0, best.1, best.2, false)
+}
+
+/// Pin a near-edge point exactly onto an edge of `ring` by projecting it onto
+/// that edge's LINE — so it sits on the boundary while keeping its position
+/// along the edge. For an axis-aligned edge this is exactly "match the edge's
+/// perpendicular coordinate" (a horizontal edge fixes `y`, a vertical one `x`);
+/// for a DIAGONAL edge (a curve facet) it projects onto the slanted line rather
+/// than snapping to an axis, which would drag the point off the boundary. Used
+/// to pin attach/cut endpoints onto their edges so they line up with the spliced
+/// boundary — extend strokes attach to axis walls, a cut may reach a curve.
+pub(crate) fn pin_to_edge(p: &mut Point2f32, ring: &[Point2f32], edge: usize) {
+    let n = ring.len();
+    if n < 2 {
+        return;
+    }
+    let a = ring[edge % n];
+    let b = ring[(edge + 1) % n];
+    let (dx, dy) = (b.x - a.x, b.y - a.y);
+    let len2 = dx * dx + dy * dy;
+    if len2 < 1e-12 {
+        return; // degenerate edge — nothing to pin onto
+    }
+    // Foot of the perpendicular from `p` to the line through a→b. For an axis
+    // edge this reduces to setting just the perpendicular coordinate (the
+    // parallel one projects back to itself), so axis behaviour is unchanged.
+    let t = ((p.x - a.x) * dx + (p.y - a.y) * dy) / len2;
+    p.x = a.x + t * dx;
+    p.y = a.y + t * dy;
+}
+
 /// Twice the signed shoelace area of a ring (sign = winding); callers that
 /// only compare magnitudes use `.abs()`.
 pub(crate) fn ring_signed_area2(pts: &[Point2f32]) -> f32 {
@@ -472,6 +543,34 @@ pub fn untangle_ring(points: &[Point2f32]) -> Vec<Point2f32> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // 10x10 square: 0:(0,0) 1:(10,0) 2:(10,10) 3:(0,10)
+    fn unit_square() -> Vec<Point2f32> {
+        let p = |x, y| Point2f32::new(x, y);
+        vec![p(0.0, 0.0), p(10.0, 0.0), p(10.0, 10.0), p(0.0, 10.0)]
+    }
+
+    #[test]
+    fn snap_to_nearest_vertex_when_within_tol() {
+        let p = |x, y| Point2f32::new(x, y);
+        let ring = unit_square();
+        let (edge, t, dist, is_vertex) = snap_to_polygon(&ring, p(10.5, 9.6), 2.0);
+        assert_eq!(edge, 2);
+        assert_eq!(t, 0.0);
+        assert!(is_vertex);
+        assert!(dist < 2.0);
+    }
+
+    #[test]
+    fn snap_to_edge_when_far_from_any_vertex() {
+        let p = |x, y| Point2f32::new(x, y);
+        let ring = unit_square();
+        let (edge, t, dist, is_vertex) = snap_to_polygon(&ring, p(5.0, -1.0), 2.0);
+        assert_eq!(edge, 0);
+        assert!((t - 0.5).abs() < 1e-3);
+        assert!(!is_vertex);
+        assert!((dist - 1.0).abs() < 1e-3);
+    }
 
     #[test]
     fn untangle_removes_a_self_crossing() {

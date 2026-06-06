@@ -5,7 +5,7 @@
 //! the parametric model in place. So these stay `FloorPlan` methods — the pure
 //! splice mechanics already live in `extend.rs`.
 use crate::polygon_area;
-use crate::{extend, geom, simplification};
+use crate::{geom, orthogonal, simplification, splice};
 use crate::{Error, FloorPlan, ParameterId};
 use domain::points::Point2f32;
 // Test-only: the functions fully-qualify `std::collections::HashSet`; these
@@ -55,7 +55,7 @@ impl FloorPlan {
     /// newly-minted parameter IDs; errors (leaving the plan unchanged) if the
     /// line doesn't cross the outline or the result isn't a simple polygon.
     pub fn trim_by_stroke(&mut self, stroke: &[Point2f32]) -> Result<Vec<ParameterId>, Error> {
-        use crate::extend::SpliceElem;
+        use crate::splice::SpliceElem;
         if stroke.len() < 2 {
             return Err(Error::TrimError(
                 "trim stroke needs at least 2 points".into(),
@@ -249,7 +249,7 @@ impl FloorPlan {
         // Orthogonalize (Ortho tools) snaps to H/V; simplify (Curve tools) just
         // RDP-facets the hand-drawn arc, keeping its curvature.
         let path = if orthogonalize {
-            extend::orthogonalize_open_path(stroke, merge_tol)?
+            orthogonal::orthogonalize_open_path(stroke, merge_tol)?
         } else {
             simplification::simplify_stroke(stroke, merge_tol)?
         };
@@ -293,8 +293,8 @@ impl FloorPlan {
         // `snapped*` is true when the endpoint landed on an existing CORNER.
         let start = path[0];
         let end = path[path.len() - 1];
-        let (e1, t1, s_dist, snapped1) = extend::snap_to_polygon(&ring, start, vertex_tol);
-        let (e2, t2, e_dist, snapped2) = extend::snap_to_polygon(&ring, end, vertex_tol);
+        let (e1, t1, s_dist, snapped1) = geom::snap_to_polygon(&ring, start, vertex_tol);
+        let (e2, t2, e_dist, snapped2) = geom::snap_to_polygon(&ring, end, vertex_tol);
         if s_dist > max_tol || e_dist > max_tol {
             return Err(err(format!(
                 "endpoints too far from the outline (start={:.3}, end={:.3}, max={:.3})",
@@ -307,23 +307,23 @@ impl FloorPlan {
 
         let mut path = path.to_vec();
         let last = path.len() - 1;
-        extend::pin_to_edge(&mut path[0], &ring, e1);
-        extend::pin_to_edge(&mut path[last], &ring, e2);
+        geom::pin_to_edge(&mut path[0], &ring, e1);
+        geom::pin_to_edge(&mut path[last], &ring, e2);
 
         let mut chosen = if keep_larger {
             // Trim: build both arc-replacements; keep whichever leaves more area.
-            let area_of = |seq: &[crate::extend::SpliceElem]| -> f32 {
+            let area_of = |seq: &[crate::splice::SpliceElem]| -> f32 {
                 let pts: Vec<Point2f32> = seq
                     .iter()
                     .map(|e| match e {
-                        crate::extend::SpliceElem::Keep(idx) => ring[*idx],
-                        crate::extend::SpliceElem::New(pp) => *pp,
+                        crate::splice::SpliceElem::Keep(idx) => ring[*idx],
+                        crate::splice::SpliceElem::New(pp) => *pp,
                     })
                     .collect();
                 polygon_area(&pts).abs()
             };
-            let seq_a = extend::splice_sequence(&ring, e1, t1, e2, t2, &path, true);
-            let seq_b = extend::splice_sequence(&ring, e1, t1, e2, t2, &path, false);
+            let seq_a = splice::splice_sequence(&ring, e1, t1, e2, t2, &path, true);
+            let seq_b = splice::splice_sequence(&ring, e1, t1, e2, t2, &path, false);
             if area_of(&seq_a) >= area_of(&seq_b) {
                 seq_a
             } else {
@@ -331,7 +331,7 @@ impl FloorPlan {
             }
         } else {
             // Extend: replace the SHORTER arc with the path (adds the feature).
-            extend::plan_splice_sequence(&ring, e1, t1, e2, t2, &path)
+            splice::plan_splice_sequence(&ring, e1, t1, e2, t2, &path)
         };
 
         // Corner reuse. When an attach endpoint snaps onto an EXISTING corner
@@ -346,7 +346,7 @@ impl FloorPlan {
         // the corner's own already-known params and no extra param. Draw the
         // endpoint clearly off a corner to attach elsewhere. The guard avoids a
         // duplicate Keep when the corner happens to survive in the splice walk.
-        use crate::extend::SpliceElem;
+        use crate::splice::SpliceElem;
         let kept: std::collections::HashSet<usize> = chosen
             .iter()
             .filter_map(|el| match el {

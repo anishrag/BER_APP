@@ -60,7 +60,7 @@ impl FloorPlan {
         v2: VertexId,
         bulge_ratio: f32,
     ) -> Result<Vec<ParameterId>, Error> {
-        use crate::extend::SpliceElem;
+        use crate::splice::SpliceElem;
         let (r1, i1) = self
             .find_vertex(v1)
             .ok_or_else(|| Error::ExtendError("arc start vertex gone".into()))?;

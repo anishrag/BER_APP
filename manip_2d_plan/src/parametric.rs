@@ -626,7 +626,7 @@ impl ParametricPlan {
     }
 
     /// Replace `ring` with a spliced version built from `sequence` (see
-    /// `crate::extend::plan_splice_sequence`). `Keep(i)` slots clone the
+    /// `crate::splice::plan_splice_sequence`). `Keep(i)` slots clone the
     /// existing vertex verbatim — id, exprs, and parameter IDs all preserved.
     /// `New(p)` slots become fresh vertices whose coordinate expressions are
     /// resolved by matching `p`'s coords against the *kept* vertices' coords
@@ -643,9 +643,9 @@ impl ParametricPlan {
     pub fn splice_into_edge(
         &mut self,
         ring: usize,
-        sequence: &[crate::extend::SpliceElem],
+        sequence: &[crate::splice::SpliceElem],
     ) -> Result<Vec<ParameterId>, Error> {
-        use crate::extend::SpliceElem;
+        use crate::splice::SpliceElem;
         let old = self
             .rings
             .get(ring)
@@ -1952,7 +1952,7 @@ mod tests {
 
     #[test]
     fn splice_same_edge_bump_preserves_existing_params() {
-        use crate::extend::plan_splice_sequence;
+        use crate::splice::plan_splice_sequence;
         // 10x5 rectangle. After constraints: width param on V1.x, height on V2.y.
         let mut plan = build_plan(&[(0.0, 0.0), (10.0, 0.0), (10.0, 5.0), (0.0, 5.0)]);
         let pw = match &plan.rings[0][1].x_expr {
@@ -1999,7 +1999,7 @@ mod tests {
 
     #[test]
     fn splice_two_porches_same_depth_get_distinct_params() {
-        use crate::extend::plan_splice_sequence;
+        use crate::splice::plan_splice_sequence;
         let mut plan = build_plan(&[(0.0, 0.0), (10.0, 0.0), (10.0, 10.0), (0.0, 10.0)]);
 
         // Porch 1 on the top edge (edge 0), x in [2,4], depth y=-5.
@@ -2063,7 +2063,7 @@ mod tests {
 
     #[test]
     fn splice_cross_edge_removes_corner_vertex() {
-        use crate::extend::plan_splice_sequence;
+        use crate::splice::plan_splice_sequence;
         let mut plan = build_plan(&[(0.0, 0.0), (10.0, 0.0), (10.0, 10.0), (0.0, 10.0)]);
         // Vertex 1 is the corner at (10,0). Chamfer it: attach on edge 0 and
         // edge 1, replacing the corner.

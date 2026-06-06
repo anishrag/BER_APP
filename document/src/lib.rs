@@ -188,6 +188,21 @@ pub struct Document {
     pub wall_sections: HashMap<VertexId, Vec<ExposureSection>>,
 }
 
+/// Of the available `pieces`, the one the `stroke` is drawn in — the piece
+/// containing the most of the stroke's points. `None` if none contains any (the
+/// stroke lies entirely on boundaries, or there are no pieces).
+fn pick_piece_for_stroke(pieces: Vec<FloorPlan>, stroke: &[Point2f32]) -> Option<FloorPlan> {
+    pieces
+        .into_iter()
+        .map(|p| {
+            let inside = stroke.iter().filter(|s| p.contains_point(s.x, s.y)).count();
+            (inside, p)
+        })
+        .filter(|(inside, _)| *inside > 0)
+        .max_by_key(|(inside, _)| *inside)
+        .map(|(_, p)| p)
+}
+
 impl Document {
     /// Write the live editing buffer back into whichever slot is active, so the
     /// slots are current before they're read (persist / switch / snapshot).
@@ -218,25 +233,24 @@ impl Document {
         self.dimensioning = slot.dimensioning;
     }
 
-    /// Resolve a freehand sub-area stroke against the storey OUTLINE — clip,
-    /// then cut or carve. The relationship "sub-areas are carved against the
-    /// outline" lives here, not in the caller.
-    pub fn carve_or_cut_against_outline(
+    /// Resolve a freehand sub-area stroke against the AVAILABLE region — the
+    /// storey outline minus `holes` (the already-drawn regions of the same kind,
+    /// which a new sub-area must not overlap). The available region can be
+    /// disconnected; the cut runs against the piece the stroke is drawn in.
+    /// Returns that piece (the caller pins walls against it) plus the outcome.
+    /// `holes` empty → the whole outline (the relationship "sub-areas are carved
+    /// against the outline" lives here, not in the caller).
+    pub fn carve_or_cut_in_available(
         &self,
         stroke: &[Point2f32],
+        holes: &[Vec<Point2f32>],
         tuning: &SubareaTuning,
-    ) -> Result<SubareaOutcome, Error> {
-        self.outline.floor_plan.carve_or_cut(stroke, tuning)
-    }
-
-    /// The outline MINUS `holes` (already-placed regions), as the area still
-    /// available to carve into — so a new phase tiles against its neighbours
-    /// without overlap. Falls back to the whole outline when nothing is removed.
-    pub fn available_region(&self, holes: &[Vec<Point2f32>]) -> FloorPlan {
-        self.outline
-            .floor_plan
-            .subtract(holes)
-            .unwrap_or_else(|| self.outline.floor_plan.clone())
+    ) -> Result<(FloorPlan, SubareaOutcome), Error> {
+        let pieces = self.outline.floor_plan.subtract_all(holes);
+        let boundary = pick_piece_for_stroke(pieces, stroke)
+            .unwrap_or_else(|| self.outline.floor_plan.clone());
+        let outcome = boundary.carve_or_cut(stroke, tuning)?;
+        Ok((boundary, outcome))
     }
 
     /// Build a `ShapeSlot` for a freshly-constructed sub-area `plan`: inherit the
@@ -273,5 +287,39 @@ impl Document {
         self.load_active_into_buffer();
         self.pending_arc = None;
         self.edit_state = EditState::default();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn p(x: f32, y: f32) -> Point2f32 {
+        Point2f32::new(x, y)
+    }
+
+    /// `pick_piece_for_stroke` returns the available piece the stroke is drawn in
+    /// (the one containing most of its points), not just any / the largest.
+    #[test]
+    fn picks_the_piece_the_stroke_is_drawn_in() {
+        let left =
+            FloorPlan::from_clean_ring(&[p(0., 0.), p(4., 0.), p(4., 2.), p(0., 2.)]).unwrap();
+        let right =
+            FloorPlan::from_clean_ring(&[p(6., 0.), p(10., 0.), p(10., 2.), p(6., 2.)]).unwrap();
+        // a stroke inside the RIGHT piece
+        let stroke = vec![p(7., 0.5), p(8., 1.0), p(9., 1.5)];
+        let picked =
+            pick_piece_for_stroke(vec![left, right], &stroke).expect("a piece contains it");
+        assert!(picked.contains_point(8.0, 1.0), "picked the right piece");
+        assert!(!picked.contains_point(2.0, 1.0), "not the left piece");
+    }
+
+    /// No piece contains the stroke → `None` (the caller falls back to the outline).
+    #[test]
+    fn picks_none_when_no_piece_contains_the_stroke() {
+        let piece =
+            FloorPlan::from_clean_ring(&[p(0., 0.), p(2., 0.), p(2., 2.), p(0., 2.)]).unwrap();
+        let stroke = vec![p(50., 50.), p(60., 60.)];
+        assert!(pick_piece_for_stroke(vec![piece], &stroke).is_none());
     }
 }
