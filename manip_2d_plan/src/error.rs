@@ -42,4 +42,7 @@ pub enum Error {
 
     #[error("Trim failed: {0}")]
     TrimError(String),
+
+    #[error("can't complete this cut without changing its shape: it can't stay orthogonal and still reach the walls")]
+    CutWouldChangeShape,
 }

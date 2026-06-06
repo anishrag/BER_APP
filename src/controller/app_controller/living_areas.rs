@@ -243,7 +243,7 @@ impl AppController {
                     eprintln!("living area: {}", e);
                 }
             }
-            Err(e) => eprintln!("living-area carve_or_cut: {:?}", e),
+            Err(e) => eprintln!("living-area carve_or_cut: {}", e),
         }
     }
 

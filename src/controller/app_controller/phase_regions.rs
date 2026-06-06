@@ -135,7 +135,7 @@ impl AppController {
             }
             Err(e) => {
                 println!("────────────────────────────────────────────────────");
-                eprintln!("phase carve_or_cut: {:?}", e);
+                eprintln!("phase carve_or_cut: {}", e);
             }
         }
     }

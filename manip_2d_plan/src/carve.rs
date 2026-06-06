@@ -159,6 +159,7 @@ impl FloorPlan {
 }
 
 /// What a freehand sub-area stroke resolved to.
+#[derive(Debug)]
 pub enum SubareaOutcome {
     /// A straight cut split the outline into two regions — the caller lets the
     /// user pick which becomes the sub-area.
@@ -403,9 +404,11 @@ struct CutPlan {
     t2: f32,
 }
 
-/// Orthogonalize an OPEN cut `path` to the storey axes and snap + square its two
-/// ends onto `ring`. `None` if the ends don't reach two DISTINCT outline points.
-/// Shared by `split_cut` (user picks a side) and `sub_area` (auto-keeps a side).
+/// Resolve an OPEN cut `path` against `ring`. A STRAIGHT cut (step 2) slides both
+/// ends along the edges they land on to a shared row/column; a STEPPED cut
+/// (step 3) orthogonalizes the interior and slides each terminal end to its edge.
+/// `None` when the cut doesn't reach the outline (→ carve); `Err` when it reaches
+/// but can't be made orthogonal without changing its shape.
 fn cut_outline(
     ring: &[Point2f32],
     path: &[Point2f32],
@@ -420,119 +423,94 @@ fn cut_outline(
     if span < 1e-6 {
         return Ok(None);
     }
-    // Coarse, span-relative simplify: drops hand wobble but keeps a real step
-    // (ceilinged so a big corner survives even on a long cut).
     let cut_tol = tuning.coarse_simplify_tol(span, tolerance);
     let simplified = simplification::simplify_open(path, cut_tol);
-    // A straight cut between two points, snapped to the nearer axis.
-    let straight = |s: Point2f32, e: Point2f32| {
-        if (s.x - e.x).abs() <= (s.y - e.y).abs() {
-            let x = (s.x + e.x) * 0.5;
-            vec![Point2f32::new(x, s.y), Point2f32::new(x, e.y)]
-        } else {
-            let y = (s.y + e.y) * 0.5;
-            vec![Point2f32::new(s.x, y), Point2f32::new(e.x, y)]
-        }
-    };
-    let (s0, e0) = (simplified[0], simplified[simplified.len() - 1]);
-    let mut opath = if simplified.len() >= 3 {
-        // RDP may collapse a shallow step to <3 points; fall back to a straight
-        // cut rather than failing.
-        match orthogonal::make_orthogonal_at(&simplified, cut_tol, 0.0) {
-            Ok(o) if o.len() >= 2 => o,
-            _ => straight(s0, e0),
-        }
-    } else {
-        straight(s0, e0)
-    };
-
-    // Both ends must reach the outline at two DISTINCT points; snap them exactly
-    // onto it so the cut divides the boundary cleanly.
     let vertex_tol = (diag * tuning.cut_vertex_tol_ratio).max(1e-4);
     let reach_tol = (diag * tuning.cut_reach_tol_ratio).max(1e-3);
-    let last = opath.len() - 1;
-    let (e1, t1, d1, v1) = extend::snap_to_polygon(ring, opath[0], vertex_tol);
-    let (e2, t2, d2, v2) = extend::snap_to_polygon(ring, opath[last], vertex_tol);
-    if d1 > reach_tol || d2 > reach_tol || (e1 == e2 && (t1 - t2).abs() < 1e-3) {
-        return Ok(None);
-    }
-    let (pre0, pre_last) = (opath[0], opath[last]);
-    // A vertex snap (t=0 at corner `e`) must land EXACTLY on the corner.
-    if v1 {
-        opath[0] = ring[e1];
-    } else {
-        extend::pin_to_edge(&mut opath[0], ring, e1);
-    }
-    if v2 {
-        opath[last] = ring[e2];
-    } else {
-        extend::pin_to_edge(&mut opath[last], ring, e2);
-    }
 
-    // Keep the cut ORTHOGONAL after the snap, in two passes over its two ends.
-    // A snap can tilt a terminal leg only when the endpoint moved OFF the leg's
-    // rail (its shared axis coordinate); the fix depends on WHY it moved:
-    //
-    //  1. ALIGN — the end landed on an INTERIOR-FACING vertex (no outline edge
-    //     parallel to the leg there). Shift the inward neighbour onto that
-    //     vertex's rail, so the leg is axis-aligned THROUGH the vertex. The
-    //     cut's position is then fixed by the vertex (both ends share one
-    //     parameter), leaving nothing to dimension on that wall.
-    //  2. STEP — the end landed on an edge/corner whose wall runs PARALLEL to
-    //     the leg, where aligning would lay the cut on top of that wall. Keep
-    //     the leg's rail and add a short perpendicular jog out to the endpoint.
-    let eps = 1e-3;
-    let nverts = ring.len();
-    let tilted = |a: Point2f32, b: Point2f32| (a.x - b.x).abs() > eps && (a.y - b.y).abs() > eps;
-    // A leg is vertical when its PRE-snap endpoint shared the neighbour's x.
-    let leg_vertical = |pre: Point2f32, c: Point2f32| (pre.x - c.x).abs() < (pre.y - c.y).abs();
-    let faces_interior = |vi: usize, vertical: bool| {
-        let (v, p, q) = (
-            ring[vi],
-            ring[(vi + nverts - 1) % nverts],
-            ring[(vi + 1) % nverts],
-        );
-        if vertical {
-            (p.x - v.x).abs() > eps && (q.x - v.x).abs() > eps
-        } else {
-            (p.y - v.y).abs() > eps && (q.y - v.y).abs() > eps
+    // STEP 3: a cut with corners orthogonalizes to a stepped polyline. A
+    // near-straight one collapses and falls through to the straight-cut solve.
+    let stepped = if simplified.len() >= 3 {
+        match orthogonal::make_orthogonal_at(&simplified, cut_tol, 0.0) {
+            Ok(o) if o.len() >= 3 => Some(o),
+            _ => None,
         }
+    } else {
+        None
     };
-    // PASS 1: align onto interior-facing vertices (no insertions → stable
-    // indices). For a straight cut whose other end is the anchored vertex, this
-    // shifts THIS end onto it; for a multi-leg cut it shifts the free corner.
-    for (e_idx, c_idx, is_v, vi, pre) in [
-        (0usize, 1usize.min(last), v1, e1, pre0),
-        (last, last.saturating_sub(1), v2, e2, pre_last),
-    ] {
-        if is_v && tilted(opath[e_idx], opath[c_idx]) {
-            let vertical = leg_vertical(pre, opath[c_idx]);
-            if faces_interior(vi, vertical) {
-                if vertical {
-                    opath[c_idx].x = opath[e_idx].x;
-                } else {
-                    opath[c_idx].y = opath[e_idx].y;
-                }
+
+    let Some(mut opath) = stepped else {
+        // STEP 2: a single straight cut.
+        return solve_straight_cut(
+            ring,
+            simplified[0],
+            simplified[simplified.len() - 1],
+            vertex_tol,
+            reach_tol,
+        );
+    };
+
+    // Place each terminal END onto the outline along its own leg's rail.
+    let last = opath.len() - 1;
+    let n = ring.len();
+    let place = |opath: &mut Vec<Point2f32>, e_idx: usize, n_idx: usize| -> Option<(usize, f32)> {
+        let end = opath[e_idx];
+        let neighbour = opath[n_idx];
+        let (edge, t_snap, d, is_vertex) = extend::snap_to_polygon(ring, end, vertex_tol);
+        if d > reach_tol {
+            return None;
+        }
+        let leg_horizontal = (end.y - neighbour.y).abs() <= (end.x - neighbour.x).abs();
+        if is_vertex {
+            let v = ring[edge];
+            opath[e_idx] = v;
+            if leg_horizontal {
+                opath[n_idx].y = v.y;
+            } else {
+                opath[n_idx].x = v.x;
+            }
+            return Some((edge, 0.0));
+        }
+        let (a, b) = (ring[edge], ring[(edge + 1) % n]);
+        let crossing = if leg_horizontal {
+            let c = neighbour.y;
+            ((b.y - a.y).abs() > 1e-6)
+                .then(|| (c - a.y) / (b.y - a.y))
+                .filter(|t| (0.0f32..=1.0).contains(t))
+                .map(|t| (Point2f32::new(a.x + t * (b.x - a.x), c), t))
+        } else {
+            let c = neighbour.x;
+            ((b.x - a.x).abs() > 1e-6)
+                .then(|| (c - a.x) / (b.x - a.x))
+                .filter(|t| (0.0f32..=1.0).contains(t))
+                .map(|t| (Point2f32::new(c, a.y + t * (b.y - a.y)), t))
+        };
+        match crossing {
+            Some((pt, t)) => {
+                opath[e_idx] = pt;
+                Some((edge, t))
+            }
+            None => {
+                extend::pin_to_edge(&mut opath[e_idx], ring, edge);
+                Some((edge, t_snap))
             }
         }
-    }
-    // PASS 2: step whatever is still tilted. END first so START indices hold.
-    let step = |opath: &mut Vec<Point2f32>, e_idx: usize, c_idx: usize, pre: Point2f32| {
-        if tilted(opath[e_idx], opath[c_idx]) {
-            let (e, c) = (opath[e_idx], opath[c_idx]);
-            let corner = if leg_vertical(pre, c) {
-                Point2f32::new(c.x, e.y) // vertical leg toward c, jog in x to e
-            } else {
-                Point2f32::new(e.x, c.y)
-            };
-            let ins = if e_idx > c_idx { e_idx } else { c_idx };
-            opath.insert(ins, corner);
-        }
     };
-    let m = opath.len();
-    step(&mut opath, m - 1, m - 2, pre_last);
-    step(&mut opath, 0, 1, pre0);
 
+    let drawn_reaches = |p: Point2f32| extend::snap_to_polygon(ring, p, vertex_tol).2 <= reach_tol;
+    let drawn_reached_both = drawn_reaches(path[0]) && drawn_reaches(path[path.len() - 1]);
+    let p1 = place(&mut opath, 0, 1usize.min(last));
+    let p2 = place(&mut opath, last, last.saturating_sub(1));
+    let (Some((e1, t1)), Some((e2, t2))) = (p1, p2) else {
+        return if drawn_reached_both {
+            Err(Error::CutWouldChangeShape)
+        } else {
+            Ok(None)
+        };
+    };
+    if e1 == e2 && (t1 - t2).abs() < 1e-3 {
+        return Ok(None);
+    }
     Ok(Some(CutPlan {
         opath,
         e1,
@@ -540,6 +518,127 @@ fn cut_outline(
         e2,
         t2,
     }))
+}
+
+/// `[lo, hi]` overlap of two 1-D ranges (each given by its two endpoints), or
+/// `None` if they don't overlap.
+fn range_overlap(a0: f32, a1: f32, b0: f32, b1: f32) -> Option<(f32, f32)> {
+    let lo = a0.min(a1).max(b0.min(b1));
+    let hi = a0.max(a1).min(b0.max(b1));
+    (lo <= hi + 1e-4).then_some((lo, hi))
+}
+
+/// Place a point on edge `(a, b)` at a shared coordinate, sliding along the edge.
+/// `horizontal_cut` → the shared coordinate `coord` is a Y (the cut is horizontal);
+/// else it's an X. `toward` breaks the tie when the edge is parallel to the cut.
+/// `None` if `coord` is off the edge's span. Returns the point and its `t`.
+fn slide_on_edge(
+    a: Point2f32,
+    b: Point2f32,
+    horizontal_cut: bool,
+    coord: f32,
+    toward: Point2f32,
+) -> Option<(Point2f32, f32)> {
+    let eps = 1e-4;
+    if horizontal_cut {
+        let (lo, hi) = (a.y.min(b.y), a.y.max(b.y));
+        if coord < lo - eps || coord > hi + eps {
+            return None;
+        }
+        let t = if (b.y - a.y).abs() < eps {
+            // Horizontal edge at y≈coord: x free → slide toward `toward.x`.
+            if (b.x - a.x).abs() < eps {
+                0.0
+            } else {
+                ((toward.x - a.x) / (b.x - a.x)).clamp(0.0, 1.0)
+            }
+        } else {
+            ((coord - a.y) / (b.y - a.y)).clamp(0.0, 1.0)
+        };
+        Some((Point2f32::new(a.x + t * (b.x - a.x), coord), t))
+    } else {
+        let (lo, hi) = (a.x.min(b.x), a.x.max(b.x));
+        if coord < lo - eps || coord > hi + eps {
+            return None;
+        }
+        let t = if (b.x - a.x).abs() < eps {
+            if (b.y - a.y).abs() < eps {
+                0.0
+            } else {
+                ((toward.y - a.y) / (b.y - a.y)).clamp(0.0, 1.0)
+            }
+        } else {
+            ((coord - a.x) / (b.x - a.x)).clamp(0.0, 1.0)
+        };
+        Some((Point2f32::new(coord, a.y + t * (b.y - a.y)), t))
+    }
+}
+
+/// STEP 2: a STRAIGHT cut. Snap each drawn end to the edge it sits on, then slide
+/// both ends along their edges to a shared coordinate so the cut is one HORIZONTAL
+/// or VERTICAL line (picking the orientation closest to the drawn cut). `Err`
+/// (`CutWouldChangeShape`) when neither is possible (the two edges share no row or
+/// column); `None` (→ carve) when the drawn cut doesn't reach the outline.
+fn solve_straight_cut(
+    ring: &[Point2f32],
+    d0: Point2f32,
+    d1: Point2f32,
+    vertex_tol: f32,
+    reach_tol: f32,
+) -> Result<Option<CutPlan>, Error> {
+    let n = ring.len();
+    let (e1, _, dd1, _) = extend::snap_to_polygon(ring, d0, vertex_tol);
+    let (e2, _, dd2, _) = extend::snap_to_polygon(ring, d1, vertex_tol);
+    if dd1 > reach_tol || dd2 > reach_tol {
+        return Ok(None); // doesn't reach → let the caller carve
+    }
+    if e1 == e2 {
+        return Ok(None); // both ends on one edge → not a dividing cut
+    }
+    let (a1, b1) = (ring[e1], ring[(e1 + 1) % n]);
+    let (a2, b2) = (ring[e2], ring[(e2 + 1) % n]);
+    let yov = range_overlap(a1.y, b1.y, a2.y, b2.y);
+    let xov = range_overlap(a1.x, b1.x, a2.x, b2.x);
+
+    let horizontal = || -> Option<CutPlan> {
+        let (lo, hi) = yov?;
+        let y0 = ((d0.y + d1.y) * 0.5).clamp(lo, hi);
+        let (p1, t1) = slide_on_edge(a1, b1, true, y0, d0)?;
+        let (p2, t2) = slide_on_edge(a2, b2, true, y0, d1)?;
+        Some(CutPlan {
+            opath: vec![p1, p2],
+            e1,
+            t1,
+            e2,
+            t2,
+        })
+    };
+    let vertical = || -> Option<CutPlan> {
+        let (lo, hi) = xov?;
+        let x0 = ((d0.x + d1.x) * 0.5).clamp(lo, hi);
+        let (p1, t1) = slide_on_edge(a1, b1, false, x0, d0)?;
+        let (p2, t2) = slide_on_edge(a2, b2, false, x0, d1)?;
+        Some(CutPlan {
+            opath: vec![p1, p2],
+            e1,
+            t1,
+            e2,
+            t2,
+        })
+    };
+
+    // Prefer the orientation matching the drawn cut's dominant axis.
+    let h = horizontal();
+    let v = vertical();
+    let plan = if (d1.x - d0.x).abs() >= (d1.y - d0.y).abs() {
+        h.or(v)
+    } else {
+        v.or(h)
+    };
+    match plan {
+        Some(p) => Ok(Some(p)),
+        None => Err(Error::CutWouldChangeShape),
+    }
 }
 
 /// Splice `plan`'s cut into `outline` -- replacing the arc from crossing 1->2
@@ -672,6 +771,102 @@ mod cut_line_tests {
     use super::*;
     fn p(x: f32, y: f32) -> Point2f32 {
         Point2f32::new(x, y)
+    }
+
+    /// A horizontal cut meeting a DIAGONAL house wall slides its end ALONG the
+    /// cut to the clean axis-crossing (~(8,8) on x+y=16) — a single straight cut
+    /// wall, no jog — because the orthogonality-aware snap moves the end along its
+    /// own rail to where that rail crosses the diagonal.
+    #[test]
+    fn cut_to_a_diagonal_wall_reaches_it() {
+        // Square with the top-right corner cut by a diagonal (10,6)->(6,10).
+        let outline = FloorPlan::from_clean_ring(&[
+            p(0., 0.),
+            p(10., 0.),
+            p(10., 6.),
+            p(6., 10.),
+            p(0., 10.),
+        ])
+        .unwrap();
+        assert!(
+            !outline.non_orthogonal_edges().is_empty(),
+            "outline has a diagonal"
+        );
+        // Horizontal cut from the left wall across to the diagonal (meets at (8,8)).
+        let cut = vec![p(0.1, 8.0), p(7.0, 8.0)];
+        let split = split_cut(&outline.get_points(), &cut, 0.1, &SubareaTuning::default()).unwrap();
+        let (a, b) = split.expect("cut reaches the left wall and the diagonal → two regions");
+        a.validate_simple().unwrap();
+        b.validate_simple().unwrap();
+        let on_diag = |fp: &FloorPlan| {
+            fp.get_points()
+                .iter()
+                .any(|q| (q.x + q.y - 16.0).abs() < 0.2 && (q.y - 8.0).abs() < 0.4)
+        };
+        assert!(
+            on_diag(&a) || on_diag(&b),
+            "the cut's far end reached the diagonal near (8,8): a={:?} b={:?}",
+            a.get_points(),
+            b.get_points()
+        );
+    }
+
+    /// A "vertical" cut across an all-DIAGONAL storey (a diamond), drawn from the
+    /// upper-left edge to the lower-right edge. Those edges share a common x only
+    /// at the vertices, so the only orthogonal cut slides both ends to the top and
+    /// bottom vertices — a clean vertical diagonal (5,10)-(5,0). The ends leave the
+    /// edges they were drawn on because that's the sole feasible orthogonal cut.
+    #[test]
+    fn diamond_vertical_cut_slides_to_the_vertices() {
+        // CCW diamond: bottom (5,0), right (10,5), top (5,10), left (0,5).
+        let outline =
+            FloorPlan::from_clean_ring(&[p(5., 0.), p(10., 5.), p(5., 10.), p(0., 5.)]).unwrap();
+        let cut = vec![p(2., 7.), p(6., 1.)]; // upper-left edge → lower-right edge
+        let (a, b) = split_cut(&outline.get_points(), &cut, 0.1, &SubareaTuning::default())
+            .unwrap()
+            .expect("slides to the vertical diagonal between the top and bottom vertices");
+        a.validate_simple().unwrap();
+        b.validate_simple().unwrap();
+        let has = |fp: &FloorPlan, x: f32, y: f32| {
+            fp.get_points()
+                .iter()
+                .any(|q| (q.x - x).abs() < 0.1 && (q.y - y).abs() < 0.1)
+        };
+        // The cut runs (5,10)-(5,0); both regions carry those endpoints.
+        assert!(
+            has(&a, 5., 10.) && has(&a, 5., 0.),
+            "region a on the cut: {:?}",
+            a.get_points()
+        );
+        assert!(
+            has(&b, 5., 10.) && has(&b, 5., 0.),
+            "region b on the cut: {:?}",
+            b.get_points()
+        );
+    }
+
+    /// A cut between two edges that share NO row or column — the top-left and
+    /// bottom-right chamfers of an octagon — can't be made horizontal OR vertical
+    /// by sliding, so it errors clearly rather than distorting the cut's shape.
+    #[test]
+    fn cut_between_opposite_chamfers_errors() {
+        // Chamfered square: TL chamfer (2,10)-(0,8) [x∈0..2,y∈8..10]; BR chamfer
+        // (8,0)-(10,2) [x∈8..10,y∈0..2] — disjoint in both x and y.
+        let outline = FloorPlan::from_clean_ring(&[
+            p(2., 0.),
+            p(8., 0.),
+            p(10., 2.),
+            p(10., 8.),
+            p(8., 10.),
+            p(2., 10.),
+            p(0., 8.),
+            p(0., 2.),
+        ])
+        .unwrap();
+        let cut = vec![p(1., 9.), p(9., 1.)]; // TL chamfer → BR chamfer
+        let err = carve_or_cut(&outline.get_points(), &cut, &SubareaTuning::default())
+            .expect_err("opposite chamfers share no row or column");
+        assert!(matches!(err, Error::CutWouldChangeShape), "got {err:?}");
     }
 
     /// Drawing a single straight CUT line across the storey (endpoints on two
@@ -839,9 +1034,8 @@ mod cut_line_tests {
     }
 
     /// A cut endpoint that snaps to a CORNER whose wall runs parallel to the
-    /// terminal leg must not tilt the leg — an orthogonal STEP is inserted so the
-    /// cut stays axis-aligned. The bottom end sits just inside the (10,0) corner,
-    /// so it snaps to that corner's vertical wall.
+    /// terminal leg must stay axis-aligned. The bottom end sits just inside the
+    /// (10,0) corner, so it snaps to that corner's vertical wall.
     #[test]
     fn cut_snapping_to_a_corner_stays_orthogonal() {
         let outline = FloorPlan::from_points_to_orthogonal(
@@ -896,11 +1090,10 @@ mod cut_line_tests {
         );
     }
 
-    /// A STRAIGHT cut whose end snaps to a VERTEX must stay axis-aligned: the
-    /// OTHER end is re-aligned onto the vertex (it slides along its perpendicular
-    /// edge), so the cut is vertical THROUGH the vertex — not tilted, and with no
-    /// stray free parameter. (Regression: a near-vertical cut whose bottom snapped
-    /// to a vertex came out tilted because the step-fix only ran for ≥3-leg cuts.)
+    /// A STRAIGHT cut whose end snaps to a VERTEX must stay axis-aligned: the leg
+    /// lands exactly on the corner and its inner neighbour is aligned onto the
+    /// corner's rail, so the cut is vertical THROUGH the vertex — not tilted, and
+    /// with no stray free parameter.
     #[test]
     fn straight_cut_snapping_to_a_vertex_stays_axis_aligned() {
         // (6,0) is a real corner (flat bottom meets a diagonal), so a vertical cut
