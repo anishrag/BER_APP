@@ -65,18 +65,34 @@ pub(crate) fn clip_stroke_inside(
     points: &[Point2f32],
     close_gap_m: f32,
 ) -> Vec<Point2f32> {
-    let closed = points.len() >= 3
-        && points
-            .first()
-            .zip(points.last())
-            .map(|(a, b)| ((a.x - b.x).powi(2) + (a.y - b.y).powi(2)).sqrt() < close_gap_m)
-            .unwrap_or(false);
+    let ends_meet = points
+        .first()
+        .zip(points.last())
+        .map(|(a, b)| ((a.x - b.x).powi(2) + (a.y - b.y).powi(2)).sqrt() < close_gap_m)
+        .unwrap_or(false);
+    // A genuine CLOSED loop both meets its ends AND encloses real area. A short
+    // straight CUT whose ends merely fall within `close_gap_m` is NOT a loop —
+    // clipping it as one collapses it to a degenerate sliver and the cut is then
+    // lost. Keep it OPEN so the cut solver sees the real line.
+    let closed = points.len() >= 3 && ends_meet && encloses_area(points);
     if closed {
         if let Some(clipped) = clip_loop_to_outline(outline, points) {
             return clipped;
         }
     }
     clamp_inside(outline, points)
+}
+
+/// Whether `pts` enclose real area (a drawn ROOM) rather than being a near-
+/// straight line whose ends happen to fall close together (a short CUT). The
+/// enclosed (shoelace) area must be a real fraction of the stroke's extent.
+fn encloses_area(pts: &[Point2f32]) -> bool {
+    let Some(((x0, y0), (x1, y1))) = geom::bbox(pts) else {
+        return false;
+    };
+    let span = (x1 - x0).max(y1 - y0);
+    let area = geom::ring_signed_area2(pts).abs() * 0.5;
+    area > span * span * 0.05
 }
 
 /// Intersect a closed freehand loop with the outline polygon and return the
@@ -345,5 +361,92 @@ mod tests {
             outline.any_point_outside(&poking, 0.05),
             "room past x=10 is flagged"
         );
+    }
+}
+
+#[cfg(test)]
+mod overlap_repro {
+    use super::*;
+    fn pt(x: f32, y: f32) -> Point2f32 {
+        Point2f32::new(x, y)
+    }
+    fn outline() -> Vec<Point2f32> {
+        vec![
+            pt(2.95, 0.571),
+            pt(2.45, 0.571),
+            pt(2.45, 1.571),
+            pt(1.55, 1.571),
+            pt(1.55, 2.571),
+            pt(1.552, 2.653),
+            pt(1.562, 2.735),
+            pt(1.578, 2.815),
+            pt(1.601, 2.894),
+            pt(1.63, 2.971),
+            pt(1.665, 3.045),
+            pt(1.706, 3.116),
+            pt(1.753, 3.183),
+            pt(1.805, 3.246),
+            pt(1.863, 3.305),
+            pt(1.925, 3.359),
+            pt(1.991, 3.407),
+            pt(2.061, 3.45),
+            pt(2.134, 3.487),
+            pt(2.21, 3.518),
+            pt(2.289, 3.542),
+            pt(2.369, 3.56),
+            pt(2.45, 3.571),
+            pt(3.45, 3.571),
+            pt(3.45, 3.071),
+            pt(4.15, 3.071),
+            pt(4.15, 3.571),
+            pt(5.45, 3.571),
+            pt(5.45, 2.871),
+            pt(4.85, 2.571),
+            pt(3.45, 2.571),
+            pt(3.45, 1.271),
+            pt(3.455, 1.219),
+            pt(3.456, 1.166),
+            pt(3.453, 1.113),
+            pt(3.445, 1.061),
+            pt(3.433, 1.01),
+            pt(3.416, 0.959),
+            pt(3.395, 0.911),
+            pt(3.37, 0.864),
+            pt(3.341, 0.82),
+            pt(3.309, 0.778),
+            pt(3.273, 0.74),
+            pt(3.234, 0.704),
+            pt(3.192, 0.672),
+            pt(3.147, 0.644),
+            pt(3.1, 0.619),
+            pt(3.052, 0.599),
+            pt(3.001, 0.583),
+        ]
+    }
+    #[test]
+    fn subtract_excludes_edge_touching_area() {
+        let o = outline();
+        // the right-room living area (touches the right walls) from the log
+        let area = vec![
+            pt(3.4498644, 2.571196),
+            pt(4.8498645, 2.571196),
+            pt(5.4498644, 2.871196),
+            pt(5.4498644, 3.571196),
+            pt(4.149864, 3.571196),
+            pt(4.149864, 3.071196),
+            pt(3.4498644, 3.071196),
+        ];
+        let pieces = subtract_all(&o, &[area]);
+        // a point well inside the right room must NOT be in any available piece
+        assert!(
+            !pieces
+                .iter()
+                .any(|p| geom::ring_contains_point(&p.get_points(), 5.0, 3.2)),
+            "the existing right-room area must be excluded from the available region"
+        );
+        // the left part is still available
+        assert!(pieces
+            .iter()
+            .any(|p| geom::ring_contains_point(&p.get_points(), 2.5, 2.0)));
     }
 }

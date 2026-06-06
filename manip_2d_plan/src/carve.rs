@@ -597,8 +597,9 @@ fn solve_straight_cut(
     reach_tol: f32,
 ) -> Result<Option<CutPlan>, Error> {
     let n = ring.len();
-    let (e1, _, dd1, _) = snap::snap_to_polygon(ring, d0, vertex_tol);
-    let (e2, _, dd2, _) = snap::snap_to_polygon(ring, d1, vertex_tol);
+    let eps = 1e-3_f32;
+    let (e1, _, dd1, v1) = snap::snap_to_polygon(ring, d0, vertex_tol);
+    let (e2, _, dd2, v2) = snap::snap_to_polygon(ring, d1, vertex_tol);
     if dd1 > reach_tol || dd2 > reach_tol {
         return Ok(None); // doesn't reach → let the caller carve
     }
@@ -610,11 +611,45 @@ fn solve_straight_cut(
     let yov = range_overlap(a1.y, b1.y, a2.y, b2.y);
     let xov = range_overlap(a1.x, b1.x, a2.x, b2.x);
 
+    // Resolve one cut end onto the shared row/column `c` (`horizontal` = shared
+    // y). A VERTEX end pins to its CORNER — so a cut that extends an existing
+    // wall terminates exactly at the wall's end (collinear), instead of sliding
+    // onto and overlapping it, or leaving a sliver beside it. A mid-edge end
+    // slides along its edge to `c`. `None` if a corner doesn't lie on `c`.
+    let endpoint = |e: usize,
+                    a: Point2f32,
+                    b: Point2f32,
+                    is_vertex: bool,
+                    horizontal: bool,
+                    c: f32,
+                    toward: Point2f32|
+     -> Option<(Point2f32, f32)> {
+        if is_vertex {
+            let v = ring[e];
+            let on = if horizontal {
+                (v.y - c).abs() <= eps
+            } else {
+                (v.x - c).abs() <= eps
+            };
+            on.then_some((v, 0.0))
+        } else {
+            slide_on_edge(a, b, horizontal, c, toward)
+        }
+    };
+
     let horizontal = || -> Option<CutPlan> {
         let (lo, hi) = yov?;
-        let y0 = ((d0.y + d1.y) * 0.5).clamp(lo, hi);
-        let (p1, t1) = slide_on_edge(a1, b1, true, y0, d0)?;
-        let (p2, t2) = slide_on_edge(a2, b2, true, y0, d1)?;
+        // A vertex end fixes the row; else the overlap midpoint.
+        let y0 = match (v1, v2) {
+            (true, _) => ring[e1].y,
+            (_, true) => ring[e2].y,
+            _ => ((d0.y + d1.y) * 0.5).clamp(lo, hi),
+        };
+        if y0 < lo - eps || y0 > hi + eps {
+            return None;
+        }
+        let (p1, t1) = endpoint(e1, a1, b1, v1, true, y0, d0)?;
+        let (p2, t2) = endpoint(e2, a2, b2, v2, true, y0, d1)?;
         Some(CutPlan {
             opath: vec![p1, p2],
             e1,
@@ -625,9 +660,16 @@ fn solve_straight_cut(
     };
     let vertical = || -> Option<CutPlan> {
         let (lo, hi) = xov?;
-        let x0 = ((d0.x + d1.x) * 0.5).clamp(lo, hi);
-        let (p1, t1) = slide_on_edge(a1, b1, false, x0, d0)?;
-        let (p2, t2) = slide_on_edge(a2, b2, false, x0, d1)?;
+        let x0 = match (v1, v2) {
+            (true, _) => ring[e1].x,
+            (_, true) => ring[e2].x,
+            _ => ((d0.x + d1.x) * 0.5).clamp(lo, hi),
+        };
+        if x0 < lo - eps || x0 > hi + eps {
+            return None;
+        }
+        let (p1, t1) = endpoint(e1, a1, b1, v1, false, x0, d0)?;
+        let (p2, t2) = endpoint(e2, a2, b2, v2, false, x0, d1)?;
         Some(CutPlan {
             opath: vec![p1, p2],
             e1,
@@ -2579,5 +2621,97 @@ mod boundary_carve_tests {
             "diagonal endpoints preserved (not flattened): {:?}",
             ring
         );
+    }
+}
+
+#[cfg(test)]
+mod checkpoint_cut {
+    use super::*;
+    use crate::SubareaTuning;
+    fn pt(x: f32, y: f32) -> Point2f32 {
+        Point2f32::new(x, y)
+    }
+    fn outline() -> Vec<Point2f32> {
+        vec![
+            pt(2.95, 0.571),
+            pt(2.45, 0.571),
+            pt(2.45, 1.571),
+            pt(1.55, 1.571),
+            pt(1.55, 2.571),
+            pt(1.552, 2.653),
+            pt(1.562, 2.735),
+            pt(1.578, 2.815),
+            pt(1.601, 2.894),
+            pt(1.63, 2.971),
+            pt(1.665, 3.045),
+            pt(1.706, 3.116),
+            pt(1.753, 3.183),
+            pt(1.805, 3.246),
+            pt(1.863, 3.305),
+            pt(1.925, 3.359),
+            pt(1.991, 3.407),
+            pt(2.061, 3.45),
+            pt(2.134, 3.487),
+            pt(2.21, 3.518),
+            pt(2.289, 3.542),
+            pt(2.369, 3.56),
+            pt(2.45, 3.571),
+            pt(3.45, 3.571),
+            pt(3.45, 3.071),
+            pt(4.15, 3.071),
+            pt(4.15, 3.571),
+            pt(5.45, 3.571),
+            pt(5.45, 2.871),
+            pt(4.85, 2.571),
+            pt(3.45, 2.571),
+            pt(3.45, 1.271),
+            pt(3.455, 1.219),
+            pt(3.456, 1.166),
+            pt(3.453, 1.113),
+            pt(3.445, 1.061),
+            pt(3.433, 1.01),
+            pt(3.416, 0.959),
+            pt(3.395, 0.911),
+            pt(3.37, 0.864),
+            pt(3.341, 0.82),
+            pt(3.309, 0.778),
+            pt(3.273, 0.74),
+            pt(3.234, 0.704),
+            pt(3.192, 0.672),
+            pt(3.147, 0.644),
+            pt(3.1, 0.619),
+            pt(3.052, 0.599),
+            pt(3.001, 0.583),
+        ]
+    }
+    #[test]
+    fn short_cut_in_line_with_a_wall_still_divides() {
+        let o = outline();
+        let stroke = vec![
+            pt(3.460, 2.561),
+            pt(3.460, 2.65),
+            pt(3.460, 2.72),
+            pt(3.454, 2.84),
+            pt(3.454, 2.90),
+            pt(3.454, 2.95),
+            pt(3.457, 2.996),
+            pt(3.460, 3.04),
+            pt(3.460, 3.082),
+        ];
+        let t = SubareaTuning::default();
+        let res = FloorPlan::from_clean_ring(&o)
+            .unwrap()
+            .carve_or_cut(&stroke, &t);
+        // A short near-vertical cut (ends within `close_gap_m`, so it must NOT be
+        // mis-clipped as a closed loop) whose ends land on CORNERS in line with an
+        // existing wall must still be a dividing CUT: the cut extends the wall
+        // through the gap (terminating at the corners), splitting off the room.
+        match res {
+            Ok(SubareaOutcome::Cut(a, b)) => {
+                a.validate_simple().expect("region a valid");
+                b.validate_simple().expect("region b valid");
+            }
+            other => panic!("expected a Cut, got {other:?}"),
+        }
     }
 }

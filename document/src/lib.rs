@@ -188,19 +188,48 @@ pub struct Document {
     pub wall_sections: HashMap<VertexId, Vec<ExposureSection>>,
 }
 
-/// Of the available `pieces`, the one the `stroke` is drawn in — the piece
-/// containing the most of the stroke's points. `None` if none contains any (the
-/// stroke lies entirely on boundaries, or there are no pieces).
+/// Twice the unsigned shoelace area of a plan's primary ring.
+fn ring_area2(fp: &FloorPlan) -> f32 {
+    let pts = fp.get_points();
+    let n = pts.len();
+    if n < 3 {
+        return 0.0;
+    }
+    let mut s = 0.0;
+    for i in 0..n {
+        let a = pts[i];
+        let b = pts[(i + 1) % n];
+        s += a.x * b.y - b.x * a.y;
+    }
+    s.abs()
+}
+
+/// Of the available `pieces`, the one to carve the `stroke` against. Scored by
+/// how much the stroke and the piece OVERLAP, counting BOTH directions, so it
+/// works whether the stroke runs THROUGH the piece or LOOPS AROUND it:
+/// - stroke points inside the piece (an open cut traversing it), plus
+/// - piece vertices inside the stroke loop (a closed area drawn around it).
+///
+/// Ties (and the "stroke over already-taken space — no overlap anywhere" case)
+/// break to the LARGEST piece. Returns `None` only when there are NO pieces (the
+/// whole outline is taken). Crucially this never lets the caller fall back to the
+/// full outline when free space exists, so a new area can't overlap an existing
+/// one — the clip confines it to the available region (or rejects it).
 fn pick_piece_for_stroke(pieces: Vec<FloorPlan>, stroke: &[Point2f32]) -> Option<FloorPlan> {
     pieces
         .into_iter()
         .map(|p| {
-            let inside = stroke.iter().filter(|s| p.contains_point(s.x, s.y)).count();
-            (inside, p)
+            let pts_in_piece = stroke.iter().filter(|s| p.contains_point(s.x, s.y)).count();
+            let piece_in_stroke = p
+                .get_points()
+                .iter()
+                .filter(|v| manip_2d_plan::ring_contains_point(stroke, v.x, v.y))
+                .count();
+            let overlap = pts_in_piece + piece_in_stroke;
+            (overlap, ring_area2(&p), p)
         })
-        .filter(|(inside, _)| *inside > 0)
-        .max_by_key(|(inside, _)| *inside)
-        .map(|(_, p)| p)
+        .max_by(|(oa, aa, _), (ob, ab, _)| oa.cmp(ob).then(aa.total_cmp(ab)))
+        .map(|(_, _, p)| p)
 }
 
 impl Document {
@@ -314,12 +343,43 @@ mod tests {
         assert!(!picked.contains_point(2.0, 1.0), "not the left piece");
     }
 
-    /// No piece contains the stroke → `None` (the caller falls back to the outline).
+    /// A stroke that LOOPS AROUND an available piece (its points outside the
+    /// piece, but the piece inside the loop) still picks that piece — overlap is
+    /// counted both ways, so an area drawn as a loop around free space works.
     #[test]
-    fn picks_none_when_no_piece_contains_the_stroke() {
-        let piece =
+    fn picks_the_piece_the_stroke_loops_around() {
+        let inner =
+            FloorPlan::from_clean_ring(&[p(4., 4.), p(6., 4.), p(6., 6.), p(4., 6.)]).unwrap();
+        let elsewhere =
+            FloorPlan::from_clean_ring(&[p(0., 0.), p(1., 0.), p(1., 1.), p(0., 1.)]).unwrap();
+        // a loop AROUND `inner`: its points are outside `inner`, but `inner` is
+        // enclosed by it.
+        let stroke = vec![p(3., 3.), p(7., 3.), p(7., 7.), p(3., 7.), p(3., 3.)];
+        let picked = pick_piece_for_stroke(vec![elsewhere, inner], &stroke).expect("a piece");
+        assert!(
+            picked.contains_point(5.0, 5.0),
+            "picked the looped-around piece"
+        );
+    }
+
+    /// A stroke drawn over ALREADY-TAKEN space (no available piece contains it)
+    /// still picks the largest available piece — NOT `None` — so the caller never
+    /// falls back to the full outline and the new area can't overlap an existing
+    /// one. `None` only when there are no pieces at all.
+    #[test]
+    fn picks_largest_available_when_stroke_is_over_taken_space() {
+        let small =
             FloorPlan::from_clean_ring(&[p(0., 0.), p(2., 0.), p(2., 2.), p(0., 2.)]).unwrap();
+        let big = FloorPlan::from_clean_ring(&[p(10., 0.), p(20., 0.), p(20., 10.), p(10., 10.)])
+            .unwrap();
+        // stroke is over neither piece → picks the bigger available piece
         let stroke = vec![p(50., 50.), p(60., 60.)];
-        assert!(pick_piece_for_stroke(vec![piece], &stroke).is_none());
+        let picked = pick_piece_for_stroke(vec![small, big], &stroke).expect("a piece");
+        assert!(
+            picked.contains_point(15., 5.),
+            "picked the larger piece: nope"
+        );
+        // no pieces at all → None
+        assert!(pick_piece_for_stroke(vec![], &stroke).is_none());
     }
 }
