@@ -19,6 +19,18 @@ fn project_onto_edge(outline: &[Point2f32], p: Point2f32, edge: usize) -> Point2
     geom::project_point_to_segment(p, a, b).0
 }
 
+/// Snap `p` to the nearest outline VERTEX within `tol` metres; otherwise leave it.
+/// Lets a hug transition that lands near a corner sit exactly on it.
+fn snap_to_corner(p: Point2f32, outline: &[Point2f32], tol: f32) -> Point2f32 {
+    outline
+        .iter()
+        .copied()
+        .map(|v| (v, (v.x - p.x).powi(2) + (v.y - p.y).powi(2)))
+        .filter(|(_, d2)| *d2 <= tol * tol)
+        .min_by(|(_, da), (_, db)| da.total_cmp(db))
+        .map_or(p, |(v, _)| v)
+}
+
 /// The real outline polyline from `entry` (on the run's first edge) to `exit`
 /// (on its last edge), inserting the shared corner vertex between each pair of
 /// consecutive edges the run hugged — so a run that rounds a corner keeps the
@@ -90,8 +102,18 @@ pub(crate) fn build_region_ring(
         .iter()
         .map(|r| match r {
             Run::OnBoundary { start, end, edges } => {
-                let entry = project_onto_edge(outline, stroke[*start], edges[0]);
-                let exit = project_onto_edge(outline, stroke[*end], *edges.last().unwrap());
+                // Snap each transition to a nearby outline CORNER, so a hug that
+                // runs up to a corner reaches it exactly (not a hand-width short).
+                let entry = snap_to_corner(
+                    project_onto_edge(outline, stroke[*start], edges[0]),
+                    outline,
+                    tuning.corner_snap_m,
+                );
+                let exit = snap_to_corner(
+                    project_onto_edge(outline, stroke[*end], *edges.last().unwrap()),
+                    outline,
+                    tuning.corner_snap_m,
+                );
                 Some((entry, exit, edges.clone()))
             }
             Run::Interior { .. } => None,
@@ -869,6 +891,66 @@ mod cut_line_tests {
         assert!(matches!(err, Error::CutWouldChangeShape), "got {err:?}");
     }
 
+    /// PARKED: a terminal leg drawn PARALLEL to a wall, ending in the MIDDLE of it
+    /// (far from any corner, so it doesn't snap to a vertex), can't slide along
+    /// itself to reach that wall. Today `place` falls back to the perpendicular
+    /// foot, which TILTS the leg. The desired behavior is to NOT emit a
+    /// non-orthogonal cut — either decline it or add a perpendicular jog. Ignored
+    /// until we decide reject-vs-jog for the parallel-wall fallback.
+    #[ignore = "parallel-wall fallback can tilt the leg; reject-vs-jog not decided"]
+    #[test]
+    fn cut_leg_along_a_parallel_wall_stays_orthogonal_or_declines() {
+        let outline =
+            FloorPlan::from_clean_ring(&[p(0., 0.), p(10., 0.), p(10., 10.), p(0., 10.)]).unwrap();
+        // L-cut: up at x=3, then a HORIZONTAL leg ending mid-way under the top
+        // wall at (6, 9.7) — parallel to it, far from any corner.
+        let cut = vec![p(3., 0.), p(3., 9.7), p(6., 9.7)];
+        match split_cut(&outline.get_points(), &cut, 0.1, &SubareaTuning::default()) {
+            Ok(None) | Err(_) => {} // declined or errored — acceptable
+            Ok(Some((a, b))) => assert!(
+                a.non_orthogonal_edges().is_empty() && b.non_orthogonal_edges().is_empty(),
+                "the parallel-wall leg must not tilt: a={:?} b={:?}",
+                a.non_orthogonal_edges(),
+                b.non_orthogonal_edges()
+            ),
+        }
+    }
+
+    /// Documents why the interior run still can't use cut's slide, EVEN with the
+    /// corner-snap: when a hug→interior transition lands MID-WALL (far from any
+    /// corner), the boundary follower projects it PERPENDICULAR onto the wall,
+    /// while `cut_outline` slides its leg to the RAIL-crossing — two different
+    /// points on a diagonal, with no corner to snap either to. So routing the
+    /// interior run through cut would still detach the ring (Problem B). Asserts
+    /// the two endpoints match, so it FAILS under `--ignored`, showing the gap.
+    #[ignore = "cut endpoint vs boundary-follower endpoint diverge mid-wall; corner-snap can't reconcile them"]
+    #[test]
+    fn cut_and_boundary_follower_endpoints_diverge_mid_wall() {
+        // Right triangle: the hypotenuse (10,0)->(0,10) is a long DIAGONAL wall.
+        let outline = FloorPlan::from_clean_ring(&[p(0., 0.), p(10., 0.), p(0., 10.)]).unwrap();
+        let ring = outline.get_points();
+        // A vertical cut from the bottom wall up to MID-hypotenuse (drawn end (4,5)).
+        let cut = vec![p(4., 0.2), p(4., 5.)];
+        let plan = cut_outline(&ring, &cut, 0.05, &SubareaTuning::default())
+            .unwrap()
+            .expect("the cut reaches both walls");
+        // cut's hypotenuse endpoint: it slid the vertical leg to the rail crossing.
+        let cut_end = plan.opath[1];
+        // boundary follower's endpoint: project the drawn end PERPENDICULAR onto
+        // the hypotenuse (edge 1), with corner-snap applied (a no-op here — the
+        // nearest corner is ~6 m away).
+        let bf_end = snap_to_corner(
+            project_onto_edge(&ring, p(4., 5.), 1),
+            &ring,
+            SubareaTuning::default().corner_snap_m,
+        );
+        assert!(
+            (cut_end - bf_end).norm() < 0.02,
+            "cut endpoint {cut_end:?} != boundary-follower endpoint {bf_end:?} \
+             (mid-wall diagonal, no corner to reconcile)"
+        );
+    }
+
     /// Drawing a single straight CUT line across the storey (endpoints on two
     /// walls) splits it and takes one side as the living area — rather than
     /// erroring as "too few points". Picks the smaller region (shorter arc).
@@ -1544,18 +1626,25 @@ mod farwall_tests {
             &SubareaTuning::default(),
         )
         .unwrap();
-        // the diagonal follows fully (single non-orthogonal edge)
+        let poly = room.polygons()[0].clone();
+        // EXACTLY the drawn shape: 4 walls — the shared diagonal + three drawn
+        // walls — with NO spurious floor stub at the bottom corner.
+        assert_eq!(poly.len(), 4, "exactly 4 walls (no floor stub): {poly:?}");
+        // exactly one non-orthogonal edge (the shared diagonal)
         assert_eq!(
             room.non_orthogonal_edges().len(),
             1,
-            "diagonal only: {:?}",
-            room.polygons()[0]
+            "diagonal only: {poly:?}"
+        );
+        // the diagonal follows ALL THE WAY to the storey corner v0 = (2.677, 1.772)
+        // — the corner-snap makes the hug reach it instead of stopping short.
+        assert!(
+            poly.iter()
+                .any(|v| (v.x - 2.677).abs() < 0.02 && (v.y - 1.772).abs() < 0.01),
+            "diagonal reaches the corner v0 (2.677, 1.772): {poly:?}"
         );
         // the far wall snapped down onto the storey top (4.772), not left at 4.80
-        let max_y = room.polygons()[0]
-            .iter()
-            .map(|v| v.y)
-            .fold(f32::MIN, f32::max);
+        let max_y = poly.iter().map(|v| v.y).fold(f32::MIN, f32::max);
         assert!(
             (max_y - 4.772).abs() < 0.01,
             "far wall snapped to the storey edge, got {max_y}"

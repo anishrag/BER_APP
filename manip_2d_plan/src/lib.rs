@@ -112,6 +112,11 @@ pub struct SubareaTuning {
     /// `diag * cut_reach_tol_ratio`.
     pub cut_vertex_tol_ratio: f32,
     pub cut_reach_tol_ratio: f32,
+    /// A boundary-follow hug run's transition point (where the stroke peels off
+    /// the wall) snaps to an outline CORNER within this many METRES — so a carve
+    /// that hugs a wall up to a corner reaches the corner exactly instead of
+    /// stopping a hand-width short. Absolute (sub-areas are drawn in metres).
+    pub corner_snap_m: f32,
 }
 
 impl Default for SubareaTuning {
@@ -128,6 +133,7 @@ impl Default for SubareaTuning {
             simplify_ceil_m: 0.7,
             cut_vertex_tol_ratio: 0.03,
             cut_reach_tol_ratio: 0.06,
+            corner_snap_m: 0.15,
         }
     }
 }

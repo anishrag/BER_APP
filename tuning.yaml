@@ -92,3 +92,8 @@ subarea:
   # accept the cut only if both ends reach the outline within diag * cut_reach_tol_ratio.
   cut_vertex_tol_ratio: 0.03
   cut_reach_tol_ratio: 0.06
+
+  # A boundary-follow hug transition (where the stroke peels off a wall) snaps to
+  # an outline CORNER within this many metres -- so a carve that hugs a wall up to
+  # a corner reaches it exactly instead of stopping a hand-width short.
+  corner_snap_m: 0.15

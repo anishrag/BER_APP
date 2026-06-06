@@ -169,5 +169,6 @@ mod tests {
             d.subarea.cut_vertex_tol_ratio
         );
         assert_eq!(t.subarea.cut_reach_tol_ratio, d.subarea.cut_reach_tol_ratio);
+        assert_eq!(t.subarea.corner_snap_m, d.subarea.corner_snap_m);
     }
 }
