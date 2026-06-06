@@ -6,7 +6,7 @@
 //! `&[Point2f32]`. `FloorPlan::carve_or_cut` is the single public entry — a thin
 //! facade that clips the stroke, then routes to `split_cut` or `sub_area`.
 use crate::boundary_follow::{self, Run};
-use crate::{geom, orthogonal, region, simplification, splice};
+use crate::{geom, orthogonal, region, simplification, snap, splice};
 use crate::{Error, FloorPlan, SubareaTuning};
 use domain::points::Point2f32;
 // Shared crate-root test helper, used by the carve test modules via `super::*`.
@@ -17,18 +17,6 @@ fn project_onto_edge(outline: &[Point2f32], p: Point2f32, edge: usize) -> Point2
     let a = outline[edge];
     let b = outline[(edge + 1) % n];
     geom::project_point_to_segment(p, a, b).0
-}
-
-/// Snap `p` to the nearest outline VERTEX within `tol` metres; otherwise leave it.
-/// Lets a hug transition that lands near a corner sit exactly on it.
-fn snap_to_corner(p: Point2f32, outline: &[Point2f32], tol: f32) -> Point2f32 {
-    outline
-        .iter()
-        .copied()
-        .map(|v| (v, (v.x - p.x).powi(2) + (v.y - p.y).powi(2)))
-        .filter(|(_, d2)| *d2 <= tol * tol)
-        .min_by(|(_, da), (_, db)| da.total_cmp(db))
-        .map_or(p, |(v, _)| v)
 }
 
 /// The real outline polyline from `entry` (on the run's first edge) to `exit`
@@ -104,12 +92,12 @@ pub(crate) fn build_region_ring(
             Run::OnBoundary { start, end, edges } => {
                 // Snap each transition to a nearby outline CORNER, so a hug that
                 // runs up to a corner reaches it exactly (not a hand-width short).
-                let entry = snap_to_corner(
+                let entry = snap::snap_to_corner(
                     project_onto_edge(outline, stroke[*start], edges[0]),
                     outline,
                     tuning.corner_snap_m,
                 );
-                let exit = snap_to_corner(
+                let exit = snap::snap_to_corner(
                     project_onto_edge(outline, stroke[*end], *edges.last().unwrap()),
                     outline,
                     tuning.corner_snap_m,
@@ -478,7 +466,7 @@ fn cut_outline(
     let place = |opath: &mut Vec<Point2f32>, e_idx: usize, n_idx: usize| -> Option<(usize, f32)> {
         let end = opath[e_idx];
         let neighbour = opath[n_idx];
-        let (edge, t_snap, d, is_vertex) = geom::snap_to_polygon(ring, end, vertex_tol);
+        let (edge, t_snap, d, is_vertex) = snap::snap_to_polygon(ring, end, vertex_tol);
         if d > reach_tol {
             return None;
         }
@@ -513,13 +501,13 @@ fn cut_outline(
                 Some((edge, t))
             }
             None => {
-                geom::pin_to_edge(&mut opath[e_idx], ring, edge);
+                snap::pin_to_edge(&mut opath[e_idx], ring, edge);
                 Some((edge, t_snap))
             }
         }
     };
 
-    let drawn_reaches = |p: Point2f32| geom::snap_to_polygon(ring, p, vertex_tol).2 <= reach_tol;
+    let drawn_reaches = |p: Point2f32| snap::snap_to_polygon(ring, p, vertex_tol).2 <= reach_tol;
     let drawn_reached_both = drawn_reaches(path[0]) && drawn_reaches(path[path.len() - 1]);
     let p1 = place(&mut opath, 0, 1usize.min(last));
     let p2 = place(&mut opath, last, last.saturating_sub(1));
@@ -609,8 +597,8 @@ fn solve_straight_cut(
     reach_tol: f32,
 ) -> Result<Option<CutPlan>, Error> {
     let n = ring.len();
-    let (e1, _, dd1, _) = geom::snap_to_polygon(ring, d0, vertex_tol);
-    let (e2, _, dd2, _) = geom::snap_to_polygon(ring, d1, vertex_tol);
+    let (e1, _, dd1, _) = snap::snap_to_polygon(ring, d0, vertex_tol);
+    let (e2, _, dd2, _) = snap::snap_to_polygon(ring, d1, vertex_tol);
     if dd1 > reach_tol || dd2 > reach_tol {
         return Ok(None); // doesn't reach → let the caller carve
     }
@@ -939,7 +927,7 @@ mod cut_line_tests {
         // boundary follower's endpoint: project the drawn end PERPENDICULAR onto
         // the hypotenuse (edge 1), with corner-snap applied (a no-op here — the
         // nearest corner is ~6 m away).
-        let bf_end = snap_to_corner(
+        let bf_end = snap::snap_to_corner(
             project_onto_edge(&ring, p(4., 5.), 1),
             &ring,
             SubareaTuning::default().corner_snap_m,

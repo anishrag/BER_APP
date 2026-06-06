@@ -14,24 +14,25 @@ mod arc;
 mod boundary_follow;
 mod carve;
 mod error;
-mod extend;
 mod geom;
+mod new_storey;
 mod orthogonal;
 mod parametric;
 mod query;
 mod region;
 mod simplification;
+mod snap;
 mod splice;
 mod trim;
 
 pub use carve::SubareaOutcome;
 pub use error::Error;
-pub use extend::snap_stroke_to_ring;
 pub use geom::{
     bbox_diagonal as ring_diagonal, find_flipped_edge, intersect_circles, project_to_circle,
     ring_contains_point, solve_axis_wall,
 };
 pub use parametric::{Axis, CollinearitySuggestion, ParameterAxis, ParameterId, VertexId};
+pub use snap::snap_stroke_to_ring;
 
 use domain::points::Point2f32;
 
@@ -453,19 +454,19 @@ impl FloorPlan {
     // `any_point_outside` are region operations — see the `region` module.
 
     /// Longest run of consecutive `points` off this plan's outline ring — see
-    /// [`extend::longest_offring_run`].
+    /// [`new_storey::longest_offring_run`].
     pub fn longest_offring_run(&self, points: &[Point2f32], off_tol: f32) -> usize {
-        extend::longest_offring_run(&self.parametric.ring_points(0), points, off_tol)
+        new_storey::longest_offring_run(&self.parametric.ring_points(0), points, off_tol)
     }
 
     /// Longest outline span the trace `points` did not follow — see
-    /// [`extend::uncovered_perimeter_run`].
+    /// [`new_storey::uncovered_perimeter_run`].
     pub fn uncovered_perimeter_run(&self, points: &[Point2f32], cover_tol: f32) -> f32 {
-        extend::uncovered_perimeter_run(&self.parametric.ring_points(0), points, cover_tol)
+        new_storey::uncovered_perimeter_run(&self.parametric.ring_points(0), points, cover_tol)
     }
 
     /// Build a new-storey outline that follows this plan where the trace hugs it
-    /// — see [`extend::outline_following_trace`].
+    /// — see [`new_storey::outline_following_trace`].
     pub fn outline_following_trace(
         &self,
         trace: &[Point2f32],
@@ -473,7 +474,7 @@ impl FloorPlan {
         ortho_tol: f32,
         tuning: &SpliceTuning,
     ) -> Option<Vec<Point2f32>> {
-        extend::outline_following_trace(
+        new_storey::outline_following_trace(
             &self.parametric.ring_points(0),
             trace,
             follow_tol,

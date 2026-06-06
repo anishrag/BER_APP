@@ -5,7 +5,7 @@
 //! the parametric model in place. So these stay `FloorPlan` methods — the pure
 //! splice mechanics already live in `extend.rs`.
 use crate::polygon_area;
-use crate::{geom, orthogonal, simplification, splice};
+use crate::{geom, orthogonal, simplification, snap, splice};
 use crate::{Error, FloorPlan, ParameterId};
 use domain::points::Point2f32;
 // Test-only: the functions fully-qualify `std::collections::HashSet`; these
@@ -293,8 +293,8 @@ impl FloorPlan {
         // `snapped*` is true when the endpoint landed on an existing CORNER.
         let start = path[0];
         let end = path[path.len() - 1];
-        let (e1, t1, s_dist, snapped1) = geom::snap_to_polygon(&ring, start, vertex_tol);
-        let (e2, t2, e_dist, snapped2) = geom::snap_to_polygon(&ring, end, vertex_tol);
+        let (e1, t1, s_dist, snapped1) = snap::snap_to_polygon(&ring, start, vertex_tol);
+        let (e2, t2, e_dist, snapped2) = snap::snap_to_polygon(&ring, end, vertex_tol);
         if s_dist > max_tol || e_dist > max_tol {
             return Err(err(format!(
                 "endpoints too far from the outline (start={:.3}, end={:.3}, max={:.3})",
@@ -307,8 +307,8 @@ impl FloorPlan {
 
         let mut path = path.to_vec();
         let last = path.len() - 1;
-        geom::pin_to_edge(&mut path[0], &ring, e1);
-        geom::pin_to_edge(&mut path[last], &ring, e2);
+        snap::pin_to_edge(&mut path[0], &ring, e1);
+        snap::pin_to_edge(&mut path[last], &ring, e2);
 
         let mut chosen = if keep_larger {
             // Trim: build both arc-replacements; keep whichever leaves more area.
