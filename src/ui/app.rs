@@ -292,6 +292,7 @@ impl eframe::App for BerApp {
                 let current_storey_idx = self.app_controller.borrow().current_storey_idx();
 
                 let controller = self.app_controller.clone();
+                let splice_debug = self.app_controller.borrow().splice_debug_overlay();
                 SketchPage::render(
                     ui,
                     stroke.as_ref().map(EguiStroke::from),
@@ -338,6 +339,7 @@ impl eframe::App for BerApp {
                     can_undo,
                     can_redo,
                     view,
+                    &splice_debug,
                     |event| match event {
                         UiEvent::Sketch(sketch_event) => match sketch_event {
                             SketchEvent::AddPoint(p) => controller

@@ -9,6 +9,37 @@
 use crate::geom;
 use domain::points::Point2f32;
 
+/// What an ELECTIVE snap snapped to. An elective snap is one taken because a
+/// nearby feature was a BETTER target, when staying put was also valid — as
+/// opposed to a FORCED snap (e.g. clamping a point that fell OUTSIDE the outline
+/// back onto it), which has no alternative and is NOT routed through here.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum SnapKind {
+    /// A point snapped onto a polygon VERTEX instead of staying on the edge.
+    ToVertex,
+    /// A point snapped onto a nearby CORNER (it could have stayed where drawn).
+    ToCorner,
+    /// A wall snapped onto a PARALLEL boundary wall it runs alongside.
+    ToParallelWall,
+    /// A stroke point snapped onto the PREVIOUS storey's outline.
+    ToPreviousOutline,
+}
+
+/// The single choke point every ELECTIVE snap routes through: move `from` → `to`
+/// because of a nearby feature, when staying at `from` was also valid. Returns
+/// `to` (the snap is applied). Centralising it means snaps can later be surfaced
+/// on the UI and undone individually (reverting to `from`). For now it just logs.
+pub(crate) fn elective_snap(kind: SnapKind, from: Point2f32, to: Point2f32) -> Point2f32 {
+    log::info!(
+        "[snap] {kind:?}: ({:.3}, {:.3}) -> ({:.3}, {:.3})",
+        from.x,
+        from.y,
+        to.x,
+        to.y
+    );
+    to
+}
+
 /// Snap a point to a polygon's perimeter: the closest vertex if any is within
 /// `vertex_tol`, else the closest point on the closest edge. Returns
 /// `(edge_idx, t, distance, snapped_to_vertex)` with `t` CLAMPED to `[0, 1]`
@@ -55,12 +86,16 @@ pub(crate) fn snap_to_polygon(
 /// Snap `p` to the nearest ring VERTEX within `tol`; otherwise leave it.
 /// Lets a hug transition that lands near a corner sit exactly on it.
 pub(crate) fn snap_to_corner(p: Point2f32, ring: &[Point2f32], tol: f32) -> Point2f32 {
-    ring.iter()
+    match ring
+        .iter()
         .copied()
         .map(|v| (v, (v.x - p.x).powi(2) + (v.y - p.y).powi(2)))
         .filter(|(_, d2)| *d2 <= tol * tol)
         .min_by(|(_, da), (_, db)| da.total_cmp(db))
-        .map_or(p, |(v, _)| v)
+    {
+        Some((v, _)) => elective_snap(SnapKind::ToCorner, p, v),
+        None => p,
+    }
 }
 
 /// Pin a point exactly onto an edge of `ring` by projecting it onto that edge's
@@ -114,11 +149,13 @@ pub fn snap_stroke_to_ring(
                 return *p;
             }
             let a = ring[edge % n];
-            if on_vertex {
-                return a;
-            }
-            let b = ring[(edge + 1) % n];
-            Point2f32::new(a.x + t * (b.x - a.x), a.y + t * (b.y - a.y))
+            let snapped = if on_vertex {
+                a
+            } else {
+                let b = ring[(edge + 1) % n];
+                Point2f32::new(a.x + t * (b.x - a.x), a.y + t * (b.y - a.y))
+            };
+            elective_snap(SnapKind::ToPreviousOutline, *p, snapped)
         })
         .collect()
 }

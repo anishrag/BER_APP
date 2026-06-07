@@ -379,6 +379,9 @@ impl SketchPage {
         can_undo: bool,
         can_redo: bool,
         view: ViewParams,
+        // DEBUG: splice-pipeline phases from the last extend/trim —
+        // `(label, world points, closed)` — drawn as a coloured overlay.
+        splice_debug: &[(String, Vec<(f32, f32)>, bool)],
         mut on_event: F,
     ) where
         F: FnMut(UiEvent),
@@ -456,6 +459,17 @@ impl SketchPage {
                     mode,
                     view,
                     pending_cut_regions,
+                );
+
+                // DEBUG: splice-pipeline phases of the last extend/trim.
+                render::render_splice_debug(
+                    &painter,
+                    rect,
+                    ber,
+                    current_storey_idx,
+                    mode,
+                    view,
+                    splice_debug,
                 );
 
                 // Construction-phase areas: committed regions (purple, labelled),

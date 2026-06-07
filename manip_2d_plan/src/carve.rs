@@ -284,10 +284,10 @@ pub(crate) fn sub_area(
     build_region(outline, &ortho)
 }
 
-/// Finalize a candidate sub-area ring against `outline`: snap drawn walls onto
-/// nearby PARALLEL outline walls, strip collapse remnants, anchor at a shared
-/// corner, and parametrize into an independent `FloorPlan`. Shared tail of the
-/// carve and cut region construction.
+/// The geometry CLEANUP shared by sub-area construction (cut, ortho-trim): snap
+/// drawn walls onto parallel outline walls, strip coincident/collinear remnants,
+/// un-intersect a folded ring, and square off spurious diagonals. Returns the
+/// cleaned ring (NOT yet corner-anchored or parametrized).
 ///
 /// Strips the coincident / collinear remnants left when the orthogonalizer
 /// collapses a sub-threshold feature (e.g. a too-shallow nook) onto a wall:
@@ -296,7 +296,7 @@ pub(crate) fn sub_area(
 /// the outline's — so a small room inside a big house is cleaned at its own
 /// scale. Kept tiny (0.5% of the area's diagonal) so it only removes genuine
 /// collapse remnants and never a real (≥~10%) nook.
-fn build_region(outline: &[Point2f32], pts: &[Point2f32]) -> Result<FloorPlan, Error> {
+pub(crate) fn clean_region_ring(outline: &[Point2f32], pts: &[Point2f32]) -> Vec<Point2f32> {
     let area_diag = geom::bbox_diagonal(pts);
 
     // Correct any drawn wall that runs close to (and overlaps) a parallel house
@@ -332,6 +332,16 @@ fn build_region(outline: &[Point2f32], pts: &[Point2f32]) -> Result<FloorPlan, E
     // vertices, and untangle repairs any crossing the corner introduces.
     let squared = geom::orthogonalize_off_boundary(&cleaned, outline, 0.003);
     let cleaned = orthogonal::remove_collinear(&geom::untangle_ring(&squared), collinear_tol);
+    crate::trim::record_phase("cleaned ring", &cleaned, true);
+    cleaned
+}
+
+/// Finalize a cleaned candidate ring against `outline` into an INDEPENDENT
+/// `FloorPlan` (fresh params): anchor at a shared corner, parametrize. The
+/// cut/carve region finalize. (Ortho-trim finalizes differently — in place.)
+fn build_region(outline: &[Point2f32], pts: &[Point2f32]) -> Result<FloorPlan, Error> {
+    let area_diag = geom::bbox_diagonal(pts);
+    let cleaned = clean_region_ring(outline, pts);
     if cleaned.len() < 3 {
         return Err(Error::ExtendError("living area collapsed to a line".into()));
     }
@@ -406,12 +416,13 @@ pub(crate) fn split_cut(
 
 /// A cut path orthogonalized and snapped onto the outline `ring`, ready to
 /// splice: the squared poly-line plus the two boundary crossings it lands on.
-struct CutPlan {
-    opath: Vec<Point2f32>,
-    e1: usize,
-    t1: f32,
-    e2: usize,
-    t2: f32,
+/// `pub(crate)` so ortho-trim can reuse the cut's attach machinery.
+pub(crate) struct CutPlan {
+    pub(crate) opath: Vec<Point2f32>,
+    pub(crate) e1: usize,
+    pub(crate) t1: f32,
+    pub(crate) e2: usize,
+    pub(crate) t2: f32,
 }
 
 /// Resolve an OPEN cut `path` against `ring`. A STRAIGHT cut (step 2) slides both
@@ -419,12 +430,13 @@ struct CutPlan {
 /// (step 3) orthogonalizes the interior and slides each terminal end to its edge.
 /// `None` when the cut doesn't reach the outline (→ carve); `Err` when it reaches
 /// but can't be made orthogonal without changing its shape.
-fn cut_outline(
+pub(crate) fn cut_outline(
     ring: &[Point2f32],
     path: &[Point2f32],
     tolerance: f32,
     tuning: &SubareaTuning,
 ) -> Result<Option<CutPlan>, Error> {
+    crate::trim::record_phase("raw stroke", path, false);
     let diag = geom::bbox_diagonal(ring);
     let Some(((bnx, bny), (bxx, bxy))) = geom::bbox(path) else {
         return Ok(None);
@@ -435,13 +447,14 @@ fn cut_outline(
     }
     let cut_tol = tuning.coarse_simplify_tol(span, tolerance);
     let simplified = simplification::simplify_open(path, cut_tol);
+    crate::trim::record_phase("simplified (RDP)", &simplified, false);
     let vertex_tol = (diag * tuning.cut_vertex_tol_ratio).max(1e-4);
     let reach_tol = (diag * tuning.cut_reach_tol_ratio).max(1e-3);
 
     // STEP 3: a cut with corners orthogonalizes to a stepped polyline. A
     // near-straight one collapses and falls through to the straight-cut solve.
     let stepped = if simplified.len() >= 3 {
-        match orthogonal::make_orthogonal_at(&simplified, cut_tol, 0.0) {
+        match orthogonal::make_orthogonal_at(&simplified, cut_tol, 0.0, orthogonal::Closure::Open) {
             Ok(o) if o.len() >= 3 => Some(o),
             _ => None,
         }
@@ -473,7 +486,8 @@ fn cut_outline(
         let leg_horizontal = (end.y - neighbour.y).abs() <= (end.x - neighbour.x).abs();
         if is_vertex {
             let v = ring[edge];
-            opath[e_idx] = v;
+            // Elective: the end snapped onto a CORNER rather than its edge.
+            opath[e_idx] = snap::elective_snap(snap::SnapKind::ToVertex, end, v);
             if leg_horizontal {
                 opath[n_idx].y = v.y;
             } else {
@@ -521,6 +535,7 @@ fn cut_outline(
     if e1 == e2 && (t1 - t2).abs() < 1e-3 {
         return Ok(None);
     }
+    crate::trim::record_phase("attached to outline", &opath, false);
     Ok(Some(CutPlan {
         opath,
         e1,
@@ -631,7 +646,12 @@ fn solve_straight_cut(
             } else {
                 (v.x - c).abs() <= eps
             };
-            on.then_some((v, 0.0))
+            on.then(|| {
+                // Elective: terminate at the CORNER rather than sliding along the
+                // edge to `c` (the fallback the user reverts to on undo).
+                let from = slide_on_edge(a, b, horizontal, c, toward).map_or(toward, |(p, _)| p);
+                (snap::elective_snap(snap::SnapKind::ToVertex, from, v), 0.0)
+            })
         } else {
             slide_on_edge(a, b, horizontal, c, toward)
         }
@@ -720,6 +740,7 @@ fn cut_region(
     if pts.len() < 3 {
         return Err(Error::ExtendError("cut region collapsed".into()));
     }
+    crate::trim::record_phase("spliced ring", &pts, true);
     build_region(outline, &pts)
 }
 
@@ -807,11 +828,16 @@ fn snap_walls(outline: &[Point2f32], pts: &[Point2f32], tol: f32) -> Vec<Point2f
     }
     let mut out = pts.to_vec();
     for p in &mut out {
+        let drawn = *p;
         if let Some((_, to)) = remap_x.iter().find(|(from, _)| (p.x - from).abs() < eps) {
             p.x = *to;
         }
         if let Some((_, to)) = remap_y.iter().find(|(from, _)| (p.y - from).abs() < eps) {
             p.y = *to;
+        }
+        // Elective: this vertex moved onto a parallel boundary wall.
+        if *p != drawn {
+            *p = snap::elective_snap(snap::SnapKind::ToParallelWall, drawn, *p);
         }
     }
 

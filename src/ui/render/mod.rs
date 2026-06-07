@@ -488,6 +488,64 @@ pub fn render_cut_candidates(
     }
 }
 
+/// DEBUG: draw the splice-pipeline phases of the last extend/trim. Each phase is
+/// a distinctly-coloured polyline (with dotted vertices) plus a colour-keyed
+/// legend entry top-left, so the stages — raw stroke → orthogonalized → pinned →
+/// spliced ring — can be compared visually. `phases` is `(label, world pts, closed)`.
+pub fn render_splice_debug(
+    painter: &egui::Painter,
+    rect: egui::Rect,
+    ber: Option<&Ber>,
+    current_storey_idx: Option<usize>,
+    sketch_mode: SketchMode,
+    view: ViewParams,
+    phases: &[(String, Vec<(f32, f32)>, bool)],
+) {
+    if phases.is_empty() {
+        return;
+    }
+    let Some((_storey, t)) = storey_transform(rect, ber, current_storey_idx, sketch_mode, view)
+    else {
+        return;
+    };
+    let colors = [
+        egui::Color32::from_rgb(255, 70, 70),  // raw — red
+        egui::Color32::from_rgb(255, 170, 30), // simplified — orange
+        egui::Color32::from_rgb(230, 220, 40), // snapped to H/V — yellow
+        egui::Color32::from_rgb(60, 200, 90),  // orthogonalized — green
+        egui::Color32::from_rgb(80, 150, 255), // pinned — blue
+        egui::Color32::from_rgb(210, 90, 230), // spliced — magenta
+    ];
+    for (i, (label, pts_w, closed)) in phases.iter().enumerate() {
+        if pts_w.len() < 2 {
+            continue;
+        }
+        let color = colors[i % colors.len()];
+        let pts: Vec<egui::Pos2> = pts_w
+            .iter()
+            .map(|(x, y)| t.apply(*x as f64, *y as f64))
+            .collect();
+        let n = pts.len();
+        let segs = if *closed { n } else { n - 1 };
+        for k in 0..segs {
+            painter.line_segment([pts[k], pts[(k + 1) % n]], egui::Stroke::new(2.0, color));
+        }
+        for p in &pts {
+            painter.circle_filled(*p, 3.0, color);
+        }
+        // Colour-keyed legend, stacked top-left so labels never overlap the
+        // shape; numbered by pipeline order.
+        let ly = rect.top() + 8.0 + i as f32 * 16.0;
+        painter.text(
+            egui::pos2(rect.left() + 10.0, ly),
+            egui::Align2::LEFT_TOP,
+            format!("{}. {}", i + 1, label),
+            egui::FontId::proportional(13.0),
+            color,
+        );
+    }
+}
+
 /// Render committed construction-phase areas: each ring tinted purple with its
 /// phase label at the centroid, so the assessor sees which footprint carries
 /// which year. `regions` is `(ring_world_coords, label)`.

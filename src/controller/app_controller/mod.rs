@@ -269,6 +269,9 @@ pub struct AppController {
     /// dimensionable slot); the user taps one, which becomes `phase_shape` and is
     /// then dimensioned. Transient.
     pending_phase_cut: Option<[ShapeSlot; 2]>,
+    /// DEBUG: the splice-pipeline phases (#1 raw stroke … #4 spliced ring) from
+    /// the last extend/trim, captured for the UI's coloured debug overlay.
+    splice_debug: Vec<manip_2d_plan::SplicePhase>,
     /// Active post-drag measurement prompt. Set on mouse-up after a drag if
     /// the plan is already dimensioned; cleared when the user applies or
     /// cancels. The user types a distance + cycles through candidate
@@ -359,6 +362,7 @@ impl AppController {
             phase_mode: false,
             phase_regions: HashMap::new(),
             pending_phase_cut: None,
+            splice_debug: Vec::new(),
             edit_drag_prompt: None,
             vertex_drop_prompt: None,
             history: Vec::new(),
@@ -1810,7 +1814,10 @@ impl AppController {
             .collect();
         println!("Extend stroke (world coords): {} points", pts.len());
         dump_stroke("extend", &pts);
-        if let Err(e) = self.apply_extend_stroke(&pts) {
+        let _ = manip_2d_plan::take_splice_debug(); // clear stale phases
+        let res = self.apply_extend_stroke(&pts);
+        self.splice_debug = manip_2d_plan::take_splice_debug();
+        if let Err(e) = res {
             eprintln!("apply_extend_stroke: {}", e);
         }
     }
@@ -1877,9 +1884,26 @@ impl AppController {
             .collect();
         println!("Trim stroke (world coords): {} points", pts.len());
         dump_stroke("trim", &pts);
-        if let Err(e) = self.apply_trim_stroke(&pts) {
+        let _ = manip_2d_plan::take_splice_debug(); // clear stale phases
+        let res = self.apply_trim_stroke(&pts);
+        // Capture the pipeline phases (recorded even when the splice is rejected)
+        // for the UI's coloured debug overlay.
+        self.splice_debug = manip_2d_plan::take_splice_debug();
+        if let Err(e) = res {
             eprintln!("apply_trim_stroke: {}", e);
         }
+    }
+
+    /// DEBUG: the splice-pipeline phases captured from the last extend/trim, as
+    /// `(label, world points, closed)` per phase — for the UI's coloured overlay.
+    pub fn splice_debug_overlay(&self) -> Vec<(String, Vec<(f32, f32)>, bool)> {
+        self.splice_debug
+            .iter()
+            .map(|ph| {
+                let pts = ph.points.iter().map(|p| (p.x, p.y)).collect();
+                (ph.label.clone(), pts, ph.closed)
+            })
+            .collect()
     }
 
     /// Apply a Trim, discarding the smaller side. Dispatches by the active

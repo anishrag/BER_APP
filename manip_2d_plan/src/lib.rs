@@ -33,6 +33,7 @@ pub use geom::{
 };
 pub use parametric::{Axis, CollinearitySuggestion, ParameterAxis, ParameterId, VertexId};
 pub use snap::snap_stroke_to_ring;
+pub use trim::{take_splice_debug, SplicePhase};
 
 use domain::points::Point2f32;
 
@@ -219,9 +220,16 @@ impl FloorPlan {
             simplified.pop();
         }
 
+        // A known loop is `Closed`; an otherwise-open shape is `Auto` (snap shut
+        // only if the ends nearly meet — the user may have drawn either).
+        let closure = if closed {
+            orthogonal::Closure::Closed
+        } else {
+            orthogonal::Closure::Auto
+        };
         let orthog_points = match base_angle {
-            Some(a) => orthogonal::make_orthogonal_at(&simplified, tolerance, a)?,
-            None => orthogonal::make_orthogonal(&simplified, tolerance)?,
+            Some(a) => orthogonal::make_orthogonal_at(&simplified, tolerance, a, closure)?,
+            None => orthogonal::make_orthogonal(&simplified, tolerance, closure)?,
         };
 
         // For a closed polygon, finalize the closing structure (see
@@ -255,7 +263,12 @@ impl FloorPlan {
         if closed && simplified.len() > 3 {
             simplified.pop();
         }
-        let orthog_points = orthogonal::make_orthogonal(&simplified, tolerance)?;
+        let closure = if closed {
+            orthogonal::Closure::Closed
+        } else {
+            orthogonal::Closure::Auto
+        };
+        let orthog_points = orthogonal::make_orthogonal(&simplified, tolerance, closure)?;
         let final_points = if closed {
             finalize_closed_ring(orthog_points, tolerance)
         } else {

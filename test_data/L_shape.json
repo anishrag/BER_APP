@@ -1,0 +1,129 @@
+{
+  "id": "7a60f102-a74b-48f2-ab87-bd8acd51f89b",
+  "address": "",
+  "eircode": "",
+  "construction_phases": {
+    "years": {
+      "Extension1": 1999,
+      "Original": 1990
+    },
+    "nicknames": {
+      "Extension1": "sfe"
+    }
+  },
+  "heating_system": {
+    "id": "38175cea-5303-4dd3-9a99-165eeffe9570",
+    "system_type": "Invalid",
+    "description": "",
+    "year_installed": null,
+    "controls": {
+      "programmer": false,
+      "zones": 0,
+      "notes": null
+    },
+    "separate_hot_water": false
+  },
+  "ventilation_system": {
+    "id": "cfbd571c-6661-4482-aca4-5df793909615",
+    "system_type": "Invalid",
+    "description": null
+  },
+  "sheltered_sides": 0.0,
+  "number_of_storeys": 1,
+  "storeys": [
+    {
+      "id": "c7af743e-91eb-4a0d-beef-b6aae18d4b25",
+      "name": "",
+      "storey_number": 0,
+      "floors": {
+        "regions": [
+          {
+            "id": "77ee044f-186b-433e-ae56-d44b97e78677",
+            "polygon": {
+              "exterior": [
+                {
+                  "x": 1.1560649871826172,
+                  "y": 1.801126480102539
+                },
+                {
+                  "x": 1.1560649871826172,
+                  "y": 4.801126480102539
+                },
+                {
+                  "x": 4.156064987182617,
+                  "y": 4.801126480102539
+                },
+                {
+                  "x": 4.156064987182617,
+                  "y": 3.301126480102539
+                },
+                {
+                  "x": 3.156064987182617,
+                  "y": 3.301126480102539
+                },
+                {
+                  "x": 3.156064987182617,
+                  "y": 1.801126480102539
+                },
+                {
+                  "x": 1.1560649871826172,
+                  "y": 1.801126480102539
+                }
+              ],
+              "interiors": []
+            },
+            "height": 2.4,
+            "construction_id": "fae67b98-85a8-4d7f-94ae-83dc4949d5b3"
+          }
+        ]
+      },
+      "walls": {
+        "regions": []
+      },
+      "roofs": {
+        "regions": []
+      },
+      "windows": [],
+      "doors": [],
+      "rooms": [],
+      "living_areas": {
+        "regions": []
+      }
+    }
+  ],
+  "wall_constructions": [
+    {
+      "base": {
+        "id": "b3e3dd96-557d-4866-9954-eaba155da5e0",
+        "construction_makeup": "Tbd",
+        "construction_phase": "Original",
+        "photos": [],
+        "description": null
+      },
+      "construction_type": "Uninitialised"
+    }
+  ],
+  "floor_constructions": [
+    {
+      "base": {
+        "id": "fae67b98-85a8-4d7f-94ae-83dc4949d5b3",
+        "construction_makeup": "Tbd",
+        "construction_phase": "Original",
+        "photos": [],
+        "description": null
+      },
+      "construction_type": "SolidFloor"
+    }
+  ],
+  "ceiling_constructions": [],
+  "thermal_mass_info": {
+    "id": "4c783a76-40c9-4fca-a138-24dd6f1ea769",
+    "floors": "Invalid",
+    "partition_walls": "Invalid",
+    "external_walls": "Invalid",
+    "separating_walls": "Invalid"
+  },
+  "orientation_deg": 0.0,
+  "solar": [],
+  "photos": []
+}

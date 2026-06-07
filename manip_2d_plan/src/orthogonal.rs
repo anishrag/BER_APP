@@ -4,9 +4,29 @@ use domain::points::Point2f32;
 
 use crate::Error;
 
-/// Convert a simplified stroke to an orthogonal polygon and generate base constraints
-pub fn make_orthogonal(points: &[Point2f32], tolerance: f32) -> Result<Vec<Point2f32>, Error> {
-    make_orthogonal_at(points, tolerance, find_dominant_angle(points))
+/// How the orthogonalizer treats the gap between a path's two ends.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Closure {
+    /// Never join the ends — a strictly OPEN path (trim, extend, cut). Two ends
+    /// that happen to land near each other are left as two separate ends.
+    Open,
+    /// Always treat the path as a loop — add the implicit closing corner.
+    Closed,
+    /// Join the ends ONLY if they're within `tolerance × 10` — for input that
+    /// could be either a path or a loop (draw-either). Below the gap it stays
+    /// open; close enough, it snaps shut.
+    Auto,
+}
+
+/// Convert a simplified stroke to an orthogonal polygon and generate base
+/// constraints. `closure` decides whether the two ends get joined — see
+/// [`Closure`] and [`make_orthogonal_at`].
+pub fn make_orthogonal(
+    points: &[Point2f32],
+    tolerance: f32,
+    closure: Closure,
+) -> Result<Vec<Point2f32>, Error> {
+    make_orthogonal_at(points, tolerance, find_dominant_angle(points), closure)
 }
 
 /// Like [`make_orthogonal`] but snaps to a grid aligned with a GIVEN
@@ -19,13 +39,18 @@ pub fn make_orthogonal_at(
     points: &[Point2f32],
     tolerance: f32,
     base_angle: f32,
+    closure: Closure,
 ) -> Result<Vec<Point2f32>, Error> {
     if points.len() < 3 {
         return Err(Error::InsufficientPoints);
     }
 
     // Snap all points to horizontal/vertical grid aligned with the given angle.
-    let orthogonal_points = snap_to_orthogonal(&points, base_angle, tolerance)?;
+    // `closure` gates the implicit-closure corner (see [`Closure`]).
+    let orthogonal_points = snap_to_orthogonal(&points, base_angle, tolerance, closure)?;
+    // DEBUG overlay sub-stage: each segment now squared to H/V (this is where an
+    // endpoint moves along one axis to align its terminal leg).
+    crate::trim::record_phase("snapped to H/V", &orthogonal_points, false);
 
     // Remove duplicate consecutive points
     let cleaned = remove_duplicates(&orthogonal_points, tolerance);
@@ -36,6 +61,8 @@ pub fn make_orthogonal_at(
     // axis-aligned both halves of the wobble to the same coordinate but kept
     // them as separate vertices. Geometrically the middle vertex is redundant.
     let collapsed = remove_collinear(&cleaned, tolerance);
+    // DEBUG overlay sub-stage: duplicates + same-axis (collinear) vertices removed.
+    crate::trim::record_phase("orthogonalized (cleaned)", &collapsed, false);
 
     if collapsed.len() < 3 {
         return Err(Error::OrthogonalError(
@@ -220,11 +247,14 @@ fn find_dominant_angle(points: &[Point2f32]) -> f32 {
     best_angle
 }
 
-/// Snap points to an orthogonal grid
+/// Snap points to an orthogonal grid. `closure` controls the implicit-closure
+/// corner: `Open` never adds it, `Closed` always, `Auto` only when the two ends
+/// are within `tolerance × 10` (draw-either input).
 fn snap_to_orthogonal(
     points: &[Point2f32],
     base_angle: f32,
     tolerance: f32,
+    closure: Closure,
 ) -> Result<Vec<Point2f32>, Error> {
     if points.len() < 2 {
         return Err(Error::InsufficientPoints);
@@ -265,14 +295,20 @@ fn snap_to_orthogonal(
         current = *snapped.last().unwrap();
     }
 
-    // If stroke should be closed, ensure last point connects properly to first
-    if (points.first().unwrap() - points.last().unwrap()).norm() < tolerance * 10.0 {
+    // Decide whether to join the two ends with an implicit closing corner.
+    // `Open` never does; `Closed` always; `Auto` only when the ends nearly meet.
+    let should_close = match closure {
+        Closure::Open => false,
+        Closure::Closed => true,
+        Closure::Auto => {
+            (points.first().unwrap() - points.last().unwrap()).norm() < tolerance * 10.0
+        }
+    };
+    if should_close {
         let first = snapped[0];
         let last = *snapped.last().unwrap();
-
-        // Add intermediate point if needed to close properly
+        // Add a corner only if the closing edge isn't already axis-aligned.
         if (last.0 - first.0).abs() > tolerance && (last.1 - first.1).abs() > tolerance {
-            // Need a corner point
             snapped.push((first.0, last.1));
         }
     }
@@ -391,7 +427,7 @@ pub(crate) fn orthogonalize_open_path(
     tolerance: f32,
 ) -> Result<Vec<Point2f32>, Error> {
     let simplified = crate::simplification::simplify_stroke(points, tolerance)?;
-    make_orthogonal(&simplified, tolerance)
+    make_orthogonal(&simplified, tolerance, Closure::Open) // open path — never close
 }
 
 #[cfg(test)]

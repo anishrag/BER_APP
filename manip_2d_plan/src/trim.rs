@@ -23,6 +23,10 @@ impl FloorPlan {
     /// vertices keep their identity/parameters; returns the newly-minted
     /// parameter IDs. See [`splice_path`](Self::splice_path) for the mechanics.
     pub fn extend_ortho(&mut self, stroke: &[Point2f32]) -> Result<Vec<ParameterId>, Error> {
+        // NOT on the shared cut pipeline: a porch's exact corner-reuse (an end on
+        // an existing corner, with its 2-param depth/attach structure) doesn't
+        // survive the cut's snap-walls/anchor cleanup, so extend keeps its own
+        // splice path. See `splice_cleaned`.
         self.splice_path(stroke, true, false)
     }
 
@@ -199,13 +203,98 @@ impl FloorPlan {
         self.trim_by_stroke(&[p0, p1])
     }
 
-    /// Trim with an orthogonal cut PATH (removing area): the stroke is
-    /// orthogonalized, its endpoints attach to the outline, and the
-    /// smaller-area side is replaced by the stepped cut — an orthogonal
-    /// notch/chamfer (vs the straight diagonal [`trim_by_stroke`](Self::trim_by_stroke)
-    /// cuts). See [`splice_path`](Self::splice_path).
+    /// Trim with an orthogonal cut PATH (removing area): an orthogonal
+    /// notch/chamfer (vs the straight diagonal [`trim_by_stroke`](Self::trim_by_stroke)).
+    ///
+    /// Shares the living-area/phase CUT's pipeline:
+    /// [`cut_outline`](crate::carve::cut_outline) (orthogonalize to the storey
+    /// axes + attach ends) → [`splice_sequence`](crate::splice::splice_sequence)
+    /// (keep the larger side) → [`clean_region_ring`](crate::carve::clean_region_ring)
+    /// (untangle / square / snap-walls). The cleanup is what makes the result
+    /// valid where a raw in-place splice would self-cross. It then **re-derives
+    /// the splice by position** and finalizes with `splice_into_edge`, so the
+    /// surviving walls keep their `VertexId`/`ParameterId` (and dimensions) — only
+    /// the new trim walls mint params. (The cut finalize, `build_region`, rebuilds
+    /// fresh instead; that's the only divergence from the cut.)
     pub fn trim_ortho(&mut self, stroke: &[Point2f32]) -> Result<Vec<ParameterId>, Error> {
-        self.splice_path(stroke, true, true)
+        use crate::splice::SpliceElem;
+        let err = |m: &str| Error::TrimError(m.into());
+        let ring = self.parametric.ring_points(0);
+        if ring.len() < 3 {
+            return Err(err("no existing polygon"));
+        }
+        let diag = self.bounding_box_diagonal();
+        let merge_tol = if diag > 0.0 {
+            (diag * 0.01).max(1e-4)
+        } else {
+            10.0
+        };
+        // Widen the reach to the historical tolerance so an end drawn a bit off
+        // the wall still attaches.
+        let tuning = crate::SubareaTuning {
+            cut_reach_tol_ratio: 0.25,
+            ..crate::SubareaTuning::default()
+        };
+        let plan = crate::carve::cut_outline(&ring, stroke, merge_tol, &tuning)?
+            .ok_or_else(|| err("orthogonal path doesn't reach the outline"))?;
+
+        // Splice BOTH sides; keep the larger-area one.
+        let resolve = |seq: &[SpliceElem]| -> Vec<Point2f32> {
+            seq.iter()
+                .map(|el| match el {
+                    SpliceElem::Keep(i) => ring[*i],
+                    SpliceElem::New(p) => *p,
+                })
+                .collect()
+        };
+        let pts_a = resolve(&crate::splice::splice_sequence(
+            &ring,
+            plan.e1,
+            plan.t1,
+            plan.e2,
+            plan.t2,
+            &plan.opath,
+            true,
+        ));
+        let pts_b = resolve(&crate::splice::splice_sequence(
+            &ring,
+            plan.e1,
+            plan.t1,
+            plan.e2,
+            plan.t2,
+            &plan.opath,
+            false,
+        ));
+        let pts = if polygon_area(&pts_a).abs() >= polygon_area(&pts_b).abs() {
+            pts_a
+        } else {
+            pts_b
+        };
+        record_phase("spliced ring", &pts, true);
+
+        // Shared cut cleanup (records "cleaned ring").
+        let cleaned = crate::carve::clean_region_ring(&ring, &pts);
+        if cleaned.len() < 3 {
+            return Err(err("collapsed the shape to a line"));
+        }
+
+        // Re-derive the splice by POSITION so identity is preserved: a cleaned
+        // vertex coinciding with an existing ring vertex REUSES it (`Keep` → keeps
+        // its IDs/dimension); only the genuinely-new walls mint params.
+        let eps = (diag * 0.002).max(1e-4);
+        let seq: Vec<SpliceElem> = cleaned
+            .iter()
+            .map(|p| {
+                match ring
+                    .iter()
+                    .position(|v| (v.x - p.x).abs() < eps && (v.y - p.y).abs() < eps)
+                {
+                    Some(i) => SpliceElem::Keep(i),
+                    None => SpliceElem::New(*p),
+                }
+            })
+            .collect();
+        self.parametric.splice_into_edge(0, &seq)
     }
 
     /// Trim a wall with a faceted freeform CURVE (removing area): the drawn arc
@@ -246,16 +335,32 @@ impl FloorPlan {
         } else {
             10.0
         };
-        // Orthogonalize (Ortho tools) snaps to H/V; simplify (Curve tools) just
-        // RDP-facets the hand-drawn arc, keeping its curvature.
+        // DEBUG overlay — capture every pipeline stage, in order.
+        // STAGE: the raw freehand stroke, before any processing.
+        record_phase("raw stroke", stroke, false);
+
+        // STAGE: RDP-simplify (drop jitter / redundant points). Both the Ortho
+        // and Curve tools simplify; only Ortho then squares to H/V.
+        let simplified = simplification::simplify_stroke(stroke, merge_tol)?;
+        record_phase("simplified (RDP)", &simplified, false);
+
+        // STAGE(S): Ortho squares to H/V — `make_orthogonal` records its OWN
+        // internal sub-stages ("snapped to H/V", then "orthogonalized (cleaned)").
+        // Curve keeps the faceted arc as-is.
         let path = if orthogonalize {
-            orthogonal::orthogonalize_open_path(stroke, merge_tol)?
+            // Snap to the STOREY's axes (base_angle = 0), NOT the stroke's own
+            // dominant angle — otherwise a tilted hand-drawn notch squares to a
+            // tilted grid instead of lining up with the (axis-aligned) outline.
+            // Strictly OPEN — the two ends attach to the outline separately and
+            // must never be joined into a loop.
+            orthogonal::make_orthogonal_at(&simplified, merge_tol, 0.0, orthogonal::Closure::Open)?
         } else {
-            simplification::simplify_stroke(stroke, merge_tol)?
+            simplified
         };
         if path.len() < 2 {
             return Err(err("path collapsed".into()));
         }
+
         self.splice_cleaned(&path, keep_larger)
     }
 
@@ -295,6 +400,14 @@ impl FloorPlan {
         let end = path[path.len() - 1];
         let (e1, t1, s_dist, snapped1) = snap::snap_to_polygon(&ring, start, vertex_tol);
         let (e2, t2, e_dist, snapped2) = snap::snap_to_polygon(&ring, end, vertex_tol);
+        // Elective: an extend/trim endpoint that landed on an existing CORNER
+        // snapped to it (it could have attached mid-edge).
+        if snapped1 {
+            snap::elective_snap(snap::SnapKind::ToVertex, start, ring[e1]);
+        }
+        if snapped2 {
+            snap::elective_snap(snap::SnapKind::ToVertex, end, ring[e2]);
+        }
         if s_dist > max_tol || e_dist > max_tol {
             return Err(err(format!(
                 "endpoints too far from the outline (start={:.3}, end={:.3}, max={:.3})",
@@ -309,6 +422,11 @@ impl FloorPlan {
         let last = path.len() - 1;
         snap::pin_to_edge(&mut path[0], &ring, e1);
         snap::pin_to_edge(&mut path[last], &ring, e2);
+
+        // STAGE: the path with its two ENDPOINTS pinned onto the outline edges
+        // (e1/e2) — its ends now sit on the boundary. (This is the #2→#3 seam
+        // where a sideways pin can re-tilt a squared end into a diagonal.)
+        record_phase("pinned to outline", &path, false);
 
         let mut chosen = if keep_larger {
             // Trim: build both arc-replacements; keep whichever leaves more area.
@@ -400,8 +518,69 @@ impl FloorPlan {
         for (idx, val) in ops {
             chosen[idx] = val;
         }
+
+        // STAGE: the SPLICED RING (the `chosen` sequence resolved to points) —
+        // the candidate result handed to `splice_into_edge`. For a bad stroke
+        // this is where the ring SELF-CROSSES and gets rejected.
+        let spliced: Vec<Point2f32> = chosen
+            .iter()
+            .map(|el| match el {
+                SpliceElem::Keep(i) => ring[*i],
+                SpliceElem::New(p) => *p,
+            })
+            .collect();
+        record_phase("spliced ring", &spliced, true);
+
         self.parametric.splice_into_edge(0, &chosen)
     }
+}
+
+/// Toggle capture of the splice-pipeline phases for the app's debug overlay.
+const DEBUG_DRAW: bool = true;
+
+/// One captured phase of the splice pipeline — a labelled path/ring the app
+/// draws as a coloured debug overlay. `closed` joins the last point to the first.
+#[derive(Clone, Debug)]
+pub struct SplicePhase {
+    pub label: String,
+    pub points: Vec<Point2f32>,
+    pub closed: bool,
+}
+
+thread_local! {
+    static SPLICE_PHASES: std::cell::RefCell<Vec<SplicePhase>> =
+        const { std::cell::RefCell::new(Vec::new()) };
+}
+
+/// Drain the splice-pipeline phases recorded since the last drain. The shell
+/// drains BEFORE a splice op (to clear stale phases) and again AFTER to capture
+/// that op's phases for the overlay.
+pub fn take_splice_debug() -> Vec<SplicePhase> {
+    SPLICE_PHASES.with(|p| std::mem::take(&mut *p.borrow_mut()))
+}
+
+/// Record one splice phase for the debug overlay, in CALL order (the UI numbers
+/// them). Only the path/ring is captured. No-op unless `DEBUG_DRAW`. The shell
+/// drains these with [`take_splice_debug`]. `pub(crate)` so the orthogonalizer
+/// can record its own internal sub-stages.
+pub(crate) fn record_phase(label: &str, shape: &[Point2f32], closed: bool) {
+    if !DEBUG_DRAW || shape.is_empty() {
+        return;
+    }
+    // Also dump the coordinates to the console so a stage can be inspected /
+    // shared without the UI. Numbered to match the overlay's legend order is the
+    // UI's job; here we print label + every point.
+    log::info!(
+        "[splice stage] {label} ({} pts, closed={closed}): {shape:?}",
+        shape.len()
+    );
+    SPLICE_PHASES.with(|p| {
+        p.borrow_mut().push(SplicePhase {
+            label: label.to_string(),
+            points: shape.to_vec(),
+            closed,
+        });
+    });
 }
 
 #[cfg(test)]
@@ -1551,5 +1730,104 @@ mod trim_tests {
         );
         assert!(plan.validate_simple().is_ok());
         assert!(diagonal_edge_count(&plan) >= 2);
+    }
+}
+
+#[cfg(test)]
+mod trim_self_cross {
+    use super::*;
+    fn p(x: f32, y: f32) -> Point2f32 {
+        Point2f32::new(x, y)
+    }
+    /// The wiggly trim stroke from the field log used to fail with "edges 0 and 7
+    /// intersect": the orthogonalizer's implicit-closure heuristic saw the two
+    /// near endpoints and bolted on a spurious closing corner. With trim paths now
+    /// orthogonalized as `Closure::Open`, no closing corner is added and the trim
+    /// produces a valid simple polygon.
+    #[test]
+    fn wiggly_open_trim_no_longer_self_crosses() {
+        // The dimensioned L-shape (≈3 m) from the log; inner corner at (3.156, 3.301).
+        let outline = vec![
+            p(1.157, 1.802),
+            p(1.157, 4.802),
+            p(4.156, 4.802),
+            p(4.156, 3.301),
+            p(3.156, 3.301),
+            p(3.156, 1.802),
+        ];
+        let mut fp = FloorPlan::from_clean_ring(&outline).unwrap();
+        let stroke = vec![
+            p(3.134, 3.303),
+            p(3.124, 3.310),
+            p(3.113, 3.317),
+            p(3.096, 3.331),
+            p(3.078, 3.349),
+            p(3.071, 3.367),
+            p(3.050, 3.381),
+            p(3.039, 3.391),
+            p(3.025, 3.398),
+            p(3.005, 3.412),
+            p(2.998, 3.422),
+            p(2.991, 3.432),
+            p(2.984, 3.439),
+            p(2.977, 3.446),
+            p(2.970, 3.453),
+            p(2.953, 3.467),
+            p(2.935, 3.473),
+            p(2.928, 3.480),
+            p(2.918, 3.484),
+            p(2.907, 3.491),
+            p(2.894, 3.501),
+            p(2.887, 3.508),
+            p(2.874, 3.514),
+            p(2.857, 3.521),
+            p(2.846, 3.525),
+            p(2.832, 3.528),
+            p(2.818, 3.528),
+            p(2.811, 3.535),
+            p(2.811, 3.526),
+            p(2.818, 3.505),
+            p(2.818, 3.488),
+            p(2.818, 3.460),
+            p(2.825, 3.446),
+            p(2.832, 3.429),
+            p(2.832, 3.387),
+            p(2.825, 3.373),
+            p(2.818, 3.356),
+            p(2.815, 3.326),
+            p(2.811, 3.295),
+            p(2.804, 3.252),
+            p(2.796, 3.195),
+            p(2.796, 3.149),
+            p(2.789, 3.097),
+            p(2.789, 3.062),
+            p(2.789, 3.034),
+            p(2.782, 3.017),
+            p(2.782, 2.999),
+            p(2.782, 2.979),
+            p(2.782, 2.958),
+            p(2.775, 2.937),
+            p(2.775, 2.920),
+            p(2.775, 2.909),
+            p(2.762, 2.895),
+            p(2.762, 2.885),
+            p(2.755, 2.871),
+            p(2.755, 2.864),
+            p(2.764, 2.864),
+            p(2.794, 2.872),
+            p(2.851, 2.886),
+            p(2.933, 2.914),
+            p(3.027, 2.931),
+            p(3.077, 2.937),
+            p(3.098, 2.944),
+            p(3.140, 2.944),
+            p(3.183, 2.947),
+            p(3.229, 2.951),
+            p(3.253, 2.951),
+        ];
+        fp.trim_ortho(&stroke)
+            .expect("open trim no longer self-crosses");
+        fp.validate_simple()
+            .expect("trim result is a simple polygon");
     }
 }
