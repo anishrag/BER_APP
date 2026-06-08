@@ -26,6 +26,7 @@ use datatypes::ber::structural::WallExposure;
 use domain::points::Point2f32;
 use manip_2d_plan::{Error, FloorPlan, ParameterId, SubareaOutcome, SubareaTuning, VertexId};
 use std::collections::{HashMap, HashSet};
+use std::ops::{Deref, DerefMut};
 
 /// A single "what's the length of this wall?" question to put to the assessor.
 #[derive(Debug, Clone)]
@@ -156,9 +157,11 @@ pub struct ExposureSection {
     pub exposure: WallExposure,
 }
 
-/// One storey's editable shapes and which is active.
+/// One storey's editable shapes and which is active. The building-level
+/// [`Document`] holds one of these per storey; it `Deref`s to the active one, so
+/// per-storey field/method access reads through transparently.
 #[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
-pub struct Document {
+pub struct StoreyDoc {
     /// The storey outline (primary footprint).
     pub outline: ShapeSlot,
     /// Potential living-area sub-shapes, drawn inside the storey the same way as
@@ -236,7 +239,61 @@ fn pick_piece_for_stroke(pieces: Vec<FloorPlan>, stroke: &[Point2f32]) -> Option
         .map(|(_, _, p)| p)
 }
 
+/// The editable model of a whole BUILDING: one [`StoreyDoc`] per storey plus
+/// which storey is active. It `Deref`s to the active storey, so the controller's
+/// existing per-storey access (`document.floor_plan`, `document.sync_active()`)
+/// transparently targets the active storey. Switching storeys is just moving
+/// `active_storey` — each storey keeps its own parametric editing state, so a
+/// switch is LOSSLESS (no rebuild from resolved points).
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct Document {
+    /// One editable model per storey. Invariant: never empty (always ≥ 1), so
+    /// `Deref` always has an active storey to target.
+    pub storeys: Vec<StoreyDoc>,
+    /// Which storey is being edited — the one `Deref` targets.
+    pub active_storey: usize,
+}
+
+impl Default for Document {
+    fn default() -> Self {
+        Self {
+            storeys: vec![StoreyDoc::default()],
+            active_storey: 0,
+        }
+    }
+}
+
+impl Deref for Document {
+    type Target = StoreyDoc;
+    fn deref(&self) -> &StoreyDoc {
+        &self.storeys[self.active_storey]
+    }
+}
+
+impl DerefMut for Document {
+    fn deref_mut(&mut self) -> &mut StoreyDoc {
+        &mut self.storeys[self.active_storey]
+    }
+}
+
 impl Document {
+    /// Switch the active storey, if `idx` is a valid storey. The target storey's
+    /// own editing buffer is preserved across the switch.
+    pub fn set_active_storey(&mut self, idx: usize) {
+        if idx < self.storeys.len() {
+            self.active_storey = idx;
+        }
+    }
+
+    /// Append a fresh empty storey and make it active. Returns its index.
+    pub fn push_storey(&mut self) -> usize {
+        self.storeys.push(StoreyDoc::default());
+        self.active_storey = self.storeys.len() - 1;
+        self.active_storey
+    }
+}
+
+impl StoreyDoc {
     /// Write the live editing buffer back into whichever slot is active, so the
     /// slots are current before they're read (persist / switch / snapshot).
     pub fn sync_active(&mut self) {

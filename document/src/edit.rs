@@ -4,10 +4,10 @@
 //! and their solvers — is interaction bound to the controller's prompt types (an
 //! intentional shell exception; see "Responsibility placement" in CLAUDE.md), and
 //! the actual plan edits it performs are already `manip_2d_plan` calls.
-use crate::Document;
+use crate::StoreyDoc;
 use manip_2d_plan::ParameterAxis;
 
-impl Document {
+impl StoreyDoc {
     /// Drag the currently-selected vertex (free 2D) or wall (along its movable
     /// axis) to world `(x, y)`, mutating the live plan. Returns whether anything
     /// actually moved (the shell snapshots once per drag and persists on change).

@@ -211,7 +211,9 @@ pub struct DimensionPromptUiData {
 /// Format version of the editing-layer snapshot (`Document` serde). Bump when
 /// the serialized shape changes incompatibly — old snapshots are then ignored on
 /// load and the editor rebuilds from the resolved BER points instead.
-const PARAMETRIC_SNAPSHOT_VERSION: i64 = 1;
+// v2: snapshot is now a multi-storey `Document` ({ storeys, active_storey })
+// rather than a single storey's flat fields.
+const PARAMETRIC_SNAPSHOT_VERSION: i64 = 2;
 
 pub struct AppController {
     conn: Db,
@@ -576,16 +578,42 @@ impl AppController {
         let record = BerRepository::new(&self.conn)
             .load(id)
             .map_err(|e| format!("failed to load BER: {}", e))?;
-        // A reopened BER always lands on storey 0 (multi-storey navigation
-        // doesn't persist the per-session cursor — by design, see plan).
-        // Default landing is storey 0; a snapshot may move it to the storey the
-        // assessor was last editing (see `try_restore_snapshot`).
-        self.current_storey_idx = Some(0);
-        self.load_storey_into_editor(record.data.storeys.first());
         self.current_record = Some(record);
-        // Restore the exact in-progress editing state (incl. un-finalised work
-        // the resolved record can't hold) from the snapshot; falls back silently
-        // to the rebuild above if it's missing or from an incompatible version.
+        // Rebuild ONE StoreyDoc per storey from its resolved points — the fallback
+        // when there's no compatible snapshot. Grow the container to N storeys,
+        // then rebuild each in place (so multi-storey records stay fully editable
+        // even pre-snapshot). A reopened BER lands on storey 0; a snapshot may move
+        // it to the storey the assessor was last editing (see `try_restore_snapshot`).
+        let n = self
+            .current_record
+            .as_ref()
+            .unwrap()
+            .data
+            .storeys
+            .len()
+            .max(1);
+        self.document = Document::default();
+        for _ in 1..n {
+            self.document.push_storey();
+        }
+        for i in 0..n {
+            self.document.set_active_storey(i);
+            let storey = self
+                .current_record
+                .as_ref()
+                .unwrap()
+                .data
+                .storeys
+                .get(i)
+                .cloned();
+            self.load_storey_into_editor(storey.as_ref());
+        }
+        self.document.set_active_storey(0);
+        self.current_storey_idx = Some(0);
+        // Restore the exact in-progress editing state (every storey's shared
+        // params / collinearity / curves + un-finalised work the resolved record
+        // can't hold) from the snapshot; falls back silently to the rebuild above
+        // if it's missing or from an incompatible version.
         self.try_restore_snapshot(id);
         let idx = self.current_storey_idx.unwrap_or(0);
         // Phase areas are session-only — rebuild them from the loaded storey's
@@ -616,18 +644,29 @@ impl AppController {
         if version != PARAMETRIC_SNAPSHOT_VERSION {
             return;
         }
-        let Ok(doc) = serde_json::from_str::<Document>(&json) else {
+        let Ok(mut doc) = serde_json::from_str::<Document>(&json) else {
             return;
         };
-        let n_storeys = self
+        // The snapshot is a whole multi-storey Document, written alongside the
+        // resolved record — so it must describe the SAME storey count and have at
+        // least one storey. On any mismatch keep the rebuild, which is always
+        // consistent with `current_record`. `storey_idx` is now vestigial — the
+        // active storey lives in the Document.
+        let _ = storey_idx;
+        let n = self
             .current_record
             .as_ref()
             .map(|r| r.data.storeys.len())
             .unwrap_or(0);
-        if (storey_idx as usize) < n_storeys {
-            self.current_storey_idx = Some(storey_idx as usize);
+        if doc.storeys.is_empty() || doc.storeys.len() != n {
+            return;
         }
+        if doc.active_storey >= n {
+            doc.active_storey = 0;
+        }
+        let idx = doc.active_storey;
         self.document = doc;
+        self.current_storey_idx = Some(idx);
         // Resume on the OUTLINE (the canonical entry point, same as a fresh open).
         // The in-progress shapes are all restored in their slots; we just point
         // the live buffer back at the outline.
@@ -688,29 +727,53 @@ impl AppController {
         if self.current_storey_idx == target {
             return Ok(());
         }
-        // Save the current storey first so its in-memory state is current.
+        // Derive the OUTGOING storey into `current_record` (eager — we're leaving
+        // it; `commit_to_ber` syncs its buffer first).
         self.commit_to_ber()?;
+        // LOSSLESS switch: the target storey's `StoreyDoc` is kept in place, so we
+        // just move the active index — NO rebuild-from-resolved-points (which
+        // would drop shared params / collinearity / curves). Its outline, living
+        // areas, dimensioning and exposure are exactly as the assessor left them.
+        if let Some(i) = target {
+            self.document.set_active_storey(i);
+        }
         self.current_storey_idx = target;
-        // Clear transient per-storey state — none of it carries across a switch.
+        // Re-derive the now-active storey on the next render/persist.
+        self.mark_dirty()?;
+        // Clear only TRANSIENT state — none of it carries across a switch. The
+        // storey's SHAPES + dimensioning (above) are preserved.
         self.view = ViewTransform::default();
         self.document.edit_state = EditState::default();
-        self.review = None;
         self.document.pending_arc = None;
+        self.review = None;
         self.pending_cut = None;
         self.pending_redraw = None;
         self.edit_drag_prompt = None;
         self.vertex_drop_prompt = None;
-        let storey = target.and_then(|i| {
-            self.current_record
-                .as_ref()
-                .and_then(|r| r.data.storeys.get(i).cloned())
-        });
-        self.load_storey_into_editor(storey.as_ref());
-        // Rebuild the target storey's phase areas from its tagged floor regions
-        // (unless this session already has them) so its partition is reproducible.
-        if let Some(i) = target {
-            if !self.phase_regions.contains_key(&i) {
-                self.reconstruct_phase_regions_for(i);
+        self.living_area_mode = false;
+        self.exposure_mode = false;
+        self.phase_mode = false;
+        self.selected_exposure_wall = None;
+        self.exposure_sel = None;
+        self.exposure_drag = None;
+        match target {
+            Some(i) => {
+                // Resume on the outline (canonical entry); load its slot into the
+                // buffer. The storey's shapes were preserved in place above.
+                self.document.active = ActiveShape::Outline;
+                self.document.load_active_into_buffer();
+                // Rebuild the target storey's phase areas from its tagged floor
+                // regions (unless this session already has them).
+                if !self.phase_regions.contains_key(&i) {
+                    self.reconstruct_phase_regions_for(i);
+                }
+            }
+            None => {
+                // "All storeys" overview — no editable shape. The active storey's
+                // slots stay intact (synced by `commit_to_ber`); empty only the
+                // live buffer so the canvas has nothing to edit on.
+                self.document.floor_plan = FloorPlan::default();
+                self.document.dimensioning = DimensionState::default();
             }
         }
         self.compute_next_dimension_prompt();
@@ -745,6 +808,9 @@ impl AppController {
             "[new-storey] add_storey: appended storey {} (now editing it, zoomed out for drawing room)",
             new_idx
         );
+        // Grow the editing container in lock-step: a fresh empty StoreyDoc, made
+        // active. (Invariant: document.storeys.len() == current_record storeys.)
+        self.document.push_storey();
         self.current_storey_idx = Some(new_idx);
         // Start zoomed out so the previous-storey watermark doesn't fill the
         // canvas — the assessor needs room to draw a footprint that extends
@@ -875,7 +941,11 @@ impl AppController {
         if self.current_record.is_none() {
             return;
         }
-        let idx = self.current_storey_idx.unwrap_or(0);
+        // No active storey (the "All storeys" overview tab) → nothing to derive;
+        // `current_record` already holds each storey's last-derived geometry.
+        let Some(idx) = self.current_storey_idx else {
+            return;
+        };
         let storey = self.resolve_storey(idx);
         self.current_record.as_mut().unwrap().data.storeys[idx] = storey;
         // Floors are already phase-correct from the partition; this stamps the
@@ -4374,9 +4444,10 @@ mod trim_collapse_tests {
         // un-set params) must leave the curved shape untouched.
         let area_before_rescale = ring_area(&c);
         let diag_before = diag_edges(&c);
-        c.document
-            .floor_plan
-            .aesthetic_rescale(&c.document.dimensioning.known_params);
+        // (`document` derefs to the active storey, so the disjoint floor_plan /
+        // dimensioning borrows must be split — lift the known set into a local.)
+        let known = c.document.dimensioning.known_params.clone();
+        c.document.floor_plan.aesthetic_rescale(&known);
         assert_eq!(diag_edges(&c), diag_before, "rescale must not drop facets");
         assert!(
             (ring_area(&c) - area_before_rescale).abs() < 1e-3,

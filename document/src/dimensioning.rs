@@ -1,13 +1,13 @@
 //! Dimensioning operations on the active shape — pure model mutation.
 //! The shell (`AppController`) wraps these with undo + persistence.
-use crate::{ActiveShape, DimensionPrompt, Document};
+use crate::{ActiveShape, DimensionPrompt, StoreyDoc};
 use manip_2d_plan::{find_flipped_edge, ParameterAxis};
 
 // ── Dimensioning operations ─────────────────────────────────────────────────
 // Pure model mutation over the active shape's plan + dimensioning state. The
 // shell (`AppController`) wraps these with undo (snapshot/restore) and persistence
 // (`commit_to_ber`); none of that lives here.
-impl Document {
+impl StoreyDoc {
     /// Apply the user's entered length for the current dimension prompt. The first
     /// entry scales the whole plan from pixels to metres; later entries set the
     /// prompt's controlled parameter, then repair the un-set walls and (for a

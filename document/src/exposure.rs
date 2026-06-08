@@ -1,7 +1,7 @@
 //! Wall-exposure model operations: painting / clearing per-wall heat-loss
 //! sections on the storey outline, and deriving full coverage. Pure model
 //! mutation — the shell owns pointer selection, undo, and persistence.
-use crate::{Document, ExposureSection};
+use crate::{ExposureSection, StoreyDoc};
 use datatypes::ber::structural::WallExposure;
 use manip_2d_plan::VertexId;
 
@@ -85,7 +85,7 @@ pub fn wall_coverage(len: f32, sections: &[ExposureSection]) -> Vec<(f32, f32, W
     out
 }
 
-impl Document {
+impl StoreyDoc {
     /// Paint a section `[start, end]` (the wall's length is `len`) with `exposure`
     /// onto outline wall `vid`, then fill the gaps so the wall is fully
     /// partitioned into explicit sections.
