@@ -782,6 +782,11 @@ impl AppController {
         self.document.active = ActiveShape::Outline;
         self.living_area_mode = false;
         self.exposure_mode = false;
+        // Phase mode is a sub-area tool like the two above; leaving it on across a
+        // storey switch routed the new storey's OUTLINE stroke into the phase
+        // carve (against an empty footprint). Reset it so the new storey starts in
+        // outline mode.
+        self.phase_mode = false;
         self.selected_exposure_wall = None;
         self.exposure_sel = None;
         self.exposure_drag = None;

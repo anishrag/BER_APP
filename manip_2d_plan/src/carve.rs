@@ -189,6 +189,14 @@ fn carve_or_cut(
     stroke: &[Point2f32],
     tuning: &SubareaTuning,
 ) -> Result<SubareaOutcome, Error> {
+    // No storey footprint to carve against (e.g. a freshly-added storey with no
+    // outline yet) — there's nothing to clip/follow, so bail instead of letting
+    // the boundary follower index an empty ring.
+    if outline.len() < 3 {
+        return Err(Error::ExtendError(
+            "no storey outline to carve against".into(),
+        ));
+    }
     let pts = region::clip_stroke_inside(outline, stroke, tuning.close_gap_m);
     let tol = (geom::bbox_diagonal(&pts) * tuning.rdp_tol_ratio).max(tuning.rdp_tol_floor);
     match split_cut(outline, &pts, tol, tuning)? {
@@ -2739,5 +2747,25 @@ mod checkpoint_cut {
             }
             other => panic!("expected a Cut, got {other:?}"),
         }
+    }
+}
+
+#[cfg(test)]
+mod empty_outline_guard {
+    use super::*;
+    /// Carving against a storey with no outline (e.g. a freshly-added storey)
+    /// must return an error, NOT panic in the boundary follower.
+    #[test]
+    fn carve_against_empty_outline_errs_not_panics() {
+        let empty = FloorPlan::default();
+        let stroke = vec![
+            Point2f32::new(0.0, 0.0),
+            Point2f32::new(1.0, 0.0),
+            Point2f32::new(1.0, 1.0),
+            Point2f32::new(0.0, 1.0),
+        ];
+        assert!(empty
+            .carve_or_cut(&stroke, &SubareaTuning::default())
+            .is_err());
     }
 }
