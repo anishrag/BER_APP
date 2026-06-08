@@ -29,7 +29,16 @@ pub struct BerApp {
     pub splash_state: SplashState,
     pub new_ber_state: NewBerState,
     pub sketch_state: SketchState,
+
+    // Idle-autosave bookkeeping: the controller's edit `revision` last seen, and
+    // the app-clock time it last changed. When the revision goes quiet for
+    // `IDLE_SAVE_SECS`, we flush un-persisted edits to disk.
+    last_seen_revision: u64,
+    last_change_time: f64,
 }
+
+/// Idle gap (seconds of no edits) before an autosave flush fires.
+const IDLE_SAVE_SECS: f64 = 2.5;
 
 #[derive(Default)]
 pub struct SketchState {
@@ -131,6 +140,8 @@ impl BerApp {
             splash_state: SplashState::default(),
             new_ber_state: NewBerState::default(),
             sketch_state: SketchState::default(),
+            last_seen_revision: 0,
+            last_change_time: 0.0,
         }
     }
 
@@ -174,10 +185,34 @@ impl BerApp {
 }
 
 impl eframe::App for BerApp {
+    /// Backstop for the idle autosave: eframe calls `save` periodically and on
+    /// shutdown, so edits made within the idle window before a clean exit still
+    /// reach disk. No-op when nothing is pending.
+    fn save(&mut self, _storage: &mut dyn eframe::Storage) {
+        let _ = self.app_controller.borrow_mut().flush_if_dirty();
+    }
+
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         if !self.splash_state.loading_started {
             self.start_loading();
             self.splash_state.loading_started = true;
+        }
+
+        // Idle autosave: edits refresh the in-memory BER (cheap) but no longer
+        // write to disk; we flush to SQLite once editing goes quiet. On a change
+        // we reset the timer and schedule a wake-up at the idle deadline (egui is
+        // reactive — without `request_repaint_after` it would never tick to save).
+        {
+            let now = ctx.input(|i| i.time);
+            let rev = self.app_controller.borrow().revision();
+            if rev != self.last_seen_revision {
+                self.last_seen_revision = rev;
+                self.last_change_time = now;
+                ctx.request_repaint_after(std::time::Duration::from_secs_f64(IDLE_SAVE_SECS));
+            } else if now - self.last_change_time >= IDLE_SAVE_SECS {
+                // No-op if nothing is pending; otherwise one SQLite write.
+                let _ = self.app_controller.borrow_mut().flush_if_dirty();
+            }
         }
         // Check for progress updates if on splash screen
         if self.current_page == Page::Splash {

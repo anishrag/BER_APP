@@ -272,6 +272,13 @@ pub struct AppController {
     /// DEBUG: the splice-pipeline phases (#1 raw stroke … #4 spliced ring) from
     /// the last extend/trim, captured for the UI's coloured debug overlay.
     splice_debug: Vec<manip_2d_plan::SplicePhase>,
+    /// Edit counter, bumped on every in-memory BER refresh (`commit_to_ber`).
+    /// `revision != saved_revision` means there are un-persisted edits. The UI
+    /// uses `revision` for idle detection; `flush_if_dirty` writes to disk and
+    /// catches `saved_revision` up. This is what decouples the (cheap, per-edit)
+    /// in-memory refresh from the (costly) SQLite write.
+    revision: u64,
+    saved_revision: u64,
     /// Active post-drag measurement prompt. Set on mouse-up after a drag if
     /// the plan is already dimensioned; cleared when the user applies or
     /// cancels. The user types a distance + cycles through candidate
@@ -363,6 +370,8 @@ impl AppController {
             phase_regions: HashMap::new(),
             pending_phase_cut: None,
             splice_debug: Vec::new(),
+            revision: 0,
+            saved_revision: 0,
             edit_drag_prompt: None,
             vertex_drop_prompt: None,
             history: Vec::new(),
@@ -544,6 +553,10 @@ impl AppController {
     /// from the resolved `floors` geometry (equivalences/dimensions are then
     /// lost — unavoidable for pre-snapshot records).
     pub fn open_ber(&mut self, id: &ItemId) -> Result<(), String> {
+        // Boundary flush: switching records persists any pending edits on the
+        // current one first, so the idle-deferred writes aren't lost when the
+        // assessor opens a different (or the same) BER.
+        let _ = self.flush_if_dirty();
         let record = BerRepository::new(&self.conn)
             .load(id)
             .map_err(|e| format!("failed to load BER: {}", e))?;
@@ -965,7 +978,27 @@ impl AppController {
         // phase onto the just-rebuilt WALLS from the same session areas.
         self.resolve_storey_phases(idx);
 
-        self.persist()
+        // In-memory refresh only — the canvas renders `current_record`, so this
+        // keeps the view live. The disk write is deferred to `flush_if_dirty`
+        // (idle / boundary), so editing never blocks on SQLite.
+        self.revision = self.revision.wrapping_add(1);
+        Ok(())
+    }
+
+    /// Persist to SQLite only if there are un-saved edits since the last write.
+    /// Called on the idle autosave tick and at session boundaries — NOT per edit.
+    pub fn flush_if_dirty(&mut self) -> Result<(), String> {
+        if self.revision != self.saved_revision {
+            self.persist()?;
+            self.saved_revision = self.revision;
+        }
+        Ok(())
+    }
+
+    /// Edit revision — bumped on every in-memory BER refresh. The UI watches this
+    /// to detect activity and time the idle autosave.
+    pub fn revision(&self) -> u64 {
+        self.revision
     }
 
     /// Stamp the construction PHASE onto storey `idx`'s WALLS from the session
