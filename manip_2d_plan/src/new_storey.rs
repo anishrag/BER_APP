@@ -349,6 +349,21 @@ fn square_off_new_walls(out: &mut [(Point2f32, bool)], tuning: &SpliceTuning) {
             let my = (a.y + b.y) * 0.5; // near-horizontal → share y
             out[i].0.y = my;
             out[j].0.y = my;
+        } else if dx < axis_tol && dy < axis_tol {
+            // A tiny diagonal JUNCTION connector (both deltas sub-tolerance) where
+            // a followed-boundary anchor meets a squared new wall but the two
+            // didn't quite line up. It can't read as horizontal OR vertical above,
+            // so square it to the nearer axis — otherwise it leaves a small
+            // non-orthogonal seam in a footprint that should be all right angles.
+            if dx <= dy {
+                let mx = (a.x + b.x) * 0.5; // closer to vertical → share x
+                out[i].0.x = mx;
+                out[j].0.x = mx;
+            } else {
+                let my = (a.y + b.y) * 0.5; // closer to horizontal → share y
+                out[i].0.y = my;
+                out[j].0.y = my;
+            }
         }
     }
 }
@@ -484,6 +499,13 @@ pub(crate) fn outline_following_trace(
         cleaned.rotate_left(rk);
     }
     let cleaned: Vec<Point2f32> = cleaned.into_iter().map(|(p, _)| p).collect();
+    // Final safety net: square off any junction tilt that `square_off_new_walls`'
+    // single-pass snapping left behind (snapping one seam can un-square a
+    // neighbour). This squares only edges that are tilted AND NOT on `ring`, so
+    // followed edges and curve facets (which sit verbatim on the boundary) are
+    // kept; the new storey over an axis-aligned previous comes out fully
+    // orthogonal. Same pass `build_region` uses.
+    let cleaned = crate::geom::orthogonalize_off_boundary(&cleaned, ring, 0.003);
     log::debug!(
         "[new_storey] built {} verts from {} runs ({} following, {} new-wall)",
         cleaned.len(),
@@ -556,6 +578,206 @@ mod tests {
         ];
         assert!(
             outline_following_trace(&ring, &trace, 0.5, 0.3, &SpliceTuning::default()).is_none()
+        );
+    }
+}
+
+#[cfg(test)]
+mod square_off_tests {
+    use super::*;
+    fn p(x: f32, y: f32) -> Point2f32 {
+        Point2f32::new(x, y)
+    }
+    /// A tiny diagonal junction (both deltas sub-tolerance) where a followed
+    /// anchor meets a squared new wall must be squared, not left as a seam.
+    #[test]
+    fn squares_a_tiny_diagonal_junction() {
+        // Quad with a small diagonal on edge 0 (the seam from the field log).
+        let mut out = vec![
+            (p(0.236, 2.321), false),
+            (p(0.259, 2.331), false),
+            (p(0.259, 0.401), false),
+            (p(0.236, 0.401), false),
+        ];
+        square_off_new_walls(&mut out, &SpliceTuning::default());
+        // Edge 0 is now axis-aligned (shares one coordinate).
+        let (a, b) = (out[0].0, out[1].0);
+        let axis_aligned = (a.x - b.x).abs() < 1e-4 || (a.y - b.y).abs() < 1e-4;
+        assert!(axis_aligned, "tiny diagonal junction squared: {a:?}->{b:?}");
+    }
+}
+
+#[cfg(test)]
+mod new_storey_orthogonal_regression {
+    use super::*;
+    fn p(x: f32, y: f32) -> Point2f32 {
+        Point2f32::new(x, y)
+    }
+    /// Field case: tracing an upper storey over a ~2×2 m ground floor produced a
+    /// footprint with a NON-ORTHOGONAL seam where a followed-boundary run met a
+    /// squared new wall. A new storey over an axis-aligned storey must come out
+    /// fully orthogonal. (Reproduces the exact raw trace + previous ring.)
+    #[test]
+    fn traced_new_storey_is_fully_orthogonal() {
+        // Previous storey: a 2×2 m square (world/metre coords from the log).
+        let ring = vec![
+            p(0.236, 0.321),
+            p(2.236, 0.321),
+            p(2.236, 2.321),
+            p(0.236, 2.321),
+        ];
+        // The raw freehand trace (137 pts) as captured.
+        let trace = vec![
+            p(0.261, 0.362),
+            p(0.261, 0.362),
+            p(0.261, 0.420),
+            p(0.261, 0.466),
+            p(0.261, 0.521),
+            p(0.261, 0.629),
+            p(0.261, 0.715),
+            p(0.261, 0.802),
+            p(0.261, 0.869),
+            p(0.261, 0.934),
+            p(0.261, 0.992),
+            p(0.261, 1.056),
+            p(0.261, 1.104),
+            p(0.248, 1.177),
+            p(0.241, 1.265),
+            p(0.233, 1.352),
+            p(0.226, 1.431),
+            p(0.220, 1.561),
+            p(0.220, 1.637),
+            p(0.220, 1.713),
+            p(0.220, 1.800),
+            p(0.234, 1.879),
+            p(0.234, 1.955),
+            p(0.248, 2.032),
+            p(0.248, 2.106),
+            p(0.248, 2.173),
+            p(0.248, 2.215),
+            p(0.248, 2.252),
+            p(0.248, 2.292),
+            p(0.248, 2.324),
+            p(0.259, 2.372),
+            p(0.265, 2.427),
+            p(0.271, 2.469),
+            p(0.282, 2.495),
+            p(0.282, 2.500),
+            p(0.282, 2.500),
+            p(0.282, 2.500),
+            p(0.282, 2.496),
+            p(0.282, 2.496),
+            p(0.287, 2.466),
+            p(0.310, 2.426),
+            p(0.321, 2.393),
+            p(0.331, 2.362),
+            p(0.347, 2.346),
+            p(0.347, 2.341),
+            p(0.347, 2.341),
+            p(0.352, 2.341),
+            p(0.377, 2.341),
+            p(0.448, 2.341),
+            p(0.557, 2.364),
+            p(0.983, 2.437),
+            p(1.350, 2.489),
+            p(1.728, 2.521),
+            p(2.064, 2.531),
+            p(2.305, 2.531),
+            p(2.405, 2.531),
+            p(2.448, 2.514),
+            p(2.464, 2.498),
+            p(2.464, 2.487),
+            p(2.474, 2.487),
+            p(2.485, 2.487),
+            p(2.485, 2.487),
+            p(2.485, 2.487),
+            p(2.485, 2.483),
+            p(2.485, 2.483),
+            p(2.485, 2.473),
+            p(2.485, 2.441),
+            p(2.469, 2.415),
+            p(2.427, 2.385),
+            p(2.376, 2.353),
+            p(2.302, 2.333),
+            p(2.233, 2.326),
+            p(2.185, 2.314),
+            p(2.140, 2.314),
+            p(2.135, 2.314),
+            p(2.135, 2.314),
+            p(2.135, 2.314),
+            p(2.135, 2.309),
+            p(2.135, 2.273),
+            p(2.141, 2.209),
+            p(2.170, 2.122),
+            p(2.219, 2.016),
+            p(2.271, 1.877),
+            p(2.322, 1.672),
+            p(2.363, 1.479),
+            p(2.413, 1.178),
+            p(2.423, 1.061),
+            p(2.423, 1.044),
+            p(2.423, 1.028),
+            p(2.423, 0.950),
+            p(2.423, 0.798),
+            p(2.423, 0.670),
+            p(2.439, 0.557),
+            p(2.439, 0.488),
+            p(2.439, 0.438),
+            p(2.439, 0.417),
+            p(2.439, 0.401),
+            p(2.439, 0.401),
+            p(2.439, 0.401),
+            p(2.429, 0.401),
+            p(2.429, 0.401),
+            p(2.393, 0.396),
+            p(2.361, 0.385),
+            p(2.351, 0.364),
+            p(2.345, 0.348),
+            p(2.335, 0.343),
+            p(2.335, 0.338),
+            p(2.335, 0.338),
+            p(2.335, 0.338),
+            p(2.330, 0.338),
+            p(2.330, 0.338),
+            p(2.316, 0.338),
+            p(2.271, 0.338),
+            p(2.199, 0.338),
+            p(2.101, 0.361),
+            p(2.019, 0.375),
+            p(1.888, 0.404),
+            p(1.765, 0.437),
+            p(1.583, 0.465),
+            p(1.356, 0.486),
+            p(1.093, 0.486),
+            p(0.820, 0.475),
+            p(0.626, 0.455),
+            p(0.535, 0.455),
+            p(0.485, 0.449),
+            p(0.445, 0.443),
+            p(0.406, 0.443),
+            p(0.368, 0.443),
+            p(0.313, 0.443),
+            p(0.281, 0.443),
+            p(0.250, 0.443),
+            p(0.218, 0.443),
+            p(0.187, 0.443),
+            p(0.166, 0.443),
+            p(0.155, 0.443),
+            p(0.155, 0.443),
+            p(0.155, 0.443),
+        ];
+        let out = outline_following_trace(&ring, &trace, 0.141, 0.050, &SpliceTuning::default())
+            .expect("the trace decomposes into a partial-reproduce splice");
+        let n = out.len();
+        let non_ortho: Vec<_> = (0..n)
+            .filter(|&i| {
+                let (a, b) = (out[i], out[(i + 1) % n]);
+                (a.x - b.x).abs() >= 1e-3 && (a.y - b.y).abs() >= 1e-3
+            })
+            .collect();
+        assert!(
+            non_ortho.is_empty(),
+            "new-storey outline must be fully orthogonal; non-ortho edges at {non_ortho:?} in {out:?}"
         );
     }
 }

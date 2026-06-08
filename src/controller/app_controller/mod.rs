@@ -861,10 +861,31 @@ impl AppController {
     /// No-op when no BER is loaded. Called by handler methods that complete a
     /// logical user action (stroke end, wall drag end, etc.) — not from
     /// incremental handlers like `sketch_add_point`.
+    /// Refresh the active storey's geometry in `current_record` from the editing
+    /// model, and mark the edit (for idle autosave). Thin wrapper over the
+    /// [`resolve_storey`](Self::resolve_storey) projection.
     fn commit_to_ber(&mut self) -> Result<(), String> {
         if self.current_record.is_none() {
             return Ok(());
         }
+        let idx = self.current_storey_idx.unwrap_or(0);
+        let storey = self.resolve_storey(idx);
+        self.current_record.as_mut().unwrap().data.storeys[idx] = storey;
+        // Floors are already phase-correct from the partition; this stamps the
+        // phase onto the just-rebuilt WALLS from the same session areas. Then mark
+        // the edit — the disk write is deferred to `flush_if_dirty` (idle/boundary).
+        self.resolve_storey_phases(idx);
+        self.revision = self.revision.wrapping_add(1);
+        Ok(())
+    }
+
+    /// Project the active storey's geometry (floors, walls, living areas) from the
+    /// editing model into a `Storey`. This derivation was lifted out of
+    /// `commit_to_ber`; returning a `Storey` is step 1 toward driving render +
+    /// persist from the projection directly (and eventually deleting the eager
+    /// sync). Still `&mut self` — it registers constructions via `ensure_*`; a
+    /// later increment pre-registers them so this can be pure.
+    fn resolve_storey(&mut self, idx: usize) -> Storey {
         // Flush the live buffer into the active shape's slot, so `outline` and
         // `living_areas` are current regardless of which shape is being edited.
         self.sync_active();
@@ -934,14 +955,6 @@ impl AppController {
             })
             .collect();
 
-        // In-memory: write the FULL resolved geometry (dimensioned or not) into
-        // `current_record` so the canvas — which renders `current_ber_clone` —
-        // stays live. The DB write (`persist`) then filters this down to the
-        // FINALISED parts only, so the database never holds pixel/incomplete
-        // geometry. There's no parametric snapshot: the outline is the only
-        // thing that needs lossless re-edit, and we've traded that away (reload
-        // rebuilds everything from these resolved points).
-        let idx = self.current_storey_idx.unwrap_or(0);
         // Phase areas for this storey (world/metre rings + phase), cloned before
         // the mutable record borrow — they drive the floor PARTITION below.
         let phase_area_rings: Vec<(Vec<Point2f64>, ConstructionPhase)> = self
@@ -994,8 +1007,12 @@ impl AppController {
                 (ring.clone(), cid)
             })
             .collect();
+        // Clone the existing storey (keeps id/name/number/roofs/openings) and
+        // override only the derived geometry — so this RETURNS a Storey rather
+        // than mutating `current_record` in place. The `record` borrow ends here.
+        let mut storey = record.data.storeys[idx].clone();
         if polygons_f64.iter().any(|p| p.len() >= 3) {
-            record.data.storeys[idx].floors = if areas_with_cids.is_empty() {
+            storey.floors = if areas_with_cids.is_empty() {
                 // No phase zones → keep the whole-outline floor verbatim (NO geo
                 // boolean ops, so the stored points round-trip exactly and the
                 // rebuilt outline isn't re-normalised — which broke collinearity).
@@ -1018,27 +1035,18 @@ impl AppController {
                 FloorRegions { regions }
             };
         }
-        record.data.storeys[idx].living_areas =
+        storey.living_areas =
             FloorRegions::from_vertex_lists(living_area_lists, DEFAULT_CEILING_HEIGHT_M, floor_cid);
         // Re-derive walls from exposure (empty when nothing is marked),
         // preserving the construction link of the region a split came from.
-        record.data.storeys[idx].walls = WallRegions::rebuild_preserving(
+        storey.walls = WallRegions::rebuild_preserving(
             wall_segments,
-            &record.data.storeys[idx].walls,
+            &storey.walls,
             0.0,
             DEFAULT_CEILING_HEIGHT_M,
             wall_cid,
         );
-
-        // Floors are already phase-correct from the partition; this stamps the
-        // phase onto the just-rebuilt WALLS from the same session areas.
-        self.resolve_storey_phases(idx);
-
-        // In-memory refresh only — the canvas renders `current_record`, so this
-        // keeps the view live. The disk write is deferred to `flush_if_dirty`
-        // (idle / boundary), so editing never blocks on SQLite.
-        self.revision = self.revision.wrapping_add(1);
-        Ok(())
+        storey
     }
 
     /// Persist to SQLite only if there are un-saved edits since the last write.
