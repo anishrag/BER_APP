@@ -42,12 +42,14 @@ pub struct DimensionPrompt {
 /// entered the polygon is a pixel-scale notepad sketch; once the first dimension
 /// lands, the whole plan converts to real units (metres) and each subsequent
 /// dimension pins another parameter.
-#[derive(Debug, Default, Clone)]
+#[derive(Debug, Default, Clone, serde::Serialize, serde::Deserialize)]
 pub struct DimensionState {
     /// Parameter IDs the user has explicitly entered a length for.
     pub known_params: HashSet<ParameterId>,
     /// Current "which wall do I ask about next?" prompt, or `None` when all
     /// dimensions have been supplied (or there's nothing to dimension yet).
+    /// Transient — re-derived after load, so excluded from the snapshot.
+    #[serde(skip)]
     pub current_prompt: Option<DimensionPrompt>,
     /// True once the first dimension is entered — from that point on the
     /// plan is in real units rather than pixels.
@@ -69,7 +71,7 @@ pub struct DimensionState {
 /// area): its parametric plan plus the dimensioning progress against it. The
 /// active shape's slot is mirrored live in the controller's editing buffer;
 /// the inactive shapes rest in their slots until activated.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
 pub struct ShapeSlot {
     pub floor_plan: FloorPlan,
     pub dimensioning: DimensionState,
@@ -78,7 +80,7 @@ pub struct ShapeSlot {
 /// Which shape the editor is currently acting on. The controller's live buffer
 /// mirrors this one; switching saves the live state back to its slot and loads
 /// the target's.
-#[derive(Debug, Clone, Copy, PartialEq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Default, serde::Serialize, serde::Deserialize)]
 pub enum ActiveShape {
     /// The storey outline (the primary footprint).
     #[default]
@@ -155,7 +157,7 @@ pub struct ExposureSection {
 }
 
 /// One storey's editable shapes and which is active.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
 pub struct Document {
     /// The storey outline (primary footprint).
     pub outline: ShapeSlot,
@@ -176,9 +178,11 @@ pub struct Document {
     pub floor_plan: FloorPlan,
     /// Dimensioning progress against `floor_plan`.
     pub dimensioning: DimensionState,
-    /// Edit-mode click/drag cursor into `floor_plan`.
+    /// Edit-mode click/drag cursor into `floor_plan`. Transient — not snapshotted.
+    #[serde(skip)]
     pub edit_state: EditState,
-    /// A provisional curved wall mid-flow against `floor_plan`, if any.
+    /// A provisional curved wall mid-flow against `floor_plan`, if any. Transient.
+    #[serde(skip)]
     pub pending_arc: Option<PendingArc>,
 
     /// Exposure SECTIONS of each OUTLINE perimeter wall, keyed by the wall's

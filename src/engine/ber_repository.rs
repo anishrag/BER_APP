@@ -1,5 +1,5 @@
 use chrono::NaiveDate;
-use rusqlite::{params, Connection, Result};
+use rusqlite::{params, Connection, OptionalExtension, Result};
 use serde_json;
 
 use datatypes::ber::ber_struct::Ber;
@@ -42,9 +42,54 @@ impl<'a> BerRepository<'a> {
             );
 
             CREATE INDEX IF NOT EXISTS idx_ber_date ON ber(date_assessed);
+
+            -- Editing-layer snapshot (parametric plans + dimensioning) for crash
+            -- recovery + exact reopen of IN-PROGRESS work that `ber.data_json`
+            -- (finalised geometry only) doesn't hold. Disposable: a version
+            -- mismatch / parse failure falls back to rebuild-from-points.
+            CREATE TABLE IF NOT EXISTS parametric_snapshot (
+                ber_id        TEXT PRIMARY KEY REFERENCES ber(id) ON DELETE CASCADE,
+                version       INTEGER NOT NULL,
+                storey_idx    INTEGER NOT NULL,
+                snapshot_json TEXT NOT NULL
+            );
             ",
         )?;
         Ok(())
+    }
+
+    /// Upsert the editing-layer snapshot for `ber_id`. `version` lets a loader
+    /// reject a stale format; `storey_idx` records which storey the snapshot's
+    /// document belongs to (reopen restores it there).
+    pub fn save_snapshot(
+        &self,
+        ber_id: &ItemId,
+        version: i64,
+        storey_idx: i64,
+        snapshot_json: &str,
+    ) -> Result<()> {
+        self.conn.execute(
+            "INSERT INTO parametric_snapshot (ber_id, version, storey_idx, snapshot_json)
+             VALUES (?1, ?2, ?3, ?4)
+             ON CONFLICT(ber_id) DO UPDATE SET
+                version = excluded.version,
+                storey_idx = excluded.storey_idx,
+                snapshot_json = excluded.snapshot_json",
+            params![ber_id.to_string(), version, storey_idx, snapshot_json],
+        )?;
+        Ok(())
+    }
+
+    /// Load the editing-layer snapshot for `ber_id`, if any:
+    /// `(version, storey_idx, snapshot_json)`.
+    pub fn load_snapshot(&self, ber_id: &ItemId) -> Result<Option<(i64, i64, String)>> {
+        self.conn
+            .query_row(
+                "SELECT version, storey_idx, snapshot_json FROM parametric_snapshot WHERE ber_id = ?1",
+                params![ber_id.to_string()],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .optional()
     }
 
     /// List BERs as lightweight summaries (extracting address and eircode from JSON)

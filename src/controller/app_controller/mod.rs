@@ -208,6 +208,11 @@ pub struct DimensionPromptUiData {
 // preserved), living areas are rebuilt non-editable, and exposure is recovered
 // from the wall regions.
 
+/// Format version of the editing-layer snapshot (`Document` serde). Bump when
+/// the serialized shape changes incompatibly — old snapshots are then ignored on
+/// load and the editor rebuilds from the resolved BER points instead.
+const PARAMETRIC_SNAPSHOT_VERSION: i64 = 1;
+
 pub struct AppController {
     conn: Db,
     sketch_engine: SketchEngine,
@@ -279,6 +284,10 @@ pub struct AppController {
     /// in-memory refresh from the (costly) SQLite write.
     revision: u64,
     saved_revision: u64,
+    /// Optional background writer (the real app attaches one; tests don't). When
+    /// present, `autosave` hands the disk write to it off the UI thread; when
+    /// absent, `autosave` falls back to a synchronous `flush_if_dirty`.
+    writer: Option<crate::engine::PersistenceWriter>,
     /// Active post-drag measurement prompt. Set on mouse-up after a drag if
     /// the plan is already dimensioned; cleared when the user applies or
     /// cancels. The user types a distance + cycles through candidate
@@ -372,6 +381,7 @@ impl AppController {
             splice_debug: Vec::new(),
             revision: 0,
             saved_revision: 0,
+            writer: None,
             edit_drag_prompt: None,
             vertex_drop_prompt: None,
             history: Vec::new(),
@@ -562,20 +572,61 @@ impl AppController {
             .map_err(|e| format!("failed to load BER: {}", e))?;
         // A reopened BER always lands on storey 0 (multi-storey navigation
         // doesn't persist the per-session cursor — by design, see plan).
+        // Default landing is storey 0; a snapshot may move it to the storey the
+        // assessor was last editing (see `try_restore_snapshot`).
         self.current_storey_idx = Some(0);
         self.load_storey_into_editor(record.data.storeys.first());
         self.current_record = Some(record);
+        // Restore the exact in-progress editing state (incl. un-finalised work
+        // the resolved record can't hold) from the snapshot; falls back silently
+        // to the rebuild above if it's missing or from an incompatible version.
+        self.try_restore_snapshot(id);
+        let idx = self.current_storey_idx.unwrap_or(0);
         // Phase areas are session-only — rebuild them from the loaded storey's
         // tagged floor regions so the partition stays reproducible.
         self.phase_regions.clear();
-        self.reconstruct_phase_regions_for(0);
+        self.reconstruct_phase_regions_for(idx);
         self.view = ViewTransform::default();
         self.document.edit_state = EditState::default();
         self.review = None;
         self.compute_next_dimension_prompt();
         self.history.clear();
         self.redo.clear();
+        // Freshly loaded → nothing pending against disk.
+        self.saved_revision = self.revision;
         Ok(())
+    }
+
+    /// Replace the rebuilt editor state with the editing-layer snapshot for `id`,
+    /// if one exists and matches the current format version. Silently keeps the
+    /// rebuild on a missing / stale / unparseable snapshot (the resolved record
+    /// stays the durable source of truth).
+    fn try_restore_snapshot(&mut self, id: &ItemId) {
+        let Ok(Some((version, storey_idx, json))) =
+            BerRepository::new(&self.conn).load_snapshot(id)
+        else {
+            return;
+        };
+        if version != PARAMETRIC_SNAPSHOT_VERSION {
+            return;
+        }
+        let Ok(doc) = serde_json::from_str::<Document>(&json) else {
+            return;
+        };
+        let n_storeys = self
+            .current_record
+            .as_ref()
+            .map(|r| r.data.storeys.len())
+            .unwrap_or(0);
+        if (storey_idx as usize) < n_storeys {
+            self.current_storey_idx = Some(storey_idx as usize);
+        }
+        self.document = doc;
+        // Resume on the OUTLINE (the canonical entry point, same as a fresh open).
+        // The in-progress shapes are all restored in their slots; we just point
+        // the live buffer back at the outline.
+        self.document.active = ActiveShape::Outline;
+        self.load_active_into_buffer();
     }
 
     /// DEV: write the current in-memory BER to the checkpoint file so the next
@@ -1110,9 +1161,39 @@ impl AppController {
     /// unambiguous. Triggered on every commit; the DB simply gains each part as
     /// it becomes finalised.
     fn persist(&self) -> Result<(), String> {
-        let Some(record) = &self.current_record else {
+        let Some(out) = self.build_persist_record() else {
             return Ok(());
         };
+        let repo = BerRepository::new(&self.conn);
+        repo.upsert(&out)
+            .map_err(|e| format!("upsert failed: {}", e))?;
+        if let Some(s) = self.build_snapshot() {
+            repo.save_snapshot(&s.ber_id, s.version, s.storey_idx, &s.json)
+                .map_err(|e| format!("snapshot save failed: {}", e))?;
+        }
+        Ok(())
+    }
+
+    /// Serialize the editing layer (the live [`Document`]: parametric plans +
+    /// dimensioning + slots) for crash-recovery / exact reopen of IN-PROGRESS
+    /// work. `None` when no BER is open. Transient fields are `#[serde(skip)]`ped.
+    fn build_snapshot(&self) -> Option<crate::engine::DocSnapshot> {
+        let ber_id = self.current_record.as_ref()?.id.clone();
+        let json = serde_json::to_string(&self.document).ok()?;
+        Some(crate::engine::DocSnapshot {
+            ber_id,
+            version: PARAMETRIC_SNAPSHOT_VERSION,
+            storey_idx: self.current_storey_idx.unwrap_or(0) as i64,
+            json,
+        })
+    }
+
+    /// Build the FILTERED record to persist (the DB never holds pixel/incomplete
+    /// geometry). This is the UI-thread half of a save — the half that needs
+    /// `self.document`; the resulting owned record can then be upserted inline
+    /// (`persist`) or handed to the background writer (`autosave`).
+    fn build_persist_record(&self) -> Option<BerRecord> {
+        let record = self.current_record.as_ref()?;
         let mut out = record.clone();
         let idx = self.current_storey_idx.unwrap_or(0);
         if self.outline_finalised() {
@@ -1149,9 +1230,37 @@ impl AppController {
             storey.walls = WallRegions::default();
             storey.living_areas = FloorRegions::default();
         }
-        BerRepository::new(&self.conn)
-            .upsert(&out)
-            .map_err(|e| format!("upsert failed: {}", e))
+        Some(out)
+    }
+
+    /// Attach a background persistence writer (the real app does this; tests
+    /// leave it unset and fall back to synchronous writes).
+    pub fn attach_writer(&mut self, writer: crate::engine::PersistenceWriter) {
+        self.writer = Some(writer);
+    }
+
+    /// Save pending edits WITHOUT blocking the UI on disk I/O: build the filtered
+    /// record on this thread, then hand it to the background writer. Falls back
+    /// to a synchronous `flush_if_dirty` when no writer is attached (tests).
+    /// Used by the idle autosave tick.
+    pub fn autosave(&mut self) -> Result<(), String> {
+        if self.revision == self.saved_revision {
+            return Ok(());
+        }
+        if self.writer.is_none() {
+            return self.flush_if_dirty();
+        }
+        if let Some(out) = self.build_persist_record() {
+            let bundle = crate::engine::SaveBundle {
+                record: out,
+                snapshot: self.build_snapshot(),
+            };
+            self.writer.as_ref().unwrap().save(bundle);
+        }
+        // Optimistic: the latest is queued. A boundary `flush_if_dirty` (open/exit)
+        // re-checks against `revision`, so within-window edits aren't lost.
+        self.saved_revision = self.revision;
+        Ok(())
     }
 
     /// The outline is finalised when its metre scale is set AND no wall is left
@@ -2844,12 +2953,24 @@ mod trim_collapse_tests {
         )
         .unwrap();
         c.commit_to_ber().unwrap();
+        c.flush_if_dirty().unwrap();
 
-        // Reopen from the DB: nothing was persisted (the outline wasn't final).
+        // The DURABLE record holds no geometry (the outline wasn't finalised, so
+        // it's filtered out of `data_json`). The editing-layer snapshot recovers
+        // the in-progress sketch separately on reopen.
+        let durable = BerRepository::new(&c.conn).load(&ber.id).unwrap();
+        assert!(
+            durable
+                .data
+                .storeys
+                .first()
+                .map_or(true, |s| s.floors.regions.is_empty()),
+            "an un-dimensioned outline isn't written into the durable BER record"
+        );
         c.open_ber(&ber.id).unwrap();
         assert!(
-            c.document.outline.floor_plan.get_points().is_empty(),
-            "an un-dimensioned outline isn't written to the DB"
+            !c.document.outline.floor_plan.get_points().is_empty(),
+            "...but the snapshot recovers the in-progress outline on reopen"
         );
     }
 
@@ -2887,15 +3008,18 @@ mod trim_collapse_tests {
             (2.1, 2.1),
         ]);
         assert_eq!(c.living_area_count(), 1, "drawn (in memory)");
+        c.flush_if_dirty().unwrap();
 
-        c.open_ber(&ber.id).unwrap();
-        assert_eq!(
-            c.living_area_count(),
-            0,
-            "un-dimensioned living area isn't persisted"
+        // The DURABLE record holds no living area (un-dimensioned → filtered),
+        // though the dimensioned outline IS written.
+        let durable = BerRepository::new(&c.conn).load(&ber.id).unwrap();
+        let storey = durable.data.storeys.first().expect("storey persisted");
+        assert!(
+            storey.living_areas.regions.is_empty(),
+            "un-dimensioned living area isn't written into the durable BER record"
         );
         assert!(
-            !c.document.outline.floor_plan.get_points().is_empty(),
+            !storey.floors.regions.is_empty(),
             "but the dimensioned outline is"
         );
     }
@@ -4919,7 +5043,32 @@ mod trim_collapse_tests {
         let a1 = area_of(&s1[0]);
         assert!((a0 - 100.0).abs() < 1.0, "storey 0 ~ 100 m² (got {a0})");
         assert!((a1 - 36.0).abs() < 1.0, "storey 1 ~ 36 m² (got {a1})");
-        // After reopen the editor lands on storey 0 by default.
-        assert_eq!(c.current_storey_idx(), Some(0));
+        // Reopen RESUMES the storey last edited (the snapshot's storey) — here
+        // storey 1, finalised last — rather than always resetting to storey 0.
+        assert_eq!(c.current_storey_idx(), Some(1));
+    }
+
+    #[test]
+    fn snapshot_version_mismatch_falls_back_to_rebuild() {
+        let mut c = AppController::new(crate::engine::open_db(":memory:").unwrap());
+        let ber = c.create_ber(
+            "T".into(),
+            chrono::NaiveDate::from_ymd_opt(2026, 1, 1).unwrap(),
+        );
+        finalise_current_storey_as_square(&mut c, 10.0);
+        c.flush_if_dirty().unwrap();
+
+        // Poison the snapshot: an incompatible version + unparseable JSON. The
+        // loader must reject it and rebuild from the durable record's points.
+        BerRepository::new(&c.conn)
+            .save_snapshot(&ber.id, PARAMETRIC_SNAPSHOT_VERSION + 1, 0, "not json")
+            .unwrap();
+
+        c.open_ber(&ber.id)
+            .expect("reopen falls back, doesn't error");
+        assert!(
+            !c.document.outline.floor_plan.get_points().is_empty(),
+            "a stale/garbage snapshot is ignored; the outline is rebuilt from the durable BER"
+        );
     }
 }

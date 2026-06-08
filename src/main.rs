@@ -24,6 +24,13 @@ fn main() -> Result<(), ui::RunError> {
     // TODO: replace with platform-appropriate data dir (e.g. ~/.local/share/ber_app)
     // once we package for distribution. cwd is fine for development.
     let conn = engine::open_db("bers.db").expect("Failed to open database");
-    let controller = Rc::new(RefCell::new(AppController::new(conn)));
+    let mut controller = AppController::new(conn);
+    // Background writer (its own connection, WAL) so idle autosaves don't block
+    // the UI on SQLite. If it can't spawn, fall back to synchronous saves.
+    match engine::PersistenceWriter::spawn("bers.db".to_string()) {
+        Ok(writer) => controller.attach_writer(writer),
+        Err(e) => eprintln!("persistence writer unavailable, saving synchronously: {e}"),
+    }
+    let controller = Rc::new(RefCell::new(controller));
     ui::run(controller)
 }

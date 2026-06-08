@@ -210,8 +210,9 @@ impl eframe::App for BerApp {
                 self.last_change_time = now;
                 ctx.request_repaint_after(std::time::Duration::from_secs_f64(IDLE_SAVE_SECS));
             } else if now - self.last_change_time >= IDLE_SAVE_SECS {
-                // No-op if nothing is pending; otherwise one SQLite write.
-                let _ = self.app_controller.borrow_mut().flush_if_dirty();
+                // No-op if nothing is pending; otherwise hand the write to the
+                // background thread (falls back to a sync write if none attached).
+                let _ = self.app_controller.borrow_mut().autosave();
             }
         }
         // Check for progress updates if on splash screen
