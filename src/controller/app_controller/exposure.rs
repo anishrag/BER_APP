@@ -233,13 +233,9 @@ impl AppController {
     /// is what this method then reads back. Selection is interaction state and
     /// stays live (`selected_exposure_wall` keyed by `VertexId`).
     pub fn wall_exposure_views(&self) -> Vec<WallExposureView> {
-        let idx = self.current_storey_idx.unwrap_or(0);
-        let sections_by_vid = self
-            .current_record
-            .as_ref()
-            .and_then(|r| r.data.storeys.get(idx))
-            .map(|s| self.sections_from_wall_regions(&s.walls))
-            .unwrap_or_default();
+        // Sections come DIRECTLY from the editing model (`document.wall_sections`,
+        // where paint/clear/set-remaining mutate) — no round-trip through the
+        // committed BER's `WallRegions`. Selection is live interaction state.
         self.document
             .outline
             .floor_plan
@@ -249,7 +245,12 @@ impl AppController {
                 a: (a.x as f64, a.y as f64),
                 b: (b.x as f64, b.y as f64),
                 length_m: wall_len(a, b),
-                sections: sections_by_vid.get(&vid).cloned().unwrap_or_default(),
+                sections: self
+                    .document
+                    .wall_sections
+                    .get(&vid)
+                    .cloned()
+                    .unwrap_or_default(),
                 selected: self.selected_exposure_wall == Some(vid),
             })
             .collect()

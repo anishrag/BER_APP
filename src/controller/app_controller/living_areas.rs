@@ -84,24 +84,27 @@ impl AppController {
         }
     }
 
-    /// Resolved outlines (world coords) of every living area, for rendering
-    /// them over the storey in a distinct colour. Read from the in-memory
-    /// `Storey.living_areas` (the `Ber` struct in `current_record`): BER data
-    /// rendered from BER. `commit_to_ber` keeps it per-frame current.
+    /// Resolved outlines (world coords) of every living area, for rendering them
+    /// over the storey in a distinct colour. Derived DIRECTLY from the editing
+    /// model (the active area from the live buffer, the rest from their slots) —
+    /// no round-trip through the committed BER. Index-aligned with
+    /// [`living_area_wall_labels`](Self::living_area_wall_labels).
     pub fn living_area_polygons(&self) -> Vec<Vec<(f64, f64)>> {
-        let idx = self.current_storey_idx.unwrap_or(0);
-        let Some(storey) = self
-            .current_record
-            .as_ref()
-            .and_then(|r| r.data.storeys.get(idx))
-        else {
-            return Vec::new();
-        };
-        storey
+        self.document
             .living_areas
-            .to_vertex_lists()
-            .into_iter()
-            .map(|verts| verts.into_iter().map(|p| (p.x, p.y)).collect())
+            .iter()
+            .enumerate()
+            .map(|(i, slot)| {
+                let plan = if self.document.active == ActiveShape::LivingArea(i) {
+                    &self.document.floor_plan
+                } else {
+                    &slot.floor_plan
+                };
+                plan.get_points()
+                    .into_iter()
+                    .map(|p| (p.x as f64, p.y as f64))
+                    .collect()
+            })
             .collect()
     }
 

@@ -168,6 +168,43 @@ pub struct CeilingConstruction {
 /// duplicating fabric (the inverse — grouping for DEAP export — then just reads
 /// back the shared constructions).
 impl Ber {
+    /// Read-only lookup of an existing wall construction by `(type, makeup,
+    /// phase)` — the side-effect-free half of [`ensure_wall_construction`]. For
+    /// the geometry projection, which must not mutate the construction registry.
+    pub fn wall_construction_id(
+        &self,
+        construction_type: WallConstructionType,
+        makeup: ConstructionMakeup,
+        phase: ConstructionPhase,
+    ) -> Option<ItemId> {
+        self.wall_constructions
+            .iter()
+            .find(|c| {
+                c.construction_type == construction_type
+                    && c.base.construction_makeup == makeup
+                    && c.base.construction_phase == phase
+            })
+            .map(|c| c.base.id)
+    }
+
+    /// Read-only lookup of an existing floor construction by `(type, makeup,
+    /// phase)` — the side-effect-free half of [`ensure_floor_construction`].
+    pub fn floor_construction_id(
+        &self,
+        construction_type: FloorConstructionType,
+        makeup: ConstructionMakeup,
+        phase: ConstructionPhase,
+    ) -> Option<ItemId> {
+        self.floor_constructions
+            .iter()
+            .find(|c| {
+                c.construction_type == construction_type
+                    && c.base.construction_makeup == makeup
+                    && c.base.construction_phase == phase
+            })
+            .map(|c| c.base.id)
+    }
+
     /// Find a wall construction matching `(construction_type, makeup, phase)`,
     /// else create and append one. Returns its id.
     pub fn ensure_wall_construction(
