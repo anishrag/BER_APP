@@ -237,6 +237,10 @@ impl eframe::App for BerApp {
                 });
             }
             Page::Sketch => {
+                // Bring the resolved geometry current before the immutable borrow
+                // reads it for rendering — edits only `mark_dirty`, so the derive
+                // is deferred to here (once per frame, not per edit).
+                self.app_controller.borrow_mut().materialize();
                 let (
                     stroke,
                     mode,

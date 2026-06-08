@@ -106,7 +106,7 @@ impl AppController {
         let undo_snap = self.current_history_snapshot();
         self.document.apply_dimension(value)?;
         self.warn_if_non_orthogonal("dimension");
-        self.commit_to_ber()?;
+        self.mark_dirty()?;
         self.push_history_snapshot(undo_snap);
         Ok(())
     }
@@ -143,7 +143,7 @@ impl AppController {
         // and a rebuild would dangle them.
         if !self.document.dimensioning.scale_set {
             self.document.floor_plan.simplify_degenerate();
-            if let Err(e) = self.commit_to_ber() {
+            if let Err(e) = self.mark_dirty() {
                 eprintln!("commit_to_ber after simplify_degenerate: {}", e);
             }
         }

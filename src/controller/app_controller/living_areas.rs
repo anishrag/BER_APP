@@ -203,7 +203,7 @@ impl AppController {
         self.document.add_active_living_area(slot);
         self.living_area_mode = true;
         self.pending_cut = None;
-        let _ = self.commit_to_ber();
+        let _ = self.mark_dirty();
         self.warn_if_non_orthogonal("draw living area");
         // Dimension the new area's walls (no scale calibration — inherited).
         self.maybe_start_dimensioning();
@@ -333,7 +333,7 @@ impl AppController {
                 self.document.living_areas.len() - 1,
             ));
         }
-        let _ = self.commit_to_ber();
+        let _ = self.mark_dirty();
         self.push_history_snapshot(undo_snap);
     }
 }

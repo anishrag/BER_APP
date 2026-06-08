@@ -227,7 +227,7 @@ impl AppController {
             .or_default()
             .push(PhaseRegion { polygon, phase });
         self.abandon_phase_shape(); // discard the live buffer, return to outline
-        let _ = self.commit_to_ber();
+        let _ = self.mark_dirty();
     }
 
     /// Discard the in-flight phase area / pending cut without tagging.
@@ -292,7 +292,7 @@ impl AppController {
             }
         });
         if removed {
-            let _ = self.commit_to_ber();
+            let _ = self.mark_dirty();
         }
     }
 }

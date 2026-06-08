@@ -191,7 +191,7 @@ impl AppController {
         };
         let undo_snap = self.current_history_snapshot();
         self.document.set_wall_section(vid, s, e, len, exposure);
-        let _ = self.commit_to_ber();
+        let _ = self.mark_dirty();
         self.push_history_snapshot(undo_snap);
     }
 
@@ -206,7 +206,7 @@ impl AppController {
         }
         let undo_snap = self.current_history_snapshot();
         self.document.clear_wall_section(vid);
-        let _ = self.commit_to_ber();
+        let _ = self.mark_dirty();
         self.push_history_snapshot(undo_snap);
     }
 
@@ -217,7 +217,7 @@ impl AppController {
         self.sync_active();
         let undo_snap = self.current_history_snapshot();
         if self.document.set_all_remaining_exposed() {
-            let _ = self.commit_to_ber();
+            let _ = self.mark_dirty();
             self.push_history_snapshot(undo_snap);
         }
     }

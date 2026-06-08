@@ -284,6 +284,11 @@ pub struct AppController {
     /// in-memory refresh from the (costly) SQLite write.
     revision: u64,
     saved_revision: u64,
+    /// The `revision` the in-memory `current_record` geometry was last DERIVED
+    /// at. `revision != derived_revision` means an edit happened without a
+    /// re-derive; `materialize` brings it current on demand (before render /
+    /// persist) instead of every edit deriving eagerly.
+    derived_revision: u64,
     /// Optional background writer (the real app attaches one; tests don't). When
     /// present, `autosave` hands the disk write to it off the UI thread; when
     /// absent, `autosave` falls back to a synchronous `flush_if_dirty`.
@@ -381,6 +386,7 @@ impl AppController {
             splice_debug: Vec::new(),
             revision: 0,
             saved_revision: 0,
+            derived_revision: 0,
             writer: None,
             edit_drag_prompt: None,
             vertex_drop_prompt: None,
@@ -433,7 +439,7 @@ impl AppController {
         self.redo.push(cur);
         self.restore_history_snapshot(snap);
         // Push the restored polygon to BER so the canvas reflects it.
-        self.commit_to_ber()?;
+        self.mark_dirty()?;
         Ok(())
     }
 
@@ -445,7 +451,7 @@ impl AppController {
         let cur = self.current_history_snapshot();
         self.history.push(cur);
         self.restore_history_snapshot(snap);
-        self.commit_to_ber()?;
+        self.mark_dirty()?;
         Ok(())
     }
 
@@ -861,21 +867,48 @@ impl AppController {
     /// No-op when no BER is loaded. Called by handler methods that complete a
     /// logical user action (stroke end, wall drag end, etc.) — not from
     /// incremental handlers like `sketch_add_point`.
-    /// Refresh the active storey's geometry in `current_record` from the editing
-    /// model, and mark the edit (for idle autosave). Thin wrapper over the
-    /// [`resolve_storey`](Self::resolve_storey) projection.
-    fn commit_to_ber(&mut self) -> Result<(), String> {
+    /// Derive the active storey's geometry into `current_record` (the
+    /// [`resolve_storey`](Self::resolve_storey) projection + phase stamping).
+    /// No revision bookkeeping — the callers (`commit_to_ber` / `materialize`)
+    /// own that.
+    fn refresh_storey(&mut self) {
         if self.current_record.is_none() {
-            return Ok(());
+            return;
         }
         let idx = self.current_storey_idx.unwrap_or(0);
         let storey = self.resolve_storey(idx);
         self.current_record.as_mut().unwrap().data.storeys[idx] = storey;
         // Floors are already phase-correct from the partition; this stamps the
-        // phase onto the just-rebuilt WALLS from the same session areas. Then mark
-        // the edit — the disk write is deferred to `flush_if_dirty` (idle/boundary).
+        // phase onto the just-rebuilt WALLS from the same session areas.
         self.resolve_storey_phases(idx);
+    }
+
+    /// Mark the active storey edited: the in-memory `current_record` geometry is
+    /// now stale, and there's an un-saved change. The re-derive is DEFERRED to
+    /// [`materialize`](Self::materialize) (before render / persist), so editing —
+    /// including mid-drag — never re-derives the whole BER per edit.
+    fn mark_dirty(&mut self) -> Result<(), String> {
         self.revision = self.revision.wrapping_add(1);
+        Ok(())
+    }
+
+    /// Bring `current_record`'s geometry up to date with the editing model, if an
+    /// edit happened since the last derive. Called before anything READS the
+    /// resolved geometry (render, persist). No-op when already current.
+    pub fn materialize(&mut self) {
+        if self.revision != self.derived_revision {
+            self.refresh_storey();
+            self.derived_revision = self.revision;
+        }
+    }
+
+    /// Eagerly derive AND mark dirty (and record that we just derived). Kept for
+    /// the few boundary callers that need `current_record` current immediately —
+    /// e.g. saving the outgoing storey before `add_storey` switches away.
+    fn commit_to_ber(&mut self) -> Result<(), String> {
+        self.refresh_storey();
+        self.revision = self.revision.wrapping_add(1);
+        self.derived_revision = self.revision;
         Ok(())
     }
 
@@ -1053,6 +1086,7 @@ impl AppController {
     /// Called on the idle autosave tick and at session boundaries — NOT per edit.
     pub fn flush_if_dirty(&mut self) -> Result<(), String> {
         if self.revision != self.saved_revision {
+            self.materialize(); // bring current_record geometry current before writing
             self.persist()?;
             self.saved_revision = self.revision;
         }
@@ -1263,6 +1297,7 @@ impl AppController {
         if self.writer.is_none() {
             return self.flush_if_dirty();
         }
+        self.materialize(); // bring current_record geometry current before snapshotting it
         if let Some(out) = self.build_persist_record() {
             let bundle = crate::engine::SaveBundle {
                 record: out,
@@ -1334,7 +1369,7 @@ impl AppController {
             self.document.floor_plan.active_parameter_count()
         );
         self.advance_review_cursor();
-        let result = self.commit_to_ber();
+        let result = self.mark_dirty();
         self.after_review_step();
         result
     }
@@ -1417,7 +1452,7 @@ impl AppController {
     /// changing the shape. Then commit the cleaned outline and start dimensioning.
     fn finish_review(&mut self) {
         self.clean_envelope_collinear();
-        if let Err(e) = self.commit_to_ber() {
+        if let Err(e) = self.mark_dirty() {
             eprintln!("commit_to_ber after collinearity review: {}", e);
         }
         self.maybe_start_dimensioning();
@@ -1616,7 +1651,7 @@ impl AppController {
     /// Callers snapshot history (`push_history_snapshot`) BEFORE calling this, so
     /// an undo entry exists even if the commit fails.
     fn commit_review_redimension(&mut self) -> Result<(), String> {
-        self.commit_to_ber()?;
+        self.mark_dirty()?;
         self.populate_collinearity_review();
         self.maybe_start_dimensioning();
         Ok(())
@@ -2006,7 +2041,7 @@ impl AppController {
         self.clean_envelope_collinear();
         // History snapshotted before the commit (consistent across apply_*).
         self.push_history_snapshot(undo_snap);
-        self.commit_to_ber()?;
+        self.mark_dirty()?;
         // Ask about collinearity ONLY for the porch's new walls — e.g. whether
         // a new porch front lines up with an earlier one. We never assume it;
         // and we don't re-surface pairs among the pre-existing walls. (Extend
@@ -2088,7 +2123,7 @@ impl AppController {
         // History snapshotted before the commit (consistent across apply_*). A
         // plain Trim never asks about collinearity, so no review step here.
         self.push_history_snapshot(undo_snap);
-        self.commit_to_ber()?;
+        self.mark_dirty()?;
         self.maybe_start_dimensioning();
         Ok(())
     }
@@ -2223,7 +2258,7 @@ impl AppController {
         println!("=== end CURVE DEBUG ===");
         // ---- end debug ----
 
-        self.commit_to_ber()?;
+        self.mark_dirty()?;
         self.maybe_start_dimensioning();
         self.push_history_snapshot(undo_snap);
         Ok(())
@@ -2341,7 +2376,7 @@ impl AppController {
             pa.bulge_ratio,
             facet_params.len()
         );
-        self.commit_to_ber()?;
+        self.mark_dirty()?;
         self.push_history_snapshot(undo_snap);
         Ok(())
     }
@@ -3474,6 +3509,7 @@ mod trim_collapse_tests {
         ]);
         assert_eq!(c.living_area_count(), 1, "one living area drawn");
 
+        c.materialize(); // edits defer the derive; bring current_record current
         let storey = c.current_record.as_ref().unwrap().data.storeys[0].clone();
         assert_eq!(
             storey.living_areas.regions.len(),
@@ -3546,6 +3582,7 @@ mod trim_collapse_tests {
         assert_eq!(secs[0].exposure, WallExposure::SemiExposed);
 
         // Only the MARKED wall derives a region — un-marked walls produce none.
+        c.materialize(); // edits defer the derive; bring current_record current
         let storey = &c.current_record.as_ref().unwrap().data.storeys[0];
         assert_eq!(storey.walls.regions.len(), 1, "only the marked wall");
         let _ = walls;
@@ -3589,6 +3626,7 @@ mod trim_collapse_tests {
         assert_eq!(secs[2].exposure, WallExposure::Exposed);
 
         // wall0 is derived first → its 3 sub-regions are regions[0..3].
+        c.materialize(); // edits defer the derive; bring current_record current
         let r = &c.current_record.as_ref().unwrap().data.storeys[0]
             .walls
             .regions;
@@ -3622,6 +3660,7 @@ mod trim_collapse_tests {
         c.set_wall_exposure(WallExposure::Exposed);
         // Point wall0's region at a known (non-default) shared construction, and
         // give that construction a description.
+        c.materialize(); // derive wall0's region before attaching a construction
         let cid = {
             let record = c.current_record.as_mut().unwrap();
             let cid = record.data.ensure_wall_construction(
@@ -3648,6 +3687,7 @@ mod trim_collapse_tests {
 
         // wall0 is now 3 regions (derived first) — all inherit the SAME shared
         // construction id; only exposure differs.
+        c.materialize(); // edits defer the derive; bring current_record current
         let record = c.current_record.as_ref().unwrap();
         let r = &record.data.storeys[0].walls.regions;
         for i in 0..3 {
@@ -4018,6 +4058,7 @@ mod trim_collapse_tests {
         c.exposure_pointer_down(mid.0 as f64, mid.1 as f64, 0.5);
         c.set_wall_exposure(WallExposure::NonHeatLoss); // mark only one wall
 
+        c.materialize(); // edits defer the derive; bring current_record current
         let storey = c.current_record.as_ref().unwrap().data.storeys[0].clone();
         c.document.wall_sections.clear();
         c.load_storey_into_editor(Some(&storey));
@@ -4045,6 +4086,7 @@ mod trim_collapse_tests {
         c.set_exposure_section_range(len * 0.2, len * 0.5);
         c.set_wall_exposure(WallExposure::SemiExposed); // → 3 sections
 
+        c.materialize(); // edits defer the derive; bring current_record current
         let storey = c.current_record.as_ref().unwrap().data.storeys[0].clone();
         c.document.wall_sections.clear();
         c.load_storey_into_editor(Some(&storey));

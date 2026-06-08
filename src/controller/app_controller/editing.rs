@@ -126,7 +126,7 @@ impl AppController {
         // wall + new vertex immediately. Without this the polygon stays
         // at its pre-insert shape during the drag and only one edge
         // looks like it's following the cursor.
-        if let Err(e) = self.commit_to_ber() {
+        if let Err(e) = self.mark_dirty() {
             eprintln!("commit_to_ber after insert_vertex_on_wall: {}", e);
         }
         println!(
@@ -157,7 +157,7 @@ impl AppController {
         // Push the live drag state to BER so the renderer sees the wall
         // / vertex follow the cursor instead of snapping only on release.
         if self.document.drag_active_to(world_x, world_y) {
-            if let Err(e) = self.commit_to_ber() {
+            if let Err(e) = self.mark_dirty() {
                 eprintln!("commit_to_ber during edit_mouse_drag: {}", e);
             }
         }
@@ -176,7 +176,7 @@ impl AppController {
         }
         self.document.edit_state.dragging = false;
         if self.document.edit_state.selected_vertex.is_some() {
-            self.commit_to_ber()?;
+            self.mark_dirty()?;
             if self.document.dimensioning.scale_set {
                 self.populate_vertex_drop_prompt();
             }
@@ -185,7 +185,7 @@ impl AppController {
         if self.document.dimensioning.scale_set {
             self.populate_edit_drag_prompt();
         } else {
-            self.commit_to_ber()?;
+            self.mark_dirty()?;
         }
         Ok(())
     }
@@ -381,7 +381,7 @@ impl AppController {
         // labels via the standard `walls_with_known_length` path.
         self.document.dimensioning.known_params.insert(x_p);
         self.document.dimensioning.known_params.insert(y_p);
-        self.commit_to_ber()?;
+        self.mark_dirty()?;
 
         if let Some(p) = self.vertex_drop_prompt.as_mut() {
             p.applied.push((idx, distance));
@@ -436,7 +436,7 @@ impl AppController {
         }
         self.document.edit_state.selected_vertex = None;
         self.document.edit_state.pre_drag_vertex_pos = None;
-        self.commit_to_ber()?;
+        self.mark_dirty()?;
         Ok(())
     }
 
@@ -586,7 +586,7 @@ impl AppController {
                     .shift_constant(old_value, prompt.axis, new_value);
             }
         }
-        self.commit_to_ber()?;
+        self.mark_dirty()?;
         self.edit_drag_prompt = None;
         self.document.edit_state.pre_drag_value = None;
         self.document.edit_state.pre_drag_kind = None;
@@ -650,7 +650,7 @@ impl AppController {
                 }
             }
         }
-        self.commit_to_ber()?;
+        self.mark_dirty()?;
         self.edit_drag_prompt = None;
         self.document.edit_state.pre_drag_value = None;
         self.document.edit_state.pre_drag_kind = None;
