@@ -13,6 +13,7 @@
 mod arc;
 mod boundary_follow;
 mod carve;
+mod debug_stages;
 mod error;
 mod geom;
 mod new_storey;
@@ -26,13 +27,13 @@ mod snap;
 mod splice;
 
 pub use carve::SubareaOutcome;
+pub use debug_stages::{take_splice_debug, SplicePhase};
 pub use error::Error;
 pub use geom::{
     bbox_diagonal as ring_diagonal, find_flipped_edge, intersect_circles, project_to_circle,
     ring_contains_point, solve_axis_wall,
 };
 pub use parametric::{Axis, CollinearitySuggestion, ParameterAxis, ParameterId, VertexId};
-pub use path_edits::{take_splice_debug, SplicePhase};
 pub use snap::snap_stroke_to_ring;
 
 use domain::points::Point2f32;

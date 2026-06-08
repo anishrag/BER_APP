@@ -10,6 +10,7 @@
 //!   `splice_curve` → `splice_cleaned`.
 //!
 //! Both ultimately call the low-level ring-splice primitive in [`crate::splice`].
+use crate::debug_stages::record_phase;
 use crate::polygon_area;
 use crate::{geom, simplification, snap, splice};
 use crate::{Error, FloorPlan, ParameterId};
@@ -517,54 +518,6 @@ impl FloorPlan {
 
         self.parametric.splice_into_edge(0, &chosen)
     }
-}
-
-/// Toggle capture of the splice-pipeline phases for the app's debug overlay.
-const DEBUG_DRAW: bool = true;
-
-/// One captured phase of the splice pipeline — a labelled path/ring the app
-/// draws as a coloured debug overlay. `closed` joins the last point to the first.
-#[derive(Clone, Debug)]
-pub struct SplicePhase {
-    pub label: String,
-    pub points: Vec<Point2f32>,
-    pub closed: bool,
-}
-
-thread_local! {
-    static SPLICE_PHASES: std::cell::RefCell<Vec<SplicePhase>> =
-        const { std::cell::RefCell::new(Vec::new()) };
-}
-
-/// Drain the splice-pipeline phases recorded since the last drain. The shell
-/// drains BEFORE a splice op (to clear stale phases) and again AFTER to capture
-/// that op's phases for the overlay.
-pub fn take_splice_debug() -> Vec<SplicePhase> {
-    SPLICE_PHASES.with(|p| std::mem::take(&mut *p.borrow_mut()))
-}
-
-/// Record one splice phase for the debug overlay, in CALL order (the UI numbers
-/// them). Only the path/ring is captured. No-op unless `DEBUG_DRAW`. The shell
-/// drains these with [`take_splice_debug`]. `pub(crate)` so the orthogonalizer
-/// can record its own internal sub-stages.
-pub(crate) fn record_phase(label: &str, shape: &[Point2f32], closed: bool) {
-    if !DEBUG_DRAW || shape.is_empty() {
-        return;
-    }
-    // Also dump the coordinates to the console so a stage can be inspected /
-    // shared without the UI. Numbered to match the overlay's legend order is the
-    // UI's job; here we print label + every point.
-    log::info!(
-        "[splice stage] {label} ({} pts, closed={closed}): {shape:?}",
-        shape.len()
-    );
-    SPLICE_PHASES.with(|p| {
-        p.borrow_mut().push(SplicePhase {
-            label: label.to_string(),
-            points: shape.to_vec(),
-            closed,
-        });
-    });
 }
 
 #[cfg(test)]

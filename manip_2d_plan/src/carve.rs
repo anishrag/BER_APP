@@ -340,7 +340,7 @@ pub(crate) fn clean_region_ring(outline: &[Point2f32], pts: &[Point2f32]) -> Vec
     // vertices, and untangle repairs any crossing the corner introduces.
     let squared = geom::orthogonalize_off_boundary(&cleaned, outline, 0.003);
     let cleaned = orthogonal::remove_collinear(&geom::untangle_ring(&squared), collinear_tol);
-    crate::path_edits::record_phase("cleaned ring", &cleaned, true);
+    crate::debug_stages::record_phase("cleaned ring", &cleaned, true);
     cleaned
 }
 
@@ -444,7 +444,7 @@ pub(crate) fn cut_outline(
     tolerance: f32,
     tuning: &SubareaTuning,
 ) -> Result<Option<CutPlan>, Error> {
-    crate::path_edits::record_phase("raw stroke", path, false);
+    crate::debug_stages::record_phase("raw stroke", path, false);
     let diag = geom::bbox_diagonal(ring);
     let Some(((bnx, bny), (bxx, bxy))) = geom::bbox(path) else {
         return Ok(None);
@@ -455,7 +455,7 @@ pub(crate) fn cut_outline(
     }
     let cut_tol = tuning.coarse_simplify_tol(span, tolerance);
     let simplified = simplification::simplify_open(path, cut_tol);
-    crate::path_edits::record_phase("simplified (RDP)", &simplified, false);
+    crate::debug_stages::record_phase("simplified (RDP)", &simplified, false);
     let vertex_tol = (diag * tuning.cut_vertex_tol_ratio).max(1e-4);
     let reach_tol = (diag * tuning.cut_reach_tol_ratio).max(1e-3);
 
@@ -543,7 +543,7 @@ pub(crate) fn cut_outline(
     if e1 == e2 && (t1 - t2).abs() < 1e-3 {
         return Ok(None);
     }
-    crate::path_edits::record_phase("attached to outline", &opath, false);
+    crate::debug_stages::record_phase("attached to outline", &opath, false);
     Ok(Some(CutPlan {
         opath,
         e1,
@@ -748,7 +748,7 @@ fn cut_region(
     if pts.len() < 3 {
         return Err(Error::ExtendError("cut region collapsed".into()));
     }
-    crate::path_edits::record_phase("spliced ring", &pts, true);
+    crate::debug_stages::record_phase("spliced ring", &pts, true);
     build_region(outline, &pts)
 }
 
