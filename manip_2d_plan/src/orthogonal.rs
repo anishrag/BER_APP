@@ -50,7 +50,7 @@ pub fn make_orthogonal_at(
     let orthogonal_points = snap_to_orthogonal(&points, base_angle, tolerance, closure)?;
     // DEBUG overlay sub-stage: each segment now squared to H/V (this is where an
     // endpoint moves along one axis to align its terminal leg).
-    crate::trim::record_phase("snapped to H/V", &orthogonal_points, false);
+    crate::path_edits::record_phase("snapped to H/V", &orthogonal_points, false);
 
     // Remove duplicate consecutive points
     let cleaned = remove_duplicates(&orthogonal_points, tolerance);
@@ -62,7 +62,7 @@ pub fn make_orthogonal_at(
     // them as separate vertices. Geometrically the middle vertex is redundant.
     let collapsed = remove_collinear(&cleaned, tolerance);
     // DEBUG overlay sub-stage: duplicates + same-axis (collinear) vertices removed.
-    crate::trim::record_phase("orthogonalized (cleaned)", &collapsed, false);
+    crate::path_edits::record_phase("orthogonalized (cleaned)", &collapsed, false);
 
     if collapsed.len() < 3 {
         return Err(Error::OrthogonalError(

@@ -18,12 +18,12 @@ mod geom;
 mod new_storey;
 mod orthogonal;
 mod parametric;
+mod path_edits;
 mod query;
 mod region;
 mod simplification;
 mod snap;
 mod splice;
-mod trim;
 
 pub use carve::SubareaOutcome;
 pub use error::Error;
@@ -32,8 +32,8 @@ pub use geom::{
     ring_contains_point, solve_axis_wall,
 };
 pub use parametric::{Axis, CollinearitySuggestion, ParameterAxis, ParameterId, VertexId};
+pub use path_edits::{take_splice_debug, SplicePhase};
 pub use snap::snap_stroke_to_ring;
-pub use trim::{take_splice_debug, SplicePhase};
 
 use domain::points::Point2f32;
 

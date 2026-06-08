@@ -1,9 +1,15 @@
-//! Trim / extend / curved-wall edits — in-place mutations of a FloorPlan's ring.
+//! In-place path edits of a `FloorPlan`'s ring: EXTEND (add area), TRIM (remove
+//! area), and the curved variants. Every entry is `&mut self` — it splices a
+//! drawn path onto the outline, editing the parametric model in place, so these
+//! stay `FloorPlan` methods (unlike `carve`, which is pure `ring → FloorPlan`).
 //!
-//! Unlike `carve` (pure `ring → FloorPlan`), every entry here is `&mut self`: it
-//! splices a drawn path onto the outline (extend) or removes area (trim), editing
-//! the parametric model in place. So these stay `FloorPlan` methods — the pure
-//! splice mechanics already live in `extend.rs`.
+//! Two backbones share this file:
+//! - the ORTHO ops (`extend_ortho` / `trim_ortho`) go through the cut pipeline in
+//!   [`crate::carve`] (`cut_outline` → `splice_ortho_via_cut`);
+//! - the CURVE ops (`extend_curve` / `trim_curve`) keep their faceted arc via
+//!   `splice_curve` → `splice_cleaned`.
+//!
+//! Both ultimately call the low-level ring-splice primitive in [`crate::splice`].
 use crate::polygon_area;
 use crate::{geom, simplification, snap, splice};
 use crate::{Error, FloorPlan, ParameterId};
@@ -562,7 +568,7 @@ pub(crate) fn record_phase(label: &str, shape: &[Point2f32], closed: bool) {
 }
 
 #[cfg(test)]
-mod trim_tests {
+mod path_edit_tests {
     use super::*;
 
     fn p(x: f32, y: f32) -> Point2f32 {
@@ -1773,7 +1779,7 @@ mod trim_tests {
 }
 
 #[cfg(test)]
-mod trim_self_cross {
+mod path_edit_self_cross {
     use super::*;
     fn p(x: f32, y: f32) -> Point2f32 {
         Point2f32::new(x, y)
