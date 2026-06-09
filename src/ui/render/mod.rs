@@ -546,6 +546,59 @@ pub fn render_splice_debug(
     }
 }
 
+/// Short human label for an elective snap kind.
+pub(crate) fn snap_kind_label(kind: manip_2d_plan::SnapKind) -> &'static str {
+    match kind {
+        manip_2d_plan::SnapKind::ToVertex | manip_2d_plan::SnapKind::ToCorner => "corner",
+        manip_2d_plan::SnapKind::ToEdge => "edge",
+        manip_2d_plan::SnapKind::ToPreviousOutline => "prev outline",
+        manip_2d_plan::SnapKind::ToParallelWall => "parallel wall",
+    }
+}
+
+/// The world→screen transform for the active storey, exposed so the interaction
+/// layer can place clickable widgets (e.g. snap tags) over the canvas.
+pub(crate) fn active_storey_transform(
+    rect: egui::Rect,
+    ber: Option<&Ber>,
+    current_storey_idx: Option<usize>,
+    sketch_mode: SketchMode,
+    view: ViewParams,
+) -> Option<Transform2d> {
+    storey_transform(rect, ber, current_storey_idx, sketch_mode, view).map(|(_storey, t)| t)
+}
+
+/// Render a marker at each elective snap of the last action: orange when applied,
+/// grey when currently un-snapped. The clickable label/menu is an overlay widget
+/// (see the sketch page) placed at the same point.
+pub fn render_snap_tags(
+    painter: &egui::Painter,
+    rect: egui::Rect,
+    ber: Option<&Ber>,
+    current_storey_idx: Option<usize>,
+    sketch_mode: SketchMode,
+    view: ViewParams,
+    tags: &[crate::controller::app_controller::SnapTagView],
+) {
+    if tags.is_empty() {
+        return;
+    }
+    let Some((_storey, t)) = storey_transform(rect, ber, current_storey_idx, sketch_mode, view)
+    else {
+        return;
+    };
+    for tag in tags {
+        let p = t.apply(tag.pos.0 as f64, tag.pos.1 as f64);
+        let color = if tag.current_kind.is_some() {
+            egui::Color32::from_rgb(255, 140, 0) // orange — applied
+        } else {
+            egui::Color32::from_gray(150) // grey — un-snapped
+        };
+        painter.circle_filled(p, 5.0, color);
+        painter.circle_stroke(p, 5.0, egui::Stroke::new(1.5, egui::Color32::WHITE));
+    }
+}
+
 /// Render committed construction-phase areas: each ring tinted purple with its
 /// phase label at the centroid, so the assessor sees which footprint carries
 /// which year. `regions` is `(ring_world_coords, label)`.

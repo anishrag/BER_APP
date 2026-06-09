@@ -487,16 +487,18 @@ pub(crate) fn cut_outline(
     let place = |opath: &mut Vec<Point2f32>, e_idx: usize, n_idx: usize| -> Option<(usize, f32)> {
         let end = opath[e_idx];
         let neighbour = opath[n_idx];
-        let (loc, d) = snap::find_nearest(ring, end, vertex_tol);
+        let (loc_raw, d) = snap::find_nearest(ring, end, vertex_tol);
         if d > reach_tol {
             return None;
         }
+        // Reach passed → the elective corner-vs-edge choice (records; the chosen
+        // attach drives the placement, so a forced edge wins on replay).
+        let loc = snap::choose_attach(ring, end, loc_raw, d, vertex_tol);
         let (edge, t_snap) = loc.edge_t();
         let leg_horizontal = (end.y - neighbour.y).abs() <= (end.x - neighbour.x).abs();
         if loc.is_vertex() {
             let v = ring[edge];
-            // Elective: the end snapped onto a CORNER rather than its edge.
-            opath[e_idx] = snap::elective_snap(snap::SnapKind::ToVertex, end, v);
+            opath[e_idx] = v;
             if leg_horizontal {
                 opath[n_idx].y = v.y;
             } else {
@@ -661,7 +663,10 @@ fn solve_straight_cut(
                 // Elective: terminate at the CORNER rather than sliding along the
                 // edge to `c` (the fallback the user reverts to on undo).
                 let from = slide_on_edge(a, b, horizontal, c, toward).map_or(toward, |(p, _)| p);
-                (snap::elective_snap(snap::SnapKind::ToVertex, from, v), 0.0)
+                (
+                    snap::elective_snap(snap::SnapKind::ToVertex, from, v, false),
+                    0.0,
+                )
             })
         } else {
             slide_on_edge(a, b, horizontal, c, toward)
@@ -848,7 +853,7 @@ fn snap_walls(outline: &[Point2f32], pts: &[Point2f32], tol: f32) -> Vec<Point2f
         }
         // Elective: this vertex moved onto a parallel boundary wall.
         if *p != drawn {
-            *p = snap::elective_snap(snap::SnapKind::ToParallelWall, drawn, *p);
+            *p = snap::elective_snap(snap::SnapKind::ToParallelWall, drawn, *p, true);
         }
     }
 

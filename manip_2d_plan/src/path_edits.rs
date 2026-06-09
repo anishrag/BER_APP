@@ -412,28 +412,27 @@ impl FloorPlan {
         // `snapped*` is true when the endpoint landed on an existing CORNER.
         let start = path[0];
         let end = path[path.len() - 1];
-        let (loc1, s_dist) = snap::find_nearest(&ring, start, vertex_tol);
-        let (loc2, e_dist) = snap::find_nearest(&ring, end, vertex_tol);
-        let (e1, t1) = loc1.edge_t();
-        let (e2, t2) = loc2.edge_t();
-        let (snapped1, snapped2) = (loc1.is_vertex(), loc2.is_vertex());
-        // Elective: an extend/trim endpoint that landed on an existing CORNER
-        // snapped to it (it could have attached mid-edge).
-        if snapped1 {
-            snap::elective_snap(snap::SnapKind::ToVertex, start, ring[e1]);
-        }
-        if snapped2 {
-            snap::elective_snap(snap::SnapKind::ToVertex, end, ring[e2]);
-        }
+        let (loc1_raw, s_dist) = snap::find_nearest(&ring, start, vertex_tol);
+        let (loc2_raw, e_dist) = snap::find_nearest(&ring, end, vertex_tol);
+        let (e1_raw, t1_raw) = loc1_raw.edge_t();
+        let (e2_raw, t2_raw) = loc2_raw.edge_t();
         if s_dist > max_tol || e_dist > max_tol {
             return Err(err(format!(
                 "endpoints too far from the outline (start={:.3}, end={:.3}, max={:.3})",
                 s_dist, e_dist, max_tol
             )));
         }
-        if e1 == e2 && (t1 - t2).abs() < 1e-3 {
+        if e1_raw == e2_raw && (t1_raw - t2_raw).abs() < 1e-3 {
             return Err(err("stroke starts and ends at the same point".into()));
         }
+        // Validity passed → record the elective corner-vs-edge choice at each
+        // endpoint (a corner that snapped could attach mid-edge instead). The
+        // CHOSEN attach drives the splice below, so a forced edge wins on replay.
+        let loc1 = snap::choose_attach(&ring, start, loc1_raw, s_dist, vertex_tol);
+        let loc2 = snap::choose_attach(&ring, end, loc2_raw, e_dist, vertex_tol);
+        let (e1, t1) = loc1.edge_t();
+        let (e2, t2) = loc2.edge_t();
+        let (snapped1, snapped2) = (loc1.is_vertex(), loc2.is_vertex());
 
         let mut path = path.to_vec();
         let last = path.len() - 1;

@@ -333,6 +333,7 @@ impl eframe::App for BerApp {
 
                 let controller = self.app_controller.clone();
                 let splice_debug = self.app_controller.borrow().splice_debug_overlay();
+                let snap_tags = self.app_controller.borrow().snap_overlay();
                 SketchPage::render(
                     ui,
                     stroke.as_ref().map(EguiStroke::from),
@@ -380,6 +381,7 @@ impl eframe::App for BerApp {
                     can_redo,
                     view,
                     &splice_debug,
+                    &snap_tags,
                     |event| match event {
                         UiEvent::Sketch(sketch_event) => match sketch_event {
                             SketchEvent::AddPoint(p) => controller
@@ -447,6 +449,15 @@ impl eframe::App for BerApp {
                             }
                             SketchEvent::IgnoreRedraw => {
                                 controller.borrow_mut().discard_pending_redraw();
+                            }
+                            SketchEvent::UnsnapLast => {
+                                controller.borrow_mut().unsnap_last();
+                            }
+                            SketchEvent::ChooseSnap { from, choice } => {
+                                controller.borrow_mut().choose_snap(
+                                    domain::points::Point2f32::new(from.0, from.1),
+                                    choice,
+                                );
                             }
                             SketchEvent::ApplyDimension(value) => {
                                 match controller.borrow_mut().apply_dimension(value) {

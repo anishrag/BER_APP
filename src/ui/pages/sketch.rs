@@ -3,8 +3,8 @@ use egui::Pos2;
 use strum::IntoEnumIterator;
 
 use crate::controller::app_controller::{
-    DimensionPromptUiData, EditDragPromptUiData, ExposureSelection, VertexDropPromptUiData,
-    WallExposureView,
+    DimensionPromptUiData, EditDragPromptUiData, ExposureSelection, SnapTagView,
+    VertexDropPromptUiData, WallExposureView,
 };
 use crate::ui::pages::events::UiEvent;
 use crate::ui::render;
@@ -149,6 +149,16 @@ pub enum SketchEvent {
     AddStoreyFromCurrent,
     /// User chose to discard the pending stroke.
     IgnoreRedraw,
+    /// Replay the last snapping action with every elective snap disabled
+    /// (revert to the freehand points). Test hook for the snap-choice replay.
+    UnsnapLast,
+    /// Force one elective snap (identified by its drawn `from` point) to a
+    /// specific choice — `Some(candidate_index)` or `None` (don't snap) — and
+    /// replay the action. Driven by clicking a snap tag's menu.
+    ChooseSnap {
+        from: (f32, f32),
+        choice: Option<usize>,
+    },
     /// Primary mouse button pressed in Edit mode at the given world-coord
     /// position. Hit-tests a wall and selects it if found.
     EditMouseDown {
@@ -382,6 +392,9 @@ impl SketchPage {
         // DEBUG: splice-pipeline phases from the last extend/trim —
         // `(label, world points, closed)` — drawn as a coloured overlay.
         splice_debug: &[(String, Vec<(f32, f32)>, bool)],
+        // Elective snaps of the last action — `(world_x, world_y, kind, has_alt)`
+        // — drawn as clickable tags.
+        snap_tags: &[SnapTagView],
         mut on_event: F,
     ) where
         F: FnMut(UiEvent),
@@ -471,6 +484,58 @@ impl SketchPage {
                     view,
                     splice_debug,
                 );
+
+                // Elective-snap tags of the last action (orange markers + kind).
+                render::render_snap_tags(
+                    &painter,
+                    rect,
+                    ber,
+                    current_storey_idx,
+                    mode,
+                    view,
+                    snap_tags,
+                );
+
+                // Left-click menu per snap tag: pick a different candidate, or
+                // "Don't snap", to replay the action with just that snap changed.
+                if !snap_tags.is_empty() {
+                    if let Some(t) =
+                        render::active_storey_transform(rect, ber, current_storey_idx, mode, view)
+                    {
+                        for (ti, tag) in snap_tags.iter().enumerate() {
+                            let sp = t.apply(tag.pos.0 as f64, tag.pos.1 as f64);
+                            let label = match tag.current_kind {
+                                Some(k) => format!("{} ▾", render::snap_kind_label(k)),
+                                None => "no snap ▾".to_string(),
+                            };
+                            egui::Area::new(ui.id().with(("snap_tag", ti)))
+                                .fixed_pos(sp + egui::vec2(7.0, -7.0))
+                                .order(egui::Order::Foreground)
+                                .show(ui.ctx(), |ui| {
+                                    ui.menu_button(label, |ui| {
+                                        for (kind, idx) in &tag.options {
+                                            if ui.button(render::snap_kind_label(*kind)).clicked() {
+                                                on_event(UiEvent::Sketch(
+                                                    SketchEvent::ChooseSnap {
+                                                        from: tag.from,
+                                                        choice: Some(*idx),
+                                                    },
+                                                ));
+                                                ui.close_menu();
+                                            }
+                                        }
+                                        if tag.skippable && ui.button("Don't snap").clicked() {
+                                            on_event(UiEvent::Sketch(SketchEvent::ChooseSnap {
+                                                from: tag.from,
+                                                choice: None,
+                                            }));
+                                            ui.close_menu();
+                                        }
+                                    });
+                                });
+                        }
+                    }
+                }
 
                 // Construction-phase areas: committed regions (purple, labelled),
                 // plus the pending carved area / cut candidates while picking.
@@ -1182,6 +1247,13 @@ impl SketchPage {
             .clicked()
         {
             on_event(UiEvent::Sketch(SketchEvent::SaveCheckpoint));
+        }
+        if ui
+            .button("↩ Un-snap last")
+            .on_hover_text("Replay the last drawn action with its elective snaps disabled")
+            .clicked()
+        {
+            on_event(UiEvent::Sketch(SketchEvent::UnsnapLast));
         }
     }
 

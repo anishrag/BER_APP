@@ -34,7 +34,10 @@ pub use geom::{
     ring_contains_point, solve_axis_wall,
 };
 pub use parametric::{Axis, CollinearitySuggestion, ParameterAxis, ParameterId, VertexId};
-pub use snap::snap_stroke_to_ring;
+pub use snap::{
+    clear_snap_policy, set_snap_policy, snap_stroke_to_ring, take_snap_decisions, SnapCandidate,
+    SnapChoice, SnapDecision, SnapKind,
+};
 
 use domain::points::Point2f32;
 
