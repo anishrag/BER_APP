@@ -55,9 +55,10 @@ impl<'a> Perimeter<'a> {
     }
 
     /// Project `p` onto the nearest edge → `(perimeter position, distance,
-    /// nearest edge index)`. Uses [`snap::snap_to_polygon`] for the snap.
+    /// nearest edge index)`. Uses [`snap::find_nearest`] for the snap.
     fn project(&self, p: Point2f32) -> (f32, f32, usize) {
-        let (e, t, d, _) = snap::snap_to_polygon(self.ring, p, 0.0);
+        let (loc, d) = snap::find_nearest(self.ring, p, 0.0);
+        let (e, t) = loc.edge_t();
         (self.cum[e] + t * self.elen[e], d, e)
     }
 
@@ -129,7 +130,7 @@ pub(crate) fn longest_offring_run(ring: &[Point2f32], points: &[Point2f32], off_
     }
     let off: Vec<bool> = points
         .iter()
-        .map(|p| snap::snap_to_polygon(ring, *p, 0.0).2 > off_tol)
+        .map(|p| snap::find_nearest(ring, *p, 0.0).1 > off_tol)
         .collect();
     if off.iter().all(|&b| b) {
         return m;

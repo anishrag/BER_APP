@@ -412,8 +412,11 @@ impl FloorPlan {
         // `snapped*` is true when the endpoint landed on an existing CORNER.
         let start = path[0];
         let end = path[path.len() - 1];
-        let (e1, t1, s_dist, snapped1) = snap::snap_to_polygon(&ring, start, vertex_tol);
-        let (e2, t2, e_dist, snapped2) = snap::snap_to_polygon(&ring, end, vertex_tol);
+        let (loc1, s_dist) = snap::find_nearest(&ring, start, vertex_tol);
+        let (loc2, e_dist) = snap::find_nearest(&ring, end, vertex_tol);
+        let (e1, t1) = loc1.edge_t();
+        let (e2, t2) = loc2.edge_t();
+        let (snapped1, snapped2) = (loc1.is_vertex(), loc2.is_vertex());
         // Elective: an extend/trim endpoint that landed on an existing CORNER
         // snapped to it (it could have attached mid-edge).
         if snapped1 {

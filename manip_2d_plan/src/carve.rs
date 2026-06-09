@@ -487,12 +487,13 @@ pub(crate) fn cut_outline(
     let place = |opath: &mut Vec<Point2f32>, e_idx: usize, n_idx: usize| -> Option<(usize, f32)> {
         let end = opath[e_idx];
         let neighbour = opath[n_idx];
-        let (edge, t_snap, d, is_vertex) = snap::snap_to_polygon(ring, end, vertex_tol);
+        let (loc, d) = snap::find_nearest(ring, end, vertex_tol);
         if d > reach_tol {
             return None;
         }
+        let (edge, t_snap) = loc.edge_t();
         let leg_horizontal = (end.y - neighbour.y).abs() <= (end.x - neighbour.x).abs();
-        if is_vertex {
+        if loc.is_vertex() {
             let v = ring[edge];
             // Elective: the end snapped onto a CORNER rather than its edge.
             opath[e_idx] = snap::elective_snap(snap::SnapKind::ToVertex, end, v);
@@ -529,7 +530,7 @@ pub(crate) fn cut_outline(
         }
     };
 
-    let drawn_reaches = |p: Point2f32| snap::snap_to_polygon(ring, p, vertex_tol).2 <= reach_tol;
+    let drawn_reaches = |p: Point2f32| snap::find_nearest(ring, p, vertex_tol).1 <= reach_tol;
     let drawn_reached_both = drawn_reaches(path[0]) && drawn_reaches(path[path.len() - 1]);
     let p1 = place(&mut opath, 0, 1usize.min(last));
     let p2 = place(&mut opath, last, last.saturating_sub(1));
@@ -621,8 +622,10 @@ fn solve_straight_cut(
 ) -> Result<Option<CutPlan>, Error> {
     let n = ring.len();
     let eps = 1e-3_f32;
-    let (e1, _, dd1, v1) = snap::snap_to_polygon(ring, d0, vertex_tol);
-    let (e2, _, dd2, v2) = snap::snap_to_polygon(ring, d1, vertex_tol);
+    let (loc1, dd1) = snap::find_nearest(ring, d0, vertex_tol);
+    let (loc2, dd2) = snap::find_nearest(ring, d1, vertex_tol);
+    let (e1, v1) = (loc1.edge_t().0, loc1.is_vertex());
+    let (e2, v2) = (loc2.edge_t().0, loc2.is_vertex());
     if dd1 > reach_tol || dd2 > reach_tol {
         return Ok(None); // doesn't reach → let the caller carve
     }

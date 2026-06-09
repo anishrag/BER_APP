@@ -1,10 +1,17 @@
 //! Snapping points and strokes ONTO a polygon's boundary.
 //!
-//! These are the tolerance/projection helpers that put a freehand point or
-//! stroke exactly onto an existing ring — its nearest perimeter point, a nearby
-//! corner, or a specific edge's line. They build on [`crate::geom`]'s raw
-//! coordinate math (`project_point_to_segment`); callers across extend, trim,
-//! carve, and the new-storey flow share them.
+//! Two phases, kept separate:
+//! - **FIND** — [`find_nearest`] locates the nearest boundary spot as an
+//!   [`OnRing`] (a *vertex* or a *point along an edge*) plus its distance. It's
+//!   pure — it applies nothing.
+//! - **APPLY** — resolve that [`OnRing`] to a coordinate ([`OnRing::point`]) or,
+//!   for an optional move, route it through [`elective_snap`] (which records it).
+//!
+//! `OnRing` carries the STRUCTURAL fact (which vertex / which edge + how far
+//! along), so a within-plan consumer can preserve parametric identity (reuse the
+//! vertex, splice into the edge), while a cross-ring consumer projects it to a
+//! raw coordinate. They build on [`crate::geom`]'s coordinate math; callers
+//! across extend, trim, carve, and the new-storey flow share them.
 
 use crate::geom;
 use domain::points::Point2f32;
@@ -25,6 +32,50 @@ pub(crate) enum SnapKind {
     ToPreviousOutline,
 }
 
+/// A located point on a ring's boundary — a vertex, or a position along an edge.
+/// The structural fact a snap targets: [`find_nearest`] produces it; a within-plan
+/// consumer reads it as IDENTITY (`Vertex(i)` → reuse vertex `i`; `Edge` → splice
+/// into that edge), a cross-ring consumer projects it to a coordinate with
+/// [`OnRing::point`]. The index is only meaningful for the ring it was found in.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(crate) enum OnRing {
+    /// Ring vertex `i`.
+    Vertex(usize),
+    /// A point `t ∈ [0, 1]` along edge `edge` (from vertex `edge` to `edge + 1`).
+    Edge { edge: usize, t: f32 },
+}
+
+impl OnRing {
+    /// Resolve to the coordinate on `ring` — the lossy projection that DROPS the
+    /// structural identity. Use when you want a raw point (e.g. a cross-ring
+    /// consumer reusing the previous storey's wall position).
+    pub(crate) fn point(self, ring: &[Point2f32]) -> Point2f32 {
+        let n = ring.len();
+        match self {
+            OnRing::Vertex(i) => ring[i % n],
+            OnRing::Edge { edge, t } => {
+                let a = ring[edge % n];
+                let b = ring[(edge + 1) % n];
+                Point2f32::new(a.x + t * (b.x - a.x), a.y + t * (b.y - a.y))
+            }
+        }
+    }
+
+    /// As an `(edge, t)` attach point for splicing — a vertex `i` is the START of
+    /// edge `i` (`t = 0`), matching the splice machinery's convention.
+    pub(crate) fn edge_t(self) -> (usize, f32) {
+        match self {
+            OnRing::Vertex(i) => (i, 0.0),
+            OnRing::Edge { edge, t } => (edge, t),
+        }
+    }
+
+    /// Did the snap land on an existing CORNER (vs mid-edge)?
+    pub(crate) fn is_vertex(self) -> bool {
+        matches!(self, OnRing::Vertex(_))
+    }
+}
+
 /// The single choke point every ELECTIVE snap routes through: move `from` → `to`
 /// because of a nearby feature, when staying at `from` was also valid. Returns
 /// `to` (the snap is applied). Centralising it means snaps can later be surfaced
@@ -40,32 +91,28 @@ pub(crate) fn elective_snap(kind: SnapKind, from: Point2f32, to: Point2f32) -> P
     to
 }
 
-/// Snap a point to a polygon's perimeter: the closest vertex if any is within
-/// `vertex_tol`, else the closest point on the closest edge. Returns
-/// `(edge_idx, t, distance, snapped_to_vertex)` with `t` CLAMPED to `[0, 1]`
-/// (callers rebuild the point from it). When snapping to vertex `i`, returns
-/// `(i, 0.0, dist, true)` — treating vertex `i` as the start of edge `i`.
-pub(crate) fn snap_to_polygon(
-    ring: &[Point2f32],
-    pt: Point2f32,
-    vertex_tol: f32,
-) -> (usize, f32, f32, bool) {
+/// FIND the nearest boundary location to `p`: the closest vertex if one is within
+/// `vertex_tol` (→ `Vertex`), else the closest point on the closest edge (→
+/// `Edge`, `t` clamped to `[0, 1]`). Returns the location + its distance. PURE —
+/// no snap is applied; the caller decides, routing elective applies through
+/// [`elective_snap`].
+pub(crate) fn find_nearest(ring: &[Point2f32], p: Point2f32, vertex_tol: f32) -> (OnRing, f32) {
     let n = ring.len();
     if n < 2 {
-        return (0, 0.0, f32::INFINITY, false);
+        return (OnRing::Vertex(0), f32::INFINITY);
     }
     // Closest vertex.
     let mut closest_v: (usize, f32) = (0, f32::INFINITY);
     for i in 0..n {
-        let dx = ring[i].x - pt.x;
-        let dy = ring[i].y - pt.y;
+        let dx = ring[i].x - p.x;
+        let dy = ring[i].y - p.y;
         let d = (dx * dx + dy * dy).sqrt();
         if d < closest_v.1 {
             closest_v = (i, d);
         }
     }
     if closest_v.1 <= vertex_tol {
-        return (closest_v.0, 0.0, closest_v.1, true);
+        return (OnRing::Vertex(closest_v.0), closest_v.1);
     }
     // Otherwise closest point on an edge.
     let mut best: (usize, f32, f32) = (0, 0.0, f32::INFINITY);
@@ -75,26 +122,27 @@ pub(crate) fn snap_to_polygon(
         if (a.x - b.x).powi(2) + (a.y - b.y).powi(2) < 1e-6 {
             continue; // degenerate edge
         }
-        let (_q, t, dist) = geom::project_point_to_segment(pt, a, b);
+        let (_q, t, dist) = geom::project_point_to_segment(p, a, b);
         if dist < best.2 {
             best = (i, t.clamp(0.0, 1.0), dist);
         }
     }
-    (best.0, best.1, best.2, false)
+    (
+        OnRing::Edge {
+            edge: best.0,
+            t: best.1,
+        },
+        best.2,
+    )
 }
 
-/// Snap `p` to the nearest ring VERTEX within `tol`; otherwise leave it.
-/// Lets a hug transition that lands near a corner sit exactly on it.
+/// Snap `p` to the nearest ring VERTEX within `tol`; otherwise leave it. A FIND
+/// (vertex only) + an elective APPLY. Lets a hug transition that lands near a
+/// corner sit exactly on it.
 pub(crate) fn snap_to_corner(p: Point2f32, ring: &[Point2f32], tol: f32) -> Point2f32 {
-    match ring
-        .iter()
-        .copied()
-        .map(|v| (v, (v.x - p.x).powi(2) + (v.y - p.y).powi(2)))
-        .filter(|(_, d2)| *d2 <= tol * tol)
-        .min_by(|(_, da), (_, db)| da.total_cmp(db))
-    {
-        Some((v, _)) => elective_snap(SnapKind::ToCorner, p, v),
-        None => p,
+    match find_nearest(ring, p, tol).0 {
+        OnRing::Vertex(i) => elective_snap(SnapKind::ToCorner, p, ring[i]),
+        OnRing::Edge { .. } => p,
     }
 }
 
@@ -103,9 +151,11 @@ pub(crate) fn snap_to_corner(p: Point2f32, ring: &[Point2f32], tol: f32) -> Poin
 /// For an axis-aligned edge this is exactly "match the edge's perpendicular
 /// coordinate" (a horizontal edge fixes `y`, a vertical one `x`); for a DIAGONAL
 /// edge (a curve facet) it projects onto the slanted line rather than snapping to
-/// an axis, which would drag the point off the boundary. Used to pin attach/cut
-/// endpoints onto their edges so they line up with the spliced boundary — extend
-/// strokes attach to axis walls, a cut may reach a curve.
+/// an axis, which would drag the point off the boundary. An APPLY onto a KNOWN
+/// edge — note the projection is UNCLAMPED (foot of perpendicular, may land past
+/// an endpoint), unlike [`find_nearest`]'s clamped edge result. Used to pin
+/// attach/cut endpoints onto their edges so they line up with the spliced
+/// boundary.
 pub(crate) fn pin_to_edge(p: &mut Point2f32, ring: &[Point2f32], edge: usize) {
     let n = ring.len();
     if n < 2 {
@@ -118,20 +168,19 @@ pub(crate) fn pin_to_edge(p: &mut Point2f32, ring: &[Point2f32], edge: usize) {
     if len2 < 1e-12 {
         return; // degenerate edge — nothing to pin onto
     }
-    // Foot of the perpendicular from `p` to the line through a→b. For an axis
-    // edge this reduces to setting just the perpendicular coordinate (the
-    // parallel one projects back to itself), so axis behaviour is unchanged.
+    // Foot of the perpendicular from `p` to the line through a→b (UNCLAMPED), then
+    // resolve through the shared `OnRing::point` apply.
     let t = ((p.x - a.x) * dx + (p.y - a.y) * dy) / len2;
-    p.x = a.x + t * dx;
-    p.y = a.y + t * dy;
+    *p = OnRing::Edge { edge, t }.point(ring);
 }
 
 /// Snap each point of `stroke` onto `ring`'s perimeter when within `snap_tol`,
 /// leaving points farther away untouched. Used by the multi-storey "draw on
 /// top of the previous storey" flow so endpoints land exactly on the previous
 /// outline (so the new storey's footprint reuses those coordinates verbatim).
-/// [`snap_to_polygon`] already handles closest-vertex vs closest-edge — we just
-/// project to the returned `(edge, t)` when the gap is within tolerance.
+/// A cross-ring consumer: it FINDs on the previous ring, then projects the
+/// result to a COORDINATE ([`OnRing::point`]) — the new storey mints its own
+/// vertices, so the previous ring's vertex identity is correctly discarded.
 pub fn snap_stroke_to_ring(
     stroke: &[Point2f32],
     ring: &[Point2f32],
@@ -140,22 +189,14 @@ pub fn snap_stroke_to_ring(
     if ring.len() < 2 {
         return stroke.to_vec();
     }
-    let n = ring.len();
     stroke
         .iter()
         .map(|p| {
-            let (edge, t, dist, on_vertex) = snap_to_polygon(ring, *p, snap_tol);
+            let (loc, dist) = find_nearest(ring, *p, snap_tol);
             if dist > snap_tol {
                 return *p;
             }
-            let a = ring[edge % n];
-            let snapped = if on_vertex {
-                a
-            } else {
-                let b = ring[(edge + 1) % n];
-                Point2f32::new(a.x + t * (b.x - a.x), a.y + t * (b.y - a.y))
-            };
-            elective_snap(SnapKind::ToPreviousOutline, *p, snapped)
+            elective_snap(SnapKind::ToPreviousOutline, *p, loc.point(ring))
         })
         .collect()
 }
@@ -171,25 +212,35 @@ mod tests {
     }
 
     #[test]
-    fn snap_to_nearest_vertex_when_within_tol() {
+    fn find_nearest_vertex_when_within_tol() {
         let p = |x, y| Point2f32::new(x, y);
         let ring = unit_square();
-        let (edge, t, dist, is_vertex) = snap_to_polygon(&ring, p(10.5, 9.6), 2.0);
-        assert_eq!(edge, 2);
-        assert_eq!(t, 0.0);
-        assert!(is_vertex);
+        let (loc, dist) = find_nearest(&ring, p(10.5, 9.6), 2.0);
+        assert_eq!(loc, OnRing::Vertex(2));
         assert!(dist < 2.0);
     }
 
     #[test]
-    fn snap_to_edge_when_far_from_any_vertex() {
+    fn find_nearest_edge_when_far_from_any_vertex() {
         let p = |x, y| Point2f32::new(x, y);
         let ring = unit_square();
-        let (edge, t, dist, is_vertex) = snap_to_polygon(&ring, p(5.0, -1.0), 2.0);
-        assert_eq!(edge, 0);
-        assert!((t - 0.5).abs() < 1e-3);
-        assert!(!is_vertex);
+        let (loc, dist) = find_nearest(&ring, p(5.0, -1.0), 2.0);
+        match loc {
+            OnRing::Edge { edge, t } => {
+                assert_eq!(edge, 0);
+                assert!((t - 0.5).abs() < 1e-3);
+            }
+            OnRing::Vertex(_) => panic!("expected an edge"),
+        }
         assert!((dist - 1.0).abs() < 1e-3);
+    }
+
+    #[test]
+    fn on_ring_point_resolves_vertex_and_edge() {
+        let p = |x, y| Point2f32::new(x, y);
+        let ring = unit_square();
+        assert_eq!(OnRing::Vertex(2).point(&ring), p(10.0, 10.0));
+        assert_eq!(OnRing::Edge { edge: 0, t: 0.5 }.point(&ring), p(5.0, 0.0));
     }
 
     #[test]
