@@ -339,7 +339,7 @@ impl StoreyDoc {
         let pieces = self.outline.floor_plan.subtract_all(holes);
         let boundary = pick_piece_for_stroke(pieces, stroke)
             .unwrap_or_else(|| self.outline.floor_plan.clone());
-        let outcome = boundary.carve_or_cut(stroke, tuning)?;
+        let outcome = boundary.carve_or_cut(stroke, tuning, false)?;
         Ok((boundary, outcome))
     }
 

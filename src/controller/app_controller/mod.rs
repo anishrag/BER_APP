@@ -2085,7 +2085,61 @@ impl AppController {
         }
     }
 
+    /// New storey via the **living-area carve**: trace the storey below as a
+    /// reference, follow it where the trace hugs it and build fresh walls where it
+    /// diverges — `allow_outside` so overhangs/extensions past the old footprint
+    /// are kept rather than clamped in. The carve subsumes the legacy
+    /// reproduce/splice/extension three-way; an unexpected CUT falls back to it.
     fn apply_outline_world_inner(
+        &mut self,
+        world_points: &[(f32, f32)],
+        closed: bool,
+    ) -> Result<(), String> {
+        let pts: Vec<Point2f32> = world_points
+            .iter()
+            .map(|(x, y)| Point2f32::new(*x, *y))
+            .collect();
+        let prev_ring = self
+            .previous_storey_ring()
+            .ok_or_else(|| "no previous storey to draw on".to_string())?;
+        let prev_plan = FloorPlan::from_clean_ring(&prev_ring)
+            .map_err(|e| format!("Failed to build reference outline: {:?}", e))?;
+        let outcome = prev_plan
+            .carve_or_cut(&pts, &self.tuning.subarea, true)
+            .map_err(|e| format!("Failed to trace new storey: {:?}", e))?;
+        let new_plan = match outcome {
+            manip_2d_plan::SubareaOutcome::Area(plan) => plan,
+            manip_2d_plan::SubareaOutcome::Cut(..) => {
+                println!("[new-storey] carve resolved to a CUT, not an area — using legacy path");
+                return self.apply_outline_world_inner_legacy(world_points, closed);
+            }
+        };
+        let undo_snap = self.current_history_snapshot();
+        self.document.dimensioning = DimensionState::default();
+        self.document.dimensioning.scale_set = true;
+        self.document.floor_plan = new_plan;
+        self.warn_if_non_orthogonal("draw outline (carve)");
+        self.document.dimensioning.known_params =
+            prev_plan.params_pinned_to_outline(&self.document.floor_plan);
+        let active = self.document.floor_plan.all_active_params();
+        println!(
+            "[new-storey] carved outline (reuse of living-area carve): {} verts, pinned {} of {} \
+             active params ({} new wall param(s) left to dimension)",
+            self.document.floor_plan.get_points().len(),
+            self.document.dimensioning.known_params.len(),
+            active.len(),
+            active
+                .len()
+                .saturating_sub(self.document.dimensioning.known_params.len()),
+        );
+        self.push_history_snapshot(undo_snap);
+        self.commit_review_redimension()
+    }
+
+    /// LEGACY new-storey geometry (bespoke `new_storey.rs` splice). Kept as the
+    /// fallback for the carve's CUT case and as a safety net while the carve reuse
+    /// is validated — to be removed once confirmed.
+    fn apply_outline_world_inner_legacy(
         &mut self,
         world_points: &[(f32, f32)],
         closed: bool,

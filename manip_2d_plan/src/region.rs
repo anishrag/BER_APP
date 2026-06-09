@@ -64,7 +64,15 @@ pub(crate) fn clip_stroke_inside(
     outline: &[Point2f32],
     points: &[Point2f32],
     close_gap_m: f32,
+    allow_outside: bool,
 ) -> Vec<Point2f32> {
+    // A new-storey outline traces the storey BELOW and may legitimately bulge out
+    // past it (overhangs, extensions). There the boundary is a REFERENCE to follow,
+    // not a fence — keep the stroke verbatim and let the carve follow it where it
+    // hugs and build fresh walls where it diverges, inside or out.
+    if allow_outside {
+        return points.to_vec();
+    }
     let ends_meet = points
         .first()
         .zip(points.last())
@@ -203,7 +211,7 @@ impl FloorPlan {
     /// First-stage clip of a freehand sub-area stroke onto the storey — see
     /// [`clip_stroke_inside`].
     pub fn clip_stroke_inside(&self, points: &[Point2f32], close_gap_m: f32) -> Vec<Point2f32> {
-        clip_stroke_inside(&self.parametric.ring_points(0), points, close_gap_m)
+        clip_stroke_inside(&self.parametric.ring_points(0), points, close_gap_m, false)
     }
 
     /// This plan MINUS the union of `holes`, as a fresh `FloorPlan` — see

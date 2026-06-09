@@ -163,8 +163,14 @@ impl FloorPlan {
         &self,
         stroke: &[Point2f32],
         tuning: &SubareaTuning,
+        allow_outside: bool,
     ) -> Result<SubareaOutcome, Error> {
-        carve_or_cut(&self.parametric.ring_points(0), stroke, tuning)
+        carve_or_cut(
+            &self.parametric.ring_points(0),
+            stroke,
+            tuning,
+            allow_outside,
+        )
     }
 }
 
@@ -188,6 +194,7 @@ fn carve_or_cut(
     outline: &[Point2f32],
     stroke: &[Point2f32],
     tuning: &SubareaTuning,
+    allow_outside: bool,
 ) -> Result<SubareaOutcome, Error> {
     // No storey footprint to carve against (e.g. a freshly-added storey with no
     // outline yet) — there's nothing to clip/follow, so bail instead of letting
@@ -197,7 +204,7 @@ fn carve_or_cut(
             "no storey outline to carve against".into(),
         ));
     }
-    let pts = region::clip_stroke_inside(outline, stroke, tuning.close_gap_m);
+    let pts = region::clip_stroke_inside(outline, stroke, tuning.close_gap_m, allow_outside);
     let tol = (geom::bbox_diagonal(&pts) * tuning.rdp_tol_ratio).max(tuning.rdp_tol_floor);
     match split_cut(outline, &pts, tol, tuning)? {
         Some((a, b)) => Ok(SubareaOutcome::Cut(a, b)),
@@ -958,8 +965,13 @@ mod cut_line_tests {
         ])
         .unwrap();
         let cut = vec![p(1., 9.), p(9., 1.)]; // TL chamfer → BR chamfer
-        let err = carve_or_cut(&outline.get_points(), &cut, &SubareaTuning::default())
-            .expect_err("opposite chamfers share no row or column");
+        let err = carve_or_cut(
+            &outline.get_points(),
+            &cut,
+            &SubareaTuning::default(),
+            false,
+        )
+        .expect_err("opposite chamfers share no row or column");
         assert!(matches!(err, Error::CutWouldChangeShape), "got {err:?}");
     }
 
@@ -2743,7 +2755,7 @@ mod checkpoint_cut {
         let t = SubareaTuning::default();
         let res = FloorPlan::from_clean_ring(&o)
             .unwrap()
-            .carve_or_cut(&stroke, &t);
+            .carve_or_cut(&stroke, &t, false);
         // A short near-vertical cut (ends within `close_gap_m`, so it must NOT be
         // mis-clipped as a closed loop) whose ends land on CORNERS in line with an
         // existing wall must still be a dividing CUT: the cut extends the wall
@@ -2773,7 +2785,7 @@ mod empty_outline_guard {
             Point2f32::new(0.0, 1.0),
         ];
         assert!(empty
-            .carve_or_cut(&stroke, &SubareaTuning::default())
+            .carve_or_cut(&stroke, &SubareaTuning::default(), false)
             .is_err());
     }
 }
