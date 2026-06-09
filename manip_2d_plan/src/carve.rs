@@ -190,6 +190,21 @@ pub enum SubareaOutcome {
 /// tolerance is derived from the clipped stroke + `tuning`, so the caller passes
 /// neither a pre-clipped stroke nor a tolerance — the whole clip→tol→cut/carve
 /// pipeline lives here, not in the caller.
+thread_local! {
+    /// When set, the carve treats the outline as a REFERENCE to align to (the
+    /// storey below in a new-storey trace) rather than a containing fence — so a
+    /// wall snaps onto a parallel boundary wall it's merely ADJACENT to (meets at a
+    /// corner), not only one it OVERLAPS. Set by [`carve_or_cut`] from its
+    /// `allow_outside` flag; defaults off for living-area carving.
+    static ALIGN_TO_REFERENCE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// Whether the current carve aligns walls to an adjacent reference wall (see
+/// [`ALIGN_TO_REFERENCE`]).
+fn align_to_reference() -> bool {
+    ALIGN_TO_REFERENCE.with(|f| f.get())
+}
+
 fn carve_or_cut(
     outline: &[Point2f32],
     stroke: &[Point2f32],
@@ -204,6 +219,9 @@ fn carve_or_cut(
             "no storey outline to carve against".into(),
         ));
     }
+    // A new-storey trace aligns its walls to the storey below even where they only
+    // meet it at a corner (adjacent, not overlapping).
+    ALIGN_TO_REFERENCE.with(|f| f.set(allow_outside));
     let pts = region::clip_stroke_inside(outline, stroke, tuning.close_gap_m, allow_outside);
     let tol = (geom::bbox_diagonal(&pts) * tuning.rdp_tol_ratio).max(tuning.rdp_tol_floor);
     match split_cut(outline, &pts, tol, tuning)? {
@@ -821,7 +839,13 @@ fn snap_walls(outline: &[Point2f32], pts: &[Point2f32], tol: f32) -> Vec<Point2f
     let n = pts.len();
     let mut remap_x: Vec<(f32, f32)> = Vec::new();
     let mut remap_y: Vec<(f32, f32)> = Vec::new();
-    let overlaps = |alo: f32, ahi: f32, blo: f32, bhi: f32| ahi.min(bhi) - alo.max(blo) > eps;
+    // Normally a wall must OVERLAP a parallel boundary wall to snap onto it. When
+    // aligning to a reference (new-storey), also accept walls that merely meet it
+    // at a corner — ranges adjacent within `tol`, not overlapping — so a new wall
+    // flush with the storey-below's neighbouring wall snaps to its line.
+    let min_overlap = if align_to_reference() { -tol } else { eps };
+    let overlaps =
+        |alo: f32, ahi: f32, blo: f32, bhi: f32| ahi.min(bhi) - alo.max(blo) > min_overlap;
     for i in 0..n {
         let a = pts[i];
         let b = pts[(i + 1) % n];
