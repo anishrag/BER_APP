@@ -1,6 +1,6 @@
 //! Dimensioning operations on the active shape — pure model mutation.
 //! The shell (`AppController`) wraps these with undo + persistence.
-use crate::{ActiveShape, DimensionPrompt, StoreyDoc};
+use crate::{ActiveShape, DimensionPrompt, PendingArc, StoreyDoc};
 use manip_2d_plan::{find_flipped_edge, ParameterAxis};
 
 // ── Dimensioning operations ─────────────────────────────────────────────────
@@ -236,5 +236,35 @@ impl StoreyDoc {
         self.dimensioning
             .skipped_walls
             .retain(|v| self.floor_plan.find_vertex(*v).is_some());
+    }
+
+    /// True once both of a provisional arc's attach stubs are dimensioned — every
+    /// parameter the placeholder edge's length depends on is known, fixing both
+    /// endpoints. The shell's cue to facet the arc in.
+    pub fn pending_arc_ready(&self, pa: &PendingArc) -> bool {
+        let (Some((r1, is)), Some((r2, ie))) = (
+            self.floor_plan.find_vertex(pa.start),
+            self.floor_plan.find_vertex(pa.end),
+        ) else {
+            return false;
+        };
+        if r1 != r2 {
+            return false;
+        }
+        let Some(n) = self.floor_plan.polygons().get(r1).map(|p| p.len()) else {
+            return false;
+        };
+        let edge_start = if (is + 1) % n == ie {
+            is
+        } else if (ie + 1) % n == is {
+            ie
+        } else {
+            return false;
+        };
+        let deps = self.floor_plan.wall_param_deps(r1, edge_start);
+        !deps.is_empty()
+            && deps
+                .iter()
+                .all(|p| self.dimensioning.known_params.contains(p))
     }
 }

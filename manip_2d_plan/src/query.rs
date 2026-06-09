@@ -126,6 +126,28 @@ impl FloorPlan {
         self.parametric.find_vertex(id)
     }
 
+    /// For an edge connecting vertices `a` and `b` (e.g. an arc's placeholder
+    /// chord), the RING-START vertex of that edge — the one prompt logic keys the
+    /// wall by. `None` if the two aren't adjacent on a single ring.
+    pub fn adjacent_edge_start(&self, a: VertexId, b: VertexId) -> Option<VertexId> {
+        let (ra, ia) = self.find_vertex(a)?;
+        let (rb, ib) = self.find_vertex(b)?;
+        if ra != rb {
+            return None;
+        }
+        let n = self.parametric.ring_points(ra).len();
+        if n == 0 {
+            return None;
+        }
+        if (ia + 1) % n == ib {
+            Some(a)
+        } else if (ib + 1) % n == ia {
+            Some(b)
+        } else {
+            None
+        }
+    }
+
     /// The outline perimeter as walls: for ring 0, each edge's stable start
     /// `VertexId` together with its two endpoint coordinates `(a, b)`, in ring
     /// order. The editor uses this to derive heat-loss wall regions and to key

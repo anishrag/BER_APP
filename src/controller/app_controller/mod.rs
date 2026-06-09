@@ -30,7 +30,7 @@ use crate::engine::Db;
 use datatypes::ber::ber_struct::Ber;
 use datatypes::ber::common::{ConstructionPhase, ConstructionPhases, ItemId};
 use datatypes::ber::structural::{FloorRegions, Storey, WallExposure, WallRegions};
-use domain::points::{Point2f32, Point2f64};
+use domain::points::{to_f32, to_f64, Point2f32, Point2f64};
 use domain::sketch::{DisplayMode, EditTools, SketchMode};
 use manip_2d_plan::{
     Axis, CollinearitySuggestion, FloorPlan, ParameterAxis, SubareaOutcome, VertexId,
@@ -1063,7 +1063,7 @@ impl AppController {
                 .floors
                 .merged_outline()
                 .into_iter()
-                .map(|p| Point2f32::new(p.x as f32, p.y as f32))
+                .map(to_f32)
                 .collect()
         } else {
             storey
@@ -1071,11 +1071,7 @@ impl AppController {
                 .to_vertex_lists()
                 .into_iter()
                 .find(|r| r.len() >= 3)
-                .map(|r| {
-                    r.iter()
-                        .map(|p| Point2f32::new(p.x as f32, p.y as f32))
-                        .collect()
-                })
+                .map(|r| r.iter().copied().map(to_f32).collect())
                 .unwrap_or_default()
         };
         if primary.len() >= 3 {
@@ -1222,45 +1218,16 @@ impl AppController {
             .floor_plan
             .polygons()
             .into_iter()
-            .map(|ring| {
-                ring.into_iter()
-                    .map(|p| Point2f64::new(p.x as f64, p.y as f64))
-                    .collect()
-            })
+            .map(|ring| ring.into_iter().map(to_f64).collect())
             .collect();
 
-        // Derive the heat-loss walls from the outline perimeter. ONLY walls the
-        // user has marked become regions — an un-marked wall produces NO region
-        // (it stays "unset", and `WallRegions` is the single source of truth, so
-        // that distinction survives reload). A marked wall is split into one
-        // vertical `WallRegion` per section (sub-segment endpoints interpolated
-        // by distance) extruded to `DEFAULT_CEILING_HEIGHT_M` — the same
-        // provisional height floors use — until real heights are entered.
-        // Computed before the mutable `record` borrow below.
-        let wall_segments: Vec<(Point2f64, Point2f64, WallExposure)> = s
-            .outline
-            .floor_plan
-            .perimeter_walls()
-            .into_iter()
-            .flat_map(|(vid, a, b)| {
-                let sections = match s.wall_sections.get(&vid) {
-                    Some(s) if !s.is_empty() => s,
-                    _ => return Vec::new(), // un-marked wall → no region
-                };
-                let len = ((b.x - a.x).powi(2) + (b.y - a.y).powi(2)).sqrt();
-                let lerp = move |d: f32| {
-                    let t = if len > 1e-6 { d / len } else { 0.0 };
-                    Point2f64::new(
-                        (a.x + t * (b.x - a.x)) as f64,
-                        (a.y + t * (b.y - a.y)) as f64,
-                    )
-                };
-                document::wall_coverage(len, sections)
-                    .into_iter()
-                    .map(move |(s, e, exposure)| (lerp(s), lerp(e), exposure))
-                    .collect::<Vec<_>>()
-            })
-            .collect();
+        // The marked heat-loss wall segments (one per exposure section of each
+        // marked wall) — derived in `document`. ONLY marked walls become regions;
+        // an un-marked wall stays "unset" (and `WallRegions` is the single source
+        // of truth, so that distinction survives reload). Each is extruded below to
+        // `DEFAULT_CEILING_HEIGHT_M` (the provisional height) until real heights
+        // are entered. Computed before the mutable `record` borrow.
+        let wall_segments = s.wall_exposure_segments();
 
         // Resolved living-area polygons (each slot is current after sync_active).
         // Stored in `Storey.living_areas`, NOT the snapshot — they're
@@ -1272,7 +1239,7 @@ impl AppController {
                 slot.floor_plan
                     .get_points()
                     .into_iter()
-                    .map(|p| Point2f64::new(p.x as f64, p.y as f64))
+                    .map(to_f64)
                     .collect()
             })
             .collect();
@@ -1285,11 +1252,7 @@ impl AppController {
             .map(|rs| {
                 rs.iter()
                     .map(|r| {
-                        let ring = r
-                            .polygon
-                            .iter()
-                            .map(|p| Point2f64::new(p.x as f64, p.y as f64))
-                            .collect();
+                        let ring = r.polygon.iter().copied().map(to_f64).collect();
                         (ring, r.phase.clone())
                     })
                     .collect()
@@ -1531,13 +1494,7 @@ impl AppController {
                 .living_areas
                 .iter()
                 .filter(|s| shape_finalised(&s.dimensioning, &s.floor_plan))
-                .map(|s| {
-                    s.floor_plan
-                        .get_points()
-                        .into_iter()
-                        .map(|p| Point2f64::new(p.x as f64, p.y as f64))
-                        .collect()
-                })
+                .map(|s| s.floor_plan.get_points().into_iter().map(to_f64).collect())
                 .collect();
             // `ensure_*` borrows `out.data`, so resolve the id before the
             // storey borrow below.
@@ -2035,12 +1992,7 @@ impl AppController {
         if ring_f64.len() < 3 {
             return None;
         }
-        Some(
-            ring_f64
-                .into_iter()
-                .map(|p| Point2f32::new(p.x as f32, p.y as f32))
-                .collect(),
-        )
+        Some(ring_f64.into_iter().map(to_f32).collect())
     }
 
     /// Apply the FIRST outline stroke of a new upper storey, captured in the
@@ -2360,33 +2312,6 @@ impl AppController {
     /// ([`commit_pending_arc`](Self::commit_pending_arc)) bakes the curve in.
     /// Nothing about the geometry changes until then.
     fn begin_arc_stroke(&mut self, points: &[Point2f32]) -> Result<(), String> {
-        // ---- CURVE DEBUG (temporary): everything needed to reproduce ----
-        // Plan + dimensioning state BEFORE the curve, so the exact dimensioned
-        // shape can be reconstructed in a test.
-        println!("=== CURVE DEBUG: begin_arc_stroke ===");
-        println!("  plan BEFORE: {:?}", self.document.floor_plan);
-        {
-            let mut k: Vec<_> = self
-                .document
-                .dimensioning
-                .known_params
-                .iter()
-                .copied()
-                .collect();
-            k.sort();
-            println!(
-                "  known_params={:?} scale_set={}",
-                k, self.document.dimensioning.scale_set
-            );
-        }
-        // The raw stroke, as a paste-able Rust literal.
-        print!("  stroke ({} pts): vec![", points.len());
-        for p in points {
-            print!("p({:.3},{:.3}),", p.x, p.y);
-        }
-        println!("]");
-        // ---- end debug header ----
-
         let undo_snap = self.current_history_snapshot();
         let (start, end, bulge_ratio) = self
             .document
@@ -2394,7 +2319,7 @@ impl AppController {
             .begin_arc(points)
             .map_err(|e| format!("{}", e))?;
         // Don't prompt the straight placeholder edge — only its attach stubs.
-        if let Some(skip) = self.placeholder_skip_vertex(start, end) {
+        if let Some(skip) = self.document.floor_plan.adjacent_edge_start(start, end) {
             self.document.dimensioning.skipped_walls.insert(skip);
         }
         self.document.pending_arc = Some(PendingArc {
@@ -2407,109 +2332,10 @@ impl AppController {
             bulge_ratio
         );
         self.resync_dimensioning_to_plan();
-
-        // ---- CURVE DEBUG (temporary): the spliced structure ----
-        println!(
-            "  begin: start_vid={} end_vid={} bulge={:.3} skip_vid={:?}",
-            start,
-            end,
-            bulge_ratio,
-            self.placeholder_skip_vertex(start, end)
-        );
-        if let (Some((r, is)), Some((_, ie))) = (
-            self.document.floor_plan.find_vertex(start),
-            self.document.floor_plan.find_vertex(end),
-        ) {
-            println!("  start at ring{r}/idx{is}, end at idx{ie}");
-        }
-        {
-            let mut a: Vec<_> = self
-                .document
-                .floor_plan
-                .all_active_params()
-                .into_iter()
-                .collect();
-            a.sort();
-            let mut k: Vec<_> = self
-                .document
-                .dimensioning
-                .known_params
-                .iter()
-                .copied()
-                .collect();
-            k.sort();
-            println!("  active_params={a:?} known_after_retain={k:?}");
-        }
-        let ring = self.document.floor_plan.polygons()[0].clone();
-        for e in 0..ring.len() {
-            println!(
-                "  edge {e} {:?}->{:?} axis={:?} deps={:?}",
-                (ring[e].x, ring[e].y),
-                (ring[(e + 1) % ring.len()].x, ring[(e + 1) % ring.len()].y),
-                self.document.floor_plan.wall_axis(0, e),
-                self.document.floor_plan.wall_param_deps(0, e),
-            );
-        }
-        println!("=== end CURVE DEBUG ===");
-        // ---- end debug ----
-
         self.mark_dirty()?;
         self.maybe_start_dimensioning();
         self.push_history_snapshot(undo_snap);
         Ok(())
-    }
-
-    /// The provisional arc's placeholder edge connects `start` and `end`
-    /// directly; return whichever is that edge's RING-START vertex (the one
-    /// `next_promptable_wall` keys the placeholder wall by), so it can be
-    /// skipped. `None` if the two are no longer adjacent on one ring.
-    fn placeholder_skip_vertex(&self, start: VertexId, end: VertexId) -> Option<VertexId> {
-        let (r1, is) = self.document.floor_plan.find_vertex(start)?;
-        let (r2, ie) = self.document.floor_plan.find_vertex(end)?;
-        if r1 != r2 {
-            return None;
-        }
-        let n = self.document.floor_plan.polygons().get(r1)?.len();
-        if n == 0 {
-            return None;
-        }
-        if (is + 1) % n == ie {
-            Some(start)
-        } else if (ie + 1) % n == is {
-            Some(end)
-        } else {
-            None
-        }
-    }
-
-    /// True once both of the provisional arc's attach stubs are dimensioned —
-    /// i.e. every parameter the placeholder edge's length depends on is known,
-    /// fixing both endpoints. That's the cue to facet the arc in.
-    fn pending_arc_ready(&self, pa: &PendingArc) -> bool {
-        let (Some((r1, is)), Some((r2, ie))) = (
-            self.document.floor_plan.find_vertex(pa.start),
-            self.document.floor_plan.find_vertex(pa.end),
-        ) else {
-            return false;
-        };
-        if r1 != r2 {
-            return false;
-        }
-        let Some(n) = self.document.floor_plan.polygons().get(r1).map(|p| p.len()) else {
-            return false;
-        };
-        let edge_start = if (is + 1) % n == ie {
-            is
-        } else if (ie + 1) % n == is {
-            ie
-        } else {
-            return false;
-        };
-        let deps = self.document.floor_plan.wall_param_deps(r1, edge_start);
-        !deps.is_empty()
-            && deps
-                .iter()
-                .all(|p| self.document.dimensioning.known_params.contains(p))
     }
 
     /// The provisional curve's current bulge (signed sagitta / chord), but only
@@ -2519,7 +2345,9 @@ impl AppController {
     /// dimensioning the attach lines).
     pub fn pending_arc_bulge(&self) -> Option<f32> {
         let pa = self.document.pending_arc.as_ref()?;
-        if self.document.dimensioning.current_prompt.is_some() || !self.pending_arc_ready(pa) {
+        if self.document.dimensioning.current_prompt.is_some()
+            || !self.document.pending_arc_ready(pa)
+        {
             return None;
         }
         Some(pa.bulge_ratio)

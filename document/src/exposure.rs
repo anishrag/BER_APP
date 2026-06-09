@@ -3,6 +3,7 @@
 //! mutation — the shell owns pointer selection, undo, and persistence.
 use crate::{ExposureSection, StoreyDoc};
 use datatypes::ber::structural::WallExposure;
+use domain::points::Point2f64;
 use manip_2d_plan::VertexId;
 
 /// Paint `[start, end]` of a wall with `exposure`: the new mark WINS over any
@@ -112,6 +113,37 @@ impl StoreyDoc {
     /// Remove all exposure sections from outline wall `vid`.
     pub fn clear_wall_section(&mut self, vid: VertexId) {
         self.wall_sections.remove(&vid);
+    }
+
+    /// This storey's marked heat-loss wall SEGMENTS: each MARKED outline wall,
+    /// split into its exposure sections, as `(start, end, exposure)` in world
+    /// coords (endpoints interpolated along the wall by distance). An un-marked
+    /// wall yields nothing — it stays "unset". The shell projects these into BER
+    /// `WallRegion`s.
+    pub fn wall_exposure_segments(&self) -> Vec<(Point2f64, Point2f64, WallExposure)> {
+        self.outline
+            .floor_plan
+            .perimeter_walls()
+            .into_iter()
+            .flat_map(|(vid, a, b)| {
+                let sections = match self.wall_sections.get(&vid) {
+                    Some(s) if !s.is_empty() => s,
+                    _ => return Vec::new(), // un-marked wall → no segment
+                };
+                let len = ((b.x - a.x).powi(2) + (b.y - a.y).powi(2)).sqrt();
+                let lerp = move |d: f32| {
+                    let t = if len > 1e-6 { d / len } else { 0.0 };
+                    Point2f64::new(
+                        (a.x + t * (b.x - a.x)) as f64,
+                        (a.y + t * (b.y - a.y)) as f64,
+                    )
+                };
+                wall_coverage(len, sections)
+                    .into_iter()
+                    .map(move |(s, e, exposure)| (lerp(s), lerp(e), exposure))
+                    .collect::<Vec<_>>()
+            })
+            .collect()
     }
 
     /// Mark every outline wall that has no sections set as fully `Exposed`.
