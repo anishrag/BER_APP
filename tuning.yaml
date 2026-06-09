@@ -9,48 +9,13 @@
 # another tolerance.
 
 new_storey:
-  # Snap radius for pulling a traced point onto the previous outline.
+  # Snap radius for pulling a traced point onto the previous outline. (The new
+  # storey is otherwise traced through the living-area carve — see `subarea`.)
   snap_tol_ratio: 0.08
-
-  # RDP simplification tolerance when orthogonalizing a genuinely-different storey.
-  rdp_tol_ratio: 0.01
-  rdp_tol_floor: 0.05
-
-  # A run of >=2 trace points farther than this many metres off the previous
-  # outline is a real new wall (a garage/nib), not hand slop.
-  new_wall_off_tol_m: 1.0
-
-  # Coverage radius for the reproduce check AND the splice's follow tolerance.
-  # Tighter -> the new storey clings to the storey below less eagerly.
-  cover_tol_ratio: 0.05
-  cover_tol_min: 0.05
-  cover_tol_max: 0.3
-
-  # A faithful reproduce must leave no unvisited boundary span longer than this.
-  uncovered_limit_ratio: 0.06
 
   # View zoom when an upper storey is added (1.0 = pure auto-fit; <1 zooms out
   # to leave room to draw past the previous footprint).
   add_storey_zoom: 0.7
-
-  splice:
-    # A STRAIGHT wall is "followed" only within follow_tol * this. Lower =
-    # cling to straight walls only when nearly touching (keep the drawn line
-    # otherwise). Curves always use the full follow_tol.
-    straight_cling_factor: 0.4
-
-    # A "following" graze shorter than follow_tol * this, flanked by diverging
-    # runs, is treated as part of the new wall (keeps a crossing wall in one
-    # piece instead of splitting it).
-    graze_smoothing_factor: 3.5
-
-    # New-wall squaring: an edge is "near-axis" when its off-axis delta is below
-    # (diag * axis_tol_ratio).max(axis_tol_floor)...
-    axis_tol_ratio: 0.06
-    axis_tol_floor: 0.05
-    # ...and is squared only when its long side exceeds aspect x its short side
-    # (clearly an axis wall, never a diagonal curve facet).
-    aspect: 6.0
 
 collinearity:
   # A near-collinear edge pair is offered for review when the perpendicular gap

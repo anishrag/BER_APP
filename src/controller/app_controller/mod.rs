@@ -2088,12 +2088,12 @@ impl AppController {
     /// New storey via the **living-area carve**: trace the storey below as a
     /// reference, follow it where the trace hugs it and build fresh walls where it
     /// diverges — `allow_outside` so overhangs/extensions past the old footprint
-    /// are kept rather than clamped in. The carve subsumes the legacy
-    /// reproduce/splice/extension three-way; an unexpected CUT falls back to it.
+    /// are kept rather than clamped in. The carve's boundary-follow subsumes the
+    /// old reproduce/splice/extension cases in one pass.
     fn apply_outline_world_inner(
         &mut self,
         world_points: &[(f32, f32)],
-        closed: bool,
+        _closed: bool,
     ) -> Result<(), String> {
         let pts: Vec<Point2f32> = world_points
             .iter()
@@ -2109,9 +2109,11 @@ impl AppController {
             .map_err(|e| format!("Failed to trace new storey: {:?}", e))?;
         let new_plan = match outcome {
             manip_2d_plan::SubareaOutcome::Area(plan) => plan,
-            manip_2d_plan::SubareaOutcome::Cut(..) => {
-                println!("[new-storey] carve resolved to a CUT, not an area — using legacy path");
-                return self.apply_outline_world_inner_legacy(world_points, closed);
+            // An outline trace is a closed loop → an Area; a Cut only arises from an
+            // open/partial trace, where the first region is the drawn side.
+            manip_2d_plan::SubareaOutcome::Cut(a, _b) => {
+                println!("[new-storey] carve resolved to a CUT (open trace?) — using first region");
+                a
             }
         };
         let undo_snap = self.current_history_snapshot();
@@ -2132,166 +2134,6 @@ impl AppController {
                 .len()
                 .saturating_sub(self.document.dimensioning.known_params.len()),
         );
-        self.push_history_snapshot(undo_snap);
-        self.commit_review_redimension()
-    }
-
-    /// LEGACY new-storey geometry (bespoke `new_storey.rs` splice). Kept as the
-    /// fallback for the carve's CUT case and as a safety net while the carve reuse
-    /// is validated — to be removed once confirmed.
-    fn apply_outline_world_inner_legacy(
-        &mut self,
-        world_points: &[(f32, f32)],
-        closed: bool,
-    ) -> Result<(), String> {
-        let pts: Vec<Point2f32> = world_points
-            .iter()
-            .map(|(x, y)| Point2f32::new(*x, *y))
-            .collect();
-        // Snap to the previous outline (meaningful now that both are metres),
-        // then build a reference plan from that same ring for pinning.
-        let snapped = self
-            .snap_to_previous_storey_outline(&pts)
-            .unwrap_or_else(|| pts.clone());
-        let prev_ring = self
-            .previous_storey_ring()
-            .ok_or_else(|| "no previous storey to draw on".to_string())?;
-        // Metre-scale RDP tolerance: the pixel-tuned 10.0 used for fresh sketches
-        // would collapse a real outline. ~1% of the previous diagonal smooths
-        // freehand jitter without eating real corners.
-        let prev_diag = manip_2d_plan::ring_diagonal(&prev_ring);
-        let ns = self.tuning.new_storey.clone();
-        let tol = (prev_diag * ns.rdp_tol_ratio).max(ns.rdp_tol_floor);
-        println!(
-            "[new-storey] closed={}, prev_ring {} verts (diag {:.2} m), RDP tol {:.3} m",
-            closed,
-            prev_ring.len(),
-            prev_diag,
-            tol
-        );
-
-        let undo_snap = self.current_history_snapshot();
-        let prev_plan = FloorPlan::from_clean_ring(&prev_ring)
-            .map_err(|e| format!("Failed to build reference outline: {:?}", e))?;
-
-        // Does the trace merely REPRODUCE the previous outline (following the
-        // boundary, with at most hand slop), or is there a SUSTAINED new excursion
-        // (an extension)? If there's no run of consecutive points sitting clearly
-        // off the boundary, copy the previous outline VERBATIM — carrying its
-        // exact linear representation up, curves and all, instead of
-        // orthogonalizing and squaring them off. A real extension (a sustained run
-        // of points well off the boundary) takes the orthogonalize path, which
-        // adds the new walls (squaring off only the freshly-drawn part).
-        //
-        // `NEW_WALL_TOL_M` is ABSOLUTE metres (this path is always metre-scale)
-        // and deliberately MUCH looser than the snap tolerance: tracing a curve
-        // freehand strays past the snap radius but stays within ~1 m of the
-        // boundary — that's still "following", not a new wall. Two-plus
-        // consecutive points beyond it are a genuine feature (a garage, a nib).
-        let new_wall_tol_m = ns.new_wall_off_tol_m;
-        // Measure reproduce-ness on the RAW trace, NOT the snapped one: the snap
-        // has already pulled a shallow setback wall ONTO the boundary, which would
-        // erase the very divergence we're testing for. A faithful trace strays
-        // only by hand slop, so raw still reads as a reproduce; a deliberate
-        // setback shows up.
-        let off_run = prev_plan.longest_offring_run(&pts, new_wall_tol_m);
-        // A reproduce must ALSO cover the whole previous perimeter — a trace that
-        // SKIPS a chunk (stops early on a side, cuts a bulge off, overhangs a
-        // cut-out) isn't a reproduce. `cover_tol` is tighter than the snap radius
-        // (and capped in absolute metres) so a small setback registers as
-        // unvisited rather than being absorbed as slop; faithful curve tracing
-        // stays well within it.
-        let cover_tol = (prev_diag * ns.cover_tol_ratio).clamp(ns.cover_tol_min, ns.cover_tol_max);
-        let uncovered = prev_plan.uncovered_perimeter_run(&pts, cover_tol);
-        let uncovered_limit = prev_diag * ns.uncovered_limit_ratio;
-        let reproduces_outline = off_run < 2 && uncovered < uncovered_limit;
-        println!(
-            "[new-storey] reproduce check: longest off-ring run = {} pts (> {:.2} m off), \
-             largest unvisited boundary span = {:.2} m (limit {:.2} m) → {}",
-            off_run,
-            new_wall_tol_m,
-            uncovered,
-            uncovered_limit,
-            if reproduces_outline {
-                "REPRODUCE (copy verbatim, curves kept)"
-            } else {
-                "ORTHOGONALIZE (different storey — new walls / skipped boundary)"
-            }
-        );
-        self.document.dimensioning = DimensionState::default();
-        self.document.dimensioning.scale_set = true;
-        if reproduces_outline {
-            // Verbatim copy: the whole outline is shared → every param is known,
-            // nothing to dimension. The curve survives unchanged.
-            self.document.floor_plan = prev_plan;
-            self.document.dimensioning.known_params = self.document.floor_plan.all_active_params();
-            println!(
-                "[new-storey] trace reproduces the previous outline → copied verbatim ({} verts, curve preserved)",
-                self.document.floor_plan.get_points().len()
-            );
-            self.push_history_snapshot(undo_snap);
-            return self.commit_review_redimension();
-        }
-
-        // Partial-reproduce path: the storey is MOSTLY the one below but differs
-        // over a short run (a setback, an overhang). Splice — follow the previous
-        // outline VERBATIM (curves and all) where the trace hugs it, and square
-        // off only the diverging walls. Pass the RAW (un-snapped) trace so a
-        // diverging wall keeps its drawn position. Falls through to the
-        // whole-trace orthogonalize below if the trace doesn't decompose cleanly.
-        if let Some(spliced) = prev_plan.outline_following_trace(&pts, cover_tol, tol, &ns.splice) {
-            match FloorPlan::from_clean_ring(&spliced) {
-                Ok(fp) => {
-                    self.document.floor_plan = fp;
-                    self.warn_if_non_orthogonal("draw outline (world, spliced)");
-                    self.document.dimensioning.known_params =
-                        prev_plan.params_pinned_to_outline(&self.document.floor_plan);
-                    let active = self.document.floor_plan.all_active_params();
-                    println!(
-                        "[new-storey] spliced outline: followed the previous boundary and squared \
-                         off only the new walls → {} verts, pinned {} of {} active params \
-                         ({} new wall param(s) left to dimension)",
-                        self.document.floor_plan.get_points().len(),
-                        self.document.dimensioning.known_params.len(),
-                        active.len(),
-                        active
-                            .len()
-                            .saturating_sub(self.document.dimensioning.known_params.len()),
-                    );
-                    self.push_history_snapshot(undo_snap);
-                    return self.commit_review_redimension();
-                }
-                Err(e) => println!(
-                    "[new-storey] splice built {} verts but they're not a simple ring ({:?}) \
-                     → falling back to orthogonalize",
-                    spliced.len(),
-                    e
-                ),
-            }
-        }
-
-        // Extension path: orthogonalize to the WORLD axes (not the stroke's
-        // dominant angle) so a slightly-rotated freehand trace can't tilt the
-        // storey off the frame below; pin the walls shared with the previous
-        // storey so dimensioning prompts only the genuinely-new ones.
-        self.document.floor_plan =
-            FloorPlan::from_points_to_world_orthogonal(&snapped, tol, closed)
-                .map_err(|e| format!("Failed to draw outline: {:?}", e))?;
-        self.warn_if_non_orthogonal("draw outline (world)");
-        self.document.dimensioning.known_params =
-            prev_plan.params_pinned_to_outline(&self.document.floor_plan);
-        let active = self.document.floor_plan.all_active_params();
-        println!(
-            "[new-storey] built outline: {} verts, scale_set=true, pinned {} of {} active params \
-             ({} new wall param(s) left to dimension)",
-            self.document.floor_plan.get_points().len(),
-            self.document.dimensioning.known_params.len(),
-            active.len(),
-            active
-                .len()
-                .saturating_sub(self.document.dimensioning.known_params.len()),
-        );
-
         self.push_history_snapshot(undo_snap);
         self.commit_review_redimension()
     }

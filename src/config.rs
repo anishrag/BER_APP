@@ -1,6 +1,6 @@
 //! Runtime tuning knobs, loaded from `tuning.yaml`.
 //!
-//! These are the thresholds for the new-storey (method 2) splice and the
+//! These are the thresholds for the new-storey trace, the sub-area carve, and the
 //! collinearity review — the numbers we tune while iterating on the feel of the
 //! tool. They live in a YAML file so they can be adjusted without recompiling.
 //!
@@ -21,41 +21,16 @@ pub struct NewStoreyTuning {
     /// Snap radius for pulling a traced point onto the previous outline
     /// (`ring_diag * this`).
     pub snap_tol_ratio: f32,
-    /// RDP simplification tolerance when orthogonalizing a different storey
-    /// (`(prev_diag * ratio).max(floor)`).
-    pub rdp_tol_ratio: f32,
-    pub rdp_tol_floor: f32,
-    /// A run of ≥2 trace points farther than this many METRES off the previous
-    /// outline is a sustained excursion (a real new wall), not hand slop.
-    pub new_wall_off_tol_m: f32,
-    /// Coverage radius for the reproduce check / splice follow tolerance
-    /// (`(prev_diag * ratio).clamp(min, max)`).
-    pub cover_tol_ratio: f32,
-    pub cover_tol_min: f32,
-    pub cover_tol_max: f32,
-    /// A reproduce must leave no unvisited boundary span longer than
-    /// `prev_diag * this`.
-    pub uncovered_limit_ratio: f32,
     /// View zoom when a new upper storey is added (leaves room to draw past the
     /// previous footprint). `1.0` = pure auto-fit.
     pub add_storey_zoom: f32,
-    /// Dimensionless knobs for the splice itself (in `manip_2d_plan`).
-    pub splice: manip_2d_plan::SpliceTuning,
 }
 
 impl Default for NewStoreyTuning {
     fn default() -> Self {
         Self {
             snap_tol_ratio: 0.08,
-            rdp_tol_ratio: 0.01,
-            rdp_tol_floor: 0.05,
-            new_wall_off_tol_m: 1.0,
-            cover_tol_ratio: 0.05,
-            cover_tol_min: 0.05,
-            cover_tol_max: 0.3,
-            uncovered_limit_ratio: 0.06,
             add_storey_zoom: 0.7,
-            splice: manip_2d_plan::SpliceTuning::default(),
         }
     }
 }
@@ -128,25 +103,7 @@ mod tests {
         let ns = &t.new_storey;
         let dn = &d.new_storey;
         assert_eq!(ns.snap_tol_ratio, dn.snap_tol_ratio);
-        assert_eq!(ns.rdp_tol_ratio, dn.rdp_tol_ratio);
-        assert_eq!(ns.rdp_tol_floor, dn.rdp_tol_floor);
-        assert_eq!(ns.new_wall_off_tol_m, dn.new_wall_off_tol_m);
-        assert_eq!(ns.cover_tol_ratio, dn.cover_tol_ratio);
-        assert_eq!(ns.cover_tol_min, dn.cover_tol_min);
-        assert_eq!(ns.cover_tol_max, dn.cover_tol_max);
-        assert_eq!(ns.uncovered_limit_ratio, dn.uncovered_limit_ratio);
         assert_eq!(ns.add_storey_zoom, dn.add_storey_zoom);
-        assert_eq!(
-            ns.splice.straight_cling_factor,
-            dn.splice.straight_cling_factor
-        );
-        assert_eq!(
-            ns.splice.graze_smoothing_factor,
-            dn.splice.graze_smoothing_factor
-        );
-        assert_eq!(ns.splice.axis_tol_ratio, dn.splice.axis_tol_ratio);
-        assert_eq!(ns.splice.axis_tol_floor, dn.splice.axis_tol_floor);
-        assert_eq!(ns.splice.aspect, dn.splice.aspect);
         assert_eq!(
             t.collinearity.min_separation_ratio,
             d.collinearity.min_separation_ratio

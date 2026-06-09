@@ -16,7 +16,6 @@ mod carve;
 mod debug_stages;
 mod error;
 mod geom;
-mod new_storey;
 mod orthogonal;
 mod parametric;
 mod path_edits;
@@ -40,43 +39,6 @@ pub use snap::{
 };
 
 use domain::points::Point2f32;
-
-/// Dimensionless tuning knobs for [`FloorPlan::outline_following_trace`] (the
-/// new-storey splice). Defaults reproduce the values used before these were
-/// extracted; the app overrides them from `tuning.yaml`.
-#[derive(Debug, Clone)]
-#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
-#[cfg_attr(feature = "serde", serde(default))]
-pub struct SpliceTuning {
-    /// A STRAIGHT boundary wall is "followed" only within `follow_tol * this`, so
-    /// a roughly-straight wall drawn a little off it keeps its own straight line
-    /// instead of clinging onto the boundary. CURVE facets always use the full
-    /// `follow_tol` (so freehand-traced curves stay preserved).
-    pub straight_cling_factor: f32,
-    /// A "following" graze shorter than `follow_tol * this`, flanked by diverging
-    /// runs, is flipped to diverging — keeps a new wall that brushes an interior
-    /// edge in one piece instead of splitting it.
-    pub graze_smoothing_factor: f32,
-    /// New-wall squaring: an edge is "near-axis" when its off-axis delta is below
-    /// `(diag * axis_tol_ratio).max(axis_tol_floor)`.
-    pub axis_tol_ratio: f32,
-    pub axis_tol_floor: f32,
-    /// New-wall squaring: snap only when the long side exceeds `aspect ×` the
-    /// short side (clearly an axis wall, not a diagonal curve facet).
-    pub aspect: f32,
-}
-
-impl Default for SpliceTuning {
-    fn default() -> Self {
-        Self {
-            straight_cling_factor: 0.4,
-            graze_smoothing_factor: 3.5,
-            axis_tol_ratio: 0.06,
-            axis_tol_floor: 0.05,
-            aspect: 6.0,
-        }
-    }
-}
 
 /// Tuning for sub-area carves ([`FloorPlan::carve_or_cut`] — living areas and
 /// construction-phase areas): the closed-loop gap and the boundary-follow
@@ -469,36 +431,6 @@ impl FloorPlan {
 
     // `contains_point` / `clamp_inside` / `clip_stroke_inside` / `subtract` /
     // `any_point_outside` are region operations — see the `region` module.
-
-    /// Longest run of consecutive `points` off this plan's outline ring — see
-    /// [`new_storey::longest_offring_run`].
-    pub fn longest_offring_run(&self, points: &[Point2f32], off_tol: f32) -> usize {
-        new_storey::longest_offring_run(&self.parametric.ring_points(0), points, off_tol)
-    }
-
-    /// Longest outline span the trace `points` did not follow — see
-    /// [`new_storey::uncovered_perimeter_run`].
-    pub fn uncovered_perimeter_run(&self, points: &[Point2f32], cover_tol: f32) -> f32 {
-        new_storey::uncovered_perimeter_run(&self.parametric.ring_points(0), points, cover_tol)
-    }
-
-    /// Build a new-storey outline that follows this plan where the trace hugs it
-    /// — see [`new_storey::outline_following_trace`].
-    pub fn outline_following_trace(
-        &self,
-        trace: &[Point2f32],
-        follow_tol: f32,
-        ortho_tol: f32,
-        tuning: &SpliceTuning,
-    ) -> Option<Vec<Point2f32>> {
-        new_storey::outline_following_trace(
-            &self.parametric.ring_points(0),
-            trace,
-            follow_tol,
-            ortho_tol,
-            tuning,
-        )
-    }
 }
 
 /// Signed area of a closed polygon (shoelace). Sign reflects winding;

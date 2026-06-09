@@ -184,12 +184,6 @@ pub enum SubareaOutcome {
     Area(FloorPlan),
 }
 
-/// Resolve a freehand sub-area stroke against `outline`: clip it onto the storey
-/// ([`region::clip_stroke_inside`]), then either split it (a straight cut → two regions,
-/// [`split_cut`]) or carve it (anything else → one area, [`sub_area`]). The carve
-/// tolerance is derived from the clipped stroke + `tuning`, so the caller passes
-/// neither a pre-clipped stroke nor a tolerance — the whole clip→tol→cut/carve
-/// pipeline lives here, not in the caller.
 thread_local! {
     /// When set, the carve treats the outline as a REFERENCE to align to (the
     /// storey below in a new-storey trace) rather than a containing fence — so a
@@ -204,6 +198,13 @@ thread_local! {
 fn align_to_reference() -> bool {
     ALIGN_TO_REFERENCE.with(|f| f.get())
 }
+
+/// Resolve a freehand sub-area stroke against `outline`: clip it onto the storey
+/// ([`region::clip_stroke_inside`]), then either split it (a straight cut → two regions,
+/// [`split_cut`]) or carve it (anything else → one area, [`sub_area`]). The carve
+/// tolerance is derived from the clipped stroke + `tuning`, so the caller passes
+/// neither a pre-clipped stroke nor a tolerance — the whole clip→tol→cut/carve
+/// pipeline lives here, not in the caller.
 
 fn carve_or_cut(
     outline: &[Point2f32],
