@@ -21,6 +21,8 @@ pub struct StepRegion {
 /// regions (each region with non-zero `level_m` → one step region). Step
 /// regions are session-only; without this, the next commit would re-level
 /// with no areas and flatten the floor. Empty when nothing is stepped.
+/// Degenerate (sub-mm²) regions are skipped — boolean-op debris from a record
+/// written before `with_levels` filtered slivers, not real floors.
 pub fn step_regions_from_floors(ber: &Ber, idx: usize) -> Vec<StepRegion> {
     let Some(storey) = ber.storeys.get(idx) else {
         return Vec::new();
@@ -39,7 +41,7 @@ pub fn step_regions_from_floors(ber: &Ber, idx: usize) -> Vec<StepRegion> {
             .iter()
             .map(|p| Point2f32::new(p.x as f32, p.y as f32))
             .collect();
-        if ring.len() >= 3 {
+        if ring.len() >= 3 && ring_area2(&ring) >= 2e-6 {
             regions.push(StepRegion {
                 polygon: ring,
                 level_m: fr.level_m,
@@ -47,6 +49,19 @@ pub fn step_regions_from_floors(ber: &Ber, idx: usize) -> Vec<StepRegion> {
         }
     }
     regions
+}
+
+/// Twice the unsigned shoelace area of `ring` (so the sliver threshold above
+/// is 1e-6 m²). Local on purpose — `document` has no geo dependency.
+fn ring_area2(ring: &[Point2f32]) -> f64 {
+    let n = ring.len();
+    let mut s = 0.0_f64;
+    for i in 0..n {
+        let a = ring[i];
+        let b = ring[(i + 1) % n];
+        s += a.x as f64 * b.y as f64 - b.x as f64 * a.y as f64;
+    }
+    s.abs()
 }
 
 #[cfg(test)]

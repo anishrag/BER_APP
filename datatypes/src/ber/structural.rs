@@ -524,8 +524,16 @@ impl FloorRegions {
     /// remainders keep their existing level. Earlier areas claim first where
     /// areas overlap (same rule as `partition`). Empty `areas` → `self`
     /// unchanged (NO geo ops, so stored points round-trip exactly).
+    ///
+    /// Sub-mm² slivers are dropped: a step ring reconstructed on reload has
+    /// round-tripped through `f32`, so it no longer coincides exactly with a
+    /// phase boundary it once abutted — the boolean ops would otherwise shave a
+    /// degenerate piece and persist it as a junk region.
     pub fn with_levels(self, areas: &[(Vec<Point2f64>, f64)]) -> Self {
         use geo::bool_ops::BooleanOps;
+        use geo::Area;
+        /// Pieces smaller than this (m²) are boolean-op debris, not floors.
+        const SLIVER_AREA_M2: f64 = 1e-6;
         if areas.is_empty() {
             return self;
         }
@@ -552,12 +560,18 @@ impl FloorRegions {
                 let inside = region.polygon.intersection(&to_poly(ring));
                 let piece = inside.difference(&claimed);
                 for poly in &piece.0 {
+                    if poly.unsigned_area() < SLIVER_AREA_M2 {
+                        continue;
+                    }
                     regions.push(mk(poly, *level));
                 }
                 claimed = claimed.union(&piece);
             }
             let remainder = region.polygon.difference(&claimed);
             for poly in &remainder.0 {
+                if poly.unsigned_area() < SLIVER_AREA_M2 {
+                    continue;
+                }
                 regions.push(mk(poly, region.level_m));
             }
         }

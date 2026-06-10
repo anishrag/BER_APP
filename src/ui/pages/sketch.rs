@@ -1276,7 +1276,10 @@ impl SketchPage {
                             {
                                 on_event(UiEvent::Sketch(SketchEvent::SetPhaseMode(ph)));
                             }
-                            if phase_mode {
+                            // Also shown when a pick is PENDING with the mode off
+                            // (a restored mid-flight area after reopen): the pick
+                            // blocks drawing, so its prompt must stay reachable.
+                            if phase_mode || phase_pick_pending {
                                 Self::phase_toolbar(
                                     ui,
                                     phase_choices,
@@ -1299,7 +1302,8 @@ impl SketchPage {
                         {
                             on_event(UiEvent::Sketch(SketchEvent::SetStepMode(st)));
                         }
-                        if step_mode {
+                        // Same pending-with-mode-off rule as the phase toolbar.
+                        if step_mode || step_pick_pending {
                             Self::step_toolbar(
                                 ui,
                                 step_region_polygons,
@@ -1698,8 +1702,10 @@ impl SketchPage {
                     .desired_width(60.0)
                     .hint_text("e.g. 0.15"),
             );
-            // Unparseable input is ignored — the buttons just do nothing.
-            let amount = parse_dimension_expression(amount_input);
+            // Unparseable input is ignored — the buttons just do nothing. The
+            // BUTTON owns the sign: an expression that evaluates negative
+            // (e.g. "1-2") must not flip Lower into a raise, so take |v|.
+            let amount = parse_dimension_expression(amount_input).map(f32::abs);
             if ui
                 .button("Raise")
                 .on_hover_text("Raise this area's floor by the amount")

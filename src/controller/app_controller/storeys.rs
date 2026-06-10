@@ -38,6 +38,10 @@ impl AppController {
         self.review = None;
         self.pending_cut = None;
         self.pending_redraw = None;
+        // Pending phase/step cuts hold the OUTGOING storey's geometry — a pick
+        // after the switch would graft it onto the new storey.
+        self.pending_phase_cut = None;
+        self.pending_step_cut = None;
         self.edit_drag_prompt = None;
         self.vertex_drop_prompt = None;
         self.living_area_mode = false;
