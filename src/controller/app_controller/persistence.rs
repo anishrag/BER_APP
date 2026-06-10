@@ -114,6 +114,10 @@ impl AppController {
         self.reconstruct_step_regions_for(idx);
         self.ceiling_step_regions.clear();
         self.reconstruct_ceiling_step_regions_for(idx);
+        // An in-flight ceiling-step line belongs to the PREVIOUS record — its
+        // prompt holds VertexIds into that record's outline plan.
+        self.pending_ceiling_step = None;
+        self.ceiling_step_mode = false;
         self.view = ViewTransform::default();
         self.document.edit_state = EditState::default();
         self.review = None;
@@ -202,6 +206,9 @@ impl AppController {
         self.reconstruct_step_regions_for(0);
         self.ceiling_step_regions.clear();
         self.reconstruct_ceiling_step_regions_for(0);
+        // Same as open_ber: drop any line state from the previous session.
+        self.pending_ceiling_step = None;
+        self.ceiling_step_mode = false;
         self.view = ViewTransform::default();
         self.document.edit_state = EditState::default();
         self.review = None;

@@ -89,6 +89,12 @@ impl AppController {
             self.exposure_mode = false;
             self.phase_mode = false;
             self.step_mode = false;
+            // A surviving cut-pick would fire on the SAME tap as the ceiling
+            // line flow (its choose_* methods have no mode guard), grafting an
+            // in-flight phase/step shape under the line — clear them all.
+            self.pending_cut = None;
+            self.pending_phase_cut = None;
+            self.pending_step_cut = None;
             self.activate_shape(ActiveShape::Outline);
             self.set_edit_mode(EditTools::DrawPerpWalls);
         }

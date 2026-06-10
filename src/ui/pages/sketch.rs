@@ -1063,11 +1063,20 @@ impl SketchPage {
                 }
 
                 // Ceiling-step taps: in mode with nothing pending, a tap places
-                // the line's point (H/V picked next); while the side pick is
-                // pending — including with the mode toggled off — the tap picks
-                // the stepping side. Other stages ignore taps (the controller's
-                // stage dispatch owns that), so this can stay coarse.
-                if ceiling_step_mode || ceiling_step_side_pending {
+                // the line's point (H/V picked next) — but only under the draw
+                // tool, so Edit/Trim clicks in-mode don't spawn phantom points.
+                // While the side pick is pending — including with the mode
+                // toggled off — the tap picks the stepping side. A pending
+                // cut-pick owns the tap instead (those handlers above have no
+                // mode guard, so one tap would otherwise fire both). Other
+                // stages ignore taps (the controller's stage dispatch owns
+                // that), so this can stay coarse.
+                if (ceiling_step_side_pending
+                    || (ceiling_step_mode && matches!(edit_tool, EditTools::DrawPerpWalls)))
+                    && !cut_pending
+                    && !phase_cut_pending
+                    && !step_cut_pending
+                {
                     if response.clicked_by(egui::PointerButton::Primary) {
                         if let Some((wx, wy)) = response.interact_pointer_pos().and_then(|pos| {
                             screen_to_world(ber, current_storey_idx, rect, view, pos)

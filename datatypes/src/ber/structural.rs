@@ -683,7 +683,10 @@ impl CeilingRegions {
     /// far (2D boolean ops on the plan projection); intersected pieces get
     /// every vertex's z shifted by the delta, remainders keep theirs — so
     /// overlapping areas COMPOSE (deltas sum). Empty `areas` → `self`
-    /// unchanged (no geo ops). Sub-mm² slivers dropped (same rationale as
+    /// unchanged (no geo ops). Boolean results carrying interior rings (a
+    /// step strictly inside a region) are decomposed into simple pieces
+    /// first — `Polygon3D` is exterior-only and would fill the hole (see
+    /// `split_to_simple`). Sub-mm² slivers dropped (same rationale as
     /// `FloorRegions::with_levels`). Pieces inherit `construction_id`, get
     /// fresh ids and default `opes` (openings are dropped on split — region
     /// identity doesn't survive a re-split). Assumes FLAT input regions (all
@@ -733,18 +736,18 @@ impl CeilingRegions {
                     }
                 };
                 let piece = region_poly.intersection(&area_poly);
-                for poly in &piece.0 {
+                for poly in piece.0.iter().flat_map(split_to_simple) {
                     if poly.unsigned_area() < SLIVER_AREA_M2 {
                         continue;
                     }
-                    next.push(mk(poly, base_z + delta));
+                    next.push(mk(&poly, base_z + delta));
                 }
                 let remainder = region_poly.difference(&area_poly);
-                for poly in &remainder.0 {
+                for poly in remainder.0.iter().flat_map(split_to_simple) {
                     if poly.unsigned_area() < SLIVER_AREA_M2 {
                         continue;
                     }
-                    next.push(mk(poly, base_z));
+                    next.push(mk(&poly, base_z));
                 }
             }
             regions = next;
@@ -752,6 +755,62 @@ impl CeilingRegions {
         Self { regions }
     }
 }
+
+/// Decompose a boolean-op result polygon into SIMPLE (exterior-only) pieces.
+///
+/// `Polygon3D` stores only an exterior ring, so emitting a `geo` polygon that
+/// carries interior rings would silently FILL its holes — and `difference`
+/// produces exactly that when a step area lies strictly INSIDE a region (the
+/// remainder is the region with a hole). The filled phantom would overlap the
+/// stepped piece and inflate the total ceiling area on the next re-derive,
+/// breaking the canonicalize → re-derive fixpoint.
+///
+/// All ceiling-step geometry is axis-aligned, so a polygon with holes is cut
+/// with an axis-aligned line through the first hole's centre (intersection
+/// with the two half-plane rectangles over the polygon's bbox) and the pieces
+/// are decomposed recursively. The cut crosses that hole, so neither half can
+/// still contain it whole — every split strictly reduces the remaining hole
+/// extent and the recursion terminates with simple pieces.
+fn split_to_simple(poly: &Polygon<f64>) -> Vec<Polygon<f64>> {
+    use geo::bool_ops::BooleanOps;
+    use geo::BoundingRect;
+    if poly.interiors().is_empty() {
+        return vec![poly.clone()];
+    }
+    let (Some(bbox), Some(hole)) = (poly.bounding_rect(), poly.interiors()[0].bounding_rect())
+    else {
+        // Degenerate ring with no extent — nothing meaningful to split.
+        return vec![poly.clone()];
+    };
+    // Cut perpendicular to the hole's WIDER dimension so the line genuinely
+    // crosses it (a vertical cut through a hair-thin vertical hole may not).
+    let c = hole.center();
+    let (min, max) = (bbox.min(), bbox.max());
+    let pad = 1.0; // clip rects overhang the bbox so its edges never graze
+    let rect = |x0: f64, y0: f64, x1: f64, y1: f64| {
+        Polygon::new(
+            LineString::from(vec![(x0, y0), (x1, y0), (x1, y1), (x0, y1)]),
+            vec![],
+        )
+    };
+    let halves = if hole.width() >= hole.height() {
+        [
+            rect(min.x - pad, min.y - pad, c.x, max.y + pad),
+            rect(c.x, min.y - pad, max.x + pad, max.y + pad),
+        ]
+    } else {
+        [
+            rect(min.x - pad, min.y - pad, max.x + pad, c.y),
+            rect(min.x - pad, c.y, max.x + pad, max.y + pad),
+        ]
+    };
+    halves
+        .iter()
+        .flat_map(|half| poly.intersection(half).0)
+        .flat_map(|piece| split_to_simple(&piece))
+        .collect()
+}
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Polygon3D {
     pub exterior: Vec<Point3f64>,
@@ -1306,6 +1365,100 @@ mod tests {
         assert_eq!(ceilings.regions.len(), 1, "sliver piece dropped");
         let z = ceilings.regions[0].flat_z().expect("remainder is flat");
         assert!((z - h).abs() < 1e-9, "remainder keeps its height");
+    }
+
+    /// HIGH-severity regression: a step area strictly INTERIOR to a region
+    /// makes `difference` return the region with a HOLE; `Polygon3D` is
+    /// exterior-only, so without decomposition the hole is silently filled —
+    /// a phantom full-area region overlapping the stepped piece. Four
+    /// composing half-plane steps create a strictly-interior [2,8]² centre
+    /// cell at +0.4; canonicalize (rebuild areas from the derived regions,
+    /// as `ceiling_step_regions_from_roofs` does) then re-derive must be a
+    /// FIXPOINT — pre-fix it inflated 100 m² of ceiling to 136 m².
+    #[test]
+    fn with_z_deltas_interior_step_keeps_holes_and_rederive_is_a_fixpoint() {
+        use geo::Area;
+        use std::collections::BTreeMap;
+        let h = 2.4;
+        let cid = ItemId::default();
+        let footprint =
+            || CeilingRegions::default_for_footprint(vec![square(0.0, 0.0, 10.0, 10.0)], h, cid);
+        // z → total area, keyed at 1e-6 m height resolution.
+        let area_by_z = |c: &CeilingRegions| -> BTreeMap<i64, f64> {
+            let mut map: BTreeMap<i64, f64> = BTreeMap::new();
+            for r in &c.regions {
+                let z = r.flat_z().expect("every step piece is flat");
+                *map.entry((z * 1e6).round() as i64).or_insert(0.0) +=
+                    Polygon::<f64>::from(r.polygon.clone()).unsigned_area();
+            }
+            map
+        };
+
+        // First pass: four half-plane steps composing to +0.4 in the centre.
+        let first = footprint().with_z_deltas(&[
+            (square(2.0, 0.0, 10.0, 10.0), 0.1), // x > 2
+            (square(0.0, 0.0, 8.0, 10.0), 0.1),  // x < 8
+            (square(0.0, 2.0, 10.0, 10.0), 0.1), // y > 2
+            (square(0.0, 0.0, 10.0, 8.0), 0.1),  // y < 8
+        ]);
+        let first_map = area_by_z(&first);
+        let total: f64 = first_map.values().sum();
+        assert!(
+            (total - 100.0).abs() < 1e-6,
+            "total area 100 m², got {total}"
+        );
+        // The strictly-interior centre cell: [2,8]² at h + 0.4 (36 m²).
+        let key = |z: f64| (z * 1e6).round() as i64;
+        assert!(
+            (first_map[&key(h + 0.4)] - 36.0).abs() < 1e-6,
+            "36 m² centre cell at h + 0.4"
+        );
+        let centre: Vec<_> = first
+            .regions
+            .iter()
+            .filter(|r| r.flat_z().is_some_and(|z| (z - (h + 0.4)).abs() < 1e-9))
+            .collect();
+        assert_eq!(centre.len(), 1, "one centre piece");
+        for v in &centre[0].polygon.exterior {
+            assert!(
+                (2.0..=8.0).contains(&v.x) && (2.0..=8.0).contains(&v.y),
+                "centre piece is [2,8]², got vertex ({}, {})",
+                v.x,
+                v.y
+            );
+        }
+
+        // Simulate canonicalize: rebuild (ring, delta) areas from the derived
+        // regions and re-apply to a FRESH default ceiling. The interior
+        // centre cell now arrives as an area of its own, so its remainder is
+        // the footprint with a hole — the case `split_to_simple` exists for.
+        let rebuilt: Vec<(Vec<Point2f64>, f64)> = first
+            .regions
+            .iter()
+            .map(|r| {
+                let ring = r
+                    .polygon
+                    .exterior
+                    .iter()
+                    .map(|v| Point2f64::new(v.x, v.y))
+                    .collect();
+                (ring, r.flat_z().unwrap() - h)
+            })
+            .collect();
+        let second = footprint().with_z_deltas(&rebuilt);
+        let second_map = area_by_z(&second);
+        assert_eq!(
+            first_map.keys().collect::<Vec<_>>(),
+            second_map.keys().collect::<Vec<_>>(),
+            "re-derive keeps the same set of heights"
+        );
+        for (z, a) in &first_map {
+            assert!(
+                (a - second_map[z]).abs() < 1e-6,
+                "area at z key {z} changed on re-derive: {a} → {}",
+                second_map[z]
+            );
+        }
     }
 
     #[test]
