@@ -41,6 +41,14 @@ pub enum PositionPromptKind {
     /// The area is anchored but this wall's perpendicular coord (e.g. a cut
     /// line) is unset — applying sets the parameter (+ repair).
     Wall { param: ParameterId },
+    /// A ceiling-step LINE's coordinate — built by the dedicated
+    /// `LinePositionPrompt` flow (`ceiling_step.rs`) and resolved by the SHELL
+    /// (`StoreyDoc::resolve_ceiling_line_position`), never by the dimensioning
+    /// loop: there's no shape or parameter behind a line. The variant exists so
+    /// the shared position-panel UI data can tag the prompt kind; it never
+    /// reaches `apply_position`/`skip_current_position` (`unreachable!`) and is
+    /// never serialized (`current_position_prompt` is `serde(skip)`).
+    Line,
 }
 
 /// One candidate measurement. NOTE the two VertexIds index DIFFERENT plans:
@@ -80,7 +88,9 @@ fn axis_walls(plan: &FloorPlan, axis: ParameterAxis) -> Vec<(VertexId, f32)> {
 /// The outline reference walls for a prompt on `axis`: ring-0 outline walls
 /// whose PERPENDICULAR axis is `axis`, deduped by coordinate within tolerance
 /// (collinear outline walls are one reference; the first in ring order wins).
-fn reference_walls(outline: &FloorPlan, axis: ParameterAxis) -> Vec<(VertexId, f32)> {
+/// `pub(crate)`: the ceiling-step line prompt (`ceiling_step.rs`) reuses the
+/// same reference-wall scan.
+pub(crate) fn reference_walls(outline: &FloorPlan, axis: ParameterAxis) -> Vec<(VertexId, f32)> {
     let mut refs: Vec<(VertexId, f32)> = Vec::new();
     for (vid, c) in axis_walls(outline, axis) {
         if !refs.iter().any(|(_, rc)| (rc - c).abs() < COORD_TOL) {
@@ -290,6 +300,7 @@ impl StoreyDoc {
                     ));
                 }
             }
+            PositionPromptKind::Line => unreachable!("Line prompts are shell-resolved"),
         }
 
         // Guardrail (BOTH kinds): the area must stay inside the storey.
@@ -358,6 +369,7 @@ impl StoreyDoc {
                     param
                 );
             }
+            PositionPromptKind::Line => unreachable!("Line prompts are shell-resolved"),
         }
         self.recompute_position_prompt();
     }

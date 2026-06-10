@@ -53,7 +53,8 @@ pub fn step_regions_from_floors(ber: &Ber, idx: usize) -> Vec<StepRegion> {
 
 /// Twice the unsigned shoelace area of `ring` (so the sliver threshold above
 /// is 1e-6 m²). Local on purpose — `document` has no geo dependency.
-fn ring_area2(ring: &[Point2f32]) -> f64 {
+/// `pub(crate)`: the ceiling-step reconstruction applies the same filter.
+pub(crate) fn ring_area2(ring: &[Point2f32]) -> f64 {
     let n = ring.len();
     let mut s = 0.0_f64;
     for i in 0..n {

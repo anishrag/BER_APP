@@ -220,6 +220,9 @@ impl AppController {
             idx,
             regions,
             steps,
+            // Ceiling-step session regions: wired up by the ceiling-step
+            // controller flow (slice 4); empty until then.
+            &[],
         );
         // Floors are already phase-correct from the partition; this stamps the
         // phase onto the just-rebuilt WALLS from the same session areas.
@@ -257,6 +260,8 @@ impl AppController {
                 idx,
                 regions,
                 steps,
+                // Ceiling-step session regions: wired up in slice 4.
+                &[],
             );
             document::stamp_wall_phases(&mut record.data, idx, regions);
         }

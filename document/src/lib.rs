@@ -15,6 +15,7 @@
 //! the shell — undo, persistence, UI prompts — stay on `AppController` and call
 //! in here.
 
+mod ceiling_step;
 mod dimensioning;
 mod edit;
 mod exposure;
@@ -24,6 +25,10 @@ mod position;
 mod resolve;
 mod step;
 
+pub use ceiling_step::{
+    ceiling_step_regions_from_roofs, CeilingStepRegion, LinePositionOption, LinePositionPrompt,
+    LineSide,
+};
 /// Derive full per-wall exposure coverage — the shell's `commit_to_ber` uses it.
 pub use exposure::{range_at, wall_coverage};
 pub use load::reconstruct_living_areas;
