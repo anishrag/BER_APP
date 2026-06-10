@@ -42,6 +42,10 @@ impl AppController {
         // after the switch would graft it onto the new storey.
         self.pending_phase_cut = None;
         self.pending_step_cut = None;
+        // Same for a half-finished ceiling-step line (its coordinate is in the
+        // outgoing storey's space); the mode resets like the other area tools.
+        self.pending_ceiling_step = None;
+        self.ceiling_step_mode = false;
         // The ceiling-height prompt was asking about the OUTGOING scope — the
         // new scope re-gates on its own heights when 3D is next requested.
         self.ceiling_height_prompt = false;
@@ -68,6 +72,10 @@ impl AppController {
                 // Same for its step areas (from the levelled floor regions).
                 if !self.step_regions.contains_key(&i) {
                     self.reconstruct_step_regions_for(i);
+                }
+                // And its ceiling-step areas (from the stepped roof regions).
+                if !self.ceiling_step_regions.contains_key(&i) {
+                    self.reconstruct_ceiling_step_regions_for(i);
                 }
             }
             None => {
@@ -151,6 +159,9 @@ impl AppController {
         // Any in-flight phase/step area belongs to the OUTGOING storey — abandon it.
         self.pending_phase_cut = None;
         self.pending_step_cut = None;
+        // An in-flight ceiling-step line too (its coordinate is that storey's).
+        self.pending_ceiling_step = None;
+        self.ceiling_step_mode = false;
         // Same for a ceiling-height prompt — it was asking about that storey.
         self.ceiling_height_prompt = false;
         self.living_area_mode = false;
@@ -212,6 +223,11 @@ impl AppController {
             .get(&idx)
             .map(Vec::as_slice)
             .unwrap_or(&[]);
+        let ceiling_steps: &[CeilingStepRegion] = self
+            .ceiling_step_regions
+            .get(&idx)
+            .map(Vec::as_slice)
+            .unwrap_or(&[]);
         let record = self.current_record.as_mut().unwrap();
         document::ensure_storey_constructions(&mut record.data, idx, regions);
         record.data.storeys[idx] = document::resolve_storey(
@@ -220,9 +236,7 @@ impl AppController {
             idx,
             regions,
             steps,
-            // Ceiling-step session regions: wired up by the ceiling-step
-            // controller flow (slice 4); empty until then.
-            &[],
+            ceiling_steps,
         );
         // Floors are already phase-correct from the partition; this stamps the
         // phase onto the just-rebuilt WALLS from the same session areas.
@@ -252,6 +266,11 @@ impl AppController {
                 .get(&idx)
                 .map(Vec::as_slice)
                 .unwrap_or(&[]);
+            let ceiling_steps: &[CeilingStepRegion] = self
+                .ceiling_step_regions
+                .get(&idx)
+                .map(Vec::as_slice)
+                .unwrap_or(&[]);
             let record = self.current_record.as_mut().unwrap();
             document::ensure_storey_constructions(&mut record.data, idx, regions);
             record.data.storeys[idx] = document::resolve_storey(
@@ -260,8 +279,7 @@ impl AppController {
                 idx,
                 regions,
                 steps,
-                // Ceiling-step session regions: wired up in slice 4.
-                &[],
+                ceiling_steps,
             );
             document::stamp_wall_phases(&mut record.data, idx, regions);
         }
@@ -329,6 +347,25 @@ impl AppController {
             self.step_regions.remove(&idx);
         } else {
             self.step_regions.insert(idx, regions);
+        }
+    }
+
+    /// Rebuild the session ceiling-step areas for storey `idx` from its
+    /// persisted roofs (each flat region off the default height by ≥ 1 mm → a
+    /// step area with `delta = z − default`). Ceiling-step areas are
+    /// session-only, so on reload they'd otherwise be empty and the NEXT
+    /// commit would re-derive the default flat ceiling — flattening the steps.
+    /// Also called after each assign to CANONICALIZE the session list to the
+    /// exact derived pieces. No-op (entry removed) when nothing is stepped.
+    pub(super) fn reconstruct_ceiling_step_regions_for(&mut self, idx: usize) {
+        let Some(record) = self.current_record.as_ref() else {
+            return;
+        };
+        let regions = document::ceiling_step_regions_from_roofs(&record.data, idx);
+        if regions.is_empty() {
+            self.ceiling_step_regions.remove(&idx);
+        } else {
+            self.ceiling_step_regions.insert(idx, regions);
         }
     }
 

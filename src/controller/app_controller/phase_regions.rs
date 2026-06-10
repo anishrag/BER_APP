@@ -30,6 +30,8 @@ impl AppController {
             self.living_area_mode = false;
             self.exposure_mode = false;
             self.step_mode = false;
+            self.ceiling_step_mode = false;
+            self.pending_ceiling_step = None;
             self.activate_shape(ActiveShape::Outline);
             self.set_edit_mode(EditTools::DrawPerpWalls);
         }

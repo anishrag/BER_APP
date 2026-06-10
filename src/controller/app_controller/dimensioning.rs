@@ -108,6 +108,33 @@ impl AppController {
     /// the reference wall against the storey outline plan
     /// (`document.outline.floor_plan`).
     pub fn position_prompt_for_ui(&self) -> Option<PositionPromptUiData> {
+        // A pending ceiling-step LINE outranks the document's shape-position
+        // loop (it can't coexist with one anyway — ceiling-step mode forces
+        // the outline active). The "area wall" is the line itself (its span
+        // endpoints); the reference wall resolves in the OUTLINE plan. Kind
+        // `Line` is part of the prompt identity, so the UI prefill refills
+        // when a shape prompt follows a line prompt (or vice versa).
+        if let Some(PendingCeilingStep::Position { axis, prompt, .. }) =
+            self.pending_ceiling_step.as_ref()
+        {
+            let option = prompt.options.get(prompt.current_idx)?;
+            let (a, b) = self.pending_ceiling_step_line()?;
+            return Some(PositionPromptUiData {
+                area_wall: WallPositions {
+                    wall_a: a,
+                    wall_b: b,
+                },
+                reference_wall: wall_positions_in(
+                    &self.document.outline.floor_plan,
+                    option.outline_wall_vid,
+                )?,
+                axis: *axis,
+                kind: PositionPromptKind::Line,
+                current_distance: option.current_distance,
+                option_idx: prompt.current_idx,
+                option_count: prompt.options.len(),
+            });
+        }
         let prompt = self
             .document
             .dimensioning
@@ -134,6 +161,22 @@ impl AppController {
     /// only the shell workflow. On rejection the snapshot is discarded —
     /// `apply_dimension`'s pattern.
     pub fn apply_position_dimension(&mut self, value: f32) -> Result<(), String> {
+        // Ceiling-step LINE prompt: shell-resolved. NOTHING in the model moves
+        // — the resolved coordinate just rides into the Amount stage — so no
+        // undo snapshot and no mark_dirty (there's nothing to re-derive yet).
+        if let Some(PendingCeilingStep::Position {
+            axis, side, prompt, ..
+        }) = self.pending_ceiling_step.as_ref()
+        {
+            let coord_m = self.document.resolve_ceiling_line_position(prompt, value)?;
+            let (axis, side) = (*axis, *side);
+            self.pending_ceiling_step = Some(PendingCeilingStep::Amount {
+                axis,
+                coord_m,
+                side,
+            });
+            return Ok(());
+        }
         let undo_snap = self.current_history_snapshot();
         self.document.apply_position(value)?;
         self.mark_dirty()?;
@@ -144,6 +187,23 @@ impl AppController {
     /// Skip the current position prompt — accept the drawn position (see
     /// [`Document::skip_current_position`]); record it for undo first.
     pub fn skip_position_dimension(&mut self) {
+        // Ceiling-step LINE prompt: accept the DRAWN coordinate as-is and
+        // advance to the amount. No history / no mark_dirty — nothing moved.
+        if let Some(PendingCeilingStep::Position {
+            axis,
+            coord_m,
+            side,
+            ..
+        }) = self.pending_ceiling_step.as_ref()
+        {
+            let (axis, coord_m, side) = (*axis, *coord_m, *side);
+            self.pending_ceiling_step = Some(PendingCeilingStep::Amount {
+                axis,
+                coord_m,
+                side,
+            });
+            return;
+        }
         self.record_history();
         self.document.skip_current_position();
         let _ = self.mark_dirty();
@@ -152,6 +212,13 @@ impl AppController {
     /// Advance the position prompt to its next outline reference wall (wraps).
     /// Not a mutation of the model's geometry — no history entry.
     pub fn cycle_position_reference(&mut self) {
+        // Ceiling-step LINE prompt: cycle ITS reference options.
+        if let Some(PendingCeilingStep::Position { prompt, .. }) =
+            self.pending_ceiling_step.as_mut()
+        {
+            prompt.cycle();
+            return;
+        }
         self.document.cycle_position_reference();
     }
 

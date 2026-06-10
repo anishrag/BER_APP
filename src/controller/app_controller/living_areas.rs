@@ -56,6 +56,10 @@ impl AppController {
         self.living_area_mode = on;
         self.pending_cut = None;
         if on {
+            // Mutually exclusive with the ceiling-step line tool (the other
+            // area tools clear each other the same way).
+            self.ceiling_step_mode = false;
+            self.pending_ceiling_step = None;
             // Drop straight into draw mode so a stroke makes a new living area
             // without the user also having to pick the tool.
             self.set_edit_mode(EditTools::DrawPerpWalls);

@@ -3138,3 +3138,255 @@ fn storey_switch_clears_ceiling_height_prompt() {
     assert!(!c.ceiling_height_prompt_pending(), "cleared on switch");
     assert_eq!(c.sketch_mode(), SketchMode::Storey2D, "still 2D");
 }
+
+// ─── Ceiling steps (line + side + amount) ───────────────────────────────────
+
+/// A finalised 10×10 storey with its default ceiling height set (2.4 m) and
+/// ceiling-step mode entered — the starting point of every step flow.
+fn ceiling_ready_controller() -> AppController {
+    let mut c = dimensioned_square_controller();
+    c.set_default_ceiling_height(2.4).expect("height applies");
+    c.set_sketch_mode(SketchMode::Storey2D); // the height gate switched to 3D
+    c.set_ceiling_step_mode(true);
+    assert!(c.ceiling_step_mode(), "mode enters once available");
+    c
+}
+
+/// Sorted flat heights of storey 0's derived roof regions.
+fn roof_flat_zs(c: &AppController) -> Vec<f64> {
+    let storey = &c.current_record.as_ref().unwrap().data.storeys[0];
+    let mut zs: Vec<f64> = storey
+        .roofs
+        .regions
+        .iter()
+        .filter_map(|r| r.flat_z())
+        .collect();
+    zs.sort_by(f64::total_cmp);
+    zs
+}
+
+/// Drive a fresh flow to the AMOUNT stage with the line pinned at exactly
+/// x = 4 (vertical line, Greater side): stroke → side tap → position apply.
+fn ceiling_step_to_amount_at_x4(c: &mut AppController) {
+    c.apply_ceiling_step_stroke_event(&[(3.78, 0.5), (3.82, 5.0), (3.8, 9.5)]);
+    assert!(c.ceiling_step_side_pending(), "stroke fitted → side pick");
+    c.ceiling_step_tap(7.0, 5.0); // right of the line → Greater side
+    let ui = c.position_prompt_for_ui().expect("line position prompt");
+    assert_eq!(ui.kind, PositionPromptKind::Line);
+    assert_eq!(ui.axis, ParameterAxis::X);
+    c.apply_position_dimension(4.0).expect("position applies"); // 4 m from x = 0
+    assert!(c.ceiling_step_amount_pending());
+}
+
+/// The mode toggle is gated: refused while the storey has no default ceiling
+/// height (the deltas are relative to it), available once it's set, and never
+/// available on the read-only All tab.
+#[test]
+fn ceiling_step_mode_gated_on_default_height() {
+    let mut c = dimensioned_square_controller();
+    assert!(!c.ceiling_step_available(), "no default height yet");
+    c.set_ceiling_step_mode(true);
+    assert!(!c.ceiling_step_mode(), "setter re-enforces the gate");
+
+    c.set_default_ceiling_height(2.4).unwrap();
+    assert!(c.ceiling_step_available());
+    c.set_ceiling_step_mode(true);
+    assert!(c.ceiling_step_mode());
+
+    // The All tab is read-only — not available there (the switch also resets
+    // the mode like the other area tools).
+    c.set_current_storey(None).unwrap();
+    assert!(!c.ceiling_step_available());
+    assert!(!c.ceiling_step_mode());
+}
+
+/// The full stroke path: near-straight stroke → side tap → position prompt
+/// (apply pins the line at exactly 4 m) → amount → materialize splits the
+/// roof into h / h+Δ pieces either side of the line, and the session list
+/// canonicalizes to the exact derived stepped piece.
+#[test]
+fn ceiling_step_stroke_side_position_amount_splits_roofs() {
+    let mut c = ceiling_ready_controller();
+    ceiling_step_to_amount_at_x4(&mut c);
+    c.assign_ceiling_step_delta(0.3).expect("amount applies");
+    assert!(!c.ceiling_step_pending(), "flow complete");
+
+    c.materialize();
+    let zs = roof_flat_zs(&c);
+    assert_eq!(zs.len(), 2, "roof split into two flat pieces");
+    assert!((zs[0] - 2.4).abs() < 1e-6, "default piece keeps h");
+    assert!((zs[1] - 2.7).abs() < 1e-6, "stepped piece at h + Δ");
+    // The RAISED piece is the one right of the line.
+    let storey = &c.current_record.as_ref().unwrap().data.storeys[0];
+    for region in &storey.roofs.regions {
+        let n = region.polygon.exterior.len() as f64;
+        let cx = region.polygon.exterior.iter().map(|v| v.x).sum::<f64>() / n;
+        let z = region.flat_z().expect("flat");
+        if cx > 4.0 {
+            assert!((z - 2.7).abs() < 1e-6, "right of the line steps up");
+        } else {
+            assert!((z - 2.4).abs() < 1e-6, "left of the line stays default");
+        }
+    }
+    // Canonicalized: the session list is the exact derived piece, split at
+    // the POSITION-APPLIED coordinate (x = 4, not the drawn ~3.8).
+    let session = &c.ceiling_step_regions[&0];
+    assert_eq!(session.len(), 1);
+    assert!((session[0].delta_m - 0.3).abs() < 1e-6);
+    let min_x = session[0]
+        .polygon
+        .iter()
+        .map(|p| p.x)
+        .fold(f32::INFINITY, f32::min);
+    assert!(
+        (min_x - 4.0).abs() < 1e-3,
+        "position apply moved the line to exactly 4 (got {min_x})"
+    );
+}
+
+/// The tap + H/V picker path is equivalent to the stroke path: a tapped point
+/// plus "Vertical" yields the same line, side pick, position prompt, and
+/// derived split.
+#[test]
+fn ceiling_step_tap_orientation_path_matches_the_stroke_path() {
+    let mut c = ceiling_ready_controller();
+    c.ceiling_step_tap(3.8, 5.0);
+    assert!(c.ceiling_step_orientation_pending(), "tap → H/V choice");
+    c.choose_ceiling_step_orientation(false); // vertical → position varies on X
+    assert!(c.ceiling_step_side_pending());
+    c.ceiling_step_tap(8.0, 5.0); // Greater side
+    let ui = c.position_prompt_for_ui().expect("line position prompt");
+    assert_eq!(ui.kind, PositionPromptKind::Line);
+    c.apply_position_dimension(4.0).unwrap();
+    c.assign_ceiling_step_delta(0.3).unwrap();
+
+    c.materialize();
+    let zs = roof_flat_zs(&c);
+    assert_eq!(zs.len(), 2);
+    assert!((zs[0] - 2.4).abs() < 1e-6 && (zs[1] - 2.7).abs() < 1e-6);
+    let session = &c.ceiling_step_regions[&0];
+    let min_x = session[0]
+        .polygon
+        .iter()
+        .map(|p| p.x)
+        .fold(f32::INFINITY, f32::min);
+    assert!((min_x - 4.0).abs() < 1e-3, "same split as the stroke path");
+}
+
+/// Skipping the position prompt keeps the DRAWN coordinate (the stroke's
+/// fitted centroid, ≈ 3.8) instead of moving the line.
+#[test]
+fn ceiling_step_position_skip_keeps_the_drawn_line() {
+    let mut c = ceiling_ready_controller();
+    c.apply_ceiling_step_stroke_event(&[(3.78, 0.5), (3.82, 5.0), (3.8, 9.5)]);
+    c.ceiling_step_tap(7.0, 5.0);
+    assert!(c.position_prompt_for_ui().is_some());
+    c.skip_position_dimension();
+    assert!(
+        c.ceiling_step_amount_pending(),
+        "skip → amount, drawn coord"
+    );
+    c.assign_ceiling_step_delta(-0.2).unwrap();
+
+    c.materialize();
+    let session = &c.ceiling_step_regions[&0];
+    assert!((session[0].delta_m + 0.2).abs() < 1e-6, "lowered by 0.2");
+    let min_x = session[0]
+        .polygon
+        .iter()
+        .map(|p| p.x)
+        .fold(f32::INFINITY, f32::min);
+    assert!(
+        (min_x - 3.8).abs() < 0.05,
+        "drawn coordinate kept (got {min_x})"
+    );
+}
+
+/// Reload reconstructs the session regions from the persisted roofs, and a
+/// no-edit re-derive keeps the split — the canonicalize-at-commit fixpoint.
+#[test]
+fn ceiling_step_split_survives_reload_and_rederive() {
+    let mut c = ceiling_ready_controller();
+    ceiling_step_to_amount_at_x4(&mut c);
+    c.assign_ceiling_step_delta(0.3).unwrap();
+    c.materialize();
+    let before = roof_flat_zs(&c);
+    assert_eq!(before.len(), 2);
+
+    let id = c.current_record.as_ref().unwrap().id.clone();
+    c.flush_if_dirty().unwrap();
+    c.open_ber(&id).unwrap();
+    // Session regions rebuilt from the persisted roofs.
+    let session = &c.ceiling_step_regions[&0];
+    assert_eq!(session.len(), 1, "reconstructed from the stepped roof");
+    assert!((session[0].delta_m - 0.3).abs() < 1e-6);
+
+    // Re-derive without any edit: the split must be reproduced exactly
+    // (derive → reconstruct → derive is a fixpoint).
+    c.mark_dirty().unwrap();
+    c.materialize();
+    let after = roof_flat_zs(&c);
+    assert_eq!(after.len(), 2, "split kept across the re-derive");
+    assert!((after[0] - before[0]).abs() < 1e-6 && (after[1] - before[1]).abs() < 1e-6);
+}
+
+/// Deleting the step region re-flattens the roof to the default height on
+/// the next derive.
+#[test]
+fn deleting_a_ceiling_step_reflattens_the_roof() {
+    let mut c = ceiling_ready_controller();
+    ceiling_step_to_amount_at_x4(&mut c);
+    c.assign_ceiling_step_delta(0.3).unwrap();
+    c.materialize();
+    assert_eq!(roof_flat_zs(&c).len(), 2);
+
+    c.delete_ceiling_step_region(0);
+    c.materialize();
+    let zs = roof_flat_zs(&c);
+    assert!(
+        zs.iter().all(|z| (z - 2.4).abs() < 1e-6),
+        "roof back at the default everywhere (got {zs:?})"
+    );
+}
+
+/// A storey switch abandons the in-flight line and leaves the mode — its
+/// coordinate is in the outgoing storey's space.
+#[test]
+fn storey_switch_clears_pending_ceiling_step() {
+    let mut c = ceiling_ready_controller();
+    c.apply_ceiling_step_stroke_event(&[(3.78, 0.5), (3.82, 5.0), (3.8, 9.5)]);
+    assert!(c.ceiling_step_side_pending());
+    c.add_storey().unwrap();
+    assert!(!c.ceiling_step_mode(), "mode reset on switch");
+    assert!(!c.ceiling_step_pending(), "pending line abandoned");
+}
+
+/// The assign validation: a near-zero step (|Δ| < 0.01 m) and a drop at or
+/// past the default height are rejected, with the pending line left intact
+/// so the user can retype; a valid amount still lands afterwards.
+#[test]
+fn ceiling_step_amount_rejections_keep_the_pending_line() {
+    let mut c = ceiling_ready_controller();
+    ceiling_step_to_amount_at_x4(&mut c);
+
+    assert!(
+        c.assign_ceiling_step_delta(0.005).is_err(),
+        "near-zero rejected"
+    );
+    assert!(c.ceiling_step_amount_pending(), "pending intact");
+    assert!(
+        c.assign_ceiling_step_delta(-2.4).is_err(),
+        "Δ ≤ −default rejected (ceiling would reach the floor)"
+    );
+    assert!(c.ceiling_step_amount_pending(), "pending intact");
+    assert!(
+        c.ceiling_step_regions.get(&0).is_none(),
+        "nothing committed by the rejections"
+    );
+
+    c.assign_ceiling_step_delta(0.2)
+        .expect("valid amount lands");
+    assert!(!c.ceiling_step_pending());
+    c.materialize();
+    assert_eq!(roof_flat_zs(&c).len(), 2);
+}

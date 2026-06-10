@@ -315,6 +315,32 @@ pub enum SketchEvent {
     CancelPendingStep,
     /// Delete the current storey's step region at the given index.
     DeleteStepRegion(usize),
+    /// Toggle ceiling-step mode: when on, a stroke draws an axis-aligned line
+    /// across the plan (or a tap places a point + H/V choice) and the ceiling
+    /// steps on one side of it.
+    SetCeilingStepMode(bool),
+    /// A ceiling-step stroke (world coords) — fitted to an axis-aligned line.
+    CeilingStepStrokeWorld {
+        points: Vec<(f32, f32)>,
+    },
+    /// Tap (world coords) in the ceiling-step flow: places the line's point
+    /// when nothing is pending, or picks the stepping side of a pending line.
+    CeilingStepTap {
+        world_x: f64,
+        world_y: f64,
+    },
+    /// User picked the orientation of a tapped ceiling-step point
+    /// (a horizontal line's position varies on Y).
+    ChooseCeilingStepOrientation {
+        horizontal: bool,
+    },
+    /// User entered the ceiling-step amount (metres, signed: the Up/Down
+    /// buttons own the sign; the typed value contributes |v|).
+    AssignCeilingStepDelta(f32),
+    /// Discard the in-flight ceiling-step line at any stage.
+    CancelPendingCeilingStep,
+    /// Delete the current storey's ceiling-step region at the given index.
+    DeleteCeilingStepRegion(usize),
     /// Toggle wall-exposure mode: when on, tapping an outline wall selects it
     /// (and the section handles), the type buttons mark the selected range.
     SetExposureMode(bool),
@@ -430,6 +456,21 @@ impl SketchPage {
         pending_step_cut_regions: &[Vec<(f64, f64)>],
         step_pick_pending: bool,
         step_amount_input: &mut String,
+        // Ceiling-step tagging: mode flag + availability gate (needs a default
+        // ceiling height + finalised outline), the committed step regions
+        // `(ring, label)` to tint, the pending line + its two side half-rects,
+        // the per-stage flags (orientation pick / side tap / amount entry),
+        // whether ANY stage is pending, and the amount input's backing string.
+        ceiling_step_mode: bool,
+        ceiling_step_available: bool,
+        ceiling_step_region_polygons: &[(Vec<(f64, f64)>, String)],
+        pending_ceiling_step_line: Option<((f64, f64), (f64, f64))>,
+        pending_ceiling_step_side_rects: &[Vec<(f64, f64)>],
+        ceiling_step_orientation_pending: bool,
+        ceiling_step_side_pending: bool,
+        ceiling_step_amount_pending: bool,
+        ceiling_step_pending: bool,
+        ceiling_amount_input: &mut String,
         // First-3D ceiling-height gate: whether the typed prompt is open, the
         // backing string for its input, its last error, and whether the current
         // scope already has its heights (drives the 3D option's hover hint).
@@ -663,6 +704,43 @@ impl SketchPage {
                         view,
                         std::slice::from_ref(&(pending_step_polygon.to_vec(), "?".to_string())),
                         step_tint,
+                    );
+                }
+
+                // Ceiling-step areas: committed regions (amber, labelled with
+                // the signed delta — hue distinct from the floor steps' teal),
+                // the two side half-rects while the side tap is pending, and
+                // the dashed provisional line.
+                let ceiling_step_tint = egui::Color32::from_rgb(255, 170, 60); // amber
+                render::render_phase_regions(
+                    &painter,
+                    rect,
+                    ber,
+                    current_storey_idx,
+                    mode,
+                    view,
+                    ceiling_step_region_polygons,
+                    ceiling_step_tint,
+                );
+                render::render_cut_candidates(
+                    &painter,
+                    rect,
+                    ber,
+                    current_storey_idx,
+                    mode,
+                    view,
+                    pending_ceiling_step_side_rects,
+                );
+                if let Some((a, b)) = pending_ceiling_step_line {
+                    render::render_ceiling_step_line(
+                        &painter,
+                        rect,
+                        ber,
+                        current_storey_idx,
+                        mode,
+                        view,
+                        a,
+                        b,
                     );
                 }
 
@@ -984,6 +1062,24 @@ impl SketchPage {
                     }
                 }
 
+                // Ceiling-step taps: in mode with nothing pending, a tap places
+                // the line's point (H/V picked next); while the side pick is
+                // pending — including with the mode toggled off — the tap picks
+                // the stepping side. Other stages ignore taps (the controller's
+                // stage dispatch owns that), so this can stay coarse.
+                if ceiling_step_mode || ceiling_step_side_pending {
+                    if response.clicked_by(egui::PointerButton::Primary) {
+                        if let Some((wx, wy)) = response.interact_pointer_pos().and_then(|pos| {
+                            screen_to_world(ber, current_storey_idx, rect, view, pos)
+                        }) {
+                            on_event(UiEvent::Sketch(SketchEvent::CeilingStepTap {
+                                world_x: wx,
+                                world_y: wy,
+                            }));
+                        }
+                    }
+                }
+
                 // Exposure mode: a tap selects the wall under the pointer; a
                 // primary drag near a selection handle slides that handle along
                 // the wall. Takes priority over stroke/edit input (suppressed via
@@ -1040,6 +1136,7 @@ impl SketchPage {
                     && !phase_pick_pending
                     && !step_cut_pending
                     && !step_pick_pending
+                    && !ceiling_step_pending
                     && !exposure_mode;
 
                 if primary_available && !matches!(edit_tool, EditTools::Edit) {
@@ -1077,6 +1174,10 @@ impl SketchPage {
                             // space too (carve an area to raise/lower its floor).
                             let step_draw =
                                 step_mode && matches!(edit_tool, EditTools::DrawPerpWalls);
+                            // A ceiling-step stroke is the LINE the ceiling
+                            // steps along — drawn in metre space as well.
+                            let ceiling_step_draw =
+                                ceiling_step_mode && matches!(edit_tool, EditTools::DrawPerpWalls);
                             // First outline of a fresh upper storey: drawn over
                             // the previous-storey watermark, so it must be
                             // captured in that storey's metre space (mirrors the
@@ -1086,6 +1187,7 @@ impl SketchPage {
                                     && !living_area_mode
                                     && !phase_mode
                                     && !step_mode
+                                    && !ceiling_step_mode
                                     && matches!(current_storey_idx, Some(i) if i > 0)
                                     && ber
                                         .and_then(|b| b.storeys.get(current_storey_idx?))
@@ -1093,6 +1195,7 @@ impl SketchPage {
                             let needs_world = living_area_draw
                                 || phase_draw
                                 || step_draw
+                                || ceiling_step_draw
                                 || outline_on_watermark
                                 || matches!(
                                     edit_tool,
@@ -1137,6 +1240,10 @@ impl SketchPage {
                                         }
                                     } else if step_draw {
                                         SketchEvent::StepRegionStrokeWorld {
+                                            points: world_points,
+                                        }
+                                    } else if ceiling_step_draw {
+                                        SketchEvent::CeilingStepStrokeWorld {
                                             points: world_points,
                                         }
                                     } else if outline_on_watermark {
@@ -1419,6 +1526,40 @@ impl SketchPage {
                                 step_region_polygons,
                                 step_pick_pending,
                                 step_amount_input,
+                                &mut on_event,
+                            );
+                        }
+                        // Ceiling-step tagging: draw a line across the plan,
+                        // tap the side that steps, enter the amount. Disabled
+                        // until the storey has a default ceiling height (the
+                        // deltas are relative to it) — the controller setter
+                        // re-enforces the gate.
+                        let cs_resp = ui
+                            .add_enabled(
+                                ceiling_step_available,
+                                egui::SelectableLabel::new(ceiling_step_mode, "⬆ Ceiling steps"),
+                            )
+                            .on_hover_text(
+                                "Raise or lower part of the ceiling: draw a straight line \
+                                 across the plan, tap the side that steps, then enter the amount",
+                            )
+                            .on_disabled_hover_text(
+                                "Set the storey's default ceiling height first",
+                            );
+                        if cs_resp.clicked() {
+                            on_event(UiEvent::Sketch(SketchEvent::SetCeilingStepMode(
+                                !ceiling_step_mode,
+                            )));
+                        }
+                        // Same pending-with-mode-off rule as the other tools.
+                        if ceiling_step_mode || ceiling_step_pending {
+                            Self::ceiling_step_toolbar(
+                                ui,
+                                ceiling_step_region_polygons,
+                                ceiling_step_orientation_pending,
+                                ceiling_step_side_pending,
+                                ceiling_step_amount_pending,
+                                ceiling_amount_input,
                                 &mut on_event,
                             );
                         }
@@ -1968,6 +2109,104 @@ impl SketchPage {
                         .clicked()
                     {
                         on_event(UiEvent::Sketch(SketchEvent::DeleteStepRegion(i)));
+                    }
+                });
+            }
+        }
+    }
+
+    /// Ceiling-step controls, stage by stage: the H/V picker for a tapped
+    /// point; the "tap the side" hint while the side pick is pending; the
+    /// amount field (metres) + Up/Down buttons (which own the sign) once the
+    /// line is resolved; otherwise the committed-region list with deletes.
+    /// (The position stage shows as the shared position-prompt panel instead.)
+    #[allow(clippy::too_many_arguments)]
+    fn ceiling_step_toolbar<F: FnMut(UiEvent)>(
+        ui: &mut egui::Ui,
+        regions: &[(Vec<(f64, f64)>, String)],
+        orientation_pending: bool,
+        side_pending: bool,
+        amount_pending: bool,
+        amount_input: &mut String,
+        on_event: &mut F,
+    ) {
+        if orientation_pending {
+            ui.label(egui::RichText::new("Line direction:").strong());
+            if ui
+                .button("Horizontal")
+                .on_hover_text("A horizontal step line through the tapped point")
+                .clicked()
+            {
+                on_event(UiEvent::Sketch(SketchEvent::ChooseCeilingStepOrientation {
+                    horizontal: true,
+                }));
+            }
+            if ui
+                .button("Vertical")
+                .on_hover_text("A vertical step line through the tapped point")
+                .clicked()
+            {
+                on_event(UiEvent::Sketch(SketchEvent::ChooseCeilingStepOrientation {
+                    horizontal: false,
+                }));
+            }
+            if ui.button("Cancel").clicked() {
+                on_event(UiEvent::Sketch(SketchEvent::CancelPendingCeilingStep));
+            }
+        } else if side_pending {
+            ui.label(
+                egui::RichText::new("Tap the side of the line where the ceiling steps")
+                    .color(egui::Color32::from_rgb(255, 200, 60)),
+            );
+            if ui.button("Cancel").clicked() {
+                on_event(UiEvent::Sketch(SketchEvent::CancelPendingCeilingStep));
+            }
+        } else if amount_pending {
+            ui.label(egui::RichText::new("Step (m):").strong());
+            ui.add(
+                egui::TextEdit::singleline(amount_input)
+                    .desired_width(60.0)
+                    .hint_text("e.g. 0.2"),
+            );
+            // Unparseable input is ignored — the buttons just do nothing. The
+            // BUTTON owns the sign (an expression that evaluates negative must
+            // not flip Down into a raise), so take |v|.
+            let amount = parse_dimension_expression(amount_input).map(f32::abs);
+            if ui
+                .button("Up")
+                .on_hover_text("Raise the ceiling on that side by the amount")
+                .clicked()
+            {
+                if let Some(v) = amount {
+                    on_event(UiEvent::Sketch(SketchEvent::AssignCeilingStepDelta(v)));
+                    amount_input.clear();
+                }
+            }
+            if ui
+                .button("Down")
+                .on_hover_text("Lower the ceiling on that side by the amount")
+                .clicked()
+            {
+                if let Some(v) = amount {
+                    on_event(UiEvent::Sketch(SketchEvent::AssignCeilingStepDelta(-v)));
+                    amount_input.clear();
+                }
+            }
+            if ui.button("Cancel").clicked() {
+                on_event(UiEvent::Sketch(SketchEvent::CancelPendingCeilingStep));
+                amount_input.clear();
+            }
+        } else {
+            ui.label("Draw a straight line across the plan to step the ceiling.");
+            for (i, (_ring, label)) in regions.iter().enumerate() {
+                ui.horizontal(|ui| {
+                    ui.label(label);
+                    if ui
+                        .button("🗑")
+                        .on_hover_text("Delete this ceiling step (re-flattens to the default)")
+                        .clicked()
+                    {
+                        on_event(UiEvent::Sketch(SketchEvent::DeleteCeilingStepRegion(i)));
                     }
                 });
             }

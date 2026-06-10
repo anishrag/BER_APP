@@ -80,6 +80,8 @@ pub struct SketchState {
     pub exposure_end_input: String,
     /// Backing string for the floor-step amount input (metres).
     pub step_amount_input: String,
+    /// Backing string for the ceiling-step amount input (metres).
+    pub ceiling_amount_input: String,
     /// Backing string for the first-3D ceiling-height prompt's input (metres).
     pub ceiling_height_input: String,
     /// Last error from `set_default_ceiling_height`. Shown next to the textbox
@@ -310,6 +312,15 @@ impl eframe::App for BerApp {
                     pending_step_polygon,
                     pending_step_cut_regions,
                     step_pick_pending,
+                    ceiling_step_mode,
+                    ceiling_step_available,
+                    ceiling_step_region_polygons,
+                    pending_ceiling_step_line,
+                    pending_ceiling_step_side_rects,
+                    ceiling_step_orientation_pending,
+                    ceiling_step_side_pending,
+                    ceiling_step_amount_pending,
+                    ceiling_step_pending,
                     ceiling_height_prompt,
                     ceiling_heights_set,
                     view,
@@ -360,6 +371,15 @@ impl eframe::App for BerApp {
                         controller_ref.pending_step_polygon(),
                         controller_ref.pending_step_cut_regions(),
                         controller_ref.step_pick_pending(),
+                        controller_ref.ceiling_step_mode(),
+                        controller_ref.ceiling_step_available(),
+                        controller_ref.ceiling_step_region_polygons(),
+                        controller_ref.pending_ceiling_step_line(),
+                        controller_ref.pending_ceiling_step_side_rects(),
+                        controller_ref.ceiling_step_orientation_pending(),
+                        controller_ref.ceiling_step_side_pending(),
+                        controller_ref.ceiling_step_amount_pending(),
+                        controller_ref.ceiling_step_pending(),
                         controller_ref.ceiling_height_prompt_pending(),
                         controller_ref.ceiling_heights_set(),
                         crate::ui::render::ViewParams {
@@ -446,6 +466,16 @@ impl eframe::App for BerApp {
                     &pending_step_cut_regions,
                     step_pick_pending,
                     &mut self.sketch_state.step_amount_input,
+                    ceiling_step_mode,
+                    ceiling_step_available,
+                    &ceiling_step_region_polygons,
+                    pending_ceiling_step_line,
+                    &pending_ceiling_step_side_rects,
+                    ceiling_step_orientation_pending,
+                    ceiling_step_side_pending,
+                    ceiling_step_amount_pending,
+                    ceiling_step_pending,
+                    &mut self.sketch_state.ceiling_amount_input,
                     ceiling_height_prompt,
                     &mut self.sketch_state.ceiling_height_input,
                     ceiling_height_error.as_deref(),
@@ -644,6 +674,36 @@ impl eframe::App for BerApp {
                             }
                             SketchEvent::DeleteStepRegion(index) => {
                                 controller.borrow_mut().delete_step_region(index);
+                            }
+                            SketchEvent::SetCeilingStepMode(on) => {
+                                controller.borrow_mut().set_ceiling_step_mode(on);
+                            }
+                            SketchEvent::CeilingStepStrokeWorld { points } => {
+                                controller
+                                    .borrow_mut()
+                                    .apply_ceiling_step_stroke_event(&points);
+                            }
+                            SketchEvent::CeilingStepTap { world_x, world_y } => {
+                                controller
+                                    .borrow_mut()
+                                    .ceiling_step_tap(world_x as f32, world_y as f32);
+                            }
+                            SketchEvent::ChooseCeilingStepOrientation { horizontal } => {
+                                controller
+                                    .borrow_mut()
+                                    .choose_ceiling_step_orientation(horizontal);
+                            }
+                            SketchEvent::AssignCeilingStepDelta(delta_m) => {
+                                log_err(
+                                    "assign_ceiling_step_delta",
+                                    controller.borrow_mut().assign_ceiling_step_delta(delta_m),
+                                );
+                            }
+                            SketchEvent::CancelPendingCeilingStep => {
+                                controller.borrow_mut().cancel_pending_ceiling_step();
+                            }
+                            SketchEvent::DeleteCeilingStepRegion(index) => {
+                                controller.borrow_mut().delete_ceiling_step_region(index);
                             }
                             SketchEvent::SetExposureMode(on) => {
                                 controller.borrow_mut().set_exposure_mode(on);

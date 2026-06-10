@@ -3,6 +3,7 @@
 // declared here). This file holds only the struct, its constructor, and the
 // module wiring; each submodule owns one concern:
 //   - `ceiling`       — the first-3D ceiling-height gate + prompt.
+//   - `ceiling_steps` — ceiling-step (raise/lower part of the ceiling) tagging.
 //   - `dimensioning`  — the dimension-prompt workflow.
 //   - `editing`       — Edit-mode interaction + measurement prompts.
 //   - `exposure`      — wall-exposure marking interaction.
@@ -17,6 +18,7 @@
 //   - `strokes`       — sketch entry points + the apply-stroke family.
 //   - `view`          — canvas pan/zoom.
 mod ceiling;
+mod ceiling_steps;
 mod dimensioning;
 mod editing;
 mod exposure;
@@ -24,8 +26,8 @@ mod living_areas;
 mod phase_regions;
 
 use document::{
-    ActiveShape, DimensionPrompt, DimensionState, Document, EditState, MovedCoordKind, PendingArc,
-    PhaseRegion, ShapeSlot, StepRegion, StoreyDoc,
+    ActiveShape, CeilingStepRegion, DimensionPrompt, DimensionState, Document, EditState,
+    MovedCoordKind, PendingArc, PhaseRegion, ShapeSlot, StepRegion, StoreyDoc,
 };
 pub use document::{ExposureSection, PositionPromptKind};
 pub use exposure::{ExposureSelection, SectionHandle, WallExposureView};
@@ -58,6 +60,7 @@ mod storeys;
 mod strokes;
 mod view;
 
+use ceiling_steps::PendingCeilingStep;
 pub use dimensioning::{DimensionPromptUiData, PositionPromptUiData};
 pub use editing::{
     EditDragPrompt, EditDragPromptUiData, MeasurementOption, VertexDropPrompt,
@@ -158,6 +161,21 @@ pub struct AppController {
     /// dimensionable slot); the user taps one, which becomes `step_shape` and is
     /// then dimensioned. Transient.
     pending_step_cut: Option<[ShapeSlot; 2]>,
+    /// True when the editor is tagging ceiling steps (raised/lowered ceiling
+    /// areas, entered as a line + side + amount). Routes canvas strokes/taps
+    /// to the line input; mutually exclusive with living-area / exposure /
+    /// phase / floor-step modes. Toggled by the UI; gated on the storey's
+    /// default ceiling height + a finalised outline.
+    ceiling_step_mode: bool,
+    /// Session-only ceiling-step areas, keyed by storey index. NOT persisted
+    /// in the BER — they re-split the roof regions at commit; the durable
+    /// record is each roof region's per-vertex z. Canonicalized to the exact
+    /// derived pieces after each assign. See `ceiling_steps.rs`.
+    ceiling_step_regions: HashMap<usize, Vec<CeilingStepRegion>>,
+    /// The in-flight ceiling-step line, advanced tap by tap (orientation →
+    /// side → position → amount). Transient — outside undo, cleared on storey
+    /// switch / mode exit / cancel.
+    pending_ceiling_step: Option<PendingCeilingStep>,
     /// True while the first-3D "set default ceiling height" prompt is open: a
     /// 3D view was requested but the current scope has no ceiling height yet
     /// (see `ceiling.rs`). Session-only, outside undo — same deliberate choice
@@ -231,6 +249,9 @@ impl AppController {
             step_mode: false,
             step_regions: HashMap::new(),
             pending_step_cut: None,
+            ceiling_step_mode: false,
+            ceiling_step_regions: HashMap::new(),
+            pending_ceiling_step: None,
             ceiling_height_prompt: false,
             splice_debug: Vec::new(),
             revision: 0,

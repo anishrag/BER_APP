@@ -105,12 +105,15 @@ impl AppController {
         // if it's missing or from an incompatible version.
         self.try_restore_snapshot(id);
         let idx = self.current_storey_idx.unwrap_or(0);
-        // Phase + step areas are session-only — rebuild them from the loaded
-        // storey's tagged/levelled floor regions so the splits stay reproducible.
+        // Phase + step + ceiling-step areas are session-only — rebuild them
+        // from the loaded storey's tagged/levelled floor regions (and stepped
+        // roof regions) so the splits stay reproducible.
         self.phase_regions.clear();
         self.reconstruct_phase_regions_for(idx);
         self.step_regions.clear();
         self.reconstruct_step_regions_for(idx);
+        self.ceiling_step_regions.clear();
+        self.reconstruct_ceiling_step_regions_for(idx);
         self.view = ViewTransform::default();
         self.document.edit_state = EditState::default();
         self.review = None;
@@ -197,6 +200,8 @@ impl AppController {
         self.reconstruct_phase_regions_for(0);
         self.step_regions.clear();
         self.reconstruct_step_regions_for(0);
+        self.ceiling_step_regions.clear();
+        self.reconstruct_ceiling_step_regions_for(0);
         self.view = ViewTransform::default();
         self.document.edit_state = EditState::default();
         self.review = None;

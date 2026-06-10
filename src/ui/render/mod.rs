@@ -515,6 +515,34 @@ pub fn render_cut_candidates(
     }
 }
 
+/// Draw the PENDING ceiling-step line as a dashed amber segment across the
+/// storey footprint. Dashed because the line is provisional input UX — it's
+/// still awaiting its side / position / amount; committed ceiling-step
+/// regions render as tinted rings instead (`render_phase_regions`).
+pub fn render_ceiling_step_line(
+    painter: &egui::Painter,
+    rect: egui::Rect,
+    ber: Option<&Ber>,
+    current_storey_idx: Option<usize>,
+    sketch_mode: SketchMode,
+    view: ViewParams,
+    line_a: (f64, f64),
+    line_b: (f64, f64),
+) {
+    let Some((_storey, t)) = storey_transform(rect, ber, current_storey_idx, sketch_mode, view)
+    else {
+        return;
+    };
+    let a = t.apply(line_a.0, line_a.1);
+    let b = t.apply(line_b.0, line_b.1);
+    draw_dashed_segment(
+        painter,
+        a,
+        b,
+        egui::Stroke::new(3.0, egui::Color32::from_rgb(255, 170, 60)),
+    );
+}
+
 /// DEBUG: draw the splice-pipeline phases of the last extend/trim. Each phase is
 /// a distinctly-coloured polyline (with dotted vertices) plus a colour-keyed
 /// legend entry top-left, so the stages — raw stroke → orthogonalized → pinned →
