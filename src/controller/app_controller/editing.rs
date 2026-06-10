@@ -731,3 +731,120 @@ fn joint_solve(
         (WallLength, WallLength) => intersect_circles(n1, d1, n2, d2, cur),
     }
 }
+
+/// World-coord endpoints of one wall.
+#[derive(Debug, Clone, Copy)]
+pub struct WallPositions {
+    pub wall_a: (f64, f64),
+    pub wall_b: (f64, f64),
+}
+
+/// UI-friendly view of the post-drag measurement prompt: the wall the user
+/// just moved + the wall they're measuring distance *from* + the current
+/// distance value + which option is selected out of how many.
+#[derive(Debug, Clone, Copy)]
+pub struct EditDragPromptUiData {
+    pub moved_wall: WallPositions,
+    pub reference_wall: WallPositions,
+    pub current_distance: f32,
+    pub option_idx: usize,
+    pub option_count: usize,
+}
+
+/// What kind of geometric constraint a vertex measurement represents.
+/// Axis = linear (|V.x - N.x| or |V.y - N.y|), pins one coord at a time.
+/// WallLength = euclidean |V - N|, a circle constraint that needs another
+/// measurement for full pinning (circle intersection / substitution).
+#[derive(Debug, Clone, Copy)]
+pub enum VertexMeasurementKind {
+    Axis(ParameterAxis),
+    WallLength,
+}
+
+/// One candidate measurement for the just-dropped vertex.
+#[derive(Debug, Clone)]
+pub struct VertexMeasurement {
+    pub kind: VertexMeasurementKind,
+    /// Neighbour vertex this measurement is from.
+    pub neighbor_vid: VertexId,
+    /// Live distance: axis → `|V.coord - N.coord|`, wall → `|V - N|`.
+    pub current_distance: f32,
+    /// For axis measurements: sign of `(V.coord - N.coord)` at populate
+    /// time. Preserved on apply so V ends up on the same side of N.
+    /// Unused for wall-length measurements (left as 1.0).
+    pub sign: f32,
+}
+
+/// Active post-vertex-drop prompt. After releasing a newly-inserted
+/// vertex, the user is shown text boxes for each relevant neighbour
+/// distance and fills them in to pin the vertex precisely.
+#[derive(Debug, Clone)]
+pub struct VertexDropPrompt {
+    /// The newly-inserted vertex.
+    pub vertex_vid: VertexId,
+    /// Candidate measurements — up to 5 typically (3 H/V de-duped + 2
+    /// wall-lengths to prev and next).
+    pub measurements: Vec<VertexMeasurement>,
+    /// Applied measurements (index into `measurements`, entered value)
+    /// in chronological order. The prompt is cleared once 2 are applied
+    /// — at that point the joint solve has fully pinned V's position.
+    pub applied: Vec<(usize, f32)>,
+}
+
+/// UI-friendly snapshot of a vertex-drop prompt. Holds vertex/neighbour
+/// world coords so the renderer can draw an arrow per active measurement
+/// and the UI can label each text box.
+#[derive(Debug, Clone)]
+pub struct VertexDropPromptUiData {
+    /// The newly-inserted vertex's world position.
+    pub vertex_pos: (f64, f64),
+    /// One entry per still-active measurement (axis not yet pinned).
+    pub active: Vec<VertexMeasurementUiData>,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct VertexMeasurementUiData {
+    /// Original index in `VertexDropPrompt.measurements` — used by Apply
+    /// to know which measurement the user is responding to.
+    pub idx: usize,
+    /// World position of the neighbour.
+    pub neighbor_pos: (f64, f64),
+    /// Kind of constraint this measurement represents.
+    pub kind: VertexMeasurementKind,
+    /// Live distance.
+    pub current_distance: f32,
+}
+
+/// One candidate measurement for the post-drag prompt: "distance from this
+/// other wall to the moved one." The user can cycle through these to find
+/// one they can practically measure with a tape.
+#[derive(Debug, Clone)]
+pub struct MeasurementOption {
+    /// Reference wall's start-vertex id.
+    pub reference_wall_vid: VertexId,
+    /// Reference's perpendicular coord (the world-coord value the moved
+    /// wall is measured *from*).
+    pub reference_value: f32,
+    /// Sign of `(moved_value - reference_value)` at the time the prompt
+    /// was constructed. Preserved when the user enters a distance so the
+    /// moved wall stays on the same side of the reference as it was after
+    /// the drag.
+    pub sign: f32,
+    /// Current `|moved_value - reference_value|` (post-drag). Shown to the
+    /// user as the "current" measurement before they edit it.
+    pub current_distance: f32,
+}
+
+#[derive(Debug, Clone)]
+pub struct EditDragPrompt {
+    /// VertexId of the moved wall.
+    pub moved_wall_vid: VertexId,
+    /// Perpendicular axis the wall moves along.
+    pub axis: ParameterAxis,
+    /// Whether the moved coord is a Parameter or a Constant.
+    pub kind: MovedCoordKind,
+    /// Candidate measurements; the user cycles through them.
+    pub options: Vec<MeasurementOption>,
+    /// Index of the option currently being asked about.
+    pub current_idx: usize,
+}

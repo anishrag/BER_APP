@@ -159,3 +159,25 @@ impl AppController {
         self.document.resync_dimensioning();
     }
 }
+
+/// UI-friendly snapshot of the current dimension prompt. `walls[0]` is the
+/// wall the prompt was generated for ("primary"); subsequent entries are
+/// other walls whose length expression is identical — the user can measure
+/// any of them and enter the same value. World coordinates here are the same
+/// coord system as the rendered BER polygon; the renderer transforms via
+/// its `Transform2d`.
+#[derive(Debug, Clone)]
+pub struct DimensionPromptUiData {
+    pub walls: Vec<WallPositions>,
+    /// Current length of the primary wall in the plan's current units.
+    pub current_length: f32,
+}
+
+// There is NO persisted sketch snapshot. The DB stores only finalised
+// (complete, metre-scale) resolved geometry — `Storey.floors` (outline),
+// `Storey.living_areas`, and `Storey.walls` (exposure). On reload the editor
+// rebuilds everything from those resolved points (see `load_storey_into_editor`):
+// the outline's parametric model is re-derived (re-edit fidelity — shared
+// params, collinearity equivalences, curve arcs — is deliberately not
+// preserved), living areas are rebuilt non-editable, and exposure is recovered
+// from the wall regions.
