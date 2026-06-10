@@ -26,6 +26,58 @@ pub fn fit_line(points: &[Point2f32]) -> (Point2f32, (f32, f32)) {
     (Point2f32::new(cx, cy), (theta.cos(), theta.sin()))
 }
 
+/// A step-line stroke must span at least this many METRES along its fitted
+/// direction (strokes arrive in world/metre space; anything shorter is a tap
+/// or a stray mark, not a line).
+const AXIS_LINE_MIN_SPAN_M: f32 = 0.05;
+
+/// A stroke is "line-like" only when no point deviates perpendicular from the
+/// fitted line by more than this fraction of the stroke's span — a closed loop
+/// (~50%) or an L (~30%) blows well past it; freehand waviness stays under.
+const AXIS_LINE_MAX_DEV_RATIO: f32 = 0.15;
+
+/// Fit an AXIS-ALIGNED line to a near-straight stroke: TLS fit ([`fit_line`]),
+/// orientation snapped to the DOMINANT axis (the step line is orthogonal by
+/// construction). Returns the axis the line's POSITION varies on (X for a
+/// vertical line — the position-prompt convention) and the centroid's
+/// coordinate on it. `None` when the stroke is too short (< 2 points, or span
+/// under [`AXIS_LINE_MIN_SPAN_M`]) or not line-like (max perpendicular
+/// deviation over [`AXIS_LINE_MAX_DEV_RATIO`] of its span — a loop or an L is
+/// not a step line). A ~45° stroke snaps to whichever axis dominates; there is
+/// no diagonal rejection.
+pub fn fit_axis_line(points: &[Point2f32]) -> Option<(ParameterAxis, f32)> {
+    if points.len() < 2 {
+        return None;
+    }
+    let (centroid, (dx, dy)) = fit_line(points);
+    // Span = extent of the projections onto the fitted direction; deviation =
+    // largest perpendicular offset from the fitted line.
+    let (mut min_t, mut max_t) = (f32::INFINITY, f32::NEG_INFINITY);
+    let mut max_dev = 0.0_f32;
+    for p in points {
+        let rx = p.x - centroid.x;
+        let ry = p.y - centroid.y;
+        let t = rx * dx + ry * dy;
+        min_t = min_t.min(t);
+        max_t = max_t.max(t);
+        max_dev = max_dev.max((rx * dy - ry * dx).abs());
+    }
+    let span = max_t - min_t;
+    if span < AXIS_LINE_MIN_SPAN_M {
+        return None;
+    }
+    if max_dev > span * AXIS_LINE_MAX_DEV_RATIO {
+        return None;
+    }
+    // Snap to the dominant axis of the fitted direction. A mostly-vertical
+    // stroke (|dy| > |dx|) is a vertical line, whose position varies on X.
+    if dy.abs() > dx.abs() {
+        Some((ParameterAxis::X, centroid.x))
+    } else {
+        Some((ParameterAxis::Y, centroid.y))
+    }
+}
+
 /// Project `cur` onto a circle of radius `r` around `n`.
 pub fn project_to_circle(cur: (f32, f32), n: (f32, f32), r: f32) -> (f32, f32) {
     let dx = cur.0 - n.0;
@@ -912,6 +964,71 @@ mod tests {
     fn lerp_along_degenerate_segment_stays_at_start() {
         assert_eq!(lerp_along(p(1.0, 1.0), p(1.0, 1.0), 0.0, 5.0), (1.0, 1.0));
         assert_eq!(lerp_along(p(0.0, 0.0), p(10.0, 0.0), 10.0, 2.5), (2.5, 0.0));
+    }
+
+    #[test]
+    fn fit_axis_line_near_vertical_snaps_to_x() {
+        // Wavy but near-vertical stroke at x ≈ 3: position varies on X.
+        let stroke = vec![p(3.02, 0.0), p(2.97, 1.0), p(3.03, 2.0), p(2.99, 3.0)];
+        let (axis, coord) = fit_axis_line(&stroke).expect("near-vertical fits");
+        assert_eq!(axis, ParameterAxis::X);
+        assert!((coord - 3.0).abs() < 0.05, "coord ≈ 3, got {coord}");
+    }
+
+    #[test]
+    fn fit_axis_line_near_horizontal_snaps_to_y() {
+        let stroke = vec![p(0.0, 2.01), p(1.5, 1.98), p(3.0, 2.02), p(4.5, 2.0)];
+        let (axis, coord) = fit_axis_line(&stroke).expect("near-horizontal fits");
+        assert_eq!(axis, ParameterAxis::Y);
+        assert!((coord - 2.0).abs() < 0.05, "coord ≈ 2, got {coord}");
+    }
+
+    #[test]
+    fn fit_axis_line_diagonal_snaps_to_dominant_axis() {
+        // Steeper than 45° (rises 3 in y per 1 in x): the vertical component
+        // dominates, so it snaps to a VERTICAL line → position axis X.
+        let stroke = vec![p(0.0, 0.0), p(0.5, 1.5), p(1.0, 3.0)];
+        let (axis, coord) = fit_axis_line(&stroke).expect("diagonal snaps, no rejection");
+        assert_eq!(axis, ParameterAxis::X);
+        // Coordinate is the centroid's x.
+        assert!((coord - 0.5).abs() < 1e-5, "centroid x, got {coord}");
+    }
+
+    #[test]
+    fn fit_axis_line_rejects_a_closed_loop() {
+        // A square loop: max perpendicular deviation ≈ half the span — far
+        // over the 15% line-likeness ratio.
+        let loop_stroke = vec![
+            p(0.0, 0.0),
+            p(2.0, 0.0),
+            p(2.0, 2.0),
+            p(0.0, 2.0),
+            p(0.0, 0.1),
+        ];
+        assert_eq!(fit_axis_line(&loop_stroke), None);
+    }
+
+    #[test]
+    fn fit_axis_line_rejects_an_l_shape() {
+        // Two equal arms at a right angle: the corner sits well off any single
+        // fitted line.
+        let l_stroke = vec![
+            p(0.0, 0.0),
+            p(1.0, 0.0),
+            p(2.0, 0.0),
+            p(2.0, 1.0),
+            p(2.0, 2.0),
+        ];
+        assert_eq!(fit_axis_line(&l_stroke), None);
+    }
+
+    #[test]
+    fn fit_axis_line_rejects_short_strokes() {
+        // Two points 2 cm apart: under the 0.05 m span floor.
+        assert_eq!(fit_axis_line(&[p(0.0, 0.0), p(0.0, 0.02)]), None);
+        // Fewer than 2 points.
+        assert_eq!(fit_axis_line(&[]), None);
+        assert_eq!(fit_axis_line(&[p(1.0, 1.0)]), None);
     }
 
     #[test]
