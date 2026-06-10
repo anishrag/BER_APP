@@ -80,7 +80,7 @@ impl AppController {
     pub fn active_living_area_index(&self) -> Option<usize> {
         match self.document.active {
             ActiveShape::LivingArea(i) => Some(i),
-            ActiveShape::Outline | ActiveShape::PhaseArea => None,
+            ActiveShape::Outline | ActiveShape::PhaseArea | ActiveShape::StepArea => None,
         }
     }
 

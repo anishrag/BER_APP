@@ -193,8 +193,10 @@ impl AppController {
             .unwrap_or(&[]);
         let record = self.current_record.as_mut().unwrap();
         document::ensure_storey_constructions(&mut record.data, idx, regions);
+        // Step regions are not wired yet (slice C): no session step areas, so
+        // floors keep their levels untouched.
         record.data.storeys[idx] =
-            document::resolve_storey(&self.document.storeys[idx], &record.data, idx, regions);
+            document::resolve_storey(&self.document.storeys[idx], &record.data, idx, regions, &[]);
         // Floors are already phase-correct from the partition; this stamps the
         // phase onto the just-rebuilt WALLS from the same session areas.
         document::stamp_wall_phases(&mut record.data, idx, regions);

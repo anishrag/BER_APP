@@ -21,12 +21,14 @@ mod exposure;
 mod load;
 mod phase;
 mod resolve;
+mod step;
 
 /// Derive full per-wall exposure coverage — the shell's `commit_to_ber` uses it.
 pub use exposure::{range_at, wall_coverage};
 pub use load::reconstruct_living_areas;
 pub use phase::{phase_regions_from_floors, stamp_wall_phases, PhaseRegion};
 pub use resolve::{ensure_storey_constructions, resolve_storey, DEFAULT_CEILING_HEIGHT_M};
+pub use step::{step_regions_from_floors, StepRegion};
 
 use datatypes::ber::structural::WallExposure;
 use domain::points::Point2f32;
@@ -111,6 +113,9 @@ pub enum ActiveShape {
     /// The in-flight construction-phase area being dimensioned (held in
     /// `phase_shape`). There's only ever one at a time, so no index.
     PhaseArea,
+    /// The in-flight floor-step area being dimensioned (held in `step_shape`).
+    /// There's only ever one at a time, so no index.
+    StepArea,
 }
 
 /// A provisional curved wall awaiting its two attach dimensions before being
@@ -191,6 +196,10 @@ pub struct StoreyDoc {
     /// The in-flight construction-phase area being dimensioned (a sub-shape, like
     /// a living area, but tagged with a phase at the end rather than kept).
     pub phase_shape: Option<ShapeSlot>,
+    /// The in-flight floor-step area being dimensioned (a sub-shape, like a
+    /// living area, but assigned a floor level at the end rather than kept).
+    #[serde(default)]
+    pub step_shape: Option<ShapeSlot>,
     /// Which shape the live editing buffer below currently mirrors.
     pub active: ActiveShape,
 
@@ -329,6 +338,7 @@ impl StoreyDoc {
                 }
             }
             ActiveShape::PhaseArea => self.phase_shape = Some(slot),
+            ActiveShape::StepArea => self.step_shape = Some(slot),
         }
     }
 
@@ -338,6 +348,7 @@ impl StoreyDoc {
             ActiveShape::Outline => self.outline.clone(),
             ActiveShape::LivingArea(i) => self.living_areas.get(i).cloned().unwrap_or_default(),
             ActiveShape::PhaseArea => self.phase_shape.clone().unwrap_or_default(),
+            ActiveShape::StepArea => self.step_shape.clone().unwrap_or_default(),
         };
         self.floor_plan = slot.floor_plan;
         self.dimensioning = slot.dimensioning;
@@ -438,6 +449,16 @@ impl StoreyDoc {
         self.pending_arc = None;
         self.edit_state = EditState::default();
     }
+
+    /// Make `slot` the in-flight step area and the active shape (loading it into
+    /// the live buffer, dropping any in-flight arc / edit cursor).
+    pub fn begin_step_area(&mut self, slot: ShapeSlot) {
+        self.step_shape = Some(slot);
+        self.active = ActiveShape::StepArea;
+        self.load_active_into_buffer();
+        self.pending_arc = None;
+        self.edit_state = EditState::default();
+    }
 }
 
 #[cfg(test)]
@@ -502,5 +523,33 @@ mod tests {
         );
         // no pieces at all → None
         assert!(pick_piece_for_stroke(vec![], &stroke).is_none());
+    }
+
+    /// An active `StepArea` round-trips through `step_shape`: `begin_step_area`
+    /// checks the slot out into the live buffer, `sync_active` writes buffer
+    /// changes back to the slot, and `load_active_into_buffer` restores them.
+    #[test]
+    fn step_area_round_trips_sync_and_load_through_step_shape() {
+        let plan =
+            FloorPlan::from_clean_ring(&[p(0., 0.), p(2., 0.), p(2., 2.), p(0., 2.)]).unwrap();
+        let mut doc = StoreyDoc::default();
+        doc.begin_step_area(ShapeSlot {
+            floor_plan: plan,
+            dimensioning: DimensionState::default(),
+        });
+        assert_eq!(doc.active, ActiveShape::StepArea);
+        assert_eq!(doc.floor_plan.get_points().len(), 4, "slot checked out");
+
+        // Mutate the live buffer, sync back → the change lands in step_shape.
+        doc.dimensioning.scale_set = true;
+        doc.sync_active();
+        assert!(doc.step_shape.as_ref().unwrap().dimensioning.scale_set);
+
+        // Clobber the buffer, reload → the slot's state comes back.
+        doc.dimensioning = DimensionState::default();
+        doc.floor_plan = FloorPlan::default();
+        doc.load_active_into_buffer();
+        assert!(doc.dimensioning.scale_set);
+        assert_eq!(doc.floor_plan.get_points().len(), 4);
     }
 }

@@ -1,7 +1,7 @@
 //! The resolve projection: editing model → resolved BER geometry. The inverse
 //! of the load path (`load.rs`). PURE over its inputs — the shell owns *when*
 //! to project (commit/materialize/persist) and the revision bookkeeping.
-use crate::{PhaseRegion, StoreyDoc};
+use crate::{PhaseRegion, StepRegion, StoreyDoc};
 use datatypes::ber::ber_struct::Ber;
 use datatypes::ber::common::{ConstructionPhase, ItemId};
 use datatypes::ber::structural::{FloorRegions, Storey, WallRegions};
@@ -30,12 +30,16 @@ pub fn ensure_storey_constructions(ber: &mut Ber, idx: usize, phase_regions: &[P
 /// caller has already synced the active buffer and ensured the storey + its
 /// constructions exist ([`ensure_storey_constructions`]), so this only LOOKS UP
 /// construction ids and never mutates `ber` — letting it run for ANY storey,
-/// not just the active one. `phase_regions` are the storey's session areas.
+/// not just the active one. `phase_regions` and `step_regions` are the
+/// storey's session areas: phases PARTITION the floor by construction, then
+/// steps RE-SPLIT the resulting regions and stamp `level_m` on the pieces
+/// (sequential composition — the phase partition is untouched).
 pub fn resolve_storey(
     s: &StoreyDoc,
     ber: &Ber,
     idx: usize,
     phase_regions: &[PhaseRegion],
+    step_regions: &[StepRegion],
 ) -> Storey {
     // The storey footprint is always the OUTLINE (never a living area, even
     // when one is active). One ring → one FloorRegion.
@@ -128,10 +132,31 @@ pub fn resolve_storey(
             FloorRegions { regions }
         };
     }
+    // Step areas re-split the (possibly phase-partitioned) floor regions and
+    // stamp `level_m` on the intersected pieces. Skipped entirely when empty —
+    // `with_levels` would be a no-op anyway, but not calling it at all keeps
+    // the verbatim branch above free of geo ops (exact point round-trip).
+    if !step_regions.is_empty() {
+        let step_areas: Vec<(Vec<Point2f64>, f64)> = step_regions
+            .iter()
+            .map(|r| {
+                let ring: Vec<Point2f64> = r.polygon.iter().copied().map(to_f64).collect();
+                (ring, r.level_m)
+            })
+            .collect();
+        storey.floors = std::mem::take(&mut storey.floors).with_levels(&step_areas);
+    }
     storey.living_areas =
         FloorRegions::from_vertex_lists(living_area_lists, DEFAULT_CEILING_HEIGHT_M, floor_cid);
     // Re-derive walls from exposure (empty when nothing is marked),
     // preserving the construction link of the region a split came from.
+    // SEAM (deferred until after roofs): riser WALL regions will be derived HERE,
+    // from adjacent floor regions with differing `level_m` — one wall region per
+    // shared boundary segment, spanning the two levels; segments whose lower side
+    // sits below grade (level_m < 0) get an exposed-to-ground exposure, plus
+    // below-grade perimeter strips along the outline of lowered regions. The
+    // shared-edge extraction belongs in datatypes (a FloorRegions method); the
+    // derivation belongs here, alongside the rebuild it must merge with.
     storey.walls = WallRegions::rebuild_preserving(
         wall_segments,
         &storey.walls,
@@ -175,7 +200,7 @@ mod tests {
 
         let mut ber = Ber::default();
         ensure_storey_constructions(&mut ber, 0, &[]);
-        let storey = resolve_storey(&doc, &ber, 0, &[]);
+        let storey = resolve_storey(&doc, &ber, 0, &[], &[]);
 
         // Floor: the whole outline verbatim, extruded to the default height.
         assert_eq!(storey.floors.regions.len(), 1);
@@ -197,6 +222,95 @@ mod tests {
             .any(|q| (q.z - DEFAULT_CEILING_HEIGHT_M).abs() < 1e-9));
 
         assert!(storey.living_areas.regions.is_empty());
+    }
+
+    /// A finalised square StoreyDoc with the given corner points as its outline.
+    fn square_doc(pts: &[Point2f32]) -> StoreyDoc {
+        let plan = FloorPlan::from_clean_ring(pts).unwrap();
+        let mut doc = StoreyDoc::default();
+        doc.dimensioning.scale_set = true;
+        doc.floor_plan = plan.clone();
+        doc.outline = ShapeSlot {
+            floor_plan: plan,
+            dimensioning: doc.dimensioning.clone(),
+        };
+        doc
+    }
+
+    /// One step region over the left half of a 4×4 storey splits the floor into
+    /// two regions: the stepped half carrying its `level_m`, the untouched half
+    /// at 0.0.
+    #[test]
+    fn step_region_splits_floor_into_level_regions() {
+        let doc = square_doc(&[
+            Point2f32::new(0.0, 0.0),
+            Point2f32::new(4.0, 0.0),
+            Point2f32::new(4.0, 4.0),
+            Point2f32::new(0.0, 4.0),
+        ]);
+        let steps = vec![crate::StepRegion {
+            polygon: vec![
+                Point2f32::new(0.0, 0.0),
+                Point2f32::new(2.0, 0.0),
+                Point2f32::new(2.0, 4.0),
+                Point2f32::new(0.0, 4.0),
+            ],
+            level_m: -0.3,
+        }];
+
+        let mut ber = Ber::default();
+        ensure_storey_constructions(&mut ber, 0, &[]);
+        let storey = resolve_storey(&doc, &ber, 0, &[], &steps);
+
+        assert_eq!(storey.floors.regions.len(), 2);
+        // Unsigned shoelace area of a ring (no geo dependency in this crate).
+        let ring_area = |ring: &[Point2f64]| {
+            let n = ring.len();
+            let mut s = 0.0;
+            for i in 0..n {
+                let (a, b) = (ring[i], ring[(i + 1) % n]);
+                s += a.x * b.y - b.x * a.y;
+            }
+            s.abs() / 2.0
+        };
+        let rings = storey.floors.to_vertex_lists();
+        let area_at_level = |level: f64| {
+            storey
+                .floors
+                .regions
+                .iter()
+                .zip(&rings)
+                .filter(|(r, _)| (r.level_m - level).abs() < 1e-9)
+                .map(|(_, ring)| ring_area(ring))
+                .sum::<f64>()
+        };
+        assert!((area_at_level(-0.3) - 8.0).abs() < 1e-6, "stepped half");
+        assert!((area_at_level(0.0) - 8.0).abs() < 1e-6, "untouched half");
+    }
+
+    /// Empty `step_regions` performs NO geo ops: the floor ring's stored points
+    /// are exactly the outline's points (round-trip / collinearity guard).
+    #[test]
+    fn empty_step_regions_round_trip_floor_points_exactly() {
+        let pts = vec![
+            Point2f32::new(0.1, 0.2),
+            Point2f32::new(4.3, 0.2),
+            Point2f32::new(4.3, 3.7),
+            Point2f32::new(0.1, 3.7),
+        ];
+        let doc = square_doc(&pts);
+        let mut ber = Ber::default();
+        ensure_storey_constructions(&mut ber, 0, &[]);
+        let storey = resolve_storey(&doc, &ber, 0, &[], &[]);
+
+        let expected: Vec<Vec<Point2f64>> = doc
+            .outline
+            .floor_plan
+            .polygons()
+            .into_iter()
+            .map(|ring| ring.into_iter().map(domain::points::to_f64).collect())
+            .collect();
+        assert_eq!(storey.floors.to_vertex_lists(), expected);
     }
 
     /// ensure_storey_constructions grows the storeys vec and registers the
