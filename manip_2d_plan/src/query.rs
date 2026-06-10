@@ -193,6 +193,15 @@ impl FloorPlan {
         self.parametric.scale_all(factor);
     }
 
+    /// Translate every coordinate in the plan by `(dx, dy)`: each X/Y
+    /// parameter value and each X/Y Constant. Wall lengths are invariant
+    /// (pure rigid translation); parameter IDs and expressions are untouched.
+    /// Used to pin a position-dimensioned area's free axis by rigid-moving
+    /// the whole area so a measured wall lands exactly.
+    pub fn translate_all(&mut self, dx: f32, dy: f32) {
+        self.parametric.translate_all(dx, dy);
+    }
+
     /// Set the value of a single parameter directly. Used to apply a user-
     /// entered dimension to the unknown parameter a wall constrains.
     pub fn set_parameter(&mut self, param_id: ParameterId, value: f32) {

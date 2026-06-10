@@ -44,6 +44,7 @@ pub enum Axis {
 /// Which Cartesian axis a parameter's value lives on. A parameter is used as
 /// either an `x_expr` or a `y_expr` (never both), so its axis is well-defined.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
 pub enum ParameterAxis {
     /// Parameter controls an x-coordinate.
     X,
@@ -255,6 +256,45 @@ impl ParametricPlan {
                 if let CoordinateExpression::Constant(c) = &mut vertex.y_expr {
                     *c *= factor;
                 }
+            }
+        }
+    }
+
+    /// Translate every coordinate in the plan by `(dx, dy)`: each X/Y
+    /// parameter value and each X/Y Constant. Wall lengths are invariant
+    /// (pure rigid translation); parameter IDs and expressions are untouched.
+    ///
+    /// A parameter's axis comes from the vertex expressions referencing it
+    /// (a parameter is only ever an `x_expr` OR a `y_expr`); an orphaned
+    /// parameter no vertex references has no axis and is left alone — it
+    /// doesn't affect geometry.
+    pub fn translate_all(&mut self, dx: f32, dy: f32) {
+        let mut x_params: HashSet<ParameterId> = HashSet::new();
+        let mut y_params: HashSet<ParameterId> = HashSet::new();
+        for ring in &mut self.rings {
+            for vertex in ring {
+                match &mut vertex.x_expr {
+                    CoordinateExpression::Constant(c) => *c += dx,
+                    CoordinateExpression::Parameter(p) => {
+                        x_params.insert(*p);
+                    }
+                }
+                match &mut vertex.y_expr {
+                    CoordinateExpression::Constant(c) => *c += dy,
+                    CoordinateExpression::Parameter(p) => {
+                        y_params.insert(*p);
+                    }
+                }
+            }
+        }
+        for p in x_params {
+            if let Some(v) = self.parameters.get_mut(&p) {
+                *v += dx;
+            }
+        }
+        for p in y_params {
+            if let Some(v) = self.parameters.get_mut(&p) {
+                *v += dy;
             }
         }
     }
@@ -2011,6 +2051,31 @@ mod tests {
         // Every length should halve.
         assert!((post_lengths.0 - pre_lengths.0 * 0.5).abs() < 0.01);
         assert!((post_lengths.1 - pre_lengths.1 * 0.5).abs() < 0.01);
+    }
+
+    #[test]
+    fn translate_all_shifts_every_param_and_constant() {
+        // Rectangle with the origin off (0,0): after orthogonal constraints,
+        // V0 is the constant origin and other vertices' matching coords have
+        // been collapsed to constants too — all must shift along with the
+        // parameters.
+        let mut plan = build_plan(&[(10.0, 20.0), (210.0, 20.0), (210.0, 120.0), (10.0, 120.0)]);
+        let before = plan.ring_points(0);
+        let pre_lengths: Vec<f32> = (0..4).map(|i| plan.wall_length(0, i).unwrap()).collect();
+        plan.translate_all(3.5, -7.25);
+        let after = plan.ring_points(0);
+        for (b, a) in before.iter().zip(&after) {
+            assert!(
+                (a.x - b.x - 3.5).abs() < 1e-3 && (a.y - b.y + 7.25).abs() < 1e-3,
+                "every vertex shifts by exactly (dx, dy): {b:?} -> {a:?}"
+            );
+        }
+        for (i, pre) in pre_lengths.iter().enumerate() {
+            assert!(
+                (plan.wall_length(0, i).unwrap() - pre).abs() < 1e-3,
+                "wall {i} length invariant under translation"
+            );
+        }
     }
 
     #[test]

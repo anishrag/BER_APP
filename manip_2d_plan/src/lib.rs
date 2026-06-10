@@ -274,12 +274,69 @@ impl FloorPlan {
         area: &FloorPlan,
     ) -> std::collections::HashSet<ParameterId> {
         let mut pinned = std::collections::HashSet::new();
+        self.scan_outline_contacts(area, &mut |idx, axis| {
+            let pid = match axis {
+                ParameterAxis::X => area.vertex_x_param(0, idx),
+                ParameterAxis::Y => area.vertex_y_param(0, idx),
+            };
+            if let Some(pid) = pid {
+                pinned.insert(pid);
+            }
+        });
+        pinned
+    }
+
+    /// Axes along which `area`'s absolute position is NOT fixed by this
+    /// boundary plan — the whole area could translate along a listed axis
+    /// without violating any snapped wall / shared corner / diagonal-facet
+    /// contact, so its drawn position on that axis is approximate. Same
+    /// contact tests as [`params_pinned_to_outline`](Self::params_pinned_to_outline),
+    /// but per AXIS and including Constant coords (a pin on V0 fixes an axis
+    /// without any param existing).
+    ///
+    /// Axis A is fixed iff any `area` wall perpendicular to A overlaps a
+    /// parallel boundary wall at the same coordinate, OR any `area` vertex
+    /// coincides with a boundary corner / lies on a boundary diagonal edge /
+    /// sits on a curve facet (those fix BOTH axes). Returned in stable order
+    /// X then Y; degenerate inputs (<3 vertices on either ring — nothing to
+    /// scan) report both axes free.
+    pub fn free_position_axes(&self, area: &FloorPlan) -> Vec<ParameterAxis> {
+        let (mut x_fixed, mut y_fixed) = (false, false);
+        self.scan_outline_contacts(area, &mut |_idx, axis| match axis {
+            ParameterAxis::X => x_fixed = true,
+            ParameterAxis::Y => y_fixed = true,
+        });
+        let mut free = Vec::new();
+        if !x_fixed {
+            free.push(ParameterAxis::X);
+        }
+        if !y_fixed {
+            free.push(ParameterAxis::Y);
+        }
+        free
+    }
+
+    /// The contact scan shared by
+    /// [`params_pinned_to_outline`](Self::params_pinned_to_outline) and
+    /// [`free_position_axes`](Self::free_position_axes): walks `area`'s ring-0
+    /// geometry against this plan's ring-0 outline and reports every boundary
+    /// contact as a `pin(vertex_idx, axis)` event (vertex indices are into
+    /// `area`'s ring 0):
+    ///  - an axis-aligned `area` wall overlapping a parallel outline wall at
+    ///    the same coordinate pins the wall's PERPENDICULAR axis at the wall's
+    ///    start vertex;
+    ///  - an `area` vertex coinciding with an outline CORNER pins both axes;
+    ///  - an `area` edge lying on an outline DIAGONAL edge pins both axes of
+    ///    both endpoints;
+    ///  - an `area` vertex sitting on a non-axis-aligned outline facet (curve
+    ///    facet or diagonal) pins both axes.
+    fn scan_outline_contacts(&self, area: &FloorPlan, pin: &mut dyn FnMut(usize, ParameterAxis)) {
         let outline = self.parametric.ring_points(0);
         let no = outline.len();
         let apts = area.get_points();
         let n = apts.len();
         if no < 3 || n < 3 {
-            return pinned;
+            return;
         }
         let eps = 1e-3_f32;
         // Outline walls by axis: vertical (x, ylo, yhi); horizontal (y, xlo, xhi).
@@ -304,9 +361,7 @@ impl FloorPlan {
                     .iter()
                     .any(|(x, ylo, yhi)| (x - a.x).abs() < eps && overlaps(lo, hi, *ylo, *yhi))
                 {
-                    if let Some(pid) = area.vertex_x_param(0, i) {
-                        pinned.insert(pid);
-                    }
+                    pin(i, ParameterAxis::X);
                 }
             } else if (a.y - b.y).abs() < eps {
                 let (lo, hi) = (a.x.min(b.x), a.x.max(b.x));
@@ -314,9 +369,7 @@ impl FloorPlan {
                     .iter()
                     .any(|(y, xlo, xhi)| (y - a.y).abs() < eps && overlaps(lo, hi, *xlo, *xhi))
                 {
-                    if let Some(pid) = area.vertex_y_param(0, i) {
-                        pinned.insert(pid);
-                    }
+                    pin(i, ParameterAxis::Y);
                 }
             }
         }
@@ -330,12 +383,8 @@ impl FloorPlan {
                 .iter()
                 .any(|o| (o.x - v.x).abs() < eps && (o.y - v.y).abs() < eps)
             {
-                if let Some(pid) = area.vertex_x_param(0, i) {
-                    pinned.insert(pid);
-                }
-                if let Some(pid) = area.vertex_y_param(0, i) {
-                    pinned.insert(pid);
-                }
+                pin(i, ParameterAxis::X);
+                pin(i, ParameterAxis::Y);
             }
         }
         // A region edge lying ON an outline DIAGONAL edge (a wall the room
@@ -370,12 +419,8 @@ impl FloorPlan {
             });
             if on_diagonal {
                 for idx in [i, (i + 1) % n] {
-                    if let Some(pid) = area.vertex_x_param(0, idx) {
-                        pinned.insert(pid);
-                    }
-                    if let Some(pid) = area.vertex_y_param(0, idx) {
-                        pinned.insert(pid);
-                    }
+                    pin(idx, ParameterAxis::X);
+                    pin(idx, ParameterAxis::Y);
                 }
             }
         }
@@ -407,15 +452,10 @@ impl FloorPlan {
                 (oa.x - ob.x).abs() >= eps && (oa.y - ob.y).abs() >= eps && on_seg_tol(v, oa, ob)
             });
             if on_facet {
-                if let Some(pid) = area.vertex_x_param(0, i) {
-                    pinned.insert(pid);
-                }
-                if let Some(pid) = area.vertex_y_param(0, i) {
-                    pinned.insert(pid);
-                }
+                pin(i, ParameterAxis::X);
+                pin(i, ParameterAxis::Y);
             }
         }
-        pinned
     }
 
     /// Concrete vertex positions of the first polygon (backwards-compatible
@@ -502,4 +542,160 @@ fn snap_open_fixed_ends_stepped(pts: &[Point2f32]) -> Vec<Point2f32> {
     }
     out.push(last);
     out
+}
+
+#[cfg(test)]
+mod position_axis_tests {
+    use super::*;
+
+    fn p(x: f32, y: f32) -> Point2f32 {
+        Point2f32::new(x, y)
+    }
+
+    /// 10 x 8 storey outline.
+    fn rect_outline() -> FloorPlan {
+        FloorPlan::from_clean_ring(&[p(0.0, 0.0), p(10.0, 0.0), p(10.0, 8.0), p(0.0, 8.0)]).unwrap()
+    }
+
+    /// A fully interior area touches no boundary — both axes are free, in
+    /// the documented stable order X then Y.
+    #[test]
+    fn interior_area_is_free_on_both_axes() {
+        let outline = rect_outline();
+        let area =
+            FloorPlan::from_clean_ring(&[p(2.0, 2.0), p(5.0, 2.0), p(5.0, 4.0), p(2.0, 4.0)])
+                .unwrap();
+        assert_eq!(
+            outline.free_position_axes(&area),
+            vec![ParameterAxis::X, ParameterAxis::Y]
+        );
+    }
+
+    /// An area hugging ONE outline wall mid-span (no corner reached) is fixed
+    /// on the wall's perpendicular axis only — it could still slide along the
+    /// wall. Note the shared coordinate sits on the area's CONSTANT origin
+    /// vertex, so this fixedness is invisible to `params_pinned_to_outline`
+    /// (no param exists to pin) but must still register here.
+    #[test]
+    fn mid_span_wall_hug_leaves_only_the_along_wall_axis_free() {
+        let outline = rect_outline();
+        // Hugs the bottom wall (y = 0): Y fixed, X free.
+        let bottom =
+            FloorPlan::from_clean_ring(&[p(2.0, 0.0), p(5.0, 0.0), p(5.0, 3.0), p(2.0, 3.0)])
+                .unwrap();
+        assert_eq!(outline.free_position_axes(&bottom), vec![ParameterAxis::X]);
+        // Hugs the left wall (x = 0): X fixed, Y free.
+        let left =
+            FloorPlan::from_clean_ring(&[p(0.0, 2.0), p(3.0, 2.0), p(3.0, 5.0), p(0.0, 5.0)])
+                .unwrap();
+        assert_eq!(outline.free_position_axes(&left), vec![ParameterAxis::Y]);
+    }
+
+    /// An area vertex coinciding with an outline corner fixes both axes.
+    #[test]
+    fn corner_contact_fixes_both_axes() {
+        let outline = rect_outline();
+        let area =
+            FloorPlan::from_clean_ring(&[p(0.0, 0.0), p(3.0, 0.0), p(3.0, 3.0), p(0.0, 3.0)])
+                .unwrap();
+        assert!(outline.free_position_axes(&area).is_empty());
+    }
+
+    /// An area vertex sitting on a DIAGONAL outline facet fixes both axes,
+    /// even with no axis-aligned wall overlap and no shared corner.
+    #[test]
+    fn vertex_on_diagonal_facet_fixes_both_axes() {
+        // 10x10 square with the top-right corner cut along x + y = 16.
+        let outline = FloorPlan::from_clean_ring(&[
+            p(0.0, 0.0),
+            p(10.0, 0.0),
+            p(10.0, 6.0),
+            p(6.0, 10.0),
+            p(0.0, 10.0),
+        ])
+        .unwrap();
+        // (8, 8) lies on the diagonal; no other contact anywhere.
+        let area =
+            FloorPlan::from_clean_ring(&[p(4.0, 4.0), p(8.0, 4.0), p(8.0, 8.0), p(4.0, 8.0)])
+                .unwrap();
+        assert!(outline.free_position_axes(&area).is_empty());
+    }
+
+    /// A CUT region keeps an outline arc including its corners, so both axes
+    /// are fixed — even though its origin coords are Constants with no
+    /// parameters to pin.
+    #[test]
+    fn cut_region_fixes_both_axes() {
+        let outline = rect_outline();
+        // Straight vertical cut at x = 4, reaching both walls.
+        let stroke = vec![
+            p(4.0, 0.1),
+            p(4.0, 2.0),
+            p(4.0, 4.0),
+            p(4.0, 6.0),
+            p(4.0, 7.9),
+        ];
+        match outline
+            .carve_or_cut(&stroke, &SubareaTuning::default(), false)
+            .unwrap()
+        {
+            SubareaOutcome::Cut(a, b) => {
+                assert!(
+                    outline.free_position_axes(&a).is_empty(),
+                    "cut region a is position-fixed on both axes"
+                );
+                assert!(
+                    outline.free_position_axes(&b).is_empty(),
+                    "cut region b is position-fixed on both axes"
+                );
+            }
+            other => panic!("expected a Cut, got {other:?}"),
+        }
+    }
+
+    /// Degenerate input (<3 vertices) — nothing to scan, both axes free.
+    #[test]
+    fn degenerate_area_reports_both_axes_free() {
+        let outline = rect_outline();
+        assert_eq!(
+            outline.free_position_axes(&FloorPlan::default()),
+            vec![ParameterAxis::X, ParameterAxis::Y]
+        );
+    }
+
+    /// `translate_all` rigid-moves the whole plan: every point shifts by
+    /// exactly (dx, dy) and every wall length is unchanged. The L-shape gives
+    /// non-V0 constants (coords collapsed onto the origin's lines) to verify
+    /// constants translate along with parameters.
+    #[test]
+    fn translate_all_shifts_points_uniformly_and_preserves_lengths() {
+        let mut plan = FloorPlan::from_clean_ring(&[
+            p(0.0, 0.0),
+            p(6.0, 0.0),
+            p(6.0, 3.0),
+            p(3.0, 3.0),
+            p(3.0, 5.0),
+            p(0.0, 5.0),
+        ])
+        .unwrap();
+        let before = plan.get_points();
+        let n = before.len();
+        let pre_lengths: Vec<f32> = (0..n).map(|i| plan.wall_length(0, i).unwrap()).collect();
+        let (dx, dy) = (2.5, -1.75);
+        plan.translate_all(dx, dy);
+        let after = plan.get_points();
+        assert_eq!(before.len(), after.len());
+        for (b, a) in before.iter().zip(&after) {
+            assert!(
+                (a.x - b.x - dx).abs() < 1e-3 && (a.y - b.y - dy).abs() < 1e-3,
+                "every vertex shifts by exactly (dx, dy): {b:?} -> {a:?}"
+            );
+        }
+        for (i, pre) in pre_lengths.iter().enumerate() {
+            assert!(
+                (plan.wall_length(0, i).unwrap() - pre).abs() < 1e-3,
+                "wall {i} length invariant under translation"
+            );
+        }
+    }
 }
