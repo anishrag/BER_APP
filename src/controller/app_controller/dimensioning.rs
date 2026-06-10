@@ -170,10 +170,12 @@ impl AppController {
         {
             let coord_m = self.document.resolve_ceiling_line_position(prompt, value)?;
             let (axis, side) = (*axis, *side);
+            // Position stage implies un-snapped — no snap to carry forward.
             self.pending_ceiling_step = Some(PendingCeilingStep::Amount {
                 axis,
                 coord_m,
                 side,
+                snap: None,
             });
             return Ok(());
         }
@@ -197,10 +199,12 @@ impl AppController {
         }) = self.pending_ceiling_step.as_ref()
         {
             let (axis, coord_m, side) = (*axis, *coord_m, *side);
+            // Position stage implies un-snapped — no snap to carry forward.
             self.pending_ceiling_step = Some(PendingCeilingStep::Amount {
                 axis,
                 coord_m,
                 side,
+                snap: None,
             });
             return;
         }

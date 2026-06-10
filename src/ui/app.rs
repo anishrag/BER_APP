@@ -317,6 +317,7 @@ impl eframe::App for BerApp {
                     ceiling_step_region_polygons,
                     pending_ceiling_step_line,
                     pending_ceiling_step_side_rects,
+                    ceiling_step_snap_tag,
                     ceiling_step_orientation_pending,
                     ceiling_step_side_pending,
                     ceiling_step_amount_pending,
@@ -376,6 +377,7 @@ impl eframe::App for BerApp {
                         controller_ref.ceiling_step_region_polygons(),
                         controller_ref.pending_ceiling_step_line(),
                         controller_ref.pending_ceiling_step_side_rects(),
+                        controller_ref.ceiling_step_snap_tag(),
                         controller_ref.ceiling_step_orientation_pending(),
                         controller_ref.ceiling_step_side_pending(),
                         controller_ref.ceiling_step_amount_pending(),
@@ -471,6 +473,7 @@ impl eframe::App for BerApp {
                     &ceiling_step_region_polygons,
                     pending_ceiling_step_line,
                     &pending_ceiling_step_side_rects,
+                    ceiling_step_snap_tag.as_ref(),
                     ceiling_step_orientation_pending,
                     ceiling_step_side_pending,
                     ceiling_step_amount_pending,
@@ -698,6 +701,9 @@ impl eframe::App for BerApp {
                                     "assign_ceiling_step_delta",
                                     controller.borrow_mut().assign_ceiling_step_delta(delta_m),
                                 );
+                            }
+                            SketchEvent::UnsnapCeilingStepLine => {
+                                controller.borrow_mut().unsnap_ceiling_step_line();
                             }
                             SketchEvent::CancelPendingCeilingStep => {
                                 controller.borrow_mut().cancel_pending_ceiling_step();

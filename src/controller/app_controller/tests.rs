@@ -3390,3 +3390,198 @@ fn ceiling_step_amount_rejections_keep_the_pending_line() {
     c.materialize();
     assert_eq!(roof_flat_zs(&c).len(), 2);
 }
+
+// ─── Ceiling-step line snapping ─────────────────────────────────────────────
+
+/// An L-shaped storey (10×10 with the top-right 4×6 bite removed), default
+/// ceiling height set and ceiling-step mode entered. Its vertical wall at
+/// x = 6 and horizontal wall at y = 4 are the only NON-extreme parallel
+/// references — the snap targets (the bbox-extreme boundary walls never
+/// snap; a 10×10 square has no target at all).
+fn ceiling_ready_l_controller() -> AppController {
+    let p = |x: f32, y: f32| Point2f32::new(x, y);
+    let mut c = AppController::new(crate::engine::open_db(":memory:").unwrap());
+    let _ = c.create_ber(
+        "T".into(),
+        chrono::NaiveDate::from_ymd_opt(2026, 1, 1).unwrap(),
+    );
+    c.document.floor_plan = FloorPlan::from_clean_ring(&[
+        p(0., 0.),
+        p(10., 0.),
+        p(10., 4.),
+        p(6., 4.),
+        p(6., 10.),
+        p(0., 10.),
+    ])
+    .unwrap();
+    c.document.dimensioning.scale_set = true;
+    c.document.dimensioning.known_params = c.document.floor_plan.all_active_params();
+    c.commit_to_ber().unwrap();
+    c.set_default_ceiling_height(2.4).expect("height applies");
+    c.set_sketch_mode(SketchMode::Storey2D); // the height gate switched to 3D
+    c.set_ceiling_step_mode(true);
+    assert!(c.ceiling_step_mode());
+    c
+}
+
+/// A stroke within snap tolerance of a parallel wall SNAPS onto it: the
+/// line's coordinate becomes the wall's exactly, the snap tag renders (empty
+/// options + skippable — the menu offers only "Don't snap"), the side pick
+/// SKIPS the position prompt (the coordinate is exact by construction), and
+/// the assigned step splits the roof at the wall's coordinate.
+#[test]
+fn ceiling_step_line_within_tolerance_snaps_to_the_wall() {
+    let mut c = ceiling_ready_l_controller();
+    // Drawn at x ≈ 5.9 — within 0.2 of the interior wall at x = 6.
+    c.apply_ceiling_step_stroke_event(&[(5.88, 0.5), (5.92, 4.0), (5.9, 9.5)]);
+    assert!(c.ceiling_step_side_pending());
+    let ((lx, _), _) = c.pending_ceiling_step_line().unwrap();
+    assert!((lx - 6.0).abs() < 1e-6, "coordinate snapped to the wall");
+
+    let tag = c.ceiling_step_snap_tag().expect("snap tag present");
+    assert!((tag.pos.0 - 6.0).abs() < 1e-4, "tag on the snapped line");
+    assert!(
+        (tag.from.0 - 5.9).abs() < 0.05,
+        "identity = the drawn point"
+    );
+    assert_eq!(
+        tag.current_kind,
+        Some(manip_2d_plan::SnapKind::ToParallelWall)
+    );
+    assert!(
+        tag.options.is_empty() && tag.skippable,
+        "menu = Don't snap only"
+    );
+
+    c.ceiling_step_tap(2.0, 5.0); // left of the line → Less side
+    assert!(
+        c.position_prompt_for_ui().is_none(),
+        "snapped line skips the position prompt"
+    );
+    assert!(c.ceiling_step_amount_pending(), "straight to the amount");
+    assert!(c.ceiling_step_snap_tag().is_some(), "tag still clickable");
+
+    c.assign_ceiling_step_delta(0.3).expect("amount applies");
+    c.materialize();
+    // The stepped (Less) session piece ends exactly at the wall, x = 6.
+    let session = &c.ceiling_step_regions[&0];
+    assert_eq!(session.len(), 1);
+    let max_x = session[0]
+        .polygon
+        .iter()
+        .map(|p| p.x)
+        .fold(f32::NEG_INFINITY, f32::max);
+    assert!(
+        (max_x - 6.0).abs() < 1e-3,
+        "assign landed at the wall's coordinate (got {max_x})"
+    );
+}
+
+/// Beyond the snap tolerance nothing changes: no snap, no tag, and the side
+/// pick opens the position prompt as normal with the drawn coordinate.
+#[test]
+fn ceiling_step_line_beyond_tolerance_does_not_snap() {
+    let mut c = ceiling_ready_l_controller();
+    // Drawn at x ≈ 5.0 — 1.0 m from the wall at x = 6.
+    c.apply_ceiling_step_stroke_event(&[(4.98, 0.5), (5.02, 4.0), (5.0, 9.5)]);
+    assert!(c.ceiling_step_side_pending());
+    let ((lx, _), _) = c.pending_ceiling_step_line().unwrap();
+    assert!((lx - 5.0).abs() < 0.05, "drawn coordinate kept");
+    assert!(c.ceiling_step_snap_tag().is_none(), "no tag without a snap");
+
+    c.ceiling_step_tap(2.0, 5.0);
+    let ui = c
+        .position_prompt_for_ui()
+        .expect("position prompt as normal");
+    assert_eq!(ui.kind, PositionPromptKind::Line);
+}
+
+/// Un-snapping from the AMOUNT stage reverts the line to its DRAWN coordinate
+/// and reopens the skipped position question; applying it then moves the line
+/// like any un-snapped flow.
+#[test]
+fn unsnap_from_amount_reopens_the_position_prompt_with_the_drawn_coord() {
+    let mut c = ceiling_ready_l_controller();
+    c.apply_ceiling_step_stroke_event(&[(5.88, 0.5), (5.92, 4.0), (5.9, 9.5)]);
+    c.ceiling_step_tap(2.0, 5.0); // snapped → Amount, no position prompt
+    assert!(c.ceiling_step_amount_pending());
+
+    c.unsnap_ceiling_step_line();
+    let ui = c
+        .position_prompt_for_ui()
+        .expect("position prompt reopened");
+    assert_eq!(ui.kind, PositionPromptKind::Line);
+    let ((lx, _), _) = c.pending_ceiling_step_line().unwrap();
+    assert!((lx - 5.9).abs() < 0.05, "line back at the DRAWN coordinate");
+    assert!(c.ceiling_step_snap_tag().is_none(), "snap dropped");
+
+    // The reopened prompt works as normal: skip keeps the drawn coordinate.
+    c.skip_position_dimension();
+    assert!(c.ceiling_step_amount_pending());
+    c.assign_ceiling_step_delta(0.3).unwrap();
+    c.materialize();
+    let session = &c.ceiling_step_regions[&0];
+    let max_x = session[0]
+        .polygon
+        .iter()
+        .map(|p| p.x)
+        .fold(f32::NEG_INFINITY, f32::max);
+    assert!((max_x - 5.9).abs() < 0.05, "split at the drawn coordinate");
+}
+
+/// Un-snapping from the SIDE stage reverts the coordinate but stays at the
+/// side pick; the position prompt then follows the side tap as normal.
+#[test]
+fn unsnap_from_side_stays_at_the_side_pick() {
+    let mut c = ceiling_ready_l_controller();
+    c.apply_ceiling_step_stroke_event(&[(5.88, 0.5), (5.92, 4.0), (5.9, 9.5)]);
+    assert!(c.ceiling_step_snap_tag().is_some());
+
+    c.unsnap_ceiling_step_line();
+    assert!(c.ceiling_step_side_pending(), "still awaiting the side tap");
+    assert!(c.ceiling_step_snap_tag().is_none());
+    let ((lx, _), _) = c.pending_ceiling_step_line().unwrap();
+    assert!((lx - 5.9).abs() < 0.05, "drawn coordinate restored");
+
+    c.ceiling_step_tap(2.0, 5.0);
+    assert!(
+        c.position_prompt_for_ui().is_some(),
+        "un-snapped side pick opens the position prompt as normal"
+    );
+}
+
+/// Walls at the outline bbox EXTREMES never snap — a line on the boundary
+/// would leave one side empty. Drawn 0.1 m inside the square's left wall,
+/// the line keeps its drawn coordinate and asks the position question.
+#[test]
+fn bbox_extreme_walls_never_snap() {
+    let mut c = ceiling_ready_controller(); // 10×10 square: all walls extreme
+    c.apply_ceiling_step_stroke_event(&[(0.1, 0.5), (0.1, 5.0), (0.1, 9.5)]);
+    assert!(c.ceiling_step_side_pending());
+    assert!(
+        c.ceiling_step_snap_tag().is_none(),
+        "no snap at the extreme"
+    );
+    let ((lx, _), _) = c.pending_ceiling_step_line().unwrap();
+    assert!((lx - 0.1).abs() < 0.05, "drawn coordinate kept");
+    c.ceiling_step_tap(5.0, 5.0);
+    assert!(c.position_prompt_for_ui().is_some(), "prompt not skipped");
+}
+
+/// The tap + H/V path snaps identically to the stroke path: same snapped
+/// coordinate, same tag, same position-prompt skip.
+#[test]
+fn ceiling_step_tap_orientation_path_snaps_identically() {
+    let mut c = ceiling_ready_l_controller();
+    c.ceiling_step_tap(5.9, 5.0);
+    assert!(c.ceiling_step_orientation_pending());
+    c.choose_ceiling_step_orientation(false); // vertical → position varies on X
+    assert!(c.ceiling_step_side_pending());
+    let ((lx, _), _) = c.pending_ceiling_step_line().unwrap();
+    assert!((lx - 6.0).abs() < 1e-6, "tapped point snapped to the wall");
+    assert!(c.ceiling_step_snap_tag().is_some());
+
+    c.ceiling_step_tap(8.0, 2.0); // right of the line → Greater side
+    assert!(c.position_prompt_for_ui().is_none(), "prompt skipped");
+    assert!(c.ceiling_step_amount_pending());
+}

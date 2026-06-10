@@ -18,6 +18,19 @@
 use super::*;
 use document::{LinePositionPrompt, LineSide};
 
+/// The elective wall snap a pending step line is carrying: the line's
+/// `coord_m` already HOLDS the snapped (reference wall's) coordinate; this
+/// remembers where the line was actually DRAWN so "Don't snap" can revert,
+/// and which outline wall it snapped onto. A snapped line skips the position
+/// prompt — its coordinate is a reference wall's, exact by construction.
+#[derive(Debug, Clone, Copy)]
+pub(super) struct CeilingLineSnap {
+    /// The fitted/tapped coordinate before snapping — the un-snap target.
+    pub(super) drawn_coord_m: f32,
+    /// The outline wall the line snapped onto (start vertex, outline plan).
+    pub(super) outline_wall_vid: VertexId,
+}
+
 /// The in-flight ceiling-step input, advanced stage by stage:
 /// tap → [`Orientation`] → H/V → [`Side`] → side tap → ([`Position`] →)
 /// [`Amount`] → assign. A stroke skips straight to [`Side`] (the fit decides
@@ -29,10 +42,17 @@ pub(super) enum PendingCeilingStep {
     Orientation { point: Point2f32 },
     /// The line is fixed; awaiting the side tap. `axis` is the axis the
     /// line's POSITION varies on (X for a vertical line).
-    Side { axis: ParameterAxis, coord_m: f32 },
+    Side {
+        axis: ParameterAxis,
+        coord_m: f32,
+        /// `Some` when the line snapped onto a parallel outline wall —
+        /// `coord_m` is then the wall's coordinate.
+        snap: Option<CeilingLineSnap>,
+    },
     /// Side picked; the line's coordinate is being measured from an outline
     /// reference wall. Shell-resolved — this prompt never enters the
     /// document's position-prompt loop (there's no shape behind a line).
+    /// Implies UN-snapped: a snapped line skips this stage entirely.
     Position {
         axis: ParameterAxis,
         coord_m: f32,
@@ -44,6 +64,9 @@ pub(super) enum PendingCeilingStep {
         axis: ParameterAxis,
         coord_m: f32,
         side: LineSide,
+        /// `Some` when the line is snapped — the position prompt was skipped
+        /// (the coordinate is exact); un-snapping from here reopens it.
+        snap: Option<CeilingLineSnap>,
     },
 }
 
@@ -119,11 +142,33 @@ impl AppController {
         // `document.outline`, which is only synced on shape switches.
         self.sync_active();
         match self.document.fit_ceiling_step_line(&pts) {
-            Ok((axis, coord_m)) => {
-                self.pending_ceiling_step = Some(PendingCeilingStep::Side { axis, coord_m });
-            }
+            Ok((axis, coord_m)) => self.begin_ceiling_step_side(axis, coord_m),
             Err(e) => eprintln!("ceiling-step line: {}", e),
         }
+    }
+
+    /// Both line-creation paths land here the moment the axis + coordinate
+    /// are known: try the elective wall snap ([`StoreyDoc::snap_ceiling_step_line`])
+    /// — within tolerance of a non-extreme parallel outline wall the line's
+    /// coordinate BECOMES the wall's, and the drawn coordinate rides along in
+    /// the snap record so the tag's "Don't snap" can revert. Then await the
+    /// side tap.
+    fn begin_ceiling_step_side(&mut self, axis: ParameterAxis, coord_m: f32) {
+        let (coord_m, snap) = match self.document.snap_ceiling_step_line(axis, coord_m) {
+            Some((snapped, outline_wall_vid)) => (
+                snapped,
+                Some(CeilingLineSnap {
+                    drawn_coord_m: coord_m,
+                    outline_wall_vid,
+                }),
+            ),
+            None => (coord_m, None),
+        };
+        self.pending_ceiling_step = Some(PendingCeilingStep::Side {
+            axis,
+            coord_m,
+            snap,
+        });
     }
 
     /// Canvas tap dispatch for the ceiling-step flow:
@@ -140,8 +185,12 @@ impl AppController {
                     point: Point2f32::new(world_x, world_y),
                 });
             }
-            Some(PendingCeilingStep::Side { axis, coord_m }) => {
-                let (axis, coord_m) = (*axis, *coord_m);
+            Some(PendingCeilingStep::Side {
+                axis,
+                coord_m,
+                snap,
+            }) => {
+                let (axis, coord_m, snap) = (*axis, *coord_m, *snap);
                 let tap = match axis {
                     ParameterAxis::X => world_x,
                     ParameterAxis::Y => world_y,
@@ -151,7 +200,7 @@ impl AppController {
                 } else {
                     LineSide::Less
                 };
-                self.advance_past_side(axis, coord_m, side);
+                self.advance_past_side(axis, coord_m, side, snap);
             }
             _ => {}
         }
@@ -160,8 +209,25 @@ impl AppController {
     /// Side chosen: open the position prompt for the line's coordinate, or —
     /// when the outline has no parallel wall to measure from — accept the
     /// drawn coordinate (the document logs the auto-resolve) and go straight
-    /// to the amount.
-    fn advance_past_side(&mut self, axis: ParameterAxis, coord_m: f32, side: LineSide) {
+    /// to the amount. A SNAPPED line also skips the prompt: its coordinate IS
+    /// a reference wall's, exact by construction — there's nothing to ask;
+    /// the snap rides into the amount stage so its tag stays clickable.
+    fn advance_past_side(
+        &mut self,
+        axis: ParameterAxis,
+        coord_m: f32,
+        side: LineSide,
+        snap: Option<CeilingLineSnap>,
+    ) {
+        if snap.is_some() {
+            self.pending_ceiling_step = Some(PendingCeilingStep::Amount {
+                axis,
+                coord_m,
+                side,
+                snap,
+            });
+            return;
+        }
         self.pending_ceiling_step = Some(
             match self.document.ceiling_line_position_prompt(axis, coord_m) {
                 Some(prompt) => PendingCeilingStep::Position {
@@ -174,9 +240,89 @@ impl AppController {
                     axis,
                     coord_m,
                     side,
+                    snap: None,
                 },
             },
         );
+    }
+
+    /// The snap tag's "Don't snap": revert the pending line to its DRAWN
+    /// coordinate and drop the snap. From the side pick the stage stays put
+    /// (the position prompt follows the side tap as normal); from the amount
+    /// stage the skipped position question REOPENS (or auto-resolves straight
+    /// back to the amount, logged). Deliberately NOT routed through the
+    /// generic `choose_snap`/`unsnap_last` replay — those rewind history and
+    /// re-run a stroke, but the pending line lives OUTSIDE history.
+    pub fn unsnap_ceiling_step_line(&mut self) {
+        match self.pending_ceiling_step.take() {
+            Some(PendingCeilingStep::Side {
+                axis,
+                snap: Some(snap),
+                ..
+            }) => {
+                log::debug!(
+                    "ceiling-step line un-snapped from outline wall {:?} back to {:.3}",
+                    snap.outline_wall_vid,
+                    snap.drawn_coord_m
+                );
+                self.pending_ceiling_step = Some(PendingCeilingStep::Side {
+                    axis,
+                    coord_m: snap.drawn_coord_m,
+                    snap: None,
+                });
+            }
+            Some(PendingCeilingStep::Amount {
+                axis,
+                side,
+                snap: Some(snap),
+                ..
+            }) => {
+                log::debug!(
+                    "ceiling-step line un-snapped from outline wall {:?} back to {:.3}",
+                    snap.outline_wall_vid,
+                    snap.drawn_coord_m
+                );
+                self.advance_past_side(axis, snap.drawn_coord_m, side, None);
+            }
+            other => self.pending_ceiling_step = other, // not snapped — no-op
+        }
+    }
+
+    /// The pending line's wall snap as ONE standard canvas snap tag, at the
+    /// line's midpoint. `options` is EMPTY and `skippable` is true — the
+    /// tag's menu offers exactly "Don't snap", which the UI routes to
+    /// [`unsnap_ceiling_step_line`](Self::unsnap_ceiling_step_line) (NOT the
+    /// generic choose-snap replay — the line is outside history). `None`
+    /// while the line isn't snapped or nothing is pending.
+    pub fn ceiling_step_snap_tag(&self) -> Option<SnapTagView> {
+        let (axis, snap) = match self.pending_ceiling_step.as_ref()? {
+            PendingCeilingStep::Side {
+                axis,
+                snap: Some(snap),
+                ..
+            }
+            | PendingCeilingStep::Amount {
+                axis,
+                snap: Some(snap),
+                ..
+            } => (*axis, *snap),
+            _ => return None,
+        };
+        let ((ax, ay), (bx, by)) = self.pending_ceiling_step_line()?;
+        let mid = (((ax + bx) / 2.0) as f32, ((ay + by) / 2.0) as f32);
+        // The tag's `from` identity is the drawn point: the same midpoint at
+        // the pre-snap coordinate (where the line would return on un-snap).
+        let from = match axis {
+            ParameterAxis::X => (snap.drawn_coord_m, mid.1),
+            ParameterAxis::Y => (mid.0, snap.drawn_coord_m),
+        };
+        Some(SnapTagView {
+            pos: mid,
+            from,
+            current_kind: Some(manip_2d_plan::SnapKind::ToParallelWall),
+            options: Vec::new(),
+            skippable: true,
+        })
     }
 
     /// H/V picker for a TAPPED line point: a `horizontal` line's position
@@ -194,9 +340,7 @@ impl AppController {
             (ParameterAxis::X, point.x)
         };
         match self.document.validate_ceiling_step_line(axis, coord_m) {
-            Ok(()) => {
-                self.pending_ceiling_step = Some(PendingCeilingStep::Side { axis, coord_m });
-            }
+            Ok(()) => self.begin_ceiling_step_side(axis, coord_m),
             Err(e) => eprintln!("ceiling-step line: {}", e),
         }
     }
@@ -239,7 +383,7 @@ impl AppController {
     pub fn pending_ceiling_step_line(&self) -> Option<((f64, f64), (f64, f64))> {
         let (axis, coord_m) = match self.pending_ceiling_step.as_ref()? {
             PendingCeilingStep::Orientation { .. } => return None,
-            PendingCeilingStep::Side { axis, coord_m }
+            PendingCeilingStep::Side { axis, coord_m, .. }
             | PendingCeilingStep::Position { axis, coord_m, .. }
             | PendingCeilingStep::Amount { axis, coord_m, .. } => (*axis, *coord_m),
         };
@@ -260,7 +404,8 @@ impl AppController {
     /// for the UI to tint while the user taps the side that steps — the
     /// cut-pick pattern. Empty when the side pick isn't pending.
     pub fn pending_ceiling_step_side_rects(&self) -> Vec<Vec<(f64, f64)>> {
-        let Some(PendingCeilingStep::Side { axis, coord_m }) = self.pending_ceiling_step.as_ref()
+        let Some(PendingCeilingStep::Side { axis, coord_m, .. }) =
+            self.pending_ceiling_step.as_ref()
         else {
             return Vec::new();
         };
@@ -291,6 +436,7 @@ impl AppController {
             axis,
             coord_m,
             side,
+            ..
         }) = self.pending_ceiling_step.as_ref()
         else {
             return Ok(()); // nothing awaiting an amount — no-op

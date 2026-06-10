@@ -130,6 +130,12 @@ const LINE_OFF_FOOTPRINT_MSG: &str =
 /// within a millimetre of the bounding box edge steps nothing.
 const LINE_CROSS_TOL: f32 = 1e-3;
 
+/// How close (metres) a drawn/tapped step line must land to a parallel outline
+/// wall to SNAP onto it. Hand precision on a tablet, matching the spirit of
+/// the other snap tolerances; promotable to `tuning.yaml` later if it needs
+/// per-device adjustment.
+const CEILING_LINE_SNAP_TOL_M: f32 = 0.2;
+
 // ── Ceiling-step operations ─────────────────────────────────────────────────
 // Pure queries over the storey outline. The shell (`AppController`) owns the
 // pending-step state machine, the region storage, and canonicalization.
@@ -171,6 +177,40 @@ impl StoreyDoc {
             return Err(LINE_OFF_FOOTPRINT_MSG.to_string());
         }
         Ok(())
+    }
+
+    /// Snap a drawn/tapped step line onto the nearest parallel outline wall
+    /// within [`CEILING_LINE_SNAP_TOL_M`]. The candidates are the SAME deduped
+    /// reference walls the position prompt offers ([`reference_walls`]) — so a
+    /// snapped line IS at a reference wall's coordinate, exact by
+    /// construction, which is exactly why the shell SKIPS the position prompt
+    /// for it: there is no "how far from the wall?" question left to ask.
+    /// Walls at the outline bbox EXTREMES on the axis are EXCLUDED — a line
+    /// snapped onto the boundary leaves one side of it empty (a step that
+    /// steps nothing), and
+    /// [`validate_ceiling_step_line`](Self::validate_ceiling_step_line) would
+    /// reject the coordinate anyway.
+    ///
+    /// Returns `(snapped coordinate, outline wall vid)`, nearest wall wins;
+    /// `None` when no qualifying wall is within tolerance. Pure — the shell
+    /// decides when to call and remembers the drawn coordinate for un-snapping.
+    pub fn snap_ceiling_step_line(
+        &self,
+        axis: ParameterAxis,
+        coord_m: f32,
+    ) -> Option<(f32, VertexId)> {
+        let ((min_x, min_y), (max_x, max_y)) = self.outline.floor_plan.bounding_box()?;
+        let (lo, hi) = match axis {
+            ParameterAxis::X => (min_x, max_x),
+            ParameterAxis::Y => (min_y, max_y),
+        };
+        reference_walls(&self.outline.floor_plan, axis)
+            .into_iter()
+            .filter(|(_, c)| (c - lo).abs() > LINE_CROSS_TOL && (c - hi).abs() > LINE_CROSS_TOL)
+            .map(|(vid, c)| (vid, c, (c - coord_m).abs()))
+            .filter(|(_, _, d)| *d <= CEILING_LINE_SNAP_TOL_M)
+            .min_by(|a, b| a.2.total_cmp(&b.2))
+            .map(|(vid, c, _)| (c, vid))
     }
 
     /// Build the position prompt for a drawn step line: the OUTLINE walls
@@ -472,6 +512,80 @@ mod tests {
         // Empty outline → None.
         assert!(StoreyDoc::default()
             .ceiling_step_region(ParameterAxis::X, 4.0, LineSide::Less, 0.3)
+            .is_none());
+    }
+
+    /// A StoreyDoc with a finalised staircase outline whose vertical walls sit
+    /// at x = 0, 6.75, 7, 10 and horizontal walls at y = 0, 2, 4, 6 — i.e.
+    /// NON-extreme parallel references at x ∈ {6.75, 7} and y ∈ {2, 4}.
+    fn storey_staircase() -> StoreyDoc {
+        let outline = FloorPlan::from_clean_ring(&[
+            p(0., 0.),
+            p(10., 0.),
+            p(10., 2.),
+            p(7., 2.),
+            p(7., 4.),
+            p(6.75, 4.),
+            p(6.75, 6.),
+            p(0., 6.),
+        ])
+        .unwrap();
+        let known = outline.all_active_params();
+        let mut doc = StoreyDoc::default();
+        doc.outline = ShapeSlot {
+            floor_plan: outline,
+            dimensioning: DimensionState {
+                scale_set: true,
+                known_params: known,
+                ..Default::default()
+            },
+        };
+        doc.load_active_into_buffer();
+        doc
+    }
+
+    /// Within tolerance of a non-extreme parallel wall the line snaps, and
+    /// when TWO qualify the NEAREST wins; beyond tolerance there's no snap.
+    #[test]
+    fn snap_picks_the_nearest_non_extreme_wall_within_tolerance() {
+        let doc = storey_staircase();
+        // x = 6.9 is within 0.2 of BOTH x = 7 (0.1 away) and x = 6.75
+        // (0.15 away) — the nearer wall, x = 7, wins.
+        let (coord, _) = doc
+            .snap_ceiling_step_line(ParameterAxis::X, 6.9)
+            .expect("within tolerance");
+        assert!(
+            (coord - 7.0).abs() < 1e-6,
+            "nearest wall wins (got {coord})"
+        );
+        // x = 6.82 flips the nearest to 6.75.
+        let (coord, _) = doc.snap_ceiling_step_line(ParameterAxis::X, 6.82).unwrap();
+        assert!((coord - 6.75).abs() < 1e-6);
+        // The Y axis snaps to its non-extreme walls the same way.
+        let (coord, _) = doc.snap_ceiling_step_line(ParameterAxis::Y, 2.1).unwrap();
+        assert!((coord - 2.0).abs() < 1e-6);
+        // Beyond tolerance: nearest non-extreme wall is 1.75 m away.
+        assert!(doc.snap_ceiling_step_line(ParameterAxis::X, 5.0).is_none());
+    }
+
+    /// Walls at the outline bbox extremes never snap (a line on the boundary
+    /// steps nothing) — even when they're the only parallel walls at all.
+    #[test]
+    fn snap_excludes_bbox_extreme_walls() {
+        let doc = storey_staircase();
+        // Near the x = 0 / x = 10 extremes — inside the footprint, within
+        // tolerance of the boundary walls, but those never qualify.
+        assert!(doc.snap_ceiling_step_line(ParameterAxis::X, 0.1).is_none());
+        assert!(doc.snap_ceiling_step_line(ParameterAxis::X, 9.9).is_none());
+        // A plain rectangle has ONLY extreme walls: nothing ever snaps.
+        let rect = storey_10x6();
+        assert!(rect
+            .snap_ceiling_step_line(ParameterAxis::X, 0.15)
+            .is_none());
+        assert!(rect.snap_ceiling_step_line(ParameterAxis::Y, 5.9).is_none());
+        // No outline at all → nothing to snap to.
+        assert!(StoreyDoc::default()
+            .snap_ceiling_step_line(ParameterAxis::X, 1.0)
             .is_none());
     }
 

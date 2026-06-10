@@ -337,6 +337,11 @@ pub enum SketchEvent {
     /// User entered the ceiling-step amount (metres, signed: the Up/Down
     /// buttons own the sign; the typed value contributes |v|).
     AssignCeilingStepDelta(f32),
+    /// "Don't snap" on the pending ceiling-step line's snap tag: revert the
+    /// line to its drawn coordinate. Routed to the controller's dedicated
+    /// `unsnap_ceiling_step_line` — NOT `ChooseSnap`/`UnsnapLast`, whose
+    /// rewind-and-replay machinery must not touch a line outside history.
+    UnsnapCeilingStepLine,
     /// Discard the in-flight ceiling-step line at any stage.
     CancelPendingCeilingStep,
     /// Delete the current storey's ceiling-step region at the given index.
@@ -466,6 +471,9 @@ impl SketchPage {
         ceiling_step_region_polygons: &[(Vec<(f64, f64)>, String)],
         pending_ceiling_step_line: Option<((f64, f64), (f64, f64))>,
         pending_ceiling_step_side_rects: &[Vec<(f64, f64)>],
+        // The pending line's wall snap as one standard snap tag (its menu
+        // offers only "Don't snap", routed to UnsnapCeilingStepLine).
+        ceiling_step_snap_tag: Option<&SnapTagView>,
         ceiling_step_orientation_pending: bool,
         ceiling_step_side_pending: bool,
         ceiling_step_amount_pending: bool,
@@ -742,6 +750,46 @@ impl SketchPage {
                         a,
                         b,
                     );
+                }
+
+                // The pending line's wall snap, drawn through the SAME snap-tag
+                // renderer as the stroke snaps — but its menu is a separate
+                // widget routed to UnsnapCeilingStepLine, never ChooseSnap:
+                // the generic replay rewinds history, and the pending line
+                // lives outside it. With no alternative candidates the menu
+                // offers exactly "Don't snap".
+                if let Some(tag) = ceiling_step_snap_tag {
+                    render::render_snap_tags(
+                        &painter,
+                        rect,
+                        ber,
+                        current_storey_idx,
+                        mode,
+                        view,
+                        std::slice::from_ref(tag),
+                    );
+                    if let Some(t) =
+                        render::active_storey_transform(rect, ber, current_storey_idx, mode, view)
+                    {
+                        let sp = t.apply(tag.pos.0 as f64, tag.pos.1 as f64);
+                        let label = match tag.current_kind {
+                            Some(k) => format!("{} ▾", render::snap_kind_label(k)),
+                            None => "no snap ▾".to_string(),
+                        };
+                        egui::Area::new(ui.id().with("ceiling_step_snap_tag"))
+                            .fixed_pos(sp + egui::vec2(7.0, -7.0))
+                            .order(egui::Order::Foreground)
+                            .show(ui.ctx(), |ui| {
+                                ui.menu_button(label, |ui| {
+                                    if tag.skippable && ui.button("Don't snap").clicked() {
+                                        on_event(UiEvent::Sketch(
+                                            SketchEvent::UnsnapCeilingStepLine,
+                                        ));
+                                        ui.close_menu();
+                                    }
+                                });
+                            });
+                    }
                 }
 
                 // Wall exposure: colour each outline wall by its heat-loss class
