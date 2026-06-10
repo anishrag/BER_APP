@@ -12,14 +12,6 @@
 //! (no polygons) leaves already-tagged surfaces untouched.
 use super::*;
 
-/// A session-only tagged area: a world-space (metre) ring + the phase to stamp
-/// onto surfaces inside it. Keyed per storey in `AppController::phase_regions`.
-#[derive(Debug, Clone)]
-pub(super) struct PhaseRegion {
-    pub polygon: Vec<Point2f32>,
-    pub phase: ConstructionPhase,
-}
-
 impl AppController {
     /// True when the editor is tagging construction-phase areas (drives the UI
     /// toggle and routes `DrawPerpWalls` strokes to phase carving).
@@ -294,30 +286,6 @@ impl AppController {
         if removed {
             let _ = self.mark_dirty();
         }
-    }
-}
-
-/// The construction phase to stamp on a surface at `(x, y)` (storey metre
-/// space), given its `existing` phase. The agreed rule: a phase polygon
-/// containing the point WINS (latest tag first); else preserve a non-`Original`
-/// existing phase; else `Original`. `phase_polys` is the storey's session areas
-/// as `(ring, phase)`.
-pub(super) fn resolved_phase(
-    phase_polys: &[(Vec<Point2f32>, ConstructionPhase)],
-    x: f32,
-    y: f32,
-    existing: ConstructionPhase,
-) -> ConstructionPhase {
-    if let Some((_, phase)) = phase_polys
-        .iter()
-        .rev()
-        .find(|(ring, _)| manip_2d_plan::ring_contains_point(ring, x, y))
-    {
-        phase.clone()
-    } else if existing != ConstructionPhase::Original {
-        existing
-    } else {
-        ConstructionPhase::Original
     }
 }
 

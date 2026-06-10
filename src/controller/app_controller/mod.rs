@@ -13,11 +13,10 @@ mod phase_regions;
 pub use document::ExposureSection;
 pub use exposure::{ExposureSelection, SectionHandle, WallExposureView};
 use living_areas::shape_finalised;
-use phase_regions::{resolved_phase, PhaseRegion};
 
 use document::{
     ActiveShape, DimensionPrompt, DimensionState, Document, EditState, MovedCoordKind, PendingArc,
-    ShapeSlot, StoreyDoc,
+    PhaseRegion, ShapeSlot, StoreyDoc,
 };
 // `ExposureSection` is re-exported above (the controller's public surface).
 
@@ -1294,58 +1293,17 @@ impl AppController {
 
     /// Stamp the construction PHASE onto storey `idx`'s WALLS from the session
     /// phase areas (floors are already phase-correct from the commit-time
-    /// partition). Per wall, by its base midpoint: a phase area containing it
-    /// WINS (latest first); else the wall keeps its existing non-`Original` phase
-    /// (rebuild inherited it); else `Original`. Type/make-up are preserved — only
-    /// the phase axis changes, so the construction is re-`ensure`d with the same
-    /// `(type, makeup)`.
+    /// partition) — see [`document::stamp_wall_phases`].
     fn resolve_storey_phases(&mut self, idx: usize) {
-        // Clone the storey's phase polygons so we don't borrow `self` while the
-        // record is mutably borrowed below.
-        let phase_polys: Vec<(Vec<Point2f32>, ConstructionPhase)> = self
+        let regions: &[PhaseRegion] = self
             .phase_regions
             .get(&idx)
-            .map(|rs| {
-                rs.iter()
-                    .map(|r| (r.polygon.clone(), r.phase.clone()))
-                    .collect()
-            })
-            .unwrap_or_default();
+            .map(Vec::as_slice)
+            .unwrap_or(&[]);
         let Some(record) = self.current_record.as_mut() else {
             return;
         };
-        let ber = &mut record.data;
-        if ber.storeys.len() <= idx {
-            return;
-        }
-
-        // WALLS: `rebuild_preserving` already carried each wall's construction
-        // (and phase) across; apply the polygon override on top.
-        let n_walls = ber.storeys[idx].walls.regions.len();
-        for i in 0..n_walls {
-            let Some(mid) = ber.storeys[idx].walls.regions[i].base_midpoint() else {
-                continue;
-            };
-            let cur_cid = ber.storeys[idx].walls.regions[i].construction_id;
-            let (ty, makeup, cur_phase) = match ber.wall_construction(cur_cid) {
-                Some(c) => (
-                    c.construction_type,
-                    c.base.construction_makeup.clone(),
-                    c.base.construction_phase.clone(),
-                ),
-                None => (
-                    Default::default(),
-                    Default::default(),
-                    ConstructionPhase::Original,
-                ),
-            };
-            let new_phase =
-                resolved_phase(&phase_polys, mid.x as f32, mid.y as f32, cur_phase.clone());
-            if new_phase != cur_phase {
-                let cid = ber.ensure_wall_construction(ty, makeup, new_phase);
-                ber.storeys[idx].walls.regions[i].construction_id = cid;
-            }
-        }
+        document::stamp_wall_phases(&mut record.data, idx, regions);
     }
 
     /// Rebuild the session phase areas for storey `idx` from its persisted floor
@@ -1358,35 +1316,7 @@ impl AppController {
         let Some(record) = self.current_record.as_ref() else {
             return;
         };
-        let Some(storey) = record.data.storeys.get(idx) else {
-            return;
-        };
-        let mut regions: Vec<PhaseRegion> = Vec::new();
-        for fr in &storey.floors.regions {
-            let phase = record
-                .data
-                .floor_construction(fr.construction_id)
-                .map(|c| c.base.construction_phase.clone())
-                .unwrap_or(ConstructionPhase::Original);
-            if phase == ConstructionPhase::Original {
-                continue;
-            }
-            let mut ring: Vec<Point2f32> = fr
-                .polygon
-                .exterior()
-                .coords()
-                .map(|c| Point2f32::new(c.x as f32, c.y as f32))
-                .collect();
-            if ring.len() > 1 && ring.first() == ring.last() {
-                ring.pop();
-            }
-            if ring.len() >= 3 {
-                regions.push(PhaseRegion {
-                    polygon: ring,
-                    phase,
-                });
-            }
-        }
+        let regions = document::phase_regions_from_floors(&record.data, idx);
         if regions.is_empty() {
             self.phase_regions.remove(&idx);
         } else {
