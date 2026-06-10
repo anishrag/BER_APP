@@ -34,7 +34,7 @@ These are hard rules. The boundary script at `.claude/scripts/check-boundaries.s
 
 **Rule:** No source file may `use slint` or any `slint_*` crate.
 
-**Why:** `slint` is still listed in `Cargo.toml:9` from an earlier abandoned toolkit choice. Leaving the dependency in place is harmless for now; importing it in source signals confusion about which toolkit the project is on.
+**Why:** `slint` was an earlier abandoned toolkit choice (its leftover `Cargo.toml` dependency was removed in June 2026). Importing it in source signals confusion about which toolkit the project is on.
 
 **How to apply:** Use egui. If you find yourself wanting Slint-only behaviour, that's a project-level decision to revisit — not something to import ad-hoc.
 
