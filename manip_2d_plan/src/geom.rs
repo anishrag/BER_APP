@@ -298,6 +298,28 @@ pub(crate) fn project_point_to_segment(
     (q, t, d)
 }
 
+/// Euclidean length of segment `a→b`.
+pub fn segment_len(a: Point2f32, b: Point2f32) -> f32 {
+    ((b.x - a.x).powi(2) + (b.y - a.y).powi(2)).sqrt()
+}
+
+/// Point at distance `d` along the segment `a→b` of length `len`. A degenerate
+/// (zero-length) segment returns `a`.
+pub fn lerp_along(a: Point2f32, b: Point2f32, len: f32, d: f32) -> (f32, f32) {
+    let t = if len > 1e-6 { d / len } else { 0.0 };
+    (a.x + t * (b.x - a.x), a.y + t * (b.y - a.y))
+}
+
+/// Distance from `a` of the projection of `(px, py)` onto the segment `a→b` of
+/// length `len`, clamped to `[0, len]`. A degenerate segment returns `0.0`.
+pub fn project_distance_along(a: Point2f32, b: Point2f32, len: f32, px: f32, py: f32) -> f32 {
+    if len <= 1e-6 {
+        return 0.0;
+    }
+    let dot = (px - a.x) * (b.x - a.x) + (py - a.y) * (b.y - a.y);
+    (dot / len).clamp(0.0, len)
+}
+
 /// Twice the signed shoelace area of a ring (sign = winding); callers that
 /// only compare magnitudes use `.abs()`.
 pub(crate) fn ring_signed_area2(pts: &[Point2f32]) -> f32 {
@@ -878,5 +900,26 @@ mod tests {
             circular_arc_points(p(0.0, 0.0), p(10.0, 0.0), 0.0, 5.0),
             vec![p(0.0, 0.0), p(10.0, 0.0)]
         );
+    }
+
+    #[test]
+    fn segment_len_is_euclidean() {
+        assert_eq!(segment_len(p(0.0, 0.0), p(3.0, 4.0)), 5.0);
+        assert_eq!(segment_len(p(2.0, 2.0), p(2.0, 2.0)), 0.0);
+    }
+
+    #[test]
+    fn lerp_along_degenerate_segment_stays_at_start() {
+        assert_eq!(lerp_along(p(1.0, 1.0), p(1.0, 1.0), 0.0, 5.0), (1.0, 1.0));
+        assert_eq!(lerp_along(p(0.0, 0.0), p(10.0, 0.0), 10.0, 2.5), (2.5, 0.0));
+    }
+
+    #[test]
+    fn project_distance_along_clamps_to_segment() {
+        let (a, b) = (p(0.0, 0.0), p(10.0, 0.0));
+        assert_eq!(project_distance_along(a, b, 10.0, 4.0, 3.0), 4.0);
+        assert_eq!(project_distance_along(a, b, 10.0, -5.0, 0.0), 0.0);
+        assert_eq!(project_distance_along(a, b, 10.0, 15.0, 0.0), 10.0);
+        assert_eq!(project_distance_along(a, a, 0.0, 5.0, 5.0), 0.0);
     }
 }

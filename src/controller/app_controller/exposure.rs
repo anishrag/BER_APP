@@ -16,6 +16,9 @@
 //! by giving `ExposureSection` a face subdivision — see the plan; the BER output
 //! (`WallRegion.polygon` is an arbitrary `Polygon3D`) already allows it.
 use super::*;
+use manip_2d_plan::{
+    lerp_along, project_distance_along as project_distance, segment_len as wall_len,
+};
 
 /// Which end of the current selection a drag is moving.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -331,25 +334,4 @@ fn range_at(len: f32, sections: &[ExposureSection], d: f32) -> (f32, f32) {
         }
     }
     (0.0, len)
-}
-
-/// Euclidean wall length.
-fn wall_len(a: Point2f32, b: Point2f32) -> f32 {
-    ((b.x - a.x).powi(2) + (b.y - a.y).powi(2)).sqrt()
-}
-
-/// Point at distance `d` (metres) along the wall `a→b` of length `len`.
-fn lerp_along(a: Point2f32, b: Point2f32, len: f32, d: f32) -> (f32, f32) {
-    let t = if len > 1e-6 { d / len } else { 0.0 };
-    (a.x + t * (b.x - a.x), a.y + t * (b.y - a.y))
-}
-
-/// Distance (metres from `a`) of the projection of `(px, py)` onto the wall
-/// `a→b`, clamped to `[0, len]`.
-fn project_distance(a: Point2f32, b: Point2f32, len: f32, px: f32, py: f32) -> f32 {
-    if len <= 1e-6 {
-        return 0.0;
-    }
-    let dot = (px - a.x) * (b.x - a.x) + (py - a.y) * (b.y - a.y);
-    (dot / len).clamp(0.0, len)
 }
