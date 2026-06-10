@@ -43,6 +43,7 @@ impl AppController {
         self.living_area_mode = false;
         self.exposure_mode = false;
         self.phase_mode = false;
+        self.step_mode = false;
         self.selected_exposure_wall = None;
         self.exposure_sel = None;
         self.exposure_drag = None;
@@ -56,6 +57,10 @@ impl AppController {
                 // regions (unless this session already has them).
                 if !self.phase_regions.contains_key(&i) {
                     self.reconstruct_phase_regions_for(i);
+                }
+                // Same for its step areas (from the levelled floor regions).
+                if !self.step_regions.contains_key(&i) {
+                    self.reconstruct_step_regions_for(i);
                 }
             }
             None => {
@@ -136,15 +141,17 @@ impl AppController {
         // Shell session state resets here; the model rebuild itself is
         // `StoreyDoc::from_storey` (document) — replacing the whole StoreyDoc
         // covers the buffer, slots, active shape, pending arc and wall sections.
-        // Any in-flight phase area belongs to the OUTGOING storey — abandon it.
+        // Any in-flight phase/step area belongs to the OUTGOING storey — abandon it.
         self.pending_phase_cut = None;
+        self.pending_step_cut = None;
         self.living_area_mode = false;
         self.exposure_mode = false;
         // Phase mode is a sub-area tool like the two above; leaving it on across a
         // storey switch routed the new storey's OUTLINE stroke into the phase
         // carve (against an empty footprint). Reset it so the new storey starts in
-        // outline mode.
+        // outline mode. Step mode is the same kind of tool — same reset.
         self.phase_mode = false;
+        self.step_mode = false;
         self.selected_exposure_wall = None;
         self.exposure_sel = None;
         self.exposure_drag = None;
@@ -191,12 +198,20 @@ impl AppController {
             .get(&idx)
             .map(Vec::as_slice)
             .unwrap_or(&[]);
+        let steps: &[StepRegion] = self
+            .step_regions
+            .get(&idx)
+            .map(Vec::as_slice)
+            .unwrap_or(&[]);
         let record = self.current_record.as_mut().unwrap();
         document::ensure_storey_constructions(&mut record.data, idx, regions);
-        // Step regions are not wired yet (slice C): no session step areas, so
-        // floors keep their levels untouched.
-        record.data.storeys[idx] =
-            document::resolve_storey(&self.document.storeys[idx], &record.data, idx, regions, &[]);
+        record.data.storeys[idx] = document::resolve_storey(
+            &self.document.storeys[idx],
+            &record.data,
+            idx,
+            regions,
+            steps,
+        );
         // Floors are already phase-correct from the partition; this stamps the
         // phase onto the just-rebuilt WALLS from the same session areas.
         document::stamp_wall_phases(&mut record.data, idx, regions);
@@ -246,6 +261,24 @@ impl AppController {
             self.phase_regions.remove(&idx);
         } else {
             self.phase_regions.insert(idx, regions);
+        }
+    }
+
+    /// Rebuild the session step areas for storey `idx` from its persisted floor
+    /// regions (each region with non-zero `level_m` → a step area). Step areas
+    /// are session-only, so on reload they'd otherwise be empty and the NEXT
+    /// commit would re-level with no areas — flattening the floor.
+    /// Reconstructing here keeps the split reproducible. No-op when nothing is
+    /// stepped.
+    pub(super) fn reconstruct_step_regions_for(&mut self, idx: usize) {
+        let Some(record) = self.current_record.as_ref() else {
+            return;
+        };
+        let regions = document::step_regions_from_floors(&record.data, idx);
+        if regions.is_empty() {
+            self.step_regions.remove(&idx);
+        } else {
+            self.step_regions.insert(idx, regions);
         }
     }
 

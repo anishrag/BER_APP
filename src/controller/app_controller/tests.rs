@@ -1334,6 +1334,174 @@ fn phase_split_survives_reload() {
     );
 }
 
+/// A floor-step area must be DIMENSIONED before its level is assigned (the
+/// exact boundary decides which floor pieces step). So: carve → dimension the
+/// drawn walls → only THEN the amount field → assign stores the dimensioned
+/// ring and returns to the outline.
+#[test]
+fn step_area_is_dimensioned_before_its_level_is_assigned() {
+    let mut c = AppController::new(crate::engine::open_db(":memory:").unwrap());
+    c.create_ber(
+        "T".into(),
+        chrono::NaiveDate::from_ymd_opt(2026, 1, 1).unwrap(),
+    );
+    // 2x2 dimensioned storey.
+    let square = vec![
+        Point2f32::new(0.0, 0.0),
+        Point2f32::new(2.0, 0.0),
+        Point2f32::new(2.0, 2.0),
+        Point2f32::new(0.0, 2.0),
+        Point2f32::new(0.05, 0.05),
+    ];
+    c.document.floor_plan = FloorPlan::from_points_to_orthogonal(&square, 0.1, true).unwrap();
+    c.document.dimensioning.scale_set = true;
+    c.document.dimensioning.known_params = c.document.floor_plan.all_active_params();
+    c.sync_active(); // flush into the outline slot so the step carves against it
+
+    // Draw an interior step area (a ~0.9m square that doesn't reach a wall).
+    c.set_step_mode(true);
+    c.apply_step_region_stroke_event(&[
+        (0.5, 0.5),
+        (1.4, 0.5),
+        (1.4, 1.4),
+        (0.5, 1.4),
+        (0.55, 0.55),
+    ]);
+
+    // It must prompt for dimensions — NOT be immediately assignable.
+    assert!(
+        c.dimensioning_active(),
+        "step area prompts to be dimensioned"
+    );
+    assert!(!c.step_pick_pending(), "no level entry until dimensioned");
+
+    // Dimension every drawn wall.
+    let mut guard = 0;
+    while c.dimensioning_active() && guard < 12 {
+        c.apply_dimension(0.9).expect("dimension applies");
+        guard += 1;
+    }
+    assert!(c.step_pick_pending(), "now the amount field shows");
+    assert!(
+        c.pending_step_polygon().len() >= 4,
+        "dimensioned ring available: {:?}",
+        c.pending_step_polygon()
+    );
+
+    // Assign the level → stored region, back to the outline.
+    c.assign_step_level_to_pending(-0.3);
+    assert!(!c.step_pick_pending(), "level consumed");
+    let regions = c.step_region_polygons();
+    assert_eq!(
+        regions.len(),
+        1,
+        "the dimensioned step area is stored: {regions:?}"
+    );
+    assert_eq!(regions[0].1, "-0.30 m", "label carries the signed level");
+    // And the outline is the active buffer again, intact (the 2x2 square).
+    assert_eq!(
+        c.document.floor_plan.get_points().len(),
+        4,
+        "outline restored as the live buffer: {:?}",
+        c.document.floor_plan.get_points()
+    );
+}
+
+/// A near-zero step amount (|level| < 0.01 m) is rejected: the pending area
+/// stays open (the user retypes or cancels) and nothing is stored.
+#[test]
+fn step_area_zero_amount_is_rejected_and_area_stays_pending() {
+    let mut c = dimensioned_square_controller();
+    c.set_step_mode(true);
+    c.apply_step_region_stroke_event(&[(2.0, 2.0), (6.0, 2.0), (6.0, 6.0), (2.0, 6.0), (2.1, 2.1)]);
+    let mut guard = 0;
+    while c.dimensioning_active() && guard < 12 {
+        c.apply_dimension(4.0).expect("dimension applies");
+        guard += 1;
+    }
+    assert!(c.step_pick_pending(), "carved area awaits its amount");
+
+    c.assign_step_level_to_pending(0.005);
+    assert!(
+        c.step_pick_pending(),
+        "a zero step is no step — the prompt stays open"
+    );
+    assert!(
+        c.pending_step_polygon().len() >= 4,
+        "the pending area remains"
+    );
+    assert!(c.step_region_polygons().is_empty(), "nothing was stored");
+}
+
+/// A floor-step area splits the storey floor into level regions: the stepped
+/// zone carries the assigned `level_m`, the remainder stays at the datum.
+/// (Counts aren't asserted — the split may produce several pieces.)
+#[test]
+fn step_area_splits_floor_into_level_regions() {
+    let mut c = dimensioned_square_controller();
+    // Carve an interior 4x4 step area, dimension it, lower it by 0.3 m.
+    c.set_step_mode(true);
+    c.apply_step_region_stroke_event(&[(2.0, 2.0), (6.0, 2.0), (6.0, 6.0), (2.0, 6.0), (2.1, 2.1)]);
+    let mut guard = 0;
+    while c.dimensioning_active() && guard < 12 {
+        c.apply_dimension(4.0).expect("dimension applies");
+        guard += 1;
+    }
+    assert!(c.step_pick_pending(), "carved area awaits its amount");
+    c.assign_step_level_to_pending(-0.3);
+    c.materialize();
+
+    let rec = c.current_record.as_ref().unwrap();
+    let floors = &rec.data.storeys[0].floors.regions;
+    assert!(
+        floors.iter().any(|f| (f.level_m + 0.3).abs() < 1e-6),
+        "a floor region carries the lowered level: {floors:?}"
+    );
+    assert!(
+        floors.iter().any(|f| f.level_m == 0.0),
+        "the remainder stays at the storey datum: {floors:?}"
+    );
+}
+
+/// The level split survives a DB round-trip: reopening rebuilds the session
+/// step areas from the levelled floor regions, so the NEXT materialize keeps
+/// the split instead of flattening the floor.
+#[test]
+fn step_split_survives_reload() {
+    let p = |x: f32, y: f32| Point2f32::new(x, y);
+    let mut c = dimensioned_square_controller();
+    c.step_regions.entry(0).or_default().push(StepRegion {
+        polygon: vec![p(5., 0.), p(10., 0.), p(10., 10.), p(5., 10.)],
+        level_m: -0.3,
+    });
+    c.commit_to_ber().unwrap();
+    let id = c.current_record.as_ref().unwrap().id;
+
+    c.open_ber(&id).unwrap();
+    let floors = &c.current_record.as_ref().unwrap().data.storeys[0]
+        .floors
+        .regions;
+    assert!(
+        floors.iter().any(|f| (f.level_m + 0.3).abs() < 1e-6),
+        "split persisted + reloaded: {floors:?}"
+    );
+    assert!(
+        c.step_regions.get(&0).is_some_and(|v| !v.is_empty()),
+        "step areas reconstructed from the levelled floor regions"
+    );
+
+    // A re-derive WITHOUT further edits must keep the split (the reconstructed
+    // session areas re-apply it; without them the floor would flatten).
+    c.commit_to_ber().unwrap();
+    let floors = &c.current_record.as_ref().unwrap().data.storeys[0]
+        .floors
+        .regions;
+    assert!(
+        floors.iter().any(|f| (f.level_m + 0.3).abs() < 1e-6),
+        "the next materialize keeps the level split: {floors:?}"
+    );
+}
+
 /// REGRESSION: an UNTAGGED storey's outline must survive commit→reload
 /// unchanged — no `geo` re-normalisation. When the partition + merged-outline
 /// ran unconditionally (even with no phase zones), the rebuilt ring was

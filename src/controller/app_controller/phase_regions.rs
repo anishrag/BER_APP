@@ -21,14 +21,15 @@ impl AppController {
 
     /// Enter/leave phase-tagging mode. Entering drops into draw mode (so a
     /// stroke carves an area straight away), acts on the storey OUTLINE, and is
-    /// mutually exclusive with living-area / exposure modes. Leaving clears any
-    /// half-finished pick.
+    /// mutually exclusive with living-area / exposure / step modes. Leaving
+    /// clears any half-finished pick.
     pub fn set_phase_mode(&mut self, on: bool) {
         self.phase_mode = on;
         self.abandon_phase_shape();
         if on {
             self.living_area_mode = false;
             self.exposure_mode = false;
+            self.step_mode = false;
             self.activate_shape(ActiveShape::Outline);
             self.set_edit_mode(EditTools::DrawPerpWalls);
         }

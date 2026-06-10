@@ -11,6 +11,7 @@
 //   - `phase_regions` — construction-phase tagging workflow.
 //   - `review`        — the collinearity-review cursor.
 //   - `snap`          — elective-snap tags, choose/un-snap replay.
+//   - `step_regions`  — floor-step (raise/lower area) tagging workflow.
 //   - `storeys`       — storey switching + the deferred-derive pipeline.
 //   - `strokes`       — sketch entry points + the apply-stroke family.
 //   - `view`          — canvas pan/zoom.
@@ -23,7 +24,7 @@ mod phase_regions;
 pub use document::ExposureSection;
 use document::{
     ActiveShape, DimensionPrompt, DimensionState, Document, EditState, MovedCoordKind, PendingArc,
-    PhaseRegion, ShapeSlot, StoreyDoc, DEFAULT_CEILING_HEIGHT_M,
+    PhaseRegion, ShapeSlot, StepRegion, StoreyDoc, DEFAULT_CEILING_HEIGHT_M,
 };
 pub use exposure::{ExposureSelection, SectionHandle, WallExposureView};
 // `ExposureSection` is re-exported above (the controller's public surface).
@@ -50,6 +51,7 @@ mod history;
 mod persistence;
 mod review;
 mod snap;
+mod step_regions;
 mod storeys;
 mod strokes;
 mod view;
@@ -142,6 +144,18 @@ pub struct AppController {
     /// dimensionable slot); the user taps one, which becomes `phase_shape` and is
     /// then dimensioned. Transient.
     pending_phase_cut: Option<[ShapeSlot; 2]>,
+    /// True when the editor is tagging floor-step areas (raised/lowered floor
+    /// levels). Routes `DrawPerpWalls` to step carving; mutually exclusive with
+    /// living-area / exposure / phase modes. Toggled by the UI.
+    step_mode: bool,
+    /// Session-only floor-step areas, keyed by storey index. NOT persisted in
+    /// the BER — they re-split the floor regions at commit; the durable record
+    /// is each floor region's `level_m`. See `step_regions.rs`.
+    step_regions: HashMap<usize, Vec<StepRegion>>,
+    /// A step cut split the storey into two candidate regions (each a
+    /// dimensionable slot); the user taps one, which becomes `step_shape` and is
+    /// then dimensioned. Transient.
+    pending_step_cut: Option<[ShapeSlot; 2]>,
     /// DEBUG: the splice-pipeline phases (#1 raw stroke … #4 spliced ring) from
     /// the last extend/trim, captured for the UI's coloured debug overlay.
     splice_debug: Vec<manip_2d_plan::SplicePhase>,
@@ -207,6 +221,9 @@ impl AppController {
             phase_mode: false,
             phase_regions: HashMap::new(),
             pending_phase_cut: None,
+            step_mode: false,
+            step_regions: HashMap::new(),
+            pending_step_cut: None,
             splice_debug: Vec::new(),
             revision: 0,
             saved_revision: 0,
