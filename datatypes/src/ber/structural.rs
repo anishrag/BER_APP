@@ -443,6 +443,22 @@ impl FloorRegions {
         strip_collinear(&ring)
     }
 
+    /// The storey footprint as ONE usable ring: when the floor is split into
+    /// several phase zones, merge them back (`merged_outline`); otherwise the
+    /// single region's exact stored points (no geo ops, so they round-trip).
+    /// `None` when no region yields a ≥3-vertex ring.
+    pub fn footprint_ring(&self) -> Option<Vec<Point2f64>> {
+        let ring = if self.regions.len() > 1 {
+            self.merged_outline()
+        } else {
+            self.to_vertex_lists()
+                .into_iter()
+                .find(|r| r.len() >= 3)
+                .unwrap_or_default()
+        };
+        (ring.len() >= 3).then_some(ring)
+    }
+
     /// Partition `outline` into floor regions by a set of construction-phase
     /// `areas` (each a ring + the construction id to stamp on it). Every area is
     /// clipped to the outline and to the parts NOT already claimed by an earlier

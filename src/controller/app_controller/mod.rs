@@ -12,12 +12,12 @@ mod phase_regions;
 
 pub use document::ExposureSection;
 pub use exposure::{ExposureSelection, SectionHandle, WallExposureView};
-use living_areas::{reconstruct_living_areas, shape_finalised};
+use living_areas::shape_finalised;
 use phase_regions::{resolved_phase, PhaseRegion};
 
 use document::{
     ActiveShape, DimensionPrompt, DimensionState, Document, EditState, MovedCoordKind, PendingArc,
-    ShapeSlot,
+    ShapeSlot, StoreyDoc,
 };
 // `ExposureSection` is re-exported above (the controller's public surface).
 
@@ -1027,15 +1027,11 @@ impl AppController {
     /// curve arcs) is intentionally not preserved — drawing tools work from the
     /// loaded points.
     fn load_storey_into_editor(&mut self, storey: Option<&Storey>) {
-        self.document.dimensioning = DimensionState::default();
-        // A provisional arc is transient and tied to the OUTGOING plan's
-        // vertices; loading a record must not carry a stale one over.
-        self.document.pending_arc = None;
-        self.document.living_areas = Vec::new();
+        // Shell session state resets here; the model rebuild itself is
+        // `StoreyDoc::from_storey` (document) — replacing the whole StoreyDoc
+        // covers the buffer, slots, active shape, pending arc and wall sections.
         // Any in-flight phase area belongs to the OUTGOING storey — abandon it.
-        self.document.phase_shape = None;
         self.pending_phase_cut = None;
-        self.document.active = ActiveShape::Outline;
         self.living_area_mode = false;
         self.exposure_mode = false;
         // Phase mode is a sub-area tool like the two above; leaving it on across a
@@ -1046,54 +1042,8 @@ impl AppController {
         self.selected_exposure_wall = None;
         self.exposure_sel = None;
         self.exposure_drag = None;
-        self.document.wall_sections = HashMap::new();
-        self.document.outline = ShapeSlot::default();
-        let Some(storey) = storey else {
-            self.document.floor_plan = FloorPlan::default();
-            return;
-        };
-
-        // Outline: rebuild from the resolved floor footprint. A SINGLE region is
-        // the whole footprint — use its exact stored points (no geo, so it
-        // round-trips). Only when the floor is split into several phase zones do
-        // we MERGE them back into one outline ring (the first region would be
-        // just one zone).
-        let primary: Vec<Point2f32> = if storey.floors.regions.len() > 1 {
-            storey
-                .floors
-                .merged_outline()
-                .into_iter()
-                .map(to_f32)
-                .collect()
-        } else {
-            storey
-                .floors
-                .to_vertex_lists()
-                .into_iter()
-                .find(|r| r.len() >= 3)
-                .map(|r| r.iter().copied().map(to_f32).collect())
-                .unwrap_or_default()
-        };
-        if primary.len() >= 3 {
-            self.document.floor_plan = FloorPlan::from_clean_ring(&primary).unwrap_or_default();
-            // Loaded geometry is finalised: metre scale set, nothing to dimension.
-            self.document.dimensioning = DimensionState {
-                known_params: self.document.floor_plan.all_active_params(),
-                scale_set: true,
-                dimensioned_walls: Vec::new(),
-                skipped_walls: HashSet::new(),
-                current_prompt: None,
-            };
-        } else {
-            self.document.floor_plan = FloorPlan::default();
-            self.document.dimensioning = DimensionState::default();
-        }
-        self.document.outline = ShapeSlot {
-            floor_plan: self.document.floor_plan.clone(),
-            dimensioning: self.document.dimensioning.clone(),
-        };
-        self.document.living_areas = reconstruct_living_areas(&storey.living_areas);
-        self.document.wall_sections = self.sections_from_wall_regions(&storey.walls);
+        let idx = self.document.active_storey;
+        self.document.storeys[idx] = storey.map(StoreyDoc::from_storey).unwrap_or_default();
     }
 
     /// Snapshot of the BER currently being edited, for the UI to render.
@@ -1979,20 +1929,8 @@ impl AppController {
             return None;
         }
         let prev = self.current_record.as_ref()?.data.storeys.get(idx - 1)?;
-        // Merge phase zones back to the full footprint when the previous storey
-        // is split; otherwise the single region IS the footprint.
-        let ring_f64 = if prev.floors.regions.len() > 1 {
-            prev.floors.merged_outline()
-        } else {
-            prev.floors
-                .to_vertex_lists()
-                .into_iter()
-                .find(|r| r.len() >= 3)?
-        };
-        if ring_f64.len() < 3 {
-            return None;
-        }
-        Some(ring_f64.into_iter().map(to_f32).collect())
+        let ring = prev.floors.footprint_ring()?;
+        Some(ring.into_iter().map(to_f32).collect())
     }
 
     /// Apply the FIRST outline stroke of a new upper storey, captured in the

@@ -345,34 +345,3 @@ pub(super) fn shape_finalised(dim: &DimensionState, plan: &FloorPlan) -> bool {
     plan.next_promptable_wall(&dim.known_params, &dim.skipped_walls)
         .is_none()
 }
-
-/// Rebuild the runtime living-area slots from their resolved polygons on load.
-/// Living areas are non-editable, so each is reconstructed from exact points
-/// (`from_clean_ring`) with a COMPLETE dimensioning state (metre scale already
-/// set, all params known) — they render and can be deleted, but aren't
-/// re-dimensioned. Degenerate (<3-vertex) polygons are skipped.
-pub(super) fn reconstruct_living_areas(areas: &FloorRegions) -> Vec<ShapeSlot> {
-    areas
-        .to_vertex_lists()
-        .into_iter()
-        .filter(|verts| verts.len() >= 3)
-        .filter_map(|verts| {
-            let pts: Vec<Point2f32> = verts
-                .iter()
-                .map(|p| Point2f32::new(p.x as f32, p.y as f32))
-                .collect();
-            let plan = FloorPlan::from_clean_ring(&pts).ok()?;
-            let known_params = plan.all_active_params();
-            Some(ShapeSlot {
-                floor_plan: plan,
-                dimensioning: DimensionState {
-                    known_params,
-                    scale_set: true,
-                    dimensioned_walls: Vec::new(),
-                    skipped_walls: HashSet::new(),
-                    current_prompt: None,
-                },
-            })
-        })
-        .collect()
-}

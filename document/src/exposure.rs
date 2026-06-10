@@ -2,9 +2,10 @@
 //! sections on the storey outline, and deriving full coverage. Pure model
 //! mutation — the shell owns pointer selection, undo, and persistence.
 use crate::{ExposureSection, StoreyDoc};
-use datatypes::ber::structural::WallExposure;
-use domain::points::Point2f64;
-use manip_2d_plan::VertexId;
+use datatypes::ber::structural::{WallExposure, WallRegions};
+use domain::points::{Point2f32, Point2f64};
+use manip_2d_plan::{project_distance_along, segment_len, VertexId};
+use std::collections::HashMap;
 
 /// Paint `[start, end]` of a wall with `exposure`: the new mark WINS over any
 /// overlap (existing sections are trimmed to their non-overlapping remnants),
@@ -86,6 +87,18 @@ pub fn wall_coverage(len: f32, sections: &[ExposureSection]) -> Vec<(f32, f32, W
     out
 }
 
+/// The coverage range `(start, end)` — a marked section or an un-marked gap —
+/// containing distance `d` along a wall of length `len`. Lets a tap select just
+/// the piece under it rather than the whole wall.
+pub fn range_at(len: f32, sections: &[ExposureSection], d: f32) -> (f32, f32) {
+    for (s, e, _) in wall_coverage(len, sections) {
+        if d >= s - 1e-4 && d <= e + 1e-4 {
+            return (s, e);
+        }
+    }
+    (0.0, len)
+}
+
 impl StoreyDoc {
     /// Paint a section `[start, end]` (the wall's length is `len`) with `exposure`
     /// onto outline wall `vid`, then fill the gaps so the wall is fully
@@ -144,6 +157,56 @@ impl StoreyDoc {
                     .collect::<Vec<_>>()
             })
             .collect()
+    }
+
+    /// Rebuild the runtime section model from the persisted `WallRegions` (the
+    /// source of truth) on load. Each region's base edge is projected onto the
+    /// perimeter wall it lies on to recover its `(start_m, end_m, exposure)`;
+    /// regions are grouped by wall and sorted. Walls with no region are absent
+    /// (unset). Inverse of the commit-time derivation.
+    pub fn sections_from_wall_regions(
+        &self,
+        walls: &WallRegions,
+    ) -> HashMap<VertexId, Vec<ExposureSection>> {
+        let perim = self.outline.floor_plan.perimeter_walls();
+        let mut out: HashMap<VertexId, Vec<ExposureSection>> = HashMap::new();
+        for region in &walls.regions {
+            let ext = &region.polygon.exterior;
+            if ext.len() < 2 {
+                continue;
+            }
+            let p0 = Point2f32::new(ext[0].x as f32, ext[0].y as f32);
+            let p1 = Point2f32::new(ext[1].x as f32, ext[1].y as f32);
+            let mid = Point2f32::new((p0.x + p1.x) * 0.5, (p0.y + p1.y) * 0.5);
+            let Some((vid, a, b)) = perim.iter().copied().find(|(_, a, b)| {
+                domain::points::point_to_segment_distance(
+                    mid.x as f64,
+                    mid.y as f64,
+                    a.x as f64,
+                    a.y as f64,
+                    b.x as f64,
+                    b.y as f64,
+                ) < 1e-2
+            }) else {
+                continue; // region's base edge isn't on any current wall
+            };
+            let len = segment_len(a, b);
+            let d0 = project_distance_along(a, b, len, p0.x, p0.y);
+            let d1 = project_distance_along(a, b, len, p1.x, p1.y);
+            out.entry(vid).or_default().push(ExposureSection {
+                start_m: d0.min(d1),
+                end_m: d0.max(d1),
+                exposure: region.exposure,
+            });
+        }
+        for secs in out.values_mut() {
+            secs.sort_by(|x, y| {
+                x.start_m
+                    .partial_cmp(&y.start_m)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            });
+        }
+        out
     }
 
     /// Mark every outline wall that has no sections set as fully `Exposed`.
