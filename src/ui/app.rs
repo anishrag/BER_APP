@@ -60,6 +60,8 @@ pub struct SketchState {
     /// Backing strings for the exposure section's typed start/end inputs.
     pub exposure_start_input: String,
     pub exposure_end_input: String,
+    /// Backing string for the floor-step amount input (metres).
+    pub step_amount_input: String,
 }
 
 pub struct SplashState {
@@ -279,6 +281,11 @@ impl eframe::App for BerApp {
                     pending_phase_cut_regions,
                     phase_choices,
                     phase_pick_pending,
+                    step_mode,
+                    step_region_polygons,
+                    pending_step_polygon,
+                    pending_step_cut_regions,
+                    step_pick_pending,
                     view,
                 ) = {
                     let controller_ref = self.app_controller.borrow();
@@ -321,6 +328,11 @@ impl eframe::App for BerApp {
                         controller_ref.pending_phase_cut_regions(),
                         controller_ref.construction_phase_choices(),
                         controller_ref.phase_pick_pending(),
+                        controller_ref.step_mode(),
+                        controller_ref.step_region_polygons(),
+                        controller_ref.pending_step_polygon(),
+                        controller_ref.pending_step_cut_regions(),
+                        controller_ref.step_pick_pending(),
                         crate::ui::render::ViewParams {
                             zoom: v.zoom,
                             offset_x: v.offset_x,
@@ -369,6 +381,12 @@ impl eframe::App for BerApp {
                     &pending_phase_cut_regions,
                     &phase_choices,
                     phase_pick_pending,
+                    step_mode,
+                    &step_region_polygons,
+                    &pending_step_polygon,
+                    &pending_step_cut_regions,
+                    step_pick_pending,
+                    &mut self.sketch_state.step_amount_input,
                     edit_selected_wall,
                     edit_selected_vertex,
                     edit_drag_prompt,
@@ -520,6 +538,30 @@ impl eframe::App for BerApp {
                             }
                             SketchEvent::DeletePhaseRegion(index) => {
                                 controller.borrow_mut().delete_phase_region(index);
+                            }
+                            SketchEvent::SetStepMode(on) => {
+                                controller.borrow_mut().set_step_mode(on);
+                            }
+                            SketchEvent::StepRegionStrokeWorld { points } => {
+                                controller
+                                    .borrow_mut()
+                                    .apply_step_region_stroke_event(&points);
+                            }
+                            SketchEvent::AssignStepLevel(level_m) => {
+                                controller
+                                    .borrow_mut()
+                                    .assign_step_level_to_pending(level_m);
+                            }
+                            SketchEvent::ChooseStepCutRegion { world_x, world_y } => {
+                                controller
+                                    .borrow_mut()
+                                    .choose_step_cut_region(world_x as f32, world_y as f32);
+                            }
+                            SketchEvent::CancelPendingStep => {
+                                controller.borrow_mut().cancel_pending_step();
+                            }
+                            SketchEvent::DeleteStepRegion(index) => {
+                                controller.borrow_mut().delete_step_region(index);
                             }
                             SketchEvent::SetExposureMode(on) => {
                                 controller.borrow_mut().set_exposure_mode(on);

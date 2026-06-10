@@ -286,6 +286,26 @@ pub enum SketchEvent {
     CancelPendingPhase,
     /// Delete the current storey's phase region at the given index.
     DeletePhaseRegion(usize),
+    /// Toggle floor-step tagging mode: when on, DrawPerpWalls carves an area
+    /// whose floor is raised or lowered relative to the storey datum.
+    SetStepMode(bool),
+    /// A step-tagging DrawPerpWalls stroke (world coords) — carves an area (or
+    /// cuts the storey) whose floor level will be raised/lowered.
+    StepRegionStrokeWorld {
+        points: Vec<(f32, f32)>,
+    },
+    /// User entered a signed floor level (metres; + raised, − lowered) for the
+    /// pending carved step area.
+    AssignStepLevel(f32),
+    /// Tap (world coords) picking which region of a pending step cut to level.
+    ChooseStepCutRegion {
+        world_x: f64,
+        world_y: f64,
+    },
+    /// Discard the half-finished step pick without assigning a level.
+    CancelPendingStep,
+    /// Delete the current storey's step region at the given index.
+    DeleteStepRegion(usize),
     /// Toggle wall-exposure mode: when on, tapping an outline wall selects it
     /// (and the section handles), the type buttons mark the selected range.
     SetExposureMode(bool),
@@ -378,6 +398,16 @@ impl SketchPage {
         pending_phase_cut_regions: &[Vec<(f64, f64)>],
         phase_choices: &[(ConstructionPhase, String)],
         phase_pick_pending: bool,
+        // Floor-step tagging: mode flag, the committed step regions
+        // `(ring, label)` to tint, the carved area awaiting its level, the cut
+        // candidates to tap between, whether a level entry is pending, and the
+        // backing string for the amount input.
+        step_mode: bool,
+        step_region_polygons: &[(Vec<(f64, f64)>, String)],
+        pending_step_polygon: &[(f64, f64)],
+        pending_step_cut_regions: &[Vec<(f64, f64)>],
+        step_pick_pending: bool,
+        step_amount_input: &mut String,
         edit_selected_wall: Option<((f64, f64), (f64, f64))>,
         edit_selected_vertex: Option<(f64, f64)>,
         edit_drag_prompt: Option<EditDragPromptUiData>,
@@ -539,6 +569,7 @@ impl SketchPage {
 
                 // Construction-phase areas: committed regions (purple, labelled),
                 // plus the pending carved area / cut candidates while picking.
+                let phase_tint = egui::Color32::from_rgb(200, 120, 255); // purple
                 render::render_phase_regions(
                     &painter,
                     rect,
@@ -547,6 +578,7 @@ impl SketchPage {
                     mode,
                     view,
                     phase_region_polygons,
+                    phase_tint,
                 );
                 render::render_cut_candidates(
                     &painter,
@@ -566,6 +598,42 @@ impl SketchPage {
                         mode,
                         view,
                         std::slice::from_ref(&(pending_phase_polygon.to_vec(), "?".to_string())),
+                        phase_tint,
+                    );
+                }
+
+                // Floor-step areas: committed regions (teal, labelled with the
+                // signed level), plus the pending carved area / cut candidates.
+                let step_tint = egui::Color32::from_rgb(60, 220, 200); // teal
+                render::render_phase_regions(
+                    &painter,
+                    rect,
+                    ber,
+                    current_storey_idx,
+                    mode,
+                    view,
+                    step_region_polygons,
+                    step_tint,
+                );
+                render::render_cut_candidates(
+                    &painter,
+                    rect,
+                    ber,
+                    current_storey_idx,
+                    mode,
+                    view,
+                    pending_step_cut_regions,
+                );
+                if pending_step_polygon.len() >= 3 {
+                    render::render_phase_regions(
+                        &painter,
+                        rect,
+                        ber,
+                        current_storey_idx,
+                        mode,
+                        view,
+                        std::slice::from_ref(&(pending_step_polygon.to_vec(), "?".to_string())),
+                        step_tint,
                     );
                 }
 
@@ -811,6 +879,22 @@ impl SketchPage {
                     }
                 }
 
+                // Pending STEP cut: a primary click picks which candidate region
+                // gets the floor level. Mirrors the phase cut.
+                let step_cut_pending = !pending_step_cut_regions.is_empty();
+                if step_cut_pending {
+                    if response.clicked_by(egui::PointerButton::Primary) {
+                        if let Some((wx, wy)) = response.interact_pointer_pos().and_then(|pos| {
+                            screen_to_world(ber, current_storey_idx, rect, view, pos)
+                        }) {
+                            on_event(UiEvent::Sketch(SketchEvent::ChooseStepCutRegion {
+                                world_x: wx,
+                                world_y: wy,
+                            }));
+                        }
+                    }
+                }
+
                 // Exposure mode: a tap selects the wall under the pointer; a
                 // primary drag near a selection handle slides that handle along
                 // the wall. Takes priority over stroke/edit input (suppressed via
@@ -865,6 +949,8 @@ impl SketchPage {
                     && !cut_pending
                     && !phase_cut_pending
                     && !phase_pick_pending
+                    && !step_cut_pending
+                    && !step_pick_pending
                     && !exposure_mode;
 
                 if primary_available && !matches!(edit_tool, EditTools::Edit) {
@@ -898,6 +984,10 @@ impl SketchPage {
                             // metre space too (carve an area to assign a year).
                             let phase_draw =
                                 phase_mode && matches!(edit_tool, EditTools::DrawPerpWalls);
+                            // Floor-step tagging draws in the storey's metre
+                            // space too (carve an area to raise/lower its floor).
+                            let step_draw =
+                                step_mode && matches!(edit_tool, EditTools::DrawPerpWalls);
                             // First outline of a fresh upper storey: drawn over
                             // the previous-storey watermark, so it must be
                             // captured in that storey's metre space (mirrors the
@@ -906,12 +996,14 @@ impl SketchPage {
                                 matches!(edit_tool, EditTools::DrawPerpWalls)
                                     && !living_area_mode
                                     && !phase_mode
+                                    && !step_mode
                                     && matches!(current_storey_idx, Some(i) if i > 0)
                                     && ber
                                         .and_then(|b| b.storeys.get(current_storey_idx?))
                                         .is_some_and(|s| s.floors.regions.is_empty());
                             let needs_world = living_area_draw
                                 || phase_draw
+                                || step_draw
                                 || outline_on_watermark
                                 || matches!(
                                     edit_tool,
@@ -952,6 +1044,10 @@ impl SketchPage {
                                         }
                                     } else if phase_draw {
                                         SketchEvent::PhaseRegionStrokeWorld {
+                                            points: world_points,
+                                        }
+                                    } else if step_draw {
+                                        SketchEvent::StepRegionStrokeWorld {
                                             points: world_points,
                                         }
                                     } else if outline_on_watermark {
@@ -1189,6 +1285,28 @@ impl SketchPage {
                                     &mut on_event,
                                 );
                             }
+                        }
+                        // Floor-step tagging: select an area of the floor and
+                        // raise/lower it relative to the storey datum.
+                        let mut st = step_mode;
+                        if ui
+                            .toggle_value(&mut st, "↕ Floor steps")
+                            .on_hover_text(
+                                "Mark a floor area as raised or lowered: draw an area \
+                                 (like a living area), then enter the step amount",
+                            )
+                            .changed()
+                        {
+                            on_event(UiEvent::Sketch(SketchEvent::SetStepMode(st)));
+                        }
+                        if step_mode {
+                            Self::step_toolbar(
+                                ui,
+                                step_region_polygons,
+                                step_pick_pending,
+                                step_amount_input,
+                                &mut on_event,
+                            );
                         }
                     }
                     ui.separator();
@@ -1557,6 +1675,66 @@ impl SketchPage {
                         .clicked()
                     {
                         on_event(UiEvent::Sketch(SketchEvent::DeletePhaseRegion(i)));
+                    }
+                });
+            }
+        }
+    }
+
+    /// Floor-step controls. While a carved area awaits its level, shows the
+    /// amount field (metres) + Raise/Lower buttons (sign the amount) + Cancel;
+    /// otherwise lists the committed step regions with delete buttons.
+    fn step_toolbar<F: FnMut(UiEvent)>(
+        ui: &mut egui::Ui,
+        regions: &[(Vec<(f64, f64)>, String)],
+        pick_pending: bool,
+        amount_input: &mut String,
+        on_event: &mut F,
+    ) {
+        if pick_pending {
+            ui.label(egui::RichText::new("Step amount (m):").strong());
+            ui.add(
+                egui::TextEdit::singleline(amount_input)
+                    .desired_width(60.0)
+                    .hint_text("e.g. 0.15"),
+            );
+            // Unparseable input is ignored — the buttons just do nothing.
+            let amount = parse_dimension_expression(amount_input);
+            if ui
+                .button("Raise")
+                .on_hover_text("Raise this area's floor by the amount")
+                .clicked()
+            {
+                if let Some(v) = amount {
+                    on_event(UiEvent::Sketch(SketchEvent::AssignStepLevel(v)));
+                    amount_input.clear();
+                }
+            }
+            if ui
+                .button("Lower")
+                .on_hover_text("Lower this area's floor by the amount")
+                .clicked()
+            {
+                if let Some(v) = amount {
+                    on_event(UiEvent::Sketch(SketchEvent::AssignStepLevel(-v)));
+                    amount_input.clear();
+                }
+            }
+            if ui.button("Cancel").clicked() {
+                on_event(UiEvent::Sketch(SketchEvent::CancelPendingStep));
+                amount_input.clear();
+            }
+        } else {
+            ui.label("Draw an area to raise or lower its floor.");
+            for (i, (_ring, label)) in regions.iter().enumerate() {
+                ui.horizontal(|ui| {
+                    ui.label(label);
+                    if ui
+                        .button("🗑")
+                        .on_hover_text("Delete this step area")
+                        .clicked()
+                    {
+                        on_event(UiEvent::Sketch(SketchEvent::DeleteStepRegion(i)));
                     }
                 });
             }

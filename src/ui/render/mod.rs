@@ -599,9 +599,11 @@ pub fn render_snap_tags(
     }
 }
 
-/// Render committed construction-phase areas: each ring tinted purple with its
-/// phase label at the centroid, so the assessor sees which footprint carries
-/// which year. `regions` is `(ring_world_coords, label)`.
+/// Render committed tagged areas (construction-phase or floor-step regions):
+/// each ring tinted `color` with its label at the centroid, so the assessor
+/// sees which footprint carries which tag. `regions` is
+/// `(ring_world_coords, label)`.
+#[allow(clippy::too_many_arguments)]
 pub fn render_phase_regions(
     painter: &egui::Painter,
     rect: egui::Rect,
@@ -610,6 +612,7 @@ pub fn render_phase_regions(
     sketch_mode: SketchMode,
     view: ViewParams,
     regions: &[(Vec<(f64, f64)>, String)],
+    color: egui::Color32,
 ) {
     if regions.is_empty() {
         return;
@@ -618,7 +621,6 @@ pub fn render_phase_regions(
     else {
         return;
     };
-    let color = egui::Color32::from_rgb(200, 120, 255); // purple
     for (region, label) in regions {
         if region.len() < 3 {
             continue;
