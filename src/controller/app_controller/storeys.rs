@@ -42,6 +42,9 @@ impl AppController {
         // after the switch would graft it onto the new storey.
         self.pending_phase_cut = None;
         self.pending_step_cut = None;
+        // The ceiling-height prompt was asking about the OUTGOING scope — the
+        // new scope re-gates on its own heights when 3D is next requested.
+        self.ceiling_height_prompt = false;
         self.edit_drag_prompt = None;
         self.vertex_drop_prompt = None;
         self.living_area_mode = false;
@@ -148,6 +151,8 @@ impl AppController {
         // Any in-flight phase/step area belongs to the OUTGOING storey — abandon it.
         self.pending_phase_cut = None;
         self.pending_step_cut = None;
+        // Same for a ceiling-height prompt — it was asking about that storey.
+        self.ceiling_height_prompt = false;
         self.living_area_mode = false;
         self.exposure_mode = false;
         // Phase mode is a sub-area tool like the two above; leaving it on across a

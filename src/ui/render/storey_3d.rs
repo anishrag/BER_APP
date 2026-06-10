@@ -4,6 +4,11 @@
 //! extruded upward to the ceiling height; walls are the quads connecting floor
 //! and ceiling rings. Roof line is the ceiling polygon at the top.
 //!
+//! The ceiling height comes from `storey.ceiling_height_m` — the controller's
+//! first-3D gate guarantees it's set before this view is reachable; an unset
+//! storey (defensive: a storey-tab switch while already in 3D can land on one)
+//! paints a hint instead of guessing a height.
+//!
 //! `render_at_z_offset` is the workhorse — `full_house_3d` calls it per storey
 //! with a cumulative z offset. The public `render` is just `render_at_z_offset`
 //! with `z_offset = 0` and computes its own bounding box.
@@ -21,6 +26,16 @@ pub fn render(
     display_mode: DisplayMode,
     view: ViewParams,
 ) {
+    if storey.ceiling_height_m.is_none() {
+        painter.text(
+            rect.center(),
+            egui::Align2::CENTER_CENTER,
+            "Set a ceiling height to view in 3D.",
+            egui::FontId::default(),
+            style::HINT_TEXT,
+        );
+        return;
+    }
     let Some((min_xy, max_xy)) = projected_bb_for_storey(storey, 0.0) else {
         return;
     };
@@ -30,6 +45,8 @@ pub fn render(
 
 /// Render `storey` with the assumption that its floor sits at world-z `z_offset`.
 /// Caller supplies the transform so multi-storey views can share one camera.
+/// Defensive no-op when the storey's ceiling height is unset (`render` and
+/// `full_house_3d` both hint-and-return before getting here).
 pub(crate) fn render_at_z_offset(
     painter: &egui::Painter,
     t: &Transform2d,
@@ -37,21 +54,31 @@ pub(crate) fn render_at_z_offset(
     display_mode: DisplayMode,
     z_offset: f64,
 ) {
+    let Some(height) = storey.ceiling_height_m else {
+        return;
+    };
     for region in &storey.floors.regions {
-        draw_extruded_region(painter, t, region, z_offset, display_mode);
+        draw_extruded_region(
+            painter,
+            t,
+            region,
+            z_offset,
+            z_offset + height,
+            display_mode,
+        );
     }
 }
 
 /// Projected (post-isometric) 2D bounding box of every point in this storey,
-/// including the ceiling ring (floor + height) at the given `z_offset`.
+/// including the ceiling ring (floor + ceiling height) at the given `z_offset`.
+/// `None` when there's no geometry or no ceiling height to extrude to.
 pub(crate) fn projected_bb_for_storey(
     storey: &Storey,
     z_offset: f64,
 ) -> Option<((f64, f64), (f64, f64))> {
-    // Compile-keeping placeholder (was the always-2.4 FloorRegion.height); the
-    // 3D wiring slice re-points extrusion to `storey.ceiling_height_m`.
+    let height = storey.ceiling_height_m?;
     let mut iter = storey.floors.regions.iter().flat_map(move |r| {
-        let z_top = z_offset + 2.4;
+        let z_top = z_offset + height;
         let floor = r
             .polygon
             .exterior()
@@ -80,14 +107,10 @@ fn draw_extruded_region(
     painter: &egui::Painter,
     t: &Transform2d,
     region: &FloorRegion,
-    z_offset: f64,
+    z_floor: f64,
+    ceiling_z: f64,
     display_mode: DisplayMode,
 ) {
-    let z_floor = z_offset;
-    // Compile-keeping placeholder (was the always-2.4 FloorRegion.height); the
-    // 3D wiring slice re-points extrusion to `storey.ceiling_height_m`.
-    let z_ceiling = z_offset + 2.4;
-
     let exterior: Vec<_> = region.polygon.exterior().coords().cloned().collect();
     if exterior.len() < 4 {
         return;
@@ -103,7 +126,7 @@ fn draw_extruded_region(
     let ceiling_pts: Vec<egui::Pos2> = exterior
         .iter()
         .map(|c| {
-            let (px, py) = project_iso(c.x, c.y, z_ceiling);
+            let (px, py) = project_iso(c.x, c.y, ceiling_z);
             t.apply(px, py)
         })
         .collect();

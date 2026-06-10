@@ -80,6 +80,11 @@ pub struct SketchState {
     pub exposure_end_input: String,
     /// Backing string for the floor-step amount input (metres).
     pub step_amount_input: String,
+    /// Backing string for the first-3D ceiling-height prompt's input (metres).
+    pub ceiling_height_input: String,
+    /// Last error from `set_default_ceiling_height`. Shown next to the textbox
+    /// so the user can correct without losing what they typed.
+    pub ceiling_height_error: Option<String>,
 }
 
 pub struct SplashState {
@@ -305,6 +310,8 @@ impl eframe::App for BerApp {
                     pending_step_polygon,
                     pending_step_cut_regions,
                     step_pick_pending,
+                    ceiling_height_prompt,
+                    ceiling_heights_set,
                     view,
                 ) = {
                     let controller_ref = self.app_controller.borrow();
@@ -353,6 +360,8 @@ impl eframe::App for BerApp {
                         controller_ref.pending_step_polygon(),
                         controller_ref.pending_step_cut_regions(),
                         controller_ref.step_pick_pending(),
+                        controller_ref.ceiling_height_prompt_pending(),
+                        controller_ref.ceiling_heights_set(),
                         crate::ui::render::ViewParams {
                             zoom: v.zoom,
                             offset_x: v.offset_x,
@@ -378,6 +387,7 @@ impl eframe::App for BerApp {
 
                 let current_storey_idx = self.app_controller.borrow().current_storey_idx();
                 let position_error = self.sketch_state.position_error.clone();
+                let ceiling_height_error = self.sketch_state.ceiling_height_error.clone();
 
                 let controller = self.app_controller.clone();
                 let splice_debug = self.app_controller.borrow().splice_debug_overlay();
@@ -426,6 +436,10 @@ impl eframe::App for BerApp {
                     &pending_step_cut_regions,
                     step_pick_pending,
                     &mut self.sketch_state.step_amount_input,
+                    ceiling_height_prompt,
+                    &mut self.sketch_state.ceiling_height_input,
+                    ceiling_height_error.as_deref(),
+                    ceiling_heights_set,
                     edit_selected_wall,
                     edit_selected_vertex,
                     edit_drag_prompt,
@@ -654,6 +668,21 @@ impl eframe::App for BerApp {
                             }
                             SketchEvent::SetAllRemainingExposed => {
                                 controller.borrow_mut().set_all_remaining_exposed();
+                            }
+                            SketchEvent::SetDefaultCeilingHeight(value) => {
+                                match controller.borrow_mut().set_default_ceiling_height(value) {
+                                    Ok(()) => {
+                                        self.sketch_state.ceiling_height_error = None;
+                                    }
+                                    Err(e) => {
+                                        eprintln!("set_default_ceiling_height: {}", e);
+                                        self.sketch_state.ceiling_height_error = Some(e);
+                                    }
+                                }
+                            }
+                            SketchEvent::CancelCeilingHeightPrompt => {
+                                controller.borrow_mut().cancel_ceiling_height_prompt();
+                                self.sketch_state.ceiling_height_error = None;
                             }
                             SketchEvent::SetCurrentStorey(target) => {
                                 log_err(

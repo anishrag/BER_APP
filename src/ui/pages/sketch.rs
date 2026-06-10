@@ -343,6 +343,13 @@ pub enum SketchEvent {
     ClearWallExposure,
     /// Mark every outline wall not yet set as exposed.
     SetAllRemainingExposed,
+    /// User typed a default ceiling height (m) in the first-3D prompt: stamp
+    /// the current scope (this storey, or every unset storey from the All tab)
+    /// and complete the switch into the 3D view that was requested.
+    SetDefaultCeilingHeight(f32),
+    /// User dismissed the ceiling-height prompt without setting a height —
+    /// stays in 2D.
+    CancelCeilingHeightPrompt,
     /// Switch the editor onto a specific storey, or `None` for the read-only
     /// "All storeys" overview tab.
     SetCurrentStorey(Option<usize>),
@@ -423,6 +430,13 @@ impl SketchPage {
         pending_step_cut_regions: &[Vec<(f64, f64)>],
         step_pick_pending: bool,
         step_amount_input: &mut String,
+        // First-3D ceiling-height gate: whether the typed prompt is open, the
+        // backing string for its input, its last error, and whether the current
+        // scope already has its heights (drives the 3D option's hover hint).
+        ceiling_height_prompt: bool,
+        ceiling_height_input: &mut String,
+        ceiling_height_error: Option<&str>,
+        ceiling_heights_set: bool,
         edit_selected_wall: Option<((f64, f64), (f64, f64))>,
         edit_selected_vertex: Option<(f64, f64)>,
         edit_drag_prompt: Option<EditDragPromptUiData>,
@@ -454,7 +468,7 @@ impl SketchPage {
                 Self::storey_tabs(ui, ber, current_storey_idx, &mut on_event);
 
                 // --- Mode toolbar: SketchMode (per-storey view choice) ---
-                if let Some(new_mode) = Self::mode_toolbar(ui, mode) {
+                if let Some(new_mode) = Self::mode_toolbar(ui, mode, ceiling_heights_set) {
                     on_event(UiEvent::Sketch(SketchEvent::ChangeMode(new_mode)));
                 }
 
@@ -1242,6 +1256,19 @@ impl SketchPage {
                 // The All-storeys tab (`current_storey_idx == None`) is read-only,
                 // so drawing/edit tools are hidden — only the Fit button stays.
                 ui.horizontal(|ui| {
+                    // The ceiling-height prompt outranks everything — it's the
+                    // blocked 3D request waiting on its height. Shown on the
+                    // All-storeys tab too (full-house 3D gates there), so it
+                    // sits before the read-only early-return below.
+                    if ceiling_height_prompt {
+                        Self::ceiling_height_prompt_toolbar(
+                            ui,
+                            ceiling_height_input,
+                            ceiling_height_error,
+                            &mut on_event,
+                        );
+                        return;
+                    }
                     if current_storey_idx.is_none() {
                         ui.label(
                             egui::RichText::new("Pick a storey tab to edit.")
@@ -1715,6 +1742,57 @@ impl SketchPage {
         }
     }
 
+    /// The first-3D ceiling-height prompt: a 3D view was requested but the
+    /// current scope has no default ceiling height yet. One typed value (m,
+    /// must be > 0) stamps the scope and opens the 3D view; Cancel stays 2D.
+    fn ceiling_height_prompt_toolbar<F: FnMut(UiEvent)>(
+        ui: &mut egui::Ui,
+        input: &mut String,
+        error: Option<&str>,
+        on_event: &mut F,
+    ) {
+        ui.label(
+            egui::RichText::new("Default ceiling height (m):")
+                .strong()
+                .color(egui::Color32::from_rgb(60, 220, 255)),
+        );
+        let resp = ui.add(
+            egui::TextEdit::singleline(input)
+                .desired_width(80.0)
+                .hint_text("e.g. 2.4"),
+        );
+        let submit_pressed = resp.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
+        let set_clicked = ui
+            .button("Set")
+            .on_hover_text("Set this height and open the 3D view")
+            .clicked();
+        if set_clicked || submit_pressed {
+            // A ceiling height must be strictly positive — 0 (which the parser
+            // allows for wall-collapse) is rejected here, leaving the typed
+            // text in place to correct.
+            if let Some(value) = parse_dimension_expression(input) {
+                if value > 0.0 {
+                    on_event(UiEvent::Sketch(SketchEvent::SetDefaultCeilingHeight(value)));
+                    input.clear();
+                }
+            }
+        }
+        if ui
+            .button("Cancel")
+            .on_hover_text("Stay in 2D without setting a height")
+            .clicked()
+        {
+            on_event(UiEvent::Sketch(SketchEvent::CancelCeilingHeightPrompt));
+            input.clear();
+        }
+        if let Some(err) = error {
+            ui.label(
+                egui::RichText::new(format!("⚠ {}", err))
+                    .color(egui::Color32::from_rgb(255, 120, 90)),
+            );
+        }
+    }
+
     /// Radius/bulge slider for a provisional curve whose attach lines are set.
     /// Dragging it reshapes the amber preview live; "Accept curve" bakes it in.
     /// `bulge` is the signed sagitta / chord (0 = flat, larger = more curved).
@@ -2027,15 +2105,24 @@ impl SketchPage {
         });
     }
 
-    fn mode_toolbar(ui: &mut egui::Ui, mode: SketchMode) -> Option<SketchMode> {
+    fn mode_toolbar(
+        ui: &mut egui::Ui,
+        mode: SketchMode,
+        ceiling_heights_set: bool,
+    ) -> Option<SketchMode> {
         let mut change_mode: Option<SketchMode> = None;
         ui.horizontal(|ui| {
             for mode_item in SketchMode::iter() {
                 let selected = mode == mode_item;
-                if ui
-                    .selectable_label(selected, format!("{:?}", mode_item))
-                    .clicked()
-                {
+                let mut response = ui.selectable_label(selected, format!("{:?}", mode_item));
+                // 3D stays CLICKABLE without ceiling heights — clicking opens
+                // the height prompt (the controller gate) — but the hint warns
+                // the assessor what the click will ask for first.
+                if matches!(mode_item, SketchMode::Storey3D) && !ceiling_heights_set {
+                    response = response
+                        .on_hover_text("Sets the default ceiling height first — 3D needs it");
+                }
+                if response.clicked() {
                     change_mode = Some(mode_item);
                 }
             }

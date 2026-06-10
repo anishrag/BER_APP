@@ -7,7 +7,7 @@
 //! roof-height labels at each floor corner.
 
 use datatypes::ber::fenestration::{Door, Window};
-use datatypes::ber::structural::{FloorRegion, Storey};
+use datatypes::ber::structural::{CeilingRegion, FloorRegion, Storey};
 use domain::sketch::DisplayMode;
 use eframe::egui;
 use geo::Coord;
@@ -111,16 +111,15 @@ pub fn render(
         }
     }
 
-    // Roof-height labels at each floor corner.
-    //
-    // TODO: when CeilingRegion data is populated, look up the matching ceiling
-    // vertex's z-coordinate per corner instead of using the floor's bulk
-    // `height` field (which represents floor-to-ceiling distance, flat).
+    // Ceiling-height labels at each roof-region corner, from the region's
+    // per-vertex z (metres above the storey's floor datum). Roof regions only
+    // exist once the assessor has entered a ceiling height — before that,
+    // nothing is drawn (no made-up heights on the canvas).
     if matches!(
         display_mode,
         DisplayMode::Roofs | DisplayMode::AllSurfaces | DisplayMode::FloorMapDims
     ) {
-        for region in &storey.floors.regions {
+        for region in &storey.roofs.regions {
             draw_corner_height_labels(painter, &t, region);
         }
     }
@@ -390,19 +389,16 @@ fn draw_dimensions(
     }
 }
 
-fn draw_corner_height_labels(painter: &egui::Painter, t: &Transform2d, region: &FloorRegion) {
-    // Compile-keeping placeholder (was the always-2.4 FloorRegion.height); the
-    // UI slice re-points these labels to `storey.roofs` polygon z.
-    let h: f64 = 2.4;
-    let coords: Vec<Coord<f64>> = region.polygon.exterior().coords().cloned().collect();
-    // Exterior closes (last point == first); skip the duplicate.
-    let unique = &coords[..coords.len().saturating_sub(1)];
-    for c in unique {
-        let pos = t.apply(c.x, c.y) + egui::Vec2::new(0.0, -12.0);
+fn draw_corner_height_labels(painter: &egui::Painter, t: &Transform2d, region: &CeilingRegion) {
+    // Each roof vertex carries its own height as the polygon's z — flat today
+    // (the default derivation stamps one typed height), per-corner once the
+    // roofs feature introduces slopes.
+    for v in &region.polygon.exterior {
+        let pos = t.apply(v.x, v.y) + egui::Vec2::new(0.0, -12.0);
         painter.text(
             pos,
             egui::Align2::CENTER_BOTTOM,
-            format!("h={:.2}m", h),
+            format!("h={:.2}m", v.z),
             egui::FontId::proportional(9.0),
             style::ROOF_LINE,
         );

@@ -2,6 +2,7 @@
 // (children of this module, so they can use the private fields/methods
 // declared here). This file holds only the struct, its constructor, and the
 // module wiring; each submodule owns one concern:
+//   - `ceiling`       — the first-3D ceiling-height gate + prompt.
 //   - `dimensioning`  — the dimension-prompt workflow.
 //   - `editing`       — Edit-mode interaction + measurement prompts.
 //   - `exposure`      — wall-exposure marking interaction.
@@ -15,6 +16,7 @@
 //   - `storeys`       — storey switching + the deferred-derive pipeline.
 //   - `strokes`       — sketch entry points + the apply-stroke family.
 //   - `view`          — canvas pan/zoom.
+mod ceiling;
 mod dimensioning;
 mod editing;
 mod exposure;
@@ -156,6 +158,11 @@ pub struct AppController {
     /// dimensionable slot); the user taps one, which becomes `step_shape` and is
     /// then dimensioned. Transient.
     pending_step_cut: Option<[ShapeSlot; 2]>,
+    /// True while the first-3D "set default ceiling height" prompt is open: a
+    /// 3D view was requested but the current scope has no ceiling height yet
+    /// (see `ceiling.rs`). Session-only, outside undo — same deliberate choice
+    /// as phases/steps; overwriting the value is its own undo.
+    ceiling_height_prompt: bool,
     /// DEBUG: the splice-pipeline phases (#1 raw stroke … #4 spliced ring) from
     /// the last extend/trim, captured for the UI's coloured debug overlay.
     splice_debug: Vec<manip_2d_plan::SplicePhase>,
@@ -224,6 +231,7 @@ impl AppController {
             step_mode: false,
             step_regions: HashMap::new(),
             pending_step_cut: None,
+            ceiling_height_prompt: false,
             splice_debug: Vec::new(),
             revision: 0,
             saved_revision: 0,

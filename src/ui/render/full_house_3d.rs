@@ -28,6 +28,21 @@ pub fn render(
         return;
     }
 
+    // The stack's z-step per storey IS its ceiling height — every storey needs
+    // one before the full house can stack. The controller's first-3D gate fills
+    // them from the All-storeys tab; an unset one here (e.g. a storey added
+    // while already in 3D) paints the hint instead of guessing a height.
+    if ber.storeys.iter().any(|s| s.ceiling_height_m.is_none()) {
+        painter.text(
+            rect.center(),
+            egui::Align2::CENTER_CENTER,
+            "Set a ceiling height to view in 3D.",
+            egui::FontId::default(),
+            style::HINT_TEXT,
+        );
+        return;
+    }
+
     // First pass: precompute z-offsets per storey and the combined projected bbox.
     let mut z_offsets = Vec::with_capacity(ber.storeys.len());
     let mut z = 0.0_f64;
@@ -44,10 +59,8 @@ pub fn render(
                 ),
             });
         }
-        // Compile-keeping placeholder (was the always-2.4 FloorRegion.height);
-        // the 3D wiring slice re-points the z-step to `storey.ceiling_height_m`.
-        let storey_height = 2.4;
-        z += storey_height;
+        // Checked Some above: the next storey's floor sits on this ceiling.
+        z += storey.ceiling_height_m.unwrap_or_default();
     }
 
     let Some((min_xy, max_xy)) = combined else {
