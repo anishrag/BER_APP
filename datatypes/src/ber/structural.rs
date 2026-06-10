@@ -677,6 +677,80 @@ impl CeilingRegions {
             .collect();
         Self { regions }
     }
+
+    /// Re-split the regions by ceiling-step `areas` (world ring + z DELTA in
+    /// metres), applied IN ORDER: each area splits every region produced so
+    /// far (2D boolean ops on the plan projection); intersected pieces get
+    /// every vertex's z shifted by the delta, remainders keep theirs — so
+    /// overlapping areas COMPOSE (deltas sum). Empty `areas` → `self`
+    /// unchanged (no geo ops). Sub-mm² slivers dropped (same rationale as
+    /// `FloorRegions::with_levels`). Pieces inherit `construction_id`, get
+    /// fresh ids and default `opes` (openings are dropped on split — region
+    /// identity doesn't survive a re-split). Assumes FLAT input regions (all
+    /// current content is — see `flat_z`); sloped regions are the later
+    /// roofs feature.
+    pub fn with_z_deltas(self, areas: &[(Vec<Point2f64>, f64)]) -> Self {
+        use geo::bool_ops::BooleanOps;
+        use geo::Area;
+        /// Pieces smaller than this (m²) are boolean-op debris, not ceilings.
+        const SLIVER_AREA_M2: f64 = 1e-6;
+        if areas.is_empty() {
+            return self;
+        }
+        let to_poly = |ring: &[Point2f64]| {
+            Polygon::new(
+                LineString::from(ring.iter().map(|p| (p.x, p.y)).collect::<Vec<_>>()),
+                vec![],
+            )
+        };
+        let mut regions = self.regions;
+        for (ring, delta) in areas {
+            if ring.len() < 3 {
+                continue;
+            }
+            let area_poly = to_poly(ring);
+            let mut next: Vec<CeilingRegion> = Vec::new();
+            for region in regions {
+                // FLAT-region assumption: the boolean ops produce fresh 2D
+                // vertices, so per-vertex z can't be carried through — stamp
+                // every output vertex at the source region's single height.
+                let base_z = region.polygon.exterior.first().map(|v| v.z).unwrap_or(0.0);
+                let region_poly: Polygon<f64> = region.polygon.clone().into();
+                let mk = |poly: &Polygon<f64>, z: f64| {
+                    let mut pts: Vec<Point3f64> = poly
+                        .exterior()
+                        .coords()
+                        .map(|c| Point3f64::new(c.x, c.y, z))
+                        .collect();
+                    if pts.len() > 1 && pts.first() == pts.last() {
+                        pts.pop();
+                    }
+                    CeilingRegion {
+                        id: ItemId::default(),
+                        polygon: Polygon3D::new(pts),
+                        opes: Opes::default(),
+                        construction_id: region.construction_id,
+                    }
+                };
+                let piece = region_poly.intersection(&area_poly);
+                for poly in &piece.0 {
+                    if poly.unsigned_area() < SLIVER_AREA_M2 {
+                        continue;
+                    }
+                    next.push(mk(poly, base_z + delta));
+                }
+                let remainder = region_poly.difference(&area_poly);
+                for poly in &remainder.0 {
+                    if poly.unsigned_area() < SLIVER_AREA_M2 {
+                        continue;
+                    }
+                    next.push(mk(poly, base_z));
+                }
+            }
+            regions = next;
+        }
+        Self { regions }
+    }
 }
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Polygon3D {
@@ -706,6 +780,23 @@ pub struct CeilingRegion {
     pub polygon: Polygon3D, // 2D polygon boundary
     pub opes: Opes,
     pub construction_id: ItemId,
+}
+
+impl CeilingRegion {
+    /// The region's single height when it is FLAT (every vertex z within
+    /// 1e-6 m), `None` for sloped/degenerate regions. Used to reconstruct
+    /// session step areas and label heights in 2D.
+    pub fn flat_z(&self) -> Option<f64> {
+        if self.polygon.exterior.len() < 3 {
+            return None;
+        }
+        let z0 = self.polygon.exterior[0].z;
+        self.polygon
+            .exterior
+            .iter()
+            .all(|v| (v.z - z0).abs() <= 1e-6)
+            .then_some(z0)
+    }
 }
 
 impl Default for FloorRegion {
@@ -1140,6 +1231,115 @@ mod tests {
         ];
         let ceilings = CeilingRegions::default_for_footprint(rings, 2.4, ItemId::default());
         assert_eq!(ceilings.regions.len(), 1, "degenerate ring skipped");
+    }
+
+    #[test]
+    fn with_z_deltas_crossing_steps_compose_into_four_levels() {
+        use geo::Area;
+        let h = 2.4;
+        let (a, b) = (0.3, -0.2);
+        let cid = ItemId::default();
+        // ONE call, areas in order: the vertical step (right half, `a`) runs
+        // first, then the horizontal step (top half, `b`) re-splits BOTH
+        // pieces the first one produced — deltas sum in the overlap.
+        let ceilings =
+            CeilingRegions::default_for_footprint(vec![square(0.0, 0.0, 10.0, 10.0)], h, cid)
+                .with_z_deltas(&[
+                    (square(5.0, 0.0, 10.0, 10.0), a), // vertical line, right half
+                    (square(0.0, 5.0, 10.0, 10.0), b), // horizontal line, top half
+                ]);
+        assert_eq!(
+            ceilings.regions.len(),
+            4,
+            "two crossing steps → 4 quadrants"
+        );
+        let area_at = |z: f64| -> f64 {
+            ceilings
+                .regions
+                .iter()
+                .filter(|r| r.flat_z().is_some_and(|rz| (rz - z).abs() < 1e-9))
+                .map(|r| Polygon::<f64>::from(r.polygon.clone()).unsigned_area())
+                .sum()
+        };
+        for z in [h, h + a, h + b, h + a + b] {
+            assert!(
+                (area_at(z) - 25.0).abs() < 1e-6,
+                "one 25 m² quadrant at z = {z}"
+            );
+        }
+        // Pieces inherit the fabric link.
+        for r in &ceilings.regions {
+            assert_eq!(r.construction_id, cid);
+        }
+    }
+
+    #[test]
+    fn with_z_deltas_empty_areas_is_a_noop_with_exact_points() {
+        // Deliberately awkward ring (collinear vertex) — geo ops would normalise
+        // it; an exact round-trip proves none ran.
+        let ring = vec![
+            Point2f64::new(0.0, 0.0),
+            Point2f64::new(5.0, 0.0), // collinear with neighbours
+            Point2f64::new(10.0, 0.0),
+            Point2f64::new(10.0, 10.0),
+            Point2f64::new(0.0, 10.0),
+        ];
+        let ceilings = CeilingRegions::default_for_footprint(vec![ring], 2.7, ItemId::default());
+        let before = ceilings.regions[0].polygon.clone();
+        let before_id = ceilings.regions[0].id;
+        let out = ceilings.with_z_deltas(&[]);
+        assert_eq!(out.regions[0].polygon, before, "points round-trip exactly");
+        assert_eq!(out.regions[0].id, before_id, "region untouched");
+    }
+
+    #[test]
+    fn with_z_deltas_drops_sliver_pieces() {
+        let h = 2.5;
+        let ceilings = CeilingRegions::default_for_footprint(
+            vec![square(0.0, 0.0, 10.0, 10.0)],
+            h,
+            ItemId::default(),
+        )
+        // Area only grazes the footprint: the intersected strip is
+        // 1e-8 × 10 m = 1e-7 m² — boolean-op debris, not a ceiling.
+        .with_z_deltas(&[(square(-5.0, 0.0, 1e-8, 10.0), 0.3)]);
+        assert_eq!(ceilings.regions.len(), 1, "sliver piece dropped");
+        let z = ceilings.regions[0].flat_z().expect("remainder is flat");
+        assert!((z - h).abs() < 1e-9, "remainder keeps its height");
+    }
+
+    #[test]
+    fn flat_z_some_for_flat_none_for_sloped_or_degenerate() {
+        let cid = ItemId::default();
+        let flat =
+            CeilingRegions::default_for_footprint(vec![square(0.0, 0.0, 4.0, 4.0)], 2.6, cid)
+                .regions
+                .remove(0);
+        assert_eq!(flat.flat_z(), Some(2.6));
+
+        let sloped = CeilingRegion {
+            id: ItemId::default(),
+            polygon: Polygon3D::new(vec![
+                Point3f64::new(0.0, 0.0, 2.4),
+                Point3f64::new(4.0, 0.0, 2.4),
+                Point3f64::new(4.0, 4.0, 3.1), // ridge — not within 1e-6
+                Point3f64::new(0.0, 4.0, 3.1),
+            ]),
+            opes: Opes::default(),
+            construction_id: cid,
+        };
+        assert_eq!(sloped.flat_z(), None);
+
+        let degenerate = CeilingRegion {
+            id: ItemId::default(),
+            polygon: Polygon3D::new(vec![
+                Point3f64::new(0.0, 0.0, 2.4),
+                Point3f64::new(4.0, 0.0, 2.4),
+            ]),
+            opes: Opes::default(),
+            construction_id: cid,
+        };
+        assert_eq!(degenerate.flat_z(), None, "< 3 vertices is degenerate");
     }
 
     #[test]
