@@ -52,11 +52,17 @@ pub struct SketchState {
     /// the prompt's current (drawn) distance whenever the prompt identity
     /// changes (see `position_prompt_key`); the user overtypes or accepts.
     pub position_input: String,
-    /// Identity `(axis, option_idx)` of the position prompt the input was
-    /// last prefilled for. When the visible prompt's identity differs (next
-    /// axis, cycled reference), the input is refilled with its drawn
-    /// distance. `None` when no position prompt is showing.
-    pub position_prompt_key: Option<(manip_2d_plan::ParameterAxis, usize)>,
+    /// Identity `(axis, kind, option_idx)` of the position prompt the input
+    /// was last prefilled for. When the visible prompt's identity differs
+    /// (next axis, next Wall param, cycled reference), the input is refilled
+    /// with its drawn distance — `kind` is part of the identity because two
+    /// consecutive Wall prompts can share the same axis and option index.
+    /// `None` when no position prompt is showing.
+    pub position_prompt_key: Option<(
+        manip_2d_plan::ParameterAxis,
+        crate::controller::app_controller::PositionPromptKind,
+        usize,
+    )>,
     /// Last error from `apply_position_dimension`. Shown next to the textbox
     /// so the user can correct without losing what they typed.
     pub position_error: Option<String>,
@@ -361,7 +367,7 @@ impl eframe::App for BerApp {
                 // reference starts from its measured-as-drawn value; the
                 // user's in-progress typing on the SAME prompt is preserved.
                 if let Some(pp) = &position_prompt {
-                    let key = (pp.axis, pp.option_idx);
+                    let key = (pp.axis, pp.kind, pp.option_idx);
                     if self.sketch_state.position_prompt_key != Some(key) {
                         self.sketch_state.position_prompt_key = Some(key);
                         self.sketch_state.position_input = format!("{:.2}", pp.current_distance);

@@ -121,6 +121,7 @@ impl AppController {
                 option.outline_wall_vid,
             )?,
             axis: prompt.axis,
+            kind: prompt.kind,
             current_distance: option.current_distance,
             option_idx: prompt.current_idx,
             option_count: prompt.options.len(),
@@ -239,6 +240,10 @@ pub struct PositionPromptUiData {
     pub area_wall: WallPositions,
     pub reference_wall: WallPositions,
     pub axis: ParameterAxis,
+    /// The prompt's kind — part of its IDENTITY: two consecutive `Wall`
+    /// prompts can share `(axis, option_idx)`, so the prefill key must
+    /// include this or the second prompt inherits the first one's text.
+    pub kind: PositionPromptKind,
     pub current_distance: f32,
     pub option_idx: usize,
     pub option_count: usize,

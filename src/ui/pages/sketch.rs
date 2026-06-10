@@ -1575,14 +1575,16 @@ impl SketchPage {
         {
             on_event(UiEvent::Sketch(SketchEvent::SkipPositionDimension));
         }
-        if ui
-            .button(format!(
-                "Measure from another wall ({}/{})",
-                prompt.option_idx + 1,
-                prompt.option_count,
-            ))
-            .on_hover_text("Measure the distance from a different outline wall")
-            .clicked()
+        // Only offered when there IS another wall to measure from.
+        if prompt.option_count > 1
+            && ui
+                .button(format!(
+                    "Measure from another wall ({}/{})",
+                    prompt.option_idx + 1,
+                    prompt.option_count,
+                ))
+                .on_hover_text("Measure the distance from a different outline wall")
+                .clicked()
         {
             on_event(UiEvent::Sketch(SketchEvent::CyclePositionReference));
         }

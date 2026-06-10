@@ -21,11 +21,11 @@ mod exposure;
 mod living_areas;
 mod phase_regions;
 
-pub use document::ExposureSection;
 use document::{
     ActiveShape, DimensionPrompt, DimensionState, Document, EditState, MovedCoordKind, PendingArc,
     PhaseRegion, ShapeSlot, StepRegion, StoreyDoc, DEFAULT_CEILING_HEIGHT_M,
 };
+pub use document::{ExposureSection, PositionPromptKind};
 pub use exposure::{ExposureSelection, SectionHandle, WallExposureView};
 // `ExposureSection` is re-exported above (the controller's public surface).
 

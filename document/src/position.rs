@@ -322,7 +322,11 @@ impl StoreyDoc {
             self.dimensioning.position_resolved_axes.push(prompt.axis);
         }
         log::debug!("  ✓ position accepted on {:?}.", prompt.axis);
-        self.recompute_position_prompt();
+        // Full recompute (lengths first): setting a Wall param known can make
+        // another wall length-promptable — ask it as a LENGTH before any
+        // further position question. The hook then refreshes the position
+        // prompt either way.
+        self.recompute_prompt();
         Ok(())
     }
 
@@ -592,6 +596,28 @@ mod tests {
         doc.skip_current_position();
         assert!(doc.dimensioning.current_position_prompt.is_none());
         assert_eq!(doc.floor_plan.get_points(), before, "skip moves nothing");
+    }
+
+    /// A fully snapped area (corner contact pins both axes) is NEVER position
+    /// prompted once its lengths are applied — no over-prompting.
+    #[test]
+    fn corner_hugging_area_is_never_position_prompted() {
+        let mut doc = storey_10x10();
+        let plan =
+            FloorPlan::from_clean_ring(&[p(0., 0.), p(3., 0.), p(3., 3.), p(0., 3.)]).unwrap();
+        let slot = doc.pinned_slot_for(&doc.outline.floor_plan, plan);
+        assert!(
+            slot.dimensioning.position_free_axes.is_empty(),
+            "corner contact pins both axes"
+        );
+        doc.begin_phase_area(slot);
+        doc.recompute_prompt();
+        complete_length_loop(&mut doc);
+        assert!(doc.dimensioning.current_prompt.is_none());
+        assert!(
+            doc.dimensioning.current_position_prompt.is_none(),
+            "fully snapped area must not be asked where it is"
+        );
     }
 
     /// Living areas carry the free-axes record but are NEVER position-prompted.
