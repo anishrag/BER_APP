@@ -101,27 +101,17 @@ impl AppController {
             return false;
         };
         // Snapshot before inserting the vertex — the whole insert + drag
-        // + prompt-apply sequence undoes as one action.
+        // + prompt-apply sequence undoes as one action (the model flags the
+        // drag snapshot as taken so edit_mouse_drag doesn't take a second one).
         self.record_history();
-        let new_vid = match self.document.floor_plan.insert_vertex_on_wall(
+        let Some(new_vid) = self.document.begin_vertex_insert_drag(
             ring,
             edge_start,
             world_x as f32,
             world_y as f32,
-        ) {
-            Some(v) => v,
-            None => return false,
+        ) else {
+            return false;
         };
-        self.document.edit_state.selected_wall = None;
-        self.document.edit_state.selected_vertex = Some(new_vid);
-        self.document.edit_state.dragging = true;
-        // Drag snapshot already taken (covers the whole interaction
-        // starting with the insert); flag it so edit_mouse_drag doesn't
-        // take a second one.
-        self.document.edit_state.drag_snapshot_taken = true;
-        self.document.edit_state.pre_drag_vertex_pos = Some((world_x as f32, world_y as f32));
-        self.document.edit_state.pre_drag_value = None;
-        self.document.edit_state.pre_drag_kind = None;
         // Push the new topology to BER so the renderer sees the split
         // wall + new vertex immediately. Without this the polygon stays
         // at its pre-insert shape during the drag and only one edge

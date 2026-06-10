@@ -337,11 +337,3 @@ impl AppController {
         self.push_history_snapshot(undo_snap);
     }
 }
-
-/// A shape is finalised — nothing left to dimension — when it has no wall the
-/// dimensioning loop would still prompt for. (The caller also checks the metre
-/// scale for the outline; living areas inherit it.)
-pub(super) fn shape_finalised(dim: &DimensionState, plan: &FloorPlan) -> bool {
-    plan.next_promptable_wall(&dim.known_params, &dim.skipped_walls)
-        .is_none()
-}

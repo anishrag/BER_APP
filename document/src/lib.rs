@@ -84,6 +84,20 @@ pub struct ShapeSlot {
     pub dimensioning: DimensionState,
 }
 
+impl ShapeSlot {
+    /// Finalised — nothing left to dimension: no wall the dimensioning loop
+    /// would still prompt for. (The caller also checks the metre scale for the
+    /// outline; living areas inherit it.)
+    pub fn finalised(&self) -> bool {
+        self.floor_plan
+            .next_promptable_wall(
+                &self.dimensioning.known_params,
+                &self.dimensioning.skipped_walls,
+            )
+            .is_none()
+    }
+}
+
 /// Which shape the editor is currently acting on. The controller's live buffer
 /// mirrors this one; switching saves the live state back to its slot and loads
 /// the target's.
@@ -347,6 +361,46 @@ impl StoreyDoc {
             .unwrap_or_else(|| self.outline.floor_plan.clone());
         let outcome = boundary.carve_or_cut(stroke, tuning, false)?;
         Ok((boundary, outcome))
+    }
+
+    /// New storey outline via the living-area carve: trace `prev_ring` (the
+    /// previous storey's footprint, in metres) as the reference, follow it where
+    /// the `stroke` hugs it and build fresh walls where it diverges —
+    /// `allow_outside` so overhangs/extensions past the old footprint are kept
+    /// rather than clamped in. The carved plan is adopted into the live buffer
+    /// with the metre scale inherited and every shared wall pinned
+    /// ([`FloorPlan::params_pinned_to_outline`]) so it isn't re-prompted — only
+    /// the genuinely-new walls remain to dimension. Returns
+    /// `(pinned, active)` parameter counts for the shell's logging. On error the
+    /// buffer is untouched.
+    pub fn carve_outline_from_previous(
+        &mut self,
+        stroke: &[Point2f32],
+        prev_ring: &[Point2f32],
+        tuning: &SubareaTuning,
+    ) -> Result<(usize, usize), String> {
+        let prev_plan = FloorPlan::from_clean_ring(prev_ring)
+            .map_err(|e| format!("Failed to build reference outline: {:?}", e))?;
+        let outcome = prev_plan
+            .carve_or_cut(stroke, tuning, true)
+            .map_err(|e| format!("Failed to trace new storey: {:?}", e))?;
+        let new_plan = match outcome {
+            SubareaOutcome::Area(plan) => plan,
+            // An outline trace is a closed loop → an Area; a Cut only arises from
+            // an open/partial trace, where the first region is the drawn side.
+            SubareaOutcome::Cut(a, _b) => {
+                log::info!(
+                    "[new-storey] carve resolved to a CUT (open trace?) — using first region"
+                );
+                a
+            }
+        };
+        self.dimensioning = DimensionState::default();
+        self.dimensioning.scale_set = true;
+        self.floor_plan = new_plan;
+        self.dimensioning.known_params = prev_plan.params_pinned_to_outline(&self.floor_plan);
+        let active = self.floor_plan.all_active_params();
+        Ok((self.dimensioning.known_params.len(), active.len()))
     }
 
     /// Build a `ShapeSlot` for a freshly-constructed sub-area `plan`: inherit the

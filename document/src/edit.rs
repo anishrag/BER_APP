@@ -5,9 +5,34 @@
 //! intentional shell exception; see "Responsibility placement" in CLAUDE.md), and
 //! the actual plan edits it performs are already `manip_2d_plan` calls.
 use crate::StoreyDoc;
-use manip_2d_plan::ParameterAxis;
+use manip_2d_plan::{ParameterAxis, VertexId};
 
 impl StoreyDoc {
+    /// Insert a new vertex on wall `(ring, edge_start)` at world `(x, y)` and
+    /// set up the edit cursor for a free-2D drag on it. The shell has already
+    /// taken the undo snapshot covering the whole insert + drag interaction, so
+    /// `drag_snapshot_taken` is flagged to suppress a second one. Returns the
+    /// new vertex's id, or `None` if the insert failed (cursor untouched).
+    pub fn begin_vertex_insert_drag(
+        &mut self,
+        ring: usize,
+        edge_start: usize,
+        x: f32,
+        y: f32,
+    ) -> Option<VertexId> {
+        let new_vid = self
+            .floor_plan
+            .insert_vertex_on_wall(ring, edge_start, x, y)?;
+        self.edit_state.selected_wall = None;
+        self.edit_state.selected_vertex = Some(new_vid);
+        self.edit_state.dragging = true;
+        self.edit_state.drag_snapshot_taken = true;
+        self.edit_state.pre_drag_vertex_pos = Some((x, y));
+        self.edit_state.pre_drag_value = None;
+        self.edit_state.pre_drag_kind = None;
+        Some(new_vid)
+    }
+
     /// Drag the currently-selected vertex (free 2D) or wall (along its movable
     /// axis) to world `(x, y)`, mutating the live plan. Returns whether anything
     /// actually moved (the shell snapshots once per drag and persists on change).

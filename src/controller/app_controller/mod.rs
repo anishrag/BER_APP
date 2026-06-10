@@ -11,13 +11,11 @@ mod living_areas;
 mod phase_regions;
 
 pub use document::ExposureSection;
-pub use exposure::{ExposureSelection, SectionHandle, WallExposureView};
-use living_areas::shape_finalised;
-
 use document::{
     ActiveShape, DimensionPrompt, DimensionState, Document, EditState, MovedCoordKind, PendingArc,
     PhaseRegion, ShapeSlot, StoreyDoc, DEFAULT_CEILING_HEIGHT_M,
 };
+pub use exposure::{ExposureSelection, SectionHandle, WallExposureView};
 // `ExposureSection` is re-exported above (the controller's public surface).
 
 use chrono::NaiveDate;
@@ -1202,7 +1200,7 @@ impl AppController {
                 .document
                 .living_areas
                 .iter()
-                .filter(|s| shape_finalised(&s.dimensioning, &s.floor_plan))
+                .filter(|s| s.finalised())
                 .map(|s| s.floor_plan.get_points().into_iter().map(to_f64).collect())
                 .collect();
             // `ensure_*` borrows `out.data`, so resolve the id before the
@@ -1260,11 +1258,7 @@ impl AppController {
     /// The outline is finalised when its metre scale is set AND no wall is left
     /// to dimension — i.e. its resolved geometry is complete and in metres.
     fn outline_finalised(&self) -> bool {
-        self.document.outline.dimensioning.scale_set
-            && shape_finalised(
-                &self.document.outline.dimensioning,
-                &self.document.outline.floor_plan,
-            )
+        self.document.outline.dimensioning.scale_set && self.document.outline.finalised()
     }
 
     /// COLLINEARITY REVIEW-------------------------------------------
@@ -1751,37 +1745,18 @@ impl AppController {
         let prev_ring = self
             .previous_storey_ring()
             .ok_or_else(|| "no previous storey to draw on".to_string())?;
-        let prev_plan = FloorPlan::from_clean_ring(&prev_ring)
-            .map_err(|e| format!("Failed to build reference outline: {:?}", e))?;
-        let outcome = prev_plan
-            .carve_or_cut(&pts, &self.tuning.subarea, true)
-            .map_err(|e| format!("Failed to trace new storey: {:?}", e))?;
-        let new_plan = match outcome {
-            manip_2d_plan::SubareaOutcome::Area(plan) => plan,
-            // An outline trace is a closed loop → an Area; a Cut only arises from an
-            // open/partial trace, where the first region is the drawn side.
-            manip_2d_plan::SubareaOutcome::Cut(a, _b) => {
-                println!("[new-storey] carve resolved to a CUT (open trace?) — using first region");
-                a
-            }
-        };
         let undo_snap = self.current_history_snapshot();
-        self.document.dimensioning = DimensionState::default();
-        self.document.dimensioning.scale_set = true;
-        self.document.floor_plan = new_plan;
+        let (pinned, active) =
+            self.document
+                .carve_outline_from_previous(&pts, &prev_ring, &self.tuning.subarea)?;
         self.warn_if_non_orthogonal("draw outline (carve)");
-        self.document.dimensioning.known_params =
-            prev_plan.params_pinned_to_outline(&self.document.floor_plan);
-        let active = self.document.floor_plan.all_active_params();
         println!(
             "[new-storey] carved outline (reuse of living-area carve): {} verts, pinned {} of {} \
              active params ({} new wall param(s) left to dimension)",
             self.document.floor_plan.get_points().len(),
-            self.document.dimensioning.known_params.len(),
-            active.len(),
-            active
-                .len()
-                .saturating_sub(self.document.dimensioning.known_params.len()),
+            pinned,
+            active,
+            active.saturating_sub(pinned),
         );
         self.push_history_snapshot(undo_snap);
         self.commit_review_redimension()
