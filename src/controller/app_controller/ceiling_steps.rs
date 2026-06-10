@@ -118,6 +118,10 @@ impl AppController {
             self.pending_cut = None;
             self.pending_phase_cut = None;
             self.pending_step_cut = None;
+            // Drop any replayable snap tags from earlier strokes: their
+            // choose/un-snap REPLAYS the outline action, which could move the
+            // wall a pending line just snapped onto out from under it.
+            self.last_snap_action = None;
             self.activate_shape(ActiveShape::Outline);
             self.set_edit_mode(EditTools::DrawPerpWalls);
         }
