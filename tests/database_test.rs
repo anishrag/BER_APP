@@ -243,7 +243,6 @@ fn create_full_ber(id: ItemId) -> Ber {
                     Point2f64::new(10.0, 8.0),
                     Point2f64::new(0.0, 8.0),
                 ],
-                0.0,
                 floor_cid,
             ),
             walls: Default::default(),
@@ -252,6 +251,7 @@ fn create_full_ber(id: ItemId) -> Ber {
             doors: vec![],
             rooms: vec![],
             living_areas: Default::default(),
+            ceiling_height_m: None,
         },
         Storey {
             id: ItemId::default(),
@@ -264,6 +264,7 @@ fn create_full_ber(id: ItemId) -> Ber {
             doors: vec![],
             rooms: vec![],
             living_areas: Default::default(),
+            ceiling_height_m: None,
         },
     ];
 

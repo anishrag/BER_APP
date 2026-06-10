@@ -48,8 +48,10 @@ pub(crate) fn projected_bb_for_storey(
     storey: &Storey,
     z_offset: f64,
 ) -> Option<((f64, f64), (f64, f64))> {
+    // Compile-keeping placeholder (was the always-2.4 FloorRegion.height); the
+    // 3D wiring slice re-points extrusion to `storey.ceiling_height_m`.
     let mut iter = storey.floors.regions.iter().flat_map(move |r| {
-        let z_top = z_offset + r.height;
+        let z_top = z_offset + 2.4;
         let floor = r
             .polygon
             .exterior()
@@ -82,7 +84,9 @@ fn draw_extruded_region(
     display_mode: DisplayMode,
 ) {
     let z_floor = z_offset;
-    let z_ceiling = z_offset + region.height;
+    // Compile-keeping placeholder (was the always-2.4 FloorRegion.height); the
+    // 3D wiring slice re-points extrusion to `storey.ceiling_height_m`.
+    let z_ceiling = z_offset + 2.4;
 
     let exterior: Vec<_> = region.polygon.exterior().coords().cloned().collect();
     if exterior.len() < 4 {

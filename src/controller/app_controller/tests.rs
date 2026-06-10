@@ -1264,11 +1264,9 @@ fn marking_a_wall_sets_exposure_and_derives_a_ber_wall() {
     assert_eq!(w0.exposure, WallExposure::SemiExposed);
     assert_eq!(w0.polygon.exterior.len(), 4, "vertical plane = 4 vertices");
     assert!(w0.polygon.exterior.iter().any(|q| q.z == 0.0));
-    assert!(w0
-        .polygon
-        .exterior
-        .iter()
-        .any(|q| (q.z - DEFAULT_CEILING_HEIGHT_M).abs() < 1e-9));
+    // 2.4 = document::resolve::PROVISIONAL_WALL_EXTRUSION_M (pub(crate) there):
+    // no ceiling height is set, so walls extrude to the provisional placeholder.
+    assert!(w0.polygon.exterior.iter().any(|q| (q.z - 2.4).abs() < 1e-9));
 }
 
 /// A section over PART of a wall derives several regions: the marked range

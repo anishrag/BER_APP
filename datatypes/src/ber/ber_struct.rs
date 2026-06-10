@@ -41,4 +41,25 @@ impl Ber {
             ..Default::default()
         }
     }
+
+    /// Stamp the default ceiling height: on storey `storey_idx` when given, else
+    /// on every storey that doesn't already have one (the all-storeys 3D prompt —
+    /// one typed value fills the gaps, never overwrites a set storey).
+    /// Caller has validated `height_m > 0`.
+    pub fn set_default_ceiling_height(&mut self, storey_idx: Option<usize>, height_m: f64) {
+        match storey_idx {
+            Some(idx) => {
+                if let Some(storey) = self.storeys.get_mut(idx) {
+                    storey.ceiling_height_m = Some(height_m);
+                }
+            }
+            None => {
+                for storey in &mut self.storeys {
+                    if storey.ceiling_height_m.is_none() {
+                        storey.ceiling_height_m = Some(height_m);
+                    }
+                }
+            }
+        }
+    }
 }

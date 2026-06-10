@@ -205,6 +205,24 @@ impl Ber {
             .map(|c| c.base.id)
     }
 
+    /// Read-only lookup of an existing ceiling construction by `(type, makeup,
+    /// phase)` — the side-effect-free half of [`ensure_ceiling_construction`].
+    pub fn ceiling_construction_id(
+        &self,
+        construction_type: CeilingConstructionType,
+        makeup: ConstructionMakeup,
+        phase: ConstructionPhase,
+    ) -> Option<ItemId> {
+        self.ceiling_constructions
+            .iter()
+            .find(|c| {
+                c.construction_type == construction_type
+                    && c.base.construction_makeup == makeup
+                    && c.base.construction_phase == phase
+            })
+            .map(|c| c.base.id)
+    }
+
     /// Find a wall construction matching `(construction_type, makeup, phase)`,
     /// else create and append one. Returns its id.
     pub fn ensure_wall_construction(
@@ -306,12 +324,12 @@ impl Ber {
 }
 /// A planar region of the floor — pure geometry. Its fabric (construction
 /// type/make-up/phase, photos, description) lives on the `FloorConstruction`
-/// referenced by `construction_id`.
+/// referenced by `construction_id`. Floors carry no vertical extent: `level_m`
+/// is their datum; ceilings own heights (`CeilingRegion` per-vertex z).
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct FloorRegion {
     pub id: ItemId,
     pub polygon: Polygon<f64>, // 2D polygon boundary
-    pub height: f64,           // height per vertex
     pub construction_id: ItemId,
     /// Floor level in metres relative to the storey's floor datum: 0.0 = the
     /// unstepped storey floor, positive = raised, negative = lowered (steps).
@@ -322,12 +340,12 @@ pub struct FloorRegion {
 /// A planar region of the floor
 #[derive(Clone, Debug, Serialize, Deserialize, Default)]
 pub struct FloorRegions {
-    pub regions: Vec<FloorRegion>, // height per vertex
+    pub regions: Vec<FloorRegion>,
 }
 
 impl FloorRegions {
     /// Create a `FloorRegions` with a single region referencing `construction_id`.
-    pub fn new(vertices: Vec<Point2f64>, height: f64, construction_id: ItemId) -> Self {
+    pub fn new(vertices: Vec<Point2f64>, construction_id: ItemId) -> Self {
         let polygon = Polygon::new(
             LineString::from(vertices.iter().map(|p| (p.x, p.y)).collect::<Vec<_>>()),
             vec![],
@@ -336,7 +354,6 @@ impl FloorRegions {
         let region = FloorRegion {
             id: ItemId::default(),
             polygon,
-            height,
             construction_id,
             level_m: 0.0,
         };
@@ -348,15 +365,11 @@ impl FloorRegions {
 
     /// Create a FloorRegions containing one region per polygon. Used when a
     /// storey has multiple disjoint floor areas (e.g. extension sections on
-    /// upper floors). All regions share the same height and `construction_id`.
+    /// upper floors). All regions share the same `construction_id`.
     /// (Distinct from `from_polygons` — that one takes `&Polygon` slices for
     /// gen_3d_vol's 3D-derived polygons; this one takes raw vertex lists
     /// straight from the parametric layer.)
-    pub fn from_vertex_lists(
-        polygons: Vec<Vec<Point2f64>>,
-        height: f64,
-        construction_id: ItemId,
-    ) -> Self {
+    pub fn from_vertex_lists(polygons: Vec<Vec<Point2f64>>, construction_id: ItemId) -> Self {
         let regions = polygons
             .into_iter()
             .filter(|p| p.len() >= 3)
@@ -368,7 +381,6 @@ impl FloorRegions {
                 FloorRegion {
                     id: ItemId::default(),
                     polygon,
-                    height,
                     construction_id,
                     level_m: 0.0,
                 }
@@ -478,7 +490,6 @@ impl FloorRegions {
         outline: &[Point2f64],
         areas: &[(Vec<Point2f64>, ItemId)],
         remainder_construction_id: ItemId,
-        height: f64,
     ) -> Self {
         use geo::bool_ops::BooleanOps;
         if outline.len() < 3 {
@@ -493,7 +504,6 @@ impl FloorRegions {
         let mk = |poly: &Polygon<f64>, cid: ItemId| FloorRegion {
             id: ItemId::default(),
             polygon: poly.clone(),
-            height,
             construction_id: cid,
             level_m: 0.0,
         };
@@ -548,7 +558,6 @@ impl FloorRegions {
             let mk = |poly: &Polygon<f64>, level_m: f64| FloorRegion {
                 id: ItemId::default(),
                 polygon: poly.clone(),
-                height: region.height,
                 construction_id: region.construction_id,
                 level_m,
             };
@@ -640,6 +649,34 @@ impl CeilingRegions {
             }],
         }
     }
+
+    /// One FLAT ceiling region per footprint ring: every vertex at z = `height_m`
+    /// (metres above the storey's floor datum), all sharing `construction_id`.
+    /// Rings with < 3 vertices are skipped. The default layout the assessor's
+    /// typed height creates; later roof work re-splits/refines these regions.
+    pub fn default_for_footprint(
+        rings: Vec<Vec<Point2f64>>,
+        height_m: f64,
+        construction_id: ItemId,
+    ) -> Self {
+        let regions = rings
+            .into_iter()
+            .filter(|ring| ring.len() >= 3)
+            .map(|ring| {
+                let vertices = ring
+                    .into_iter()
+                    .map(|p| Point3f64::new(p.x, p.y, height_m))
+                    .collect();
+                CeilingRegion {
+                    id: ItemId::default(),
+                    polygon: Polygon3D::new(vertices),
+                    opes: Opes::default(),
+                    construction_id,
+                }
+            })
+            .collect();
+        Self { regions }
+    }
 }
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Polygon3D {
@@ -676,7 +713,6 @@ impl Default for FloorRegion {
         Self {
             id: ItemId::default(),
             polygon: Polygon::new(LineString::new(vec![]), vec![]),
-            height: f64::default(),
             construction_id: ItemId::default(),
             level_m: 0.0,
         }
@@ -805,6 +841,11 @@ pub struct Storey {
     /// need no parametric snapshot. `#[serde(default)]` so older records load.
     #[serde(default)]
     pub living_areas: FloorRegions,
+    /// Default ceiling height in metres above this storey's floor datum.
+    /// `None` until the assessor enters it — gates 3D viewing; when `Some`,
+    /// resolve derives the default ceiling regions and extrudes walls to it.
+    #[serde(default)]
+    pub ceiling_height_m: Option<f64>,
     // No editable sketch snapshot is stored: the resolved geometry above
     // (`floors`/`walls`/`living_areas`) is the only persisted representation,
     // and the editor rebuilds its working state from it on load. The DB only
@@ -853,7 +894,7 @@ mod tests {
     fn partition_with_no_areas_is_one_region() {
         let outline = square(0.0, 0.0, 10.0, 10.0);
         let rem = ItemId::default();
-        let fr = FloorRegions::partition(&outline, &[], rem, 2.4);
+        let fr = FloorRegions::partition(&outline, &[], rem);
         assert_eq!(fr.regions.len(), 1);
         assert_eq!(fr.regions[0].construction_id, rem);
     }
@@ -869,7 +910,6 @@ mod tests {
             &outline,
             &[(square(5.0, 0.0, 10.0, 10.0), area_cid)],
             rem_cid,
-            2.4,
         );
         assert_eq!(fr.regions.len(), 2, "area piece + remainder");
         let area_region = fr
@@ -900,7 +940,6 @@ mod tests {
                 (square(4.0, 0.0, 10.0, 10.0), b), // right 4..10 (overlaps 4..6)
             ],
             rem,
-            2.4,
         );
         use geo::Area;
         let area_a: f64 = fr
@@ -929,7 +968,7 @@ mod tests {
     fn with_levels_splits_region_into_stepped_piece_and_remainder() {
         use geo::Area;
         let cid = ItemId::default();
-        let fr = FloorRegions::new(square(0.0, 0.0, 10.0, 10.0), 2.4, cid);
+        let fr = FloorRegions::new(square(0.0, 0.0, 10.0, 10.0), cid);
         // Step the right half down 0.3 m.
         let stepped = fr.with_levels(&[(square(5.0, 0.0, 10.0, 10.0), -0.3)]);
         assert_eq!(stepped.regions.len(), 2, "stepped piece + remainder");
@@ -945,10 +984,9 @@ mod tests {
             .expect("remainder exists");
         assert!((step.polygon.unsigned_area() - 50.0).abs() < 1e-6);
         assert!((rem.polygon.unsigned_area() - 50.0).abs() < 1e-6);
-        // Pieces inherit the region's fabric link and height.
+        // Pieces inherit the region's fabric link.
         for r in &stepped.regions {
             assert_eq!(r.construction_id, cid);
-            assert_eq!(r.height, 2.4);
         }
     }
 
@@ -964,7 +1002,7 @@ mod tests {
             Point2f64::new(10.0, 10.0),
             Point2f64::new(0.0, 10.0),
         ];
-        let fr = FloorRegions::new(ring.clone(), 2.4, cid);
+        let fr = FloorRegions::new(ring.clone(), cid);
         let before: Vec<Vec<Point2f64>> = fr.to_vertex_lists();
         let before_id = fr.regions[0].id;
         let out = fr.with_levels(&[]);
@@ -976,7 +1014,7 @@ mod tests {
     fn floor_region_without_level_m_deserializes_to_zero() {
         // JSON produced by the OLD shape (no `level_m` field): serialize the
         // current shape and strip the field.
-        let region = FloorRegions::new(square(0.0, 0.0, 10.0, 10.0), 2.4, ItemId::default())
+        let region = FloorRegions::new(square(0.0, 0.0, 10.0, 10.0), ItemId::default())
             .regions
             .remove(0);
         let mut json = serde_json::to_value(&region).expect("serialize");
@@ -989,7 +1027,7 @@ mod tests {
     #[test]
     fn with_levels_earlier_area_claims_overlap() {
         use geo::Area;
-        let fr = FloorRegions::new(square(0.0, 0.0, 10.0, 10.0), 2.4, ItemId::default());
+        let fr = FloorRegions::new(square(0.0, 0.0, 10.0, 10.0), ItemId::default());
         // Two OVERLAPPING step areas; the second yields to the first in 4..6.
         let stepped = fr.with_levels(&[
             (square(0.0, 0.0, 6.0, 10.0), 0.5),   // left 0..6, raised
@@ -1079,5 +1117,91 @@ mod tests {
         }
         // Exposure still set per piece.
         assert_eq!(split.regions[1].exposure, WallExposure::SemiExposed);
+    }
+
+    #[test]
+    fn default_for_footprint_stamps_height_on_every_vertex() {
+        let cid = ItemId::default();
+        let rings = vec![square(0.0, 0.0, 4.0, 4.0), square(6.0, 0.0, 9.0, 3.0)];
+        let ceilings = CeilingRegions::default_for_footprint(rings, 2.7, cid);
+        assert_eq!(ceilings.regions.len(), 2, "one region per ring");
+        for r in &ceilings.regions {
+            assert_eq!(r.construction_id, cid);
+            assert_eq!(r.polygon.exterior.len(), 4);
+            assert!(r.polygon.exterior.iter().all(|v| (v.z - 2.7).abs() < 1e-9));
+        }
+    }
+
+    #[test]
+    fn default_for_footprint_skips_degenerate_rings() {
+        let rings = vec![
+            vec![Point2f64::new(0.0, 0.0), Point2f64::new(1.0, 0.0)], // < 3 vertices
+            square(0.0, 0.0, 4.0, 4.0),
+        ];
+        let ceilings = CeilingRegions::default_for_footprint(rings, 2.4, ItemId::default());
+        assert_eq!(ceilings.regions.len(), 1, "degenerate ring skipped");
+    }
+
+    #[test]
+    fn set_default_ceiling_height_on_one_storey() {
+        let mut ber = Ber::default();
+        ber.storeys.push(Storey::default());
+        ber.storeys.push(Storey::default());
+        ber.set_default_ceiling_height(Some(1), 2.6);
+        assert_eq!(
+            ber.storeys[0].ceiling_height_m, None,
+            "other storey untouched"
+        );
+        assert_eq!(ber.storeys[1].ceiling_height_m, Some(2.6));
+        // Re-stamping the SAME storey overwrites (per-storey scope is explicit).
+        ber.set_default_ceiling_height(Some(1), 2.9);
+        assert_eq!(ber.storeys[1].ceiling_height_m, Some(2.9));
+    }
+
+    #[test]
+    fn set_default_ceiling_height_all_storeys_fills_only_missing() {
+        let mut ber = Ber::default();
+        ber.storeys.push(Storey {
+            ceiling_height_m: Some(3.1),
+            ..Storey::default()
+        });
+        ber.storeys.push(Storey::default());
+        ber.set_default_ceiling_height(None, 2.4);
+        assert_eq!(
+            ber.storeys[0].ceiling_height_m,
+            Some(3.1),
+            "set storey never overwritten"
+        );
+        assert_eq!(ber.storeys[1].ceiling_height_m, Some(2.4), "gap filled");
+    }
+
+    #[test]
+    fn floor_region_json_with_legacy_height_field_still_deserializes() {
+        // JSON produced by the OLD shape carried a `height` field (always the
+        // 2.4 placeholder). Removal is load-compatible: serialize the current
+        // shape, inject the legacy field, deserialize.
+        let region = FloorRegions::new(square(0.0, 0.0, 10.0, 10.0), ItemId::default())
+            .regions
+            .remove(0);
+        let mut json = serde_json::to_value(&region).expect("serialize");
+        json.as_object_mut()
+            .unwrap()
+            .insert("height".to_string(), serde_json::json!(2.4));
+        let old: FloorRegion = serde_json::from_value(json).expect("old JSON still loads");
+        assert_eq!(old.construction_id, region.construction_id);
+        assert_eq!(old.level_m, 0.0);
+    }
+
+    #[test]
+    fn storey_json_without_ceiling_height_deserializes_to_none() {
+        let storey = Storey::default();
+        let mut json = serde_json::to_value(&storey).expect("serialize");
+        assert!(json
+            .as_object_mut()
+            .unwrap()
+            .remove("ceiling_height_m")
+            .is_some());
+        let old: Storey = serde_json::from_value(json).expect("old JSON still loads");
+        assert_eq!(old.ceiling_height_m, None);
     }
 }

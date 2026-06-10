@@ -214,9 +214,9 @@ impl WallRegionsManip for WallRegions {
                 let shared_edges = find_shared_edges_2d(&region_a.polygon, &region_b.polygon);
 
                 for (p1, p2) in shared_edges {
-                    // Create wall from floor height difference
-                    let z1_a = region_a.height;
-                    let z1_b = region_b.height;
+                    // Create wall from floor level difference
+                    let z1_a = region_a.level_m;
+                    let z1_b = region_b.level_m;
 
                     // Only create wall if there's a height discontinuity
                     if (z1_a - z1_b).abs() < EPSILON {

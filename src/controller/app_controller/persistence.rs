@@ -283,8 +283,7 @@ impl AppController {
                 Default::default(),
             );
             if let Some(storey) = out.data.storeys.get_mut(idx) {
-                storey.living_areas =
-                    FloorRegions::from_vertex_lists(lists, DEFAULT_CEILING_HEIGHT_M, floor_cid);
+                storey.living_areas = FloorRegions::from_vertex_lists(lists, floor_cid);
             }
         } else if let Some(storey) = out.data.storeys.get_mut(idx) {
             // Outline not finalised → persist no geometry yet (it's likely

@@ -29,7 +29,7 @@ pub use exposure::{range_at, wall_coverage};
 pub use load::reconstruct_living_areas;
 pub use phase::{phase_regions_from_floors, stamp_wall_phases, PhaseRegion};
 pub use position::{PositionOption, PositionPrompt, PositionPromptKind};
-pub use resolve::{ensure_storey_constructions, resolve_storey, DEFAULT_CEILING_HEIGHT_M};
+pub use resolve::{ensure_storey_constructions, resolve_storey};
 pub use step::{step_regions_from_floors, StepRegion};
 
 use datatypes::ber::structural::WallExposure;

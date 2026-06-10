@@ -4,23 +4,26 @@
 use crate::{PhaseRegion, StepRegion, StoreyDoc};
 use datatypes::ber::ber_struct::Ber;
 use datatypes::ber::common::{ConstructionPhase, ItemId};
-use datatypes::ber::structural::{FloorRegions, Storey, WallRegions};
+use datatypes::ber::structural::{CeilingRegions, FloorRegions, Storey, WallRegions};
 use domain::points::{to_f64, Point2f64};
 
-/// Default storey ceiling height in metres, used as a placeholder until the UI
-/// collects it from the assessor.
-pub const DEFAULT_CEILING_HEIGHT_M: f64 = 2.4;
+/// Placeholder top for derived wall quads until the storey's ceiling height is
+/// set — never visible in 3D (gated); walls re-extrude on the next materialize
+/// after the height is entered.
+pub(crate) const PROVISIONAL_WALL_EXTRUSION_M: f64 = 2.4;
 
 /// The `&mut` prerequisites of the otherwise read-only [`resolve_storey`]:
 /// lazy-create the storey slot if missing, and register (find-or-insert) every
 /// construction the projection will look up — the default floor + wall, plus
-/// one floor per phase region on this storey. Idempotent.
+/// the default ceiling, plus one floor per phase region on this storey.
+/// Idempotent.
 pub fn ensure_storey_constructions(ber: &mut Ber, idx: usize, phase_regions: &[PhaseRegion]) {
     while ber.storeys.len() <= idx {
         ber.storeys.push(Storey::default());
     }
     ber.ensure_floor_construction(Default::default(), Default::default(), Default::default());
     ber.ensure_wall_construction(Default::default(), Default::default(), Default::default());
+    ber.ensure_ceiling_construction(Default::default(), Default::default(), Default::default());
     for region in phase_regions {
         ber.ensure_floor_construction(Default::default(), Default::default(), region.phase.clone());
     }
@@ -54,9 +57,8 @@ pub fn resolve_storey(
     // The marked heat-loss wall segments (one per exposure section of each
     // marked wall). ONLY marked walls become regions; an un-marked wall stays
     // "unset" (and `WallRegions` is the single source of truth, so that
-    // distinction survives reload). Each is extruded below to
-    // `DEFAULT_CEILING_HEIGHT_M` (the provisional height) until real heights
-    // are entered.
+    // distinction survives reload). Each is extruded below to the storey's
+    // ceiling height, or `PROVISIONAL_WALL_EXTRUSION_M` until it's entered.
     let wall_segments = s.wall_exposure_segments();
 
     // Resolved living-area polygons (each slot is current after sync_active).
@@ -113,7 +115,7 @@ pub fn resolve_storey(
             // No phase zones → keep the whole-outline floor verbatim (NO geo
             // boolean ops, so the stored points round-trip exactly and the
             // rebuilt outline isn't re-normalised — which broke collinearity).
-            FloorRegions::from_vertex_lists(polygons_f64, DEFAULT_CEILING_HEIGHT_M, floor_cid)
+            FloorRegions::from_vertex_lists(polygons_f64.clone(), floor_cid)
         } else {
             // Tagged → partition each outline ring into phase zones.
             let mut regions = Vec::new();
@@ -121,16 +123,27 @@ pub fn resolve_storey(
                 if ring.len() < 3 {
                     continue;
                 }
-                let part = FloorRegions::partition(
-                    ring,
-                    &areas_with_cids,
-                    floor_cid,
-                    DEFAULT_CEILING_HEIGHT_M,
-                );
+                let part = FloorRegions::partition(ring, &areas_with_cids, floor_cid);
                 regions.extend(part.regions);
             }
             FloorRegions { regions }
         };
+    }
+    // Roofs: once the storey's ceiling height is set, derive the default flat
+    // ceiling — one region per outline ring, every vertex at z = height. While
+    // unset, leave `roofs` untouched (3D is gated on the height anyway).
+    // SEAM: re-deriving roofs every materialize wipes any future hand-refined
+    // ceiling layout — fine today (only derived content exists); the later
+    // roofs feature must add session ceiling areas reconstructed from persisted
+    // regions (step/phase pattern) BEFORE users can refine.
+    if let Some(height_m) = storey.ceiling_height_m {
+        let ceiling_cid = ber
+            .ceiling_construction_id(Default::default(), Default::default(), Default::default())
+            .expect("base ceiling construction ensured before resolve");
+        if polygons_f64.iter().any(|p| p.len() >= 3) {
+            storey.roofs =
+                CeilingRegions::default_for_footprint(polygons_f64, height_m, ceiling_cid);
+        }
     }
     // Step areas re-split the (possibly phase-partitioned) floor regions and
     // stamp `level_m` on the intersected pieces. Skipped entirely when empty —
@@ -146,8 +159,7 @@ pub fn resolve_storey(
             .collect();
         storey.floors = std::mem::take(&mut storey.floors).with_levels(&step_areas);
     }
-    storey.living_areas =
-        FloorRegions::from_vertex_lists(living_area_lists, DEFAULT_CEILING_HEIGHT_M, floor_cid);
+    storey.living_areas = FloorRegions::from_vertex_lists(living_area_lists, floor_cid);
     // Re-derive walls from exposure (empty when nothing is marked),
     // preserving the construction link of the region a split came from.
     // SEAM (deferred until after roofs): riser WALL regions will be derived HERE,
@@ -157,13 +169,11 @@ pub fn resolve_storey(
     // below-grade perimeter strips along the outline of lowered regions. The
     // shared-edge extraction belongs in datatypes (a FloorRegions method); the
     // derivation belongs here, alongside the rebuild it must merge with.
-    storey.walls = WallRegions::rebuild_preserving(
-        wall_segments,
-        &storey.walls,
-        0.0,
-        DEFAULT_CEILING_HEIGHT_M,
-        wall_cid,
-    );
+    let wall_top = storey
+        .ceiling_height_m
+        .unwrap_or(PROVISIONAL_WALL_EXTRUSION_M);
+    storey.walls =
+        WallRegions::rebuild_preserving(wall_segments, &storey.walls, 0.0, wall_top, wall_cid);
     storey
 }
 
@@ -176,8 +186,8 @@ mod tests {
     use manip_2d_plan::FloorPlan;
 
     /// Golden projection: a finalised 4×4 m square outline with one wall marked
-    /// SemiExposed projects to one floor region (default ceiling height, exact
-    /// ring round-trip), one wall region carrying the mark, no living areas.
+    /// SemiExposed projects to one floor region (exact ring round-trip), one
+    /// wall region carrying the mark, no living areas.
     #[test]
     fn golden_projection_of_a_square_storey() {
         let pts = vec![
@@ -202,9 +212,8 @@ mod tests {
         ensure_storey_constructions(&mut ber, 0, &[]);
         let storey = resolve_storey(&doc, &ber, 0, &[], &[]);
 
-        // Floor: the whole outline verbatim, extruded to the default height.
+        // Floor: the whole outline verbatim.
         assert_eq!(storey.floors.regions.len(), 1);
-        assert!((storey.floors.regions[0].height - DEFAULT_CEILING_HEIGHT_M).abs() < 1e-9);
         let ring = &storey.floors.to_vertex_lists()[0];
         assert_eq!(ring.len(), 4);
         assert!(ring
@@ -212,14 +221,16 @@ mod tests {
             .any(|p| (p.x - 4.0).abs() < 1e-9 && (p.y - 4.0).abs() < 1e-9));
 
         // Walls: only the marked wall becomes a region, carrying its exposure
-        // and reaching the provisional ceiling height.
+        // and reaching the provisional extrusion (no ceiling height set yet).
         assert_eq!(storey.walls.regions.len(), 1);
         assert_eq!(storey.walls.regions[0].exposure, WallExposure::SemiExposed);
         assert!(storey.walls.regions[0]
             .polygon
             .exterior
             .iter()
-            .any(|q| (q.z - DEFAULT_CEILING_HEIGHT_M).abs() < 1e-9));
+            .any(|q| (q.z - PROVISIONAL_WALL_EXTRUSION_M).abs() < 1e-9));
+        // No ceiling height set → roofs stay untouched (empty default).
+        assert!(storey.roofs.regions.is_empty());
 
         assert!(storey.living_areas.regions.is_empty());
     }
@@ -339,5 +350,127 @@ mod tests {
                 ConstructionPhase::Extension1
             )
             .is_some());
+        // The default ceiling construction is ensured too (roofs derivation
+        // looks it up read-only).
+        assert_eq!(ber.ceiling_constructions.len(), 1);
+        assert!(ber
+            .ceiling_construction_id(Default::default(), Default::default(), Default::default())
+            .is_some());
+    }
+
+    /// Ceiling height set → roofs derive to one flat region per outline ring
+    /// (every vertex at z = height) and walls extrude to the same height.
+    #[test]
+    fn height_set_derives_roofs_and_extrudes_walls() {
+        let mut doc = square_doc(&[
+            Point2f32::new(0.0, 0.0),
+            Point2f32::new(4.0, 0.0),
+            Point2f32::new(4.0, 4.0),
+            Point2f32::new(0.0, 4.0),
+        ]);
+        let (vid, a, b) = doc.outline.floor_plan.perimeter_walls()[0];
+        let len = manip_2d_plan::segment_len(a, b);
+        doc.set_wall_section(vid, 0.0, len, len, WallExposure::Exposed);
+
+        let mut ber = Ber::default();
+        ensure_storey_constructions(&mut ber, 0, &[]);
+        ber.set_default_ceiling_height(Some(0), 2.7);
+        let storey = resolve_storey(&doc, &ber, 0, &[], &[]);
+
+        assert_eq!(storey.roofs.regions.len(), 1, "one region per outline ring");
+        let roof = &storey.roofs.regions[0];
+        assert_eq!(roof.polygon.exterior.len(), 4);
+        assert!(roof
+            .polygon
+            .exterior
+            .iter()
+            .all(|v| (v.z - 2.7).abs() < 1e-9));
+        let ceiling_cid = ber
+            .ceiling_construction_id(Default::default(), Default::default(), Default::default())
+            .unwrap();
+        assert_eq!(roof.construction_id, ceiling_cid);
+        // Walls extrude to the set height, not the provisional placeholder.
+        assert!(storey.walls.regions[0]
+            .polygon
+            .exterior
+            .iter()
+            .any(|q| (q.z - 2.7).abs() < 1e-9));
+    }
+
+    /// Ceiling height unset → roofs untouched (whatever the stored storey had)
+    /// and walls extrude to the provisional placeholder.
+    #[test]
+    fn height_unset_leaves_roofs_untouched_and_walls_provisional() {
+        let mut doc = square_doc(&[
+            Point2f32::new(0.0, 0.0),
+            Point2f32::new(4.0, 0.0),
+            Point2f32::new(4.0, 4.0),
+            Point2f32::new(0.0, 4.0),
+        ]);
+        let (vid, a, b) = doc.outline.floor_plan.perimeter_walls()[0];
+        let len = manip_2d_plan::segment_len(a, b);
+        doc.set_wall_section(vid, 0.0, len, len, WallExposure::Exposed);
+
+        let mut ber = Ber::default();
+        ensure_storey_constructions(&mut ber, 0, &[]);
+        // Pre-existing roof content on the stored storey survives untouched.
+        let marker = datatypes::ber::structural::CeilingRegions::default_for_footprint(
+            vec![vec![
+                Point2f64::new(0.0, 0.0),
+                Point2f64::new(1.0, 0.0),
+                Point2f64::new(1.0, 1.0),
+            ]],
+            9.9,
+            Default::default(),
+        );
+        ber.storeys[0].roofs = marker.clone();
+        let storey = resolve_storey(&doc, &ber, 0, &[], &[]);
+
+        assert_eq!(storey.roofs.regions.len(), 1);
+        assert!((storey.roofs.regions[0].polygon.exterior[0].z - 9.9).abs() < 1e-9);
+        assert!(storey.walls.regions[0]
+            .polygon
+            .exterior
+            .iter()
+            .any(|q| (q.z - PROVISIONAL_WALL_EXTRUSION_M).abs() < 1e-9));
+    }
+
+    /// Re-resolving after an outline change re-derives the roofs to the new
+    /// footprint (derived content tracks the floor plan).
+    #[test]
+    fn re_resolve_after_outline_change_re_derives_roofs() {
+        let mut ber = Ber::default();
+        ensure_storey_constructions(&mut ber, 0, &[]);
+        ber.set_default_ceiling_height(Some(0), 2.5);
+
+        let doc1 = square_doc(&[
+            Point2f32::new(0.0, 0.0),
+            Point2f32::new(4.0, 0.0),
+            Point2f32::new(4.0, 4.0),
+            Point2f32::new(0.0, 4.0),
+        ]);
+        let storey1 = resolve_storey(&doc1, &ber, 0, &[], &[]);
+        ber.storeys[0] = storey1;
+
+        // Outline grows to 6×4 → the derived roof follows.
+        let doc2 = square_doc(&[
+            Point2f32::new(0.0, 0.0),
+            Point2f32::new(6.0, 0.0),
+            Point2f32::new(6.0, 4.0),
+            Point2f32::new(0.0, 4.0),
+        ]);
+        let storey2 = resolve_storey(&doc2, &ber, 0, &[], &[]);
+        assert_eq!(storey2.roofs.regions.len(), 1);
+        let roof = &storey2.roofs.regions[0];
+        assert!(roof
+            .polygon
+            .exterior
+            .iter()
+            .any(|v| (v.x - 6.0).abs() < 1e-6 && (v.y - 4.0).abs() < 1e-6));
+        assert!(roof
+            .polygon
+            .exterior
+            .iter()
+            .all(|v| (v.z - 2.5).abs() < 1e-9));
     }
 }

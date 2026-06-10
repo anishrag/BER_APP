@@ -44,12 +44,9 @@ pub fn render(
                 ),
             });
         }
-        let storey_height = storey
-            .floors
-            .regions
-            .first()
-            .map(|r| r.height)
-            .unwrap_or(2.4);
+        // Compile-keeping placeholder (was the always-2.4 FloorRegion.height);
+        // the 3D wiring slice re-points the z-step to `storey.ceiling_height_m`.
+        let storey_height = 2.4;
         z += storey_height;
     }
 

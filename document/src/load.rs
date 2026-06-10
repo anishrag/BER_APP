@@ -86,7 +86,6 @@ mod tests {
     fn reconstruct_living_areas_skips_degenerate_polygons() {
         let areas = FloorRegions::from_vertex_lists(
             vec![square_m(4.0), vec![Point2f64::new(0.0, 0.0)]],
-            2.4,
             ItemId::default(),
         );
         let slots = reconstruct_living_areas(&areas);
@@ -105,7 +104,7 @@ mod tests {
     #[test]
     fn from_storey_round_trips_a_square_outline() {
         let storey = Storey {
-            floors: FloorRegions::from_vertex_lists(vec![square_m(5.0)], 2.4, ItemId::default()),
+            floors: FloorRegions::from_vertex_lists(vec![square_m(5.0)], ItemId::default()),
             ..Storey::default()
         };
         let doc = StoreyDoc::from_storey(&storey);

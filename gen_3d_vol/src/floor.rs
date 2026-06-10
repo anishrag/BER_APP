@@ -28,9 +28,6 @@ pub enum MergeWarning {
     },
 }
 
-// SEAM: the app writes FloorRegion.height = ceiling extrusion (2.4) while this crate reads
-// height as the floor-surface z; when wiring, map FloorRegion.level_m → the z the
-// floor/riser machinery consumes (height stays extrusion).
 pub trait FloorRegionsManip {
     fn from_polygons(
         polygons: Vec<&Polygon<f64>>,
@@ -59,9 +56,8 @@ impl FloorRegionsManip for FloorRegions {
             regions.push(FloorRegion {
                 id: ItemId::default(),
                 polygon: (*polygon).clone(),
-                height: *height,
                 construction_id,
-                level_m: 0.0,
+                level_m: *height,
             });
         }
         FloorRegions { regions }
@@ -69,7 +65,7 @@ impl FloorRegionsManip for FloorRegions {
 
     fn raise_lower_polygon(&mut self, polygon: Polygon<f64>, height_change: f64) {
         self.modify_polygon(polygon, |r| {
-            r.height += height_change;
+            r.level_m += height_change;
         });
     }
 
@@ -83,7 +79,7 @@ impl FloorRegionsManip for FloorRegions {
         let mut heights = Vec::new();
         for region in &self.regions {
             if region.polygon.contains(&geo::Point::new(point.x, point.y)) {
-                heights.push(region.height);
+                heights.push(region.level_m);
             }
         }
         heights
@@ -112,13 +108,13 @@ impl FloorRegionsManip for FloorRegions {
                 all_edges.push(DirectedEdge {
                     from: coords[i],
                     to: coords[i + 1],
-                    height: region.height,
+                    height: region.level_m,
                 });
             }
             all_edges.push(DirectedEdge {
                 from: coords[coords.len() - 1],
                 to: coords[0],
-                height: region.height,
+                height: region.level_m,
             });
         }
 
@@ -276,9 +272,8 @@ impl FloorRegionsManipPrivate for FloorRegions {
             regions.push(FloorRegion {
                 id: ItemId::default(),
                 polygon: polygon2d,
-                height,
                 construction_id,
-                level_m: 0.0,
+                level_m: height,
             });
         }
         FloorRegions { regions }
@@ -310,10 +305,11 @@ impl FloorRegionsManipPrivate for FloorRegions {
         while let Some(region) = selected.pop() {
             let mut group = vec![region.clone()];
 
-            // Regions are merge-compatible iff they share the same height and
-            // construction (fabric now lives behind `construction_id`).
+            // Regions are merge-compatible iff they share the same floor level
+            // and construction (fabric now lives behind `construction_id`).
             selected.retain(|other| {
-                if other.height == region.height && other.construction_id == region.construction_id
+                if other.level_m == region.level_m
+                    && other.construction_id == region.construction_id
                 {
                     group.push((*other).clone());
                     false
@@ -333,9 +329,8 @@ impl FloorRegionsManipPrivate for FloorRegions {
                 merged.push(FloorRegion {
                     id: ItemId::default(),
                     polygon: poly,
-                    height: region.height,
                     construction_id: region.construction_id,
-                    level_m: 0.0,
+                    level_m: region.level_m,
                 });
             }
 
@@ -371,7 +366,6 @@ impl FloorRegionsManipPrivate for FloorRegions {
                 new_regions.push(FloorRegion {
                     id,
                     polygon: poly,
-                    height: region.height,
                     construction_id: region.construction_id,
                     level_m: region.level_m,
                 });
@@ -462,8 +456,8 @@ impl MergeableRegion for FloorRegion {
     }
 
     fn is_merge_compatible(&self, other: &Self) -> bool {
-        // Same height + same construction (fabric is behind `construction_id`).
-        self.height == other.height && self.construction_id == other.construction_id
+        // Same floor level + same construction (fabric is behind `construction_id`).
+        self.level_m == other.level_m && self.construction_id == other.construction_id
     }
 
     fn with_geometry(&self, geometry: Self::Geometry) -> Self {
@@ -507,7 +501,7 @@ mod tests {
             Point2f64::new(0.0, 10.0),
         ];
 
-        FloorRegions::new(vertices, 0.0, ItemId::default())
+        FloorRegions::new(vertices, ItemId::default())
     }
 
     #[test]
@@ -519,10 +513,10 @@ mod tests {
             Point2f64::new(10.0, 10.0),
             Point2f64::new(0.0, 10.0),
         ];
-        let floor = FloorRegions::new(vertices, 0.0, cid);
+        let floor = FloorRegions::new(vertices, cid);
 
         assert_eq!(floor.regions.len(), 1);
-        assert_eq!(floor.regions[0].height, 0.0);
+        assert_eq!(floor.regions[0].level_m, 0.0);
         // Fabric now lives behind `construction_id`; the region just references it.
         assert_eq!(floor.regions[0].construction_id, cid);
     }
@@ -536,8 +530,8 @@ mod tests {
 
         assert_eq!(floor.regions.len(), 2);
 
-        let raised = floor.regions.iter().filter(|r| r.height == 2.5).count();
-        let flat = floor.regions.iter().filter(|r| r.height == 0.0).count();
+        let raised = floor.regions.iter().filter(|r| r.level_m == 2.5).count();
+        let flat = floor.regions.iter().filter(|r| r.level_m == 0.0).count();
 
         assert_eq!(raised, 1);
         assert_eq!(flat, 1);
@@ -620,7 +614,7 @@ mod tests {
         floor.raise_lower_polygon(rectangle(0.0, 0.0, 10.0, 10.0), 1.0);
         floor.raise_lower_polygon(rectangle(0.0, 0.0, 5.0, 10.0), 2.0);
 
-        let heights: Vec<f64> = floor.regions.iter().map(|r| r.height).collect();
+        let heights: Vec<f64> = floor.regions.iter().map(|r| r.level_m).collect();
 
         assert!(heights.contains(&3.0)); // overlap region
         assert!(heights.contains(&1.0)); // remainder region
@@ -636,8 +630,8 @@ mod tests {
             Point2f64::new(0.0, 4.0),
         ];
 
-        let mut regions = FloorRegions::new(vertices, 0.0, ItemId::default());
-        regions.regions[0].height = 1.0;
+        let mut regions = FloorRegions::new(vertices, ItemId::default());
+        regions.regions[0].level_m = 1.0;
 
         let polygon_3d = regions.get_clockwise_3d_polygon_starting_closest_to_origin();
 
@@ -691,8 +685,8 @@ mod tests {
             Point2f64::new(2.0, 2.0),
         ];
 
-        let mut regions = FloorRegions::new(vertices1, 0.0, ItemId::default());
-        regions.regions[0].height = 1.0;
+        let mut regions = FloorRegions::new(vertices1, ItemId::default());
+        regions.regions[0].level_m = 1.0;
 
         // Add second region
         let polygon2 = Polygon::new(
@@ -707,9 +701,8 @@ mod tests {
         regions.regions.push(FloorRegion {
             id: ItemId::default(),
             polygon: polygon2,
-            height: 3.0,
             construction_id: ItemId::default(),
-            level_m: 0.0,
+            level_m: 3.0,
         });
 
         let polygon_3d = regions.get_clockwise_3d_polygon_starting_closest_to_origin();
@@ -796,7 +789,7 @@ mod tests {
             Point2f64::new(0.0, 1.0),
         ];
 
-        let regions = FloorRegions::new(vertices, 0.0, ItemId::default());
+        let regions = FloorRegions::new(vertices, ItemId::default());
 
         let polygon_3d = regions.get_clockwise_3d_polygon_starting_closest_to_origin();
 

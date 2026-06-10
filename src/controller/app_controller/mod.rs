@@ -23,7 +23,7 @@ mod phase_regions;
 
 use document::{
     ActiveShape, DimensionPrompt, DimensionState, Document, EditState, MovedCoordKind, PendingArc,
-    PhaseRegion, ShapeSlot, StepRegion, StoreyDoc, DEFAULT_CEILING_HEIGHT_M,
+    PhaseRegion, ShapeSlot, StepRegion, StoreyDoc,
 };
 pub use document::{ExposureSection, PositionPromptKind};
 pub use exposure::{ExposureSelection, SectionHandle, WallExposureView};

@@ -191,10 +191,10 @@ mod tests {
                 Point2f64::new(off, 4.0),
             ]
         };
-        let mut floors = FloorRegions::from_vertex_lists(vec![square(0.0)], 2.4, original_cid);
+        let mut floors = FloorRegions::from_vertex_lists(vec![square(0.0)], original_cid);
         floors
             .regions
-            .extend(FloorRegions::from_vertex_lists(vec![square(4.0)], 2.4, ext_cid).regions);
+            .extend(FloorRegions::from_vertex_lists(vec![square(4.0)], ext_cid).regions);
         ber.storeys.push(Storey {
             floors,
             ..Storey::default()

@@ -391,10 +391,9 @@ fn draw_dimensions(
 }
 
 fn draw_corner_height_labels(painter: &egui::Painter, t: &Transform2d, region: &FloorRegion) {
-    let h = region.height;
-    if h.abs() < 1e-6 {
-        return;
-    }
+    // Compile-keeping placeholder (was the always-2.4 FloorRegion.height); the
+    // UI slice re-points these labels to `storey.roofs` polygon z.
+    let h: f64 = 2.4;
     let coords: Vec<Coord<f64>> = region.polygon.exterior().coords().cloned().collect();
     // Exterior closes (last point == first); skip the duplicate.
     let unique = &coords[..coords.len().saturating_sub(1)];

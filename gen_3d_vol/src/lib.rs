@@ -213,7 +213,12 @@ impl Gen3D {
                 storey = floor_plan.storey + 1;
             }
             None => {
-                floor_regions = FloorRegions::new(vertices, height, construction_id);
+                let mut fr = FloorRegions::new(vertices, construction_id);
+                // `height` here is the floor-surface z — the region's level.
+                for r in &mut fr.regions {
+                    r.level_m = height;
+                }
+                floor_regions = fr;
             }
         }
 
@@ -313,7 +318,8 @@ impl Gen3D {
     // --- Ceiling modification methods ---
     // ----------------------------------------------------------------------------------------------
     pub fn add_ceiling_with_height(&mut self, height: f64) {
-        let first_floor_height = self.floors.regions[0].height;
+        // `height` is metres above the floor SURFACE (the region's level).
+        let first_floor_height = self.floors.regions[0].level_m;
         let height = first_floor_height + height;
         let exterior_polygon = self
             .floors
