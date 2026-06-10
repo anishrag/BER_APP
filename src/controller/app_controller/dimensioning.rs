@@ -98,6 +98,62 @@ impl AppController {
         })
     }
 
+    /// Resolved view of the current POSITION prompt for the UI: world-coord
+    /// endpoints of the measured area wall + the outline reference wall, the
+    /// axis, and the current (drawn) distance to prefill the textbox with.
+    /// `None` when there's no active position prompt.
+    ///
+    /// CRITICAL: the prompt's two `VertexId`s index DIFFERENT plans — the area
+    /// wall resolves against the LIVE editing buffer (`document.floor_plan`),
+    /// the reference wall against the storey outline plan
+    /// (`document.outline.floor_plan`).
+    pub fn position_prompt_for_ui(&self) -> Option<PositionPromptUiData> {
+        let prompt = self
+            .document
+            .dimensioning
+            .current_position_prompt
+            .as_ref()?;
+        let option = prompt.options.get(prompt.current_idx)?;
+        Some(PositionPromptUiData {
+            area_wall: wall_positions_in(&self.document.floor_plan, option.area_wall_vid)?,
+            reference_wall: wall_positions_in(
+                &self.document.outline.floor_plan,
+                option.outline_wall_vid,
+            )?,
+            axis: prompt.axis,
+            current_distance: option.current_distance,
+            option_idx: prompt.current_idx,
+            option_count: prompt.options.len(),
+        })
+    }
+
+    /// Apply the user's entered distance for the current POSITION prompt, then
+    /// persist + snapshot for undo. The model mutation (translate / set-param /
+    /// guardrail / rollback) lives in [`Document::apply_position`]; this owns
+    /// only the shell workflow. On rejection the snapshot is discarded —
+    /// `apply_dimension`'s pattern.
+    pub fn apply_position_dimension(&mut self, value: f32) -> Result<(), String> {
+        let undo_snap = self.current_history_snapshot();
+        self.document.apply_position(value)?;
+        self.mark_dirty()?;
+        self.push_history_snapshot(undo_snap);
+        Ok(())
+    }
+
+    /// Skip the current position prompt — accept the drawn position (see
+    /// [`Document::skip_current_position`]); record it for undo first.
+    pub fn skip_position_dimension(&mut self) {
+        self.record_history();
+        self.document.skip_current_position();
+        let _ = self.mark_dirty();
+    }
+
+    /// Advance the position prompt to its next outline reference wall (wraps).
+    /// Not a mutation of the model's geometry — no history entry.
+    pub fn cycle_position_reference(&mut self) {
+        self.document.cycle_position_reference();
+    }
+
     /// Apply the user's entered length for the current dimension prompt, then
     /// persist + snapshot for undo. The model mutation (scale / set / repair /
     /// guardrail / rollback) lives in [`Document::apply_dimension`]; this owns
@@ -171,6 +227,39 @@ pub struct DimensionPromptUiData {
     pub walls: Vec<WallPositions>,
     /// Current length of the primary wall in the plan's current units.
     pub current_length: f32,
+}
+
+/// UI-friendly snapshot of the current POSITION prompt: the area wall being
+/// measured (live buffer coords) + the storey-outline reference wall it's
+/// measured from, the axis the distance runs along, the current (drawn)
+/// distance to prefill the textbox with, and which reference option is
+/// selected out of how many. Same coord system as the rendered BER polygon.
+#[derive(Debug, Clone, Copy)]
+pub struct PositionPromptUiData {
+    pub area_wall: WallPositions,
+    pub reference_wall: WallPositions,
+    pub axis: ParameterAxis,
+    pub current_distance: f32,
+    pub option_idx: usize,
+    pub option_count: usize,
+}
+
+/// World-coord endpoints of the wall starting at `vid` in `plan`. `None` when
+/// the vertex no longer exists (stale prompt) or the ring is degenerate.
+fn wall_positions_in(plan: &FloorPlan, vid: VertexId) -> Option<WallPositions> {
+    let (ring, edge_start) = plan.find_vertex(vid)?;
+    let polygons = plan.polygons();
+    let pts = polygons.get(ring)?;
+    let n = pts.len();
+    if n < 2 {
+        return None;
+    }
+    let a = pts.get(edge_start)?;
+    let b = pts.get((edge_start + 1) % n)?;
+    Some(WallPositions {
+        wall_a: (a.x as f64, a.y as f64),
+        wall_b: (b.x as f64, b.y as f64),
+    })
 }
 
 // There is NO persisted sketch snapshot. The DB stores only finalised

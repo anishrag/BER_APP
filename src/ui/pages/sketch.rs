@@ -3,8 +3,8 @@ use egui::Pos2;
 use strum::IntoEnumIterator;
 
 use crate::controller::app_controller::{
-    DimensionPromptUiData, EditDragPromptUiData, ExposureSelection, SnapTagView,
-    VertexDropPromptUiData, WallExposureView,
+    DimensionPromptUiData, EditDragPromptUiData, ExposureSelection, PositionPromptUiData,
+    SnapTagView, VertexDropPromptUiData, WallExposureView,
 };
 use crate::ui::pages::events::UiEvent;
 use crate::ui::render;
@@ -245,6 +245,15 @@ pub enum SketchEvent {
     ApplyDimension(f32),
     /// User skipped the current dimension prompt.
     SkipDimension,
+    /// User submitted a distance for the current POSITION prompt: how far the
+    /// carved phase/step area (or its cut wall) sits from the highlighted
+    /// storey-outline reference wall, along the prompt's axis.
+    ApplyPositionDimension(f32),
+    /// User skipped the current position prompt — accept the drawn position.
+    SkipPositionDimension,
+    /// User asked to measure the area's position from a different outline
+    /// reference wall — advance to the next candidate (wraps).
+    CyclePositionReference,
     /// User dragged the curve-radius slider: set the provisional arc's bulge
     /// (signed sagitta / chord). Updates the amber preview live.
     SetCurveBulge(f32),
@@ -363,6 +372,12 @@ impl SketchPage {
         dim_scale_set: bool,
         dim_error: Option<&str>,
         dimensioned_walls: &[(usize, usize)],
+        // Position prompt for a carved phase/step area: how far the area (or
+        // its cut wall) sits from a storey-outline wall. Shown once the area's
+        // wall-length loop is done; both walls are highlighted on the canvas.
+        position_prompt: Option<PositionPromptUiData>,
+        position_input: &mut String,
+        position_error: Option<&str>,
         // World-coord points of a provisional ExtendCurve/TrimCurve arc awaiting
         // its attach dimensions, drawn as an amber preview overlay.
         arc_preview: Option<&[(f64, f64)]>,
@@ -803,6 +818,66 @@ impl SketchPage {
                     }
                 }
 
+                // Position-prompt overlay (mirrors the edit-drag prompt's):
+                //
+                //   * Area wall being measured highlighted in ORANGE, the
+                //     outline reference wall in RED — two different plans, so
+                //     two colours keep them apart.
+                //   * A cyan arrow drawn along the prompt's axis between the
+                //     two walls, spanning the distance being measured.
+                if let Some(pp) = &position_prompt {
+                    render::render_wall_highlight(
+                        &painter,
+                        rect,
+                        ber,
+                        current_storey_idx,
+                        mode,
+                        view,
+                        pp.area_wall.wall_a,
+                        pp.area_wall.wall_b,
+                        egui::Color32::from_rgb(255, 170, 40), // orange: the area wall
+                    );
+                    render::render_wall_highlight(
+                        &painter,
+                        rect,
+                        ber,
+                        current_storey_idx,
+                        mode,
+                        view,
+                        pp.reference_wall.wall_a,
+                        pp.reference_wall.wall_b,
+                        egui::Color32::from_rgb(255, 80, 80), // red: the outline reference
+                    );
+                    let (arrow_a, arrow_b) = match pp.axis {
+                        manip_2d_plan::ParameterAxis::X => {
+                            // Horizontal arrow at the area wall's midpoint y.
+                            let mid_y = (pp.area_wall.wall_a.1 + pp.area_wall.wall_b.1) * 0.5;
+                            (
+                                (pp.reference_wall.wall_a.0, mid_y),
+                                (pp.area_wall.wall_a.0, mid_y),
+                            )
+                        }
+                        manip_2d_plan::ParameterAxis::Y => {
+                            // Vertical arrow at the area wall's midpoint x.
+                            let mid_x = (pp.area_wall.wall_a.0 + pp.area_wall.wall_b.0) * 0.5;
+                            (
+                                (mid_x, pp.reference_wall.wall_a.1),
+                                (mid_x, pp.area_wall.wall_a.1),
+                            )
+                        }
+                    };
+                    render::render_dimension_prompt(
+                        &painter,
+                        rect,
+                        ber,
+                        current_storey_idx,
+                        mode,
+                        view,
+                        arrow_a,
+                        arrow_b,
+                    );
+                }
+
                 // Provisional curved-wall preview (amber arc) drawn on top, so
                 // the user sees the curve while dimensioning its attach lines.
                 if let Some(pts) = arc_preview {
@@ -1189,6 +1264,14 @@ impl SketchPage {
                             dim_error,
                             &mut on_event,
                         );
+                    } else if let Some(p) = position_prompt {
+                        Self::position_prompt_toolbar(
+                            ui,
+                            p,
+                            position_input,
+                            position_error,
+                            &mut on_event,
+                        );
                     } else if let Some(p) = edit_drag_prompt {
                         Self::edit_drag_prompt_toolbar(
                             ui,
@@ -1438,6 +1521,72 @@ impl SketchPage {
         // Surface the last error inline so the user can correct without
         // losing what they typed.
         if let Some(err) = dim_error {
+            ui.label(
+                egui::RichText::new(format!("⚠ {}", err))
+                    .color(egui::Color32::from_rgb(255, 120, 90)),
+            );
+        }
+    }
+
+    /// Toolbar for the position prompt of a carved phase/step area: the
+    /// distance (along the prompt's axis) from the highlighted outline
+    /// reference wall to the highlighted area wall. The textbox arrives
+    /// PREFILLED with the drawn distance (see `BerApp`'s prompt-identity
+    /// refill); Apply pins it, Skip accepts the drawn position, and the
+    /// cycle button moves to another reference wall.
+    fn position_prompt_toolbar<F: FnMut(UiEvent)>(
+        ui: &mut egui::Ui,
+        prompt: PositionPromptUiData,
+        input: &mut String,
+        error: Option<&str>,
+        on_event: &mut F,
+    ) {
+        let direction = match prompt.axis {
+            manip_2d_plan::ParameterAxis::X => "Horizontal",
+            manip_2d_plan::ParameterAxis::Y => "Vertical",
+        };
+        ui.label(
+            egui::RichText::new(format!(
+                "{} distance from the highlighted wall (m):",
+                direction
+            ))
+            .strong()
+            .color(egui::Color32::from_rgb(60, 220, 255)),
+        );
+        let resp = ui.add(
+            egui::TextEdit::singleline(input)
+                .desired_width(80.0)
+                .hint_text("e.g. 3.5"),
+        );
+        let submit_pressed = resp.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
+        let apply_clicked = ui
+            .button("Apply")
+            .on_hover_text("Pin the area at exactly this distance")
+            .clicked();
+        if apply_clicked || submit_pressed {
+            if let Some(value) = parse_dimension_expression(input) {
+                on_event(UiEvent::Sketch(SketchEvent::ApplyPositionDimension(value)));
+            }
+        }
+        if ui
+            .button("Skip")
+            .on_hover_text("Accept the drawn position as-is")
+            .clicked()
+        {
+            on_event(UiEvent::Sketch(SketchEvent::SkipPositionDimension));
+        }
+        if ui
+            .button(format!(
+                "Measure from another wall ({}/{})",
+                prompt.option_idx + 1,
+                prompt.option_count,
+            ))
+            .on_hover_text("Measure the distance from a different outline wall")
+            .clicked()
+        {
+            on_event(UiEvent::Sketch(SketchEvent::CyclePositionReference));
+        }
+        if let Some(err) = error {
             ui.label(
                 egui::RichText::new(format!("⚠ {}", err))
                     .color(egui::Color32::from_rgb(255, 120, 90)),

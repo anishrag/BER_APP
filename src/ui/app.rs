@@ -48,6 +48,18 @@ pub struct SketchState {
     /// Last error from `apply_dimension`. Shown next to the textbox so the
     /// user can correct without losing what they typed.
     pub dimension_error: Option<String>,
+    /// Backing string for the position prompt's text input. PREFILLED with
+    /// the prompt's current (drawn) distance whenever the prompt identity
+    /// changes (see `position_prompt_key`); the user overtypes or accepts.
+    pub position_input: String,
+    /// Identity `(axis, option_idx)` of the position prompt the input was
+    /// last prefilled for. When the visible prompt's identity differs (next
+    /// axis, cycled reference), the input is refilled with its drawn
+    /// distance. `None` when no position prompt is showing.
+    pub position_prompt_key: Option<(manip_2d_plan::ParameterAxis, usize)>,
+    /// Last error from `apply_position_dimension`. Shown next to the textbox
+    /// so the user can correct without losing what they typed.
+    pub position_error: Option<String>,
     /// Backing string for the Edit-drag measurement prompt's input.
     pub edit_drag_input: String,
     /// Last error from `apply_edit_drag` (or the cancel/cycle paths).
@@ -256,6 +268,7 @@ impl eframe::App for BerApp {
                     dim_prompt,
                     dim_scale_set,
                     dim_error,
+                    position_prompt,
                     dimensioned_walls,
                     arc_preview,
                     curve_bulge,
@@ -303,6 +316,7 @@ impl eframe::App for BerApp {
                         controller_ref.dimension_prompt_for_ui(),
                         controller_ref.dimensioning_scale_set(),
                         self.sketch_state.dimension_error.clone(),
+                        controller_ref.position_prompt_for_ui(),
                         controller_ref.walls_with_known_length(),
                         controller_ref.pending_arc_preview(),
                         controller_ref.pending_arc_bulge(),
@@ -341,7 +355,23 @@ impl eframe::App for BerApp {
                     )
                 };
 
+                // Prefill the position-prompt textbox with the prompt's drawn
+                // distance whenever the prompt IDENTITY (axis + selected
+                // reference option) changes — a fresh prompt or a cycled
+                // reference starts from its measured-as-drawn value; the
+                // user's in-progress typing on the SAME prompt is preserved.
+                if let Some(pp) = &position_prompt {
+                    let key = (pp.axis, pp.option_idx);
+                    if self.sketch_state.position_prompt_key != Some(key) {
+                        self.sketch_state.position_prompt_key = Some(key);
+                        self.sketch_state.position_input = format!("{:.2}", pp.current_distance);
+                    }
+                } else {
+                    self.sketch_state.position_prompt_key = None;
+                }
+
                 let current_storey_idx = self.app_controller.borrow().current_storey_idx();
+                let position_error = self.sketch_state.position_error.clone();
 
                 let controller = self.app_controller.clone();
                 let splice_debug = self.app_controller.borrow().splice_debug_overlay();
@@ -363,6 +393,9 @@ impl eframe::App for BerApp {
                     dim_scale_set,
                     dim_error.as_deref(),
                     &dimensioned_walls,
+                    position_prompt,
+                    &mut self.sketch_state.position_input,
+                    position_error.as_deref(),
                     arc_preview.as_deref(),
                     curve_bulge,
                     living_area_mode,
@@ -491,6 +524,25 @@ impl eframe::App for BerApp {
                             SketchEvent::SkipDimension => {
                                 controller.borrow_mut().skip_current_dimension();
                                 self.sketch_state.dimension_error = None;
+                            }
+                            SketchEvent::ApplyPositionDimension(value) => {
+                                match controller.borrow_mut().apply_position_dimension(value) {
+                                    Ok(()) => {
+                                        self.sketch_state.position_error = None;
+                                    }
+                                    Err(e) => {
+                                        eprintln!("apply_position_dimension: {}", e);
+                                        self.sketch_state.position_error = Some(e);
+                                    }
+                                }
+                            }
+                            SketchEvent::SkipPositionDimension => {
+                                controller.borrow_mut().skip_position_dimension();
+                                self.sketch_state.position_error = None;
+                            }
+                            SketchEvent::CyclePositionReference => {
+                                controller.borrow_mut().cycle_position_reference();
+                                self.sketch_state.position_error = None;
                             }
                             SketchEvent::SetCurveBulge(ratio) => {
                                 controller.borrow_mut().set_pending_arc_bulge(ratio);

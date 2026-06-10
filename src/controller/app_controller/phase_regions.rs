@@ -135,12 +135,14 @@ impl AppController {
         }
     }
 
-    /// True once the in-flight phase area is fully DIMENSIONED and awaiting its
-    /// phase pick (the UI shows the phase picker). While dimensioning is still in
-    /// progress the dimension prompt shows instead.
+    /// True once the in-flight phase area is fully DIMENSIONED — wall lengths
+    /// AND position — and awaiting its phase pick (the UI shows the phase
+    /// picker). While the length loop or a position prompt is still in
+    /// progress, that prompt shows instead.
     pub fn phase_pick_pending(&self) -> bool {
         self.document.active == ActiveShape::PhaseArea
             && self.document.dimensioning.current_prompt.is_none()
+            && self.document.dimensioning.current_position_prompt.is_none()
             && self.document.floor_plan.get_points().len() >= 3
     }
 

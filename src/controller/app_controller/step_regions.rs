@@ -134,12 +134,14 @@ impl AppController {
         }
     }
 
-    /// True once the in-flight step area is fully DIMENSIONED and awaiting its
-    /// level (the UI shows the amount field). While dimensioning is still in
-    /// progress the dimension prompt shows instead.
+    /// True once the in-flight step area is fully DIMENSIONED — wall lengths
+    /// AND position — and awaiting its level (the UI shows the amount field).
+    /// While the length loop or a position prompt is still in progress, that
+    /// prompt shows instead.
     pub fn step_pick_pending(&self) -> bool {
         self.document.active == ActiveShape::StepArea
             && self.document.dimensioning.current_prompt.is_none()
+            && self.document.dimensioning.current_position_prompt.is_none()
             && self.document.floor_plan.get_points().len() >= 3
     }
 

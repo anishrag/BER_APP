@@ -671,6 +671,10 @@ fn phase_area_is_dimensioned_before_its_phase_is_assigned() {
         c.apply_dimension(0.9).expect("dimension applies");
         guard += 1;
     }
+    // Lengths done — but an interior area's POSITION is still approximate,
+    // so the position prompts gate the picker until entered or skipped.
+    assert!(!c.phase_pick_pending(), "no phase pick until positioned");
+    skip_position_prompts(&mut c);
     assert!(c.phase_pick_pending(), "now the phase picker shows");
     assert!(
         c.pending_phase_polygon().len() >= 4,
@@ -996,6 +1000,183 @@ fn dimensioned_square_controller() -> AppController {
     c.document.dimensioning.known_params = c.document.floor_plan.all_active_params();
     c.commit_to_ber().unwrap();
     c
+}
+
+/// Accept the drawn position for every pending position prompt (skip them
+/// all), so a test can drive a carved area past the position loop to its
+/// phase/level pick.
+fn skip_position_prompts(c: &mut AppController) {
+    let mut guard = 0;
+    while c.document.dimensioning.current_position_prompt.is_some() && guard < 8 {
+        c.skip_position_dimension();
+        guard += 1;
+    }
+    assert!(guard < 8, "position-prompt loop didn't terminate");
+}
+
+/// Drive the wall-length loop of a freshly carved 4×4 interior area (drawn at
+/// (2,2)–(6,6) in the 10×10 storey) to completion.
+fn complete_interior_length_loop(c: &mut AppController) {
+    let mut guard = 0;
+    while c.dimensioning_active() && guard < 12 {
+        c.apply_dimension(4.0).expect("dimension applies");
+        guard += 1;
+    }
+    assert!(guard < 12, "length loop didn't terminate");
+}
+
+fn buffer_min_x(c: &AppController) -> f32 {
+    c.document
+        .floor_plan
+        .get_points()
+        .iter()
+        .map(|p| p.x)
+        .fold(f32::INFINITY, f32::min)
+}
+
+/// Slice-3 gate, phase flavour: a free-standing (fully interior) phase area
+/// finishes its wall-length loop and lands in the POSITION loop — the phase
+/// pick stays gated until both axes are entered. The UI data resolves its two
+/// VertexIds against the right plans (area wall → live buffer, reference wall
+/// → storey outline).
+#[test]
+fn interior_phase_area_position_prompts_gate_the_phase_pick() {
+    let mut c = dimensioned_square_controller();
+    c.set_phase_mode(true);
+    // Interior 4x4 at (2,2)–(6,6): no outline contact → both axes free.
+    c.apply_phase_region_stroke_event(&[
+        (2.0, 2.0),
+        (6.0, 2.0),
+        (6.0, 6.0),
+        (2.0, 6.0),
+        (2.1, 2.1),
+    ]);
+    complete_interior_length_loop(&mut c);
+
+    // Lengths done; the position prompt (not the phase pick) is up.
+    assert!(
+        c.document.dimensioning.current_position_prompt.is_some(),
+        "position prompt after the length loop"
+    );
+    assert!(!c.phase_pick_pending(), "phase pick gated by position");
+
+    // UI data: the area wall comes from the LIVE buffer (left wall at x≈2),
+    // the reference wall from the storey OUTLINE (its x=0 wall) — two
+    // different VertexId namespaces.
+    let ui = c.position_prompt_for_ui().expect("ui data for the prompt");
+    assert_eq!(ui.axis, ParameterAxis::X);
+    assert_eq!(ui.option_count, 2, "outline refs x=0 and x=10");
+    assert_eq!(ui.option_idx, 0);
+    // The carved area's left wall sits at x=2.1 (the stroke's lift point
+    // becomes the anchored Constant), so the drawn distance from x=0 is 2.1.
+    assert!((ui.current_distance - 2.1).abs() < 1e-3, "drawn ~2.1 m off");
+    assert!(
+        ui.reference_wall.wall_a.0.abs() < 1e-3 && ui.reference_wall.wall_b.0.abs() < 1e-3,
+        "reference is the outline's x=0 wall: {:?}",
+        ui.reference_wall
+    );
+    assert!(
+        (ui.area_wall.wall_a.0 - 2.1).abs() < 1e-3 && (ui.area_wall.wall_b.0 - 2.1).abs() < 1e-3,
+        "area wall is the buffer's x≈2.1 wall: {:?}",
+        ui.area_wall
+    );
+
+    // Enter X then Y → only then the phase pick opens.
+    c.apply_position_dimension(3.0).expect("X position applies");
+    assert!(!c.phase_pick_pending(), "Y still pending");
+    assert!((buffer_min_x(&c) - 3.0).abs() < 1e-3, "area moved to x=3");
+    c.apply_position_dimension(2.0).expect("Y position applies");
+    assert!(
+        c.document.dimensioning.current_position_prompt.is_none(),
+        "both axes entered"
+    );
+    assert!(c.phase_pick_pending(), "phase pick now open");
+}
+
+/// Slice-3 gate, step flavour: same gating for a step area, resolved by
+/// SKIPPING each position prompt (accept the drawn position).
+#[test]
+fn interior_step_area_position_skip_opens_the_level_entry() {
+    let mut c = dimensioned_square_controller();
+    c.set_step_mode(true);
+    c.apply_step_region_stroke_event(&[(2.0, 2.0), (6.0, 2.0), (6.0, 6.0), (2.0, 6.0), (2.1, 2.1)]);
+    complete_interior_length_loop(&mut c);
+
+    assert!(
+        c.document.dimensioning.current_position_prompt.is_some(),
+        "position prompt after the length loop"
+    );
+    assert!(!c.step_pick_pending(), "level entry gated by position");
+    let before = c.document.floor_plan.get_points();
+
+    c.skip_position_dimension(); // X — accept as drawn
+    assert!(!c.step_pick_pending(), "Y still pending");
+    c.skip_position_dimension(); // Y — accept as drawn
+    assert!(
+        c.document.dimensioning.current_position_prompt.is_none(),
+        "both axes resolved"
+    );
+    assert!(c.step_pick_pending(), "level entry now open");
+    assert_eq!(
+        c.document.floor_plan.get_points(),
+        before,
+        "skip moves nothing"
+    );
+}
+
+/// Undo after `apply_position_dimension` restores both the geometry and the
+/// prompt progress: the area returns to its drawn position and the same
+/// position prompt is asked again.
+#[test]
+fn undo_after_apply_position_dimension_restores_geometry_and_prompt() {
+    let mut c = dimensioned_square_controller();
+    c.set_phase_mode(true);
+    c.apply_phase_region_stroke_event(&[
+        (2.0, 2.0),
+        (6.0, 2.0),
+        (6.0, 6.0),
+        (2.0, 6.0),
+        (2.1, 2.1),
+    ]);
+    complete_interior_length_loop(&mut c);
+    let before = c.document.floor_plan.get_points();
+    assert_eq!(
+        c.document
+            .dimensioning
+            .current_position_prompt
+            .as_ref()
+            .map(|p| p.axis),
+        Some(ParameterAxis::X)
+    );
+
+    c.apply_position_dimension(3.0).expect("X position applies");
+    assert!((buffer_min_x(&c) - 3.0).abs() < 1e-3, "area moved to x=3");
+    assert_eq!(
+        c.document
+            .dimensioning
+            .current_position_prompt
+            .as_ref()
+            .map(|p| p.axis),
+        Some(ParameterAxis::Y),
+        "advanced to the Y prompt"
+    );
+
+    c.undo().expect("undo");
+    assert_eq!(
+        c.document.floor_plan.get_points(),
+        before,
+        "geometry restored to the drawn position"
+    );
+    assert_eq!(
+        c.document
+            .dimensioning
+            .current_position_prompt
+            .as_ref()
+            .map(|p| p.axis),
+        Some(ParameterAxis::X),
+        "the X position prompt returns"
+    );
+    assert!(!c.phase_pick_pending(), "phase pick gated again");
 }
 
 /// Living areas persist as resolved polygons in `Storey.living_areas` (part
@@ -1381,6 +1562,10 @@ fn step_area_is_dimensioned_before_its_level_is_assigned() {
         c.apply_dimension(0.9).expect("dimension applies");
         guard += 1;
     }
+    // Lengths done — but an interior area's POSITION is still approximate,
+    // so the position prompts gate the amount field until entered or skipped.
+    assert!(!c.step_pick_pending(), "no level entry until positioned");
+    skip_position_prompts(&mut c);
     assert!(c.step_pick_pending(), "now the amount field shows");
     assert!(
         c.pending_step_polygon().len() >= 4,
@@ -1419,6 +1604,7 @@ fn step_area_zero_amount_is_rejected_and_area_stays_pending() {
         c.apply_dimension(4.0).expect("dimension applies");
         guard += 1;
     }
+    skip_position_prompts(&mut c); // accept the drawn position
     assert!(c.step_pick_pending(), "carved area awaits its amount");
 
     c.assign_step_level_to_pending(0.005);
@@ -1447,6 +1633,7 @@ fn step_area_splits_floor_into_level_regions() {
         c.apply_dimension(4.0).expect("dimension applies");
         guard += 1;
     }
+    skip_position_prompts(&mut c); // accept the drawn position
     assert!(c.step_pick_pending(), "carved area awaits its amount");
     c.assign_step_level_to_pending(-0.3);
     c.materialize();

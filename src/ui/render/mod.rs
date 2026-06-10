@@ -389,6 +389,34 @@ pub fn render_equivalent_wall(
     wall_a: (f64, f64),
     wall_b: (f64, f64),
 ) {
+    render_wall_highlight(
+        painter,
+        rect,
+        ber,
+        current_storey_idx,
+        sketch_mode,
+        view,
+        wall_a,
+        wall_b,
+        egui::Color32::from_rgb(255, 80, 80),
+    );
+}
+
+/// Highlight one wall in a caller-chosen colour — the same thick on-wall line
+/// as [`render_equivalent_wall`], for prompts that need to distinguish two
+/// walls (e.g. the position prompt's area wall vs its outline reference wall).
+#[allow(clippy::too_many_arguments)]
+pub fn render_wall_highlight(
+    painter: &egui::Painter,
+    rect: egui::Rect,
+    ber: Option<&Ber>,
+    current_storey_idx: Option<usize>,
+    sketch_mode: SketchMode,
+    view: ViewParams,
+    wall_a: (f64, f64),
+    wall_b: (f64, f64),
+    color: egui::Color32,
+) {
     let Some((_storey, t)) = storey_transform(rect, ber, current_storey_idx, sketch_mode, view)
     else {
         return;
@@ -397,7 +425,6 @@ pub fn render_equivalent_wall(
     let a = t.apply(wall_a.0, wall_a.1);
     let b = t.apply(wall_b.0, wall_b.1);
 
-    let color = egui::Color32::from_rgb(255, 80, 80);
     let stroke = egui::Stroke::new(4.0, color);
     painter.line_segment([a, b], stroke);
 }

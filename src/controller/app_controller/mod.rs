@@ -56,7 +56,7 @@ mod storeys;
 mod strokes;
 mod view;
 
-pub use dimensioning::DimensionPromptUiData;
+pub use dimensioning::{DimensionPromptUiData, PositionPromptUiData};
 pub use editing::{
     EditDragPrompt, EditDragPromptUiData, MeasurementOption, VertexDropPrompt,
     VertexDropPromptUiData, VertexMeasurement, VertexMeasurementKind, VertexMeasurementUiData,
