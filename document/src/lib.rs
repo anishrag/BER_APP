@@ -20,11 +20,13 @@ mod edit;
 mod exposure;
 mod load;
 mod phase;
+mod resolve;
 
 /// Derive full per-wall exposure coverage — the shell's `commit_to_ber` uses it.
 pub use exposure::{range_at, wall_coverage};
 pub use load::reconstruct_living_areas;
 pub use phase::{phase_regions_from_floors, stamp_wall_phases, PhaseRegion};
+pub use resolve::{ensure_storey_constructions, resolve_storey, DEFAULT_CEILING_HEIGHT_M};
 
 use datatypes::ber::structural::WallExposure;
 use domain::points::Point2f32;

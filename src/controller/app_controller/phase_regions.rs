@@ -5,7 +5,7 @@
 //!
 //! Unlike living areas, a phase region is NOT persisted in the BER. It's
 //! session-only controller state whose job is to stamp the phase onto fabric
-//! surfaces at commit (`resolve_storey_phases` in `mod.rs`): every surface whose
+//! surfaces at commit (`document::stamp_wall_phases`): every surface whose
 //! representative point falls inside the polygon takes its phase. The durable
 //! record of a surface's phase is its `construction_id` — so a region keeps
 //! stamping anything new drawn in its footprint during the session, and reload
@@ -272,7 +272,7 @@ impl AppController {
 
     /// Delete the current storey's phase region at `index` and re-commit (so
     /// surfaces it had stamped fall back to their existing phase — see the
-    /// preserve-existing rule in `resolve_storey_phases`). No-op if out of range.
+    /// preserve-existing rule in `document::stamp_wall_phases`). No-op if out of range.
     pub fn delete_phase_region(&mut self, index: usize) {
         let idx = self.current_storey_idx.unwrap_or(0);
         let removed = self.phase_regions.get_mut(&idx).is_some_and(|regions| {

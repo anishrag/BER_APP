@@ -16,7 +16,7 @@ use living_areas::shape_finalised;
 
 use document::{
     ActiveShape, DimensionPrompt, DimensionState, Document, EditState, MovedCoordKind, PendingArc,
-    PhaseRegion, ShapeSlot, StoreyDoc,
+    PhaseRegion, ShapeSlot, StoreyDoc, DEFAULT_CEILING_HEIGHT_M,
 };
 // `ExposureSection` is re-exported above (the controller's public surface).
 
@@ -37,10 +37,6 @@ use manip_2d_plan::{
 use sketch::model::Stroke;
 use sketch::SketchEngine;
 use std::collections::{HashMap, HashSet};
-
-/// Default storey ceiling height in meters, used as a placeholder until the UI
-/// collects it from the assessor.
-const DEFAULT_CEILING_HEIGHT_M: f64 = 2.4;
 
 /// Print a stroke as a `vec![p(x,y), …]` literal (matching the curve-debug
 /// dumps) so a whole session can be copy-pasted into a bit-for-bit integration
@@ -1063,7 +1059,7 @@ impl AppController {
     /// logical user action (stroke end, wall drag end, etc.) — not from
     /// incremental handlers like `sketch_add_point`.
     /// Derive the active storey's geometry into `current_record` (the
-    /// [`resolve_storey`](Self::resolve_storey) projection + phase stamping).
+    /// [`document::resolve_storey`] projection + phase stamping).
     /// No revision bookkeeping — the callers (`commit_to_ber` / `materialize`)
     /// own that.
     fn refresh_storey(&mut self) {
@@ -1077,45 +1073,20 @@ impl AppController {
         };
         // Flush the active buffer into its slot, then ensure the storey slot + its
         // constructions exist — the two `&mut` prerequisites of the otherwise
-        // read-only `resolve_storey`.
+        // read-only projection (`document::resolve_storey`).
         self.sync_active();
-        self.ensure_storey_constructions(idx);
-        let storey = self.resolve_storey(idx);
-        self.current_record.as_mut().unwrap().data.storeys[idx] = storey;
-        // Floors are already phase-correct from the partition; this stamps the
-        // phase onto the just-rebuilt WALLS from the same session areas.
-        self.resolve_storey_phases(idx);
-    }
-
-    /// The `&mut` prerequisites of the pure [`resolve_storey`](Self::resolve_storey):
-    /// lazy-create the storey slot if missing, and register (find-or-insert) every
-    /// construction the projection will look up — the default floor + wall, plus
-    /// one floor per phase area on this storey. Idempotent.
-    fn ensure_storey_constructions(&mut self, idx: usize) {
-        let phases: Vec<ConstructionPhase> = self
+        let regions: &[PhaseRegion] = self
             .phase_regions
             .get(&idx)
-            .map(|rs| rs.iter().map(|r| r.phase.clone()).collect())
-            .unwrap_or_default();
+            .map(Vec::as_slice)
+            .unwrap_or(&[]);
         let record = self.current_record.as_mut().unwrap();
-        while record.data.storeys.len() <= idx {
-            record.data.storeys.push(Storey::default());
-        }
-        record.data.ensure_floor_construction(
-            Default::default(),
-            Default::default(),
-            Default::default(),
-        );
-        record.data.ensure_wall_construction(
-            Default::default(),
-            Default::default(),
-            Default::default(),
-        );
-        for phase in phases {
-            record
-                .data
-                .ensure_floor_construction(Default::default(), Default::default(), phase);
-        }
+        document::ensure_storey_constructions(&mut record.data, idx, regions);
+        record.data.storeys[idx] =
+            document::resolve_storey(&self.document.storeys[idx], &record.data, idx, regions);
+        // Floors are already phase-correct from the partition; this stamps the
+        // phase onto the just-rebuilt WALLS from the same session areas.
+        document::stamp_wall_phases(&mut record.data, idx, regions);
     }
 
     /// Mark the active storey edited: the in-memory `current_record` geometry is
@@ -1147,133 +1118,6 @@ impl AppController {
         Ok(())
     }
 
-    /// Project the active storey's geometry (floors, walls, living areas) from the
-    /// editing model into a `Storey`. This derivation was lifted out of
-    /// `commit_to_ber`; returning a `Storey` is step 1 toward driving render +
-    /// persist from the projection directly (and eventually deleting the eager
-    /// sync). Still `&mut self` — it registers constructions via `ensure_*`; a
-    /// later increment pre-registers them so this can be pure.
-    fn resolve_storey(&self, idx: usize) -> Storey {
-        // PURE projection of storey `idx` from the editing model. The caller
-        // (`refresh_storey`) has already synced the active buffer and ensured this
-        // storey + its constructions exist (`ensure_storey_constructions`), so we
-        // only LOOK UP construction ids and never mutate `current_record` — letting
-        // this run for ANY storey, not just the active one.
-        let s = &self.document.storeys[idx];
-        // The storey footprint is always the OUTLINE (never a living area, even
-        // when one is active). One ring → one FloorRegion.
-        let polygons_f64: Vec<Vec<Point2f64>> = s
-            .outline
-            .floor_plan
-            .polygons()
-            .into_iter()
-            .map(|ring| ring.into_iter().map(to_f64).collect())
-            .collect();
-
-        // The marked heat-loss wall segments (one per exposure section of each
-        // marked wall) — derived in `document`. ONLY marked walls become regions;
-        // an un-marked wall stays "unset" (and `WallRegions` is the single source
-        // of truth, so that distinction survives reload). Each is extruded below to
-        // `DEFAULT_CEILING_HEIGHT_M` (the provisional height) until real heights
-        // are entered. Computed before the mutable `record` borrow.
-        let wall_segments = s.wall_exposure_segments();
-
-        // Resolved living-area polygons (each slot is current after sync_active).
-        // Stored in `Storey.living_areas`, NOT the snapshot — they're
-        // non-editable on reload, so their resolved geometry suffices.
-        let living_area_lists: Vec<Vec<Point2f64>> = s
-            .living_areas
-            .iter()
-            .map(|slot| {
-                slot.floor_plan
-                    .get_points()
-                    .into_iter()
-                    .map(to_f64)
-                    .collect()
-            })
-            .collect();
-
-        // Phase areas for this storey (world/metre rings + phase), cloned before
-        // the mutable record borrow — they drive the floor PARTITION below.
-        let phase_area_rings: Vec<(Vec<Point2f64>, ConstructionPhase)> = self
-            .phase_regions
-            .get(&idx)
-            .map(|rs| {
-                rs.iter()
-                    .map(|r| {
-                        let ring = r.polygon.iter().copied().map(to_f64).collect();
-                        (ring, r.phase.clone())
-                    })
-                    .collect()
-            })
-            .unwrap_or_default();
-        // Construction ids are LOOKED UP, not created — the caller ensured them
-        // (`ensure_storey_constructions`), keeping this read-only. `floor_cid` is
-        // the default (unset, `Original`) floor: the partition REMAINDER + living
-        // areas. A phase area whose floor somehow wasn't ensured falls back to it.
-        let record = self.current_record.as_ref().unwrap();
-        let floor_cid = record
-            .data
-            .floor_construction_id(Default::default(), Default::default(), Default::default())
-            .expect("base floor construction ensured before resolve");
-        let wall_cid = record
-            .data
-            .wall_construction_id(Default::default(), Default::default(), Default::default())
-            .expect("base wall construction ensured before resolve");
-        // PARTITION each outline ring by the phase areas → one region per phase
-        // zone + the remainder.
-        let areas_with_cids: Vec<(Vec<Point2f64>, ItemId)> = phase_area_rings
-            .iter()
-            .map(|(ring, phase)| {
-                let cid = record
-                    .data
-                    .floor_construction_id(Default::default(), Default::default(), phase.clone())
-                    .unwrap_or(floor_cid);
-                (ring.clone(), cid)
-            })
-            .collect();
-        // Clone the existing storey (keeps id/name/number/roofs/openings) and
-        // override only the derived geometry — so this RETURNS a Storey rather
-        // than mutating `current_record` in place. The `record` borrow ends here.
-        let mut storey = record.data.storeys[idx].clone();
-        if polygons_f64.iter().any(|p| p.len() >= 3) {
-            storey.floors = if areas_with_cids.is_empty() {
-                // No phase zones → keep the whole-outline floor verbatim (NO geo
-                // boolean ops, so the stored points round-trip exactly and the
-                // rebuilt outline isn't re-normalised — which broke collinearity).
-                FloorRegions::from_vertex_lists(polygons_f64, DEFAULT_CEILING_HEIGHT_M, floor_cid)
-            } else {
-                // Tagged → partition each outline ring into phase zones.
-                let mut regions = Vec::new();
-                for ring in &polygons_f64 {
-                    if ring.len() < 3 {
-                        continue;
-                    }
-                    let part = FloorRegions::partition(
-                        ring,
-                        &areas_with_cids,
-                        floor_cid,
-                        DEFAULT_CEILING_HEIGHT_M,
-                    );
-                    regions.extend(part.regions);
-                }
-                FloorRegions { regions }
-            };
-        }
-        storey.living_areas =
-            FloorRegions::from_vertex_lists(living_area_lists, DEFAULT_CEILING_HEIGHT_M, floor_cid);
-        // Re-derive walls from exposure (empty when nothing is marked),
-        // preserving the construction link of the region a split came from.
-        storey.walls = WallRegions::rebuild_preserving(
-            wall_segments,
-            &storey.walls,
-            0.0,
-            DEFAULT_CEILING_HEIGHT_M,
-            wall_cid,
-        );
-        storey
-    }
-
     /// Persist to SQLite only if there are un-saved edits since the last write.
     /// Called on the idle autosave tick and at session boundaries — NOT per edit.
     pub fn flush_if_dirty(&mut self) -> Result<(), String> {
@@ -1289,21 +1133,6 @@ impl AppController {
     /// to detect activity and time the idle autosave.
     pub fn revision(&self) -> u64 {
         self.revision
-    }
-
-    /// Stamp the construction PHASE onto storey `idx`'s WALLS from the session
-    /// phase areas (floors are already phase-correct from the commit-time
-    /// partition) — see [`document::stamp_wall_phases`].
-    fn resolve_storey_phases(&mut self, idx: usize) {
-        let regions: &[PhaseRegion] = self
-            .phase_regions
-            .get(&idx)
-            .map(Vec::as_slice)
-            .unwrap_or(&[]);
-        let Some(record) = self.current_record.as_mut() else {
-            return;
-        };
-        document::stamp_wall_phases(&mut record.data, idx, regions);
     }
 
     /// Rebuild the session phase areas for storey `idx` from its persisted floor
