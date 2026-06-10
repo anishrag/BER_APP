@@ -1767,14 +1767,12 @@ impl SketchPage {
             .on_hover_text("Set this height and open the 3D view")
             .clicked();
         if set_clicked || submit_pressed {
-            // A ceiling height must be strictly positive — 0 (which the parser
-            // allows for wall-collapse) is rejected here, leaving the typed
-            // text in place to correct.
+            // Validation (finite, > 0) lives in the controller — emit any
+            // parsed value so its error message surfaces next to the box
+            // instead of the button silently doing nothing. The dispatch arm
+            // clears the input on success; on rejection the text stays put.
             if let Some(value) = parse_dimension_expression(input) {
-                if value > 0.0 {
-                    on_event(UiEvent::Sketch(SketchEvent::SetDefaultCeilingHeight(value)));
-                    input.clear();
-                }
+                on_event(UiEvent::Sketch(SketchEvent::SetDefaultCeilingHeight(value)));
             }
         }
         if ui

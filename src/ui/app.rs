@@ -385,6 +385,16 @@ impl eframe::App for BerApp {
                     self.sketch_state.position_prompt_key = None;
                 }
 
+                // Once the ceiling-height prompt closes (Set succeeded or
+                // Cancel), drop any leftover typed text so the next prompt
+                // starts clean; while it's open — including after a rejected
+                // value — the text stays put for correction.
+                if !self.app_controller.borrow().ceiling_height_prompt_pending()
+                    && !self.sketch_state.ceiling_height_input.is_empty()
+                {
+                    self.sketch_state.ceiling_height_input.clear();
+                }
+
                 let current_storey_idx = self.app_controller.borrow().current_storey_idx();
                 let position_error = self.sketch_state.position_error.clone();
                 let ceiling_height_error = self.sketch_state.ceiling_height_error.clone();
@@ -673,6 +683,8 @@ impl eframe::App for BerApp {
                                 match controller.borrow_mut().set_default_ceiling_height(value) {
                                     Ok(()) => {
                                         self.sketch_state.ceiling_height_error = None;
+                                        // The input clears via the pre-render
+                                        // housekeeping once the prompt closes.
                                     }
                                     Err(e) => {
                                         eprintln!("set_default_ceiling_height: {}", e);

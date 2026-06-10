@@ -226,6 +226,42 @@ impl AppController {
         document::stamp_wall_phases(&mut record.data, idx, regions);
     }
 
+    /// Derive EVERY storey's geometry into `current_record` — the all-storeys
+    /// analogue of [`refresh_storey`](Self::refresh_storey), for changes that
+    /// touch all storeys at once (e.g. the All-tab default ceiling height).
+    /// Each storey resolves from its retained `StoreyDoc`. The live buffer is
+    /// deliberately NOT synced: on the All tab it's empty by design (the slots
+    /// were committed when the tab was entered), and syncing would clobber the
+    /// active storey's outline with that empty buffer.
+    pub(super) fn refresh_all_storeys(&mut self) {
+        if self.current_record.is_none() {
+            return;
+        }
+        let n = self.document.storeys.len();
+        for idx in 0..n {
+            let regions: &[PhaseRegion] = self
+                .phase_regions
+                .get(&idx)
+                .map(Vec::as_slice)
+                .unwrap_or(&[]);
+            let steps: &[StepRegion] = self
+                .step_regions
+                .get(&idx)
+                .map(Vec::as_slice)
+                .unwrap_or(&[]);
+            let record = self.current_record.as_mut().unwrap();
+            document::ensure_storey_constructions(&mut record.data, idx, regions);
+            record.data.storeys[idx] = document::resolve_storey(
+                &self.document.storeys[idx],
+                &record.data,
+                idx,
+                regions,
+                steps,
+            );
+            document::stamp_wall_phases(&mut record.data, idx, regions);
+        }
+    }
+
     /// Mark the active storey edited: the in-memory `current_record` geometry is
     /// now stale, and there's an un-saved change. The re-derive is DEFERRED to
     /// [`materialize`](Self::materialize) (before render / persist), so editing —

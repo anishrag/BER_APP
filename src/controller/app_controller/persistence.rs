@@ -287,10 +287,12 @@ impl AppController {
             }
         } else if let Some(storey) = out.data.storeys.get_mut(idx) {
             // Outline not finalised → persist no geometry yet (it's likely
-            // still in pixels; living areas can't be metric before it is).
+            // still in pixels; living areas can't be metric before it is —
+            // and roofs derived over a pixel footprint are pixel units too).
             storey.floors = FloorRegions::default();
             storey.walls = WallRegions::default();
             storey.living_areas = FloorRegions::default();
+            storey.roofs = Default::default();
         }
         Some(out)
     }

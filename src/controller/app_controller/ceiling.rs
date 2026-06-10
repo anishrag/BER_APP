@@ -43,6 +43,13 @@ impl AppController {
         record
             .data
             .set_default_ceiling_height(self.current_storey_idx, height_m as f64);
+        // On the All-storeys tab the deferred per-storey derive never runs
+        // (`refresh_storey` early-returns with no active storey), so re-derive
+        // every storey EAGERLY — otherwise walls keep their provisional 2.4 m
+        // extrusion and roofs stay missing until each storey is revisited.
+        if self.current_storey_idx.is_none() {
+            self.refresh_all_storeys();
+        }
         self.ceiling_height_prompt = false;
         // Complete the switch the gate intercepted. `Storey3D` is the only 3D
         // sketch mode — per-storey vs full-house is decided by which storey tab
