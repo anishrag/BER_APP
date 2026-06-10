@@ -28,6 +28,9 @@ pub enum MergeWarning {
     },
 }
 
+// SEAM: the app writes FloorRegion.height = ceiling extrusion (2.4) while this crate reads
+// height as the floor-surface z; when wiring, map FloorRegion.level_m → the z the
+// floor/riser machinery consumes (height stays extrusion).
 pub trait FloorRegionsManip {
     fn from_polygons(
         polygons: Vec<&Polygon<f64>>,
@@ -58,6 +61,7 @@ impl FloorRegionsManip for FloorRegions {
                 polygon: (*polygon).clone(),
                 height: *height,
                 construction_id,
+                level_m: 0.0,
             });
         }
         FloorRegions { regions }
@@ -274,6 +278,7 @@ impl FloorRegionsManipPrivate for FloorRegions {
                 polygon: polygon2d,
                 height,
                 construction_id,
+                level_m: 0.0,
             });
         }
         FloorRegions { regions }
@@ -330,6 +335,7 @@ impl FloorRegionsManipPrivate for FloorRegions {
                     polygon: poly,
                     height: region.height,
                     construction_id: region.construction_id,
+                    level_m: 0.0,
                 });
             }
 
@@ -367,6 +373,7 @@ impl FloorRegionsManipPrivate for FloorRegions {
                     polygon: poly,
                     height: region.height,
                     construction_id: region.construction_id,
+                    level_m: region.level_m,
                 });
                 id = ItemId::default(); // ensure new ID for subsequent remainders
             }
@@ -702,6 +709,7 @@ mod tests {
             polygon: polygon2,
             height: 3.0,
             construction_id: ItemId::default(),
+            level_m: 0.0,
         });
 
         let polygon_3d = regions.get_clockwise_3d_polygon_starting_closest_to_origin();

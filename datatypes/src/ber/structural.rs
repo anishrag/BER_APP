@@ -313,6 +313,10 @@ pub struct FloorRegion {
     pub polygon: Polygon<f64>, // 2D polygon boundary
     pub height: f64,           // height per vertex
     pub construction_id: ItemId,
+    /// Floor level in metres relative to the storey's floor datum: 0.0 = the
+    /// unstepped storey floor, positive = raised, negative = lowered (steps).
+    #[serde(default)]
+    pub level_m: f64,
 }
 
 /// A planar region of the floor
@@ -334,6 +338,7 @@ impl FloorRegions {
             polygon,
             height,
             construction_id,
+            level_m: 0.0,
         };
 
         Self {
@@ -365,6 +370,7 @@ impl FloorRegions {
                     polygon,
                     height,
                     construction_id,
+                    level_m: 0.0,
                 }
             })
             .collect();
@@ -489,6 +495,7 @@ impl FloorRegions {
             polygon: poly.clone(),
             height,
             construction_id: cid,
+            level_m: 0.0,
         };
         let outline_poly = to_poly(outline);
         let mut regions: Vec<FloorRegion> = Vec::new();
@@ -507,6 +514,52 @@ impl FloorRegions {
         let remainder = outline_poly.difference(&claimed);
         for poly in &remainder.0 {
             regions.push(mk(poly, remainder_construction_id));
+        }
+        Self { regions }
+    }
+
+    /// Re-partition the regions by step `areas` (ring + floor level in metres
+    /// from the storey datum; + raised, − lowered): each region is split along
+    /// the area boundaries, intersected pieces take the area's level, the
+    /// remainders keep their existing level. Earlier areas claim first where
+    /// areas overlap (same rule as `partition`). Empty `areas` → `self`
+    /// unchanged (NO geo ops, so stored points round-trip exactly).
+    pub fn with_levels(self, areas: &[(Vec<Point2f64>, f64)]) -> Self {
+        use geo::bool_ops::BooleanOps;
+        if areas.is_empty() {
+            return self;
+        }
+        let to_poly = |ring: &[Point2f64]| {
+            Polygon::new(
+                LineString::from(ring.iter().map(|p| (p.x, p.y)).collect::<Vec<_>>()),
+                vec![],
+            )
+        };
+        let mut regions: Vec<FloorRegion> = Vec::new();
+        for region in self.regions {
+            let mk = |poly: &Polygon<f64>, level_m: f64| FloorRegion {
+                id: ItemId::default(),
+                polygon: poly.clone(),
+                height: region.height,
+                construction_id: region.construction_id,
+                level_m,
+            };
+            let mut claimed: MultiPolygon<f64> = MultiPolygon::new(vec![]);
+            for (ring, level) in areas {
+                if ring.len() < 3 {
+                    continue;
+                }
+                let inside = region.polygon.intersection(&to_poly(ring));
+                let piece = inside.difference(&claimed);
+                for poly in &piece.0 {
+                    regions.push(mk(poly, *level));
+                }
+                claimed = claimed.union(&piece);
+            }
+            let remainder = region.polygon.difference(&claimed);
+            for poly in &remainder.0 {
+                regions.push(mk(poly, region.level_m));
+            }
         }
         Self { regions }
     }
@@ -611,6 +664,7 @@ impl Default for FloorRegion {
             polygon: Polygon::new(LineString::new(vec![]), vec![]),
             height: f64::default(),
             construction_id: ItemId::default(),
+            level_m: 0.0,
         }
     }
 }
@@ -855,6 +909,95 @@ mod tests {
             (area_b - 40.0).abs() < 1e-6,
             "second yields the 4..6 overlap → 6..10 only"
         );
+    }
+
+    #[test]
+    fn with_levels_splits_region_into_stepped_piece_and_remainder() {
+        use geo::Area;
+        let cid = ItemId::default();
+        let fr = FloorRegions::new(square(0.0, 0.0, 10.0, 10.0), 2.4, cid);
+        // Step the right half down 0.3 m.
+        let stepped = fr.with_levels(&[(square(5.0, 0.0, 10.0, 10.0), -0.3)]);
+        assert_eq!(stepped.regions.len(), 2, "stepped piece + remainder");
+        let step = stepped
+            .regions
+            .iter()
+            .find(|r| r.level_m == -0.3)
+            .expect("stepped piece exists");
+        let rem = stepped
+            .regions
+            .iter()
+            .find(|r| r.level_m == 0.0)
+            .expect("remainder exists");
+        assert!((step.polygon.unsigned_area() - 50.0).abs() < 1e-6);
+        assert!((rem.polygon.unsigned_area() - 50.0).abs() < 1e-6);
+        // Pieces inherit the region's fabric link and height.
+        for r in &stepped.regions {
+            assert_eq!(r.construction_id, cid);
+            assert_eq!(r.height, 2.4);
+        }
+    }
+
+    #[test]
+    fn with_levels_empty_areas_is_a_noop_with_exact_points() {
+        let cid = ItemId::default();
+        // Deliberately awkward ring (collinear vertex) — geo ops would normalise
+        // it; an exact round-trip proves none ran.
+        let ring = vec![
+            Point2f64::new(0.0, 0.0),
+            Point2f64::new(5.0, 0.0), // collinear with neighbours
+            Point2f64::new(10.0, 0.0),
+            Point2f64::new(10.0, 10.0),
+            Point2f64::new(0.0, 10.0),
+        ];
+        let fr = FloorRegions::new(ring.clone(), 2.4, cid);
+        let before: Vec<Vec<Point2f64>> = fr.to_vertex_lists();
+        let before_id = fr.regions[0].id;
+        let out = fr.with_levels(&[]);
+        assert_eq!(out.to_vertex_lists(), before, "points round-trip exactly");
+        assert_eq!(out.regions[0].id, before_id, "region untouched");
+    }
+
+    #[test]
+    fn floor_region_without_level_m_deserializes_to_zero() {
+        // JSON produced by the OLD shape (no `level_m` field): serialize the
+        // current shape and strip the field.
+        let region = FloorRegions::new(square(0.0, 0.0, 10.0, 10.0), 2.4, ItemId::default())
+            .regions
+            .remove(0);
+        let mut json = serde_json::to_value(&region).expect("serialize");
+        assert!(json.as_object_mut().unwrap().remove("level_m").is_some());
+        let old: FloorRegion = serde_json::from_value(json).expect("old JSON still loads");
+        assert_eq!(old.level_m, 0.0);
+        assert_eq!(old.construction_id, region.construction_id);
+    }
+
+    #[test]
+    fn with_levels_earlier_area_claims_overlap() {
+        use geo::Area;
+        let fr = FloorRegions::new(square(0.0, 0.0, 10.0, 10.0), 2.4, ItemId::default());
+        // Two OVERLAPPING step areas; the second yields to the first in 4..6.
+        let stepped = fr.with_levels(&[
+            (square(0.0, 0.0, 6.0, 10.0), 0.5),   // left 0..6, raised
+            (square(4.0, 0.0, 10.0, 10.0), -0.2), // right 4..10 (overlaps 4..6)
+        ]);
+        let area_at = |level: f64| -> f64 {
+            stepped
+                .regions
+                .iter()
+                .filter(|r| r.level_m == level)
+                .map(|r| r.polygon.unsigned_area())
+                .sum()
+        };
+        assert!(
+            (area_at(0.5) - 60.0).abs() < 1e-6,
+            "first area keeps its full 0..6"
+        );
+        assert!(
+            (area_at(-0.2) - 40.0).abs() < 1e-6,
+            "second yields the 4..6 overlap → 6..10 only"
+        );
+        assert!(area_at(0.0).abs() < 1e-6, "no unstepped remainder left");
     }
 
     #[test]

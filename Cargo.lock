@@ -874,6 +874,7 @@ dependencies = [
  "domain",
  "geo",
  "serde",
+ "serde_json",
  "uuid",
 ]
 
