@@ -923,6 +923,7 @@ dependencies = [
  "log",
  "manip_2d_plan",
  "serde",
+ "serde_json",
 ]
 
 [[package]]

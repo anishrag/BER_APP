@@ -20,6 +20,7 @@ mod edit;
 mod exposure;
 mod load;
 mod phase;
+mod position;
 mod resolve;
 mod step;
 
@@ -27,12 +28,15 @@ mod step;
 pub use exposure::{range_at, wall_coverage};
 pub use load::reconstruct_living_areas;
 pub use phase::{phase_regions_from_floors, stamp_wall_phases, PhaseRegion};
+pub use position::{PositionOption, PositionPrompt, PositionPromptKind};
 pub use resolve::{ensure_storey_constructions, resolve_storey, DEFAULT_CEILING_HEIGHT_M};
 pub use step::{step_regions_from_floors, StepRegion};
 
 use datatypes::ber::structural::WallExposure;
 use domain::points::Point2f32;
-use manip_2d_plan::{Error, FloorPlan, ParameterId, SubareaOutcome, SubareaTuning, VertexId};
+use manip_2d_plan::{
+    Error, FloorPlan, ParameterAxis, ParameterId, SubareaOutcome, SubareaTuning, VertexId,
+};
 use std::collections::{HashMap, HashSet};
 use std::ops::{Deref, DerefMut};
 
@@ -74,6 +78,26 @@ pub struct DimensionState {
     /// A param controlled by a skipped wall just isn't pinned by that wall;
     /// if no other wall can set it, the param stays un-dimensioned.
     pub skipped_walls: HashSet<VertexId>,
+    /// Axes along which the shape's drawn POSITION is approximate — the carve
+    /// boundary didn't pin it. Set once by [`StoreyDoc::pinned_slot_for`]
+    /// against the boundary (which isn't retained later). Living areas carry
+    /// the record too but are never position-prompted.
+    #[serde(default)]
+    pub position_free_axes: Vec<ParameterAxis>,
+    /// Free axes whose position has been dealt with: a distance entered, the
+    /// drawn position explicitly accepted (skip), or auto-resolved (logged)
+    /// because there was no outline reference to measure against.
+    #[serde(default)]
+    pub position_resolved_axes: Vec<ParameterAxis>,
+    /// Params whose `Wall`-kind position prompt was skipped or auto-resolved
+    /// (the wall — e.g. a cut line — stays at its drawn coordinate).
+    #[serde(default)]
+    pub position_skipped_params: HashSet<ParameterId>,
+    /// Current "how far is this area from the outline?" prompt, or `None`.
+    /// Transient — re-derived by `recompute_position_prompt` (hooked into
+    /// `recompute_prompt`), so excluded from the snapshot.
+    #[serde(skip)]
+    pub current_position_prompt: Option<PositionPrompt>,
 }
 
 /// In-memory state for one editable shape (the storey outline or a living
@@ -418,12 +442,15 @@ impl StoreyDoc {
     /// outline's metre scale, and pre-mark as KNOWN the parameters pinned to
     /// `boundary` (walls snapped onto it) so dimensioning only asks about the
     /// walls the user actually drew. `boundary` is the storey outline for a
-    /// living area, or the available region for a phase area.
+    /// living area, or the available region for a phase area. Also records the
+    /// axes the boundary does NOT pin (`position_free_axes`) — the boundary
+    /// isn't retained, so the area's positional freedom is captured here, once.
     pub fn pinned_slot_for(&self, boundary: &FloorPlan, plan: FloorPlan) -> ShapeSlot {
         ShapeSlot {
             dimensioning: DimensionState {
                 scale_set: self.outline.dimensioning.scale_set,
                 known_params: boundary.params_pinned_to_outline(&plan),
+                position_free_axes: boundary.free_position_axes(&plan),
                 ..Default::default()
             },
             floor_plan: plan,

@@ -7,7 +7,6 @@ use crate::{DimensionState, ShapeSlot, StoreyDoc};
 use datatypes::ber::structural::{FloorRegions, Storey};
 use domain::points::{to_f32, Point2f32};
 use manip_2d_plan::FloorPlan;
-use std::collections::HashSet;
 
 impl StoreyDoc {
     /// Rebuild one storey's editing model from its resolved BER geometry.
@@ -26,9 +25,7 @@ impl StoreyDoc {
             doc.dimensioning = DimensionState {
                 known_params: doc.floor_plan.all_active_params(),
                 scale_set: true,
-                dimensioned_walls: Vec::new(),
-                skipped_walls: HashSet::new(),
-                current_prompt: None,
+                ..Default::default()
             };
         }
         doc.outline = ShapeSlot {
@@ -63,9 +60,7 @@ pub fn reconstruct_living_areas(areas: &FloorRegions) -> Vec<ShapeSlot> {
                 dimensioning: DimensionState {
                     known_params,
                     scale_set: true,
-                    dimensioned_walls: Vec::new(),
-                    skipped_walls: HashSet::new(),
-                    current_prompt: None,
+                    ..Default::default()
                 },
             })
         })

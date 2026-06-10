@@ -209,7 +209,9 @@ impl StoreyDoc {
     }
 
     /// Recompute `current_prompt`: the first wall depending on exactly one unknown
-    /// parameter, or `None` when every active param is known.
+    /// parameter, or `None` when every active param is known. Also recomputes the
+    /// follow-up position prompt (`position.rs`) — it activates only once the
+    /// length loop is done, so hooking it here covers every call site.
     pub fn recompute_prompt(&mut self) {
         self.dimensioning.current_prompt = self
             .floor_plan
@@ -221,6 +223,7 @@ impl StoreyDoc {
                 wall_start_vertex,
                 controlled_param,
             });
+        self.recompute_position_prompt();
     }
 
     /// Drop dimensioning state that no longer refers to a live param/vertex after
@@ -236,6 +239,9 @@ impl StoreyDoc {
         self.dimensioning
             .skipped_walls
             .retain(|v| self.floor_plan.find_vertex(*v).is_some());
+        self.dimensioning
+            .position_skipped_params
+            .retain(|p| active.contains(p));
     }
 
     /// True once both of a provisional arc's attach stubs are dimensioned — every
