@@ -6,11 +6,8 @@ edition = "2021"
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
-slint = "1.12.1"
 log = "0.4.27"
 env_logger = "0.11"
-tiny-skia = "0.11.0"
-simplify-polyline = "0.5.0"
 rusqlite = { version = "0.31", features = ["bundled"] }
 uuid = { version = "1.6", features = ["v4", "serde"] }
 anyhow = "1.0"
@@ -19,7 +16,6 @@ serde = { version = "1.0.228", features = ["derive"] }
 serde_json = "1.0.145"
 serde_yaml = "0.9"
 geo = "0.32.0"
-nalgebra = { version = "0.34.1", features = ["serde-serialize"] }
 earcutr = "0.5.0"
 datatypes = { path = "datatypes" }
 document = { path = "document" }
@@ -30,8 +26,6 @@ eframe = "0.33.3"
 egui = "0.33.3"
 strum = "0.27.2"
 strum_macros = "0.27.2"
-egui-datepicker = "0.3.0"
-egui_field_editor = "0.2.2"
 egui_extras = { version = "0.33.3", features = ["datepicker"] }
 
 [workspace]
