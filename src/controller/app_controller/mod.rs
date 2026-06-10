@@ -329,14 +329,20 @@ pub struct HistorySnapshot {
     living_area_mode: bool,
 }
 
-/// A replayable snapping action: which freehand tool + the raw stroke, so it can
-/// be re-run from scratch under a forced snap policy. (Only the freehand
-/// outline/extend/trim are captured today; world strokes are a follow-up.)
+/// A replayable snapping action: the raw stroke (plus enough context to re-run
+/// it from scratch) under a forced snap policy.
 #[derive(Debug, Clone)]
 enum SnapAction {
     Freehand {
         tool: EditTools,
         points: Vec<Point2f32>,
+        closed: bool,
+    },
+    /// A new-storey outline traced in world (metre) space over the previous
+    /// storey's watermark — replayed through the carve path
+    /// (`apply_outline_world_inner`).
+    OutlineWorld {
+        points: Vec<(f32, f32)>,
         closed: bool,
     },
 }
@@ -491,21 +497,29 @@ impl AppController {
 
     /// Re-run a captured snapping action from its raw input (used by replay).
     fn dispatch_snap_action(&mut self, action: &SnapAction) {
-        let SnapAction::Freehand {
-            tool,
-            points,
-            closed,
-        } = action;
-        // Restore the tool so the inner apply_* dispatches the same way it did.
-        self.sketch_engine.edit_tool = *tool;
-        let r = match tool {
-            EditTools::DrawPerpWalls => self.apply_drawperp_stroke(points, *closed),
-            EditTools::AddDetachedSection => self.apply_addsection_stroke(points, *closed),
-            EditTools::ExtendOrtho | EditTools::ExtendCurve => self.apply_extend_stroke(points),
-            EditTools::Trim | EditTools::TrimOrtho | EditTools::TrimCurve => {
-                self.apply_trim_stroke(points)
+        let r = match action {
+            SnapAction::Freehand {
+                tool,
+                points,
+                closed,
+            } => {
+                // Restore the tool so the inner apply_* dispatches the same way it did.
+                self.sketch_engine.edit_tool = *tool;
+                match tool {
+                    EditTools::DrawPerpWalls => self.apply_drawperp_stroke(points, *closed),
+                    EditTools::AddDetachedSection => self.apply_addsection_stroke(points, *closed),
+                    EditTools::ExtendOrtho | EditTools::ExtendCurve => {
+                        self.apply_extend_stroke(points)
+                    }
+                    EditTools::Trim | EditTools::TrimOrtho | EditTools::TrimCurve => {
+                        self.apply_trim_stroke(points)
+                    }
+                    _ => Ok(()),
+                }
             }
-            _ => Ok(()),
+            SnapAction::OutlineWorld { points, closed } => {
+                self.apply_outline_world_inner(points, *closed)
+            }
         };
         if let Err(e) = r {
             eprintln!("[snap replay] re-run failed: {e}");
@@ -1725,7 +1739,17 @@ impl AppController {
         };
         if let Err(e) = self.apply_outline_world_inner(world_points, closed) {
             eprintln!("[new-storey] apply_outline_stroke_world failed: {}", e);
+            // Drain any decisions the failed carve recorded so they can't be
+            // misattributed to the next captured action.
+            let _ = manip_2d_plan::take_snap_decisions();
+            return;
         }
+        // If the carve made elective snaps, remember the action so the tag
+        // overlay can offer alternatives / un-snap and replay it.
+        self.capture_snap_action(SnapAction::OutlineWorld {
+            points: world_points.to_vec(),
+            closed,
+        });
     }
 
     /// New storey via the **living-area carve**: trace the storey below as a
@@ -4275,6 +4299,43 @@ mod trim_collapse_tests {
         assert!(
             c.document.dimensioning.current_prompt.is_none(),
             "all walls shared → no dimension prompt"
+        );
+    }
+
+    /// The new-storey WORLD outline (the carve path) records its elective snaps
+    /// so they surface as tag overlays, and replays as `SnapAction::OutlineWorld`
+    /// when the user un-snaps or picks an alternative.
+    #[test]
+    fn outline_world_stroke_is_captured_for_snap_replay() {
+        let mut c = dimensioned_square_controller(); // storey 0 = 10x10 (metres)
+        c.add_storey().unwrap();
+        // The engine's pixel stroke only supplies the close-check; the world
+        // points below are what get applied.
+        c.sketch_start_stroke(Point2f32::new(0.0, 0.0)).unwrap();
+        for (x, y) in [(100.0, 0.0), (100.0, 100.0), (0.0, 100.0), (1.0, 1.0)] {
+            c.sketch_add_point(Point2f32::new(x, y)).unwrap();
+        }
+        // Trace the 10x10 a little off each corner so the carve's corner snaps fire.
+        let world = vec![(0.2, 0.2), (9.8, 0.2), (9.8, 9.8), (0.2, 9.8), (0.3, 0.3)];
+        c.apply_outline_stroke_world(&world);
+        assert_eq!(c.document.floor_plan.ring_count(), 1, "outline built");
+        let tags = c.snap_overlay();
+        assert!(
+            !tags.is_empty(),
+            "the carve's elective snaps surface as clickable tags"
+        );
+        // Un-snap replays the SAME world stroke with every snap disabled.
+        c.unsnap_last();
+        assert_eq!(
+            c.document.floor_plan.ring_count(),
+            1,
+            "replay rebuilt the outline"
+        );
+        let tags = c.snap_overlay();
+        assert!(!tags.is_empty(), "replay re-captured its decisions");
+        assert!(
+            tags.iter().all(|t| t.current_kind.is_none()),
+            "all snaps disabled after un-snap"
         );
     }
 
