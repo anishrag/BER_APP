@@ -36,12 +36,22 @@ use manip_2d_plan::CollinearitySuggestion;
 
 /// User-controlled view transform passed in from the controller. `zoom = 1.0`
 /// and zero offsets = pure auto-fit. Higher zoom enlarges; positive offset_x
-/// pans the view right.
-#[derive(Debug, Clone, Copy, Default)]
+/// pans the view right. `yaw_deg`/`pitch_deg` are the 3D orbit angles
+/// (ignored by the 2D views); their defaults reproduce the historical fixed
+/// isometric projection.
+#[derive(Debug, Clone, Copy)]
 pub struct ViewParams {
     pub zoom: f32,
     pub offset_x: f32,
     pub offset_y: f32,
+    pub yaw_deg: f32,
+    pub pitch_deg: f32,
+}
+
+impl Default for ViewParams {
+    fn default() -> Self {
+        Self::identity()
+    }
 }
 
 impl ViewParams {
@@ -50,7 +60,15 @@ impl ViewParams {
             zoom: 1.0,
             offset_x: 0.0,
             offset_y: 0.0,
+            yaw_deg: crate::controller::app_controller::DEFAULT_YAW_DEG,
+            pitch_deg: crate::controller::app_controller::DEFAULT_PITCH_DEG,
         }
+    }
+
+    /// Orbit-parameterized orthographic projection of a world point (z up)
+    /// onto the 2D view plane (y down) — see [`project_3d`].
+    pub(crate) fn project_3d(&self, x: f64, y: f64, z: f64) -> (f64, f64) {
+        project_3d(x, y, z, self.yaw_deg, self.pitch_deg)
     }
 }
 
@@ -1090,14 +1108,28 @@ fn storey_transform(
     Some((storey, fit_transform(rect, min_xy, max_xy, view)))
 }
 
-/// True isometric projection: rotate around vertical, tilt back, z is up.
-/// World (x, y, z) → 2D plane (x', y'). Used by `storey_3d` and `full_house_3d`.
-pub(crate) fn project_iso(x: f64, y: f64, z: f64) -> (f64, f64) {
-    const COS30: f64 = 0.866_025_403_784_438_6;
-    const SIN30: f64 = 0.5;
-    let px = (x - y) * COS30;
-    let py = (x + y) * SIN30 - z;
-    (px, py)
+/// Orbit-parameterized orthographic projection (the 3D camera): rotate the
+/// world by `yaw_deg` about the vertical (z-up) axis, tilt by `pitch_deg`
+/// (camera elevation above the horizon — 90° = top-down plan), drop depth.
+/// World (x, y, z) → 2D plane (x', y'), y' down. Used by `storey_3d` and
+/// `full_house_3d`.
+///
+/// At the default angles (yaw 45°, pitch atan(1/√2) ≈ 35.264°) this equals
+/// the historical fixed isometric `((x − y)·cos30°, (x + y)·sin30° − z)`
+/// scaled by a uniform √(3/2), which the auto-fit cancels — so the default
+/// view renders identically to the old fixed projection.
+///
+/// Rotation happens about the world origin; the resulting uniform translation
+/// of the projected bbox is absorbed by `fit_transform` centring on that
+/// bbox, so no explicit centroid pivot is needed.
+pub(crate) fn project_3d(x: f64, y: f64, z: f64, yaw_deg: f32, pitch_deg: f32) -> (f64, f64) {
+    let yaw = (yaw_deg as f64).to_radians();
+    let pitch = (pitch_deg as f64).to_radians();
+    // Yaw about the vertical axis.
+    let u = x * yaw.cos() - y * yaw.sin();
+    let v = x * yaw.sin() + y * yaw.cos();
+    // Pitch: foreshorten the receding axis, mix in height.
+    (u, v * pitch.sin() - z * pitch.cos())
 }
 
 /// Returns `base` if `target` should be highlighted, else a faded variant.
@@ -1216,5 +1248,31 @@ mod tests {
             (span(&t0, 3.0) - 3.0 * span(&t0, 1.0)).abs() < 1e-3,
             "3 m reads as 3× the pixels of 1 m"
         );
+    }
+
+    /// At the default orbit angles, `project_3d` reproduces the historical
+    /// fixed isometric `((x − y)·cos30°, (x + y)·sin30° − z)` exactly, up to
+    /// one uniform scale factor √(3/2) on both axes — which the auto-fit
+    /// cancels, so the default 3D view renders pixel-identically to before
+    /// orbiting existed.
+    #[test]
+    fn default_orbit_angles_reproduce_the_fixed_isometric() {
+        let v = ViewParams::identity();
+        let cos30 = 0.866_025_403_784_438_6_f64;
+        let s = 1.5_f64.sqrt();
+        for &(x, y, z) in &[
+            (1.0, 0.0, 0.0),
+            (0.0, 1.0, 0.0),
+            (0.0, 0.0, 1.0),
+            (3.2, -1.7, 2.4),
+            (-5.0, 8.5, 0.3),
+        ] {
+            let (px, py) = v.project_3d(x, y, z);
+            let (ix, iy) = ((x - y) * cos30, (x + y) * 0.5 - z);
+            assert!(
+                (px * s - ix).abs() < 1e-4 && (py * s - iy).abs() < 1e-4,
+                "default orbit of ({x},{y},{z}) → ({px},{py})·√(3/2) ≠ iso ({ix},{iy})"
+            );
+        }
     }
 }

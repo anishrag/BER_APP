@@ -54,7 +54,7 @@ pub fn render(
 
     for storey in &ber.storeys {
         z_offsets.push(z);
-        if let Some(bb) = storey_3d::projected_bb_for_storey(storey, z) {
+        if let Some(bb) = storey_3d::projected_bb_for_storey(storey, z, view) {
             combined = Some(match combined {
                 None => bb,
                 Some((cur_min, cur_max)) => (
@@ -82,8 +82,9 @@ pub fn render(
 
     // Second pass: render each storey using the shared transform.
     // Iterate top-down so lower storeys' floors don't paint over upper-storey walls
-    // (closer-to-camera in isometric is drawn last).
+    // (closer-to-camera in the default view is drawn last; with a free orbit
+    // this ordering is approximate — wireframe rendering keeps it readable).
     for (i, storey) in ber.storeys.iter().enumerate().rev() {
-        storey_3d::render_at_z_offset(painter, &t, storey, display_mode, z_offsets[i]);
+        storey_3d::render_at_z_offset(painter, &t, storey, display_mode, z_offsets[i], view);
     }
 }

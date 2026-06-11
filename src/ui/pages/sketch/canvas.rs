@@ -510,9 +510,11 @@ pub(super) fn render<F: FnMut(UiEvent)>(
         render::render_arc_preview(&painter, rect, ber, current_storey_idx, mode, vp, pts);
     }
 
-    // Pan / zoom on the canvas.
-    //   - Scroll wheel  → zoom about the cursor
-    //   - Right-drag    → pan
+    // Pan / zoom / orbit on the canvas.
+    //   - Scroll wheel  → zoom about the cursor (2D and 3D)
+    //   - Middle/right-drag → pan (2D and 3D)
+    //   - Primary drag in 3D → orbit (Google-Earth style; primary is the
+    //     stroke-drawing button in 2D, but draws nothing in 3D)
     if response.hovered() {
         let scroll_y = ui.input(|i| i.smooth_scroll_delta.y);
         if scroll_y.abs() > 0.0 {
@@ -537,6 +539,21 @@ pub(super) fn render<F: FnMut(UiEvent)>(
         let d = response.drag_delta();
         if d.x.abs() > 0.0 || d.y.abs() > 0.0 {
             on_event(UiEvent::Sketch(SketchEvent::PanView { dx: d.x, dy: d.y }));
+        }
+    }
+    // In 3D the primary drag ORBITS the camera (it draws strokes only in
+    // 2D — see `primary_available` below). Trackball feel: the near side of
+    // the model follows the cursor — drag right swings it right (yaw),
+    // drag down pulls it down revealing the top (pitch up, toward plan).
+    // Reset via the Drawing category's Fit button.
+    if matches!(mode, SketchMode::Storey3D) && response.dragged_by(egui::PointerButton::Primary) {
+        const ORBIT_DEG_PER_PIXEL: f32 = 0.4;
+        let d = response.drag_delta();
+        if d.x.abs() > 0.0 || d.y.abs() > 0.0 {
+            on_event(UiEvent::Sketch(SketchEvent::OrbitView {
+                dyaw: -d.x * ORBIT_DEG_PER_PIXEL,
+                dpitch: d.y * ORBIT_DEG_PER_PIXEL,
+            }));
         }
     }
 

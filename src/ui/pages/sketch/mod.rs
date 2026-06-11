@@ -152,7 +152,14 @@ pub enum SketchEvent {
         dx: f32,
         dy: f32,
     },
-    /// Reset the view to pure auto-fit.
+    /// Primary-drag orbit delta in the 3D view (degrees of yaw/pitch,
+    /// already converted from pixels by the canvas).
+    OrbitView {
+        dyaw: f32,
+        dpitch: f32,
+    },
+    /// Reset the view to pure auto-fit (and the 3D orbit to its default
+    /// isometric angles).
     ResetView,
     /// User submitted a value for the current dimension prompt.
     ApplyDimension(f32),

@@ -470,6 +470,8 @@ impl eframe::App for BerApp {
                                         zoom: v.zoom,
                                         offset_x: v.offset_x,
                                         offset_y: v.offset_y,
+                                        yaw_deg: v.yaw_deg,
+                                        pitch_deg: v.pitch_deg,
                                     },
                                 )
                             };
@@ -653,6 +655,9 @@ impl eframe::App for BerApp {
                                     }
                                     SketchEvent::PanView { dx, dy } => {
                                         controller.borrow_mut().pan_view(dx, dy);
+                                    }
+                                    SketchEvent::OrbitView { dyaw, dpitch } => {
+                                        controller.borrow_mut().orbit_view(dyaw, dpitch);
                                     }
                                     SketchEvent::ResetView => {
                                         controller.borrow_mut().reset_view();

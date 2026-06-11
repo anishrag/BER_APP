@@ -1,7 +1,9 @@
 //! Axonometric 3D rendering of a single Storey.
 //!
-//! Uses isometric projection (see `super::project_iso`). The storey's REAL
-//! resolved geometry is drawn, not a uniform extrusion:
+//! Uses the orbitable orthographic projection (see `super::project_3d`,
+//! parameterized by the view's yaw/pitch — drag-to-orbit; the defaults give
+//! the classic isometric). The storey's REAL resolved geometry is drawn, not
+//! a uniform extrusion:
 //!
 //! - each floor region's outline at its own `level_m` (floor steps show as
 //!   raised/lowered rings);
@@ -25,7 +27,7 @@ use datatypes::ber::structural::{CeilingRegion, FloorRegion, Storey};
 use domain::sketch::DisplayMode;
 use eframe::egui;
 
-use super::{color_for, fit_transform, project_iso, style, Transform2d, ViewParams};
+use super::{color_for, fit_transform, style, Transform2d, ViewParams};
 
 pub fn render(
     painter: &egui::Painter,
@@ -44,11 +46,11 @@ pub fn render(
         );
         return;
     }
-    let Some((min_xy, max_xy)) = projected_bb_for_storey(storey, 0.0) else {
+    let Some((min_xy, max_xy)) = projected_bb_for_storey(storey, 0.0, view) else {
         return;
     };
     let t = fit_transform(rect, min_xy, max_xy, view);
-    render_at_z_offset(painter, &t, storey, display_mode, 0.0);
+    render_at_z_offset(painter, &t, storey, display_mode, 0.0, view);
 }
 
 /// The lowest floor level in the storey (metres relative to its datum) — the
@@ -65,7 +67,9 @@ fn min_floor_level(storey: &Storey) -> f64 {
 
 /// Render `storey` with the assumption that its floor DATUM sits at world-z
 /// `z_offset` (region `level_m`s offset from there).
-/// Caller supplies the transform so multi-storey views can share one camera.
+/// Caller supplies the transform so multi-storey views can share one camera;
+/// `view` carries the orbit angles the points are projected with (must match
+/// the angles the transform's fit bbox was computed at).
 /// Defensive no-op when the storey's ceiling height is unset (`render` and
 /// `full_house_3d` both hint-and-return before getting here).
 pub(crate) fn render_at_z_offset(
@@ -74,6 +78,7 @@ pub(crate) fn render_at_z_offset(
     storey: &Storey,
     display_mode: DisplayMode,
     z_offset: f64,
+    view: ViewParams,
 ) {
     let Some(height) = storey.ceiling_height_m else {
         return;
@@ -89,6 +94,7 @@ pub(crate) fn render_at_z_offset(
             wall_bottom,
             wall_top,
             display_mode,
+            view,
         );
     }
     // Roofs at their REAL per-vertex z (ceiling steps). Fallback when the
@@ -103,7 +109,7 @@ pub(crate) fn render_at_z_offset(
                 .exterior()
                 .coords()
                 .map(|c| {
-                    let (px, py) = project_iso(c.x, c.y, wall_top);
+                    let (px, py) = view.project_3d(c.x, c.y, wall_top);
                     t.apply(px, py)
                 })
                 .collect();
@@ -116,19 +122,20 @@ pub(crate) fn render_at_z_offset(
         }
     } else {
         for roof in &storey.roofs.regions {
-            draw_roof_region(painter, t, roof, z_offset, display_mode);
+            draw_roof_region(painter, t, roof, z_offset, display_mode, view);
         }
     }
 }
 
-/// Projected (post-isometric) 2D bounding box of every point in this storey:
-/// each floor region's ring at the wall band's bottom/top AND at its own
-/// `level_m`, plus every roof vertex at its own z — so lowered floors and
-/// raised ceilings never clip. `None` when there's no geometry or no ceiling
-/// height to extrude to.
+/// Projected (post-projection, at `view`'s orbit angles) 2D bounding box of
+/// every point in this storey: each floor region's ring at the wall band's
+/// bottom/top AND at its own `level_m`, plus every roof vertex at its own z —
+/// so lowered floors, raised ceilings, and any orbit angle never clip. `None`
+/// when there's no geometry or no ceiling height to extrude to.
 pub(crate) fn projected_bb_for_storey(
     storey: &Storey,
     z_offset: f64,
+    view: ViewParams,
 ) -> Option<((f64, f64), (f64, f64))> {
     let height = storey.ceiling_height_m?;
     let wall_bottom = z_offset + min_floor_level(storey);
@@ -146,14 +153,14 @@ pub(crate) fn projected_bb_for_storey(
     for region in &storey.floors.regions {
         for c in region.polygon.exterior().coords() {
             for z in [wall_bottom, z_offset + region.level_m, wall_top] {
-                let (px, py) = project_iso(c.x, c.y, z);
+                let (px, py) = view.project_3d(c.x, c.y, z);
                 add(px, py);
             }
         }
     }
     for region in &storey.roofs.regions {
         for v in &region.polygon.exterior {
-            let (px, py) = project_iso(v.x, v.y, z_offset + v.z);
+            let (px, py) = view.project_3d(v.x, v.y, z_offset + v.z);
             add(px, py);
         }
     }
@@ -163,6 +170,7 @@ pub(crate) fn projected_bb_for_storey(
 /// One floor region: wall quads spanning the shared band (`wall_bottom` →
 /// `wall_top` — the volume hint) plus the floor outline at the region's own
 /// level (`floor_z`), so floor steps read as offset rings.
+#[allow(clippy::too_many_arguments)]
 fn draw_floor_region(
     painter: &egui::Painter,
     t: &Transform2d,
@@ -171,6 +179,7 @@ fn draw_floor_region(
     wall_bottom: f64,
     wall_top: f64,
     display_mode: DisplayMode,
+    view: ViewParams,
 ) {
     let exterior: Vec<_> = region.polygon.exterior().coords().cloned().collect();
     if exterior.len() < 4 {
@@ -181,7 +190,7 @@ fn draw_floor_region(
         exterior
             .iter()
             .map(|c| {
-                let (px, py) = project_iso(c.x, c.y, z);
+                let (px, py) = view.project_3d(c.x, c.y, z);
                 t.apply(px, py)
             })
             .collect()
@@ -222,6 +231,7 @@ fn draw_roof_region(
     region: &CeilingRegion,
     z_offset: f64,
     display_mode: DisplayMode,
+    view: ViewParams,
 ) {
     if region.polygon.exterior.len() < 3 {
         return;
@@ -231,7 +241,7 @@ fn draw_roof_region(
         .exterior
         .iter()
         .map(|v| {
-            let (px, py) = project_iso(v.x, v.y, z_offset + v.z);
+            let (px, py) = view.project_3d(v.x, v.y, z_offset + v.z);
             t.apply(px, py)
         })
         .collect();

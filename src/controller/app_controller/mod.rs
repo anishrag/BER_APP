@@ -74,7 +74,7 @@ pub use review::CollinearityReview;
 pub use snap::SnapTagView;
 use snap::{LastSnapAction, SnapAction};
 pub use strokes::PendingRedraw;
-pub use view::ViewTransform;
+pub use view::{ViewTransform, DEFAULT_PITCH_DEG, DEFAULT_YAW_DEG};
 
 /// Print a stroke as a `vec![p(x,y), …]` literal (matching the curve-debug
 /// dumps) so a whole session can be copy-pasted into a bit-for-bit integration

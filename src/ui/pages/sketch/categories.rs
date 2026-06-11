@@ -469,7 +469,7 @@ fn tool_ui<F: FnMut(UiEvent)>(
             // Available on the All-storeys tab too (view-only, like before).
             if ui
                 .button("Fit")
-                .on_hover_text("Reset view (zoom/pan)")
+                .on_hover_text("Reset view (zoom/pan, and the 3D orbit angle)")
                 .clicked()
             {
                 on_event(UiEvent::Sketch(SketchEvent::ResetView));

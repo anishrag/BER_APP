@@ -3670,3 +3670,46 @@ fn exit_then_create_starts_clean() {
     assert_eq!(c.current_key_details().unwrap().0, "B");
     let _ = b;
 }
+
+/// Drag-to-orbit view state: the defaults are the documented isometric
+/// baseline (yaw 45°, pitch atan(1/√2) ≈ 35.264° — the angles that
+/// reproduce the historical fixed projection), yaw wraps mod 360, pitch
+/// clamps to 5..=90 (90 = top-down plan), and Fit/reset restores the
+/// defaults along with zoom/pan.
+#[test]
+fn orbit_view_wraps_yaw_clamps_pitch_and_resets() {
+    let mut c = AppController::new(crate::engine::open_db(":memory:").unwrap());
+    let v = c.view();
+    assert_eq!(
+        v.yaw_deg, DEFAULT_YAW_DEG,
+        "default yaw is the 45° baseline"
+    );
+    assert_eq!(v.pitch_deg, DEFAULT_PITCH_DEG);
+    let true_iso_pitch = (1.0f64 / 2.0f64.sqrt()).atan().to_degrees();
+    assert!(
+        (DEFAULT_PITCH_DEG as f64 - true_iso_pitch).abs() < 1e-3,
+        "default pitch is the true-isometric elevation atan(1/√2): \
+         {DEFAULT_PITCH_DEG} vs {true_iso_pitch}"
+    );
+
+    // Yaw wraps mod 360 in both directions.
+    c.orbit_view(350.0, 0.0); // 45 + 350 = 395 → 35
+    assert!((c.view().yaw_deg - 35.0).abs() < 1e-3, "yaw wraps past 360");
+    c.orbit_view(-90.0, 0.0); // 35 − 90 = −55 → 305
+    assert!((c.view().yaw_deg - 305.0).abs() < 1e-3, "yaw wraps below 0");
+
+    // Pitch clamps: top-down plan at 90, just-above-horizon at 5.
+    c.orbit_view(0.0, 500.0);
+    assert_eq!(c.view().pitch_deg, 90.0, "pitch clamps at top-down");
+    c.orbit_view(0.0, -500.0);
+    assert_eq!(c.view().pitch_deg, 5.0, "pitch clamps above the horizon");
+
+    // Fit (reset_view) restores the default angles along with zoom/pan.
+    c.pan_view(10.0, -4.0);
+    c.zoom_view(2.0, (0.0, 0.0), (0.0, 0.0));
+    c.reset_view();
+    let v = c.view();
+    assert_eq!(v.yaw_deg, DEFAULT_YAW_DEG, "reset restores the default yaw");
+    assert_eq!(v.pitch_deg, DEFAULT_PITCH_DEG);
+    assert_eq!((v.zoom, v.offset_x, v.offset_y), (1.0, 0.0, 0.0));
+}
