@@ -29,4 +29,4 @@ strum_macros = "0.27.2"
 egui_extras = { version = "0.33.3", features = ["datepicker"] }
 
 [workspace]
-members = ["datatypes", "document", "gen_3d_vol", "sketch", "domain", "manip_2d_plan"]
+members = ["datatypes", "document", "sketch", "domain", "manip_2d_plan"]

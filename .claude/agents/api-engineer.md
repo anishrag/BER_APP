@@ -47,7 +47,7 @@ Then design the signatures, applying these rules:
   `document` still build with `cargo build -p document`? Would `manip_2d_plan`
   still make sense to someone who has never heard of a BER? The dependency
   direction is fixed: `domain ← manip_2d_plan ← document ← src`, with
-  `datatypes` feeding `document`/`src` and `gen_3d_vol` dormant until wired.
+  `datatypes` feeding `document`/`src`.
   Never invert an edge; never add a sideways edge to "share" something — move
   the shared thing down instead.
 - **Name from the caller's point of view** and match the crate's existing
@@ -93,8 +93,8 @@ Audit and SHRINK. You may edit code in this mode, behavior-preserving only:
 - Respect the enforced boundaries (no egui/rusqlite/nalgebra leaks; `document`
   builds standalone) and the deliberate non-moves: phase-region storage stays
   on the controller (undo/snapshot semantics), the grandfathered prompt
-  builders/solvers in `editing.rs` stay, `gen_3d_vol` doesn't grow without a
-  caller, commented blocks in `manip_2d_plan/lib.rs` stay commented.
+  builders/solvers in `editing.rs` stay, commented blocks in
+  `manip_2d_plan/lib.rs` stay commented.
 - Serialized types (`Ber`, `StoreyDoc` snapshot) are load-bearing: surface
   changes must not change serde shape without an explicit compatibility plan.
 - Never widen visibility to "make it compile" — that's a placement smell;

@@ -24,7 +24,6 @@ You are the engineer for the BER_APP shell: `src/controller/` (drives the
   cursors and prompt state, UiEvent plumbing, UI-facing view data, error
   message mapping. Hand such logic to document-engineer / geometry-engineer
   rather than inlining it.
-- Don't expand `gen_3d_vol` beyond what a caller you're adding actually needs.
 
 ## Layout
 

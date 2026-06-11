@@ -6,7 +6,7 @@ use super::ber_struct::Ber;
 use super::common::{ConstructionPhase, Item, ItemId, Photo};
 use super::fenestration::{Door, Window};
 
-use domain::points::{point_to_segment_distance, Point2f64, Point3f64};
+use domain::points::{point_to_segment_distance, Point2f64, Point3f64, Vector3f64};
 #[derive(Debug, Default, Clone, Serialize, Deserialize)]
 pub struct Opes {
     pub doors: Vec<ItemId>,   // references to Door IDs
@@ -925,9 +925,90 @@ pub struct Polygon3D {
     pub exterior: Vec<Point3f64>,
 }
 
+/// A line lying in a planar polygon's plane, with the side-deciding `normal` —
+/// the input to [`Polygon3D::split_by_line`]. Moved here from the dissolved
+/// `gen_3d_vol` crate (2026-06).
+pub struct SplitLine3D {
+    pub point: Point3f64,      // point on line
+    pub direction: Vector3f64, // unit
+    pub normal: Vector3f64,    // points to "positive" side
+}
+
 impl Polygon3D {
     pub fn new(exterior: Vec<Point3f64>) -> Self {
         Self { exterior }
+    }
+
+    /// Unit normal of the polygon's plane (from its first three vertices) and
+    /// the plane's distance-to-origin term; `None` when degenerate. Private
+    /// helper for [`Polygon3D::split_by_line`].
+    fn get_normal_and_distance_to_origin(&self) -> Option<(Vector3f64, f64)> {
+        if self.exterior.len() < 3 {
+            return None;
+        }
+        let p0 = &self.exterior[0];
+        let p1 = &self.exterior[1];
+        let p2 = &self.exterior[2];
+        let u = Vector3f64::new(p1.x - p0.x, p1.y - p0.y, p1.z - p0.z);
+        let v = Vector3f64::new(p2.x - p0.x, p2.y - p0.y, p2.z - p0.z);
+        let normal = Vector3f64::new(
+            u.y * v.z - u.z * v.y,
+            u.z * v.x - u.x * v.z,
+            u.x * v.y - u.y * v.x,
+        );
+        let norm_length = (normal.x.powi(2) + normal.y.powi(2) + normal.z.powi(2)).sqrt();
+        if norm_length < 1e-10 {
+            return None;
+        }
+        let unit_normal = Vector3f64::new(
+            normal.x / norm_length,
+            normal.y / norm_length,
+            normal.z / norm_length,
+        );
+        let d = -(unit_normal.x * p0.x + unit_normal.y * p0.y + unit_normal.z * p0.z);
+        Some((unit_normal, d / norm_length))
+    }
+
+    /// Split this planar polygon in two along `line` (which must lie in its
+    /// plane).
+    ///
+    /// SEAM: currently has no caller. Kept for the deferred wall face/height
+    /// DIAGONAL SPLIT of the wall-exposure design — dividing one marked wall's
+    /// face along a length/height intercept into separately-attributed
+    /// `WallRegion`s for mixed constructions.
+    pub fn split_by_line(&self, line: &SplitLine3D) -> Vec<Polygon3D> {
+        let (plane_n, _) = self.get_normal_and_distance_to_origin().unwrap();
+        let line_n = plane_n.cross(&line.direction).normalize();
+
+        let mut left = Vec::new();
+        let mut right = Vec::new();
+
+        let verts = &self.exterior;
+
+        for i in 0..verts.len() {
+            let a = verts[i];
+            let b = verts[(i + 1) % verts.len()];
+
+            let da = (a.coords - line.point.coords).dot(&line_n);
+            let db = (b.coords - line.point.coords).dot(&line_n);
+
+            if da >= 0.0 {
+                left.push(a);
+            }
+            if da <= 0.0 {
+                right.push(a);
+            }
+
+            // Edge crosses the line → add intersection
+            if da * db < 0.0 {
+                let t = da / (da - db);
+                let p = a + t * (b - a);
+                left.push(p);
+                right.push(p);
+            }
+        }
+
+        vec![Polygon3D::new(left), Polygon3D::new(right)]
     }
 }
 impl From<Polygon3D> for Polygon<f64> {
@@ -2380,5 +2461,76 @@ mod tests {
             .is_some());
         let old: Storey = serde_json::from_value(json).expect("old JSON still loads");
         assert_eq!(old.ceiling_height_m, None);
+    }
+
+    /* ---------------------------------------------------------------------
+     * Polygon3D::split_by_line (moved from the dissolved gen_3d_vol crate)
+     * ------------------------------------------------------------------ */
+
+    /// A 4 m × 3 m vertical wall face in the y = 0 plane.
+    fn wall_face() -> Polygon3D {
+        Polygon3D::new(vec![
+            Point3f64::new(0.0, 0.0, 0.0),
+            Point3f64::new(4.0, 0.0, 0.0),
+            Point3f64::new(4.0, 0.0, 3.0),
+            Point3f64::new(0.0, 0.0, 3.0),
+        ])
+    }
+
+    #[test]
+    fn polygon3d_plane_normal_is_unit_and_perpendicular() {
+        let (n, _) = wall_face().get_normal_and_distance_to_origin().unwrap();
+        assert!((n.norm() - 1.0).abs() < 1e-9);
+        // perpendicular to both spanning edges of the face
+        assert!(n.dot(&Vector3f64::new(1.0, 0.0, 0.0)).abs() < 1e-9);
+        assert!(n.dot(&Vector3f64::new(0.0, 0.0, 1.0)).abs() < 1e-9);
+    }
+
+    #[test]
+    fn polygon3d_degenerate_has_no_plane_normal() {
+        let degenerate = Polygon3D::new(vec![
+            Point3f64::new(0.0, 0.0, 0.0),
+            Point3f64::new(1.0, 0.0, 0.0),
+        ]);
+        assert!(degenerate.get_normal_and_distance_to_origin().is_none());
+    }
+
+    #[test]
+    fn split_by_line_divides_wall_face_at_intercept() {
+        let line = SplitLine3D {
+            point: Point3f64::new(1.0, 0.0, 0.0),
+            direction: Vector3f64::new(0.0, 0.0, 1.0), // vertical, in the face plane
+            normal: Vector3f64::new(1.0, 0.0, 0.0),
+        };
+        let halves = wall_face().split_by_line(&line);
+        assert_eq!(halves.len(), 2);
+        for half in &halves {
+            assert_eq!(half.exterior.len(), 4);
+        }
+        let xs = |p: &Polygon3D| {
+            let min = p.exterior.iter().map(|v| v.x).fold(f64::MAX, f64::min);
+            let max = p.exterior.iter().map(|v| v.x).fold(f64::MIN, f64::max);
+            (min, max)
+        };
+        let (mut a, mut b) = (xs(&halves[0]), xs(&halves[1]));
+        if a.0 > b.0 {
+            std::mem::swap(&mut a, &mut b);
+        }
+        assert_eq!(a, (0.0, 1.0));
+        assert_eq!(b, (1.0, 4.0));
+    }
+
+    #[test]
+    fn split_by_line_outside_face_leaves_one_half_empty() {
+        let line = SplitLine3D {
+            point: Point3f64::new(-1.0, 0.0, 0.0),
+            direction: Vector3f64::new(0.0, 0.0, 1.0),
+            normal: Vector3f64::new(1.0, 0.0, 0.0),
+        };
+        let halves = wall_face().split_by_line(&line);
+        assert_eq!(halves.len(), 2);
+        let mut sizes: Vec<usize> = halves.iter().map(|h| h.exterior.len()).collect();
+        sizes.sort();
+        assert_eq!(sizes, vec![0, 4]);
     }
 }

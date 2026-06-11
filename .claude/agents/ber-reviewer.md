@@ -19,7 +19,7 @@ against these axes, in order of importance:
    controller. Flag inlined domain logic in the controller even when it works.
 2. **Boundary mechanics.** Run `.claude/scripts/check-boundaries.sh` and
    `cargo build -p document`. Check no `egui`/`rusqlite`/`nalgebra` leaked
-   into forbidden crates, and `gen_3d_vol` wasn't expanded without a caller.
+   into forbidden crates.
 3. **Behavior preservation** (for refactors). Hunt for semantic drift the
    tests might miss: undo/snapshot semantics (what `HistorySnapshot` captures
    — session-only state like phase regions is deliberately OUTSIDE it),
