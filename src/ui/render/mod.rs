@@ -914,9 +914,9 @@ pub fn render_wall_exposure(
         return;
     };
 
-    let exposed = egui::Color32::from_rgb(255, 140, 40);
-    let semi = egui::Color32::from_rgb(240, 205, 40);
-    let non = egui::Color32::from_rgb(95, 145, 215);
+    let exposed = style::EXPOSED_WALL;
+    let semi = style::SEMI_EXPOSED_WALL;
+    let non = style::NON_HEAT_LOSS_WALL;
     let grey = egui::Color32::from_rgb(150, 150, 150);
     let width = if exposure_mode { 5.0 } else { 3.5 };
     let color_of = |e: WallExposure| match e {
@@ -1104,6 +1104,11 @@ pub(crate) mod style {
     pub const FLOOR_LINE: Color32 = Color32::from_rgb(120, 170, 240);
     pub const WALL_LINE: Color32 = Color32::from_rgb(230, 230, 230);
     pub const ROOF_LINE: Color32 = Color32::from_rgb(220, 160, 80);
+    /// Exposure-class colours — shared between the 2D exposure overlay and the
+    /// 3D wall-region rendering so a wall reads the same in both views.
+    pub const EXPOSED_WALL: Color32 = Color32::from_rgb(255, 140, 40);
+    pub const SEMI_EXPOSED_WALL: Color32 = Color32::from_rgb(240, 205, 40);
+    pub const NON_HEAT_LOSS_WALL: Color32 = Color32::from_rgb(95, 145, 215);
     pub const WINDOW_FILL: Color32 = Color32::from_rgba_premultiplied(130, 200, 230, 180);
     pub const DOOR_FILL: Color32 = Color32::from_rgba_premultiplied(180, 130, 80, 200);
     pub const DIMENSION_TEXT: Color32 = Color32::from_rgb(200, 200, 200);

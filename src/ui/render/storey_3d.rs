@@ -7,12 +7,15 @@
 //!
 //! - each floor region's outline at its own `level_m` (floor steps show as
 //!   raised/lowered rings);
-//! - each roof region at its own per-vertex z (ceiling steps show as offset
-//!   rings — all regions are flat today, sloped roofs are a later feature);
-//! - walls stay a single-band volume hint: every floor region's ring extruded
-//!   from the LOWEST floor level up to the default ceiling height. Riser walls
-//!   between stepped sections are deliberately not derived (wall regions are
-//!   exposure-driven and sparse) — deferred work.
+//! - each roof region at its own per-vertex z (ceiling steps as offset rings,
+//!   fans/ridges as sloped faces);
+//! - each WALL REGION's real polygon — sloped/jumped tops tracing the roof —
+//!   coloured by its exposure class (the 2D scheme). Walls exist only where
+//!   exposure is marked, so a faint single-band volume hint (every floor ring
+//!   extruded from the LOWEST floor level to the default ceiling height) stays
+//!   underneath for the unmarked remainder; it fades further when real wall
+//!   regions exist so they read clearly. Riser walls between stepped sections
+//!   are deliberately not derived — deferred work.
 //!
 //! The default ceiling height comes from `storey.ceiling_height_m` — the
 //! controller's first-3D gate guarantees it's set before this view is
@@ -23,7 +26,7 @@
 //! with a cumulative z offset. The public `render` is just `render_at_z_offset`
 //! with `z_offset = 0` and computes its own bounding box.
 
-use datatypes::ber::structural::{CeilingRegion, FloorRegion, Storey};
+use datatypes::ber::structural::{CeilingRegion, FloorRegion, Storey, WallExposure, WallRegion};
 use domain::sketch::DisplayMode;
 use eframe::egui;
 
@@ -85,6 +88,9 @@ pub(crate) fn render_at_z_offset(
     };
     let wall_bottom = z_offset + min_floor_level(storey);
     let wall_top = z_offset + height;
+    // The band is only a volume hint; once REAL wall regions exist it fades
+    // further so the exposure-coloured walls read on top of it.
+    let band_faded = !storey.walls.regions.is_empty();
     for region in &storey.floors.regions {
         draw_floor_region(
             painter,
@@ -94,8 +100,14 @@ pub(crate) fn render_at_z_offset(
             wall_bottom,
             wall_top,
             display_mode,
+            band_faded,
             view,
         );
+    }
+    // Real wall regions: the exact resolved polygons (tops trace the roof —
+    // jumps at ceiling steps, slopes under fans/ridges), coloured by exposure.
+    for wall in &storey.walls.regions {
+        draw_wall_region(painter, t, wall, z_offset, display_mode, view);
     }
     // Roofs at their REAL per-vertex z (ceiling steps). Fallback when the
     // resolved roofs are missing (defensive: height set but the resolve
@@ -164,12 +176,21 @@ pub(crate) fn projected_bb_for_storey(
             add(px, py);
         }
     }
+    // Wall regions: their tops can exceed the default height (under a ridge)
+    // or drop below the band (lowered floors) — fold every vertex in.
+    for region in &storey.walls.regions {
+        for v in &region.polygon.exterior {
+            let (px, py) = view.project_3d(v.x, v.y, z_offset + v.z);
+            add(px, py);
+        }
+    }
     bb
 }
 
 /// One floor region: wall quads spanning the shared band (`wall_bottom` →
-/// `wall_top` — the volume hint) plus the floor outline at the region's own
-/// level (`floor_z`), so floor steps read as offset rings.
+/// `wall_top` — the volume hint; faded further when `band_faded`, i.e. real
+/// wall regions exist) plus the floor outline at the region's own level
+/// (`floor_z`), so floor steps read as offset rings.
 #[allow(clippy::too_many_arguments)]
 fn draw_floor_region(
     painter: &egui::Painter,
@@ -179,6 +200,7 @@ fn draw_floor_region(
     wall_bottom: f64,
     wall_top: f64,
     display_mode: DisplayMode,
+    band_faded: bool,
     view: ViewParams,
 ) {
     let exterior: Vec<_> = region.polygon.exterior().coords().cloned().collect();
@@ -199,10 +221,12 @@ fn draw_floor_region(
     let top_pts = ring_at(wall_top);
 
     // Walls: a quad per edge, from (bottom[i], bottom[i+1], top[i+1], top[i]).
-    let wall_stroke = egui::Stroke::new(
-        1.5,
-        color_for(DisplayMode::Walls, display_mode, style::WALL_LINE),
-    );
+    let band_color = color_for(DisplayMode::Walls, display_mode, style::WALL_LINE);
+    let wall_stroke = if band_faded {
+        egui::Stroke::new(1.0, style::faded(band_color))
+    } else {
+        egui::Stroke::new(1.5, band_color)
+    };
     for i in 0..(exterior.len() - 1) {
         let quad = vec![bottom_pts[i], bottom_pts[i + 1], top_pts[i + 1], top_pts[i]];
         painter.add(egui::Shape::closed_line(quad, wall_stroke));
@@ -221,6 +245,39 @@ fn draw_floor_region(
         floor_pts,
         egui::Stroke::new(2.0, floor_color),
     ));
+}
+
+/// One WALL region's real polygon (base edge at the bottom, top tracing the
+/// roof — jumps at ceiling steps, slopes under fans/ridges), coloured by its
+/// exposure class with the shared 2D scheme so a wall reads the same in both
+/// views. Heavier stroke than the volume-hint band so marked walls dominate.
+fn draw_wall_region(
+    painter: &egui::Painter,
+    t: &Transform2d,
+    region: &WallRegion,
+    z_offset: f64,
+    display_mode: DisplayMode,
+    view: ViewParams,
+) {
+    if region.polygon.exterior.len() < 3 {
+        return;
+    }
+    let pts: Vec<egui::Pos2> = region
+        .polygon
+        .exterior
+        .iter()
+        .map(|v| {
+            let (px, py) = view.project_3d(v.x, v.y, z_offset + v.z);
+            t.apply(px, py)
+        })
+        .collect();
+    let base = match region.exposure {
+        WallExposure::Exposed => style::EXPOSED_WALL,
+        WallExposure::SemiExposed => style::SEMI_EXPOSED_WALL,
+        WallExposure::NonHeatLoss => style::NON_HEAT_LOSS_WALL,
+    };
+    let color = color_for(DisplayMode::Walls, display_mode, base);
+    painter.add(egui::Shape::closed_line(pts, egui::Stroke::new(2.0, color)));
 }
 
 /// One roof region's outline at its own per-vertex z (`z_offset` + the stored
@@ -250,4 +307,59 @@ fn draw_roof_region(
         pts,
         egui::Stroke::new(1.5, roof_color),
     ));
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use datatypes::ber::common::ItemId;
+    use datatypes::ber::structural::{FloorRegions, Opes, Polygon3D, WallRegions};
+    use domain::points::{Point2f64, Point3f64};
+
+    /// The fitted view must include WALL vertices: a wall whose top rises
+    /// above the default ceiling height (under a ridge) extends the projected
+    /// bounding box beyond the floors+roofs extent.
+    #[test]
+    fn projected_bb_includes_wall_tops_above_the_default_height() {
+        let square = vec![
+            Point2f64::new(0.0, 0.0),
+            Point2f64::new(4.0, 0.0),
+            Point2f64::new(4.0, 4.0),
+            Point2f64::new(0.0, 4.0),
+        ];
+        let mut storey = Storey {
+            floors: FloorRegions::from_vertex_lists(vec![square], ItemId::default()),
+            ceiling_height_m: Some(2.4),
+            ..Storey::default()
+        };
+        let view = ViewParams::default();
+        let without_walls = projected_bb_for_storey(&storey, 0.0, view).unwrap();
+
+        // A wall peaking at 4.2 m — well above the 2.4 m band top.
+        storey.walls = WallRegions {
+            regions: vec![WallRegion {
+                id: ItemId::default(),
+                polygon: Polygon3D {
+                    exterior: vec![
+                        Point3f64::new(0.0, 0.0, 0.0),
+                        Point3f64::new(4.0, 0.0, 0.0),
+                        Point3f64::new(2.0, 0.0, 4.2),
+                    ],
+                },
+                exposure: WallExposure::Exposed,
+                opes: Opes::default(),
+                construction_id: ItemId::default(),
+            }],
+        };
+        let with_walls = projected_bb_for_storey(&storey, 0.0, view).unwrap();
+        // Higher z projects to smaller screen-y at the default pitch — the
+        // bb's min-y must extend; the rest must not shrink.
+        assert!(
+            with_walls.0 .1 < without_walls.0 .1,
+            "wall peak extends the bb: {:?} vs {:?}",
+            with_walls,
+            without_walls
+        );
+        assert!(with_walls.1 .1 >= without_walls.1 .1 - 1e-9);
+    }
 }
