@@ -91,6 +91,12 @@ pub struct SketchState {
     /// prefill has been written, cleared when the stage closes, so the user's
     /// in-progress typing isn't clobbered every frame.
     pub roof_apex_prefilled: bool,
+    /// Backing string for the roof-ridge LENGTH input (metres). PREFILLED
+    /// with the pending ridge's drawn length when the Length stage opens
+    /// (via `roof_ridge_length_prefilled`); the user overtypes or skips.
+    pub roof_ridge_length_input: String,
+    /// One-shot guard for the length prefill, mirroring `roof_apex_prefilled`.
+    pub roof_ridge_length_prefilled: bool,
     /// Last error from `set_default_ceiling_height`. Shown next to the
     /// Heights field so the user can correct without losing what they typed;
     /// cleared on the next successful Set.
@@ -424,6 +430,8 @@ impl eframe::App for BerApp {
                                 pending_roof_ridge_line,
                                 roof_ridge_snap_tag,
                                 roof_ridge_position_pending,
+                                roof_ridge_length_pending,
+                                pending_roof_ridge_length,
                                 roof_ridge_height_pending,
                                 roof_ridge_pending,
                                 default_ceiling_height,
@@ -498,6 +506,8 @@ impl eframe::App for BerApp {
                                     controller_ref.pending_roof_ridge_line(),
                                     controller_ref.roof_ridge_snap_tag(),
                                     controller_ref.roof_ridge_position_pending(),
+                                    controller_ref.roof_ridge_length_pending(),
+                                    controller_ref.pending_roof_ridge_length(),
                                     controller_ref.roof_ridge_height_pending(),
                                     controller_ref.roof_ridge_pending(),
                                     controller_ref.default_ceiling_height(),
@@ -543,6 +553,23 @@ impl eframe::App for BerApp {
                                 }
                             } else {
                                 self.sketch_state.roof_apex_prefilled = false;
+                            }
+
+                            // Prefill the ridge LENGTH box with the pending
+                            // ridge's drawn length when its stage OPENS — the
+                            // stroke is approximate, so the typed value is
+                            // the real dimension and the prefill is just the
+                            // starting point. Same one-shot guard pattern.
+                            if roof_ridge_length_pending {
+                                if !self.sketch_state.roof_ridge_length_prefilled {
+                                    self.sketch_state.roof_ridge_length_prefilled = true;
+                                    self.sketch_state.roof_ridge_length_input =
+                                        pending_roof_ridge_length
+                                            .map(|l| format!("{l:.2}"))
+                                            .unwrap_or_default();
+                                }
+                            } else {
+                                self.sketch_state.roof_ridge_length_prefilled = false;
                             }
 
                             // Deferred clear-on-success for the Heights field's input
@@ -650,8 +677,12 @@ impl eframe::App for BerApp {
                                 pending_roof_ridge_line,
                                 roof_ridge_snap_tag: roof_ridge_snap_tag.as_ref(),
                                 roof_ridge_position_pending,
+                                roof_ridge_length_pending,
                                 roof_ridge_height_pending,
                                 roof_ridge_pending,
+                                roof_ridge_length_input: &mut self
+                                    .sketch_state
+                                    .roof_ridge_length_input,
                                 ceiling_height_error: ceiling_height_error.as_deref(),
                                 default_ceiling_height,
                                 ceiling_heights_set,
@@ -922,6 +953,15 @@ impl eframe::App for BerApp {
                                         controller
                                             .borrow_mut()
                                             .apply_roof_ridge_stroke_event(&points);
+                                    }
+                                    SketchEvent::AssignRoofRidgeLength(len_m) => {
+                                        log_err(
+                                            "assign_roof_ridge_length",
+                                            controller.borrow_mut().assign_roof_ridge_length(len_m),
+                                        );
+                                    }
+                                    SketchEvent::SkipRoofRidgeLength => {
+                                        controller.borrow_mut().skip_roof_ridge_length();
                                     }
                                     SketchEvent::AssignRoofRidgeHeight(z_m) => {
                                         log_err(

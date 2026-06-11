@@ -4000,7 +4000,7 @@ fn second_roof_point_forms_a_ridge_and_a_third_is_rejected() {
     assert!(!c.roof_point_pending());
 }
 
-// ─── Roof ridges (line input: stroke + cross-coord position + one height) ──
+// ─── Roof ridges (line input: cross + start + length questions + height) ───
 
 /// Sorted (x, y, z) vertex triples of storey 0's derived roof regions —
 /// a strong geometric fingerprint for "same roof" comparisons.
@@ -4016,18 +4016,23 @@ fn roof_vertex_fingerprint(c: &AppController) -> Vec<(f64, f64, f64)> {
     vs
 }
 
-/// The full un-snapped line flow: a near-straight stroke in roof-point mode
-/// fits to an axis-aligned SEGMENT (endpoints = the stroke's own extent), the
-/// cross coordinate gets the position prompt (kind `Line`, the "area wall"
-/// being the segment itself) — and applying it moves ONLY the coordinate,
-/// never the extent. One typed height places BOTH apexes; the derived roof is
-/// a pitched ridge (one two-apex group), with no session step state over the
-/// default base.
+/// The full un-snapped line flow asks THREE questions, each prefilled with
+/// the drawn value (the stroke is approximate): the CROSS position (kind
+/// `Line`, the "area wall" being the segment itself), the START position
+/// along the ridge axis (measured from a PERPENDICULAR wall to the extent's
+/// lo — the "area wall" degenerates to the LO endpoint), and the LENGTH (a
+/// typed amount, no reference wall). Typed answers land EXACTLY — the
+/// assigned apexes sit at the RESOLVED `(cross, start)`/`(cross, start +
+/// length)`, not the drawn ones. One typed height then places BOTH apexes;
+/// the derived roof is a pitched ridge (one two-apex group), with no session
+/// step state over the default base.
 #[test]
-fn roof_ridge_stroke_position_height_flow_forms_a_pitched_roof() {
+fn roof_ridge_cross_start_length_height_flow_forms_a_pitched_roof() {
     let mut c = roof_ready_controller();
     c.apply_roof_ridge_stroke_event(&[(3.78, 2.0), (3.82, 5.0), (3.8, 8.0)]);
-    assert!(c.roof_ridge_position_pending(), "stroke fitted → position");
+
+    // Question 1: the CROSS position.
+    assert!(c.roof_ridge_position_pending(), "stroke fitted → cross");
     let ui = c.position_prompt_for_ui().expect("cross-coord prompt");
     assert_eq!(ui.kind, PositionPromptKind::Line);
     assert_eq!(ui.axis, ParameterAxis::X);
@@ -4041,26 +4046,63 @@ fn roof_ridge_stroke_position_height_flow_forms_a_pitched_roof() {
         (ui.area_wall.wall_a.1 - 2.0).abs() < 1e-4 && (ui.area_wall.wall_b.1 - 8.0).abs() < 1e-4,
         "the prompt's area wall IS the segment"
     );
-
     // Nearest ref is x = 0 (≈3.8 m): 4 m from it → x = 4. The extent must
     // NOT shift — it's on the other axis.
-    c.apply_position_dimension(4.0).expect("position applies");
-    assert!(c.roof_ridge_height_pending(), "position resolved → height");
-    let ((ax, ay), (_bx, by)) = c.pending_roof_ridge_line().unwrap();
-    assert!((ax - 4.0).abs() < 1e-6, "cross coordinate pinned at 4");
-    assert!(
-        (ay - 2.0).abs() < 1e-4 && (by - 8.0).abs() < 1e-4,
-        "extent unchanged by the position apply"
-    );
+    c.apply_position_dimension(4.0).expect("cross applies");
 
+    // Question 2: the START position, on the ALONG axis (a vertical ridge's
+    // extent runs on Y → the references are HORIZONTAL walls), highlighting
+    // the LO ENDPOINT (degenerate wall) at the already-resolved cross.
+    assert!(c.roof_ridge_position_pending(), "cross resolved → start");
+    let ui = c.position_prompt_for_ui().expect("start prompt");
+    assert_eq!(ui.kind, PositionPromptKind::Line);
+    assert_eq!(ui.axis, ParameterAxis::Y);
+    assert_eq!(
+        ui.area_wall.wall_a, ui.area_wall.wall_b,
+        "the measured object is the LO endpoint — a degenerate wall"
+    );
+    assert!((ui.area_wall.wall_a.0 - 4.0).abs() < 1e-6, "resolved cross");
+    assert!((ui.area_wall.wall_a.1 - 2.0).abs() < 1e-4, "drawn lo");
+    assert!(
+        (ui.current_distance - 2.0).abs() < 1e-4,
+        "prefill = drawn distance from the nearest ref (y = 0)"
+    );
+    // 3 m from y = 0 → the ridge now STARTS at y = 3; the drawn length (6)
+    // rides along, so the far end previews at y = 9.
+    c.apply_position_dimension(3.0).expect("start applies");
+    let ((_, ay), (_, by)) = c.pending_roof_ridge_line().unwrap();
+    assert!((ay - 3.0).abs() < 1e-4, "start pinned at 3");
+    assert!((by - 9.0).abs() < 1e-4, "far end = start + drawn length");
+
+    // Question 3: the LENGTH — prefilled with the drawn |hi − lo|, no
+    // reference wall (it's the ridge's own dimension).
+    assert!(c.roof_ridge_length_pending(), "start resolved → length");
+    assert!(
+        c.position_prompt_for_ui().is_none(),
+        "the length is not a position question"
+    );
+    let prefill = c.pending_roof_ridge_length().expect("drawn length");
+    assert!((prefill - 6.0).abs() < 1e-4);
+    c.assign_roof_ridge_length(4.0).expect("length applies");
+
+    // The height, then assign.
+    assert!(c.roof_ridge_height_pending(), "length resolved → height");
+    let ((_, ay), (_, by)) = c.pending_roof_ridge_line().unwrap();
+    assert!(
+        (ay - 3.0).abs() < 1e-4 && (by - 7.0).abs() < 1e-4,
+        "extent = [start, start + typed length]"
+    );
     c.assign_roof_ridge_height(4.2).expect("ridge assigns");
     assert!(!c.roof_ridge_pending(), "flow complete");
     c.materialize();
     let storey = &c.current_record.as_ref().unwrap().data.storeys[0];
     assert_eq!(storey.roof_apexes.len(), 2, "both apexes durable");
-    for (apex, want_y) in storey.roof_apexes.iter().zip([2.0, 8.0]) {
+    for (apex, want_y) in storey.roof_apexes.iter().zip([3.0, 7.0]) {
         assert!((apex.point.x - 4.0).abs() < 1e-6);
-        assert!((apex.point.y - want_y).abs() < 1e-4, "extent endpoints");
+        assert!(
+            (apex.point.y - want_y).abs() < 1e-4,
+            "apexes at the RESOLVED start/length, not the drawn ones"
+        );
         assert!((apex.z_m - 4.2).abs() < 1e-6);
     }
     let groups = storey.roofs.apex_groups(&storey.roof_apexes);
@@ -4087,28 +4129,33 @@ fn roof_ridge_stroke_position_height_flow_forms_a_pitched_roof() {
     );
     assert_eq!(
         c.roof_ridge_views(),
-        vec![((4.0, 2.0), (4.0, 8.0), "⌃ 4.20 m".into())],
+        vec![((4.0, 3.0), (4.0, 7.0), "⌃ 4.20 m".into())],
         "committed overlay: the segment + level-ridge label"
     );
 }
 
-/// The line input and the two-point tap flow are the SAME model: placing the
-/// two apexes by taps (at the exact coordinates the line input produced)
-/// derives a vertex-for-vertex identical roof.
+/// The line input and the two-point tap flow are the SAME model: skipping
+/// every question keeps the DRAWN values (cross, start, AND length), and
+/// placing the two apexes by taps at exactly those drawn endpoints derives a
+/// vertex-for-vertex identical roof.
 #[test]
 fn roof_ridge_line_input_matches_the_two_point_flow() {
-    // Line input, pinned at x = 4 with extent y 2..8.
+    // Line input with every prompt skipped: the drawn segment stands.
     let mut line = roof_ready_controller();
     line.apply_roof_ridge_stroke_event(&[(3.78, 2.0), (3.82, 5.0), (3.8, 8.0)]);
-    line.apply_position_dimension(4.0).unwrap();
+    let ((ax, ay), (bx, by)) = line.pending_roof_ridge_line().expect("drawn segment");
+    line.skip_position_dimension(); // cross: drawn coordinate stands
+    line.skip_position_dimension(); // start: drawn lo stands
+    line.skip_roof_ridge_length(); // length: drawn |hi − lo| stands
     line.assign_roof_ridge_height(4.2).unwrap();
     line.materialize();
+    let ((lax, lay), (lbx, lby)) = ((ax, ay), (bx, by));
 
-    // Two-point flow at the same coordinates and height.
+    // Two-point flow at the same (drawn) coordinates and height.
     let mut taps = roof_ready_controller();
-    for y in [2.0, 8.0] {
-        taps.roof_point_tap(4.0, y);
-        taps.skip_position_dimension(); // X stays 4.0
+    for (x, y) in [(lax, lay), (lbx, lby)] {
+        taps.roof_point_tap(x as f32, y as f32);
+        taps.skip_position_dimension(); // X stays as tapped
         taps.skip_position_dimension(); // Y stays as tapped
         taps.assign_roof_apex(4.2).expect("apex assigns");
     }
@@ -4126,22 +4173,24 @@ fn roof_ridge_line_input_matches_the_two_point_flow() {
 }
 
 /// A stroke within snap tolerance of a parallel wall SNAPS the cross
-/// coordinate onto it: the position prompt is SKIPPED (the coordinate is
-/// exact by construction), the single tag renders at the segment midpoint,
-/// and the assigned apexes' cross coordinate equals the wall's EXACTLY.
+/// coordinate onto it: the CROSS question is SKIPPED (the coordinate is
+/// exact by construction) — the flow opens at the START question instead —
+/// the single tag renders at the segment midpoint, and the assigned apexes'
+/// cross coordinate equals the wall's EXACTLY.
 #[test]
-fn roof_ridge_snap_skips_the_prompt_and_lands_on_the_wall() {
+fn roof_ridge_snap_skips_the_cross_question_and_lands_on_the_wall() {
     let mut c = ceiling_ready_l_controller();
     c.set_roof_point_mode(true);
     assert!(c.roof_point_mode());
     // Drawn at x ≈ 5.9 — within 0.2 of the interior wall at x = 6; the
-    // extent (y 0.5..3.5) stays inside the L's lower band.
+    // extent (y 0.5..3.5) stays inside the L's lower band, beyond snap
+    // tolerance of any horizontal wall.
     c.apply_roof_ridge_stroke_event(&[(5.88, 0.5), (5.92, 2.0), (5.9, 3.5)]);
-    assert!(
-        c.position_prompt_for_ui().is_none(),
-        "snapped line skips the position prompt"
-    );
-    assert!(c.roof_ridge_height_pending(), "straight to the height");
+    let ui = c
+        .position_prompt_for_ui()
+        .expect("cross snapped → the START question opens directly");
+    assert_eq!(ui.kind, PositionPromptKind::Line);
+    assert_eq!(ui.axis, ParameterAxis::Y, "the along axis's question");
     let ((ax, _), _) = c.pending_roof_ridge_line().unwrap();
     assert!((ax - 6.0).abs() < 1e-6, "coordinate snapped to the wall");
 
@@ -4161,38 +4210,120 @@ fn roof_ridge_snap_skips_the_prompt_and_lands_on_the_wall() {
         "menu = Don't snap only"
     );
 
+    c.skip_position_dimension(); // start: drawn lo stands
+    assert!(c.roof_ridge_length_pending());
+    assert!(c.roof_ridge_snap_tag().is_some(), "tag still clickable");
+    c.skip_roof_ridge_length(); // length: drawn length stands
+    assert!(c.roof_ridge_height_pending());
     c.assign_roof_ridge_height(4.0).expect("ridge assigns");
     let storey = &c.current_record.as_ref().unwrap().data.storeys[0];
     assert_eq!(storey.roof_apexes.len(), 2);
-    for apex in &storey.roof_apexes {
+    for (apex, want_y) in storey.roof_apexes.iter().zip([0.5, 3.5]) {
         assert!(
             (apex.point.x - 6.0).abs() < 1e-9,
             "snapped cross coordinate lands EXACTLY on the wall"
         );
+        assert!((apex.point.y - want_y).abs() < 1e-4, "drawn extent kept");
     }
 }
 
-/// "Don't snap" on the pending ridge reverts the cross coordinate to its
-/// DRAWN value and REOPENS the skipped position question; the reopened flow
-/// works as normal (skip keeps the drawn coordinate, assign lands there).
+/// A stroke whose LO endpoint lands within snap tolerance of a PERPENDICULAR
+/// wall snaps the START: question 2 is skipped (cross → straight to the
+/// length), the start tag renders at the LO endpoint, and the drawn LENGTH
+/// rides unchanged (snapping slides the extent, it doesn't stretch it).
+/// "Don't snap" on the start tag reverts `lo` and reopens question 2 only.
 #[test]
-fn unsnap_roof_ridge_reopens_the_position_prompt_with_the_drawn_coord() {
+fn roof_ridge_start_snap_skips_question_two_and_unsnap_reopens_it() {
+    let mut c = ceiling_ready_l_controller();
+    c.set_roof_point_mode(true);
+    // Vertical stroke at x ≈ 2.8 (no parallel wall within 0.2), starting at
+    // y ≈ 4.1 — within 0.2 of the horizontal wall y = 4 — ending at y = 8.5.
+    c.apply_roof_ridge_stroke_event(&[(2.78, 4.1), (2.82, 6.0), (2.8, 8.5)]);
+
+    // Question 1 (cross) opens first; no tag yet — the stage owns the tag,
+    // and the riding start snap's question hasn't arrived.
+    let ui = c.position_prompt_for_ui().expect("cross question");
+    assert_eq!(ui.axis, ParameterAxis::X);
+    assert!(c.roof_ridge_snap_tag().is_none(), "no tag at the cross");
+    c.apply_position_dimension(2.5).expect("cross applies"); // from x = 0
+
+    // Question 2 is SKIPPED: the start snapped onto y = 4.
+    assert!(
+        c.position_prompt_for_ui().is_none(),
+        "snapped start skips its question"
+    );
+    assert!(c.roof_ridge_length_pending(), "straight to the length");
+    let ((ax, ay), (_, by)) = c.pending_roof_ridge_line().unwrap();
+    assert!(
+        (ax - 2.5).abs() < 1e-6 && (ay - 4.0).abs() < 1e-6,
+        "snapped"
+    );
+    assert!(
+        (by - 8.4).abs() < 1e-4,
+        "drawn length (4.4) slides with the snap, it doesn't stretch"
+    );
+    let tag = c.roof_ridge_snap_tag().expect("start tag present");
+    assert!(
+        (tag.pos.0 - 2.5).abs() < 1e-4 && (tag.pos.1 - 4.0).abs() < 1e-4,
+        "tag at the LO endpoint"
+    );
+    assert!(
+        (tag.from.1 - 4.1).abs() < 0.05,
+        "identity = the drawn start"
+    );
+
+    // "Don't snap": lo reverts to the drawn 4.1 and ONLY question 2 reopens
+    // (the typed cross stands).
+    c.unsnap_roof_ridge();
+    assert!(c.roof_ridge_snap_tag().is_none(), "snap dropped");
+    let ui = c.position_prompt_for_ui().expect("start question reopened");
+    assert_eq!(ui.axis, ParameterAxis::Y);
+    let ((ax, ay), _) = c.pending_roof_ridge_line().unwrap();
+    assert!((ax - 2.5).abs() < 1e-6, "resolved cross kept");
+    assert!((ay - 4.1).abs() < 0.05, "back at the DRAWN start");
+
+    // Type the start (1 m from the nearest ref y = 4, drawn side +) and a
+    // length: the apexes land at the RESOLVED start/length.
+    c.apply_position_dimension(1.0).expect("start applies"); // y = 5
+    c.assign_roof_ridge_length(3.0).expect("length applies");
+    c.assign_roof_ridge_height(4.0).expect("ridge assigns");
+    let storey = &c.current_record.as_ref().unwrap().data.storeys[0];
+    for (apex, want_y) in storey.roof_apexes.iter().zip([5.0, 8.0]) {
+        assert!((apex.point.x - 2.5).abs() < 1e-6);
+        assert!((apex.point.y - want_y).abs() < 1e-4);
+    }
+}
+
+/// "Don't snap" on the CROSS tag reverts the cross coordinate to its DRAWN
+/// value and RESTARTS from question 1 (re-asking the start question — the
+/// roof point's restart reasoning); the reopened flow works as normal (skip
+/// everything keeps the drawn segment, assign lands there).
+#[test]
+fn unsnap_roof_ridge_cross_reopens_the_cross_question_with_the_drawn_coord() {
     let mut c = ceiling_ready_l_controller();
     c.set_roof_point_mode(true);
     c.apply_roof_ridge_stroke_event(&[(5.88, 0.5), (5.92, 2.0), (5.9, 3.5)]);
+    // Cross snapped → start question up, cross tag showing. Pass the start
+    // and the length: the tag stays clickable through both stages.
+    c.skip_position_dimension();
+    c.skip_roof_ridge_length();
     assert!(c.roof_ridge_height_pending());
 
     c.unsnap_roof_ridge();
     assert!(c.roof_ridge_snap_tag().is_none(), "snap dropped");
-    let ui = c
-        .position_prompt_for_ui()
-        .expect("position prompt reopened");
+    let ui = c.position_prompt_for_ui().expect("cross question reopened");
     assert_eq!(ui.kind, PositionPromptKind::Line);
+    assert_eq!(ui.axis, ParameterAxis::X, "restarted from question 1");
     let ((ax, _), _) = c.pending_roof_ridge_line().unwrap();
     assert!((ax - 5.9).abs() < 0.05, "back at the DRAWN coordinate");
 
-    c.skip_position_dimension();
-    assert!(c.roof_ridge_height_pending(), "skip → height, drawn coord");
+    c.skip_position_dimension(); // cross: drawn stands
+    c.skip_position_dimension(); // start re-asked: drawn stands
+    c.skip_roof_ridge_length();
+    assert!(
+        c.roof_ridge_height_pending(),
+        "skips → height, drawn values"
+    );
     c.assign_roof_ridge_height(4.0).expect("ridge assigns");
     let storey = &c.current_record.as_ref().unwrap().data.storeys[0];
     assert!(
@@ -4211,7 +4342,9 @@ fn unsnap_roof_ridge_reopens_the_position_prompt_with_the_drawn_coord() {
 fn roof_ridge_survives_reload_and_rederive_fixpoint() {
     let mut c = roof_ready_controller();
     c.apply_roof_ridge_stroke_event(&[(3.78, 2.0), (3.82, 5.0), (3.8, 8.0)]);
-    c.apply_position_dimension(4.0).unwrap();
+    c.apply_position_dimension(4.0).unwrap(); // cross
+    c.apply_position_dimension(2.0).unwrap(); // start (y = 2)
+    c.assign_roof_ridge_length(6.0).unwrap();
     c.assign_roof_ridge_height(4.2).unwrap();
     c.materialize();
     let before = roof_vertex_fingerprint(&c);
@@ -4246,7 +4379,9 @@ fn roof_ridge_survives_reload_and_rederive_fixpoint() {
 fn deleting_one_ridge_apex_degrades_to_a_fan() {
     let mut c = roof_ready_controller();
     c.apply_roof_ridge_stroke_event(&[(3.78, 2.0), (3.82, 5.0), (3.8, 8.0)]);
-    c.apply_position_dimension(4.0).unwrap();
+    c.apply_position_dimension(4.0).unwrap(); // cross
+    c.skip_position_dimension(); // start: drawn stands
+    c.skip_roof_ridge_length();
     c.assign_roof_ridge_height(4.2).unwrap();
     c.materialize();
 
@@ -4270,9 +4405,10 @@ fn deleting_one_ridge_apex_degrades_to_a_fan() {
     );
 }
 
-/// Assign rejections keep the pending ridge open for a retype: a height
-/// within a centimetre of the base slopes nothing. Off-footprint and
-/// non-line strokes never go pending at all, and a tap while a ridge is
+/// Rejections at every typed stage keep the pending ridge open for a
+/// retype: a zero-ish LENGTH, a length pushing the far end off the
+/// footprint, and a height within a centimetre of the base. Off-footprint
+/// and non-line strokes never go pending at all, and a tap while a ridge is
 /// pending does NOT start a point flow.
 #[test]
 fn roof_ridge_rejections_keep_the_pending_and_bad_strokes_never_pend() {
@@ -4282,11 +4418,20 @@ fn roof_ridge_rejections_keep_the_pending_and_bad_strokes_never_pend() {
     assert!(!c.roof_ridge_pending(), "off-footprint stroke rejected");
 
     c.apply_roof_ridge_stroke_event(&[(3.78, 2.0), (3.82, 5.0), (3.8, 8.0)]);
-    c.apply_position_dimension(4.0).unwrap();
-    assert!(c.roof_ridge_height_pending());
+    c.apply_position_dimension(4.0).unwrap(); // cross
+    c.skip_position_dimension(); // start: drawn lo = 2 stands
+    assert!(c.roof_ridge_length_pending());
     // A tap while the ridge is pending must not spawn a roof point.
     c.roof_point_tap(7.0, 5.0);
     assert!(!c.roof_point_pending(), "tap suppressed while ridge pends");
+
+    // Length rejections: zero-ish, then off the footprint (2 + 9 > 10).
+    let err = c.assign_roof_ridge_length(0.0).unwrap_err();
+    assert!(err.contains("more than a centimetre"), "got: {err}");
+    let err = c.assign_roof_ridge_length(9.0).unwrap_err();
+    assert!(err.contains("outside the storey footprint"), "got: {err}");
+    assert!(c.roof_ridge_length_pending(), "pending intact on rejection");
+    c.assign_roof_ridge_length(6.0).expect("valid length lands");
 
     let err = c.assign_roof_ridge_height(2.405).unwrap_err();
     assert!(err.contains("within a centimetre"), "got: {err}");

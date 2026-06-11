@@ -52,6 +52,17 @@ pub enum ParameterAxis {
     Y,
 }
 
+impl ParameterAxis {
+    /// The perpendicular axis (X ↔ Y) — e.g. an axis-aligned line whose
+    /// position varies on `self` has its EXTENT along `self.other()`.
+    pub fn other(self) -> Self {
+        match self {
+            ParameterAxis::X => ParameterAxis::Y,
+            ParameterAxis::Y => ParameterAxis::X,
+        }
+    }
+}
+
 /// A suggestion that two edges (possibly in different rings of the same plan)
 /// are close enough to be considered the same line. The caller asks the user,
 /// then either applies (`apply_collinear_suggestion`) or discards.

@@ -78,7 +78,7 @@ pub use history::HistorySnapshot;
 use persistence::PARAMETRIC_SNAPSHOT_VERSION;
 pub use review::CollinearityReview;
 use roof_points::PendingRoofPoint;
-use roof_ridges::PendingRoofRidge;
+use roof_ridges::{PendingRoofRidge, RidgeQuestion};
 pub use snap::SnapTagView;
 use snap::{LastSnapAction, SnapAction};
 pub use strokes::PendingRedraw;

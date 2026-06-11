@@ -296,6 +296,12 @@ pub enum SketchEvent {
     RoofRidgeStrokeWorld {
         points: Vec<(f32, f32)>,
     },
+    /// User entered the ridge LENGTH (metres along the ridge axis — the
+    /// extent becomes `[start, start + length]`) for the pending roof ridge.
+    AssignRoofRidgeLength(f32),
+    /// Skip the pending roof ridge's length question — accept the drawn
+    /// length as-is.
+    SkipRoofRidgeLength,
     /// User entered the ridge height (metres, ABSOLUTE above the storey floor
     /// datum — both endpoints get it) for the pending roof ridge.
     AssignRoofRidgeHeight(f32),
@@ -457,13 +463,17 @@ pub struct SketchView<'a> {
     /// ridges `(end_a, end_b, label)` to overlay ("⌃ 4.20 m" /
     /// "4.20→4.50 m"), the pending ridge SEGMENT for the dashed overlay, its
     /// snap tag (menu offers only "Don't snap", routed to UnsnapRoofRidge),
-    /// and the per-stage flags. The height entry reuses `roof_apex_input`.
+    /// and the per-stage flags (position questions / length entry / height
+    /// entry). The height entry reuses `roof_apex_input`; the length entry
+    /// has its own buffer (prefilled with the drawn length on stage open).
     pub roof_ridge_views: &'a [((f64, f64), (f64, f64), String)],
     pub pending_roof_ridge_line: Option<((f64, f64), (f64, f64))>,
     pub roof_ridge_snap_tag: Option<&'a SnapTagView>,
     pub roof_ridge_position_pending: bool,
+    pub roof_ridge_length_pending: bool,
     pub roof_ridge_height_pending: bool,
     pub roof_ridge_pending: bool,
+    pub roof_ridge_length_input: &'a mut String,
     /// Default ceiling heights: the last error from the Heights field's Set
     /// (shown inline next to it), the current scope's value when it has one
     /// (the field's "2.40 m" display), and whether the scope's heights are

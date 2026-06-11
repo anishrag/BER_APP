@@ -141,8 +141,10 @@ pub(super) fn render<F: FnMut(UiEvent)>(
                     view.roof_point_height_pending,
                     view.roof_point_position_pending,
                     view.roof_ridge_height_pending,
+                    view.roof_ridge_length_pending,
                     view.roof_ridge_position_pending,
                     view.roof_apex_input,
+                    view.roof_ridge_length_input,
                     on_event,
                 );
             }
@@ -725,20 +727,25 @@ fn ceiling_step_toolbar<F: FnMut(UiEvent)>(
 }
 
 /// Roof-point (and roof-RIDGE) controls, stage by stage: the height field +
-/// Set/Cancel once the point's/ridge's position is resolved; a "answer the
-/// distance question" hint while a position stage is up (it shows as the
-/// shared position-prompt panel); otherwise a tap/stroke hint plus the
+/// Set/Cancel once the point's/ridge's position is resolved; the ridge's
+/// LENGTH field (its own buffer, prefilled with the drawn length) + Set/Skip
+/// between its position questions and its height; a "answer the distance
+/// question" hint while a position stage is up (it shows as the shared
+/// position-prompt panel); otherwise a tap/stroke hint plus the
 /// committed-apex list with deletes. The ridge stages mirror the apex ones
 /// and share the height input buffer (the two flows are never pending at
 /// once — same mode, mutually suppressing).
+#[allow(clippy::too_many_arguments)] // one flag/buffer per dock stage
 fn roof_point_toolbar<F: FnMut(UiEvent)>(
     ui: &mut egui::Ui,
     apexes: &[((f64, f64), String)],
     height_pending: bool,
     position_pending: bool,
     ridge_height_pending: bool,
+    ridge_length_pending: bool,
     ridge_position_pending: bool,
     height_input: &mut String,
+    ridge_length_input: &mut String,
     on_event: &mut F,
 ) {
     if ridge_height_pending {
@@ -763,6 +770,35 @@ fn roof_point_toolbar<F: FnMut(UiEvent)>(
         if ui.button("Cancel").clicked() {
             on_event(UiEvent::Sketch(SketchEvent::CancelPendingRoofRidge));
             height_input.clear();
+        }
+    } else if ridge_length_pending {
+        ui.label(egui::RichText::new("Ridge length (m):").strong());
+        // Arrives PREFILLED with the drawn length (the stroke is approximate
+        // — the typed value is the real dimension; Skip accepts the drawn).
+        ui.add(
+            egui::TextEdit::singleline(ridge_length_input)
+                .desired_width(60.0)
+                .hint_text("e.g. 6.0"),
+        );
+        if ui
+            .button("Set")
+            .on_hover_text("Use exactly this ridge length (from the highlighted end)")
+            .clicked()
+        {
+            if let Some(v) = parse_dimension_expression(ridge_length_input) {
+                on_event(UiEvent::Sketch(SketchEvent::AssignRoofRidgeLength(v)));
+            }
+        }
+        if ui
+            .button("Skip")
+            .on_hover_text("Accept the drawn length as-is")
+            .clicked()
+        {
+            on_event(UiEvent::Sketch(SketchEvent::SkipRoofRidgeLength));
+        }
+        if ui.button("Cancel").clicked() {
+            on_event(UiEvent::Sketch(SketchEvent::CancelPendingRoofRidge));
+            ridge_length_input.clear();
         }
     } else if ridge_position_pending {
         // The ridge's cross-coordinate question — the shared position panel

@@ -83,6 +83,20 @@ const RIDGE_ENDS_COINCIDE_MSG: &str = "The ridge's two ends coincide — draw a 
 const RIDGE_OFF_FOOTPRINT_MSG: &str =
     "The ridge must lie inside the storey footprint — draw it inside the floor plan.";
 
+/// User-facing rejection for a typed ridge length that is zero-ish (a ridge
+/// shorter than a centimetre is a point, not a ridge). Kept stable.
+const RIDGE_LENGTH_TOO_SHORT_MSG: &str =
+    "The ridge length must be more than a centimetre — enter a longer length.";
+
+/// User-facing rejection for a typed ridge length whose far end would leave
+/// the storey footprint. Kept stable.
+const RIDGE_LENGTH_OFF_FOOTPRINT_MSG: &str =
+    "That length would push the ridge outside the storey footprint — enter a length that fits.";
+
+/// A typed ridge length at or below this (m) is rejected — it places the two
+/// apexes (near-)coincident.
+const MIN_RIDGE_LENGTH_M: f32 = 0.01;
+
 /// An apex within this (m) of its region's base height slopes nothing.
 const MIN_APEX_DELTA_M: f64 = 0.01;
 
@@ -310,6 +324,30 @@ impl StoreyDoc {
                 .map_err(|_| RIDGE_OFF_FOOTPRINT_MSG.to_string())?;
         }
         Ok((axis, coord, (lo, hi)))
+    }
+
+    /// Validate a typed roof-ridge LENGTH against the OUTLINE: the resolved
+    /// extent `[lo, lo + len_m]` on `extent_axis` (the axis the ridge RUNS
+    /// along — `axis.other()` of the fit's cross axis) must keep both
+    /// endpoints strictly inside the footprint bbox, and the length itself
+    /// must exceed a centimetre (shorter places the two apexes coincident).
+    /// The cheap stroke-level check — the materialized same-region test stays
+    /// in [`validate_roof_ridge`] at assign. `Err` is user-facing, messages
+    /// stable.
+    pub fn validate_roof_ridge_extent(
+        &self,
+        extent_axis: ParameterAxis,
+        lo: f32,
+        len_m: f32,
+    ) -> Result<(), String> {
+        if !len_m.is_finite() || len_m <= MIN_RIDGE_LENGTH_M {
+            return Err(RIDGE_LENGTH_TOO_SHORT_MSG.to_string());
+        }
+        for t in [lo, lo + len_m] {
+            self.validate_ceiling_step_line(extent_axis, t)
+                .map_err(|_| RIDGE_LENGTH_OFF_FOOTPRINT_MSG.to_string())?;
+        }
+        Ok(())
     }
 }
 
@@ -716,5 +754,38 @@ mod tests {
             .fit_roof_ridge_line(&blob)
             .unwrap_err()
             .contains("straight"));
+    }
+
+    /// validate_roof_ridge_extent: a sane typed length passes; a zero-ish or
+    /// non-finite length gets the too-short message; a length (or start)
+    /// pushing either end of `[lo, lo + len]` onto/over the footprint bbox on
+    /// the extent axis gets the off-footprint message. Both stable.
+    #[test]
+    fn validate_ridge_extent_checks_length_and_footprint() {
+        let doc = storey_10x6(); // bbox y ∈ [0, 6] for a vertical ridge
+        assert!(doc
+            .validate_roof_ridge_extent(ParameterAxis::Y, 1.0, 4.0)
+            .is_ok());
+        for len in [0.0, 0.01, -2.0, f32::NAN] {
+            assert_eq!(
+                doc.validate_roof_ridge_extent(ParameterAxis::Y, 1.0, len)
+                    .unwrap_err(),
+                RIDGE_LENGTH_TOO_SHORT_MSG,
+                "len {len}"
+            );
+        }
+        // Far end at/over the bbox edge (1 + 5 = 6), and a start outside.
+        for (lo, len) in [(1.0, 5.0), (1.0, 9.0), (-0.5, 2.0)] {
+            assert_eq!(
+                doc.validate_roof_ridge_extent(ParameterAxis::Y, lo, len)
+                    .unwrap_err(),
+                RIDGE_LENGTH_OFF_FOOTPRINT_MSG,
+                "lo {lo} len {len}"
+            );
+        }
+        // The wider X axis fits the same span comfortably.
+        assert!(doc
+            .validate_roof_ridge_extent(ParameterAxis::X, 1.0, 5.0)
+            .is_ok());
     }
 }
