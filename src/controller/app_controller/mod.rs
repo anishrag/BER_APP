@@ -4,6 +4,7 @@
 // module wiring; each submodule owns one concern:
 //   - `ceiling`       — default ceiling heights (Heights category entry + 3D availability).
 //   - `ceiling_steps` — ceiling-step (raise/lower part of the ceiling) tagging.
+//   - `debug`         — the paste-ready debug dump of the derivation state.
 //   - `dimensioning`  — the dimension-prompt workflow.
 //   - `editing`       — Edit-mode interaction + measurement prompts.
 //   - `exposure`      — wall-exposure marking interaction.
@@ -21,6 +22,7 @@
 //   - `view`          — canvas pan/zoom.
 mod ceiling;
 mod ceiling_steps;
+mod debug;
 mod dimensioning;
 mod editing;
 mod exposure;

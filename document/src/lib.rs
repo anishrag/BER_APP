@@ -16,6 +16,7 @@
 //! in here.
 
 mod ceiling_step;
+mod debug;
 mod dimensioning;
 mod edit;
 mod exposure;
@@ -30,6 +31,7 @@ pub use ceiling_step::{
     ceiling_step_regions_from_roofs, CeilingStepRegion, LinePositionOption, LinePositionPrompt,
     LineSide,
 };
+pub use debug::debug_dump_storey;
 /// Derive full per-wall exposure coverage — the shell's `commit_to_ber` uses it.
 pub use exposure::{range_at, wall_coverage};
 pub use load::reconstruct_living_areas;

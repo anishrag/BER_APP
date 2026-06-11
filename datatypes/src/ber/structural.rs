@@ -1857,6 +1857,15 @@ impl WallRegions {
 
 // ── Roof-profile sampling (private helpers for `WallRegions::regenerate`) ──
 
+/// Plan-coordinate tolerance (m) of the roof-profile sampling. The derived
+/// roof regions are boolean-op output (geo/i_overlay snaps coordinates to an
+/// adaptive grid) and round-trip through f32 on canonicalize/reload, so a
+/// region boundary that conceptually COINCIDES with a wall base line can sit
+/// up to a few 1e-7 m off it. 1e-4 m (0.1 mm) is comfortably above that
+/// noise and far below any real architectural feature, so a pick/breakpoint
+/// within this band is the same geometry, not a different roof.
+const PROFILE_EPS_M: f64 = 1e-4;
+
 /// The plane `z = c0 + cx·x + cy·y` through a planar ceiling region, from its
 /// first vertex and the first vertex pair with a non-degenerate plan cross
 /// product. Exact for flat pieces (`cx = cy = 0`) and fan triangles alike.
@@ -1882,28 +1891,61 @@ fn region_plane(region: &CeilingRegion) -> Option<(f64, f64, f64)> {
     None
 }
 
-/// The plane of the first roof region whose plan projection touches `p`.
-/// Containment is boundary-INCLUSIVE (`Intersects`): a wall base lies ON the
-/// outline edge that bounds its roof region, so the strict predicate would
-/// never match. When two regions share the boundary `p` sits on (a ceiling
-/// step running ALONG the wall), the first in region order wins — callers
-/// sample interval midpoints, which are never at a crossing breakpoint.
-fn covering_roof_plane(roofs: &CeilingRegions, p: Point2f64) -> Option<(f64, f64, f64)> {
+/// The (region index, plane) of the first roof region whose plan projection
+/// touches `p`. Containment is boundary-INCLUSIVE (`Intersects`): a wall
+/// base lies ON the outline edge that bounds its roof region, so the strict
+/// predicate would never match. When two regions share the boundary `p` sits
+/// on (a ceiling step running ALONG the wall), the first in region order
+/// wins — callers sample interval midpoints, which are never at a crossing
+/// breakpoint.
+///
+/// When the EXACT point touches no region, retry NUDGED by [`PROFILE_EPS_M`]
+/// perpendicular to the wall (`n` is the caller's unit normal; both sides
+/// tried). The derived regions are boolean-op output whose boundary can sit
+/// a few 1e-7 m INSIDE the wall line it conceptually coincides with (grid
+/// snapping + f32 round-trips — see [`PROFILE_EPS_M`]); without the retry
+/// the pick fails along exactly the walls that bound a stepped/ridged roof
+/// piece and the caller's fallback silently flattens them to the default
+/// height. The exact pick stays first so behaviour on clean geometry — tie
+/// order included — is unchanged.
+fn covering_roof_plane(
+    roofs: &CeilingRegions,
+    p: Point2f64,
+    n: (f64, f64),
+) -> Option<(usize, (f64, f64, f64))> {
     use geo::Intersects;
-    let gp = GeoPoint::new(p.x, p.y);
-    roofs.regions.iter().find_map(|r| {
-        Polygon::<f64>::from(r.polygon.clone())
-            .intersects(&gp)
-            .then(|| region_plane(r))
-            .flatten()
+    let pick = |q: Point2f64| {
+        let gq = GeoPoint::new(q.x, q.y);
+        roofs.regions.iter().enumerate().find_map(|(i, r)| {
+            Polygon::<f64>::from(r.polygon.clone())
+                .intersects(&gq)
+                .then(|| region_plane(r).map(|plane| (i, plane)))
+                .flatten()
+        })
+    };
+    pick(p).or_else(|| {
+        [1.0, -1.0].iter().find_map(|s| {
+            pick(Point2f64::new(
+                p.x + s * n.0 * PROFILE_EPS_M,
+                p.y + s * n.1 * PROFILE_EPS_M,
+            ))
+        })
     })
 }
 
 /// Parameters t ∈ [0, 1] along the base `a`→`b` where the covering roof
 /// region can change: every crossing of a region boundary edge with the base
-/// (collinear overlapping edges contribute their projected endpoints), plus
-/// the ends 0 and 1. Sorted ascending; the caller treats near-equal values
-/// (Δt ≤ 1e-9) as one breakpoint.
+/// (near-collinear overlapping edges contribute their projected endpoints),
+/// plus the ends 0 and 1. Sorted ascending; the caller skips sub-µm spans.
+///
+/// Tolerances are METRIC ([`PROFILE_EPS_M`]), not exact: the derived roof
+/// rings are boolean-op output that can sit a few 1e-7 m off the wall line
+/// they conceptually coincide with. An edge whose BOTH endpoints lie within
+/// the band counts as collinear-overlapping (the old exact cross-product
+/// test missed displaced eaves edges); a crossing edge may start/stop up to
+/// [`PROFILE_EPS_M`] (in metres, scaled to its own parameter) short of the
+/// wall line and still contribute (the old `s` tolerance of 1e-9 dropped
+/// step-boundary edges that stopped ~1e-7 m shy, losing the step's jump).
 fn profile_breakpoints(roofs: &CeilingRegions, a: Point2f64, b: Point2f64) -> Vec<f64> {
     let (dx, dy) = (b.x - a.x, b.y - a.y);
     let len2 = dx * dx + dy * dy;
@@ -1911,6 +1953,7 @@ fn profile_breakpoints(roofs: &CeilingRegions, a: Point2f64, b: Point2f64) -> Ve
     if len2 <= 1e-18 {
         return ts;
     }
+    let len = len2.sqrt();
     for r in &roofs.regions {
         let ext = &r.polygon.exterior;
         let n = ext.len();
@@ -1920,25 +1963,38 @@ fn profile_breakpoints(roofs: &CeilingRegions, a: Point2f64, b: Point2f64) -> Ve
         for i in 0..n {
             let p = ext[i];
             let q = ext[(i + 1) % n];
-            let (ex, ey) = (q.x - p.x, q.y - p.y);
-            let (wx, wy) = (p.x - a.x, p.y - a.y);
-            let denom = dx * ey - dy * ex;
-            if denom.abs() > 1e-12 {
-                // Proper crossing: base(t) == edge(s); keep t when both
-                // parameters land on their segments.
-                let t = (wx * ey - wy * ex) / denom;
-                let s = (wx * dy - wy * dx) / denom;
-                if (-1e-9..=1.0 + 1e-9).contains(&s) && (0.0..=1.0).contains(&t) {
-                    ts.push(t);
-                }
-            } else if (wx * dy - wy * dx).abs() <= 1e-9 * len2.sqrt() {
-                // Collinear overlap (e.g. the roof edge along the wall base
-                // itself): the region can start/stop at the edge's endpoints.
+            // Perpendicular distance (m) of each edge endpoint to the wall
+            // LINE — the metric collinearity measure.
+            let dist_to_line = |c: &Point3f64| ((c.x - a.x) * dy - (c.y - a.y) * dx).abs() / len;
+            if dist_to_line(&p) <= PROFILE_EPS_M && dist_to_line(&q) <= PROFILE_EPS_M {
+                // (Near-)collinear overlap (e.g. the roof's eaves edge along
+                // the wall base itself, possibly displaced by boolean-op
+                // noise): the region can start/stop at the edge's endpoints.
                 for c in [p, q] {
                     let t = ((c.x - a.x) * dx + (c.y - a.y) * dy) / len2;
                     if (0.0..=1.0).contains(&t) {
                         ts.push(t);
                     }
+                }
+                continue;
+            }
+            let (ex, ey) = (q.x - p.x, q.y - p.y);
+            let (wx, wy) = (p.x - a.x, p.y - a.y);
+            let denom = dx * ey - dy * ex;
+            if denom.abs() > 1e-12 {
+                // Proper crossing: base(t) == edge(s); keep t when both
+                // parameters land on their segments, letting the edge fall
+                // short of / overshoot the wall line by PROFILE_EPS_M.
+                let t = (wx * ey - wy * ex) / denom;
+                let s = (wx * dy - wy * dx) / denom;
+                let edge_len = (ex * ex + ey * ey).sqrt();
+                let eps_s = if edge_len > 0.0 {
+                    PROFILE_EPS_M / edge_len
+                } else {
+                    0.0
+                };
+                if (-eps_s..=1.0 + eps_s).contains(&s) && (0.0..=1.0).contains(&t) {
+                    ts.push(t);
                 }
             }
         }
@@ -1962,25 +2018,56 @@ fn roof_profile_top(
     b: Point2f64,
     fallback_top_z: f64,
 ) -> Vec<Point3f64> {
-    let at = |t: f64| Point2f64::new(a.x + (b.x - a.x) * t, a.y + (b.y - a.y) * t);
+    let (dx, dy) = (b.x - a.x, b.y - a.y);
+    let len = (dx * dx + dy * dy).sqrt();
+    // Unit normal of the base — the nudge direction for the tolerant pick.
+    let n = if len > 0.0 {
+        (-dy / len, dx / len)
+    } else {
+        (0.0, 0.0)
+    };
+    let at = |t: f64| Point2f64::new(a.x + dx * t, a.y + dy * t);
     // (t0, t1, z at t0, z at t1) per interval, ascending t.
     let mut spans: Vec<(f64, f64, f64, f64)> = Vec::new();
     for w in profile_breakpoints(roofs, a, b).windows(2) {
         let (t0, t1) = (w[0], w[1]);
-        if t1 - t0 <= 1e-9 {
+        // Skip degenerate and sub-µm spans (boolean-op noise can put two
+        // breakpoints ~1e-8 m apart; a hairline span samples unreliably and
+        // its vertices are meaningless).
+        if t1 - t0 <= 1e-9 || (t1 - t0) * len <= 1e-6 {
             continue;
         }
-        let span = match covering_roof_plane(roofs, at((t0 + t1) / 2.0)) {
-            Some((c0, cx, cy)) => {
+        let mid = at((t0 + t1) / 2.0);
+        let span = match covering_roof_plane(roofs, mid, n) {
+            Some((ri, (c0, cx, cy))) => {
                 let (p0, p1) = (at(t0), at(t1));
-                (
-                    t0,
-                    t1,
-                    c0 + cx * p0.x + cy * p0.y,
-                    c0 + cx * p1.x + cy * p1.y,
-                )
+                let (z0, z1) = (c0 + cx * p0.x + cy * p0.y, c0 + cx * p1.x + cy * p1.y);
+                log::debug!(
+                    "wall profile [{:.3},{:.3}]→[{:.3},{:.3}] span t=[{t0:.4},{t1:.4}] \
+                     mid=({:.4},{:.4}): roof region #{ri} plane z={c0:.4}{cx:+.4}·x{cy:+.4}·y \
+                     → top {z0:.4}..{z1:.4}",
+                    a.x,
+                    a.y,
+                    b.x,
+                    b.y,
+                    mid.x,
+                    mid.y
+                );
+                (t0, t1, z0, z1)
             }
-            None => (t0, t1, fallback_top_z, fallback_top_z),
+            None => {
+                log::debug!(
+                    "wall profile [{:.3},{:.3}]→[{:.3},{:.3}] span t=[{t0:.4},{t1:.4}] \
+                     mid=({:.4},{:.4}): NO covering roof region → fallback z={fallback_top_z:.4}",
+                    a.x,
+                    a.y,
+                    b.x,
+                    b.y,
+                    mid.x,
+                    mid.y
+                );
+                (t0, t1, fallback_top_z, fallback_top_z)
+            }
         };
         spans.push(span);
     }
@@ -1999,6 +2086,20 @@ fn roof_profile_top(
     for (t0, t1, z0, z1) in spans.iter().rev() {
         push(&mut out, at(*t1), *z1);
         push(&mut out, at(*t0), *z0);
+    }
+    if log::log_enabled!(log::Level::Debug) {
+        let pl: Vec<String> = out
+            .iter()
+            .map(|v| format!("({:.4},{:.4},{:.4})", v.x, v.y, v.z))
+            .collect();
+        log::debug!(
+            "wall profile [{:.3},{:.3}]→[{:.3},{:.3}] top polyline (b→a): {}",
+            a.x,
+            a.y,
+            b.x,
+            b.y,
+            pl.join(" ")
+        );
     }
     out
 }

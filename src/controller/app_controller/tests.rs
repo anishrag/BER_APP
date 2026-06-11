@@ -3162,6 +3162,23 @@ fn ceiling_step_to_amount_at_x4(c: &mut AppController) {
     assert!(c.ceiling_step_amount_pending());
 }
 
+/// The debug dump materializes first and reports both the session inputs and
+/// the per-storey derivation in the stable greppable format.
+#[test]
+fn debug_dump_current_reports_session_state_and_storey() {
+    let mut c = ceiling_ready_controller();
+    ceiling_step_to_amount_at_x4(&mut c);
+    c.assign_ceiling_step_delta(0.3).expect("delta applies");
+    let dump = c.debug_dump_current();
+    assert!(dump.contains("=== SESSION STATE ==="));
+    assert!(dump.contains("ceiling_step=true"), "{dump}");
+    assert!(dump.contains("ceiling_step_region[storey 0][0] delta_m=0.3000"));
+    assert!(dump.contains("=== STOREY DUMP[0] ==="));
+    assert!(dump.contains("ceiling_height_m: Some(2.4"), "{dump}");
+    assert!(dump.contains("roofs (2):"), "{dump}");
+    assert!(dump.contains("=== END STOREY DUMP[0] ==="));
+}
+
 /// The mode toggle is gated: refused while the storey has no default ceiling
 /// height (the deltas are relative to it), available once it's set, and never
 /// available on the read-only All tab.

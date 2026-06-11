@@ -48,6 +48,8 @@ pub enum Tool {
     SaveCheckpoint,
     /// DEV: load the checkpoint file, replacing the current sketch session.
     LoadCheckpoint,
+    /// DEV: dump the roof/wall derivation state to stdout + clipboard.
+    DebugDump,
     /// Read-only autosave status line ("saved Ns ago").
     AutosaveStatus,
 }
@@ -103,6 +105,7 @@ pub const CATEGORIES: &[Category] = &[
         tools: &[
             Tool::SaveCheckpoint,
             Tool::LoadCheckpoint,
+            Tool::DebugDump,
             Tool::AutosaveStatus,
         ],
     },
@@ -543,6 +546,18 @@ fn tool_ui<F: FnMut(UiEvent)>(
                 .clicked()
             {
                 on_event(UiEvent::Sketch(SketchEvent::LoadCheckpoint));
+            }
+        }
+        Tool::DebugDump => {
+            if ui
+                .button("🐞 Debug dump")
+                .on_hover_text(
+                    "DEV: print the roof/wall derivation dump to the terminal \
+                     and copy it to the clipboard",
+                )
+                .clicked()
+            {
+                on_event(UiEvent::Sketch(SketchEvent::DebugDump));
             }
         }
         Tool::AutosaveStatus => {

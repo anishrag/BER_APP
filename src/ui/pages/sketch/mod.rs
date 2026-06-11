@@ -119,6 +119,9 @@ pub enum SketchEvent {
     /// DEV: load the checkpoint file into the editor, replacing the current
     /// sketch session (same reconstruction as a `BER_CHECKPOINT=1` launch).
     LoadCheckpoint,
+    /// DEV: print the roof/wall derivation dump to stdout (and copy it to
+    /// the clipboard) for paste-ready diagnosis.
+    DebugDump,
     /// Extend-mode stroke completed: the user's captured stroke,
     /// converted to *world* coords via the current fit transform so the
     /// controller can compare it against the polygon (which is in real

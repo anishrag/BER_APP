@@ -1216,6 +1216,388 @@ mod tests {
         );
     }
 
+    /// THE USER'S RAISED-AND-RIDGED-JUT SCENARIO: an L-shaped storey (main
+    /// 4×4 + a 2×2 jut east at x ∈ [4,6], y ∈ [0,2]), the jut's ceiling
+    /// raised 1 m by a ceiling step, then a ridge over the raised jut
+    /// (apexes (4.5, 1) hip end and (6, 1) gable end, both at 4.4 m). The
+    /// perimeter walls under the raised section must JOIN the roof: eaves at
+    /// the RAISED base (3.4), the gable-end wall rising to the ridge, and
+    /// the long south wall jumping 2.4 → 3.4 where the step crosses it.
+    #[test]
+    fn walls_under_a_raised_and_ridged_jut_join_the_roof() {
+        let mut doc = square_doc(&[
+            Point2f32::new(0.0, 0.0),
+            Point2f32::new(6.0, 0.0),
+            Point2f32::new(6.0, 2.0),
+            Point2f32::new(4.0, 2.0),
+            Point2f32::new(4.0, 4.0),
+            Point2f32::new(0.0, 4.0),
+        ]);
+        // Mark EVERY perimeter wall exposed — the user painted the envelope.
+        for (vid, a, b) in doc.outline.floor_plan.perimeter_walls() {
+            let len = manip_2d_plan::segment_len(a, b);
+            doc.set_wall_section(vid, 0.0, len, len, WallExposure::Exposed);
+        }
+        let mut ber = Ber::default();
+        ensure_storey_constructions(&mut ber, 0, &[]);
+        ber.set_default_ceiling_height(Some(0), 2.4);
+        // Raise the jut: step at x = 4, Greater side, +1.0 → jut ceiling 3.4.
+        let step = doc
+            .ceiling_step_region(
+                manip_2d_plan::ParameterAxis::X,
+                4.0,
+                crate::LineSide::Greater,
+                1.0,
+            )
+            .unwrap();
+        // Ridge over the raised jut along y = 1: hip end inside, gable end
+        // ON the east perimeter wall.
+        for apex in [
+            RoofApex {
+                point: Point2f64::new(4.5, 1.0),
+                z_m: 4.4,
+            },
+            RoofApex {
+                point: Point2f64::new(6.0, 1.0),
+                z_m: 4.4,
+            },
+        ] {
+            ber.add_roof_apex(0, apex);
+        }
+        let storey = resolve_storey(&doc, &ber, 0, &[], &[], &[step]);
+        assert_eq!(storey.walls.regions.len(), 6, "one region per edge");
+
+        // Find a wall region by its base edge (either orientation).
+        let wall_with_base = |a: Point2f64, b: Point2f64| {
+            storey
+                .walls
+                .regions
+                .iter()
+                .find(|r| {
+                    let e = &r.polygon.exterior;
+                    let close = |p: &domain::points::Point3f64, q: Point2f64| {
+                        (p.x - q.x).abs() < 1e-6 && (p.y - q.y).abs() < 1e-6
+                    };
+                    close(&e[0], a) && close(&e[1], b) || close(&e[0], b) && close(&e[1], a)
+                })
+                .unwrap_or_else(|| panic!("no wall with base ({a:?}, {b:?})"))
+        };
+        // Top vertices (above the base) of a wall region.
+        let tops = |r: &datatypes::ber::structural::WallRegion| -> Vec<domain::points::Point3f64> {
+            r.polygon
+                .exterior
+                .iter()
+                .filter(|v| v.z > 1e-9)
+                .copied()
+                .collect()
+        };
+
+        // East gable-end wall (6,0)→(6,2): eaves at 3.4 at both ends, rising
+        // to the ridge (6, 1, 4.4) in between.
+        let east = wall_with_base(Point2f64::new(6.0, 0.0), Point2f64::new(6.0, 2.0));
+        let east_tops = tops(east);
+        let z_at_y = |ts: &[domain::points::Point3f64], y: f64| {
+            ts.iter()
+                .filter(|v| (v.y - y).abs() < 1e-6)
+                .map(|v| v.z)
+                .fold(f64::NEG_INFINITY, f64::max)
+        };
+        assert!(
+            (z_at_y(&east_tops, 0.0) - 3.4).abs() < 1e-6,
+            "east wall eaves at the RAISED base at (6,0): {east_tops:?}"
+        );
+        assert!(
+            (z_at_y(&east_tops, 2.0) - 3.4).abs() < 1e-6,
+            "east wall eaves at the RAISED base at (6,2): {east_tops:?}"
+        );
+        assert!(
+            (z_at_y(&east_tops, 1.0) - 4.4).abs() < 1e-6,
+            "east wall rises to the ridge under the gable: {east_tops:?}"
+        );
+
+        // North jut wall (6,2)→(4,2): flat eaves along the raised base.
+        let jut_north = wall_with_base(Point2f64::new(6.0, 2.0), Point2f64::new(4.0, 2.0));
+        let jn_tops = tops(jut_north);
+        assert!(
+            jn_tops.iter().all(|v| (v.z - 3.4).abs() < 1e-6),
+            "jut north wall tops out at the raised eaves: {jn_tops:?}"
+        );
+
+        // South wall (0,0)→(6,0): 2.4 over the main span, a vertical jump at
+        // x = 4, then the RAISED eaves 3.4 over the jut span.
+        let south = wall_with_base(Point2f64::new(0.0, 0.0), Point2f64::new(6.0, 0.0));
+        let s_tops = tops(south);
+        let z_at_x = |ts: &[domain::points::Point3f64], x: f64| {
+            ts.iter()
+                .filter(|v| (v.x - x).abs() < 1e-6)
+                .map(|v| v.z)
+                .fold(f64::NEG_INFINITY, f64::max)
+        };
+        assert!(
+            (z_at_x(&s_tops, 0.0) - 2.4).abs() < 1e-6,
+            "south wall at the default height on the main span: {s_tops:?}"
+        );
+        assert!(
+            (z_at_x(&s_tops, 4.0) - 3.4).abs() < 1e-6,
+            "south wall jumps to the raised eaves at the step: {s_tops:?}"
+        );
+        assert!(
+            (z_at_x(&s_tops, 6.0) - 3.4).abs() < 1e-6,
+            "south wall at the raised eaves over the jut: {s_tops:?}"
+        );
+        assert!(
+            s_tops
+                .iter()
+                .all(|v| v.x > 4.0 - 1e-6 || (v.z - 2.4).abs() < 1e-6),
+            "main-span top stays flat at 2.4: {s_tops:?}"
+        );
+        assert!(
+            s_tops
+                .iter()
+                .all(|v| v.x < 4.0 + 1e-6 || (v.z - 3.4).abs() < 1e-6),
+            "jut-span top stays flat at the raised eaves 3.4: {s_tops:?}"
+        );
+
+        // Main-only walls stay at the default height.
+        let west = wall_with_base(Point2f64::new(0.0, 4.0), Point2f64::new(0.0, 0.0));
+        assert!(
+            tops(west).iter().all(|v| (v.z - 2.4).abs() < 1e-6),
+            "west wall flat at the default height"
+        );
+    }
+
+    /// The SAME scenario through the APP'S ACTUAL LOOP: non-integer (real
+    /// sketch) coordinates, interior ridge apexes (the two-apex flow
+    /// validates them strictly inside the stepped region), and the shell's
+    /// canonicalize step after every assign (resolve → reconstruct the
+    /// session ceiling-step list from the derived roofs → re-resolve). The
+    /// jut's perimeter walls must still top out at the RAISED eaves.
+    #[test]
+    fn walls_join_the_raised_ridged_roof_through_the_canonicalize_loop() {
+        let mut doc = square_doc(&[
+            Point2f32::new(0.13, 0.27),
+            Point2f32::new(6.41, 0.27),
+            Point2f32::new(6.41, 2.33),
+            Point2f32::new(4.22, 2.33),
+            Point2f32::new(4.22, 4.51),
+            Point2f32::new(0.13, 4.51),
+        ]);
+        for (vid, a, b) in doc.outline.floor_plan.perimeter_walls() {
+            let len = manip_2d_plan::segment_len(a, b);
+            doc.set_wall_section(vid, 0.0, len, len, WallExposure::Exposed);
+        }
+        let mut ber = Ber::default();
+        ensure_storey_constructions(&mut ber, 0, &[]);
+        ber.set_default_ceiling_height(Some(0), 2.43);
+
+        // Step assign: raise the jut (x ≥ 4.22, snapped to the inner wall)
+        // by 1 m, then canonicalize (materialize → reconstruct → re-resolve).
+        let step = doc
+            .ceiling_step_region(
+                manip_2d_plan::ParameterAxis::X,
+                4.22,
+                crate::LineSide::Greater,
+                1.0,
+            )
+            .unwrap();
+        ber.storeys[0] = resolve_storey(&doc, &ber, 0, &[], &[], &[step]);
+        let steps = crate::ceiling_step_regions_from_roofs(&ber, 0);
+        ber.storeys[0] = resolve_storey(&doc, &ber, 0, &[], &[], &steps);
+
+        // Ridge assign: two apexes strictly inside the raised jut piece
+        // (validate_roof_ridge guarantees this in the app), then the
+        // canonicalize loop again.
+        let raised_eaves = 2.43 + 1.0;
+        for apex in [
+            RoofApex {
+                point: Point2f64::new(4.8, 1.3),
+                z_m: 4.4,
+            },
+            RoofApex {
+                point: Point2f64::new(5.9, 1.3),
+                z_m: 4.4,
+            },
+        ] {
+            ber.add_roof_apex(0, apex);
+        }
+        ber.storeys[0] = resolve_storey(&doc, &ber, 0, &[], &[], &steps);
+        let steps2 = crate::ceiling_step_regions_from_roofs(&ber, 0);
+        assert_eq!(steps2.len(), 1, "one merged step area under the ridge");
+        ber.storeys[0] = resolve_storey(&doc, &ber, 0, &[], &[], &steps2);
+        let storey = &ber.storeys[0];
+
+        let wall_with_base = |a: Point2f64, b: Point2f64| {
+            storey
+                .walls
+                .regions
+                .iter()
+                .find(|r| {
+                    let e = &r.polygon.exterior;
+                    let close = |p: &domain::points::Point3f64, q: Point2f64| {
+                        (p.x - q.x).abs() < 1e-3 && (p.y - q.y).abs() < 1e-3
+                    };
+                    close(&e[0], a) && close(&e[1], b) || close(&e[0], b) && close(&e[1], a)
+                })
+                .unwrap_or_else(|| panic!("no wall with base ({a:?}, {b:?})"))
+        };
+        let tops = |r: &datatypes::ber::structural::WallRegion| -> Vec<domain::points::Point3f64> {
+            r.polygon
+                .exterior
+                .iter()
+                .filter(|v| v.z > 1e-9)
+                .copied()
+                .collect()
+        };
+
+        // The jut's own perimeter walls (east + jut-north): hip ends are
+        // strictly inside, so the whole top is the RAISED eaves — flat 3.43.
+        for (a, b, name) in [
+            (
+                Point2f64::new(6.41, 0.27),
+                Point2f64::new(6.41, 2.33),
+                "east",
+            ),
+            (
+                Point2f64::new(6.41, 2.33),
+                Point2f64::new(4.22, 2.33),
+                "jut north",
+            ),
+        ] {
+            let w = wall_with_base(a, b);
+            let ts = tops(w);
+            assert!(
+                ts.iter().all(|v| (v.z - raised_eaves).abs() < 1e-3),
+                "{name} wall must top out at the raised eaves {raised_eaves}: {ts:?}"
+            );
+        }
+
+        // The long south wall: default height over the main span, raised
+        // eaves over the jut span, one vertical jump at the step.
+        let south = wall_with_base(Point2f64::new(0.13, 0.27), Point2f64::new(6.41, 0.27));
+        let s_tops = tops(south);
+        let max_z_where = |pred: &dyn Fn(&domain::points::Point3f64) -> bool| {
+            s_tops
+                .iter()
+                .filter(|v| pred(v))
+                .map(|v| v.z)
+                .fold(f64::NEG_INFINITY, f64::max)
+        };
+        assert!(
+            (max_z_where(&|v| v.x < 4.0) - 2.43).abs() < 1e-3,
+            "south wall main span at the default height: {s_tops:?}"
+        );
+        assert!(
+            (max_z_where(&|v| v.x > 4.5) - raised_eaves).abs() < 1e-3,
+            "south wall jut span at the RAISED eaves: {s_tops:?}"
+        );
+    }
+
+    /// THE REGRESSION GUARD for the raised+ridged-jut wall bug: 200
+    /// pseudo-random L-footprints (messy real-sketch f32 coordinates)
+    /// through the full step → canonicalize → ridge → canonicalize loop.
+    /// Pre-fix, ~20% of trials left the jut's perimeter walls flat at the
+    /// DEFAULT height: the boolean-op output (i_overlay grid snapping, plus
+    /// the f32 round-trip of canonicalization) displaces the stepped roof
+    /// piece's boundary a few 1e-7 m off the wall line, the exact
+    /// boundary-inclusive containment pick in `covering_roof_plane` then
+    /// misses, and `fallback_top_z` silently flattens the wall. Fixed by the
+    /// metric-tolerance sampling in datatypes (`PROFILE_EPS_M`).
+    #[test]
+    fn stress_walls_join_raised_ridged_roof() {
+        let mut seed: u64 = 0x9E3779B97F4A7C15;
+        let mut next = move || {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            (seed >> 11) as f64 / (1u64 << 53) as f64
+        };
+        let mut failures = 0;
+        for trial in 0..200 {
+            // Messy f32 sketch-like coords.
+            let x0 = (0.0 + next() * 0.5) as f32;
+            let y0 = (0.0 + next() * 0.5) as f32;
+            let xm = x0 + (3.5 + next()) as f32; // inner corner x
+            let x1 = xm + (1.5 + next()) as f32; // east extent
+            let y1 = y0 + (1.5 + next()) as f32; // jut north
+            let y2 = y1 + (1.5 + next()) as f32; // main north
+            let doc = {
+                let mut doc = square_doc(&[
+                    Point2f32::new(x0, y0),
+                    Point2f32::new(x1, y0),
+                    Point2f32::new(x1, y1),
+                    Point2f32::new(xm, y1),
+                    Point2f32::new(xm, y2),
+                    Point2f32::new(x0, y2),
+                ]);
+                for (vid, a, b) in doc.outline.floor_plan.perimeter_walls() {
+                    let len = manip_2d_plan::segment_len(a, b);
+                    doc.set_wall_section(vid, 0.0, len, len, WallExposure::Exposed);
+                }
+                doc
+            };
+            let h = 2.4;
+            let mut ber = Ber::default();
+            ensure_storey_constructions(&mut ber, 0, &[]);
+            ber.set_default_ceiling_height(Some(0), h);
+            let step = doc
+                .ceiling_step_region(
+                    manip_2d_plan::ParameterAxis::X,
+                    xm,
+                    crate::LineSide::Greater,
+                    1.0,
+                )
+                .unwrap();
+            ber.storeys[0] = resolve_storey(&doc, &ber, 0, &[], &[], &[step]);
+            let steps = crate::ceiling_step_regions_from_roofs(&ber, 0);
+            ber.storeys[0] = resolve_storey(&doc, &ber, 0, &[], &[], &steps);
+            // Ridge strictly inside the jut, along its mid-y.
+            let my = (y0 as f64 + y1 as f64) / 2.0;
+            for apex in [
+                RoofApex {
+                    point: Point2f64::new(xm as f64 + 0.4, my),
+                    z_m: h + 2.0,
+                },
+                RoofApex {
+                    point: Point2f64::new(x1 as f64 - 0.4, my),
+                    z_m: h + 2.0,
+                },
+            ] {
+                ber.add_roof_apex(0, apex);
+            }
+            ber.storeys[0] = resolve_storey(&doc, &ber, 0, &[], &[], &steps);
+            let steps2 = crate::ceiling_step_regions_from_roofs(&ber, 0);
+            ber.storeys[0] = resolve_storey(&doc, &ber, 0, &[], &[], &steps2);
+            let storey = &ber.storeys[0];
+            let raised = h + 1.0;
+            // Jut perimeter walls: east (x1,y0)-(x1,y1) and north (x1,y1)-(xm,y1).
+            for r in &storey.walls.regions {
+                let e = &r.polygon.exterior;
+                let (a, b) = (e[0], e[1]);
+                let on_jut = (a.x - x1 as f64).abs() < 1e-6 && (b.x - x1 as f64).abs() < 1e-6
+                    || (a.y - y1 as f64).abs() < 1e-6
+                        && (b.y - y1 as f64).abs() < 1e-6
+                        && a.x > xm as f64 - 1e-6
+                        && b.x > xm as f64 - 1e-6;
+                if !on_jut {
+                    continue;
+                }
+                let bad: Vec<_> = e
+                    .iter()
+                    .filter(|v| v.z > 1e-9 && (v.z - raised).abs() > 1e-3)
+                    .collect();
+                if !bad.is_empty() {
+                    failures += 1;
+                    eprintln!(
+                        "trial {trial}: wall base ({:.4},{:.4})-({:.4},{:.4}) tops wrong: {bad:?} \
+                         [xm={xm}, x1={x1}, y0={y0}, y1={y1}]",
+                        a.x, a.y, b.x, b.y
+                    );
+                }
+            }
+        }
+        assert_eq!(failures, 0, "{failures} failing trials");
+    }
+
     /// Exposure recovery round-trips SLOPED-TOP walls: the base edge stays at
     /// `exterior[0..2]` whatever the top does, so `sections_from_wall_regions`
     /// reads back exactly the painted sections.

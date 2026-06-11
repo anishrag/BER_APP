@@ -1092,6 +1092,13 @@ impl eframe::App for BerApp {
                                             eprintln!("load_checkpoint: no checkpoint file found");
                                         }
                                     }
+                                    SketchEvent::DebugDump => {
+                                        // Stdout for the terminal user, clipboard
+                                        // for pasting straight into a report.
+                                        let dump = controller.borrow_mut().debug_dump_current();
+                                        println!("{dump}");
+                                        ctx.copy_text(dump);
+                                    }
                                     SketchEvent::CancelVertexDrop => {
                                         // Note: the toolbar already cleared `inputs`
                                         // when the Cancel button was clicked; touching
