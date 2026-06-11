@@ -42,20 +42,23 @@ pub struct CeilingStepRegion {
 }
 
 /// Rebuild the session ceiling-step regions for storey `idx` from its
-/// persisted roofs — APEX-AWARE: each region's BASE height is read with the
-/// storey's roof apexes dropped (`CeilingRegion::fan_base_z`, which equals
-/// `flat_z` for unfanned regions), and a region whose base differs from the
-/// storey's default by ≥ 1 mm → one step region with `delta = base − default`.
-/// A fan piece over a stepped area thus emits its TRIANGLE ring at the step's
-/// delta — that's the apex-over-step reload fixpoint: re-deriving applies the
-/// triangle steps first, then `with_apexes` re-fans them to the identical
-/// surface (composition order: default → steps → apexes). Known UX cost: the
-/// step list fragments into triangles under a fan — accepted for now. Empty
-/// when the storey is missing or its ceiling height is unset (steps only
-/// exist relative to a default). Genuinely irregular sloped regions (no
-/// shared base once apex vertices drop) are skipped, as are degenerate
-/// sub-mm² slivers. Without this, the next commit would re-derive the default
-/// flat ceiling with no areas and flatten the steps.
+/// persisted roofs — GROUP-AWARE: the storey's roof apexes are grouped with
+/// the regions they shape (`CeilingRegions::apex_groups`, THE grouping
+/// authority), and each group whose shared base differs from the storey's
+/// default by ≥ 1 mm emits ONE step region per merged ring at
+/// `delta = base − default` — a fan or ridge over a stepped area
+/// reconstructs as the whole conceptual area it was raised over, not a
+/// triangle list. Plain FLAT regions in no group whose height is off the
+/// default by ≥ 1 mm emit their own ring, as before; SLOPED regions in no
+/// group (nothing durable explains their slope) are warn-skipped. Degenerate
+/// sub-mm² slivers are dropped. Empty when the storey is missing or its
+/// ceiling height is unset (steps only exist relative to a default).
+///
+/// This is one half of the reload fixpoint: re-deriving applies the merged
+/// step area first, then `with_apexes` re-forms the fan/ridge over the
+/// stepped piece (composition order: default → steps → apexes), reproducing
+/// the identical surface. Without this, the next commit would re-derive the
+/// default flat ceiling with no areas and flatten the steps.
 pub fn ceiling_step_regions_from_roofs(ber: &Ber, idx: usize) -> Vec<CeilingStepRegion> {
     let Some(storey) = ber.storeys.get(idx) else {
         return Vec::new();
@@ -64,8 +67,44 @@ pub fn ceiling_step_regions_from_roofs(ber: &Ber, idx: usize) -> Vec<CeilingStep
         return Vec::new();
     };
     let mut regions: Vec<CeilingStepRegion> = Vec::new();
-    for region in &storey.roofs.regions {
-        let Some(z) = region.fan_base_z(&storey.roof_apexes) else {
+    let mut push_ring = |ring: Vec<Point2f32>, delta: f64| {
+        if ring.len() >= 3 && ring_area2(&ring) >= 2e-6 {
+            regions.push(CeilingStepRegion {
+                polygon: ring,
+                delta_m: delta,
+            });
+        }
+    };
+    // Apex groups first: one step region per merged ring at the group's base.
+    let groups = storey.roofs.apex_groups(&storey.roof_apexes);
+    for group in &groups {
+        let delta = group.base_z - default_z;
+        if delta.abs() < 1e-3 {
+            continue;
+        }
+        for ring in &group.merged_rings {
+            let ring32: Vec<Point2f32> = ring
+                .iter()
+                .map(|v| Point2f32::new(v.x as f32, v.y as f32))
+                .collect();
+            push_ring(ring32, delta);
+        }
+    }
+    // Then the plain (un-apexed) regions: flat ones off the default step,
+    // sloped ones are irregular — warn-skip.
+    let grouped: std::collections::HashSet<usize> = groups
+        .iter()
+        .flat_map(|g| g.region_idxs.iter().copied())
+        .collect();
+    for (ri, region) in storey.roofs.regions.iter().enumerate() {
+        if grouped.contains(&ri) {
+            continue;
+        }
+        let Some(z) = region.flat_z() else {
+            log::warn!(
+                "sloped ceiling region in no apex group on storey {idx} — \
+                 skipped by the ceiling-step reconstruction"
+            );
             continue;
         };
         let delta = z - default_z;
@@ -78,12 +117,7 @@ pub fn ceiling_step_regions_from_roofs(ber: &Ber, idx: usize) -> Vec<CeilingStep
             .iter()
             .map(|v| Point2f32::new(v.x as f32, v.y as f32))
             .collect();
-        if ring.len() >= 3 && ring_area2(&ring) >= 2e-6 {
-            regions.push(CeilingStepRegion {
-                polygon: ring,
-                delta_m: delta,
-            });
-        }
+        push_ring(ring, delta);
     }
     regions
 }
@@ -636,12 +670,12 @@ mod tests {
         assert!(ceiling_step_regions_from_roofs(&ber, 7).is_empty());
     }
 
-    /// APEX-AWARE reconstruction: a fan piece whose BASE (apex vertices
-    /// dropped) is off the default emits its triangle ring at the step delta;
-    /// a fan over the default base emits nothing; a genuinely irregular slope
-    /// (no apex match) is skipped.
+    /// GROUP-AWARE reconstruction: a fan whose group BASE is off the default
+    /// emits ONE merged step region (the whole area it was raised over, not
+    /// its triangles); a fan over the default base emits nothing; a genuinely
+    /// irregular slope (no apex group) is warn-skipped.
     #[test]
-    fn reconstruction_is_apex_aware() {
+    fn reconstruction_is_group_aware() {
         use datatypes::ber::structural::{
             CeilingRegion, CeilingRegions, Polygon3D, RoofApex, Storey,
         };
@@ -700,13 +734,14 @@ mod tests {
         });
 
         let regions = ceiling_step_regions_from_roofs(&ber, 0);
-        assert_eq!(regions.len(), n_fan, "only the stepped fan's triangles");
-        let mut total = 0.0;
-        for r in &regions {
-            assert!((r.delta_m - 0.3).abs() < 1e-9, "each recovers the delta");
-            assert_eq!(r.polygon.len(), 3, "triangle rings, apex corner kept");
-            total += ring_area2(&r.polygon) / 2.0;
-        }
-        assert!((total - 8.0).abs() < 1e-4, "triangles tile the 2×4 half");
+        assert_eq!(regions.len(), 1, "ONE merged area, not the fan's triangles");
+        assert!(
+            (regions[0].delta_m - 0.3).abs() < 1e-9,
+            "recovers the delta"
+        );
+        assert!(
+            (ring_area2(&regions[0].polygon) / 2.0 - 8.0).abs() < 1e-4,
+            "the merged ring is the whole 2×4 stepped half"
+        );
     }
 }

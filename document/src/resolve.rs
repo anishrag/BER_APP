@@ -837,8 +837,9 @@ mod tests {
 
     /// THE APEX-OVER-STEP RELOAD FIXPOINT (the load-bearing invariant):
     /// resolve with a step + an apex over the stepped piece, reconstruct the
-    /// session steps apex-aware (the fan's triangles each recover the step
-    /// delta), re-resolve from the reconstruction → the identical surface.
+    /// session steps group-aware (the fan's group merges back into ONE step
+    /// area at the step delta), re-resolve from the reconstruction → the
+    /// identical surface.
     #[test]
     fn apex_over_step_reload_fixpoint() {
         let (doc, mut ber) = ceiling_test_setup(2.4);
@@ -863,15 +864,15 @@ mod tests {
         let before = roof_surface_multiset(&ber.storeys[0]);
         assert!((before.iter().map(|r| r.0).sum::<f64>() - 16.0).abs() < 1e-4);
 
-        // APEX-AWARE reconstruction: each fan triangle recovers delta 0.3.
+        // GROUP-AWARE reconstruction: the fan's group merges back into ONE
+        // step area (the whole 2×4 stepped half) at delta 0.3.
         let rec1 = crate::ceiling_step_regions_from_roofs(&ber, 0);
-        assert_eq!(rec1.len(), 4, "the fan's triangles, not the flat piece");
-        let mut rec_area = 0.0;
-        for r in &rec1 {
-            assert!((r.delta_m - 0.3).abs() < 1e-9);
-            rec_area += crate::step::ring_area2(&r.polygon) / 2.0;
-        }
-        assert!((rec_area - 8.0).abs() < 1e-4, "triangles tile the 2×4 half");
+        assert_eq!(rec1.len(), 1, "one merged area, not the fan's triangles");
+        assert!((rec1[0].delta_m - 0.3).abs() < 1e-9);
+        assert!(
+            (crate::step::ring_area2(&rec1[0].polygon) / 2.0 - 8.0).abs() < 1e-4,
+            "the merged ring is the 2×4 half"
+        );
 
         // Re-resolve from the reconstruction → identical surface (the apex
         // re-fans its own triangles to themselves — sliver-drop identity).
@@ -904,6 +905,104 @@ mod tests {
         ber.storeys[0] = resolve_storey(&doc, &ber, 0, &[], &[], &rec);
         let after = roof_surface_multiset(&ber.storeys[0]);
         assert_same_surface(&before, &after);
+    }
+
+    /// Total plan area per (min z, max z) signature, sorted — the "z → area
+    /// multiset" view of the roof surface. Coarser than the per-region
+    /// multiset: robust to how the surface is tiled into regions, which is
+    /// exactly what the FIRST resolve→reconstruct→re-resolve round may
+    /// change (the union can canonicalize ring vertices).
+    fn roof_z_area_multiset(storey: &Storey) -> Vec<(f64, f64, f64)> {
+        let mut agg: Vec<(f64, f64, f64)> = Vec::new();
+        for (area, lo, hi) in roof_surface_multiset(storey) {
+            match agg
+                .iter_mut()
+                .find(|(l, h, _)| (l - lo).abs() < 1e-6 && (h - hi).abs() < 1e-6)
+            {
+                Some((_, _, a)) => *a += area,
+                None => agg.push((lo, hi, area)),
+            }
+        }
+        agg.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        agg
+    }
+
+    fn assert_same_z_areas(before: &[(f64, f64, f64)], after: &[(f64, f64, f64)]) {
+        assert_eq!(before.len(), after.len(), "same set of z signatures");
+        for ((bl, bh, ba), (al, ah, aa)) in before.iter().zip(after) {
+            assert!(
+                (bl - al).abs() < 1e-6 && (bh - ah).abs() < 1e-6 && (ba - aa).abs() < 1e-4,
+                "z→area changed: before ({bl:.3}, {bh:.3}, {ba:.6}) vs after \
+                 ({al:.3}, {ah:.3}, {aa:.6})"
+            );
+        }
+    }
+
+    /// THE END-TO-END RIDGE FIXPOINT: a step + a RIDGE (two apexes) over the
+    /// stepped area → resolve → reconstruct (ONE merged step area — the
+    /// fragmentation wart is dead) → re-resolve → geometrically equal roofs
+    /// (z → area multiset) → reconstruct + re-resolve once more → still
+    /// equal (settled after the first canonicalize).
+    #[test]
+    fn ridge_over_step_reload_fixpoint() {
+        let (doc, mut ber) = ceiling_test_setup(2.4);
+        // Right half (x ≥ 2) stepped to 2.7; a ridge along x = 3 over it.
+        let step = doc
+            .ceiling_step_region(
+                manip_2d_plan::ParameterAxis::X,
+                2.0,
+                crate::LineSide::Greater,
+                0.3,
+            )
+            .unwrap();
+        ber.add_roof_apex(
+            0,
+            RoofApex {
+                point: Point2f64::new(3.0, 1.0),
+                z_m: 4.2,
+            },
+        );
+        ber.add_roof_apex(
+            0,
+            RoofApex {
+                point: Point2f64::new(3.0, 3.0),
+                z_m: 4.2,
+            },
+        );
+        ber.storeys[0] = resolve_storey(&doc, &ber, 0, &[], &[], &[step]);
+        // The flat left half + the ridge's hub/transition triangles, with the
+        // ridge tops at 4.2 and the eaves at the STEPPED base 2.7.
+        let before = roof_z_area_multiset(&ber.storeys[0]);
+        assert!(
+            (before.iter().map(|r| r.2).sum::<f64>() - 16.0).abs() < 1e-4,
+            "the surface tiles the footprint"
+        );
+        assert!(
+            ber.storeys[0].roofs.regions.iter().any(|r| r
+                .polygon
+                .exterior
+                .iter()
+                .any(|v| (v.z - 4.2).abs() < 1e-9)),
+            "the ridge rises"
+        );
+
+        // Reconstruct: ONE merged step area (the whole 2×4 stepped half).
+        let rec1 = crate::ceiling_step_regions_from_roofs(&ber, 0);
+        assert_eq!(rec1.len(), 1, "one merged area under the ridge");
+        assert!((rec1[0].delta_m - 0.3).abs() < 1e-9);
+        assert!((crate::step::ring_area2(&rec1[0].polygon) / 2.0 - 8.0).abs() < 1e-4);
+
+        // Re-resolve from the reconstruction → geometrically equal roofs.
+        ber.storeys[0] = resolve_storey(&doc, &ber, 0, &[], &[], &rec1);
+        let after = roof_z_area_multiset(&ber.storeys[0]);
+        assert_same_z_areas(&before, &after);
+
+        // Once more: reconstruct again, re-resolve again → still equal.
+        let rec2 = crate::ceiling_step_regions_from_roofs(&ber, 0);
+        assert_eq!(rec2.len(), 1);
+        assert!((rec2[0].delta_m - 0.3).abs() < 1e-9);
+        ber.storeys[0] = resolve_storey(&doc, &ber, 0, &[], &[], &rec2);
+        assert_same_z_areas(&before, &roof_z_area_multiset(&ber.storeys[0]));
     }
 
     /// While the ceiling height is unset there is no default ceiling to fan:
@@ -1005,6 +1104,88 @@ mod tests {
                 "top reaches {z}"
             );
         }
+    }
+
+    /// WALL-UNDER-RIDGE confidence: a marked wall keeps its identity when a
+    /// ridge forms over the storey (same base edge → amend), its top traces
+    /// the eaves (a strictly-interior ridge is a hip — perimeter walls stay
+    /// at the base height), and `regenerate`'s plane sampler handles ridge
+    /// triangles: a segment crossing UNDER the ridge line gets a genuinely
+    /// sloped top rising to the ridge height.
+    #[test]
+    fn wall_under_a_ridge_keeps_identity_and_samples_ridge_planes() {
+        let mut doc = square_doc(&[
+            Point2f32::new(0.0, 0.0),
+            Point2f32::new(4.0, 0.0),
+            Point2f32::new(4.0, 4.0),
+            Point2f32::new(0.0, 4.0),
+        ]);
+        let (vid, a, b) = doc.outline.floor_plan.perimeter_walls()[0];
+        let len = manip_2d_plan::segment_len(a, b);
+        doc.set_wall_section(vid, 0.0, len, len, WallExposure::Exposed);
+        let mut ber = Ber::default();
+        ensure_storey_constructions(&mut ber, 0, &[]);
+        ber.set_default_ceiling_height(Some(0), 2.4);
+
+        // Flat resolve first — capture the wall's identity.
+        ber.storeys[0] = resolve_storey(&doc, &ber, 0, &[], &[], &[]);
+        let id0 = ber.storeys[0].walls.regions[0].id;
+
+        // A ridge along x = 2 (apexes (2,1) and (2,3) at 4.2) → re-resolve.
+        for y in [1.0, 3.0] {
+            ber.add_roof_apex(
+                0,
+                RoofApex {
+                    point: Point2f64::new(2.0, y),
+                    z_m: 4.2,
+                },
+            );
+        }
+        let storey = resolve_storey(&doc, &ber, 0, &[], &[], &[]);
+        assert_eq!(storey.walls.regions.len(), 1);
+        let wall = &storey.walls.regions[0];
+        assert_eq!(wall.id, id0, "same base edge → same wall (amend)");
+        // The marked wall is on the footprint boundary: every roof triangle
+        // meets it along an eaves edge at the base height — flat top (hip).
+        assert!(wall
+            .polygon
+            .exterior
+            .iter()
+            .all(|q| q.z.abs() < 1e-9 || (q.z - 2.4).abs() < 1e-9));
+
+        // The plane-sampler confidence half: a segment along y = 2 crosses
+        // under the ridge line — its top slopes up the hub/transition planes
+        // (z = 2.4 + 0.9·x on the left), peaks at the ridge (x = 2, z = 4.2),
+        // and slopes back down.
+        use datatypes::ber::structural::WallRegions;
+        let wall_cid = ber
+            .wall_construction_id(Default::default(), Default::default(), Default::default())
+            .unwrap();
+        let walls = WallRegions::regenerate(
+            vec![(
+                Point2f64::new(0.0, 2.0),
+                Point2f64::new(4.0, 2.0),
+                WallExposure::Exposed,
+            )],
+            &WallRegions::default(),
+            &storey.roofs,
+            0.0,
+            2.4,
+            wall_cid,
+        );
+        let ext = &walls.regions[0].polygon.exterior;
+        let top_at = |x: f64| {
+            ext.iter()
+                .filter(|q| (q.x - x).abs() < 1e-6 && q.z > 1e-9)
+                .map(|q| q.z)
+                .fold(f64::NEG_INFINITY, f64::max)
+        };
+        assert!((top_at(0.0) - 2.4).abs() < 1e-6, "eaves at the left end");
+        assert!((top_at(4.0) - 2.4).abs() < 1e-6, "eaves at the right end");
+        assert!(
+            (top_at(2.0) - 4.2).abs() < 1e-6,
+            "the top reaches the ridge height where it crosses the ridge"
+        );
     }
 
     /// Exposure recovery round-trips SLOPED-TOP walls: the base edge stays at

@@ -3820,8 +3820,9 @@ fn roof_apex_survives_reload_with_no_session_state_and_rederive_fixpoint() {
 
 /// An apex OVER a ceiling step — the load-bearing fixpoint chain end-to-end:
 /// the fan keeps the stepped base, the session ceiling-step list
-/// CANONICALIZES into the fan's triangle pieces (each carrying the step
-/// delta), and reload + re-derive reproduce the identical surface.
+/// CANONICALIZES into ONE merged step area (the fan's apex group, merged
+/// back to the whole stepped piece), and reload + re-derive reproduce the
+/// identical surface.
 #[test]
 fn roof_apex_over_a_ceiling_step_canonicalizes_and_survives_reload() {
     let mut c = ceiling_ready_controller();
@@ -3835,14 +3836,15 @@ fn roof_apex_over_a_ceiling_step_canonicalizes_and_survives_reload() {
     c.skip_position_dimension(); // Y stays 5.0
     c.assign_roof_apex(4.2).expect("apex over the step assigns");
 
-    // Canonicalized: the stepped piece is now the fan's TRIANGLES, each
-    // recovering the step delta (the accepted step-list fragmentation).
+    // Canonicalized: the fan's apex group merges back into ONE step area
+    // covering the whole stepped piece at the step delta.
     let session = &c.ceiling_step_regions[&0];
-    assert_eq!(session.len(), 4, "one step triangle per fan boundary edge");
-    for r in session {
-        assert!((r.delta_m - 0.3).abs() < 1e-6, "each keeps the delta");
-        assert_eq!(r.polygon.len(), 3);
-    }
+    assert_eq!(session.len(), 1, "one merged area, not fan triangles");
+    assert!((session[0].delta_m - 0.3).abs() < 1e-6, "keeps the delta");
+    let xs: Vec<f32> = session[0].polygon.iter().map(|p| p.x).collect();
+    let min_x = xs.iter().copied().fold(f32::INFINITY, f32::min);
+    let max_x = xs.iter().copied().fold(f32::NEG_INFINITY, f32::max);
+    assert!((min_x - 4.0).abs() < 1e-4 && (max_x - 10.0).abs() < 1e-4);
     c.materialize();
     let zs_of = |c: &AppController| {
         let storey = &c.current_record.as_ref().unwrap().data.storeys[0];
@@ -3872,7 +3874,7 @@ fn roof_apex_over_a_ceiling_step_canonicalizes_and_survives_reload() {
     c.flush_if_dirty().unwrap();
     c.open_ber(&id).unwrap();
     let session = &c.ceiling_step_regions[&0];
-    assert_eq!(session.len(), 4, "triangles reconstructed from the roofs");
+    assert_eq!(session.len(), 1, "merged area reconstructed from the roofs");
     assert!(session.iter().all(|r| (r.delta_m - 0.3).abs() < 1e-6));
     c.mark_dirty().unwrap();
     c.materialize();
@@ -3931,27 +3933,52 @@ fn storey_switch_clears_pending_roof_point() {
     assert!(!c.roof_point_pending(), "pending point abandoned");
 }
 
-/// v1: a second apex inside an already-fanned (sloped) region is rejected at
-/// assign with the stable one-per-area message; the pending point stays open
-/// so the user can cancel or move on.
+/// The two-point ridge flow at the shell level: a SECOND apex inside an
+/// already-fanned region is ACCEPTED — the ridge forms (a sloping one here,
+/// the two heights differ) — and a THIRD point in the ridged area is
+/// rejected with the stable two-per-area message; the pending point stays
+/// open so the user can cancel or move on.
 #[test]
-fn roof_apex_in_an_already_sloped_region_is_rejected_at_assign() {
+fn second_roof_point_forms_a_ridge_and_a_third_is_rejected() {
     let mut c = roof_ready_controller();
     c.roof_point_tap(3.8, 5.2);
     c.apply_position_dimension(4.0).unwrap();
     c.apply_position_dimension(5.0).unwrap();
     c.assign_roof_apex(4.2).unwrap();
 
-    // Strictly inside one of the fan triangles, not on its boundary.
+    // Second point, strictly inside one of the fan triangles: the ridge.
     c.roof_point_tap(3.9, 1.1);
     c.skip_position_dimension();
     c.skip_position_dimension();
+    c.assign_roof_apex(3.5)
+        .expect("second point forms the ridge");
+    let storey = &c.current_record.as_ref().unwrap().data.storeys[0];
+    assert_eq!(storey.roof_apexes.len(), 2, "both apexes durable");
+    let zs: Vec<f64> = storey
+        .roofs
+        .regions
+        .iter()
+        .flat_map(|r| r.polygon.exterior.iter().map(|v| v.z))
+        .collect();
+    assert!(
+        zs.iter().any(|z| (z - 4.2).abs() < 1e-6),
+        "ridge rises to the first apex"
+    );
+    assert!(
+        zs.iter().any(|z| (z - 3.5).abs() < 1e-6),
+        "…and carries the second"
+    );
+
+    // Third point in the ridged area: rejected, pending stays open.
+    c.roof_point_tap(8.0, 5.0);
+    c.skip_position_dimension();
+    c.skip_position_dimension();
     assert!(c.roof_point_height_pending());
-    let err = c.assign_roof_apex(3.5).unwrap_err();
-    assert!(err.contains("already slopes"), "got: {err}");
+    let err = c.assign_roof_apex(3.0).unwrap_err();
+    assert!(err.contains("already has a ridge"), "got: {err}");
     assert!(c.roof_point_height_pending(), "pending intact on rejection");
     let storey = &c.current_record.as_ref().unwrap().data.storeys[0];
-    assert_eq!(storey.roof_apexes.len(), 1, "nothing committed");
+    assert_eq!(storey.roof_apexes.len(), 2, "nothing committed");
     c.cancel_pending_roof_point();
     assert!(!c.roof_point_pending());
 }
