@@ -34,7 +34,8 @@ pub(super) fn has_content(view: &SketchView<'_>) -> bool {
                 || view.ceiling_step_mode
                 || view.ceiling_step_pending
                 || view.roof_point_mode
-                || view.roof_point_pending))
+                || view.roof_point_pending
+                || view.roof_ridge_pending))
 }
 
 /// Render the dock. Priority of the prompt chain: read-only notice >
@@ -131,13 +132,16 @@ pub(super) fn render<F: FnMut(UiEvent)>(
                     on_event,
                 );
             }
-            // Same pending-with-mode-off rule again.
-            if view.roof_point_mode || view.roof_point_pending {
+            // Same pending-with-mode-off rule again. A pending RIDGE (the
+            // stroke flow sharing roof-point mode) keeps it reachable too.
+            if view.roof_point_mode || view.roof_point_pending || view.roof_ridge_pending {
                 roof_point_toolbar(
                     ui,
                     view.roof_apex_views,
                     view.roof_point_height_pending,
                     view.roof_point_position_pending,
+                    view.roof_ridge_height_pending,
+                    view.roof_ridge_position_pending,
                     view.roof_apex_input,
                     on_event,
                 );
@@ -720,19 +724,57 @@ fn ceiling_step_toolbar<F: FnMut(UiEvent)>(
     }
 }
 
-/// Roof-point controls, stage by stage: the height field + Set/Cancel once
-/// the point's position is resolved; a "answer the distance question" hint
-/// while a position stage is up (it shows as the shared position-prompt
-/// panel); otherwise a tap hint plus the committed-apex list with deletes.
+/// Roof-point (and roof-RIDGE) controls, stage by stage: the height field +
+/// Set/Cancel once the point's/ridge's position is resolved; a "answer the
+/// distance question" hint while a position stage is up (it shows as the
+/// shared position-prompt panel); otherwise a tap/stroke hint plus the
+/// committed-apex list with deletes. The ridge stages mirror the apex ones
+/// and share the height input buffer (the two flows are never pending at
+/// once — same mode, mutually suppressing).
 fn roof_point_toolbar<F: FnMut(UiEvent)>(
     ui: &mut egui::Ui,
     apexes: &[((f64, f64), String)],
     height_pending: bool,
     position_pending: bool,
+    ridge_height_pending: bool,
+    ridge_position_pending: bool,
     height_input: &mut String,
     on_event: &mut F,
 ) {
-    if height_pending {
+    if ridge_height_pending {
+        ui.label(egui::RichText::new("Ridge height (m):").strong());
+        ui.add(
+            egui::TextEdit::singleline(height_input)
+                .desired_width(60.0)
+                .hint_text("e.g. 4.2"),
+        );
+        // The height is ABSOLUTE (above the storey floor datum) and applies
+        // to BOTH ridge ends; the controller validates it.
+        if ui
+            .button("Set")
+            .on_hover_text("Raise (or lower) the ceiling area to a ridge at this height")
+            .clicked()
+        {
+            if let Some(v) = parse_dimension_expression(height_input) {
+                on_event(UiEvent::Sketch(SketchEvent::AssignRoofRidgeHeight(v)));
+                height_input.clear();
+            }
+        }
+        if ui.button("Cancel").clicked() {
+            on_event(UiEvent::Sketch(SketchEvent::CancelPendingRoofRidge));
+            height_input.clear();
+        }
+    } else if ridge_position_pending {
+        // The ridge's cross-coordinate question — the shared position panel
+        // above owns the entry; this hint keeps Cancel reachable alongside it.
+        ui.label(
+            egui::RichText::new("Pin the ridge's position (the distance question above)")
+                .color(egui::Color32::from_rgb(255, 200, 60)),
+        );
+        if ui.button("Cancel").clicked() {
+            on_event(UiEvent::Sketch(SketchEvent::CancelPendingRoofRidge));
+        }
+    } else if height_pending {
         ui.label(egui::RichText::new("Apex height (m):").strong());
         ui.add(
             egui::TextEdit::singleline(height_input)
@@ -767,7 +809,10 @@ fn roof_point_toolbar<F: FnMut(UiEvent)>(
             on_event(UiEvent::Sketch(SketchEvent::CancelPendingRoofPoint));
         }
     } else {
-        ui.label("Tap a high point inside a ceiling area to slope the roof.");
+        ui.label(
+            "Tap a high point inside a ceiling area to slope the roof, \
+             or draw a straight stroke along a ridge line.",
+        );
         for (i, (_pos, label)) in apexes.iter().enumerate() {
             ui.horizontal(|ui| {
                 ui.label(label);

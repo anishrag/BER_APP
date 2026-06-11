@@ -287,6 +287,23 @@ pub enum SketchEvent {
     CancelPendingRoofPoint,
     /// Delete the current storey's roof apex at the given index.
     DeleteRoofApex(usize),
+    /// A roof-RIDGE stroke (world coords) drawn in roof-point mode — fitted
+    /// to an axis-aligned segment placing TWO apexes at once (stroke = ridge,
+    /// tap = point: the ceiling-step stroke/tap routing pattern).
+    RoofRidgeStrokeWorld {
+        points: Vec<(f32, f32)>,
+    },
+    /// User entered the ridge height (metres, ABSOLUTE above the storey floor
+    /// datum — both endpoints get it) for the pending roof ridge.
+    AssignRoofRidgeHeight(f32),
+    /// "Don't snap" on the pending roof ridge's snap tag: revert the cross
+    /// coordinate to its drawn value and reopen the position question. Routed
+    /// to the controller's dedicated `unsnap_roof_ridge` — NOT
+    /// `ChooseSnap`/`UnsnapLast`, whose rewind-and-replay machinery must not
+    /// touch a ridge outside history.
+    UnsnapRoofRidge,
+    /// Discard the in-flight roof ridge at any stage.
+    CancelPendingRoofRidge,
     /// Toggle wall-exposure mode: when on, tapping an outline wall selects it
     /// (and the section handles), the type buttons mark the selected range.
     SetExposureMode(bool),
@@ -433,6 +450,17 @@ pub struct SketchView<'a> {
     pub roof_point_height_pending: bool,
     pub roof_point_pending: bool,
     pub roof_apex_input: &'a mut String,
+    /// Roof-RIDGE line input (a stroke in roof-point mode): the committed
+    /// ridges `(end_a, end_b, label)` to overlay ("⌃ 4.20 m" /
+    /// "4.20→4.50 m"), the pending ridge SEGMENT for the dashed overlay, its
+    /// snap tag (menu offers only "Don't snap", routed to UnsnapRoofRidge),
+    /// and the per-stage flags. The height entry reuses `roof_apex_input`.
+    pub roof_ridge_views: &'a [((f64, f64), (f64, f64), String)],
+    pub pending_roof_ridge_line: Option<((f64, f64), (f64, f64))>,
+    pub roof_ridge_snap_tag: Option<&'a SnapTagView>,
+    pub roof_ridge_position_pending: bool,
+    pub roof_ridge_height_pending: bool,
+    pub roof_ridge_pending: bool,
     /// Default ceiling heights: the last error from the Heights field's Set
     /// (shown inline next to it), the current scope's value when it has one
     /// (the field's "2.40 m" display), and whether the scope's heights are

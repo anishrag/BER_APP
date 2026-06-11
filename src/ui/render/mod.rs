@@ -602,6 +602,68 @@ pub fn render_roof_apexes(
     }
 }
 
+/// The roof-ridge hue: violet-blue, distinct from the apex rose-magenta, the
+/// phase purple, the floor-step teal and the ceiling-step amber.
+const ROOF_RIDGE_COLOR: egui::Color32 = egui::Color32::from_rgb(130, 150, 255);
+
+/// Draw the PENDING roof-ridge line as a dashed segment between its OWN
+/// endpoints (the stroke's extent — a ridge has endpoints, unlike the
+/// bbox-spanning ceiling-step line). Dashed because it's provisional input
+/// UX, still awaiting its position / height.
+pub fn render_roof_ridge_line(
+    painter: &egui::Painter,
+    rect: egui::Rect,
+    ber: Option<&Ber>,
+    current_storey_idx: Option<usize>,
+    sketch_mode: SketchMode,
+    view: ViewParams,
+    line_a: (f64, f64),
+    line_b: (f64, f64),
+) {
+    let Some((_storey, t)) = storey_transform(rect, ber, current_storey_idx, sketch_mode, view)
+    else {
+        return;
+    };
+    let a = t.apply(line_a.0, line_a.1);
+    let b = t.apply(line_b.0, line_b.1);
+    draw_dashed_segment(painter, a, b, egui::Stroke::new(3.0, ROOF_RIDGE_COLOR));
+}
+
+/// Draw the storey's COMMITTED roof ridges: a solid segment between the two
+/// apex points of each two-apex group, labelled at the midpoint
+/// ("⌃ 4.20 m", or "4.20→4.50 m" for a sloping ridge). The apex dots
+/// themselves come from [`render_roof_apexes`].
+pub fn render_roof_ridges(
+    painter: &egui::Painter,
+    rect: egui::Rect,
+    ber: Option<&Ber>,
+    current_storey_idx: Option<usize>,
+    sketch_mode: SketchMode,
+    view: ViewParams,
+    ridges: &[((f64, f64), (f64, f64), String)],
+) {
+    if ridges.is_empty() {
+        return;
+    }
+    let Some((_storey, t)) = storey_transform(rect, ber, current_storey_idx, sketch_mode, view)
+    else {
+        return;
+    };
+    for ((ax, ay), (bx, by), label) in ridges {
+        let a = t.apply(*ax, *ay);
+        let b = t.apply(*bx, *by);
+        painter.line_segment([a, b], egui::Stroke::new(3.0, ROOF_RIDGE_COLOR));
+        let mid = egui::pos2((a.x + b.x) / 2.0, (a.y + b.y) / 2.0);
+        painter.text(
+            mid + egui::vec2(0.0, -8.0),
+            egui::Align2::CENTER_BOTTOM,
+            label,
+            egui::FontId::proportional(13.0),
+            ROOF_RIDGE_COLOR,
+        );
+    }
+}
+
 /// DEBUG: draw the splice-pipeline phases of the last extend/trim. Each phase is
 /// a distinctly-coloured polyline (with dotted vertices) plus a colour-keyed
 /// legend entry top-left, so the stages — raw stroke → orthogonalized → pinned →

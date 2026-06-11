@@ -114,6 +114,7 @@ impl AppController {
             self.step_mode = false;
             self.roof_point_mode = false;
             self.pending_roof_point = None;
+            self.pending_roof_ridge = None;
             // A surviving cut-pick would fire on the SAME tap as the ceiling
             // line flow (its choose_* methods have no mode guard), grafting an
             // in-flight phase/step shape under the line — clear them all.

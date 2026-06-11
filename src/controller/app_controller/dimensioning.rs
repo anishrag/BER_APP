@@ -166,6 +166,31 @@ impl AppController {
                 option_count: prompt.options.len(),
             });
         }
+        // A pending roof RIDGE's cross-coordinate question, same shape as the
+        // ceiling-step line's (it reuses that prompt machinery): the "area
+        // wall" is the ridge SEGMENT itself (its extent endpoints), the
+        // reference wall resolves in the OUTLINE plan, kind `Line`.
+        if let Some(PendingRoofRidge::Position { axis, prompt, .. }) =
+            self.pending_roof_ridge.as_ref()
+        {
+            let option = prompt.options.get(prompt.current_idx)?;
+            let (a, b) = self.pending_roof_ridge_line()?;
+            return Some(PositionPromptUiData {
+                area_wall: WallPositions {
+                    wall_a: a,
+                    wall_b: b,
+                },
+                reference_wall: wall_positions_in(
+                    &self.document.outline.floor_plan,
+                    option.outline_wall_vid,
+                )?,
+                axis: *axis,
+                kind: PositionPromptKind::Line,
+                current_distance: option.current_distance,
+                option_idx: prompt.current_idx,
+                option_count: prompt.options.len(),
+            });
+        }
         let prompt = self
             .document
             .dimensioning
@@ -238,6 +263,28 @@ impl AppController {
             self.advance_roof_point(point, snap_x, snap_y, remaining);
             return Ok(());
         }
+        // Roof-ridge cross-coordinate prompt: shell-resolved the same way.
+        // NOTHING in the model moves — the resolved coordinate just rides
+        // into the Height stage (the EXTENT does not shift: it's on the other
+        // axis) — so no undo snapshot and no mark_dirty.
+        if let Some(PendingRoofRidge::Position {
+            axis,
+            extent,
+            prompt,
+            ..
+        }) = self.pending_roof_ridge.as_ref()
+        {
+            let coord_m = self.document.resolve_ceiling_line_position(prompt, value)?;
+            let (axis, extent) = (*axis, *extent);
+            // Position stage implies un-snapped — no snap to carry forward.
+            self.pending_roof_ridge = Some(PendingRoofRidge::Height {
+                axis,
+                coord_m,
+                extent,
+                snap: None,
+            });
+            return Ok(());
+        }
         let undo_snap = self.current_history_snapshot();
         self.document.apply_position(value)?;
         self.mark_dirty()?;
@@ -287,6 +334,26 @@ impl AppController {
             self.advance_roof_point(point, snap_x, snap_y, remaining);
             return;
         }
+        // Roof-ridge cross-coordinate prompt: accept the DRAWN coordinate
+        // as-is and advance to the height. No history / no mark_dirty —
+        // nothing moved.
+        if let Some(PendingRoofRidge::Position {
+            axis,
+            coord_m,
+            extent,
+            ..
+        }) = self.pending_roof_ridge.as_ref()
+        {
+            let (axis, coord_m, extent) = (*axis, *coord_m, *extent);
+            // Position stage implies un-snapped — no snap to carry forward.
+            self.pending_roof_ridge = Some(PendingRoofRidge::Height {
+                axis,
+                coord_m,
+                extent,
+                snap: None,
+            });
+            return;
+        }
         self.record_history();
         self.document.skip_current_position();
         let _ = self.mark_dirty();
@@ -304,6 +371,11 @@ impl AppController {
         }
         // Roof-point per-axis prompt: cycle ITS reference options.
         if let Some(PendingRoofPoint::Position { prompt, .. }) = self.pending_roof_point.as_mut() {
+            prompt.cycle();
+            return;
+        }
+        // Roof-ridge cross-coordinate prompt: cycle ITS reference options.
+        if let Some(PendingRoofRidge::Position { prompt, .. }) = self.pending_roof_ridge.as_mut() {
             prompt.cycle();
             return;
         }

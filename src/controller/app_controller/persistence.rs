@@ -139,6 +139,7 @@ impl AppController {
         self.pending_ceiling_step = None;
         self.roof_point_mode = false;
         self.pending_roof_point = None;
+        self.pending_roof_ridge = None;
         self.splice_debug.clear();
         self.last_snap_action = None;
         self.edit_drag_prompt = None;
@@ -221,10 +222,11 @@ impl AppController {
         self.reconstruct_ceiling_step_regions_for(idx);
         // An in-flight ceiling-step line belongs to the PREVIOUS record — its
         // prompt holds VertexIds into that record's outline plan. A pending
-        // roof point's prompt does too.
+        // roof point's / ridge's prompt does too.
         self.pending_ceiling_step = None;
         self.ceiling_step_mode = false;
         self.pending_roof_point = None;
+        self.pending_roof_ridge = None;
         self.roof_point_mode = false;
         self.view = ViewTransform::default();
         self.document.edit_state = EditState::default();
@@ -318,6 +320,7 @@ impl AppController {
         self.pending_ceiling_step = None;
         self.ceiling_step_mode = false;
         self.pending_roof_point = None;
+        self.pending_roof_ridge = None;
         self.roof_point_mode = false;
         self.view = ViewTransform::default();
         self.document.edit_state = EditState::default();

@@ -459,8 +459,9 @@ fn tool_ui<F: FnMut(UiEvent)>(
                     egui::Button::selectable(flags.roof_point_mode, "⛰ Roof points"),
                 )
                 .on_hover_text(
-                    "Slope part of the roof to a high (or low) point: tap a \
-                     point inside a ceiling area, then enter its height",
+                    "Slope part of the roof: tap a high (or low) point inside \
+                     a ceiling area, or draw a straight stroke for a ridge, \
+                     then enter the height",
                 )
                 .on_disabled_hover_text(
                     "Set the default ceiling height first (the Heights field above)",

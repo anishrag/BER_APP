@@ -46,8 +46,10 @@ impl AppController {
         // outgoing storey's space); the mode resets like the other area tools.
         self.pending_ceiling_step = None;
         self.ceiling_step_mode = false;
-        // And a half-finished roof point (same coordinate space argument).
+        // And a half-finished roof point / ridge (same coordinate space
+        // argument).
         self.pending_roof_point = None;
+        self.pending_roof_ridge = None;
         self.roof_point_mode = false;
         self.edit_drag_prompt = None;
         self.vertex_drop_prompt = None;
@@ -160,10 +162,11 @@ impl AppController {
         self.pending_phase_cut = None;
         self.pending_step_cut = None;
         // An in-flight ceiling-step line too (its coordinate is that storey's),
-        // and an in-flight roof point for the same reason.
+        // and an in-flight roof point / ridge for the same reason.
         self.pending_ceiling_step = None;
         self.ceiling_step_mode = false;
         self.pending_roof_point = None;
+        self.pending_roof_ridge = None;
         self.roof_point_mode = false;
         self.living_area_mode = false;
         self.exposure_mode = false;

@@ -335,6 +335,58 @@ pub(super) fn render<F: FnMut(UiEvent)>(
         }
     }
 
+    // Roof ridges: committed two-apex groups as solid labelled segments
+    // ("⌃ 4.20 m"), plus the pending ridge as a dashed SEGMENT between its
+    // own endpoints (the stroke's extent, not bbox-spanning). Violet-blue,
+    // distinct from the apex rose-magenta.
+    render::render_roof_ridges(
+        &painter,
+        rect,
+        ber,
+        current_storey_idx,
+        mode,
+        vp,
+        view.roof_ridge_views,
+    );
+    if let Some((a, b)) = view.pending_roof_ridge_line {
+        render::render_roof_ridge_line(&painter, rect, ber, current_storey_idx, mode, vp, a, b);
+    }
+
+    // The pending ridge's wall snap, mirroring the ceiling-step line's:
+    // drawn through the same snap-tag renderer, but its menu is a separate
+    // widget routed to UnsnapRoofRidge, never ChooseSnap — the generic
+    // replay rewinds history, and the pending ridge lives outside it. The
+    // menu offers exactly "Don't snap".
+    if let Some(tag) = view.roof_ridge_snap_tag {
+        render::render_snap_tags(
+            &painter,
+            rect,
+            ber,
+            current_storey_idx,
+            mode,
+            vp,
+            std::slice::from_ref(tag),
+        );
+        if let Some(t) = render::active_storey_transform(rect, ber, current_storey_idx, mode, vp) {
+            let sp = t.apply(tag.pos.0 as f64, tag.pos.1 as f64);
+            let label = match tag.current_kind {
+                Some(k) => format!("{} ▾", render::snap_kind_label(k)),
+                None => "no snap ▾".to_string(),
+            };
+            egui::Area::new(ui.id().with("roof_ridge_snap_tag"))
+                .fixed_pos(sp + egui::vec2(7.0, -7.0))
+                .order(egui::Order::Foreground)
+                .show(ui.ctx(), |ui| {
+                    ui.menu_button(label, |ui| {
+                        if tag.skippable && ui.button("Don't snap").clicked() {
+                            on_event(UiEvent::Sketch(SketchEvent::UnsnapRoofRidge));
+                            ui.close_menu();
+                        }
+                    });
+                });
+        }
+    }
+
     // Wall exposure: colour each outline wall by its heat-loss class
     // (brighter in exposure mode; the selected wall is haloed).
     render::render_wall_exposure(
@@ -687,10 +739,12 @@ pub(super) fn render<F: FnMut(UiEvent)>(
     // Roof-point tap: in mode with nothing pending, a tap places the
     // apex's point — but only under the draw tool, so Move/Trim clicks
     // in-mode don't spawn phantom points (the ceiling-step gating). A
-    // pending cut-pick owns the tap instead. Once a stage is pending,
-    // taps do nothing (the prompts are toolbar/panel-driven).
+    // pending cut-pick owns the tap instead. Once a stage is pending —
+    // a point's OR a ridge's (stroke = ridge shares the mode) — taps do
+    // nothing (the prompts are toolbar/panel-driven).
     if view.roof_point_mode
         && !view.roof_point_pending
+        && !view.roof_ridge_pending
         && matches!(edit_tool, EditTools::DrawPerpWalls)
         && !cut_pending
         && !phase_cut_pending
@@ -767,6 +821,7 @@ pub(super) fn render<F: FnMut(UiEvent)>(
         && !view.step_pick_pending
         && !view.ceiling_step_pending
         && !view.roof_point_pending
+        && !view.roof_ridge_pending
         && !view.exposure_mode;
 
     if primary_available && !matches!(edit_tool, EditTools::Move) {
@@ -806,6 +861,11 @@ pub(super) fn render<F: FnMut(UiEvent)>(
                 // steps along — drawn in metre space as well.
                 let ceiling_step_draw =
                     view.ceiling_step_mode && matches!(edit_tool, EditTools::DrawPerpWalls);
+                // In roof-point mode a STROKE draws a RIDGE (taps stay
+                // the point input — the ceiling-step stroke/tap split),
+                // in metre space too.
+                let roof_ridge_draw =
+                    view.roof_point_mode && matches!(edit_tool, EditTools::DrawPerpWalls);
                 // First outline of a fresh upper storey: drawn over
                 // the previous-storey watermark, so it must be
                 // captured in that storey's metre space (mirrors the
@@ -815,6 +875,7 @@ pub(super) fn render<F: FnMut(UiEvent)>(
                     && !view.phase_mode
                     && !view.step_mode
                     && !view.ceiling_step_mode
+                    && !view.roof_point_mode
                     && matches!(current_storey_idx, Some(i) if i > 0)
                     && ber
                         .and_then(|b| b.storeys.get(current_storey_idx?))
@@ -823,6 +884,7 @@ pub(super) fn render<F: FnMut(UiEvent)>(
                     || phase_draw
                     || step_draw
                     || ceiling_step_draw
+                    || roof_ridge_draw
                     || outline_on_watermark
                     || matches!(
                         edit_tool,
@@ -871,6 +933,10 @@ pub(super) fn render<F: FnMut(UiEvent)>(
                             }
                         } else if ceiling_step_draw {
                             SketchEvent::CeilingStepStrokeWorld {
+                                points: world_points,
+                            }
+                        } else if roof_ridge_draw {
+                            SketchEvent::RoofRidgeStrokeWorld {
                                 points: world_points,
                             }
                         } else if outline_on_watermark {

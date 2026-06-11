@@ -13,6 +13,7 @@
 //   - `phase_regions` — construction-phase tagging workflow.
 //   - `review`        — the collinearity-review cursor.
 //   - `roof_points`   — roof-point (apex / sloped-ceiling) tagging.
+//   - `roof_ridges`   — roof-RIDGE line input (a stroke placing two apexes).
 //   - `snap`          — elective-snap tags, choose/un-snap replay.
 //   - `step_regions`  — floor-step (raise/lower area) tagging workflow.
 //   - `storeys`       — storey switching + the deferred-derive pipeline.
@@ -56,6 +57,7 @@ mod history;
 mod persistence;
 mod review;
 mod roof_points;
+mod roof_ridges;
 mod snap;
 mod step_regions;
 mod storeys;
@@ -74,6 +76,7 @@ pub use history::HistorySnapshot;
 use persistence::PARAMETRIC_SNAPSHOT_VERSION;
 pub use review::CollinearityReview;
 use roof_points::PendingRoofPoint;
+use roof_ridges::PendingRoofRidge;
 pub use snap::SnapTagView;
 use snap::{LastSnapAction, SnapAction};
 pub use strokes::PendingRedraw;
@@ -189,6 +192,12 @@ pub struct AppController {
     /// switch / mode exit / cancel. The DURABLE record is
     /// `Storey::roof_apexes`; see `roof_points.rs`.
     pending_roof_point: Option<PendingRoofPoint>,
+    /// The in-flight roof RIDGE (a stroke in roof-point mode placing TWO
+    /// apexes at once), advanced stage by stage (stroke → cross-coordinate
+    /// position → height). Transient — outside undo, cleared everywhere
+    /// `pending_roof_point` is. The DURABLE record is the same
+    /// `Storey::roof_apexes`; see `roof_ridges.rs`.
+    pending_roof_ridge: Option<PendingRoofRidge>,
     /// DEBUG: the splice-pipeline phases (#1 raw stroke … #4 spliced ring) from
     /// the last extend/trim, captured for the UI's coloured debug overlay.
     splice_debug: Vec<manip_2d_plan::SplicePhase>,
@@ -262,6 +271,7 @@ impl AppController {
             pending_ceiling_step: None,
             roof_point_mode: false,
             pending_roof_point: None,
+            pending_roof_ridge: None,
             splice_debug: Vec::new(),
             revision: 0,
             saved_revision: 0,
