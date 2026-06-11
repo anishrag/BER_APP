@@ -176,11 +176,6 @@ pub struct AppController {
     /// side → position → amount). Transient — outside undo, cleared on storey
     /// switch / mode exit / cancel.
     pending_ceiling_step: Option<PendingCeilingStep>,
-    /// True while the first-3D "set default ceiling height" prompt is open: a
-    /// 3D view was requested but the current scope has no ceiling height yet
-    /// (see `ceiling.rs`). Session-only, outside undo — same deliberate choice
-    /// as phases/steps; overwriting the value is its own undo.
-    ceiling_height_prompt: bool,
     /// DEBUG: the splice-pipeline phases (#1 raw stroke … #4 spliced ring) from
     /// the last extend/trim, captured for the UI's coloured debug overlay.
     splice_debug: Vec<manip_2d_plan::SplicePhase>,
@@ -252,7 +247,6 @@ impl AppController {
             ceiling_step_mode: false,
             ceiling_step_regions: HashMap::new(),
             pending_ceiling_step: None,
-            ceiling_height_prompt: false,
             splice_debug: Vec::new(),
             revision: 0,
             saved_revision: 0,

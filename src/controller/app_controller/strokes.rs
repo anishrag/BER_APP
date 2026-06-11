@@ -50,12 +50,11 @@ impl AppController {
     }
 
     pub fn set_sketch_mode(&mut self, mode: SketchMode) {
-        // First-3D gate: a 3D view needs real storey heights (walls/roofs are
-        // extruded to them). Requesting it while the current scope has none
-        // opens the ceiling-height prompt INSTEAD of switching; applying the
-        // height completes the switch (see `ceiling.rs`).
+        // 3D needs real storey heights (walls/roofs are extruded to them).
+        // The UI's floating 2D/3D toggle is disabled until the scope's
+        // heights are set (entered via the Heights category); this guard is
+        // defense in depth — a 3D request without heights is a silent no-op.
         if matches!(mode, SketchMode::Storey3D) && !self.ceiling_heights_set() {
-            self.ceiling_height_prompt = true;
             return;
         }
         self.sketch_engine.set_mode(mode);

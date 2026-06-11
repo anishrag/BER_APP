@@ -3005,35 +3005,43 @@ fn snapshot_version_mismatch_falls_back_to_rebuild() {
     );
 }
 
-/// The first-3D gate: requesting the 3D view before the current storey has a
-/// ceiling height opens the typed prompt INSTEAD of switching the sketch mode.
+/// The 3D gate: the UI's 2D/3D toggle is disabled until the scope's heights
+/// are set; the controller guard is defense in depth — requesting 3D before
+/// the current storey has a ceiling height is a SILENT NO-OP (stays 2D).
 #[test]
-fn requesting_3d_without_ceiling_height_opens_prompt_and_stays_2d() {
+fn requesting_3d_without_ceiling_height_is_a_silent_noop() {
     let mut c = dimensioned_square_controller();
     assert_eq!(c.sketch_mode(), SketchMode::Storey2D);
     assert!(!c.ceiling_heights_set(), "no height entered yet");
     c.set_sketch_mode(SketchMode::Storey3D);
-    assert!(c.ceiling_height_prompt_pending(), "prompt opened");
     assert_eq!(
         c.sketch_mode(),
         SketchMode::Storey2D,
-        "the switch is held until a height is entered"
+        "refused until a height is entered via the Heights category"
     );
 }
 
-/// Applying the typed height closes the prompt, completes the intercepted
-/// switch to 3D, and the next materialize derives the roofs at that height
-/// (one flat region per outline ring) with the walls extruded to it.
+/// Setting the height (a Heights-category action) does NOT switch the view —
+/// the editor stays in 2D. It opens the 3D gate (the switch now succeeds),
+/// and the next materialize derives the roofs at that height (one flat
+/// region per outline ring) with the walls extruded to it.
 #[test]
-fn applying_ceiling_height_switches_to_3d_and_derives_roofs() {
+fn setting_ceiling_height_stays_2d_and_opens_the_3d_gate() {
     let mut c = dimensioned_square_controller();
-    c.set_sketch_mode(SketchMode::Storey3D);
-    assert!(c.ceiling_height_prompt_pending());
-
     c.set_default_ceiling_height(2.7).expect("valid height");
-    assert!(!c.ceiling_height_prompt_pending(), "prompt closed");
-    assert_eq!(c.sketch_mode(), SketchMode::Storey3D, "switch completed");
+    assert_eq!(
+        c.sketch_mode(),
+        SketchMode::Storey2D,
+        "setting a height is not a view switch"
+    );
     assert!(c.ceiling_heights_set());
+    assert!(
+        (c.default_ceiling_height().unwrap() - 2.7).abs() < 1e-6,
+        "the Heights field shows the stored value"
+    );
+
+    c.set_sketch_mode(SketchMode::Storey3D);
+    assert_eq!(c.sketch_mode(), SketchMode::Storey3D, "gate now open");
 
     c.materialize(); // edits defer the derive; bring current_record current
     let storey = &c.current_record.as_ref().unwrap().data.storeys[0];
@@ -3059,33 +3067,16 @@ fn applying_ceiling_height_switches_to_3d_and_derives_roofs() {
         .all(|q| q.z.abs() < 1e-6 || (q.z - 2.7).abs() < 1e-6));
 }
 
-/// Cancelling the prompt dismisses it without setting anything — the editor
-/// stays in 2D and the storey still has no height (3D re-gates next time).
-#[test]
-fn cancelling_ceiling_height_prompt_stays_2d() {
-    let mut c = dimensioned_square_controller();
-    c.set_sketch_mode(SketchMode::Storey3D);
-    assert!(c.ceiling_height_prompt_pending());
-    c.cancel_ceiling_height_prompt();
-    assert!(!c.ceiling_height_prompt_pending());
-    assert_eq!(c.sketch_mode(), SketchMode::Storey2D);
-    assert!(!c.ceiling_heights_set(), "nothing was stamped");
-}
-
 /// Zero, negative and non-finite heights are rejected with a user-facing
-/// error; the prompt stays open and nothing is stamped or switched.
+/// error (shown inline next to the Heights field); nothing is stamped and
+/// the 3D gate stays closed.
 #[test]
-fn invalid_ceiling_heights_rejected_with_prompt_still_open() {
+fn invalid_ceiling_heights_rejected() {
     let mut c = dimensioned_square_controller();
-    c.set_sketch_mode(SketchMode::Storey3D);
     for bad in [0.0_f32, -1.0, f32::NAN] {
         assert!(
             c.set_default_ceiling_height(bad).is_err(),
             "{bad} must be rejected"
-        );
-        assert!(
-            c.ceiling_height_prompt_pending(),
-            "prompt stays open after {bad}"
         );
         assert_eq!(c.sketch_mode(), SketchMode::Storey2D, "still 2D");
     }
@@ -3094,24 +3085,29 @@ fn invalid_ceiling_heights_rejected_with_prompt_still_open() {
         None,
         "nothing stamped"
     );
+    assert!(!c.ceiling_heights_set(), "3D gate still closed");
 }
 
-/// From the All-storeys tab the prompt's scope is every storey: one typed
-/// value fills only the storeys WITHOUT a height, never overwriting one the
-/// assessor already set per-storey.
+/// From the All-storeys tab the Heights field's scope is every storey: one
+/// typed value fills only the storeys WITHOUT a height, never overwriting
+/// one the assessor already set per-storey.
 #[test]
 fn all_storeys_ceiling_scope_fills_only_unset_storeys() {
     let mut c = dimensioned_square_controller();
     // Storey 0 gets its own height via the per-storey scope.
-    c.set_sketch_mode(SketchMode::Storey3D);
     c.set_default_ceiling_height(3.1).unwrap();
     // A fresh storey 1 has no height → the All-storeys scope is incomplete
-    // and 3D re-gates there.
+    // and the full-house 3D switch is still refused there.
     c.add_storey().unwrap();
     c.set_current_storey(None).unwrap();
     assert!(!c.ceiling_heights_set(), "storey 1 has no height yet");
     c.set_sketch_mode(SketchMode::Storey3D);
-    assert!(c.ceiling_height_prompt_pending());
+    assert_eq!(c.sketch_mode(), SketchMode::Storey2D, "3D refused");
+    assert_eq!(
+        c.default_ceiling_height(),
+        None,
+        "mixed/incomplete house: no single value to show in the field"
+    );
 
     c.set_default_ceiling_height(2.4).unwrap();
     let storeys = &c.current_record.as_ref().unwrap().data.storeys;
@@ -3124,19 +3120,8 @@ fn all_storeys_ceiling_scope_fills_only_unset_storeys() {
         "gap filled with the typed value"
     );
     assert!(c.ceiling_heights_set(), "all-storeys scope now complete");
-    assert_eq!(c.sketch_mode(), SketchMode::Storey3D);
-}
-
-/// Switching storey clears an open ceiling-height prompt — it was asking
-/// about the OUTGOING scope; the new scope re-gates on its own heights.
-#[test]
-fn storey_switch_clears_ceiling_height_prompt() {
-    let mut c = dimensioned_square_controller();
     c.set_sketch_mode(SketchMode::Storey3D);
-    assert!(c.ceiling_height_prompt_pending());
-    c.set_current_storey(None).unwrap();
-    assert!(!c.ceiling_height_prompt_pending(), "cleared on switch");
-    assert_eq!(c.sketch_mode(), SketchMode::Storey2D, "still 2D");
+    assert_eq!(c.sketch_mode(), SketchMode::Storey3D, "gate now open");
 }
 
 // ─── Ceiling steps (line + side + amount) ───────────────────────────────────
@@ -3146,7 +3131,6 @@ fn storey_switch_clears_ceiling_height_prompt() {
 fn ceiling_ready_controller() -> AppController {
     let mut c = dimensioned_square_controller();
     c.set_default_ceiling_height(2.4).expect("height applies");
-    c.set_sketch_mode(SketchMode::Storey2D); // the height gate switched to 3D
     c.set_ceiling_step_mode(true);
     assert!(c.ceiling_step_mode(), "mode enters once available");
     c
@@ -3418,7 +3402,6 @@ fn ceiling_ready_l_controller() -> AppController {
     c.document.dimensioning.known_params = c.document.floor_plan.all_active_params();
     c.commit_to_ber().unwrap();
     c.set_default_ceiling_height(2.4).expect("height applies");
-    c.set_sketch_mode(SketchMode::Storey2D); // the height gate switched to 3D
     c.set_ceiling_step_mode(true);
     assert!(c.ceiling_step_mode());
     c

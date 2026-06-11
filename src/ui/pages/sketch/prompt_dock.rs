@@ -18,8 +18,7 @@ use datatypes::ber::structural::WallExposure;
 /// Whether the dock has anything to show this frame. When false the bottom
 /// panel is skipped entirely so the canvas gets the space.
 pub(super) fn has_content(view: &SketchView<'_>) -> bool {
-    view.ceiling_height_prompt
-        || view.current_storey_idx.is_none()
+    view.current_storey_idx.is_none()
         || view.pending_redraw
         || view.curve_bulge.is_some()
         || view.dim_prompt.is_some()
@@ -36,31 +35,18 @@ pub(super) fn has_content(view: &SketchView<'_>) -> bool {
                 || view.ceiling_step_pending))
 }
 
-/// Render the dock. Priority of the prompt chain: ceiling-height prompt >
-/// read-only notice > pending redraw > curve radius > dimension prompt >
-/// position prompt > edit-drag prompt > vertex-drop prompt > collinearity
-/// review > exposure controls. The phase / step / ceiling-step flow toolbars
-/// render ALONGSIDE the chain (as before): e.g. a position prompt can be up
-/// while a step amount is still pending.
+/// Render the dock. Priority of the prompt chain: read-only notice >
+/// pending redraw > curve radius > dimension prompt > position prompt >
+/// edit-drag prompt > vertex-drop prompt > collinearity review > exposure
+/// controls. The phase / step / ceiling-step flow toolbars render ALONGSIDE
+/// the chain (as before): e.g. a position prompt can be up while a step
+/// amount is still pending.
 pub(super) fn render<F: FnMut(UiEvent)>(
     ui: &mut egui::Ui,
     view: &mut SketchView<'_>,
     on_event: &mut F,
 ) {
     ui.horizontal_wrapped(|ui| {
-        // The ceiling-height prompt outranks everything — it's the blocked
-        // 3D request waiting on its height. Shown on the All-storeys tab too
-        // (full-house 3D gates there), so it sits before the read-only
-        // early-return below.
-        if view.ceiling_height_prompt {
-            ceiling_height_prompt_toolbar(
-                ui,
-                view.ceiling_height_input,
-                view.ceiling_height_error,
-                on_event,
-            );
-            return;
-        }
         if view.current_storey_idx.is_none() {
             ui.label(
                 egui::RichText::new("Pick a storey tab to edit.")
@@ -156,7 +142,10 @@ pub(super) fn render<F: FnMut(UiEvent)>(
 /// Zero is accepted — it collapses the wall (used to zero a trim remnant so a
 /// cut snaps onto a corner). Whitespace is ignored. Returns `None` for
 /// malformed input or a negative result.
-fn parse_dimension_expression(input: &str) -> Option<f32> {
+///
+/// `pub(super)` so the Heights category's ceiling-height field shares the
+/// same entry surface as the dock's prompts.
+pub(super) fn parse_dimension_expression(input: &str) -> Option<f32> {
     let trimmed = input.trim();
     if trimmed.is_empty() {
         return None;
@@ -434,54 +423,6 @@ fn vertex_drop_prompt_toolbar<F: FnMut(UiEvent)>(
         for s in inputs.iter_mut() {
             s.clear();
         }
-    }
-    if let Some(err) = error {
-        ui.label(
-            egui::RichText::new(format!("⚠ {}", err)).color(egui::Color32::from_rgb(255, 120, 90)),
-        );
-    }
-}
-
-/// The first-3D ceiling-height prompt: a 3D view was requested but the
-/// current scope has no default ceiling height yet. One typed value (m,
-/// must be > 0) stamps the scope and opens the 3D view; Cancel stays 2D.
-fn ceiling_height_prompt_toolbar<F: FnMut(UiEvent)>(
-    ui: &mut egui::Ui,
-    input: &mut String,
-    error: Option<&str>,
-    on_event: &mut F,
-) {
-    ui.label(
-        egui::RichText::new("Default ceiling height (m):")
-            .strong()
-            .color(egui::Color32::from_rgb(60, 220, 255)),
-    );
-    let resp = ui.add(
-        egui::TextEdit::singleline(input)
-            .desired_width(80.0)
-            .hint_text("e.g. 2.4"),
-    );
-    let submit_pressed = resp.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
-    let set_clicked = ui
-        .button("Set")
-        .on_hover_text("Set this height and open the 3D view")
-        .clicked();
-    if set_clicked || submit_pressed {
-        // Validation (finite, > 0) lives in the controller — emit any
-        // parsed value so its error message surfaces next to the box
-        // instead of the button silently doing nothing. The dispatch arm
-        // clears the input on success; on rejection the text stays put.
-        if let Some(value) = parse_dimension_expression(input) {
-            on_event(UiEvent::Sketch(SketchEvent::SetDefaultCeilingHeight(value)));
-        }
-    }
-    if ui
-        .button("Cancel")
-        .on_hover_text("Stay in 2D without setting a height")
-        .clicked()
-    {
-        on_event(UiEvent::Sketch(SketchEvent::CancelCeilingHeightPrompt));
-        input.clear();
     }
     if let Some(err) = error {
         ui.label(

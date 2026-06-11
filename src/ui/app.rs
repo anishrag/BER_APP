@@ -83,13 +83,18 @@ pub struct SketchState {
     pub step_amount_input: String,
     /// Backing string for the ceiling-step amount input (metres).
     pub ceiling_amount_input: String,
-    /// Backing string for the first-3D ceiling-height prompt's input (metres).
-    pub ceiling_height_input: String,
-    /// Last error from `set_default_ceiling_height`. Shown next to the textbox
-    /// so the user can correct without losing what they typed.
+    /// Last error from `set_default_ceiling_height`. Shown next to the
+    /// Heights field so the user can correct without losing what they typed;
+    /// cleared on the next successful Set.
     pub ceiling_height_error: Option<String>,
-    /// Category-layout UI state: the ribbon's active tab + the wall-length
-    /// label visibility toggle (defaults ON).
+    /// One-shot clear-on-success for the Heights field's input buffer: the
+    /// event closure can't clear `categories.ceiling_height_input` directly
+    /// (the render borrows `categories` mutably), so a successful Set raises
+    /// this and the next frame's pre-render housekeeping does the clear.
+    pub ceiling_height_input_clear: bool,
+    /// Category-layout UI state: the ribbon's active tab, the wall-length
+    /// label visibility toggle (defaults ON), and the Heights field's
+    /// ceiling-height input buffer.
     pub categories: categories::CategoryUiState,
 }
 
@@ -399,7 +404,7 @@ impl eframe::App for BerApp {
                                 ceiling_step_side_pending,
                                 ceiling_step_amount_pending,
                                 ceiling_step_pending,
-                                ceiling_height_prompt,
+                                default_ceiling_height,
                                 ceiling_heights_set,
                                 view_params,
                             ) = {
@@ -459,7 +464,7 @@ impl eframe::App for BerApp {
                                     controller_ref.ceiling_step_side_pending(),
                                     controller_ref.ceiling_step_amount_pending(),
                                     controller_ref.ceiling_step_pending(),
-                                    controller_ref.ceiling_height_prompt_pending(),
+                                    controller_ref.default_ceiling_height(),
                                     controller_ref.ceiling_heights_set(),
                                     crate::ui::render::ViewParams {
                                         zoom: v.zoom,
@@ -485,14 +490,11 @@ impl eframe::App for BerApp {
                                 self.sketch_state.position_prompt_key = None;
                             }
 
-                            // Once the ceiling-height prompt closes (Set succeeded or
-                            // Cancel), drop any leftover typed text so the next prompt
-                            // starts clean; while it's open — including after a rejected
-                            // value — the text stays put for correction.
-                            if !self.app_controller.borrow().ceiling_height_prompt_pending()
-                                && !self.sketch_state.ceiling_height_input.is_empty()
-                            {
-                                self.sketch_state.ceiling_height_input.clear();
+                            // Deferred clear-on-success for the Heights field's input
+                            // (raised by the SetDefaultCeilingHeight Ok path last frame).
+                            if self.sketch_state.ceiling_height_input_clear {
+                                self.sketch_state.categories.ceiling_height_input.clear();
+                                self.sketch_state.ceiling_height_input_clear = false;
                             }
 
                             let current_storey_idx =
@@ -580,9 +582,8 @@ impl eframe::App for BerApp {
                                 ceiling_step_amount_pending,
                                 ceiling_step_pending,
                                 ceiling_amount_input: &mut self.sketch_state.ceiling_amount_input,
-                                ceiling_height_prompt,
-                                ceiling_height_input: &mut self.sketch_state.ceiling_height_input,
                                 ceiling_height_error: ceiling_height_error.as_deref(),
+                                default_ceiling_height,
                                 ceiling_heights_set,
                                 edit_selected_wall,
                                 edit_selected_vertex,
@@ -861,19 +862,19 @@ impl eframe::App for BerApp {
                                             .set_default_ceiling_height(value)
                                         {
                                             Ok(()) => {
+                                                // Clear-on-success: the field's label now
+                                                // shows the stored value, so the entry box
+                                                // resets to empty for the next entry (via
+                                                // the one-shot flag — see its doc). A
+                                                // rejected value stays put for correction.
                                                 self.sketch_state.ceiling_height_error = None;
-                                                // The input clears via the pre-render
-                                                // housekeeping once the prompt closes.
+                                                self.sketch_state.ceiling_height_input_clear = true;
                                             }
                                             Err(e) => {
                                                 eprintln!("set_default_ceiling_height: {}", e);
                                                 self.sketch_state.ceiling_height_error = Some(e);
                                             }
                                         }
-                                    }
-                                    SketchEvent::CancelCeilingHeightPrompt => {
-                                        controller.borrow_mut().cancel_ceiling_height_prompt();
-                                        self.sketch_state.ceiling_height_error = None;
                                     }
                                     SketchEvent::SetCurrentStorey(target) => {
                                         log_err(

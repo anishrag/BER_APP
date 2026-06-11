@@ -1,8 +1,8 @@
-//! The first-3D ceiling-height gate: 3D views need real storey heights, so the
-//! first request for a 3D view while the current scope has none opens a typed
-//! prompt instead of switching. Applying the height stamps the scope (via
-//! [`Ber::set_default_ceiling_height`]) and completes the switch; cancelling
-//! stays in 2D. The prompt flag is session-only and OUTSIDE undo — same
+//! Default ceiling heights: entered via the Heights category whenever the
+//! assessor wants (no prompt flow — the 2D/3D toggle is simply disabled until
+//! the current scope has its heights). Setting a height stamps the scope (via
+//! [`Ber::set_default_ceiling_height`]) and stays in the current view; the 3D
+//! switch is a separate, now-ungated action. Heights are OUTSIDE undo — same
 //! deliberate choice as phases/steps; overwriting the value is its own undo.
 use super::*;
 
@@ -23,16 +23,31 @@ impl AppController {
         }
     }
 
-    /// Is the first-3D "set default ceiling height" prompt open?
-    pub fn ceiling_height_prompt_pending(&self) -> bool {
-        self.ceiling_height_prompt
+    /// The current scope's default ceiling height for display in the Heights
+    /// field: per-storey → that storey's value; All-storeys → the shared value
+    /// when every storey is set to the SAME height, else `None` (a mixed or
+    /// incomplete house has no single value to show).
+    pub fn default_ceiling_height(&self) -> Option<f64> {
+        let record = self.current_record.as_ref()?;
+        let storeys = &record.data.storeys;
+        match self.current_storey_idx {
+            Some(i) => storeys.get(i)?.ceiling_height_m,
+            None => {
+                let first = storeys.first()?.ceiling_height_m?;
+                storeys
+                    .iter()
+                    .all(|s| s.ceiling_height_m.is_some_and(|h| (h - first).abs() < 1e-9))
+                    .then_some(first)
+            }
+        }
     }
 
-    /// Apply the typed default height (m): rejects non-finite/≤0; stamps the
-    /// current scope (`Ber::set_default_ceiling_height` — on the current
-    /// storey, or filling every UNSET storey from the All-storeys tab), closes
-    /// the prompt, switches to the 3D view the gate intercepted, marks dirty
-    /// (the next materialize derives the roofs and re-extrudes the walls).
+    /// Apply the typed default height (m) from the Heights category: rejects
+    /// non-finite/≤0; stamps the current scope (`Ber::set_default_ceiling_height`
+    /// — overwriting on the current storey, or filling every UNSET storey from
+    /// the All-storeys tab), marks dirty (the next materialize derives the
+    /// roofs and re-extrudes the walls). Stays in the current view — switching
+    /// to 3D is the floating canvas button's separate action.
     pub fn set_default_ceiling_height(&mut self, height_m: f32) -> Result<(), String> {
         if !height_m.is_finite() || height_m <= 0.0 {
             return Err("Ceiling height must be a positive number of metres.".into());
@@ -50,17 +65,7 @@ impl AppController {
         if self.current_storey_idx.is_none() {
             self.refresh_all_storeys();
         }
-        self.ceiling_height_prompt = false;
-        // Complete the switch the gate intercepted. `Storey3D` is the only 3D
-        // sketch mode — per-storey vs full-house is decided by which storey tab
-        // is active, so no separate target needs remembering.
-        self.sketch_engine.set_mode(SketchMode::Storey3D);
         self.mark_dirty()?;
         Ok(())
-    }
-
-    /// Dismiss the prompt without setting a height (stays in 2D).
-    pub fn cancel_ceiling_height_prompt(&mut self) {
-        self.ceiling_height_prompt = false;
     }
 }

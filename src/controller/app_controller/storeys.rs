@@ -46,9 +46,6 @@ impl AppController {
         // outgoing storey's space); the mode resets like the other area tools.
         self.pending_ceiling_step = None;
         self.ceiling_step_mode = false;
-        // The ceiling-height prompt was asking about the OUTGOING scope — the
-        // new scope re-gates on its own heights when 3D is next requested.
-        self.ceiling_height_prompt = false;
         self.edit_drag_prompt = None;
         self.vertex_drop_prompt = None;
         self.living_area_mode = false;
@@ -162,8 +159,6 @@ impl AppController {
         // An in-flight ceiling-step line too (its coordinate is that storey's).
         self.pending_ceiling_step = None;
         self.ceiling_step_mode = false;
-        // Same for a ceiling-height prompt — it was asking about that storey.
-        self.ceiling_height_prompt = false;
         self.living_area_mode = false;
         self.exposure_mode = false;
         // Phase mode is a sub-area tool like the two above; leaving it on across a

@@ -131,7 +131,6 @@ impl AppController {
         self.ceiling_step_mode = false;
         self.ceiling_step_regions.clear();
         self.pending_ceiling_step = None;
-        self.ceiling_height_prompt = false;
         self.splice_debug.clear();
         self.last_snap_action = None;
         self.edit_drag_prompt = None;

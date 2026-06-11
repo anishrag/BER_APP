@@ -3,13 +3,13 @@
 //! Module map:
 //! - `mod.rs` — [`SketchEvent`], the [`SketchView`] view-model the shell
 //!   builds each frame, the page entry point (orientation check + panel
-//!   arrangement), the storey tabs, and the 2D/3D + display-mode selectors
-//!   (these stay up top for now; slice 3 makes them floating canvas buttons).
+//!   arrangement), and the storey tabs.
 //! - `categories.rs` — the tool categories defined ONCE as data, plus the two
 //!   renderers over them: portrait → top ribbon, landscape → left side panel.
 //! - `prompt_dock.rs` — every contextual flow panel (dimension/position
 //!   prompts, cut picks, amount entry, review, …) in one bottom strip.
-//! - `canvas.rs` — the canvas itself: overlays, stroke capture, taps, drags.
+//! - `canvas.rs` — the canvas itself: overlays, stroke capture, taps, drags,
+//!   plus the floating 2D/3D + display-mode buttons in its corner.
 
 mod canvas;
 pub mod categories;
@@ -17,7 +17,6 @@ mod prompt_dock;
 
 use egui::epaint::PathStroke;
 use egui::Pos2;
-use strum::IntoEnumIterator;
 
 use crate::controller::app_controller::{
     DimensionPromptUiData, EditDragPromptUiData, ExposureSelection, PositionPromptUiData,
@@ -288,13 +287,11 @@ pub enum SketchEvent {
     ClearWallExposure,
     /// Mark every outline wall not yet set as exposed.
     SetAllRemainingExposed,
-    /// User typed a default ceiling height (m) in the first-3D prompt: stamp
-    /// the current scope (this storey, or every unset storey from the All tab)
-    /// and complete the switch into the 3D view that was requested.
+    /// User typed a default ceiling height (m) in the Heights category's
+    /// field: stamp the current scope (overwriting this storey's value, or
+    /// filling every unset storey from the All tab). Stays in the current
+    /// view — 3D is the floating canvas button's separate action.
     SetDefaultCeilingHeight(f32),
-    /// User dismissed the ceiling-height prompt without setting a height —
-    /// stays in 2D.
-    CancelCeilingHeightPrompt,
     /// Switch the editor onto a specific storey, or `None` for the read-only
     /// "All storeys" overview tab.
     SetCurrentStorey(Option<usize>),
@@ -392,12 +389,13 @@ pub struct SketchView<'a> {
     pub ceiling_step_amount_pending: bool,
     pub ceiling_step_pending: bool,
     pub ceiling_amount_input: &'a mut String,
-    /// First-3D ceiling-height gate: whether the typed prompt is open, the
-    /// backing string for its input, its last error, and whether the current
-    /// scope already has its heights (drives the 3D option's hover hint).
-    pub ceiling_height_prompt: bool,
-    pub ceiling_height_input: &'a mut String,
+    /// Default ceiling heights: the last error from the Heights field's Set
+    /// (shown inline next to it), the current scope's value when it has one
+    /// (the field's "2.40 m" display), and whether the scope's heights are
+    /// all set (gates the floating 2D/3D toggle). The field's input buffer
+    /// lives on `cat_state`.
     pub ceiling_height_error: Option<&'a str>,
+    pub default_ceiling_height: Option<f64>,
     pub ceiling_heights_set: bool,
     pub edit_selected_wall: Option<((f64, f64), (f64, f64))>,
     pub edit_selected_vertex: Option<(f64, f64)>,
@@ -441,19 +439,11 @@ impl SketchPage {
         // closures below don't hold a borrow of `view`.
         let flags = categories::ToolFlags::from_view(&view);
 
-        // --- Top strip: storey tabs (storey navigation is above the
-        // view-mode choice — picking a storey is the higher-level axis),
-        // then the 2D/3D + display-mode selectors (unchanged for now;
-        // slice 3 turns them into floating canvas buttons), then — in
-        // portrait — the category ribbon.
+        // --- Top strip: storey tabs (the 2D/3D + display-mode choices are
+        // floating canvas buttons — see `canvas.rs`), then — in portrait —
+        // the category ribbon.
         egui::TopBottomPanel::top("sketch_top_strip").show_inside(ui, |ui| {
             storey_tabs(ui, view.ber, view.current_storey_idx, &mut on_event);
-            if let Some(new_mode) = mode_toolbar(ui, view.mode, view.ceiling_heights_set) {
-                on_event(UiEvent::Sketch(SketchEvent::ChangeMode(new_mode)));
-            }
-            if let Some(new_display) = display_toolbar(ui, view.display) {
-                on_event(UiEvent::Sketch(SketchEvent::ChangeDisplay(new_display)));
-            }
             if portrait {
                 ui.separator();
                 categories::ribbon(ui, &flags, view.cat_state, &mut on_event);
@@ -552,45 +542,4 @@ fn storey_tabs<F: FnMut(UiEvent)>(
             on_event(UiEvent::Sketch(SketchEvent::AddStorey));
         }
     });
-}
-
-fn mode_toolbar(
-    ui: &mut egui::Ui,
-    mode: SketchMode,
-    ceiling_heights_set: bool,
-) -> Option<SketchMode> {
-    let mut change_mode: Option<SketchMode> = None;
-    ui.horizontal(|ui| {
-        for mode_item in SketchMode::iter() {
-            let selected = mode == mode_item;
-            let mut response = ui.selectable_label(selected, format!("{:?}", mode_item));
-            // 3D stays CLICKABLE without ceiling heights — clicking opens
-            // the height prompt (the controller gate) — but the hint warns
-            // the assessor what the click will ask for first.
-            if matches!(mode_item, SketchMode::Storey3D) && !ceiling_heights_set {
-                response =
-                    response.on_hover_text("Sets the default ceiling height first — 3D needs it");
-            }
-            if response.clicked() {
-                change_mode = Some(mode_item);
-            }
-        }
-    });
-    change_mode
-}
-
-fn display_toolbar(ui: &mut egui::Ui, display: DisplayMode) -> Option<DisplayMode> {
-    let mut change_display: Option<DisplayMode> = None;
-    ui.horizontal(|ui| {
-        for display_item in DisplayMode::iter() {
-            let selected = display == display_item;
-            if ui
-                .selectable_label(selected, format!("{:?}", display_item))
-                .clicked()
-            {
-                change_display = Some(display_item);
-            }
-        }
-    });
-    change_display
 }

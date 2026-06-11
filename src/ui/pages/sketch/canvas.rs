@@ -1,15 +1,17 @@
-//! The Sketch CANVAS: paints the plan + every overlay, then routes pointer
-//! input (strokes, taps, drags, pan/zoom) into [`SketchEvent`]s. Pure
-//! relocation of the canvas block that used to live inline in `sketch.rs`.
+//! The Sketch CANVAS: paints the plan + every overlay, routes pointer input
+//! (strokes, taps, drags, pan/zoom) into [`SketchEvent`]s, and hosts the
+//! floating view buttons (2D/3D toggle + display-mode cycler) in its
+//! top-right corner.
 
 use egui::epaint::PathShape;
+use strum::IntoEnumIterator;
 
 use super::{EguiStroke, SketchEvent, SketchView};
 use crate::ui::pages::events::UiEvent;
 use crate::ui::render;
 use crate::ui::render::ViewParams;
 use datatypes::ber::ber_struct::Ber;
-use domain::sketch::{EditTools, SketchMode};
+use domain::sketch::{DisplayMode, EditTools, SketchMode};
 
 pub(super) fn render<F: FnMut(UiEvent)>(
     ui: &mut egui::Ui,
@@ -47,6 +49,11 @@ pub(super) fn render<F: FnMut(UiEvent)>(
 
     let painter = ui.painter_at(rect);
     painter.rect_filled(rect, 0.0, egui::Color32::from_gray(30));
+
+    // Floating view buttons in the canvas's top-right corner (an egui Area on
+    // the Foreground order, so they sit above the canvas and own their
+    // clicks — same pattern as the snap-tag menus).
+    view_buttons(ui, rect, view, on_event);
 
     // BER view layer with optional collinearity highlight overlay.
     render::render_ber(
@@ -879,6 +886,60 @@ pub(super) fn render<F: FnMut(UiEvent)>(
             }
         }
     }
+}
+
+/// The two floating canvas buttons, anchored to the top-right corner and
+/// stacked vertically. Plain text labels for now — visual design deferred.
+///
+/// - **2D/3D toggle**: shows the current view ("2D"/"3D"); a click switches
+///   to the other. Disabled until the current scope has its ceiling
+///   height(s) — heights are entered via the Heights category, and the
+///   controller's `set_sketch_mode` re-enforces the gate as a no-op.
+/// - **Display mode**: shows the current [`DisplayMode`]'s name; a click
+///   CYCLES to the next variant (wrapping).
+fn view_buttons<F: FnMut(UiEvent)>(
+    ui: &mut egui::Ui,
+    rect: egui::Rect,
+    view: &SketchView<'_>,
+    on_event: &mut F,
+) {
+    egui::Area::new(ui.id().with("canvas_view_buttons"))
+        .fixed_pos(rect.right_top() + egui::vec2(-110.0, 8.0))
+        .order(egui::Order::Foreground)
+        .show(ui.ctx(), |ui| {
+            ui.vertical(|ui| {
+                let (label, other) = match view.mode {
+                    SketchMode::Storey2D => ("2D", SketchMode::Storey3D),
+                    SketchMode::Storey3D => ("3D", SketchMode::Storey2D),
+                };
+                // The gate is on ENTERING 3D only — going back to 2D is
+                // always allowed (otherwise switching onto a fresh storey
+                // while in 3D would trap the user there). Mirrors the
+                // controller guard, which only refuses Storey3D.
+                let enabled = matches!(view.mode, SketchMode::Storey3D) || view.ceiling_heights_set;
+                if ui
+                    .add_enabled(enabled, egui::Button::new(label))
+                    .on_hover_text("Toggle between the 2D plan and the 3D view")
+                    .on_disabled_hover_text("Set a ceiling height (Heights) first")
+                    .clicked()
+                {
+                    on_event(UiEvent::Sketch(SketchEvent::ChangeMode(other)));
+                }
+                // Cycle to the variant after the current one, wrapping.
+                let next_display = {
+                    let mut iter = DisplayMode::iter().cycle();
+                    iter.find(|d| *d == view.display);
+                    iter.next().expect("cycle() never ends")
+                };
+                if ui
+                    .button(format!("{:?}", view.display))
+                    .on_hover_text("Cycle what the canvas shows (dims / roofs / walls / floors)")
+                    .clicked()
+                {
+                    on_event(UiEvent::Sketch(SketchEvent::ChangeDisplay(next_display)));
+                }
+            });
+        });
 }
 
 /// The current storey's screen↔world transform for the 2D canvas, or `None`

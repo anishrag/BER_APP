@@ -10,6 +10,7 @@
 //! mode toggles (living area / construction year / exposure / floor steps /
 //! ceiling steps) keep their controller-enforced exclusive-mode semantics.
 
+use super::prompt_dock::parse_dimension_expression;
 use super::{SketchEvent, SketchView};
 use crate::ui::pages::events::UiEvent;
 use domain::sketch::EditTools;
@@ -25,6 +26,10 @@ pub enum Tool {
     ConstructionYear,
     /// Wall-exposure painting mode toggle.
     Exposure,
+    /// The storey's default ceiling height: a metres field + "Set", showing
+    /// the current value when one is set. Re-entering overwrites; on the All
+    /// tab one value fills every still-unset storey.
+    DefaultCeilingHeight,
     /// Floor-step tagging mode toggle.
     FloorSteps,
     /// Ceiling-step tagging mode toggle (gated on a default ceiling height).
@@ -53,8 +58,6 @@ pub struct Category {
 /// The single source of truth for the Sketch toolset. Both renderers walk
 /// this list.
 ///
-/// - **Heights** gains the always-available default-ceiling-height field in
-///   slice 3 (today the height is entered via the first-3D prompt).
 /// - **Dimensions** has no collinearity-review button: review prompts are
 ///   flow-driven (they appear in the prompt dock as suggestions arise after a
 ///   stroke), so there's nothing to launch manually.
@@ -78,7 +81,11 @@ pub const CATEGORIES: &[Category] = &[
     },
     Category {
         name: "Heights",
-        tools: &[Tool::FloorSteps, Tool::CeilingSteps],
+        tools: &[
+            Tool::DefaultCeilingHeight,
+            Tool::FloorSteps,
+            Tool::CeilingSteps,
+        ],
     },
     Category {
         name: "Drawing",
@@ -106,6 +113,11 @@ pub struct CategoryUiState {
     /// Wall-length label visibility (the Dimensions-category toggle). Gates
     /// the storey + living-area length labels on the canvas.
     pub show_wall_lengths: bool,
+    /// Backing string for the Heights category's default-ceiling-height
+    /// field. Cleared by the shell when a Set succeeds (the field then shows
+    /// the stored value as its label); kept on a rejected value so the user
+    /// can correct it.
+    pub ceiling_height_input: String,
 }
 
 impl Default for CategoryUiState {
@@ -113,6 +125,7 @@ impl Default for CategoryUiState {
         Self {
             active_category: 0,
             show_wall_lengths: true, // labels visible by default
+            ceiling_height_input: String::new(),
         }
     }
 }
@@ -136,6 +149,11 @@ pub struct ToolFlags {
     pub step_mode: bool,
     pub ceiling_step_mode: bool,
     pub ceiling_step_available: bool,
+    /// The current scope's default ceiling height, when set — the Heights
+    /// field shows it ("2.40 m") next to the entry box.
+    pub default_ceiling_height: Option<f64>,
+    /// Last error from the Heights field's Set, shown inline beside it.
+    pub ceiling_height_error: Option<String>,
     pub can_undo: bool,
     pub can_redo: bool,
     pub autosave_status: Option<String>,
@@ -155,6 +173,8 @@ impl ToolFlags {
             step_mode: view.step_mode,
             ceiling_step_mode: view.ceiling_step_mode,
             ceiling_step_available: view.ceiling_step_available,
+            default_ceiling_height: view.default_ceiling_height,
+            ceiling_height_error: view.ceiling_height_error.map(str::to_owned),
             can_undo: view.can_undo,
             can_redo: view.can_redo,
             autosave_status: view.autosave_status.clone(),
@@ -316,6 +336,44 @@ fn tool_ui<F: FnMut(UiEvent)>(
                 )));
             }
         }
+        Tool::DefaultCeilingHeight => {
+            // Always available (it's the prerequisite the 3D view and the
+            // ceiling steps gate on). Works on the All tab too: there one
+            // value fills every still-UNSET storey. Re-entering on a storey
+            // overwrites its value; validation (> 0, finite) lives in the
+            // controller and its rejection shows inline like the other
+            // prompt errors.
+            ui.horizontal(|ui| {
+                ui.label("Ceiling height");
+                if let Some(h) = flags.default_ceiling_height {
+                    ui.label(format!("{h:.2} m"));
+                }
+                let resp = ui.add(
+                    egui::TextEdit::singleline(&mut state.ceiling_height_input)
+                        .desired_width(50.0)
+                        .hint_text("e.g. 2.4"),
+                );
+                let submitted = resp.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
+                let set_clicked = ui
+                    .button("Set")
+                    .on_hover_text(
+                        "Set the storey's default ceiling height (on the All tab: \
+                         fill every storey that doesn't have one yet)",
+                    )
+                    .clicked();
+                if set_clicked || submitted {
+                    if let Some(value) = parse_dimension_expression(&state.ceiling_height_input) {
+                        on_event(UiEvent::Sketch(SketchEvent::SetDefaultCeilingHeight(value)));
+                    }
+                }
+            });
+            if let Some(err) = &flags.ceiling_height_error {
+                ui.label(
+                    egui::RichText::new(format!("⚠ {}", err))
+                        .color(egui::Color32::from_rgb(255, 120, 90)),
+                );
+            }
+        }
         Tool::FloorSteps => {
             let enabled = !flags.read_only && flags.has_floor_plan;
             if ui
@@ -346,7 +404,9 @@ fn tool_ui<F: FnMut(UiEvent)>(
                     "Raise or lower part of the ceiling: draw a straight line \
                      across the plan, tap the side that steps, then enter the amount",
                 )
-                .on_disabled_hover_text("Set the storey's default ceiling height first")
+                .on_disabled_hover_text(
+                    "Set the default ceiling height first (the Heights field above)",
+                )
                 .clicked()
             {
                 on_event(UiEvent::Sketch(SketchEvent::SetCeilingStepMode(
