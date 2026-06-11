@@ -138,8 +138,14 @@ impl<'a> BerRepository<'a> {
         rows.collect()
     }
 
-    /// Delete a BER by id
+    /// Delete a BER by id, including its editing-layer snapshot. The schema's
+    /// `ON DELETE CASCADE` only fires with `PRAGMA foreign_keys=ON` (which we
+    /// don't set), so the snapshot row is deleted explicitly.
     pub fn delete(&self, id: &ItemId) -> Result<()> {
+        self.conn.execute(
+            "DELETE FROM parametric_snapshot WHERE ber_id = ?1",
+            params![id.to_string()],
+        )?;
         self.conn
             .execute("DELETE FROM ber WHERE id = ?1", params![id.to_string()])?;
         Ok(())
@@ -348,14 +354,22 @@ mod tests {
 
         let record = make_test_record(ItemId::default());
         repo.upsert(&record).unwrap();
+        repo.save_snapshot(&record.id, 1, 0, "{}").unwrap();
 
         repo.delete(&record.id).unwrap();
 
         let count: i64 = conn
             .query_row("SELECT COUNT(*) FROM ber", [], |row| row.get(0))
             .unwrap();
-
         assert_eq!(count, 0);
+
+        // The editing-layer snapshot goes with it (no FK pragma → explicit).
+        let snap_count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM parametric_snapshot", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        assert_eq!(snap_count, 0);
     }
 
     #[test]

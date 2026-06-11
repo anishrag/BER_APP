@@ -3585,3 +3585,105 @@ fn ceiling_step_tap_orientation_path_snaps_identically() {
     assert!(c.position_prompt_for_ui().is_none(), "prompt skipped");
     assert!(c.ceiling_step_amount_pending());
 }
+
+// ---------------------------------------------------------------------------
+// Home / workspace shell wiring: list, delete, rename, date, exit.
+// ---------------------------------------------------------------------------
+
+/// `list_bers` returns saved records newest-assessment-first, `delete_ber`
+/// removes them, and the currently-open record is refused (Home is only
+/// reachable record-free via `exit_ber`, but the guard keeps it explicit).
+#[test]
+fn list_and_delete_bers() {
+    let mut c = AppController::new(crate::engine::open_db(":memory:").unwrap());
+    let a = c.create_ber(
+        "A".to_string(),
+        NaiveDate::from_ymd_opt(2026, 1, 1).unwrap(),
+    );
+    assert!(
+        c.delete_ber(&a.id).is_err(),
+        "deleting the open record must be refused"
+    );
+    assert_eq!(c.list_bers().len(), 1, "refused delete must not remove it");
+    c.exit_ber().unwrap();
+    let b = c.create_ber(
+        "B".to_string(),
+        NaiveDate::from_ymd_opt(2026, 2, 1).unwrap(),
+    );
+    c.exit_ber().unwrap();
+
+    let list = c.list_bers();
+    assert_eq!(list.len(), 2);
+    assert_eq!(list[0].name, "B", "newest assessment date first");
+    assert_eq!(list[1].name, "A");
+
+    c.delete_ber(&a.id).unwrap();
+    let list = c.list_bers();
+    assert_eq!(list.len(), 1);
+    assert_eq!(list[0].id, b.id);
+}
+
+/// Key Details live edits (rename + date + phases) write through to the
+/// record and survive an exit → `open_ber` round-trip, i.e. they persisted.
+#[test]
+fn rename_and_date_persist_through_reload() {
+    let mut c = AppController::new(crate::engine::open_db(":memory:").unwrap());
+    let ber = c.create_ber(
+        "Untitled BER".to_string(),
+        NaiveDate::from_ymd_opt(2026, 6, 1).unwrap(),
+    );
+    c.rename_ber("12 Main Street".to_string());
+    c.set_date_assessed(NaiveDate::from_ymd_opt(2026, 6, 5).unwrap());
+    let mut phases = ConstructionPhases::default();
+    phases.set_year(ConstructionPhase::Original, 1985);
+    c.set_construction_phases(phases);
+    c.exit_ber().unwrap();
+    assert!(c.current_key_details().is_none(), "exit clears the record");
+
+    c.open_ber(&ber.id).unwrap();
+    let (name, date, phases) = c.current_key_details().unwrap();
+    assert_eq!(name, "12 Main Street");
+    assert_eq!(date, NaiveDate::from_ymd_opt(2026, 6, 5).unwrap());
+    assert_eq!(phases.year_of(&ConstructionPhase::Original), Some(1985));
+}
+
+/// `exit_ber` clears ALL loaded/session state so a subsequent create starts
+/// clean: no record, no plan, default modes; the new record then starts on
+/// storey 0 (the `Some(0)` reset belongs to create/open, not exit).
+#[test]
+fn exit_then_create_starts_clean() {
+    let mut c = AppController::new(crate::engine::open_db(":memory:").unwrap());
+    c.create_ber(
+        "A".to_string(),
+        NaiveDate::from_ymd_opt(2026, 1, 1).unwrap(),
+    );
+    // Leave editing state behind: a drawn plan + a toggled mode.
+    let square = vec![
+        Point2f32::new(0.0, 0.0),
+        Point2f32::new(10.0, 0.0),
+        Point2f32::new(10.0, 10.0),
+        Point2f32::new(0.0, 10.0),
+        Point2f32::new(0.2, 0.2),
+    ];
+    c.document.floor_plan = FloorPlan::from_points_to_orthogonal(&square, 0.5, true).unwrap();
+    c.set_living_area_mode(true);
+
+    c.exit_ber().unwrap();
+    assert!(c.current_record_name().is_none());
+    assert_eq!(c.current_storey_idx(), None);
+    assert!(!c.has_floor_plan(), "exit must drop the drawn plan");
+    assert!(!c.living_area_mode(), "exit must reset interaction modes");
+
+    let b = c.create_ber(
+        "B".to_string(),
+        NaiveDate::from_ymd_opt(2026, 2, 1).unwrap(),
+    );
+    assert_eq!(c.current_record_name().as_deref(), Some("B"));
+    assert_eq!(c.current_storey_idx(), Some(0));
+    assert!(
+        !c.has_floor_plan(),
+        "fresh record must start without a plan"
+    );
+    assert_eq!(c.current_key_details().unwrap().0, "B");
+    let _ = b;
+}

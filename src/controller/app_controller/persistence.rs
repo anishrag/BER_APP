@@ -38,13 +38,111 @@ impl AppController {
     }
 
     /// Set the BER's construction phases (house + extension years). These are the
-    /// only phases the assessor can later assign to an area; captured up front on
-    /// the New-BER form. No-op when no BER is loaded. Persists.
+    /// only phases the assessor can later assign to an area; captured on the
+    /// Key Details form. No-op when no BER is loaded. Persists.
     pub fn set_construction_phases(&mut self, phases: ConstructionPhases) {
         if let Some(record) = self.current_record.as_mut() {
             record.data.construction_phases = phases;
         }
         let _ = self.persist();
+    }
+
+    /// Rename the loaded BER. No-op when no BER is loaded. Persists (same
+    /// write-through pattern as `set_construction_phases`).
+    pub fn rename_ber(&mut self, name: String) {
+        if let Some(record) = self.current_record.as_mut() {
+            record.name = name;
+        }
+        let _ = self.persist();
+    }
+
+    /// Set the loaded BER's assessment date. No-op when no BER is loaded.
+    /// Persists (same write-through pattern as `set_construction_phases`).
+    pub fn set_date_assessed(&mut self, date_assessed: NaiveDate) {
+        if let Some(record) = self.current_record.as_mut() {
+            record.date_assessed = date_assessed;
+        }
+        let _ = self.persist();
+    }
+
+    /// The loaded record's name, for the workspace top bar. `None` when no BER
+    /// is loaded.
+    pub fn current_record_name(&self) -> Option<String> {
+        self.current_record.as_ref().map(|r| r.name.clone())
+    }
+
+    /// The loaded record's Key Details — `(name, date_assessed, phases)` — for
+    /// pre-populating the form on workspace entry. `None` when no BER is loaded.
+    pub fn current_key_details(&self) -> Option<(String, NaiveDate, ConstructionPhases)> {
+        self.current_record.as_ref().map(|r| {
+            (
+                r.name.clone(),
+                r.date_assessed,
+                r.data.construction_phases.clone(),
+            )
+        })
+    }
+
+    /// All saved BERs as lightweight summaries (newest assessment date first),
+    /// for the Home page's Load panel. Empty on a query failure.
+    pub fn list_bers(&self) -> Vec<BerSummary> {
+        BerRepository::new(&self.conn).list().unwrap_or_default()
+    }
+
+    /// Delete a saved BER (and its editing-layer snapshot). REFUSES to delete
+    /// the currently-open record — in practice unreachable, since Home (the
+    /// only place delete is offered) is only entered record-free via
+    /// `exit_ber`, but the guard keeps the invariant explicit.
+    pub fn delete_ber(&mut self, id: &ItemId) -> Result<(), String> {
+        if self.current_record.as_ref().is_some_and(|r| r.id == *id) {
+            return Err("cannot delete the currently-open BER".to_string());
+        }
+        BerRepository::new(&self.conn)
+            .delete(id)
+            .map_err(|e| format!("delete failed: {}", e))
+    }
+
+    /// Leave the workspace: flush any pending edits to disk, then clear ALL
+    /// loaded/session state back to the fresh-app baseline (the state
+    /// `AppController::new` builds), so a subsequent `create_ber`/`open_ber`
+    /// starts clean. `current_storey_idx` returns to `None` (the no-record
+    /// state); create/open set it to `Some(0)` on entry. Returns the flush
+    /// result — the clear happens regardless.
+    pub fn exit_ber(&mut self) -> Result<(), String> {
+        let flushed = self.flush_if_dirty();
+        self.current_record = None;
+        self.current_storey_idx = None;
+        self.document = Document::default();
+        self.sketch_engine = SketchEngine::new();
+        self.review = None;
+        self.pending_redraw = None;
+        self.living_area_mode = false;
+        self.exposure_mode = false;
+        self.selected_exposure_wall = None;
+        self.exposure_sel = None;
+        self.exposure_drag = None;
+        self.pending_cut = None;
+        self.phase_mode = false;
+        self.phase_regions.clear();
+        self.pending_phase_cut = None;
+        self.step_mode = false;
+        self.step_regions.clear();
+        self.pending_step_cut = None;
+        self.ceiling_step_mode = false;
+        self.ceiling_step_regions.clear();
+        self.pending_ceiling_step = None;
+        self.ceiling_height_prompt = false;
+        self.splice_debug.clear();
+        self.last_snap_action = None;
+        self.edit_drag_prompt = None;
+        self.vertex_drop_prompt = None;
+        self.history.clear();
+        self.redo.clear();
+        self.view = ViewTransform::default();
+        // Nothing loaded → nothing pending against disk or the derive pipeline.
+        self.saved_revision = self.revision;
+        self.derived_revision = self.revision;
+        flushed
     }
 
     pub fn get_ber(&self, id: &ItemId) -> Option<Ber> {

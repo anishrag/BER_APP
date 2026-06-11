@@ -36,7 +36,7 @@ pub use exposure::{ExposureSelection, SectionHandle, WallExposureView};
 use chrono::NaiveDate;
 use std::sync::mpsc::Sender;
 
-use crate::engine::ber_repository::{BerRecord, BerRepository};
+use crate::engine::ber_repository::{BerRecord, BerRepository, BerSummary};
 use crate::engine::dataloader::DataLoader;
 use crate::engine::Db;
 use datatypes::ber::ber_struct::Ber;

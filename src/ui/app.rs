@@ -1,4 +1,3 @@
-use chrono::NaiveDate;
 use eframe::egui;
 use std::cell::RefCell;
 use std::rc::Rc;
@@ -7,11 +6,12 @@ use std::sync::mpsc::{channel, Receiver, Sender};
 
 use crate::controller::app_controller::AppController;
 use crate::ui::adapters::sketch_egui::pos2_to_point2f;
-use crate::ui::pages::events::{Page, UiEvent};
-use crate::ui::pages::new_ber::{parse_year, NewBerEvent};
+use crate::ui::pages::events::{Page, Section, UiEvent};
+use crate::ui::pages::home::{HomeEvent, HomePage, HomeState};
+use crate::ui::pages::key_details::{KeyDetailsEvent, KeyDetailsPage, KeyDetailsState};
 use crate::ui::pages::sketch::{EguiStroke, SketchEvent, SketchPage};
-use crate::ui::pages::{home::HomePage, new_ber::NewBerPage, splash::SplashPage};
-use datatypes::ber::common::{ConstructionPhase, ConstructionPhases};
+use crate::ui::pages::splash::SplashPage;
+use crate::ui::pages::workspace::workspace_chrome;
 
 /// Surface a controller call's error (if any) to stderr with a label. Used by
 /// the event-dispatch arms whose only failure handling is to log.
@@ -27,7 +27,8 @@ pub struct BerApp {
 
     // Page-specific state
     pub splash_state: SplashState,
-    pub new_ber_state: NewBerState,
+    pub home_state: HomeState,
+    pub key_details_state: KeyDetailsState,
     pub sketch_state: SketchState,
 
     // Idle-autosave bookkeeping: the controller's edit `revision` last seen, and
@@ -107,73 +108,91 @@ impl Default for SplashState {
     }
 }
 
-#[derive(Default)]
-pub struct NewBerState {
-    pub name: String,
-    pub date_str: String,
-    pub date_assessed: Option<NaiveDate>,
-    pub date_error: Option<String>,
-    /// Year the house was built (→ `ConstructionPhase::Original`).
-    pub construction_year: String,
-    /// Extensions (→ `Extension1..4`), in order added. Capped at 4. Each has a
-    /// user nickname ("Back extension") + a build year.
-    pub extensions: Vec<ExtensionInput>,
-}
-
-/// One extension row on the New-BER form: a descriptive nickname and a year.
-#[derive(Default)]
-pub struct ExtensionInput {
-    pub nickname: String,
-    pub year: String,
-}
-
-/// Build the BER's construction phases from the New-BER form: the house year →
-/// `Original`, each valid extension year → `Extension1..4`. Unparseable/blank
-/// entries are skipped (the house year is gated by `can_create`).
-fn collect_construction_phases(state: &NewBerState) -> ConstructionPhases {
-    let mut phases = ConstructionPhases::default();
-    if let Some(y) = parse_year(&state.construction_year) {
-        phases.set_year(ConstructionPhase::Original, y);
-    }
-    let variants = [
-        ConstructionPhase::Extension1,
-        ConstructionPhase::Extension2,
-        ConstructionPhase::Extension3,
-        ConstructionPhase::Extension4,
-    ];
-    for (variant, ext) in variants.into_iter().zip(state.extensions.iter()) {
-        if let Some(y) = parse_year(&ext.year) {
-            phases.set_year(variant.clone(), y);
-            phases.set_nickname(variant, ext.nickname.clone());
-        }
-    }
-    phases
-}
-
 impl BerApp {
     pub fn new(app_controller: Rc<RefCell<AppController>>) -> Self {
         // DEV: `BER_CHECKPOINT=1 cargo run` loads the saved checkpoint plan and
-        // jumps straight to the sketch page, so a test case needn't be redrawn.
+        // jumps straight to the sketch section, so a test case needn't be redrawn.
         let current_page = if std::env::var("BER_CHECKPOINT").is_ok()
             && app_controller.borrow_mut().load_checkpoint()
         {
-            Page::Sketch
+            Page::Workspace(Section::Sketch)
         } else {
             Page::Splash
         };
-        Self {
+        let mut app = Self {
             current_page,
             app_controller,
             splash_state: SplashState::default(),
-            new_ber_state: NewBerState::default(),
+            home_state: HomeState::default(),
+            key_details_state: KeyDetailsState::default(),
             sketch_state: SketchState::default(),
             last_seen_revision: 0,
             last_change_time: 0.0,
+        };
+        // Checkpoint path enters the workspace directly — prefill Key Details
+        // the same way New/Load do.
+        if matches!(app.current_page, Page::Workspace(_)) {
+            app.populate_key_details();
         }
+        app
     }
 
     pub fn navigate_to(&mut self, page: Page) {
         self.current_page = page;
+    }
+
+    /// Rebuild the Key Details form's backing strings from the loaded record
+    /// (name, date, construction year + extensions reconstructed from its
+    /// `ConstructionPhases`). Called on every workspace entry (New / Load /
+    /// checkpoint) so the form always mirrors the record.
+    fn populate_key_details(&mut self) {
+        self.key_details_state = match self.app_controller.borrow().current_key_details() {
+            Some((name, date, phases)) => KeyDetailsState::from_record(name, date, &phases),
+            None => KeyDetailsState::default(),
+        };
+    }
+
+    /// Act on a Home-page intent (controller call + navigation + state
+    /// population). Runs after the render closure has released its borrows.
+    fn handle_home_event(&mut self, event: HomeEvent) {
+        match event {
+            HomeEvent::NewBer => {
+                // The record is created IMMEDIATELY — Key Details edits it live.
+                let today = chrono::Local::now().naive_local().date();
+                self.app_controller
+                    .borrow_mut()
+                    .create_ber("Untitled BER".to_string(), today);
+                self.populate_key_details();
+                self.home_state = HomeState::default();
+                self.navigate_to(Page::Workspace(Section::KeyDetails));
+            }
+            HomeEvent::ToggleLoadPanel => {
+                self.home_state.show_load_panel = !self.home_state.show_load_panel;
+                self.home_state.pending_delete = None;
+                if self.home_state.show_load_panel {
+                    self.home_state.rows = self.app_controller.borrow().list_bers();
+                }
+            }
+            HomeEvent::OpenBer(id) => {
+                let result = self.app_controller.borrow_mut().open_ber(&id);
+                match result {
+                    Ok(()) => {
+                        self.populate_key_details();
+                        self.home_state = HomeState::default();
+                        self.navigate_to(Page::Workspace(Section::KeyDetails));
+                    }
+                    Err(e) => eprintln!("open_ber: {e}"),
+                }
+            }
+            HomeEvent::DeleteBer(id) => {
+                log_err(
+                    "delete_ber",
+                    self.app_controller.borrow_mut().delete_ber(&id),
+                );
+                self.home_state.pending_delete = None;
+                self.home_state.rows = self.app_controller.borrow().list_bers();
+            }
+        }
     }
 
     pub fn start_loading(&mut self) {
@@ -250,665 +269,730 @@ impl eframe::App for BerApp {
 
         let page = self.current_page;
         // Render current page
-        egui::CentralPanel::default().show(ctx, |ui| match page {
-            Page::Splash => SplashPage::render(
-                ui,
-                self.splash_state.progress_text.clone(),
-                self.splash_state.progress_value,
-                |_| {},
-            ),
-            Page::Home => {
-                HomePage::render(ui, |event| match event {
-                    UiEvent::NavigateTo(p) => self.navigate_to(p),
-                    _ => {}
+        match page {
+            Page::Splash => {
+                egui::CentralPanel::default().show(ctx, |ui| {
+                    SplashPage::render(
+                        ui,
+                        self.splash_state.progress_text.clone(),
+                        self.splash_state.progress_value,
+                        |_| {},
+                    )
                 });
             }
-            Page::Sketch => {
-                // Bring the resolved geometry current before the immutable borrow
-                // reads it for rendering — edits only `mark_dirty`, so the derive
-                // is deferred to here (once per frame, not per edit).
-                self.app_controller.borrow_mut().materialize();
-                let (
-                    stroke,
-                    mode,
-                    edit_mode,
-                    display_mode,
-                    ber,
-                    review,
-                    review_remaining,
-                    has_floor_plan,
-                    pending_redraw,
-                    dim_prompt,
-                    dim_scale_set,
-                    dim_error,
-                    position_prompt,
-                    dimensioned_walls,
-                    arc_preview,
-                    curve_bulge,
-                    living_area_mode,
-                    living_area_polygons,
-                    living_area_wall_labels,
-                    active_living_area,
-                    pending_cut_regions,
-                    exposure_mode,
-                    exposure_walls,
-                    exposure_selection,
-                    edit_selected_wall,
-                    edit_selected_vertex,
-                    edit_drag_prompt,
-                    edit_drag_error,
-                    vertex_drop_prompt,
-                    vertex_drop_error,
-                    can_undo,
-                    can_redo,
-                    phase_mode,
-                    phase_region_polygons,
-                    pending_phase_polygon,
-                    pending_phase_cut_regions,
-                    phase_choices,
-                    phase_pick_pending,
-                    step_mode,
-                    step_region_polygons,
-                    pending_step_polygon,
-                    pending_step_cut_regions,
-                    step_pick_pending,
-                    ceiling_step_mode,
-                    ceiling_step_available,
-                    ceiling_step_region_polygons,
-                    pending_ceiling_step_line,
-                    pending_ceiling_step_side_rects,
-                    ceiling_step_snap_tag,
-                    ceiling_step_orientation_pending,
-                    ceiling_step_side_pending,
-                    ceiling_step_amount_pending,
-                    ceiling_step_pending,
-                    ceiling_height_prompt,
-                    ceiling_heights_set,
-                    view,
-                ) = {
-                    let controller_ref = self.app_controller.borrow();
-                    let v = controller_ref.view();
-                    (
-                        controller_ref.sketch_stroke(),
-                        controller_ref.sketch_mode(),
-                        controller_ref.edit_mode(),
-                        controller_ref.display_mode(),
-                        controller_ref.current_ber_clone(),
-                        controller_ref.current_review_suggestion_clone(),
-                        controller_ref.review_remaining(),
-                        controller_ref.has_floor_plan(),
-                        controller_ref.has_pending_redraw(),
-                        controller_ref.dimension_prompt_for_ui(),
-                        controller_ref.dimensioning_scale_set(),
-                        self.sketch_state.dimension_error.clone(),
-                        controller_ref.position_prompt_for_ui(),
-                        controller_ref.walls_with_known_length(),
-                        controller_ref.pending_arc_preview(),
-                        controller_ref.pending_arc_bulge(),
-                        controller_ref.living_area_mode(),
-                        controller_ref.living_area_polygons(),
-                        controller_ref.living_area_wall_labels(),
-                        controller_ref.active_living_area_index(),
-                        controller_ref.pending_cut_regions(),
-                        controller_ref.exposure_mode(),
-                        controller_ref.wall_exposure_views(),
-                        controller_ref.exposure_selection(),
-                        controller_ref.edit_selected_wall_positions(),
-                        controller_ref.edit_selected_vertex_position(),
-                        controller_ref.edit_drag_prompt_for_ui(),
-                        self.sketch_state.edit_drag_error.clone(),
-                        controller_ref.vertex_drop_prompt_for_ui(),
-                        self.sketch_state.vertex_drop_error.clone(),
-                        controller_ref.can_undo(),
-                        controller_ref.can_redo(),
-                        controller_ref.phase_mode(),
-                        controller_ref.phase_region_polygons(),
-                        controller_ref.pending_phase_polygon(),
-                        controller_ref.pending_phase_cut_regions(),
-                        controller_ref.construction_phase_choices(),
-                        controller_ref.phase_pick_pending(),
-                        controller_ref.step_mode(),
-                        controller_ref.step_region_polygons(),
-                        controller_ref.pending_step_polygon(),
-                        controller_ref.pending_step_cut_regions(),
-                        controller_ref.step_pick_pending(),
-                        controller_ref.ceiling_step_mode(),
-                        controller_ref.ceiling_step_available(),
-                        controller_ref.ceiling_step_region_polygons(),
-                        controller_ref.pending_ceiling_step_line(),
-                        controller_ref.pending_ceiling_step_side_rects(),
-                        controller_ref.ceiling_step_snap_tag(),
-                        controller_ref.ceiling_step_orientation_pending(),
-                        controller_ref.ceiling_step_side_pending(),
-                        controller_ref.ceiling_step_amount_pending(),
-                        controller_ref.ceiling_step_pending(),
-                        controller_ref.ceiling_height_prompt_pending(),
-                        controller_ref.ceiling_heights_set(),
-                        crate::ui::render::ViewParams {
-                            zoom: v.zoom,
-                            offset_x: v.offset_x,
-                            offset_y: v.offset_y,
-                        },
-                    )
-                };
-
-                // Prefill the position-prompt textbox with the prompt's drawn
-                // distance whenever the prompt IDENTITY (axis + selected
-                // reference option) changes — a fresh prompt or a cycled
-                // reference starts from its measured-as-drawn value; the
-                // user's in-progress typing on the SAME prompt is preserved.
-                if let Some(pp) = &position_prompt {
-                    let key = (pp.axis, pp.kind, pp.option_idx);
-                    if self.sketch_state.position_prompt_key != Some(key) {
-                        self.sketch_state.position_prompt_key = Some(key);
-                        self.sketch_state.position_input = format!("{:.2}", pp.current_distance);
-                    }
-                } else {
-                    self.sketch_state.position_prompt_key = None;
+            Page::Home => {
+                // Collect intents from the render closure first, then act after
+                // it releases its borrow of self.home_state.
+                let mut home_events: Vec<HomeEvent> = Vec::new();
+                egui::CentralPanel::default().show(ctx, |ui| {
+                    HomePage::render(ui, &mut self.home_state, |event| {
+                        if let UiEvent::Home(e) = event {
+                            home_events.push(e);
+                        }
+                    });
+                });
+                for e in home_events {
+                    self.handle_home_event(e);
                 }
-
-                // Once the ceiling-height prompt closes (Set succeeded or
-                // Cancel), drop any leftover typed text so the next prompt
-                // starts clean; while it's open — including after a rejected
-                // value — the text stays put for correction.
-                if !self.app_controller.borrow().ceiling_height_prompt_pending()
-                    && !self.sketch_state.ceiling_height_input.is_empty()
-                {
-                    self.sketch_state.ceiling_height_input.clear();
-                }
-
-                let current_storey_idx = self.app_controller.borrow().current_storey_idx();
-                let position_error = self.sketch_state.position_error.clone();
-                let ceiling_height_error = self.sketch_state.ceiling_height_error.clone();
-
-                let controller = self.app_controller.clone();
-                let splice_debug = self.app_controller.borrow().splice_debug_overlay();
-                let snap_tags = self.app_controller.borrow().snap_overlay();
-                SketchPage::render(
-                    ui,
-                    stroke.as_ref().map(EguiStroke::from),
-                    mode,
-                    display_mode,
-                    edit_mode,
-                    ber.as_ref(),
-                    current_storey_idx,
-                    review.as_ref(),
-                    review_remaining,
-                    has_floor_plan,
-                    pending_redraw,
-                    dim_prompt,
-                    &mut self.sketch_state.dimension_input,
-                    dim_scale_set,
-                    dim_error.as_deref(),
-                    &dimensioned_walls,
-                    position_prompt,
-                    &mut self.sketch_state.position_input,
-                    position_error.as_deref(),
-                    arc_preview.as_deref(),
-                    curve_bulge,
-                    living_area_mode,
-                    &living_area_polygons,
-                    &living_area_wall_labels,
-                    active_living_area,
-                    &pending_cut_regions,
-                    exposure_mode,
-                    &exposure_walls,
-                    exposure_selection,
-                    &mut self.sketch_state.exposure_start_input,
-                    &mut self.sketch_state.exposure_end_input,
-                    phase_mode,
-                    &phase_region_polygons,
-                    &pending_phase_polygon,
-                    &pending_phase_cut_regions,
-                    &phase_choices,
-                    phase_pick_pending,
-                    step_mode,
-                    &step_region_polygons,
-                    &pending_step_polygon,
-                    &pending_step_cut_regions,
-                    step_pick_pending,
-                    &mut self.sketch_state.step_amount_input,
-                    ceiling_step_mode,
-                    ceiling_step_available,
-                    &ceiling_step_region_polygons,
-                    pending_ceiling_step_line,
-                    &pending_ceiling_step_side_rects,
-                    ceiling_step_snap_tag.as_ref(),
-                    ceiling_step_orientation_pending,
-                    ceiling_step_side_pending,
-                    ceiling_step_amount_pending,
-                    ceiling_step_pending,
-                    &mut self.sketch_state.ceiling_amount_input,
-                    ceiling_height_prompt,
-                    &mut self.sketch_state.ceiling_height_input,
-                    ceiling_height_error.as_deref(),
-                    ceiling_heights_set,
-                    edit_selected_wall,
-                    edit_selected_vertex,
-                    edit_drag_prompt,
-                    &mut self.sketch_state.edit_drag_input,
-                    edit_drag_error.as_deref(),
-                    vertex_drop_prompt,
-                    &mut self.sketch_state.vertex_drop_inputs,
-                    vertex_drop_error.as_deref(),
-                    can_undo,
-                    can_redo,
-                    view,
-                    &splice_debug,
-                    &snap_tags,
+            }
+            Page::Workspace(section) => {
+                let ber_name = self
+                    .app_controller
+                    .borrow()
+                    .current_record_name()
+                    .unwrap_or_default();
+                // Chrome intents land in locals (the body closure borrows self).
+                let mut next_page: Option<Page> = None;
+                let mut exit_clicked = false;
+                workspace_chrome(
+                    ctx,
+                    section,
+                    &ber_name,
                     |event| match event {
-                        UiEvent::Sketch(sketch_event) => match sketch_event {
-                            SketchEvent::AddPoint(p) => controller
-                                .borrow_mut()
-                                .sketch_add_point(pos2_to_point2f(p))
-                                .expect("Failed to add point"),
-                            SketchEvent::EndStroke(p) => controller
-                                .borrow_mut()
-                                .sketch_end_stroke(pos2_to_point2f(p))
-                                .expect("Failed to end stroke"),
-                            SketchEvent::StartStroke(p) => log_err(
-                                "sketch_start_stroke",
-                                controller
-                                    .borrow_mut()
-                                    .sketch_start_stroke(pos2_to_point2f(p)),
-                            ),
-                            SketchEvent::ChangeMode(m) => {
-                                controller.borrow_mut().set_sketch_mode(m)
-                            }
-                            SketchEvent::ChangeDisplay(m) => {
-                                controller.borrow_mut().set_display_mode(m)
-                            }
-                            SketchEvent::ChangeEditTool(m) => {
-                                controller.borrow_mut().set_edit_mode(m)
-                            }
-                            SketchEvent::AcceptCollinearity => {
-                                log_err(
-                                    "accept_current_review",
-                                    controller.borrow_mut().accept_current_review(),
-                                );
-                            }
-                            SketchEvent::RejectCollinearity => {
-                                controller.borrow_mut().reject_current_review();
-                            }
-                            SketchEvent::SkipAllCollinearity => {
-                                controller.borrow_mut().skip_all_review();
-                            }
-                            SketchEvent::ZoomView {
-                                factor,
-                                anchor_x,
-                                anchor_y,
-                                canvas_center_x,
-                                canvas_center_y,
-                            } => {
-                                controller.borrow_mut().zoom_view(
-                                    factor,
-                                    (anchor_x, anchor_y),
-                                    (canvas_center_x, canvas_center_y),
-                                );
-                            }
-                            SketchEvent::PanView { dx, dy } => {
-                                controller.borrow_mut().pan_view(dx, dy);
-                            }
-                            SketchEvent::ResetView => {
-                                controller.borrow_mut().reset_view();
-                            }
-                            SketchEvent::ReplaceStorey => {
-                                log_err(
-                                    "confirm_replace_storey",
-                                    controller.borrow_mut().confirm_replace_storey(),
-                                );
-                            }
-                            SketchEvent::AddStoreyFromCurrent => {
-                                controller.borrow_mut().confirm_add_storey_from_current();
-                            }
-                            SketchEvent::IgnoreRedraw => {
-                                controller.borrow_mut().discard_pending_redraw();
-                            }
-                            SketchEvent::UnsnapLast => {
-                                controller.borrow_mut().unsnap_last();
-                            }
-                            SketchEvent::ChooseSnap { from, choice } => {
-                                controller.borrow_mut().choose_snap(
-                                    domain::points::Point2f32::new(from.0, from.1),
-                                    choice,
-                                );
-                            }
-                            SketchEvent::ApplyDimension(value) => {
-                                match controller.borrow_mut().apply_dimension(value) {
-                                    Ok(()) => {
-                                        self.sketch_state.dimension_error = None;
-                                    }
-                                    Err(e) => {
-                                        eprintln!("apply_dimension: {}", e);
-                                        self.sketch_state.dimension_error = Some(e);
-                                    }
-                                }
-                            }
-                            SketchEvent::SkipDimension => {
-                                controller.borrow_mut().skip_current_dimension();
-                                self.sketch_state.dimension_error = None;
-                            }
-                            SketchEvent::ApplyPositionDimension(value) => {
-                                match controller.borrow_mut().apply_position_dimension(value) {
-                                    Ok(()) => {
-                                        self.sketch_state.position_error = None;
-                                    }
-                                    Err(e) => {
-                                        eprintln!("apply_position_dimension: {}", e);
-                                        self.sketch_state.position_error = Some(e);
-                                    }
-                                }
-                            }
-                            SketchEvent::SkipPositionDimension => {
-                                controller.borrow_mut().skip_position_dimension();
-                                self.sketch_state.position_error = None;
-                            }
-                            SketchEvent::CyclePositionReference => {
-                                controller.borrow_mut().cycle_position_reference();
-                                self.sketch_state.position_error = None;
-                            }
-                            SketchEvent::SetCurveBulge(ratio) => {
-                                controller.borrow_mut().set_pending_arc_bulge(ratio);
-                            }
-                            SketchEvent::CommitCurve => {
-                                log_err(
-                                    "commit_pending_arc",
-                                    controller.borrow_mut().commit_pending_arc(),
-                                );
-                            }
-                            SketchEvent::SetLivingAreaMode(on) => {
-                                controller.borrow_mut().set_living_area_mode(on);
-                            }
-                            SketchEvent::LivingAreaStrokeWorld { points } => {
-                                controller
-                                    .borrow_mut()
-                                    .apply_living_area_stroke_event(&points);
-                            }
-                            SketchEvent::DeleteLivingArea(index) => {
-                                controller.borrow_mut().delete_living_area(index);
-                            }
-                            SketchEvent::ChooseCutRegion { world_x, world_y } => {
-                                controller
-                                    .borrow_mut()
-                                    .choose_cut_region(world_x as f32, world_y as f32);
-                            }
-                            SketchEvent::SetPhaseMode(on) => {
-                                controller.borrow_mut().set_phase_mode(on);
-                            }
-                            SketchEvent::PhaseRegionStrokeWorld { points } => {
-                                controller
-                                    .borrow_mut()
-                                    .apply_phase_region_stroke_event(&points);
-                            }
-                            SketchEvent::AssignPhase(phase) => {
-                                controller.borrow_mut().assign_phase_to_pending(phase);
-                            }
-                            SketchEvent::ChoosePhaseCutRegion { world_x, world_y } => {
-                                controller
-                                    .borrow_mut()
-                                    .choose_phase_cut_region(world_x as f32, world_y as f32);
-                            }
-                            SketchEvent::CancelPendingPhase => {
-                                controller.borrow_mut().cancel_pending_phase();
-                            }
-                            SketchEvent::DeletePhaseRegion(index) => {
-                                controller.borrow_mut().delete_phase_region(index);
-                            }
-                            SketchEvent::SetStepMode(on) => {
-                                controller.borrow_mut().set_step_mode(on);
-                            }
-                            SketchEvent::StepRegionStrokeWorld { points } => {
-                                controller
-                                    .borrow_mut()
-                                    .apply_step_region_stroke_event(&points);
-                            }
-                            SketchEvent::AssignStepLevel(level_m) => {
-                                controller
-                                    .borrow_mut()
-                                    .assign_step_level_to_pending(level_m);
-                            }
-                            SketchEvent::ChooseStepCutRegion { world_x, world_y } => {
-                                controller
-                                    .borrow_mut()
-                                    .choose_step_cut_region(world_x as f32, world_y as f32);
-                            }
-                            SketchEvent::CancelPendingStep => {
-                                controller.borrow_mut().cancel_pending_step();
-                            }
-                            SketchEvent::DeleteStepRegion(index) => {
-                                controller.borrow_mut().delete_step_region(index);
-                            }
-                            SketchEvent::SetCeilingStepMode(on) => {
-                                controller.borrow_mut().set_ceiling_step_mode(on);
-                            }
-                            SketchEvent::CeilingStepStrokeWorld { points } => {
-                                controller
-                                    .borrow_mut()
-                                    .apply_ceiling_step_stroke_event(&points);
-                            }
-                            SketchEvent::CeilingStepTap { world_x, world_y } => {
-                                controller
-                                    .borrow_mut()
-                                    .ceiling_step_tap(world_x as f32, world_y as f32);
-                            }
-                            SketchEvent::ChooseCeilingStepOrientation { horizontal } => {
-                                controller
-                                    .borrow_mut()
-                                    .choose_ceiling_step_orientation(horizontal);
-                            }
-                            SketchEvent::AssignCeilingStepDelta(delta_m) => {
-                                log_err(
-                                    "assign_ceiling_step_delta",
-                                    controller.borrow_mut().assign_ceiling_step_delta(delta_m),
-                                );
-                            }
-                            SketchEvent::UnsnapCeilingStepLine => {
-                                controller.borrow_mut().unsnap_ceiling_step_line();
-                            }
-                            SketchEvent::CancelPendingCeilingStep => {
-                                controller.borrow_mut().cancel_pending_ceiling_step();
-                            }
-                            SketchEvent::DeleteCeilingStepRegion(index) => {
-                                controller.borrow_mut().delete_ceiling_step_region(index);
-                            }
-                            SketchEvent::SetExposureMode(on) => {
-                                controller.borrow_mut().set_exposure_mode(on);
-                            }
-                            SketchEvent::ExposurePointerDown {
-                                world_x,
-                                world_y,
-                                tol,
-                            } => {
-                                controller
-                                    .borrow_mut()
-                                    .exposure_pointer_down(world_x, world_y, tol);
-                            }
-                            SketchEvent::ExposurePointerDrag { world_x, world_y } => {
-                                controller
-                                    .borrow_mut()
-                                    .exposure_pointer_drag(world_x, world_y);
-                            }
-                            SketchEvent::ExposurePointerUp => {
-                                controller.borrow_mut().exposure_pointer_up();
-                            }
-                            SketchEvent::SetExposureSectionRange { start_m, end_m } => {
-                                controller
-                                    .borrow_mut()
-                                    .set_exposure_section_range(start_m, end_m);
-                            }
-                            SketchEvent::SetWallExposure(exposure) => {
-                                controller.borrow_mut().set_wall_exposure(exposure);
-                            }
-                            SketchEvent::ClearWallExposure => {
-                                controller.borrow_mut().clear_wall_exposure();
-                            }
-                            SketchEvent::SetAllRemainingExposed => {
-                                controller.borrow_mut().set_all_remaining_exposed();
-                            }
-                            SketchEvent::SetDefaultCeilingHeight(value) => {
-                                match controller.borrow_mut().set_default_ceiling_height(value) {
-                                    Ok(()) => {
-                                        self.sketch_state.ceiling_height_error = None;
-                                        // The input clears via the pre-render
-                                        // housekeeping once the prompt closes.
-                                    }
-                                    Err(e) => {
-                                        eprintln!("set_default_ceiling_height: {}", e);
-                                        self.sketch_state.ceiling_height_error = Some(e);
-                                    }
-                                }
-                            }
-                            SketchEvent::CancelCeilingHeightPrompt => {
-                                controller.borrow_mut().cancel_ceiling_height_prompt();
-                                self.sketch_state.ceiling_height_error = None;
-                            }
-                            SketchEvent::SetCurrentStorey(target) => {
-                                log_err(
-                                    "set_current_storey",
-                                    controller.borrow_mut().set_current_storey(target),
-                                );
-                            }
-                            SketchEvent::AddStorey => {
-                                log_err("add_storey", controller.borrow_mut().add_storey());
-                            }
-                            SketchEvent::EditMouseDown {
-                                world_x,
-                                world_y,
-                                tol,
-                            } => {
-                                controller
-                                    .borrow_mut()
-                                    .edit_mouse_down(world_x, world_y, tol);
-                            }
-                            SketchEvent::EditMouseDrag { world_x, world_y } => {
-                                controller.borrow_mut().edit_mouse_drag(world_x, world_y);
-                            }
-                            SketchEvent::EditMouseUp => {
-                                log_err("edit_mouse_up", controller.borrow_mut().edit_mouse_up());
-                            }
-                            SketchEvent::ApplyEditDrag(value) => {
-                                match controller.borrow_mut().apply_edit_drag(value) {
-                                    Ok(()) => {
-                                        self.sketch_state.edit_drag_error = None;
-                                    }
-                                    Err(e) => {
-                                        eprintln!("apply_edit_drag: {}", e);
-                                        self.sketch_state.edit_drag_error = Some(e);
-                                    }
-                                }
-                            }
-                            SketchEvent::CycleEditDragMeasurement => {
-                                controller.borrow_mut().cycle_edit_drag_measurement();
-                                self.sketch_state.edit_drag_error = None;
-                            }
-                            SketchEvent::CancelEditDrag => {
-                                log_err(
-                                    "cancel_edit_drag",
-                                    controller.borrow_mut().cancel_edit_drag(),
-                                );
-                                self.sketch_state.edit_drag_error = None;
-                            }
-                            SketchEvent::EditDoubleClick {
-                                world_x,
-                                world_y,
-                                tol,
-                            } => {
-                                controller
-                                    .borrow_mut()
-                                    .edit_double_click(world_x, world_y, tol);
-                            }
-                            SketchEvent::ApplyVertexMeasurement { idx, value } => {
-                                match controller.borrow_mut().apply_vertex_measurement(idx, value) {
-                                    Ok(()) => {
-                                        self.sketch_state.vertex_drop_error = None;
-                                    }
-                                    Err(e) => {
-                                        eprintln!("apply_vertex_measurement: {}", e);
-                                        self.sketch_state.vertex_drop_error = Some(e);
-                                    }
-                                }
-                            }
-                            SketchEvent::Undo => {
-                                log_err("undo", controller.borrow_mut().undo());
-                            }
-                            SketchEvent::ExtendStrokeWorld { points } => {
-                                controller.borrow_mut().apply_extend_stroke_event(&points);
-                            }
-                            SketchEvent::OutlineStrokeWorld { points } => {
-                                controller.borrow_mut().apply_outline_stroke_world(&points);
-                            }
-                            SketchEvent::TrimStrokeWorld { points } => {
-                                controller.borrow_mut().apply_trim_stroke_event(&points);
-                            }
-                            SketchEvent::Redo => {
-                                log_err("redo", controller.borrow_mut().redo());
-                            }
-                            SketchEvent::SaveCheckpoint => {
-                                log_err(
-                                    "save_checkpoint",
-                                    controller.borrow_mut().save_checkpoint(),
-                                );
-                            }
-                            SketchEvent::CancelVertexDrop => {
-                                // Note: the toolbar already cleared `inputs`
-                                // when the Cancel button was clicked; touching
-                                // `self.sketch_state.vertex_drop_inputs` here
-                                // would double-borrow it (the toolbar still
-                                // owns the &mut reference during the closure).
-                                log_err(
-                                    "cancel_vertex_drop",
-                                    controller.borrow_mut().cancel_vertex_drop(),
-                                );
-                                self.sketch_state.vertex_drop_error = None;
-                            }
-                            _ => {}
-                        },
+                        UiEvent::NavigateTo(p) => next_page = Some(p),
+                        UiEvent::ExitBer => exit_clicked = true,
                         _ => {}
                     },
+                    |ui| match section {
+                        Section::KeyDetails => {
+                            // LIVE editor: every field change writes through to
+                            // the loaded record (and persists) immediately.
+                            let controller = self.app_controller.clone();
+                            KeyDetailsPage::render(ui, &mut self.key_details_state, |event| {
+                                if let UiEvent::KeyDetails(e) = event {
+                                    let mut c = controller.borrow_mut();
+                                    match e {
+                                        KeyDetailsEvent::Rename(name) => c.rename_ber(name),
+                                        KeyDetailsEvent::SetDateAssessed(d) => {
+                                            c.set_date_assessed(d)
+                                        }
+                                        KeyDetailsEvent::SetConstructionPhases(p) => {
+                                            c.set_construction_phases(p)
+                                        }
+                                    }
+                                }
+                            });
+                        }
+                        Section::MoreDetails => {
+                            ui.heading("More Details");
+                            ui.label("More details — coming soon.");
+                        }
+                        Section::Sketch => {
+                            // Bring the resolved geometry current before the immutable borrow
+                            // reads it for rendering — edits only `mark_dirty`, so the derive
+                            // is deferred to here (once per frame, not per edit).
+                            self.app_controller.borrow_mut().materialize();
+                            let (
+                                stroke,
+                                mode,
+                                edit_mode,
+                                display_mode,
+                                ber,
+                                review,
+                                review_remaining,
+                                has_floor_plan,
+                                pending_redraw,
+                                dim_prompt,
+                                dim_scale_set,
+                                dim_error,
+                                position_prompt,
+                                dimensioned_walls,
+                                arc_preview,
+                                curve_bulge,
+                                living_area_mode,
+                                living_area_polygons,
+                                living_area_wall_labels,
+                                active_living_area,
+                                pending_cut_regions,
+                                exposure_mode,
+                                exposure_walls,
+                                exposure_selection,
+                                edit_selected_wall,
+                                edit_selected_vertex,
+                                edit_drag_prompt,
+                                edit_drag_error,
+                                vertex_drop_prompt,
+                                vertex_drop_error,
+                                can_undo,
+                                can_redo,
+                                phase_mode,
+                                phase_region_polygons,
+                                pending_phase_polygon,
+                                pending_phase_cut_regions,
+                                phase_choices,
+                                phase_pick_pending,
+                                step_mode,
+                                step_region_polygons,
+                                pending_step_polygon,
+                                pending_step_cut_regions,
+                                step_pick_pending,
+                                ceiling_step_mode,
+                                ceiling_step_available,
+                                ceiling_step_region_polygons,
+                                pending_ceiling_step_line,
+                                pending_ceiling_step_side_rects,
+                                ceiling_step_snap_tag,
+                                ceiling_step_orientation_pending,
+                                ceiling_step_side_pending,
+                                ceiling_step_amount_pending,
+                                ceiling_step_pending,
+                                ceiling_height_prompt,
+                                ceiling_heights_set,
+                                view,
+                            ) = {
+                                let controller_ref = self.app_controller.borrow();
+                                let v = controller_ref.view();
+                                (
+                                    controller_ref.sketch_stroke(),
+                                    controller_ref.sketch_mode(),
+                                    controller_ref.edit_mode(),
+                                    controller_ref.display_mode(),
+                                    controller_ref.current_ber_clone(),
+                                    controller_ref.current_review_suggestion_clone(),
+                                    controller_ref.review_remaining(),
+                                    controller_ref.has_floor_plan(),
+                                    controller_ref.has_pending_redraw(),
+                                    controller_ref.dimension_prompt_for_ui(),
+                                    controller_ref.dimensioning_scale_set(),
+                                    self.sketch_state.dimension_error.clone(),
+                                    controller_ref.position_prompt_for_ui(),
+                                    controller_ref.walls_with_known_length(),
+                                    controller_ref.pending_arc_preview(),
+                                    controller_ref.pending_arc_bulge(),
+                                    controller_ref.living_area_mode(),
+                                    controller_ref.living_area_polygons(),
+                                    controller_ref.living_area_wall_labels(),
+                                    controller_ref.active_living_area_index(),
+                                    controller_ref.pending_cut_regions(),
+                                    controller_ref.exposure_mode(),
+                                    controller_ref.wall_exposure_views(),
+                                    controller_ref.exposure_selection(),
+                                    controller_ref.edit_selected_wall_positions(),
+                                    controller_ref.edit_selected_vertex_position(),
+                                    controller_ref.edit_drag_prompt_for_ui(),
+                                    self.sketch_state.edit_drag_error.clone(),
+                                    controller_ref.vertex_drop_prompt_for_ui(),
+                                    self.sketch_state.vertex_drop_error.clone(),
+                                    controller_ref.can_undo(),
+                                    controller_ref.can_redo(),
+                                    controller_ref.phase_mode(),
+                                    controller_ref.phase_region_polygons(),
+                                    controller_ref.pending_phase_polygon(),
+                                    controller_ref.pending_phase_cut_regions(),
+                                    controller_ref.construction_phase_choices(),
+                                    controller_ref.phase_pick_pending(),
+                                    controller_ref.step_mode(),
+                                    controller_ref.step_region_polygons(),
+                                    controller_ref.pending_step_polygon(),
+                                    controller_ref.pending_step_cut_regions(),
+                                    controller_ref.step_pick_pending(),
+                                    controller_ref.ceiling_step_mode(),
+                                    controller_ref.ceiling_step_available(),
+                                    controller_ref.ceiling_step_region_polygons(),
+                                    controller_ref.pending_ceiling_step_line(),
+                                    controller_ref.pending_ceiling_step_side_rects(),
+                                    controller_ref.ceiling_step_snap_tag(),
+                                    controller_ref.ceiling_step_orientation_pending(),
+                                    controller_ref.ceiling_step_side_pending(),
+                                    controller_ref.ceiling_step_amount_pending(),
+                                    controller_ref.ceiling_step_pending(),
+                                    controller_ref.ceiling_height_prompt_pending(),
+                                    controller_ref.ceiling_heights_set(),
+                                    crate::ui::render::ViewParams {
+                                        zoom: v.zoom,
+                                        offset_x: v.offset_x,
+                                        offset_y: v.offset_y,
+                                    },
+                                )
+                            };
+
+                            // Prefill the position-prompt textbox with the prompt's drawn
+                            // distance whenever the prompt IDENTITY (axis + selected
+                            // reference option) changes — a fresh prompt or a cycled
+                            // reference starts from its measured-as-drawn value; the
+                            // user's in-progress typing on the SAME prompt is preserved.
+                            if let Some(pp) = &position_prompt {
+                                let key = (pp.axis, pp.kind, pp.option_idx);
+                                if self.sketch_state.position_prompt_key != Some(key) {
+                                    self.sketch_state.position_prompt_key = Some(key);
+                                    self.sketch_state.position_input =
+                                        format!("{:.2}", pp.current_distance);
+                                }
+                            } else {
+                                self.sketch_state.position_prompt_key = None;
+                            }
+
+                            // Once the ceiling-height prompt closes (Set succeeded or
+                            // Cancel), drop any leftover typed text so the next prompt
+                            // starts clean; while it's open — including after a rejected
+                            // value — the text stays put for correction.
+                            if !self.app_controller.borrow().ceiling_height_prompt_pending()
+                                && !self.sketch_state.ceiling_height_input.is_empty()
+                            {
+                                self.sketch_state.ceiling_height_input.clear();
+                            }
+
+                            let current_storey_idx =
+                                self.app_controller.borrow().current_storey_idx();
+                            let position_error = self.sketch_state.position_error.clone();
+                            let ceiling_height_error =
+                                self.sketch_state.ceiling_height_error.clone();
+
+                            let controller = self.app_controller.clone();
+                            let splice_debug = self.app_controller.borrow().splice_debug_overlay();
+                            let snap_tags = self.app_controller.borrow().snap_overlay();
+                            SketchPage::render(
+                                ui,
+                                stroke.as_ref().map(EguiStroke::from),
+                                mode,
+                                display_mode,
+                                edit_mode,
+                                ber.as_ref(),
+                                current_storey_idx,
+                                review.as_ref(),
+                                review_remaining,
+                                has_floor_plan,
+                                pending_redraw,
+                                dim_prompt,
+                                &mut self.sketch_state.dimension_input,
+                                dim_scale_set,
+                                dim_error.as_deref(),
+                                &dimensioned_walls,
+                                position_prompt,
+                                &mut self.sketch_state.position_input,
+                                position_error.as_deref(),
+                                arc_preview.as_deref(),
+                                curve_bulge,
+                                living_area_mode,
+                                &living_area_polygons,
+                                &living_area_wall_labels,
+                                active_living_area,
+                                &pending_cut_regions,
+                                exposure_mode,
+                                &exposure_walls,
+                                exposure_selection,
+                                &mut self.sketch_state.exposure_start_input,
+                                &mut self.sketch_state.exposure_end_input,
+                                phase_mode,
+                                &phase_region_polygons,
+                                &pending_phase_polygon,
+                                &pending_phase_cut_regions,
+                                &phase_choices,
+                                phase_pick_pending,
+                                step_mode,
+                                &step_region_polygons,
+                                &pending_step_polygon,
+                                &pending_step_cut_regions,
+                                step_pick_pending,
+                                &mut self.sketch_state.step_amount_input,
+                                ceiling_step_mode,
+                                ceiling_step_available,
+                                &ceiling_step_region_polygons,
+                                pending_ceiling_step_line,
+                                &pending_ceiling_step_side_rects,
+                                ceiling_step_snap_tag.as_ref(),
+                                ceiling_step_orientation_pending,
+                                ceiling_step_side_pending,
+                                ceiling_step_amount_pending,
+                                ceiling_step_pending,
+                                &mut self.sketch_state.ceiling_amount_input,
+                                ceiling_height_prompt,
+                                &mut self.sketch_state.ceiling_height_input,
+                                ceiling_height_error.as_deref(),
+                                ceiling_heights_set,
+                                edit_selected_wall,
+                                edit_selected_vertex,
+                                edit_drag_prompt,
+                                &mut self.sketch_state.edit_drag_input,
+                                edit_drag_error.as_deref(),
+                                vertex_drop_prompt,
+                                &mut self.sketch_state.vertex_drop_inputs,
+                                vertex_drop_error.as_deref(),
+                                can_undo,
+                                can_redo,
+                                view,
+                                &splice_debug,
+                                &snap_tags,
+                                |event| match event {
+                                    UiEvent::Sketch(sketch_event) => match sketch_event {
+                                        SketchEvent::AddPoint(p) => controller
+                                            .borrow_mut()
+                                            .sketch_add_point(pos2_to_point2f(p))
+                                            .expect("Failed to add point"),
+                                        SketchEvent::EndStroke(p) => controller
+                                            .borrow_mut()
+                                            .sketch_end_stroke(pos2_to_point2f(p))
+                                            .expect("Failed to end stroke"),
+                                        SketchEvent::StartStroke(p) => log_err(
+                                            "sketch_start_stroke",
+                                            controller
+                                                .borrow_mut()
+                                                .sketch_start_stroke(pos2_to_point2f(p)),
+                                        ),
+                                        SketchEvent::ChangeMode(m) => {
+                                            controller.borrow_mut().set_sketch_mode(m)
+                                        }
+                                        SketchEvent::ChangeDisplay(m) => {
+                                            controller.borrow_mut().set_display_mode(m)
+                                        }
+                                        SketchEvent::ChangeEditTool(m) => {
+                                            controller.borrow_mut().set_edit_mode(m)
+                                        }
+                                        SketchEvent::AcceptCollinearity => {
+                                            log_err(
+                                                "accept_current_review",
+                                                controller.borrow_mut().accept_current_review(),
+                                            );
+                                        }
+                                        SketchEvent::RejectCollinearity => {
+                                            controller.borrow_mut().reject_current_review();
+                                        }
+                                        SketchEvent::SkipAllCollinearity => {
+                                            controller.borrow_mut().skip_all_review();
+                                        }
+                                        SketchEvent::ZoomView {
+                                            factor,
+                                            anchor_x,
+                                            anchor_y,
+                                            canvas_center_x,
+                                            canvas_center_y,
+                                        } => {
+                                            controller.borrow_mut().zoom_view(
+                                                factor,
+                                                (anchor_x, anchor_y),
+                                                (canvas_center_x, canvas_center_y),
+                                            );
+                                        }
+                                        SketchEvent::PanView { dx, dy } => {
+                                            controller.borrow_mut().pan_view(dx, dy);
+                                        }
+                                        SketchEvent::ResetView => {
+                                            controller.borrow_mut().reset_view();
+                                        }
+                                        SketchEvent::ReplaceStorey => {
+                                            log_err(
+                                                "confirm_replace_storey",
+                                                controller.borrow_mut().confirm_replace_storey(),
+                                            );
+                                        }
+                                        SketchEvent::AddStoreyFromCurrent => {
+                                            controller
+                                                .borrow_mut()
+                                                .confirm_add_storey_from_current();
+                                        }
+                                        SketchEvent::IgnoreRedraw => {
+                                            controller.borrow_mut().discard_pending_redraw();
+                                        }
+                                        SketchEvent::UnsnapLast => {
+                                            controller.borrow_mut().unsnap_last();
+                                        }
+                                        SketchEvent::ChooseSnap { from, choice } => {
+                                            controller.borrow_mut().choose_snap(
+                                                domain::points::Point2f32::new(from.0, from.1),
+                                                choice,
+                                            );
+                                        }
+                                        SketchEvent::ApplyDimension(value) => {
+                                            match controller.borrow_mut().apply_dimension(value) {
+                                                Ok(()) => {
+                                                    self.sketch_state.dimension_error = None;
+                                                }
+                                                Err(e) => {
+                                                    eprintln!("apply_dimension: {}", e);
+                                                    self.sketch_state.dimension_error = Some(e);
+                                                }
+                                            }
+                                        }
+                                        SketchEvent::SkipDimension => {
+                                            controller.borrow_mut().skip_current_dimension();
+                                            self.sketch_state.dimension_error = None;
+                                        }
+                                        SketchEvent::ApplyPositionDimension(value) => {
+                                            match controller
+                                                .borrow_mut()
+                                                .apply_position_dimension(value)
+                                            {
+                                                Ok(()) => {
+                                                    self.sketch_state.position_error = None;
+                                                }
+                                                Err(e) => {
+                                                    eprintln!("apply_position_dimension: {}", e);
+                                                    self.sketch_state.position_error = Some(e);
+                                                }
+                                            }
+                                        }
+                                        SketchEvent::SkipPositionDimension => {
+                                            controller.borrow_mut().skip_position_dimension();
+                                            self.sketch_state.position_error = None;
+                                        }
+                                        SketchEvent::CyclePositionReference => {
+                                            controller.borrow_mut().cycle_position_reference();
+                                            self.sketch_state.position_error = None;
+                                        }
+                                        SketchEvent::SetCurveBulge(ratio) => {
+                                            controller.borrow_mut().set_pending_arc_bulge(ratio);
+                                        }
+                                        SketchEvent::CommitCurve => {
+                                            log_err(
+                                                "commit_pending_arc",
+                                                controller.borrow_mut().commit_pending_arc(),
+                                            );
+                                        }
+                                        SketchEvent::SetLivingAreaMode(on) => {
+                                            controller.borrow_mut().set_living_area_mode(on);
+                                        }
+                                        SketchEvent::LivingAreaStrokeWorld { points } => {
+                                            controller
+                                                .borrow_mut()
+                                                .apply_living_area_stroke_event(&points);
+                                        }
+                                        SketchEvent::DeleteLivingArea(index) => {
+                                            controller.borrow_mut().delete_living_area(index);
+                                        }
+                                        SketchEvent::ChooseCutRegion { world_x, world_y } => {
+                                            controller
+                                                .borrow_mut()
+                                                .choose_cut_region(world_x as f32, world_y as f32);
+                                        }
+                                        SketchEvent::SetPhaseMode(on) => {
+                                            controller.borrow_mut().set_phase_mode(on);
+                                        }
+                                        SketchEvent::PhaseRegionStrokeWorld { points } => {
+                                            controller
+                                                .borrow_mut()
+                                                .apply_phase_region_stroke_event(&points);
+                                        }
+                                        SketchEvent::AssignPhase(phase) => {
+                                            controller.borrow_mut().assign_phase_to_pending(phase);
+                                        }
+                                        SketchEvent::ChoosePhaseCutRegion { world_x, world_y } => {
+                                            controller.borrow_mut().choose_phase_cut_region(
+                                                world_x as f32,
+                                                world_y as f32,
+                                            );
+                                        }
+                                        SketchEvent::CancelPendingPhase => {
+                                            controller.borrow_mut().cancel_pending_phase();
+                                        }
+                                        SketchEvent::DeletePhaseRegion(index) => {
+                                            controller.borrow_mut().delete_phase_region(index);
+                                        }
+                                        SketchEvent::SetStepMode(on) => {
+                                            controller.borrow_mut().set_step_mode(on);
+                                        }
+                                        SketchEvent::StepRegionStrokeWorld { points } => {
+                                            controller
+                                                .borrow_mut()
+                                                .apply_step_region_stroke_event(&points);
+                                        }
+                                        SketchEvent::AssignStepLevel(level_m) => {
+                                            controller
+                                                .borrow_mut()
+                                                .assign_step_level_to_pending(level_m);
+                                        }
+                                        SketchEvent::ChooseStepCutRegion { world_x, world_y } => {
+                                            controller.borrow_mut().choose_step_cut_region(
+                                                world_x as f32,
+                                                world_y as f32,
+                                            );
+                                        }
+                                        SketchEvent::CancelPendingStep => {
+                                            controller.borrow_mut().cancel_pending_step();
+                                        }
+                                        SketchEvent::DeleteStepRegion(index) => {
+                                            controller.borrow_mut().delete_step_region(index);
+                                        }
+                                        SketchEvent::SetCeilingStepMode(on) => {
+                                            controller.borrow_mut().set_ceiling_step_mode(on);
+                                        }
+                                        SketchEvent::CeilingStepStrokeWorld { points } => {
+                                            controller
+                                                .borrow_mut()
+                                                .apply_ceiling_step_stroke_event(&points);
+                                        }
+                                        SketchEvent::CeilingStepTap { world_x, world_y } => {
+                                            controller
+                                                .borrow_mut()
+                                                .ceiling_step_tap(world_x as f32, world_y as f32);
+                                        }
+                                        SketchEvent::ChooseCeilingStepOrientation {
+                                            horizontal,
+                                        } => {
+                                            controller
+                                                .borrow_mut()
+                                                .choose_ceiling_step_orientation(horizontal);
+                                        }
+                                        SketchEvent::AssignCeilingStepDelta(delta_m) => {
+                                            log_err(
+                                                "assign_ceiling_step_delta",
+                                                controller
+                                                    .borrow_mut()
+                                                    .assign_ceiling_step_delta(delta_m),
+                                            );
+                                        }
+                                        SketchEvent::UnsnapCeilingStepLine => {
+                                            controller.borrow_mut().unsnap_ceiling_step_line();
+                                        }
+                                        SketchEvent::CancelPendingCeilingStep => {
+                                            controller.borrow_mut().cancel_pending_ceiling_step();
+                                        }
+                                        SketchEvent::DeleteCeilingStepRegion(index) => {
+                                            controller
+                                                .borrow_mut()
+                                                .delete_ceiling_step_region(index);
+                                        }
+                                        SketchEvent::SetExposureMode(on) => {
+                                            controller.borrow_mut().set_exposure_mode(on);
+                                        }
+                                        SketchEvent::ExposurePointerDown {
+                                            world_x,
+                                            world_y,
+                                            tol,
+                                        } => {
+                                            controller
+                                                .borrow_mut()
+                                                .exposure_pointer_down(world_x, world_y, tol);
+                                        }
+                                        SketchEvent::ExposurePointerDrag { world_x, world_y } => {
+                                            controller
+                                                .borrow_mut()
+                                                .exposure_pointer_drag(world_x, world_y);
+                                        }
+                                        SketchEvent::ExposurePointerUp => {
+                                            controller.borrow_mut().exposure_pointer_up();
+                                        }
+                                        SketchEvent::SetExposureSectionRange { start_m, end_m } => {
+                                            controller
+                                                .borrow_mut()
+                                                .set_exposure_section_range(start_m, end_m);
+                                        }
+                                        SketchEvent::SetWallExposure(exposure) => {
+                                            controller.borrow_mut().set_wall_exposure(exposure);
+                                        }
+                                        SketchEvent::ClearWallExposure => {
+                                            controller.borrow_mut().clear_wall_exposure();
+                                        }
+                                        SketchEvent::SetAllRemainingExposed => {
+                                            controller.borrow_mut().set_all_remaining_exposed();
+                                        }
+                                        SketchEvent::SetDefaultCeilingHeight(value) => {
+                                            match controller
+                                                .borrow_mut()
+                                                .set_default_ceiling_height(value)
+                                            {
+                                                Ok(()) => {
+                                                    self.sketch_state.ceiling_height_error = None;
+                                                    // The input clears via the pre-render
+                                                    // housekeeping once the prompt closes.
+                                                }
+                                                Err(e) => {
+                                                    eprintln!("set_default_ceiling_height: {}", e);
+                                                    self.sketch_state.ceiling_height_error =
+                                                        Some(e);
+                                                }
+                                            }
+                                        }
+                                        SketchEvent::CancelCeilingHeightPrompt => {
+                                            controller.borrow_mut().cancel_ceiling_height_prompt();
+                                            self.sketch_state.ceiling_height_error = None;
+                                        }
+                                        SketchEvent::SetCurrentStorey(target) => {
+                                            log_err(
+                                                "set_current_storey",
+                                                controller.borrow_mut().set_current_storey(target),
+                                            );
+                                        }
+                                        SketchEvent::AddStorey => {
+                                            log_err(
+                                                "add_storey",
+                                                controller.borrow_mut().add_storey(),
+                                            );
+                                        }
+                                        SketchEvent::EditMouseDown {
+                                            world_x,
+                                            world_y,
+                                            tol,
+                                        } => {
+                                            controller
+                                                .borrow_mut()
+                                                .edit_mouse_down(world_x, world_y, tol);
+                                        }
+                                        SketchEvent::EditMouseDrag { world_x, world_y } => {
+                                            controller
+                                                .borrow_mut()
+                                                .edit_mouse_drag(world_x, world_y);
+                                        }
+                                        SketchEvent::EditMouseUp => {
+                                            log_err(
+                                                "edit_mouse_up",
+                                                controller.borrow_mut().edit_mouse_up(),
+                                            );
+                                        }
+                                        SketchEvent::ApplyEditDrag(value) => {
+                                            match controller.borrow_mut().apply_edit_drag(value) {
+                                                Ok(()) => {
+                                                    self.sketch_state.edit_drag_error = None;
+                                                }
+                                                Err(e) => {
+                                                    eprintln!("apply_edit_drag: {}", e);
+                                                    self.sketch_state.edit_drag_error = Some(e);
+                                                }
+                                            }
+                                        }
+                                        SketchEvent::CycleEditDragMeasurement => {
+                                            controller.borrow_mut().cycle_edit_drag_measurement();
+                                            self.sketch_state.edit_drag_error = None;
+                                        }
+                                        SketchEvent::CancelEditDrag => {
+                                            log_err(
+                                                "cancel_edit_drag",
+                                                controller.borrow_mut().cancel_edit_drag(),
+                                            );
+                                            self.sketch_state.edit_drag_error = None;
+                                        }
+                                        SketchEvent::EditDoubleClick {
+                                            world_x,
+                                            world_y,
+                                            tol,
+                                        } => {
+                                            controller
+                                                .borrow_mut()
+                                                .edit_double_click(world_x, world_y, tol);
+                                        }
+                                        SketchEvent::ApplyVertexMeasurement { idx, value } => {
+                                            match controller
+                                                .borrow_mut()
+                                                .apply_vertex_measurement(idx, value)
+                                            {
+                                                Ok(()) => {
+                                                    self.sketch_state.vertex_drop_error = None;
+                                                }
+                                                Err(e) => {
+                                                    eprintln!("apply_vertex_measurement: {}", e);
+                                                    self.sketch_state.vertex_drop_error = Some(e);
+                                                }
+                                            }
+                                        }
+                                        SketchEvent::Undo => {
+                                            log_err("undo", controller.borrow_mut().undo());
+                                        }
+                                        SketchEvent::ExtendStrokeWorld { points } => {
+                                            controller
+                                                .borrow_mut()
+                                                .apply_extend_stroke_event(&points);
+                                        }
+                                        SketchEvent::OutlineStrokeWorld { points } => {
+                                            controller
+                                                .borrow_mut()
+                                                .apply_outline_stroke_world(&points);
+                                        }
+                                        SketchEvent::TrimStrokeWorld { points } => {
+                                            controller
+                                                .borrow_mut()
+                                                .apply_trim_stroke_event(&points);
+                                        }
+                                        SketchEvent::Redo => {
+                                            log_err("redo", controller.borrow_mut().redo());
+                                        }
+                                        SketchEvent::SaveCheckpoint => {
+                                            log_err(
+                                                "save_checkpoint",
+                                                controller.borrow_mut().save_checkpoint(),
+                                            );
+                                        }
+                                        SketchEvent::CancelVertexDrop => {
+                                            // Note: the toolbar already cleared `inputs`
+                                            // when the Cancel button was clicked; touching
+                                            // `self.sketch_state.vertex_drop_inputs` here
+                                            // would double-borrow it (the toolbar still
+                                            // owns the &mut reference during the closure).
+                                            log_err(
+                                                "cancel_vertex_drop",
+                                                controller.borrow_mut().cancel_vertex_drop(),
+                                            );
+                                            self.sketch_state.vertex_drop_error = None;
+                                        }
+                                        _ => {}
+                                    },
+                                    _ => {}
+                                },
+                            );
+                        }
+                    },
                 );
-            }
-            Page::NewBer => {
-                // Collect intents from the form closure first, then act after the
-                // closure releases its borrow of self.new_ber_state.
-                let mut create_clicked = false;
-                let mut next_page: Option<Page> = None;
-
-                NewBerPage::render(ui, &mut self.new_ber_state, |event| match event {
-                    UiEvent::NavigateTo(p) => next_page = Some(p),
-                    UiEvent::NewBer(NewBerEvent::CreateClicked) => {
-                        create_clicked = true;
-                    }
-                    _ => {}
-                });
-
-                if create_clicked {
-                    let name = std::mem::take(&mut self.new_ber_state.name);
-                    let date = self
-                        .new_ber_state
-                        .date_assessed
-                        .unwrap_or_else(|| chrono::Local::now().naive_local().date());
-                    let phases = collect_construction_phases(&self.new_ber_state);
-                    {
-                        let mut ctrl = self.app_controller.borrow_mut();
-                        ctrl.create_ber(name, date);
-                        ctrl.set_construction_phases(phases);
-                    }
-                    self.new_ber_state = NewBerState::default();
-                    next_page = Some(Page::Home);
-                }
-
-                if let Some(p) = next_page {
+                if exit_clicked {
+                    // Flush + clear the loaded record, then return Home with
+                    // all per-record page state reset (autosave means nothing
+                    // is lost; no confirm dialog).
+                    log_err("exit_ber", self.app_controller.borrow_mut().exit_ber());
+                    self.key_details_state = KeyDetailsState::default();
+                    self.home_state = HomeState::default();
+                    self.sketch_state = SketchState::default();
+                    self.navigate_to(Page::Home);
+                } else if let Some(p) = next_page {
                     self.navigate_to(p);
                 }
             }
-            Page::KeyDeets => {
-                ui.heading("Key Details");
-                ui.label("TODO: Implement key details page");
-            }
-            Page::MoreDeets => {
-                ui.heading("More Details");
-                ui.label("TODO: Implement more details page");
-            }
-        });
+        }
     }
 }
