@@ -49,6 +49,15 @@ pub enum PositionPromptKind {
     /// reaches `apply_position`/`skip_current_position` (`unreachable!`) and is
     /// never serialized (`current_position_prompt` is `serde(skip)`).
     Line,
+    /// A roof-point (apex) coordinate on one UN-snapped axis — built by the
+    /// shell's pending-roof-point flow, which reuses the `LinePositionPrompt`
+    /// machinery per axis (X then Y) and resolves it itself
+    /// (`StoreyDoc::resolve_ceiling_line_position`), never by the dimensioning
+    /// loop: there's no shape or parameter behind a tapped point. Like `Line`,
+    /// the variant exists so the shared position-panel UI data can tag the
+    /// prompt kind; it never reaches `apply_position`/`skip_current_position`
+    /// (`unreachable!`) and is never serialized.
+    Point,
 }
 
 /// One candidate measurement. NOTE the two VertexIds index DIFFERENT plans:
@@ -301,6 +310,7 @@ impl StoreyDoc {
                 }
             }
             PositionPromptKind::Line => unreachable!("Line prompts are shell-resolved"),
+            PositionPromptKind::Point => unreachable!("Point prompts are shell-resolved"),
         }
 
         // Guardrail (BOTH kinds): the area must stay inside the storey.
@@ -370,6 +380,7 @@ impl StoreyDoc {
                 );
             }
             PositionPromptKind::Line => unreachable!("Line prompts are shell-resolved"),
+            PositionPromptKind::Point => unreachable!("Point prompts are shell-resolved"),
         }
         self.recompute_position_prompt();
     }

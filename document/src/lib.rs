@@ -23,6 +23,7 @@ mod load;
 mod phase;
 mod position;
 mod resolve;
+mod roof_point;
 mod step;
 
 pub use ceiling_step::{
@@ -35,6 +36,7 @@ pub use load::reconstruct_living_areas;
 pub use phase::{phase_regions_from_floors, stamp_wall_phases, PhaseRegion};
 pub use position::{PositionOption, PositionPrompt, PositionPromptKind};
 pub use resolve::{ensure_storey_constructions, resolve_storey};
+pub use roof_point::validate_roof_apex;
 pub use step::{step_regions_from_floors, StepRegion};
 
 use datatypes::ber::structural::WallExposure;

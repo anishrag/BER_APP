@@ -42,13 +42,20 @@ pub struct CeilingStepRegion {
 }
 
 /// Rebuild the session ceiling-step regions for storey `idx` from its
-/// persisted roofs: each FLAT region whose height differs from the storey's
-/// default by ≥ 1 mm → one step region with `delta = z − default`. Empty when
-/// the storey is missing or its ceiling height is unset (steps only exist
-/// relative to a default). Sloped regions are skipped (`flat_z` is `None` —
-/// they're the later roofs feature, not steps), as are degenerate sub-mm²
-/// slivers. Without this, the next commit would re-derive the default flat
-/// ceiling with no areas and flatten the steps.
+/// persisted roofs — APEX-AWARE: each region's BASE height is read with the
+/// storey's roof apexes dropped (`CeilingRegion::fan_base_z`, which equals
+/// `flat_z` for unfanned regions), and a region whose base differs from the
+/// storey's default by ≥ 1 mm → one step region with `delta = base − default`.
+/// A fan piece over a stepped area thus emits its TRIANGLE ring at the step's
+/// delta — that's the apex-over-step reload fixpoint: re-deriving applies the
+/// triangle steps first, then `with_apexes` re-fans them to the identical
+/// surface (composition order: default → steps → apexes). Known UX cost: the
+/// step list fragments into triangles under a fan — accepted for now. Empty
+/// when the storey is missing or its ceiling height is unset (steps only
+/// exist relative to a default). Genuinely irregular sloped regions (no
+/// shared base once apex vertices drop) are skipped, as are degenerate
+/// sub-mm² slivers. Without this, the next commit would re-derive the default
+/// flat ceiling with no areas and flatten the steps.
 pub fn ceiling_step_regions_from_roofs(ber: &Ber, idx: usize) -> Vec<CeilingStepRegion> {
     let Some(storey) = ber.storeys.get(idx) else {
         return Vec::new();
@@ -58,7 +65,7 @@ pub fn ceiling_step_regions_from_roofs(ber: &Ber, idx: usize) -> Vec<CeilingStep
     };
     let mut regions: Vec<CeilingStepRegion> = Vec::new();
     for region in &storey.roofs.regions {
-        let Some(z) = region.flat_z() else {
+        let Some(z) = region.fan_base_z(&storey.roof_apexes) else {
             continue;
         };
         let delta = z - default_z;
@@ -627,5 +634,79 @@ mod tests {
         assert!(ceiling_step_regions_from_roofs(&ber, 0).is_empty());
         // Missing storey → empty.
         assert!(ceiling_step_regions_from_roofs(&ber, 7).is_empty());
+    }
+
+    /// APEX-AWARE reconstruction: a fan piece whose BASE (apex vertices
+    /// dropped) is off the default emits its triangle ring at the step delta;
+    /// a fan over the default base emits nothing; a genuinely irregular slope
+    /// (no apex match) is skipped.
+    #[test]
+    fn reconstruction_is_apex_aware() {
+        use datatypes::ber::structural::{
+            CeilingRegion, CeilingRegions, Polygon3D, RoofApex, Storey,
+        };
+        use domain::points::{Point2f64, Point3f64};
+
+        let square = |x0: f64, x1: f64| {
+            vec![
+                Point2f64::new(x0, 0.0),
+                Point2f64::new(x1, 0.0),
+                Point2f64::new(x1, 4.0),
+                Point2f64::new(x0, 4.0),
+            ]
+        };
+        let cid = Default::default();
+        // Left half: stepped to 2.7 then fanned to an apex at (1, 2, 4.2).
+        let apex = RoofApex {
+            point: Point2f64::new(1.0, 2.0),
+            z_m: 4.2,
+        };
+        let mut roofs = CeilingRegions::default_for_footprint(vec![square(0.0, 2.0)], 2.7, cid)
+            .with_apexes(std::slice::from_ref(&apex));
+        let n_fan = roofs.regions.len();
+        assert_eq!(n_fan, 4, "one triangle per boundary edge");
+        // Right half: fanned at the DEFAULT base — reconstructs to nothing.
+        roofs.regions.extend(
+            CeilingRegions::default_for_footprint(vec![square(2.0, 4.0)], 2.4, cid)
+                .with_apexes(&[RoofApex {
+                    point: Point2f64::new(3.0, 2.0),
+                    z_m: 3.5,
+                }])
+                .regions,
+        );
+        // An irregular slope no apex explains → skipped.
+        roofs.regions.push(CeilingRegion {
+            id: Default::default(),
+            polygon: Polygon3D::new(vec![
+                Point3f64::new(10.0, 0.0, 2.0),
+                Point3f64::new(12.0, 0.0, 2.5),
+                Point3f64::new(11.0, 2.0, 3.0),
+            ]),
+            opes: Default::default(),
+            construction_id: cid,
+        });
+        let mut ber = Ber::default();
+        ber.storeys.push(Storey {
+            roofs,
+            ceiling_height_m: Some(2.4),
+            roof_apexes: vec![
+                apex,
+                RoofApex {
+                    point: Point2f64::new(3.0, 2.0),
+                    z_m: 3.5,
+                },
+            ],
+            ..Storey::default()
+        });
+
+        let regions = ceiling_step_regions_from_roofs(&ber, 0);
+        assert_eq!(regions.len(), n_fan, "only the stepped fan's triangles");
+        let mut total = 0.0;
+        for r in &regions {
+            assert!((r.delta_m - 0.3).abs() < 1e-9, "each recovers the delta");
+            assert_eq!(r.polygon.len(), 3, "triangle rings, apex corner kept");
+            total += ring_area2(&r.polygon) / 2.0;
+        }
+        assert!((total - 8.0).abs() < 1e-4, "triangles tile the 2×4 half");
     }
 }

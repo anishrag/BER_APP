@@ -230,8 +230,8 @@ mod tests {
                 datatypes::ber::structural::WallExposure::Exposed,
             ),
         ];
-        // Slice B-2 wires real roofs into resolve; empty roofs here keep the
-        // flat 2.4 m top this fixture always had.
+        // This fixture tests phase stamping, not roofs — empty roofs give the
+        // flat 2.4 m top, which is all the base-midpoint hit-test needs.
         let walls = WallRegions::regenerate(
             segs,
             &WallRegions::default(),
