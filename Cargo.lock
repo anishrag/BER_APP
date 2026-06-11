@@ -1422,10 +1422,6 @@ dependencies = [
  "datatypes",
  "domain",
  "earcutr 0.5.0",
- "geo",
- "itertools 0.14.0",
- "ordered-float",
- "uuid",
 ]
 
 [[package]]

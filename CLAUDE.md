@@ -8,7 +8,7 @@ Rust app for an Irish BER (Building Energy Rating) assessor, eventually targetin
 - `datatypes/` — BER + DEAP data model. Pure data, no I/O.
 - `sketch/` — stroke capture engine with a `SketchModeBehaviour` trait. Depends on `domain` only.
 - `manip_2d_plan/` — floor-plan post-processing (simplify → orthogonalize → parametric). Depends on `domain` only. Owns the parametric floor-plan model and **all geometry algorithms over it**: `FloorPlan` (public API) wraps `ParametricPlan` (rings of parametric vertices + shared parameters); `geom.rs` holds pure coordinate math. (See "Responsibility placement".)
-- `gen_3d_vol/` — 2D floor plan → 3D volume (walls/floors/ceilings). Not currently wired into the app.
+- `gen_3d_vol/` — dormant solid-3D leftovers, not wired into the app: per-storey volume assembly (`Gen3D::from_ber_storey`), ceiling mesh triangulation + ridge-vertex insertion, wall split-by-line. Floor/roof/wall *region derivation* is owned by `datatypes` + `document` (`resolve_storey`) now.
 - `document/` — the editable storey **model** the app edits: one storey's shapes (`outline` + `living_areas` + in-flight `phase_shape`), which is active, the live editing buffer (the active shape's `floor_plan`/`dimensioning`/`edit_state`/`pending_arc`), per-wall exposure, and the model *operations* over them (slot switching, cross-shape geometry, the dimensioning loop, exposure painting, drag geometry). UI-free and DB-free — **builds standalone** (so a future native shell can drive it as a library). Depends on `domain`, `datatypes`, `manip_2d_plan`. Logs via the `log` facade, not `println!`.
 - `src/` — the eframe app **shell**: `controller/` drives the `document` (UiEvent dispatch, undo/redo, persistence orchestration, session/interaction state, UI-data derivation); `engine/` is persistence; `ui/` is egui. Page flow: Splash → Home (New/Load) → BER workspace [Key Details | Sketch | More Details].
 
@@ -18,7 +18,7 @@ Rust app for an Irish BER (Building Energy Rating) assessor, eventually targetin
 2. **`nalgebra` is confined to `domain/**`.** Other crates use the `Point2f32` / `Point2f64` / `Point3f64` typedefs from `domain::points`.
 3. **No `use slint`** anywhere in source. Slint was an earlier toolkit choice; the project is on egui now.
 4. **Database access (`rusqlite`) only through `src/engine/`.** Use `BerRepository` from controllers and UI.
-5. **Don't expand `gen_3d_vol/`** until it's wired into the controller — ~3,700 LOC currently unused.
+5. **Don't expand `gen_3d_vol/`** until it's wired into the controller — ~1,400 LOC currently unused (slimmed from ~4,400 after its region-derivation machinery was superseded by `datatypes` + `document`).
 6. **Don't uncomment large commented blocks** (notably in `manip_2d_plan/src/lib.rs`) without a concrete caller.
 7. **`document/` is the editing model — keep it UI-free and DB-free.** Editing *logic* (model mutation over a storey's shapes) goes in `document` as `Document` methods; the controller is the shell that drives it. No `egui`/`eframe` and no `rusqlite` in `document` (rules 1 + 4 already enforce this via the scan). It must keep building standalone (`cargo build -p document`).
 
@@ -37,7 +37,7 @@ Each module owns a concern. Put logic where its concern lives:
 | Stroke/pen capture (raw input → strokes, mode behaviours) | `sketch` |
 | BER + DEAP data model and pure data transforms (no I/O) | `datatypes` |
 | Shared coordinate primitives & vector math (`Point2*`/`Point3*`) | `domain` |
-| 2D plan → 3D volume | `gen_3d_vol` (dormant — see scope rule) |
+| Solid-3D viewing (volume assembly, mesh triangulation) | `gen_3d_vol` (dormant — see scope rule; floor/roof/wall region derivation lives in `datatypes` + `document`) |
 | Persistence / SQL | `src/engine` (`BerRepository`) |
 | Rendering & per-page UI state | `src/ui` |
 

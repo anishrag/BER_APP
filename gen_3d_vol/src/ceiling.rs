@@ -1,22 +1,24 @@
-// 1. x take floor polygon and split by discontinuitys
-// 2. x Triangulate each region separately
-// 3. x Create extra vertices if needed and set heights
-// 4. repolygon and split by planes
-// 5. x further split by year
-// 6. x futher user splitting if required
+//! Ceiling MESH machinery: earcut triangulation of a `CeilingRegion`, arbitrary
+//! ridge-vertex insertion (a point at an explicit height, splitting triangles),
+//! and re-polygonisation (coplanar + connected triangles → regions).
+//!
+//! Kept because the canonical roof derivation (`CeilingRegions::with_apexes`)
+//! only supports fan-to-apex slopes: a true gable RIDGE (two high points joined
+//! by a level edge) needs per-vertex height insertion, and a future solid-3D
+//! viewer needs the triangulation. Region re-splitting by area and construction
+//! stamping are owned by `datatypes` (`with_z_deltas` / `partition`) now.
+
 // external crates
-use domain::points::{Point2f64, Point3f64, Vector2f64, Vector3f64};
+use domain::points::{Point2f64, Point3f64, Vector3f64};
 use earcutr::earcut;
-use geo::Polygon;
 use std::collections::HashMap;
 use std::convert::TryFrom;
 // crate includes
 use datatypes::ber::common::ItemId;
-use datatypes::ber::structural::{CeilingRegion, CeilingRegions, Opes};
+use datatypes::ber::structural::{CeilingRegion, CeilingRegions, Opes, Polygon3D};
 
 // local includes
-use super::geometry::{point_in_triangle_2d, point_on_segment_2d, Geometry, MergeableRegion};
-use super::types::{DirectedEdge3D, HasRegionId, Point3Ext, Polygon3D, Polygon3DMultiZ, EPSILON};
+use super::geometry::{point_in_triangle_2d, point_on_segment_2d, Geometry, EPSILON};
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 struct Edge2D {
@@ -83,80 +85,14 @@ pub enum CeilingRegionError {
     ConversionFailed,
 }
 
-impl MergeableRegion for CeilingRegion {
-    type Geometry = Polygon3D; // or Vec<Vertex> if you use vertex list
-
-    fn id(&self) -> ItemId {
-        self.id
-    }
-
-    fn geometry(&self) -> &Self::Geometry {
-        &self.polygon
-    }
-
-    fn is_merge_compatible(&self, other: &Self) -> bool {
-        // Same construction (fabric lives behind `construction_id`).
-        self.construction_id == other.construction_id
-    }
-
-    fn with_geometry(&self, geometry: Self::Geometry) -> Self {
-        CeilingRegion {
-            id: ItemId::default(),
-            polygon: geometry,
-            opes: self.opes.clone(),
-            construction_id: self.construction_id,
-        }
-    }
-}
-
+/// Ridge-vertex insertion over a whole `CeilingRegions` — the capability
+/// `with_apexes` doesn't cover (an interior point at an explicit height
+/// without fanning the entire region to it).
 pub trait CeilingRegionsManip {
     fn insert_vertex(&mut self, p: Point2f64, height: f64) -> Result<(), CeilingRegionError>;
-    /// Re-point the ceiling regions overlapping `polygon` at `construction_id`,
-    /// splitting geometry along the polygon boundary. The caller (the `Gen3D`
-    /// wrapper) resolves the desired construction to an id first.
-    fn set_polygon_construction(&mut self, polygon: Polygon<f64>, construction_id: ItemId);
-    fn modify_polygon_increase_height(&mut self, polygon: Polygon<f64>, delta_height: f64);
-    fn get_clockwise_3d_polygon_starting_closest_to_origin(&self) -> Polygon3DMultiZ;
-    fn get_all_heights(p: Point2f64) -> Vec<(f64)>;
-}
-pub enum RegionDir {
-    NPlus45,
-    NPlus135,
-    NPlus225,
-    NPlus315,
-}
-//TODO: enforce always clockwise
-fn get_region_dir_relative_to_edge_point(p: Point2f64, reg: &CeilingRegion) -> Result<f64, ()> {
-    let poly_points = &reg.polygon.exterior;
-    let n = poly_points.len();
-
-    let mut acc_angle: f64 = 0.0;
-    let mut num_segments = 0;
-    for i in 1..n {
-        let a = poly_points[i - 1];
-        let b = poly_points[i];
-
-        if point_on_segment_2d(&p, &a, &b, EPSILON) {
-            let edge = Vector2f64::new(b.x - a.x, b.y - a.y).normalize();
-
-            let outward = Vector2f64::new(edge.y, -edge.x);
-
-            let angle = outward.y.atan2(outward.x);
-            acc_angle += angle;
-            num_segments += 1;
-        }
-    }
-    if num_segments == 0 || num_segments > 2 {
-        return Err(());
-    }
-    Ok(acc_angle)
 }
 
 impl CeilingRegionsManip for CeilingRegions {
-    fn get_all_heights(p: Point2f64) -> Vec<(f64)> {
-        vec![]
-    }
-
     //TODO: fix this. when we put a height, we should specify which region it's for
     fn insert_vertex(&mut self, p: Point2f64, height: f64) -> Result<(), CeilingRegionError> {
         let old_regions = std::mem::take(&mut self.regions);
@@ -191,211 +127,8 @@ impl CeilingRegionsManip for CeilingRegions {
             })?;
         Ok(())
     }
-
-    fn set_polygon_construction(&mut self, polygon: Polygon<f64>, construction_id: ItemId) {
-        self.modify_polygon(polygon, |r| {
-            r.construction_id = construction_id;
-        });
-    }
-
-    fn modify_polygon_increase_height(&mut self, polygon: Polygon<f64>, delta_height: f64) {
-        self.modify_polygon(polygon, |r| {
-            for vertex in r.polygon.exterior.iter_mut() {
-                vertex.z += delta_height;
-            }
-        });
-    }
-
-    fn get_clockwise_3d_polygon_starting_closest_to_origin(&self) -> Polygon3DMultiZ {
-        // ------------------------------------------------------------
-        // 1. Collect all directed edges from all regions
-        // ------------------------------------------------------------
-        let mut all_edges: Vec<DirectedEdge3D> = Vec::new();
-
-        for region in &self.regions {
-            let coords = &region.polygon.exterior;
-
-            if coords.len() < 2 {
-                continue;
-            }
-
-            for i in 0..coords.len() - 1 {
-                all_edges.push(DirectedEdge3D::new(coords[i], coords[i + 1]));
-            }
-
-            // Closing edge
-            all_edges.push(DirectedEdge3D::new(coords[coords.len() - 1], coords[0]));
-        }
-
-        if all_edges.is_empty() {
-            return Polygon3DMultiZ::new(vec![]);
-        }
-
-        // ------------------------------------------------------------
-        // 2. Cancel interior edges (A→B cancels B→A)
-        // ------------------------------------------------------------
-        let mut exterior_edges: Vec<DirectedEdge3D> = Vec::new();
-
-        'edge_loop: for (i, e) in all_edges.iter().enumerate() {
-            if all_edges
-                .iter()
-                .enumerate()
-                .any(|(j, other)| j != i && e.matches_xy_undirected(other))
-            {
-                continue 'edge_loop;
-            }
-            exterior_edges.push(*e);
-        }
-        println!("Exterior edges: {:?}", exterior_edges);
-        if exterior_edges.is_empty() {
-            return Polygon3DMultiZ::new(vec![]);
-        }
-
-        // ------------------------------------------------------------
-        // 3. Reconstruct ordered boundary edge loop
-        // ------------------------------------------------------------
-        let mut boundary_edges: Vec<DirectedEdge3D> = Vec::new();
-        let start_edge = exterior_edges[0];
-        boundary_edges.push(start_edge);
-
-        loop {
-            let last = boundary_edges.last().unwrap();
-            let mut found = false;
-
-            for e in &exterior_edges {
-                if e.from.eq_xy(&last.to, EPSILON) {
-                    if boundary_edges.len() > 1 {
-                        let prev = boundary_edges[boundary_edges.len() - 2];
-                        if e.to.eq_xy(&prev.from, EPSILON) {
-                            continue;
-                        }
-                    }
-
-                    if e.to.eq_xy(&start_edge.from, EPSILON) {
-                        boundary_edges.push(*e);
-                        found = true;
-                        break;
-                    }
-
-                    boundary_edges.push(*e);
-                    found = true;
-                    break;
-                }
-            }
-
-            if !found || boundary_edges.last().unwrap().to == start_edge.from {
-                break;
-            }
-        }
-
-        println!("Reconstructed boundary edges: {:?}", boundary_edges);
-        // ------------------------------------------------------------
-        // 4. Ensure clockwise orientation
-        // ------------------------------------------------------------
-        let mut signed_area = 0.0;
-        for e in &boundary_edges {
-            let pt1 = e.from;
-            let pt2 = e.to;
-            signed_area += pt1.x * pt2.y - pt2.x * pt1.y;
-        }
-
-        if signed_area > 0.0 {
-            boundary_edges.reverse();
-            for e in &mut boundary_edges {
-                std::mem::swap(&mut e.from, &mut e.to);
-            }
-        }
-
-        // ------------------------------------------------------------
-        // 5. Build traversal-consistent multi-Z vertices
-        // ------------------------------------------------------------
-        let mut points_with_z: Vec<(f64, f64, Vec<f64>)> = Vec::new();
-
-        for i in 0..boundary_edges.len() {
-            let incoming = &boundary_edges[i];
-            let outgoing = &boundary_edges[(i + 1) % boundary_edges.len()];
-
-            let pt = incoming.to; // current vertex
-
-            // Collect Zs from the incoming edge's end and outgoing edge's start
-            let mut heights = vec![incoming.to.z, outgoing.from.z];
-            heights.sort_by(|a, b| a.partial_cmp(b).unwrap());
-            heights.dedup();
-
-            points_with_z.push((pt.x, pt.y, heights));
-        }
-
-        // ------------------------------------------------------------
-        // 6. Rotate so closest point to origin is first
-        // ------------------------------------------------------------
-        let closest_idx = points_with_z
-            .iter()
-            .enumerate()
-            .min_by(|(_, (x1, y1, _)), (_, (x2, y2, _))| {
-                let d1 = x1 * x1 + y1 * y1;
-                let d2 = x2 * x2 + y2 * y2;
-                d1.partial_cmp(&d2).unwrap()
-            })
-            .map(|(i, _)| i)
-            .unwrap_or(0);
-
-        points_with_z.rotate_left(closest_idx);
-
-        Polygon3DMultiZ::new(points_with_z)
-    }
 }
 
-trait CeilingRegionsManipPrivate {
-    fn modify_polygon<F>(&mut self, polygon: Polygon<f64>, modify: F)
-    where
-        F: FnMut(&mut CeilingRegion);
-}
-
-impl CeilingRegionsManipPrivate for CeilingRegions {
-    fn modify_polygon<F>(&mut self, polygon: Polygon<f64>, mut modify: F)
-    where
-        F: FnMut(&mut CeilingRegion),
-    {
-        let mut new_regions = Vec::new();
-        let mut regions_to_remove = Vec::new();
-
-        for (idx, region) in self.regions.iter().enumerate() {
-            let intersection = region.polygon.intersection(&polygon);
-            if intersection.polygons.is_empty() {
-                continue;
-            }
-
-            let remainder = region.polygon.difference(&polygon);
-            regions_to_remove.push(idx);
-
-            let mut id = region.id;
-            // remainder
-            for poly in remainder.polygons {
-                new_regions.push(CeilingRegion {
-                    id,
-                    polygon: poly,
-                    opes: region.opes.clone(),
-                    construction_id: region.construction_id,
-                });
-                id = ItemId::default();
-            }
-
-            // intersection
-            for poly in intersection.polygons {
-                let mut new_region = region.clone();
-                new_region.polygon = poly;
-                modify(&mut new_region);
-                new_regions.push(new_region);
-            }
-        }
-
-        for idx in regions_to_remove.into_iter().rev() {
-            self.regions.remove(idx);
-        }
-
-        self.regions.extend(new_regions);
-    }
-}
 #[derive(Debug)]
 pub enum VertexInsertionError {
     VertexNotInAnyTriangle { x: f64, y: f64 },
@@ -695,7 +428,7 @@ impl CeilingMesh {
 }
 
 impl TryFrom<&CeilingRegion> for CeilingMesh {
-    type Error = earcutr::Error; // or the actual error type from earcutr
+    type Error = earcutr::Error;
 
     fn try_from(ceiling_region: &CeilingRegion) -> Result<Self, Self::Error> {
         let vertices_3d = &ceiling_region.polygon.exterior;
@@ -736,43 +469,10 @@ impl TryFrom<&CeilingRegion> for CeilingMesh {
 }
 
 impl TryFrom<CeilingRegion> for CeilingMesh {
-    type Error = earcutr::Error; // or the actual error type from earcutr
+    type Error = earcutr::Error;
 
     fn try_from(ceiling_region: CeilingRegion) -> Result<Self, Self::Error> {
-        let vertices_3d = ceiling_region.polygon.exterior;
-
-        if vertices_3d.len() < 3 {
-            return Err(earcutr::Error::Unknown);
-        }
-
-        // Flatten into 2D
-        let mut coords_2d = Vec::with_capacity(vertices_3d.len() * 2);
-        for v in &vertices_3d {
-            coords_2d.push(v.x);
-            coords_2d.push(v.y);
-        }
-
-        let holes: Vec<usize> = Vec::new();
-
-        // Triangulate — propagate error with ?
-        let indices = earcut(&coords_2d, &holes, 2)?;
-
-        let mut triangles = Vec::with_capacity(indices.len() / 3);
-        for chunk in indices.chunks_exact(3) {
-            let a = vertices_3d[chunk[0]];
-            let b = vertices_3d[chunk[1]];
-            let c = vertices_3d[chunk[2]];
-
-            triangles.push(CeilingTriangle {
-                vertices: [a, b, c],
-                plane: Plane::from_triangle(&[a, b, c]),
-            });
-        }
-
-        Ok(CeilingMesh {
-            triangles,
-            construction_id: ceiling_region.construction_id,
-        })
+        Self::try_from(&ceiling_region)
     }
 }
 impl Plane {
@@ -860,12 +560,6 @@ impl From<CeilingMesh> for CeilingRegionConversion {
     }
 }
 
-impl HasRegionId for CeilingRegion {
-    fn id_mut(&mut self) -> &mut ItemId {
-        &mut self.id
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -924,53 +618,6 @@ mod tests {
         let edge2 = undirected_edge_3df(&p1, &p2_close);
 
         assert_eq!(edge1, edge2);
-    }
-
-    #[test]
-    fn test_ceiling_regions_new() {
-        let vertices = vec![
-            Point3f64::new(0.0, 0.0, 0.0),
-            Point3f64::new(1.0, 0.0, 0.0),
-            Point3f64::new(0.5, 1.0, 0.0),
-        ];
-
-        let cid = ItemId::default();
-        let regions = CeilingRegions::new(vertices, cid);
-
-        assert_eq!(regions.regions.len(), 1);
-        // Fabric lives behind `construction_id`; the region just references it.
-        assert_eq!(regions.regions[0].construction_id, cid);
-    }
-
-    #[test]
-    fn test_ceiling_regions_modify_polygon_increase_height() {
-        let vertices = vec![
-            Point3f64::new(0.0, 0.0, 0.0),
-            Point3f64::new(1.0, 0.0, 0.0),
-            Point3f64::new(1.0, 1.0, 0.0),
-            Point3f64::new(0.0, 1.0, 0.0),
-        ];
-
-        let mut regions = CeilingRegions::new(vertices, ItemId::default());
-
-        // Create a polygon that overlaps
-        let poly = geo::Polygon::new(
-            geo::LineString::from(vec![
-                (0.0, 0.0),
-                (1.0, 0.0),
-                (1.0, 1.0),
-                (0.0, 1.0),
-                (0.0, 0.0),
-            ]),
-            vec![],
-        );
-
-        regions.modify_polygon_increase_height(poly, 2.0);
-
-        // Check that heights were increased
-        for vertex in &regions.regions[0].polygon.exterior {
-            assert_eq!(vertex.z, 2.0);
-        }
     }
 
     #[test]
@@ -1186,34 +833,6 @@ mod tests {
     }
 
     #[test]
-    fn test_set_polygon_construction() {
-        let vertices = vec![
-            Point3f64::new(0.0, 0.0, 0.0),
-            Point3f64::new(1.0, 0.0, 0.0),
-            Point3f64::new(1.0, 1.0, 0.0),
-            Point3f64::new(0.0, 1.0, 0.0),
-        ];
-
-        let mut regions = CeilingRegions::new(vertices, ItemId::default());
-        let new_cid = ItemId::default();
-
-        let poly = geo::Polygon::new(
-            geo::LineString::from(vec![
-                (0.0, 0.0),
-                (1.0, 0.0),
-                (1.0, 1.0),
-                (0.0, 1.0),
-                (0.0, 0.0),
-            ]),
-            vec![],
-        );
-
-        regions.set_polygon_construction(poly, new_cid);
-
-        assert_eq!(regions.regions[0].construction_id, new_cid);
-    }
-
-    #[test]
     fn test_ceiling_triangle_plane_consistency() {
         let verts = [
             Point3f64::new(0.0, 0.0, 0.0),
@@ -1267,94 +886,30 @@ mod tests {
     }
 
     #[test]
-    fn test_simple_flat_square_ceiling() {
-        let vertices = vec![
-            Point3f64::new(0.0, 0.0, 2.5),
-            Point3f64::new(1.0, 0.0, 2.5),
-            Point3f64::new(1.0, 1.0, 2.5),
-            Point3f64::new(0.0, 1.0, 2.5),
-        ];
+    fn insert_vertex_creates_ridge_regions() {
+        // Region-level entry point: inserting an interior point at a height
+        // splits the flat region into sloped planar pieces.
+        let mut regions = CeilingRegions::new(
+            vec![
+                Point3f64::new(0.0, 0.0, 2.5),
+                Point3f64::new(2.0, 0.0, 2.5),
+                Point3f64::new(2.0, 2.0, 2.5),
+                Point3f64::new(0.0, 2.0, 2.5),
+            ],
+            ItemId::default(),
+        );
 
-        let ceilings = CeilingRegions::new(vertices, ItemId::default());
-        let polygon_3d = ceilings.get_clockwise_3d_polygon_starting_closest_to_origin();
-
-        // Should have 4 vertices
-        assert_eq!(polygon_3d.exterior.len(), 4);
-
-        // Check all Z values
-        for (_, _, zs) in &polygon_3d.exterior {
-            assert_eq!(zs.len(), 1);
-            assert!((zs[0] - 2.5).abs() < 1e-9);
-        }
-    }
-
-    #[test]
-    fn test_sloped_ceiling_edge() {
-        let vertices = vec![
-            Point3f64::new(0.0, 0.0, 2.0),
-            Point3f64::new(1.0, 0.0, 2.5),
-            Point3f64::new(1.0, 1.0, 3.0),
-            Point3f64::new(0.0, 1.0, 2.5),
-        ];
-
-        let ceilings = CeilingRegions::new(vertices, ItemId::default());
-        let polygon_3d = ceilings.get_clockwise_3d_polygon_starting_closest_to_origin();
-
-        assert_eq!(polygon_3d.exterior.len(), 4);
-
-        // Each vertex should have only 1 1 z value
-        for (_, _, zs) in &polygon_3d.exterior {
-            assert!(!zs.is_empty());
-            assert!(zs.len() == 1);
-        }
-
-        // The lowest Z should be 2.0 and the highest 3.0
-        let mut min_z = f64::MAX;
-        let mut max_z = f64::MIN;
-        for (_, _, zs) in &polygon_3d.exterior {
-            for z in zs {
-                min_z = min_z.min(*z);
-                max_z = max_z.max(*z);
-            }
-        }
-        assert!((min_z - 2.0).abs() < 1e-9);
-        assert!((max_z - 3.0).abs() < 1e-9);
-    }
-
-    #[test]
-    fn test_multiple_ceiling_regions() {
-        let region1 = vec![
-            Point3f64::new(0.0, 0.0, 2.0),
-            Point3f64::new(1.0, 0.0, 2.0),
-            Point3f64::new(1.0, 1.0, 2.0),
-            Point3f64::new(0.0, 1.0, 2.0),
-        ];
-
-        let region2 = vec![
-            Point3f64::new(1.0, 0.0, 2.5),
-            Point3f64::new(2.0, 0.0, 2.5),
-            Point3f64::new(2.0, 1.0, 2.5),
-            Point3f64::new(1.0, 1.0, 2.5),
-        ];
-
-        let mut ceilings = CeilingRegions::new(region1, ItemId::default());
-        ceilings.regions.push(CeilingRegion {
-            id: ItemId::default(),
-            polygon: Polygon3D::new(region2),
-            opes: Opes::default(),
-            construction_id: ItemId::default(),
-        });
-
-        println!("{:#?}", ceilings);
-        let polygon_3d = ceilings.get_clockwise_3d_polygon_starting_closest_to_origin();
-
-        println!("{:?}", polygon_3d);
-        // There should be 6 vertices
-        assert!(polygon_3d.exterior.len() == 6);
-
-        // Check that all Z values are correctly present
-        for (_, _, zs) in &polygon_3d.exterior {
-            assert!(!zs.is_empty());
-        }
+        let result = regions.insert_vertex(Point2f64::new(1.0, 1.0), 3.5);
+        assert!(result.is_ok());
+        assert!(regions.regions.len() > 1);
+        // The raised vertex must appear in the result
+        assert!(regions
+            .regions
+            .iter()
+            .any(
+                |r| r.polygon.exterior.iter().any(|v| (v.x - 1.0).abs() < 1e-9
+                    && (v.y - 1.0).abs() < 1e-9
+                    && (v.z - 3.5).abs() < 1e-9)
+            ));
     }
 }

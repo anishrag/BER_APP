@@ -10,9 +10,9 @@ These aren't enforced by a script — they're easy to violate when "improving" a
 
 **Rule:** Don't add to `gen_3d_vol/` unless the change is required by a caller that already exists, or that you're adding in the same task.
 
-**Why:** The crate is ~3,700 LOC across `walls.rs`, `floors.rs`, `ceiling.rs`, `geometry.rs`, etc., and nothing in the main app currently calls it. Expanding it speculatively inflates the unused surface and makes the eventual integration harder.
+**Why:** The crate is ~1,400 LOC (`lib.rs`, `ceiling.rs`, `walls.rs`, `geometry.rs`) and nothing in the main app currently calls it. It was slimmed from ~4,400 LOC when floor/roof/wall *region derivation* moved to its canonical home — `datatypes` (`with_levels`, `default_for_footprint`/`with_z_deltas`/`with_apexes`, `regenerate`) composed by `document::resolve_storey`. What's left is only what those ops don't do (volume assembly for a 3D viewer, ceiling mesh triangulation + ridge-vertex insertion, wall split-by-line). Expanding it speculatively inflates the unused surface — and re-growing derivation logic here would recreate the duplication that was just deleted.
 
-**How to apply:** If a task is "make the sketch generate a 3D volume," the 3D work goes through the controller wiring up the existing API. If `gen_3d_vol` needs a new method, add the minimum to satisfy that call.
+**How to apply:** If a task is "show the sketch as a 3D volume," the work is the controller wiring up `Gen3D::from_ber_storey` and the mesh machinery. New *derivation* logic (region splitting, wall generation) goes in `datatypes`/`document`, never here. If `gen_3d_vol` needs a new method for an actual caller, add the minimum to satisfy that call.
 
 ## Don't uncomment large commented blocks
 

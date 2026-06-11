@@ -1,16 +1,20 @@
+//! Wall split-by-line: divide one `WallRegion`'s face along a length/height
+//! intercept line into separately-attributed regions.
+//!
+//! Kept because the canonical wall pipeline (`WallRegions::regenerate` in
+//! `datatypes`, driven by `document::resolve_storey`) deliberately defers
+//! face splits (the wall-exposure design's "face/height diagonal split");
+//! this is the geometric core a future split feature would re-apply. Wall
+//! *generation* (perimeter + discontinuity walls) is owned by `regenerate`
+//! and the resolve-time riser seam now.
+
 // standard includes
 use datatypes::ber::common::ItemId;
-use datatypes::ber::structural::{
-    CeilingRegions, FloorRegions, Opes, WallExposure, WallRegion, WallRegions,
-};
-use domain::points::{Point2f64, Point3f64, Vector2f64, Vector3f64};
-use geo::Polygon;
+use datatypes::ber::structural::{WallRegion, WallRegions};
+use domain::points::{Point3f64, Vector2f64, Vector3f64};
 
 // local includes
-use super::ceiling::CeilingRegionsManip;
-use super::floor::FloorRegionsManip;
-use super::geometry::{Geometry, MergeableRegion};
-use super::types::{HasRegionId, Polygon3D, Polygon3DMultiZ, SplitLine3D, EPSILON};
+use super::geometry::{Geometry, SplitLine3D};
 
 trait WallRegionManip {
     fn get_leftmost_floor_vertex(&self) -> Point3f64;
@@ -73,34 +77,6 @@ impl WallRegionManip for WallRegion {
         }
     }
 }
-impl MergeableRegion for WallRegion {
-    type Geometry = Polygon3D; // or Vec<Vertex> if you use vertex list
-
-    fn id(&self) -> ItemId {
-        self.id
-    }
-
-    fn geometry(&self) -> &Self::Geometry {
-        &self.polygon
-    }
-
-    fn is_merge_compatible(&self, other: &Self) -> bool {
-        // Same construction (fabric is behind `construction_id`) AND exposure
-        // (exposure stays on the region so one construction can split into
-        // exposed / semi-exposed sections).
-        self.construction_id == other.construction_id && self.exposure == other.exposure
-    }
-
-    fn with_geometry(&self, geometry: Self::Geometry) -> Self {
-        WallRegion {
-            id: self.id,
-            polygon: geometry,
-            exposure: self.exposure,
-            opes: self.opes.clone(),
-            construction_id: self.construction_id,
-        }
-    }
-}
 
 pub trait WallRegionsManip {
     fn get_wall_region_by_id_mut(&mut self, id: &ItemId) -> Option<&mut WallRegion>;
@@ -112,49 +88,9 @@ pub trait WallRegionsManip {
         update_new_region: F,
     ) where
         F: FnMut(&mut WallRegion);
-    fn add_from_floor_discontinuities(
-        &mut self,
-        floor_regions: &FloorRegions,
-        construction_id: ItemId,
-        default_exposure: Option<WallExposure>,
-    );
-    fn add_from_ceiling_discontinuities(
-        &mut self,
-        ceiling_regions: &CeilingRegions,
-        construction_id: ItemId,
-        default_exposure: Option<WallExposure>,
-    );
-    fn add_from_exterior_perimeter(
-        &mut self,
-        floor_regions: &FloorRegions,
-        ceiling_regions: &CeilingRegions,
-        construction_id: ItemId,
-        default_exposure: Option<WallExposure>,
-    );
-    fn merge(&mut self, other: WallRegions);
-    fn modify_walls_in_region(
-        &mut self,
-        polygon_2d: &Polygon<f64>,
-        construction_id: Option<ItemId>,
-        exposure: Option<WallExposure>,
-    );
-    fn check_floor_ceiling_aligned(
-        floor_boundary: &Polygon3DMultiZ,
-        ceiling_boundary: &Polygon3DMultiZ,
-    ) -> bool;
-    fn merge_floor_ceiling_by_line(
-        floor_boundary: &Polygon3DMultiZ,
-        ceiling_boundary: &Polygon3DMultiZ,
-    ) -> Option<Vec<BoundaryVertex>>;
 }
 
-pub struct BoundaryVertex {
-    point: Point2f64,
-    floor_height: Vec<f64>,
-    ceiling_height: Vec<f64>,
-}
 impl WallRegionsManip for WallRegions {
-    /// Create a new empty WallRegions
     fn get_wall_region_by_id_mut(&mut self, id: &ItemId) -> Option<&mut WallRegion> {
         self.regions.iter_mut().find(|region| &region.id == id)
     }
@@ -196,377 +132,12 @@ impl WallRegionsManip for WallRegions {
             self.regions.push(new_wall_region);
         }
     }
-
-    /// Generate walls from floor region discontinuities (internal walls where floor height changes)
-    fn add_from_floor_discontinuities(
-        &mut self,
-        floor_regions: &FloorRegions,
-        construction_id: ItemId,
-        default_exposure: Option<WallExposure>,
-    ) {
-        // Find all edges between different floor regions
-        for i in 0..floor_regions.regions.len() {
-            for j in (i + 1)..floor_regions.regions.len() {
-                let region_a = &floor_regions.regions[i];
-                let region_b = &floor_regions.regions[j];
-
-                // Find shared edges between the two regions
-                let shared_edges = find_shared_edges_2d(&region_a.polygon, &region_b.polygon);
-
-                for (p1, p2) in shared_edges {
-                    // Create wall from floor level difference
-                    let z1_a = region_a.level_m;
-                    let z1_b = region_b.level_m;
-
-                    // Only create wall if there's a height discontinuity
-                    if (z1_a - z1_b).abs() < EPSILON {
-                        continue;
-                    }
-
-                    let vertices = vec![
-                        Point3f64::new(p1.0, p1.1, z1_a),
-                        Point3f64::new(p2.0, p2.1, z1_a),
-                        Point3f64::new(p2.0, p2.1, z1_b),
-                        Point3f64::new(p1.0, p1.1, z1_b),
-                    ];
-
-                    self.regions.push(WallRegion {
-                        id: ItemId::default(),
-                        polygon: Polygon3D::new(vertices),
-                        exposure: default_exposure.unwrap_or(WallExposure::Exposed),
-                        opes: Opes::default(),
-                        construction_id,
-                    });
-                }
-            }
-        }
-    }
-
-    /// Generate walls from ceiling region discontinuities (internal walls where ceiling height jumps)
-    fn add_from_ceiling_discontinuities(
-        &mut self,
-        ceiling_regions: &CeilingRegions,
-        construction_id: ItemId,
-        default_exposure: Option<WallExposure>,
-    ) {
-        // Find all edges between different ceiling regions
-        for i in 0..ceiling_regions.regions.len() {
-            for j in (i + 1)..ceiling_regions.regions.len() {
-                let region_a = &ceiling_regions.regions[i];
-                let region_b = &ceiling_regions.regions[j];
-
-                // Find shared edges between the two ceiling regions
-                let shared_edges = find_shared_edges_3d(&region_a.polygon, &region_b.polygon);
-
-                for edge in shared_edges {
-                    // Edge represents points on two different ceiling levels
-                    let (p1_a, p2_a) = edge.points_a;
-                    let (p1_b, p2_b) = edge.points_b;
-
-                    if p1_a.z != p1_b.z || p2_a.z != p2_b.z {
-                        continue; // Ensure edges correspond correctly
-                    }
-
-                    // Create vertical wall between the two ceiling heights
-                    let vertices = vec![p1_a, p2_a, p2_b, p1_b];
-
-                    self.regions.push(WallRegion {
-                        id: ItemId::default(),
-                        polygon: Polygon3D::new(vertices),
-                        exposure: default_exposure.unwrap_or(WallExposure::NonHeatLoss),
-                        opes: Opes::default(),
-                        construction_id,
-                    });
-                }
-            }
-        }
-    }
-
-    fn check_floor_ceiling_aligned(
-        floor_boundary: &Polygon3DMultiZ,
-        ceiling_boundary: &Polygon3DMultiZ,
-    ) -> bool {
-        let floor_simple = floor_boundary.simplify(EPSILON);
-        let ceiling_simple = ceiling_boundary.simplify(EPSILON);
-
-        floor_simple.xy_approx_eq(&ceiling_simple, EPSILON)
-    }
-
-    fn merge_floor_ceiling_by_line(
-        floor_boundary: &Polygon3DMultiZ,
-        ceiling_boundary: &Polygon3DMultiZ,
-    ) -> Option<Vec<BoundaryVertex>> {
-        assert!(Self::check_floor_ceiling_aligned(
-            floor_boundary,
-            ceiling_boundary
-        ));
-        let approx_eq = |p1: &(f64, f64), p2: &(f64, f64)| {
-            (p1.0 - p2.0).abs() < EPSILON && (p1.1 - p2.1).abs() < EPSILON
-        };
-
-        let mut merged = Vec::new();
-        let mut fi = 0;
-        let mut ci = 0;
-        let (fx, fy, fheight) = &floor_boundary.exterior[fi];
-        let (_, _, cheight) = &ceiling_boundary.exterior[ci];
-
-        merged.push(BoundaryVertex {
-            point: Point2f64::new(*fx, *fy),
-            floor_height: fheight.clone(),
-            ceiling_height: cheight.clone(),
-        });
-        fi += 1;
-        ci += 1;
-        let mut segment_start: Option<(f64, f64)> = Some((*fx, *fy));
-
-        // Helper for linear interpolation of heights along a line
-        let interpolate_ceiling_height = |p: (f64, f64),
-                                          start: (f64, f64, Vec<f64>),
-                                          end: (f64, f64, Vec<f64>)|
-         -> Option<Vec<f64>> {
-            let start_z = start.2.last()?;
-            let end_z = end.2.first()?;
-            let dx = end.0 - start.0;
-            let dy = end.1 - start.1;
-            let length_sq = dx * dx + dy * dy;
-            if length_sq < EPSILON {
-                return Some(start.2.clone()); // avoid division by zero
-            }
-            let t = ((p.0 - start.0) * dx + (p.1 - start.1) * dy) / length_sq;
-            Some(vec![start_z + t * (end_z - start_z)])
-        };
-
-        while fi < floor_boundary.exterior.len() || ci < ceiling_boundary.exterior.len() {
-            let (fx, fy, fheight) = &floor_boundary.exterior[fi % floor_boundary.exterior.len()];
-            let (cx, cy, cheight) =
-                &ceiling_boundary.exterior[ci % ceiling_boundary.exterior.len()];
-
-            if approx_eq(&(*fx, *fy), &(*cx, *cy)) {
-                merged.push(BoundaryVertex {
-                    point: Point2f64::new(*fx, *fy),
-                    floor_height: fheight.clone(),
-                    ceiling_height: cheight.clone(),
-                });
-                segment_start = Some((*fx, *fy));
-                fi += 1;
-                ci += 1;
-                // Points coincide → merge
-            } else {
-                // Points are different but on the same line → choose closest to segment_start
-                let start = segment_start.unwrap();
-                let dist_floor = ((*fx - start.0).powi(2) + (*fy - start.1).powi(2)).sqrt();
-                let dist_ceiling = ((*cx - start.0).powi(2) + (*cy - start.1).powi(2)).sqrt();
-
-                if dist_floor <= dist_ceiling {
-                    let interpolated_ceiling = interpolate_ceiling_height(
-                        (*fx, *fy),
-                        ceiling_boundary.exterior[ci - 1].clone(),
-                        ceiling_boundary.exterior[ci].clone(),
-                    )?;
-                    merged.push(BoundaryVertex {
-                        point: Point2f64::new(*fx, *fy),
-                        floor_height: fheight.clone(),
-                        ceiling_height: interpolated_ceiling,
-                    });
-                    segment_start = Some((*fx, *fy));
-                    fi += 1;
-                } else {
-                    let floor_height = floor_boundary.exterior[fi - 1].2.last()?;
-                    merged.push(BoundaryVertex {
-                        point: Point2f64::new(*cx, *cy),
-                        floor_height: vec![*floor_height],
-                        ceiling_height: cheight.clone(),
-                    });
-                    segment_start = Some((*cx, *cy));
-                    ci += 1;
-                }
-            }
-        }
-
-        Some(merged)
-    }
-    /// Generate exterior walls from floor and ceiling perimeters
-    fn add_from_exterior_perimeter(
-        &mut self,
-        floor_regions: &FloorRegions,
-        ceiling_regions: &CeilingRegions,
-        construction_id: ItemId,
-        default_exposure: Option<WallExposure>,
-    ) {
-        let floor_boundary = floor_regions.get_clockwise_3d_polygon_starting_closest_to_origin();
-        let ceiling_boundary =
-            ceiling_regions.get_clockwise_3d_polygon_starting_closest_to_origin();
-        let merged_boundary_vertices =
-            Self::merge_floor_ceiling_by_line(&floor_boundary, &ceiling_boundary).expect(
-                "Failed to merge floor and ceiling boundaries; ensure they are aligned in XY",
-            );
-        merged_boundary_vertices
-            .iter()
-            .enumerate()
-            .for_each(|(i, bv)| {
-                let next_bv = &merged_boundary_vertices[(i + 1) % merged_boundary_vertices.len()];
-                let floor_heights = &bv.floor_height;
-                let ceiling_heights = &bv.ceiling_height;
-                for &fh in floor_heights {
-                    for &ch in ceiling_heights {
-                        if (fh - ch).abs() < EPSILON {
-                            continue; // No wall if floor and ceiling heights are equal
-                        }
-                        let vertices = vec![
-                            Point3f64::new(bv.point.x, bv.point.y, fh),
-                            Point3f64::new(next_bv.point.x, next_bv.point.y, fh),
-                            Point3f64::new(next_bv.point.x, next_bv.point.y, ch),
-                            Point3f64::new(bv.point.x, bv.point.y, ch),
-                        ];
-                        self.regions.push(WallRegion {
-                            id: ItemId::default(),
-                            polygon: Polygon3D::new(vertices),
-                            exposure: default_exposure.unwrap_or(WallExposure::Exposed),
-                            opes: Opes::default(),
-                            construction_id,
-                        });
-                    }
-                }
-            });
-    }
-
-    /// Merge this WallRegions with another
-    fn merge(&mut self, other: WallRegions) {
-        self.regions.extend(other.regions);
-    }
-
-    /// Modify wall properties for walls that match a 2D polygon (e.g., for user editing)
-    fn modify_walls_in_region(
-        &mut self,
-        polygon_2d: &Polygon<f64>,
-        construction_id: Option<ItemId>,
-        exposure: Option<WallExposure>,
-    ) {
-        for region in &mut self.regions {
-            // Check if wall intersects with the 2D polygon
-            if wall_intersects_polygon_2d(&region.polygon, polygon_2d) {
-                if let Some(cid) = construction_id {
-                    region.construction_id = cid;
-                }
-                if let Some(exp) = exposure {
-                    region.exposure = exp;
-                }
-            }
-        }
-    }
-}
-// Helper structures
-struct SharedEdge3D {
-    points_a: (Point3f64, Point3f64),
-    points_b: (Point3f64, Point3f64),
-}
-
-// Helper functions
-fn find_shared_edges_2d(
-    poly_a: &Polygon<f64>,
-    poly_b: &Polygon<f64>,
-) -> Vec<((f64, f64), (f64, f64))> {
-    let mut shared_edges = Vec::new();
-
-    let coords_a = poly_a.exterior().coords().collect::<Vec<_>>();
-    let coords_b = poly_b.exterior().coords().collect::<Vec<_>>();
-
-    for i in 0..coords_a.len() - 1 {
-        let edge_a = (coords_a[i], coords_a[i + 1]);
-
-        for j in 0..coords_b.len() - 1 {
-            let edge_b = (coords_b[j], coords_b[j + 1]);
-
-            // Check if edges are the same (in either direction)
-            if edges_equal_2d(edge_a, edge_b) {
-                shared_edges.push(((edge_a.0.x, edge_a.0.y), (edge_a.1.x, edge_a.1.y)));
-            }
-        }
-    }
-
-    shared_edges
-}
-
-fn edges_equal_2d(
-    edge_a: (&geo::Coord<f64>, &geo::Coord<f64>),
-    edge_b: (&geo::Coord<f64>, &geo::Coord<f64>),
-) -> bool {
-    let same_dir = points_equal_2d(edge_a.0, edge_b.0) && points_equal_2d(edge_a.1, edge_b.1);
-    let reverse_dir = points_equal_2d(edge_a.0, edge_b.1) && points_equal_2d(edge_a.1, edge_b.0);
-    same_dir || reverse_dir
-}
-
-fn points_equal_2d(a: &geo::Coord<f64>, b: &geo::Coord<f64>) -> bool {
-    (a.x - b.x).abs() < EPSILON && (a.y - b.y).abs() < EPSILON
-}
-
-fn find_shared_edges_3d(poly_a: &Polygon3D, poly_b: &Polygon3D) -> Vec<SharedEdge3D> {
-    let mut shared_edges = Vec::new();
-
-    let verts_a = &poly_a.exterior;
-    let verts_b = &poly_b.exterior;
-
-    for i in 0..verts_a.len() {
-        let j = (i + 1) % verts_a.len();
-        let edge_a = (&verts_a[i], &verts_a[j]);
-
-        for k in 0..verts_b.len() {
-            let l = (k + 1) % verts_b.len();
-            let edge_b = (&verts_b[k], &verts_b[l]);
-
-            // Check if edges share the same 2D projection
-            if edges_equal_3d_projection(edge_a, edge_b) {
-                shared_edges.push(SharedEdge3D {
-                    points_a: (*edge_a.0, *edge_a.1),
-                    points_b: (*edge_b.0, *edge_b.1),
-                });
-            }
-        }
-    }
-
-    shared_edges
-}
-
-fn edges_equal_3d_projection(
-    edge_a: (&Point3f64, &Point3f64),
-    edge_b: (&Point3f64, &Point3f64),
-) -> bool {
-    let same_dir = points_equal_3d_xy(edge_a.0, edge_b.0) && points_equal_3d_xy(edge_a.1, edge_b.1);
-    let reverse_dir =
-        points_equal_3d_xy(edge_a.0, edge_b.1) && points_equal_3d_xy(edge_a.1, edge_b.0);
-    same_dir || reverse_dir
-}
-
-fn points_equal_3d_xy(a: &Point3f64, b: &Point3f64) -> bool {
-    (a.x - b.x).abs() < EPSILON && (a.y - b.y).abs() < EPSILON
-}
-
-fn point_in_polygon_2d(polygon: &Polygon<f64>, x: f64, y: f64) -> bool {
-    let point = geo::Point::new(x, y);
-    use geo::Contains;
-    polygon.contains(&point)
-}
-
-fn wall_intersects_polygon_2d(wall: &Polygon3D, polygon_2d: &Polygon<f64>) -> bool {
-    // Check if any wall vertex (projected to 2D) is inside the polygon
-    for vertex in &wall.exterior {
-        if point_in_polygon_2d(polygon_2d, vertex.x, vertex.y) {
-            return true;
-        }
-    }
-    false
-}
-
-impl HasRegionId for WallRegion {
-    fn id_mut(&mut self) -> &mut ItemId {
-        &mut self.id
-    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use geo::{polygon, Polygon};
+    use datatypes::ber::structural::{Opes, Polygon3D, WallExposure};
 
     const TOL: f64 = 1e-9;
 
@@ -592,17 +163,6 @@ mod tests {
     fn simple_wall_regions() -> WallRegions {
         WallRegions {
             regions: vec![simple_wall()],
-        }
-    }
-
-    fn simple_floor_boundary(z: f64) -> Polygon3DMultiZ {
-        Polygon3DMultiZ {
-            exterior: vec![
-                (0.0, 0.0, vec![z]),
-                (4.0, 0.0, vec![z]),
-                (4.0, 4.0, vec![z]),
-                (0.0, 4.0, vec![z]),
-            ],
         }
     }
 
@@ -658,51 +218,6 @@ mod tests {
     }
 
     /* ---------------------------------------------------------------------
-     * MergeableRegion
-     * ------------------------------------------------------------------ */
-
-    #[test]
-    fn merge_compatible_when_all_fields_match() {
-        let a = simple_wall();
-        // Same construction (shared id) + same exposure ⇒ compatible. (Each
-        // `simple_wall()` gets a fresh random `construction_id`, so clone to
-        // share it.)
-        let b = a.clone();
-        assert!(a.is_merge_compatible(&b));
-    }
-
-    #[test]
-    fn merge_incompatible_if_any_field_differs() {
-        let a = simple_wall();
-        let mut b = a.clone(); // start fully compatible, then vary one field
-
-        b.exposure = WallExposure::NonHeatLoss;
-        assert!(!a.is_merge_compatible(&b));
-
-        b.exposure = a.exposure;
-        // A different construction now means a different `construction_id`.
-        b.construction_id = ItemId::default();
-        assert!(!a.is_merge_compatible(&b));
-    }
-
-    #[test]
-    fn with_geometry_preserves_metadata() {
-        let wall = simple_wall();
-        let new_poly = Polygon3D::new(vec![
-            Point3f64::new(0.0, 0.0, 0.0),
-            Point3f64::new(2.0, 0.0, 0.0),
-            Point3f64::new(2.0, 0.0, 3.0),
-            Point3f64::new(0.0, 0.0, 3.0),
-        ]);
-
-        let w2 = wall.with_geometry(new_poly.clone());
-
-        assert_eq!(w2.polygon.exterior, new_poly.exterior);
-        assert_eq!(w2.exposure, wall.exposure);
-        assert_eq!(w2.construction_id, wall.construction_id);
-    }
-
-    /* ---------------------------------------------------------------------
      * WallRegionsManip – lookup & split
      * ------------------------------------------------------------------ */
 
@@ -732,125 +247,5 @@ mod tests {
         let mut walls = simple_wall_regions();
         walls.split_wall_region(ItemId::default(), 1.0, 0.0, |_| {});
         assert_eq!(walls.regions.len(), 1);
-    }
-
-    /* ---------------------------------------------------------------------
-     * Floor / ceiling alignment
-     * ------------------------------------------------------------------ */
-
-    #[test]
-    fn floor_ceiling_aligned_when_xy_matches() {
-        let floor = simple_floor_boundary(0.0);
-        let ceiling = simple_floor_boundary(3.0);
-
-        assert!(WallRegions::check_floor_ceiling_aligned(&floor, &ceiling));
-    }
-
-    #[test]
-    fn floor_ceiling_not_aligned_when_xy_differs() {
-        let floor = simple_floor_boundary(0.0);
-
-        let ceiling = Polygon3DMultiZ {
-            exterior: vec![
-                (1.0, 0.0, vec![3.0]),
-                (5.0, 0.0, vec![3.0]),
-                (5.0, 4.0, vec![3.0]),
-                (1.0, 4.0, vec![3.0]),
-            ],
-        };
-
-        assert!(!WallRegions::check_floor_ceiling_aligned(&floor, &ceiling));
-    }
-
-    /* ---------------------------------------------------------------------
-     * merge_floor_ceiling_by_line
-     * ------------------------------------------------------------------ */
-
-    #[test]
-    fn merge_floor_ceiling_produces_boundary_vertices() {
-        let floor = simple_floor_boundary(0.0);
-        let ceiling = simple_floor_boundary(3.0);
-
-        let merged = WallRegions::merge_floor_ceiling_by_line(&floor, &ceiling).unwrap();
-
-        assert_eq!(merged.len(), floor.exterior.len());
-
-        for bv in merged {
-            assert_eq!(bv.floor_height, vec![0.0]);
-            assert_eq!(bv.ceiling_height, vec![3.0]);
-        }
-    }
-
-    #[test]
-    fn merge_floor_ceiling_handles_linear_interpolation() {
-        let floor = Polygon3DMultiZ {
-            exterior: vec![(0.0, 0.0, vec![0.0]), (2.0, 0.0, vec![0.0])],
-        };
-
-        let ceiling = Polygon3DMultiZ {
-            exterior: vec![(0.0, 0.0, vec![2.0]), (2.0, 0.0, vec![4.0])],
-        };
-
-        let merged = WallRegions::merge_floor_ceiling_by_line(&floor, &ceiling).unwrap();
-
-        assert_eq!(merged.len(), 2);
-        assert!((merged[1].ceiling_height[0] - 4.0).abs() < TOL);
-    }
-
-    /* ---------------------------------------------------------------------
-     * modify_walls_in_region
-     * ------------------------------------------------------------------ */
-
-    #[test]
-    fn modify_walls_only_affects_intersecting_walls() {
-        let mut walls = simple_wall_regions();
-        let original_cid = walls.regions[0].construction_id;
-        let new_cid = ItemId::default();
-
-        let selection = polygon![
-            (x: -1.0, y: -1.0),
-            (x:  5.0, y: -1.0),
-            (x:  5.0, y:  1.0),
-            (x: -1.0, y:  1.0),
-        ];
-
-        walls.modify_walls_in_region(&selection, Some(new_cid), Some(WallExposure::NonHeatLoss));
-
-        let w = &walls.regions[0];
-        // Construction is re-pointed (fabric now lives behind `construction_id`).
-        assert_eq!(w.construction_id, new_cid);
-        assert_ne!(w.construction_id, original_cid);
-        assert_eq!(w.exposure, WallExposure::NonHeatLoss);
-    }
-
-    #[test]
-    fn modify_walls_noop_when_no_intersection() {
-        let mut walls = simple_wall_regions();
-        let original_cid = walls.regions[0].construction_id;
-
-        let selection = polygon![
-            (x: 10.0, y: 10.0),
-            (x: 12.0, y: 10.0),
-            (x: 12.0, y: 12.0),
-            (x: 10.0, y: 12.0),
-        ];
-
-        walls.modify_walls_in_region(&selection, Some(ItemId::default()), None);
-
-        // No overlap → construction left untouched.
-        assert_eq!(walls.regions[0].construction_id, original_cid);
-    }
-
-    /* ---------------------------------------------------------------------
-     * merge()
-     * ------------------------------------------------------------------ */
-
-    #[test]
-    fn merge_extends_regions() {
-        let mut a = simple_wall_regions();
-        let b = simple_wall_regions();
-
-        a.merge(b);
-        assert_eq!(a.regions.len(), 2);
     }
 }

@@ -365,10 +365,8 @@ impl FloorRegions {
 
     /// Create a FloorRegions containing one region per polygon. Used when a
     /// storey has multiple disjoint floor areas (e.g. extension sections on
-    /// upper floors). All regions share the same `construction_id`.
-    /// (Distinct from `from_polygons` — that one takes `&Polygon` slices for
-    /// gen_3d_vol's 3D-derived polygons; this one takes raw vertex lists
-    /// straight from the parametric layer.)
+    /// upper floors). All regions share the same `construction_id`. Takes raw
+    /// vertex lists straight from the parametric layer.
     pub fn from_vertex_lists(polygons: Vec<Vec<Point2f64>>, construction_id: ItemId) -> Self {
         let regions = polygons
             .into_iter()
