@@ -140,15 +140,17 @@ impl<'a> BerRepository<'a> {
 
     /// Delete a BER by id, including its editing-layer snapshot. The schema's
     /// `ON DELETE CASCADE` only fires with `PRAGMA foreign_keys=ON` (which we
-    /// don't set), so the snapshot row is deleted explicitly.
+    /// don't set), so the snapshot row is deleted explicitly. Both deletes run
+    /// in one transaction so a failure can't leave an orphaned snapshot or a
+    /// snapshot-less half-delete.
     pub fn delete(&self, id: &ItemId) -> Result<()> {
-        self.conn.execute(
+        let tx = self.conn.unchecked_transaction()?;
+        tx.execute(
             "DELETE FROM parametric_snapshot WHERE ber_id = ?1",
             params![id.to_string()],
         )?;
-        self.conn
-            .execute("DELETE FROM ber WHERE id = ?1", params![id.to_string()])?;
-        Ok(())
+        tx.execute("DELETE FROM ber WHERE id = ?1", params![id.to_string()])?;
+        tx.commit()
     }
 
     /// Insert or update a BER record

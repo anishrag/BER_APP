@@ -110,6 +110,12 @@ impl AppController {
     /// result — the clear happens regardless.
     pub fn exit_ber(&mut self) -> Result<(), String> {
         let flushed = self.flush_if_dirty();
+        // Barrier: Home (and its delete) is only reachable through here, so
+        // waiting out the background writer's queue closes the race where a
+        // queued autosave upsert resurrects a record deleted moments later.
+        if let Some(writer) = &self.writer {
+            writer.drain();
+        }
         self.current_record = None;
         self.current_storey_idx = None;
         self.document = Document::default();

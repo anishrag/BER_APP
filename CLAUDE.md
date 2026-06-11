@@ -10,7 +10,7 @@ Rust app for an Irish BER (Building Energy Rating) assessor, eventually targetin
 - `manip_2d_plan/` — floor-plan post-processing (simplify → orthogonalize → parametric). Depends on `domain` only. Owns the parametric floor-plan model and **all geometry algorithms over it**: `FloorPlan` (public API) wraps `ParametricPlan` (rings of parametric vertices + shared parameters); `geom.rs` holds pure coordinate math. (See "Responsibility placement".)
 - `gen_3d_vol/` — 2D floor plan → 3D volume (walls/floors/ceilings). Not currently wired into the app.
 - `document/` — the editable storey **model** the app edits: one storey's shapes (`outline` + `living_areas` + in-flight `phase_shape`), which is active, the live editing buffer (the active shape's `floor_plan`/`dimensioning`/`edit_state`/`pending_arc`), per-wall exposure, and the model *operations* over them (slot switching, cross-shape geometry, the dimensioning loop, exposure painting, drag geometry). UI-free and DB-free — **builds standalone** (so a future native shell can drive it as a library). Depends on `domain`, `datatypes`, `manip_2d_plan`. Logs via the `log` facade, not `println!`.
-- `src/` — the eframe app **shell**: `controller/` drives the `document` (UiEvent dispatch, undo/redo, persistence orchestration, session/interaction state, UI-data derivation); `engine/` is persistence; `ui/` is egui. Page flow: Splash → Home → NewBer / Sketch / KeyDeets / MoreDeets.
+- `src/` — the eframe app **shell**: `controller/` drives the `document` (UiEvent dispatch, undo/redo, persistence orchestration, session/interaction state, UI-data derivation); `engine/` is persistence; `ui/` is egui. Page flow: Splash → Home (New/Load) → BER workspace [Key Details | Sketch | More Details].
 
 ## Load-bearing rules
 

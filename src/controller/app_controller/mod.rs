@@ -2,7 +2,7 @@
 // (children of this module, so they can use the private fields/methods
 // declared here). This file holds only the struct, its constructor, and the
 // module wiring; each submodule owns one concern:
-//   - `ceiling`       — the first-3D ceiling-height gate + prompt.
+//   - `ceiling`       — default ceiling heights (Heights category entry + 3D availability).
 //   - `ceiling_steps` — ceiling-step (raise/lower part of the ceiling) tagging.
 //   - `dimensioning`  — the dimension-prompt workflow.
 //   - `editing`       — Edit-mode interaction + measurement prompts.

@@ -138,6 +138,10 @@ pub struct ToolFlags {
     /// The All-storeys tab is read-only: every mutating tool is disabled,
     /// matching the old toolbar which offered only Fit there.
     pub read_only: bool,
+    /// An edit-drag / vertex-drop measurement prompt is docked. Switching edit
+    /// tool would wipe the pre-drag state its Cancel reverts to, so every
+    /// Edit-category tool is disabled until the prompt is resolved.
+    pub measurement_prompt_active: bool,
     pub has_floor_plan: bool,
     pub living_area_mode: bool,
     pub active_living_area: Option<usize>,
@@ -164,6 +168,8 @@ impl ToolFlags {
         Self {
             edit_tool: view.edit_tool,
             read_only: view.current_storey_idx.is_none(),
+            measurement_prompt_active: view.edit_drag_prompt.is_some()
+                || view.vertex_drop_prompt.is_some(),
             has_floor_plan: view.has_floor_plan,
             living_area_mode: view.living_area_mode,
             active_living_area: view.active_living_area,
@@ -254,17 +260,22 @@ fn tool_ui<F: FnMut(UiEvent)>(
             // DrawPerpWalls is the prerequisite step — always available.
             // Every other tool operates on an existing shape and is gated
             // on `has_floor_plan` so the assessor can't pick them until
-            // the orthogonal outline is drawn.
-            let enabled =
-                !flags.read_only && (matches!(t, EditTools::DrawPerpWalls) || flags.has_floor_plan);
+            // the orthogonal outline is drawn. While a measurement prompt
+            // is docked, ALL edit tools (including Move, which created it)
+            // are disabled: switching tools wipes the pre-drag state the
+            // prompt's Cancel reverts to.
+            let enabled = !flags.read_only
+                && !flags.measurement_prompt_active
+                && (matches!(t, EditTools::DrawPerpWalls) || flags.has_floor_plan);
             let selected = flags.edit_tool == t;
-            if ui
-                .add_enabled(
-                    enabled,
-                    egui::Button::selectable(selected, edit_tool_label(t)),
-                )
-                .clicked()
-            {
+            let mut resp = ui.add_enabled(
+                enabled,
+                egui::Button::selectable(selected, edit_tool_label(t)),
+            );
+            if flags.measurement_prompt_active {
+                resp = resp.on_disabled_hover_text("Finish or cancel the measurement first");
+            }
+            if resp.clicked() {
                 on_event(UiEvent::Sketch(SketchEvent::ChangeEditTool(t)));
             }
         }
