@@ -432,9 +432,16 @@ impl SketchPage {
     {
         // Orientation = aspect ratio of the available rect, re-checked every
         // frame (free with egui): portrait → ribbon on top, landscape → side
-        // panel on the left. Both render the SAME category data.
+        // panel on the left. Both render the SAME category data. The
+        // layout-preview override (the top-strip "Layout" button — a dev
+        // affordance for trying both arrangements on one device) wins when
+        // set; Auto falls through to the aspect-ratio check.
         let avail = ui.available_size();
-        let portrait = avail.y > avail.x;
+        let portrait = match view.cat_state.layout_override {
+            Some(categories::LayoutOrientation::Portrait) => true,
+            Some(categories::LayoutOrientation::Landscape) => false,
+            None => avail.y > avail.x,
+        };
         // Owned snapshot of the flags the tool buttons need, so the panel
         // closures below don't hold a borrow of `view`.
         let flags = categories::ToolFlags::from_view(&view);
@@ -443,7 +450,13 @@ impl SketchPage {
         // floating canvas buttons — see `canvas.rs`), then — in portrait —
         // the category ribbon.
         egui::TopBottomPanel::top("sketch_top_strip").show_inside(ui, |ui| {
-            storey_tabs(ui, view.ber, view.current_storey_idx, &mut on_event);
+            storey_tabs(
+                ui,
+                view.ber,
+                view.current_storey_idx,
+                &mut view.cat_state.layout_override,
+                &mut on_event,
+            );
             if portrait {
                 ui.separator();
                 categories::ribbon(ui, &flags, view.cat_state, &mut on_event);
@@ -497,13 +510,15 @@ impl SketchPage {
 }
 
 /// Horizontal row of tabs for storey navigation:
-/// `[All]` `[Storey 1]` `[Storey 2]` … `[+ Add new]`.
+/// `[All]` `[Storey 1]` `[Storey 2]` … `[+ Add new]`, plus the
+/// layout-preview cycler (`Layout: Auto ▸ Portrait ▸ Landscape`).
 /// `[All]` (read-only overview) sets `current_storey_idx = None`; each
 /// storey tab sets `Some(i)`; `[+ Add new]` triggers `AddStorey`.
 fn storey_tabs<F: FnMut(UiEvent)>(
     ui: &mut egui::Ui,
     ber: Option<&Ber>,
     current_storey_idx: Option<usize>,
+    layout_override: &mut Option<categories::LayoutOrientation>,
     on_event: &mut F,
 ) {
     let storeys = ber.map(|b| b.storeys.as_slice()).unwrap_or(&[]);
@@ -540,6 +555,30 @@ fn storey_tabs<F: FnMut(UiEvent)>(
             .clicked()
         {
             on_event(UiEvent::Sketch(SketchEvent::AddStorey));
+        }
+        // Layout-preview cycler (a preview/dev affordance the user requested):
+        // force the category layout to the portrait ribbon or landscape side
+        // panel; Auto picks by aspect ratio. Pure page state — no controller
+        // round-trip. Plain text for now — visual design deferred.
+        use categories::LayoutOrientation::{Landscape, Portrait};
+        let label = match layout_override {
+            None => "Layout: Auto",
+            Some(Portrait) => "Layout: Portrait",
+            Some(Landscape) => "Layout: Landscape",
+        };
+        if ui
+            .button(label)
+            .on_hover_text(
+                "Preview the toolbar layout: Auto (by aspect ratio) \
+                 ▸ Portrait (top ribbon) ▸ Landscape (side panel)",
+            )
+            .clicked()
+        {
+            *layout_override = match layout_override {
+                None => Some(Portrait),
+                Some(Portrait) => Some(Landscape),
+                Some(Landscape) => None,
+            };
         }
     });
 }

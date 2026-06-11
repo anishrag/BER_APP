@@ -1,19 +1,27 @@
 //! Axonometric 3D rendering of a single Storey.
 //!
-//! Uses isometric projection (see `super::project_iso`). The floor polygon is
-//! extruded upward to the ceiling height; walls are the quads connecting floor
-//! and ceiling rings. Roof line is the ceiling polygon at the top.
+//! Uses isometric projection (see `super::project_iso`). The storey's REAL
+//! resolved geometry is drawn, not a uniform extrusion:
 //!
-//! The ceiling height comes from `storey.ceiling_height_m` — the controller's
-//! first-3D gate guarantees it's set before this view is reachable; an unset
-//! storey (defensive: a storey-tab switch while already in 3D can land on one)
-//! paints a hint instead of guessing a height.
+//! - each floor region's outline at its own `level_m` (floor steps show as
+//!   raised/lowered rings);
+//! - each roof region at its own per-vertex z (ceiling steps show as offset
+//!   rings — all regions are flat today, sloped roofs are a later feature);
+//! - walls stay a single-band volume hint: every floor region's ring extruded
+//!   from the LOWEST floor level up to the default ceiling height. Riser walls
+//!   between stepped sections are deliberately not derived (wall regions are
+//!   exposure-driven and sparse) — deferred work.
+//!
+//! The default ceiling height comes from `storey.ceiling_height_m` — the
+//! controller's first-3D gate guarantees it's set before this view is
+//! reachable; an unset storey (defensive: a storey-tab switch while already in
+//! 3D can land on one) paints a hint instead of guessing a height.
 //!
 //! `render_at_z_offset` is the workhorse — `full_house_3d` calls it per storey
 //! with a cumulative z offset. The public `render` is just `render_at_z_offset`
 //! with `z_offset = 0` and computes its own bounding box.
 
-use datatypes::ber::structural::{FloorRegion, Storey};
+use datatypes::ber::structural::{CeilingRegion, FloorRegion, Storey};
 use domain::sketch::DisplayMode;
 use eframe::egui;
 
@@ -30,7 +38,7 @@ pub fn render(
         painter.text(
             rect.center(),
             egui::Align2::CENTER_CENTER,
-            "Set a ceiling height to view in 3D.",
+            "Set a default ceiling height to view in 3D.",
             egui::FontId::default(),
             style::HINT_TEXT,
         );
@@ -43,7 +51,20 @@ pub fn render(
     render_at_z_offset(painter, &t, storey, display_mode, 0.0);
 }
 
-/// Render `storey` with the assumption that its floor sits at world-z `z_offset`.
+/// The lowest floor level in the storey (metres relative to its datum) — the
+/// bottom of the wall band. `0.0` when there are no floor regions.
+fn min_floor_level(storey: &Storey) -> f64 {
+    storey
+        .floors
+        .regions
+        .iter()
+        .map(|r| r.level_m)
+        .reduce(f64::min)
+        .unwrap_or(0.0)
+}
+
+/// Render `storey` with the assumption that its floor DATUM sits at world-z
+/// `z_offset` (region `level_m`s offset from there).
 /// Caller supplies the transform so multi-storey views can share one camera.
 /// Defensive no-op when the storey's ceiling height is unset (`render` and
 /// `full_house_3d` both hint-and-return before getting here).
@@ -57,58 +78,98 @@ pub(crate) fn render_at_z_offset(
     let Some(height) = storey.ceiling_height_m else {
         return;
     };
+    let wall_bottom = z_offset + min_floor_level(storey);
+    let wall_top = z_offset + height;
     for region in &storey.floors.regions {
-        draw_extruded_region(
+        draw_floor_region(
             painter,
             t,
             region,
-            z_offset,
-            z_offset + height,
+            z_offset + region.level_m,
+            wall_bottom,
+            wall_top,
             display_mode,
         );
     }
+    // Roofs at their REAL per-vertex z (ceiling steps). Fallback when the
+    // resolved roofs are missing (defensive: height set but the resolve
+    // projection not yet run): flat rings over each floor region at the
+    // default height, matching the old uniform extrusion.
+    if storey.roofs.regions.is_empty() {
+        let roof_color = color_for(DisplayMode::Roofs, display_mode, style::ROOF_LINE);
+        for region in &storey.floors.regions {
+            let pts: Vec<egui::Pos2> = region
+                .polygon
+                .exterior()
+                .coords()
+                .map(|c| {
+                    let (px, py) = project_iso(c.x, c.y, wall_top);
+                    t.apply(px, py)
+                })
+                .collect();
+            if pts.len() >= 3 {
+                painter.add(egui::Shape::closed_line(
+                    pts,
+                    egui::Stroke::new(1.5, roof_color),
+                ));
+            }
+        }
+    } else {
+        for roof in &storey.roofs.regions {
+            draw_roof_region(painter, t, roof, z_offset, display_mode);
+        }
+    }
 }
 
-/// Projected (post-isometric) 2D bounding box of every point in this storey,
-/// including the ceiling ring (floor + ceiling height) at the given `z_offset`.
-/// `None` when there's no geometry or no ceiling height to extrude to.
+/// Projected (post-isometric) 2D bounding box of every point in this storey:
+/// each floor region's ring at the wall band's bottom/top AND at its own
+/// `level_m`, plus every roof vertex at its own z — so lowered floors and
+/// raised ceilings never clip. `None` when there's no geometry or no ceiling
+/// height to extrude to.
 pub(crate) fn projected_bb_for_storey(
     storey: &Storey,
     z_offset: f64,
 ) -> Option<((f64, f64), (f64, f64))> {
     let height = storey.ceiling_height_m?;
-    let mut iter = storey.floors.regions.iter().flat_map(move |r| {
-        let z_top = z_offset + height;
-        let floor = r
-            .polygon
-            .exterior()
-            .coords()
-            .map(move |c| project_iso(c.x, c.y, z_offset));
-        let ceiling = r
-            .polygon
-            .exterior()
-            .coords()
-            .map(move |c| project_iso(c.x, c.y, z_top));
-        floor.chain(ceiling)
-    });
-    let (mut min_x, mut min_y) = iter.next()?;
-    let mut max_x = min_x;
-    let mut max_y = min_y;
-    for (x, y) in iter {
-        min_x = min_x.min(x);
-        max_x = max_x.max(x);
-        min_y = min_y.min(y);
-        max_y = max_y.max(y);
+    let wall_bottom = z_offset + min_floor_level(storey);
+    let wall_top = z_offset + height;
+    let mut bb: Option<((f64, f64), (f64, f64))> = None;
+    let mut add = |px: f64, py: f64| {
+        bb = Some(match bb {
+            None => ((px, py), (px, py)),
+            Some(((min_x, min_y), (max_x, max_y))) => (
+                (min_x.min(px), min_y.min(py)),
+                (max_x.max(px), max_y.max(py)),
+            ),
+        });
+    };
+    for region in &storey.floors.regions {
+        for c in region.polygon.exterior().coords() {
+            for z in [wall_bottom, z_offset + region.level_m, wall_top] {
+                let (px, py) = project_iso(c.x, c.y, z);
+                add(px, py);
+            }
+        }
     }
-    Some(((min_x, min_y), (max_x, max_y)))
+    for region in &storey.roofs.regions {
+        for v in &region.polygon.exterior {
+            let (px, py) = project_iso(v.x, v.y, z_offset + v.z);
+            add(px, py);
+        }
+    }
+    bb
 }
 
-fn draw_extruded_region(
+/// One floor region: wall quads spanning the shared band (`wall_bottom` →
+/// `wall_top` — the volume hint) plus the floor outline at the region's own
+/// level (`floor_z`), so floor steps read as offset rings.
+fn draw_floor_region(
     painter: &egui::Painter,
     t: &Transform2d,
     region: &FloorRegion,
-    z_floor: f64,
-    ceiling_z: f64,
+    floor_z: f64,
+    wall_bottom: f64,
+    wall_top: f64,
     display_mode: DisplayMode,
 ) {
     let exterior: Vec<_> = region.polygon.exterior().coords().cloned().collect();
@@ -116,47 +177,67 @@ fn draw_extruded_region(
         return;
     }
 
-    let floor_pts: Vec<egui::Pos2> = exterior
-        .iter()
-        .map(|c| {
-            let (px, py) = project_iso(c.x, c.y, z_floor);
-            t.apply(px, py)
-        })
-        .collect();
-    let ceiling_pts: Vec<egui::Pos2> = exterior
-        .iter()
-        .map(|c| {
-            let (px, py) = project_iso(c.x, c.y, ceiling_z);
-            t.apply(px, py)
-        })
-        .collect();
+    let ring_at = |z: f64| -> Vec<egui::Pos2> {
+        exterior
+            .iter()
+            .map(|c| {
+                let (px, py) = project_iso(c.x, c.y, z);
+                t.apply(px, py)
+            })
+            .collect()
+    };
+    let bottom_pts = ring_at(wall_bottom);
+    let top_pts = ring_at(wall_top);
 
-    // Walls: a quad per floor edge, from (floor[i], floor[i+1], ceiling[i+1], ceiling[i]).
+    // Walls: a quad per edge, from (bottom[i], bottom[i+1], top[i+1], top[i]).
     let wall_stroke = egui::Stroke::new(
         1.5,
         color_for(DisplayMode::Walls, display_mode, style::WALL_LINE),
     );
     for i in 0..(exterior.len() - 1) {
-        let quad = vec![
-            floor_pts[i],
-            floor_pts[i + 1],
-            ceiling_pts[i + 1],
-            ceiling_pts[i],
-        ];
+        let quad = vec![bottom_pts[i], bottom_pts[i + 1], top_pts[i + 1], top_pts[i]];
         painter.add(egui::Shape::closed_line(quad, wall_stroke));
     }
 
-    // Floor outline (slightly thicker so it reads as the base).
+    // Floor outline at the region's own level (slightly thicker so it reads
+    // as the base). Reuse the bottom ring when the region sits on the band's
+    // floor — the common, un-stepped case.
+    let floor_pts = if floor_z == wall_bottom {
+        bottom_pts
+    } else {
+        ring_at(floor_z)
+    };
     let floor_color = color_for(DisplayMode::Floors, display_mode, style::FLOOR_LINE);
     painter.add(egui::Shape::closed_line(
         floor_pts,
         egui::Stroke::new(2.0, floor_color),
     ));
+}
 
-    // Ceiling outline (roof line — flat ceiling for now).
+/// One roof region's outline at its own per-vertex z (`z_offset` + the stored
+/// vertex z, which is metres above the storey's floor datum).
+fn draw_roof_region(
+    painter: &egui::Painter,
+    t: &Transform2d,
+    region: &CeilingRegion,
+    z_offset: f64,
+    display_mode: DisplayMode,
+) {
+    if region.polygon.exterior.len() < 3 {
+        return;
+    }
+    let pts: Vec<egui::Pos2> = region
+        .polygon
+        .exterior
+        .iter()
+        .map(|v| {
+            let (px, py) = project_iso(v.x, v.y, z_offset + v.z);
+            t.apply(px, py)
+        })
+        .collect();
     let roof_color = color_for(DisplayMode::Roofs, display_mode, style::ROOF_LINE);
     painter.add(egui::Shape::closed_line(
-        ceiling_pts,
+        pts,
         egui::Stroke::new(1.5, roof_color),
     ));
 }

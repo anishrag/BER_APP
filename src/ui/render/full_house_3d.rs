@@ -1,8 +1,12 @@
 //! Axonometric 3D rendering of every Storey in the BER, stacked vertically.
 //!
-//! Storeys are placed at cumulative z offsets equal to the sum of heights of
-//! storeys below. The transform is fitted across all storeys' projected
-//! bounding boxes so the whole building sits inside the canvas.
+//! Storeys are placed at cumulative z offsets equal to the sum of DEFAULT
+//! ceiling heights of storeys below (stepped floors/ceilings don't shift the
+//! stack — stacking fidelity is later work). Within its band each storey
+//! renders its real per-region floor levels and roof z via
+//! `storey_3d::render_at_z_offset`. The transform is fitted across all
+//! storeys' projected bounding boxes so the whole building sits inside the
+//! canvas.
 
 use datatypes::ber::ber_struct::Ber;
 use domain::sketch::DisplayMode;
@@ -28,7 +32,7 @@ pub fn render(
         return;
     }
 
-    // The stack's z-step per storey IS its ceiling height — every storey needs
+    // The stack's z-step per storey IS its default ceiling height — every storey needs
     // one before the full house can stack. The controller's first-3D gate fills
     // them from the All-storeys tab; an unset one here (e.g. a storey added
     // while already in 3D) paints the hint instead of guessing a height.
@@ -36,7 +40,7 @@ pub fn render(
         painter.text(
             rect.center(),
             egui::Align2::CENTER_CENTER,
-            "Set a ceiling height to view in 3D.",
+            "Set a default ceiling height to view in 3D.",
             egui::FontId::default(),
             style::HINT_TEXT,
         );

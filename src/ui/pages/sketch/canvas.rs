@@ -920,7 +920,7 @@ fn view_buttons<F: FnMut(UiEvent)>(
                 if ui
                     .add_enabled(enabled, egui::Button::new(label))
                     .on_hover_text("Toggle between the 2D plan and the 3D view")
-                    .on_disabled_hover_text("Set a ceiling height (Heights) first")
+                    .on_disabled_hover_text("Set a default ceiling height (Heights) first")
                     .clicked()
                 {
                     on_event(UiEvent::Sketch(SketchEvent::ChangeMode(other)));

@@ -105,11 +105,26 @@ pub const CATEGORIES: &[Category] = &[
     },
 ];
 
+/// A forced category-layout arrangement for the layout-preview button
+/// (`None` on the override = Auto: pick by the canvas aspect ratio).
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum LayoutOrientation {
+    /// Top ribbon (the portrait arrangement).
+    Portrait,
+    /// Left side panel (the landscape arrangement).
+    Landscape,
+}
+
 /// Cross-frame UI state of the category layout. Lives on `SketchState`.
 pub struct CategoryUiState {
     /// Which category tab the portrait ribbon shows. (The landscape side
     /// panel shows all categories, so it ignores this.)
     pub active_category: usize,
+    /// Layout-preview override: force the portrait ribbon or landscape side
+    /// panel regardless of aspect ratio; `None` = Auto. A preview/dev
+    /// affordance the user requested — cycled by the top-strip "Layout"
+    /// button so both arrangements can be tried on one device.
+    pub layout_override: Option<LayoutOrientation>,
     /// Wall-length label visibility (the Dimensions-category toggle). Gates
     /// the storey + living-area length labels on the canvas.
     pub show_wall_lengths: bool,
@@ -124,6 +139,7 @@ impl Default for CategoryUiState {
     fn default() -> Self {
         Self {
             active_category: 0,
+            layout_override: None,   // Auto: pick by aspect ratio
             show_wall_lengths: true, // labels visible by default
             ceiling_height_input: String::new(),
         }
@@ -355,7 +371,7 @@ fn tool_ui<F: FnMut(UiEvent)>(
             // controller and its rejection shows inline like the other
             // prompt errors.
             ui.horizontal(|ui| {
-                ui.label("Ceiling height");
+                ui.label("Default ceiling height");
                 if let Some(h) = flags.default_ceiling_height {
                     ui.label(format!("{h:.2} m"));
                 }
