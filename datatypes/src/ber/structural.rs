@@ -637,7 +637,10 @@ impl FloorRegion {
 /// (composition order is law: default ceiling → step areas → apexes).
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct RoofApex {
-    /// Plan position of the apex, in storey/world metres.
+    /// Plan position of the apex, in storey/world metres. Must be
+    /// f32-representable (the reload reconstruction round-trips rings through
+    /// f32, and the fan's exact vertex matching depends on it) —
+    /// `Ber::add_roof_apex` quantizes, so go through it.
     pub point: Point2f64,
     /// ABSOLUTE height of the apex in metres above the storey's floor datum
     /// ("ridge at 4.2 m"), NOT a delta against the region it lands in.

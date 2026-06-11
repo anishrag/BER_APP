@@ -68,7 +68,15 @@ impl Ber {
     /// happens upstream in the document layer at assign time — this just
     /// stores the declarative input that resolve re-applies. No-op when the
     /// storey doesn't exist.
-    pub fn add_roof_apex(&mut self, storey_idx: usize, apex: RoofApex) {
+    ///
+    /// The position is QUANTIZED to the f32 grid: the reload reconstruction
+    /// round-trips roof rings through f32, and `with_apexes`' exact vertex
+    /// matching only holds when the stored apex survives that round-trip.
+    /// Shell-originated coordinates already do; this makes the fixpoint hold
+    /// for ANY caller (imports, fixtures) by construction.
+    pub fn add_roof_apex(&mut self, storey_idx: usize, mut apex: RoofApex) {
+        apex.point.x = apex.point.x as f32 as f64;
+        apex.point.y = apex.point.y as f32 as f64;
         if let Some(storey) = self.storeys.get_mut(storey_idx) {
             storey.roof_apexes.push(apex);
         }
