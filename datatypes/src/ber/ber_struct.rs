@@ -2,7 +2,7 @@ use serde::{Deserialize, Serialize};
 
 use super::common::{ConstructionPhases, ItemId, Photo};
 use super::structural::{
-    CeilingConstruction, FloorConstruction, Storey, ThermalMassInfo, WallConstruction,
+    CeilingConstruction, FloorConstruction, RoofApex, Storey, ThermalMassInfo, WallConstruction,
 };
 use super::systems::{HeatingSystem, SolarElements, VentilationSystem};
 
@@ -59,6 +59,28 @@ impl Ber {
                         storey.ceiling_height_m = Some(height_m);
                     }
                 }
+            }
+        }
+    }
+
+    /// Append a roof apex to storey `storey_idx`'s durable apex list.
+    /// Validation (position strictly inside a ceiling region, sane height)
+    /// happens upstream in the document layer at assign time — this just
+    /// stores the declarative input that resolve re-applies. No-op when the
+    /// storey doesn't exist.
+    pub fn add_roof_apex(&mut self, storey_idx: usize, apex: RoofApex) {
+        if let Some(storey) = self.storeys.get_mut(storey_idx) {
+            storey.roof_apexes.push(apex);
+        }
+    }
+
+    /// Remove the roof apex at `apex_idx` on storey `storey_idx` (the apex
+    /// list in the toolbar deletes by index). No-op when either index is out
+    /// of range.
+    pub fn remove_roof_apex(&mut self, storey_idx: usize, apex_idx: usize) {
+        if let Some(storey) = self.storeys.get_mut(storey_idx) {
+            if apex_idx < storey.roof_apexes.len() {
+                storey.roof_apexes.remove(apex_idx);
             }
         }
     }

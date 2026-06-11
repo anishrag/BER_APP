@@ -230,8 +230,16 @@ mod tests {
                 datatypes::ber::structural::WallExposure::Exposed,
             ),
         ];
-        let walls =
-            WallRegions::rebuild_preserving(segs, &WallRegions::default(), 0.0, 2.4, wall_cid);
+        // Slice B-2 wires real roofs into resolve; empty roofs here keep the
+        // flat 2.4 m top this fixture always had.
+        let walls = WallRegions::regenerate(
+            segs,
+            &WallRegions::default(),
+            &datatypes::ber::structural::CeilingRegions::default(),
+            0.0,
+            2.4,
+            wall_cid,
+        );
         ber.storeys.push(Storey {
             walls,
             ..Storey::default()

@@ -206,8 +206,16 @@ pub fn resolve_storey(
     let wall_top = storey
         .ceiling_height_m
         .unwrap_or(PROVISIONAL_WALL_EXTRUSION_M);
-    storey.walls =
-        WallRegions::rebuild_preserving(wall_segments, &storey.walls, 0.0, wall_top, wall_cid);
+    // Slice B-2 wires the real derived roofs in here (so wall tops trace the
+    // roof profile); until then empty roofs keep every top flat at wall_top.
+    storey.walls = WallRegions::regenerate(
+        wall_segments,
+        &storey.walls,
+        &CeilingRegions::default(),
+        0.0,
+        wall_top,
+        wall_cid,
+    );
     storey
 }
 

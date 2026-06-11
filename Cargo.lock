@@ -873,6 +873,7 @@ dependencies = [
  "chrono",
  "domain",
  "geo",
+ "log",
  "serde",
  "serde_json",
  "uuid",
