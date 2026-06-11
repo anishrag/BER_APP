@@ -83,6 +83,14 @@ pub struct SketchState {
     pub step_amount_input: String,
     /// Backing string for the ceiling-step amount input (metres).
     pub ceiling_amount_input: String,
+    /// Backing string for the roof-point apex-height input (metres). PREFILLED
+    /// with the storey's default ceiling height when the Height stage opens
+    /// (via `roof_apex_prefilled`); the user overtypes or accepts.
+    pub roof_apex_input: String,
+    /// One-shot guard for the prefill above: set when the Height stage's
+    /// prefill has been written, cleared when the stage closes, so the user's
+    /// in-progress typing isn't clobbered every frame.
+    pub roof_apex_prefilled: bool,
     /// Last error from `set_default_ceiling_height`. Shown next to the
     /// Heights field so the user can correct without losing what they typed;
     /// cleared on the next successful Set.
@@ -404,6 +412,14 @@ impl eframe::App for BerApp {
                                 ceiling_step_side_pending,
                                 ceiling_step_amount_pending,
                                 ceiling_step_pending,
+                                roof_point_mode,
+                                roof_point_available,
+                                roof_apex_views,
+                                pending_roof_point,
+                                roof_point_snap_tag,
+                                roof_point_position_pending,
+                                roof_point_height_pending,
+                                roof_point_pending,
                                 default_ceiling_height,
                                 ceiling_heights_set,
                                 view_params,
@@ -464,6 +480,14 @@ impl eframe::App for BerApp {
                                     controller_ref.ceiling_step_side_pending(),
                                     controller_ref.ceiling_step_amount_pending(),
                                     controller_ref.ceiling_step_pending(),
+                                    controller_ref.roof_point_mode(),
+                                    controller_ref.roof_point_available(),
+                                    controller_ref.roof_apex_views(),
+                                    controller_ref.pending_roof_point_position(),
+                                    controller_ref.roof_point_snap_tag(),
+                                    controller_ref.roof_point_position_pending(),
+                                    controller_ref.roof_point_height_pending(),
+                                    controller_ref.roof_point_pending(),
                                     controller_ref.default_ceiling_height(),
                                     controller_ref.ceiling_heights_set(),
                                     crate::ui::render::ViewParams {
@@ -490,6 +514,22 @@ impl eframe::App for BerApp {
                                 }
                             } else {
                                 self.sketch_state.position_prompt_key = None;
+                            }
+
+                            // Prefill the roof-point height box with the storey's
+                            // default ceiling height when the Height stage OPENS (a
+                            // sensible starting point for "how high is the ridge?");
+                            // the one-shot guard preserves the user's typing on the
+                            // same stage across frames.
+                            if roof_point_height_pending {
+                                if !self.sketch_state.roof_apex_prefilled {
+                                    self.sketch_state.roof_apex_prefilled = true;
+                                    self.sketch_state.roof_apex_input = default_ceiling_height
+                                        .map(|h| format!("{h:.2}"))
+                                        .unwrap_or_default();
+                                }
+                            } else {
+                                self.sketch_state.roof_apex_prefilled = false;
                             }
 
                             // Deferred clear-on-success for the Heights field's input
@@ -584,6 +624,15 @@ impl eframe::App for BerApp {
                                 ceiling_step_amount_pending,
                                 ceiling_step_pending,
                                 ceiling_amount_input: &mut self.sketch_state.ceiling_amount_input,
+                                roof_point_mode,
+                                roof_point_available,
+                                roof_apex_views: &roof_apex_views,
+                                pending_roof_point,
+                                roof_point_snap_tag: roof_point_snap_tag.as_ref(),
+                                roof_point_position_pending,
+                                roof_point_height_pending,
+                                roof_point_pending,
+                                roof_apex_input: &mut self.sketch_state.roof_apex_input,
                                 ceiling_height_error: ceiling_height_error.as_deref(),
                                 default_ceiling_height,
                                 ceiling_heights_set,
@@ -826,6 +875,29 @@ impl eframe::App for BerApp {
                                     }
                                     SketchEvent::DeleteCeilingStepRegion(index) => {
                                         controller.borrow_mut().delete_ceiling_step_region(index);
+                                    }
+                                    SketchEvent::SetRoofPointMode(on) => {
+                                        controller.borrow_mut().set_roof_point_mode(on);
+                                    }
+                                    SketchEvent::RoofPointTap { world_x, world_y } => {
+                                        controller
+                                            .borrow_mut()
+                                            .roof_point_tap(world_x as f32, world_y as f32);
+                                    }
+                                    SketchEvent::AssignRoofApexHeight(z_m) => {
+                                        log_err(
+                                            "assign_roof_apex",
+                                            controller.borrow_mut().assign_roof_apex(z_m),
+                                        );
+                                    }
+                                    SketchEvent::UnsnapRoofPoint => {
+                                        controller.borrow_mut().unsnap_roof_point();
+                                    }
+                                    SketchEvent::CancelPendingRoofPoint => {
+                                        controller.borrow_mut().cancel_pending_roof_point();
+                                    }
+                                    SketchEvent::DeleteRoofApex(index) => {
+                                        controller.borrow_mut().delete_roof_apex(index);
                                     }
                                     SketchEvent::SetExposureMode(on) => {
                                         controller.borrow_mut().set_exposure_mode(on);

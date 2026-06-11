@@ -266,6 +266,27 @@ pub enum SketchEvent {
     CancelPendingCeilingStep,
     /// Delete the current storey's ceiling-step region at the given index.
     DeleteCeilingStepRegion(usize),
+    /// Toggle roof-point mode: when on, tapping a point inside a ceiling area
+    /// starts the apex flow (per-axis position questions, then the height).
+    SetRoofPointMode(bool),
+    /// Tap (world coords) in roof-point mode placing the apex's position.
+    RoofPointTap {
+        world_x: f64,
+        world_y: f64,
+    },
+    /// User entered the apex height (metres, ABSOLUTE above the storey floor
+    /// datum) for the pending roof point.
+    AssignRoofApexHeight(f32),
+    /// "Don't snap" on the pending roof point's snap tag: revert BOTH axes to
+    /// their tapped coordinates and restart the position questions. Routed to
+    /// the controller's dedicated `unsnap_roof_point` — NOT
+    /// `ChooseSnap`/`UnsnapLast`, whose rewind-and-replay machinery must not
+    /// touch a point outside history.
+    UnsnapRoofPoint,
+    /// Discard the in-flight roof point at any stage.
+    CancelPendingRoofPoint,
+    /// Delete the current storey's roof apex at the given index.
+    DeleteRoofApex(usize),
     /// Toggle wall-exposure mode: when on, tapping an outline wall selects it
     /// (and the section handles), the type buttons mark the selected range.
     SetExposureMode(bool),
@@ -396,6 +417,22 @@ pub struct SketchView<'a> {
     pub ceiling_step_amount_pending: bool,
     pub ceiling_step_pending: bool,
     pub ceiling_amount_input: &'a mut String,
+    /// Roof-point (apex) tagging: mode flag + availability gate (same gate as
+    /// the ceiling steps), the committed apexes `(position, label)` to mark
+    /// ("▲ 4.20 m"), the pending point's position for the provisional dot,
+    /// the per-stage flags (height entry / any stage), and the height input's
+    /// backing string. The position stage shows as the shared position panel.
+    pub roof_point_mode: bool,
+    pub roof_point_available: bool,
+    pub roof_apex_views: &'a [((f64, f64), String)],
+    pub pending_roof_point: Option<(f64, f64)>,
+    /// The pending point's wall snap as one standard snap tag (its menu
+    /// offers only "Don't snap", routed to UnsnapRoofPoint).
+    pub roof_point_snap_tag: Option<&'a SnapTagView>,
+    pub roof_point_position_pending: bool,
+    pub roof_point_height_pending: bool,
+    pub roof_point_pending: bool,
+    pub roof_apex_input: &'a mut String,
     /// Default ceiling heights: the last error from the Heights field's Set
     /// (shown inline next to it), the current scope's value when it has one
     /// (the field's "2.40 m" display), and whether the scope's heights are

@@ -3569,6 +3569,393 @@ fn ceiling_step_tap_orientation_path_snaps_identically() {
     assert!(c.ceiling_step_amount_pending());
 }
 
+// ─── Roof points (apex tap + per-axis position + height) ───────────────────
+
+/// A finalised 10×10 storey with its default ceiling height set (2.4 m) and
+/// roof-point mode entered — the starting point of every apex flow.
+fn roof_ready_controller() -> AppController {
+    let mut c = dimensioned_square_controller();
+    c.set_default_ceiling_height(2.4).expect("height applies");
+    c.set_roof_point_mode(true);
+    assert!(c.roof_point_mode(), "mode enters once available");
+    c
+}
+
+/// The mode toggle is gated exactly like the ceiling steps: refused while the
+/// storey has no default ceiling height, available once it's set, and never
+/// available on the read-only All tab. A tap outside the footprint is
+/// rejected (nothing goes pending).
+#[test]
+fn roof_point_mode_gated_like_ceiling_steps() {
+    let mut c = dimensioned_square_controller();
+    assert!(!c.roof_point_available(), "no default height yet");
+    c.set_roof_point_mode(true);
+    assert!(!c.roof_point_mode(), "setter re-enforces the gate");
+
+    c.set_default_ceiling_height(2.4).unwrap();
+    assert!(c.roof_point_available());
+    c.set_roof_point_mode(true);
+    assert!(c.roof_point_mode());
+
+    // A tap outside the footprint bbox is rejected up front.
+    c.roof_point_tap(15.0, 5.0);
+    assert!(!c.roof_point_pending(), "off-footprint tap rejected");
+
+    // The All tab is read-only — not available there (the switch also resets
+    // the mode like the other area tools).
+    c.set_current_storey(None).unwrap();
+    assert!(!c.roof_point_available());
+    assert!(!c.roof_point_mode());
+}
+
+/// The full un-snapped flow: tap → X position prompt (kind `Point`, the
+/// "area wall" degenerate at the tapped point) → Y prompt → height → assign
+/// FANS the containing ceiling region: one triangle per boundary edge, every
+/// triangle holding the apex vertex at the entered height, boundary corners
+/// at the base. The applied positions land exactly; the session ceiling-step
+/// list stays EMPTY (a fan over the default base reconstructs to nothing —
+/// the apex is durable input, not session state).
+#[test]
+fn roof_point_tap_x_y_height_flow_fans_the_region() {
+    let mut c = roof_ready_controller();
+    c.roof_point_tap(3.8, 5.2);
+    let ui = c.position_prompt_for_ui().expect("X position prompt");
+    assert_eq!(ui.kind, PositionPromptKind::Point);
+    assert_eq!(ui.axis, ParameterAxis::X);
+    assert_eq!(
+        ui.area_wall.wall_a, ui.area_wall.wall_b,
+        "a point, not a wall"
+    );
+    assert!((ui.area_wall.wall_a.0 - 3.8).abs() < 1e-4);
+    // Nearest ref is x = 0 (3.8 m): 4 m from it → x = 4.
+    c.apply_position_dimension(4.0).expect("X applies");
+
+    let ui = c.position_prompt_for_ui().expect("Y position prompt");
+    assert_eq!(ui.kind, PositionPromptKind::Point);
+    assert_eq!(ui.axis, ParameterAxis::Y);
+    // Nearest ref is y = 10 (4.8 m), drawn side −: 5 m from it → y = 5.
+    c.apply_position_dimension(5.0).expect("Y applies");
+    assert!(c.roof_point_height_pending(), "both axes pinned → height");
+    assert_eq!(
+        c.pending_roof_point_position(),
+        Some((4.0, 5.0)),
+        "applied positions land exactly"
+    );
+
+    c.assign_roof_apex(4.2).expect("apex assigns");
+    assert!(!c.roof_point_pending(), "flow complete");
+    c.materialize();
+    let storey = &c.current_record.as_ref().unwrap().data.storeys[0];
+    assert_eq!(
+        storey.roofs.regions.len(),
+        4,
+        "one fan triangle per boundary edge"
+    );
+    for region in &storey.roofs.regions {
+        assert_eq!(region.polygon.exterior.len(), 3, "triangles");
+        assert!(
+            region
+                .polygon
+                .exterior
+                .iter()
+                .any(|v| (v.x - 4.0).abs() < 1e-6
+                    && (v.y - 5.0).abs() < 1e-6
+                    && (v.z - 4.2).abs() < 1e-6),
+            "every triangle holds the apex at the entered height"
+        );
+        assert!(
+            region
+                .polygon
+                .exterior
+                .iter()
+                .all(|v| (v.z - 4.2).abs() < 1e-6 || (v.z - 2.4).abs() < 1e-6),
+            "boundary corners stay at the base"
+        );
+    }
+    assert_eq!(storey.roof_apexes.len(), 1, "the durable input");
+    assert!(
+        c.ceiling_step_regions.get(&0).is_none(),
+        "a fan over the default base needs NO session step state"
+    );
+    assert_eq!(c.roof_apex_views(), vec![((4.0, 5.0), "▲ 4.20 m".into())]);
+}
+
+/// A tap within snap tolerance of a parallel wall on ONE axis snaps that
+/// axis: its position prompt is SKIPPED (the coordinate is a reference
+/// wall's, exact by construction), the single tag renders, the OTHER axis is
+/// still asked, and the assigned apex lands exactly on the wall's coordinate.
+#[test]
+fn roof_point_snapped_axis_skips_its_prompt_and_lands_exactly() {
+    let mut c = ceiling_ready_l_controller();
+    c.set_roof_point_mode(true);
+    assert!(c.roof_point_mode());
+    // Tap (3.0, 3.9): Y is within 0.2 of the interior wall y = 4 → snaps;
+    // X has no wall within tolerance → asked.
+    c.roof_point_tap(3.0, 3.9);
+    let tag = c.roof_point_snap_tag().expect("snap tag present");
+    assert_eq!(
+        tag.current_kind,
+        Some(manip_2d_plan::SnapKind::ToParallelWall)
+    );
+    assert!((tag.pos.1 - 4.0).abs() < 1e-6, "tag at the snapped point");
+    assert!(
+        (tag.from.1 - 3.9).abs() < 1e-6,
+        "identity = the tapped point"
+    );
+    assert!(
+        tag.options.is_empty() && tag.skippable,
+        "menu = Don't snap only"
+    );
+
+    let ui = c.position_prompt_for_ui().expect("X still asked");
+    assert_eq!(ui.kind, PositionPromptKind::Point);
+    assert_eq!(ui.axis, ParameterAxis::X);
+    // Nearest ref is the interior wall x = 6 (3 m), drawn side −:
+    // 2.5 m from it → x = 3.5.
+    c.apply_position_dimension(2.5).expect("X applies");
+    assert!(
+        c.roof_point_height_pending(),
+        "snapped Y skipped its prompt — straight to the height"
+    );
+    assert!(c.roof_point_snap_tag().is_some(), "tag still clickable");
+
+    c.assign_roof_apex(4.0).expect("apex assigns");
+    let storey = &c.current_record.as_ref().unwrap().data.storeys[0];
+    let apex = &storey.roof_apexes[0];
+    assert!((apex.point.x - 3.5).abs() < 1e-6);
+    assert!(
+        (apex.point.y - 4.0).abs() < 1e-6,
+        "snapped axis lands EXACTLY"
+    );
+}
+
+/// Both axes within tolerance = a corner snap for free: no position prompt
+/// at all, straight to the height, and the single tag shows the corner kind.
+#[test]
+fn roof_point_both_axes_snapped_goes_straight_to_height() {
+    let mut c = ceiling_ready_l_controller();
+    c.set_roof_point_mode(true);
+    c.roof_point_tap(5.9, 3.9); // within 0.2 of x = 6 AND y = 4
+    assert!(
+        c.position_prompt_for_ui().is_none(),
+        "both snapped — no position question"
+    );
+    assert!(c.roof_point_height_pending(), "straight to the height");
+    assert_eq!(
+        c.pending_roof_point_position(),
+        Some((6.0, 4.0)),
+        "both coordinates snapped"
+    );
+    let tag = c.roof_point_snap_tag().expect("one tag for both");
+    assert_eq!(tag.current_kind, Some(manip_2d_plan::SnapKind::ToCorner));
+}
+
+/// "Don't snap" from the HEIGHT stage reverts BOTH axes to their tapped
+/// coordinates and restarts the question flow from X.
+#[test]
+fn unsnap_roof_point_restarts_from_x_with_the_drawn_coords() {
+    let mut c = ceiling_ready_l_controller();
+    c.set_roof_point_mode(true);
+    c.roof_point_tap(5.9, 3.9);
+    assert!(c.roof_point_height_pending());
+
+    c.unsnap_roof_point();
+    assert!(c.roof_point_snap_tag().is_none(), "snaps dropped");
+    let ui = c.position_prompt_for_ui().expect("X question reopened");
+    assert_eq!(ui.kind, PositionPromptKind::Point);
+    assert_eq!(ui.axis, ParameterAxis::X);
+    assert_eq!(
+        c.pending_roof_point_position(),
+        Some((5.9 as f32 as f64, 3.9 as f32 as f64)),
+        "both axes back at the DRAWN coordinates"
+    );
+    // The restarted flow works as normal: skip X, then Y is asked too
+    // (un-snapped now), skip it, and the height opens on the drawn point.
+    c.skip_position_dimension();
+    let ui = c.position_prompt_for_ui().expect("Y question follows");
+    assert_eq!(ui.axis, ParameterAxis::Y);
+    c.skip_position_dimension();
+    assert!(c.roof_point_height_pending());
+}
+
+/// Reload rebuilds the fan from the DURABLE apex with NO session state, and
+/// a no-edit re-derive reproduces it exactly — the apex reload fixpoint.
+#[test]
+fn roof_apex_survives_reload_with_no_session_state_and_rederive_fixpoint() {
+    let mut c = roof_ready_controller();
+    c.roof_point_tap(3.8, 5.2);
+    c.apply_position_dimension(4.0).unwrap();
+    c.apply_position_dimension(5.0).unwrap();
+    c.assign_roof_apex(4.2).unwrap();
+    c.materialize();
+
+    let id = c.current_record.as_ref().unwrap().id.clone();
+    c.flush_if_dirty().unwrap();
+    c.open_ber(&id).unwrap();
+    let storey = &c.current_record.as_ref().unwrap().data.storeys[0];
+    assert_eq!(storey.roofs.regions.len(), 4, "fan persisted");
+    assert_eq!(storey.roof_apexes.len(), 1, "apex input persisted");
+    assert!(
+        c.ceiling_step_regions.get(&0).is_none(),
+        "no session state to reconstruct for a default-base fan"
+    );
+
+    // Re-derive without any edit: the fan must be reproduced exactly.
+    c.mark_dirty().unwrap();
+    c.materialize();
+    let storey = &c.current_record.as_ref().unwrap().data.storeys[0];
+    assert_eq!(
+        storey.roofs.regions.len(),
+        4,
+        "fan kept across the re-derive"
+    );
+    let max_z = storey
+        .roofs
+        .regions
+        .iter()
+        .flat_map(|r| r.polygon.exterior.iter().map(|v| v.z))
+        .fold(f64::NEG_INFINITY, f64::max);
+    assert!((max_z - 4.2).abs() < 1e-6, "apex height kept");
+}
+
+/// An apex OVER a ceiling step — the load-bearing fixpoint chain end-to-end:
+/// the fan keeps the stepped base, the session ceiling-step list
+/// CANONICALIZES into the fan's triangle pieces (each carrying the step
+/// delta), and reload + re-derive reproduce the identical surface.
+#[test]
+fn roof_apex_over_a_ceiling_step_canonicalizes_and_survives_reload() {
+    let mut c = ceiling_ready_controller();
+    ceiling_step_to_amount_at_x4(&mut c);
+    c.assign_ceiling_step_delta(0.3).unwrap(); // right of x = 4 at 2.7
+    c.set_roof_point_mode(true); // leaves ceiling-step mode; sessions stay
+
+    // Apex inside the STEPPED piece, at its drawn position (skip both axes).
+    c.roof_point_tap(7.0, 5.0);
+    c.skip_position_dimension(); // X stays 7.0
+    c.skip_position_dimension(); // Y stays 5.0
+    c.assign_roof_apex(4.2).expect("apex over the step assigns");
+
+    // Canonicalized: the stepped piece is now the fan's TRIANGLES, each
+    // recovering the step delta (the accepted step-list fragmentation).
+    let session = &c.ceiling_step_regions[&0];
+    assert_eq!(session.len(), 4, "one step triangle per fan boundary edge");
+    for r in session {
+        assert!((r.delta_m - 0.3).abs() < 1e-6, "each keeps the delta");
+        assert_eq!(r.polygon.len(), 3);
+    }
+    c.materialize();
+    let zs_of = |c: &AppController| {
+        let storey = &c.current_record.as_ref().unwrap().data.storeys[0];
+        let mut zs: Vec<f64> = storey
+            .roofs
+            .regions
+            .iter()
+            .flat_map(|r| r.polygon.exterior.iter().map(|v| v.z))
+            .collect();
+        zs.sort_by(f64::total_cmp);
+        zs
+    };
+    let before = zs_of(&c);
+    assert!((before.last().unwrap() - 4.2).abs() < 1e-6, "apex present");
+    assert!(
+        before.iter().any(|z| (z - 2.7).abs() < 1e-6),
+        "fan base kept the STEPPED height (apex-over-step)"
+    );
+    assert!(
+        before.iter().any(|z| (z - 2.4).abs() < 1e-6),
+        "the un-stepped piece stays at the default"
+    );
+
+    // Reload: session list reconstructs to the same triangles; the surface
+    // re-derives identically (the fixpoint).
+    let id = c.current_record.as_ref().unwrap().id.clone();
+    c.flush_if_dirty().unwrap();
+    c.open_ber(&id).unwrap();
+    let session = &c.ceiling_step_regions[&0];
+    assert_eq!(session.len(), 4, "triangles reconstructed from the roofs");
+    assert!(session.iter().all(|r| (r.delta_m - 0.3).abs() < 1e-6));
+    c.mark_dirty().unwrap();
+    c.materialize();
+    assert_eq!(
+        zs_of(&c),
+        before,
+        "derive → reconstruct → derive is a fixpoint"
+    );
+}
+
+/// Deleting the apex re-flattens its fan to the base on the next derive
+/// (and clears the now-empty session step list — same canonicalize).
+#[test]
+fn deleting_a_roof_apex_reflattens_the_fan() {
+    let mut c = roof_ready_controller();
+    c.roof_point_tap(3.8, 5.2);
+    c.apply_position_dimension(4.0).unwrap();
+    c.apply_position_dimension(5.0).unwrap();
+    c.assign_roof_apex(4.2).unwrap();
+    c.materialize();
+    assert_eq!(
+        c.current_record.as_ref().unwrap().data.storeys[0]
+            .roofs
+            .regions
+            .len(),
+        4
+    );
+
+    c.delete_roof_apex(0);
+    c.materialize();
+    let storey = &c.current_record.as_ref().unwrap().data.storeys[0];
+    assert!(storey.roof_apexes.is_empty(), "durable input removed");
+    assert_eq!(storey.roofs.regions.len(), 1, "back to one flat region");
+    assert!(
+        storey
+            .roofs
+            .regions
+            .iter()
+            .all(|r| r.flat_z().is_some_and(|z| (z - 2.4).abs() < 1e-6)),
+        "flat at the default again"
+    );
+    assert!(c.ceiling_step_regions.get(&0).is_none());
+    // Out-of-range delete is a no-op.
+    c.delete_roof_apex(7);
+}
+
+/// A storey switch abandons the in-flight point and leaves the mode — its
+/// coordinates are in the outgoing storey's space.
+#[test]
+fn storey_switch_clears_pending_roof_point() {
+    let mut c = roof_ready_controller();
+    c.roof_point_tap(3.8, 5.2);
+    assert!(c.roof_point_pending());
+    c.add_storey().unwrap();
+    assert!(!c.roof_point_mode(), "mode reset on switch");
+    assert!(!c.roof_point_pending(), "pending point abandoned");
+}
+
+/// v1: a second apex inside an already-fanned (sloped) region is rejected at
+/// assign with the stable one-per-area message; the pending point stays open
+/// so the user can cancel or move on.
+#[test]
+fn roof_apex_in_an_already_sloped_region_is_rejected_at_assign() {
+    let mut c = roof_ready_controller();
+    c.roof_point_tap(3.8, 5.2);
+    c.apply_position_dimension(4.0).unwrap();
+    c.apply_position_dimension(5.0).unwrap();
+    c.assign_roof_apex(4.2).unwrap();
+
+    // Strictly inside one of the fan triangles, not on its boundary.
+    c.roof_point_tap(3.9, 1.1);
+    c.skip_position_dimension();
+    c.skip_position_dimension();
+    assert!(c.roof_point_height_pending());
+    let err = c.assign_roof_apex(3.5).unwrap_err();
+    assert!(err.contains("already slopes"), "got: {err}");
+    assert!(c.roof_point_height_pending(), "pending intact on rejection");
+    let storey = &c.current_record.as_ref().unwrap().data.storeys[0];
+    assert_eq!(storey.roof_apexes.len(), 1, "nothing committed");
+    c.cancel_pending_roof_point();
+    assert!(!c.roof_point_pending());
+}
+
 // ---------------------------------------------------------------------------
 // Home / workspace shell wiring: list, delete, rename, date, exit.
 // ---------------------------------------------------------------------------

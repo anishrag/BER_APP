@@ -32,7 +32,9 @@ pub(super) fn has_content(view: &SketchView<'_>) -> bool {
                 || view.step_mode
                 || view.step_pick_pending
                 || view.ceiling_step_mode
-                || view.ceiling_step_pending))
+                || view.ceiling_step_pending
+                || view.roof_point_mode
+                || view.roof_point_pending))
 }
 
 /// Render the dock. Priority of the prompt chain: read-only notice >
@@ -126,6 +128,17 @@ pub(super) fn render<F: FnMut(UiEvent)>(
                     view.ceiling_step_side_pending,
                     view.ceiling_step_amount_pending,
                     view.ceiling_amount_input,
+                    on_event,
+                );
+            }
+            // Same pending-with-mode-off rule again.
+            if view.roof_point_mode || view.roof_point_pending {
+                roof_point_toolbar(
+                    ui,
+                    view.roof_apex_views,
+                    view.roof_point_height_pending,
+                    view.roof_point_position_pending,
+                    view.roof_apex_input,
                     on_event,
                 );
             }
@@ -701,6 +714,69 @@ fn ceiling_step_toolbar<F: FnMut(UiEvent)>(
                     .clicked()
                 {
                     on_event(UiEvent::Sketch(SketchEvent::DeleteCeilingStepRegion(i)));
+                }
+            });
+        }
+    }
+}
+
+/// Roof-point controls, stage by stage: the height field + Set/Cancel once
+/// the point's position is resolved; a "answer the distance question" hint
+/// while a position stage is up (it shows as the shared position-prompt
+/// panel); otherwise a tap hint plus the committed-apex list with deletes.
+fn roof_point_toolbar<F: FnMut(UiEvent)>(
+    ui: &mut egui::Ui,
+    apexes: &[((f64, f64), String)],
+    height_pending: bool,
+    position_pending: bool,
+    height_input: &mut String,
+    on_event: &mut F,
+) {
+    if height_pending {
+        ui.label(egui::RichText::new("Apex height (m):").strong());
+        ui.add(
+            egui::TextEdit::singleline(height_input)
+                .desired_width(60.0)
+                .hint_text("e.g. 4.2"),
+        );
+        // Unparseable input is ignored — the button just does nothing. The
+        // height is ABSOLUTE (above the storey floor datum), so the value
+        // goes through as-is; the controller validates it.
+        if ui
+            .button("Set")
+            .on_hover_text("Slope the ceiling area up (or down) to this height at the point")
+            .clicked()
+        {
+            if let Some(v) = parse_dimension_expression(height_input) {
+                on_event(UiEvent::Sketch(SketchEvent::AssignRoofApexHeight(v)));
+                height_input.clear();
+            }
+        }
+        if ui.button("Cancel").clicked() {
+            on_event(UiEvent::Sketch(SketchEvent::CancelPendingRoofPoint));
+            height_input.clear();
+        }
+    } else if position_pending {
+        // A position stage — the shared position panel above owns the entry;
+        // this hint keeps Cancel reachable alongside it.
+        ui.label(
+            egui::RichText::new("Pin the point's position (the distance question above)")
+                .color(egui::Color32::from_rgb(255, 200, 60)),
+        );
+        if ui.button("Cancel").clicked() {
+            on_event(UiEvent::Sketch(SketchEvent::CancelPendingRoofPoint));
+        }
+    } else {
+        ui.label("Tap a high point inside a ceiling area to slope the roof.");
+        for (i, (_pos, label)) in apexes.iter().enumerate() {
+            ui.horizontal(|ui| {
+                ui.label(label);
+                if ui
+                    .button("🗑")
+                    .on_hover_text("Delete this roof point (the area re-flattens)")
+                    .clicked()
+                {
+                    on_event(UiEvent::Sketch(SketchEvent::DeleteRoofApex(i)));
                 }
             });
         }

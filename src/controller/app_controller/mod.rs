@@ -12,6 +12,7 @@
 //   - `persistence`   — BER record lifecycle, persist/autosave/snapshot.
 //   - `phase_regions` — construction-phase tagging workflow.
 //   - `review`        — the collinearity-review cursor.
+//   - `roof_points`   — roof-point (apex / sloped-ceiling) tagging.
 //   - `snap`          — elective-snap tags, choose/un-snap replay.
 //   - `step_regions`  — floor-step (raise/lower area) tagging workflow.
 //   - `storeys`       — storey switching + the deferred-derive pipeline.
@@ -54,6 +55,7 @@ use std::collections::{HashMap, HashSet};
 mod history;
 mod persistence;
 mod review;
+mod roof_points;
 mod snap;
 mod step_regions;
 mod storeys;
@@ -71,6 +73,7 @@ pub use history::HistorySnapshot;
 #[cfg(test)]
 use persistence::PARAMETRIC_SNAPSHOT_VERSION;
 pub use review::CollinearityReview;
+use roof_points::PendingRoofPoint;
 pub use snap::SnapTagView;
 use snap::{LastSnapAction, SnapAction};
 pub use strokes::PendingRedraw;
@@ -176,6 +179,16 @@ pub struct AppController {
     /// side → position → amount). Transient — outside undo, cleared on storey
     /// switch / mode exit / cancel.
     pending_ceiling_step: Option<PendingCeilingStep>,
+    /// True when the editor is tagging roof points (apexes that fan a ceiling
+    /// region up to a height, entered as a tap + per-axis position + height).
+    /// Routes canvas taps to the point input; mutually exclusive with the
+    /// other area tools. Toggled by the UI; same gate as the ceiling steps.
+    roof_point_mode: bool,
+    /// The in-flight roof point, advanced stage by stage (tap → per-axis
+    /// position → height). Transient — outside undo, cleared on storey
+    /// switch / mode exit / cancel. The DURABLE record is
+    /// `Storey::roof_apexes`; see `roof_points.rs`.
+    pending_roof_point: Option<PendingRoofPoint>,
     /// DEBUG: the splice-pipeline phases (#1 raw stroke … #4 spliced ring) from
     /// the last extend/trim, captured for the UI's coloured debug overlay.
     splice_debug: Vec<manip_2d_plan::SplicePhase>,
@@ -247,6 +260,8 @@ impl AppController {
             ceiling_step_mode: false,
             ceiling_step_regions: HashMap::new(),
             pending_ceiling_step: None,
+            roof_point_mode: false,
+            pending_roof_point: None,
             splice_debug: Vec::new(),
             revision: 0,
             saved_revision: 0,

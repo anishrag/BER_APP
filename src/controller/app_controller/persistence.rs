@@ -137,6 +137,8 @@ impl AppController {
         self.ceiling_step_mode = false;
         self.ceiling_step_regions.clear();
         self.pending_ceiling_step = None;
+        self.roof_point_mode = false;
+        self.pending_roof_point = None;
         self.splice_debug.clear();
         self.last_snap_action = None;
         self.edit_drag_prompt = None;
@@ -218,9 +220,12 @@ impl AppController {
         self.ceiling_step_regions.clear();
         self.reconstruct_ceiling_step_regions_for(idx);
         // An in-flight ceiling-step line belongs to the PREVIOUS record — its
-        // prompt holds VertexIds into that record's outline plan.
+        // prompt holds VertexIds into that record's outline plan. A pending
+        // roof point's prompt does too.
         self.pending_ceiling_step = None;
         self.ceiling_step_mode = false;
+        self.pending_roof_point = None;
+        self.roof_point_mode = false;
         self.view = ViewTransform::default();
         self.document.edit_state = EditState::default();
         self.review = None;
@@ -309,9 +314,11 @@ impl AppController {
         self.reconstruct_step_regions_for(0);
         self.ceiling_step_regions.clear();
         self.reconstruct_ceiling_step_regions_for(0);
-        // Same as open_ber: drop any line state from the previous session.
+        // Same as open_ber: drop any line/point state from the previous session.
         self.pending_ceiling_step = None;
         self.ceiling_step_mode = false;
+        self.pending_roof_point = None;
+        self.roof_point_mode = false;
         self.view = ViewTransform::default();
         self.document.edit_state = EditState::default();
         self.review = None;
@@ -409,11 +416,13 @@ impl AppController {
         } else if let Some(storey) = out.data.storeys.get_mut(idx) {
             // Outline not finalised → persist no geometry yet (it's likely
             // still in pixels; living areas can't be metric before it is —
-            // and roofs derived over a pixel footprint are pixel units too).
+            // and roofs derived over a pixel footprint are pixel units too,
+            // so the apexes that fan them are dropped for parity).
             storey.floors = FloorRegions::default();
             storey.walls = WallRegions::default();
             storey.living_areas = FloorRegions::default();
             storey.roofs = Default::default();
+            storey.roof_apexes = Vec::new();
         }
         Some(out)
     }

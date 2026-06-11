@@ -114,13 +114,18 @@ pub fn render(
     // Ceiling-height labels at each roof-region corner, from the region's
     // per-vertex z (metres above the storey's floor datum). Roof regions only
     // exist once the assessor has entered a ceiling height — before that,
-    // nothing is drawn (no made-up heights on the canvas).
+    // nothing is drawn (no made-up heights on the canvas). Corners are
+    // DEDUPED by rounded (x, y) across regions: a fanned ceiling (roof apex)
+    // splits into many triangles sharing vertices, which would otherwise
+    // stack identical labels on top of each other. First region wins.
     if matches!(
         display_mode,
         DisplayMode::Roofs | DisplayMode::AllSurfaces | DisplayMode::FloorMapDims
     ) {
+        let mut seen_corners: std::collections::HashSet<(i64, i64)> =
+            std::collections::HashSet::new();
         for region in &storey.roofs.regions {
-            draw_corner_height_labels(painter, &t, region);
+            draw_corner_height_labels(painter, &t, region, &mut seen_corners);
         }
     }
 
@@ -389,11 +394,20 @@ fn draw_dimensions(
     }
 }
 
-fn draw_corner_height_labels(painter: &egui::Painter, t: &Transform2d, region: &CeilingRegion) {
-    // Each roof vertex carries its own height as the polygon's z — flat today
-    // (the default derivation stamps one typed height), per-corner once the
-    // roofs feature introduces slopes.
+fn draw_corner_height_labels(
+    painter: &egui::Painter,
+    t: &Transform2d,
+    region: &CeilingRegion,
+    seen: &mut std::collections::HashSet<(i64, i64)>,
+) {
+    // Each roof vertex carries its own height as the polygon's z. `seen`
+    // dedupes shared corners across regions by (x, y) rounded to the mm —
+    // fan triangles and step pieces meet at common vertices.
     for v in &region.polygon.exterior {
+        let key = ((v.x * 1000.0).round() as i64, (v.y * 1000.0).round() as i64);
+        if !seen.insert(key) {
+            continue;
+        }
         let pos = t.apply(v.x, v.y) + egui::Vec2::new(0.0, -12.0);
         painter.text(
             pos,

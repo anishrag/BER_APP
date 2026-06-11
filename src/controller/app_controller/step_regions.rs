@@ -31,6 +31,8 @@ impl AppController {
             self.phase_mode = false;
             self.ceiling_step_mode = false;
             self.pending_ceiling_step = None;
+            self.roof_point_mode = false;
+            self.pending_roof_point = None;
             self.activate_shape(ActiveShape::Outline);
             self.set_edit_mode(EditTools::DrawPerpWalls);
         }

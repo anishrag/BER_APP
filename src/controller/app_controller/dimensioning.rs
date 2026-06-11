@@ -135,6 +135,37 @@ impl AppController {
                 option_count: prompt.options.len(),
             });
         }
+        // A pending roof point's per-axis question outranks the shape loop
+        // the same way (roof-point mode forces the outline active too). The
+        // "area wall" is the POINT itself — a degenerate wall whose two
+        // endpoints coincide; the canvas's highlight + arrow degrade
+        // gracefully to a dot + an arrow to it. Kind `Point` keeps the UI
+        // prefill identity distinct from line and shape prompts.
+        if let Some(PendingRoofPoint::Position {
+            point,
+            axis,
+            prompt,
+            ..
+        }) = self.pending_roof_point.as_ref()
+        {
+            let option = prompt.options.get(prompt.current_idx)?;
+            let p = (point.x as f64, point.y as f64);
+            return Some(PositionPromptUiData {
+                area_wall: WallPositions {
+                    wall_a: p,
+                    wall_b: p,
+                },
+                reference_wall: wall_positions_in(
+                    &self.document.outline.floor_plan,
+                    option.outline_wall_vid,
+                )?,
+                axis: *axis,
+                kind: PositionPromptKind::Point,
+                current_distance: option.current_distance,
+                option_idx: prompt.current_idx,
+                option_count: prompt.options.len(),
+            });
+        }
         let prompt = self
             .document
             .dimensioning
@@ -179,6 +210,34 @@ impl AppController {
             });
             return Ok(());
         }
+        // Roof-point per-axis prompt: shell-resolved the same way. NOTHING in
+        // the model moves — the resolved coordinate just rides into the next
+        // stage (Y's question, or the height) — so no undo snapshot and no
+        // mark_dirty (there's nothing to re-derive yet).
+        if let Some(PendingRoofPoint::Position {
+            point,
+            axis,
+            prompt,
+            snap_x,
+            snap_y,
+        }) = self.pending_roof_point.as_ref()
+        {
+            let coord_m = self.document.resolve_ceiling_line_position(prompt, value)?;
+            let (mut point, axis, snap_x, snap_y) = (*point, *axis, *snap_x, *snap_y);
+            let remaining: &[ParameterAxis] = match axis {
+                ParameterAxis::X => {
+                    point.x = coord_m;
+                    &[ParameterAxis::Y]
+                }
+                ParameterAxis::Y => {
+                    point.y = coord_m;
+                    &[]
+                }
+            };
+            self.pending_roof_point = None;
+            self.advance_roof_point(point, snap_x, snap_y, remaining);
+            return Ok(());
+        }
         let undo_snap = self.current_history_snapshot();
         self.document.apply_position(value)?;
         self.mark_dirty()?;
@@ -208,6 +267,26 @@ impl AppController {
             });
             return;
         }
+        // Roof-point per-axis prompt: accept the TAPPED coordinate as-is and
+        // advance (Y's question, or the height). No history / no mark_dirty —
+        // nothing moved.
+        if let Some(PendingRoofPoint::Position {
+            point,
+            axis,
+            snap_x,
+            snap_y,
+            ..
+        }) = self.pending_roof_point.as_ref()
+        {
+            let (point, axis, snap_x, snap_y) = (*point, *axis, *snap_x, *snap_y);
+            let remaining: &[ParameterAxis] = match axis {
+                ParameterAxis::X => &[ParameterAxis::Y],
+                ParameterAxis::Y => &[],
+            };
+            self.pending_roof_point = None;
+            self.advance_roof_point(point, snap_x, snap_y, remaining);
+            return;
+        }
         self.record_history();
         self.document.skip_current_position();
         let _ = self.mark_dirty();
@@ -220,6 +299,11 @@ impl AppController {
         if let Some(PendingCeilingStep::Position { prompt, .. }) =
             self.pending_ceiling_step.as_mut()
         {
+            prompt.cycle();
+            return;
+        }
+        // Roof-point per-axis prompt: cycle ITS reference options.
+        if let Some(PendingRoofPoint::Position { prompt, .. }) = self.pending_roof_point.as_mut() {
             prompt.cycle();
             return;
         }

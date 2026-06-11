@@ -287,6 +287,54 @@ pub(super) fn render<F: FnMut(UiEvent)>(
         }
     }
 
+    // Roof apexes: committed high points ("▲ 4.20 m" markers) plus the
+    // pending tapped point as a hollow dot, in a distinct rose-magenta.
+    render::render_roof_apexes(
+        &painter,
+        rect,
+        ber,
+        current_storey_idx,
+        mode,
+        vp,
+        view.roof_apex_views,
+        view.pending_roof_point,
+    );
+
+    // The pending roof point's wall snap(s) as ONE tag, mirroring the
+    // ceiling-step line's: drawn through the same snap-tag renderer, but
+    // its menu is a separate widget routed to UnsnapRoofPoint, never
+    // ChooseSnap — the generic replay rewinds history, and the pending
+    // point lives outside it. The menu offers exactly "Don't snap".
+    if let Some(tag) = view.roof_point_snap_tag {
+        render::render_snap_tags(
+            &painter,
+            rect,
+            ber,
+            current_storey_idx,
+            mode,
+            vp,
+            std::slice::from_ref(tag),
+        );
+        if let Some(t) = render::active_storey_transform(rect, ber, current_storey_idx, mode, vp) {
+            let sp = t.apply(tag.pos.0 as f64, tag.pos.1 as f64);
+            let label = match tag.current_kind {
+                Some(k) => format!("{} ▾", render::snap_kind_label(k)),
+                None => "no snap ▾".to_string(),
+            };
+            egui::Area::new(ui.id().with("roof_point_snap_tag"))
+                .fixed_pos(sp + egui::vec2(7.0, -7.0))
+                .order(egui::Order::Foreground)
+                .show(ui.ctx(), |ui| {
+                    ui.menu_button(label, |ui| {
+                        if tag.skippable && ui.button("Don't snap").clicked() {
+                            on_event(UiEvent::Sketch(SketchEvent::UnsnapRoofPoint));
+                            ui.close_menu();
+                        }
+                    });
+                });
+        }
+    }
+
     // Wall exposure: colour each outline wall by its heat-loss class
     // (brighter in exposure mode; the selected wall is haloed).
     render::render_wall_exposure(
@@ -636,6 +684,31 @@ pub(super) fn render<F: FnMut(UiEvent)>(
         }
     }
 
+    // Roof-point tap: in mode with nothing pending, a tap places the
+    // apex's point — but only under the draw tool, so Move/Trim clicks
+    // in-mode don't spawn phantom points (the ceiling-step gating). A
+    // pending cut-pick owns the tap instead. Once a stage is pending,
+    // taps do nothing (the prompts are toolbar/panel-driven).
+    if view.roof_point_mode
+        && !view.roof_point_pending
+        && matches!(edit_tool, EditTools::DrawPerpWalls)
+        && !cut_pending
+        && !phase_cut_pending
+        && !step_cut_pending
+    {
+        if response.clicked_by(egui::PointerButton::Primary) {
+            if let Some((wx, wy)) = response
+                .interact_pointer_pos()
+                .and_then(|pos| screen_to_world(ber, current_storey_idx, rect, vp, pos))
+            {
+                on_event(UiEvent::Sketch(SketchEvent::RoofPointTap {
+                    world_x: wx,
+                    world_y: wy,
+                }));
+            }
+        }
+    }
+
     // Exposure mode: a tap selects the wall under the pointer; a
     // primary drag near a selection handle slides that handle along
     // the wall. Takes priority over stroke/edit input (suppressed via
@@ -693,6 +766,7 @@ pub(super) fn render<F: FnMut(UiEvent)>(
         && !step_cut_pending
         && !view.step_pick_pending
         && !view.ceiling_step_pending
+        && !view.roof_point_pending
         && !view.exposure_mode;
 
     if primary_available && !matches!(edit_tool, EditTools::Move) {

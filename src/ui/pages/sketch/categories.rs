@@ -34,6 +34,8 @@ pub enum Tool {
     FloorSteps,
     /// Ceiling-step tagging mode toggle (gated on a default ceiling height).
     CeilingSteps,
+    /// Roof-point (apex) tagging mode toggle (same gate as the ceiling steps).
+    RoofPoints,
     Undo,
     Redo,
     /// Reset the view to pure auto-fit.
@@ -85,6 +87,7 @@ pub const CATEGORIES: &[Category] = &[
             Tool::DefaultCeilingHeight,
             Tool::FloorSteps,
             Tool::CeilingSteps,
+            Tool::RoofPoints,
         ],
     },
     Category {
@@ -169,6 +172,8 @@ pub struct ToolFlags {
     pub step_mode: bool,
     pub ceiling_step_mode: bool,
     pub ceiling_step_available: bool,
+    pub roof_point_mode: bool,
+    pub roof_point_available: bool,
     /// The current scope's default ceiling height, when set — the Heights
     /// field shows it ("2.40 m") next to the entry box.
     pub default_ceiling_height: Option<f64>,
@@ -195,6 +200,8 @@ impl ToolFlags {
             step_mode: view.step_mode,
             ceiling_step_mode: view.ceiling_step_mode,
             ceiling_step_available: view.ceiling_step_available,
+            roof_point_mode: view.roof_point_mode,
+            roof_point_available: view.roof_point_available,
             default_ceiling_height: view.default_ceiling_height,
             ceiling_height_error: view.ceiling_height_error.map(str::to_owned),
             can_undo: view.can_undo,
@@ -438,6 +445,30 @@ fn tool_ui<F: FnMut(UiEvent)>(
             {
                 on_event(UiEvent::Sketch(SketchEvent::SetCeilingStepMode(
                     !flags.ceiling_step_mode,
+                )));
+            }
+        }
+        Tool::RoofPoints => {
+            // Same gate as the ceiling steps (a default ceiling height +
+            // finalised outline — the apex fans a derived ceiling region);
+            // the controller setter re-enforces it.
+            let enabled = !flags.read_only && flags.has_floor_plan && flags.roof_point_available;
+            if ui
+                .add_enabled(
+                    enabled,
+                    egui::Button::selectable(flags.roof_point_mode, "⛰ Roof points"),
+                )
+                .on_hover_text(
+                    "Slope part of the roof to a high (or low) point: tap a \
+                     point inside a ceiling area, then enter its height",
+                )
+                .on_disabled_hover_text(
+                    "Set the default ceiling height first (the Heights field above)",
+                )
+                .clicked()
+            {
+                on_event(UiEvent::Sketch(SketchEvent::SetRoofPointMode(
+                    !flags.roof_point_mode,
                 )));
             }
         }

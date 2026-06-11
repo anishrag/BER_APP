@@ -70,9 +70,12 @@ impl AppController {
             // reads it). Then leave living-area mode and act on the outline.
             self.sync_active();
             self.set_living_area_mode(false);
-            // Mutually exclusive with the ceiling-step line tool too.
+            // Mutually exclusive with the ceiling-step line and roof-point
+            // tools too.
             self.ceiling_step_mode = false;
             self.pending_ceiling_step = None;
+            self.roof_point_mode = false;
+            self.pending_roof_point = None;
         }
     }
 

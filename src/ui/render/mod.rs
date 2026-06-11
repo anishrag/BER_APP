@@ -561,6 +561,47 @@ pub fn render_ceiling_step_line(
     );
 }
 
+/// Draw the storey's roof apexes (committed high points) plus the PENDING
+/// tapped point. Committed apexes render as a filled dot with their height
+/// label above ("▲ 4.20 m"); the pending point is a hollow dot — provisional,
+/// like the dashed ceiling-step line. Rose-magenta, distinct from the phase
+/// purple / step teal / ceiling-step amber tints.
+pub fn render_roof_apexes(
+    painter: &egui::Painter,
+    rect: egui::Rect,
+    ber: Option<&Ber>,
+    current_storey_idx: Option<usize>,
+    sketch_mode: SketchMode,
+    view: ViewParams,
+    apexes: &[((f64, f64), String)],
+    pending: Option<(f64, f64)>,
+) {
+    if apexes.is_empty() && pending.is_none() {
+        return;
+    }
+    let Some((_storey, t)) = storey_transform(rect, ber, current_storey_idx, sketch_mode, view)
+    else {
+        return;
+    };
+    let color = egui::Color32::from_rgb(255, 80, 170); // rose-magenta
+    for ((x, y), label) in apexes {
+        let p = t.apply(*x, *y);
+        painter.circle_filled(p, 5.0, color);
+        painter.circle_stroke(p, 5.0, egui::Stroke::new(1.5, egui::Color32::WHITE));
+        painter.text(
+            p + egui::vec2(0.0, -10.0),
+            egui::Align2::CENTER_BOTTOM,
+            label,
+            egui::FontId::proportional(13.0),
+            color,
+        );
+    }
+    if let Some((x, y)) = pending {
+        let p = t.apply(x, y);
+        painter.circle_stroke(p, 6.0, egui::Stroke::new(2.5, color));
+    }
+}
+
 /// DEBUG: draw the splice-pipeline phases of the last extend/trim. Each phase is
 /// a distinctly-coloured polyline (with dotted vertices) plus a colour-keyed
 /// legend entry top-left, so the stages — raw stroke → orthogonalized → pinned →
