@@ -985,6 +985,29 @@ mod tests {
                 .any(|v| (v.z - 4.2).abs() < 1e-9)),
             "the ridge rises"
         );
+        // The coplanar merge gives the classic shape: the stepped half comes
+        // out as 2 planar trapezoids (each holding BOTH ridge ends) + 2 end
+        // triangles, plus the flat left half — 5 regions, not 9 triangles.
+        assert_eq!(ber.storeys[0].roofs.regions.len(), 5);
+        let sloped: Vec<_> = ber.storeys[0]
+            .roofs
+            .regions
+            .iter()
+            .filter(|r| r.flat_z().is_none())
+            .collect();
+        let mut counts: Vec<usize> = sloped.iter().map(|r| r.polygon.exterior.len()).collect();
+        counts.sort();
+        assert_eq!(counts, vec![3, 3, 4, 4], "2 trapezoids + 2 end triangles");
+        for r in sloped.iter().filter(|r| r.polygon.exterior.len() == 4) {
+            for ay in [1.0, 3.0] {
+                assert!(
+                    r.polygon.exterior.iter().any(|v| (v.x - 3.0).abs() < 1e-9
+                        && (v.y - ay).abs() < 1e-9
+                        && (v.z - 4.2).abs() < 1e-9),
+                    "trapezoid holds the ridge end at y = {ay}"
+                );
+            }
+        }
 
         // Reconstruct: ONE merged step area (the whole 2×4 stepped half).
         let rec1 = crate::ceiling_step_regions_from_roofs(&ber, 0);

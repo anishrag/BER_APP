@@ -104,8 +104,8 @@ fn region_idx_strictly_containing(storey: &Storey, p: Point2f64) -> Result<usize
 
 /// The ridge-foldover guard for a SECOND point in a one-apex group: run
 /// [`ridge_hub_switches`] over the group's merged ring (the whole conceptual
-/// area the ridge will form over — the resolved regions are fan triangles by
-/// now) and reject > 2. Picks the merged ring containing `p` (the new
+/// area the ridge will form over — the resolved regions are fan/ridge faces
+/// by now) and reject > 2. Picks the merged ring containing `p` (the new
 /// point); a group degenerate enough to have none (every member warn-excluded
 /// from the merge) skips the check with a warning — resolve warns and
 /// proceeds on foldover anyway.
@@ -154,8 +154,8 @@ fn check_group_ridge(
 ///     (`flat_z()` — a sloped region no apex explains is irregular) and the
 ///     base for the slope check is its height;
 ///   - in a ONE-apex group → ALLOWED: the second point forms a RIDGE. The
-///     base is the GROUP's `base_z` (the resolved regions are fan triangles
-///     — none of them is "the" base), and the ridge between the existing
+///     base is the GROUP's `base_z` (the resolved regions are sloped fan
+///     faces — none of them is "the" base), and the ridge between the existing
 ///     apex and `p` must not fold over the group's merged ring
 ///     (> 2 hub switches → rejected, [`RIDGE_TOO_IRREGULAR_MSG`]);
 ///   - in a TWO-or-more-apex group → rejected: two high points per ceiling

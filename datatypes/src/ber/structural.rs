@@ -829,9 +829,10 @@ impl CeilingRegions {
     ///   per-vertex z (no flat-input stamp like `with_z_deltas`, so fans
     ///   compose over stepped — and, structurally, already-shaped — pieces),
     ///   the apex sits at its `z_m`;
-    /// - **2** → a RIDGE: each boundary edge rises to its nearer apex (HUB
-    ///   triangles; nearness by ridge-axis midpoint projection, tie → the
-    ///   second apex) plus one TRANSITION triangle `(v, A, B)` per hub
+    /// - **2** → a RIDGE: boundary edges are first SPLIT where they cross
+    ///   the ridge MIDLINE (`t = 0.5`), then each (sub-)edge rises to its
+    ///   nearer apex (HUB triangles; nearness by ridge-axis midpoint
+    ///   projection) plus one TRANSITION triangle `(v, A, B)` per hub
     ///   switch — see `ridge_triangles`;
     /// - **≥3** → warn + ridge from the FIRST TWO in apex-list order
     ///   (deterministic, never a panic — resolve must always produce
@@ -848,6 +849,14 @@ impl CeilingRegions {
     /// (never rejected — the assessor may be mid-edit). Pieces inherit
     /// `construction_id`, get fresh ids and default `opes`. Empty `apexes`
     /// → `self` unchanged.
+    ///
+    /// Each shaped region's output finally runs through the COPLANAR MERGE
+    /// (`merge_coplanar_faces`): coplanar triangle neighbours collapse into
+    /// single planar polygons, so a centred ridge over a rectangle comes out
+    /// as the classic 4 faces — two trapezoids and two end triangles — not
+    /// 8 triangles. Re-applying the apexes to the merged faces reproduces
+    /// them (the re-apply identity now holds on the MERGED output: the
+    /// triangulation re-fragments each face and the merge folds it back).
     ///
     /// [`region_strictly_containing`]: CeilingRegions::region_strictly_containing
     pub fn with_apexes(self, apexes: &[RoofApex]) -> Self {
@@ -874,7 +883,10 @@ impl CeilingRegions {
             }
             match contained.len() {
                 0 => next.push(region),
-                1 => next.extend(fan_triangles(region, &apexes[contained[0]])),
+                1 => next.extend(merge_coplanar_faces(fan_triangles(
+                    region,
+                    &apexes[contained[0]],
+                ))),
                 n => {
                     if n >= 3 {
                         log::warn!(
@@ -882,11 +894,11 @@ impl CeilingRegions {
                              ridging from the first two in apex-list order"
                         );
                     }
-                    next.extend(ridge_triangles(
+                    next.extend(merge_coplanar_faces(ridge_triangles(
                         region,
                         &apexes[contained[0]],
                         &apexes[contained[1]],
-                    ));
+                    )));
                 }
             }
         }
@@ -1103,13 +1115,52 @@ fn fan_triangles(region: CeilingRegion, apex: &RoofApex) -> Vec<CeilingRegion> {
     out
 }
 
+/// Split each edge of `ext` at the point where the ridge parameter
+/// `t(P) = (P − a)·d / |d|²` crosses 0.5 STRICTLY INSIDE the edge — the
+/// ridge MIDLINE. Run before hub assignment (`ridge_edge_hubs`) so the two
+/// hubs split a tied edge between them instead of one hub hogging it: on a
+/// centred rectangle ridge both long edges used to midpoint-tie to B, which
+/// sent ALL FOUR corners to B and made the roof asymmetric. The inserted
+/// vertex's z is linearly interpolated along the edge (boundary edges are
+/// typically level, so it's the base z). Edges whose endpoint sits exactly
+/// ON the midline don't split (the vertex is already there); a whole edge
+/// ALONG the midline has constant `t = 0.5` and never crosses. Degenerate
+/// ridge (`|d|² < 1e-12`) → `ext` unchanged (the caller falls back to a
+/// fan). The SINGLE source of the split — `ridge_triangles` and
+/// [`ridge_hub_switches`] both run it, or the assign-time hub-switch check
+/// would validate a different roof than resolve builds.
+fn ridge_split_ring(ext: Vec<Point3f64>, a: Point2f64, b: Point2f64) -> Vec<Point3f64> {
+    let (dx, dy) = (b.x - a.x, b.y - a.y);
+    let d2 = dx * dx + dy * dy;
+    if d2 < 1e-12 {
+        return ext;
+    }
+    let t_of = |v: &Point3f64| ((v.x - a.x) * dx + (v.y - a.y) * dy) / d2;
+    let n = ext.len();
+    let mut out = Vec::with_capacity(n + 2);
+    for i in 0..n {
+        let p = ext[i];
+        let q = ext[(i + 1) % n];
+        out.push(p);
+        let (tp, tq) = (t_of(&p), t_of(&q));
+        if (tp - 0.5) * (tq - 0.5) < 0.0 {
+            let s = (0.5 - tp) / (tq - tp);
+            out.push(p + s * (q - p));
+        }
+    }
+    out
+}
+
 /// Per-EDGE hub assignment for a ridge from `a` to `b` over a plan ring:
 /// with `d = b − a` and the unclamped ridge parameter
 /// `t(P) = (P − a)·d / |d|²`, edge `i` (from `ring[i]` to `ring[i+1]`)
-/// belongs to hub B iff `t(midpoint) ≥ 0.5` (tie → B). Returns one bool per
-/// edge (`true` = B), or `None` for a degenerate ridge (`|d|² < 1e-12`).
-/// The SINGLE source of the hub rule — `ridge_triangles` and
-/// [`ridge_hub_switches`] must agree or the assign-time hub-switch check
+/// belongs to hub B iff `t(midpoint) ≥ 0.5` (tie → B — after
+/// [`ridge_split_ring`] a tie only remains for an edge lying ALONG the
+/// midline, equidistant from both hubs so either choice tiles, or for a
+/// zero-length edge, whose triangle is a sliver anyway).
+/// Returns one bool per edge (`true` = B), or `None` for a degenerate ridge
+/// (`|d|² < 1e-12`). The SINGLE source of the hub rule — `ridge_triangles`
+/// and [`ridge_hub_switches`] must agree or the assign-time hub-switch check
 /// would validate a different roof than resolve builds.
 fn ridge_edge_hubs(ring: &[(f64, f64)], a: Point2f64, b: Point2f64) -> Option<Vec<bool>> {
     let (dx, dy) = (b.x - a.x, b.y - a.y);
@@ -1131,19 +1182,25 @@ fn ridge_edge_hubs(ring: &[(f64, f64)], a: Point2f64, b: Point2f64) -> Option<Ve
 }
 
 /// How many times the per-edge hub assignment SWITCHES between the two ridge
-/// endpoints walking `ring` (counted at vertices whose entering and leaving
-/// edges disagree — each switch is one transition triangle). A convex ring
-/// with both apexes interior switches exactly 2; more means the ring wraps
-/// past the ridge axis (a deep notch) and the transition triangles would
-/// overlap — assign-time validation rejects > 2, resolve warns and proceeds.
-/// `0` for rings with fewer than 3 vertices or a degenerate ridge
-/// (`a` ≈ `b`). Pure plan-space — usable on a group's merged ring before any
-/// apex exists.
+/// endpoints walking `ring` — after the midline split ([`ridge_split_ring`]),
+/// so the count equals the number of boundary crossings of the ridge midline
+/// and agrees with what `ridge_triangles` builds (counted at vertices whose
+/// entering and leaving edges disagree — each switch is one transition
+/// triangle). A convex ring with both apexes interior switches exactly 2;
+/// more means the ring wraps past the ridge axis (a deep notch) and the
+/// transition triangles would overlap — assign-time validation rejects > 2,
+/// resolve warns and proceeds. `0` for rings with fewer than 3 vertices or a
+/// degenerate ridge (`a` ≈ `b`). Pure plan-space — usable on a group's
+/// merged ring before any apex exists.
 pub fn ridge_hub_switches(ring: &[Point2f64], a: Point2f64, b: Point2f64) -> usize {
     if ring.len() < 3 {
         return 0;
     }
-    let plan: Vec<(f64, f64)> = ring.iter().map(|p| (p.x, p.y)).collect();
+    let ext: Vec<Point3f64> = ring.iter().map(|p| Point3f64::new(p.x, p.y, 0.0)).collect();
+    let plan: Vec<(f64, f64)> = ridge_split_ring(ext, a, b)
+        .iter()
+        .map(|p| (p.x, p.y))
+        .collect();
     let Some(hubs) = ridge_edge_hubs(&plan, a, b) else {
         return 0;
     };
@@ -1157,22 +1214,28 @@ pub fn ridge_hub_switches(ring: &[Point2f64], a: Point2f64, b: Point2f64) -> usi
 /// 0. PRE-LIFT ring vertices plan-matching an apex to that apex's z.
 /// 1. Degenerate ridge (`|b − a|² < 1e-12` in plan) → warn + single fan
 ///    to `a`.
-/// 2. HUB triangles, in edge order: each boundary edge `(vᵢ, vᵢ₊₁)` rises to
-///    its hub `H` — `a` if the edge midpoint's ridge parameter
-///    `t < 0.5`, else `b` (tie → `b`; see [`ridge_edge_hubs`]) — emitting
-///    `(vᵢ, vᵢ₊₁, H)` with the boundary keeping its (pre-lifted) z and `H`
-///    at the hub's `z_m`.
-/// 3. TRANSITION triangles, in vertex order: at each vertex `v` whose
+/// 2. SPLIT boundary edges where they cross the ridge MIDLINE (`t = 0.5`),
+///    z interpolated along the edge ([`ridge_split_ring`]) — so the two
+///    hubs share a tied edge symmetrically instead of B hogging it.
+/// 3. HUB triangles, in edge order: each boundary (sub-)edge `(vᵢ, vᵢ₊₁)`
+///    rises to its hub `H` — `a` if the edge midpoint's ridge parameter
+///    `t < 0.5`, else `b` (see [`ridge_edge_hubs`]) — emitting
+///    `(vᵢ, vᵢ₊₁, H)` with the boundary keeping its (pre-lifted /
+///    interpolated) z and `H` at the hub's `z_m`.
+/// 4. TRANSITION triangles, in vertex order: at each vertex `v` whose
 ///    entering and leaving edges disagree, `(v, hub(leaving),
-///    hub(entering))` — this order preserves CCW winding.
+///    hub(entering))` — this order preserves CCW winding. After the split
+///    these sit at the midline crossings, tiling symmetrically.
 ///
 /// Sub-[`SLIVER_AREA_M2`] (plan) triangles drop in both steps. Fresh ids,
 /// default `opes`, inherited `construction_id` (fan parity). For a convex
 /// ring (≤ 2 hub switches) the triangles tile the region exactly; every
-/// triangle is trivially planar.
+/// triangle is trivially planar. The caller (`with_apexes`) merges coplanar
+/// neighbours afterwards ([`merge_coplanar_faces`]).
 fn ridge_triangles(region: CeilingRegion, a: &RoofApex, b: &RoofApex) -> Vec<CeilingRegion> {
     let cid = region.construction_id;
     let ext = pre_lift(region.polygon.exterior, &[a, b]);
+    let ext = ridge_split_ring(ext, a.point, b.point);
     let plan: Vec<(f64, f64)> = ext.iter().map(|v| (v.x, v.y)).collect();
     let Some(hubs) = ridge_edge_hubs(&plan, a.point, b.point) else {
         log::warn!(
@@ -1225,6 +1288,181 @@ fn ridge_triangles(region: CeilingRegion, a: &RoofApex, b: &RoofApex) -> Vec<Cei
         out.push(mk(vec![ext[i], hl, he]));
     }
     out
+}
+
+/// Vertex / plane tolerance for the coplanar face merge, in metres.
+const MERGE_EPS_M: f64 = 1e-6;
+
+/// Two 3D vertices equal within [`MERGE_EPS_M`] on every coordinate.
+fn merge_pts_eq(u: &Point3f64, v: &Point3f64) -> bool {
+    (u.x - v.x).abs() <= MERGE_EPS_M
+        && (u.y - v.y).abs() <= MERGE_EPS_M
+        && (u.z - v.z).abs() <= MERGE_EPS_M
+}
+
+/// Unit normal `n` and offset `d` (`n·v = d`) of a face's plane via Newell's
+/// method (robust for any planar polygon, not just its first three
+/// vertices); `None` when degenerate.
+fn face_plane(ext: &[Point3f64]) -> Option<(Vector3f64, f64)> {
+    if ext.len() < 3 {
+        return None;
+    }
+    let (mut nx, mut ny, mut nz) = (0.0, 0.0, 0.0);
+    for i in 0..ext.len() {
+        let p = ext[i];
+        let q = ext[(i + 1) % ext.len()];
+        nx += (p.y - q.y) * (p.z + q.z);
+        ny += (p.z - q.z) * (p.x + q.x);
+        nz += (p.x - q.x) * (p.y + q.y);
+    }
+    let len = (nx * nx + ny * ny + nz * nz).sqrt();
+    if len < 1e-12 {
+        return None;
+    }
+    let n = Vector3f64::new(nx / len, ny / len, nz / len);
+    let d = ext
+        .iter()
+        .map(|v| n.x * v.x + n.y * v.y + n.z * v.z)
+        .sum::<f64>()
+        / ext.len() as f64;
+    Some((n, d))
+}
+
+/// `w` lies on the straight 3D line through its neighbours `p` → `q` (within
+/// [`MERGE_EPS_M`] of it) — a redundant vertex on a merged boundary.
+fn collinear3(p: &Point3f64, w: &Point3f64, q: &Point3f64) -> bool {
+    let u = *w - *p;
+    let v = *q - *p;
+    let vl = v.norm();
+    if vl <= MERGE_EPS_M {
+        // p ≈ q: w sits between duplicate neighbours — treat as redundant
+        // only when it coincides with them too.
+        return u.norm() <= MERGE_EPS_M;
+    }
+    u.cross(&v).norm() <= MERGE_EPS_M * vl
+}
+
+/// First edge of `r1` whose REVERSE appears in `r2`:
+/// `(i1, i2)` with `r2[i2] == r1[i1+1]` and `r2[i2+1] == r1[i1]`
+/// ([`merge_pts_eq`], plan + z). Zero-length edges never qualify.
+fn shared_edge(r1: &[Point3f64], r2: &[Point3f64]) -> Option<(usize, usize)> {
+    let (n1, n2) = (r1.len(), r2.len());
+    for i1 in 0..n1 {
+        let (u, v) = (r1[i1], r1[(i1 + 1) % n1]);
+        if merge_pts_eq(&u, &v) {
+            continue;
+        }
+        for i2 in 0..n2 {
+            if merge_pts_eq(&r2[i2], &v) && merge_pts_eq(&r2[(i2 + 1) % n2], &u) {
+                return Some((i1, i2));
+            }
+        }
+    }
+    None
+}
+
+/// Merge two face rings into their union polygon when they (a) share a FULL
+/// edge — two consecutive vertices equal within [`MERGE_EPS_M`] (plan + z),
+/// either orientation (`r2` is reversed first if the edge matches
+/// same-direction) — and (b) are COPLANAR: every vertex of both within
+/// [`MERGE_EPS_M`] of the plane of the larger (by plan area, Newell fit).
+/// The shared edge is removed, the boundaries spliced, and collinear-in-plane
+/// vertices along the merged boundary dropped. `None` when the pair doesn't
+/// qualify (or the union would degenerate below 3 vertices).
+fn merge_coplanar_pair(r1: &[Point3f64], r2: &[Point3f64]) -> Option<Vec<Point3f64>> {
+    if r1.len() < 3 || r2.len() < 3 {
+        return None;
+    }
+    // (a) the shared full edge, normalizing r2 to opposite orientation.
+    let (r2v, (i1, i2)) = match shared_edge(r1, r2) {
+        Some(hit) => (r2.to_vec(), hit),
+        None => {
+            let rev: Vec<Point3f64> = r2.iter().rev().copied().collect();
+            let hit = shared_edge(r1, &rev)?;
+            (rev, hit)
+        }
+    };
+    // (b) coplanarity against the larger face's plane.
+    let plan_area = |ext: &[Point3f64]| {
+        let n = ext.len();
+        (0..n)
+            .map(|i| {
+                let p = ext[i];
+                let q = ext[(i + 1) % n];
+                p.x * q.y - q.x * p.y
+            })
+            .sum::<f64>()
+            .abs()
+            / 2.0
+    };
+    let big = if plan_area(r1) >= plan_area(&r2v) {
+        r1
+    } else {
+        &r2v[..]
+    };
+    let (n, d) = face_plane(big)?;
+    let on_plane = |ext: &[Point3f64]| {
+        ext.iter()
+            .all(|v| (n.x * v.x + n.y * v.y + n.z * v.z - d).abs() <= MERGE_EPS_M)
+    };
+    if !on_plane(r1) || !on_plane(&r2v) {
+        return None;
+    }
+    // (c) splice: r1 from v all the way round to u, then r2's path from u
+    // back round to v with both shared endpoints dropped.
+    let (n1, n2) = (r1.len(), r2v.len());
+    let mut merged: Vec<Point3f64> = (0..n1).map(|k| r1[(i1 + 1 + k) % n1]).collect();
+    merged.extend((2..n2).map(|k| r2v[(i2 + k) % n2]));
+    // (d) drop collinear / duplicate vertices along the merged boundary.
+    let mut changed = true;
+    while changed && merged.len() > 3 {
+        changed = false;
+        let mut i = 0;
+        while i < merged.len() && merged.len() > 3 {
+            let m = merged.len();
+            let p = merged[(i + m - 1) % m];
+            let q = merged[(i + 1) % m];
+            if collinear3(&p, &merged[i], &q) {
+                merged.remove(i);
+                changed = true;
+            } else {
+                i += 1;
+            }
+        }
+    }
+    (merged.len() >= 3).then_some(merged)
+}
+
+/// The COPLANAR MERGE pass run on each region's fan/ridge output at the end
+/// of [`CeilingRegions::with_apexes`]: repeatedly merge the first pair of
+/// faces (in stable index order — determinism is part of the reload
+/// fixpoint) that share a full edge and are coplanar
+/// ([`merge_coplanar_pair`]), until none qualify. Coplanar triangle
+/// neighbours thus collapse into single planar polygons (the rectangle
+/// ridge's two slopes become trapezoids). Merged faces inherit
+/// `construction_id`, get fresh ids and default `opes` (split parity);
+/// untouched faces pass through as-is.
+fn merge_coplanar_faces(mut faces: Vec<CeilingRegion>) -> Vec<CeilingRegion> {
+    'outer: loop {
+        for i in 0..faces.len() {
+            for j in (i + 1)..faces.len() {
+                if let Some(merged) =
+                    merge_coplanar_pair(&faces[i].polygon.exterior, &faces[j].polygon.exterior)
+                {
+                    let construction_id = faces[i].construction_id;
+                    faces[i] = CeilingRegion {
+                        id: ItemId::default(),
+                        polygon: Polygon3D::new(merged),
+                        opes: Opes::default(),
+                        construction_id,
+                    };
+                    faces.remove(j);
+                    continue 'outer;
+                }
+            }
+        }
+        return faces;
+    }
 }
 
 /// Decompose a boolean-op result polygon into SIMPLE (exterior-only) pieces.
@@ -2806,38 +3044,110 @@ mod tests {
         CeilingRegions::default_for_footprint(vec![square(0.0, 0.0, 10.0, 4.0)], 2.4, cid)
     }
 
+    /// Every vertex of the region within 1e-6 m of its own (Newell) plane.
+    fn is_planar(r: &CeilingRegion) -> bool {
+        let ext = &r.polygon.exterior;
+        let Some((n, d)) = face_plane(ext) else {
+            return false;
+        };
+        ext.iter()
+            .all(|v| (n.x * v.x + n.y * v.y + n.z * v.z - d).abs() <= 1e-6)
+    }
+
+    /// THE rectangle-ridge test: the classic hipped result. The midline edge
+    /// split shares the long edges between the two hubs (no more "B connects
+    /// to all 4 corners" on the tie), and the coplanar merge collapses each
+    /// slope's triangles into ONE planar trapezoid: exactly 4 faces —
+    /// 2 trapezoids (4 vertices, holding BOTH apexes) + 2 end triangles
+    /// (3 vertices, one apex each), all planar, tiling the footprint.
     #[test]
     fn with_apexes_two_apexes_make_a_rectangle_gable() {
         let cid = ItemId::default();
         let (a, b) = gable_apexes();
-        let apexes = vec![a, b];
+        let apexes = vec![a.clone(), b.clone()];
         let out = gable_footprint(cid).with_apexes(&apexes);
-        // 4 hub triangles (one per rectangle edge) + 2 transition triangles
-        // (one per hub switch — convex ring, exactly two switches).
-        assert_eq!(out.regions.len(), 6, "4 hub + 2 transition");
-        let hubs = out
+        assert_eq!(out.regions.len(), 4, "2 trapezoids + 2 end triangles");
+        let mut vertex_counts: Vec<usize> = out
             .regions
             .iter()
-            .filter(|r| apex_vertex_count(r, &apexes) == 1)
-            .count();
-        let transitions = out
+            .map(|r| r.polygon.exterior.len())
+            .collect();
+        vertex_counts.sort();
+        assert_eq!(vertex_counts, vec![3, 3, 4, 4], "trapezoid/triangle split");
+        let trapezoids: Vec<&CeilingRegion> = out
             .regions
             .iter()
-            .filter(|r| apex_vertex_count(r, &apexes) == 2)
-            .count();
-        assert_eq!(hubs, 4, "one hub triangle per boundary edge");
-        assert_eq!(transitions, 2, "one transition per hub switch");
-        // The triangles tile the region exactly.
+            .filter(|r| r.polygon.exterior.len() == 4)
+            .collect();
+        let at = |v: &Point3f64, apex: &RoofApex| {
+            (v.x - apex.point.x).abs() <= 1e-9
+                && (v.y - apex.point.y).abs() <= 1e-9
+                && (v.z - apex.z_m).abs() <= 1e-9
+        };
+        for t in &trapezoids {
+            assert!(
+                t.polygon.exterior.iter().any(|v| at(v, &a))
+                    && t.polygon.exterior.iter().any(|v| at(v, &b)),
+                "each trapezoid holds BOTH apex vertices: {:?}",
+                t.polygon
+            );
+            // The merged trapezoid still recovers its base for the
+            // ceiling-step reconstruction — the reload-fixpoint invariant.
+            assert_eq!(t.fan_base_z(&apexes), Some(2.4), "trapezoid base z");
+        }
+        let triangles: Vec<&CeilingRegion> = out
+            .regions
+            .iter()
+            .filter(|r| r.polygon.exterior.len() == 3)
+            .collect();
+        for t in &triangles {
+            assert_eq!(apex_vertex_count(t, &apexes), 1, "end triangles: one apex");
+            assert_eq!(t.fan_base_z(&apexes), Some(2.4), "end triangle base z");
+        }
+        // The faces tile the region exactly, planar, CCW, fabric inherited.
         let total: f64 = out.regions.iter().map(plan_area).sum();
         assert!((total - 40.0).abs() < 1e-6, "areas sum to the region");
         for r in &out.regions {
-            assert_eq!(r.polygon.exterior.len(), 3);
+            assert!(is_planar(r), "non-planar face: {:?}", r.polygon);
             assert_eq!(r.construction_id, cid, "pieces inherit the fabric link");
-            // Winding consistent: CCW input ring → every triangle CCW.
+            assert!(signed_plan_area(r) > 0.0, "flipped face: {:?}", r.polygon);
+        }
+    }
+
+    /// THE NEW IDENTITY: re-applying the apexes to with_apexes' own MERGED
+    /// output reproduces the same merged faces — the triangulation
+    /// re-fragments each face (the trapezoids contain both apexes as
+    /// corners; pre-lift holds their z) and the coplanar merge folds it
+    /// back. Load-bearing for the reload → re-derive fixpoint.
+    #[test]
+    fn with_apexes_on_its_own_merged_output_is_identity() {
+        let (a, b) = gable_apexes();
+        let apexes = vec![a, b];
+        let gable = gable_footprint(ItemId::default()).with_apexes(&apexes);
+        assert_eq!(gable.regions.len(), 4);
+        let again = gable.clone().with_apexes(&apexes);
+        assert_eq!(again.regions.len(), gable.regions.len(), "same face count");
+        for (before, after) in gable.regions.iter().zip(&again.regions) {
             assert!(
-                signed_plan_area(r) > 0.0,
-                "flipped triangle: {:?}",
-                r.polygon
+                cyclically_equal(&after.polygon, &before.polygon),
+                "re-apply identity on the merged gable: {:?} vs {:?}",
+                before.polygon,
+                after.polygon
+            );
+        }
+        // And each face individually re-applies to itself too (the end
+        // triangles via the fan branch, the trapezoids via the ridge one).
+        for face in &gable.regions {
+            let out = CeilingRegions {
+                regions: vec![face.clone()],
+            }
+            .with_apexes(&apexes);
+            assert_eq!(out.regions.len(), 1, "one face survives");
+            assert!(
+                cyclically_equal(&out.regions[0].polygon, &face.polygon),
+                "per-face re-apply identity: {:?} vs {:?}",
+                face.polygon,
+                out.regions[0].polygon
             );
         }
     }
@@ -2879,9 +3189,9 @@ mod tests {
         }
     }
 
-    /// RE-APPLY-TO-SELF IDENTITY for HUB triangles: a hub triangle contains
-    /// only its own apex (as a corner), so it re-applies through the FAN
-    /// branch and comes back unchanged.
+    /// RE-APPLY-TO-SELF IDENTITY for END (hub) triangles: an end triangle
+    /// contains only its own apex (as a corner), so it re-applies through
+    /// the FAN branch and comes back unchanged.
     #[test]
     fn ridge_hub_triangle_reapply_is_identity() {
         let (a, b) = gable_apexes();
@@ -2892,7 +3202,7 @@ mod tests {
             .iter()
             .filter(|r| apex_vertex_count(r, &apexes) == 1)
             .collect();
-        assert_eq!(hubs.len(), 4);
+        assert_eq!(hubs.len(), 2, "the two end triangles");
         for r in hubs {
             let before = r.polygon.clone();
             let out = CeilingRegions {
@@ -2957,9 +3267,13 @@ mod tests {
             z_m: 4.0,
         };
         let out = gable_footprint(ItemId::default()).with_apexes(&[a, b]);
-        // Hub triangle of the edge (0,4)→(0,0) (hub A, a duplicate corner)
-        // and the transition at (0,0) are zero-area slivers: 6 → 4 pieces.
-        assert_eq!(out.regions.len(), 4, "two slivers dropped");
+        // The midline split inserts two boundary vertices; the two zero-area
+        // slivers at the corner apex (its hub triangle and the (0,0)
+        // transition) drop; and on the bottom edge — whose corner end was
+        // pre-lifted to the apex, so the split vertex's z interpolates DOWN
+        // THE SLOPE — the hub triangle and its transition are coplanar and
+        // merge back into one clean triangle ((10,0), B, A): 5 faces.
+        assert_eq!(out.regions.len(), 5, "slivers dropped, south slope merged");
         for r in &out.regions {
             assert!(plan_area(r) >= 1e-6, "no sliver emitted: {:?}", r.polygon);
         }
@@ -2998,8 +3312,8 @@ mod tests {
         assert_eq!(polys(&three), polys(&two), "third apex ignored");
     }
 
-    /// GROUPING: a ridge's hub triangles carry only their own apex, but the
-    /// transition triangles carry BOTH — transitive closure links A and B
+    /// GROUPING: a ridge's end triangles carry only their own apex, but the
+    /// merged trapezoids carry BOTH — transitive closure links A and B
     /// into ONE group, whose merged ring is the original footprint.
     #[test]
     fn apex_groups_link_a_ridges_apexes_transitively_and_merge_to_the_footprint() {
@@ -3008,10 +3322,10 @@ mod tests {
         let apexes = vec![a, b];
         let gable = gable_footprint(ItemId::default()).with_apexes(&apexes);
         let groups = gable.apex_groups(&apexes);
-        assert_eq!(groups.len(), 1, "transition triangles link A and B");
+        assert_eq!(groups.len(), 1, "the trapezoids link A and B");
         let g = &groups[0];
         assert_eq!(g.apex_idxs, vec![0, 1]);
-        assert_eq!(g.region_idxs.len(), 6, "every triangle is a member");
+        assert_eq!(g.region_idxs.len(), 4, "every face is a member");
         assert!((g.base_z - 2.4).abs() < 1e-9, "group base from the members");
         assert_eq!(g.merged_rings.len(), 1, "union is one simple ring");
         let ring = &g.merged_rings[0];
