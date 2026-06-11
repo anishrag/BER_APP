@@ -27,11 +27,10 @@ pub enum EditTools {
     /// extension on an upper floor that's separate from another section).
     /// Each stroke appends a new ring rather than replacing.
     AddDetachedSection,
-    /// Select-and-edit mode. Primary click on a wall selects it; primary drag
+    /// Select-and-move mode. Primary click on a wall selects it; primary drag
     /// translates it (parameter update). Double-click on a wall inserts a new
-    /// vertex at the click point that the user can drag freely. Replaces the
-    /// older Select + Move tools.
-    Edit,
+    /// vertex at the click point that the user can drag freely.
+    Move,
     /// Extend a wall with an orthogonal (stepped) path that bulges it out,
     /// adding area. The drawn path is orthogonalized and spliced onto the
     /// shorter arc.

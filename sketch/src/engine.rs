@@ -123,9 +123,9 @@ impl SketchEngine {
             | (SketchMode::Storey2D, EditTools::TrimCurve) => {
                 self.set_mode_behaviour(Box::new(Storey2DPerpWalls));
             }
-            // Edit mode doesn't capture freehand strokes — interaction
+            // Move mode doesn't capture freehand strokes — interaction
             // happens via click/drag handled at the UI layer.
-            (SketchMode::Storey2D, EditTools::Edit) => {
+            (SketchMode::Storey2D, EditTools::Move) => {
                 self.set_mode_behaviour(Box::new(Storey2DPerpWalls));
             }
             _ => (),

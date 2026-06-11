@@ -1,17 +1,17 @@
-//! Edit-mode interaction for `AppController`: wall/vertex selection,
+//! Move-mode interaction for `AppController`: wall/vertex selection,
 //! dragging, and the post-drag / post-drop measurement prompts. Split out
 //! of the controller core; see "Responsibility placement" in CLAUDE.md.
 use super::*;
 use manip_2d_plan::{intersect_circles, project_to_circle, solve_axis_wall};
 
 impl AppController {
-    /// VertexId of the wall currently selected in Edit mode, if any. The UI
+    /// VertexId of the wall currently selected in Move mode, if any. The UI
     /// uses this to render the selection highlight.
     pub fn edit_selected_wall(&self) -> Option<VertexId> {
         self.document.edit_state.selected_wall
     }
 
-    /// World-coord endpoints of the currently selected Edit-mode wall, or
+    /// World-coord endpoints of the currently selected Move-mode wall, or
     /// `None` if nothing is selected. Returned in the same order the
     /// polygon traverses (wall_a then wall_b).
     pub fn edit_selected_wall_positions(&self) -> Option<((f64, f64), (f64, f64))> {
@@ -28,7 +28,7 @@ impl AppController {
         Some(((a.x as f64, a.y as f64), (b.x as f64, b.y as f64)))
     }
 
-    /// World-coord position of the currently selected Edit-mode vertex
+    /// World-coord position of the currently selected Move-mode vertex
     /// (from double-click insert), or `None`. Used by the UI to render
     /// a highlight marker on the inserted vertex.
     pub fn edit_selected_vertex_position(&self) -> Option<(f64, f64)> {
@@ -39,12 +39,12 @@ impl AppController {
         Some((p.x as f64, p.y as f64))
     }
 
-    /// Edit-mode primary-button press. Hit-test the world-coord position
+    /// Move-mode primary-button press. Hit-test the world-coord position
     /// against all walls; if any wall is within `tol`, select it and start
     /// a drag. Snapshots the pre-drag value of the wall's controlling
     /// coord so the post-drag prompt can revert on Cancel.
     pub fn edit_mouse_down(&mut self, world_x: f64, world_y: f64, tol: f64) -> bool {
-        if !matches!(self.sketch_engine.edit_tool, EditTools::Edit) {
+        if !matches!(self.sketch_engine.edit_tool, EditTools::Move) {
             return false;
         }
         let Some((ring, edge_start)) = self
@@ -85,12 +85,12 @@ impl AppController {
         true
     }
 
-    /// Edit-mode double-click: insert a new vertex on the wall closest to
+    /// Move-mode double-click: insert a new vertex on the wall closest to
     /// `(world_x, world_y)` (within `tol`), place it at the click point,
     /// and start a free-2D drag on it. Returns true if a vertex was
     /// inserted.
     pub fn edit_double_click(&mut self, world_x: f64, world_y: f64, tol: f64) -> bool {
-        if !matches!(self.sketch_engine.edit_tool, EditTools::Edit) {
+        if !matches!(self.sketch_engine.edit_tool, EditTools::Move) {
             return false;
         }
         let Some((ring, edge_start)) = self
@@ -126,7 +126,7 @@ impl AppController {
         true
     }
 
-    /// Edit-mode drag update. Dispatches based on what's selected:
+    /// Move-mode drag update. Dispatches based on what's selected:
     ///
     /// * If a `selected_vertex` is set (from a double-click insert),
     ///   updates both its x and y parameters to the cursor's world-coord
@@ -153,7 +153,7 @@ impl AppController {
         }
     }
 
-    /// Edit-mode drag release. Routes by what was being dragged:
+    /// Move-mode drag release. Routes by what was being dragged:
     ///
     /// * Vertex drag → for now, just commits at the rough drop position.
     ///   A post-drop measurement prompt (separate from the wall one) is

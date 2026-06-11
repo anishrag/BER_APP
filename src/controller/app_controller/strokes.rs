@@ -70,8 +70,8 @@ impl AppController {
     }
 
     pub fn set_edit_mode(&mut self, mode: EditTools) {
-        if !matches!(mode, EditTools::Edit) {
-            // Leaving Edit mode clears the selection so a stale highlight
+        if !matches!(mode, EditTools::Move) {
+            // Leaving Move mode clears the selection so a stale highlight
             // doesn't carry over into the next tool.
             self.document.edit_state = EditState::default();
         }

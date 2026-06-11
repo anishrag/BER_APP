@@ -345,7 +345,7 @@ fn dragging_a_wall_measures_perpendicular_to_it() {
         // The drag prompt only appears once the plan is dimensioned.
         c.document.dimensioning.scale_set = true;
         c.document.dimensioning.known_params = c.document.floor_plan.all_active_params();
-        c.set_edit_mode(EditTools::Edit);
+        c.set_edit_mode(EditTools::Move);
         c
     };
 

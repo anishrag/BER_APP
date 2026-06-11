@@ -1,0 +1,900 @@
+//! The PROMPT DOCK: one bottom strip where every contextual flow panel of the
+//! Sketch page renders, in both orientations — dimension/position prompts,
+//! the post-drag and vertex-drop measurement prompts, the curve-radius
+//! slider, the redraw decision, the collinearity review, the exposure
+//! controls, and the phase / floor-step / ceiling-step flows. Visibility
+//! logic is unchanged from the old bottom toolbar; only the location is
+//! unified.
+
+use super::{SketchEvent, SketchView};
+use crate::controller::app_controller::{
+    DimensionPromptUiData, EditDragPromptUiData, ExposureSelection, PositionPromptUiData,
+    VertexDropPromptUiData,
+};
+use crate::ui::pages::events::UiEvent;
+use datatypes::ber::common::ConstructionPhase;
+use datatypes::ber::structural::WallExposure;
+
+/// Whether the dock has anything to show this frame. When false the bottom
+/// panel is skipped entirely so the canvas gets the space.
+pub(super) fn has_content(view: &SketchView<'_>) -> bool {
+    view.ceiling_height_prompt
+        || view.current_storey_idx.is_none()
+        || view.pending_redraw
+        || view.curve_bulge.is_some()
+        || view.dim_prompt.is_some()
+        || view.position_prompt.is_some()
+        || view.edit_drag_prompt.is_some()
+        || view.vertex_drop_prompt.is_some()
+        || view.review.is_some()
+        || view.exposure_mode
+        || (view.has_floor_plan
+            && ((!view.phase_choices.is_empty() && (view.phase_mode || view.phase_pick_pending))
+                || view.step_mode
+                || view.step_pick_pending
+                || view.ceiling_step_mode
+                || view.ceiling_step_pending))
+}
+
+/// Render the dock. Priority of the prompt chain: ceiling-height prompt >
+/// read-only notice > pending redraw > curve radius > dimension prompt >
+/// position prompt > edit-drag prompt > vertex-drop prompt > collinearity
+/// review > exposure controls. The phase / step / ceiling-step flow toolbars
+/// render ALONGSIDE the chain (as before): e.g. a position prompt can be up
+/// while a step amount is still pending.
+pub(super) fn render<F: FnMut(UiEvent)>(
+    ui: &mut egui::Ui,
+    view: &mut SketchView<'_>,
+    on_event: &mut F,
+) {
+    ui.horizontal_wrapped(|ui| {
+        // The ceiling-height prompt outranks everything — it's the blocked
+        // 3D request waiting on its height. Shown on the All-storeys tab too
+        // (full-house 3D gates there), so it sits before the read-only
+        // early-return below.
+        if view.ceiling_height_prompt {
+            ceiling_height_prompt_toolbar(
+                ui,
+                view.ceiling_height_input,
+                view.ceiling_height_error,
+                on_event,
+            );
+            return;
+        }
+        if view.current_storey_idx.is_none() {
+            ui.label(
+                egui::RichText::new("Pick a storey tab to edit.")
+                    .color(egui::Color32::from_rgb(180, 180, 180)),
+            );
+            return;
+        }
+        if view.pending_redraw {
+            pending_redraw_toolbar(ui, on_event);
+        } else if let Some(bulge) = view.curve_bulge {
+            curve_radius_toolbar(ui, bulge, on_event);
+        } else if let Some(p) = &view.dim_prompt {
+            dimension_prompt_toolbar(
+                ui,
+                p,
+                view.dim_scale_set,
+                view.dim_input,
+                view.dim_error,
+                on_event,
+            );
+        } else if let Some(p) = &view.position_prompt {
+            position_prompt_toolbar(ui, p, view.position_input, view.position_error, on_event);
+        } else if let Some(p) = &view.edit_drag_prompt {
+            edit_drag_prompt_toolbar(ui, p, view.edit_drag_input, view.edit_drag_error, on_event);
+        } else if let Some(vp) = &view.vertex_drop_prompt {
+            vertex_drop_prompt_toolbar(
+                ui,
+                vp,
+                view.vertex_drop_inputs,
+                view.vertex_drop_error,
+                on_event,
+            );
+        } else if view.review.is_some() {
+            review_toolbar(ui, view.review_remaining, on_event);
+        } else if view.exposure_mode {
+            exposure_toolbar(
+                ui,
+                view.exposure_walls,
+                view.exposure_selection.as_ref(),
+                view.exposure_start_input,
+                view.exposure_end_input,
+                on_event,
+            );
+        }
+
+        if view.has_floor_plan {
+            // Construction-phase picker / region list. Only useful once
+            // construction years exist (picker non-empty). Also shown when a
+            // pick is PENDING with the mode off (a restored mid-flight area
+            // after reopen): the pick blocks drawing, so its prompt must stay
+            // reachable.
+            if !view.phase_choices.is_empty() && (view.phase_mode || view.phase_pick_pending) {
+                phase_toolbar(
+                    ui,
+                    view.phase_choices,
+                    view.phase_region_polygons,
+                    view.phase_pick_pending,
+                    on_event,
+                );
+            }
+            // Same pending-with-mode-off rule as the phase toolbar.
+            if view.step_mode || view.step_pick_pending {
+                step_toolbar(
+                    ui,
+                    view.step_region_polygons,
+                    view.step_pick_pending,
+                    view.step_amount_input,
+                    on_event,
+                );
+            }
+            // Same pending-with-mode-off rule as the other tools.
+            if view.ceiling_step_mode || view.ceiling_step_pending {
+                ceiling_step_toolbar(
+                    ui,
+                    view.ceiling_step_region_polygons,
+                    view.ceiling_step_orientation_pending,
+                    view.ceiling_step_side_pending,
+                    view.ceiling_step_amount_pending,
+                    view.ceiling_amount_input,
+                    on_event,
+                );
+            }
+        }
+    });
+}
+
+/// Parse a dimension expression. Supports:
+/// - A single non-negative number: `"4.2"`, `"0.5"`, `"0"`
+/// - Sums and differences of numbers: `"3.2 + 1.5"`, `"5 - 1.8 + 0.3"`
+/// - Optional leading `+`; a leading `-` is rejected since dimensions can't
+///   be negative.
+///
+/// Zero is accepted — it collapses the wall (used to zero a trim remnant so a
+/// cut snaps onto a corner). Whitespace is ignored. Returns `None` for
+/// malformed input or a negative result.
+fn parse_dimension_expression(input: &str) -> Option<f32> {
+    let trimmed = input.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    let mut total: f32 = 0.0;
+    let mut sign: f32 = 1.0;
+    let mut current = String::new();
+    let mut started = false;
+    for ch in trimmed.chars() {
+        if ch.is_whitespace() {
+            continue;
+        }
+        if ch == '+' || ch == '-' {
+            if !started {
+                if ch == '-' {
+                    return None;
+                }
+                started = true;
+                continue;
+            }
+            if current.is_empty() {
+                return None;
+            }
+            let v: f32 = current.parse().ok()?;
+            total += sign * v;
+            sign = if ch == '+' { 1.0 } else { -1.0 };
+            current.clear();
+        } else {
+            current.push(ch);
+            started = true;
+        }
+    }
+    if current.is_empty() {
+        return None;
+    }
+    let v: f32 = current.parse().ok()?;
+    total += sign * v;
+    // Zero is allowed: entering 0 collapses the wall (e.g. zeroing a trim
+    // remnant to snap a cut onto a corner). Negatives are still rejected.
+    if total.is_finite() && total >= 0.0 {
+        Some(total)
+    } else {
+        None
+    }
+}
+
+fn dimension_prompt_toolbar<F: FnMut(UiEvent)>(
+    ui: &mut egui::Ui,
+    prompt: &DimensionPromptUiData,
+    scale_set: bool,
+    dim_input: &mut String,
+    dim_error: Option<&str>,
+    on_event: &mut F,
+) {
+    let units = if scale_set {
+        "m"
+    } else {
+        "(first — sets scale)"
+    };
+    ui.label(
+        egui::RichText::new(format!("Length of highlighted wall {}:", units))
+            .strong()
+            .color(egui::Color32::from_rgb(60, 220, 255)),
+    );
+    // Show the current value for orientation. Useful especially for the
+    // first dimension — the assessor sees "looks like ~3.something m" and
+    // confirms with an exact measurement.
+    ui.label(format!("(currently {:.2})", prompt.current_length));
+    let resp = ui.add(
+        egui::TextEdit::singleline(dim_input)
+            .desired_width(80.0)
+            .hint_text("e.g. 4.2"),
+    );
+    let submit_pressed = resp.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
+    let apply_clicked = ui
+        .button("Apply")
+        .on_hover_text("Apply this dimension and move to the next")
+        .clicked();
+    if apply_clicked || submit_pressed {
+        if let Some(value) = parse_dimension_expression(dim_input) {
+            on_event(UiEvent::Sketch(SketchEvent::ApplyDimension(value)));
+            dim_input.clear();
+        }
+    }
+    if ui
+        .button("Skip")
+        .on_hover_text("Skip this dimension, ask about a different wall")
+        .clicked()
+    {
+        on_event(UiEvent::Sketch(SketchEvent::SkipDimension));
+        dim_input.clear();
+    }
+    // Surface the last error inline so the user can correct without
+    // losing what they typed.
+    if let Some(err) = dim_error {
+        ui.label(
+            egui::RichText::new(format!("⚠ {}", err)).color(egui::Color32::from_rgb(255, 120, 90)),
+        );
+    }
+}
+
+/// Toolbar for the position prompt of a carved phase/step area: the
+/// distance (along the prompt's axis) from the highlighted outline
+/// reference wall to the highlighted area wall. The textbox arrives
+/// PREFILLED with the drawn distance (see `BerApp`'s prompt-identity
+/// refill); Apply pins it, Skip accepts the drawn position, and the
+/// cycle button moves to another reference wall.
+fn position_prompt_toolbar<F: FnMut(UiEvent)>(
+    ui: &mut egui::Ui,
+    prompt: &PositionPromptUiData,
+    input: &mut String,
+    error: Option<&str>,
+    on_event: &mut F,
+) {
+    let direction = match prompt.axis {
+        manip_2d_plan::ParameterAxis::X => "Horizontal",
+        manip_2d_plan::ParameterAxis::Y => "Vertical",
+    };
+    ui.label(
+        egui::RichText::new(format!(
+            "{} distance from the highlighted wall (m):",
+            direction
+        ))
+        .strong()
+        .color(egui::Color32::from_rgb(60, 220, 255)),
+    );
+    let resp = ui.add(
+        egui::TextEdit::singleline(input)
+            .desired_width(80.0)
+            .hint_text("e.g. 3.5"),
+    );
+    let submit_pressed = resp.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
+    let apply_clicked = ui
+        .button("Apply")
+        .on_hover_text("Pin the area at exactly this distance")
+        .clicked();
+    if apply_clicked || submit_pressed {
+        if let Some(value) = parse_dimension_expression(input) {
+            on_event(UiEvent::Sketch(SketchEvent::ApplyPositionDimension(value)));
+        }
+    }
+    if ui
+        .button("Skip")
+        .on_hover_text("Accept the drawn position as-is")
+        .clicked()
+    {
+        on_event(UiEvent::Sketch(SketchEvent::SkipPositionDimension));
+    }
+    // Only offered when there IS another wall to measure from.
+    if prompt.option_count > 1
+        && ui
+            .button(format!(
+                "Measure from another wall ({}/{})",
+                prompt.option_idx + 1,
+                prompt.option_count,
+            ))
+            .on_hover_text("Measure the distance from a different outline wall")
+            .clicked()
+    {
+        on_event(UiEvent::Sketch(SketchEvent::CyclePositionReference));
+    }
+    if let Some(err) = error {
+        ui.label(
+            egui::RichText::new(format!("⚠ {}", err)).color(egui::Color32::from_rgb(255, 120, 90)),
+        );
+    }
+}
+
+fn edit_drag_prompt_toolbar<F: FnMut(UiEvent)>(
+    ui: &mut egui::Ui,
+    prompt: &EditDragPromptUiData,
+    input: &mut String,
+    error: Option<&str>,
+    on_event: &mut F,
+) {
+    ui.label(
+        egui::RichText::new("Distance from highlighted reference wall (m):")
+            .strong()
+            .color(egui::Color32::from_rgb(60, 220, 255)),
+    );
+    ui.label(format!(
+        "(currently {:.2}, option {}/{})",
+        prompt.current_distance,
+        prompt.option_idx + 1,
+        prompt.option_count,
+    ));
+    let resp = ui.add(
+        egui::TextEdit::singleline(input)
+            .desired_width(80.0)
+            .hint_text("e.g. 3.5"),
+    );
+    let submit_pressed = resp.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
+    let apply_clicked = ui
+        .button("Apply")
+        .on_hover_text("Apply this distance")
+        .clicked();
+    if apply_clicked || submit_pressed {
+        if let Some(value) = parse_dimension_expression(input) {
+            on_event(UiEvent::Sketch(SketchEvent::ApplyEditDrag(value)));
+            input.clear();
+        }
+    }
+    if ui
+        .button("Different measurement")
+        .on_hover_text("Try another reference wall")
+        .clicked()
+    {
+        on_event(UiEvent::Sketch(SketchEvent::CycleEditDragMeasurement));
+    }
+    if ui
+        .button("Cancel")
+        .on_hover_text("Revert the wall to its position before this drag")
+        .clicked()
+    {
+        on_event(UiEvent::Sketch(SketchEvent::CancelEditDrag));
+        input.clear();
+    }
+    if let Some(err) = error {
+        ui.label(
+            egui::RichText::new(format!("⚠ {}", err)).color(egui::Color32::from_rgb(255, 120, 90)),
+        );
+    }
+}
+
+fn vertex_drop_prompt_toolbar<F: FnMut(UiEvent)>(
+    ui: &mut egui::Ui,
+    prompt: &VertexDropPromptUiData,
+    inputs: &mut [String; 4],
+    error: Option<&str>,
+    on_event: &mut F,
+) {
+    use crate::controller::app_controller::VertexMeasurementKind;
+    use manip_2d_plan::ParameterAxis;
+    ui.label(
+        egui::RichText::new("Place vertex — fill in any 2 distances (m):")
+            .strong()
+            .color(egui::Color32::from_rgb(60, 220, 255)),
+    );
+    // One column per active measurement. Each shows: kind label,
+    // current value for orientation, textbox, Apply button.
+    for m in &prompt.active {
+        let kind_label = match m.kind {
+            VertexMeasurementKind::Axis(ParameterAxis::X) => "H",
+            VertexMeasurementKind::Axis(ParameterAxis::Y) => "V",
+            VertexMeasurementKind::WallLength => "W",
+        };
+        ui.label(format!("{} ({:.2})", kind_label, m.current_distance));
+        // Use idx-based slot so inputs survive across frames + apply
+        // targets the right measurement. Cap at 4 slots.
+        let slot = m.idx.min(inputs.len() - 1);
+        let resp = ui.add(
+            egui::TextEdit::singleline(&mut inputs[slot])
+                .desired_width(60.0)
+                .hint_text("=?"),
+        );
+        let submitted = resp.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
+        let clicked = ui.button("✓").on_hover_text("Set this distance").clicked();
+        if clicked || submitted {
+            if let Some(v) = parse_dimension_expression(&inputs[slot]) {
+                on_event(UiEvent::Sketch(SketchEvent::ApplyVertexMeasurement {
+                    idx: m.idx,
+                    value: v,
+                }));
+                inputs[slot].clear();
+            }
+        }
+        ui.separator();
+    }
+    if ui
+        .button("Cancel")
+        .on_hover_text("Revert the new vertex to its initial position")
+        .clicked()
+    {
+        on_event(UiEvent::Sketch(SketchEvent::CancelVertexDrop));
+        for s in inputs.iter_mut() {
+            s.clear();
+        }
+    }
+    if let Some(err) = error {
+        ui.label(
+            egui::RichText::new(format!("⚠ {}", err)).color(egui::Color32::from_rgb(255, 120, 90)),
+        );
+    }
+}
+
+/// The first-3D ceiling-height prompt: a 3D view was requested but the
+/// current scope has no default ceiling height yet. One typed value (m,
+/// must be > 0) stamps the scope and opens the 3D view; Cancel stays 2D.
+fn ceiling_height_prompt_toolbar<F: FnMut(UiEvent)>(
+    ui: &mut egui::Ui,
+    input: &mut String,
+    error: Option<&str>,
+    on_event: &mut F,
+) {
+    ui.label(
+        egui::RichText::new("Default ceiling height (m):")
+            .strong()
+            .color(egui::Color32::from_rgb(60, 220, 255)),
+    );
+    let resp = ui.add(
+        egui::TextEdit::singleline(input)
+            .desired_width(80.0)
+            .hint_text("e.g. 2.4"),
+    );
+    let submit_pressed = resp.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
+    let set_clicked = ui
+        .button("Set")
+        .on_hover_text("Set this height and open the 3D view")
+        .clicked();
+    if set_clicked || submit_pressed {
+        // Validation (finite, > 0) lives in the controller — emit any
+        // parsed value so its error message surfaces next to the box
+        // instead of the button silently doing nothing. The dispatch arm
+        // clears the input on success; on rejection the text stays put.
+        if let Some(value) = parse_dimension_expression(input) {
+            on_event(UiEvent::Sketch(SketchEvent::SetDefaultCeilingHeight(value)));
+        }
+    }
+    if ui
+        .button("Cancel")
+        .on_hover_text("Stay in 2D without setting a height")
+        .clicked()
+    {
+        on_event(UiEvent::Sketch(SketchEvent::CancelCeilingHeightPrompt));
+        input.clear();
+    }
+    if let Some(err) = error {
+        ui.label(
+            egui::RichText::new(format!("⚠ {}", err)).color(egui::Color32::from_rgb(255, 120, 90)),
+        );
+    }
+}
+
+/// Radius/bulge slider for a provisional curve whose attach lines are set.
+/// Dragging it reshapes the amber preview live; "Accept curve" bakes it in.
+/// `bulge` is the signed sagitta / chord (0 = flat, larger = more curved).
+fn curve_radius_toolbar<F: FnMut(UiEvent)>(ui: &mut egui::Ui, bulge: f32, on_event: &mut F) {
+    ui.label(
+        egui::RichText::new("Curve radius:")
+            .strong()
+            .color(egui::Color32::from_rgb(255, 200, 60)),
+    );
+    let mut b = bulge;
+    if ui
+        .add(
+            egui::Slider::new(&mut b, -1.5..=1.5)
+                .text("bulge")
+                .show_value(false),
+        )
+        .on_hover_text("Drag to flatten (toward 0) or deepen the curve; sign flips the side")
+        .changed()
+    {
+        on_event(UiEvent::Sketch(SketchEvent::SetCurveBulge(b)));
+    }
+    if ui
+        .button("Accept curve")
+        .on_hover_text("Bake the curve into the plan at this radius")
+        .clicked()
+    {
+        on_event(UiEvent::Sketch(SketchEvent::CommitCurve));
+    }
+}
+
+fn pending_redraw_toolbar<F: FnMut(UiEvent)>(ui: &mut egui::Ui, on_event: &mut F) {
+    ui.label(
+        egui::RichText::new("A storey already exists. What should this new stroke do?")
+            .strong()
+            .color(egui::Color32::from_rgb(255, 200, 60)),
+    );
+    if ui
+        .button("Replace this storey")
+        .on_hover_text("Discard the current outline and replace it with this stroke")
+        .clicked()
+    {
+        on_event(UiEvent::Sketch(SketchEvent::ReplaceStorey));
+    }
+    if ui
+        .button("New storey from this")
+        .on_hover_text("Save current storey, start a new one from this stroke (coming soon)")
+        .clicked()
+    {
+        on_event(UiEvent::Sketch(SketchEvent::AddStoreyFromCurrent));
+    }
+    if ui
+        .button("Ignore")
+        .on_hover_text("Discard this stroke, keep the current storey")
+        .clicked()
+    {
+        on_event(UiEvent::Sketch(SketchEvent::IgnoreRedraw));
+    }
+}
+
+fn review_toolbar<F: FnMut(UiEvent)>(ui: &mut egui::Ui, remaining: usize, on_event: &mut F) {
+    ui.horizontal(|ui| {
+        ui.label(
+            egui::RichText::new(format!("Same line? {} remaining", remaining))
+                .strong()
+                .color(egui::Color32::from_rgb(255, 200, 60)),
+        );
+        if ui.button("Yes").clicked() {
+            on_event(UiEvent::Sketch(SketchEvent::AcceptCollinearity));
+        }
+        if ui.button("No").clicked() {
+            on_event(UiEvent::Sketch(SketchEvent::RejectCollinearity));
+        }
+        if ui.button("Skip all").clicked() {
+            on_event(UiEvent::Sketch(SketchEvent::SkipAllCollinearity));
+        }
+    });
+}
+
+/// Construction-phase tagging controls. While a carved area is pending,
+/// shows the year picker (one button per defined phase) + Cancel; otherwise
+/// lists the committed phase regions with delete buttons.
+fn phase_toolbar<F: FnMut(UiEvent)>(
+    ui: &mut egui::Ui,
+    choices: &[(ConstructionPhase, String)],
+    regions: &[(Vec<(f64, f64)>, String)],
+    pick_pending: bool,
+    on_event: &mut F,
+) {
+    if pick_pending {
+        ui.label(egui::RichText::new("Assign year to area:").strong());
+        ui.horizontal_wrapped(|ui| {
+            for (phase, label) in choices {
+                if ui.button(label).clicked() {
+                    on_event(UiEvent::Sketch(SketchEvent::AssignPhase(phase.clone())));
+                }
+            }
+            if ui.button("Cancel").clicked() {
+                on_event(UiEvent::Sketch(SketchEvent::CancelPendingPhase));
+            }
+        });
+    } else {
+        ui.label("Draw an area to tag its year of construction.");
+        for (i, (_ring, label)) in regions.iter().enumerate() {
+            ui.horizontal(|ui| {
+                ui.label(label);
+                if ui
+                    .button("🗑")
+                    .on_hover_text("Delete this phase area")
+                    .clicked()
+                {
+                    on_event(UiEvent::Sketch(SketchEvent::DeletePhaseRegion(i)));
+                }
+            });
+        }
+    }
+}
+
+/// Floor-step controls. While a carved area awaits its level, shows the
+/// amount field (metres) + Raise/Lower buttons (sign the amount) + Cancel;
+/// otherwise lists the committed step regions with delete buttons.
+fn step_toolbar<F: FnMut(UiEvent)>(
+    ui: &mut egui::Ui,
+    regions: &[(Vec<(f64, f64)>, String)],
+    pick_pending: bool,
+    amount_input: &mut String,
+    on_event: &mut F,
+) {
+    if pick_pending {
+        ui.label(egui::RichText::new("Step amount (m):").strong());
+        ui.add(
+            egui::TextEdit::singleline(amount_input)
+                .desired_width(60.0)
+                .hint_text("e.g. 0.15"),
+        );
+        // Unparseable input is ignored — the buttons just do nothing. The
+        // BUTTON owns the sign: an expression that evaluates negative
+        // (e.g. "1-2") must not flip Lower into a raise, so take |v|.
+        let amount = parse_dimension_expression(amount_input).map(f32::abs);
+        if ui
+            .button("Raise")
+            .on_hover_text("Raise this area's floor by the amount")
+            .clicked()
+        {
+            if let Some(v) = amount {
+                on_event(UiEvent::Sketch(SketchEvent::AssignStepLevel(v)));
+                amount_input.clear();
+            }
+        }
+        if ui
+            .button("Lower")
+            .on_hover_text("Lower this area's floor by the amount")
+            .clicked()
+        {
+            if let Some(v) = amount {
+                on_event(UiEvent::Sketch(SketchEvent::AssignStepLevel(-v)));
+                amount_input.clear();
+            }
+        }
+        if ui.button("Cancel").clicked() {
+            on_event(UiEvent::Sketch(SketchEvent::CancelPendingStep));
+            amount_input.clear();
+        }
+    } else {
+        ui.label("Draw an area to raise or lower its floor.");
+        for (i, (_ring, label)) in regions.iter().enumerate() {
+            ui.horizontal(|ui| {
+                ui.label(label);
+                if ui
+                    .button("🗑")
+                    .on_hover_text("Delete this step area")
+                    .clicked()
+                {
+                    on_event(UiEvent::Sketch(SketchEvent::DeleteStepRegion(i)));
+                }
+            });
+        }
+    }
+}
+
+/// Ceiling-step controls, stage by stage: the H/V picker for a tapped
+/// point; the "tap the side" hint while the side pick is pending; the
+/// amount field (metres) + Up/Down buttons (which own the sign) once the
+/// line is resolved; otherwise the committed-region list with deletes.
+/// (The position stage shows as the shared position-prompt panel instead.)
+fn ceiling_step_toolbar<F: FnMut(UiEvent)>(
+    ui: &mut egui::Ui,
+    regions: &[(Vec<(f64, f64)>, String)],
+    orientation_pending: bool,
+    side_pending: bool,
+    amount_pending: bool,
+    amount_input: &mut String,
+    on_event: &mut F,
+) {
+    if orientation_pending {
+        ui.label(egui::RichText::new("Line direction:").strong());
+        if ui
+            .button("Horizontal")
+            .on_hover_text("A horizontal step line through the tapped point")
+            .clicked()
+        {
+            on_event(UiEvent::Sketch(SketchEvent::ChooseCeilingStepOrientation {
+                horizontal: true,
+            }));
+        }
+        if ui
+            .button("Vertical")
+            .on_hover_text("A vertical step line through the tapped point")
+            .clicked()
+        {
+            on_event(UiEvent::Sketch(SketchEvent::ChooseCeilingStepOrientation {
+                horizontal: false,
+            }));
+        }
+        if ui.button("Cancel").clicked() {
+            on_event(UiEvent::Sketch(SketchEvent::CancelPendingCeilingStep));
+        }
+    } else if side_pending {
+        ui.label(
+            egui::RichText::new("Tap the side of the line where the ceiling steps")
+                .color(egui::Color32::from_rgb(255, 200, 60)),
+        );
+        if ui.button("Cancel").clicked() {
+            on_event(UiEvent::Sketch(SketchEvent::CancelPendingCeilingStep));
+        }
+    } else if amount_pending {
+        ui.label(egui::RichText::new("Step (m):").strong());
+        ui.add(
+            egui::TextEdit::singleline(amount_input)
+                .desired_width(60.0)
+                .hint_text("e.g. 0.2"),
+        );
+        // Unparseable input is ignored — the buttons just do nothing. The
+        // BUTTON owns the sign (an expression that evaluates negative must
+        // not flip Down into a raise), so take |v|.
+        let amount = parse_dimension_expression(amount_input).map(f32::abs);
+        if ui
+            .button("Up")
+            .on_hover_text("Raise the ceiling on that side by the amount")
+            .clicked()
+        {
+            if let Some(v) = amount {
+                on_event(UiEvent::Sketch(SketchEvent::AssignCeilingStepDelta(v)));
+                amount_input.clear();
+            }
+        }
+        if ui
+            .button("Down")
+            .on_hover_text("Lower the ceiling on that side by the amount")
+            .clicked()
+        {
+            if let Some(v) = amount {
+                on_event(UiEvent::Sketch(SketchEvent::AssignCeilingStepDelta(-v)));
+                amount_input.clear();
+            }
+        }
+        if ui.button("Cancel").clicked() {
+            on_event(UiEvent::Sketch(SketchEvent::CancelPendingCeilingStep));
+            amount_input.clear();
+        }
+    } else {
+        ui.label("Draw a straight line across the plan to step the ceiling.");
+        for (i, (_ring, label)) in regions.iter().enumerate() {
+            ui.horizontal(|ui| {
+                ui.label(label);
+                if ui
+                    .button("🗑")
+                    .on_hover_text("Delete this ceiling step (re-flattens to the default)")
+                    .clicked()
+                {
+                    on_event(UiEvent::Sketch(SketchEvent::DeleteCeilingStepRegion(i)));
+                }
+            });
+        }
+    }
+}
+
+/// Wall-exposure mode toolbar. With a wall selected: a section selection
+/// `start–end` (live with the drag handles) plus typed start/end inputs, the
+/// three type buttons that paint the current selection, and "Clear wall".
+/// Always: "Set remaining → Exposed" bulk-marks every still-unset wall.
+fn exposure_toolbar<F: FnMut(UiEvent)>(
+    ui: &mut egui::Ui,
+    walls: &[crate::controller::app_controller::WallExposureView],
+    selection: Option<&ExposureSelection>,
+    start_input: &mut String,
+    end_input: &mut String,
+    on_event: &mut F,
+) {
+    let unset = walls.iter().filter(|w| w.sections.is_empty()).count();
+    ui.horizontal(|ui| {
+        if let Some(sel) = selection {
+            let (lo, hi) = (sel.start_m.min(sel.end_m), sel.start_m.max(sel.end_m));
+            ui.label(
+                egui::RichText::new(format!(
+                    "Section {lo:.2}–{hi:.2} m (wall {:.2} m):",
+                    sel.length_m
+                ))
+                .strong(),
+            );
+            ui.label("start");
+            let rs = ui.add(
+                egui::TextEdit::singleline(start_input)
+                    .desired_width(46.0)
+                    .hint_text(format!("{lo:.2}")),
+            );
+            ui.label("end");
+            let re = ui.add(
+                egui::TextEdit::singleline(end_input)
+                    .desired_width(46.0)
+                    .hint_text(format!("{hi:.2}")),
+            );
+            let enter = (rs.lost_focus() || re.lost_focus())
+                && ui.input(|i| i.key_pressed(egui::Key::Enter));
+            if ui.button("Set range").clicked() || enter {
+                let s = parse_dimension_expression(start_input).unwrap_or(lo);
+                let e = parse_dimension_expression(end_input).unwrap_or(hi);
+                on_event(UiEvent::Sketch(SketchEvent::SetExposureSectionRange {
+                    start_m: s,
+                    end_m: e,
+                }));
+                start_input.clear();
+                end_input.clear();
+            }
+            ui.separator();
+            if ui.button("Exposed").clicked() {
+                on_event(UiEvent::Sketch(SketchEvent::SetWallExposure(
+                    WallExposure::Exposed,
+                )));
+            }
+            if ui.button("Semi-exposed").clicked() {
+                on_event(UiEvent::Sketch(SketchEvent::SetWallExposure(
+                    WallExposure::SemiExposed,
+                )));
+            }
+            if ui.button("Non-heat-loss").clicked() {
+                on_event(UiEvent::Sketch(SketchEvent::SetWallExposure(
+                    WallExposure::NonHeatLoss,
+                )));
+            }
+            if ui.button("Clear wall").clicked() {
+                on_event(UiEvent::Sketch(SketchEvent::ClearWallExposure));
+            }
+        } else {
+            ui.label(
+                egui::RichText::new("Tap a wall to mark its exposure")
+                    .color(egui::Color32::from_rgb(255, 200, 60)),
+            );
+        }
+        ui.separator();
+        if ui
+            .add_enabled(
+                unset > 0,
+                egui::Button::new(format!("Set remaining {unset} → Exposed")),
+            )
+            .clicked()
+        {
+            on_event(UiEvent::Sketch(SketchEvent::SetAllRemainingExposed));
+        }
+    });
+}
+
+#[cfg(test)]
+mod expression_tests {
+    use super::parse_dimension_expression;
+
+    fn approx(a: f32, b: f32) -> bool {
+        (a - b).abs() < 1e-4
+    }
+
+    #[test]
+    fn single_number() {
+        assert!(approx(parse_dimension_expression("4.2").unwrap(), 4.2));
+        assert!(approx(parse_dimension_expression("  3  ").unwrap(), 3.0));
+    }
+
+    #[test]
+    fn sum_and_difference() {
+        assert!(approx(parse_dimension_expression("3 + 1.5").unwrap(), 4.5));
+        assert!(approx(parse_dimension_expression("5 - 1.8").unwrap(), 3.2));
+        assert!(approx(
+            parse_dimension_expression("2 + 3.5 - 0.3").unwrap(),
+            5.2
+        ));
+    }
+
+    #[test]
+    fn leading_plus_allowed_leading_minus_rejected() {
+        assert!(approx(parse_dimension_expression("+4.2").unwrap(), 4.2));
+        assert!(parse_dimension_expression("-4.2").is_none());
+    }
+
+    #[test]
+    fn malformed_inputs_rejected() {
+        assert!(parse_dimension_expression("").is_none());
+        assert!(parse_dimension_expression("3 +").is_none());
+        assert!(parse_dimension_expression("3 + + 2").is_none());
+        assert!(parse_dimension_expression("hello").is_none());
+        assert!(parse_dimension_expression("3 - 5").is_none()); // negative result
+    }
+
+    #[test]
+    fn zero_accepted_for_collapsing_a_wall() {
+        // 0 is a valid dimension: it collapses the wall (e.g. zero a trim
+        // remnant). Only negatives are rejected.
+        assert!(approx(parse_dimension_expression("0").unwrap(), 0.0));
+        assert!(approx(parse_dimension_expression("3 - 3").unwrap(), 0.0));
+    }
+}

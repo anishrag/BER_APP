@@ -333,6 +333,12 @@ impl AppController {
         self.revision
     }
 
+    /// Whether there are edits not yet handed to persistence (revision ahead
+    /// of the last save). Drives the State category's autosave status line.
+    pub fn is_dirty(&self) -> bool {
+        self.revision != self.saved_revision
+    }
+
     /// Write a FINALISED copy of the current record to the DB. Components that
     /// aren't fully dimensioned — and thus may still be in pixel units — are
     /// dropped from what's SAVED (never from memory). So the database only ever
