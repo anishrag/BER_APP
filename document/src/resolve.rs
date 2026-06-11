@@ -996,6 +996,10 @@ mod tests {
         ber.storeys[0] = resolve_storey(&doc, &ber, 0, &[], &[], &rec1);
         let after = roof_z_area_multiset(&ber.storeys[0]);
         assert_same_z_areas(&before, &after);
+        // Round 1 is the SETTLED state (the f32 quantization has happened):
+        // from here the spec's claim is the STRONG per-region invariant, not
+        // just the z→area aggregate — a tiling oscillation must fail this.
+        let settled = roof_surface_multiset(&ber.storeys[0]);
 
         // Once more: reconstruct again, re-resolve again → still equal.
         let rec2 = crate::ceiling_step_regions_from_roofs(&ber, 0);
@@ -1003,6 +1007,7 @@ mod tests {
         assert!((rec2[0].delta_m - 0.3).abs() < 1e-9);
         ber.storeys[0] = resolve_storey(&doc, &ber, 0, &[], &[], &rec2);
         assert_same_z_areas(&before, &roof_z_area_multiset(&ber.storeys[0]));
+        assert_same_surface(&settled, &roof_surface_multiset(&ber.storeys[0]));
     }
 
     /// While the ceiling height is unset there is no default ceiling to fan:
