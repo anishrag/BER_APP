@@ -29,9 +29,9 @@ pub use carve::SubareaOutcome;
 pub use debug_stages::{take_splice_debug, SplicePhase};
 pub use error::Error;
 pub use geom::{
-    bbox_diagonal as ring_diagonal, find_flipped_edge, fit_axis_line, intersect_circles,
-    lerp_along, project_distance_along, project_to_circle, ring_contains_point, segment_len,
-    solve_axis_wall,
+    bbox_diagonal as ring_diagonal, find_flipped_edge, fit_axis_line, fit_axis_segment,
+    intersect_circles, lerp_along, project_distance_along, project_to_circle, ring_contains_point,
+    segment_len, solve_axis_wall,
 };
 pub use parametric::{Axis, CollinearitySuggestion, ParameterAxis, ParameterId, VertexId};
 pub use snap::{

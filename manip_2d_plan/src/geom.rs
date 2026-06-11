@@ -36,16 +36,27 @@ const AXIS_LINE_MIN_SPAN_M: f32 = 0.05;
 /// (~50%) or an L (~30%) blows well past it; freehand waviness stays under.
 const AXIS_LINE_MAX_DEV_RATIO: f32 = 0.15;
 
-/// Fit an AXIS-ALIGNED line to a near-straight stroke: TLS fit ([`fit_line`]),
-/// orientation snapped to the DOMINANT axis (the step line is orthogonal by
-/// construction). Returns the axis the line's POSITION varies on (X for a
-/// vertical line — the position-prompt convention) and the centroid's
-/// coordinate on it. `None` when the stroke is too short (< 2 points, or span
-/// under [`AXIS_LINE_MIN_SPAN_M`]) or not line-like (max perpendicular
-/// deviation over [`AXIS_LINE_MAX_DEV_RATIO`] of its span — a loop or an L is
-/// not a step line). A ~45° stroke snaps to whichever axis dominates; there is
-/// no diagonal rejection.
-pub fn fit_axis_line(points: &[Point2f32]) -> Option<(ParameterAxis, f32)> {
+/// Fit an AXIS-ALIGNED segment to a near-straight stroke: TLS fit
+/// ([`fit_line`]), orientation snapped to the DOMINANT axis (the step/ridge
+/// line is orthogonal by construction). Returns `(axis, coord, (lo, hi))`:
+///
+/// - `axis` is the axis the line's POSITION varies on (X for a vertical
+///   line — the position-prompt convention) and `coord` the centroid's
+///   coordinate on it;
+/// - `(lo, hi)` is the stroke's projected EXTENT along the fitted line —
+///   which runs along the OTHER axis from `axis`. For a vertical line
+///   (`axis` = X, `coord` = the line's x) the extent is the stroke's
+///   y-range; for a horizontal line (`axis` = Y) it is the x-range.
+///   `lo <= hi` always, regardless of the stroke's draw direction. A ridge
+///   needs endpoints, not an infinite line — the extent is taken AS DRAWN
+///   (min/max over the stroke's points on the line's axis), with no snapping.
+///
+/// `None` when the stroke is too short (< 2 points, or span under
+/// [`AXIS_LINE_MIN_SPAN_M`]) or not line-like (max perpendicular deviation
+/// over [`AXIS_LINE_MAX_DEV_RATIO`] of its span — a loop or an L is not a
+/// line). A ~45° stroke snaps to whichever axis dominates; there is no
+/// diagonal rejection.
+pub fn fit_axis_segment(points: &[Point2f32]) -> Option<(ParameterAxis, f32, (f32, f32))> {
     if points.len() < 2 {
         return None;
     }
@@ -70,12 +81,27 @@ pub fn fit_axis_line(points: &[Point2f32]) -> Option<(ParameterAxis, f32)> {
         return None;
     }
     // Snap to the dominant axis of the fitted direction. A mostly-vertical
-    // stroke (|dy| > |dx|) is a vertical line, whose position varies on X.
+    // stroke (|dy| > |dx|) is a vertical line, whose position varies on X —
+    // and whose extent runs along Y (the other axis).
+    let extent = |get: fn(&Point2f32) -> f32| {
+        points
+            .iter()
+            .map(get)
+            .fold((f32::INFINITY, f32::NEG_INFINITY), |(lo, hi), v| {
+                (lo.min(v), hi.max(v))
+            })
+    };
     if dy.abs() > dx.abs() {
-        Some((ParameterAxis::X, centroid.x))
+        Some((ParameterAxis::X, centroid.x, extent(|p| p.y)))
     } else {
-        Some((ParameterAxis::Y, centroid.y))
+        Some((ParameterAxis::Y, centroid.y, extent(|p| p.x)))
     }
+}
+
+/// [`fit_axis_segment`] without the extent — the infinite-line view a
+/// ceiling-step stroke needs (position only; the line spans the footprint).
+pub fn fit_axis_line(points: &[Point2f32]) -> Option<(ParameterAxis, f32)> {
+    fit_axis_segment(points).map(|(axis, coord, _)| (axis, coord))
 }
 
 /// Project `cur` onto a circle of radius `r` around `n`.
@@ -1020,6 +1046,49 @@ mod tests {
             p(2.0, 2.0),
         ];
         assert_eq!(fit_axis_line(&l_stroke), None);
+    }
+
+    #[test]
+    fn fit_axis_segment_near_vertical_extent_is_the_y_range() {
+        // Vertical line (position on X) — the extent runs along Y, taken as
+        // drawn: y spans 0.2 → 3.1 over the wavy stroke.
+        let stroke = vec![p(3.02, 0.2), p(2.97, 1.0), p(3.03, 3.1), p(2.99, 2.0)];
+        let (axis, coord, (lo, hi)) = fit_axis_segment(&stroke).expect("near-vertical fits");
+        assert_eq!(axis, ParameterAxis::X);
+        assert!((coord - 3.0).abs() < 0.05, "coord ≈ 3, got {coord}");
+        assert_eq!((lo, hi), (0.2, 3.1), "extent = y-range as drawn");
+    }
+
+    #[test]
+    fn fit_axis_segment_near_horizontal_extent_is_the_x_range() {
+        // Drawn right-to-left: lo/hi still come out ordered.
+        let stroke = vec![p(4.5, 2.0), p(3.0, 2.02), p(1.5, 1.98), p(0.4, 2.01)];
+        let (axis, coord, (lo, hi)) = fit_axis_segment(&stroke).expect("near-horizontal fits");
+        assert_eq!(axis, ParameterAxis::Y);
+        assert!((coord - 2.0).abs() < 0.05, "coord ≈ 2, got {coord}");
+        assert_eq!(
+            (lo, hi),
+            (0.4, 4.5),
+            "extent = x-range, draw-direction-free"
+        );
+    }
+
+    #[test]
+    fn fit_axis_line_is_fit_axis_segment_without_the_extent() {
+        let strokes: Vec<Vec<Point2f32>> = vec![
+            vec![p(3.02, 0.0), p(2.97, 1.0), p(3.03, 2.0), p(2.99, 3.0)],
+            vec![p(0.0, 2.01), p(1.5, 1.98), p(3.0, 2.02), p(4.5, 2.0)],
+            vec![p(0.0, 0.0), p(0.5, 1.5), p(1.0, 3.0)],
+            vec![p(0.0, 0.0), p(0.0, 0.02)], // rejected: both must be None
+            vec![],
+        ];
+        for stroke in &strokes {
+            assert_eq!(
+                fit_axis_line(stroke),
+                fit_axis_segment(stroke).map(|(a, c, _)| (a, c)),
+                "wrapper equivalence for {stroke:?}"
+            );
+        }
     }
 
     #[test]

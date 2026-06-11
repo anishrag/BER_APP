@@ -647,6 +647,53 @@ pub struct RoofApex {
     pub z_m: f64,
 }
 
+/// Ceiling pieces and boolean debris with plan area below this (m²) are
+/// slivers, not ceilings. ONE shared constant for the ceiling re-split
+/// ([`CeilingRegions::with_z_deltas`]), the fan/ridge triangulations
+/// ([`CeilingRegions::with_apexes`]), and the group merge
+/// ([`CeilingRegions::apex_groups`]) — the re-apply identities depend on all
+/// three drawing the line in the same place.
+const SLIVER_AREA_M2: f64 = 1e-6;
+
+/// A connected GROUP of roof apexes and the ceiling regions they shape — the
+/// session-derived view (never persisted; no serde) that is THE grouping
+/// authority: ridge validation ("does this region already have a high
+/// point?") and the group-aware ceiling-step reconstruction both consume it
+/// rather than re-deriving their own pairing.
+///
+/// Built by [`CeilingRegions::apex_groups`]: an apex and a region are
+/// incident when the region carries a vertex plan-matching the apex point
+/// (within 1e-6 m — the [`fan_base_z`] predicate; apex coordinates are
+/// copied verbatim into fan/ridge triangles, no boolean ops touch them), and
+/// the incidence is closed TRANSITIVELY — a ridge's transition triangles
+/// carry BOTH endpoints, linking apex A to apex B through them.
+///
+/// [`fan_base_z`]: CeilingRegion::fan_base_z
+#[derive(Clone, Debug, PartialEq)]
+pub struct RoofApexGroup {
+    /// Indices into the `apexes` slice passed to `apex_groups`, ascending.
+    pub apex_idxs: Vec<usize>,
+    /// Indices into [`CeilingRegions::regions`] of every member region
+    /// (one carrying a vertex plan-matching one of the group's apexes),
+    /// ascending. Includes base-z DISAGREEING members (membership is
+    /// topological); only the merge excludes them.
+    pub region_idxs: Vec<usize>,
+    /// The flat base the group's roof rises from: the first member region's
+    /// [`fan_base_z`] (in region order). Members whose own base disagrees
+    /// (or is `None`) are warn-logged and EXCLUDED from `merged_rings`;
+    /// `0.0` (warn-logged) in the degenerate case where no member has a
+    /// level base.
+    ///
+    /// [`fan_base_z`]: CeilingRegion::fan_base_z
+    pub base_z: f64,
+    /// Plan union of the agreeing member regions' polygons, as SIMPLE
+    /// exterior rings (open — no closing duplicate; holes decomposed away
+    /// via `split_to_simple`; sub-sliver pieces dropped). For an intact
+    /// fan/ridge this is one ring equal to the footprint piece the roof
+    /// was raised over.
+    pub merged_rings: Vec<Vec<Point2f64>>,
+}
+
 /// A planar region of the floor
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct CeilingRegions {
@@ -701,17 +748,15 @@ impl CeilingRegions {
     /// unchanged (no geo ops). Boolean results carrying interior rings (a
     /// step strictly inside a region) are decomposed into simple pieces
     /// first — `Polygon3D` is exterior-only and would fill the hole (see
-    /// `split_to_simple`). Sub-mm² slivers dropped (same rationale as
-    /// `FloorRegions::with_levels`). Pieces inherit `construction_id`, get
-    /// fresh ids and default `opes` (openings are dropped on split — region
-    /// identity doesn't survive a re-split). Assumes FLAT input regions (all
-    /// current content is — see `flat_z`); sloped regions are the later
-    /// roofs feature.
+    /// `split_to_simple`). Sub-mm² slivers dropped ([`SLIVER_AREA_M2`], same
+    /// rationale as `FloorRegions::with_levels`). Pieces inherit
+    /// `construction_id`, get fresh ids and default `opes` (openings are
+    /// dropped on split — region identity doesn't survive a re-split).
+    /// Assumes FLAT input regions (all current content is — see `flat_z`);
+    /// sloped regions are the later roofs feature.
     pub fn with_z_deltas(self, areas: &[(Vec<Point2f64>, f64)]) -> Self {
         use geo::bool_ops::BooleanOps;
         use geo::Area;
-        /// Pieces smaller than this (m²) are boolean-op debris, not ceilings.
-        const SLIVER_AREA_M2: f64 = 1e-6;
         if areas.is_empty() {
             return self;
         }
@@ -770,84 +815,224 @@ impl CeilingRegions {
         Self { regions }
     }
 
-    /// FAN the regions by roof `apexes`, applied IN ORDER (the last step of
-    /// the composition: default ceiling → step areas → apexes). Each apex
-    /// fans every region whose plan projection contains it — containment is
-    /// boundary-INCLUSIVE (`geo` `Intersects`, not `Contains`): a re-applied
-    /// apex is a CORNER of its own fan triangles and must still find them so
-    /// re-fanning is the identity (assign-time validation deliberately uses
-    /// the strict predicate instead — [`region_strictly_containing`]; two
-    /// different predicates by design). A fanned region becomes one triangle
-    /// per boundary edge: the edge keeps its per-vertex z (no flat-input
-    /// stamp like `with_z_deltas`, so fans compose over stepped — and,
-    /// structurally, already-fanned — pieces), the apex sits at `z_m`.
-    /// Sub-mm² (plan) sliver triangles are dropped — exactly the degenerate
-    /// pair incident to an apex that is already a corner, which is what makes
-    /// re-fan-to-self the identity. Fan triangles are SIMPLE by construction
-    /// (three exterior vertices, no interior rings), so unlike `with_z_deltas`
-    /// no hole decomposition (`split_to_simple`) is needed here. An apex
-    /// contained by NO region is warn-logged and skipped (never rejected —
-    /// the assessor may be mid-edit). Pieces inherit `construction_id`, get
-    /// fresh ids and default `opes`. Empty `apexes` → `self` unchanged.
+    /// Shape the regions by roof `apexes` in ONE pass (the last step of the
+    /// composition: default ceiling → step areas → apexes), grouping the
+    /// apexes PER REGION by boundary-INCLUSIVE containment (`geo`
+    /// `Intersects`, not `Contains`): a re-applied apex is a CORNER of its
+    /// own fan/ridge triangles and must still find them so re-application is
+    /// the geometric identity (assign-time validation deliberately uses the
+    /// strict predicate instead — [`region_strictly_containing`]; two
+    /// different predicates by design). Per region:
+    ///
+    /// - **0** contained apexes → kept untouched;
+    /// - **1** → a FAN: one triangle per boundary edge — the edge keeps its
+    ///   per-vertex z (no flat-input stamp like `with_z_deltas`, so fans
+    ///   compose over stepped — and, structurally, already-shaped — pieces),
+    ///   the apex sits at its `z_m`;
+    /// - **2** → a RIDGE: each boundary edge rises to its nearer apex (HUB
+    ///   triangles; nearness by ridge-axis midpoint projection, tie → the
+    ///   second apex) plus one TRANSITION triangle `(v, A, B)` per hub
+    ///   switch — see `ridge_triangles`;
+    /// - **≥3** → warn + ridge from the FIRST TWO in apex-list order
+    ///   (deterministic, never a panic — resolve must always produce
+    ///   geometry; assign-time validation rejects this up front).
+    ///
+    /// Both branches PRE-LIFT first (D2 step 0): ring vertices plan-matching
+    /// an applied apex (1e-6 m) take that apex's z — load-bearing for the
+    /// re-apply-to-self identity. Sub-mm² (plan) sliver triangles are
+    /// dropped ([`SLIVER_AREA_M2`]) — exactly the degenerate pieces incident
+    /// to an apex that is already a corner. Triangles are SIMPLE by
+    /// construction (three exterior vertices, no interior rings), so unlike
+    /// `with_z_deltas` no hole decomposition (`split_to_simple`) is needed
+    /// here. An apex contained by NO region is warn-logged and skipped
+    /// (never rejected — the assessor may be mid-edit). Pieces inherit
+    /// `construction_id`, get fresh ids and default `opes`. Empty `apexes`
+    /// → `self` unchanged.
     ///
     /// [`region_strictly_containing`]: CeilingRegions::region_strictly_containing
     pub fn with_apexes(self, apexes: &[RoofApex]) -> Self {
         use geo::Intersects;
-        /// Triangles with plan area below this (m²) are fan debris, not
-        /// ceilings (same threshold as `with_z_deltas`).
-        const SLIVER_AREA_M2: f64 = 1e-6;
         if apexes.is_empty() {
             return self;
         }
-        let mut regions = self.regions;
-        for apex in apexes {
-            let p = GeoPoint::new(apex.point.x, apex.point.y);
-            let mut next: Vec<CeilingRegion> = Vec::new();
-            let mut hit = false;
-            for region in regions {
-                let plan: Polygon<f64> = region.polygon.clone().into();
-                if region.polygon.exterior.len() < 3 || !plan.intersects(&p) {
-                    next.push(region);
-                    continue;
-                }
-                hit = true;
-                let ext = &region.polygon.exterior;
-                let n = ext.len();
-                for i in 0..n {
-                    let a = ext[i];
-                    let b = ext[(i + 1) % n];
-                    // Plan area via the cross product — degenerate triangles
-                    // (the two edges INCIDENT to an apex that is already a
-                    // corner) fall below the sliver threshold and drop.
-                    let area = ((b.x - a.x) * (apex.point.y - a.y)
-                        - (b.y - a.y) * (apex.point.x - a.x))
-                        .abs()
-                        / 2.0;
-                    if area < SLIVER_AREA_M2 {
-                        continue;
+        let mut used = vec![false; apexes.len()];
+        let mut next: Vec<CeilingRegion> = Vec::new();
+        for region in self.regions {
+            if region.polygon.exterior.len() < 3 {
+                next.push(region);
+                continue;
+            }
+            let plan: Polygon<f64> = region.polygon.clone().into();
+            let contained: Vec<usize> = apexes
+                .iter()
+                .enumerate()
+                .filter(|(_, a)| plan.intersects(&GeoPoint::new(a.point.x, a.point.y)))
+                .map(|(i, _)| i)
+                .collect();
+            for &i in &contained {
+                used[i] = true;
+            }
+            match contained.len() {
+                0 => next.push(region),
+                1 => next.extend(fan_triangles(region, &apexes[contained[0]])),
+                n => {
+                    if n >= 3 {
+                        log::warn!(
+                            "ceiling region contains {n} roof apexes — \
+                             ridging from the first two in apex-list order"
+                        );
                     }
-                    next.push(CeilingRegion {
-                        id: ItemId::default(),
-                        polygon: Polygon3D::new(vec![
-                            a,
-                            b,
-                            Point3f64::new(apex.point.x, apex.point.y, apex.z_m),
-                        ]),
-                        opes: Opes::default(),
-                        construction_id: region.construction_id,
-                    });
+                    next.extend(ridge_triangles(
+                        region,
+                        &apexes[contained[0]],
+                        &apexes[contained[1]],
+                    ));
                 }
             }
+        }
+        for (i, hit) in used.iter().enumerate() {
             if !hit {
                 log::warn!(
                     "roof apex at ({:.3}, {:.3}) lies in no ceiling region — skipped",
-                    apex.point.x,
-                    apex.point.y
+                    apexes[i].point.x,
+                    apexes[i].point.y
                 );
             }
-            regions = next;
         }
-        Self { regions }
+        Self { regions: next }
+    }
+
+    /// Group `apexes` with the regions they shape — THE grouping authority
+    /// (see [`RoofApexGroup`]). Incidence is quantized plan-corner identity
+    /// (a region vertex within 1e-6 m of the apex point — the
+    /// [`fan_base_z`] predicate), closed transitively over shared regions
+    /// (a ridge's transition triangles carry both endpoints, linking A to
+    /// B). Apexes incident to no region join no group (e.g. mid-edit, or a
+    /// dormant apex outside every ring). Groups come out ordered by their
+    /// smallest apex index; `base_z` and the warn-excluded merge are per
+    /// the [`RoofApexGroup`] field docs.
+    ///
+    /// [`fan_base_z`]: CeilingRegion::fan_base_z
+    pub fn apex_groups(&self, apexes: &[RoofApex]) -> Vec<RoofApexGroup> {
+        use geo::bool_ops::BooleanOps;
+        use geo::Area;
+        const EPS_M: f64 = 1e-6;
+        if apexes.is_empty() {
+            return Vec::new();
+        }
+        // Region → incident apex indices, by quantized plan-corner identity.
+        let matched: Vec<Vec<usize>> = self
+            .regions
+            .iter()
+            .map(|r| {
+                apexes
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, a)| {
+                        r.polygon.exterior.iter().any(|v| {
+                            (v.x - a.point.x).abs() <= EPS_M && (v.y - a.point.y).abs() <= EPS_M
+                        })
+                    })
+                    .map(|(i, _)| i)
+                    .collect()
+            })
+            .collect();
+        // Transitive closure: union-find over apex indices, linked whenever
+        // one region is incident to both.
+        let mut parent: Vec<usize> = (0..apexes.len()).collect();
+        fn find(parent: &mut [usize], mut i: usize) -> usize {
+            while parent[i] != i {
+                parent[i] = parent[parent[i]]; // path halving
+                i = parent[i];
+            }
+            i
+        }
+        for m in &matched {
+            for w in m.windows(2) {
+                let (ra, rb) = (find(&mut parent, w[0]), find(&mut parent, w[1]));
+                parent[ra.max(rb)] = ra.min(rb);
+            }
+        }
+        // Collect components: apex members (only incident apexes), then
+        // region members in region order.
+        let mut groups: Vec<(usize, Vec<usize>, Vec<usize>)> = Vec::new();
+        let group_of = |root: usize, groups: &mut Vec<(usize, Vec<usize>, Vec<usize>)>| {
+            if let Some(g) = groups.iter().position(|(r, _, _)| *r == root) {
+                g
+            } else {
+                groups.push((root, Vec::new(), Vec::new()));
+                groups.len() - 1
+            }
+        };
+        for ai in 0..apexes.len() {
+            if matched.iter().any(|m| m.contains(&ai)) {
+                let root = find(&mut parent, ai);
+                let g = group_of(root, &mut groups);
+                groups[g].1.push(ai);
+            }
+        }
+        for (ri, m) in matched.iter().enumerate() {
+            if let Some(&a0) = m.first() {
+                let root = find(&mut parent, a0);
+                let g = group_of(root, &mut groups);
+                groups[g].2.push(ri);
+            }
+        }
+        groups.sort_by_key(|(_, apex_idxs, _)| apex_idxs[0]);
+        groups
+            .into_iter()
+            .map(|(_, apex_idxs, region_idxs)| {
+                // base_z from the members, warn-excluding disagreement.
+                let mut base_z: Option<f64> = None;
+                let mut merge: Vec<&CeilingRegion> = Vec::new();
+                for &ri in &region_idxs {
+                    let r = &self.regions[ri];
+                    match (r.fan_base_z(apexes), base_z) {
+                        (Some(z), None) => {
+                            base_z = Some(z);
+                            merge.push(r);
+                        }
+                        (Some(z), Some(b)) if (z - b).abs() <= EPS_M => merge.push(r),
+                        (got, _) => log::warn!(
+                            "roof apex group: region base z {got:?} disagrees with the \
+                             group's base {base_z:?} — excluded from the merged ring"
+                        ),
+                    }
+                }
+                if base_z.is_none() {
+                    log::warn!("roof apex group has no level-based member region — base_z = 0");
+                }
+                // Plan union of the agreeing members → simple exterior rings.
+                let mut acc = MultiPolygon::<f64>(Vec::new());
+                for r in &merge {
+                    acc = acc.union(&MultiPolygon(vec![r.polygon.clone().into()]));
+                }
+                let merged_rings = acc
+                    .0
+                    .iter()
+                    .flat_map(split_to_simple)
+                    .filter(|p| p.unsigned_area() >= SLIVER_AREA_M2)
+                    .map(|p| {
+                        let mut pts: Vec<Point2f64> = p
+                            .exterior()
+                            .coords()
+                            .map(|c| Point2f64::new(c.x, c.y))
+                            .collect();
+                        if pts.len() > 1 && pts.first() == pts.last() {
+                            pts.pop();
+                        }
+                        pts
+                    })
+                    .filter(|ring| ring.len() >= 3)
+                    .collect();
+                RoofApexGroup {
+                    apex_idxs,
+                    region_idxs,
+                    base_z: base_z.unwrap_or(0.0),
+                    merged_rings,
+                }
+            })
+            .collect()
     }
 
     /// The region whose plan projection STRICTLY contains `p` (boundary
@@ -863,6 +1048,183 @@ impl CeilingRegions {
             .iter()
             .find(|r| Polygon::<f64>::from(r.polygon.clone()).contains(&gp))
     }
+}
+
+/// D2 step 0 — PRE-LIFT: any ring vertex plan-matching one of `apexes`
+/// (within 1e-6 m, the `fan_base_z` predicate) takes that apex's z.
+/// Load-bearing for the re-apply-to-self identity: a fan/ridge triangle fed
+/// back through `with_apexes` carries the apexes as ring CORNERS, and the
+/// emitted hub/transition triangles keep the (lifted) boundary z — without
+/// the lift a re-emitted corner could revert to a stale height.
+fn pre_lift(mut ext: Vec<Point3f64>, apexes: &[&RoofApex]) -> Vec<Point3f64> {
+    const EPS_M: f64 = 1e-6;
+    for v in &mut ext {
+        if let Some(a) = apexes
+            .iter()
+            .find(|a| (v.x - a.point.x).abs() <= EPS_M && (v.y - a.point.y).abs() <= EPS_M)
+        {
+            v.z = a.z_m;
+        }
+    }
+    ext
+}
+
+/// Plan (projected) area of triangle `(p, q, r)` via the cross product —
+/// positive CCW, negative CW.
+fn tri_signed_plan_area(p: &Point3f64, q: &Point3f64, r: &Point3f64) -> f64 {
+    ((q.x - p.x) * (r.y - p.y) - (q.y - p.y) * (r.x - p.x)) / 2.0
+}
+
+/// FAN a region to a single `apex` (the 1-apex branch of
+/// [`CeilingRegions::with_apexes`], where the semantics are documented):
+/// pre-lift, then one triangle per boundary edge `(vᵢ, vᵢ₊₁, apex)`, dropping
+/// sub-[`SLIVER_AREA_M2`] slivers — exactly the degenerate pair incident to
+/// an apex that is already a corner. Fresh ids, default `opes`, inherited
+/// `construction_id`.
+fn fan_triangles(region: CeilingRegion, apex: &RoofApex) -> Vec<CeilingRegion> {
+    let cid = region.construction_id;
+    let ext = pre_lift(region.polygon.exterior, &[apex]);
+    let apex_v = Point3f64::new(apex.point.x, apex.point.y, apex.z_m);
+    let n = ext.len();
+    let mut out = Vec::new();
+    for i in 0..n {
+        let a = ext[i];
+        let b = ext[(i + 1) % n];
+        if tri_signed_plan_area(&a, &b, &apex_v).abs() < SLIVER_AREA_M2 {
+            continue;
+        }
+        out.push(CeilingRegion {
+            id: ItemId::default(),
+            polygon: Polygon3D::new(vec![a, b, apex_v]),
+            opes: Opes::default(),
+            construction_id: cid,
+        });
+    }
+    out
+}
+
+/// Per-EDGE hub assignment for a ridge from `a` to `b` over a plan ring:
+/// with `d = b − a` and the unclamped ridge parameter
+/// `t(P) = (P − a)·d / |d|²`, edge `i` (from `ring[i]` to `ring[i+1]`)
+/// belongs to hub B iff `t(midpoint) ≥ 0.5` (tie → B). Returns one bool per
+/// edge (`true` = B), or `None` for a degenerate ridge (`|d|² < 1e-12`).
+/// The SINGLE source of the hub rule — `ridge_triangles` and
+/// [`ridge_hub_switches`] must agree or the assign-time hub-switch check
+/// would validate a different roof than resolve builds.
+fn ridge_edge_hubs(ring: &[(f64, f64)], a: Point2f64, b: Point2f64) -> Option<Vec<bool>> {
+    let (dx, dy) = (b.x - a.x, b.y - a.y);
+    let d2 = dx * dx + dy * dy;
+    if d2 < 1e-12 {
+        return None;
+    }
+    let n = ring.len();
+    Some(
+        (0..n)
+            .map(|i| {
+                let p = ring[i];
+                let q = ring[(i + 1) % n];
+                let (mx, my) = ((p.0 + q.0) / 2.0, (p.1 + q.1) / 2.0);
+                ((mx - a.x) * dx + (my - a.y) * dy) / d2 >= 0.5
+            })
+            .collect(),
+    )
+}
+
+/// How many times the per-edge hub assignment SWITCHES between the two ridge
+/// endpoints walking `ring` (counted at vertices whose entering and leaving
+/// edges disagree — each switch is one transition triangle). A convex ring
+/// with both apexes interior switches exactly 2; more means the ring wraps
+/// past the ridge axis (a deep notch) and the transition triangles would
+/// overlap — assign-time validation rejects > 2, resolve warns and proceeds.
+/// `0` for rings with fewer than 3 vertices or a degenerate ridge
+/// (`a` ≈ `b`). Pure plan-space — usable on a group's merged ring before any
+/// apex exists.
+pub fn ridge_hub_switches(ring: &[Point2f64], a: Point2f64, b: Point2f64) -> usize {
+    if ring.len() < 3 {
+        return 0;
+    }
+    let plan: Vec<(f64, f64)> = ring.iter().map(|p| (p.x, p.y)).collect();
+    let Some(hubs) = ridge_edge_hubs(&plan, a, b) else {
+        return 0;
+    };
+    let n = hubs.len();
+    (0..n).filter(|&i| hubs[i] != hubs[(i + n - 1) % n]).count()
+}
+
+/// Triangulate a region under a RIDGE between apexes `a` and `b` (the 2-apex
+/// branch of [`CeilingRegions::with_apexes`]), per design D2:
+///
+/// 0. PRE-LIFT ring vertices plan-matching an apex to that apex's z.
+/// 1. Degenerate ridge (`|b − a|² < 1e-12` in plan) → warn + single fan
+///    to `a`.
+/// 2. HUB triangles, in edge order: each boundary edge `(vᵢ, vᵢ₊₁)` rises to
+///    its hub `H` — `a` if the edge midpoint's ridge parameter
+///    `t < 0.5`, else `b` (tie → `b`; see [`ridge_edge_hubs`]) — emitting
+///    `(vᵢ, vᵢ₊₁, H)` with the boundary keeping its (pre-lifted) z and `H`
+///    at the hub's `z_m`.
+/// 3. TRANSITION triangles, in vertex order: at each vertex `v` whose
+///    entering and leaving edges disagree, `(v, hub(leaving),
+///    hub(entering))` — this order preserves CCW winding.
+///
+/// Sub-[`SLIVER_AREA_M2`] (plan) triangles drop in both steps. Fresh ids,
+/// default `opes`, inherited `construction_id` (fan parity). For a convex
+/// ring (≤ 2 hub switches) the triangles tile the region exactly; every
+/// triangle is trivially planar.
+fn ridge_triangles(region: CeilingRegion, a: &RoofApex, b: &RoofApex) -> Vec<CeilingRegion> {
+    let cid = region.construction_id;
+    let ext = pre_lift(region.polygon.exterior, &[a, b]);
+    let plan: Vec<(f64, f64)> = ext.iter().map(|v| (v.x, v.y)).collect();
+    let Some(hubs) = ridge_edge_hubs(&plan, a.point, b.point) else {
+        log::warn!(
+            "degenerate ridge: apexes coincide in plan at ({:.3}, {:.3}) — fanning to the first",
+            a.point.x,
+            a.point.y
+        );
+        return fan_triangles(
+            CeilingRegion {
+                id: ItemId::default(),
+                polygon: Polygon3D::new(ext),
+                opes: Opes::default(),
+                construction_id: cid,
+            },
+            a,
+        );
+    };
+    let hub_v = |is_b: bool| {
+        let h = if is_b { b } else { a };
+        Point3f64::new(h.point.x, h.point.y, h.z_m)
+    };
+    let mk = |verts: Vec<Point3f64>| CeilingRegion {
+        id: ItemId::default(),
+        polygon: Polygon3D::new(verts),
+        opes: Opes::default(),
+        construction_id: cid,
+    };
+    let n = ext.len();
+    let mut out = Vec::new();
+    // Hub triangles, in edge order.
+    for i in 0..n {
+        let (va, vb) = (ext[i], ext[(i + 1) % n]);
+        let h = hub_v(hubs[i]);
+        if tri_signed_plan_area(&va, &vb, &h).abs() < SLIVER_AREA_M2 {
+            continue;
+        }
+        out.push(mk(vec![va, vb, h]));
+    }
+    // Transition triangles, in vertex order.
+    for i in 0..n {
+        let entering = hubs[(i + n - 1) % n];
+        let leaving = hubs[i];
+        if entering == leaving {
+            continue;
+        }
+        let (hl, he) = (hub_v(leaving), hub_v(entering));
+        if tri_signed_plan_area(&ext[i], &hl, &he).abs() < SLIVER_AREA_M2 {
+            continue;
+        }
+        out.push(mk(vec![ext[i], hl, he]));
+    }
+    out
 }
 
 /// Decompose a boolean-op result polygon into SIMPLE (exterior-only) pieces.
@@ -1055,8 +1417,13 @@ impl CeilingRegion {
     /// is what makes ceiling-step reconstruction APEX-AWARE: a stepped piece
     /// fanned under an apex still recovers its step delta on reload — the
     /// load-bearing reload-fixpoint invariant. Equals [`flat_z`] when no
-    /// vertex matches an apex. `None` when fewer than two base vertices
-    /// remain or the remainder isn't level (a genuinely irregular slope).
+    /// vertex matches an apex. `None` when NO base vertex remains or the
+    /// remainder isn't level (a genuinely irregular slope). RELAXED (ridge
+    /// work) to accept a SINGLE remaining base vertex: a ridge TRANSITION
+    /// triangle `(v, A, B)` keeps exactly one non-apex vertex and must still
+    /// recover its base on reload; the plan-degenerate needles the old
+    /// two-vertex floor guarded against still die downstream at the
+    /// reconstruction's `ring_area2` filter.
     ///
     /// [`flat_z`]: CeilingRegion::flat_z
     pub fn fan_base_z(&self, apexes: &[RoofApex]) -> Option<f64> {
@@ -1076,9 +1443,6 @@ impl CeilingRegion {
             .map(|v| v.z)
             .collect();
         let (&z0, rest) = base.split_first()?;
-        if rest.is_empty() {
-            return None;
-        }
         rest.iter().all(|z| (z - z0).abs() <= EPS_M).then_some(z0)
     }
 }
@@ -2266,8 +2630,9 @@ mod tests {
     }
 
     #[test]
-    fn with_apexes_applies_in_order_across_regions() {
-        // Two disjoint rings; one apex each — both fan independently.
+    fn with_apexes_one_pass_fans_disjoint_rings_independently() {
+        // Two disjoint rings; one apex each — both fan independently (each
+        // region groups its own contained apexes; here one each → FAN).
         let regions = CeilingRegions::default_for_footprint(
             vec![square(0.0, 0.0, 4.0, 4.0), square(6.0, 0.0, 10.0, 4.0)],
             2.4,
@@ -2347,7 +2712,12 @@ mod tests {
         };
         assert_eq!(sloped.fan_base_z(&[apex.clone()]), Some(2.4));
 
-        // Degenerate: fewer than two non-apex vertices remain.
+        // A needle with a SINGLE non-apex vertex. DELIBERATE CHANGE (ridge
+        // work): this used to be None under a two-base-vertex floor, but a
+        // ridge TRANSITION triangle (v, A, B) keeps exactly one non-apex
+        // vertex and must still recover its base on reload, so fan_base_z is
+        // RELAXED to >= 1 remaining vertex. Plan-degenerate needles like this
+        // one still die downstream at the reconstruction's ring_area2 filter.
         let needle = CeilingRegion {
             id: ItemId::default(),
             polygon: Polygon3D::new(vec![
@@ -2358,7 +2728,379 @@ mod tests {
             opes: Opes::default(),
             construction_id: cid,
         };
-        assert_eq!(needle.fan_base_z(&[apex]), None);
+        assert_eq!(needle.fan_base_z(&[apex]), Some(2.4));
+
+        // All vertices are apexes: nothing left to base on → still None.
+        let all_apex = CeilingRegion {
+            id: ItemId::default(),
+            polygon: Polygon3D::new(vec![
+                Point3f64::new(2.0, 2.0, 4.0),
+                Point3f64::new(2.0, 2.0, 4.0),
+                Point3f64::new(2.0, 2.0, 4.0),
+            ]),
+            opes: Opes::default(),
+            construction_id: cid,
+        };
+        assert_eq!(
+            all_apex.fan_base_z(&[RoofApex {
+                point: Point2f64::new(2.0, 2.0),
+                z_m: 4.0,
+            }]),
+            None
+        );
+    }
+
+    // ── Roof ridges (two apexes in one region) ──────────────────────────
+
+    /// Signed plan area of a region's exterior ring (shoelace; positive CCW).
+    fn signed_plan_area(r: &CeilingRegion) -> f64 {
+        let e = &r.polygon.exterior;
+        let n = e.len();
+        (0..n)
+            .map(|i| {
+                let p = e[i];
+                let q = e[(i + 1) % n];
+                p.x * q.y - q.x * p.y
+            })
+            .sum::<f64>()
+            / 2.0
+    }
+
+    /// How many of the region's vertices plan-match one of `apexes`
+    /// (1e-6 m) — 1 for a hub triangle, 2 for a transition triangle.
+    fn apex_vertex_count(r: &CeilingRegion, apexes: &[RoofApex]) -> usize {
+        r.polygon
+            .exterior
+            .iter()
+            .filter(|v| {
+                apexes
+                    .iter()
+                    .any(|a| (v.x - a.point.x).abs() <= 1e-6 && (v.y - a.point.y).abs() <= 1e-6)
+            })
+            .count()
+    }
+
+    /// Cyclic ring equality: same vertices in the same cyclic order, any
+    /// starting vertex (triangulation may re-emit a triangle rotated).
+    fn cyclically_equal(a: &Polygon3D, b: &Polygon3D) -> bool {
+        let (ea, eb) = (&a.exterior, &b.exterior);
+        let n = ea.len();
+        n == eb.len() && (0..n).any(|s| (0..n).all(|i| ea[i] == eb[(i + s) % n]))
+    }
+
+    /// A level gable over the 10×4 footprint: apexes at (2,2) and (8,2).
+    fn gable_apexes() -> (RoofApex, RoofApex) {
+        (
+            RoofApex {
+                point: Point2f64::new(2.0, 2.0),
+                z_m: 4.2,
+            },
+            RoofApex {
+                point: Point2f64::new(8.0, 2.0),
+                z_m: 4.2,
+            },
+        )
+    }
+
+    fn gable_footprint(cid: ItemId) -> CeilingRegions {
+        CeilingRegions::default_for_footprint(vec![square(0.0, 0.0, 10.0, 4.0)], 2.4, cid)
+    }
+
+    #[test]
+    fn with_apexes_two_apexes_make_a_rectangle_gable() {
+        let cid = ItemId::default();
+        let (a, b) = gable_apexes();
+        let apexes = vec![a, b];
+        let out = gable_footprint(cid).with_apexes(&apexes);
+        // 4 hub triangles (one per rectangle edge) + 2 transition triangles
+        // (one per hub switch — convex ring, exactly two switches).
+        assert_eq!(out.regions.len(), 6, "4 hub + 2 transition");
+        let hubs = out
+            .regions
+            .iter()
+            .filter(|r| apex_vertex_count(r, &apexes) == 1)
+            .count();
+        let transitions = out
+            .regions
+            .iter()
+            .filter(|r| apex_vertex_count(r, &apexes) == 2)
+            .count();
+        assert_eq!(hubs, 4, "one hub triangle per boundary edge");
+        assert_eq!(transitions, 2, "one transition per hub switch");
+        // The triangles tile the region exactly.
+        let total: f64 = out.regions.iter().map(plan_area).sum();
+        assert!((total - 40.0).abs() < 1e-6, "areas sum to the region");
+        for r in &out.regions {
+            assert_eq!(r.polygon.exterior.len(), 3);
+            assert_eq!(r.construction_id, cid, "pieces inherit the fabric link");
+            // Winding consistent: CCW input ring → every triangle CCW.
+            assert!(
+                signed_plan_area(r) > 0.0,
+                "flipped triangle: {:?}",
+                r.polygon
+            );
+        }
+    }
+
+    /// RE-APPLY-TO-SELF IDENTITY for a TRANSITION triangle `(w, A, B)`, for
+    /// all three positions of w's ridge parameter: t(w) interior to [0, 1]
+    /// (it comes back as a transition triangle), t(w) < 0 and t(w) > 1 (it
+    /// comes back as a HUB triangle, possibly rotated — hence cyclic
+    /// equality). PRE-LIFT is what makes the corners hold their apex z.
+    #[test]
+    fn ridge_transition_triangle_reapply_is_identity_for_all_t_cases() {
+        let (a, b) = gable_apexes();
+        let apexes = vec![a, b];
+        for w in [
+            Point3f64::new(5.0, 4.0, 2.4),  // t(w) = 0.5: interior
+            Point3f64::new(0.0, 4.0, 2.4),  // t(w) < 0: behind A
+            Point3f64::new(10.0, 4.0, 2.4), // t(w) > 1: beyond B
+        ] {
+            let tri = CeilingRegions {
+                regions: vec![CeilingRegion {
+                    id: ItemId::default(),
+                    polygon: Polygon3D::new(vec![
+                        w,
+                        Point3f64::new(2.0, 2.0, 4.2),
+                        Point3f64::new(8.0, 2.0, 4.2),
+                    ]),
+                    opes: Opes::default(),
+                    construction_id: ItemId::default(),
+                }],
+            };
+            let before = tri.regions[0].polygon.clone();
+            let out = tri.with_apexes(&apexes);
+            assert_eq!(out.regions.len(), 1, "one triangle survives for w={w:?}");
+            assert!(
+                cyclically_equal(&out.regions[0].polygon, &before),
+                "re-apply identity for w={w:?}: got {:?}",
+                out.regions[0].polygon
+            );
+        }
+    }
+
+    /// RE-APPLY-TO-SELF IDENTITY for HUB triangles: a hub triangle contains
+    /// only its own apex (as a corner), so it re-applies through the FAN
+    /// branch and comes back unchanged.
+    #[test]
+    fn ridge_hub_triangle_reapply_is_identity() {
+        let (a, b) = gable_apexes();
+        let apexes = vec![a, b];
+        let gable = gable_footprint(ItemId::default()).with_apexes(&apexes);
+        let hubs: Vec<&CeilingRegion> = gable
+            .regions
+            .iter()
+            .filter(|r| apex_vertex_count(r, &apexes) == 1)
+            .collect();
+        assert_eq!(hubs.len(), 4);
+        for r in hubs {
+            let before = r.polygon.clone();
+            let out = CeilingRegions {
+                regions: vec![r.clone()],
+            }
+            .with_apexes(&apexes);
+            assert_eq!(out.regions.len(), 1);
+            assert!(
+                cyclically_equal(&out.regions[0].polygon, &before),
+                "hub re-fan identity: got {:?}",
+                out.regions[0].polygon
+            );
+        }
+    }
+
+    /// SLOPING ridge (zA ≠ zB — the two-point flow with different heights):
+    /// every triangle vertex at apex A's plan position carries zA, at B's
+    /// carries zB, and the boundary keeps the base.
+    #[test]
+    fn with_apexes_sloping_ridge_carries_each_apexes_z() {
+        let a = RoofApex {
+            point: Point2f64::new(2.0, 2.0),
+            z_m: 4.0,
+        };
+        let b = RoofApex {
+            point: Point2f64::new(8.0, 2.0),
+            z_m: 4.5,
+        };
+        let out = gable_footprint(ItemId::default()).with_apexes(&[a.clone(), b.clone()]);
+        let at =
+            |v: &Point3f64, p: Point2f64| (v.x - p.x).abs() <= 1e-9 && (v.y - p.y).abs() <= 1e-9;
+        let (mut saw_a, mut saw_b) = (false, false);
+        for r in &out.regions {
+            for v in &r.polygon.exterior {
+                if at(v, a.point) {
+                    assert!((v.z - 4.0).abs() < 1e-9, "A end at zA");
+                    saw_a = true;
+                } else if at(v, b.point) {
+                    assert!((v.z - 4.5).abs() < 1e-9, "B end at zB");
+                    saw_b = true;
+                } else {
+                    assert!((v.z - 2.4).abs() < 1e-9, "boundary keeps the base z");
+                }
+            }
+        }
+        assert!(saw_a && saw_b, "both ridge ends appear in the roof");
+        let total: f64 = out.regions.iter().map(plan_area).sum();
+        assert!((total - 40.0).abs() < 1e-6);
+    }
+
+    /// SLIVER DROP: an apex sitting ON a ring corner makes its incident hub
+    /// triangle and one transition zero-area — both drop, and the remaining
+    /// triangles still tile the footprint with nothing under the threshold.
+    #[test]
+    fn ridge_triangles_drop_corner_apex_slivers() {
+        let a = RoofApex {
+            point: Point2f64::new(0.0, 0.0), // ON the footprint corner
+            z_m: 4.0,
+        };
+        let b = RoofApex {
+            point: Point2f64::new(8.0, 2.0),
+            z_m: 4.0,
+        };
+        let out = gable_footprint(ItemId::default()).with_apexes(&[a, b]);
+        // Hub triangle of the edge (0,4)→(0,0) (hub A, a duplicate corner)
+        // and the transition at (0,0) are zero-area slivers: 6 → 4 pieces.
+        assert_eq!(out.regions.len(), 4, "two slivers dropped");
+        for r in &out.regions {
+            assert!(plan_area(r) >= 1e-6, "no sliver emitted: {:?}", r.polygon);
+        }
+        let total: f64 = out.regions.iter().map(plan_area).sum();
+        assert!((total - 40.0).abs() < 1e-6, "tiling survives the drops");
+    }
+
+    /// DEGENERATE ridge: two apexes at one plan point fall back to a single
+    /// fan at the first (warn + proceed — resolve never panics).
+    #[test]
+    fn with_apexes_coincident_apexes_fall_back_to_a_fan() {
+        let (a, _) = gable_apexes();
+        let dup = a.clone();
+        let fanned = gable_footprint(ItemId::default()).with_apexes(&[a.clone()]);
+        let ridged = gable_footprint(ItemId::default()).with_apexes(&[a, dup]);
+        let polys = |r: &CeilingRegions| -> Vec<Polygon3D> {
+            r.regions.iter().map(|x| x.polygon.clone()).collect()
+        };
+        assert_eq!(polys(&ridged), polys(&fanned), "fallback equals the fan");
+    }
+
+    /// ≥3 apexes in one region: warn + ridge from the FIRST TWO in apex-list
+    /// order — deterministic, never a panic.
+    #[test]
+    fn with_apexes_three_apexes_use_the_first_two() {
+        let (a, b) = gable_apexes();
+        let c = RoofApex {
+            point: Point2f64::new(5.0, 1.0),
+            z_m: 5.0,
+        };
+        let two = gable_footprint(ItemId::default()).with_apexes(&[a.clone(), b.clone()]);
+        let three = gable_footprint(ItemId::default()).with_apexes(&[a, b, c]);
+        let polys = |r: &CeilingRegions| -> Vec<Polygon3D> {
+            r.regions.iter().map(|x| x.polygon.clone()).collect()
+        };
+        assert_eq!(polys(&three), polys(&two), "third apex ignored");
+    }
+
+    /// GROUPING: a ridge's hub triangles carry only their own apex, but the
+    /// transition triangles carry BOTH — transitive closure links A and B
+    /// into ONE group, whose merged ring is the original footprint.
+    #[test]
+    fn apex_groups_link_a_ridges_apexes_transitively_and_merge_to_the_footprint() {
+        use geo::Area;
+        let (a, b) = gable_apexes();
+        let apexes = vec![a, b];
+        let gable = gable_footprint(ItemId::default()).with_apexes(&apexes);
+        let groups = gable.apex_groups(&apexes);
+        assert_eq!(groups.len(), 1, "transition triangles link A and B");
+        let g = &groups[0];
+        assert_eq!(g.apex_idxs, vec![0, 1]);
+        assert_eq!(g.region_idxs.len(), 6, "every triangle is a member");
+        assert!((g.base_z - 2.4).abs() < 1e-9, "group base from the members");
+        assert_eq!(g.merged_rings.len(), 1, "union is one simple ring");
+        let ring = &g.merged_rings[0];
+        let poly = Polygon::new(
+            LineString::from(ring.iter().map(|p| (p.x, p.y)).collect::<Vec<_>>()),
+            vec![],
+        );
+        assert!(
+            (poly.unsigned_area() - 40.0).abs() < 1e-6,
+            "merged ring = the original footprint"
+        );
+        for corner in [(0.0, 0.0), (10.0, 0.0), (10.0, 4.0), (0.0, 4.0)] {
+            assert!(
+                ring.iter()
+                    .any(|p| (p.x - corner.0).abs() < 1e-9 && (p.y - corner.1).abs() < 1e-9),
+                "footprint corner {corner:?} on the merged ring"
+            );
+        }
+    }
+
+    /// Two fans over DISJOINT rings share no region → two separate groups,
+    /// each merging back to its own footprint square.
+    #[test]
+    fn apex_groups_keep_unlinked_fans_separate() {
+        use geo::Area;
+        let apexes = vec![
+            RoofApex {
+                point: Point2f64::new(2.0, 2.0),
+                z_m: 4.0,
+            },
+            RoofApex {
+                point: Point2f64::new(8.0, 2.0),
+                z_m: 3.5,
+            },
+        ];
+        let regions = CeilingRegions::default_for_footprint(
+            vec![square(0.0, 0.0, 4.0, 4.0), square(6.0, 0.0, 10.0, 4.0)],
+            2.4,
+            ItemId::default(),
+        )
+        .with_apexes(&apexes);
+        let groups = regions.apex_groups(&apexes);
+        assert_eq!(groups.len(), 2, "no shared region, no link");
+        for (i, g) in groups.iter().enumerate() {
+            assert_eq!(g.apex_idxs, vec![i], "groups ordered by apex index");
+            assert_eq!(g.region_idxs.len(), 4, "each fan's 4 triangles");
+            assert!((g.base_z - 2.4).abs() < 1e-9);
+            assert_eq!(g.merged_rings.len(), 1);
+            let ring = &g.merged_rings[0];
+            let poly = Polygon::new(
+                LineString::from(ring.iter().map(|p| (p.x, p.y)).collect::<Vec<_>>()),
+                vec![],
+            );
+            assert!((poly.unsigned_area() - 16.0).abs() < 1e-6);
+        }
+        // An apex matched by no region joins no group.
+        assert!(regions
+            .apex_groups(&[RoofApex {
+                point: Point2f64::new(50.0, 50.0),
+                z_m: 4.0,
+            }])
+            .is_empty());
+    }
+
+    /// `ridge_hub_switches`: a convex ring with the ridge inside switches
+    /// hubs exactly twice; a ring with a deep notch crossing the ridge axis
+    /// switches more (the shape assign-time validation rejects); degenerate
+    /// inputs report 0.
+    #[test]
+    fn ridge_hub_switches_convex_is_two_and_deep_notch_more() {
+        let a = Point2f64::new(2.0, 2.0);
+        let b = Point2f64::new(8.0, 2.0);
+        assert_eq!(ridge_hub_switches(&square(0.0, 0.0, 10.0, 4.0), a, b), 2);
+        // A deep slot cut from the right past the ridge midline: the slot's
+        // far edge hubs to A between B-hubbed runs → 4 switches.
+        let notched = vec![
+            Point2f64::new(0.0, 0.0),
+            Point2f64::new(10.0, 0.0),
+            Point2f64::new(10.0, 1.0),
+            Point2f64::new(3.0, 1.0),
+            Point2f64::new(3.0, 3.0),
+            Point2f64::new(10.0, 3.0),
+            Point2f64::new(10.0, 4.0),
+            Point2f64::new(0.0, 4.0),
+        ];
+        assert_eq!(ridge_hub_switches(&notched, a, b), 4);
+        // Degenerate: coincident endpoints / too-small rings.
+        assert_eq!(ridge_hub_switches(&square(0.0, 0.0, 10.0, 4.0), a, a), 0);
+        assert_eq!(ridge_hub_switches(&[], a, b), 0);
     }
 
     #[test]
