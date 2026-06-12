@@ -340,10 +340,22 @@ pub fn validate_roof_ridge_extent(
             Point2f64::new(1.0, 0.0),
         ),
     };
-    let region = storey
-        .roofs
-        .region_strictly_containing(start)
-        .ok_or_else(|| RIDGE_START_OUTSIDE_CEILING_MSG.to_string())?;
+    let ridx = region_idx_strictly_containing(storey, start)
+        .map_err(|_| RIDGE_START_OUTSIDE_CEILING_MSG.to_string())?;
+    // Reject occupied / already-sloped areas HERE rather than letting the
+    // Height stage reject later — both are properties of the start's region,
+    // fully knowable at the Length question (the no-late-rejection invariant
+    // then genuinely covers every Height-stage region predicate; only the
+    // height VALUE itself can still be rejected, which is the user's own
+    // entry on that stage).
+    let groups = storey.roofs.apex_groups(&storey.roof_apexes);
+    if groups.iter().any(|g| g.region_idxs.contains(&ridx)) {
+        return Err(RIDGE_REGION_OCCUPIED_MSG.to_string());
+    }
+    let region = &storey.roofs.regions[ridx];
+    if region.flat_z().is_none() {
+        return Err(REGION_IRREGULAR_SLOPE_MSG.to_string());
+    }
     let (_, max_len) = region
         .plan_span_through(start, dir)
         // Strictly inside but no span — a degenerate region; the start is

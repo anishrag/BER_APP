@@ -115,13 +115,15 @@ impl StoreyDoc {
         len: f32,
         exposure: WallExposure,
     ) {
+        let (s, e) = (start.clamp(0.0, len), end.clamp(0.0, len));
+        // A zero-length paint is a no-op — bail BEFORE creating the map entry,
+        // so an untouched wall stays ABSENT (matching what a reload rebuilds;
+        // an empty Vec entry would be in-session-only noise).
+        if (e - s).abs() < 1e-4 {
+            return;
+        }
         let sections = self.wall_sections.entry(vid).or_default();
-        paint_section(
-            sections,
-            start.clamp(0.0, len),
-            end.clamp(0.0, len),
-            exposure,
-        );
+        paint_section(sections, s, e, exposure);
     }
 
     /// Remove all exposure sections from outline wall `vid`.

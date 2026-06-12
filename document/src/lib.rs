@@ -251,9 +251,11 @@ pub struct StoreyDoc {
     pub pending_arc: Option<PendingArc>,
 
     /// Exposure SECTIONS of each OUTLINE perimeter wall, keyed by the wall's
-    /// stable start `VertexId` (survives edits). Un-marked length defaults to
-    /// `Exposed` when derived into BER `WallRegions`. Part of the document
-    /// (editable, undoable) but keyed to the outline, not the active shape.
+    /// stable start `VertexId` (survives edits). Holds ONLY painted sections;
+    /// un-marked length derives into `Unset` BER `WallRegions` (it exists but
+    /// carries no exposure claim until the assessor marks it). Part of the
+    /// document (editable, undoable) but keyed to the outline, not the active
+    /// shape.
     pub wall_sections: HashMap<VertexId, Vec<ExposureSection>>,
 }
 
