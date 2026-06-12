@@ -5,6 +5,11 @@ edition = "2021"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
+# cdylib for the Android entry (android-activity glue loads the app as a
+# shared library); rlib so the desktop binary keeps consuming the lib crate.
+[lib]
+crate-type = ["rlib", "cdylib"]
+
 [dependencies]
 log = "0.4.27"
 env_logger = "0.11"
@@ -27,6 +32,14 @@ egui = "0.33.3"
 strum = "0.27.2"
 strum_macros = "0.27.2"
 egui_extras = { version = "0.33.3", features = ["datepicker"] }
+
+# Android entry-point deps. `AndroidApp` is always named THROUGH winit
+# (`winit::platform::android::activity::AndroidApp`) so the android-activity
+# version is the one winit links — never depend on android-activity directly.
+[target.'cfg(target_os = "android")'.dependencies]
+winit = { version = "0.30", features = ["android-native-activity"] }
+eframe = { version = "0.33.3", features = ["android-native-activity"] }
+android_logger = "0.15"
 
 [workspace]
 members = ["datatypes", "document", "sketch", "domain", "manip_2d_plan"]

@@ -49,11 +49,11 @@ pub struct PersistenceWriter {
 }
 
 impl PersistenceWriter {
-    /// Spawn a writer thread with its own connection to `path` (WAL — see
+    /// Spawn a writer thread with its own connection to `db_path` (WAL — see
     /// [`open_db`](super::open_db)). The connection is opened here so a failure
     /// surfaces to the caller, then moved into the thread (`Connection: Send`).
-    pub fn spawn(path: String) -> rusqlite::Result<Self> {
-        let conn = super::open_db(&path)?;
+    pub fn spawn(db_path: std::path::PathBuf) -> rusqlite::Result<Self> {
+        let conn = super::open_db(&db_path)?;
         let (tx, rx) = mpsc::channel::<WriterMsg>();
         let handle = std::thread::Builder::new()
             .name("ber-persist".into())
@@ -156,9 +156,7 @@ mod tests {
                 .unwrap()
                 .as_nanos()
         ));
-        let path_str = path.to_string_lossy().into_owned();
-
-        let writer = PersistenceWriter::spawn(path_str.clone()).unwrap();
+        let writer = PersistenceWriter::spawn(path.clone()).unwrap();
         let ber = Ber::new();
         let id = ber.id;
         writer.save(SaveBundle {
@@ -174,7 +172,7 @@ mod tests {
         writer.drain();
 
         // No drop/join yet — the barrier alone must have flushed the write.
-        let conn = crate::engine::open_db(&path_str).unwrap();
+        let conn = crate::engine::open_db(&path).unwrap();
         let count: i64 = conn
             .query_row(
                 "SELECT COUNT(*) FROM ber WHERE id = ?1",

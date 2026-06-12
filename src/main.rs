@@ -1,11 +1,5 @@
-use std::cell::RefCell;
-use std::rc::Rc;
-
-// The binary consumes the library crate (`src/lib.rs`) instead of re-declaring
-// the module tree — one compilation of the app code, and `pub` surface
-// warnings stay meaningful (they come from the lib alone).
-use ber_app::controller::app_controller::AppController;
-use ber_app::{engine, ui};
+use ber_app::paths::Paths;
+use ber_app::ui;
 
 fn main() -> Result<(), ui::RunError> {
     // Route the app's and library crates' debug traces (`ber_app`, `document`,
@@ -21,16 +15,8 @@ fn main() -> Result<(), ui::RunError> {
     .format(|buf, record| writeln!(buf, "{}", record.args()))
     .init();
 
-    // TODO: replace with platform-appropriate data dir (e.g. ~/.local/share/ber_app)
-    // once we package for distribution. cwd is fine for development.
-    let conn = engine::open_db("bers.db").expect("Failed to open database");
-    let mut controller = AppController::new(conn);
-    // Background writer (its own connection, WAL) so idle autosaves don't block
-    // the UI on SQLite. If it can't spawn, fall back to synchronous saves.
-    match engine::PersistenceWriter::spawn("bers.db".to_string()) {
-        Ok(writer) => controller.attach_writer(writer),
-        Err(e) => log::warn!("persistence writer unavailable, saving synchronously: {e}"),
-    }
-    let controller = Rc::new(RefCell::new(controller));
+    // Desktop keeps the cwd-relative data dir (./bers.db) by design — dev data
+    // lives next to the repo. Android resolves its own dir in android_main.
+    let controller = ber_app::bootstrap(&Paths::desktop());
     ui::run(controller)
 }
