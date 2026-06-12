@@ -840,11 +840,16 @@ fn snap_walls(outline: &[Point2f32], pts: &[Point2f32], tol: f32) -> Vec<Point2f
     let n = pts.len();
     let mut remap_x: Vec<(f32, f32)> = Vec::new();
     let mut remap_y: Vec<(f32, f32)> = Vec::new();
-    // Normally a wall must OVERLAP a parallel boundary wall to snap onto it. When
-    // aligning to a reference (new-storey), also accept walls that merely meet it
-    // at a corner — ranges adjacent within `tol`, not overlapping — so a new wall
-    // flush with the storey-below's neighbouring wall snaps to its line.
-    let min_overlap = if align_to_reference() { -tol } else { eps };
+    // Normally a wall must OVERLAP a parallel boundary wall — or at least TOUCH
+    // its span end-to-end — to snap onto it. The touching case matters when the
+    // boundary follower pinned part of a drawn line exactly onto an outline edge
+    // it overlapped, leaving the interior remainder ADJACENT at the shared corner
+    // (span overlap exactly zero): without it, one drawn line keeps two
+    // perpendicular coordinates — a jog that later derives a sliver riser wall.
+    // When aligning to a reference (new-storey), also accept walls a full `tol`
+    // APART along the span — so a new wall flush with the storey-below's
+    // neighbouring wall snaps to its line.
+    let min_overlap = if align_to_reference() { -tol } else { -eps };
     let overlaps =
         |alo: f32, ahi: f32, blo: f32, bhi: f32| ahi.min(bhi) - alo.max(blo) > min_overlap;
     for i in 0..n {
@@ -2700,6 +2705,81 @@ mod boundary_carve_tests {
             "diagonal endpoints preserved (not flattened): {:?}",
             ring
         );
+    }
+}
+
+#[cfg(test)]
+mod alignment_snap_tests {
+    use super::*;
+    use crate::SubareaTuning;
+
+    fn p(x: f32, y: f32) -> Point2f32 {
+        Point2f32::new(x, y)
+    }
+
+    /// REGRESSION (live report, 2026-06): a floor-step rect drawn so its bottom
+    /// line ran ~2 cm above an outline edge it only PARTIALLY overlapped. The
+    /// boundary follower pinned the overlapping part exactly onto the edge
+    /// (y = 4.6222), but the interior remainder kept its own H/V-snapped
+    /// y = 4.6422 — a 2 cm jog on what was drawn as ONE horizontal line, which
+    /// later derived a 2 cm sliver riser wall. `snap_walls` must align the
+    /// WHOLE drawn line onto the edge even when their spans merely TOUCH at the
+    /// shared corner (overlap exactly zero), not only when they overlap.
+    #[test]
+    fn drawn_line_touching_a_parallel_outline_edge_takes_one_coordinate() {
+        // The session dump's outline ring, verbatim.
+        let outline = vec![
+            p(2.8664, 7.6222),
+            p(5.8664, 7.6222),
+            p(5.8664, 10.6222),
+            p(8.8664, 10.6222),
+            p(8.8664, 4.6222),
+            p(6.8664, 4.6222),
+            p(6.8664, 1.6222),
+            p(2.8664, 1.6222),
+        ];
+        // The drawn closed rect: left on x = 5.8664, top on y = 10.6222, right
+        // on x = 8.8664, bottom at y = 4.6422 — 2 cm above the outline edge
+        // y = 4.6222 (which spans x ∈ [6.8664, 8.8664] only).
+        let stroke = vec![
+            p(5.8664, 10.6222),
+            p(5.8664, 7.5),
+            p(5.8664, 4.6422),
+            p(7.0, 4.6422),
+            p(8.8664, 4.6422),
+            p(8.8664, 7.5),
+            p(8.8664, 10.6222),
+            p(7.0, 10.6222),
+            p(5.9, 10.6222),
+        ];
+        let outcome = carve_or_cut(&outline, &stroke, &SubareaTuning::default(), false)
+            .expect("the closed rect carves");
+        let SubareaOutcome::Area(plan) = outcome else {
+            panic!("a closed loop is a carve, not a cut");
+        };
+        plan.validate_simple().unwrap();
+        let ring = plan.get_points();
+        // ONE bottom y — the outline edge's. The drawn 4.6422 must not survive.
+        assert!(
+            !ring.iter().any(|v| (v.y - 4.6422).abs() < 1e-3),
+            "the drawn y = 4.6422 was aligned onto the outline edge: {ring:?}"
+        );
+        let min_y = ring.iter().map(|v| v.y).fold(f32::INFINITY, f32::min);
+        assert!(
+            (min_y - 4.6222).abs() < 1e-3,
+            "bottom sits on the outline edge y = 4.6222, got {min_y} ({ring:?})"
+        );
+        // No 2 cm sliver edge anywhere (the jog + its riser are gone).
+        let n = ring.len();
+        for i in 0..n {
+            let (a, b) = (ring[i], ring[(i + 1) % n]);
+            let len = ((a.x - b.x).powi(2) + (a.y - b.y).powi(2)).sqrt();
+            assert!(
+                len > 0.1,
+                "sliver edge {a:?} -> {b:?} (len {len}) survived: {ring:?}"
+            );
+        }
+        assert_eq!(ring.len(), 4, "a clean rectangle: {ring:?}");
     }
 }
 

@@ -799,6 +799,85 @@ mod tests {
         assert_eq!(risers[0].exposure, WallExposure::Exposed);
     }
 
+    /// REGRESSION (live report, 2026-06): a floor-step rect carved with its
+    /// bottom line drawn ~2 cm above an outline edge it only PARTIALLY
+    /// overlapped used to keep TWO bottom coordinates (the overlapped part
+    /// pinned onto the edge, the interior remainder at its drawn y) — and the
+    /// 2 cm jog derived a sliver riser wall. End-to-end over the session
+    /// dump's exact numbers: carve → step region → resolve emits NO sliver
+    /// riser (the carve aligns the whole drawn line onto the outline edge).
+    #[test]
+    fn step_carve_aligned_onto_an_outline_edge_derives_no_sliver_riser() {
+        use manip_2d_plan::{SubareaOutcome, SubareaTuning};
+        let p = Point2f32::new;
+        let outline = [
+            p(2.8664, 7.6222),
+            p(5.8664, 7.6222),
+            p(5.8664, 10.6222),
+            p(8.8664, 10.6222),
+            p(8.8664, 4.6222),
+            p(6.8664, 4.6222),
+            p(6.8664, 1.6222),
+            p(2.8664, 1.6222),
+        ];
+        let doc = square_doc(&outline);
+        // The drawn step rect: bottom at y = 4.6422, 2 cm above the outline
+        // edge y = 4.6222 (whose span [6.8664, 8.8664] it only partly covers).
+        let stroke = vec![
+            p(5.8664, 10.6222),
+            p(5.8664, 7.5),
+            p(5.8664, 4.6422),
+            p(7.0, 4.6422),
+            p(8.8664, 4.6422),
+            p(8.8664, 7.5),
+            p(8.8664, 10.6222),
+            p(7.0, 10.6222),
+            p(5.9, 10.6222),
+        ];
+        let outcome = doc
+            .outline
+            .floor_plan
+            .carve_or_cut(&stroke, &SubareaTuning::default(), false)
+            .expect("the closed rect carves");
+        let SubareaOutcome::Area(plan) = outcome else {
+            panic!("a closed loop carves an area");
+        };
+        let steps = vec![crate::StepRegion {
+            polygon: plan.get_points(),
+            level_m: 0.3,
+        }];
+        let mut ber = Ber::default();
+        ensure_storey_constructions(&mut ber, 0, &[]);
+        let storey = resolve_storey(&doc, &ber, 0, &[], &steps, &[]);
+        // The floor split carries the step level...
+        assert!(storey
+            .floors
+            .regions
+            .iter()
+            .any(|r| (r.level_m - 0.3).abs() < 1e-9));
+        // ...and no riser face is a 2 cm sliver: every wall region's base
+        // edge is a real wall length.
+        for r in &storey.walls.regions {
+            let e = &r.polygon.exterior;
+            let (a, b) = (e[0], e[1]);
+            let len = ((a.x - b.x).powi(2) + (a.y - b.y).powi(2)).sqrt();
+            assert!(
+                len > 0.05,
+                "sliver wall region (base len {len:.4}) derived at {a:?} -> {b:?}"
+            );
+        }
+        // The riser sits on the outline edge's y, never the drawn 4.6422.
+        assert!(
+            !storey
+                .walls
+                .regions
+                .iter()
+                .flat_map(|r| r.polygon.exterior.iter())
+                .any(|v| (v.y - 4.6422).abs() < 1e-3),
+            "the drawn (un-aligned) y = 4.6422 must not survive into any wall"
+        );
+    }
+
     /// A ceiling step's riser classifies as kind `Ceiling` (no matching
     /// floor riser face), defaulting `Unset` like every other wall.
     #[test]
