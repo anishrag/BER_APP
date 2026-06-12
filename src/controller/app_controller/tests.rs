@@ -3427,6 +3427,224 @@ fn ceiling_step_amount_rejections_keep_the_pending_line() {
     assert_eq!(roof_flat_zs(&c).len(), 2);
 }
 
+// ─── Ceiling steps (carve — closed stroke, floor-step parity) ───────────────
+
+/// Unsigned shoelace area of a session-region ring.
+fn session_ring_area(ring: &[Point2f32]) -> f64 {
+    let n = ring.len();
+    let mut s = 0.0_f64;
+    for i in 0..n {
+        let (a, b) = (ring[i], ring[(i + 1) % n]);
+        s += a.x as f64 * b.y as f64 - b.x as f64 * a.y as f64;
+    }
+    s.abs() / 2.0
+}
+
+/// Draw the interior 4×4 carve at (2,2)–(6,6) in ceiling-step mode and drive
+/// it to the amount stage (lengths 4 m, drawn position accepted).
+fn ceiling_carve_to_amount(c: &mut AppController) {
+    c.apply_ceiling_step_stroke_event(&[
+        (2.0, 2.0),
+        (6.0, 2.0),
+        (6.0, 6.0),
+        (2.0, 6.0),
+        (2.1, 2.1),
+    ]);
+    complete_interior_length_loop(c);
+    skip_position_prompts(c);
+    assert!(c.ceiling_step_amount_pending(), "amount stage open");
+}
+
+/// THE CARVE FLOW END-TO-END: a CLOSED stroke in ceiling-step mode carves an
+/// area (not a line), dimensions it as the `StepArea` shape — wall lengths,
+/// then the position prompts — with the FLOOR amount UI never showing, then
+/// opens the SAME delta stage as the line flow; assigning the delta stores
+/// the region, splits the roof at the area, and returns to the outline.
+#[test]
+fn ceiling_carve_closed_stroke_dimensions_then_takes_the_delta() {
+    let mut c = ceiling_ready_controller();
+    c.apply_ceiling_step_stroke_event(&[
+        (2.0, 2.0),
+        (6.0, 2.0),
+        (6.0, 6.0),
+        (2.0, 6.0),
+        (2.1, 2.1),
+    ]);
+    assert!(
+        !c.ceiling_step_side_pending(),
+        "a closed stroke is an area, not a line"
+    );
+    assert!(c.ceiling_step_pending(), "the carve is in flight");
+    assert!(
+        c.dimensioning_active(),
+        "the drawn walls prompt for lengths"
+    );
+    assert!(
+        !c.step_pick_pending(),
+        "the FLOOR amount UI never shows for a ceiling carve"
+    );
+    assert!(
+        !c.ceiling_step_amount_pending(),
+        "delta gated by the length loop"
+    );
+
+    complete_interior_length_loop(&mut c);
+    assert!(
+        c.document.dimensioning.current_position_prompt.is_some(),
+        "an interior area's position prompts follow the lengths"
+    );
+    assert!(!c.ceiling_step_amount_pending(), "delta gated by position");
+    skip_position_prompts(&mut c);
+    assert!(
+        c.ceiling_step_amount_pending(),
+        "the line flow's amount stage opens"
+    );
+    assert!(!c.step_pick_pending(), "still not a floor pick");
+    assert!(
+        c.pending_step_polygon().len() >= 4,
+        "the dimensioned ring highlights like a floor step"
+    );
+    assert!(
+        c.pending_ceiling_step_line().is_none(),
+        "an area has no dashed-line overlay"
+    );
+
+    c.assign_ceiling_step_delta(0.3).expect("delta applies");
+    assert!(!c.ceiling_step_pending(), "amount consumed");
+    assert_eq!(
+        c.document.active,
+        ActiveShape::Outline,
+        "back to the outline"
+    );
+    assert_eq!(c.document.floor_plan.get_points().len(), 4);
+    // The assign canonicalized: the session list is the derived piece — the
+    // carved 4×4 at +0.3.
+    let session = &c.ceiling_step_regions[&0];
+    assert_eq!(session.len(), 1, "one canonical step region");
+    assert!((session[0].delta_m - 0.3).abs() < 1e-6);
+    assert!(
+        (session_ring_area(&session[0].polygon) - 16.0).abs() < 0.1,
+        "the carved 4×4 area: {:?}",
+        session[0].polygon
+    );
+    // The roof split: 2.7 over the carve, 2.4 elsewhere.
+    let zs = roof_flat_zs(&c);
+    assert!(zs.iter().any(|z| (z - 2.7).abs() < 1e-6), "{zs:?}");
+    assert!(zs.iter().any(|z| (z - 2.4).abs() < 1e-6), "{zs:?}");
+}
+
+/// Carve-flow guards, floor-step parity: the delta validations reject without
+/// dropping the pending area; Cancel abandons it back to the outline; undo
+/// after the carve restores the outline (the carve pushed a history snapshot,
+/// and the pending state is the document — nothing dangles).
+#[test]
+fn ceiling_carve_rejections_cancel_and_undo_mirror_the_floor_flow() {
+    let mut c = ceiling_ready_controller();
+    ceiling_carve_to_amount(&mut c);
+
+    assert!(
+        c.assign_ceiling_step_delta(0.005).is_err(),
+        "near-zero rejected"
+    );
+    assert!(c.ceiling_step_amount_pending(), "area stays pending");
+    assert!(
+        c.assign_ceiling_step_delta(-2.4).is_err(),
+        "Δ ≤ −default rejected"
+    );
+    assert!(c.ceiling_step_amount_pending(), "area stays pending");
+    assert!(
+        c.ceiling_step_regions.get(&0).is_none(),
+        "nothing committed by the rejections"
+    );
+
+    c.cancel_pending_ceiling_step();
+    assert!(!c.ceiling_step_pending(), "cancel clears the carve");
+    assert_eq!(c.document.active, ActiveShape::Outline);
+    assert_eq!(c.document.floor_plan.get_points().len(), 4);
+
+    // Undo right after a fresh carve stroke (each dimension answer pushes its
+    // own snapshot, so undo there rewinds one answer — the floor parity):
+    // back to the outline, nothing pending.
+    c.apply_ceiling_step_stroke_event(&[
+        (2.0, 2.0),
+        (6.0, 2.0),
+        (6.0, 6.0),
+        (2.0, 6.0),
+        (2.1, 2.1),
+    ]);
+    assert!(c.ceiling_step_pending(), "carve in flight");
+    c.undo().expect("undo applies");
+    assert_eq!(c.document.active, ActiveShape::Outline, "carve rewound");
+    assert!(!c.ceiling_step_pending(), "no dangling pending state");
+    assert!(c.ceiling_step_mode(), "mode itself stays on");
+}
+
+/// THE CARVE RELOAD FIXPOINT: carve → delta → resolve, then reload from the
+/// DB — the session regions reconstruct to the SAME canonical piece (ring
+/// area + delta) — and a re-derive reproduces the identical roof split
+/// (derive → reconstruct → derive is a fixpoint), reconstruction stable.
+#[test]
+fn ceiling_carve_split_survives_reload_and_rederive() {
+    let mut c = ceiling_ready_controller();
+    ceiling_carve_to_amount(&mut c);
+    c.assign_ceiling_step_delta(0.3).expect("delta applies");
+    c.materialize();
+    let before_zs = roof_flat_zs(&c);
+    let before_area = session_ring_area(&c.ceiling_step_regions[&0][0].polygon);
+    assert!((before_area - 16.0).abs() < 0.1);
+
+    let id = c.current_record.as_ref().unwrap().id.clone();
+    c.flush_if_dirty().unwrap();
+    c.open_ber(&id).unwrap();
+    // Session regions rebuilt from the persisted roofs — the same piece.
+    let session = &c.ceiling_step_regions[&0];
+    assert_eq!(session.len(), 1, "reconstructed from the stepped roof");
+    assert!((session[0].delta_m - 0.3).abs() < 1e-6);
+    assert!(
+        (session_ring_area(&session[0].polygon) - before_area).abs() < 1e-3,
+        "reconstruction matches the carved area"
+    );
+
+    // Re-derive without any edit: the split is reproduced exactly.
+    c.mark_dirty().unwrap();
+    c.materialize();
+    let after_zs = roof_flat_zs(&c);
+    assert_eq!(before_zs.len(), after_zs.len(), "split kept");
+    for (b, a) in before_zs.iter().zip(&after_zs) {
+        assert!((b - a).abs() < 1e-6, "{before_zs:?} vs {after_zs:?}");
+    }
+    // And the reconstruction itself is stable across the round trip.
+    c.reconstruct_ceiling_step_regions_for(0);
+    let session = &c.ceiling_step_regions[&0];
+    assert_eq!(session.len(), 1);
+    assert!((session_ring_area(&session[0].polygon) - before_area).abs() < 1e-3);
+}
+
+/// A storey switch abandons a half-dimensioned ceiling CARVE with the mode —
+/// it must not resurface as a FLOOR-step pick when switching back.
+#[test]
+fn storey_switch_abandons_an_in_flight_ceiling_carve() {
+    let mut c = ceiling_ready_controller();
+    c.apply_ceiling_step_stroke_event(&[
+        (2.0, 2.0),
+        (6.0, 2.0),
+        (6.0, 6.0),
+        (2.0, 6.0),
+        (2.1, 2.1),
+    ]);
+    assert!(c.ceiling_step_pending(), "carve in flight");
+    c.add_storey().unwrap();
+    assert!(!c.ceiling_step_mode(), "mode reset on switch");
+    assert!(!c.ceiling_step_pending(), "carve abandoned");
+    c.set_current_storey(Some(0)).unwrap();
+    assert_eq!(
+        c.document.active,
+        ActiveShape::Outline,
+        "no StepArea shape lingers on the original storey"
+    );
+    assert!(!c.step_pick_pending(), "…so no floor-step pick resurfaces");
+}
+
 // ─── Ceiling-step line snapping ─────────────────────────────────────────────
 
 /// An L-shaped storey (10×10 with the top-right 4×6 bite removed), default

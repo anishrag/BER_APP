@@ -42,8 +42,9 @@ impl AppController {
 
     /// Discard the in-flight step area (if any) and return to the outline,
     /// dropping its half-dimensioned buffer (we DON'T sync it back). Used to
-    /// cancel a pick or leave step mode.
-    fn abandon_step_shape(&mut self) {
+    /// cancel a pick or leave step mode — and by the ceiling-step CARVE,
+    /// which dimensions its area as the same `StepArea` shape.
+    pub(super) fn abandon_step_shape(&mut self) {
         self.document.step_shape = None;
         self.pending_step_cut = None;
         if self.document.active == ActiveShape::StepArea {
@@ -61,8 +62,13 @@ impl AppController {
     /// drawn walls (mirrors `begin_phase_area_dimensioning` — a step area only
     /// re-levels the floor once its level is assigned). The outline-pinned
     /// walls are pre-known (in the slot's `known_params`), so only the walls
-    /// the user actually drew are prompted.
-    fn begin_step_area_dimensioning(&mut self, slot: ShapeSlot, undo_snap: HistorySnapshot) {
+    /// the user actually drew are prompted. Shared with the ceiling-step
+    /// CARVE, whose area dimensions through the same `StepArea` shape.
+    pub(super) fn begin_step_area_dimensioning(
+        &mut self,
+        slot: ShapeSlot,
+        undo_snap: HistorySnapshot,
+    ) {
         self.document.begin_step_area(slot);
         self.pending_step_cut = None;
         self.maybe_start_dimensioning();
@@ -143,9 +149,13 @@ impl AppController {
     /// True once the in-flight step area is fully DIMENSIONED — wall lengths
     /// AND position — and awaiting its level (the UI shows the amount field).
     /// While the length loop or a position prompt is still in progress, that
-    /// prompt shows instead.
+    /// prompt shows instead. A CEILING-step carve also dimensions as the
+    /// `StepArea` shape but awaits a ceiling DELTA, not a floor level — under
+    /// ceiling-step mode this is never a floor pick, so the floor amount UI
+    /// can't show for it.
     pub fn step_pick_pending(&self) -> bool {
         self.document.active == ActiveShape::StepArea
+            && !self.ceiling_step_mode
             && self.document.dimensioning.current_prompt.is_none()
             && self.document.dimensioning.current_position_prompt.is_none()
             && self.document.floor_plan.get_points().len() >= 3

@@ -860,7 +860,7 @@ fn ceiling_step_toolbar<F: FnMut(UiEvent)>(
         }
         inline_error(ui, error);
     } else {
-        ui.label("Draw a straight line across the plan to step the ceiling.");
+        ui.label("Draw a straight line across the plan — or a closed area — to step the ceiling.");
         for (i, (_ring, label)) in regions.iter().enumerate() {
             ui.horizontal(|ui| {
                 ui.label(label);

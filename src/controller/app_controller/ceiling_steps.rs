@@ -4,6 +4,15 @@
 //! coordinate via a position prompt, then enters the step amount (metres,
 //! relative to the storey's default ceiling height; + raised, − lowered).
 //!
+//! A CLOSED stroke instead CARVES an area — floor-step parity: the same
+//! carve-against-the-available-region machinery, dimensioned (wall lengths +
+//! position prompts) as the active `StepArea` shape, then the SAME amount
+//! stage as the line flow. The carve has NO session tag of its own: modes are
+//! mutually exclusive, so an active `StepArea` shape while ceiling-step mode
+//! is on IS the in-flight ceiling carve
+//! ([`AppController::ceiling_carve_in_flight`]) — which keeps undo clean (the
+//! document snapshot is the whole pending state).
+//!
 //! Like floor steps, a ceiling step is NOT persisted as a record of its own.
 //! It's session-only controller state whose job is to re-split the resolved
 //! ceiling regions at commit (`CeilingRegions::with_z_deltas`, applied in
@@ -100,13 +109,15 @@ impl AppController {
     /// away), forces the OUTLINE active (so no carved-area position prompt can
     /// coexist with the line's), and is mutually exclusive with living-area /
     /// exposure / phase / floor-step modes. Leaving clears any half-finished
-    /// line.
+    /// line or carved area.
     pub fn set_ceiling_step_mode(&mut self, on: bool) {
         if on && !self.ceiling_step_available() {
             return;
         }
+        // Drop a half-finished line AND abandon a half-dimensioned carve —
+        // BEFORE the flag flips (the carve is detected via the OLD mode).
+        self.cancel_pending_ceiling_step();
         self.ceiling_step_mode = on;
-        self.pending_ceiling_step = None;
         if on {
             self.living_area_mode = false;
             self.exposure_mode = false;
@@ -131,10 +142,13 @@ impl AppController {
         }
     }
 
-    /// UI entry point: a ceiling-step stroke in world (metre) coords. Fits it
-    /// to an axis-aligned line ([`StoreyDoc::fit_ceiling_step_line`]) and, on
-    /// success, advances straight to the side pick. A stroke that isn't
-    /// line-like or doesn't cross the footprint is rejected (logged).
+    /// UI entry point: a ceiling-step stroke in world (metre) coords. An OPEN
+    /// stroke fits to an axis-aligned line
+    /// ([`StoreyDoc::fit_ceiling_step_line`]) and, on success, advances
+    /// straight to the side pick; a stroke that isn't line-like or doesn't
+    /// cross the footprint is rejected (logged). A CLOSED stroke (the same
+    /// closure test the floor-step carve uses) CARVES an area instead —
+    /// see [`apply_ceiling_carve_stroke`](Self::apply_ceiling_carve_stroke).
     pub fn apply_ceiling_step_stroke_event(&mut self, world_points: &[(f32, f32)]) {
         let _ = self.sketch_engine.take_stroke_raw();
         let pts: Vec<Point2f32> = world_points
@@ -146,12 +160,58 @@ impl AppController {
         }
         // Paste-ready stroke dump (matches the living-area / step-area dumps).
         dump_stroke("ceiling-step", &pts);
-        // Flush the live buffer to its slot: the fit validates against
-        // `document.outline`, which is only synced on shape switches.
+        // Flush the live buffer to its slot: both the fit and the carve work
+        // against `document.outline`, which is only synced on shape switches.
         self.sync_active();
+        // A CLOSED stroke is an AREA, not a line — the floor-step parity path.
+        if manip_2d_plan::stroke_is_closed(&pts, self.tuning.subarea.close_gap_m) {
+            self.apply_ceiling_carve_stroke(&pts);
+            return;
+        }
         match self.document.fit_ceiling_step_line(&pts) {
             Ok((axis, coord_m)) => self.begin_ceiling_step_side(axis, coord_m),
             Err(e) => eprintln!("ceiling-step line: {}", e),
+        }
+    }
+
+    /// A CLOSED ceiling-step stroke: carve the area against the AVAILABLE
+    /// region — the outline minus the ceiling steps already committed —
+    /// exactly as the floor step does (shared edges snap, no overlap), and
+    /// start dimensioning it as the active `StepArea` shape: wall lengths,
+    /// then the position prompts (snapped-to-wall axes skip the question via
+    /// the pinned slot's `position_free_axes`). The SAME delta prompt as the
+    /// line flow follows once dimensioning resolves. Rejections are logged;
+    /// nothing is mutated on failure.
+    fn apply_ceiling_carve_stroke(&mut self, pts: &[Point2f32]) {
+        let idx = self.current_storey_idx.unwrap_or(0);
+        let step_rings: Vec<Vec<Point2f32>> = self
+            .ceiling_step_regions
+            .get(&idx)
+            .map(|rs| rs.iter().map(|r| r.polygon.clone()).collect())
+            .unwrap_or_default();
+        match self
+            .document
+            .carve_or_cut_in_available(pts, &step_rings, &self.tuning.subarea)
+        {
+            Ok((boundary, SubareaOutcome::Area(plan))) => {
+                if let Err(e) = plan.validate_simple() {
+                    eprintln!("ceiling step area rejected (walls cross): {:?}", e);
+                    return;
+                }
+                let undo_snap = self.current_history_snapshot();
+                let slot = self.pinned_subarea_slot(&boundary, plan);
+                // No session tag: the active `StepArea` shape under
+                // ceiling-step mode IS the in-flight carve, so undo (a
+                // document restore) cleanly rewinds the whole pending state.
+                self.begin_step_area_dimensioning(slot, undo_snap);
+            }
+            // `stroke_is_closed` gated this path and a closed loop always
+            // carves to an Area — defensive (a cut would need a side pick
+            // this flow doesn't have).
+            Ok((_, SubareaOutcome::Cut(..))) => {
+                eprintln!("ceiling-step carve: closed stroke resolved to a cut — ignored");
+            }
+            Err(e) => eprintln!("ceiling-step carve: {}", e),
         }
     }
 
@@ -188,7 +248,10 @@ impl AppController {
     /// - any other stage → ignored (those are toolbar/prompt-driven).
     pub fn ceiling_step_tap(&mut self, world_x: f32, world_y: f32) {
         match self.pending_ceiling_step.as_ref() {
-            None if self.ceiling_step_mode => {
+            // No line stage open and no carve being dimensioned — the tap
+            // places a fresh line point. (A tap while a carve is in flight is
+            // ignored: its prompts are toolbar-driven, like the floor step's.)
+            None if self.ceiling_step_mode && !self.ceiling_carve_in_flight() => {
                 self.pending_ceiling_step = Some(PendingCeilingStep::Orientation {
                     point: Point2f32::new(world_x, world_y),
                 });
@@ -369,20 +432,41 @@ impl AppController {
         )
     }
 
-    /// True while the resolved line awaits its step amount.
+    /// True while the resolved line awaits its step amount — or a carved
+    /// ceiling-step area is fully dimensioned and awaiting its delta.
     pub fn ceiling_step_amount_pending(&self) -> bool {
         matches!(
             self.pending_ceiling_step,
             Some(PendingCeilingStep::Amount { .. })
-        )
+        ) || self.ceiling_carve_amount_pending()
     }
 
-    /// True while ANY ceiling-step input is in flight (including the position
-    /// stage, which shows as the shared position panel). The UI uses this to
-    /// keep the toolbar reachable with the mode off and to suppress stroke
+    /// True while a ceiling-step CARVE is in flight: modes are mutually
+    /// exclusive, so an active `StepArea` shape under ceiling-step mode can
+    /// only be the carved area being dimensioned. Derived (no session tag) so
+    /// undo — a document restore — rewinds it with the document.
+    pub(super) fn ceiling_carve_in_flight(&self) -> bool {
+        self.ceiling_step_mode && self.document.active == ActiveShape::StepArea
+    }
+
+    /// True once the in-flight ceiling-step CARVE is fully DIMENSIONED — wall
+    /// lengths AND position — and awaiting its delta (the line flow's amount
+    /// stage). Mirrors [`step_pick_pending`](Self::step_pick_pending), which
+    /// is the floor flavour of the same gate over the shared `StepArea` shape.
+    fn ceiling_carve_amount_pending(&self) -> bool {
+        self.ceiling_carve_in_flight()
+            && self.document.dimensioning.current_prompt.is_none()
+            && self.document.dimensioning.current_position_prompt.is_none()
+            && self.document.floor_plan.get_points().len() >= 3
+    }
+
+    /// True while ANY ceiling-step input is in flight — a line stage
+    /// (including the position stage, which shows as the shared position
+    /// panel) or a carved area being dimensioned. The UI uses this to keep
+    /// the toolbar reachable with the mode off and to suppress stroke
     /// capture while a stage is pending.
     pub fn ceiling_step_pending(&self) -> bool {
-        self.pending_ceiling_step.is_some()
+        self.pending_ceiling_step.is_some() || self.ceiling_carve_in_flight()
     }
 
     /// The pending step line's endpoints (world coords), spanning the outline
@@ -432,24 +516,27 @@ impl AppController {
         }
     }
 
-    /// Assign the step amount to the pending line: rejects a near-zero step
-    /// (|Δ| < 0.01 m — floor-step parity) and a drop at or past the default
-    /// height (the ceiling would reach the floor); the pending line stays
-    /// open on rejection so the user can retype. On success: push the
-    /// half-rect region (the resolve projection clips it), re-derive, then
-    /// CANONICALIZE the session list from the derived roofs so it equals the
-    /// post-reload reconstruction. Outside undo — phases/steps parity.
+    /// Assign the step amount to the pending line — or to a fully-dimensioned
+    /// carved area: rejects a near-zero step (|Δ| < 0.01 m — floor-step
+    /// parity) and a drop at or past the default height (the ceiling would
+    /// reach the floor); the pending line/area stays open on rejection so the
+    /// user can retype. On success: push the region — the line's half-rect
+    /// (the resolve projection clips it) or the carve's dimensioned ring —
+    /// re-derive, then CANONICALIZE the session list from the derived roofs
+    /// so it equals the post-reload reconstruction. Outside undo —
+    /// phases/steps parity.
     pub fn assign_ceiling_step_delta(&mut self, delta_m: f32) -> Result<(), String> {
-        let Some(PendingCeilingStep::Amount {
-            axis,
-            coord_m,
-            side,
-            ..
-        }) = self.pending_ceiling_step.as_ref()
-        else {
-            return Ok(()); // nothing awaiting an amount — no-op
+        // The line's parameters, or `None` for a dimensioned carve.
+        let line = match self.pending_ceiling_step.as_ref() {
+            Some(PendingCeilingStep::Amount {
+                axis,
+                coord_m,
+                side,
+                ..
+            }) => Some((*axis, *coord_m, *side)),
+            _ if self.ceiling_carve_amount_pending() => None,
+            _ => return Ok(()), // nothing awaiting an amount — no-op
         };
-        let (axis, coord_m, side) = (*axis, *coord_m, *side);
         if !delta_m.is_finite() || delta_m.abs() < 0.01 {
             return Err("Ceiling step must be at least 0.01 m.".into());
         }
@@ -467,14 +554,34 @@ impl AppController {
                 -delta_m, default
             ));
         }
-        let region = self
-            .document
-            .ceiling_step_region(axis, coord_m, side, delta_m as f64)
-            .ok_or("The storey has no outline to step.")?;
+        let region = match line {
+            Some((axis, coord_m, side)) => self
+                .document
+                .ceiling_step_region(axis, coord_m, side, delta_m as f64)
+                .ok_or("The storey has no outline to step.")?,
+            None => {
+                // The live buffer IS the dimensioned area (floor-step parity);
+                // its resolved ring is the region.
+                let polygon = self.document.floor_plan.get_points();
+                if polygon.len() < 3 {
+                    return Err(
+                        "The step area has no usable outline — cancel and redraw it.".into(),
+                    );
+                }
+                CeilingStepRegion {
+                    polygon,
+                    delta_m: delta_m as f64,
+                }
+            }
+        };
         self.ceiling_step_regions
             .entry(idx)
             .or_default()
             .push(region);
+        if line.is_none() {
+            // Discard the carve's live buffer, return to the outline.
+            self.abandon_step_shape();
+        }
         self.pending_ceiling_step = None;
         self.mark_dirty()?;
         // Canonicalize: derive now, then make the session list the EXACT
@@ -485,8 +592,13 @@ impl AppController {
         Ok(())
     }
 
-    /// Discard the in-flight ceiling-step line at any stage.
+    /// Discard the in-flight ceiling-step line — or carved area — at any
+    /// stage. A carve is an active `StepArea` shape, so its live buffer is
+    /// abandoned too (back to the outline, floor-step parity).
     pub fn cancel_pending_ceiling_step(&mut self) {
+        if self.ceiling_carve_in_flight() {
+            self.abandon_step_shape();
+        }
         self.pending_ceiling_step = None;
     }
 

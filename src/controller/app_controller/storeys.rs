@@ -17,6 +17,12 @@ impl AppController {
         if self.current_storey_idx == target {
             return Ok(());
         }
+        // An in-flight ceiling-step CARVE is an active `StepArea` shape on the
+        // OUTGOING storey — abandon it BEFORE the commit syncs the buffer (and
+        // before the mode flag resets below, which is what identifies it), so
+        // the half-dimensioned area neither persists nor resurfaces as a
+        // floor-step pick when switching back.
+        self.cancel_pending_ceiling_step();
         // Derive the OUTGOING storey into `current_record` (eager — we're leaving
         // it; `commit_to_ber` syncs its buffer first).
         self.commit_to_ber()?;

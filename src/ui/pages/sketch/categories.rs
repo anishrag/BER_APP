@@ -507,7 +507,8 @@ fn tool_ui<F: FnMut(UiEvent)>(
                 )
                 .on_hover_text(
                     "Raise or lower part of the ceiling: draw a straight line \
-                     across the plan, tap the side that steps, then enter the amount",
+                     across the plan and tap the side that steps, or draw a \
+                     closed area (like a floor step), then enter the amount",
                 )
                 .on_disabled_hover_text(
                     "Set the default ceiling height first (the Heights field above)",
