@@ -4759,7 +4759,10 @@ fn apply_users_ceiling_step(
 /// THE MODEL QUESTION from the live report: after the ceiling-step line
 /// SNAPPED onto the outline's inner vertical wall and the jut side was raised
 /// by +1.0 m, do the resolved wall regions around the raised section top out
-/// at 3.4 m — or stay flat at the 2.4 m default?
+/// at 3.4 m — or stay flat at the 2.4 m default? Extended for slice C: a
+/// floor step lowering the same jut by 0.3 m derives a GROUND riser along
+/// the step line, the ceiling step derives an EXPOSED riser there, both with
+/// correct z-spans, unique ids, and identity stable across reload.
 #[test]
 fn users_l_session_raised_section_wall_tops_follow_the_step() {
     let (mut c, [min_x, max_x, min_y, max_y, inner_x, inner_y]) = users_l_session_controller();
@@ -4768,7 +4771,20 @@ fn users_l_session_raised_section_wall_tops_follow_the_step() {
     );
 
     apply_users_ceiling_step(&mut c, inner_x, inner_y, max_x, max_y);
-    c.materialize();
+    // The user also drops the jut's FLOOR by 0.3 m (same footprint as the
+    // raised ceiling side: x > inner wall) — the floor-step counterpart.
+    let p = |x: f32, y: f32| Point2f32::new(x, y);
+    c.step_regions.entry(0).or_default().push(StepRegion {
+        polygon: vec![
+            p(inner_x, inner_y),
+            p(max_x, inner_y),
+            p(max_x, max_y),
+            p(inner_x, max_y),
+        ],
+        level_m: -0.3,
+    });
+    // The direct push above doesn't bump the revision — force the derive.
+    c.commit_to_ber().unwrap();
 
     let storey = &c.current_record.as_ref().unwrap().data.storeys[0];
     println!("{}", document::debug_dump_storey(storey, "users-L"));
@@ -4794,12 +4810,23 @@ fn users_l_session_raised_section_wall_tops_follow_the_step() {
             .map(|v| v.z)
             .collect()
     };
-    assert_eq!(storey.walls.regions.len(), 6, "all six walls marked");
+    // 6 perimeter walls + the 2 derived RISER faces along the step line.
+    assert_eq!(storey.walls.regions.len(), 8, "six walls + two risers");
+    // A riser's base edge lies ON the step line x = inner_x, over the
+    // INTERIOR run y ∈ [inner_y, max_y] (the outline's own inner wall sits
+    // below inner_y).
+    let near = |v: f64, w: f32| (v - w as f64).abs() < 1e-3;
+    let is_riser = |r: &datatypes::ber::structural::WallRegion| {
+        let e = &r.polygon.exterior;
+        near(e[0].x, inner_x) && near(e[1].x, inner_x) && e[0].y.max(e[1].y) > inner_y as f64 + 1e-3
+    };
     for r in &storey.walls.regions {
+        if is_riser(r) {
+            continue; // asserted separately below
+        }
         let e = &r.polygon.exterior;
         let (a, b) = (e[0], e[1]);
         let tops = top_zs(r);
-        let near = |v: f64, w: f32| (v - w as f64).abs() < 1e-3;
         let on_raised_side = |x: f64| x > inner_x as f64 + 1e-3;
         if near(a.x, max_x) && near(b.x, max_x) {
             // Right wall of the jut: fully raised.
@@ -4830,9 +4857,63 @@ fn users_l_session_raised_section_wall_tops_follow_the_step() {
         }
     }
 
-    // And the raised tops SURVIVE persist → reload → re-derive (the session
-    // step areas are reconstructed from the persisted roofs; without that the
-    // next commit would flatten the walls back to 2.4).
+    // THE RISERS along the step line (slice C): the floor step's Ground
+    // riser spanning −0.3 → 0 and the ceiling step's Exposed riser spanning
+    // 2.4 → 3.4, each one face over y ∈ [inner_y, max_y].
+    let risers: Vec<&datatypes::ber::structural::WallRegion> = storey
+        .walls
+        .regions
+        .iter()
+        .filter(|r| is_riser(r))
+        .collect();
+    assert_eq!(risers.len(), 2, "one floor + one ceiling riser");
+    let span = |r: &datatypes::ber::structural::WallRegion| {
+        let zs = r.polygon.exterior.iter().map(|v| v.z);
+        (
+            zs.clone().fold(f64::INFINITY, f64::min),
+            zs.fold(f64::NEG_INFINITY, f64::max),
+        )
+    };
+    let ground = risers
+        .iter()
+        .find(|r| r.exposure == WallExposure::Ground)
+        .expect("the floor step derives a Ground riser");
+    let (lo, hi) = span(ground);
+    assert!(
+        (lo + 0.3).abs() < 1e-6 && hi.abs() < 1e-6,
+        "Ground riser spans the floor step −0.3 → 0: [{lo}, {hi}]"
+    );
+    let ceiling = risers
+        .iter()
+        .find(|r| r.exposure == WallExposure::Exposed)
+        .expect("the ceiling step derives an Exposed riser");
+    let (lo, hi) = span(ceiling);
+    assert!(
+        (lo - 2.4).abs() < 1e-3 && (hi - 3.4).abs() < 1e-3,
+        "Exposed riser spans the ceiling step 2.4 → 3.4: [{lo}, {hi}]"
+    );
+    for r in &risers {
+        let ys = [r.polygon.exterior[0].y, r.polygon.exterior[1].y];
+        assert!(
+            near(ys[0].min(ys[1]), inner_y) && near(ys[0].max(ys[1]), max_y),
+            "riser runs the full interior step line: {ys:?}"
+        );
+        // Base-edge contract: exterior[0]/[1] at the riser's LOWER level.
+        let (lo, _) = span(r);
+        assert!((r.polygon.exterior[0].z - lo).abs() < 1e-6);
+        assert!((r.polygon.exterior[1].z - lo).abs() < 1e-6);
+    }
+    // No id is duplicated across the perimeter + riser regions.
+    let mut ids: Vec<_> = storey.walls.regions.iter().map(|r| r.id).collect();
+    ids.sort_by_key(|id| id.0);
+    ids.dedup();
+    assert_eq!(ids.len(), 8, "ids unique");
+    let ground_id = ground.id;
+    let ceiling_id = ceiling.id;
+
+    // And the raised tops + risers SURVIVE persist → reload → re-derive (the
+    // session step areas are reconstructed from the persisted floors/roofs;
+    // without that the next commit would flatten the walls back to 2.4).
     c.commit_to_ber().unwrap();
     let id = c.current_record.as_ref().unwrap().id;
     c.open_ber(&id).unwrap();
@@ -4849,6 +4930,35 @@ fn users_l_session_raised_section_wall_tops_follow_the_step() {
         raised_tops >= 4,
         "raised wall tops survive reload + re-derive: {}",
         document::debug_dump_storey(storey, "users-L-reloaded")
+    );
+    // Riser identity is stable across the round trip (amend matching), and
+    // the reload left the painted wall sections untouched — the risers never
+    // turn into phantom exposure sections.
+    let reloaded: Vec<&datatypes::ber::structural::WallRegion> = storey
+        .walls
+        .regions
+        .iter()
+        .filter(|r| is_riser(r))
+        .collect();
+    assert_eq!(reloaded.len(), 2, "both risers re-derive after reload");
+    assert!(
+        reloaded.iter().any(|r| r.id == ground_id),
+        "Ground riser keeps its id across reload"
+    );
+    assert!(
+        reloaded.iter().any(|r| r.id == ceiling_id),
+        "Exposed riser keeps its id across reload"
+    );
+    for sections in c.document.wall_sections.values() {
+        assert!(
+            sections.iter().all(|s| s.exposure == WallExposure::Exposed),
+            "only the painted Exposed sections recover — no riser phantoms"
+        );
+    }
+    assert_eq!(
+        c.document.wall_sections.len(),
+        6,
+        "exactly the six painted perimeter walls have sections"
     );
 }
 

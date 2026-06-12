@@ -591,6 +591,51 @@ impl FloorRegions {
         }
         Self { regions }
     }
+
+    /// Interior FLOOR-RISER faces: for every plan edge piece shared by two
+    /// regions whose `level_m` differ (> [`RISER_Z_EPS_M`]), the vertical
+    /// quad from the lower to the higher level. `exterior[0]`/`[1]` are the
+    /// base edge at the LOWER level (the vertex-order contract `WallRegion`
+    /// readers rely on). Outline edges never emit: a piece must be shared by
+    /// TWO regions, and the regions tile the footprint with disjoint
+    /// interiors. Shared pieces are recovered by METRIC collinearity
+    /// ([`shared_plan_pieces`]) — the rings are boolean-op output, so a
+    /// conceptually shared edge is never an exact vertex match. Interior
+    /// rings (a step strictly inside a region leaves the remainder with a
+    /// hole) participate like exteriors.
+    pub fn riser_faces(&self) -> Vec<Polygon3D> {
+        let to_pts = |ls: &LineString<f64>| {
+            let mut pts: Vec<Point2f64> = ls.coords().map(|c| Point2f64::new(c.x, c.y)).collect();
+            if pts.len() > 1 && pts.first() == pts.last() {
+                pts.pop();
+            }
+            pts
+        };
+        let rings_of = |r: &FloorRegion| -> Vec<Vec<Point2f64>> {
+            std::iter::once(to_pts(r.polygon.exterior()))
+                .chain(r.polygon.interiors().iter().map(to_pts))
+                .collect()
+        };
+        let rings: Vec<Vec<Vec<Point2f64>>> = self.regions.iter().map(rings_of).collect();
+        let mut out = Vec::new();
+        for i in 0..self.regions.len() {
+            for j in (i + 1)..self.regions.len() {
+                let (zi, zj) = (self.regions[i].level_m, self.regions[j].level_m);
+                if (zi - zj).abs() <= RISER_Z_EPS_M {
+                    continue; // same level — a phase split, not a step
+                }
+                let (lo, hi) = (zi.min(zj), zi.max(zj));
+                for ring_i in &rings[i] {
+                    for ring_j in &rings[j] {
+                        for (p, q) in shared_plan_pieces(ring_i, ring_j) {
+                            out.extend(riser_face(p, q, lo, hi, lo, hi));
+                        }
+                    }
+                }
+            }
+        }
+        out
+    }
 }
 
 /// Drop vertices that lie on the straight line between their neighbours (within
@@ -1066,6 +1111,79 @@ impl CeilingRegions {
         self.regions
             .iter()
             .find(|r| Polygon::<f64>::from(r.polygon.clone()).contains(&gp))
+    }
+
+    /// Interior CEILING-RISER faces: for every plan edge piece shared by two
+    /// regions ([`shared_plan_pieces`] — metric collinearity over boolean-op
+    /// output, never exact vertex equality) whose (linear) z profiles differ
+    /// by more than [`RISER_Z_EPS_M`] somewhere along it, the vertical face
+    /// between them: a quad with `exterior[0]`/`[1]` the base edge along the
+    /// LOWER profile (the `WallRegion` vertex-order contract), split into
+    /// two triangles where the profiles CROSS inside the piece (sub-sliver
+    /// halves dropped). The predicate is Z-DISCONTINUITY, not adjacency:
+    /// continuous fan/ridge seams — equal profiles along the shared edge —
+    /// emit NOTHING. Outline edges never emit (they border one region).
+    pub fn riser_faces(&self) -> Vec<Polygon3D> {
+        let plan_ring = |r: &CeilingRegion| -> Vec<Point2f64> {
+            r.polygon
+                .exterior
+                .iter()
+                .map(|v| Point2f64::new(v.x, v.y))
+                .collect()
+        };
+        let rings: Vec<Vec<Point2f64>> = self.regions.iter().map(plan_ring).collect();
+        let mut out = Vec::new();
+        for i in 0..self.regions.len() {
+            for j in (i + 1)..self.regions.len() {
+                let (Some((ci, cxi, cyi)), Some((cj, cxj, cyj))) = (
+                    region_plane(&self.regions[i]),
+                    region_plane(&self.regions[j]),
+                ) else {
+                    continue; // plan-degenerate region — no profile to compare
+                };
+                let z_i = |p: Point2f64| ci + cxi * p.x + cyi * p.y;
+                let z_j = |p: Point2f64| cj + cxj * p.x + cyj * p.y;
+                for (p, q) in shared_plan_pieces(&rings[i], &rings[j]) {
+                    let (dp, dq) = (z_i(p) - z_j(p), z_i(q) - z_j(q));
+                    if dp.abs() <= RISER_Z_EPS_M && dq.abs() <= RISER_Z_EPS_M {
+                        continue; // continuous seam (fan/ridge) — no face
+                    }
+                    if dp * dq < 0.0 && dp.abs() > RISER_Z_EPS_M && dq.abs() > RISER_Z_EPS_M {
+                        // Profiles cross inside the piece: one triangle per
+                        // side, each closing to zero gap at the crossing.
+                        let t = dp / (dp - dq);
+                        let x = Point2f64::new(p.x + (q.x - p.x) * t, p.y + (q.y - p.y) * t);
+                        let zx = z_i(x);
+                        out.extend(riser_face(
+                            p,
+                            x,
+                            z_i(p).min(z_j(p)),
+                            z_i(p).max(z_j(p)),
+                            zx,
+                            zx,
+                        ));
+                        out.extend(riser_face(
+                            x,
+                            q,
+                            zx,
+                            zx,
+                            z_i(q).min(z_j(q)),
+                            z_i(q).max(z_j(q)),
+                        ));
+                    } else {
+                        out.extend(riser_face(
+                            p,
+                            q,
+                            z_i(p).min(z_j(p)),
+                            z_i(p).max(z_j(p)),
+                            z_i(q).min(z_j(q)),
+                            z_i(q).max(z_j(q)),
+                        ));
+                    }
+                }
+            }
+        }
+        out
     }
 }
 
@@ -1860,37 +1978,10 @@ impl WallRegions {
         default_construction_id: ItemId,
     ) -> Self {
         // ── Injective base-edge matching (amend) ─────────────────────────
-        /// Both endpoints of a base edge must sit within this (m) of a
-        /// previous region's for the segment to be the SAME wall.
-        const MATCH_EPS_M: f64 = 1e-2;
-        let dist =
-            |u: Point2f64, vx: f64, vy: f64| ((u.x - vx).powi(2) + (u.y - vy).powi(2)).sqrt();
-        // Every qualifying (error, segment, previous) pair, then greedy
-        // assignment best-first — injective by construction.
-        let mut candidates: Vec<(f64, usize, usize)> = Vec::new();
-        for (si, (a, b, _)) in segments.iter().enumerate() {
-            for (pi, r) in previous.regions.iter().enumerate() {
-                let e = &r.polygon.exterior;
-                if e.len() < 2 {
-                    continue;
-                }
-                let fwd = dist(*a, e[0].x, e[0].y).max(dist(*b, e[1].x, e[1].y));
-                let rev = dist(*a, e[1].x, e[1].y).max(dist(*b, e[0].x, e[0].y));
-                let err = fwd.min(rev);
-                if err <= MATCH_EPS_M {
-                    candidates.push((err, si, pi));
-                }
-            }
-        }
-        candidates.sort_by(|x, y| x.0.partial_cmp(&y.0).unwrap_or(std::cmp::Ordering::Equal));
-        let mut amend_from: Vec<Option<usize>> = vec![None; segments.len()];
+        let bases: Vec<(Point2f64, Point2f64)> =
+            segments.iter().map(|(a, b, _)| (*a, *b)).collect();
         let mut prev_used = vec![false; previous.regions.len()];
-        for (_, si, pi) in candidates {
-            if amend_from[si].is_none() && !prev_used[pi] {
-                amend_from[si] = Some(pi);
-                prev_used[pi] = true;
-            }
-        }
+        let amend_from = Self::match_bases_to_previous(&bases, previous, &mut prev_used);
 
         let regions = segments
             .into_iter()
@@ -1934,6 +2025,121 @@ impl WallRegions {
         Self { regions }
     }
 
+    /// `regenerate`'s injective amend matcher, shared with [`with_risers`]:
+    /// a base edge matches a previous region when both endpoints sit within
+    /// [`MATCH_EPS_M`] of its base edge (either orientation). Every
+    /// qualifying (error, base, previous) pair is assigned greedily
+    /// best-first, so a previous region amends at most one base and ids are
+    /// never duplicated. `prev_used` marks previous regions already CLAIMED
+    /// on entry (how `with_risers` excludes the ids the perimeter pass kept)
+    /// and is updated with the assignments made.
+    ///
+    /// [`with_risers`]: WallRegions::with_risers
+    fn match_bases_to_previous(
+        bases: &[(Point2f64, Point2f64)],
+        previous: &WallRegions,
+        prev_used: &mut [bool],
+    ) -> Vec<Option<usize>> {
+        let dist =
+            |u: Point2f64, vx: f64, vy: f64| ((u.x - vx).powi(2) + (u.y - vy).powi(2)).sqrt();
+        let mut candidates: Vec<(f64, usize, usize)> = Vec::new();
+        for (si, (a, b)) in bases.iter().enumerate() {
+            for (pi, r) in previous.regions.iter().enumerate() {
+                let e = &r.polygon.exterior;
+                if e.len() < 2 {
+                    continue;
+                }
+                let fwd = dist(*a, e[0].x, e[0].y).max(dist(*b, e[1].x, e[1].y));
+                let rev = dist(*a, e[1].x, e[1].y).max(dist(*b, e[0].x, e[0].y));
+                let err = fwd.min(rev);
+                if err <= MATCH_EPS_M {
+                    candidates.push((err, si, pi));
+                }
+            }
+        }
+        candidates.sort_by(|x, y| x.0.partial_cmp(&y.0).unwrap_or(std::cmp::Ordering::Equal));
+        let mut matched: Vec<Option<usize>> = vec![None; bases.len()];
+        for (_, si, pi) in candidates {
+            if matched[si].is_none() && !prev_used[pi] {
+                matched[si] = Some(pi);
+                prev_used[pi] = true;
+            }
+        }
+        matched
+    }
+
+    /// Append derived RISER faces (`faces` pairs each face with the exposure
+    /// the caller assigned) with `regenerate`'s amend identity: the same
+    /// injective best-match on the base edge (`exterior[0]`/`[1]`, within
+    /// [`MATCH_EPS_M`]) against `previous` — EXCLUDING the previous ids
+    /// `self` already holds, so a riser can never duplicate an id the
+    /// perimeter pass kept. A matched face keeps the previous region's `id`,
+    /// `construction_id` AND `opes`; an unmatched face whose base midpoint a
+    /// previous region covers inherits its `construction_id` only; anything
+    /// else gets `default_construction_id`. The faces are re-derived
+    /// deterministically every materialize, so the match keeps riser
+    /// identity stable across re-resolves.
+    pub fn with_risers(
+        mut self,
+        faces: Vec<(Polygon3D, WallExposure)>,
+        previous: &WallRegions,
+        default_construction_id: ItemId,
+    ) -> Self {
+        let faces: Vec<(Polygon3D, WallExposure)> = faces
+            .into_iter()
+            .filter(|(p, _)| p.exterior.len() >= 3)
+            .collect();
+        // Previous regions whose id survived into `self` are already claimed.
+        let mut prev_used: Vec<bool> = previous
+            .regions
+            .iter()
+            .map(|p| self.regions.iter().any(|r| r.id == p.id))
+            .collect();
+        let bases: Vec<(Point2f64, Point2f64)> = faces
+            .iter()
+            .map(|(p, _)| {
+                (
+                    Point2f64::new(p.exterior[0].x, p.exterior[0].y),
+                    Point2f64::new(p.exterior[1].x, p.exterior[1].y),
+                )
+            })
+            .collect();
+        let matched = Self::match_bases_to_previous(&bases, previous, &mut prev_used);
+        for ((polygon, exposure), m) in faces.into_iter().zip(matched) {
+            let region = match m {
+                Some(pi) => {
+                    let src = &previous.regions[pi];
+                    WallRegion {
+                        id: src.id,
+                        polygon,
+                        exposure,
+                        opes: src.opes.clone(),
+                        construction_id: src.construction_id,
+                    }
+                }
+                None => {
+                    let mid = Point2f64::new(
+                        (polygon.exterior[0].x + polygon.exterior[1].x) * 0.5,
+                        (polygon.exterior[0].y + polygon.exterior[1].y) * 0.5,
+                    );
+                    let construction_id = match previous.region_covering(mid) {
+                        Some(src) => src.construction_id,
+                        None => default_construction_id,
+                    };
+                    WallRegion {
+                        id: ItemId::default(),
+                        polygon,
+                        exposure,
+                        opes: Opes::default(),
+                        construction_id,
+                    }
+                }
+            };
+            self.regions.push(region);
+        }
+        self
+    }
+
     /// The region whose base edge (the wall footprint) passes through `p`, used
     /// to inherit fabric properties when re-deriving. `None` if no region covers
     /// the point (e.g. a freshly drawn wall).
@@ -1944,6 +2150,102 @@ impl WallRegions {
                 && point_to_segment_distance(p.x, p.y, e[0].x, e[0].y, e[1].x, e[1].y) < 1e-2
         })
     }
+}
+
+/// Both endpoints of a base edge must sit within this (m) of a previous
+/// region's for it to be the SAME wall — the amend-matching tolerance of
+/// [`WallRegions::regenerate`] and [`WallRegions::with_risers`].
+const MATCH_EPS_M: f64 = 1e-2;
+
+// ── Shared-boundary riser extraction (private helpers for `riser_faces`) ──
+
+/// Minimum 1D overlap (m) for two near-collinear boundary edges to count as
+/// a SHARED plan piece — anything shorter is boolean-op noise, not a real
+/// region boundary.
+const RISER_MIN_OVERLAP_M: f64 = 1e-3;
+
+/// Z discontinuity (m) above which two surfaces meeting at a plan edge need
+/// a riser face between them. At or below it they are the SAME continuous
+/// surface — a fan/ridge seam, or floor pieces one phase boundary splits at
+/// a single level.
+const RISER_Z_EPS_M: f64 = 1e-4;
+
+/// The plan pieces two region boundary rings SHARE: every edge pair that is
+/// metrically collinear (each endpoint of one within [`PROFILE_EPS_M`] of
+/// the other's line — the rings are boolean-op output, so a conceptually
+/// shared edge is never an exact vertex match) whose 1D overlap along the
+/// line exceeds [`RISER_MIN_OVERLAP_M`], as the overlap's plan endpoints.
+/// Simple rings never retrace themselves, so one pair's pieces are disjoint.
+fn shared_plan_pieces(a: &[Point2f64], b: &[Point2f64]) -> Vec<(Point2f64, Point2f64)> {
+    let mut out = Vec::new();
+    let (na, nb) = (a.len(), b.len());
+    if na < 2 || nb < 2 {
+        return out;
+    }
+    for i in 0..na {
+        let (p, q) = (a[i], a[(i + 1) % na]);
+        let (dx, dy) = (q.x - p.x, q.y - p.y);
+        let len = (dx * dx + dy * dy).sqrt();
+        if len <= RISER_MIN_OVERLAP_M {
+            continue;
+        }
+        let (ux, uy) = (dx / len, dy / len);
+        // Perpendicular distance (m) to / parameter (m) along edge a's line.
+        let dist_to_line = |c: Point2f64| ((c.x - p.x) * uy - (c.y - p.y) * ux).abs();
+        let t_of = |c: Point2f64| (c.x - p.x) * ux + (c.y - p.y) * uy;
+        for j in 0..nb {
+            let (r, s) = (b[j], b[(j + 1) % nb]);
+            if dist_to_line(r) > PROFILE_EPS_M || dist_to_line(s) > PROFILE_EPS_M {
+                continue; // not (near-)collinear — no shared run
+            }
+            let (t0, t1) = (t_of(r), t_of(s));
+            let (lo, hi) = (t0.min(t1).max(0.0), t0.max(t1).min(len));
+            if hi - lo <= RISER_MIN_OVERLAP_M {
+                continue;
+            }
+            out.push((
+                Point2f64::new(p.x + ux * lo, p.y + uy * lo),
+                Point2f64::new(p.x + ux * hi, p.y + uy * hi),
+            ));
+        }
+    }
+    out
+}
+
+/// One vertical riser face over the plan run `p`→`q`, from a LOWER surface
+/// (`lo_*` at each end) up to an upper one (`hi_*`): `exterior[0]`/`[1]` are
+/// the base edge along the lower (the `WallRegion` vertex-order contract),
+/// then the top traces back `q`→`p`. A top vertex that wouldn't open past
+/// [`RISER_Z_EPS_M`] is skipped, so a face whose profiles meet at one end
+/// comes out a triangle. `None` when degenerate — a sub-
+/// [`RISER_MIN_OVERLAP_M`] plan run or no end opening past the z epsilon
+/// (the sub-sliver halves of a crossing split).
+fn riser_face(
+    p: Point2f64,
+    q: Point2f64,
+    lo_p: f64,
+    hi_p: f64,
+    lo_q: f64,
+    hi_q: f64,
+) -> Option<Polygon3D> {
+    let plan_len = ((q.x - p.x).powi(2) + (q.y - p.y).powi(2)).sqrt();
+    if plan_len <= RISER_MIN_OVERLAP_M {
+        return None;
+    }
+    if hi_p - lo_p <= RISER_Z_EPS_M && hi_q - lo_q <= RISER_Z_EPS_M {
+        return None;
+    }
+    let mut ext = vec![
+        Point3f64::new(p.x, p.y, lo_p),
+        Point3f64::new(q.x, q.y, lo_q),
+    ];
+    if hi_q - lo_q > RISER_Z_EPS_M {
+        ext.push(Point3f64::new(q.x, q.y, hi_q));
+    }
+    if hi_p - lo_p > RISER_Z_EPS_M {
+        ext.push(Point3f64::new(p.x, p.y, hi_p));
+    }
+    Some(Polygon3D::new(ext))
 }
 
 // ── Roof-profile sampling (private helpers for `WallRegions::regenerate`) ──
@@ -2720,6 +3022,249 @@ mod tests {
         // The loser still sits on the old base, so it inherits the
         // construction via the covered-split rule.
         assert_eq!(walls.regions[0].construction_id, cid);
+    }
+
+    // ── Riser faces + with_risers ───────────────────────────────────────────
+
+    /// One floor step → ONE riser quad on the interior boundary, base edge
+    /// at the LOWER level (the vertex-order contract), nothing on the
+    /// outline.
+    #[test]
+    fn floor_riser_faces_emit_on_the_interior_step_boundary_only() {
+        let cid = ItemId::default();
+        let floors = FloorRegions::new(square(0.0, 0.0, 4.0, 4.0), cid)
+            .with_levels(&[(square(0.0, 0.0, 2.0, 4.0), -0.3)]);
+        assert_eq!(floors.regions.len(), 2);
+        let faces = floors.riser_faces();
+        assert_eq!(faces.len(), 1, "one shared boundary piece steps");
+        let ext = &faces[0].exterior;
+        assert_eq!(ext.len(), 4, "a full quad");
+        // Base edge at the LOWER level −0.3, top at 0.0, the whole face on
+        // the interior line x = 2 (never the outline).
+        assert!((ext[0].z + 0.3).abs() < 1e-9 && (ext[1].z + 0.3).abs() < 1e-9);
+        assert!(ext[2].z.abs() < 1e-9 && ext[3].z.abs() < 1e-9);
+        assert!(ext.iter().all(|v| (v.x - 2.0).abs() < 1e-6));
+        let ys: Vec<f64> = ext.iter().map(|v| v.y).collect();
+        assert!(ys.iter().any(|y| y.abs() < 1e-6));
+        assert!(ys.iter().any(|y| (y - 4.0).abs() < 1e-6));
+    }
+
+    /// Two floor regions at the SAME level (a phase partition) emit nothing:
+    /// the riser predicate is z-discontinuity, not adjacency.
+    #[test]
+    fn floor_riser_faces_skip_same_level_boundaries() {
+        let cid = ItemId::default();
+        let floors = FloorRegions::partition(
+            &square(0.0, 0.0, 4.0, 4.0),
+            &[(square(0.0, 0.0, 2.0, 4.0), ItemId::default())],
+            cid,
+        );
+        assert_eq!(floors.regions.len(), 2);
+        assert!(floors.riser_faces().is_empty());
+    }
+
+    /// A ceiling step → one face from the lower to the higher flat piece,
+    /// base edge along the LOWER profile.
+    #[test]
+    fn ceiling_riser_faces_emit_one_face_per_step_boundary() {
+        let cid = ItemId::default();
+        let roofs =
+            CeilingRegions::default_for_footprint(vec![square(0.0, 0.0, 4.0, 4.0)], 2.4, cid)
+                .with_z_deltas(&[(square(2.0, 0.0, 4.0, 4.0), 0.3)]);
+        assert_eq!(roofs.regions.len(), 2);
+        let faces = roofs.riser_faces();
+        assert_eq!(faces.len(), 1);
+        let ext = &faces[0].exterior;
+        assert_eq!(ext.len(), 4);
+        assert!(
+            (ext[0].z - 2.4).abs() < 1e-9 && (ext[1].z - 2.4).abs() < 1e-9,
+            "base edge along the lower profile"
+        );
+        assert!((ext[2].z - 2.7).abs() < 1e-9 && (ext[3].z - 2.7).abs() < 1e-9);
+        assert!(ext.iter().all(|v| (v.x - 2.0).abs() < 1e-4));
+    }
+
+    /// Continuous fan and ridge seams (equal profiles along the shared edge)
+    /// emit NOTHING — the surfaces meet; there is no vertical face.
+    #[test]
+    fn ceiling_riser_faces_skip_fan_and_ridge_seams() {
+        let cid = ItemId::default();
+        let fan = CeilingRegions::default_for_footprint(vec![square(0.0, 0.0, 4.0, 4.0)], 2.4, cid)
+            .with_apexes(&[RoofApex {
+                point: Point2f64::new(2.0, 2.0),
+                z_m: 4.0,
+            }]);
+        assert!(fan.regions.len() >= 4, "one triangle per edge");
+        assert!(fan.riser_faces().is_empty(), "fan seams are continuous");
+
+        let (a, b) = gable_apexes();
+        let gable = gable_footprint(cid).with_apexes(&[a, b]);
+        assert!(gable.regions.len() >= 2);
+        assert!(gable.riser_faces().is_empty(), "ridge seams are continuous");
+    }
+
+    /// CROSSING profiles split the face into two triangles at the crossing
+    /// point, each with its base edge along the locally LOWER profile.
+    #[test]
+    fn ceiling_riser_faces_split_crossing_profiles_into_triangles() {
+        let cid = ItemId::default();
+        let mk = |pts: Vec<Point3f64>| CeilingRegion {
+            id: ItemId::default(),
+            polygon: Polygon3D::new(pts),
+            opes: Opes::default(),
+            construction_id: cid,
+        };
+        // Shared edge (0,0)→(2,0): A flat at 0.5 below it, B sloped z = x/2
+        // above it — the profiles cross at (1, 0, 0.5).
+        let a = mk(vec![
+            Point3f64::new(0.0, 0.0, 0.5),
+            Point3f64::new(2.0, 0.0, 0.5),
+            Point3f64::new(2.0, -1.0, 0.5),
+            Point3f64::new(0.0, -1.0, 0.5),
+        ]);
+        let b = mk(vec![
+            Point3f64::new(0.0, 0.0, 0.0),
+            Point3f64::new(2.0, 0.0, 1.0),
+            Point3f64::new(2.0, 1.0, 1.0),
+            Point3f64::new(0.0, 1.0, 0.0),
+        ]);
+        let faces = CeilingRegions {
+            regions: vec![a, b],
+        }
+        .riser_faces();
+        assert_eq!(faces.len(), 2, "one triangle per side of the crossing");
+        for f in &faces {
+            assert_eq!(f.exterior.len(), 3);
+            assert!(
+                f.exterior
+                    .iter()
+                    .any(|v| (v.x - 1.0).abs() < 1e-9 && (v.z - 0.5).abs() < 1e-9),
+                "each triangle closes at the crossing point: {:?}",
+                f.exterior
+            );
+        }
+        // Left side spans the gap 0 → 0.5 at x = 0; right side 0.5 → 1 at
+        // x = 2 — and each base edge sits on the lower of the two profiles.
+        assert!(faces.iter().any(|f| f
+            .exterior
+            .iter()
+            .any(|v| v.x.abs() < 1e-9 && v.z.abs() < 1e-9)));
+        assert!(faces.iter().any(|f| f
+            .exterior
+            .iter()
+            .any(|v| (v.x - 2.0).abs() < 1e-9 && (v.z - 1.0).abs() < 1e-9)));
+        for f in &faces {
+            assert!(
+                f.exterior[2].z >= f.exterior[0].z.max(f.exterior[1].z) - 1e-9,
+                "base first, apex above: {:?}",
+                f.exterior
+            );
+        }
+    }
+
+    /// `with_risers` amend identity: a re-derived riser keeps its previous
+    /// id, construction and opes; a riser face landing on an id the
+    /// perimeter pass already claimed can never duplicate it (exclusion);
+    /// an unmatched-but-covered face inherits the construction only.
+    #[test]
+    fn with_risers_amend_keeps_identity_and_never_duplicates_ids() {
+        let cid = ItemId::default();
+        let segs = || {
+            vec![(
+                Point2f64::new(0.0, 0.0),
+                Point2f64::new(4.0, 0.0),
+                WallExposure::Exposed,
+            )]
+        };
+        let riser = || {
+            Polygon3D::new(vec![
+                Point3f64::new(0.0, 2.0, -0.3),
+                Point3f64::new(4.0, 2.0, -0.3),
+                Point3f64::new(4.0, 2.0, 0.0),
+                Point3f64::new(0.0, 2.0, 0.0),
+            ])
+        };
+        // First derivation: one perimeter wall + one interior riser.
+        let mut walls1 = WallRegions::regenerate(
+            segs(),
+            &WallRegions::default(),
+            &CeilingRegions::default(),
+            0.0,
+            2.4,
+            cid,
+        )
+        .with_risers(
+            vec![(riser(), WallExposure::Ground)],
+            &WallRegions::default(),
+            cid,
+        );
+        assert_eq!(walls1.regions.len(), 2);
+        let wall_id = walls1.regions[0].id;
+        let riser_id = walls1.regions[1].id;
+        assert_ne!(wall_id, riser_id, "ids unique on first derivation");
+        assert_eq!(walls1.regions[1].exposure, WallExposure::Ground);
+        // Decorate the riser as later edits would: its own cid + an ope.
+        let riser_cid = ItemId::default();
+        let ope = ItemId::default();
+        walls1.regions[1].construction_id = riser_cid;
+        walls1.regions[1].opes.doors.push(ope);
+
+        // Re-derive from walls1: the perimeter amends, the riser re-derives
+        // deterministically — and keeps its identity.
+        let walls2 = WallRegions::regenerate(
+            segs(),
+            &walls1,
+            &CeilingRegions::default(),
+            0.0,
+            2.4,
+            ItemId::default(),
+        )
+        .with_risers(
+            vec![(riser(), WallExposure::Ground)],
+            &walls1,
+            ItemId::default(),
+        );
+        assert_eq!(walls2.regions.len(), 2);
+        assert_eq!(walls2.regions[0].id, wall_id, "perimeter amend keeps id");
+        let r = &walls2.regions[1];
+        assert_eq!(r.id, riser_id, "riser amend keeps id across re-derivation");
+        assert_eq!(r.construction_id, riser_cid);
+        assert_eq!(r.opes.doors, vec![ope], "openings survive the amend");
+
+        // EXCLUSION: a riser face whose base coincides with the perimeter
+        // wall's base can't steal its already-claimed id — it gets a fresh
+        // id and inherits the construction via the covered-split rule.
+        let on_wall = Polygon3D::new(vec![
+            Point3f64::new(0.0, 0.0, -0.3),
+            Point3f64::new(4.0, 0.0, -0.3),
+            Point3f64::new(4.0, 0.0, 0.0),
+            Point3f64::new(0.0, 0.0, 0.0),
+        ]);
+        let walls3 = WallRegions::regenerate(
+            segs(),
+            &walls1,
+            &CeilingRegions::default(),
+            0.0,
+            2.4,
+            ItemId::default(),
+        )
+        .with_risers(
+            vec![(on_wall, WallExposure::Ground)],
+            &walls1,
+            ItemId::default(),
+        );
+        assert_eq!(walls3.regions.len(), 2);
+        assert_eq!(walls3.regions[0].id, wall_id);
+        assert_ne!(
+            walls3.regions[1].id, wall_id,
+            "a claimed id is never duplicated"
+        );
+        assert_ne!(walls3.regions[1].id, riser_id);
+        assert_eq!(
+            walls3.regions[1].construction_id, cid,
+            "covered base inherits the construction only"
+        );
+        assert!(walls3.regions[1].opes.doors.is_empty(), "no opes inherited");
     }
 
     /// A ceiling step crossing the wall base makes a VERTICAL JUMP in the

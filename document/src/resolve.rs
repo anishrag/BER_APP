@@ -4,7 +4,9 @@
 use crate::{CeilingStepRegion, PhaseRegion, StepRegion, StoreyDoc};
 use datatypes::ber::ber_struct::Ber;
 use datatypes::ber::common::{ConstructionPhase, ItemId};
-use datatypes::ber::structural::{CeilingRegions, FloorRegions, Storey, WallRegions};
+use datatypes::ber::structural::{
+    CeilingRegions, FloorRegions, Polygon3D, Storey, WallExposure, WallRegions,
+};
 use domain::points::{to_f64, Point2f64};
 
 /// Placeholder top for derived wall quads until the storey's ceiling height is
@@ -236,31 +238,55 @@ pub fn resolve_storey(
     // empty default keeps every top flat at the provisional extrusion; once
     // it's set, spans no roof region covers fall back flat at the storey's
     // default height. `fallback_top_z` is ABSOLUTE z (base_z is 0.0 here).
-    // SEAM (deferred): RISER regions will be derived HERE, alongside the wall
-    // rebuild they must merge with — BOTH families:
-    //  - FLOOR risers, from adjacent floor regions with differing `level_m`:
-    //    one wall region per shared boundary segment, spanning the two levels;
-    //    segments whose lower side sits below grade (level_m < 0) get an
-    //    exposed-to-ground exposure, plus below-grade perimeter strips along
-    //    the outline of lowered regions.
-    //  - ROOF risers, the interior vertical faces between adjacent ceiling
-    //    regions: the jump faces of a ceiling step and the faces a fan's
-    //    triangles leave against neighbouring flat pieces.
-    // The shared-edge extraction belongs in datatypes (FloorRegions /
-    // CeilingRegions methods); the derivation belongs here.
     let no_roofs = CeilingRegions::default();
     let (roofs_for_walls, fallback_top_z) = match storey.ceiling_height_m {
         Some(h) => (&storey.roofs, h),
         None => (&no_roofs, PROVISIONAL_WALL_EXTRUSION_M),
     };
-    storey.walls = WallRegions::regenerate(
+    // The walls the storey held BEFORE this projection: the identity source
+    // for BOTH passes — the perimeter regenerate and the riser append.
+    let previous_walls = std::mem::take(&mut storey.walls);
+    let walls = WallRegions::regenerate(
         wall_segments,
-        &storey.walls,
+        &previous_walls,
         roofs_for_walls,
         0.0,
         fallback_top_z,
         wall_cid,
     );
+    // RISER regions append after the perimeter rebuild — derived geometry,
+    // re-derived on every materialize like the walls themselves:
+    //  - FLOOR risers → `Ground`: the vertical faces between adjacent floor
+    //    regions whose `level_m` differ, derived whether or not the ceiling
+    //    height is set (floor steps don't depend on it).
+    //  - CEILING risers → `Exposed`: the interior vertical faces between
+    //    adjacent ceiling regions whose z profiles jump (a ceiling step's
+    //    face; fan/ridge seams are continuous and emit nothing). Derived off
+    //    `roofs_for_walls`, so they're empty until the height is set — no
+    //    extra gating needed.
+    // Perimeter walls never duplicate, by construction: outline edges border
+    // ONE region, so `riser_faces` can't emit there — a ceiling step CROSSING
+    // a wall shows up as that wall's vertical top jump, while the riser face
+    // runs along the step line itself. Identity rides `with_risers`' amend
+    // matching against the SAME previous set the perimeter pass consumed,
+    // minus the ids that pass already kept.
+    // v1 approximations: every floor riser is `Ground` (no grade model yet —
+    // a step-up riser between two above-grade floors is really exposed), and
+    // riser exposure is not yet editable (the outline exposure painter can't
+    // reach an interior face; a future 3D tap-picker will own that).
+    let risers: Vec<(Polygon3D, WallExposure)> = storey
+        .floors
+        .riser_faces()
+        .into_iter()
+        .map(|f| (f, WallExposure::Ground))
+        .chain(
+            roofs_for_walls
+                .riser_faces()
+                .into_iter()
+                .map(|f| (f, WallExposure::Exposed)),
+        )
+        .collect();
+    storey.walls = walls.with_risers(risers, &previous_walls, wall_cid);
     storey
 }
 
@@ -391,6 +417,70 @@ mod tests {
         };
         assert!((area_at_level(-0.3) - 8.0).abs() < 1e-6, "stepped half");
         assert!((area_at_level(0.0) - 8.0).abs() < 1e-6, "untouched half");
+    }
+
+    /// A floor step derives a GROUND riser wall along its interior boundary
+    /// — regardless of the ceiling height (unset here) — with the base edge
+    /// at the LOWER level, ids unique against the perimeter regions, and the
+    /// riser's id STABLE across re-resolves (amend).
+    #[test]
+    fn floor_step_derives_a_ground_riser_with_stable_identity() {
+        let doc = square_doc(&[
+            Point2f32::new(0.0, 0.0),
+            Point2f32::new(4.0, 0.0),
+            Point2f32::new(4.0, 4.0),
+            Point2f32::new(0.0, 4.0),
+        ]);
+        let steps = vec![crate::StepRegion {
+            polygon: vec![
+                Point2f32::new(0.0, 0.0),
+                Point2f32::new(2.0, 0.0),
+                Point2f32::new(2.0, 4.0),
+                Point2f32::new(0.0, 4.0),
+            ],
+            level_m: -0.3,
+        }];
+        let mut ber = Ber::default();
+        ensure_storey_constructions(&mut ber, 0, &[]);
+        let storey = resolve_storey(&doc, &ber, 0, &[], &steps, &[]);
+
+        // 4 perimeter (Unset) regions + ONE Ground riser on the step line.
+        assert_eq!(storey.walls.regions.len(), 5);
+        let grounds: Vec<_> = storey
+            .walls
+            .regions
+            .iter()
+            .filter(|r| r.exposure == WallExposure::Ground)
+            .collect();
+        assert_eq!(grounds.len(), 1, "one riser on the interior boundary");
+        let ext = &grounds[0].polygon.exterior;
+        assert_eq!(ext.len(), 4, "a vertical quad");
+        assert!(
+            (ext[0].z + 0.3).abs() < 1e-9 && (ext[1].z + 0.3).abs() < 1e-9,
+            "base edge at the LOWER level: {ext:?}"
+        );
+        assert!(ext[2].z.abs() < 1e-9 && ext[3].z.abs() < 1e-9);
+        assert!(
+            ext.iter().all(|v| (v.x - 2.0).abs() < 1e-6),
+            "the face sits on the step line x = 2, never the outline: {ext:?}"
+        );
+        let mut ids: Vec<_> = storey.walls.regions.iter().map(|r| r.id).collect();
+        ids.sort_by_key(|id| id.0);
+        ids.dedup();
+        assert_eq!(ids.len(), 5, "no duplicate ids");
+
+        // Re-resolve with the derived storey as the previous state: the
+        // riser AMENDS (deterministic re-derivation ⇒ stable identity).
+        let riser_id = grounds[0].id;
+        ber.storeys[0] = storey;
+        let storey2 = resolve_storey(&doc, &ber, 0, &[], &steps, &[]);
+        let riser2 = storey2
+            .walls
+            .regions
+            .iter()
+            .find(|r| r.exposure == WallExposure::Ground)
+            .expect("riser re-derives");
+        assert_eq!(riser2.id, riser_id, "riser id stable across re-resolves");
     }
 
     /// Empty `step_regions` performs NO geo ops: the floor ring's stored points
@@ -1094,7 +1184,10 @@ mod tests {
     /// The user's amend scenario at resolve level: a marked wall under a NEW
     /// ceiling step keeps its id, construction_id, and openings across the
     /// re-resolve (same base edge → AMEND), while its top gains the step's
-    /// vertical jump.
+    /// vertical jump — and the step's interior RISER face derives as ONE
+    /// `Exposed` region that COEXISTS with that jump without double-counting
+    /// (the jump is part of the perimeter wall's polygon; the riser is the
+    /// separate face along the step line itself).
     #[test]
     fn wall_under_a_ceiling_step_keeps_identity_across_re_resolves() {
         let mut doc = square_doc(&[
@@ -1140,14 +1233,40 @@ mod tests {
                 0.3,
             )
             .unwrap();
-        let storey2 = resolve_storey(&doc, &ber, 0, &[], &[], &[step]);
+        let storey2 = resolve_storey(&doc, &ber, 0, &[], &[], &[step.clone()]);
 
-        assert_eq!(storey2.walls.regions.len(), 4);
+        // 4 perimeter regions + the step's ONE interior riser face.
+        assert_eq!(storey2.walls.regions.len(), 5);
+        // The riser: base edge ON the step line (x = 2, interior), spanning
+        // the two ceiling heights, Exposed (the ceiling-riser default).
+        let is_riser = |r: &&datatypes::ber::structural::WallRegion| {
+            let e = &r.polygon.exterior;
+            (e[0].x - 2.0).abs() < 1e-4 && (e[1].x - 2.0).abs() < 1e-4
+        };
+        let risers: Vec<_> = storey2.walls.regions.iter().filter(is_riser).collect();
+        assert_eq!(risers.len(), 1, "exactly one riser — no double-counting");
+        let riser = risers[0];
+        assert_eq!(riser.exposure, WallExposure::Exposed);
+        let rext = &riser.polygon.exterior;
+        assert!(
+            (rext[0].z - 2.4).abs() < 1e-9 && (rext[1].z - 2.4).abs() < 1e-9,
+            "riser base at the lower ceiling: {rext:?}"
+        );
+        assert!(
+            rext.iter().any(|v| (v.z - 2.7).abs() < 1e-9),
+            "riser tops at the stepped ceiling: {rext:?}"
+        );
+        // Every id unique across perimeter + riser.
+        let mut ids: Vec<_> = storey2.walls.regions.iter().map(|r| r.id).collect();
+        ids.sort_by_key(|id| id.0);
+        ids.dedup();
+        assert_eq!(ids.len(), 5, "no duplicate ids");
+
         let wall = storey2
             .walls
             .regions
             .iter()
-            .find(|r| r.exposure == WallExposure::Exposed)
+            .find(|r| r.exposure == WallExposure::Exposed && !is_riser(r))
             .unwrap();
         assert_eq!(wall.id, id0, "same base edge → same wall (amend)");
         assert_eq!(wall.construction_id, cid0);
@@ -1163,6 +1282,20 @@ mod tests {
                 "top reaches {z}"
             );
         }
+
+        // Re-resolve once more from storey2: the riser AMENDS — its id is
+        // stable across re-derivations.
+        let riser_id = riser.id;
+        let mut ber2 = ber.clone();
+        ber2.storeys[0] = storey2.clone();
+        let storey3 = resolve_storey(&doc, &ber2, 0, &[], &[], &[step]);
+        let riser3 = storey3
+            .walls
+            .regions
+            .iter()
+            .find(|r| is_riser(r))
+            .expect("riser re-derives");
+        assert_eq!(riser3.id, riser_id, "riser id stable across re-resolves");
     }
 
     /// WALL-UNDER-RIDGE confidence: a marked wall keeps its identity when a
@@ -1308,7 +1441,36 @@ mod tests {
             ber.add_roof_apex(0, apex);
         }
         let storey = resolve_storey(&doc, &ber, 0, &[], &[], &[step]);
-        assert_eq!(storey.walls.regions.len(), 6, "one region per edge");
+        // One region per perimeter edge + the raised jut's interior riser
+        // face along the step line x = 4 (the ridge's own seams are
+        // continuous and emit nothing).
+        assert_eq!(storey.walls.regions.len(), 7, "6 walls + 1 riser");
+        let riser = storey
+            .walls
+            .regions
+            .iter()
+            .find(|r| {
+                let e = &r.polygon.exterior;
+                (e[0].x - 4.0).abs() < 1e-4
+                    && (e[1].x - 4.0).abs() < 1e-4
+                    && e[0].y.max(e[1].y) < 2.0 + 1e-4
+            })
+            .expect("the step line carries a riser face");
+        assert_eq!(riser.exposure, WallExposure::Exposed);
+        assert!(
+            (riser.polygon.exterior[0].z - 2.4).abs() < 1e-6,
+            "riser base at the main ceiling: {:?}",
+            riser.polygon.exterior
+        );
+        assert!(
+            riser
+                .polygon
+                .exterior
+                .iter()
+                .any(|v| (v.z - 3.4).abs() < 1e-6),
+            "riser tops at the raised eaves: {:?}",
+            riser.polygon.exterior
+        );
 
         // Find a wall region by its base edge (either orientation).
         let wall_with_base = |a: Point2f64, b: Point2f64| {
@@ -1678,8 +1840,9 @@ mod tests {
         let storey = resolve_storey(&doc, &ber, 0, &[], &[], &[step]);
 
         // One region per coverage range: gap/Semi/gap on the painted wall +
-        // one whole-wall Unset region for each of the three unmarked walls.
-        assert_eq!(storey.walls.regions.len(), 6);
+        // one whole-wall Unset region for each of the three unmarked walls +
+        // the ceiling step's interior riser face.
+        assert_eq!(storey.walls.regions.len(), 7);
         assert_eq!(
             storey
                 .walls
@@ -1701,7 +1864,8 @@ mod tests {
         assert_eq!(
             recovered.len(),
             1,
-            "only the painted wall recovers — Unset regions yield NO sections"
+            "only the painted wall recovers — Unset regions and the riser \
+             (an interior base edge on no perimeter wall) yield NO sections"
         );
         let secs = &recovered[&vid];
         let expected = &doc.wall_sections[&vid];
