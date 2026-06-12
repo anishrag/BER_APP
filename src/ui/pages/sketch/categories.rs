@@ -13,6 +13,7 @@
 use super::prompt_dock::parse_dimension_expression;
 use super::{SketchEvent, SketchView};
 use crate::ui::pages::events::UiEvent;
+use crate::ui::widgets::metre_input;
 use domain::sketch::EditTools;
 
 /// One tool/toggle slot inside a category.
@@ -405,12 +406,8 @@ fn tool_ui<F: FnMut(UiEvent)>(
                 if let Some(h) = flags.default_ceiling_height {
                     ui.label(format!("{h:.2} m"));
                 }
-                let resp = ui.add(
-                    egui::TextEdit::singleline(&mut state.ceiling_height_input)
-                        .desired_width(50.0)
-                        .hint_text("e.g. 2.4"),
-                );
-                let submitted = resp.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
+                let submitted =
+                    metre_input(ui, &mut state.ceiling_height_input, 50.0, "e.g. 2.4").submitted;
                 let set_clicked = ui
                     .button("Set")
                     .on_hover_text(
@@ -444,13 +441,9 @@ fn tool_ui<F: FnMut(UiEvent)>(
                     if let Some(t) = flags.floor_thickness {
                         ui.label(format!("{t:.2} m"));
                     }
-                    let resp = ui.add(
-                        egui::TextEdit::singleline(&mut state.floor_thickness_input)
-                            .desired_width(50.0)
-                            .hint_text("e.g. 0.3"),
-                    );
                     let submitted =
-                        resp.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
+                        metre_input(ui, &mut state.floor_thickness_input, 50.0, "e.g. 0.3")
+                            .submitted;
                     let set_clicked = ui
                         .button("Set")
                         .on_hover_text(

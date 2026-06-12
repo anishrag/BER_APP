@@ -1,4 +1,5 @@
 use crate::ui::pages::events::UiEvent;
+use crate::ui::widgets::{metre_input, text_input};
 use chrono::NaiveDate;
 use datatypes::ber::common::{ConstructionPhase, ConstructionPhases, Year};
 use egui::{RichText, Ui};
@@ -175,7 +176,7 @@ impl KeyDetailsPage {
             .spacing([40.0, 10.0])
             .show(ui, |ui| {
                 ui.label("BER Name:");
-                if ui.text_edit_singleline(&mut state.name).changed() {
+                if text_input(ui, &mut state.name, f32::INFINITY, "").changed {
                     on_event(UiEvent::KeyDetails(KeyDetailsEvent::Rename(
                         state.name.clone(),
                     )));
@@ -187,14 +188,7 @@ impl KeyDetailsPage {
                 ui.end_row();
 
                 ui.label("Year of Construction:");
-                if ui
-                    .add(
-                        egui::TextEdit::singleline(&mut state.construction_year)
-                            .hint_text("e.g. 1985")
-                            .desired_width(80.0),
-                    )
-                    .changed()
-                {
+                if metre_input(ui, &mut state.construction_year, 80.0, "e.g. 1985").changed {
                     phases_changed = true;
                 }
                 ui.end_row();
@@ -214,25 +208,11 @@ impl KeyDetailsPage {
         for (i, ext) in state.extensions.iter_mut().enumerate() {
             ui.horizontal(|ui| {
                 ui.label(extension_label(&ext.phase));
-                if ui
-                    .add(
-                        egui::TextEdit::singleline(&mut ext.nickname)
-                            .hint_text("name e.g. Back extension")
-                            .desired_width(160.0),
-                    )
-                    .changed()
-                {
+                if text_input(ui, &mut ext.nickname, 160.0, "name e.g. Back extension").changed {
                     phases_changed = true;
                 }
                 ui.label("year");
-                if ui
-                    .add(
-                        egui::TextEdit::singleline(&mut ext.year)
-                            .hint_text("2008")
-                            .desired_width(60.0),
-                    )
-                    .changed()
-                {
+                if metre_input(ui, &mut ext.year, 60.0, "2008").changed {
                     phases_changed = true;
                 }
                 if ui.button("Remove").clicked() {

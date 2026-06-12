@@ -12,6 +12,7 @@ use crate::controller::app_controller::{
     PositionPromptUiData, VertexDropPromptUiData,
 };
 use crate::ui::pages::events::UiEvent;
+use crate::ui::widgets::metre_input;
 use datatypes::ber::common::ConstructionPhase;
 use datatypes::ber::structural::WallExposure;
 
@@ -272,12 +273,7 @@ fn dimension_prompt_toolbar<F: FnMut(UiEvent)>(
     // first dimension — the assessor sees "looks like ~3.something m" and
     // confirms with an exact measurement.
     ui.label(format!("(currently {:.2})", prompt.current_length));
-    let resp = ui.add(
-        egui::TextEdit::singleline(dim_input)
-            .desired_width(80.0)
-            .hint_text("e.g. 4.2"),
-    );
-    let submit_pressed = resp.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
+    let submit_pressed = metre_input(ui, dim_input, 80.0, "e.g. 4.2").submitted;
     let apply_clicked = ui
         .button("Apply")
         .on_hover_text("Apply this dimension and move to the next")
@@ -324,12 +320,7 @@ fn position_prompt_toolbar<F: FnMut(UiEvent)>(
         .strong()
         .color(egui::Color32::from_rgb(60, 220, 255)),
     );
-    let resp = ui.add(
-        egui::TextEdit::singleline(input)
-            .desired_width(80.0)
-            .hint_text("e.g. 3.5"),
-    );
-    let submit_pressed = resp.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
+    let submit_pressed = metre_input(ui, input, 80.0, "e.g. 3.5").submitted;
     let apply_clicked = ui
         .button("Apply")
         .on_hover_text("Pin the area at exactly this distance")
@@ -390,12 +381,7 @@ fn edit_drag_prompt_toolbar<F: FnMut(UiEvent)>(
         prompt.option_idx + 1,
         prompt.option_count,
     ));
-    let resp = ui.add(
-        egui::TextEdit::singleline(input)
-            .desired_width(80.0)
-            .hint_text("e.g. 3.5"),
-    );
-    let submit_pressed = resp.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
+    let submit_pressed = metre_input(ui, input, 80.0, "e.g. 3.5").submitted;
     let apply_clicked = ui
         .button("Apply")
         .on_hover_text("Apply this distance")
@@ -450,12 +436,7 @@ fn vertex_drop_prompt_toolbar<F: FnMut(UiEvent)>(
         // Use idx-based slot so inputs survive across frames + apply
         // targets the right measurement. Cap at 4 slots.
         let slot = m.idx.min(inputs.len() - 1);
-        let resp = ui.add(
-            egui::TextEdit::singleline(&mut inputs[slot])
-                .desired_width(60.0)
-                .hint_text("=?"),
-        );
-        let submitted = resp.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
+        let submitted = metre_input(ui, &mut inputs[slot], 60.0, "=?").submitted;
         let clicked = ui.button("✓").on_hover_text("Set this distance").clicked();
         if clicked || submitted {
             if let Some(v) = parse_dimension_expression(&inputs[slot]) {
@@ -536,12 +517,7 @@ fn new_storey_toolbar<F: FnMut(UiEvent)>(
                 .strong()
                 .color(egui::Color32::from_rgb(60, 220, 255)),
         );
-        let resp = ui.add(
-            egui::TextEdit::singleline(thickness_input)
-                .desired_width(60.0)
-                .hint_text("e.g. 0.30"),
-        );
-        let submitted = resp.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
+        let submitted = metre_input(ui, thickness_input, 60.0, "e.g. 0.30").submitted;
         let set_clicked = ui
             .button("Set")
             .on_hover_text("Use this slab thickness (it sets the storey's floor level)")
@@ -726,11 +702,7 @@ fn step_toolbar<F: FnMut(UiEvent)>(
 ) {
     if pick_pending {
         ui.label(egui::RichText::new("Step amount (m):").strong());
-        ui.add(
-            egui::TextEdit::singleline(amount_input)
-                .desired_width(60.0)
-                .hint_text("e.g. 0.15"),
-        );
+        metre_input(ui, amount_input, 60.0, "e.g. 0.15");
         // Unparseable input is ignored — the buttons just do nothing. The
         // BUTTON owns the sign: an expression that evaluates negative
         // (e.g. "1-2") must not flip Lower into a raise, so take |v|.
@@ -825,11 +797,7 @@ fn ceiling_step_toolbar<F: FnMut(UiEvent)>(
         }
     } else if amount_pending {
         ui.label(egui::RichText::new("Step (m):").strong());
-        ui.add(
-            egui::TextEdit::singleline(amount_input)
-                .desired_width(60.0)
-                .hint_text("e.g. 0.2"),
-        );
+        metre_input(ui, amount_input, 60.0, "e.g. 0.2");
         // Unparseable input is ignored — the buttons just do nothing. The
         // BUTTON owns the sign (an expression that evaluates negative must
         // not flip Down into a raise), so take |v|.
@@ -913,11 +881,7 @@ fn roof_point_toolbar<F: FnMut(UiEvent)>(
 ) {
     if rect.height_pending {
         ui.label(egui::RichText::new("Flat-top height (m):").strong());
-        ui.add(
-            egui::TextEdit::singleline(height_input)
-                .desired_width(60.0)
-                .hint_text("e.g. 4.2"),
-        );
+        metre_input(ui, height_input, 60.0, "e.g. 4.2");
         // ABSOLUTE height (above the storey floor datum), applied to all
         // four corners; the controller validates it.
         if ui
@@ -943,11 +907,7 @@ fn roof_point_toolbar<F: FnMut(UiEvent)>(
         ui.label(egui::RichText::new(label).strong());
         // Arrives PREFILLED with the drawn side length (the stroke is
         // approximate — the typed value is the real dimension).
-        ui.add(
-            egui::TextEdit::singleline(ridge_length_input)
-                .desired_width(60.0)
-                .hint_text("e.g. 4.0"),
-        );
+        metre_input(ui, ridge_length_input, 60.0, "e.g. 4.0");
         if ui
             .button("Set")
             .on_hover_text("Use exactly this side length (the near corner stays put)")
@@ -981,11 +941,7 @@ fn roof_point_toolbar<F: FnMut(UiEvent)>(
         }
     } else if ridge_height_pending {
         ui.label(egui::RichText::new("Ridge height (m):").strong());
-        ui.add(
-            egui::TextEdit::singleline(height_input)
-                .desired_width(60.0)
-                .hint_text("e.g. 4.2"),
-        );
+        metre_input(ui, height_input, 60.0, "e.g. 4.2");
         // The height is ABSOLUTE (above the storey floor datum) and applies
         // to BOTH ridge ends; the controller validates it.
         if ui
@@ -1007,11 +963,7 @@ fn roof_point_toolbar<F: FnMut(UiEvent)>(
         ui.label(egui::RichText::new("Ridge length (m):").strong());
         // Arrives PREFILLED with the drawn length (the stroke is approximate
         // — the typed value is the real dimension; Skip accepts the drawn).
-        ui.add(
-            egui::TextEdit::singleline(ridge_length_input)
-                .desired_width(60.0)
-                .hint_text("e.g. 6.0"),
-        );
+        metre_input(ui, ridge_length_input, 60.0, "e.g. 6.0");
         // "(from the highlighted end)" only when an end is ANCHORED — an
         // extent end snapped onto a wall, so the typed length extends from
         // (or, for a snapped far end, back from) that exact coordinate.
@@ -1049,11 +1001,7 @@ fn roof_point_toolbar<F: FnMut(UiEvent)>(
         }
     } else if height_pending {
         ui.label(egui::RichText::new("Apex height (m):").strong());
-        ui.add(
-            egui::TextEdit::singleline(height_input)
-                .desired_width(60.0)
-                .hint_text("e.g. 4.2"),
-        );
+        metre_input(ui, height_input, 60.0, "e.g. 4.2");
         // Unparseable input is ignored — the button just does nothing. The
         // height is ABSOLUTE (above the storey floor datum), so the value
         // goes through as-is; the controller validates it.
@@ -1188,19 +1136,10 @@ fn exposure_toolbar<F: FnMut(UiEvent)>(
                 .strong(),
             );
             ui.label("start");
-            let rs = ui.add(
-                egui::TextEdit::singleline(start_input)
-                    .desired_width(46.0)
-                    .hint_text(format!("{lo:.2}")),
-            );
+            let rs = metre_input(ui, start_input, 46.0, &format!("{lo:.2}"));
             ui.label("end");
-            let re = ui.add(
-                egui::TextEdit::singleline(end_input)
-                    .desired_width(46.0)
-                    .hint_text(format!("{hi:.2}")),
-            );
-            let enter = (rs.lost_focus() || re.lost_focus())
-                && ui.input(|i| i.key_pressed(egui::Key::Enter));
+            let re = metre_input(ui, end_input, 46.0, &format!("{hi:.2}"));
+            let enter = rs.submitted || re.submitted;
             if ui.button("Set range").clicked() || enter {
                 let s = parse_dimension_expression(start_input).unwrap_or(lo);
                 let e = parse_dimension_expression(end_input).unwrap_or(hi);

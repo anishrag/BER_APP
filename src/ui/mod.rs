@@ -2,6 +2,7 @@ pub mod adapters;
 pub mod app;
 pub mod pages;
 pub mod render;
+pub mod widgets;
 
 use eframe::egui;
 use std::cell::RefCell;
