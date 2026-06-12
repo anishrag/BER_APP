@@ -232,6 +232,10 @@ impl AppController {
             .map_err(|e| format!("Failed to draw outline: {:?}", e))?;
         println!("floor plan: {:?}", self.document.floor_plan);
         self.warn_if_non_orthogonal("draw outline");
+        // An upper storey's outline was just replaced WHOLESALE (the Replace
+        // path / a fresh draw): the inherited-level seed must re-fire against
+        // the new footprint, and the old footprint's step regions die with it.
+        self.reset_inherited_seed_for_redraw();
         self.document.dimensioning = DimensionState::default();
         self.push_history_snapshot(undo_snap);
         self.commit_review_redimension()
@@ -354,6 +358,11 @@ impl AppController {
             self.document
                 .carve_outline_from_previous(&pts, &prev_ring, &self.tuning.subarea)?;
         self.warn_if_non_orthogonal("draw outline (carve)");
+        // The carve replaced the upper storey's outline WHOLESALE: re-pend
+        // the inherited-level seed (the tail below / the dimensioning tails
+        // re-seed against the NEW footprint) and drop the step regions
+        // canonicalized against the old one. No-op on a fresh storey.
+        self.reset_inherited_seed_for_redraw();
         println!(
             "[new-storey] carved outline (reuse of living-area carve): {} verts, pinned {} of {} \
              active params ({} new wall param(s) left to dimension)",

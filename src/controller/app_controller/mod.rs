@@ -75,8 +75,6 @@ pub use editing::{
     WallPositions,
 };
 pub use history::HistorySnapshot;
-// Slice D wires the UI consumer; until then the re-export is "unused".
-#[allow(unused_imports)]
 pub use new_storey::NewStoreyPromptUiData;
 use new_storey::{NewStoreyStage, PendingNewStorey};
 #[cfg(test)]

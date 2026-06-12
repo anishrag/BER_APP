@@ -27,7 +27,7 @@
 //! [`StoreyDoc::adopt_finalised_outline`]: document::StoreyDoc::adopt_finalised_outline
 //! [`maybe_seed_inherited_levels`]: AppController::maybe_seed_inherited_levels
 use super::*;
-use datatypes::ber::suggest::{suggest_storey_outlines, OutlineSuggestion};
+use datatypes::ber::suggest::{has_suggestion_inputs, suggest_storey_outlines, OutlineSuggestion};
 
 /// At most this many ranked suggestions are offered to browse.
 const MAX_OUTLINE_SUGGESTIONS: usize = 6;
@@ -293,10 +293,9 @@ impl AppController {
     }
 
     /// Whether [`choose_suggest_outlines`] has anything to work from: a
-    /// storey below with its ceiling height set, a usable footprint, and at
-    /// least one flat ceiling region. Mirrors the suggestion engine's empty
-    /// conditions cheaply (no unions) — the engine can still come up empty
-    /// on validation, which the method's stable `Err` covers.
+    /// storey below whose inputs satisfy the suggestion engine's cheap
+    /// empty-guard mirror ([`has_suggestion_inputs`]) — the engine can still
+    /// come up empty on validation, which the method's stable `Err` covers.
     ///
     /// [`choose_suggest_outlines`]: AppController::choose_suggest_outlines
     fn can_suggest_outlines(&self) -> bool {
@@ -306,20 +305,10 @@ impl AppController {
         if idx == 0 {
             return false;
         }
-        let Some(below) = self
-            .current_record
+        self.current_record
             .as_ref()
             .and_then(|r| r.data.storeys.get(idx - 1))
-        else {
-            return false;
-        };
-        below.ceiling_height_m.is_some()
-            && below.floors.footprint_ring().is_some()
-            && below
-                .roofs
-                .regions
-                .iter()
-                .any(|r| r.polygon.exterior.len() >= 3 && r.flat_z().is_some())
+            .is_some_and(has_suggestion_inputs)
     }
 
     /// Outline-stroke gating for the new-storey flow. Called by the outline
@@ -412,6 +401,32 @@ impl AppController {
             eprintln!("commit_to_ber after inherited-level seed: {e}");
         }
         self.reconstruct_step_regions_for(idx);
+    }
+
+    /// A WHOLESALE outline replacement on an UPPER storey (the redraw
+    /// Replace path, or a world-carve over the storey) invalidates
+    /// everything seeded against the old footprint: re-PEND the
+    /// inherited-level seed and DROP the storey's session step regions —
+    /// the seeded pieces were canonicalized against the OLD footprint and
+    /// die with it, so the finalisation tail re-seeds against the new
+    /// footprint exactly like a restart's
+    /// [`rederive_inherited_seed_pending`] would. NOTE: dropping the entry
+    /// also drops the user's OWN steps on the storey — the honest semantic
+    /// for a wholesale redraw (they too were drawn against the old
+    /// footprint). No-op on storey 0 / the All tab, and harmless on a fresh
+    /// (never-seeded) upper storey.
+    ///
+    /// [`rederive_inherited_seed_pending`]:
+    /// AppController::rederive_inherited_seed_pending
+    pub(super) fn reset_inherited_seed_for_redraw(&mut self) {
+        let Some(idx) = self.current_storey_idx else {
+            return;
+        };
+        if idx == 0 {
+            return;
+        }
+        self.inherited_seed_pending.insert(idx);
+        self.step_regions.remove(&idx);
     }
 
     /// Re-derive which storeys still await their inherited-level seed —

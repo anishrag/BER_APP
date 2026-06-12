@@ -5513,6 +5513,105 @@ fn drawn_path_seed_survives_restart_via_rederived_pending() {
     );
 }
 
+/// IN-SESSION REDRAW RE-SEEDS: finalise an upper storey over the stepped
+/// below-ceiling (the seed fires, canonicalizing pieces against THAT
+/// footprint), then redraw the outline wholesale via the Replace path onto
+/// the raised half only. The redraw must re-PEND the seed and DROP the stale
+/// seeded pieces (they were canonicalized against the old footprint — under
+/// the old behaviour they'd graft a bogus +0.3 step onto the new floor);
+/// re-dimensioning to finalisation then re-seeds against the NEW footprint:
+/// sitting entirely on the 2.7 ceiling, its anchor IS that level, so the
+/// floor is flat — matching what a restart's re-derive would produce.
+#[test]
+fn upper_storey_redraw_reseeds_inherited_levels_against_new_footprint() {
+    let mut c = stepped_ceiling_below_controller();
+    c.add_storey().unwrap();
+    c.assign_floor_thickness(0.3).unwrap();
+
+    // First outline: the full 10×10 trace — finalised at the carve tail, the
+    // seed fires: one inherited piece (x ≥ 5, +0.3).
+    draw_world_square_trace(&mut c);
+    assert!(c.outline_finalised(), "fully pinned trace → finalised");
+    assert!(!c.inherited_seed_pending.contains(&1), "seed consumed");
+    assert_eq!(c.step_regions[&1].len(), 1, "inherited piece seeded");
+
+    // Wholesale REDRAW via the Replace path: a pixel rect that will be
+    // dimensioned onto the raised right half only (x ∈ [5,10], y ∈ [0,10]).
+    let p = |x: f32, y: f32| Point2f32::new(x, y);
+    c.set_edit_mode(EditTools::DrawPerpWalls);
+    c.sketch_start_stroke(p(500.0, 0.0)).unwrap();
+    // Tail anatomy: (500,50) is the drag point homing in along the closing
+    // edge (outside the 30 px close zone, so `check_closed` keeps it and the
+    // orthogonalizer pops it as the drag point); (501,1) is the lift point
+    // inside the zone, which `check_closed` pops.
+    for (x, y) in [
+        (1000.0, 0.0),
+        (1000.0, 1000.0),
+        (500.0, 1000.0),
+        (500.0, 50.0),
+        (501.0, 1.0),
+    ] {
+        c.sketch_add_point(p(x, y)).unwrap();
+    }
+    c.sketch_end_stroke(p(501.0, 1.0)).unwrap();
+    assert!(c.has_pending_redraw(), "existing plan → redraw decision");
+    c.confirm_replace_storey().expect("replace applies");
+
+    // The replacement re-pended the seed and dropped the stale seeded pieces
+    // — in-session now matches what a restart's re-derive would do.
+    assert!(
+        c.inherited_seed_pending.contains(&1),
+        "wholesale redraw re-pends the inherited seed"
+    );
+    assert!(
+        c.step_regions.get(&1).is_none(),
+        "stale seeded pieces die with the old footprint"
+    );
+
+    // Re-dimension the redrawn rect to finalisation: verticals 10 m,
+    // horizontals 5 m (true lengths, so the geometry lands at x ∈ [5,10]).
+    let mut guard = 0;
+    while c.dimensioning_active() && guard < 12 {
+        let prompt = c.document.dimensioning.current_prompt.clone().unwrap();
+        let (_, a, b) = c
+            .document
+            .floor_plan
+            .perimeter_walls()
+            .into_iter()
+            .find(|(vid, _, _)| *vid == prompt.wall_start_vertex)
+            .expect("prompted wall exists");
+        let v = if (a.x - b.x).abs() < (a.y - b.y).abs() {
+            10.0
+        } else {
+            5.0
+        };
+        c.apply_dimension(v).expect("dimension applies");
+        guard += 1;
+    }
+    assert!(guard < 12, "dimension loop didn't terminate");
+    assert!(c.outline_finalised(), "redraw finalised");
+    assert!(
+        !c.inherited_seed_pending.contains(&1),
+        "seed re-fired at the redraw's finalisation"
+    );
+
+    // Seeded against the NEW footprint: it sits entirely on the 2.7 ceiling,
+    // so that level is the anchor and NOTHING stands proud — a flat floor.
+    // (The stale graft would instead have raised the whole floor to +0.3.)
+    assert!(
+        c.step_regions.get(&1).is_none_or(|v| v.is_empty()),
+        "no inherited steps on a single-level footprint: {:?}",
+        c.step_regions.get(&1)
+    );
+    c.materialize();
+    let levels = floor_level_areas(&c, 1);
+    assert_eq!(levels.len(), 1, "one flat floor region: {levels:?}");
+    assert!(
+        levels[0].0.abs() < 1e-9 && (levels[0].1 - 50.0).abs() < 1e-3,
+        "flat 50 m² floor at the datum, not the old +0.3 graft: {levels:?}"
+    );
+}
+
 /// LEGACY STACKING UNTOUCHED: a storey added without ever assigning a
 /// thickness keeps `floor_thickness_m = None`, and the datum stack is the
 /// byte-identical ceiling-height sum.

@@ -103,6 +103,26 @@ pub const HEURISTICS: &[OutlineHeuristic] = &[
     ("full-footprint", h6_full_footprint),
 ];
 
+/// Whether [`suggest_storey_outlines`] has anything to work from — the CHEAP
+/// mirror of its empty-guards (no unions, no scoring): `below` has its
+/// ceiling height set, a non-sliver footprint, and at least one flat ceiling
+/// region. KEEP IN LOCK-STEP with the guards at the top of
+/// [`suggest_storey_outlines`]. The engine can still come up empty on
+/// validation/dedup, so a caller gating on this must tolerate an empty
+/// result from the engine itself.
+pub fn has_suggestion_inputs(below: &Storey) -> bool {
+    below.ceiling_height_m.is_some()
+        && below
+            .floors
+            .footprint_ring()
+            .is_some_and(|fp| ring_to_poly(&fp).unsigned_area() > SLIVER_AREA_M2)
+        && below
+            .roofs
+            .regions
+            .iter()
+            .any(|r| r.polygon.exterior.len() >= 3 && r.flat_z().is_some())
+}
+
 /// Suggest outline rings for the storey above `below`, best first, at most
 /// `max` of them.
 ///
