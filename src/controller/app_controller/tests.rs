@@ -4431,11 +4431,14 @@ fn roof_ridge_rejections_keep_the_pending_and_bad_strokes_never_pend() {
     c.roof_point_tap(7.0, 5.0);
     assert!(!c.roof_point_pending(), "tap suppressed while ridge pends");
 
-    // Length rejections: zero-ish, then off the footprint (2 + 9 > 10).
+    // Length rejections: zero-ish, then out of the ceiling area (from y = 2
+    // the flat 10×10 region's run is 8 m; 9 overshoots) — with the
+    // permitted run in the message.
     let err = c.assign_roof_ridge_length(0.0).unwrap_err();
     assert!(err.contains("more than a centimetre"), "got: {err}");
     let err = c.assign_roof_ridge_length(9.0).unwrap_err();
-    assert!(err.contains("outside the storey footprint"), "got: {err}");
+    assert!(err.contains("out of its ceiling area"), "got: {err}");
+    assert!(err.contains("under 8.00 m"), "got: {err}");
     assert!(c.roof_ridge_length_pending(), "pending intact on rejection");
     c.assign_roof_ridge_length(6.0).expect("valid length lands");
 
@@ -4824,13 +4827,18 @@ fn users_l_session_raised_section_wall_tops_follow_the_step() {
 }
 
 /// The END-OF-SESSION ridge from the live report: a near-vertical ridge
-/// stroke at x ≈ 3.73–3.78 (y 1.66 → 2.67) over the raised jut, the cross
-/// question skipped, the start typed as 1.0 m from the inner horizontal wall
-/// (lo = inner_y + 1.0 — exactly 1.0 m below the top wall). A typed length
-/// overshooting the top wall is rejected WITH the permitted range in the
-/// message; a length reaching exactly TO the wall (wall-to-wall) is accepted.
+/// stroke at x ≈ 3.73–3.78 (y 1.66 → 2.67) over the RAISED jut (its ceiling
+/// piece runs 2.0 m, inner_y → max_y, at 3.4), the cross question skipped,
+/// the start typed as 1.0 m from the inner horizontal wall (lo = inner_y +
+/// 1.0 — exactly 1.0 m below the top wall). The length is now limited by the
+/// raised ceiling AREA, not the footprint bbox: an overshooting length AND
+/// the wall-to-wall length are both rejected WITH the permitted run (the
+/// wall-to-wall far end would land ON the area boundary and only fail later
+/// at the Height stage — the old bbox test accepted it dishonestly); a
+/// just-under length is accepted and the Height stage then SUCCEEDS — the
+/// no-late-rejection invariant, end to end.
 #[test]
-fn users_l_session_ridge_length_gets_range_on_reject_and_wall_to_wall_lands() {
+fn users_l_session_ridge_length_is_limited_to_the_raised_area_and_height_lands() {
     let (mut c, [_, max_x, _, max_y, inner_x, inner_y]) = users_l_session_controller();
     apply_users_ceiling_step(&mut c, inner_x, inner_y, max_x, max_y);
 
@@ -4851,22 +4859,31 @@ fn users_l_session_ridge_length_gets_range_on_reject_and_wall_to_wall_lands() {
     c.apply_position_dimension(1.0).unwrap(); // start: 1.0 m above inner_y
     assert!(c.roof_ridge_length_pending(), "length question opens");
 
-    // From lo = inner_y + 1.0 the top wall is exactly 1.0 m away: 1.5 m
-    // overshoots → rejected, and the message now SAYS what fits.
-    let err = c.assign_roof_ridge_length(1.5).unwrap_err();
-    assert!(
-        err.contains("outside the storey footprint"),
-        "stable prefix kept: {err}"
-    );
-    assert!(
-        err.contains("up to 1.00 m"),
-        "permitted range in the message: {err}"
-    );
-    assert!(c.roof_ridge_length_pending(), "pending intact on rejection");
+    // From lo = inner_y + 1.0 the raised area's far wall is exactly 1.0 m
+    // away: an overshoot AND the exact wall-to-wall length are rejected,
+    // and the message SAYS what fits.
+    for len in [1.5, 1.0] {
+        let err = c.assign_roof_ridge_length(len).unwrap_err();
+        assert!(
+            err.contains("out of its ceiling area"),
+            "len {len}, stable prefix kept: {err}"
+        );
+        assert!(
+            err.contains("under 1.00 m"),
+            "len {len}, permitted run in the message: {err}"
+        );
+        assert!(c.roof_ridge_length_pending(), "pending intact on rejection");
+    }
 
-    // Exactly to the wall — a ridge spanning the section wall-to-wall is
-    // legitimate; the old strictly-inside check wrongly rejected this.
-    c.assign_roof_ridge_length(1.0)
-        .expect("wall-to-wall length lands");
+    // Just under the run: accepted…
+    c.assign_roof_ridge_length(0.99)
+        .expect("a length inside the raised area lands");
     assert!(c.roof_ridge_height_pending(), "on to the height question");
+    // …and the Height stage must then SUCCEED: Length-stage acceptance
+    // implies the height validation's strict same-region containment.
+    c.assign_roof_ridge_height(4.2)
+        .expect("no late rejection at the height stage");
+    assert!(!c.roof_ridge_pending(), "flow complete");
+    let storey = &c.current_record.as_ref().unwrap().data.storeys[0];
+    assert_eq!(storey.roof_apexes.len(), 2, "both apexes durable");
 }

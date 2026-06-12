@@ -275,6 +275,9 @@ fn draw_wall_region(
         WallExposure::Exposed => style::EXPOSED_WALL,
         WallExposure::SemiExposed => style::SEMI_EXPOSED_WALL,
         WallExposure::NonHeatLoss => style::NON_HEAT_LOSS_WALL,
+        // Slices B/C wire real handling (style::UNSET_WALL / GROUND_WALL);
+        // no resolved region carries these exposures yet.
+        WallExposure::Unset | WallExposure::Ground => egui::Color32::from_rgb(150, 150, 150),
     };
     let color = color_for(DisplayMode::Walls, display_mode, base);
     painter.add(egui::Shape::closed_line(pts, egui::Stroke::new(2.0, color)));

@@ -923,6 +923,10 @@ pub fn render_wall_exposure(
         WallExposure::Exposed => exposed,
         WallExposure::SemiExposed => semi,
         WallExposure::NonHeatLoss => non,
+        // Slice B wires real handling (Unset coverage segments + a Ground
+        // style); no section carries these yet — sections hold painted
+        // exposures only.
+        WallExposure::Unset | WallExposure::Ground => grey,
     };
     // Point at distance `d` (metres) along wall a→b of length `len`, in screen.
     let along = |a: (f64, f64), b: (f64, f64), len: f32, d: f32| {

@@ -88,22 +88,31 @@ const RIDGE_OFF_FOOTPRINT_MSG: &str =
 const RIDGE_LENGTH_TOO_SHORT_MSG: &str =
     "The ridge length must be more than a centimetre — enter a longer length.";
 
+/// User-facing rejection for a typed-length ridge whose START sits strictly
+/// inside no ceiling region (boundary excluded — the same strict containment
+/// the height-stage check applies per end). Kept stable.
+const RIDGE_START_OUTSIDE_CEILING_MSG: &str =
+    "The ridge's start doesn't sit inside a ceiling area — a ridge can't start on a wall \
+     or an area boundary yet.";
+
 /// User-facing rejection for a typed ridge length whose far end would leave
-/// the storey footprint. Kept stable as the message PREFIX —
-/// [`StoreyDoc::validate_roof_ridge_extent`] appends the permitted range so
-/// the user knows what would fit.
-const RIDGE_LENGTH_OFF_FOOTPRINT_MSG: &str =
-    "That length would push the ridge outside the storey footprint — enter a length that fits";
+/// the ceiling area its start sits in. Kept stable as the message PREFIX —
+/// [`validate_roof_ridge_extent`] appends the permitted run so the user
+/// knows what would fit.
+const RIDGE_LENGTH_EXCEEDS_AREA_MSG: &str =
+    "That length would push the ridge out of its ceiling area — enter a length that fits";
 
 /// A typed ridge length at or below this (m) is rejected — it places the two
 /// apexes (near-)coincident.
 const MIN_RIDGE_LENGTH_M: f32 = 0.01;
 
-/// How far (m) a typed ridge extent may overshoot the footprint bbox and
-/// still count as TOUCHING it: a ridge spanning a section wall-to-wall is
-/// legitimate, so unlike the step line's strictly-inside test the ends may
-/// land within a millimetre of the bbox edge.
-const RIDGE_TOUCH_TOL_M: f32 = 1e-3;
+/// The CLEARANCE (m) a typed ridge extent must keep from its ceiling area's
+/// boundary: Length-stage acceptance must IMPLY the Height stage's STRICT
+/// containment ([`validate_roof_ridge`] — boundary excluded), so the far end
+/// stays a millimetre clear rather than touching. (Renamed from
+/// `RIDGE_TOUCH_TOL_M`, whose bbox test ALLOWED a wall-to-wall touch — that
+/// touch passed Length only to fail at Height; the reversal is deliberate.)
+const RIDGE_CLEAR_TOL_M: f64 = 1e-3;
 
 /// An apex within this (m) of its region's base height slopes nothing.
 const MIN_APEX_DELTA_M: f64 = 0.01;
@@ -284,6 +293,70 @@ pub fn validate_roof_ridge(
     Ok(())
 }
 
+/// Validate a typed roof-ridge LENGTH against the storey's RESOLVED roofs
+/// (the materialized check — the old footprint-bbox test let a length clear
+/// the bbox yet cross a ceiling-area boundary, failing only at the Height
+/// stage; this rejects honestly at Length):
+///
+/// - The length itself must exceed a centimetre (shorter places the two
+///   apexes coincident).
+/// - The ridge's START — `(coord, lo)` for a vertical ridge (`axis` = X),
+///   `(lo, coord)` for a horizontal one (the shell's ridge-endpoint axis
+///   convention) — must sit STRICTLY inside one ceiling region
+///   ([`region_strictly_containing`]; boundary excluded, so a snapped start
+///   ON a wall is rejected here — recoverable via the snap tag).
+/// - The resolved extent `[lo, lo + len]` must fit that region's contiguous
+///   run along the extent axis from the start
+///   ([`CeilingRegion::plan_span_through`]'s `t_max`), keeping
+///   [`RIDGE_CLEAR_TOL_M`] clear of the boundary so Length-stage acceptance
+///   implies the Height stage's strict containment.
+///
+/// `Err` is user-facing: the over-length rejection carries the permitted run
+/// ("under N.NN m from that start") so the user knows what would fit.
+///
+/// [`region_strictly_containing`]:
+/// datatypes::ber::structural::CeilingRegions::region_strictly_containing
+/// [`CeilingRegion::plan_span_through`]:
+/// datatypes::ber::structural::CeilingRegion::plan_span_through
+pub fn validate_roof_ridge_extent(
+    storey: &Storey,
+    axis: ParameterAxis,
+    coord_m: f32,
+    lo: f32,
+    len_m: f32,
+) -> Result<(), String> {
+    if !len_m.is_finite() || len_m <= MIN_RIDGE_LENGTH_M {
+        return Err(RIDGE_LENGTH_TOO_SHORT_MSG.to_string());
+    }
+    // The start and the extent direction per the axis convention: `axis` is
+    // the CROSS axis; the extent runs along `axis.other()`.
+    let (start, dir) = match axis {
+        ParameterAxis::X => (
+            Point2f64::new(coord_m as f64, lo as f64),
+            Point2f64::new(0.0, 1.0),
+        ),
+        ParameterAxis::Y => (
+            Point2f64::new(lo as f64, coord_m as f64),
+            Point2f64::new(1.0, 0.0),
+        ),
+    };
+    let region = storey
+        .roofs
+        .region_strictly_containing(start)
+        .ok_or_else(|| RIDGE_START_OUTSIDE_CEILING_MSG.to_string())?;
+    let (_, max_len) = region
+        .plan_span_through(start, dir)
+        // Strictly inside but no span — a degenerate region; the start is
+        // unusable as a ridge start all the same.
+        .ok_or_else(|| RIDGE_START_OUTSIDE_CEILING_MSG.to_string())?;
+    if (len_m as f64) > max_len - RIDGE_CLEAR_TOL_M {
+        return Err(format!(
+            "{RIDGE_LENGTH_EXCEEDS_AREA_MSG} (under {max_len:.2} m from that start)."
+        ));
+    }
+    Ok(())
+}
+
 impl StoreyDoc {
     /// The cheap tap-time validation of a roof-point position against the
     /// OUTLINE (no `Ber` needed — the resolved-roofs check is
@@ -332,45 +405,6 @@ impl StoreyDoc {
                 .map_err(|_| RIDGE_OFF_FOOTPRINT_MSG.to_string())?;
         }
         Ok((axis, coord, (lo, hi)))
-    }
-
-    /// Validate a typed roof-ridge LENGTH against the OUTLINE: the resolved
-    /// extent `[lo, lo + len_m]` on `extent_axis` (the axis the ridge RUNS
-    /// along — `axis.other()` of the fit's cross axis) must keep both ends
-    /// inside the footprint bbox — TOUCHING the bbox edge (within
-    /// [`RIDGE_TOUCH_TOL_M`]) is allowed, since a ridge legitimately spans a
-    /// section wall-to-wall; `lo` is the RESOLVED start (a typed start answer
-    /// has already landed by the time the length question is asked). The
-    /// length itself must exceed a centimetre (shorter places the two apexes
-    /// coincident). The cheap stroke-level check — the materialized
-    /// same-region test stays in [`validate_roof_ridge`] at assign. `Err` is
-    /// user-facing: the off-footprint rejection carries the permitted range
-    /// ("up to N.NN m from that start") so the user knows what would fit.
-    pub fn validate_roof_ridge_extent(
-        &self,
-        extent_axis: ParameterAxis,
-        lo: f32,
-        len_m: f32,
-    ) -> Result<(), String> {
-        if !len_m.is_finite() || len_m <= MIN_RIDGE_LENGTH_M {
-            return Err(RIDGE_LENGTH_TOO_SHORT_MSG.to_string());
-        }
-        let Some(((min_x, min_y), (max_x, max_y))) = self.outline.floor_plan.bounding_box() else {
-            return Err(format!("{RIDGE_LENGTH_OFF_FOOTPRINT_MSG}."));
-        };
-        let (bb_lo, bb_hi) = match extent_axis {
-            ParameterAxis::X => (min_x, max_x),
-            ParameterAxis::Y => (min_y, max_y),
-        };
-        if lo < bb_lo - RIDGE_TOUCH_TOL_M || lo + len_m > bb_hi + RIDGE_TOUCH_TOL_M {
-            // The permitted range from the resolved start to the bbox edge —
-            // floor at zero so a start outside the bbox can't read negative.
-            let max_len = (bb_hi - lo).max(0.0);
-            return Err(format!(
-                "{RIDGE_LENGTH_OFF_FOOTPRINT_MSG} (up to {max_len:.2} m from that start)."
-            ));
-        }
-        Ok(())
     }
 }
 
@@ -780,51 +814,67 @@ mod tests {
     }
 
     /// validate_roof_ridge_extent: a sane typed length passes; a zero-ish or
-    /// non-finite length gets the too-short message; a length (or start)
-    /// pushing either end of `[lo, lo + len]` OVER the footprint bbox on the
-    /// extent axis gets the off-footprint message WITH the permitted range —
-    /// but a length ending exactly ON the bbox edge (wall-to-wall) is
-    /// accepted.
+    /// non-finite length gets the too-short message; a start not strictly
+    /// inside a ceiling region (boundary, outside, no roofs at all) gets the
+    /// stable start-outside message; a length reaching the region boundary —
+    /// wall-to-wall INCLUDED, the deliberate flip from the old bbox test —
+    /// is rejected WITH the permitted run, because Length-stage acceptance
+    /// must imply the Height stage's strict containment.
     #[test]
-    fn validate_ridge_extent_checks_length_and_footprint() {
-        let doc = storey_10x6(); // bbox y ∈ [0, 6] for a vertical ridge
-        assert!(doc
-            .validate_roof_ridge_extent(ParameterAxis::Y, 1.0, 4.0)
-            .is_ok());
+    fn validate_ridge_extent_checks_length_against_the_region_span() {
+        // One flat 4×4 region. A vertical ridge (cross axis X at x = 2) from
+        // y = 1: the run to the far wall is 3 m; a length comfortably under
+        // it passes.
+        let storey = storey_with_flat_roof(2.4);
+        assert!(validate_roof_ridge_extent(&storey, ParameterAxis::X, 2.0, 1.0, 2.0).is_ok());
         for len in [0.0, 0.01, -2.0, f32::NAN] {
             assert_eq!(
-                doc.validate_roof_ridge_extent(ParameterAxis::Y, 1.0, len)
-                    .unwrap_err(),
+                validate_roof_ridge_extent(&storey, ParameterAxis::X, 2.0, 1.0, len).unwrap_err(),
                 RIDGE_LENGTH_TOO_SHORT_MSG,
                 "len {len}"
             );
         }
-        // Touching the bbox edge is legitimate: wall-to-wall (1 + 5 = 6, the
-        // bbox top) and the full span (0 → 6) both pass.
-        assert!(doc
-            .validate_roof_ridge_extent(ParameterAxis::Y, 1.0, 5.0)
-            .is_ok());
-        assert!(doc
-            .validate_roof_ridge_extent(ParameterAxis::Y, 0.0, 6.0)
-            .is_ok());
-        // Genuinely over the edge, and a start outside: rejected with the
-        // stable prefix AND the permitted range from that start.
-        for (lo, len, range) in [(1.0, 5.1, "5.00"), (1.0, 9.0, "5.00"), (-0.5, 2.0, "6.50")] {
-            let err = doc
-                .validate_roof_ridge_extent(ParameterAxis::Y, lo, len)
-                .unwrap_err();
+        // Wall-to-wall (1 + 3 = 4, the far boundary) is REJECTED now: the
+        // far end would land ON the boundary and fail the Height stage's
+        // strict containment. So is anything longer — always with the stable
+        // prefix and the permitted run from that start.
+        for len in [3.0, 3.5, 9.0] {
+            let err =
+                validate_roof_ridge_extent(&storey, ParameterAxis::X, 2.0, 1.0, len).unwrap_err();
             assert!(
-                err.starts_with(RIDGE_LENGTH_OFF_FOOTPRINT_MSG),
-                "lo {lo} len {len}: {err}"
+                err.starts_with(RIDGE_LENGTH_EXCEEDS_AREA_MSG),
+                "len {len}: {err}"
             );
             assert!(
-                err.contains(&format!("up to {range} m")),
-                "lo {lo} len {len} must carry the permitted range: {err}"
+                err.contains("under 3.00 m"),
+                "len {len} must carry the permitted run: {err}"
             );
         }
-        // The wider X axis fits the same span comfortably.
-        assert!(doc
-            .validate_roof_ridge_extent(ParameterAxis::X, 1.0, 5.0)
-            .is_ok());
+        // Just under the run (clear of the millimetre clearance) passes.
+        assert!(validate_roof_ridge_extent(&storey, ParameterAxis::X, 2.0, 1.0, 2.99).is_ok());
+        // A start ON a region boundary, outside every region, or in a storey
+        // with no roofs: the stable start-outside message.
+        for (storey, coord, lo) in [
+            (&storey, 2.0, 0.0), // (2, 0): on the boundary
+            (&storey, 9.0, 1.0), // (9, 1): outside
+            (&Storey::default(), 2.0, 1.0),
+        ] {
+            assert_eq!(
+                validate_roof_ridge_extent(storey, ParameterAxis::X, coord, lo, 1.0).unwrap_err(),
+                RIDGE_START_OUTSIDE_CEILING_MSG,
+                "coord {coord} lo {lo}"
+            );
+        }
+        // Horizontal ridge (cross axis Y at y = 2) from x = 1 in the notched
+        // C-shape: the run ends at the slot's near edge (x = 3), NOT the
+        // ring's 10 m extent — the limit is the contiguous run through the
+        // start, not the bbox.
+        let storey = storey_with_flat_ring(notched_ring(), 2.4);
+        let err = validate_roof_ridge_extent(&storey, ParameterAxis::Y, 2.0, 1.0, 2.0).unwrap_err();
+        assert!(
+            err.starts_with(RIDGE_LENGTH_EXCEEDS_AREA_MSG) && err.contains("under 2.00 m"),
+            "got: {err}"
+        );
+        assert!(validate_roof_ridge_extent(&storey, ParameterAxis::Y, 2.0, 1.0, 1.9).is_ok());
     }
 }

@@ -10,7 +10,8 @@
 //!    is from a PERPENDICULAR outline wall (the same machinery on the
 //!    ALONG axis, `axis.other()`).
 //! 3. LENGTH — the ridge's own dimension (no reference wall): a typed
-//!    amount validated by [`StoreyDoc::validate_roof_ridge_extent`].
+//!    amount validated against the RESOLVED ceiling regions
+//!    ([`document::validate_roof_ridge_extent`]).
 //!
 //! Then one typed height places BOTH apexes at once (`Ber::add_roof_apex`
 //! ×2) — a level ridge. A sloping ridge is entered via the two-point tap
@@ -243,12 +244,16 @@ impl AppController {
         });
     }
 
-    /// Set the pending ridge's LENGTH (question 3): validate the resolved
-    /// extent `[lo, lo + len]` against the footprint
-    /// ([`StoreyDoc::validate_roof_ridge_extent`] — > 1 cm, both ends
-    /// strictly inside the bbox on the along axis) and advance to the
-    /// height. The pending ridge stays open on rejection so the user can
-    /// retype. No-op unless the length stage is up.
+    /// Set the pending ridge's LENGTH (question 3): materialize (the
+    /// validation runs against the RESOLVED roofs — explicitly, not riding
+    /// the render loop), then validate the resolved extent `[lo, lo + len]`
+    /// against the ceiling area the start sits in
+    /// ([`document::validate_roof_ridge_extent`] — > 1 cm, the start
+    /// strictly inside one region, the length within that region's run with
+    /// a millimetre's clearance, so an accepted length can't be rejected
+    /// later at the Height stage) and advance to the height. The pending
+    /// ridge stays open on rejection so the user can retype. No-op unless
+    /// the length stage is up.
     pub fn assign_roof_ridge_length(&mut self, len: f32) -> Result<(), String> {
         let Some(PendingRoofRidge::Length {
             axis,
@@ -261,15 +266,25 @@ impl AppController {
         else {
             return Ok(()); // nothing awaiting a length — no-op
         };
-        self.document
-            .validate_roof_ridge_extent(axis.other(), *lo, len)?;
+        let (axis, coord_m, lo) = (*axis, *coord_m, *lo);
+        let (cross_snap, start_snap) = (*cross_snap, *start_snap);
+        let idx = self.current_storey_idx.unwrap_or(0);
+        // Bring the derived roofs current — the length is validated against
+        // the resolved ceiling regions, not the editing buffer.
+        self.materialize();
+        let storey = self
+            .current_record
+            .as_ref()
+            .and_then(|r| r.data.storeys.get(idx))
+            .ok_or("no storey to assign a roof ridge to")?;
+        document::validate_roof_ridge_extent(storey, axis, coord_m, lo, len)?;
         self.pending_roof_ridge = Some(PendingRoofRidge::Height {
-            axis: *axis,
-            coord_m: *coord_m,
-            lo: *lo,
+            axis,
+            coord_m,
+            lo,
             len_m: len,
-            cross_snap: *cross_snap,
-            start_snap: *start_snap,
+            cross_snap,
+            start_snap,
         });
         Ok(())
     }

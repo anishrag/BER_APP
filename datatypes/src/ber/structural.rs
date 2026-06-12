@@ -106,6 +106,13 @@ pub enum WallExposure {
     Exposed,     // Exterior wall exposed to outside
     SemiExposed, // Wall to unheated space
     NonHeatLoss, // Internal wall, no heat loss
+    /// No exposure marked yet. Walls exist (and draw) Unset; DEAP export will
+    /// refuse a BER containing Unset regions — that restriction lives at the
+    /// future export boundary (the deap mapping layer), not here.
+    Unset,
+    /// In contact with the ground (floor-step risers; DEAP treats
+    /// ground-contact walls separately from Exposed).
+    Ground,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1683,6 +1690,90 @@ impl CeilingRegion {
         let (&z0, rest) = base.split_first()?;
         rest.iter().all(|z| (z - z0).abs() <= EPS_M).then_some(z0)
     }
+
+    /// The contiguous run of the plan line `p + t·dir` (`t` in METRES, `dir`
+    /// unit-length) that stays inside this region's plan polygon and contains
+    /// t = 0, as `(t_min, t_max)` with `t_min ≤ 0 ≤ t_max`. Even-odd over the
+    /// ring's crossings: every proper crossing of a ring edge with the line
+    /// contributes its `t`, and an edge lying ALONG the line contributes its
+    /// endpoints' `t` (the [`profile_breakpoints`] convention — tolerances are
+    /// METRIC, [`PROFILE_EPS_M`], because the derived rings are boolean-op
+    /// output that can sit a few 1e-7 m off the line they conceptually
+    /// coincide with). `None` when `p` is not strictly inside the plan
+    /// polygon (boundary EXCLUDED — the [`region_strictly_containing`]
+    /// predicate) or the region/direction is degenerate.
+    ///
+    /// [`region_strictly_containing`]:
+    /// CeilingRegions::region_strictly_containing
+    pub fn plan_span_through(&self, p: Point2f64, dir: Point2f64) -> Option<(f64, f64)> {
+        let ext = &self.polygon.exterior;
+        if ext.len() < 3 {
+            return None;
+        }
+        let dlen = (dir.x * dir.x + dir.y * dir.y).sqrt();
+        if dlen <= 1e-12 {
+            return None;
+        }
+        // Normalize so `t` is metres even if `dir` is only near-unit.
+        let (dx, dy) = (dir.x / dlen, dir.y / dlen);
+        let gp = GeoPoint::new(p.x, p.y);
+        if !Polygon::<f64>::from(self.polygon.clone()).contains(&gp) {
+            return None;
+        }
+        // Every t where the line can switch between inside and outside.
+        let mut ts: Vec<f64> = Vec::new();
+        let n = ext.len();
+        for i in 0..n {
+            let a = ext[i];
+            let b = ext[(i + 1) % n];
+            // Perpendicular distance (m) of a ring vertex to the LINE.
+            let dist_to_line = |c: &Point3f64| ((c.x - p.x) * dy - (c.y - p.y) * dx).abs();
+            if dist_to_line(&a) <= PROFILE_EPS_M && dist_to_line(&b) <= PROFILE_EPS_M {
+                // (Near-)collinear overlap: the run can start/stop at the
+                // edge's endpoints — both contribute their projected t.
+                for c in [a, b] {
+                    ts.push((c.x - p.x) * dx + (c.y - p.y) * dy);
+                }
+                continue;
+            }
+            let (ex, ey) = (b.x - a.x, b.y - a.y);
+            let denom = dx * ey - dy * ex;
+            if denom.abs() <= 1e-12 {
+                continue; // parallel but not collinear — no crossing
+            }
+            // Proper crossing: line(t) == edge(s). The edge may fall short
+            // of / overshoot the line by PROFILE_EPS_M (scaled to its own
+            // parameter), like profile_breakpoints' crossing test.
+            let (wx, wy) = (a.x - p.x, a.y - p.y);
+            let t = (wx * ey - wy * ex) / denom;
+            let s = (wx * dy - wy * dx) / denom;
+            let edge_len = (ex * ex + ey * ey).sqrt();
+            let eps_s = if edge_len > 0.0 {
+                PROFILE_EPS_M / edge_len
+            } else {
+                0.0
+            };
+            if (-eps_s..=1.0 + eps_s).contains(&s) {
+                ts.push(t);
+            }
+        }
+        // The contiguous run containing t = 0 is bounded by the nearest
+        // crossing on each side (NOT the union of runs — a notch past the
+        // first boundary doesn't extend the span). `p` strictly inside a
+        // closed ring guarantees a crossing on both sides; a degenerate ring
+        // that yields none on either side returns None.
+        let t_min = ts
+            .iter()
+            .copied()
+            .filter(|t| *t <= 0.0)
+            .fold(f64::NAN, f64::max);
+        let t_max = ts
+            .iter()
+            .copied()
+            .filter(|t| *t >= 0.0)
+            .fold(f64::NAN, f64::min);
+        (t_min.is_finite() && t_max.is_finite()).then_some((t_min, t_max))
+    }
 }
 
 impl Default for FloorRegion {
@@ -2192,6 +2283,111 @@ mod tests {
             Point2f64::new(x1, y1),
             Point2f64::new(x0, y1),
         ]
+    }
+
+    // ── CeilingRegion::plan_span_through ────────────────────────────────────
+
+    /// A flat region over `ring` at z = 2.4 (the span is plan-only; z is
+    /// irrelevant to it).
+    fn region_over(ring: Vec<Point2f64>) -> CeilingRegion {
+        CeilingRegion {
+            id: ItemId::default(),
+            polygon: Polygon3D::new(
+                ring.into_iter()
+                    .map(|p| Point3f64::new(p.x, p.y, 2.4))
+                    .collect(),
+            ),
+            opes: Opes::default(),
+            construction_id: ItemId::default(),
+        }
+    }
+
+    /// A 10×4 ring with a deep SLOT cut from the right (y ∈ [1, 3], reaching
+    /// in to x = 3) — a C-shape (the roof_point notched ring).
+    fn notched_ring() -> Vec<Point2f64> {
+        vec![
+            Point2f64::new(0.0, 0.0),
+            Point2f64::new(10.0, 0.0),
+            Point2f64::new(10.0, 1.0),
+            Point2f64::new(3.0, 1.0),
+            Point2f64::new(3.0, 3.0),
+            Point2f64::new(10.0, 3.0),
+            Point2f64::new(10.0, 4.0),
+            Point2f64::new(0.0, 4.0),
+        ]
+    }
+
+    /// A rectangle yields the full chord through the point, on both axes.
+    #[test]
+    fn plan_span_through_rectangle_is_the_full_chord() {
+        let r = region_over(square(0.0, 0.0, 10.0, 4.0));
+        let (lo, hi) = r
+            .plan_span_through(Point2f64::new(3.0, 2.0), Point2f64::new(1.0, 0.0))
+            .expect("strictly inside");
+        assert!(
+            (lo + 3.0).abs() < 1e-9 && (hi - 7.0).abs() < 1e-9,
+            "{lo} {hi}"
+        );
+        let (lo, hi) = r
+            .plan_span_through(Point2f64::new(3.0, 2.0), Point2f64::new(0.0, 1.0))
+            .expect("strictly inside");
+        assert!(
+            (lo + 2.0).abs() < 1e-9 && (hi - 2.0).abs() < 1e-9,
+            "{lo} {hi}"
+        );
+    }
+
+    /// A notched ring limits the span to the contiguous run CONTAINING t = 0,
+    /// not the even-odd union of runs along the whole line.
+    #[test]
+    fn plan_span_through_notch_is_the_interval_containing_zero() {
+        let r = region_over(notched_ring());
+        // From (1, 2) along +X the left arm ends at the slot's near edge
+        // (x = 3) — NOT at the ring's x = 10 extent.
+        let (lo, hi) = r
+            .plan_span_through(Point2f64::new(1.0, 2.0), Point2f64::new(1.0, 0.0))
+            .expect("strictly inside the left arm");
+        assert!(
+            (lo + 1.0).abs() < 1e-9 && (hi - 2.0).abs() < 1e-9,
+            "{lo} {hi}"
+        );
+        // From (5, 0.5) along +Y the bottom arm ends at the slot (y = 1).
+        let (lo, hi) = r
+            .plan_span_through(Point2f64::new(5.0, 0.5), Point2f64::new(0.0, 1.0))
+            .expect("strictly inside the bottom arm");
+        assert!(
+            (lo + 0.5).abs() < 1e-9 && (hi - 0.5).abs() < 1e-9,
+            "{lo} {hi}"
+        );
+    }
+
+    /// Containment is STRICT: a boundary or outside point yields None.
+    #[test]
+    fn plan_span_through_boundary_or_outside_is_none() {
+        let r = region_over(square(0.0, 0.0, 10.0, 4.0));
+        for p in [
+            Point2f64::new(0.0, 2.0),  // on the left edge
+            Point2f64::new(10.0, 4.0), // a corner
+            Point2f64::new(11.0, 2.0), // outside
+        ] {
+            assert!(
+                r.plan_span_through(p, Point2f64::new(1.0, 0.0)).is_none(),
+                "{p:?}"
+            );
+        }
+    }
+
+    /// Degenerate input — a sub-triangle ring or a zero direction — is None.
+    #[test]
+    fn plan_span_through_degenerate_is_none() {
+        let two = region_over(vec![Point2f64::new(0.0, 0.0), Point2f64::new(4.0, 0.0)]);
+        assert!(two
+            .plan_span_through(Point2f64::new(1.0, 0.0), Point2f64::new(1.0, 0.0))
+            .is_none());
+        let r = region_over(square(0.0, 0.0, 10.0, 4.0));
+        assert!(r
+            .plan_span_through(Point2f64::new(3.0, 2.0), Point2f64::new(0.0, 0.0))
+            .is_none());
     }
 
     #[test]
