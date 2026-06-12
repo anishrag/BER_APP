@@ -152,6 +152,12 @@ impl SketchEngine {
             .end_stroke(&mut self.stroke, self.close_epsilon)
     }
 
+    /// Abandon the in-flight stroke, if any — the capture turned out to be a
+    /// navigation gesture, not a drawing. No-op when none is active.
+    pub fn cancel_stroke(&mut self) {
+        self.stroke = None;
+    }
+
     /// Take the current stroke out of the engine without running the
     /// "did the user close the loop?" check. Used by the Extend tool,
     /// whose strokes start and end at *different* points on an existing

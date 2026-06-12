@@ -90,6 +90,12 @@ impl AppController {
             .map_err(|e| format!("Failed to start stroke: {:?}", e))
     }
 
+    /// Drop the in-flight stroke without dispatching it (two-finger gesture
+    /// retraction). Nothing was committed, so no undo snapshot is taken.
+    pub fn sketch_cancel_stroke(&mut self) {
+        self.sketch_engine.cancel_stroke();
+    }
+
     pub fn sketch_add_point(&mut self, point: Point2f32) -> Result<(), String> {
         self.sketch_engine
             .add_point(point)

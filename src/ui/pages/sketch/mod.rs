@@ -14,6 +14,7 @@
 mod canvas;
 pub mod categories;
 mod prompt_dock;
+pub mod touch;
 
 use egui::epaint::PathStroke;
 use egui::Pos2;
@@ -41,6 +42,9 @@ pub enum SketchEvent {
     StartStroke(Pos2),
     AddPoint(Pos2),
     EndStroke(Pos2),
+    /// Retract the in-flight stroke: the capture turned out to be the start
+    /// of a two-finger navigation gesture, not a drawing.
+    CancelStroke,
     ChangeMode(SketchMode),
     ChangeDisplay(DisplayMode),
     ChangeEditTool(EditTools),
@@ -586,8 +590,12 @@ pub struct SketchView<'a> {
 pub struct SketchPage;
 
 impl SketchPage {
-    pub fn render<F>(ui: &mut egui::Ui, mut view: SketchView<'_>, mut on_event: F)
-    where
+    pub fn render<F>(
+        ui: &mut egui::Ui,
+        mut view: SketchView<'_>,
+        touch: &mut touch::TouchNav,
+        mut on_event: F,
+    ) where
         F: FnMut(UiEvent),
     {
         // Orientation = aspect ratio of the available rect, re-checked every
@@ -645,7 +653,7 @@ impl SketchPage {
 
         // --- The canvas fills whatever's left.
         egui::CentralPanel::default().show_inside(ui, |ui| {
-            canvas::render(ui, &view, &mut on_event);
+            canvas::render(ui, &view, touch, &mut on_event);
         });
 
         // Keyboard shortcuts: Ctrl+Z undo, Ctrl+Shift+Z or Ctrl+Y redo.

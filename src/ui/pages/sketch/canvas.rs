@@ -6,6 +6,7 @@
 use egui::epaint::PathShape;
 use strum::IntoEnumIterator;
 
+use super::touch::TouchNav;
 use super::{EguiStroke, SketchEvent, SketchView};
 use crate::ui::pages::events::UiEvent;
 use crate::ui::render;
@@ -16,6 +17,7 @@ use domain::sketch::{DisplayMode, EditTools, SketchMode};
 pub(super) fn render<F: FnMut(UiEvent)>(
     ui: &mut egui::Ui,
     view: &SketchView<'_>,
+    touch: &mut TouchNav,
     on_event: &mut F,
 ) {
     let reviewing = view.review.is_some();
@@ -637,6 +639,12 @@ pub(super) fn render<F: FnMut(UiEvent)>(
         render::render_arc_preview(&painter, rect, ber, current_storey_idx, mode, vp, pts);
     }
 
+    // Two-finger navigation (touch): pinch zoom + two-finger pan, with
+    // retraction of a stroke begun before the second finger landed. While a
+    // gesture is active (until EVERY finger lifts) all primary-drag input
+    // below — strokes, Move drags, exposure drags, 3D orbit — is suppressed.
+    let touch_nav_active = touch.handle(ui, rect, view.current.is_some(), on_event);
+
     // Pan / zoom / orbit on the canvas.
     //   - Scroll wheel  → zoom about the cursor (2D and 3D)
     //   - Middle/right-drag → pan (2D and 3D)
@@ -673,7 +681,10 @@ pub(super) fn render<F: FnMut(UiEvent)>(
     // the model follows the cursor — drag right swings it right (yaw),
     // drag down pulls it down revealing the top (pitch up, toward plan).
     // Reset via the Drawing category's Fit button.
-    if matches!(mode, SketchMode::Storey3D) && response.dragged_by(egui::PointerButton::Primary) {
+    if matches!(mode, SketchMode::Storey3D)
+        && !touch_nav_active
+        && response.dragged_by(egui::PointerButton::Primary)
+    {
         const ORBIT_DEG_PER_PIXEL: f32 = 0.4;
         let d = response.drag_delta();
         if d.x.abs() > 0.0 || d.y.abs() > 0.0 {
@@ -795,7 +806,7 @@ pub(super) fn render<F: FnMut(UiEvent)>(
     // primary drag near a selection handle slides that handle along
     // the wall. Takes priority over stroke/edit input (suppressed via
     // `primary_available` above).
-    if view.exposure_mode && !cut_pending {
+    if view.exposure_mode && !cut_pending && !touch_nav_active {
         if let Some(t) = canvas_transform(ber, current_storey_idx, rect, vp, false) {
             let tol_world = (12.0 / t.scale()) as f64;
             if response.drag_started_by(egui::PointerButton::Primary) {
@@ -853,7 +864,7 @@ pub(super) fn render<F: FnMut(UiEvent)>(
         && !view.roof_rect_pending
         && !view.exposure_mode;
 
-    if primary_available && !matches!(edit_tool, EditTools::Move) {
+    if primary_available && !touch_nav_active && !matches!(edit_tool, EditTools::Move) {
         if response.drag_started_by(egui::PointerButton::Primary) {
             if let Some(pos) = response.interact_pointer_pos() {
                 let local_pos = pos - rect.left_top().to_vec2();
@@ -1024,6 +1035,7 @@ pub(super) fn render<F: FnMut(UiEvent)>(
     // prompt is up — that prompt has to be Apply / Cycle /
     // Cancel first.
     if primary_available
+        && !touch_nav_active
         && matches!(edit_tool, EditTools::Move)
         && view.edit_drag_prompt.is_none()
         && view.vertex_drop_prompt.is_none()

@@ -9,7 +9,9 @@ use crate::ui::adapters::sketch_egui::pos2_to_point2f;
 use crate::ui::pages::events::{Page, Section, UiEvent};
 use crate::ui::pages::home::{HomeEvent, HomePage, HomeState};
 use crate::ui::pages::key_details::{KeyDetailsEvent, KeyDetailsPage, KeyDetailsState};
-use crate::ui::pages::sketch::{categories, EguiStroke, SketchEvent, SketchPage, SketchView};
+use crate::ui::pages::sketch::{
+    categories, touch, EguiStroke, SketchEvent, SketchPage, SketchView,
+};
 use crate::ui::pages::splash::SplashPage;
 use crate::ui::pages::workspace::workspace_chrome;
 
@@ -43,6 +45,9 @@ const IDLE_SAVE_SECS: f64 = 2.5;
 
 #[derive(Default)]
 pub struct SketchState {
+    /// Two-finger canvas-navigation state (pinch zoom / pan / stroke
+    /// retraction) — cross-frame because a gesture spans frames.
+    pub touch_nav: touch::TouchNav,
     /// Backing string for the dimension prompt's text input. Lives across
     /// frames so the user's in-progress typing isn't lost on re-render.
     pub dimension_input: String,
@@ -839,16 +844,27 @@ impl eframe::App for BerApp {
                                 cat_state: &mut self.sketch_state.categories,
                                 autosave_status,
                             };
-                            SketchPage::render(ui, view, |event| match event {
+                            let touch_nav = &mut self.sketch_state.touch_nav;
+                            SketchPage::render(ui, view, touch_nav, |event| match event {
                                 UiEvent::Sketch(sketch_event) => match sketch_event {
-                                    SketchEvent::AddPoint(p) => controller
-                                        .borrow_mut()
-                                        .sketch_add_point(pos2_to_point2f(p))
-                                        .expect("Failed to add point"),
-                                    SketchEvent::EndStroke(p) => controller
-                                        .borrow_mut()
-                                        .sketch_end_stroke(pos2_to_point2f(p))
-                                        .expect("Failed to end stroke"),
+                                    // Logged, not expected: after a two-finger
+                                    // CancelStroke, a trailing AddPoint/EndStroke
+                                    // can legitimately find no active stroke.
+                                    SketchEvent::AddPoint(p) => log_err(
+                                        "sketch_add_point",
+                                        controller
+                                            .borrow_mut()
+                                            .sketch_add_point(pos2_to_point2f(p)),
+                                    ),
+                                    SketchEvent::EndStroke(p) => log_err(
+                                        "sketch_end_stroke",
+                                        controller
+                                            .borrow_mut()
+                                            .sketch_end_stroke(pos2_to_point2f(p)),
+                                    ),
+                                    SketchEvent::CancelStroke => {
+                                        controller.borrow_mut().sketch_cancel_stroke();
+                                    }
                                     SketchEvent::StartStroke(p) => log_err(
                                         "sketch_start_stroke",
                                         controller
