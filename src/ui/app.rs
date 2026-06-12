@@ -340,6 +340,15 @@ impl eframe::App for BerApp {
             ctx.request_repaint(); // Keep updating while loading
         }
 
+        // Android's back button arrives as an ordinary egui key (winit maps
+        // KEYCODE_BACK → BrowserBack). Back from the workspace exits the BER
+        // (same flush-and-return-Home path as the chrome's Exit); back from
+        // Home/Splash is deliberately ignored so the activity's default
+        // minimise happens instead of killing the app. Unconditional — it's a
+        // reasonable desktop shortcut too (browser-back keyboards).
+        let back_pressed =
+            ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::BrowserBack));
+
         let page = self.current_page;
         // Render current page
         match page {
@@ -376,7 +385,7 @@ impl eframe::App for BerApp {
                     .unwrap_or_default();
                 // Chrome intents land in locals (the body closure borrows self).
                 let mut next_page: Option<Page> = None;
-                let mut exit_clicked = false;
+                let mut exit_clicked = back_pressed;
                 workspace_chrome(
                     ctx,
                     section,
