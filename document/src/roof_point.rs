@@ -89,13 +89,21 @@ const RIDGE_LENGTH_TOO_SHORT_MSG: &str =
     "The ridge length must be more than a centimetre — enter a longer length.";
 
 /// User-facing rejection for a typed ridge length whose far end would leave
-/// the storey footprint. Kept stable.
+/// the storey footprint. Kept stable as the message PREFIX —
+/// [`StoreyDoc::validate_roof_ridge_extent`] appends the permitted range so
+/// the user knows what would fit.
 const RIDGE_LENGTH_OFF_FOOTPRINT_MSG: &str =
-    "That length would push the ridge outside the storey footprint — enter a length that fits.";
+    "That length would push the ridge outside the storey footprint — enter a length that fits";
 
 /// A typed ridge length at or below this (m) is rejected — it places the two
 /// apexes (near-)coincident.
 const MIN_RIDGE_LENGTH_M: f32 = 0.01;
+
+/// How far (m) a typed ridge extent may overshoot the footprint bbox and
+/// still count as TOUCHING it: a ridge spanning a section wall-to-wall is
+/// legitimate, so unlike the step line's strictly-inside test the ends may
+/// land within a millimetre of the bbox edge.
+const RIDGE_TOUCH_TOL_M: f32 = 1e-3;
 
 /// An apex within this (m) of its region's base height slopes nothing.
 const MIN_APEX_DELTA_M: f64 = 0.01;
@@ -328,12 +336,16 @@ impl StoreyDoc {
 
     /// Validate a typed roof-ridge LENGTH against the OUTLINE: the resolved
     /// extent `[lo, lo + len_m]` on `extent_axis` (the axis the ridge RUNS
-    /// along — `axis.other()` of the fit's cross axis) must keep both
-    /// endpoints strictly inside the footprint bbox, and the length itself
-    /// must exceed a centimetre (shorter places the two apexes coincident).
-    /// The cheap stroke-level check — the materialized same-region test stays
-    /// in [`validate_roof_ridge`] at assign. `Err` is user-facing, messages
-    /// stable.
+    /// along — `axis.other()` of the fit's cross axis) must keep both ends
+    /// inside the footprint bbox — TOUCHING the bbox edge (within
+    /// [`RIDGE_TOUCH_TOL_M`]) is allowed, since a ridge legitimately spans a
+    /// section wall-to-wall; `lo` is the RESOLVED start (a typed start answer
+    /// has already landed by the time the length question is asked). The
+    /// length itself must exceed a centimetre (shorter places the two apexes
+    /// coincident). The cheap stroke-level check — the materialized
+    /// same-region test stays in [`validate_roof_ridge`] at assign. `Err` is
+    /// user-facing: the off-footprint rejection carries the permitted range
+    /// ("up to N.NN m from that start") so the user knows what would fit.
     pub fn validate_roof_ridge_extent(
         &self,
         extent_axis: ParameterAxis,
@@ -343,9 +355,20 @@ impl StoreyDoc {
         if !len_m.is_finite() || len_m <= MIN_RIDGE_LENGTH_M {
             return Err(RIDGE_LENGTH_TOO_SHORT_MSG.to_string());
         }
-        for t in [lo, lo + len_m] {
-            self.validate_ceiling_step_line(extent_axis, t)
-                .map_err(|_| RIDGE_LENGTH_OFF_FOOTPRINT_MSG.to_string())?;
+        let Some(((min_x, min_y), (max_x, max_y))) = self.outline.floor_plan.bounding_box() else {
+            return Err(format!("{RIDGE_LENGTH_OFF_FOOTPRINT_MSG}."));
+        };
+        let (bb_lo, bb_hi) = match extent_axis {
+            ParameterAxis::X => (min_x, max_x),
+            ParameterAxis::Y => (min_y, max_y),
+        };
+        if lo < bb_lo - RIDGE_TOUCH_TOL_M || lo + len_m > bb_hi + RIDGE_TOUCH_TOL_M {
+            // The permitted range from the resolved start to the bbox edge —
+            // floor at zero so a start outside the bbox can't read negative.
+            let max_len = (bb_hi - lo).max(0.0);
+            return Err(format!(
+                "{RIDGE_LENGTH_OFF_FOOTPRINT_MSG} (up to {max_len:.2} m from that start)."
+            ));
         }
         Ok(())
     }
@@ -758,8 +781,10 @@ mod tests {
 
     /// validate_roof_ridge_extent: a sane typed length passes; a zero-ish or
     /// non-finite length gets the too-short message; a length (or start)
-    /// pushing either end of `[lo, lo + len]` onto/over the footprint bbox on
-    /// the extent axis gets the off-footprint message. Both stable.
+    /// pushing either end of `[lo, lo + len]` OVER the footprint bbox on the
+    /// extent axis gets the off-footprint message WITH the permitted range —
+    /// but a length ending exactly ON the bbox edge (wall-to-wall) is
+    /// accepted.
     #[test]
     fn validate_ridge_extent_checks_length_and_footprint() {
         let doc = storey_10x6(); // bbox y ∈ [0, 6] for a vertical ridge
@@ -774,13 +799,27 @@ mod tests {
                 "len {len}"
             );
         }
-        // Far end at/over the bbox edge (1 + 5 = 6), and a start outside.
-        for (lo, len) in [(1.0, 5.0), (1.0, 9.0), (-0.5, 2.0)] {
-            assert_eq!(
-                doc.validate_roof_ridge_extent(ParameterAxis::Y, lo, len)
-                    .unwrap_err(),
-                RIDGE_LENGTH_OFF_FOOTPRINT_MSG,
-                "lo {lo} len {len}"
+        // Touching the bbox edge is legitimate: wall-to-wall (1 + 5 = 6, the
+        // bbox top) and the full span (0 → 6) both pass.
+        assert!(doc
+            .validate_roof_ridge_extent(ParameterAxis::Y, 1.0, 5.0)
+            .is_ok());
+        assert!(doc
+            .validate_roof_ridge_extent(ParameterAxis::Y, 0.0, 6.0)
+            .is_ok());
+        // Genuinely over the edge, and a start outside: rejected with the
+        // stable prefix AND the permitted range from that start.
+        for (lo, len, range) in [(1.0, 5.1, "5.00"), (1.0, 9.0, "5.00"), (-0.5, 2.0, "6.50")] {
+            let err = doc
+                .validate_roof_ridge_extent(ParameterAxis::Y, lo, len)
+                .unwrap_err();
+            assert!(
+                err.starts_with(RIDGE_LENGTH_OFF_FOOTPRINT_MSG),
+                "lo {lo} len {len}: {err}"
+            );
+            assert!(
+                err.contains(&format!("up to {range} m")),
+                "lo {lo} len {len} must carry the permitted range: {err}"
             );
         }
         // The wider X axis fits the same span comfortably.

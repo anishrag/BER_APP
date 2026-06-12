@@ -4599,3 +4599,268 @@ fn orbit_view_wraps_yaw_clamps_pitch_and_resets() {
     assert_eq!(v.pitch_deg, DEFAULT_PITCH_DEG);
     assert_eq!((v.zoom, v.offset_x, v.offset_y), (1.0, 0.0, 0.0));
 }
+
+// ─── Live-session repro: L-shaped storey, snapped ceiling step, wall tops ────
+
+/// Replay of a reported live session up to the ceiling step: the L-shaped
+/// outline drawn in pixels (6 orthogonal vertices), dimensioned 3 / 2 / 1 / 1
+/// through the real prompt loop, every perimeter wall marked Exposed, default
+/// ceiling height 2.4 m. Returns the controller plus the storey's landmark
+/// coordinates (min/max x/y, the inner vertical wall's x, the inner
+/// horizontal wall's y) measured from the dimensioned outline.
+fn users_l_session_controller() -> (AppController, [f32; 6]) {
+    let p = |x: f32, y: f32| Point2f32::new(x, y);
+    let mut c = AppController::new(crate::engine::open_db(":memory:").unwrap());
+    let _ = c.create_ber(
+        "T".into(),
+        chrono::NaiveDate::from_ymd_opt(2026, 1, 1).unwrap(),
+    );
+    // The user's orthogonalized outline (pixel space), closed ring.
+    let ring_px = [
+        p(297.54297, 783.47656),
+        p(1029.625, 783.47656),
+        p(1029.625, 365.73828),
+        p(682.5703, 365.73828),
+        p(682.5703, 147.86328),
+        p(297.54297, 147.86328),
+    ];
+    let mut stroke = ring_px.to_vec();
+    stroke.push(p(298.0, 782.5)); // lift near start
+    c.document.floor_plan = FloorPlan::from_points_to_orthogonal(&stroke, 0.5, true).unwrap();
+    assert_eq!(
+        c.document.floor_plan.polygons()[0].len(),
+        6,
+        "outline keeps its 6 corners"
+    );
+    // Map each wall (by stable start VertexId) to the user's typed length:
+    // ring edges 0..6 got 3 / 2 / 1 / 1 (+ the two closure-derived 2 / 3).
+    let targets_by_edge = [3.0_f32, 2.0, 1.0, 1.0, 2.0, 3.0];
+    let mut target_of: std::collections::HashMap<VertexId, f32> = std::collections::HashMap::new();
+    for (vid, a, b) in c.document.floor_plan.perimeter_walls() {
+        let mid = ((a.x + b.x) / 2.0, (a.y + b.y) / 2.0);
+        let edge = (0..6)
+            .min_by(|&i, &j| {
+                let m = |k: usize| {
+                    let (s, e) = (ring_px[k], ring_px[(k + 1) % 6]);
+                    let (mx, my) = ((s.x + e.x) / 2.0, (s.y + e.y) / 2.0);
+                    (mx - mid.0).powi(2) + (my - mid.1).powi(2)
+                };
+                m(i).partial_cmp(&m(j)).unwrap()
+            })
+            .unwrap();
+        target_of.insert(vid, targets_by_edge[edge]);
+    }
+    // The real dimensioning loop: answer each prompt with that wall's length.
+    c.compute_next_dimension_prompt();
+    let mut guard = 0;
+    while c.dimensioning_active() && guard < 12 {
+        let prompt = c.document.dimensioning.current_prompt.clone().unwrap();
+        let v = target_of[&prompt.wall_start_vertex];
+        c.apply_dimension(v)
+            .unwrap_or_else(|e| panic!("dimension {v} failed: {e}"));
+        guard += 1;
+    }
+    assert!(guard < 12, "dimension loop didn't terminate");
+    c.commit_to_ber().unwrap();
+    assert!(c.outline_finalised(), "outline fully dimensioned");
+    c.set_default_ceiling_height(2.4).expect("height applies");
+    c.set_all_remaining_exposed();
+    c.commit_to_ber().unwrap();
+
+    // Landmarks from the dimensioned outline (world metres).
+    let pts = c.document.outline.floor_plan.get_points();
+    let xs: Vec<f32> = pts.iter().map(|p| p.x).collect();
+    let ys: Vec<f32> = pts.iter().map(|p| p.y).collect();
+    let min_x = xs.iter().copied().fold(f32::INFINITY, f32::min);
+    let max_x = xs.iter().copied().fold(f32::NEG_INFINITY, f32::max);
+    let min_y = ys.iter().copied().fold(f32::INFINITY, f32::min);
+    let max_y = ys.iter().copied().fold(f32::NEG_INFINITY, f32::max);
+    let inner_x = xs
+        .iter()
+        .copied()
+        .find(|&x| (x - min_x).abs() > 1e-3 && (x - max_x).abs() > 1e-3)
+        .expect("inner vertical wall");
+    let inner_y = ys
+        .iter()
+        .copied()
+        .find(|&y| (y - min_y).abs() > 1e-3 && (y - max_y).abs() > 1e-3)
+        .expect("inner horizontal wall");
+    (c, [min_x, max_x, min_y, max_y, inner_x, inner_y])
+}
+
+/// The user's ceiling step: a near-vertical stroke drifting from
+/// (3.217, 1.215) to (3.317, 3.261) — fits at x ≈ 3.27, within the 0.2 m snap
+/// tolerance of the inner wall, so it SNAPS onto it — then the jut side
+/// (x > inner wall) tapped and raised by +1.0 m.
+fn apply_users_ceiling_step(
+    c: &mut AppController,
+    inner_x: f32,
+    inner_y: f32,
+    max_x: f32,
+    max_y: f32,
+) {
+    c.set_ceiling_step_mode(true);
+    let stroke: Vec<(f32, f32)> = (0..=10)
+        .map(|i| {
+            let t = i as f32 / 10.0;
+            (3.217 + 0.100 * t, 1.215 + 2.046 * t)
+        })
+        .collect();
+    c.apply_ceiling_step_stroke_event(&stroke);
+    assert!(c.ceiling_step_side_pending(), "stroke fitted → side pick");
+    let ((lx, _), _) = c.pending_ceiling_step_line().unwrap();
+    assert!(
+        (lx as f32 - inner_x).abs() < 1e-4,
+        "line snapped onto the inner wall: line at {lx}, wall at {inner_x}"
+    );
+    c.ceiling_step_tap((inner_x + max_x) / 2.0, (inner_y + max_y) / 2.0);
+    assert!(
+        c.ceiling_step_amount_pending(),
+        "snapped line skips the position prompt"
+    );
+    c.assign_ceiling_step_delta(1.0).expect("step applies");
+}
+
+/// THE MODEL QUESTION from the live report: after the ceiling-step line
+/// SNAPPED onto the outline's inner vertical wall and the jut side was raised
+/// by +1.0 m, do the resolved wall regions around the raised section top out
+/// at 3.4 m — or stay flat at the 2.4 m default?
+#[test]
+fn users_l_session_raised_section_wall_tops_follow_the_step() {
+    let (mut c, [min_x, max_x, min_y, max_y, inner_x, inner_y]) = users_l_session_controller();
+    println!(
+        "landmarks: x [{min_x:.4}, {inner_x:.4}, {max_x:.4}]  y [{min_y:.4}, {inner_y:.4}, {max_y:.4}]"
+    );
+
+    apply_users_ceiling_step(&mut c, inner_x, inner_y, max_x, max_y);
+    c.materialize();
+
+    let storey = &c.current_record.as_ref().unwrap().data.storeys[0];
+    println!("{}", document::debug_dump_storey(storey, "users-L"));
+
+    // Roofs: raised piece at 3.4 over the jut, remainder at 2.4.
+    let zs: Vec<f64> = storey
+        .roofs
+        .regions
+        .iter()
+        .filter_map(|r| r.flat_z())
+        .collect();
+    assert!(
+        zs.iter().any(|z| (z - 3.4).abs() < 1e-6) && zs.iter().any(|z| (z - 2.4).abs() < 1e-6),
+        "roof split into 2.4 + 3.4 pieces: {zs:?}"
+    );
+
+    // Walls: classify each marked wall by its base edge and check its top.
+    let top_zs = |r: &datatypes::ber::structural::WallRegion| -> Vec<f64> {
+        r.polygon
+            .exterior
+            .iter()
+            .skip(2) // base edge first (the contract), then the top profile
+            .map(|v| v.z)
+            .collect()
+    };
+    assert_eq!(storey.walls.regions.len(), 6, "all six walls marked");
+    for r in &storey.walls.regions {
+        let e = &r.polygon.exterior;
+        let (a, b) = (e[0], e[1]);
+        let tops = top_zs(r);
+        let near = |v: f64, w: f32| (v - w as f64).abs() < 1e-3;
+        let on_raised_side = |x: f64| x > inner_x as f64 + 1e-3;
+        if near(a.x, max_x) && near(b.x, max_x) {
+            // Right wall of the jut: fully raised.
+            assert!(
+                tops.iter().all(|z| (z - 3.4).abs() < 1e-6),
+                "right jut wall must top at 3.4: {tops:?}"
+            );
+        } else if near(a.y, inner_y) && near(b.y, inner_y) && on_raised_side((a.x + b.x) / 2.0) {
+            // Bottom wall of the jut: fully raised.
+            assert!(
+                tops.iter().all(|z| (z - 3.4).abs() < 1e-6),
+                "jut bottom wall must top at 3.4: {tops:?}"
+            );
+        } else if near(a.y, max_y) && near(b.y, max_y) {
+            // Long top wall: crosses the step → both heights, jump at inner_x.
+            assert!(
+                tops.iter().any(|z| (z - 3.4).abs() < 1e-6)
+                    && tops.iter().any(|z| (z - 2.4).abs() < 1e-6),
+                "top wall must jump 2.4 → 3.4 at the step: {tops:?}"
+            );
+        } else {
+            // Everything else stays at the default height.
+            assert!(
+                tops.iter().all(|z| (z - 2.4).abs() < 1e-6),
+                "wall ({:.3},{:.3})→({:.3},{:.3}) outside the raised side must stay at 2.4: {tops:?}",
+                a.x, a.y, b.x, b.y
+            );
+        }
+    }
+
+    // And the raised tops SURVIVE persist → reload → re-derive (the session
+    // step areas are reconstructed from the persisted roofs; without that the
+    // next commit would flatten the walls back to 2.4).
+    c.commit_to_ber().unwrap();
+    let id = c.current_record.as_ref().unwrap().id;
+    c.open_ber(&id).unwrap();
+    c.commit_to_ber().unwrap();
+    let storey = &c.current_record.as_ref().unwrap().data.storeys[0];
+    let raised_tops = storey
+        .walls
+        .regions
+        .iter()
+        .flat_map(|r| r.polygon.exterior.iter().skip(2))
+        .filter(|v| (v.z - 3.4).abs() < 1e-3)
+        .count();
+    assert!(
+        raised_tops >= 4,
+        "raised wall tops survive reload + re-derive: {}",
+        document::debug_dump_storey(storey, "users-L-reloaded")
+    );
+}
+
+/// The END-OF-SESSION ridge from the live report: a near-vertical ridge
+/// stroke at x ≈ 3.73–3.78 (y 1.66 → 2.67) over the raised jut, the cross
+/// question skipped, the start typed as 1.0 m from the inner horizontal wall
+/// (lo = inner_y + 1.0 — exactly 1.0 m below the top wall). A typed length
+/// overshooting the top wall is rejected WITH the permitted range in the
+/// message; a length reaching exactly TO the wall (wall-to-wall) is accepted.
+#[test]
+fn users_l_session_ridge_length_gets_range_on_reject_and_wall_to_wall_lands() {
+    let (mut c, [_, max_x, _, max_y, inner_x, inner_y]) = users_l_session_controller();
+    apply_users_ceiling_step(&mut c, inner_x, inner_y, max_x, max_y);
+
+    c.set_ceiling_step_mode(false);
+    c.set_roof_point_mode(true);
+    let stroke: Vec<(f32, f32)> = (0..=10)
+        .map(|i| {
+            let t = i as f32 / 10.0;
+            (3.73 + 0.05 * t, 1.66 + 1.01 * t)
+        })
+        .collect();
+    c.apply_roof_ridge_stroke_event(&stroke);
+    // Neither drawn position is within snap tolerance (nearest parallel
+    // walls sit ≈ 0.46 m / 0.45 m away) → question 1 (cross) opens.
+    assert!(c.roof_ridge_position_pending(), "cross question opens");
+    c.skip_position_dimension(); // cross: the drawn x ≈ 3.75 stands
+    assert!(c.roof_ridge_position_pending(), "start question opens");
+    c.apply_position_dimension(1.0).unwrap(); // start: 1.0 m above inner_y
+    assert!(c.roof_ridge_length_pending(), "length question opens");
+
+    // From lo = inner_y + 1.0 the top wall is exactly 1.0 m away: 1.5 m
+    // overshoots → rejected, and the message now SAYS what fits.
+    let err = c.assign_roof_ridge_length(1.5).unwrap_err();
+    assert!(
+        err.contains("outside the storey footprint"),
+        "stable prefix kept: {err}"
+    );
+    assert!(
+        err.contains("up to 1.00 m"),
+        "permitted range in the message: {err}"
+    );
+    assert!(c.roof_ridge_length_pending(), "pending intact on rejection");
+
+    // Exactly to the wall — a ridge spanning the section wall-to-wall is
+    // legitimate; the old strictly-inside check wrongly rejected this.
+    c.assign_roof_ridge_length(1.0)
+        .expect("wall-to-wall length lands");
+    assert!(c.roof_ridge_height_pending(), "on to the height question");
+}
