@@ -759,8 +759,8 @@ pub fn validate_roof_rect_length(
 ///   allowed within [`APEX_BOUNDARY_EPS_M`] per side.
 /// - Each quantized corner is claimed by exactly that region
 ///   ([`check_rect_corner_claims`]).
-/// - The region boundary doesn't wrap past a hip line:
-///   [`rect_hip_switches`] == 4.
+/// - The region boundary's sector walk is clean (every edge and vertex
+///   faces the rect side nearest it): [`rect_hip_switches`] == 4.
 ///
 /// `Err` is user-facing, all messages stable; the over-length rejection
 /// carries the permitted run ([`RECT_LENGTH_EXCEEDS_AREA_MSG`] prefix).
@@ -1807,33 +1807,58 @@ mod tests {
         );
     }
 
-    /// The hip-line fence (risk #4): NON-convex regions are fine as long as
-    /// the boundary doesn't wrap a hip ray — a rect tucked into the notched
-    /// C's arm, and one along its bottom arm, both pass (the sector
-    /// classification absorbs the notch); a region whose boundary dips past
-    /// a hip ray and back (a needle notch toward the rect corner — > 4
-    /// switches, the loft would fold) is rejected with the stable
-    /// too-irregular message.
+    /// The sector-walk fence (risk #4): a NON-convex region passes as long
+    /// as every boundary edge faces the rect side nearest it (a clean
+    /// 4-switch walk — the L-shaped region with the rect in its corner); a
+    /// rect tucked into the notched C's arm leaves the far edges facing the
+    /// rect's RIGHT side (the run loft would fold across the rect — 2
+    /// switches), as does one along its bottom arm (3 switches), and a
+    /// needle notch dipping toward a rect corner (a vertex whose own sector
+    /// matches neither adjacent edge — the vertex-break arm of the count):
+    /// all rejected with the stable too-irregular message.
     #[test]
-    fn validate_rect_placement_fences_hip_wrapping_rings() {
-        let storey = storey_with_flat_ring(notched_ring(), 2.4);
-        // Tucked in the left arm (x ≤ 3): clean 4 switches.
+    fn validate_rect_placement_fences_unclean_sector_walks() {
+        // L-shaped region, rect in its inner corner: every edge faces its
+        // nearest rect side (the two-edge runs included) — passes.
+        let l_ring = vec![
+            Point2f64::new(0.0, 0.0),
+            Point2f64::new(6.0, 0.0),
+            Point2f64::new(6.0, 4.0),
+            Point2f64::new(4.0, 4.0),
+            Point2f64::new(4.0, 6.0),
+            Point2f64::new(0.0, 6.0),
+        ];
+        let storey = storey_with_flat_ring(l_ring, 2.4);
         assert!(validate_roof_rect_placement(
+            &storey,
+            Point2f64::new(1.0, 1.0),
+            Point2f64::new(3.0, 3.0)
+        )
+        .is_ok());
+        // Tucked in the C's left arm (x ≤ 3): the bottom and top edges'
+        // midpoints sit far right of the rect and face its RIGHT side —
+        // the loft would stretch their run across the rect.
+        let storey = storey_with_flat_ring(notched_ring(), 2.4);
+        let err = validate_roof_rect_placement(
             &storey,
             Point2f64::new(0.5, 0.5),
-            Point2f64::new(2.5, 3.5)
+            Point2f64::new(2.5, 3.5),
         )
-        .is_ok());
-        // Along the bottom arm under the slot: still 4 switches — passes.
-        assert!(validate_roof_rect_placement(
+        .unwrap_err();
+        assert_eq!(err, RECT_TOO_IRREGULAR_MSG);
+        // Along the bottom arm under the slot: the left edge faces the top
+        // sector's run from the wrong side (3 switches).
+        let err = validate_roof_rect_placement(
             &storey,
             Point2f64::new(0.5, 0.2),
-            Point2f64::new(9.0, 0.8)
+            Point2f64::new(9.0, 0.8),
         )
-        .is_ok());
+        .unwrap_err();
+        assert_eq!(err, RECT_TOO_IRREGULAR_MSG);
         // A needle notch dipping from the top edge toward the rect's
-        // top-right corner crosses its hip ray twice: the walk re-enters
-        // the right sector between top pieces (6 switches) — the fence.
+        // top-right corner: its tip vertex faces the RIGHT side while both
+        // its edges face the TOP — it would hip to a corner neither run
+        // uses (the vertex-break arm) — the fence.
         let needle = vec![
             Point2f64::new(0.0, 0.0),
             Point2f64::new(10.0, 0.0),
