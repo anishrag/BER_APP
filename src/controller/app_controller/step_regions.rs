@@ -210,19 +210,20 @@ impl AppController {
     /// the just-dimensioned step area: store its DIMENSIONED ring as a session
     /// step region and re-commit, which re-splits the floor regions by it. Then
     /// return to the outline. A near-zero amount (|level| < 0.01 m) is rejected
-    /// — the pending area stays open so the user can retype.
-    pub fn assign_step_level_to_pending(&mut self, level_m: f32) {
+    /// with an `Err` — the pending area stays open so the user can retype.
+    pub fn assign_step_level_to_pending(&mut self, level_m: f32) -> Result<(), String> {
         if self.document.active != ActiveShape::StepArea {
-            return;
+            return Ok(()); // nothing awaiting a level — no-op
         }
-        if level_m.abs() < 0.01 {
-            return; // a zero step is no step — keep the prompt open
+        if !level_m.is_finite() || level_m.abs() < 0.01 {
+            // A zero step is no step — keep the prompt open.
+            return Err("Floor step must be at least 0.01 m.".into());
         }
         // The live buffer IS the dimensioned step area; its resolved ring is what
         // we store (metre-precise, so the floor split is accurate).
         let polygon = self.document.floor_plan.get_points();
         if polygon.len() < 3 {
-            return;
+            return Err("The step area has no usable outline — cancel and redraw it.".into());
         }
         let idx = self.current_storey_idx.unwrap_or(0);
         self.step_regions.entry(idx).or_default().push(StepRegion {
@@ -230,7 +231,7 @@ impl AppController {
             level_m: level_m as f64,
         });
         self.abandon_step_shape(); // discard the live buffer, return to outline
-        let _ = self.mark_dirty();
+        self.mark_dirty()
     }
 
     /// Discard the in-flight step area / pending cut without assigning a level.

@@ -425,6 +425,8 @@ pub struct SketchView<'a> {
     pub pending_step_cut_regions: &'a [Vec<(f64, f64)>],
     pub step_pick_pending: bool,
     pub step_amount_input: &'a mut String,
+    /// Last error from the step-level assign, shown inline in the step toolbar.
+    pub step_error: Option<&'a str>,
     /// Ceiling-step tagging: mode flag + availability gate (needs a default
     /// ceiling height + finalised outline), the committed step regions
     /// `(ring, label)` to tint, the pending line + its two side half-rects,
@@ -443,6 +445,8 @@ pub struct SketchView<'a> {
     pub ceiling_step_amount_pending: bool,
     pub ceiling_step_pending: bool,
     pub ceiling_amount_input: &'a mut String,
+    /// Last error from the ceiling-step assign, shown inline in its toolbar.
+    pub ceiling_step_error: Option<&'a str>,
     /// Roof-point (apex) tagging: mode flag + availability gate (same gate as
     /// the ceiling steps), the committed apexes `(position, label)` to mark
     /// ("▲ 4.20 m"), the pending point's position for the provisional dot,
@@ -474,6 +478,10 @@ pub struct SketchView<'a> {
     pub roof_ridge_height_pending: bool,
     pub roof_ridge_pending: bool,
     pub roof_ridge_length_input: &'a mut String,
+    /// Last error from the roof assigns (apex height / ridge length / ridge
+    /// height), shown inline in the shared roof toolbar — one field because
+    /// the three stages are mutually exclusive within it.
+    pub roof_error: Option<&'a str>,
     /// Default ceiling heights: the last error from the Heights field's Set
     /// (shown inline next to it), the current scope's value when it has one
     /// (the field's "2.40 m" display), and whether the scope's heights are

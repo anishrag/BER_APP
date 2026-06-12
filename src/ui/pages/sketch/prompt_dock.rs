@@ -117,6 +117,7 @@ pub(super) fn render<F: FnMut(UiEvent)>(
                     view.step_region_polygons,
                     view.step_pick_pending,
                     view.step_amount_input,
+                    view.step_error,
                     on_event,
                 );
             }
@@ -129,6 +130,7 @@ pub(super) fn render<F: FnMut(UiEvent)>(
                     view.ceiling_step_side_pending,
                     view.ceiling_step_amount_pending,
                     view.ceiling_amount_input,
+                    view.ceiling_step_error,
                     on_event,
                 );
             }
@@ -145,11 +147,23 @@ pub(super) fn render<F: FnMut(UiEvent)>(
                     view.roof_ridge_position_pending,
                     view.roof_apex_input,
                     view.roof_ridge_length_input,
+                    view.roof_error,
                     on_event,
                 );
             }
         }
     });
+}
+
+/// Surface a rejected entry inline, next to the input that produced it, so
+/// the user sees WHY nothing happened and can correct without losing what
+/// they typed. Shared by every prompt panel that validates input.
+fn inline_error(ui: &mut egui::Ui, error: Option<&str>) {
+    if let Some(err) = error {
+        ui.label(
+            egui::RichText::new(format!("⚠ {}", err)).color(egui::Color32::from_rgb(255, 120, 90)),
+        );
+    }
 }
 
 /// Parse a dimension expression. Supports:
@@ -257,13 +271,7 @@ fn dimension_prompt_toolbar<F: FnMut(UiEvent)>(
         on_event(UiEvent::Sketch(SketchEvent::SkipDimension));
         dim_input.clear();
     }
-    // Surface the last error inline so the user can correct without
-    // losing what they typed.
-    if let Some(err) = dim_error {
-        ui.label(
-            egui::RichText::new(format!("⚠ {}", err)).color(egui::Color32::from_rgb(255, 120, 90)),
-        );
-    }
+    inline_error(ui, dim_error);
 }
 
 /// Toolbar for the position prompt of a carved phase/step area: the
@@ -326,11 +334,7 @@ fn position_prompt_toolbar<F: FnMut(UiEvent)>(
     {
         on_event(UiEvent::Sketch(SketchEvent::CyclePositionReference));
     }
-    if let Some(err) = error {
-        ui.label(
-            egui::RichText::new(format!("⚠ {}", err)).color(egui::Color32::from_rgb(255, 120, 90)),
-        );
-    }
+    inline_error(ui, error);
 }
 
 fn edit_drag_prompt_toolbar<F: FnMut(UiEvent)>(
@@ -382,11 +386,7 @@ fn edit_drag_prompt_toolbar<F: FnMut(UiEvent)>(
         on_event(UiEvent::Sketch(SketchEvent::CancelEditDrag));
         input.clear();
     }
-    if let Some(err) = error {
-        ui.label(
-            egui::RichText::new(format!("⚠ {}", err)).color(egui::Color32::from_rgb(255, 120, 90)),
-        );
-    }
+    inline_error(ui, error);
 }
 
 fn vertex_drop_prompt_toolbar<F: FnMut(UiEvent)>(
@@ -443,11 +443,7 @@ fn vertex_drop_prompt_toolbar<F: FnMut(UiEvent)>(
             s.clear();
         }
     }
-    if let Some(err) = error {
-        ui.label(
-            egui::RichText::new(format!("⚠ {}", err)).color(egui::Color32::from_rgb(255, 120, 90)),
-        );
-    }
+    inline_error(ui, error);
 }
 
 /// Radius/bulge slider for a provisional curve whose attach lines are set.
@@ -575,6 +571,7 @@ fn step_toolbar<F: FnMut(UiEvent)>(
     regions: &[(Vec<(f64, f64)>, String)],
     pick_pending: bool,
     amount_input: &mut String,
+    error: Option<&str>,
     on_event: &mut F,
 ) {
     if pick_pending {
@@ -612,6 +609,7 @@ fn step_toolbar<F: FnMut(UiEvent)>(
             on_event(UiEvent::Sketch(SketchEvent::CancelPendingStep));
             amount_input.clear();
         }
+        inline_error(ui, error);
     } else {
         ui.label("Draw an area to raise or lower its floor.");
         for (i, (_ring, label)) in regions.iter().enumerate() {
@@ -641,6 +639,7 @@ fn ceiling_step_toolbar<F: FnMut(UiEvent)>(
     side_pending: bool,
     amount_pending: bool,
     amount_input: &mut String,
+    error: Option<&str>,
     on_event: &mut F,
 ) {
     if orientation_pending {
@@ -709,6 +708,7 @@ fn ceiling_step_toolbar<F: FnMut(UiEvent)>(
             on_event(UiEvent::Sketch(SketchEvent::CancelPendingCeilingStep));
             amount_input.clear();
         }
+        inline_error(ui, error);
     } else {
         ui.label("Draw a straight line across the plan to step the ceiling.");
         for (i, (_ring, label)) in regions.iter().enumerate() {
@@ -746,6 +746,7 @@ fn roof_point_toolbar<F: FnMut(UiEvent)>(
     ridge_position_pending: bool,
     height_input: &mut String,
     ridge_length_input: &mut String,
+    error: Option<&str>,
     on_event: &mut F,
 ) {
     if ridge_height_pending {
@@ -771,6 +772,7 @@ fn roof_point_toolbar<F: FnMut(UiEvent)>(
             on_event(UiEvent::Sketch(SketchEvent::CancelPendingRoofRidge));
             height_input.clear();
         }
+        inline_error(ui, error);
     } else if ridge_length_pending {
         ui.label(egui::RichText::new("Ridge length (m):").strong());
         // Arrives PREFILLED with the drawn length (the stroke is approximate
@@ -800,6 +802,7 @@ fn roof_point_toolbar<F: FnMut(UiEvent)>(
             on_event(UiEvent::Sketch(SketchEvent::CancelPendingRoofRidge));
             ridge_length_input.clear();
         }
+        inline_error(ui, error);
     } else if ridge_position_pending {
         // The ridge's cross-coordinate question — the shared position panel
         // above owns the entry; this hint keeps Cancel reachable alongside it.
@@ -834,6 +837,7 @@ fn roof_point_toolbar<F: FnMut(UiEvent)>(
             on_event(UiEvent::Sketch(SketchEvent::CancelPendingRoofPoint));
             height_input.clear();
         }
+        inline_error(ui, error);
     } else if position_pending {
         // A position stage — the shared position panel above owns the entry;
         // this hint keeps Cancel reachable alongside it.

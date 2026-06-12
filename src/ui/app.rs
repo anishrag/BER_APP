@@ -81,8 +81,26 @@ pub struct SketchState {
     pub exposure_end_input: String,
     /// Backing string for the floor-step amount input (metres).
     pub step_amount_input: String,
+    // Error surfacing follows the established per-flow pattern (one
+    // `Option<String>` per prompt panel — `dimension_error`, `position_error`,
+    // etc.) rather than a single shared field: each error renders inside the
+    // panel that owns the rejected input, and the step / ceiling-step / roof
+    // toolbars can be on screen alongside other prompts. The roof family
+    // (apex height, ridge length, ridge height) shares ONE field because it
+    // shares one toolbar with mutually exclusive stages.
+    /// Last error from `assign_step_level_to_pending`. Shown next to the
+    /// amount field so the user can correct without losing what they typed;
+    /// cleared on success and on cancel.
+    pub step_error: Option<String>,
     /// Backing string for the ceiling-step amount input (metres).
     pub ceiling_amount_input: String,
+    /// Last error from `assign_ceiling_step_delta`. Same lifecycle as
+    /// `step_error` (also cleared by un-snap — the stage it described is gone).
+    pub ceiling_step_error: Option<String>,
+    /// Last error from the roof-point/ridge assigns (`assign_roof_apex`,
+    /// `assign_roof_ridge_length`, `assign_roof_ridge_height`) — one field for
+    /// the shared roof toolbar; cleared on success, skip, cancel, and un-snap.
+    pub roof_error: Option<String>,
     /// Backing string for the roof-point apex-height input (metres). PREFILLED
     /// with the storey's default ceiling height when the Height stage opens
     /// (via `roof_apex_prefilled`); the user overtypes or accepts.
@@ -584,6 +602,9 @@ impl eframe::App for BerApp {
                             let position_error = self.sketch_state.position_error.clone();
                             let ceiling_height_error =
                                 self.sketch_state.ceiling_height_error.clone();
+                            let step_error = self.sketch_state.step_error.clone();
+                            let ceiling_step_error = self.sketch_state.ceiling_step_error.clone();
+                            let roof_error = self.sketch_state.roof_error.clone();
 
                             let controller = self.app_controller.clone();
                             let splice_debug = self.app_controller.borrow().splice_debug_overlay();
@@ -653,6 +674,7 @@ impl eframe::App for BerApp {
                                 pending_step_cut_regions: &pending_step_cut_regions,
                                 step_pick_pending,
                                 step_amount_input: &mut self.sketch_state.step_amount_input,
+                                step_error: step_error.as_deref(),
                                 ceiling_step_mode,
                                 ceiling_step_available,
                                 ceiling_step_region_polygons: &ceiling_step_region_polygons,
@@ -664,6 +686,7 @@ impl eframe::App for BerApp {
                                 ceiling_step_amount_pending,
                                 ceiling_step_pending,
                                 ceiling_amount_input: &mut self.sketch_state.ceiling_amount_input,
+                                ceiling_step_error: ceiling_step_error.as_deref(),
                                 roof_point_mode,
                                 roof_point_available,
                                 roof_apex_views: &roof_apex_views,
@@ -683,6 +706,7 @@ impl eframe::App for BerApp {
                                 roof_ridge_length_input: &mut self
                                     .sketch_state
                                     .roof_ridge_length_input,
+                                roof_error: roof_error.as_deref(),
                                 ceiling_height_error: ceiling_height_error.as_deref(),
                                 default_ceiling_height,
                                 ceiling_heights_set,
@@ -876,9 +900,18 @@ impl eframe::App for BerApp {
                                             .apply_step_region_stroke_event(&points);
                                     }
                                     SketchEvent::AssignStepLevel(level_m) => {
-                                        controller
+                                        match controller
                                             .borrow_mut()
-                                            .assign_step_level_to_pending(level_m);
+                                            .assign_step_level_to_pending(level_m)
+                                        {
+                                            Ok(()) => {
+                                                self.sketch_state.step_error = None;
+                                            }
+                                            Err(e) => {
+                                                eprintln!("assign_step_level_to_pending: {}", e);
+                                                self.sketch_state.step_error = Some(e);
+                                            }
+                                        }
                                     }
                                     SketchEvent::ChooseStepCutRegion { world_x, world_y } => {
                                         controller
@@ -887,6 +920,7 @@ impl eframe::App for BerApp {
                                     }
                                     SketchEvent::CancelPendingStep => {
                                         controller.borrow_mut().cancel_pending_step();
+                                        self.sketch_state.step_error = None;
                                     }
                                     SketchEvent::DeleteStepRegion(index) => {
                                         controller.borrow_mut().delete_step_region(index);
@@ -910,18 +944,27 @@ impl eframe::App for BerApp {
                                             .choose_ceiling_step_orientation(horizontal);
                                     }
                                     SketchEvent::AssignCeilingStepDelta(delta_m) => {
-                                        log_err(
-                                            "assign_ceiling_step_delta",
-                                            controller
-                                                .borrow_mut()
-                                                .assign_ceiling_step_delta(delta_m),
-                                        );
+                                        match controller
+                                            .borrow_mut()
+                                            .assign_ceiling_step_delta(delta_m)
+                                        {
+                                            Ok(()) => {
+                                                self.sketch_state.ceiling_step_error = None;
+                                            }
+                                            Err(e) => {
+                                                eprintln!("assign_ceiling_step_delta: {}", e);
+                                                self.sketch_state.ceiling_step_error = Some(e);
+                                            }
+                                        }
                                     }
                                     SketchEvent::UnsnapCeilingStepLine => {
                                         controller.borrow_mut().unsnap_ceiling_step_line();
+                                        // The stage the error described is gone.
+                                        self.sketch_state.ceiling_step_error = None;
                                     }
                                     SketchEvent::CancelPendingCeilingStep => {
                                         controller.borrow_mut().cancel_pending_ceiling_step();
+                                        self.sketch_state.ceiling_step_error = None;
                                     }
                                     SketchEvent::DeleteCeilingStepRegion(index) => {
                                         controller.borrow_mut().delete_ceiling_step_region(index);
@@ -935,16 +978,24 @@ impl eframe::App for BerApp {
                                             .roof_point_tap(world_x as f32, world_y as f32);
                                     }
                                     SketchEvent::AssignRoofApexHeight(z_m) => {
-                                        log_err(
-                                            "assign_roof_apex",
-                                            controller.borrow_mut().assign_roof_apex(z_m),
-                                        );
+                                        match controller.borrow_mut().assign_roof_apex(z_m) {
+                                            Ok(()) => {
+                                                self.sketch_state.roof_error = None;
+                                            }
+                                            Err(e) => {
+                                                eprintln!("assign_roof_apex: {}", e);
+                                                self.sketch_state.roof_error = Some(e);
+                                            }
+                                        }
                                     }
                                     SketchEvent::UnsnapRoofPoint => {
                                         controller.borrow_mut().unsnap_roof_point();
+                                        // The stage the error described is gone.
+                                        self.sketch_state.roof_error = None;
                                     }
                                     SketchEvent::CancelPendingRoofPoint => {
                                         controller.borrow_mut().cancel_pending_roof_point();
+                                        self.sketch_state.roof_error = None;
                                     }
                                     SketchEvent::DeleteRoofApex(index) => {
                                         controller.borrow_mut().delete_roof_apex(index);
@@ -955,25 +1006,43 @@ impl eframe::App for BerApp {
                                             .apply_roof_ridge_stroke_event(&points);
                                     }
                                     SketchEvent::AssignRoofRidgeLength(len_m) => {
-                                        log_err(
-                                            "assign_roof_ridge_length",
-                                            controller.borrow_mut().assign_roof_ridge_length(len_m),
-                                        );
+                                        match controller
+                                            .borrow_mut()
+                                            .assign_roof_ridge_length(len_m)
+                                        {
+                                            Ok(()) => {
+                                                self.sketch_state.roof_error = None;
+                                            }
+                                            Err(e) => {
+                                                eprintln!("assign_roof_ridge_length: {}", e);
+                                                self.sketch_state.roof_error = Some(e);
+                                            }
+                                        }
                                     }
                                     SketchEvent::SkipRoofRidgeLength => {
                                         controller.borrow_mut().skip_roof_ridge_length();
+                                        self.sketch_state.roof_error = None;
                                     }
                                     SketchEvent::AssignRoofRidgeHeight(z_m) => {
-                                        log_err(
-                                            "assign_roof_ridge",
-                                            controller.borrow_mut().assign_roof_ridge_height(z_m),
-                                        );
+                                        match controller.borrow_mut().assign_roof_ridge_height(z_m)
+                                        {
+                                            Ok(()) => {
+                                                self.sketch_state.roof_error = None;
+                                            }
+                                            Err(e) => {
+                                                eprintln!("assign_roof_ridge_height: {}", e);
+                                                self.sketch_state.roof_error = Some(e);
+                                            }
+                                        }
                                     }
                                     SketchEvent::UnsnapRoofRidge => {
                                         controller.borrow_mut().unsnap_roof_ridge();
+                                        // The stage the error described is gone.
+                                        self.sketch_state.roof_error = None;
                                     }
                                     SketchEvent::CancelPendingRoofRidge => {
                                         controller.borrow_mut().cancel_pending_roof_ridge();
+                                        self.sketch_state.roof_error = None;
                                     }
                                     SketchEvent::SetExposureMode(on) => {
                                         controller.borrow_mut().set_exposure_mode(on);

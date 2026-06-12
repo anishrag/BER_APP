@@ -1572,7 +1572,7 @@ fn step_area_is_dimensioned_before_its_level_is_assigned() {
     );
 
     // Assign the level → stored region, back to the outline.
-    c.assign_step_level_to_pending(-0.3);
+    c.assign_step_level_to_pending(-0.3).expect("level applies");
     assert!(!c.step_pick_pending(), "level consumed");
     let regions = c.step_region_polygons();
     assert_eq!(
@@ -1605,7 +1605,13 @@ fn step_area_zero_amount_is_rejected_and_area_stays_pending() {
     skip_position_prompts(&mut c); // accept the drawn position
     assert!(c.step_pick_pending(), "carved area awaits its amount");
 
-    c.assign_step_level_to_pending(0.005);
+    let err = c
+        .assign_step_level_to_pending(0.005)
+        .expect_err("a near-zero step is rejected");
+    assert!(
+        err.contains("0.01"),
+        "the rejection names the minimum so the UI can show it: {err}"
+    );
     assert!(
         c.step_pick_pending(),
         "a zero step is no step — the prompt stays open"
@@ -1633,7 +1639,7 @@ fn step_area_splits_floor_into_level_regions() {
     }
     skip_position_prompts(&mut c); // accept the drawn position
     assert!(c.step_pick_pending(), "carved area awaits its amount");
-    c.assign_step_level_to_pending(-0.3);
+    c.assign_step_level_to_pending(-0.3).expect("level applies");
     c.materialize();
 
     let rec = c.current_record.as_ref().unwrap();
