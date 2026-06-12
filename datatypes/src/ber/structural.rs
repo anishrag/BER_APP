@@ -638,9 +638,19 @@ impl FloorRegions {
     }
 }
 
+/// Build a `geo` polygon from an OPEN plan ring (no closing duplicate
+/// required — `LineString` closes it).
+pub(crate) fn ring_to_poly(ring: &[Point2f64]) -> Polygon<f64> {
+    Polygon::new(
+        LineString::from(ring.iter().map(|p| (p.x, p.y)).collect::<Vec<_>>()),
+        vec![],
+    )
+}
+
 /// Drop vertices that lie on the straight line between their neighbours (within
-/// a small cross-product tolerance) — used to clean a merged outline ring.
-fn strip_collinear(ring: &[Point2f64]) -> Vec<Point2f64> {
+/// a small cross-product tolerance) — used to clean a merged outline ring and
+/// the suggestion rings in `ber::suggest`.
+pub(crate) fn strip_collinear(ring: &[Point2f64]) -> Vec<Point2f64> {
     let n = ring.len();
     if n < 3 {
         return ring.to_vec();
@@ -702,10 +712,13 @@ pub struct RoofApex {
 /// Ceiling pieces and boolean debris with plan area below this (m²) are
 /// slivers, not ceilings. ONE shared constant for the ceiling re-split
 /// ([`CeilingRegions::with_z_deltas`]), the fan/ridge triangulations
-/// ([`CeilingRegions::with_apexes`]), and the group merge
-/// ([`CeilingRegions::apex_groups`]) — the re-apply identities depend on all
-/// three drawing the line in the same place.
-const SLIVER_AREA_M2: f64 = 1e-6;
+/// ([`CeilingRegions::with_apexes`]), the group merge
+/// ([`CeilingRegions::apex_groups`]), the upper-storey anchor/inheritance
+/// queries ([`CeilingRegions::lowest_flat_z_over`] /
+/// [`CeilingRegions::inherited_floor_levels`]), and the outline-suggestion
+/// pipeline (`ber::suggest`) — the re-apply identities depend on all of them
+/// drawing the line in the same place.
+pub(crate) const SLIVER_AREA_M2: f64 = 1e-6;
 
 /// A connected GROUP of roof apexes and the ceiling regions they shape — the
 /// session-derived view (never persisted; no serde) that is THE grouping
@@ -1097,6 +1110,101 @@ impl CeilingRegions {
                 }
             })
             .collect()
+    }
+
+    /// The LOWEST flat ceiling height over `footprint`: the minimum
+    /// [`flat_z`] among regions whose plan polygon overlaps `footprint` by
+    /// more than [`SLIVER_AREA_M2`] (a boundary graze is not coverage).
+    /// Heights are metres above this storey's floor datum. This is the
+    /// ANCHOR the storey above's floor slab sits on
+    /// (`Ber::storey_floor_datums`) and the zero its inherited floor steps
+    /// are measured from ([`inherited_floor_levels`]). `None` when no flat
+    /// region overlaps — sloped-only coverage, empty roofs, or a degenerate
+    /// footprint (< 3 vertices).
+    ///
+    /// [`flat_z`]: CeilingRegion::flat_z
+    /// [`inherited_floor_levels`]: CeilingRegions::inherited_floor_levels
+    pub fn lowest_flat_z_over(&self, footprint: &[Point2f64]) -> Option<f64> {
+        use geo::bool_ops::BooleanOps;
+        use geo::Area;
+        if footprint.len() < 3 {
+            return None;
+        }
+        let fp = ring_to_poly(footprint);
+        self.regions
+            .iter()
+            .filter_map(|r| {
+                let z = r.flat_z()?;
+                let plan: Polygon<f64> = r.polygon.clone().into();
+                (plan.intersection(&fp).unsigned_area() > SLIVER_AREA_M2).then_some(z)
+            })
+            .min_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal))
+    }
+
+    /// The floor levels a storey ABOVE inherits from this (below-storey)
+    /// ceiling: for every FLAT region overlapping `footprint` (by more than
+    /// [`SLIVER_AREA_M2`]) whose height sits more than [`RISER_Z_EPS_M`]
+    /// above the anchor ([`lowest_flat_z_over`]), the plan pieces of
+    /// region ∩ footprint at level `z − anchor` — the anchor (and with it
+    /// the floor-slab thickness) cancels, so levels are
+    /// thickness-independent. Boolean results carrying interior rings are
+    /// decomposed via `split_to_simple` (`Polygon3D`-style exterior-only
+    /// consumers would fill the hole) and sub-[`SLIVER_AREA_M2`] pieces are
+    /// dropped. Piece rings are OPEN (no closing duplicate) and
+    /// f32-QUANTIZED (the `Ber::add_roof_apex` precedent: the document
+    /// layer round-trips step rings through `Point2f32`, and the
+    /// seed → reload fixpoint needs the stored ring to survive that
+    /// round-trip). Sloped regions overlapping the footprint are
+    /// warn-logged and contribute nothing (sloped-under-floor is later
+    /// roofs work). Empty when there is no anchor.
+    ///
+    /// [`lowest_flat_z_over`]: CeilingRegions::lowest_flat_z_over
+    pub fn inherited_floor_levels(&self, footprint: &[Point2f64]) -> Vec<(Vec<Point2f64>, f64)> {
+        use geo::bool_ops::BooleanOps;
+        use geo::Area;
+        let Some(anchor) = self.lowest_flat_z_over(footprint) else {
+            return Vec::new();
+        };
+        let fp = ring_to_poly(footprint);
+        let mut out = Vec::new();
+        for r in &self.regions {
+            let plan: Polygon<f64> = r.polygon.clone().into();
+            let covered = plan.intersection(&fp);
+            if covered.unsigned_area() <= SLIVER_AREA_M2 {
+                continue; // not under the new storey
+            }
+            let Some(z) = r.flat_z() else {
+                log::warn!(
+                    "sloped ceiling region under the new storey's footprint — \
+                     it contributes no inherited floor level"
+                );
+                continue;
+            };
+            if z - anchor <= RISER_Z_EPS_M {
+                continue; // the anchor level itself — not a step
+            }
+            for poly in covered.0.iter().flat_map(split_to_simple) {
+                if poly.unsigned_area() < SLIVER_AREA_M2 {
+                    continue;
+                }
+                let mut ring: Vec<Point2f64> = poly
+                    .exterior()
+                    .coords()
+                    .map(|c| Point2f64::new(c.x as f32 as f64, c.y as f32 as f64))
+                    .collect();
+                if ring.len() > 1 && ring.first() == ring.last() {
+                    ring.pop();
+                }
+                ring.dedup(); // quantization can collapse near-identical vertices
+                if ring.len() > 1 && ring.first() == ring.last() {
+                    ring.pop();
+                }
+                if ring.len() >= 3 {
+                    out.push((ring, z - anchor));
+                }
+            }
+        }
+        out
     }
 
     /// The region whose plan projection STRICTLY contains `p` (boundary
@@ -1605,7 +1713,7 @@ fn merge_coplanar_faces(mut faces: Vec<CeilingRegion>) -> Vec<CeilingRegion> {
 /// are decomposed recursively. The cut crosses that hole, so neither half can
 /// still contain it whole — every split strictly reduces the remaining hole
 /// extent and the recursion terminates with simple pieces.
-fn split_to_simple(poly: &Polygon<f64>) -> Vec<Polygon<f64>> {
+pub(crate) fn split_to_simple(poly: &Polygon<f64>) -> Vec<Polygon<f64>> {
     use geo::bool_ops::BooleanOps;
     use geo::BoundingRect;
     if poly.interiors().is_empty() {
@@ -2183,8 +2291,11 @@ const RISER_MIN_OVERLAP_M: f64 = 1e-3;
 /// Z discontinuity (m) above which two surfaces meeting at a plan edge need
 /// a riser face between them. At or below it they are the SAME continuous
 /// surface — a fan/ridge seam, or floor pieces one phase boundary splits at
-/// a single level.
-const RISER_Z_EPS_M: f64 = 1e-4;
+/// a single level. Also the line between "same level" and "a real step" for
+/// the upper-storey inheritance ([`CeilingRegions::inherited_floor_levels`])
+/// and the distinct-level count in `ber::suggest` — one constant so a riser
+/// the 3D view draws is exactly a level the suggestion engine counts.
+pub(crate) const RISER_Z_EPS_M: f64 = 1e-4;
 
 /// The plan pieces two region boundary rings SHARE: every edge pair that is
 /// metrically collinear (each endpoint of one within [`PROFILE_EPS_M`] of
@@ -2559,6 +2670,15 @@ pub struct Storey {
     /// records load.
     #[serde(default)]
     pub roof_apexes: Vec<RoofApex>,
+    /// Floor-slab thickness in metres between this storey's floor and the
+    /// ceiling of the storey below it bears on. Durable INPUT like
+    /// `ceiling_height_m` — asked first when the storey is added (never on
+    /// storey 0) and re-editable in Heights. `None` on storey 0 and on
+    /// records from before the new-storey flow: `Ber::storey_floor_datums`
+    /// then falls back to the legacy below-ceiling-height stacking.
+    /// `#[serde(default)]` so older records load.
+    #[serde(default)]
+    pub floor_thickness_m: Option<f64>,
     // No editable sketch snapshot is stored: the resolved geometry above
     // (`floors`/`walls`/`living_areas`) is the only persisted representation,
     // and the editor rebuilds its working state from it on load. The DB only
@@ -4496,6 +4616,216 @@ mod tests {
             .is_some());
         let old: Storey = serde_json::from_value(json).expect("old JSON still loads");
         assert_eq!(old.ceiling_height_m, None);
+    }
+
+    /* ---------------------------------------------------------------------
+     * Floor thickness, storey floor datums, ceiling anchor + inheritance
+     * ------------------------------------------------------------------ */
+
+    /// L-shape ceiling stepped via `with_z_deltas`: bottom arm (x∈[0,10],
+    /// y∈[0,4], 40 m²) raised to 2.7, upper arm (x∈[0,4], y∈[4,10], 24 m²)
+    /// left at 2.4 — flats at two z's.
+    fn stepped_l_roofs() -> CeilingRegions {
+        let l_ring = vec![
+            Point2f64::new(0.0, 0.0),
+            Point2f64::new(10.0, 0.0),
+            Point2f64::new(10.0, 4.0),
+            Point2f64::new(4.0, 4.0),
+            Point2f64::new(4.0, 10.0),
+            Point2f64::new(0.0, 10.0),
+        ];
+        CeilingRegions::default_for_footprint(vec![l_ring], 2.4, ItemId::default())
+            .with_z_deltas(&[(square(0.0, 0.0, 10.0, 4.0), 0.3)])
+    }
+
+    /// `Some(z)` within float noise of `want` (2.4 + 0.3 lands at
+    /// 2.6999999999999997 — `with_z_deltas` sums deltas in f64).
+    fn assert_approx(got: Option<f64>, want: f64) {
+        assert!(
+            got.is_some_and(|z| (z - want).abs() < 1e-9),
+            "want ~{want}, got {got:?}"
+        );
+    }
+
+    #[test]
+    fn lowest_flat_z_over_takes_min_of_overlapping_flats() {
+        let roofs = stepped_l_roofs();
+        // Footprint covering both arms → the LOWER level anchors.
+        assert_approx(roofs.lowest_flat_z_over(&square(0.0, 0.0, 10.0, 10.0)), 2.4);
+        // Footprint strictly inside the raised bottom arm only.
+        assert_approx(roofs.lowest_flat_z_over(&square(1.0, 1.0, 9.0, 3.0)), 2.7);
+        // Off to the side → no coverage.
+        assert_eq!(
+            roofs.lowest_flat_z_over(&square(20.0, 20.0, 30.0, 30.0)),
+            None
+        );
+        // A boundary graze (sub-sliver overlap) is not coverage.
+        assert_eq!(
+            roofs.lowest_flat_z_over(&square(10.0, 0.0, 20.0, 4.0)),
+            None
+        );
+        // Degenerate footprint.
+        assert_eq!(roofs.lowest_flat_z_over(&[]), None);
+    }
+
+    #[test]
+    fn inherited_floor_levels_pieces_at_z_minus_anchor() {
+        use geo::Area;
+        let roofs = stepped_l_roofs();
+        // Footprint over both arms: anchor 2.4, ONE inherited level — the
+        // bottom arm at 2.7 − 2.4 = 0.3 (the slab thickness cancels).
+        let levels = roofs.inherited_floor_levels(&square(0.0, 0.0, 10.0, 10.0));
+        assert_eq!(levels.len(), 1, "{levels:?}");
+        let (ring, level) = &levels[0];
+        assert!((level - 0.3).abs() < 1e-9);
+        let area = ring_to_poly(ring).unsigned_area();
+        assert!(
+            (area - 40.0).abs() < 1e-6,
+            "the whole bottom arm, got {area}"
+        );
+        // f32-quantized at the boundary (the add_roof_apex precedent).
+        for p in ring {
+            assert_eq!(p.x, p.x as f32 as f64);
+            assert_eq!(p.y, p.y as f32 as f64);
+        }
+        // A footprint clipped to part of both arms inherits only the covered
+        // piece of the raised arm: (2..10, 0..4) = 32 m².
+        let clipped = roofs.inherited_floor_levels(&square(2.0, 0.0, 10.0, 10.0));
+        assert_eq!(clipped.len(), 1, "{clipped:?}");
+        let clipped_area = ring_to_poly(&clipped[0].0).unsigned_area();
+        assert!(
+            (clipped_area - 32.0).abs() < 1e-6,
+            "8 × 4 piece, got {clipped_area}"
+        );
+    }
+
+    #[test]
+    fn inherited_floor_levels_anchor_level_and_no_anchor_yield_empty() {
+        let roofs = stepped_l_roofs();
+        // Footprint on the raised arm only: it IS the anchor — no step.
+        assert!(roofs
+            .inherited_floor_levels(&square(1.0, 1.0, 9.0, 3.0))
+            .is_empty());
+        // No coverage at all → no anchor → empty.
+        assert!(roofs
+            .inherited_floor_levels(&square(20.0, 20.0, 30.0, 30.0))
+            .is_empty());
+    }
+
+    #[test]
+    fn inherited_floor_levels_sloped_regions_contribute_nothing() {
+        // Flat anchor on the left half, a sloped region on the right half.
+        let mut roofs = CeilingRegions::default_for_footprint(
+            vec![square(0.0, 0.0, 5.0, 10.0)],
+            2.4,
+            ItemId::default(),
+        );
+        roofs.regions.push(CeilingRegion {
+            id: ItemId::default(),
+            polygon: Polygon3D::new(vec![
+                Point3f64::new(5.0, 0.0, 2.4),
+                Point3f64::new(10.0, 0.0, 3.4),
+                Point3f64::new(10.0, 10.0, 3.4),
+                Point3f64::new(5.0, 10.0, 2.4),
+            ]),
+            opes: Opes::default(),
+            construction_id: ItemId::default(),
+        });
+        // The sloped half is covered but warn-logged out — no levels.
+        assert!(roofs
+            .inherited_floor_levels(&square(0.0, 0.0, 10.0, 10.0))
+            .is_empty());
+        // And it never anchors: only the flat half does.
+        assert_eq!(
+            roofs.lowest_flat_z_over(&square(0.0, 0.0, 10.0, 10.0)),
+            Some(2.4)
+        );
+    }
+
+    #[test]
+    fn set_floor_thickness_stamps_existing_storey_only() {
+        let mut ber = Ber::default();
+        ber.storeys.push(Storey::default());
+        ber.storeys.push(Storey::default());
+        ber.set_floor_thickness(1, 0.3);
+        assert_eq!(
+            ber.storeys[0].floor_thickness_m, None,
+            "other storey untouched"
+        );
+        assert_eq!(ber.storeys[1].floor_thickness_m, Some(0.3));
+        // Re-stamping overwrites (the Heights re-edit).
+        ber.set_floor_thickness(1, 0.25);
+        assert_eq!(ber.storeys[1].floor_thickness_m, Some(0.25));
+        // Out-of-range is a no-op.
+        ber.set_floor_thickness(7, 0.3);
+    }
+
+    #[test]
+    fn storey_floor_datums_legacy_stacking_is_ceiling_height_sum() {
+        let mut ber = Ber::default();
+        for h in [Some(2.4), Some(2.6), Some(3.0)] {
+            ber.storeys.push(Storey {
+                ceiling_height_m: h,
+                ..Storey::default()
+            });
+        }
+        // No thicknesses anywhere → byte-identical to the old stacking:
+        // z += below.ceiling_height_m.unwrap_or_default().
+        assert_eq!(ber.storey_floor_datums(), vec![0.0, 2.4, 5.0]);
+        // An unset height counts 0 — callers gate before trusting the stack.
+        ber.storeys[1].ceiling_height_m = None;
+        assert_eq!(ber.storey_floor_datums(), vec![0.0, 2.4, 2.4]);
+    }
+
+    #[test]
+    fn storey_floor_datums_anchors_thickness_on_lowest_covered_flat() {
+        let cid = ItemId::default();
+        let below = Storey {
+            floors: FloorRegions::new(square(0.0, 0.0, 10.0, 10.0), cid),
+            roofs: stepped_l_roofs(),
+            ceiling_height_m: Some(2.4),
+            ..Storey::default()
+        };
+        // Upper footprint strictly inside the RAISED arm → anchor 2.7.
+        let upper_on_raised = Storey {
+            floors: FloorRegions::new(square(1.0, 1.0, 9.0, 3.0), cid),
+            floor_thickness_m: Some(0.3),
+            ..Storey::default()
+        };
+        let mut ber = Ber::default();
+        ber.storeys = vec![below.clone(), upper_on_raised];
+        let datums_approx = |ber: &Ber, want: [f64; 2], why: &str| {
+            let got = ber.storey_floor_datums();
+            assert!(
+                got.len() == 2 && got.iter().zip(want).all(|(g, w)| (g - w).abs() < 1e-9),
+                "{why}: want ~{want:?}, got {got:?}"
+            );
+        };
+        datums_approx(&ber, [0.0, 3.0], "2.7 + 0.3");
+        // Upper footprint spanning BOTH arms → the LOW flat anchors.
+        ber.storeys[1].floors = FloorRegions::new(square(0.0, 0.0, 10.0, 10.0), cid);
+        datums_approx(&ber, [0.0, 2.7], "2.4 + 0.3");
+        // No flat coverage (footprint off to the side) → fall back to the
+        // below ceiling height.
+        ber.storeys[1].floors = FloorRegions::new(square(20.0, 20.0, 26.0, 26.0), cid);
+        datums_approx(&ber, [0.0, 2.7], "2.4 + 0.3 fallback");
+        // No footprint at all (fresh storey) → same fallback.
+        ber.storeys[1].floors = FloorRegions::default();
+        datums_approx(&ber, [0.0, 2.7], "fresh storey fallback");
+    }
+
+    #[test]
+    fn storey_json_without_floor_thickness_deserializes_to_none() {
+        // JSON produced by the OLD shape (no `floor_thickness_m` field).
+        let storey = Storey::default();
+        let mut json = serde_json::to_value(&storey).expect("serialize");
+        assert!(json
+            .as_object_mut()
+            .unwrap()
+            .remove("floor_thickness_m")
+            .is_some());
+        let old: Storey = serde_json::from_value(json).expect("old JSON still loads");
+        assert_eq!(old.floor_thickness_m, None);
     }
 
     /* ---------------------------------------------------------------------

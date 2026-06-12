@@ -63,6 +63,65 @@ impl Ber {
         }
     }
 
+    /// Stamp the floor-slab thickness on storey `storey_idx` (the add-storey
+    /// prompt and the Heights re-edit). Validation — finite, ≥ 0, never
+    /// storey 0 — happens upstream in the controller; this just stores the
+    /// declarative input [`storey_floor_datums`] consumes. No-op when the
+    /// storey doesn't exist.
+    ///
+    /// [`storey_floor_datums`]: Ber::storey_floor_datums
+    pub fn set_floor_thickness(&mut self, storey_idx: usize, thickness_m: f64) {
+        if let Some(storey) = self.storeys.get_mut(storey_idx) {
+            storey.floor_thickness_m = Some(thickness_m);
+        }
+    }
+
+    /// Absolute floor datum (z, metres) per storey, index-aligned with
+    /// `storeys`. THE datum rule:
+    ///
+    /// - `z_0 = 0`;
+    /// - `z_N = z_{N−1} + step`, where the step depends on storey N's
+    ///   `floor_thickness_m`:
+    ///   - `None` (legacy records, storey 0-era storeys): the storey
+    ///     BELOW's `ceiling_height_m` — byte-identical to the original
+    ///     full-house ceiling-height stacking;
+    ///   - `Some(t)`: `anchor_z + t`, where `anchor_z` is the LOWEST flat
+    ///     ceiling height of the storey below over THIS storey's footprint
+    ///     ([`CeilingRegions::lowest_flat_z_over`] — overlap above sliver
+    ///     area), falling back to the storey below's `ceiling_height_m`
+    ///     when this storey has no footprint yet or no flat ceiling covers
+    ///     it.
+    ///
+    /// Unset ceiling heights count 0 in both branches (`unwrap_or_default`,
+    /// exactly like the stacking this replaces) — callers gate on heights
+    /// being set (the 3D gate) before trusting the stack.
+    ///
+    /// [`CeilingRegions::lowest_flat_z_over`]:
+    /// super::structural::CeilingRegions::lowest_flat_z_over
+    pub fn storey_floor_datums(&self) -> Vec<f64> {
+        let mut out = Vec::with_capacity(self.storeys.len());
+        let mut z = 0.0_f64;
+        for (i, storey) in self.storeys.iter().enumerate() {
+            if i > 0 {
+                let below = &self.storeys[i - 1];
+                let below_height = below.ceiling_height_m.unwrap_or_default();
+                z += match storey.floor_thickness_m {
+                    None => below_height,
+                    Some(t) => {
+                        let anchor = storey
+                            .floors
+                            .footprint_ring()
+                            .and_then(|fp| below.roofs.lowest_flat_z_over(&fp))
+                            .unwrap_or(below_height);
+                        anchor + t
+                    }
+                };
+            }
+            out.push(z);
+        }
+        out
+    }
+
     /// Append a roof apex to storey `storey_idx`'s durable apex list.
     /// Validation (position strictly inside a ceiling region, sane height)
     /// happens upstream in the document layer at assign time — this just
