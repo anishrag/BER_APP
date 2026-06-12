@@ -4434,6 +4434,89 @@ fn roof_ridge_survives_reload_and_rederive_fixpoint() {
     );
 }
 
+/// THE BOUNDARY-RIDGE FULL FIXPOINT (gables): a wall-to-wall ridge over a
+/// STEPPED piece — the apexes sit exactly ON the outline, the derived step
+/// ring is boolean-op output (the noisy path the EPS claim band exists for).
+/// Resolve → commit-style reconstruct (canonicalize the session step list
+/// from the derived roofs) → persist → reload → re-resolve must reproduce
+/// the surface identically, and the wall under each ridge end must carry the
+/// gable apex on its top. (The apexes are stamped directly — the typed-start
+/// flow can't reach the boundary until the end snaps land; this is the
+/// durable-input path a snap will drive.)
+#[test]
+fn boundary_ridge_over_a_step_full_fixpoint_and_gable_walls() {
+    use datatypes::ber::structural::RoofApex;
+    let mut c = ceiling_ready_controller();
+    ceiling_step_to_amount_at_x4(&mut c);
+    c.assign_ceiling_step_delta(0.3).unwrap(); // right of x = 4 at 2.7
+
+    // The wall-to-wall gable ridge over the stepped piece: ends ON the
+    // outline walls y = 0 / y = 10 at x = 7.
+    let record = c.current_record.as_mut().unwrap();
+    for y in [0.0, 10.0] {
+        record.data.add_roof_apex(
+            0,
+            RoofApex {
+                point: Point2f64::new(7.0, y),
+                z_m: 4.5,
+            },
+        );
+    }
+    c.mark_dirty().unwrap();
+    // Commit-style canonicalize: derive, then rebuild the session step list
+    // from the derived roofs (exactly assign_roof_ridge_height's shape).
+    c.materialize();
+    c.reconstruct_ceiling_step_regions_for(0);
+    let before = roof_vertex_fingerprint(&c);
+    assert!(
+        before.iter().any(|v| (v.2 - 4.5).abs() < 1e-9),
+        "ridge present"
+    );
+    // The boundary apexes were CLAIMED by the stepped piece (no warn-skip):
+    // its slopes rise from the stepped base ≈ 2.7 (the delta round-trips
+    // f32), and the session list holds ONE merged area covering the whole
+    // stepped half at the step delta.
+    assert!(before.iter().any(|v| (v.2 - 2.7).abs() < 1e-6), "eaves");
+    let session = &c.ceiling_step_regions[&0];
+    assert_eq!(session.len(), 1, "one merged area, not slope faces");
+    assert!((session[0].delta_m - 0.3).abs() < 1e-6);
+    // The grouping authority links both boundary apexes into ONE ridge.
+    let storey = &c.current_record.as_ref().unwrap().data.storeys[0];
+    let groups = storey.roofs.apex_groups(&storey.roof_apexes);
+    assert_eq!(groups.len(), 1);
+    assert_eq!(groups[0].apex_idxs.len(), 2, "a gable ridge");
+    // The gable walls: the outline walls under the ridge ends (y = 0 and
+    // y = 10) carry the apex vertex (7, ·, 4.5) on their top profile.
+    let gable_tops = storey
+        .walls
+        .regions
+        .iter()
+        .filter(|w| {
+            w.polygon
+                .exterior
+                .iter()
+                .any(|v| (v.x - 7.0).abs() < 1e-6 && (v.z - 4.5).abs() < 1e-6)
+        })
+        .count();
+    assert_eq!(gable_tops, 2, "both end walls carry the gable apex");
+
+    // Persist → reload → re-resolve: byte-identical surface (the fixpoint).
+    let id = c.current_record.as_ref().unwrap().id.clone();
+    c.flush_if_dirty().unwrap();
+    c.open_ber(&id).unwrap();
+    let storey = &c.current_record.as_ref().unwrap().data.storeys[0];
+    assert_eq!(storey.roof_apexes.len(), 2, "apex pair persisted");
+    let session = &c.ceiling_step_regions[&0];
+    assert_eq!(session.len(), 1, "merged area reconstructed");
+    c.mark_dirty().unwrap();
+    c.materialize();
+    assert_eq!(
+        roof_vertex_fingerprint(&c),
+        before,
+        "resolve → reconstruct → re-resolve is a fixpoint"
+    );
+}
+
 /// Deleting ONE apex of a ridge degrades it to a fan on the next derive —
 /// the group keeps the remaining apex, and the ridge overlay disappears.
 #[test]
@@ -4506,16 +4589,18 @@ fn roof_ridge_rejections_keep_the_pending_and_bad_strokes_never_pend() {
         .expect("a bbox-fitting length passes the Length stage");
     c.apply_position_dimension(4.0).unwrap(); // cross → x = 4
                                               // …and rejected at the LAST OPEN stage: a typed start of 2 m (from
-                                              // y = 0) leaves only an 8 m run — the finalize check rejects the START
-                                              // entry with the permitted run, and the prompt stays open.
+                                              // y = 0) pushes the far end to y = 11, past the wall — the finalize
+                                              // check rejects the START entry with the full wall-to-wall run, and
+                                              // the prompt stays open.
     let err = c.apply_position_dimension(2.0).unwrap_err();
     assert!(err.contains("out of its ceiling area"), "got: {err}");
-    assert!(err.contains("under 8.00 m"), "got: {err}");
+    assert!(err.contains("10.00 m wall to wall"), "got: {err}");
     assert!(
         c.roof_ridge_position_pending(),
         "start prompt stays open on the finalize rejection"
     );
-    // A start the length fits from (y = 0.5: a 9.5 m run) lands → height.
+    // A start the length fits from (y = 0.5: the extent ends 0.5 m clear
+    // of the far wall) lands → height.
     c.apply_position_dimension(0.5)
         .expect("fitting start lands");
     assert!(c.roof_ridge_height_pending());
@@ -4602,14 +4687,17 @@ fn roof_ridge_stage_order_table() {
 /// The ALL-SNAPPED row of the stage table: with BOTH positions snapped no
 /// location question opens, so the finalize placement check runs straight
 /// off the Length stage and its rejection lands on the typed length. In the
-/// L footprint every (vertical-wall, horizontal-wall) snap pair meets ON
-/// the footprint boundary — here the corner (6, 4) — which the strict
-/// containment rejects; the Length stage stays open (Cancel recovers).
+/// L footprint the cross snap (x ≈ 5.9 → 6) and start snap (y ≈ 4.1 → 4)
+/// put the ridge ALONG the upper arm's right wall x = 6 — its midpoint
+/// sits on the boundary, in no ceiling area — which finalize rejects; the
+/// Length stage stays open (Cancel recovers). (A boundary START is legal
+/// now — the gable feature — but a ridge along a wall still makes no roof.)
 #[test]
 fn roof_ridge_all_snapped_finalize_rejection_lands_on_the_length() {
     let mut c = ceiling_ready_l_controller();
     c.set_roof_point_mode(true);
-    // x ≈ 5.9 → snaps 6; lo ≈ 4.1 → snaps 4: the start is the corner (6, 4).
+    // x ≈ 5.9 → snaps 6; lo ≈ 4.1 → snaps 4: the ridge runs up the wall
+    // x = 6 from the corner (6, 4).
     c.apply_roof_ridge_stroke_event(&[(5.88, 4.1), (5.9, 8.5)]);
     assert!(c.roof_ridge_length_pending(), "length is question 1");
     let ((ax, ay), _) = c.pending_roof_ridge_line().unwrap();
@@ -4620,7 +4708,7 @@ fn roof_ridge_all_snapped_finalize_rejection_lands_on_the_length() {
     let err = c.assign_roof_ridge_length(2.0).unwrap_err();
     assert!(
         err.contains("doesn't sit inside a ceiling area"),
-        "the finalize start-containment rejection, on the typed length: {err}"
+        "the finalize midpoint-containment rejection, on the typed length: {err}"
     );
     assert!(c.roof_ridge_length_pending(), "length stage stays open");
     // The skip path trips the same check (logged + surfaced to the caller).
@@ -4645,12 +4733,13 @@ fn roof_ridge_finalize_rejection_lands_on_the_cross_when_start_snapped() {
         .expect("optimistic bound passes");
     let ui = c.position_prompt_for_ui().expect("cross question");
     assert_eq!(ui.axis, ParameterAxis::X);
-    // The cross answer completes the geometry → finalize: from (2.5, 4)
-    // the run is 6 m, the 6.5 m length doesn't fit — rejected on the typed
-    // cross, prompt stays open.
+    // The cross answer completes the geometry → finalize: anchored at the
+    // snapped y = 4, the 6.5 m extent reaches y = 10.5 — half a metre past
+    // the far wall at x = 2.5 — rejected on the typed cross with the full
+    // run there (the L spans y 0..10 at that x), prompt stays open.
     let err = c.apply_position_dimension(2.5).unwrap_err();
     assert!(err.contains("out of its ceiling area"), "got: {err}");
-    assert!(err.contains("under 6.00 m"), "got: {err}");
+    assert!(err.contains("10.00 m wall to wall"), "got: {err}");
     assert!(c.roof_ridge_position_pending(), "cross prompt stays open");
     c.cancel_pending_roof_ridge();
     assert!(!c.roof_ridge_pending());
@@ -5193,16 +5282,16 @@ fn users_l_session_ridge_placement_is_limited_to_the_raised_area_and_height_land
     assert!(c.roof_ridge_position_pending(), "start question opens");
 
     // The START is the last open location stage: from lo = inner_y + 1.0
-    // the raised area's far wall is exactly 1.0 m away — the 1.5 m ridge
-    // is rejected on the typed start, WITH the permitted run, and the
-    // prompt stays open.
+    // the 1.5 m ridge overruns the raised area's far wall by half a metre
+    // — rejected on the typed start, WITH the area's full 2.0 m run, and
+    // the prompt stays open.
     let err = c.apply_position_dimension(1.0).unwrap_err();
     assert!(
         err.contains("out of its ceiling area"),
         "stable prefix kept: {err}"
     );
     assert!(
-        err.contains("under 1.00 m"),
+        err.contains("2.00 m wall to wall"),
         "permitted run in the message: {err}"
     );
     assert!(

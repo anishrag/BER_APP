@@ -174,8 +174,10 @@ const LINE_CROSS_TOL: f32 = 1e-3;
 /// How close (metres) a drawn/tapped step line must land to a parallel outline
 /// wall to SNAP onto it. Hand precision on a tablet, matching the spirit of
 /// the other snap tolerances; promotable to `tuning.yaml` later if it needs
-/// per-device adjustment.
-const CEILING_LINE_SNAP_TOL_M: f32 = 0.2;
+/// per-device adjustment. Crate-visible: the roof-ridge stroke fit
+/// (`roof_point.rs`) expands its endpoint test by the same tolerance — a
+/// stroke ending on/just past the wall must survive to the end snap.
+pub(crate) const CEILING_LINE_SNAP_TOL_M: f32 = 0.2;
 
 // ── Ceiling-step operations ─────────────────────────────────────────────────
 // Pure queries over the storey outline. The shell (`AppController`) owns the

@@ -251,9 +251,10 @@ impl AppController {
         }
         // No location questions remain — the geometry is fully determined.
         // FINALIZE: bring the derived roofs current (explicitly, not riding
-        // the render loop) and run the binding placement check — the start
-        // strictly inside one flat un-apexed region, the extent within that
-        // region's run — before opening the Height stage.
+        // the render loop) and run the binding placement check — the
+        // MIDPOINT strictly inside one flat un-apexed region, the extent
+        // within that region's run through it (boundary touch allowed — a
+        // wall-to-wall gable) — before opening the Height stage.
         let idx = self.current_storey_idx.unwrap_or(0);
         self.materialize();
         let storey = self
@@ -569,10 +570,11 @@ impl AppController {
 
     /// Assign the ridge height to the pending line: materialize (the
     /// validation runs against the RESOLVED roofs), validate
-    /// ([`document::validate_roof_ridge`] — both endpoints strictly inside
-    /// the same un-apexed flat region, a height that actually slopes it, no
-    /// boundary foldover; all re-checked cheaply even though finalize
-    /// passed — `materialize` may have shifted derived rings), then stamp
+    /// ([`document::validate_roof_ridge`] — the midpoint strictly inside one
+    /// un-apexed flat region, both endpoints claimed by exactly it (inside
+    /// or on its OUTER boundary — a gable end), a height that actually
+    /// slopes it, no boundary foldover; all re-checked cheaply even though
+    /// finalize passed — `materialize` may have shifted derived rings), then stamp
     /// BOTH apexes as DURABLE input (`Ber::add_roof_apex` ×2 — quantization
     /// included), re-derive, and CANONICALIZE the session ceiling-step list
     /// from the derived roofs (the roof-point parity). The endpoints are

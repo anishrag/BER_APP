@@ -703,6 +703,14 @@ impl RoofApex {
 /// drawing the line in the same place.
 pub(crate) const SLIVER_AREA_M2: f64 = 1e-6;
 
+/// Plan tolerance (m) for claiming an apex that sits ON a region boundary.
+/// Same rationale as `PROFILE_EPS_M`: derived rings are boolean-op output that
+/// can sit a few 1e-7 m off the line they conceptually coincide with — a
+/// gable apex stored exactly on the outline must still claim its region when
+/// the derived ring is noise-displaced, or the apex warn-skips and the roof
+/// flattens on re-resolve (a fixpoint break).
+pub const APEX_BOUNDARY_EPS_M: f64 = 1e-4;
+
 /// A connected GROUP of roof apexes and the ceiling regions they shape — the
 /// session-derived view (never persisted; no serde) that is THE grouping
 /// authority: ridge validation ("does this region already have a high
@@ -864,13 +872,17 @@ impl CeilingRegions {
     }
 
     /// Shape the regions by roof `apexes` in ONE pass (the last step of the
-    /// composition: default ceiling → step areas → apexes), grouping the
-    /// apexes PER REGION by boundary-INCLUSIVE containment (`geo`
-    /// `Intersects`, not `Contains`): a re-applied apex is a CORNER of its
-    /// own fan/ridge triangles and must still find them so re-application is
-    /// the geometric identity (assign-time validation deliberately uses the
-    /// strict predicate instead — [`region_strictly_containing`]; two
-    /// different predicates by design). Per region:
+    /// composition: default ceiling → step areas → apexes), assigning each
+    /// apex to its FIRST claiming region ([`claim_regions`]: strict-inside,
+    /// else the [`APEX_BOUNDARY_EPS_M`] boundary band — boundary-INCLUSIVE,
+    /// so a re-applied apex that is a CORNER of its own fan/ridge triangles,
+    /// or a GABLE apex stored exactly on the outline, still finds a region
+    /// and re-application stays the geometric identity; assign-time
+    /// validation deliberately uses the strict predicate instead —
+    /// [`region_strictly_containing`]; two different predicates by design).
+    /// Per region:
+    ///
+    /// [`claim_regions`]: CeilingRegions::claim_regions
     ///
     /// - **0** contained apexes → kept untouched;
     /// - **1** → a FAN: one triangle per boundary edge — the edge keeps its
@@ -908,27 +920,50 @@ impl CeilingRegions {
     ///
     /// [`region_strictly_containing`]: CeilingRegions::region_strictly_containing
     pub fn with_apexes(self, apexes: &[RoofApex]) -> Self {
-        use geo::Intersects;
         if apexes.is_empty() {
             return self;
         }
-        let mut used = vec![false; apexes.len()];
+        // One claim pass per apex ([`claim_regions`]): the FIRST claimant in
+        // region order wins — deterministic per resolve, since boolean ops
+        // emit regions in a stable order. Strict-inside apexes claim exactly
+        // the region the old boundary-inclusive collect gave them; a
+        // boundary apex (a GABLE end, or a re-applied apex that is a corner
+        // of its own triangles) claims its first incident region — re-fanning
+        // / re-ridging a planar face to its own corners is the identity after
+        // the coplanar merge, so first-claim preserves the re-apply identity.
+        // Multi-claim (an apex on an INTERNAL shared boundary — legacy or
+        // hand-edited input; assign-time validation rejects creating one) is
+        // warn-and-proceed, the ≥3-apex posture.
+        let mut per_region: Vec<Vec<usize>> = vec![Vec::new(); self.regions.len()];
+        for (i, apex) in apexes.iter().enumerate() {
+            let claims = self.claim_regions(apex.point);
+            match claims.split_first() {
+                None => log::warn!(
+                    "roof apex at ({:.3}, {:.3}) lies in no ceiling region — skipped",
+                    apex.point.x,
+                    apex.point.y
+                ),
+                Some((&first, rest)) => {
+                    if !rest.is_empty() {
+                        log::warn!(
+                            "roof apex at ({:.3}, {:.3}) sits on a boundary shared by {} \
+                             regions — claimed by the first (#{first})",
+                            apex.point.x,
+                            apex.point.y,
+                            claims.len()
+                        );
+                    }
+                    per_region[first].push(i);
+                }
+            }
+        }
         let mut next: Vec<CeilingRegion> = Vec::new();
-        for region in self.regions {
+        for (ri, region) in self.regions.into_iter().enumerate() {
             if region.polygon.exterior.len() < 3 {
                 next.push(region);
                 continue;
             }
-            let plan: Polygon<f64> = region.polygon.clone().into();
-            let contained: Vec<usize> = apexes
-                .iter()
-                .enumerate()
-                .filter(|(_, a)| plan.intersects(&GeoPoint::new(a.point.x, a.point.y)))
-                .map(|(i, _)| i)
-                .collect();
-            for &i in &contained {
-                used[i] = true;
-            }
+            let contained = &per_region[ri];
             match contained.len() {
                 0 => next.push(region),
                 1 => next.extend(merge_coplanar_faces(fan_triangles(
@@ -948,15 +983,6 @@ impl CeilingRegions {
                         &apexes[contained[1]],
                     )));
                 }
-            }
-        }
-        for (i, hit) in used.iter().enumerate() {
-            if !hit {
-                log::warn!(
-                    "roof apex at ({:.3}, {:.3}) lies in no ceiling region — skipped",
-                    apexes[i].point.x,
-                    apexes[i].point.y
-                );
             }
         }
         Self { regions: next }
@@ -1202,6 +1228,32 @@ impl CeilingRegions {
         self.regions
             .iter()
             .find(|r| Polygon::<f64>::from(r.polygon.clone()).contains(&gp))
+    }
+
+    /// Indices of the regions that CLAIM plan point `p`: the region strictly
+    /// containing it (at most one — interiors are disjoint), else every
+    /// region whose plan boundary passes within [`APEX_BOUNDARY_EPS_M`] of
+    /// it (ascending index order — deterministic, since resolve emits the
+    /// regions in a stable order). Empty when `p` is inside nothing and near
+    /// no boundary. THE apex-claim predicate:
+    /// [`with_apexes`](CeilingRegions::with_apexes) takes the FIRST claimant
+    /// (warn when > 1); assign-time validation REQUIRES exactly one (an apex
+    /// on an internal shared boundary is rejected).
+    pub fn claim_regions(&self, p: Point2f64) -> Vec<usize> {
+        let gp = GeoPoint::new(p.x, p.y);
+        if let Some(i) = self
+            .regions
+            .iter()
+            .position(|r| Polygon::<f64>::from(r.polygon.clone()).contains(&gp))
+        {
+            return vec![i];
+        }
+        self.regions
+            .iter()
+            .enumerate()
+            .filter(|(_, r)| r.plan_contains_within(p, APEX_BOUNDARY_EPS_M))
+            .map(|(i, _)| i)
+            .collect()
     }
 
     /// Interior CEILING-RISER faces: for every plan edge piece shared by two
@@ -1898,6 +1950,28 @@ impl CeilingRegion {
             .collect();
         let (&z0, rest) = base.split_first()?;
         rest.iter().all(|z| (z - z0).abs() <= EPS_M).then_some(z0)
+    }
+
+    /// `p` is strictly inside this region's plan polygon OR within `eps_m`
+    /// of its boundary (point-to-ring-edge distance). The per-region half of
+    /// [`CeilingRegions::claim_regions`] — the boundary band is what keeps a
+    /// gable apex claimed when its derived ring is boolean-noise-displaced.
+    /// `false` for plan-degenerate regions (< 3 vertices — they can never
+    /// host an apex, so they must never claim one).
+    pub fn plan_contains_within(&self, p: Point2f64, eps_m: f64) -> bool {
+        let ext = &self.polygon.exterior;
+        if ext.len() < 3 {
+            return false;
+        }
+        let gp = GeoPoint::new(p.x, p.y);
+        if Polygon::<f64>::from(self.polygon.clone()).contains(&gp) {
+            return true;
+        }
+        let n = ext.len();
+        (0..n).any(|i| {
+            let (a, b) = (&ext[i], &ext[(i + 1) % n]);
+            point_to_segment_distance(p.x, p.y, a.x, a.y, b.x, b.y) <= eps_m
+        })
     }
 
     /// The contiguous run of the plan line `p + t·dir` (`t` in METRES, `dir`
@@ -4497,6 +4571,275 @@ mod tests {
         // Degenerate: coincident endpoints / too-small rings.
         assert_eq!(ridge_hub_switches(&square(0.0, 0.0, 10.0, 4.0), a, a), 0);
         assert_eq!(ridge_hub_switches(&[], a, b), 0);
+        // A BOUNDARY-ended ridge (both ends on opposite walls — a gable)
+        // still switches exactly 2 over a rectangle: the midline crosses the
+        // two long edges only, so the existing ≤ 2 guard keeps working.
+        assert_eq!(
+            ridge_hub_switches(
+                &square(0.0, 0.0, 10.0, 4.0),
+                Point2f64::new(0.0, 2.0),
+                Point2f64::new(10.0, 2.0)
+            ),
+            2
+        );
+    }
+
+    /// `claim_regions` / `plan_contains_within`: strictly-inside points claim
+    /// exactly their region; a point ON a region boundary (or within the
+    /// [`APEX_BOUNDARY_EPS_M`] band of it) claims via the boundary arm; a
+    /// point inside nothing and near no boundary claims nothing.
+    #[test]
+    fn claim_regions_strict_inside_then_boundary_band() {
+        let regions = gable_footprint(ItemId::default()); // one 10×4 region
+        assert_eq!(regions.claim_regions(Point2f64::new(5.0, 2.0)), vec![0]);
+        // Exactly on the outline edge / a corner: the boundary band claims.
+        assert_eq!(regions.claim_regions(Point2f64::new(0.0, 2.0)), vec![0]);
+        assert_eq!(regions.claim_regions(Point2f64::new(10.0, 4.0)), vec![0]);
+        // Displaced off the edge by less than the band: still claimed.
+        assert_eq!(regions.claim_regions(Point2f64::new(-5e-5, 2.0)), vec![0]);
+        // Beyond the band: nothing.
+        assert!(regions.claim_regions(Point2f64::new(-1.0, 2.0)).is_empty());
+        assert!(regions.claim_regions(Point2f64::new(5.0, 9.0)).is_empty());
+    }
+
+    /// MULTI-CLAIM DETERMINISM (the legacy / hand-edited shared-boundary
+    /// case validation now prevents creating): an apex on the boundary
+    /// SHARED by two regions claims both, in ascending region order, and
+    /// `with_apexes` hands it to the FIRST — identically on every resolve.
+    #[test]
+    fn shared_boundary_apex_claims_are_deterministic_and_first_claim_wins() {
+        let cid = ItemId::default();
+        let two = || {
+            let mut r =
+                CeilingRegions::default_for_footprint(vec![square(0.0, 0.0, 4.0, 4.0)], 2.4, cid);
+            r.regions.extend(
+                CeilingRegions::default_for_footprint(vec![square(4.0, 0.0, 8.0, 4.0)], 2.4, cid)
+                    .regions,
+            );
+            r
+        };
+        let apex = RoofApex {
+            point: Point2f64::new(4.0, 2.0), // ON the shared boundary x = 4
+            z_m: 4.2,
+        };
+        assert_eq!(
+            two().claim_regions(apex.point),
+            vec![0, 1],
+            "both claim, ascending region order"
+        );
+        let fingerprint = |r: &CeilingRegions| {
+            let mut vs: Vec<(f64, f64, f64)> = r
+                .regions
+                .iter()
+                .flat_map(|reg| reg.polygon.exterior.iter().map(|v| (v.x, v.y, v.z)))
+                .collect();
+            vs.sort_by(|a, b| a.partial_cmp(b).unwrap());
+            vs
+        };
+        let once = two().with_apexes(std::slice::from_ref(&apex));
+        let again = two().with_apexes(std::slice::from_ref(&apex));
+        assert_eq!(
+            fingerprint(&once),
+            fingerprint(&again),
+            "first-claim is deterministic across resolves"
+        );
+        // The FIRST region (index 0) was fanned; the second is untouched.
+        assert!(
+            once.regions.iter().any(|r| r
+                .polygon
+                .exterior
+                .iter()
+                .any(|v| (v.z - 4.2).abs() < 1e-9)),
+            "the claiming region rises to the apex"
+        );
+        let untouched: Vec<_> = once
+            .regions
+            .iter()
+            .filter(|r| r.polygon.exterior.iter().all(|v| v.x >= 4.0 - 1e-9))
+            .collect();
+        assert!(
+            untouched.iter().any(|r| r.polygon.exterior.len() == 4
+                && r.polygon.exterior.iter().all(|v| (v.z - 2.4).abs() < 1e-9)),
+            "the second region passes through flat"
+        );
+    }
+
+    /// A wall-to-wall (BOUNDARY) ridge — both ends ON opposite outline walls
+    /// — makes a GABLE: the wall-edge hub triangles are plan-degenerate and
+    /// sliver-drop, the rest merge into exactly TWO planar slope faces, and
+    /// re-applying the apexes to the output is the identity (the reload
+    /// fixpoint's resolve half).
+    #[test]
+    fn with_apexes_boundary_ridge_makes_two_gable_slopes_and_reapplies_identically() {
+        let cid = ItemId::default();
+        let apexes = [
+            RoofApex {
+                point: Point2f64::new(2.0, 0.0), // ON the bottom wall
+                z_m: 4.2,
+            },
+            RoofApex {
+                point: Point2f64::new(2.0, 4.0), // ON the top wall
+                z_m: 4.2,
+            },
+        ];
+        let base =
+            CeilingRegions::default_for_footprint(vec![square(0.0, 0.0, 4.0, 4.0)], 2.4, cid);
+        let out = base.with_apexes(&apexes);
+        assert_eq!(out.regions.len(), 2, "two slope faces, nothing else");
+        for r in &out.regions {
+            assert!(is_planar(r), "each slope is one plane");
+            let zs: Vec<f64> = r.polygon.exterior.iter().map(|v| v.z).collect();
+            assert!(zs.iter().any(|z| (z - 4.2).abs() < 1e-9), "ridge edge");
+            assert!(zs.iter().any(|z| (z - 2.4).abs() < 1e-9), "eaves edge");
+        }
+        // Plan coverage: the two slopes tile the footprint (8 m² each).
+        use geo::Area;
+        let total: f64 = out
+            .regions
+            .iter()
+            .map(|r| Polygon::<f64>::from(r.polygon.clone()).unsigned_area())
+            .sum();
+        assert!((total - 16.0).abs() < 1e-9, "slopes tile the footprint");
+
+        // Re-apply identity: the gable apexes are claimed (via the boundary
+        // band — they are corners of the slope faces) and reproduce the
+        // same two faces.
+        let fingerprint = |r: &CeilingRegions| {
+            let mut vs: Vec<(f64, f64, f64)> = r
+                .regions
+                .iter()
+                .flat_map(|reg| reg.polygon.exterior.iter().map(|v| (v.x, v.y, v.z)))
+                .collect();
+            vs.sort_by(|a, b| a.partial_cmp(b).unwrap());
+            vs
+        };
+        let again = out.clone().with_apexes(&apexes);
+        assert_eq!(fingerprint(&out), fingerprint(&again), "re-apply identity");
+        // …and the grouping authority still links both apexes to the slopes.
+        let groups = again.apex_groups(&apexes);
+        assert_eq!(groups.len(), 1);
+        assert_eq!(groups[0].apex_idxs, vec![0, 1]);
+    }
+
+    /// THE GABLE WALL-PROFILE TEST: the wall UNDER a boundary ridge end gets
+    /// the triangular gable top straight out of `WallRegions::regenerate` —
+    /// `profile_breakpoints` picks up the slope edges along the wall,
+    /// `covering_roof_plane` evaluates the two sloping planes, and the top
+    /// traces base → apex → base. No wall-side change was needed.
+    #[test]
+    fn regenerate_boundary_ridge_makes_a_triangular_gable_wall_top() {
+        let cid = ItemId::default();
+        let apexes = [
+            RoofApex {
+                point: Point2f64::new(2.0, 0.0),
+                z_m: 4.2,
+            },
+            RoofApex {
+                point: Point2f64::new(2.0, 4.0),
+                z_m: 4.2,
+            },
+        ];
+        let roofs =
+            CeilingRegions::default_for_footprint(vec![square(0.0, 0.0, 4.0, 4.0)], 2.4, cid)
+                .with_apexes(&apexes);
+        let ring = square(0.0, 0.0, 4.0, 4.0);
+        let segments: Vec<(Point2f64, Point2f64, WallExposure)> = (0..4)
+            .map(|i| (ring[i], ring[(i + 1) % 4], WallExposure::Unset))
+            .collect();
+        let walls =
+            WallRegions::regenerate(segments, &WallRegions::default(), &roofs, 0.0, 2.4, cid);
+        assert_eq!(walls.regions.len(), 4);
+        // The GABLE wall y = 0 (under the ridge end at (2, 0)): base edge,
+        // then the top traced b → a as eaves → apex → eaves.
+        let gable = &walls.regions[0].polygon.exterior;
+        assert_eq!(gable.len(), 5, "quad + the apex vertex");
+        assert!(
+            (gable[0].z).abs() < 1e-9 && (gable[1].z).abs() < 1e-9,
+            "base"
+        );
+        assert!(
+            (gable[2].x - 4.0).abs() < 1e-9 && (gable[2].z - 2.4).abs() < 1e-9,
+            "eaves at the b corner"
+        );
+        assert!(
+            (gable[3].x - 2.0).abs() < 1e-9
+                && (gable[3].y).abs() < 1e-9
+                && (gable[3].z - 4.2).abs() < 1e-9,
+            "the GABLE APEX on the wall top: {gable:?}"
+        );
+        assert!(
+            (gable[4].x).abs() < 1e-9 && (gable[4].z - 2.4).abs() < 1e-9,
+            "eaves at the a corner"
+        );
+        // The two EAVES walls (x = 4 and x = 0, ALONG the ridge slopes' low
+        // edges) stay flat quads at the eaves height.
+        for i in [1, 3] {
+            let ext = &walls.regions[i].polygon.exterior;
+            assert_eq!(ext.len(), 4, "eaves wall {i} is a flat quad: {ext:?}");
+            assert!(ext.iter().skip(2).all(|v| (v.z - 2.4).abs() < 1e-9));
+        }
+        // The opposite gable (y = 4) mirrors the first.
+        let gable2 = &walls.regions[2].polygon.exterior;
+        assert_eq!(gable2.len(), 5);
+        assert!(gable2
+            .iter()
+            .any(|v| (v.x - 2.0).abs() < 1e-9 && (v.z - 4.2).abs() < 1e-9));
+    }
+
+    /// f32 QUANTIZATION ROUND-TRIP of a boundary apex: a snapped end's
+    /// coordinate IS an outline wall's — an f32 widened to f64 — so
+    /// `quantize_point` is the identity on it and the stored apex still
+    /// claims its region exactly; when the derived ring is boolean-noise
+    /// displaced (~1e-7 m) the [`APEX_BOUNDARY_EPS_M`] band keeps the claim.
+    #[test]
+    fn boundary_apex_f32_round_trip_reclaims_its_region() {
+        let cid = ItemId::default();
+        // Outline coordinates as the pipeline stores them: f32 widened.
+        let (x0, x1) = (0.1f32 as f64, 4.3f32 as f64);
+        let (y0, y1) = (0.2f32 as f64, 3.7f32 as f64);
+        let ring = vec![
+            Point2f64::new(x0, y0),
+            Point2f64::new(x1, y0),
+            Point2f64::new(x1, y1),
+            Point2f64::new(x0, y1),
+        ];
+        let regions = CeilingRegions::default_for_footprint(vec![ring], 2.4, cid);
+        // The apex sits ON the left wall (a gable end at x = x0).
+        let apex_p = Point2f64::new(x0, 2.0);
+        assert_eq!(
+            RoofApex::quantize_point(apex_p),
+            apex_p,
+            "quantization is the identity on an outline coordinate"
+        );
+        assert_eq!(regions.claim_regions(apex_p), vec![0], "exact claim");
+
+        // Boolean-noise displacement: the ring sits 1e-7 m INSIDE the stored
+        // apex — strict containment fails, the EPS band claims.
+        let noisy_ring = vec![
+            Point2f64::new(x0 + 1e-7, y0),
+            Point2f64::new(x1, y0),
+            Point2f64::new(x1, y1),
+            Point2f64::new(x0 + 1e-7, y1),
+        ];
+        let noisy = CeilingRegions::default_for_footprint(vec![noisy_ring], 2.4, cid);
+        assert_eq!(
+            noisy.claim_regions(apex_p),
+            vec![0],
+            "the boundary band claims through boolean noise"
+        );
+        // …and with_apexes still shapes the noisy region (no warn-skip).
+        let shaped = noisy.with_apexes(&[RoofApex {
+            point: apex_p,
+            z_m: 4.2,
+        }]);
+        assert!(
+            shaped.regions.iter().any(|r| r
+                .polygon
+                .exterior
+                .iter()
+                .any(|v| (v.z - 4.2).abs() < 1e-9)),
+            "the noise-displaced region still rises to the apex"
+        );
     }
 
     #[test]
