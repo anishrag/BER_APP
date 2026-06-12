@@ -237,11 +237,26 @@ pub fn resolve_storey(
     // may hold stale stored content — never feed it to the walls), so the
     // empty default keeps every top flat at the provisional extrusion; once
     // it's set, spans no roof region covers fall back flat at the storey's
-    // default height. `fallback_top_z` is ABSOLUTE z (base_z is 0.0 here).
+    // default height. `fallback_top_z` is ABSOLUTE z.
     let no_roofs = CeilingRegions::default();
     let (roofs_for_walls, fallback_top_z) = match storey.ceiling_height_m {
         Some(h) => (&storey.roofs, h),
         None => (&no_roofs, PROVISIONAL_WALL_EXTRUSION_M),
+    };
+    // DEAP measures upper-storey wall area floor-to-floor: the perimeter
+    // walls extend DOWN through the slab band, so their base drops by the
+    // storey's floor thickness (storey-LOCAL coords — the datum is the
+    // floor's top). Storey 0 and legacy records have no thickness (`None`)
+    // → base_z = 0, byte-identical output. `fallback_top_z` stays the
+    // ABSOLUTE ceiling height; the riser pass below is untouched (an
+    // interior step riser spans between two slabs of the SAME storey, not
+    // down to the storey below).
+    // (Map None AND an explicit 0.0 to exactly +0.0 — negating a 0.0
+    // default would stamp `-0.0` into every base vertex and break the
+    // byte-identity of the legacy resolve under serialization.)
+    let wall_base_z = match storey.floor_thickness_m {
+        Some(t) if t > 0.0 => -t,
+        _ => 0.0,
     };
     // The walls the storey held BEFORE this projection: the identity source
     // for BOTH passes — the perimeter regenerate and the riser append.
@@ -250,7 +265,7 @@ pub fn resolve_storey(
         wall_segments,
         &previous_walls,
         roofs_for_walls,
-        0.0,
+        wall_base_z,
         fallback_top_z,
         wall_cid,
     );
@@ -557,6 +572,180 @@ mod tests {
             r.exposure,
             WallExposure::SemiExposed,
             "override survives the re-extrusion re-derive"
+        );
+    }
+
+    // ── Floor thickness in the perimeter walls (DEAP floor-to-floor) ───────
+
+    /// LEGACY GUARD: a storey without a floor thickness (`None` — storey 0
+    /// and every pre-thickness record) AND one with an explicit 0.0 resolve
+    /// with the perimeter base at EXACTLY +0.0 — bit-for-bit, so the legacy
+    /// projection stays byte-identical under serialization (`-0.0` would
+    /// serialize differently).
+    #[test]
+    fn no_floor_thickness_keeps_exact_positive_zero_wall_bases() {
+        for thickness in [None, Some(0.0)] {
+            let doc = square_doc(&[
+                Point2f32::new(0.0, 0.0),
+                Point2f32::new(4.0, 0.0),
+                Point2f32::new(4.0, 4.0),
+                Point2f32::new(0.0, 4.0),
+            ]);
+            let mut ber = Ber::default();
+            ensure_storey_constructions(&mut ber, 0, &[]);
+            ber.set_default_ceiling_height(Some(0), 2.4);
+            ber.storeys[0].floor_thickness_m = thickness;
+            let storey = resolve_storey(&doc, &ber, 0, &[], &[], &[]);
+            assert_eq!(storey.walls.regions.len(), 4);
+            for r in &storey.walls.regions {
+                for v in &r.polygon.exterior[..2] {
+                    assert_eq!(
+                        v.z.to_bits(),
+                        0.0f64.to_bits(),
+                        "{thickness:?}: base must be exactly +0.0, got {:?}",
+                        v.z
+                    );
+                }
+            }
+        }
+    }
+
+    /// THE SLAB BAND (design §6): a 0.225 m floor thickness on storey 1
+    /// drops every PERIMETER wall's base to z = −0.225 (storey-local — the
+    /// datum is the floor's top) while the tops stay at the absolute ceiling
+    /// height; an interior floor-step RISER face is untouched (it spans
+    /// between two slabs of the SAME storey); and the thickness EDIT amends
+    /// every wall — ids stable against the thickness-less resolve.
+    #[test]
+    fn floor_thickness_drops_perimeter_wall_bases_but_not_step_risers() {
+        let doc = square_doc(&[
+            Point2f32::new(0.0, 0.0),
+            Point2f32::new(4.0, 0.0),
+            Point2f32::new(4.0, 4.0),
+            Point2f32::new(0.0, 4.0),
+        ]);
+        let steps = vec![crate::StepRegion {
+            polygon: vec![
+                Point2f32::new(0.0, 0.0),
+                Point2f32::new(2.0, 0.0),
+                Point2f32::new(2.0, 4.0),
+                Point2f32::new(0.0, 4.0),
+            ],
+            level_m: -0.3,
+        }];
+        let mut ber = Ber::default();
+        ensure_storey_constructions(&mut ber, 1, &[]);
+        ber.set_default_ceiling_height(Some(1), 2.4);
+
+        // Baseline WITHOUT the thickness: 4 perimeter walls + 1 riser at
+        // base 0. (No perimeter wall shares the riser's plan edge here —
+        // the rank-only |Δz| term in the amend matcher keeps a shared-edge
+        // riser and perimeter wall apart; see `match_bases_to_previous`.)
+        let storey0 = resolve_storey(&doc, &ber, 1, &[], &steps, &[]);
+        assert_eq!(storey0.walls.regions.len(), 5);
+        let mut ids0: Vec<_> = storey0.walls.regions.iter().map(|r| r.id).collect();
+        ids0.sort_by_key(|id| id.0);
+
+        // The thickness edit: every wall re-extrudes downward and AMENDS.
+        ber.storeys[1] = storey0;
+        ber.storeys[1].floor_thickness_m = Some(0.225);
+        let storey = resolve_storey(&doc, &ber, 1, &[], &steps, &[]);
+        assert_eq!(storey.walls.regions.len(), 5);
+        let is_riser = |r: &datatypes::ber::structural::WallRegion| {
+            let e = &r.polygon.exterior;
+            (e[0].x - 2.0).abs() < 1e-6 && (e[1].x - 2.0).abs() < 1e-6
+        };
+        for r in storey.walls.regions.iter().filter(|r| !is_riser(r)) {
+            let e = &r.polygon.exterior;
+            assert!(
+                (e[0].z + 0.225).abs() < 1e-9 && (e[1].z + 0.225).abs() < 1e-9,
+                "perimeter base drops by the thickness: {e:?}"
+            );
+            assert!(
+                e.iter().any(|v| (v.z - 2.4).abs() < 1e-9),
+                "top stays at the ABSOLUTE ceiling height: {e:?}"
+            );
+        }
+        let riser = storey
+            .walls
+            .regions
+            .iter()
+            .find(|r| is_riser(r))
+            .expect("the floor riser still derives");
+        let rext = &riser.polygon.exterior;
+        assert!(
+            (rext[0].z + 0.3).abs() < 1e-9 && (rext[1].z + 0.3).abs() < 1e-9,
+            "riser base UNCHANGED at the lower floor level: {rext:?}"
+        );
+        assert!(
+            rext.iter().all(|v| v.z < 1e-9),
+            "riser tops at the upper floor level, not the slab band: {rext:?}"
+        );
+        let mut ids: Vec<_> = storey.walls.regions.iter().map(|r| r.id).collect();
+        ids.sort_by_key(|id| id.0);
+        assert_eq!(ids, ids0, "the thickness edit AMENDS every wall");
+    }
+
+    /// RELOAD of a thickness-set record AMENDS every perimeter wall (the
+    /// plan-only match gate — design risk #7): the first re-resolve against
+    /// the persisted walls keeps id, construction AND openings, and the
+    /// painted exposure re-applies — nothing is recreated.
+    #[test]
+    fn reload_of_a_thickness_set_record_amends_every_perimeter_wall() {
+        let mut doc = square_doc(&[
+            Point2f32::new(0.0, 0.0),
+            Point2f32::new(4.0, 0.0),
+            Point2f32::new(4.0, 4.0),
+            Point2f32::new(0.0, 4.0),
+        ]);
+        let (vid, a, b) = doc.outline.floor_plan.perimeter_walls()[0];
+        let len = manip_2d_plan::segment_len(a, b);
+        doc.set_wall_section(vid, 0.0, len, len, WallExposure::SemiExposed);
+        let mut ber = Ber::default();
+        ensure_storey_constructions(&mut ber, 1, &[]);
+        ber.set_default_ceiling_height(Some(1), 2.4);
+        ber.storeys[1].floor_thickness_m = Some(0.225);
+
+        let mut storey = resolve_storey(&doc, &ber, 1, &[], &[], &[]);
+        assert_eq!(storey.walls.regions.len(), 4);
+        let marked_idx = storey
+            .walls
+            .regions
+            .iter()
+            .position(|r| r.exposure == WallExposure::SemiExposed)
+            .unwrap();
+        let door_id = ItemId::default();
+        storey.walls.regions[marked_idx].opes.doors.push(door_id);
+        let (id0, cid0) = (
+            storey.walls.regions[marked_idx].id,
+            storey.walls.regions[marked_idx].construction_id,
+        );
+        let mut ids0: Vec<_> = storey.walls.regions.iter().map(|r| r.id).collect();
+        ids0.sort_by_key(|id| id.0);
+
+        // What reload does: rebuild the doc from points (same `doc` here)
+        // and re-resolve against the PERSISTED region set.
+        ber.storeys[1] = storey;
+        let storey2 = resolve_storey(&doc, &ber, 1, &[], &[], &[]);
+        let mut ids2: Vec<_> = storey2.walls.regions.iter().map(|r| r.id).collect();
+        ids2.sort_by_key(|id| id.0);
+        assert_eq!(ids2, ids0, "every perimeter wall AMENDS, none recreated");
+        let wall = storey2
+            .walls
+            .regions
+            .iter()
+            .find(|r| r.id == id0)
+            .expect("the marked wall keeps its identity");
+        assert_eq!(wall.opes.doors, vec![door_id], "openings survive");
+        assert_eq!(wall.construction_id, cid0, "construction survives");
+        assert_eq!(
+            wall.exposure,
+            WallExposure::SemiExposed,
+            "the painted exposure re-applies"
+        );
+        assert!(
+            (wall.polygon.exterior[0].z + 0.225).abs() < 1e-9,
+            "the slab band persists across the reload"
         );
     }
 
