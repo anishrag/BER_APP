@@ -270,10 +270,15 @@ pub fn resolve_storey(
     // runs along the step line itself. Identity rides `with_risers`' amend
     // matching against the SAME previous set the perimeter pass consumed,
     // minus the ids that pass already kept.
-    // v1 approximations: every floor riser is `Ground` (no grade model yet —
-    // a step-up riser between two above-grade floors is really exposed), and
-    // riser exposure is not yet editable (the outline exposure painter can't
-    // reach an interior face; a future 3D tap-picker will own that).
+    // These exposures are the derived DEFAULTS only: `with_risers`' amend
+    // PRESERVES a matched previous region's exposure, so a riser the user
+    // overrode (selected via the 2D dashed-line picker — see
+    // `StoreyDoc::riser_walls`) keeps the override across every
+    // re-derivation, and across reload (the first materialize after load
+    // amends against the persisted set). v1 approximation: every FRESH floor
+    // riser defaults to `Ground` (no grade model yet — a step-up riser
+    // between two above-grade floors is really exposed; the assessor can
+    // correct it in the picker).
     let risers: Vec<(Polygon3D, WallExposure)> = storey
         .floors
         .riser_faces()
@@ -481,6 +486,143 @@ mod tests {
             .find(|r| r.exposure == WallExposure::Ground)
             .expect("riser re-derives");
         assert_eq!(riser2.id, riser_id, "riser id stable across re-resolves");
+    }
+
+    /// THE RISER DURABILITY RULE at resolve level: an overridden riser
+    /// exposure survives a plain re-resolve AND a re-resolve after a
+    /// geometry-affecting edit (the ceiling height lands, re-extruding every
+    /// wall) — the amend base-matches the unchanged step line and preserves
+    /// the override instead of re-stamping the derived `Ground` default.
+    #[test]
+    fn riser_exposure_override_survives_re_resolves() {
+        let doc = square_doc(&[
+            Point2f32::new(0.0, 0.0),
+            Point2f32::new(4.0, 0.0),
+            Point2f32::new(4.0, 4.0),
+            Point2f32::new(0.0, 4.0),
+        ]);
+        let steps = vec![crate::StepRegion {
+            polygon: vec![
+                Point2f32::new(0.0, 0.0),
+                Point2f32::new(2.0, 0.0),
+                Point2f32::new(2.0, 4.0),
+                Point2f32::new(0.0, 4.0),
+            ],
+            level_m: -0.3,
+        }];
+        let mut ber = Ber::default();
+        ensure_storey_constructions(&mut ber, 0, &[]);
+        let mut storey = resolve_storey(&doc, &ber, 0, &[], &steps, &[]);
+        let riser = storey
+            .walls
+            .regions
+            .iter_mut()
+            .find(|r| r.exposure == WallExposure::Ground)
+            .expect("the floor riser derives");
+        let riser_id = riser.id;
+        riser.exposure = WallExposure::SemiExposed; // the user's override
+        ber.storeys[0] = storey;
+
+        // Plain re-resolve: the override survives the amend.
+        ber.storeys[0] = resolve_storey(&doc, &ber, 0, &[], &steps, &[]);
+        let r = ber.storeys[0]
+            .walls
+            .regions
+            .iter()
+            .find(|r| r.id == riser_id)
+            .expect("riser identity stable");
+        assert_eq!(r.exposure, WallExposure::SemiExposed, "override survives");
+
+        // Geometry-affecting edit: the height lands, walls re-extrude — the
+        // riser's base edge is unchanged, so it still amends.
+        ber.storeys[0].ceiling_height_m = Some(2.7);
+        ber.storeys[0] = resolve_storey(&doc, &ber, 0, &[], &steps, &[]);
+        let r = ber.storeys[0]
+            .walls
+            .regions
+            .iter()
+            .find(|r| r.id == riser_id)
+            .expect("riser identity stable across the height change");
+        assert_eq!(
+            r.exposure,
+            WallExposure::SemiExposed,
+            "override survives the re-extrusion re-derive"
+        );
+    }
+
+    /// `riser_walls` classifies geometrically: the floor-step storey yields
+    /// exactly one riser (kind `Floor`, on the step line), no perimeter wall
+    /// region is ever misclassified, and the classification is independent
+    /// of the riser's (overridable) exposure.
+    #[test]
+    fn riser_walls_classify_floor_risers_and_skip_perimeter_walls() {
+        let doc = square_doc(&[
+            Point2f32::new(0.0, 0.0),
+            Point2f32::new(4.0, 0.0),
+            Point2f32::new(4.0, 4.0),
+            Point2f32::new(0.0, 4.0),
+        ]);
+        let steps = vec![crate::StepRegion {
+            polygon: vec![
+                Point2f32::new(0.0, 0.0),
+                Point2f32::new(2.0, 0.0),
+                Point2f32::new(2.0, 4.0),
+                Point2f32::new(0.0, 4.0),
+            ],
+            level_m: -0.3,
+        }];
+        let mut ber = Ber::default();
+        ensure_storey_constructions(&mut ber, 0, &[]);
+        let mut storey = resolve_storey(&doc, &ber, 0, &[], &steps, &[]);
+
+        let risers = doc.riser_walls(&storey);
+        assert_eq!(risers.len(), 1, "exactly the step riser, no perimeter");
+        let r = &risers[0];
+        assert_eq!(r.kind, crate::RiserKind::Floor);
+        assert_eq!(r.exposure, WallExposure::Ground);
+        assert!(
+            (r.a.x - 2.0).abs() < 1e-6 && (r.b.x - 2.0).abs() < 1e-6,
+            "base edge on the step line x = 2"
+        );
+
+        // Override the exposure — classification doesn't change (geometric
+        // discriminator, not exposure-based).
+        storey
+            .walls
+            .regions
+            .iter_mut()
+            .find(|reg| reg.id == r.id)
+            .unwrap()
+            .exposure = WallExposure::Exposed;
+        let risers = doc.riser_walls(&storey);
+        assert_eq!(risers.len(), 1);
+        assert_eq!(risers[0].kind, crate::RiserKind::Floor);
+        assert_eq!(risers[0].exposure, WallExposure::Exposed);
+    }
+
+    /// A ceiling step's riser classifies as kind `Ceiling` (no matching
+    /// floor riser face), defaulting `Exposed`.
+    #[test]
+    fn riser_walls_classify_ceiling_risers() {
+        let (doc, ber) = ceiling_test_setup(2.4);
+        let step = doc
+            .ceiling_step_region(
+                manip_2d_plan::ParameterAxis::X,
+                2.0,
+                crate::LineSide::Greater,
+                0.3,
+            )
+            .unwrap();
+        let storey = resolve_storey(&doc, &ber, 0, &[], &[], &[step]);
+        let risers = doc.riser_walls(&storey);
+        assert_eq!(risers.len(), 1, "one ceiling riser on the step line");
+        assert_eq!(risers[0].kind, crate::RiserKind::Ceiling);
+        assert_eq!(risers[0].exposure, WallExposure::Exposed);
+        assert_eq!(
+            risers[0].kind.default_exposure(),
+            WallExposure::Exposed,
+            "clear reverts a ceiling riser to Exposed"
+        );
     }
 
     /// Empty `step_regions` performs NO geo ops: the floor ring's stored points

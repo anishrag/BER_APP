@@ -890,6 +890,12 @@ pub fn render_living_areas(
 /// shown faint grey first (so un-marked gaps read as grey), the selected wall's
 /// two section handles are drawn, and a legend is shown. Outside the mode only
 /// the coloured sections are drawn.
+///
+/// Derived RISER walls draw as DASHED lines along their plan base edges
+/// (dashed ≠ outline wall), coloured by exposure class — full-strength in
+/// exposure mode (where they're tappable), faded otherwise like the other
+/// non-active categories. The selected riser gets endpoint handles, mirroring
+/// the wall-selection visual.
 #[allow(clippy::too_many_arguments)]
 pub fn render_wall_exposure(
     painter: &egui::Painter,
@@ -899,14 +905,15 @@ pub fn render_wall_exposure(
     sketch_mode: SketchMode,
     view: ViewParams,
     walls: &[WallExposureView],
+    risers: &[crate::controller::app_controller::RiserView],
     selection: Option<&ExposureSelection>,
     exposure_mode: bool,
 ) {
-    if walls.is_empty() {
+    if walls.is_empty() && risers.is_empty() {
         return;
     }
     let any_set = walls.iter().any(|w| !w.sections.is_empty());
-    if !exposure_mode && !any_set {
+    if !exposure_mode && !any_set && risers.is_empty() {
         return;
     }
     let Some((_storey, t)) = storey_transform(rect, ber, current_storey_idx, sketch_mode, view)
@@ -951,6 +958,37 @@ pub fn render_wall_exposure(
         }
     }
 
+    // RISER walls: dashed along the base edge, exposure-coloured. Faded
+    // outside exposure mode (they're context there, not the active tool).
+    for r in risers {
+        let pa = t.apply(r.a.0, r.a.1);
+        let pb = t.apply(r.b.0, r.b.1);
+        let color = if exposure_mode {
+            color_of(r.exposure)
+        } else {
+            style::faded(color_of(r.exposure))
+        };
+        let w = if r.selected { width + 2.0 } else { width };
+        painter.add(egui::Shape::dashed_line(
+            &[pa, pb],
+            egui::Stroke::new(w, color),
+            8.0,
+            6.0,
+        ));
+        if r.selected {
+            // Whole-face selection: handles at both ends (the wall-selection
+            // visual), but they don't drag — risers have no section range.
+            for p in [pa, pb] {
+                painter.circle_filled(p, 6.0, egui::Color32::WHITE);
+                painter.circle_stroke(
+                    p,
+                    6.0,
+                    egui::Stroke::new(2.0, egui::Color32::from_rgb(40, 40, 40)),
+                );
+            }
+        }
+    }
+
     // Selected wall's section handles.
     if let Some(sel) = selection {
         let hs = along(sel.a, sel.b, sel.length_m, sel.start_m);
@@ -966,12 +1004,17 @@ pub fn render_wall_exposure(
     }
 
     if exposure_mode {
-        let legend = [
+        let mut legend = vec![
             ("Exposed", exposed),
             ("Semi-exposed", semi),
             ("Non-heat-loss", non),
             ("Unset", grey),
         ];
+        if !risers.is_empty() {
+            // Risers default Ground (floor steps) — the earth swatch only
+            // means something once a dashed riser line is on screen.
+            legend.push(("Ground", style::GROUND_WALL));
+        }
         let mut y = rect.top() + 10.0;
         for (label, color) in legend {
             let p = egui::pos2(rect.left() + 12.0, y);
@@ -987,6 +1030,22 @@ pub fn render_wall_exposure(
                 color,
             );
             y += 18.0;
+        }
+        if !risers.is_empty() {
+            let p = egui::pos2(rect.left() + 12.0, y);
+            painter.add(egui::Shape::dashed_line(
+                &[p, egui::pos2(p.x + 22.0, p.y)],
+                egui::Stroke::new(4.0, grey),
+                5.0,
+                4.0,
+            ));
+            painter.text(
+                egui::pos2(p.x + 28.0, p.y),
+                egui::Align2::LEFT_CENTER,
+                "Riser (tap to mark)",
+                egui::FontId::proportional(12.0),
+                grey,
+            );
         }
     }
 }

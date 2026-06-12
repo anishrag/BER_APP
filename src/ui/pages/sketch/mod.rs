@@ -20,7 +20,7 @@ use egui::Pos2;
 
 use crate::controller::app_controller::{
     DimensionPromptUiData, EditDragPromptUiData, ExposureSelection, PositionPromptUiData,
-    SnapTagView, VertexDropPromptUiData, WallExposureView,
+    RiserView, SnapTagView, VertexDropPromptUiData, WallExposureView,
 };
 use crate::ui::pages::events::UiEvent;
 use crate::ui::render::ViewParams;
@@ -405,6 +405,9 @@ pub struct SketchView<'a> {
     pub exposure_selection: Option<ExposureSelection>,
     pub exposure_start_input: &'a mut String,
     pub exposure_end_input: &'a mut String,
+    /// The active storey's derived RISER walls (dashed 2D lines; selectable
+    /// in exposure mode — the type buttons then act on the selected riser).
+    pub riser_views: &'a [RiserView],
     /// Construction-phase (year-of-construction) tagging: mode flag, the
     /// committed regions `(ring, label)` to tint, the carved area awaiting a
     /// phase pick, the cut candidates to tap between, the phase choices for

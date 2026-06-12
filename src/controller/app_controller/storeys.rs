@@ -60,6 +60,7 @@ impl AppController {
         self.selected_exposure_wall = None;
         self.exposure_sel = None;
         self.exposure_drag = None;
+        self.selected_riser = None;
         match target {
             Some(i) => {
                 // Resume on the outline (canonical entry); load its slot into the
@@ -179,6 +180,7 @@ impl AppController {
         self.selected_exposure_wall = None;
         self.exposure_sel = None;
         self.exposure_drag = None;
+        self.selected_riser = None;
         let idx = self.document.active_storey;
         self.document.storeys[idx] = storey.map(StoreyDoc::from_storey).unwrap_or_default();
     }

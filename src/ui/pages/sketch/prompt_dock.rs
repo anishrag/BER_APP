@@ -88,6 +88,7 @@ pub(super) fn render<F: FnMut(UiEvent)>(
             exposure_toolbar(
                 ui,
                 view.exposure_walls,
+                view.riser_views,
                 view.exposure_selection.as_ref(),
                 view.exposure_start_input,
                 view.exposure_end_input,
@@ -871,16 +872,22 @@ fn roof_point_toolbar<F: FnMut(UiEvent)>(
 /// Wall-exposure mode toolbar. With a wall selected: a section selection
 /// `start–end` (live with the drag handles) plus typed start/end inputs, the
 /// three type buttons that paint the current selection, and "Clear wall".
+/// With a RISER selected (a dashed line tapped): a kind label, the same type
+/// buttons (they route to the riser), and "Clear" back to the derived
+/// default — NO range controls, risers are whole-face only (v1).
 /// Always: "Set remaining → Exposed" bulk-marks every still-unset coverage
 /// range — whole unmarked walls and the unset gaps around painted sections.
 fn exposure_toolbar<F: FnMut(UiEvent)>(
     ui: &mut egui::Ui,
     walls: &[crate::controller::app_controller::WallExposureView],
+    risers: &[crate::controller::app_controller::RiserView],
     selection: Option<&ExposureSelection>,
     start_input: &mut String,
     end_input: &mut String,
     on_event: &mut F,
 ) {
+    use crate::controller::app_controller::RiserKind;
+    let selected_riser = risers.iter().find(|r| r.selected);
     // Count walls with ANY unset coverage (no sections at all, or unset gaps
     // around painted sections) — the same ranges SetAllRemainingExposed paints.
     let unset = walls
@@ -892,7 +899,39 @@ fn exposure_toolbar<F: FnMut(UiEvent)>(
         })
         .count();
     ui.horizontal(|ui| {
-        if let Some(sel) = selection {
+        if let Some(r) = selected_riser {
+            // Riser context: whole-face only (v1) — no start/end range
+            // controls; the type buttons route to the riser in the
+            // controller (`set_wall_exposure` → `set_riser_exposure`).
+            let label = match r.kind {
+                RiserKind::Floor => "Riser: floor step",
+                RiserKind::Ceiling => "Riser: ceiling step",
+            };
+            ui.label(egui::RichText::new(label).strong());
+            ui.separator();
+            if ui.button("Exposed").clicked() {
+                on_event(UiEvent::Sketch(SketchEvent::SetWallExposure(
+                    WallExposure::Exposed,
+                )));
+            }
+            if ui.button("Semi-exposed").clicked() {
+                on_event(UiEvent::Sketch(SketchEvent::SetWallExposure(
+                    WallExposure::SemiExposed,
+                )));
+            }
+            if ui.button("Non-heat-loss").clicked() {
+                on_event(UiEvent::Sketch(SketchEvent::SetWallExposure(
+                    WallExposure::NonHeatLoss,
+                )));
+            }
+            let default_label = match r.kind {
+                RiserKind::Floor => "Back to the derived default (ground contact)",
+                RiserKind::Ceiling => "Back to the derived default (exposed)",
+            };
+            if ui.button("Clear").on_hover_text(default_label).clicked() {
+                on_event(UiEvent::Sketch(SketchEvent::ClearWallExposure));
+            }
+        } else if let Some(sel) = selection {
             let (lo, hi) = (sel.start_m.min(sel.end_m), sel.start_m.max(sel.end_m));
             ui.label(
                 egui::RichText::new(format!(
@@ -949,10 +988,12 @@ fn exposure_toolbar<F: FnMut(UiEvent)>(
                 on_event(UiEvent::Sketch(SketchEvent::ClearWallExposure));
             }
         } else {
-            ui.label(
-                egui::RichText::new("Tap a wall to mark its exposure")
-                    .color(egui::Color32::from_rgb(255, 200, 60)),
-            );
+            let hint = if risers.is_empty() {
+                "Tap a wall to mark its exposure"
+            } else {
+                "Tap a wall — or a dashed riser line — to mark its exposure"
+            };
+            ui.label(egui::RichText::new(hint).color(egui::Color32::from_rgb(255, 200, 60)));
         }
         ui.separator();
         if ui

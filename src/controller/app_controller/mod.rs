@@ -33,8 +33,8 @@ use document::{
     ActiveShape, CeilingStepRegion, DimensionPrompt, DimensionState, Document, EditState,
     MovedCoordKind, PendingArc, PhaseRegion, ShapeSlot, StepRegion, StoreyDoc,
 };
-pub use document::{ExposureSection, PositionPromptKind};
-pub use exposure::{ExposureSelection, SectionHandle, WallExposureView};
+pub use document::{ExposureSection, PositionPromptKind, RiserKind};
+pub use exposure::{ExposureSelection, RiserView, SectionHandle, WallExposureView};
 // `ExposureSection` is re-exported above (the controller's public surface).
 
 use chrono::NaiveDate;
@@ -140,6 +140,12 @@ pub struct AppController {
     exposure_sel: Option<(f32, f32)>,
     /// Which selection handle a canvas drag is currently moving. Transient.
     exposure_drag: Option<SectionHandle>,
+    /// In exposure mode, the derived RISER wall (by its stable region
+    /// `ItemId` — `with_risers`' amend keeps it across re-derivations) the
+    /// user last tapped on its dashed 2D line. Mutually exclusive with
+    /// `selected_exposure_wall`; the exposure type buttons then act on the
+    /// riser. Cleared everywhere the wall selection is.
+    selected_riser: Option<ItemId>,
     /// A straight CUT line has split the storey into two candidate regions; the
     /// user picks which becomes the living area by tapping inside it. Transient
     /// (not persisted / not in undo history); `None` when nothing is awaiting a
@@ -261,6 +267,7 @@ impl AppController {
             selected_exposure_wall: None,
             exposure_sel: None,
             exposure_drag: None,
+            selected_riser: None,
             pending_cut: None,
             phase_mode: false,
             phase_regions: HashMap::new(),

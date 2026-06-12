@@ -1978,8 +1978,8 @@ impl WallRegions {
         default_construction_id: ItemId,
     ) -> Self {
         // ── Injective base-edge matching (amend) ─────────────────────────
-        let bases: Vec<(Point2f64, Point2f64)> =
-            segments.iter().map(|(a, b, _)| (*a, *b)).collect();
+        let bases: Vec<(Point2f64, Point2f64, f64)> =
+            segments.iter().map(|(a, b, _)| (*a, *b, base_z)).collect();
         let mut prev_used = vec![false; previous.regions.len()];
         let amend_from = Self::match_bases_to_previous(&bases, previous, &mut prev_used);
 
@@ -2027,23 +2027,30 @@ impl WallRegions {
 
     /// `regenerate`'s injective amend matcher, shared with [`with_risers`]:
     /// a base edge matches a previous region when both endpoints sit within
-    /// [`MATCH_EPS_M`] of its base edge (either orientation). Every
+    /// [`MATCH_EPS_M`] of its base edge IN PLAN (either orientation). Every
     /// qualifying (error, base, previous) pair is assigned greedily
     /// best-first, so a previous region amends at most one base and ids are
-    /// never duplicated. `prev_used` marks previous regions already CLAIMED
+    /// never duplicated. The RANKING error adds the |Δz| of the base levels
+    /// (each base is z-constant; the third tuple element is its z): a floor
+    /// riser and a ceiling riser share the same PLAN edge under a step line,
+    /// and without the z term the greedy pass could hand one the other's
+    /// identity (id + opes + exposure). The z term is rank-only — it never
+    /// gates, so an edge whose level moved (a re-assigned step level, a
+    /// ceiling-height change) still amends when nothing closer claims its
+    /// previous region. `prev_used` marks previous regions already CLAIMED
     /// on entry (how `with_risers` excludes the ids the perimeter pass kept)
     /// and is updated with the assignments made.
     ///
     /// [`with_risers`]: WallRegions::with_risers
     fn match_bases_to_previous(
-        bases: &[(Point2f64, Point2f64)],
+        bases: &[(Point2f64, Point2f64, f64)],
         previous: &WallRegions,
         prev_used: &mut [bool],
     ) -> Vec<Option<usize>> {
         let dist =
             |u: Point2f64, vx: f64, vy: f64| ((u.x - vx).powi(2) + (u.y - vy).powi(2)).sqrt();
         let mut candidates: Vec<(f64, usize, usize)> = Vec::new();
-        for (si, (a, b)) in bases.iter().enumerate() {
+        for (si, (a, b, z)) in bases.iter().enumerate() {
             for (pi, r) in previous.regions.iter().enumerate() {
                 let e = &r.polygon.exterior;
                 if e.len() < 2 {
@@ -2053,7 +2060,7 @@ impl WallRegions {
                 let rev = dist(*a, e[1].x, e[1].y).max(dist(*b, e[0].x, e[0].y));
                 let err = fwd.min(rev);
                 if err <= MATCH_EPS_M {
-                    candidates.push((err, si, pi));
+                    candidates.push((err + (z - e[0].z).abs(), si, pi));
                 }
             }
         }
@@ -2069,16 +2076,22 @@ impl WallRegions {
     }
 
     /// Append derived RISER faces (`faces` pairs each face with the exposure
-    /// the caller assigned) with `regenerate`'s amend identity: the same
-    /// injective best-match on the base edge (`exterior[0]`/`[1]`, within
-    /// [`MATCH_EPS_M`]) against `previous` — EXCLUDING the previous ids
-    /// `self` already holds, so a riser can never duplicate an id the
+    /// the caller derived as its DEFAULT) with `regenerate`'s amend identity:
+    /// the same injective best-match on the base edge (`exterior[0]`/`[1]`,
+    /// within [`MATCH_EPS_M`]) against `previous` — EXCLUDING the previous
+    /// ids `self` already holds, so a riser can never duplicate an id the
     /// perimeter pass kept. A matched face keeps the previous region's `id`,
-    /// `construction_id` AND `opes`; an unmatched face whose base midpoint a
-    /// previous region covers inherits its `construction_id` only; anything
-    /// else gets `default_construction_id`. The faces are re-derived
-    /// deterministically every materialize, so the match keeps riser
-    /// identity stable across re-resolves.
+    /// `construction_id`, `opes` AND `exposure` — the DURABILITY RULE: a
+    /// user-overridden riser exposure survives every re-derivation (and a
+    /// reload, since the first materialize after load amends against the
+    /// persisted set), where stamping the freshly-derived default would wipe
+    /// it. Only a FRESH (unmatched) riser takes the caller's derived default;
+    /// an unmatched face whose base midpoint a previous region covers
+    /// inherits its `construction_id` only; anything else gets
+    /// `default_construction_id`. Perimeter walls are untouched by this rule
+    /// — their exposure comes from the painted sections via `regenerate`.
+    /// The faces are re-derived deterministically every materialize, so the
+    /// match keeps riser identity stable across re-resolves.
     pub fn with_risers(
         mut self,
         faces: Vec<(Polygon3D, WallExposure)>,
@@ -2095,12 +2108,13 @@ impl WallRegions {
             .iter()
             .map(|p| self.regions.iter().any(|r| r.id == p.id))
             .collect();
-        let bases: Vec<(Point2f64, Point2f64)> = faces
+        let bases: Vec<(Point2f64, Point2f64, f64)> = faces
             .iter()
             .map(|(p, _)| {
                 (
                     Point2f64::new(p.exterior[0].x, p.exterior[0].y),
                     Point2f64::new(p.exterior[1].x, p.exterior[1].y),
+                    p.exterior[0].z,
                 )
             })
             .collect();
@@ -2112,7 +2126,9 @@ impl WallRegions {
                     WallRegion {
                         id: src.id,
                         polygon,
-                        exposure,
+                        // Durability rule: the previous exposure wins over the
+                        // freshly-derived default — a user override survives.
+                        exposure: src.exposure,
                         opes: src.opes.clone(),
                         construction_id: src.construction_id,
                     }
@@ -3203,11 +3219,13 @@ mod tests {
         let riser_id = walls1.regions[1].id;
         assert_ne!(wall_id, riser_id, "ids unique on first derivation");
         assert_eq!(walls1.regions[1].exposure, WallExposure::Ground);
-        // Decorate the riser as later edits would: its own cid + an ope.
+        // Decorate the riser as later edits would: its own cid + an ope + a
+        // user-overridden exposure.
         let riser_cid = ItemId::default();
         let ope = ItemId::default();
         walls1.regions[1].construction_id = riser_cid;
         walls1.regions[1].opes.doors.push(ope);
+        walls1.regions[1].exposure = WallExposure::SemiExposed;
 
         // Re-derive from walls1: the perimeter amends, the riser re-derives
         // deterministically — and keeps its identity.
@@ -3230,6 +3248,12 @@ mod tests {
         assert_eq!(r.id, riser_id, "riser amend keeps id across re-derivation");
         assert_eq!(r.construction_id, riser_cid);
         assert_eq!(r.opes.doors, vec![ope], "openings survive the amend");
+        assert_eq!(
+            r.exposure,
+            WallExposure::SemiExposed,
+            "the overridden exposure survives the amend (durability rule) — \
+             the freshly-derived Ground default never re-stamps it"
+        );
 
         // EXCLUSION: a riser face whose base coincides with the perimeter
         // wall's base can't steal its already-claimed id — it gets a fresh
@@ -3265,6 +3289,118 @@ mod tests {
             "covered base inherits the construction only"
         );
         assert!(walls3.regions[1].opes.doors.is_empty(), "no opes inherited");
+        assert_eq!(
+            walls3.regions[1].exposure,
+            WallExposure::Ground,
+            "a FRESH (unmatched) riser takes the derived default"
+        );
+    }
+
+    /// A floor riser and a ceiling riser SHARE the plan base edge under a
+    /// step line — the z-aware ranking keeps each matched to its OWN
+    /// previous region. In particular a floor face appearing for the first
+    /// time next to an existing ceiling riser must NOT steal its identity
+    /// (id/opes/exposure): the ceiling face out-ranks it on z, the floor
+    /// face derives fresh with the caller's default.
+    #[test]
+    fn with_risers_never_swaps_colocated_floor_and_ceiling_risers() {
+        let cid = ItemId::default();
+        let face_at = |z_lo: f64, z_hi: f64| {
+            Polygon3D::new(vec![
+                Point3f64::new(0.0, 2.0, z_lo),
+                Point3f64::new(4.0, 2.0, z_lo),
+                Point3f64::new(4.0, 2.0, z_hi),
+                Point3f64::new(0.0, 2.0, z_hi),
+            ])
+        };
+        // Previous state: only the CEILING riser exists (2.4 → 2.7).
+        let prev = WallRegions::default().with_risers(
+            vec![(face_at(2.4, 2.7), WallExposure::Exposed)],
+            &WallRegions::default(),
+            cid,
+        );
+        let ceiling_id = prev.regions[0].id;
+        // A floor step now lands on the SAME plan line: the new derive has
+        // both faces. The ceiling face keeps its id; the floor face is
+        // FRESH and takes the derived Ground default.
+        let walls = WallRegions::default().with_risers(
+            vec![
+                (face_at(-0.3, 0.0), WallExposure::Ground),
+                (face_at(2.4, 2.7), WallExposure::Exposed),
+            ],
+            &prev,
+            cid,
+        );
+        assert_eq!(walls.regions.len(), 2);
+        let floor = &walls.regions[0];
+        let ceiling = &walls.regions[1];
+        assert_eq!(ceiling.id, ceiling_id, "ceiling riser keeps its identity");
+        assert_ne!(floor.id, ceiling_id, "floor riser never steals it");
+        assert_eq!(floor.exposure, WallExposure::Ground, "fresh → default");
+        assert_eq!(ceiling.exposure, WallExposure::Exposed);
+    }
+
+    /// Durability across a GEOMETRY edit: the perimeter changes (so the
+    /// perimeter pass re-derives different segments) but the riser's base
+    /// edge is unchanged — the amend still base-matches and the overridden
+    /// exposure survives the fresh derivation.
+    #[test]
+    fn with_risers_override_survives_a_geometry_edit_that_still_base_matches() {
+        let cid = ItemId::default();
+        let riser = || {
+            Polygon3D::new(vec![
+                Point3f64::new(0.0, 2.0, -0.3),
+                Point3f64::new(4.0, 2.0, -0.3),
+                Point3f64::new(4.0, 2.0, 0.0),
+                Point3f64::new(0.0, 2.0, 0.0),
+            ])
+        };
+        let segs_before = vec![(
+            Point2f64::new(0.0, 0.0),
+            Point2f64::new(4.0, 0.0),
+            WallExposure::Exposed,
+        )];
+        // The wall moved to y = -1 (an outline edit); the step line did not.
+        let segs_after = vec![(
+            Point2f64::new(0.0, -1.0),
+            Point2f64::new(4.0, -1.0),
+            WallExposure::Exposed,
+        )];
+        let mut walls1 = WallRegions::regenerate(
+            segs_before,
+            &WallRegions::default(),
+            &CeilingRegions::default(),
+            0.0,
+            2.4,
+            cid,
+        )
+        .with_risers(
+            vec![(riser(), WallExposure::Ground)],
+            &WallRegions::default(),
+            cid,
+        );
+        let riser_id = walls1.regions[1].id;
+        walls1.regions[1].exposure = WallExposure::Exposed; // user override
+
+        let walls2 = WallRegions::regenerate(
+            segs_after,
+            &walls1,
+            &CeilingRegions::default(),
+            0.0,
+            2.4,
+            cid,
+        )
+        .with_risers(vec![(riser(), WallExposure::Ground)], &walls1, cid);
+        let r = walls2
+            .regions
+            .iter()
+            .find(|r| r.id == riser_id)
+            .expect("riser amends across the geometry edit");
+        assert_eq!(
+            r.exposure,
+            WallExposure::Exposed,
+            "override survives the fresh derive after the edit"
+        );
     }
 
     /// A ceiling step crossing the wall base makes a VERTICAL JUMP in the

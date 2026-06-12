@@ -127,6 +127,7 @@ impl AppController {
         self.selected_exposure_wall = None;
         self.exposure_sel = None;
         self.exposure_drag = None;
+        self.selected_riser = None;
         self.pending_cut = None;
         self.phase_mode = false;
         self.phase_regions.clear();

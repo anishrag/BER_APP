@@ -5023,3 +5023,179 @@ fn users_l_session_ridge_length_is_limited_to_the_raised_area_and_height_lands()
     let storey = &c.current_record.as_ref().unwrap().data.storeys[0];
     assert_eq!(storey.roof_apexes.len(), 2, "both apexes durable");
 }
+
+// ─── Riser exposure: the 2D dashed-line picker ──────────────────────────────
+
+/// Helper: the 10×10 dimensioned storey with a floor step over its left half
+/// — derives one `Ground` riser wall along x = 5 — materialized and ready
+/// for exposure-mode riser picking.
+fn riser_ready_controller() -> AppController {
+    let p = |x: f32, y: f32| Point2f32::new(x, y);
+    let mut c = dimensioned_square_controller();
+    c.step_regions.entry(0).or_default().push(StepRegion {
+        polygon: vec![p(0., 0.), p(5., 0.), p(5., 10.), p(0., 10.)],
+        level_m: -0.3,
+    });
+    c.commit_to_ber().unwrap();
+    c
+}
+
+/// Tapping near a riser's dashed line (within the tighter riser tolerance)
+/// selects IT — not an outline wall — and the exposure type buttons then
+/// route to the riser: the override lands in the record, survives the next
+/// re-resolve (the amend preserves it), AND survives a full DB reload. The
+/// override is record-level state, so it sits OUTSIDE undo (like phases /
+/// steps / roof apexes) — no history entry is pushed.
+#[test]
+fn riser_tap_select_override_and_reload_round_trip() {
+    let mut c = riser_ready_controller();
+    c.set_exposure_mode(true);
+
+    let views = c.riser_views();
+    assert_eq!(views.len(), 1, "one riser on the step line");
+    assert_eq!(views[0].kind, RiserKind::Floor);
+    assert_eq!(views[0].exposure, WallExposure::Ground);
+    let riser_id = views[0].id;
+
+    // Tap ON the step line, mid-storey: the riser wins the pick.
+    c.exposure_pointer_down(5.0, 5.0, 0.5);
+    assert_eq!(c.selected_riser, Some(riser_id), "riser selected");
+    assert!(
+        c.selected_exposure_wall.is_none() && c.exposure_sel.is_none(),
+        "riser selection is exclusive with the wall selection"
+    );
+    assert!(
+        c.riser_views()[0].selected,
+        "selection surfaces in the view"
+    );
+
+    // The type buttons route to the riser. Record-level → outside undo.
+    c.set_wall_exposure(WallExposure::SemiExposed);
+    assert!(
+        !c.can_undo(),
+        "riser override pushes NO history entry (it lives in the record, \
+         which a Document snapshot can't revert)"
+    );
+    c.materialize(); // re-derives: the amend must PRESERVE the override
+    let views = c.riser_views();
+    assert_eq!(views[0].exposure, WallExposure::SemiExposed);
+    assert_eq!(
+        views[0].id, riser_id,
+        "identity stable across the re-derive"
+    );
+
+    // Another full re-derive (commit) keeps it too.
+    c.commit_to_ber().unwrap();
+    assert_eq!(c.riser_views()[0].exposure, WallExposure::SemiExposed);
+
+    // Reload: the persisted region carries the override; the first
+    // re-derive after load amends against the persisted set and keeps it.
+    let id = c.current_record.as_ref().unwrap().id;
+    c.open_ber(&id).unwrap();
+    assert_eq!(
+        c.riser_views()[0].exposure,
+        WallExposure::SemiExposed,
+        "override survives the DB round-trip"
+    );
+    c.commit_to_ber().unwrap();
+    let views = c.riser_views();
+    assert_eq!(views.len(), 1);
+    assert_eq!(
+        views[0].exposure,
+        WallExposure::SemiExposed,
+        "…and the first re-derive after reload"
+    );
+}
+
+/// "Clear" on a selected riser reverts it to the DERIVED default for its
+/// kind (`Ground` for a floor-step riser) — and the revert also sticks
+/// across the next re-derive.
+#[test]
+fn riser_clear_reverts_to_the_derived_default() {
+    let mut c = riser_ready_controller();
+    c.set_exposure_mode(true);
+    c.exposure_pointer_down(5.0, 5.0, 0.5);
+    c.set_wall_exposure(WallExposure::Exposed);
+    c.materialize();
+    assert_eq!(c.riser_views()[0].exposure, WallExposure::Exposed);
+
+    c.clear_wall_exposure(); // routes to clear_riser_exposure
+    c.materialize();
+    assert_eq!(
+        c.riser_views()[0].exposure,
+        WallExposure::Ground,
+        "floor riser cleared back to Ground"
+    );
+    c.commit_to_ber().unwrap();
+    assert_eq!(c.riser_views()[0].exposure, WallExposure::Ground);
+}
+
+/// Pick priority: a tap on an outline wall still selects the WALL (the
+/// riser only wins inside its tighter band around its own line), and a tap
+/// on empty space clears the riser selection like the wall one.
+#[test]
+fn riser_pick_priority_and_deselection() {
+    let mut c = riser_ready_controller();
+    c.set_exposure_mode(true);
+
+    // On the left outline wall (x = 0) — 5 m from the riser line.
+    c.exposure_pointer_down(0.05, 5.0, 0.5);
+    assert!(c.selected_exposure_wall.is_some(), "wall selected");
+    assert!(c.selected_riser.is_none(), "riser not stolen");
+
+    // On the riser line: selection moves to the riser, wall cleared.
+    c.exposure_pointer_down(5.0, 5.0, 0.5);
+    assert!(c.selected_riser.is_some());
+    assert!(c.selected_exposure_wall.is_none());
+
+    // Empty space clears everything.
+    c.exposure_pointer_down(2.5, 2.5, 0.1);
+    assert!(c.selected_riser.is_none(), "tap-away deselects the riser");
+    assert!(c.selected_exposure_wall.is_none());
+
+    // Leaving the mode clears it too.
+    c.exposure_pointer_down(5.0, 5.0, 0.5);
+    assert!(c.selected_riser.is_some());
+    c.set_exposure_mode(false);
+    assert!(c.selected_riser.is_none(), "mode exit clears the selection");
+}
+
+/// THE L-SCENARIO DISCRIMINATOR CHECK: on the L-shaped storey with a snapped
+/// ceiling step at x = 6 — whose riser line is COLLINEAR with the x = 6
+/// perimeter wall but doesn't lie on its segment — `riser_views` returns
+/// exactly the one interior ceiling riser, and no perimeter wall is ever
+/// misclassified as a riser (the wall views stay complete alongside).
+#[test]
+fn riser_views_do_not_misclassify_perimeter_walls_on_the_l_scenario() {
+    let mut c = ceiling_ready_l_controller();
+    c.materialize();
+    assert!(
+        c.riser_views().is_empty(),
+        "no steps yet → no risers (perimeter regions never classify)"
+    );
+
+    // The snapped ceiling step from the L-scenario: line at x = 6, Less
+    // side, +0.3 — its riser face runs along x = 6 for y ∈ [0, 4], on the
+    // same LINE as the perimeter wall at x = 6 (y ∈ [4, 10]).
+    c.apply_ceiling_step_stroke_event(&[(5.88, 0.5), (5.92, 4.0), (5.9, 9.5)]);
+    c.ceiling_step_tap(2.0, 5.0); // Less side
+    c.assign_ceiling_step_delta(0.3).expect("amount applies");
+    c.materialize();
+
+    let risers = c.riser_views();
+    assert_eq!(risers.len(), 1, "exactly the interior ceiling riser");
+    assert_eq!(risers[0].kind, RiserKind::Ceiling);
+    assert_eq!(risers[0].exposure, WallExposure::Exposed, "derived default");
+    assert!(
+        (risers[0].a.0 - 6.0).abs() < 1e-4 && (risers[0].b.0 - 6.0).abs() < 1e-4,
+        "riser base on the step line x = 6: {:?} {:?}",
+        risers[0].a,
+        risers[0].b
+    );
+    assert!(
+        risers[0].a.1.max(risers[0].b.1) <= 4.0 + 1e-4,
+        "…and only on the interior span y ∈ [0, 4], never the wall segment"
+    );
+    // The perimeter set is untouched: all 6 outline walls still present.
+    assert_eq!(c.wall_exposure_views().len(), 6);
+}

@@ -1,8 +1,11 @@
 //! Wall-exposure model operations: painting / clearing per-wall heat-loss
-//! sections on the storey outline, and deriving full coverage. Pure model
-//! mutation — the shell owns pointer selection, undo, and persistence.
+//! sections on the storey outline, deriving full coverage, and classifying
+//! the resolved storey's derived RISER walls (the dashed-line picker's
+//! data). Pure model logic — the shell owns pointer selection, undo, and
+//! persistence.
 use crate::{ExposureSection, StoreyDoc};
-use datatypes::ber::structural::{WallExposure, WallRegions};
+use datatypes::ber::common::ItemId;
+use datatypes::ber::structural::{Storey, WallExposure, WallRegions};
 use domain::points::{Point2f32, Point2f64};
 use manip_2d_plan::{project_distance_along, segment_len, VertexId};
 use std::collections::HashMap;
@@ -87,6 +90,48 @@ pub fn wall_coverage(len: f32, sections: &[ExposureSection]) -> Vec<(f32, f32, W
         out.push((0.0, len, WallExposure::Unset)); // nothing painted → all unset
     }
     out
+}
+
+/// Whether a derived riser wall stands between two FLOOR levels (a floor
+/// step's vertical face) or two CEILING profiles (a ceiling step's). Decides
+/// the riser's derived DEFAULT exposure, which "clear" reverts to.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RiserKind {
+    Floor,
+    Ceiling,
+}
+
+impl RiserKind {
+    /// The exposure the resolve projection derives for a fresh riser of this
+    /// kind (the v1 approximation: floor risers touch the ground, ceiling
+    /// risers face outside). Must stay in lock-step with `resolve_storey`'s
+    /// riser derivation.
+    pub fn default_exposure(self) -> WallExposure {
+        match self {
+            RiserKind::Floor => WallExposure::Ground,
+            RiserKind::Ceiling => WallExposure::Exposed,
+        }
+    }
+}
+
+/// One derived riser wall of the resolved storey, projected to its plan BASE
+/// edge — what the 2D editor draws (dashed) and selects. `id` is the
+/// region's stable identity (`with_risers`' amend keeps it across
+/// re-derivations), so it's a safe selection key.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct RiserWall {
+    pub id: ItemId,
+    pub a: Point2f64,
+    pub b: Point2f64,
+    pub exposure: WallExposure,
+    pub kind: RiserKind,
+}
+
+/// Both endpoints of two plan edges within `eps` of each other, in either
+/// orientation — the same edge-identity test as the riser amend matching.
+fn plan_edges_match(a: Point2f64, b: Point2f64, c: Point2f64, d: Point2f64, eps: f64) -> bool {
+    let dist = |p: Point2f64, q: Point2f64| ((p.x - q.x).powi(2) + (p.y - q.y).powi(2)).sqrt();
+    (dist(a, c).max(dist(b, d)) <= eps) || (dist(a, d).max(dist(b, c)) <= eps)
 }
 
 /// The coverage range `(start, end)` — a marked section or an un-marked gap —
@@ -217,6 +262,80 @@ impl StoreyDoc {
                 x.start_m
                     .partial_cmp(&y.start_m)
                     .unwrap_or(std::cmp::Ordering::Equal)
+            });
+        }
+        out
+    }
+
+    /// The resolved storey's derived RISER walls, projected to their plan
+    /// base edges — the data behind the 2D dashed-line riser picker.
+    ///
+    /// DISCRIMINATOR (geometric, deliberately not exposure-based — a riser's
+    /// exposure can be overridden away from `Ground`/`Exposed`, so exposure
+    /// can't identify one): a wall region whose base edge does NOT lie on
+    /// any current outline perimeter wall is a riser. The midpoint-on-wall
+    /// test and 1e-2 m tolerance are exactly the recovery matching of
+    /// [`sections_from_wall_regions`](Self::sections_from_wall_regions);
+    /// perimeter regions always pass it by construction (their bases are cut
+    /// from the perimeter walls), and `resolve_storey` only ever appends
+    /// riser faces beyond them (riser faces never emit on outline edges —
+    /// those border one region).
+    ///
+    /// KIND: a riser whose base edge matches one of `storey.floors`'
+    /// re-derived floor riser faces (same edge identity as the amend
+    /// matching) is a `Floor` riser; everything else is `Ceiling`. The floor
+    /// faces re-derive deterministically, so the match is exact.
+    pub fn riser_walls(&self, storey: &Storey) -> Vec<RiserWall> {
+        const EPS_M: f64 = 1e-2;
+        let perim = self.outline.floor_plan.perimeter_walls();
+        let floor_bases: Vec<(Point2f64, Point2f64)> = storey
+            .floors
+            .riser_faces()
+            .iter()
+            .filter(|f| f.exterior.len() >= 2)
+            .map(|f| {
+                (
+                    Point2f64::new(f.exterior[0].x, f.exterior[0].y),
+                    Point2f64::new(f.exterior[1].x, f.exterior[1].y),
+                )
+            })
+            .collect();
+        let mut out = Vec::new();
+        for region in &storey.walls.regions {
+            let ext = &region.polygon.exterior;
+            if ext.len() < 2 {
+                continue;
+            }
+            let a = Point2f64::new(ext[0].x, ext[0].y);
+            let b = Point2f64::new(ext[1].x, ext[1].y);
+            let mid = Point2f64::new((a.x + b.x) * 0.5, (a.y + b.y) * 0.5);
+            let on_perimeter = perim.iter().any(|(_, pa, pb)| {
+                domain::points::point_to_segment_distance(
+                    mid.x,
+                    mid.y,
+                    pa.x as f64,
+                    pa.y as f64,
+                    pb.x as f64,
+                    pb.y as f64,
+                ) < EPS_M
+            });
+            if on_perimeter {
+                continue; // a perimeter wall region, not a riser
+            }
+            let kind = if floor_bases
+                .iter()
+                .any(|(fa, fb)| plan_edges_match(a, b, *fa, *fb, EPS_M))
+            {
+                RiserKind::Floor
+            } else {
+                RiserKind::Ceiling
+            };
+            out.push(RiserWall {
+                id: region.id,
+                a,
+                b,
+                exposure: region.exposure,
+                kind,
             });
         }
         out

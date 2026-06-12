@@ -388,7 +388,8 @@ pub(super) fn render<F: FnMut(UiEvent)>(
     }
 
     // Wall exposure: colour each outline wall by its heat-loss class
-    // (brighter in exposure mode; the selected wall is haloed).
+    // (brighter in exposure mode; the selected wall is haloed). Derived
+    // riser walls draw dashed alongside, selectable in exposure mode.
     render::render_wall_exposure(
         &painter,
         rect,
@@ -397,6 +398,7 @@ pub(super) fn render<F: FnMut(UiEvent)>(
         mode,
         vp,
         view.exposure_walls,
+        view.riser_views,
         view.exposure_selection.as_ref(),
         view.exposure_mode,
     );

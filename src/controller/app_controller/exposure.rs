@@ -17,10 +17,18 @@
 //! by giving `ExposureSection` a face subdivision — see the plan; the BER output
 //! (`WallRegion.polygon` is an arbitrary `Polygon3D`) already allows it.
 use super::*;
-use document::range_at;
+use document::{range_at, RiserKind};
 use manip_2d_plan::{
     lerp_along, project_distance_along as project_distance, segment_len as wall_len,
 };
+
+/// A tap selects a riser only within this fraction of the wall-pick
+/// tolerance. Risers get FIRST claim inside the tighter band (their dashed
+/// lines are interior and thin — a deliberate tap on one shouldn't lose to a
+/// perimeter wall that happens to be within the looser tolerance), while a
+/// tap that's merely NEAR a riser but comfortably within wall range still
+/// picks the wall.
+const RISER_PICK_TOL_FRACTION: f64 = 0.6;
 
 /// Which end of the current selection a drag is moving.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -49,6 +57,19 @@ pub struct ExposureSelection {
     pub length_m: f32,
 }
 
+/// One derived RISER wall for rendering/selection: its plan base edge (world
+/// coords), exposure, kind (floor/ceiling step — decides the clear-default),
+/// and whether it's the current riser selection. Drawn as a DASHED line so it
+/// reads apart from the outline walls.
+pub struct RiserView {
+    pub id: ItemId,
+    pub a: (f64, f64),
+    pub b: (f64, f64),
+    pub exposure: WallExposure,
+    pub kind: RiserKind,
+    pub selected: bool,
+}
+
 impl AppController {
     /// True when the editor is in wall-exposure mode (drives the UI toggle and
     /// routes a canvas tap/drag to wall selection rather than drawing).
@@ -64,6 +85,7 @@ impl AppController {
         self.selected_exposure_wall = None;
         self.exposure_sel = None;
         self.exposure_drag = None;
+        self.selected_riser = None;
         if on {
             // Flush the live buffer to its slot first: `activate_shape(Outline)`
             // early-returns without syncing when the outline is already active,
@@ -117,7 +139,17 @@ impl AppController {
                 return;
             }
         }
-        // 2. Otherwise (re)select the wall under the pointer (ring 0 only),
+        // 2. A riser's dashed line gets first claim, inside a TIGHTER band
+        //    than the wall pick (see `RISER_PICK_TOL_FRACTION`). Risers are
+        //    whole-face selections — no section range, no handles.
+        if let Some(id) = self.riser_hit(world_x, world_y, tol * RISER_PICK_TOL_FRACTION) {
+            self.selected_riser = Some(id);
+            self.selected_exposure_wall = None;
+            self.exposure_sel = None;
+            self.exposure_drag = None;
+            return;
+        }
+        // 3. Otherwise (re)select the wall under the pointer (ring 0 only),
         //    picking just the SUB-SECTION under the tap — the coverage range (a
         //    marked section or an un-marked gap) containing the tapped distance.
         //    So once a wall is split, tapping a leftover piece selects only that
@@ -129,6 +161,7 @@ impl AppController {
         {
             Some((0, edge_start)) => {
                 self.selected_exposure_wall = self.document.floor_plan.vertex_id_at(0, edge_start);
+                self.selected_riser = None;
                 self.exposure_drag = None;
                 self.exposure_sel = if let Some((a, b, len)) = self.selected_wall_geom() {
                     let d = project_distance(a, b, len, world_x as f32, world_y as f32);
@@ -148,8 +181,43 @@ impl AppController {
                 self.selected_exposure_wall = None;
                 self.exposure_sel = None;
                 self.exposure_drag = None;
+                self.selected_riser = None;
             }
         }
+    }
+
+    /// The riser whose base edge is nearest the point, within `tol` (world
+    /// metres). Distances via the same point-to-segment primitive the
+    /// document's recovery matching uses.
+    fn riser_hit(&self, world_x: f64, world_y: f64, tol: f64) -> Option<ItemId> {
+        self.riser_walls()
+            .into_iter()
+            .map(|r| {
+                let d = domain::points::point_to_segment_distance(
+                    world_x, world_y, r.a.x, r.a.y, r.b.x, r.b.y,
+                );
+                (d, r.id)
+            })
+            .filter(|(d, _)| *d <= tol)
+            .min_by(|x, y| x.0.partial_cmp(&y.0).unwrap_or(std::cmp::Ordering::Equal))
+            .map(|(_, id)| id)
+    }
+
+    /// The active storey's derived riser walls, classified by the document
+    /// model from the materialized record (`StoreyDoc::riser_walls` — the
+    /// geometric discriminator lives there). Empty when no record/storey.
+    fn riser_walls(&self) -> Vec<document::RiserWall> {
+        let Some(idx) = self.current_storey_idx else {
+            return Vec::new();
+        };
+        let Some(storey) = self
+            .current_record
+            .as_ref()
+            .and_then(|r| r.data.storeys.get(idx))
+        else {
+            return Vec::new();
+        };
+        self.document.riser_walls(storey)
     }
 
     /// Drag the grabbed handle: project the pointer onto the wall line and set
@@ -190,8 +258,13 @@ impl AppController {
     /// Only the painted section is stored — leftover length around the mark
     /// stays unset (it derives `Unset` `WallRegion`s on commit, so a partly
     /// marked wall still splits into one region per coverage range). Undoable;
-    /// persists immediately.
+    /// persists immediately. With a RISER selected instead, the assignment
+    /// routes to it (`set_riser_exposure`) — whole-face, outside undo.
     pub fn set_wall_exposure(&mut self, exposure: WallExposure) {
+        if self.selected_riser.is_some() {
+            self.set_riser_exposure(exposure);
+            return;
+        }
         let Some(vid) = self.selected_exposure_wall else {
             return;
         };
@@ -207,9 +280,67 @@ impl AppController {
         self.push_history_snapshot(undo_snap);
     }
 
+    /// Set the selected RISER's exposure: mutate its region in the
+    /// materialized record by stable id, then mark dirty (the next
+    /// materialize re-derives — `with_risers`' amend PRESERVES the override,
+    /// and the idle autosave persists the record, so it also survives
+    /// reload).
+    ///
+    /// UNDO semantics, honestly: the override lives in the RECORD, not the
+    /// `Document`, so it sits OUTSIDE undo (a `HistorySnapshot` is a
+    /// `Document` clone) — the same deal as phase/step/ceiling-step areas
+    /// and roof apexes. No snapshot is pushed: pushing one would add a no-op
+    /// undo entry (and clear redo) without ever reverting the riser. The
+    /// "Clear" button is the way back (to the kind's derived default).
+    pub fn set_riser_exposure(&mut self, exposure: WallExposure) {
+        let Some(id) = self.selected_riser else {
+            return;
+        };
+        let Some(idx) = self.current_storey_idx else {
+            return;
+        };
+        let Some(region) = self
+            .current_record
+            .as_mut()
+            .and_then(|r| r.data.storeys.get_mut(idx))
+            .and_then(|s| s.walls.regions.iter_mut().find(|r| r.id == id))
+        else {
+            return;
+        };
+        if region.exposure == exposure {
+            return;
+        }
+        region.exposure = exposure;
+        let _ = self.mark_dirty();
+    }
+
+    /// Revert the selected riser to its DERIVED default exposure — `Ground`
+    /// for a floor-step riser, `Exposed` for a ceiling-step one (the kind
+    /// decides; see `RiserKind::default_exposure`). Same record-level/no-undo
+    /// semantics as `set_riser_exposure`.
+    pub fn clear_riser_exposure(&mut self) {
+        let Some(id) = self.selected_riser else {
+            return;
+        };
+        let Some(kind) = self
+            .riser_walls()
+            .into_iter()
+            .find(|r| r.id == id)
+            .map(|r| r.kind)
+        else {
+            return;
+        };
+        self.set_riser_exposure(kind.default_exposure());
+    }
+
     /// Remove all exposure sections from the selected wall (it reverts to
-    /// unset). Undoable; persists immediately.
+    /// unset). Undoable; persists immediately. With a RISER selected instead,
+    /// reverts it to its derived default (`clear_riser_exposure`).
     pub fn clear_wall_exposure(&mut self) {
+        if self.selected_riser.is_some() {
+            self.clear_riser_exposure();
+            return;
+        }
         let Some(vid) = self.selected_exposure_wall else {
             return;
         };
@@ -265,6 +396,24 @@ impl AppController {
                     .cloned()
                     .unwrap_or_default(),
                 selected: self.selected_exposure_wall == Some(vid),
+            })
+            .collect()
+    }
+
+    /// The derived RISER walls of the active storey with selection state, for
+    /// the 2D dashed-line rendering and the riser toolbar context. Reads the
+    /// materialized record (call after `materialize` — the render loop
+    /// already does); classification is `StoreyDoc::riser_walls`.
+    pub fn riser_views(&self) -> Vec<RiserView> {
+        self.riser_walls()
+            .into_iter()
+            .map(|r| RiserView {
+                id: r.id,
+                a: (r.a.x, r.a.y),
+                b: (r.b.x, r.b.y),
+                exposure: r.exposure,
+                kind: r.kind,
+                selected: self.selected_riser == Some(r.id),
             })
             .collect()
     }
