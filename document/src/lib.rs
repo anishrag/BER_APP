@@ -34,7 +34,6 @@ pub use ceiling_step::{
 pub use debug::debug_dump_storey;
 /// Derive full per-wall exposure coverage — the shell's `commit_to_ber` uses it.
 pub use exposure::{range_at, wall_coverage, RiserKind, RiserWall};
-pub use load::reconstruct_living_areas;
 pub use phase::{phase_regions_from_floors, stamp_wall_phases, PhaseRegion};
 pub use position::{PositionOption, PositionPrompt, PositionPromptKind};
 pub use resolve::{ensure_storey_constructions, resolve_storey};
@@ -259,22 +258,6 @@ pub struct StoreyDoc {
     pub wall_sections: HashMap<VertexId, Vec<ExposureSection>>,
 }
 
-/// Twice the unsigned shoelace area of a plan's primary ring.
-fn ring_area2(fp: &FloorPlan) -> f32 {
-    let pts = fp.get_points();
-    let n = pts.len();
-    if n < 3 {
-        return 0.0;
-    }
-    let mut s = 0.0;
-    for i in 0..n {
-        let a = pts[i];
-        let b = pts[(i + 1) % n];
-        s += a.x * b.y - b.x * a.y;
-    }
-    s.abs()
-}
-
 /// Of the available `pieces`, the one to carve the `stroke` against. Scored by
 /// how much the stroke and the piece OVERLAP, counting BOTH directions, so it
 /// works whether the stroke runs THROUGH the piece or LOOPS AROUND it:
@@ -297,7 +280,8 @@ fn pick_piece_for_stroke(pieces: Vec<FloorPlan>, stroke: &[Point2f32]) -> Option
                 .filter(|v| manip_2d_plan::ring_contains_point(stroke, v.x, v.y))
                 .count();
             let overlap = pts_in_piece + piece_in_stroke;
-            (overlap, ring_area2(&p), p)
+            // Tie-break on ring area (the crate-shared shoelace in `step`).
+            (overlap, step::ring_area2(&p.get_points()), p)
         })
         .max_by(|(oa, aa, _), (ob, ab, _)| oa.cmp(ob).then(aa.total_cmp(ab)))
         .map(|(_, _, p)| p)

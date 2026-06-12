@@ -2,7 +2,7 @@ use eframe::egui;
 use std::cell::RefCell;
 use std::rc::Rc;
 
-use std::sync::mpsc::{channel, Receiver, Sender};
+use std::sync::mpsc::{channel, Receiver};
 
 use crate::controller::app_controller::AppController;
 use crate::ui::adapters::sketch_egui::pos2_to_point2f;
@@ -1344,7 +1344,6 @@ impl eframe::App for BerApp {
                                         );
                                         self.sketch_state.vertex_drop_error = None;
                                     }
-                                    _ => {}
                                 },
                                 _ => {}
                             });

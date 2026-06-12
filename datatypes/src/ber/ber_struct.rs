@@ -134,8 +134,7 @@ impl Ber {
     /// Shell-originated coordinates already do; this makes the fixpoint hold
     /// for ANY caller (imports, fixtures) by construction.
     pub fn add_roof_apex(&mut self, storey_idx: usize, mut apex: RoofApex) {
-        apex.point.x = apex.point.x as f32 as f64;
-        apex.point.y = apex.point.y as f32 as f64;
+        apex.point = RoofApex::quantize_point(apex.point);
         if let Some(storey) = self.storeys.get_mut(storey_idx) {
             storey.roof_apexes.push(apex);
         }

@@ -313,13 +313,5 @@ impl AppController {
     }
 }
 
-/// Statistics about a floor plan
-#[derive(Debug, Clone)]
-pub struct FloorPlanStats {
-    pub perimeter: f32,
-    pub area: f32,
-    pub num_vertices: usize,
-}
-
 #[cfg(test)]
 mod tests;

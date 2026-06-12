@@ -37,14 +37,14 @@ pub enum SectionHandle {
     End,
 }
 
-/// One outline wall for rendering: endpoints (world coords), its length, the
-/// exposure sections set on it, and whether it's selected.
+/// One outline wall for rendering: endpoints (world coords), its length, and
+/// the exposure sections set on it. (The current selection renders through
+/// [`ExposureSelection`], not per-wall flags.)
 pub struct WallExposureView {
     pub a: (f64, f64),
     pub b: (f64, f64),
     pub length_m: f32,
     pub sections: Vec<ExposureSection>,
-    pub selected: bool,
 }
 
 /// The selected wall's current section selection, for drawing handles and the
@@ -57,11 +57,13 @@ pub struct ExposureSelection {
     pub length_m: f32,
 }
 
-/// One derived RISER wall for rendering/selection: its plan base edge (world
-/// coords), exposure, kind (floor/ceiling step — the toolbar's label; the
-/// clear-default is `Unset` for both kinds), and whether it's the current
-/// riser selection. Drawn as a DASHED line so it reads apart from the
-/// outline walls.
+/// One derived RISER wall for rendering/selection: its stable region id, its
+/// plan base edge (world coords), exposure, kind (floor/ceiling step — the
+/// toolbar's label; the clear-default is `Unset` for both kinds), and whether
+/// it's the current riser selection. Drawn as a DASHED line so it reads apart
+/// from the outline walls. (`id` is the stable identity — `with_risers`'
+/// amend keeps it across re-derivations; the UI itself selects via pointer
+/// taps, not ids.)
 pub struct RiserView {
     pub id: ItemId,
     pub a: (f64, f64),
@@ -396,7 +398,6 @@ impl AppController {
                     .get(&vid)
                     .cloned()
                     .unwrap_or_default(),
-                selected: self.selected_exposure_wall == Some(vid),
             })
             .collect()
     }

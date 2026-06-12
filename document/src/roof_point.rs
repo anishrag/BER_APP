@@ -29,8 +29,8 @@
 //! datatypes::ber::structural::CeilingRegions::apex_groups
 
 use crate::StoreyDoc;
-use datatypes::ber::structural::{ridge_hub_switches, RoofApexGroup, Storey};
-use domain::points::{Point2f32, Point2f64};
+use datatypes::ber::structural::{ridge_hub_switches, RoofApex, RoofApexGroup, Storey};
+use domain::points::{to_f32, Point2f32, Point2f64};
 use manip_2d_plan::ParameterAxis;
 
 /// User-facing rejection for a tapped point outside the storey footprint.
@@ -149,10 +149,7 @@ fn check_group_ridge(
         .merged_rings
         .iter()
         .find(|ring| {
-            let pts: Vec<Point2f32> = ring
-                .iter()
-                .map(|q| Point2f32::new(q.x as f32, q.y as f32))
-                .collect();
+            let pts: Vec<Point2f32> = ring.iter().copied().map(to_f32).collect();
             manip_2d_plan::ring_contains_point(&pts, p.x as f32, p.y as f32)
         })
         .or_else(|| group.merged_rings.first());
@@ -257,8 +254,8 @@ pub fn validate_roof_ridge(
         ));
     }
     // Work on the endpoints exactly as add_roof_apex will store them.
-    let qa = Point2f64::new(a.x as f32 as f64, a.y as f32 as f64);
-    let qb = Point2f64::new(b.x as f32 as f64, b.y as f32 as f64);
+    let qa = RoofApex::quantize_point(a);
+    let qb = RoofApex::quantize_point(b);
     if qa.x == qb.x && qa.y == qb.y {
         return Err(RIDGE_ENDS_COINCIDE_MSG.to_string());
     }

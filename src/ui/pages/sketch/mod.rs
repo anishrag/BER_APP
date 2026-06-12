@@ -44,9 +44,6 @@ pub enum SketchEvent {
     ChangeMode(SketchMode),
     ChangeDisplay(DisplayMode),
     ChangeEditTool(EditTools),
-    StrokeClosed {
-        stroke_idx: usize,
-    },
     /// User confirmed the current collinearity suggestion: walls are the same line.
     AcceptCollinearity,
     /// User rejected the current collinearity suggestion: walls are distinct.

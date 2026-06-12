@@ -8,7 +8,7 @@
 //! from persisted floors — lives here.
 use datatypes::ber::ber_struct::Ber;
 use datatypes::ber::common::ConstructionPhase;
-use domain::points::Point2f32;
+use domain::points::{to_f32, Point2f32};
 
 /// A session-only tagged area: a world-space (metre) ring + the phase to stamp
 /// onto surfaces inside it.
@@ -102,10 +102,7 @@ pub fn phase_regions_from_floors(ber: &Ber, idx: usize) -> Vec<PhaseRegion> {
         if phase == ConstructionPhase::Original {
             continue;
         }
-        let ring: Vec<Point2f32> = verts
-            .iter()
-            .map(|p| Point2f32::new(p.x as f32, p.y as f32))
-            .collect();
+        let ring: Vec<Point2f32> = verts.iter().copied().map(to_f32).collect();
         if ring.len() >= 3 {
             regions.push(PhaseRegion {
                 polygon: ring,
@@ -119,7 +116,6 @@ pub fn phase_regions_from_floors(ber: &Ber, idx: usize) -> Vec<PhaseRegion> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use datatypes::ber::common::ItemId;
     use datatypes::ber::structural::{FloorRegions, Storey};
     use domain::points::Point2f64;
 

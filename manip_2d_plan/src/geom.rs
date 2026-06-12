@@ -398,6 +398,31 @@ pub fn project_distance_along(a: Point2f32, b: Point2f32, len: f32, px: f32, py:
     (dot / len).clamp(0.0, len)
 }
 
+/// Distance from `coord` to the nearest edge of `ring` that is PARALLEL to
+/// `axis` (a `Horizontal` axis compares against horizontal edges' y, a
+/// `Vertical` one against vertical edges' x). `None` when the ring has no
+/// edge on that axis. Coordinates are whatever space `ring` is in (the
+/// callers pass metres). Used to pick which of a near-collinear pair lies on
+/// a reference ring (the new-storey collinearity review).
+pub fn nearest_parallel_edge_distance(
+    ring: &[Point2f32],
+    axis: &crate::Axis,
+    coord: f32,
+) -> Option<f32> {
+    let n = ring.len();
+    let mut best: Option<f32> = None;
+    for i in 0..n {
+        let (a, b) = (ring[i], ring[(i + 1) % n]);
+        let d = match axis {
+            crate::Axis::Horizontal if (a.y - b.y).abs() < 1e-3 => (coord - a.y).abs(),
+            crate::Axis::Vertical if (a.x - b.x).abs() < 1e-3 => (coord - a.x).abs(),
+            _ => continue,
+        };
+        best = Some(best.map_or(d, |bst: f32| bst.min(d)));
+    }
+    best
+}
+
 /// Twice the signed shoelace area of a ring (sign = winding); callers that
 /// only compare magnitudes use `.abs()`.
 pub(crate) fn ring_signed_area2(pts: &[Point2f32]) -> f32 {

@@ -1,12 +1,11 @@
 use std::cell::RefCell;
 use std::rc::Rc;
 
-mod config;
-mod controller;
-mod engine;
-mod ui;
-
-use controller::app_controller::AppController;
+// The binary consumes the library crate (`src/lib.rs`) instead of re-declaring
+// the module tree — one compilation of the app code, and `pub` surface
+// warnings stay meaningful (they come from the lib alone).
+use ber_app::controller::app_controller::AppController;
+use ber_app::{engine, ui};
 
 fn main() -> Result<(), ui::RunError> {
     // Route the library crates' debug traces (`document`, `manip_2d_plan`) to

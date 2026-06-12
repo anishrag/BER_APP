@@ -417,15 +417,6 @@ impl FloorRegions {
             .collect()
     }
 
-    /// The region whose polygon contains `p`, used to inherit a floor's fabric
-    /// (incl. construction phase) when re-deriving geometry. `None` if `p` is in
-    /// no region.
-    pub fn region_containing(&self, p: Point2f64) -> Option<&FloorRegion> {
-        self.regions
-            .iter()
-            .find(|r| r.polygon.contains(&GeoPoint::new(p.x, p.y)))
-    }
-
     /// The storey footprint as a single ring — the UNION of all floor regions'
     /// polygons (the inverse of `partition`: merge the phase zones back into one
     /// outline). Collinear vertices left where two zones' shared edge dissolved
@@ -672,26 +663,6 @@ pub(crate) fn strip_collinear(ring: &[Point2f64]) -> Vec<Point2f64> {
     }
 }
 
-impl FloorRegion {
-    /// A representative point of the region — the centroid of its exterior
-    /// vertices. Used to hit-test which construction-phase area a floor falls in.
-    /// (For a convex/whole-storey floor this lies inside; concave floors may need
-    /// splitting before per-part phase assignment — deferred.)
-    pub fn representative_point(&self) -> Point2f64 {
-        let mut coords: Vec<Coord<f64>> = self.polygon.exterior().coords().copied().collect();
-        if coords.len() > 1 && coords.first() == coords.last() {
-            coords.pop();
-        }
-        if coords.is_empty() {
-            return Point2f64::new(0.0, 0.0);
-        }
-        let (sx, sy) = coords
-            .iter()
-            .fold((0.0, 0.0), |(ax, ay), c| (ax + c.x, ay + c.y));
-        let n = coords.len() as f64;
-        Point2f64::new(sx / n, sy / n)
-    }
-}
 /// A declared roof high point: fan the ceiling region containing `point` up
 /// (or down) to `z_m`. Durable INPUT, like `Storey::ceiling_height_m` — a fan
 /// apex is not cleanly invertible from triangulated geometry, so the
@@ -707,6 +678,18 @@ pub struct RoofApex {
     /// ABSOLUTE height of the apex in metres above the storey's floor datum
     /// ("ridge at 4.2 m"), NOT a delta against the region it lands in.
     pub z_m: f64,
+}
+
+impl RoofApex {
+    /// Quantize a plan position to the f32 grid — exactly the rounding
+    /// [`Ber::add_roof_apex`] applies on store. Callers that must reason
+    /// about an apex BEFORE storing it (e.g. "are these two endpoints still
+    /// distinct?") use this so their answer matches the stored value.
+    ///
+    /// [`Ber::add_roof_apex`]: super::ber_struct::Ber::add_roof_apex
+    pub fn quantize_point(p: Point2f64) -> Point2f64 {
+        Point2f64::new(p.x as f32 as f64, p.y as f32 as f64)
+    }
 }
 
 /// Ceiling pieces and boolean debris with plan area below this (m²) are
@@ -1124,7 +1107,7 @@ impl CeilingRegions {
     ///
     /// [`flat_z`]: CeilingRegion::flat_z
     /// [`inherited_floor_levels`]: CeilingRegions::inherited_floor_levels
-    pub fn lowest_flat_z_over(&self, footprint: &[Point2f64]) -> Option<f64> {
+    pub(crate) fn lowest_flat_z_over(&self, footprint: &[Point2f64]) -> Option<f64> {
         use geo::bool_ops::BooleanOps;
         use geo::Area;
         if footprint.len() < 3 {
@@ -2267,7 +2250,7 @@ impl WallRegions {
     /// The region whose base edge (the wall footprint) passes through `p`, used
     /// to inherit fabric properties when re-deriving. `None` if no region covers
     /// the point (e.g. a freshly drawn wall).
-    pub fn region_covering(&self, p: Point2f64) -> Option<&WallRegion> {
+    pub(crate) fn region_covering(&self, p: Point2f64) -> Option<&WallRegion> {
         self.regions.iter().find(|r| {
             let e = &r.polygon.exterior;
             e.len() >= 2

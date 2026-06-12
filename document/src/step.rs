@@ -38,10 +38,7 @@ pub fn step_regions_from_floors(ber: &Ber, idx: usize) -> Vec<StepRegion> {
         if fr.level_m == 0.0 {
             continue;
         }
-        let ring: Vec<Point2f32> = verts
-            .iter()
-            .map(|p| Point2f32::new(p.x as f32, p.y as f32))
-            .collect();
+        let ring: Vec<Point2f32> = verts.iter().copied().map(to_f32).collect();
         if ring.len() >= 3 && ring_area2(&ring) >= 2e-6 {
             regions.push(StepRegion {
                 polygon: ring,
@@ -79,7 +76,8 @@ pub fn inherited_step_regions(below: &Storey, footprint: &[Point2f32]) -> Vec<St
 
 /// Twice the unsigned shoelace area of `ring` (so the sliver threshold above
 /// is 1e-6 m²). Local on purpose — `document` has no geo dependency.
-/// `pub(crate)`: the ceiling-step reconstruction applies the same filter.
+/// `pub(crate)`: the ceiling-step reconstruction applies the same filter, and
+/// the carve piece-pick (`lib.rs`) tie-breaks on it.
 pub(crate) fn ring_area2(ring: &[Point2f32]) -> f64 {
     let n = ring.len();
     let mut s = 0.0_f64;
@@ -158,10 +156,7 @@ mod tests {
             .iter()
             .zip(storey.floors.to_vertex_lists())
             .map(|(r, ring)| {
-                let ring32: Vec<Point2f32> = ring
-                    .iter()
-                    .map(|p| Point2f32::new(p.x as f32, p.y as f32))
-                    .collect();
+                let ring32: Vec<Point2f32> = ring.iter().copied().map(to_f32).collect();
                 (r.level_m, ring_area2(&ring32) / 2.0)
             })
             .collect();

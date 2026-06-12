@@ -5,12 +5,6 @@ use super::*;
 use manip_2d_plan::{intersect_circles, project_to_circle, solve_axis_wall};
 
 impl AppController {
-    /// VertexId of the wall currently selected in Move mode, if any. The UI
-    /// uses this to render the selection highlight.
-    pub fn edit_selected_wall(&self) -> Option<VertexId> {
-        self.document.edit_state.selected_wall
-    }
-
     /// World-coord endpoints of the currently selected Move-mode wall, or
     /// `None` if nothing is selected. Returned in the same order the
     /// polygon traverses (wall_a then wall_b).
@@ -225,7 +219,6 @@ impl AppController {
                 measurements.push(VertexMeasurement {
                     kind: VertexMeasurementKind::Axis(ParameterAxis::X),
                     neighbor_vid: prev_vid,
-                    current_distance: prev_dx.abs(),
                     sign: prev_dx.signum(),
                 });
             }
@@ -234,7 +227,6 @@ impl AppController {
                 measurements.push(VertexMeasurement {
                     kind: VertexMeasurementKind::Axis(ParameterAxis::X),
                     neighbor_vid: prev_vid,
-                    current_distance: prev_dx.abs(),
                     sign: prev_dx.signum(),
                 });
             }
@@ -242,7 +234,6 @@ impl AppController {
                 measurements.push(VertexMeasurement {
                     kind: VertexMeasurementKind::Axis(ParameterAxis::X),
                     neighbor_vid: next_vid,
-                    current_distance: next_dx.abs(),
                     sign: next_dx.signum(),
                 });
             }
@@ -255,7 +246,6 @@ impl AppController {
                 measurements.push(VertexMeasurement {
                     kind: VertexMeasurementKind::Axis(ParameterAxis::Y),
                     neighbor_vid: prev_vid,
-                    current_distance: prev_dy.abs(),
                     sign: prev_dy.signum(),
                 });
             }
@@ -264,7 +254,6 @@ impl AppController {
                 measurements.push(VertexMeasurement {
                     kind: VertexMeasurementKind::Axis(ParameterAxis::Y),
                     neighbor_vid: prev_vid,
-                    current_distance: prev_dy.abs(),
                     sign: prev_dy.signum(),
                 });
             }
@@ -272,7 +261,6 @@ impl AppController {
                 measurements.push(VertexMeasurement {
                     kind: VertexMeasurementKind::Axis(ParameterAxis::Y),
                     neighbor_vid: next_vid,
-                    current_distance: next_dy.abs(),
                     sign: next_dy.signum(),
                 });
             }
@@ -285,7 +273,6 @@ impl AppController {
             measurements.push(VertexMeasurement {
                 kind: VertexMeasurementKind::WallLength,
                 neighbor_vid: prev_vid,
-                current_distance: prev_dist,
                 sign: 1.0,
             });
         }
@@ -294,7 +281,6 @@ impl AppController {
             measurements.push(VertexMeasurement {
                 kind: VertexMeasurementKind::WallLength,
                 neighbor_vid: next_vid,
-                current_distance: next_dist,
                 sign: 1.0,
             });
         }
@@ -767,8 +753,6 @@ pub struct VertexMeasurement {
     pub kind: VertexMeasurementKind,
     /// Neighbour vertex this measurement is from.
     pub neighbor_vid: VertexId,
-    /// Live distance: axis → `|V.coord - N.coord|`, wall → `|V - N|`.
-    pub current_distance: f32,
     /// For axis measurements: sign of `(V.coord - N.coord)` at populate
     /// time. Preserved on apply so V ends up on the same side of N.
     /// Unused for wall-length measurements (left as 1.0).

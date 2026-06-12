@@ -251,7 +251,11 @@ impl AppController {
                     .iter()
                     .map(|r| {
                         let ring = r.polygon.iter().map(|p| (p.x as f64, p.y as f64)).collect();
-                        (ring, phase_label(&r.phase, phases))
+                        let label = phases.map_or_else(
+                            || r.phase.default_name(),
+                            |ph| ph.display_label(&r.phase),
+                        );
+                        (ring, label)
                     })
                     .collect()
             })
@@ -272,7 +276,7 @@ impl AppController {
             .defined_phases()
             .into_iter()
             .map(|p| {
-                let label = phase_label(&p, Some(phases));
+                let label = phases.display_label(&p);
                 (p, label)
             })
             .collect()
@@ -294,26 +298,5 @@ impl AppController {
         if removed {
             let _ = self.mark_dirty();
         }
-    }
-}
-
-/// A human label for a phase: the user's nickname if given (e.g. "Back
-/// extension"), else the default name ("Original", "Extension 1"), with the
-/// year appended when known — e.g. "Back extension (2008)", "Original (1985)".
-fn phase_label(phase: &ConstructionPhase, phases: Option<&ConstructionPhases>) -> String {
-    let name = phases
-        .and_then(|p| p.nickname_of(phase))
-        .map(|s| s.to_string())
-        .unwrap_or_else(|| match phase {
-            ConstructionPhase::Original => "Original".to_string(),
-            ConstructionPhase::Extension1 => "Extension 1".to_string(),
-            ConstructionPhase::Extension2 => "Extension 2".to_string(),
-            ConstructionPhase::Extension3 => "Extension 3".to_string(),
-            ConstructionPhase::Extension4 => "Extension 4".to_string(),
-            ConstructionPhase::Other(s) => s.clone(),
-        });
-    match phases.and_then(|p| p.year_of(phase)) {
-        Some(year) => format!("{name} ({year})"),
-        None => name,
     }
 }

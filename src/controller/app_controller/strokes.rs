@@ -180,7 +180,7 @@ impl AppController {
     /// the shape rectilinear (draw / extend-ortho / carve / dimension) so a
     /// "wall isn't straight" report shows up in the log with the exact edge.
     /// (A plain `Trim` may create a deliberate diagonal cut, so it's not checked.)
-    pub(crate) fn warn_if_non_orthogonal(&self, ctx: &str) {
+    pub(super) fn warn_if_non_orthogonal(&self, ctx: &str) {
         let bad = self.document.floor_plan.non_orthogonal_edges();
         if bad.is_empty() {
             return;

@@ -148,7 +148,7 @@ pub(super) fn render<F: FnMut(UiEvent)>(
                                         from: tag.from,
                                         choice: Some(*idx),
                                     }));
-                                    ui.close_menu();
+                                    ui.close();
                                 }
                             }
                             if tag.skippable && ui.button("Don't snap").clicked() {
@@ -156,7 +156,7 @@ pub(super) fn render<F: FnMut(UiEvent)>(
                                     from: tag.from,
                                     choice: None,
                                 }));
-                                ui.close_menu();
+                                ui.close();
                             }
                         });
                     });
@@ -291,7 +291,7 @@ pub(super) fn render<F: FnMut(UiEvent)>(
                     ui.menu_button(label, |ui| {
                         if tag.skippable && ui.button("Don't snap").clicked() {
                             on_event(UiEvent::Sketch(SketchEvent::UnsnapCeilingStepLine));
-                            ui.close_menu();
+                            ui.close();
                         }
                     });
                 });
@@ -339,7 +339,7 @@ pub(super) fn render<F: FnMut(UiEvent)>(
                     ui.menu_button(label, |ui| {
                         if tag.skippable && ui.button("Don't snap").clicked() {
                             on_event(UiEvent::Sketch(SketchEvent::UnsnapRoofPoint));
-                            ui.close_menu();
+                            ui.close();
                         }
                     });
                 });
@@ -391,7 +391,7 @@ pub(super) fn render<F: FnMut(UiEvent)>(
                     ui.menu_button(label, |ui| {
                         if tag.skippable && ui.button("Don't snap").clicked() {
                             on_event(UiEvent::Sketch(SketchEvent::UnsnapRoofRidge));
-                            ui.close_menu();
+                            ui.close();
                         }
                     });
                 });

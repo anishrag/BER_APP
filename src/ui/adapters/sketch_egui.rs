@@ -3,7 +3,6 @@ use egui::epaint::{ColorMode, PathStroke};
 use egui::{Color32, Pos2};
 
 use sketch::model::Stroke;
-use sketch::SketchEvent;
 
 use domain::points::Point2f32;
 
@@ -34,18 +33,4 @@ impl From<Stroke> for EguiStroke {
 
 pub fn pos2_to_point2f(pos: Pos2) -> Point2f32 {
     Point2f32::new(pos.x, pos.y)
-}
-
-/// Helper to adapt a slice of domain strokes
-pub fn adapt_strokes(strokes: &Stroke) -> EguiStroke {
-    strokes.into()
-}
-
-/// Optional: helper to send UI events to the sketch engine
-/// UI pages can call this closure instead of talking to controller directly
-pub fn handle_ui_event<F>(event: SketchEvent, mut on_event: F)
-where
-    F: FnMut(SketchEvent),
-{
-    on_event(event);
 }

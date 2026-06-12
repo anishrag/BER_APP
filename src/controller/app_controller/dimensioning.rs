@@ -22,18 +22,6 @@ impl AppController {
         self.document.dimensioning.scale_set
     }
 
-    /// Resolved positions (ring index, edge-start vertex index) of every wall
-    /// the user has explicitly dimensioned. The UI uses this to decide which
-    /// wall length labels to render — derived/un-set walls show no label.
-    pub fn dimensioned_walls(&self) -> Vec<(usize, usize)> {
-        self.document
-            .dimensioning
-            .dimensioned_walls
-            .iter()
-            .filter_map(|vid| self.document.floor_plan.find_vertex(*vid))
-            .collect()
-    }
-
     /// Every wall whose length is currently *known* — meaning all parameters
     /// in its length expression are in `known_params`. This is the superset
     /// of `dimensioned_walls`: it also catches walls whose length is implied

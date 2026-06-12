@@ -50,6 +50,21 @@ pub enum ConstructionPhase {
     Other(String),
 }
 
+impl ConstructionPhase {
+    /// The phase's built-in display name ("Original", "Extension 1", …) —
+    /// what the UI shows when no nickname has been given.
+    pub fn default_name(&self) -> String {
+        match self {
+            ConstructionPhase::Original => "Original".to_string(),
+            ConstructionPhase::Extension1 => "Extension 1".to_string(),
+            ConstructionPhase::Extension2 => "Extension 2".to_string(),
+            ConstructionPhase::Extension3 => "Extension 3".to_string(),
+            ConstructionPhase::Extension4 => "Extension 4".to_string(),
+            ConstructionPhase::Other(s) => s.clone(),
+        }
+    }
+}
+
 /// BER-level construction dates mapping
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct ConstructionPhases {
@@ -97,6 +112,21 @@ impl ConstructionPhases {
     /// Set (or replace) the year for `phase`.
     pub fn set_year(&mut self, phase: ConstructionPhase, year: Year) {
         self.years.insert(phase, year);
+    }
+
+    /// A human label for `phase`: the user's nickname if given (e.g. "Back
+    /// extension"), else the default name ("Original", "Extension 1"), with
+    /// the year appended when known — e.g. "Back extension (2008)",
+    /// "Original (1985)".
+    pub fn display_label(&self, phase: &ConstructionPhase) -> String {
+        let name = self
+            .nickname_of(phase)
+            .map(|s| s.to_string())
+            .unwrap_or_else(|| phase.default_name());
+        match self.year_of(phase) {
+            Some(year) => format!("{name} ({year})"),
+            None => name,
+        }
     }
 
     /// The phases that have a year set, in canonical order (Original, then

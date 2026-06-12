@@ -156,11 +156,6 @@ impl AppController {
         flushed
     }
 
-    pub fn get_ber(&self, id: &ItemId) -> Option<Ber> {
-        let repo = BerRepository::new(&self.conn);
-        repo.load(id).ok().map(|record| record.data)
-    }
-
     /// Load an existing BER into the editor: sets it as the current record and
     /// reconstructs the parametric sketch + dimensioning state from the stored
     /// snapshot, so editing resumes with every collinearity equivalence and

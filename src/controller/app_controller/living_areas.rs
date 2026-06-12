@@ -318,11 +318,6 @@ impl AppController {
         }
     }
 
-    /// Discard a pending cut without creating anything.
-    pub fn cancel_pending_cut(&mut self) {
-        self.pending_cut = None;
-    }
-
     /// Delete the living area at `index` (living areas are non-editable — to
     /// change one, delete and redraw). Undoable; persists.
     pub fn delete_living_area(&mut self, index: usize) {
