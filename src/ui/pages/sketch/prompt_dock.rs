@@ -157,6 +157,7 @@ pub(super) fn render<F: FnMut(UiEvent)>(
                     view.roof_point_position_pending,
                     view.roof_ridge_height_pending,
                     view.roof_ridge_length_pending,
+                    view.roof_ridge_length_anchored,
                     view.roof_ridge_position_pending,
                     view.roof_apex_input,
                     view.roof_ridge_length_input,
@@ -871,6 +872,7 @@ fn roof_point_toolbar<F: FnMut(UiEvent)>(
     position_pending: bool,
     ridge_height_pending: bool,
     ridge_length_pending: bool,
+    ridge_length_anchored: bool,
     ridge_position_pending: bool,
     height_input: &mut String,
     ridge_length_input: &mut String,
@@ -910,11 +912,15 @@ fn roof_point_toolbar<F: FnMut(UiEvent)>(
                 .desired_width(60.0)
                 .hint_text("e.g. 6.0"),
         );
-        if ui
-            .button("Set")
-            .on_hover_text("Use exactly this ridge length (from the highlighted end)")
-            .clicked()
-        {
+        // "(from the highlighted end)" only when an end is ANCHORED — the
+        // extent's start snapped onto a wall, so the typed length extends
+        // from that exact coordinate.
+        let set_hover = if ridge_length_anchored {
+            "Use exactly this ridge length (from the highlighted end)"
+        } else {
+            "Use exactly this ridge length"
+        };
+        if ui.button("Set").on_hover_text(set_hover).clicked() {
             if let Some(v) = parse_dimension_expression(ridge_length_input) {
                 on_event(UiEvent::Sketch(SketchEvent::AssignRoofRidgeLength(v)));
             }

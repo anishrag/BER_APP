@@ -281,9 +281,12 @@ impl AppController {
         // Roof-ridge position questions: shell-resolved the same way. NOTHING
         // in the model moves — the resolved coordinate just rides into the
         // next stage — so no undo snapshot and no mark_dirty. The CROSS
-        // question (1) resolves `coord_m` (the extent does not shift: it's on
-        // the other axis); the START question (2) resolves the extent's `lo`
-        // (the length rides unchanged — it's question 3's).
+        // question (2) resolves `coord_m` (the extent does not shift: it's on
+        // the other axis); the START question (3) resolves the extent's `lo`
+        // (the length rides unchanged — it was question 1's). The advance
+        // runs the FINALIZE placement check once no questions remain; on its
+        // rejection the pending stays at THIS stage (advance only replaces
+        // it on success), so the `Err` lands on the open prompt.
         if let Some(PendingRoofRidge::CrossPosition {
             axis,
             lo,
@@ -295,9 +298,8 @@ impl AppController {
         {
             let coord_m = self.document.resolve_ceiling_line_position(prompt, value)?;
             let (axis, lo, len_m, start_snap) = (*axis, *lo, *len_m, *start_snap);
-            self.pending_roof_ridge = None;
             // Cross stage implies the cross was un-snapped — none to carry.
-            self.advance_roof_ridge(
+            return self.advance_roof_ridge(
                 axis,
                 coord_m,
                 lo,
@@ -306,7 +308,6 @@ impl AppController {
                 start_snap,
                 &[RidgeQuestion::Start],
             );
-            return Ok(());
         }
         if let Some(PendingRoofRidge::StartPosition {
             axis,
@@ -319,10 +320,8 @@ impl AppController {
         {
             let lo = self.document.resolve_ceiling_line_position(prompt, value)?;
             let (axis, coord_m, len_m, cross_snap) = (*axis, *coord_m, *len_m, *cross_snap);
-            self.pending_roof_ridge = None;
             // Start stage implies the start was un-snapped — none to carry.
-            self.advance_roof_ridge(axis, coord_m, lo, len_m, cross_snap, None, &[]);
-            return Ok(());
+            return self.advance_roof_ridge(axis, coord_m, lo, len_m, cross_snap, None, &[]);
         }
         let undo_snap = self.current_history_snapshot();
         self.document.apply_position(value)?;
@@ -374,9 +373,11 @@ impl AppController {
             return;
         }
         // Roof-ridge position questions: accept the DRAWN value as-is and
-        // advance — the cross question (1) on to the start question, the
-        // start question (2) on to the length. No history / no mark_dirty —
-        // nothing moved.
+        // advance — the cross question (2) on to the start question, the
+        // start question (3) on to finalize + the height. No history / no
+        // mark_dirty — nothing moved. A finalize rejection has no typed
+        // value to attach to on the skip path: log it and leave the prompt
+        // open (typing a value surfaces the same rejection inline).
         if let Some(PendingRoofRidge::CrossPosition {
             axis,
             coord_m,
@@ -388,8 +389,7 @@ impl AppController {
         {
             let (axis, coord_m, lo, len_m, start_snap) =
                 (*axis, *coord_m, *lo, *len_m, *start_snap);
-            self.pending_roof_ridge = None;
-            self.advance_roof_ridge(
+            if let Err(e) = self.advance_roof_ridge(
                 axis,
                 coord_m,
                 lo,
@@ -397,7 +397,9 @@ impl AppController {
                 None,
                 start_snap,
                 &[RidgeQuestion::Start],
-            );
+            ) {
+                log::warn!("roof ridge skip rejected: {e}");
+            }
             return;
         }
         if let Some(PendingRoofRidge::StartPosition {
@@ -411,8 +413,10 @@ impl AppController {
         {
             let (axis, coord_m, lo, len_m, cross_snap) =
                 (*axis, *coord_m, *lo, *len_m, *cross_snap);
-            self.pending_roof_ridge = None;
-            self.advance_roof_ridge(axis, coord_m, lo, len_m, cross_snap, None, &[]);
+            if let Err(e) = self.advance_roof_ridge(axis, coord_m, lo, len_m, cross_snap, None, &[])
+            {
+                log::warn!("roof ridge skip rejected: {e}");
+            }
             return;
         }
         self.record_history();

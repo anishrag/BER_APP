@@ -495,6 +495,9 @@ pub struct SketchView<'a> {
     pub roof_ridge_snap_tag: Option<&'a SnapTagView>,
     pub roof_ridge_position_pending: bool,
     pub roof_ridge_length_pending: bool,
+    /// The open length question's extent starts at a SNAPPED wall coordinate
+    /// — the panel's "from the highlighted end" hover shows only then.
+    pub roof_ridge_length_anchored: bool,
     pub roof_ridge_height_pending: bool,
     pub roof_ridge_pending: bool,
     pub roof_ridge_length_input: &'a mut String,

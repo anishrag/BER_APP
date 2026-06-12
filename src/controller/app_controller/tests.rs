@@ -4035,7 +4035,7 @@ fn second_roof_point_forms_a_ridge_and_a_third_is_rejected() {
     assert!(!c.roof_point_pending());
 }
 
-// ─── Roof ridges (line input: cross + start + length questions + height) ───
+// ─── Roof ridges (line input: length + cross + start questions + height) ───
 
 /// Sorted (x, y, z) vertex triples of storey 0's derived roof regions —
 /// a strong geometric fingerprint for "same roof" comparisons.
@@ -4051,41 +4051,61 @@ fn roof_vertex_fingerprint(c: &AppController) -> Vec<(f64, f64, f64)> {
     vs
 }
 
-/// The full un-snapped line flow asks THREE questions, each prefilled with
-/// the drawn value (the stroke is approximate): the CROSS position (kind
-/// `Line`, the "area wall" being the segment itself), the START position
-/// along the ridge axis (measured from a PERPENDICULAR wall to the extent's
-/// lo — the "area wall" degenerates to the LO endpoint), and the LENGTH (a
-/// typed amount, no reference wall). Typed answers land EXACTLY — the
+/// The full un-snapped line flow asks THREE questions in the assessor's
+/// measuring order — dimension first, then where it sits — each prefilled
+/// with the drawn value (the stroke is approximate): the LENGTH (a typed
+/// amount, no reference wall), the CROSS position (kind `Line`, the "area
+/// wall" being the segment itself), and the START position along the ridge
+/// axis (measured from a PERPENDICULAR wall to the extent's lo — the "area
+/// wall" degenerates to the LO endpoint). Typed answers land EXACTLY — the
 /// assigned apexes sit at the RESOLVED `(cross, start)`/`(cross, start +
 /// length)`, not the drawn ones. One typed height then places BOTH apexes;
 /// the derived roof is a pitched ridge (one two-apex group), with no session
 /// step state over the default base.
 #[test]
-fn roof_ridge_cross_start_length_height_flow_forms_a_pitched_roof() {
+fn roof_ridge_length_cross_start_height_flow_forms_a_pitched_roof() {
     let mut c = roof_ready_controller();
     c.apply_roof_ridge_stroke_event(&[(3.78, 2.0), (3.82, 5.0), (3.8, 8.0)]);
 
-    // Question 1: the CROSS position.
-    assert!(c.roof_ridge_position_pending(), "stroke fitted → cross");
+    // Question 1: the LENGTH — prefilled with the drawn |hi − lo|, no
+    // reference wall (it's the ridge's own dimension).
+    assert!(
+        c.roof_ridge_length_pending(),
+        "stroke fitted → length first"
+    );
+    assert!(
+        c.position_prompt_for_ui().is_none(),
+        "the length is not a position question"
+    );
+    let prefill = c.pending_roof_ridge_length().expect("drawn length");
+    assert!((prefill - 6.0).abs() < 1e-4);
+    assert!(
+        !c.roof_ridge_length_anchored(),
+        "nothing snapped — no anchored end"
+    );
+    // A typed length anchors at the drawn lo: the extent becomes [2, 6].
+    c.assign_roof_ridge_length(4.0).expect("length applies");
+
+    // Question 2: the CROSS position.
+    assert!(c.roof_ridge_position_pending(), "length resolved → cross");
     let ui = c.position_prompt_for_ui().expect("cross-coord prompt");
     assert_eq!(ui.kind, PositionPromptKind::Line);
     assert_eq!(ui.axis, ParameterAxis::X);
     let ((ax, ay), (bx, by)) = c.pending_roof_ridge_line().expect("segment");
     assert!((ax - 3.8).abs() < 0.05 && (bx - 3.8).abs() < 0.05);
     assert!(
-        (ay - 2.0).abs() < 1e-4 && (by - 8.0).abs() < 1e-4,
-        "extent as drawn"
+        (ay - 2.0).abs() < 1e-4 && (by - 6.0).abs() < 1e-4,
+        "extent = [drawn lo, drawn lo + typed length]"
     );
     assert!(
-        (ui.area_wall.wall_a.1 - 2.0).abs() < 1e-4 && (ui.area_wall.wall_b.1 - 8.0).abs() < 1e-4,
+        (ui.area_wall.wall_a.1 - 2.0).abs() < 1e-4 && (ui.area_wall.wall_b.1 - 6.0).abs() < 1e-4,
         "the prompt's area wall IS the segment"
     );
     // Nearest ref is x = 0 (≈3.8 m): 4 m from it → x = 4. The extent must
     // NOT shift — it's on the other axis.
     c.apply_position_dimension(4.0).expect("cross applies");
 
-    // Question 2: the START position, on the ALONG axis (a vertical ridge's
+    // Question 3: the START position, on the ALONG axis (a vertical ridge's
     // extent runs on Y → the references are HORIZONTAL walls), highlighting
     // the LO ENDPOINT (degenerate wall) at the already-resolved cross.
     assert!(c.roof_ridge_position_pending(), "cross resolved → start");
@@ -4102,30 +4122,17 @@ fn roof_ridge_cross_start_length_height_flow_forms_a_pitched_roof() {
         (ui.current_distance - 2.0).abs() < 1e-4,
         "prefill = drawn distance from the nearest ref (y = 0)"
     );
-    // 3 m from y = 0 → the ridge now STARTS at y = 3; the drawn length (6)
-    // rides along, so the far end previews at y = 9.
+    // 3 m from y = 0 → the ridge now STARTS at y = 3; the typed length (4)
+    // rides along, so the far end lands at y = 7. The last open location
+    // stage runs the finalize placement check on the way out.
     c.apply_position_dimension(3.0).expect("start applies");
-    let ((_, ay), (_, by)) = c.pending_roof_ridge_line().unwrap();
-    assert!((ay - 3.0).abs() < 1e-4, "start pinned at 3");
-    assert!((by - 9.0).abs() < 1e-4, "far end = start + drawn length");
-
-    // Question 3: the LENGTH — prefilled with the drawn |hi − lo|, no
-    // reference wall (it's the ridge's own dimension).
-    assert!(c.roof_ridge_length_pending(), "start resolved → length");
-    assert!(
-        c.position_prompt_for_ui().is_none(),
-        "the length is not a position question"
-    );
-    let prefill = c.pending_roof_ridge_length().expect("drawn length");
-    assert!((prefill - 6.0).abs() < 1e-4);
-    c.assign_roof_ridge_length(4.0).expect("length applies");
 
     // The height, then assign.
-    assert!(c.roof_ridge_height_pending(), "length resolved → height");
+    assert!(c.roof_ridge_height_pending(), "start resolved → height");
     let ((_, ay), (_, by)) = c.pending_roof_ridge_line().unwrap();
     assert!(
         (ay - 3.0).abs() < 1e-4 && (by - 7.0).abs() < 1e-4,
-        "extent = [start, start + typed length]"
+        "extent = [typed start, typed start + typed length]"
     );
     c.assign_roof_ridge_height(4.2).expect("ridge assigns");
     assert!(!c.roof_ridge_pending(), "flow complete");
@@ -4179,9 +4186,9 @@ fn roof_ridge_line_input_matches_the_two_point_flow() {
     let mut line = roof_ready_controller();
     line.apply_roof_ridge_stroke_event(&[(3.78, 2.0), (3.82, 5.0), (3.8, 8.0)]);
     let ((ax, ay), (bx, by)) = line.pending_roof_ridge_line().expect("drawn segment");
+    line.skip_roof_ridge_length().unwrap(); // length: drawn |hi − lo| stands
     line.skip_position_dimension(); // cross: drawn coordinate stands
     line.skip_position_dimension(); // start: drawn lo stands
-    line.skip_roof_ridge_length(); // length: drawn |hi − lo| stands
     line.assign_roof_ridge_height(4.2).unwrap();
     line.materialize();
     let ((lax, lay), (lbx, lby)) = ((ax, ay), (bx, by));
@@ -4208,10 +4215,12 @@ fn roof_ridge_line_input_matches_the_two_point_flow() {
 }
 
 /// A stroke within snap tolerance of a parallel wall SNAPS the cross
-/// coordinate onto it: the CROSS question is SKIPPED (the coordinate is
-/// exact by construction) — the flow opens at the START question instead —
-/// the single tag renders at the segment midpoint, and the assigned apexes'
-/// cross coordinate equals the wall's EXACTLY.
+/// coordinate onto it: after the Length question (always first) the CROSS
+/// question is SKIPPED (the coordinate is exact by construction) — the flow
+/// moves straight to the START question — the single tag renders at the
+/// segment midpoint from then on (the stage owns the tag: none shows at the
+/// Length stage, where no snap question has been passed yet), and the
+/// assigned apexes' cross coordinate equals the wall's EXACTLY.
 #[test]
 fn roof_ridge_snap_skips_the_cross_question_and_lands_on_the_wall() {
     let mut c = ceiling_ready_l_controller();
@@ -4221,13 +4230,20 @@ fn roof_ridge_snap_skips_the_cross_question_and_lands_on_the_wall() {
     // extent (y 0.5..3.5) stays inside the L's lower band, beyond snap
     // tolerance of any horizontal wall.
     c.apply_roof_ridge_stroke_event(&[(5.88, 0.5), (5.92, 2.0), (5.9, 3.5)]);
+    assert!(c.roof_ridge_length_pending(), "length is always question 1");
+    let ((ax, _), _) = c.pending_roof_ridge_line().unwrap();
+    assert!((ax - 6.0).abs() < 1e-6, "coordinate snapped to the wall");
+    assert!(
+        c.roof_ridge_snap_tag().is_none(),
+        "no tag at the Length stage — no snap question passed yet"
+    );
+
+    c.skip_roof_ridge_length().unwrap(); // length: drawn length stands
     let ui = c
         .position_prompt_for_ui()
         .expect("cross snapped → the START question opens directly");
     assert_eq!(ui.kind, PositionPromptKind::Line);
     assert_eq!(ui.axis, ParameterAxis::Y, "the along axis's question");
-    let ((ax, _), _) = c.pending_roof_ridge_line().unwrap();
-    assert!((ax - 6.0).abs() < 1e-6, "coordinate snapped to the wall");
 
     let tag = c.roof_ridge_snap_tag().expect("snap tag present");
     assert_eq!(
@@ -4245,11 +4261,9 @@ fn roof_ridge_snap_skips_the_cross_question_and_lands_on_the_wall() {
         "menu = Don't snap only"
     );
 
-    c.skip_position_dimension(); // start: drawn lo stands
-    assert!(c.roof_ridge_length_pending());
-    assert!(c.roof_ridge_snap_tag().is_some(), "tag still clickable");
-    c.skip_roof_ridge_length(); // length: drawn length stands
+    c.skip_position_dimension(); // start: drawn lo stands → finalize
     assert!(c.roof_ridge_height_pending());
+    assert!(c.roof_ridge_snap_tag().is_some(), "tag still clickable");
     c.assign_roof_ridge_height(4.0).expect("ridge assigns");
     let storey = &c.current_record.as_ref().unwrap().data.storeys[0];
     assert_eq!(storey.roof_apexes.len(), 2);
@@ -4263,39 +4277,51 @@ fn roof_ridge_snap_skips_the_cross_question_and_lands_on_the_wall() {
 }
 
 /// A stroke whose LO endpoint lands within snap tolerance of a PERPENDICULAR
-/// wall snaps the START: question 2 is skipped (cross → straight to the
-/// length), the start tag renders at the LO endpoint, and the drawn LENGTH
-/// rides unchanged (snapping slides the extent, it doesn't stretch it).
-/// "Don't snap" on the start tag reverts `lo` and reopens question 2 only.
+/// wall snaps the START: its question is skipped (cross → straight through
+/// finalize to the height), the start tag renders at the LO endpoint from
+/// the Height stage, the Length question reports the extent ANCHORED, and
+/// the drawn LENGTH rides unchanged (snapping slides the extent, it doesn't
+/// stretch it). "Don't snap" on the start tag reverts `lo` and reopens the
+/// start question only (the resolved length + cross stand).
 #[test]
-fn roof_ridge_start_snap_skips_question_two_and_unsnap_reopens_it() {
+fn roof_ridge_start_snap_skips_its_question_and_unsnap_reopens_it() {
     let mut c = ceiling_ready_l_controller();
     c.set_roof_point_mode(true);
     // Vertical stroke at x ≈ 2.8 (no parallel wall within 0.2), starting at
     // y ≈ 4.1 — within 0.2 of the horizontal wall y = 4 — ending at y = 8.5.
     c.apply_roof_ridge_stroke_event(&[(2.78, 4.1), (2.82, 6.0), (2.8, 8.5)]);
 
-    // Question 1 (cross) opens first; no tag yet — the stage owns the tag,
-    // and the riding start snap's question hasn't arrived.
+    // Question 1 (length) opens first; the snapped start ANCHORS the
+    // extent (a typed length extends from the exact wall coordinate); no
+    // tag yet — the stage owns the tag, and no snap question has arrived.
+    assert!(c.roof_ridge_length_pending(), "length first");
+    assert!(c.roof_ridge_length_anchored(), "start snapped → anchored");
+    assert!(c.roof_ridge_snap_tag().is_none(), "no tag at the length");
+    let ((_, ay), (_, by)) = c.pending_roof_ridge_line().unwrap();
+    assert!((ay - 4.0).abs() < 1e-6, "lo snapped onto the wall");
+    assert!(
+        (by - 8.4).abs() < 1e-4,
+        "drawn length (4.4) slides with the snap, it doesn't stretch"
+    );
+    c.skip_roof_ridge_length().unwrap(); // drawn 4.4 stands
+
+    // Question 2 (cross) opens — still no tag (the start's question
+    // hasn't arrived; the cross stage implies an un-snapped cross).
     let ui = c.position_prompt_for_ui().expect("cross question");
     assert_eq!(ui.axis, ParameterAxis::X);
     assert!(c.roof_ridge_snap_tag().is_none(), "no tag at the cross");
     c.apply_position_dimension(2.5).expect("cross applies"); // from x = 0
 
-    // Question 2 is SKIPPED: the start snapped onto y = 4.
+    // The start question is SKIPPED (snapped) → finalize → height.
     assert!(
         c.position_prompt_for_ui().is_none(),
         "snapped start skips its question"
     );
-    assert!(c.roof_ridge_length_pending(), "straight to the length");
-    let ((ax, ay), (_, by)) = c.pending_roof_ridge_line().unwrap();
+    assert!(c.roof_ridge_height_pending(), "straight to the height");
+    let ((ax, ay), _) = c.pending_roof_ridge_line().unwrap();
     assert!(
         (ax - 2.5).abs() < 1e-6 && (ay - 4.0).abs() < 1e-6,
         "snapped"
-    );
-    assert!(
-        (by - 8.4).abs() < 1e-4,
-        "drawn length (4.4) slides with the snap, it doesn't stretch"
     );
     let tag = c.roof_ridge_snap_tag().expect("start tag present");
     assert!(
@@ -4307,8 +4333,8 @@ fn roof_ridge_start_snap_skips_question_two_and_unsnap_reopens_it() {
         "identity = the drawn start"
     );
 
-    // "Don't snap": lo reverts to the drawn 4.1 and ONLY question 2 reopens
-    // (the typed cross stands).
+    // "Don't snap": lo reverts to the drawn 4.1 and ONLY the start
+    // question reopens (the typed cross AND the resolved length stand).
     c.unsnap_roof_ridge();
     assert!(c.roof_ridge_snap_tag().is_none(), "snap dropped");
     let ui = c.position_prompt_for_ui().expect("start question reopened");
@@ -4317,47 +4343,47 @@ fn roof_ridge_start_snap_skips_question_two_and_unsnap_reopens_it() {
     assert!((ax - 2.5).abs() < 1e-6, "resolved cross kept");
     assert!((ay - 4.1).abs() < 0.05, "back at the DRAWN start");
 
-    // Type the start (1 m from the nearest ref y = 4, drawn side +) and a
-    // length: the apexes land at the RESOLVED start/length.
+    // Type the start (1 m from the nearest ref y = 4, drawn side +): the
+    // apexes land at the RESOLVED start with the resolved (drawn) length.
     c.apply_position_dimension(1.0).expect("start applies"); // y = 5
-    c.assign_roof_ridge_length(3.0).expect("length applies");
     c.assign_roof_ridge_height(4.0).expect("ridge assigns");
     let storey = &c.current_record.as_ref().unwrap().data.storeys[0];
-    for (apex, want_y) in storey.roof_apexes.iter().zip([5.0, 8.0]) {
+    for (apex, want_y) in storey.roof_apexes.iter().zip([5.0, 9.4]) {
         assert!((apex.point.x - 2.5).abs() < 1e-6);
         assert!((apex.point.y - want_y).abs() < 1e-4);
     }
 }
 
 /// "Don't snap" on the CROSS tag reverts the cross coordinate to its DRAWN
-/// value and RESTARTS from question 1 (re-asking the start question — the
-/// roof point's restart reasoning); the reopened flow works as normal (skip
-/// everything keeps the drawn segment, assign lands there).
+/// value and RESTARTS from the cross question (re-asking the start question
+/// — the roof point's restart reasoning; the resolved LENGTH stands, its
+/// question came first); the reopened flow works as normal (skip everything
+/// keeps the drawn segment, assign lands there).
 #[test]
 fn unsnap_roof_ridge_cross_reopens_the_cross_question_with_the_drawn_coord() {
     let mut c = ceiling_ready_l_controller();
     c.set_roof_point_mode(true);
     c.apply_roof_ridge_stroke_event(&[(5.88, 0.5), (5.92, 2.0), (5.9, 3.5)]);
-    // Cross snapped → start question up, cross tag showing. Pass the start
-    // and the length: the tag stays clickable through both stages.
+    // Cross snapped: pass the length, then the start question (the cross's
+    // was skipped) — the cross tag stays clickable through to the height.
+    c.skip_roof_ridge_length().unwrap();
     c.skip_position_dimension();
-    c.skip_roof_ridge_length();
     assert!(c.roof_ridge_height_pending());
+    assert!(c.roof_ridge_snap_tag().is_some(), "cross tag at the height");
 
     c.unsnap_roof_ridge();
     assert!(c.roof_ridge_snap_tag().is_none(), "snap dropped");
     let ui = c.position_prompt_for_ui().expect("cross question reopened");
     assert_eq!(ui.kind, PositionPromptKind::Line);
-    assert_eq!(ui.axis, ParameterAxis::X, "restarted from question 1");
+    assert_eq!(ui.axis, ParameterAxis::X, "restarted from the cross");
     let ((ax, _), _) = c.pending_roof_ridge_line().unwrap();
     assert!((ax - 5.9).abs() < 0.05, "back at the DRAWN coordinate");
 
     c.skip_position_dimension(); // cross: drawn stands
     c.skip_position_dimension(); // start re-asked: drawn stands
-    c.skip_roof_ridge_length();
     assert!(
         c.roof_ridge_height_pending(),
-        "skips → height, drawn values"
+        "skips → height, drawn values (the resolved length stood)"
     );
     c.assign_roof_ridge_height(4.0).expect("ridge assigns");
     let storey = &c.current_record.as_ref().unwrap().data.storeys[0];
@@ -4377,9 +4403,9 @@ fn unsnap_roof_ridge_cross_reopens_the_cross_question_with_the_drawn_coord() {
 fn roof_ridge_survives_reload_and_rederive_fixpoint() {
     let mut c = roof_ready_controller();
     c.apply_roof_ridge_stroke_event(&[(3.78, 2.0), (3.82, 5.0), (3.8, 8.0)]);
+    c.assign_roof_ridge_length(6.0).unwrap();
     c.apply_position_dimension(4.0).unwrap(); // cross
     c.apply_position_dimension(2.0).unwrap(); // start (y = 2)
-    c.assign_roof_ridge_length(6.0).unwrap();
     c.assign_roof_ridge_height(4.2).unwrap();
     c.materialize();
     let before = roof_vertex_fingerprint(&c);
@@ -4414,9 +4440,9 @@ fn roof_ridge_survives_reload_and_rederive_fixpoint() {
 fn deleting_one_ridge_apex_degrades_to_a_fan() {
     let mut c = roof_ready_controller();
     c.apply_roof_ridge_stroke_event(&[(3.78, 2.0), (3.82, 5.0), (3.8, 8.0)]);
+    c.skip_roof_ridge_length().unwrap();
     c.apply_position_dimension(4.0).unwrap(); // cross
     c.skip_position_dimension(); // start: drawn stands
-    c.skip_roof_ridge_length();
     c.assign_roof_ridge_height(4.2).unwrap();
     c.materialize();
 
@@ -4441,9 +4467,15 @@ fn deleting_one_ridge_apex_degrades_to_a_fan() {
 }
 
 /// Rejections at every typed stage keep the pending ridge open for a
-/// retype: a zero-ish LENGTH, a length pushing the far end off the
-/// footprint, and a height within a centimetre of the base. Off-footprint
-/// and non-line strokes never go pending at all, and a tap while a ridge is
+/// retype, each stage rejecting only what is KNOWABLE at it (the
+/// validation/stage table): the LENGTH stage rejects a zero-ish value and
+/// one beyond EVERY ceiling area's bbox (the optimistic bound, with the
+/// permitted bound in the message); a length that fits the bbox but not the
+/// actual run is accepted at Length and rejected at the LAST OPEN location
+/// stage (here the start), where the geometry becomes fully determined —
+/// with the permitted run, the rejection attached to the typed position;
+/// the HEIGHT stage rejects only the height value itself. Off-footprint and
+/// non-line strokes never go pending at all, and a tap while a ridge is
 /// pending does NOT start a point flow.
 #[test]
 fn roof_ridge_rejections_keep_the_pending_and_bad_strokes_never_pend() {
@@ -4453,23 +4485,40 @@ fn roof_ridge_rejections_keep_the_pending_and_bad_strokes_never_pend() {
     assert!(!c.roof_ridge_pending(), "off-footprint stroke rejected");
 
     c.apply_roof_ridge_stroke_event(&[(3.78, 2.0), (3.82, 5.0), (3.8, 8.0)]);
-    c.apply_position_dimension(4.0).unwrap(); // cross
-    c.skip_position_dimension(); // start: drawn lo = 2 stands
-    assert!(c.roof_ridge_length_pending());
+    assert!(c.roof_ridge_length_pending(), "length is question 1");
     // A tap while the ridge is pending must not spawn a roof point.
     c.roof_point_tap(7.0, 5.0);
     assert!(!c.roof_point_pending(), "tap suppressed while ridge pends");
 
-    // Length rejections: zero-ish, then out of the ceiling area (from y = 2
-    // the flat 10×10 region's run is 8 m; 9 overshoots) — with the
-    // permitted run in the message.
+    // Length rejections: zero-ish, then beyond every area's bbox (the
+    // 10×10 footprint's one flat region runs 10 m along the ridge axis) —
+    // with the permitted bound in the message.
     let err = c.assign_roof_ridge_length(0.0).unwrap_err();
     assert!(err.contains("more than a centimetre"), "got: {err}");
-    let err = c.assign_roof_ridge_length(9.0).unwrap_err();
+    let err = c.assign_roof_ridge_length(11.0).unwrap_err();
+    assert!(err.contains("No ceiling area is that long"), "got: {err}");
+    assert!(err.contains("under 10.00 m"), "got: {err}");
+    assert!(c.roof_ridge_length_pending(), "pending intact on rejection");
+
+    // 9 m fits the bbox → ACCEPTED at Length (the bound is deliberately
+    // optimistic — no location is known yet)…
+    c.assign_roof_ridge_length(9.0)
+        .expect("a bbox-fitting length passes the Length stage");
+    c.apply_position_dimension(4.0).unwrap(); // cross → x = 4
+                                              // …and rejected at the LAST OPEN stage: a typed start of 2 m (from
+                                              // y = 0) leaves only an 8 m run — the finalize check rejects the START
+                                              // entry with the permitted run, and the prompt stays open.
+    let err = c.apply_position_dimension(2.0).unwrap_err();
     assert!(err.contains("out of its ceiling area"), "got: {err}");
     assert!(err.contains("under 8.00 m"), "got: {err}");
-    assert!(c.roof_ridge_length_pending(), "pending intact on rejection");
-    c.assign_roof_ridge_length(6.0).expect("valid length lands");
+    assert!(
+        c.roof_ridge_position_pending(),
+        "start prompt stays open on the finalize rejection"
+    );
+    // A start the length fits from (y = 0.5: a 9.5 m run) lands → height.
+    c.apply_position_dimension(0.5)
+        .expect("fitting start lands");
+    assert!(c.roof_ridge_height_pending());
 
     let err = c.assign_roof_ridge_height(2.405).unwrap_err();
     assert!(err.contains("within a centimetre"), "got: {err}");
@@ -4478,6 +4527,132 @@ fn roof_ridge_rejections_keep_the_pending_and_bad_strokes_never_pend() {
     assert!(storey.roof_apexes.is_empty(), "nothing committed");
 
     c.assign_roof_ridge_height(4.2).expect("valid height lands");
+    assert!(!c.roof_ridge_pending());
+}
+
+/// THE STAGE-ORDER TABLE (design §3, normative): Length is question 1 and
+/// is always asked; the Cross and Start questions follow, each SKIPPED when
+/// its degree of freedom snapped at stroke time; the finalize placement
+/// check runs at the last open stage; then Height. One row per snap
+/// combination, driven by where the stroke lands in the L footprint (the
+/// interior wall x = 6 and the horizontal wall y = 4 are the snap targets).
+#[test]
+fn roof_ridge_stage_order_table() {
+    // The pending ridge's stage as a short label. The two position
+    // questions are told apart by the open prompt's axis — the table uses
+    // VERTICAL strokes only, so X is the cross question, Y the start.
+    fn stage(c: &AppController) -> &'static str {
+        if c.roof_ridge_length_pending() {
+            return "len";
+        }
+        if c.roof_ridge_height_pending() {
+            return "height";
+        }
+        if c.roof_ridge_position_pending() {
+            let ui = c
+                .position_prompt_for_ui()
+                .expect("position stage has a prompt");
+            return match ui.axis {
+                ParameterAxis::X => "cross",
+                ParameterAxis::Y => "start",
+            };
+        }
+        "none"
+    }
+    let rows: [(&str, [(f32, f32); 2], &[&str]); 3] = [
+        (
+            "no snaps",
+            [(2.78, 1.0), (2.8, 3.0)],
+            &["len", "cross", "start", "height"],
+        ),
+        (
+            "cross snapped (x ≈ 5.9 → 6)",
+            [(5.88, 0.5), (5.9, 3.5)],
+            &["len", "start", "height"],
+        ),
+        (
+            "start snapped (y ≈ 4.1 → 4)",
+            [(2.78, 4.1), (2.8, 8.5)],
+            &["len", "cross", "height"],
+        ),
+    ];
+    for (name, stroke, want) in rows {
+        let mut c = ceiling_ready_l_controller();
+        c.set_roof_point_mode(true);
+        c.apply_roof_ridge_stroke_event(&stroke);
+        let mut seq: Vec<&str> = Vec::new();
+        let mut guard = 0;
+        while c.roof_ridge_pending() && guard < 6 {
+            let s = stage(&c);
+            seq.push(s);
+            match s {
+                "len" => c
+                    .skip_roof_ridge_length()
+                    .unwrap_or_else(|e| panic!("{name}: length skip rejected: {e}")),
+                "cross" | "start" => c.skip_position_dimension(),
+                "height" => break,
+                other => panic!("{name}: unexpected stage {other}"),
+            }
+            guard += 1;
+        }
+        assert_eq!(&seq, want, "{name}");
+    }
+}
+
+/// The ALL-SNAPPED row of the stage table: with BOTH positions snapped no
+/// location question opens, so the finalize placement check runs straight
+/// off the Length stage and its rejection lands on the typed length. In the
+/// L footprint every (vertical-wall, horizontal-wall) snap pair meets ON
+/// the footprint boundary — here the corner (6, 4) — which the strict
+/// containment rejects; the Length stage stays open (Cancel recovers).
+#[test]
+fn roof_ridge_all_snapped_finalize_rejection_lands_on_the_length() {
+    let mut c = ceiling_ready_l_controller();
+    c.set_roof_point_mode(true);
+    // x ≈ 5.9 → snaps 6; lo ≈ 4.1 → snaps 4: the start is the corner (6, 4).
+    c.apply_roof_ridge_stroke_event(&[(5.88, 4.1), (5.9, 8.5)]);
+    assert!(c.roof_ridge_length_pending(), "length is question 1");
+    let ((ax, ay), _) = c.pending_roof_ridge_line().unwrap();
+    assert!(
+        (ax - 6.0).abs() < 1e-6 && (ay - 4.0).abs() < 1e-6,
+        "both snaps landed"
+    );
+    let err = c.assign_roof_ridge_length(2.0).unwrap_err();
+    assert!(
+        err.contains("doesn't sit inside a ceiling area"),
+        "the finalize start-containment rejection, on the typed length: {err}"
+    );
+    assert!(c.roof_ridge_length_pending(), "length stage stays open");
+    // The skip path trips the same check (logged + surfaced to the caller).
+    let err = c.skip_roof_ridge_length().unwrap_err();
+    assert!(err.contains("doesn't sit inside a ceiling area"), "{err}");
+    c.cancel_pending_roof_ridge();
+    assert!(!c.roof_ridge_pending(), "cancel recovers");
+}
+
+/// Finalize at the CROSS stage: when the start snapped, the cross question
+/// is the LAST open location stage, so a length that fits the bbox but not
+/// the run from the snapped start is rejected on the typed CROSS distance —
+/// with the permitted run — and an achievable cross then lands.
+#[test]
+fn roof_ridge_finalize_rejection_lands_on_the_cross_when_start_snapped() {
+    let mut c = ceiling_ready_l_controller();
+    c.set_roof_point_mode(true);
+    // Start snaps to y = 4; the upper arm's run from there is 6 m (y 4..10).
+    c.apply_roof_ridge_stroke_event(&[(2.78, 4.1), (2.8, 8.5)]);
+    // 6.5 m fits the L's 10 m bbox → passes the Length stage's bound.
+    c.assign_roof_ridge_length(6.5)
+        .expect("optimistic bound passes");
+    let ui = c.position_prompt_for_ui().expect("cross question");
+    assert_eq!(ui.axis, ParameterAxis::X);
+    // The cross answer completes the geometry → finalize: from (2.5, 4)
+    // the run is 6 m, the 6.5 m length doesn't fit — rejected on the typed
+    // cross, prompt stays open.
+    let err = c.apply_position_dimension(2.5).unwrap_err();
+    assert!(err.contains("out of its ceiling area"), "got: {err}");
+    assert!(err.contains("under 6.00 m"), "got: {err}");
+    assert!(c.roof_ridge_position_pending(), "cross prompt stays open");
+    c.cancel_pending_roof_ridge();
     assert!(!c.roof_ridge_pending());
 }
 
@@ -4972,19 +5147,19 @@ fn users_l_session_raised_section_wall_tops_follow_the_step() {
     );
 }
 
-/// The END-OF-SESSION ridge from the live report: a near-vertical ridge
-/// stroke at x ≈ 3.73–3.78 (y 1.66 → 2.67) over the RAISED jut (its ceiling
-/// piece runs 2.0 m, inner_y → max_y, at 3.4), the cross question skipped,
-/// the start typed as 1.0 m from the inner horizontal wall (lo = inner_y +
-/// 1.0 — exactly 1.0 m below the top wall). The length is now limited by the
-/// raised ceiling AREA, not the footprint bbox: an overshooting length AND
-/// the wall-to-wall length are both rejected WITH the permitted run (the
-/// wall-to-wall far end would land ON the area boundary and only fail later
-/// at the Height stage — the old bbox test accepted it dishonestly); a
-/// just-under length is accepted and the Height stage then SUCCEEDS — the
-/// no-late-rejection invariant, end to end.
+/// The END-OF-SESSION ridge from the live report, under the Length-first
+/// order: a near-vertical ridge stroke at x ≈ 3.73–3.78 (y 1.66 → 2.67)
+/// over the RAISED jut (its ceiling piece runs 2.0 m, inner_y → max_y, at
+/// 3.4). The LENGTH question opens first and its bound is OPTIMISTIC (the
+/// typed 1.5 m fits several areas' bboxes, so it passes); the cross is then
+/// skipped (the drawn x stands), and the START — the last open location
+/// stage — runs the binding placement check: from lo = inner_y + 1.0 the
+/// raised area's far wall is exactly 1.0 m away, so the 1.5 m ridge is
+/// rejected ON THE TYPED START with the permitted run; a start the length
+/// fits from is accepted and the Height stage then SUCCEEDS — the
+/// no-late-rejection invariant in its honest form, end to end.
 #[test]
-fn users_l_session_ridge_length_is_limited_to_the_raised_area_and_height_lands() {
+fn users_l_session_ridge_placement_is_limited_to_the_raised_area_and_height_lands() {
     let (mut c, [_, max_x, _, max_y, inner_x, inner_y]) = users_l_session_controller();
     apply_users_ceiling_step(&mut c, inner_x, inner_y, max_x, max_y);
 
@@ -4997,36 +5172,51 @@ fn users_l_session_ridge_length_is_limited_to_the_raised_area_and_height_lands()
         })
         .collect();
     c.apply_roof_ridge_stroke_event(&stroke);
+    // Question 1: the length. A wildly long value is rejected HERE (it
+    // fits no area's bbox — the optimistic bound)…
+    assert!(c.roof_ridge_length_pending(), "length question opens");
+    let err = c.assign_roof_ridge_length(25.0).unwrap_err();
+    assert!(
+        err.contains("No ceiling area is that long"),
+        "beyond every bbox → the Length-stage bound: {err}"
+    );
+    assert!(c.roof_ridge_length_pending(), "pending intact on rejection");
+    // …but 1.5 m fits SOME area's bbox, so it passes — the binding check
+    // is the location stage's.
+    c.assign_roof_ridge_length(1.5)
+        .expect("a bbox-fitting length passes the Length stage");
+
     // Neither drawn position is within snap tolerance (nearest parallel
-    // walls sit ≈ 0.46 m / 0.45 m away) → question 1 (cross) opens.
+    // walls sit ≈ 0.46 m / 0.45 m away) → the cross question opens.
     assert!(c.roof_ridge_position_pending(), "cross question opens");
     c.skip_position_dimension(); // cross: the drawn x ≈ 3.75 stands
     assert!(c.roof_ridge_position_pending(), "start question opens");
-    c.apply_position_dimension(1.0).unwrap(); // start: 1.0 m above inner_y
-    assert!(c.roof_ridge_length_pending(), "length question opens");
 
-    // From lo = inner_y + 1.0 the raised area's far wall is exactly 1.0 m
-    // away: an overshoot AND the exact wall-to-wall length are rejected,
-    // and the message SAYS what fits.
-    for len in [1.5, 1.0] {
-        let err = c.assign_roof_ridge_length(len).unwrap_err();
-        assert!(
-            err.contains("out of its ceiling area"),
-            "len {len}, stable prefix kept: {err}"
-        );
-        assert!(
-            err.contains("under 1.00 m"),
-            "len {len}, permitted run in the message: {err}"
-        );
-        assert!(c.roof_ridge_length_pending(), "pending intact on rejection");
-    }
+    // The START is the last open location stage: from lo = inner_y + 1.0
+    // the raised area's far wall is exactly 1.0 m away — the 1.5 m ridge
+    // is rejected on the typed start, WITH the permitted run, and the
+    // prompt stays open.
+    let err = c.apply_position_dimension(1.0).unwrap_err();
+    assert!(
+        err.contains("out of its ceiling area"),
+        "stable prefix kept: {err}"
+    );
+    assert!(
+        err.contains("under 1.00 m"),
+        "permitted run in the message: {err}"
+    );
+    assert!(
+        c.roof_ridge_position_pending(),
+        "start prompt stays open on the finalize rejection"
+    );
 
-    // Just under the run: accepted…
-    c.assign_roof_ridge_length(0.99)
-        .expect("a length inside the raised area lands");
+    // A start the length fits from (0.3 m above inner_y leaves a 1.7 m
+    // run): accepted…
+    c.apply_position_dimension(0.3)
+        .expect("a start the length fits from lands");
     assert!(c.roof_ridge_height_pending(), "on to the height question");
-    // …and the Height stage must then SUCCEED: Length-stage acceptance
-    // implies the height validation's strict same-region containment.
+    // …and the Height stage must then SUCCEED: finalize acceptance implies
+    // the height validation's strict same-region containment.
     c.assign_roof_ridge_height(4.2)
         .expect("no late rejection at the height stage");
     assert!(!c.roof_ridge_pending(), "flow complete");

@@ -473,6 +473,7 @@ impl eframe::App for BerApp {
                                 roof_ridge_snap_tag,
                                 roof_ridge_position_pending,
                                 roof_ridge_length_pending,
+                                roof_ridge_length_anchored,
                                 pending_roof_ridge_length,
                                 roof_ridge_height_pending,
                                 roof_ridge_pending,
@@ -552,6 +553,7 @@ impl eframe::App for BerApp {
                                     controller_ref.roof_ridge_snap_tag(),
                                     controller_ref.roof_ridge_position_pending(),
                                     controller_ref.roof_ridge_length_pending(),
+                                    controller_ref.roof_ridge_length_anchored(),
                                     controller_ref.pending_roof_ridge_length(),
                                     controller_ref.roof_ridge_height_pending(),
                                     controller_ref.roof_ridge_pending(),
@@ -758,6 +760,7 @@ impl eframe::App for BerApp {
                                 roof_ridge_snap_tag: roof_ridge_snap_tag.as_ref(),
                                 roof_ridge_position_pending,
                                 roof_ridge_length_pending,
+                                roof_ridge_length_anchored,
                                 roof_ridge_height_pending,
                                 roof_ridge_pending,
                                 roof_ridge_length_input: &mut self
@@ -1084,8 +1087,18 @@ impl eframe::App for BerApp {
                                         }
                                     }
                                     SketchEvent::SkipRoofRidgeLength => {
-                                        controller.borrow_mut().skip_roof_ridge_length();
-                                        self.sketch_state.roof_error = None;
+                                        // The skip can trip the FINALIZE placement
+                                        // check (both positions snapped): surface it
+                                        // like a typed rejection.
+                                        match controller.borrow_mut().skip_roof_ridge_length() {
+                                            Ok(()) => {
+                                                self.sketch_state.roof_error = None;
+                                            }
+                                            Err(e) => {
+                                                eprintln!("skip_roof_ridge_length: {}", e);
+                                                self.sketch_state.roof_error = Some(e);
+                                            }
+                                        }
                                     }
                                     SketchEvent::AssignRoofRidgeHeight(z_m) => {
                                         match controller.borrow_mut().assign_roof_ridge_height(z_m)

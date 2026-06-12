@@ -24,6 +24,11 @@
 //! - [`validate_roof_ridge`] — the materialized check for the LINE input,
 //!   which places both apexes at once: both endpoints strictly inside the
 //!   same un-apexed flat region.
+//! - [`validate_roof_ridge_length`] — the LENGTH-stage check (asked FIRST,
+//!   before any location is known): an OPTIMISTIC bound — the length must
+//!   fit SOME flat, un-apexed ceiling area's plan bbox.
+//! - [`validate_roof_ridge_extent`] — the FINALIZE placement check, run at
+//!   the last open location stage once the geometry is fully determined.
 //!
 //! [`CeilingRegions::apex_groups`]:
 //! datatypes::ber::structural::CeilingRegions::apex_groups
@@ -101,6 +106,12 @@ const RIDGE_START_OUTSIDE_CEILING_MSG: &str =
 /// knows what would fit.
 const RIDGE_LENGTH_EXCEEDS_AREA_MSG: &str =
     "That length would push the ridge out of its ceiling area — enter a length that fits";
+
+/// User-facing rejection for a typed ridge length longer than EVERY flat,
+/// un-apexed ceiling area's plan-bbox extent along the ridge axis — the
+/// Length stage's optimistic bound ([`validate_roof_ridge_length`]). Kept
+/// stable as the message PREFIX; the permitted bound is appended.
+const RIDGE_LENGTH_NO_AREA_MSG: &str = "No ceiling area is that long — enter a length under";
 
 /// A typed ridge length at or below this (m) is rejected — it places the two
 /// apexes (near-)coincident.
@@ -290,23 +301,83 @@ pub fn validate_roof_ridge(
     Ok(())
 }
 
-/// Validate a typed roof-ridge LENGTH against the storey's RESOLVED roofs
-/// (the materialized check — the old footprint-bbox test let a length clear
-/// the bbox yet cross a ceiling-area boundary, failing only at the Height
-/// stage; this rejects honestly at Length):
+/// Validate a typed roof-ridge LENGTH against the storey's RESOLVED roofs —
+/// the LENGTH stage's check, asked FIRST in the flow, before any location
+/// question, so only an OPTIMISTIC bound is knowable:
 ///
-/// - The length itself must exceed a centimetre (shorter places the two
-///   apexes coincident).
+/// - The length itself must be finite and exceed a centimetre (shorter
+///   places the two apexes coincident).
+/// - The length must fit in SOME ceiling area: `len ≤` the max over flat,
+///   un-apexed regions of the plan-bbox extent along the ridge (extent)
+///   axis `axis.other()`. A cheap over-approximation — a length that fits
+///   the bbox but not the actual run is rejected later, at the location
+///   stage that fully determines the geometry (the finalize check,
+///   [`validate_roof_ridge_extent`], whose rejection then attaches to the
+///   position the user just entered).
+///
+/// `Err` is user-facing, messages stable: the over-length rejection carries
+/// the permitted bound ([`RIDGE_LENGTH_NO_AREA_MSG`] prefix).
+pub fn validate_roof_ridge_length(
+    storey: &Storey,
+    axis: ParameterAxis,
+    len_m: f32,
+) -> Result<(), String> {
+    if !len_m.is_finite() || len_m <= MIN_RIDGE_LENGTH_M {
+        return Err(RIDGE_LENGTH_TOO_SHORT_MSG.to_string());
+    }
+    // Only flat, un-apexed regions can host a new ridge — the same region
+    // predicates the finalize check applies, lifted to the optimistic
+    // "could ANY area take it" form.
+    let groups = storey.roofs.apex_groups(&storey.roof_apexes);
+    let max_extent = storey
+        .roofs
+        .regions
+        .iter()
+        .enumerate()
+        .filter(|(i, r)| r.flat_z().is_some() && !groups.iter().any(|g| g.region_idxs.contains(i)))
+        .map(|(_, r)| {
+            // The region's plan-bbox extent along the EXTENT axis (the
+            // ridge runs along `axis.other()` per the axis convention).
+            let mut min = f64::INFINITY;
+            let mut max = f64::NEG_INFINITY;
+            for v in &r.polygon.exterior {
+                let c = match axis {
+                    ParameterAxis::X => v.y,
+                    ParameterAxis::Y => v.x,
+                };
+                min = min.min(c);
+                max = max.max(c);
+            }
+            max - min
+        })
+        .fold(0.0_f64, f64::max);
+    if (len_m as f64) > max_extent {
+        return Err(format!("{RIDGE_LENGTH_NO_AREA_MSG} {max_extent:.2} m."));
+    }
+    Ok(())
+}
+
+/// Validate the pending ridge's PLACEMENT against the storey's RESOLVED
+/// roofs — THE FINALIZE CHECK, run at the moment the geometry becomes fully
+/// determined (the last open location stage, or straight after the typed
+/// length when every location was snapped), so its rejection always attaches
+/// to a value the user just entered:
+///
 /// - The ridge's START — `(coord, lo)` for a vertical ridge (`axis` = X),
 ///   `(lo, coord)` for a horizontal one (the shell's ridge-endpoint axis
 ///   convention) — must sit STRICTLY inside one ceiling region
 ///   ([`region_strictly_containing`]; boundary excluded, so a snapped start
 ///   ON a wall is rejected here — recoverable via the snap tag).
+/// - That region must be flat and un-apexed (the same predicates the Height
+///   stage re-checks — rejecting here keeps the Height stage's only
+///   rejectable input the height value itself).
 /// - The resolved extent `[lo, lo + len]` must fit that region's contiguous
 ///   run along the extent axis from the start
 ///   ([`CeilingRegion::plan_span_through`]'s `t_max`), keeping
-///   [`RIDGE_CLEAR_TOL_M`] clear of the boundary so Length-stage acceptance
+///   [`RIDGE_CLEAR_TOL_M`] clear of the boundary so finalize acceptance
 ///   implies the Height stage's strict containment.
+/// - The length is re-guarded cheaply (> 1 cm): the SKIP path accepts the
+///   drawn length without the Length stage's validation.
 ///
 /// `Err` is user-facing: the over-length rejection carries the permitted run
 /// ("under N.NN m from that start") so the user knows what would fit.
@@ -341,10 +412,10 @@ pub fn validate_roof_ridge_extent(
         .map_err(|_| RIDGE_START_OUTSIDE_CEILING_MSG.to_string())?;
     // Reject occupied / already-sloped areas HERE rather than letting the
     // Height stage reject later — both are properties of the start's region,
-    // fully knowable at the Length question (the no-late-rejection invariant
-    // then genuinely covers every Height-stage region predicate; only the
-    // height VALUE itself can still be rejected, which is the user's own
-    // entry on that stage).
+    // fully knowable at finalize (the no-late-rejection invariant then
+    // genuinely covers every Height-stage region predicate; only the height
+    // VALUE itself can still be rejected, which is the user's own entry on
+    // that stage).
     let groups = storey.roofs.apex_groups(&storey.roof_apexes);
     if groups.iter().any(|g| g.region_idxs.contains(&ridx)) {
         return Err(RIDGE_REGION_OCCUPIED_MSG.to_string());
@@ -822,13 +893,89 @@ mod tests {
             .contains("straight"));
     }
 
-    /// validate_roof_ridge_extent: a sane typed length passes; a zero-ish or
-    /// non-finite length gets the too-short message; a start not strictly
-    /// inside a ceiling region (boundary, outside, no roofs at all) gets the
-    /// stable start-outside message; a length reaching the region boundary —
-    /// wall-to-wall INCLUDED, the deliberate flip from the old bbox test —
-    /// is rejected WITH the permitted run, because Length-stage acceptance
-    /// must imply the Height stage's strict containment.
+    /// validate_roof_ridge_length (the LENGTH stage's optimistic bound): a
+    /// zero-ish or non-finite length gets the too-short message; a length
+    /// within SOME flat un-apexed region's plan-bbox extent along the ridge
+    /// axis passes — even when no actual run that long exists through any
+    /// particular start (the binding check is finalize's); a length beyond
+    /// EVERY area's bbox is rejected with the stable no-area prefix AND the
+    /// permitted bound.
+    #[test]
+    fn validate_ridge_length_is_an_optimistic_bbox_bound() {
+        let storey = storey_with_flat_roof(2.4);
+        for len in [0.0, 0.01, -2.0, f32::NAN] {
+            assert_eq!(
+                validate_roof_ridge_length(&storey, ParameterAxis::X, len).unwrap_err(),
+                RIDGE_LENGTH_TOO_SHORT_MSG,
+                "len {len}"
+            );
+        }
+        // The 4×4 region's bbox extent along either axis is 4: the full
+        // wall-to-wall bound passes at THIS stage (the location stage may
+        // still reject the actual run), anything beyond is rejected with
+        // the bound in the message.
+        assert!(validate_roof_ridge_length(&storey, ParameterAxis::X, 3.0).is_ok());
+        assert!(validate_roof_ridge_length(&storey, ParameterAxis::X, 4.0).is_ok());
+        let err = validate_roof_ridge_length(&storey, ParameterAxis::X, 4.5).unwrap_err();
+        assert!(
+            err.starts_with(RIDGE_LENGTH_NO_AREA_MSG) && err.contains("under 4.00 m"),
+            "got: {err}"
+        );
+
+        // OPTIMISM, demonstrated: the notched C-shape's bbox runs 10 m
+        // along X even though no contiguous run through most starts does —
+        // a 9.5 m horizontal ridge passes Length and is only rejected at
+        // the location stage.
+        let storey = storey_with_flat_ring(notched_ring(), 2.4);
+        assert!(validate_roof_ridge_length(&storey, ParameterAxis::Y, 9.5).is_ok());
+        let err = validate_roof_ridge_length(&storey, ParameterAxis::Y, 10.5).unwrap_err();
+        assert!(err.contains("under 10.00 m"), "got: {err}");
+
+        // An APEXED region can't host a new ridge, so it contributes no
+        // bound: a storey whose only region group is fanned rejects every
+        // length (bound 0.00).
+        let mut storey = storey_with_flat_roof(2.4);
+        apply_apexes(&mut storey, vec![apex(2.0, 2.0, 4.2)]);
+        let err = validate_roof_ridge_length(&storey, ParameterAxis::X, 1.0).unwrap_err();
+        assert!(
+            err.starts_with(RIDGE_LENGTH_NO_AREA_MSG) && err.contains("under 0.00 m"),
+            "got: {err}"
+        );
+        // …and a storey with no roofs at all does too.
+        let err =
+            validate_roof_ridge_length(&Storey::default(), ParameterAxis::X, 1.0).unwrap_err();
+        assert!(err.starts_with(RIDGE_LENGTH_NO_AREA_MSG), "got: {err}");
+
+        // With a SECOND, longer flat region the bound is the MAX over the
+        // candidates.
+        let mut storey = storey_with_flat_roof(2.4);
+        storey.roofs.regions.extend(
+            CeilingRegions::default_for_footprint(
+                vec![vec![
+                    Point2f64::new(4.0, 0.0),
+                    Point2f64::new(4.0, 9.0),
+                    Point2f64::new(7.0, 9.0),
+                    Point2f64::new(7.0, 0.0),
+                ]],
+                2.4,
+                Default::default(),
+            )
+            .regions,
+        );
+        assert!(validate_roof_ridge_length(&storey, ParameterAxis::X, 8.5).is_ok());
+        let err = validate_roof_ridge_length(&storey, ParameterAxis::X, 9.5).unwrap_err();
+        assert!(err.contains("under 9.00 m"), "got: {err}");
+    }
+
+    /// validate_roof_ridge_extent (the FINALIZE placement check, run at the
+    /// last open location stage): a sane extent passes; a zero-ish or
+    /// non-finite length gets the too-short message (the SKIP path accepts
+    /// drawn lengths without the Length stage's validation); a start not
+    /// strictly inside a ceiling region (boundary, outside, no roofs at all)
+    /// gets the stable start-outside message; a length reaching the region
+    /// boundary — wall-to-wall INCLUDED, the deliberate flip from the old
+    /// bbox test — is rejected WITH the permitted run, because finalize
+    /// acceptance must imply the Height stage's strict containment.
     #[test]
     fn validate_ridge_extent_checks_length_against_the_region_span() {
         // One flat 4×4 region. A vertical ridge (cross axis X at x = 2) from
