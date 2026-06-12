@@ -73,11 +73,11 @@ impl Tuning {
         match std::fs::read_to_string(&path) {
             Ok(text) => match serde_yaml::from_str::<Tuning>(&text) {
                 Ok(t) => {
-                    println!("[tuning] loaded {path}");
+                    log::info!("[tuning] loaded {path}");
                     t
                 }
                 Err(e) => {
-                    eprintln!("[tuning] {path}: parse error ({e}); using defaults");
+                    log::warn!("[tuning] {path}: parse error ({e}); using defaults");
                     Self::default()
                 }
             },

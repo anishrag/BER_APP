@@ -59,12 +59,18 @@ impl AppController {
             return Ok(());
         };
         self.record_history();
-        println!(
+        log::debug!(
             "collinearity YES: ring {}/edge {} & ring {}/edge {} along {:?} (coords {:.2}, {:.2})",
-            sug.ring_a, sug.edge_a, sug.ring_b, sug.edge_b, sug.axis, sug.coord_a, sug.coord_b
+            sug.ring_a,
+            sug.edge_a,
+            sug.ring_b,
+            sug.edge_b,
+            sug.axis,
+            sug.coord_a,
+            sug.coord_b
         );
         self.document.floor_plan.apply_collinear_suggestion(&sug);
-        println!(
+        log::debug!(
             "  → active_parameter_count = {}",
             self.document.floor_plan.active_parameter_count()
         );
@@ -80,9 +86,15 @@ impl AppController {
             return;
         };
         self.record_history();
-        println!(
+        log::debug!(
             "collinearity NO:  ring {}/edge {} & ring {}/edge {} along {:?} (coords {:.2}, {:.2})",
-            sug.ring_a, sug.edge_a, sug.ring_b, sug.edge_b, sug.axis, sug.coord_a, sug.coord_b
+            sug.ring_a,
+            sug.edge_a,
+            sug.ring_b,
+            sug.edge_b,
+            sug.axis,
+            sug.coord_a,
+            sug.coord_b
         );
         if let Some(review) = self.review.as_mut() {
             review.rejections.push(sug);
@@ -153,7 +165,7 @@ impl AppController {
     pub(super) fn finish_review(&mut self) {
         self.clean_envelope_collinear();
         if let Err(e) = self.mark_dirty() {
-            eprintln!("commit_to_ber after collinearity review: {}", e);
+            log::error!("commit_to_ber after collinearity review: {}", e);
         }
         self.maybe_start_dimensioning();
     }
@@ -240,7 +252,7 @@ impl AppController {
             .floor_plan
             .remove_collinear_vertices(&preserve);
         if !removed.is_empty() {
-            println!(
+            log::debug!(
                 "Cleanup: removed {} spurious collinear vertex/vertices {:?}",
                 removed.len(),
                 removed
@@ -297,7 +309,7 @@ impl AppController {
                 s
             })
             .collect();
-        println!(
+        log::debug!(
             "[new-storey] collinearity scan: plan diag {:.2}, sep range [{:.3}, {:.3}] → {} \
              near-collinear pair(s) to review",
             diag,

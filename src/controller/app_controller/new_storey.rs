@@ -183,7 +183,7 @@ impl AppController {
             }
             .into());
         }
-        println!(
+        log::debug!(
             "[new-storey] {} outline suggestion(s) from storey {}: {:?}",
             suggestions.len(),
             idx - 1,
@@ -258,7 +258,7 @@ impl AppController {
         let undo_snap = self.current_history_snapshot();
         self.document.adopt_finalised_outline(&ring32)?;
         self.push_history_snapshot(undo_snap);
-        println!(
+        log::debug!(
             "[new-storey] accepted suggested outline ({} verts) for storey {idx} — \
              finalised, no review, no prompts",
             ring32.len()
@@ -341,14 +341,14 @@ impl AppController {
     pub(super) fn new_storey_blocks_outline_stroke(&mut self) -> bool {
         match self.pending_new_storey.as_ref().map(|p| &p.stage) {
             Some(NewStoreyStage::Thickness) => {
-                println!(
+                log::debug!(
                     "[new-storey] outline stroke ignored — the floor-slab thickness \
                      is asked first (the dock explains)"
                 );
                 true
             }
             Some(_) => {
-                println!("[new-storey] stroke = implicit choose_draw_outline");
+                log::debug!("[new-storey] stroke = implicit choose_draw_outline");
                 self.choose_draw_outline();
                 false
             }
@@ -402,7 +402,7 @@ impl AppController {
             return;
         };
         let seeded = document::inherited_step_regions(below, footprint);
-        println!(
+        log::debug!(
             "[new-storey] seeding {} inherited floor level(s) onto storey {idx}",
             seeded.len()
         );
@@ -413,7 +413,7 @@ impl AppController {
         // session list from the derived regions — trap 1: the session set is
         // the exact datatypes pieces, so reload is a fixpoint.
         if let Err(e) = self.commit_to_ber() {
-            eprintln!("commit_to_ber after inherited-level seed: {e}");
+            log::error!("commit_to_ber after inherited-level seed: {e}");
         }
         self.reconstruct_step_regions_for(idx);
     }
@@ -460,7 +460,7 @@ impl AppController {
             .map(|(i, _)| i)
             .collect();
         if !self.inherited_seed_pending.is_empty() {
-            println!(
+            log::debug!(
                 "[new-storey] inherited-level seed pending (re-derived) for storeys {:?}",
                 self.inherited_seed_pending
             );

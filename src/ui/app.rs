@@ -17,7 +17,7 @@ use crate::ui::pages::workspace::workspace_chrome;
 /// the event-dispatch arms whose only failure handling is to log.
 fn log_err(label: &str, result: Result<(), String>) {
     if let Err(e) = result {
-        eprintln!("{label}: {e}");
+        log::error!("{label}: {e}");
     }
 }
 
@@ -249,7 +249,7 @@ impl BerApp {
                         self.home_state = HomeState::default();
                         self.navigate_to(Page::Workspace(Section::KeyDetails));
                     }
-                    Err(e) => eprintln!("open_ber: {e}"),
+                    Err(e) => log::error!("open_ber: {e}"),
                 }
             }
             HomeEvent::DeleteBer(id) => {
@@ -925,7 +925,7 @@ impl eframe::App for BerApp {
                                                 self.sketch_state.dimension_error = None;
                                             }
                                             Err(e) => {
-                                                eprintln!("apply_dimension: {}", e);
+                                                log::error!("apply_dimension: {}", e);
                                                 self.sketch_state.dimension_error = Some(e);
                                             }
                                         }
@@ -943,7 +943,7 @@ impl eframe::App for BerApp {
                                                 self.sketch_state.position_error = None;
                                             }
                                             Err(e) => {
-                                                eprintln!("apply_position_dimension: {}", e);
+                                                log::error!("apply_position_dimension: {}", e);
                                                 self.sketch_state.position_error = Some(e);
                                             }
                                         }
@@ -958,7 +958,7 @@ impl eframe::App for BerApp {
                                                 self.sketch_state.position_error = None;
                                             }
                                             Err(e) => {
-                                                eprintln!("skip_position_dimension: {}", e);
+                                                log::error!("skip_position_dimension: {}", e);
                                                 self.sketch_state.position_error = Some(e);
                                             }
                                         }
@@ -1032,7 +1032,7 @@ impl eframe::App for BerApp {
                                                 self.sketch_state.step_error = None;
                                             }
                                             Err(e) => {
-                                                eprintln!("assign_step_level_to_pending: {}", e);
+                                                log::error!("assign_step_level_to_pending: {}", e);
                                                 self.sketch_state.step_error = Some(e);
                                             }
                                         }
@@ -1076,7 +1076,7 @@ impl eframe::App for BerApp {
                                                 self.sketch_state.ceiling_step_error = None;
                                             }
                                             Err(e) => {
-                                                eprintln!("assign_ceiling_step_delta: {}", e);
+                                                log::error!("assign_ceiling_step_delta: {}", e);
                                                 self.sketch_state.ceiling_step_error = Some(e);
                                             }
                                         }
@@ -1107,7 +1107,7 @@ impl eframe::App for BerApp {
                                                 self.sketch_state.roof_error = None;
                                             }
                                             Err(e) => {
-                                                eprintln!("assign_roof_apex: {}", e);
+                                                log::error!("assign_roof_apex: {}", e);
                                                 self.sketch_state.roof_error = Some(e);
                                             }
                                         }
@@ -1138,7 +1138,7 @@ impl eframe::App for BerApp {
                                                 self.sketch_state.roof_error = None;
                                             }
                                             Err(e) => {
-                                                eprintln!("assign_roof_ridge_length: {}", e);
+                                                log::error!("assign_roof_ridge_length: {}", e);
                                                 self.sketch_state.roof_error = Some(e);
                                             }
                                         }
@@ -1152,7 +1152,7 @@ impl eframe::App for BerApp {
                                                 self.sketch_state.roof_error = None;
                                             }
                                             Err(e) => {
-                                                eprintln!("skip_roof_ridge_length: {}", e);
+                                                log::error!("skip_roof_ridge_length: {}", e);
                                                 self.sketch_state.roof_error = Some(e);
                                             }
                                         }
@@ -1164,7 +1164,7 @@ impl eframe::App for BerApp {
                                                 self.sketch_state.roof_error = None;
                                             }
                                             Err(e) => {
-                                                eprintln!("assign_roof_ridge_height: {}", e);
+                                                log::error!("assign_roof_ridge_height: {}", e);
                                                 self.sketch_state.roof_error = Some(e);
                                             }
                                         }
@@ -1177,7 +1177,7 @@ impl eframe::App for BerApp {
                                                 self.sketch_state.position_error = None;
                                             }
                                             Err(e) => {
-                                                eprintln!("centre_roof_position: {}", e);
+                                                log::error!("centre_roof_position: {}", e);
                                                 self.sketch_state.position_error = Some(e);
                                             }
                                         }
@@ -1198,7 +1198,7 @@ impl eframe::App for BerApp {
                                                 self.sketch_state.roof_error = None;
                                             }
                                             Err(e) => {
-                                                eprintln!("assign_roof_rect_length: {}", e);
+                                                log::error!("assign_roof_rect_length: {}", e);
                                                 self.sketch_state.roof_error = Some(e);
                                             }
                                         }
@@ -1213,7 +1213,7 @@ impl eframe::App for BerApp {
                                                 self.sketch_state.roof_error = None;
                                             }
                                             Err(e) => {
-                                                eprintln!("skip_roof_rect_length: {}", e);
+                                                log::error!("skip_roof_rect_length: {}", e);
                                                 self.sketch_state.roof_error = Some(e);
                                             }
                                         }
@@ -1224,7 +1224,7 @@ impl eframe::App for BerApp {
                                                 self.sketch_state.roof_error = None;
                                             }
                                             Err(e) => {
-                                                eprintln!("assign_roof_rect_height: {}", e);
+                                                log::error!("assign_roof_rect_height: {}", e);
                                                 self.sketch_state.roof_error = Some(e);
                                             }
                                         }
@@ -1282,7 +1282,7 @@ impl eframe::App for BerApp {
                                                 self.sketch_state.ceiling_height_input_clear = true;
                                             }
                                             Err(e) => {
-                                                eprintln!("set_default_ceiling_height: {}", e);
+                                                log::error!("set_default_ceiling_height: {}", e);
                                                 self.sketch_state.ceiling_height_error = Some(e);
                                             }
                                         }
@@ -1302,7 +1302,7 @@ impl eframe::App for BerApp {
                                                 self.sketch_state.new_storey_error = None;
                                             }
                                             Err(e) => {
-                                                eprintln!("assign_floor_thickness: {}", e);
+                                                log::error!("assign_floor_thickness: {}", e);
                                                 self.sketch_state.new_storey_error = Some(e);
                                             }
                                         }
@@ -1319,7 +1319,7 @@ impl eframe::App for BerApp {
                                                     true;
                                             }
                                             Err(e) => {
-                                                eprintln!("set_floor_thickness: {}", e);
+                                                log::error!("set_floor_thickness: {}", e);
                                                 self.sketch_state.floor_thickness_error = Some(e);
                                             }
                                         }
@@ -1334,7 +1334,7 @@ impl eframe::App for BerApp {
                                                 self.sketch_state.new_storey_error = None;
                                             }
                                             Err(e) => {
-                                                eprintln!("choose_suggest_outlines: {}", e);
+                                                log::error!("choose_suggest_outlines: {}", e);
                                                 self.sketch_state.new_storey_error = Some(e);
                                             }
                                         }
@@ -1351,7 +1351,7 @@ impl eframe::App for BerApp {
                                                 self.sketch_state.new_storey_error = None;
                                             }
                                             Err(e) => {
-                                                eprintln!("accept_suggestion: {}", e);
+                                                log::error!("accept_suggestion: {}", e);
                                                 self.sketch_state.new_storey_error = Some(e);
                                             }
                                         }
@@ -1380,7 +1380,7 @@ impl eframe::App for BerApp {
                                                 self.sketch_state.edit_drag_error = None;
                                             }
                                             Err(e) => {
-                                                eprintln!("apply_edit_drag: {}", e);
+                                                log::error!("apply_edit_drag: {}", e);
                                                 self.sketch_state.edit_drag_error = Some(e);
                                             }
                                         }
@@ -1414,7 +1414,7 @@ impl eframe::App for BerApp {
                                                 self.sketch_state.vertex_drop_error = None;
                                             }
                                             Err(e) => {
-                                                eprintln!("apply_vertex_measurement: {}", e);
+                                                log::error!("apply_vertex_measurement: {}", e);
                                                 self.sketch_state.vertex_drop_error = Some(e);
                                             }
                                         }
@@ -1447,14 +1447,14 @@ impl eframe::App for BerApp {
                                         // refreshed here — the closure can't re-borrow
                                         // self — acceptable for a dev-only path.
                                         if !controller.borrow_mut().load_checkpoint() {
-                                            eprintln!("load_checkpoint: no checkpoint file found");
+                                            log::warn!("load_checkpoint: no checkpoint file found");
                                         }
                                     }
                                     SketchEvent::DebugDump => {
                                         // Stdout for the terminal user, clipboard
                                         // for pasting straight into a report.
                                         let dump = controller.borrow_mut().debug_dump_current();
-                                        println!("{dump}");
+                                        log::info!("{dump}");
                                         ctx.copy_text(dump);
                                     }
                                     SketchEvent::CancelVertexDrop => {

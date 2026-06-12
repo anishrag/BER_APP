@@ -111,11 +111,15 @@ impl AppController {
         // at its pre-insert shape during the drag and only one edge
         // looks like it's following the cursor.
         if let Err(e) = self.mark_dirty() {
-            eprintln!("commit_to_ber after insert_vertex_on_wall: {}", e);
+            log::error!("commit_to_ber after insert_vertex_on_wall: {}", e);
         }
-        println!(
+        log::debug!(
             "vertex inserted: ring {}/edge {}+1 (vertex_id {}) at ({:.3}, {:.3})",
-            ring, edge_start, new_vid, world_x, world_y
+            ring,
+            edge_start,
+            new_vid,
+            world_x,
+            world_y
         );
         true
     }
@@ -142,7 +146,7 @@ impl AppController {
         // / vertex follow the cursor instead of snapping only on release.
         if self.document.drag_active_to(world_x, world_y) {
             if let Err(e) = self.mark_dirty() {
-                eprintln!("commit_to_ber during edit_mouse_drag: {}", e);
+                log::error!("commit_to_ber during edit_mouse_drag: {}", e);
             }
         }
     }

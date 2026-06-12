@@ -584,7 +584,7 @@ impl AppController {
         if !self.document.dimensioning.scale_set {
             self.document.floor_plan.simplify_degenerate();
             if let Err(e) = self.mark_dirty() {
-                eprintln!("commit_to_ber after simplify_degenerate: {}", e);
+                log::error!("commit_to_ber after simplify_degenerate: {}", e);
             }
         }
         self.compute_next_dimension_prompt();

@@ -103,7 +103,7 @@ impl AppController {
             .get(&idx)
             .map(|rs| rs.iter().map(|r| r.polygon.clone()).collect())
             .unwrap_or_default();
-        println!("── floor-step sketch ───────────────────────────────");
+        log::debug!("── floor-step sketch ───────────────────────────────");
 
         // One call does subtract → pick piece → clip → cut-or-carve against the
         // available region (outline minus the steps already drawn); we only
@@ -113,23 +113,23 @@ impl AppController {
             .carve_or_cut_in_available(&pts, &step_rings, &self.tuning.subarea)
         {
             Ok((boundary, SubareaOutcome::Cut(a, b))) => {
-                println!("  → step cut splits the available region into two — tap one to keep");
-                println!("────────────────────────────────────────────────────");
+                log::debug!("  → step cut splits the available region into two — tap one to keep");
+                log::debug!("────────────────────────────────────────────────────");
                 let sa = self.pinned_subarea_slot(&boundary, a);
                 let sb = self.pinned_subarea_slot(&boundary, b);
                 self.pending_step_cut = Some([sa, sb]);
             }
             Ok((boundary, SubareaOutcome::Area(plan))) => {
-                println!("  → step-area plan: {:?}", plan);
+                log::debug!("  → step-area plan: {:?}", plan);
                 let bad = plan.non_orthogonal_edges();
                 if bad.is_empty() {
-                    println!("  → orthogonal ✓");
+                    log::debug!("  → orthogonal ✓");
                 } else {
-                    println!("  → ⚠ NON-ORTHOGONAL edges: {:?}", bad);
+                    log::debug!("  → ⚠ NON-ORTHOGONAL edges: {:?}", bad);
                 }
-                println!("────────────────────────────────────────────────────");
+                log::debug!("────────────────────────────────────────────────────");
                 if let Err(e) = plan.validate_simple() {
-                    eprintln!("step area rejected (walls cross): {:?}", e);
+                    log::warn!("step area rejected (walls cross): {:?}", e);
                     return;
                 }
                 // Become a dimensionable shape (like a phase area): the user
@@ -140,8 +140,8 @@ impl AppController {
                 self.begin_step_area_dimensioning(slot, undo_snap);
             }
             Err(e) => {
-                println!("────────────────────────────────────────────────────");
-                eprintln!("step carve_or_cut: {}", e);
+                log::debug!("────────────────────────────────────────────────────");
+                log::error!("step carve_or_cut: {}", e);
             }
         }
     }

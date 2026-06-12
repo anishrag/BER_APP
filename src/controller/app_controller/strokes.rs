@@ -31,7 +31,7 @@ impl AppController {
     /// Stub — implementation deferred to the multi-storey feature.
     pub fn confirm_add_storey_from_current(&mut self) {
         if let Some(_pending) = self.pending_redraw.take() {
-            println!("Add new storey from current — TODO (stub for upcoming feature)");
+            log::debug!("Add new storey from current — TODO (stub for upcoming feature)");
         }
     }
 
@@ -117,7 +117,7 @@ impl AppController {
                 .map_err(|e| format!("Failed to end stroke: {:?}", e))?
         };
         if let Some(stroke) = stroke_opt {
-            println!("Stroke completed with {} points", stroke.points.len());
+            log::debug!("Stroke completed with {} points", stroke.points.len());
             // Keep the raw stroke + tool so this action can be REPLAYED under a
             // forced snap policy (recorded after the dispatch, if it snapped).
             let captured = SnapAction::Freehand {
@@ -154,12 +154,12 @@ impl AppController {
                     if let Err(e) = self.apply_extend_stroke(&stroke.points) {
                         // For now just log; in future we'll surface this
                         // to the UI alongside the dimension error.
-                        eprintln!("apply_extend_stroke: {}", e);
+                        log::error!("apply_extend_stroke: {}", e);
                     }
                 }
                 EditTools::Trim | EditTools::TrimOrtho | EditTools::TrimCurve => {
                     if let Err(e) = self.apply_trim_stroke(&stroke.points) {
-                        eprintln!("apply_trim_stroke: {}", e);
+                        log::error!("apply_trim_stroke: {}", e);
                     }
                 }
                 _ => {
@@ -185,9 +185,9 @@ impl AppController {
         if bad.is_empty() {
             return;
         }
-        eprintln!("⚠ NON-ORTHOGONAL edge(s) after {ctx} ({}):", bad.len());
+        log::warn!("⚠ NON-ORTHOGONAL edge(s) after {ctx} ({}):", bad.len());
         for (r, e, a, b) in &bad {
-            eprintln!(
+            log::warn!(
                 "    ring {r} edge {e}: ({:.3},{:.3})→({:.3},{:.3})  dx={:.4} dy={:.4}",
                 a.x,
                 a.y,
@@ -207,14 +207,14 @@ impl AppController {
         // Snapshot pre-stroke (may be empty / pre-dim) for undo.
         let undo_snap = self.current_history_snapshot();
         dump_stroke("draw-outline", points);
-        println!(
+        log::debug!(
             "[new-storey] PIXEL outline path: storey={:?}, {} points (this is the from-scratch \
              pixel path)",
             self.current_storey_idx,
             points.len()
         );
         if matches!(self.current_storey_idx, Some(i) if i > 0) {
-            eprintln!(
+            log::warn!(
                 "[new-storey] WARNING: pixel path on upper storey {:?} — the world/snap path did \
                  NOT trigger (expected the previous storey's watermark + metre-space capture). The \
                  outline won't snap to the storey below and will re-scale from scratch.",
@@ -230,7 +230,7 @@ impl AppController {
         let points: &[Point2f32] = snapped_owned.as_deref().unwrap_or(points);
         self.document.floor_plan = FloorPlan::from_points_to_orthogonal(points, 10.0, closed)
             .map_err(|e| format!("Failed to draw outline: {:?}", e))?;
-        println!("floor plan: {:?}", self.document.floor_plan);
+        log::debug!("floor plan: {:?}", self.document.floor_plan);
         self.warn_if_non_orthogonal("draw outline");
         // An upper storey's outline was just replaced WHOLESALE (the Replace
         // path / a fresh draw): the inherited-level seed must re-fire against
@@ -267,7 +267,7 @@ impl AppController {
             .zip(snapped.iter())
             .filter(|(a, b)| (a.x - b.x).abs() > 1e-4 || (a.y - b.y).abs() > 1e-4)
             .count();
-        println!(
+        log::debug!(
             "[new-storey] snap to previous outline: tol {:.3} m, {}/{} points pulled onto it",
             tol,
             moved,
@@ -287,7 +287,7 @@ impl AppController {
     /// remain to dimension. The geometry (snap, orthogonalize, pin) all lives
     /// in `manip_2d_plan`; here we only sequence it.
     pub fn apply_outline_stroke_world(&mut self, world_points: &[(f32, f32)]) {
-        println!(
+        log::debug!(
             "[new-storey] WORLD outline path: storey={:?}, {} world points",
             self.current_storey_idx,
             world_points.len()
@@ -313,16 +313,16 @@ impl AppController {
         let closed = match self.sketch_engine.end_stroke() {
             Ok(Some(stroke)) => stroke.is_closed,
             Ok(None) => {
-                println!("[new-storey] no stroke in engine — nothing to apply");
+                log::debug!("[new-storey] no stroke in engine — nothing to apply");
                 return;
             }
             Err(e) => {
-                eprintln!("[new-storey] end_stroke failed: {:?}", e);
+                log::error!("[new-storey] end_stroke failed: {:?}", e);
                 return;
             }
         };
         if let Err(e) = self.apply_outline_world_inner(world_points, closed) {
-            eprintln!("[new-storey] apply_outline_stroke_world failed: {}", e);
+            log::error!("[new-storey] apply_outline_stroke_world failed: {}", e);
             // Drain any decisions the failed carve recorded so they can't be
             // misattributed to the next captured action.
             let _ = manip_2d_plan::take_snap_decisions();
@@ -363,7 +363,7 @@ impl AppController {
         // re-seed against the NEW footprint) and drop the step regions
         // canonicalized against the old one. No-op on a fresh storey.
         self.reset_inherited_seed_for_redraw();
-        println!(
+        log::debug!(
             "[new-storey] carved outline (reuse of living-area carve): {} verts, pinned {} of {} \
              active params ({} new wall param(s) left to dimension)",
             self.document.floor_plan.get_points().len(),
@@ -409,7 +409,7 @@ impl AppController {
             // are in meters. Mixed units will look wrong on the canvas until
             // a per-stroke pixels→meters conversion is added.
         }
-        println!(
+        log::debug!(
             "floor plan (after AddDetachedSection): {:?}",
             self.document.floor_plan
         );
@@ -430,13 +430,13 @@ impl AppController {
             .iter()
             .map(|(x, y)| Point2f32::new(*x, *y))
             .collect();
-        println!("Extend stroke (world coords): {} points", pts.len());
+        log::debug!("Extend stroke (world coords): {} points", pts.len());
         dump_stroke("extend", &pts);
         let _ = manip_2d_plan::take_splice_debug(); // clear stale phases
         let res = self.apply_extend_stroke(&pts);
         self.splice_debug = manip_2d_plan::take_splice_debug();
         if let Err(e) = res {
-            eprintln!("apply_extend_stroke: {}", e);
+            log::error!("apply_extend_stroke: {}", e);
         }
         self.capture_snap_action(SnapAction::Freehand {
             tool: self.sketch_engine.edit_tool,
@@ -465,7 +465,7 @@ impl AppController {
             .floor_plan
             .extend_ortho(points)
             .map_err(|e| format!("{}", e))?;
-        println!("Extend: {} new param(s) {:?}", minted.len(), minted);
+        log::debug!("Extend: {} new param(s) {:?}", minted.len(), minted);
         self.warn_if_non_orthogonal("extend");
         // The porch is a fix-up to the ENVELOPE — once spliced, that it was a
         // "porch" is irrelevant. Drop any vertex it left collinear (e.g. a
@@ -505,7 +505,7 @@ impl AppController {
             .iter()
             .map(|(x, y)| Point2f32::new(*x, *y))
             .collect();
-        println!("Trim stroke (world coords): {} points", pts.len());
+        log::debug!("Trim stroke (world coords): {} points", pts.len());
         dump_stroke("trim", &pts);
         let _ = manip_2d_plan::take_splice_debug(); // clear stale phases
         let res = self.apply_trim_stroke(&pts);
@@ -513,7 +513,7 @@ impl AppController {
         // for the UI's coloured debug overlay.
         self.splice_debug = manip_2d_plan::take_splice_debug();
         if let Err(e) = res {
-            eprintln!("apply_trim_stroke: {}", e);
+            log::error!("apply_trim_stroke: {}", e);
         }
         self.capture_snap_action(SnapAction::Freehand {
             tool: self.sketch_engine.edit_tool,
@@ -556,7 +556,7 @@ impl AppController {
             _ => self.document.floor_plan.trim_by_stroke(points),
         }
         .map_err(|e| format!("{}", e))?;
-        println!("Trim: {} new param(s) {:?}", minted.len(), minted);
+        log::debug!("Trim: {} new param(s) {:?}", minted.len(), minted);
         self.clean_envelope_collinear();
         // History snapshotted before the commit (consistent across apply_*). A
         // plain Trim never asks about collinearity, so no review step here.
@@ -592,7 +592,7 @@ impl AppController {
             end,
             bulge_ratio,
         });
-        println!(
+        log::debug!(
             "Curve: provisional arc (bulge ratio {:.3}); dimension the two attach lines to bake it in",
             bulge_ratio
         );
@@ -644,7 +644,7 @@ impl AppController {
             {
                 Ok(params) => params,
                 Err(e) => {
-                    eprintln!(
+                    log::warn!(
                         "finish_arc failed ({e}); dropping the provisional curve, keeping \
                      the straight placeholder. bulge={:.3}",
                         pa.bulge_ratio
@@ -659,7 +659,7 @@ impl AppController {
             .known_params
             .extend(facet_params.iter().copied());
         self.document.pending_arc = None;
-        println!(
+        log::debug!(
             "Curve: committed at bulge {:.3} ({} facet params locked)",
             pa.bulge_ratio,
             facet_params.len()

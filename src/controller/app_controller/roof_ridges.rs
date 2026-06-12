@@ -186,7 +186,7 @@ impl AppController {
         let (axis, coord_m, (lo, hi)) = match self.document.fit_roof_ridge_line(&pts) {
             Ok(fit) => fit,
             Err(e) => {
-                eprintln!("roof ridge: {}", e);
+                log::error!("roof ridge: {}", e);
                 return;
             }
         };
@@ -258,7 +258,7 @@ impl AppController {
                 end_snap,
                 &[RidgeQuestion::Cross, RidgeQuestion::Start],
             ) {
-                eprintln!("roof ridge: {}", e);
+                log::error!("roof ridge: {}", e);
                 self.pending_roof_ridge = None;
             }
             return;

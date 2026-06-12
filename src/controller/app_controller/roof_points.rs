@@ -134,7 +134,7 @@ impl AppController {
         self.sync_active();
         let tapped = Point2f32::new(world_x, world_y);
         if let Err(e) = self.document.validate_roof_point(tapped) {
-            eprintln!("roof point: {}", e);
+            log::error!("roof point: {}", e);
             return;
         }
         let (x, snap_x) = match self

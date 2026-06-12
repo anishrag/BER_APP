@@ -166,15 +166,15 @@ impl AppController {
         plan: FloorPlan,
     ) -> Result<(), String> {
         let undo_snap = self.current_history_snapshot();
-        println!("── living-area plan ─────────────────────────────────");
-        println!("  → living-area plan: {:?}", plan);
+        log::debug!("── living-area plan ─────────────────────────────────");
+        log::debug!("  → living-area plan: {:?}", plan);
         let bad = plan.non_orthogonal_edges();
         if bad.is_empty() {
-            println!("  → orthogonal ✓");
+            log::debug!("  → orthogonal ✓");
         } else {
-            println!("  → ⚠ NON-ORTHOGONAL edges: {:?}", bad);
+            log::debug!("  → ⚠ NON-ORTHOGONAL edges: {:?}", bad);
         }
-        println!("────────────────────────────────────────────────────");
+        log::debug!("────────────────────────────────────────────────────");
         // Fallback guardrail: the geometry layer un-intersects a folded ring, so
         // this rarely fires — but refuse a survivor rather than commit bad geometry.
         if let Err(e) = plan.validate_simple() {
@@ -197,7 +197,7 @@ impl AppController {
     pub(super) fn pinned_subarea_slot(&self, boundary: &FloorPlan, plan: FloorPlan) -> ShapeSlot {
         let slot = self.document.pinned_slot_for(boundary, plan);
         if !slot.dimensioning.known_params.is_empty() {
-            println!(
+            log::debug!(
                 "  pinned-to-outline params (pre-known): {:?}",
                 slot.dimensioning.known_params
             );
@@ -255,7 +255,7 @@ impl AppController {
             // A straight cut → offer both halves to pick from. Each region's walls
             // along the boundary are pinned (pre-known); only the cut wall is set.
             Ok((boundary, SubareaOutcome::Cut(a, b))) => {
-                println!("── cut splits the available region into two — tap one to keep ──");
+                log::debug!("── cut splits the available region into two — tap one to keep ──");
                 self.pending_cut = Some([
                     self.pinned_subarea_slot(&boundary, a),
                     self.pinned_subarea_slot(&boundary, b),
@@ -263,10 +263,10 @@ impl AppController {
             }
             Ok((boundary, SubareaOutcome::Area(plan))) => {
                 if let Err(e) = self.commit_living_area_plan(&boundary, plan) {
-                    eprintln!("living area: {}", e);
+                    log::error!("living area: {}", e);
                 }
             }
-            Err(e) => eprintln!("living-area carve_or_cut: {}", e),
+            Err(e) => log::error!("living-area carve_or_cut: {}", e),
         }
     }
 
@@ -311,7 +311,7 @@ impl AppController {
         if let Some(slot) = chosen {
             // Guardrail: don't commit a self-intersecting region.
             if let Err(e) = slot.floor_plan.validate_simple() {
-                eprintln!("cut region rejected (walls cross): {:?}", e);
+                log::warn!("cut region rejected (walls cross): {:?}", e);
                 return;
             }
             let undo_snap = self.current_history_snapshot();

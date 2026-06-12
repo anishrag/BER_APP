@@ -93,7 +93,7 @@ impl AppController {
         let (lo, hi) = match self.document.fit_roof_rect(pts) {
             Ok(fit) => fit,
             Err(e) => {
-                eprintln!("roof rect: {}", e);
+                log::error!("roof rect: {}", e);
                 return;
             }
         };

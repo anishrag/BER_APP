@@ -95,7 +95,7 @@ impl AppController {
             }
         };
         if let Err(e) = r {
-            eprintln!("[snap replay] re-run failed: {e}");
+            log::error!("[snap replay] re-run failed: {e}");
         }
     }
 

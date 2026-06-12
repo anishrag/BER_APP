@@ -170,7 +170,7 @@ impl AppController {
         }
         match self.document.fit_ceiling_step_line(&pts) {
             Ok((axis, coord_m)) => self.begin_ceiling_step_side(axis, coord_m),
-            Err(e) => eprintln!("ceiling-step line: {}", e),
+            Err(e) => log::error!("ceiling-step line: {}", e),
         }
     }
 
@@ -195,7 +195,7 @@ impl AppController {
         {
             Ok((boundary, SubareaOutcome::Area(plan))) => {
                 if let Err(e) = plan.validate_simple() {
-                    eprintln!("ceiling step area rejected (walls cross): {:?}", e);
+                    log::warn!("ceiling step area rejected (walls cross): {:?}", e);
                     return;
                 }
                 let undo_snap = self.current_history_snapshot();
@@ -209,9 +209,9 @@ impl AppController {
             // carves to an Area — defensive (a cut would need a side pick
             // this flow doesn't have).
             Ok((_, SubareaOutcome::Cut(..))) => {
-                eprintln!("ceiling-step carve: closed stroke resolved to a cut — ignored");
+                log::warn!("ceiling-step carve: closed stroke resolved to a cut — ignored");
             }
-            Err(e) => eprintln!("ceiling-step carve: {}", e),
+            Err(e) => log::error!("ceiling-step carve: {}", e),
         }
     }
 
@@ -412,7 +412,7 @@ impl AppController {
         };
         match self.document.validate_ceiling_step_line(axis, coord_m) {
             Ok(()) => self.begin_ceiling_step_side(axis, coord_m),
-            Err(e) => eprintln!("ceiling-step line: {}", e),
+            Err(e) => log::error!("ceiling-step line: {}", e),
         }
     }
 

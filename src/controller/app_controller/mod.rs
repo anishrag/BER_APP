@@ -98,7 +98,7 @@ fn dump_stroke(label: &str, pts: &[Point2f32]) {
         .iter()
         .map(|p| format!("p({:.3},{:.3}),", p.x, p.y))
         .collect();
-    println!("  {label} stroke ({} pts): vec![{body}]", pts.len());
+    log::debug!("  {label} stroke ({} pts): vec![{body}]", pts.len());
 }
 
 pub struct AppController {

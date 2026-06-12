@@ -1001,7 +1001,7 @@ pub(super) fn render<F: FnMut(UiEvent)>(
                         let has_stroke = view.current.is_some();
                         let has_bbox =
                             canvas_transform(ber, current_storey_idx, rect, vp, true).is_some();
-                        eprintln!(
+                        log::warn!(
                             "[new-storey] WARNING: outline-on-watermark stroke could \
                              NOT convert to world coords (stroke present={has_stroke}, \
                              fit bbox present={has_bbox}) — falling back to the pixel \

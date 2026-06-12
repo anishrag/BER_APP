@@ -128,7 +128,7 @@ impl AppController {
             });
             n
         };
-        println!(
+        log::debug!(
             "[new-storey] add_storey: appended storey {} (now editing it, zoomed out for drawing room)",
             new_idx
         );

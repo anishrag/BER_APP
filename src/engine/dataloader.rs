@@ -37,14 +37,14 @@ impl DataLoader {
             thread::sleep(Duration::from_secs(1)); // Reduced for testing
 
             let progress = (i + 1) as f32 / total as f32;
-            println!("Loader thread: {} - {:.1}%", step, progress * 100.0);
+            log::debug!("Loader thread: {} - {:.1}%", step, progress * 100.0);
 
             if tx.send((step.to_string(), progress)).is_err() {
-                println!("Channel closed, stopping loader thread");
+                log::debug!("Channel closed, stopping loader thread");
                 break;
             }
         }
-        println!("Loader thread finished");
+        log::debug!("Loader thread finished");
 
         Ok(())
     }

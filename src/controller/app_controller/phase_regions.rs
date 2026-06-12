@@ -98,7 +98,7 @@ impl AppController {
             .get(&idx)
             .map(|rs| rs.iter().map(|r| r.polygon.clone()).collect())
             .unwrap_or_default();
-        println!("── construction-phase sketch ───────────────────────");
+        log::debug!("── construction-phase sketch ───────────────────────");
 
         // One call does subtract → pick piece → clip → cut-or-carve against the
         // available region (outline minus the phases already drawn); we only
@@ -108,23 +108,23 @@ impl AppController {
             .carve_or_cut_in_available(&pts, &phase_rings, &self.tuning.subarea)
         {
             Ok((boundary, SubareaOutcome::Cut(a, b))) => {
-                println!("  → phase cut splits the available region into two — tap one to keep");
-                println!("────────────────────────────────────────────────────");
+                log::debug!("  → phase cut splits the available region into two — tap one to keep");
+                log::debug!("────────────────────────────────────────────────────");
                 let sa = self.pinned_subarea_slot(&boundary, a);
                 let sb = self.pinned_subarea_slot(&boundary, b);
                 self.pending_phase_cut = Some([sa, sb]);
             }
             Ok((boundary, SubareaOutcome::Area(plan))) => {
-                println!("  → phase-area plan: {:?}", plan);
+                log::debug!("  → phase-area plan: {:?}", plan);
                 let bad = plan.non_orthogonal_edges();
                 if bad.is_empty() {
-                    println!("  → orthogonal ✓");
+                    log::debug!("  → orthogonal ✓");
                 } else {
-                    println!("  → ⚠ NON-ORTHOGONAL edges: {:?}", bad);
+                    log::debug!("  → ⚠ NON-ORTHOGONAL edges: {:?}", bad);
                 }
-                println!("────────────────────────────────────────────────────");
+                log::debug!("────────────────────────────────────────────────────");
                 if let Err(e) = plan.validate_simple() {
-                    eprintln!("phase area rejected (walls cross): {:?}", e);
+                    log::warn!("phase area rejected (walls cross): {:?}", e);
                     return;
                 }
                 // Become a dimensionable shape (like a living area): the user
@@ -135,8 +135,8 @@ impl AppController {
                 self.begin_phase_area_dimensioning(slot, undo_snap);
             }
             Err(e) => {
-                println!("────────────────────────────────────────────────────");
-                eprintln!("phase carve_or_cut: {}", e);
+                log::debug!("────────────────────────────────────────────────────");
+                log::error!("phase carve_or_cut: {}", e);
             }
         }
     }

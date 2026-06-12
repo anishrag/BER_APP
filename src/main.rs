@@ -8,13 +8,14 @@ use ber_app::controller::app_controller::AppController;
 use ber_app::{engine, ui};
 
 fn main() -> Result<(), ui::RunError> {
-    // Route the library crates' debug traces (`document`, `manip_2d_plan`) to
-    // stdout with a message-only format, so they read exactly like the controller's
-    // own `println!` lines. Default filter keeps dependency noise out; override
-    // with `RUST_LOG` (e.g. `RUST_LOG=warn` to quiet the traces).
+    // Route the app's and library crates' debug traces (`ber_app`, `document`,
+    // `manip_2d_plan`) to stdout with a message-only format. Default filter
+    // keeps dependency noise out; override with `RUST_LOG` (e.g.
+    // `RUST_LOG=warn` to quiet the traces).
     use std::io::Write;
     env_logger::Builder::from_env(
-        env_logger::Env::default().default_filter_or("error,document=debug,manip_2d_plan=debug"),
+        env_logger::Env::default()
+            .default_filter_or("error,ber_app=debug,document=debug,manip_2d_plan=debug"),
     )
     .target(env_logger::Target::Stdout)
     .format(|buf, record| writeln!(buf, "{}", record.args()))
@@ -28,7 +29,7 @@ fn main() -> Result<(), ui::RunError> {
     // the UI on SQLite. If it can't spawn, fall back to synchronous saves.
     match engine::PersistenceWriter::spawn("bers.db".to_string()) {
         Ok(writer) => controller.attach_writer(writer),
-        Err(e) => eprintln!("persistence writer unavailable, saving synchronously: {e}"),
+        Err(e) => log::warn!("persistence writer unavailable, saving synchronously: {e}"),
     }
     let controller = Rc::new(RefCell::new(controller));
     ui::run(controller)
