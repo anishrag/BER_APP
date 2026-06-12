@@ -25,6 +25,7 @@ use crate::controller::app_controller::{
 };
 use crate::ui::pages::events::UiEvent;
 use crate::ui::render::ViewParams;
+use crate::ui::widgets::HintExt;
 use datatypes::ber::ber_struct::Ber;
 use datatypes::ber::common::ConstructionPhase;
 use datatypes::ber::structural::WallExposure;
@@ -694,7 +695,7 @@ fn storey_tabs<F: FnMut(UiEvent)>(
         // All-storeys tab. Selected when `current_storey_idx == None`.
         if ui
             .selectable_label(current_storey_idx.is_none(), "All")
-            .on_hover_text("Read-only overview of every storey")
+            .hint("Read-only overview of every storey")
             .clicked()
             && current_storey_idx.is_some()
         {
@@ -716,7 +717,7 @@ fn storey_tabs<F: FnMut(UiEvent)>(
         let enabled = ber.is_some();
         if ui
             .add_enabled(enabled, egui::Button::new("+ Add new"))
-            .on_hover_text(
+            .hint(
                 "Add a new storey. Draw it with the previous storey shown faintly \
                  as a guide; endpoints snap onto it.",
             )
@@ -736,7 +737,7 @@ fn storey_tabs<F: FnMut(UiEvent)>(
         };
         if ui
             .button(label)
-            .on_hover_text(
+            .hint(
                 "Preview the toolbar layout: Auto (by aspect ratio) \
                  ▸ Portrait (top ribbon) ▸ Landscape (side panel)",
             )

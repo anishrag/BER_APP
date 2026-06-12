@@ -12,7 +12,7 @@ use crate::controller::app_controller::{
     PositionPromptUiData, VertexDropPromptUiData,
 };
 use crate::ui::pages::events::UiEvent;
-use crate::ui::widgets::metre_input;
+use crate::ui::widgets::{metre_input, HintExt};
 use datatypes::ber::common::ConstructionPhase;
 use datatypes::ber::structural::WallExposure;
 
@@ -276,7 +276,7 @@ fn dimension_prompt_toolbar<F: FnMut(UiEvent)>(
     let submit_pressed = metre_input(ui, dim_input, 80.0, "e.g. 4.2").submitted;
     let apply_clicked = ui
         .button("Apply")
-        .on_hover_text("Apply this dimension and move to the next")
+        .hint("Apply this dimension and move to the next")
         .clicked();
     if apply_clicked || submit_pressed {
         if let Some(value) = parse_dimension_expression(dim_input) {
@@ -286,7 +286,7 @@ fn dimension_prompt_toolbar<F: FnMut(UiEvent)>(
     }
     if ui
         .button("Skip")
-        .on_hover_text("Skip this dimension, ask about a different wall")
+        .hint("Skip this dimension, ask about a different wall")
         .clicked()
     {
         on_event(UiEvent::Sketch(SketchEvent::SkipDimension));
@@ -323,7 +323,7 @@ fn position_prompt_toolbar<F: FnMut(UiEvent)>(
     let submit_pressed = metre_input(ui, input, 80.0, "e.g. 3.5").submitted;
     let apply_clicked = ui
         .button("Apply")
-        .on_hover_text("Pin the area at exactly this distance")
+        .hint("Pin the area at exactly this distance")
         .clicked();
     if apply_clicked || submit_pressed {
         if let Some(value) = parse_dimension_expression(input) {
@@ -332,7 +332,7 @@ fn position_prompt_toolbar<F: FnMut(UiEvent)>(
     }
     if ui
         .button("Skip")
-        .on_hover_text("Accept the drawn position as-is")
+        .hint("Accept the drawn position as-is")
         .clicked()
     {
         on_event(UiEvent::Sketch(SketchEvent::SkipPositionDimension));
@@ -342,7 +342,7 @@ fn position_prompt_toolbar<F: FnMut(UiEvent)>(
     if prompt.offers_centre
         && ui
             .button("Centre")
-            .on_hover_text("Centre it within its ceiling area")
+            .hint("Centre it within its ceiling area")
             .clicked()
     {
         on_event(UiEvent::Sketch(SketchEvent::CentreRoofPosition));
@@ -355,7 +355,7 @@ fn position_prompt_toolbar<F: FnMut(UiEvent)>(
                 prompt.option_idx + 1,
                 prompt.option_count,
             ))
-            .on_hover_text("Measure the distance from a different outline wall")
+            .hint("Measure the distance from a different outline wall")
             .clicked()
     {
         on_event(UiEvent::Sketch(SketchEvent::CyclePositionReference));
@@ -382,10 +382,7 @@ fn edit_drag_prompt_toolbar<F: FnMut(UiEvent)>(
         prompt.option_count,
     ));
     let submit_pressed = metre_input(ui, input, 80.0, "e.g. 3.5").submitted;
-    let apply_clicked = ui
-        .button("Apply")
-        .on_hover_text("Apply this distance")
-        .clicked();
+    let apply_clicked = ui.button("Apply").hint("Apply this distance").clicked();
     if apply_clicked || submit_pressed {
         if let Some(value) = parse_dimension_expression(input) {
             on_event(UiEvent::Sketch(SketchEvent::ApplyEditDrag(value)));
@@ -394,14 +391,14 @@ fn edit_drag_prompt_toolbar<F: FnMut(UiEvent)>(
     }
     if ui
         .button("Different measurement")
-        .on_hover_text("Try another reference wall")
+        .hint("Try another reference wall")
         .clicked()
     {
         on_event(UiEvent::Sketch(SketchEvent::CycleEditDragMeasurement));
     }
     if ui
         .button("Cancel")
-        .on_hover_text("Revert the wall to its position before this drag")
+        .hint("Revert the wall to its position before this drag")
         .clicked()
     {
         on_event(UiEvent::Sketch(SketchEvent::CancelEditDrag));
@@ -437,7 +434,7 @@ fn vertex_drop_prompt_toolbar<F: FnMut(UiEvent)>(
         // targets the right measurement. Cap at 4 slots.
         let slot = m.idx.min(inputs.len() - 1);
         let submitted = metre_input(ui, &mut inputs[slot], 60.0, "=?").submitted;
-        let clicked = ui.button("✓").on_hover_text("Set this distance").clicked();
+        let clicked = ui.button("✓").hint("Set this distance").clicked();
         if clicked || submitted {
             if let Some(v) = parse_dimension_expression(&inputs[slot]) {
                 on_event(UiEvent::Sketch(SketchEvent::ApplyVertexMeasurement {
@@ -451,7 +448,7 @@ fn vertex_drop_prompt_toolbar<F: FnMut(UiEvent)>(
     }
     if ui
         .button("Cancel")
-        .on_hover_text("Revert the new vertex to its initial position")
+        .hint("Revert the new vertex to its initial position")
         .clicked()
     {
         on_event(UiEvent::Sketch(SketchEvent::CancelVertexDrop));
@@ -478,14 +475,14 @@ fn curve_radius_toolbar<F: FnMut(UiEvent)>(ui: &mut egui::Ui, bulge: f32, on_eve
                 .text("bulge")
                 .show_value(false),
         )
-        .on_hover_text("Drag to flatten (toward 0) or deepen the curve; sign flips the side")
+        .hint("Drag to flatten (toward 0) or deepen the curve; sign flips the side")
         .changed()
     {
         on_event(UiEvent::Sketch(SketchEvent::SetCurveBulge(b)));
     }
     if ui
         .button("Accept curve")
-        .on_hover_text("Bake the curve into the plan at this radius")
+        .hint("Bake the curve into the plan at this radius")
         .clicked()
     {
         on_event(UiEvent::Sketch(SketchEvent::CommitCurve));
@@ -520,7 +517,7 @@ fn new_storey_toolbar<F: FnMut(UiEvent)>(
         let submitted = metre_input(ui, thickness_input, 60.0, "e.g. 0.30").submitted;
         let set_clicked = ui
             .button("Set")
-            .on_hover_text("Use this slab thickness (it sets the storey's floor level)")
+            .hint("Use this slab thickness (it sets the storey's floor level)")
             .clicked();
         if set_clicked || submitted {
             if let Some(v) = parse_dimension_expression(thickness_input) {
@@ -529,7 +526,7 @@ fn new_storey_toolbar<F: FnMut(UiEvent)>(
         }
         if ui
             .button("Use 0.30")
-            .on_hover_text("Accept the typical 0.30 m slab")
+            .hint("Accept the typical 0.30 m slab")
             .clicked()
         {
             on_event(UiEvent::Sketch(SketchEvent::AssignFloorThickness(0.30)));
@@ -546,17 +543,15 @@ fn new_storey_toolbar<F: FnMut(UiEvent)>(
         );
         if ui
             .button("Draw outline")
-            .on_hover_text(
-                "Draw it over the faint previous storey (just drawing a stroke works too)",
-            )
+            .hint("Draw it over the faint previous storey (just drawing a stroke works too)")
             .clicked()
         {
             on_event(UiEvent::Sketch(SketchEvent::ChooseDrawOutline));
         }
         if ui
             .add_enabled(prompt.can_suggest, egui::Button::new("Suggest outlines"))
-            .on_hover_text("Browse outlines derived from the storey below's roof shape")
-            .on_disabled_hover_text(
+            .hint("Browse outlines derived from the storey below's roof shape")
+            .disabled_hint(
                 "Needs the storey below to have its ceiling height set and a flat ceiling area",
             )
             .clicked()
@@ -570,20 +565,16 @@ fn new_storey_toolbar<F: FnMut(UiEvent)>(
                 .color(egui::Color32::from_rgb(60, 220, 255)),
         );
         ui.label(label);
-        if ui
-            .button("◀")
-            .on_hover_text("Previous suggestion")
-            .clicked()
-        {
+        if ui.button("◀").hint("Previous suggestion").clicked() {
             on_event(UiEvent::Sketch(SketchEvent::PrevSuggestion));
         }
         ui.label(format!("{}/{}", idx + 1, count));
-        if ui.button("▶").on_hover_text("Next suggestion").clicked() {
+        if ui.button("▶").hint("Next suggestion").clicked() {
             on_event(UiEvent::Sketch(SketchEvent::NextSuggestion));
         }
         if ui
             .button("Accept")
-            .on_hover_text(
+            .hint(
                 "Use this outline as the storey's footprint — finalised, \
                  no dimension questions",
             )
@@ -593,7 +584,7 @@ fn new_storey_toolbar<F: FnMut(UiEvent)>(
         }
         if ui
             .button("Draw instead")
-            .on_hover_text("Abandon the suggestions and draw the outline yourself")
+            .hint("Abandon the suggestions and draw the outline yourself")
             .clicked()
         {
             on_event(UiEvent::Sketch(SketchEvent::ChooseDrawOutline));
@@ -610,21 +601,21 @@ fn pending_redraw_toolbar<F: FnMut(UiEvent)>(ui: &mut egui::Ui, on_event: &mut F
     );
     if ui
         .button("Replace this storey")
-        .on_hover_text("Discard the current outline and replace it with this stroke")
+        .hint("Discard the current outline and replace it with this stroke")
         .clicked()
     {
         on_event(UiEvent::Sketch(SketchEvent::ReplaceStorey));
     }
     if ui
         .button("New storey from this")
-        .on_hover_text("Save current storey, start a new one from this stroke (coming soon)")
+        .hint("Save current storey, start a new one from this stroke (coming soon)")
         .clicked()
     {
         on_event(UiEvent::Sketch(SketchEvent::AddStoreyFromCurrent));
     }
     if ui
         .button("Ignore")
-        .on_hover_text("Discard this stroke, keep the current storey")
+        .hint("Discard this stroke, keep the current storey")
         .clicked()
     {
         on_event(UiEvent::Sketch(SketchEvent::IgnoreRedraw));
@@ -677,11 +668,7 @@ fn phase_toolbar<F: FnMut(UiEvent)>(
         for (i, (_ring, label)) in regions.iter().enumerate() {
             ui.horizontal(|ui| {
                 ui.label(label);
-                if ui
-                    .button("🗑")
-                    .on_hover_text("Delete this phase area")
-                    .clicked()
-                {
+                if ui.button("🗑").hint("Delete this phase area").clicked() {
                     on_event(UiEvent::Sketch(SketchEvent::DeletePhaseRegion(i)));
                 }
             });
@@ -709,7 +696,7 @@ fn step_toolbar<F: FnMut(UiEvent)>(
         let amount = parse_dimension_expression(amount_input).map(f32::abs);
         if ui
             .button("Raise")
-            .on_hover_text("Raise this area's floor by the amount")
+            .hint("Raise this area's floor by the amount")
             .clicked()
         {
             if let Some(v) = amount {
@@ -719,7 +706,7 @@ fn step_toolbar<F: FnMut(UiEvent)>(
         }
         if ui
             .button("Lower")
-            .on_hover_text("Lower this area's floor by the amount")
+            .hint("Lower this area's floor by the amount")
             .clicked()
         {
             if let Some(v) = amount {
@@ -737,11 +724,7 @@ fn step_toolbar<F: FnMut(UiEvent)>(
         for (i, (_ring, label)) in regions.iter().enumerate() {
             ui.horizontal(|ui| {
                 ui.label(label);
-                if ui
-                    .button("🗑")
-                    .on_hover_text("Delete this step area")
-                    .clicked()
-                {
+                if ui.button("🗑").hint("Delete this step area").clicked() {
                     on_event(UiEvent::Sketch(SketchEvent::DeleteStepRegion(i)));
                 }
             });
@@ -768,7 +751,7 @@ fn ceiling_step_toolbar<F: FnMut(UiEvent)>(
         ui.label(egui::RichText::new("Line direction:").strong());
         if ui
             .button("Horizontal")
-            .on_hover_text("A horizontal step line through the tapped point")
+            .hint("A horizontal step line through the tapped point")
             .clicked()
         {
             on_event(UiEvent::Sketch(SketchEvent::ChooseCeilingStepOrientation {
@@ -777,7 +760,7 @@ fn ceiling_step_toolbar<F: FnMut(UiEvent)>(
         }
         if ui
             .button("Vertical")
-            .on_hover_text("A vertical step line through the tapped point")
+            .hint("A vertical step line through the tapped point")
             .clicked()
         {
             on_event(UiEvent::Sketch(SketchEvent::ChooseCeilingStepOrientation {
@@ -804,7 +787,7 @@ fn ceiling_step_toolbar<F: FnMut(UiEvent)>(
         let amount = parse_dimension_expression(amount_input).map(f32::abs);
         if ui
             .button("Up")
-            .on_hover_text("Raise the ceiling on that side by the amount")
+            .hint("Raise the ceiling on that side by the amount")
             .clicked()
         {
             if let Some(v) = amount {
@@ -814,7 +797,7 @@ fn ceiling_step_toolbar<F: FnMut(UiEvent)>(
         }
         if ui
             .button("Down")
-            .on_hover_text("Lower the ceiling on that side by the amount")
+            .hint("Lower the ceiling on that side by the amount")
             .clicked()
         {
             if let Some(v) = amount {
@@ -834,7 +817,7 @@ fn ceiling_step_toolbar<F: FnMut(UiEvent)>(
                 ui.label(label);
                 if ui
                     .button("🗑")
-                    .on_hover_text("Delete this ceiling step (re-flattens to the default)")
+                    .hint("Delete this ceiling step (re-flattens to the default)")
                     .clicked()
                 {
                     on_event(UiEvent::Sketch(SketchEvent::DeleteCeilingStepRegion(i)));
@@ -886,7 +869,7 @@ fn roof_point_toolbar<F: FnMut(UiEvent)>(
         // four corners; the controller validates it.
         if ui
             .button("Set")
-            .on_hover_text("Raise the ceiling area to a flat top at this height")
+            .hint("Raise the ceiling area to a flat top at this height")
             .clicked()
         {
             if let Some(v) = parse_dimension_expression(height_input) {
@@ -910,7 +893,7 @@ fn roof_point_toolbar<F: FnMut(UiEvent)>(
         metre_input(ui, ridge_length_input, 60.0, "e.g. 4.0");
         if ui
             .button("Set")
-            .on_hover_text("Use exactly this side length (the near corner stays put)")
+            .hint("Use exactly this side length (the near corner stays put)")
             .clicked()
         {
             if let Some(v) = parse_dimension_expression(ridge_length_input) {
@@ -919,7 +902,7 @@ fn roof_point_toolbar<F: FnMut(UiEvent)>(
         }
         if ui
             .button("Skip")
-            .on_hover_text("Accept the drawn length as-is")
+            .hint("Accept the drawn length as-is")
             .clicked()
         {
             on_event(UiEvent::Sketch(SketchEvent::SkipRoofRectLength));
@@ -946,7 +929,7 @@ fn roof_point_toolbar<F: FnMut(UiEvent)>(
         // to BOTH ridge ends; the controller validates it.
         if ui
             .button("Set")
-            .on_hover_text("Raise (or lower) the ceiling area to a ridge at this height")
+            .hint("Raise (or lower) the ceiling area to a ridge at this height")
             .clicked()
         {
             if let Some(v) = parse_dimension_expression(height_input) {
@@ -972,14 +955,14 @@ fn roof_point_toolbar<F: FnMut(UiEvent)>(
         } else {
             "Use exactly this ridge length"
         };
-        if ui.button("Set").on_hover_text(set_hover).clicked() {
+        if ui.button("Set").hint(set_hover).clicked() {
             if let Some(v) = parse_dimension_expression(ridge_length_input) {
                 on_event(UiEvent::Sketch(SketchEvent::AssignRoofRidgeLength(v)));
             }
         }
         if ui
             .button("Skip")
-            .on_hover_text("Accept the drawn length as-is")
+            .hint("Accept the drawn length as-is")
             .clicked()
         {
             on_event(UiEvent::Sketch(SketchEvent::SkipRoofRidgeLength));
@@ -1007,7 +990,7 @@ fn roof_point_toolbar<F: FnMut(UiEvent)>(
         // goes through as-is; the controller validates it.
         if ui
             .button("Set")
-            .on_hover_text("Slope the ceiling area up (or down) to this height at the point")
+            .hint("Slope the ceiling area up (or down) to this height at the point")
             .clicked()
         {
             if let Some(v) = parse_dimension_expression(height_input) {
@@ -1041,7 +1024,7 @@ fn roof_point_toolbar<F: FnMut(UiEvent)>(
                 ui.label(label);
                 if ui
                     .button("🗑")
-                    .on_hover_text("Delete this roof point (the area re-flattens)")
+                    .hint("Delete this roof point (the area re-flattens)")
                     .clicked()
                 {
                     on_event(UiEvent::Sketch(SketchEvent::DeleteRoofApex(i)));
@@ -1112,7 +1095,7 @@ fn exposure_toolbar<F: FnMut(UiEvent)>(
             // which today only risers (floor/ceiling step faces) can be.
             if ui
                 .button("Ground")
-                .on_hover_text("In contact with the ground (below grade)")
+                .hint("In contact with the ground (below grade)")
                 .clicked()
             {
                 on_event(UiEvent::Sketch(SketchEvent::SetWallExposure(
@@ -1121,7 +1104,7 @@ fn exposure_toolbar<F: FnMut(UiEvent)>(
             }
             if ui
                 .button("Clear")
-                .on_hover_text("Back to the derived default (unset)")
+                .hint("Back to the derived default (unset)")
                 .clicked()
             {
                 on_event(UiEvent::Sketch(SketchEvent::ClearWallExposure));
@@ -1168,7 +1151,7 @@ fn exposure_toolbar<F: FnMut(UiEvent)>(
             }
             if ui
                 .button("Clear wall")
-                .on_hover_text("Remove this wall's marks — back to unset")
+                .hint("Remove this wall's marks — back to unset")
                 .clicked()
             {
                 on_event(UiEvent::Sketch(SketchEvent::ClearWallExposure));

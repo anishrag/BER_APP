@@ -11,6 +11,7 @@ use super::{EguiStroke, SketchEvent, SketchView};
 use crate::ui::pages::events::UiEvent;
 use crate::ui::render;
 use crate::ui::render::ViewParams;
+use crate::ui::widgets::HintExt;
 use datatypes::ber::ber_struct::Ber;
 use domain::sketch::{DisplayMode, EditTools, SketchMode};
 
@@ -1117,8 +1118,8 @@ fn view_buttons<F: FnMut(UiEvent)>(
                 let enabled = matches!(view.mode, SketchMode::Storey3D) || view.ceiling_heights_set;
                 if ui
                     .add_enabled(enabled, egui::Button::new(label))
-                    .on_hover_text("Toggle between the 2D plan and the 3D view")
-                    .on_disabled_hover_text("Set a default ceiling height (Heights) first")
+                    .hint("Toggle between the 2D plan and the 3D view")
+                    .disabled_hint("Set a default ceiling height (Heights) first")
                     .clicked()
                 {
                     on_event(UiEvent::Sketch(SketchEvent::ChangeMode(other)));
@@ -1131,7 +1132,7 @@ fn view_buttons<F: FnMut(UiEvent)>(
                 };
                 if ui
                     .button(format!("{:?}", view.display))
-                    .on_hover_text("Cycle what the canvas shows (dims / roofs / walls / floors)")
+                    .hint("Cycle what the canvas shows (dims / roofs / walls / floors)")
                     .clicked()
                 {
                     on_event(UiEvent::Sketch(SketchEvent::ChangeDisplay(next_display)));

@@ -13,7 +13,7 @@
 use super::prompt_dock::parse_dimension_expression;
 use super::{SketchEvent, SketchView};
 use crate::ui::pages::events::UiEvent;
-use crate::ui::widgets::metre_input;
+use crate::ui::widgets::{metre_input, HintExt};
 use domain::sketch::EditTools;
 
 /// One tool/toggle slot inside a category.
@@ -320,7 +320,7 @@ fn tool_ui<F: FnMut(UiEvent)>(
                 egui::Button::selectable(selected, edit_tool_label(t)),
             );
             if flags.measurement_prompt_active {
-                resp = resp.on_disabled_hover_text("Finish or cancel the measurement first");
+                resp = resp.disabled_hint("Finish or cancel the measurement first");
             }
             if resp.clicked() {
                 on_event(UiEvent::Sketch(SketchEvent::ChangeEditTool(t)));
@@ -333,7 +333,7 @@ fn tool_ui<F: FnMut(UiEvent)>(
                     enabled,
                     egui::Button::selectable(flags.living_area_mode, "🏠 Living areas"),
                 )
-                .on_hover_text(
+                .hint(
                     "Draw potential living-space sub-areas inside the storey \
                      (drawn & dimensioned the same way; largest chosen later)",
                 )
@@ -349,7 +349,7 @@ fn tool_ui<F: FnMut(UiEvent)>(
                 if let Some(idx) = flags.active_living_area {
                     if ui
                         .button("🗑 Delete area")
-                        .on_hover_text("Delete this living area (redraw to change one)")
+                        .hint("Delete this living area (redraw to change one)")
                         .clicked()
                     {
                         on_event(UiEvent::Sketch(SketchEvent::DeleteLivingArea(idx)));
@@ -364,11 +364,11 @@ fn tool_ui<F: FnMut(UiEvent)>(
                     enabled,
                     egui::Button::selectable(flags.phase_mode, "📅 Construction year"),
                 )
-                .on_hover_text(
+                .hint(
                     "Tag an area with its year of construction: draw an \
                      area (like a living area), then pick the year",
                 )
-                .on_disabled_hover_text("Enter the construction years in Key Details first")
+                .disabled_hint("Enter the construction years in Key Details first")
                 .clicked()
             {
                 on_event(UiEvent::Sketch(SketchEvent::SetPhaseMode(
@@ -383,7 +383,7 @@ fn tool_ui<F: FnMut(UiEvent)>(
                     enabled,
                     egui::Button::selectable(flags.exposure_mode, "🌡 Exposure"),
                 )
-                .on_hover_text(
+                .hint(
                     "Mark each storey wall's heat-loss exposure: tap a wall, \
                      then pick exposed / semi-exposed / non-heat-loss",
                 )
@@ -410,7 +410,7 @@ fn tool_ui<F: FnMut(UiEvent)>(
                     metre_input(ui, &mut state.ceiling_height_input, 50.0, "e.g. 2.4").submitted;
                 let set_clicked = ui
                     .button("Set")
-                    .on_hover_text(
+                    .hint(
                         "Set the storey's default ceiling height (on the All tab: \
                          fill every storey that doesn't have one yet)",
                     )
@@ -446,13 +446,11 @@ fn tool_ui<F: FnMut(UiEvent)>(
                             .submitted;
                     let set_clicked = ui
                         .button("Set")
-                        .on_hover_text(
+                        .hint(
                             "Set the floor-slab thickness to the storey below \
                              (it sets this storey's floor level)",
                         )
-                        .on_disabled_hover_text(
-                            "Only an upper storey has a floor slab to the storey below",
-                        )
+                        .disabled_hint("Only an upper storey has a floor slab to the storey below")
                         .clicked();
                     if set_clicked || submitted {
                         if let Some(value) =
@@ -479,7 +477,7 @@ fn tool_ui<F: FnMut(UiEvent)>(
                     enabled,
                     egui::Button::selectable(flags.step_mode, "↕ Floor steps"),
                 )
-                .on_hover_text(
+                .hint(
                     "Mark a floor area as raised or lowered: draw an area \
                      (like a living area), then enter the step amount",
                 )
@@ -498,14 +496,12 @@ fn tool_ui<F: FnMut(UiEvent)>(
                     enabled,
                     egui::Button::selectable(flags.ceiling_step_mode, "⬆ Ceiling steps"),
                 )
-                .on_hover_text(
+                .hint(
                     "Raise or lower part of the ceiling: draw a straight line \
                      across the plan and tap the side that steps, or draw a \
                      closed area (like a floor step), then enter the amount",
                 )
-                .on_disabled_hover_text(
-                    "Set the default ceiling height first (the Heights field above)",
-                )
+                .disabled_hint("Set the default ceiling height first (the Heights field above)")
                 .clicked()
             {
                 on_event(UiEvent::Sketch(SketchEvent::SetCeilingStepMode(
@@ -523,14 +519,12 @@ fn tool_ui<F: FnMut(UiEvent)>(
                     enabled,
                     egui::Button::selectable(flags.roof_point_mode, "⛰ Roof points"),
                 )
-                .on_hover_text(
+                .hint(
                     "Slope part of the roof: tap a high (or low) point inside \
                      a ceiling area, or draw a straight stroke for a ridge, \
                      then enter the height",
                 )
-                .on_disabled_hover_text(
-                    "Set the default ceiling height first (the Heights field above)",
-                )
+                .disabled_hint("Set the default ceiling height first (the Heights field above)")
                 .clicked()
             {
                 on_event(UiEvent::Sketch(SketchEvent::SetRoofPointMode(
@@ -544,7 +538,7 @@ fn tool_ui<F: FnMut(UiEvent)>(
                     !flags.read_only && flags.can_undo,
                     egui::Button::new("↶ Undo"),
                 )
-                .on_hover_text("Undo (Ctrl+Z)")
+                .hint("Undo (Ctrl+Z)")
                 .clicked()
             {
                 on_event(UiEvent::Sketch(SketchEvent::Undo));
@@ -556,7 +550,7 @@ fn tool_ui<F: FnMut(UiEvent)>(
                     !flags.read_only && flags.can_redo,
                     egui::Button::new("↷ Redo"),
                 )
-                .on_hover_text("Redo (Ctrl+Shift+Z or Ctrl+Y)")
+                .hint("Redo (Ctrl+Shift+Z or Ctrl+Y)")
                 .clicked()
             {
                 on_event(UiEvent::Sketch(SketchEvent::Redo));
@@ -566,7 +560,7 @@ fn tool_ui<F: FnMut(UiEvent)>(
             // Available on the All-storeys tab too (view-only, like before).
             if ui
                 .button("Fit")
-                .on_hover_text("Reset view (zoom/pan, and the 3D orbit angle)")
+                .hint("Reset view (zoom/pan, and the 3D orbit angle)")
                 .clicked()
             {
                 on_event(UiEvent::Sketch(SketchEvent::ResetView));
@@ -575,7 +569,7 @@ fn tool_ui<F: FnMut(UiEvent)>(
         Tool::UnsnapLast => {
             if ui
                 .add_enabled(!flags.read_only, egui::Button::new("↩ Un-snap last"))
-                .on_hover_text("Replay the last drawn action with its elective snaps disabled")
+                .hint("Replay the last drawn action with its elective snaps disabled")
                 .clicked()
             {
                 on_event(UiEvent::Sketch(SketchEvent::UnsnapLast));
@@ -585,12 +579,12 @@ fn tool_ui<F: FnMut(UiEvent)>(
             // Pure page state — flips the canvas's label rendering directly,
             // no controller round-trip.
             ui.toggle_value(&mut state.show_wall_lengths, "📏 Wall lengths")
-                .on_hover_text("Show the wall-length labels on the plan");
+                .hint("Show the wall-length labels on the plan");
         }
         Tool::SaveCheckpoint => {
             if ui
                 .add_enabled(!flags.read_only, egui::Button::new("📌 Save checkpoint"))
-                .on_hover_text(
+                .hint(
                     "DEV: save this plan as the checkpoint, reloaded on \
                      `BER_CHECKPOINT=1 cargo run` or via Load checkpoint",
                 )
@@ -602,9 +596,7 @@ fn tool_ui<F: FnMut(UiEvent)>(
         Tool::LoadCheckpoint => {
             if ui
                 .button("📂 Load checkpoint")
-                .on_hover_text(
-                    "DEV: load the saved checkpoint plan, replacing the current sketch session",
-                )
+                .hint("DEV: load the saved checkpoint plan, replacing the current sketch session")
                 .clicked()
             {
                 on_event(UiEvent::Sketch(SketchEvent::LoadCheckpoint));
@@ -613,7 +605,7 @@ fn tool_ui<F: FnMut(UiEvent)>(
         Tool::DebugDump => {
             if ui
                 .button("🐞 Debug dump")
-                .on_hover_text(
+                .hint(
                     "DEV: print the roof/wall derivation dump to the terminal \
                      and copy it to the clipboard",
                 )
