@@ -94,7 +94,10 @@ pub(crate) fn clip_stroke_inside(
 /// Whether `pts` enclose real area (a drawn ROOM) rather than being a near-
 /// straight line whose ends happen to fall close together (a short CUT). The
 /// enclosed (shoelace) area must be a real fraction of the stroke's extent.
-fn encloses_area(pts: &[Point2f32]) -> bool {
+/// Public (re-exported as `stroke_encloses_area`): the roof-rect stroke
+/// routing applies the SAME closed-loop classification the carve does —
+/// ends within `close_gap_m` AND enclosing real area.
+pub fn encloses_area(pts: &[Point2f32]) -> bool {
     let Some(((x0, y0), (x1, y1))) = geom::bbox(pts) else {
         return false;
     };

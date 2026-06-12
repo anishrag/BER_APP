@@ -363,6 +363,20 @@ pub(super) fn render<F: FnMut(UiEvent)>(
         render::render_roof_ridge_line(&painter, rect, ber, current_storey_idx, mode, vp, a, b);
     }
 
+    // Roof RECTS (flat tops): committed four-apex rect groups as solid
+    // labelled outlines, plus the pending rect as a dashed outline — the
+    // ridge family's closed-stroke sibling, same violet-blue.
+    render::render_roof_rects(
+        &painter,
+        rect,
+        ber,
+        current_storey_idx,
+        mode,
+        vp,
+        view.roof_rect_views,
+        view.pending_roof_rect_outline,
+    );
+
     // The pending ridge's wall snap, mirroring the ceiling-step line's:
     // drawn through the same snap-tag renderer, but its menu is a separate
     // widget routed to UnsnapRoofRidge, never ChooseSnap — the generic
@@ -758,6 +772,7 @@ pub(super) fn render<F: FnMut(UiEvent)>(
     if view.roof_point_mode
         && !view.roof_point_pending
         && !view.roof_ridge_pending
+        && !view.roof_rect_pending
         && matches!(edit_tool, EditTools::DrawPerpWalls)
         && !cut_pending
         && !phase_cut_pending
@@ -835,6 +850,7 @@ pub(super) fn render<F: FnMut(UiEvent)>(
         && !view.ceiling_step_pending
         && !view.roof_point_pending
         && !view.roof_ridge_pending
+        && !view.roof_rect_pending
         && !view.exposure_mode;
 
     if primary_available && !matches!(edit_tool, EditTools::Move) {

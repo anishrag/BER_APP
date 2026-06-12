@@ -306,6 +306,17 @@ pub enum SketchEvent {
     /// start): apply the computed centre-it-within-its-ceiling-area value
     /// through the same path as a typed distance.
     CentreRoofPosition,
+    /// User entered a SIDE LENGTH (metres) for the pending roof RECT's open
+    /// length stage (LenX, then LenY — the closed-stroke flat-top flow).
+    AssignRoofRectLength(f32),
+    /// Skip the pending roof rect's open side-length question — accept the
+    /// drawn length as-is.
+    SkipRoofRectLength,
+    /// User entered the flat top's height (metres, ABSOLUTE above the storey
+    /// floor datum — all four corners get it) for the pending roof rect.
+    AssignRoofRectHeight(f32),
+    /// Discard the in-flight roof rect at any stage.
+    CancelPendingRoofRect,
     /// "Don't snap" on the pending roof ridge's snap tag: revert the cross
     /// coordinate to its drawn value and reopen the position question. Routed
     /// to the controller's dedicated `unsnap_roof_ridge` — NOT
@@ -504,6 +515,18 @@ pub struct SketchView<'a> {
     pub roof_ridge_length_anchored: bool,
     pub roof_ridge_height_pending: bool,
     pub roof_ridge_pending: bool,
+    /// Roof-RECT (flat-topped hip) input — the closed-stroke sibling of the
+    /// ridge: committed flat tops `(corners, label)` to overlay, the pending
+    /// rect's corners for the dashed overlay, and the per-stage flags. The
+    /// open length stage is identified by its AXIS (LenX/LenY share the
+    /// ridge length input buffer — the two flows are never pending at once);
+    /// the height entry reuses `roof_apex_input`.
+    pub roof_rect_views: &'a [([(f64, f64); 4], String)],
+    pub pending_roof_rect_outline: Option<[(f64, f64); 4]>,
+    pub roof_rect_position_pending: bool,
+    pub roof_rect_length_axis: Option<manip_2d_plan::ParameterAxis>,
+    pub roof_rect_height_pending: bool,
+    pub roof_rect_pending: bool,
     pub roof_ridge_length_input: &'a mut String,
     /// Last error from the roof assigns (apex height / ridge length / ridge
     /// height), shown inline in the shared roof toolbar — one field because

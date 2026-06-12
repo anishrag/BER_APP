@@ -894,9 +894,16 @@ impl CeilingRegions {
     ///   nearer apex (HUB triangles; nearness by ridge-axis midpoint
     ///   projection) plus one TRANSITION triangle `(v, A, B)` per hub
     ///   switch — see `ridge_triangles`;
-    /// - **≥3** → warn + ridge from the FIRST TWO in apex-list order
-    ///   (deterministic, never a panic — resolve must always produce
-    ///   geometry; assign-time validation rejects this up front).
+    /// - **4 forming an axis-aligned RECT** (one apex per corner, shared z
+    ///   — [`apexes_form_rect`]) → the flat-topped HIP (pavilion): the
+    ///   pavilion loft [`rect_ridge_faces`] — boundary edges split at the
+    ///   corner hip diagonals, lofted to the rect side they face, plus the
+    ///   flat TOP. A ring wrapping past a hip line (> 4 switches,
+    ///   [`rect_hip_switches`]) warns and proceeds;
+    /// - **≥3** (and a 4 that is no rect) → warn + ridge from the FIRST
+    ///   TWO in apex-list order (deterministic, never a panic — resolve
+    ///   must always produce geometry; assign-time validation rejects this
+    ///   up front).
     ///
     /// Both branches PRE-LIFT first (D2 step 0): ring vertices plan-matching
     /// an applied apex (1e-6 m) take that apex's z — load-bearing for the
@@ -971,6 +978,37 @@ impl CeilingRegions {
                     &apexes[contained[0]],
                 ))),
                 n => {
+                    // 4 contained apexes forming an axis-aligned RECT with
+                    // one shared z → the flat-topped hip (pavilion),
+                    // [`rect_ridge_faces`]. A ring wrapping a notch past a
+                    // hip line (> 4 switches — assign-time validation
+                    // rejects creating one) warns and proceeds: the loft
+                    // may fold but resolve always produces geometry.
+                    if n == 4 {
+                        let quad = [
+                            &apexes[contained[0]],
+                            &apexes[contained[1]],
+                            &apexes[contained[2]],
+                            &apexes[contained[3]],
+                        ];
+                        if let Some((lo, hi)) = apexes_form_rect(&quad) {
+                            let ring: Vec<Point2f64> = region
+                                .polygon
+                                .exterior
+                                .iter()
+                                .map(|v| Point2f64::new(v.x, v.y))
+                                .collect();
+                            let switches = rect_hip_switches(&ring, lo, hi);
+                            if switches > 4 {
+                                log::warn!(
+                                    "rect ridge over a ring wrapping past a hip line \
+                                     ({switches} switches) — the loft may fold; proceeding"
+                                );
+                            }
+                            next.extend(merge_coplanar_faces(rect_ridge_faces(region, quad)));
+                            continue;
+                        }
+                    }
                     if n >= 3 {
                         log::warn!(
                             "ceiling region contains {n} roof apexes — \
@@ -1073,6 +1111,23 @@ impl CeilingRegions {
                 let mut merge: Vec<&CeilingRegion> = Vec::new();
                 for &ri in &region_idxs {
                     let r = &self.regions[ri];
+                    // A member whose EVERY vertex is apex-matching (the
+                    // rect ridge's flat TOP) has no base of its own: it
+                    // joins the merge WITHOUT voting on base_z — excluding
+                    // it would punch a hole in the reconstructed step area
+                    // and revert the under-top base on re-resolve. Regions
+                    // with a DISAGREEING or genuinely irregular base stay
+                    // warn-excluded below.
+                    let all_apex = r.polygon.exterior.len() >= 3
+                        && r.polygon.exterior.iter().all(|v| {
+                            apexes.iter().any(|a| {
+                                (v.x - a.point.x).abs() <= EPS_M && (v.y - a.point.y).abs() <= EPS_M
+                            })
+                        });
+                    if all_apex {
+                        merge.push(r);
+                        continue;
+                    }
                     match (r.fan_base_z(apexes), base_z) {
                         (Some(z), None) => {
                             base_z = Some(z);
@@ -1555,6 +1610,239 @@ fn ridge_triangles(region: CeilingRegion, a: &RoofApex, b: &RoofApex) -> Vec<Cei
         }
         out.push(mk(vec![ext[i], hl, he]));
     }
+    out
+}
+
+/// A rect ridge side at or below this (m) is a line, not a rectangle — the
+/// datatypes-side floor matching the document's MIN_RIDGE_LENGTH_M.
+const RECT_MIN_SIDE_M: f64 = 0.01;
+
+/// The 4 apexes form an AXIS-ALIGNED RECTANGLE: their quantized plan points
+/// are exactly the corner set {x0, x1} × {y0, y1} (one apex per corner),
+/// both sides exceed [`RECT_MIN_SIDE_M`], and every z agrees within 1e-6 —
+/// the flat-topped-hip (pavilion) recognizer gating [`with_apexes`]' n = 4
+/// branch. Returns the rect as `(lo, hi)` corners. Public so the shell's
+/// committed-rect view applies the SAME predicate the resolve does.
+///
+/// [`with_apexes`]: CeilingRegions::with_apexes
+pub fn apexes_form_rect(apexes: &[&RoofApex]) -> Option<(Point2f64, Point2f64)> {
+    const Z_EPS: f64 = 1e-6;
+    if apexes.len() != 4 {
+        return None;
+    }
+    let z0 = apexes[0].z_m;
+    if apexes.iter().any(|a| (a.z_m - z0).abs() > Z_EPS) {
+        return None;
+    }
+    let pts: Vec<Point2f64> = apexes
+        .iter()
+        .map(|a| RoofApex::quantize_point(a.point))
+        .collect();
+    let (mut x0, mut y0) = (f64::INFINITY, f64::INFINITY);
+    let (mut x1, mut y1) = (f64::NEG_INFINITY, f64::NEG_INFINITY);
+    for p in &pts {
+        x0 = x0.min(p.x);
+        y0 = y0.min(p.y);
+        x1 = x1.max(p.x);
+        y1 = y1.max(p.y);
+    }
+    if x1 - x0 <= RECT_MIN_SIDE_M || y1 - y0 <= RECT_MIN_SIDE_M {
+        return None;
+    }
+    // Exactly one apex per corner (exact equality is right here: the bbox
+    // extremes come from the same quantized values).
+    let one_at = |cx: f64, cy: f64| pts.iter().filter(|p| p.x == cx && p.y == cy).count() == 1;
+    (one_at(x0, y0) && one_at(x1, y0) && one_at(x1, y1) && one_at(x0, y1))
+        .then_some((Point2f64::new(x0, y0), Point2f64::new(x1, y1)))
+}
+
+/// Which rect SIDE plan point `p` faces — the corner-sector classification
+/// SHARED by the hip split, the loft hub assignment, and the switch count
+/// (the single-source rule, [`ridge_edge_hubs`]' rect analogue): the side
+/// with the LARGEST outward excess, the 45° hip rays from each corner being
+/// the ties (first side in order wins a tie — deterministic). `0` = bottom
+/// (faces y < lo.y), `1` = right, `2` = top, `3` = left — matching the CCW
+/// corner ring c00 → c10 → c11 → c01, where side `i` runs from corner `i`
+/// to corner `(i + 1) % 4`.
+fn rect_side_sector(p: Point2f64, lo: Point2f64, hi: Point2f64) -> usize {
+    let e = [lo.y - p.y, p.x - hi.x, p.y - hi.y, lo.x - p.x];
+    let mut best = 0;
+    for (i, v) in e.iter().enumerate().skip(1) {
+        if *v > e[best] {
+            best = i;
+        }
+    }
+    best
+}
+
+/// Split each edge of `ext` where it crosses one of the rect's four hip
+/// DIAGONAL rays — from each corner OUTWARD along (±1, ±1) — the rect
+/// analogue of [`ridge_split_ring`], and like it the SINGLE source of the
+/// split, shared by [`rect_ridge_faces`] and [`rect_hip_switches`] (or the
+/// assign-time switch check would validate a different roof than resolve
+/// builds). The inserted vertex's z interpolates linearly along the edge;
+/// a vertex exactly ON a ray doesn't split (it is already there), an edge
+/// ALONG a ray never crosses it, and crossings behind the corner (t ≤ 0,
+/// inside the rect) don't count. Multiple rays crossing one edge insert in
+/// edge order.
+fn rect_split_ring(ext: Vec<Point3f64>, lo: Point2f64, hi: Point2f64) -> Vec<Point3f64> {
+    let rays = [
+        (lo, (-1.0, -1.0)),
+        (Point2f64::new(hi.x, lo.y), (1.0, -1.0)),
+        (hi, (1.0, 1.0)),
+        (Point2f64::new(lo.x, hi.y), (-1.0, 1.0)),
+    ];
+    let n = ext.len();
+    let mut out = Vec::with_capacity(n + 8);
+    for i in 0..n {
+        let p = ext[i];
+        let q = ext[(i + 1) % n];
+        out.push(p);
+        let (ex, ey) = (q.x - p.x, q.y - p.y);
+        let mut cuts: Vec<f64> = Vec::new();
+        for (c, (dx, dy)) in rays {
+            let denom = dx * ey - dy * ex; // d × e
+            if denom.abs() <= 1e-12 {
+                continue; // edge parallel to the ray — no crossing
+            }
+            let (wx, wy) = (p.x - c.x, p.y - c.y);
+            // p + s·e = c + t·d, both by cross products.
+            let s = (wx * dy - wy * dx) / denom;
+            let t = (wx * ey - wy * ex) / denom;
+            if s > 1e-12 && s < 1.0 - 1e-12 && t > 1e-9 {
+                cuts.push(s);
+            }
+        }
+        cuts.sort_by(f64::total_cmp);
+        cuts.dedup_by(|a, b| (*a - *b).abs() <= 1e-12);
+        for s in cuts {
+            out.push(p + s * (q - p));
+        }
+    }
+    out
+}
+
+/// How many times the per-edge SIDE assignment switches walking `ring`
+/// after the hip-diagonal split ([`rect_split_ring`] + [`rect_side_sector`]
+/// — the same pair [`rect_ridge_faces`] lofts with) — the rect foldover
+/// guard: a ring enclosing the rect cleanly switches exactly 4 (once past
+/// each hip ray); more means the ring wraps a notch past a hip line and
+/// the loft would fold. Assign-time validation rejects ≠ 4; resolve warns
+/// and proceeds (legacy input must never panic). `0` for rings with fewer
+/// than 3 vertices or a degenerate rect. Pure plan-space.
+pub fn rect_hip_switches(ring: &[Point2f64], lo: Point2f64, hi: Point2f64) -> usize {
+    if ring.len() < 3 || hi.x - lo.x <= 0.0 || hi.y - lo.y <= 0.0 {
+        return 0;
+    }
+    let ext: Vec<Point3f64> = ring.iter().map(|p| Point3f64::new(p.x, p.y, 0.0)).collect();
+    let ext = rect_split_ring(ext, lo, hi);
+    let n = ext.len();
+    let sides: Vec<usize> = (0..n)
+        .map(|i| {
+            let (p, q) = (&ext[i], &ext[(i + 1) % n]);
+            rect_side_sector(Point2f64::new((p.x + q.x) / 2.0, (p.y + q.y) / 2.0), lo, hi)
+        })
+        .collect();
+    (0..n)
+        .filter(|&i| sides[i] != sides[(i + n - 1) % n])
+        .count()
+}
+
+/// D3 — the PAVILION LOFT (the rect analogue of [`ridge_triangles`], the
+/// 4-corner branch of [`CeilingRegions::with_apexes`]):
+///
+/// 0. PRE-LIFT ring vertices plan-matching a corner to that corner's z.
+/// 1. SPLIT boundary edges where they cross a corner's hip DIAGONAL ray
+///    ([`rect_split_ring`] — the single source of the split, shared with
+///    [`rect_hip_switches`]).
+/// 2. Per (sub-)edge `(v, w)`, hub = the rect SIDE its midpoint faces
+///    ([`rect_side_sector`]): one LOFT triangle `(v, w, S_b)`, where the
+///    side runs S_a → S_b CCW along the rect.
+/// 3. One TRANSITION (hip-wedge) triangle `(v, S_b, S_a)` of the LEAVING
+///    side per assignment switch — at the first vertex of each same-side
+///    RUN, closing that run's fan from S_b back to S_a (one per run, NOT
+///    per edge: the per-edge form would double-cover a sector holding
+///    several boundary edges). Vertex order preserves CCW. Each sector
+///    thus comes out as the polygon fan
+///    `(S_b, S_a, v₁), (S_b, v₁, v₂), …` — adjacent sectors share the hip
+///    segment `(v, corner)`, so the loft tiles and stays watertight.
+/// 4. Append the flat TOP — the rect at the corners' z, each corner
+///    vertex copied VERBATIM from its apex (the corner-identity
+///    convention `apex_groups` reads).
+///
+/// Sub-[`SLIVER_AREA_M2`] plan triangles drop (a rect side ON the region
+/// boundary lofts nothing — the mono-gable side; re-applying to the top
+/// rect itself drops everything but the top). Fresh ids, default `opes`,
+/// inherited `construction_id`; the caller merges coplanar neighbours
+/// ([`merge_coplanar_faces`]) — with EQUAL eaves offsets each side's
+/// triangles fold into one trapezoid, the classic 4-face pavilion + flat
+/// top; unequal offsets keep the corner wedges as their own (planar)
+/// triangles.
+fn rect_ridge_faces(region: CeilingRegion, corners: [&RoofApex; 4]) -> Vec<CeilingRegion> {
+    let cid = region.construction_id;
+    let (mut x0, mut y0) = (f64::INFINITY, f64::INFINITY);
+    let (mut x1, mut y1) = (f64::NEG_INFINITY, f64::NEG_INFINITY);
+    for a in &corners {
+        let q = RoofApex::quantize_point(a.point);
+        x0 = x0.min(q.x);
+        y0 = y0.min(q.y);
+        x1 = x1.max(q.x);
+        y1 = y1.max(q.y);
+    }
+    let (lo, hi) = (Point2f64::new(x0, y0), Point2f64::new(x1, y1));
+    // The canonical CCW corner ring c00 → c10 → c11 → c01, each at its OWN
+    // apex's verbatim coordinates + z (the caller verified one per corner;
+    // the fallback never fires on validated input).
+    let corner_at = |cx: f64, cy: f64| -> Point3f64 {
+        corners
+            .iter()
+            .find(|a| {
+                let q = RoofApex::quantize_point(a.point);
+                q.x == cx && q.y == cy
+            })
+            .map(|a| Point3f64::new(a.point.x, a.point.y, a.z_m))
+            .unwrap_or_else(|| Point3f64::new(cx, cy, corners[0].z_m))
+    };
+    let cs = [
+        corner_at(x0, y0),
+        corner_at(x1, y0),
+        corner_at(x1, y1),
+        corner_at(x0, y1),
+    ];
+    let ext = pre_lift(region.polygon.exterior, &corners[..]);
+    let ext = rect_split_ring(ext, lo, hi);
+    let mk = |verts: Vec<Point3f64>| CeilingRegion {
+        id: ItemId::default(),
+        polygon: Polygon3D::new(verts),
+        opes: Opes::default(),
+        construction_id: cid,
+    };
+    let n = ext.len();
+    let sides: Vec<usize> = (0..n)
+        .map(|i| {
+            let (p, q) = (&ext[i], &ext[(i + 1) % n]);
+            rect_side_sector(Point2f64::new((p.x + q.x) / 2.0, (p.y + q.y) / 2.0), lo, hi)
+        })
+        .collect();
+    let mut out = Vec::new();
+    // Loft + hip-wedge triangles, in ring order.
+    for i in 0..n {
+        let (v, w) = (ext[i], ext[(i + 1) % n]);
+        let side = sides[i];
+        let (sa, sb) = (cs[side], cs[(side + 1) % 4]);
+        // A side SWITCH at v: close the starting run's fan with the hip
+        // wedge (v, S_b, S_a) — once per run.
+        if sides[(i + n - 1) % n] != side
+            && tri_signed_plan_area(&v, &sb, &sa).abs() >= SLIVER_AREA_M2
+        {
+            out.push(mk(vec![v, sb, sa]));
+        }
+        if tri_signed_plan_area(&v, &w, &sb).abs() >= SLIVER_AREA_M2 {
+            out.push(mk(vec![v, w, sb]));
+        }
+    }
+    // The flat TOP.
+    out.push(mk(cs.to_vec()));
     out
 }
 
@@ -4719,6 +5007,286 @@ mod tests {
         let groups = again.apex_groups(&apexes);
         assert_eq!(groups.len(), 1);
         assert_eq!(groups[0].apex_idxs, vec![0, 1]);
+    }
+
+    // ── rect (pavilion) ridges ──────────────────────────────────────────────
+
+    /// The four corner apexes of the canonical pavilion, over the rect
+    /// `(1,1)..(5,3)` at z = 4 — equal 1 m eaves offsets inside the 6×4
+    /// footprint.
+    fn pavilion_apexes() -> Vec<RoofApex> {
+        [(1.0, 1.0), (5.0, 1.0), (5.0, 3.0), (1.0, 3.0)]
+            .into_iter()
+            .map(|(x, y)| RoofApex {
+                point: Point2f64::new(x, y),
+                z_m: 4.0,
+            })
+            .collect()
+    }
+
+    fn fingerprint(r: &CeilingRegions) -> Vec<(f64, f64, f64)> {
+        let mut vs: Vec<(f64, f64, f64)> = r
+            .regions
+            .iter()
+            .flat_map(|reg| reg.polygon.exterior.iter().map(|v| (v.x, v.y, v.z)))
+            .collect();
+        vs.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        vs
+    }
+
+    /// `apexes_form_rect`: one apex per corner of {x0,x1}×{y0,y1} with a
+    /// shared z is a rect, in any order; unequal z, a duplicated corner, a
+    /// degenerate side, and a wrong count are not.
+    #[test]
+    fn apexes_form_rect_recognizes_corner_sets() {
+        let apexes = pavilion_apexes();
+        let mut refs: Vec<&RoofApex> = apexes.iter().collect();
+        let (lo, hi) = apexes_form_rect(&refs).expect("a rect");
+        assert_eq!((lo.x, lo.y, hi.x, hi.y), (1.0, 1.0, 5.0, 3.0));
+        refs.swap(0, 2); // order-free
+        assert!(apexes_form_rect(&refs).is_some());
+
+        // Unequal z.
+        let mut bad = apexes.clone();
+        bad[3].z_m = 4.5;
+        assert!(apexes_form_rect(&bad.iter().collect::<Vec<_>>()).is_none());
+        // A duplicated corner (three distinct points).
+        let mut bad = apexes.clone();
+        bad[3].point = bad[0].point;
+        assert!(apexes_form_rect(&bad.iter().collect::<Vec<_>>()).is_none());
+        // A degenerate side (all four on one line).
+        let line: Vec<RoofApex> = [(1.0, 1.0), (2.0, 1.0), (3.0, 1.0), (4.0, 1.0)]
+            .into_iter()
+            .map(|(x, y)| RoofApex {
+                point: Point2f64::new(x, y),
+                z_m: 4.0,
+            })
+            .collect();
+        assert!(apexes_form_rect(&line.iter().collect::<Vec<_>>()).is_none());
+        // A non-rect quad (one corner pulled inward).
+        let mut bad = apexes.clone();
+        bad[2].point = Point2f64::new(4.5, 3.0);
+        assert!(apexes_form_rect(&bad.iter().collect::<Vec<_>>()).is_none());
+        // Wrong count.
+        assert!(apexes_form_rect(&apexes.iter().take(3).collect::<Vec<_>>()).is_none());
+    }
+
+    /// `rect_hip_switches`: a ring enclosing the rect cleanly switches
+    /// exactly 4 — equal or unequal offsets, and a rect side ON the ring
+    /// (the mono-gable case) included; a ring wrapping past a hip line (the
+    /// notched C with the rect spanning its slot) switches more; degenerate
+    /// input is 0.
+    #[test]
+    fn rect_hip_switches_clean_is_four_notch_wrap_is_more() {
+        let ring = square(0.0, 0.0, 6.0, 4.0);
+        let (lo, hi) = (Point2f64::new(1.0, 1.0), Point2f64::new(5.0, 3.0));
+        assert_eq!(rect_hip_switches(&ring, lo, hi), 4, "equal offsets");
+        let (lo, hi) = (Point2f64::new(2.0, 1.0), Point2f64::new(4.0, 3.0));
+        assert_eq!(rect_hip_switches(&ring, lo, hi), 4, "unequal offsets");
+        let (lo, hi) = (Point2f64::new(1.0, 0.0), Point2f64::new(5.0, 2.0));
+        assert_eq!(rect_hip_switches(&ring, lo, hi), 4, "side on the ring");
+        // The notched C with the rect spanning the slot's reach: the ring
+        // wraps past the hip lines.
+        let (lo, hi) = (Point2f64::new(0.5, 0.5), Point2f64::new(9.0, 3.5));
+        assert!(
+            rect_hip_switches(&notched_ring(), lo, hi) > 4,
+            "wrap past a hip line exceeds the fence (got {})",
+            rect_hip_switches(&notched_ring(), lo, hi)
+        );
+        // Degenerate: a sub-triangle ring or a zero-side rect.
+        assert_eq!(rect_hip_switches(&ring[..2], lo, hi), 0);
+        assert_eq!(
+            rect_hip_switches(&ring, Point2f64::new(1.0, 1.0), Point2f64::new(1.0, 3.0)),
+            0
+        );
+    }
+
+    /// THE PAVILION: four corner apexes with equal eaves offsets → the
+    /// classic flat-topped hip — 4 planar trapezoids + the flat TOP, tiling
+    /// the footprint, every boundary vertex at the eaves and every rect
+    /// corner verbatim at its apex; the grouping authority links all four
+    /// corners into ONE group at the eaves base whose merged ring (the TOP
+    /// joins WITHOUT voting — the apex_groups amendment) is the whole
+    /// footprint.
+    #[test]
+    fn with_apexes_four_corners_make_a_pavilion() {
+        use geo::Area;
+        let cid = ItemId::default();
+        let apexes = pavilion_apexes();
+        let out = CeilingRegions::default_for_footprint(vec![square(0.0, 0.0, 6.0, 4.0)], 2.4, cid)
+            .with_apexes(&apexes);
+        assert_eq!(out.regions.len(), 5, "4 slopes + the flat top");
+        for r in &out.regions {
+            assert!(
+                is_planar(r),
+                "every pavilion face is planar: {:?}",
+                r.polygon
+            );
+            assert_eq!(r.polygon.exterior.len(), 4, "trapezoids + the top");
+        }
+        let tops: Vec<&CeilingRegion> = out
+            .regions
+            .iter()
+            .filter(|r| r.flat_z().is_some_and(|z| (z - 4.0).abs() < 1e-9))
+            .collect();
+        assert_eq!(tops.len(), 1, "one flat top at the apex height");
+        let top_plan: Polygon<f64> = tops[0].polygon.clone().into();
+        assert!(
+            (top_plan.unsigned_area() - 8.0).abs() < 1e-9,
+            "the 4×2 rect"
+        );
+        let total: f64 = out
+            .regions
+            .iter()
+            .map(|r| Polygon::<f64>::from(r.polygon.clone()).unsigned_area())
+            .sum();
+        assert!((total - 24.0).abs() < 1e-9, "faces tile the footprint");
+
+        // The grouping authority: one group, all four corners, eaves base,
+        // merged ring = the footprint (the all-apex TOP joined the merge).
+        let groups = out.apex_groups(&apexes);
+        assert_eq!(groups.len(), 1);
+        assert_eq!(groups[0].apex_idxs, vec![0, 1, 2, 3]);
+        assert!((groups[0].base_z - 2.4).abs() < 1e-9);
+        assert_eq!(groups[0].merged_rings.len(), 1, "one merged ring");
+        let ring = ring_to_poly(&groups[0].merged_rings[0]);
+        assert!(
+            (ring.unsigned_area() - 24.0).abs() < 1e-6,
+            "the merged ring covers the WHOLE footprint — no hole under the top"
+        );
+    }
+
+    /// THE RECT RE-APPLY IDENTITY (the fixpoint core): feeding the merged
+    /// pavilion output back through `with_apexes` with the same four apexes
+    /// reproduces it vertex for vertex — each claimed face re-triangulates
+    /// in its own plane and folds back; unclaimed faces pass through.
+    #[test]
+    fn rect_reapply_is_identity() {
+        let cid = ItemId::default();
+        let apexes = pavilion_apexes();
+        let out = CeilingRegions::default_for_footprint(vec![square(0.0, 0.0, 6.0, 4.0)], 2.4, cid)
+            .with_apexes(&apexes);
+        let again = out.clone().with_apexes(&apexes);
+        assert_eq!(fingerprint(&out), fingerprint(&again), "re-apply identity");
+        // And once more — settled for good.
+        let third = again.clone().with_apexes(&apexes);
+        assert_eq!(fingerprint(&again), fingerprint(&third));
+    }
+
+    /// Risk #4 — the rect TOUCHING ONE WALL (the mono-gable side): the side
+    /// ON the region boundary lofts nothing (plan-degenerate, dropped), the
+    /// switch count stays at the clean 4, the surviving faces still tile
+    /// the footprint, the wall-side boundary rises to the apexes (the
+    /// mono-gable profile), and the re-apply identity holds.
+    #[test]
+    fn rect_touching_one_wall_drops_the_degenerate_side_and_reapplies() {
+        use geo::Area;
+        let cid = ItemId::default();
+        // Rect (1,0)..(5,2): its bottom side lies ON the footprint edge y=0.
+        let apexes: Vec<RoofApex> = [(1.0, 0.0), (5.0, 0.0), (5.0, 2.0), (1.0, 2.0)]
+            .into_iter()
+            .map(|(x, y)| RoofApex {
+                point: Point2f64::new(x, y),
+                z_m: 4.0,
+            })
+            .collect();
+        let out = CeilingRegions::default_for_footprint(vec![square(0.0, 0.0, 6.0, 4.0)], 2.4, cid)
+            .with_apexes(&apexes);
+        // Tiles the footprint with no face below the wall side.
+        let total: f64 = out
+            .regions
+            .iter()
+            .map(|r| Polygon::<f64>::from(r.polygon.clone()).unsigned_area())
+            .sum();
+        assert!((total - 24.0).abs() < 1e-9, "faces tile the footprint");
+        assert!(
+            out.regions
+                .iter()
+                .all(|r| r.polygon.exterior.iter().all(|v| v.y >= -1e-9)),
+            "nothing lofts past the wall-side boundary"
+        );
+        // The flat top carries the two on-wall corners at the apex height —
+        // the wall under them gets the gable profile from roof_profile_top.
+        let top = out
+            .regions
+            .iter()
+            .find(|r| r.flat_z().is_some_and(|z| (z - 4.0).abs() < 1e-9))
+            .expect("the flat top");
+        for x in [1.0, 5.0] {
+            assert!(
+                top.polygon
+                    .exterior
+                    .iter()
+                    .any(|v| (v.x - x).abs() < 1e-9 && v.y.abs() < 1e-9),
+                "top corner ON the wall at x = {x}"
+            );
+        }
+        // One group of four; re-apply identity.
+        let groups = out.apex_groups(&apexes);
+        assert_eq!(groups.len(), 1);
+        assert_eq!(groups[0].apex_idxs, vec![0, 1, 2, 3]);
+        let again = out.clone().with_apexes(&apexes);
+        assert_eq!(fingerprint(&out), fingerprint(&again), "re-apply identity");
+    }
+
+    /// Risk #4 — a ring wrapping past a hip line (the L/C shape with the
+    /// rect spanning its slot, > 4 switches): assign-time validation fences
+    /// this, but legacy input must WARN-AND-PROCEED — with_apexes still
+    /// produces faces (the flat top included) and never panics, and
+    /// re-resolving is deterministic.
+    #[test]
+    fn rect_over_a_wrapping_ring_warns_and_proceeds() {
+        let cid = ItemId::default();
+        let apexes: Vec<RoofApex> = [(0.5, 0.5), (9.0, 0.5), (9.0, 3.5), (0.5, 3.5)]
+            .into_iter()
+            .map(|(x, y)| RoofApex {
+                point: Point2f64::new(x, y),
+                z_m: 4.0,
+            })
+            .collect();
+        let base = || CeilingRegions::default_for_footprint(vec![notched_ring()], 2.4, cid);
+        let out = base().with_apexes(&apexes);
+        assert!(!out.regions.is_empty(), "faces produced, no panic");
+        assert!(
+            out.regions
+                .iter()
+                .any(|r| r.flat_z().is_some_and(|z| (z - 4.0).abs() < 1e-9)),
+            "the flat top is emitted"
+        );
+        let again = base().with_apexes(&apexes);
+        assert_eq!(
+            fingerprint(&out),
+            fingerprint(&again),
+            "deterministic across resolves"
+        );
+    }
+
+    /// Four apexes that do NOT form a rect (unequal z, or a non-corner
+    /// point) fall through to the existing ≥3 warn path: a ridge from the
+    /// first two — never a panic.
+    #[test]
+    fn four_non_rect_apexes_fall_through_to_the_ridge_warn_path() {
+        let cid = ItemId::default();
+        let mut apexes = pavilion_apexes();
+        apexes[2].z_m = 4.5; // breaks the shared-z rule
+        let out = CeilingRegions::default_for_footprint(vec![square(0.0, 0.0, 6.0, 4.0)], 2.4, cid)
+            .with_apexes(&apexes);
+        assert!(!out.regions.is_empty());
+        // The ridge-from-first-two fallback: the surface rises to 4.0 (the
+        // first two apexes' z), and no flat top at 4.0 exists.
+        let zs: Vec<f64> = out
+            .regions
+            .iter()
+            .flat_map(|r| r.polygon.exterior.iter().map(|v| v.z))
+            .collect();
+        assert!(zs.iter().any(|z| (z - 4.0).abs() < 1e-9));
+        assert!(
+            !out.regions
+                .iter()
+                .any(|r| r.flat_z().is_some_and(|z| (z - 4.0).abs() < 1e-9)
+                    && r.polygon.exterior.len() == 4),
+            "no pavilion top — the rect branch did not fire"
+        );
     }
 
     /// THE GABLE WALL-PROFILE TEST: the wall UNDER a boundary ridge end gets

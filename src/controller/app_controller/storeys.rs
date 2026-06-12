@@ -54,6 +54,7 @@ impl AppController {
         // argument).
         self.pending_roof_point = None;
         self.pending_roof_ridge = None;
+        self.pending_roof_rect = None;
         self.roof_point_mode = false;
         self.edit_drag_prompt = None;
         self.vertex_drop_prompt = None;
@@ -185,6 +186,7 @@ impl AppController {
         self.ceiling_step_mode = false;
         self.pending_roof_point = None;
         self.pending_roof_ridge = None;
+        self.pending_roof_rect = None;
         self.roof_point_mode = false;
         self.living_area_mode = false;
         self.exposure_mode = false;

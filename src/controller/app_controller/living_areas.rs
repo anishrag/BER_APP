@@ -63,6 +63,7 @@ impl AppController {
             self.roof_point_mode = false;
             self.pending_roof_point = None;
             self.pending_roof_ridge = None;
+            self.pending_roof_rect = None;
             // Drop straight into draw mode so a stroke makes a new living area
             // without the user also having to pick the tool.
             self.set_edit_mode(EditTools::DrawPerpWalls);

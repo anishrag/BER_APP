@@ -104,6 +104,50 @@ pub fn fit_axis_line(points: &[Point2f32]) -> Option<(ParameterAxis, f32)> {
     fit_axis_segment(points).map(|(axis, coord, _)| (axis, coord))
 }
 
+/// A stroke is "rectangle-like" only when no point sits further from the
+/// stroke bbox's BOUNDARY than this fraction of the bbox's SHORTER side —
+/// the rect analogue of [`AXIS_LINE_MAX_DEV_RATIO`]: a diagonal stroke's
+/// middle sits half the short side from every edge (ratio 0.5), a filled
+/// blob worse; freehand waviness along the sides stays under.
+const AXIS_RECT_MAX_DEV_RATIO: f32 = 0.25;
+
+/// Fit a CLOSED stroke to an AXIS-ALIGNED rectangle — the rect analogue of
+/// [`fit_axis_segment`]'s straightness heuristic. The fitted rectangle is
+/// the stroke's bounding box, accepted when every point sits near the bbox
+/// boundary (within [`AXIS_RECT_MAX_DEV_RATIO`] of the shorter side — a
+/// diagonal stroke or a filled blob has points deep inside and is
+/// rejected). Both sides must span at least [`AXIS_LINE_MIN_SPAN_M`] (a
+/// straight line is not a rectangle). Returns `((min_x, min_y), (max_x,
+/// max_y))`. CLOSURE IS THE CALLER'S TEST — an open U-shaped stroke passes
+/// the near-boundary heuristic; the caller routes only closed strokes here.
+pub fn fit_axis_rect(points: &[Point2f32]) -> Option<((f32, f32), (f32, f32))> {
+    if points.len() < 4 {
+        return None;
+    }
+    let (mut min_x, mut min_y) = (f32::INFINITY, f32::INFINITY);
+    let (mut max_x, mut max_y) = (f32::NEG_INFINITY, f32::NEG_INFINITY);
+    for p in points {
+        min_x = min_x.min(p.x);
+        min_y = min_y.min(p.y);
+        max_x = max_x.max(p.x);
+        max_y = max_y.max(p.y);
+    }
+    let (w, h) = (max_x - min_x, max_y - min_y);
+    if w < AXIS_LINE_MIN_SPAN_M || h < AXIS_LINE_MIN_SPAN_M {
+        return None; // a line (or a tap), not a rectangle
+    }
+    let tol = w.min(h) * AXIS_RECT_MAX_DEV_RATIO;
+    let near_boundary = |p: &Point2f32| {
+        let dx = (p.x - min_x).min(max_x - p.x);
+        let dy = (p.y - min_y).min(max_y - p.y);
+        dx.min(dy) <= tol
+    };
+    points
+        .iter()
+        .all(near_boundary)
+        .then_some(((min_x, min_y), (max_x, max_y)))
+}
+
 /// Project `cur` onto a circle of radius `r` around `n`.
 pub fn project_to_circle(cur: (f32, f32), n: (f32, f32), r: f32) -> (f32, f32) {
     let dx = cur.0 - n.0;
@@ -1123,6 +1167,58 @@ mod tests {
         // Fewer than 2 points.
         assert_eq!(fit_axis_line(&[]), None);
         assert_eq!(fit_axis_line(&[p(1.0, 1.0)]), None);
+    }
+
+    /// A hand-wavy closed rectangle fits to its bbox; a diagonal stroke, a
+    /// filled blob, a bare line (one degenerate side), and a too-short point
+    /// set are rejected. Closure itself is the CALLER's test — an open
+    /// three-sided U still fits (documented behaviour).
+    #[test]
+    fn fit_axis_rect_accepts_rectangles_and_rejects_lines_diagonals_blobs() {
+        // Wavy rectangle ~ (1,1)..(5,3), drawn around the boundary.
+        let rect = vec![
+            p(1.0, 1.05),
+            p(3.0, 0.95),
+            p(5.0, 1.0),
+            p(5.05, 2.0),
+            p(4.95, 3.0),
+            p(3.0, 3.05),
+            p(1.0, 2.95),
+            p(0.95, 2.0),
+            p(1.05, 1.1),
+        ];
+        let ((x0, y0), (x1, y1)) = fit_axis_rect(&rect).expect("rectangle fits");
+        assert!((x0 - 0.95).abs() < 1e-6 && (x1 - 5.05).abs() < 1e-6);
+        assert!((y0 - 0.95).abs() < 1e-6 && (y1 - 3.05).abs() < 1e-6);
+
+        // A diagonal stroke: its middle sits half the short side from every
+        // bbox edge — rejected.
+        let diagonal = vec![p(0.0, 0.0), p(1.0, 1.0), p(2.0, 2.0), p(3.0, 3.0)];
+        assert_eq!(fit_axis_rect(&diagonal), None);
+        // A shallow diagonal is no better (the tolerance scales with the
+        // SHORT side, so flattening the slope doesn't sneak it through).
+        let shallow = vec![p(0.0, 0.0), p(1.0, 0.2), p(2.0, 0.4), p(3.0, 0.6)];
+        assert_eq!(fit_axis_rect(&shallow), None);
+
+        // A filled blob (points across the interior) is rejected.
+        let blob = vec![
+            p(0.0, 0.0),
+            p(2.0, 0.0),
+            p(1.0, 1.0),
+            p(2.0, 2.0),
+            p(0.0, 2.0),
+            p(1.2, 0.9),
+        ];
+        assert_eq!(fit_axis_rect(&blob), None);
+
+        // A straight line has a degenerate side — not a rectangle.
+        let line = vec![p(0.0, 0.0), p(1.0, 0.01), p(2.0, 0.0), p(3.0, 0.01)];
+        assert_eq!(fit_axis_rect(&line), None);
+        // Fewer than 4 points never fit.
+        assert_eq!(
+            fit_axis_rect(&[p(0.0, 0.0), p(2.0, 0.0), p(2.0, 2.0)]),
+            None
+        );
     }
 
     #[test]

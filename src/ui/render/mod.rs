@@ -664,6 +664,59 @@ pub fn render_roof_ridges(
     }
 }
 
+/// Draw the storey's COMMITTED flat tops (rect ridges): a solid outline
+/// around each four-apex rect group, labelled at its centre ("⌃ 4.20 m"),
+/// plus the PENDING rect as a dashed outline — provisional, like the
+/// pending ridge segment. Shares the ridge violet-blue (one roof-stroke
+/// family); the corner dots come from [`render_roof_apexes`].
+pub fn render_roof_rects(
+    painter: &egui::Painter,
+    rect: egui::Rect,
+    ber: Option<&Ber>,
+    current_storey_idx: Option<usize>,
+    sketch_mode: SketchMode,
+    view: ViewParams,
+    rects: &[([(f64, f64); 4], String)],
+    pending: Option<[(f64, f64); 4]>,
+) {
+    if rects.is_empty() && pending.is_none() {
+        return;
+    }
+    let Some((_storey, t)) = storey_transform(rect, ber, current_storey_idx, sketch_mode, view)
+    else {
+        return;
+    };
+    for (corners, label) in rects {
+        let pts: Vec<egui::Pos2> = corners.iter().map(|(x, y)| t.apply(*x, *y)).collect();
+        for k in 0..4 {
+            painter.line_segment(
+                [pts[k], pts[(k + 1) % 4]],
+                egui::Stroke::new(3.0, ROOF_RIDGE_COLOR),
+            );
+        }
+        let cx = pts.iter().map(|p| p.x).sum::<f32>() / 4.0;
+        let cy = pts.iter().map(|p| p.y).sum::<f32>() / 4.0;
+        painter.text(
+            egui::pos2(cx, cy),
+            egui::Align2::CENTER_CENTER,
+            label,
+            egui::FontId::proportional(13.0),
+            ROOF_RIDGE_COLOR,
+        );
+    }
+    if let Some(corners) = pending {
+        let pts: Vec<egui::Pos2> = corners.iter().map(|(x, y)| t.apply(*x, *y)).collect();
+        for k in 0..4 {
+            draw_dashed_segment(
+                painter,
+                pts[k],
+                pts[(k + 1) % 4],
+                egui::Stroke::new(3.0, ROOF_RIDGE_COLOR),
+            );
+        }
+    }
+}
+
 /// DEBUG: draw the splice-pipeline phases of the last extend/trim. Each phase is
 /// a distinctly-coloured polyline (with dotted vertices) plus a colour-keyed
 /// legend entry top-left, so the stages — raw stroke → orthogonalized → pinned →

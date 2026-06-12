@@ -34,6 +34,7 @@ impl AppController {
             self.roof_point_mode = false;
             self.pending_roof_point = None;
             self.pending_roof_ridge = None;
+            self.pending_roof_rect = None;
             self.activate_shape(ActiveShape::Outline);
             self.set_edit_mode(EditTools::DrawPerpWalls);
         }

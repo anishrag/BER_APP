@@ -115,6 +115,11 @@ pub struct SketchState {
     pub roof_ridge_length_input: String,
     /// One-shot guard for the length prefill, mirroring `roof_apex_prefilled`.
     pub roof_ridge_length_prefilled: bool,
+    /// Identity (the open stage's axis) of the roof-RECT side-length input's
+    /// last prefill — keyed on the AXIS so the LenX → LenY transition refills
+    /// (the rect shares `roof_ridge_length_input`; the two flows are never
+    /// pending at once). `None` when no rect length stage is up.
+    pub roof_rect_len_key: Option<manip_2d_plan::ParameterAxis>,
     /// Backing string for the new-storey flow's thickness input. PREFILLED
     /// "0.30" when the Thickness stage opens (via the one-shot guard below);
     /// the user overtypes, or "Use 0.30" submits the default directly.
@@ -477,6 +482,13 @@ impl eframe::App for BerApp {
                                 pending_roof_ridge_length,
                                 roof_ridge_height_pending,
                                 roof_ridge_pending,
+                                roof_rect_views,
+                                pending_roof_rect_outline,
+                                roof_rect_position_pending,
+                                roof_rect_length_axis,
+                                pending_roof_rect_length,
+                                roof_rect_height_pending,
+                                roof_rect_pending,
                                 default_ceiling_height,
                                 ceiling_heights_set,
                                 new_storey_prompt,
@@ -557,6 +569,13 @@ impl eframe::App for BerApp {
                                     controller_ref.pending_roof_ridge_length(),
                                     controller_ref.roof_ridge_height_pending(),
                                     controller_ref.roof_ridge_pending(),
+                                    controller_ref.roof_rect_views(),
+                                    controller_ref.pending_roof_rect_outline(),
+                                    controller_ref.roof_rect_position_pending(),
+                                    controller_ref.roof_rect_length_pending(),
+                                    controller_ref.pending_roof_rect_length(),
+                                    controller_ref.roof_rect_height_pending(),
+                                    controller_ref.roof_rect_pending(),
                                     controller_ref.default_ceiling_height(),
                                     controller_ref.ceiling_heights_set(),
                                     controller_ref.new_storey_prompt(),
@@ -593,7 +612,10 @@ impl eframe::App for BerApp {
                             // ridge?"); the one-shot guard preserves the user's
                             // typing on the same stage across frames. The two flows
                             // share the buffer — they're never pending at once.
-                            if roof_point_height_pending || roof_ridge_height_pending {
+                            if roof_point_height_pending
+                                || roof_ridge_height_pending
+                                || roof_rect_height_pending
+                            {
                                 if !self.sketch_state.roof_apex_prefilled {
                                     self.sketch_state.roof_apex_prefilled = true;
                                     self.sketch_state.roof_apex_input = default_ceiling_height
@@ -619,6 +641,24 @@ impl eframe::App for BerApp {
                                 }
                             } else {
                                 self.sketch_state.roof_ridge_length_prefilled = false;
+                            }
+
+                            // Prefill the roof-RECT side-length box (shared
+                            // buffer with the ridge length — never both
+                            // pending) whenever the open stage's AXIS
+                            // changes, so LenX → LenY refills with the drawn
+                            // depth while preserving in-progress typing on
+                            // the same stage.
+                            if let Some(axis) = roof_rect_length_axis {
+                                if self.sketch_state.roof_rect_len_key != Some(axis) {
+                                    self.sketch_state.roof_rect_len_key = Some(axis);
+                                    self.sketch_state.roof_ridge_length_input =
+                                        pending_roof_rect_length
+                                            .map(|l| format!("{l:.2}"))
+                                            .unwrap_or_default();
+                                }
+                            } else {
+                                self.sketch_state.roof_rect_len_key = None;
                             }
 
                             // Prefill the new-storey thickness box with the typical
@@ -763,6 +803,12 @@ impl eframe::App for BerApp {
                                 roof_ridge_length_anchored,
                                 roof_ridge_height_pending,
                                 roof_ridge_pending,
+                                roof_rect_views: &roof_rect_views,
+                                pending_roof_rect_outline,
+                                roof_rect_position_pending,
+                                roof_rect_length_axis,
+                                roof_rect_height_pending,
+                                roof_rect_pending,
                                 roof_ridge_length_input: &mut self
                                     .sketch_state
                                     .roof_ridge_length_input,
@@ -1115,7 +1161,7 @@ impl eframe::App for BerApp {
                                     SketchEvent::CentreRoofPosition => {
                                         // The rejection lands on the open
                                         // position prompt, like a typed value.
-                                        match controller.borrow_mut().centre_roof_ridge_position() {
+                                        match controller.borrow_mut().centre_roof_position() {
                                             Ok(()) => {
                                                 self.sketch_state.position_error = None;
                                             }
@@ -1132,6 +1178,48 @@ impl eframe::App for BerApp {
                                     }
                                     SketchEvent::CancelPendingRoofRidge => {
                                         controller.borrow_mut().cancel_pending_roof_ridge();
+                                        self.sketch_state.roof_error = None;
+                                    }
+                                    SketchEvent::AssignRoofRectLength(len_m) => {
+                                        match controller.borrow_mut().assign_roof_rect_length(len_m)
+                                        {
+                                            Ok(()) => {
+                                                self.sketch_state.roof_error = None;
+                                            }
+                                            Err(e) => {
+                                                eprintln!("assign_roof_rect_length: {}", e);
+                                                self.sketch_state.roof_error = Some(e);
+                                            }
+                                        }
+                                    }
+                                    SketchEvent::SkipRoofRectLength => {
+                                        // The LenY skip can trip the FINALIZE
+                                        // placement check (no position question
+                                        // opened): surface it like a typed
+                                        // rejection.
+                                        match controller.borrow_mut().skip_roof_rect_length() {
+                                            Ok(()) => {
+                                                self.sketch_state.roof_error = None;
+                                            }
+                                            Err(e) => {
+                                                eprintln!("skip_roof_rect_length: {}", e);
+                                                self.sketch_state.roof_error = Some(e);
+                                            }
+                                        }
+                                    }
+                                    SketchEvent::AssignRoofRectHeight(z_m) => {
+                                        match controller.borrow_mut().assign_roof_rect_height(z_m) {
+                                            Ok(()) => {
+                                                self.sketch_state.roof_error = None;
+                                            }
+                                            Err(e) => {
+                                                eprintln!("assign_roof_rect_height: {}", e);
+                                                self.sketch_state.roof_error = Some(e);
+                                            }
+                                        }
+                                    }
+                                    SketchEvent::CancelPendingRoofRect => {
+                                        controller.borrow_mut().cancel_pending_roof_rect();
                                         self.sketch_state.roof_error = None;
                                     }
                                     SketchEvent::SetExposureMode(on) => {

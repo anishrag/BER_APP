@@ -4910,6 +4910,331 @@ fn centre_rejection_lands_on_the_open_prompt_and_only_ridge_stages_offer_it() {
     );
 }
 
+// ── roof RECT (flat-topped hip / pavilion) ──────────────────────────────────
+
+/// A hand-wavy CLOSED rectangle around (2,2)..(6,5) — routes to the rect
+/// flow (ends meet + encloses area, the carve's closure classification).
+fn rect_stroke() -> Vec<(f32, f32)> {
+    vec![
+        (2.0, 2.0),
+        (4.0, 1.95),
+        (6.0, 2.0),
+        (6.05, 3.5),
+        (6.0, 5.0),
+        (4.0, 5.05),
+        (2.0, 5.0),
+        (1.95, 3.5),
+        (2.0, 2.1),
+    ]
+}
+
+/// THE RECT MULTI-STAGE FLOW incl. CENTRE (design §5): a CLOSED stroke in
+/// roof-point mode routes to the rect flow — LenX (prefilled drawn, typed)
+/// → LenY (typed) → PosX (typed distance, Centre offered) → PosY (the
+/// Centre button) → finalize → Height — and the commit stamps FOUR corner
+/// apexes in ONE group: the pavilion, with its flat top at the entered
+/// height and the committed-rect overlay labelled.
+#[test]
+fn roof_rect_closed_stroke_flow_with_centre_forms_a_pavilion() {
+    let mut c = roof_ready_controller();
+    c.apply_roof_ridge_stroke_event(&rect_stroke());
+    assert!(
+        c.roof_rect_pending() && !c.roof_ridge_pending(),
+        "a closed stroke routes to the RECT flow"
+    );
+    assert_eq!(c.roof_rect_length_pending(), Some(ParameterAxis::X));
+    let prefill = c.pending_roof_rect_length().expect("drawn width");
+    assert!((prefill - 4.1).abs() < 0.01, "got {prefill}");
+    c.assign_roof_rect_length(4.0).expect("width applies");
+
+    assert_eq!(c.roof_rect_length_pending(), Some(ParameterAxis::Y));
+    let prefill = c.pending_roof_rect_length().expect("drawn depth");
+    assert!((prefill - 3.1).abs() < 0.01, "LenY refills with the depth");
+    c.assign_roof_rect_length(2.0).expect("depth applies");
+
+    // PosX: the shared position panel, kind Line, Centre offered; the area
+    // wall is the rect's LEFT side. Type 3 m from x = 0 → lo.x = 3.
+    let ui = c.position_prompt_for_ui().expect("PosX");
+    assert_eq!(ui.axis, ParameterAxis::X);
+    assert_eq!(ui.kind, PositionPromptKind::Line);
+    assert!(ui.offers_centre, "the rect location stages offer Centre");
+    assert_eq!(
+        ui.area_wall.wall_a.0, ui.area_wall.wall_b.0,
+        "the measured object is the rect's LO side"
+    );
+    c.apply_position_dimension(3.0).expect("PosX applies");
+
+    // PosY: Centre → the 2 m depth centres at lo.y = 4 and finalize passes.
+    let ui = c.position_prompt_for_ui().expect("PosY");
+    assert_eq!(ui.axis, ParameterAxis::Y);
+    assert!(ui.offers_centre);
+    c.centre_roof_position()
+        .expect("centre applies like a typed value");
+    assert!(c.roof_rect_height_pending(), "finalize passed → height");
+    let outline = c.pending_roof_rect_outline().expect("dashed overlay");
+    assert!((outline[0].0 - 3.0).abs() < 1e-6 && (outline[0].1 - 4.0).abs() < 1e-5);
+    assert!((outline[2].0 - 7.0).abs() < 1e-6 && (outline[2].1 - 6.0).abs() < 1e-5);
+
+    c.assign_roof_rect_height(4.2).expect("rect assigns");
+    assert!(!c.roof_rect_pending(), "flow complete");
+    c.materialize();
+    let storey = &c.current_record.as_ref().unwrap().data.storeys[0];
+    assert_eq!(storey.roof_apexes.len(), 4, "four corner apexes durable");
+    let groups = storey.roofs.apex_groups(&storey.roof_apexes);
+    assert_eq!(groups.len(), 1, "ONE group");
+    assert_eq!(groups[0].apex_idxs.len(), 4, "…holding all four corners");
+    assert!(
+        storey
+            .roofs
+            .regions
+            .iter()
+            .any(|r| r.flat_z().is_some_and(|z| (z - 4.2).abs() < 1e-6)
+                && r.polygon.exterior.len() == 4),
+        "the flat top at the entered height"
+    );
+    assert!(
+        c.ceiling_step_regions.get(&0).is_none(),
+        "a pavilion over the default base needs NO session step state"
+    );
+    let views = c.roof_rect_views();
+    assert_eq!(views.len(), 1, "one committed rect overlay");
+    assert_eq!(views[0].1, "⌃ 4.20 m");
+    assert!(c.roof_ridge_views().is_empty(), "not a two-apex ridge");
+}
+
+/// Rect rejections keep the open stage for a retype (the ridge's
+/// no-late-rejection shape): the LENGTH stages reject zero-ish sides and
+/// ones beyond every area's bbox; the finalize check rejects a typed
+/// POSITION that pushes the rect out (with the permitted run); the HEIGHT
+/// stage rejects a near-base value. Off-footprint closed strokes never
+/// pend; taps and new strokes are suppressed while a rect is pending;
+/// Cancel recovers.
+#[test]
+fn roof_rect_rejections_keep_stages_open_and_cancel_recovers() {
+    let mut c = roof_ready_controller();
+    // Off the footprint (beyond the snap tolerance): never pends.
+    c.apply_roof_ridge_stroke_event(&[
+        (12.0, 2.0),
+        (14.0, 2.0),
+        (14.0, 4.0),
+        (12.0, 4.0),
+        (12.0, 2.1),
+    ]);
+    assert!(!c.roof_rect_pending(), "off-footprint rect rejected");
+
+    c.apply_roof_ridge_stroke_event(&rect_stroke());
+    assert!(c.roof_rect_pending());
+    // A tap and a new stroke while pending are suppressed.
+    c.roof_point_tap(8.0, 8.0);
+    assert!(!c.roof_point_pending(), "tap suppressed while rect pends");
+    c.apply_roof_ridge_stroke_event(&[(7.0, 2.0), (7.0, 8.0)]);
+    assert!(
+        !c.roof_ridge_pending(),
+        "stroke suppressed while rect pends"
+    );
+
+    // Length rejections: zero-ish, then beyond the 10×10 bbox.
+    let err = c.assign_roof_rect_length(0.0).unwrap_err();
+    assert!(err.contains("more than a centimetre"), "got: {err}");
+    let err = c.assign_roof_rect_length(11.0).unwrap_err();
+    assert!(err.contains("No ceiling area is that long"), "got: {err}");
+    assert_eq!(
+        c.roof_rect_length_pending(),
+        Some(ParameterAxis::X),
+        "stage intact on rejection"
+    );
+    c.skip_roof_rect_length().unwrap(); // width: drawn 4.1 stands
+    c.skip_roof_rect_length().unwrap(); // depth: drawn 3.1 stands
+    c.apply_position_dimension(3.0).expect("PosX applies"); // lo.x = 3
+
+    // PosY: 8 m from y = 0 pushes the rect to y ∈ [8, 11.1] — out the far
+    // wall. The finalize rejection lands on the typed value with the
+    // permitted run; the prompt stays open.
+    let err = c.apply_position_dimension(8.0).unwrap_err();
+    assert!(
+        err.contains("flat top out of its ceiling area") && err.contains("10.00 m"),
+        "got: {err}"
+    );
+    assert!(c.roof_rect_position_pending(), "PosY stays open");
+    c.apply_position_dimension(4.0)
+        .expect("a fitting position lands");
+    assert!(c.roof_rect_height_pending());
+
+    // Height rejections keep the stage; nothing committed.
+    let err = c.assign_roof_rect_height(2.405).unwrap_err();
+    assert!(err.contains("centimetre"), "got: {err}");
+    assert!(c.roof_rect_height_pending());
+    let storey = &c.current_record.as_ref().unwrap().data.storeys[0];
+    assert!(storey.roof_apexes.is_empty(), "nothing committed");
+    c.cancel_pending_roof_rect();
+    assert!(!c.roof_rect_pending(), "cancel recovers");
+}
+
+/// THE RECT FIXPOINT over the DEFAULT base (design §5's required test):
+/// resolve → commit-style canonicalize → persist → reload → re-resolve
+/// reproduces the pavilion byte for byte, from the four durable apexes
+/// with no session state.
+#[test]
+fn roof_rect_survives_reload_and_rederive_fixpoint() {
+    let mut c = roof_ready_controller();
+    c.apply_roof_ridge_stroke_event(&rect_stroke());
+    c.skip_roof_rect_length().unwrap();
+    c.skip_roof_rect_length().unwrap();
+    c.skip_position_dimension(); // PosX: drawn stands
+    c.skip_position_dimension(); // PosY: drawn stands → finalize → height
+    assert!(c.roof_rect_height_pending());
+    c.assign_roof_rect_height(4.2).unwrap();
+    c.materialize();
+    let before = roof_vertex_fingerprint(&c);
+
+    let id = c.current_record.as_ref().unwrap().id.clone();
+    c.flush_if_dirty().unwrap();
+    c.open_ber(&id).unwrap();
+    let storey = &c.current_record.as_ref().unwrap().data.storeys[0];
+    assert_eq!(storey.roof_apexes.len(), 4, "corner apexes persisted");
+    let groups = storey.roofs.apex_groups(&storey.roof_apexes);
+    assert_eq!(groups.len(), 1);
+    assert_eq!(groups[0].apex_idxs.len(), 4, "still one rect group");
+    assert!(
+        c.ceiling_step_regions.get(&0).is_none(),
+        "no session state for a default-base pavilion"
+    );
+    assert_eq!(c.roof_rect_views().len(), 1, "overlay re-derives");
+
+    c.mark_dirty().unwrap();
+    c.materialize();
+    assert_eq!(
+        roof_vertex_fingerprint(&c),
+        before,
+        "derive → reload → derive is a fixpoint"
+    );
+}
+
+/// THE RECT FIXPOINT over a STEPPED base (design §5's second required
+/// test — the boolean-noise path the EPS claim band and the apex_groups
+/// all-apex-top amendment exist for): a pavilion over a raised ceiling
+/// piece canonicalizes to ONE merged step area (top included — no hole),
+/// persists, reloads, and re-resolves identically.
+#[test]
+fn roof_rect_over_a_step_full_fixpoint() {
+    let mut c = ceiling_ready_controller();
+    ceiling_step_to_amount_at_x4(&mut c);
+    c.assign_ceiling_step_delta(0.3).unwrap(); // right of x = 4 at 2.7
+    c.set_roof_point_mode(true);
+    assert!(c.roof_point_mode());
+    // A closed rect over the stepped piece (x ∈ [4, 10]).
+    c.apply_roof_ridge_stroke_event(&[
+        (5.0, 2.0),
+        (7.0, 1.95),
+        (9.0, 2.0),
+        (9.05, 4.0),
+        (9.0, 6.0),
+        (7.0, 6.05),
+        (5.0, 6.0),
+        (4.95, 4.0),
+        (5.0, 2.1),
+    ]);
+    assert!(c.roof_rect_pending());
+    c.skip_roof_rect_length().unwrap();
+    c.skip_roof_rect_length().unwrap();
+    c.skip_position_dimension();
+    c.skip_position_dimension();
+    assert!(c.roof_rect_height_pending(), "drawn rect finalizes");
+    c.assign_roof_rect_height(4.5).unwrap();
+    c.materialize();
+    let before = roof_vertex_fingerprint(&c);
+    assert!(
+        before.iter().any(|v| (v.2 - 4.5).abs() < 1e-9),
+        "flat top present"
+    );
+    assert!(
+        before.iter().any(|v| (v.2 - 2.7).abs() < 1e-6),
+        "eaves rise from the STEPPED base"
+    );
+    // Canonicalize emitted ONE merged step area covering the whole stepped
+    // piece — the all-apex TOP joined the merge (no hole) — at the delta.
+    let session = &c.ceiling_step_regions[&0];
+    assert_eq!(session.len(), 1, "one merged area, top included");
+    assert!((session[0].delta_m - 0.3).abs() < 1e-6);
+    assert!(
+        (document::ceiling_step_regions_from_roofs(&c.current_record.as_ref().unwrap().data, 0)
+            .len())
+            == 1
+    );
+    let storey = &c.current_record.as_ref().unwrap().data.storeys[0];
+    let groups = storey.roofs.apex_groups(&storey.roof_apexes);
+    assert_eq!(groups.len(), 1);
+    assert_eq!(groups[0].apex_idxs.len(), 4);
+
+    // Persist → reload → re-resolve: byte-identical (the fixpoint).
+    let id = c.current_record.as_ref().unwrap().id.clone();
+    c.flush_if_dirty().unwrap();
+    c.open_ber(&id).unwrap();
+    let storey = &c.current_record.as_ref().unwrap().data.storeys[0];
+    assert_eq!(storey.roof_apexes.len(), 4, "apexes persisted");
+    let session = &c.ceiling_step_regions[&0];
+    assert_eq!(session.len(), 1, "merged area reconstructed");
+    c.mark_dirty().unwrap();
+    c.materialize();
+    assert_eq!(
+        roof_vertex_fingerprint(&c),
+        before,
+        "resolve → reconstruct → re-resolve is a fixpoint"
+    );
+}
+
+/// Risk #4's wall half — the rect TOUCHING ONE WALL (mono-gable side): the
+/// four corner apexes with one side ON the outline produce a wall that
+/// rises to the flat-top height under that side (the gable profile falls
+/// out of WallRegions::regenerate, like the boundary ridge), the overlay
+/// shows the committed rect, and a no-edit re-derive is a fixpoint. (The
+/// apexes are stamped directly — per-side snapping is deferred, so the
+/// drawn flow can't land EXACTLY on the wall yet.)
+#[test]
+fn roof_rect_touching_one_wall_makes_a_mono_gable_wall() {
+    use datatypes::ber::structural::RoofApex;
+    let mut c = roof_ready_controller();
+    let record = c.current_record.as_mut().unwrap();
+    for (x, y) in [(3.0, 0.0), (7.0, 0.0), (7.0, 4.0), (3.0, 4.0)] {
+        record.data.add_roof_apex(
+            0,
+            RoofApex {
+                point: Point2f64::new(x, y),
+                z_m: 4.5,
+            },
+        );
+    }
+    c.mark_dirty().unwrap();
+    c.materialize();
+    c.reconstruct_ceiling_step_regions_for(0);
+    let storey = &c.current_record.as_ref().unwrap().data.storeys[0];
+    let groups = storey.roofs.apex_groups(&storey.roof_apexes);
+    assert_eq!(groups.len(), 1);
+    assert_eq!(groups[0].apex_idxs.len(), 4, "one rect group");
+    // The wall under the touching side (y = 0) carries the on-wall corners
+    // at the flat-top height on its top profile — the mono-gable.
+    let gable_walls = storey
+        .walls
+        .regions
+        .iter()
+        .filter(|w| {
+            w.polygon
+                .exterior
+                .iter()
+                .any(|v| (v.z - 4.5).abs() < 1e-6 && v.y.abs() < 1e-6)
+        })
+        .count();
+    assert!(
+        gable_walls >= 1,
+        "the wall under the touching side rises to the flat top"
+    );
+    assert_eq!(c.roof_rect_views().len(), 1, "committed overlay");
+    let before = roof_vertex_fingerprint(&c);
+    c.mark_dirty().unwrap();
+    c.materialize();
+    assert_eq!(roof_vertex_fingerprint(&c), before, "re-derive fixpoint");
+}
+
 /// A snapped HI end with the start un-snapped: the Length question still
 /// opens (prefilled with the snapped-end run, reported ANCHORED) and a
 /// typed length RE-ANCHORS at the wall — `lo = hi − len`, the far end stays

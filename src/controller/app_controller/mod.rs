@@ -60,6 +60,7 @@ mod new_storey;
 mod persistence;
 mod review;
 mod roof_points;
+mod roof_rects;
 mod roof_ridges;
 mod snap;
 mod step_regions;
@@ -81,6 +82,7 @@ use new_storey::{NewStoreyStage, PendingNewStorey};
 use persistence::PARAMETRIC_SNAPSHOT_VERSION;
 pub use review::CollinearityReview;
 use roof_points::PendingRoofPoint;
+use roof_rects::PendingRoofRect;
 use roof_ridges::{PendingRoofRidge, RidgeQuestion};
 pub use snap::SnapTagView;
 use snap::{LastSnapAction, SnapAction};
@@ -209,6 +211,13 @@ pub struct AppController {
     /// `pending_roof_point` is. The DURABLE record is the same
     /// `Storey::roof_apexes`; see `roof_ridges.rs`.
     pending_roof_ridge: Option<PendingRoofRidge>,
+    /// The in-flight roof RECT (a CLOSED stroke in roof-point mode placing
+    /// FOUR corner apexes at once — the flat-topped hip), advanced stage by
+    /// stage (stroke → side lengths → lo positions → height). Transient —
+    /// outside undo, cleared everywhere `pending_roof_ridge` is. The
+    /// DURABLE record is the same `Storey::roof_apexes`; see
+    /// `roof_rects.rs`.
+    pending_roof_rect: Option<PendingRoofRect>,
     /// The in-flight NEW-STOREY flow (thickness → method choice → suggestion
     /// browse). Controller-transient — OUTSIDE undo, never persisted; set by
     /// `add_storey`, cleared on storey switch / load / open / exit. See
@@ -295,6 +304,7 @@ impl AppController {
             roof_point_mode: false,
             pending_roof_point: None,
             pending_roof_ridge: None,
+            pending_roof_rect: None,
             pending_new_storey: None,
             inherited_seed_pending: HashSet::new(),
             splice_debug: Vec::new(),

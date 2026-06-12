@@ -91,6 +91,7 @@ impl AppController {
         self.roof_point_mode = on;
         self.pending_roof_point = None;
         self.pending_roof_ridge = None;
+        self.pending_roof_rect = None;
         if on {
             self.living_area_mode = false;
             self.exposure_mode = false;
@@ -121,7 +122,11 @@ impl AppController {
     /// = a corner snap for free), and the first UN-snapped axis opens its
     /// position prompt (X then Y; both snapped → straight to the height).
     pub fn roof_point_tap(&mut self, world_x: f32, world_y: f32) {
-        if !self.roof_point_mode || self.pending_roof_point.is_some() || self.roof_ridge_pending() {
+        if !self.roof_point_mode
+            || self.pending_roof_point.is_some()
+            || self.roof_ridge_pending()
+            || self.roof_rect_pending()
+        {
             return;
         }
         // Flush the live buffer to its slot: the validation + snaps read

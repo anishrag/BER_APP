@@ -34,13 +34,19 @@
 //!   button's COMPUTED SUGGESTIONS: the value that centres the pending ridge
 //!   within its ceiling area, routed by the shell through the SAME assign
 //!   path as a typed value.
+//! - The closed-stroke RECT ridge (flat-topped hip / pavilion, durably FOUR
+//!   corner apexes in one group): [`StoreyDoc::fit_roof_rect`],
+//!   [`validate_roof_rect_lengths`] (stage-1 optimistic bound),
+//!   [`validate_roof_rect_placement`] (the finalize check),
+//!   [`validate_roof_rect_ridge`] (the height stage), and
+//!   [`centred_rect_lo`] (the rect's Centre suggestion).
 //!
 //! [`CeilingRegions::apex_groups`]:
 //! datatypes::ber::structural::CeilingRegions::apex_groups
 
 use crate::StoreyDoc;
 use datatypes::ber::structural::{
-    ridge_hub_switches, RoofApex, RoofApexGroup, Storey, APEX_BOUNDARY_EPS_M,
+    rect_hip_switches, ridge_hub_switches, RoofApex, RoofApexGroup, Storey, APEX_BOUNDARY_EPS_M,
 };
 use domain::points::{to_f32, Point2f32, Point2f64};
 use manip_2d_plan::ParameterAxis;
@@ -135,6 +141,55 @@ const RIDGE_LENGTH_EXCEEDS_AREA_MSG: &str =
 /// Length stage's optimistic bound ([`validate_roof_ridge_length`]). Kept
 /// stable as the message PREFIX; the permitted bound is appended.
 const RIDGE_LENGTH_NO_AREA_MSG: &str = "No ceiling area is that long — enter a length under";
+
+/// User-facing rejection for a closed roof-mode stroke that isn't
+/// rectangle-like. Kept stable.
+const RECT_NOT_RECT_MSG: &str =
+    "That stroke isn't a rectangle — draw one closed rectangular stroke over the flat top.";
+
+/// User-facing rejection for a drawn flat-top rectangle outside the storey
+/// footprint. Kept stable.
+const RECT_OFF_FOOTPRINT_MSG: &str =
+    "The flat top must lie inside the storey footprint — draw it inside the floor plan.";
+
+/// User-facing rejection for a flat top whose CENTRE sits strictly inside no
+/// ceiling region — the rect's region is claimed by its centre (never the
+/// corners, which may legally sit ON the boundary). Kept stable.
+const RECT_OUTSIDE_CEILING_MSG: &str =
+    "The flat top doesn't sit inside a ceiling area — draw it within one ceiling area.";
+
+/// User-facing rejection for a flat-top side at or below a centimetre (the
+/// corners would collapse). Kept stable.
+const RECT_SIDE_TOO_SHORT_MSG: &str =
+    "Each side of the flat top must be more than a centimetre — enter a longer length.";
+
+/// User-facing rejection for a flat top over a ceiling area an apex group
+/// already shapes. Kept stable.
+const RECT_REGION_OCCUPIED_MSG: &str =
+    "That ceiling area already has a high point — draw the flat top over a ceiling area \
+     without one.";
+
+/// User-facing rejection when the ceiling area's boundary wraps past one of
+/// the flat top's hip lines ([`rect_hip_switches`] ≠ 4 — the loft would
+/// fold). Kept stable.
+const RECT_TOO_IRREGULAR_MSG: &str =
+    "That ceiling area is too irregular for a flat-topped roof there.";
+
+/// User-facing rejection for a typed flat-top side length whose extent would
+/// leave the ceiling area. Kept stable as the message PREFIX — the permitted
+/// run is appended (the ridge convention).
+const RECT_LENGTH_EXCEEDS_AREA_MSG: &str =
+    "That length would push the flat top out of its ceiling area — enter a length that fits";
+
+/// User-facing rejection for a flat-top corner claimed by NO ceiling area.
+/// Kept stable.
+const RECT_CORNER_OUTSIDE_CEILING_MSG: &str =
+    "The flat top's corners must stay inside (or on the edge of) one ceiling area.";
+
+/// User-facing rejection for flat-top corners spilling into a DIFFERENT
+/// ceiling area than the centre's. Kept stable.
+const RECT_CORNERS_SAME_REGION_MSG: &str =
+    "All four corners of the flat top must sit in the same ceiling area.";
 
 /// A typed ridge length at or below this (m) is rejected — it places the two
 /// apexes (near-)coincident.
@@ -603,6 +658,201 @@ pub fn centred_ridge_start(
     Ok((span_mid - len_m as f64 / 2.0) as f32)
 }
 
+// ── The closed-stroke RECT ridge (flat-topped hip / pavilion) ───────────────
+
+/// The four corners of the rect `(lo, hi)`, QUANTIZED exactly as
+/// `Ber::add_roof_apex` will store them, in the canonical CCW order
+/// c00 → c10 → c11 → c01.
+fn rect_corners(lo: Point2f64, hi: Point2f64) -> [Point2f64; 4] {
+    let qlo = RoofApex::quantize_point(lo);
+    let qhi = RoofApex::quantize_point(hi);
+    [
+        qlo,
+        Point2f64::new(qhi.x, qlo.y),
+        qhi,
+        Point2f64::new(qlo.x, qhi.y),
+    ]
+}
+
+/// Require flat-top corner `q` (already quantized) to be claimed by EXACTLY
+/// the region `ridx` — the rect flavour of [`check_end_claims`], with the
+/// rect's stable messages: strictly inside or on the OUTER boundary passes
+/// (a boundary-touching side is the mono-gable case); an internal shared
+/// boundary, a different region, or no claimant rejects.
+fn check_rect_corner_claims(storey: &Storey, q: Point2f64, ridx: usize) -> Result<(), String> {
+    let claims = storey.roofs.claim_regions(q);
+    if claims == [ridx] {
+        return Ok(());
+    }
+    if claims.is_empty() {
+        Err(RECT_CORNER_OUTSIDE_CEILING_MSG.to_string())
+    } else if claims.contains(&ridx) {
+        Err(RIDGE_END_ON_SHARED_BOUNDARY_MSG.to_string())
+    } else {
+        Err(RECT_CORNERS_SAME_REGION_MSG.to_string())
+    }
+}
+
+/// Validate the two typed flat-top SIDE LENGTHS against the storey's
+/// RESOLVED roofs — the rect flow's stage-1 check (per axis, the rect
+/// analogue of [`validate_roof_ridge_length`], run progressively as each
+/// length is typed): both must exceed a centimetre, and each must fit SOME
+/// flat, un-apexed ceiling area's plan-bbox extent along its axis (the
+/// OPTIMISTIC bound — the binding check is the finalize placement's,
+/// [`validate_roof_rect_placement`]). `Err` is user-facing, messages stable.
+pub fn validate_roof_rect_lengths(storey: &Storey, len_x: f32, len_y: f32) -> Result<(), String> {
+    for len in [len_x, len_y] {
+        if !len.is_finite() || len <= MIN_RIDGE_LENGTH_M {
+            return Err(RECT_SIDE_TOO_SHORT_MSG.to_string());
+        }
+    }
+    // The per-axis bbox bound, reused from the ridge: an extent along X is
+    // a ridge whose CROSS axis is Y (the extent runs along `axis.other()`).
+    validate_roof_ridge_length(storey, ParameterAxis::Y, len_x)?;
+    validate_roof_ridge_length(storey, ParameterAxis::X, len_y)
+}
+
+/// Validate the flat top's PLACEMENT against the storey's RESOLVED roofs —
+/// the rect flow's FINALIZE check, run at the last open location stage
+/// (the rect analogue of [`validate_roof_ridge_extent`]):
+///
+/// - Both quantized sides exceed a centimetre.
+/// - The rect's CENTRE sits STRICTLY inside one flat, un-apexed ceiling
+///   region (the centre, never the corners, picks the region).
+/// - The region's runs through the centre fit BOTH extents
+///   ([`CeilingRegion::plan_span_through`] per axis), boundary touch
+///   allowed within [`APEX_BOUNDARY_EPS_M`] per side.
+/// - Each quantized corner is claimed by exactly that region
+///   ([`check_rect_corner_claims`]).
+/// - The region boundary doesn't wrap past a hip line:
+///   [`rect_hip_switches`] == 4.
+///
+/// `Err` is user-facing, all messages stable; the over-length rejection
+/// carries the permitted run ([`RECT_LENGTH_EXCEEDS_AREA_MSG`] prefix).
+///
+/// [`CeilingRegion::plan_span_through`]:
+/// datatypes::ber::structural::CeilingRegion::plan_span_through
+pub fn validate_roof_rect_placement(
+    storey: &Storey,
+    lo: Point2f64,
+    hi: Point2f64,
+) -> Result<(), String> {
+    let corners = rect_corners(lo, hi);
+    let (qlo, qhi) = (corners[0], corners[2]);
+    if qhi.x - qlo.x <= MIN_RIDGE_LENGTH_M as f64 || qhi.y - qlo.y <= MIN_RIDGE_LENGTH_M as f64 {
+        return Err(RECT_SIDE_TOO_SHORT_MSG.to_string());
+    }
+    let centre = Point2f64::new((qlo.x + qhi.x) / 2.0, (qlo.y + qhi.y) / 2.0);
+    let ridx = region_idx_strictly_containing(storey, centre)
+        .map_err(|_| RECT_OUTSIDE_CEILING_MSG.to_string())?;
+    let groups = storey.roofs.apex_groups(&storey.roof_apexes);
+    if groups.iter().any(|g| g.region_idxs.contains(&ridx)) {
+        return Err(RECT_REGION_OCCUPIED_MSG.to_string());
+    }
+    let region = &storey.roofs.regions[ridx];
+    if region.flat_z().is_none() {
+        return Err(REGION_IRREGULAR_SLOPE_MSG.to_string());
+    }
+    // Both extents fit the region's run through the centre, boundary touch
+    // allowed within the EPS band per side.
+    for (dir, half) in [
+        (Point2f64::new(1.0, 0.0), (qhi.x - qlo.x) / 2.0),
+        (Point2f64::new(0.0, 1.0), (qhi.y - qlo.y) / 2.0),
+    ] {
+        let (t_min, t_max) = region
+            .plan_span_through(centre, dir)
+            .ok_or_else(|| RECT_OUTSIDE_CEILING_MSG.to_string())?;
+        if t_min > -half + APEX_BOUNDARY_EPS_M || t_max < half - APEX_BOUNDARY_EPS_M {
+            let span = t_max - t_min;
+            return Err(format!(
+                "{RECT_LENGTH_EXCEEDS_AREA_MSG} (the ceiling area runs {span:.2} m \
+                 wall to wall there)."
+            ));
+        }
+    }
+    for q in corners {
+        check_rect_corner_claims(storey, q, ridx)?;
+    }
+    let ring: Vec<Point2f64> = region
+        .polygon
+        .exterior
+        .iter()
+        .map(|v| Point2f64::new(v.x, v.y))
+        .collect();
+    if rect_hip_switches(&ring, qlo, qhi) != 4 {
+        return Err(RECT_TOO_IRREGULAR_MSG.to_string());
+    }
+    Ok(())
+}
+
+/// Validate the flat-top RECT ridge at its HEIGHT stage (the rect analogue
+/// of [`validate_roof_ridge`], which places FOUR apexes at once): `z_m`
+/// finite and > 0, the placement re-checked (cheap, and `materialize` may
+/// have shifted derived rings), and `|z_m − base|` ≥ 1 cm against the
+/// claimed region's flat base. `Err` is user-facing, messages stable.
+pub fn validate_roof_rect_ridge(
+    storey: &Storey,
+    lo: Point2f64,
+    hi: Point2f64,
+    z_m: f64,
+) -> Result<(), String> {
+    if !z_m.is_finite() || z_m <= 0.0 {
+        return Err(format!(
+            "height must be a positive number of metres (got {z_m})"
+        ));
+    }
+    validate_roof_rect_placement(storey, lo, hi)?;
+    let qlo = RoofApex::quantize_point(lo);
+    let qhi = RoofApex::quantize_point(hi);
+    let centre = Point2f64::new((qlo.x + qhi.x) / 2.0, (qlo.y + qhi.y) / 2.0);
+    let ridx = region_idx_strictly_containing(storey, centre)
+        .map_err(|_| RECT_OUTSIDE_CEILING_MSG.to_string())?;
+    let base = storey.roofs.regions[ridx]
+        .flat_z()
+        .ok_or_else(|| REGION_IRREGULAR_SLOPE_MSG.to_string())?;
+    if (z_m - base).abs() < MIN_APEX_DELTA_M {
+        return Err(format!(
+            "{z_m} m is within a centimetre of that ceiling area's height ({base} m) — \
+             enter a height that actually slopes it."
+        ));
+    }
+    Ok(())
+}
+
+/// The LO coordinate on `axis` that CENTRES the pending flat top within its
+/// ceiling area — the 'Centre' button's computed suggestion for the rect's
+/// PosX / PosY stages (mirrors [`centred_ridge_start`]): the region is
+/// claimed by the rect's CENTRE (strictly inside), the span runs through it
+/// along `axis`, and the centred lo is `span_mid − len/2`. `Err`
+/// (user-facing, stable) when the centre sits in no region or the side
+/// length exceeds the span beyond the boundary-touch band.
+pub fn centred_rect_lo(
+    storey: &Storey,
+    axis: ParameterAxis,
+    lo: Point2f64,
+    hi: Point2f64,
+) -> Result<f32, String> {
+    let centre = Point2f64::new((lo.x + hi.x) / 2.0, (lo.y + hi.y) / 2.0);
+    let ridx = region_idx_strictly_containing(storey, centre)
+        .map_err(|_| RECT_OUTSIDE_CEILING_MSG.to_string())?;
+    let (dir, len, centre_c) = match axis {
+        ParameterAxis::X => (Point2f64::new(1.0, 0.0), hi.x - lo.x, centre.x),
+        ParameterAxis::Y => (Point2f64::new(0.0, 1.0), hi.y - lo.y, centre.y),
+    };
+    let (t_min, t_max) = storey.roofs.regions[ridx]
+        .plan_span_through(centre, dir)
+        .ok_or_else(|| RECT_OUTSIDE_CEILING_MSG.to_string())?;
+    let span = t_max - t_min;
+    if len > span + 2.0 * APEX_BOUNDARY_EPS_M {
+        return Err(format!(
+            "{RECT_LENGTH_EXCEEDS_AREA_MSG} (the ceiling area runs {span:.2} m \
+             wall to wall there)."
+        ));
+    }
+    let span_mid = centre_c + (t_min + t_max) / 2.0;
+    Ok((span_mid - len / 2.0) as f32)
+}
+
 impl StoreyDoc {
     /// The cheap tap-time validation of a roof-point position against the
     /// OUTLINE (no `Ber` needed — the resolved-roofs check is
@@ -661,6 +911,32 @@ impl StoreyDoc {
             }
         }
         Ok((axis, coord, (lo, hi)))
+    }
+
+    /// Fit a CLOSED `stroke` (world/metre space) to an axis-aligned
+    /// flat-top RECTANGLE: [`manip_2d_plan::fit_axis_rect`] (the stroke's
+    /// bbox, accepted only when every point hugs its boundary), then the
+    /// footprint test — all four sides within the outline bbox expanded by
+    /// the snap tolerance
+    /// ([`CEILING_LINE_SNAP_TOL_M`](crate::ceiling_step)), so a side drawn
+    /// on/just past a wall survives (the mono-gable case; finalize pins the
+    /// binding placement). Returns the rect as `(lo, hi)` corners. `Err` is
+    /// user-facing, messages stable. CLOSURE is the caller's test — the
+    /// shell routes a closed roof-mode stroke here, an open one to
+    /// [`fit_roof_ridge_line`](Self::fit_roof_ridge_line).
+    pub fn fit_roof_rect(&self, stroke: &[Point2f32]) -> Result<(Point2f32, Point2f32), String> {
+        let ((x0, y0), (x1, y1)) =
+            manip_2d_plan::fit_axis_rect(stroke).ok_or_else(|| RECT_NOT_RECT_MSG.to_string())?;
+        let ((min_x, min_y), (max_x, max_y)) = self
+            .outline
+            .floor_plan
+            .bounding_box()
+            .ok_or_else(|| RECT_OFF_FOOTPRINT_MSG.to_string())?;
+        let tol = crate::ceiling_step::CEILING_LINE_SNAP_TOL_M;
+        if x0 < min_x - tol || y0 < min_y - tol || x1 > max_x + tol || y1 > max_y + tol {
+            return Err(RECT_OFF_FOOTPRINT_MSG.to_string());
+        }
+        Ok((Point2f32::new(x0, y0), Point2f32::new(x1, y1)))
     }
 }
 
@@ -1326,6 +1602,245 @@ mod tests {
         );
         let cross = centred_ridge_cross(&storey, ParameterAxis::Y, 2.0, 1.0, 1.0).unwrap();
         assert!((cross - 2.0).abs() < 1e-6, "y-run 0..4 (got {cross})");
+    }
+
+    // ── the rect (flat-topped hip) validators ───────────────────────────────
+
+    /// `fit_roof_rect`: a closed rectangular stroke fits to its bbox; a side
+    /// drawn on/just past a wall survives within the snap tolerance (the
+    /// mono-gable case); a rect beyond the tolerance and a non-rect stroke
+    /// are rejected with their stable messages.
+    #[test]
+    fn fit_roof_rect_accepts_rects_within_the_expanded_footprint() {
+        let doc = storey_10x6();
+        let stroke = vec![
+            p(2.0, 1.05),
+            p(4.0, 0.95),
+            p(6.0, 1.0),
+            p(6.05, 2.5),
+            p(5.95, 4.0),
+            p(4.0, 4.05),
+            p(2.0, 3.95),
+            p(1.95, 2.5),
+        ];
+        let (lo, hi) = doc.fit_roof_rect(&stroke).expect("rect fits");
+        assert!((lo.x - 1.95).abs() < 1e-6 && (hi.y - 4.05).abs() < 1e-6);
+        // A side ON the wall (y = 0) and just past it (−0.1, inside the
+        // 0.2 m tolerance) both survive to the finalize placement.
+        let touching = vec![
+            p(2.0, 0.0),
+            p(6.0, 0.0),
+            p(6.0, 2.0),
+            p(2.0, 2.0),
+            p(2.0, 0.05),
+        ];
+        assert!(doc.fit_roof_rect(&touching).is_ok());
+        let over = vec![p(2.0, -0.1), p(6.0, -0.1), p(6.0, 2.0), p(2.0, 2.0)];
+        assert!(doc.fit_roof_rect(&over).is_ok());
+        // Beyond the tolerance: the stable footprint message.
+        let out = vec![p(2.0, -0.5), p(6.0, -0.5), p(6.0, 2.0), p(2.0, 2.0)];
+        assert_eq!(doc.fit_roof_rect(&out).unwrap_err(), RECT_OFF_FOOTPRINT_MSG);
+        // A diagonal (non-rect) stroke: the stable not-a-rectangle message.
+        let diag = vec![p(1.0, 1.0), p(2.0, 2.0), p(3.0, 3.0), p(4.0, 4.0)];
+        assert_eq!(doc.fit_roof_rect(&diag).unwrap_err(), RECT_NOT_RECT_MSG);
+    }
+
+    /// `validate_roof_rect_lengths` is the per-axis optimistic bbox bound:
+    /// zero-ish sides get the stable side-too-short message; a pair fitting
+    /// some area passes; a side beyond every area's bbox extent on its axis
+    /// is rejected with the ridge's stable no-area prefix.
+    #[test]
+    fn validate_rect_lengths_is_a_per_axis_optimistic_bound() {
+        let storey = storey_with_flat_roof(2.4); // one flat 4×4 region
+        for (lx, ly) in [(0.0, 2.0), (2.0, 0.01), (f32::NAN, 2.0), (-1.0, 2.0)] {
+            assert_eq!(
+                validate_roof_rect_lengths(&storey, lx, ly).unwrap_err(),
+                RECT_SIDE_TOO_SHORT_MSG,
+                "({lx}, {ly})"
+            );
+        }
+        assert!(validate_roof_rect_lengths(&storey, 3.0, 2.0).is_ok());
+        assert!(validate_roof_rect_lengths(&storey, 4.0, 4.0).is_ok());
+        let err = validate_roof_rect_lengths(&storey, 4.5, 2.0).unwrap_err();
+        assert!(
+            err.starts_with(RIDGE_LENGTH_NO_AREA_MSG) && err.contains("under 4.00 m"),
+            "got: {err}"
+        );
+        let err = validate_roof_rect_lengths(&storey, 2.0, 4.5).unwrap_err();
+        assert!(err.starts_with(RIDGE_LENGTH_NO_AREA_MSG), "got: {err}");
+    }
+
+    /// The rect FINALIZE check: an interior rect passes; BOUNDARY TOUCH is
+    /// legal (a side, or the whole wall-to-wall rect); a centre in no
+    /// region, an overrunning extent (with the permitted run), an occupied
+    /// region, and corners on an internal shared boundary are rejected with
+    /// their stable messages.
+    #[test]
+    fn validate_rect_placement_centre_claims_spans_corners_and_fence() {
+        let storey = storey_with_flat_roof(2.4); // 4×4
+        let rect =
+            |x0: f64, y0: f64, x1: f64, y1: f64| (Point2f64::new(x0, y0), Point2f64::new(x1, y1));
+        let (lo, hi) = rect(1.0, 1.0, 3.0, 3.0);
+        assert!(validate_roof_rect_placement(&storey, lo, hi).is_ok());
+        // Boundary touch: one side ON the wall (mono-gable) and the full
+        // wall-to-wall rect both pass.
+        let (lo, hi) = rect(1.0, 0.0, 3.0, 2.0);
+        assert!(validate_roof_rect_placement(&storey, lo, hi).is_ok());
+        let (lo, hi) = rect(0.0, 0.0, 4.0, 4.0);
+        assert!(validate_roof_rect_placement(&storey, lo, hi).is_ok());
+        // Degenerate sides.
+        let (lo, hi) = rect(1.0, 1.0, 1.005, 3.0);
+        assert_eq!(
+            validate_roof_rect_placement(&storey, lo, hi).unwrap_err(),
+            RECT_SIDE_TOO_SHORT_MSG
+        );
+        // Centre outside every region.
+        let (lo, hi) = rect(5.0, 1.0, 7.0, 3.0);
+        assert_eq!(
+            validate_roof_rect_placement(&storey, lo, hi).unwrap_err(),
+            RECT_OUTSIDE_CEILING_MSG
+        );
+        // Overrunning the region while the centre stays inside: the stable
+        // prefix + the permitted run.
+        let (lo, hi) = rect(-0.5, 1.0, 4.5, 3.0);
+        let err = validate_roof_rect_placement(&storey, lo, hi).unwrap_err();
+        assert!(
+            err.starts_with(RECT_LENGTH_EXCEEDS_AREA_MSG) && err.contains("4.00 m"),
+            "got: {err}"
+        );
+        // An occupied region rejects the rect.
+        let mut occupied = storey_with_flat_roof(2.4);
+        apply_apexes(&mut occupied, vec![apex(2.0, 2.0, 4.2)]);
+        let (lo, hi) = rect(1.5, 0.2, 2.5, 0.7); // centre inside a fan face
+        assert_eq!(
+            validate_roof_rect_placement(&occupied, lo, hi).unwrap_err(),
+            RECT_REGION_OCCUPIED_MSG
+        );
+        // A corner ON an internal shared boundary: two flat regions side by
+        // side, rect in region 0 reaching the shared line x = 4.
+        let mut two = storey_with_flat_roof(2.4);
+        two.roofs.regions.extend(
+            CeilingRegions::default_for_footprint(
+                vec![vec![
+                    Point2f64::new(4.0, 0.0),
+                    Point2f64::new(8.0, 0.0),
+                    Point2f64::new(8.0, 4.0),
+                    Point2f64::new(4.0, 4.0),
+                ]],
+                2.4,
+                Default::default(),
+            )
+            .regions,
+        );
+        let (lo, hi) = rect(2.0, 1.0, 4.0, 3.0);
+        assert_eq!(
+            validate_roof_rect_placement(&two, lo, hi).unwrap_err(),
+            RIDGE_END_ON_SHARED_BOUNDARY_MSG
+        );
+    }
+
+    /// The hip-line fence (risk #4): NON-convex regions are fine as long as
+    /// the boundary doesn't wrap a hip ray — a rect tucked into the notched
+    /// C's arm, and one along its bottom arm, both pass (the sector
+    /// classification absorbs the notch); a region whose boundary dips past
+    /// a hip ray and back (a needle notch toward the rect corner — > 4
+    /// switches, the loft would fold) is rejected with the stable
+    /// too-irregular message.
+    #[test]
+    fn validate_rect_placement_fences_hip_wrapping_rings() {
+        let storey = storey_with_flat_ring(notched_ring(), 2.4);
+        // Tucked in the left arm (x ≤ 3): clean 4 switches.
+        assert!(validate_roof_rect_placement(
+            &storey,
+            Point2f64::new(0.5, 0.5),
+            Point2f64::new(2.5, 3.5)
+        )
+        .is_ok());
+        // Along the bottom arm under the slot: still 4 switches — passes.
+        assert!(validate_roof_rect_placement(
+            &storey,
+            Point2f64::new(0.5, 0.2),
+            Point2f64::new(9.0, 0.8)
+        )
+        .is_ok());
+        // A needle notch dipping from the top edge toward the rect's
+        // top-right corner crosses its hip ray twice: the walk re-enters
+        // the right sector between top pieces (6 switches) — the fence.
+        let needle = vec![
+            Point2f64::new(0.0, 0.0),
+            Point2f64::new(10.0, 0.0),
+            Point2f64::new(10.0, 4.0),
+            Point2f64::new(9.5, 2.05),
+            Point2f64::new(9.0, 4.0),
+            Point2f64::new(0.0, 4.0),
+        ];
+        let storey = storey_with_flat_ring(needle, 2.4);
+        let err = validate_roof_rect_placement(
+            &storey,
+            Point2f64::new(1.0, 1.0),
+            Point2f64::new(9.0, 2.0),
+        )
+        .unwrap_err();
+        assert_eq!(err, RECT_TOO_IRREGULAR_MSG);
+    }
+
+    /// `validate_roof_rect_ridge` (the height stage): a sane height passes,
+    /// non-finite / non-positive and near-base heights are rejected, and the
+    /// placement is re-checked.
+    #[test]
+    fn validate_rect_ridge_checks_height_and_replays_placement() {
+        let storey = storey_with_flat_roof(2.4);
+        let (lo, hi) = (Point2f64::new(1.0, 1.0), Point2f64::new(3.0, 3.0));
+        assert!(validate_roof_rect_ridge(&storey, lo, hi, 4.0).is_ok());
+        for z in [f64::NAN, 0.0, -1.0] {
+            let err = validate_roof_rect_ridge(&storey, lo, hi, z).unwrap_err();
+            assert!(err.contains("positive"), "z = {z} got: {err}");
+        }
+        let err = validate_roof_rect_ridge(&storey, lo, hi, 2.405).unwrap_err();
+        assert!(err.contains("centimetre"), "got: {err}");
+        // Placement re-checked at the height stage.
+        let off = (Point2f64::new(5.0, 1.0), Point2f64::new(7.0, 3.0));
+        assert_eq!(
+            validate_roof_rect_ridge(&storey, off.0, off.1, 4.0).unwrap_err(),
+            RECT_OUTSIDE_CEILING_MSG
+        );
+    }
+
+    /// `centred_rect_lo` mirrors `centred_ridge_start` per axis: the rect
+    /// centres within the run through its centre; a full-span side centres
+    /// to the boundary; a centre in no region and an over-long side reject
+    /// with their stable messages.
+    #[test]
+    fn centred_rect_lo_centres_each_axis_within_the_run() {
+        let storey = storey_with_flat_roof(2.4); // 4×4
+        let (lo, hi) = (Point2f64::new(0.5, 1.0), Point2f64::new(2.5, 2.0));
+        let cx = centred_rect_lo(&storey, ParameterAxis::X, lo, hi).unwrap();
+        assert!(
+            (cx - 1.0).abs() < 1e-6,
+            "2 m side centres at x = 1 (got {cx})"
+        );
+        let cy = centred_rect_lo(&storey, ParameterAxis::Y, lo, hi).unwrap();
+        assert!(
+            (cy - 1.5).abs() < 1e-6,
+            "1 m side centres at y = 1.5 (got {cy})"
+        );
+        // A full-span side centres to the exact wall-to-wall extent.
+        let (lo, hi) = (Point2f64::new(0.5, 1.0), Point2f64::new(4.5, 2.0));
+        let cx = centred_rect_lo(&storey, ParameterAxis::X, lo, hi).unwrap();
+        assert!(cx.abs() < 1e-6, "full span → lo = 0 (got {cx})");
+        // Centre outside.
+        let (lo, hi) = (Point2f64::new(5.0, 1.0), Point2f64::new(7.0, 2.0));
+        assert_eq!(
+            centred_rect_lo(&storey, ParameterAxis::X, lo, hi).unwrap_err(),
+            RECT_OUTSIDE_CEILING_MSG
+        );
+        // A side longer than the run: the stable prefix + the permitted run.
+        let (lo, hi) = (Point2f64::new(0.0, 1.0), Point2f64::new(5.0, 2.0));
+        let err = centred_rect_lo(&storey, ParameterAxis::X, lo, hi).unwrap_err();
+        assert!(
+            err.starts_with(RECT_LENGTH_EXCEEDS_AREA_MSG) && err.contains("4.00 m"),
+            "got: {err}"
+        );
     }
 
     /// The finalize check's END-CLAIM arm: an extent ending ON an INTERNAL

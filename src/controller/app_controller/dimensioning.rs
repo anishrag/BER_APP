@@ -211,6 +211,48 @@ impl AppController {
                 offers_centre: true,
             });
         }
+        // The roof RECT's position questions (PosX / PosY): the "area wall"
+        // is the rect's LO SIDE on the open stage's axis (the LEFT side for
+        // PosX, the BOTTOM for PosY), the reference wall resolves in the
+        // OUTLINE plan, kind `Line`. Both offer the Centre suggestion.
+        if let Some(PendingRoofRect::PosX { lo, len, prompt }) = self.pending_roof_rect.as_ref() {
+            let option = prompt.options.get(prompt.current_idx)?;
+            return Some(PositionPromptUiData {
+                area_wall: WallPositions {
+                    wall_a: (lo.0 as f64, lo.1 as f64),
+                    wall_b: (lo.0 as f64, (lo.1 + len.1) as f64),
+                },
+                reference_wall: wall_positions_in(
+                    &self.document.outline.floor_plan,
+                    option.outline_wall_vid,
+                )?,
+                axis: ParameterAxis::X,
+                kind: PositionPromptKind::Line,
+                current_distance: option.current_distance,
+                option_idx: prompt.current_idx,
+                option_count: prompt.options.len(),
+                offers_centre: true,
+            });
+        }
+        if let Some(PendingRoofRect::PosY { lo, len, prompt }) = self.pending_roof_rect.as_ref() {
+            let option = prompt.options.get(prompt.current_idx)?;
+            return Some(PositionPromptUiData {
+                area_wall: WallPositions {
+                    wall_a: (lo.0 as f64, lo.1 as f64),
+                    wall_b: ((lo.0 + len.0) as f64, lo.1 as f64),
+                },
+                reference_wall: wall_positions_in(
+                    &self.document.outline.floor_plan,
+                    option.outline_wall_vid,
+                )?,
+                axis: ParameterAxis::Y,
+                kind: PositionPromptKind::Line,
+                current_distance: option.current_distance,
+                option_idx: prompt.current_idx,
+                option_count: prompt.options.len(),
+                offers_centre: true,
+            });
+        }
         let prompt = self
             .document
             .dimensioning
@@ -332,6 +374,16 @@ impl AppController {
             // Start stage implies NEITHER end was snapped — none to carry.
             return self.advance_roof_ridge(axis, coord_m, lo, len_m, cross_snap, None, None, &[]);
         }
+        // Roof-RECT position questions (PosX / PosY): the same
+        // shell-resolved shape — the resolved LO coordinate rides into the
+        // next stage (PosY, or finalize + the height); a finalize rejection
+        // keeps THIS stage open (advance only replaces it on success).
+        if let Some(PendingRoofRect::PosX { prompt, .. } | PendingRoofRect::PosY { prompt, .. }) =
+            self.pending_roof_rect.as_ref()
+        {
+            let coord = self.document.resolve_ceiling_line_position(prompt, value)?;
+            return self.resolve_roof_rect_position(coord);
+        }
         let undo_snap = self.current_history_snapshot();
         self.document.apply_position(value)?;
         self.mark_dirty()?;
@@ -431,6 +483,21 @@ impl AppController {
             }
             return;
         }
+        // Roof-RECT position questions: accept the DRAWN lo coordinate
+        // as-is and advance; a finalize rejection on the skip path is
+        // logged with the prompt left open (the ridge's skip shape).
+        if let Some(PendingRoofRect::PosX { lo, .. } | PendingRoofRect::PosY { lo, .. }) =
+            self.pending_roof_rect.as_ref()
+        {
+            let coord = match self.pending_roof_rect.as_ref() {
+                Some(PendingRoofRect::PosX { .. }) => lo.0,
+                _ => lo.1,
+            };
+            if let Err(e) = self.resolve_roof_rect_position(coord) {
+                log::warn!("roof rect skip rejected: {e}");
+            }
+            return;
+        }
         self.record_history();
         self.document.skip_current_position();
         let _ = self.mark_dirty();
@@ -457,6 +524,14 @@ impl AppController {
             PendingRoofRidge::CrossPosition { prompt, .. }
             | PendingRoofRidge::StartPosition { prompt, .. },
         ) = self.pending_roof_ridge.as_mut()
+        {
+            prompt.cycle();
+            return;
+        }
+        // Roof-rect position questions (PosX or PosY): cycle the open
+        // one's reference options.
+        if let Some(PendingRoofRect::PosX { prompt, .. } | PendingRoofRect::PosY { prompt, .. }) =
+            self.pending_roof_rect.as_mut()
         {
             prompt.cycle();
             return;

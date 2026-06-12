@@ -155,7 +155,11 @@ impl AppController {
     /// end-snap tolerance) is rejected (logged).
     pub fn apply_roof_ridge_stroke_event(&mut self, world_points: &[(f32, f32)]) {
         let _ = self.sketch_engine.take_stroke_raw();
-        if !self.roof_point_mode || self.roof_point_pending() || self.roof_ridge_pending() {
+        if !self.roof_point_mode
+            || self.roof_point_pending()
+            || self.roof_ridge_pending()
+            || self.roof_rect_pending()
+        {
             return;
         }
         let pts: Vec<Point2f32> = world_points
@@ -165,11 +169,25 @@ impl AppController {
         if pts.len() < 2 {
             return;
         }
-        // Paste-ready stroke dump (matches the ceiling-step / area dumps).
-        dump_stroke("roof-ridge", &pts);
         // Flush the live buffer to its slot: the fit + snap read
         // `document.outline`, which is only synced on shape switches.
         self.sync_active();
+        // A CLOSED stroke is the RECT-ridge flow's flat top, not a ridge
+        // line — classified exactly as the living-area/phase carve
+        // classifies closure (the world-stroke path has no `is_closed`
+        // flag): ends within `close_gap_m` AND enclosing real area
+        // (`stroke_encloses_area`) — a SHORT ridge stroke whose ends merely
+        // fall within the gap stays a line.
+        let ends_gap = {
+            let (a, b) = (pts[0], pts[pts.len() - 1]);
+            ((a.x - b.x).powi(2) + (a.y - b.y).powi(2)).sqrt()
+        };
+        if ends_gap < self.tuning.subarea.close_gap_m && manip_2d_plan::stroke_encloses_area(&pts) {
+            self.apply_roof_rect_stroke(&pts);
+            return;
+        }
+        // Paste-ready stroke dump (matches the ceiling-step / area dumps).
+        dump_stroke("roof-ridge", &pts);
         let (axis, coord_m, (lo, hi)) = match self.document.fit_roof_ridge_line(&pts) {
             Ok(fit) => fit,
             Err(e) => {

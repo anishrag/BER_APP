@@ -36,7 +36,8 @@ pub(super) fn has_content(view: &SketchView<'_>) -> bool {
                 || view.ceiling_step_pending
                 || view.roof_point_mode
                 || view.roof_point_pending
-                || view.roof_ridge_pending))
+                || view.roof_ridge_pending
+                || view.roof_rect_pending))
 }
 
 /// Render the dock. Priority of the prompt chain: read-only notice >
@@ -147,9 +148,14 @@ pub(super) fn render<F: FnMut(UiEvent)>(
                     on_event,
                 );
             }
-            // Same pending-with-mode-off rule again. A pending RIDGE (the
-            // stroke flow sharing roof-point mode) keeps it reachable too.
-            if view.roof_point_mode || view.roof_point_pending || view.roof_ridge_pending {
+            // Same pending-with-mode-off rule again. A pending RIDGE or
+            // RECT (the stroke flows sharing roof-point mode) keeps it
+            // reachable too.
+            if view.roof_point_mode
+                || view.roof_point_pending
+                || view.roof_ridge_pending
+                || view.roof_rect_pending
+            {
                 roof_point_toolbar(
                     ui,
                     view.roof_apex_views,
@@ -159,6 +165,11 @@ pub(super) fn render<F: FnMut(UiEvent)>(
                     view.roof_ridge_length_pending,
                     view.roof_ridge_length_anchored,
                     view.roof_ridge_position_pending,
+                    RectStages {
+                        length_axis: view.roof_rect_length_axis,
+                        position_pending: view.roof_rect_position_pending,
+                        height_pending: view.roof_rect_height_pending,
+                    },
                     view.roof_apex_input,
                     view.roof_ridge_length_input,
                     view.roof_error,
@@ -865,15 +876,25 @@ fn ceiling_step_toolbar<F: FnMut(UiEvent)>(
     }
 }
 
-/// Roof-point (and roof-RIDGE) controls, stage by stage: the height field +
-/// Set/Cancel once the point's/ridge's position is resolved; the ridge's
-/// LENGTH field (its own buffer, prefilled with the drawn length) + Set/Skip
-/// between its position questions and its height; a "answer the distance
+/// The pending roof-RECT's per-stage flags, bundled for the shared roof
+/// toolbar (one struct, not three more positional bools).
+struct RectStages {
+    /// `Some(axis)` while a side-length question is open (X = the width,
+    /// Y = the depth).
+    length_axis: Option<manip_2d_plan::ParameterAxis>,
+    position_pending: bool,
+    height_pending: bool,
+}
+
+/// Roof-point (and roof-RIDGE / roof-RECT) controls, stage by stage: the
+/// height field + Set/Cancel once the point's/ridge's/rect's position is
+/// resolved; the ridge's or rect's LENGTH field (shared buffer, prefilled
+/// with the drawn value) + Set/Skip between stages; a "answer the distance
 /// question" hint while a position stage is up (it shows as the shared
 /// position-prompt panel); otherwise a tap/stroke hint plus the
-/// committed-apex list with deletes. The ridge stages mirror the apex ones
-/// and share the height input buffer (the two flows are never pending at
-/// once — same mode, mutually suppressing).
+/// committed-apex list with deletes. The ridge and rect stages mirror the
+/// apex ones and share the height input buffer (the flows are never pending
+/// at once — same mode, mutually suppressing).
 #[allow(clippy::too_many_arguments)] // one flag/buffer per dock stage
 fn roof_point_toolbar<F: FnMut(UiEvent)>(
     ui: &mut egui::Ui,
@@ -884,12 +905,81 @@ fn roof_point_toolbar<F: FnMut(UiEvent)>(
     ridge_length_pending: bool,
     ridge_length_anchored: bool,
     ridge_position_pending: bool,
+    rect: RectStages,
     height_input: &mut String,
     ridge_length_input: &mut String,
     error: Option<&str>,
     on_event: &mut F,
 ) {
-    if ridge_height_pending {
+    if rect.height_pending {
+        ui.label(egui::RichText::new("Flat-top height (m):").strong());
+        ui.add(
+            egui::TextEdit::singleline(height_input)
+                .desired_width(60.0)
+                .hint_text("e.g. 4.2"),
+        );
+        // ABSOLUTE height (above the storey floor datum), applied to all
+        // four corners; the controller validates it.
+        if ui
+            .button("Set")
+            .on_hover_text("Raise the ceiling area to a flat top at this height")
+            .clicked()
+        {
+            if let Some(v) = parse_dimension_expression(height_input) {
+                on_event(UiEvent::Sketch(SketchEvent::AssignRoofRectHeight(v)));
+                height_input.clear();
+            }
+        }
+        if ui.button("Cancel").clicked() {
+            on_event(UiEvent::Sketch(SketchEvent::CancelPendingRoofRect));
+            height_input.clear();
+        }
+        inline_error(ui, error);
+    } else if let Some(axis) = rect.length_axis {
+        let label = match axis {
+            manip_2d_plan::ParameterAxis::X => "Flat-top width, E–W (m):",
+            manip_2d_plan::ParameterAxis::Y => "Flat-top depth, N–S (m):",
+        };
+        ui.label(egui::RichText::new(label).strong());
+        // Arrives PREFILLED with the drawn side length (the stroke is
+        // approximate — the typed value is the real dimension).
+        ui.add(
+            egui::TextEdit::singleline(ridge_length_input)
+                .desired_width(60.0)
+                .hint_text("e.g. 4.0"),
+        );
+        if ui
+            .button("Set")
+            .on_hover_text("Use exactly this side length (the near corner stays put)")
+            .clicked()
+        {
+            if let Some(v) = parse_dimension_expression(ridge_length_input) {
+                on_event(UiEvent::Sketch(SketchEvent::AssignRoofRectLength(v)));
+            }
+        }
+        if ui
+            .button("Skip")
+            .on_hover_text("Accept the drawn length as-is")
+            .clicked()
+        {
+            on_event(UiEvent::Sketch(SketchEvent::SkipRoofRectLength));
+        }
+        if ui.button("Cancel").clicked() {
+            on_event(UiEvent::Sketch(SketchEvent::CancelPendingRoofRect));
+            ridge_length_input.clear();
+        }
+        inline_error(ui, error);
+    } else if rect.position_pending {
+        // A rect position stage — the shared position panel above owns the
+        // entry; this hint keeps Cancel reachable alongside it.
+        ui.label(
+            egui::RichText::new("Pin the flat top's position (the distance question above)")
+                .color(egui::Color32::from_rgb(255, 200, 60)),
+        );
+        if ui.button("Cancel").clicked() {
+            on_event(UiEvent::Sketch(SketchEvent::CancelPendingRoofRect));
+        }
+    } else if ridge_height_pending {
         ui.label(egui::RichText::new("Ridge height (m):").strong());
         ui.add(
             egui::TextEdit::singleline(height_input)
@@ -994,8 +1084,9 @@ fn roof_point_toolbar<F: FnMut(UiEvent)>(
         }
     } else {
         ui.label(
-            "Tap a high point inside a ceiling area to slope the roof, \
-             or draw a straight stroke along a ridge line.",
+            "Tap a high point inside a ceiling area to slope the roof, draw a \
+             straight stroke along a ridge line, or a closed rectangle for a \
+             flat-topped roof.",
         );
         for (i, (_pos, label)) in apexes.iter().enumerate() {
             ui.horizontal(|ui| {

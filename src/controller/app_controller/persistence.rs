@@ -143,6 +143,7 @@ impl AppController {
         self.roof_point_mode = false;
         self.pending_roof_point = None;
         self.pending_roof_ridge = None;
+        self.pending_roof_rect = None;
         self.splice_debug.clear();
         self.last_snap_action = None;
         self.edit_drag_prompt = None;
@@ -231,6 +232,7 @@ impl AppController {
         self.ceiling_step_mode = false;
         self.pending_roof_point = None;
         self.pending_roof_ridge = None;
+        self.pending_roof_rect = None;
         self.roof_point_mode = false;
         self.view = ViewTransform::default();
         self.document.edit_state = EditState::default();
@@ -328,6 +330,7 @@ impl AppController {
         self.ceiling_step_mode = false;
         self.pending_roof_point = None;
         self.pending_roof_ridge = None;
+        self.pending_roof_rect = None;
         self.roof_point_mode = false;
         self.view = ViewTransform::default();
         self.document.edit_state = EditState::default();
