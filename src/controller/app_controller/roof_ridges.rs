@@ -449,6 +449,80 @@ impl AppController {
         )
     }
 
+    /// The 'Centre' button on the pending ridge's OPEN location stage:
+    /// materialize (the suggestion reads the RESOLVED roofs), compute the
+    /// centred value for that stage — the cross coordinate
+    /// ([`document::centred_ridge_cross`]) or the extent start
+    /// ([`document::centred_ridge_start`]), both the midpoint of the
+    /// region's span through the ridge midpoint — and advance EXACTLY as if
+    /// it had been typed: the same `advance_roof_ridge` call as
+    /// `apply_position_dimension`'s ridge arms, so validation / finalize /
+    /// stage behaviour is identical by construction. NOT routed through
+    /// `resolve_ceiling_line_position` — that maps a distance from a
+    /// reference wall; Centre produces the coordinate directly. On `Err`
+    /// (user-facing) the pending stage is untouched, so the prompt stays
+    /// open. No-op when no location stage is up.
+    pub fn centre_roof_ridge_position(&mut self) -> Result<(), String> {
+        // Bring the derived roofs current — the centred value is computed
+        // against the resolved ceiling regions, not the editing buffer.
+        let idx = self.current_storey_idx.unwrap_or(0);
+        match self.pending_roof_ridge.as_ref() {
+            Some(PendingRoofRidge::CrossPosition {
+                axis,
+                coord_m,
+                lo,
+                len_m,
+                start_snap,
+                end_snap,
+                ..
+            }) => {
+                let (axis, coord_m, lo, len_m) = (*axis, *coord_m, *lo, *len_m);
+                let (start_snap, end_snap) = (*start_snap, *end_snap);
+                self.materialize();
+                let storey = self
+                    .current_record
+                    .as_ref()
+                    .and_then(|r| r.data.storeys.get(idx))
+                    .ok_or("no storey to centre a roof ridge in")?;
+                let centred = document::centred_ridge_cross(storey, axis, coord_m, lo, len_m)?;
+                // Cross stage implies the cross was un-snapped — none to
+                // carry (apply_position_dimension's CrossPosition shape).
+                self.advance_roof_ridge(
+                    axis,
+                    centred,
+                    lo,
+                    len_m,
+                    None,
+                    start_snap,
+                    end_snap,
+                    &[RidgeQuestion::Start],
+                )
+            }
+            Some(PendingRoofRidge::StartPosition {
+                axis,
+                coord_m,
+                lo,
+                len_m,
+                cross_snap,
+                ..
+            }) => {
+                let (axis, coord_m, lo, len_m, cross_snap) =
+                    (*axis, *coord_m, *lo, *len_m, *cross_snap);
+                self.materialize();
+                let storey = self
+                    .current_record
+                    .as_ref()
+                    .and_then(|r| r.data.storeys.get(idx))
+                    .ok_or("no storey to centre a roof ridge in")?;
+                let centred = document::centred_ridge_start(storey, axis, coord_m, lo, len_m)?;
+                // Start stage implies NEITHER end was snapped — none to
+                // carry (apply_position_dimension's StartPosition shape).
+                self.advance_roof_ridge(axis, coord_m, centred, len_m, cross_snap, None, None, &[])
+            }
+            _ => Ok(()), // no location stage up — no-op
+        }
+    }
+
     /// The snap tag's "Don't snap": revert the SHOWING snap's degree of
     /// freedom to its DRAWN value, drop that snap, and REOPEN its skipped
     /// question (or auto-resolve onward, logged). One tag at a time, owned

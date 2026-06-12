@@ -302,6 +302,10 @@ pub enum SketchEvent {
     /// User entered the ridge height (metres, ABSOLUTE above the storey floor
     /// datum — both endpoints get it) for the pending roof ridge.
     AssignRoofRidgeHeight(f32),
+    /// The 'Centre' button on an open roof location stage (ridge cross /
+    /// start): apply the computed centre-it-within-its-ceiling-area value
+    /// through the same path as a typed distance.
+    CentreRoofPosition,
     /// "Don't snap" on the pending roof ridge's snap tag: revert the cross
     /// coordinate to its drawn value and reopen the position question. Routed
     /// to the controller's dedicated `unsnap_roof_ridge` — NOT

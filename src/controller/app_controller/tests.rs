@@ -4804,6 +4804,112 @@ fn roof_ridge_along_a_wall_rejection_lands_on_the_length() {
     assert!(!c.roof_ridge_pending(), "cancel recovers");
 }
 
+/// THE CENTRE BUTTON (S5): both ridge location prompts offer it
+/// (`offers_centre`), and clicking it applies the computed
+/// centre-it-within-its-ceiling-area value through the SAME advance path as
+/// a typed distance — the cross centres to the area's midline, the start
+/// centres the typed length along the run, the stage machine advances
+/// exactly as for a typed value, and the assigned apexes land at the
+/// centred coordinates.
+#[test]
+fn centre_button_centres_cross_and_start_within_the_area() {
+    let mut c = roof_ready_controller();
+    c.apply_roof_ridge_stroke_event(&[(3.78, 2.0), (3.82, 5.0), (3.8, 8.0)]);
+    c.assign_roof_ridge_length(4.0).expect("length applies");
+
+    // The cross question offers Centre; clicking it lands x = 5 (the 10×10
+    // area's midline) and advances to the start question.
+    let ui = c.position_prompt_for_ui().expect("cross prompt");
+    assert_eq!(ui.axis, ParameterAxis::X);
+    assert!(ui.offers_centre, "the ridge cross stage offers Centre");
+    c.centre_roof_ridge_position().expect("cross centres");
+    let ((ax, _), (bx, _)) = c.pending_roof_ridge_line().unwrap();
+    assert!(
+        (ax - 5.0).abs() < 1e-6 && (bx - 5.0).abs() < 1e-6,
+        "cross centred on the area midline (got {ax})"
+    );
+
+    // The start question offers it too; the 4 m length centres to [3, 7].
+    let ui = c.position_prompt_for_ui().expect("start prompt follows");
+    assert_eq!(ui.axis, ParameterAxis::Y);
+    assert!(ui.offers_centre, "the ridge start stage offers Centre");
+    c.centre_roof_ridge_position().expect("start centres");
+    assert!(
+        c.roof_ridge_height_pending(),
+        "centre advances exactly like a typed value — finalize passed"
+    );
+    let ((_, ay), (_, by)) = c.pending_roof_ridge_line().unwrap();
+    assert!(
+        (ay - 3.0).abs() < 1e-6 && (by - 7.0).abs() < 1e-6,
+        "extent centred along the run (got {ay}..{by})"
+    );
+
+    c.assign_roof_ridge_height(4.2).expect("ridge assigns");
+    let storey = &c.current_record.as_ref().unwrap().data.storeys[0];
+    for (apex, want_y) in storey.roof_apexes.iter().zip([3.0, 7.0]) {
+        assert!((apex.point.x - 5.0).abs() < 1e-6);
+        assert!((apex.point.y - want_y).abs() < 1e-6);
+    }
+}
+
+/// Centre ROUTES THROUGH VALIDATION like a typed value: a Centre whose
+/// length can't fit the run through the midpoint is rejected with the
+/// stable exceeds-area message (+ the permitted run) and the prompt stays
+/// open; non-ridge position prompts never offer Centre, and the handler is
+/// a no-op when no ridge location stage is up.
+#[test]
+fn centre_rejection_lands_on_the_open_prompt_and_only_ridge_stages_offer_it() {
+    // The roof-point tap flow's prompt does NOT offer Centre, and the
+    // ridge-centre handler is a no-op on it.
+    let mut c = roof_ready_controller();
+    c.roof_point_tap(3.8, 5.2);
+    let ui = c.position_prompt_for_ui().expect("tap flow's X prompt");
+    assert!(!ui.offers_centre, "the tap flow has no Centre");
+    c.centre_roof_ridge_position().expect("no-op");
+    assert!(
+        c.roof_point_pending() && !c.roof_ridge_pending(),
+        "tap flow untouched"
+    );
+    c.cancel_pending_roof_point();
+
+    // L footprint, vertical ridge in the RIGHT band (run y ∈ [0, 4]): the
+    // drawn 5 m length passes the optimistic Length bound (the bbox runs
+    // 10 m along Y) but exceeds the 4 m run through the midpoint — the
+    // Centre click is rejected exactly like a typed start.
+    let mut c = ceiling_ready_l_controller();
+    c.set_roof_point_mode(true);
+    c.apply_roof_ridge_stroke_event(&[(7.98, 0.5), (8.02, 5.5)]);
+    c.skip_roof_ridge_length().unwrap(); // drawn 5 m stands
+    c.skip_position_dimension(); // cross: drawn x ≈ 8 stands
+    let ui = c.position_prompt_for_ui().expect("start prompt");
+    assert_eq!(ui.axis, ParameterAxis::Y);
+    let err = c.centre_roof_ridge_position().unwrap_err();
+    assert!(
+        err.contains("out of its ceiling area") && err.contains("4.00 m"),
+        "the typed-value rejection, on the Centre click: {err}"
+    );
+    assert!(
+        c.roof_ridge_position_pending(),
+        "prompt stays open on the rejection"
+    );
+    c.cancel_pending_roof_ridge();
+
+    // A length that fits the band centres within it: 3 m → lo = 0.5.
+    let mut c = ceiling_ready_l_controller();
+    c.set_roof_point_mode(true);
+    c.apply_roof_ridge_stroke_event(&[(7.98, 0.5), (8.02, 5.5)]);
+    c.assign_roof_ridge_length(3.0).unwrap();
+    c.skip_position_dimension(); // cross: drawn x ≈ 8 stands
+    c.centre_roof_ridge_position()
+        .expect("fitting length centres");
+    assert!(c.roof_ridge_height_pending());
+    let ((_, ay), (_, by)) = c.pending_roof_ridge_line().unwrap();
+    assert!(
+        (ay - 0.5).abs() < 1e-6 && (by - 3.5).abs() < 1e-6,
+        "3 m centred in the 4 m band (got {ay}..{by})"
+    );
+}
+
 /// A snapped HI end with the start un-snapped: the Length question still
 /// opens (prefilled with the snapped-end run, reported ANCHORED) and a
 /// typed length RE-ANCHORS at the wall — `lo = hi − len`, the far end stays

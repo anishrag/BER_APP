@@ -335,6 +335,16 @@ fn position_prompt_toolbar<F: FnMut(UiEvent)>(
     {
         on_event(UiEvent::Sketch(SketchEvent::SkipPositionDimension));
     }
+    // The roof location stages offer a computed CENTRE suggestion, applied
+    // through the same path as a typed distance.
+    if prompt.offers_centre
+        && ui
+            .button("Centre")
+            .on_hover_text("Centre it within its ceiling area")
+            .clicked()
+    {
+        on_event(UiEvent::Sketch(SketchEvent::CentreRoofPosition));
+    }
     // Only offered when there IS another wall to measure from.
     if prompt.option_count > 1
         && ui

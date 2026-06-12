@@ -1112,6 +1112,19 @@ impl eframe::App for BerApp {
                                             }
                                         }
                                     }
+                                    SketchEvent::CentreRoofPosition => {
+                                        // The rejection lands on the open
+                                        // position prompt, like a typed value.
+                                        match controller.borrow_mut().centre_roof_ridge_position() {
+                                            Ok(()) => {
+                                                self.sketch_state.position_error = None;
+                                            }
+                                            Err(e) => {
+                                                eprintln!("centre_roof_position: {}", e);
+                                                self.sketch_state.position_error = Some(e);
+                                            }
+                                        }
+                                    }
                                     SketchEvent::UnsnapRoofRidge => {
                                         controller.borrow_mut().unsnap_roof_ridge();
                                         // The stage the error described is gone.

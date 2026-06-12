@@ -121,6 +121,7 @@ impl AppController {
                 current_distance: option.current_distance,
                 option_idx: prompt.current_idx,
                 option_count: prompt.options.len(),
+                offers_centre: false,
             });
         }
         // A pending roof point's per-axis question outranks the shape loop
@@ -152,6 +153,7 @@ impl AppController {
                 current_distance: option.current_distance,
                 option_idx: prompt.current_idx,
                 option_count: prompt.options.len(),
+                offers_centre: false,
             });
         }
         // A pending roof RIDGE's cross-coordinate question (question 1), same
@@ -177,6 +179,8 @@ impl AppController {
                 current_distance: option.current_distance,
                 option_idx: prompt.current_idx,
                 option_count: prompt.options.len(),
+                // The ridge's location stages offer the Centre suggestion.
+                offers_centre: true,
             });
         }
         // The ridge's START question (question 2): the measured object is the
@@ -204,6 +208,7 @@ impl AppController {
                 current_distance: option.current_distance,
                 option_idx: prompt.current_idx,
                 option_count: prompt.options.len(),
+                offers_centre: true,
             });
         }
         let prompt = self
@@ -223,6 +228,7 @@ impl AppController {
             current_distance: option.current_distance,
             option_idx: prompt.current_idx,
             option_count: prompt.options.len(),
+            offers_centre: false,
         })
     }
 
@@ -555,6 +561,12 @@ pub struct PositionPromptUiData {
     pub current_distance: f32,
     pub option_idx: usize,
     pub option_count: usize,
+    /// True when the prompt offers the 'Centre' button — a computed
+    /// "centre it within its ceiling area" suggestion routed through the
+    /// same assign path as a typed value. Set only by the roof-ridge (and
+    /// roof-rect) location stages; the carve/step/point prompts have no
+    /// owning area to centre within.
+    pub offers_centre: bool,
 }
 
 /// World-coord endpoints of the wall starting at `vid` in `plan`. `None` when

@@ -30,6 +30,10 @@
 //!   fit SOME flat, un-apexed ceiling area's plan bbox.
 //! - [`validate_roof_ridge_extent`] — the FINALIZE placement check, run at
 //!   the last open location stage once the geometry is fully determined.
+//! - [`centred_ridge_cross`] / [`centred_ridge_start`] — the 'Centre'
+//!   button's COMPUTED SUGGESTIONS: the value that centres the pending ridge
+//!   within its ceiling area, routed by the shell through the SAME assign
+//!   path as a typed value.
 //!
 //! [`CeilingRegions::apex_groups`]:
 //! datatypes::ber::structural::CeilingRegions::apex_groups
@@ -502,6 +506,101 @@ pub fn validate_roof_ridge_extent(
         check_end_claims(storey, RoofApex::quantize_point(q), ridx)?;
     }
     Ok(())
+}
+
+/// The pending ridge's MIDPOINT (per the shell's axis convention — `axis` is
+/// the CROSS axis, the extent runs along `axis.other()`), the resolved
+/// region strictly containing it, and that region's contiguous run through
+/// the midpoint along `dir` — the shared lookup behind the two Centre
+/// suggestions. Both Err arms (midpoint in no region; strictly inside but no
+/// span — degenerate) collapse to the stable ridge-outside message.
+fn ridge_span_through_midpoint(
+    storey: &Storey,
+    axis: ParameterAxis,
+    coord_m: f32,
+    lo: f32,
+    len_m: f32,
+    dir: Point2f64,
+) -> Result<(f64, f64), String> {
+    let mid_along = lo as f64 + len_m as f64 / 2.0;
+    let mid = match axis {
+        ParameterAxis::X => Point2f64::new(coord_m as f64, mid_along),
+        ParameterAxis::Y => Point2f64::new(mid_along, coord_m as f64),
+    };
+    let ridx = region_idx_strictly_containing(storey, mid)
+        .map_err(|_| RIDGE_OUTSIDE_CEILING_MSG.to_string())?;
+    storey.roofs.regions[ridx]
+        .plan_span_through(mid, dir)
+        .ok_or_else(|| RIDGE_OUTSIDE_CEILING_MSG.to_string())
+}
+
+/// The cross coordinate that CENTRES the pending ridge within its ceiling
+/// area — the 'Centre' button's computed suggestion for the CROSS location
+/// stage: the midpoint of the region's span through the ridge's current
+/// (drawn / resolved-so-far) midpoint along the CROSS axis
+/// ([`CeilingRegion::plan_span_through`] — the contiguous run, not the
+/// bbox, so a notched region centres within the run the midpoint actually
+/// sits in). The region is the one STRICTLY containing the midpoint (the
+/// midpoint, never the ends, picks the region — the finalize convention).
+/// The centred coordinate lies on the span through the midpoint, which
+/// stays inside the region by construction — no separate footprint check.
+/// `Err` (user-facing, stable) when the midpoint sits in no region.
+///
+/// The shell routes the returned value through the SAME advance path as a
+/// typed cross distance, so validation/finalize behaviour is identical by
+/// construction.
+///
+/// [`CeilingRegion::plan_span_through`]:
+/// datatypes::ber::structural::CeilingRegion::plan_span_through
+pub fn centred_ridge_cross(
+    storey: &Storey,
+    axis: ParameterAxis,
+    coord_m: f32,
+    lo: f32,
+    len_m: f32,
+) -> Result<f32, String> {
+    // The span runs along the CROSS axis: `axis` itself.
+    let dir = match axis {
+        ParameterAxis::X => Point2f64::new(1.0, 0.0),
+        ParameterAxis::Y => Point2f64::new(0.0, 1.0),
+    };
+    let (t_min, t_max) = ridge_span_through_midpoint(storey, axis, coord_m, lo, len_m, dir)?;
+    Ok((coord_m as f64 + (t_min + t_max) / 2.0) as f32)
+}
+
+/// The extent START that CENTRES the pending ridge along its ceiling area —
+/// the 'Centre' button's computed suggestion for the START location stage:
+/// the region's span through the ridge's current midpoint along the ALONG
+/// axis (`axis.other()`), returning `span_mid − len/2`. `Err` (user-facing,
+/// stable) when the midpoint sits in no region
+/// ([`RIDGE_OUTSIDE_CEILING_MSG`]) or the length exceeds the span — beyond
+/// the boundary-touch band ([`APEX_BOUNDARY_EPS_M`] per side, the finalize
+/// check's allowance) — carrying the permitted run with the stable
+/// [`RIDGE_LENGTH_EXCEEDS_AREA_MSG`] prefix. A full-span length centres to
+/// the exact wall-to-wall gable.
+pub fn centred_ridge_start(
+    storey: &Storey,
+    axis: ParameterAxis,
+    coord_m: f32,
+    lo: f32,
+    len_m: f32,
+) -> Result<f32, String> {
+    // The span runs along the ALONG axis: `axis.other()`.
+    let dir = match axis {
+        ParameterAxis::X => Point2f64::new(0.0, 1.0),
+        ParameterAxis::Y => Point2f64::new(1.0, 0.0),
+    };
+    let (t_min, t_max) = ridge_span_through_midpoint(storey, axis, coord_m, lo, len_m, dir)?;
+    let span = t_max - t_min;
+    if len_m as f64 > span + 2.0 * APEX_BOUNDARY_EPS_M {
+        return Err(format!(
+            "{RIDGE_LENGTH_EXCEEDS_AREA_MSG} (the ceiling area runs {span:.2} m \
+             wall to wall there)."
+        ));
+    }
+    let mid_along = lo as f64 + len_m as f64 / 2.0;
+    let span_mid = mid_along + (t_min + t_max) / 2.0;
+    Ok((span_mid - len_m as f64 / 2.0) as f32)
 }
 
 impl StoreyDoc {
@@ -1171,6 +1270,62 @@ mod tests {
             "got: {err}"
         );
         assert!(validate_roof_ridge_extent(&storey, ParameterAxis::Y, 2.0, 1.0, 1.9).is_ok());
+    }
+
+    /// The CENTRE suggestions (the 'Centre' button's computed values): the
+    /// cross centre is the midpoint of the region's run through the ridge
+    /// midpoint along the cross axis, the start centre is `span_mid − len/2`
+    /// along the extent axis — the contiguous RUN through the midpoint, not
+    /// the bbox (the notched C centres within the arm the midpoint sits in).
+    /// A full-span length centres to the exact wall-to-wall gable; a
+    /// midpoint in no region gets the stable ridge-outside message; a length
+    /// exceeding the run gets the stable exceeds-area prefix with the
+    /// permitted run.
+    #[test]
+    fn centred_ridge_cross_and_start_centre_within_the_run() {
+        let storey = storey_with_flat_roof(2.4);
+        // Vertical ridge (cross axis X) drawn at x = 1, extent y ∈ [1, 3]:
+        // the 4×4 region centres the cross at x = 2 and the start at y = 1.
+        let cross = centred_ridge_cross(&storey, ParameterAxis::X, 1.0, 1.0, 2.0).unwrap();
+        assert!((cross - 2.0).abs() < 1e-6);
+        let start = centred_ridge_start(&storey, ParameterAxis::X, 1.0, 1.0, 2.0).unwrap();
+        assert!((start - 1.0).abs() < 1e-6);
+        // Horizontal ridge (cross axis Y) at y = 3, extent x ∈ [0.5, 1.5].
+        let cross = centred_ridge_cross(&storey, ParameterAxis::Y, 3.0, 0.5, 1.0).unwrap();
+        assert!((cross - 2.0).abs() < 1e-6);
+        let start = centred_ridge_start(&storey, ParameterAxis::Y, 3.0, 0.5, 1.0).unwrap();
+        assert!((start - 1.5).abs() < 1e-6);
+        // A FULL-SPAN length centres to the wall-to-wall gable (lo = 0).
+        let start = centred_ridge_start(&storey, ParameterAxis::X, 2.0, 0.5, 4.0).unwrap();
+        assert!(start.abs() < 1e-6);
+        // Midpoint in no region → the stable ridge-outside message, both fns.
+        assert_eq!(
+            centred_ridge_cross(&storey, ParameterAxis::X, 9.0, 1.0, 2.0).unwrap_err(),
+            RIDGE_OUTSIDE_CEILING_MSG
+        );
+        assert_eq!(
+            centred_ridge_start(&storey, ParameterAxis::X, 9.0, 1.0, 2.0).unwrap_err(),
+            RIDGE_OUTSIDE_CEILING_MSG
+        );
+        // A length exceeding the run (midpoint still inside): the stable
+        // prefix + the permitted run.
+        let err = centred_ridge_start(&storey, ParameterAxis::X, 2.0, 0.5, 5.0).unwrap_err();
+        assert!(
+            err.starts_with(RIDGE_LENGTH_EXCEEDS_AREA_MSG) && err.contains("4.00 m"),
+            "got: {err}"
+        );
+
+        // The notched C-shape: a horizontal ridge in the LEFT arm (midpoint
+        // (1.5, 2)) centres within the arm's 3 m run to the slot edge — not
+        // the ring's 10 m bbox; the cross centres within the arm's height.
+        let storey = storey_with_flat_ring(notched_ring(), 2.4);
+        let start = centred_ridge_start(&storey, ParameterAxis::Y, 2.0, 1.0, 1.0).unwrap();
+        assert!(
+            (start - 1.0).abs() < 1e-6,
+            "run 0..3, centred lo (got {start})"
+        );
+        let cross = centred_ridge_cross(&storey, ParameterAxis::Y, 2.0, 1.0, 1.0).unwrap();
+        assert!((cross - 2.0).abs() < 1e-6, "y-run 0..4 (got {cross})");
     }
 
     /// The finalize check's END-CLAIM arm: an extent ending ON an INTERNAL
