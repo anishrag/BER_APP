@@ -593,7 +593,10 @@ impl FloorRegions {
     /// ([`shared_plan_pieces`]) — the rings are boolean-op output, so a
     /// conceptually shared edge is never an exact vertex match. Interior
     /// rings (a step strictly inside a region leaves the remainder with a
-    /// hole) participate like exteriors.
+    /// hole) participate like exteriors. A face that comes out a coplanar
+    /// FLUSH continuation of a wall region does not survive as its own
+    /// region: `WallRegions::with_risers` merges it into that wall
+    /// (`merge_coplanar_flush`).
     pub fn riser_faces(&self) -> Vec<Polygon3D> {
         let to_pts = |ls: &LineString<f64>| {
             let mut pts: Vec<Point2f64> = ls.coords().map(|c| Point2f64::new(c.x, c.y)).collect();
@@ -1322,7 +1325,10 @@ impl CeilingRegions {
     /// two triangles where the profiles CROSS inside the piece (sub-sliver
     /// halves dropped). The predicate is Z-DISCONTINUITY, not adjacency:
     /// continuous fan/ridge seams — equal profiles along the shared edge —
-    /// emit NOTHING. Outline edges never emit (they border one region).
+    /// emit NOTHING. Outline edges never emit (they border one region). A
+    /// face that comes out a coplanar FLUSH continuation of a wall region
+    /// does not survive as its own region: `WallRegions::with_risers`
+    /// merges it into that wall (`merge_coplanar_flush`).
     pub fn riser_faces(&self) -> Vec<Polygon3D> {
         let plan_ring = |r: &CeilingRegion| -> Vec<Point2f64> {
             r.polygon
@@ -2547,6 +2553,18 @@ impl WallRegions {
     /// — their exposure comes from the painted sections via `regenerate`.
     /// The faces are re-derived deterministically every materialize, so the
     /// match keeps riser identity stable across re-resolves.
+    ///
+    /// THE COPLANAR-FLUSH MERGE runs last ([`merge_coplanar_flush`]): a
+    /// riser that is a coplanar continuation of another wall region — same
+    /// vertical plane, sharing a positive-length boundary segment — is the
+    /// same physical wall, so it merges INTO that region (the host keeps
+    /// its id/base/exposure/opes/construction; the riser's own identity and
+    /// any previously-painted riser exposure are discarded). Only risers
+    /// that REMAIN separate regions reach the output — those are what the
+    /// 2D dashed-line riser picker lists; a merged riser is selected and
+    /// painted through its host wall's normal exposure flow.
+    ///
+    /// [`merge_coplanar_flush`]: WallRegions::merge_coplanar_flush
     pub fn with_risers(
         mut self,
         faces: Vec<(Polygon3D, WallExposure)>,
@@ -2574,6 +2592,7 @@ impl WallRegions {
             })
             .collect();
         let matched = Self::match_bases_to_previous(&bases, previous, &mut prev_used);
+        let first_riser = self.regions.len();
         for ((polygon, exposure), m) in faces.into_iter().zip(matched) {
             let region = match m {
                 Some(pi) => {
@@ -2607,6 +2626,77 @@ impl WallRegions {
                 }
             };
             self.regions.push(region);
+        }
+        self.merge_coplanar_flush(first_riser)
+    }
+
+    /// THE COPLANAR-FLUSH MERGE (live report, 2026-06: a ceiling-step carve
+    /// whose boundary lines CONTINUE perimeter wall planes derived riser
+    /// regions that visually split one physical wall in two): a riser region
+    /// that is (a) COPLANAR with another wall region — every vertex of its
+    /// ring on the host's base line in plan, i.e. the same vertical plane —
+    /// and (b) FLUSH with it — the two rings share a positive-length
+    /// boundary segment in wall-plane (along, z) coordinates — merges INTO
+    /// that region. The host keeps its `id`, BASE EDGE (`exterior[0]`/`[1]`
+    /// — the vertex-order contract, so exposure recovery and section
+    /// painting keep keying off the unchanged base), `exposure`, `opes` and
+    /// `construction_id`; only its polygon grows by the riser's ring
+    /// ([`stitch_flush_coplanar`]), so a merged host can be L-shaped
+    /// (non-convex). The merged riser's own identity, openings and any
+    /// previously-painted exposure are DISCARDED — deliberately: it is one
+    /// physical wall, and the host's attribution wins.
+    ///
+    /// The rule is purely geometric, so it applies to floor and ceiling
+    /// risers alike, and it iterates to a fixpoint so CHAINS merge
+    /// transitively (a second riser flush with an already-grown host, or
+    /// riser-into-riser where no wall is adjacent). Deterministic: risers
+    /// are visited in derivation order, and a riser flush with several
+    /// hosts prefers a NON-RISER host, tie-broken by the lexicographically
+    /// smallest base edge. A riser that touches a coplanar wall at a single
+    /// point (no positive-length shared segment) stays a separate region,
+    /// and perimeter walls never merge into each other — exposure sections
+    /// split over one outline edge stay separate regions.
+    fn merge_coplanar_flush(mut self, first_riser: usize) -> Self {
+        let mut is_riser: Vec<bool> = (0..self.regions.len()).map(|k| k >= first_riser).collect();
+        loop {
+            let mut merge: Option<(usize, usize, Polygon3D)> = None;
+            'risers: for ri in 0..self.regions.len() {
+                if !is_riser[ri] {
+                    continue;
+                }
+                let mut best: Option<(usize, Polygon3D)> = None;
+                for hi in 0..self.regions.len() {
+                    if hi == ri {
+                        continue;
+                    }
+                    let Some(stitched) =
+                        stitch_flush_coplanar(&self.regions[hi].polygon, &self.regions[ri].polygon)
+                    else {
+                        continue;
+                    };
+                    let better = match &best {
+                        None => true,
+                        Some((bi, _)) => match (is_riser[*bi], is_riser[hi]) {
+                            (true, false) => true,
+                            (false, true) => false,
+                            _ => base_lt(&self.regions[hi], &self.regions[*bi]),
+                        },
+                    };
+                    if better {
+                        best = Some((hi, stitched));
+                    }
+                }
+                if let Some((hi, stitched)) = best {
+                    merge = Some((ri, hi, stitched));
+                    break 'risers;
+                }
+            }
+            let Some((ri, hi, stitched)) = merge else {
+                break; // no flush riser left — fixpoint reached
+            };
+            self.regions[hi].polygon = stitched;
+            self.regions.remove(ri);
+            is_riser.remove(ri);
         }
         self
     }
@@ -2720,6 +2810,195 @@ fn riser_face(
         ext.push(Point3f64::new(p.x, p.y, hi_p));
     }
     Some(Polygon3D::new(ext))
+}
+
+// ── Coplanar-flush riser merging (private helpers for `with_risers`) ──────
+
+/// Stitch a flush coplanar `guest` ring into `host` — the geometric half of
+/// [`WallRegions::merge_coplanar_flush`]. `Some(merged)` when the guest lies
+/// in the host's vertical plane (every vertex of both rings within
+/// [`PROFILE_EPS_M`] of the host's base line in plan) and some guest edge
+/// runs collinear with a NON-BASE host edge in wall-plane (along, z)
+/// coordinates with more than [`RISER_MIN_OVERLAP_M`] of 1D overlap — the
+/// "shares a positive-length boundary segment" test; a single-point touch
+/// fails it and the rings stay separate. `None` when any gate fails.
+///
+/// The merged ring is the union boundary, built by splicing: the host ring
+/// walked from its base, with a detour around the guest ring where the
+/// shared segment sits. The shared segment may be a strict SUB-SEGMENT of
+/// either ring's edge (the host's profile edge usually outspans the riser's
+/// side edge) — its endpoints are always existing vertices of one of the
+/// two rings, so no new coordinates are ever invented and re-derivation is
+/// exact. The guest ring is reversed when needed so the two rings traverse
+/// the shared segment in opposite directions (two simple polygons on
+/// opposite sides of a shared edge), and junction vertices the splice makes
+/// collinear (or duplicate) are dropped afterwards — never the base pair.
+/// The host's base edge (`exterior[0]`/`[1]`) is preserved verbatim; a
+/// guest whose only shared segment lies ON the base edge (a face glued
+/// under the base) never merges, keeping the vertex-order contract intact.
+fn stitch_flush_coplanar(host: &Polygon3D, guest: &Polygon3D) -> Option<Polygon3D> {
+    let he = &host.exterior;
+    if he.len() < 3 || guest.exterior.len() < 3 {
+        return None;
+    }
+    let (a, b) = (he[0], he[1]);
+    let (bx, by) = (b.x - a.x, b.y - a.y);
+    let base_len = (bx * bx + by * by).sqrt();
+    if base_len <= RISER_MIN_OVERLAP_M {
+        return None;
+    }
+    let (ux, uy) = (bx / base_len, by / base_len);
+    // COPLANARITY gate: every vertex of BOTH rings on the host's base line
+    // in plan — i.e. the rings share one vertical plane.
+    let plan_off = |v: &Point3f64| ((v.x - a.x) * uy - (v.y - a.y) * ux).abs();
+    if he
+        .iter()
+        .chain(guest.exterior.iter())
+        .any(|v| plan_off(v) > PROFILE_EPS_M)
+    {
+        return None;
+    }
+    // Wall-plane coordinates: (metres along the base line, z).
+    let tz = |v: &Point3f64| ((v.x - a.x) * ux + (v.y - a.y) * uy, v.z);
+    let h_tz: Vec<(f64, f64)> = he.iter().map(tz).collect();
+    let nh = he.len();
+
+    // The shared edge pair: a guest edge collinear with a non-base host
+    // edge, overlapping it over a positive 1D run. Longest overlap wins
+    // (deterministic). `same_dir` notes a guest ring that traverses the
+    // shared run in the host's direction and must be reversed.
+    let find_shared = |g_tz: &[(f64, f64)]| -> Option<(usize, usize, bool, f64)> {
+        let ng = g_tz.len();
+        let mut best: Option<(usize, usize, bool, f64)> = None;
+        // i starts at 1: pairing across the BASE edge (i == 0) would splice
+        // into it, and the base is the vertex-order contract — such a
+        // configuration never merges.
+        for i in 1..nh {
+            let (p, q) = (h_tz[i], h_tz[(i + 1) % nh]);
+            let (ex, ez) = (q.0 - p.0, q.1 - p.1);
+            let el = (ex * ex + ez * ez).sqrt();
+            if el <= RISER_MIN_OVERLAP_M {
+                continue;
+            }
+            let (dx, dz) = (ex / el, ez / el);
+            for j in 0..ng {
+                let (r, s) = (g_tz[j], g_tz[(j + 1) % ng]);
+                let off_r = ((r.0 - p.0) * dz - (r.1 - p.1) * dx).abs();
+                let off_s = ((s.0 - p.0) * dz - (s.1 - p.1) * dx).abs();
+                if off_r > PROFILE_EPS_M || off_s > PROFILE_EPS_M {
+                    continue; // not collinear with the host edge
+                }
+                let sr = (r.0 - p.0) * dx + (r.1 - p.1) * dz;
+                let ss = (s.0 - p.0) * dx + (s.1 - p.1) * dz;
+                let overlap = sr.max(ss).min(el) - sr.min(ss).max(0.0);
+                if overlap <= RISER_MIN_OVERLAP_M {
+                    continue; // disjoint runs, or a single-point touch
+                }
+                if best.map_or(true, |(_, _, _, o)| overlap > o) {
+                    best = Some((i, j, ss > sr, overlap));
+                }
+            }
+        }
+        best
+    };
+
+    let mut ge: Vec<Point3f64> = guest.exterior.clone();
+    let g_tz: Vec<(f64, f64)> = ge.iter().map(tz).collect();
+    let (i, mut j, same_dir, _) = find_shared(&g_tz)?;
+    if same_dir {
+        // Two simple polygons on opposite sides of a shared edge traverse
+        // it in OPPOSITE directions — normalize the guest's winding.
+        ge.reverse();
+        j = (2 * ge.len() - 2 - j) % ge.len();
+    }
+    let ng = ge.len();
+    let g_tz: Vec<(f64, f64)> = ge.iter().map(tz).collect();
+    // Host edge frame, and the guest edge's run along it (sr > ss after the
+    // normalization above: the guest edge opposes the host's direction).
+    let (p, q) = (h_tz[i], h_tz[(i + 1) % nh]);
+    let (ex, ez) = (q.0 - p.0, q.1 - p.1);
+    let el = (ex * ex + ez * ez).sqrt();
+    let (dx, dz) = (ex / el, ez / el);
+    let s_of = |c: (f64, f64)| (c.0 - p.0) * dx + (c.1 - p.1) * dz;
+    let sr = s_of(g_tz[j]);
+    let ss = s_of(g_tz[(j + 1) % ng]);
+    debug_assert!(sr > ss, "normalized guest edge opposes the host edge");
+    // A guest end that lands on the host edge's endpoint reuses the host
+    // vertex; otherwise the guest endpoint splits the host edge (the
+    // partial-overlap case — the split point is the guest's own vertex).
+    let lo_coincides = ss.abs() <= RISER_MIN_OVERLAP_M;
+    let hi_coincides = (sr - el).abs() <= RISER_MIN_OVERLAP_M;
+
+    let mut merged: Vec<Point3f64> = Vec::with_capacity(nh + ng);
+    for (k, v) in he.iter().enumerate() {
+        merged.push(*v);
+        if k == i {
+            // Detour around the guest: out to its low end (unless it sits
+            // on he[i]), around the ring, back in from its high end.
+            if !lo_coincides {
+                merged.push(ge[(j + 1) % ng]);
+            }
+            for step in 2..ng {
+                merged.push(ge[(j + step) % ng]);
+            }
+            if !hi_coincides {
+                merged.push(ge[j]);
+            }
+        }
+    }
+    // Junction vertices the splice made collinear (or duplicate) drop out —
+    // never the base pair (indices 0/1, the vertex-order contract).
+    loop {
+        let n = merged.len();
+        if n <= 3 {
+            break;
+        }
+        match (2..n).find(|&k| collinear_between(merged[k - 1], merged[k], merged[(k + 1) % n])) {
+            Some(k) => {
+                merged.remove(k);
+            }
+            None => break,
+        }
+    }
+    Some(Polygon3D::new(merged))
+}
+
+/// `b` lies ON the segment `a`→`c` (within 1e-9 m of the line, between the
+/// endpoints) — the post-splice junction-vertex cleanup test of
+/// [`stitch_flush_coplanar`]. Also true for an exact duplicate (`b == a`).
+fn collinear_between(a: Point3f64, b: Point3f64, c: Point3f64) -> bool {
+    let u = (c.x - a.x, c.y - a.y, c.z - a.z);
+    let v = (b.x - a.x, b.y - a.y, b.z - a.z);
+    let ulen = (u.0 * u.0 + u.1 * u.1 + u.2 * u.2).sqrt();
+    if ulen <= 1e-12 {
+        return true; // a == c — a degenerate corner; drop b
+    }
+    let cross = (
+        u.1 * v.2 - u.2 * v.1,
+        u.2 * v.0 - u.0 * v.2,
+        u.0 * v.1 - u.1 * v.0,
+    );
+    let dist = (cross.0 * cross.0 + cross.1 * cross.1 + cross.2 * cross.2).sqrt() / ulen;
+    let between = v.0 * (c.x - b.x) + v.1 * (c.y - b.y) + v.2 * (c.z - b.z) >= -1e-12;
+    dist <= 1e-9 && between
+}
+
+/// Strict lexicographic order on two regions' base edges — the deterministic
+/// host tie-break of [`WallRegions::merge_coplanar_flush`].
+fn base_lt(a: &WallRegion, b: &WallRegion) -> bool {
+    let key = |r: &WallRegion| {
+        let e = &r.polygon.exterior;
+        [e[0].x, e[0].y, e[0].z, e[1].x, e[1].y, e[1].z]
+    };
+    let (ka, kb) = (key(a), key(b));
+    for (x, y) in ka.iter().zip(kb.iter()) {
+        match x.total_cmp(y) {
+            std::cmp::Ordering::Less => return true,
+            std::cmp::Ordering::Greater => return false,
+            std::cmp::Ordering::Equal => {}
+        }
+    }
+    false
 }
 
 // ── Roof-profile sampling (private helpers for `WallRegions::regenerate`) ──
@@ -3868,6 +4147,276 @@ mod tests {
             r.exposure,
             WallExposure::Exposed,
             "override survives the fresh derive after the edit"
+        );
+    }
+
+    // ── Coplanar-flush riser merging ────────────────────────────────────────
+
+    /// A ring's (x, z) profile (y is constant in these fixtures), for terse
+    /// merged-shape assertions.
+    fn xz(p: &Polygon3D) -> Vec<(f64, f64)> {
+        p.exterior.iter().map(|v| (v.x, v.z)).collect()
+    }
+
+    /// One wall region with base `(0,0)→(4,0)`, flat top at 2.4 (a quad).
+    fn flat_wall(cid: ItemId) -> WallRegions {
+        WallRegions::regenerate(
+            vec![(
+                Point2f64::new(0.0, 0.0),
+                Point2f64::new(4.0, 0.0),
+                WallExposure::Exposed,
+            )],
+            &WallRegions::default(),
+            &CeilingRegions::default(),
+            0.0,
+            2.4,
+            cid,
+        )
+    }
+
+    /// A vertical quad on the wall plane y = 0 over plan x ∈ [x0, x1],
+    /// z ∈ [z0, z1] — a riser face continuing the wall's plane.
+    fn coplanar_face(x0: f64, x1: f64, z0: f64, z1: f64) -> Polygon3D {
+        Polygon3D::new(vec![
+            Point3f64::new(x0, 0.0, z0),
+            Point3f64::new(x1, 0.0, z0),
+            Point3f64::new(x1, 0.0, z1),
+            Point3f64::new(x0, 0.0, z1),
+        ])
+    }
+
+    /// THE COPLANAR-FLUSH MERGE: a riser continuing the wall's plane past
+    /// its end, sharing the wall's side edge over z ∈ [1, 2.4] (a strict
+    /// SUB-SEGMENT — the partial-overlap case), merges INTO the wall: one
+    /// region, host id/exposure/opes kept, polygon the L-shaped union with
+    /// the base edge still at indices 0/1.
+    #[test]
+    fn flush_coplanar_riser_merges_into_its_continuation_wall() {
+        let cid = ItemId::default();
+        let mut walls = flat_wall(cid);
+        let wall_id = walls.regions[0].id;
+        let ope = ItemId::default();
+        walls.regions[0].opes.doors.push(ope);
+        let walls = walls.with_risers(
+            vec![(coplanar_face(4.0, 6.0, 1.0, 2.4), WallExposure::Unset)],
+            &WallRegions::default(),
+            cid,
+        );
+        assert_eq!(walls.regions.len(), 1, "the flush riser merged");
+        let r = &walls.regions[0];
+        assert_eq!(r.id, wall_id, "host id kept");
+        assert_eq!(r.exposure, WallExposure::Exposed, "host exposure kept");
+        assert_eq!(r.opes.doors, vec![ope], "host openings kept");
+        assert_eq!(r.construction_id, cid, "host construction kept");
+        assert_eq!(
+            xz(&r.polygon),
+            vec![
+                (0.0, 0.0),
+                (4.0, 0.0), // base edge first — the vertex-order contract
+                (4.0, 1.0), // the riser's low end splits the wall's side edge
+                (6.0, 1.0),
+                (6.0, 2.4),
+                (0.0, 2.4), // the collinear junction at (4, 2.4) dropped
+            ],
+            "the union ring, stitched along the shared side edge"
+        );
+    }
+
+    /// A coplanar riser that touches the wall at a SINGLE POINT (no
+    /// positive-length shared segment — the corner-only case) stays a
+    /// separate region.
+    #[test]
+    fn coplanar_riser_touching_at_a_point_stays_separate() {
+        let cid = ItemId::default();
+        let walls = flat_wall(cid).with_risers(
+            // Beside the wall and ABOVE its top: only the corner (4, 0, 2.4)
+            // is shared.
+            vec![(coplanar_face(4.0, 6.0, 2.4, 3.4), WallExposure::Unset)],
+            &WallRegions::default(),
+            cid,
+        );
+        assert_eq!(walls.regions.len(), 2, "a point touch never merges");
+    }
+
+    /// A NON-coplanar riser (parallel plane, 0.5 m away) never merges,
+    /// whatever its z band.
+    #[test]
+    fn off_plane_riser_never_merges() {
+        let cid = ItemId::default();
+        let riser = Polygon3D::new(vec![
+            Point3f64::new(4.0, 0.5, 1.0),
+            Point3f64::new(6.0, 0.5, 1.0),
+            Point3f64::new(6.0, 0.5, 2.4),
+            Point3f64::new(4.0, 0.5, 2.4),
+        ]);
+        let walls = flat_wall(cid).with_risers(
+            vec![(riser, WallExposure::Unset)],
+            &WallRegions::default(),
+            cid,
+        );
+        assert_eq!(walls.regions.len(), 2, "different plane — no merge");
+    }
+
+    /// CHAINS merge transitively: riser A is flush with the wall, riser B
+    /// only with A. A merges first (non-riser host preferred), the host
+    /// grows, then B is flush with the grown host and merges too — one
+    /// region, the seams cleaned up.
+    #[test]
+    fn flush_riser_chain_merges_transitively_into_the_wall() {
+        let cid = ItemId::default();
+        let walls = flat_wall(cid);
+        let wall_id = walls.regions[0].id;
+        let walls = walls.with_risers(
+            vec![
+                (coplanar_face(4.0, 6.0, 1.0, 2.4), WallExposure::Unset),
+                (coplanar_face(6.0, 8.0, 1.0, 2.4), WallExposure::Unset),
+            ],
+            &WallRegions::default(),
+            cid,
+        );
+        assert_eq!(walls.regions.len(), 1, "the whole chain merged");
+        assert_eq!(walls.regions[0].id, wall_id);
+        assert_eq!(
+            xz(&walls.regions[0].polygon),
+            vec![
+                (0.0, 0.0),
+                (4.0, 0.0),
+                (4.0, 1.0),
+                (8.0, 1.0),
+                (8.0, 2.4),
+                (0.0, 2.4),
+            ],
+            "both seam junctions dropped as collinear"
+        );
+    }
+
+    /// A riser BRIDGING two coplanar walls merges into exactly ONE of them,
+    /// deterministically: the lexicographically smallest base edge wins.
+    /// The walls themselves never merge into each other (exposure sections
+    /// stay separate regions).
+    #[test]
+    fn bridging_riser_prefers_the_lexicographically_smallest_wall() {
+        let cid = ItemId::default();
+        let walls = WallRegions::regenerate(
+            vec![
+                (
+                    Point2f64::new(0.0, 0.0),
+                    Point2f64::new(4.0, 0.0),
+                    WallExposure::Exposed,
+                ),
+                (
+                    Point2f64::new(6.0, 0.0),
+                    Point2f64::new(10.0, 0.0),
+                    WallExposure::SemiExposed,
+                ),
+            ],
+            &WallRegions::default(),
+            &CeilingRegions::default(),
+            0.0,
+            2.4,
+            cid,
+        );
+        let (id_a, id_b) = (walls.regions[0].id, walls.regions[1].id);
+        let walls = walls.with_risers(
+            // Flush with wall A's right edge AND wall B's left edge.
+            vec![(coplanar_face(4.0, 6.0, 1.0, 2.4), WallExposure::Unset)],
+            &WallRegions::default(),
+            cid,
+        );
+        assert_eq!(walls.regions.len(), 2, "walls never merge into each other");
+        let a = walls.regions.iter().find(|r| r.id == id_a).unwrap();
+        let b = walls.regions.iter().find(|r| r.id == id_b).unwrap();
+        assert_eq!(
+            a.polygon.exterior.len(),
+            6,
+            "the riser merged into the smaller base: {:?}",
+            xz(&a.polygon)
+        );
+        assert_eq!(b.polygon.exterior.len(), 4, "the other wall is untouched");
+    }
+
+    /// THE DELIBERATE BEHAVIOUR CHANGE: a riser the user previously painted
+    /// (separate region, overridden exposure, own opes) that NOW comes out
+    /// flush with a wall merges into it — the HOST's exposure wins and the
+    /// riser's old identity/opes/exposure are discarded.
+    #[test]
+    fn painted_riser_that_now_merges_loses_to_the_host_exposure() {
+        let cid = ItemId::default();
+        // Previous state, as persisted by an older derivation: the wall and
+        // a SEPARATE riser region the user painted SemiExposed.
+        let mut previous = flat_wall(cid);
+        let wall_id = previous.regions[0].id;
+        let old_riser = WallRegion {
+            id: ItemId::default(),
+            polygon: coplanar_face(4.0, 6.0, 1.0, 2.4),
+            exposure: WallExposure::SemiExposed, // the user's old override
+            opes: Opes::default(),
+            construction_id: cid,
+        };
+        let old_riser_id = old_riser.id;
+        previous.regions.push(old_riser);
+
+        // Re-derive: the riser face amends its old region (picking up the
+        // override) and THEN merges — the host's attribution wins.
+        let walls = WallRegions::regenerate(
+            vec![(
+                Point2f64::new(0.0, 0.0),
+                Point2f64::new(4.0, 0.0),
+                WallExposure::Exposed,
+            )],
+            &previous,
+            &CeilingRegions::default(),
+            0.0,
+            2.4,
+            cid,
+        )
+        .with_risers(
+            vec![(coplanar_face(4.0, 6.0, 1.0, 2.4), WallExposure::Unset)],
+            &previous,
+            cid,
+        );
+        assert_eq!(walls.regions.len(), 1, "merged despite the old override");
+        assert_eq!(walls.regions[0].id, wall_id);
+        assert_eq!(
+            walls.regions[0].exposure,
+            WallExposure::Exposed,
+            "the host wall's exposure wins over the riser's old override"
+        );
+        assert!(
+            walls.regions.iter().all(|r| r.id != old_riser_id),
+            "the merged riser's identity is gone"
+        );
+    }
+
+    /// Merging is IDEMPOTENT across re-derivations: feeding the merged
+    /// result back as `previous` re-derives the identical merged region
+    /// (id stable, polygon byte-identical).
+    #[test]
+    fn merged_wall_rederives_identically() {
+        let cid = ItemId::default();
+        let segs = || {
+            vec![(
+                Point2f64::new(0.0, 0.0),
+                Point2f64::new(4.0, 0.0),
+                WallExposure::Exposed,
+            )]
+        };
+        let derive = |previous: &WallRegions| {
+            WallRegions::regenerate(segs(), previous, &CeilingRegions::default(), 0.0, 2.4, cid)
+                .with_risers(
+                    vec![(coplanar_face(4.0, 6.0, 1.0, 2.4), WallExposure::Unset)],
+                    previous,
+                    cid,
+                )
+        };
+        let walls1 = derive(&WallRegions::default());
+        let walls2 = derive(&walls1);
+        assert_eq!(walls1.regions.len(), 1);
+        assert_eq!(walls2.regions.len(), 1);
+        assert_eq!(walls2.regions[0].id, walls1.regions[0].id, "id stable");
+        assert_eq!(
+            walls2.regions[0].polygon, walls1.regions[0].polygon,
+            "the merged polygon re-derives identically"
         );
     }
 

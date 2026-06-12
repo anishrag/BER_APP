@@ -296,6 +296,13 @@ pub fn resolve_storey(
     // right, so ground contact is now the assessor's EXPLICIT choice (the
     // riser toolbar's Ground button; `Ground` stays in the enum as that
     // choice, never a default).
+    // A riser that comes out a COPLANAR-FLUSH continuation of another wall
+    // region (same vertical plane, sharing a positive-length edge — e.g. a
+    // step line continuing a perimeter wall's plane) does not survive as a
+    // separate region: `with_risers` merges it into that wall
+    // (`merge_coplanar_flush` — host keeps id/base/exposure/opes), so one
+    // physical wall resolves as ONE region and `riser_walls` only ever
+    // lists the risers that remain separate.
     let risers: Vec<(Polygon3D, WallExposure)> = storey
         .floors
         .riser_faces()
@@ -901,6 +908,219 @@ mod tests {
             WallExposure::Unset,
             "clear reverts a ceiling riser to Unset"
         );
+    }
+
+    /// The exact storey of the LIVE REPORT (2026-06): an L/U-shaped outline
+    /// with one ceiling-step rect (+1.0 over h = 2.4) whose south and west
+    /// boundary lines CONTINUE perimeter wall planes. The fixture for the
+    /// regression test below and the merge-rule resolve tests.
+    fn flush_riser_fixture() -> (StoreyDoc, Ber, Vec<crate::CeilingStepRegion>) {
+        let doc = square_doc(&[
+            Point2f32::new(5.2184, 6.5205),
+            Point2f32::new(5.2184, 8.5205),
+            Point2f32::new(8.2184, 8.5205),
+            Point2f32::new(8.2184, 2.5205),
+            Point2f32::new(4.2184, 2.5205),
+            Point2f32::new(4.2184, 1.5205),
+            Point2f32::new(2.2184, 1.5205),
+            Point2f32::new(2.2184, 5.5205),
+            Point2f32::new(3.2184, 5.5205),
+            Point2f32::new(3.2184, 6.5205),
+        ]);
+        let mut ber = Ber::default();
+        ensure_storey_constructions(&mut ber, 0, &[]);
+        ber.set_default_ceiling_height(Some(0), 2.4);
+        let steps = vec![crate::CeilingStepRegion {
+            polygon: vec![
+                Point2f32::new(3.2184, 6.5205),
+                Point2f32::new(3.2184, 2.5205),
+                Point2f32::new(5.2184, 2.5205),
+                Point2f32::new(5.2184, 6.5205),
+            ],
+            delta_m: 1.0,
+        }];
+        (doc, ber, steps)
+    }
+
+    /// THE COPLANAR-FLUSH RISER MERGE REGRESSION (live report, 2026-06):
+    /// before the merge this storey resolved 13 wall regions — 10 perimeter
+    /// + 3 ceiling risers, two of which were coplanar continuations of
+    /// perimeter walls, visually splitting one physical wall in two. Now:
+    /// 11 regions — the south side covered by ONE region (the wall with an
+    /// L-profiled polygon), the west side likewise, and the third riser
+    /// (which touches its coplanar wall at a single point only) still a
+    /// separate region; `riser_walls` lists ONLY that one, so the dashed
+    /// picker never offers a merged riser (it's painted through its host
+    /// wall's normal flow). Identity is stable: a re-resolve amends every
+    /// region and re-derives the merged polygons byte-identically.
+    #[test]
+    fn flush_coplanar_risers_merge_into_their_continuation_walls() {
+        let (doc, mut ber, steps) = flush_riser_fixture();
+        let storey = resolve_storey(&doc, &ber, 0, &[], &[], &steps);
+        assert_eq!(
+            storey.walls.regions.len(),
+            11,
+            "10 perimeter walls + the single surviving riser"
+        );
+
+        // A region by its base edge (the contract: exterior[0]/[1]).
+        fn wall_with_base<'a>(
+            s: &'a datatypes::ber::structural::Storey,
+            a: (f64, f64),
+            b: (f64, f64),
+        ) -> &'a datatypes::ber::structural::WallRegion {
+            s.walls
+                .regions
+                .iter()
+                .find(|r| {
+                    let e = &r.polygon.exterior;
+                    (e[0].x - a.0).abs() < 1e-4
+                        && (e[0].y - a.1).abs() < 1e-4
+                        && (e[1].x - b.0).abs() < 1e-4
+                        && (e[1].y - b.1).abs() < 1e-4
+                })
+                .unwrap_or_else(|| panic!("no wall with base {a:?} -> {b:?}"))
+        }
+        let ring_xyz = |r: &datatypes::ber::structural::WallRegion| -> Vec<(f64, f64, f64)> {
+            r.polygon.exterior.iter().map(|v| (v.x, v.y, v.z)).collect()
+        };
+        let assert_ring = |got: &[(f64, f64, f64)], want: &[(f64, f64, f64)], name: &str| {
+            assert_eq!(got.len(), want.len(), "{name}: {got:?}");
+            for (g, w) in got.iter().zip(want) {
+                assert!(
+                    (g.0 - w.0).abs() < 1e-4
+                        && (g.1 - w.1).abs() < 1e-4
+                        && (g.2 - w.2).abs() < 1e-4,
+                    "{name}: got {got:?}, want {want:?}"
+                );
+            }
+        };
+
+        // The SOUTH side: one region — the perimeter wall, its polygon the
+        // L-profiled union with the merged riser (base edge first, top
+        // tracing b -> a with the step jump at x = 5.2184, the riser ring
+        // spliced in along the shared vertical edge at x = 4.2184).
+        let south = wall_with_base(&storey, (8.2184, 2.5205), (4.2184, 2.5205));
+        assert_ring(
+            &ring_xyz(south),
+            &[
+                (8.2184, 2.5205, 0.0),
+                (4.2184, 2.5205, 0.0),
+                (4.2184, 2.5205, 2.4),
+                (3.2184, 2.5205, 2.4),
+                (3.2184, 2.5205, 3.4),
+                (5.2184, 2.5205, 3.4),
+                (5.2184, 2.5205, 2.4),
+                (8.2184, 2.5205, 2.4),
+            ],
+            "south wall",
+        );
+
+        // The WEST side: likewise one L-profiled region.
+        let west = wall_with_base(&storey, (3.2184, 5.5205), (3.2184, 6.5205));
+        assert_ring(
+            &ring_xyz(west),
+            &[
+                (3.2184, 5.5205, 0.0),
+                (3.2184, 6.5205, 0.0),
+                (3.2184, 6.5205, 3.4),
+                (3.2184, 2.5205, 3.4),
+                (3.2184, 2.5205, 2.4),
+                (3.2184, 5.5205, 2.4),
+            ],
+            "west wall",
+        );
+
+        // The EAST riser (x = 5.2184) touches its coplanar perimeter wall
+        // at the single point (5.2184, 6.5205, 2.4) — NO shared
+        // positive-length edge, so it stays separate, and it is the ONLY
+        // riser the dashed picker lists.
+        let risers = doc.riser_walls(&storey);
+        assert_eq!(risers.len(), 1, "merged risers never reach the picker");
+        assert_eq!(risers[0].kind, crate::RiserKind::Ceiling);
+        assert!(
+            (risers[0].a.x - 5.2184).abs() < 1e-4 && (risers[0].b.x - 5.2184).abs() < 1e-4,
+            "the surviving riser is the east one: {risers:?}"
+        );
+
+        // AMEND IDENTITY: a re-resolve against the merged result keeps every
+        // region's id and re-derives the polygons byte-identically.
+        let fingerprint = format!("{:?}", storey.walls);
+        let (south_id, west_id) = (south.id, west.id);
+        ber.storeys[0] = storey;
+        let storey2 = resolve_storey(&doc, &ber, 0, &[], &[], &steps);
+        assert_eq!(
+            format!("{:?}", storey2.walls),
+            fingerprint,
+            "re-resolve is a fixpoint over the merged walls"
+        );
+        assert_eq!(
+            wall_with_base(&storey2, (8.2184, 2.5205), (4.2184, 2.5205)).id,
+            south_id
+        );
+        assert_eq!(
+            wall_with_base(&storey2, (3.2184, 5.5205), (3.2184, 6.5205)).id,
+            west_id
+        );
+    }
+
+    /// Exposure painted on a HOST wall survives the merge and the amend: the
+    /// merged region carries the painted exposure, recovery
+    /// (`sections_from_wall_regions`) still keys off the unchanged base
+    /// edge, and a re-resolve keeps it — the painted-section flow is
+    /// untouched by the riser merge.
+    #[test]
+    fn exposure_painting_keys_off_the_merged_hosts_unchanged_base() {
+        let (mut doc, mut ber, steps) = flush_riser_fixture();
+        // Paint the full south wall (base (8.2184, 2.5205) -> (4.2184,
+        // 2.5205)) SemiExposed.
+        let (vid, a, b) = doc
+            .outline
+            .floor_plan
+            .perimeter_walls()
+            .into_iter()
+            .find(|(_, a, b)| {
+                (a.y - 2.5205).abs() < 1e-4
+                    && (b.y - 2.5205).abs() < 1e-4
+                    && (a.x - b.x).abs() > 1.0
+            })
+            .expect("the south wall exists");
+        let len = manip_2d_plan::segment_len(a, b);
+        doc.set_wall_section(vid, 0.0, len, len, WallExposure::SemiExposed);
+
+        let storey = resolve_storey(&doc, &ber, 0, &[], &[], &steps);
+        assert_eq!(storey.walls.regions.len(), 11);
+        let south = storey
+            .walls
+            .regions
+            .iter()
+            .find(|r| r.exposure == WallExposure::SemiExposed)
+            .expect("the painted wall resolves");
+        assert_eq!(
+            south.polygon.exterior.len(),
+            8,
+            "the painted wall is the merged L-shaped region: {:?}",
+            south.polygon.exterior
+        );
+        // Recovery (what reload does) finds exactly the painted section on
+        // the south wall — the merged region's base edge is unchanged.
+        let recovered = doc.sections_from_wall_regions(&storey.walls);
+        let secs = recovered.get(&vid).expect("section recovers to the wall");
+        assert_eq!(secs.len(), 1);
+        assert_eq!(secs[0].exposure, WallExposure::SemiExposed);
+        assert!(secs[0].start_m.abs() < 1e-3 && (secs[0].end_m - len).abs() < 1e-3);
+
+        // The amend keeps the painted exposure across a re-resolve.
+        let south_id = south.id;
+        ber.storeys[0] = storey;
+        let storey2 = resolve_storey(&doc, &ber, 0, &[], &[], &steps);
+        let south2 = storey2
+            .walls
+            .regions
+            .iter()
+            .find(|r| r.id == south_id)
+            .expect("identity stable");
+        assert_eq!(south2.exposure, WallExposure::SemiExposed);
     }
 
     /// Empty `step_regions` performs NO geo ops: the floor ring's stored points

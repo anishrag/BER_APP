@@ -5550,6 +5550,86 @@ fn roof_rect_over_a_step_full_fixpoint() {
     );
 }
 
+/// THE COPLANAR-FLUSH RISER MERGE FIXPOINT (live report, 2026-06): the
+/// L/U-shaped storey whose ceiling-step rect CONTINUES two perimeter wall
+/// planes resolves with the flush risers merged into their walls (11
+/// regions — 10 perimeter, two of them L-profiled, plus the single
+/// surviving riser), persists, reloads, and re-resolves BYTE-IDENTICALLY:
+/// the merged polygons re-derive exactly and identity rides the amend.
+#[test]
+fn flush_riser_merge_survives_reload_and_rederive_fixpoint() {
+    let p = |x: f32, y: f32| Point2f32::new(x, y);
+    let mut c = AppController::new(crate::engine::open_db(":memory:").unwrap());
+    let _ = c.create_ber(
+        "T".into(),
+        chrono::NaiveDate::from_ymd_opt(2026, 1, 1).unwrap(),
+    );
+    c.document.floor_plan = FloorPlan::from_clean_ring(&[
+        p(5.2184, 6.5205),
+        p(5.2184, 8.5205),
+        p(8.2184, 8.5205),
+        p(8.2184, 2.5205),
+        p(4.2184, 2.5205),
+        p(4.2184, 1.5205),
+        p(2.2184, 1.5205),
+        p(2.2184, 5.5205),
+        p(3.2184, 5.5205),
+        p(3.2184, 6.5205),
+    ])
+    .unwrap();
+    c.document.dimensioning.scale_set = true;
+    c.document.dimensioning.known_params = c.document.floor_plan.all_active_params();
+    c.commit_to_ber().unwrap();
+    c.set_default_ceiling_height(2.4).expect("height applies");
+    // The assessor's carved step rect (+1.0 over the 2.4 default), exactly
+    // as the carve flow stores it.
+    c.ceiling_step_regions.insert(
+        0,
+        vec![CeilingStepRegion {
+            polygon: vec![
+                p(3.2184, 6.5205),
+                p(3.2184, 2.5205),
+                p(5.2184, 2.5205),
+                p(5.2184, 6.5205),
+            ],
+            delta_m: 1.0,
+        }],
+    );
+    c.mark_dirty().unwrap();
+    c.materialize();
+    let walls_fingerprint = |c: &AppController| {
+        format!(
+            "{:?}",
+            c.current_record.as_ref().unwrap().data.storeys[0].walls
+        )
+    };
+    let before = walls_fingerprint(&c);
+    assert_eq!(
+        c.current_record.as_ref().unwrap().data.storeys[0]
+            .walls
+            .regions
+            .len(),
+        11,
+        "10 perimeter walls (two merged with their flush risers) + 1 riser"
+    );
+
+    // Persist → reload → re-resolve: byte-identical walls (the fixpoint).
+    let id = c.current_record.as_ref().unwrap().id.clone();
+    c.flush_if_dirty().unwrap();
+    c.open_ber(&id).unwrap();
+    let session = &c.ceiling_step_regions[&0];
+    assert_eq!(session.len(), 1, "step area reconstructed on reload");
+    assert!((session[0].delta_m - 1.0).abs() < 1e-6);
+    c.mark_dirty().unwrap();
+    c.materialize();
+    assert_eq!(
+        walls_fingerprint(&c),
+        before,
+        "resolve → persist → reload → re-resolve is a fixpoint over the \
+         merged walls"
+    );
+}
+
 /// Risk #4's wall half — the rect TOUCHING ONE WALL (mono-gable side): the
 /// four corner apexes with one side ON the outline produce a wall that
 /// rises to the flat-top height under that side (the gable profile falls
@@ -6580,9 +6660,14 @@ fn riser_pick_priority_and_deselection() {
 
 /// THE L-SCENARIO DISCRIMINATOR CHECK: on the L-shaped storey with a snapped
 /// ceiling step at x = 6 — whose riser line is COLLINEAR with the x = 6
-/// perimeter wall but doesn't lie on its segment — `riser_views` returns
-/// exactly the one interior ceiling riser, and no perimeter wall is ever
-/// misclassified as a riser (the wall views stay complete alongside).
+/// perimeter wall but doesn't lie on its segment — no perimeter wall is
+/// ever misclassified as a riser, and (the coplanar-flush merge, live
+/// report 2026-06) the riser doesn't survive as a separate region at all:
+/// the RAISED side covers the x = 6 wall, so the riser face is a flush
+/// continuation of that wall's plane sharing its bottom edge segment — it
+/// merges INTO the wall, which resolves as ONE L-profiled region covering
+/// the whole x = 6 plane. The picker accordingly lists nothing; the merged
+/// face is painted through the wall's normal exposure flow.
 #[test]
 fn riser_views_do_not_misclassify_perimeter_walls_on_the_l_scenario() {
     let mut c = ceiling_ready_l_controller();
@@ -6600,22 +6685,48 @@ fn riser_views_do_not_misclassify_perimeter_walls_on_the_l_scenario() {
     c.assign_ceiling_step_delta(0.3).expect("amount applies");
     c.materialize();
 
-    let risers = c.riser_views();
-    assert_eq!(risers.len(), 1, "exactly the interior ceiling riser");
-    assert_eq!(risers[0].kind, RiserKind::Ceiling);
-    assert_eq!(risers[0].exposure, WallExposure::Unset, "derived default");
     assert!(
-        (risers[0].a.0 - 6.0).abs() < 1e-4 && (risers[0].b.0 - 6.0).abs() < 1e-4,
-        "riser base on the step line x = 6: {:?} {:?}",
-        risers[0].a,
-        risers[0].b
-    );
-    assert!(
-        risers[0].a.1.max(risers[0].b.1) <= 4.0 + 1e-4,
-        "…and only on the interior span y ∈ [0, 4], never the wall segment"
+        c.riser_views().is_empty(),
+        "the flush riser merged into the x = 6 wall — nothing to pick"
     );
     // The perimeter set is untouched: all 6 outline walls still present.
     assert_eq!(c.wall_exposure_views().len(), 6);
+    // The x = 6 wall region is the L-profiled union: its base edge is the
+    // unchanged perimeter segment y ∈ [4, 10], its polygon now reaches the
+    // riser's extent y = 0 with the step band z ∈ [2.4, 2.7].
+    let storey = &c.current_record.as_ref().unwrap().data.storeys[0];
+    let wall = storey
+        .walls
+        .regions
+        .iter()
+        .find(|r| {
+            let e = &r.polygon.exterior;
+            e.iter().all(|v| (v.x - 6.0).abs() < 1e-4)
+        })
+        .expect("the x = 6 wall resolves");
+    let e = &wall.polygon.exterior;
+    assert!(
+        (e[0].y - 4.0).abs() < 1e-4 && (e[1].y - 10.0).abs() < 1e-4 && e[0].z.abs() < 1e-9,
+        "base edge unchanged (the host wall's): {e:?}"
+    );
+    assert!(
+        e.iter()
+            .any(|v| v.y.abs() < 1e-4 && (v.z - 2.4).abs() < 1e-6),
+        "the merged riser's far end is part of the wall ring: {e:?}"
+    );
+    assert_eq!(
+        storey
+            .walls
+            .regions
+            .iter()
+            .filter(|r| {
+                let e = &r.polygon.exterior;
+                e.iter().all(|v| (v.x - 6.0).abs() < 1e-4)
+            })
+            .count(),
+        1,
+        "ONE region covers the whole x = 6 plane"
+    );
 }
 
 // ── New-storey flow (thickness → method → suggest/draw → inherited seed) ───
