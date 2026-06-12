@@ -2462,6 +2462,9 @@ fn outline_world_inherits_scale_and_pins_shared_walls() {
 fn outline_world_stroke_is_captured_for_snap_replay() {
     let mut c = dimensioned_square_controller(); // storey 0 = 10x10 (metres)
     c.add_storey().unwrap();
+    // The new-storey flow asks the slab thickness FIRST (outline strokes are
+    // gated until it lands); answer it so the draw path opens.
+    c.assign_floor_thickness(0.3).unwrap();
     // The engine's pixel stroke only supplies the close-check; the world
     // points below are what get applied.
     c.sketch_start_stroke(Point2f32::new(0.0, 0.0)).unwrap();
@@ -5242,4 +5245,333 @@ fn riser_views_do_not_misclassify_perimeter_walls_on_the_l_scenario() {
     );
     // The perimeter set is untouched: all 6 outline walls still present.
     assert_eq!(c.wall_exposure_views().len(), 6);
+}
+
+// ── New-storey flow (thickness → method → suggest/draw → inherited seed) ───
+
+/// Storey 0 = 10×10 (metres) with ceiling 2.4 and the right half (x ≥ 5)
+/// stepped up to 2.7 — the "below" every new-storey test inherits from.
+fn stepped_ceiling_below_controller() -> AppController {
+    let mut c = dimensioned_square_controller();
+    c.set_default_ceiling_height(2.4).expect("height applies");
+    let region = c
+        .document
+        .ceiling_step_region(ParameterAxis::X, 5.0, document::LineSide::Greater, 0.3)
+        .expect("step region builds");
+    c.ceiling_step_regions.entry(0).or_default().push(region);
+    c.mark_dirty().unwrap();
+    c.materialize();
+    c.reconstruct_ceiling_step_regions_for(0); // canonicalize, assign parity
+    c
+}
+
+/// `(level_m, plan area)` per floor region of storey `idx`, sorted — the
+/// fingerprint the seed/fixpoint assertions compare.
+fn floor_level_areas(c: &AppController, idx: usize) -> Vec<(f64, f64)> {
+    let storey = &c.current_record.as_ref().unwrap().data.storeys[idx];
+    let mut v: Vec<(f64, f64)> = storey
+        .floors
+        .regions
+        .iter()
+        .zip(storey.floors.to_vertex_lists())
+        .map(|(r, ring)| {
+            let n = ring.len();
+            let mut s = 0.0;
+            for i in 0..n {
+                let (a, b) = (ring[i], ring[(i + 1) % n]);
+                s += a.x * b.y - b.x * a.y;
+            }
+            (r.level_m, s.abs() / 2.0)
+        })
+        .collect();
+    v.sort_by(|a, b| a.partial_cmp(b).unwrap());
+    v
+}
+
+/// Feed the sketch engine a pixel stroke (the close-check input) and apply a
+/// 10×10 world trace of the storey below — the upper-storey draw path.
+fn draw_world_square_trace(c: &mut AppController) {
+    c.sketch_start_stroke(Point2f32::new(0.0, 0.0)).unwrap();
+    for (x, y) in [(100.0, 0.0), (100.0, 100.0), (0.0, 100.0), (1.0, 1.0)] {
+        c.sketch_add_point(Point2f32::new(x, y)).unwrap();
+    }
+    let world = vec![(0.2, 0.2), (9.8, 0.2), (9.8, 9.8), (0.2, 9.8), (0.3, 0.3)];
+    c.apply_outline_stroke_world(&world);
+}
+
+/// THICKNESS-FIRST: `add_storey` opens the flow at the thickness question
+/// (never on storey 0); outline strokes are ignored until it lands; invalid
+/// values keep the prompt open; a valid value stamps the durable
+/// `floor_thickness_m` and advances to the method choice; the Heights
+/// re-edit (`set_floor_thickness`) never touches the stage.
+#[test]
+fn new_storey_thickness_is_asked_first_and_gates_outline_strokes() {
+    let mut c = dimensioned_square_controller();
+    assert!(c.new_storey_prompt().is_none(), "no flow on storey 0");
+    assert_eq!(c.floor_thickness(), None, "storey 0 has no slab thickness");
+    assert!(
+        c.assign_floor_thickness(0.3).is_err(),
+        "storey 0 refuses a thickness"
+    );
+
+    c.add_storey().unwrap();
+    let prompt = c.new_storey_prompt().expect("flow opened by add_storey");
+    assert!(prompt.thickness_pending && !prompt.method_pending);
+    assert!(prompt.suggestion.is_none());
+
+    // The world outline stroke is IGNORED while the thickness is pending.
+    draw_world_square_trace(&mut c);
+    assert_eq!(c.document.floor_plan.ring_count(), 0, "stroke ignored");
+    assert!(
+        c.new_storey_prompt().unwrap().thickness_pending,
+        "still asking for the thickness"
+    );
+
+    // Invalid values keep the prompt open and stamp nothing.
+    assert!(c.assign_floor_thickness(-0.1).is_err());
+    assert!(c.assign_floor_thickness(f64::NAN).is_err());
+    assert_eq!(c.floor_thickness(), None);
+
+    c.assign_floor_thickness(0.30).expect("valid thickness");
+    assert_eq!(c.floor_thickness(), Some(0.30), "display value");
+    assert_eq!(
+        c.current_record.as_ref().unwrap().data.storeys[1].floor_thickness_m,
+        Some(0.30),
+        "durably stamped on the Storey"
+    );
+    let prompt = c.new_storey_prompt().unwrap();
+    assert!(!prompt.thickness_pending && prompt.method_pending);
+
+    // Heights re-edit: value changes, the flow stage doesn't.
+    c.set_floor_thickness(0.25).expect("re-edit applies");
+    assert_eq!(c.floor_thickness(), Some(0.25));
+    assert!(
+        c.new_storey_prompt().unwrap().method_pending,
+        "set_floor_thickness never advances the stage"
+    );
+}
+
+/// SUGGEST → CYCLE → ACCEPT: the suggestions derive from the storey below
+/// (full-footprint two-level candidate ranked first), the cursor wraps both
+/// ways, and accepting adopts a FULLY-FINALISED outline — no dimension
+/// prompts, no collinearity review — and seeds the inherited floor level
+/// (canonicalized). Undo restores the empty outline; the seeded steps stay
+/// (outside undo — trap 6).
+#[test]
+fn suggested_outline_accepts_finalised_with_no_prompts_or_review() {
+    let mut c = stepped_ceiling_below_controller();
+    c.add_storey().unwrap();
+    c.assign_floor_thickness(0.3).unwrap();
+    assert!(
+        c.new_storey_prompt().unwrap().can_suggest,
+        "below has height + flat ceilings"
+    );
+
+    c.choose_suggest_outlines().expect("suggestions derive");
+    let (ring, _label, idx0, count) = c.new_storey_prompt().unwrap().suggestion.expect("browsing");
+    assert_eq!(idx0, 0);
+    assert!(count >= 2, "stepped ceiling yields several candidates");
+    // Top-ranked: the full 10×10 footprint (coverage + compactness beat the
+    // single-level halves).
+    let ring_area = {
+        let n = ring.len();
+        let mut s = 0.0;
+        for i in 0..n {
+            let (a, b) = (ring[i], ring[(i + 1) % n]);
+            s += a.0 * b.1 - b.0 * a.1;
+        }
+        s.abs() / 2.0
+    };
+    assert!((ring_area - 100.0).abs() < 1.0, "full footprint first");
+
+    // Cycle wraps forward and back.
+    c.cycle_suggestion(true);
+    assert_eq!(c.new_storey_prompt().unwrap().suggestion.unwrap().2, 1);
+    c.cycle_suggestion(false);
+    assert_eq!(c.new_storey_prompt().unwrap().suggestion.unwrap().2, 0);
+
+    c.accept_suggestion().expect("accept");
+    assert!(c.new_storey_prompt().is_none(), "flow closed");
+    assert!(c.outline_finalised(), "fully finalised outline");
+    assert!(c.current_dimension_prompt().is_none(), "no prompts");
+    assert!(c.review.is_none(), "no collinearity review");
+    assert!(
+        !c.inherited_seed_pending.contains(&1),
+        "seed consumed at accept"
+    );
+
+    // The inherited level landed: storey 1's floor split, the raised half
+    // (x ≥ 5, 50 m²) at +0.3, the rest at the datum.
+    let levels = floor_level_areas(&c, 1);
+    assert_eq!(levels.len(), 2, "floor split at the inherited line");
+    assert!((levels[0].0 - 0.0).abs() < 1e-9 && (levels[0].1 - 50.0).abs() < 1e-4);
+    assert!((levels[1].0 - 0.3).abs() < 1e-9 && (levels[1].1 - 50.0).abs() < 1e-4);
+    // Session list canonicalized to the exact derived piece.
+    let session = &c.step_regions[&1];
+    assert_eq!(session.len(), 1);
+    assert!((session[0].level_m - 0.3).abs() < 1e-9);
+
+    // Undo: the adoption reverts (empty outline again); the seeded steps and
+    // the thickness remain — outside undo by design.
+    c.undo().unwrap();
+    assert_eq!(c.document.floor_plan.ring_count(), 0, "outline undone");
+    assert_eq!(c.step_regions[&1].len(), 1, "seeded steps survive undo");
+    assert_eq!(c.floor_thickness(), Some(0.3), "thickness survives undo");
+}
+
+/// `choose_suggest_outlines` fails with a STABLE error when there's nothing
+/// to suggest from (no ceiling height below), and the prompt's `can_suggest`
+/// gate agrees.
+#[test]
+fn choose_suggest_without_flat_ceilings_below_is_a_stable_err() {
+    let mut c = dimensioned_square_controller(); // no ceiling height set
+    c.add_storey().unwrap();
+    c.assign_floor_thickness(0.3).unwrap();
+    let prompt = c.new_storey_prompt().unwrap();
+    assert!(prompt.method_pending && !prompt.can_suggest);
+    let err = c.choose_suggest_outlines().expect_err("nothing to suggest");
+    assert!(
+        err.contains("Draw the outline instead"),
+        "stable, actionable message: {err}"
+    );
+    // The flow stays at the method choice — drawing still works.
+    assert!(c.new_storey_prompt().unwrap().method_pending);
+}
+
+/// DRAWN PATH: a canvas stroke at the method choice is the implicit
+/// choose_draw_outline; the fully-pinned trace finalises at the carve tail,
+/// which seeds the inherited floor level right there.
+#[test]
+fn drawn_outline_seeds_inherited_levels_at_finalisation() {
+    let mut c = stepped_ceiling_below_controller();
+    c.add_storey().unwrap();
+    c.assign_floor_thickness(0.3).unwrap();
+    assert!(c.new_storey_prompt().unwrap().method_pending);
+
+    // The stroke IS the draw choice — flow closes, carve applies.
+    draw_world_square_trace(&mut c);
+    assert!(
+        c.new_storey_prompt().is_none(),
+        "stroke chose the draw path"
+    );
+    assert_eq!(c.document.floor_plan.ring_count(), 1, "outline carved");
+    assert!(c.outline_finalised(), "fully pinned trace → finalised");
+    assert!(!c.inherited_seed_pending.contains(&1), "seed consumed");
+
+    let session = c.step_regions.get(&1).expect("inherited level seeded");
+    assert_eq!(session.len(), 1);
+    assert!((session[0].level_m - 0.3).abs() < 1e-9);
+    c.materialize();
+    let levels = floor_level_areas(&c, 1);
+    assert_eq!(levels.len(), 2, "storey 1's floor split");
+    assert!(levels
+        .iter()
+        .any(|(l, a)| (l - 0.3).abs() < 1e-9 && (a - 50.0).abs() < 1.0));
+}
+
+/// DRAWN PATH ACROSS A RESTART: the storey is added but not drawn, the app
+/// "restarts" (flush + open_ber), and the re-derived seed-pending set still
+/// fires the seed when the outline finalises. The un-finalised persist kept
+/// the thickness (trap 7); finalised storeys never re-pend (trap 3).
+#[test]
+fn drawn_path_seed_survives_restart_via_rederived_pending() {
+    let mut c = stepped_ceiling_below_controller();
+    c.add_storey().unwrap();
+    c.assign_floor_thickness(0.3).unwrap();
+
+    let id = c.current_record.as_ref().unwrap().id.clone();
+    c.flush_if_dirty().unwrap();
+    c.open_ber(&id).expect("reopen");
+    assert!(
+        c.inherited_seed_pending.contains(&1),
+        "un-finalised upper storey re-pends on open"
+    );
+    assert!(
+        !c.inherited_seed_pending.contains(&0),
+        "storey 0 never pends"
+    );
+    assert!(
+        c.new_storey_prompt().is_none(),
+        "the flow itself is not restored — only the seed transition"
+    );
+    // The snapshot resumed on the storey being edited (1); the un-finalised
+    // persist kept the thickness.
+    assert_eq!(c.current_storey_idx(), Some(1));
+    assert_eq!(c.floor_thickness(), Some(0.3), "thickness survived restart");
+
+    draw_world_square_trace(&mut c);
+    assert!(c.outline_finalised());
+    assert!(!c.inherited_seed_pending.contains(&1), "seed consumed");
+    let session = c.step_regions.get(&1).expect("seeded after the restart");
+    assert!((session[0].level_m - 0.3).abs() < 1e-9);
+    c.materialize();
+    assert!(
+        floor_level_areas(&c, 1)
+            .iter()
+            .any(|(l, _)| (l - 0.3).abs() < 1e-9),
+        "inherited level derived into the floors"
+    );
+}
+
+/// LEGACY STACKING UNTOUCHED: a storey added without ever assigning a
+/// thickness keeps `floor_thickness_m = None`, and the datum stack is the
+/// byte-identical ceiling-height sum.
+#[test]
+fn legacy_none_thickness_keeps_ceiling_stacking_datums() {
+    let mut c = dimensioned_square_controller();
+    c.set_default_ceiling_height(2.4).unwrap();
+    c.add_storey().unwrap();
+    // The assessor never enters a thickness (old workflow): dismiss the flow
+    // and draw directly.
+    c.choose_draw_outline();
+    finalise_current_storey_as_square(&mut c, 6.0);
+    let ber = c.current_record.as_ref().unwrap().data.clone();
+    assert_eq!(ber.storeys[1].floor_thickness_m, None, "never stamped");
+    let datums = ber.storey_floor_datums();
+    let height = ber.storeys[0].ceiling_height_m.unwrap();
+    assert_eq!(datums.len(), 2);
+    assert_eq!(datums[0], 0.0);
+    assert_eq!(
+        datums[1], height,
+        "legacy stacking: BYTE-IDENTICAL to the below-ceiling height sum"
+    );
+}
+
+/// CONTROLLER-LEVEL FIXPOINT: accept a suggestion (seeded + canonicalized),
+/// reload, and a no-edit re-derive reproduces the identical floor split —
+/// the seeded pieces equal what the reload reconstructs (trap 1).
+#[test]
+fn accepted_suggestion_split_survives_reload_and_rederive() {
+    let mut c = stepped_ceiling_below_controller();
+    c.add_storey().unwrap();
+    c.assign_floor_thickness(0.3).unwrap();
+    c.choose_suggest_outlines().unwrap();
+    c.accept_suggestion().unwrap();
+    c.materialize();
+    let before = floor_level_areas(&c, 1);
+    assert_eq!(before.len(), 2);
+
+    let id = c.current_record.as_ref().unwrap().id.clone();
+    c.flush_if_dirty().unwrap();
+    c.open_ber(&id).expect("reopen");
+    assert!(
+        !c.inherited_seed_pending.contains(&1),
+        "finalised storey never retro-seeds"
+    );
+    // Session step regions rebuilt from the persisted levelled floors.
+    let session = c.step_regions.get(&1).expect("reconstructed on open");
+    assert_eq!(session.len(), 1);
+    assert!((session[0].level_m - 0.3).abs() < 1e-9);
+
+    // Re-derive without any edit → identical split.
+    c.mark_dirty().unwrap();
+    c.materialize();
+    let after = floor_level_areas(&c, 1);
+    assert_eq!(before.len(), after.len());
+    for ((bl, ba), (al, aa)) in before.iter().zip(&after) {
+        assert!(
+            (bl - al).abs() < 1e-9 && (ba - aa).abs() < 1e-4,
+            "floor fingerprint changed: ({bl}, {ba}) vs ({al}, {aa})"
+        );
+    }
 }

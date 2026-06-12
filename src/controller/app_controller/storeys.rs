@@ -38,6 +38,10 @@ impl AppController {
         self.review = None;
         self.pending_cut = None;
         self.pending_redraw = None;
+        // The new-storey flow (thickness/method/browse) belongs to the storey
+        // it was opened on — never carried across a switch. (The inherited-
+        // level SEED set stays: it's consumed at each storey's finalisation.)
+        self.pending_new_storey = None;
         // Pending phase/step cuts hold the OUTGOING storey's geometry — a pick
         // after the switch would graft it onto the new storey.
         self.pending_phase_cut = None;
@@ -142,6 +146,16 @@ impl AppController {
         // Fresh, empty editor — scale_set false so the first wall dimensioned on
         // the new storey calibrates its scale (independent of any prior storey).
         self.load_storey_into_editor(None);
+        // Open the NEW-STOREY flow (AFTER load_storey_into_editor — it clears
+        // the pending flow): the slab thickness is asked FIRST (never on
+        // storey 0), and the inherited floor levels seed when this storey's
+        // outline finalises (accept or drawn finalisation).
+        if new_idx > 0 {
+            self.pending_new_storey = Some(PendingNewStorey {
+                stage: NewStoreyStage::Thickness,
+            });
+            self.inherited_seed_pending.insert(new_idx);
+        }
         self.history.clear();
         self.redo.clear();
         Ok(())
@@ -162,6 +176,9 @@ impl AppController {
         // Any in-flight phase/step area belongs to the OUTGOING storey — abandon it.
         self.pending_phase_cut = None;
         self.pending_step_cut = None;
+        // So does an in-flight new-storey flow (`add_storey` re-opens it AFTER
+        // this call when it's the one loading).
+        self.pending_new_storey = None;
         // An in-flight ceiling-step line too (its coordinate is that storey's),
         // and an in-flight roof point / ridge for the same reason.
         self.pending_ceiling_step = None;

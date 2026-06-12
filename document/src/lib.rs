@@ -39,7 +39,7 @@ pub use phase::{phase_regions_from_floors, stamp_wall_phases, PhaseRegion};
 pub use position::{PositionOption, PositionPrompt, PositionPromptKind};
 pub use resolve::{ensure_storey_constructions, resolve_storey};
 pub use roof_point::{validate_roof_apex, validate_roof_ridge, validate_roof_ridge_extent};
-pub use step::{step_regions_from_floors, StepRegion};
+pub use step::{inherited_step_regions, step_regions_from_floors, StepRegion};
 
 use datatypes::ber::structural::WallExposure;
 use domain::points::Point2f32;
@@ -449,6 +449,43 @@ impl StoreyDoc {
         Ok((self.dimensioning.known_params.len(), active.len()))
     }
 
+    /// Adopt `ring` (world metres, open — no closing duplicate) as this
+    /// storey's FULLY-FINALISED outline: the accepted-suggestion path of the
+    /// new-storey flow. Mirrors the loaded-storey pattern
+    /// ([`StoreyDoc::from_storey`]): exact points via `from_clean_ring`, all
+    /// active params known, metre scale set — nothing left to dimension, no
+    /// carve, no collinearity questions. Replaces the outline slot AND the
+    /// live editing buffer (the outline becomes active), and clears the
+    /// transient cursors a buffer swap invalidates (pending arc, edit
+    /// cursor). Living areas / exposure are untouched (a fresh storey has
+    /// none). `Err` on a degenerate ring (< 3 vertices, or one the
+    /// parametric build rejects); the storey is then unchanged.
+    pub fn adopt_finalised_outline(&mut self, ring: &[Point2f32]) -> Result<(), String> {
+        if ring.len() < 3 {
+            return Err(format!(
+                "outline ring is degenerate ({} vertices)",
+                ring.len()
+            ));
+        }
+        let plan = FloorPlan::from_clean_ring(ring)
+            .map_err(|e| format!("outline ring rejected: {:?}", e))?;
+        let dimensioning = DimensionState {
+            known_params: plan.all_active_params(),
+            scale_set: true,
+            ..Default::default()
+        };
+        self.outline = ShapeSlot {
+            floor_plan: plan.clone(),
+            dimensioning: dimensioning.clone(),
+        };
+        self.active = ActiveShape::Outline;
+        self.floor_plan = plan;
+        self.dimensioning = dimensioning;
+        self.pending_arc = None;
+        self.edit_state = EditState::default();
+        Ok(())
+    }
+
     /// Build a `ShapeSlot` for a freshly-constructed sub-area `plan`: inherit the
     /// outline's metre scale, and pre-mark as KNOWN the parameters pinned to
     /// `boundary` (walls snapped onto it) so dimensioning only asks about the
@@ -561,6 +598,61 @@ mod tests {
         );
         // no pieces at all → None
         assert!(pick_piece_for_stroke(vec![], &stroke).is_none());
+    }
+
+    /// `adopt_finalised_outline` lands the ring as a FINALISED outline — the
+    /// from_storey pattern: metre scale set, every param known, no prompt to
+    /// come — with the live buffer mirroring the slot and the transient edit
+    /// cursor cleared. The resolve projection round-trips the ring exactly.
+    #[test]
+    fn adopt_finalised_outline_finalises_and_round_trips() {
+        let ring = [p(0., 0.), p(6., 0.), p(6., 4.), p(0., 4.)];
+        let mut doc = StoreyDoc::default();
+        doc.edit_state.dragging = true; // a stale cursor the adopt must drop
+        doc.adopt_finalised_outline(&ring)
+            .expect("clean ring adopts");
+
+        assert!(doc.dimensioning.scale_set, "metre scale inherited");
+        assert!(doc.outline.finalised(), "nothing left to dimension");
+        assert_eq!(
+            doc.dimensioning.known_params,
+            doc.floor_plan.all_active_params()
+        );
+        assert!(doc.dimensioning.current_prompt.is_none());
+        assert_eq!(doc.active, ActiveShape::Outline);
+        assert_eq!(
+            doc.outline.floor_plan.get_points(),
+            doc.floor_plan.get_points(),
+            "live buffer mirrors the outline slot"
+        );
+        assert!(!doc.edit_state.dragging, "edit cursor cleared");
+
+        // The resolve projection round-trips the adopted ring EXACTLY (the
+        // empty-step verbatim branch — no geo ops).
+        let mut ber = datatypes::ber::ber_struct::Ber::default();
+        ensure_storey_constructions(&mut ber, 0, &[]);
+        let storey = resolve_storey(&doc, &ber, 0, &[], &[], &[]);
+        let lists = storey.floors.to_vertex_lists();
+        assert_eq!(lists.len(), 1);
+        let expected: Vec<domain::points::Point2f64> =
+            ring.iter().copied().map(domain::points::to_f64).collect();
+        assert_eq!(lists[0], expected, "resolved floor is the ring verbatim");
+    }
+
+    /// A degenerate ring is rejected with `Err` and the storey is unchanged.
+    #[test]
+    fn adopt_finalised_outline_rejects_degenerate_rings() {
+        let mut doc = StoreyDoc::default();
+        doc.adopt_finalised_outline(&[p(0., 0.), p(6., 0.), p(6., 4.), p(0., 4.)])
+            .unwrap();
+        let before = doc.floor_plan.get_points();
+        assert!(
+            doc.adopt_finalised_outline(&[p(0., 0.), p(1., 0.)])
+                .is_err(),
+            "< 3 vertices is degenerate"
+        );
+        assert_eq!(doc.floor_plan.get_points(), before, "storey unchanged");
+        assert!(doc.dimensioning.scale_set, "previous adoption intact");
     }
 
     /// An active `StepArea` round-trips through `step_shape`: `begin_step_area`

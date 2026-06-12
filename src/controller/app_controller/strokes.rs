@@ -127,6 +127,12 @@ impl AppController {
             };
             match edit_tool {
                 EditTools::DrawPerpWalls => {
+                    // New-storey flow gating: while the slab THICKNESS is
+                    // pending the stroke is ignored; in ChooseMethod/Browse
+                    // the stroke is an implicit choose_draw_outline.
+                    if self.new_storey_blocks_outline_stroke() {
+                        return Ok(());
+                    }
                     // Drawing the primary outline.
                     if self.document.floor_plan.ring_count() > 0 {
                         // A plan already exists — don't silently overwrite.
@@ -289,6 +295,14 @@ impl AppController {
                 .map(|(x, y)| Point2f32::new(*x, *y))
                 .collect::<Vec<_>>(),
         );
+        // New-storey flow gating (same as the pixel path): while the slab
+        // THICKNESS is pending the stroke is ignored — but still drained from
+        // the engine so it doesn't linger; in ChooseMethod/Browse the stroke
+        // is an implicit choose_draw_outline and applies normally.
+        if self.new_storey_blocks_outline_stroke() {
+            let _ = self.sketch_engine.take_stroke_raw();
+            return;
+        }
         // Run the engine's pixel-based close-check to learn whether the user
         // closed the loop; the pixel points themselves are discarded in favour
         // of the world points the UI already converted.
@@ -349,7 +363,13 @@ impl AppController {
             active.saturating_sub(pinned),
         );
         self.push_history_snapshot(undo_snap);
-        self.commit_review_redimension()
+        self.commit_review_redimension()?;
+        // A fully-pinned carve (every wall shared with the storey below) is
+        // finalised right here — the seed point for the inherited floor
+        // levels (no-op while walls remain to dimension; those seed from the
+        // dimensioning tails instead).
+        self.maybe_seed_inherited_levels();
+        Ok(())
     }
 
     /// Apply an AddDetachedSection stroke: append a ring (or replace if

@@ -470,6 +470,9 @@ impl AppController {
         self.warn_if_non_orthogonal("dimension");
         self.mark_dirty()?;
         self.push_history_snapshot(undo_snap);
+        // This dimension may have FINALISED a drawn upper-storey outline —
+        // the seed point for its inherited floor levels (no-op otherwise).
+        self.maybe_seed_inherited_levels();
         Ok(())
     }
 
@@ -478,6 +481,8 @@ impl AppController {
     pub fn skip_current_dimension(&mut self) {
         self.record_history();
         self.document.skip_current_dimension();
+        // Skipping the last promptable wall finalises the outline too.
+        self.maybe_seed_inherited_levels();
     }
 
     /// Recompute `current_prompt` based on which params are still unknown — see

@@ -56,6 +56,7 @@ use sketch::SketchEngine;
 use std::collections::{HashMap, HashSet};
 
 mod history;
+mod new_storey;
 mod persistence;
 mod review;
 mod roof_points;
@@ -74,6 +75,10 @@ pub use editing::{
     WallPositions,
 };
 pub use history::HistorySnapshot;
+// Slice D wires the UI consumer; until then the re-export is "unused".
+#[allow(unused_imports)]
+pub use new_storey::NewStoreyPromptUiData;
+use new_storey::{NewStoreyStage, PendingNewStorey};
 #[cfg(test)]
 use persistence::PARAMETRIC_SNAPSHOT_VERSION;
 pub use review::CollinearityReview;
@@ -206,6 +211,17 @@ pub struct AppController {
     /// `pending_roof_point` is. The DURABLE record is the same
     /// `Storey::roof_apexes`; see `roof_ridges.rs`.
     pending_roof_ridge: Option<PendingRoofRidge>,
+    /// The in-flight NEW-STOREY flow (thickness → method choice → suggestion
+    /// browse). Controller-transient — OUTSIDE undo, never persisted; set by
+    /// `add_storey`, cleared on storey switch / load / open / exit. See
+    /// `new_storey.rs`.
+    pending_new_storey: Option<PendingNewStorey>,
+    /// Upper storeys (idx > 0) whose INHERITED floor levels haven't been
+    /// seeded yet — the drawn-path seed fires when the storey's outline
+    /// FINALISES. Inserted by `add_storey`; re-derived on open/restore as
+    /// {idx > 0 with an un-finalised outline} (restart-safe); consumed at
+    /// seed; cleared on `exit_ber`. See `new_storey.rs`.
+    inherited_seed_pending: HashSet<usize>,
     /// DEBUG: the splice-pipeline phases (#1 raw stroke … #4 spliced ring) from
     /// the last extend/trim, captured for the UI's coloured debug overlay.
     splice_debug: Vec<manip_2d_plan::SplicePhase>,
@@ -281,6 +297,8 @@ impl AppController {
             roof_point_mode: false,
             pending_roof_point: None,
             pending_roof_ridge: None,
+            pending_new_storey: None,
+            inherited_seed_pending: HashSet::new(),
             splice_debug: Vec::new(),
             revision: 0,
             saved_revision: 0,

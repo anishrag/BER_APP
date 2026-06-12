@@ -122,6 +122,8 @@ impl AppController {
         self.sketch_engine = SketchEngine::new();
         self.review = None;
         self.pending_redraw = None;
+        self.pending_new_storey = None;
+        self.inherited_seed_pending.clear();
         self.living_area_mode = false;
         self.exposure_mode = false;
         self.selected_exposure_wall = None;
@@ -211,6 +213,12 @@ impl AppController {
         // can't hold) from the snapshot; falls back silently to the rebuild above
         // if it's missing or from an incompatible version.
         self.try_restore_snapshot(id);
+        // RESTART-SAFE drawn-path seeding: re-derive which upper storeys still
+        // await their inherited floor levels ({idx > 0, outline un-finalised}
+        // — the snapshot above decides which outlines those are). The
+        // new-storey FLOW itself is not restored (`load_storey_into_editor`
+        // cleared it); only the seed transition survives.
+        self.rederive_inherited_seed_pending();
         let idx = self.current_storey_idx.unwrap_or(0);
         // Phase + step + ceiling-step areas are session-only — rebuild them
         // from the loaded storey's tagged/levelled floor regions (and stepped
@@ -311,6 +319,9 @@ impl AppController {
         self.current_storey_idx = Some(0);
         self.load_storey_into_editor(record.data.storeys.first());
         self.current_record = Some(record);
+        // Same restart-safe re-derivation as open_ber (a single-storey
+        // checkpoint just yields the empty set).
+        self.rederive_inherited_seed_pending();
         self.phase_regions.clear();
         self.reconstruct_phase_regions_for(0);
         self.step_regions.clear();
