@@ -65,9 +65,15 @@ pub struct Tuning {
     pub subarea: manip_2d_plan::SubareaTuning,
 }
 
+/// Shipped defaults, embedded at compile time. The repo-root file IS the
+/// shipped file (the test below guards it against drifting from the struct
+/// defaults), so on platforms with no cwd file — Android — the app still
+/// gets the tuned values.
+const EMBEDDED_TUNING: &str = include_str!("../tuning.yaml");
+
 impl Tuning {
-    /// Load from `$BER_TUNING` (or `./tuning.yaml`). Missing or invalid → all
-    /// defaults, with a note on stderr.
+    /// Load from `$BER_TUNING`, else `./tuning.yaml`, else the embedded copy.
+    /// An invalid file → all defaults, with a logged note.
     pub fn load() -> Self {
         let path = std::env::var("BER_TUNING").unwrap_or_else(|_| "tuning.yaml".to_string());
         match std::fs::read_to_string(&path) {
@@ -81,7 +87,15 @@ impl Tuning {
                     Self::default()
                 }
             },
-            Err(_) => Self::default(),
+            Err(_) => match serde_yaml::from_str::<Tuning>(EMBEDDED_TUNING) {
+                Ok(t) => t,
+                Err(e) => {
+                    // Unreachable in practice: the test below keeps the
+                    // embedded file parseable.
+                    log::error!("[tuning] embedded defaults: parse error ({e}); using defaults");
+                    Self::default()
+                }
+            },
         }
     }
 }
