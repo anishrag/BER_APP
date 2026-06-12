@@ -14,9 +14,11 @@ use super::structural::{
     ring_to_poly, split_to_simple, strip_collinear, Storey, RISER_Z_EPS_M, SLIVER_AREA_M2,
 };
 
-/// Candidate rings below this plan area (m²) are rejected by the pipeline —
-/// anything under ~2 m × 2 m is geometry noise, not a storey outline.
-pub const MIN_SUGGESTION_AREA_M2: f64 = 4.0;
+/// Candidate rings below this plan area (m²) are rejected by the pipeline.
+/// This floor exists to kill SLIVERS (boolean-noise fragments), not small
+/// rooms — anything under ~0.7 m × 0.7 m is geometry noise, but a small
+/// flat ceiling is still a legitimate storey to build on.
+pub const MIN_SUGGESTION_AREA_M2: f64 = 0.5;
 
 /// Scoring weights (per the approved spec these live in code, not
 /// `tuning.yaml`). The score B/C consume — higher is better:
@@ -598,6 +600,63 @@ mod tests {
         assert_eq!(out[0].levels, 1);
         // Full coverage + full compactness, no penalties.
         assert!((out[0].score - 1.5).abs() < 1e-9);
+    }
+
+    /// THE LIVE-REPRO REGRESSION: a SMALL storey below (1 m² flat ceiling
+    /// at 2.4 m plus a 0.0875 m² pavilion flat top at 4.0 m) still gets
+    /// the obvious 1 m² suggestion — [`MIN_SUGGESTION_AREA_M2`] kills
+    /// slivers, not rooms. The sub-floor 4.0 m top alone stays filtered.
+    #[test]
+    fn small_storey_still_yields_the_obvious_suggestion() {
+        let cid = ItemId::default();
+        let ring = square(0.7728, 0.7387, 1.7728, 1.7387);
+        let mut roofs = CeilingRegions::default_for_footprint(vec![ring.clone()], 2.4, cid);
+        roofs.regions.extend(
+            CeilingRegions::default_for_footprint(
+                vec![square(1.0978, 1.1137, 1.4478, 1.3637)],
+                4.0,
+                cid,
+            )
+            .regions,
+        );
+        let below = Storey {
+            floors: FloorRegions::new(ring, cid),
+            roofs,
+            ceiling_height_m: Some(2.4),
+            ..Storey::default()
+        };
+        assert!(has_suggestion_inputs(&below));
+        let out = suggest_storey_outlines(&below, 10);
+        assert!(!out.is_empty(), "the 1 m² storey suggests");
+        assert!(
+            (out[0].area_m2 - 1.0).abs() < 1e-4,
+            "the full 1 m² square ranks first (got {})",
+            out[0].area_m2
+        );
+        assert!(
+            out.iter().all(|s| s.area_m2 >= MIN_SUGGESTION_AREA_M2),
+            "the 0.0875 m² top alone stays filtered: {out:?}"
+        );
+    }
+
+    /// A TRUE sliver below ([`MIN_SUGGESTION_AREA_M2`] is the floor) still
+    /// yields no suggestions even though the inputs are present — the
+    /// caller's "too small" message path is reachable.
+    #[test]
+    fn sub_floor_flat_areas_are_still_filtered() {
+        let cid = ItemId::default();
+        let ring = square(0.0, 0.0, 0.6, 0.6); // 0.36 m² < the 0.5 floor
+        let below = Storey {
+            floors: FloorRegions::new(ring.clone(), cid),
+            roofs: CeilingRegions::default_for_footprint(vec![ring], 2.4, cid),
+            ceiling_height_m: Some(2.4),
+            ..Storey::default()
+        };
+        assert!(
+            has_suggestion_inputs(&below),
+            "inputs present — only the area floor filters"
+        );
+        assert!(suggest_storey_outlines(&below, 10).is_empty());
     }
 
     #[test]

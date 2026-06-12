@@ -147,12 +147,17 @@ impl AppController {
     /// `Err` when there's nothing to suggest from (storey 0, no storey
     /// below, or the below storey has no ceiling height / flat ceiling area
     /// — the UI gates the button on [`new_storey_prompt`]'s `can_suggest`,
-    /// but the method defends too).
+    /// but the method defends too), and a DISTINCT stable `Err` when the
+    /// inputs are there but every candidate was filtered (the flat ceiling
+    /// areas below are all under the suggestion engine's sliver floor).
     ///
     /// [`new_storey_prompt`]: AppController::new_storey_prompt
     pub fn choose_suggest_outlines(&mut self) -> Result<(), String> {
         const NO_SUGGESTIONS: &str = "No outline suggestions available — the storey below \
              needs its ceiling height set and a flat ceiling area. Draw the outline instead.";
+        const ALL_FILTERED: &str = "No outline suggestions available — the flat ceiling \
+             areas of the storey below are too small to build a storey on. Draw the outline \
+             instead.";
         let Some(idx) = self.current_storey_idx else {
             return Err("no storey selected".into());
         };
@@ -166,7 +171,17 @@ impl AppController {
             .ok_or(NO_SUGGESTIONS)?;
         let suggestions = suggest_storey_outlines(below, MAX_OUTLINE_SUGGESTIONS);
         if suggestions.is_empty() {
-            return Err(NO_SUGGESTIONS.into());
+            // Attribute the emptiness honestly: with the inputs present
+            // (ceiling height + footprint + a flat ceiling area —
+            // `has_suggestion_inputs`), the engine filtered every candidate
+            // (too small / degenerate); without them, it never had anything
+            // to work from.
+            return Err(if has_suggestion_inputs(below) {
+                ALL_FILTERED
+            } else {
+                NO_SUGGESTIONS
+            }
+            .into());
         }
         println!(
             "[new-storey] {} outline suggestion(s) from storey {}: {:?}",

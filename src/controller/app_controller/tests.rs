@@ -6587,6 +6587,50 @@ fn choose_suggest_without_flat_ceilings_below_is_a_stable_err() {
         err.contains("Draw the outline instead"),
         "stable, actionable message: {err}"
     );
+    assert!(
+        err.contains("ceiling height"),
+        "the no-inputs cause is named: {err}"
+    );
+    // The flow stays at the method choice — drawing still works.
+    assert!(c.new_storey_prompt().unwrap().method_pending);
+}
+
+/// `choose_suggest_outlines` attributes an EMPTY result honestly: when the
+/// storey below HAS its ceiling height and a flat ceiling area but every
+/// candidate is under the suggestion engine's sliver floor, the error says
+/// the areas are TOO SMALL — not that the height / flat area are missing.
+#[test]
+fn choose_suggest_with_only_sliver_flat_areas_says_too_small() {
+    use datatypes::ber::structural::{CeilingRegions, FloorRegions};
+    let mut c = dimensioned_square_controller();
+    c.set_default_ceiling_height(2.4).unwrap();
+    c.add_storey().unwrap();
+    c.assign_floor_thickness(0.3).unwrap();
+    // Shrink the storey below's resolved geometry to a true sliver
+    // (0.6 × 0.6 m = 0.36 m²): the suggestion inputs are present, but every
+    // candidate falls under the engine's area floor.
+    {
+        let record = c.current_record.as_mut().unwrap();
+        let below = &mut record.data.storeys[0];
+        let ring = vec![
+            Point2f64::new(0.0, 0.0),
+            Point2f64::new(0.6, 0.0),
+            Point2f64::new(0.6, 0.6),
+            Point2f64::new(0.0, 0.6),
+        ];
+        below.floors = FloorRegions::new(ring.clone(), Default::default());
+        below.roofs = CeilingRegions::default_for_footprint(vec![ring], 2.4, Default::default());
+    }
+    assert!(
+        c.new_storey_prompt().unwrap().can_suggest,
+        "the cheap input gate still holds — only the area floor filters"
+    );
+    let err = c.choose_suggest_outlines().expect_err("all filtered");
+    assert!(err.contains("too small"), "honest cause: {err}");
+    assert!(
+        err.contains("Draw the outline instead"),
+        "still actionable: {err}"
+    );
     // The flow stays at the method choice — drawing still works.
     assert!(c.new_storey_prompt().unwrap().method_pending);
 }
