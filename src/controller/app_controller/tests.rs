@@ -1234,7 +1234,7 @@ fn delete_living_area_removes_it() {
 /// Tapping a wall in exposure mode selects it (whole-wall selection);
 /// assigning a type stores a full-length section AND derives a BER
 /// `WallRegion` (vertical plane, default ceiling height) of that exposure.
-/// Unmarked walls default to `Exposed`.
+/// Unmarked walls derive `Unset` regions — present, just not classified.
 #[test]
 fn marking_a_wall_sets_exposure_and_derives_a_ber_wall() {
     let mut c = dimensioned_square_controller();
@@ -1255,13 +1255,31 @@ fn marking_a_wall_sets_exposure_and_derives_a_ber_wall() {
     assert_eq!(secs.len(), 1);
     assert_eq!(secs[0].exposure, WallExposure::SemiExposed);
 
-    // Only the MARKED wall derives a region — un-marked walls produce none.
+    // The FULL perimeter derives: the marked wall carries its exposure, the
+    // three unmarked walls come through as Unset regions.
     c.materialize(); // edits defer the derive; bring current_record current
     let storey = &c.current_record.as_ref().unwrap().data.storeys[0];
-    assert_eq!(storey.walls.regions.len(), 1, "only the marked wall");
-    let _ = walls;
-    let w0 = &storey.walls.regions[0];
-    assert_eq!(w0.exposure, WallExposure::SemiExposed);
+    assert_eq!(
+        storey.walls.regions.len(),
+        walls.len(),
+        "every wall derives"
+    );
+    assert_eq!(
+        storey
+            .walls
+            .regions
+            .iter()
+            .filter(|r| r.exposure == WallExposure::Unset)
+            .count(),
+        walls.len() - 1,
+        "unmarked walls are Unset"
+    );
+    let w0 = storey
+        .walls
+        .regions
+        .iter()
+        .find(|r| r.exposure == WallExposure::SemiExposed)
+        .expect("the marked wall's region");
     assert_eq!(w0.polygon.exterior.len(), 4, "vertical plane = 4 vertices");
     assert!(w0.polygon.exterior.iter().any(|q| q.z == 0.0));
     // 2.4 = document::resolve::PROVISIONAL_WALL_EXTRUSION_M (pub(crate) there):
@@ -1270,8 +1288,8 @@ fn marking_a_wall_sets_exposure_and_derives_a_ber_wall() {
 }
 
 /// A section over PART of a wall derives several regions: the marked range
-/// plus the un-marked remainder as Exposed, sub-segment lengths summing to
-/// the wall length.
+/// plus the un-marked remainder as Unset gaps, sub-segment lengths summing
+/// to the wall length.
 #[test]
 fn mid_wall_section_splits_into_multiple_regions() {
     let mut c = dimensioned_square_controller();
@@ -1285,27 +1303,27 @@ fn mid_wall_section_splits_into_multiple_regions() {
     // Mark the middle [0.2L, 0.5L] semi-exposed (typed-range path).
     c.set_exposure_section_range(len * 0.2, len * 0.5);
     c.set_wall_exposure(WallExposure::SemiExposed);
-    // The wall is materialized into 3 explicit sections: Exposed, Semi,
-    // Exposed (the leftovers become their own sections).
+    // ONLY the painted section is stored — the leftovers stay unset (they
+    // exist as Unset ranges in the derived coverage, never as sections).
     let secs = c
         .document
         .wall_sections
         .get(&vid0)
         .expect("wall0 has sections");
-    assert_eq!(secs.len(), 3);
-    assert_eq!(secs[0].exposure, WallExposure::Exposed);
-    assert_eq!(secs[1].exposure, WallExposure::SemiExposed);
-    assert_eq!(secs[2].exposure, WallExposure::Exposed);
+    assert_eq!(secs.len(), 1);
+    assert_eq!(secs[0].exposure, WallExposure::SemiExposed);
 
-    // wall0 is derived first → its 3 sub-regions are regions[0..3].
+    // wall0 is derived first → its 3 coverage ranges (Unset gap, the mark,
+    // Unset gap) are regions[0..3]; the other 3 walls follow as whole-wall
+    // Unset regions.
     c.materialize(); // edits defer the derive; bring current_record current
     let r = &c.current_record.as_ref().unwrap().data.storeys[0]
         .walls
         .regions;
-    assert!(r.len() >= 3);
-    assert_eq!(r[0].exposure, WallExposure::Exposed);
+    assert_eq!(r.len(), 6);
+    assert_eq!(r[0].exposure, WallExposure::Unset);
     assert_eq!(r[1].exposure, WallExposure::SemiExposed);
-    assert_eq!(r[2].exposure, WallExposure::Exposed);
+    assert_eq!(r[2].exposure, WallExposure::Unset);
     let base = |reg: &datatypes::ber::structural::WallRegion| {
         let e = &reg.polygon.exterior;
         ((e[1].x - e[0].x).powi(2) + (e[1].y - e[0].y).powi(2)).sqrt()
@@ -1936,44 +1954,49 @@ fn split_wall_sections_reconstruct_on_reload() {
     c.set_exposure_mode(true);
     c.exposure_pointer_down(mid.0 as f64, mid.1 as f64, 0.5);
     c.set_exposure_section_range(len * 0.2, len * 0.5);
-    c.set_wall_exposure(WallExposure::SemiExposed); // → 3 sections
+    c.set_wall_exposure(WallExposure::SemiExposed); // → 1 painted section
 
     c.materialize(); // edits defer the derive; bring current_record current
     let storey = c.current_record.as_ref().unwrap().data.storeys[0].clone();
     c.document.wall_sections.clear();
     c.load_storey_into_editor(Some(&storey));
+    // Only the PAINTED section comes back: the Unset gap regions around it
+    // (and the whole-wall Unset regions) recover to no sections at all —
+    // exactly the in-session state (single representation, no canonicalize).
     assert_eq!(
         c.document.wall_sections.len(),
         1,
         "one split wall reconstructed"
     );
     let secs = c.document.wall_sections.values().next().unwrap();
-    assert_eq!(secs.len(), 3);
-    assert_eq!(secs[0].exposure, WallExposure::Exposed);
-    assert_eq!(secs[1].exposure, WallExposure::SemiExposed);
-    assert_eq!(secs[2].exposure, WallExposure::Exposed);
+    assert_eq!(secs.len(), 1);
+    assert_eq!(secs[0].exposure, WallExposure::SemiExposed);
     assert!(
-        (secs[1].start_m - len * 0.2).abs() < 0.02,
+        (secs[0].start_m - len * 0.2).abs() < 0.02,
         "{}",
-        secs[1].start_m
+        secs[0].start_m
     );
     assert!(
-        (secs[1].end_m - len * 0.5).abs() < 0.02,
+        (secs[0].end_m - len * 0.5).abs() < 0.02,
         "{}",
-        secs[1].end_m
+        secs[0].end_m
     );
 }
 
-/// "Set remaining → Exposed" fills only walls with no sections yet, leaving
-/// already-marked walls (semi/non) untouched.
+/// "Set remaining → Exposed" paints every UNSET coverage range: whole
+/// unmarked walls AND the unset gaps around painted sections, leaving the
+/// painted sections (semi/non) untouched.
 #[test]
-fn set_all_remaining_fills_only_unset_walls() {
+fn set_all_remaining_fills_unset_walls_and_gaps() {
     let mut c = dimensioned_square_controller();
     let walls = c.document.outline.floor_plan.perimeter_walls();
     let (vid0, a0, b0) = walls[0];
     let mid = ((a0.x + b0.x) * 0.5, (a0.y + b0.y) * 0.5);
+    let len = ((b0.x - a0.x).powi(2) + (b0.y - a0.y).powi(2)).sqrt();
+    // Mark only the MIDDLE of wall0 — its two ends stay unset gaps.
     c.set_exposure_mode(true);
     c.exposure_pointer_down(mid.0 as f64, mid.1 as f64, 0.5);
+    c.set_exposure_section_range(len * 0.2, len * 0.5);
     c.set_wall_exposure(WallExposure::SemiExposed);
 
     c.set_all_remaining_exposed();
@@ -1982,11 +2005,14 @@ fn set_all_remaining_fills_only_unset_walls() {
         walls.len(),
         "every wall now set"
     );
-    assert_eq!(
-        c.document.wall_sections.get(&vid0).map(|s| s[0].exposure),
-        Some(WallExposure::SemiExposed),
-        "the marked wall keeps its type"
-    );
+    // Wall0: the mark survives, its two unset GAPS were painted Exposed
+    // (mandatory for the post-reload case, where gaps are the only Unset
+    // representation).
+    let secs = c.document.wall_sections.get(&vid0).unwrap();
+    assert_eq!(secs.len(), 3, "gap + mark + gap, all explicit now");
+    assert_eq!(secs[0].exposure, WallExposure::Exposed);
+    assert_eq!(secs[1].exposure, WallExposure::SemiExposed);
+    assert_eq!(secs[2].exposure, WallExposure::Exposed);
     for (vid, _, _) in &walls {
         if *vid != vid0 {
             assert_eq!(

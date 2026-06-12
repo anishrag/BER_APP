@@ -5,8 +5,9 @@
 //! A wall can carry several exposure SECTIONS along its length (each a range in
 //! metres from the wall's start vertex). Each section is an independent,
 //! single-exposure piece — at the BER layer a wall splits into one `WallRegion`
-//! per section (never a fused multi-exposure region). Un-marked length defaults
-//! to `Exposed` (the envelope assumption). Exposure is keyed by each wall's
+//! per coverage range (never a fused multi-exposure region). Un-marked length
+//! is genuinely `Unset` — it derives an `Unset` region (drawn grey) rather
+//! than being assumed `Exposed`. Exposure is keyed by each wall's
 //! stable start `VertexId`, lives on the OUTLINE only (living-area interior
 //! walls aren't envelope/heat-loss elements), and is derived into BER
 //! `WallRegions` on commit (see `commit_to_ber`).
@@ -185,11 +186,11 @@ impl AppController {
         self.exposure_sel = Some((start_m.clamp(0.0, len), end_m.clamp(0.0, len)));
     }
 
-    /// Paint the current selection range on the selected wall with `exposure`,
-    /// then materialize the WHOLE wall into explicit sections — any leftover
-    /// length around the mark becomes its own `Exposed` section. So marking a
-    /// range inside a wall splits it into N explicit sections (and N
-    /// `WallRegion`s on commit). Undoable; persists immediately.
+    /// Paint the current selection range on the selected wall with `exposure`.
+    /// Only the painted section is stored — leftover length around the mark
+    /// stays unset (it derives `Unset` `WallRegion`s on commit, so a partly
+    /// marked wall still splits into one region per coverage range). Undoable;
+    /// persists immediately.
     pub fn set_wall_exposure(&mut self, exposure: WallExposure) {
         let Some(vid) = self.selected_exposure_wall else {
             return;
@@ -206,8 +207,8 @@ impl AppController {
         self.push_history_snapshot(undo_snap);
     }
 
-    /// Remove all exposure sections from the selected wall (it reverts to the
-    /// default Exposed assumption). Undoable; persists immediately.
+    /// Remove all exposure sections from the selected wall (it reverts to
+    /// unset). Undoable; persists immediately.
     pub fn clear_wall_exposure(&mut self) {
         let Some(vid) = self.selected_exposure_wall else {
             return;
@@ -221,9 +222,10 @@ impl AppController {
         self.push_history_snapshot(undo_snap);
     }
 
-    /// Mark every outline wall with no sections yet as fully `Exposed` (one
-    /// full-length section). Walls that already carry sections are untouched.
-    /// Undoable; persists immediately. No-op if nothing changes.
+    /// Paint every unset coverage range on the outline `Exposed` — whole
+    /// unmarked walls and the unset gaps around painted sections. Painted
+    /// sections themselves are untouched. Undoable; persists immediately.
+    /// No-op if nothing changes.
     pub fn set_all_remaining_exposed(&mut self) {
         self.sync_active();
         let undo_snap = self.current_history_snapshot();

@@ -871,7 +871,8 @@ fn roof_point_toolbar<F: FnMut(UiEvent)>(
 /// Wall-exposure mode toolbar. With a wall selected: a section selection
 /// `start–end` (live with the drag handles) plus typed start/end inputs, the
 /// three type buttons that paint the current selection, and "Clear wall".
-/// Always: "Set remaining → Exposed" bulk-marks every still-unset wall.
+/// Always: "Set remaining → Exposed" bulk-marks every still-unset coverage
+/// range — whole unmarked walls and the unset gaps around painted sections.
 fn exposure_toolbar<F: FnMut(UiEvent)>(
     ui: &mut egui::Ui,
     walls: &[crate::controller::app_controller::WallExposureView],
@@ -880,7 +881,16 @@ fn exposure_toolbar<F: FnMut(UiEvent)>(
     end_input: &mut String,
     on_event: &mut F,
 ) {
-    let unset = walls.iter().filter(|w| w.sections.is_empty()).count();
+    // Count walls with ANY unset coverage (no sections at all, or unset gaps
+    // around painted sections) — the same ranges SetAllRemainingExposed paints.
+    let unset = walls
+        .iter()
+        .filter(|w| {
+            document::wall_coverage(w.length_m, &w.sections)
+                .iter()
+                .any(|(_, _, e)| *e == WallExposure::Unset)
+        })
+        .count();
     ui.horizontal(|ui| {
         if let Some(sel) = selection {
             let (lo, hi) = (sel.start_m.min(sel.end_m), sel.start_m.max(sel.end_m));
@@ -931,7 +941,11 @@ fn exposure_toolbar<F: FnMut(UiEvent)>(
                     WallExposure::NonHeatLoss,
                 )));
             }
-            if ui.button("Clear wall").clicked() {
+            if ui
+                .button("Clear wall")
+                .on_hover_text("Remove this wall's marks — back to unset")
+                .clicked()
+            {
                 on_event(UiEvent::Sketch(SketchEvent::ClearWallExposure));
             }
         } else {

@@ -917,16 +917,17 @@ pub fn render_wall_exposure(
     let exposed = style::EXPOSED_WALL;
     let semi = style::SEMI_EXPOSED_WALL;
     let non = style::NON_HEAT_LOSS_WALL;
-    let grey = egui::Color32::from_rgb(150, 150, 150);
+    let grey = style::UNSET_WALL;
     let width = if exposure_mode { 5.0 } else { 3.5 };
     let color_of = |e: WallExposure| match e {
         WallExposure::Exposed => exposed,
         WallExposure::SemiExposed => semi,
         WallExposure::NonHeatLoss => non,
-        // Slice B wires real handling (Unset coverage segments + a Ground
-        // style); no section carries these yet — sections hold painted
-        // exposures only.
-        WallExposure::Unset | WallExposure::Ground => grey,
+        // Sections store PAINTED exposures only: Unset is derived coverage
+        // and Ground belongs to derived riser walls, so neither reaches a
+        // section — but the match stays exhaustive.
+        WallExposure::Unset => grey,
+        WallExposure::Ground => style::GROUND_WALL,
     };
     // Point at distance `d` (metres) along wall a→b of length `len`, in screen.
     let along = |a: (f64, f64), b: (f64, f64), len: f32, d: f32| {
@@ -1113,6 +1114,10 @@ pub(crate) mod style {
     pub const EXPOSED_WALL: Color32 = Color32::from_rgb(255, 140, 40);
     pub const SEMI_EXPOSED_WALL: Color32 = Color32::from_rgb(240, 205, 40);
     pub const NON_HEAT_LOSS_WALL: Color32 = Color32::from_rgb(95, 145, 215);
+    /// Walls with no exposure marked yet — neutral grey in both views.
+    pub const UNSET_WALL: Color32 = Color32::from_rgb(150, 150, 150);
+    /// Ground-contact walls (floor-step risers) — earth tone.
+    pub const GROUND_WALL: Color32 = Color32::from_rgb(150, 105, 60);
     pub const WINDOW_FILL: Color32 = Color32::from_rgba_premultiplied(130, 200, 230, 180);
     pub const DOOR_FILL: Color32 = Color32::from_rgba_premultiplied(180, 130, 80, 200);
     pub const DIMENSION_TEXT: Color32 = Color32::from_rgb(200, 200, 200);

@@ -61,11 +61,14 @@ pub fn resolve_storey(
         .map(|ring| ring.into_iter().map(to_f64).collect())
         .collect();
 
-    // The marked heat-loss wall segments (one per exposure section of each
-    // marked wall). ONLY marked walls become regions; an un-marked wall stays
-    // "unset" (and `WallRegions` is the single source of truth, so that
-    // distinction survives reload). Each is extruded below to the storey's
-    // ceiling height, or `PROVISIONAL_WALL_EXTRUSION_M` until it's entered.
+    // The wall coverage segments over the FULL perimeter: one per coverage
+    // range of each wall — painted sections plus `Unset` gaps, a whole-wall
+    // `Unset` segment for an unmarked wall. EVERY wall becomes a region
+    // (`Unset` included), so unmarked walls render and trace the roof like
+    // marked ones; the unpainted state still survives reload because recovery
+    // (`sections_from_wall_regions`) skips `Unset` regions instead of turning
+    // them back into sections. Each is extruded below to the storey's ceiling
+    // height, or `PROVISIONAL_WALL_EXTRUSION_M` until it's entered.
     let wall_segments = s.wall_exposure_segments();
 
     // Resolved living-area polygons (each slot is current after sync_active).
@@ -220,7 +223,8 @@ pub fn resolve_storey(
         storey.floors = std::mem::take(&mut storey.floors).with_levels(&step_areas);
     }
     storey.living_areas = FloorRegions::from_vertex_lists(living_area_lists, floor_cid);
-    // Re-derive walls from exposure (empty when nothing is marked):
+    // Re-derive walls from the full-perimeter coverage (one region per
+    // coverage range — `Unset` ranges included):
     // `WallRegions::regenerate` traces each wall's TOP along the derived roof
     // profile just set above — piecewise-linear over flat pieces and fan
     // triangles, a vertical jump where a ceiling step crosses the wall — and
@@ -269,8 +273,10 @@ mod tests {
     use manip_2d_plan::FloorPlan;
 
     /// Golden projection: a finalised 4×4 m square outline with one wall marked
-    /// SemiExposed projects to one floor region (exact ring round-trip), one
-    /// wall region carrying the mark, no living areas.
+    /// SemiExposed projects to one floor region (exact ring round-trip), FOUR
+    /// wall regions — the marked wall carrying its exposure plus one Unset
+    /// region per unmarked wall (the full perimeter resolves) — and no living
+    /// areas.
     #[test]
     fn golden_projection_of_a_square_storey() {
         let pts = vec![
@@ -303,15 +309,20 @@ mod tests {
             .iter()
             .any(|p| (p.x - 4.0).abs() < 1e-9 && (p.y - 4.0).abs() < 1e-9));
 
-        // Walls: only the marked wall becomes a region, carrying its exposure
-        // and reaching the provisional extrusion (no ceiling height set yet).
-        assert_eq!(storey.walls.regions.len(), 1);
-        assert_eq!(storey.walls.regions[0].exposure, WallExposure::SemiExposed);
-        assert!(storey.walls.regions[0]
+        // Walls: the FULL perimeter resolves — the marked wall carries its
+        // exposure, the three unmarked walls come out Unset; every region
+        // reaches the provisional extrusion (no ceiling height set yet).
+        // Select by EXPOSURE, not index: region order is a derivation detail.
+        assert_eq!(storey.walls.regions.len(), 4);
+        let by_exposure =
+            |e: WallExposure| storey.walls.regions.iter().filter(move |r| r.exposure == e);
+        assert_eq!(by_exposure(WallExposure::SemiExposed).count(), 1);
+        assert_eq!(by_exposure(WallExposure::Unset).count(), 3);
+        assert!(storey.walls.regions.iter().all(|r| r
             .polygon
             .exterior
             .iter()
-            .any(|q| (q.z - PROVISIONAL_WALL_EXTRUSION_M).abs() < 1e-9));
+            .any(|q| (q.z - PROVISIONAL_WALL_EXTRUSION_M).abs() < 1e-9)));
         // No ceiling height set → roofs stay untouched (empty default).
         assert!(storey.roofs.regions.is_empty());
 
@@ -472,12 +483,15 @@ mod tests {
             .ceiling_construction_id(Default::default(), Default::default(), Default::default())
             .unwrap();
         assert_eq!(roof.construction_id, ceiling_cid);
-        // Walls extrude to the set height, not the provisional placeholder.
-        assert!(storey.walls.regions[0]
+        // Walls extrude to the set height, not the provisional placeholder —
+        // the full perimeter (the Exposed mark + 3 Unset walls), so unmarked
+        // walls reach the roof too.
+        assert_eq!(storey.walls.regions.len(), 4);
+        assert!(storey.walls.regions.iter().all(|r| r
             .polygon
             .exterior
             .iter()
-            .any(|q| (q.z - 2.7).abs() < 1e-9));
+            .any(|q| (q.z - 2.7).abs() < 1e-9)));
     }
 
     /// Ceiling height unset → roofs untouched (whatever the stored storey had)
@@ -511,11 +525,11 @@ mod tests {
 
         assert_eq!(storey.roofs.regions.len(), 1);
         assert!((storey.roofs.regions[0].polygon.exterior[0].z - 9.9).abs() < 1e-9);
-        assert!(storey.walls.regions[0]
+        assert!(storey.walls.regions.iter().all(|r| r
             .polygon
             .exterior
             .iter()
-            .any(|q| (q.z - PROVISIONAL_WALL_EXTRUSION_M).abs() < 1e-9));
+            .any(|q| (q.z - PROVISIONAL_WALL_EXTRUSION_M).abs() < 1e-9)));
     }
 
     /// Re-resolving after an outline change re-derives the roofs to the new
@@ -1054,11 +1068,11 @@ mod tests {
         }];
         let storey = resolve_storey(&doc, &ber, 0, &[], &[], &[]);
         assert!(storey.roofs.regions.is_empty(), "no height → no roofs");
-        assert!(storey.walls.regions[0]
+        assert!(storey.walls.regions.iter().all(|r| r
             .polygon
             .exterior
             .iter()
-            .any(|q| (q.z - PROVISIONAL_WALL_EXTRUSION_M).abs() < 1e-9));
+            .any(|q| (q.z - PROVISIONAL_WALL_EXTRUSION_M).abs() < 1e-9)));
     }
 
     /// An apex the outline shrank away from goes DORMANT: warn-skipped by
@@ -1098,12 +1112,24 @@ mod tests {
 
         ber.storeys[0] = resolve_storey(&doc, &ber, 0, &[], &[], &[]);
         assert_eq!(ber.storeys[0].roofs.regions.len(), 1);
-        let wall0 = &ber.storeys[0].walls.regions[0];
+        // The full perimeter resolves (the marked wall + 3 Unset) — select
+        // the marked wall by EXPOSURE, not index.
+        assert_eq!(ber.storeys[0].walls.regions.len(), 4);
+        let marked_idx = ber.storeys[0]
+            .walls
+            .regions
+            .iter()
+            .position(|r| r.exposure == WallExposure::Exposed)
+            .unwrap();
+        let wall0 = &ber.storeys[0].walls.regions[marked_idx];
         assert_eq!(wall0.polygon.exterior.len(), 4, "flat top: a quad");
         let (id0, cid0) = (wall0.id, wall0.construction_id);
         // Hang a door on the wall — an amend must not orphan it.
         let door_id = ItemId::default();
-        ber.storeys[0].walls.regions[0].opes.doors.push(door_id);
+        ber.storeys[0].walls.regions[marked_idx]
+            .opes
+            .doors
+            .push(door_id);
 
         // A step at x = 2 (+0.3) crosses every horizontal wall → re-resolve.
         let step = doc
@@ -1116,8 +1142,13 @@ mod tests {
             .unwrap();
         let storey2 = resolve_storey(&doc, &ber, 0, &[], &[], &[step]);
 
-        assert_eq!(storey2.walls.regions.len(), 1);
-        let wall = &storey2.walls.regions[0];
+        assert_eq!(storey2.walls.regions.len(), 4);
+        let wall = storey2
+            .walls
+            .regions
+            .iter()
+            .find(|r| r.exposure == WallExposure::Exposed)
+            .unwrap();
         assert_eq!(wall.id, id0, "same base edge → same wall (amend)");
         assert_eq!(wall.construction_id, cid0);
         assert_eq!(wall.opes.doors, vec![door_id], "openings survive");
@@ -1155,9 +1186,16 @@ mod tests {
         ensure_storey_constructions(&mut ber, 0, &[]);
         ber.set_default_ceiling_height(Some(0), 2.4);
 
-        // Flat resolve first — capture the wall's identity.
+        // Flat resolve first — capture the marked wall's identity (the full
+        // perimeter resolves; select by exposure, not index).
         ber.storeys[0] = resolve_storey(&doc, &ber, 0, &[], &[], &[]);
-        let id0 = ber.storeys[0].walls.regions[0].id;
+        let id0 = ber.storeys[0]
+            .walls
+            .regions
+            .iter()
+            .find(|r| r.exposure == WallExposure::Exposed)
+            .unwrap()
+            .id;
 
         // A ridge along x = 2 (apexes (2,1) and (2,3) at 4.2) → re-resolve.
         for y in [1.0, 3.0] {
@@ -1170,8 +1208,13 @@ mod tests {
             );
         }
         let storey = resolve_storey(&doc, &ber, 0, &[], &[], &[]);
-        assert_eq!(storey.walls.regions.len(), 1);
-        let wall = &storey.walls.regions[0];
+        assert_eq!(storey.walls.regions.len(), 4);
+        let wall = storey
+            .walls
+            .regions
+            .iter()
+            .find(|r| r.exposure == WallExposure::Exposed)
+            .unwrap();
         assert_eq!(wall.id, id0, "same base edge → same wall (amend)");
         // The marked wall is on the footprint boundary: every roof triangle
         // meets it along an eaves edge at the base height — flat top (hip).
@@ -1600,7 +1643,8 @@ mod tests {
 
     /// Exposure recovery round-trips SLOPED-TOP walls: the base edge stays at
     /// `exterior[0..2]` whatever the top does, so `sections_from_wall_regions`
-    /// reads back exactly the painted sections.
+    /// reads back exactly the painted sections — and the Unset regions (the
+    /// gaps + the unmarked walls) recover to NO sections at all.
     #[test]
     fn sections_from_wall_regions_round_trips_sloped_top_walls() {
         let mut doc = square_doc(&[
@@ -1611,7 +1655,8 @@ mod tests {
         ]);
         let (vid, a, b) = doc.outline.floor_plan.perimeter_walls()[0];
         let len = manip_2d_plan::segment_len(a, b);
-        // Paint the middle SemiExposed → three sections on one wall.
+        // Paint the middle SemiExposed → ONE stored section; the rest of the
+        // wall is Unset coverage (single representation).
         doc.set_wall_section(vid, 1.0, 3.0, len, WallExposure::SemiExposed);
         let mut ber = Ber::default();
         ensure_storey_constructions(&mut ber, 0, &[]);
@@ -1632,7 +1677,18 @@ mod tests {
             .unwrap();
         let storey = resolve_storey(&doc, &ber, 0, &[], &[], &[step]);
 
-        assert_eq!(storey.walls.regions.len(), 3, "one region per section");
+        // One region per coverage range: gap/Semi/gap on the painted wall +
+        // one whole-wall Unset region for each of the three unmarked walls.
+        assert_eq!(storey.walls.regions.len(), 6);
+        assert_eq!(
+            storey
+                .walls
+                .regions
+                .iter()
+                .filter(|r| r.exposure == WallExposure::Unset)
+                .count(),
+            5
+        );
         assert!(
             storey
                 .walls
@@ -1642,9 +1698,14 @@ mod tests {
             "at least one top is genuinely non-flat"
         );
         let recovered = doc.sections_from_wall_regions(&storey.walls);
-        assert_eq!(recovered.len(), 1, "all on the one painted wall");
+        assert_eq!(
+            recovered.len(),
+            1,
+            "only the painted wall recovers — Unset regions yield NO sections"
+        );
         let secs = &recovered[&vid];
         let expected = &doc.wall_sections[&vid];
+        assert_eq!(expected.len(), 1, "only the paint is stored");
         assert_eq!(secs.len(), expected.len());
         for (got, want) in secs.iter().zip(expected) {
             assert!((got.start_m - want.start_m).abs() < 1e-3);

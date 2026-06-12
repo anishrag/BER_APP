@@ -10,12 +10,12 @@
 //! - each roof region at its own per-vertex z (ceiling steps as offset rings,
 //!   fans/ridges as sloped faces);
 //! - each WALL REGION's real polygon — sloped/jumped tops tracing the roof —
-//!   coloured by its exposure class (the 2D scheme). Walls exist only where
-//!   exposure is marked, so a faint single-band volume hint (every floor ring
-//!   extruded from the LOWEST floor level to the default ceiling height) stays
-//!   underneath for the unmarked remainder; it fades further when real wall
-//!   regions exist so they read clearly. Riser walls between stepped sections
-//!   are deliberately not derived — deferred work.
+//!   coloured by its exposure class (the 2D scheme). EVERY perimeter wall
+//!   resolves to a region now (unmarked walls come through as `Unset`, drawn
+//!   grey), so the walls themselves carry the building's volume and Unset
+//!   walls genuinely follow raised/ridged roofs — the old faint volume-hint
+//!   band is gone. Riser walls between stepped sections are deliberately not
+//!   derived yet — deferred work.
 //!
 //! The default ceiling height comes from `storey.ceiling_height_m` — the
 //! controller's first-3D gate guarantees it's set before this view is
@@ -57,7 +57,8 @@ pub fn render(
 }
 
 /// The lowest floor level in the storey (metres relative to its datum) — the
-/// bottom of the wall band. `0.0` when there are no floor regions.
+/// bottom of the storey's vertical extent for view fitting. `0.0` when there
+/// are no floor regions.
 fn min_floor_level(storey: &Storey) -> f64 {
     storey
         .floors
@@ -86,21 +87,14 @@ pub(crate) fn render_at_z_offset(
     let Some(height) = storey.ceiling_height_m else {
         return;
     };
-    let wall_bottom = z_offset + min_floor_level(storey);
     let wall_top = z_offset + height;
-    // The band is only a volume hint; once REAL wall regions exist it fades
-    // further so the exposure-coloured walls read on top of it.
-    let band_faded = !storey.walls.regions.is_empty();
     for region in &storey.floors.regions {
         draw_floor_region(
             painter,
             t,
             region,
             z_offset + region.level_m,
-            wall_bottom,
-            wall_top,
             display_mode,
-            band_faded,
             view,
         );
     }
@@ -140,10 +134,11 @@ pub(crate) fn render_at_z_offset(
 }
 
 /// Projected (post-projection, at `view`'s orbit angles) 2D bounding box of
-/// every point in this storey: each floor region's ring at the wall band's
-/// bottom/top AND at its own `level_m`, plus every roof vertex at its own z —
-/// so lowered floors, raised ceilings, and any orbit angle never clip. `None`
-/// when there's no geometry or no ceiling height to extrude to.
+/// every point in this storey: each floor region's ring at the storey's
+/// lowest level and default ceiling height AND at its own `level_m`, plus
+/// every roof vertex at its own z — so lowered floors, raised ceilings, and
+/// any orbit angle never clip. `None` when there's no geometry or no ceiling
+/// height to extrude to.
 pub(crate) fn projected_bb_for_storey(
     storey: &Storey,
     z_offset: f64,
@@ -187,59 +182,30 @@ pub(crate) fn projected_bb_for_storey(
     bb
 }
 
-/// One floor region: wall quads spanning the shared band (`wall_bottom` →
-/// `wall_top` — the volume hint; faded further when `band_faded`, i.e. real
-/// wall regions exist) plus the floor outline at the region's own level
-/// (`floor_z`), so floor steps read as offset rings.
-#[allow(clippy::too_many_arguments)]
+/// One floor region's outline at its own level (`floor_z`), so floor steps
+/// read as offset rings. The building's vertical extent is carried by the
+/// wall regions themselves (every wall resolves, Unset included) — no volume
+/// band is drawn here.
 fn draw_floor_region(
     painter: &egui::Painter,
     t: &Transform2d,
     region: &FloorRegion,
     floor_z: f64,
-    wall_bottom: f64,
-    wall_top: f64,
     display_mode: DisplayMode,
-    band_faded: bool,
     view: ViewParams,
 ) {
-    let exterior: Vec<_> = region.polygon.exterior().coords().cloned().collect();
-    if exterior.len() < 4 {
+    let floor_pts: Vec<egui::Pos2> = region
+        .polygon
+        .exterior()
+        .coords()
+        .map(|c| {
+            let (px, py) = view.project_3d(c.x, c.y, floor_z);
+            t.apply(px, py)
+        })
+        .collect();
+    if floor_pts.len() < 4 {
         return;
     }
-
-    let ring_at = |z: f64| -> Vec<egui::Pos2> {
-        exterior
-            .iter()
-            .map(|c| {
-                let (px, py) = view.project_3d(c.x, c.y, z);
-                t.apply(px, py)
-            })
-            .collect()
-    };
-    let bottom_pts = ring_at(wall_bottom);
-    let top_pts = ring_at(wall_top);
-
-    // Walls: a quad per edge, from (bottom[i], bottom[i+1], top[i+1], top[i]).
-    let band_color = color_for(DisplayMode::Walls, display_mode, style::WALL_LINE);
-    let wall_stroke = if band_faded {
-        egui::Stroke::new(1.0, style::faded(band_color))
-    } else {
-        egui::Stroke::new(1.5, band_color)
-    };
-    for i in 0..(exterior.len() - 1) {
-        let quad = vec![bottom_pts[i], bottom_pts[i + 1], top_pts[i + 1], top_pts[i]];
-        painter.add(egui::Shape::closed_line(quad, wall_stroke));
-    }
-
-    // Floor outline at the region's own level (slightly thicker so it reads
-    // as the base). Reuse the bottom ring when the region sits on the band's
-    // floor — the common, un-stepped case.
-    let floor_pts = if floor_z == wall_bottom {
-        bottom_pts
-    } else {
-        ring_at(floor_z)
-    };
     let floor_color = color_for(DisplayMode::Floors, display_mode, style::FLOOR_LINE);
     painter.add(egui::Shape::closed_line(
         floor_pts,
@@ -250,7 +216,7 @@ fn draw_floor_region(
 /// One WALL region's real polygon (base edge at the bottom, top tracing the
 /// roof — jumps at ceiling steps, slopes under fans/ridges), coloured by its
 /// exposure class with the shared 2D scheme so a wall reads the same in both
-/// views. Heavier stroke than the volume-hint band so marked walls dominate.
+/// views. Unset walls draw grey — present, just not classified yet.
 fn draw_wall_region(
     painter: &egui::Painter,
     t: &Transform2d,
@@ -275,9 +241,8 @@ fn draw_wall_region(
         WallExposure::Exposed => style::EXPOSED_WALL,
         WallExposure::SemiExposed => style::SEMI_EXPOSED_WALL,
         WallExposure::NonHeatLoss => style::NON_HEAT_LOSS_WALL,
-        // Slices B/C wire real handling (style::UNSET_WALL / GROUND_WALL);
-        // no resolved region carries these exposures yet.
-        WallExposure::Unset | WallExposure::Ground => egui::Color32::from_rgb(150, 150, 150),
+        WallExposure::Unset => style::UNSET_WALL,
+        WallExposure::Ground => style::GROUND_WALL,
     };
     let color = color_for(DisplayMode::Walls, display_mode, base);
     painter.add(egui::Shape::closed_line(pts, egui::Stroke::new(2.0, color)));

@@ -61,9 +61,11 @@ fn paint_section(
 }
 
 /// Full coverage of a wall of length `len` as `(start, end, exposure)` ranges:
-/// the set sections in order, with every gap (and the whole wall when there are
-/// no sections) filled with `Exposed`. Used to derive one BER `WallRegion` per
-/// range (called by the shell's `commit_to_ber`).
+/// the painted sections in order, with every gap (and the whole wall when
+/// nothing is painted) filled with `Unset` — unmarked length is genuinely
+/// unset, never assumed `Exposed`. `Unset` is DERIVED coverage only: it never
+/// enters the stored sections (single-representation rule). Used to derive one
+/// BER `WallRegion` per range (via [`StoreyDoc::wall_exposure_segments`]).
 pub fn wall_coverage(len: f32, sections: &[ExposureSection]) -> Vec<(f32, f32, WallExposure)> {
     let mut out: Vec<(f32, f32, WallExposure)> = Vec::new();
     let mut cursor = 0.0_f32;
@@ -71,7 +73,7 @@ pub fn wall_coverage(len: f32, sections: &[ExposureSection]) -> Vec<(f32, f32, W
         let s = sec.start_m.clamp(0.0, len);
         let e = sec.end_m.clamp(0.0, len);
         if s > cursor + 1e-4 {
-            out.push((cursor, s, WallExposure::Exposed)); // gap before this section
+            out.push((cursor, s, WallExposure::Unset)); // gap before this section
         }
         if e > s + 1e-4 {
             out.push((s, e, sec.exposure));
@@ -79,10 +81,10 @@ pub fn wall_coverage(len: f32, sections: &[ExposureSection]) -> Vec<(f32, f32, W
         }
     }
     if cursor < len - 1e-4 {
-        out.push((cursor, len, WallExposure::Exposed)); // trailing gap
+        out.push((cursor, len, WallExposure::Unset)); // trailing gap
     }
     if out.is_empty() {
-        out.push((0.0, len, WallExposure::Exposed)); // no sections → all exposed
+        out.push((0.0, len, WallExposure::Unset)); // nothing painted → all unset
     }
     out
 }
@@ -100,9 +102,11 @@ pub fn range_at(len: f32, sections: &[ExposureSection], d: f32) -> (f32, f32) {
 }
 
 impl StoreyDoc {
-    /// Paint a section `[start, end]` (the wall's length is `len`) with `exposure`
-    /// onto outline wall `vid`, then fill the gaps so the wall is fully
-    /// partitioned into explicit sections.
+    /// Paint a section `[start, end]` (clamped to the wall's length `len`) with
+    /// `exposure` onto outline wall `vid`. ONLY painted sections are stored —
+    /// unmarked length never materializes into sections; it shows up as `Unset`
+    /// in the derived coverage instead (single-representation rule: the
+    /// in-session model equals the post-reload one with no canonicalize pass).
     pub fn set_wall_section(
         &mut self,
         vid: VertexId,
@@ -112,15 +116,12 @@ impl StoreyDoc {
         exposure: WallExposure,
     ) {
         let sections = self.wall_sections.entry(vid).or_default();
-        paint_section(sections, start, end, exposure);
-        *sections = wall_coverage(len, sections)
-            .into_iter()
-            .map(|(start_m, end_m, exposure)| ExposureSection {
-                start_m,
-                end_m,
-                exposure,
-            })
-            .collect();
+        paint_section(
+            sections,
+            start.clamp(0.0, len),
+            end.clamp(0.0, len),
+            exposure,
+        );
     }
 
     /// Remove all exposure sections from outline wall `vid`.
@@ -128,21 +129,24 @@ impl StoreyDoc {
         self.wall_sections.remove(&vid);
     }
 
-    /// This storey's marked heat-loss wall SEGMENTS: each MARKED outline wall,
-    /// split into its exposure sections, as `(start, end, exposure)` in world
-    /// coords (endpoints interpolated along the wall by distance). An un-marked
-    /// wall yields nothing — it stays "unset". The shell projects these into BER
-    /// `WallRegion`s.
+    /// This storey's heat-loss wall SEGMENTS over the FULL perimeter: every
+    /// outline wall split into its coverage ranges — painted sections plus
+    /// `Unset` gaps, an unmarked wall yielding one full-length `Unset` segment
+    /// — as `(start, end, exposure)` in world coords (endpoints interpolated
+    /// along the wall by distance). The shell projects these into BER
+    /// `WallRegion`s, so every wall exists in the resolved geometry whether
+    /// it's been marked or not.
     pub fn wall_exposure_segments(&self) -> Vec<(Point2f64, Point2f64, WallExposure)> {
         self.outline
             .floor_plan
             .perimeter_walls()
             .into_iter()
             .flat_map(|(vid, a, b)| {
-                let sections = match self.wall_sections.get(&vid) {
-                    Some(s) if !s.is_empty() => s,
-                    _ => return Vec::new(), // un-marked wall → no segment
-                };
+                let sections = self
+                    .wall_sections
+                    .get(&vid)
+                    .map(Vec::as_slice)
+                    .unwrap_or(&[]);
                 let len = ((b.x - a.x).powi(2) + (b.y - a.y).powi(2)).sqrt();
                 let lerp = move |d: f32| {
                     let t = if len > 1e-6 { d / len } else { 0.0 };
@@ -162,8 +166,12 @@ impl StoreyDoc {
     /// Rebuild the runtime section model from the persisted `WallRegions` (the
     /// source of truth) on load. Each region's base edge is projected onto the
     /// perimeter wall it lies on to recover its `(start_m, end_m, exposure)`;
-    /// regions are grouped by wall and sorted. Walls with no region are absent
-    /// (unset). Inverse of the commit-time derivation.
+    /// regions are grouped by wall and sorted. `Unset` and `Ground` regions are
+    /// SKIPPED: `Unset` is derived coverage (recovering it would mark every
+    /// wall after one save/load) and `Ground` belongs to derived riser walls
+    /// (recovering it would turn risers into phantom painted sections) —
+    /// neither was painted, so neither comes back as a section. Inverse of the
+    /// commit-time derivation.
     pub fn sections_from_wall_regions(
         &self,
         walls: &WallRegions,
@@ -171,6 +179,9 @@ impl StoreyDoc {
         let perim = self.outline.floor_plan.perimeter_walls();
         let mut out: HashMap<VertexId, Vec<ExposureSection>> = HashMap::new();
         for region in &walls.regions {
+            if matches!(region.exposure, WallExposure::Unset | WallExposure::Ground) {
+                continue; // derived, not painted — never recovers to sections
+            }
             let ext = &region.polygon.exterior;
             if ext.len() < 2 {
                 continue;
@@ -209,31 +220,32 @@ impl StoreyDoc {
         out
     }
 
-    /// Mark every outline wall that has no sections set as fully `Exposed`.
-    /// Returns whether anything changed (so the shell can skip undo/persist).
+    /// Paint every `Unset` coverage RANGE on the outline `Exposed` — whole
+    /// unmarked walls AND the gaps around painted sections (the gap case is
+    /// what makes this work after a reload, where gaps are the only `Unset`
+    /// representation). Returns whether anything changed (so the shell can
+    /// skip undo/persist).
     pub fn set_all_remaining_exposed(&mut self) -> bool {
-        let unset: Vec<(VertexId, f32)> = self
-            .outline
-            .floor_plan
-            .perimeter_walls()
+        let mut changed = false;
+        for (vid, a, b) in self.outline.floor_plan.perimeter_walls() {
+            let len = segment_len(a, b);
+            let unset: Vec<(f32, f32)> = wall_coverage(
+                len,
+                self.wall_sections
+                    .get(&vid)
+                    .map(Vec::as_slice)
+                    .unwrap_or(&[]),
+            )
             .into_iter()
-            .filter(|(vid, _, _)| self.wall_sections.get(vid).map_or(true, |s| s.is_empty()))
-            .map(|(vid, a, b)| (vid, ((a.x - b.x).powi(2) + (a.y - b.y).powi(2)).sqrt()))
+            .filter(|(s, e, exp)| *exp == WallExposure::Unset && e - s > 1e-4)
+            .map(|(s, e, _)| (s, e))
             .collect();
-        if unset.is_empty() {
-            return false;
+            for (s, e) in unset {
+                self.set_wall_section(vid, s, e, len, WallExposure::Exposed);
+                changed = true;
+            }
         }
-        for (vid, len) in unset {
-            self.wall_sections.insert(
-                vid,
-                vec![ExposureSection {
-                    start_m: 0.0,
-                    end_m: len,
-                    exposure: WallExposure::Exposed,
-                }],
-            );
-        }
-        true
+        changed
     }
 }
 
@@ -281,24 +293,131 @@ mod tests {
     }
 
     #[test]
-    fn coverage_fills_gaps_with_exposed() {
+    fn coverage_fills_gaps_with_unset() {
         let s = vec![sec(2.0, 3.0, WallExposure::SemiExposed)];
         let cov = wall_coverage(5.0, &s);
         assert_eq!(
             cov,
             vec![
-                (0.0, 2.0, WallExposure::Exposed),
+                (0.0, 2.0, WallExposure::Unset),
                 (2.0, 3.0, WallExposure::SemiExposed),
-                (3.0, 5.0, WallExposure::Exposed),
+                (3.0, 5.0, WallExposure::Unset),
             ]
         );
     }
 
     #[test]
-    fn coverage_of_no_sections_is_all_exposed() {
+    fn coverage_of_no_sections_is_all_unset() {
         assert_eq!(
             wall_coverage(4.0, &[]),
-            vec![(0.0, 4.0, WallExposure::Exposed)]
+            vec![(0.0, 4.0, WallExposure::Unset)]
         );
+    }
+
+    /// A finalised 4×4 m square StoreyDoc for the model-level tests below.
+    fn square_doc() -> crate::StoreyDoc {
+        use domain::points::Point2f32;
+        let pts = vec![
+            Point2f32::new(0.0, 0.0),
+            Point2f32::new(4.0, 0.0),
+            Point2f32::new(4.0, 4.0),
+            Point2f32::new(0.0, 4.0),
+        ];
+        let plan = manip_2d_plan::FloorPlan::from_clean_ring(&pts).unwrap();
+        let mut doc = crate::StoreyDoc::default();
+        doc.dimensioning.scale_set = true;
+        doc.floor_plan = plan.clone();
+        doc.outline = crate::ShapeSlot {
+            floor_plan: plan,
+            dimensioning: doc.dimensioning.clone(),
+        };
+        doc
+    }
+
+    /// SINGLE-REPRESENTATION RULE: painting part of a wall stores ONLY the
+    /// painted section — the gaps are never materialized into sections; they
+    /// exist only as `Unset` ranges in the derived coverage.
+    #[test]
+    fn set_wall_section_stores_only_painted_sections() {
+        let mut doc = square_doc();
+        let (vid, a, b) = doc.outline.floor_plan.perimeter_walls()[0];
+        let len = segment_len(a, b);
+        doc.set_wall_section(vid, 1.0, 3.0, len, WallExposure::SemiExposed);
+
+        let secs = &doc.wall_sections[&vid];
+        assert_eq!(secs, &vec![sec(1.0, 3.0, WallExposure::SemiExposed)]);
+        assert_eq!(
+            wall_coverage(len, secs),
+            vec![
+                (0.0, 1.0, WallExposure::Unset),
+                (1.0, 3.0, WallExposure::SemiExposed),
+                (3.0, len, WallExposure::Unset),
+            ]
+        );
+    }
+
+    /// `wall_exposure_segments` covers the FULL perimeter: unmarked walls
+    /// yield one full-length `Unset` segment; a partially marked wall yields
+    /// its painted section plus `Unset` gaps.
+    #[test]
+    fn wall_exposure_segments_cover_the_full_perimeter() {
+        let mut doc = square_doc();
+        // Nothing painted → one Unset segment per wall, tiling the perimeter.
+        let segs = doc.wall_exposure_segments();
+        assert_eq!(segs.len(), 4);
+        assert!(segs.iter().all(|(_, _, e)| *e == WallExposure::Unset));
+        let total: f64 = segs
+            .iter()
+            .map(|(a, b, _)| ((b.x - a.x).powi(2) + (b.y - a.y).powi(2)).sqrt())
+            .sum();
+        assert!((total - 16.0).abs() < 1e-6, "tiles the 4×4 perimeter");
+
+        // Paint the middle of wall0 → its segment splits into gap/mark/gap.
+        let (vid, a, b) = doc.outline.floor_plan.perimeter_walls()[0];
+        let len = segment_len(a, b);
+        doc.set_wall_section(vid, 1.0, 3.0, len, WallExposure::SemiExposed);
+        let segs = doc.wall_exposure_segments();
+        assert_eq!(segs.len(), 6, "3 ranges on wall0 + 1 per other wall");
+        assert_eq!(
+            segs.iter()
+                .filter(|(_, _, e)| *e == WallExposure::SemiExposed)
+                .count(),
+            1
+        );
+        assert_eq!(
+            segs.iter()
+                .filter(|(_, _, e)| *e == WallExposure::Unset)
+                .count(),
+            5
+        );
+    }
+
+    /// "Set remaining → Exposed" paints every Unset coverage range: whole
+    /// unmarked walls AND the gaps around painted sections. Idempotent.
+    #[test]
+    fn set_all_remaining_exposed_paints_unset_walls_and_gaps() {
+        let mut doc = square_doc();
+        let (vid, a, b) = doc.outline.floor_plan.perimeter_walls()[0];
+        let len = segment_len(a, b);
+        doc.set_wall_section(vid, 1.0, 3.0, len, WallExposure::SemiExposed);
+
+        assert!(doc.set_all_remaining_exposed(), "something to paint");
+        // Wall0: the mark survives, its two gaps are now explicit Exposed.
+        let secs = &doc.wall_sections[&vid];
+        assert_eq!(secs.len(), 3);
+        assert_eq!(secs[0], sec(0.0, 1.0, WallExposure::Exposed));
+        assert_eq!(secs[1], sec(1.0, 3.0, WallExposure::SemiExposed));
+        assert_eq!(secs[2], sec(3.0, len, WallExposure::Exposed));
+        // Other walls: one full-length Exposed section each.
+        for (v, a, b) in doc.outline.floor_plan.perimeter_walls() {
+            if v == vid {
+                continue;
+            }
+            let secs = &doc.wall_sections[&v];
+            assert_eq!(secs.len(), 1);
+            assert_eq!(secs[0], sec(0.0, segment_len(a, b), WallExposure::Exposed));
+        }
+        // Nothing Unset remains → a second pass changes nothing.
+        assert!(!doc.set_all_remaining_exposed(), "idempotent");
     }
 }
