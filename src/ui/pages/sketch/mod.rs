@@ -19,8 +19,8 @@ use egui::epaint::PathStroke;
 use egui::Pos2;
 
 use crate::controller::app_controller::{
-    DimensionPromptUiData, EditDragPromptUiData, ExposureSelection, PositionPromptUiData,
-    RiserView, SnapTagView, VertexDropPromptUiData, WallExposureView,
+    DimensionPromptUiData, EditDragPromptUiData, ExposureSelection, NewStoreyPromptUiData,
+    PositionPromptUiData, RiserView, SnapTagView, VertexDropPromptUiData, WallExposureView,
 };
 use crate::ui::pages::events::UiEvent;
 use crate::ui::render::ViewParams;
@@ -352,6 +352,26 @@ pub enum SketchEvent {
     /// Append a fresh empty storey and switch the editor onto it (method 2:
     /// the previous storey is shown as a watermark while the new one is drawn).
     AddStorey,
+    /// New-storey flow: the user answered the THICKNESS question — the
+    /// floor-slab thickness to the storey below (metres). Stamps the durable
+    /// value and advances the flow to the method choice.
+    AssignFloorThickness(f64),
+    /// Heights-category re-edit of the floor-slab thickness (storey ≥ 1).
+    /// Same stamp as `AssignFloorThickness` but never touches the flow stage.
+    SetFloorThickness(f64),
+    /// New-storey flow: the user chose to DRAW the outline (also emitted by
+    /// the Browse stage's "Draw instead" button).
+    ChooseDrawOutline,
+    /// New-storey flow: the user chose to browse SUGGESTED outlines derived
+    /// from the storey below.
+    ChooseSuggestOutlines,
+    /// Browse stage: advance to the next suggestion (wraps).
+    NextSuggestion,
+    /// Browse stage: go back to the previous suggestion (wraps).
+    PrevSuggestion,
+    /// Browse stage: accept the current suggestion as the storey's
+    /// fully-finalised outline (no review, no dimension prompts).
+    AcceptSuggestion,
 }
 
 /// Everything the Sketch page needs for one frame, built by the app shell
@@ -493,6 +513,23 @@ pub struct SketchView<'a> {
     pub ceiling_height_error: Option<&'a str>,
     pub default_ceiling_height: Option<f64>,
     pub ceiling_heights_set: bool,
+    /// The new-storey flow's prompt (thickness → method choice → suggestion
+    /// browse), rendered as the prompt dock's TOP-priority toolbar; while
+    /// browsing, the canvas tints the current suggestion's ring over the
+    /// previous-storey watermark. `None` when no flow is in progress.
+    pub new_storey_prompt: Option<NewStoreyPromptUiData>,
+    /// Backing string for the flow's thickness input (prefilled "0.30" when
+    /// the Thickness stage opens — the one-shot guard lives on `SketchState`).
+    pub new_storey_thickness_input: &'a mut String,
+    /// Last error from the new-storey flow's toolbar (thickness assign,
+    /// suggest, accept), shown inline in it.
+    pub new_storey_error: Option<&'a str>,
+    /// The current storey's floor-slab thickness for the Heights field's
+    /// "0.30 m" display (`None` on storey 0 / the All tab / unset). The
+    /// field's input buffer lives on `cat_state`.
+    pub floor_thickness: Option<f64>,
+    /// Last error from the Heights thickness field's Set, shown inline.
+    pub floor_thickness_error: Option<&'a str>,
     pub edit_selected_wall: Option<((f64, f64), (f64, f64))>,
     pub edit_selected_vertex: Option<(f64, f64)>,
     pub edit_drag_prompt: Option<EditDragPromptUiData>,

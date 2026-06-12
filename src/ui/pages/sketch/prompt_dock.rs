@@ -8,8 +8,8 @@
 
 use super::{SketchEvent, SketchView};
 use crate::controller::app_controller::{
-    DimensionPromptUiData, EditDragPromptUiData, ExposureSelection, PositionPromptUiData,
-    VertexDropPromptUiData,
+    DimensionPromptUiData, EditDragPromptUiData, ExposureSelection, NewStoreyPromptUiData,
+    PositionPromptUiData, VertexDropPromptUiData,
 };
 use crate::ui::pages::events::UiEvent;
 use datatypes::ber::common::ConstructionPhase;
@@ -19,6 +19,7 @@ use datatypes::ber::structural::WallExposure;
 /// panel is skipped entirely so the canvas gets the space.
 pub(super) fn has_content(view: &SketchView<'_>) -> bool {
     view.current_storey_idx.is_none()
+        || view.new_storey_prompt.is_some()
         || view.pending_redraw
         || view.curve_bulge.is_some()
         || view.dim_prompt.is_some()
@@ -39,11 +40,14 @@ pub(super) fn has_content(view: &SketchView<'_>) -> bool {
 }
 
 /// Render the dock. Priority of the prompt chain: read-only notice >
-/// pending redraw > curve radius > dimension prompt > position prompt >
-/// edit-drag prompt > vertex-drop prompt > collinearity review > exposure
-/// controls. The phase / step / ceiling-step flow toolbars render ALONGSIDE
-/// the chain (as before): e.g. a position prompt can be up while a step
-/// amount is still pending.
+/// new-storey flow > pending redraw > curve radius > dimension prompt >
+/// position prompt > edit-drag prompt > vertex-drop prompt > collinearity
+/// review > exposure controls. The new-storey flow sits at the TOP: it only
+/// exists on a fresh upper storey, where none of the others can coexist
+/// (notably not `pending_redraw` — the flow precedes any stroke). The
+/// phase / step / ceiling-step flow toolbars render ALONGSIDE the chain
+/// (as before): e.g. a position prompt can be up while a step amount is
+/// still pending.
 pub(super) fn render<F: FnMut(UiEvent)>(
     ui: &mut egui::Ui,
     view: &mut SketchView<'_>,
@@ -57,7 +61,15 @@ pub(super) fn render<F: FnMut(UiEvent)>(
             );
             return;
         }
-        if view.pending_redraw {
+        if let Some(p) = &view.new_storey_prompt {
+            new_storey_toolbar(
+                ui,
+                p,
+                view.new_storey_thickness_input,
+                view.new_storey_error,
+                on_event,
+            );
+        } else if view.pending_redraw {
             pending_redraw_toolbar(ui, on_event);
         } else if let Some(bulge) = view.curve_bulge {
             curve_radius_toolbar(ui, bulge, on_event);
@@ -475,6 +487,121 @@ fn curve_radius_toolbar<F: FnMut(UiEvent)>(ui: &mut egui::Ui, bulge: f32, on_eve
     {
         on_event(UiEvent::Sketch(SketchEvent::CommitCurve));
     }
+}
+
+/// The NEW-STOREY flow toolbar, stage by stage:
+///
+/// - **Thickness**: the slab-thickness question asked FIRST on a fresh upper
+///   storey — input (arrives prefilled "0.30") + Set + "Use 0.30" (= submit
+///   the default), plus the hint that drawing stays paused until it lands
+///   (the controller ignores outline strokes during this stage).
+/// - **ChooseMethod**: "Draw outline" vs "Suggest outlines" (the latter
+///   gated on `can_suggest` — the storey below needs its ceiling height and
+///   a flat ceiling area). A canvas stroke is an implicit "Draw outline".
+/// - **Browse**: the current suggestion's label, ◀ ▶ cycling with a "2/5"
+///   count, Accept (adopts it fully finalised — no review, no prompts), and
+///   "Draw instead". The canvas tints the suggestion's ring meanwhile.
+fn new_storey_toolbar<F: FnMut(UiEvent)>(
+    ui: &mut egui::Ui,
+    prompt: &NewStoreyPromptUiData,
+    thickness_input: &mut String,
+    error: Option<&str>,
+    on_event: &mut F,
+) {
+    if prompt.thickness_pending {
+        ui.label(
+            egui::RichText::new("Floor thickness to the storey below (m):")
+                .strong()
+                .color(egui::Color32::from_rgb(60, 220, 255)),
+        );
+        let resp = ui.add(
+            egui::TextEdit::singleline(thickness_input)
+                .desired_width(60.0)
+                .hint_text("e.g. 0.30"),
+        );
+        let submitted = resp.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
+        let set_clicked = ui
+            .button("Set")
+            .on_hover_text("Use this slab thickness (it sets the storey's floor level)")
+            .clicked();
+        if set_clicked || submitted {
+            if let Some(v) = parse_dimension_expression(thickness_input) {
+                on_event(UiEvent::Sketch(SketchEvent::AssignFloorThickness(v as f64)));
+            }
+        }
+        if ui
+            .button("Use 0.30")
+            .on_hover_text("Accept the typical 0.30 m slab")
+            .clicked()
+        {
+            on_event(UiEvent::Sketch(SketchEvent::AssignFloorThickness(0.30)));
+        }
+        ui.label(
+            egui::RichText::new("Drawing is paused until the thickness is set.")
+                .color(egui::Color32::from_rgb(180, 180, 180)),
+        );
+    } else if prompt.method_pending {
+        ui.label(
+            egui::RichText::new("How should this storey's outline start?")
+                .strong()
+                .color(egui::Color32::from_rgb(60, 220, 255)),
+        );
+        if ui
+            .button("Draw outline")
+            .on_hover_text(
+                "Draw it over the faint previous storey (just drawing a stroke works too)",
+            )
+            .clicked()
+        {
+            on_event(UiEvent::Sketch(SketchEvent::ChooseDrawOutline));
+        }
+        if ui
+            .add_enabled(prompt.can_suggest, egui::Button::new("Suggest outlines"))
+            .on_hover_text("Browse outlines derived from the storey below's roof shape")
+            .on_disabled_hover_text(
+                "Needs the storey below to have its ceiling height set and a flat ceiling area",
+            )
+            .clicked()
+        {
+            on_event(UiEvent::Sketch(SketchEvent::ChooseSuggestOutlines));
+        }
+    } else if let Some((_ring, label, idx, count)) = &prompt.suggestion {
+        ui.label(
+            egui::RichText::new("Suggested outline:")
+                .strong()
+                .color(egui::Color32::from_rgb(60, 220, 255)),
+        );
+        ui.label(label);
+        if ui
+            .button("◀")
+            .on_hover_text("Previous suggestion")
+            .clicked()
+        {
+            on_event(UiEvent::Sketch(SketchEvent::PrevSuggestion));
+        }
+        ui.label(format!("{}/{}", idx + 1, count));
+        if ui.button("▶").on_hover_text("Next suggestion").clicked() {
+            on_event(UiEvent::Sketch(SketchEvent::NextSuggestion));
+        }
+        if ui
+            .button("Accept")
+            .on_hover_text(
+                "Use this outline as the storey's footprint — finalised, \
+                 no dimension questions",
+            )
+            .clicked()
+        {
+            on_event(UiEvent::Sketch(SketchEvent::AcceptSuggestion));
+        }
+        if ui
+            .button("Draw instead")
+            .on_hover_text("Abandon the suggestions and draw the outline yourself")
+            .clicked()
+        {
+            on_event(UiEvent::Sketch(SketchEvent::ChooseDrawOutline));
+        }
+    }
+    inline_error(ui, error);
 }
 
 fn pending_redraw_toolbar<F: FnMut(UiEvent)>(ui: &mut egui::Ui, on_event: &mut F) {

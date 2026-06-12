@@ -68,6 +68,17 @@ pub(super) fn render<F: FnMut(UiEvent)>(
         vp,
     );
 
+    // New-storey browse stage: tint the current outline suggestion's ring
+    // translucently over the previous-storey watermark so the assessor sees
+    // the candidate footprint in place while cycling ◀ ▶ in the dock.
+    if let Some((ring, _label, _idx, _count)) = view
+        .new_storey_prompt
+        .as_ref()
+        .and_then(|p| p.suggestion.as_ref())
+    {
+        render::render_suggestion_ring(&painter, rect, ber, current_storey_idx, mode, vp, ring);
+    }
+
     // Living-area sub-shapes overlaid in green (active brighter),
     // with length labels on their known walls (like the storey).
     render::render_living_areas(

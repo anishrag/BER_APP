@@ -822,6 +822,55 @@ pub fn render_phase_regions(
     }
 }
 
+/// Tint the CURRENT new-storey outline suggestion's ring translucently over
+/// the previous-storey watermark (the browse stage of the new-storey flow):
+/// a sky-blue fill — a hue none of the other overlays use — plus a crisp
+/// outline. Filled via earcutr so concave suggestions (L, U, …) tint
+/// correctly (the floor-fill pattern; egui's `convex_polygon` fan-cuts
+/// across concavities).
+pub fn render_suggestion_ring(
+    painter: &egui::Painter,
+    rect: egui::Rect,
+    ber: Option<&Ber>,
+    current_storey_idx: Option<usize>,
+    sketch_mode: SketchMode,
+    view: ViewParams,
+    ring: &[(f64, f64)],
+) {
+    if ring.len() < 3 {
+        return;
+    }
+    // The storey is fresh (no outline yet), so the fit transform is driven
+    // by the watermark half of `fit_bbox_for_storey` — the same box the
+    // watermark was drawn with, putting the tint exactly over it.
+    let Some((_storey, t)) = storey_transform(rect, ber, current_storey_idx, sketch_mode, view)
+    else {
+        return;
+    };
+    let screen_pts: Vec<egui::Pos2> = ring.iter().map(|(x, y)| t.apply(*x, *y)).collect();
+    let fill = egui::Color32::from_rgba_unmultiplied(80, 180, 255, 60); // translucent sky blue
+    let outline = egui::Color32::from_rgb(80, 180, 255);
+    let flat: Vec<f64> = ring.iter().flat_map(|(x, y)| [*x, *y]).collect();
+    if let Ok(triangles) = earcutr::earcut(&flat, &[], 2) {
+        let mut mesh = egui::Mesh::default();
+        for &p in &screen_pts {
+            mesh.vertices.push(egui::epaint::Vertex {
+                pos: p,
+                uv: egui::epaint::WHITE_UV,
+                color: fill,
+            });
+        }
+        for idx in triangles {
+            mesh.indices.push(idx as u32);
+        }
+        painter.add(egui::Shape::mesh(mesh));
+    }
+    painter.add(egui::Shape::closed_line(
+        screen_pts,
+        egui::Stroke::new(2.5, outline),
+    ));
+}
+
 #[allow(clippy::too_many_arguments)]
 pub fn render_living_areas(
     painter: &egui::Painter,

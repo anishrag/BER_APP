@@ -30,6 +30,10 @@ pub enum Tool {
     /// the current value when one is set. Re-entering overwrites; on the All
     /// tab one value fills every still-unset storey.
     DefaultCeilingHeight,
+    /// The storey's floor-slab thickness to the storey below: a metres field
+    /// + "Set", showing the current value when one is set. Upper storeys
+    /// only (storey 0 has no slab over another storey) — disabled elsewhere.
+    FloorThickness,
     /// Floor-step tagging mode toggle.
     FloorSteps,
     /// Ceiling-step tagging mode toggle (gated on a default ceiling height).
@@ -87,6 +91,7 @@ pub const CATEGORIES: &[Category] = &[
         name: "Heights",
         tools: &[
             Tool::DefaultCeilingHeight,
+            Tool::FloorThickness,
             Tool::FloorSteps,
             Tool::CeilingSteps,
             Tool::RoofPoints,
@@ -139,6 +144,9 @@ pub struct CategoryUiState {
     /// the stored value as its label); kept on a rejected value so the user
     /// can correct it.
     pub ceiling_height_input: String,
+    /// Backing string for the Heights category's floor-slab-thickness field.
+    /// Same clear-on-success lifecycle as `ceiling_height_input`.
+    pub floor_thickness_input: String,
 }
 
 impl Default for CategoryUiState {
@@ -148,6 +156,7 @@ impl Default for CategoryUiState {
             layout_override: None,   // Auto: pick by aspect ratio
             show_wall_lengths: true, // labels visible by default
             ceiling_height_input: String::new(),
+            floor_thickness_input: String::new(),
         }
     }
 }
@@ -182,6 +191,14 @@ pub struct ToolFlags {
     pub default_ceiling_height: Option<f64>,
     /// Last error from the Heights field's Set, shown inline beside it.
     pub ceiling_height_error: Option<String>,
+    /// On an UPPER storey (index ≥ 1): the only place a floor-slab
+    /// thickness applies, so the Heights thickness field is enabled.
+    pub upper_storey: bool,
+    /// The current storey's floor-slab thickness, when set — the Heights
+    /// thickness field shows it ("0.30 m") next to the entry box.
+    pub floor_thickness: Option<f64>,
+    /// Last error from the thickness field's Set, shown inline beside it.
+    pub floor_thickness_error: Option<String>,
     pub can_undo: bool,
     pub can_redo: bool,
     pub autosave_status: Option<String>,
@@ -207,6 +224,9 @@ impl ToolFlags {
             roof_point_available: view.roof_point_available,
             default_ceiling_height: view.default_ceiling_height,
             ceiling_height_error: view.ceiling_height_error.map(str::to_owned),
+            upper_storey: matches!(view.current_storey_idx, Some(i) if i >= 1),
+            floor_thickness: view.floor_thickness,
+            floor_thickness_error: view.floor_thickness_error.map(str::to_owned),
             can_undo: view.can_undo,
             can_redo: view.can_redo,
             autosave_status: view.autosave_status.clone(),
@@ -405,6 +425,54 @@ fn tool_ui<F: FnMut(UiEvent)>(
                 }
             });
             if let Some(err) = &flags.ceiling_height_error {
+                ui.label(
+                    egui::RichText::new(format!("⚠ {}", err))
+                        .color(egui::Color32::from_rgb(255, 120, 90)),
+                );
+            }
+        }
+        Tool::FloorThickness => {
+            // Upper storeys only — storey 0 sits on the ground, the All tab
+            // has no single storey to stamp. Mirrors the ceiling-height
+            // field: shows the stored value, re-entering overwrites,
+            // validation (finite ≥ 0) lives in the controller and its
+            // rejection shows inline. Disabled (not hidden) so the Heights
+            // layout stays stable across storey tabs.
+            ui.add_enabled_ui(flags.upper_storey, |ui| {
+                ui.horizontal(|ui| {
+                    ui.label("Floor thickness");
+                    if let Some(t) = flags.floor_thickness {
+                        ui.label(format!("{t:.2} m"));
+                    }
+                    let resp = ui.add(
+                        egui::TextEdit::singleline(&mut state.floor_thickness_input)
+                            .desired_width(50.0)
+                            .hint_text("e.g. 0.3"),
+                    );
+                    let submitted =
+                        resp.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
+                    let set_clicked = ui
+                        .button("Set")
+                        .on_hover_text(
+                            "Set the floor-slab thickness to the storey below \
+                             (it sets this storey's floor level)",
+                        )
+                        .on_disabled_hover_text(
+                            "Only an upper storey has a floor slab to the storey below",
+                        )
+                        .clicked();
+                    if set_clicked || submitted {
+                        if let Some(value) =
+                            parse_dimension_expression(&state.floor_thickness_input)
+                        {
+                            on_event(UiEvent::Sketch(SketchEvent::SetFloorThickness(
+                                value as f64,
+                            )));
+                        }
+                    }
+                });
+            });
+            if let Some(err) = &flags.floor_thickness_error {
                 ui.label(
                     egui::RichText::new(format!("⚠ {}", err))
                         .color(egui::Color32::from_rgb(255, 120, 90)),

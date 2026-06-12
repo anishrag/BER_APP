@@ -1,9 +1,10 @@
 //! Axonometric 3D rendering of every Storey in the BER, stacked vertically.
 //!
-//! Storeys are placed at cumulative z offsets equal to the sum of DEFAULT
-//! ceiling heights of storeys below (stepped floors/ceilings don't shift the
-//! stack — stacking fidelity is later work). Within its band each storey
-//! renders its real per-region floor levels and roof z via
+//! Storeys are placed at the floor datums from `Ber::storey_floor_datums()`:
+//! slab-thickness-aware (anchor on the lowest covered flat ceiling below +
+//! the slab) where a thickness is recorded, and the legacy
+//! sum-of-default-ceiling-heights stacking where it isn't. Within its band
+//! each storey renders its real per-region floor levels and roof z via
 //! `storey_3d::render_at_z_offset`. The transform is fitted across all
 //! storeys' projected bounding boxes so the whole building sits inside the
 //! canvas.
@@ -47,13 +48,14 @@ pub fn render(
         return;
     }
 
-    // First pass: precompute z-offsets per storey and the combined projected bbox.
-    let mut z_offsets = Vec::with_capacity(ber.storeys.len());
-    let mut z = 0.0_f64;
+    // First pass: per-storey floor datums (the slab-thickness-aware datum
+    // rule — legacy records without thicknesses stack on the ceiling heights
+    // exactly as before) and the combined projected bbox. The heights gate
+    // above guarantees the datums' ceiling-height inputs are all set.
+    let z_offsets = ber.storey_floor_datums();
     let mut combined: Option<((f64, f64), (f64, f64))> = None;
 
-    for storey in &ber.storeys {
-        z_offsets.push(z);
+    for (storey, &z) in ber.storeys.iter().zip(&z_offsets) {
         if let Some(bb) = storey_3d::projected_bb_for_storey(storey, z, view) {
             combined = Some(match combined {
                 None => bb,
@@ -63,8 +65,6 @@ pub fn render(
                 ),
             });
         }
-        // Checked Some above: the next storey's floor sits on this ceiling.
-        z += storey.ceiling_height_m.unwrap_or_default();
     }
 
     let Some((min_xy, max_xy)) = combined else {

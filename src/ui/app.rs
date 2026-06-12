@@ -115,6 +115,29 @@ pub struct SketchState {
     pub roof_ridge_length_input: String,
     /// One-shot guard for the length prefill, mirroring `roof_apex_prefilled`.
     pub roof_ridge_length_prefilled: bool,
+    /// Backing string for the new-storey flow's thickness input. PREFILLED
+    /// "0.30" when the Thickness stage opens (via the one-shot guard below);
+    /// the user overtypes, or "Use 0.30" submits the default directly.
+    pub new_storey_thickness_input: String,
+    /// One-shot guard for the thickness prefill, mirroring
+    /// `roof_apex_prefilled`: set when the stage's prefill has been written,
+    /// cleared when the stage closes.
+    pub new_storey_thickness_prefilled: bool,
+    /// Last error from the new-storey toolbar's actions
+    /// (`assign_floor_thickness`, `choose_suggest_outlines`,
+    /// `accept_suggestion`) — one field for the one toolbar, whose stages
+    /// are mutually exclusive (the roof-family pattern). Shown inline in it;
+    /// cleared on each success.
+    pub new_storey_error: Option<String>,
+    /// Last error from the Heights thickness field's `set_floor_thickness`.
+    /// Its own field (not `new_storey_error`): the Heights field and the
+    /// flow toolbar can be on screen at once, each error renders in the
+    /// panel that owns the rejected input.
+    pub floor_thickness_error: Option<String>,
+    /// One-shot clear-on-success for the Heights thickness field's input
+    /// buffer, mirroring `ceiling_height_input_clear` (the event closure
+    /// can't clear `categories.floor_thickness_input` directly).
+    pub floor_thickness_input_clear: bool,
     /// Last error from `set_default_ceiling_height`. Shown next to the
     /// Heights field so the user can correct without losing what they typed;
     /// cleared on the next successful Set.
@@ -455,6 +478,8 @@ impl eframe::App for BerApp {
                                 roof_ridge_pending,
                                 default_ceiling_height,
                                 ceiling_heights_set,
+                                new_storey_prompt,
+                                floor_thickness,
                                 view_params,
                             ) = {
                                 let controller_ref = self.app_controller.borrow();
@@ -532,6 +557,8 @@ impl eframe::App for BerApp {
                                     controller_ref.roof_ridge_pending(),
                                     controller_ref.default_ceiling_height(),
                                     controller_ref.ceiling_heights_set(),
+                                    controller_ref.new_storey_prompt(),
+                                    controller_ref.floor_thickness(),
                                     crate::ui::render::ViewParams {
                                         zoom: v.zoom,
                                         offset_x: v.offset_x,
@@ -592,11 +619,35 @@ impl eframe::App for BerApp {
                                 self.sketch_state.roof_ridge_length_prefilled = false;
                             }
 
+                            // Prefill the new-storey thickness box with the typical
+                            // 0.30 m when the Thickness stage OPENS — "Use 0.30" /
+                            // Enter then accepts it as-is. Same one-shot guard
+                            // pattern as the roof prefills, so the user's typing
+                            // on the open stage isn't clobbered every frame.
+                            let thickness_pending = new_storey_prompt
+                                .as_ref()
+                                .is_some_and(|p| p.thickness_pending);
+                            if thickness_pending {
+                                if !self.sketch_state.new_storey_thickness_prefilled {
+                                    self.sketch_state.new_storey_thickness_prefilled = true;
+                                    self.sketch_state.new_storey_thickness_input =
+                                        "0.30".to_string();
+                                }
+                            } else {
+                                self.sketch_state.new_storey_thickness_prefilled = false;
+                            }
+
                             // Deferred clear-on-success for the Heights field's input
                             // (raised by the SetDefaultCeilingHeight Ok path last frame).
                             if self.sketch_state.ceiling_height_input_clear {
                                 self.sketch_state.categories.ceiling_height_input.clear();
                                 self.sketch_state.ceiling_height_input_clear = false;
+                            }
+                            // Same deferred clear for the thickness field's input
+                            // (raised by the SetFloorThickness Ok path last frame).
+                            if self.sketch_state.floor_thickness_input_clear {
+                                self.sketch_state.categories.floor_thickness_input.clear();
+                                self.sketch_state.floor_thickness_input_clear = false;
                             }
 
                             let current_storey_idx =
@@ -607,6 +658,9 @@ impl eframe::App for BerApp {
                             let step_error = self.sketch_state.step_error.clone();
                             let ceiling_step_error = self.sketch_state.ceiling_step_error.clone();
                             let roof_error = self.sketch_state.roof_error.clone();
+                            let new_storey_error = self.sketch_state.new_storey_error.clone();
+                            let floor_thickness_error =
+                                self.sketch_state.floor_thickness_error.clone();
 
                             let controller = self.app_controller.clone();
                             let splice_debug = self.app_controller.borrow().splice_debug_overlay();
@@ -713,6 +767,13 @@ impl eframe::App for BerApp {
                                 ceiling_height_error: ceiling_height_error.as_deref(),
                                 default_ceiling_height,
                                 ceiling_heights_set,
+                                new_storey_prompt,
+                                new_storey_thickness_input: &mut self
+                                    .sketch_state
+                                    .new_storey_thickness_input,
+                                new_storey_error: new_storey_error.as_deref(),
+                                floor_thickness,
+                                floor_thickness_error: floor_thickness_error.as_deref(),
                                 edit_selected_wall,
                                 edit_selected_vertex,
                                 edit_drag_prompt,
@@ -1109,6 +1170,66 @@ impl eframe::App for BerApp {
                                     }
                                     SketchEvent::AddStorey => {
                                         log_err("add_storey", controller.borrow_mut().add_storey());
+                                    }
+                                    SketchEvent::AssignFloorThickness(v) => {
+                                        match controller.borrow_mut().assign_floor_thickness(v) {
+                                            Ok(()) => {
+                                                self.sketch_state.new_storey_error = None;
+                                            }
+                                            Err(e) => {
+                                                eprintln!("assign_floor_thickness: {}", e);
+                                                self.sketch_state.new_storey_error = Some(e);
+                                            }
+                                        }
+                                    }
+                                    SketchEvent::SetFloorThickness(v) => {
+                                        match controller.borrow_mut().set_floor_thickness(v) {
+                                            Ok(()) => {
+                                                // Clear-on-success mirrors the ceiling-height
+                                                // field: the label now shows the stored value,
+                                                // so the entry box resets via the one-shot
+                                                // flag; a rejected value stays for correction.
+                                                self.sketch_state.floor_thickness_error = None;
+                                                self.sketch_state.floor_thickness_input_clear =
+                                                    true;
+                                            }
+                                            Err(e) => {
+                                                eprintln!("set_floor_thickness: {}", e);
+                                                self.sketch_state.floor_thickness_error = Some(e);
+                                            }
+                                        }
+                                    }
+                                    SketchEvent::ChooseDrawOutline => {
+                                        controller.borrow_mut().choose_draw_outline();
+                                        self.sketch_state.new_storey_error = None;
+                                    }
+                                    SketchEvent::ChooseSuggestOutlines => {
+                                        match controller.borrow_mut().choose_suggest_outlines() {
+                                            Ok(()) => {
+                                                self.sketch_state.new_storey_error = None;
+                                            }
+                                            Err(e) => {
+                                                eprintln!("choose_suggest_outlines: {}", e);
+                                                self.sketch_state.new_storey_error = Some(e);
+                                            }
+                                        }
+                                    }
+                                    SketchEvent::NextSuggestion => {
+                                        controller.borrow_mut().cycle_suggestion(true);
+                                    }
+                                    SketchEvent::PrevSuggestion => {
+                                        controller.borrow_mut().cycle_suggestion(false);
+                                    }
+                                    SketchEvent::AcceptSuggestion => {
+                                        match controller.borrow_mut().accept_suggestion() {
+                                            Ok(()) => {
+                                                self.sketch_state.new_storey_error = None;
+                                            }
+                                            Err(e) => {
+                                                eprintln!("accept_suggestion: {}", e);
+                                                self.sketch_state.new_storey_error = Some(e);
+                                            }
+                                        }
                                     }
                                     SketchEvent::EditMouseDown {
                                         world_x,
