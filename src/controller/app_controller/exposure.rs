@@ -58,9 +58,10 @@ pub struct ExposureSelection {
 }
 
 /// One derived RISER wall for rendering/selection: its plan base edge (world
-/// coords), exposure, kind (floor/ceiling step — decides the clear-default),
-/// and whether it's the current riser selection. Drawn as a DASHED line so it
-/// reads apart from the outline walls.
+/// coords), exposure, kind (floor/ceiling step — the toolbar's label; the
+/// clear-default is `Unset` for both kinds), and whether it's the current
+/// riser selection. Drawn as a DASHED line so it reads apart from the
+/// outline walls.
 pub struct RiserView {
     pub id: ItemId,
     pub a: (f64, f64),
@@ -314,10 +315,10 @@ impl AppController {
         let _ = self.mark_dirty();
     }
 
-    /// Revert the selected riser to its DERIVED default exposure — `Ground`
-    /// for a floor-step riser, `Exposed` for a ceiling-step one (the kind
-    /// decides; see `RiserKind::default_exposure`). Same record-level/no-undo
-    /// semantics as `set_riser_exposure`.
+    /// Revert the selected riser to its DERIVED default exposure — `Unset`
+    /// for both kinds, like every other wall (see
+    /// `RiserKind::default_exposure`). Same record-level/no-undo semantics
+    /// as `set_riser_exposure`.
     pub fn clear_riser_exposure(&mut self) {
         let Some(id) = self.selected_riser else {
             return;

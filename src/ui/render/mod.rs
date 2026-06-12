@@ -931,8 +931,9 @@ pub fn render_wall_exposure(
         WallExposure::SemiExposed => semi,
         WallExposure::NonHeatLoss => non,
         // Sections store PAINTED exposures only: Unset is derived coverage
-        // and Ground belongs to derived riser walls, so neither reaches a
-        // section — but the match stays exhaustive.
+        // and Ground is riser-only (the riser toolbar's Ground button), so
+        // neither reaches a section — but the match stays exhaustive (and
+        // risers, which CAN be Unset or Ground, colour through here too).
         WallExposure::Unset => grey,
         WallExposure::Ground => style::GROUND_WALL,
     };
@@ -1011,8 +1012,9 @@ pub fn render_wall_exposure(
             ("Unset", grey),
         ];
         if !risers.is_empty() {
-            // Risers default Ground (floor steps) — the earth swatch only
-            // means something once a dashed riser line is on screen.
+            // Ground is a riser-only CHOICE (never a default now) — the
+            // earth swatch only means something once a dashed riser line is
+            // on screen.
             legend.push(("Ground", style::GROUND_WALL));
         }
         let mut y = rect.top() + 10.0;
@@ -1175,7 +1177,7 @@ pub(crate) mod style {
     pub const NON_HEAT_LOSS_WALL: Color32 = Color32::from_rgb(95, 145, 215);
     /// Walls with no exposure marked yet — neutral grey in both views.
     pub const UNSET_WALL: Color32 = Color32::from_rgb(150, 150, 150);
-    /// Ground-contact walls (floor-step risers) — earth tone.
+    /// Ground-contact walls (a riser-only assessor choice) — earth tone.
     pub const GROUND_WALL: Color32 = Color32::from_rgb(150, 105, 60);
     pub const WINDOW_FILL: Color32 = Color32::from_rgba_premultiplied(130, 200, 230, 180);
     pub const DOOR_FILL: Color32 = Color32::from_rgba_premultiplied(180, 130, 80, 200);

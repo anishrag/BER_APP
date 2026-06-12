@@ -256,12 +256,12 @@ pub fn resolve_storey(
     );
     // RISER regions append after the perimeter rebuild — derived geometry,
     // re-derived on every materialize like the walls themselves:
-    //  - FLOOR risers → `Ground`: the vertical faces between adjacent floor
-    //    regions whose `level_m` differ, derived whether or not the ceiling
-    //    height is set (floor steps don't depend on it).
-    //  - CEILING risers → `Exposed`: the interior vertical faces between
-    //    adjacent ceiling regions whose z profiles jump (a ceiling step's
-    //    face; fan/ridge seams are continuous and emit nothing). Derived off
+    //  - FLOOR risers: the vertical faces between adjacent floor regions
+    //    whose `level_m` differ, derived whether or not the ceiling height
+    //    is set (floor steps don't depend on it).
+    //  - CEILING risers: the interior vertical faces between adjacent
+    //    ceiling regions whose z profiles jump (a ceiling step's face;
+    //    fan/ridge seams are continuous and emit nothing). Derived off
     //    `roofs_for_walls`, so they're empty until the height is set — no
     //    extra gating needed.
     // Perimeter walls never duplicate, by construction: outline edges border
@@ -270,26 +270,23 @@ pub fn resolve_storey(
     // runs along the step line itself. Identity rides `with_risers`' amend
     // matching against the SAME previous set the perimeter pass consumed,
     // minus the ids that pass already kept.
-    // These exposures are the derived DEFAULTS only: `with_risers`' amend
-    // PRESERVES a matched previous region's exposure, so a riser the user
-    // overrode (selected via the 2D dashed-line picker — see
-    // `StoreyDoc::riser_walls`) keeps the override across every
-    // re-derivation, and across reload (the first materialize after load
-    // amends against the persisted set). v1 approximation: every FRESH floor
-    // riser defaults to `Ground` (no grade model yet — a step-up riser
-    // between two above-grade floors is really exposed; the assessor can
-    // correct it in the picker).
+    // Every FRESH riser defaults to `Unset`, like every other wall — these
+    // are the derived DEFAULTS only: `with_risers`' amend PRESERVES a
+    // matched previous region's exposure, so a riser the user set (selected
+    // via the 2D dashed-line picker — see `StoreyDoc::riser_walls`) keeps
+    // the choice across every re-derivation, and across reload (the first
+    // materialize after load amends against the persisted set). The old v1
+    // approximation (floor risers `Ground`, ceiling risers `Exposed`) is
+    // gone: with no grade model a guessed default was wrong as often as
+    // right, so ground contact is now the assessor's EXPLICIT choice (the
+    // riser toolbar's Ground button; `Ground` stays in the enum as that
+    // choice, never a default).
     let risers: Vec<(Polygon3D, WallExposure)> = storey
         .floors
         .riser_faces()
         .into_iter()
-        .map(|f| (f, WallExposure::Ground))
-        .chain(
-            roofs_for_walls
-                .riser_faces()
-                .into_iter()
-                .map(|f| (f, WallExposure::Exposed)),
-        )
+        .chain(roofs_for_walls.riser_faces())
+        .map(|f| (f, WallExposure::Unset))
         .collect();
     storey.walls = walls.with_risers(risers, &previous_walls, wall_cid);
     storey
@@ -424,12 +421,13 @@ mod tests {
         assert!((area_at_level(0.0) - 8.0).abs() < 1e-6, "untouched half");
     }
 
-    /// A floor step derives a GROUND riser wall along its interior boundary
-    /// — regardless of the ceiling height (unset here) — with the base edge
-    /// at the LOWER level, ids unique against the perimeter regions, and the
-    /// riser's id STABLE across re-resolves (amend).
+    /// A floor step derives a riser wall (defaulting `Unset`, like every
+    /// other wall) along its interior boundary — regardless of the ceiling
+    /// height (unset here) — with the base edge at the LOWER level, ids
+    /// unique against the perimeter regions, and the riser's id STABLE
+    /// across re-resolves (amend).
     #[test]
-    fn floor_step_derives_a_ground_riser_with_stable_identity() {
+    fn floor_step_derives_an_unset_riser_with_stable_identity() {
         let doc = square_doc(&[
             Point2f32::new(0.0, 0.0),
             Point2f32::new(4.0, 0.0),
@@ -449,16 +447,22 @@ mod tests {
         ensure_storey_constructions(&mut ber, 0, &[]);
         let storey = resolve_storey(&doc, &ber, 0, &[], &steps, &[]);
 
-        // 4 perimeter (Unset) regions + ONE Ground riser on the step line.
+        // 4 perimeter (Unset) regions + ONE riser on the step line. The
+        // riser defaults Unset too, so pick it out GEOMETRICALLY: its base
+        // edge sits on the interior step line x = 2 (no perimeter wall does).
         assert_eq!(storey.walls.regions.len(), 5);
-        let grounds: Vec<_> = storey
-            .walls
-            .regions
-            .iter()
-            .filter(|r| r.exposure == WallExposure::Ground)
-            .collect();
-        assert_eq!(grounds.len(), 1, "one riser on the interior boundary");
-        let ext = &grounds[0].polygon.exterior;
+        let on_step_line = |r: &&datatypes::ber::structural::WallRegion| {
+            let e = &r.polygon.exterior;
+            (e[0].x - 2.0).abs() < 1e-6 && (e[1].x - 2.0).abs() < 1e-6
+        };
+        let risers: Vec<_> = storey.walls.regions.iter().filter(on_step_line).collect();
+        assert_eq!(risers.len(), 1, "one riser on the interior boundary");
+        assert_eq!(
+            risers[0].exposure,
+            WallExposure::Unset,
+            "a fresh riser defaults Unset like every other wall"
+        );
+        let ext = &risers[0].polygon.exterior;
         assert_eq!(ext.len(), 4, "a vertical quad");
         assert!(
             (ext[0].z + 0.3).abs() < 1e-9 && (ext[1].z + 0.3).abs() < 1e-9,
@@ -476,14 +480,14 @@ mod tests {
 
         // Re-resolve with the derived storey as the previous state: the
         // riser AMENDS (deterministic re-derivation ⇒ stable identity).
-        let riser_id = grounds[0].id;
+        let riser_id = risers[0].id;
         ber.storeys[0] = storey;
         let storey2 = resolve_storey(&doc, &ber, 0, &[], &steps, &[]);
         let riser2 = storey2
             .walls
             .regions
             .iter()
-            .find(|r| r.exposure == WallExposure::Ground)
+            .find(on_step_line)
             .expect("riser re-derives");
         assert_eq!(riser2.id, riser_id, "riser id stable across re-resolves");
     }
@@ -492,7 +496,7 @@ mod tests {
     /// exposure survives a plain re-resolve AND a re-resolve after a
     /// geometry-affecting edit (the ceiling height lands, re-extruding every
     /// wall) — the amend base-matches the unchanged step line and preserves
-    /// the override instead of re-stamping the derived `Ground` default.
+    /// the override instead of re-stamping the derived `Unset` default.
     #[test]
     fn riser_exposure_override_survives_re_resolves() {
         let doc = square_doc(&[
@@ -513,12 +517,18 @@ mod tests {
         let mut ber = Ber::default();
         ensure_storey_constructions(&mut ber, 0, &[]);
         let mut storey = resolve_storey(&doc, &ber, 0, &[], &steps, &[]);
+        // The riser defaults Unset like the perimeter regions — find it by
+        // its base edge on the interior step line x = 2.
         let riser = storey
             .walls
             .regions
             .iter_mut()
-            .find(|r| r.exposure == WallExposure::Ground)
+            .find(|r| {
+                let e = &r.polygon.exterior;
+                (e[0].x - 2.0).abs() < 1e-6 && (e[1].x - 2.0).abs() < 1e-6
+            })
             .expect("the floor riser derives");
+        assert_eq!(riser.exposure, WallExposure::Unset, "fresh → Unset");
         let riser_id = riser.id;
         riser.exposure = WallExposure::SemiExposed; // the user's override
         ber.storeys[0] = storey;
@@ -579,7 +589,7 @@ mod tests {
         assert_eq!(risers.len(), 1, "exactly the step riser, no perimeter");
         let r = &risers[0];
         assert_eq!(r.kind, crate::RiserKind::Floor);
-        assert_eq!(r.exposure, WallExposure::Ground);
+        assert_eq!(r.exposure, WallExposure::Unset, "default Unset");
         assert!(
             (r.a.x - 2.0).abs() < 1e-6 && (r.b.x - 2.0).abs() < 1e-6,
             "base edge on the step line x = 2"
@@ -601,7 +611,7 @@ mod tests {
     }
 
     /// A ceiling step's riser classifies as kind `Ceiling` (no matching
-    /// floor riser face), defaulting `Exposed`.
+    /// floor riser face), defaulting `Unset` like every other wall.
     #[test]
     fn riser_walls_classify_ceiling_risers() {
         let (doc, ber) = ceiling_test_setup(2.4);
@@ -617,11 +627,11 @@ mod tests {
         let risers = doc.riser_walls(&storey);
         assert_eq!(risers.len(), 1, "one ceiling riser on the step line");
         assert_eq!(risers[0].kind, crate::RiserKind::Ceiling);
-        assert_eq!(risers[0].exposure, WallExposure::Exposed);
+        assert_eq!(risers[0].exposure, WallExposure::Unset);
         assert_eq!(
             risers[0].kind.default_exposure(),
-            WallExposure::Exposed,
-            "clear reverts a ceiling riser to Exposed"
+            WallExposure::Unset,
+            "clear reverts a ceiling riser to Unset"
         );
     }
 
@@ -1327,7 +1337,7 @@ mod tests {
     /// ceiling step keeps its id, construction_id, and openings across the
     /// re-resolve (same base edge → AMEND), while its top gains the step's
     /// vertical jump — and the step's interior RISER face derives as ONE
-    /// `Exposed` region that COEXISTS with that jump without double-counting
+    /// `Unset` region that COEXISTS with that jump without double-counting
     /// (the jump is part of the perimeter wall's polygon; the riser is the
     /// separate face along the step line itself).
     #[test]
@@ -1380,7 +1390,7 @@ mod tests {
         // 4 perimeter regions + the step's ONE interior riser face.
         assert_eq!(storey2.walls.regions.len(), 5);
         // The riser: base edge ON the step line (x = 2, interior), spanning
-        // the two ceiling heights, Exposed (the ceiling-riser default).
+        // the two ceiling heights, Unset (the riser default, like any wall).
         let is_riser = |r: &&datatypes::ber::structural::WallRegion| {
             let e = &r.polygon.exterior;
             (e[0].x - 2.0).abs() < 1e-4 && (e[1].x - 2.0).abs() < 1e-4
@@ -1388,7 +1398,7 @@ mod tests {
         let risers: Vec<_> = storey2.walls.regions.iter().filter(is_riser).collect();
         assert_eq!(risers.len(), 1, "exactly one riser — no double-counting");
         let riser = risers[0];
-        assert_eq!(riser.exposure, WallExposure::Exposed);
+        assert_eq!(riser.exposure, WallExposure::Unset);
         let rext = &riser.polygon.exterior;
         assert!(
             (rext[0].z - 2.4).abs() < 1e-9 && (rext[1].z - 2.4).abs() < 1e-9,
@@ -1598,7 +1608,7 @@ mod tests {
                     && e[0].y.max(e[1].y) < 2.0 + 1e-4
             })
             .expect("the step line carries a riser face");
-        assert_eq!(riser.exposure, WallExposure::Exposed);
+        assert_eq!(riser.exposure, WallExposure::Unset);
         assert!(
             (riser.polygon.exterior[0].z - 2.4).abs() < 1e-6,
             "riser base at the main ceiling: {:?}",
@@ -1983,7 +1993,8 @@ mod tests {
 
         // One region per coverage range: gap/Semi/gap on the painted wall +
         // one whole-wall Unset region for each of the three unmarked walls +
-        // the ceiling step's interior riser face.
+        // the ceiling step's interior riser face (also Unset — the riser
+        // default is Unset like every other wall).
         assert_eq!(storey.walls.regions.len(), 7);
         assert_eq!(
             storey
@@ -1992,7 +2003,7 @@ mod tests {
                 .iter()
                 .filter(|r| r.exposure == WallExposure::Unset)
                 .count(),
-            5
+            6
         );
         assert!(
             storey

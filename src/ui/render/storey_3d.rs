@@ -15,8 +15,9 @@
 //!   grey), so the walls themselves carry the building's volume and Unset
 //!   walls genuinely follow raised/ridged roofs — the old faint volume-hint
 //!   band is gone. RISER faces between stepped sections are derived too
-//!   (floor risers `Ground`, earth-toned; ceiling risers `Exposed`) and draw
-//!   through the same wall-region path.
+//!   (defaulting `Unset` like other walls; `Ground` is the riser-only
+//!   assessor choice, earth-toned) and draw through the same wall-region
+//!   path.
 //!
 //! The default ceiling height comes from `storey.ceiling_height_m` — the
 //! controller's first-3D gate guarantees it's set before this view is

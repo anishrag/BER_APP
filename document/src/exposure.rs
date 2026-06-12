@@ -93,8 +93,9 @@ pub fn wall_coverage(len: f32, sections: &[ExposureSection]) -> Vec<(f32, f32, W
 }
 
 /// Whether a derived riser wall stands between two FLOOR levels (a floor
-/// step's vertical face) or two CEILING profiles (a ceiling step's). Decides
-/// the riser's derived DEFAULT exposure, which "clear" reverts to.
+/// step's vertical face) or two CEILING profiles (a ceiling step's). Drives
+/// the picker's kind label; the derived DEFAULT exposure (which "clear"
+/// reverts to) is `Unset` for both kinds.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RiserKind {
     Floor,
@@ -102,15 +103,14 @@ pub enum RiserKind {
 }
 
 impl RiserKind {
-    /// The exposure the resolve projection derives for a fresh riser of this
-    /// kind (the v1 approximation: floor risers touch the ground, ceiling
-    /// risers face outside). Must stay in lock-step with `resolve_storey`'s
-    /// riser derivation.
+    /// The exposure the resolve projection derives for a fresh riser of
+    /// either kind — `Unset`, like every other wall, and what "clear"
+    /// reverts to. Ground contact is the assessor's explicit choice (the
+    /// riser toolbar's Ground button), no longer a derived floor-riser
+    /// default. Must stay in lock-step with `resolve_storey`'s riser
+    /// derivation.
     pub fn default_exposure(self) -> WallExposure {
-        match self {
-            RiserKind::Floor => WallExposure::Ground,
-            RiserKind::Ceiling => WallExposure::Exposed,
-        }
+        WallExposure::Unset
     }
 }
 
@@ -215,10 +215,13 @@ impl StoreyDoc {
     /// perimeter wall it lies on to recover its `(start_m, end_m, exposure)`;
     /// regions are grouped by wall and sorted. `Unset` and `Ground` regions are
     /// SKIPPED: `Unset` is derived coverage (recovering it would mark every
-    /// wall after one save/load) and `Ground` belongs to derived riser walls
-    /// (recovering it would turn risers into phantom painted sections) —
-    /// neither was painted, so neither comes back as a section. Inverse of the
-    /// commit-time derivation.
+    /// wall after one save/load) and `Ground` is riser-only (the assessor's
+    /// explicit choice in the riser toolbar — recovering it would turn risers
+    /// into phantom painted sections). Riser regions never recover anyway —
+    /// their base edges lie on no perimeter wall, so the geometric match below
+    /// drops them whatever their exposure (that's what keeps an overridden
+    /// Exposed/Semi/NonHeatLoss riser out too); the `Ground` skip is
+    /// belt-and-braces on top. Inverse of the commit-time derivation.
     pub fn sections_from_wall_regions(
         &self,
         walls: &WallRegions,
@@ -271,7 +274,7 @@ impl StoreyDoc {
     /// base edges — the data behind the 2D dashed-line riser picker.
     ///
     /// DISCRIMINATOR (geometric, deliberately not exposure-based — a riser's
-    /// exposure can be overridden away from `Ground`/`Exposed`, so exposure
+    /// exposure can be overridden away from the `Unset` default, so exposure
     /// can't identify one): a wall region whose base edge does NOT lie on
     /// any current outline perimeter wall is a riser. The midpoint-on-wall
     /// test and 1e-2 m tolerance are exactly the recovery matching of

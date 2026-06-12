@@ -4760,9 +4760,10 @@ fn apply_users_ceiling_step(
 /// SNAPPED onto the outline's inner vertical wall and the jut side was raised
 /// by +1.0 m, do the resolved wall regions around the raised section top out
 /// at 3.4 m — or stay flat at the 2.4 m default? Extended for slice C: a
-/// floor step lowering the same jut by 0.3 m derives a GROUND riser along
-/// the step line, the ceiling step derives an EXPOSED riser there, both with
-/// correct z-spans, unique ids, and identity stable across reload.
+/// floor step lowering the same jut by 0.3 m derives a riser along the step
+/// line and the ceiling step derives another there — both defaulting `Unset`
+/// like every other wall — with correct z-spans, unique ids, and identity
+/// stable across reload.
 #[test]
 fn users_l_session_raised_section_wall_tops_follow_the_step() {
     let (mut c, [min_x, max_x, min_y, max_y, inner_x, inner_y]) = users_l_session_controller();
@@ -4857,9 +4858,11 @@ fn users_l_session_raised_section_wall_tops_follow_the_step() {
         }
     }
 
-    // THE RISERS along the step line (slice C): the floor step's Ground
-    // riser spanning −0.3 → 0 and the ceiling step's Exposed riser spanning
-    // 2.4 → 3.4, each one face over y ∈ [inner_y, max_y].
+    // THE RISERS along the step line (slice C): the floor step's riser
+    // spanning −0.3 → 0 and the ceiling step's riser spanning 2.4 → 3.4,
+    // each one face over y ∈ [inner_y, max_y], BOTH defaulting Unset (the
+    // riser default is Unset like every other wall — so tell them apart by
+    // z-span, not exposure).
     let risers: Vec<&datatypes::ber::structural::WallRegion> = storey
         .walls
         .regions
@@ -4867,6 +4870,10 @@ fn users_l_session_raised_section_wall_tops_follow_the_step() {
         .filter(|r| is_riser(r))
         .collect();
     assert_eq!(risers.len(), 2, "one floor + one ceiling riser");
+    assert!(
+        risers.iter().all(|r| r.exposure == WallExposure::Unset),
+        "fresh risers default Unset like every other wall"
+    );
     let span = |r: &datatypes::ber::structural::WallRegion| {
         let zs = r.polygon.exterior.iter().map(|v| v.z);
         (
@@ -4874,23 +4881,23 @@ fn users_l_session_raised_section_wall_tops_follow_the_step() {
             zs.fold(f64::NEG_INFINITY, f64::max),
         )
     };
-    let ground = risers
+    let floor_riser = risers
         .iter()
-        .find(|r| r.exposure == WallExposure::Ground)
-        .expect("the floor step derives a Ground riser");
-    let (lo, hi) = span(ground);
+        .find(|r| span(r).1 < 1.0)
+        .expect("the floor step derives a riser");
+    let (lo, hi) = span(floor_riser);
     assert!(
         (lo + 0.3).abs() < 1e-6 && hi.abs() < 1e-6,
-        "Ground riser spans the floor step −0.3 → 0: [{lo}, {hi}]"
+        "floor riser spans the floor step −0.3 → 0: [{lo}, {hi}]"
     );
-    let ceiling = risers
+    let ceiling_riser = risers
         .iter()
-        .find(|r| r.exposure == WallExposure::Exposed)
-        .expect("the ceiling step derives an Exposed riser");
-    let (lo, hi) = span(ceiling);
+        .find(|r| span(r).0 > 1.0)
+        .expect("the ceiling step derives a riser");
+    let (lo, hi) = span(ceiling_riser);
     assert!(
         (lo - 2.4).abs() < 1e-3 && (hi - 3.4).abs() < 1e-3,
-        "Exposed riser spans the ceiling step 2.4 → 3.4: [{lo}, {hi}]"
+        "ceiling riser spans the ceiling step 2.4 → 3.4: [{lo}, {hi}]"
     );
     for r in &risers {
         let ys = [r.polygon.exterior[0].y, r.polygon.exterior[1].y];
@@ -4908,8 +4915,8 @@ fn users_l_session_raised_section_wall_tops_follow_the_step() {
     ids.sort_by_key(|id| id.0);
     ids.dedup();
     assert_eq!(ids.len(), 8, "ids unique");
-    let ground_id = ground.id;
-    let ceiling_id = ceiling.id;
+    let floor_riser_id = floor_riser.id;
+    let ceiling_riser_id = ceiling_riser.id;
 
     // And the raised tops + risers SURVIVE persist → reload → re-derive (the
     // session step areas are reconstructed from the persisted floors/roofs;
@@ -4942,12 +4949,12 @@ fn users_l_session_raised_section_wall_tops_follow_the_step() {
         .collect();
     assert_eq!(reloaded.len(), 2, "both risers re-derive after reload");
     assert!(
-        reloaded.iter().any(|r| r.id == ground_id),
-        "Ground riser keeps its id across reload"
+        reloaded.iter().any(|r| r.id == floor_riser_id),
+        "floor riser keeps its id across reload"
     );
     assert!(
-        reloaded.iter().any(|r| r.id == ceiling_id),
-        "Exposed riser keeps its id across reload"
+        reloaded.iter().any(|r| r.id == ceiling_riser_id),
+        "ceiling riser keeps its id across reload"
     );
     for sections in c.document.wall_sections.values() {
         assert!(
@@ -5027,8 +5034,8 @@ fn users_l_session_ridge_length_is_limited_to_the_raised_area_and_height_lands()
 // ─── Riser exposure: the 2D dashed-line picker ──────────────────────────────
 
 /// Helper: the 10×10 dimensioned storey with a floor step over its left half
-/// — derives one `Ground` riser wall along x = 5 — materialized and ready
-/// for exposure-mode riser picking.
+/// — derives one riser wall along x = 5 (defaulting `Unset`) — materialized
+/// and ready for exposure-mode riser picking.
 fn riser_ready_controller() -> AppController {
     let p = |x: f32, y: f32| Point2f32::new(x, y);
     let mut c = dimensioned_square_controller();
@@ -5054,7 +5061,11 @@ fn riser_tap_select_override_and_reload_round_trip() {
     let views = c.riser_views();
     assert_eq!(views.len(), 1, "one riser on the step line");
     assert_eq!(views[0].kind, RiserKind::Floor);
-    assert_eq!(views[0].exposure, WallExposure::Ground);
+    assert_eq!(
+        views[0].exposure,
+        WallExposure::Unset,
+        "risers default Unset like every other wall"
+    );
     let riser_id = views[0].id;
 
     // Tap ON the step line, mid-storey: the riser wins the pick.
@@ -5107,9 +5118,9 @@ fn riser_tap_select_override_and_reload_round_trip() {
     );
 }
 
-/// "Clear" on a selected riser reverts it to the DERIVED default for its
-/// kind (`Ground` for a floor-step riser) — and the revert also sticks
-/// across the next re-derive.
+/// "Clear" on a selected riser reverts it to the DERIVED default — `Unset`,
+/// like every other wall — and the revert also sticks across the next
+/// re-derive.
 #[test]
 fn riser_clear_reverts_to_the_derived_default() {
     let mut c = riser_ready_controller();
@@ -5123,11 +5134,44 @@ fn riser_clear_reverts_to_the_derived_default() {
     c.materialize();
     assert_eq!(
         c.riser_views()[0].exposure,
-        WallExposure::Ground,
-        "floor riser cleared back to Ground"
+        WallExposure::Unset,
+        "floor riser cleared back to Unset"
     );
     c.commit_to_ber().unwrap();
-    assert_eq!(c.riser_views()[0].exposure, WallExposure::Ground);
+    assert_eq!(c.riser_views()[0].exposure, WallExposure::Unset);
+}
+
+/// GROUND is the riser-only explicit choice (the toolbar's Ground button —
+/// DEAP ground contact applies to below-grade faces, which today only risers
+/// can be): setting it routes like any other exposure, survives the
+/// re-derive AND a full DB reload, and never recovers into painted wall
+/// sections (the Ground skip in `sections_from_wall_regions`, on top of the
+/// geometric riser mismatch).
+#[test]
+fn riser_ground_choice_persists_and_never_recovers_to_sections() {
+    let mut c = riser_ready_controller();
+    c.set_exposure_mode(true);
+    c.exposure_pointer_down(5.0, 5.0, 0.5);
+    c.set_wall_exposure(WallExposure::Ground);
+    c.materialize();
+    assert_eq!(
+        c.riser_views()[0].exposure,
+        WallExposure::Ground,
+        "the explicit Ground choice survives the amend"
+    );
+
+    c.commit_to_ber().unwrap();
+    let id = c.current_record.as_ref().unwrap().id;
+    c.open_ber(&id).unwrap();
+    assert_eq!(
+        c.riser_views()[0].exposure,
+        WallExposure::Ground,
+        "Ground survives the DB round-trip"
+    );
+    assert!(
+        c.document.wall_sections.is_empty(),
+        "the Ground riser never recovers into painted wall sections"
+    );
 }
 
 /// Pick priority: a tap on an outline wall still selects the WALL (the
@@ -5185,7 +5229,7 @@ fn riser_views_do_not_misclassify_perimeter_walls_on_the_l_scenario() {
     let risers = c.riser_views();
     assert_eq!(risers.len(), 1, "exactly the interior ceiling riser");
     assert_eq!(risers[0].kind, RiserKind::Ceiling);
-    assert_eq!(risers[0].exposure, WallExposure::Exposed, "derived default");
+    assert_eq!(risers[0].exposure, WallExposure::Unset, "derived default");
     assert!(
         (risers[0].a.0 - 6.0).abs() < 1e-4 && (risers[0].b.0 - 6.0).abs() < 1e-4,
         "riser base on the step line x = 6: {:?} {:?}",

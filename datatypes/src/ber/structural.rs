@@ -3252,7 +3252,7 @@ mod tests {
             r.exposure,
             WallExposure::SemiExposed,
             "the overridden exposure survives the amend (durability rule) — \
-             the freshly-derived Ground default never re-stamps it"
+             the caller's freshly-supplied default never re-stamps it"
         );
 
         // EXCLUSION: a riser face whose base coincides with the perimeter
@@ -3322,7 +3322,8 @@ mod tests {
         let ceiling_id = prev.regions[0].id;
         // A floor step now lands on the SAME plan line: the new derive has
         // both faces. The ceiling face keeps its id; the floor face is
-        // FRESH and takes the derived Ground default.
+        // FRESH and takes the caller's supplied default (Ground here —
+        // arbitrary for this test; the app supplies Unset).
         let walls = WallRegions::default().with_risers(
             vec![
                 (face_at(-0.3, 0.0), WallExposure::Ground),

@@ -873,8 +873,9 @@ fn roof_point_toolbar<F: FnMut(UiEvent)>(
 /// `start–end` (live with the drag handles) plus typed start/end inputs, the
 /// three type buttons that paint the current selection, and "Clear wall".
 /// With a RISER selected (a dashed line tapped): a kind label, the same type
-/// buttons (they route to the riser), and "Clear" back to the derived
-/// default — NO range controls, risers are whole-face only (v1).
+/// buttons plus a riser-only "Ground" button (they route to the riser), and
+/// "Clear" back to the derived default (`Unset`) — NO range controls, risers
+/// are whole-face only (v1).
 /// Always: "Set remaining → Exposed" bulk-marks every still-unset coverage
 /// range — whole unmarked walls and the unset gaps around painted sections.
 fn exposure_toolbar<F: FnMut(UiEvent)>(
@@ -924,11 +925,23 @@ fn exposure_toolbar<F: FnMut(UiEvent)>(
                     WallExposure::NonHeatLoss,
                 )));
             }
-            let default_label = match r.kind {
-                RiserKind::Floor => "Back to the derived default (ground contact)",
-                RiserKind::Ceiling => "Back to the derived default (exposed)",
-            };
-            if ui.button("Clear").on_hover_text(default_label).clicked() {
+            // Ground is riser-only (outline walls keep their three buttons):
+            // DEAP's ground-contact category applies to below-grade faces,
+            // which today only risers (floor/ceiling step faces) can be.
+            if ui
+                .button("Ground")
+                .on_hover_text("In contact with the ground (below grade)")
+                .clicked()
+            {
+                on_event(UiEvent::Sketch(SketchEvent::SetWallExposure(
+                    WallExposure::Ground,
+                )));
+            }
+            if ui
+                .button("Clear")
+                .on_hover_text("Back to the derived default (unset)")
+                .clicked()
+            {
                 on_event(UiEvent::Sketch(SketchEvent::ClearWallExposure));
             }
         } else if let Some(sel) = selection {
