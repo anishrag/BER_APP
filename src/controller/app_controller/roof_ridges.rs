@@ -48,17 +48,24 @@ pub(super) enum RidgeQuestion {
 }
 
 /// The in-flight roof-ridge input, advanced stage by stage: stroke →
-/// [`Length`] → ([`CrossPosition`] when un-snapped →) ([`StartPosition`]
-/// when un-snapped →) finalize → [`Height`] → assign. Session-only, outside
-/// undo; cleared on storey switch, mode exit, and cancel.
+/// ([`Length`] unless BOTH extent ends snapped →) ([`CrossPosition`] when
+/// un-snapped →) ([`StartPosition`] when NEITHER end snapped →) finalize →
+/// [`Height`] → assign. Session-only, outside undo; cleared on storey
+/// switch, mode exit, and cancel.
 ///
 /// Every stage carries the accumulating `(axis, coord_m, lo, len_m)` — the
 /// ridge's endpoints are `(coord, lo)`/`(coord, lo + len)` per the axis
 /// convention of [`AppController::ridge_endpoints`] — plus the per-stage
 /// snaps. A snapped degree of freedom skips its question (the coordinate is
-/// a reference wall's, exact by construction); its snap rides along so the
-/// tag stays clickable, ONE tag at a time — the stage owns which (see
-/// [`AppController::roof_ridge_snap_tag`]).
+/// a reference wall's, exact by construction): the CROSS snap skips the
+/// cross question, the START (lo) snap the start question, and the END (hi)
+/// snap fixes the extent's far end — with the start ALSO snapped the LENGTH
+/// is exact by construction (its question is skipped); with the start
+/// un-snapped the Length question still opens (prefilled `hi − lo`) and a
+/// typed length RE-ANCHORS at the snapped hi (`lo = hi − len`), which fixes
+/// the position DOF and skips the Start question too. Each snap rides along
+/// so the tag stays clickable, ONE tag at a time — the stage owns which
+/// (see [`AppController::roof_ridge_snap_tag`]).
 ///
 /// [`CrossPosition`]: PendingRoofRidge::CrossPosition
 /// [`StartPosition`]: PendingRoofRidge::StartPosition
@@ -68,9 +75,11 @@ pub(super) enum RidgeQuestion {
 pub(super) enum PendingRoofRidge {
     /// Question 1: the ridge LENGTH (metres along the ridge axis — the
     /// extent becomes `[lo, lo + len]`). No reference wall: it's the
-    /// ridge's own dimension. Prefilled with the drawn length, skippable;
-    /// a typed length is bounded optimistically
-    /// ([`document::validate_roof_ridge_length`]). Both snaps ride through.
+    /// ridge's own dimension. Prefilled with the drawn (possibly
+    /// end-snapped) length, skippable; a typed length is bounded
+    /// optimistically ([`document::validate_roof_ridge_length`]) and
+    /// re-anchors at a snapped hi. Skipped iff BOTH extent ends snapped
+    /// (the length is exact by construction). All three snaps ride through.
     Length {
         axis: ParameterAxis,
         coord_m: f32,
@@ -78,27 +87,31 @@ pub(super) enum PendingRoofRidge {
         len_m: f32,
         cross_snap: Option<CeilingLineSnap>,
         start_snap: Option<CeilingLineSnap>,
+        end_snap: Option<CeilingLineSnap>,
     },
     /// Question 2: the line's cross coordinate is being measured from a
     /// PARALLEL outline reference wall — the ceiling-step line prompt
     /// reused. Shell-resolved (`StoreyDoc::resolve_ceiling_line_position`);
     /// never enters the document's position-prompt loop. Implies the cross
     /// is UN-snapped: a snapped line skips this stage entirely. The START
-    /// snap (whose question comes later) rides through.
+    /// and END snaps (whose questions come later / already passed) ride
+    /// through.
     CrossPosition {
         axis: ParameterAxis,
         coord_m: f32,
         lo: f32,
         len_m: f32,
         start_snap: Option<CeilingLineSnap>,
+        end_snap: Option<CeilingLineSnap>,
         prompt: LinePositionPrompt,
     },
     /// Question 3: the extent's START (`lo`, the ridge's nearer end on the
     /// ALONG axis `axis.other()`) is being measured from a PERPENDICULAR
     /// outline reference wall — the same prompt machinery on the other
-    /// axis. Implies the start is UN-snapped. The LAST location stage: its
-    /// answer fully determines the geometry, so the finalize check runs on
-    /// the way out of it.
+    /// axis. Implies NEITHER end snapped (either snap fixes the position
+    /// DOF and skips this stage — `end_snap` is structurally absent here).
+    /// The LAST location stage: its answer fully determines the geometry,
+    /// so the finalize check runs on the way out of it.
     StartPosition {
         axis: ParameterAxis,
         coord_m: f32,
@@ -117,6 +130,7 @@ pub(super) enum PendingRoofRidge {
         len_m: f32,
         cross_snap: Option<CeilingLineSnap>,
         start_snap: Option<CeilingLineSnap>,
+        end_snap: Option<CeilingLineSnap>,
     },
 }
 
@@ -124,14 +138,21 @@ impl AppController {
     /// UI entry point: a ridge stroke (world/metre coords) drawn in
     /// roof-point mode. Fits it to an axis-aligned segment
     /// ([`StoreyDoc::fit_roof_ridge_line`] — axis + cross coordinate + the
-    /// stroke's own extent), then tries the elective wall snap on BOTH
-    /// drawn positions — the CROSS coordinate against parallel walls and
-    /// the extent's START (`lo`) against perpendicular ones
-    /// ([`StoreyDoc::snap_ceiling_step_line`] per axis) — and opens the
-    /// LENGTH question (question 1 — always asked, prefilled with the
-    /// drawn length; the snapped position questions are skipped later by
-    /// [`advance_roof_ridge`](Self::advance_roof_ridge)). A stroke that
-    /// isn't line-like or lies outside the footprint is rejected (logged).
+    /// stroke's own extent), then tries the elective wall snap on all THREE
+    /// drawn degrees of freedom — the CROSS coordinate against parallel
+    /// walls ([`StoreyDoc::snap_ceiling_step_line`], bbox extremes
+    /// excluded: a ridge along a wall makes no roof) and BOTH extent ends
+    /// (`lo`/`hi`) against perpendicular ones
+    /// ([`StoreyDoc::snap_roof_ridge_end`], bbox extremes INCLUDED: an end
+    /// on the boundary is a gable). When `lo` and `hi` would snap to the
+    /// SAME wall only the nearer end keeps its snap. Then the LENGTH
+    /// question opens (question 1, prefilled with the — possibly
+    /// end-snapped — drawn length) UNLESS both ends snapped, in which case
+    /// the length is exact by construction and the flow advances straight
+    /// to the position questions; a finalize rejection on that all-snapped
+    /// path rejects the stroke itself (logged), like a fit failure. A
+    /// stroke that isn't line-like or lies outside the footprint (+ the
+    /// end-snap tolerance) is rejected (logged).
     pub fn apply_roof_ridge_stroke_event(&mut self, world_points: &[(f32, f32)]) {
         let _ = self.sketch_engine.take_stroke_raw();
         if !self.roof_point_mode || self.roof_point_pending() || self.roof_ridge_pending() {
@@ -156,9 +177,6 @@ impl AppController {
                 return;
             }
         };
-        // The drawn length is fixed BEFORE the start snap: snapping `lo`
-        // onto a wall slides the whole extent, it doesn't stretch it.
-        let len_m = hi - lo;
         let (coord_m, cross_snap) = match self.document.snap_ceiling_step_line(axis, coord_m) {
             Some((snapped, outline_wall_vid)) => (
                 snapped,
@@ -169,7 +187,21 @@ impl AppController {
             ),
             None => (coord_m, None),
         };
-        let (lo, start_snap) = match self.document.snap_ceiling_step_line(axis.other(), lo) {
+        // Both extent ends try the end snap (extremes included). Same-wall
+        // guard: a short stroke near one wall can put both ends in
+        // tolerance of it — only the nearer end keeps its snap.
+        let mut lo_hit = self.document.snap_roof_ridge_end(axis.other(), lo);
+        let mut hi_hit = self.document.snap_roof_ridge_end(axis.other(), hi);
+        if let (Some((lc, lv)), Some((hc, hv))) = (lo_hit, hi_hit) {
+            if lv == hv {
+                if (lc - lo).abs() <= (hc - hi).abs() {
+                    hi_hit = None;
+                } else {
+                    lo_hit = None;
+                }
+            }
+        }
+        let (lo_snapped, start_snap) = match lo_hit {
             Some((snapped, outline_wall_vid)) => (
                 snapped,
                 Some(CeilingLineSnap {
@@ -179,6 +211,45 @@ impl AppController {
             ),
             None => (lo, None),
         };
+        let (hi_snapped, end_snap) = match hi_hit {
+            Some((snapped, outline_wall_vid)) => (
+                snapped,
+                Some(CeilingLineSnap {
+                    drawn_coord_m: hi,
+                    outline_wall_vid,
+                }),
+            ),
+            None => (hi, None),
+        };
+        // The extent under the snaps: a lone START snap SLIDES the drawn
+        // length (it anchors the position, it doesn't stretch); a lone END
+        // snap fixes the far end, so the segment runs drawn-lo → snapped-hi
+        // (a typed length later re-anchors at hi); BOTH snapped → the
+        // length is wall-to-wall exact by construction.
+        let (lo, len_m) = match (&start_snap, &end_snap) {
+            (Some(_), Some(_)) => (lo_snapped, hi_snapped - lo_snapped),
+            (Some(_), None) => (lo_snapped, hi - lo),
+            (None, _) => (lo, hi_snapped - lo),
+        };
+        if start_snap.is_some() && end_snap.is_some() {
+            // Both ends snapped: the Length question is skipped — advance
+            // straight to the position questions. A finalize rejection here
+            // has no open stage to land on: it rejects the STROKE (logged).
+            if let Err(e) = self.advance_roof_ridge(
+                axis,
+                coord_m,
+                lo,
+                len_m,
+                cross_snap,
+                start_snap,
+                end_snap,
+                &[RidgeQuestion::Cross, RidgeQuestion::Start],
+            ) {
+                eprintln!("roof ridge: {}", e);
+                self.pending_roof_ridge = None;
+            }
+            return;
+        }
         self.pending_roof_ridge = Some(PendingRoofRidge::Length {
             axis,
             coord_m,
@@ -186,6 +257,7 @@ impl AppController {
             len_m,
             cross_snap,
             start_snap,
+            end_snap,
         });
     }
 
@@ -193,9 +265,11 @@ impl AppController {
     /// in `remaining` whose degree of freedom is UN-snapped and has an
     /// outline reference to measure from opens its position prompt; a
     /// snapped one needs no question (its coordinate is a reference wall's,
-    /// exact by construction) and one with no reference auto-resolves (the
-    /// document logs it — the drawn value stands). No questions left → the
-    /// geometry is fully determined: run the FINALIZE placement check
+    /// exact by construction — the START question is skipped when EITHER
+    /// extent end snapped, since either fixes the position DOF) and one
+    /// with no reference auto-resolves (the document logs it — the drawn
+    /// value stands). No questions left → the geometry is fully determined:
+    /// run the FINALIZE placement check
     /// ([`document::validate_roof_ridge_extent`] against the RESOLVED
     /// roofs) and move to the Height stage.
     ///
@@ -203,7 +277,9 @@ impl AppController {
     /// whichever stage the caller was on stays open — so the `Err` lands on
     /// the prompt the user just answered (the no-late-rejection invariant's
     /// honest form: every stage validates everything knowable at it; the
-    /// full placement check runs at the last open stage).
+    /// full placement check runs at the last open stage). The one caller
+    /// with NO open stage — the all-snapped straight-from-stroke path —
+    /// drops the stroke on `Err` instead.
     #[allow(clippy::too_many_arguments)] // the accumulating ridge state — one bundle
     pub(super) fn advance_roof_ridge(
         &mut self,
@@ -213,12 +289,15 @@ impl AppController {
         len_m: f32,
         cross_snap: Option<CeilingLineSnap>,
         start_snap: Option<CeilingLineSnap>,
+        end_snap: Option<CeilingLineSnap>,
         remaining: &[RidgeQuestion],
     ) -> Result<(), String> {
         for &question in remaining {
             let (snapped, prompt_axis, coord) = match question {
                 RidgeQuestion::Cross => (cross_snap.is_some(), axis, coord_m),
-                RidgeQuestion::Start => (start_snap.is_some(), axis.other(), lo),
+                RidgeQuestion::Start => {
+                    (start_snap.is_some() || end_snap.is_some(), axis.other(), lo)
+                }
             };
             if snapped {
                 continue;
@@ -234,8 +313,11 @@ impl AppController {
                         lo,
                         len_m,
                         start_snap,
+                        end_snap,
                         prompt,
                     },
+                    // The Start question only opens when NEITHER end
+                    // snapped — `StartPosition` carries no end snap.
                     RidgeQuestion::Start => PendingRoofRidge::StartPosition {
                         axis,
                         coord_m,
@@ -270,6 +352,7 @@ impl AppController {
             len_m,
             cross_snap,
             start_snap,
+            end_snap,
         });
         Ok(())
     }
@@ -280,24 +363,29 @@ impl AppController {
     /// ([`document::validate_roof_ridge_length`] — > 1 cm and fits SOME
     /// flat, un-apexed ceiling area's bbox; no location is known yet, so
     /// the binding check is finalize's), then advance to the position
-    /// questions. When BOTH positions are snapped the finalize check runs
-    /// right here, so its rejection attaches to the typed length. The
-    /// pending ridge stays open on rejection so the user can retype. No-op
-    /// unless the length stage is up.
+    /// questions. With the extent's END snapped (and the start not), the
+    /// typed length RE-ANCHORS at the wall — `lo = hi − len`, the far end
+    /// stays exactly on the snapped coordinate — which fixes the position
+    /// DOF and skips the Start question. When both remaining positions are
+    /// snapped the finalize check runs right here, so its rejection
+    /// attaches to the typed length. The pending ridge stays open on
+    /// rejection so the user can retype. No-op unless the length stage is
+    /// up.
     pub fn assign_roof_ridge_length(&mut self, len: f32) -> Result<(), String> {
         let Some(PendingRoofRidge::Length {
             axis,
             coord_m,
             lo,
-            len_m: _,
+            len_m,
             cross_snap,
             start_snap,
+            end_snap,
         }) = self.pending_roof_ridge.as_ref()
         else {
             return Ok(()); // nothing awaiting a length — no-op
         };
-        let (axis, coord_m, lo) = (*axis, *coord_m, *lo);
-        let (cross_snap, start_snap) = (*cross_snap, *start_snap);
+        let (axis, coord_m, lo, len_m) = (*axis, *coord_m, *lo, *len_m);
+        let (cross_snap, start_snap, end_snap) = (*cross_snap, *start_snap, *end_snap);
         let idx = self.current_storey_idx.unwrap_or(0);
         // Bring the derived roofs current — the length is validated against
         // the resolved ceiling regions, not the editing buffer.
@@ -308,6 +396,13 @@ impl AppController {
             .and_then(|r| r.data.storeys.get(idx))
             .ok_or("no storey to assign a roof ridge to")?;
         document::validate_roof_ridge_length(storey, axis, len)?;
+        // A snapped hi (with the start un-snapped — both-snapped never
+        // reaches this stage) re-anchors the typed length at the wall.
+        let lo = if end_snap.is_some() && start_snap.is_none() {
+            (lo + len_m) - len
+        } else {
+            lo
+        };
         self.advance_roof_ridge(
             axis,
             coord_m,
@@ -315,13 +410,16 @@ impl AppController {
             len,
             cross_snap,
             start_snap,
+            end_snap,
             &[RidgeQuestion::Cross, RidgeQuestion::Start],
         )
     }
 
     /// Skip the pending ridge's LENGTH question — accept the drawn length
-    /// (already validated inside the footprint at fit time) and advance to
-    /// the position questions. When BOTH positions are snapped the finalize
+    /// (already validated inside the footprint at fit time; with the END
+    /// snapped the drawn length already runs to the snapped wall, so the
+    /// anchor holds with no re-anchoring) and advance to the position
+    /// questions. When the remaining positions are snapped the finalize
     /// check runs right here; its rejection keeps the Length stage open.
     /// No-op unless the length stage is up.
     pub fn skip_roof_ridge_length(&mut self) -> Result<(), String> {
@@ -332,12 +430,13 @@ impl AppController {
             len_m,
             cross_snap,
             start_snap,
+            end_snap,
         }) = self.pending_roof_ridge.as_ref()
         else {
             return Ok(()); // nothing awaiting a length — no-op
         };
         let (axis, coord_m, lo, len_m) = (*axis, *coord_m, *lo, *len_m);
-        let (cross_snap, start_snap) = (*cross_snap, *start_snap);
+        let (cross_snap, start_snap, end_snap) = (*cross_snap, *start_snap, *end_snap);
         self.advance_roof_ridge(
             axis,
             coord_m,
@@ -345,6 +444,7 @@ impl AppController {
             len_m,
             cross_snap,
             start_snap,
+            end_snap,
             &[RidgeQuestion::Cross, RidgeQuestion::Start],
         )
     }
@@ -352,25 +452,82 @@ impl AppController {
     /// The snap tag's "Don't snap": revert the SHOWING snap's degree of
     /// freedom to its DRAWN value, drop that snap, and REOPEN its skipped
     /// question (or auto-resolve onward, logged). One tag at a time, owned
-    /// by the stage ([`roof_ridge_snap_tag`](Self::roof_ridge_snap_tag)):
-    /// the START tag (at Height) un-snaps `lo` and re-asks the start
-    /// question (the resolved length + cross stand); the CROSS tag (at
-    /// StartPosition, or at Height when the start never snapped) un-snaps
-    /// `coord_m` and restarts from the cross question — re-asking an
-    /// answered start question is cheaper than remembering whether it was
-    /// answered (the roof point's restart-from-X reasoning); the resolved
-    /// length stands either way (its question came first). Deliberately NOT
-    /// routed through the generic `choose_snap`/`unsnap_last` replay —
-    /// those rewind history and re-run a stroke, but the pending ridge
-    /// lives OUTSIDE history. No-op while un-snapped or nothing is pending.
+    /// by the stage ([`roof_ridge_snap_tag`](Self::roof_ridge_snap_tag)) —
+    /// the normative un-snap transition table:
+    ///
+    /// - the END tag (at Cross or Height) reverts `hi` to its drawn value
+    ///   and reopens the LENGTH question — ALWAYS, whether or not it was
+    ///   skipped (re-asking is cheaper than remembering); the cross and
+    ///   start snaps ride;
+    /// - the START tag (at Height, when no end snap outranks it) un-snaps
+    ///   `lo` and re-asks the start question (the resolved length + cross
+    ///   stand);
+    /// - the CROSS tag (at StartPosition, or at Height when neither end
+    ///   snapped) un-snaps `coord_m` and restarts from the cross question —
+    ///   re-asking an answered start question is cheaper than remembering
+    ///   whether it was answered (the roof point's restart-from-X
+    ///   reasoning); the resolved length stands either way (its question
+    ///   came first).
+    ///
+    /// Deliberately NOT routed through the generic
+    /// `choose_snap`/`unsnap_last` replay — those rewind history and re-run
+    /// a stroke, but the pending ridge lives OUTSIDE history. No-op while
+    /// un-snapped or nothing is pending.
     pub fn unsnap_roof_ridge(&mut self) {
         let Some(pending) = self.pending_roof_ridge.take() else {
             return;
         };
         let restore = pending.clone();
         let result = match pending {
-            // START tag showing: the Height stage with a start snap (the
-            // only post-start-question stage under the Length-first order).
+            // END tag showing: any stage carrying an end snap (it outranks
+            // the others everywhere it can appear — CrossPosition and
+            // Height). Revert hi to the drawn value and reopen the Length
+            // question with the surviving snaps riding; the Length stage
+            // always opens (no auto-resolve), so this never fails.
+            PendingRoofRidge::CrossPosition {
+                axis,
+                coord_m,
+                lo,
+                len_m: _,
+                start_snap,
+                end_snap: Some(snap),
+                ..
+            }
+            | PendingRoofRidge::Height {
+                axis,
+                coord_m,
+                lo,
+                len_m: _,
+                cross_snap: _,
+                start_snap,
+                end_snap: Some(snap),
+            } => {
+                log::debug!(
+                    "roof ridge END un-snapped from outline wall {:?} back to {:.3}; \
+                     reopening the length question",
+                    snap.outline_wall_vid,
+                    snap.drawn_coord_m
+                );
+                // The cross snap rides only where it exists (at the Cross
+                // stage it is None by construction — its question is open).
+                let cross_snap = match &restore {
+                    PendingRoofRidge::Height { cross_snap, .. } => *cross_snap,
+                    _ => None,
+                };
+                self.pending_roof_ridge = Some(PendingRoofRidge::Length {
+                    axis,
+                    coord_m,
+                    lo,
+                    len_m: snap.drawn_coord_m - lo,
+                    cross_snap,
+                    start_snap,
+                    end_snap: None,
+                });
+                Ok(())
+            }
+            // START tag showing: the Height stage with a start snap and no
+            // end snap (the only post-start-question stage under the
+            // Length-first order; an end snap would outrank).
             PendingRoofRidge::Height {
                 axis,
                 coord_m,
@@ -378,6 +535,7 @@ impl AppController {
                 len_m,
                 cross_snap,
                 start_snap: Some(snap),
+                end_snap: None,
             } => {
                 log::debug!(
                     "roof ridge START un-snapped from outline wall {:?} back to {:.3}; \
@@ -392,11 +550,12 @@ impl AppController {
                     len_m,
                     cross_snap,
                     None,
+                    None,
                     &[RidgeQuestion::Start],
                 )
             }
             // CROSS tag showing: a post-cross-question stage with a cross
-            // snap (and no start snap outranking it).
+            // snap (and no start/end snap outranking it).
             PendingRoofRidge::StartPosition {
                 axis,
                 coord_m: _,
@@ -412,6 +571,7 @@ impl AppController {
                 len_m,
                 cross_snap: Some(snap),
                 start_snap: None,
+                end_snap: None,
             } => {
                 log::debug!(
                     "roof ridge CROSS un-snapped from outline wall {:?} back to {:.3}; \
@@ -424,6 +584,7 @@ impl AppController {
                     snap.drawn_coord_m,
                     lo,
                     len_m,
+                    None,
                     None,
                     None,
                     &[RidgeQuestion::Cross, RidgeQuestion::Start],
@@ -445,62 +606,93 @@ impl AppController {
 
     /// The pending ridge's wall snap as ONE standard canvas snap tag — one
     /// at a time, the STAGE owns which: the tag shown is the snap whose
-    /// question was most recently PASSED, start outranking cross. At the
-    /// Length and Cross stages no snap question has been passed yet →
-    /// no tag; from the start question onward the cross snap's tag shows
-    /// (at the segment's midpoint); at the Height stage a start snap's tag
-    /// (at the LO endpoint) outranks it — un-snapping the start drops back
-    /// to the start question, where the cross tag becomes reachable again.
-    /// `options` is EMPTY and `skippable` is true — the tag's menu offers
-    /// exactly "Don't snap", which the UI routes to
+    /// question was most recently PASSED, end outranking start outranking
+    /// cross. At the Length stage no snap question has been passed yet →
+    /// no tag; from the cross question onward an END snap's tag shows (at
+    /// the HI endpoint — the Length question, which it shapes, has been
+    /// passed); at the start question the cross snap's tag shows (at the
+    /// segment's midpoint; an end snap never coexists with an open start
+    /// question); at the Height stage end outranks start (LO endpoint)
+    /// outranks cross — un-snapping the showing one drops back to its
+    /// question, where the next tag becomes reachable again. `options` is
+    /// EMPTY and `skippable` is true — the tag's menu offers exactly
+    /// "Don't snap", which the UI routes to
     /// [`unsnap_roof_ridge`](Self::unsnap_roof_ridge) (NOT the generic
     /// choose-snap replay — the ridge is outside history). `None` while the
     /// showing stage has no snap or nothing is pending.
     pub fn roof_ridge_snap_tag(&self) -> Option<SnapTagView> {
-        let (axis, snap, is_start_tag) = match self.pending_roof_ridge.as_ref()? {
-            // Questions 1 (length) and 2 (cross) are pre-snap-question:
-            // nothing snapped that the user could reject yet (a riding
-            // snap's question hasn't arrived; the cross stage itself
-            // implies an un-snapped cross).
-            PendingRoofRidge::Length { .. } | PendingRoofRidge::CrossPosition { .. } => {
-                return None
-            }
+        #[derive(Clone, Copy)]
+        enum Tag {
+            End,
+            Start,
+            Cross,
+        }
+        let (axis, snap, tag) = match self.pending_roof_ridge.as_ref()? {
+            // Question 1 (length) is pre-snap-question: nothing snapped
+            // that the user could reject yet.
+            PendingRoofRidge::Length { .. } => return None,
+            // At the cross question the Length question has been passed:
+            // an END snap's tag shows (the cross stage itself implies an
+            // un-snapped cross; a start snap's question hasn't arrived).
+            PendingRoofRidge::CrossPosition {
+                axis,
+                end_snap: Some(snap),
+                ..
+            } => (*axis, *snap, Tag::End),
+            PendingRoofRidge::CrossPosition { .. } => return None,
             PendingRoofRidge::StartPosition {
                 axis,
                 cross_snap: Some(snap),
                 ..
-            } => (*axis, *snap, false),
+            } => (*axis, *snap, Tag::Cross),
+            PendingRoofRidge::Height {
+                axis,
+                end_snap: Some(snap),
+                ..
+            } => (*axis, *snap, Tag::End),
             PendingRoofRidge::Height {
                 axis,
                 start_snap: Some(snap),
                 ..
-            } => (*axis, *snap, true),
+            } => (*axis, *snap, Tag::Start),
             PendingRoofRidge::Height {
                 axis,
                 cross_snap: Some(snap),
                 ..
-            } => (*axis, *snap, false),
+            } => (*axis, *snap, Tag::Cross),
             _ => return None,
         };
         let ((ax, ay), (bx, by)) = self.pending_roof_ridge_line()?;
-        let (pos, from) = if is_start_tag {
+        let (pos, from) = match tag {
             // The START tag sits on the LO endpoint; its identity is the
             // endpoint at the drawn start coordinate (the un-snap target).
-            let pos = (ax as f32, ay as f32);
-            let from = match axis {
-                ParameterAxis::X => (pos.0, snap.drawn_coord_m),
-                ParameterAxis::Y => (snap.drawn_coord_m, pos.1),
-            };
-            (pos, from)
-        } else {
+            Tag::Start => {
+                let pos = (ax as f32, ay as f32);
+                let from = match axis {
+                    ParameterAxis::X => (pos.0, snap.drawn_coord_m),
+                    ParameterAxis::Y => (snap.drawn_coord_m, pos.1),
+                };
+                (pos, from)
+            }
+            // The END tag mirrors it on the HI endpoint.
+            Tag::End => {
+                let pos = (bx as f32, by as f32);
+                let from = match axis {
+                    ParameterAxis::X => (pos.0, snap.drawn_coord_m),
+                    ParameterAxis::Y => (snap.drawn_coord_m, pos.1),
+                };
+                (pos, from)
+            }
             // The CROSS tag sits at the segment midpoint; its identity is
             // the same midpoint at the pre-snap cross coordinate.
-            let mid = (((ax + bx) / 2.0) as f32, ((ay + by) / 2.0) as f32);
-            let from = match axis {
-                ParameterAxis::X => (snap.drawn_coord_m, mid.1),
-                ParameterAxis::Y => (mid.0, snap.drawn_coord_m),
-            };
-            (mid, from)
+            Tag::Cross => {
+                let mid = (((ax + bx) / 2.0) as f32, ((ay + by) / 2.0) as f32);
+                let from = match axis {
+                    ParameterAxis::X => (snap.drawn_coord_m, mid.1),
+                    ParameterAxis::Y => (mid.0, snap.drawn_coord_m),
+                };
+                (mid, from)
+            }
         };
         Some(SnapTagView {
             pos,
@@ -656,17 +848,21 @@ impl AppController {
         }
     }
 
-    /// True when the open LENGTH question's extent is ANCHORED — its start
+    /// True when the open LENGTH question's extent is ANCHORED — an end
     /// snapped onto a wall, so a typed length extends from that exact
-    /// coordinate (the length panel's "from the highlighted end" hover
-    /// shows only then). False on every other stage and while the start is
-    /// un-snapped (a typed length still anchors at the drawn `lo`, but
-    /// nothing is exact to point at).
+    /// coordinate (from a snapped start, or BACK from a snapped hi — the
+    /// re-anchor; the length panel's "from the highlighted end" hover shows
+    /// only then). False on every other stage and while neither end is
+    /// snapped (a typed length still anchors at the drawn `lo`, but nothing
+    /// is exact to point at).
     pub fn roof_ridge_length_anchored(&self) -> bool {
         matches!(
             self.pending_roof_ridge,
             Some(PendingRoofRidge::Length {
                 start_snap: Some(_),
+                ..
+            }) | Some(PendingRoofRidge::Length {
+                end_snap: Some(_),
                 ..
             })
         )

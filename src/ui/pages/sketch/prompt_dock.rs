@@ -912,9 +912,9 @@ fn roof_point_toolbar<F: FnMut(UiEvent)>(
                 .desired_width(60.0)
                 .hint_text("e.g. 6.0"),
         );
-        // "(from the highlighted end)" only when an end is ANCHORED — the
-        // extent's start snapped onto a wall, so the typed length extends
-        // from that exact coordinate.
+        // "(from the highlighted end)" only when an end is ANCHORED — an
+        // extent end snapped onto a wall, so the typed length extends from
+        // (or, for a snapped far end, back from) that exact coordinate.
         let set_hover = if ridge_length_anchored {
             "Use exactly this ridge length (from the highlighted end)"
         } else {

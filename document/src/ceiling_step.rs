@@ -242,6 +242,35 @@ impl StoreyDoc {
         axis: ParameterAxis,
         coord_m: f32,
     ) -> Option<(f32, VertexId)> {
+        self.snap_line_to_reference_wall(axis, coord_m, false)
+    }
+
+    /// Snap a ridge EXTENT END coordinate (on the ALONG axis `axis.other()`
+    /// — callers pass that axis directly) onto the nearest parallel outline
+    /// wall within [`CEILING_LINE_SNAP_TOL_M`], INCLUDING walls at the
+    /// outline bbox extremes — a ridge end on the boundary is a GABLE, not a
+    /// no-op (the one deliberate difference from
+    /// [`snap_ceiling_step_line`](Self::snap_ceiling_step_line); the cross
+    /// coordinate keeps the exclusion — a ridge lying ALONG a wall still
+    /// makes no roof). Returns `(snapped coordinate, outline wall vid)`,
+    /// nearest wall wins; `None` beyond tolerance.
+    pub fn snap_roof_ridge_end(
+        &self,
+        axis: ParameterAxis,
+        coord_m: f32,
+    ) -> Option<(f32, VertexId)> {
+        self.snap_line_to_reference_wall(axis, coord_m, true)
+    }
+
+    /// The shared body of the two line snaps: the deduped parallel reference
+    /// walls on `axis`, optionally excluding the outline bbox extremes,
+    /// nearest within [`CEILING_LINE_SNAP_TOL_M`] wins.
+    fn snap_line_to_reference_wall(
+        &self,
+        axis: ParameterAxis,
+        coord_m: f32,
+        include_extremes: bool,
+    ) -> Option<(f32, VertexId)> {
         let ((min_x, min_y), (max_x, max_y)) = self.outline.floor_plan.bounding_box()?;
         let (lo, hi) = match axis {
             ParameterAxis::X => (min_x, max_x),
@@ -249,7 +278,10 @@ impl StoreyDoc {
         };
         reference_walls(&self.outline.floor_plan, axis)
             .into_iter()
-            .filter(|(_, c)| (c - lo).abs() > LINE_CROSS_TOL && (c - hi).abs() > LINE_CROSS_TOL)
+            .filter(|(_, c)| {
+                include_extremes
+                    || ((c - lo).abs() > LINE_CROSS_TOL && (c - hi).abs() > LINE_CROSS_TOL)
+            })
             .map(|(vid, c)| (vid, c, (c - coord_m).abs()))
             .filter(|(_, _, d)| *d <= CEILING_LINE_SNAP_TOL_M)
             .min_by(|a, b| a.2.total_cmp(&b.2))
@@ -629,6 +661,39 @@ mod tests {
         // No outline at all → nothing to snap to.
         assert!(StoreyDoc::default()
             .snap_ceiling_step_line(ParameterAxis::X, 1.0)
+            .is_none());
+    }
+
+    /// `snap_roof_ridge_end`: the ceiling-line snap WITH the bbox extremes —
+    /// a ridge end on the boundary is a gable. Extreme and interior walls
+    /// both qualify, nearest wins, beyond tolerance is no snap.
+    #[test]
+    fn ridge_end_snap_includes_bbox_extreme_walls() {
+        let doc = storey_staircase();
+        // Near the x = 0 extreme: the step-line snap refuses, the ridge-end
+        // snap lands ON the boundary.
+        assert!(doc.snap_ceiling_step_line(ParameterAxis::X, 0.1).is_none());
+        let (coord, _) = doc
+            .snap_roof_ridge_end(ParameterAxis::X, 0.1)
+            .expect("extreme wall snaps for a ridge end");
+        assert!(coord.abs() < 1e-6);
+        // Near the x = 10 extreme.
+        let (coord, _) = doc.snap_roof_ridge_end(ParameterAxis::X, 9.9).unwrap();
+        assert!((coord - 10.0).abs() < 1e-6);
+        // Interior walls still snap identically (x = 6.9 → nearest is 7).
+        let (coord, _) = doc.snap_roof_ridge_end(ParameterAxis::X, 6.9).unwrap();
+        assert!((coord - 7.0).abs() < 1e-6);
+        // Beyond tolerance: nothing.
+        assert!(doc.snap_roof_ridge_end(ParameterAxis::X, 5.0).is_none());
+        // A plain rectangle's ONLY walls are extremes: the ridge end snaps
+        // where the step line never could.
+        let rect = storey_10x6();
+        let (coord, _) = rect.snap_roof_ridge_end(ParameterAxis::Y, 5.9).unwrap();
+        assert!((coord - 6.0).abs() < 1e-6);
+        assert!(rect.snap_ceiling_step_line(ParameterAxis::Y, 5.9).is_none());
+        // No outline at all → nothing to snap to.
+        assert!(StoreyDoc::default()
+            .snap_roof_ridge_end(ParameterAxis::X, 1.0)
             .is_none());
     }
 

@@ -292,12 +292,14 @@ impl AppController {
             lo,
             len_m,
             start_snap,
+            end_snap,
             prompt,
             ..
         }) = self.pending_roof_ridge.as_ref()
         {
             let coord_m = self.document.resolve_ceiling_line_position(prompt, value)?;
-            let (axis, lo, len_m, start_snap) = (*axis, *lo, *len_m, *start_snap);
+            let (axis, lo, len_m, start_snap, end_snap) =
+                (*axis, *lo, *len_m, *start_snap, *end_snap);
             // Cross stage implies the cross was un-snapped — none to carry.
             return self.advance_roof_ridge(
                 axis,
@@ -306,6 +308,7 @@ impl AppController {
                 len_m,
                 None,
                 start_snap,
+                end_snap,
                 &[RidgeQuestion::Start],
             );
         }
@@ -320,8 +323,8 @@ impl AppController {
         {
             let lo = self.document.resolve_ceiling_line_position(prompt, value)?;
             let (axis, coord_m, len_m, cross_snap) = (*axis, *coord_m, *len_m, *cross_snap);
-            // Start stage implies the start was un-snapped — none to carry.
-            return self.advance_roof_ridge(axis, coord_m, lo, len_m, cross_snap, None, &[]);
+            // Start stage implies NEITHER end was snapped — none to carry.
+            return self.advance_roof_ridge(axis, coord_m, lo, len_m, cross_snap, None, None, &[]);
         }
         let undo_snap = self.current_history_snapshot();
         self.document.apply_position(value)?;
@@ -384,11 +387,12 @@ impl AppController {
             lo,
             len_m,
             start_snap,
+            end_snap,
             ..
         }) = self.pending_roof_ridge.as_ref()
         {
-            let (axis, coord_m, lo, len_m, start_snap) =
-                (*axis, *coord_m, *lo, *len_m, *start_snap);
+            let (axis, coord_m, lo, len_m, start_snap, end_snap) =
+                (*axis, *coord_m, *lo, *len_m, *start_snap, *end_snap);
             if let Err(e) = self.advance_roof_ridge(
                 axis,
                 coord_m,
@@ -396,6 +400,7 @@ impl AppController {
                 len_m,
                 None,
                 start_snap,
+                end_snap,
                 &[RidgeQuestion::Start],
             ) {
                 log::warn!("roof ridge skip rejected: {e}");
@@ -413,7 +418,8 @@ impl AppController {
         {
             let (axis, coord_m, lo, len_m, cross_snap) =
                 (*axis, *coord_m, *lo, *len_m, *cross_snap);
-            if let Err(e) = self.advance_roof_ridge(axis, coord_m, lo, len_m, cross_snap, None, &[])
+            if let Err(e) =
+                self.advance_roof_ridge(axis, coord_m, lo, len_m, cross_snap, None, None, &[])
             {
                 log::warn!("roof ridge skip rejected: {e}");
             }

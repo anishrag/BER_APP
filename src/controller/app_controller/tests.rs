@@ -4644,7 +4644,7 @@ fn roof_ridge_stage_order_table() {
         }
         "none"
     }
-    let rows: [(&str, [(f32, f32); 2], &[&str]); 3] = [
+    let rows: [(&str, [(f32, f32); 2], &[&str]); 5] = [
         (
             "no snaps",
             [(2.78, 1.0), (2.8, 3.0)],
@@ -4659,6 +4659,20 @@ fn roof_ridge_stage_order_table() {
             "start snapped (y ≈ 4.1 → 4)",
             [(2.78, 4.1), (2.8, 8.5)],
             &["len", "cross", "height"],
+        ),
+        (
+            // The END snap fixes the position DOF: Start is skipped, but
+            // the Length question still opens (one end free).
+            "end snapped (hi ≈ 9.9 → 10, a bbox extreme)",
+            [(2.78, 5.0), (2.8, 9.9)],
+            &["len", "cross", "height"],
+        ),
+        (
+            // BOTH ends snapped: the length is exact by construction —
+            // Length AND Start are skipped.
+            "both ends snapped (wall to wall)",
+            [(2.78, 0.1), (2.8, 9.9)],
+            &["cross", "height"],
         ),
     ];
     for (name, stroke, want) in rows {
@@ -4684,20 +4698,92 @@ fn roof_ridge_stage_order_table() {
     }
 }
 
-/// The ALL-SNAPPED row of the stage table: with BOTH positions snapped no
-/// location question opens, so the finalize placement check runs straight
-/// off the Length stage and its rejection lands on the typed length. In the
-/// L footprint the cross snap (x ≈ 5.9 → 6) and start snap (y ≈ 4.1 → 4)
-/// put the ridge ALONG the upper arm's right wall x = 6 — its midpoint
-/// sits on the boundary, in no ceiling area — which finalize rejects; the
-/// Length stage stays open (Cancel recovers). (A boundary START is legal
-/// now — the gable feature — but a ridge along a wall still makes no roof.)
+/// THE WALL-TO-WALL DRAW, end to end (the S4 gate): a stroke whose BOTH
+/// extent ends land within snap tolerance of opposite outline walls — bbox
+/// extremes INCLUDED, the deliberate difference from the step-line snap —
+/// snaps both ends, which makes the length exact by construction: the
+/// LENGTH question is skipped, the cross question opens (with the END tag
+/// showing — its question, the Length, has been passed), the START question
+/// is skipped (the position DOF is fixed), finalize allows the boundary
+/// touch, and one typed height lands the GABLE ridge: apexes exactly ON
+/// both walls, the end walls carrying the triangular gable top.
 #[test]
-fn roof_ridge_all_snapped_finalize_rejection_lands_on_the_length() {
+fn roof_ridge_wall_to_wall_draw_succeeds_end_to_end() {
+    let mut c = ceiling_ready_l_controller();
+    c.set_roof_point_mode(true);
+    // Vertical stroke at x ≈ 2.8 (no parallel wall within 0.2), running
+    // y ≈ 0.1 → 9.9: lo snaps to the bbox-extreme wall y = 0, hi to y = 10.
+    c.apply_roof_ridge_stroke_event(&[(2.78, 0.1), (2.8, 9.9)]);
+    assert!(
+        !c.roof_ridge_length_pending(),
+        "both ends snapped → the length is exact by construction, no question"
+    );
+    let ui = c
+        .position_prompt_for_ui()
+        .expect("the cross question opens");
+    assert_eq!(ui.axis, ParameterAxis::X);
+    let ((_, ay), (_, by)) = c.pending_roof_ridge_line().unwrap();
+    assert!(
+        ay.abs() < 1e-6 && (by - 10.0).abs() < 1e-6,
+        "extent wall to wall, exact"
+    );
+    // The END tag shows at the cross stage (its question — the Length —
+    // has been passed; end outranks the riding start snap), at the HI end.
+    let tag = c.roof_ridge_snap_tag().expect("end tag at the cross stage");
+    assert!((tag.pos.1 - 10.0).abs() < 1e-4, "tag at the HI endpoint");
+    assert!((tag.from.1 - 9.9).abs() < 0.05, "identity = the drawn end");
+    assert!(tag.options.is_empty() && tag.skippable, "Don't snap only");
+
+    c.skip_position_dimension(); // cross: drawn x ≈ 2.8 stands
+    assert!(
+        c.roof_ridge_height_pending(),
+        "start skipped (either end snap fixes the position) → height"
+    );
+    c.assign_roof_ridge_height(4.0)
+        .expect("the wall-to-wall gable ridge assigns");
+    assert!(!c.roof_ridge_pending(), "flow complete");
+    c.materialize();
+    let storey = &c.current_record.as_ref().unwrap().data.storeys[0];
+    assert_eq!(storey.roof_apexes.len(), 2, "both apexes durable");
+    for (apex, want_y) in storey.roof_apexes.iter().zip([0.0, 10.0]) {
+        assert!(
+            (apex.point.y - want_y).abs() < 1e-9,
+            "apex exactly ON the wall (got {:?})",
+            apex.point
+        );
+    }
+    // The end walls carry the triangular gable top (the apex vertex on the
+    // wall's top profile) — straight out of WallRegions::regenerate.
+    let gable_walls = storey
+        .walls
+        .regions
+        .iter()
+        .filter(|w| {
+            w.polygon.exterior.iter().any(|v| {
+                (v.z - 4.0).abs() < 1e-6 && (v.y.abs() < 1e-6 || (v.y - 10.0).abs() < 1e-6)
+            })
+        })
+        .count();
+    assert_eq!(gable_walls, 2, "both end walls carry the gable apex");
+    assert!(
+        c.ceiling_step_regions.get(&0).is_none(),
+        "a gable over the default base needs no session step state"
+    );
+}
+
+/// The all-snapped REJECTION path that remains: cross + start snaps that
+/// put the ridge ALONG a wall (here the upper arm's right wall x = 6 — the
+/// midpoint sits on the boundary, in no ceiling area). The end is NOT
+/// snapped, so the Length question opens and the finalize rejection lands
+/// on the typed length; the Length stage stays open (Cancel recovers). A
+/// boundary START is legal now — the gable feature — but a ridge along a
+/// wall still makes no roof.
+#[test]
+fn roof_ridge_along_a_wall_rejection_lands_on_the_length() {
     let mut c = ceiling_ready_l_controller();
     c.set_roof_point_mode(true);
     // x ≈ 5.9 → snaps 6; lo ≈ 4.1 → snaps 4: the ridge runs up the wall
-    // x = 6 from the corner (6, 4).
+    // x = 6 from the corner (6, 4). hi = 8.5 is beyond every snap.
     c.apply_roof_ridge_stroke_event(&[(5.88, 4.1), (5.9, 8.5)]);
     assert!(c.roof_ridge_length_pending(), "length is question 1");
     let ((ax, ay), _) = c.pending_roof_ridge_line().unwrap();
@@ -4716,6 +4802,214 @@ fn roof_ridge_all_snapped_finalize_rejection_lands_on_the_length() {
     assert!(err.contains("doesn't sit inside a ceiling area"), "{err}");
     c.cancel_pending_roof_ridge();
     assert!(!c.roof_ridge_pending(), "cancel recovers");
+}
+
+/// A snapped HI end with the start un-snapped: the Length question still
+/// opens (prefilled with the snapped-end run, reported ANCHORED) and a
+/// typed length RE-ANCHORS at the wall — `lo = hi − len`, the far end stays
+/// exactly on the snapped coordinate — which fixes the position DOF and
+/// skips the Start question too.
+#[test]
+fn roof_ridge_end_snap_reanchors_a_typed_length_at_the_wall() {
+    let mut c = ceiling_ready_l_controller();
+    c.set_roof_point_mode(true);
+    // Vertical stroke y 5.0 → 9.9: hi snaps to y = 10, lo (1 m from the
+    // interior wall y = 4) does not.
+    c.apply_roof_ridge_stroke_event(&[(2.78, 5.0), (2.8, 9.9)]);
+    assert!(c.roof_ridge_length_pending(), "length opens (one end free)");
+    assert!(
+        c.roof_ridge_length_anchored(),
+        "snapped hi anchors the extent"
+    );
+    let prefill = c.pending_roof_ridge_length().unwrap();
+    assert!(
+        (prefill - 5.0).abs() < 1e-4,
+        "prefill runs drawn-lo → snapped-hi (got {prefill})"
+    );
+    // A typed 3 m re-anchors at the wall: lo = 10 − 3 = 7.
+    c.assign_roof_ridge_length(3.0).expect("length re-anchors");
+    let ((_, ay), (_, by)) = c.pending_roof_ridge_line().unwrap();
+    assert!(
+        (ay - 7.0).abs() < 1e-6 && (by - 10.0).abs() < 1e-6,
+        "far end pinned to the wall, start re-anchored"
+    );
+    c.skip_position_dimension(); // cross: drawn stands
+    assert!(
+        c.roof_ridge_height_pending(),
+        "start skipped — the hi snap fixed the position"
+    );
+    c.assign_roof_ridge_height(4.0).expect("gable end assigns");
+    let storey = &c.current_record.as_ref().unwrap().data.storeys[0];
+    for (apex, want_y) in storey.roof_apexes.iter().zip([7.0, 10.0]) {
+        assert!((apex.point.y - want_y).abs() < 1e-6);
+    }
+}
+
+/// The SAME-WALL guard: a short stroke with both ends in tolerance of ONE
+/// wall keeps only the NEARER end's snap — the other end stays drawn, so
+/// the ridge never collapses to a point on the wall.
+#[test]
+fn roof_ridge_same_wall_snap_keeps_only_the_nearer_end() {
+    let mut c = ceiling_ready_l_controller();
+    c.set_roof_point_mode(true);
+    // Both ends within 0.2 of y = 4 (the interior wall): lo at 3.9 (0.1
+    // away), hi at 4.15 (0.15 away) — the LO end is nearer and keeps it.
+    c.apply_roof_ridge_stroke_event(&[(2.78, 3.9), (2.8, 4.15)]);
+    assert!(c.roof_ridge_length_pending());
+    let ((_, ay), (_, by)) = c.pending_roof_ridge_line().unwrap();
+    assert!((ay - 4.0).abs() < 1e-6, "nearer LO end snapped to the wall");
+    assert!(
+        (by - 4.25).abs() < 1e-4,
+        "HI end keeps the drawn length from the snapped lo (got {by})"
+    );
+    c.cancel_pending_roof_ridge();
+}
+
+/// THE UN-SNAP TRANSITION TABLE (design §2, normative), table-driven: which
+/// tag shows where, what its "Don't snap" reverts, and which question
+/// reopens. END → the Length question (always), surviving snaps ride;
+/// START → the start question (resolved length + cross stand); CROSS → the
+/// cross question, restarting through Start (resolved length stands).
+#[test]
+fn roof_ridge_unsnap_transition_table() {
+    // The pending ridge's stage as a short label (vertical strokes only:
+    // an X-axis prompt is the cross question, Y the start).
+    fn stage(c: &AppController) -> &'static str {
+        if c.roof_ridge_length_pending() {
+            return "len";
+        }
+        if c.roof_ridge_height_pending() {
+            return "height";
+        }
+        if c.roof_ridge_position_pending() {
+            let ui = c.position_prompt_for_ui().expect("prompt at a position");
+            return match ui.axis {
+                ParameterAxis::X => "cross",
+                ParameterAxis::Y => "start",
+            };
+        }
+        "none"
+    }
+    // (name, stroke, skips to reach the tag's stage, the stage the tag
+    //  shows at, tag position (x, y), stage after un-snap, the reverted
+    //  drawn coordinate as (axis-of-line-check, expected value)).
+    struct Row {
+        name: &'static str,
+        stroke: [(f32, f32); 2],
+        skips: usize,
+        tag_stage: &'static str,
+        tag_pos: (f32, f32),
+        after: &'static str,
+        // Check on the pending line after un-snap: (what, expected).
+        revert: fn(&AppController) -> f64,
+        expect: f64,
+    }
+    let rows = [
+        Row {
+            // END tag at the HEIGHT stage (end-only snap): un-snap reverts
+            // hi to the drawn 9.9 and reopens the LENGTH question.
+            name: "end tag at height",
+            stroke: [(2.78, 5.0), (2.8, 9.9)],
+            skips: 2, // length, cross (start auto-skipped) → height
+            tag_stage: "height",
+            tag_pos: (2.8, 10.0),
+            after: "len",
+            revert: |c| c.pending_roof_ridge_line().unwrap().1 .1, // hi
+            expect: 9.9,
+        },
+        Row {
+            // END tag at the CROSS stage (both ends snapped — the Length
+            // was skipped by construction): un-snap reopens the LENGTH;
+            // the START snap rides (the extent stays anchored at y = 0).
+            name: "end tag at cross",
+            stroke: [(2.78, 0.1), (2.8, 9.9)],
+            skips: 0, // straight to the cross question
+            tag_stage: "cross",
+            tag_pos: (2.8, 10.0),
+            after: "len",
+            revert: |c| c.pending_roof_ridge_line().unwrap().1 .1, // hi
+            expect: 9.9,
+        },
+        Row {
+            // START tag at the HEIGHT stage (start-only snap): un-snap
+            // reverts lo to the drawn 4.1 and reopens the START question.
+            name: "start tag at height",
+            stroke: [(2.78, 4.1), (2.8, 8.5)],
+            skips: 2, // length, cross → height (start was skipped)
+            tag_stage: "height",
+            tag_pos: (2.8, 4.0),
+            after: "start",
+            revert: |c| c.pending_roof_ridge_line().unwrap().0 .1, // lo
+            expect: 4.1,
+        },
+        Row {
+            // CROSS tag at the START stage: un-snap reverts the coordinate
+            // to the drawn 5.9 and restarts from the CROSS question.
+            name: "cross tag at start",
+            stroke: [(5.88, 0.5), (5.9, 3.5)],
+            skips: 1, // length → start (cross was skipped)
+            tag_stage: "start",
+            tag_pos: (6.0, 2.0),
+            after: "cross",
+            revert: |c| c.pending_roof_ridge_line().unwrap().0 .0, // coord
+            expect: 5.9,
+        },
+        Row {
+            // CROSS tag at the HEIGHT stage (nothing else snapped):
+            // un-snap restarts from the CROSS question through Start.
+            name: "cross tag at height",
+            stroke: [(5.88, 0.5), (5.9, 3.5)],
+            skips: 2, // length, start → height
+            tag_stage: "height",
+            tag_pos: (6.0, 2.0),
+            after: "cross",
+            revert: |c| c.pending_roof_ridge_line().unwrap().0 .0, // coord
+            expect: 5.9,
+        },
+    ];
+    for row in rows {
+        let mut c = ceiling_ready_l_controller();
+        c.set_roof_point_mode(true);
+        c.apply_roof_ridge_stroke_event(&row.stroke);
+        for _ in 0..row.skips {
+            if c.roof_ridge_length_pending() {
+                c.skip_roof_ridge_length()
+                    .unwrap_or_else(|e| panic!("{}: length skip rejected: {e}", row.name));
+            } else {
+                c.skip_position_dimension();
+            }
+        }
+        assert_eq!(stage(&c), row.tag_stage, "{}: tag stage", row.name);
+        let tag = c
+            .roof_ridge_snap_tag()
+            .unwrap_or_else(|| panic!("{}: tag missing", row.name));
+        assert!(
+            (tag.pos.0 - row.tag_pos.0).abs() < 0.05 && (tag.pos.1 - row.tag_pos.1).abs() < 0.05,
+            "{}: tag at {:?}, want {:?}",
+            row.name,
+            tag.pos,
+            row.tag_pos
+        );
+        c.unsnap_roof_ridge();
+        assert_eq!(stage(&c), row.after, "{}: reopened question", row.name);
+        let got = (row.revert)(&c);
+        assert!(
+            (got - row.expect).abs() < 0.05,
+            "{}: reverted to {got}, want {}",
+            row.name,
+            row.expect
+        );
+        // One tag at a time: the clicked tag is gone. (Another snap's tag
+        // may surface later, once its question is passed again — but never
+        // at the reopened question itself for the un-snapped DOF.)
+        if let Some(t) = c.roof_ridge_snap_tag() {
+            assert!(
+                (t.pos.0 - tag.pos.0).abs() > 0.05 || (t.pos.1 - tag.pos.1).abs() > 0.05,
+                "{}: the un-snapped tag must not still show",
+                row.name
+            );
+        }
+    }
 }
 
 /// Finalize at the CROSS stage: when the start snapped, the cross question
