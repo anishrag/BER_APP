@@ -39,8 +39,9 @@ pub use position::{PositionOption, PositionPrompt, PositionPromptKind};
 pub use resolve::{ensure_storey_constructions, resolve_storey};
 pub use roof_point::{
     centred_rect_lo, centred_ridge_cross, centred_ridge_start, validate_roof_apex,
-    validate_roof_rect_lengths, validate_roof_rect_placement, validate_roof_rect_ridge,
-    validate_roof_ridge, validate_roof_ridge_extent, validate_roof_ridge_length,
+    validate_roof_rect_length, validate_roof_rect_lengths, validate_roof_rect_placement,
+    validate_roof_rect_ridge, validate_roof_ridge, validate_roof_ridge_extent,
+    validate_roof_ridge_length,
 };
 pub use step::{inherited_step_regions, step_regions_from_floors, StepRegion};
 

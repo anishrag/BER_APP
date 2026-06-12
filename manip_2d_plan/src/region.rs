@@ -73,17 +73,7 @@ pub(crate) fn clip_stroke_inside(
     if allow_outside {
         return points.to_vec();
     }
-    let ends_meet = points
-        .first()
-        .zip(points.last())
-        .map(|(a, b)| ((a.x - b.x).powi(2) + (a.y - b.y).powi(2)).sqrt() < close_gap_m)
-        .unwrap_or(false);
-    // A genuine CLOSED loop both meets its ends AND encloses real area. A short
-    // straight CUT whose ends merely fall within `close_gap_m` is NOT a loop —
-    // clipping it as one collapses it to a degenerate sliver and the cut is then
-    // lost. Keep it OPEN so the cut solver sees the real line.
-    let closed = points.len() >= 3 && ends_meet && encloses_area(points);
-    if closed {
+    if stroke_is_closed(points, close_gap_m) {
         if let Some(clipped) = clip_loop_to_outline(outline, points) {
             return clipped;
         }
@@ -91,12 +81,28 @@ pub(crate) fn clip_stroke_inside(
     clamp_inside(outline, points)
 }
 
+/// THE closed-loop classification, single-sourced (public, re-exported as
+/// `stroke_is_closed`): a genuine CLOSED loop both meets its ends (within
+/// `gap_m`) AND encloses real area ([`encloses_area`]). A short straight CUT
+/// whose ends merely fall within the gap is NOT a loop — the carve clipping
+/// it as one collapses it to a degenerate sliver and the cut is then lost,
+/// and a short roof-ridge stroke must stay a LINE, not become a flat-top
+/// rect. Used by the carve's first-stage clip ([`clip_stroke_inside`]) and
+/// the shell's roof-stroke routing.
+pub fn stroke_is_closed(pts: &[Point2f32], gap_m: f32) -> bool {
+    let ends_meet = pts
+        .first()
+        .zip(pts.last())
+        .map(|(a, b)| ((a.x - b.x).powi(2) + (a.y - b.y).powi(2)).sqrt() < gap_m)
+        .unwrap_or(false);
+    pts.len() >= 3 && ends_meet && encloses_area(pts)
+}
+
 /// Whether `pts` enclose real area (a drawn ROOM) rather than being a near-
 /// straight line whose ends happen to fall close together (a short CUT). The
 /// enclosed (shoelace) area must be a real fraction of the stroke's extent.
-/// Public (re-exported as `stroke_encloses_area`): the roof-rect stroke
-/// routing applies the SAME closed-loop classification the carve does —
-/// ends within `close_gap_m` AND enclosing real area.
+/// Public (re-exported as `stroke_encloses_area`); [`stroke_is_closed`]
+/// combines it with the ends-meet test.
 pub fn encloses_area(pts: &[Point2f32]) -> bool {
     let Some(((x0, y0), (x1, y1))) = geom::bbox(pts) else {
         return false;

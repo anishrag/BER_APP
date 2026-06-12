@@ -147,12 +147,14 @@ impl AppController {
     }
 
     /// Set the pending rect's open SIDE LENGTH (LenX or LenY): materialize,
-    /// validate both lengths progressively
-    /// ([`document::validate_roof_rect_lengths`] — the optimistic per-axis
-    /// bbox bound; the binding check is finalize's), stamp the typed value
-    /// (the LO corner stays anchored), and advance — LenX → LenY, LenY →
-    /// the position questions. The pending rect stays open on rejection.
-    /// No-op unless a length stage is up.
+    /// validate the TYPED value on the open stage's axis only
+    /// ([`document::validate_roof_rect_length`] — the optimistic per-axis
+    /// bbox bound; the OTHER axis's drawn length is its own stage's to
+    /// reject, or finalize's when skipped, so a bad drawn depth never
+    /// rejects a good typed width; the binding check is finalize's), stamp
+    /// the typed value (the LO corner stays anchored), and advance — LenX →
+    /// LenY, LenY → the position questions. The pending rect stays open on
+    /// rejection. No-op unless a length stage is up.
     pub fn assign_roof_rect_length(&mut self, len_m: f32) -> Result<(), String> {
         let Some(PendingRoofRect::LenX { lo, len } | PendingRoofRect::LenY { lo, len }) =
             self.pending_roof_rect.as_ref()
@@ -161,6 +163,11 @@ impl AppController {
         };
         let (lo, len) = (*lo, *len);
         let on_x = matches!(self.pending_roof_rect, Some(PendingRoofRect::LenX { .. }));
+        let axis = if on_x {
+            ParameterAxis::X
+        } else {
+            ParameterAxis::Y
+        };
         let proposed = if on_x { (len_m, len.1) } else { (len.0, len_m) };
         let idx = self.current_storey_idx.unwrap_or(0);
         self.materialize();
@@ -169,7 +176,7 @@ impl AppController {
             .as_ref()
             .and_then(|r| r.data.storeys.get(idx))
             .ok_or("no storey to assign a roof rect to")?;
-        document::validate_roof_rect_lengths(storey, proposed.0, proposed.1)?;
+        document::validate_roof_rect_length(storey, axis, len_m)?;
         if on_x {
             self.pending_roof_rect = Some(PendingRoofRect::LenY { lo, len: proposed });
             Ok(())

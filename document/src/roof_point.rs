@@ -479,6 +479,10 @@ pub fn validate_roof_ridge_length(
 /// - Each end must be claimed by exactly that region
 ///   ([`check_end_claims`] — an end on an INTERNAL shared boundary is
 ///   rejected here, not at the Height stage).
+/// - The ridge must not fold over the region's boundary
+///   ([`ridge_hub_switches`] ≤ 2 over the quantized prospective ends — the
+///   Height stage re-checks, but rejecting a notched region HERE keeps the
+///   no-late-rejection invariant: no height could fix it).
 /// - The length is re-guarded cheaply (> 1 cm): the SKIP path accepts the
 ///   drawn length without the Length stage's validation.
 ///
@@ -559,6 +563,24 @@ pub fn validate_roof_ridge_extent(
     };
     for q in [qa, qb] {
         check_end_claims(storey, RoofApex::quantize_point(q), ridx)?;
+    }
+    // The foldover fence, on the quantized prospective ends — the SAME check
+    // the Height stage re-runs ([`validate_roof_ridge`]'s hub-switch guard).
+    // Without it a notched region passes finalize and is rejected LATE, at
+    // the Height stage, where no typed height can fix it.
+    let ring: Vec<Point2f64> = region
+        .polygon
+        .exterior
+        .iter()
+        .map(|v| Point2f64::new(v.x, v.y))
+        .collect();
+    if ridge_hub_switches(
+        &ring,
+        RoofApex::quantize_point(qa),
+        RoofApex::quantize_point(qb),
+    ) > 2
+    {
+        return Err(RIDGE_TOO_IRREGULAR_MSG.to_string());
     }
     Ok(())
 }
@@ -701,15 +723,28 @@ fn check_rect_corner_claims(storey: &Storey, q: Point2f64, ridx: usize) -> Resul
 /// OPTIMISTIC bound — the binding check is the finalize placement's,
 /// [`validate_roof_rect_placement`]). `Err` is user-facing, messages stable.
 pub fn validate_roof_rect_lengths(storey: &Storey, len_x: f32, len_y: f32) -> Result<(), String> {
-    for len in [len_x, len_y] {
-        if !len.is_finite() || len <= MIN_RIDGE_LENGTH_M {
-            return Err(RECT_SIDE_TOO_SHORT_MSG.to_string());
-        }
+    validate_roof_rect_length(storey, ParameterAxis::X, len_x)?;
+    validate_roof_rect_length(storey, ParameterAxis::Y, len_y)
+}
+
+/// Validate ONE typed flat-top side length, on the open stage's axis only —
+/// what the shell's LenX/LenY stages call, so a rejection always attaches to
+/// the value the user just typed (a bad DRAWN length on the OTHER axis is
+/// that axis's own stage's to reject, or finalize's when skipped): the side
+/// must exceed a centimetre and fit SOME flat, un-apexed ceiling area's
+/// plan-bbox extent along `axis`. `Err` is user-facing, messages stable.
+pub fn validate_roof_rect_length(
+    storey: &Storey,
+    axis: ParameterAxis,
+    len: f32,
+) -> Result<(), String> {
+    if !len.is_finite() || len <= MIN_RIDGE_LENGTH_M {
+        return Err(RECT_SIDE_TOO_SHORT_MSG.to_string());
     }
-    // The per-axis bbox bound, reused from the ridge: an extent along X is
-    // a ridge whose CROSS axis is Y (the extent runs along `axis.other()`).
-    validate_roof_ridge_length(storey, ParameterAxis::Y, len_x)?;
-    validate_roof_ridge_length(storey, ParameterAxis::X, len_y)
+    // The per-axis bbox bound, reused from the ridge: an extent along `axis`
+    // is a ridge whose CROSS axis is `axis.other()` (the extent runs along
+    // the other axis from the cross).
+    validate_roof_ridge_length(storey, axis.other(), len)
 }
 
 /// Validate the flat top's PLACEMENT against the storey's RESOLVED roofs —
@@ -1546,6 +1581,39 @@ mod tests {
             "got: {err}"
         );
         assert!(validate_roof_ridge_extent(&storey, ParameterAxis::Y, 2.0, 1.0, 1.9).is_ok());
+    }
+
+    /// THE HUB-SWITCH FENCE AT FINALIZE (the accepted-early/rejected-late
+    /// regression): a ridge along the notched C's TOP ARM (cross axis Y at
+    /// y = 3.5, extent x ∈ [1, 9]) passes every other finalize predicate —
+    /// midpoint (5, 3.5) strictly inside, flat, un-apexed, the wall-to-wall
+    /// run at y = 3.5 spans the full 10 m, both ends claimed — but the
+    /// boundary walk between its ends wraps past the slot (4 hub switches),
+    /// which the Height stage would reject with no typed height able to fix
+    /// it. Finalize must reject it FIRST, with the same stable message. A
+    /// ridge staying within the left arm still passes.
+    #[test]
+    fn validate_ridge_extent_rejects_a_foldover_the_height_stage_would() {
+        let storey = storey_with_flat_ring(notched_ring(), 2.4);
+        assert_eq!(
+            validate_roof_ridge_extent(&storey, ParameterAxis::Y, 3.5, 1.0, 8.0).unwrap_err(),
+            RIDGE_TOO_IRREGULAR_MSG
+        );
+        // The same geometry is exactly what the Height stage checks: its
+        // rejection must agree (finalize is never LOOSER than Height).
+        assert_eq!(
+            validate_roof_ridge(
+                &storey,
+                Point2f64::new(1.0, 3.5),
+                Point2f64::new(9.0, 3.5),
+                4.0
+            )
+            .unwrap_err(),
+            RIDGE_TOO_IRREGULAR_MSG
+        );
+        // A vertical ridge confined to the LEFT arm keeps a sane walk
+        // (2 switches) and still finalizes.
+        assert!(validate_roof_ridge_extent(&storey, ParameterAxis::X, 1.5, 0.5, 3.0).is_ok());
     }
 
     /// The CENTRE suggestions (the 'Centre' button's computed values): the

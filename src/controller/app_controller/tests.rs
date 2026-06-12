@@ -1008,7 +1008,7 @@ fn dimensioned_square_controller() -> AppController {
 fn skip_position_prompts(c: &mut AppController) {
     let mut guard = 0;
     while c.document.dimensioning.current_position_prompt.is_some() && guard < 8 {
-        c.skip_position_dimension();
+        c.skip_position_dimension().unwrap();
         guard += 1;
     }
     assert!(guard < 8, "position-prompt loop didn't terminate");
@@ -1109,9 +1109,9 @@ fn interior_step_area_position_skip_opens_the_level_entry() {
     assert!(!c.step_pick_pending(), "level entry gated by position");
     let before = c.document.floor_plan.get_points();
 
-    c.skip_position_dimension(); // X — accept as drawn
+    c.skip_position_dimension().unwrap(); // X — accept as drawn
     assert!(!c.step_pick_pending(), "Y still pending");
-    c.skip_position_dimension(); // Y — accept as drawn
+    c.skip_position_dimension().unwrap(); // Y — accept as drawn
     assert!(
         c.document.dimensioning.current_position_prompt.is_none(),
         "both axes resolved"
@@ -3317,7 +3317,7 @@ fn ceiling_step_position_skip_keeps_the_drawn_line() {
     c.apply_ceiling_step_stroke_event(&[(3.78, 0.5), (3.82, 5.0), (3.8, 9.5)]);
     c.ceiling_step_tap(7.0, 5.0);
     assert!(c.position_prompt_for_ui().is_some());
-    c.skip_position_dimension();
+    c.skip_position_dimension().unwrap();
     assert!(
         c.ceiling_step_amount_pending(),
         "skip → amount, drawn coord"
@@ -3551,7 +3551,7 @@ fn unsnap_from_amount_reopens_the_position_prompt_with_the_drawn_coord() {
     assert!(c.ceiling_step_snap_tag().is_none(), "snap dropped");
 
     // The reopened prompt works as normal: skip keeps the drawn coordinate.
-    c.skip_position_dimension();
+    c.skip_position_dimension().unwrap();
     assert!(c.ceiling_step_amount_pending());
     c.assign_ceiling_step_delta(0.3).unwrap();
     c.materialize();
@@ -3823,10 +3823,10 @@ fn unsnap_roof_point_restarts_from_x_with_the_drawn_coords() {
     );
     // The restarted flow works as normal: skip X, then Y is asked too
     // (un-snapped now), skip it, and the height opens on the drawn point.
-    c.skip_position_dimension();
+    c.skip_position_dimension().unwrap();
     let ui = c.position_prompt_for_ui().expect("Y question follows");
     assert_eq!(ui.axis, ParameterAxis::Y);
-    c.skip_position_dimension();
+    c.skip_position_dimension().unwrap();
     assert!(c.roof_point_height_pending());
 }
 
@@ -3884,8 +3884,8 @@ fn roof_apex_over_a_ceiling_step_canonicalizes_and_survives_reload() {
 
     // Apex inside the STEPPED piece, at its drawn position (skip both axes).
     c.roof_point_tap(7.0, 5.0);
-    c.skip_position_dimension(); // X stays 7.0
-    c.skip_position_dimension(); // Y stays 5.0
+    c.skip_position_dimension().unwrap(); // X stays 7.0
+    c.skip_position_dimension().unwrap(); // Y stays 5.0
     c.assign_roof_apex(4.2).expect("apex over the step assigns");
 
     // Canonicalized: the fan's apex group merges back into ONE step area
@@ -4000,8 +4000,8 @@ fn second_roof_point_forms_a_ridge_and_a_third_is_rejected() {
 
     // Second point, strictly inside one of the fan triangles: the ridge.
     c.roof_point_tap(3.9, 1.1);
-    c.skip_position_dimension();
-    c.skip_position_dimension();
+    c.skip_position_dimension().unwrap();
+    c.skip_position_dimension().unwrap();
     c.assign_roof_apex(3.5)
         .expect("second point forms the ridge");
     let storey = &c.current_record.as_ref().unwrap().data.storeys[0];
@@ -4023,8 +4023,8 @@ fn second_roof_point_forms_a_ridge_and_a_third_is_rejected() {
 
     // Third point in the ridged area: rejected, pending stays open.
     c.roof_point_tap(8.0, 5.0);
-    c.skip_position_dimension();
-    c.skip_position_dimension();
+    c.skip_position_dimension().unwrap();
+    c.skip_position_dimension().unwrap();
     assert!(c.roof_point_height_pending());
     let err = c.assign_roof_apex(3.0).unwrap_err();
     assert!(err.contains("already has a ridge"), "got: {err}");
@@ -4187,8 +4187,8 @@ fn roof_ridge_line_input_matches_the_two_point_flow() {
     line.apply_roof_ridge_stroke_event(&[(3.78, 2.0), (3.82, 5.0), (3.8, 8.0)]);
     let ((ax, ay), (bx, by)) = line.pending_roof_ridge_line().expect("drawn segment");
     line.skip_roof_ridge_length().unwrap(); // length: drawn |hi − lo| stands
-    line.skip_position_dimension(); // cross: drawn coordinate stands
-    line.skip_position_dimension(); // start: drawn lo stands
+    line.skip_position_dimension().unwrap(); // cross: drawn coordinate stands
+    line.skip_position_dimension().unwrap(); // start: drawn lo stands
     line.assign_roof_ridge_height(4.2).unwrap();
     line.materialize();
     let ((lax, lay), (lbx, lby)) = ((ax, ay), (bx, by));
@@ -4197,8 +4197,8 @@ fn roof_ridge_line_input_matches_the_two_point_flow() {
     let mut taps = roof_ready_controller();
     for (x, y) in [(lax, lay), (lbx, lby)] {
         taps.roof_point_tap(x as f32, y as f32);
-        taps.skip_position_dimension(); // X stays as tapped
-        taps.skip_position_dimension(); // Y stays as tapped
+        taps.skip_position_dimension().unwrap(); // X stays as tapped
+        taps.skip_position_dimension().unwrap(); // Y stays as tapped
         taps.assign_roof_apex(4.2).expect("apex assigns");
     }
     taps.materialize();
@@ -4261,7 +4261,7 @@ fn roof_ridge_snap_skips_the_cross_question_and_lands_on_the_wall() {
         "menu = Don't snap only"
     );
 
-    c.skip_position_dimension(); // start: drawn lo stands → finalize
+    c.skip_position_dimension().unwrap(); // start: drawn lo stands → finalize
     assert!(c.roof_ridge_height_pending());
     assert!(c.roof_ridge_snap_tag().is_some(), "tag still clickable");
     c.assign_roof_ridge_height(4.0).expect("ridge assigns");
@@ -4367,7 +4367,7 @@ fn unsnap_roof_ridge_cross_reopens_the_cross_question_with_the_drawn_coord() {
     // Cross snapped: pass the length, then the start question (the cross's
     // was skipped) — the cross tag stays clickable through to the height.
     c.skip_roof_ridge_length().unwrap();
-    c.skip_position_dimension();
+    c.skip_position_dimension().unwrap();
     assert!(c.roof_ridge_height_pending());
     assert!(c.roof_ridge_snap_tag().is_some(), "cross tag at the height");
 
@@ -4379,8 +4379,8 @@ fn unsnap_roof_ridge_cross_reopens_the_cross_question_with_the_drawn_coord() {
     let ((ax, _), _) = c.pending_roof_ridge_line().unwrap();
     assert!((ax - 5.9).abs() < 0.05, "back at the DRAWN coordinate");
 
-    c.skip_position_dimension(); // cross: drawn stands
-    c.skip_position_dimension(); // start re-asked: drawn stands
+    c.skip_position_dimension().unwrap(); // cross: drawn stands
+    c.skip_position_dimension().unwrap(); // start re-asked: drawn stands
     assert!(
         c.roof_ridge_height_pending(),
         "skips → height, drawn values (the resolved length stood)"
@@ -4525,7 +4525,7 @@ fn deleting_one_ridge_apex_degrades_to_a_fan() {
     c.apply_roof_ridge_stroke_event(&[(3.78, 2.0), (3.82, 5.0), (3.8, 8.0)]);
     c.skip_roof_ridge_length().unwrap();
     c.apply_position_dimension(4.0).unwrap(); // cross
-    c.skip_position_dimension(); // start: drawn stands
+    c.skip_position_dimension().unwrap(); // start: drawn stands
     c.assign_roof_ridge_height(4.2).unwrap();
     c.materialize();
 
@@ -4615,6 +4615,101 @@ fn roof_ridge_rejections_keep_the_pending_and_bad_strokes_never_pend() {
     assert!(!c.roof_ridge_pending());
 }
 
+/// A finalised notched-C storey (a 10×4 bar with a slot cut from the right,
+/// y ∈ [1, 3] reaching in to x = 3) with its default ceiling height set and
+/// roof-point mode entered — the foldover-fence fixture.
+fn roof_ready_notched_controller() -> AppController {
+    let p = |x: f32, y: f32| Point2f32::new(x, y);
+    let mut c = AppController::new(crate::engine::open_db(":memory:").unwrap());
+    let _ = c.create_ber(
+        "T".into(),
+        chrono::NaiveDate::from_ymd_opt(2026, 1, 1).unwrap(),
+    );
+    c.document.floor_plan = FloorPlan::from_clean_ring(&[
+        p(0., 0.),
+        p(10., 0.),
+        p(10., 1.),
+        p(3., 1.),
+        p(3., 3.),
+        p(10., 3.),
+        p(10., 4.),
+        p(0., 4.),
+    ])
+    .unwrap();
+    c.document.dimensioning.scale_set = true;
+    c.document.dimensioning.known_params = c.document.floor_plan.all_active_params();
+    c.commit_to_ber().unwrap();
+    c.set_default_ceiling_height(2.4).expect("height applies");
+    c.set_roof_point_mode(true);
+    assert!(c.roof_point_mode());
+    c
+}
+
+/// THE HUB-SWITCH FENCE AT FINALIZE (M1's accepted-early/rejected-late
+/// regression, controller leg): a ridge along the notched C's top arm
+/// passes every span/claim predicate but folds over the slot (4 hub
+/// switches) — only the Height stage used to catch it, where no typed
+/// height can fix it. The finalize check at the LAST open location stage
+/// must reject it instead, with the rejection landing on the typed start
+/// and the prompt left open (the no-late-rejection shape of the existing
+/// finalize-rejection tests).
+#[test]
+fn roof_ridge_foldover_is_rejected_at_finalize_not_the_height_stage() {
+    let mut c = roof_ready_notched_controller();
+    // Horizontal ridge through the top arm: cross y ≈ 3.45 (no snap — the
+    // y = 3 wall is 0.45 away), extent x ∈ [1, 9] (ends 1 m clear of the
+    // perpendicular walls — no end snaps).
+    c.apply_roof_ridge_stroke_event(&[(1.0, 3.43), (5.0, 3.47), (9.0, 3.45)]);
+    assert!(c.roof_ridge_length_pending(), "length is question 1");
+    c.assign_roof_ridge_length(8.0)
+        .expect("8 m fits the C's 10 m bbox — the optimistic bound passes");
+    // Cross: 0.5 m from the nearest parallel wall (y = 3) → y = 3.5.
+    c.apply_position_dimension(0.5).expect("cross applies");
+    // Start (the LAST open location stage): 1 m from x = 0 → lo = 1. The
+    // geometry is now fully determined and the foldover fence fires HERE —
+    // not at the Height stage.
+    let err = c.apply_position_dimension(1.0).unwrap_err();
+    assert!(
+        err.contains("too irregular for a single ridge"),
+        "the Height stage's stable foldover message, surfaced at finalize: {err}"
+    );
+    assert!(
+        c.roof_ridge_position_pending(),
+        "start prompt stays open on the finalize rejection"
+    );
+    assert!(
+        !c.roof_ridge_height_pending(),
+        "the un-fixable Height stage is never reached"
+    );
+    let storey = &c.current_record.as_ref().unwrap().data.storeys[0];
+    assert!(storey.roof_apexes.is_empty(), "nothing committed");
+}
+
+/// SKIP-PATH FINALIZE REJECTIONS SURFACE (L1): a Skip at the last open
+/// location stage runs the same finalize check a typed value does, and its
+/// rejection is RETURNED (for the inline error), not just logged — the
+/// prompt stays open.
+#[test]
+fn roof_ridge_skip_at_the_last_stage_surfaces_the_finalize_rejection() {
+    let mut c = roof_ready_controller();
+    c.apply_roof_ridge_stroke_event(&[(3.78, 2.0), (3.82, 5.0), (3.8, 8.0)]);
+    // 9 m from the drawn lo (y = 2) will overrun the 10 m footprint — but
+    // the Length stage's bound is optimistic, so it passes here.
+    c.assign_roof_ridge_length(9.0).expect("bbox bound passes");
+    c.skip_position_dimension()
+        .expect("cross skip: drawn x stands, start question remains");
+    // Start skip: the drawn lo stands → finalize → extent [2, 11] overruns.
+    let err = c.skip_position_dimension().unwrap_err();
+    assert!(
+        err.contains("out of its ceiling area") && err.contains("10.00 m wall to wall"),
+        "the finalize rejection surfaces on the skip path: {err}"
+    );
+    assert!(
+        c.roof_ridge_position_pending(),
+        "start prompt stays open on the skipped finalize rejection"
+    );
+}
+
 /// THE STAGE-ORDER TABLE (design §3, normative): Length is question 1 and
 /// is always asked; the Cross and Start questions follow, each SKIPPED when
 /// its degree of freedom snapped at stroke time; the finalize placement
@@ -4688,7 +4783,9 @@ fn roof_ridge_stage_order_table() {
                 "len" => c
                     .skip_roof_ridge_length()
                     .unwrap_or_else(|e| panic!("{name}: length skip rejected: {e}")),
-                "cross" | "start" => c.skip_position_dimension(),
+                "cross" | "start" => c
+                    .skip_position_dimension()
+                    .unwrap_or_else(|e| panic!("{name}: position skip rejected: {e}")),
                 "height" => break,
                 other => panic!("{name}: unexpected stage {other}"),
             }
@@ -4734,7 +4831,7 @@ fn roof_ridge_wall_to_wall_draw_succeeds_end_to_end() {
     assert!((tag.from.1 - 9.9).abs() < 0.05, "identity = the drawn end");
     assert!(tag.options.is_empty() && tag.skippable, "Don't snap only");
 
-    c.skip_position_dimension(); // cross: drawn x ≈ 2.8 stands
+    c.skip_position_dimension().unwrap(); // cross: drawn x ≈ 2.8 stands
     assert!(
         c.roof_ridge_height_pending(),
         "start skipped (either end snap fixes the position) → height"
@@ -4880,7 +4977,7 @@ fn centre_rejection_lands_on_the_open_prompt_and_only_ridge_stages_offer_it() {
     c.set_roof_point_mode(true);
     c.apply_roof_ridge_stroke_event(&[(7.98, 0.5), (8.02, 5.5)]);
     c.skip_roof_ridge_length().unwrap(); // drawn 5 m stands
-    c.skip_position_dimension(); // cross: drawn x ≈ 8 stands
+    c.skip_position_dimension().unwrap(); // cross: drawn x ≈ 8 stands
     let ui = c.position_prompt_for_ui().expect("start prompt");
     assert_eq!(ui.axis, ParameterAxis::Y);
     let err = c.centre_roof_ridge_position().unwrap_err();
@@ -4899,7 +4996,7 @@ fn centre_rejection_lands_on_the_open_prompt_and_only_ridge_stages_offer_it() {
     c.set_roof_point_mode(true);
     c.apply_roof_ridge_stroke_event(&[(7.98, 0.5), (8.02, 5.5)]);
     c.assign_roof_ridge_length(3.0).unwrap();
-    c.skip_position_dimension(); // cross: drawn x ≈ 8 stands
+    c.skip_position_dimension().unwrap(); // cross: drawn x ≈ 8 stands
     c.centre_roof_ridge_position()
         .expect("fitting length centres");
     assert!(c.roof_ridge_height_pending());
@@ -5070,6 +5167,58 @@ fn roof_rect_rejections_keep_stages_open_and_cancel_recovers() {
     assert!(!c.roof_rect_pending(), "cancel recovers");
 }
 
+/// PER-STAGE LENGTH ATTRIBUTION (L2): each rect length stage validates only
+/// ITS axis's typed value — a bad DRAWN depth must not reject a good typed
+/// width at LenX with the depth's message. A ceiling step at y = 4 splits
+/// the 10×10 roof into 10×4 and 10×6 areas (Y bound 6, X bound 10); the
+/// rect is drawn ≈ 4.1 wide × 7.1 deep, so the drawn depth already exceeds
+/// every area's Y extent. LenX accepts a fitting typed width; LenY rejects
+/// the over-deep value at ITS stage (with the Y bound) and accepts a
+/// fitting one.
+#[test]
+fn roof_rect_length_stages_validate_only_their_own_axis() {
+    let mut c = ceiling_ready_controller();
+    // Step line along y = 4 (horizontal stroke → axis Y), raised above.
+    c.apply_ceiling_step_stroke_event(&[(0.5, 3.78), (5.0, 3.82), (9.5, 3.8)]);
+    c.ceiling_step_tap(5.0, 7.0); // above the line → Greater side
+    c.apply_position_dimension(4.0)
+        .expect("line pinned at y = 4");
+    c.assign_ceiling_step_delta(0.3).unwrap();
+    c.set_roof_point_mode(true);
+    // A closed rect ≈ (2, 1)–(6, 8): drawn depth ≈ 7.1 > the 6 m Y bound.
+    c.apply_roof_ridge_stroke_event(&[
+        (2.0, 1.0),
+        (4.0, 0.95),
+        (6.0, 1.0),
+        (6.05, 4.5),
+        (6.0, 8.0),
+        (4.0, 8.05),
+        (2.0, 8.0),
+        (1.95, 4.5),
+        (2.0, 1.1),
+    ]);
+    assert_eq!(c.roof_rect_length_pending(), Some(ParameterAxis::X));
+    // The fix: a good typed WIDTH passes LenX even though the drawn depth
+    // is bad (it used to be validated alongside and reject with Y's bound).
+    c.assign_roof_rect_length(4.0)
+        .expect("LenX validates only the typed width");
+    assert_eq!(c.roof_rect_length_pending(), Some(ParameterAxis::Y));
+    // The bad depth rejects at ITS OWN stage, with the Y-axis bound.
+    let err = c.assign_roof_rect_length(7.0).unwrap_err();
+    assert!(
+        err.contains("No ceiling area is that long") && err.contains("under 6.00 m"),
+        "got: {err}"
+    );
+    assert_eq!(
+        c.roof_rect_length_pending(),
+        Some(ParameterAxis::Y),
+        "LenY stays open on rejection"
+    );
+    c.assign_roof_rect_length(3.0)
+        .expect("a fitting depth applies");
+    assert!(c.roof_rect_position_pending(), "on to the position stages");
+}
+
 /// THE RECT FIXPOINT over the DEFAULT base (design §5's required test):
 /// resolve → commit-style canonicalize → persist → reload → re-resolve
 /// reproduces the pavilion byte for byte, from the four durable apexes
@@ -5080,8 +5229,8 @@ fn roof_rect_survives_reload_and_rederive_fixpoint() {
     c.apply_roof_ridge_stroke_event(&rect_stroke());
     c.skip_roof_rect_length().unwrap();
     c.skip_roof_rect_length().unwrap();
-    c.skip_position_dimension(); // PosX: drawn stands
-    c.skip_position_dimension(); // PosY: drawn stands → finalize → height
+    c.skip_position_dimension().unwrap(); // PosX: drawn stands
+    c.skip_position_dimension().unwrap(); // PosY: drawn stands → finalize → height
     assert!(c.roof_rect_height_pending());
     c.assign_roof_rect_height(4.2).unwrap();
     c.materialize();
@@ -5137,8 +5286,8 @@ fn roof_rect_over_a_step_full_fixpoint() {
     assert!(c.roof_rect_pending());
     c.skip_roof_rect_length().unwrap();
     c.skip_roof_rect_length().unwrap();
-    c.skip_position_dimension();
-    c.skip_position_dimension();
+    c.skip_position_dimension().unwrap();
+    c.skip_position_dimension().unwrap();
     assert!(c.roof_rect_height_pending(), "drawn rect finalizes");
     c.assign_roof_rect_height(4.5).unwrap();
     c.materialize();
@@ -5264,7 +5413,7 @@ fn roof_ridge_end_snap_reanchors_a_typed_length_at_the_wall() {
         (ay - 7.0).abs() < 1e-6 && (by - 10.0).abs() < 1e-6,
         "far end pinned to the wall, start re-anchored"
     );
-    c.skip_position_dimension(); // cross: drawn stands
+    c.skip_position_dimension().unwrap(); // cross: drawn stands
     assert!(
         c.roof_ridge_height_pending(),
         "start skipped — the hi snap fixed the position"
@@ -5407,7 +5556,7 @@ fn roof_ridge_unsnap_transition_table() {
                 c.skip_roof_ridge_length()
                     .unwrap_or_else(|e| panic!("{}: length skip rejected: {e}", row.name));
             } else {
-                c.skip_position_dimension();
+                c.skip_position_dimension().unwrap();
             }
         }
         assert_eq!(stage(&c), row.tag_stage, "{}: tag stage", row.name);
@@ -6003,7 +6152,7 @@ fn users_l_session_ridge_placement_is_limited_to_the_raised_area_and_height_land
     // Neither drawn position is within snap tolerance (nearest parallel
     // walls sit ≈ 0.46 m / 0.45 m away) → the cross question opens.
     assert!(c.roof_ridge_position_pending(), "cross question opens");
-    c.skip_position_dimension(); // cross: the drawn x ≈ 3.75 stands
+    c.skip_position_dimension().unwrap(); // cross: the drawn x ≈ 3.75 stands
     assert!(c.roof_ridge_position_pending(), "start question opens");
 
     // The START is the last open location stage: from lo = inner_y + 1.0
@@ -6677,4 +6826,45 @@ fn accepted_suggestion_split_survives_reload_and_rederive() {
             "floor fingerprint changed: ({bl}, {ba}) vs ({al}, {aa})"
         );
     }
+}
+
+/// THE THICKNESS PERSIST LEG (the ridge/rect persist tests' shape, slab
+/// flavour): a finalised upper storey with `floor_thickness_m` set drops its
+/// perimeter wall bases by the slab at resolve — persist → reload →
+/// re-resolve must reproduce the wall regions BYTE-IDENTICALLY (the
+/// float_roundtrip JSON guarantee), with the thickness itself surviving the
+/// restart.
+#[test]
+fn floor_thickness_wall_regions_survive_reload_and_rederive_fixpoint() {
+    let mut c = stepped_ceiling_below_controller();
+    c.add_storey().unwrap();
+    c.assign_floor_thickness(0.3).unwrap();
+    c.choose_suggest_outlines().unwrap();
+    c.accept_suggestion().unwrap();
+    c.materialize();
+    let walls_json = |c: &AppController| {
+        serde_json::to_string(&c.current_record.as_ref().unwrap().data.storeys[1].walls)
+            .expect("wall regions serialize")
+    };
+    let before = walls_json(&c);
+    assert!(
+        !c.current_record.as_ref().unwrap().data.storeys[1]
+            .walls
+            .regions
+            .is_empty(),
+        "the finalised upper storey derives wall regions"
+    );
+
+    let id = c.current_record.as_ref().unwrap().id.clone();
+    c.flush_if_dirty().unwrap();
+    c.open_ber(&id).expect("reopen");
+    assert_eq!(c.floor_thickness(), Some(0.3), "thickness survived reload");
+    c.mark_dirty().unwrap();
+    c.materialize();
+    assert_eq!(
+        walls_json(&c),
+        before,
+        "resolve → persist → reload → re-resolve keeps the slab-dropped \
+         wall regions byte-identical"
+    );
 }

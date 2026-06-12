@@ -393,7 +393,11 @@ impl AppController {
 
     /// Skip the current position prompt — accept the drawn position (see
     /// [`Document::skip_current_position`]); record it for undo first.
-    pub fn skip_position_dimension(&mut self) {
+    /// `Err` (user-facing) when the skipped roof-ridge/rect stage was the
+    /// LAST open location stage and the FINALIZE placement check rejects the
+    /// drawn geometry — the prompt stays open, exactly like a typed
+    /// rejection. Every other arm is infallible.
+    pub fn skip_position_dimension(&mut self) -> Result<(), String> {
         // Ceiling-step LINE prompt: accept the DRAWN coordinate as-is and
         // advance to the amount. No history / no mark_dirty — nothing moved.
         if let Some(PendingCeilingStep::Position {
@@ -411,7 +415,7 @@ impl AppController {
                 side,
                 snap: None,
             });
-            return;
+            return Ok(());
         }
         // Roof-point per-axis prompt: accept the TAPPED coordinate as-is and
         // advance (Y's question, or the height). No history / no mark_dirty —
@@ -431,14 +435,14 @@ impl AppController {
             };
             self.pending_roof_point = None;
             self.advance_roof_point(point, snap_x, snap_y, remaining);
-            return;
+            return Ok(());
         }
         // Roof-ridge position questions: accept the DRAWN value as-is and
         // advance — the cross question (2) on to the start question, the
         // start question (3) on to finalize + the height. No history / no
-        // mark_dirty — nothing moved. A finalize rejection has no typed
-        // value to attach to on the skip path: log it and leave the prompt
-        // open (typing a value surfaces the same rejection inline).
+        // mark_dirty — nothing moved. A finalize rejection is RETURNED with
+        // the prompt left open, so the shell surfaces it inline exactly
+        // like a typed rejection.
         if let Some(PendingRoofRidge::CrossPosition {
             axis,
             coord_m,
@@ -451,7 +455,7 @@ impl AppController {
         {
             let (axis, coord_m, lo, len_m, start_snap, end_snap) =
                 (*axis, *coord_m, *lo, *len_m, *start_snap, *end_snap);
-            if let Err(e) = self.advance_roof_ridge(
+            return self.advance_roof_ridge(
                 axis,
                 coord_m,
                 lo,
@@ -460,10 +464,7 @@ impl AppController {
                 start_snap,
                 end_snap,
                 &[RidgeQuestion::Start],
-            ) {
-                log::warn!("roof ridge skip rejected: {e}");
-            }
-            return;
+            );
         }
         if let Some(PendingRoofRidge::StartPosition {
             axis,
@@ -476,16 +477,11 @@ impl AppController {
         {
             let (axis, coord_m, lo, len_m, cross_snap) =
                 (*axis, *coord_m, *lo, *len_m, *cross_snap);
-            if let Err(e) =
-                self.advance_roof_ridge(axis, coord_m, lo, len_m, cross_snap, None, None, &[])
-            {
-                log::warn!("roof ridge skip rejected: {e}");
-            }
-            return;
+            return self.advance_roof_ridge(axis, coord_m, lo, len_m, cross_snap, None, None, &[]);
         }
         // Roof-RECT position questions: accept the DRAWN lo coordinate
-        // as-is and advance; a finalize rejection on the skip path is
-        // logged with the prompt left open (the ridge's skip shape).
+        // as-is and advance; a finalize rejection is returned with the
+        // prompt left open (the ridge's skip shape).
         if let Some(PendingRoofRect::PosX { lo, .. } | PendingRoofRect::PosY { lo, .. }) =
             self.pending_roof_rect.as_ref()
         {
@@ -493,14 +489,12 @@ impl AppController {
                 Some(PendingRoofRect::PosX { .. }) => lo.0,
                 _ => lo.1,
             };
-            if let Err(e) = self.resolve_roof_rect_position(coord) {
-                log::warn!("roof rect skip rejected: {e}");
-            }
-            return;
+            return self.resolve_roof_rect_position(coord);
         }
         self.record_history();
         self.document.skip_current_position();
         let _ = self.mark_dirty();
+        Ok(())
     }
 
     /// Advance the position prompt to its next outline reference wall (wraps).

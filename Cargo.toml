@@ -13,10 +13,7 @@ uuid = { version = "1.6", features = ["v4", "serde"] }
 anyhow = "1.0"
 chrono = { version = "0.4.42", features = ["serde"] }
 serde = { version = "1.0.228", features = ["derive"] }
-# float_roundtrip: the BER blob round-trips f64 geometry through JSON — without
-# it serde_json's fast float parse can be 1 ulp off, breaking the reload
-# fixpoint for drawn (non-exact) coordinates (e.g. roof-rect corners).
-serde_json = { version = "1.0.145", features = ["float_roundtrip"] }
+serde_json = { workspace = true }
 serde_yaml = "0.9"
 geo = "0.32.0"
 earcutr = "0.5.0"
@@ -33,3 +30,11 @@ egui_extras = { version = "0.33.3", features = ["datepicker"] }
 
 [workspace]
 members = ["datatypes", "document", "sketch", "domain", "manip_2d_plan"]
+
+[workspace.dependencies]
+# float_roundtrip: the BER blob round-trips f64 geometry through JSON — without
+# it serde_json's fast float parse can be 1 ulp off, breaking the reload
+# fixpoint for drawn (non-exact) coordinates (e.g. roof-rect corners). Hoisted
+# to the workspace so every member (and a standalone `cargo test -p document`)
+# gets the same parser — declare it as `serde_json = { workspace = true }`.
+serde_json = { version = "1.0.145", features = ["float_roundtrip"] }

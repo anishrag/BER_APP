@@ -34,7 +34,7 @@ pub use geom::{
     project_distance_along, project_to_circle, ring_contains_point, segment_len, solve_axis_wall,
 };
 pub use parametric::{Axis, CollinearitySuggestion, ParameterAxis, ParameterId, VertexId};
-pub use region::encloses_area as stroke_encloses_area;
+pub use region::{encloses_area as stroke_encloses_area, stroke_is_closed};
 pub use snap::{
     clear_snap_policy, set_snap_policy, snap_stroke_to_ring, take_snap_decisions, SnapCandidate,
     SnapChoice, SnapDecision, SnapKind,

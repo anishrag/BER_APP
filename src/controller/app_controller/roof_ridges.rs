@@ -173,16 +173,11 @@ impl AppController {
         // `document.outline`, which is only synced on shape switches.
         self.sync_active();
         // A CLOSED stroke is the RECT-ridge flow's flat top, not a ridge
-        // line — classified exactly as the living-area/phase carve
-        // classifies closure (the world-stroke path has no `is_closed`
-        // flag): ends within `close_gap_m` AND enclosing real area
-        // (`stroke_encloses_area`) — a SHORT ridge stroke whose ends merely
-        // fall within the gap stays a line.
-        let ends_gap = {
-            let (a, b) = (pts[0], pts[pts.len() - 1]);
-            ((a.x - b.x).powi(2) + (a.y - b.y).powi(2)).sqrt()
-        };
-        if ends_gap < self.tuning.subarea.close_gap_m && manip_2d_plan::stroke_encloses_area(&pts) {
+        // line — classified by THE closure rule the living-area/phase carve
+        // uses ([`manip_2d_plan::stroke_is_closed`], single-sourced): ends
+        // within `close_gap_m` AND enclosing real area — a SHORT ridge
+        // stroke whose ends merely fall within the gap stays a line.
+        if manip_2d_plan::stroke_is_closed(&pts, self.tuning.subarea.close_gap_m) {
             self.apply_roof_rect_stroke(&pts);
             return;
         }

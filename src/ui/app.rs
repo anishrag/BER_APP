@@ -949,8 +949,19 @@ impl eframe::App for BerApp {
                                         }
                                     }
                                     SketchEvent::SkipPositionDimension => {
-                                        controller.borrow_mut().skip_position_dimension();
-                                        self.sketch_state.position_error = None;
+                                        // A roof-ridge/rect skip at the last
+                                        // location stage can trip the FINALIZE
+                                        // placement check: surface it like a
+                                        // typed rejection.
+                                        match controller.borrow_mut().skip_position_dimension() {
+                                            Ok(()) => {
+                                                self.sketch_state.position_error = None;
+                                            }
+                                            Err(e) => {
+                                                eprintln!("skip_position_dimension: {}", e);
+                                                self.sketch_state.position_error = Some(e);
+                                            }
+                                        }
                                     }
                                     SketchEvent::CyclePositionReference => {
                                         controller.borrow_mut().cycle_position_reference();
