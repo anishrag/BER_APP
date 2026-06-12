@@ -63,4 +63,8 @@ When in doubt, push the logic down into the owning module and have the controlle
 
 ## Target platform
 
-Android tablet (not iOS — see prior analysis: egui's iOS path has unresolved touch-perf and keyboard issues). Sideloaded APK; no Play Store. Touch polish via egui's built-in multi-touch (pinch/zoom on the sketch canvas) plus `egui_virtual_keyboard` for text entry.
+Android tablet (not iOS — see prior analysis: egui's iOS path has unresolved touch-perf and keyboard issues). Sideloaded APK; no Play Store. The port landed 2026-06 (plan: `.claude/plans/android-port.md`):
+
+- Entry points: `src/main.rs` (desktop) and `src/android.rs` (cfg'd `android_main`) share `ber_app::bootstrap(&Paths)`; eframe is wired in `src/ui/mod.rs` only (`run` / `run_android` → one `launch`).
+- Touch: two-finger navigation + stroke retraction in `src/ui/pages/sketch/touch.rs`; on-screen numeric/qwerty pads in `src/ui/widgets/pads.rs` (Android always; desktop via `BER_TOUCH=1`); tooltips via `HintExt::hint` (no-op on Android). `egui_virtual_keyboard` was evaluated and rejected (stale, pre-0.33).
+- Packaging: `scripts/build-android.sh` (cargo-ndk + the Gradle project in `android/`, arm64 only) — see `android/README.md` for one-time toolchain setup and signing.

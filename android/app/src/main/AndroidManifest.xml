@@ -1,0 +1,27 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+
+    <!-- No permissions: the app uses internal storage only. -->
+
+    <application
+        android:label="BER App"
+        android:hasCode="false">
+        <!-- eframe runs via android-activity's native-activity glue:
+             NativeActivity loads libber_app.so (the cdylib built by
+             cargo-ndk into jniLibs/) and calls its android_main. -->
+        <activity
+            android:name="android.app.NativeActivity"
+            android:exported="true"
+            android:screenOrientation="landscape"
+            android:configChanges="orientation|keyboardHidden|keyboard|screenSize|screenLayout|uiMode">
+            <meta-data
+                android:name="android.app.lib_name"
+                android:value="ber_app" />
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity>
+    </application>
+
+</manifest>
