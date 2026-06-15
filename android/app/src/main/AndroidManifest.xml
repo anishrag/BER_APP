@@ -4,14 +4,17 @@
     <!-- No permissions: the app uses internal storage only. -->
 
     <application
-        android:label="BER App"
-        android:hasCode="false">
+        android:label="BER App">
         <!-- eframe runs via android-activity's native-activity glue:
              NativeActivity loads libber_app.so (the cdylib built by
-             cargo-ndk into jniLibs/) and calls its android_main. -->
+             cargo-ndk into jniLibs/) and calls its android_main. MainActivity
+             is a thin NativeActivity subclass that adds immersive mode (hides
+             the system bars so they don't overlap the app's bottom panels);
+             the APK therefore carries a DEX, so no android:hasCode="false". -->
         <activity
-            android:name="android.app.NativeActivity"
+            android:name=".MainActivity"
             android:exported="true"
+            android:theme="@android:style/Theme.DeviceDefault.NoActionBar.Fullscreen"
             android:screenOrientation="landscape"
             android:configChanges="orientation|keyboardHidden|keyboard|screenSize|screenLayout|uiMode">
             <meta-data

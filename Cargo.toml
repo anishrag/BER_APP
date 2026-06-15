@@ -27,18 +27,28 @@ document = { path = "document" }
 domain = { path = "domain" }
 manip_2d_plan = { path = "manip_2d_plan", features = ["serde"] }
 sketch = { path = "sketch" }
-eframe = "0.33.3"
 egui = "0.33.3"
 strum = "0.27.2"
 strum_macros = "0.27.2"
 egui_extras = { version = "0.33.3", features = ["datepicker"] }
+
+# eframe is split per-target: desktop keeps the full default feature set
+# (accesskit, x11, wayland, glow). On android `accesskit` is rejected unless
+# you use android-game-activity, and x11/wayland are desktop-only — so the
+# android build opts out of defaults and re-adds only what it needs.
+[target.'cfg(not(target_os = "android"))'.dependencies]
+eframe = "0.33.3"
 
 # Android entry-point deps. `AndroidApp` is always named THROUGH winit
 # (`winit::platform::android::activity::AndroidApp`) so the android-activity
 # version is the one winit links — never depend on android-activity directly.
 [target.'cfg(target_os = "android")'.dependencies]
 winit = { version = "0.30", features = ["android-native-activity"] }
-eframe = { version = "0.33.3", features = ["android-native-activity"] }
+eframe = { version = "0.33.3", default-features = false, features = [
+    "android-native-activity",
+    "glow",
+    "default_fonts",
+] }
 android_logger = "0.15"
 
 [workspace]

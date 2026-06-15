@@ -10,7 +10,7 @@
 //!
 //! One pad exists at a time: ownership (which field the pad edits) is keyed
 //! by the `TextEdit`'s widget id in egui memory, claimed on focus, released
-//! by ✓ (submit), ⌄ (dismiss), or another field claiming it. The pad lives
+//! by OK (submit), Hide (dismiss), or another field claiming it. The pad lives
 //! in a floating `Area`, so widget state stays inside `src/ui/widgets` —
 //! no per-page plumbing.
 
@@ -55,7 +55,7 @@ enum PadEvent {
 
 /// The metre-value field: a singleline `TextEdit` (width/hint preserved from
 /// the call sites) that opens the shared NUMERIC pad on focus when pads are
-/// enabled. Digits, `.`, `+` (dimension expressions accept sums), ⌫, ✓.
+/// enabled. Digits, `.`, `+` (dimension expressions accept sums), Del, OK.
 pub fn metre_input(ui: &mut egui::Ui, buf: &mut String, width: f32, hint: &str) -> PadResponse {
     input_with_pad(ui, buf, width, hint, PadKind::Numeric)
 }
@@ -132,12 +132,14 @@ fn key(ui: &mut egui::Ui, label: &str) -> bool {
     .clicked()
 }
 
-/// Draw the shared pad (floating, bottom-right so it doesn't cover the
-/// prompt dock's field) and apply its presses to `buf`.
+/// Draw the shared pad (floating, top-right over the canvas) and apply its
+/// presses to `buf`. The prompt dock is a *bottom* panel, so anchoring the pad
+/// to the top keeps both the field being edited and its action buttons
+/// (Apply / Skip / …) fully visible; the y-offset clears the top strip.
 fn render_pad(ctx: &egui::Context, buf: &mut String, kind: PadKind) -> PadEvent {
     let mut event = PadEvent::None;
     egui::Area::new(Id::new("ber_touch_pad"))
-        .anchor(Align2::RIGHT_BOTTOM, egui::vec2(-8.0, -8.0))
+        .anchor(Align2::RIGHT_TOP, egui::vec2(-8.0, 56.0))
         .order(egui::Order::Foreground)
         .show(ctx, |ui| {
             egui::Frame::popup(ui.style()).show(ui, |ui| {
@@ -168,15 +170,15 @@ fn numeric_rows(ui: &mut egui::Ui, buf: &mut String) -> PadEvent {
         });
     }
     ui.horizontal(|ui| {
-        if key(ui, "⌫") {
+        if key(ui, "Del") {
             if buf.pop().is_some() {
                 event = PadEvent::Edited;
             }
         }
-        if key(ui, "✓") {
+        if key(ui, "OK") {
             event = PadEvent::Submit;
         }
-        if key(ui, "⌄") {
+        if key(ui, "Hide") {
             event = PadEvent::Dismiss;
         }
     });
@@ -208,7 +210,7 @@ fn qwerty_rows(ctx: &egui::Context, ui: &mut egui::Ui, buf: &mut String) -> PadE
     }
     ui.horizontal(|ui| {
         // Single-shot shift (mobile convention): clears after one character.
-        let shift_label = if shift { "⇧●" } else { "⇧" };
+        let shift_label = if shift { "Shift*" } else { "Shift" };
         if key(ui, shift_label) {
             shift = !shift;
             shift_used = false;
@@ -223,15 +225,15 @@ fn qwerty_rows(ctx: &egui::Context, ui: &mut egui::Ui, buf: &mut String) -> PadE
             buf.push(' ');
             event = PadEvent::Edited;
         }
-        if key(ui, "⌫") {
+        if key(ui, "Del") {
             if buf.pop().is_some() {
                 event = PadEvent::Edited;
             }
         }
-        if key(ui, "✓") {
+        if key(ui, "OK") {
             event = PadEvent::Submit;
         }
-        if key(ui, "⌄") {
+        if key(ui, "Hide") {
             event = PadEvent::Dismiss;
         }
     });
