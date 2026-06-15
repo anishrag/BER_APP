@@ -192,7 +192,10 @@ impl AppController {
             if snapped {
                 continue;
             }
-            if let Some(prompt) = self.document.ceiling_line_position_prompt(axis, coord) {
+            if let Some(prompt) = self
+                .document
+                .ceiling_line_position_prompt(axis, coord, None)
+            {
                 self.pending_roof_point = Some(PendingRoofPoint::Position {
                     point,
                     axis,

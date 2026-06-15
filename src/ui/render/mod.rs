@@ -561,6 +561,36 @@ pub fn render_ceiling_step_line(
     );
 }
 
+/// Draw the storey's COMMITTED same-height ceiling DIVIDERS — each a faint
+/// dashed cut segment (low-alpha grey), visually distinct from the
+/// amber-solid height steps. These partition a ceiling region without a riser
+/// (to bound a ridge's own area); the divider regions are excluded from the
+/// amber tint/label feed, so this is the only place they appear.
+pub fn render_ceiling_dividers(
+    painter: &egui::Painter,
+    rect: egui::Rect,
+    ber: Option<&Ber>,
+    current_storey_idx: Option<usize>,
+    sketch_mode: SketchMode,
+    view: ViewParams,
+    lines: &[((f64, f64), (f64, f64))],
+) {
+    if lines.is_empty() {
+        return;
+    }
+    let Some((_storey, t)) = storey_transform(rect, ber, current_storey_idx, sketch_mode, view)
+    else {
+        return;
+    };
+    let stroke = egui::Stroke::new(
+        2.0,
+        egui::Color32::from_rgba_unmultiplied(120, 120, 120, 90),
+    );
+    for (a, b) in lines {
+        draw_dashed_segment(painter, t.apply(a.0, a.1), t.apply(b.0, b.1), stroke);
+    }
+}
+
 /// Draw the storey's roof apexes (committed high points) plus the PENDING
 /// tapped point. Committed apexes render as a filled dot with their height
 /// label above ("▲ 4.20 m"); the pending point is a hollow dot — provisional,

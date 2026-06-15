@@ -472,6 +472,7 @@ impl eframe::App for BerApp {
                                 ceiling_step_mode,
                                 ceiling_step_available,
                                 ceiling_step_region_polygons,
+                                ceiling_divider_lines,
                                 pending_ceiling_step_line,
                                 pending_ceiling_step_side_rects,
                                 ceiling_step_snap_tag,
@@ -559,6 +560,7 @@ impl eframe::App for BerApp {
                                     controller_ref.ceiling_step_mode(),
                                     controller_ref.ceiling_step_available(),
                                     controller_ref.ceiling_step_region_polygons(),
+                                    controller_ref.ceiling_divider_lines(),
                                     controller_ref.pending_ceiling_step_line(),
                                     controller_ref.pending_ceiling_step_side_rects(),
                                     controller_ref.ceiling_step_snap_tag(),
@@ -791,6 +793,7 @@ impl eframe::App for BerApp {
                                 ceiling_step_mode,
                                 ceiling_step_available,
                                 ceiling_step_region_polygons: &ceiling_step_region_polygons,
+                                ceiling_divider_lines: &ceiling_divider_lines,
                                 pending_ceiling_step_line,
                                 pending_ceiling_step_side_rects: &pending_ceiling_step_side_rects,
                                 ceiling_step_snap_tag: ceiling_step_snap_tag.as_ref(),
@@ -1106,6 +1109,17 @@ impl eframe::App for BerApp {
                                             }
                                         }
                                     }
+                                    SketchEvent::KeepCeilingSameHeight => {
+                                        match controller.borrow_mut().keep_ceiling_same_height() {
+                                            Ok(()) => {
+                                                self.sketch_state.ceiling_step_error = None;
+                                            }
+                                            Err(e) => {
+                                                log::error!("keep_ceiling_same_height: {}", e);
+                                                self.sketch_state.ceiling_step_error = Some(e);
+                                            }
+                                        }
+                                    }
                                     SketchEvent::UnsnapCeilingStepLine => {
                                         controller.borrow_mut().unsnap_ceiling_step_line();
                                         // The stage the error described is gone.
@@ -1115,8 +1129,8 @@ impl eframe::App for BerApp {
                                         controller.borrow_mut().cancel_pending_ceiling_step();
                                         self.sketch_state.ceiling_step_error = None;
                                     }
-                                    SketchEvent::DeleteCeilingStepRegion(index) => {
-                                        controller.borrow_mut().delete_ceiling_step_region(index);
+                                    SketchEvent::DeleteCeilingStepRegion(ring) => {
+                                        controller.borrow_mut().delete_ceiling_step_region(&ring);
                                     }
                                     SketchEvent::SetRoofPointMode(on) => {
                                         controller.borrow_mut().set_roof_point_mode(on);

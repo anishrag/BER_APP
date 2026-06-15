@@ -19,8 +19,37 @@ use crate::position::reference_walls;
 use crate::step::ring_area2;
 use crate::StoreyDoc;
 use datatypes::ber::ber_struct::Ber;
-use domain::points::Point2f32;
+use domain::points::{Point2f32, Point2f64};
 use manip_2d_plan::{ParameterAxis, VertexId};
+
+/// Coordinate tolerance (metres) for the "is this wall on the region's extent
+/// on `axis`?" test — a wall within a millimetre of the ring's axis-extent
+/// min or max bounds the region there. Matches `position::COORD_TOL`.
+const REGION_EXTENT_TOL: f32 = 1e-3;
+
+/// Does `coord` (a reference wall's coordinate on `axis`) lie ON the priority
+/// `ring`'s extent on `axis` — i.e. equal the ring's bbox min or max on that
+/// axis within [`REGION_EXTENT_TOL`]? The region is a rectangle-ish piece
+/// bounded by outline walls, so its axis-extent endpoints ARE the coordinates
+/// of the two walls that bound it perpendicular to `axis`. Cheap bbox test,
+/// no edge walk. `false` for an empty ring.
+fn wall_bounds_region_on_axis(coord: f32, ring: &[Point2f64], axis: ParameterAxis) -> bool {
+    let mut lo = f64::INFINITY;
+    let mut hi = f64::NEG_INFINITY;
+    for v in ring {
+        let c = match axis {
+            ParameterAxis::X => v.x,
+            ParameterAxis::Y => v.y,
+        };
+        lo = lo.min(c);
+        hi = hi.max(c);
+    }
+    if !lo.is_finite() || !hi.is_finite() {
+        return false;
+    }
+    let c = coord as f64;
+    (c - lo).abs() < REGION_EXTENT_TOL as f64 || (c - hi).abs() < REGION_EXTENT_TOL as f64
+}
 
 /// Which side of the step line the delta applies to: coordinates on the
 /// line's axis LESS or GREATER than the line's coordinate.
@@ -54,11 +83,39 @@ pub struct CeilingStepRegion {
 /// sub-mm² slivers are dropped. Empty when the storey is missing or its
 /// ceiling height is unset (steps only exist relative to a default).
 ///
-/// This is one half of the reload fixpoint: re-deriving applies the merged
-/// step area first, then `with_apexes` re-forms the fan/ridge over the
-/// stepped piece (composition order: default → steps → apexes), reproducing
-/// the identical surface. Without this, the next commit would re-derive the
-/// default flat ceiling with no areas and flatten the steps.
+/// SAME-HEIGHT DIVIDERS (the genuine-subdivision predicate). A flat region AT
+/// the default height carries no `delta`, yet two such regions side by side
+/// are a real subdivision — a same-height divider drawn purely to bound a
+/// later ridge to its own area. Geometry is the durable record (no stored
+/// flag), so reconstruction must re-emit these as `delta_m = 0.0` areas, else
+/// the next derive runs `with_z_deltas` over no areas and re-fuses them.
+///
+/// The predicate is NOT "delta is 0" (that would invent a spurious divider for
+/// every default REMAINDER of a real step carve). Delta-0 dividers are
+/// re-emitted IFF the whole ceiling sits at the default, partitioned into ≥ 2
+/// PIECES — where a piece is an un-grouped flat default-z region OR an apex
+/// group whose base IS the default (a ridge drawn over one half at the storey's
+/// own ceiling height). Each such piece's ring (the group's merged ring, or the
+/// region's exterior) is re-emitted at delta 0. So:
+/// - an un-split storey (one default-z flat covering the outline) → ONE piece →
+///   emits NOTHING;
+/// - a same-height split, no ridges (≥ 2 default-z flats) → each is re-emitted,
+///   and re-deriving `with_z_deltas([(A,0),(B,0)])` reproduces the same pieces
+///   (the areas tile the footprint, so the boolean is order-independent — a
+///   fixpoint);
+/// - a same-height split with a ridge over ONE or BOTH halves AT the default →
+///   the at-default groups count as pieces and re-emit their merged rings at
+///   delta 0, so `with_z_deltas` re-establishes the boundary BEFORE
+///   `with_apexes` re-applies the ridges to their own halves (without this the
+///   two ridges re-fuse into one region that fans over the whole footprint —
+///   the L-spanning bug);
+/// - a `+Δ` carve, or a ridge OFF the default → one off-default region/group +
+///   its default remainder (possibly several polygons): the off-default carve
+///   means this is NOT a pure same-height tiling, so the flat-default fragments
+///   are NOT mistaken for deliberate dividers. The off-default area/apexes
+///   re-split the default ring on re-derive, so the partition survives without
+///   a delta-0 emit. The delta-0 emit is needed ONLY when EVERY piece is at the
+///   default (every group's base = default and every plain region flat-default).
 pub fn ceiling_step_regions_from_roofs(ber: &Ber, idx: usize) -> Vec<CeilingStepRegion> {
     let Some(storey) = ber.storeys.get(idx) else {
         return Vec::new();
@@ -75,27 +132,78 @@ pub fn ceiling_step_regions_from_roofs(ber: &Ber, idx: usize) -> Vec<CeilingStep
             });
         }
     };
-    // Apex groups first: one step region per merged ring at the group's base.
     let groups = storey.roofs.apex_groups(&storey.roof_apexes);
+    let grouped: std::collections::HashSet<usize> = groups
+        .iter()
+        .flat_map(|g| g.region_idxs.iter().copied())
+        .collect();
+    // The same-height-divider predicate (see the doc comment). A delta-0
+    // divider is re-emitted only when the WHOLE ceiling sits at the default,
+    // partitioned into ≥ 2 pieces — where a piece is an un-grouped flat-default
+    // region OR an apex group whose base IS the default (a ridge drawn over one
+    // half at the storey's own ceiling height). Any OFF-default group or
+    // off-default/sloped plain region means a sibling carve already supplies
+    // the boundary (its area or apexes re-split the merged default ring on
+    // re-derive), so the flat-default fragments are that carve's remainder, not
+    // deliberate dividers — re-emitting them would invent spurious dividers
+    // (a +0.3 carve leaves its default remainder split into several polygons).
+    let off_default_group = groups.iter().any(|g| (g.base_z - default_z).abs() >= 1e-3);
+    let has_non_default_plain = storey.roofs.regions.iter().enumerate().any(|(ri, region)| {
+        !grouped.contains(&ri)
+            && region
+                .flat_z()
+                .is_none_or(|z| (z - default_z).abs() >= 1e-3)
+    });
+    let flat_default_count = storey
+        .roofs
+        .regions
+        .iter()
+        .enumerate()
+        .filter(|(ri, region)| {
+            !grouped.contains(ri)
+                && region
+                    .flat_z()
+                    .is_some_and(|z| (z - default_z).abs() < 1e-3)
+        })
+        .count();
+    let at_default_group_count = groups
+        .iter()
+        .filter(|g| (g.base_z - default_z).abs() < 1e-3)
+        .count();
+    let same_height_partition = !off_default_group
+        && !has_non_default_plain
+        && (flat_default_count + at_default_group_count) >= 2;
+    // Apex groups: an OFF-default group emits one area per merged ring at
+    // `delta = base − default`; an AT-default group, in a pure same-height
+    // tiling, emits its merged ring(s) as delta-0 dividers so `with_z_deltas`
+    // re-establishes the boundary before `with_apexes` re-applies the apexes —
+    // otherwise two ridges at the default re-fuse into one region that fans
+    // over the whole footprint (the L-spanning bug).
     for group in &groups {
         let delta = group.base_z - default_z;
-        if delta.abs() < 1e-3 {
+        let emit_delta = if delta.abs() < 1e-3 {
+            if same_height_partition {
+                Some(0.0)
+            } else {
+                None
+            }
+        } else {
+            Some(delta)
+        };
+        let Some(emit_delta) = emit_delta else {
             continue;
-        }
+        };
         for ring in &group.merged_rings {
             let ring32: Vec<Point2f32> = ring
                 .iter()
                 .map(|v| Point2f32::new(v.x as f32, v.y as f32))
                 .collect();
-            push_ring(ring32, delta);
+            push_ring(ring32, emit_delta);
         }
     }
-    // Then the plain (un-apexed) regions: flat ones off the default step,
-    // sloped ones are irregular — warn-skip.
-    let grouped: std::collections::HashSet<usize> = groups
-        .iter()
-        .flat_map(|g| g.region_idxs.iter().copied())
-        .collect();
+    // Then the plain (un-apexed) regions: flat off-default ones emit their
+    // delta; flat default-z ones emit a delta-0 divider in a pure same-height
+    // tiling; sloped ones are irregular — warn-skip.
     for (ri, region) in storey.roofs.regions.iter().enumerate() {
         if grouped.contains(&ri) {
             continue;
@@ -108,9 +216,10 @@ pub fn ceiling_step_regions_from_roofs(ber: &Ber, idx: usize) -> Vec<CeilingStep
             continue;
         };
         let delta = z - default_z;
-        if delta.abs() < 1e-3 {
+        if delta.abs() < 1e-3 && !same_height_partition {
             continue;
         }
+        let delta = if delta.abs() < 1e-3 { 0.0 } else { delta };
         let ring: Vec<Point2f32> = region
             .polygon
             .exterior
@@ -293,10 +402,22 @@ impl StoreyDoc {
     /// by coordinate), nearest first. `None` when there is no parallel
     /// reference — the approximate-stroke principle's LOGGED auto-resolve:
     /// the caller accepts the drawn coordinate.
+    ///
+    /// When `prefer_region` is `Some(ring)` (a resolved ceiling region's plan
+    /// ring, world metres), reference walls whose coordinate lies ON that
+    /// region's extent on `axis` (the ring's bbox min/max within `COORD_TOL`)
+    /// sort FIRST — nearest among them is the default (`current_idx = 0`) —
+    /// then the rest by `current_distance`, so a ridge's default reference
+    /// wall bounds its OWN area rather than the globally nearest wall in
+    /// another arm. The option SET is UNCHANGED (cycle-button semantics
+    /// preserved); only the sort + `current_idx` change. `None`, or a ring no
+    /// option lies on, falls back to pure global-nearest — the original
+    /// behaviour, unchanged for callers that pass `None`.
     pub fn ceiling_line_position_prompt(
         &self,
         axis: ParameterAxis,
         coord_m: f32,
+        prefer_region: Option<&[Point2f64]>,
     ) -> Option<LinePositionPrompt> {
         let refs = reference_walls(&self.outline.floor_plan, axis);
         if refs.is_empty() {
@@ -315,7 +436,21 @@ impl StoreyDoc {
                 current_distance: (coord_m - reference_value).abs(),
             })
             .collect();
-        options.sort_by(|a, b| a.current_distance.total_cmp(&b.current_distance));
+        // Sort by distance; when a priority ring is given, walls bounding that
+        // region on `axis` sort ahead of all others (their relative order is
+        // still by distance). `sort_by` is stable, so within each tier the
+        // distance order is preserved.
+        options.sort_by(|a, b| {
+            let a_bounds = prefer_region
+                .is_some_and(|ring| wall_bounds_region_on_axis(a.reference_value, ring, axis));
+            let b_bounds = prefer_region
+                .is_some_and(|ring| wall_bounds_region_on_axis(b.reference_value, ring, axis));
+            // Bounding walls first (false < true, so reverse the bool),
+            // then nearest first.
+            b_bounds
+                .cmp(&a_bounds)
+                .then_with(|| a.current_distance.total_cmp(&b.current_distance))
+        });
         Some(LinePositionPrompt {
             axis,
             options,
@@ -481,7 +616,7 @@ mod tests {
         // Vertical line at x = 4: references are the vertical outline walls
         // x = 0 (4 m away) and x = 10 (6 m away).
         let prompt = doc
-            .ceiling_line_position_prompt(ParameterAxis::X, 4.0)
+            .ceiling_line_position_prompt(ParameterAxis::X, 4.0, None)
             .expect("two parallel walls");
         assert_eq!(prompt.axis, ParameterAxis::X);
         assert_eq!(prompt.options.len(), 2);
@@ -502,7 +637,7 @@ mod tests {
         // No outline at all → no reference → None (auto-resolve).
         let empty = StoreyDoc::default();
         assert!(empty
-            .ceiling_line_position_prompt(ParameterAxis::X, 4.0)
+            .ceiling_line_position_prompt(ParameterAxis::X, 4.0, None)
             .is_none());
     }
 
@@ -512,7 +647,7 @@ mod tests {
     fn resolve_position_respects_sign_and_rejects_bad_values() {
         let doc = storey_10x6();
         let mut prompt = doc
-            .ceiling_line_position_prompt(ParameterAxis::X, 4.0)
+            .ceiling_line_position_prompt(ParameterAxis::X, 4.0, None)
             .unwrap();
         // Nearest ref x = 0, drawn side +: 3 m → x = 3.
         assert!((doc.resolve_ceiling_line_position(&prompt, 3.0).unwrap() - 3.0).abs() < 1e-4);
@@ -809,6 +944,391 @@ mod tests {
         assert!(
             (ring_area2(&regions[0].polygon) / 2.0 - 8.0).abs() < 1e-4,
             "the merged ring is the whole 2×4 stepped half"
+        );
+    }
+
+    // ── Same-height divider reconstruction (Slice A1) ───────────────────────
+    use datatypes::ber::structural::{CeilingRegions, Storey};
+    use domain::points::Point2f64;
+
+    /// A 0..10 × 0..6 rectangle in f64 plan coords for the divider tests.
+    fn square64(x0: f64, x1: f64) -> Vec<Point2f64> {
+        vec![
+            Point2f64::new(x0, 0.0),
+            Point2f64::new(x1, 0.0),
+            Point2f64::new(x1, 6.0),
+            Point2f64::new(x0, 6.0),
+        ]
+    }
+
+    /// A storey whose roofs are exactly `rings`, each flat at the matching
+    /// `z`, with the given default ceiling height.
+    fn storey_with_flat_regions(rings: &[(Vec<Point2f64>, f64)], default_z: f64) -> Ber {
+        let cid = Default::default();
+        let mut roofs = CeilingRegions::default();
+        for (ring, z) in rings {
+            roofs
+                .regions
+                .extend(CeilingRegions::default_for_footprint(vec![ring.clone()], *z, cid).regions);
+        }
+        let mut ber = Ber::default();
+        ber.storeys.push(Storey {
+            roofs,
+            ceiling_height_m: Some(default_z),
+            ..Storey::default()
+        });
+        ber
+    }
+
+    /// A-T1: two default-z flat regions (an L split into two same-height
+    /// halves) reconstruct as TWO delta-0 divider areas.
+    #[test]
+    fn reconstruction_emits_dividers_for_two_default_flats() {
+        let ber = storey_with_flat_regions(
+            &[(square64(0.0, 4.0), 2.4), (square64(4.0, 10.0), 2.4)],
+            2.4,
+        );
+        let regions = ceiling_step_regions_from_roofs(&ber, 0);
+        assert_eq!(regions.len(), 2, "both default-z flats re-emit as dividers");
+        for r in &regions {
+            assert!(r.delta_m.abs() < 1e-12, "divider carries delta 0");
+        }
+    }
+
+    /// A-T2: a lone default-z flat emits NOTHING (no spurious divider); a
+    /// default-z flat alongside an OFF-default flat emits only the off-default
+    /// one (flat-default count is 1 → no divider).
+    #[test]
+    fn reconstruction_no_spurious_divider() {
+        // One flat covering the whole outline → count 1 → empty.
+        let ber = storey_with_flat_regions(&[(square64(0.0, 10.0), 2.4)], 2.4);
+        assert!(
+            ceiling_step_regions_from_roofs(&ber, 0).is_empty(),
+            "a lone default-z flat is not a divider"
+        );
+
+        // One default-z flat + one off-default flat: only the off-default emits.
+        let ber = storey_with_flat_regions(
+            &[(square64(0.0, 4.0), 2.4), (square64(4.0, 10.0), 2.7)],
+            2.4,
+        );
+        let regions = ceiling_step_regions_from_roofs(&ber, 0);
+        assert_eq!(regions.len(), 1, "only the off-default region emits");
+        assert!((regions[0].delta_m - 0.3).abs() < 1e-9);
+    }
+
+    /// A-T3: idempotence fixpoint — two delta-0 halves → `with_z_deltas` →
+    /// reconstruct → `with_z_deltas` again yields the identical region set
+    /// (same z's, same footprint, order-independent boolean).
+    #[test]
+    fn reconstruction_divider_is_a_fixpoint() {
+        let default_z = 2.4;
+        let cid = Default::default();
+        // The default whole-outline ceiling.
+        let base = CeilingRegions::default_for_footprint(vec![square64(0.0, 10.0)], default_z, cid);
+
+        // First split into two same-height halves via delta-0 areas.
+        let areas = vec![
+            (square64(0.0, 4.0), 0.0_f64),
+            (square64(4.0, 10.0), 0.0_f64),
+        ];
+        let split = base.clone().with_z_deltas(&areas);
+
+        let mut ber = Ber::default();
+        ber.storeys.push(Storey {
+            roofs: split.clone(),
+            ceiling_height_m: Some(default_z),
+            ..Storey::default()
+        });
+        let recon = ceiling_step_regions_from_roofs(&ber, 0);
+        assert_eq!(recon.len(), 2, "two dividers reconstructed");
+
+        // Re-derive from the recon list over the SAME default ring.
+        let recon_areas: Vec<(Vec<Point2f64>, f64)> = recon
+            .iter()
+            .map(|r| {
+                (
+                    r.polygon
+                        .iter()
+                        .map(|p| Point2f64::new(p.x as f64, p.y as f64))
+                        .collect(),
+                    r.delta_m,
+                )
+            })
+            .collect();
+        let rederived =
+            CeilingRegions::default_for_footprint(vec![square64(0.0, 10.0)], default_z, cid)
+                .with_z_deltas(&recon_areas);
+
+        // Same number of pieces, same total footprint area, all at default z.
+        assert_eq!(rederived.regions.len(), split.regions.len());
+        for region in &rederived.regions {
+            assert!((region.flat_z().unwrap() - default_z).abs() < 1e-9);
+        }
+        let total: f64 = rederived
+            .regions
+            .iter()
+            .map(|r| {
+                let ring: Vec<Point2f32> = r
+                    .polygon
+                    .exterior
+                    .iter()
+                    .map(|v| Point2f32::new(v.x as f32, v.y as f32))
+                    .collect();
+                (ring_area2(&ring) / 2.0) as f64
+            })
+            .sum();
+        assert!((total - 60.0).abs() < 1e-3, "areas tile the 10×6 footprint");
+    }
+
+    /// A-T4: a ridged half + a flat half emits NO delta-0 divider (the ridged
+    /// half is grouped → flat-default count is 1; its apexes re-split the ring
+    /// on re-derive). The ridged half still reconstructs via its group when
+    /// its base is off the default.
+    #[test]
+    fn reconstruction_ridged_half_no_divider() {
+        use datatypes::ber::structural::RoofApex;
+        let cid = Default::default();
+        let default_z = 2.4;
+        // Right half ridged at a base OFF the default (so the group emits).
+        let apex = RoofApex {
+            point: Point2f64::new(7.0, 3.0),
+            z_m: 4.0,
+        };
+        let mut roofs =
+            CeilingRegions::default_for_footprint(vec![square64(0.0, 4.0)], default_z, cid);
+        roofs.regions.extend(
+            CeilingRegions::default_for_footprint(vec![square64(4.0, 10.0)], 2.7, cid)
+                .with_apexes(std::slice::from_ref(&apex))
+                .regions,
+        );
+        let mut ber = Ber::default();
+        ber.storeys.push(Storey {
+            roofs,
+            ceiling_height_m: Some(default_z),
+            roof_apexes: vec![apex],
+            ..Storey::default()
+        });
+        let regions = ceiling_step_regions_from_roofs(&ber, 0);
+        // The grouped (ridged) half emits ONE merged area at +0.3; the lone
+        // flat-default half emits NO delta-0 divider (count is 1).
+        assert!(
+            regions.iter().all(|r| r.delta_m.abs() > 1e-9),
+            "no delta-0 divider emitted; only the off-default ridge group"
+        );
+        assert_eq!(regions.len(), 1, "just the ridged half's merged area");
+    }
+
+    /// A-T4b (regression): a same-height split with a ridge over one half AT
+    /// the DEFAULT base. The at-default group counts as a partition piece, so
+    /// reconstruction re-emits the boundary as delta-0 dividers — and
+    /// re-deriving (`with_z_deltas` then `with_apexes`) keeps the ridge
+    /// confined to its own half instead of fanning over the whole footprint
+    /// (the L-spanning bug an at-default ridge would otherwise reintroduce on
+    /// reload).
+    #[test]
+    fn reconstruction_at_default_ridge_keeps_divider() {
+        use datatypes::ber::structural::RoofApex;
+        let cid = Default::default();
+        let default_z = 2.4;
+        // Right half ridged at the DEFAULT base (apex raised above it).
+        let apex = RoofApex {
+            point: Point2f64::new(7.0, 3.0),
+            z_m: 4.0,
+        };
+        let mut roofs =
+            CeilingRegions::default_for_footprint(vec![square64(0.0, 4.0)], default_z, cid);
+        roofs.regions.extend(
+            CeilingRegions::default_for_footprint(vec![square64(4.0, 10.0)], default_z, cid)
+                .with_apexes(std::slice::from_ref(&apex))
+                .regions,
+        );
+        let mut ber = Ber::default();
+        ber.storeys.push(Storey {
+            roofs,
+            ceiling_height_m: Some(default_z),
+            roof_apexes: vec![apex.clone()],
+            ..Storey::default()
+        });
+        let recon = ceiling_step_regions_from_roofs(&ber, 0);
+        // The boundary survives: both pieces re-emit at delta 0 (the at-default
+        // group's merged ring + the flat half), NOT dropped.
+        assert!(!recon.is_empty(), "the same-height divider is not dropped");
+        assert!(
+            recon.iter().all(|r| r.delta_m.abs() < 1e-9),
+            "every re-emitted piece is a delta-0 divider"
+        );
+        // Re-derive: re-split the default ring, then apply the ridge. It must
+        // land ONLY in the right half (x ≥ 4) — never spanning to x = 0.
+        let areas: Vec<(Vec<Point2f64>, f64)> = recon
+            .iter()
+            .map(|r| {
+                (
+                    r.polygon
+                        .iter()
+                        .map(|p| Point2f64::new(p.x as f64, p.y as f64))
+                        .collect(),
+                    r.delta_m,
+                )
+            })
+            .collect();
+        let rederived =
+            CeilingRegions::default_for_footprint(vec![square64(0.0, 10.0)], default_z, cid)
+                .with_z_deltas(&areas)
+                .with_apexes(std::slice::from_ref(&apex));
+        let groups = rederived.apex_groups(std::slice::from_ref(&apex));
+        assert_eq!(groups.len(), 1, "one ridge group");
+        let min_x = groups[0]
+            .merged_rings
+            .iter()
+            .flatten()
+            .map(|p| p.x)
+            .fold(f64::INFINITY, f64::min);
+        assert!(
+            min_x >= 4.0 - 1e-6,
+            "the ridge stays in the right half (min x = {min_x}), not spanning the footprint"
+        );
+    }
+
+    // ── Smarter default reference wall (Slice B1) ───────────────────────────
+
+    /// An L-shaped outline: a wide bottom arm (y ∈ 0..3, x ∈ 0..12) plus a
+    /// tall left arm (x ∈ 0..4, y ∈ 0..10). Vertical outline walls at
+    /// x ∈ {0, 4, 12}; the right arm's bounding wall is x = 12.
+    fn storey_l_shape() -> StoreyDoc {
+        let outline = FloorPlan::from_clean_ring(&[
+            p(0., 0.),
+            p(12., 0.),
+            p(12., 3.),
+            p(4., 3.),
+            p(4., 10.),
+            p(0., 10.),
+        ])
+        .unwrap();
+        let known = outline.all_active_params();
+        let mut doc = StoreyDoc::default();
+        doc.outline = ShapeSlot {
+            floor_plan: outline,
+            dimensioning: DimensionState {
+                scale_set: true,
+                known_params: known,
+                ..Default::default()
+            },
+        };
+        doc.load_active_into_buffer();
+        doc
+    }
+
+    /// B-T1: with `Some(own_arm_ring)`, the default option (`current_idx 0`)
+    /// is a wall bounding the ring, even when another wall is globally nearer;
+    /// the full option set is still present and cyclable.
+    #[test]
+    fn prompt_prefers_a_wall_bounding_the_region() {
+        let doc = storey_l_shape();
+        // A vertical ridge line at x = 10, in the bottom-right arm. Reference
+        // walls on X are x ∈ {0, 4, 12}. Globally nearest to 10 is x = 12
+        // (2 away) then x = 4 (6 away) then x = 0 (10 away). The own arm's
+        // ring spans x ∈ 4..12, so x = 4 and x = 12 BOTH bound it — x = 12 is
+        // already nearest, so to prove the sort we put the ridge at x = 5,
+        // where x = 4 (1 away, bounds the region) beats x = 0? No — pick a
+        // region whose bounding wall is NOT the global nearest:
+        // ring = the LEFT arm (x ∈ 0..4), ridge at x = 3.5 → global nearest is
+        // x = 4 (0.5) which DOES bound it; so use the bottom arm ring with the
+        // line near x = 4 boundary but make x=4 not nearest. Simplest robust
+        // case: line at x = 3, own ring = bottom arm (x ∈ 4..12). Global
+        // nearest is x = 4 (1 away) which bounds the bottom arm; next x = 0
+        // (3 away) which does NOT. Default must be x = 4.
+        let bottom_arm: Vec<Point2f64> = vec![
+            Point2f64::new(4.0, 0.0),
+            Point2f64::new(12.0, 0.0),
+            Point2f64::new(12.0, 3.0),
+            Point2f64::new(4.0, 3.0),
+        ];
+        // Put the line where the GLOBAL nearest wall does NOT bound the arm:
+        // line at x = 1 → nearest is x = 0 (1 away, NOT on the bottom arm),
+        // next x = 4 (3 away, BOUNDS the arm). With the ring the default flips
+        // to x = 4.
+        let prompt = doc
+            .ceiling_line_position_prompt(ParameterAxis::X, 1.0, Some(&bottom_arm))
+            .expect("parallel walls");
+        assert_eq!(
+            prompt.options.len(),
+            3,
+            "full option set preserved (x ∈ 0,4,12)"
+        );
+        assert!(
+            (prompt.options[prompt.current_idx].reference_value - 4.0).abs() < 1e-4,
+            "default is the arm-bounding wall x=4, not the global-nearest x=0"
+        );
+
+        // Without the ring, the global nearest (x = 0) is the default.
+        let plain = doc
+            .ceiling_line_position_prompt(ParameterAxis::X, 1.0, None)
+            .unwrap();
+        assert!((plain.options[0].reference_value - 0.0).abs() < 1e-4);
+    }
+
+    /// B-T2: `None` is identical to the current global-nearest ordering.
+    #[test]
+    fn prompt_none_is_global_nearest() {
+        let doc = storey_10x6();
+        let prompt = doc
+            .ceiling_line_position_prompt(ParameterAxis::X, 4.0, None)
+            .unwrap();
+        assert_eq!(prompt.options.len(), 2);
+        assert!((prompt.options[0].reference_value - 0.0).abs() < 1e-4);
+        assert!((prompt.options[1].reference_value - 10.0).abs() < 1e-4);
+        assert_eq!(prompt.current_idx, 0);
+    }
+
+    /// B-T3: a ring no parallel wall lies on (degenerate) falls back to
+    /// global-nearest — the bounding test never matches, so the sort is the
+    /// plain distance order.
+    #[test]
+    fn prompt_degenerate_ring_falls_back() {
+        let doc = storey_10x6();
+        // A ring whose X-extent (20..30) matches NO reference wall (x ∈ 0,10).
+        let off_ring = vec![
+            Point2f64::new(20.0, 0.0),
+            Point2f64::new(30.0, 0.0),
+            Point2f64::new(30.0, 6.0),
+            Point2f64::new(20.0, 6.0),
+        ];
+        let prompt = doc
+            .ceiling_line_position_prompt(ParameterAxis::X, 4.0, Some(&off_ring))
+            .unwrap();
+        assert!(
+            (prompt.options[0].reference_value - 0.0).abs() < 1e-4,
+            "no wall bounds the ring → plain global-nearest default"
+        );
+    }
+
+    /// B-T4: `ridge_region_ring` returns the midpoint's region ring, and
+    /// `None` when the midpoint is in no region.
+    #[test]
+    fn ridge_region_ring_returns_the_midpoints_region() {
+        let cid = Default::default();
+        let default_z = 2.4;
+        // Two same-height halves at x ∈ 0..4 and x ∈ 4..10.
+        let base = CeilingRegions::default_for_footprint(vec![square64(0.0, 10.0)], default_z, cid)
+            .with_z_deltas(&[(square64(0.0, 4.0), 0.0), (square64(4.0, 10.0), 0.0)]);
+        let storey = Storey {
+            roofs: base,
+            ceiling_height_m: Some(default_z),
+            ..Storey::default()
+        };
+        // A ridge along Y in the RIGHT half: cross axis X at x = 7, extent
+        // y ∈ 1..5 → midpoint (7, 3), inside the x ∈ 4..10 region.
+        let ring = crate::ridge_region_ring(&storey, ParameterAxis::X, 7.0, 1.0, 4.0)
+            .expect("midpoint is in the right region");
+        let min_x = ring.iter().map(|p| p.x).fold(f64::INFINITY, f64::min);
+        let max_x = ring.iter().map(|p| p.x).fold(f64::NEG_INFINITY, f64::max);
+        assert!((min_x - 4.0).abs() < 1e-6 && (max_x - 10.0).abs() < 1e-6);
+
+        // A midpoint outside any region → None.
+        assert!(
+            crate::ridge_region_ring(&storey, ParameterAxis::X, 50.0, 1.0, 4.0).is_none(),
+            "midpoint in no region"
         );
     }
 }

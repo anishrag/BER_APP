@@ -3376,12 +3376,198 @@ fn deleting_a_ceiling_step_reflattens_the_roof() {
     c.materialize();
     assert_eq!(roof_flat_zs(&c).len(), 2);
 
-    c.delete_ceiling_step_region(0);
+    delete_ceiling_step_region_at(&mut c, 0);
     c.materialize();
     let zs = roof_flat_zs(&c);
     assert!(
         zs.iter().all(|z| (z - 2.4).abs() < 1e-6),
         "roof back at the default everywhere (got {zs:?})"
+    );
+}
+
+/// Delete the storey-0 ceiling-step region at raw-Vec index `i` by its world
+/// ring — `delete_ceiling_step_region` takes a ring (the displayed feed is
+/// divider-filtered, so display indices don't map to the raw Vec).
+fn delete_ceiling_step_region_at(c: &mut AppController, i: usize) {
+    let ring: Vec<(f64, f64)> = c.ceiling_step_regions[&0][i]
+        .polygon
+        .iter()
+        .map(|p| (p.x as f64, p.y as f64))
+        .collect();
+    c.delete_ceiling_step_region(&ring);
+}
+
+/// A-T5: a same-height split (delta 0.0) — via `assign_ceiling_step_delta(0.0)`
+/// and the `keep_ceiling_same_height` button alike — splits the active line
+/// into two SAME-HEIGHT pieces, both kept in the session list, `mark_dirty`
+/// set; the near-zero rejection no longer fires for 0.
+#[test]
+fn ceiling_same_height_split_keeps_both_pieces() {
+    for via_button in [false, true] {
+        let mut c = ceiling_ready_controller();
+        ceiling_step_to_amount_at_x4(&mut c);
+        if via_button {
+            c.keep_ceiling_same_height()
+                .expect("same-height split applies");
+        } else {
+            // The near-zero guard no longer rejects an exact 0.
+            c.assign_ceiling_step_delta(0.0)
+                .expect("zero delta is a divider, not a rejection");
+        }
+        assert!(!c.ceiling_step_pending(), "flow complete");
+        assert!(c.is_dirty(), "the split marked the document dirty");
+
+        c.materialize();
+        // Two pieces, both at the default height (no riser).
+        let zs = roof_flat_zs(&c);
+        assert_eq!(zs.len(), 2, "split into two flat pieces");
+        assert!(
+            zs.iter().all(|z| (z - 2.4).abs() < 1e-6),
+            "both pieces stay at the default height (got {zs:?})"
+        );
+        // Both flat-default pieces are kept as delta-0 dividers in the session.
+        let session = &c.ceiling_step_regions[&0];
+        assert_eq!(session.len(), 2, "both halves recorded as dividers");
+        assert!(
+            session.iter().all(|r| r.delta_m.abs() < 1e-3),
+            "both are same-height dividers"
+        );
+    }
+}
+
+/// A-T6: a same-height split survives reload + a no-edit re-derive — the
+/// shell-level fixpoint (derive → reconstruct → derive reproduces the two
+/// flat pieces).
+#[test]
+fn ceiling_same_height_split_survives_reload_and_rederive() {
+    let mut c = ceiling_ready_controller();
+    ceiling_step_to_amount_at_x4(&mut c);
+    c.assign_ceiling_step_delta(0.0).unwrap();
+    c.materialize();
+    assert_eq!(roof_flat_zs(&c).len(), 2);
+
+    let id = c.current_record.as_ref().unwrap().id.clone();
+    c.flush_if_dirty().unwrap();
+    c.open_ber(&id).unwrap();
+    let session = &c.ceiling_step_regions[&0];
+    assert_eq!(
+        session.len(),
+        2,
+        "both dividers reconstructed from the roofs"
+    );
+    assert!(session.iter().all(|r| r.delta_m.abs() < 1e-3));
+
+    // Re-derive with no edit: the two flat pieces must persist (fixpoint).
+    c.mark_dirty().unwrap();
+    c.materialize();
+    let zs = roof_flat_zs(&c);
+    assert_eq!(zs.len(), 2, "split kept across the re-derive");
+    assert!(zs.iter().all(|z| (z - 2.4).abs() < 1e-6));
+}
+
+/// A-T7: deleting the divider(s) re-fuses the two halves to ONE flat default
+/// ring on the next derive. The same-height split records BOTH halves as
+/// delta-0 dividers (they tile the footprint), so removing the partition means
+/// clearing them — with no session region the derive yields a single default
+/// ring (no spurious divider, the genuine-subdivision predicate's lone-region
+/// case).
+#[test]
+fn deleting_a_divider_refuses_the_halves() {
+    let mut c = ceiling_ready_controller();
+    ceiling_step_to_amount_at_x4(&mut c);
+    c.assign_ceiling_step_delta(0.0).unwrap();
+    c.materialize();
+    assert_eq!(c.ceiling_step_regions[&0].len(), 2, "two dividers");
+
+    // Delete the dividers (the user removes the split). Each delete re-commits;
+    // once none remain the next derive re-fuses to a single default ring.
+    while c
+        .ceiling_step_regions
+        .get(&0)
+        .is_some_and(|rs| !rs.is_empty())
+    {
+        delete_ceiling_step_region_at(&mut c, 0);
+    }
+    c.materialize();
+    c.reconstruct_ceiling_step_regions_for(0);
+    let zs = roof_flat_zs(&c);
+    assert_eq!(zs.len(), 1, "the two halves re-fused into one flat region");
+    assert!((zs[0] - 2.4).abs() < 1e-6);
+    assert!(
+        c.ceiling_step_regions.get(&0).is_none(),
+        "no session divider survives a lone flat-default region"
+    );
+}
+
+/// A-T8: a divider's label reads "divider"; the amber feed
+/// (`ceiling_step_region_polygons`) EXCLUDES it; `ceiling_divider_lines`
+/// emits its cut segment.
+#[test]
+fn divider_label_feed_and_cut_segment() {
+    let mut c = ceiling_ready_controller();
+    ceiling_step_to_amount_at_x4(&mut c);
+    c.assign_ceiling_step_delta(0.0).unwrap();
+    c.materialize();
+    c.reconstruct_ceiling_step_regions_for(0);
+
+    // Label.
+    assert_eq!(AppController::ceiling_step_region_label(0.0), "divider");
+    assert_eq!(AppController::ceiling_step_region_label(0.2), "+0.20 m");
+
+    // The amber tint/label feed excludes dividers — both halves are dividers.
+    assert!(
+        c.ceiling_step_region_polygons().is_empty(),
+        "dividers don't show as amber height steps"
+    );
+
+    // The faint dashed cut: one segment per divider, on the split axis (X = 4).
+    let cuts = c.ceiling_divider_lines();
+    assert!(!cuts.is_empty(), "divider cut segments emitted");
+    for ((ax, _ay), (bx, _by)) in &cuts {
+        assert!(
+            (ax - 4.0).abs() < 1e-3 && (bx - 4.0).abs() < 1e-3,
+            "the cut is the shared edge at x = 4 (got {ax}..{bx})"
+        );
+    }
+}
+
+/// A-T8b (delete contract): with a divider PRECEDING a height step in the raw
+/// region Vec, the displayed (divider-filtered) feed lists only the step;
+/// deleting via that feed's ring removes the STEP, not the divider — the
+/// world-ring lookup maps the filtered entry back to its raw Vec index.
+#[test]
+fn deleting_from_the_filtered_feed_removes_the_right_region() {
+    let mut c = ceiling_ready_controller();
+    // Raw Vec order: [divider(Δ0) at x = 4 Greater, step(+0.3) at x = 7 Greater].
+    let divider = c
+        .document
+        .ceiling_step_region(ParameterAxis::X, 4.0, document::LineSide::Greater, 0.0)
+        .expect("divider builds");
+    let step = c
+        .document
+        .ceiling_step_region(ParameterAxis::X, 7.0, document::LineSide::Greater, 0.3)
+        .expect("step builds");
+    c.ceiling_step_regions.entry(0).or_default().push(divider);
+    c.ceiling_step_regions.entry(0).or_default().push(step);
+
+    // The displayed feed is filtered to the height step alone.
+    let feed = c.ceiling_step_region_polygons();
+    assert_eq!(
+        feed.len(),
+        1,
+        "only the +0.30 step shows; the divider is hidden"
+    );
+    assert_eq!(feed[0].1, "+0.30 m");
+
+    // Delete via the FEED's ring (what the UI button carries). It must remove
+    // the step (raw index 1), not the divider (raw index 0).
+    c.delete_ceiling_step_region(&feed[0].0);
+    let remaining = &c.ceiling_step_regions[&0];
+    assert_eq!(remaining.len(), 1, "one region left");
+    assert!(
+        remaining[0].delta_m.abs() < 1e-3,
+        "the surviving region is the DIVIDER, not the step (got delta {})",
+        remaining[0].delta_m
     );
 }
 
@@ -3397,17 +3583,19 @@ fn storey_switch_clears_pending_ceiling_step() {
     assert!(!c.ceiling_step_pending(), "pending line abandoned");
 }
 
-/// The assign validation: a near-zero step (|Δ| < 0.01 m) and a drop at or
-/// past the default height are rejected, with the pending line left intact
-/// so the user can retype; a valid amount still lands afterwards.
+/// The assign validation: a non-finite step and a drop at or past the default
+/// height are rejected, with the pending line left intact so the user can
+/// retype; a valid amount still lands afterwards. (A near-zero |Δ| < 0.01 is
+/// NO LONGER rejected — it snaps to 0.0, a same-height divider; see
+/// `ceiling_same_height_split_keeps_both_pieces`.)
 #[test]
 fn ceiling_step_amount_rejections_keep_the_pending_line() {
     let mut c = ceiling_ready_controller();
     ceiling_step_to_amount_at_x4(&mut c);
 
     assert!(
-        c.assign_ceiling_step_delta(0.005).is_err(),
-        "near-zero rejected"
+        c.assign_ceiling_step_delta(f32::NAN).is_err(),
+        "non-finite rejected"
     );
     assert!(c.ceiling_step_amount_pending(), "pending intact");
     assert!(
@@ -3543,8 +3731,8 @@ fn ceiling_carve_rejections_cancel_and_undo_mirror_the_floor_flow() {
     ceiling_carve_to_amount(&mut c);
 
     assert!(
-        c.assign_ceiling_step_delta(0.005).is_err(),
-        "near-zero rejected"
+        c.assign_ceiling_step_delta(f32::INFINITY).is_err(),
+        "non-finite rejected"
     );
     assert!(c.ceiling_step_amount_pending(), "area stays pending");
     assert!(
@@ -4394,6 +4582,123 @@ fn roof_ridge_length_cross_start_height_flow_forms_a_pitched_roof() {
     );
 }
 
+/// A T-shaped storey: a wide bottom bar (x ∈ 0..12, y ∈ 0..3) plus a narrow
+/// top stub (x ∈ 5..7, y ∈ 3..10). Vertical (X) outline walls at x ∈ {0,5,7,12}
+/// — note the INTERIOR stub walls x ∈ {5,7} sit between the bottom bar's
+/// bounding walls x ∈ {0,12}. Default ceiling height set, roof-point mode on.
+fn roof_ready_t_controller() -> AppController {
+    let p = |x: f32, y: f32| Point2f32::new(x, y);
+    let mut c = AppController::new(crate::engine::open_db(":memory:").unwrap());
+    let _ = c.create_ber(
+        "T".into(),
+        chrono::NaiveDate::from_ymd_opt(2026, 1, 1).unwrap(),
+    );
+    c.document.floor_plan = FloorPlan::from_clean_ring(&[
+        p(0., 0.),
+        p(12., 0.),
+        p(12., 3.),
+        p(7., 3.),
+        p(7., 10.),
+        p(5., 10.),
+        p(5., 3.),
+        p(0., 3.),
+    ])
+    .unwrap();
+    c.document.dimensioning.scale_set = true;
+    c.document.dimensioning.known_params = c.document.floor_plan.all_active_params();
+    c.commit_to_ber().unwrap();
+    c.set_default_ceiling_height(2.4).expect("height applies");
+    c.set_roof_point_mode(true);
+    assert!(c.roof_point_mode());
+    c
+}
+
+/// B-T5: on a same-height-SPLIT T storey, a ridge drawn in the bottom bar gets
+/// a cross-position prompt whose DEFAULT reference wall bounds the ridge's OWN
+/// region (x = 12, a bottom-bar bbox edge) — NOT the globally-nearest interior
+/// stub wall (x = 7), which doesn't bound the bottom bar. Cycling still reaches
+/// every wall (the option set is unchanged). The default-wall smartness is the
+/// only change; the rest of the flow is unaffected.
+#[test]
+fn roof_ridge_default_wall_bounds_its_own_arm() {
+    let mut c = roof_ready_t_controller();
+    // Same-height split at y = 3 (Less side = the bottom bar): the bottom bar
+    // and the top stub become two flat-default regions, so the bottom bar is a
+    // region of its OWN that `ridge_region_ring` can return. (Direct push +
+    // canonicalize — the `stepped_ceiling_below_controller` pattern, delta 0.)
+    let divider = c
+        .document
+        .ceiling_step_region(ParameterAxis::Y, 3.0, document::LineSide::Less, 0.0)
+        .expect("divider region builds");
+    c.ceiling_step_regions.entry(0).or_default().push(divider);
+    c.mark_dirty().unwrap();
+    c.materialize();
+    c.reconstruct_ceiling_step_regions_for(0);
+    assert_eq!(roof_flat_zs(&c).len(), 2, "two same-height regions");
+
+    // A vertical ridge in the bottom bar at cross x ≈ 8 (1 m from the interior
+    // stub wall x = 7 — beyond the 0.2 m snap tol, so the cross question
+    // opens), extent y ∈ [0.5, 2.5] (midpoint (8, 1.5) strictly inside the
+    // bottom bar). No end snaps (0.5 m clear of y ∈ {0,3}).
+    c.apply_roof_ridge_stroke_event(&[(8.0, 0.5), (8.02, 1.5), (8.0, 2.5)]);
+    assert!(
+        c.roof_ridge_length_pending(),
+        "stroke fitted → length first"
+    );
+    c.skip_roof_ridge_length().expect("accept the drawn length");
+
+    // The cross question, with the SMART default: x = 12 bounds the bottom bar;
+    // the global-nearest x = 7 (interior stub wall) does not.
+    assert!(c.roof_ridge_position_pending(), "length → cross");
+    let ui = c.position_prompt_for_ui().expect("cross prompt");
+    assert_eq!(ui.kind, PositionPromptKind::Line);
+    assert_eq!(ui.axis, ParameterAxis::X);
+    assert!(
+        (ui.reference_wall.wall_a.0 - 12.0).abs() < 1e-4,
+        "default reference wall bounds the ridge's own arm (x = 12), not the \
+         globally-nearest interior wall x = 7 (got {})",
+        ui.reference_wall.wall_a.0
+    );
+    assert_eq!(
+        ui.option_count, 4,
+        "the full option set is preserved (x ∈ 0,5,7,12)"
+    );
+
+    // Cycling reaches the others — including the interior x = 7 that was the
+    // global nearest — proving only the DEFAULT changed, not the set.
+    let mut seen = vec![ui.reference_wall.wall_a.0.round()];
+    for _ in 0..ui.option_count - 1 {
+        c.cycle_position_reference();
+        let u = c.position_prompt_for_ui().expect("cycled prompt");
+        seen.push(u.reference_wall.wall_a.0.round());
+    }
+    seen.sort_by(f64::total_cmp);
+    assert_eq!(seen, vec![0.0, 5.0, 7.0, 12.0], "cycle reaches every wall");
+}
+
+/// B-T5 (smoke): the three NON-ridge callers that pass `None` keep their
+/// global-nearest default — the ridge smartness doesn't bleed into them. A
+/// ceiling-step line on the bottom bar defaults to the globally-nearest wall.
+#[test]
+fn non_ridge_position_prompts_stay_global_nearest() {
+    let mut c = roof_ready_t_controller();
+    c.set_roof_point_mode(false);
+    c.set_ceiling_step_mode(true);
+    // Vertical ceiling-step line at x ≈ 8 — nearest X-wall is the interior
+    // x = 7 (1 m), the global-nearest default (None → no priority ring).
+    c.apply_ceiling_step_stroke_event(&[(8.0, 0.5), (8.02, 5.0), (8.0, 9.5)]);
+    assert!(c.ceiling_step_side_pending());
+    c.ceiling_step_tap(2.0, 1.0); // Less side
+    let ui = c
+        .position_prompt_for_ui()
+        .expect("ceiling-step line prompt");
+    assert_eq!(ui.kind, PositionPromptKind::Line);
+    assert!(
+        (ui.reference_wall.wall_a.0 - 7.0).abs() < 1e-4,
+        "the ceiling-step line stays global-nearest (x = 7), not arm-aware"
+    );
+}
+
 /// The line input and the two-point tap flow are the SAME model: skipping
 /// every question keeps the DRAWN values (cross, start, AND length), and
 /// placing the two apexes by taps at exactly those drawn endpoints derives a
@@ -4561,9 +4866,12 @@ fn roof_ridge_start_snap_skips_its_question_and_unsnap_reopens_it() {
     assert!((ax - 2.5).abs() < 1e-6, "resolved cross kept");
     assert!((ay - 4.1).abs() < 0.05, "back at the DRAWN start");
 
-    // Type the start (1 m from the nearest ref y = 4, drawn side +): the
+    // Type the start (5 m from the default ref y = 0, drawn side +): the
     // apexes land at the RESOLVED start with the resolved (drawn) length.
-    c.apply_position_dimension(1.0).expect("start applies"); // y = 5
+    // (The default ref is y = 0 — a wall bounding the ridge's own region;
+    // the interior notch wall y = 4 doesn't bound the whole-L region, so the
+    // smarter-default sort puts it after the boundary walls.)
+    c.apply_position_dimension(5.0).expect("start applies"); // y = 5
     c.assign_roof_ridge_height(4.0).expect("ridge assigns");
     let storey = &c.current_record.as_ref().unwrap().data.storeys[0];
     for (apex, want_y) in storey.roof_apexes.iter().zip([5.0, 9.4]) {

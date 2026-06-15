@@ -805,6 +805,14 @@ fn ceiling_step_toolbar<F: FnMut(UiEvent)>(
                 amount_input.clear();
             }
         }
+        if ui
+            .button("Keep same height")
+            .hint("Split without a step — both sides stay the same height")
+            .clicked()
+        {
+            on_event(UiEvent::Sketch(SketchEvent::KeepCeilingSameHeight));
+            amount_input.clear();
+        }
         if ui.button("Cancel").clicked() {
             on_event(UiEvent::Sketch(SketchEvent::CancelPendingCeilingStep));
             amount_input.clear();
@@ -812,7 +820,7 @@ fn ceiling_step_toolbar<F: FnMut(UiEvent)>(
         inline_error(ui, error);
     } else {
         ui.label("Draw a straight line across the plan — or a closed area — to step the ceiling.");
-        for (i, (_ring, label)) in regions.iter().enumerate() {
+        for (ring, label) in regions.iter() {
             ui.horizontal(|ui| {
                 ui.label(label);
                 if ui
@@ -820,7 +828,9 @@ fn ceiling_step_toolbar<F: FnMut(UiEvent)>(
                     .hint("Delete this ceiling step (re-flattens to the default)")
                     .clicked()
                 {
-                    on_event(UiEvent::Sketch(SketchEvent::DeleteCeilingStepRegion(i)));
+                    on_event(UiEvent::Sketch(SketchEvent::DeleteCeilingStepRegion(
+                        ring.clone(),
+                    )));
                 }
             });
         }

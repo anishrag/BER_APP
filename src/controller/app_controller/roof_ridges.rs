@@ -305,6 +305,20 @@ impl AppController {
         end_snap: Option<CeilingLineSnap>,
         remaining: &[RidgeQuestion],
     ) -> Result<(), String> {
+        // The ridge's OWN resolved ceiling region (priority ring): both
+        // position questions default their reference wall to one bounding this
+        // region, so on an L-shape the default isn't the globally-nearest wall
+        // in the other arm. Same ridge → same ring for Cross and Start (the
+        // Start question measures on `axis.other()`, but the region is the
+        // ridge's region either way). `materialize` brings the roofs current
+        // so the lookup sees this ridge's area.
+        let idx = self.current_storey_idx.unwrap_or(0);
+        self.materialize();
+        let prefer_region: Option<Vec<Point2f64>> = self
+            .current_record
+            .as_ref()
+            .and_then(|r| r.data.storeys.get(idx))
+            .and_then(|storey| document::ridge_region_ring(storey, axis, coord_m, lo, len_m));
         for &question in remaining {
             let (snapped, prompt_axis, coord) = match question {
                 RidgeQuestion::Cross => (cross_snap.is_some(), axis, coord_m),
@@ -315,10 +329,11 @@ impl AppController {
             if snapped {
                 continue;
             }
-            if let Some(prompt) = self
-                .document
-                .ceiling_line_position_prompt(prompt_axis, coord)
-            {
+            if let Some(prompt) = self.document.ceiling_line_position_prompt(
+                prompt_axis,
+                coord,
+                prefer_region.as_deref(),
+            ) {
                 self.pending_roof_ridge = Some(match question {
                     RidgeQuestion::Cross => PendingRoofRidge::CrossPosition {
                         axis,
@@ -349,9 +364,9 @@ impl AppController {
         // the render loop) and run the binding placement check — the
         // MIDPOINT strictly inside one flat un-apexed region, the extent
         // within that region's run through it (boundary touch allowed — a
-        // wall-to-wall gable) — before opening the Height stage.
-        let idx = self.current_storey_idx.unwrap_or(0);
-        self.materialize();
+        // wall-to-wall gable) — before opening the Height stage. (`idx` and a
+        // materialize are already in hand from the prefer-region lookup above;
+        // the loop only reads, so the roofs are still current.)
         let storey = self
             .current_record
             .as_ref()

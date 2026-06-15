@@ -398,6 +398,44 @@ pub fn bbox_diagonal(points: &[Point2f32]) -> f32 {
     }
 }
 
+/// The interior shared edge (world coords) between a sub-rectangle `region`
+/// (an axis-aligned partition piece) and the rest of a footprint whose bounding
+/// box is `outline_bbox` = `((ox0,oy0),(ox1,oy1))` — the faint-divider cut for a
+/// same-height ceiling split. Returns the region's bbox edge on the SPLIT axis
+/// that lies INTERIOR to the outline (not flush with the outline bbox):
+/// a vertical edge when the region is narrower than the outline in X, a
+/// horizontal edge when narrower in Y, else `None` (degenerate — the region
+/// fills the footprint on both axes, or has no points). Pure f64 coordinate
+/// math; no model state.
+pub fn interior_split_edge(
+    region: &[(f64, f64)],
+    outline_bbox: ((f64, f64), (f64, f64)),
+) -> Option<((f64, f64), (f64, f64))> {
+    let ((ox0, oy0), (ox1, oy1)) = outline_bbox;
+    let mut it = region.iter();
+    let &(fx, fy) = it.next()?;
+    let (mut rx0, mut ry0, mut rx1, mut ry1) = (fx, fy, fx, fy);
+    for &(x, y) in it {
+        rx0 = rx0.min(x);
+        ry0 = ry0.min(y);
+        rx1 = rx1.max(x);
+        ry1 = ry1.max(y);
+    }
+    const TOL: f64 = 1e-6;
+    if (rx1 - rx0) + TOL < (ox1 - ox0) {
+        // Vertical cut — the full-height edge at rx0 or rx1 not flush with the
+        // outline's X extent.
+        let cut_x = if (rx0 - ox0).abs() <= TOL { rx1 } else { rx0 };
+        Some(((cut_x, ry0), (cut_x, ry1)))
+    } else if (ry1 - ry0) + TOL < (oy1 - oy0) {
+        // Horizontal cut — the full-width edge at ry0 or ry1.
+        let cut_y = if (ry0 - oy0).abs() <= TOL { ry1 } else { ry0 };
+        Some(((rx0, cut_y), (rx1, cut_y)))
+    } else {
+        None
+    }
+}
+
 /// Nearest point on segment `a→b` to `p`. Returns the clamped on-segment point,
 /// the UNCLAMPED parameter `t` (so callers can tell whether the foot fell beyond
 /// an endpoint), and the distance from `p` to that on-segment point. A
@@ -835,6 +873,36 @@ fn axis_aligned_segments_cross(a1: Point2f32, a2: Point2f32, b1: Point2f32, b2: 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // A vertical split: a region flush with the outline's left edge yields the
+    // shared cut at its RIGHT edge; the complementary half yields the same x.
+    #[test]
+    fn interior_split_edge_finds_the_shared_cut() {
+        let outline = ((0.0, 0.0), (10.0, 10.0));
+        // Left half x ∈ 0..4 → cut at x = 4 (its right edge, interior).
+        let left = [(0.0, 0.0), (4.0, 0.0), (4.0, 10.0), (0.0, 10.0)];
+        assert_eq!(
+            interior_split_edge(&left, outline),
+            Some(((4.0, 0.0), (4.0, 10.0)))
+        );
+        // Right half x ∈ 4..10 → cut at x = 4 (its left edge, interior).
+        let right = [(4.0, 0.0), (10.0, 0.0), (10.0, 10.0), (4.0, 10.0)];
+        assert_eq!(
+            interior_split_edge(&right, outline),
+            Some(((4.0, 0.0), (4.0, 10.0)))
+        );
+        // Horizontal split: bottom band y ∈ 0..3 → cut at y = 3.
+        let bottom = [(0.0, 0.0), (10.0, 0.0), (10.0, 3.0), (0.0, 3.0)];
+        assert_eq!(
+            interior_split_edge(&bottom, outline),
+            Some(((0.0, 3.0), (10.0, 3.0)))
+        );
+        // A region filling the footprint on both axes has no interior cut.
+        let full = [(0.0, 0.0), (10.0, 0.0), (10.0, 10.0), (0.0, 10.0)];
+        assert_eq!(interior_split_edge(&full, outline), None);
+        // Empty ring → None.
+        assert_eq!(interior_split_edge(&[], outline), None);
+    }
 
     // Both validators must accept a clean square and reject too-few vertices, a
     // collapsed edge, and a self-crossing "bow-tie".

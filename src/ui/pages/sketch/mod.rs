@@ -262,6 +262,10 @@ pub enum SketchEvent {
     /// User entered the ceiling-step amount (metres, signed: the Up/Down
     /// buttons own the sign; the typed value contributes |v|).
     AssignCeilingStepDelta(f32),
+    /// "Keep same height": split the pending line/area into two same-height
+    /// pieces (a divider, no riser) — routed to `keep_ceiling_same_height`
+    /// (a 0.0 delta). Bounds a ridge's own area without a step.
+    KeepCeilingSameHeight,
     /// "Don't snap" on the pending ceiling-step line's snap tag: revert the
     /// line to its drawn coordinate. Routed to the controller's dedicated
     /// `unsnap_ceiling_step_line` — NOT `ChooseSnap`/`UnsnapLast`, whose
@@ -269,8 +273,11 @@ pub enum SketchEvent {
     UnsnapCeilingStepLine,
     /// Discard the in-flight ceiling-step line at any stage.
     CancelPendingCeilingStep,
-    /// Delete the current storey's ceiling-step region at the given index.
-    DeleteCeilingStepRegion(usize),
+    /// Delete the current storey's ceiling-step region identified by its world
+    /// ring. A ring (not a list index) because the displayed feed is
+    /// divider-FILTERED — its indices don't map to the raw region Vec; the
+    /// controller maps the ring back to the raw index.
+    DeleteCeilingStepRegion(Vec<(f64, f64)>),
     /// Toggle roof-point mode: when on, tapping a point inside a ceiling area
     /// starts the apex flow (per-axis position questions, then the height).
     SetRoofPointMode(bool),
@@ -475,6 +482,10 @@ pub struct SketchView<'a> {
     pub ceiling_step_mode: bool,
     pub ceiling_step_available: bool,
     pub ceiling_step_region_polygons: &'a [(Vec<(f64, f64)>, String)],
+    /// Same-height divider cut segments (world coords) — drawn as a faint
+    /// dashed pass, visually distinct from the amber-solid height steps.
+    /// Divider regions are excluded from `ceiling_step_region_polygons`.
+    pub ceiling_divider_lines: &'a [((f64, f64), (f64, f64))],
     pub pending_ceiling_step_line: Option<((f64, f64), (f64, f64))>,
     pub pending_ceiling_step_side_rects: &'a [Vec<(f64, f64)>],
     /// The pending line's wall snap as one standard snap tag (its menu

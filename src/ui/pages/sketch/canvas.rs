@@ -252,6 +252,17 @@ pub(super) fn render<F: FnMut(UiEvent)>(
         view.ceiling_step_region_polygons,
         ceiling_step_tint,
     );
+    // Same-height dividers: a faint dashed pass, distinct from the amber
+    // height steps (divider regions are filtered out of the amber feed above).
+    render::render_ceiling_dividers(
+        &painter,
+        rect,
+        ber,
+        current_storey_idx,
+        mode,
+        vp,
+        view.ceiling_divider_lines,
+    );
     render::render_cut_candidates(
         &painter,
         rect,

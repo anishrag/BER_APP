@@ -300,7 +300,10 @@ impl AppController {
             return;
         }
         self.pending_ceiling_step = Some(
-            match self.document.ceiling_line_position_prompt(axis, coord_m) {
+            match self
+                .document
+                .ceiling_line_position_prompt(axis, coord_m, None)
+            {
                 Some(prompt) => PendingCeilingStep::Position {
                     axis,
                     coord_m,
@@ -537,9 +540,14 @@ impl AppController {
             _ if self.ceiling_carve_amount_pending() => None,
             _ => return Ok(()), // nothing awaiting an amount — no-op
         };
-        if !delta_m.is_finite() || delta_m.abs() < 0.01 {
-            return Err("Ceiling step must be at least 0.01 m.".into());
+        if !delta_m.is_finite() {
+            return Err("Ceiling step must be a number.".into());
         }
+        // Snap a near-zero step to EXACTLY 0.0 — a same-height divider (the
+        // type-0 path and the "Keep same height" button converge here, and
+        // reconstruction's `< 1e-3` flat test matches). The `Δ ≤ −default`
+        // floor-clip guard below is vacuously fine at 0.
+        let delta_m = if delta_m.abs() < 0.01 { 0.0 } else { delta_m };
         let idx = self.current_storey_idx.unwrap_or(0);
         let default = self
             .current_record
@@ -592,6 +600,15 @@ impl AppController {
         Ok(())
     }
 
+    /// Split the active ceiling-step line/area into two SAME-HEIGHT pieces
+    /// (a divider, no riser) — the UI's "Keep same height" button. Just a
+    /// 0.0 delta through [`assign_ceiling_step_delta`](Self::assign_ceiling_step_delta),
+    /// named so the button reads intentionally; the partition bounds a ridge's
+    /// own area without changing either side's height.
+    pub fn keep_ceiling_same_height(&mut self) -> Result<(), String> {
+        self.assign_ceiling_step_delta(0.0)
+    }
+
     /// Discard the in-flight ceiling-step line — or carved area — at any
     /// stage. A carve is an active `StepArea` shape, so its live buffer is
     /// abandoned too (back to the outline, floor-step parity).
@@ -602,10 +619,14 @@ impl AppController {
         self.pending_ceiling_step = None;
     }
 
-    /// The current storey's committed ceiling-step regions, as `(ring, label)`
-    /// in world coords, for the UI to tint and label (label e.g. "+0.20 m" /
-    /// "−0.30 m"). Index-aligned with deletion (see
-    /// [`delete_ceiling_step_region`](Self::delete_ceiling_step_region)).
+    /// The current storey's committed HEIGHT-STEP regions, as `(ring, label)`
+    /// in world coords, for the UI's amber tint + label (label e.g. "+0.20 m"
+    /// / "−0.30 m"). Same-height DIVIDERS (`|Δ| < 1e-3`) are EXCLUDED — they'd
+    /// otherwise read as a solid amber ring labelled "+0.00 m"; the UI draws
+    /// them as a faint dashed cut instead (see
+    /// [`ceiling_divider_lines`](Self::ceiling_divider_lines)). NOT
+    /// index-aligned with `ceiling_step_regions` once dividers exist — for
+    /// deletion the UI uses the world ring to map back.
     pub fn ceiling_step_region_polygons(&self) -> Vec<(Vec<(f64, f64)>, String)> {
         let idx = self.current_storey_idx.unwrap_or(0);
         self.ceiling_step_regions
@@ -613,29 +634,80 @@ impl AppController {
             .map(|regions| {
                 regions
                     .iter()
+                    .filter(|r| r.delta_m.abs() >= 1e-3)
                     .map(|r| {
                         let ring = r.polygon.iter().map(|p| (p.x as f64, p.y as f64)).collect();
-                        (ring, format!("{:+.2} m", r.delta_m))
+                        (ring, Self::ceiling_step_region_label(r.delta_m))
                     })
                     .collect()
             })
             .unwrap_or_default()
     }
 
-    /// Delete the current storey's ceiling-step region at `index` and
-    /// re-commit (the roof pieces it had stepped re-flatten to the default
-    /// height on the next derive). No-op if out of range.
-    pub fn delete_ceiling_step_region(&mut self, index: usize) {
+    /// The label for a committed ceiling-step region: "divider" for a
+    /// same-height partition (`|Δ| < 1e-3`), else the signed delta
+    /// ("+0.20 m"). Used by the region list/test surface; the amber feed
+    /// ([`ceiling_step_region_polygons`](Self::ceiling_step_region_polygons))
+    /// excludes dividers entirely.
+    pub fn ceiling_step_region_label(delta_m: f64) -> String {
+        if delta_m.abs() < 1e-3 {
+            "divider".to_string()
+        } else {
+            format!("{:+.2} m", delta_m)
+        }
+    }
+
+    /// The current storey's same-height DIVIDER cut segments (world coords) —
+    /// one per committed `|Δ| < 1e-3` ceiling-step region, for the UI's faint
+    /// dashed pass. The cut geometry (the divider's interior bbox edge on the
+    /// split axis, shared with the other piece) is pure coordinate math, so it
+    /// lives in [`manip_2d_plan::interior_split_edge`]; this just iterates the
+    /// session dividers and hands each ring + the outline bbox to it. View data
+    /// only — derived, not stored.
+    pub fn ceiling_divider_lines(&self) -> Vec<((f64, f64), (f64, f64))> {
         let idx = self.current_storey_idx.unwrap_or(0);
-        let removed = self.ceiling_step_regions.get_mut(&idx).is_some_and(|rs| {
-            if index < rs.len() {
-                rs.remove(index);
-                true
-            } else {
-                false
-            }
+        let Some(((ox0, oy0), (ox1, oy1))) = self.document.outline.floor_plan.bounding_box() else {
+            return Vec::new();
+        };
+        let outline_bbox = ((ox0 as f64, oy0 as f64), (ox1 as f64, oy1 as f64));
+        self.ceiling_step_regions
+            .get(&idx)
+            .map(|regions| {
+                regions
+                    .iter()
+                    .filter(|r| r.delta_m.abs() < 1e-3)
+                    .filter_map(|r| {
+                        let ring: Vec<(f64, f64)> =
+                            r.polygon.iter().map(|p| (p.x as f64, p.y as f64)).collect();
+                        manip_2d_plan::interior_split_edge(&ring, outline_bbox)
+                    })
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    /// Delete the current storey's ceiling-step region matching `ring` (the
+    /// world ring the UI feed carries) and re-commit — the roof pieces it had
+    /// stepped re-flatten to the default height on the next derive. A RING, not
+    /// a list index: the displayed feed
+    /// ([`ceiling_step_region_polygons`](Self::ceiling_step_region_polygons))
+    /// is divider-filtered, so its indices don't map to the raw region Vec.
+    /// No-op when no region's ring matches.
+    pub fn delete_ceiling_step_region(&mut self, ring: &[(f64, f64)]) {
+        let idx = self.current_storey_idx.unwrap_or(0);
+        let raw = self.ceiling_step_regions.get(&idx).and_then(|rs| {
+            rs.iter().position(|r| {
+                r.polygon.len() == ring.len()
+                    && r.polygon.iter().zip(ring).all(|(p, (rx, ry))| {
+                        (p.x as f64 - rx).abs() < 1e-6 && (p.y as f64 - ry).abs() < 1e-6
+                    })
+            })
         });
-        if removed {
+        if let Some(raw) = raw {
+            self.ceiling_step_regions
+                .get_mut(&idx)
+                .expect("entry exists")
+                .remove(raw);
             let _ = self.mark_dirty();
         }
     }

@@ -585,6 +585,42 @@ pub fn validate_roof_ridge_extent(
     Ok(())
 }
 
+/// The plan ring (world metres) of the resolved ceiling region STRICTLY
+/// CONTAINING the ridge midpoint for `(axis, coord_m, lo, len_m)`, or `None`
+/// when the midpoint is in no region. Reuses the same midpoint formula and
+/// `region_strictly_containing` machinery as
+/// [`validate_roof_ridge_extent`] (`axis` is the CROSS axis; the extent runs
+/// along `axis.other()`, midpoint at `lo + len/2`).
+///
+/// This is the priority ring for
+/// [`StoreyDoc::ceiling_line_position_prompt`](crate::StoreyDoc::ceiling_line_position_prompt):
+/// passing it makes a ridge's DEFAULT reference wall bound its OWN ceiling
+/// area rather than the globally nearest wall (which on an L-shape is often a
+/// wall in the other arm). Owned `&Storey` in, owned ring out — no shell, UI,
+/// or DB dependency crosses into the document crate.
+pub fn ridge_region_ring(
+    storey: &Storey,
+    axis: ParameterAxis,
+    coord_m: f32,
+    lo: f32,
+    len_m: f32,
+) -> Option<Vec<Point2f64>> {
+    let mid_along = lo as f64 + len_m as f64 / 2.0;
+    let mid = match axis {
+        ParameterAxis::X => Point2f64::new(coord_m as f64, mid_along),
+        ParameterAxis::Y => Point2f64::new(mid_along, coord_m as f64),
+    };
+    let region = storey.roofs.region_strictly_containing(mid)?;
+    Some(
+        region
+            .polygon
+            .exterior
+            .iter()
+            .map(|v| Point2f64::new(v.x, v.y))
+            .collect(),
+    )
+}
+
 /// The pending ridge's MIDPOINT (per the shell's axis convention — `axis` is
 /// the CROSS axis, the extent runs along `axis.other()`), the resolved
 /// region strictly containing it, and that region's contiguous run through

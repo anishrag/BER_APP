@@ -124,7 +124,10 @@ impl AppController {
                 ParameterAxis::X => lo.0,
                 ParameterAxis::Y => lo.1,
             };
-            if let Some(prompt) = self.document.ceiling_line_position_prompt(axis, coord) {
+            if let Some(prompt) = self
+                .document
+                .ceiling_line_position_prompt(axis, coord, None)
+            {
                 self.pending_roof_rect = Some(match axis {
                     ParameterAxis::X => PendingRoofRect::PosX { lo, len, prompt },
                     ParameterAxis::Y => PendingRoofRect::PosY { lo, len, prompt },
