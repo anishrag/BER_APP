@@ -22,3 +22,4 @@ android/gradlew
 android/gradlew.bat
 # Release keystore: never check in
 *.keystore
+*keystore.properties
