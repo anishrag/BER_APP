@@ -14,18 +14,19 @@ use crate::controller::app_controller::{ChecklistItem, ChecklistStatus};
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum Phase {
     Mapping,
-    Stage2,
-    Stage3,
+    Structure,
+    Objects,
 }
 
 /// Floating phase signpost centred at the top of the canvas: three boxes
-/// (`Mapping → Stage 2 → Stage 3`) joined by arrows, the `current` one
-/// highlighted. Non-interactive — a progress signpost, not a tab strip.
-pub fn phase_bar(ui: &egui::Ui, rect: Rect, current: Phase) {
+/// (`Mapping → Structure → Objects`) joined by arrows, the `current` one
+/// highlighted and any phase listed in `completed` carrying a green ✓.
+/// Non-interactive — a progress signpost, not a tab strip.
+pub fn phase_bar(ui: &egui::Ui, rect: Rect, current: Phase, completed: &[Phase]) {
     let phases = [
         (Phase::Mapping, "Mapping"),
-        (Phase::Stage2, "Stage 2"),
-        (Phase::Stage3, "Stage 3"),
+        (Phase::Structure, "Structure"),
+        (Phase::Objects, "Objects"),
     ];
     egui::Area::new(ui.id().with("canvas_phase_bar"))
         .order(egui::Order::Foreground)
@@ -41,14 +42,25 @@ pub fn phase_bar(ui: &egui::Ui, rect: Rect, current: Phase) {
                     if i > 0 {
                         ui.label(RichText::new("→").size(18.0).color(Color32::from_gray(170)));
                     }
-                    phase_box(ui, label, *phase == current);
+                    phase_box(ui, label, *phase == current, completed.contains(phase));
                 }
             });
         });
 }
 
-/// One phase box — filled + outlined, highlighted when it's the active phase.
-fn phase_box(ui: &mut egui::Ui, label: &str, active: bool) {
+/// Whether the Mapping (Stage A) phase is complete — every checklist item green
+/// (done on every storey). Drives the green ✓ on the Mapping box in the
+/// signpost. Empty (no BER loaded) is not complete.
+pub fn mapping_complete(checklist: &[ChecklistItem]) -> bool {
+    !checklist.is_empty()
+        && checklist
+            .iter()
+            .all(|item| item.status == ChecklistStatus::AllStoreys)
+}
+
+/// One phase box — filled + outlined, highlighted when it's the active phase,
+/// prefixed with a green ✓ when the phase is complete.
+fn phase_box(ui: &mut egui::Ui, label: &str, active: bool, complete: bool) {
     let (fill, stroke_col, text_col) = if active {
         (
             Color32::from_rgb(40, 92, 160),
@@ -68,11 +80,22 @@ fn phase_box(ui: &mut egui::Ui, label: &str, active: bool) {
         .corner_radius(CornerRadius::same(6))
         .inner_margin(Margin::symmetric(12, 6))
         .show(ui, |ui| {
-            let mut text = RichText::new(label).color(text_col).size(15.0);
-            if active {
-                text = text.strong();
-            }
-            ui.label(text);
+            ui.horizontal(|ui| {
+                if complete {
+                    // Same green as the checklist's "all storeys done" dot.
+                    ui.label(
+                        RichText::new("✓")
+                            .color(Color32::from_rgb(80, 180, 95))
+                            .size(15.0)
+                            .strong(),
+                    );
+                }
+                let mut text = RichText::new(label).color(text_col).size(15.0);
+                if active {
+                    text = text.strong();
+                }
+                ui.label(text);
+            });
         });
 }
 

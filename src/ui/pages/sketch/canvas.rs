@@ -1,10 +1,8 @@
 //! The Sketch CANVAS: paints the plan + every overlay, routes pointer input
 //! (strokes, taps, drags, pan/zoom) into [`SketchEvent`]s, and hosts the
-//! floating view buttons (2D/3D toggle + display-mode cycler) in its
-//! top-right corner.
+//! floating 2D/3D toggle in its top-right corner.
 
 use egui::epaint::PathShape;
-use strum::IntoEnumIterator;
 
 use super::touch::TouchNav;
 use super::{EguiStroke, SketchEvent, SketchView};
@@ -13,7 +11,7 @@ use crate::ui::render;
 use crate::ui::render::ViewParams;
 use crate::ui::widgets::HintExt;
 use datatypes::ber::ber_struct::Ber;
-use domain::sketch::{DisplayMode, EditTools, SketchMode};
+use domain::sketch::{EditTools, SketchMode};
 
 pub(super) fn render<F: FnMut(UiEvent)>(
     ui: &mut egui::Ui,
@@ -66,8 +64,15 @@ pub(super) fn render<F: FnMut(UiEvent)>(
     view_buttons(ui, rect, view, on_event);
 
     // Floating phase signpost (top-centre) + the live Stage A completion
-    // checklist (a draggable window), both painted over the canvas.
-    super::overlays::phase_bar(ui, rect, super::overlays::Phase::Mapping);
+    // checklist (a draggable window), both painted over the canvas. Mapping
+    // earns its green ✓ once every checklist item is green (done on all
+    // storeys); the later phases aren't built, so they never tick yet.
+    use super::overlays::Phase;
+    let mut completed = Vec::new();
+    if super::overlays::mapping_complete(&view.checklist) {
+        completed.push(Phase::Mapping);
+    }
+    super::overlays::phase_bar(ui, rect, Phase::Mapping, &completed);
     super::overlays::checklist_window(ui, rect, &view.checklist);
 
     // BER view layer with optional collinearity highlight overlay.
@@ -1133,15 +1138,12 @@ pub(super) fn render<F: FnMut(UiEvent)>(
     }
 }
 
-/// The two floating canvas buttons, anchored to the top-right corner and
-/// stacked vertically. Plain text labels for now — visual design deferred.
-///
-/// - **2D/3D toggle**: shows the current view ("2D"/"3D"); a click switches
-///   to the other. Disabled until the current scope has its ceiling
-///   height(s) — heights are entered via the Heights category, and the
-///   controller's `set_sketch_mode` re-enforces the gate as a no-op.
-/// - **Display mode**: shows the current [`DisplayMode`]'s name; a click
-///   CYCLES to the next variant (wrapping).
+/// The floating 2D/3D toggle, anchored to the canvas's top-right corner. Plain
+/// text label for now — visual design deferred. Shows the current view
+/// ("2D"/"3D"); a click switches to the other. Disabled until the current
+/// scope has its ceiling height(s) — heights are entered via the Heights
+/// category, and the controller's `set_sketch_mode` re-enforces the gate as a
+/// no-op.
 fn view_buttons<F: FnMut(UiEvent)>(
     ui: &mut egui::Ui,
     rect: egui::Rect,
@@ -1169,19 +1171,6 @@ fn view_buttons<F: FnMut(UiEvent)>(
                     .clicked()
                 {
                     on_event(UiEvent::Sketch(SketchEvent::ChangeMode(other)));
-                }
-                // Cycle to the variant after the current one, wrapping.
-                let next_display = {
-                    let mut iter = DisplayMode::iter().cycle();
-                    iter.find(|d| *d == view.display);
-                    iter.next().expect("cycle() never ends")
-                };
-                if ui
-                    .button(format!("{:?}", view.display))
-                    .hint("Cycle what the canvas shows (dims / roofs / walls / floors)")
-                    .clicked()
-                {
-                    on_event(UiEvent::Sketch(SketchEvent::ChangeDisplay(next_display)));
                 }
             });
         });

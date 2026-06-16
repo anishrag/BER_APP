@@ -9,8 +9,8 @@
 //! - `prompt_dock.rs` — every contextual flow panel (dimension/position
 //!   prompts, cut picks, amount entry, review, …) in one bottom strip.
 //! - `canvas.rs` — the canvas itself: overlays, stroke capture, taps, drags,
-//!   plus the floating 2D/3D + display-mode buttons in its corner.
-//! - `overlays.rs` — the floating phase signpost (Mapping → Stage 2 → Stage 3)
+//!   plus the floating 2D/3D button in its corner.
+//! - `overlays.rs` — the floating phase signpost (Mapping → Structure → Objects)
 //!   and the live Stage A completion checklist, painted over the canvas.
 
 mod canvas;
@@ -52,7 +52,6 @@ pub enum SketchEvent {
     /// of a two-finger navigation gesture, not a drawing.
     CancelStroke,
     ChangeMode(SketchMode),
-    ChangeDisplay(DisplayMode),
     ChangeEditTool(EditTools),
     /// User confirmed the current collinearity suggestion: walls are the same line.
     AcceptCollinearity,
@@ -66,9 +65,6 @@ pub enum SketchEvent {
     AddStoreyFromCurrent,
     /// User chose to discard the pending stroke.
     IgnoreRedraw,
-    /// Replay the last snapping action with every elective snap disabled
-    /// (revert to the freehand points). Test hook for the snap-choice replay.
-    UnsnapLast,
     /// Force one elective snap (identified by its drawn `from` point) to a
     /// specific choice — `Some(candidate_index)` or `None` (don't snap) — and
     /// replay the action. Driven by clicking a snap tag's menu.

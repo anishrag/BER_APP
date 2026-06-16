@@ -952,9 +952,6 @@ impl eframe::App for BerApp {
                                     SketchEvent::ChangeMode(m) => {
                                         controller.borrow_mut().set_sketch_mode(m)
                                     }
-                                    SketchEvent::ChangeDisplay(m) => {
-                                        controller.borrow_mut().set_display_mode(m)
-                                    }
                                     SketchEvent::ChangeEditTool(m) => {
                                         controller.borrow_mut().set_edit_mode(m)
                                     }
@@ -1003,9 +1000,6 @@ impl eframe::App for BerApp {
                                     }
                                     SketchEvent::IgnoreRedraw => {
                                         controller.borrow_mut().discard_pending_redraw();
-                                    }
-                                    SketchEvent::UnsnapLast => {
-                                        controller.borrow_mut().unsnap_last();
                                     }
                                     SketchEvent::ChooseSnap { from, choice } => {
                                         controller.borrow_mut().choose_snap(

@@ -48,8 +48,6 @@ pub enum Tool {
     Redo,
     /// Reset the view to pure auto-fit.
     FitView,
-    /// Replay the last drawn action with its elective snaps disabled.
-    UnsnapLast,
     /// Wall-length label visibility — pure page state, no controller event.
     WallLengthLabels,
     /// DEV: save the current plan to the checkpoint file.
@@ -106,22 +104,20 @@ pub const CATEGORIES: &[Category] = &[
         tools: &[Tool::Openings],
     },
     Category {
-        name: "Drawing",
-        tools: &[Tool::Undo, Tool::Redo, Tool::FitView, Tool::UnsnapLast],
-    },
-    Category {
         name: "Dimensions",
         tools: &[Tool::WallLengthLabels],
     },
-    Category {
-        name: "State",
-        tools: &[
-            Tool::SaveCheckpoint,
-            Tool::LoadCheckpoint,
-            Tool::DebugDump,
-            Tool::AutosaveStatus,
-        ],
-    },
+];
+
+/// Tools that apply in EVERY mode, so they live in a persistent strip at the
+/// bottom of the toolbar (both layouts) rather than behind a category tab:
+/// the view controls, then the dev/State group.
+const BOTTOM_VIEW_TOOLS: &[Tool] = &[Tool::Undo, Tool::Redo, Tool::FitView];
+const BOTTOM_STATE_TOOLS: &[Tool] = &[
+    Tool::SaveCheckpoint,
+    Tool::LoadCheckpoint,
+    Tool::DebugDump,
+    Tool::AutosaveStatus,
 ];
 
 /// A forced category-layout arrangement for the layout-preview button
@@ -268,9 +264,12 @@ pub fn ribbon<F: FnMut(UiEvent)>(
             tool_ui(ui, *tool, flags, state, on_event);
         }
     });
+    ui.separator();
+    bottom_tools(ui, flags, state, on_event);
 }
 
-/// Landscape renderer: every category as a collapsible group, all visible.
+/// Landscape renderer: every category as a collapsible group, all visible,
+/// with the always-relevant bottom strip beneath them.
 pub fn side_panel<F: FnMut(UiEvent)>(
     ui: &mut egui::Ui,
     flags: &ToolFlags,
@@ -286,6 +285,30 @@ pub fn side_panel<F: FnMut(UiEvent)>(
                 }
             });
     }
+    ui.separator();
+    bottom_tools(ui, flags, state, on_event);
+}
+
+/// The always-relevant bottom strip, shared by both layouts: the view controls
+/// (undo / redo / fit) on one row, the dev/State group on the next. Rendered
+/// below the category content because these apply in every mode, so they
+/// shouldn't hide behind a category tab.
+fn bottom_tools<F: FnMut(UiEvent)>(
+    ui: &mut egui::Ui,
+    flags: &ToolFlags,
+    state: &mut CategoryUiState,
+    on_event: &mut F,
+) {
+    ui.horizontal_wrapped(|ui| {
+        for tool in BOTTOM_VIEW_TOOLS {
+            tool_ui(ui, *tool, flags, state, on_event);
+        }
+    });
+    ui.horizontal_wrapped(|ui| {
+        for tool in BOTTOM_STATE_TOOLS {
+            tool_ui(ui, *tool, flags, state, on_event);
+        }
+    });
 }
 
 fn edit_tool_label(tool: EditTools) -> &'static str {
@@ -592,15 +615,6 @@ fn tool_ui<F: FnMut(UiEvent)>(
                 .clicked()
             {
                 on_event(UiEvent::Sketch(SketchEvent::ResetView));
-            }
-        }
-        Tool::UnsnapLast => {
-            if ui
-                .add_enabled(!flags.read_only, egui::Button::new("↩ Un-snap last"))
-                .hint("Replay the last drawn action with its elective snaps disabled")
-                .clicked()
-            {
-                on_event(UiEvent::Sketch(SketchEvent::UnsnapLast));
             }
         }
         Tool::WallLengthLabels => {

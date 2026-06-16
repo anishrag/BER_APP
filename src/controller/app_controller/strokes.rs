@@ -60,10 +60,6 @@ impl AppController {
         self.sketch_engine.set_mode(mode);
     }
 
-    pub fn set_display_mode(&mut self, mode: DisplayMode) {
-        self.sketch_engine.set_display(mode);
-    }
-
     pub fn display_mode(&self) -> DisplayMode {
         self.sketch_engine.display
     }
