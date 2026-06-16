@@ -2413,6 +2413,48 @@ impl CeilingRegion {
             .fold(f64::NAN, f64::min);
         (t_min.is_finite() && t_max.is_finite()).then_some((t_min, t_max))
     }
+
+    /// Like [`plan_span_through`](Self::plan_span_through), but tolerant of `p`
+    /// lying ON the region's plan boundary — the mono-pitch case where a ridge
+    /// runs ALONG a shared edge, so its midpoint is on the edge, not strictly
+    /// inside. When the strict span is empty we nudge `p` a hair PERPENDICULAR
+    /// to `dir` (which leaves the along-`dir` origin unchanged, so the returned
+    /// `(t_min, t_max)` stay valid for the original `p`) toward the region's
+    /// interior and re-measure. Returns `None` only when `p` is on no edge of
+    /// this region or the region/direction is degenerate.
+    pub fn plan_span_through_inclusive(&self, p: Point2f64, dir: Point2f64) -> Option<(f64, f64)> {
+        if let Some(s) = self.plan_span_through(p, dir) {
+            return Some(s);
+        }
+        let ext = &self.polygon.exterior;
+        if ext.len() < 3 {
+            return None;
+        }
+        // `p` must actually sit on this region's boundary — otherwise the nudge
+        // would invent a span for a point that isn't on the edge at all.
+        if !self.plan_contains_within(p, APEX_BOUNDARY_EPS_M) {
+            return None;
+        }
+        let dlen = (dir.x * dir.x + dir.y * dir.y).sqrt();
+        if dlen <= 1e-12 {
+            return None;
+        }
+        let (dx, dy) = (dir.x / dlen, dir.y / dlen);
+        // Unit perpendicular to `dir`; point it toward the region centroid (the
+        // vertex average — the interior side for the rectangular ceiling areas
+        // a junction ridge bounds).
+        let (mut nx, mut ny) = (-dy, dx);
+        let n = ext.len() as f64;
+        let cx = ext.iter().map(|v| v.x).sum::<f64>() / n;
+        let cy = ext.iter().map(|v| v.y).sum::<f64>() / n;
+        if (cx - p.x) * nx + (cy - p.y) * ny < 0.0 {
+            nx = -nx;
+            ny = -ny;
+        }
+        let eps = 1e-3;
+        let pin = Point2f64::new(p.x + nx * eps, p.y + ny * eps);
+        self.plan_span_through(pin, dir)
+    }
 }
 
 impl Default for FloorRegion {
@@ -3575,6 +3617,28 @@ mod tests {
                 "{p:?}"
             );
         }
+    }
+
+    /// The boundary-tolerant variant DOES yield a span for a point ON an edge
+    /// when the line runs along that edge (a mono-pitch ridge on a wall): the
+    /// perpendicular nudge into the interior recovers the chord, measured from
+    /// the same along-edge origin. A point genuinely outside still yields None.
+    #[test]
+    fn plan_span_through_inclusive_recovers_an_on_edge_span() {
+        let r = region_over(square(0.0, 0.0, 10.0, 4.0));
+        // On the left edge x = 0, running UP the edge (dir +y): the chord is the
+        // edge itself, y in [0, 4], so from y = 2 the span is [-2, 2].
+        let (lo, hi) = r
+            .plan_span_through_inclusive(Point2f64::new(0.0, 2.0), Point2f64::new(0.0, 1.0))
+            .expect("a span along the edge");
+        assert!(
+            (lo - -2.0).abs() < 0.01 && (hi - 2.0).abs() < 0.01,
+            "{lo} {hi}"
+        );
+        // Outside is still None.
+        assert!(r
+            .plan_span_through_inclusive(Point2f64::new(11.0, 2.0), Point2f64::new(0.0, 1.0))
+            .is_none());
     }
 
     /// Degenerate input — a sub-triangle ring or a zero direction — is None.

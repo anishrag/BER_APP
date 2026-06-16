@@ -5385,15 +5385,15 @@ fn roof_ridge_wall_to_wall_draw_succeeds_end_to_end() {
     );
 }
 
-/// The all-snapped REJECTION path that remains: cross + start snaps that
-/// put the ridge ALONG a wall (here the upper arm's right wall x = 6 — the
-/// midpoint sits on the boundary, in no ceiling area). The end is NOT
-/// snapped, so the Length question opens and the finalize rejection lands
-/// on the typed length; the Length stage stays open (Cancel recovers). A
-/// boundary START is legal now — the gable feature — but a ridge along a
-/// wall still makes no roof.
+/// A ridge drawn ALONG an OUTLINE wall (here the L's right wall x = 6, from the
+/// notch corner up) is now ACCEPTED as a mono-pitch: cross + start snap put it
+/// exactly on the wall, its midpoint sits ON the outline boundary, and instead
+/// of the old "along a wall makes no roof" rejection it raises that boundary
+/// wall and slopes the single ceiling area it bounds (the user's "on the image
+/// boundary … just raise the boundary wall"). A single claimant means NO area
+/// question — the finalize advances straight to the height.
 #[test]
-fn roof_ridge_along_a_wall_rejection_lands_on_the_length() {
+fn roof_ridge_along_an_outline_wall_raises_it_as_a_mono_pitch() {
     let mut c = ceiling_ready_l_controller();
     c.set_roof_point_mode(true);
     // x ≈ 5.9 → snaps 6; lo ≈ 4.1 → snaps 4: the ridge runs up the wall
@@ -5405,17 +5405,25 @@ fn roof_ridge_along_a_wall_rejection_lands_on_the_length() {
         (ax - 6.0).abs() < 1e-6 && (ay - 4.0).abs() < 1e-6,
         "both snaps landed"
     );
-    let err = c.assign_roof_ridge_length(2.0).unwrap_err();
+    // The finalize now ACCEPTS the boundary ridge and advances to the height.
+    c.assign_roof_ridge_length(2.0)
+        .expect("a ridge along the outline wall is a valid mono-pitch");
     assert!(
-        err.contains("doesn't sit inside a ceiling area"),
-        "the finalize midpoint-containment rejection, on the typed length: {err}"
+        c.roof_ridge_height_pending(),
+        "advanced to the height question"
     );
-    assert!(c.roof_ridge_length_pending(), "length stage stays open");
-    // The skip path trips the same check (logged + surfaced to the caller).
-    let err = c.skip_roof_ridge_length().unwrap_err();
-    assert!(err.contains("doesn't sit inside a ceiling area"), "{err}");
-    c.cancel_pending_roof_ridge();
-    assert!(!c.roof_ridge_pending(), "cancel recovers");
+    // One claiming area → no area choice; the height applies directly.
+    c.assign_roof_ridge_height(3.0).expect("height applies");
+    assert!(!c.roof_ridge_pending(), "ridge finalized");
+    let storey = &c.current_record.as_ref().unwrap().data.storeys[0];
+    assert_eq!(storey.roof_apexes.len(), 2, "both apexes durable");
+    for apex in &storey.roof_apexes {
+        assert!(
+            (apex.point.x - 6.0).abs() < 1e-6,
+            "apex on the outline wall x = 6 (got {:?})",
+            apex.point
+        );
+    }
 }
 
 /// THE CENTRE BUTTON (S5): both ridge location prompts offer it

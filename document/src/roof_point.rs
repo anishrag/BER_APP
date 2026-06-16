@@ -351,19 +351,6 @@ fn check_end_claims(storey: &Storey, q: Point2f64, ridx: usize) -> Result<(), St
     }
 }
 
-/// First region (region order) that CLAIMS `p` — strictly inside, or on a
-/// region boundary. Boundary-inclusive (matching the fan); when several areas
-/// share the boundary the fan's side HINT picks at resolve, so validation just
-/// needs SOME claimant. `Err` if `p` is outside every region.
-fn region_idx_claiming(storey: &Storey, p: Point2f64) -> Result<usize, String> {
-    storey
-        .roofs
-        .claim_regions(p)
-        .first()
-        .copied()
-        .ok_or_else(|| POINT_OUTSIDE_CEILING_MSG.to_string())
-}
-
 /// Validate a roof RIDGE (the line input, which places BOTH apexes at once
 /// via `Ber::add_roof_apex` ×2) against the storey's RESOLVED roofs:
 ///
@@ -406,7 +393,36 @@ pub fn validate_roof_ridge(
         return Err(RIDGE_ENDS_COINCIDE_MSG.to_string());
     }
     let mid = Point2f64::new((qa.x + qb.x) / 2.0, (qa.y + qb.y) / 2.0);
-    let ra = region_idx_claiming(storey, mid).map_err(|_| RIDGE_OUTSIDE_CEILING_MSG.to_string())?;
+    // Try every area claiming the midpoint (mirrors `validate_roof_ridge_extent`):
+    // a junction ridge on a shared boundary is valid if it slopes EITHER
+    // neighbour; a strict-interior midpoint has one claimant. Most specific
+    // rejection wins.
+    let claims = storey.roofs.claim_regions(mid);
+    if claims.is_empty() {
+        return Err(RIDGE_OUTSIDE_CEILING_MSG.to_string());
+    }
+    let mut last_err = RIDGE_OUTSIDE_CEILING_MSG.to_string();
+    for ra in claims {
+        match ridge_fits_region_height(storey, ra, qa, qb, z_m) {
+            Ok(()) => return Ok(()),
+            Err(e) => last_err = e,
+        }
+    }
+    Err(last_err)
+}
+
+/// Whether a level ridge `qa→qb` at height `z_m` fits ceiling region `ra`: both
+/// ends claimed by it, the region un-apexed, flat, sloped by `z_m` (≥ 1 cm off
+/// its base), and the ridge not folding over its boundary. The per-region body
+/// of [`validate_roof_ridge`], factored out so a boundary ridge can be tried
+/// against each claiming area.
+fn ridge_fits_region_height(
+    storey: &Storey,
+    ra: usize,
+    qa: Point2f64,
+    qb: Point2f64,
+    z_m: f64,
+) -> Result<(), String> {
     for q in [qa, qb] {
         check_end_claims(storey, q, ra)?;
     }
@@ -554,14 +570,45 @@ pub fn validate_roof_ridge_extent(
             Point2f64::new(1.0, 0.0),
         ),
     };
-    let ridx =
-        region_idx_claiming(storey, mid).map_err(|_| RIDGE_OUTSIDE_CEILING_MSG.to_string())?;
-    // Reject occupied / already-sloped areas HERE rather than letting the
-    // Height stage reject later — both are properties of the midpoint's
-    // region, fully knowable at finalize (the no-late-rejection invariant
-    // then genuinely covers every Height-stage region predicate; only the
-    // height VALUE itself can still be rejected, which is the user's own
-    // entry on that stage).
+    // Try EVERY area that claims the midpoint, not just the first: a ridge on
+    // an internal shared boundary (a mono-pitch junction) is claimed by both
+    // neighbours, and is valid if it fits EITHER — the user picks which slopes
+    // (the ChooseArea prompt) and the other gets a step. A strict-interior
+    // midpoint has exactly one claimant, so this preserves the prior single-
+    // region behaviour. The most specific rejection is surfaced.
+    let claims = storey.roofs.claim_regions(mid);
+    if claims.is_empty() {
+        return Err(RIDGE_OUTSIDE_CEILING_MSG.to_string());
+    }
+    let mut last_err = RIDGE_OUTSIDE_CEILING_MSG.to_string();
+    for ridx in claims {
+        match ridge_fits_region_extent(storey, ridx, mid, dir, half, axis, coord_m, lo, len_m) {
+            Ok(()) => return Ok(()),
+            Err(e) => last_err = e,
+        }
+    }
+    Err(last_err)
+}
+
+/// Whether the prospective ridge `(axis, coord_m, lo, len_m)` (midpoint `mid`,
+/// extent direction `dir`, half-length `half`) fits ceiling region `ridx`: the
+/// region must be un-apexed, flat, span the full ridge along `dir`
+/// (boundary-tolerant — a junction ridge runs along the region's edge), have
+/// both ends claimed by it, and not fold over its boundary. The per-region body
+/// of [`validate_roof_ridge_extent`], factored out so a boundary ridge can be
+/// tried against each claiming area.
+#[allow(clippy::too_many_arguments)]
+fn ridge_fits_region_extent(
+    storey: &Storey,
+    ridx: usize,
+    mid: Point2f64,
+    dir: Point2f64,
+    half: f64,
+    axis: ParameterAxis,
+    coord_m: f32,
+    lo: f32,
+    len_m: f32,
+) -> Result<(), String> {
     let groups = storey.roofs.apex_groups(&storey.roof_apexes);
     if groups.iter().any(|g| g.region_idxs.contains(&ridx)) {
         return Err(RIDGE_REGION_OCCUPIED_MSG.to_string());
@@ -571,9 +618,9 @@ pub fn validate_roof_ridge_extent(
         return Err(REGION_IRREGULAR_SLOPE_MSG.to_string());
     }
     let (t_min, t_max) = region
-        .plan_span_through(mid, dir)
-        // Strictly inside but no span — a degenerate region; the midpoint is
-        // unusable as a ridge anchor all the same.
+        .plan_span_through_inclusive(mid, dir)
+        // Claims the midpoint but yields no span — a degenerate region; the
+        // midpoint is unusable as a ridge anchor all the same.
         .ok_or_else(|| RIDGE_OUTSIDE_CEILING_MSG.to_string())?;
     // Boundary touch ALLOWED: lo ≥ mid + t_min − EPS and
     // lo + len ≤ mid + t_max + EPS, i.e. each half-extent fits its side of
@@ -585,8 +632,9 @@ pub fn validate_roof_ridge_extent(
              wall to wall there)."
         ));
     }
-    // Both ends claimed by exactly the midpoint's region: an end on an
-    // internal shared boundary is rejected here, not at the Height stage.
+    // Both ends claimed by the candidate region: an end on an internal shared
+    // boundary that this region also touches is fine (it's the junction ridge);
+    // an end that leaves it entirely is rejected here, not at the Height stage.
     let (qa, qb) = match axis {
         ParameterAxis::X => (
             Point2f64::new(coord_m as f64, lo as f64),
@@ -1635,12 +1683,16 @@ mod tests {
                 "len {len} must carry the full run: {err}"
             );
         }
-        // A ridge whose MIDPOINT leaves the ceiling — far overrun, a ridge
-        // along the boundary, a position outside every region, or a storey
-        // with no roofs at all: the stable ridge-outside message.
+        // A ridge along the left OUTLINE wall (x = 0) is now a valid mono-pitch
+        // — its midpoint sits ON the outline boundary, claimed by the one area
+        // it bounds, and the boundary-tolerant span fits it (it raises that
+        // wall and slopes the area).
+        assert!(validate_roof_ridge_extent(&storey, ParameterAxis::X, 0.0, 1.0, 2.0).is_ok());
+        // A ridge whose MIDPOINT leaves every ceiling area — far overrun, a
+        // position outside every region, or a storey with no roofs at all: the
+        // stable ridge-outside message.
         for (storey, coord, lo, len) in [
             (&storey, 2.0, 1.0, 9.0), // midpoint (2, 5.5): overrun
-            (&storey, 0.0, 1.0, 2.0), // along the left wall
             (&storey, 9.0, 1.0, 1.0), // outside
             (&Storey::default(), 2.0, 1.0, 1.0),
         ] {
@@ -2043,5 +2095,41 @@ mod tests {
         assert!(validate_roof_ridge_extent(&storey, ParameterAxis::Y, 2.0, 1.0, 3.0).is_ok());
         // Ending ON the OUTER boundary (x = 0, one claimant) stays legal.
         assert!(validate_roof_ridge_extent(&storey, ParameterAxis::Y, 2.0, 0.0, 3.0).is_ok());
+    }
+
+    /// A ridge running ALONG the INTERNAL boundary x = 4 shared by two ceiling
+    /// areas (the user's mono-pitch-on-a-junction case): both the finalize
+    /// extent check and the height check accept it — its midpoint sits on the
+    /// shared edge, claimed by both areas, and the boundary-tolerant span fits
+    /// it in EITHER. (Which one slopes is the controller's ChooseArea prompt;
+    /// validation only needs SOME claiming area to accept.)
+    #[test]
+    fn ridge_along_an_internal_shared_boundary_is_accepted_by_both_validators() {
+        let mut storey = storey_with_flat_roof(2.4);
+        storey.roofs.regions.extend(
+            CeilingRegions::default_for_footprint(
+                vec![vec![
+                    Point2f64::new(4.0, 0.0),
+                    Point2f64::new(8.0, 0.0),
+                    Point2f64::new(8.0, 4.0),
+                    Point2f64::new(4.0, 4.0),
+                ]],
+                2.4,
+                Default::default(),
+            )
+            .regions,
+        );
+        // The ridge runs UP the shared line x = 4 (cross axis X at x = 4), from
+        // y = 1 to y = 3 — its midpoint (4, 2) is ON the junction.
+        assert!(
+            validate_roof_ridge_extent(&storey, ParameterAxis::X, 4.0, 1.0, 2.0).is_ok(),
+            "finalize accepts a ridge along the shared boundary"
+        );
+        let a = Point2f64::new(4.0, 1.0);
+        let b = Point2f64::new(4.0, 3.0);
+        assert!(
+            validate_roof_ridge(&storey, a, b, 3.0).is_ok(),
+            "the height stage also accepts it"
+        );
     }
 }
