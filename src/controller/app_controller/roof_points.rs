@@ -140,7 +140,7 @@ impl AppController {
         }
         let (x, snap_x) = match self
             .document
-            .snap_ceiling_step_line(ParameterAxis::X, tapped.x)
+            .snap_roof_point_coord(ParameterAxis::X, tapped.x)
         {
             Some((snapped, outline_wall_vid)) => (
                 snapped,
@@ -153,7 +153,7 @@ impl AppController {
         };
         let (y, snap_y) = match self
             .document
-            .snap_ceiling_step_line(ParameterAxis::Y, tapped.y)
+            .snap_roof_point_coord(ParameterAxis::Y, tapped.y)
         {
             Some((snapped, outline_wall_vid)) => (
                 snapped,

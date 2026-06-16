@@ -114,6 +114,12 @@ const RIDGE_ENDS_COINCIDE_MSG: &str = "The ridge's two ends coincide — draw a 
 const RIDGE_OFF_FOOTPRINT_MSG: &str =
     "The ridge must lie inside the storey footprint — draw it inside the floor plan.";
 
+/// How far a hand-drawn ridge END may overshoot a perimeter wall and still be
+/// accepted (clamped onto the wall) — a ridge meant to reach a wall is usually
+/// drawn a little past it. Generous, since the finalize region check guards the
+/// real geometry.
+const RIDGE_END_REACH_M: f32 = 0.6;
+
 /// User-facing rejection for a typed ridge length that is zero-ish (a ridge
 /// shorter than a centimetre is a point, not a ridge). Kept stable.
 const RIDGE_LENGTH_TOO_SHORT_MSG: &str =
@@ -974,13 +980,19 @@ impl StoreyDoc {
             ParameterAxis::X => (min_y, max_y),
             ParameterAxis::Y => (min_x, max_x),
         };
+        // A hand-drawn ridge meant to span wall-to-wall typically OVERSHOOTS the
+        // outer walls by a few cm. Reject only a gross miss (beyond
+        // `RIDGE_END_REACH_M` past the footprint); otherwise CLAMP each end onto
+        // the footprint bbox so the ridge ends exactly at the walls (the
+        // assessor's "let it snap from the top to bottom wall"). The actual
+        // region containment is still checked at finalize (`validate_roof_ridge`).
         for t in [lo, hi] {
-            if t < ext_lo - crate::ceiling_step::CEILING_LINE_SNAP_TOL_M
-                || t > ext_hi + crate::ceiling_step::CEILING_LINE_SNAP_TOL_M
-            {
+            if t < ext_lo - RIDGE_END_REACH_M || t > ext_hi + RIDGE_END_REACH_M {
                 return Err(RIDGE_OFF_FOOTPRINT_MSG.to_string());
             }
         }
+        let lo = lo.clamp(ext_lo, ext_hi);
+        let hi = hi.clamp(ext_lo, ext_hi);
         Ok((axis, coord, (lo, hi)))
     }
 
@@ -1449,17 +1461,21 @@ mod tests {
             doc.fit_roof_ridge_line(&along_wall).unwrap_err(),
             RIDGE_OFF_FOOTPRINT_MSG
         );
-        // Endpoint ON the bbox edge (y = 0) and just past it (y = −0.1,
-        // within the 0.2 m end-snap tolerance): the fit accepts both, with
-        // the drawn extent kept.
+        // Endpoint ON the bbox edge (y = 0): fits, extent kept.
         let touching = vec![p(4.0, 0.0), p(4.0, 3.0)];
         let (axis, _, (lo, hi)) = doc.fit_roof_ridge_line(&touching).expect("gable end fits");
         assert_eq!(axis, ParameterAxis::X);
         assert!(lo.abs() < 1e-6 && (hi - 3.0).abs() < 1e-6);
-        let overshoot = vec![p(4.0, -0.1), p(4.0, 3.0)];
-        assert!(doc.fit_roof_ridge_line(&overshoot).is_ok());
-        // Beyond the tolerance: rejected.
-        let too_far = vec![p(4.0, -0.5), p(4.0, 3.0)];
+        // An end OVERSHOOTING the wall (y = −0.4, within the reach band) is
+        // CLAMPED onto the wall (y = 0), not rejected — "let it snap to the wall".
+        let overshoot = vec![p(4.0, -0.4), p(4.0, 3.0)];
+        let (_, _, (lo, hi)) = doc
+            .fit_roof_ridge_line(&overshoot)
+            .expect("overshoot clamps");
+        assert!(lo.abs() < 1e-6, "overshoot clamped to the wall: {lo}");
+        assert!((hi - 3.0).abs() < 1e-6);
+        // A GROSS miss (y = −0.8, beyond the reach band): still rejected.
+        let too_far = vec![p(4.0, -0.8), p(4.0, 3.0)];
         assert_eq!(
             doc.fit_roof_ridge_line(&too_far).unwrap_err(),
             RIDGE_OFF_FOOTPRINT_MSG

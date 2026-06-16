@@ -315,6 +315,18 @@ impl StoreyDoc {
         self.snap_line_to_reference_wall(axis, coord_m, true)
     }
 
+    /// Snap a roof-POINT coordinate on `axis` to the nearest parallel outline
+    /// wall, INCLUDING the bbox-extreme (outermost) walls — so a point tapped
+    /// near a CORNER snaps to it on BOTH axes (the ceiling-step snap excludes the
+    /// extremes, which is why a corner tap previously snapped only one axis).
+    pub fn snap_roof_point_coord(
+        &self,
+        axis: ParameterAxis,
+        coord_m: f32,
+    ) -> Option<(f32, VertexId)> {
+        self.snap_line_to_reference_wall(axis, coord_m, true)
+    }
+
     /// The shared body of the two line snaps: the deduped parallel reference
     /// walls on `axis`, optionally excluding the outline bbox extremes,
     /// nearest within [`CEILING_LINE_SNAP_TOL_M`] wins.
