@@ -862,6 +862,10 @@ impl eframe::App for BerApp {
                                 roof_ridge_length_anchored,
                                 roof_ridge_height_pending,
                                 roof_ridge_pending,
+                                roof_ridge_area_options: self
+                                    .app_controller
+                                    .borrow()
+                                    .roof_ridge_area_options(),
                                 roof_rect_views: &roof_rect_views,
                                 pending_roof_rect_outline,
                                 roof_rect_position_pending,
@@ -1262,6 +1266,14 @@ impl eframe::App for BerApp {
                                                 log::error!("assign_roof_ridge_height: {}", e);
                                                 self.sketch_state.roof_error = Some(e);
                                             }
+                                        }
+                                    }
+                                    SketchEvent::ChooseRoofRidgeArea(i) => {
+                                        if let Err(e) =
+                                            controller.borrow_mut().choose_roof_ridge_area(i)
+                                        {
+                                            log::error!("choose_roof_ridge_area: {}", e);
+                                            self.sketch_state.roof_error = Some(e);
                                         }
                                     }
                                     SketchEvent::CentreRoofPosition => {

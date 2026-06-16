@@ -316,6 +316,9 @@ pub enum SketchEvent {
     /// User entered the ridge height (metres, ABSOLUTE above the storey floor
     /// datum — both endpoints get it) for the pending roof ridge.
     AssignRoofRidgeHeight(f32),
+    /// Pick which area a boundary ridge slopes (the ChooseArea stage) — index
+    /// into the offered options.
+    ChooseRoofRidgeArea(usize),
     /// The 'Centre' button on an open roof location stage (ridge cross /
     /// start): apply the computed centre-it-within-its-ceiling-area value
     /// through the same path as a typed distance.
@@ -586,6 +589,9 @@ pub struct SketchView<'a> {
     pub roof_ridge_length_anchored: bool,
     pub roof_ridge_height_pending: bool,
     pub roof_ridge_pending: bool,
+    /// When the placed ridge sits on an internal area boundary: the labels of
+    /// the areas to choose between (which one slopes). Empty otherwise.
+    pub roof_ridge_area_options: Vec<String>,
     /// Roof-RECT (flat-topped hip) input — the closed-stroke sibling of the
     /// ridge: committed flat tops `(corners, label)` to overlay, the pending
     /// rect's corners for the dashed overlay, and the per-stage flags. The

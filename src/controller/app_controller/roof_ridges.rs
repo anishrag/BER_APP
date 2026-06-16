@@ -132,6 +132,56 @@ pub(super) enum PendingRoofRidge {
         start_snap: Option<CeilingLineSnap>,
         end_snap: Option<CeilingLineSnap>,
     },
+    /// The ridge + height are set but it sits on an INTERNAL boundary shared by
+    /// two ceiling areas — ASK which one SLOPES (the other gets a step at the
+    /// boundary). Each option is `(label, interior point)`; the chosen interior
+    /// point becomes the apexes' side hint.
+    ChooseArea {
+        a: Point2f64,
+        b: Point2f64,
+        z_m: f64,
+        options: Vec<(String, (f32, f32))>,
+    },
+}
+
+/// A point ~30 cm inside `region` from the ridge midpoint (toward the region's
+/// centroid) — a robust interior point to use as the apex side hint.
+fn area_inside_point(
+    region: &datatypes::ber::structural::CeilingRegion,
+    mid: Point2f64,
+) -> (f32, f32) {
+    let ext = &region.polygon.exterior;
+    let n = ext.len().max(1) as f64;
+    let cx = ext.iter().map(|v| v.x).sum::<f64>() / n;
+    let cy = ext.iter().map(|v| v.y).sum::<f64>() / n;
+    let (dx, dy) = (cx - mid.x, cy - mid.y);
+    let d = (dx * dx + dy * dy).sqrt().max(1e-6);
+    let step = d.min(0.3);
+    (
+        (mid.x + dx / d * step) as f32,
+        (mid.y + dy / d * step) as f32,
+    )
+}
+
+/// A human label for which side of the ridge an area sits on.
+fn area_side_label(axis: ParameterAxis, coord_m: f32, inside: (f32, f32)) -> String {
+    match axis {
+        ParameterAxis::X => {
+            if inside.0 < coord_m {
+                "Left of the ridge"
+            } else {
+                "Right of the ridge"
+            }
+        }
+        ParameterAxis::Y => {
+            if inside.1 < coord_m {
+                "Below the ridge"
+            } else {
+                "Above the ridge"
+            }
+        }
+    }
+    .to_string()
 }
 
 impl AppController {
@@ -862,7 +912,10 @@ impl AppController {
             lo,
             len_m,
             ..
-        }) = self.pending_roof_ridge.as_ref()?;
+        }) = self.pending_roof_ridge.as_ref()?
+        else {
+            return None; // ChooseArea carries no axis/extent
+        };
         Some((*axis, *coord_m, *lo, *len_m))
     }
 
@@ -891,13 +944,13 @@ impl AppController {
         else {
             return Ok(()); // nothing awaiting a height — no-op
         };
-        let (a, b) = Self::ridge_endpoints(*axis, *coord_m, *lo, *len_m);
+        let (axis, coord_m, lo, len_m) = (*axis, *coord_m, *lo, *len_m);
+        let (a, b) = Self::ridge_endpoints(axis, coord_m, lo, len_m);
         // When the cross coordinate SNAPPED onto a wall, the ridge may sit on an
         // internal junction shared by two areas — keep the DRAWN (pre-snap) side
-        // as a hint so the resolve slopes the area the assessor drew over (a
-        // mono-pitch extension), not the other one. Harmless on an outline snap.
+        // as a hint so the resolve slopes the area the assessor drew over.
         let side_hint: Option<(f32, f32)> = cross_snap.as_ref().map(|cs| {
-            let mid_along = *lo + *len_m / 2.0;
+            let mid_along = lo + len_m / 2.0;
             match axis {
                 ParameterAxis::X => (cs.drawn_coord_m, mid_along),
                 ParameterAxis::Y => (mid_along, cs.drawn_coord_m),
@@ -913,6 +966,37 @@ impl AppController {
             .and_then(|r| r.data.storeys.get(idx))
             .ok_or("no storey to assign a roof ridge to")?;
         document::validate_roof_ridge(storey, a, b, z_m as f64)?;
+        // Which area slopes? On an INTERNAL boundary (midpoint claimed by >1
+        // area) we ASK — unless the drawn side already lands clearly inside one.
+        let mid = Point2f64::new((a.x + b.x) / 2.0, (a.y + b.y) / 2.0);
+        let claims = storey.roofs.claim_regions(mid);
+        let drawn_inside = side_hint.and_then(|(hx, hy)| {
+            let hp = Point2f64::new(hx as f64, hy as f64);
+            let r = storey.roofs.region_strictly_containing(hp)?;
+            let ri = storey.roofs.regions.iter().position(|x| x.id == r.id)?;
+            claims.contains(&ri).then_some(ri)
+        });
+        if claims.len() >= 2 && drawn_inside.is_none() {
+            let options: Vec<(String, (f32, f32))> = claims
+                .iter()
+                .map(|&ri| {
+                    let inside = area_inside_point(&storey.roofs.regions[ri], mid);
+                    (area_side_label(axis, coord_m, inside), inside)
+                })
+                .collect();
+            self.pending_roof_ridge = Some(PendingRoofRidge::ChooseArea {
+                a,
+                b,
+                z_m: z_m as f64,
+                options,
+            });
+            return Ok(());
+        }
+        // Unambiguous: the hint is the clearly-drawn area's interior, else the
+        // drawn side (harmless on an outline wall — single claimant).
+        let chosen_hint = drawn_inside
+            .map(|ri| area_inside_point(&storey.roofs.regions[ri], mid))
+            .or(side_hint);
         let record = self.current_record.as_mut().expect("checked above");
         for p in [a, b] {
             record.data.add_roof_apex(
@@ -922,7 +1006,7 @@ impl AppController {
                     z_m: z_m as f64,
                 },
             );
-            if let Some(region) = side_hint {
+            if let Some(region) = chosen_hint {
                 record.data.push_roof_apex_hint(idx, p, region);
             }
         }
@@ -940,6 +1024,46 @@ impl AppController {
     /// Discard the in-flight roof ridge at any stage.
     pub fn cancel_pending_roof_ridge(&mut self) {
         self.pending_roof_ridge = None;
+    }
+
+    /// Pick which area a boundary ridge SLOPES (the ChooseArea stage): store the
+    /// two apexes plus the chosen area's interior point as their side hint, so
+    /// the resolve slopes that area (the other gets a step at the boundary).
+    pub fn choose_roof_ridge_area(&mut self, option_idx: usize) -> Result<(), String> {
+        let Some(PendingRoofRidge::ChooseArea { a, b, z_m, options }) =
+            self.pending_roof_ridge.take()
+        else {
+            return Ok(());
+        };
+        let Some(&(_, inside)) = options.get(option_idx) else {
+            // Out-of-range — keep the stage open.
+            self.pending_roof_ridge = Some(PendingRoofRidge::ChooseArea { a, b, z_m, options });
+            return Ok(());
+        };
+        let idx = self.current_storey_idx.unwrap_or(0);
+        let record = self
+            .current_record
+            .as_mut()
+            .ok_or("no storey for the roof ridge")?;
+        for p in [a, b] {
+            record.data.add_roof_apex(idx, RoofApex { point: p, z_m });
+            record.data.push_roof_apex_hint(idx, p, inside);
+        }
+        self.mark_dirty()?;
+        self.materialize();
+        self.reconstruct_ceiling_step_regions_for(idx);
+        Ok(())
+    }
+
+    /// The area-choice labels for a boundary ridge, if the ChooseArea stage is
+    /// up (else empty). The UI shows one button per label.
+    pub fn roof_ridge_area_options(&self) -> Vec<String> {
+        match &self.pending_roof_ridge {
+            Some(PendingRoofRidge::ChooseArea { options, .. }) => {
+                options.iter().map(|(l, _)| l.clone()).collect()
+            }
+            _ => Vec::new(),
+        }
     }
 
     /// True while either position question is up — the cross's (question 2)

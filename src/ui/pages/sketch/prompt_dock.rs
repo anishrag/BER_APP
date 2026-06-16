@@ -154,7 +154,23 @@ pub(super) fn render<F: FnMut(UiEvent)>(
             // Same pending-with-mode-off rule again. A pending RIDGE or
             // RECT (the stroke flows sharing roof-point mode) keeps it
             // reachable too.
-            if view.roof_point_mode
+            if !view.roof_ridge_area_options.is_empty() {
+                // The ridge sits on an internal boundary — ask which area slopes.
+                ui.label(
+                    egui::RichText::new(
+                        "Which area should this ridge slope? (the other gets a step)",
+                    )
+                    .strong(),
+                );
+                for (i, label) in view.roof_ridge_area_options.iter().enumerate() {
+                    if ui.button(label).clicked() {
+                        on_event(UiEvent::Sketch(SketchEvent::ChooseRoofRidgeArea(i)));
+                    }
+                }
+                if ui.button("Cancel").clicked() {
+                    on_event(UiEvent::Sketch(SketchEvent::CancelPendingRoofRidge));
+                }
+            } else if view.roof_point_mode
                 || view.roof_point_pending
                 || view.roof_ridge_pending
                 || view.roof_rect_pending
