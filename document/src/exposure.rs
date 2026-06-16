@@ -371,6 +371,34 @@ impl StoreyDoc {
         }
         changed
     }
+
+    /// True when every outline perimeter wall is fully classified — no `Unset`
+    /// coverage range remains (a whole unmarked wall OR a gap around painted
+    /// sections both count as `Unset`, the inverse of what
+    /// [`set_all_remaining_exposed`](Self::set_all_remaining_exposed) would
+    /// paint). An outline with no perimeter walls (nothing drawn yet) is NOT
+    /// complete. Reads the outline SLOT, so the active storey must be synced
+    /// (`sync_active`, which `materialize` runs) before this is meaningful.
+    pub fn exposure_complete(&self) -> bool {
+        let walls = self.outline.floor_plan.perimeter_walls();
+        if walls.is_empty() {
+            return false;
+        }
+        walls.into_iter().all(|(vid, a, b)| {
+            let len = segment_len(a, b);
+            wall_coverage(
+                len,
+                self.wall_sections
+                    .get(&vid)
+                    .map(Vec::as_slice)
+                    .unwrap_or(&[]),
+            )
+            .into_iter()
+            // An `Unset` remnant only counts if it has real length (mirrors the
+            // `e - s > 1e-4` filter `set_all_remaining_exposed` paints against).
+            .all(|(s, e, exp)| exp != WallExposure::Unset || e - s <= 1e-4)
+        })
+    }
 }
 
 #[cfg(test)]

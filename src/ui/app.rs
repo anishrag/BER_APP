@@ -787,6 +787,11 @@ impl eframe::App for BerApp {
                                 }
                             };
 
+                            // Stage A checklist — recomputed from the (already
+                            // materialized) editing model, for the floating
+                            // checklist window overlay.
+                            let checklist = self.app_controller.borrow().stage_a_checklist();
+
                             let view = SketchView {
                                 current: stroke.as_ref().map(EguiStroke::from),
                                 mode,
@@ -915,6 +920,7 @@ impl eframe::App for BerApp {
                                 transom_input: &mut self.sketch_state.transom_input,
                                 opening_error: opening_error.as_deref(),
                                 elevation_view,
+                                checklist,
                             };
                             let touch_nav = &mut self.sketch_state.touch_nav;
                             SketchPage::render(ui, view, touch_nav, |event| match event {

@@ -22,6 +22,7 @@
 //   - `view`          — canvas pan/zoom.
 mod ceiling;
 mod ceiling_steps;
+mod checklist;
 mod debug;
 mod dimensioning;
 mod editing;
@@ -30,6 +31,7 @@ mod living_areas;
 mod openings;
 mod phase_regions;
 
+pub use checklist::{ChecklistItem, ChecklistStatus};
 use document::{
     ActiveShape, CeilingStepRegion, DimensionPrompt, DimensionState, Document, EditState,
     MovedCoordKind, PendingArc, PhaseRegion, ShapeSlot, StepRegion, StoreyDoc,

@@ -7,10 +7,12 @@ set -u
 f=$(jq -r '.tool_response.filePath // .tool_input.file_path // empty' 2>/dev/null)
 [[ -z "$f" ]] && exit 0
 
-# Normalize absolute project paths to relative
-case "$f" in
-  /home/anish/WORK/BER_APP/*) f="${f#/home/anish/WORK/BER_APP/}" ;;
-esac
+# Normalize absolute project paths to relative (repo root resolved dynamically,
+# so this works across clones regardless of where the repo lives on disk).
+repo_root=$(git rev-parse --show-toplevel 2>/dev/null)
+if [[ -n "$repo_root" ]]; then
+  f="${f#"$repo_root"/}"
+fi
 f="${f#./}"
 
 # Best-effort format on Rust sources

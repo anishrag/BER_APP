@@ -3151,6 +3151,46 @@ fn all_storeys_ceiling_scope_fills_only_unset_storeys() {
     assert_eq!(c.sketch_mode(), SketchMode::Storey3D, "gate now open");
 }
 
+// ─── Stage A checklist (red / yellow / green roll-up) ───────────────────────
+
+/// The Stage A checklist rolls each item up against the current scope: green
+/// when every storey is complete, yellow when the current storey is complete
+/// but not all, red otherwise. Measurements (dimensioning) demonstrates all
+/// three; heights flips red→green when set.
+#[test]
+fn stage_a_checklist_rolls_up_red_yellow_green() {
+    fn status(c: &AppController, label: &str) -> ChecklistStatus {
+        c.stage_a_checklist()
+            .into_iter()
+            .find(|i| i.label == label)
+            .expect("checklist item exists")
+            .status
+    }
+    let mut c = dimensioned_square_controller();
+    // The only storey is fully dimensioned → measurements complete everywhere.
+    assert_eq!(status(&c, "Measurements"), ChecklistStatus::AllStoreys);
+    // Heights + exposures untouched → red.
+    assert_eq!(status(&c, "Heights"), ChecklistStatus::Incomplete);
+    assert_eq!(status(&c, "Exposures"), ChecklistStatus::Incomplete);
+
+    // Setting the height completes it on the only storey → green.
+    c.set_default_ceiling_height(2.4).unwrap();
+    assert_eq!(status(&c, "Heights"), ChecklistStatus::AllStoreys);
+
+    // A fresh, undrawn storey: measurements now complete on storey 0 but not on
+    // storey 1. `add_storey` switches onto the new storey, where the current
+    // scope is incomplete → red.
+    c.add_storey().unwrap();
+    c.materialize();
+    assert_eq!(status(&c, "Measurements"), ChecklistStatus::Incomplete);
+    // Back on the finished storey 0 → complete here but not on all → yellow.
+    c.set_current_storey(Some(0)).unwrap();
+    c.materialize();
+    assert_eq!(status(&c, "Measurements"), ChecklistStatus::ThisStorey);
+    // Heights was only set on storey 0, so it too is now yellow.
+    assert_eq!(status(&c, "Heights"), ChecklistStatus::ThisStorey);
+}
+
 // ─── Ceiling steps (line + side + amount) ───────────────────────────────────
 
 /// A finalised 10×10 storey with its default ceiling height set (2.4 m) and

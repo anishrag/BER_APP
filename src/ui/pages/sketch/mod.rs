@@ -10,9 +10,12 @@
 //!   prompts, cut picks, amount entry, review, …) in one bottom strip.
 //! - `canvas.rs` — the canvas itself: overlays, stroke capture, taps, drags,
 //!   plus the floating 2D/3D + display-mode buttons in its corner.
+//! - `overlays.rs` — the floating phase signpost (Mapping → Stage 2 → Stage 3)
+//!   and the live Stage A completion checklist, painted over the canvas.
 
 mod canvas;
 pub mod categories;
+pub mod overlays;
 mod prompt_dock;
 pub mod touch;
 
@@ -20,7 +23,7 @@ use egui::epaint::PathStroke;
 use egui::Pos2;
 
 use crate::controller::app_controller::{
-    DimensionPromptUiData, EditDragPromptUiData, ElevationView, ExposureSelection,
+    ChecklistItem, DimensionPromptUiData, EditDragPromptUiData, ElevationView, ExposureSelection,
     NewStoreyPromptUiData, OpeningPromptUiData, OpeningToolKind, PositionPromptUiData, RiserView,
     SnapTagView, VertexDropPromptUiData, WallExposureView,
 };
@@ -681,6 +684,10 @@ pub struct SketchView<'a> {
     /// The open per-wall ELEVATION overlay, if any (the unrolled wall + its
     /// draggable openings).
     pub elevation_view: Option<ElevationView>,
+    /// Stage A completion checklist rows (Measurements / Heights / Exposures),
+    /// recomputed each frame from the editing model — drawn as the floating,
+    /// draggable checklist window over the canvas.
+    pub checklist: Vec<ChecklistItem>,
 }
 
 #[derive(Default)]

@@ -65,6 +65,11 @@ pub(super) fn render<F: FnMut(UiEvent)>(
     // clicks — same pattern as the snap-tag menus).
     view_buttons(ui, rect, view, on_event);
 
+    // Floating phase signpost (top-centre) + the live Stage A completion
+    // checklist (a draggable window), both painted over the canvas.
+    super::overlays::phase_bar(ui, rect, super::overlays::Phase::Mapping);
+    super::overlays::checklist_window(ui, rect, &view.checklist);
+
     // BER view layer with optional collinearity highlight overlay.
     render::render_ber(
         &painter,

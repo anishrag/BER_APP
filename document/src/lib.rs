@@ -368,6 +368,14 @@ impl StoreyDoc {
         }
     }
 
+    /// True when the storey outline is fully measured: a metre scale is set AND
+    /// the dimensioning loop has nothing left to prompt for. Reads the outline
+    /// SLOT (sync the active storey first — `materialize` does). An un-drawn or
+    /// un-scaled outline is not complete.
+    pub fn measurements_complete(&self) -> bool {
+        self.outline.dimensioning.scale_set && self.outline.finalised()
+    }
+
     /// Load the active shape's slot into the live editing buffer.
     pub fn load_active_into_buffer(&mut self) {
         let slot = match self.active {
