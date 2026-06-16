@@ -144,46 +144,6 @@ pub(super) enum PendingRoofRidge {
     },
 }
 
-/// A point ~30 cm inside `region` from the ridge midpoint (toward the region's
-/// centroid) — a robust interior point to use as the apex side hint.
-fn area_inside_point(
-    region: &datatypes::ber::structural::CeilingRegion,
-    mid: Point2f64,
-) -> (f32, f32) {
-    let ext = &region.polygon.exterior;
-    let n = ext.len().max(1) as f64;
-    let cx = ext.iter().map(|v| v.x).sum::<f64>() / n;
-    let cy = ext.iter().map(|v| v.y).sum::<f64>() / n;
-    let (dx, dy) = (cx - mid.x, cy - mid.y);
-    let d = (dx * dx + dy * dy).sqrt().max(1e-6);
-    let step = d.min(0.3);
-    (
-        (mid.x + dx / d * step) as f32,
-        (mid.y + dy / d * step) as f32,
-    )
-}
-
-/// A human label for which side of the ridge an area sits on.
-fn area_side_label(axis: ParameterAxis, coord_m: f32, inside: (f32, f32)) -> String {
-    match axis {
-        ParameterAxis::X => {
-            if inside.0 < coord_m {
-                "Left of the ridge"
-            } else {
-                "Right of the ridge"
-            }
-        }
-        ParameterAxis::Y => {
-            if inside.1 < coord_m {
-                "Below the ridge"
-            } else {
-                "Above the ridge"
-            }
-        }
-    }
-    .to_string()
-}
-
 impl AppController {
     /// UI entry point: a ridge stroke (world/metre coords) drawn in
     /// roof-point mode. Fits it to an axis-aligned segment
@@ -945,17 +905,11 @@ impl AppController {
             return Ok(()); // nothing awaiting a height — no-op
         };
         let (axis, coord_m, lo, len_m) = (*axis, *coord_m, *lo, *len_m);
-        let (a, b) = Self::ridge_endpoints(axis, coord_m, lo, len_m);
         // When the cross coordinate SNAPPED onto a wall, the ridge may sit on an
-        // internal junction shared by two areas — keep the DRAWN (pre-snap) side
-        // as a hint so the resolve slopes the area the assessor drew over.
-        let side_hint: Option<(f32, f32)> = cross_snap.as_ref().map(|cs| {
-            let mid_along = lo + len_m / 2.0;
-            match axis {
-                ParameterAxis::X => (cs.drawn_coord_m, mid_along),
-                ParameterAxis::Y => (mid_along, cs.drawn_coord_m),
-            }
-        });
+        // internal junction shared by two areas — the DRAWN (pre-snap) cross
+        // coordinate tells the model which area the assessor drew over.
+        let drawn_cross = cross_snap.as_ref().map(|cs| cs.drawn_coord_m);
+        let (a, b) = Self::ridge_endpoints(axis, coord_m, lo, len_m);
         let idx = self.current_storey_idx.unwrap_or(0);
         // Bring the derived roofs current — the ridge is validated against
         // the resolved ceiling regions, not the editing buffer.
@@ -966,37 +920,22 @@ impl AppController {
             .and_then(|r| r.data.storeys.get(idx))
             .ok_or("no storey to assign a roof ridge to")?;
         document::validate_roof_ridge(storey, a, b, z_m as f64)?;
-        // Which area slopes? On an INTERNAL boundary (midpoint claimed by >1
-        // area) we ASK — unless the drawn side already lands clearly inside one.
-        let mid = Point2f64::new((a.x + b.x) / 2.0, (a.y + b.y) / 2.0);
-        let claims = storey.roofs.claim_regions(mid);
-        let drawn_inside = side_hint.and_then(|(hx, hy)| {
-            let hp = Point2f64::new(hx as f64, hy as f64);
-            let r = storey.roofs.region_strictly_containing(hp)?;
-            let ri = storey.roofs.regions.iter().position(|x| x.id == r.id)?;
-            claims.contains(&ri).then_some(ri)
-        });
-        if claims.len() >= 2 && drawn_inside.is_none() {
-            let options: Vec<(String, (f32, f32))> = claims
-                .iter()
-                .map(|&ri| {
-                    let inside = area_inside_point(&storey.roofs.regions[ri], mid);
-                    (area_side_label(axis, coord_m, inside), inside)
-                })
-                .collect();
-            self.pending_roof_ridge = Some(PendingRoofRidge::ChooseArea {
-                a,
-                b,
-                z_m: z_m as f64,
-                options,
-            });
-            return Ok(());
-        }
-        // Unambiguous: the hint is the clearly-drawn area's interior, else the
-        // drawn side (harmless on an outline wall — single claimant).
-        let chosen_hint = drawn_inside
-            .map(|ri| area_inside_point(&storey.roofs.regions[ri], mid))
-            .or(side_hint);
+        // Which area slopes? The model decides: a junction ridge shared by ≥ 2
+        // areas with no clear drawn side is AMBIGUOUS (we ask); otherwise it
+        // resolves to the interior hint to stamp (or none).
+        let chosen_hint =
+            match document::resolve_ridge_slope_side(storey, a, b, drawn_cross, axis, coord_m) {
+                document::RidgeSlopeSide::Ambiguous(options) => {
+                    self.pending_roof_ridge = Some(PendingRoofRidge::ChooseArea {
+                        a,
+                        b,
+                        z_m: z_m as f64,
+                        options,
+                    });
+                    return Ok(());
+                }
+                document::RidgeSlopeSide::Resolved(hint) => hint,
+            };
         let record = self.current_record.as_mut().expect("checked above");
         for p in [a, b] {
             record.data.add_roof_apex(

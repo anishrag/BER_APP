@@ -2533,6 +2533,25 @@ impl WallRegion {
         Some((Point2f64::new(a.x, a.y), (dx / len, dy / len), len, a.z))
     }
 
+    /// The wall's TOP profile in wall-local coordinates: each vertex of the top
+    /// polyline (`exterior[2..]`, running b→a per the vertex-order contract) as
+    /// `(along, z)` — `along` projected onto the base direction from the base
+    /// origin. Empty for a degenerate wall (no base frame). The elevation editor
+    /// draws this as the unrolled wall's top edge; it's the same projection
+    /// [`top_z_at_along`](Self::top_z_at_along) samples.
+    pub fn top_profile(&self) -> Vec<(f32, f32)> {
+        let Some((origin, (ux, uy), _len, _base_z)) = self.base_frame() else {
+            return Vec::new();
+        };
+        self.polygon.exterior[2..]
+            .iter()
+            .map(|v| {
+                let along = (v.x - origin.x) * ux + (v.y - origin.y) * uy;
+                (along as f32, v.z as f32)
+            })
+            .collect()
+    }
+
     /// The top-profile z directly above the base point at along-distance `d`
     /// (0..length), interpolating the top polyline (`exterior[2..]`, which runs
     /// b→a per the vertex-order contract). At a vertical jump (a ceiling-step
@@ -3511,6 +3530,23 @@ pub struct Storey {
     // (`floors`/`walls`/`living_areas`) is the only persisted representation,
     // and the editor rebuilds its working state from it on load. The DB only
     // ever holds finalised (complete, metre-scale) geometry.
+}
+
+impl Storey {
+    /// Drop all DERIVED geometry — floors, walls, living areas, roofs, and the
+    /// fan apexes over them — back to empty. The persist path calls this when
+    /// the outline isn't finalised yet: that geometry is still pixel/incomplete
+    /// (roofs derived over a pixel footprint are pixel units too, so the apexes
+    /// that fan them go with it), and the DB only ever holds finalised geometry.
+    /// The durable INPUTS (`ceiling_height_m`, `roof_apex_hints`,
+    /// `floor_thickness_m`, `ceiling_dividers`) are left untouched.
+    pub fn clear_derived_geometry(&mut self) {
+        self.floors = FloorRegions::default();
+        self.walls = WallRegions::default();
+        self.living_areas = FloorRegions::default();
+        self.roofs = CeilingRegions::default();
+        self.roof_apexes = Vec::new();
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

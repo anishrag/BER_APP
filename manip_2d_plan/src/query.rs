@@ -121,6 +121,64 @@ impl FloorPlan {
         self.parametric.vertex_id_at(ring, vertex_idx)
     }
 
+    /// For the axis-aligned wall `(ring, edge_start)`, the moved wall's CROSS
+    /// axis plus every OTHER wall PARALLEL to it (same orientation), each as
+    /// `(reference wall's start vid, reference coordinate, sign, distance)` —
+    /// the moved wall's perpendicular coordinate measured from that reference.
+    /// Coincident walls (within 1 mm) and the moved wall itself are skipped;
+    /// order is ring/edge traversal order (stable, so the same wall shows first
+    /// across recomputes). `None` when the wall is degenerate (< 2 vertices).
+    ///
+    /// This is the discovery walk behind the shell's post-drag measurement
+    /// prompt — plan topology + coordinate math, so it lives on `FloorPlan`; the
+    /// shell only assembles its `MeasurementOption`s from the result.
+    pub fn parallel_walls_to(
+        &self,
+        ring: usize,
+        edge_start: usize,
+    ) -> Option<(ParameterAxis, Vec<(VertexId, f32, f32, f32)>)> {
+        let polygons = self.polygons();
+        let r0 = polygons.get(ring)?;
+        let n = r0.len();
+        if n < 2 {
+            return None;
+        }
+        let a = r0[edge_start];
+        let b = r0[(edge_start + 1) % n];
+        // Orientation of the moved wall: vertical (its X is the cross coord) vs
+        // horizontal (its Y is). Tolerance-free abs compare, like the old walk.
+        let is_vertical = (b.y - a.y).abs() > (b.x - a.x).abs();
+        let axis = if is_vertical {
+            ParameterAxis::X
+        } else {
+            ParameterAxis::Y
+        };
+        let moved_value = if is_vertical { a.x } else { a.y };
+        let mut out: Vec<(VertexId, f32, f32, f32)> = Vec::new();
+        for (ri, r) in polygons.iter().enumerate() {
+            for i in 0..r.len() {
+                if ri == ring && i == edge_start {
+                    continue;
+                }
+                let (p, q) = (r[i], r[(i + 1) % r.len()]);
+                let other_is_vertical = (q.y - p.y).abs() > (q.x - p.x).abs();
+                if other_is_vertical != is_vertical {
+                    continue; // not parallel to the moved wall
+                }
+                let ref_value = if is_vertical { p.x } else { p.y };
+                let delta = moved_value - ref_value;
+                let distance = delta.abs();
+                if distance < 1e-3 {
+                    continue; // coincident — no measurement to form
+                }
+                if let Some(ref_vid) = self.vertex_id_at(ri, i) {
+                    out.push((ref_vid, ref_value, delta.signum(), distance));
+                }
+            }
+        }
+        Some((axis, out))
+    }
+
     /// Look up a vertex by stable ID. Returns `(ring_index, vertex_index)`.
     pub fn find_vertex(&self, id: VertexId) -> Option<(usize, usize)> {
         self.parametric.find_vertex(id)

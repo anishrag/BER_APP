@@ -408,16 +408,10 @@ impl AppController {
         let idx = self.current_storey_idx.unwrap_or(0);
         if self.outline_finalised() {
             // Outline is metric + fully dimensioned → keep its floors/walls,
-            // and persist only the living areas that are themselves done.
-            let lists: Vec<Vec<Point2f64>> = self
-                .document
-                .living_areas
-                .iter()
-                .filter(|s| s.finalised())
-                .map(|s| s.floor_plan.get_points().into_iter().map(to_f64).collect())
-                .collect();
-            // `ensure_*` borrows `out.data`, so resolve the id before the
-            // storey borrow below.
+            // and persist only the living areas that are themselves done (the
+            // model owns the finalised-projection; `ensure_*` borrows
+            // `out.data`, so resolve the id before the storey borrow below).
+            let lists = self.document.finalised_living_area_lists();
             let floor_cid = out.data.ensure_floor_construction(
                 Default::default(),
                 Default::default(),
@@ -427,15 +421,9 @@ impl AppController {
                 storey.living_areas = FloorRegions::from_vertex_lists(lists, floor_cid);
             }
         } else if let Some(storey) = out.data.storeys.get_mut(idx) {
-            // Outline not finalised → persist no geometry yet (it's likely
-            // still in pixels; living areas can't be metric before it is —
-            // and roofs derived over a pixel footprint are pixel units too,
-            // so the apexes that fan them are dropped for parity).
-            storey.floors = FloorRegions::default();
-            storey.walls = WallRegions::default();
-            storey.living_areas = FloorRegions::default();
-            storey.roofs = Default::default();
-            storey.roof_apexes = Vec::new();
+            // Outline not finalised → persist no derived geometry yet (it's
+            // likely still in pixels; the model owns what "derived" means).
+            storey.clear_derived_geometry();
         }
         Some(out)
     }

@@ -46,7 +46,8 @@
 
 use crate::StoreyDoc;
 use datatypes::ber::structural::{
-    rect_hip_switches, ridge_hub_switches, RoofApex, RoofApexGroup, Storey, APEX_BOUNDARY_EPS_M,
+    rect_hip_switches, ridge_hub_switches, CeilingRegion, RoofApex, RoofApexGroup, Storey,
+    APEX_BOUNDARY_EPS_M,
 };
 use domain::points::{to_f32, Point2f32, Point2f64};
 use manip_2d_plan::ParameterAxis;
@@ -1099,6 +1100,113 @@ impl StoreyDoc {
         }
         Ok((Point2f32::new(x0, y0), Point2f32::new(x1, y1)))
     }
+}
+
+/// The outcome of deciding WHICH ceiling area a level ridge slopes — the shell
+/// matches on this to either stamp the apexes directly or open its area-choice
+/// prompt. (See [`resolve_ridge_slope_side`].)
+pub enum RidgeSlopeSide {
+    /// One area to slope: the interior point to stamp as BOTH apexes' side hint
+    /// (`None` for a single-claimant outline ridge with no usable drawn side —
+    /// the apexes are stored without a hint, as a plain mono-pitch).
+    Resolved(Option<(f32, f32)>),
+    /// The ridge sits on an INTERNAL boundary shared by ≥ 2 areas and the drawn
+    /// side doesn't fall clearly inside one — the shell must ASK which slopes.
+    /// Each option is `(side label, that area's interior hint point)`.
+    Ambiguous(Vec<(String, (f32, f32))>),
+}
+
+/// A point ~30 cm inside `region` from the ridge midpoint `mid` (toward the
+/// region's centroid) — a robust interior point to use as the apex side hint.
+fn area_inside_point(region: &CeilingRegion, mid: Point2f64) -> (f32, f32) {
+    let ext = &region.polygon.exterior;
+    let n = ext.len().max(1) as f64;
+    let cx = ext.iter().map(|v| v.x).sum::<f64>() / n;
+    let cy = ext.iter().map(|v| v.y).sum::<f64>() / n;
+    let (dx, dy) = (cx - mid.x, cy - mid.y);
+    let d = (dx * dx + dy * dy).sqrt().max(1e-6);
+    let step = d.min(0.3);
+    (
+        (mid.x + dx / d * step) as f32,
+        (mid.y + dy / d * step) as f32,
+    )
+}
+
+/// A human label for which side of the ridge an area sits on.
+fn area_side_label(axis: ParameterAxis, coord_m: f32, inside: (f32, f32)) -> String {
+    match axis {
+        ParameterAxis::X => {
+            if inside.0 < coord_m {
+                "Left of the ridge"
+            } else {
+                "Right of the ridge"
+            }
+        }
+        ParameterAxis::Y => {
+            if inside.1 < coord_m {
+                "Below the ridge"
+            } else {
+                "Above the ridge"
+            }
+        }
+    }
+    .to_string()
+}
+
+/// Decide which ceiling area a level ridge `a→b` (cross axis `axis`, coordinate
+/// `coord_m`) slopes, given the DRAWN (pre-snap) cross coordinate `drawn_cross`
+/// (the side the assessor drew over, `None` when the cross didn't snap).
+///
+/// The ridge's region is claimed by its midpoint ([`CeilingRegions::claim_regions`]):
+/// - claimed by ONE area, or the drawn side falls clearly inside one of several
+///   → [`RidgeSlopeSide::Resolved`] with that area's interior hint (or the drawn
+///   side itself / `None`);
+/// - claimed by ≥ 2 with no clear drawn side (a junction ridge on an internal
+///   boundary) → [`RidgeSlopeSide::Ambiguous`] with one option per claiming area.
+///
+/// This keeps the claim/contain walks and the centroid/side math in the model
+/// layer; the shell only matches on the result.
+///
+/// [`CeilingRegions::claim_regions`]:
+/// datatypes::ber::structural::CeilingRegions::claim_regions
+pub fn resolve_ridge_slope_side(
+    storey: &Storey,
+    a: Point2f64,
+    b: Point2f64,
+    drawn_cross: Option<f32>,
+    axis: ParameterAxis,
+    coord_m: f32,
+) -> RidgeSlopeSide {
+    let mid = Point2f64::new((a.x + b.x) / 2.0, (a.y + b.y) / 2.0);
+    // The drawn side as a plan point: the midpoint with its CROSS coordinate
+    // replaced by where the line was actually drawn (before it snapped).
+    let drawn_side: Option<(f32, f32)> = drawn_cross.map(|dc| match axis {
+        ParameterAxis::X => (dc, mid.y as f32),
+        ParameterAxis::Y => (mid.x as f32, dc),
+    });
+    let claims = storey.roofs.claim_regions(mid);
+    let drawn_inside = drawn_side.and_then(|(hx, hy)| {
+        let hp = Point2f64::new(hx as f64, hy as f64);
+        let r = storey.roofs.region_strictly_containing(hp)?;
+        let ri = storey.roofs.regions.iter().position(|x| x.id == r.id)?;
+        claims.contains(&ri).then_some(ri)
+    });
+    if claims.len() >= 2 && drawn_inside.is_none() {
+        let options = claims
+            .iter()
+            .map(|&ri| {
+                let inside = area_inside_point(&storey.roofs.regions[ri], mid);
+                (area_side_label(axis, coord_m, inside), inside)
+            })
+            .collect();
+        return RidgeSlopeSide::Ambiguous(options);
+    }
+    // Unambiguous: the clearly-drawn area's interior, else the drawn side
+    // (harmless on an outline wall — single claimant), else no hint.
+    let chosen = drawn_inside
+        .map(|ri| area_inside_point(&storey.roofs.regions[ri], mid))
+        .or(drawn_side);
+    RidgeSlopeSide::Resolved(chosen)
 }
 
 #[cfg(test)]

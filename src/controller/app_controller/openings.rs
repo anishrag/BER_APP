@@ -5,7 +5,7 @@
 //! datatypes ops; this only sequences them.
 use super::*;
 use datatypes::ber::common::ItemId;
-use datatypes::ber::fenestration::{DoorKind, Frame, Glazing, OpeningPlacement};
+use datatypes::ber::fenestration::{DoorKind, Frame, Glazing};
 use datatypes::ber::openings::{self, DoorSidelightsSpec, OpeningError, OpeningRef};
 
 /// Which opening the toolbar places next (or `Edit` to open an elevation).
@@ -373,14 +373,9 @@ impl AppController {
         let idx = self.current_storey_idx?;
         let storey = self.current_record.as_ref()?.data.storeys.get(idx)?;
         let wall = storey.walls.regions.iter().find(|r| r.id == wall_id)?;
-        let (origin, (ux, uy), len, base_z) = wall.base_frame()?;
-        let top_profile: Vec<(f32, f32)> = wall.polygon.exterior[2..]
-            .iter()
-            .map(|v| {
-                let along = (v.x - origin.x) * ux + (v.y - origin.y) * uy;
-                (along as f32, v.z as f32)
-            })
-            .collect();
+        let (_, _, len, base_z) = wall.base_frame()?;
+        // The wall-local top profile is the model's projection (WallRegion).
+        let top_profile = wall.top_profile();
         let openings = self
             .wall_openings(storey, wall_id)
             .into_iter()
@@ -486,61 +481,25 @@ impl AppController {
     // ── helpers ───────────────────────────────────────────────────────────────
 
     /// Every wall opening on `wall_id`: `(ref, kind, along, sill, width, height)`.
+    /// The model owns the gather ([`openings::wall_openings`]); the shell only
+    /// maps `is_door` + assembly membership to its own view kind.
     fn wall_openings(
         &self,
         storey: &Storey,
         wall_id: ItemId,
     ) -> Vec<(OpeningRef, OpeningViewKind, f32, f32, f32, f32)> {
-        let mut out = Vec::new();
-        for w in &storey.windows {
-            if let Some(OpeningPlacement::Wall {
-                wall_id: wid,
-                along_m,
-                sill_m,
-            }) = &w.placement
-            {
-                if *wid == wall_id {
-                    let kind = if w.assembly_id.is_some() {
-                        OpeningViewKind::SidelightWindow
-                    } else {
-                        OpeningViewKind::Window
-                    };
-                    out.push((
-                        OpeningRef::Window(w.id),
-                        kind,
-                        *along_m,
-                        *sill_m,
-                        w.width_m,
-                        w.height_m,
-                    ));
-                }
-            }
-        }
-        for d in &storey.doors {
-            if let Some(OpeningPlacement::Wall {
-                wall_id: wid,
-                along_m,
-                sill_m,
-            }) = &d.placement
-            {
-                if *wid == wall_id {
-                    let kind = if d.assembly_id.is_some() {
-                        OpeningViewKind::DoorPanel
-                    } else {
-                        OpeningViewKind::Door
-                    };
-                    out.push((
-                        OpeningRef::Door(d.id),
-                        kind,
-                        *along_m,
-                        *sill_m,
-                        d.width_m,
-                        d.height_m,
-                    ));
-                }
-            }
-        }
-        out
+        openings::wall_openings(storey, wall_id)
+            .into_iter()
+            .map(|o| {
+                let kind = match (o.is_door, o.assembly_id.is_some()) {
+                    (false, false) => OpeningViewKind::Window,
+                    (false, true) => OpeningViewKind::SidelightWindow,
+                    (true, false) => OpeningViewKind::Door,
+                    (true, true) => OpeningViewKind::DoorPanel,
+                };
+                (o.opening, kind, o.along_m, o.sill_m, o.width_m, o.height_m)
+            })
+            .collect()
     }
 }
 

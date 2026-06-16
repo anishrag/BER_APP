@@ -48,8 +48,8 @@ use crate::engine::dataloader::DataLoader;
 use crate::engine::Db;
 use datatypes::ber::ber_struct::Ber;
 use datatypes::ber::common::{ConstructionPhase, ConstructionPhases, ItemId};
-use datatypes::ber::structural::{FloorRegions, Storey, WallExposure, WallRegions};
-use domain::points::{to_f32, to_f64, Point2f32, Point2f64};
+use datatypes::ber::structural::{FloorRegions, Storey, WallExposure};
+use domain::points::{to_f32, Point2f32, Point2f64};
 use domain::sketch::{DisplayMode, EditTools, SketchMode};
 use manip_2d_plan::{
     Axis, CollinearitySuggestion, FloorPlan, ParameterAxis, SubareaOutcome, VertexId,

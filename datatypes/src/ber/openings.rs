@@ -37,6 +37,70 @@ pub enum OpeningRef {
     Door(ItemId),
 }
 
+/// One opening placed on a wall, with everything a caller needs to lay it out:
+/// which opening, whether it's a door (vs window), its assembly membership (a
+/// door+sidelights group, else `None`), and its wall-local placement/size. The
+/// shell maps `is_door` + `assembly_id` to its own view kind; redistribution
+/// reads the centre/width/assembly.
+#[derive(Debug, Clone, Copy)]
+pub struct WallOpening {
+    pub opening: OpeningRef,
+    pub is_door: bool,
+    pub assembly_id: Option<ItemId>,
+    pub along_m: f32,
+    pub sill_m: f32,
+    pub width_m: f32,
+    pub height_m: f32,
+}
+
+/// Every opening placed on wall `wall_id` (windows then doors, placement order),
+/// as [`WallOpening`]s. THE single gather over a wall's openings — both the
+/// elevation view and [`redistribute_wall_openings`] build from this.
+pub fn wall_openings(storey: &Storey, wall_id: ItemId) -> Vec<WallOpening> {
+    let mut out = Vec::new();
+    for w in &storey.windows {
+        if let Some(OpeningPlacement::Wall {
+            wall_id: wid,
+            along_m,
+            sill_m,
+        }) = &w.placement
+        {
+            if *wid == wall_id {
+                out.push(WallOpening {
+                    opening: OpeningRef::Window(w.id),
+                    is_door: false,
+                    assembly_id: w.assembly_id,
+                    along_m: *along_m,
+                    sill_m: *sill_m,
+                    width_m: w.width_m,
+                    height_m: w.height_m,
+                });
+            }
+        }
+    }
+    for d in &storey.doors {
+        if let Some(OpeningPlacement::Wall {
+            wall_id: wid,
+            along_m,
+            sill_m,
+        }) = &d.placement
+        {
+            if *wid == wall_id {
+                out.push(WallOpening {
+                    opening: OpeningRef::Door(d.id),
+                    is_door: true,
+                    assembly_id: d.assembly_id,
+                    along_m: *along_m,
+                    sill_m: *sill_m,
+                    width_m: d.width_m,
+                    height_m: d.height_m,
+                });
+            }
+        }
+    }
+    out
+}
+
 /// A structured door+sidelights assembly: a door panel with optional flanking
 /// sidelights and a transom (top light) over the door. The composer (`compose_
 /// door_sidelights`) lays these out and emits one `Door` + the side/top
@@ -394,31 +458,10 @@ pub fn redistribute_wall_openings(
 ) -> Result<(), OpeningError> {
     let len = wall_length(storey, wall_id).ok_or(OpeningError::NoHostRegion)?;
     // Gather (ref, centre, width, assembly) for every opening on this wall.
-    let mut items: Vec<(OpeningRef, f32, f32, Option<ItemId>)> = Vec::new();
-    for w in &storey.windows {
-        if let Some(OpeningPlacement::Wall {
-            wall_id: wid,
-            along_m,
-            ..
-        }) = &w.placement
-        {
-            if *wid == wall_id {
-                items.push((OpeningRef::Window(w.id), *along_m, w.width_m, w.assembly_id));
-            }
-        }
-    }
-    for d in &storey.doors {
-        if let Some(OpeningPlacement::Wall {
-            wall_id: wid,
-            along_m,
-            ..
-        }) = &d.placement
-        {
-            if *wid == wall_id {
-                items.push((OpeningRef::Door(d.id), *along_m, d.width_m, d.assembly_id));
-            }
-        }
-    }
+    let items: Vec<(OpeningRef, f32, f32, Option<ItemId>)> = wall_openings(storey, wall_id)
+        .into_iter()
+        .map(|o| (o.opening, o.along_m, o.width_m, o.assembly_id))
+        .collect();
     if items.is_empty() {
         return Ok(());
     }

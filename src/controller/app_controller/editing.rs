@@ -345,22 +345,9 @@ impl AppController {
             joint_solve(prior_m, prior_val, prior_n_pos, &m, distance, n_pos, cur)
         };
 
-        let x_p = self
-            .document
-            .floor_plan
-            .vertex_x_param(v_ring, v_idx)
-            .ok_or_else(|| "vertex.x_expr isn't a parameter".to_string())?;
-        let y_p = self
-            .document
-            .floor_plan
-            .vertex_y_param(v_ring, v_idx)
-            .ok_or_else(|| "vertex.y_expr isn't a parameter".to_string())?;
-        self.document.floor_plan.set_parameter(x_p, new_pos.0);
-        self.document.floor_plan.set_parameter(y_p, new_pos.1);
-        // Both params land in `known_params` so the new walls get length
-        // labels via the standard `walls_with_known_length` path.
-        self.document.dimensioning.known_params.insert(x_p);
-        self.document.dimensioning.known_params.insert(y_p);
+        // Pin both axes + register them as known (the model mutation behind a
+        // solved measurement) in one document call.
+        self.document.pin_vertex_position(v_ring, v_idx, new_pos)?;
         self.mark_dirty()?;
 
         if let Some(p) = self.vertex_drop_prompt.as_mut() {
@@ -473,62 +460,28 @@ impl AppController {
         let Some(kind) = self.document.edit_state.pre_drag_kind else {
             return;
         };
-        let polygons = self.document.floor_plan.polygons();
-        let Some(ring_pts) = polygons.get(ring) else {
+        // The parallel-wall DISCOVERY (orientation + the walk over every other
+        // wall) is plan topology — `manip_2d_plan` owns it; the shell just packs
+        // the candidates into `MeasurementOption`s for its prompt type.
+        let Some((axis, candidates)) = self.document.floor_plan.parallel_walls_to(ring, edge_start)
+        else {
             return;
         };
-        let n = ring_pts.len();
-        if n < 2 {
-            return;
-        }
-        let a = ring_pts[edge_start];
-        let b = ring_pts[(edge_start + 1) % n];
-        // Axis-aligned wall: determine orientation. Tolerance against floats.
-        let dx = (b.x - a.x).abs();
-        let dy = (b.y - a.y).abs();
-        let is_vertical = dy > dx;
-        let axis = if is_vertical {
-            ParameterAxis::X
-        } else {
-            ParameterAxis::Y
-        };
-        let moved_value = if is_vertical { a.x } else { a.y };
-
-        let mut options: Vec<MeasurementOption> = Vec::new();
-        for (ri, r) in polygons.iter().enumerate() {
-            for i in 0..r.len() {
-                if ri == ring && i == edge_start {
-                    continue;
-                }
-                let p = r[i];
-                let q = r[(i + 1) % r.len()];
-                let pdx = (q.x - p.x).abs();
-                let pdy = (q.y - p.y).abs();
-                let other_is_vertical = pdy > pdx;
-                if other_is_vertical != is_vertical {
-                    continue;
-                }
-                let ref_value = if is_vertical { p.x } else { p.y };
-                let delta = moved_value - ref_value;
-                let distance = delta.abs();
-                if distance < 1e-3 {
-                    continue;
-                }
-                let Some(ref_vid) = self.document.floor_plan.vertex_id_at(ri, i) else {
-                    continue;
-                };
-                options.push(MeasurementOption {
-                    reference_wall_vid: ref_vid,
-                    reference_value: ref_value,
-                    sign: delta.signum(),
-                    current_distance: distance,
-                });
-            }
-        }
-        if options.is_empty() {
+        if candidates.is_empty() {
             // Nothing parallel to the moved wall — can't form a measurement.
             return;
         }
+        let options: Vec<MeasurementOption> = candidates
+            .into_iter()
+            .map(
+                |(reference_wall_vid, reference_value, sign, current_distance)| MeasurementOption {
+                    reference_wall_vid,
+                    reference_value,
+                    sign,
+                    current_distance,
+                },
+            )
+            .collect();
         self.edit_drag_prompt = Some(EditDragPrompt {
             moved_wall_vid: vid,
             axis,

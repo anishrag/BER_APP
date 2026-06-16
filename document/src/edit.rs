@@ -8,6 +8,33 @@ use crate::StoreyDoc;
 use manip_2d_plan::{ParameterAxis, VertexId};
 
 impl StoreyDoc {
+    /// Pin vertex `(ring, idx)` at an exact plan position: resolve its x and y
+    /// parameters, set both, and register both as known dimensions — so the
+    /// adjoining walls get length labels via the standard known-length path.
+    /// The shell calls this after solving a vertex measurement (the one model
+    /// mutation behind that flow). `Err` if either axis isn't a parameter (an
+    /// anchored constant vertex can't be repositioned this way).
+    pub fn pin_vertex_position(
+        &mut self,
+        ring: usize,
+        idx: usize,
+        new_pos: (f32, f32),
+    ) -> Result<(), String> {
+        let x_p = self
+            .floor_plan
+            .vertex_x_param(ring, idx)
+            .ok_or_else(|| "vertex.x_expr isn't a parameter".to_string())?;
+        let y_p = self
+            .floor_plan
+            .vertex_y_param(ring, idx)
+            .ok_or_else(|| "vertex.y_expr isn't a parameter".to_string())?;
+        self.floor_plan.set_parameter(x_p, new_pos.0);
+        self.floor_plan.set_parameter(y_p, new_pos.1);
+        self.dimensioning.known_params.insert(x_p);
+        self.dimensioning.known_params.insert(y_p);
+        Ok(())
+    }
+
     /// Insert a new vertex on wall `(ring, edge_start)` at world `(x, y)` and
     /// set up the edit cursor for a free-2D drag on it. The shell has already
     /// taken the undo snapshot covering the whole insert + drag interaction, so

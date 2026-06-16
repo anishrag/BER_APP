@@ -40,15 +40,15 @@ pub use phase::{
 pub use position::{PositionOption, PositionPrompt, PositionPromptKind};
 pub use resolve::{ensure_storey_constructions, resolve_storey};
 pub use roof_point::{
-    centred_rect_lo, centred_ridge_cross, centred_ridge_start, ridge_region_ring,
-    validate_roof_apex, validate_roof_rect_length, validate_roof_rect_lengths,
+    centred_rect_lo, centred_ridge_cross, centred_ridge_start, resolve_ridge_slope_side,
+    ridge_region_ring, validate_roof_apex, validate_roof_rect_length, validate_roof_rect_lengths,
     validate_roof_rect_placement, validate_roof_rect_ridge, validate_roof_ridge,
-    validate_roof_ridge_extent, validate_roof_ridge_length,
+    validate_roof_ridge_extent, validate_roof_ridge_length, RidgeSlopeSide,
 };
 pub use step::{inherited_step_regions, step_regions_from_floors, StepRegion};
 
 use datatypes::ber::structural::WallExposure;
-use domain::points::Point2f32;
+use domain::points::{to_f64, Point2f32, Point2f64};
 use manip_2d_plan::{
     Error, FloorPlan, ParameterAxis, ParameterId, SubareaOutcome, SubareaTuning, VertexId,
 };
@@ -349,6 +349,19 @@ impl Document {
 }
 
 impl StoreyDoc {
+    /// The plan rings (world metres) of the living areas that are themselves
+    /// FINALISED — the persist path keeps only completed sub-areas (an
+    /// in-progress one is still pixel/incomplete and must not reach the DB). The
+    /// metric projection of each finalised slot's outline. (Resolve, by
+    /// contrast, projects ALL living areas — the active one still renders.)
+    pub fn finalised_living_area_lists(&self) -> Vec<Vec<Point2f64>> {
+        self.living_areas
+            .iter()
+            .filter(|s| s.finalised())
+            .map(|s| s.floor_plan.get_points().into_iter().map(to_f64).collect())
+            .collect()
+    }
+
     /// Write the live editing buffer back into whichever slot is active, so the
     /// slots are current before they're read (persist / switch / snapshot).
     pub fn sync_active(&mut self) {
