@@ -244,6 +244,10 @@ impl AppController {
         // constructions exist — the two `&mut` prerequisites of the otherwise
         // read-only projection (`document::resolve_storey`).
         self.sync_active();
+        // Mirror the active storey's same-height dividers into the DURABLE field
+        // BEFORE resolve clones the storey — they leave no z-trace, so this is
+        // their only record (and `resolve_storey` re-applies them from it).
+        self.sync_ceiling_dividers(idx);
         let regions: &[PhaseRegion] = self
             .phase_regions
             .get(&idx)
@@ -272,6 +276,37 @@ impl AppController {
         // Floors are already phase-correct from the partition; this stamps the
         // phase onto the just-rebuilt WALLS by reading those partitioned floors.
         document::stamp_wall_phases(&mut record.data, idx);
+    }
+
+    /// Mirror the active storey's same-height DIVIDERS (the delta-0 entries of
+    /// its session ceiling-step list) into the DURABLE `Storey::ceiling_dividers`
+    /// — the only record of a divider, which leaves no z-trace in the resolved
+    /// roofs. ACTIVE storey only: `refresh_all_storeys` deliberately does NOT
+    /// call this, so an unvisited storey (empty session list) keeps its
+    /// persisted dividers instead of having them wiped.
+    pub(super) fn sync_ceiling_dividers(&mut self, idx: usize) {
+        let dividers: Vec<Vec<domain::points::Point2f64>> = self
+            .ceiling_step_regions
+            .get(&idx)
+            .map(|steps| {
+                steps
+                    .iter()
+                    .filter(|r| r.delta_m.abs() < 1e-3)
+                    .map(|r| {
+                        r.polygon
+                            .iter()
+                            .copied()
+                            .map(domain::points::to_f64)
+                            .collect()
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+        if let Some(record) = self.current_record.as_mut() {
+            if let Some(storey) = record.data.storeys.get_mut(idx) {
+                storey.ceiling_dividers = dividers;
+            }
+        }
     }
 
     /// Derive EVERY storey's geometry into `current_record` — the all-storeys

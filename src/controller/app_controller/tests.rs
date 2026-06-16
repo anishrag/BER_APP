@@ -3417,12 +3417,13 @@ fn ceiling_same_height_split_keeps_both_pieces() {
             zs.iter().all(|z| (z - 2.4).abs() < 1e-6),
             "both pieces stay at the default height (got {zs:?})"
         );
-        // Both flat-default pieces are kept as delta-0 dividers in the session.
+        // The ONE divider drawn is the durable record (a delta-0 area); it still
+        // splits the ceiling into the two flat roof pieces asserted above.
         let session = &c.ceiling_step_regions[&0];
-        assert_eq!(session.len(), 2, "both halves recorded as dividers");
+        assert_eq!(session.len(), 1, "the drawn divider recorded once");
         assert!(
             session.iter().all(|r| r.delta_m.abs() < 1e-3),
-            "both are same-height dividers"
+            "it is a same-height divider"
         );
     }
 }
@@ -3444,8 +3445,8 @@ fn ceiling_same_height_split_survives_reload_and_rederive() {
     let session = &c.ceiling_step_regions[&0];
     assert_eq!(
         session.len(),
-        2,
-        "both dividers reconstructed from the roofs"
+        1,
+        "the divider reconstructed from the durable field"
     );
     assert!(session.iter().all(|r| r.delta_m.abs() < 1e-3));
 
@@ -3457,19 +3458,17 @@ fn ceiling_same_height_split_survives_reload_and_rederive() {
     assert!(zs.iter().all(|z| (z - 2.4).abs() < 1e-6));
 }
 
-/// A-T7: deleting the divider(s) re-fuses the two halves to ONE flat default
-/// ring on the next derive. The same-height split records BOTH halves as
-/// delta-0 dividers (they tile the footprint), so removing the partition means
-/// clearing them — with no session region the derive yields a single default
-/// ring (no spurious divider, the genuine-subdivision predicate's lone-region
-/// case).
+/// A-T7: deleting the divider re-fuses the two halves to ONE flat default ring
+/// on the next derive. The split records ONE delta-0 divider area (the durable
+/// record), so removing the partition means clearing it — with no divider the
+/// derive yields a single default ring.
 #[test]
 fn deleting_a_divider_refuses_the_halves() {
     let mut c = ceiling_ready_controller();
     ceiling_step_to_amount_at_x4(&mut c);
     c.assign_ceiling_step_delta(0.0).unwrap();
     c.materialize();
-    assert_eq!(c.ceiling_step_regions[&0].len(), 2, "two dividers");
+    assert_eq!(c.ceiling_step_regions[&0].len(), 1, "one divider");
 
     // Delete the dividers (the user removes the split). Each delete re-commits;
     // once none remain the next derive re-fuses to a single default ring.

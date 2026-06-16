@@ -83,39 +83,18 @@ pub struct CeilingStepRegion {
 /// sub-mm² slivers are dropped. Empty when the storey is missing or its
 /// ceiling height is unset (steps only exist relative to a default).
 ///
-/// SAME-HEIGHT DIVIDERS (the genuine-subdivision predicate). A flat region AT
-/// the default height carries no `delta`, yet two such regions side by side
-/// are a real subdivision — a same-height divider drawn purely to bound a
-/// later ridge to its own area. Geometry is the durable record (no stored
-/// flag), so reconstruction must re-emit these as `delta_m = 0.0` areas, else
-/// the next derive runs `with_z_deltas` over no areas and re-fuses them.
-///
-/// The predicate is NOT "delta is 0" (that would invent a spurious divider for
-/// every default REMAINDER of a real step carve). Delta-0 dividers are
-/// re-emitted IFF the whole ceiling sits at the default, partitioned into ≥ 2
-/// PIECES — where a piece is an un-grouped flat default-z region OR an apex
-/// group whose base IS the default (a ridge drawn over one half at the storey's
-/// own ceiling height). Each such piece's ring (the group's merged ring, or the
-/// region's exterior) is re-emitted at delta 0. So:
-/// - an un-split storey (one default-z flat covering the outline) → ONE piece →
-///   emits NOTHING;
-/// - a same-height split, no ridges (≥ 2 default-z flats) → each is re-emitted,
-///   and re-deriving `with_z_deltas([(A,0),(B,0)])` reproduces the same pieces
-///   (the areas tile the footprint, so the boolean is order-independent — a
-///   fixpoint);
-/// - a same-height split with a ridge over ONE or BOTH halves AT the default →
-///   the at-default groups count as pieces and re-emit their merged rings at
-///   delta 0, so `with_z_deltas` re-establishes the boundary BEFORE
-///   `with_apexes` re-applies the ridges to their own halves (without this the
-///   two ridges re-fuse into one region that fans over the whole footprint —
-///   the L-spanning bug);
-/// - a `+Δ` carve, or a ridge OFF the default → one off-default region/group +
-///   its default remainder (possibly several polygons): the off-default carve
-///   means this is NOT a pure same-height tiling, so the flat-default fragments
-///   are NOT mistaken for deliberate dividers. The off-default area/apexes
-///   re-split the default ring on re-derive, so the partition survives without
-///   a delta-0 emit. The delta-0 emit is needed ONLY when EVERY piece is at the
-///   default (every group's base = default and every plain region flat-default).
+/// SAME-HEIGHT DIVIDERS. A flat region AT the default height carries no `delta`
+/// and leaves NO z-trace in the resolved roofs, yet a same-height divider drawn
+/// purely to bound a later ridge to its own area is a real subdivision that must
+/// survive reload. Geometry CANNOT record it (a `+Δ` carve's default remainder
+/// is byte-identical to a deliberate divider), so the divider is stored
+/// DURABLY on the storey (`Storey::ceiling_dividers`) — like `roof_apexes` — and
+/// re-emitted here from that field as a `delta_m = 0.0` area. The next derive
+/// then re-applies it (`resolve_storey`) BEFORE the apexes, so a ridge over one
+/// piece stays confined instead of fanning over the whole footprint (the
+/// L-spanning bug). Nothing about dividers is inferred from geometry any more;
+/// a flat default-z region with no stored divider emits nothing (a carve's
+/// remainder is not a step).
 pub fn ceiling_step_regions_from_roofs(ber: &Ber, idx: usize) -> Vec<CeilingStepRegion> {
     let Some(storey) = ber.storeys.get(idx) else {
         return Vec::new();
@@ -137,73 +116,28 @@ pub fn ceiling_step_regions_from_roofs(ber: &Ber, idx: usize) -> Vec<CeilingStep
         .iter()
         .flat_map(|g| g.region_idxs.iter().copied())
         .collect();
-    // The same-height-divider predicate (see the doc comment). A delta-0
-    // divider is re-emitted only when the WHOLE ceiling sits at the default,
-    // partitioned into ≥ 2 pieces — where a piece is an un-grouped flat-default
-    // region OR an apex group whose base IS the default (a ridge drawn over one
-    // half at the storey's own ceiling height). Any OFF-default group or
-    // off-default/sloped plain region means a sibling carve already supplies
-    // the boundary (its area or apexes re-split the merged default ring on
-    // re-derive), so the flat-default fragments are that carve's remainder, not
-    // deliberate dividers — re-emitting them would invent spurious dividers
-    // (a +0.3 carve leaves its default remainder split into several polygons).
-    let off_default_group = groups.iter().any(|g| (g.base_z - default_z).abs() >= 1e-3);
-    let has_non_default_plain = storey.roofs.regions.iter().enumerate().any(|(ri, region)| {
-        !grouped.contains(&ri)
-            && region
-                .flat_z()
-                .is_none_or(|z| (z - default_z).abs() >= 1e-3)
-    });
-    let flat_default_count = storey
-        .roofs
-        .regions
-        .iter()
-        .enumerate()
-        .filter(|(ri, region)| {
-            !grouped.contains(ri)
-                && region
-                    .flat_z()
-                    .is_some_and(|z| (z - default_z).abs() < 1e-3)
-        })
-        .count();
-    let at_default_group_count = groups
-        .iter()
-        .filter(|g| (g.base_z - default_z).abs() < 1e-3)
-        .count();
-    let same_height_partition = !off_default_group
-        && !has_non_default_plain
-        && (flat_default_count + at_default_group_count) >= 2;
-    // Apex groups: an OFF-default group emits one area per merged ring at
-    // `delta = base − default`; an AT-default group, in a pure same-height
-    // tiling, emits its merged ring(s) as delta-0 dividers so `with_z_deltas`
-    // re-establishes the boundary before `with_apexes` re-applies the apexes —
-    // otherwise two ridges at the default re-fuse into one region that fans
-    // over the whole footprint (the L-spanning bug).
+    // OFF-default apex groups emit one area per merged ring at `delta =
+    // base − default`. An AT-default group leaves no z-trace and is NOT
+    // re-emitted from geometry — any divider that bounds it is restored from the
+    // durable `ceiling_dividers` below, not inferred.
     for group in &groups {
         let delta = group.base_z - default_z;
-        let emit_delta = if delta.abs() < 1e-3 {
-            if same_height_partition {
-                Some(0.0)
-            } else {
-                None
-            }
-        } else {
-            Some(delta)
-        };
-        let Some(emit_delta) = emit_delta else {
+        if delta.abs() < 1e-3 {
             continue;
-        };
+        }
         for ring in &group.merged_rings {
             let ring32: Vec<Point2f32> = ring
                 .iter()
                 .map(|v| Point2f32::new(v.x as f32, v.y as f32))
                 .collect();
-            push_ring(ring32, emit_delta);
+            push_ring(ring32, delta);
         }
     }
-    // Then the plain (un-apexed) regions: flat off-default ones emit their
-    // delta; flat default-z ones emit a delta-0 divider in a pure same-height
-    // tiling; sloped ones are irregular — warn-skip.
+    // Plain (un-apexed) regions: flat OFF-default ones emit their delta. A flat
+    // default-z region leaves no z-trace — it is a divider piece or a `+Δ`
+    // carve's remainder, indistinguishable from geometry, so it is never emitted
+    // from here (dividers come from the durable store; remainders aren't steps).
+    // Sloped regions in no group are irregular — warn-skip.
     for (ri, region) in storey.roofs.regions.iter().enumerate() {
         if grouped.contains(&ri) {
             continue;
@@ -216,10 +150,9 @@ pub fn ceiling_step_regions_from_roofs(ber: &Ber, idx: usize) -> Vec<CeilingStep
             continue;
         };
         let delta = z - default_z;
-        if delta.abs() < 1e-3 && !same_height_partition {
+        if delta.abs() < 1e-3 {
             continue;
         }
-        let delta = if delta.abs() < 1e-3 { 0.0 } else { delta };
         let ring: Vec<Point2f32> = region
             .polygon
             .exterior
@@ -227,6 +160,17 @@ pub fn ceiling_step_regions_from_roofs(ber: &Ber, idx: usize) -> Vec<CeilingStep
             .map(|v| Point2f32::new(v.x as f32, v.y as f32))
             .collect();
         push_ring(ring, delta);
+    }
+    // Same-height DIVIDERS are restored from the DURABLE store, not geometry
+    // (they leave no z-trace). Re-emit each stored ring as a delta-0 area so the
+    // session list round-trips and the next derive re-establishes the boundary
+    // before the apexes — keeping a ridge confined to its own piece.
+    for ring in &storey.ceiling_dividers {
+        let ring32: Vec<Point2f32> = ring
+            .iter()
+            .map(|v| Point2f32::new(v.x as f32, v.y as f32))
+            .collect();
+        push_ring(ring32, 0.0);
     }
     regions
 }
@@ -980,19 +924,28 @@ mod tests {
         ber
     }
 
-    /// A-T1: two default-z flat regions (an L split into two same-height
-    /// halves) reconstruct as TWO delta-0 divider areas.
+    /// A-T1: reconstruction emits one delta-0 divider per ring in the DURABLE
+    /// `ceiling_dividers` — and same-height flats with NO stored divider emit
+    /// nothing (a divider is never inferred from geometry).
     #[test]
-    fn reconstruction_emits_dividers_for_two_default_flats() {
+    fn reconstruction_emits_one_divider_per_stored_ring() {
+        // Two same-height flats but no stored divider → geometry alone emits
+        // nothing (a `+Δ` carve's remainder would look identical, so neither is
+        // a step).
         let ber = storey_with_flat_regions(
             &[(square64(0.0, 4.0), 2.4), (square64(4.0, 10.0), 2.4)],
             2.4,
         );
+        assert!(
+            ceiling_step_regions_from_roofs(&ber, 0).is_empty(),
+            "a same-height split is not inferred from geometry"
+        );
+        // With the divider stored durably, it round-trips back as a delta-0 area.
+        let mut ber = storey_with_flat_regions(&[(square64(0.0, 10.0), 2.4)], 2.4);
+        ber.storeys[0].ceiling_dividers = vec![square64(0.0, 4.0)];
         let regions = ceiling_step_regions_from_roofs(&ber, 0);
-        assert_eq!(regions.len(), 2, "both default-z flats re-emit as dividers");
-        for r in &regions {
-            assert!(r.delta_m.abs() < 1e-12, "divider carries delta 0");
-        }
+        assert_eq!(regions.len(), 1, "one delta-0 divider per stored ring");
+        assert!(regions[0].delta_m.abs() < 1e-12, "divider carries delta 0");
     }
 
     /// A-T2: a lone default-z flat emits NOTHING (no spurious divider); a
@@ -1017,33 +970,41 @@ mod tests {
         assert!((regions[0].delta_m - 0.3).abs() < 1e-9);
     }
 
-    /// A-T3: idempotence fixpoint — two delta-0 halves → `with_z_deltas` →
-    /// reconstruct → `with_z_deltas` again yields the identical region set
-    /// (same z's, same footprint, order-independent boolean).
+    /// A-T3: a stored divider is a fixpoint — resolve splits the default ring
+    /// into two same-height pieces, reconstruction returns the stored DIVIDER
+    /// (one, not the two pieces), and re-deriving reproduces the identical
+    /// two-piece split.
     #[test]
     fn reconstruction_divider_is_a_fixpoint() {
         let default_z = 2.4;
         let cid = Default::default();
-        // The default whole-outline ceiling.
-        let base = CeilingRegions::default_for_footprint(vec![square64(0.0, 10.0)], default_z, cid);
-
-        // First split into two same-height halves via delta-0 areas.
-        let areas = vec![
-            (square64(0.0, 4.0), 0.0_f64),
-            (square64(4.0, 10.0), 0.0_f64),
-        ];
-        let split = base.clone().with_z_deltas(&areas);
+        let divider = square64(0.0, 4.0);
+        // The roofs are the divider's resolved split of the default ring.
+        let split =
+            CeilingRegions::default_for_footprint(vec![square64(0.0, 10.0)], default_z, cid)
+                .with_z_deltas(&[(divider.clone(), 0.0)]);
+        assert_eq!(
+            split.regions.len(),
+            2,
+            "the divider splits the default ring"
+        );
 
         let mut ber = Ber::default();
         ber.storeys.push(Storey {
             roofs: split.clone(),
             ceiling_height_m: Some(default_z),
+            ceiling_dividers: vec![divider],
             ..Storey::default()
         });
         let recon = ceiling_step_regions_from_roofs(&ber, 0);
-        assert_eq!(recon.len(), 2, "two dividers reconstructed");
+        assert_eq!(
+            recon.len(),
+            1,
+            "the stored divider reconstructs, not the pieces"
+        );
+        assert!(recon[0].delta_m.abs() < 1e-12);
 
-        // Re-derive from the recon list over the SAME default ring.
+        // Re-derive from the reconstructed divider over the SAME default ring.
         let recon_areas: Vec<(Vec<Point2f64>, f64)> = recon
             .iter()
             .map(|r| {
@@ -1119,19 +1080,19 @@ mod tests {
         assert_eq!(regions.len(), 1, "just the ridged half's merged area");
     }
 
-    /// A-T4b (regression): a same-height split with a ridge over one half AT
-    /// the DEFAULT base. The at-default group counts as a partition piece, so
-    /// reconstruction re-emits the boundary as delta-0 dividers — and
-    /// re-deriving (`with_z_deltas` then `with_apexes`) keeps the ridge
-    /// confined to its own half instead of fanning over the whole footprint
-    /// (the L-spanning bug an at-default ridge would otherwise reintroduce on
-    /// reload).
+    /// A-T4b (regression): a ridge over one half AT the DEFAULT base stays
+    /// confined to its half ONLY because the bounding divider is stored durably.
+    /// Reconstruction returns that divider (the at-default ridge group leaves no
+    /// z-trace and is NOT re-emitted from geometry), and re-deriving
+    /// (`with_z_deltas` then `with_apexes`) keeps the ridge in the right half
+    /// instead of fanning over the whole footprint (the L-spanning bug).
     #[test]
     fn reconstruction_at_default_ridge_keeps_divider() {
         use datatypes::ber::structural::RoofApex;
         let cid = Default::default();
         let default_z = 2.4;
-        // Right half ridged at the DEFAULT base (apex raised above it).
+        let divider = square64(4.0, 10.0); // the right half, stored as the boundary
+                                           // Right half ridged at the DEFAULT base (apex raised above it).
         let apex = RoofApex {
             point: Point2f64::new(7.0, 3.0),
             z_m: 4.0,
@@ -1148,15 +1109,16 @@ mod tests {
             roofs,
             ceiling_height_m: Some(default_z),
             roof_apexes: vec![apex.clone()],
+            ceiling_dividers: vec![divider],
             ..Storey::default()
         });
         let recon = ceiling_step_regions_from_roofs(&ber, 0);
-        // The boundary survives: both pieces re-emit at delta 0 (the at-default
-        // group's merged ring + the flat half), NOT dropped.
-        assert!(!recon.is_empty(), "the same-height divider is not dropped");
+        // The stored divider survives; the at-default ridge group is NOT
+        // re-emitted from geometry (it leaves no z-trace).
+        assert_eq!(recon.len(), 1, "only the stored divider reconstructs");
         assert!(
             recon.iter().all(|r| r.delta_m.abs() < 1e-9),
-            "every re-emitted piece is a delta-0 divider"
+            "it is a delta-0 divider"
         );
         // Re-derive: re-split the default ring, then apply the ridge. It must
         // land ONLY in the right half (x ≥ 4) — never spanning to x = 0.
@@ -1187,6 +1149,34 @@ mod tests {
         assert!(
             min_x >= 4.0 - 1e-6,
             "the ridge stays in the right half (min x = {min_x}), not spanning the footprint"
+        );
+    }
+
+    /// A-T9 (THE live L-shape regression): a same-height divider COEXISTS with
+    /// an unrelated OFF-default step elsewhere on the storey. The old inference
+    /// dropped every divider the moment any off-default region existed (so the
+    /// boundary vanished and a ridge fanned to the far wall). The durable model
+    /// keeps it — reconstruction returns the off-default step (from geometry)
+    /// AND the stored divider.
+    #[test]
+    fn reconstruction_keeps_divider_alongside_an_off_default_step() {
+        let pt = |x: f64, y: f64| Point2f64::new(x, y);
+        let rect = |x0: f64, y0: f64, x1: f64, y1: f64| {
+            vec![pt(x0, y0), pt(x1, y0), pt(x1, y1), pt(x0, y1)]
+        };
+        // Roofs: a +0.5 step over the right strip, the left column at default.
+        let mut ber =
+            storey_with_flat_regions(&[(square64(0.0, 4.0), 2.4), (square64(4.0, 6.0), 2.9)], 2.4);
+        // A same-height divider splits the left column at y = 3 — stored durably.
+        ber.storeys[0].ceiling_dividers = vec![rect(0.0, 0.0, 4.0, 3.0)];
+        let regions = ceiling_step_regions_from_roofs(&ber, 0);
+        let steps = regions.iter().filter(|r| r.delta_m.abs() >= 1e-3).count();
+        let dividers = regions.iter().filter(|r| r.delta_m.abs() < 1e-3).count();
+        assert_eq!(steps, 1, "the off-default step still emits");
+        assert_eq!(dividers, 1, "the divider survives alongside the step");
+        assert!(
+            regions.iter().any(|r| (r.delta_m - 0.5).abs() < 1e-9),
+            "the step carries its +0.5 delta"
         );
     }
 

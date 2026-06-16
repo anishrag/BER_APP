@@ -254,6 +254,7 @@ fn create_full_ber(id: ItemId) -> Ber {
             ceiling_height_m: None,
             roof_apexes: vec![],
             floor_thickness_m: None,
+            ceiling_dividers: vec![],
         },
         Storey {
             id: ItemId::default(),
@@ -269,6 +270,7 @@ fn create_full_ber(id: ItemId) -> Ber {
             ceiling_height_m: None,
             roof_apexes: vec![],
             floor_thickness_m: None,
+            ceiling_dividers: vec![],
         },
     ];
 

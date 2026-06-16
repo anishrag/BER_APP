@@ -164,14 +164,24 @@ pub fn resolve_storey(
         if polygons_f64.iter().any(|p| p.len() >= 3) {
             let mut roofs =
                 CeilingRegions::default_for_footprint(polygons_f64, height_m, ceiling_cid);
-            if !ceiling_steps.is_empty() {
-                let areas: Vec<(Vec<Point2f64>, f64)> = ceiling_steps
+            if !ceiling_steps.is_empty() || !storey.ceiling_dividers.is_empty() {
+                // The session ±Δ steps (and any in-flight delta-0 divider the
+                // controller hasn't synced to the durable field yet), PLUS the
+                // durable same-height DIVIDERS as delta-0 splits. A divider
+                // leaves no z-trace, so the stored ring is the only durable
+                // record; applying it (idempotently — re-applying a delta-0
+                // split is a no-op on z) re-establishes the boundary BEFORE
+                // `with_apexes`, keeping a ridge confined to its own piece.
+                let mut areas: Vec<(Vec<Point2f64>, f64)> = ceiling_steps
                     .iter()
                     .map(|r| {
                         let ring: Vec<Point2f64> = r.polygon.iter().copied().map(to_f64).collect();
                         (ring, r.delta_m)
                     })
                     .collect();
+                for ring in &storey.ceiling_dividers {
+                    areas.push((ring.clone(), 0.0));
+                }
                 roofs = roofs.with_z_deltas(&areas);
                 // Composed-delta sanity: a step is validated against the
                 // default at assign time only, so stacked steps can drive a

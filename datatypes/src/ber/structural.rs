@@ -3305,6 +3305,17 @@ pub struct Storey {
     /// `#[serde(default)]` so older records load.
     #[serde(default)]
     pub floor_thickness_m: Option<f64>,
+    /// Same-height ceiling DIVIDERS: world-metre plan rings that subdivide the
+    /// ceiling at the SAME height, drawn purely to bound a roof ridge to its own
+    /// area. Durable INPUT like `roof_apexes` — unlike a `±Δ` step a divider
+    /// leaves NO z-trace in the resolved roofs (both sides stay at the default),
+    /// so it cannot be reconstructed from geometry and must be stored. Resolve
+    /// re-applies each as a delta-0 split, BEFORE the apexes (composition order:
+    /// default ceiling → steps → dividers → apexes), so a ridge over one piece
+    /// stays confined instead of fanning across the whole footprint.
+    /// `#[serde(default)]` so older records load.
+    #[serde(default)]
+    pub ceiling_dividers: Vec<Vec<Point2f64>>,
     // No editable sketch snapshot is stored: the resolved geometry above
     // (`floors`/`walls`/`living_areas`) is the only persisted representation,
     // and the editor rebuilds its working state from it on load. The DB only
