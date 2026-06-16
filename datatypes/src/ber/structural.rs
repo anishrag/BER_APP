@@ -683,6 +683,18 @@ pub struct RoofApex {
     pub z_m: f64,
 }
 
+/// Disambiguates a roof apex that sits on an INTERNAL boundary shared by two
+/// ceiling areas (a mono-pitch ridge along the house↔extension junction): which
+/// area should it slope? `apex` is the apex plan point it applies to; `region`
+/// is a point INSIDE the intended area (the drawn pre-snap location). Durable,
+/// stored on the `Storey` parallel to (but keyed by point, not index) the
+/// apexes, so `with_apexes` resolves the side deterministically every resolve.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct RoofApexHint {
+    pub apex: (f32, f32),
+    pub region: (f32, f32),
+}
+
 impl RoofApex {
     /// Quantize a plan position to the f32 grid — exactly the rounding
     /// [`Ber::add_roof_apex`] applies on store. Callers that must reason
@@ -931,6 +943,16 @@ impl CeilingRegions {
     ///
     /// [`region_strictly_containing`]: CeilingRegions::region_strictly_containing
     pub fn with_apexes(self, apexes: &[RoofApex]) -> Self {
+        self.with_apexes_hinted(apexes, &[])
+    }
+
+    /// Like [`with_apexes`](Self::with_apexes), but `hints` resolve a MULTI-claim
+    /// apex (one on an internal boundary shared by two areas — a mono-pitch ridge
+    /// along the junction) to the area whose interior contains the hint's
+    /// `region` point, instead of the first claimant. An apex with no matching
+    /// hint, or whose hint lands in no claimed area, keeps first-claim (so normal
+    /// apexes and old records are byte-identical).
+    pub fn with_apexes_hinted(self, apexes: &[RoofApex], hints: &[RoofApexHint]) -> Self {
         if apexes.is_empty() {
             return self;
         }
@@ -955,16 +977,40 @@ impl CeilingRegions {
                     apex.point.y
                 ),
                 Some((&first, rest)) => {
-                    if !rest.is_empty() {
-                        log::warn!(
-                            "roof apex at ({:.3}, {:.3}) sits on a boundary shared by {} \
-                             regions — claimed by the first (#{first})",
-                            apex.point.x,
-                            apex.point.y,
-                            claims.len()
-                        );
-                    }
-                    per_region[first].push(i);
+                    let chosen = if rest.is_empty() {
+                        first
+                    } else {
+                        // Multi-claim (internal shared boundary): a side hint for
+                        // this apex picks the area whose interior it names; else
+                        // first-claim (warn), as before.
+                        let hinted = hints
+                            .iter()
+                            .find(|h| {
+                                (h.apex.0 as f64 - apex.point.x).abs() < 1e-3
+                                    && (h.apex.1 as f64 - apex.point.y).abs() < 1e-3
+                            })
+                            .and_then(|h| {
+                                let rp = GeoPoint::new(h.region.0 as f64, h.region.1 as f64);
+                                claims.iter().copied().find(|&ri| {
+                                    Polygon::<f64>::from(self.regions[ri].polygon.clone())
+                                        .contains(&rp)
+                                })
+                            });
+                        match hinted {
+                            Some(ri) => ri,
+                            None => {
+                                log::warn!(
+                                    "roof apex at ({:.3}, {:.3}) sits on a boundary shared by {} \
+                                     regions — claimed by the first (#{first})",
+                                    apex.point.x,
+                                    apex.point.y,
+                                    claims.len()
+                                );
+                                first
+                            }
+                        }
+                    };
+                    per_region[chosen].push(i);
                 }
             }
         }
@@ -3369,6 +3415,12 @@ pub struct Storey {
     /// records load.
     #[serde(default)]
     pub roof_apexes: Vec<RoofApex>,
+    /// Side hints for apexes on an internal shared boundary (a mono-pitch ridge
+    /// along the house↔extension junction) — which ceiling area each slopes.
+    /// Keyed by apex point (see [`RoofApexHint`]); empty for normal apexes.
+    /// `#[serde(default)]` so older records load.
+    #[serde(default)]
+    pub roof_apex_hints: Vec<RoofApexHint>,
     /// Floor-slab thickness in metres between this storey's floor and the
     /// ceiling of the storey below it bears on. Durable INPUT like
     /// `ceiling_height_m` — asked first when the storey is added (never on
@@ -5642,6 +5694,61 @@ mod tests {
         let groups = again.apex_groups(&apexes);
         assert_eq!(groups.len(), 1);
         assert_eq!(groups[0].apex_idxs, vec![0, 1]);
+    }
+
+    /// A mono-pitch ridge on the boundary SHARED by two areas: the side HINT
+    /// picks which one slopes. Hinting the RIGHT area slopes it (and leaves the
+    /// LEFT flat); WITHOUT a hint, first-claim slopes the LEFT (region 0).
+    #[test]
+    fn with_apexes_hint_picks_the_sloped_side_of_a_shared_boundary() {
+        let cid = ItemId::default();
+        // Left area x0..4, right area x4..8, both flat at 2.4.
+        let mut roofs =
+            CeilingRegions::default_for_footprint(vec![square(0.0, 0.0, 4.0, 4.0)], 2.4, cid);
+        roofs.regions.extend(
+            CeilingRegions::default_for_footprint(vec![square(4.0, 0.0, 8.0, 4.0)], 2.4, cid)
+                .regions,
+        );
+        // A ridge along the shared line x = 4 at z = 4.0.
+        let apexes = vec![
+            RoofApex {
+                point: Point2f64::new(4.0, 0.0),
+                z_m: 4.0,
+            },
+            RoofApex {
+                point: Point2f64::new(4.0, 4.0),
+                z_m: 4.0,
+            },
+        ];
+        // Does any output face on side `right_of_4` reach the ridge height?
+        let side_slopes = |roofs: &CeilingRegions, right_of_4: bool| {
+            roofs.regions.iter().any(|r| {
+                let cx = r.polygon.exterior.iter().map(|v| v.x).sum::<f64>()
+                    / r.polygon.exterior.len().max(1) as f64;
+                let on_side = if right_of_4 { cx > 4.0 } else { cx < 4.0 };
+                on_side && r.polygon.exterior.iter().any(|v| (v.z - 4.0).abs() < 1e-6)
+            })
+        };
+        // Hint into the RIGHT area → it slopes, the left stays flat.
+        let hints = vec![
+            RoofApexHint {
+                apex: (4.0, 0.0),
+                region: (6.0, 2.0),
+            },
+            RoofApexHint {
+                apex: (4.0, 4.0),
+                region: (6.0, 2.0),
+            },
+        ];
+        let hinted = roofs.clone().with_apexes_hinted(&apexes, &hints);
+        assert!(side_slopes(&hinted, true), "the hinted (right) area slopes");
+        assert!(!side_slopes(&hinted, false), "the left area stays flat");
+        // No hint → first claim (region 0, the LEFT) slopes instead.
+        let unhinted = roofs.with_apexes_hinted(&apexes, &[]);
+        assert!(
+            side_slopes(&unhinted, false),
+            "without a hint the left slopes"
+        );
     }
 
     // ── rect (pavilion) ridges ──────────────────────────────────────────────

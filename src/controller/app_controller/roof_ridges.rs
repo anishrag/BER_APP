@@ -881,12 +881,24 @@ impl AppController {
             coord_m,
             lo,
             len_m,
+            cross_snap,
             ..
         }) = self.pending_roof_ridge.as_ref()
         else {
             return Ok(()); // nothing awaiting a height — no-op
         };
         let (a, b) = Self::ridge_endpoints(*axis, *coord_m, *lo, *len_m);
+        // When the cross coordinate SNAPPED onto a wall, the ridge may sit on an
+        // internal junction shared by two areas — keep the DRAWN (pre-snap) side
+        // as a hint so the resolve slopes the area the assessor drew over (a
+        // mono-pitch extension), not the other one. Harmless on an outline snap.
+        let side_hint: Option<(f32, f32)> = cross_snap.as_ref().map(|cs| {
+            let mid_along = *lo + *len_m / 2.0;
+            match axis {
+                ParameterAxis::X => (cs.drawn_coord_m, mid_along),
+                ParameterAxis::Y => (mid_along, cs.drawn_coord_m),
+            }
+        });
         let idx = self.current_storey_idx.unwrap_or(0);
         // Bring the derived roofs current — the ridge is validated against
         // the resolved ceiling regions, not the editing buffer.
@@ -906,6 +918,9 @@ impl AppController {
                     z_m: z_m as f64,
                 },
             );
+            if let Some(region) = side_hint {
+                record.data.push_roof_apex_hint(idx, p, region);
+            }
         }
         self.pending_roof_ridge = None;
         self.mark_dirty()?;

@@ -3,9 +3,11 @@ use serde::{Deserialize, Serialize};
 use super::common::{ConstructionPhases, ItemId, Photo, Year};
 use super::fenestration::{Frame, Glazing, WindowNameSpecifics, WindowType};
 use super::structural::{
-    CeilingConstruction, FloorConstruction, RoofApex, Storey, ThermalMassInfo, WallConstruction,
+    CeilingConstruction, FloorConstruction, RoofApex, RoofApexHint, Storey, ThermalMassInfo,
+    WallConstruction,
 };
 use super::systems::{HeatingSystem, SolarElements, VentilationSystem};
+use domain::points::Point2f64;
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct Ber {
@@ -169,6 +171,25 @@ impl Ber {
         apex.point = RoofApex::quantize_point(apex.point);
         if let Some(storey) = self.storeys.get_mut(storey_idx) {
             storey.roof_apexes.push(apex);
+        }
+    }
+
+    /// Record a side hint for a boundary apex (a mono-pitch ridge along an
+    /// internal junction): `apex_point` is matched to a stored apex; `region` is
+    /// a point inside the area it should slope. The apex point is quantized to
+    /// match `add_roof_apex`'s storage so the hint keys correctly.
+    pub fn push_roof_apex_hint(
+        &mut self,
+        storey_idx: usize,
+        apex_point: Point2f64,
+        region: (f32, f32),
+    ) {
+        let q = RoofApex::quantize_point(apex_point);
+        if let Some(storey) = self.storeys.get_mut(storey_idx) {
+            storey.roof_apex_hints.push(RoofApexHint {
+                apex: (q.x as f32, q.y as f32),
+                region,
+            });
         }
     }
 

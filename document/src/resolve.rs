@@ -215,7 +215,7 @@ pub fn resolve_storey(
                         );
                     }
                 }
-                roofs = roofs.with_apexes(&storey.roof_apexes);
+                roofs = roofs.with_apexes_hinted(&storey.roof_apexes, &storey.roof_apex_hints);
             }
             storey.roofs = roofs;
         }

@@ -339,16 +339,29 @@ pub fn validate_roof_apex(storey: &Storey, p: Point2f64, z_m: f64) -> Result<(),
 /// datatypes::ber::structural::CeilingRegions::claim_regions
 fn check_end_claims(storey: &Storey, q: Point2f64, ridx: usize) -> Result<(), String> {
     let claims = storey.roofs.claim_regions(q);
-    if claims == [ridx] {
-        return Ok(());
-    }
-    if claims.is_empty() {
+    // The end may be strictly inside the region, on its OUTER boundary (gable),
+    // OR on an INTERNAL boundary that includes it (a mono-pitch ridge along the
+    // junction — the area it slopes is fixed by the apex side hint at resolve).
+    if claims.contains(&ridx) {
+        Ok(())
+    } else if claims.is_empty() {
         Err(RIDGE_END_OUTSIDE_CEILING_MSG.to_string())
-    } else if claims.contains(&ridx) {
-        Err(RIDGE_END_ON_SHARED_BOUNDARY_MSG.to_string())
     } else {
         Err(RIDGE_ENDS_SAME_REGION_MSG.to_string())
     }
+}
+
+/// First region (region order) that CLAIMS `p` — strictly inside, or on a
+/// region boundary. Boundary-inclusive (matching the fan); when several areas
+/// share the boundary the fan's side HINT picks at resolve, so validation just
+/// needs SOME claimant. `Err` if `p` is outside every region.
+fn region_idx_claiming(storey: &Storey, p: Point2f64) -> Result<usize, String> {
+    storey
+        .roofs
+        .claim_regions(p)
+        .first()
+        .copied()
+        .ok_or_else(|| POINT_OUTSIDE_CEILING_MSG.to_string())
 }
 
 /// Validate a roof RIDGE (the line input, which places BOTH apexes at once
@@ -393,8 +406,7 @@ pub fn validate_roof_ridge(
         return Err(RIDGE_ENDS_COINCIDE_MSG.to_string());
     }
     let mid = Point2f64::new((qa.x + qb.x) / 2.0, (qa.y + qb.y) / 2.0);
-    let ra = region_idx_strictly_containing(storey, mid)
-        .map_err(|_| RIDGE_OUTSIDE_CEILING_MSG.to_string())?;
+    let ra = region_idx_claiming(storey, mid).map_err(|_| RIDGE_OUTSIDE_CEILING_MSG.to_string())?;
     for q in [qa, qb] {
         check_end_claims(storey, q, ra)?;
     }
@@ -542,8 +554,8 @@ pub fn validate_roof_ridge_extent(
             Point2f64::new(1.0, 0.0),
         ),
     };
-    let ridx = region_idx_strictly_containing(storey, mid)
-        .map_err(|_| RIDGE_OUTSIDE_CEILING_MSG.to_string())?;
+    let ridx =
+        region_idx_claiming(storey, mid).map_err(|_| RIDGE_OUTSIDE_CEILING_MSG.to_string())?;
     // Reject occupied / already-sloped areas HERE rather than letting the
     // Height stage reject later — both are properties of the midpoint's
     // region, fully knowable at finalize (the no-late-rejection invariant
@@ -1298,17 +1310,15 @@ mod tests {
             .unwrap_err(),
             RIDGE_END_OUTSIDE_CEILING_MSG
         );
-        // A ridge ALONG the boundary: its midpoint sits in no region.
-        assert_eq!(
-            validate_roof_ridge(
-                &storey,
-                Point2f64::new(1.0, 0.0),
-                Point2f64::new(3.0, 0.0),
-                4.2
-            )
-            .unwrap_err(),
-            RIDGE_OUTSIDE_CEILING_MSG
-        );
+        // A ridge ALONG the outline wall (a mono-pitch high edge) is now LEGAL —
+        // it slopes the region down to the opposite wall.
+        assert!(validate_roof_ridge(
+            &storey,
+            Point2f64::new(1.0, 0.0),
+            Point2f64::new(3.0, 0.0),
+            4.2
+        )
+        .is_ok());
         // Two flat regions side by side.
         let mut storey = storey_with_flat_roof(2.4);
         storey.roofs.regions.extend(
@@ -1336,18 +1346,16 @@ mod tests {
             .unwrap_err(),
             RIDGE_ENDS_SAME_REGION_MSG
         );
-        // An end ON the INTERNAL boundary shared by the two regions: no
-        // single owner — the stable shared-boundary rejection.
-        assert_eq!(
-            validate_roof_ridge(
-                &storey,
-                Point2f64::new(1.0, 2.0),
-                Point2f64::new(4.0, 2.0),
-                4.2
-            )
-            .unwrap_err(),
-            RIDGE_END_ON_SHARED_BOUNDARY_MSG
-        );
+        // An end ON the INTERNAL boundary shared by the two regions is now
+        // LEGAL — a mono-pitch ridge along the junction (the side hint fixes
+        // which area slopes at resolve).
+        assert!(validate_roof_ridge(
+            &storey,
+            Point2f64::new(1.0, 2.0),
+            Point2f64::new(4.0, 2.0),
+            4.2
+        )
+        .is_ok());
     }
 
     /// A region already shaped by an apex group rejects the line input (the
@@ -2029,11 +2037,10 @@ mod tests {
             )
             .regions,
         );
-        // Horizontal ridge in region 0 ending exactly ON the shared line
-        // x = 4: midpoint (2.5, 2) is inside region 0 and the span allows
-        // the touch, but the end has two claimants.
-        let err = validate_roof_ridge_extent(&storey, ParameterAxis::Y, 2.0, 1.0, 3.0).unwrap_err();
-        assert_eq!(err, RIDGE_END_ON_SHARED_BOUNDARY_MSG);
+        // A ridge ending exactly ON the shared line x = 4 (a mono-pitch ridge
+        // along the junction) is now LEGAL — the side hint fixes which area
+        // slopes at resolve.
+        assert!(validate_roof_ridge_extent(&storey, ParameterAxis::Y, 2.0, 1.0, 3.0).is_ok());
         // Ending ON the OUTER boundary (x = 0, one claimant) stays legal.
         assert!(validate_roof_ridge_extent(&storey, ParameterAxis::Y, 2.0, 0.0, 3.0).is_ok());
     }
