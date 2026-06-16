@@ -56,11 +56,16 @@ use manip_2d_plan::ParameterAxis;
 const POINT_OFF_FOOTPRINT_MSG: &str =
     "The high point must be inside the storey footprint — tap a point inside the floor plan.";
 
-/// User-facing rejection for an apex that lands in no ceiling region (or on a
-/// region boundary — containment is strict at assign time). Kept stable.
+/// User-facing rejection for an apex that lands in no ceiling region.
 const POINT_OUTSIDE_CEILING_MSG: &str =
-    "Tap a point inside the ceiling — the high point must sit strictly inside one \
-     ceiling area, not on a boundary.";
+    "Tap a point inside the ceiling — the high point must sit inside a ceiling area.";
+
+/// User-facing rejection for an apex on an INTERNAL boundary shared by two
+/// ceiling areas (ambiguous which one it would slope). A point on a single
+/// region's edge/corner (the footprint perimeter) is allowed.
+const POINT_ON_SHARED_BOUNDARY_MSG: &str =
+    "That point sits on the line between two ceiling areas — tap inside the area \
+     you want to slope, or on its outer wall/corner.";
 
 /// User-facing rejection for a third high point in a ceiling area whose apex
 /// group already holds two (a ridge). Kept stable.
@@ -220,6 +225,19 @@ fn region_idx_strictly_containing(storey: &Storey, p: Point2f64) -> Result<usize
         .expect("region returned from the same list"))
 }
 
+/// Index of the region UNIQUELY claiming `p`: strictly inside, or on the
+/// boundary of EXACTLY ONE region (a footprint edge/corner — a valid anchor for
+/// a corner-raised slope). `Err` if `p` is outside every region, or on an
+/// INTERNAL boundary shared by several (ambiguous which it slopes). Matches the
+/// boundary-inclusive predicate the fan (`with_apexes`) re-applies with.
+fn region_idx_uniquely_claiming(storey: &Storey, p: Point2f64) -> Result<usize, String> {
+    match storey.roofs.claim_regions(p).as_slice() {
+        [] => Err(POINT_OUTSIDE_CEILING_MSG.to_string()),
+        [i] => Ok(*i),
+        _ => Err(POINT_ON_SHARED_BOUNDARY_MSG.to_string()),
+    }
+}
+
 /// The ridge-foldover guard for a SECOND point in a one-apex group: run
 /// [`ridge_hub_switches`] over the group's merged ring (the whole conceptual
 /// area the ridge will form over — the resolved regions are fan/ridge faces
@@ -289,7 +307,7 @@ pub fn validate_roof_apex(storey: &Storey, p: Point2f64, z_m: f64) -> Result<(),
             "height must be a positive number of metres (got {z_m})"
         ));
     }
-    let ri = region_idx_strictly_containing(storey, p)?;
+    let ri = region_idx_uniquely_claiming(storey, p)?;
     let groups = storey.roofs.apex_groups(&storey.roof_apexes);
     let base = match groups.iter().find(|g| g.region_idxs.contains(&ri)) {
         None => storey.roofs.regions[ri]
@@ -1111,22 +1129,26 @@ mod tests {
     /// or in a storey with no roofs at all gets the stable outside-ceiling
     /// message.
     #[test]
-    fn point_outside_or_on_a_boundary_is_rejected() {
+    fn apex_outside_rejected_but_single_region_edge_and_corner_allowed() {
         let storey = storey_with_flat_roof(2.4);
-        for q in [
-            Point2f64::new(0.0, 2.0), // on the outline boundary
-            Point2f64::new(5.0, 2.0), // outside
-            Point2f64::new(4.0, 4.0), // a corner
-        ] {
-            assert_eq!(
-                validate_roof_apex(&storey, q, 4.0).unwrap_err(),
-                POINT_OUTSIDE_CEILING_MSG,
-                "{q:?}"
-            );
-        }
+        // OUTSIDE every region → rejected.
+        assert_eq!(
+            validate_roof_apex(&storey, Point2f64::new(5.0, 2.0), 4.0).unwrap_err(),
+            POINT_OUTSIDE_CEILING_MSG
+        );
         assert_eq!(
             validate_roof_apex(&Storey::default(), Point2f64::new(2.0, 2.0), 4.0).unwrap_err(),
             POINT_OUTSIDE_CEILING_MSG
+        );
+        // On the SINGLE region's outline edge / corner → now ALLOWED (a
+        // corner-raised slope). The fan handles the boundary apex.
+        assert!(
+            validate_roof_apex(&storey, Point2f64::new(0.0, 2.0), 4.0).is_ok(),
+            "an apex on the outer wall is allowed"
+        );
+        assert!(
+            validate_roof_apex(&storey, Point2f64::new(4.0, 4.0), 4.0).is_ok(),
+            "an apex on a footprint corner is allowed"
         );
     }
 
