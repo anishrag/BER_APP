@@ -36,8 +36,11 @@ use document::{LinePositionPrompt, LineSide};
 pub(super) struct CeilingLineSnap {
     /// The fitted/tapped coordinate before snapping — the un-snap target.
     pub(super) drawn_coord_m: f32,
-    /// The outline wall the line snapped onto (start vertex, outline plan).
-    pub(super) outline_wall_vid: VertexId,
+    /// The outline wall the line snapped onto (start vertex, outline plan), or
+    /// `None` when it snapped onto an EXTRA reference line — an existing region
+    /// boundary in this storey or the storey below, which carries no outline
+    /// vertex.
+    pub(super) outline_wall_vid: Option<VertexId>,
 }
 
 /// The in-flight ceiling-step input, advanced stage by stage:
@@ -223,7 +226,8 @@ impl AppController {
     /// the snap record so the tag's "Don't snap" can revert. Then await the
     /// side tap.
     fn begin_ceiling_step_side(&mut self, axis: ParameterAxis, coord_m: f32) {
-        let (coord_m, snap) = match self.document.snap_ceiling_step_line(axis, coord_m) {
+        let extras = self.ceiling_step_snap_references(axis);
+        let (coord_m, snap) = match self.document.snap_ceiling_step_line(axis, coord_m, &extras) {
             Some((snapped, outline_wall_vid)) => (
                 snapped,
                 Some(CeilingLineSnap {
@@ -238,6 +242,34 @@ impl AppController {
             coord_m,
             snap,
         });
+    }
+
+    /// Extra reference coordinates (on `axis`) a drawn ceiling-step line may
+    /// snap to, beyond the current outline walls: the parallel edges of EXISTING
+    /// floor AND ceiling regions in this storey (internal floor/ceiling step
+    /// boundaries) and of the storey BELOW (its outline + floor/ceiling steps) —
+    /// so a line drawn near any existing line locks onto it. Gathered from the
+    /// materialized records the shell already holds; the geometry extraction is
+    /// [`document::region_line_coords`] / [`document::ceiling_line_coords`].
+    fn ceiling_step_snap_references(&self, axis: ParameterAxis) -> Vec<f32> {
+        let Some(idx) = self.current_storey_idx else {
+            return Vec::new();
+        };
+        let Some(record) = self.current_record.as_ref() else {
+            return Vec::new();
+        };
+        let mut coords = Vec::new();
+        let mut gather = |storey: &datatypes::ber::structural::Storey| {
+            coords.extend(document::region_line_coords(&storey.floors, axis));
+            coords.extend(document::ceiling_line_coords(&storey.roofs, axis));
+        };
+        if let Some(storey) = record.data.storeys.get(idx) {
+            gather(storey);
+        }
+        if let Some(below) = idx.checked_sub(1).and_then(|b| record.data.storeys.get(b)) {
+            gather(below);
+        }
+        coords
     }
 
     /// Canvas tap dispatch for the ceiling-step flow:

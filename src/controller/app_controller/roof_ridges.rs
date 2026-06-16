@@ -249,7 +249,7 @@ impl AppController {
                 snapped,
                 Some(CeilingLineSnap {
                     drawn_coord_m: coord_m,
-                    outline_wall_vid,
+                    outline_wall_vid: Some(outline_wall_vid),
                 }),
             ),
             None => (coord_m, None),
@@ -273,7 +273,7 @@ impl AppController {
                 snapped,
                 Some(CeilingLineSnap {
                     drawn_coord_m: lo,
-                    outline_wall_vid,
+                    outline_wall_vid: Some(outline_wall_vid),
                 }),
             ),
             None => (lo, None),
@@ -283,7 +283,7 @@ impl AppController {
                 snapped,
                 Some(CeilingLineSnap {
                     drawn_coord_m: hi,
-                    outline_wall_vid,
+                    outline_wall_vid: Some(outline_wall_vid),
                 }),
             ),
             None => (hi, None),

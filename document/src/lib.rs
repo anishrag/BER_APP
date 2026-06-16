@@ -28,8 +28,8 @@ mod roof_point;
 mod step;
 
 pub use ceiling_step::{
-    ceiling_step_regions_from_roofs, CeilingStepRegion, LinePositionOption, LinePositionPrompt,
-    LineSide,
+    ceiling_line_coords, ceiling_step_regions_from_roofs, region_line_coords, CeilingStepRegion,
+    LinePositionOption, LinePositionPrompt, LineSide,
 };
 pub use debug::debug_dump_storey;
 /// Derive full per-wall exposure coverage — the shell's `commit_to_ber` uses it.

@@ -19,6 +19,7 @@ use crate::position::reference_walls;
 use crate::step::ring_area2;
 use crate::StoreyDoc;
 use datatypes::ber::ber_struct::Ber;
+use datatypes::ber::structural::{CeilingRegions, FloorRegions};
 use domain::points::{Point2f32, Point2f64};
 use manip_2d_plan::{ParameterAxis, VertexId};
 
@@ -49,6 +50,75 @@ fn wall_bounds_region_on_axis(coord: f32, ring: &[Point2f64], axis: ParameterAxi
     }
     let c = coord as f64;
     (c - lo).abs() < REGION_EXTENT_TOL as f64 || (c - hi).abs() < REGION_EXTENT_TOL as f64
+}
+
+/// Edge-coordinate tolerance for [`region_line_coords`] — matches
+/// `LINE_CROSS_TOL` (an axis-aligned edge / a dedupe hit).
+const LINE_COORD_TOL: f64 = 1e-3;
+
+/// Collect, into `out`, the CONSTANT coordinate on `axis` of every edge of the
+/// plan `ring` (point pairs, world metres) PARALLEL to a step line on `axis` —
+/// an axis-aligned edge (a vertical edge → its `x` for axis X; a horizontal edge
+/// → its `y` for axis Y). The ring is treated as CLOSED (the last→first edge is
+/// included, so an unclosed ring still contributes every edge); a geo ring whose
+/// last point repeats the first yields a degenerate wrap edge that the run test
+/// skips. Deduped within tolerance.
+fn push_axis_parallel_coords(ring: &[(f64, f64)], axis: ParameterAxis, out: &mut Vec<f32>) {
+    let n = ring.len();
+    if n < 2 {
+        return;
+    }
+    for i in 0..n {
+        let (a, b) = (ring[i], ring[(i + 1) % n]);
+        let coord = match axis {
+            ParameterAxis::X => ((a.0 - b.0).abs() < LINE_COORD_TOL
+                && (a.1 - b.1).abs() > LINE_COORD_TOL)
+                .then_some(a.0),
+            ParameterAxis::Y => ((a.1 - b.1).abs() < LINE_COORD_TOL
+                && (a.0 - b.0).abs() > LINE_COORD_TOL)
+                .then_some(a.1),
+        };
+        if let Some(c) = coord {
+            let c = c as f32;
+            if !out.iter().any(|rc| (rc - c).abs() < LINE_COORD_TOL as f32) {
+                out.push(c);
+            }
+        }
+    }
+}
+
+/// Reference coordinates (on `axis`) of every FLOOR-region edge parallel to a
+/// step line on `axis` ([`push_axis_parallel_coords`]). Internal step boundaries
+/// AND the region outline alike, deduped. The shell gathers these from THIS
+/// storey's resolved floors and the storey BELOW's, then feeds them to
+/// [`StoreyDoc::snap_ceiling_step_line`] so a drawn step line also snaps to
+/// existing region lines — not only the current outline walls.
+pub fn region_line_coords(regions: &FloorRegions, axis: ParameterAxis) -> Vec<f32> {
+    let mut out: Vec<f32> = Vec::new();
+    for region in &regions.regions {
+        let ring: Vec<(f64, f64)> = region
+            .polygon
+            .exterior()
+            .coords()
+            .map(|c| (c.x, c.y))
+            .collect();
+        push_axis_parallel_coords(&ring, axis, &mut out);
+    }
+    out
+}
+
+/// Reference coordinates (on `axis`) of every CEILING-region edge parallel to a
+/// step line on `axis` — the analogue of [`region_line_coords`] for the roof
+/// (ceiling-step) regions, so a drawn step line also snaps to existing ceiling
+/// steps in THIS storey and the one below. Ceiling rings are 3D and may be
+/// unclosed; only the plan `(x, y)` matters and the wrap edge is included.
+pub fn ceiling_line_coords(regions: &CeilingRegions, axis: ParameterAxis) -> Vec<f32> {
+    let mut out: Vec<f32> = Vec::new();
+    for region in &regions.regions {
+        let ring: Vec<(f64, f64)> = region.polygon.exterior.iter().map(|v| (v.x, v.y)).collect();
+        push_axis_parallel_coords(&ring, axis, &mut out);
+    }
+    out
 }
 
 /// Which side of the step line the delta applies to: coordinates on the
@@ -287,15 +357,48 @@ impl StoreyDoc {
     /// [`validate_ceiling_step_line`](Self::validate_ceiling_step_line) would
     /// reject the coordinate anyway.
     ///
-    /// Returns `(snapped coordinate, outline wall vid)`, nearest wall wins;
-    /// `None` when no qualifying wall is within tolerance. Pure — the shell
-    /// decides when to call and remembers the drawn coordinate for un-snapping.
+    /// Candidates are the non-extreme parallel OUTLINE walls (each carrying its
+    /// vertex id) PLUS `extra_coords` — additional reference coordinates on
+    /// `axis` the shell gathered from existing region lines (this storey's floor
+    /// boundaries and the storey below's; see [`region_line_coords`]). Nearest
+    /// within [`CEILING_LINE_SNAP_TOL_M`] wins.
+    ///
+    /// Returns `(snapped coordinate, Some(outline wall vid))` when the winner is
+    /// an outline wall, or `(coordinate, None)` when it is one of the extra
+    /// reference lines (no outline vertex). `None` when nothing is within
+    /// tolerance. Pure — the shell decides when to call, supplies the extra
+    /// references, and remembers the drawn coordinate for un-snapping.
     pub fn snap_ceiling_step_line(
         &self,
         axis: ParameterAxis,
         coord_m: f32,
-    ) -> Option<(f32, VertexId)> {
-        self.snap_line_to_reference_wall(axis, coord_m, false)
+        extra_coords: &[f32],
+    ) -> Option<(f32, Option<VertexId>)> {
+        let ((min_x, min_y), (max_x, max_y)) = self.outline.floor_plan.bounding_box()?;
+        let (lo, hi) = match axis {
+            ParameterAxis::X => (min_x, max_x),
+            ParameterAxis::Y => (min_y, max_y),
+        };
+        // A line snapped onto the outline bbox EXTREME steps nothing, and
+        // `validate_ceiling_step_line` would reject it — exclude those, whether
+        // they come from an outline wall or an extra reference line.
+        let not_extreme =
+            |c: f32| (c - lo).abs() > LINE_CROSS_TOL && (c - hi).abs() > LINE_CROSS_TOL;
+        let outline = reference_walls(&self.outline.floor_plan, axis)
+            .into_iter()
+            .filter(|(_, c)| not_extreme(*c))
+            .map(|(vid, c)| (c, Some(vid)));
+        let extras = extra_coords
+            .iter()
+            .copied()
+            .filter(|c| not_extreme(*c))
+            .map(|c| (c, None));
+        outline
+            .chain(extras)
+            .map(|(c, vid)| (c, vid, (c - coord_m).abs()))
+            .filter(|(_, _, d)| *d <= CEILING_LINE_SNAP_TOL_M)
+            .min_by(|a, b| a.2.total_cmp(&b.2))
+            .map(|(c, vid, _)| (c, vid))
     }
 
     /// Snap a ridge EXTENT END coordinate (on the ALONG axis `axis.other()`
@@ -718,20 +821,26 @@ mod tests {
         // x = 6.9 is within 0.2 of BOTH x = 7 (0.1 away) and x = 6.75
         // (0.15 away) — the nearer wall, x = 7, wins.
         let (coord, _) = doc
-            .snap_ceiling_step_line(ParameterAxis::X, 6.9)
+            .snap_ceiling_step_line(ParameterAxis::X, 6.9, &[])
             .expect("within tolerance");
         assert!(
             (coord - 7.0).abs() < 1e-6,
             "nearest wall wins (got {coord})"
         );
         // x = 6.82 flips the nearest to 6.75.
-        let (coord, _) = doc.snap_ceiling_step_line(ParameterAxis::X, 6.82).unwrap();
+        let (coord, _) = doc
+            .snap_ceiling_step_line(ParameterAxis::X, 6.82, &[])
+            .unwrap();
         assert!((coord - 6.75).abs() < 1e-6);
         // The Y axis snaps to its non-extreme walls the same way.
-        let (coord, _) = doc.snap_ceiling_step_line(ParameterAxis::Y, 2.1).unwrap();
+        let (coord, _) = doc
+            .snap_ceiling_step_line(ParameterAxis::Y, 2.1, &[])
+            .unwrap();
         assert!((coord - 2.0).abs() < 1e-6);
         // Beyond tolerance: nearest non-extreme wall is 1.75 m away.
-        assert!(doc.snap_ceiling_step_line(ParameterAxis::X, 5.0).is_none());
+        assert!(doc
+            .snap_ceiling_step_line(ParameterAxis::X, 5.0, &[])
+            .is_none());
     }
 
     /// Walls at the outline bbox extremes never snap (a line on the boundary
@@ -741,18 +850,108 @@ mod tests {
         let doc = storey_staircase();
         // Near the x = 0 / x = 10 extremes — inside the footprint, within
         // tolerance of the boundary walls, but those never qualify.
-        assert!(doc.snap_ceiling_step_line(ParameterAxis::X, 0.1).is_none());
-        assert!(doc.snap_ceiling_step_line(ParameterAxis::X, 9.9).is_none());
+        assert!(doc
+            .snap_ceiling_step_line(ParameterAxis::X, 0.1, &[])
+            .is_none());
+        assert!(doc
+            .snap_ceiling_step_line(ParameterAxis::X, 9.9, &[])
+            .is_none());
         // A plain rectangle has ONLY extreme walls: nothing ever snaps.
         let rect = storey_10x6();
         assert!(rect
-            .snap_ceiling_step_line(ParameterAxis::X, 0.15)
+            .snap_ceiling_step_line(ParameterAxis::X, 0.15, &[])
             .is_none());
-        assert!(rect.snap_ceiling_step_line(ParameterAxis::Y, 5.9).is_none());
+        assert!(rect
+            .snap_ceiling_step_line(ParameterAxis::Y, 5.9, &[])
+            .is_none());
         // No outline at all → nothing to snap to.
         assert!(StoreyDoc::default()
-            .snap_ceiling_step_line(ParameterAxis::X, 1.0)
+            .snap_ceiling_step_line(ParameterAxis::X, 1.0, &[])
             .is_none());
+    }
+
+    /// EXTRA reference coordinates (existing region lines this storey / the one
+    /// below) snap too — even on a plain rectangle whose only OUTLINE walls are
+    /// the excluded extremes. The winner carries NO outline vid, and an extra on
+    /// the bbox extreme is still excluded (a line there steps nothing).
+    #[test]
+    fn snap_uses_extra_reference_lines_with_no_outline_vid() {
+        let rect = storey_10x6(); // only extreme outline walls
+                                  // Drawn x = 4.1; an extra reference line at x = 4.0 is within tolerance.
+        let (coord, vid) = rect
+            .snap_ceiling_step_line(ParameterAxis::X, 4.1, &[4.0])
+            .expect("snaps to the extra reference line");
+        assert!((coord - 4.0).abs() < 1e-6);
+        assert!(vid.is_none(), "an extra line carries no outline vertex");
+        // An extra coord ON the bbox extreme (x = 0) is excluded.
+        assert!(rect
+            .snap_ceiling_step_line(ParameterAxis::X, 0.1, &[0.0])
+            .is_none());
+        // Beyond tolerance: no snap.
+        assert!(rect
+            .snap_ceiling_step_line(ParameterAxis::X, 4.5, &[4.0])
+            .is_none());
+    }
+
+    /// `region_line_coords` returns the CONSTANT coordinate of each axis-aligned
+    /// region edge parallel to a step line on the axis: a vertical edge's `x`
+    /// for axis X, a horizontal edge's `y` for axis Y — deduped.
+    #[test]
+    fn region_line_coords_picks_axis_parallel_edges() {
+        use datatypes::ber::common::ItemId;
+        // Two side-by-side rects: x∈[0,4] and x∈[4,7], both y∈[0,3]. The shared
+        // internal boundary is x = 4.
+        let cid = ItemId::default();
+        let mut regions = FloorRegions::new(
+            vec![
+                Point2f64::new(0.0, 0.0),
+                Point2f64::new(4.0, 0.0),
+                Point2f64::new(4.0, 3.0),
+                Point2f64::new(0.0, 3.0),
+            ],
+            cid,
+        );
+        regions.regions.extend(
+            FloorRegions::new(
+                vec![
+                    Point2f64::new(4.0, 0.0),
+                    Point2f64::new(7.0, 0.0),
+                    Point2f64::new(7.0, 3.0),
+                    Point2f64::new(4.0, 3.0),
+                ],
+                cid,
+            )
+            .regions,
+        );
+        let mut xs = region_line_coords(&regions, ParameterAxis::X);
+        xs.sort_by(f32::total_cmp);
+        assert_eq!(xs, vec![0.0, 4.0, 7.0], "vertical edges' x (deduped)");
+        let mut ys = region_line_coords(&regions, ParameterAxis::Y);
+        ys.sort_by(f32::total_cmp);
+        assert_eq!(ys, vec![0.0, 3.0], "horizontal edges' y (deduped)");
+    }
+
+    /// `ceiling_line_coords` works the same over ceiling regions, whose rings
+    /// are 3D and UNCLOSED — the wrap (last→first) edge is still counted.
+    #[test]
+    fn ceiling_line_coords_counts_the_wrap_edge_of_unclosed_rings() {
+        use datatypes::ber::common::ItemId;
+        let roofs = CeilingRegions::default_for_footprint(
+            vec![vec![
+                Point2f64::new(0.0, 0.0),
+                Point2f64::new(4.0, 0.0),
+                Point2f64::new(4.0, 3.0),
+                Point2f64::new(0.0, 3.0),
+            ]],
+            2.4,
+            ItemId::default(),
+        );
+        let mut xs = ceiling_line_coords(&roofs, ParameterAxis::X);
+        xs.sort_by(f32::total_cmp);
+        assert_eq!(xs, vec![0.0, 4.0], "both vertical edges incl. the wrap");
+        let mut ys = ceiling_line_coords(&roofs, ParameterAxis::Y);
+        ys.sort_by(f32::total_cmp);
+        assert_eq!(ys, vec![0.0, 3.0]);
     }
 
     /// `snap_roof_ridge_end`: the ceiling-line snap WITH the bbox extremes —
@@ -763,7 +962,9 @@ mod tests {
         let doc = storey_staircase();
         // Near the x = 0 extreme: the step-line snap refuses, the ridge-end
         // snap lands ON the boundary.
-        assert!(doc.snap_ceiling_step_line(ParameterAxis::X, 0.1).is_none());
+        assert!(doc
+            .snap_ceiling_step_line(ParameterAxis::X, 0.1, &[])
+            .is_none());
         let (coord, _) = doc
             .snap_roof_ridge_end(ParameterAxis::X, 0.1)
             .expect("extreme wall snaps for a ridge end");
@@ -781,7 +982,9 @@ mod tests {
         let rect = storey_10x6();
         let (coord, _) = rect.snap_roof_ridge_end(ParameterAxis::Y, 5.9).unwrap();
         assert!((coord - 6.0).abs() < 1e-6);
-        assert!(rect.snap_ceiling_step_line(ParameterAxis::Y, 5.9).is_none());
+        assert!(rect
+            .snap_ceiling_step_line(ParameterAxis::Y, 5.9, &[])
+            .is_none());
         // No outline at all → nothing to snap to.
         assert!(StoreyDoc::default()
             .snap_roof_ridge_end(ParameterAxis::X, 1.0)
