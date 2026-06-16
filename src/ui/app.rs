@@ -161,6 +161,24 @@ pub struct SketchState {
     /// label visibility toggle (defaults ON), and the Heights field's
     /// ceiling-height input buffer.
     pub categories: categories::CategoryUiState,
+    // ── Windows/doors ──────────────────────────────────────────────────────
+    /// Size + glazing inputs for the in-flight opening placement.
+    pub opening_width_input: String,
+    pub opening_height_input: String,
+    pub opening_sill_input: String,
+    pub opening_glazing: datatypes::ber::fenestration::Glazing,
+    pub opening_frame: datatypes::ber::fenestration::Frame,
+    pub opening_year_input: String,
+    /// Door+sidelights composer inputs (sidelight widths + transom height).
+    pub sidelight_left_input: String,
+    pub sidelight_right_input: String,
+    pub transom_input: String,
+    /// Last error from an opening submit (wall too short, etc.).
+    pub opening_error: Option<String>,
+    /// One-shot clear-on-success for the opening size inputs: the event closure
+    /// can't clear them while the view borrows them, so the next frame's
+    /// pre-render housekeeping does it.
+    pub opening_inputs_clear: bool,
 }
 
 pub struct SplashState {
@@ -707,6 +725,18 @@ impl eframe::App for BerApp {
                                 self.sketch_state.categories.floor_thickness_input.clear();
                                 self.sketch_state.floor_thickness_input_clear = false;
                             }
+                            // Deferred clear for the opening size inputs (raised
+                            // by a successful opening submit last frame).
+                            if self.sketch_state.opening_inputs_clear {
+                                self.sketch_state.opening_width_input.clear();
+                                self.sketch_state.opening_height_input.clear();
+                                self.sketch_state.opening_sill_input.clear();
+                                self.sketch_state.opening_year_input.clear();
+                                self.sketch_state.sidelight_left_input.clear();
+                                self.sketch_state.sidelight_right_input.clear();
+                                self.sketch_state.transom_input.clear();
+                                self.sketch_state.opening_inputs_clear = false;
+                            }
 
                             let current_storey_idx =
                                 self.app_controller.borrow().current_storey_idx();
@@ -719,6 +749,18 @@ impl eframe::App for BerApp {
                             let new_storey_error = self.sketch_state.new_storey_error.clone();
                             let floor_thickness_error =
                                 self.sketch_state.floor_thickness_error.clone();
+                            // Windows/doors view data (its own borrow — kept out
+                            // of the big tuple above).
+                            let (openings_mode, openings_tool, opening_prompt, elevation_view) = {
+                                let c = self.app_controller.borrow();
+                                (
+                                    c.openings_mode(),
+                                    c.openings_tool(),
+                                    c.pending_opening_prompt(),
+                                    c.elevation_view(),
+                                )
+                            };
+                            let opening_error = self.sketch_state.opening_error.clone();
 
                             let controller = self.app_controller.clone();
                             let splice_debug = self.app_controller.borrow().splice_debug_overlay();
@@ -855,6 +897,20 @@ impl eframe::App for BerApp {
                                 snap_tags: &snap_tags,
                                 cat_state: &mut self.sketch_state.categories,
                                 autosave_status,
+                                openings_mode,
+                                openings_tool,
+                                opening_prompt,
+                                opening_width_input: &mut self.sketch_state.opening_width_input,
+                                opening_height_input: &mut self.sketch_state.opening_height_input,
+                                opening_sill_input: &mut self.sketch_state.opening_sill_input,
+                                opening_glazing: &mut self.sketch_state.opening_glazing,
+                                opening_frame: &mut self.sketch_state.opening_frame,
+                                opening_year_input: &mut self.sketch_state.opening_year_input,
+                                sidelight_left_input: &mut self.sketch_state.sidelight_left_input,
+                                sidelight_right_input: &mut self.sketch_state.sidelight_right_input,
+                                transom_input: &mut self.sketch_state.transom_input,
+                                opening_error: opening_error.as_deref(),
+                                elevation_view,
                             };
                             let touch_nav = &mut self.sketch_state.touch_nav;
                             SketchPage::render(ui, view, touch_nav, |event| match event {
@@ -1305,6 +1361,97 @@ impl eframe::App for BerApp {
                                     }
                                     SketchEvent::SetAllRemainingExposed => {
                                         controller.borrow_mut().set_all_remaining_exposed();
+                                    }
+                                    SketchEvent::SetOpeningsMode(on) => {
+                                        controller.borrow_mut().set_openings_mode(on);
+                                    }
+                                    SketchEvent::SetOpeningTool(tool) => {
+                                        controller.borrow_mut().set_openings_tool(tool);
+                                    }
+                                    SketchEvent::OpeningsPointerDown {
+                                        world_x,
+                                        world_y,
+                                        tol,
+                                    } => {
+                                        controller
+                                            .borrow_mut()
+                                            .openings_pointer_down(world_x, world_y, tol);
+                                    }
+                                    SketchEvent::SubmitWindow {
+                                        width_m,
+                                        height_m,
+                                        sill_m,
+                                        glazing,
+                                        frame,
+                                        year,
+                                    } => {
+                                        let r = controller.borrow_mut().place_pending_window(
+                                            width_m, height_m, sill_m, glazing, frame, year,
+                                        );
+                                        match r {
+                                            Ok(()) => {
+                                                self.sketch_state.opening_error = None;
+                                                self.sketch_state.opening_inputs_clear = true;
+                                            }
+                                            Err(e) => self.sketch_state.opening_error = Some(e),
+                                        }
+                                    }
+                                    SketchEvent::SubmitDoor { width_m, height_m } => {
+                                        let r = controller
+                                            .borrow_mut()
+                                            .place_pending_door(width_m, height_m);
+                                        match r {
+                                            Ok(()) => {
+                                                self.sketch_state.opening_error = None;
+                                                self.sketch_state.opening_inputs_clear = true;
+                                            }
+                                            Err(e) => self.sketch_state.opening_error = Some(e),
+                                        }
+                                    }
+                                    SketchEvent::SubmitDoorSidelights {
+                                        door_w,
+                                        door_h,
+                                        left,
+                                        right,
+                                        transom,
+                                        glazing,
+                                        frame,
+                                        year,
+                                    } => {
+                                        let r =
+                                            controller.borrow_mut().place_pending_door_sidelights(
+                                                door_w, door_h, left, right, transom, glazing,
+                                                frame, year,
+                                            );
+                                        match r {
+                                            Ok(()) => {
+                                                self.sketch_state.opening_error = None;
+                                                self.sketch_state.opening_inputs_clear = true;
+                                            }
+                                            Err(e) => self.sketch_state.opening_error = Some(e),
+                                        }
+                                    }
+                                    SketchEvent::CancelPendingOpening => {
+                                        controller.borrow_mut().cancel_pending_opening();
+                                    }
+                                    SketchEvent::ElevationPointerDown { along_m, height_m } => {
+                                        controller
+                                            .borrow_mut()
+                                            .elevation_pointer_down(along_m, height_m);
+                                    }
+                                    SketchEvent::ElevationPointerDrag { along_m, height_m } => {
+                                        controller
+                                            .borrow_mut()
+                                            .elevation_pointer_drag(along_m, height_m);
+                                    }
+                                    SketchEvent::ElevationPointerUp => {
+                                        controller.borrow_mut().elevation_pointer_up();
+                                    }
+                                    SketchEvent::DeleteSelectedOpening => {
+                                        controller.borrow_mut().delete_selected_opening();
+                                    }
+                                    SketchEvent::CloseElevation => {
+                                        controller.borrow_mut().close_elevation();
                                     }
                                     SketchEvent::SetDefaultCeilingHeight(value) => {
                                         match controller

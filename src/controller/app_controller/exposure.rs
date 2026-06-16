@@ -90,6 +90,7 @@ impl AppController {
         self.exposure_drag = None;
         self.selected_riser = None;
         if on {
+            self.exit_openings_mode();
             // Flush the live buffer to its slot first: `activate_shape(Outline)`
             // early-returns without syncing when the outline is already active,
             // which would leave `self.document.outline.floor_plan` stale (the renderer

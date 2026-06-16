@@ -320,37 +320,52 @@ fn draw_window(
     if window.vertices.len() < 4 {
         return;
     }
-    // Project the quad's XY footprint (works whether it's a wall window or a
-    // roof window — for wall windows the footprint degenerates to a thin line,
-    // for roof windows it's a real rectangle).
-    let pts: Vec<egui::Pos2> = window
-        .vertices
-        .iter()
-        .map(|(x, y, _z)| t.apply(*x as f64, *y as f64))
-        .collect();
-    let fill = color_for(DisplayMode::Walls, display_mode, style::WINDOW_FILL);
-    painter.add(egui::Shape::convex_polygon(
-        pts,
-        fill,
-        egui::Stroke::new(1.0, style::WINDOW_FILL),
-    ));
+    let color = color_for(DisplayMode::Walls, display_mode, style::WINDOW_FILL);
+    draw_opening_footprint(painter, t, &window.vertices, color);
 }
 
 fn draw_door(painter: &egui::Painter, t: &Transform2d, door: &Door, display_mode: DisplayMode) {
     if door.vertices.len() < 4 {
         return;
     }
-    let pts: Vec<egui::Pos2> = door
-        .vertices
+    let color = color_for(DisplayMode::Walls, display_mode, style::DOOR_FILL);
+    draw_opening_footprint(painter, t, &door.vertices, color);
+}
+
+/// Draw an opening's XY footprint. A ROOF opening projects to a real rectangle
+/// (filled); a WALL opening lies in the vertical wall plane, so its footprint
+/// collapses to a line along the wall — drawn as a THICK coloured span so it
+/// reads as a marked opening on the plan (a degenerate polygon would be
+/// invisible under the wall edge).
+fn draw_opening_footprint(
+    painter: &egui::Painter,
+    t: &Transform2d,
+    vertices: &[(f32, f32, f32)],
+    color: egui::Color32,
+) {
+    let pts: Vec<egui::Pos2> = vertices
         .iter()
         .map(|(x, y, _z)| t.apply(*x as f64, *y as f64))
         .collect();
-    let fill = color_for(DisplayMode::Walls, display_mode, style::DOOR_FILL);
-    painter.add(egui::Shape::convex_polygon(
-        pts,
-        fill,
-        egui::Stroke::new(1.0, style::DOOR_FILL),
-    ));
+    // Screen-space area: a real rectangle (roof window) has positive area; a
+    // wall opening's collinear footprint is ~0.
+    let n = pts.len();
+    let mut area2 = 0.0_f32;
+    for i in 0..n {
+        let a = pts[i];
+        let b = pts[(i + 1) % n];
+        area2 += a.x * b.y - b.x * a.y;
+    }
+    if area2.abs() * 0.5 > 4.0 {
+        painter.add(egui::Shape::convex_polygon(
+            pts,
+            color,
+            egui::Stroke::new(1.0, color),
+        ));
+    } else {
+        // Wall opening: a thick span between the base endpoints (exterior[0..1]).
+        painter.line_segment([pts[0], pts[1]], egui::Stroke::new(5.0, color));
+    }
 }
 
 fn draw_dimensions(

@@ -2133,6 +2133,20 @@ impl Polygon3D {
         Some((unit_normal, d / norm_length))
     }
 
+    /// The z of this polygon's plane at plan point `(x, y)` — for lifting a
+    /// roof window's plan rectangle onto a (possibly sloped) ceiling region. A
+    /// flat region returns its constant z. `None` if degenerate or the plane is
+    /// vertical (zero z-normal).
+    pub fn plane_z(&self, x: f64, y: f64) -> Option<f64> {
+        let (n, _) = self.get_normal_and_distance_to_origin()?;
+        if n.z.abs() < 1e-9 {
+            return None;
+        }
+        let p0 = self.exterior[0];
+        // n · (P − p0) = 0  →  z = p0.z − (n.x·(x−p0.x) + n.y·(y−p0.y)) / n.z
+        Some(p0.z - (n.x * (x - p0.x) + n.y * (y - p0.y)) / n.z)
+    }
+
     /// Split this planar polygon in two along `line` (which must lie in its
     /// plane).
     ///
@@ -2386,6 +2400,65 @@ impl WallRegion {
     pub fn base_midpoint(&self) -> Option<Point2f64> {
         let e = &self.polygon.exterior;
         (e.len() >= 2).then(|| Point2f64::new((e[0].x + e[1].x) * 0.5, (e[0].y + e[1].y) * 0.5))
+    }
+
+    /// World→wall-local frame for the base edge: `(origin = exterior[0] in plan,
+    /// u_hat = unit vector along the base toward exterior[1], length, base_z)`.
+    /// `None` for a degenerate wall (base edge under 1e-9 m). The opening model
+    /// parameterises a wall placement as a centre distance along `u_hat` from
+    /// `origin` plus a sill above `base_z`.
+    pub fn base_frame(&self) -> Option<(Point2f64, (f64, f64), f64, f64)> {
+        let e = &self.polygon.exterior;
+        if e.len() < 2 {
+            return None;
+        }
+        let (a, b) = (e[0], e[1]);
+        let (dx, dy) = (b.x - a.x, b.y - a.y);
+        let len = (dx * dx + dy * dy).sqrt();
+        if len < 1e-9 {
+            return None;
+        }
+        Some((Point2f64::new(a.x, a.y), (dx / len, dy / len), len, a.z))
+    }
+
+    /// The top-profile z directly above the base point at along-distance `d`
+    /// (0..length), interpolating the top polyline (`exterior[2..]`, which runs
+    /// b→a per the vertex-order contract). At a vertical jump (a ceiling-step
+    /// crossing — two top vertices at one plan point) the LOWER z is returned,
+    /// so an opening clamped under this can never poke through the ceiling.
+    /// Falls back to the lowest top vertex when `d` is out of range, else
+    /// `base_z`.
+    pub fn top_z_at_along(&self, d: f64) -> f64 {
+        let e = &self.polygon.exterior;
+        let Some((origin, (ux, uy), _len, base_z)) = self.base_frame() else {
+            return e.first().map(|v| v.z).unwrap_or(0.0);
+        };
+        if e.len() < 3 {
+            return base_z;
+        }
+        let tops: Vec<(f64, f64)> = e[2..]
+            .iter()
+            .map(|v| ((v.x - origin.x) * ux + (v.y - origin.y) * uy, v.z))
+            .collect();
+        let mut best: Option<f64> = None;
+        for w in tops.windows(2) {
+            let ((a0, z0), (a1, z1)) = (w[0], w[1]);
+            let (lo, hi) = (a0.min(a1), a0.max(a1));
+            if d >= lo - 1e-9 && d <= hi + 1e-9 {
+                let z = if (a1 - a0).abs() < 1e-9 {
+                    z0.min(z1) // vertical jump → lower edge
+                } else {
+                    z0 + (z1 - z0) * ((d - a0) / (a1 - a0))
+                };
+                best = Some(best.map_or(z, |b: f64| b.min(z)));
+            }
+        }
+        best.or_else(|| {
+            tops.iter()
+                .map(|&(_, z)| z)
+                .fold(None, |m: Option<f64>, z| Some(m.map_or(z, |b| b.min(z))))
+        })
+        .unwrap_or(base_z)
     }
 }
 

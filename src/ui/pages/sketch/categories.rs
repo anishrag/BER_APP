@@ -41,6 +41,9 @@ pub enum Tool {
     CeilingSteps,
     /// Roof-point (apex) tagging mode toggle (same gate as the ceiling steps).
     RoofPoints,
+    /// Windows/doors placement mode toggle (place openings from the plan, then
+    /// reposition them in a per-wall elevation).
+    Openings,
     Undo,
     Redo,
     /// Reset the view to pure auto-fit.
@@ -97,6 +100,10 @@ pub const CATEGORIES: &[Category] = &[
             Tool::CeilingSteps,
             Tool::RoofPoints,
         ],
+    },
+    Category {
+        name: "Openings",
+        tools: &[Tool::Openings],
     },
     Category {
         name: "Drawing",
@@ -187,6 +194,7 @@ pub struct ToolFlags {
     pub ceiling_step_available: bool,
     pub roof_point_mode: bool,
     pub roof_point_available: bool,
+    pub openings_mode: bool,
     /// The current scope's default ceiling height, when set — the Heights
     /// field shows it ("2.40 m") next to the entry box.
     pub default_ceiling_height: Option<f64>,
@@ -223,6 +231,7 @@ impl ToolFlags {
             ceiling_step_available: view.ceiling_step_available,
             roof_point_mode: view.roof_point_mode,
             roof_point_available: view.roof_point_available,
+            openings_mode: view.openings_mode,
             default_ceiling_height: view.default_ceiling_height,
             ceiling_height_error: view.ceiling_height_error.map(str::to_owned),
             upper_storey: matches!(view.current_storey_idx, Some(i) if i >= 1),
@@ -391,6 +400,25 @@ fn tool_ui<F: FnMut(UiEvent)>(
             {
                 on_event(UiEvent::Sketch(SketchEvent::SetExposureMode(
                     !flags.exposure_mode,
+                )));
+            }
+        }
+        Tool::Openings => {
+            let enabled = !flags.read_only && flags.has_floor_plan;
+            if ui
+                .add_enabled(
+                    enabled,
+                    egui::Button::selectable(flags.openings_mode, "🪟 Windows/Doors"),
+                )
+                .hint(
+                    "Place windows, roof windows and doors: pick a type, tap near \
+                     a wall to drop it, then enter its size. Tap a wall in Edit to \
+                     reposition openings on its elevation.",
+                )
+                .clicked()
+            {
+                on_event(UiEvent::Sketch(SketchEvent::SetOpeningsMode(
+                    !flags.openings_mode,
                 )));
             }
         }

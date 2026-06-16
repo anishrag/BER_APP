@@ -9,11 +9,12 @@
 use super::{SketchEvent, SketchView};
 use crate::controller::app_controller::{
     DimensionPromptUiData, EditDragPromptUiData, ExposureSelection, NewStoreyPromptUiData,
-    PositionPromptUiData, VertexDropPromptUiData,
+    OpeningPromptUiData, OpeningToolKind, PositionPromptUiData, VertexDropPromptUiData,
 };
 use crate::ui::pages::events::UiEvent;
 use crate::ui::widgets::{metre_input, HintExt};
 use datatypes::ber::common::ConstructionPhase;
+use datatypes::ber::fenestration::{Frame, Glazing};
 use datatypes::ber::structural::WallExposure;
 
 /// Whether the dock has anything to show this frame. When false the bottom
@@ -29,6 +30,7 @@ pub(super) fn has_content(view: &SketchView<'_>) -> bool {
         || view.vertex_drop_prompt.is_some()
         || view.review.is_some()
         || view.exposure_mode
+        || view.openings_mode
         || (view.has_floor_plan
             && ((!view.phase_choices.is_empty() && (view.phase_mode || view.phase_pick_pending))
                 || view.step_mode
@@ -177,8 +179,180 @@ pub(super) fn render<F: FnMut(UiEvent)>(
                     on_event,
                 );
             }
+            if view.openings_mode {
+                openings_toolbar(
+                    ui,
+                    view.openings_tool,
+                    view.opening_prompt.as_ref(),
+                    view.elevation_view.is_some(),
+                    view.opening_width_input,
+                    view.opening_height_input,
+                    view.opening_sill_input,
+                    view.opening_glazing,
+                    view.opening_frame,
+                    view.opening_year_input,
+                    view.sidelight_left_input,
+                    view.sidelight_right_input,
+                    view.transom_input,
+                    view.opening_error,
+                    on_event,
+                );
+            }
         }
     });
+}
+
+/// The windows/doors toolbar: a type picker, then (once a wall/roof is tapped)
+/// the size + glazing entry for the chosen type, or the elevation Done/Delete
+/// controls when an elevation is open.
+#[allow(clippy::too_many_arguments)]
+fn openings_toolbar<F: FnMut(UiEvent)>(
+    ui: &mut egui::Ui,
+    tool: OpeningToolKind,
+    prompt: Option<&OpeningPromptUiData>,
+    has_elevation: bool,
+    width_input: &mut String,
+    height_input: &mut String,
+    sill_input: &mut String,
+    glazing: &mut Glazing,
+    frame: &mut Frame,
+    year_input: &mut String,
+    left_input: &mut String,
+    right_input: &mut String,
+    transom_input: &mut String,
+    error: Option<&str>,
+    on_event: &mut F,
+) {
+    use OpeningToolKind::*;
+    ui.separator();
+    // Type picker.
+    let mut pick = |ui: &mut egui::Ui, k: OpeningToolKind, label: &str| {
+        if ui.add(egui::Button::selectable(tool == k, label)).clicked() {
+            on_event(UiEvent::Sketch(SketchEvent::SetOpeningTool(k)));
+        }
+    };
+    pick(ui, Window, "🪟 Window");
+    pick(ui, RoofWindow, "🔆 Roof window");
+    pick(ui, Door, "🚪 Door");
+    pick(ui, DoorSidelights, "🚪+ Sidelights");
+    pick(ui, Edit, "✋ Edit on wall");
+
+    if has_elevation {
+        ui.separator();
+        if ui.button("🗑 Delete selected").clicked() {
+            on_event(UiEvent::Sketch(SketchEvent::DeleteSelectedOpening));
+        }
+        if ui.button("Done").clicked() {
+            on_event(UiEvent::Sketch(SketchEvent::CloseElevation));
+        }
+        return;
+    }
+
+    let Some(prompt) = prompt else {
+        ui.label(
+            egui::RichText::new("  tap near a wall (or a roof for a roof window) to place")
+                .color(egui::Color32::from_rgb(170, 170, 170)),
+        );
+        return;
+    };
+    ui.separator();
+    // Size entry (door+sidelights labels its width/height as the DOOR's).
+    let (w_label, h_label) = match prompt.tool {
+        DoorSidelights => ("door W", "door H"),
+        _ => ("W", "H"),
+    };
+    ui.label(w_label);
+    metre_input(ui, width_input, 46.0, "=?");
+    ui.label(h_label);
+    metre_input(ui, height_input, 46.0, "=?");
+    if matches!(prompt.tool, Window | RoofWindow) && !prompt.on_roof {
+        ui.label("sill");
+        metre_input(ui, sill_input, 46.0, "1.0");
+    }
+    // Door+sidelights: optional flanking + top lights.
+    if matches!(prompt.tool, DoorSidelights) {
+        ui.label("L light");
+        metre_input(ui, left_input, 40.0, "—");
+        ui.label("R light");
+        metre_input(ui, right_input, 40.0, "—");
+        ui.label("transom");
+        metre_input(ui, transom_input, 40.0, "—");
+    }
+    // Glazing / frame / year for any window glass.
+    if matches!(prompt.tool, Window | RoofWindow | DoorSidelights) {
+        egui::ComboBox::from_id_salt("opening_glazing")
+            .selected_text(glazing_label(glazing))
+            .show_ui(ui, |ui| {
+                ui.selectable_value(glazing, Glazing::Single, "Single");
+                ui.selectable_value(glazing, Glazing::Double, "Double");
+                ui.selectable_value(glazing, Glazing::Triple, "Triple");
+            });
+        egui::ComboBox::from_id_salt("opening_frame")
+            .selected_text(frame_label(frame))
+            .show_ui(ui, |ui| {
+                ui.selectable_value(frame, Frame::WoodUPVC, "Wood/uPVC");
+                ui.selectable_value(frame, Frame::Metal, "Metal");
+            });
+        ui.label("year");
+        metre_input(ui, year_input, 50.0, "—");
+    }
+    if ui.button("Place").clicked() {
+        let w = parse_dimension_expression(width_input);
+        let h = parse_dimension_expression(height_input);
+        if let (Some(width_m), Some(height_m)) = (w, h) {
+            let year = year_input.trim().parse::<u32>().unwrap_or(0);
+            let event = match prompt.tool {
+                Window | RoofWindow => {
+                    let sill_m = if prompt.on_roof {
+                        0.0
+                    } else {
+                        parse_dimension_expression(sill_input).unwrap_or(1.0)
+                    };
+                    SketchEvent::SubmitWindow {
+                        width_m,
+                        height_m,
+                        sill_m,
+                        glazing: glazing.clone(),
+                        frame: frame.clone(),
+                        year,
+                    }
+                }
+                Door | Edit => SketchEvent::SubmitDoor { width_m, height_m },
+                DoorSidelights => SketchEvent::SubmitDoorSidelights {
+                    door_w: width_m,
+                    door_h: height_m,
+                    left: parse_dimension_expression(left_input).filter(|v| *v > 0.0),
+                    right: parse_dimension_expression(right_input).filter(|v| *v > 0.0),
+                    transom: parse_dimension_expression(transom_input).filter(|v| *v > 0.0),
+                    glazing: glazing.clone(),
+                    frame: frame.clone(),
+                    year,
+                },
+            };
+            on_event(UiEvent::Sketch(event));
+        }
+    }
+    if ui.button("Cancel").clicked() {
+        on_event(UiEvent::Sketch(SketchEvent::CancelPendingOpening));
+    }
+    inline_error(ui, error);
+}
+
+fn glazing_label(g: &Glazing) -> &'static str {
+    match g {
+        Glazing::Single => "Single",
+        Glazing::Double => "Double",
+        Glazing::Triple => "Triple",
+        Glazing::Other(_) => "Other",
+    }
+}
+
+fn frame_label(f: &Frame) -> &'static str {
+    match f {
+        Frame::WoodUPVC => "Wood/uPVC",
+        Frame::Metal => "Metal",
+        Frame::Other(_) => "Other",
+    }
 }
 
 /// Surface a rejected entry inline, next to the input that produced it, so

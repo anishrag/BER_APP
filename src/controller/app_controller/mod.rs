@@ -27,6 +27,7 @@ mod dimensioning;
 mod editing;
 mod exposure;
 mod living_areas;
+mod openings;
 mod phase_regions;
 
 use document::{
@@ -78,6 +79,10 @@ pub use editing::{
 pub use history::HistorySnapshot;
 pub use new_storey::NewStoreyPromptUiData;
 use new_storey::{NewStoreyStage, PendingNewStorey};
+use openings::PendingOpening;
+pub use openings::{
+    ElevationView, OpeningPlanView, OpeningPromptUiData, OpeningToolKind, OpeningViewKind,
+};
 #[cfg(test)]
 use persistence::PARAMETRIC_SNAPSHOT_VERSION;
 pub use review::CollinearityReview;
@@ -218,6 +223,25 @@ pub struct AppController {
     /// DURABLE record is the same `Storey::roof_apexes`; see
     /// `roof_rects.rs`.
     pending_roof_rect: Option<PendingRoofRect>,
+    /// True when the editor is placing windows/doors. A tap near a wall drops
+    /// the selected opening type on the nearest wall (then prompts size); a tap
+    /// with no pending placement opens that wall's ELEVATION editor. Mutually
+    /// exclusive with the other area tools; gated on a finalised outline.
+    openings_mode: bool,
+    /// Which opening the toolbar places next (window / roof window / door /
+    /// door+sidelights).
+    openings_tool: OpeningToolKind,
+    /// The in-flight placement (a wall/roof pick) awaiting size + type entry.
+    /// Transient — outside undo, cleared on storey switch / mode exit.
+    pending_opening: Option<PendingOpening>,
+    /// When `Some`, the ELEVATION overlay is open for this wall (by id): the
+    /// canvas shows the unrolled wall and drags reposition its openings.
+    /// Transient.
+    elevation_wall: Option<datatypes::ber::common::ItemId>,
+    /// The opening grabbed during an elevation drag (transient).
+    elevation_drag: Option<datatypes::ber::openings::OpeningRef>,
+    /// The opening selected in the elevation, for Delete (transient).
+    elevation_selection: Option<datatypes::ber::openings::OpeningRef>,
     /// The in-flight NEW-STOREY flow (thickness → method choice → suggestion
     /// browse). Controller-transient — OUTSIDE undo, never persisted; set by
     /// `add_storey`, cleared on storey switch / load / open / exit. See
@@ -305,6 +329,12 @@ impl AppController {
             pending_roof_point: None,
             pending_roof_ridge: None,
             pending_roof_rect: None,
+            openings_mode: false,
+            openings_tool: OpeningToolKind::Window,
+            pending_opening: None,
+            elevation_wall: None,
+            elevation_drag: None,
+            elevation_selection: None,
             pending_new_storey: None,
             inherited_seed_pending: HashSet::new(),
             splice_debug: Vec::new(),

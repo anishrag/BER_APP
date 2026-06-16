@@ -1,6 +1,7 @@
 use serde::{Deserialize, Serialize};
 
-use super::common::{ConstructionPhases, ItemId, Photo};
+use super::common::{ConstructionPhases, ItemId, Photo, Year};
+use super::fenestration::{Frame, Glazing, WindowNameSpecifics, WindowType};
 use super::structural::{
     CeilingConstruction, FloorConstruction, RoofApex, Storey, ThermalMassInfo, WallConstruction,
 };
@@ -27,6 +28,11 @@ pub struct Ber {
     pub floor_constructions: Vec<FloorConstruction>,
     #[serde(default)]
     pub ceiling_constructions: Vec<CeilingConstruction>,
+    /// Shared window types (glazing/frame/year) — windows reference these by
+    /// `window_type_id`, like wall regions reference constructions.
+    /// `#[serde(default)]` so older records load.
+    #[serde(default)]
+    pub window_types: Vec<WindowType>,
     pub thermal_mass_info: ThermalMassInfo,
     pub orientation_deg: f32,
     pub solar: Vec<SolarElements>,
@@ -40,6 +46,32 @@ impl Ber {
             number_of_storeys: 1,
             ..Default::default()
         }
+    }
+
+    /// Find-or-create a shared `WindowType` for `(glazing, frame, year)` and
+    /// return its id — the window-type analogue of `ensure_*_construction`, so
+    /// identical windows share one type.
+    pub fn ensure_window_type(&mut self, glazing: Glazing, frame: Frame, year: Year) -> ItemId {
+        if let Some(t) = self.window_types.iter().find(|t| {
+            t.glazing == glazing
+                && t.frame == frame
+                && t.year == year
+                && t.specifics == WindowNameSpecifics::Standard
+        }) {
+            return t.id;
+        }
+        let id = ItemId::default();
+        self.window_types.push(WindowType {
+            id,
+            year,
+            glazing,
+            gap: vec![],
+            frame,
+            specifics: WindowNameSpecifics::Standard,
+            photos: vec![],
+            notes: None,
+        });
+        id
     }
 
     /// Stamp the default ceiling height: on storey `storey_idx` when given, else

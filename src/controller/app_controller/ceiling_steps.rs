@@ -119,6 +119,7 @@ impl AppController {
         self.cancel_pending_ceiling_step();
         self.ceiling_step_mode = on;
         if on {
+            self.exit_openings_mode();
             self.living_area_mode = false;
             self.exposure_mode = false;
             self.phase_mode = false;

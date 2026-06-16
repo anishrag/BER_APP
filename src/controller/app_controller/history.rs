@@ -14,6 +14,16 @@ pub struct HistorySnapshot {
     /// The living-area MODE flag (a UI tab toggle) is session state kept OUT of
     /// `Document`, but undo restores it so a draw/undo also round-trips the tab.
     pub(super) living_area_mode: bool,
+    /// The active storey's BER record AS IT WAS — the only undoable state that
+    /// lives on the BER side rather than in `Document`: window/door OPENINGS
+    /// (and the `opes` links + window types). Captured per snapshot so an
+    /// opening add/move/delete undoes; `None` when no record/storey is active.
+    /// On restore it's written back BEFORE the re-resolve, which then derives
+    /// vertices and amends `opes` from it.
+    pub(super) record_storey: Option<(usize, datatypes::ber::structural::Storey)>,
+    /// The window-type registry (windows reference it by id) — restored with the
+    /// storey so an undone window doesn't leave a dangling type reference.
+    pub(super) window_types: Option<Vec<datatypes::ber::fenestration::WindowType>>,
 }
 
 impl AppController {
@@ -26,15 +36,38 @@ impl AppController {
     }
 
     pub(super) fn current_history_snapshot(&self) -> HistorySnapshot {
+        let record_storey = self.current_storey_idx.and_then(|idx| {
+            self.current_record
+                .as_ref()
+                .and_then(|r| r.data.storeys.get(idx).map(|s| (idx, s.clone())))
+        });
+        let window_types = self
+            .current_record
+            .as_ref()
+            .map(|r| r.data.window_types.clone());
         HistorySnapshot {
             document: self.document.clone(),
             living_area_mode: self.living_area_mode,
+            record_storey,
+            window_types,
         }
     }
 
     pub(super) fn restore_history_snapshot(&mut self, snap: HistorySnapshot) {
         self.document = snap.document;
         self.living_area_mode = snap.living_area_mode;
+        // Restore the BER-side openings (and window types) BEFORE the next
+        // re-resolve, which re-derives vertices and amends `opes` from them.
+        if let Some(record) = self.current_record.as_mut() {
+            if let Some(types) = snap.window_types {
+                record.data.window_types = types;
+            }
+            if let Some((idx, storey)) = snap.record_storey {
+                if let Some(slot) = record.data.storeys.get_mut(idx) {
+                    *slot = storey;
+                }
+            }
+        }
         // In-flight prompts no longer match the restored state — clear.
         self.edit_drag_prompt = None;
         self.vertex_drop_prompt = None;

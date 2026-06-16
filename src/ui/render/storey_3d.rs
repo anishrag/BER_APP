@@ -105,6 +105,18 @@ pub(crate) fn render_at_z_offset(
     for wall in &storey.walls.regions {
         draw_wall_region(painter, t, wall, z_offset, display_mode, view);
     }
+    // Openings (windows blue, doors brown) — each opening's 4 vertices are a
+    // real quad in 3D (in the wall plane, or on the roof plane for roof
+    // windows), so they fill cleanly even though a wall window's PLAN footprint
+    // is degenerate. Drawn after the walls so they sit on the face.
+    for window in &storey.windows {
+        let c = color_for(DisplayMode::Walls, display_mode, style::WINDOW_FILL);
+        draw_opening_3d(painter, t, &window.vertices, z_offset, view, c);
+    }
+    for door in &storey.doors {
+        let c = color_for(DisplayMode::Walls, display_mode, style::DOOR_FILL);
+        draw_opening_3d(painter, t, &door.vertices, z_offset, view, c);
+    }
     // Roofs at their REAL per-vertex z (ceiling steps). Fallback when the
     // resolved roofs are missing (defensive: height set but the resolve
     // projection not yet run): flat rings over each floor region at the
@@ -332,4 +344,32 @@ mod tests {
         );
         assert!(with_walls.1 .1 >= without_walls.1 .1 - 1e-9);
     }
+}
+
+/// Draw one opening as a filled quad in 3D: project its 4 vertices at the
+/// storey's `z_offset` and fill. Works for wall openings (a vertical rectangle
+/// on the wall face) and roof windows (a tilted quad on the roof plane) alike.
+fn draw_opening_3d(
+    painter: &egui::Painter,
+    t: &Transform2d,
+    vertices: &[(f32, f32, f32)],
+    z_offset: f64,
+    view: ViewParams,
+    color: egui::Color32,
+) {
+    if vertices.len() < 4 {
+        return;
+    }
+    let pts: Vec<egui::Pos2> = vertices
+        .iter()
+        .map(|(x, y, z)| {
+            let (px, py) = view.project_3d(*x as f64, *y as f64, z_offset + *z as f64);
+            t.apply(px, py)
+        })
+        .collect();
+    painter.add(egui::Shape::convex_polygon(
+        pts,
+        color,
+        egui::Stroke::new(1.0, color),
+    ));
 }

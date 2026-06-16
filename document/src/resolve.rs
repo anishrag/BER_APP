@@ -321,6 +321,16 @@ pub fn resolve_storey(
         .map(|f| (f, WallExposure::Unset))
         .collect();
     storey.walls = walls.with_risers(risers, &previous_walls, wall_cid);
+    // OPENINGS tail: walls/roofs are now final, so recompute each placed
+    // window/door's derived `vertices` cache from its durable placement, then
+    // drop any opening whose host region the edit replaced. Pure data transform
+    // over the just-resolved storey (the geometry projection above never reads
+    // openings) — same post-resolve discipline as `stamp_wall_phases`.
+    datatypes::ber::openings::derive_opening_vertices(&mut storey);
+    datatypes::ber::openings::prune_orphaned_openings(&mut storey);
+    // Each wall/roof region's `opes` is a DERIVED index of the openings on it,
+    // rebuilt from placements (ceiling ids regenerate, so it can't be carried).
+    datatypes::ber::openings::rebuild_opes(&mut storey);
     storey
 }
 
@@ -731,8 +741,19 @@ mod tests {
             .iter()
             .position(|r| r.exposure == WallExposure::SemiExposed)
             .unwrap();
-        let door_id = ItemId::default();
-        storey.walls.regions[marked_idx].opes.doors.push(door_id);
+        // A REAL door on the marked wall — `opes` is derived from placements.
+        let marked_wall_id = storey.walls.regions[marked_idx].id;
+        let door_id = datatypes::ber::openings::add_wall_door(
+            &mut storey,
+            marked_wall_id,
+            1.0,
+            0.9,
+            2.0,
+            datatypes::ber::fenestration::DoorKind::Solid,
+            "door".to_string(),
+            0.0,
+        )
+        .unwrap();
         let (id0, cid0) = (
             storey.walls.regions[marked_idx].id,
             storey.walls.regions[marked_idx].construction_id,
@@ -1867,12 +1888,19 @@ mod tests {
         let wall0 = &ber.storeys[0].walls.regions[marked_idx];
         assert_eq!(wall0.polygon.exterior.len(), 4, "flat top: a quad");
         let (id0, cid0) = (wall0.id, wall0.construction_id);
-        // Hang a door on the wall — an amend must not orphan it.
-        let door_id = ItemId::default();
-        ber.storeys[0].walls.regions[marked_idx]
-            .opes
-            .doors
-            .push(door_id);
+        // Hang a REAL door on the wall — an amend must not orphan it (`opes`
+        // is derived from the placement).
+        let door_id = datatypes::ber::openings::add_wall_door(
+            &mut ber.storeys[0],
+            id0,
+            2.0,
+            0.9,
+            2.0,
+            datatypes::ber::fenestration::DoorKind::Solid,
+            "door".to_string(),
+            0.0,
+        )
+        .unwrap();
 
         // A step at x = 2 (+0.3) crosses every horizontal wall → re-resolve.
         let step = doc
@@ -2527,5 +2555,75 @@ mod tests {
             assert!((got.end_m - want.end_m).abs() < 1e-3);
             assert_eq!(got.exposure, want.exposure);
         }
+    }
+
+    /// A wall window placed on a resolved storey survives a RE-RESOLVE: its
+    /// derived `vertices` are recomputed from the durable placement and the
+    /// wall's `opes` reference is preserved by the amend — the openings tail of
+    /// `resolve_storey`.
+    #[test]
+    fn placed_window_derives_vertices_and_survives_re_resolve() {
+        use datatypes::ber::fenestration::{OpeningPlacement, Window};
+        let doc = square_doc(&[
+            Point2f32::new(0.0, 0.0),
+            Point2f32::new(4.0, 0.0),
+            Point2f32::new(4.0, 4.0),
+            Point2f32::new(0.0, 4.0),
+        ]);
+        let mut ber = Ber::default();
+        ensure_storey_constructions(&mut ber, 0, &[]);
+        ber.set_default_ceiling_height(Some(0), 2.4);
+        // First resolve to mint wall ids.
+        ber.storeys[0] = resolve_storey(&doc, &ber, 0, &[], &[], &[]);
+        let wall = &ber.storeys[0].walls.regions[0];
+        let wall_id = wall.id;
+        let (_, _, len, _) = wall.base_frame().unwrap();
+        // Place a 1 m × 1.2 m window centred on that wall, sill 1 m, and link it.
+        let win_id = ItemId::default();
+        ber.storeys[0].windows.push(Window {
+            id: win_id,
+            vertices: vec![],
+            width_m: 1.0,
+            height_m: 1.2,
+            window_type_id: ItemId::default(),
+            placement: Some(OpeningPlacement::Wall {
+                wall_id,
+                along_m: (len / 2.0) as f32,
+                sill_m: 1.0,
+            }),
+            assembly_id: None,
+        });
+        let widx = ber.storeys[0]
+            .walls
+            .regions
+            .iter()
+            .position(|r| r.id == wall_id)
+            .unwrap();
+        ber.storeys[0].walls.regions[widx].opes.windows.push(win_id);
+
+        // Re-resolve: the tail derives vertices; the amend keeps the opes ref.
+        ber.storeys[0] = resolve_storey(&doc, &ber, 0, &[], &[], &[]);
+        let win = &ber.storeys[0].windows[0];
+        assert_eq!(win.vertices.len(), 4, "vertices derived");
+        assert!(
+            win.vertices.iter().any(|v| (v.2 - 1.0).abs() < 1e-3),
+            "sill at z = 1.0: {:?}",
+            win.vertices
+        );
+        assert!(
+            win.vertices.iter().any(|v| (v.2 - 2.2).abs() < 1e-3),
+            "top at z = 2.2 (under the 2.4 ceiling): {:?}",
+            win.vertices
+        );
+        let host = ber.storeys[0]
+            .walls
+            .regions
+            .iter()
+            .find(|r| r.id == wall_id)
+            .expect("wall id stable across re-resolve");
+        assert!(
+            host.opes.windows.contains(&win_id),
+            "the opes reference survives the amend"
+        );
     }
 }

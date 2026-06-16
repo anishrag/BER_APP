@@ -20,14 +20,16 @@ use egui::epaint::PathStroke;
 use egui::Pos2;
 
 use crate::controller::app_controller::{
-    DimensionPromptUiData, EditDragPromptUiData, ExposureSelection, NewStoreyPromptUiData,
-    PositionPromptUiData, RiserView, SnapTagView, VertexDropPromptUiData, WallExposureView,
+    DimensionPromptUiData, EditDragPromptUiData, ElevationView, ExposureSelection,
+    NewStoreyPromptUiData, OpeningPromptUiData, OpeningToolKind, PositionPromptUiData, RiserView,
+    SnapTagView, VertexDropPromptUiData, WallExposureView,
 };
 use crate::ui::pages::events::UiEvent;
 use crate::ui::render::ViewParams;
 use crate::ui::widgets::HintExt;
 use datatypes::ber::ber_struct::Ber;
 use datatypes::ber::common::ConstructionPhase;
+use datatypes::ber::fenestration::{Frame, Glazing};
 use datatypes::ber::structural::WallExposure;
 use domain::sketch::{DisplayMode, EditTools, SketchMode};
 use manip_2d_plan::CollinearitySuggestion;
@@ -365,6 +367,59 @@ pub enum SketchEvent {
     ClearWallExposure,
     /// Mark every outline wall not yet set as exposed.
     SetAllRemainingExposed,
+    // ── Windows/doors ──────────────────────────────────────────────────────
+    /// Toggle windows/doors mode.
+    SetOpeningsMode(bool),
+    /// Pick which opening type the toolbar places next.
+    SetOpeningTool(OpeningToolKind),
+    /// Plan tap in openings mode: pick the nearest wall/roof (or open the
+    /// tapped wall's elevation in Edit).
+    OpeningsPointerDown {
+        world_x: f64,
+        world_y: f64,
+        tol: f64,
+    },
+    /// Submit a window placement (wall or roof) with size + glazing.
+    SubmitWindow {
+        width_m: f32,
+        height_m: f32,
+        sill_m: f32,
+        glazing: Glazing,
+        frame: Frame,
+        year: u32,
+    },
+    /// Submit a plain door placement.
+    SubmitDoor {
+        width_m: f32,
+        height_m: f32,
+    },
+    /// Submit a door+sidelights assembly (composer output).
+    SubmitDoorSidelights {
+        door_w: f32,
+        door_h: f32,
+        left: Option<f32>,
+        right: Option<f32>,
+        transom: Option<f32>,
+        glazing: Glazing,
+        frame: Frame,
+        year: u32,
+    },
+    /// Cancel the in-flight placement.
+    CancelPendingOpening,
+    /// Elevation overlay press / drag / release at wall-local `(along, height)`.
+    ElevationPointerDown {
+        along_m: f32,
+        height_m: f32,
+    },
+    ElevationPointerDrag {
+        along_m: f32,
+        height_m: f32,
+    },
+    ElevationPointerUp,
+    /// Delete the opening selected in the elevation.
+    DeleteSelectedOpening,
+    /// Close the elevation overlay.
+    CloseElevation,
     /// User typed a default ceiling height (m) in the Heights category's
     /// field: stamp the current scope (overwriting this storey's value, or
     /// filling every unset storey from the All tab). Stays in the current
@@ -596,6 +651,30 @@ pub struct SketchView<'a> {
     /// Autosave status line for the State category ("saved Ns ago"), derived
     /// by the shell from its revision bookkeeping. `None` hides the label.
     pub autosave_status: Option<String>,
+    // ── Windows/doors ──────────────────────────────────────────────────────
+    pub openings_mode: bool,
+    /// The opening type the toolbar places next (window / roof window / door /
+    /// door+sidelights / edit-elevation).
+    pub openings_tool: OpeningToolKind,
+    /// What the dock should prompt for the in-flight placement, if any.
+    pub opening_prompt: Option<OpeningPromptUiData>,
+    pub opening_width_input: &'a mut String,
+    pub opening_height_input: &'a mut String,
+    pub opening_sill_input: &'a mut String,
+    /// Window glazing/frame/year selection — the dock's combos mutate these in
+    /// place (the submit event then reads them).
+    pub opening_glazing: &'a mut Glazing,
+    pub opening_frame: &'a mut Frame,
+    pub opening_year_input: &'a mut String,
+    /// Door+sidelights composer inputs (door size + optional left/right
+    /// sidelight + transom).
+    pub sidelight_left_input: &'a mut String,
+    pub sidelight_right_input: &'a mut String,
+    pub transom_input: &'a mut String,
+    pub opening_error: Option<&'a str>,
+    /// The open per-wall ELEVATION overlay, if any (the unrolled wall + its
+    /// draggable openings).
+    pub elevation_view: Option<ElevationView>,
 }
 
 #[derive(Default)]

@@ -50,6 +50,13 @@ pub(super) fn render<F: FnMut(UiEvent)>(
     let (rect, response) =
         ui.allocate_exact_size(ui.available_size(), egui::Sense::click_and_drag());
 
+    // Elevation editor: when a wall's elevation is open it REPLACES the plan
+    // canvas — the unrolled wall with draggable openings. Owns its own input.
+    if let Some(elev) = view.elevation_view.as_ref() {
+        elevation_overlay(ui, rect, &response, elev, vp, on_event);
+        return;
+    }
+
     let painter = ui.painter_at(rect);
     painter.rect_filled(rect, 0.0, egui::Color32::from_gray(30));
 
@@ -857,6 +864,28 @@ pub(super) fn render<F: FnMut(UiEvent)>(
         }
     }
 
+    // Openings mode (no elevation open): a tap near a wall drops the selected
+    // opening type on the nearest wall (or opens the wall's elevation in Edit).
+    // The elevation overlay, when open, captures its own input (see the
+    // elevation render path), so plan taps are gated on it being closed.
+    if view.openings_mode && view.elevation_view.is_none() && !cut_pending && !touch_nav_active {
+        if let Some(t) = canvas_transform(ber, current_storey_idx, rect, vp, false) {
+            let tol_world = (14.0 / t.scale()) as f64;
+            let tap = response.clicked_by(egui::PointerButton::Primary)
+                || response.drag_started_by(egui::PointerButton::Primary);
+            if tap {
+                if let Some(pos) = response.interact_pointer_pos() {
+                    let (wx, wy) = t.inverse(pos.x, pos.y);
+                    on_event(UiEvent::Sketch(SketchEvent::OpeningsPointerDown {
+                        world_x: wx,
+                        world_y: wy,
+                        tol: tol_world,
+                    }));
+                }
+            }
+        }
+    }
+
     // Primary-button input: stroke drawing OR Move-mode
     // click/drag, depending on `edit_tool`. Both gated on
     // 2D mode and "no overlay is open" (review / pending
@@ -874,7 +903,8 @@ pub(super) fn render<F: FnMut(UiEvent)>(
         && !view.roof_point_pending
         && !view.roof_ridge_pending
         && !view.roof_rect_pending
-        && !view.exposure_mode;
+        && !view.exposure_mode
+        && !view.openings_mode;
 
     if primary_available && !touch_nav_active && !matches!(edit_tool, EditTools::Move) {
         if response.drag_started_by(egui::PointerButton::Primary) {
@@ -1210,4 +1240,141 @@ fn draw_stroke(painter: &egui::Painter, rect: egui::Rect, stroke: &EguiStroke) {
         let last = *points.last().expect("non-empty checked above");
         painter.circle_filled(last, 6.0, snap_color);
     }
+}
+
+/// Render the per-wall ELEVATION editor: the unrolled wall (base line + roof
+/// top profile) with each opening as a draggable rectangle. Drags reposition
+/// (horizontal → along, vertical → sill); sizes are fixed. The panel owns its
+/// own primary-button input, emitting `Elevation*` events.
+fn elevation_overlay<F: FnMut(UiEvent)>(
+    ui: &mut egui::Ui,
+    rect: egui::Rect,
+    response: &egui::Response,
+    elev: &crate::controller::app_controller::ElevationView,
+    vp: render::ViewParams,
+    on_event: &mut F,
+) {
+    let painter = ui.painter_at(rect);
+    painter.rect_filled(rect, 0.0, egui::Color32::from_gray(24));
+
+    let len = (elev.wall_len_m as f64).max(0.1);
+    let base = elev.base_z as f64;
+    let top_max = elev
+        .top_profile
+        .iter()
+        .map(|(_, z)| *z as f64)
+        .fold(base + 0.5, f64::max);
+    // World frame: x = along (0..len), y = -z (so height grows UP on screen),
+    // with a small margin so the wall sits off the panel edges.
+    let margin = (top_max - base).max(0.5) * 0.12;
+    let t = render::fit_transform(
+        rect,
+        (-len * 0.05, -(top_max + margin)),
+        (len * 1.05, -(base - margin)),
+        vp,
+    );
+    let p = |along: f64, z: f64| t.apply(along, -z);
+    let wall_col = egui::Color32::from_gray(150);
+    let line = |a: egui::Pos2, b: egui::Pos2, w: f32, c: egui::Color32| {
+        painter.line_segment([a, b], egui::Stroke::new(w, c));
+    };
+    // Base, top profile, and the two side edges connecting them.
+    line(p(0.0, base), p(len, base), 2.0, wall_col);
+    if elev.top_profile.len() >= 2 {
+        for w in elev.top_profile.windows(2) {
+            line(
+                p(w[0].0 as f64, w[0].1 as f64),
+                p(w[1].0 as f64, w[1].1 as f64),
+                2.0,
+                wall_col,
+            );
+        }
+        // The profile runs b→a (along len→0); join the base ends to it.
+        let first = elev.top_profile.first().unwrap();
+        let last = elev.top_profile.last().unwrap();
+        line(
+            p(len, base),
+            p(first.0 as f64, first.1 as f64),
+            2.0,
+            wall_col,
+        );
+        line(p(0.0, base), p(last.0 as f64, last.1 as f64), 2.0, wall_col);
+    } else {
+        line(p(0.0, base), p(0.0, top_max), 2.0, wall_col);
+        line(p(len, base), p(len, top_max), 2.0, wall_col);
+        line(p(0.0, top_max), p(len, top_max), 2.0, wall_col);
+    }
+    // Openings as filled rectangles with a (heavier when selected) border.
+    for o in &elev.openings {
+        let l = (o.along_m - o.width_m / 2.0) as f64;
+        let r = (o.along_m + o.width_m / 2.0) as f64;
+        let b = base + o.sill_m as f64;
+        let tp = b + o.height_m as f64;
+        let ro = egui::Rect::from_two_pos(p(l, b), p(r, tp));
+        let (fill, stroke) = elevation_colors(o.kind, o.selected);
+        painter.rect_filled(ro, 1.0, fill);
+        let sw = if o.selected { 2.5 } else { 1.5 };
+        line(ro.left_top(), ro.right_top(), sw, stroke);
+        line(ro.right_top(), ro.right_bottom(), sw, stroke);
+        line(ro.right_bottom(), ro.left_bottom(), sw, stroke);
+        line(ro.left_bottom(), ro.left_top(), sw, stroke);
+    }
+    painter.text(
+        rect.left_top() + egui::vec2(8.0, 8.0),
+        egui::Align2::LEFT_TOP,
+        "Elevation — drag openings to reposition (sizes locked). Done in the toolbar.",
+        egui::FontId::proportional(13.0),
+        egui::Color32::from_gray(160),
+    );
+    // Primary input → wall-local (along, height-above-base).
+    let to_local = |pos: egui::Pos2| {
+        let (wx, wy) = t.inverse(pos.x, pos.y);
+        (wx as f32, ((-wy) - base) as f32)
+    };
+    let emit_down = |on_event: &mut F, pos: egui::Pos2| {
+        let (a, h) = to_local(pos);
+        on_event(UiEvent::Sketch(SketchEvent::ElevationPointerDown {
+            along_m: a,
+            height_m: h,
+        }));
+    };
+    if response.drag_started_by(egui::PointerButton::Primary) {
+        if let Some(pos) = response.interact_pointer_pos() {
+            emit_down(on_event, pos);
+        }
+    }
+    if response.dragged_by(egui::PointerButton::Primary) {
+        if let Some(pos) = response.interact_pointer_pos() {
+            let (a, h) = to_local(pos);
+            on_event(UiEvent::Sketch(SketchEvent::ElevationPointerDrag {
+                along_m: a,
+                height_m: h,
+            }));
+        }
+    }
+    if response.drag_stopped_by(egui::PointerButton::Primary) {
+        on_event(UiEvent::Sketch(SketchEvent::ElevationPointerUp));
+    }
+    if response.clicked_by(egui::PointerButton::Primary) {
+        if let Some(pos) = response.interact_pointer_pos() {
+            emit_down(on_event, pos);
+        }
+    }
+}
+
+/// Fill + border colour for an opening rectangle in the elevation (glass blue /
+/// door brown; brighter + white-bordered when selected).
+fn elevation_colors(
+    kind: crate::controller::app_controller::OpeningViewKind,
+    selected: bool,
+) -> (egui::Color32, egui::Color32) {
+    use crate::controller::app_controller::OpeningViewKind::*;
+    let base = match kind {
+        Window | RoofWindow | SidelightWindow => egui::Color32::from_rgb(90, 160, 220),
+        Door | DoorPanel => egui::Color32::from_rgb(180, 130, 80),
+    };
+    let a = if selected { 130 } else { 70 };
+    let fill = egui::Color32::from_rgba_unmultiplied(base.r(), base.g(), base.b(), a);
+    let stroke = if selected { egui::Color32::WHITE } else { base };
+    (fill, stroke)
 }

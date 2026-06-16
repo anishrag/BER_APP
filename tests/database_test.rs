@@ -201,6 +201,7 @@ fn create_minimal_ber(id: ItemId) -> Ber {
         wall_constructions: vec![],
         floor_constructions: vec![],
         ceiling_constructions: vec![],
+        window_types: vec![],
         thermal_mass_info: ThermalMassInfo {
             id: ItemId::default(),
             floors: ThermalMassCategoryEnum::Medium,

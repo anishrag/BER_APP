@@ -93,6 +93,7 @@ impl AppController {
         self.pending_roof_ridge = None;
         self.pending_roof_rect = None;
         if on {
+            self.exit_openings_mode();
             self.living_area_mode = false;
             self.exposure_mode = false;
             self.phase_mode = false;

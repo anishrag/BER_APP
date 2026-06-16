@@ -7540,3 +7540,165 @@ fn floor_thickness_wall_regions_survive_reload_and_rederive_fixpoint() {
          wall regions byte-identical"
     );
 }
+
+// ── Windows / doors placement (openings tool) ───────────────────────────────
+
+/// Placing a window via the openings tool: pick the nearest wall, enter size +
+/// glazing, and it lands with derived vertices, a registered window type, and an
+/// `opes` link — and UNDO removes it (BER-side state is in the snapshot now).
+#[test]
+fn place_window_via_controller_persists_and_undoes() {
+    use datatypes::ber::fenestration::{Frame, Glazing};
+    let mut c = dimensioned_square_controller();
+    c.materialize();
+    c.set_openings_mode(true);
+    c.set_openings_tool(OpeningToolKind::Window);
+    // Tap 0.2 m outside the bottom wall, at x = 5 → picks that wall.
+    c.openings_pointer_down(5.0, -0.2, 0.5);
+    assert!(c.pending_opening_prompt().is_some(), "a wall was picked");
+    c.place_pending_window(1.0, 1.2, 1.0, Glazing::Double, Frame::WoodUPVC, 2010)
+        .expect("window places");
+    c.materialize();
+    {
+        let ber = &c.current_record.as_ref().unwrap().data;
+        assert_eq!(ber.storeys[0].windows.len(), 1, "window added");
+        assert_eq!(
+            ber.storeys[0].windows[0].vertices.len(),
+            4,
+            "vertices derived"
+        );
+        assert_eq!(ber.window_types.len(), 1, "window type registered");
+        assert!(
+            ber.storeys[0]
+                .walls
+                .regions
+                .iter()
+                .any(|r| !r.opes.windows.is_empty()),
+            "opes linked"
+        );
+    }
+    c.undo().expect("undo");
+    c.materialize();
+    assert!(
+        c.current_record.as_ref().unwrap().data.storeys[0]
+            .windows
+            .is_empty(),
+        "undo removed the window"
+    );
+}
+
+/// A placed window survives save + reload: the placement is durable, and the
+/// reload re-derives vertices and re-links `opes` via the amend.
+#[test]
+fn placed_window_survives_reload() {
+    use datatypes::ber::fenestration::{Frame, Glazing};
+    let mut c = dimensioned_square_controller();
+    c.materialize();
+    c.set_openings_mode(true);
+    c.openings_pointer_down(5.0, -0.2, 0.5);
+    c.place_pending_window(1.0, 1.2, 1.0, Glazing::Triple, Frame::Metal, 2005)
+        .expect("window places");
+    c.materialize();
+    let id = c.current_record.as_ref().unwrap().id.clone();
+    c.flush_if_dirty().unwrap();
+    c.open_ber(&id).unwrap();
+    c.materialize();
+    let storey = &c.current_record.as_ref().unwrap().data.storeys[0];
+    assert_eq!(storey.windows.len(), 1, "window persisted across reload");
+    assert_eq!(
+        storey.windows[0].vertices.len(),
+        4,
+        "vertices re-derived on reload"
+    );
+    assert!(
+        storey
+            .walls
+            .regions
+            .iter()
+            .any(|r| !r.opes.windows.is_empty()),
+        "opes re-linked across reload"
+    );
+}
+
+/// Door+sidelights composer (via the controller): one tap + a spec yields one
+/// door panel plus its sidelight/transom windows, all in one assembly.
+#[test]
+fn place_door_sidelights_via_controller() {
+    use datatypes::ber::fenestration::{Frame, Glazing};
+    let mut c = dimensioned_square_controller();
+    c.materialize();
+    c.set_openings_mode(true);
+    c.set_openings_tool(OpeningToolKind::DoorSidelights);
+    c.openings_pointer_down(5.0, -0.2, 0.5);
+    c.place_pending_door_sidelights(
+        0.9,
+        2.0,
+        Some(0.4),
+        Some(0.4),
+        Some(0.4),
+        Glazing::Double,
+        Frame::WoodUPVC,
+        2010,
+    )
+    .expect("assembly places");
+    c.materialize();
+    let storey = &c.current_record.as_ref().unwrap().data.storeys[0];
+    assert_eq!(storey.doors.len(), 1, "one door panel");
+    assert_eq!(storey.windows.len(), 3, "two sidelights + a transom");
+    let aid = storey.doors[0].assembly_id;
+    assert!(aid.is_some(), "door carries an assembly id");
+    assert!(
+        storey.windows.iter().all(|w| w.assembly_id == aid),
+        "every glass member shares the assembly"
+    );
+}
+
+/// Elevation editor: open a wall's elevation, drag an opening (no overlap), and
+/// delete the selected one.
+#[test]
+fn elevation_move_and_delete_openings() {
+    use datatypes::ber::fenestration::{Frame, Glazing};
+    let mut c = dimensioned_square_controller();
+    c.materialize();
+    c.set_openings_mode(true);
+    // Two windows on the bottom wall.
+    c.openings_pointer_down(2.0, -0.2, 0.5);
+    c.place_pending_window(1.0, 1.2, 1.0, Glazing::Double, Frame::WoodUPVC, 2010)
+        .unwrap();
+    c.openings_pointer_down(8.0, -0.2, 0.5);
+    c.place_pending_window(1.0, 1.2, 1.0, Glazing::Double, Frame::WoodUPVC, 2010)
+        .unwrap();
+    c.materialize();
+    // Open the bottom wall's elevation (Edit tap).
+    c.set_openings_tool(OpeningToolKind::Edit);
+    c.openings_pointer_down(5.0, -0.2, 0.5);
+    assert!(c.elevation_wall().is_some(), "elevation opened");
+    let ev = c.elevation_view().expect("an elevation view");
+    assert_eq!(ev.openings.len(), 2, "both windows shown on the wall");
+    // Grab the first opening at its centre, drag it, release.
+    let o0 = &ev.openings[0];
+    let (a0, mid_h) = (o0.along_m, o0.sill_m + o0.height_m / 2.0);
+    c.elevation_pointer_down(a0, mid_h);
+    c.elevation_pointer_drag(a0 + 1.0, mid_h);
+    c.elevation_pointer_up();
+    c.materialize();
+    // The two still don't overlap (redistribution held).
+    let ev = c.elevation_view().unwrap();
+    let mut spans: Vec<(f32, f32)> = ev
+        .openings
+        .iter()
+        .map(|o| (o.along_m - o.width_m / 2.0, o.along_m + o.width_m / 2.0))
+        .collect();
+    spans.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap());
+    assert!(spans[1].0 >= spans[0].1 - 1e-3, "no overlap after the drag");
+    // Delete the selected (dragged) opening.
+    c.delete_selected_opening();
+    c.materialize();
+    assert_eq!(
+        c.current_record.as_ref().unwrap().data.storeys[0]
+            .windows
+            .len(),
+        1,
+        "the dragged window was deleted"
+    );
+}

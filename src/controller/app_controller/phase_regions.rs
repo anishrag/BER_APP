@@ -27,6 +27,7 @@ impl AppController {
         self.phase_mode = on;
         self.abandon_phase_shape();
         if on {
+            self.exit_openings_mode();
             self.living_area_mode = false;
             self.exposure_mode = false;
             self.step_mode = false;
