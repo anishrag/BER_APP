@@ -1095,11 +1095,35 @@ impl CeilingRegions {
         if apexes.is_empty() {
             return Vec::new();
         }
-        // Region → incident apex indices, by quantized plan-corner identity.
+        // Whether a region is actually SHAPED by the apexes — matching what
+        // [`with_apexes_hinted`] produced — rather than merely sharing a plan
+        // CORNER with one. A region is shaped if it is sloped (a real fan/ridge
+        // face — `flat_z` is None) OR it is an all-apex flat TOP (every vertex
+        // is an apex corner: a hipped/rect roof's level top). A region that is
+        // flat AND keeps non-apex corners only TOUCHES an apex at a shared
+        // boundary corner (the flat neighbour of a junction mono-pitch ridge) —
+        // it is NOT shaped, so it must not be claimed/merged by the group. (All
+        // callers run on RESOLVED roofs, so `flat_z` reflects the real slope.)
+        let is_shaped = |r: &CeilingRegion| -> bool {
+            if r.flat_z().is_none() {
+                return true;
+            }
+            r.polygon.exterior.len() >= 3
+                && r.polygon.exterior.iter().all(|v| {
+                    apexes.iter().any(|a| {
+                        (v.x - a.point.x).abs() <= EPS_M && (v.y - a.point.y).abs() <= EPS_M
+                    })
+                })
+        };
+        // Region → incident apex indices, by quantized plan-corner identity —
+        // but only for regions the apexes actually shape (above).
         let matched: Vec<Vec<usize>> = self
             .regions
             .iter()
             .map(|r| {
+                if !is_shaped(r) {
+                    return Vec::new();
+                }
                 apexes
                     .iter()
                     .enumerate()
@@ -5807,6 +5831,26 @@ mod tests {
         let hinted = roofs.clone().with_apexes_hinted(&apexes, &hints);
         assert!(side_slopes(&hinted, true), "the hinted (right) area slopes");
         assert!(!side_slopes(&hinted, false), "the left area stays flat");
+        // The apex group must claim ONLY the sloped side — even though the
+        // apexes (4,0)/(4,4) are also CORNERS of the flat left area, that area
+        // is merely touched, not shaped, so it stays free for its own ridge/step
+        // (the bug: a junction ridge marking the flat neighbour "occupied").
+        let groups = hinted.apex_groups(&apexes);
+        assert_eq!(groups.len(), 1, "one group");
+        let flat_left = hinted
+            .regions
+            .iter()
+            .position(|r| {
+                let cx = r.polygon.exterior.iter().map(|v| v.x).sum::<f64>()
+                    / r.polygon.exterior.len().max(1) as f64;
+                cx < 4.0
+            })
+            .expect("a left-side region");
+        assert!(
+            !groups[0].region_idxs.contains(&flat_left),
+            "the flat left neighbour is NOT claimed by the group (got {:?})",
+            groups[0].region_idxs
+        );
         // No hint → first claim (region 0, the LEFT) slopes instead.
         let unhinted = roofs.with_apexes_hinted(&apexes, &[]);
         assert!(
