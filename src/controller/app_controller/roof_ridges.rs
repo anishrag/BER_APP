@@ -190,7 +190,11 @@ impl AppController {
                 return;
             }
         };
-        let (coord_m, cross_snap) = match self.document.snap_ceiling_step_line(axis, coord_m) {
+        // The CROSS snaps to the nearest parallel wall INCLUDING the outline's
+        // outer walls and area boundaries: a ridge along a wall is now a valid
+        // mono-pitch (it raises that wall / boundary and slopes away), so the
+        // ridge must be able to land exactly on it.
+        let (coord_m, cross_snap) = match self.document.snap_roof_point_coord(axis, coord_m) {
             Some((snapped, outline_wall_vid)) => (
                 snapped,
                 Some(CeilingLineSnap {
