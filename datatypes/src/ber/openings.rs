@@ -11,9 +11,8 @@ use super::fenestration::{Door, DoorKind, OpeningPlacement, Window};
 use super::structural::Storey;
 use domain::points::point_to_segment_distance;
 
-/// Default sill heights (metres above the wall base) and spacing constants for
+/// Default door sill height (metres above the wall base) + spacing constants for
 /// auto-redistribution. Tuning-overridable later; sensible Irish-BER defaults.
-pub const DEFAULT_WINDOW_SILL_M: f32 = 1.0;
 pub const DEFAULT_DOOR_SILL_M: f32 = 0.0;
 const MIN_GAP_M: f32 = 0.1;
 const END_MARGIN_M: f32 = 0.05;
@@ -452,7 +451,7 @@ pub fn delete_opening(storey: &mut Storey, opening: OpeningRef) {
 /// as possible. A door+sidelights assembly is treated as ONE rigid unit (its
 /// bounding width) and its members translate together. `WallTooShort` when the
 /// total can't fit; the storey is left unchanged in that case.
-pub fn redistribute_wall_openings(
+pub(crate) fn redistribute_wall_openings(
     storey: &mut Storey,
     wall_id: ItemId,
 ) -> Result<(), OpeningError> {

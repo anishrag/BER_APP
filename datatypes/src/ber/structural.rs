@@ -26,16 +26,6 @@ pub enum ConstructionMaterial {
 }
 
 impl ConstructionMaterial {
-    pub fn lambda(&self) -> f32 {
-        match self {
-            ConstructionMaterial::Concrete => 1.7,
-            ConstructionMaterial::InsulationEPS => 0.035,
-            ConstructionMaterial::Plasterboard => 0.25,
-            ConstructionMaterial::Timber => 0.13,
-            ConstructionMaterial::Custom { lambda, .. } => *lambda,
-        }
-    }
-
     pub fn name(&self) -> String {
         match self {
             ConstructionMaterial::Concrete => "Concrete".into(),
@@ -115,17 +105,6 @@ pub enum WallExposure {
     Ground,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct WallData {
-    pub construction_type: WallConstructionType,
-    pub exposure: WallExposure,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct RoofData {
-    pub construction_type: CeilingConstructionType,
-}
-
 /// Shared construction identity + fabric properties. A handful of these exist
 /// per dwelling (e.g. "300mm filled cavity, original"); many regions reference
 /// one by `construction_id`. Geometry (polygon, exposure, openings) lives on the
@@ -138,15 +117,6 @@ pub struct ConstructionBase {
     pub construction_phase: ConstructionPhase,
     pub photos: Vec<Photo>,
     pub description: Option<String>,
-}
-
-impl ConstructionBase {
-    pub fn clone_with_new_id(&self) -> Self {
-        Self {
-            id: ItemId::default(),
-            ..self.clone() // use regular clone for the rest
-        }
-    }
 }
 
 /// A wall construction shared by one or more `WallRegion`s.
@@ -322,11 +292,6 @@ impl Ber {
     /// Resolve a floor construction by id.
     pub fn floor_construction(&self, id: ItemId) -> Option<&FloorConstruction> {
         self.floor_constructions.iter().find(|c| c.base.id == id)
-    }
-
-    /// Resolve a ceiling construction by id.
-    pub fn ceiling_construction(&self, id: ItemId) -> Option<&CeilingConstruction> {
-        self.ceiling_constructions.iter().find(|c| c.base.id == id)
     }
 }
 /// A planar region of the floor — pure geometry. Its fabric (construction
@@ -2207,7 +2172,7 @@ impl Polygon3D {
     /// roof window's plan rectangle onto a (possibly sloped) ceiling region. A
     /// flat region returns its constant z. `None` if degenerate or the plane is
     /// vertical (zero z-normal).
-    pub fn plane_z(&self, x: f64, y: f64) -> Option<f64> {
+    pub(crate) fn plane_z(&self, x: f64, y: f64) -> Option<f64> {
         let (n, _) = self.get_normal_and_distance_to_origin()?;
         if n.z.abs() < 1e-9 {
             return None;
@@ -2338,7 +2303,7 @@ impl CeilingRegion {
     /// gable apex claimed when its derived ring is boolean-noise-displaced.
     /// `false` for plan-degenerate regions (< 3 vertices — they can never
     /// host an apex, so they must never claim one).
-    pub fn plan_contains_within(&self, p: Point2f64, eps_m: f64) -> bool {
+    pub(crate) fn plan_contains_within(&self, p: Point2f64, eps_m: f64) -> bool {
         let ext = &self.polygon.exterior;
         if ext.len() < 3 {
             return false;
@@ -2559,7 +2524,7 @@ impl WallRegion {
     /// so an opening clamped under this can never poke through the ceiling.
     /// Falls back to the lowest top vertex when `d` is out of range, else
     /// `base_z`.
-    pub fn top_z_at_along(&self, d: f64) -> f64 {
+    pub(crate) fn top_z_at_along(&self, d: f64) -> f64 {
         let e = &self.polygon.exterior;
         let Some((origin, (ux, uy), _len, base_z)) = self.base_frame() else {
             return e.first().map(|v| v.z).unwrap_or(0.0);
@@ -3547,12 +3512,6 @@ impl Storey {
         self.roofs = CeilingRegions::default();
         self.roof_apexes = Vec::new();
     }
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ShelteredSideInfo {
-    pub id: ItemId,
-    pub sheltered_sides: i32, // e.g., ["North", "West"]
 }
 
 #[derive(Debug, Default, Clone, Serialize, Deserialize, PartialEq)]

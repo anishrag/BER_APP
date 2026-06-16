@@ -82,9 +82,7 @@ pub use history::HistorySnapshot;
 pub use new_storey::NewStoreyPromptUiData;
 use new_storey::{NewStoreyStage, PendingNewStorey};
 use openings::PendingOpening;
-pub use openings::{
-    ElevationView, OpeningPlanView, OpeningPromptUiData, OpeningToolKind, OpeningViewKind,
-};
+pub use openings::{ElevationView, OpeningPromptUiData, OpeningToolKind, OpeningViewKind};
 #[cfg(test)]
 use persistence::PARAMETRIC_SNAPSHOT_VERSION;
 pub use review::CollinearityReview;

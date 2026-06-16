@@ -23,7 +23,7 @@ impl DataLoader {
         Ok(())
     }
 
-    pub fn simulate_loading_data(&self, tx: Sender<(String, f32)>) -> Result<(), String> {
+    fn simulate_loading_data(&self, tx: Sender<(String, f32)>) -> Result<(), String> {
         // Logic to simulate data loading
         let steps = vec![
             "Loading config",

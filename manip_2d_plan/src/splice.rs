@@ -15,7 +15,7 @@ use domain::points::Point2f32;
 
 /// One slot in a planned spliced ring.
 #[derive(Debug, Clone, PartialEq)]
-pub enum SpliceElem {
+pub(crate) enum SpliceElem {
     /// Preserve the existing ring vertex at this index — identity, coordinate
     /// expressions, and parameter IDs all carry through unchanged.
     Keep(usize),
@@ -31,7 +31,7 @@ pub enum SpliceElem {
 /// `Keep(idx)`; the two attach points (`ortho_path`'s endpoints) and the porch
 /// interior are `New`. Same-edge bumps split the edge; cross-edge replacements
 /// drop the spanned corner(s). The stroke orients automatically.
-pub fn plan_splice_sequence(
+pub(crate) fn plan_splice_sequence(
     ring: &[Point2f32],
     e1: usize,
     t1: f32,
@@ -71,7 +71,7 @@ pub fn plan_splice_sequence(
 ///
 /// Extend always replaces the SHORTER arc (via [`plan_splice_sequence`]); Trim
 /// builds both and keeps whichever leaves the larger-area polygon.
-pub fn splice_sequence(
+pub(crate) fn splice_sequence(
     ring: &[Point2f32],
     e1: usize,
     t1: f32,

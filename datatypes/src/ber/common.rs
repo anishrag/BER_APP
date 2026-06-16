@@ -97,13 +97,6 @@ impl ConstructionPhases {
         self.nicknames.get(phase).map(|s| s.as_str())
     }
 
-    pub fn get_year(&self, phase: ConstructionPhase) -> Year {
-        self.years
-            .get(&phase)
-            .copied()
-            .expect("Phase not found in construction years")
-    }
-
     /// Non-panicking lookup of a phase's year, if one has been set.
     pub fn year_of(&self, phase: &ConstructionPhase) -> Option<Year> {
         self.years.get(phase).copied()

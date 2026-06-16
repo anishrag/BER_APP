@@ -22,8 +22,6 @@ pub struct PadResponse {
     pub submitted: bool,
     /// Buffer changed this frame (typed or via the pad).
     pub changed: bool,
-    /// The underlying `TextEdit` response (focus checks, ids).
-    pub response: egui::Response,
 }
 
 /// Are the on-screen pads active? Android always; desktop opts in with
@@ -115,11 +113,7 @@ fn input_with_pad(
         }
     }
 
-    PadResponse {
-        submitted,
-        changed,
-        response,
-    }
+    PadResponse { submitted, changed }
 }
 
 /// Minimum finger-target size for pad keys.

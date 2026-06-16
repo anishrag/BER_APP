@@ -843,7 +843,16 @@ fn check_rect_corner_claims(storey: &Storey, q: Point2f64, ridx: usize) -> Resul
 /// flat, un-apexed ceiling area's plan-bbox extent along its axis (the
 /// OPTIMISTIC bound — the binding check is the finalize placement's,
 /// [`validate_roof_rect_placement`]). `Err` is user-facing, messages stable.
-pub fn validate_roof_rect_lengths(storey: &Storey, len_x: f32, len_y: f32) -> Result<(), String> {
+///
+/// Test-only batch sibling of [`validate_roof_rect_length`]: the shell drives
+/// the per-axis singular (one rejection attaches to the typed value); this
+/// both-at-once form is kept for the unit tests.
+#[cfg(test)]
+pub(crate) fn validate_roof_rect_lengths(
+    storey: &Storey,
+    len_x: f32,
+    len_y: f32,
+) -> Result<(), String> {
     validate_roof_rect_length(storey, ParameterAxis::X, len_x)?;
     validate_roof_rect_length(storey, ParameterAxis::Y, len_y)
 }

@@ -9,7 +9,7 @@ use domain::points::Point2f32;
 /// least squares: returns the centroid and a unit direction vector along the
 /// line's principal axis (the direction of greatest spread). Used by Trim to
 /// turn a freehand cut stroke into a clean straight cut line.
-pub fn fit_line(points: &[Point2f32]) -> (Point2f32, (f32, f32)) {
+pub(crate) fn fit_line(points: &[Point2f32]) -> (Point2f32, (f32, f32)) {
     let n = points.len().max(1) as f32;
     let cx = points.iter().map(|p| p.x).sum::<f32>() / n;
     let cy = points.iter().map(|p| p.y).sum::<f32>() / n;
@@ -275,7 +275,7 @@ pub fn find_flipped_edge(
 /// records which way the curve bows. Used to capture a freehand arc as a clean
 /// circular segment (chord endpoints + this one bulge value) instead of the
 /// noisy raw polyline. Returns 0 for a degenerate (zero-length) chord.
-pub fn stroke_sagitta(stroke: &[Point2f32]) -> f32 {
+pub(crate) fn stroke_sagitta(stroke: &[Point2f32]) -> f32 {
     if stroke.len() < 3 {
         return 0.0;
     }
@@ -308,7 +308,7 @@ pub fn stroke_sagitta(stroke: &[Point2f32]) -> f32 {
 /// near-zero sagitta or zero-length chord degenerates to `[p1, p2]` (a straight
 /// segment). This is how a provisional arc becomes model points once its attach
 /// dimensions are set.
-pub fn circular_arc_points(
+pub(crate) fn circular_arc_points(
     p1: Point2f32,
     p2: Point2f32,
     sagitta: f32,
@@ -588,7 +588,7 @@ fn segment_crossing(
 /// such a verbatim wall and is left untouched; anything else tilted gets the
 /// corner. `tol` is small (a few mm) so a real off-level join is squared but
 /// float noise on a verbatim edge isn't.
-pub fn orthogonalize_off_boundary(
+pub(crate) fn orthogonalize_off_boundary(
     ring: &[Point2f32],
     outline: &[Point2f32],
     tol: f32,
@@ -633,7 +633,7 @@ pub fn orthogonalize_off_boundary(
 /// Used to repair a sub-area whose assembly placed a vertex past an adjacent
 /// wall (e.g. a boundary-hugging loop whose diagonal endpoint landed outside
 /// the room's own side wall), instead of emitting the crossed shape.
-pub fn untangle_ring(points: &[Point2f32]) -> Vec<Point2f32> {
+pub(crate) fn untangle_ring(points: &[Point2f32]) -> Vec<Point2f32> {
     let mut ring: Vec<Point2f32> = points.to_vec();
     // Each pass resolves one crossing (shrinking the ring), so the loop is
     // bounded by the vertex count.

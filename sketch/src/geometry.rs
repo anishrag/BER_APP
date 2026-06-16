@@ -1,17 +1,9 @@
 // ===== sketch/src/geometry.rs =====
 use crate::model::Stroke;
+#[cfg(test)]
 use domain::points::Point2f32;
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub struct Aabb {
-    pub min: Point2f32,
-    pub max: Point2f32,
-}
 
 impl Stroke {
-    pub fn add_point(&mut self, p: Point2f32) {
-        self.points.push(p);
-    }
-
     /// If the stroke's lift point is within `epsilon` of its starting point,
     /// mark the stroke closed and pop any trailing points still inside the
     /// snap zone (the homing-in wiggle the assessor leaves as they curl back).
@@ -57,23 +49,6 @@ impl Stroke {
         }
 
         true
-    }
-
-    pub fn bounding_box(&self) -> Option<Aabb> {
-        let mut iter = self.points.iter();
-        let first = iter.next()?;
-
-        let mut min = *first;
-        let mut max = *first;
-
-        for p in iter {
-            min.x = min.x.min(p.x);
-            min.y = min.y.min(p.y);
-            max.x = max.x.max(p.x);
-            max.y = max.y.max(p.y);
-        }
-
-        Some(Aabb { min, max })
     }
 }
 

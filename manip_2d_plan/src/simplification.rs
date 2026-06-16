@@ -9,7 +9,7 @@ use geo::{Coord, LineString};
 /// errors below 3 points — a straight wall here MUST be allowed to collapse to
 /// its two endpoints; otherwise the caller keeps the raw wander and staircases
 /// it. Returns the input unchanged when there's nothing to simplify (<3 points).
-pub fn simplify_open(points: &[Point2f32], tolerance: f32) -> Vec<Point2f32> {
+pub(crate) fn simplify_open(points: &[Point2f32], tolerance: f32) -> Vec<Point2f32> {
     if points.len() < 3 {
         return points.to_vec();
     }
@@ -28,7 +28,10 @@ pub fn simplify_open(points: &[Point2f32], tolerance: f32) -> Vec<Point2f32> {
 }
 
 /// Simplify a stroke using the Ramer-Douglas-Peucker algorithm
-pub fn simplify_stroke(points: &[Point2f32], tolerance: f32) -> Result<Vec<Point2f32>, Error> {
+pub(crate) fn simplify_stroke(
+    points: &[Point2f32],
+    tolerance: f32,
+) -> Result<Vec<Point2f32>, Error> {
     if points.len() < 3 {
         return Err(Error::InsufficientPoints);
     }

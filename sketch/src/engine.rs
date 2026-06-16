@@ -7,11 +7,11 @@ use domain::sketch::{DisplayMode, EditTools, SketchMode};
 
 /// Distance (px) within which lifting the mouse near the stroke's start point
 /// auto-closes the polygon.
-pub const DEFAULT_CLOSE_EPSILON: f32 = 30.0;
+pub(crate) const DEFAULT_CLOSE_EPSILON: f32 = 30.0;
 
 /// Distance (px) within which a new touch near an existing stroke's endpoint
 /// extends that stroke instead of starting a fresh one. Should be > [`DEFAULT_CLOSE_EPSILON`].
-pub const DEFAULT_SNAP_EPSILON: f32 = 100.0;
+pub(crate) const DEFAULT_SNAP_EPSILON: f32 = 100.0;
 pub trait SketchModeBehaviour: std::fmt::Debug {
     fn start_stroke(
         &mut self,
@@ -43,13 +43,6 @@ pub enum SketchError {
     InvalidStroke,
     ProcessingError,
 }
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub enum SketchEvent {
-    StrokeStarted,
-    StrokeUpdated,
-    StrokeFinished { stroke_idx: usize },
-    StrokeClosed { stroke_idx: usize },
-}
 
 #[derive(Default, Debug, Clone)]
 pub enum StrokeAppendMode {
@@ -61,13 +54,13 @@ pub enum StrokeAppendMode {
 #[derive(Debug)]
 pub struct SketchEngine {
     pub stroke: Option<Stroke>,
-    pub mode_behaviour: Box<dyn SketchModeBehaviour>,
+    pub(crate) mode_behaviour: Box<dyn SketchModeBehaviour>,
     pub mode: SketchMode,
     pub display: DisplayMode,
     pub edit_tool: EditTools,
-    pub close_epsilon: f32,
-    pub snap_epsilon: f32,
-    pub append_mode: StrokeAppendMode,
+    pub(crate) close_epsilon: f32,
+    pub(crate) snap_epsilon: f32,
+    pub(crate) append_mode: StrokeAppendMode,
 }
 
 impl Default for SketchEngine {
@@ -90,15 +83,11 @@ impl SketchEngine {
         Self::default()
     }
 
-    pub fn set_mode_behaviour(&mut self, behaviour: Box<dyn SketchModeBehaviour>) {
+    pub(crate) fn set_mode_behaviour(&mut self, behaviour: Box<dyn SketchModeBehaviour>) {
         self.mode_behaviour = behaviour;
     }
     pub fn set_mode(&mut self, mode: SketchMode) {
         self.mode = mode;
-        self.update_mode_behaviour();
-    }
-    pub fn set_display(&mut self, mode: DisplayMode) {
-        self.display = mode;
         self.update_mode_behaviour();
     }
     pub fn set_edit_tools(&mut self, mode: EditTools) {

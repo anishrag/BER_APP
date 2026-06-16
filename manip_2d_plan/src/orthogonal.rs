@@ -6,7 +6,7 @@ use crate::Error;
 
 /// How the orthogonalizer treats the gap between a path's two ends.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Closure {
+pub(crate) enum Closure {
     /// Never join the ends — a strictly OPEN path (trim, extend, cut). Two ends
     /// that happen to land near each other are left as two separate ends.
     Open,
@@ -21,7 +21,7 @@ pub enum Closure {
 /// Convert a simplified stroke to an orthogonal polygon and generate base
 /// constraints. `closure` decides whether the two ends get joined — see
 /// [`Closure`] and [`make_orthogonal_at`].
-pub fn make_orthogonal(
+pub(crate) fn make_orthogonal(
     points: &[Point2f32],
     tolerance: f32,
     closure: Closure,
@@ -35,7 +35,7 @@ pub fn make_orthogonal(
 /// axis-aligned storey must snap to the storey's axes (`base_angle = 0`), so a
 /// room drawn partly along a diagonal boundary doesn't tilt the whole shape to
 /// 45°. (The boundary wall is then pulled onto the diagonal separately.)
-pub fn make_orthogonal_at(
+pub(crate) fn make_orthogonal_at(
     points: &[Point2f32],
     tolerance: f32,
     base_angle: f32,
@@ -79,7 +79,7 @@ pub fn make_orthogonal_at(
 /// horizontal, so we set `last.y = first.y`; a horizontal last edge flips it.
 /// Should only be called when the polygon was implicitly closed (i.e. the
 /// `closed` flag is set in `from_points_to_orthogonal`).
-pub fn snap_closing_edge(mut points: Vec<Point2f32>, tolerance: f32) -> Vec<Point2f32> {
+pub(crate) fn snap_closing_edge(mut points: Vec<Point2f32>, tolerance: f32) -> Vec<Point2f32> {
     let n = points.len();
     if n < 3 {
         return points;
@@ -121,7 +121,7 @@ pub fn snap_closing_edge(mut points: Vec<Point2f32>, tolerance: f32) -> Vec<Poin
 ///
 /// Walks the polygon cyclically from index 0 and picks the first corner.
 /// Returns the input unchanged if there are no corners (degenerate input).
-pub fn rotate_to_corner_start(mut points: Vec<Point2f32>, tolerance: f32) -> Vec<Point2f32> {
+pub(crate) fn rotate_to_corner_start(mut points: Vec<Point2f32>, tolerance: f32) -> Vec<Point2f32> {
     let n = points.len();
     if n < 3 {
         return points;
@@ -166,7 +166,7 @@ pub(crate) const EXACT_COLLINEAR_TOL: f32 = 1e-3;
 /// as cyclic so the implicit closing edge from the last vertex back to the
 /// first counts. Iterates until stable — chains of 3+ collinear points
 /// collapse fully.
-pub fn remove_collinear(points: &[Point2f32], tolerance: f32) -> Vec<Point2f32> {
+pub(crate) fn remove_collinear(points: &[Point2f32], tolerance: f32) -> Vec<Point2f32> {
     if points.len() < 3 {
         return points.to_vec();
     }
@@ -328,7 +328,7 @@ fn snap_to_orthogonal(
 
 /// Remove duplicate consecutive points, plus a trailing duplicate of the
 /// first vertex if the polygon happens to close on itself exactly.
-pub fn remove_duplicates(points: &[Point2f32], tolerance: f32) -> Vec<Point2f32> {
+pub(crate) fn remove_duplicates(points: &[Point2f32], tolerance: f32) -> Vec<Point2f32> {
     if points.is_empty() {
         return Vec::new();
     }

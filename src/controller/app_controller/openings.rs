@@ -42,13 +42,6 @@ pub enum OpeningViewKind {
     SidelightWindow,
 }
 
-/// One opening as the plan overlay needs it (currently unused by the default
-/// render, which draws from `vertices`; kept for highlight/selection later).
-pub struct OpeningPlanView {
-    pub kind: OpeningViewKind,
-    pub polygon: Vec<(f64, f64)>,
-}
-
 /// One opening on the unrolled wall, in wall-local coords (along, sill).
 pub struct ElevationOpening {
     pub kind: OpeningViewKind,

@@ -103,7 +103,7 @@ pub fn stroke_is_closed(pts: &[Point2f32], gap_m: f32) -> bool {
 /// enclosed (shoelace) area must be a real fraction of the stroke's extent.
 /// Public (re-exported as `stroke_encloses_area`); [`stroke_is_closed`]
 /// combines it with the ends-meet test.
-pub fn encloses_area(pts: &[Point2f32]) -> bool {
+pub(crate) fn encloses_area(pts: &[Point2f32]) -> bool {
     let Some(((x0, y0), (x1, y1))) = geom::bbox(pts) else {
         return false;
     };
@@ -167,6 +167,9 @@ fn subtract_all(outline: &[Point2f32], holes: &[Vec<Point2f32>]) -> Vec<FloorPla
 }
 
 /// The single LARGEST piece of `outline` minus `holes` — see [`subtract_all`].
+/// Test-only: the app uses [`subtract_all`]; kept (with [`FloorPlan::subtract`])
+/// as a tested primitive.
+#[cfg(test)]
 fn subtract(outline: &[Point2f32], holes: &[Vec<Point2f32>]) -> Option<FloorPlan> {
     subtract_all(outline, holes).into_iter().max_by(|a, b| {
         geom::ring_signed_area2(&a.get_points())
@@ -212,8 +215,9 @@ impl FloorPlan {
     }
 
     /// Clamp points that stray outside the outline back onto it — see
-    /// [`clamp_inside`].
-    pub fn clamp_inside(&self, points: &[Point2f32]) -> Vec<Point2f32> {
+    /// [`clamp_inside`]. Test-only (the free `clamp_inside` is the live one).
+    #[cfg(test)]
+    pub(crate) fn clamp_inside(&self, points: &[Point2f32]) -> Vec<Point2f32> {
         clamp_inside(&self.parametric.ring_points(0), points)
     }
 
@@ -224,8 +228,9 @@ impl FloorPlan {
     }
 
     /// This plan MINUS the union of `holes`, as a fresh `FloorPlan` — see
-    /// [`subtract`].
-    pub fn subtract(&self, holes: &[Vec<Point2f32>]) -> Option<FloorPlan> {
+    /// [`subtract`]. Test-only (the app uses [`FloorPlan::subtract_all`]).
+    #[cfg(test)]
+    pub(crate) fn subtract(&self, holes: &[Vec<Point2f32>]) -> Option<FloorPlan> {
         subtract(&self.parametric.ring_points(0), holes)
     }
 

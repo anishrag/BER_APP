@@ -18,7 +18,7 @@ use super::structural::{
 /// This floor exists to kill SLIVERS (boolean-noise fragments), not small
 /// rooms — anything under ~0.7 m × 0.7 m is geometry noise, but a small
 /// flat ceiling is still a legitimate storey to build on.
-pub const MIN_SUGGESTION_AREA_M2: f64 = 0.5;
+pub(crate) const MIN_SUGGESTION_AREA_M2: f64 = 0.5;
 
 /// Scoring weights (per the approved spec these live in code, not
 /// `tuning.yaml`). The score B/C consume — higher is better:
@@ -66,7 +66,7 @@ pub struct OutlineSuggestion {
 /// Everything a heuristic may look at, derived once per
 /// [`suggest_storey_outlines`] call from the storey below.
 #[derive(Clone, Debug)]
-pub struct SuggestionContext {
+pub(crate) struct SuggestionContext {
     /// The below storey's FLAT ceiling regions as `(plan ring, flat z)`, in
     /// region order. Rings are open (no closing duplicate).
     pub flats: Vec<(Vec<Point2f64>, f64)>,
@@ -85,7 +85,7 @@ pub struct SuggestionContext {
 
 /// A suggestion heuristic: a label (becomes [`OutlineSuggestion::source`])
 /// plus a function from the context to RAW candidate rings.
-pub type OutlineHeuristic = (&'static str, fn(&SuggestionContext) -> Vec<Vec<Point2f64>>);
+pub(crate) type OutlineHeuristic = (&'static str, fn(&SuggestionContext) -> Vec<Vec<Point2f64>>);
 
 /// The suggestion heuristics, in the order they run.
 ///
@@ -96,7 +96,7 @@ pub type OutlineHeuristic = (&'static str, fn(&SuggestionContext) -> Vec<Vec<Poi
 /// [`MIN_SUGGESTION_AREA_M2`], collinear-strip, f32-quantize), scores,
 /// sorts, dedups and caps; a heuristic never needs to do any of that, and
 /// returning an empty/degenerate ring is always safe.
-pub const HEURISTICS: &[OutlineHeuristic] = &[
+pub(crate) const HEURISTICS: &[OutlineHeuristic] = &[
     ("all-flat-union", h1_all_flat_union),
     ("largest-flat", h2_largest_flat_region),
     ("same-z-group", h3_same_z_groups),

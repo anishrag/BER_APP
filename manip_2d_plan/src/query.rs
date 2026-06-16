@@ -336,7 +336,9 @@ impl FloorPlan {
 
     /// Remove the vertex at `(ring, idx)`, collapsing the walls around it. See
     /// [`ParametricPlan::remove_vertex`](parametric::ParametricPlan::remove_vertex).
-    pub fn remove_vertex(&mut self, ring: usize, idx: usize) -> bool {
+    /// Test-only: not on any app path (vertex removal goes via trim/splice).
+    #[cfg(test)]
+    pub(crate) fn remove_vertex(&mut self, ring: usize, idx: usize) -> bool {
         self.parametric.remove_vertex(ring, idx)
     }
 
@@ -500,11 +502,6 @@ impl FloorPlan {
     /// Current value of a parameter (in the plan's current units), or None.
     pub fn parameter_value(&self, p: ParameterId) -> Option<f32> {
         self.parametric.parameter_value(p)
-    }
-
-    /// Multiply a single parameter's value by `factor`.
-    pub fn scale_parameter(&mut self, param: ParameterId, factor: f32) {
-        self.parametric.scale_parameter(param, factor);
     }
 
     /// Rebuild every ring with zero-length edges and collinear middle vertices
