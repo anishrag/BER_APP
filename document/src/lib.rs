@@ -34,7 +34,9 @@ pub use ceiling_step::{
 pub use debug::debug_dump_storey;
 /// Derive full per-wall exposure coverage — the shell's `commit_to_ber` uses it.
 pub use exposure::{range_at, wall_coverage, RiserKind, RiserWall};
-pub use phase::{phase_regions_from_floors, stamp_wall_phases, PhaseRegion};
+pub use phase::{
+    inherited_phase_regions, phase_regions_from_floors, stamp_wall_phases, PhaseRegion,
+};
 pub use position::{PositionOption, PositionPrompt, PositionPromptKind};
 pub use resolve::{ensure_storey_constructions, resolve_storey};
 pub use roof_point::{

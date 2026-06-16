@@ -402,20 +402,37 @@ impl AppController {
             return;
         };
         let seeded = document::inherited_step_regions(below, footprint);
+        // Same transition seeds the inherited construction-PHASE zones from the
+        // storey below: a two-storey extension carries its construction date up
+        // without re-drawing. The resolve partition clips them to this outline
+        // and the post-commit reconstruction canonicalizes — a zone the new
+        // outline doesn't reach drops out. (Re-borrow the ber here; `below`'s
+        // borrow has ended.)
+        let phases = self
+            .current_record
+            .as_ref()
+            .map(|r| document::inherited_phase_regions(&r.data, idx - 1))
+            .unwrap_or_default();
         log::debug!(
-            "[new-storey] seeding {} inherited floor level(s) onto storey {idx}",
-            seeded.len()
+            "[new-storey] seeding {} inherited floor level(s) and {} phase zone(s) onto storey {idx}",
+            seeded.len(),
+            phases.len()
         );
         if !seeded.is_empty() {
             self.step_regions.entry(idx).or_default().extend(seeded);
         }
-        // Derive now (with_levels splits the floors), then canonicalize the
-        // session list from the derived regions — trap 1: the session set is
-        // the exact datatypes pieces, so reload is a fixpoint.
+        if !phases.is_empty() {
+            self.phase_regions.entry(idx).or_default().extend(phases);
+        }
+        // Derive now (with_levels splits the floors, the phase partition splits
+        // them by construction), then canonicalize BOTH session lists from the
+        // derived regions — trap 1: the session set is the exact datatypes
+        // pieces, so reload is a fixpoint.
         if let Err(e) = self.commit_to_ber() {
             log::error!("commit_to_ber after inherited-level seed: {e}");
         }
         self.reconstruct_step_regions_for(idx);
+        self.reconstruct_phase_regions_for(idx);
     }
 
     /// A WHOLESALE outline replacement on an UPPER storey (the redraw
@@ -442,6 +459,9 @@ impl AppController {
         }
         self.inherited_seed_pending.insert(idx);
         self.step_regions.remove(&idx);
+        // The inherited phase zones were canonicalized against the OLD footprint
+        // too — drop them so the finalisation tail re-seeds against the new one.
+        self.phase_regions.remove(&idx);
     }
 
     /// Re-derive which storeys still await their inherited-level seed —

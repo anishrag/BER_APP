@@ -270,8 +270,8 @@ impl AppController {
             ceiling_steps,
         );
         // Floors are already phase-correct from the partition; this stamps the
-        // phase onto the just-rebuilt WALLS from the same session areas.
-        document::stamp_wall_phases(&mut record.data, idx, regions);
+        // phase onto the just-rebuilt WALLS by reading those partitioned floors.
+        document::stamp_wall_phases(&mut record.data, idx);
     }
 
     /// Derive EVERY storey's geometry into `current_record` — the all-storeys
@@ -312,7 +312,7 @@ impl AppController {
                 steps,
                 ceiling_steps,
             );
-            document::stamp_wall_phases(&mut record.data, idx, regions);
+            document::stamp_wall_phases(&mut record.data, idx);
         }
     }
 

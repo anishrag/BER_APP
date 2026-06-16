@@ -1773,43 +1773,12 @@ fn untagged_outline_survives_reload_without_distortion() {
     }
 }
 
-/// A later phase polygon overwrites an existing non-`Original` phase under it
-/// (polygon always wins; latest tag first).
+/// A wall takes the construction phase of the partitioned FLOOR zone on its
+/// interior side: the right perimeter wall, whose interior lies in the tagged
+/// extension zone, becomes Extension1; the left perimeter wall stays Original.
+/// (Walls track the floor partition — no separate wall-only phase heuristic.)
 #[test]
-fn polygon_overwrites_existing_phase() {
-    let p = |x: f32, y: f32| Point2f32::new(x, y);
-    let right = vec![p(6., -1.), p(12., -1.), p(12., 12.), p(6., 12.)];
-    let mut c = dimensioned_square_controller();
-    c.set_all_remaining_exposed();
-    let regions = c.phase_regions.entry(0).or_default();
-    regions.push(PhaseRegion {
-        polygon: right.clone(),
-        phase: ConstructionPhase::Extension2,
-    });
-    c.commit_to_ber().unwrap();
-    // Now tag the SAME area Extension1 — must override the Extension2.
-    c.phase_regions.entry(0).or_default().push(PhaseRegion {
-        polygon: right,
-        phase: ConstructionPhase::Extension1,
-    });
-    c.commit_to_ber().unwrap();
-
-    let walls = c.current_record.as_ref().unwrap().data.storeys[0]
-        .walls
-        .regions
-        .clone();
-    let right_idx = walls
-        .iter()
-        .position(|w| w.base_midpoint().unwrap().x >= 6.0)
-        .unwrap();
-    assert_eq!(wall_phase(&c, right_idx), ConstructionPhase::Extension1);
-}
-
-/// Once a wall is tagged, removing the polygon does NOT revert it — a surface
-/// keeps its non-`Original` phase when no polygon covers it (the durable
-/// record is `construction_id`). This is the reload-safety guarantee.
-#[test]
-fn preserve_existing_phase_when_no_polygon() {
+fn wall_takes_the_phase_of_its_interior_floor_zone() {
     let p = |x: f32, y: f32| Point2f32::new(x, y);
     let mut c = dimensioned_square_controller();
     c.set_all_remaining_exposed();
@@ -1831,19 +1800,42 @@ fn preserve_existing_phase_when_no_polygon() {
         .position(|w| w.base_midpoint().unwrap().x < 6.0)
         .unwrap();
     assert_eq!(wall_phase(&c, right_idx), ConstructionPhase::Extension1);
+    assert_eq!(wall_phase(&c, left_idx), ConstructionPhase::Original);
+}
 
-    // Drop all polygons (as a reload/new session would) and re-commit.
+/// A tagged phase survives a reload: the durable record is the floor regions'
+/// `construction_id`, and the genuine reload path REBUILDS the session phase
+/// regions from those floors (`reconstruct_phase_regions_for`) before the next
+/// commit re-partitions. Simulate that here — clear the session regions, then
+/// reconstruct — and the wall keeps its phase. (Clearing WITHOUT reconstructing
+/// is not the reload path and is not expected to preserve anything.)
+#[test]
+fn phase_survives_reload_via_reconstruction() {
+    let p = |x: f32, y: f32| Point2f32::new(x, y);
+    let mut c = dimensioned_square_controller();
+    c.set_all_remaining_exposed();
+    c.phase_regions.entry(0).or_default().push(PhaseRegion {
+        polygon: vec![p(6., -1.), p(12., -1.), p(12., 12.), p(6., 12.)],
+        phase: ConstructionPhase::Extension1,
+    });
+    c.commit_to_ber().unwrap();
+    let right_idx = c.current_record.as_ref().unwrap().data.storeys[0]
+        .walls
+        .regions
+        .iter()
+        .position(|w| w.base_midpoint().unwrap().x >= 6.0)
+        .unwrap();
+    assert_eq!(wall_phase(&c, right_idx), ConstructionPhase::Extension1);
+
+    // Simulate reload: drop the session regions, then rebuild them from the
+    // persisted floor tags exactly as `open_ber` does, and re-commit.
     c.phase_regions.clear();
+    c.reconstruct_phase_regions_for(0);
     c.commit_to_ber().unwrap();
     assert_eq!(
         wall_phase(&c, right_idx),
         ConstructionPhase::Extension1,
-        "tagged wall keeps its phase with no polygon"
-    );
-    assert_eq!(
-        wall_phase(&c, left_idx),
-        ConstructionPhase::Original,
-        "untagged wall stays original"
+        "the tag is rebuilt from the floors on reload"
     );
 }
 

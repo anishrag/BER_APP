@@ -18,46 +18,86 @@ pub struct PhaseRegion {
     pub phase: ConstructionPhase,
 }
 
-/// The construction phase to stamp on a surface at `(x, y)` (storey metre
-/// space), given its `existing` phase. The agreed rule: a phase region
-/// containing the point WINS (latest tag first); else preserve a non-`Original`
-/// existing phase; else `Original`.
-fn resolved_phase(
-    regions: &[PhaseRegion],
-    x: f32,
-    y: f32,
-    existing: ConstructionPhase,
-) -> ConstructionPhase {
-    if let Some(r) = regions
+/// How far (metres) off a wall's centre-line we sample to read the floor zone
+/// on each side. Small enough to stay within the adjacent floor region (rooms
+/// are ≫ this), large enough to clear the shared boundary the wall sits on.
+const SIDE_SAMPLE_OFFSET_M: f64 = 0.02;
+
+/// The construction phase of the partitioned FLOOR region containing `(x, y)`
+/// on storey `idx`, or `None` when the point lies outside the building (in no
+/// floor region — e.g. the open-air side of a perimeter wall). The floors are
+/// already phase-correct from the commit-time partition, so they are the
+/// authoritative zone map: the Original remainder reads `Original`, each
+/// extension zone reads its own phase.
+fn floor_phase_at(ber: &Ber, idx: usize, x: f32, y: f32) -> Option<ConstructionPhase> {
+    let storey = ber.storeys.get(idx)?;
+    for (fr, verts) in storey
+        .floors
+        .regions
         .iter()
-        .rev()
-        .find(|r| manip_2d_plan::ring_contains_point(&r.polygon, x, y))
+        .zip(storey.floors.to_vertex_lists())
     {
-        r.phase.clone()
-    } else if existing != ConstructionPhase::Original {
-        existing
-    } else {
-        ConstructionPhase::Original
+        let ring: Vec<Point2f32> = verts.iter().copied().map(to_f32).collect();
+        if ring.len() >= 3 && manip_2d_plan::ring_contains_point(&ring, x, y) {
+            return Some(
+                ber.floor_construction(fr.construction_id)
+                    .map(|c| c.base.construction_phase.clone())
+                    .unwrap_or(ConstructionPhase::Original),
+            );
+        }
+    }
+    None
+}
+
+/// Sort key for "older wins": smaller = older. `Original` is the oldest fabric
+/// by definition (it predates every extension), so it floors the scale; an
+/// extension orders by its construction year. A phase with no year set (can't
+/// normally happen — only dated phases are assignable) sorts as newest.
+fn phase_age(ber: &Ber, phase: &ConstructionPhase) -> u32 {
+    match phase {
+        ConstructionPhase::Original => u32::MIN,
+        p => ber.construction_phases.year_of(p).unwrap_or(u32::MAX),
     }
 }
 
-/// Stamp the construction PHASE onto storey `idx`'s WALLS from the session
-/// phase regions (floors are already phase-correct from the commit-time
-/// partition). Per wall, by its base midpoint: a region containing it WINS
-/// (latest first); else the wall keeps its existing non-`Original` phase
-/// (rebuild inherited it); else `Original`. Type/make-up are preserved — only
-/// the phase axis changes, so the construction is re-`ensure`d with the same
-/// `(type, makeup)`.
-pub fn stamp_wall_phases(ber: &mut Ber, idx: usize, regions: &[PhaseRegion]) {
+/// Stamp the construction PHASE onto storey `idx`'s WALLS from the already
+/// phase-partitioned FLOORS (floors are stamped at commit-time partition; this
+/// projects their zones onto the walls). Per wall, sample the floor zone a
+/// hair off each side of its centre-line:
+///  - a PERIMETER wall has building on one side and open air (no floor region)
+///    on the other → it takes the interior side's phase, reliably, even though
+///    its centre-line sits exactly on the zone boundary;
+///  - a wall straddling two zones of DIFFERENT ages takes the OLDER phase (the
+///    shared/party wall belongs to the earlier structure).
+/// Type/make-up are preserved — only the phase axis changes, so the
+/// construction is re-`ensure`d with the same `(type, makeup)`.
+pub fn stamp_wall_phases(ber: &mut Ber, idx: usize) {
     if ber.storeys.len() <= idx {
         return;
     }
     let n_walls = ber.storeys[idx].walls.regions.len();
     for i in 0..n_walls {
-        let Some(mid) = ber.storeys[idx].walls.regions[i].base_midpoint() else {
-            continue;
+        // Pull the wall's base edge + current construction out as owned values
+        // so the floor reads below don't alias the (later) mutable reassign.
+        let (s1, s2, cur_cid) = {
+            let e = &ber.storeys[idx].walls.regions[i].polygon.exterior;
+            if e.len() < 2 {
+                continue;
+            }
+            let (ax, ay, bx, by) = (e[0].x, e[0].y, e[1].x, e[1].y);
+            let (dx, dy) = (bx - ax, by - ay);
+            let len = (dx * dx + dy * dy).sqrt();
+            if len < 1e-9 {
+                continue;
+            }
+            // Unit normal to the base edge; sample the floor a hair to each side.
+            let (nx, ny) = (-dy / len, dx / len);
+            let (mx, my) = ((ax + bx) * 0.5, (ay + by) * 0.5);
+            let o = SIDE_SAMPLE_OFFSET_M;
+            let s1 = ((mx + nx * o) as f32, (my + ny * o) as f32);
+            let s2 = ((mx - nx * o) as f32, (my - ny * o) as f32);
+            (s1, s2, ber.storeys[idx].walls.regions[i].construction_id)
         };
-        let cur_cid = ber.storeys[idx].walls.regions[i].construction_id;
         let (ty, makeup, cur_phase) = match ber.wall_construction(cur_cid) {
             Some(c) => (
                 c.construction_type,
@@ -70,12 +110,34 @@ pub fn stamp_wall_phases(ber: &mut Ber, idx: usize, regions: &[PhaseRegion]) {
                 ConstructionPhase::Original,
             ),
         };
-        let new_phase = resolved_phase(regions, mid.x as f32, mid.y as f32, cur_phase.clone());
+        // The zones on each side (open-air samples drop out); the OLDER wins.
+        // No floor region on either side (degenerate) → keep the current phase.
+        let new_phase = [
+            floor_phase_at(ber, idx, s1.0, s1.1),
+            floor_phase_at(ber, idx, s2.0, s2.1),
+        ]
+        .into_iter()
+        .flatten()
+        .min_by_key(|p| phase_age(ber, p))
+        .unwrap_or_else(|| cur_phase.clone());
         if new_phase != cur_phase {
             let cid = ber.ensure_wall_construction(ty, makeup, new_phase);
             ber.storeys[idx].walls.regions[i].construction_id = cid;
         }
     }
+}
+
+/// The phase regions a NEW upper storey INHERITS from the storey below it: the
+/// below storey's tagged zones (rebuilt from its persisted floors), seeded onto
+/// the new storey so a two-storey extension carries its construction date up
+/// without re-drawing. The seed is clipped to the new outline by the resolve
+/// partition and canonicalized by the post-commit reconstruction (the same
+/// seed → commit → reconstruct flow as inherited floor steps), so a zone the
+/// upper outline doesn't reach simply drops out. The phase's YEAR is BER-level
+/// (entered once in Key Details), so nothing extra is propagated — only the
+/// zone + its phase tag. Empty when nothing below is tagged.
+pub fn inherited_phase_regions(ber: &Ber, below_idx: usize) -> Vec<PhaseRegion> {
+    phase_regions_from_floors(ber, below_idx)
 }
 
 /// Rebuild the session phase regions for storey `idx` from its persisted floor
@@ -116,54 +178,149 @@ pub fn phase_regions_from_floors(ber: &Ber, idx: usize) -> Vec<PhaseRegion> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use datatypes::ber::structural::{FloorRegions, Storey};
+    use datatypes::ber::structural::{
+        CeilingRegions, FloorRegions, Storey, WallExposure, WallRegions,
+    };
     use domain::points::Point2f64;
 
-    fn ring(side: f32) -> Vec<Point2f32> {
-        vec![
-            Point2f32::new(0.0, 0.0),
-            Point2f32::new(side, 0.0),
-            Point2f32::new(side, side),
-            Point2f32::new(0.0, side),
-        ]
-    }
-
-    fn region(side: f32, phase: ConstructionPhase) -> PhaseRegion {
-        PhaseRegion {
-            polygon: ring(side),
-            phase,
-        }
-    }
-
-    #[test]
-    fn containing_region_wins_latest_first() {
-        let regions = vec![
-            region(10.0, ConstructionPhase::Extension1),
-            region(5.0, ConstructionPhase::Extension2),
+    /// A 10×5 storey split into an Original zone (x < 5) and an Extension1 zone
+    /// (x > 5), with walls along `segs`. Years: Original 1980, Extension1 2008.
+    fn split_storey(segs: Vec<(Point2f64, Point2f64, WallExposure)>) -> Ber {
+        let mut ber = Ber::default();
+        ber.construction_phases
+            .set_year(ConstructionPhase::Original, 1980);
+        ber.construction_phases
+            .set_year(ConstructionPhase::Extension1, 2008);
+        let orig_cid = ber.ensure_floor_construction(
+            Default::default(),
+            Default::default(),
+            ConstructionPhase::Original,
+        );
+        let ext_cid = ber.ensure_floor_construction(
+            Default::default(),
+            Default::default(),
+            ConstructionPhase::Extension1,
+        );
+        let wall_cid = ber.ensure_wall_construction(
+            Default::default(),
+            Default::default(),
+            Default::default(),
+        );
+        let left = vec![
+            Point2f64::new(0.0, 0.0),
+            Point2f64::new(5.0, 0.0),
+            Point2f64::new(5.0, 5.0),
+            Point2f64::new(0.0, 5.0),
         ];
-        // Inside both → the LATER tag wins.
-        assert_eq!(
-            resolved_phase(&regions, 1.0, 1.0, ConstructionPhase::Original),
-            ConstructionPhase::Extension2
+        let right = vec![
+            Point2f64::new(5.0, 0.0),
+            Point2f64::new(10.0, 0.0),
+            Point2f64::new(10.0, 5.0),
+            Point2f64::new(5.0, 5.0),
+        ];
+        let mut floors = FloorRegions::from_vertex_lists(vec![left], orig_cid);
+        floors
+            .regions
+            .extend(FloorRegions::from_vertex_lists(vec![right], ext_cid).regions);
+        let walls = WallRegions::regenerate(
+            segs,
+            &WallRegions::default(),
+            &CeilingRegions::default(),
+            0.0,
+            2.4,
+            wall_cid,
         );
-        // Inside only the first.
-        assert_eq!(
-            resolved_phase(&regions, 8.0, 8.0, ConstructionPhase::Original),
-            ConstructionPhase::Extension1
+        ber.storeys.push(Storey {
+            floors,
+            walls,
+            ..Storey::default()
+        });
+        ber
+    }
+
+    /// The phase of the wall whose base edge is `a–b` (either orientation).
+    fn wall_phase_by_base(ber: &Ber, a: (f64, f64), b: (f64, f64)) -> ConstructionPhase {
+        let near = |p: &domain::points::Point3f64, x: f64, y: f64| {
+            (p.x - x).abs() < 1e-6 && (p.y - y).abs() < 1e-6
+        };
+        let r = ber.storeys[0]
+            .walls
+            .regions
+            .iter()
+            .find(|r| {
+                let e = &r.polygon.exterior;
+                (near(&e[0], a.0, a.1) && near(&e[1], b.0, b.1))
+                    || (near(&e[0], b.0, b.1) && near(&e[1], a.0, a.1))
+            })
+            .expect("a wall with the given base edge");
+        ber.wall_construction(r.construction_id)
+            .unwrap()
+            .base
+            .construction_phase
+            .clone()
+    }
+
+    #[test]
+    fn phase_age_orders_original_oldest_then_by_year() {
+        let mut ber = Ber::default();
+        ber.construction_phases
+            .set_year(ConstructionPhase::Extension1, 2008);
+        ber.construction_phases
+            .set_year(ConstructionPhase::Extension2, 1995);
+        // Original is the oldest fabric regardless of any extension's year.
+        assert!(
+            phase_age(&ber, &ConstructionPhase::Original)
+                < phase_age(&ber, &ConstructionPhase::Extension2)
+        );
+        // Among extensions, the earlier YEAR is older.
+        assert!(
+            phase_age(&ber, &ConstructionPhase::Extension2)
+                < phase_age(&ber, &ConstructionPhase::Extension1)
         );
     }
 
     #[test]
-    fn outside_preserves_existing_non_original_phase() {
-        let regions = vec![region(5.0, ConstructionPhase::Extension1)];
+    fn perimeter_walls_take_their_interior_zone_party_wall_takes_older() {
+        let exposed = WallExposure::Exposed;
+        let mut ber = split_storey(vec![
+            // Right perimeter: building (extension zone) inside, open air outside.
+            (
+                Point2f64::new(10.0, 0.0),
+                Point2f64::new(10.0, 5.0),
+                exposed,
+            ),
+            // Interior PARTY wall on the boundary x = 5 (original | extension).
+            (Point2f64::new(5.0, 0.0), Point2f64::new(5.0, 5.0), exposed),
+            // Left perimeter: original zone inside, open air outside.
+            (Point2f64::new(0.0, 5.0), Point2f64::new(0.0, 0.0), exposed),
+        ]);
+        stamp_wall_phases(&mut ber, 0);
+        // Perimeter walls take the phase of the zone on their interior side,
+        // even though their centre-line sits exactly on the zone boundary.
         assert_eq!(
-            resolved_phase(&regions, 20.0, 20.0, ConstructionPhase::Extension3),
-            ConstructionPhase::Extension3
+            wall_phase_by_base(&ber, (10.0, 0.0), (10.0, 5.0)),
+            ConstructionPhase::Extension1,
+            "right perimeter → extension"
         );
         assert_eq!(
-            resolved_phase(&regions, 20.0, 20.0, ConstructionPhase::Original),
-            ConstructionPhase::Original
+            wall_phase_by_base(&ber, (0.0, 5.0), (0.0, 0.0)),
+            ConstructionPhase::Original,
+            "left perimeter → original"
         );
+        // The party wall straddles two ages → the OLDER (Original) wins.
+        assert_eq!(
+            wall_phase_by_base(&ber, (5.0, 0.0), (5.0, 5.0)),
+            ConstructionPhase::Original,
+            "party wall → older structure (original)"
+        );
+    }
+
+    #[test]
+    fn inherited_phase_regions_lift_the_below_storeys_zones() {
+        let ber = split_storey(vec![]);
+        let inherited = inherited_phase_regions(&ber, 0);
+        assert_eq!(inherited.len(), 1, "the one extension zone");
+        assert_eq!(inherited[0].phase, ConstructionPhase::Extension1);
     }
 
     #[test]
@@ -202,56 +359,5 @@ mod tests {
         assert_eq!(regions[0].polygon.len(), 4);
         // Missing storey → empty.
         assert!(phase_regions_from_floors(&ber, 7).is_empty());
-    }
-
-    #[test]
-    fn stamp_wall_phases_reassigns_contained_walls_only() {
-        use datatypes::ber::structural::WallRegions;
-        let mut ber = Ber::default();
-        let wall_cid = ber.ensure_wall_construction(
-            Default::default(),
-            Default::default(),
-            Default::default(),
-        );
-        // Two walls: one inside the 5×5 phase region, one far outside.
-        let segs = vec![
-            (
-                Point2f64::new(1.0, 1.0),
-                Point2f64::new(3.0, 1.0),
-                datatypes::ber::structural::WallExposure::Exposed,
-            ),
-            (
-                Point2f64::new(20.0, 20.0),
-                Point2f64::new(24.0, 20.0),
-                datatypes::ber::structural::WallExposure::Exposed,
-            ),
-        ];
-        // This fixture tests phase stamping, not roofs — empty roofs give the
-        // flat 2.4 m top, which is all the base-midpoint hit-test needs.
-        let walls = WallRegions::regenerate(
-            segs,
-            &WallRegions::default(),
-            &datatypes::ber::structural::CeilingRegions::default(),
-            0.0,
-            2.4,
-            wall_cid,
-        );
-        ber.storeys.push(Storey {
-            walls,
-            ..Storey::default()
-        });
-
-        stamp_wall_phases(&mut ber, 0, &[region(5.0, ConstructionPhase::Extension1)]);
-
-        let phase_of = |i: usize| {
-            let cid = ber.storeys[0].walls.regions[i].construction_id;
-            ber.wall_construction(cid)
-                .unwrap()
-                .base
-                .construction_phase
-                .clone()
-        };
-        assert_eq!(phase_of(0), ConstructionPhase::Extension1);
-        assert_eq!(phase_of(1), ConstructionPhase::Original);
     }
 }
