@@ -1,7 +1,16 @@
 <?xml version="1.0" encoding="utf-8"?>
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
 
-    <!-- No permissions: the app uses internal storage only. -->
+    <!-- Bluetooth, for the Leica DISTO laser meter. We connect to an
+         already-bonded device (no scan), so no location / BLUETOOTH_SCAN is
+         needed. BLUETOOTH_CONNECT is a runtime permission on API 31+ (requested
+         in MainActivity); the legacy BLUETOOTH covers API 30. Storage is still
+         internal-only. -->
+    <uses-permission android:name="android.permission.BLUETOOTH"
+        android:maxSdkVersion="30" />
+    <uses-permission android:name="android.permission.BLUETOOTH_CONNECT" />
+    <uses-feature android:name="android.hardware.bluetooth_le"
+        android:required="false" />
 
     <application
         android:label="BER App">

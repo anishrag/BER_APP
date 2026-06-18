@@ -51,8 +51,91 @@ impl Status {
     }
 }
 
-// ── Feature ON: the real btleplug-backed source ─────────────────────────────
-#[cfg(feature = "bluetooth")]
+// ── Android: BLE lives on the Java side (MainActivity) ──────────────────────
+// Android never uses btleplug (cross-compiling its droidplug companion is a
+// thornier path — see android/README.md). Instead the Kotlin/Java activity owns
+// the BluetoothGatt connection to the paired DISTO and pushes each reading +
+// status code into the globals below via two JNI `native` methods, which the
+// UI then drains exactly like the desktop source. Raw JNI pointers keep this
+// dependency-free (no `jni` crate).
+#[cfg(target_os = "android")]
+mod backend {
+    use super::{Reading, Status};
+    use std::os::raw::c_void;
+    use std::sync::atomic::{AtomicI32, Ordering};
+    use std::sync::Mutex;
+
+    /// Latest readings pushed from Java since the last UI poll.
+    static READINGS: Mutex<Vec<Reading>> = Mutex::new(Vec::new());
+    /// Last status code reported from Java (see [`status_from_code`]).
+    static STATUS_CODE: AtomicI32 = AtomicI32::new(0);
+
+    /// Map the Java status code to a [`Status`]. Kept in sync with the `STATUS_*`
+    /// constants in `MainActivity.java`.
+    fn status_from_code(code: i32) -> Status {
+        match code {
+            1 => Status::Connecting,
+            2 => Status::Connected,
+            4 => Status::Error("No paired DISTO found — pair it in Bluetooth settings".into()),
+            5 => Status::Error("Bluetooth permission needed".into()),
+            6 => Status::Error("Bluetooth is off".into()),
+            3 => Status::Error("Bluetooth error".into()),
+            _ => Status::Idle,
+        }
+    }
+
+    /// On Android the connection is owned by the Java activity (it attaches to
+    /// the bonded DISTO on resume), so this is a thin reader over the globals
+    /// the JNI callbacks feed; `connect`/`disconnect` are no-ops.
+    pub struct LaserSource;
+
+    impl LaserSource {
+        pub fn new() -> Self {
+            Self
+        }
+        pub fn status(&self) -> Status {
+            status_from_code(STATUS_CODE.load(Ordering::SeqCst))
+        }
+        pub fn connect(&mut self) {}
+        pub fn disconnect(&mut self) {}
+        pub fn poll(&mut self) -> Option<Reading> {
+            let mut q = READINGS.lock().unwrap();
+            // Most recent reading wins; older unconfirmed ones are superseded.
+            let last = q.pop();
+            q.clear();
+            last
+        }
+    }
+
+    /// `MainActivity.nativeOnDistance(double)` — a fresh measurement (metres).
+    /// Raw pointers for the JNIEnv*/jclass we don't use; ABI matches the JNI
+    /// `void (JNIEnv*, jclass, jdouble)` signature.
+    #[no_mangle]
+    pub extern "C" fn Java_ie_cannygreen_berapp_MainActivity_nativeOnDistance(
+        _env: *mut c_void,
+        _class: *mut c_void,
+        metres: f64,
+    ) {
+        if let Ok(mut q) = READINGS.lock() {
+            q.push(Reading {
+                metres: metres as f32,
+            });
+        }
+    }
+
+    /// `MainActivity.nativeOnStatus(int)` — a connection-state change.
+    #[no_mangle]
+    pub extern "C" fn Java_ie_cannygreen_berapp_MainActivity_nativeOnStatus(
+        _env: *mut c_void,
+        _class: *mut c_void,
+        code: i32,
+    ) {
+        STATUS_CODE.store(code, Ordering::SeqCst);
+    }
+}
+
+// ── Desktop: the real btleplug-backed source ────────────────────────────────
+#[cfg(all(not(target_os = "android"), feature = "bluetooth"))]
 mod backend {
     use super::{Reading, Status};
     use btleplug::api::{Central, Manager as _, Peripheral as _};
@@ -262,8 +345,8 @@ mod backend {
     }
 }
 
-// ── Feature OFF: an inert stub with the same surface ────────────────────────
-#[cfg(not(feature = "bluetooth"))]
+// ── Desktop without the feature: an inert stub with the same surface ────────
+#[cfg(all(not(target_os = "android"), not(feature = "bluetooth")))]
 mod backend {
     use super::{Reading, Status};
 

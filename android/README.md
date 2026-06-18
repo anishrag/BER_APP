@@ -38,40 +38,39 @@ Then wire it into `android/app/build.gradle.kts`'s `release` build type
 (`signingConfigs` + `signingConfig`), or sign the unsigned APK manually with
 `apksigner sign --ks android/berapp.keystore ...`.
 
-## Bluetooth laser meter (Leica DISTO) — status: NOT yet device-verified
+## Bluetooth laser meter (Leica DISTO) — status: built, NOT yet device-verified
 
 The number-entry box has a **Laser** input mode that reads distances from a
-paired Leica DISTO over BLE. The input engine lives in `src/number_entry/`
-(`bluetooth.rs`); the radio code is behind the `bluetooth` cargo feature
-(`btleplug`). It is **compile-verified on desktop only** — the on-device path
-below has not been run against the D2 yet.
+paired Leica DISTO over BLE. On **Android the BLE is done in Java**, not
+btleplug: `MainActivity.java` connects to the bonded DISTO with `BluetoothGatt`,
+subscribes to the distance characteristic (`3ab10101-…`), and pushes each
+reading + a status code into the Rust app through two `native` methods
+(`nativeOnDistance` / `nativeOnStatus`). The Rust side
+(`src/number_entry/bluetooth.rs`, `#[cfg(target_os = "android")]` backend)
+exposes those as `#[no_mangle] Java_ie_cannygreen_berapp_MainActivity_nativeOn*`
+and feeds the same `LaserSource` the UI drains. Desktop keeps using `btleplug`
+behind the `bluetooth` feature; **Android does NOT use that feature** (don't add
+`--features bluetooth` to the NDK build — btleplug isn't cross-compiled).
 
-What's done:
-- UI mode toggle + a pure RECEIVING panel (no scan, no connect button): Laser
-  mode auto-attaches to the already-paired DISTO among the OS's known devices
-  and listens. Readings (LE `f32` metres on the DISTO distance characteristic)
-  fill the expression buffer; the assessor presses the laser's own button to
-  measure. So the meter must be paired/connected at the OS level first.
-- `cargo check --features bluetooth` builds (uses BlueZ on the Linux dev box).
+Why Java, not btleplug's Android backend: btleplug needs its vendored
+"droidplug" Gradle companion *plus* an unpublished `jni-utils` SNAPSHOT and a
+JNI class-loader `init` — fiddly and unverifiable off-device. Android's own
+`BluetoothGatt` + one JNI callback is far less moving parts.
 
-What's still needed to make it work on the tablet (each needs the device to
-verify):
-1. **Build with the feature:** add `--features bluetooth` to the `cargo ndk …`
-   lines in `scripts/build-android.sh` (left off by default so the normal APK
-   carries no radio stack).
-2. **droidplug companion:** btleplug's Android backend needs its Java helper
-   (`com.nonpolynomial.btleplug.android.impl.Manager` / the `droidplug` AAR) on
-   the classpath, and `btleplug::platform::init(&env)` called once from JNI at
-   startup. The APK is currently pure-`NativeActivity` (`hasCode=false`); this
-   adds a DEX, so flip that and add the AAR in `android/app/build.gradle.kts`.
-3. **Permissions + runtime grant:** add to `AndroidManifest.xml`
-   `BLUETOOTH_SCAN` (with `usesPermissionFlags="neverForLocation"`),
-   `BLUETOOTH_CONNECT` (API 31+), and for API ≤ 30 `BLUETOOTH`/`BLUETOOTH_ADMIN`
-   + `ACCESS_FINE_LOCATION`. Android 12+ requires a *runtime* request for the
-   first two before scanning.
-4. **Pair** the DISTO in Android Settings first — Laser mode then auto-attaches
-   to it (matched by the Leica vendor service UUID, name as fallback) and
-   listens; there's no in-app scan or connect step.
+What's wired up (needs the tablet + a paired D2 to actually verify):
+- `MainActivity`: connect-on-resume / close-on-pause, `autoConnect` so it
+  reconnects when the (battery-saving) Disto wakes; reports status codes.
+- `AndroidManifest.xml`: `BLUETOOTH_CONNECT` (runtime-requested in
+  `MainActivity` on API 31+) and legacy `BLUETOOTH` for API 30. **No scan, so no
+  location permission** — we use the *bonded* device list.
+- Rust Android backend + `nativeOn*` exports; `LaserSource.status()` drives the
+  box's auto-switch into Laser mode once Connected.
+
+To use on the tablet: **pair the DISTO in Android Settings first**, then build
+and install normally (`./scripts/build-android.sh`); grant the Bluetooth prompt
+on first launch. `adb logcat -s ber_app` shows the connect/subscribe/reading
+trace. If R8/minify is ever enabled for release, keep the native-method names
+(`-keep class ie.cannygreen.berapp.MainActivity { *; }`).
 
 ## Notes
 
