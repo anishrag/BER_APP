@@ -5,9 +5,14 @@
 //! e.g. `"3.2 + 1.5"`) held in a plain `String`. [`apply`] mutates that buffer
 //! one [`Key`] at a time and [`parse_dimension_expression`] turns it into the
 //! final metre value. The point of the split: a [`Key`] doesn't care where it
-//! came from — an on-screen keypad tap, a hardware keyboard, or (later) a
-//! paired Bluetooth measuring device streaming a reading — so new input sources
-//! plug in here without touching the renderer in `src/ui`.
+//! came from — an on-screen keypad tap, a hardware keyboard, or a paired
+//! Bluetooth measuring device streaming a reading — so new input sources plug
+//! in here without touching the renderer in `src/ui`.
+//!
+//! [`bluetooth`] is one such source: a Leica DISTO laser distance meter whose
+//! readings arrive over BLE and land in the same expression buffer.
+
+pub mod bluetooth;
 
 /// One edit applied to a number-entry buffer, independent of its source.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -48,6 +53,23 @@ fn append_op(buf: &mut String, op: char) {
         buf.push(' ');
         buf.push(op);
         buf.push(' ');
+    }
+}
+
+/// Set the CURRENT (last) term of the expression to `metres`, keeping any
+/// earlier `+`/`-` terms. Used when a laser reading lands: re-shooting without
+/// an operator overwrites the unconfirmed value, but a reading after a pressed
+/// `+`/`−` starts a fresh term in the running sum. Formatted to mm (3 dp).
+pub fn set_current_term(buf: &mut String, metres: f32) {
+    let formatted = format!("{metres:.3}");
+    match buf.rfind(|c| c == '+' || c == '-') {
+        // Keep everything through the last operator, then the new term.
+        Some(op) => {
+            buf.truncate(op + 1);
+            buf.push(' ');
+            buf.push_str(&formatted);
+        }
+        None => *buf = formatted,
     }
 }
 
@@ -199,5 +221,23 @@ mod key_tests {
         assert_eq!(buf, "4.");
         apply(&mut buf, Key::Clear);
         assert_eq!(buf, "");
+    }
+
+    /// Laser readings overwrite the last term, but `+`/`−` between shots keeps
+    /// the earlier ones — so multiple shots sum.
+    #[test]
+    fn laser_readings_replace_the_current_term() {
+        use super::set_current_term;
+        let mut buf = String::new();
+        set_current_term(&mut buf, 3.247);
+        assert_eq!(buf, "3.247");
+        set_current_term(&mut buf, 3.250); // re-shoot overwrites
+        assert_eq!(buf, "3.250");
+        apply(&mut buf, Key::Plus);
+        set_current_term(&mut buf, 1.5); // new term after +
+        assert_eq!(buf, "3.250 + 1.500");
+        set_current_term(&mut buf, 1.6); // overwrite just that term
+        assert_eq!(buf, "3.250 + 1.600");
+        assert!((parse_dimension_expression(&buf).unwrap() - 4.85).abs() < 1e-4);
     }
 }

@@ -179,6 +179,15 @@ pub struct SketchState {
     /// can't clear them while the view borrows them, so the next frame's
     /// pre-render housekeeping does it.
     pub opening_inputs_clear: bool,
+    /// Whether the floating default-ceiling-height entry box is open. Lives here
+    /// (not on `categories`, which the view borrows) so the event handler can
+    /// toggle it; the view reads it by value. Opened by the Heights tool button,
+    /// closed on a successful set or its Close button.
+    pub ceiling_entry_open: bool,
+    /// Background connection to a Bluetooth laser meter (Leica DISTO), feeding
+    /// the number-entry box when it's in Laser mode. Lives across frames so the
+    /// link stays up; inert unless the `bluetooth` feature is built.
+    pub laser: crate::number_entry::bluetooth::LaserSource,
 }
 
 pub struct SplashState {
@@ -905,6 +914,8 @@ impl eframe::App for BerApp {
                                 splice_debug: &splice_debug,
                                 snap_tags: &snap_tags,
                                 cat_state: &mut self.sketch_state.categories,
+                                laser: &mut self.sketch_state.laser,
+                                ceiling_entry_open: self.sketch_state.ceiling_entry_open,
                                 autosave_status,
                                 openings_mode,
                                 openings_tool,
@@ -1471,19 +1482,28 @@ impl eframe::App for BerApp {
                                             .set_default_ceiling_height(value)
                                         {
                                             Ok(()) => {
-                                                // Clear-on-success: the field's label now
+                                                // Clear-on-success: the button's label now
                                                 // shows the stored value, so the entry box
                                                 // resets to empty for the next entry (via
-                                                // the one-shot flag — see its doc). A
-                                                // rejected value stays put for correction.
+                                                // the one-shot flag — see its doc) and the
+                                                // floating box closes. A rejected value
+                                                // keeps the box open (it shows the error)
+                                                // for correction.
                                                 self.sketch_state.ceiling_height_error = None;
                                                 self.sketch_state.ceiling_height_input_clear = true;
+                                                self.sketch_state.ceiling_entry_open = false;
                                             }
                                             Err(e) => {
                                                 log::error!("set_default_ceiling_height: {}", e);
                                                 self.sketch_state.ceiling_height_error = Some(e);
                                             }
                                         }
+                                    }
+                                    SketchEvent::OpenCeilingHeightEntry => {
+                                        self.sketch_state.ceiling_entry_open = true;
+                                    }
+                                    SketchEvent::CloseCeilingHeightEntry => {
+                                        self.sketch_state.ceiling_entry_open = false;
                                     }
                                     SketchEvent::SetCurrentStorey(target) => {
                                         log_err(

@@ -151,6 +151,13 @@ pub struct CategoryUiState {
     /// Backing string for the Heights category's floor-slab-thickness field.
     /// Same clear-on-success lifecycle as `ceiling_height_input`.
     pub floor_thickness_input: String,
+    /// How the number-entry box takes input: the on-screen keypad or a paired
+    /// Bluetooth laser meter. Persists across prompts within the session.
+    pub input_mode: super::number_box::InputMode,
+    /// Set once the assessor picks a mode by hand. Until then the box may
+    /// auto-switch to Laser when a connected DISTO is detected; after, their
+    /// choice is respected.
+    pub input_mode_pinned: bool,
 }
 
 impl Default for CategoryUiState {
@@ -161,6 +168,8 @@ impl Default for CategoryUiState {
             show_wall_lengths: true, // labels visible by default
             ceiling_height_input: String::new(),
             floor_thickness_input: String::new(),
+            input_mode: super::number_box::InputMode::default(),
+            input_mode_pinned: false,
         }
     }
 }
@@ -452,24 +461,32 @@ fn tool_ui<F: FnMut(UiEvent)>(
             // overwrites its value; validation (> 0, finite) lives in the
             // controller and its rejection shows inline like the other
             // prompt errors.
+            // Entry happens in the shared floating number box (keypad OR laser
+            // — so the ceiling height can be measured with the Disto). This
+            // button just shows the current value and opens that box.
             ui.horizontal(|ui| {
                 ui.label("Default ceiling height");
-                if let Some(h) = flags.default_ceiling_height {
-                    ui.label(format!("{h:.2} m"));
-                }
-                let submitted =
-                    metre_input(ui, &mut state.ceiling_height_input, 50.0, "e.g. 2.4").submitted;
-                let set_clicked = ui
-                    .button("Set")
+                let current = flags
+                    .default_ceiling_height
+                    .map(|h| format!("{h:.2} m"))
+                    .unwrap_or_else(|| "— not set".to_string());
+                if ui
+                    .button(format!("✎ {current}"))
                     .hint(
-                        "Set the storey's default ceiling height (on the All tab: \
-                         fill every storey that doesn't have one yet)",
+                        "Enter or measure the storey's default ceiling height (opens the \
+                         floating entry; on the All tab: fill every storey that doesn't \
+                         have one yet)",
                     )
-                    .clicked();
-                if set_clicked || submitted {
-                    if let Some(value) = parse_dimension_expression(&state.ceiling_height_input) {
-                        on_event(UiEvent::Sketch(SketchEvent::SetDefaultCeilingHeight(value)));
-                    }
+                    .clicked()
+                {
+                    // Prefill with the current value (overtype or accept) — direct
+                    // on the buffer we own here — then ask the shell to open the
+                    // floating box (its open flag lives on `SketchState`).
+                    state.ceiling_height_input = flags
+                        .default_ceiling_height
+                        .map(|h| format!("{h:.2}"))
+                        .unwrap_or_default();
+                    on_event(UiEvent::Sketch(SketchEvent::OpenCeilingHeightEntry));
                 }
             });
             if let Some(err) = &flags.ceiling_height_error {

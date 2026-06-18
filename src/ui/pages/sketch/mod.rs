@@ -423,11 +423,17 @@ pub enum SketchEvent {
     DeleteSelectedOpening,
     /// Close the elevation overlay.
     CloseElevation,
-    /// User typed a default ceiling height (m) in the Heights category's
-    /// field: stamp the current scope (overwriting this storey's value, or
-    /// filling every unset storey from the All tab). Stays in the current
-    /// view — 3D is the floating canvas button's separate action.
+    /// User entered a default ceiling height (m) in the floating number box
+    /// (opened from the Heights category): stamp the current scope (overwriting
+    /// this storey's value, or filling every unset storey from the All tab).
+    /// Stays in the current view — 3D is the floating canvas button's separate
+    /// action. A successful set closes the entry box.
     SetDefaultCeilingHeight(f32),
+    /// Open the floating default-ceiling-height entry (the Heights tool button).
+    OpenCeilingHeightEntry,
+    /// Close the floating default-ceiling-height entry without setting (its
+    /// "Close" button).
+    CloseCeilingHeightEntry,
     /// Switch the editor onto a specific storey, or `None` for the read-only
     /// "All storeys" overview tab.
     SetCurrentStorey(Option<usize>),
@@ -652,8 +658,15 @@ pub struct SketchView<'a> {
     /// — drawn as clickable tags.
     pub snap_tags: &'a [SnapTagView],
     /// The category layout's cross-frame UI state (active ribbon tab,
-    /// wall-length label visibility). Lives on `SketchState`.
+    /// wall-length label visibility, the number-entry input mode). Lives on
+    /// `SketchState`.
     pub cat_state: &'a mut categories::CategoryUiState,
+    /// Background Bluetooth laser-meter connection (Leica DISTO), drained by the
+    /// number-entry box in Laser mode. Lives on `SketchState`.
+    pub laser: &'a mut crate::number_entry::bluetooth::LaserSource,
+    /// Whether the floating default-ceiling-height entry box is open (by value —
+    /// the shell toggles the backing flag via events). Lives on `SketchState`.
+    pub ceiling_entry_open: bool,
     /// Autosave status line for the State category ("saved Ns ago"), derived
     /// by the shell from its revision bookkeeping. `None` hides the label.
     pub autosave_status: Option<String>,

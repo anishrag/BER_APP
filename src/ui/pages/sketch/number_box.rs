@@ -26,15 +26,30 @@
 //! exposure section's start+end) still live in the dock; they aren't a single
 //! value.
 
+use std::time::Duration;
+
 use egui::{Align2, Color32, Id, RichText};
 
 use super::{SketchEvent, SketchView};
+use crate::number_entry::bluetooth::{LaserSource, Status};
 use crate::number_entry::{apply, parse_dimension_expression, Key};
 use crate::ui::pages::events::UiEvent;
 use crate::ui::widgets::HintExt;
 
 /// Minimum finger-target size for keypad keys (mirrors the on-screen pads).
 const KEY: f32 = 46.0;
+
+/// How the assessor feeds a measurement into the box: the on-screen keypad, or
+/// a paired Bluetooth laser meter. A per-page preference (kept on
+/// [`super::categories::CategoryUiState`]) so it persists across prompts.
+#[derive(Clone, Copy, PartialEq, Eq, Default)]
+pub enum InputMode {
+    /// The numeric keypad with the +/− operator column.
+    #[default]
+    Keypad,
+    /// A Leica DISTO laser meter; readings stream in over BLE.
+    Laser,
+}
 
 /// One action button shown under the keypad.
 struct Action {
@@ -102,6 +117,43 @@ pub(super) fn render<F: FnMut(UiEvent)>(
 ) {
     use manip_2d_plan::ParameterAxis::{X, Y};
 
+    laser_autodetect(ctx, view);
+
+    // ── Default ceiling height (opened from the Heights tool button) ─────────
+    if view.ceiling_entry_open {
+        let sub = view
+            .default_ceiling_height
+            .map(|h| format!("currently {h:.2}"));
+        let actions = vec![
+            Action::new(
+                "Set",
+                "Set the default ceiling height",
+                SketchEvent::SetDefaultCeilingHeight,
+            )
+            .primary()
+            .keep_buffer(),
+            Action::new("Close", "Close without changing", |_| {
+                SketchEvent::CloseCeilingHeightEntry
+            })
+            .bare(),
+        ];
+        show_box(
+            ctx,
+            rect,
+            "Default ceiling height (m)",
+            sub.as_deref(),
+            "e.g. 2.4",
+            view.ceiling_height_error,
+            &mut view.cat_state.ceiling_height_input,
+            &actions,
+            &mut view.cat_state.input_mode,
+            &mut view.cat_state.input_mode_pinned,
+            view.laser,
+            on_event,
+        );
+        return;
+    }
+
     // ── Thickness (new-storey flow's first stage) ───────────────────────────
     if view
         .new_storey_prompt
@@ -130,6 +182,9 @@ pub(super) fn render<F: FnMut(UiEvent)>(
             view.new_storey_error,
             view.new_storey_thickness_input,
             &actions,
+            &mut view.cat_state.input_mode,
+            &mut view.cat_state.input_mode_pinned,
+            view.laser,
             on_event,
         );
         return;
@@ -166,6 +221,9 @@ pub(super) fn render<F: FnMut(UiEvent)>(
             view.dim_error,
             view.dim_input,
             &actions,
+            &mut view.cat_state.input_mode,
+            &mut view.cat_state.input_mode_pinned,
+            view.laser,
             on_event,
         );
         return;
@@ -221,6 +279,9 @@ pub(super) fn render<F: FnMut(UiEvent)>(
             view.position_error,
             view.position_input,
             &actions,
+            &mut view.cat_state.input_mode,
+            &mut view.cat_state.input_mode_pinned,
+            view.laser,
             on_event,
         );
         return;
@@ -259,6 +320,9 @@ pub(super) fn render<F: FnMut(UiEvent)>(
             view.edit_drag_error,
             view.edit_drag_input,
             &actions,
+            &mut view.cat_state.input_mode,
+            &mut view.cat_state.input_mode_pinned,
+            view.laser,
             on_event,
         );
         return;
@@ -284,6 +348,9 @@ pub(super) fn render<F: FnMut(UiEvent)>(
             view.roof_error,
             view.roof_apex_input,
             &actions,
+            &mut view.cat_state.input_mode,
+            &mut view.cat_state.input_mode_pinned,
+            view.laser,
             on_event,
         );
         return;
@@ -318,6 +385,9 @@ pub(super) fn render<F: FnMut(UiEvent)>(
             view.roof_error,
             view.roof_ridge_length_input,
             &actions,
+            &mut view.cat_state.input_mode,
+            &mut view.cat_state.input_mode_pinned,
+            view.laser,
             on_event,
         );
         return;
@@ -343,6 +413,9 @@ pub(super) fn render<F: FnMut(UiEvent)>(
             view.roof_error,
             view.roof_apex_input,
             &actions,
+            &mut view.cat_state.input_mode,
+            &mut view.cat_state.input_mode_pinned,
+            view.laser,
             on_event,
         );
         return;
@@ -374,6 +447,9 @@ pub(super) fn render<F: FnMut(UiEvent)>(
             view.roof_error,
             view.roof_ridge_length_input,
             &actions,
+            &mut view.cat_state.input_mode,
+            &mut view.cat_state.input_mode_pinned,
+            view.laser,
             on_event,
         );
         return;
@@ -402,6 +478,9 @@ pub(super) fn render<F: FnMut(UiEvent)>(
             view.roof_error,
             view.roof_apex_input,
             &actions,
+            &mut view.cat_state.input_mode,
+            &mut view.cat_state.input_mode_pinned,
+            view.laser,
             on_event,
         );
         return;
@@ -431,6 +510,9 @@ pub(super) fn render<F: FnMut(UiEvent)>(
             view.step_error,
             view.step_amount_input,
             &actions,
+            &mut view.cat_state.input_mode,
+            &mut view.cat_state.input_mode_pinned,
+            view.laser,
             on_event,
         );
         return;
@@ -469,6 +551,9 @@ pub(super) fn render<F: FnMut(UiEvent)>(
             view.ceiling_step_error,
             view.ceiling_amount_input,
             &actions,
+            &mut view.cat_state.input_mode,
+            &mut view.cat_state.input_mode_pinned,
+            view.laser,
             on_event,
         );
     }
@@ -492,8 +577,9 @@ fn roof_ridge_cancel() -> Action {
     .with_clear()
 }
 
-/// Draw the floating window: question (title bar / drag handle), running
-/// expression, numeric keypad with the big `+`, then the action buttons.
+/// Draw the floating window: the input-mode toggle, the question (title bar /
+/// drag handle), the running expression, the input area (keypad or laser), then
+/// the action buttons.
 #[allow(clippy::too_many_arguments)]
 fn show_box<F: FnMut(UiEvent)>(
     ctx: &egui::Context,
@@ -504,6 +590,9 @@ fn show_box<F: FnMut(UiEvent)>(
     error: Option<&str>,
     buf: &mut String,
     actions: &[Action],
+    mode: &mut InputMode,
+    mode_pinned: &mut bool,
+    laser: &mut LaserSource,
     on_event: &mut F,
 ) {
     egui::Window::new(title)
@@ -521,12 +610,13 @@ fn show_box<F: FnMut(UiEvent)>(
         .resizable(false)
         .show(ctx, |ui| {
             ui.set_min_width(220.0);
+            mode_toggle(ui, mode, mode_pinned);
             if let Some(sub) = subtitle {
                 ui.label(RichText::new(sub).color(Color32::from_gray(170)));
             }
 
             // Running expression: editable so a hardware keyboard still works on
-            // desktop; the keypad below edits the same buffer on a tablet.
+            // desktop; the keypad (or laser) below edits the same buffer.
             let resp = ui.add(
                 egui::TextEdit::singleline(buf)
                     .desired_width(KEY * 4.0 + 18.0)
@@ -536,15 +626,29 @@ fn show_box<F: FnMut(UiEvent)>(
             let enter = resp.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
 
             ui.add_space(4.0);
-            // One row: the digit grid, the stacked +/− column, then the
-            // prompt's action buttons (big and colour-coded) down the right.
+            // One row: the input area (keypad in Keypad mode, the laser
+            // connect/status panel in Laser mode), then the prompt's action
+            // buttons (big and colour-coded) down the right.
             let mut fired: Option<&Action> = None;
             ui.horizontal(|ui| {
-                digit_grid(ui, buf);
-                plus_minus(ui, buf);
+                match mode {
+                    InputMode::Keypad => {
+                        // Stay attached for detection, but don't let readings
+                        // pile up while the keypad's in charge.
+                        let _ = laser.poll();
+                        digit_grid(ui, buf);
+                        plus_minus(ui, buf);
+                    }
+                    InputMode::Laser => {
+                        // The laser fills the buffer; +/− are still here so the
+                        // assessor can sum several shots (point, +, point, …).
+                        laser_panel(ctx, ui, laser, buf);
+                        plus_minus(ui, buf);
+                    }
+                }
                 ui.add_space(8.0);
-                // Parse AFTER the keypad edits so a just-pressed key enables the
-                // action buttons this same frame.
+                // Parse AFTER the input edits so a just-pressed key (or a fresh
+                // laser reading) enables the action buttons this same frame.
                 let parsed = parse_dimension_expression(buf);
                 ui.vertical(|ui| {
                     for a in actions {
@@ -658,4 +762,120 @@ fn action_button(ui: &mut egui::Ui, a: &Action, enabled: bool) -> bool {
         .min_size(egui::vec2(128.0, KEY))
         .fill(fill);
     ui.add_enabled(enabled, btn).hint(a.hint).clicked()
+}
+
+/// The input-mode switch at the top of the box: keypad vs Bluetooth laser.
+/// Any click pins the choice, so auto-detection won't override it afterwards.
+fn mode_toggle(ui: &mut egui::Ui, mode: &mut InputMode, pinned: &mut bool) {
+    ui.horizontal(|ui| {
+        if ui
+            .selectable_label(*mode == InputMode::Keypad, "🔢 Keypad")
+            .hint("Type the measurement on the keypad")
+            .clicked()
+        {
+            *mode = InputMode::Keypad;
+            *pinned = true;
+        }
+        if ui
+            .selectable_label(*mode == InputMode::Laser, "📡 Laser")
+            .hint("Read the measurement from a paired Leica DISTO laser meter")
+            .clicked()
+        {
+            *mode = InputMode::Laser;
+            *pinned = true;
+        }
+    });
+    ui.separator();
+}
+
+/// Keep the laser attached in the background whenever the Sketch page is up, and
+/// — until the assessor pins a mode by hand — auto-switch into Laser mode the
+/// moment a connected DISTO is detected. Runs every frame from [`render`].
+fn laser_autodetect(ctx: &egui::Context, view: &mut SketchView<'_>) {
+    let status = view.laser.status();
+    if matches!(status, Status::Unsupported) {
+        return;
+    }
+    // Start (or restart) the attach whenever we're idle — once; on Error we
+    // wait for a manual Retry rather than retry-storming.
+    if matches!(status, Status::Idle) {
+        view.laser.connect();
+    }
+    // First detection auto-selects Laser, unless the assessor already chose.
+    if matches!(view.laser.status(), Status::Connected)
+        && !view.cat_state.input_mode_pinned
+        && view.cat_state.input_mode == InputMode::Keypad
+    {
+        view.cat_state.input_mode = InputMode::Laser;
+    }
+    // Repaint while attaching/connected so the transition + readings are seen
+    // even in Keypad mode (where the laser panel isn't driving repaints).
+    if view.laser.status().is_active() {
+        ctx.request_repaint_after(Duration::from_millis(200));
+    }
+}
+
+/// Laser-mode input area (replaces the keypad): pure RECEIVING. There's no
+/// connect button and no scan — entering Laser mode auto-attaches to the
+/// already-paired Disto and listens. The assessor points the device and presses
+/// ITS button; the reading streams in and fills the expression, then they press
+/// Apply (or re-shoot). Shows a status line, and a Retry only if attaching
+/// failed. Sized to roughly match the keypad's footprint so the box doesn't jump.
+fn laser_panel(ctx: &egui::Context, ui: &mut egui::Ui, laser: &mut LaserSource, buf: &mut String) {
+    // A fresh reading sets the CURRENT term — overwriting an unconfirmed value,
+    // or starting a new term after a pressed +/− (so shots can be summed).
+    if let Some(reading) = laser.poll() {
+        crate::number_entry::set_current_term(buf, reading.metres);
+    }
+    // Attaching is owned by `laser_autodetect` (runs every frame); here we just
+    // reflect status and offer a manual Retry on error.
+    let status = laser.status();
+
+    ui.vertical(|ui| {
+        ui.set_min_width(KEY * 3.5);
+        let (icon, text, colour) = match &status {
+            Status::Unsupported => (
+                "🚫",
+                "Bluetooth isn't built into this app".to_string(),
+                Color32::from_gray(160),
+            ),
+            // Idle is transient here (we just kicked off connect), show it as
+            // starting up rather than "off".
+            Status::Idle | Status::Connecting => (
+                "📡",
+                "Connecting to the laser…".to_string(),
+                Color32::from_rgb(230, 190, 70),
+            ),
+            Status::Connected => (
+                "🟢",
+                "Listening — press the button on the laser".to_string(),
+                Color32::from_rgb(90, 190, 110),
+            ),
+            Status::Error(e) => ("⚠", e.clone(), Color32::from_rgb(235, 110, 90)),
+        };
+        ui.label(RichText::new(format!("{icon}  {text}")).color(colour));
+        ui.add_space(4.0);
+        ui.label(
+            RichText::new("Point the Disto, then press its measure button.")
+                .size(11.0)
+                .weak(),
+        );
+        if matches!(status, Status::Error(_)) {
+            ui.add_space(4.0);
+            if ui
+                .add(
+                    egui::Button::new(RichText::new("Retry").color(Color32::WHITE))
+                        .min_size(egui::vec2(KEY * 2.0, KEY))
+                        .fill(Color32::from_rgb(48, 96, 158)),
+                )
+                .clicked()
+            {
+                laser.connect();
+            }
+        }
+    });
+
+    // Keep repainting while in Laser mode so the connect transition advances and
+    // freshly-arrived readings are polled without other UI input.
+    ctx.request_repaint_after(Duration::from_millis(150));
 }
