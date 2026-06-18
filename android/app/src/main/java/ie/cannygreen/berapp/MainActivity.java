@@ -68,8 +68,17 @@ public class MainActivity extends NativeActivity {
 
     private BluetoothGatt gatt;
 
-    // Implemented in Rust (libber_app.so), loaded by NativeActivity before
-    // onResume — see number_entry::bluetooth's `Java_..._nativeOn*` exports.
+    static {
+        // NativeActivity dlopen's libber_app.so from native code, which does
+        // NOT register it with the Java classloader's native-library list — so
+        // the `native` methods below would fail to resolve (UnsatisfiedLinkError).
+        // Loading it here via the JVM registers its JNI symbols for lookup;
+        // dlopen is idempotent, so this is the same already-loaded library.
+        System.loadLibrary("ber_app");
+    }
+
+    // Implemented in Rust (libber_app.so) — see number_entry::bluetooth's
+    // `Java_..._nativeOn*` exports.
     private static native void nativeOnDistance(double metres);
 
     private static native void nativeOnStatus(int code);
@@ -123,6 +132,12 @@ public class MainActivity extends NativeActivity {
 
     @SuppressLint("MissingPermission")
     private void startLaser() {
+        // onResume can fire more than once; don't open a second GATT connection
+        // to the same device (two clients can drop notifications). autoConnect
+        // keeps the existing one alive/reconnecting.
+        if (gatt != null) {
+            return;
+        }
         if (!hasBtPermission()) {
             nativeOnStatus(STATUS_NO_PERMISSION);
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
@@ -219,6 +234,7 @@ public class MainActivity extends NativeActivity {
                 @Override
                 public void onCharacteristicChanged(
                         BluetoothGatt g, BluetoothGattCharacteristic ch, byte[] value) {
+                    Log.d(TAG, "laser: notify (v33) " + ch.getUuid());
                     if (DISTANCE_UUID.equals(ch.getUuid())) {
                         handleReading(value);
                     }
@@ -229,29 +245,53 @@ public class MainActivity extends NativeActivity {
                 @SuppressWarnings("deprecation")
                 public void onCharacteristicChanged(
                         BluetoothGatt g, BluetoothGattCharacteristic ch) {
+                    Log.d(TAG, "laser: notify (legacy) " + ch.getUuid());
                     if (DISTANCE_UUID.equals(ch.getUuid())) {
                         handleReading(ch.getValue());
                     }
+                }
+
+                @Override
+                public void onDescriptorWrite(
+                        BluetoothGatt g, BluetoothGattDescriptor descriptor, int status) {
+                    Log.i(TAG, "laser: CCCD write status " + status + " (0 = success)");
                 }
             };
 
     @SuppressWarnings("deprecation")
     @SuppressLint("MissingPermission")
     private void enableNotifications(BluetoothGatt g, BluetoothGattCharacteristic ch) {
+        int props = ch.getProperties();
+        boolean indicate = (props & BluetoothGattCharacteristic.PROPERTY_INDICATE) != 0;
+        Log.i(
+                TAG,
+                "laser: char properties=0x" + Integer.toHexString(props) + " indicate=" + indicate);
         BluetoothGattDescriptor cccd = ch.getDescriptor(CCCD_UUID);
-        if (cccd != null) {
-            // Deprecated setValue+writeDescriptor still works on minSdk 30.
-            cccd.setValue(BluetoothGattDescriptor.ENABLE_NOTIFICATION_VALUE);
-            g.writeDescriptor(cccd);
+        if (cccd == null) {
+            Log.w(TAG, "laser: no CCCD descriptor on the distance characteristic");
+            return;
         }
+        // The DISTO delivers via INDICATE, not NOTIFY, on some characteristics —
+        // pick the CCCD value from the characteristic's properties (this is what
+        // btleplug does on desktop). Deprecated setValue+writeDescriptor still
+        // works on minSdk 30.
+        cccd.setValue(
+                indicate
+                        ? BluetoothGattDescriptor.ENABLE_INDICATION_VALUE
+                        : BluetoothGattDescriptor.ENABLE_NOTIFICATION_VALUE);
+        boolean ok = g.writeDescriptor(cccd);
+        Log.i(TAG, "laser: writeDescriptor(CCCD) indicate=" + indicate + " requested=" + ok);
     }
 
     private void handleReading(byte[] value) {
         if (value != null && value.length >= 4) {
             float metres = ByteBuffer.wrap(value).order(ByteOrder.LITTLE_ENDIAN).getFloat();
+            Log.i(TAG, "laser: reading " + metres + " m raw=" + java.util.Arrays.toString(value));
             if (!Float.isNaN(metres) && !Float.isInfinite(metres)) {
                 nativeOnDistance(metres);
             }
+        } else {
+            Log.w(TAG, "laser: short/empty reading payload");
         }
     }
 }
