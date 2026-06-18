@@ -3,6 +3,7 @@
 pub mod config;
 pub mod controller;
 pub mod engine;
+pub mod number_entry;
 pub mod paths;
 pub mod ui;
 

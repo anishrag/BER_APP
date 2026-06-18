@@ -15,6 +15,7 @@
 
 mod canvas;
 pub mod categories;
+mod number_box;
 pub mod overlays;
 mod prompt_dock;
 pub mod touch;
@@ -753,7 +754,12 @@ impl SketchPage {
 
         // --- The canvas fills whatever's left.
         egui::CentralPanel::default().show_inside(ui, |ui| {
+            let canvas_rect = ui.max_rect();
             canvas::render(ui, &view, touch, &mut on_event);
+            // The floating number-entry box: every single-value measurement
+            // prompt is typed here, in a draggable window over the canvas
+            // (constrained to it), rather than in the bottom prompt dock.
+            number_box::render(ui.ctx(), canvas_rect, &mut view, &mut on_event);
         });
 
         // Keyboard shortcuts: Ctrl+Z undo, Ctrl+Shift+Z or Ctrl+Y redo.

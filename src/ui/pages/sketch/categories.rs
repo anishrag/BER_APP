@@ -10,8 +10,8 @@
 //! mode toggles (living area / construction year / exposure / floor steps /
 //! ceiling steps) keep their controller-enforced exclusive-mode semantics.
 
-use super::prompt_dock::parse_dimension_expression;
 use super::{SketchEvent, SketchView};
+use crate::number_entry::parse_dimension_expression;
 use crate::ui::pages::events::UiEvent;
 use crate::ui::widgets::{metre_input, HintExt};
 use domain::sketch::EditTools;

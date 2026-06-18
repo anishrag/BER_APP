@@ -8,9 +8,10 @@
 
 use super::{SketchEvent, SketchView};
 use crate::controller::app_controller::{
-    DimensionPromptUiData, EditDragPromptUiData, ExposureSelection, NewStoreyPromptUiData,
-    OpeningPromptUiData, OpeningToolKind, PositionPromptUiData, VertexDropPromptUiData,
+    ExposureSelection, NewStoreyPromptUiData, OpeningPromptUiData, OpeningToolKind,
+    VertexDropPromptUiData,
 };
+use crate::number_entry::parse_dimension_expression;
 use crate::ui::pages::events::UiEvent;
 use crate::ui::widgets::{metre_input, HintExt};
 use datatypes::ber::common::ConstructionPhase;
@@ -20,13 +21,18 @@ use datatypes::ber::structural::WallExposure;
 /// Whether the dock has anything to show this frame. When false the bottom
 /// panel is skipped entirely so the canvas gets the space.
 pub(super) fn has_content(view: &SketchView<'_>) -> bool {
+    // Single-value number prompts (dimension/position/edit-drag/thickness/step
+    // & ceiling amounts/roof heights & lengths) are NOT listed here — they
+    // render in the floating number-entry box, not the dock. Only the dock's
+    // own content (mode lists, non-numeric stages, multi-field prompts) counts,
+    // so the dock never draws an empty strip behind the box.
     view.current_storey_idx.is_none()
-        || view.new_storey_prompt.is_some()
+        || view
+            .new_storey_prompt
+            .as_ref()
+            .is_some_and(|p| !p.thickness_pending)
         || view.pending_redraw
         || view.curve_bulge.is_some()
-        || view.dim_prompt.is_some()
-        || view.position_prompt.is_some()
-        || view.edit_drag_prompt.is_some()
         || view.vertex_drop_prompt.is_some()
         || view.review.is_some()
         || view.exposure_mode
@@ -34,13 +40,14 @@ pub(super) fn has_content(view: &SketchView<'_>) -> bool {
         || (view.has_floor_plan
             && ((!view.phase_choices.is_empty() && (view.phase_mode || view.phase_pick_pending))
                 || view.step_mode
-                || view.step_pick_pending
                 || view.ceiling_step_mode
-                || view.ceiling_step_pending
+                || view.ceiling_step_orientation_pending
+                || view.ceiling_step_side_pending
                 || view.roof_point_mode
-                || view.roof_point_pending
-                || view.roof_ridge_pending
-                || view.roof_rect_pending))
+                || view.roof_point_position_pending
+                || view.roof_ridge_position_pending
+                || view.roof_rect_position_pending
+                || !view.roof_ridge_area_options.is_empty()))
 }
 
 /// Render the dock. Priority of the prompt chain: read-only notice >
@@ -66,30 +73,11 @@ pub(super) fn render<F: FnMut(UiEvent)>(
             return;
         }
         if let Some(p) = &view.new_storey_prompt {
-            new_storey_toolbar(
-                ui,
-                p,
-                view.new_storey_thickness_input,
-                view.new_storey_error,
-                on_event,
-            );
+            new_storey_toolbar(ui, p, view.new_storey_error, on_event);
         } else if view.pending_redraw {
             pending_redraw_toolbar(ui, on_event);
         } else if let Some(bulge) = view.curve_bulge {
             curve_radius_toolbar(ui, bulge, on_event);
-        } else if let Some(p) = &view.dim_prompt {
-            dimension_prompt_toolbar(
-                ui,
-                p,
-                view.dim_scale_set,
-                view.dim_input,
-                view.dim_error,
-                on_event,
-            );
-        } else if let Some(p) = &view.position_prompt {
-            position_prompt_toolbar(ui, p, view.position_input, view.position_error, on_event);
-        } else if let Some(p) = &view.edit_drag_prompt {
-            edit_drag_prompt_toolbar(ui, p, view.edit_drag_input, view.edit_drag_error, on_event);
         } else if let Some(vp) = &view.vertex_drop_prompt {
             vertex_drop_prompt_toolbar(
                 ui,
@@ -127,27 +115,29 @@ pub(super) fn render<F: FnMut(UiEvent)>(
                     on_event,
                 );
             }
-            // Same pending-with-mode-off rule as the phase toolbar.
-            if view.step_mode || view.step_pick_pending {
+            // The step AMOUNT (Raise/Lower) is entered in the floating box; the
+            // dock keeps only the region list (and the draw hint when idle).
+            if view.step_mode {
                 step_toolbar(
                     ui,
                     view.step_region_polygons,
                     view.step_pick_pending,
-                    view.step_amount_input,
-                    view.step_error,
                     on_event,
                 );
             }
-            // Same pending-with-mode-off rule as the other tools.
-            if view.ceiling_step_mode || view.ceiling_step_pending {
+            // The ceiling-step AMOUNT (Up/Down) is entered in the floating box;
+            // the dock keeps the orientation/side stages, the region list, and
+            // the draw hint (suppressed while the amount box is active).
+            if view.ceiling_step_mode
+                || view.ceiling_step_orientation_pending
+                || view.ceiling_step_side_pending
+            {
                 ceiling_step_toolbar(
                     ui,
                     view.ceiling_step_region_polygons,
                     view.ceiling_step_orientation_pending,
                     view.ceiling_step_side_pending,
                     view.ceiling_step_amount_pending,
-                    view.ceiling_amount_input,
-                    view.ceiling_step_error,
                     on_event,
                 );
             }
@@ -171,27 +161,25 @@ pub(super) fn render<F: FnMut(UiEvent)>(
                     on_event(UiEvent::Sketch(SketchEvent::CancelPendingRoofRidge));
                 }
             } else if view.roof_point_mode
-                || view.roof_point_pending
-                || view.roof_ridge_pending
-                || view.roof_rect_pending
+                || view.roof_point_position_pending
+                || view.roof_ridge_position_pending
+                || view.roof_rect_position_pending
             {
+                // Heights and lengths are entered in the floating box; the dock
+                // keeps the position-stage Cancels, the apex list, and the
+                // tap/stroke hint (suppressed while a box stage is active).
+                let number_pending = view.roof_point_height_pending
+                    || view.roof_ridge_height_pending
+                    || view.roof_ridge_length_pending
+                    || view.roof_rect_height_pending
+                    || view.roof_rect_length_axis.is_some();
                 roof_point_toolbar(
                     ui,
                     view.roof_apex_views,
-                    view.roof_point_height_pending,
                     view.roof_point_position_pending,
-                    view.roof_ridge_height_pending,
-                    view.roof_ridge_length_pending,
-                    view.roof_ridge_length_anchored,
                     view.roof_ridge_position_pending,
-                    RectStages {
-                        length_axis: view.roof_rect_length_axis,
-                        position_pending: view.roof_rect_position_pending,
-                        height_pending: view.roof_rect_height_pending,
-                    },
-                    view.roof_apex_input,
-                    view.roof_ridge_length_input,
-                    view.roof_error,
+                    view.roof_rect_position_pending,
+                    number_pending,
                     on_event,
                 );
             }
@@ -382,221 +370,6 @@ fn inline_error(ui: &mut egui::Ui, error: Option<&str>) {
     }
 }
 
-/// Parse a dimension expression. Supports:
-/// - A single non-negative number: `"4.2"`, `"0.5"`, `"0"`
-/// - Sums and differences of numbers: `"3.2 + 1.5"`, `"5 - 1.8 + 0.3"`
-/// - Optional leading `+`; a leading `-` is rejected since dimensions can't
-///   be negative.
-///
-/// Zero is accepted — it collapses the wall (used to zero a trim remnant so a
-/// cut snaps onto a corner). Whitespace is ignored. Returns `None` for
-/// malformed input or a negative result.
-///
-/// `pub(super)` so the Heights category's ceiling-height field shares the
-/// same entry surface as the dock's prompts.
-pub(super) fn parse_dimension_expression(input: &str) -> Option<f32> {
-    let trimmed = input.trim();
-    if trimmed.is_empty() {
-        return None;
-    }
-    let mut total: f32 = 0.0;
-    let mut sign: f32 = 1.0;
-    let mut current = String::new();
-    let mut started = false;
-    for ch in trimmed.chars() {
-        if ch.is_whitespace() {
-            continue;
-        }
-        if ch == '+' || ch == '-' {
-            if !started {
-                if ch == '-' {
-                    return None;
-                }
-                started = true;
-                continue;
-            }
-            if current.is_empty() {
-                return None;
-            }
-            let v: f32 = current.parse().ok()?;
-            total += sign * v;
-            sign = if ch == '+' { 1.0 } else { -1.0 };
-            current.clear();
-        } else {
-            current.push(ch);
-            started = true;
-        }
-    }
-    if current.is_empty() {
-        return None;
-    }
-    let v: f32 = current.parse().ok()?;
-    total += sign * v;
-    // Zero is allowed: entering 0 collapses the wall (e.g. zeroing a trim
-    // remnant to snap a cut onto a corner). Negatives are still rejected.
-    if total.is_finite() && total >= 0.0 {
-        Some(total)
-    } else {
-        None
-    }
-}
-
-fn dimension_prompt_toolbar<F: FnMut(UiEvent)>(
-    ui: &mut egui::Ui,
-    prompt: &DimensionPromptUiData,
-    scale_set: bool,
-    dim_input: &mut String,
-    dim_error: Option<&str>,
-    on_event: &mut F,
-) {
-    let units = if scale_set {
-        "m"
-    } else {
-        "(first — sets scale)"
-    };
-    ui.label(
-        egui::RichText::new(format!("Length of highlighted wall {}:", units))
-            .strong()
-            .color(egui::Color32::from_rgb(60, 220, 255)),
-    );
-    // Show the current value for orientation. Useful especially for the
-    // first dimension — the assessor sees "looks like ~3.something m" and
-    // confirms with an exact measurement.
-    ui.label(format!("(currently {:.2})", prompt.current_length));
-    let submit_pressed = metre_input(ui, dim_input, 80.0, "e.g. 4.2").submitted;
-    let apply_clicked = ui
-        .button("Apply")
-        .hint("Apply this dimension and move to the next")
-        .clicked();
-    if apply_clicked || submit_pressed {
-        if let Some(value) = parse_dimension_expression(dim_input) {
-            on_event(UiEvent::Sketch(SketchEvent::ApplyDimension(value)));
-            dim_input.clear();
-        }
-    }
-    if ui
-        .button("Skip")
-        .hint("Skip this dimension, ask about a different wall")
-        .clicked()
-    {
-        on_event(UiEvent::Sketch(SketchEvent::SkipDimension));
-        dim_input.clear();
-    }
-    inline_error(ui, dim_error);
-}
-
-/// Toolbar for the position prompt of a carved phase/step area: the
-/// distance (along the prompt's axis) from the highlighted outline
-/// reference wall to the highlighted area wall. The textbox arrives
-/// PREFILLED with the drawn distance (see `BerApp`'s prompt-identity
-/// refill); Apply pins it, Skip accepts the drawn position, and the
-/// cycle button moves to another reference wall.
-fn position_prompt_toolbar<F: FnMut(UiEvent)>(
-    ui: &mut egui::Ui,
-    prompt: &PositionPromptUiData,
-    input: &mut String,
-    error: Option<&str>,
-    on_event: &mut F,
-) {
-    let direction = match prompt.axis {
-        manip_2d_plan::ParameterAxis::X => "Horizontal",
-        manip_2d_plan::ParameterAxis::Y => "Vertical",
-    };
-    ui.label(
-        egui::RichText::new(format!(
-            "{} distance from the highlighted wall (m):",
-            direction
-        ))
-        .strong()
-        .color(egui::Color32::from_rgb(60, 220, 255)),
-    );
-    let submit_pressed = metre_input(ui, input, 80.0, "e.g. 3.5").submitted;
-    let apply_clicked = ui
-        .button("Apply")
-        .hint("Pin the area at exactly this distance")
-        .clicked();
-    if apply_clicked || submit_pressed {
-        if let Some(value) = parse_dimension_expression(input) {
-            on_event(UiEvent::Sketch(SketchEvent::ApplyPositionDimension(value)));
-        }
-    }
-    if ui
-        .button("Skip")
-        .hint("Accept the drawn position as-is")
-        .clicked()
-    {
-        on_event(UiEvent::Sketch(SketchEvent::SkipPositionDimension));
-    }
-    // The roof location stages offer a computed CENTRE suggestion, applied
-    // through the same path as a typed distance.
-    if prompt.offers_centre
-        && ui
-            .button("Centre")
-            .hint("Centre it within its ceiling area")
-            .clicked()
-    {
-        on_event(UiEvent::Sketch(SketchEvent::CentreRoofPosition));
-    }
-    // Only offered when there IS another wall to measure from.
-    if prompt.option_count > 1
-        && ui
-            .button(format!(
-                "Measure from another wall ({}/{})",
-                prompt.option_idx + 1,
-                prompt.option_count,
-            ))
-            .hint("Measure the distance from a different outline wall")
-            .clicked()
-    {
-        on_event(UiEvent::Sketch(SketchEvent::CyclePositionReference));
-    }
-    inline_error(ui, error);
-}
-
-fn edit_drag_prompt_toolbar<F: FnMut(UiEvent)>(
-    ui: &mut egui::Ui,
-    prompt: &EditDragPromptUiData,
-    input: &mut String,
-    error: Option<&str>,
-    on_event: &mut F,
-) {
-    ui.label(
-        egui::RichText::new("Distance from highlighted reference wall (m):")
-            .strong()
-            .color(egui::Color32::from_rgb(60, 220, 255)),
-    );
-    ui.label(format!(
-        "(currently {:.2}, option {}/{})",
-        prompt.current_distance,
-        prompt.option_idx + 1,
-        prompt.option_count,
-    ));
-    let submit_pressed = metre_input(ui, input, 80.0, "e.g. 3.5").submitted;
-    let apply_clicked = ui.button("Apply").hint("Apply this distance").clicked();
-    if apply_clicked || submit_pressed {
-        if let Some(value) = parse_dimension_expression(input) {
-            on_event(UiEvent::Sketch(SketchEvent::ApplyEditDrag(value)));
-            input.clear();
-        }
-    }
-    if ui
-        .button("Different measurement")
-        .hint("Try another reference wall")
-        .clicked()
-    {
-        on_event(UiEvent::Sketch(SketchEvent::CycleEditDragMeasurement));
-    }
-    if ui
-        .button("Cancel")
-        .hint("Revert the wall to its position before this drag")
-        .clicked()
-    {
-        on_event(UiEvent::Sketch(SketchEvent::CancelEditDrag));
-        input.clear();
-    }
-    inline_error(ui, error);
-}
-
 fn vertex_drop_prompt_toolbar<F: FnMut(UiEvent)>(
     ui: &mut egui::Ui,
     prompt: &VertexDropPromptUiData,
@@ -682,9 +455,7 @@ fn curve_radius_toolbar<F: FnMut(UiEvent)>(ui: &mut egui::Ui, bulge: f32, on_eve
 /// The NEW-STOREY flow toolbar, stage by stage:
 ///
 /// - **Thickness**: the slab-thickness question asked FIRST on a fresh upper
-///   storey — input (arrives prefilled "0.30") + Set + "Use 0.30" (= submit
-///   the default), plus the hint that drawing stays paused until it lands
-///   (the controller ignores outline strokes during this stage).
+///   storey is now entered in the floating number box, not here.
 /// - **ChooseMethod**: "Draw outline" vs "Suggest outlines" (the latter
 ///   gated on `can_suggest` — the storey below needs its ceiling height and
 ///   a flat ceiling area). A canvas stroke is an implicit "Draw outline".
@@ -694,38 +465,10 @@ fn curve_radius_toolbar<F: FnMut(UiEvent)>(ui: &mut egui::Ui, bulge: f32, on_eve
 fn new_storey_toolbar<F: FnMut(UiEvent)>(
     ui: &mut egui::Ui,
     prompt: &NewStoreyPromptUiData,
-    thickness_input: &mut String,
     error: Option<&str>,
     on_event: &mut F,
 ) {
-    if prompt.thickness_pending {
-        ui.label(
-            egui::RichText::new("Floor thickness to the storey below (m):")
-                .strong()
-                .color(egui::Color32::from_rgb(60, 220, 255)),
-        );
-        let submitted = metre_input(ui, thickness_input, 60.0, "e.g. 0.30").submitted;
-        let set_clicked = ui
-            .button("Set")
-            .hint("Use this slab thickness (it sets the storey's floor level)")
-            .clicked();
-        if set_clicked || submitted {
-            if let Some(v) = parse_dimension_expression(thickness_input) {
-                on_event(UiEvent::Sketch(SketchEvent::AssignFloorThickness(v as f64)));
-            }
-        }
-        if ui
-            .button("Use 0.30")
-            .hint("Accept the typical 0.30 m slab")
-            .clicked()
-        {
-            on_event(UiEvent::Sketch(SketchEvent::AssignFloorThickness(0.30)));
-        }
-        ui.label(
-            egui::RichText::new("Drawing is paused until the thickness is set.")
-                .color(egui::Color32::from_rgb(180, 180, 180)),
-        );
-    } else if prompt.method_pending {
+    if prompt.method_pending {
         ui.label(
             egui::RichText::new("How should this storey's outline start?")
                 .strong()
@@ -866,75 +609,41 @@ fn phase_toolbar<F: FnMut(UiEvent)>(
     }
 }
 
-/// Floor-step controls. While a carved area awaits its level, shows the
-/// amount field (metres) + Raise/Lower buttons (sign the amount) + Cancel;
-/// otherwise lists the committed step regions with delete buttons.
+/// Floor-step region list + draw hint. The step AMOUNT (the Raise/Lower entry
+/// for a pending area) is typed in the floating number box; the dock keeps the
+/// committed-region list with deletes, plus the "draw an area" hint while no
+/// pick is in flight.
 fn step_toolbar<F: FnMut(UiEvent)>(
     ui: &mut egui::Ui,
     regions: &[(Vec<(f64, f64)>, String)],
     pick_pending: bool,
-    amount_input: &mut String,
-    error: Option<&str>,
     on_event: &mut F,
 ) {
-    if pick_pending {
-        ui.label(egui::RichText::new("Step amount (m):").strong());
-        metre_input(ui, amount_input, 60.0, "e.g. 0.15");
-        // Unparseable input is ignored — the buttons just do nothing. The
-        // BUTTON owns the sign: an expression that evaluates negative
-        // (e.g. "1-2") must not flip Lower into a raise, so take |v|.
-        let amount = parse_dimension_expression(amount_input).map(f32::abs);
-        if ui
-            .button("Raise")
-            .hint("Raise this area's floor by the amount")
-            .clicked()
-        {
-            if let Some(v) = amount {
-                on_event(UiEvent::Sketch(SketchEvent::AssignStepLevel(v)));
-                amount_input.clear();
-            }
-        }
-        if ui
-            .button("Lower")
-            .hint("Lower this area's floor by the amount")
-            .clicked()
-        {
-            if let Some(v) = amount {
-                on_event(UiEvent::Sketch(SketchEvent::AssignStepLevel(-v)));
-                amount_input.clear();
-            }
-        }
-        if ui.button("Cancel").clicked() {
-            on_event(UiEvent::Sketch(SketchEvent::CancelPendingStep));
-            amount_input.clear();
-        }
-        inline_error(ui, error);
-    } else {
+    if !pick_pending {
         ui.label("Draw an area to raise or lower its floor.");
-        for (i, (_ring, label)) in regions.iter().enumerate() {
-            ui.horizontal(|ui| {
-                ui.label(label);
-                if ui.button("🗑").hint("Delete this step area").clicked() {
-                    on_event(UiEvent::Sketch(SketchEvent::DeleteStepRegion(i)));
-                }
-            });
-        }
+    }
+    for (i, (_ring, label)) in regions.iter().enumerate() {
+        ui.horizontal(|ui| {
+            ui.label(label);
+            if ui.button("🗑").hint("Delete this step area").clicked() {
+                on_event(UiEvent::Sketch(SketchEvent::DeleteStepRegion(i)));
+            }
+        });
     }
 }
 
-/// Ceiling-step controls, stage by stage: the H/V picker for a tapped
-/// point; the "tap the side" hint while the side pick is pending; the
-/// amount field (metres) + Up/Down buttons (which own the sign) once the
-/// line is resolved; otherwise the committed-region list with deletes.
-/// (The position stage shows as the shared position-prompt panel instead.)
+/// Ceiling-step controls, stage by stage: the H/V picker for a tapped point;
+/// the "tap the side" hint while the side pick is pending; otherwise the
+/// committed-region list with deletes. The AMOUNT (Up/Down) once the line is
+/// resolved is typed in the floating number box, and the position stage shows
+/// in that box too — so the "draw a line" hint is suppressed while an amount
+/// entry is open.
 fn ceiling_step_toolbar<F: FnMut(UiEvent)>(
     ui: &mut egui::Ui,
     regions: &[(Vec<(f64, f64)>, String)],
     orientation_pending: bool,
     side_pending: bool,
     amount_pending: bool,
-    amount_input: &mut String,
-    error: Option<&str>,
     on_event: &mut F,
 ) {
     if orientation_pending {
@@ -968,48 +677,12 @@ fn ceiling_step_toolbar<F: FnMut(UiEvent)>(
         if ui.button("Cancel").clicked() {
             on_event(UiEvent::Sketch(SketchEvent::CancelPendingCeilingStep));
         }
-    } else if amount_pending {
-        ui.label(egui::RichText::new("Step (m):").strong());
-        metre_input(ui, amount_input, 60.0, "e.g. 0.2");
-        // Unparseable input is ignored — the buttons just do nothing. The
-        // BUTTON owns the sign (an expression that evaluates negative must
-        // not flip Down into a raise), so take |v|.
-        let amount = parse_dimension_expression(amount_input).map(f32::abs);
-        if ui
-            .button("Up")
-            .hint("Raise the ceiling on that side by the amount")
-            .clicked()
-        {
-            if let Some(v) = amount {
-                on_event(UiEvent::Sketch(SketchEvent::AssignCeilingStepDelta(v)));
-                amount_input.clear();
-            }
-        }
-        if ui
-            .button("Down")
-            .hint("Lower the ceiling on that side by the amount")
-            .clicked()
-        {
-            if let Some(v) = amount {
-                on_event(UiEvent::Sketch(SketchEvent::AssignCeilingStepDelta(-v)));
-                amount_input.clear();
-            }
-        }
-        if ui
-            .button("Keep same height")
-            .hint("Split without a step — both sides stay the same height")
-            .clicked()
-        {
-            on_event(UiEvent::Sketch(SketchEvent::KeepCeilingSameHeight));
-            amount_input.clear();
-        }
-        if ui.button("Cancel").clicked() {
-            on_event(UiEvent::Sketch(SketchEvent::CancelPendingCeilingStep));
-            amount_input.clear();
-        }
-        inline_error(ui, error);
     } else {
-        ui.label("Draw a straight line across the plan — or a closed area — to step the ceiling.");
+        if !amount_pending {
+            ui.label(
+                "Draw a straight line across the plan — or a closed area — to step the ceiling.",
+            );
+        }
         for (ring, label) in regions.iter() {
             ui.horizontal(|ui| {
                 ui.label(label);
@@ -1027,198 +700,57 @@ fn ceiling_step_toolbar<F: FnMut(UiEvent)>(
     }
 }
 
-/// The pending roof-RECT's per-stage flags, bundled for the shared roof
-/// toolbar (one struct, not three more positional bools).
-struct RectStages {
-    /// `Some(axis)` while a side-length question is open (X = the width,
-    /// Y = the depth).
-    length_axis: Option<manip_2d_plan::ParameterAxis>,
-    position_pending: bool,
-    height_pending: bool,
-}
-
-/// Roof-point (and roof-RIDGE / roof-RECT) controls, stage by stage: the
-/// height field + Set/Cancel once the point's/ridge's/rect's position is
-/// resolved; the ridge's or rect's LENGTH field (shared buffer, prefilled
-/// with the drawn value) + Set/Skip between stages; a "answer the distance
-/// question" hint while a position stage is up (it shows as the shared
-/// position-prompt panel); otherwise a tap/stroke hint plus the
-/// committed-apex list with deletes. The ridge and rect stages mirror the
-/// apex ones and share the height input buffer (the flows are never pending
-/// at once — same mode, mutually suppressing).
-#[allow(clippy::too_many_arguments)] // one flag/buffer per dock stage
+/// Roof-point (and roof-RIDGE / roof-RECT) NON-numeric controls. The heights
+/// and lengths are entered in the floating number box; the dock keeps the
+/// position-stage Cancels (the distance itself is typed in the box), the
+/// committed-apex list with deletes, and the tap/stroke hint — suppressed
+/// while a number stage is active (`number_pending`) so the box has the floor.
 fn roof_point_toolbar<F: FnMut(UiEvent)>(
     ui: &mut egui::Ui,
     apexes: &[((f64, f64), String)],
-    height_pending: bool,
-    position_pending: bool,
-    ridge_height_pending: bool,
-    ridge_length_pending: bool,
-    ridge_length_anchored: bool,
+    point_position_pending: bool,
     ridge_position_pending: bool,
-    rect: RectStages,
-    height_input: &mut String,
-    ridge_length_input: &mut String,
-    error: Option<&str>,
+    rect_position_pending: bool,
+    number_pending: bool,
     on_event: &mut F,
 ) {
-    if rect.height_pending {
-        ui.label(egui::RichText::new("Flat-top height (m):").strong());
-        metre_input(ui, height_input, 60.0, "e.g. 4.2");
-        // ABSOLUTE height (above the storey floor datum), applied to all
-        // four corners; the controller validates it.
-        if ui
-            .button("Set")
-            .hint("Raise the ceiling area to a flat top at this height")
-            .clicked()
-        {
-            if let Some(v) = parse_dimension_expression(height_input) {
-                on_event(UiEvent::Sketch(SketchEvent::AssignRoofRectHeight(v)));
-                height_input.clear();
-            }
-        }
+    // The three position stages each keep their own Cancel reachable while the
+    // distance is typed in the box.
+    let position_cancel = |ui: &mut egui::Ui, text: &str, ev: SketchEvent, on_event: &mut F| {
+        ui.label(egui::RichText::new(text).color(egui::Color32::from_rgb(255, 200, 60)));
         if ui.button("Cancel").clicked() {
-            on_event(UiEvent::Sketch(SketchEvent::CancelPendingRoofRect));
-            height_input.clear();
+            on_event(UiEvent::Sketch(ev));
         }
-        inline_error(ui, error);
-    } else if let Some(axis) = rect.length_axis {
-        let label = match axis {
-            manip_2d_plan::ParameterAxis::X => "Flat-top width, E–W (m):",
-            manip_2d_plan::ParameterAxis::Y => "Flat-top depth, N–S (m):",
-        };
-        ui.label(egui::RichText::new(label).strong());
-        // Arrives PREFILLED with the drawn side length (the stroke is
-        // approximate — the typed value is the real dimension).
-        metre_input(ui, ridge_length_input, 60.0, "e.g. 4.0");
-        if ui
-            .button("Set")
-            .hint("Use exactly this side length (the near corner stays put)")
-            .clicked()
-        {
-            if let Some(v) = parse_dimension_expression(ridge_length_input) {
-                on_event(UiEvent::Sketch(SketchEvent::AssignRoofRectLength(v)));
-            }
-        }
-        if ui
-            .button("Skip")
-            .hint("Accept the drawn length as-is")
-            .clicked()
-        {
-            on_event(UiEvent::Sketch(SketchEvent::SkipRoofRectLength));
-        }
-        if ui.button("Cancel").clicked() {
-            on_event(UiEvent::Sketch(SketchEvent::CancelPendingRoofRect));
-            ridge_length_input.clear();
-        }
-        inline_error(ui, error);
-    } else if rect.position_pending {
-        // A rect position stage — the shared position panel above owns the
-        // entry; this hint keeps Cancel reachable alongside it.
-        ui.label(
-            egui::RichText::new("Pin the flat top's position (the distance question above)")
-                .color(egui::Color32::from_rgb(255, 200, 60)),
+    };
+    if rect_position_pending {
+        position_cancel(
+            ui,
+            "Pin the flat top's position (the distance question is in the box)",
+            SketchEvent::CancelPendingRoofRect,
+            on_event,
         );
-        if ui.button("Cancel").clicked() {
-            on_event(UiEvent::Sketch(SketchEvent::CancelPendingRoofRect));
-        }
-    } else if ridge_height_pending {
-        ui.label(egui::RichText::new("Ridge height (m):").strong());
-        metre_input(ui, height_input, 60.0, "e.g. 4.2");
-        // The height is ABSOLUTE (above the storey floor datum) and applies
-        // to BOTH ridge ends; the controller validates it.
-        if ui
-            .button("Set")
-            .hint("Raise (or lower) the ceiling area to a ridge at this height")
-            .clicked()
-        {
-            if let Some(v) = parse_dimension_expression(height_input) {
-                on_event(UiEvent::Sketch(SketchEvent::AssignRoofRidgeHeight(v)));
-                height_input.clear();
-            }
-        }
-        if ui.button("Cancel").clicked() {
-            on_event(UiEvent::Sketch(SketchEvent::CancelPendingRoofRidge));
-            height_input.clear();
-        }
-        inline_error(ui, error);
-    } else if ridge_length_pending {
-        ui.label(egui::RichText::new("Ridge length (m):").strong());
-        // Arrives PREFILLED with the drawn length (the stroke is approximate
-        // — the typed value is the real dimension; Skip accepts the drawn).
-        metre_input(ui, ridge_length_input, 60.0, "e.g. 6.0");
-        // "(from the highlighted end)" only when an end is ANCHORED — an
-        // extent end snapped onto a wall, so the typed length extends from
-        // (or, for a snapped far end, back from) that exact coordinate.
-        let set_hover = if ridge_length_anchored {
-            "Use exactly this ridge length (from the highlighted end)"
-        } else {
-            "Use exactly this ridge length"
-        };
-        if ui.button("Set").hint(set_hover).clicked() {
-            if let Some(v) = parse_dimension_expression(ridge_length_input) {
-                on_event(UiEvent::Sketch(SketchEvent::AssignRoofRidgeLength(v)));
-            }
-        }
-        if ui
-            .button("Skip")
-            .hint("Accept the drawn length as-is")
-            .clicked()
-        {
-            on_event(UiEvent::Sketch(SketchEvent::SkipRoofRidgeLength));
-        }
-        if ui.button("Cancel").clicked() {
-            on_event(UiEvent::Sketch(SketchEvent::CancelPendingRoofRidge));
-            ridge_length_input.clear();
-        }
-        inline_error(ui, error);
     } else if ridge_position_pending {
-        // The ridge's cross-coordinate question — the shared position panel
-        // above owns the entry; this hint keeps Cancel reachable alongside it.
-        ui.label(
-            egui::RichText::new("Pin the ridge's position (the distance question above)")
-                .color(egui::Color32::from_rgb(255, 200, 60)),
+        position_cancel(
+            ui,
+            "Pin the ridge's position (the distance question is in the box)",
+            SketchEvent::CancelPendingRoofRidge,
+            on_event,
         );
-        if ui.button("Cancel").clicked() {
-            on_event(UiEvent::Sketch(SketchEvent::CancelPendingRoofRidge));
-        }
-    } else if height_pending {
-        ui.label(egui::RichText::new("Apex height (m):").strong());
-        metre_input(ui, height_input, 60.0, "e.g. 4.2");
-        // Unparseable input is ignored — the button just does nothing. The
-        // height is ABSOLUTE (above the storey floor datum), so the value
-        // goes through as-is; the controller validates it.
-        if ui
-            .button("Set")
-            .hint("Slope the ceiling area up (or down) to this height at the point")
-            .clicked()
-        {
-            if let Some(v) = parse_dimension_expression(height_input) {
-                on_event(UiEvent::Sketch(SketchEvent::AssignRoofApexHeight(v)));
-                height_input.clear();
-            }
-        }
-        if ui.button("Cancel").clicked() {
-            on_event(UiEvent::Sketch(SketchEvent::CancelPendingRoofPoint));
-            height_input.clear();
-        }
-        inline_error(ui, error);
-    } else if position_pending {
-        // A position stage — the shared position panel above owns the entry;
-        // this hint keeps Cancel reachable alongside it.
-        ui.label(
-            egui::RichText::new("Pin the point's position (the distance question above)")
-                .color(egui::Color32::from_rgb(255, 200, 60)),
+    } else if point_position_pending {
+        position_cancel(
+            ui,
+            "Pin the point's position (the distance question is in the box)",
+            SketchEvent::CancelPendingRoofPoint,
+            on_event,
         );
-        if ui.button("Cancel").clicked() {
-            on_event(UiEvent::Sketch(SketchEvent::CancelPendingRoofPoint));
-        }
     } else {
-        ui.label(
-            "Tap a high point inside a ceiling area to slope the roof, draw a \
-             straight stroke along a ridge line, or a closed rectangle for a \
-             flat-topped roof.",
-        );
+        if !number_pending {
+            ui.label(
+                "Tap a high point inside a ceiling area to slope the roof, draw a \
+                 straight stroke along a ridge line, or a closed rectangle for a \
+                 flat-topped roof.",
+            );
+        }
         for (i, (_pos, label)) in apexes.iter().enumerate() {
             ui.horizontal(|ui| {
                 ui.label(label);
@@ -1375,52 +907,4 @@ fn exposure_toolbar<F: FnMut(UiEvent)>(
             on_event(UiEvent::Sketch(SketchEvent::SetAllRemainingExposed));
         }
     });
-}
-
-#[cfg(test)]
-mod expression_tests {
-    use super::parse_dimension_expression;
-
-    fn approx(a: f32, b: f32) -> bool {
-        (a - b).abs() < 1e-4
-    }
-
-    #[test]
-    fn single_number() {
-        assert!(approx(parse_dimension_expression("4.2").unwrap(), 4.2));
-        assert!(approx(parse_dimension_expression("  3  ").unwrap(), 3.0));
-    }
-
-    #[test]
-    fn sum_and_difference() {
-        assert!(approx(parse_dimension_expression("3 + 1.5").unwrap(), 4.5));
-        assert!(approx(parse_dimension_expression("5 - 1.8").unwrap(), 3.2));
-        assert!(approx(
-            parse_dimension_expression("2 + 3.5 - 0.3").unwrap(),
-            5.2
-        ));
-    }
-
-    #[test]
-    fn leading_plus_allowed_leading_minus_rejected() {
-        assert!(approx(parse_dimension_expression("+4.2").unwrap(), 4.2));
-        assert!(parse_dimension_expression("-4.2").is_none());
-    }
-
-    #[test]
-    fn malformed_inputs_rejected() {
-        assert!(parse_dimension_expression("").is_none());
-        assert!(parse_dimension_expression("3 +").is_none());
-        assert!(parse_dimension_expression("3 + + 2").is_none());
-        assert!(parse_dimension_expression("hello").is_none());
-        assert!(parse_dimension_expression("3 - 5").is_none()); // negative result
-    }
-
-    #[test]
-    fn zero_accepted_for_collapsing_a_wall() {
-        // 0 is a valid dimension: it collapses the wall (e.g. zero a trim
-        // remnant). Only negatives are rejected.
-        assert!(approx(parse_dimension_expression("0").unwrap(), 0.0));
-        assert!(approx(parse_dimension_expression("3 - 3").unwrap(), 0.0));
-    }
 }
