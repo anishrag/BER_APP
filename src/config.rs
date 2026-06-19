@@ -61,8 +61,8 @@ pub struct Tuning {
     pub new_storey: NewStoreyTuning,
     pub collinearity: CollinearityTuning,
     /// Sub-area carve knobs (living areas / construction-phase areas), in
-    /// `manip_2d_plan`.
-    pub subarea: manip_2d_plan::SubareaTuning,
+    /// `manip_plan`.
+    pub subarea: manip_plan::SubareaTuning,
 }
 
 /// Shipped defaults, embedded at compile time. The repo-root file IS the

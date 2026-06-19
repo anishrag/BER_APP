@@ -1,7 +1,7 @@
 //! Dimensioning operations on the active shape — pure model mutation.
 //! The shell (`AppController`) wraps these with undo + persistence.
 use crate::{ActiveShape, DimensionPrompt, PendingArc, StoreyDoc};
-use manip_2d_plan::{find_flipped_edge, ParameterAxis};
+use manip_plan::{find_flipped_edge, ParameterAxis};
 
 // ── Dimensioning operations ─────────────────────────────────────────────────
 // Pure model mutation over the active shape's plan + dimensioning state. The

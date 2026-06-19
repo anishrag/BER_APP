@@ -292,9 +292,9 @@ impl AppController {
             snap_y.map_or(point.y, |s| s.drawn_coord_m),
         );
         let kind = if snap_x.is_some() && snap_y.is_some() {
-            manip_2d_plan::SnapKind::ToCorner
+            manip_plan::SnapKind::ToCorner
         } else {
-            manip_2d_plan::SnapKind::ToParallelWall
+            manip_plan::SnapKind::ToParallelWall
         };
         Some(SnapTagView {
             pos: (point.x, point.y),

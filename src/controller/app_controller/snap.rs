@@ -26,7 +26,7 @@ pub(super) enum SnapAction {
 pub(super) struct LastSnapAction {
     pub(super) action: SnapAction,
     pub(super) before: HistorySnapshot,
-    pub(super) decisions: Vec<manip_2d_plan::SnapDecision>,
+    pub(super) decisions: Vec<manip_plan::SnapDecision>,
 }
 
 /// One clickable elective-snap tag for the canvas overlay (a projection of a
@@ -41,9 +41,9 @@ pub struct SnapTagView {
     /// The decision's drawn point — its stable identity for `choose_snap`.
     pub from: (f32, f32),
     /// The applied kind, or `None` when this snap is currently disabled.
-    pub current_kind: Option<manip_2d_plan::SnapKind>,
+    pub current_kind: Option<manip_plan::SnapKind>,
     /// Candidates to offer on click: `(kind, apply-index)`, most-aggressive first.
-    pub options: Vec<(manip_2d_plan::SnapKind, usize)>,
+    pub options: Vec<(manip_plan::SnapKind, usize)>,
     /// Whether "don't snap" is a valid choice (false for a mandatory extend/trim
     /// attach — the menu then omits it).
     pub skippable: bool,
@@ -54,7 +54,7 @@ impl AppController {
     /// made (recorded in `manip`), and if any, remember the action + its
     /// pre-state (the undo entry it just pushed). No snaps → nothing to replay.
     pub(super) fn capture_snap_action(&mut self, action: SnapAction) {
-        let decisions = manip_2d_plan::take_snap_decisions();
+        let decisions = manip_plan::take_snap_decisions();
         if decisions.is_empty() {
             return;
         }
@@ -104,7 +104,7 @@ impl AppController {
     /// rebuild. Re-captures so it can be replayed again.
     pub(super) fn replay_last_snap_action(
         &mut self,
-        policy: Vec<(Point2f32, manip_2d_plan::SnapChoice)>,
+        policy: Vec<(Point2f32, manip_plan::SnapChoice)>,
     ) {
         let Some(last) = self.last_snap_action.take() else {
             return;
@@ -113,12 +113,12 @@ impl AppController {
         // the document, then re-run under the policy.
         self.history.pop();
         self.restore_history_snapshot(last.before);
-        manip_2d_plan::set_snap_policy(policy);
-        let _ = manip_2d_plan::take_snap_decisions(); // clear stale
+        manip_plan::set_snap_policy(policy);
+        let _ = manip_plan::take_snap_decisions(); // clear stale
         self.dispatch_snap_action(&last.action);
-        manip_2d_plan::clear_snap_policy();
+        manip_plan::clear_snap_policy();
         // Re-capture (the direct dispatch bypassed the normal capture point).
-        let decisions = manip_2d_plan::take_snap_decisions();
+        let decisions = manip_plan::take_snap_decisions();
         if let Some(before) = self.history.last().cloned() {
             self.last_snap_action = Some(LastSnapAction {
                 action: last.action,
@@ -164,7 +164,7 @@ impl AppController {
         };
         // Build a policy that preserves every other snap's current choice and
         // overrides just this one.
-        let policy: Vec<(Point2f32, manip_2d_plan::SnapChoice)> = last
+        let policy: Vec<(Point2f32, manip_plan::SnapChoice)> = last
             .decisions
             .iter()
             .map(|d| {
@@ -174,8 +174,8 @@ impl AppController {
                     d.chosen
                 };
                 let sc = match c {
-                    Some(i) => manip_2d_plan::SnapChoice::Apply(i),
-                    None => manip_2d_plan::SnapChoice::Skip,
+                    Some(i) => manip_plan::SnapChoice::Apply(i),
+                    None => manip_plan::SnapChoice::Skip,
                 };
                 (d.from, sc)
             })
@@ -190,10 +190,10 @@ impl AppController {
         let Some(last) = &self.last_snap_action else {
             return;
         };
-        let policy: Vec<(Point2f32, manip_2d_plan::SnapChoice)> = last
+        let policy: Vec<(Point2f32, manip_plan::SnapChoice)> = last
             .decisions
             .iter()
-            .map(|d| (d.from, manip_2d_plan::SnapChoice::Skip))
+            .map(|d| (d.from, manip_plan::SnapChoice::Skip))
             .collect();
         self.replay_last_snap_action(policy);
     }

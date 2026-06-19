@@ -20,7 +20,7 @@ or a native Android shell, so its purity is non-negotiable.
   the dimensioning loop, exposure painting, drag geometry, phase stamping, the
   resolve (`resolve.rs`) and load (`load.rs`) projections.
 - Pure coordinate/vertex/edge math does NOT belong here — push it down into
-  `manip_2d_plan` (`FloorPlan` methods or `geom.rs`) and call it.
+  `manip_plan` (`FloorPlan` methods or `geom.rs`) and call it.
 - Shell concerns (undo snapshots, persistence, UI prompts, revision tracking)
   do NOT belong here — leave hooks for the controller; take owned data in,
   return results out. Pattern: one high-level method per user action

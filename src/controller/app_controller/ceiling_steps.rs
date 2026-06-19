@@ -168,7 +168,7 @@ impl AppController {
         // against `document.outline`, which is only synced on shape switches.
         self.sync_active();
         // A CLOSED stroke is an AREA, not a line — the floor-step parity path.
-        if manip_2d_plan::stroke_is_closed(&pts, self.tuning.subarea.close_gap_m) {
+        if manip_plan::stroke_is_closed(&pts, self.tuning.subarea.close_gap_m) {
             self.apply_ceiling_carve_stroke(&pts);
             return;
         }
@@ -426,7 +426,7 @@ impl AppController {
         Some(SnapTagView {
             pos: mid,
             from,
-            current_kind: Some(manip_2d_plan::SnapKind::ToParallelWall),
+            current_kind: Some(manip_plan::SnapKind::ToParallelWall),
             options: Vec::new(),
             skippable: true,
         })
@@ -694,7 +694,7 @@ impl AppController {
     /// one per committed `|Δ| < 1e-3` ceiling-step region, for the UI's faint
     /// dashed pass. The cut geometry (the divider's interior bbox edge on the
     /// split axis, shared with the other piece) is pure coordinate math, so it
-    /// lives in [`manip_2d_plan::interior_split_edge`]; this just iterates the
+    /// lives in [`manip_plan::interior_split_edge`]; this just iterates the
     /// session dividers and hands each ring + the outline bbox to it. View data
     /// only — derived, not stored.
     pub fn ceiling_divider_lines(&self) -> Vec<((f64, f64), (f64, f64))> {
@@ -712,7 +712,7 @@ impl AppController {
                     .filter_map(|r| {
                         let ring: Vec<(f64, f64)> =
                             r.polygon.iter().map(|p| (p.x as f64, p.y as f64)).collect();
-                        manip_2d_plan::interior_split_edge(&ring, outline_bbox)
+                        manip_plan::interior_split_edge(&ring, outline_bbox)
                     })
                     .collect()
             })

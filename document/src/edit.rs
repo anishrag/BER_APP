@@ -3,9 +3,9 @@
 //! edit mode — hit-testing setup, the post-drag / vertex-drop measurement prompts
 //! and their solvers — is interaction bound to the controller's prompt types (an
 //! intentional shell exception; see "Responsibility placement" in CLAUDE.md), and
-//! the actual plan edits it performs are already `manip_2d_plan` calls.
+//! the actual plan edits it performs are already `manip_plan` calls.
 use crate::StoreyDoc;
-use manip_2d_plan::{ParameterAxis, VertexId};
+use manip_plan::{ParameterAxis, VertexId};
 
 impl StoreyDoc {
     /// Pin vertex `(ring, idx)` at an exact plan position: resolve its x and y

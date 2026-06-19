@@ -184,10 +184,10 @@ impl AppController {
         self.sync_active();
         // A CLOSED stroke is the RECT-ridge flow's flat top, not a ridge
         // line — classified by THE closure rule the living-area/phase carve
-        // uses ([`manip_2d_plan::stroke_is_closed`], single-sourced): ends
+        // uses ([`manip_plan::stroke_is_closed`], single-sourced): ends
         // within `close_gap_m` AND enclosing real area — a SHORT ridge
         // stroke whose ends merely fall within the gap stays a line.
-        if manip_2d_plan::stroke_is_closed(&pts, self.tuning.subarea.close_gap_m) {
+        if manip_plan::stroke_is_closed(&pts, self.tuning.subarea.close_gap_m) {
             self.apply_roof_rect_stroke(&pts);
             return;
         }
@@ -813,7 +813,7 @@ impl AppController {
         Some(SnapTagView {
             pos,
             from,
-            current_kind: Some(manip_2d_plan::SnapKind::ToParallelWall),
+            current_kind: Some(manip_plan::SnapKind::ToParallelWall),
             options: Vec::new(),
             skippable: true,
         })

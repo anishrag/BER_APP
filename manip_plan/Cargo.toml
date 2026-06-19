@@ -1,5 +1,5 @@
 [package]
-name = "manip_2d_plan"
+name = "manip_plan"
 version = "0.1.0"
 edition = "2021"
 description = "Hand-drawn floor-plan strokes → orthogonal parametric polygons"

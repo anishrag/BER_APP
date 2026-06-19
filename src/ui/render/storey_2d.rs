@@ -14,7 +14,7 @@ use datatypes::ber::structural::{CeilingRegion, FloorRegion, Storey, WallRegion}
 use domain::sketch::DisplayMode;
 use eframe::egui;
 use geo::Coord;
-use manip_2d_plan::CollinearitySuggestion;
+use manip_plan::CollinearitySuggestion;
 
 use super::{
     color_for, draw_dashed_segment, fill_polygon, fit_transform, style, Transform2d, ViewParams,

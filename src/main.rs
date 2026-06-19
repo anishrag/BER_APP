@@ -3,13 +3,13 @@ use ber_app::ui;
 
 fn main() -> Result<(), ui::RunError> {
     // Route the app's and library crates' debug traces (`ber_app`, `document`,
-    // `manip_2d_plan`) to stdout with a message-only format. Default filter
+    // `manip_plan`) to stdout with a message-only format. Default filter
     // keeps dependency noise out; override with `RUST_LOG` (e.g.
     // `RUST_LOG=warn` to quiet the traces).
     use std::io::Write;
     env_logger::Builder::from_env(
         env_logger::Env::default()
-            .default_filter_or("error,ber_app=debug,document=debug,manip_2d_plan=debug"),
+            .default_filter_or("error,ber_app=debug,document=debug,manip_plan=debug"),
     )
     .target(env_logger::Target::Stdout)
     .format(|buf, record| writeln!(buf, "{}", record.args()))

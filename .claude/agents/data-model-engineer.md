@@ -12,7 +12,7 @@ data model (`ber/`) and the DEAP input model (`deap/`).
   shape. Persistence lives in `src/engine`; this crate just models and
   transforms.
 - Use `Point2*`/`Point3*` from `domain::points`. Geometry *algorithms* belong
-  in `manip_2d_plan`; this crate may hold data-adjacent geometry only when it
+  in `manip_plan`; this crate may hold data-adjacent geometry only when it
   operates on its own stored types (e.g. `FloorRegions::partition`).
 - Serialized structs are load-bearing: the DB stores `Ber` as a JSON blob.
   Additive evolution only — new fields take `#[serde(default)]` so older

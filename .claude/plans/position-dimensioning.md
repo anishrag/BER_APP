@@ -24,7 +24,7 @@ existing exposure); step-cut UX strictly sequences position prompt then amount (
   (log, never silently claim precision) or the flow wedges.
 - Living areas: carry the free-axes record (uniform pinned_slot_for) but are NEVER prompted.
 
-## Slice 1 — manip_2d_plan (geometry-engineer)
+## Slice 1 — manip_plan (geometry-engineer)
 
 lib.rs, next to params_pinned_to_outline (refactor the existing contact scan into a shared private
 helper so the two stay in lockstep — behaviour-preserving for existing callers):

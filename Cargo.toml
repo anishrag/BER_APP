@@ -25,7 +25,7 @@ earcutr = "0.5.0"
 datatypes = { path = "datatypes" }
 document = { path = "document" }
 domain = { path = "domain" }
-manip_2d_plan = { path = "manip_2d_plan", features = ["serde"] }
+manip_plan = { path = "manip_plan", features = ["serde"] }
 sketch = { path = "sketch" }
 egui = "0.33.3"
 strum = "0.27.2"
@@ -63,7 +63,7 @@ eframe = { version = "0.33.3", default-features = false, features = [
 android_logger = "0.15"
 
 [workspace]
-members = ["datatypes", "document", "sketch", "domain", "manip_2d_plan"]
+members = ["datatypes", "document", "sketch", "domain", "manip_plan"]
 
 [workspace.dependencies]
 # float_roundtrip: the BER blob round-trips f64 geometry through JSON — without

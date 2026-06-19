@@ -269,8 +269,8 @@ impl AppController {
         // drew "close" to the storey below lands on it, yet far below the depth
         // of a real extension (e.g. a garage bump-out), which stays un-snapped.
         let tol =
-            (manip_2d_plan::ring_diagonal(&ring) * self.tuning.new_storey.snap_tol_ratio).max(1e-3);
-        let snapped = manip_2d_plan::snap_stroke_to_ring(points, &ring, tol);
+            (manip_plan::ring_diagonal(&ring) * self.tuning.new_storey.snap_tol_ratio).max(1e-3);
+        let snapped = manip_plan::snap_stroke_to_ring(points, &ring, tol);
         let moved = points
             .iter()
             .zip(snapped.iter())
@@ -294,7 +294,7 @@ impl AppController {
     /// [`FloorPlan::params_pinned_to_outline`]) so it isn't re-prompted — only
     /// the genuinely-new walls (e.g. a garage the upper storey extends over)
     /// remain to dimension. The geometry (snap, orthogonalize, pin) all lives
-    /// in `manip_2d_plan`; here we only sequence it.
+    /// in `manip_plan`; here we only sequence it.
     pub fn apply_outline_stroke_world(&mut self, world_points: &[(f32, f32)]) {
         log::debug!(
             "[new-storey] WORLD outline path: storey={:?}, {} world points",
@@ -334,7 +334,7 @@ impl AppController {
             log::error!("[new-storey] apply_outline_stroke_world failed: {}", e);
             // Drain any decisions the failed carve recorded so they can't be
             // misattributed to the next captured action.
-            let _ = manip_2d_plan::take_snap_decisions();
+            let _ = manip_plan::take_snap_decisions();
             return;
         }
         // If the carve made elective snaps, remember the action so the tag
@@ -441,9 +441,9 @@ impl AppController {
             .collect();
         log::debug!("Extend stroke (world coords): {} points", pts.len());
         dump_stroke("extend", &pts);
-        let _ = manip_2d_plan::take_splice_debug(); // clear stale phases
+        let _ = manip_plan::take_splice_debug(); // clear stale phases
         let res = self.apply_extend_stroke(&pts);
-        self.splice_debug = manip_2d_plan::take_splice_debug();
+        self.splice_debug = manip_plan::take_splice_debug();
         if let Err(e) = res {
             log::error!("apply_extend_stroke: {}", e);
         }
@@ -516,11 +516,11 @@ impl AppController {
             .collect();
         log::debug!("Trim stroke (world coords): {} points", pts.len());
         dump_stroke("trim", &pts);
-        let _ = manip_2d_plan::take_splice_debug(); // clear stale phases
+        let _ = manip_plan::take_splice_debug(); // clear stale phases
         let res = self.apply_trim_stroke(&pts);
         // Capture the pipeline phases (recorded even when the splice is rejected)
         // for the UI's coloured debug overlay.
-        self.splice_debug = manip_2d_plan::take_splice_debug();
+        self.splice_debug = manip_plan::take_splice_debug();
         if let Err(e) = res {
             log::error!("apply_trim_stroke: {}", e);
         }

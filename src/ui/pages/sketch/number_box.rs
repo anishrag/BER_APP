@@ -115,7 +115,7 @@ pub(super) fn render<F: FnMut(UiEvent)>(
     view: &mut SketchView<'_>,
     on_event: &mut F,
 ) {
-    use manip_2d_plan::ParameterAxis::{X, Y};
+    use manip_plan::ParameterAxis::{X, Y};
 
     laser_autodetect(ctx, view);
 

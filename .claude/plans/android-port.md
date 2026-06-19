@@ -4,7 +4,7 @@
 
 ## Starting position (re-verified 2026-06-12)
 
-- **Portable already:** all workspace crates (`domain`, `datatypes`, `sketch`, `manip_2d_plan`, `document`) plus `src/controller` and `src/engine` have zero UI-toolkit imports. No native C deps anywhere except `rusqlite` `bundled` (NDK-safe). The only non-`src/` change in the whole port is one method on `sketch::SketchEngine`.
+- **Portable already:** all workspace crates (`domain`, `datatypes`, `sketch`, `manip_plan`, `document`) plus `src/controller` and `src/engine` have zero UI-toolkit imports. No native C deps anywhere except `rusqlite` `bundled` (NDK-safe). The only non-`src/` change in the whole port is one method on `sketch::SketchEngine`.
 - **Toolkit facts (verified from registry sources, not memory):**
   - `eframe 0.33.3` has `NativeOptions.android_app: Option<winit::platform::android::activity::AndroidApp>` (cfg android).
   - eframe does **not** re-export winit's android module → the android entry needs a direct `winit` dep. `winit` is *not* on the boundary blocklist, so it may be named outside `src/ui`.
@@ -39,7 +39,7 @@ Desktop build keeps working throughout; every slice below is desktop-safe to lan
 ### Slice 7 first — log conversion (pure sweep, good first PR)
 - `println!` → `log::debug!`/`info!`, `eprintln!` → `log::warn!`/`error!` across `src/` (~116 sites).
 - Logger selection is an entry-point concern: `env_logger` stays in `main.rs`; `android_logger::init_once(...)` goes in `android_main`.
-- **Trap:** the desktop default filter `error,document=debug,manip_2d_plan=debug` would *silence* the converted controller lines — it must gain `ber_app=debug`.
+- **Trap:** the desktop default filter `error,document=debug,manip_plan=debug` would *silence* the converted controller lines — it must gain `ber_app=debug`.
 
 ### Slices 1+2 — paths, entry split, writer
 - **New `src/paths.rs`:** `struct Paths { data_dir: PathBuf }` with `Paths::in_dir(PathBuf)` (Android), `Paths::desktop()` (`$XDG_DATA_HOME/ber_app` → `~/.local/share/ber_app` → cwd dev fallback; creates the dir), `db_file() -> PathBuf`. Path *policy* lives only in entry points — controller/document never see a path. No `dirs` crate.
@@ -64,7 +64,7 @@ Desktop build keeps working throughout; every slice below is desktop-safe to lan
   - `sketch/src/engine.rs`: `pub fn cancel_stroke(&mut self)` — abandon in-flight stroke, no-op if none. (The only non-`src/` change in the port.)
   - `SketchEvent::CancelStroke` (no payload) in `src/ui/pages/sketch/mod.rs`.
   - `src/controller/app_controller/strokes.rs`: `pub fn sketch_cancel_stroke(&mut self)` — nothing committed → **no undo snapshot**. Stroke preview clears for free (it's derived from the engine's stroke).
-- Canvas change: stroke block at `canvas.rs:856` gains `&& !touch_nav_active`. Desktop-safe (`multi_touch()` is `None` with a mouse). No `document`/`manip_2d_plan` changes.
+- Canvas change: stroke block at `canvas.rs:856` gains `&& !touch_nav_active`. Desktop-safe (`multi_touch()` is `None` with a mouse). No `document`/`manip_plan` changes.
 - 3D orbit: one-finger drag already orbits; two-finger nav composes via the same gate.
 
 ### Slice 5 — numeric pad
@@ -126,7 +126,7 @@ ber-reviewer audits after Phases 1 and 2 land; live device runs stay with Anish.
 | System IME absent for egui TextEdits | High (expected) | Numeric pad covers the field workflow; extend NumPad to a minimal qwerty for the few free-text fields |
 | glow context loss on suspend | Medium | wgpu backend (one-line switch in `launch`) |
 | eframe-on-Android fundamentally disappointing | Low | Native Kotlin shell + JNI driving `controller`/`document` as a library — `src/ui` rewrite is contained by the boundary rules |
-| Parametric solve perf on tablet CPU | Low | Profile release builds in Phase 0/1; `manip_2d_plan` is pure Rust |
+| Parametric solve perf on tablet CPU | Low | Profile release builds in Phase 0/1; `manip_plan` is pure Rust |
 
 ## Open questions (flagged, answered in Phase 0)
 

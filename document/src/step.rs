@@ -96,7 +96,7 @@ mod tests {
     use datatypes::ber::structural::FloorRegions;
     use datatypes::ber::suggest::suggest_storey_outlines;
     use domain::points::Point2f64;
-    use manip_2d_plan::{FloorPlan, ParameterAxis};
+    use manip_plan::{FloorPlan, ParameterAxis};
 
     #[test]
     fn step_regions_from_floors_skips_level_zero_regions() {

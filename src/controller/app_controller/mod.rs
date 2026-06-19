@@ -58,7 +58,7 @@ use datatypes::ber::common::{ConstructionPhase, ConstructionPhases, ItemId};
 use datatypes::ber::structural::{FloorRegions, Storey, SurfaceCounts, WallExposure};
 use domain::points::{to_f32, Point2f32, Point2f64};
 use domain::sketch::{DisplayMode, EditTools, SketchMode};
-use manip_2d_plan::{
+use manip_plan::{
     Axis, CollinearitySuggestion, FloorPlan, ParameterAxis, SubareaOutcome, VertexId,
 };
 use sketch::model::Stroke;
@@ -262,7 +262,7 @@ pub struct AppController {
     inherited_seed_pending: HashSet<usize>,
     /// DEBUG: the splice-pipeline phases (#1 raw stroke … #4 spliced ring) from
     /// the last extend/trim, captured for the UI's coloured debug overlay.
-    splice_debug: Vec<manip_2d_plan::SplicePhase>,
+    splice_debug: Vec<manip_plan::SplicePhase>,
     /// Edit counter, bumped on every in-memory BER refresh (`commit_to_ber`).
     /// `revision != saved_revision` means there are un-persisted edits. The UI
     /// uses `revision` for idle detection; `flush_if_dirty` writes to disk and

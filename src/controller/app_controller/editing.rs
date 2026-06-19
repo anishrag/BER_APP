@@ -2,7 +2,7 @@
 //! dragging, and the post-drag / post-drop measurement prompts. Split out
 //! of the controller core; see "Responsibility placement" in CLAUDE.md.
 use super::*;
-use manip_2d_plan::{intersect_circles, project_to_circle, solve_axis_wall};
+use manip_plan::{intersect_circles, project_to_circle, solve_axis_wall};
 
 impl AppController {
     /// World-coord endpoints of the currently selected Move-mode wall, or
@@ -461,7 +461,7 @@ impl AppController {
             return;
         };
         // The parallel-wall DISCOVERY (orientation + the walk over every other
-        // wall) is plan topology — `manip_2d_plan` owns it; the shell just packs
+        // wall) is plan topology — `manip_plan` owns it; the shell just packs
         // the candidates into `MeasurementOption`s for its prompt type.
         let Some((axis, candidates)) = self.document.floor_plan.parallel_walls_to(ring, edge_start)
         else {

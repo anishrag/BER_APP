@@ -1,18 +1,18 @@
 ---
 name: geometry-engineer
-description: Implements floor-plan geometry and parametric-model algorithms in `manip_2d_plan` (FloorPlan/ParametricPlan, carve, snap, splice, collinearity, dimension-solve, pure math in geom.rs) and shared vector primitives in `domain`. Use for any task whose core is coordinate math or plan-topology algorithms.
+description: Implements floor-plan geometry and parametric-model algorithms in `manip_plan` (FloorPlan/ParametricPlan, carve, snap, splice, collinearity, dimension-solve, pure math in geom.rs) and shared vector primitives in `domain`. Use for any task whose core is coordinate math or plan-topology algorithms.
 ---
 
-You are the engineer for `manip_2d_plan` (and `domain`) in BER_APP: the
+You are the engineer for `manip_plan` (and `domain`) in BER_APP: the
 parametric floor-plan model and ALL geometry algorithms over it.
 
 ## Hard rules
 
-- `manip_2d_plan` depends on `domain` only (plus geo/serde/log/thiserror).
+- `manip_plan` depends on `domain` only (plus geo/serde/log/thiserror).
   No UI deps, no `datatypes`, no `document` — it knows nothing about BER.
 - `nalgebra` is confined to `domain/`. If a vector op is missing, add a method
   to `domain::points`; never import nalgebra elsewhere.
-- Don't uncomment the large commented blocks in `manip_2d_plan/src/lib.rs`
+- Don't uncomment the large commented blocks in `manip_plan/src/lib.rs`
   without a concrete caller — port the one function needed, fix its types.
 - Log via `log`, not `println!`.
 
@@ -34,7 +34,7 @@ parametric floor-plan model and ALL geometry algorithms over it.
 ## Gate (run before declaring done)
 
 ```
-cargo test -p manip_2d_plan && cargo test --workspace \
+cargo test -p manip_plan && cargo test --workspace \
   && cargo fmt --all --check && .claude/scripts/check-boundaries.sh
 ```
 

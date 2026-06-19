@@ -55,7 +55,7 @@ structural.rs:
 Tests: vertical+horizontal compose → 4 z's (h, h+a, h+b, h+a+b); empty no-op exact points;
 sliver drop; flat_z Some/None. Document the flatness assumption + opes-dropped-on-split.
 
-## Slice 2 — manip_2d_plan (geometry-engineer)
+## Slice 2 — manip_plan (geometry-engineer)
 
 geom.rs + root re-export:
   /// Fit an AXIS-ALIGNED line to a near-straight stroke: TLS fit (`fit_line`),

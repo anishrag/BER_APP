@@ -35,7 +35,7 @@ use datatypes::ber::common::ItemId;
 use datatypes::ber::structural::WallExposure;
 use domain::sketch::{DisplayMode, SketchMode};
 use eframe::egui;
-use manip_2d_plan::CollinearitySuggestion;
+use manip_plan::CollinearitySuggestion;
 
 /// User-controlled view transform passed in from the controller. `zoom = 1.0`
 /// and zero offsets = pure auto-fit. Higher zoom enlarges; positive offset_x
@@ -812,12 +812,12 @@ pub fn render_splice_debug(
 }
 
 /// Short human label for an elective snap kind.
-pub(crate) fn snap_kind_label(kind: manip_2d_plan::SnapKind) -> &'static str {
+pub(crate) fn snap_kind_label(kind: manip_plan::SnapKind) -> &'static str {
     match kind {
-        manip_2d_plan::SnapKind::ToVertex | manip_2d_plan::SnapKind::ToCorner => "corner",
-        manip_2d_plan::SnapKind::ToEdge => "edge",
-        manip_2d_plan::SnapKind::ToPreviousOutline => "prev outline",
-        manip_2d_plan::SnapKind::ToParallelWall => "parallel wall",
+        manip_plan::SnapKind::ToVertex | manip_plan::SnapKind::ToCorner => "corner",
+        manip_plan::SnapKind::ToEdge => "edge",
+        manip_plan::SnapKind::ToPreviousOutline => "prev outline",
+        manip_plan::SnapKind::ToParallelWall => "parallel wall",
     }
 }
 

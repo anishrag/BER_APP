@@ -10,7 +10,7 @@
 //! the production input from the sketch page.
 
 use domain::points::Point2f32;
-use manip_2d_plan::{Axis, FloorPlan};
+use manip_plan::{Axis, FloorPlan};
 
 fn pt(x: f32, y: f32) -> Point2f32 {
     Point2f32::new(x, y)

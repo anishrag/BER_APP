@@ -540,7 +540,7 @@ dependencies = [
  "futures",
  "geo",
  "log",
- "manip_2d_plan",
+ "manip_plan",
  "rusqlite",
  "serde",
  "serde_json",
@@ -1052,7 +1052,7 @@ dependencies = [
  "datatypes",
  "domain",
  "log",
- "manip_2d_plan",
+ "manip_plan",
  "serde",
  "serde_json",
 ]
@@ -2527,7 +2527,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "manip_2d_plan"
+name = "manip_plan"
 version = "0.1.0"
 dependencies = [
  "domain",

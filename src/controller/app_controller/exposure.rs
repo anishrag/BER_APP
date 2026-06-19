@@ -18,9 +18,7 @@
 //! (`WallRegion.polygon` is an arbitrary `Polygon3D`) already allows it.
 use super::*;
 use document::{range_at, RiserKind};
-use manip_2d_plan::{
-    lerp_along, project_distance_along as project_distance, segment_len as wall_len,
-};
+use manip_plan::{lerp_along, project_distance_along as project_distance, segment_len as wall_len};
 
 /// A tap selects a riser only within this fraction of the wall-pick
 /// tolerance. Risers get FIRST claim inside the tighter band (their dashed

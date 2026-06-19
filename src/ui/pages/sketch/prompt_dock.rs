@@ -378,7 +378,7 @@ fn vertex_drop_prompt_toolbar<F: FnMut(UiEvent)>(
     on_event: &mut F,
 ) {
     use crate::controller::app_controller::VertexMeasurementKind;
-    use manip_2d_plan::ParameterAxis;
+    use manip_plan::ParameterAxis;
     ui.label(
         egui::RichText::new("Place vertex — fill in any 2 distances (m):")
             .strong()

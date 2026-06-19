@@ -10,7 +10,7 @@ the `OnRing` find/apply split, and the `record_phase` thread-local pattern.
 
 ## Increments (each compiles + `cargo test --workspace` green)
 
-**1 — Structured snap recording (foundation).** [manip_2d_plan, unit-testable]
+**1 — Structured snap recording (foundation).** [manip_plan, unit-testable]
 - `SnapKind` → `pub`; add `pub SnapCandidate { kind, to, score }` and
   `pub SnapDecision { from, candidates, chosen }`.
 - A thread-local `SNAP_DECISIONS` (like `SPLICE_PHASES`); `record_choice(from,
@@ -19,7 +19,7 @@ the `OnRing` find/apply split, and the `record_phase` thread-local pattern.
   sites unchanged, now recorded).
 - `pub fn take_snap_decisions() -> Vec<SnapDecision>` (drain), re-exported.
 
-**2 — Candidate enumeration.** [manip_2d_plan]
+**2 — Candidate enumeration.** [manip_plan]
 - `find_candidates(ring, p, tols) -> Vec<SnapCandidate>` (top-K corners, nearest
   edge, no-snap), ranked most-aggressive first.
 - `elective_choice(decision_id, candidates) -> Point2f32` — consults the forced

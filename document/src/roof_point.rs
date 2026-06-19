@@ -50,7 +50,7 @@ use datatypes::ber::structural::{
     APEX_BOUNDARY_EPS_M,
 };
 use domain::points::{to_f32, Point2f32, Point2f64};
-use manip_2d_plan::ParameterAxis;
+use manip_plan::ParameterAxis;
 
 /// User-facing rejection for a tapped point outside the storey footprint.
 /// Kept stable — tests (and the shell) match on it.
@@ -256,7 +256,7 @@ fn check_group_ridge(
         .iter()
         .find(|ring| {
             let pts: Vec<Point2f32> = ring.iter().copied().map(to_f32).collect();
-            manip_2d_plan::ring_contains_point(&pts, p.x as f32, p.y as f32)
+            manip_plan::ring_contains_point(&pts, p.x as f32, p.y as f32)
         })
         .or_else(|| group.merged_rings.first());
     match ring {
@@ -1036,7 +1036,7 @@ impl StoreyDoc {
     }
 
     /// Fit a near-straight `stroke` (world/metre space) to an axis-aligned
-    /// RIDGE line: [`manip_2d_plan::fit_axis_segment`] — axis + coordinate +
+    /// RIDGE line: [`manip_plan::fit_axis_segment`] — axis + coordinate +
     /// the stroke's own projected EXTENT (a ridge has endpoints, taken as
     /// drawn). The cross coordinate must cross the footprint (the
     /// ceiling-step line test — STRICT: a ridge ON a parallel wall makes no
@@ -1052,7 +1052,7 @@ impl StoreyDoc {
         &self,
         stroke: &[Point2f32],
     ) -> Result<(ParameterAxis, f32, (f32, f32)), String> {
-        let (axis, coord, (lo, hi)) = manip_2d_plan::fit_axis_segment(stroke).ok_or_else(|| {
+        let (axis, coord, (lo, hi)) = manip_plan::fit_axis_segment(stroke).ok_or_else(|| {
             "That stroke isn't a straight line — draw one straight stroke along the ridge."
                 .to_string()
         })?;
@@ -1085,7 +1085,7 @@ impl StoreyDoc {
     }
 
     /// Fit a CLOSED `stroke` (world/metre space) to an axis-aligned
-    /// flat-top RECTANGLE: [`manip_2d_plan::fit_axis_rect`] (the stroke's
+    /// flat-top RECTANGLE: [`manip_plan::fit_axis_rect`] (the stroke's
     /// bbox, accepted only when every point hugs its boundary), then the
     /// footprint test — all four sides within the outline bbox expanded by
     /// the snap tolerance
@@ -1097,7 +1097,7 @@ impl StoreyDoc {
     /// [`fit_roof_ridge_line`](Self::fit_roof_ridge_line).
     pub fn fit_roof_rect(&self, stroke: &[Point2f32]) -> Result<(Point2f32, Point2f32), String> {
         let ((x0, y0), (x1, y1)) =
-            manip_2d_plan::fit_axis_rect(stroke).ok_or_else(|| RECT_NOT_RECT_MSG.to_string())?;
+            manip_plan::fit_axis_rect(stroke).ok_or_else(|| RECT_NOT_RECT_MSG.to_string())?;
         let ((min_x, min_y), (max_x, max_y)) = self
             .outline
             .floor_plan
@@ -1224,7 +1224,7 @@ mod tests {
     use crate::{DimensionState, ShapeSlot};
     use datatypes::ber::structural::{CeilingRegion, CeilingRegions, Polygon3D, RoofApex, Storey};
     use domain::points::Point3f64;
-    use manip_2d_plan::FloorPlan;
+    use manip_plan::FloorPlan;
 
     fn p(x: f32, y: f32) -> Point2f32 {
         Point2f32::new(x, y)

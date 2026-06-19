@@ -49,7 +49,7 @@ pub use step::{inherited_step_regions, step_regions_from_floors, StepRegion};
 
 use datatypes::ber::structural::WallExposure;
 use domain::points::{to_f64, Point2f32, Point2f64};
-use manip_2d_plan::{
+use manip_plan::{
     Error, FloorPlan, ParameterAxis, ParameterId, SubareaOutcome, SubareaTuning, VertexId,
 };
 use std::collections::{HashMap, HashSet};
@@ -284,7 +284,7 @@ fn pick_piece_for_stroke(pieces: Vec<FloorPlan>, stroke: &[Point2f32]) -> Option
             let piece_in_stroke = p
                 .get_points()
                 .iter()
-                .filter(|v| manip_2d_plan::ring_contains_point(stroke, v.x, v.y))
+                .filter(|v| manip_plan::ring_contains_point(stroke, v.x, v.y))
                 .count();
             let overlap = pts_in_piece + piece_in_stroke;
             // Tie-break on ring area (the crate-shared shoelace in `step`).

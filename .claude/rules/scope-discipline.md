@@ -8,7 +8,7 @@ These aren't enforced by a script — they're easy to violate when "improving" a
 
 ## Don't uncomment large commented blocks
 
-**Rule:** Don't restore the commented sections of `manip_2d_plan/src/lib.rs` (or other large `//`-block regions) without a concrete caller.
+**Rule:** Don't restore the commented sections of `manip_plan/src/lib.rs` (or other large `//`-block regions) without a concrete caller.
 
 **Why:** Those sections (add area, trim, collinear constraints, room detection, measurements) were left commented intentionally — they were not stable, or didn't compile against the current types. Restoring them en masse will pull in obsolete dependencies and may regress the parts that do work.
 

@@ -49,7 +49,7 @@ surfaces sit at `Original`.
 
 - **Geometry** (`carve_subarea` `lib.rs:203`, `split_by_cut` `lib.rs:548`, `clamp_inside`
   `lib.rs:1476`, `contains_point` `lib.rs:1450`) — already feature-agnostic in
-  `manip_2d_plan`. Reused as-is; no moves.
+  `manip_plan`. Reused as-is; no moves.
 - **Workflow** — new controller module `src/controller/app_controller/phase_regions.rs`,
   sibling to `living_areas.rs`. Owns the mode, the in-memory regions, the pending-pick
   state, and the commit resolution sequencing.
@@ -111,10 +111,10 @@ UI (`src/ui/pages/sketch.rs` + `src/ui/app.rs`):
 ### Stage 3 — Commit-time phase resolution
 
 - Add `resolved_phase_for(point, existing_phase, storey_idx) -> ConstructionPhase` on the
-  controller implementing the rule above; containment via `manip_2d_plan` point-in-ring
+  controller implementing the rule above; containment via `manip_plan` point-in-ring
   (reuse `FloorPlan::contains_point` / a `geom` helper — **no coordinate math inlined in the
   controller**). Representative point per surface: floor/ceiling region → ring centroid;
-  wall region → base-segment midpoint — both as `manip_2d_plan::geom` helpers fed owned
+  wall region → base-segment midpoint — both as `manip_plan::geom` helpers fed owned
   vertices.
 - In `commit_to_ber` (`mod.rs` ~940) and `persist` (~984): replace the `Default::default()`
   phase handed to every `ensure_*_construction` with the resolved phase. Factor a single
@@ -130,7 +130,7 @@ UI (`src/ui/pages/sketch.rs` + `src/ui/app.rs`):
 - `src/controller/app_controller/phase_regions.rs` (NEW) — the workflow.
 - `src/ui/pages/sketch.rs` — new `SketchEvent`s + phase-mode stroke capture.
 - `src/ui/render/*` — tint tagged regions (reuse living-area overlay).
-- `manip_2d_plan/src/geom.rs` — centroid / segment-midpoint helpers if not already present
+- `manip_plan/src/geom.rs` — centroid / segment-midpoint helpers if not already present
   (point-in-ring already exists behind `contains_point`).
 
 ## Tests (keep `cargo test --workspace` green; fmt + boundary scan clean)

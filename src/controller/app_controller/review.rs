@@ -287,11 +287,11 @@ impl AppController {
         // edge of the previous ring and put the closer one in the A slot.
         let prev_ring = self.previous_storey_ring();
         // A horizontal previous edge anchors a horizontal pair's y; a vertical
-        // one anchors a vertical pair's x (geometry in `manip_2d_plan`).
+        // one anchors a vertical pair's x (geometry in `manip_plan`).
         let dist_to_prev = |coord: f32, axis: &Axis| -> f32 {
             prev_ring
                 .as_ref()
-                .and_then(|ring| manip_2d_plan::nearest_parallel_edge_distance(ring, axis, coord))
+                .and_then(|ring| manip_plan::nearest_parallel_edge_distance(ring, axis, coord))
                 .unwrap_or(f32::MAX)
         };
         let suggestions: Vec<_> = self

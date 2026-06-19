@@ -3,11 +3,11 @@
 //! These exercise serialize → deserialize of a whole `FloorPlan` (and a trimmed
 //! one) from outside the crate — public surface only — so they belong here, not
 //! as in-crate unit tests. Gated on the `serde` feature; run with
-//! `cargo test -p manip_2d_plan --features serde`.
+//! `cargo test -p manip_plan --features serde`.
 #![cfg(feature = "serde")]
 
 use domain::points::Point2f32;
-use manip_2d_plan::FloorPlan;
+use manip_plan::FloorPlan;
 
 mod serde_tests {
     use super::*;

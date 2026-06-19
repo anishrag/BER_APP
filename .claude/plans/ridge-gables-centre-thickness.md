@@ -384,7 +384,7 @@ pub fn rect_hip_switches(ring: &[Point2f64], lo: Point2f64, hi: Point2f64) -> us
 ```rust
 // roof_point.rs
 /// Stroke-time fit: a CLOSED stroke in roof-point mode to an axis-aligned
-/// rect — manip_2d_plan::fit_axis_rect + the footprint test (all four
+/// rect — manip_plan::fit_axis_rect + the footprint test (all four
 /// sides within the outline bbox + snap tolerance). Err is user-facing.
 impl StoreyDoc { pub fn fit_roof_rect(&self, stroke: &[Point2f32])
                    -> Result<(Point2f32, Point2f32), String> }   // (lo, hi)
@@ -410,7 +410,7 @@ pub fn centred_rect_lo(storey: &Storey, axis: ParameterAxis,
                        lo: Point2f64, hi: Point2f64) -> Result<f32, String>
 ```
 
-### manip_2d_plan (geometry-engineer)
+### manip_plan (geometry-engineer)
 
 ```rust
 // geom.rs
@@ -532,7 +532,7 @@ Nothing else moves: `fallback_top_z` stays the absolute ceiling height; the rise
 
 ## Slice plan (implementation order + gates)
 
-Every slice gates on: `cargo build -p document && cargo build -p manip_2d_plan &&
+Every slice gates on: `cargo build -p document && cargo build -p manip_plan &&
 cargo build -p datatypes && cargo test --workspace && cargo fmt --all --check &&
 .claude/scripts/check-boundaries.sh`.
 

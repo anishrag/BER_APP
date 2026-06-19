@@ -395,7 +395,7 @@ mod tests {
     use crate::ShapeSlot;
     use datatypes::ber::structural::WallExposure;
     use domain::points::Point2f32;
-    use manip_2d_plan::FloorPlan;
+    use manip_plan::FloorPlan;
 
     /// Golden projection: a finalised 4×4 m square outline with one wall marked
     /// SemiExposed projects to one floor region (exact ring round-trip), FOUR
@@ -419,7 +419,7 @@ mod tests {
             dimensioning: doc.dimensioning.clone(),
         };
         let (vid, a, b) = doc.outline.floor_plan.perimeter_walls()[0];
-        let len = manip_2d_plan::segment_len(a, b);
+        let len = manip_plan::segment_len(a, b);
         doc.set_wall_section(vid, 0.0, len, len, WallExposure::SemiExposed);
 
         let mut ber = Ber::default();
@@ -1059,7 +1059,7 @@ mod tests {
             Point2f32::new(0.0, 4.0),
         ]);
         let (vid, a, b) = doc.outline.floor_plan.perimeter_walls()[0];
-        let len = manip_2d_plan::segment_len(a, b);
+        let len = manip_plan::segment_len(a, b);
         doc.set_wall_section(vid, 0.0, len, len, WallExposure::SemiExposed);
         let mut ber = Ber::default();
         ensure_storey_constructions(&mut ber, 1, &[]);
@@ -1179,7 +1179,7 @@ mod tests {
     /// riser (the carve aligns the whole drawn line onto the outline edge).
     #[test]
     fn step_carve_aligned_onto_an_outline_edge_derives_no_sliver_riser() {
-        use manip_2d_plan::{SubareaOutcome, SubareaTuning};
+        use manip_plan::{SubareaOutcome, SubareaTuning};
         let p = Point2f32::new;
         let outline = [
             p(2.8664, 7.6222),
@@ -1256,7 +1256,7 @@ mod tests {
         let (doc, ber) = ceiling_test_setup(2.4);
         let step = doc
             .ceiling_step_region(
-                manip_2d_plan::ParameterAxis::X,
+                manip_plan::ParameterAxis::X,
                 2.0,
                 crate::LineSide::Greater,
                 0.3,
@@ -1449,7 +1449,7 @@ mod tests {
                     && (a.x - b.x).abs() > 1.0
             })
             .expect("the south wall exists");
-        let len = manip_2d_plan::segment_len(a, b);
+        let len = manip_plan::segment_len(a, b);
         doc.set_wall_section(vid, 0.0, len, len, WallExposure::SemiExposed);
 
         let storey = resolve_storey(&doc, &ber, 0, &[], &[], &steps);
@@ -1557,7 +1557,7 @@ mod tests {
             Point2f32::new(0.0, 4.0),
         ]);
         let (vid, a, b) = doc.outline.floor_plan.perimeter_walls()[0];
-        let len = manip_2d_plan::segment_len(a, b);
+        let len = manip_plan::segment_len(a, b);
         doc.set_wall_section(vid, 0.0, len, len, WallExposure::Exposed);
 
         let mut ber = Ber::default();
@@ -1599,7 +1599,7 @@ mod tests {
             Point2f32::new(0.0, 4.0),
         ]);
         let (vid, a, b) = doc.outline.floor_plan.perimeter_walls()[0];
-        let len = manip_2d_plan::segment_len(a, b);
+        let len = manip_plan::segment_len(a, b);
         doc.set_wall_section(vid, 0.0, len, len, WallExposure::Exposed);
 
         let mut ber = Ber::default();
@@ -1713,7 +1713,7 @@ mod tests {
         let (doc, ber) = ceiling_test_setup(2.4);
         let step = doc
             .ceiling_step_region(
-                manip_2d_plan::ParameterAxis::X,
+                manip_plan::ParameterAxis::X,
                 1.0,
                 crate::LineSide::Greater,
                 0.3,
@@ -1745,7 +1745,7 @@ mod tests {
         let (doc, mut ber) = ceiling_test_setup(2.4);
         let step = doc
             .ceiling_step_region(
-                manip_2d_plan::ParameterAxis::Y,
+                manip_plan::ParameterAxis::Y,
                 3.0,
                 crate::LineSide::Less,
                 -0.2,
@@ -1804,7 +1804,7 @@ mod tests {
         ensure_storey_constructions(&mut ber, 0, &[]);
         let step = doc
             .ceiling_step_region(
-                manip_2d_plan::ParameterAxis::X,
+                manip_plan::ParameterAxis::X,
                 2.0,
                 crate::LineSide::Greater,
                 0.3,
@@ -1826,7 +1826,7 @@ mod tests {
         let (doc, ber) = ceiling_test_setup(h);
         let right = doc
             .ceiling_step_region(
-                manip_2d_plan::ParameterAxis::X,
+                manip_plan::ParameterAxis::X,
                 2.0,
                 crate::LineSide::Greater,
                 a,
@@ -1834,7 +1834,7 @@ mod tests {
             .unwrap();
         let top = doc
             .ceiling_step_region(
-                manip_2d_plan::ParameterAxis::Y,
+                manip_plan::ParameterAxis::Y,
                 2.0,
                 crate::LineSide::Greater,
                 b,
@@ -1859,7 +1859,7 @@ mod tests {
         let (doc1, mut ber) = ceiling_test_setup(2.4);
         let step = doc1
             .ceiling_step_region(
-                manip_2d_plan::ParameterAxis::X,
+                manip_plan::ParameterAxis::X,
                 2.0,
                 crate::LineSide::Less,
                 0.3,
@@ -1894,7 +1894,7 @@ mod tests {
         let (doc, ber) = ceiling_test_setup(2.4);
         let step = doc
             .ceiling_step_region(
-                manip_2d_plan::ParameterAxis::X,
+                manip_plan::ParameterAxis::X,
                 2.0,
                 crate::LineSide::Greater,
                 -2.4,
@@ -1954,7 +1954,7 @@ mod tests {
         // Right half (x ≥ 2) stepped to 2.7, apex at (3, 2) fanning it to 4.2.
         let step = doc
             .ceiling_step_region(
-                manip_2d_plan::ParameterAxis::X,
+                manip_plan::ParameterAxis::X,
                 2.0,
                 crate::LineSide::Greater,
                 0.3,
@@ -2057,7 +2057,7 @@ mod tests {
         // Right half (x ≥ 2) stepped to 2.7; a ridge along x = 3 over it.
         let step = doc
             .ceiling_step_region(
-                manip_2d_plan::ParameterAxis::X,
+                manip_plan::ParameterAxis::X,
                 2.0,
                 crate::LineSide::Greater,
                 0.3,
@@ -2152,7 +2152,7 @@ mod tests {
             Point2f32::new(0.0, 4.0),
         ]);
         let (vid, a, b) = doc.outline.floor_plan.perimeter_walls()[0];
-        let len = manip_2d_plan::segment_len(a, b);
+        let len = manip_plan::segment_len(a, b);
         doc.set_wall_section(vid, 0.0, len, len, WallExposure::Exposed);
         let mut ber = Ber::default();
         ensure_storey_constructions(&mut ber, 0, &[]);
@@ -2201,7 +2201,7 @@ mod tests {
             Point2f32::new(0.0, 4.0),
         ]);
         let (vid, a, b) = doc.outline.floor_plan.perimeter_walls()[0];
-        let len = manip_2d_plan::segment_len(a, b);
+        let len = manip_plan::segment_len(a, b);
         doc.set_wall_section(vid, 0.0, len, len, WallExposure::Exposed);
         let mut ber = Ber::default();
         ensure_storey_constructions(&mut ber, 0, &[]);
@@ -2238,7 +2238,7 @@ mod tests {
         // A step at x = 2 (+0.3) crosses every horizontal wall → re-resolve.
         let step = doc
             .ceiling_step_region(
-                manip_2d_plan::ParameterAxis::X,
+                manip_plan::ParameterAxis::X,
                 2.0,
                 crate::LineSide::Greater,
                 0.3,
@@ -2324,7 +2324,7 @@ mod tests {
             Point2f32::new(0.0, 4.0),
         ]);
         let (vid, a, b) = doc.outline.floor_plan.perimeter_walls()[0];
-        let len = manip_2d_plan::segment_len(a, b);
+        let len = manip_plan::segment_len(a, b);
         doc.set_wall_section(vid, 0.0, len, len, WallExposure::Exposed);
         let mut ber = Ber::default();
         ensure_storey_constructions(&mut ber, 0, &[]);
@@ -2423,7 +2423,7 @@ mod tests {
         ]);
         // Mark EVERY perimeter wall exposed — the user painted the envelope.
         for (vid, a, b) in doc.outline.floor_plan.perimeter_walls() {
-            let len = manip_2d_plan::segment_len(a, b);
+            let len = manip_plan::segment_len(a, b);
             doc.set_wall_section(vid, 0.0, len, len, WallExposure::Exposed);
         }
         let mut ber = Ber::default();
@@ -2432,7 +2432,7 @@ mod tests {
         // Raise the jut: step at x = 4, Greater side, +1.0 → jut ceiling 3.4.
         let step = doc
             .ceiling_step_region(
-                manip_2d_plan::ParameterAxis::X,
+                manip_plan::ParameterAxis::X,
                 4.0,
                 crate::LineSide::Greater,
                 1.0,
@@ -2600,7 +2600,7 @@ mod tests {
             Point2f32::new(0.13, 4.51),
         ]);
         for (vid, a, b) in doc.outline.floor_plan.perimeter_walls() {
-            let len = manip_2d_plan::segment_len(a, b);
+            let len = manip_plan::segment_len(a, b);
             doc.set_wall_section(vid, 0.0, len, len, WallExposure::Exposed);
         }
         let mut ber = Ber::default();
@@ -2611,7 +2611,7 @@ mod tests {
         // by 1 m, then canonicalize (materialize → reconstruct → re-resolve).
         let step = doc
             .ceiling_step_region(
-                manip_2d_plan::ParameterAxis::X,
+                manip_plan::ParameterAxis::X,
                 4.22,
                 crate::LineSide::Greater,
                 1.0,
@@ -2747,7 +2747,7 @@ mod tests {
                     Point2f32::new(x0, y2),
                 ]);
                 for (vid, a, b) in doc.outline.floor_plan.perimeter_walls() {
-                    let len = manip_2d_plan::segment_len(a, b);
+                    let len = manip_plan::segment_len(a, b);
                     doc.set_wall_section(vid, 0.0, len, len, WallExposure::Exposed);
                 }
                 doc
@@ -2758,7 +2758,7 @@ mod tests {
             ber.set_default_ceiling_height(Some(0), h);
             let step = doc
                 .ceiling_step_region(
-                    manip_2d_plan::ParameterAxis::X,
+                    manip_plan::ParameterAxis::X,
                     xm,
                     crate::LineSide::Greater,
                     1.0,
@@ -2828,7 +2828,7 @@ mod tests {
             Point2f32::new(0.0, 4.0),
         ]);
         let (vid, a, b) = doc.outline.floor_plan.perimeter_walls()[0];
-        let len = manip_2d_plan::segment_len(a, b);
+        let len = manip_plan::segment_len(a, b);
         // Paint the middle SemiExposed → ONE stored section; the rest of the
         // wall is Unset coverage (single representation).
         doc.set_wall_section(vid, 1.0, 3.0, len, WallExposure::SemiExposed);
@@ -2843,7 +2843,7 @@ mod tests {
         }];
         let step = doc
             .ceiling_step_region(
-                manip_2d_plan::ParameterAxis::X,
+                manip_plan::ParameterAxis::X,
                 2.0,
                 crate::LineSide::Greater,
                 0.3,
@@ -2915,7 +2915,7 @@ mod tests {
             .into_iter()
             .find(|(_, a, b)| a.y.abs() < 1e-6 && b.y.abs() < 1e-6)
             .expect("south wall on y = 0");
-        let len = manip_2d_plan::segment_len(a, b);
+        let len = manip_plan::segment_len(a, b);
         doc.set_wall_section(vid, 0.0, len, len, WallExposure::Exposed);
 
         // A floor step over the right half (x ∈ [2, 4]) crosses the south wall.

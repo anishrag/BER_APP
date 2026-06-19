@@ -157,10 +157,10 @@ impl AppController {
     /// pre-marks the walls shared with the outline as known (so dimensioning only
     /// asks about the drawn walls), makes it the active shape, appends it, and
     /// starts dimensioning. Returns a user-facing message if the region
-    /// self-crosses. (The clip/carve geometry lives in `manip_2d_plan`; this owns
+    /// self-crosses. (The clip/carve geometry lives in `manip_plan`; this owns
     /// only the commit workflow.)
     ///
-    /// [`Area`]: manip_2d_plan::SubareaOutcome::Area
+    /// [`Area`]: manip_plan::SubareaOutcome::Area
     fn commit_living_area_plan(
         &mut self,
         boundary: &FloorPlan,

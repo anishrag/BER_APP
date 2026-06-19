@@ -6,7 +6,7 @@
 use crate::{DimensionState, ShapeSlot, StoreyDoc};
 use datatypes::ber::structural::{FloorRegions, Storey};
 use domain::points::{to_f32, Point2f32};
-use manip_2d_plan::FloorPlan;
+use manip_plan::FloorPlan;
 
 impl StoreyDoc {
     /// Rebuild one storey's editing model from its resolved BER geometry.

@@ -65,7 +65,7 @@ pub struct SketchState {
     /// consecutive Wall prompts can share the same axis and option index.
     /// `None` when no position prompt is showing.
     pub position_prompt_key: Option<(
-        manip_2d_plan::ParameterAxis,
+        manip_plan::ParameterAxis,
         crate::controller::app_controller::PositionPromptKind,
         usize,
     )>,
@@ -124,7 +124,7 @@ pub struct SketchState {
     /// last prefill — keyed on the AXIS so the LenX → LenY transition refills
     /// (the rect shares `roof_ridge_length_input`; the two flows are never
     /// pending at once). `None` when no rect length stage is up.
-    pub roof_rect_len_key: Option<manip_2d_plan::ParameterAxis>,
+    pub roof_rect_len_key: Option<manip_plan::ParameterAxis>,
     /// Backing string for the new-storey flow's thickness input. PREFILLED
     /// "0.30" when the Thickness stage opens (via the one-shot guard below);
     /// the user overtypes, or "Use 0.30" submits the default directly.

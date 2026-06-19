@@ -38,7 +38,7 @@ use datatypes::ber::common::{ConstructionPhase, ItemId};
 use datatypes::ber::fenestration::{Frame, Glazing};
 use datatypes::ber::structural::{SurfaceCounts, WallExposure};
 use domain::sketch::{DisplayMode, EditTools, SketchMode};
-use manip_2d_plan::CollinearitySuggestion;
+use manip_plan::CollinearitySuggestion;
 use std::collections::HashSet;
 
 /// The UI-friendly version of a stroke
@@ -637,7 +637,7 @@ pub struct SketchView<'a> {
     pub roof_rect_views: &'a [([(f64, f64); 4], String)],
     pub pending_roof_rect_outline: Option<[(f64, f64); 4]>,
     pub roof_rect_position_pending: bool,
-    pub roof_rect_length_axis: Option<manip_2d_plan::ParameterAxis>,
+    pub roof_rect_length_axis: Option<manip_plan::ParameterAxis>,
     pub roof_rect_height_pending: bool,
     pub roof_rect_pending: bool,
     pub roof_ridge_length_input: &'a mut String,

@@ -38,7 +38,7 @@ fn floor_phase_at(ber: &Ber, idx: usize, x: f32, y: f32) -> Option<ConstructionP
         .zip(storey.floors.to_vertex_lists())
     {
         let ring: Vec<Point2f32> = verts.iter().copied().map(to_f32).collect();
-        if ring.len() >= 3 && manip_2d_plan::ring_contains_point(&ring, x, y) {
+        if ring.len() >= 3 && manip_plan::ring_contains_point(&ring, x, y) {
             return Some(
                 ber.floor_construction(fr.construction_id)
                     .map(|c| c.base.construction_phase.clone())

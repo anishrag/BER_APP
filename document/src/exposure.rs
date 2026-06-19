@@ -7,7 +7,7 @@ use crate::{ExposureSection, StoreyDoc};
 use datatypes::ber::common::ItemId;
 use datatypes::ber::structural::{Storey, WallExposure, WallRegions};
 use domain::points::{Point2f32, Point2f64};
-use manip_2d_plan::{project_distance_along, segment_len, VertexId};
+use manip_plan::{project_distance_along, segment_len, VertexId};
 use std::collections::HashMap;
 
 /// Paint `[start, end]` of a wall with `exposure`: the new mark WINS over any
@@ -483,7 +483,7 @@ mod tests {
             Point2f32::new(4.0, 4.0),
             Point2f32::new(0.0, 4.0),
         ];
-        let plan = manip_2d_plan::FloorPlan::from_clean_ring(&pts).unwrap();
+        let plan = manip_plan::FloorPlan::from_clean_ring(&pts).unwrap();
         let mut doc = crate::StoreyDoc::default();
         doc.dimensioning.scale_set = true;
         doc.floor_plan = plan.clone();

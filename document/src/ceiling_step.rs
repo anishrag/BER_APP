@@ -21,7 +21,7 @@ use crate::StoreyDoc;
 use datatypes::ber::ber_struct::Ber;
 use datatypes::ber::structural::{CeilingRegions, FloorRegions};
 use domain::points::{Point2f32, Point2f64};
-use manip_2d_plan::{ParameterAxis, VertexId};
+use manip_plan::{ParameterAxis, VertexId};
 
 /// Coordinate tolerance (metres) for the "is this wall on the region's extent
 /// on `axis`?" test — a wall within a millimetre of the ring's axis-extent
@@ -307,14 +307,14 @@ pub(crate) const CEILING_LINE_SNAP_TOL_M: f32 = 0.2;
 // pending-step state machine, the region storage, and canonicalization.
 impl StoreyDoc {
     /// Fit a near-straight `stroke` (world/metre space) to an axis-aligned
-    /// step line: [`manip_2d_plan::fit_axis_line`] + the crosses-the-footprint
+    /// step line: [`manip_plan::fit_axis_line`] + the crosses-the-footprint
     /// validation. Returns the axis the line's position varies on (X for a
     /// vertical line) and its coordinate. `Err` is user-facing.
     pub fn fit_ceiling_step_line(
         &self,
         stroke: &[Point2f32],
     ) -> Result<(ParameterAxis, f32), String> {
-        let (axis, coord) = manip_2d_plan::fit_axis_line(stroke).ok_or_else(|| {
+        let (axis, coord) = manip_plan::fit_axis_line(stroke).ok_or_else(|| {
             "That stroke isn't a straight line — draw one straight stroke across the ceiling."
                 .to_string()
         })?;
@@ -591,7 +591,7 @@ impl StoreyDoc {
 mod tests {
     use super::*;
     use crate::{DimensionState, ShapeSlot};
-    use manip_2d_plan::FloorPlan;
+    use manip_plan::FloorPlan;
 
     fn p(x: f32, y: f32) -> Point2f32 {
         Point2f32::new(x, y)

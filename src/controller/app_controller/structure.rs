@@ -328,7 +328,7 @@ fn interior_cut_edges(ring: &[Point2f32], outline: &FloorPlan) -> Vec<[Point2f64
         let mx = (a.x + b.x) * 0.5;
         let my = (a.y + b.y) * 0.5;
         if !domain::points::point_on_ring_boundary(&op64, mx as f64, my as f64, ON_BOUNDARY_TOL_M)
-            && manip_2d_plan::ring_contains_point(&op, mx, my)
+            && manip_plan::ring_contains_point(&op, mx, my)
         {
             edges.push([domain::points::to_f64(a), domain::points::to_f64(b)]);
         }

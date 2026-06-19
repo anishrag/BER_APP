@@ -13,11 +13,11 @@
 //! silently from geometry coincidence.
 
 use crate::{ActiveShape, StoreyDoc};
-use manip_2d_plan::{find_flipped_edge, FloorPlan, ParameterAxis, ParameterId, VertexId};
+use manip_plan::{find_flipped_edge, FloorPlan, ParameterAxis, ParameterId, VertexId};
 
 /// Coordinate tolerance for reference dedupe and "is this wall already on the
 /// reference?" tests, in plan units (metres once the scale is set). Matches
-/// the contact-scan eps in `manip_2d_plan`'s pin/free-axes scan.
+/// the contact-scan eps in `manip_plan`'s pin/free-axes scan.
 const COORD_TOL: f32 = 1e-3;
 
 /// One "where exactly is this area?" question: pin its position along `axis`

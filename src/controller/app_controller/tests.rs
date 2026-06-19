@@ -3916,10 +3916,7 @@ fn ceiling_step_line_within_tolerance_snaps_to_the_wall() {
         (tag.from.0 - 5.9).abs() < 0.05,
         "identity = the drawn point"
     );
-    assert_eq!(
-        tag.current_kind,
-        Some(manip_2d_plan::SnapKind::ToParallelWall)
-    );
+    assert_eq!(tag.current_kind, Some(manip_plan::SnapKind::ToParallelWall));
     assert!(
         tag.options.is_empty() && tag.skippable,
         "menu = Don't snap only"
@@ -4182,10 +4179,7 @@ fn roof_point_snapped_axis_skips_its_prompt_and_lands_exactly() {
     // X has no wall within tolerance → asked.
     c.roof_point_tap(3.0, 3.9);
     let tag = c.roof_point_snap_tag().expect("snap tag present");
-    assert_eq!(
-        tag.current_kind,
-        Some(manip_2d_plan::SnapKind::ToParallelWall)
-    );
+    assert_eq!(tag.current_kind, Some(manip_plan::SnapKind::ToParallelWall));
     assert!((tag.pos.1 - 4.0).abs() < 1e-6, "tag at the snapped point");
     assert!(
         (tag.from.1 - 3.9).abs() < 1e-6,
@@ -4236,7 +4230,7 @@ fn roof_point_both_axes_snapped_goes_straight_to_height() {
         "both coordinates snapped"
     );
     let tag = c.roof_point_snap_tag().expect("one tag for both");
-    assert_eq!(tag.current_kind, Some(manip_2d_plan::SnapKind::ToCorner));
+    assert_eq!(tag.current_kind, Some(manip_plan::SnapKind::ToCorner));
 }
 
 /// "Don't snap" from the HEIGHT stage reverts BOTH axes to their tapped
@@ -4800,10 +4794,7 @@ fn roof_ridge_snap_skips_the_cross_question_and_lands_on_the_wall() {
     assert_eq!(ui.axis, ParameterAxis::Y, "the along axis's question");
 
     let tag = c.roof_ridge_snap_tag().expect("snap tag present");
-    assert_eq!(
-        tag.current_kind,
-        Some(manip_2d_plan::SnapKind::ToParallelWall)
-    );
+    assert_eq!(tag.current_kind, Some(manip_plan::SnapKind::ToParallelWall));
     assert!((tag.pos.0 - 6.0).abs() < 1e-4, "tag on the snapped segment");
     assert!((tag.pos.1 - 2.0).abs() < 1e-4, "…at its midpoint");
     assert!(

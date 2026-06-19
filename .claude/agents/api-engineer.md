@@ -23,7 +23,7 @@ answer:
 
 | If the logic is… | it goes in… |
 | --- | --- |
-| coordinate/vertex/edge math, plan topology, snapping, solving | `manip_2d_plan` (`FloorPlan` method, or `geom.rs` if plan-free) |
+| coordinate/vertex/edge math, plan topology, snapping, solving | `manip_plan` (`FloorPlan` method, or `geom.rs` if plan-free) |
 | model mutation over a storey's shapes (slots, dimensioning, exposure, phases, resolve/load) | `document` (a `Document`/`StoreyDoc` method) |
 | BER/DEAP data shape or a pure data transform over it | `datatypes` |
 | shared vector primitives | `domain::points` |
@@ -44,9 +44,9 @@ Then design the signatures, applying these rules:
   it arrives as a parameter — that's how `resolve_storey(s, ber, idx,
   phase_regions)` stays pure and `document` stays standalone.
 - **Run the standalone-feasibility test on every new dependency edge**: would
-  `document` still build with `cargo build -p document`? Would `manip_2d_plan`
+  `document` still build with `cargo build -p document`? Would `manip_plan`
   still make sense to someone who has never heard of a BER? The dependency
-  direction is fixed: `domain ← manip_2d_plan ← document ← src`, with
+  direction is fixed: `domain ← manip_plan ← document ← src`, with
   `datatypes` feeding `document`/`src`.
   Never invert an edge; never add a sideways edge to "share" something — move
   the shared thing down instead.
@@ -73,7 +73,7 @@ Audit and SHRINK. You may edit code in this mode, behavior-preserving only:
   split modules, cross-file items are `pub(super)`, which matches the old
   single-file privacy — keep it that way.
 - **Re-export hygiene:** crate roots re-export the intended public surface
-  deliberately (`manip_2d_plan/src/lib.rs`, `document/src/lib.rs`,
+  deliberately (`manip_plan/src/lib.rs`, `document/src/lib.rs`,
   controller `mod.rs`). External callers import from the root, not from
   internal module paths. Keep public paths stable when moving items — re-point
   the re-export, don't break callers.
@@ -94,7 +94,7 @@ Audit and SHRINK. You may edit code in this mode, behavior-preserving only:
   builds standalone) and the deliberate non-moves: phase-region storage stays
   on the controller (undo/snapshot semantics), the grandfathered prompt
   builders/solvers in `editing.rs` stay, commented blocks in
-  `manip_2d_plan/lib.rs` stay commented.
+  `manip_plan/lib.rs` stay commented.
 - Serialized types (`Ber`, `StoreyDoc` snapshot) are load-bearing: surface
   changes must not change serde shape without an explicit compatibility plan.
 - Never widen visibility to "make it compile" — that's a placement smell;
@@ -103,7 +103,7 @@ Audit and SHRINK. You may edit code in this mode, behavior-preserving only:
 ## Gate (Mode 2 edits, before declaring done)
 
 ```
-cargo build -p document && cargo build -p manip_2d_plan && cargo build -p datatypes \
+cargo build -p document && cargo build -p manip_plan && cargo build -p datatypes \
   && cargo test --workspace && cargo fmt --all --check && .claude/scripts/check-boundaries.sh
 ```
 

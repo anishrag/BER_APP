@@ -522,7 +522,7 @@ pub(super) fn render<F: FnMut(UiEvent)>(
     if let Some(vdp) = &view.vertex_drop_prompt {
         for m in &vdp.active {
             use crate::controller::app_controller::VertexMeasurementKind;
-            use manip_2d_plan::ParameterAxis;
+            use manip_plan::ParameterAxis;
             // Axis measurements get a perpendicular arrow at
             // the vertex's row/column. WallLength measurements
             // draw the arrow directly along the diagonal from
@@ -668,7 +668,7 @@ pub(super) fn render<F: FnMut(UiEvent)>(
             egui::Color32::from_rgb(255, 80, 80), // red: the outline reference
         );
         let (arrow_a, arrow_b) = match pp.axis {
-            manip_2d_plan::ParameterAxis::X => {
+            manip_plan::ParameterAxis::X => {
                 // Horizontal arrow at the area wall's midpoint y.
                 let mid_y = (pp.area_wall.wall_a.1 + pp.area_wall.wall_b.1) * 0.5;
                 (
@@ -676,7 +676,7 @@ pub(super) fn render<F: FnMut(UiEvent)>(
                     (pp.area_wall.wall_a.0, mid_y),
                 )
             }
-            manip_2d_plan::ParameterAxis::Y => {
+            manip_plan::ParameterAxis::Y => {
                 // Vertical arrow at the area wall's midpoint x.
                 let mid_x = (pp.area_wall.wall_a.0 + pp.area_wall.wall_b.0) * 0.5;
                 (
