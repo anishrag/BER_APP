@@ -2475,21 +2475,116 @@ impl WallRegion {
     /// hit-test which construction-phase area the wall falls in. `None` for a
     /// degenerate polygon with fewer than two vertices.
     pub fn base_midpoint(&self) -> Option<Point2f64> {
+        let (a, b) = self.base_edge()?;
+        Some(Point2f64::new((a.x + b.x) * 0.5, (a.y + b.y) * 0.5))
+    }
+
+    /// Index where the wall's TOP profile begins in `exterior` — equivalently
+    /// the BASE profile's vertex count. The ring is `[base a→b][top b→a]`: the
+    /// base traces the FLOOR steps (`floor_profile_base`) along `a`→`b`, the
+    /// top traces the ROOF (`roof_profile_top`) back `b`→`a`. A flat base is
+    /// exactly `[a, b]` (the legacy 2-vertex contract), so this returns 2 —
+    /// `top_*` readers stay byte-for-byte identical there; a STEPPED base
+    /// inserts the step breakpoints (and a vertical jump) before `b`, pushing
+    /// the index up.
+    ///
+    /// THE SEAM is the turn at the far base endpoint `b`: the base walks
+    /// FORWARD along the footprint line (along-distance from `a` non-
+    /// decreasing — flat spans advance, a step's vertical jump repeats the
+    /// plan point), then the top turns and walks BACK toward `a` (along-
+    /// distance decreasing). So the base is the leading run of non-decreasing
+    /// along-distance; the top starts at the first vertex whose along-distance
+    /// DROPS. (A coplanar-flush merged host — the L-shape of
+    /// `merge_coplanar_flush` — has its guest spliced into the TOP edges, past
+    /// the seam, so this still cuts at the original footprint `b`; see
+    /// [`base_edge`], which clamps to the host base for such rings.)
+    /// Returns 2 for any ring too short to split.
+    ///
+    /// [`base_edge`]: WallRegion::base_edge
+    pub(crate) fn top_start_index(&self) -> usize {
         let e = &self.polygon.exterior;
-        (e.len() >= 2).then(|| Point2f64::new((e[0].x + e[1].x) * 0.5, (e[0].y + e[1].y) * 0.5))
+        if e.len() <= 2 {
+            return e.len();
+        }
+        let a = e[0];
+        let along = |v: &Point3f64| (v.x - a.x).hypot(v.y - a.y);
+        // The base is the LEADING run of non-decreasing along-distance (flat
+        // spans advance, a step's vertical jump repeats the plan point); the
+        // top then turns BACK toward `a` (along-distance drops). `b` is the
+        // FIRST vertex in that run at the run's maximum along-distance — the
+        // far footprint corner. The base/top vertical seam at `b` is plan-
+        // coincident (the top's first vertex repeats `b`'s plan), so it sits
+        // at the same along-distance and is NOT counted into the base; the
+        // top starts there. A flat base's run is just `[a, b]` → returns 2.
+        let mut run_end = 1; // last index still in the non-decreasing run
+        let mut prev = along(&e[1]);
+        for (off, v) in e[2..].iter().enumerate() {
+            let d = along(v);
+            if d >= prev - 1e-9 {
+                run_end = off + 2;
+                prev = d;
+            } else {
+                break;
+            }
+        }
+        let maxd = along(&e[run_end]);
+        // First index at the run's max along-distance = `b`'s index.
+        let bi = (1..=run_end)
+            .find(|&i| along(&e[i]) >= maxd - 1e-9)
+            .unwrap_or(1);
+        bi + 1
+    }
+
+    /// The base edge endpoints `(a, b)` in plan — the FULL footprint edge,
+    /// robust to a stepped base AND to a coplanar-flush merged host. `None`
+    /// for a degenerate wall.
+    ///
+    /// The footprint `b` is the base vertex at maximum along-distance whose z
+    /// sits in the FLOOR band (within [`MAX_FLOOR_STEP_M`] of the base z) — a
+    /// merged guest that continues the wall LINE past `b` (the L-shape's
+    /// forward arm) is excluded because it rises out of the floor band, so a
+    /// merged wall's base edge stays its original footprint, keeping the amend
+    /// match stable across re-derivation. For a clean fresh ring this is just
+    /// the last base vertex (`exterior[top_start_index() - 1]`).
+    fn base_edge(&self) -> Option<(Point3f64, Point3f64)> {
+        let e = &self.polygon.exterior;
+        let k = self.top_start_index();
+        if e.len() < 2 || k < 2 {
+            return None;
+        }
+        let a = e[0];
+        // The floor band: base z (at `a`) ± the largest plausible floor step.
+        // A merged guest's forward arm sits well above this (it rises toward
+        // the ceiling), so restricting `b` to the band drops it.
+        let lo = a.z - MAX_FLOOR_STEP_M;
+        let hi = a.z + MAX_FLOOR_STEP_M;
+        let along = |v: &Point3f64| (v.x - a.x).hypot(v.y - a.y);
+        let b = e[1..k]
+            .iter()
+            .filter(|v| v.z >= lo && v.z <= hi)
+            .fold(
+                e[1],
+                |best, v| {
+                    if along(v) > along(&best) {
+                        *v
+                    } else {
+                        best
+                    }
+                },
+            );
+        Some((a, b))
     }
 
     /// World→wall-local frame for the base edge: `(origin = exterior[0] in plan,
-    /// u_hat = unit vector along the base toward exterior[1], length, base_z)`.
-    /// `None` for a degenerate wall (base edge under 1e-9 m). The opening model
-    /// parameterises a wall placement as a centre distance along `u_hat` from
-    /// `origin` plus a sill above `base_z`.
+    /// u_hat = unit vector along the base toward the FAR base endpoint, length,
+    /// base_z)`. `None` for a degenerate wall (base edge under 1e-9 m). The
+    /// opening model parameterises a wall placement as a centre distance along
+    /// `u_hat` from `origin` plus a sill above `base_z`. `base_z` is the z at
+    /// `origin` (`exterior[0]`); over a stepped base the local z varies — the
+    /// per-along base z is not needed by openings (sills clamp under the top),
+    /// and the frame's job is the plan parameterisation a→b.
     pub fn base_frame(&self) -> Option<(Point2f64, (f64, f64), f64, f64)> {
-        let e = &self.polygon.exterior;
-        if e.len() < 2 {
-            return None;
-        }
-        let (a, b) = (e[0], e[1]);
+        let (a, b) = self.base_edge()?;
         let (dx, dy) = (b.x - a.x, b.y - a.y);
         let len = (dx * dx + dy * dy).sqrt();
         if len < 1e-9 {
@@ -2508,7 +2603,7 @@ impl WallRegion {
         let Some((origin, (ux, uy), _len, _base_z)) = self.base_frame() else {
             return Vec::new();
         };
-        self.polygon.exterior[2..]
+        self.polygon.exterior[self.top_start_index()..]
             .iter()
             .map(|v| {
                 let along = (v.x - origin.x) * ux + (v.y - origin.y) * uy;
@@ -2529,10 +2624,11 @@ impl WallRegion {
         let Some((origin, (ux, uy), _len, base_z)) = self.base_frame() else {
             return e.first().map(|v| v.z).unwrap_or(0.0);
         };
-        if e.len() < 3 {
+        let k = self.top_start_index();
+        if e.len() <= k {
             return base_z;
         }
-        let tops: Vec<(f64, f64)> = e[2..]
+        let tops: Vec<(f64, f64)> = e[k..]
             .iter()
             .map(|v| ((v.x - origin.x) * ux + (v.y - origin.y) * uy, v.z))
             .collect();
@@ -2566,22 +2662,33 @@ pub struct WallRegions {
 
 impl WallRegions {
     /// Re-derive the storey's walls from `segments` (each a footprint edge
-    /// `(a, b)` with its thermal `exposure`), tracing each wall's TOP along
-    /// the roof profile and carrying identity over from the `previous`
-    /// regions (replaces the flat-top `rebuild_preserving`).
+    /// `(a, b)` with its thermal `exposure`), tracing each wall's BASE along
+    /// the `floors` step profile and its TOP along the `roofs` profile, and
+    /// carrying identity over from the `previous` regions (replaces the
+    /// flat-top `rebuild_preserving`).
     ///
-    /// Geometry — vertex-order CONTRACT: `exterior[0]`/`exterior[1]` are
-    /// ALWAYS the base edge, `a` then `b` at `base_z` (exposure recovery and
-    /// `base_midpoint` read them positionally); the top vertices append after
-    /// index 1, tracing from `b` back to `a` so the ring closes. The top
-    /// follows the `roofs` profile over the base: piecewise-LINEAR across
-    /// each planar roof region (flat pieces and fan triangles alike), with a
-    /// VERTICAL JUMP — two vertices at one plan point — where a ceiling step
-    /// crosses the wall, keeping the perimeter envelope gap-free. Spans of
-    /// the base covered by no roof region — including when `roofs` is empty
-    /// (ceiling height unset) — top out flat at `fallback_top_z` (ABSOLUTE
-    /// z, not a height above `base_z`). A flat roof (or the fallback) yields
-    /// the classic 4-vertex quad: a-bottom, b-bottom, b-top, a-top.
+    /// Geometry — vertex-order CONTRACT: `exterior[0]` is ALWAYS `a` at its
+    /// base z; the BASE profile runs `a`→`b` (`floor_profile_base`) and the
+    /// TOP profile appends after it, running `b`→`a` so the ring closes.
+    /// [`top_start_index`] marks the seam; for the COMMON single-level base
+    /// the base collapses to exactly `[a, b]` (indices 0/1), byte-identical
+    /// to the old flat base, so legacy positional readers
+    /// ([`base_frame`]/[`base_midpoint`]/exposure recovery) are unaffected.
+    /// The BASE follows the `floors`' `level_m` (composed onto `base_z`): a
+    /// raised/lowered floor region lifts/drops the base under it, with a
+    /// VERTICAL JUMP where a step line crosses the wall (symmetric to a
+    /// ceiling step's top jump); a same-level partition seam (a phase split)
+    /// leaves the base a straight edge. The TOP follows the `roofs` profile:
+    /// piecewise-LINEAR across each planar roof region (flat pieces and fan
+    /// triangles alike), with a VERTICAL JUMP where a ceiling step crosses
+    /// the wall. Spans the roofs don't cover — including when `roofs` is
+    /// empty (ceiling height unset) — top out flat at `fallback_top_z`
+    /// (ABSOLUTE z). A flat roof over a flat floor yields the classic
+    /// 4-vertex quad: a-bottom, b-bottom, b-top, a-top.
+    ///
+    /// [`top_start_index`]: WallRegion::top_start_index
+    /// [`base_frame`]: WallRegion::base_frame
+    /// [`base_midpoint`]: WallRegion::base_midpoint
     ///
     /// Identity (amend-vs-create):
     /// - AMEND: a segment whose base edge matches a previous region's (both
@@ -2603,6 +2710,7 @@ impl WallRegions {
         segments: Vec<(Point2f64, Point2f64, WallExposure)>,
         previous: &WallRegions,
         roofs: &CeilingRegions,
+        floors: &FloorRegions,
         base_z: f64,
         fallback_top_z: f64,
         default_construction_id: ItemId,
@@ -2617,11 +2725,10 @@ impl WallRegions {
             .into_iter()
             .enumerate()
             .map(|(si, (a, b, exposure))| {
-                // Base edge first (the contract), then the roof-profile top.
-                let mut ext = vec![
-                    Point3f64::new(a.x, a.y, base_z),
-                    Point3f64::new(b.x, b.y, base_z),
-                ];
+                // Base profile first (a→b, tracing the floor steps — a flat
+                // base collapses to the 2-vertex `[a, b]` of the contract),
+                // then the roof-profile top (b→a) to close the ring.
+                let mut ext = floor_profile_base(floors, a, b, base_z);
                 ext.extend(roof_profile_top(roofs, a, b, fallback_top_z));
                 let polygon = Polygon3D::new(ext);
                 match amend_from[si] {
@@ -2682,15 +2789,18 @@ impl WallRegions {
         let mut candidates: Vec<(f64, usize, usize)> = Vec::new();
         for (si, (a, b, z)) in bases.iter().enumerate() {
             for (pi, r) in previous.regions.iter().enumerate() {
-                let e = &r.polygon.exterior;
-                if e.len() < 2 {
+                // The FULL base edge (a→last base vertex), robust to a
+                // previous region whose base stepped: comparing against the
+                // raw `exterior[1]` would miss a stepped perimeter wall whose
+                // index-1 vertex is a step breakpoint, not the far endpoint.
+                let Some((e0, e1)) = r.base_edge() else {
                     continue;
-                }
-                let fwd = dist(*a, e[0].x, e[0].y).max(dist(*b, e[1].x, e[1].y));
-                let rev = dist(*a, e[1].x, e[1].y).max(dist(*b, e[0].x, e[0].y));
+                };
+                let fwd = dist(*a, e0.x, e0.y).max(dist(*b, e1.x, e1.y));
+                let rev = dist(*a, e1.x, e1.y).max(dist(*b, e0.x, e0.y));
                 let err = fwd.min(rev);
                 if err <= MATCH_EPS_M {
-                    candidates.push((err + (z - e[0].z).abs(), si, pi));
+                    candidates.push((err + (z - e0.z).abs(), si, pi));
                 }
             }
         }
@@ -2875,9 +2985,9 @@ impl WallRegions {
     /// the point (e.g. a freshly drawn wall).
     pub(crate) fn region_covering(&self, p: Point2f64) -> Option<&WallRegion> {
         self.regions.iter().find(|r| {
-            let e = &r.polygon.exterior;
-            e.len() >= 2
-                && point_to_segment_distance(p.x, p.y, e[0].x, e[0].y, e[1].x, e[1].y) < 1e-2
+            r.base_edge().is_some_and(|(a, b)| {
+                point_to_segment_distance(p.x, p.y, a.x, a.y, b.x, b.y) < 1e-2
+            })
         })
     }
 }
@@ -2886,6 +2996,17 @@ impl WallRegions {
 /// region's for it to be the SAME wall — the amend-matching tolerance of
 /// [`WallRegions::regenerate`] and [`WallRegions::with_risers`].
 const MATCH_EPS_M: f64 = 1e-2;
+
+/// Half-width (m) of the FLOOR BAND used by [`WallRegion::base_edge`] to tell
+/// a wall's base profile apart from a coplanar-flush-merged riser arm that
+/// continues the wall LINE: a base vertex sits within this of the base z (a
+/// floor STEP), while a merged guest rises toward the ceiling, well above it.
+/// 0.6 m comfortably exceeds any real interior floor step (sub-grade
+/// thresholds, sunken rooms) yet stays far below the wall-to-ceiling rise, so
+/// the band cleanly separates the two. Only `base_edge` uses it — the base
+/// GEOMETRY itself is exact (`floor_profile_base`), this only disambiguates a
+/// post-MERGE ring whose base is a CONVENTION (the host's footprint).
+const MAX_FLOOR_STEP_M: f64 = 0.6;
 
 // ── Shared-boundary riser extraction (private helpers for `riser_faces`) ──
 
@@ -3010,6 +3131,11 @@ fn stitch_flush_coplanar(host: &Polygon3D, guest: &Polygon3D) -> Option<Polygon3
     if he.len() < 3 || guest.exterior.len() < 3 {
         return None;
     }
+    // `he[0]`→`he[1]` fixes the host's vertical-plane DIRECTION. A wall
+    // footprint is a straight line, so every base vertex is collinear — when
+    // the host base is STEPPED, `he[1]` is a step breakpoint, but it lies on
+    // the same base line, so the direction (and the plan-offset coplanarity
+    // gate below) is unchanged.
     let (a, b) = (he[0], he[1]);
     let (bx, by) = (b.x - a.x, b.y - a.y);
     let base_len = (bx * bx + by * by).sqrt();
@@ -3156,8 +3282,15 @@ fn collinear_between(a: Point3f64, b: Point3f64, c: Point3f64) -> bool {
 /// host tie-break of [`WallRegions::merge_coplanar_flush`].
 fn base_lt(a: &WallRegion, b: &WallRegion) -> bool {
     let key = |r: &WallRegion| {
-        let e = &r.polygon.exterior;
-        [e[0].x, e[0].y, e[0].z, e[1].x, e[1].y, e[1].z]
+        // Order on the FULL base edge (a, b) so a stepped host sorts by its
+        // footprint endpoints, not an interior step breakpoint.
+        match r.base_edge() {
+            Some((a, b)) => [a.x, a.y, a.z, b.x, b.y, b.z],
+            None => {
+                let e = &r.polygon.exterior;
+                [e[0].x, e[0].y, e[0].z, e[1].x, e[1].y, e[1].z]
+            }
+        }
     };
     let (ka, kb) = (key(a), key(b));
     for (x, y) in ka.iter().zip(kb.iter()) {
@@ -3415,6 +3548,166 @@ fn roof_profile_top(
             b.y,
             pl.join(" ")
         );
+    }
+    out
+}
+
+/// Parameters t ∈ [0, 1] along the base `a`→`b` where the covering FLOOR
+/// region can change: every crossing of a floor region boundary edge with the
+/// base (near-collinear overlapping edges contribute their projected
+/// endpoints), plus the ends 0 and 1. Sorted ascending; the caller skips
+/// sub-µm spans. The floor analogue of [`profile_breakpoints`] — floor regions
+/// are `geo::Polygon`s (2D, no per-vertex z), so this walks the exterior AND
+/// interior rings in plan. Same metric tolerances ([`PROFILE_EPS_M`]) as the
+/// roof version: floor rings are boolean-op output too.
+fn floor_breakpoints(floors: &FloorRegions, a: Point2f64, b: Point2f64) -> Vec<f64> {
+    let (dx, dy) = (b.x - a.x, b.y - a.y);
+    let len2 = dx * dx + dy * dy;
+    let mut ts = vec![0.0, 1.0];
+    if len2 <= 1e-18 {
+        return ts;
+    }
+    let len = len2.sqrt();
+    let mut push_ring = |ext: &LineString<f64>| {
+        let pts: Vec<Point2f64> = ext.coords().map(|c| Point2f64::new(c.x, c.y)).collect();
+        let n = pts.len();
+        if n < 2 {
+            return;
+        }
+        // A `geo` ring closes (first == last); walking 0..n with wraparound
+        // would double the closing edge, but a duplicate breakpoint is
+        // harmless (the caller dedups by spans), so iterate uniformly.
+        for i in 0..n {
+            let p = pts[i];
+            let q = pts[(i + 1) % n];
+            let dist_to_line = |c: &Point2f64| ((c.x - a.x) * dy - (c.y - a.y) * dx).abs() / len;
+            if dist_to_line(&p) <= PROFILE_EPS_M && dist_to_line(&q) <= PROFILE_EPS_M {
+                // Collinear overlap: the region can start/stop at the edge's
+                // projected endpoints.
+                for c in [p, q] {
+                    let t = ((c.x - a.x) * dx + (c.y - a.y) * dy) / len2;
+                    if (0.0..=1.0).contains(&t) {
+                        ts.push(t);
+                    }
+                }
+                continue;
+            }
+            let (ex, ey) = (q.x - p.x, q.y - p.y);
+            let (wx, wy) = (p.x - a.x, p.y - a.y);
+            let denom = dx * ey - dy * ex;
+            if denom.abs() > 1e-12 {
+                let t = (wx * ey - wy * ex) / denom;
+                let s = (wx * dy - wy * dx) / denom;
+                let edge_len = (ex * ex + ey * ey).sqrt();
+                let eps_s = if edge_len > 0.0 {
+                    PROFILE_EPS_M / edge_len
+                } else {
+                    0.0
+                };
+                if (-eps_s..=1.0 + eps_s).contains(&s) && (0.0..=1.0).contains(&t) {
+                    ts.push(t);
+                }
+            }
+        }
+    };
+    for r in &floors.regions {
+        push_ring(r.polygon.exterior());
+        for hole in r.polygon.interiors() {
+            push_ring(hole);
+        }
+    }
+    ts.sort_by(|x, y| x.partial_cmp(y).unwrap_or(std::cmp::Ordering::Equal));
+    ts
+}
+
+/// The `level_m` of the first FLOOR region whose plan projection contains `p`,
+/// with the tolerant normal-nudge retry of [`covering_roof_plane`] (a wall
+/// base lies ON the region boundary, and boolean-op noise can put it a few
+/// 1e-7 m to one side). Floor regions are FLAT — a region contributes its
+/// single `level_m`, no plane to evaluate. `None` over an uncovered span.
+fn covering_floor_level(floors: &FloorRegions, p: Point2f64, n: (f64, f64)) -> Option<f64> {
+    use geo::Intersects;
+    let pick = |q: Point2f64| {
+        let gq = GeoPoint::new(q.x, q.y);
+        floors
+            .regions
+            .iter()
+            .find(|r| r.polygon.intersects(&gq))
+            .map(|r| r.level_m)
+    };
+    pick(p).or_else(|| {
+        [1.0, -1.0].iter().find_map(|s| {
+            pick(Point2f64::new(
+                p.x + s * n.0 * PROFILE_EPS_M,
+                p.y + s * n.1 * PROFILE_EPS_M,
+            ))
+        })
+    })
+}
+
+/// The wall BASE for the base edge `a`→`b`, traced from `a` to `b` (the
+/// caller's ring opens with this, then closes via [`roof_profile_top`] running
+/// `b`→`a`): one flat span per [`floor_breakpoints`] interval, z =
+/// `base_z + covering_region.level_m` (the slab-band offset already in
+/// `base_z` composed with the local floor step), `base_z` over uncovered
+/// spans. The floor analogue of [`roof_profile_top`], but SIMPLER — floor
+/// regions are flat, so a span's z is constant (no slope), and the only
+/// breakpoints that matter are STEP lines (a level change). Where adjacent
+/// spans disagree at a breakpoint, both vertices are kept — the VERTICAL JUMP
+/// of a floor step crossing the wall (symmetric to a ceiling step's top jump);
+/// where they agree, consecutive duplicates collapse, so a single-level base
+/// (or empty `floors`) yields exactly `[a@base_z, b@base_z]` — the byte-
+/// identical 2-vertex base every legacy reader keys off.
+fn floor_profile_base(
+    floors: &FloorRegions,
+    a: Point2f64,
+    b: Point2f64,
+    base_z: f64,
+) -> Vec<Point3f64> {
+    let (dx, dy) = (b.x - a.x, b.y - a.y);
+    let len = (dx * dx + dy * dy).sqrt();
+    let n = if len > 0.0 {
+        (-dy / len, dx / len)
+    } else {
+        (0.0, 0.0)
+    };
+    let at = |t: f64| Point2f64::new(a.x + dx * t, a.y + dy * t);
+    // (t0, t1, z over the interval) ascending t — z is constant per span.
+    let mut spans: Vec<(f64, f64, f64)> = Vec::new();
+    for w in floor_breakpoints(floors, a, b).windows(2) {
+        let (t0, t1) = (w[0], w[1]);
+        if t1 - t0 <= 1e-9 || (t1 - t0) * len <= 1e-6 {
+            continue;
+        }
+        let mid = at((t0 + t1) / 2.0);
+        let z = base_z + covering_floor_level(floors, mid, n).unwrap_or(0.0);
+        // MERGE into the previous span when the level is the SAME: a floor
+        // boundary that is a phase split (or any partition seam) at one level
+        // is NOT a step, so it must leave the base a straight edge — no
+        // intermediate vertex. Only a LEVEL CHANGE keeps a separate span (the
+        // step's vertical jump). This is what preserves byte-identity for the
+        // common single-level base: every boundary collapses into one span
+        // `[a@base_z, b@base_z]`.
+        match spans.last_mut() {
+            Some((_, pt1, pz)) if (*pz - z).abs() <= RISER_Z_EPS_M => *pt1 = t1,
+            _ => spans.push((t0, t1, z)),
+        }
+    }
+    if spans.is_empty() {
+        spans.push((0.0, 1.0, base_z));
+    }
+    let mut out: Vec<Point3f64> = Vec::new();
+    let push = |out: &mut Vec<Point3f64>, p: Point2f64, z: f64| {
+        let keep = out.last().is_none_or(|l| {
+            (l.x - p.x).abs() > 1e-9 || (l.y - p.y).abs() > 1e-9 || (l.z - z).abs() > 1e-9
+        });
+        if keep {
+            out.push(Point3f64::new(p.x, p.y, z));
+        }
+    };
+    for (t0, t1, z) in spans.iter() {
+        push(&mut out, at(*t0), *z);
+        push(&mut out, at(*t1), *z);
     }
     out
 }
@@ -3847,6 +4140,7 @@ mod tests {
             vec![(a, b, WallExposure::SemiExposed)],
             &WallRegions::default(),
             &CeilingRegions::default(),
+            &FloorRegions::default(),
             0.0,
             2.4,
             default_cid,
@@ -3877,6 +4171,7 @@ mod tests {
             vec![(a, b, WallExposure::Exposed)],
             &WallRegions::default(),
             &CeilingRegions::default(),
+            &FloorRegions::default(),
             0.0,
             2.4,
             orig_cid,
@@ -3901,6 +4196,7 @@ mod tests {
             ],
             &previous,
             &CeilingRegions::default(),
+            &FloorRegions::default(),
             0.0,
             2.4,
             fresh_cid,
@@ -3927,6 +4223,7 @@ mod tests {
             vec![(a, b, WallExposure::Exposed)],
             &WallRegions::default(),
             &CeilingRegions::default(),
+            &FloorRegions::default(),
             0.0,
             2.4,
             cid,
@@ -3945,6 +4242,7 @@ mod tests {
             )],
             &previous,
             &CeilingRegions::default(),
+            &FloorRegions::default(),
             0.0,
             3.1,
             ItemId::default(),
@@ -3970,6 +4268,7 @@ mod tests {
             vec![(a, b, WallExposure::Exposed)],
             &WallRegions::default(),
             &CeilingRegions::default(),
+            &FloorRegions::default(),
             0.0,
             2.4,
             cid,
@@ -3989,6 +4288,7 @@ mod tests {
             ],
             &previous,
             &CeilingRegions::default(),
+            &FloorRegions::default(),
             0.0,
             2.4,
             ItemId::default(),
@@ -4170,6 +4470,7 @@ mod tests {
             segs(),
             &WallRegions::default(),
             &CeilingRegions::default(),
+            &FloorRegions::default(),
             0.0,
             2.4,
             cid,
@@ -4198,6 +4499,7 @@ mod tests {
             segs(),
             &walls1,
             &CeilingRegions::default(),
+            &FloorRegions::default(),
             0.0,
             2.4,
             ItemId::default(),
@@ -4233,6 +4535,7 @@ mod tests {
             segs(),
             &walls1,
             &CeilingRegions::default(),
+            &FloorRegions::default(),
             0.0,
             2.4,
             ItemId::default(),
@@ -4336,6 +4639,7 @@ mod tests {
             segs_before,
             &WallRegions::default(),
             &CeilingRegions::default(),
+            &FloorRegions::default(),
             0.0,
             2.4,
             cid,
@@ -4352,6 +4656,7 @@ mod tests {
             segs_after,
             &walls1,
             &CeilingRegions::default(),
+            &FloorRegions::default(),
             0.0,
             2.4,
             cid,
@@ -4387,6 +4692,7 @@ mod tests {
             )],
             &WallRegions::default(),
             &CeilingRegions::default(),
+            &FloorRegions::default(),
             0.0,
             2.4,
             cid,
@@ -4531,6 +4837,7 @@ mod tests {
             ],
             &WallRegions::default(),
             &CeilingRegions::default(),
+            &FloorRegions::default(),
             0.0,
             2.4,
             cid,
@@ -4585,6 +4892,7 @@ mod tests {
             )],
             &previous,
             &CeilingRegions::default(),
+            &FloorRegions::default(),
             0.0,
             2.4,
             cid,
@@ -4621,12 +4929,20 @@ mod tests {
             )]
         };
         let derive = |previous: &WallRegions| {
-            WallRegions::regenerate(segs(), previous, &CeilingRegions::default(), 0.0, 2.4, cid)
-                .with_risers(
-                    vec![(coplanar_face(4.0, 6.0, 1.0, 2.4), WallExposure::Unset)],
-                    previous,
-                    cid,
-                )
+            WallRegions::regenerate(
+                segs(),
+                previous,
+                &CeilingRegions::default(),
+                &FloorRegions::default(),
+                0.0,
+                2.4,
+                cid,
+            )
+            .with_risers(
+                vec![(coplanar_face(4.0, 6.0, 1.0, 2.4), WallExposure::Unset)],
+                previous,
+                cid,
+            )
         };
         let walls1 = derive(&WallRegions::default());
         let walls2 = derive(&walls1);
@@ -4655,6 +4971,7 @@ mod tests {
             vec![(a, b, WallExposure::Exposed)],
             &WallRegions::default(),
             &roofs,
+            &FloorRegions::default(),
             0.0,
             9.9, // fallback must NOT be used — the roof covers the base
             cid,
@@ -4672,6 +4989,128 @@ mod tests {
         assert!(near(&ext[3], 5.0, 2.7));
         assert!(near(&ext[4], 5.0, 2.4));
         assert!(near(&ext[5], 0.0, 2.4));
+    }
+
+    /// Two flat floor regions tiling a footprint at different levels — a
+    /// ground level at 0 and a raised strip at 0.18. Helper for the floor-step
+    /// base tests.
+    fn stepped_floor(ground: Vec<Point2f64>, raised: Vec<Point2f64>, raise: f64) -> FloorRegions {
+        let cid = ItemId::default();
+        let mut f = FloorRegions::from_vertex_lists(vec![ground], cid);
+        f.regions
+            .extend(FloorRegions::from_vertex_lists(vec![raised], cid).regions);
+        // Stamp the raised level on the second region.
+        f.regions[1].level_m = raise;
+        f
+    }
+
+    /// (b) A wall entirely over a RAISED floor region bases at that level —
+    /// no vertices at the storey datum (the phantom-plane bug fixed).
+    #[test]
+    fn regenerate_base_follows_a_fully_raised_floor() {
+        let cid = ItemId::default();
+        // Raised strip x∈[3,4] at 0.18; ground x∈[0,3] at 0. The wall runs
+        // ALONG the raised strip's far edge (x = 4), entirely over the raise.
+        let floors = stepped_floor(square(0.0, 0.0, 3.0, 4.0), square(3.0, 0.0, 4.0, 4.0), 0.18);
+        let a = Point2f64::new(4.0, 0.0);
+        let b = Point2f64::new(4.0, 4.0);
+        let walls = WallRegions::regenerate(
+            vec![(a, b, WallExposure::Exposed)],
+            &WallRegions::default(),
+            &CeilingRegions::default(),
+            &floors,
+            0.0,
+            2.4,
+            cid,
+        );
+        let ext = &walls.regions[0].polygon.exterior;
+        assert_eq!(ext.len(), 4, "single level → flat 4-vertex quad");
+        assert!((ext[0].z - 0.18).abs() < 1e-9, "base a at the raised level");
+        assert!((ext[1].z - 0.18).abs() < 1e-9, "base b at the raised level");
+        assert!(
+            ext.iter()
+                .all(|v| (v.z - 0.18).abs() < 1e-9 || (v.z - 2.4).abs() < 1e-9),
+            "base raised, top at ceiling, nothing at the datum: {ext:?}"
+        );
+    }
+
+    /// (a) A wall SPANNING the step gets a stepped base with a vertical jump
+    /// at the step line; the top is unchanged (flat at the fallback).
+    #[test]
+    fn regenerate_base_steps_across_a_floor_step() {
+        let cid = ItemId::default();
+        // Ground x∈[0,3] at 0; raised x∈[3,4] at 0.18. Front wall y = 0 runs
+        // x: 0 → 4, crossing the step line at x = 3.
+        let floors = stepped_floor(square(0.0, 0.0, 3.0, 4.0), square(3.0, 0.0, 4.0, 4.0), 0.18);
+        let a = Point2f64::new(0.0, 0.0);
+        let b = Point2f64::new(4.0, 0.0);
+        let walls = WallRegions::regenerate(
+            vec![(a, b, WallExposure::Exposed)],
+            &WallRegions::default(),
+            &CeilingRegions::default(),
+            &floors,
+            0.0,
+            2.4,
+            cid,
+        );
+        let ext = &walls.regions[0].polygon.exterior;
+        let near = |v: &Point3f64, x: f64, z: f64| (v.x - x).abs() < 1e-9 && (v.z - z).abs() < 1e-9;
+        // Base a→b: 0 at ground, jump at x=3 to 0.18, on to b.
+        assert!(near(&ext[0], 0.0, 0.0), "base a at ground: {ext:?}");
+        assert!(near(&ext[1], 3.0, 0.0), "ground span ends at the step line");
+        assert!(near(&ext[2], 3.0, 0.18), "VERTICAL JUMP at the step line");
+        assert!(near(&ext[3], 4.0, 0.18), "raised span to b");
+        // Top unchanged: flat at the 2.4 fallback, b→a.
+        assert!(near(&ext[4], 4.0, 2.4), "top at b: {ext:?}");
+        assert!(near(&ext[5], 0.0, 2.4), "top at a");
+        assert_eq!(ext.len(), 6, "4 base (with jump) + 2 flat top: {ext:?}");
+        // The base edge contract: exterior[0] = a, footprint b recovered.
+        let (ba, bb) = walls.regions[0]
+            .base_frame()
+            .map(|(o, (ux, uy), l, _)| (o, Point2f64::new(o.x + ux * l, o.y + uy * l)))
+            .unwrap();
+        assert!(
+            (ba.x).abs() < 1e-9 && (bb.x - 4.0).abs() < 1e-9,
+            "base frame spans the full footprint a→b"
+        );
+    }
+
+    /// (d) BYTE-IDENTITY: with no floor step (a single-level region, or a
+    /// same-level partition seam), the base collapses to the exact 2-vertex
+    /// `[a, b]` — the floor-step feature is invisible to the common case.
+    #[test]
+    fn regenerate_single_level_base_is_byte_identical_to_flat() {
+        let cid = ItemId::default();
+        let a = Point2f64::new(0.0, 0.0);
+        let b = Point2f64::new(4.0, 0.0);
+        let segs = || vec![(a, b, WallExposure::Exposed)];
+        // Reference: no floors at all (the legacy flat base).
+        let flat = WallRegions::regenerate(
+            segs(),
+            &WallRegions::default(),
+            &CeilingRegions::default(),
+            &FloorRegions::default(),
+            0.0,
+            2.4,
+            cid,
+        );
+        // A SINGLE region at level 0, plus a SAME-LEVEL partition seam at x=2
+        // (a phase split, not a step): the base must still collapse to [a, b].
+        let floors = stepped_floor(square(0.0, 0.0, 2.0, 4.0), square(2.0, 0.0, 4.0, 4.0), 0.0);
+        let stepped = WallRegions::regenerate(
+            segs(),
+            &WallRegions::default(),
+            &CeilingRegions::default(),
+            &floors,
+            0.0,
+            2.4,
+            cid,
+        );
+        assert_eq!(
+            stepped.regions[0].polygon, flat.regions[0].polygon,
+            "a same-level floor seam leaves the base byte-identical to flat"
+        );
+        assert_eq!(flat.regions[0].polygon.exterior.len(), 4, "flat quad");
     }
 
     /// A wall under a FAN (sloped planar roof) gets a linear sloped top —
@@ -4699,6 +5138,7 @@ mod tests {
             vec![(a, b, WallExposure::Exposed)],
             &WallRegions::default(),
             &roofs,
+            &FloorRegions::default(),
             0.0,
             9.9,
             cid,
@@ -4725,6 +5165,7 @@ mod tests {
             vec![(a, b, WallExposure::Exposed)],
             &WallRegions::default(),
             &roofs,
+            &FloorRegions::default(),
             0.0,
             2.4,
             cid,
@@ -6315,8 +6756,15 @@ mod tests {
         let segments: Vec<(Point2f64, Point2f64, WallExposure)> = (0..4)
             .map(|i| (ring[i], ring[(i + 1) % 4], WallExposure::Unset))
             .collect();
-        let walls =
-            WallRegions::regenerate(segments, &WallRegions::default(), &roofs, 0.0, 2.4, cid);
+        let walls = WallRegions::regenerate(
+            segments,
+            &WallRegions::default(),
+            &roofs,
+            &FloorRegions::default(),
+            0.0,
+            2.4,
+            cid,
+        );
         assert_eq!(walls.regions.len(), 4);
         // The GABLE wall y = 0 (under the ridge end at (2, 0)): base edge,
         // then the top traced b → a as eaves → apex → eaves.

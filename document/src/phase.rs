@@ -226,6 +226,7 @@ mod tests {
             segs,
             &WallRegions::default(),
             &CeilingRegions::default(),
+            &FloorRegions::default(),
             0.0,
             2.4,
             wall_cid,

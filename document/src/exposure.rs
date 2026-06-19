@@ -232,12 +232,16 @@ impl StoreyDoc {
             if matches!(region.exposure, WallExposure::Unset | WallExposure::Ground) {
                 continue; // derived, not painted — never recovers to sections
             }
-            let ext = &region.polygon.exterior;
-            if ext.len() < 2 {
+            // The TRUE footprint base edge a→b (via `base_frame`), NOT raw
+            // `exterior[0]/[1]`: over a floor-step-crossed wall the base is a
+            // stepped profile, so `exterior[1]` is the first breakpoint, not
+            // the far endpoint — reading it raw would recover the painted
+            // section as `0..step` and silently drop the paint beyond the step.
+            let Some((origin, (ux, uy), wlen, _base_z)) = region.base_frame() else {
                 continue;
-            }
-            let p0 = Point2f32::new(ext[0].x as f32, ext[0].y as f32);
-            let p1 = Point2f32::new(ext[1].x as f32, ext[1].y as f32);
+            };
+            let p0 = Point2f32::new(origin.x as f32, origin.y as f32);
+            let p1 = Point2f32::new((origin.x + ux * wlen) as f32, (origin.y + uy * wlen) as f32);
             let mid = Point2f32::new((p0.x + p1.x) * 0.5, (p0.y + p1.y) * 0.5);
             let Some((vid, a, b)) = perim.iter().copied().find(|(_, a, b)| {
                 domain::points::point_to_segment_distance(
@@ -305,12 +309,16 @@ impl StoreyDoc {
             .collect();
         let mut out = Vec::new();
         for region in &storey.walls.regions {
-            let ext = &region.polygon.exterior;
-            if ext.len() < 2 {
+            // The TRUE footprint base edge a→b (via `base_frame`), NOT raw
+            // `exterior[0]/[1]`: a riser face is a 2-vertex base so the two
+            // agree for risers, but routing through `base_frame` keeps the
+            // perimeter-exclusion test correct for stepped perimeter walls
+            // and avoids relying on the raw-index assumption elsewhere.
+            let Some((origin, (ux, uy), wlen, _base_z)) = region.base_frame() else {
                 continue;
-            }
-            let a = Point2f64::new(ext[0].x, ext[0].y);
-            let b = Point2f64::new(ext[1].x, ext[1].y);
+            };
+            let a = origin;
+            let b = Point2f64::new(origin.x + ux * wlen, origin.y + uy * wlen);
             let mid = Point2f64::new((a.x + b.x) * 0.5, (a.y + b.y) * 0.5);
             let on_perimeter = perim.iter().any(|(_, pa, pb)| {
                 domain::points::point_to_segment_distance(

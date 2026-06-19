@@ -271,10 +271,19 @@ pub fn resolve_storey(
     // The walls the storey held BEFORE this projection: the identity source
     // for BOTH passes — the perimeter regenerate and the riser append.
     let previous_walls = std::mem::take(&mut storey.walls);
+    // The wall BASE follows the floor steps symmetric to how its TOP follows
+    // the roof: a perimeter wall spanning a raised/lowered floor region starts
+    // its base at that region's `level_m` (composed onto the slab-band
+    // `wall_base_z`), with a vertical jump at a step line crossing the wall —
+    // no phantom flat plane under a raised strip, and DEAP wall area no longer
+    // over-counts the step. `storey.floors` is final here (the `with_levels`
+    // step above ran). A flat base collapses to the byte-identical 2-vertex
+    // `[a, b]`.
     let walls = WallRegions::regenerate(
         wall_segments,
         &previous_walls,
         roofs_for_walls,
+        &storey.floors,
         wall_base_z,
         fallback_top_z,
         wall_cid,
@@ -637,6 +646,86 @@ mod tests {
         }
     }
 
+    /// THE FLOOR-STEP BASE FIX (storey 0, no slab band): a raised floor strip
+    /// makes the perimeter walls bordering / spanning it base at the RAISED
+    /// level — no flat wall bottom left at the datum under the raised floor
+    /// (the phantom-plane bug), and the step RISER face is unchanged.
+    #[test]
+    fn perimeter_wall_base_follows_a_raised_floor_step() {
+        let doc = square_doc(&[
+            Point2f32::new(0.0, 0.0),
+            Point2f32::new(4.0, 0.0),
+            Point2f32::new(4.0, 4.0),
+            Point2f32::new(0.0, 4.0),
+        ]);
+        // Raised strip x ∈ [3, 4] at +0.18 (mirrors the bug dump).
+        let steps = vec![crate::StepRegion {
+            polygon: vec![
+                Point2f32::new(3.0, 0.0),
+                Point2f32::new(4.0, 0.0),
+                Point2f32::new(4.0, 4.0),
+                Point2f32::new(3.0, 4.0),
+            ],
+            level_m: 0.18,
+        }];
+        let mut ber = Ber::default();
+        ensure_storey_constructions(&mut ber, 0, &[]);
+        ber.set_default_ceiling_height(Some(0), 2.4);
+        let storey = resolve_storey(&doc, &ber, 0, &[], &steps, &[]);
+
+        let is_riser = |r: &datatypes::ber::structural::WallRegion| {
+            let e = &r.polygon.exterior;
+            (e[0].x - 3.0).abs() < 1e-6 && (e[1].x - 3.0).abs() < 1e-6
+        };
+        // The RIGHT wall (x = 4) entirely borders the raised strip → whole
+        // base at 0.18, nothing at the datum.
+        let right = storey
+            .walls
+            .regions
+            .iter()
+            .find(|r| !is_riser(r) && r.polygon.exterior.iter().all(|v| (v.x - 4.0).abs() < 1e-6))
+            .expect("the right wall");
+        let rext = &right.polygon.exterior;
+        assert!(
+            rext.iter()
+                .filter(|v| v.z < 1.0)
+                .all(|v| (v.z - 0.18).abs() < 1e-9),
+            "right wall base entirely at the raised level: {rext:?}"
+        );
+        // The FRONT wall (y = 0, x: 0 → 4) crosses the step line at x = 3:
+        // its base STEPS from 0 to 0.18 — no flat datum bottom under the
+        // raised strip.
+        let front = storey
+            .walls
+            .regions
+            .iter()
+            .find(|r| {
+                !is_riser(r) && {
+                    let e = &r.polygon.exterior;
+                    e.iter().any(|v| v.y.abs() < 1e-9) && e.iter().any(|v| (v.x - 4.0).abs() < 1e-6)
+                }
+            })
+            .expect("the front wall");
+        let fext = &front.polygon.exterior;
+        assert!(
+            fext.iter().any(|v| v.z.abs() < 1e-9) && fext.iter().any(|v| (v.z - 0.18).abs() < 1e-9),
+            "front wall base STEPS 0 → 0.18 across the step line: {fext:?}"
+        );
+        // The step RISER is unchanged: a face on the step line x = 3 from the
+        // ground level 0 up to the raised 0.18.
+        let riser = storey
+            .walls
+            .regions
+            .iter()
+            .find(|r| is_riser(r))
+            .expect("the floor-step riser survives");
+        let zs: Vec<f64> = riser.polygon.exterior.iter().map(|v| v.z).collect();
+        assert!(
+            zs.iter().any(|z| z.abs() < 1e-9) && zs.iter().any(|z| (z - 0.18).abs() < 1e-9),
+            "riser spans 0 → 0.18, unchanged: {zs:?}"
+        );
+    }
+
     /// THE SLAB BAND (design §6): a 0.225 m floor thickness on storey 1
     /// drops every PERIMETER wall's base to z = −0.225 (storey-local — the
     /// datum is the floor's top) while the tops stay at the absolute ceiling
@@ -682,17 +771,50 @@ mod tests {
             let e = &r.polygon.exterior;
             (e[0].x - 2.0).abs() < 1e-6 && (e[1].x - 2.0).abs() < 1e-6
         };
+        // The slab band COMPOSES with the floor step: a perimeter wall over
+        // the step region (x ∈ [0, 2], level −0.3) bases at −0.225 − 0.3 =
+        // −0.525; outside it at the bare slab band −0.225. A wall CROSSING
+        // the step line (the front y = 0 and back y = 4 spans) steps between
+        // the two with a vertical jump, so its base is no longer a flat pair
+        // — but `exterior[0]` (a) and the LAST base vertex (b) still bracket
+        // the footprint edge, both at a valid base level.
         for r in storey.walls.regions.iter().filter(|r| !is_riser(r)) {
             let e = &r.polygon.exterior;
+            let base_levels_ok = |z: f64| (z + 0.225).abs() < 1e-9 || (z + 0.525).abs() < 1e-9;
+            // Every base vertex sits at one of the two valid base levels.
             assert!(
-                (e[0].z + 0.225).abs() < 1e-9 && (e[1].z + 0.225).abs() < 1e-9,
-                "perimeter base drops by the thickness: {e:?}"
+                e.iter()
+                    .take_while(|v| v.z < -0.1) // base band is below 0; top is +2.4
+                    .all(|v| base_levels_ok(v.z)),
+                "perimeter base at slab band ± step: {e:?}"
+            );
+            assert!(
+                (e[0].z + 0.225).abs() < 1e-9 || (e[0].z + 0.525).abs() < 1e-9,
+                "base origin at a valid level: {e:?}"
             );
             assert!(
                 e.iter().any(|v| (v.z - 2.4).abs() < 1e-9),
                 "top stays at the ABSOLUTE ceiling height: {e:?}"
             );
         }
+        // The wall spanning the step line steps: the front (y = 0) wall has a
+        // vertical base jump at x = 2 between −0.525 (over the step) and
+        // −0.225 (the bare slab band) — the bug fix, base follows the floor.
+        let front = storey
+            .walls
+            .regions
+            .iter()
+            .find(|r| {
+                let e = &r.polygon.exterior;
+                e.iter().any(|v| (v.y).abs() < 1e-9) && !is_riser(r)
+            })
+            .expect("the front wall");
+        let fext = &front.polygon.exterior;
+        assert!(
+            fext.iter().any(|v| (v.z + 0.525).abs() < 1e-9)
+                && fext.iter().any(|v| (v.z + 0.225).abs() < 1e-9),
+            "front wall base STEPS over the floor step: {fext:?}"
+        );
         let riser = storey
             .walls
             .regions
@@ -2051,6 +2173,7 @@ mod tests {
             )],
             &WallRegions::default(),
             &storey.roofs,
+            &FloorRegions::default(),
             0.0,
             2.4,
             wall_cid,
@@ -2555,6 +2678,85 @@ mod tests {
             assert!((got.end_m - want.end_m).abs() < 1e-3);
             assert_eq!(got.exposure, want.exposure);
         }
+    }
+
+    /// REGRESSION (floor-step base, 2026-06): exposure recovery must read the
+    /// FULL footprint base edge (`base_frame`), NOT raw `exterior[0]/[1]`. A
+    /// perimeter wall painted end-to-end and CROSSED by a floor step gets a
+    /// stepped base, so `exterior[1]` is the step breakpoint — reading it raw
+    /// recovered the section as `0..step` and silently dropped the paint
+    /// beyond the step line on reload. Recovery must return the full painted
+    /// length.
+    #[test]
+    fn sections_recover_full_length_over_a_floor_step_crossed_wall() {
+        let mut doc = square_doc(&[
+            Point2f32::new(0.0, 0.0),
+            Point2f32::new(4.0, 0.0),
+            Point2f32::new(4.0, 4.0),
+            Point2f32::new(0.0, 4.0),
+        ]);
+        // The SOUTH wall (on y = 0) runs across the step line x = 2, so its
+        // base steps; paint it end-to-end → one stored section 0..len.
+        let (vid, a, b) = doc
+            .outline
+            .floor_plan
+            .perimeter_walls()
+            .into_iter()
+            .find(|(_, a, b)| a.y.abs() < 1e-6 && b.y.abs() < 1e-6)
+            .expect("south wall on y = 0");
+        let len = manip_2d_plan::segment_len(a, b);
+        doc.set_wall_section(vid, 0.0, len, len, WallExposure::Exposed);
+
+        // A floor step over the right half (x ∈ [2, 4]) crosses the south wall.
+        let steps = vec![crate::StepRegion {
+            polygon: vec![
+                Point2f32::new(2.0, 0.0),
+                Point2f32::new(4.0, 0.0),
+                Point2f32::new(4.0, 4.0),
+                Point2f32::new(2.0, 4.0),
+            ],
+            level_m: 0.18,
+        }];
+        let mut ber = Ber::default();
+        ensure_storey_constructions(&mut ber, 0, &[]);
+        ber.set_default_ceiling_height(Some(0), 2.4);
+        let storey = resolve_storey(&doc, &ber, 0, &[], &steps, &[]);
+
+        // The painted south wall really did get a stepped base (flat-top,
+        // flat-base = 4 vertices; the step adds the vertical jump → more).
+        let south = storey
+            .walls
+            .regions
+            .iter()
+            .find(|r| r.exposure == WallExposure::Exposed)
+            .expect("the painted south wall resolves");
+        assert!(
+            south.polygon.exterior.len() > 4,
+            "south wall base is stepped (jump at x = 2): {:?}",
+            south.polygon.exterior
+        );
+        assert!(
+            south
+                .polygon
+                .exterior
+                .iter()
+                .any(|v| (v.z - 0.18).abs() < 1e-9),
+            "the raised half of the base sits at the step level: {:?}",
+            south.polygon.exterior
+        );
+
+        // Recovery returns the FULL painted length, not 0..step.
+        let recovered = doc.sections_from_wall_regions(&storey.walls);
+        let secs = recovered.get(&vid).expect("the painted wall recovers");
+        assert_eq!(secs.len(), 1);
+        assert!(secs[0].start_m.abs() < 1e-3, "start at 0: {:?}", secs[0]);
+        assert!(
+            (secs[0].end_m - len).abs() < 1e-3,
+            "FULL painted length recovered, not truncated at the step: \
+             {:?} (len {len})",
+            secs[0]
+        );
+        assert_eq!(secs[0].exposure, WallExposure::Exposed);
     }
 
     /// A wall window placed on a resolved storey survives a RE-RESOLVE: its
