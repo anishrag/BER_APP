@@ -402,17 +402,7 @@ impl AppController {
             .current_record
             .as_ref()
             .and_then(|r| r.data.storeys.get(idx))
-            .and_then(|s| {
-                self.wall_openings(s, wall_id)
-                    .into_iter()
-                    .find(|(_, _, along, sill, w, h)| {
-                        along_m >= along - w / 2.0
-                            && along_m <= along + w / 2.0
-                            && height_m >= *sill
-                            && height_m <= sill + h
-                    })
-                    .map(|(r, ..)| r)
-            });
+            .and_then(|s| openings::opening_at(s, wall_id, along_m, height_m));
         if let Some(r) = hit {
             self.record_history();
             self.elevation_drag = Some(r);
@@ -436,7 +426,7 @@ impl AppController {
             .current_record
             .as_ref()
             .and_then(|rec| rec.data.storeys.get(idx))
-            .map(|s| opening_height(s, r) / 2.0)
+            .map(|s| openings::opening_height(s, r) / 2.0)
             .unwrap_or(0.0);
         let new_sill = (height_m - half_h).max(0.0);
         if let Some(record) = self.current_record.as_mut() {
@@ -493,24 +483,6 @@ impl AppController {
                 (o.opening, kind, o.along_m, o.sill_m, o.width_m, o.height_m)
             })
             .collect()
-    }
-}
-
-/// The height of an opening (for centre-on-cursor dragging).
-fn opening_height(storey: &Storey, r: OpeningRef) -> f32 {
-    match r {
-        OpeningRef::Window(id) => storey
-            .windows
-            .iter()
-            .find(|w| w.id == id)
-            .map(|w| w.height_m)
-            .unwrap_or(0.0),
-        OpeningRef::Door(id) => storey
-            .doors
-            .iter()
-            .find(|d| d.id == id)
-            .map(|d| d.height_m)
-            .unwrap_or(0.0),
     }
 }
 

@@ -20,7 +20,7 @@ use crate::step::ring_area2;
 use crate::StoreyDoc;
 use ber_model::ber::ber_struct::Ber;
 use ber_model::ber::structural::{CeilingRegions, FloorRegions};
-use domain::points::{Point2f32, Point2f64};
+use domain::points::{to_f64, Point2f32, Point2f64};
 use manip_plan::{ParameterAxis, VertexId};
 
 /// Coordinate tolerance (metres) for the "is this wall on the region's extent
@@ -138,6 +138,29 @@ pub enum LineSide {
 pub struct CeilingStepRegion {
     pub polygon: Vec<Point2f32>,
     pub delta_m: f64,
+}
+
+impl CeilingStepRegion {
+    /// True when this region is a SAME-HEIGHT DIVIDER — a flat area at the
+    /// default ceiling height (no z delta), drawn only to bound a later ridge to
+    /// its own area. The `1e-3` band is the shared "is this delta zero?" test.
+    pub fn is_divider(&self) -> bool {
+        self.delta_m.abs() < 1e-3
+    }
+}
+
+/// The durable same-height DIVIDER rings (world metres, f64) among `regions` —
+/// the delta-0 entries, for `Storey::ceiling_dividers`. A divider leaves no
+/// z-trace in the resolved roofs, so it must be stored durably; this projects
+/// the session step list onto that field. ACTIVE storey only (the caller skips
+/// unvisited storeys so their empty session lists don't wipe persisted
+/// dividers).
+pub fn ceiling_dividers_from_step_regions(regions: &[CeilingStepRegion]) -> Vec<Vec<Point2f64>> {
+    regions
+        .iter()
+        .filter(|r| r.is_divider())
+        .map(|r| r.polygon.iter().copied().map(to_f64).collect())
+        .collect()
 }
 
 /// Rebuild the session ceiling-step regions for storey `idx` from its

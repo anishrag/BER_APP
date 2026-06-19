@@ -292,22 +292,10 @@ impl AppController {
     /// call this, so an unvisited storey (empty session list) keeps its
     /// persisted dividers instead of having them wiped.
     pub(super) fn sync_ceiling_dividers(&mut self, idx: usize) {
-        let dividers: Vec<Vec<domain::points::Point2f64>> = self
+        let dividers = self
             .ceiling_step_regions
             .get(&idx)
-            .map(|steps| {
-                steps
-                    .iter()
-                    .filter(|r| r.delta_m.abs() < 1e-3)
-                    .map(|r| {
-                        r.polygon
-                            .iter()
-                            .copied()
-                            .map(domain::points::to_f64)
-                            .collect()
-                    })
-                    .collect()
-            })
+            .map(|steps| document::ceiling_dividers_from_step_regions(steps))
             .unwrap_or_default();
         if let Some(record) = self.current_record.as_mut() {
             if let Some(storey) = record.data.storeys.get_mut(idx) {

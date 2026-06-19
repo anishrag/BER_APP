@@ -100,6 +100,43 @@ pub fn wall_openings(storey: &Storey, wall_id: ItemId) -> Vec<WallOpening> {
     out
 }
 
+/// The opening on `wall_id` whose elevation AABB (centred at `along_m`, sill at
+/// `sill_m`, spanning `width_m × height_m`) contains the point
+/// `(along_m, height_m)` — the elevation hit-test for selecting/grabbing an
+/// opening. `None` when the point misses every opening on the wall.
+pub fn opening_at(
+    storey: &Storey,
+    wall_id: ItemId,
+    along_m: f32,
+    height_m: f32,
+) -> Option<OpeningRef> {
+    wall_openings(storey, wall_id).into_iter().find_map(|o| {
+        let within = along_m >= o.along_m - o.width_m / 2.0
+            && along_m <= o.along_m + o.width_m / 2.0
+            && height_m >= o.sill_m
+            && height_m <= o.sill_m + o.height_m;
+        within.then_some(o.opening)
+    })
+}
+
+/// The height (m) of an opening — for centre-on-cursor dragging.
+pub fn opening_height(storey: &Storey, r: OpeningRef) -> f32 {
+    match r {
+        OpeningRef::Window(id) => storey
+            .windows
+            .iter()
+            .find(|w| w.id == id)
+            .map(|w| w.height_m)
+            .unwrap_or(0.0),
+        OpeningRef::Door(id) => storey
+            .doors
+            .iter()
+            .find(|d| d.id == id)
+            .map(|d| d.height_m)
+            .unwrap_or(0.0),
+    }
+}
+
 /// A structured door+sidelights assembly: a door panel with optional flanking
 /// sidelights and a transom (top light) over the door. The composer (`compose_
 /// door_sidelights`) lays these out and emits one `Door` + the side/top
