@@ -388,6 +388,8 @@ impl AppController {
         self.document.apply_position(value)?;
         self.mark_dirty()?;
         self.push_history_snapshot(undo_snap);
+        // A Structure-phase split that finishes on a POSITION prompt commits here.
+        self.maybe_commit_structure_split();
         Ok(())
     }
 
@@ -494,6 +496,8 @@ impl AppController {
         self.record_history();
         self.document.skip_current_position();
         let _ = self.mark_dirty();
+        // A Structure split whose last position prompt was SKIPPED commits here.
+        self.maybe_commit_structure_split();
         Ok(())
     }
 
@@ -546,6 +550,9 @@ impl AppController {
         // This dimension may have FINALISED a drawn upper-storey outline —
         // the seed point for its inherited floor levels (no-op otherwise).
         self.maybe_seed_inherited_levels();
+        // A Structure-phase split that just finished dimensioning commits here
+        // (no-op unless a split is in-flight and fully dimensioned).
+        self.maybe_commit_structure_split();
         Ok(())
     }
 
@@ -556,6 +563,8 @@ impl AppController {
         self.document.skip_current_dimension();
         // Skipping the last promptable wall finalises the outline too.
         self.maybe_seed_inherited_levels();
+        // A Structure split whose last length prompt was SKIPPED commits here.
+        self.maybe_commit_structure_split();
     }
 
     /// Recompute `current_prompt` based on which params are still unknown — see

@@ -7,8 +7,8 @@ use super::common::{ConstructionPhase, Item, ItemId, Photo};
 use super::fenestration::{Door, Window};
 
 use domain::points::{
-    point_on_ring_boundary, point_to_segment_distance, ring_centroid, Point2f64, Point3f64,
-    Vector3f64,
+    point_on_ring_boundary, point_to_segment_distance, ring_centroid, segment_cross_param,
+    Point2f64, Point3f64, Vector3f64,
 };
 #[derive(Debug, Default, Clone, Serialize, Deserialize)]
 pub struct Opes {
@@ -547,6 +547,64 @@ impl FloorRegions {
                 }
                 regions.push(mk(poly, region.level_m));
             }
+        }
+        Self { regions }
+    }
+
+    /// Divide the regions by structure-phase `cuts` (each a closed plan ring):
+    /// every region the cut crosses splits into an inside piece and an outside
+    /// piece, and — unlike [`partition`](Self::partition) / [`with_levels`](Self::with_levels),
+    /// which stamp a value on the intersected side — BOTH pieces keep ALL of the
+    /// source region's properties (`construction_id` AND `level_m`); only the id
+    /// is fresh. Cuts apply in order, each further subdividing the pieces left by
+    /// the earlier ones. Empty `cuts` → `self` unchanged (NO geo ops, so stored
+    /// points round-trip exactly). Sub-mm² slivers are dropped (boolean-op debris
+    /// from an `f32`-round-tripped ring no longer coinciding exactly).
+    pub fn with_splits(self, cuts: &[Vec<Point2f64>]) -> Self {
+        use geo::bool_ops::BooleanOps;
+        use geo::Area;
+        /// Pieces smaller than this (m²) are boolean-op debris, not floors.
+        const SLIVER_AREA_M2: f64 = 1e-6;
+        if cuts.is_empty() {
+            return self;
+        }
+        let to_poly = |ring: &[Point2f64]| {
+            Polygon::new(
+                LineString::from(ring.iter().map(|p| (p.x, p.y)).collect::<Vec<_>>()),
+                vec![],
+            )
+        };
+        let mut regions = self.regions;
+        for cut in cuts {
+            if cut.len() < 3 {
+                continue;
+            }
+            let cut_poly = to_poly(cut);
+            let mut next: Vec<FloorRegion> = Vec::new();
+            for region in regions {
+                let mk = |poly: &Polygon<f64>| FloorRegion {
+                    id: ItemId::default(),
+                    polygon: poly.clone(),
+                    construction_id: region.construction_id,
+                    level_m: region.level_m,
+                };
+                // inside ∪ outside == the whole region, so a region that the cut
+                // misses (or fully covers) emits its whole self re-id'd — never
+                // lost. A genuine crossing emits both sides with copied props.
+                let inside = region.polygon.intersection(&cut_poly);
+                for poly in &inside.0 {
+                    if poly.unsigned_area() >= SLIVER_AREA_M2 {
+                        next.push(mk(poly));
+                    }
+                }
+                let outside = region.polygon.difference(&cut_poly);
+                for poly in &outside.0 {
+                    if poly.unsigned_area() >= SLIVER_AREA_M2 {
+                        next.push(mk(poly));
+                    }
+                }
+            }
+            regions = next;
         }
         Self { regions }
     }
@@ -2549,7 +2607,7 @@ impl WallRegion {
     /// merged wall's base edge stays its original footprint, keeping the amend
     /// match stable across re-derivation. For a clean fresh ring this is just
     /// the last base vertex (`exterior[top_start_index() - 1]`).
-    fn base_edge(&self) -> Option<(Point3f64, Point3f64)> {
+    pub(crate) fn base_edge(&self) -> Option<(Point3f64, Point3f64)> {
         let e = &self.polygon.exterior;
         let k = self.top_start_index();
         if e.len() < 2 || k < 2 {
@@ -2818,6 +2876,84 @@ impl WallRegions {
         matched
     }
 
+    /// Divide walls crossed by structure-phase `cuts` (each a plan SEGMENT of a
+    /// finalized cut) into two sub-walls along a vertical plane at the crossing,
+    /// copying `exposure` + `construction_id` to BOTH halves (only the id is
+    /// fresh). A cut that misses a wall's base edge (or grazes an endpoint)
+    /// leaves it whole, so a cut spanning two walls splits both. Runs AFTER
+    /// [`regenerate`](Self::regenerate) (which re-makes the unsplit perimeter
+    /// wall) and BEFORE [`with_risers`](Self::with_risers).
+    ///
+    /// Identity is STABLE across re-derivation: a re-made full wall's base edge
+    /// is ~twice a previous sub-wall's, so it never amends one in `regenerate`
+    /// (error ≫ [`MATCH_EPS_M`]); it comes out whole, and here each half recovers
+    /// its previous sub-wall's `id` (+ `construction_id`/`exposure`/`opes`, the
+    /// durability rule shared with `with_risers`) by the same injective
+    /// base-edge match — EXCLUDING ids the untouched perimeter walls already
+    /// hold. A first split (no previous half) takes fresh ids; the controller
+    /// then re-homes the crossing wall's openings onto those ids at commit.
+    pub fn apply_splits(self, cuts: &[[Point2f64; 2]], previous: &WallRegions) -> Self {
+        if cuts.is_empty() {
+            return self;
+        }
+        // ── Geometric split pass ─────────────────────────────────────────
+        // Untouched walls keep `regenerate`'s id; each split yields two halves
+        // flagged as split-children needing identity recovery below.
+        let mut regions = self.regions;
+        let mut is_child = vec![false; regions.len()];
+        for cut in cuts {
+            let mut next: Vec<WallRegion> = Vec::new();
+            let mut next_child: Vec<bool> = Vec::new();
+            for (wall, child) in regions.into_iter().zip(is_child) {
+                match split_wall_by_segment(&wall, cut) {
+                    Some((h0, h1)) => {
+                        next.push(h0);
+                        next_child.push(true);
+                        next.push(h1);
+                        next_child.push(true);
+                    }
+                    None => {
+                        next.push(wall);
+                        next_child.push(child);
+                    }
+                }
+            }
+            regions = next;
+            is_child = next_child;
+        }
+        // ── Identity recovery for the split-children ─────────────────────
+        // Exclude previous ids already kept by the untouched perimeter walls.
+        let mut prev_used: Vec<bool> = previous
+            .regions
+            .iter()
+            .map(|p| {
+                regions
+                    .iter()
+                    .zip(&is_child)
+                    .any(|(r, &c)| !c && r.id == p.id)
+            })
+            .collect();
+        let child_indices: Vec<usize> = (0..regions.len()).filter(|&i| is_child[i]).collect();
+        let bases: Vec<(Point2f64, Point2f64, f64)> = child_indices
+            .iter()
+            .map(|&i| match regions[i].base_edge() {
+                Some((a, b)) => (Point2f64::new(a.x, a.y), Point2f64::new(b.x, b.y), a.z),
+                None => (Point2f64::origin(), Point2f64::origin(), 0.0),
+            })
+            .collect();
+        let matched = Self::match_bases_to_previous(&bases, previous, &mut prev_used);
+        for (k, &i) in child_indices.iter().enumerate() {
+            if let Some(pi) = matched[k] {
+                let src = &previous.regions[pi];
+                regions[i].id = src.id;
+                regions[i].construction_id = src.construction_id;
+                regions[i].exposure = src.exposure;
+                regions[i].opes = src.opes.clone();
+            }
+        }
+        Self { regions }
+    }
+
     /// Append derived RISER faces (`faces` pairs each face with the exposure
     /// the caller derived as its DEFAULT) with `regenerate`'s amend identity:
     /// the same injective best-match on the base edge (`exterior[0]`/`[1]`,
@@ -2998,6 +3134,47 @@ impl WallRegions {
 /// Both endpoints of a base edge must sit within this (m) of a previous
 /// region's for it to be the SAME wall — the amend-matching tolerance of
 /// [`WallRegions::regenerate`] and [`WallRegions::with_risers`].
+/// Split one wall along the vertical plane where the plan `cut` segment crosses
+/// its base edge, via [`Polygon3D::split_by_line`]. Returns the two sub-walls
+/// (each with the parent's `exposure`/`construction_id`, a fresh id, empty
+/// `opes`), or `None` when the cut misses the base edge, grazes an endpoint, or
+/// doesn't actually divide the face. `split_by_line` preserves the base-edge-
+/// first vertex contract for a flat base (the common case): a vertical cut of
+/// `[a, b, b_top, a_top]` yields `[a, x, x_top, a_top]` and `[x, b, b_top, x_top]`.
+fn split_wall_by_segment(
+    wall: &WallRegion,
+    cut: &[Point2f64; 2],
+) -> Option<(WallRegion, WallRegion)> {
+    let (a, b) = wall.base_edge()?;
+    let t = segment_cross_param(
+        Point2f64::new(a.x, a.y),
+        Point2f64::new(b.x, b.y),
+        cut[0],
+        cut[1],
+    )?;
+    const END_EPS: f64 = 1e-6;
+    if !(END_EPS..=1.0 - END_EPS).contains(&t) {
+        return None; // the cut grazes an endpoint — no real split
+    }
+    let line = SplitLine3D {
+        point: Point3f64::new(a.x + t * (b.x - a.x), a.y + t * (b.y - a.y), a.z),
+        direction: Vector3f64::new(0.0, 0.0, 1.0), // vertical cut within the wall plane
+        normal: Vector3f64::new(0.0, 0.0, 0.0),    // unused by `split_by_line`
+    };
+    let [h0, h1] = <[Polygon3D; 2]>::try_from(wall.polygon.split_by_line(&line)).ok()?;
+    if h0.exterior.len() < 3 || h1.exterior.len() < 3 {
+        return None; // one side came out empty — the cut didn't divide the face
+    }
+    let mk = |polygon: Polygon3D| WallRegion {
+        id: ItemId::default(),
+        polygon,
+        exposure: wall.exposure,
+        opes: Opes::default(),
+        construction_id: wall.construction_id,
+    };
+    Some((mk(h0), mk(h1)))
+}
+
 const MATCH_EPS_M: f64 = 1e-2;
 
 /// Half-width (m) of the FLOOR BAND used by [`WallRegion::base_edge`] to tell
@@ -3787,6 +3964,31 @@ pub struct Storey {
     /// `#[serde(default)]` so older records load.
     #[serde(default)]
     pub ceiling_dividers: Vec<Vec<Point2f64>>,
+    /// Structure-phase FLOOR splits: world-metre plan rings, each a finalized
+    /// (dimensioned) cut whose two sides become separate floor regions with
+    /// IDENTICAL properties (`construction_id` + `level_m` copied to both). Like
+    /// a ceiling divider the split leaves no recoverable trace (both sides share
+    /// every property), so the ring is the only durable record; resolve replays
+    /// it as a property-preserving split (`FloorRegions::with_splits`), AFTER the
+    /// phase/step partition so it composes on top. `#[serde(default)]` so older
+    /// records load.
+    #[serde(default)]
+    pub floor_splits: Vec<Vec<Point2f64>>,
+    /// Structure-phase ROOF/CEILING splits — same contract as `floor_splits`,
+    /// over the ceiling regions. Replayed as a delta-0 split alongside the
+    /// `ceiling_dividers` (`CeilingRegions::with_z_deltas`, BEFORE the apexes),
+    /// so a split piece keeps its height and confines an apex/ridge to itself.
+    /// `#[serde(default)]` so older records load.
+    #[serde(default)]
+    pub roof_splits: Vec<Vec<Point2f64>>,
+    /// Structure-phase WALL splits: each the plan SEGMENT of a finalized cut
+    /// that crosses a wall's base edge. A wall split is a vertical plane (not an
+    /// area), so the segment — not a closed ring — is stored: resolve lifts it to
+    /// the crossing point + along-distance to split the wall and re-home its
+    /// openings (`WallRegions::apply_splits`). `#[serde(default)]` so older
+    /// records load.
+    #[serde(default)]
+    pub wall_splits: Vec<[Point2f64; 2]>,
     // No editable sketch snapshot is stored: the resolved geometry above
     // (`floors`/`walls`/`living_areas`) is the only persisted representation,
     // and the editor rebuilds its working state from it on load. The DB only
@@ -4229,6 +4431,54 @@ mod tests {
         for r in &stepped.regions {
             assert_eq!(r.construction_id, cid);
         }
+    }
+
+    #[test]
+    fn with_splits_divides_region_copying_all_properties_with_fresh_ids() {
+        use geo::Area;
+        let cid = ItemId::default();
+        let mut fr = FloorRegions::new(square(0.0, 0.0, 10.0, 8.0), cid);
+        fr.regions[0].level_m = 0.3; // a raised floor — both halves must keep it
+        let parent_id = fr.regions[0].id;
+        // A structure split cutting the right half off [5,10].
+        let split = fr.with_splits(&[square(5.0, 0.0, 10.0, 8.0)]);
+        assert_eq!(split.regions.len(), 2, "one cut → two pieces");
+        for r in &split.regions {
+            assert_eq!(r.construction_id, cid, "construction copied to both sides");
+            assert!(
+                (r.level_m - 0.3).abs() < 1e-9,
+                "level_m copied to both sides"
+            );
+            assert_ne!(r.id, parent_id, "each piece gets a fresh id");
+            assert!(
+                (r.polygon.unsigned_area() - 40.0).abs() < 1e-6,
+                "two 5×8 halves"
+            );
+        }
+        let ids: std::collections::HashSet<_> = split.regions.iter().map(|r| r.id).collect();
+        assert_eq!(ids.len(), 2, "the two pieces have distinct ids");
+    }
+
+    #[test]
+    fn with_splits_empty_is_a_noop_preserving_identity() {
+        let cid = ItemId::default();
+        let fr = FloorRegions::new(square(0.0, 0.0, 10.0, 8.0), cid);
+        let id = fr.regions[0].id;
+        let out = fr.with_splits(&[]);
+        assert_eq!(out.regions.len(), 1);
+        assert_eq!(
+            out.regions[0].id, id,
+            "empty cuts → untouched, id preserved"
+        );
+    }
+
+    #[test]
+    fn with_splits_missing_region_emits_it_whole() {
+        // A cut that doesn't reach the region leaves it intact (re-id'd), never lost.
+        let cid = ItemId::default();
+        let fr = FloorRegions::new(square(0.0, 0.0, 4.0, 4.0), cid);
+        let out = fr.with_splits(&[square(10.0, 10.0, 12.0, 12.0)]);
+        assert_eq!(out.regions.len(), 1, "untouched region survives the miss");
     }
 
     #[test]
@@ -7405,5 +7655,102 @@ mod tests {
         let mut sizes: Vec<usize> = halves.iter().map(|h| h.exterior.len()).collect();
         sizes.sort();
         assert_eq!(sizes, vec![0, 4]);
+    }
+
+    /* ---------------------------------------------------------------------
+     * WallRegions::apply_splits — structure-phase wall split
+     * ------------------------------------------------------------------ */
+
+    /// A flat 4 m × 2.5 m wall from (0,0) to (4,0) in the y = 0 plane.
+    fn four_m_wall(cid: ItemId, exposure: WallExposure) -> WallRegion {
+        WallRegion {
+            id: ItemId::default(),
+            polygon: Polygon3D::new(vec![
+                Point3f64::new(0.0, 0.0, 0.0),
+                Point3f64::new(4.0, 0.0, 0.0),
+                Point3f64::new(4.0, 0.0, 2.5),
+                Point3f64::new(0.0, 0.0, 2.5),
+            ]),
+            exposure,
+            opes: Opes::default(),
+            construction_id: cid,
+        }
+    }
+
+    #[test]
+    fn apply_splits_divides_flat_wall_copying_props_with_fresh_ids() {
+        let cid = ItemId::default();
+        let wall = four_m_wall(cid, WallExposure::Exposed);
+        let parent_id = wall.id;
+        let walls = WallRegions {
+            regions: vec![wall],
+        };
+        // Vertical cut line at x = 1 crossing the base edge.
+        let cut = [Point2f64::new(1.0, -1.0), Point2f64::new(1.0, 1.0)];
+        let out = walls.apply_splits(&[cut], &WallRegions { regions: vec![] });
+        assert_eq!(out.regions.len(), 2, "one cut → two sub-walls");
+        for r in &out.regions {
+            assert_eq!(r.exposure, WallExposure::Exposed, "exposure copied to both");
+            assert_eq!(r.construction_id, cid, "construction copied to both");
+            assert_ne!(r.id, parent_id, "fresh id per piece (nothing to amend)");
+        }
+        let ids: std::collections::HashSet<_> = out.regions.iter().map(|r| r.id).collect();
+        assert_eq!(ids.len(), 2, "distinct ids");
+        // Base edges abut at the cut: far endpoints are x = 1 and x = 4.
+        let mut far_x: Vec<f64> = out
+            .regions
+            .iter()
+            .map(|r| r.base_edge().unwrap().1.x)
+            .collect();
+        far_x.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        assert!((far_x[0] - 1.0).abs() < 1e-9 && (far_x[1] - 4.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn apply_splits_missing_wall_is_left_whole() {
+        let cid = ItemId::default();
+        let walls = WallRegions {
+            regions: vec![four_m_wall(cid, WallExposure::Exposed)],
+        };
+        let cut = [Point2f64::new(10.0, -1.0), Point2f64::new(10.0, 1.0)]; // misses the wall
+        let out = walls.apply_splits(&[cut], &WallRegions { regions: vec![] });
+        assert_eq!(out.regions.len(), 1, "untouched wall survives the miss");
+    }
+
+    #[test]
+    fn apply_splits_recovers_sub_wall_ids_on_re_resolve() {
+        let cid = ItemId::default();
+        let cut = [Point2f64::new(1.0, -1.0), Point2f64::new(1.0, 1.0)];
+        // First split mints two fresh sub-wall ids.
+        let first = WallRegions {
+            regions: vec![four_m_wall(cid, WallExposure::Exposed)],
+        }
+        .apply_splits(&[cut], &WallRegions { regions: vec![] });
+        let ids_first: std::collections::HashSet<_> = first.regions.iter().map(|r| r.id).collect();
+        // Re-resolve: `regenerate` re-makes the FULL wall (fresh id), then
+        // apply_splits re-splits against `first` → must recover the SAME ids.
+        let second = WallRegions {
+            regions: vec![four_m_wall(cid, WallExposure::Exposed)],
+        }
+        .apply_splits(&[cut], &first);
+        let ids_second: std::collections::HashSet<_> =
+            second.regions.iter().map(|r| r.id).collect();
+        assert_eq!(
+            ids_first, ids_second,
+            "sub-wall ids stable across re-resolve"
+        );
+    }
+
+    #[test]
+    fn apply_splits_empty_is_a_noop() {
+        let cid = ItemId::default();
+        let wall = four_m_wall(cid, WallExposure::Exposed);
+        let id = wall.id;
+        let out = WallRegions {
+            regions: vec![wall],
+        }
+        .apply_splits(&[], &WallRegions { regions: vec![] });
+        assert_eq!(out.regions.len(), 1);
+        assert_eq!(out.regions[0].id, id, "empty cuts → untouched");
     }
 }

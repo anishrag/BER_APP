@@ -314,11 +314,16 @@ pub struct AppController {
     /// active kind) — the canvas shades exactly these. Transient; cleared on
     /// phase switch / kind change / Deselect all.
     structure_selected: HashSet<ItemId>,
-    /// A Structure-phase CARVE that split the storey into two candidate regions
-    /// (the living-area cut, reused) — the assessor taps one and every surface
-    /// of the active kind inside it joins the selection. `None` when no carve
-    /// is awaiting a pick.
-    pending_select_cut: Option<[FloorPlan; 2]>,
+    /// A Structure-phase straight CUT that split the storey into two candidate
+    /// slots (each a dimensionable sub-area); the assessor taps one, which
+    /// becomes the in-flight split shape and is then dimensioned. `None` when no
+    /// cut is awaiting a pick.
+    pending_structure_cut: Option<[ShapeSlot; 2]>,
+    /// The surface kind being split while a Structure split shape is in-flight
+    /// (carved/dimensioned). Drives which durable split field the committed ring
+    /// pushes onto and which surfaces auto-select. `None` when no split is
+    /// in-flight. Transient — cleared on phase switch / storey switch / commit.
+    structure_split_kind: Option<SurfaceKind>,
 }
 
 impl AppController {
@@ -375,7 +380,8 @@ impl AppController {
             current_phase: AssessmentPhase::default(),
             structure_selection: None,
             structure_selected: HashSet::new(),
-            pending_select_cut: None,
+            pending_structure_cut: None,
+            structure_split_kind: None,
         }
     }
 }

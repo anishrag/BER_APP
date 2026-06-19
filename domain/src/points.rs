@@ -60,6 +60,24 @@ pub fn point_on_ring_boundary(ring: &[Point2f64], x: f64, y: f64, tol: f64) -> b
     })
 }
 
+/// If segment `a→b` crosses segment `p→q` at a single point, the parameter
+/// `t ∈ [0, 1]` along `a→b` of that crossing (the point is `a + t·(b−a)`).
+/// `None` when the segments are parallel/degenerate or don't meet within both
+/// spans. Shared 2D vector math (used to find where a cut line crosses a wall's
+/// base edge).
+pub fn segment_cross_param(a: Point2f64, b: Point2f64, p: Point2f64, q: Point2f64) -> Option<f64> {
+    let (rx, ry) = (b.x - a.x, b.y - a.y);
+    let (sx, sy) = (q.x - p.x, q.y - p.y);
+    let denom = rx * sy - ry * sx;
+    if denom.abs() < 1e-12 {
+        return None; // parallel or a degenerate segment
+    }
+    let (qpx, qpy) = (p.x - a.x, p.y - a.y);
+    let t = (qpx * sy - qpy * sx) / denom;
+    let u = (qpx * ry - qpy * rx) / denom;
+    ((0.0..=1.0).contains(&t) && (0.0..=1.0).contains(&u)).then_some(t)
+}
+
 /// The average of a ring's vertices (a closing-duplicate vertex is dropped) — a
 /// cheap interior-ish centre for region-membership tests (good enough for the
 /// simple region footprints carve selection deals with; a wall's degenerate ring

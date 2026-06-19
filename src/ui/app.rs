@@ -831,6 +831,12 @@ impl eframe::App for BerApp {
                             // Candidate regions of a pending Structure carve.
                             let structure_cut_regions =
                                 self.app_controller.borrow().structure_cut_regions();
+                            // The in-flight Structure split ring (highlighted
+                            // while it's being dimensioned).
+                            let pending_structure_split_polygon = self
+                                .app_controller
+                                .borrow()
+                                .pending_structure_split_polygon();
 
                             let view = SketchView {
                                 current: stroke.as_ref().map(EguiStroke::from),
@@ -969,6 +975,7 @@ impl eframe::App for BerApp {
                                 structure_selection,
                                 structure_selected: &structure_selected,
                                 structure_cut_regions: &structure_cut_regions,
+                                pending_structure_split_polygon: &pending_structure_split_polygon,
                             };
                             let touch_nav = &mut self.sketch_state.touch_nav;
                             SketchPage::render(ui, view, touch_nav, |event| match event {

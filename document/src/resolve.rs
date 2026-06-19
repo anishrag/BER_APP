@@ -164,7 +164,10 @@ pub fn resolve_storey(
         if polygons_f64.iter().any(|p| p.len() >= 3) {
             let mut roofs =
                 CeilingRegions::default_for_footprint(polygons_f64, height_m, ceiling_cid);
-            if !ceiling_steps.is_empty() || !storey.ceiling_dividers.is_empty() {
+            if !ceiling_steps.is_empty()
+                || !storey.ceiling_dividers.is_empty()
+                || !storey.roof_splits.is_empty()
+            {
                 // The session ±Δ steps (and any in-flight delta-0 divider the
                 // controller hasn't synced to the durable field yet), PLUS the
                 // durable same-height DIVIDERS as delta-0 splits. A divider
@@ -180,6 +183,14 @@ pub fn resolve_storey(
                     })
                     .collect();
                 for ring in &storey.ceiling_dividers {
+                    areas.push((ring.clone(), 0.0));
+                }
+                // Structure-phase ROOF splits are delta-0 ceiling splits too —
+                // both pieces keep their height + construction (opes re-home by
+                // plan point in `rebuild_opes` at the tail), so the assessor can
+                // attribute each separately. Composed with steps/dividers,
+                // BEFORE the apexes, keeping a ridge confined to its piece.
+                for ring in &storey.roof_splits {
                     areas.push((ring.clone(), 0.0));
                 }
                 roofs = roofs.with_z_deltas(&areas);
@@ -233,6 +244,13 @@ pub fn resolve_storey(
             })
             .collect();
         storey.floors = std::mem::take(&mut storey.floors).with_levels(&step_areas);
+    }
+    // Structure-phase FLOOR splits: divide the (phase/step-partitioned) floor
+    // regions by the durable cut rings — both pieces keep construction + level,
+    // only the id is fresh. After the partition so it composes on top; before
+    // the walls read `storey.floors` below. Gated for a byte-identical legacy.
+    if !storey.floor_splits.is_empty() {
+        storey.floors = std::mem::take(&mut storey.floors).with_splits(&storey.floor_splits);
     }
     storey.living_areas = FloorRegions::from_vertex_lists(living_area_lists, floor_cid);
     // Re-derive walls from the full-perimeter coverage (one region per
@@ -288,6 +306,13 @@ pub fn resolve_storey(
         fallback_top_z,
         wall_cid,
     );
+    // Structure-phase WALL splits: divide any wall a cut segment crosses into
+    // two sub-walls (copied exposure + construction, identity recovered against
+    // the previous set), so each part is separately attributable. AFTER the
+    // perimeter rebuild (it splits the full regenerated wall) and BEFORE the
+    // riser append + coplanar-flush merge. The crossing wall's openings are
+    // re-homed onto the sub-walls once, at commit (see the controller).
+    let walls = walls.apply_splits(&storey.wall_splits, &previous_walls);
     // RISER regions append after the perimeter rebuild — derived geometry,
     // re-derived on every materialize like the walls themselves:
     //  - FLOOR risers: the vertical faces between adjacent floor regions
@@ -330,6 +355,27 @@ pub fn resolve_storey(
         .map(|f| (f, WallExposure::Unset))
         .collect();
     storey.walls = walls.with_risers(risers, &previous_walls, wall_cid);
+    // Wall-split opening re-home: a structure wall split replaced a parent wall
+    // with two sub-walls, so each opening still placed on the (now-gone) parent
+    // must move onto the correct sub-wall BEFORE the orphan-prune below drops
+    // it. Keyed on the PREVIOUS walls (where the parent still exists) crossed by
+    // each cut. Idempotent: once an opening points at a sub-wall id (stable
+    // across re-derivation), later resolves find no parent crossed and no-op.
+    if !storey.wall_splits.is_empty() {
+        for cut in storey.wall_splits.clone() {
+            for (parent_id, a, b) in
+                datatypes::ber::openings::walls_crossed_by_cut(&previous_walls, cut)
+            {
+                datatypes::ber::openings::rehome_openings_across_wall_split(
+                    &mut storey,
+                    parent_id,
+                    a,
+                    b,
+                    cut,
+                );
+            }
+        }
+    }
     // OPENINGS tail: walls/roofs are now final, so recompute each placed
     // window/door's derived `vertices` cache from its durable placement, then
     // drop any opening whose host region the edit replaced. Pure data transform
@@ -470,6 +516,171 @@ mod tests {
         };
         assert!((area_at_level(-0.3) - 8.0).abs() < 1e-6, "stepped half");
         assert!((area_at_level(0.0) - 8.0).abs() < 1e-6, "untouched half");
+    }
+
+    /// A 4×4 m finalised square, the common scaffold for the split tests.
+    fn unit_square_doc() -> StoreyDoc {
+        square_doc(&[
+            Point2f32::new(0.0, 0.0),
+            Point2f32::new(4.0, 0.0),
+            Point2f32::new(4.0, 4.0),
+            Point2f32::new(0.0, 4.0),
+        ])
+    }
+
+    /// A structure-phase FLOOR split divides the floor in two, BOTH pieces
+    /// keeping the source construction (only the id is fresh), and the split
+    /// rides the durable `floor_splits` field so it survives a re-resolve.
+    #[test]
+    fn floor_split_divides_floor_and_survives_re_resolve() {
+        let doc = unit_square_doc();
+        let mut ber = Ber::default();
+        ensure_storey_constructions(&mut ber, 0, &[]);
+        ber.storeys[0].floor_splits = vec![vec![
+            Point2f64::new(0.0, 0.0),
+            Point2f64::new(2.0, 0.0),
+            Point2f64::new(2.0, 4.0),
+            Point2f64::new(0.0, 4.0),
+        ]];
+        let storey = resolve_storey(&doc, &ber, 0, &[], &[], &[]);
+        assert_eq!(storey.floors.regions.len(), 2, "the cut split the floor");
+        let cid = storey.floors.regions[0].construction_id;
+        assert!(
+            storey
+                .floors
+                .regions
+                .iter()
+                .all(|r| r.construction_id == cid),
+            "both pieces keep the source construction"
+        );
+        // Durability: feed the resolved storey back and re-resolve.
+        ber.storeys[0] = storey;
+        let storey2 = resolve_storey(&doc, &ber, 0, &[], &[], &[]);
+        assert_eq!(storey2.floors.regions.len(), 2, "split survives re-resolve");
+    }
+
+    /// A structure-phase ROOF split divides the ceiling in two at the SAME
+    /// height (delta-0), and survives a re-resolve.
+    #[test]
+    fn roof_split_divides_ceiling_keeping_height() {
+        let doc = unit_square_doc();
+        let mut ber = Ber::default();
+        ensure_storey_constructions(&mut ber, 0, &[]);
+        ber.storeys[0].ceiling_height_m = Some(2.4);
+        ber.storeys[0].roof_splits = vec![vec![
+            Point2f64::new(0.0, 0.0),
+            Point2f64::new(2.0, 0.0),
+            Point2f64::new(2.0, 4.0),
+            Point2f64::new(0.0, 4.0),
+        ]];
+        let storey = resolve_storey(&doc, &ber, 0, &[], &[], &[]);
+        assert_eq!(storey.roofs.regions.len(), 2, "the cut split the ceiling");
+        assert!(
+            storey
+                .roofs
+                .regions
+                .iter()
+                .all(|r| r.flat_z().is_some_and(|z| (z - 2.4).abs() < 1e-6)),
+            "both pieces stay at the ceiling height"
+        );
+        ber.storeys[0] = storey;
+        let storey2 = resolve_storey(&doc, &ber, 0, &[], &[], &[]);
+        assert_eq!(storey2.roofs.regions.len(), 2, "split survives re-resolve");
+    }
+
+    /// A structure-phase WALL split divides the crossed wall into two sub-walls
+    /// (4 → 5), and the sub-walls keep stable identity across a re-resolve.
+    #[test]
+    fn wall_split_divides_wall_and_keeps_identity_on_re_resolve() {
+        let doc = unit_square_doc();
+        let mut ber = Ber::default();
+        ensure_storey_constructions(&mut ber, 0, &[]);
+        ber.storeys[0].ceiling_height_m = Some(2.4);
+        // A cut crossing the bottom wall (0,0)→(4,0) at x = 2.
+        ber.storeys[0].wall_splits = vec![[Point2f64::new(2.0, -1.0), Point2f64::new(2.0, 1.0)]];
+        let storey = resolve_storey(&doc, &ber, 0, &[], &[], &[]);
+        assert_eq!(storey.walls.regions.len(), 5, "one wall split → 4 + 1");
+        let ids: std::collections::HashSet<_> = storey.walls.regions.iter().map(|r| r.id).collect();
+        ber.storeys[0] = storey;
+        let storey2 = resolve_storey(&doc, &ber, 0, &[], &[], &[]);
+        assert_eq!(storey2.walls.regions.len(), 5, "split survives re-resolve");
+        let ids2: std::collections::HashSet<_> =
+            storey2.walls.regions.iter().map(|r| r.id).collect();
+        assert_eq!(ids, ids2, "wall ids stable across re-resolve");
+    }
+
+    /// A corner/notch carve yields TWO interior cut edges, each crossing a
+    /// DIFFERENT wall — both must split (the live regression: a multi-edge carve
+    /// was wrongly rejected as ambiguous). Notching the top-right corner splits
+    /// the top + right walls: 4 → 6.
+    #[test]
+    fn two_wall_cuts_from_a_corner_notch_split_both_walls() {
+        let doc = unit_square_doc();
+        let mut ber = Ber::default();
+        ensure_storey_constructions(&mut ber, 0, &[]);
+        ber.storeys[0].ceiling_height_m = Some(2.4);
+        ber.storeys[0].wall_splits = vec![
+            [Point2f64::new(3.0, 4.0), Point2f64::new(3.0, 3.0)], // crosses the top wall at (3,4)
+            [Point2f64::new(3.0, 3.0), Point2f64::new(4.0, 3.0)], // crosses the right wall at (4,3)
+        ];
+        let storey = resolve_storey(&doc, &ber, 0, &[], &[], &[]);
+        assert_eq!(
+            storey.walls.regions.len(),
+            6,
+            "top + right walls each split"
+        );
+    }
+
+    /// A window on a wall that gets split must be RE-HOMED onto a sub-wall, not
+    /// orphaned and pruned — the prune runs inside the same resolve, so the
+    /// re-home has to happen before it.
+    #[test]
+    fn wall_split_rehomes_openings_instead_of_orphaning_them() {
+        use datatypes::ber::fenestration::{OpeningPlacement, Window};
+        let doc = unit_square_doc();
+        let mut ber = Ber::default();
+        ensure_storey_constructions(&mut ber, 0, &[]);
+        ber.storeys[0].ceiling_height_m = Some(2.4);
+        // Resolve once to learn the bottom wall's id, then place a window on it.
+        let storey = resolve_storey(&doc, &ber, 0, &[], &[], &[]);
+        let bottom = storey
+            .walls
+            .regions
+            .iter()
+            .find(|w| {
+                w.base_midpoint()
+                    .is_some_and(|m| m.y.abs() < 1e-6 && (m.x - 2.0).abs() < 1e-6)
+            })
+            .expect("bottom wall (base (0,0)->(4,0))");
+        let parent_id = bottom.id;
+        ber.storeys[0] = storey;
+        ber.storeys[0].windows.push(Window {
+            id: ItemId::default(),
+            vertices: vec![],
+            width_m: 1.0,
+            height_m: 1.0,
+            window_type_id: ItemId::default(),
+            placement: Some(OpeningPlacement::Wall {
+                wall_id: parent_id,
+                along_m: 1.0, // left of the x = 2 cut
+                sill_m: 0.8,
+            }),
+            assembly_id: None,
+        });
+        // Split the bottom wall at x = 2.
+        ber.storeys[0].wall_splits = vec![[Point2f64::new(2.0, -1.0), Point2f64::new(2.0, 1.0)]];
+        let resolved = resolve_storey(&doc, &ber, 0, &[], &[], &[]);
+        assert_eq!(resolved.windows.len(), 1, "the window survives the split");
+        match resolved.windows[0].placement.as_ref().unwrap() {
+            OpeningPlacement::Wall { wall_id, .. } => {
+                assert_ne!(*wall_id, parent_id, "re-homed off the now-gone parent");
+                assert!(
+                    resolved.walls.regions.iter().any(|w| w.id == *wall_id),
+                    "re-homed onto an existing sub-wall"
+                );
+            }
+            _ => panic!("window lost its wall placement"),
+        }
     }
 
     /// A floor step derives a riser wall (defaulting `Unset`, like every

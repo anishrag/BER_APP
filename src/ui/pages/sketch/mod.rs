@@ -742,9 +742,12 @@ pub struct SketchView<'a> {
     pub structure_selection: Option<StructureSelection>,
     /// Region ids selected in the Structure phase — the canvas shades these.
     pub structure_selected: &'a HashSet<ItemId>,
-    /// Candidate regions of a pending Structure carve (world coords) — drawn to
-    /// tap between. Empty when no carve is awaiting a pick.
+    /// Candidate regions of a pending Structure carve/cut (world coords) — drawn
+    /// to tap between. Empty when no carve is awaiting a pick.
     pub structure_cut_regions: &'a [Vec<(f64, f64)>],
+    /// The in-flight Structure split ring (world coords) — drawn highlighted
+    /// while the assessor dimensions it. Empty when no split is in-flight.
+    pub pending_structure_split_polygon: &'a [(f64, f64)],
 }
 
 #[derive(Default)]

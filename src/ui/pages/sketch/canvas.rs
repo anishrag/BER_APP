@@ -142,6 +142,23 @@ pub(super) fn render<F: FnMut(UiEvent)>(
         vp,
         view.structure_cut_regions,
     );
+    // Structure split: the in-flight ring, highlighted while it's being
+    // dimensioned (same treatment as the construction-phase pending area).
+    if view.pending_structure_split_polygon.len() >= 3 {
+        render::render_phase_regions(
+            &painter,
+            rect,
+            ber,
+            current_storey_idx,
+            mode,
+            vp,
+            std::slice::from_ref(&(
+                view.pending_structure_split_polygon.to_vec(),
+                "?".to_string(),
+            )),
+            egui::Color32::from_rgb(120, 200, 255), // blue: structure split
+        );
+    }
 
     // DEBUG: splice-pipeline phases of the last extend/trim.
     render::render_splice_debug(

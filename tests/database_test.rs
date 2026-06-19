@@ -257,6 +257,9 @@ fn create_full_ber(id: ItemId) -> Ber {
             roof_apex_hints: vec![],
             floor_thickness_m: None,
             ceiling_dividers: vec![],
+            floor_splits: vec![],
+            roof_splits: vec![],
+            wall_splits: vec![],
         },
         Storey {
             id: ItemId::default(),
@@ -274,6 +277,9 @@ fn create_full_ber(id: ItemId) -> Ber {
             roof_apex_hints: vec![],
             floor_thickness_m: None,
             ceiling_dividers: vec![],
+            floor_splits: vec![],
+            roof_splits: vec![],
+            wall_splits: vec![],
         },
     ];
 

@@ -8,8 +8,8 @@
 //! drives.
 use super::common::ItemId;
 use super::fenestration::{Door, DoorKind, OpeningPlacement, Window};
-use super::structural::Storey;
-use domain::points::point_to_segment_distance;
+use super::structural::{Storey, WallRegions};
+use domain::points::{point_to_segment_distance, segment_cross_param, Point2f64};
 
 /// Default door sill height (metres above the wall base) + spacing constants for
 /// auto-redistribution. Tuning-overridable later; sensible Irish-BER defaults.
@@ -710,6 +710,100 @@ pub fn prune_orphaned_openings(storey: &mut Storey) {
     // so no scrub is needed here.)
 }
 
+/// The walls (of the PRE-split set) a plan `cut` segment crosses, as
+/// `(id, base_a, base_b)`. `resolve_storey` calls this on the previous walls
+/// after applying a wall split, so it can re-home each crossed parent's openings
+/// onto the new sub-walls BEFORE the orphan-prune runs. See
+/// [`rehome_openings_across_wall_split`].
+pub fn walls_crossed_by_cut(
+    walls: &WallRegions,
+    cut: [Point2f64; 2],
+) -> Vec<(ItemId, Point2f64, Point2f64)> {
+    walls
+        .regions
+        .iter()
+        .filter_map(|w| {
+            let (a, b) = w.base_edge()?;
+            let (a, b) = (Point2f64::new(a.x, a.y), Point2f64::new(b.x, b.y));
+            let t = segment_cross_param(a, b, cut[0], cut[1])?;
+            (1e-6..=1.0 - 1e-6).contains(&t).then_some((w.id, a, b))
+        })
+        .collect()
+}
+
+/// Re-home a just-split parent wall's openings onto its two new sub-walls. Call
+/// ONCE, right after a structure-phase wall split has been resolved: the parent
+/// wall (`parent_id`, base edge `parent_a`→`parent_b`) is gone, replaced by two
+/// sub-walls either side of where `cut` crossed the base. An opening whose
+/// `along_m` (centre distance from `parent_a`) is before the crossing stays on
+/// the NEAR sub-wall (base `parent_a`→cut) unchanged; one beyond moves to the
+/// FAR sub-wall (base cut→`parent_b`) with `along_m` rebased to that sub-wall's
+/// start. Without this the openings' `wall_id` would dangle and
+/// [`prune_orphaned_openings`] would delete them on the next resolve. Returns
+/// `false` (a no-op) when the cut doesn't cross the base or the two sub-walls
+/// can't be matched — the prune is then the safety net.
+pub fn rehome_openings_across_wall_split(
+    storey: &mut Storey,
+    parent_id: ItemId,
+    parent_a: Point2f64,
+    parent_b: Point2f64,
+    cut: [Point2f64; 2],
+) -> bool {
+    let Some(t) = segment_cross_param(parent_a, parent_b, cut[0], cut[1]) else {
+        return false;
+    };
+    let len = ((parent_b.x - parent_a.x).powi(2) + (parent_b.y - parent_a.y).powi(2)).sqrt();
+    let cut_along = (t * len) as f32;
+    let cut_pt = Point2f64::new(
+        parent_a.x + t * (parent_b.x - parent_a.x),
+        parent_a.y + t * (parent_b.y - parent_a.y),
+    );
+    const EPS: f64 = 1e-2;
+    let near = |p: Point2f64, q: Point2f64| (p.x - q.x).hypot(p.y - q.y) <= EPS;
+    // Match the two sub-walls by their base edges abutting the cut point: NEAR
+    // runs parent_a→cut, FAR runs cut→parent_b (either endpoint order).
+    let mut near_id = None;
+    let mut far_id = None;
+    for w in &storey.walls.regions {
+        let Some((e0, e1)) = w.base_edge() else {
+            continue;
+        };
+        let (e0, e1) = (Point2f64::new(e0.x, e0.y), Point2f64::new(e1.x, e1.y));
+        if (near(e0, parent_a) && near(e1, cut_pt)) || (near(e1, parent_a) && near(e0, cut_pt)) {
+            near_id = Some(w.id);
+        } else if (near(e0, cut_pt) && near(e1, parent_b))
+            || (near(e1, cut_pt) && near(e0, parent_b))
+        {
+            far_id = Some(w.id);
+        }
+    }
+    let (Some(near_id), Some(far_id)) = (near_id, far_id) else {
+        return false;
+    };
+    let rehome = |placement: &mut Option<OpeningPlacement>| {
+        if let Some(OpeningPlacement::Wall {
+            wall_id, along_m, ..
+        }) = placement
+        {
+            if *wall_id == parent_id {
+                if *along_m <= cut_along {
+                    *wall_id = near_id;
+                } else {
+                    *wall_id = far_id;
+                    *along_m -= cut_along;
+                }
+            }
+        }
+    };
+    for w in &mut storey.windows {
+        rehome(&mut w.placement);
+    }
+    for d in &mut storey.doors {
+        rehome(&mut d.placement);
+    }
+    true
+}
+
 /// Rebuild every wall/roof region's `Opes` from the openings' PLACEMENTS, so
 /// each surface knows exactly which openings sit on it. The placement is the
 /// durable truth: wall ids amend across resolve, but ceiling ids are
@@ -919,6 +1013,90 @@ mod tests {
         assert!(near(v[1], (2.5, 0.0, 1.0)), "br {:?}", v[1]);
         assert!(near(v[2], (2.5, 0.0, 2.2)), "tr {:?}", v[2]);
         assert!(near(v[3], (1.5, 0.0, 2.2)), "tl {:?}", v[3]);
+    }
+
+    #[test]
+    fn rehome_openings_across_wall_split_repoints_and_rebases_far_openings() {
+        let parent_id = ItemId::default();
+        let near_id = ItemId::default();
+        let far_id = ItemId::default();
+        // Two resolved sub-walls along the 0→4 base, split at x = 2.
+        let mut storey = Storey {
+            walls: WallRegions {
+                regions: vec![
+                    wall(
+                        near_id,
+                        vec![
+                            p3(0.0, 0.0, 0.0),
+                            p3(2.0, 0.0, 0.0),
+                            p3(2.0, 0.0, 2.5),
+                            p3(0.0, 0.0, 2.5),
+                        ],
+                    ),
+                    wall(
+                        far_id,
+                        vec![
+                            p3(2.0, 0.0, 0.0),
+                            p3(4.0, 0.0, 0.0),
+                            p3(4.0, 0.0, 2.5),
+                            p3(2.0, 0.0, 2.5),
+                        ],
+                    ),
+                ],
+            },
+            windows: vec![
+                window(
+                    ItemId::default(),
+                    1.0,
+                    1.0,
+                    Some(OpeningPlacement::Wall {
+                        wall_id: parent_id,
+                        along_m: 1.0, // before the cut → near sub-wall, unchanged
+                        sill_m: 0.8,
+                    }),
+                ),
+                window(
+                    ItemId::default(),
+                    1.0,
+                    1.0,
+                    Some(OpeningPlacement::Wall {
+                        wall_id: parent_id,
+                        along_m: 3.0, // beyond the cut → far sub-wall, rebased to 1.0
+                        sill_m: 0.8,
+                    }),
+                ),
+            ],
+            ..Storey::default()
+        };
+        let moved = rehome_openings_across_wall_split(
+            &mut storey,
+            parent_id,
+            Point2f64::new(0.0, 0.0),
+            Point2f64::new(4.0, 0.0),
+            [Point2f64::new(2.0, -1.0), Point2f64::new(2.0, 1.0)],
+        );
+        assert!(moved, "the two sub-walls were identified");
+        match storey.windows[0].placement {
+            Some(OpeningPlacement::Wall {
+                wall_id, along_m, ..
+            }) => {
+                assert_eq!(wall_id, near_id, "near opening stays on the near sub-wall");
+                assert!((along_m - 1.0).abs() < 1e-6, "near along_m unchanged");
+            }
+            _ => panic!("near window lost its wall placement"),
+        }
+        match storey.windows[1].placement {
+            Some(OpeningPlacement::Wall {
+                wall_id, along_m, ..
+            }) => {
+                assert_eq!(wall_id, far_id, "far opening moves to the far sub-wall");
+                assert!(
+                    (along_m - 1.0).abs() < 1e-6,
+                    "far along_m rebased 3.0 − 2.0"
+                );
+            }
+            _ => panic!("far window lost its wall placement"),
+        }
     }
 
     #[test]

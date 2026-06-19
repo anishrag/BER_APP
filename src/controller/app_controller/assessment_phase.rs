@@ -72,7 +72,8 @@ impl AppController {
         self.exit_mapping_modes();
         self.structure_selection = None;
         self.structure_selected.clear();
-        self.pending_select_cut = None;
+        self.pending_structure_cut = None;
+        self.structure_split_kind = None;
         self.current_phase = phase;
         let display = match phase {
             AssessmentPhase::Mapping => DisplayMode::FloorMapDims,

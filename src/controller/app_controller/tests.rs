@@ -7750,3 +7750,139 @@ fn elevation_move_and_delete_openings() {
         "the dragged window was deleted"
     );
 }
+
+/// Structure-phase FLOOR split: in Carve mode the assessor draws an
+/// approximate interior region, DIMENSIONS it, and the floor surface SPLITS at
+/// the dimensioned ring — the chosen piece's floor auto-selects. The split is
+/// durable (stored on `Storey.floor_splits`, replayed by `resolve_storey`), so
+/// the floor count goes from one region to two.
+#[test]
+fn structure_floor_carve_dimensions_then_splits_and_selects() {
+    let mut c = dimensioned_square_controller();
+    c.materialize();
+    assert_eq!(
+        c.current_surface_counts().floors,
+        1,
+        "the 10x10 storey starts with a single floor region"
+    );
+
+    // Carve mode on Floors (no phase switch needed — the carve handler only
+    // needs a Structure selection).
+    c.set_structure_selection(Some(StructureSelection {
+        kind: SurfaceKind::Floors,
+        mode: SelectMode::Carve,
+    }));
+
+    // An interior 4x4 region at (2,2)-(6,6): a carve (not a straight cut), so it
+    // becomes a dimensionable split shape straight away.
+    c.apply_structure_carve_stroke(&[(2.0, 2.0), (6.0, 2.0), (6.0, 6.0), (2.0, 6.0), (2.1, 2.1)]);
+    assert!(
+        c.dimensioning_active(),
+        "the split shape prompts to be dimensioned, not split immediately"
+    );
+    assert!(
+        c.structure_selected_ids().is_empty(),
+        "nothing selected until the split commits"
+    );
+
+    // Dimension every drawn wall, then accept the (interior) position prompts.
+    complete_interior_length_loop(&mut c);
+    skip_position_prompts(&mut c);
+
+    // The split committed: floor regions split in two, the chosen piece's floor
+    // is selected, and the durable field carries the ring.
+    assert_eq!(
+        c.current_surface_counts().floors,
+        2,
+        "the dimensioned ring split the floor into two regions"
+    );
+    assert!(
+        !c.structure_selected_ids().is_empty(),
+        "the chosen piece's floor auto-selected: {:?}",
+        c.structure_selected_ids()
+    );
+    assert_eq!(
+        c.current_record.as_ref().unwrap().data.storeys[0]
+            .floor_splits
+            .len(),
+        1,
+        "the split is stored durably on the storey"
+    );
+    // The in-flight split shape is gone — back on the outline.
+    assert_eq!(c.document.active, ActiveShape::Outline);
+    assert!(!c.structure_cut_pending());
+}
+
+/// Structure-phase WALL split via a straight CUT: the cut splits the storey
+/// into two candidate slots; the assessor taps one, dimensions it, and the
+/// dimensioned cut line is stored as a durable `wall_splits` SEGMENT (the
+/// interior cut edge), replayed by `resolve_storey`. Then the flow returns to
+/// the outline. (Whether the cut re-resolves to MORE wall regions is the
+/// datatypes contract — a full-width bisecting cut runs parallel between two
+/// opposite walls, grazing them only at its endpoints, so it doesn't split
+/// them; that geometry is exercised in `document`/`datatypes`.)
+#[test]
+fn structure_wall_cut_picks_dimensions_then_stores_a_durable_segment() {
+    let mut c = dimensioned_square_controller();
+    c.materialize();
+
+    c.set_structure_selection(Some(StructureSelection {
+        kind: SurfaceKind::Walls,
+        mode: SelectMode::Carve,
+    }));
+
+    // A straight cut across the storey (left wall to right wall at y=5) splits
+    // it into two candidate regions to pick from.
+    c.apply_structure_carve_stroke(&[(0.0, 5.0), (10.0, 5.0)]);
+    assert!(
+        c.structure_cut_pending(),
+        "a straight cut offers two candidate regions to pick"
+    );
+    assert_eq!(c.structure_cut_regions().len(), 2, "two candidates");
+
+    // Pick the lower piece → it becomes the in-flight split shape (dimensioned,
+    // not split immediately).
+    c.choose_structure_cut_region(5.0, 2.0);
+    assert!(!c.structure_cut_pending(), "pick consumed the candidates");
+    assert!(
+        c.dimensioning_active() || c.document.dimensioning.current_position_prompt.is_some(),
+        "the picked piece prompts to be dimensioned"
+    );
+
+    // Accept the drawn cut (skip the length prompts so it stays at y=5) +
+    // accept positions; the split commits on the last skip.
+    let mut guard = 0;
+    while c.dimensioning_active() && guard < 12 {
+        c.skip_current_dimension();
+        guard += 1;
+    }
+    skip_position_prompts(&mut c);
+
+    // Walls store a SEGMENT (not a ring), durably, replayed on re-resolve.
+    assert_eq!(
+        c.current_record.as_ref().unwrap().data.storeys[0]
+            .wall_splits
+            .len(),
+        1,
+        "the interior cut edge is stored as a durable wall-split segment"
+    );
+    assert!(
+        c.current_record.as_ref().unwrap().data.storeys[0]
+            .floor_splits
+            .is_empty(),
+        "a wall split must NOT touch floor_splits"
+    );
+    // The in-flight split shape is gone — back on the outline.
+    assert_eq!(c.document.active, ActiveShape::Outline);
+    assert!(!c.structure_cut_pending());
+
+    // And the split actually took effect: the cut runs left-wall→right-wall,
+    // landing at the MIDSPAN of each (cut endpoint = wall t≈0.5), so BOTH the
+    // left and right walls divide in two — 4 perimeter walls become 6.
+    c.materialize();
+    let n_walls = c.current_record.as_ref().unwrap().data.storeys[0]
+        .walls
+        .regions
+        .len();
+    assert_eq!(n_walls, 6, "the cut split the left + right walls (4 → 6)");
+}
