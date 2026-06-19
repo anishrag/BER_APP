@@ -7,10 +7,44 @@
 use crate::parametric::{Axis, CollinearitySuggestion, ParameterAxis};
 use crate::{geom, orthogonal, parametric};
 use crate::{Error, FloorPlan, ParameterId, VertexId};
-use domain::points::Point2f32;
+use domain::points::{point_on_ring_boundary, to_f64, Point2f32, Point2f64};
 use std::collections::HashSet;
 
 impl FloorPlan {
+    /// The interior edges of a dimensioned cut `ring` against this outline —
+    /// every ring edge whose midpoint lies strictly inside the outline (the
+    /// edges that DON'T run along it). Each is a fixed cut line stored as a wall
+    /// split: a straight bisecting cut yields one, a corner/notch carve yields
+    /// several (each crossing a DIFFERENT wall). Returning them all is safe —
+    /// `WallRegions::apply_splits` only divides a wall a cut actually crosses
+    /// mid-span, so an interior edge that reaches no wall is a harmless no-op.
+    ///
+    /// A boundary edge must be EXCLUDED explicitly: `ring_contains_point` is
+    /// unreliable for a point sitting exactly on the ring (it can report a
+    /// boundary-edge midpoint as "inside"), which would otherwise pick a wall
+    /// edge — collinear with that wall, so it splits nothing. The
+    /// strictly-interior test is therefore "inside AND not on the boundary".
+    pub fn interior_cut_edges(&self, ring: &[Point2f32]) -> Vec<[Point2f64; 2]> {
+        /// How close (m) a midpoint must be to an outline edge to count as "on it".
+        const ON_BOUNDARY_TOL_M: f64 = 1e-3;
+        let op = self.get_points();
+        let op64: Vec<Point2f64> = op.iter().map(|p| to_f64(*p)).collect();
+        let n = ring.len();
+        let mut edges = Vec::new();
+        for i in 0..n {
+            let a = ring[i];
+            let b = ring[(i + 1) % n];
+            let mx = (a.x + b.x) * 0.5;
+            let my = (a.y + b.y) * 0.5;
+            if !point_on_ring_boundary(&op64, mx as f64, my as f64, ON_BOUNDARY_TOL_M)
+                && geom::ring_contains_point(&op, mx, my)
+            {
+                edges.push([to_f64(a), to_f64(b)]);
+            }
+        }
+        edges
+    }
+
     /// Edges that are neither horizontal nor vertical (off by more than 1mm on
     /// BOTH axes) — i.e. visibly slanted "not straight" walls. Returns
     /// `(ring, edge_start, a, b)` for each. Empty when the plan is fully

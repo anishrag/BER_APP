@@ -114,6 +114,25 @@ pub struct Storey {
 }
 
 impl Storey {
+    /// Record a dimensioned Structure-phase split onto the durable split field
+    /// for `kind` (replayed by `resolve_storey`). Floors/roofs store the whole
+    /// carved `ring`; walls store the fixed interior cut SEGMENT(s) in
+    /// `wall_cuts` (each crossing at most one wall) — the ring is unused for
+    /// walls. This owns which field a split lands in; the caller supplies the
+    /// already-derived ring and cut edges.
+    pub fn push_structure_split(
+        &mut self,
+        kind: SurfaceKind,
+        ring: &[Point2f64],
+        wall_cuts: Vec<[Point2f64; 2]>,
+    ) {
+        match kind {
+            SurfaceKind::Floors => self.floor_splits.push(ring.to_vec()),
+            SurfaceKind::Roofs => self.roof_splits.push(ring.to_vec()),
+            SurfaceKind::Walls => self.wall_splits.extend(wall_cuts),
+        }
+    }
+
     /// Drop all DERIVED geometry — floors, walls, living areas, roofs, and the
     /// fan apexes over them — back to empty. The persist path calls this when
     /// the outline isn't finalised yet: that geometry is still pixel/incomplete
