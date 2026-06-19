@@ -4,10 +4,56 @@
 //! and their solvers — is interaction bound to the controller's prompt types (an
 //! intentional shell exception; see "Responsibility placement" in CLAUDE.md), and
 //! the actual plan edits it performs are already `manip_plan` calls.
-use crate::StoreyDoc;
+use crate::{MovedCoordKind, StoreyDoc};
 use manip_plan::{ParameterAxis, VertexId};
 
 impl StoreyDoc {
+    /// Restore vertex `vid` to its pre-drag world position `(wx, wy)` — the
+    /// model side of CANCELLING a vertex drop. Writes the x/y parameters back;
+    /// a no-op if the vertex or its parameters can't be resolved (mirror of
+    /// [`StoreyDoc::pin_vertex_position`]).
+    pub fn revert_vertex_position(&mut self, vid: VertexId, wx: f32, wy: f32) {
+        if let Some((ring, idx)) = self.floor_plan.find_vertex(vid) {
+            if let Some(xp) = self.floor_plan.vertex_x_param(ring, idx) {
+                self.floor_plan.set_parameter(xp, wx);
+            }
+            if let Some(yp) = self.floor_plan.vertex_y_param(ring, idx) {
+                self.floor_plan.set_parameter(yp, wy);
+            }
+        }
+    }
+
+    /// Restore the moved wall's coordinate to `pre_value` — the model side of
+    /// CANCELLING an edit drag. A moved PARAMETER is set straight back; a moved
+    /// CONSTANT may have been re-keyed by the drag, so its *current* value is
+    /// re-read from the selected wall's anchor and shifted back along `axis`
+    /// (no-op if `axis` or the selected wall/anchor is missing).
+    pub fn revert_moved_wall(
+        &mut self,
+        kind: MovedCoordKind,
+        pre_value: f32,
+        axis: Option<ParameterAxis>,
+    ) {
+        match kind {
+            MovedCoordKind::Parameter(p) => self.floor_plan.set_parameter(p, pre_value),
+            MovedCoordKind::Constant(_) => {
+                let Some(axis) = axis else { return };
+                let Some(vid) = self.edit_state.selected_wall else {
+                    return;
+                };
+                let Some((ring, edge_start)) = self.floor_plan.find_vertex(vid) else {
+                    return;
+                };
+                if let Some((current_const, _)) =
+                    self.floor_plan.wall_anchor_constant(ring, edge_start)
+                {
+                    self.floor_plan
+                        .shift_constant(current_const, axis, pre_value);
+                }
+            }
+        }
+    }
+
     /// Pin vertex `(ring, idx)` at an exact plan position: resolve its x and y
     /// parameters, set both, and register both as known dimensions — so the
     /// adjoining walls get length labels via the standard known-length path.

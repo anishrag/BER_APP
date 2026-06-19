@@ -393,14 +393,8 @@ impl AppController {
             self.document.edit_state.selected_vertex = None;
             return Ok(());
         };
-        if let Some((v_ring, v_idx)) = self.document.floor_plan.find_vertex(prompt.vertex_vid) {
-            if let Some(xp) = self.document.floor_plan.vertex_x_param(v_ring, v_idx) {
-                self.document.floor_plan.set_parameter(xp, wx);
-            }
-            if let Some(yp) = self.document.floor_plan.vertex_y_param(v_ring, v_idx) {
-                self.document.floor_plan.set_parameter(yp, wy);
-            }
-        }
+        self.document
+            .revert_vertex_position(prompt.vertex_vid, wx, wy);
         self.document.edit_state.selected_vertex = None;
         self.document.edit_state.pre_drag_vertex_pos = None;
         self.mark_dirty()?;
@@ -555,34 +549,8 @@ impl AppController {
             return Ok(());
         };
         let prompt_axis = self.edit_drag_prompt.as_ref().map(|p| p.axis);
-        match kind {
-            MovedCoordKind::Parameter(p) => {
-                self.document.floor_plan.set_parameter(p, pre_value);
-            }
-            MovedCoordKind::Constant(_old_value) => {
-                if let Some(axis) = prompt_axis {
-                    // The current constant value may have been mutated by
-                    // the drag; look it up from the moved wall to find the
-                    // *current* constant, then shift back to pre_value.
-                    if let Some(vid) = self.document.edit_state.selected_wall {
-                        if let Some((ring, edge_start)) = self.document.floor_plan.find_vertex(vid)
-                        {
-                            if let Some((current_const, _)) = self
-                                .document
-                                .floor_plan
-                                .wall_anchor_constant(ring, edge_start)
-                            {
-                                self.document.floor_plan.shift_constant(
-                                    current_const,
-                                    axis,
-                                    pre_value,
-                                );
-                            }
-                        }
-                    }
-                }
-            }
-        }
+        self.document
+            .revert_moved_wall(kind, pre_value, prompt_axis);
         self.mark_dirty()?;
         self.edit_drag_prompt = None;
         self.document.edit_state.pre_drag_value = None;
