@@ -93,7 +93,7 @@ fabric side.
 
 ## Current data-model anchors (what already exists)
 
-- **`Photo { id, file_path, description }`** — `datatypes/src/ber/common.rs:36`. The one
+- **`Photo { id, file_path, description }`** — `ber_model/src/ber/common.rs:36`. The one
   evidence primitive. `file_path` is a local image path (Android: app storage). Reused
   by every phase below; **no new photo type needed.**
 - Photos already hang off:
@@ -102,14 +102,14 @@ fabric side.
   - **Systems items** — `systems.rs:71` (`photo: Option<Photo>`).
   - **BER-level** — `ber_struct.rs:33` (`Ber.photos`) and `common.rs:223` (an item's
     `photos`).
-- **Construction model** — `datatypes/src/ber/structural.rs`:
+- **Construction model** — `ber_model/src/ber/structural.rs`:
   `ensure_{wall,floor,ceiling}_construction(type, makeup, phase)` finds-or-creates a
   construction by the `(type, makeup, phase)` triple, and a surface's durable
   `construction_id` points at it (see [[construction-phase-tagging]]). Today Mapping feeds a
   real **phase** but defaults type/makeup; **Structural Details supplies the real type +
   makeup** via the same call (only those axes change; phase preserved). No new construction
   model needed — just real values where placeholders sit now.
-- **Systems model** — `datatypes/src/ber/systems.rs`: `HeatingSystem`,
+- **Systems model** — `ber_model/src/ber/systems.rs`: `HeatingSystem`,
   `VentilationSystem`, `SolarElements`, etc. The Object Counts items land here (or as
   new sibling structs alongside these) — this is where boiler/vents/solar already live.
 
@@ -120,12 +120,12 @@ system/count items. That's why they can be built in parallel and after Mapping.
 
 ## Architecture placement (respect the boundaries)
 
-- **Data model** (`datatypes`): any *new* Object Counts item types (e.g. fireplace, attic
+- **Data model** (`ber_model`): any *new* Object Counts item types (e.g. fireplace, attic
   hatch, flue) as plain structs/enums beside the existing `systems.rs` ones, each owning
   `photos`/`photo`. Pure data, no I/O. (`data-model-engineer`.)
 - **Editing/model state** (`document`): storey-scoped model mutation goes here as
   `Document` methods — setting an element's construction type/make-up (calling
-  `ensure_*_construction` in `datatypes`), and deriving "which mapped elements still lack
+  `ensure_*_construction` in `ber_model`), and deriving "which mapped elements still lack
   details or evidence" over a storey's shapes. UI-free, DB-free.
 - **Workflow** (`src/controller`): the **phase sequencing** — which phase the assessor is
   in, the per-phase checklist/cursor, driving the detail-entry + `Photo` capture for the
@@ -147,7 +147,7 @@ system/count items. That's why they can be built in parallel and after Mapping.
 
 - A notion of "current assessment phase" the app surfaces (Mapping / Structural Details /
   Object Counts), with the workspace able to switch between them. Likely a small controller
-  + UI concern; no datatypes change beyond what's needed to know an element's
+  + UI concern; no ber_model change beyond what's needed to know an element's
   detail/evidence status.
 - A capture-`Photo` primitive in the UI (open camera → save image to app storage →
   return a `Photo { file_path }`) reused by both later phases. Android camera/file wiring
@@ -173,7 +173,7 @@ system/count items. That's why they can be built in parallel and after Mapping.
 
 - Define the count categories: fireplace, boiler, blower heater, vent, attic hatch,
   flue, solar PV, solar water heater, hot-water cylinder, … (confirm the full list with
-  the assessor before fixing the enum). Add any missing item structs in `datatypes`
+  the assessor before fixing the enum). Add any missing item structs in `ber_model`
   beside `systems.rs`, each with `photos`/`photo`.
 - UI: a tally-style screen per category — add an instance, photograph it, count rises.
 - Persist instances + photos.
@@ -182,7 +182,7 @@ system/count items. That's why they can be built in parallel and after Mapping.
 
 1. **Full Object Counts list + DEAP mapping.** Exact set of countable items and which DEAP
    field each feeds (some already exist under `systems.rs`; some are new). Drives the
-   `datatypes` additions in Stage C.
+   `ber_model` additions in Stage C.
 2. **Structural Details — field set + completeness rules.** Which detail fields each
    element type needs (the construction type/make-up taxonomy + window/door specifics, and
    how they map to DEAP/U-value inputs), and what counts as "sufficiently detailed +

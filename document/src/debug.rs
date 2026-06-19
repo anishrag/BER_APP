@@ -3,8 +3,8 @@
 //! the assessor pastes it for diagnosis. Stable, greppable layout: every line
 //! starts with a fixed keyword, rings render as `(x,y[,z])` tuples to 4 dp.
 
-use datatypes::ber::common::ItemId;
-use datatypes::ber::structural::Storey;
+use ber_model::ber::common::ItemId;
+use ber_model::ber::structural::Storey;
 use std::fmt::Write as _;
 
 /// Short form of an `ItemId` for the dump: the first 8 hex chars of the UUID.
@@ -126,7 +126,7 @@ pub fn debug_dump_storey(storey: &Storey, label: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use datatypes::ber::structural::{CeilingRegions, FloorRegions, RoofApex};
+    use ber_model::ber::structural::{CeilingRegions, FloorRegions, RoofApex};
     use domain::points::Point2f64;
 
     /// The dump is stable + greppable: header/footer with the label, one

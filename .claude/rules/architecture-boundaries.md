@@ -12,7 +12,7 @@ These are hard rules. The boundary script at `.claude/scripts/check-boundaries.s
 
 **Why:** Earlier in this project's life the UI toolkit changed (slint → egui), and we want the option open. By keeping every other crate UI-agnostic, swapping the UI layer later (e.g. to Slint for iOS, or to a native Android shell calling Rust as a library) is a contained rewrite of `src/ui/` rather than a full project rewrite. Today that confinement is intact and worth preserving.
 
-**How to apply:** Render code, egui types, and widget handling stay in `src/ui/`. The controller (`src/controller/`) and engine (`src/engine/`) communicate with UI only via owned data and the `UiEvent` enum. Workspace crates (`datatypes`, `domain`, `sketch`, `manip_plan`, `document`) never see an egui type.
+**How to apply:** Render code, egui types, and widget handling stay in `src/ui/`. The controller (`src/controller/`) and engine (`src/engine/`) communicate with UI only via owned data and the `UiEvent` enum. Workspace crates (`ber_model`, `domain`, `sketch`, `manip_plan`, `document`) never see an egui type.
 
 ## `document/` is the editing model — UI-free and DB-free
 

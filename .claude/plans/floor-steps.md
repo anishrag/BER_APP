@@ -1,6 +1,6 @@
 # Floor steps (raise/lower floor areas) — interface spec (api-engineer, 2026-06-10)
 
-Status: approved for implementation. Slices A (datatypes) → B (document) → C (controller) → D (UI).
+Status: approved for implementation. Slices A (ber_model) → B (document) → C (controller) → D (UI).
 Open questions resolved by default: amount guard |level| >= 0.01 m only (no clamp); no nested steps
 (delete-and-redraw, same as phases); no snapping to phase edges (later nicety); step toggle shows
 whenever has_floor_plan (no extra precondition).
@@ -30,9 +30,9 @@ regions are re-split by step areas — producing regions carrying every needed
 4. **Amount entry:** step toolbar; when carved area fully dimensioned (`step_pick_pending`): numeric
    field (metres) + Raise/Lower buttons → AssignStepLevel(±v) + Cancel. Input String on BerApp.
 
-## Slice A — datatypes (data-model-engineer)
+## Slice A — ber_model (data-model-engineer)
 
-`datatypes/src/ber/structural.rs`:
+`ber_model/src/ber/structural.rs`:
 - FloorRegion gains:
   /// Floor level in metres relative to the storey's floor datum: 0.0 = the
   /// unstepped storey floor, positive = raised, negative = lowered (steps).
@@ -89,7 +89,7 @@ New `document/src/step.rs` (mirrors phase.rs):
   // shared boundary segment, spanning the two levels; segments whose lower side
   // sits below grade (level_m < 0) get an exposed-to-ground exposure, plus
   // below-grade perimeter strips along the outline of lowered regions. The
-  // shared-edge extraction belongs in datatypes (a FloorRegions method); the
+  // shared-edge extraction belongs in ber_model (a FloorRegions method); the
   // derivation belongs here, alongside the rebuild it must merge with.
 - Tests: step_regions_from_floors skips level-0; resolve applies levels over a phase partition;
   also load_storey_into_editor path unaffected (StoreyDoc::from_storey ignores levels — footprint

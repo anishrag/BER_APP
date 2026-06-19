@@ -259,7 +259,7 @@ impl AppController {
             return Vec::new();
         };
         let mut coords = Vec::new();
-        let mut gather = |storey: &datatypes::ber::structural::Storey| {
+        let mut gather = |storey: &ber_model::ber::structural::Storey| {
             coords.extend(document::region_line_coords(&storey.floors, axis));
             coords.extend(document::ceiling_line_coords(&storey.roofs, axis));
         };

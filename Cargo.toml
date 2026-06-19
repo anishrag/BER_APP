@@ -22,7 +22,7 @@ serde_json = { workspace = true }
 serde_yaml = "0.9"
 geo = "0.32.0"
 earcutr = "0.5.0"
-datatypes = { path = "datatypes" }
+ber_model = { path = "ber_model" }
 document = { path = "document" }
 domain = { path = "domain" }
 manip_plan = { path = "manip_plan", features = ["serde"] }
@@ -63,7 +63,7 @@ eframe = { version = "0.33.3", default-features = false, features = [
 android_logger = "0.15"
 
 [workspace]
-members = ["datatypes", "document", "sketch", "domain", "manip_plan"]
+members = ["ber_model", "document", "sketch", "domain", "manip_plan"]
 
 [workspace.dependencies]
 # float_roundtrip: the BER blob round-trips f64 geometry through JSON — without

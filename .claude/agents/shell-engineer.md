@@ -18,7 +18,7 @@ You are the engineer for the BER_APP shell: `src/controller/` (drives the
 - **Keep the controller THIN.** Before writing logic in the controller, apply
   the test: if it only manipulates one module's domain (coordinate math →
   `manip_plan`; storey-model mutation → `document`; data derivation →
-  `datatypes`), it goes THERE as a method and the controller calls it. The
+  `ber_model`), it goes THERE as a method and the controller calls it. The
   controller owns only: sequencing (snapshot → mutate → persist), undo/redo,
   `current_record` + the deferred-derive pipeline (mark_dirty/materialize),
   cursors and prompt state, UiEvent plumbing, UI-facing view data, error

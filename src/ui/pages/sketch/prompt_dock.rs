@@ -14,9 +14,9 @@ use crate::controller::app_controller::{
 use crate::number_entry::parse_dimension_expression;
 use crate::ui::pages::events::UiEvent;
 use crate::ui::widgets::{metre_input, HintExt};
-use datatypes::ber::common::ConstructionPhase;
-use datatypes::ber::fenestration::{Frame, Glazing};
-use datatypes::ber::structural::WallExposure;
+use ber_model::ber::common::ConstructionPhase;
+use ber_model::ber::fenestration::{Frame, Glazing};
+use ber_model::ber::structural::WallExposure;
 
 /// Whether the dock has anything to show this frame. When false the bottom
 /// panel is skipped entirely so the canvas gets the space.

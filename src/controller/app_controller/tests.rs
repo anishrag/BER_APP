@@ -1324,7 +1324,7 @@ fn mid_wall_section_splits_into_multiple_regions() {
     assert_eq!(r[0].exposure, WallExposure::Unset);
     assert_eq!(r[1].exposure, WallExposure::SemiExposed);
     assert_eq!(r[2].exposure, WallExposure::Unset);
-    let base = |reg: &datatypes::ber::structural::WallRegion| {
+    let base = |reg: &ber_model::ber::structural::WallRegion| {
         let e = &reg.polygon.exterior;
         ((e[1].x - e[0].x).powi(2) + (e[1].y - e[0].y).powi(2)).sqrt()
     };
@@ -1338,7 +1338,7 @@ fn mid_wall_section_splits_into_multiple_regions() {
 /// construction of the region it was carved from; only exposure changes.
 #[test]
 fn wall_construction_is_preserved_when_splitting() {
-    use datatypes::ber::structural::WallConstructionType;
+    use ber_model::ber::structural::WallConstructionType;
     let mut c = dimensioned_square_controller();
     let (_, a0, b0) = c.document.outline.floor_plan.perimeter_walls()[0];
     let mid = ((a0.x + b0.x) * 0.5, (a0.y + b0.y) * 0.5);
@@ -1411,7 +1411,7 @@ fn wall_phase(c: &AppController, region_idx: usize) -> ConstructionPhase {
 /// labelled tagging choices.
 #[test]
 fn set_construction_phases_populates_choices() {
-    use datatypes::ber::common::ConstructionPhases;
+    use ber_model::ber::common::ConstructionPhases;
     let mut c = dimensioned_square_controller();
     let mut phases = ConstructionPhases::default();
     phases.set_year(ConstructionPhase::Original, 1985);
@@ -4993,7 +4993,7 @@ fn roof_ridge_survives_reload_and_rederive_fixpoint() {
 /// durable-input path a snap will drive.)
 #[test]
 fn boundary_ridge_over_a_step_full_fixpoint_and_gable_walls() {
-    use datatypes::ber::structural::RoofApex;
+    use ber_model::ber::structural::RoofApex;
     let mut c = ceiling_ready_controller();
     ceiling_step_to_amount_at_x4(&mut c);
     c.assign_ceiling_step_delta(0.3).unwrap(); // right of x = 4 at 2.7
@@ -5977,7 +5977,7 @@ fn flush_riser_merge_survives_reload_and_rederive_fixpoint() {
 /// drawn flow can't land EXACTLY on the wall yet.)
 #[test]
 fn roof_rect_touching_one_wall_makes_a_mono_gable_wall() {
-    use datatypes::ber::structural::RoofApex;
+    use ber_model::ber::structural::RoofApex;
     let mut c = roof_ready_controller();
     let record = c.current_record.as_mut().unwrap();
     for (x, y) in [(3.0, 0.0), (7.0, 0.0), (7.0, 4.0), (3.0, 4.0)] {
@@ -6580,7 +6580,7 @@ fn users_l_session_raised_section_wall_tops_follow_the_step() {
     );
 
     // Walls: classify each marked wall by its base edge and check its top.
-    let top_zs = |r: &datatypes::ber::structural::WallRegion| -> Vec<f64> {
+    let top_zs = |r: &ber_model::ber::structural::WallRegion| -> Vec<f64> {
         r.polygon
             .exterior
             .iter()
@@ -6594,7 +6594,7 @@ fn users_l_session_raised_section_wall_tops_follow_the_step() {
     // INTERIOR run y ∈ [inner_y, max_y] (the outline's own inner wall sits
     // below inner_y).
     let near = |v: f64, w: f32| (v - w as f64).abs() < 1e-3;
-    let is_riser = |r: &datatypes::ber::structural::WallRegion| {
+    let is_riser = |r: &ber_model::ber::structural::WallRegion| {
         let e = &r.polygon.exterior;
         near(e[0].x, inner_x) && near(e[1].x, inner_x) && e[0].y.max(e[1].y) > inner_y as f64 + 1e-3
     };
@@ -6640,7 +6640,7 @@ fn users_l_session_raised_section_wall_tops_follow_the_step() {
     // each one face over y ∈ [inner_y, max_y], BOTH defaulting Unset (the
     // riser default is Unset like every other wall — so tell them apart by
     // z-span, not exposure).
-    let risers: Vec<&datatypes::ber::structural::WallRegion> = storey
+    let risers: Vec<&ber_model::ber::structural::WallRegion> = storey
         .walls
         .regions
         .iter()
@@ -6651,7 +6651,7 @@ fn users_l_session_raised_section_wall_tops_follow_the_step() {
         risers.iter().all(|r| r.exposure == WallExposure::Unset),
         "fresh risers default Unset like every other wall"
     );
-    let span = |r: &datatypes::ber::structural::WallRegion| {
+    let span = |r: &ber_model::ber::structural::WallRegion| {
         let zs = r.polygon.exterior.iter().map(|v| v.z);
         (
             zs.clone().fold(f64::INFINITY, f64::min),
@@ -6718,7 +6718,7 @@ fn users_l_session_raised_section_wall_tops_follow_the_step() {
     // Riser identity is stable across the round trip (amend matching), and
     // the reload left the painted wall sections untouched — the risers never
     // turn into phantom exposure sections.
-    let reloaded: Vec<&datatypes::ber::structural::WallRegion> = storey
+    let reloaded: Vec<&ber_model::ber::structural::WallRegion> = storey
         .walls
         .regions
         .iter()
@@ -7268,7 +7268,7 @@ fn choose_suggest_without_flat_ceilings_below_is_a_stable_err() {
 /// the areas are TOO SMALL — not that the height / flat area are missing.
 #[test]
 fn choose_suggest_with_only_sliver_flat_areas_says_too_small() {
-    use datatypes::ber::structural::{CeilingRegions, FloorRegions};
+    use ber_model::ber::structural::{CeilingRegions, FloorRegions};
     let mut c = dimensioned_square_controller();
     c.set_default_ceiling_height(2.4).unwrap();
     c.add_storey().unwrap();
@@ -7587,7 +7587,7 @@ fn floor_thickness_wall_regions_survive_reload_and_rederive_fixpoint() {
 /// `opes` link — and UNDO removes it (BER-side state is in the snapshot now).
 #[test]
 fn place_window_via_controller_persists_and_undoes() {
-    use datatypes::ber::fenestration::{Frame, Glazing};
+    use ber_model::ber::fenestration::{Frame, Glazing};
     let mut c = dimensioned_square_controller();
     c.materialize();
     c.set_openings_mode(true);
@@ -7630,7 +7630,7 @@ fn place_window_via_controller_persists_and_undoes() {
 /// reload re-derives vertices and re-links `opes` via the amend.
 #[test]
 fn placed_window_survives_reload() {
-    use datatypes::ber::fenestration::{Frame, Glazing};
+    use ber_model::ber::fenestration::{Frame, Glazing};
     let mut c = dimensioned_square_controller();
     c.materialize();
     c.set_openings_mode(true);
@@ -7663,7 +7663,7 @@ fn placed_window_survives_reload() {
 /// door panel plus its sidelight/transom windows, all in one assembly.
 #[test]
 fn place_door_sidelights_via_controller() {
-    use datatypes::ber::fenestration::{Frame, Glazing};
+    use ber_model::ber::fenestration::{Frame, Glazing};
     let mut c = dimensioned_square_controller();
     c.materialize();
     c.set_openings_mode(true);
@@ -7696,7 +7696,7 @@ fn place_door_sidelights_via_controller() {
 /// delete the selected one.
 #[test]
 fn elevation_move_and_delete_openings() {
-    use datatypes::ber::fenestration::{Frame, Glazing};
+    use ber_model::ber::fenestration::{Frame, Glazing};
     let mut c = dimensioned_square_controller();
     c.materialize();
     c.set_openings_mode(true);
@@ -7809,9 +7809,9 @@ fn structure_floor_carve_dimensions_then_splits_and_selects() {
 /// dimensioned cut line is stored as a durable `wall_splits` SEGMENT (the
 /// interior cut edge), replayed by `resolve_storey`. Then the flow returns to
 /// the outline. (Whether the cut re-resolves to MORE wall regions is the
-/// datatypes contract — a full-width bisecting cut runs parallel between two
+/// ber_model contract — a full-width bisecting cut runs parallel between two
 /// opposite walls, grazing them only at its endpoints, so it doesn't split
-/// them; that geometry is exercised in `document`/`datatypes`.)
+/// them; that geometry is exercised in `document`/`ber_model`.)
 #[test]
 fn structure_wall_cut_picks_dimensions_then_stores_a_durable_segment() {
     let mut c = dimensioned_square_controller();

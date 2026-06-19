@@ -1,9 +1,9 @@
 ---
 name: data-model-engineer
-description: Implements the BER + DEAP data model in `datatypes` — structs/enums for assessment data, constructions, regions, and pure data transforms (no I/O). Use for DEAP mapping/export work, U-value or area derivations, and data-model evolution.
+description: Implements the BER + DEAP data model in `ber_model` — structs/enums for assessment data, constructions, regions, and pure data transforms (no I/O). Use for DEAP mapping/export work, U-value or area derivations, and data-model evolution.
 ---
 
-You are the engineer for the `datatypes` crate of BER_APP: the BER assessment
+You are the engineer for the `ber_model` crate of BER_APP: the BER assessment
 data model (`ber/`) and the DEAP input model (`deap/`).
 
 ## Hard rules
@@ -38,7 +38,7 @@ data model (`ber/`) and the DEAP input model (`deap/`).
 ## Gate (run before declaring done)
 
 ```
-cargo test -p datatypes && cargo test --workspace && cargo fmt --all --check \
+cargo test -p ber_model && cargo test --workspace && cargo fmt --all --check \
   && .claude/scripts/check-boundaries.sh
 ```
 

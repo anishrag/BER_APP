@@ -6,8 +6,8 @@
 //! region *storage* (session state, deliberately outside undo and the editing
 //! snapshot); the logic over the regions — stamping walls, rebuilding regions
 //! from persisted floors — lives here.
-use datatypes::ber::ber_struct::Ber;
-use datatypes::ber::common::ConstructionPhase;
+use ber_model::ber::ber_struct::Ber;
+use ber_model::ber::common::ConstructionPhase;
 use domain::points::{to_f32, Point2f32};
 
 /// A session-only tagged area: a world-space (metre) ring + the phase to stamp
@@ -178,7 +178,7 @@ pub fn phase_regions_from_floors(ber: &Ber, idx: usize) -> Vec<PhaseRegion> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use datatypes::ber::structural::{
+    use ber_model::ber::structural::{
         CeilingRegions, FloorRegions, Storey, WallExposure, WallRegions,
     };
     use domain::points::Point2f64;

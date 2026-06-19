@@ -47,7 +47,7 @@ pub use roof_point::{
 };
 pub use step::{inherited_step_regions, step_regions_from_floors, StepRegion};
 
-use datatypes::ber::structural::WallExposure;
+use ber_model::ber::structural::WallExposure;
 use domain::points::{to_f64, Point2f32, Point2f64};
 use manip_plan::{
     Error, FloorPlan, ParameterAxis, ParameterId, SubareaOutcome, SubareaTuning, VertexId,
@@ -641,7 +641,7 @@ mod tests {
 
         // The resolve projection round-trips the adopted ring EXACTLY (the
         // empty-step verbatim branch — no geo ops).
-        let mut ber = datatypes::ber::ber_struct::Ber::default();
+        let mut ber = ber_model::ber::ber_struct::Ber::default();
         ensure_storey_constructions(&mut ber, 0, &[]);
         let storey = resolve_storey(&doc, &ber, 0, &[], &[], &[]);
         let lists = storey.floors.to_vertex_lists();

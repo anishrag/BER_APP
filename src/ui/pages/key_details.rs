@@ -1,7 +1,7 @@
 use crate::ui::pages::events::UiEvent;
 use crate::ui::widgets::{metre_input, text_input};
+use ber_model::ber::common::{ConstructionPhase, ConstructionPhases, Year};
 use chrono::NaiveDate;
-use datatypes::ber::common::{ConstructionPhase, ConstructionPhases, Year};
 use egui::{RichText, Ui};
 use egui_extras::DatePickerButton;
 

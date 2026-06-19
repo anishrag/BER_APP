@@ -1,12 +1,12 @@
-//! Windows/doors tool: the app-shell workflow over `datatypes::ber::openings`.
+//! Windows/doors tool: the app-shell workflow over `ber_model::ber::openings`.
 //! Thin — picks the host wall/roof from a plan tap, prompts size + type, calls
 //! the pure ops against `current_record.data.storeys[idx]`, snapshots for undo,
 //! and derives the UI-facing view data. All geometry/model mutation lives in the
-//! datatypes ops; this only sequences them.
+//! ber_model ops; this only sequences them.
 use super::*;
-use datatypes::ber::common::ItemId;
-use datatypes::ber::fenestration::{DoorKind, Frame, Glazing};
-use datatypes::ber::openings::{self, DoorSidelightsSpec, OpeningError, OpeningRef};
+use ber_model::ber::common::ItemId;
+use ber_model::ber::fenestration::{DoorKind, Frame, Glazing};
+use ber_model::ber::openings::{self, DoorSidelightsSpec, OpeningError, OpeningRef};
 
 /// Which opening the toolbar places next (or `Edit` to open an elevation).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

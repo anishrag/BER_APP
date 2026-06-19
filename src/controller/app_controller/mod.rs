@@ -34,11 +34,11 @@ mod phase_regions;
 mod structure;
 
 pub use assessment_phase::{AssessmentPhase, SelectMode, StructureSelection};
-// `SurfaceKind` is the data-model surface taxonomy — it lives in `datatypes`
+// `SurfaceKind` is the data-model surface taxonomy — it lives in `ber_model`
 // (the queries dispatch on it) and is re-exported here so UI + controller call
 // sites keep reaching it via `app_controller::SurfaceKind`.
+pub use ber_model::ber::structural::SurfaceKind;
 pub use checklist::{ChecklistItem, ChecklistStatus};
-pub use datatypes::ber::structural::SurfaceKind;
 use document::{
     ActiveShape, CeilingStepRegion, DimensionPrompt, DimensionState, Document, EditState,
     MovedCoordKind, PendingArc, PhaseRegion, ShapeSlot, StepRegion, StoreyDoc,
@@ -53,9 +53,9 @@ use std::sync::mpsc::Sender;
 use crate::engine::ber_repository::{BerRecord, BerRepository, BerSummary};
 use crate::engine::dataloader::DataLoader;
 use crate::engine::Db;
-use datatypes::ber::ber_struct::Ber;
-use datatypes::ber::common::{ConstructionPhase, ConstructionPhases, ItemId};
-use datatypes::ber::structural::{FloorRegions, Storey, SurfaceCounts, WallExposure};
+use ber_model::ber::ber_struct::Ber;
+use ber_model::ber::common::{ConstructionPhase, ConstructionPhases, ItemId};
+use ber_model::ber::structural::{FloorRegions, Storey, SurfaceCounts, WallExposure};
 use domain::points::{to_f32, Point2f32, Point2f64};
 use domain::sketch::{DisplayMode, EditTools, SketchMode};
 use manip_plan::{
@@ -244,11 +244,11 @@ pub struct AppController {
     /// When `Some`, the ELEVATION overlay is open for this wall (by id): the
     /// canvas shows the unrolled wall and drags reposition its openings.
     /// Transient.
-    elevation_wall: Option<datatypes::ber::common::ItemId>,
+    elevation_wall: Option<ber_model::ber::common::ItemId>,
     /// The opening grabbed during an elevation drag (transient).
-    elevation_drag: Option<datatypes::ber::openings::OpeningRef>,
+    elevation_drag: Option<ber_model::ber::openings::OpeningRef>,
     /// The opening selected in the elevation, for Delete (transient).
-    elevation_selection: Option<datatypes::ber::openings::OpeningRef>,
+    elevation_selection: Option<ber_model::ber::openings::OpeningRef>,
     /// The in-flight NEW-STOREY flow (thickness → method choice → suggestion
     /// browse). Controller-transient — OUTSIDE undo, never persisted; set by
     /// `add_storey`, cleared on storey switch / load / open / exit. See

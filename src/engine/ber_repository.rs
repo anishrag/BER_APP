@@ -2,8 +2,8 @@ use chrono::NaiveDate;
 use rusqlite::{params, Connection, OptionalExtension, Result};
 use serde_json;
 
-use datatypes::ber::ber_struct::Ber;
-use datatypes::ber::common::ItemId;
+use ber_model::ber::ber_struct::Ber;
+use ber_model::ber::common::ItemId;
 
 #[derive(Debug, Clone)]
 pub struct BerRecord {

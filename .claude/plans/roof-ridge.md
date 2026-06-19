@@ -2,7 +2,7 @@
 # (api-engineer Mode 1, 2026-06-11) — APPROVED with recommended defaults:
 # >=3 apexes/group rejected for now; ridge-line endpoints = stroke extent as drawn (no endpoint
 # prompts; only the cross coordinate gets snap + LinePositionPrompt); line input = one height
-# (level ridge; sloping via two-point flow); axis-aligned v1; split_by_line MOVES to datatypes;
+# (level ridge; sloping via two-point flow); axis-aligned v1; split_by_line MOVES to ber_model;
 # group base-z disagreement = warn-exclude.
 
 ## D1 — Durable model: Storey.roof_apexes unchanged; ridge = two apexes in one GROUP.
@@ -60,14 +60,14 @@ optional one wall-under-ridge confidence test.
 
 R-0 (data-model-engineer) — DISSOLVE gen_3d_vol:
 - Move Polygon3D::split_by_line + SplitLine3D + private normal helper + tests into
-  datatypes/src/ber/structural.rs as impl Polygon3D, with a seam comment naming the consumer
+  ber_model/src/ber/structural.rs as impl Polygon3D, with a seam comment naming the consumer
   (the deferred wall face/height diagonal split).
 - DELETE gen_3d_vol/ entirely; remove from workspace members (Cargo.toml); update CLAUDE.md
   (workspace layout line, rule 5, responsibility table), .claude/rules/scope-discipline.md,
   .claude/rules/architecture-boundaries.md crate list, .claude/agents/*.md mentions.
   check-boundaries.sh has no reference (verified). Root earcutr stays (storey_2d uses it).
 - Verdicts: from_ber_storey DELETE (viewers render Storey directly); CeilingMesh + insert_vertex
-  + ridge machinery DELETE (superseded by the datatypes ridge — the no-duplicates directive);
+  + ridge machinery DELETE (superseded by the ber_model ridge — the no-duplicates directive);
   split_wall_region DELETE (shell-flavoured scaffolding; diagonal split designs fresh against
   the moved split_by_line); 2D point helpers DELETE (only ceiling.rs consumed them).
 
@@ -77,7 +77,7 @@ R-1 (geometry-engineer) — manip geom.rs:
   pub fn fit_axis_segment(points: &[Point2f32]) -> Option<(ParameterAxis, f32, (f32, f32))>
   fit_axis_line reimplemented as fit_axis_segment(..).map(|(a,c,_)|(a,c)). Re-export.
 
-R-2 (data-model-engineer) — datatypes structural.rs:
+R-2 (data-model-engineer) — ber_model structural.rs:
   pub struct RoofApexGroup { pub apex_idxs: Vec<usize>, pub region_idxs: Vec<usize>,
     pub base_z: f64, pub merged_rings: Vec<Vec<Point2f64>> }  // doc per spec
   impl CeilingRegions {

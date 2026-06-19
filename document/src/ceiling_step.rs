@@ -18,8 +18,8 @@
 use crate::position::reference_walls;
 use crate::step::ring_area2;
 use crate::StoreyDoc;
-use datatypes::ber::ber_struct::Ber;
-use datatypes::ber::structural::{CeilingRegions, FloorRegions};
+use ber_model::ber::ber_struct::Ber;
+use ber_model::ber::structural::{CeilingRegions, FloorRegions};
 use domain::points::{Point2f32, Point2f64};
 use manip_plan::{ParameterAxis, VertexId};
 
@@ -898,7 +898,7 @@ mod tests {
     /// for axis X, a horizontal edge's `y` for axis Y — deduped.
     #[test]
     fn region_line_coords_picks_axis_parallel_edges() {
-        use datatypes::ber::common::ItemId;
+        use ber_model::ber::common::ItemId;
         // Two side-by-side rects: x∈[0,4] and x∈[4,7], both y∈[0,3]. The shared
         // internal boundary is x = 4.
         let cid = ItemId::default();
@@ -935,7 +935,7 @@ mod tests {
     /// are 3D and UNCLOSED — the wrap (last→first) edge is still counted.
     #[test]
     fn ceiling_line_coords_counts_the_wrap_edge_of_unclosed_rings() {
-        use datatypes::ber::common::ItemId;
+        use ber_model::ber::common::ItemId;
         let roofs = CeilingRegions::default_for_footprint(
             vec![vec![
                 Point2f64::new(0.0, 0.0),
@@ -996,7 +996,7 @@ mod tests {
     /// piece, slivers, and a height-unset storey yield nothing.
     #[test]
     fn reconstruction_from_roofs_keeps_only_stepped_flat_regions() {
-        use datatypes::ber::structural::{CeilingRegions, Storey};
+        use ber_model::ber::structural::{CeilingRegions, Storey};
         use domain::points::Point2f64;
 
         let square = |x0: f64, x1: f64| {
@@ -1037,7 +1037,7 @@ mod tests {
     /// irregular slope (no apex group) is warn-skipped.
     #[test]
     fn reconstruction_is_group_aware() {
-        use datatypes::ber::structural::{
+        use ber_model::ber::structural::{
             CeilingRegion, CeilingRegions, Polygon3D, RoofApex, Storey,
         };
         use domain::points::{Point2f64, Point3f64};
@@ -1107,7 +1107,7 @@ mod tests {
     }
 
     // ── Same-height divider reconstruction (Slice A1) ───────────────────────
-    use datatypes::ber::structural::{CeilingRegions, Storey};
+    use ber_model::ber::structural::{CeilingRegions, Storey};
     use domain::points::Point2f64;
 
     /// A 0..10 × 0..6 rectangle in f64 plan coords for the divider tests.
@@ -1263,7 +1263,7 @@ mod tests {
     /// its base is off the default.
     #[test]
     fn reconstruction_ridged_half_no_divider() {
-        use datatypes::ber::structural::RoofApex;
+        use ber_model::ber::structural::RoofApex;
         let cid = Default::default();
         let default_z = 2.4;
         // Right half ridged at a base OFF the default (so the group emits).
@@ -1303,7 +1303,7 @@ mod tests {
     /// instead of fanning over the whole footprint (the L-spanning bug).
     #[test]
     fn reconstruction_at_default_ridge_keeps_divider() {
-        use datatypes::ber::structural::RoofApex;
+        use ber_model::ber::structural::RoofApex;
         let cid = Default::default();
         let default_z = 2.4;
         let divider = square64(4.0, 10.0); // the right half, stored as the boundary

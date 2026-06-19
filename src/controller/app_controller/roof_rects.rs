@@ -16,7 +16,7 @@
 //! positions cover the pavilion case); the shell owns this in-flight state
 //! machine, outside undo — roof-ridge parity throughout.
 use super::*;
-use datatypes::ber::structural::{apexes_form_rect, RoofApex};
+use ber_model::ber::structural::{apexes_form_rect, RoofApex};
 use document::LinePositionPrompt;
 
 /// The in-flight roof-RECT input, advanced stage by stage: closed stroke →

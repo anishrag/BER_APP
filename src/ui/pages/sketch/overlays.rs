@@ -8,7 +8,7 @@
 use egui::{Align2, Color32, CornerRadius, Margin, Rect, RichText, Sense, Stroke};
 
 use crate::controller::app_controller::{AssessmentPhase, ChecklistItem, ChecklistStatus};
-use datatypes::ber::structural::SurfaceCounts;
+use ber_model::ber::structural::SurfaceCounts;
 use domain::sketch::DisplayMode;
 
 /// Floating phase signpost centred at the top of the canvas: three boxes

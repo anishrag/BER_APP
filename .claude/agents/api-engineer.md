@@ -25,7 +25,7 @@ answer:
 | --- | --- |
 | coordinate/vertex/edge math, plan topology, snapping, solving | `manip_plan` (`FloorPlan` method, or `geom.rs` if plan-free) |
 | model mutation over a storey's shapes (slots, dimensioning, exposure, phases, resolve/load) | `document` (a `Document`/`StoreyDoc` method) |
-| BER/DEAP data shape or a pure data transform over it | `datatypes` |
+| BER/DEAP data shape or a pure data transform over it | `ber_model` |
 | shared vector primitives | `domain::points` |
 | SQL / persistence | `src/engine` (`BerRepository`) |
 | widgets, layout, rendering | `src/ui` |
@@ -47,7 +47,7 @@ Then design the signatures, applying these rules:
   `document` still build with `cargo build -p document`? Would `manip_plan`
   still make sense to someone who has never heard of a BER? The dependency
   direction is fixed: `domain ← manip_plan ← document ← src`, with
-  `datatypes` feeding `document`/`src`.
+  `ber_model` feeding `document`/`src`.
   Never invert an edge; never add a sideways edge to "share" something — move
   the shared thing down instead.
 - **Name from the caller's point of view** and match the crate's existing
@@ -103,7 +103,7 @@ Audit and SHRINK. You may edit code in this mode, behavior-preserving only:
 ## Gate (Mode 2 edits, before declaring done)
 
 ```
-cargo build -p document && cargo build -p manip_plan && cargo build -p datatypes \
+cargo build -p document && cargo build -p manip_plan && cargo build -p ber_model \
   && cargo test --workspace && cargo fmt --all --check && .claude/scripts/check-boundaries.sh
 ```
 

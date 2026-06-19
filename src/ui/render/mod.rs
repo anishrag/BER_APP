@@ -30,9 +30,9 @@ pub mod storey_3d;
 use std::collections::HashSet;
 
 use crate::controller::app_controller::{ExposureSelection, WallExposureView};
-use datatypes::ber::ber_struct::Ber;
-use datatypes::ber::common::ItemId;
-use datatypes::ber::structural::WallExposure;
+use ber_model::ber::ber_struct::Ber;
+use ber_model::ber::common::ItemId;
+use ber_model::ber::structural::WallExposure;
 use domain::sketch::{DisplayMode, SketchMode};
 use eframe::egui;
 use manip_plan::CollinearitySuggestion;
@@ -241,7 +241,7 @@ pub fn render_dimension_prompt(
 /// Returns the ring's vertices as `(x, y)` tuples, without the closing
 /// duplicate that `geo::LineString` keeps at the end.
 fn ring_containing_wall(
-    storey: &datatypes::ber::structural::Storey,
+    storey: &ber_model::ber::structural::Storey,
     wall_a: (f64, f64),
     wall_b: (f64, f64),
 ) -> Option<Vec<(f64, f64)>> {
@@ -1221,7 +1221,7 @@ pub fn render_vertex_marker(
 /// Extract the primary floor ring of `storey` as `(x, y)` tuples (no closing
 /// duplicate). Used by `render_ber` to supply a previous-storey watermark to
 /// `storey_2d::render`. `None` if the storey has no floor regions yet.
-fn previous_outline_ring(storey: &datatypes::ber::structural::Storey) -> Option<Vec<(f64, f64)>> {
+fn previous_outline_ring(storey: &ber_model::ber::structural::Storey) -> Option<Vec<(f64, f64)>> {
     // When the floor is split into phase zones, merge them back to the full
     // footprint; otherwise the single region IS the footprint.
     if storey.floors.regions.len() > 1 {
@@ -1419,7 +1419,7 @@ fn storey_transform(
     current_storey_idx: Option<usize>,
     sketch_mode: SketchMode,
     view: ViewParams,
-) -> Option<(&datatypes::ber::structural::Storey, Transform2d)> {
+) -> Option<(&ber_model::ber::structural::Storey, Transform2d)> {
     if !matches!(sketch_mode, SketchMode::Storey2D) {
         return None;
     }
@@ -1533,8 +1533,8 @@ mod tests {
     ///      in each cell (no more per-cell vertical centering).
     #[test]
     fn all_storeys_overview_shares_scale_and_aligns_base() {
-        use datatypes::ber::common::ItemId;
-        use datatypes::ber::structural::{FloorRegions, Storey};
+        use ber_model::ber::common::ItemId;
+        use ber_model::ber::structural::{FloorRegions, Storey};
         use domain::points::Point2f64;
 
         let pt = |x: f64, y: f64| Point2f64::new(x, y);

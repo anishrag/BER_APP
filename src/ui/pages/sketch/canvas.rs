@@ -11,7 +11,7 @@ use crate::ui::pages::events::UiEvent;
 use crate::ui::render;
 use crate::ui::render::ViewParams;
 use crate::ui::widgets::HintExt;
-use datatypes::ber::ber_struct::Ber;
+use ber_model::ber::ber_struct::Ber;
 use domain::sketch::{EditTools, SketchMode};
 
 pub(super) fn render<F: FnMut(UiEvent)>(

@@ -1,6 +1,6 @@
 use crate::engine::ber_repository::BerSummary;
 use crate::ui::pages::events::UiEvent;
-use datatypes::ber::common::ItemId;
+use ber_model::ber::common::ItemId;
 use eframe::egui;
 
 /// Home-page intents. The app shell handles these (controller calls +

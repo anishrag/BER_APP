@@ -1,11 +1,11 @@
 # Ridges to walls, rect ridges, Centre prompts, reordered dimensioning, floor-thickness walls — interface design (api-engineer, Mode 1)
 
 Six connected features. Cross-checked against `src/controller/app_controller/roof_ridges.rs`,
-`document/src/roof_point.rs`, `datatypes/src/ber/structural.rs` (`with_apexes` /
+`document/src/roof_point.rs`, `ber_model/src/ber/structural.rs` (`with_apexes` /
 `apex_groups` / `ridge_triangles` / `WallRegions::regenerate` / `roof_profile_top`),
 `document/src/resolve.rs`, `document/src/ceiling_step.rs`, `document/src/position.rs`,
 `src/controller/app_controller/{snap.rs,dimensioning.rs,ceiling_steps.rs,step_regions.rs}`,
-`src/ui/pages/sketch/{prompt_dock.rs,canvas.rs}`, `datatypes/src/ber/ber_struct.rs`
+`src/ui/pages/sketch/{prompt_dock.rs,canvas.rs}`, `ber_model/src/ber/ber_struct.rs`
 (`storey_floor_datums`), `document/src/exposure.rs` (`riser_walls`,
 `sections_from_wall_regions`), `tuning.yaml`.
 
@@ -19,7 +19,7 @@ Ground rules that govern everything below:
 - **Two containment predicates by design**: assign-time validation is strict(ish);
   re-application (`with_apexes`) is inclusive. Feature 1 widens both coherently.
 - The shell owns the pending-input state machines (outside undo); the document owns
-  every validation and computed suggestion; datatypes owns the face generation.
+  every validation and computed suggestion; ber_model owns the face generation.
 
 ---
 
@@ -46,7 +46,7 @@ rectangle is still 2 (the midline crosses the two long edges only) — the exist
 One new tolerance, shared by resolve and validation:
 
 ```rust
-// datatypes/src/ber/structural.rs
+// ber_model/src/ber/structural.rs
 /// Plan tolerance (m) for claiming an apex that sits ON a region boundary.
 /// Same rationale as PROFILE_EPS_M: derived rings are boolean-op output that
 /// can sit a few 1e-7 m off the line they conceptually coincide with.
@@ -54,7 +54,7 @@ pub const APEX_BOUNDARY_EPS_M: f64 = 1e-4;
 ```
 
 ```rust
-// datatypes/src/ber/structural.rs, impl CeilingRegions
+// ber_model/src/ber/structural.rs, impl CeilingRegions
 /// Indices of the regions that CLAIM plan point `p`: the region strictly
 /// containing it (at most one — interiors are disjoint), else every region
 /// whose plan boundary passes within APEX_BOUNDARY_EPS_M of it. Empty when
@@ -65,7 +65,7 @@ pub fn claim_regions(&self, p: Point2f64) -> Vec<usize>
 ```
 
 ```rust
-// datatypes/src/ber/structural.rs, impl CeilingRegion
+// ber_model/src/ber/structural.rs, impl CeilingRegion
 /// p is strictly inside this region's plan polygon OR within eps_m of its
 /// boundary (point-to-ring-edge distance). The per-region half of claim_regions.
 pub fn plan_contains_within(&self, p: Point2f64, eps_m: f64) -> bool
@@ -85,7 +85,7 @@ ceiling-step line.
 
 ### Changes by crate
 
-`datatypes` (data-model-engineer):
+`ber_model` (data-model-engineer):
 
 - `with_apexes`: replace the per-region `plan.intersects(point)` collect with one
   `claim_regions(apex.point)` pass per apex (first claimant wins). Behaviour on all
@@ -285,7 +285,7 @@ pub fn centred_ridge_start(storey: &Storey, axis: ParameterAxis,
                            coord_m: f32, lo: f32, len_m: f32) -> Result<f32, String>
 ```
 
-Both are thin over `CeilingRegion::plan_span_through` (datatypes — no new geometry).
+Both are thin over `CeilingRegion::plan_span_through` (ber_model — no new geometry).
 
 Shell (one high-level call per user action):
 
@@ -334,7 +334,7 @@ The rect ridge is stored as **four `RoofApex` corners (equal `z_m`, quantized) i
   when an outline change strands it — more fixpoint surface for the same geometry.
   Rejected.
 
-### datatypes (data-model-engineer)
+### ber_model (data-model-engineer)
 
 ```rust
 // structural.rs, private
@@ -533,7 +533,7 @@ Nothing else moves: `fallback_top_z` stays the absolute ceiling height; the rise
 ## Slice plan (implementation order + gates)
 
 Every slice gates on: `cargo build -p document && cargo build -p manip_plan &&
-cargo build -p datatypes && cargo test --workspace && cargo fmt --all --check &&
+cargo build -p ber_model && cargo test --workspace && cargo fmt --all --check &&
 .claude/scripts/check-boundaries.sh`.
 
 | # | slice | agent(s) | contents | extra gate |

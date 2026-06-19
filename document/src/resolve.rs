@@ -2,9 +2,9 @@
 //! of the load path (`load.rs`). PURE over its inputs — the shell owns *when*
 //! to project (commit/materialize/persist) and the revision bookkeeping.
 use crate::{CeilingStepRegion, PhaseRegion, StepRegion, StoreyDoc};
-use datatypes::ber::ber_struct::Ber;
-use datatypes::ber::common::{ConstructionPhase, ItemId};
-use datatypes::ber::structural::{
+use ber_model::ber::ber_struct::Ber;
+use ber_model::ber::common::{ConstructionPhase, ItemId};
+use ber_model::ber::structural::{
     CeilingRegions, FloorRegions, Polygon3D, Storey, WallExposure, WallRegions,
 };
 use domain::points::{to_f64, Point2f64};
@@ -364,9 +364,9 @@ pub fn resolve_storey(
     if !storey.wall_splits.is_empty() {
         for cut in storey.wall_splits.clone() {
             for (parent_id, a, b) in
-                datatypes::ber::openings::walls_crossed_by_cut(&previous_walls, cut)
+                ber_model::ber::openings::walls_crossed_by_cut(&previous_walls, cut)
             {
-                datatypes::ber::openings::rehome_openings_across_wall_split(
+                ber_model::ber::openings::rehome_openings_across_wall_split(
                     &mut storey,
                     parent_id,
                     a,
@@ -381,11 +381,11 @@ pub fn resolve_storey(
     // drop any opening whose host region the edit replaced. Pure data transform
     // over the just-resolved storey (the geometry projection above never reads
     // openings) — same post-resolve discipline as `stamp_wall_phases`.
-    datatypes::ber::openings::derive_opening_vertices(&mut storey);
-    datatypes::ber::openings::prune_orphaned_openings(&mut storey);
+    ber_model::ber::openings::derive_opening_vertices(&mut storey);
+    ber_model::ber::openings::prune_orphaned_openings(&mut storey);
     // Each wall/roof region's `opes` is a DERIVED index of the openings on it,
     // rebuilt from placements (ceiling ids regenerate, so it can't be carried).
-    datatypes::ber::openings::rebuild_opes(&mut storey);
+    ber_model::ber::openings::rebuild_opes(&mut storey);
     storey
 }
 
@@ -393,7 +393,7 @@ pub fn resolve_storey(
 mod tests {
     use super::*;
     use crate::ShapeSlot;
-    use datatypes::ber::structural::WallExposure;
+    use ber_model::ber::structural::WallExposure;
     use domain::points::Point2f32;
     use manip_plan::FloorPlan;
 
@@ -636,7 +636,7 @@ mod tests {
     /// re-home has to happen before it.
     #[test]
     fn wall_split_rehomes_openings_instead_of_orphaning_them() {
-        use datatypes::ber::fenestration::{OpeningPlacement, Window};
+        use ber_model::ber::fenestration::{OpeningPlacement, Window};
         let doc = unit_square_doc();
         let mut ber = Ber::default();
         ensure_storey_constructions(&mut ber, 0, &[]);
@@ -713,7 +713,7 @@ mod tests {
         // riser defaults Unset too, so pick it out GEOMETRICALLY: its base
         // edge sits on the interior step line x = 2 (no perimeter wall does).
         assert_eq!(storey.walls.regions.len(), 5);
-        let on_step_line = |r: &&datatypes::ber::structural::WallRegion| {
+        let on_step_line = |r: &&ber_model::ber::structural::WallRegion| {
             let e = &r.polygon.exterior;
             (e[0].x - 2.0).abs() < 1e-6 && (e[1].x - 2.0).abs() < 1e-6
         };
@@ -884,7 +884,7 @@ mod tests {
         ber.set_default_ceiling_height(Some(0), 2.4);
         let storey = resolve_storey(&doc, &ber, 0, &[], &steps, &[]);
 
-        let is_riser = |r: &datatypes::ber::structural::WallRegion| {
+        let is_riser = |r: &ber_model::ber::structural::WallRegion| {
             let e = &r.polygon.exterior;
             (e[0].x - 3.0).abs() < 1e-6 && (e[1].x - 3.0).abs() < 1e-6
         };
@@ -978,7 +978,7 @@ mod tests {
         ber.storeys[1].floor_thickness_m = Some(0.225);
         let storey = resolve_storey(&doc, &ber, 1, &[], &steps, &[]);
         assert_eq!(storey.walls.regions.len(), 5);
-        let is_riser = |r: &datatypes::ber::structural::WallRegion| {
+        let is_riser = |r: &ber_model::ber::structural::WallRegion| {
             let e = &r.polygon.exterior;
             (e[0].x - 2.0).abs() < 1e-6 && (e[1].x - 2.0).abs() < 1e-6
         };
@@ -1076,13 +1076,13 @@ mod tests {
             .unwrap();
         // A REAL door on the marked wall — `opes` is derived from placements.
         let marked_wall_id = storey.walls.regions[marked_idx].id;
-        let door_id = datatypes::ber::openings::add_wall_door(
+        let door_id = ber_model::ber::openings::add_wall_door(
             &mut storey,
             marked_wall_id,
             1.0,
             0.9,
             2.0,
-            datatypes::ber::fenestration::DoorKind::Solid,
+            ber_model::ber::fenestration::DoorKind::Solid,
             "door".to_string(),
             0.0,
         )
@@ -1329,10 +1329,10 @@ mod tests {
 
         // A region by its base edge (the contract: exterior[0]/[1]).
         fn wall_with_base<'a>(
-            s: &'a datatypes::ber::structural::Storey,
+            s: &'a ber_model::ber::structural::Storey,
             a: (f64, f64),
             b: (f64, f64),
-        ) -> &'a datatypes::ber::structural::WallRegion {
+        ) -> &'a ber_model::ber::structural::WallRegion {
             s.walls
                 .regions
                 .iter()
@@ -1345,7 +1345,7 @@ mod tests {
                 })
                 .unwrap_or_else(|| panic!("no wall with base {a:?} -> {b:?}"))
         }
-        let ring_xyz = |r: &datatypes::ber::structural::WallRegion| -> Vec<(f64, f64, f64)> {
+        let ring_xyz = |r: &ber_model::ber::structural::WallRegion| -> Vec<(f64, f64, f64)> {
             r.polygon.exterior.iter().map(|v| (v.x, v.y, v.z)).collect()
         };
         let assert_ring = |got: &[(f64, f64, f64)], want: &[(f64, f64, f64)], name: &str| {
@@ -1605,7 +1605,7 @@ mod tests {
         let mut ber = Ber::default();
         ensure_storey_constructions(&mut ber, 0, &[]);
         // Pre-existing roof content on the stored storey survives untouched.
-        let marker = datatypes::ber::structural::CeilingRegions::default_for_footprint(
+        let marker = ber_model::ber::structural::CeilingRegions::default_for_footprint(
             vec![vec![
                 Point2f64::new(0.0, 0.0),
                 Point2f64::new(1.0, 0.0),
@@ -1669,7 +1669,7 @@ mod tests {
 
     /// Unsigned shoelace area of a roof region's plan projection (no geo
     /// dependency in this crate).
-    fn roof_plan_area(region: &datatypes::ber::structural::CeilingRegion) -> f64 {
+    fn roof_plan_area(region: &ber_model::ber::structural::CeilingRegion) -> f64 {
         let ring = &region.polygon.exterior;
         let n = ring.len();
         let mut s = 0.0;
@@ -1909,7 +1909,7 @@ mod tests {
 
     // ── Roof apexes (fans) + roof-aware walls ───────────────────────────────
 
-    use datatypes::ber::structural::RoofApex;
+    use ber_model::ber::structural::RoofApex;
 
     /// Multiset fingerprint of the roof SURFACE: per region `(plan area,
     /// min z, max z)`, sorted — robust to region order and to collinear
@@ -2223,13 +2223,13 @@ mod tests {
         let (id0, cid0) = (wall0.id, wall0.construction_id);
         // Hang a REAL door on the wall — an amend must not orphan it (`opes`
         // is derived from the placement).
-        let door_id = datatypes::ber::openings::add_wall_door(
+        let door_id = ber_model::ber::openings::add_wall_door(
             &mut ber.storeys[0],
             id0,
             2.0,
             0.9,
             2.0,
-            datatypes::ber::fenestration::DoorKind::Solid,
+            ber_model::ber::fenestration::DoorKind::Solid,
             "door".to_string(),
             0.0,
         )
@@ -2250,7 +2250,7 @@ mod tests {
         assert_eq!(storey2.walls.regions.len(), 5);
         // The riser: base edge ON the step line (x = 2, interior), spanning
         // the two ceiling heights, Unset (the riser default, like any wall).
-        let is_riser = |r: &&datatypes::ber::structural::WallRegion| {
+        let is_riser = |r: &&ber_model::ber::structural::WallRegion| {
             let e = &r.polygon.exterior;
             (e[0].x - 2.0).abs() < 1e-4 && (e[1].x - 2.0).abs() < 1e-4
         };
@@ -2372,7 +2372,7 @@ mod tests {
         // under the ridge line — its top slopes up the hub/transition planes
         // (z = 2.4 + 0.9·x on the left), peaks at the ridge (x = 2, z = 4.2),
         // and slopes back down.
-        use datatypes::ber::structural::WallRegions;
+        use ber_model::ber::structural::WallRegions;
         let wall_cid = ber
             .wall_construction_id(Default::default(), Default::default(), Default::default())
             .unwrap();
@@ -2500,7 +2500,7 @@ mod tests {
                 .unwrap_or_else(|| panic!("no wall with base ({a:?}, {b:?})"))
         };
         // Top vertices (above the base) of a wall region.
-        let tops = |r: &datatypes::ber::structural::WallRegion| -> Vec<domain::points::Point3f64> {
+        let tops = |r: &ber_model::ber::structural::WallRegion| -> Vec<domain::points::Point3f64> {
             r.polygon
                 .exterior
                 .iter()
@@ -2657,7 +2657,7 @@ mod tests {
                 })
                 .unwrap_or_else(|| panic!("no wall with base ({a:?}, {b:?})"))
         };
-        let tops = |r: &datatypes::ber::structural::WallRegion| -> Vec<domain::points::Point3f64> {
+        let tops = |r: &ber_model::ber::structural::WallRegion| -> Vec<domain::points::Point3f64> {
             r.polygon
                 .exterior
                 .iter()
@@ -2718,7 +2718,7 @@ mod tests {
     /// piece's boundary a few 1e-7 m off the wall line, the exact
     /// boundary-inclusive containment pick in `covering_roof_plane` then
     /// misses, and `fallback_top_z` silently flattens the wall. Fixed by the
-    /// metric-tolerance sampling in datatypes (`PROFILE_EPS_M`).
+    /// metric-tolerance sampling in ber_model (`PROFILE_EPS_M`).
     #[test]
     fn stress_walls_join_raised_ridged_roof() {
         let mut seed: u64 = 0x9E3779B97F4A7C15;
@@ -2976,7 +2976,7 @@ mod tests {
     /// `resolve_storey`.
     #[test]
     fn placed_window_derives_vertices_and_survives_re_resolve() {
-        use datatypes::ber::fenestration::{OpeningPlacement, Window};
+        use ber_model::ber::fenestration::{OpeningPlacement, Window};
         let doc = square_doc(&[
             Point2f32::new(0.0, 0.0),
             Point2f32::new(4.0, 0.0),

@@ -15,7 +15,7 @@ use std::sync::mpsc::{self, Sender, SyncSender};
 use std::thread::JoinHandle;
 use std::time::Duration;
 
-use datatypes::ber::common::ItemId;
+use ber_model::ber::common::ItemId;
 
 use super::ber_repository::{BerRecord, BerRepository};
 
@@ -140,8 +140,8 @@ impl Drop for PersistenceWriter {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use ber_model::ber::ber_struct::Ber;
     use chrono::NaiveDate;
-    use datatypes::ber::ber_struct::Ber;
 
     /// `drain` must not return until the queued save is on disk: queue a save,
     /// drain, then assert the row is visible synchronously on a fresh

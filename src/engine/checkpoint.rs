@@ -2,7 +2,7 @@
 //! can be reloaded on startup instead of redrawn every run. NOT used in the
 //! normal flow — gated behind the `BER_CHECKPOINT` env var (see `BerApp::new`)
 //! and a manual "Save checkpoint" button.
-use datatypes::ber::ber_struct::Ber;
+use ber_model::ber::ber_struct::Ber;
 
 /// Default checkpoint file (repo cwd, alongside `bers.db`).
 pub const DEFAULT_PATH: &str = "checkpoint.json";

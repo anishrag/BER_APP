@@ -9,7 +9,7 @@
 //! storeys' projected bounding boxes so the whole building sits inside the
 //! canvas.
 
-use datatypes::ber::ber_struct::Ber;
+use ber_model::ber::ber_struct::Ber;
 use domain::sketch::DisplayMode;
 use eframe::egui;
 

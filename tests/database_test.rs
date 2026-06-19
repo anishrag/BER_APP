@@ -3,10 +3,10 @@ use chrono::NaiveDate;
 use domain::points::Point2f64;
 use rusqlite::Connection;
 
-use datatypes::ber::ber_struct::Ber;
-use datatypes::ber::common::{ConstructionPhase, ConstructionPhases, ItemId, Photo};
-use datatypes::ber::structural::{FloorRegions, Storey, ThermalMassCategoryEnum, ThermalMassInfo};
-use datatypes::ber::systems::{
+use ber_model::ber::ber_struct::Ber;
+use ber_model::ber::common::{ConstructionPhase, ConstructionPhases, ItemId, Photo};
+use ber_model::ber::structural::{FloorRegions, Storey, ThermalMassCategoryEnum, ThermalMassInfo};
+use ber_model::ber::systems::{
     Direction, HeatingControls, HeatingSystem, HeatingSystemType, SolarElements, VentilationSystem,
     VentilationSystemType,
 };

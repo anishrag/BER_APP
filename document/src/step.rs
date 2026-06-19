@@ -6,8 +6,8 @@
 //! shell owns the per-storey region *storage* (session state, deliberately
 //! outside undo and the editing snapshot); the logic over the regions —
 //! rebuilding them from persisted floors — lives here.
-use datatypes::ber::ber_struct::Ber;
-use datatypes::ber::structural::Storey;
+use ber_model::ber::ber_struct::Ber;
+use ber_model::ber::structural::Storey;
 use domain::points::{to_f32, to_f64, Point2f32};
 
 /// A session-only step area: a world-space (metre) ring + the floor level
@@ -53,14 +53,14 @@ pub fn step_regions_from_floors(ber: &Ber, idx: usize) -> Vec<StepRegion> {
 /// each flat below-ceiling piece standing proud of the anchor level under
 /// `footprint` becomes one session step region (the floor above a raised
 /// ceiling is itself raised — the slab thickness cancels, so the level is
-/// just `z − anchor`). A thin f64↔f32 wrapper over the datatypes query
+/// just `z − anchor`). A thin f64↔f32 wrapper over the ber_model query
 /// ([`CeilingRegions::inherited_floor_levels`]) so the shell seeds the same
 /// canonical pieces a reload would reconstruct. Empty when nothing below
 /// stands proud (single flat ceiling), the below storey has no derived
 /// ceilings yet, or the footprint is degenerate.
 ///
 /// [`CeilingRegions::inherited_floor_levels`]:
-/// datatypes::ber::structural::CeilingRegions::inherited_floor_levels
+/// ber_model::ber::structural::CeilingRegions::inherited_floor_levels
 pub fn inherited_step_regions(below: &Storey, footprint: &[Point2f32]) -> Vec<StepRegion> {
     let fp: Vec<_> = footprint.iter().copied().map(to_f64).collect();
     below
@@ -93,8 +93,8 @@ pub(crate) fn ring_area2(ring: &[Point2f32]) -> f64 {
 mod tests {
     use super::*;
     use crate::{ensure_storey_constructions, resolve_storey, LineSide, ShapeSlot, StoreyDoc};
-    use datatypes::ber::structural::FloorRegions;
-    use datatypes::ber::suggest::suggest_storey_outlines;
+    use ber_model::ber::structural::FloorRegions;
+    use ber_model::ber::suggest::suggest_storey_outlines;
     use domain::points::Point2f64;
     use manip_plan::{FloorPlan, ParameterAxis};
 
@@ -149,7 +149,7 @@ mod tests {
 
     /// `(level_m, plan area)` per floor region, sorted — the fingerprint the
     /// fixpoint assertions compare.
-    fn floor_level_areas(storey: &datatypes::ber::structural::Storey) -> Vec<(f64, f64)> {
+    fn floor_level_areas(storey: &ber_model::ber::structural::Storey) -> Vec<(f64, f64)> {
         let mut v: Vec<(f64, f64)> = storey
             .floors
             .regions
@@ -244,7 +244,7 @@ mod tests {
             .map(domain::points::to_f32)
             .collect();
 
-        // ADOPT + SEED — the exact datatypes pieces (canonical).
+        // ADOPT + SEED — the exact ber_model pieces (canonical).
         let mut doc1 = StoreyDoc::default();
         doc1.adopt_finalised_outline(&ring32).expect("adopts");
         let seeded = inherited_step_regions(&ber.storeys[0], &ring32);
@@ -258,7 +258,7 @@ mod tests {
         assert_eq!(before.len(), 2, "floor split at the inherited line");
         assert!(before.iter().any(|(l, _)| (l - 0.3).abs() < 1e-9));
         // The inherited step derives a riser on the step line x = 2.
-        let on_step_line = |r: &&datatypes::ber::structural::WallRegion| {
+        let on_step_line = |r: &&ber_model::ber::structural::WallRegion| {
             let e = &r.polygon.exterior;
             (e[0].x - 2.0).abs() < 1e-6 && (e[1].x - 2.0).abs() < 1e-6
         };

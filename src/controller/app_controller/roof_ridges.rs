@@ -30,7 +30,7 @@
 //! phases/steps/ceiling-steps/roof-points parity.
 use super::ceiling_steps::CeilingLineSnap;
 use super::*;
-use datatypes::ber::structural::RoofApex;
+use ber_model::ber::structural::RoofApex;
 use document::LinePositionPrompt;
 
 /// Which of the pending ridge's two POSITION questions still need asking, in

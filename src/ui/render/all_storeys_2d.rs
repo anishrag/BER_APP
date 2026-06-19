@@ -7,7 +7,7 @@
 //!
 //! A 2×2 grid for >2 storeys is a follow-up; today we just lay them out in a row.
 
-use datatypes::ber::ber_struct::Ber;
+use ber_model::ber::ber_struct::Ber;
 use domain::sketch::DisplayMode;
 use eframe::egui;
 

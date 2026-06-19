@@ -9,7 +9,7 @@ Tagging is the first stage of the 3D side, doable with a single storey.
 
 ## Settled design (from discussion)
 
-- **Phase == year of construction.** `ConstructionPhase` (`datatypes/src/ber/common.rs:42`:
+- **Phase == year of construction.** `ConstructionPhase` (`ber_model/src/ber/common.rs:42`:
   `Original`, `Extension1..4`, `Other(String)`) is the label; the year lives in
   `ConstructionPhases { years: HashMap<ConstructionPhase, Year> }`
   (`common.rs:53`) on **`Ber.construction_phases`** (`ber_struct.rs`). This field already
@@ -54,13 +54,13 @@ surfaces sit at `Original`.
   sibling to `living_areas.rs`. Owns the mode, the in-memory regions, the pending-pick
   state, and the commit resolution sequencing.
 - **Result** — surface `construction_id` (existing, persisted). Plus session-only
-  `Vec<PhaseRegion>` in the controller. **No new datatypes type.**
+  `Vec<PhaseRegion>` in the controller. **No new ber_model type.**
 
 ## Stages
 
 ### Stage 1 — Capture construction dates at NewBer → populate `construction_phases`
 
-- `datatypes/src/ber/common.rs`: add small helpers on `ConstructionPhases` if needed —
+- `ber_model/src/ber/common.rs`: add small helpers on `ConstructionPhases` if needed —
   `defined_phases() -> Vec<ConstructionPhase>` (ordered: Original, then Extension1..n that
   have years) for the tagging picker, and `set_year(phase, Year)`. (`get_year` exists but
   panics on missing — picker must only offer defined phases.)
@@ -75,7 +75,7 @@ surfaces sit at `Original`.
 
 ### Stage 2 — Phase-tagging workflow (`phase_regions.rs`, session-only)
 
-Controller-side type (NOT datatypes):
+Controller-side type (NOT ber_model):
 ```rust
 struct PhaseRegion { polygon: Vec<Point2f32>, phase: ConstructionPhase } // world/metre ring
 ```
@@ -123,7 +123,7 @@ UI (`src/ui/pages/sketch.rs` + `src/ui/app.rs`):
 
 ## Files
 
-- `datatypes/src/ber/common.rs` — `ConstructionPhases::defined_phases` / `set_year`.
+- `ber_model/src/ber/common.rs` — `ConstructionPhases::defined_phases` / `set_year`.
 - `src/ui/pages/new_ber.rs`, `src/ui/app.rs` — date capture + new events + routing.
 - `src/controller/app_controller/mod.rs` — `create_ber` param, new state fields,
   commit/persist phase resolution.
@@ -144,7 +144,7 @@ Controller, beside the living-area tests:
    → stays `Extension1`; an `Original` surface stays `Original`.
 4. `new_ber_populates_construction_phases` — `create_ber` with phases sets
    `ber.construction_phases`.
-datatypes: `defined_phases` ordering / `set_year` round-trip (trivial).
+ber_model: `defined_phases` ordering / `set_year` round-trip (trivial).
 
 ## Deferred (explicitly out of MVP)
 

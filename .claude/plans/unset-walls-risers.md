@@ -9,7 +9,7 @@
 ## C = RS-1+RS-2 (risers). A independent; B before C.
 
 ## 1. Ridge length limit (slices in A)
-L-1 datatypes: impl CeilingRegion {
+L-1 ber_model: impl CeilingRegion {
   /// The contiguous run of the plan line `p + t·dir` (`t` in METRES, `dir`
   /// unit-length) that stays inside this region's plan polygon and contains
   /// t = 0, as `(t_min, t_max)` with t_min ≤ 0 ≤ t_max. Even-odd over the
@@ -17,7 +17,7 @@ L-1 datatypes: impl CeilingRegion {
   /// endpoints' t (the profile_breakpoints convention). `None` when `p` is
   /// not strictly inside (boundary excluded).
   pub fn plan_span_through(&self, p: Point2f64, dir: Point2f64) -> Option<(f64, f64)> }
-  (point+direction — datatypes can't see ParameterAxis; SplitLine3D vocabulary.)
+  (point+direction — ber_model can't see ParameterAxis; SplitLine3D vocabulary.)
   Tests: rectangle full chord; notched ring (interval containing t=0, not union); boundary →
   None; degenerate → None.
 L-2 document/roof_point.rs: StoreyDoc::validate_roof_ridge_extent DELETED; free fn
@@ -38,8 +38,8 @@ L-3 controller roof_ridges.rs: assign_roof_ridge_length internals — self.mater
   free fn. Pending stays open on Err. Controller test: raised-section scenario — span-length
   rejected WITH range, just-under accepted, then Height succeeds (no-late-rejection, e2e).
 
-## 2. WallExposure::Unset (slices in B; U-1 enum lands in A's datatypes edit)
-U-1 datatypes: WallExposure gains
+## 2. WallExposure::Unset (slices in B; U-1 enum lands in A's ber_model edit)
+U-1 ber_model: WallExposure gains
     /// No exposure marked yet. Walls exist (and draw) Unset; DEAP export will
     /// refuse a BER containing Unset regions — that restriction lives at the
     /// future export boundary (the deap mapping layer), not here.
@@ -77,7 +77,7 @@ TEST WAVE (deliberate flips, change with the code): document exposure
   4768.
 
 ## 3. Risers (slices in C)
-RS-1 datatypes:
+RS-1 ber_model:
   impl FloorRegions {
     /// Interior FLOOR-RISER faces: for every plan edge piece shared by two
     /// regions whose `level_m` differ (> 1e-4 m), the vertical quad from the

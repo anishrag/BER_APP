@@ -8,9 +8,9 @@
 
 use std::collections::HashSet;
 
-use datatypes::ber::common::ItemId;
-use datatypes::ber::fenestration::{Door, Window};
-use datatypes::ber::structural::{CeilingRegion, FloorRegion, Storey, WallRegion};
+use ber_model::ber::common::ItemId;
+use ber_model::ber::fenestration::{Door, Window};
+use ber_model::ber::structural::{CeilingRegion, FloorRegion, Storey, WallRegion};
 use domain::sketch::DisplayMode;
 use eframe::egui;
 use geo::Coord;

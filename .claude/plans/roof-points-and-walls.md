@@ -50,8 +50,8 @@ Status: DESIGN — awaiting Anish's approval + answers to the open questions bef
   (roofs parity); no snapshot bump.
 
 ## Slices + order
-A-1 datatypes (RoofApex, with_apexes, region_strictly_containing, fan_base_z, add/remove_roof_apex)
-∥ B-1 datatypes (WallRegions::regenerate + private profile sampler; replace rebuild_preserving) —
+A-1 ber_model (RoofApex, with_apexes, region_strictly_containing, fan_base_z, add/remove_roof_apex)
+∥ B-1 ber_model (WallRegions::regenerate + private profile sampler; replace rebuild_preserving) —
 independent. Then A-2 document (roof_point.rs validation; apex-aware step reconstruction;
 PositionPromptKind::Point; resolve applies with_apexes — NO resolve signature change, apexes ride
 the cloned Storey) ∥ B-2 document (resolve calls regenerate with roofs; rewrite wall comment +

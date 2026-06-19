@@ -9,7 +9,7 @@ parametric floor-plan model and ALL geometry algorithms over it.
 ## Hard rules
 
 - `manip_plan` depends on `domain` only (plus geo/serde/log/thiserror).
-  No UI deps, no `datatypes`, no `document` — it knows nothing about BER.
+  No UI deps, no `ber_model`, no `document` — it knows nothing about BER.
 - `nalgebra` is confined to `domain/`. If a vector op is missing, add a method
   to `domain::points`; never import nalgebra elsewhere.
 - Don't uncomment the large commented blocks in `manip_plan/src/lib.rs`

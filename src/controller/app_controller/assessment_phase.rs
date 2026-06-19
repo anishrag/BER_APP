@@ -8,7 +8,7 @@ use super::*;
 
 /// The canvas display mode that shades a given surface kind — Structure-phase
 /// Walls/Roofs/Floors highlighting. (`SurfaceKind` itself is the data-model
-/// taxonomy in `datatypes`; this canvas mapping is app-shell.)
+/// taxonomy in `ber_model`; this canvas mapping is app-shell.)
 fn display_mode_for(kind: SurfaceKind) -> DisplayMode {
     match kind {
         SurfaceKind::Walls => DisplayMode::Walls,

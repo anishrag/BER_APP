@@ -15,7 +15,7 @@
 //!   Wall type / …): the per-region properties to stamp onto the selection.
 //!   These are PLACEHOLDERS today — they render but do nothing.
 
-use datatypes::ber::structural::SurfaceCounts;
+use ber_model::ber::structural::SurfaceCounts;
 
 use super::SketchEvent;
 use crate::controller::app_controller::{SelectMode, StructureSelection, SurfaceKind};

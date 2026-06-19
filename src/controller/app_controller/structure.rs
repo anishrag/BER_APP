@@ -7,12 +7,12 @@
 //! The hit-testing/geometry itself lives one crate down: which surface a tap
 //! lands on and which surfaces sit inside a carved region are pure read-only
 //! queries over the BER `Storey` data model — see [`Storey::surface_at`],
-//! [`Storey::surfaces_in_ring`], [`Storey::surface_ids`] in `datatypes`. This
+//! [`Storey::surfaces_in_ring`], [`Storey::surface_ids`] in `ber_model`. This
 //! module only sequences those queries, drives the carve through `document`,
 //! and holds the transient selected set (app-shell interaction state — the
 //! regions live on the BER record, not the editing `Document`).
 use super::*;
-use datatypes::ber::structural::Storey;
+use ber_model::ber::structural::Storey;
 use domain::points::Point2f32;
 
 impl AppController {

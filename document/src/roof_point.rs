@@ -42,10 +42,10 @@
 //!   [`centred_rect_lo`] (the rect's Centre suggestion).
 //!
 //! [`CeilingRegions::apex_groups`]:
-//! datatypes::ber::structural::CeilingRegions::apex_groups
+//! ber_model::ber::structural::CeilingRegions::apex_groups
 
 use crate::StoreyDoc;
-use datatypes::ber::structural::{
+use ber_model::ber::structural::{
     rect_hip_switches, ridge_hub_switches, CeilingRegion, RoofApex, RoofApexGroup, Storey,
     APEX_BOUNDARY_EPS_M,
 };
@@ -300,8 +300,8 @@ fn check_group_ridge(
 /// `Err` is user-facing.
 ///
 /// [`region_strictly_containing`]:
-/// datatypes::ber::structural::CeilingRegions::region_strictly_containing
-/// [`apex_groups`]: datatypes::ber::structural::CeilingRegions::apex_groups
+/// ber_model::ber::structural::CeilingRegions::region_strictly_containing
+/// [`apex_groups`]: ber_model::ber::structural::CeilingRegions::apex_groups
 pub fn validate_roof_apex(storey: &Storey, p: Point2f64, z_m: f64) -> Result<(), String> {
     if !z_m.is_finite() || z_m <= 0.0 {
         return Err(format!(
@@ -337,7 +337,7 @@ pub fn validate_roof_apex(storey: &Storey, p: Point2f64, z_m: f64) -> Result<(),
 /// nothing is rejected with its stable message.
 ///
 /// [`CeilingRegions::claim_regions`]:
-/// datatypes::ber::structural::CeilingRegions::claim_regions
+/// ber_model::ber::structural::CeilingRegions::claim_regions
 fn check_end_claims(storey: &Storey, q: Point2f64, ridx: usize) -> Result<(), String> {
     let claims = storey.roofs.claim_regions(q);
     // The end may be strictly inside the region, on its OUTER boundary (gable),
@@ -544,9 +544,9 @@ pub fn validate_roof_ridge_length(
 /// now the FULL wall-to-wall span through the midpoint.
 ///
 /// [`region_strictly_containing`]:
-/// datatypes::ber::structural::CeilingRegions::region_strictly_containing
+/// ber_model::ber::structural::CeilingRegions::region_strictly_containing
 /// [`CeilingRegion::plan_span_through`]:
-/// datatypes::ber::structural::CeilingRegion::plan_span_through
+/// ber_model::ber::structural::CeilingRegion::plan_span_through
 pub fn validate_roof_ridge_extent(
     storey: &Storey,
     axis: ParameterAxis,
@@ -749,7 +749,7 @@ fn ridge_span_through_midpoint(
 /// construction.
 ///
 /// [`CeilingRegion::plan_span_through`]:
-/// datatypes::ber::structural::CeilingRegion::plan_span_through
+/// ber_model::ber::structural::CeilingRegion::plan_span_through
 pub fn centred_ridge_cross(
     storey: &Storey,
     axis: ParameterAxis,
@@ -896,7 +896,7 @@ pub fn validate_roof_rect_length(
 /// carries the permitted run ([`RECT_LENGTH_EXCEEDS_AREA_MSG`] prefix).
 ///
 /// [`CeilingRegion::plan_span_through`]:
-/// datatypes::ber::structural::CeilingRegion::plan_span_through
+/// ber_model::ber::structural::CeilingRegion::plan_span_through
 pub fn validate_roof_rect_placement(
     storey: &Storey,
     lo: Point2f64,
@@ -1177,7 +1177,7 @@ fn area_side_label(axis: ParameterAxis, coord_m: f32, inside: (f32, f32)) -> Str
 /// layer; the shell only matches on the result.
 ///
 /// [`CeilingRegions::claim_regions`]:
-/// datatypes::ber::structural::CeilingRegions::claim_regions
+/// ber_model::ber::structural::CeilingRegions::claim_regions
 pub fn resolve_ridge_slope_side(
     storey: &Storey,
     a: Point2f64,
@@ -1222,7 +1222,7 @@ pub fn resolve_ridge_slope_side(
 mod tests {
     use super::*;
     use crate::{DimensionState, ShapeSlot};
-    use datatypes::ber::structural::{CeilingRegion, CeilingRegions, Polygon3D, RoofApex, Storey};
+    use ber_model::ber::structural::{CeilingRegion, CeilingRegions, Polygon3D, RoofApex, Storey};
     use domain::points::Point3f64;
     use manip_plan::FloorPlan;
 

@@ -297,7 +297,7 @@ pub(crate) fn ridge_triangles(
 }
 
 /// A rect ridge side at or below this (m) is a line, not a rectangle — the
-/// datatypes-side floor matching the document's MIN_RIDGE_LENGTH_M.
+/// ber_model-side floor matching the document's MIN_RIDGE_LENGTH_M.
 const RECT_MIN_SIDE_M: f64 = 0.01;
 
 /// The 4 apexes form an AXIS-ALIGNED RECTANGLE: their quantized plan points

@@ -166,8 +166,8 @@ pub struct SketchState {
     pub opening_width_input: String,
     pub opening_height_input: String,
     pub opening_sill_input: String,
-    pub opening_glazing: datatypes::ber::fenestration::Glazing,
-    pub opening_frame: datatypes::ber::fenestration::Frame,
+    pub opening_glazing: ber_model::ber::fenestration::Glazing,
+    pub opening_frame: ber_model::ber::fenestration::Frame,
     pub opening_year_input: String,
     /// Door+sidelights composer inputs (sidelight widths + transom height).
     pub sidelight_left_input: String,

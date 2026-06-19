@@ -4,8 +4,8 @@
 //! data). Pure model logic — the shell owns pointer selection, undo, and
 //! persistence.
 use crate::{ExposureSection, StoreyDoc};
-use datatypes::ber::common::ItemId;
-use datatypes::ber::structural::{Storey, WallExposure, WallRegions};
+use ber_model::ber::common::ItemId;
+use ber_model::ber::structural::{Storey, WallExposure, WallRegions};
 use domain::points::{Point2f32, Point2f64};
 use manip_plan::{project_distance_along, segment_len, VertexId};
 use std::collections::HashMap;

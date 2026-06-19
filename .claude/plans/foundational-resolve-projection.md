@@ -78,7 +78,7 @@ resolve_storey(&StoreyDoc, &constructions, phases) -> Storey   ── PURE proje
 `commit_to_ber`'s derivation calls `ensure_floor/wall_construction` (mutates `Ber`'s registry).
 Make the registry *pre-populated* so the projection can *look up* instead of insert:
 - Add read-only `floor_construction_id(type, makeup, phase) -> Option<ItemId>` /
-  `wall_construction_id(...)` to `Ber` (datatypes).
+  `wall_construction_id(...)` to `Ber` (ber_model).
 - Pre-register the default floor + default wall on `create_ber`/`open_ber`, and one floor per
   phase on `set_construction_phases`.
 - No behaviour change; tests green. *Risk: low.*
@@ -112,7 +112,7 @@ watermark render straight from `document.storeys`. *Risk: medium, mostly mechani
 
 ## Critical files
 
-- `datatypes/src/ber/structural.rs` — `Ber` construction lookups (#1), `Storey` shape (#5).
+- `ber_model/src/ber/structural.rs` — `Ber` construction lookups (#1), `Storey` shape (#5).
 - `document/src/lib.rs` — `StoreyDoc` rename + new `Document` container (#4).
 - `src/controller/app_controller/mod.rs` — `resolve_storey` (#2), render/persist rewire +
   delete `commit_to_ber` (#3), multi-storey rewire (#4), `load_storey_into_editor` (#4).

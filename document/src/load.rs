@@ -4,7 +4,7 @@
 //! projection. The shell owns *when* to rebuild (open/checkpoint/add-storey);
 //! the reconstruction itself is pure model state.
 use crate::{DimensionState, ShapeSlot, StoreyDoc};
-use datatypes::ber::structural::{FloorRegions, Storey};
+use ber_model::ber::structural::{FloorRegions, Storey};
 use domain::points::{to_f32, Point2f32};
 use manip_plan::FloorPlan;
 
@@ -67,7 +67,7 @@ pub(crate) fn reconstruct_living_areas(areas: &FloorRegions) -> Vec<ShapeSlot> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use datatypes::ber::common::ItemId;
+    use ber_model::ber::common::ItemId;
     use domain::points::Point2f64;
 
     fn square_m(side: f64) -> Vec<Point2f64> {

@@ -4,7 +4,7 @@
 
 ## Starting position (re-verified 2026-06-12)
 
-- **Portable already:** all workspace crates (`domain`, `datatypes`, `sketch`, `manip_plan`, `document`) plus `src/controller` and `src/engine` have zero UI-toolkit imports. No native C deps anywhere except `rusqlite` `bundled` (NDK-safe). The only non-`src/` change in the whole port is one method on `sketch::SketchEngine`.
+- **Portable already:** all workspace crates (`domain`, `ber_model`, `sketch`, `manip_plan`, `document`) plus `src/controller` and `src/engine` have zero UI-toolkit imports. No native C deps anywhere except `rusqlite` `bundled` (NDK-safe). The only non-`src/` change in the whole port is one method on `sketch::SketchEngine`.
 - **Toolkit facts (verified from registry sources, not memory):**
   - `eframe 0.33.3` has `NativeOptions.android_app: Option<winit::platform::android::activity::AndroidApp>` (cfg android).
   - eframe does **not** re-export winit's android module → the android entry needs a direct `winit` dep. `winit` is *not* on the boundary blocklist, so it may be named outside `src/ui`.
@@ -91,7 +91,7 @@ Desktop build keeps working throughout; every slice below is desktop-safe to lan
 1. **Suspend/resume:** background mid-sketch and resume — glow can lose the GL context; verify eframe 0.33's handling, switch `launch` to wgpu backend if broken (one line by design).
 2. **Flush on pause:** force-flush the `PersistenceWriter` queue on suspend (coalesced writes must not be lost to a background kill). Verify checkpoint/snapshot recovery after force-kill.
 3. **Rotation:** lock landscape in the manifest (it's a tablet sketching app); otherwise test resize mid-sketch.
-4. **Permissions:** none (internal storage only). `datatypes::Photo` capture would be CAMERA + intent/JNI — out of scope.
+4. **Permissions:** none (internal storage only). `ber_model::Photo` capture would be CAMERA + intent/JNI — out of scope.
 
 ## Phase 4 — Packaging & distribution
 

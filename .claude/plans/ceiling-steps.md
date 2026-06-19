@@ -31,7 +31,7 @@ follow-up — 2D labels/tints only for now; minimum |delta| = 0.01 m (floor-step
   current_position_prompt is serde(skip)); Line arms in apply_position/skip_current_position are
   unreachable!("Line prompts are shell-resolved").
 
-## Slice 1 — datatypes (data-model-engineer)
+## Slice 1 — ber_model (data-model-engineer)
 
 structural.rs:
   impl CeilingRegions {

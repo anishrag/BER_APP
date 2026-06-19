@@ -15,7 +15,7 @@ use crate::controller::app_controller::{AssessmentPhase, StructureSelection};
 use crate::number_entry::parse_dimension_expression;
 use crate::ui::pages::events::UiEvent;
 use crate::ui::widgets::{metre_input, HintExt};
-use datatypes::ber::structural::SurfaceCounts;
+use ber_model::ber::structural::SurfaceCounts;
 use domain::sketch::EditTools;
 
 /// One tool/toggle slot inside a category.

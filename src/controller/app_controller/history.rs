@@ -20,10 +20,10 @@ pub struct HistorySnapshot {
     /// opening add/move/delete undoes; `None` when no record/storey is active.
     /// On restore it's written back BEFORE the re-resolve, which then derives
     /// vertices and amends `opes` from it.
-    pub(super) record_storey: Option<(usize, datatypes::ber::structural::Storey)>,
+    pub(super) record_storey: Option<(usize, ber_model::ber::structural::Storey)>,
     /// The window-type registry (windows reference it by id) — restored with the
     /// storey so an undone window doesn't leave a dangling type reference.
-    pub(super) window_types: Option<Vec<datatypes::ber::fenestration::WindowType>>,
+    pub(super) window_types: Option<Vec<ber_model::ber::fenestration::WindowType>>,
 }
 
 impl AppController {

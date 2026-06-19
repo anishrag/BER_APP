@@ -15,7 +15,7 @@
 //! equals the post-reload reconstruction — the apex-over-step reload fixpoint.
 //! Outside undo — phases/steps/ceiling-steps parity.
 use super::*;
-use datatypes::ber::structural::RoofApex;
+use ber_model::ber::structural::RoofApex;
 use document::LinePositionPrompt;
 
 /// The elective wall snap a pending roof point is carrying on ONE axis: the

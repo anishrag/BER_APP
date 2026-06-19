@@ -26,7 +26,7 @@
    all params known + scale_set). NOT the carve path. NO collinearity review, no prompts.
 6. Serde: one optional Storey field; no snapshot bump (all flow state controller-transient).
 
-## A — datatypes (data-model-engineer)
+## A — ber_model (data-model-engineer)
 CeilingRegions::lowest_flat_z_over(&self, footprint: &[Point2f64]) -> Option<f64>
 CeilingRegions::inherited_floor_levels(&self, footprint) -> Vec<(Vec<Point2f64>, f64)>
   (pieces region∩footprint via split_to_simple, slivers dropped, f32-quantized, z − anchor)
@@ -88,11 +88,11 @@ field (storey ≥ 1) mirroring the ceiling-height field. full_house_3d: replace 
 z-accumulation with ber.storey_floor_datums() (heights gate stays).
 
 ## Traps
-1. Seed = the exact datatypes pieces (canonical) — fixpoint test end-to-end. 2. with_levels is
+1. Seed = the exact ber_model pieces (canonical) — fixpoint test end-to-end. 2. with_levels is
 earlier-claims-first — seeded areas precede later user steps (existing semantics, don't "fix").
 3. Drawn path seeds at FINALISATION; seed-pending re-derived on open (restart-safe); finalised/
 old records never retro-seed. 4. Accept SKIPS the review + does NOT use carve (two deliberately
-different paths). 5. f32-quantize suggestion rings at the datatypes boundary. 6. Thickness
+different paths). 5. f32-quantize suggestion rings at the ber_model boundary. 6. Thickness
 outside undo; ACCEPT inside undo (snapshot before adoption; undo → empty outline, Browse stage
 not restored, seeded steps remain — harmless, consistent on redraw). 7. build_persist_record
 unfinalised branch KEEPS floor_thickness_m. 8. Legacy None stacking byte-identical. 9.

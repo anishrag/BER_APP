@@ -23,11 +23,11 @@
 //! [`Thickness`]: NewStoreyStage::Thickness
 //! [`ChooseMethod`]: NewStoreyStage::ChooseMethod
 //! [`Browse`]: NewStoreyStage::Browse
-//! [`OutlineSuggestion`]: datatypes::ber::suggest::OutlineSuggestion
+//! [`OutlineSuggestion`]: ber_model::ber::suggest::OutlineSuggestion
 //! [`StoreyDoc::adopt_finalised_outline`]: document::StoreyDoc::adopt_finalised_outline
 //! [`maybe_seed_inherited_levels`]: AppController::maybe_seed_inherited_levels
 use super::*;
-use datatypes::ber::suggest::{has_suggestion_inputs, suggest_storey_outlines, OutlineSuggestion};
+use ber_model::ber::suggest::{has_suggestion_inputs, suggest_storey_outlines, OutlineSuggestion};
 
 /// At most this many ranked suggestions are offered to browse.
 const MAX_OUTLINE_SUGGESTIONS: usize = 6;
@@ -426,7 +426,7 @@ impl AppController {
         }
         // Derive now (with_levels splits the floors, the phase partition splits
         // them by construction), then canonicalize BOTH session lists from the
-        // derived regions — trap 1: the session set is the exact datatypes
+        // derived regions — trap 1: the session set is the exact ber_model
         // pieces, so reload is a fixpoint.
         if let Err(e) = self.commit_to_ber() {
             log::error!("commit_to_ber after inherited-level seed: {e}");

@@ -33,10 +33,10 @@ use crate::controller::app_controller::{
 use crate::ui::pages::events::UiEvent;
 use crate::ui::render::ViewParams;
 use crate::ui::widgets::HintExt;
-use datatypes::ber::ber_struct::Ber;
-use datatypes::ber::common::{ConstructionPhase, ItemId};
-use datatypes::ber::fenestration::{Frame, Glazing};
-use datatypes::ber::structural::{SurfaceCounts, WallExposure};
+use ber_model::ber::ber_struct::Ber;
+use ber_model::ber::common::{ConstructionPhase, ItemId};
+use ber_model::ber::fenestration::{Frame, Glazing};
+use ber_model::ber::structural::{SurfaceCounts, WallExposure};
 use domain::sketch::{DisplayMode, EditTools, SketchMode};
 use manip_plan::CollinearitySuggestion;
 use std::collections::HashSet;

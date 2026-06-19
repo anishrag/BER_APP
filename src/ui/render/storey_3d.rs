@@ -30,8 +30,8 @@
 
 use std::collections::HashSet;
 
-use datatypes::ber::common::ItemId;
-use datatypes::ber::structural::{CeilingRegion, FloorRegion, Storey, WallExposure, WallRegion};
+use ber_model::ber::common::ItemId;
+use ber_model::ber::structural::{CeilingRegion, FloorRegion, Storey, WallExposure, WallRegion};
 use domain::sketch::DisplayMode;
 use eframe::egui;
 
@@ -324,8 +324,8 @@ fn draw_roof_region(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use datatypes::ber::common::ItemId;
-    use datatypes::ber::structural::{FloorRegions, Opes, Polygon3D, WallRegions};
+    use ber_model::ber::common::ItemId;
+    use ber_model::ber::structural::{FloorRegions, Opes, Polygon3D, WallRegions};
     use domain::points::{Point2f64, Point3f64};
 
     /// The fitted view must include WALL vertices: a wall whose top rises

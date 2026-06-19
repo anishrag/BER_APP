@@ -14,7 +14,7 @@ against these axes, in order of importance:
 
 1. **Placement.** For every new/moved piece of logic, apply CLAUDE.md's test:
    coordinate/vertex/edge math → `manip_plan`; storey-model mutation →
-   `document`; pure data transforms → `datatypes`; SQL → `src/engine`;
+   `document`; pure data transforms → `ber_model`; SQL → `src/engine`;
    widgets → `src/ui`; only sequencing/undo/prompt-state/view-data in the
    controller. Flag inlined domain logic in the controller even when it works.
 2. **Boundary mechanics.** Run `.claude/scripts/check-boundaries.sh` and

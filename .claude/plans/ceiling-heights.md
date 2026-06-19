@@ -28,7 +28,7 @@ validation is height > 0 (finite) only.
 - Ceiling layout ≠ floor partition: default derivation = ONE ceiling region per OUTLINE RING
   (footprint), not per floor region.
 
-## Slice 1 — datatypes + gen_3d_vol compile-keeping (data-model-engineer)
+## Slice 1 — ber_model + gen_3d_vol compile-keeping (data-model-engineer)
 
 structural.rs:
 - FloorRegion loses `height` (doc: floors carry no vertical extent; level_m is their datum,
