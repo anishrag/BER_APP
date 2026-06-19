@@ -5,29 +5,31 @@
 //! and emit no events — the phase boxes are a roadmap, not a navigator (only
 //! Stage A exists today), and the checklist is a live read-out.
 
-use egui::{Align2, Color32, CornerRadius, Margin, Rect, RichText, Stroke};
+use egui::{Align2, Color32, CornerRadius, Margin, Rect, RichText, Sense, Stroke};
 
-use crate::controller::app_controller::{ChecklistItem, ChecklistStatus};
-
-/// The assessor's three-phase job. Only `Mapping` (Stage A — the drawing tools
-/// on the left) is built today; the later two are shown greyed as a roadmap.
-#[derive(Clone, Copy, PartialEq, Eq)]
-pub enum Phase {
-    Mapping,
-    Structure,
-    Objects,
-}
+use crate::controller::app_controller::{AssessmentPhase, ChecklistItem, ChecklistStatus};
+use datatypes::ber::structural::SurfaceCounts;
+use domain::sketch::DisplayMode;
 
 /// Floating phase signpost centred at the top of the canvas: three boxes
 /// (`Mapping → Structure → Objects`) joined by arrows, the `current` one
-/// highlighted and any phase listed in `completed` carrying a green ✓.
-/// Non-interactive — a progress signpost, not a tab strip.
-pub fn phase_bar(ui: &egui::Ui, rect: Rect, current: Phase, completed: &[Phase]) {
+/// highlighted. The boxes are **clickable** to switch phase — returns the phase
+/// the assessor clicked, or `None`. Switching onto Structure is gated on
+/// `mapping_complete` (Structure also earns a green ✓ then); going back to
+/// Mapping is always allowed; Objects isn't built yet, so it's never clickable.
+#[must_use]
+pub fn phase_bar(
+    ui: &egui::Ui,
+    rect: Rect,
+    current: AssessmentPhase,
+    mapping_complete: bool,
+) -> Option<AssessmentPhase> {
     let phases = [
-        (Phase::Mapping, "Mapping"),
-        (Phase::Structure, "Structure"),
-        (Phase::Objects, "Objects"),
+        (AssessmentPhase::Mapping, "Mapping"),
+        (AssessmentPhase::Structure, "Structure"),
+        (AssessmentPhase::Objects, "Objects"),
     ];
+    let mut clicked = None;
     egui::Area::new(ui.id().with("canvas_phase_bar"))
         .order(egui::Order::Foreground)
         // `pivot(CENTER_TOP)` places the bar's top-centre at the canvas's
@@ -35,46 +37,67 @@ pub fn phase_bar(ui: &egui::Ui, rect: Rect, current: Phase, completed: &[Phase])
         // window — the landscape side panel offsets the two).
         .fixed_pos(rect.center_top() + egui::vec2(0.0, 8.0))
         .pivot(Align2::CENTER_TOP)
-        .interactable(false)
         .show(ui.ctx(), |ui| {
             ui.horizontal(|ui| {
                 for (i, (phase, label)) in phases.iter().enumerate() {
                     if i > 0 {
                         ui.label(RichText::new("→").size(18.0).color(Color32::from_gray(170)));
                     }
-                    phase_box(ui, label, *phase == current, completed.contains(phase));
+                    let active = *phase == current;
+                    // Mapping always reachable (go back); Structure once Mapping
+                    // is complete; Objects not built yet.
+                    let enabled = match phase {
+                        AssessmentPhase::Mapping => true,
+                        AssessmentPhase::Structure => mapping_complete,
+                        AssessmentPhase::Objects => false,
+                    };
+                    // Only Mapping has a completion criterion today; Structure
+                    // earns its ✓ in a later step (per-surface completion).
+                    let complete = matches!(phase, AssessmentPhase::Mapping) && mapping_complete;
+                    if phase_box(ui, label, active, complete, enabled).clicked()
+                        && !active
+                        && enabled
+                    {
+                        clicked = Some(*phase);
+                    }
                 }
             });
         });
-}
-
-/// Whether the Mapping (Stage A) phase is complete — every checklist item green
-/// (done on every storey). Drives the green ✓ on the Mapping box in the
-/// signpost. Empty (no BER loaded) is not complete.
-pub fn mapping_complete(checklist: &[ChecklistItem]) -> bool {
-    !checklist.is_empty()
-        && checklist
-            .iter()
-            .all(|item| item.status == ChecklistStatus::AllStoreys)
+    clicked
 }
 
 /// One phase box — filled + outlined, highlighted when it's the active phase,
-/// prefixed with a green ✓ when the phase is complete.
-fn phase_box(ui: &mut egui::Ui, label: &str, active: bool, complete: bool) {
+/// prefixed with a green ✓ when complete, dimmed when not yet reachable. The
+/// whole box is a click target (returns its `Response`) so the signpost can
+/// switch phases; a reachable, non-active box shows a pointer cursor.
+fn phase_box(
+    ui: &mut egui::Ui,
+    label: &str,
+    active: bool,
+    complete: bool,
+    enabled: bool,
+) -> egui::Response {
     let (fill, stroke_col, text_col) = if active {
         (
             Color32::from_rgb(40, 92, 160),
             Color32::from_rgb(120, 170, 235),
             Color32::WHITE,
         )
-    } else {
+    } else if enabled {
         (
             Color32::from_gray(48),
             Color32::from_gray(82),
-            Color32::from_gray(150),
+            Color32::from_gray(190),
+        )
+    } else {
+        // Not reachable yet — dimmer still.
+        (
+            Color32::from_gray(38),
+            Color32::from_gray(60),
+            Color32::from_gray(110),
         )
     };
-    egui::Frame::new()
+    let inner = egui::Frame::new()
         .fill(fill)
         .stroke(Stroke::new(if active { 2.0 } else { 1.0 }, stroke_col))
         .corner_radius(CornerRadius::same(6))
@@ -97,15 +120,77 @@ fn phase_box(ui: &mut egui::Ui, label: &str, active: bool, complete: bool) {
                 ui.label(text);
             });
         });
+    // Make the whole framed box (not just the text) the click target.
+    let resp = ui.interact(
+        inner.response.rect,
+        ui.id().with(("phase_box", label)),
+        Sense::click(),
+    );
+    if enabled && !active {
+        resp.on_hover_cursor(egui::CursorIcon::PointingHand)
+    } else {
+        resp
+    }
 }
 
-/// Floating, draggable, collapsible Stage A checklist over the canvas. Each
+/// A small centred banner just under the phase signpost naming the surface
+/// kind currently highlighted (+ its count), so the shaded faces on the canvas
+/// are explicit ("Highlighting Roofs · 3"). Painted only when a single surface
+/// is selected (`Walls` / `Roofs` / `Floors`); nothing otherwise.
+pub fn highlight_caption(ui: &egui::Ui, rect: Rect, display: DisplayMode, counts: SurfaceCounts) {
+    let (label, count, accent) = match display {
+        DisplayMode::Walls => ("Walls", counts.walls, Color32::from_rgb(230, 230, 230)),
+        DisplayMode::Roofs => ("Roofs", counts.roofs, Color32::from_rgb(220, 160, 80)),
+        DisplayMode::Floors => ("Floors", counts.floors, Color32::from_rgb(120, 170, 240)),
+        _ => return,
+    };
+    egui::Area::new(ui.id().with("canvas_highlight_caption"))
+        .order(egui::Order::Foreground)
+        // Just under the phase signpost (which sits at center_top + 8).
+        .fixed_pos(rect.center_top() + egui::vec2(0.0, 48.0))
+        .pivot(Align2::CENTER_TOP)
+        .interactable(false)
+        .show(ui.ctx(), |ui| {
+            egui::Frame::new()
+                .fill(Color32::from_gray(28))
+                .stroke(Stroke::new(1.0, accent))
+                .corner_radius(CornerRadius::same(6))
+                .inner_margin(Margin::symmetric(10, 4))
+                .show(ui, |ui| {
+                    ui.horizontal(|ui| {
+                        ui.label(
+                            RichText::new("Highlighting")
+                                .size(12.0)
+                                .color(Color32::from_gray(170)),
+                        );
+                        ui.label(RichText::new(label).size(13.0).strong().color(accent));
+                        ui.label(
+                            RichText::new(format!("· {count}"))
+                                .size(13.0)
+                                .color(Color32::from_gray(200)),
+                        );
+                    });
+                });
+        });
+}
+
+/// Floating, draggable, collapsible per-phase checklist over the canvas. Each
 /// item shows a red / yellow / green status dot recomputed every frame from
-/// `items` (so it tracks edits live). The window keeps its own position +
-/// collapsed state in egui memory (keyed by its title), constrained to the
-/// canvas `rect`.
-pub fn checklist_window(ui: &egui::Ui, rect: Rect, items: &[ChecklistItem]) {
-    egui::Window::new("Stage A checklist")
+/// `items` (so it tracks edits live). The window title reflects the current
+/// `phase`; it keeps its own position + collapsed state in egui memory (keyed
+/// by that title), constrained to the canvas `rect`.
+pub fn checklist_window(
+    ui: &egui::Ui,
+    rect: Rect,
+    phase: AssessmentPhase,
+    items: &[ChecklistItem],
+) {
+    let title = match phase {
+        AssessmentPhase::Mapping => "Mapping checklist",
+        AssessmentPhase::Structure => "Structure checklist",
+        AssessmentPhase::Objects => "Objects checklist",
+    };
+    egui::Window::new(title)
         .order(egui::Order::Foreground)
         .default_pos(rect.left_top() + egui::vec2(16.0, 56.0))
         .constrain_to(rect)

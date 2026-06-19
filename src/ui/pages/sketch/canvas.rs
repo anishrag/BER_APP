@@ -6,6 +6,7 @@ use egui::epaint::PathShape;
 
 use super::touch::TouchNav;
 use super::{EguiStroke, SketchEvent, SketchView};
+use crate::controller::app_controller::{AssessmentPhase, SelectMode};
 use crate::ui::pages::events::UiEvent;
 use crate::ui::render;
 use crate::ui::render::ViewParams;
@@ -63,17 +64,22 @@ pub(super) fn render<F: FnMut(UiEvent)>(
     // clicks — same pattern as the snap-tag menus).
     view_buttons(ui, rect, view, on_event);
 
-    // Floating phase signpost (top-centre) + the live Stage A completion
-    // checklist (a draggable window), both painted over the canvas. Mapping
-    // earns its green ✓ once every checklist item is green (done on all
-    // storeys); the later phases aren't built, so they never tick yet.
-    use super::overlays::Phase;
-    let mut completed = Vec::new();
-    if super::overlays::mapping_complete(&view.checklist) {
-        completed.push(Phase::Mapping);
+    // Floating phase signpost (top-centre) + the live per-phase completion
+    // checklist (a draggable window), both painted over the canvas. The
+    // signpost is clickable: clicking a reachable box switches the workspace
+    // phase. Structure unlocks once Mapping is complete (every checklist item
+    // green on all storeys); Objects isn't built yet.
+    if let Some(phase) =
+        super::overlays::phase_bar(ui, rect, view.current_phase, view.mapping_complete)
+    {
+        on_event(UiEvent::Sketch(SketchEvent::SetAssessmentPhase(phase)));
     }
-    super::overlays::phase_bar(ui, rect, Phase::Mapping, &completed);
-    super::overlays::checklist_window(ui, rect, &view.checklist);
+    super::overlays::checklist_window(ui, rect, view.current_phase, &view.checklist);
+
+    // Structure phase: when a surface kind is selected for highlighting, name it
+    // (+ its count) in a banner under the signpost so it's explicit which
+    // surfaces the shaded faces on the canvas are.
+    super::overlays::highlight_caption(ui, rect, view.display, view.surface_counts);
 
     // BER view layer with optional collinearity highlight overlay.
     render::render_ber(
@@ -86,6 +92,7 @@ pub(super) fn render<F: FnMut(UiEvent)>(
         view.review,
         dimensioned_walls,
         vp,
+        view.structure_selected,
     );
 
     // New-storey browse stage: tint the current outline suggestion's ring
@@ -123,6 +130,17 @@ pub(super) fn render<F: FnMut(UiEvent)>(
         mode,
         vp,
         view.pending_cut_regions,
+    );
+    // Structure-phase carve: the same two-candidate highlight while picking
+    // which region's surfaces to select.
+    render::render_cut_candidates(
+        &painter,
+        rect,
+        ber,
+        current_storey_idx,
+        mode,
+        vp,
+        view.structure_cut_regions,
     );
 
     // DEBUG: splice-pipeline phases of the last extend/trim.
@@ -831,6 +849,97 @@ pub(super) fn render<F: FnMut(UiEvent)>(
         }
     }
 
+    // Structure phase: the canvas has its OWN tools. In the CLICK select mode a
+    // primary tap (2D) toggles the surface under it in/out of the selection;
+    // the CARVE mode instead captures a stroke (handled in the stroke path
+    // below). All Mapping primary input is gated off (`primary_available`).
+    let structure_phase = view.current_phase == AssessmentPhase::Structure;
+    let structure_click = structure_phase
+        && matches!(
+            view.structure_selection.map(|s| s.mode),
+            Some(SelectMode::Click)
+        );
+    let structure_carve = structure_phase
+        && matches!(
+            view.structure_selection.map(|s| s.mode),
+            Some(SelectMode::Carve)
+        );
+    if structure_click && matches!(mode, SketchMode::Storey2D) && !touch_nav_active {
+        if let Some(t) = canvas_transform(ber, current_storey_idx, rect, vp, false) {
+            let tol_world = (12.0 / t.scale()) as f64;
+            if response.clicked_by(egui::PointerButton::Primary) {
+                if let Some(pos) = response.interact_pointer_pos() {
+                    let (wx, wy) = t.inverse(pos.x, pos.y);
+                    on_event(UiEvent::Sketch(SketchEvent::StructureSurfaceTap {
+                        world_x: wx,
+                        world_y: wy,
+                        tol: tol_world,
+                    }));
+                }
+            }
+        }
+    }
+
+    // Structure CARVE mode (2D): while a cut is awaiting a pick, a tap chooses
+    // which region's surfaces to select; otherwise a primary drag draws the
+    // carve stroke (captured in pixels, converted to world on release — the
+    // same path living-area cuts use), then routed to the carve handler.
+    let structure_cut_picking = !view.structure_cut_regions.is_empty();
+    if structure_carve && matches!(mode, SketchMode::Storey2D) && !touch_nav_active {
+        if structure_cut_picking {
+            if response.clicked_by(egui::PointerButton::Primary) {
+                if let Some((wx, wy)) = response
+                    .interact_pointer_pos()
+                    .and_then(|pos| screen_to_world(ber, current_storey_idx, rect, vp, pos))
+                {
+                    on_event(UiEvent::Sketch(SketchEvent::ChooseStructureCutRegion {
+                        world_x: wx,
+                        world_y: wy,
+                    }));
+                }
+            }
+        } else {
+            if response.drag_started_by(egui::PointerButton::Primary) {
+                if let Some(pos) = response.interact_pointer_pos() {
+                    on_event(UiEvent::Sketch(SketchEvent::StartStroke(
+                        pos - rect.left_top().to_vec2(),
+                    )));
+                }
+            }
+            if response.dragged_by(egui::PointerButton::Primary) {
+                if let Some(pos) = response.interact_pointer_pos() {
+                    on_event(UiEvent::Sketch(SketchEvent::AddPoint(
+                        pos - rect.left_top().to_vec2(),
+                    )));
+                }
+            }
+            if response.drag_stopped_by(egui::PointerButton::Primary) {
+                if let (Some(stroke), Some(t)) = (
+                    view.current.as_ref(),
+                    canvas_transform(ber, current_storey_idx, rect, vp, false),
+                ) {
+                    let topleft = rect.left_top();
+                    let world_points: Vec<(f32, f32)> = stroke
+                        .points
+                        .iter()
+                        .map(|p| {
+                            let (wx, wy) = t.inverse(p.x + topleft.x, p.y + topleft.y);
+                            (wx as f32, wy as f32)
+                        })
+                        .collect();
+                    on_event(UiEvent::Sketch(SketchEvent::StructureCarveStrokeWorld {
+                        points: world_points,
+                    }));
+                } else {
+                    on_event(UiEvent::Sketch(SketchEvent::CancelStroke));
+                }
+            }
+            if let Some(stroke) = &view.current {
+                draw_stroke(&painter, rect, stroke);
+            }
+        }
+    }
+
     // Exposure mode: a tap selects the wall under the pointer; a
     // primary drag near a selection handle slides that handle along
     // the wall. Takes priority over stroke/edit input (suppressed via
@@ -914,7 +1023,9 @@ pub(super) fn render<F: FnMut(UiEvent)>(
         && !view.roof_ridge_pending
         && !view.roof_rect_pending
         && !view.exposure_mode
-        && !view.openings_mode;
+        && !view.openings_mode
+        // Structure phase owns the canvas with its own selection tools.
+        && !structure_phase;
 
     if primary_available && !touch_nav_active && !matches!(edit_tool, EditTools::Move) {
         if response.drag_started_by(egui::PointerButton::Primary) {

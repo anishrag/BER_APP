@@ -18,25 +18,28 @@ pub mod categories;
 mod number_box;
 pub mod overlays;
 mod prompt_dock;
+mod structure;
 pub mod touch;
 
 use egui::epaint::PathStroke;
 use egui::Pos2;
 
 use crate::controller::app_controller::{
-    ChecklistItem, DimensionPromptUiData, EditDragPromptUiData, ElevationView, ExposureSelection,
-    NewStoreyPromptUiData, OpeningPromptUiData, OpeningToolKind, PositionPromptUiData, RiserView,
-    SnapTagView, VertexDropPromptUiData, WallExposureView,
+    AssessmentPhase, ChecklistItem, DimensionPromptUiData, EditDragPromptUiData, ElevationView,
+    ExposureSelection, NewStoreyPromptUiData, OpeningPromptUiData, OpeningToolKind,
+    PositionPromptUiData, RiserView, SnapTagView, StructureSelection, VertexDropPromptUiData,
+    WallExposureView,
 };
 use crate::ui::pages::events::UiEvent;
 use crate::ui::render::ViewParams;
 use crate::ui::widgets::HintExt;
 use datatypes::ber::ber_struct::Ber;
-use datatypes::ber::common::ConstructionPhase;
+use datatypes::ber::common::{ConstructionPhase, ItemId};
 use datatypes::ber::fenestration::{Frame, Glazing};
-use datatypes::ber::structural::WallExposure;
+use datatypes::ber::structural::{SurfaceCounts, WallExposure};
 use domain::sketch::{DisplayMode, EditTools, SketchMode};
 use manip_2d_plan::CollinearitySuggestion;
+use std::collections::HashSet;
 
 /// The UI-friendly version of a stroke
 pub struct EguiStroke {
@@ -460,6 +463,33 @@ pub enum SketchEvent {
     /// Browse stage: accept the current suggestion as the storey's
     /// fully-finalised outline (no review, no dimension prompts).
     AcceptSuggestion,
+    /// Switch the workspace onto another assessment phase (clicked in the phase
+    /// signpost). The controller gates which phases are reachable.
+    SetAssessmentPhase(AssessmentPhase),
+    /// Structure phase: set (or clear with `None`) the active surface selection
+    /// from a Select subtool. The controller shades the selected surface kind.
+    SetStructureSelection(Option<StructureSelection>),
+    /// Structure phase (Select subtool active): the assessor tapped the canvas
+    /// — toggle the surface under the point in/out of the selection.
+    StructureSurfaceTap {
+        world_x: f64,
+        world_y: f64,
+        tol: f64,
+    },
+    /// Structure phase: clear every selected surface ("Deselect all").
+    DeselectAllStructure,
+    /// Structure phase (Carve subtool): a drawn stroke in world coords. Carves
+    /// the storey like a living-area cut; the surfaces in the resulting region
+    /// get selected (a straight cut first asks which half via
+    /// `ChooseStructureCutRegion`).
+    StructureCarveStrokeWorld {
+        points: Vec<(f32, f32)>,
+    },
+    /// Structure phase: pick which carved candidate region to select from.
+    ChooseStructureCutRegion {
+        world_x: f64,
+        world_y: f64,
+    },
 }
 
 /// Everything the Sketch page needs for one frame, built by the app shell
@@ -698,6 +728,23 @@ pub struct SketchView<'a> {
     /// recomputed each frame from the editing model — drawn as the floating,
     /// draggable checklist window over the canvas.
     pub checklist: Vec<ChecklistItem>,
+    /// The assessor's current workflow phase — drives the phase signpost
+    /// highlight, the checklist title, and which toolset the left panel shows.
+    pub current_phase: AssessmentPhase,
+    /// Whether the Mapping phase is complete (every Stage A item green on all
+    /// storeys). Gates the Structure box in the phase signpost.
+    pub mapping_complete: bool,
+    /// Current storey's wall / roof / floor counts — the Structure-phase tool
+    /// read-out.
+    pub surface_counts: SurfaceCounts,
+    /// The active Structure-phase surface selection (which Select subtool is
+    /// on), so the panel can show it selected. `None` = nothing selected.
+    pub structure_selection: Option<StructureSelection>,
+    /// Region ids selected in the Structure phase — the canvas shades these.
+    pub structure_selected: &'a HashSet<ItemId>,
+    /// Candidate regions of a pending Structure carve (world coords) — drawn to
+    /// tap between. Empty when no carve is awaiting a pick.
+    pub structure_cut_regions: &'a [Vec<(f64, f64)>],
 }
 
 #[derive(Default)]

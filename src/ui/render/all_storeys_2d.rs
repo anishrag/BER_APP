@@ -82,6 +82,8 @@ pub fn render(
             view,
             None,
             global_bbox,
+            // No Structure-phase selection in the all-storeys overview.
+            &std::collections::HashSet::new(),
         );
     }
 }

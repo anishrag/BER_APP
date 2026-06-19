@@ -64,6 +64,13 @@ impl AppController {
         self.sketch_engine.display
     }
 
+    /// Set the canvas display mode (which surface kind is highlighted; the
+    /// others fade). Drives the Structure-phase Walls/Roofs/Floors tools and is
+    /// reset to a sensible default on phase switch.
+    pub fn set_display_mode(&mut self, mode: DisplayMode) {
+        self.sketch_engine.display = mode;
+    }
+
     pub fn set_edit_mode(&mut self, mode: EditTools) {
         if !matches!(mode, EditTools::Move) {
             // Leaving Move mode clears the selection so a stale highlight

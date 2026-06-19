@@ -28,11 +28,14 @@
 //! with a cumulative z offset. The public `render` is just `render_at_z_offset`
 //! with `z_offset = 0` and computes its own bounding box.
 
+use std::collections::HashSet;
+
+use datatypes::ber::common::ItemId;
 use datatypes::ber::structural::{CeilingRegion, FloorRegion, Storey, WallExposure, WallRegion};
 use domain::sketch::DisplayMode;
 use eframe::egui;
 
-use super::{color_for, fit_transform, style, Transform2d, ViewParams};
+use super::{color_for, fill_polygon, fit_transform, style, Transform2d, ViewParams};
 
 pub fn render(
     painter: &egui::Painter,
@@ -40,6 +43,9 @@ pub fn render(
     storey: &Storey,
     display_mode: DisplayMode,
     view: ViewParams,
+    // Region ids the assessor has SELECTED in the Structure phase — these faces
+    // are shaded. Empty outside that phase / with nothing selected.
+    selected: &HashSet<ItemId>,
 ) {
     if storey.ceiling_height_m.is_none() {
         painter.text(
@@ -55,7 +61,7 @@ pub fn render(
         return;
     };
     let t = fit_transform(rect, min_xy, max_xy, view);
-    render_at_z_offset(painter, &t, storey, display_mode, 0.0, view);
+    render_at_z_offset(painter, &t, storey, display_mode, 0.0, view, selected);
 }
 
 /// The lowest floor level in the storey (metres relative to its datum) — the
@@ -85,6 +91,7 @@ pub(crate) fn render_at_z_offset(
     display_mode: DisplayMode,
     z_offset: f64,
     view: ViewParams,
+    selected: &HashSet<ItemId>,
 ) {
     let Some(height) = storey.ceiling_height_m else {
         return;
@@ -98,12 +105,13 @@ pub(crate) fn render_at_z_offset(
             z_offset + region.level_m,
             display_mode,
             view,
+            selected,
         );
     }
     // Real wall regions: the exact resolved polygons (tops trace the roof —
     // jumps at ceiling steps, slopes under fans/ridges), coloured by exposure.
     for wall in &storey.walls.regions {
-        draw_wall_region(painter, t, wall, z_offset, display_mode, view);
+        draw_wall_region(painter, t, wall, z_offset, display_mode, view, selected);
     }
     // Openings (windows blue, doors brown) — each opening's 4 vertices are a
     // real quad in 3D (in the wall plane, or on the roof plane for roof
@@ -142,7 +150,7 @@ pub(crate) fn render_at_z_offset(
         }
     } else {
         for roof in &storey.roofs.regions {
-            draw_roof_region(painter, t, roof, z_offset, display_mode, view);
+            draw_roof_region(painter, t, roof, z_offset, display_mode, view, selected);
         }
     }
 }
@@ -207,6 +215,7 @@ fn draw_floor_region(
     floor_z: f64,
     display_mode: DisplayMode,
     view: ViewParams,
+    selected: &HashSet<ItemId>,
 ) {
     let floor_pts: Vec<egui::Pos2> = region
         .polygon
@@ -221,6 +230,15 @@ fn draw_floor_region(
         return;
     }
     let floor_color = color_for(DisplayMode::Floors, display_mode, style::FLOOR_LINE);
+    // A SELECTED floor region's face is SHADED so the surfaces we mean are
+    // unmistakable in 3D (the rest stay wireframe).
+    if selected.contains(&region.id) {
+        fill_polygon(
+            painter,
+            &floor_pts,
+            style::highlight_fill(style::FLOOR_LINE),
+        );
+    }
     painter.add(egui::Shape::closed_line(
         floor_pts,
         egui::Stroke::new(2.0, floor_color),
@@ -238,6 +256,7 @@ fn draw_wall_region(
     z_offset: f64,
     display_mode: DisplayMode,
     view: ViewParams,
+    selected: &HashSet<ItemId>,
 ) {
     if region.polygon.exterior.len() < 3 {
         return;
@@ -259,6 +278,11 @@ fn draw_wall_region(
         WallExposure::Ground => style::GROUND_WALL,
     };
     let color = color_for(DisplayMode::Walls, display_mode, base);
+    // A SELECTED wall region's face is SHADED (keeping its exposure colour) so
+    // it reads as a solid surface, not just an edge.
+    if selected.contains(&region.id) {
+        fill_polygon(painter, &pts, style::highlight_fill(base));
+    }
     painter.add(egui::Shape::closed_line(pts, egui::Stroke::new(2.0, color)));
 }
 
@@ -271,6 +295,7 @@ fn draw_roof_region(
     z_offset: f64,
     display_mode: DisplayMode,
     view: ViewParams,
+    selected: &HashSet<ItemId>,
 ) {
     if region.polygon.exterior.len() < 3 {
         return;
@@ -285,6 +310,11 @@ fn draw_roof_region(
         })
         .collect();
     let roof_color = color_for(DisplayMode::Roofs, display_mode, style::ROOF_LINE);
+    // A SELECTED roof region's face is SHADED so sloped fans/ridges read as
+    // surfaces, not just outlines.
+    if selected.contains(&region.id) {
+        fill_polygon(painter, &pts, style::highlight_fill(style::ROOF_LINE));
+    }
     painter.add(egui::Shape::closed_line(
         pts,
         egui::Stroke::new(1.5, roof_color),

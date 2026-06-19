@@ -55,6 +55,61 @@ impl AppController {
         ]
     }
 
+    /// Whether the Mapping (Stage A) phase is complete — every checklist item
+    /// green (done on every storey). Gates switching onto the Structure phase.
+    pub fn mapping_complete(&self) -> bool {
+        let items = self.stage_a_checklist();
+        !items.is_empty()
+            && items
+                .iter()
+                .all(|item| item.status == ChecklistStatus::AllStoreys)
+    }
+
+    /// The Structure phase checklist: one row per surface kind (Walls / Roofs /
+    /// Floors), green where the resolved storey has at least one such surface.
+    /// A first cut that mirrors the Structure toolset; richer per-surface
+    /// completion (construction types/make-ups) is a planned follow-up.
+    pub fn structure_checklist(&self) -> Vec<ChecklistItem> {
+        vec![
+            ChecklistItem {
+                label: "Walls",
+                status: self.surface_status(|c| c.walls > 0),
+            },
+            ChecklistItem {
+                label: "Roofs",
+                status: self.surface_status(|c| c.roofs > 0),
+            },
+            ChecklistItem {
+                label: "Floors",
+                status: self.surface_status(|c| c.floors > 0),
+            },
+        ]
+    }
+
+    /// Roll a per-storey surface-count predicate up against the current scope
+    /// (green = every storey, yellow = current only, red = otherwise), reading
+    /// each storey's derived [`SurfaceCounts`].
+    fn surface_status(&self, ok: impl Fn(SurfaceCounts) -> bool) -> ChecklistStatus {
+        let Some(record) = self.current_record.as_ref() else {
+            return ChecklistStatus::Incomplete;
+        };
+        let storeys = &record.data.storeys;
+        if storeys.is_empty() {
+            return ChecklistStatus::Incomplete;
+        }
+        let done = |i: usize| ok(storeys[i].surface_counts());
+        if (0..storeys.len()).all(done) {
+            ChecklistStatus::AllStoreys
+        } else if self
+            .current_storey_idx
+            .is_some_and(|i| i < storeys.len() && done(i))
+        {
+            ChecklistStatus::ThisStorey
+        } else {
+            ChecklistStatus::Incomplete
+        }
+    }
+
     /// Roll a per-storey completion predicate up against the current scope. The
     /// predicate gets each storey's editing model plus its durable ceiling
     /// height (which lives on the BER `Storey`, not the `StoreyDoc`).

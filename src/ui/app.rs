@@ -4,7 +4,7 @@ use std::rc::Rc;
 
 use std::sync::mpsc::{channel, Receiver};
 
-use crate::controller::app_controller::AppController;
+use crate::controller::app_controller::{AppController, AssessmentPhase};
 use crate::ui::adapters::sketch_egui::pos2_to_point2f;
 use crate::ui::pages::events::{Page, Section, UiEvent};
 use crate::ui::pages::home::{HomeEvent, HomePage, HomeState};
@@ -796,10 +796,41 @@ impl eframe::App for BerApp {
                                 }
                             };
 
-                            // Stage A checklist — recomputed from the (already
-                            // materialized) editing model, for the floating
-                            // checklist window overlay.
-                            let checklist = self.app_controller.borrow().stage_a_checklist();
+                            // Per-phase checklist + phase state — recomputed
+                            // from the (already materialized) editing model for
+                            // the floating checklist window + phase signpost.
+                            let (
+                                current_phase,
+                                mapping_complete,
+                                surface_counts,
+                                structure_selection,
+                                checklist,
+                            ) = {
+                                let c = self.app_controller.borrow();
+                                let phase = c.current_phase();
+                                let checklist = match phase {
+                                    AssessmentPhase::Mapping => c.stage_a_checklist(),
+                                    AssessmentPhase::Structure => c.structure_checklist(),
+                                    AssessmentPhase::Objects => Vec::new(),
+                                };
+                                (
+                                    phase,
+                                    c.mapping_complete(),
+                                    c.current_surface_counts(),
+                                    c.structure_selection(),
+                                    checklist,
+                                )
+                            };
+                            // Owned copy of the selected region ids so the view
+                            // can borrow it without holding the controller.
+                            let structure_selected = self
+                                .app_controller
+                                .borrow()
+                                .structure_selected_ids()
+                                .clone();
+                            // Candidate regions of a pending Structure carve.
+                            let structure_cut_regions =
+                                self.app_controller.borrow().structure_cut_regions();
 
                             let view = SketchView {
                                 current: stroke.as_ref().map(EguiStroke::from),
@@ -932,6 +963,12 @@ impl eframe::App for BerApp {
                                 opening_error: opening_error.as_deref(),
                                 elevation_view,
                                 checklist,
+                                current_phase,
+                                mapping_complete,
+                                surface_counts,
+                                structure_selection,
+                                structure_selected: &structure_selected,
+                                structure_cut_regions: &structure_cut_regions,
                             };
                             let touch_nav = &mut self.sketch_state.touch_nav;
                             SketchPage::render(ui, view, touch_nav, |event| match event {
@@ -1573,6 +1610,35 @@ impl eframe::App for BerApp {
                                                 self.sketch_state.new_storey_error = Some(e);
                                             }
                                         }
+                                    }
+                                    SketchEvent::SetAssessmentPhase(phase) => {
+                                        controller.borrow_mut().set_current_phase(phase);
+                                    }
+                                    SketchEvent::SetStructureSelection(sel) => {
+                                        controller.borrow_mut().set_structure_selection(sel);
+                                    }
+                                    SketchEvent::StructureSurfaceTap {
+                                        world_x,
+                                        world_y,
+                                        tol,
+                                    } => {
+                                        controller
+                                            .borrow_mut()
+                                            .toggle_structure_surface_at(world_x, world_y, tol);
+                                    }
+                                    SketchEvent::DeselectAllStructure => {
+                                        controller.borrow_mut().clear_structure_surface_selection();
+                                    }
+                                    SketchEvent::StructureCarveStrokeWorld { points } => {
+                                        controller
+                                            .borrow_mut()
+                                            .apply_structure_carve_stroke(&points);
+                                    }
+                                    SketchEvent::ChooseStructureCutRegion { world_x, world_y } => {
+                                        controller.borrow_mut().choose_structure_cut_region(
+                                            world_x as f32,
+                                            world_y as f32,
+                                        );
                                     }
                                     SketchEvent::EditMouseDown {
                                         world_x,

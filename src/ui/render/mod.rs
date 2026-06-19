@@ -27,8 +27,11 @@ pub mod full_house_3d;
 pub mod storey_2d;
 pub mod storey_3d;
 
+use std::collections::HashSet;
+
 use crate::controller::app_controller::{ExposureSelection, WallExposureView};
 use datatypes::ber::ber_struct::Ber;
+use datatypes::ber::common::ItemId;
 use datatypes::ber::structural::WallExposure;
 use domain::sketch::{DisplayMode, SketchMode};
 use eframe::egui;
@@ -90,6 +93,8 @@ pub fn render_ber(
     // tuples for the current storey. Other walls' length labels are suppressed.
     dimensioned_walls: &[(usize, usize)],
     view: ViewParams,
+    // Structure-phase selected region ids — shaded on the current storey.
+    selected: &HashSet<ItemId>,
 ) {
     let Some(ber) = ber else {
         painter.text(
@@ -124,6 +129,7 @@ pub fn render_ber(
                     view,
                     watermark.as_deref(),
                     None,
+                    selected,
                 );
             } else {
                 empty_storey_hint(painter, rect);
@@ -131,7 +137,7 @@ pub fn render_ber(
         }
         (SketchMode::Storey3D, Some(i)) => {
             if let Some(storey) = ber.storeys.get(i) {
-                storey_3d::render(painter, rect, storey, display_mode, view);
+                storey_3d::render(painter, rect, storey, display_mode, view, selected);
             } else {
                 empty_storey_hint(painter, rect);
             }
@@ -1316,10 +1322,20 @@ pub(crate) mod style {
     pub const DIMENSION_TEXT: Color32 = Color32::from_rgb(200, 200, 200);
     pub const HINT_TEXT: Color32 = Color32::from_rgb(140, 140, 140);
     pub const FADED_OPACITY: u8 = 50;
+    /// Alpha for a highlighted surface's shaded fill — opaque enough to read as
+    /// "these are the surfaces we mean", translucent enough to see geometry
+    /// (and stacked faces in 3D) through it.
+    pub const HIGHLIGHT_FILL_OPACITY: u8 = 95;
 
     pub fn faded(c: Color32) -> Color32 {
         let [r, g, b, _] = c.to_array();
         Color32::from_rgba_premultiplied(r, g, b, FADED_OPACITY)
+    }
+
+    /// `c` as a translucent shade for filling a highlighted surface region.
+    pub fn highlight_fill(c: Color32) -> Color32 {
+        let [r, g, b, _] = c.to_array();
+        Color32::from_rgba_premultiplied(r, g, b, HIGHLIGHT_FILL_OPACITY)
     }
 }
 
@@ -1452,6 +1468,35 @@ pub(crate) fn color_for(
         DisplayMode::AllSurfaces | DisplayMode::FloorMapDims => base,
         other if other == target => base,
         _ => style::faded(base),
+    }
+}
+
+/// Fill a projected (screen-space) polygon with `color`, triangulating with
+/// earcut so concave rings (L / U footprints) fill correctly rather than
+/// fanning across the concavity. A trailing closing-duplicate vertex is dropped
+/// (geo rings carry one); no-op below 3 unique points.
+pub(crate) fn fill_polygon(painter: &egui::Painter, pts: &[egui::Pos2], color: egui::Color32) {
+    let mut pts = pts.to_vec();
+    if pts.len() >= 2 && pts[0] == pts[pts.len() - 1] {
+        pts.pop();
+    }
+    if pts.len() < 3 {
+        return;
+    }
+    let flat: Vec<f64> = pts.iter().flat_map(|p| [p.x as f64, p.y as f64]).collect();
+    if let Ok(triangles) = earcutr::earcut(&flat, &[], 2) {
+        let mut mesh = egui::Mesh::default();
+        for p in &pts {
+            mesh.vertices.push(egui::epaint::Vertex {
+                pos: *p,
+                uv: egui::epaint::WHITE_UV,
+                color,
+            });
+        }
+        for idx in triangles {
+            mesh.indices.push(idx as u32);
+        }
+        painter.add(egui::Shape::mesh(mesh));
     }
 }
 

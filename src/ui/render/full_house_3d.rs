@@ -84,7 +84,17 @@ pub fn render(
     // Iterate top-down so lower storeys' floors don't paint over upper-storey walls
     // (closer-to-camera in the default view is drawn last; with a free orbit
     // this ordering is approximate — wireframe rendering keeps it readable).
+    // No Structure-phase selection in the stacked all-storeys overview.
+    let selected = std::collections::HashSet::new();
     for (i, storey) in ber.storeys.iter().enumerate().rev() {
-        storey_3d::render_at_z_offset(painter, &t, storey, display_mode, z_offsets[i], view);
+        storey_3d::render_at_z_offset(
+            painter,
+            &t,
+            storey,
+            display_mode,
+            z_offsets[i],
+            view,
+            &selected,
+        );
     }
 }

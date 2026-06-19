@@ -6,7 +6,10 @@ use super::ber_struct::Ber;
 use super::common::{ConstructionPhase, Item, ItemId, Photo};
 use super::fenestration::{Door, Window};
 
-use domain::points::{point_to_segment_distance, Point2f64, Point3f64, Vector3f64};
+use domain::points::{
+    point_on_ring_boundary, point_to_segment_distance, ring_centroid, Point2f64, Point3f64,
+    Vector3f64,
+};
 #[derive(Debug, Default, Clone, Serialize, Deserialize)]
 pub struct Opes {
     pub doors: Vec<ItemId>,   // references to Door IDs
@@ -3805,6 +3808,168 @@ impl Storey {
         self.roofs = CeilingRegions::default();
         self.roof_apexes = Vec::new();
     }
+
+    /// How many of each structural surface the storey holds — the
+    /// Structure-phase tool read-out (how many walls / roofs / floors the
+    /// diagram shows). Counts the derived regions, so they're meaningful only
+    /// after the outline is finalised (walls/roofs/floors are re-derived by
+    /// `document::resolve_storey`).
+    pub fn surface_counts(&self) -> SurfaceCounts {
+        SurfaceCounts {
+            walls: self.walls.regions.len(),
+            roofs: self.roofs.regions.len(),
+            floors: self.floors.regions.len(),
+        }
+    }
+
+    /// The id of the surface of `kind` under (or, for walls, nearest within
+    /// `tol` of) the plan point `(x, y)` — the Structure-phase tap hit-test.
+    /// Floors/roofs: point-in-polygon over the region footprint; walls: nearest
+    /// base edge within tolerance (a wall collapses to its base edge in plan).
+    pub fn surface_at(&self, kind: SurfaceKind, x: f64, y: f64, tol: f64) -> Option<ItemId> {
+        match kind {
+            SurfaceKind::Floors => self
+                .floors
+                .regions
+                .iter()
+                .find(|r| r.polygon.contains(&GeoPoint::new(x, y)))
+                .map(|r| r.id),
+            SurfaceKind::Roofs => self
+                .roofs
+                .regions
+                .iter()
+                .find(|r| polygon3d_contains_plan(&r.polygon, x, y))
+                .map(|r| r.id),
+            // Walls collapse to their base edge in plan — pick the nearest one
+            // within tolerance (its first two exterior vertices are the ground
+            // line `WallRegions::regenerate` lays down).
+            SurfaceKind::Walls => self
+                .walls
+                .regions
+                .iter()
+                .filter_map(|r| {
+                    let e = &r.polygon.exterior;
+                    if e.len() < 2 {
+                        return None;
+                    }
+                    let d = point_to_segment_distance(x, y, e[0].x, e[0].y, e[1].x, e[1].y);
+                    (d <= tol).then_some((d, r.id))
+                })
+                .min_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal))
+                .map(|(_, id)| id),
+        }
+    }
+
+    /// Every surface id of `kind` whose footprint lies inside the carved
+    /// `region_ring` (world metres) — the Structure-phase carve pick. Floors and
+    /// roofs match when their footprint centre is inside; a wall (a BOUNDARY
+    /// edge, never strictly inside) matches when its base-edge midpoint sits on
+    /// the ring's perimeter OR strictly inside (an interior riser between
+    /// stepped sections), the spanning wall claimed by whichever region holds
+    /// its midpoint.
+    pub fn surfaces_in_ring(&self, kind: SurfaceKind, region_ring: &[Point2f64]) -> Vec<ItemId> {
+        let ring_poly = ring_to_geo(region_ring);
+        let inside = |x: f64, y: f64| ring_poly.contains(&GeoPoint::new(x, y));
+        match kind {
+            SurfaceKind::Floors => self
+                .floors
+                .regions
+                .iter()
+                .filter(|r| {
+                    let c = ring_centroid(&floor_ring(&r.polygon));
+                    inside(c.x, c.y)
+                })
+                .map(|r| r.id)
+                .collect(),
+            SurfaceKind::Roofs => self
+                .roofs
+                .regions
+                .iter()
+                .filter(|r| {
+                    let c = ring_centroid(&ceiling_ring(&r.polygon));
+                    inside(c.x, c.y)
+                })
+                .map(|r| r.id)
+                .collect(),
+            SurfaceKind::Walls => self
+                .walls
+                .regions
+                .iter()
+                .filter(|r| match r.base_midpoint() {
+                    Some(m) => {
+                        point_on_ring_boundary(region_ring, m.x, m.y, WALL_ON_BOUNDARY_TOL_M)
+                            || inside(m.x, m.y)
+                    }
+                    None => false,
+                })
+                .map(|r| r.id)
+                .collect(),
+        }
+    }
+
+    /// Every surface id of `kind` on the storey (the `Select all` seed).
+    pub fn surface_ids(&self, kind: SurfaceKind) -> Vec<ItemId> {
+        match kind {
+            SurfaceKind::Walls => self.walls.regions.iter().map(|r| r.id).collect(),
+            SurfaceKind::Roofs => self.roofs.regions.iter().map(|r| r.id).collect(),
+            SurfaceKind::Floors => self.floors.regions.iter().map(|r| r.id).collect(),
+        }
+    }
+}
+
+/// Per-storey tally of structural surfaces, one field per kind. Drives the
+/// Structure-phase tool counts (and a future structure checklist).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct SurfaceCounts {
+    pub walls: usize,
+    pub roofs: usize,
+    pub floors: usize,
+}
+
+/// A structural surface kind — the Structure-phase headings (Walls / Roofs /
+/// Floors) the surface queries and the assessor's Select/Set subtools hang
+/// under. The data-model taxonomy the queries above (`surface_at`,
+/// `surfaces_in_ring`, `surface_ids`) dispatch on.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SurfaceKind {
+    Walls,
+    Roofs,
+    Floors,
+}
+
+/// How close (world metres) a wall's base-edge midpoint must be to a carved
+/// region's boundary to count as that region's wall. Walls trace the outline
+/// exactly (same source coords), so this only absorbs f64 round-trip error.
+const WALL_ON_BOUNDARY_TOL_M: f64 = 0.05;
+
+/// Whether the `Polygon3D`'s plan projection (its `(x, y)` footprint) contains
+/// `(x, y)` — point-in-polygon for a ceiling/roof region.
+fn polygon3d_contains_plan(polygon: &Polygon3D, x: f64, y: f64) -> bool {
+    ring_to_geo(&ceiling_ring(polygon)).contains(&GeoPoint::new(x, y))
+}
+
+/// A floor region's exterior ring as plan `Point2f64`s.
+fn floor_ring(polygon: &Polygon<f64>) -> Vec<Point2f64> {
+    polygon
+        .exterior()
+        .coords()
+        .map(|c| Point2f64::new(c.x, c.y))
+        .collect()
+}
+
+/// A ceiling/wall region's exterior ring projected to plan `Point2f64`s.
+fn ceiling_ring(polygon: &Polygon3D) -> Vec<Point2f64> {
+    polygon
+        .exterior
+        .iter()
+        .map(|v| Point2f64::new(v.x, v.y))
+        .collect()
+}
+
+/// Build a closed `geo` polygon from a plan ring for point-in-polygon tests.
+fn ring_to_geo(ring: &[Point2f64]) -> Polygon<f64> {
+    let coords: Vec<Coord<f64>> = ring.iter().map(|p| Coord { x: p.x, y: p.y }).collect();
+    Polygon::new(LineString::from(coords), vec![])
 }
 
 #[derive(Debug, Default, Clone, Serialize, Deserialize, PartialEq)]

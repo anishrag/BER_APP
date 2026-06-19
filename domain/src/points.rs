@@ -43,3 +43,37 @@ pub fn point_to_segment_distance(px: f64, py: f64, ax: f64, ay: f64, bx: f64, by
     let dy = py - proj_y;
     (dx * dx + dy * dy).sqrt()
 }
+
+/// Whether the point `(x, y)` lies within `tol` of the ring's boundary (any
+/// edge), the ring taken as implicitly closed. Used to match a boundary surface
+/// (a wall, which collapses to its base edge in plan) to a carved region. A ring
+/// of fewer than two vertices has no boundary. Shared 2D vector math.
+pub fn point_on_ring_boundary(ring: &[Point2f64], x: f64, y: f64, tol: f64) -> bool {
+    let n = ring.len();
+    if n < 2 {
+        return false;
+    }
+    (0..n).any(|i| {
+        let a = ring[i];
+        let b = ring[(i + 1) % n];
+        point_to_segment_distance(x, y, a.x, a.y, b.x, b.y) <= tol
+    })
+}
+
+/// The average of a ring's vertices (a closing-duplicate vertex is dropped) — a
+/// cheap interior-ish centre for region-membership tests (good enough for the
+/// simple region footprints carve selection deals with; a wall's degenerate ring
+/// collapses to its base-edge midpoint). The origin for an empty ring.
+pub fn ring_centroid(ring: &[Point2f64]) -> Point2f64 {
+    let mut pts = ring;
+    if pts.len() >= 2 && pts[0] == pts[pts.len() - 1] {
+        pts = &pts[..pts.len() - 1];
+    }
+    if pts.is_empty() {
+        return Point2f64::new(0.0, 0.0);
+    }
+    let n = pts.len() as f64;
+    let sx: f64 = pts.iter().map(|p| p.x).sum();
+    let sy: f64 = pts.iter().map(|p| p.y).sum();
+    Point2f64::new(sx / n, sy / n)
+}

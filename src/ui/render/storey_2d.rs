@@ -6,14 +6,19 @@
 //! on the relevant wall. Dimension labels appear on each edge mid-point;
 //! roof-height labels at each floor corner.
 
+use std::collections::HashSet;
+
+use datatypes::ber::common::ItemId;
 use datatypes::ber::fenestration::{Door, Window};
-use datatypes::ber::structural::{CeilingRegion, FloorRegion, Storey};
+use datatypes::ber::structural::{CeilingRegion, FloorRegion, Storey, WallRegion};
 use domain::sketch::DisplayMode;
 use eframe::egui;
 use geo::Coord;
 use manip_2d_plan::CollinearitySuggestion;
 
-use super::{color_for, draw_dashed_segment, fit_transform, style, Transform2d, ViewParams};
+use super::{
+    color_for, draw_dashed_segment, fill_polygon, fit_transform, style, Transform2d, ViewParams,
+};
 
 /// Render the storey. If `highlight` is set, the two edges named in the
 /// suggestion are drawn on top in a contrasting style so the user can see
@@ -40,6 +45,10 @@ pub fn render(
     view: ViewParams,
     watermark_ring: Option<&[(f64, f64)]>,
     fit_bbox_override: Option<((f64, f64), (f64, f64))>,
+    // Region ids the assessor has SELECTED in the Structure phase — these are
+    // shaded; everything else draws at its normal style. Empty outside that
+    // phase / with nothing selected.
+    selected: &HashSet<ItemId>,
 ) {
     // Build the fit bbox from BOTH the storey and the watermark — a new (empty)
     // storey has no bbox of its own; the previous-storey watermark supplies one
@@ -66,7 +75,7 @@ pub fn render(
 
     // Floors (background layer).
     for region in &storey.floors.regions {
-        draw_floor(painter, &t, region, display_mode);
+        draw_floor(painter, &t, region, display_mode, selected);
     }
 
     // Walls (when populated). For now we treat each floor edge as an implied wall
@@ -74,12 +83,20 @@ pub fn render(
     for region in &storey.floors.regions {
         draw_wall_edges(painter, &t, region, display_mode);
     }
+    // Selected wall regions get their plan footprint (base edge) drawn as a
+    // thick highlight on top, so an individually-picked wall reads in plan
+    // (where walls otherwise collapse to the shared floor outline).
+    for wall in &storey.walls.regions {
+        if selected.contains(&wall.id) {
+            draw_selected_wall_2d(painter, &t, wall);
+        }
+    }
 
     // Roof regions (when populated) — drawn as dashed outlines above the floor.
     // Today Storey.roofs.regions is empty by default; this loop renders nothing
     // until the controller populates ceilings.
     if !storey.roofs.regions.is_empty() {
-        draw_roof_overlay(painter, &t, storey, display_mode);
+        draw_roof_overlay(painter, &t, storey, display_mode, selected);
     }
 
     // Windows + doors. Roof windows (windows whose vertices form a horizontal quad)
@@ -224,6 +241,7 @@ fn draw_floor(
     t: &Transform2d,
     region: &FloorRegion,
     display_mode: DisplayMode,
+    selected: &HashSet<ItemId>,
 ) {
     // Pull unique exterior vertices (drop a trailing closing duplicate if geo
     // included one — `earcutr` expects each vertex once around the ring).
@@ -236,7 +254,14 @@ fn draw_floor(
     }
 
     let screen_pts: Vec<egui::Pos2> = coords.iter().map(|c| t.apply(c.x, c.y)).collect();
-    let fill = color_for(DisplayMode::Floors, display_mode, style::FLOOR_FILL);
+    // A SELECTED floor region is SHADED with a strong blue fill so it's
+    // unmistakable which floors are picked; otherwise the usual faint fill
+    // (faded when another surface kind is the focus).
+    let fill = if selected.contains(&region.id) {
+        style::highlight_fill(style::FLOOR_LINE)
+    } else {
+        color_for(DisplayMode::Floors, display_mode, style::FLOOR_FILL)
+    };
     let line_color = color_for(DisplayMode::Floors, display_mode, style::FLOOR_LINE);
 
     // Triangulate with earcutr so concave shapes (L, U, etc.) fill correctly.
@@ -276,12 +301,12 @@ fn draw_wall_edges(
     if coords.len() < 2 {
         return;
     }
-    let wall_color = color_for(DisplayMode::Walls, display_mode, style::WALL_LINE);
     // Only draw the dedicated wall stroke when it should be visible; otherwise
     // the floor outline already shows the edges and we don't want to double-stroke.
     if !matches!(display_mode, DisplayMode::Walls | DisplayMode::AllSurfaces) {
         return;
     }
+    let wall_color = color_for(DisplayMode::Walls, display_mode, style::WALL_LINE);
     let stroke = egui::Stroke::new(2.5, wall_color);
     for i in 0..(coords.len() - 1) {
         let a = t.apply(coords[i].x, coords[i].y);
@@ -290,14 +315,36 @@ fn draw_wall_edges(
     }
 }
 
+/// One SELECTED wall region's plan footprint: its base edge (the first two
+/// exterior vertices, which `WallRegions::regenerate` lays down as the wall's
+/// ground line) drawn THICK in the highlight orange so a picked wall is
+/// obvious in plan.
+fn draw_selected_wall_2d(painter: &egui::Painter, t: &Transform2d, wall: &WallRegion) {
+    let verts = &wall.polygon.exterior;
+    if verts.len() < 2 {
+        return;
+    }
+    let a = t.apply(verts[0].x, verts[0].y);
+    let b = t.apply(verts[1].x, verts[1].y);
+    painter.line_segment(
+        [a, b],
+        egui::Stroke::new(5.0, style::highlight_fill(style::WALL_LINE)),
+    );
+}
+
 fn draw_roof_overlay(
     painter: &egui::Painter,
     t: &Transform2d,
     storey: &Storey,
     display_mode: DisplayMode,
+    selected: &HashSet<ItemId>,
 ) {
     let color = color_for(DisplayMode::Roofs, display_mode, style::ROOF_LINE);
     let stroke = egui::Stroke::new(1.0, color);
+    // A SELECTED ceiling region is SHADED with a translucent orange fill (under
+    // the outline) so its roof footprint reads explicitly — otherwise the roofs
+    // are just thin dashed outlines.
+    let fill = style::highlight_fill(style::ROOF_LINE);
     for region in &storey.roofs.regions {
         let pts: Vec<egui::Pos2> = region
             .polygon
@@ -306,6 +353,9 @@ fn draw_roof_overlay(
             .map(|p| t.apply(p.x, p.y))
             .collect();
         if pts.len() >= 3 {
+            if selected.contains(&region.id) {
+                fill_polygon(painter, &pts, fill);
+            }
             painter.add(egui::Shape::closed_line(pts, stroke));
         }
     }

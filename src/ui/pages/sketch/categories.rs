@@ -10,10 +10,12 @@
 //! mode toggles (living area / construction year / exposure / floor steps /
 //! ceiling steps) keep their controller-enforced exclusive-mode semantics.
 
-use super::{SketchEvent, SketchView};
+use super::{structure, SketchEvent, SketchView};
+use crate::controller::app_controller::{AssessmentPhase, StructureSelection};
 use crate::number_entry::parse_dimension_expression;
 use crate::ui::pages::events::UiEvent;
 use crate::ui::widgets::{metre_input, HintExt};
+use datatypes::ber::structural::SurfaceCounts;
 use domain::sketch::EditTools;
 
 /// One tool/toggle slot inside a category.
@@ -216,6 +218,15 @@ pub struct ToolFlags {
     pub can_undo: bool,
     pub can_redo: bool,
     pub autosave_status: Option<String>,
+    /// The current assessment phase — selects which toolset the panel shows
+    /// (Mapping categories vs. the Structure surface panel).
+    pub phase: AssessmentPhase,
+    /// The active Structure-phase surface selection — drives which Select
+    /// subtool reads as selected.
+    pub structure_selection: Option<StructureSelection>,
+    /// Current storey's wall / roof / floor counts — the Structure panel's
+    /// per-surface read-out.
+    pub surface_counts: SurfaceCounts,
 }
 
 impl ToolFlags {
@@ -245,6 +256,9 @@ impl ToolFlags {
             can_undo: view.can_undo,
             can_redo: view.can_redo,
             autosave_status: view.autosave_status.clone(),
+            phase: view.current_phase,
+            structure_selection: view.structure_selection,
+            surface_counts: view.surface_counts,
         }
     }
 }
@@ -257,6 +271,20 @@ pub fn ribbon<F: FnMut(UiEvent)>(
     state: &mut CategoryUiState,
     on_event: &mut F,
 ) {
+    // The Structure phase swaps the Mapping category tabs for the surface
+    // inspector; the bottom strip (undo/redo/fit/dev) stays in both.
+    if flags.phase == AssessmentPhase::Structure {
+        structure::structure_panel(
+            ui,
+            flags.structure_selection,
+            flags.surface_counts,
+            !flags.read_only,
+            on_event,
+        );
+        ui.separator();
+        bottom_tools(ui, flags, state, on_event);
+        return;
+    }
     ui.horizontal(|ui| {
         for (i, cat) in CATEGORIES.iter().enumerate() {
             if ui
@@ -285,6 +313,18 @@ pub fn side_panel<F: FnMut(UiEvent)>(
     state: &mut CategoryUiState,
     on_event: &mut F,
 ) {
+    if flags.phase == AssessmentPhase::Structure {
+        structure::structure_panel(
+            ui,
+            flags.structure_selection,
+            flags.surface_counts,
+            !flags.read_only,
+            on_event,
+        );
+        ui.separator();
+        bottom_tools(ui, flags, state, on_event);
+        return;
+    }
     for cat in CATEGORIES {
         egui::CollapsingHeader::new(cat.name)
             .default_open(true)

@@ -20,6 +20,7 @@
 //   - `storeys`       — storey switching + the deferred-derive pipeline.
 //   - `strokes`       — sketch entry points + the apply-stroke family.
 //   - `view`          — canvas pan/zoom.
+mod assessment_phase;
 mod ceiling;
 mod ceiling_steps;
 mod checklist;
@@ -30,8 +31,14 @@ mod exposure;
 mod living_areas;
 mod openings;
 mod phase_regions;
+mod structure;
 
+pub use assessment_phase::{AssessmentPhase, SelectMode, StructureSelection};
+// `SurfaceKind` is the data-model surface taxonomy — it lives in `datatypes`
+// (the queries dispatch on it) and is re-exported here so UI + controller call
+// sites keep reaching it via `app_controller::SurfaceKind`.
 pub use checklist::{ChecklistItem, ChecklistStatus};
+pub use datatypes::ber::structural::SurfaceKind;
 use document::{
     ActiveShape, CeilingStepRegion, DimensionPrompt, DimensionState, Document, EditState,
     MovedCoordKind, PendingArc, PhaseRegion, ShapeSlot, StepRegion, StoreyDoc,
@@ -48,7 +55,7 @@ use crate::engine::dataloader::DataLoader;
 use crate::engine::Db;
 use datatypes::ber::ber_struct::Ber;
 use datatypes::ber::common::{ConstructionPhase, ConstructionPhases, ItemId};
-use datatypes::ber::structural::{FloorRegions, Storey, WallExposure};
+use datatypes::ber::structural::{FloorRegions, Storey, SurfaceCounts, WallExposure};
 use domain::points::{to_f32, Point2f32, Point2f64};
 use domain::sketch::{DisplayMode, EditTools, SketchMode};
 use manip_2d_plan::{
@@ -296,6 +303,22 @@ pub struct AppController {
     view: ViewTransform,
     /// Runtime thresholds loaded from `tuning.yaml` (new-storey + collinearity).
     tuning: crate::config::Tuning,
+    /// The assessor's current workflow phase (Mapping → Structure → Objects) —
+    /// drives the Sketch page's toolset, checklist, and canvas overlays.
+    current_phase: AssessmentPhase,
+    /// The active Structure-phase surface selection (a Select subtool). Drives
+    /// which surface kind the canvas shades; `None` shades nothing. Transient
+    /// interaction state — Structure-only, cleared on phase switch.
+    structure_selection: Option<StructureSelection>,
+    /// The Structure-phase SELECTED region ids (walls/roofs/floors of the
+    /// active kind) — the canvas shades exactly these. Transient; cleared on
+    /// phase switch / kind change / Deselect all.
+    structure_selected: HashSet<ItemId>,
+    /// A Structure-phase CARVE that split the storey into two candidate regions
+    /// (the living-area cut, reused) — the assessor taps one and every surface
+    /// of the active kind inside it joins the selection. `None` when no carve
+    /// is awaiting a pick.
+    pending_select_cut: Option<[FloorPlan; 2]>,
 }
 
 impl AppController {
@@ -349,6 +372,10 @@ impl AppController {
             redo: Vec::new(),
             view: ViewTransform::default(),
             tuning: crate::config::Tuning::load(),
+            current_phase: AssessmentPhase::default(),
+            structure_selection: None,
+            structure_selected: HashSet::new(),
+            pending_select_cut: None,
         }
     }
 }
