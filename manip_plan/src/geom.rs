@@ -521,6 +521,102 @@ pub(crate) fn ring_signed_area2(pts: &[Point2f32]) -> f32 {
     s
 }
 
+/// The perpendicular offset `(dx, dy)` that moves an axis-aligned wall toward
+/// the middle of the local interior of ring `polygon` — for placing a dimension
+/// arrow inside the room rather than on the wall. Casts a perpendicular from the
+/// wall midpoint toward the ring centroid and returns half the distance to the
+/// nearest opposing parallel edge. `None` if the wall isn't axis-aligned, the
+/// ring has < 4 vertices, or no opposing edge is found.
+pub fn interior_perpendicular_offset(
+    polygon: &[(f64, f64)],
+    wall_a: (f64, f64),
+    wall_b: (f64, f64),
+) -> Option<(f64, f64)> {
+    let n = polygon.len();
+    if n < 4 {
+        return None;
+    }
+    let mid_x = (wall_a.0 + wall_b.0) * 0.5;
+    let mid_y = (wall_a.1 + wall_b.1) * 0.5;
+
+    let centroid_x: f64 = polygon.iter().map(|p| p.0).sum::<f64>() / n as f64;
+    let centroid_y: f64 = polygon.iter().map(|p| p.1).sum::<f64>() / n as f64;
+
+    let eps = 1e-4_f64;
+    let dx_w = wall_b.0 - wall_a.0;
+    let dy_w = wall_b.1 - wall_a.1;
+    let is_horizontal = dy_w.abs() < eps;
+    let is_vertical = dx_w.abs() < eps;
+    if !(is_horizontal ^ is_vertical) {
+        // Diagonal or degenerate wall — no axis-aligned interior offset.
+        return None;
+    }
+
+    if is_horizontal {
+        let direction = (centroid_y - mid_y).signum();
+        if direction == 0.0 {
+            return None;
+        }
+        let mut closest: Option<f64> = None;
+        for i in 0..n {
+            let a = polygon[i];
+            let b = polygon[(i + 1) % n];
+            if (a.1 - b.1).abs() > eps {
+                continue; // not horizontal
+            }
+            let x_min = a.0.min(b.0);
+            let x_max = a.0.max(b.0);
+            if mid_x < x_min - eps || mid_x > x_max + eps {
+                continue;
+            }
+            let edge_dy = a.1 - mid_y;
+            if edge_dy.abs() < eps {
+                continue; // the wall itself
+            }
+            if edge_dy.signum() != direction {
+                continue;
+            }
+            let dist = edge_dy.abs();
+            if closest.map_or(true, |d| dist < d) {
+                closest = Some(dist);
+            }
+        }
+        let depth = closest?;
+        Some((0.0, direction * depth * 0.5))
+    } else {
+        let direction = (centroid_x - mid_x).signum();
+        if direction == 0.0 {
+            return None;
+        }
+        let mut closest: Option<f64> = None;
+        for i in 0..n {
+            let a = polygon[i];
+            let b = polygon[(i + 1) % n];
+            if (a.0 - b.0).abs() > eps {
+                continue;
+            }
+            let y_min = a.1.min(b.1);
+            let y_max = a.1.max(b.1);
+            if mid_y < y_min - eps || mid_y > y_max + eps {
+                continue;
+            }
+            let edge_dx = a.0 - mid_x;
+            if edge_dx.abs() < eps {
+                continue;
+            }
+            if edge_dx.signum() != direction {
+                continue;
+            }
+            let dist = edge_dx.abs();
+            if closest.map_or(true, |d| dist < d) {
+                closest = Some(dist);
+            }
+        }
+        let depth = closest?;
+        Some((direction * depth * 0.5, 0.0))
+    }
+}
+
 /// Whether `(x, y)` lies inside the closed ring `pts` (ray-casting / even-odd
 /// rule). The ring is taken as implicitly closed (last vertex joins first); a
 /// repeated closing vertex is harmless. Degenerate rings (<3 vertices) contain

@@ -133,6 +133,43 @@ impl Storey {
         }
     }
 
+    /// The floor-region ring (world metres, closing duplicate dropped) whose
+    /// boundary passes through BOTH `wall_a` and `wall_b` — the local room a
+    /// wall belongs to, e.g. for placing a dimension arrow in its interior.
+    /// `None` if no region's outline contains both endpoints.
+    pub fn floor_ring_containing_wall(
+        &self,
+        wall_a: (f64, f64),
+        wall_b: (f64, f64),
+    ) -> Option<Vec<(f64, f64)>> {
+        let eps = 1e-3_f64;
+        for region in &self.floors.regions {
+            let mut coords: Vec<(f64, f64)> = region
+                .polygon
+                .exterior()
+                .coords()
+                .map(|c| (c.x, c.y))
+                .collect();
+            // Drop the closing duplicate that geo adds.
+            if coords.len() >= 2 && {
+                let first = coords[0];
+                let last = coords[coords.len() - 1];
+                (first.0 - last.0).abs() < eps && (first.1 - last.1).abs() < eps
+            } {
+                coords.pop();
+            }
+            let has = |p: (f64, f64)| {
+                coords
+                    .iter()
+                    .any(|q| (q.0 - p.0).abs() < eps && (q.1 - p.1).abs() < eps)
+            };
+            if has(wall_a) && has(wall_b) {
+                return Some(coords);
+            }
+        }
+        None
+    }
+
     /// Drop all DERIVED geometry — floors, walls, living areas, roofs, and the
     /// fan apexes over them — back to empty. The persist path calls this when
     /// the outline isn't finalised yet: that geometry is still pixel/incomplete
