@@ -650,15 +650,7 @@ pub struct PositionPromptUiData {
 /// World-coord endpoints of the wall starting at `vid` in `plan`. `None` when
 /// the vertex no longer exists (stale prompt) or the ring is degenerate.
 fn wall_positions_in(plan: &FloorPlan, vid: VertexId) -> Option<WallPositions> {
-    let (ring, edge_start) = plan.find_vertex(vid)?;
-    let polygons = plan.polygons();
-    let pts = polygons.get(ring)?;
-    let n = pts.len();
-    if n < 2 {
-        return None;
-    }
-    let a = pts.get(edge_start)?;
-    let b = pts.get((edge_start + 1) % n)?;
+    let (a, b) = plan.wall_endpoints(vid)?;
     Some(WallPositions {
         wall_a: (a.x as f64, a.y as f64),
         wall_b: (b.x as f64, b.y as f64),

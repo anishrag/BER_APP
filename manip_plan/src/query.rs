@@ -45,6 +45,47 @@ impl FloorPlan {
         edges
     }
 
+    /// The world-coord endpoints `(a, b)` of the wall starting at vertex `vid`
+    /// — the ring edge from `vid` to its successor. `None` when the vertex is
+    /// gone (a stale prompt) or its ring is degenerate (< 2 vertices).
+    pub fn wall_endpoints(&self, vid: VertexId) -> Option<(Point2f32, Point2f32)> {
+        let (ring, edge_start) = self.find_vertex(vid)?;
+        let polygons = self.polygons();
+        let pts = polygons.get(ring)?;
+        let n = pts.len();
+        if n < 2 {
+            return None;
+        }
+        let a = *pts.get(edge_start)?;
+        let b = *pts.get((edge_start + 1) % n)?;
+        Some((a, b))
+    }
+
+    /// For each wall in ring 0 whose length is KNOWN (its parameter is in
+    /// `known_params`), its endpoints and length: `((ax, ay), (bx, by), len)`
+    /// with coordinates in f64. The label set the UI draws on dimensioned
+    /// living-area walls. Empty for a degenerate ring (< 3 vertices).
+    pub fn known_length_wall_segments(
+        &self,
+        known_params: &HashSet<ParameterId>,
+    ) -> Vec<((f64, f64), (f64, f64), f32)> {
+        let pts = self.get_points();
+        let n = pts.len();
+        if n < 3 {
+            return Vec::new();
+        }
+        self.walls_with_known_length(known_params)
+            .into_iter()
+            .filter(|(ring, _)| *ring == 0)
+            .filter_map(|(ring, e)| {
+                let a = pts[e % n];
+                let b = pts[(e + 1) % n];
+                let len = self.wall_length(ring, e)?;
+                Some(((a.x as f64, a.y as f64), (b.x as f64, b.y as f64), len))
+            })
+            .collect()
+    }
+
     /// Edges that are neither horizontal nor vertical (off by more than 1mm on
     /// BOTH axes) — i.e. visibly slanted "not straight" walls. Returns
     /// `(ring, edge_start, a, b)` for each. Empty when the plan is fully

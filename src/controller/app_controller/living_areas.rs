@@ -133,21 +133,7 @@ impl AppController {
                 } else {
                     (&slot.floor_plan, &slot.dimensioning)
                 };
-                let pts = plan.get_points();
-                let n = pts.len();
-                if n < 3 {
-                    return Vec::new();
-                }
-                plan.walls_with_known_length(&dim.known_params)
-                    .into_iter()
-                    .filter(|(ring, _)| *ring == 0)
-                    .filter_map(|(ring, e)| {
-                        let a = pts[e % n];
-                        let b = pts[(e + 1) % n];
-                        let len = plan.wall_length(ring, e)?;
-                        Some(((a.x as f64, a.y as f64), (b.x as f64, b.y as f64), len))
-                    })
-                    .collect()
+                plan.known_length_wall_segments(&dim.known_params)
             })
             .collect()
     }
