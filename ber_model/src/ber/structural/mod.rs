@@ -7,7 +7,6 @@
 mod ceiling_regions;
 mod constructions;
 mod floor_regions;
-mod poly3d;
 mod roof_geom;
 mod storey;
 mod wall_regions;
@@ -15,10 +14,14 @@ mod wall_regions;
 pub use ceiling_regions::*;
 pub use constructions::*;
 pub use floor_regions::*;
-pub use poly3d::*;
 pub use roof_geom::*;
 pub use storey::*;
 pub use wall_regions::*;
+
+// The 3D polygon primitive lives in `manip_plan` (the geometry crate) and is
+// re-exported here so serialized region storage and the existing
+// `ber_model::ber::structural::Polygon3D` paths are unchanged.
+pub use manip_plan::{Polygon3D, SplitLine3D};
 
 // The test module below reaches external names (domain points, BER common ids,
 // geo + serde types) through `use super::*`; in the pre-split single file these

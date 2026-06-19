@@ -1,12 +1,14 @@
+//! 3D planar-polygon primitive shared across the plan/region geometry: a ring
+//! of 3D points with plane queries and an in-plane split. Moved here from the
+//! BER data model (2026-06) so the geometry crate owns the 3D kernel; the data
+//! model re-exports it for serialized region storage.
+
 use geo::{Coord, LineString, Polygon};
-use serde::{Deserialize, Serialize};
 
 use domain::points::{Point3f64, Vector3f64};
 
-#[allow(unused_imports)]
-use super::*;
-
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct Polygon3D {
     pub exterior: Vec<Point3f64>,
 }
@@ -26,9 +28,9 @@ impl Polygon3D {
     }
 
     /// Unit normal of the polygon's plane (from its first three vertices) and
-    /// the plane's distance-to-origin term; `None` when degenerate. Private
-    /// helper for [`Polygon3D::split_by_line`].
-    pub(crate) fn get_normal_and_distance_to_origin(&self) -> Option<(Vector3f64, f64)> {
+    /// the plane's distance-to-origin term; `None` when degenerate. Helper for
+    /// [`Polygon3D::split_by_line`].
+    pub fn get_normal_and_distance_to_origin(&self) -> Option<(Vector3f64, f64)> {
         if self.exterior.len() < 3 {
             return None;
         }
@@ -59,7 +61,7 @@ impl Polygon3D {
     /// roof window's plan rectangle onto a (possibly sloped) ceiling region. A
     /// flat region returns its constant z. `None` if degenerate or the plane is
     /// vertical (zero z-normal).
-    pub(crate) fn plane_z(&self, x: f64, y: f64) -> Option<f64> {
+    pub fn plane_z(&self, x: f64, y: f64) -> Option<f64> {
         let (n, _) = self.get_normal_and_distance_to_origin()?;
         if n.z.abs() < 1e-9 {
             return None;

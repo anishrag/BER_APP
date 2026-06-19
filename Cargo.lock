@@ -561,6 +561,7 @@ dependencies = [
  "domain",
  "geo",
  "log",
+ "manip_plan",
  "serde",
  "serde_json",
  "uuid",
