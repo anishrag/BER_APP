@@ -1,106 +1,29 @@
 //! The Structure-phase tool area — the swap-in for the Mapping categories when
 //! the workspace is in the Structure phase.
 //!
-//! Layout: each surface KIND (Walls / Roofs / Floors) is a collapsible HEADING.
-//! Under it sit two kinds of subtool:
+//! Layout: a global MODE row (Wall / Roof / Floor) picks which surface kind the
+//! tools act on, then one global SELECT row (`Click` / `Carve` / `All` /
+//! `Remaining` + `Deselect all`) selects surfaces of that kind. Exactly one mode
+//! is active; the canvas shades the selected surfaces of that kind.
 //!
-//! - **Select** subtools (`Click` / `Carve` / `All` / `Remaining`) plus a
-//!   `Deselect all` button: pick which surfaces of that kind are in scope.
-//!   Exactly one Select subtool is active across the whole panel; the canvas
-//!   shades the selected surfaces. `Click` taps surfaces one at a time; `Carve`
-//!   draws a cut (the living-area flow) and selects the surfaces inside the
-//!   resolved region; `All`/`Remaining` fill the selection (`Remaining` =
-//!   `All` until its criteria are wired in).
-//! - **Set** subtools, grouped under their own headings (Construction phase /
-//!   Wall type / …): the per-region properties to stamp onto the selection.
-//!   These are PLACEHOLDERS today — they render but do nothing.
+//! Per-surface ATTRIBUTE editing (construction phase / type / build-up) is a
+//! separate flow over the current selection — NOT page tools — so it lives
+//! elsewhere; this panel is only the mode + selection tools.
 
 use ber_model::ber::structural::SurfaceCounts;
 
 use super::SketchEvent;
-use crate::controller::app_controller::{SelectMode, StructureSelection, SurfaceKind};
+use crate::controller::app_controller::{SelectMode, SurfaceKind};
 use crate::ui::pages::events::UiEvent;
 
-/// A group of Set placeholder buttons under its own sub-heading.
-struct SetGroup {
-    heading: &'static str,
-    options: &'static [&'static str],
-}
-
-/// One surface kind's section: the heading + its Set groups. (The Select
-/// subtools are the same three for every kind, so they're not in the spec.)
-struct SurfaceSpec {
-    kind: SurfaceKind,
-    label: &'static str,
-    sets: &'static [SetGroup],
-}
-
-/// Placeholder Set toolset per surface kind — the properties to set on each
-/// region. Values are stand-ins so the panel shape is real; wiring comes later.
-const SURFACES: &[SurfaceSpec] = &[
-    SurfaceSpec {
-        kind: SurfaceKind::Walls,
-        label: "Walls",
-        sets: &[
-            SetGroup {
-                heading: "Construction phase",
-                options: &["Existing", "Extension", "New build"],
-            },
-            SetGroup {
-                heading: "Wall type",
-                options: &["Cavity", "Filled cavity", "Hollow block", "Timber", "ICF"],
-            },
-            SetGroup {
-                heading: "Build-up",
-                options: &["Default", "Non-heat-loss"],
-            },
-        ],
-    },
-    SurfaceSpec {
-        kind: SurfaceKind::Roofs,
-        label: "Roofs",
-        sets: &[
-            SetGroup {
-                heading: "Construction phase",
-                options: &["Existing", "Extension", "New build"],
-            },
-            SetGroup {
-                heading: "Roof type",
-                options: &[
-                    "Flat",
-                    "Sloped (rafter)",
-                    "Sloped (ceiling)",
-                    "Sloped (both)",
-                    "Non-heat-loss",
-                ],
-            },
-            SetGroup {
-                heading: "Build-up",
-                options: &["Default", "Non-heat-loss"],
-            },
-        ],
-    },
-    SurfaceSpec {
-        kind: SurfaceKind::Floors,
-        label: "Floors",
-        sets: &[
-            SetGroup {
-                heading: "Construction phase",
-                options: &["Existing", "Extension", "New build"],
-            },
-            SetGroup {
-                heading: "Floor type",
-                options: &["Solid", "Suspended", "Exposed", "Non-heat-loss"],
-            },
-            SetGroup {
-                heading: "Build-up",
-                options: &["Default", "Non-heat-loss"],
-            },
-        ],
-    },
+/// The three MODES, in panel order.
+const MODES: &[(SurfaceKind, &str)] = &[
+    (SurfaceKind::Walls, "Walls"),
+    (SurfaceKind::Roofs, "Roofs"),
+    (SurfaceKind::Floors, "Floors"),
 ];
 
-/// The Select subtools, in panel order.
+/// The global Select subtools, in panel order.
 const SELECT_MODES: &[(SelectMode, &str)] = &[
     (SelectMode::Click, "Click"),
     (SelectMode::Carve, "Carve"),
@@ -108,74 +31,56 @@ const SELECT_MODES: &[(SelectMode, &str)] = &[
     (SelectMode::Remaining, "Remaining"),
 ];
 
-/// Render the Structure tool area into `ui` (the ribbon slot in portrait, the
-/// side panel in landscape). `selection` is the active Select subtool (drives
-/// which buttons read as selected); `counts` shows per-kind element counts on
-/// the headings; `enabled` gates interaction (off on the read-only All tab).
+/// Render the Structure tool area: the global MODE row (with per-kind counts) +
+/// the global SELECT row. `kind` is the active mode (reads as selected);
+/// `select` is the active Select subtool; `enabled` gates interaction (off on
+/// the read-only All-storeys tab).
 pub fn structure_panel<F: FnMut(UiEvent)>(
     ui: &mut egui::Ui,
-    selection: Option<StructureSelection>,
+    kind: SurfaceKind,
+    select: Option<SelectMode>,
     counts: SurfaceCounts,
     enabled: bool,
     on_event: &mut F,
 ) {
-    for spec in SURFACES {
-        let count = count_for(spec.kind, counts);
-        egui::CollapsingHeader::new(format!("{}  ·  {count}", spec.label))
-            .default_open(true)
-            .show(ui, |ui| {
-                select_row(ui, spec.kind, selection, enabled, on_event);
-                for group in spec.sets {
-                    set_group(ui, group, enabled);
-                }
-            });
-    }
-}
+    ui.label(egui::RichText::new("Mode").size(11.0).weak());
+    ui.horizontal_wrapped(|ui| {
+        for (m, label) in MODES {
+            let active = kind == *m;
+            let count = count_for(*m, counts);
+            if ui
+                .add_enabled(
+                    enabled,
+                    egui::Button::selectable(active, format!("{label}  ·  {count}")),
+                )
+                .clicked()
+                && !active
+            {
+                on_event(UiEvent::Sketch(SketchEvent::SetStructureKind(*m)));
+            }
+        }
+    });
 
-/// The Select / Select all / Select remaining row for one surface kind. Each is
-/// a toggle: clicking the active one clears the selection (un-shades).
-fn select_row<F: FnMut(UiEvent)>(
-    ui: &mut egui::Ui,
-    kind: SurfaceKind,
-    selection: Option<StructureSelection>,
-    enabled: bool,
-    on_event: &mut F,
-) {
+    ui.add_space(2.0);
     ui.label(egui::RichText::new("Select").size(11.0).weak());
     ui.horizontal_wrapped(|ui| {
         for (mode, label) in SELECT_MODES {
-            let active = selection == Some(StructureSelection { kind, mode: *mode });
+            let active = select == Some(*mode);
             if ui
                 .add_enabled(enabled, egui::Button::selectable(active, *label))
                 .clicked()
             {
-                let next = if active {
-                    None
-                } else {
-                    Some(StructureSelection { kind, mode: *mode })
-                };
-                on_event(UiEvent::Sketch(SketchEvent::SetStructureSelection(next)));
+                // Toggle: clicking the active subtool deactivates it.
+                let next = if active { None } else { Some(*mode) };
+                on_event(UiEvent::Sketch(SketchEvent::SetStructureSelectMode(next)));
             }
         }
-        // Clear the current selection without leaving the Select tool.
+        // Clear the current selection without leaving the active Select subtool.
         if ui
             .add_enabled(enabled, egui::Button::new("Deselect all").small())
             .clicked()
         {
             on_event(UiEvent::Sketch(SketchEvent::DeselectAllStructure));
-        }
-    });
-}
-
-/// A Set sub-heading with its row of placeholder value buttons. The buttons do
-/// nothing yet (the set logic is wired in a later step).
-fn set_group(ui: &mut egui::Ui, group: &SetGroup, enabled: bool) {
-    ui.add_space(2.0);
-    ui.label(egui::RichText::new(group.heading).size(11.0).weak());
-    ui.horizontal_wrapped(|ui| {
-        for option in group.options {
-            // Placeholder: rendered but inert until the set events are wired.
-            let _ = ui.add_enabled(enabled, egui::Button::new(*option).small());
         }
     });
 }

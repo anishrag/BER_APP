@@ -25,12 +25,13 @@ impl AppController {
     /// selection. The active [`StructureSelection::kind`] decides which regions
     /// are hit-tested; no-op when no Select subtool is active.
     pub fn toggle_structure_surface_at(&mut self, world_x: f64, world_y: f64, tol: f64) {
-        let Some(sel) = self.structure_selection else {
+        if self.structure_select.is_none() {
             return;
-        };
+        }
+        let kind = self.structure_kind;
         let hit = self
             .current_storey()
-            .and_then(|s| s.surface_at(sel.kind, world_x, world_y, tol));
+            .and_then(|s| s.surface_at(kind, world_x, world_y, tol));
         if let Some(id) = hit {
             if !self.structure_selected.insert(id) {
                 self.structure_selected.remove(&id);
@@ -55,9 +56,9 @@ impl AppController {
     /// drawn walls are dimensioned (see [`commit_structure_split`]).
     pub fn apply_structure_carve_stroke(&mut self, world_points: &[(f32, f32)]) {
         let _ = self.sketch_engine.take_stroke_raw();
-        let Some(sel) = self.structure_selection else {
+        if self.structure_select.is_none() {
             return;
-        };
+        }
         let pts: Vec<Point2f32> = world_points
             .iter()
             .map(|(x, y)| Point2f32::new(*x, *y))
@@ -84,7 +85,7 @@ impl AppController {
                 }
                 let undo = self.current_history_snapshot();
                 let slot = self.pinned_subarea_slot(&boundary, plan);
-                self.begin_structure_split_dimensioning(slot, sel.kind, undo);
+                self.begin_structure_split_dimensioning(slot, self.structure_kind, undo);
             }
             Err(e) => log::error!("structure carve_or_cut: {}", e),
         }
@@ -113,9 +114,9 @@ impl AppController {
     /// Pick which candidate region to split: it becomes the in-flight split
     /// shape and starts dimensioning. A tap outside both cancels.
     pub fn choose_structure_cut_region(&mut self, world_x: f32, world_y: f32) {
-        let Some(sel) = self.structure_selection else {
+        if self.structure_select.is_none() {
             return;
-        };
+        }
         let Some([a, b]) = self.pending_structure_cut.take() else {
             return;
         };
@@ -128,7 +129,7 @@ impl AppController {
         };
         if let Some(slot) = chosen {
             let undo = self.current_history_snapshot();
-            self.begin_structure_split_dimensioning(slot, sel.kind, undo);
+            self.begin_structure_split_dimensioning(slot, self.structure_kind, undo);
         }
     }
 
@@ -268,11 +269,12 @@ impl AppController {
     /// Add every surface of the active kind inside `region_ring` (world coords)
     /// to the selection — the carve-pick query, delegated to the storey.
     fn select_surfaces_in_region(&mut self, region_ring: &[Point2f64]) {
-        let Some(sel) = self.structure_selection else {
+        if self.structure_select.is_none() {
             return;
-        };
+        }
+        let kind = self.structure_kind;
         let hits = match self.current_storey() {
-            Some(storey) => storey.surfaces_in_ring(sel.kind, region_ring),
+            Some(storey) => storey.surfaces_in_ring(kind, region_ring),
             None => return,
         };
         self.structure_selected.extend(hits);

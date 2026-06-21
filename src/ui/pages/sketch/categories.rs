@@ -11,7 +11,7 @@
 //! ceiling steps) keep their controller-enforced exclusive-mode semantics.
 
 use super::{structure, SketchEvent, SketchView};
-use crate::controller::app_controller::{AssessmentPhase, StructureSelection};
+use crate::controller::app_controller::{AssessmentPhase, SelectMode, SurfaceKind};
 use crate::number_entry::parse_dimension_expression;
 use crate::ui::pages::events::UiEvent;
 use crate::ui::widgets::{metre_input, HintExt};
@@ -221,9 +221,11 @@ pub struct ToolFlags {
     /// The current assessment phase — selects which toolset the panel shows
     /// (Mapping categories vs. the Structure surface panel).
     pub phase: AssessmentPhase,
-    /// The active Structure-phase surface selection — drives which Select
-    /// subtool reads as selected.
-    pub structure_selection: Option<StructureSelection>,
+    /// The active Structure-phase MODE (Wall/Roof/Floor) — drives which mode
+    /// button reads as selected.
+    pub structure_kind: SurfaceKind,
+    /// The active global Select subtool — drives which reads as selected.
+    pub structure_select: Option<SelectMode>,
     /// Current storey's wall / roof / floor counts — the Structure panel's
     /// per-surface read-out.
     pub surface_counts: SurfaceCounts,
@@ -257,7 +259,8 @@ impl ToolFlags {
             can_redo: view.can_redo,
             autosave_status: view.autosave_status.clone(),
             phase: view.current_phase,
-            structure_selection: view.structure_selection,
+            structure_kind: view.structure_kind,
+            structure_select: view.structure_select,
             surface_counts: view.surface_counts,
         }
     }
@@ -276,7 +279,8 @@ pub fn ribbon<F: FnMut(UiEvent)>(
     if flags.phase == AssessmentPhase::Structure {
         structure::structure_panel(
             ui,
-            flags.structure_selection,
+            flags.structure_kind,
+            flags.structure_select,
             flags.surface_counts,
             !flags.read_only,
             on_event,
@@ -316,7 +320,8 @@ pub fn side_panel<F: FnMut(UiEvent)>(
     if flags.phase == AssessmentPhase::Structure {
         structure::structure_panel(
             ui,
-            flags.structure_selection,
+            flags.structure_kind,
+            flags.structure_select,
             flags.surface_counts,
             !flags.read_only,
             on_event,

@@ -871,16 +871,10 @@ pub(super) fn render<F: FnMut(UiEvent)>(
     // the CARVE mode instead captures a stroke (handled in the stroke path
     // below). All Mapping primary input is gated off (`primary_available`).
     let structure_phase = view.current_phase == AssessmentPhase::Structure;
-    let structure_click = structure_phase
-        && matches!(
-            view.structure_selection.map(|s| s.mode),
-            Some(SelectMode::Click)
-        );
-    let structure_carve = structure_phase
-        && matches!(
-            view.structure_selection.map(|s| s.mode),
-            Some(SelectMode::Carve)
-        );
+    let structure_click =
+        structure_phase && matches!(view.structure_select, Some(SelectMode::Click));
+    let structure_carve =
+        structure_phase && matches!(view.structure_select, Some(SelectMode::Carve));
     if structure_click && matches!(mode, SketchMode::Storey2D) && !touch_nav_active {
         if let Some(t) = canvas_transform(ber, current_storey_idx, rect, vp, false) {
             let tol_world = (12.0 / t.scale()) as f64;

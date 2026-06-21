@@ -31,15 +31,6 @@ pub enum SelectMode {
     Remaining,
 }
 
-/// The active Structure-phase selection: a surface kind + which Select subtool
-/// is on. Drives the canvas shading and is the target the (placeholder) Set
-/// subtools will act on.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct StructureSelection {
-    pub kind: SurfaceKind,
-    pub mode: SelectMode,
-}
-
 /// Which assessment phase the workspace is currently showing.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum AssessmentPhase {
@@ -70,14 +61,18 @@ impl AppController {
         // moves to Structure, and a Structure selection must not linger back in
         // Mapping. Clear first, then set the phase's default canvas display.
         self.exit_mapping_modes();
-        self.structure_selection = None;
+        // Reset the Structure tools: default to Wall mode with no Select subtool
+        // active and an empty selection ("first we're in wall mode").
+        self.structure_kind = SurfaceKind::Walls;
+        self.structure_select = None;
         self.structure_selected.clear();
         self.pending_structure_cut = None;
         self.structure_split_kind = None;
         self.current_phase = phase;
         let display = match phase {
             AssessmentPhase::Mapping => DisplayMode::FloorMapDims,
-            AssessmentPhase::Structure | AssessmentPhase::Objects => DisplayMode::AllSurfaces,
+            AssessmentPhase::Structure => display_mode_for(self.structure_kind),
+            AssessmentPhase::Objects => DisplayMode::AllSurfaces,
         };
         self.set_display_mode(display);
     }
@@ -95,41 +90,47 @@ impl AppController {
         self.set_roof_point_mode(false);
     }
 
-    /// The active Structure-phase surface selection, if any.
-    pub fn structure_selection(&self) -> Option<StructureSelection> {
-        self.structure_selection
+    /// The active Structure-phase MODE — which surface kind the global Select
+    /// tools act on (Wall / Roof / Floor).
+    pub fn structure_kind(&self) -> SurfaceKind {
+        self.structure_kind
     }
 
-    /// Set (or clear) the Structure-phase surface selection from a Select
-    /// subtool. Seeds the selected set: `Select all` / `Select remaining` fill
-    /// it with every region of the kind, `Select` keeps the current set (so it
-    /// refines by tapping); switching kind invalidates the old ids. `None`
-    /// clears everything. The canvas shades the selected kind only.
-    pub fn set_structure_selection(&mut self, sel: Option<StructureSelection>) {
-        let prev_kind = self.structure_selection.map(|s| s.kind);
-        self.structure_selection = sel;
-        match sel {
-            Some(s) => {
-                if prev_kind != Some(s.kind) {
-                    self.structure_selected.clear();
-                }
-                match s.mode {
-                    // Placeholder: `Remaining` fills like `All` until its
-                    // "not yet set" criteria are wired in.
-                    SelectMode::All | SelectMode::Remaining => {
-                        self.select_all_structure_surfaces(s.kind)
-                    }
-                    // Click/Carve keep the current set; taps / the carved
-                    // region refine it.
-                    SelectMode::Click | SelectMode::Carve => {}
-                }
-                self.set_display_mode(display_mode_for(s.kind));
-            }
-            None => {
-                self.structure_selected.clear();
-                self.set_display_mode(DisplayMode::AllSurfaces);
+    /// The active global Select subtool, if any.
+    pub fn structure_select(&self) -> Option<SelectMode> {
+        self.structure_select
+    }
+
+    /// Switch the Structure-phase MODE. Changing kind invalidates the current
+    /// selection (its ids belong to the old kind) and shades the new kind; an
+    /// active `All`/`Remaining` tool re-seeds the selection for the new kind.
+    pub fn set_structure_kind(&mut self, kind: SurfaceKind) {
+        if self.structure_kind != kind {
+            self.structure_kind = kind;
+            self.structure_selected.clear();
+            self.pending_structure_cut = None;
+            self.structure_split_kind = None;
+            if matches!(
+                self.structure_select,
+                Some(SelectMode::All | SelectMode::Remaining)
+            ) {
+                self.select_all_structure_surfaces(kind);
             }
         }
+        self.set_display_mode(display_mode_for(kind));
+    }
+
+    /// Set (or clear) the global Select subtool — it acts on the current
+    /// [`structure_kind`](Self::structure_kind). `All`/`Remaining` seed the
+    /// selection with every region of the kind; `Click`/`Carve` keep the current
+    /// set (refined by taps / the carved region); `None` just deactivates the
+    /// tool (the selection + mode stay — "Deselect all" is the explicit clear).
+    pub fn set_structure_select_mode(&mut self, mode: Option<SelectMode>) {
+        self.structure_select = mode;
+        if matches!(mode, Some(SelectMode::All | SelectMode::Remaining)) {
+            self.select_all_structure_surfaces(self.structure_kind);
+        }
+        self.set_display_mode(display_mode_for(self.structure_kind));
     }
 
     /// Surface counts for the current storey (walls / roofs / floors) — the

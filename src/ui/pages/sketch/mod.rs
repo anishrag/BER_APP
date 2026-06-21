@@ -27,7 +27,7 @@ use egui::Pos2;
 use crate::controller::app_controller::{
     AssessmentPhase, ChecklistItem, DimensionPromptUiData, EditDragPromptUiData, ElevationView,
     ExposureSelection, NewStoreyPromptUiData, OpeningPromptUiData, OpeningToolKind,
-    PositionPromptUiData, RiserView, SnapTagView, StructureSelection, VertexDropPromptUiData,
+    PositionPromptUiData, RiserView, SelectMode, SnapTagView, SurfaceKind, VertexDropPromptUiData,
     WallExposureView,
 };
 use crate::ui::pages::events::UiEvent;
@@ -466,9 +466,12 @@ pub enum SketchEvent {
     /// Switch the workspace onto another assessment phase (clicked in the phase
     /// signpost). The controller gates which phases are reachable.
     SetAssessmentPhase(AssessmentPhase),
-    /// Structure phase: set (or clear with `None`) the active surface selection
-    /// from a Select subtool. The controller shades the selected surface kind.
-    SetStructureSelection(Option<StructureSelection>),
+    /// Structure phase: set the active MODE (Wall/Roof/Floor) — which surface
+    /// kind the global Select tools act on. The controller shades that kind.
+    SetStructureKind(SurfaceKind),
+    /// Structure phase: set (or clear with `None`) the active global Select
+    /// subtool. It acts on the current mode's surface kind.
+    SetStructureSelectMode(Option<SelectMode>),
     /// Structure phase (Select subtool active): the assessor tapped the canvas
     /// — toggle the surface under the point in/out of the selection.
     StructureSurfaceTap {
@@ -737,9 +740,10 @@ pub struct SketchView<'a> {
     /// Current storey's wall / roof / floor counts — the Structure-phase tool
     /// read-out.
     pub surface_counts: SurfaceCounts,
-    /// The active Structure-phase surface selection (which Select subtool is
-    /// on), so the panel can show it selected. `None` = nothing selected.
-    pub structure_selection: Option<StructureSelection>,
+    /// The active Structure-phase MODE (Wall/Roof/Floor), so the panel shows it.
+    pub structure_kind: SurfaceKind,
+    /// The active global Select subtool, so the panel shows it. `None` = none.
+    pub structure_select: Option<SelectMode>,
     /// Region ids selected in the Structure phase — the canvas shades these.
     pub structure_selected: &'a HashSet<ItemId>,
     /// Candidate regions of a pending Structure carve/cut (world coords) — drawn

@@ -33,7 +33,7 @@ mod openings;
 mod phase_regions;
 mod structure;
 
-pub use assessment_phase::{AssessmentPhase, SelectMode, StructureSelection};
+pub use assessment_phase::{AssessmentPhase, SelectMode};
 // `SurfaceKind` is the data-model surface taxonomy — it lives in `ber_model`
 // (the queries dispatch on it) and is re-exported here so UI + controller call
 // sites keep reaching it via `app_controller::SurfaceKind`.
@@ -306,10 +306,13 @@ pub struct AppController {
     /// The assessor's current workflow phase (Mapping → Structure → Objects) —
     /// drives the Sketch page's toolset, checklist, and canvas overlays.
     current_phase: AssessmentPhase,
-    /// The active Structure-phase surface selection (a Select subtool). Drives
-    /// which surface kind the canvas shades; `None` shades nothing. Transient
-    /// interaction state — Structure-only, cleared on phase switch.
-    structure_selection: Option<StructureSelection>,
+    /// The active Structure-phase MODE — which surface kind (Wall/Roof/Floor)
+    /// the global Select tools act on and the canvas shades. Defaults to Walls;
+    /// reset on phase switch.
+    structure_kind: SurfaceKind,
+    /// The active global Select subtool (Click/Carve/All/Remaining), or `None`.
+    /// Transient interaction state — Structure-only, cleared on phase switch.
+    structure_select: Option<SelectMode>,
     /// The Structure-phase SELECTED region ids (walls/roofs/floors of the
     /// active kind) — the canvas shades exactly these. Transient; cleared on
     /// phase switch / kind change / Deselect all.
@@ -378,7 +381,8 @@ impl AppController {
             view: ViewTransform::default(),
             tuning: crate::config::Tuning::load(),
             current_phase: AssessmentPhase::default(),
-            structure_selection: None,
+            structure_kind: SurfaceKind::Walls,
+            structure_select: None,
             structure_selected: HashSet::new(),
             pending_structure_cut: None,
             structure_split_kind: None,

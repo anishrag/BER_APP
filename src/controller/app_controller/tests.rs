@@ -7759,10 +7759,8 @@ fn structure_floor_carve_dimensions_then_splits_and_selects() {
 
     // Carve mode on Floors (no phase switch needed — the carve handler only
     // needs a Structure selection).
-    c.set_structure_selection(Some(StructureSelection {
-        kind: SurfaceKind::Floors,
-        mode: SelectMode::Carve,
-    }));
+    c.set_structure_kind(SurfaceKind::Floors);
+    c.set_structure_select_mode(Some(SelectMode::Carve));
 
     // An interior 4x4 region at (2,2)-(6,6): a carve (not a straight cut), so it
     // becomes a dimensionable split shape straight away.
@@ -7817,10 +7815,8 @@ fn structure_wall_cut_picks_dimensions_then_stores_a_durable_segment() {
     let mut c = dimensioned_square_controller();
     c.materialize();
 
-    c.set_structure_selection(Some(StructureSelection {
-        kind: SurfaceKind::Walls,
-        mode: SelectMode::Carve,
-    }));
+    c.set_structure_kind(SurfaceKind::Walls);
+    c.set_structure_select_mode(Some(SelectMode::Carve));
 
     // A straight cut across the storey (left wall to right wall at y=5) splits
     // it into two candidate regions to pick from.

@@ -803,7 +803,8 @@ impl eframe::App for BerApp {
                                 current_phase,
                                 mapping_complete,
                                 surface_counts,
-                                structure_selection,
+                                structure_kind,
+                                structure_select,
                                 checklist,
                             ) = {
                                 let c = self.app_controller.borrow();
@@ -817,7 +818,8 @@ impl eframe::App for BerApp {
                                     phase,
                                     c.mapping_complete(),
                                     c.current_surface_counts(),
-                                    c.structure_selection(),
+                                    c.structure_kind(),
+                                    c.structure_select(),
                                     checklist,
                                 )
                             };
@@ -972,7 +974,8 @@ impl eframe::App for BerApp {
                                 current_phase,
                                 mapping_complete,
                                 surface_counts,
-                                structure_selection,
+                                structure_kind,
+                                structure_select,
                                 structure_selected: &structure_selected,
                                 structure_cut_regions: &structure_cut_regions,
                                 pending_structure_split_polygon: &pending_structure_split_polygon,
@@ -1621,8 +1624,11 @@ impl eframe::App for BerApp {
                                     SketchEvent::SetAssessmentPhase(phase) => {
                                         controller.borrow_mut().set_current_phase(phase);
                                     }
-                                    SketchEvent::SetStructureSelection(sel) => {
-                                        controller.borrow_mut().set_structure_selection(sel);
+                                    SketchEvent::SetStructureKind(kind) => {
+                                        controller.borrow_mut().set_structure_kind(kind);
+                                    }
+                                    SketchEvent::SetStructureSelectMode(mode) => {
+                                        controller.borrow_mut().set_structure_select_mode(mode);
                                     }
                                     SketchEvent::StructureSurfaceTap {
                                         world_x,
