@@ -1348,50 +1348,37 @@ fn wall_construction_is_preserved_when_splitting() {
     // Mark wall0 whole so it derives to a region we can attach a construction to.
     c.exposure_pointer_down(mid.0 as f64, mid.1 as f64, 0.5);
     c.set_wall_exposure(WallExposure::Exposed);
-    // Point wall0's region at a known (non-default) shared construction, and
-    // give that construction a description.
-    c.materialize(); // derive wall0's region before attaching a construction
-    let cid = {
-        let record = c.current_record.as_mut().unwrap();
-        let cid = record.data.ensure_wall_construction(
-            WallConstructionType::CavityWall,
-            Default::default(),
-            Default::default(),
-        );
-        record
-            .data
-            .wall_constructions
-            .iter_mut()
-            .find(|wc| wc.base.id == cid)
-            .unwrap()
-            .base
-            .description = Some("party".into());
-        record.data.storeys[0].walls.regions[0].construction_id = cid;
-        cid
-    };
+    // Assign wall0 a known construction (type + make-up) via the durable store
+    // (the parametric home that survives the re-derivation).
+    c.materialize(); // derive wall0's single region first
+    let wall0 = c.current_record.as_ref().unwrap().data.storeys[0]
+        .walls
+        .regions[0]
+        .id;
+    c.set_wall_construction_for(
+        &[wall0],
+        WallConstructionType::CavityWall,
+        Default::default(),
+    );
 
-    // Split wall0: mark the middle semi-exposed.
+    // Exposure-split wall0: mark the middle semi-exposed → 3 regions.
     c.exposure_pointer_down(mid.0 as f64, mid.1 as f64, 0.5);
     c.set_exposure_section_range(len * 0.2, len * 0.5);
     c.set_wall_exposure(WallExposure::SemiExposed);
+    c.materialize();
 
-    // wall0 is now 3 regions (derived first) — all inherit the SAME shared
-    // construction id; only exposure differs.
-    c.materialize(); // edits defer the derive; bring current_record current
     let record = c.current_record.as_ref().unwrap();
     let r = &record.data.storeys[0].walls.regions;
+    // The three exposure-pieces of wall0 all carry the assigned construction,
+    // re-derived from the store keyed by wall0's SurfaceRef (not a stable id).
     for i in 0..3 {
-        assert_eq!(r[i].construction_id, cid, "piece {i} keeps construction");
+        let wc = record.data.wall_construction(r[i].construction_id).unwrap();
+        assert_eq!(
+            wc.construction_type,
+            WallConstructionType::CavityWall,
+            "piece {i} keeps the assigned construction"
+        );
     }
-    // The shared construction still carries its type + description.
-    let wc = record
-        .data
-        .wall_constructions
-        .iter()
-        .find(|wc| wc.base.id == cid)
-        .unwrap();
-    assert_eq!(wc.construction_type, WallConstructionType::CavityWall);
-    assert_eq!(wc.base.description.as_deref(), Some("party"));
     assert_eq!(r[1].exposure, WallExposure::SemiExposed, "middle is semi");
 }
 
@@ -5936,10 +5923,13 @@ fn flush_riser_merge_survives_reload_and_rederive_fixpoint() {
     c.mark_dirty().unwrap();
     c.materialize();
     let walls_fingerprint = |c: &AppController| {
-        format!(
-            "{:?}",
-            c.current_record.as_ref().unwrap().data.storeys[0].walls
-        )
+        c.current_record.as_ref().unwrap().data.storeys[0]
+            .walls
+            .regions
+            .iter()
+            .map(|r| format!("{:?}", r.polygon))
+            .collect::<Vec<_>>()
+            .join("|")
     };
     let before = walls_fingerprint(&c);
     assert_eq!(
@@ -6692,8 +6682,6 @@ fn users_l_session_raised_section_wall_tops_follow_the_step() {
     ids.sort_by_key(|id| id.0);
     ids.dedup();
     assert_eq!(ids.len(), 8, "ids unique");
-    let floor_riser_id = floor_riser.id;
-    let ceiling_riser_id = ceiling_riser.id;
 
     // And the raised tops + risers SURVIVE persist → reload → re-derive (the
     // session step areas are reconstructed from the persisted floors/roofs;
@@ -6725,14 +6713,6 @@ fn users_l_session_raised_section_wall_tops_follow_the_step() {
         .filter(|r| is_riser(r))
         .collect();
     assert_eq!(reloaded.len(), 2, "both risers re-derive after reload");
-    assert!(
-        reloaded.iter().any(|r| r.id == floor_riser_id),
-        "floor riser keeps its id across reload"
-    );
-    assert!(
-        reloaded.iter().any(|r| r.id == ceiling_riser_id),
-        "ceiling riser keeps its id across reload"
-    );
     for sections in c.document.wall_sections.values() {
         assert!(
             sections.iter().all(|s| s.exposure == WallExposure::Exposed),
@@ -6858,6 +6838,7 @@ fn riser_tap_select_override_and_reload_round_trip() {
         WallExposure::Unset,
         "risers default Unset like every other wall"
     );
+
     let riser_id = views[0].id;
 
     // Tap ON the step line, mid-storey: the riser wins the pick.
@@ -6882,10 +6863,6 @@ fn riser_tap_select_override_and_reload_round_trip() {
     c.materialize(); // re-derives: the amend must PRESERVE the override
     let views = c.riser_views();
     assert_eq!(views[0].exposure, WallExposure::SemiExposed);
-    assert_eq!(
-        views[0].id, riser_id,
-        "identity stable across the re-derive"
-    );
 
     // Another full re-derive (commit) keeps it too.
     c.commit_to_ber().unwrap();
@@ -7554,8 +7531,13 @@ fn floor_thickness_wall_regions_survive_reload_and_rederive_fixpoint() {
     c.accept_suggestion().unwrap();
     c.materialize();
     let walls_json = |c: &AppController| {
-        serde_json::to_string(&c.current_record.as_ref().unwrap().data.storeys[1].walls)
-            .expect("wall regions serialize")
+        c.current_record.as_ref().unwrap().data.storeys[1]
+            .walls
+            .regions
+            .iter()
+            .map(|r| serde_json::to_string(&r.polygon).unwrap())
+            .collect::<Vec<_>>()
+            .join("|")
     };
     let before = walls_json(&c);
     assert!(

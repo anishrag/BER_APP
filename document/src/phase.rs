@@ -265,7 +265,6 @@ mod tests {
             .extend(FloorRegions::from_vertex_lists(vec![right], ext_cid).regions);
         let walls = WallRegions::regenerate(
             segs,
-            &WallRegions::default(),
             &CeilingRegions::default(),
             &FloorRegions::default(),
             0.0,

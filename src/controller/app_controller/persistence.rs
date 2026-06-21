@@ -225,6 +225,10 @@ impl AppController {
         self.reconstruct_step_regions_for(idx);
         self.ceiling_step_regions.clear();
         self.reconstruct_ceiling_step_regions_for(idx);
+        // Seed the durable riser-exposure table from the persisted resolved
+        // risers (legacy records / pre-table snapshots) BEFORE the first
+        // re-resolve mints fresh risers that would otherwise default Unset.
+        self.seed_riser_exposure_from_record();
         // An in-flight ceiling-step line belongs to the PREVIOUS record — its
         // prompt holds VertexIds into that record's outline plan. A pending
         // roof point's / ridge's prompt does too.
@@ -243,6 +247,43 @@ impl AppController {
         // Freshly loaded → nothing pending against disk.
         self.saved_revision = self.revision;
         Ok(())
+    }
+
+    /// Seed the durable `riser_exposure` table from the persisted resolved
+    /// risers — legacy records (and any whose snapshot predates the table) carry
+    /// a riser's exposure only on its resolved `WallRegion`, which the first
+    /// fresh-id re-resolve would otherwise reset to `Unset`. Idempotent: fills
+    /// only gaps, keyed by the riser's base edge.
+    fn seed_riser_exposure_from_record(&mut self) {
+        let n = self
+            .current_record
+            .as_ref()
+            .map(|r| r.data.storeys.len())
+            .unwrap_or(0)
+            .min(self.document.storeys.len());
+        for idx in 0..n {
+            let entries: Vec<(
+                (i64, i64, i64, i64),
+                ber_model::ber::structural::WallExposure,
+            )> = {
+                let Some(record) = self.current_record.as_ref() else {
+                    break;
+                };
+                let Some(storey) = record.data.storeys.get(idx) else {
+                    continue;
+                };
+                self.document.storeys[idx]
+                    .riser_walls(storey)
+                    .into_iter()
+                    .filter(|rw| rw.exposure != ber_model::ber::structural::WallExposure::Unset)
+                    .map(|rw| (document::riser_key(rw.a, rw.b), rw.exposure))
+                    .collect()
+            };
+            let sd = &mut self.document.storeys[idx];
+            for (k, e) in entries {
+                sd.riser_exposure.entry(k).or_insert(e);
+            }
+        }
     }
 
     /// Replace the rebuilt editor state with the editing-layer snapshot for `id`,

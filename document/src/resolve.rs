@@ -286,8 +286,9 @@ pub fn resolve_storey(
         Some(t) if t > 0.0 => -t,
         _ => 0.0,
     };
-    // The walls the storey held BEFORE this projection: the identity source
-    // for BOTH passes — the perimeter regenerate and the riser append.
+    // The pre-projection walls — kept ONLY to seed opening anchors for openings
+    // that don't have one yet (their placement still references a pre-projection
+    // wall id). Not used for identity recovery (the amend is retired).
     let previous_walls = std::mem::take(&mut storey.walls);
     // The wall BASE follows the floor steps symmetric to how its TOP follows
     // the roof: a perimeter wall spanning a raised/lowered floor region starts
@@ -299,7 +300,6 @@ pub fn resolve_storey(
     // `[a, b]`.
     let walls = WallRegions::regenerate(
         wall_segments,
-        &previous_walls,
         roofs_for_walls,
         &storey.floors,
         wall_base_z,
@@ -307,12 +307,10 @@ pub fn resolve_storey(
         wall_cid,
     );
     // Structure-phase WALL splits: divide any wall a cut segment crosses into
-    // two sub-walls (copied exposure + construction, identity recovered against
-    // the previous set), so each part is separately attributable. AFTER the
-    // perimeter rebuild (it splits the full regenerated wall) and BEFORE the
-    // riser append + coplanar-flush merge. The crossing wall's openings are
-    // re-homed onto the sub-walls once, at commit (see the controller).
-    let walls = walls.apply_splits(&storey.wall_splits, &previous_walls);
+    // two sub-walls (each copies the parent's exposure + construction, fresh
+    // id). Openings re-home onto the correct sub-wall from their parametric
+    // `wall_anchor` at the resolve tail.
+    let walls = walls.apply_splits(&storey.wall_splits);
     // RISER regions append after the perimeter rebuild — derived geometry,
     // re-derived on every materialize like the walls themselves:
     //  - FLOOR risers: the vertical faces between adjacent floor regions
@@ -326,15 +324,10 @@ pub fn resolve_storey(
     // Perimeter walls never duplicate, by construction: outline edges border
     // ONE region, so `riser_faces` can't emit there — a ceiling step CROSSING
     // a wall shows up as that wall's vertical top jump, while the riser face
-    // runs along the step line itself. Identity rides `with_risers`' amend
-    // matching against the SAME previous set the perimeter pass consumed,
-    // minus the ids that pass already kept.
-    // Every FRESH riser defaults to `Unset`, like every other wall — these
-    // are the derived DEFAULTS only: `with_risers`' amend PRESERVES a
-    // matched previous region's exposure, so a riser the user set (selected
-    // via the 2D dashed-line picker — see `StoreyDoc::riser_walls`) keeps
-    // the choice across every re-derivation, and across reload (the first
-    // materialize after load amends against the persisted set). The old v1
+    // runs along the step line itself. Every riser is FRESH each resolve and
+    // defaults to `Unset`; the user's choice (via the 2D dashed-line picker —
+    // see `StoreyDoc::riser_walls`) is restored from the durable
+    // `riser_exposure` table by `stamp_riser_exposure` below. The old v1
     // approximation (floor risers `Ground`, ceiling risers `Exposed`) is
     // gone: with no grade model a guessed default was wrong as often as
     // right, so ground contact is now the assessor's EXPLICIT choice (the
@@ -354,41 +347,18 @@ pub fn resolve_storey(
         .chain(roofs_for_walls.riser_faces())
         .map(|f| (f, WallExposure::Unset))
         .collect();
-    storey.walls = walls.with_risers(risers, &previous_walls, wall_cid);
+    storey.walls = walls.with_risers(risers, wall_cid);
     // Stamp riser exposure from the durable side-table (keyed by base edge) —
     // risers have no perimeter VertexId, so this is their durable identity.
     stamp_riser_exposure(s, &mut storey);
-    // Wall-split opening re-home: a structure wall split replaced a parent wall
-    // with two sub-walls, so each opening still placed on the (now-gone) parent
-    // must move onto the correct sub-wall BEFORE the orphan-prune below drops
-    // it. Keyed on the PREVIOUS walls (where the parent still exists) crossed by
-    // each cut. Idempotent: once an opening points at a sub-wall id (stable
-    // across re-derivation), later resolves find no parent crossed and no-op.
-    if !storey.wall_splits.is_empty() {
-        for cut in storey.wall_splits.clone() {
-            for (parent_id, a, b) in
-                ber_model::ber::openings::walls_crossed_by_cut(&previous_walls, cut)
-            {
-                ber_model::ber::openings::rehome_openings_across_wall_split(
-                    &mut storey,
-                    parent_id,
-                    a,
-                    b,
-                    cut,
-                );
-            }
-        }
-    }
-    // OPENINGS tail: walls/roofs are now final. First re-point any wall opening
-    // whose `wall_id` went stale (an outline RESHAPE mints a fresh wall id the
-    // amend-match can't recover) from its durable parametric `wall_anchor`, and
-    // seed that anchor for openings that don't have one yet — the outline plan
-    // `s` is the only source of stable perimeter ids. Then recompute each placed
-    // opening's derived `vertices` cache and drop any whose host region the edit
-    // replaced. Pure data transforms over the just-resolved storey (the geometry
-    // projection above never reads openings) — same discipline as
-    // `stamp_wall_phases`.
-    reanchor_openings(s, &mut storey);
+    // OPENINGS tail: walls/roofs are now final. Every wall id is freshly minted
+    // (no amend), so re-derive each wall opening's `wall_id`/`along_m` from its
+    // durable parametric `wall_anchor` (picking the right sub-wall after a
+    // split), seeding the anchor — for openings that lack one — from the
+    // pre-projection walls (whose ids still match the stored placement). Then
+    // recompute each placed opening's `vertices` and drop any whose host the
+    // edit removed.
+    reanchor_openings(s, &mut storey, &previous_walls);
     ber_model::ber::openings::derive_opening_vertices(&mut storey);
     ber_model::ber::openings::prune_orphaned_openings(&mut storey);
     // Each wall/roof region's `opes` is a DERIVED index of the openings on it,
@@ -432,15 +402,13 @@ fn stamp_riser_exposure(s: &StoreyDoc, storey: &mut Storey) {
 /// length. A wall that's both split and reshaped is ambiguous (the perimeter
 /// edge carries two sub-walls) and is left for the orphan-prune. Wall splits on
 /// their own keep `wall_id` valid via `rehome`, so this no-ops there.
-fn reanchor_openings(s: &StoreyDoc, storey: &mut Storey) {
+fn reanchor_openings(s: &StoreyDoc, storey: &mut Storey, previous: &WallRegions) {
     use ber_model::ber::common::ItemId;
     use ber_model::ber::fenestration::{OpeningPlacement, WallAnchor};
-    use std::collections::HashSet;
 
     const TOL_M: f64 = 0.05;
     let plan = &s.outline.floor_plan;
     let walls = &storey.walls;
-    let live: HashSet<ItemId> = walls.regions.iter().map(|r| r.id).collect();
 
     // The live wall region whose base CONTAINS world point `p`, plus the centre
     // distance along it — picks the correct sub-wall after a structure split.
@@ -473,32 +441,27 @@ fn reanchor_openings(s: &StoreyDoc, storey: &mut Storey) {
         else {
             return (None, None); // roof opening / unplaced — nothing to anchor
         };
-        match anchor {
-            // Anchored: the anchor is the truth. Re-derive the wall_id/along_m
-            // cache from it — covers fresh ids, outline reshape, and picking the
-            // right sub-wall after a split (the parent-relative fraction lands in
-            // exactly one sub-wall).
-            Some(a) => {
-                let repoint = a
-                    .wall
-                    .wall_start()
-                    .and_then(|st| plan.wall_point_at_fraction(st, a.along_fraction))
-                    .and_then(|c| host_at(Point2f64::new(c.x as f64, c.y as f64)));
-                (None, repoint)
-            }
-            // Not yet anchored: seed from the live host wall. The controller also
-            // seeds after each opening op; this catches legacy / first-resolve
-            // openings while a live id is still available (i.e. while the amend
-            // preserves ids — Stage 2c's load-migration covers the rest).
-            None => {
-                let set = live
-                    .contains(wall_id)
-                    .then(|| walls.regions.iter().find(|r| r.id == *wall_id))
-                    .flatten()
-                    .and_then(|r| opening_wall_anchor(plan, r, *along_m));
-                (set, None)
-            }
-        }
+        // Seed from the pre-projection wall when this opening has no anchor yet
+        // (its placement still references that wall's id — legacy / just-placed).
+        let seeded = if anchor.is_none() {
+            previous
+                .regions
+                .iter()
+                .find(|r| r.id == *wall_id)
+                .and_then(|r| opening_wall_anchor(plan, r, *along_m))
+        } else {
+            None
+        };
+        // Re-derive the wall_id/along_m cache from the (existing or seeded)
+        // anchor: the centre at the parent-relative fraction, then the sub-wall
+        // containing it. Handles fresh ids, reshape, and split sub-walls.
+        let repoint = anchor.or(seeded).and_then(|a| {
+            a.wall
+                .wall_start()
+                .and_then(|st| plan.wall_point_at_fraction(st, a.along_fraction))
+                .and_then(|c| host_at(Point2f64::new(c.x as f64, c.y as f64)))
+        });
+        (seeded, repoint)
     };
 
     let win: Vec<_> = storey
@@ -774,13 +737,9 @@ mod tests {
         ber.storeys[0].wall_splits = vec![[Point2f64::new(2.0, -1.0), Point2f64::new(2.0, 1.0)]];
         let storey = resolve_storey(&doc, &ber, 0, &[], &[], &[]);
         assert_eq!(storey.walls.regions.len(), 5, "one wall split → 4 + 1");
-        let ids: std::collections::HashSet<_> = storey.walls.regions.iter().map(|r| r.id).collect();
         ber.storeys[0] = storey;
         let storey2 = resolve_storey(&doc, &ber, 0, &[], &[], &[]);
         assert_eq!(storey2.walls.regions.len(), 5, "split survives re-resolve");
-        let ids2: std::collections::HashSet<_> =
-            storey2.walls.regions.iter().map(|r| r.id).collect();
-        assert_eq!(ids, ids2, "wall ids stable across re-resolve");
     }
 
     /// A corner/notch carve yields TWO interior cut edges, each crossing a
@@ -917,26 +876,25 @@ mod tests {
 
         // Re-resolve with the derived storey as the previous state: the
         // riser AMENDS (deterministic re-derivation ⇒ stable identity).
-        let riser_id = risers[0].id;
+        let _riser_id = risers[0].id;
         ber.storeys[0] = storey;
         let storey2 = resolve_storey(&doc, &ber, 0, &[], &steps, &[]);
-        let riser2 = storey2
+        let _riser2 = storey2
             .walls
             .regions
             .iter()
             .find(on_step_line)
             .expect("riser re-derives");
-        assert_eq!(riser2.id, riser_id, "riser id stable across re-resolves");
     }
 
-    /// THE RISER DURABILITY RULE at resolve level: an overridden riser
-    /// exposure survives a plain re-resolve AND a re-resolve after a
-    /// geometry-affecting edit (the ceiling height lands, re-extruding every
-    /// wall) — the amend base-matches the unchanged step line and preserves
-    /// the override instead of re-stamping the derived `Unset` default.
+    /// THE RISER DURABILITY RULE at resolve level: an overridden riser exposure
+    /// (recorded in the durable `riser_exposure` table, keyed by base edge)
+    /// survives a plain re-resolve AND a re-resolve after a geometry-affecting
+    /// edit (the ceiling height lands, re-extruding every wall) — the stamp
+    /// re-applies it instead of the derived `Unset` default.
     #[test]
     fn riser_exposure_override_survives_re_resolves() {
-        let doc = square_doc(&[
+        let mut doc = square_doc(&[
             Point2f32::new(0.0, 0.0),
             Point2f32::new(4.0, 0.0),
             Point2f32::new(4.0, 4.0),
@@ -951,45 +909,46 @@ mod tests {
             ],
             level_m: -0.3,
         }];
+        let on_step_line = |r: &&ber_model::ber::structural::WallRegion| {
+            let e = &r.polygon.exterior;
+            (e[0].x - 2.0).abs() < 1e-6 && (e[1].x - 2.0).abs() < 1e-6
+        };
         let mut ber = Ber::default();
         ensure_storey_constructions(&mut ber, 0, &[]);
-        let mut storey = resolve_storey(&doc, &ber, 0, &[], &steps, &[]);
-        // The riser defaults Unset like the perimeter regions — find it by
-        // its base edge on the interior step line x = 2.
+        let storey = resolve_storey(&doc, &ber, 0, &[], &steps, &[]);
+        // The riser defaults Unset — record the user's override in the durable
+        // table (keyed by base edge), the source of truth the resolve stamps.
         let riser = storey
             .walls
             .regions
-            .iter_mut()
-            .find(|r| {
-                let e = &r.polygon.exterior;
-                (e[0].x - 2.0).abs() < 1e-6 && (e[1].x - 2.0).abs() < 1e-6
-            })
+            .iter()
+            .find(on_step_line)
             .expect("the floor riser derives");
         assert_eq!(riser.exposure, WallExposure::Unset, "fresh → Unset");
-        let riser_id = riser.id;
-        riser.exposure = WallExposure::SemiExposed; // the user's override
-        ber.storeys[0] = storey;
+        let (e0, e1) = riser.base_edge().unwrap();
+        let key = crate::riser_key(Point2f64::new(e0.x, e0.y), Point2f64::new(e1.x, e1.y));
+        doc.riser_exposure.insert(key, WallExposure::SemiExposed);
 
-        // Plain re-resolve: the override survives the amend.
+        // Plain re-resolve: the override is stamped from the table.
         ber.storeys[0] = resolve_storey(&doc, &ber, 0, &[], &steps, &[]);
         let r = ber.storeys[0]
             .walls
             .regions
             .iter()
-            .find(|r| r.id == riser_id)
-            .expect("riser identity stable");
+            .find(on_step_line)
+            .unwrap();
         assert_eq!(r.exposure, WallExposure::SemiExposed, "override survives");
 
         // Geometry-affecting edit: the height lands, walls re-extrude — the
-        // riser's base edge is unchanged, so it still amends.
+        // riser's base edge is unchanged, so the table still keys it.
         ber.storeys[0].ceiling_height_m = Some(2.7);
         ber.storeys[0] = resolve_storey(&doc, &ber, 0, &[], &steps, &[]);
         let r = ber.storeys[0]
             .walls
             .regions
             .iter()
-            .find(|r| r.id == riser_id)
-            .expect("riser identity stable across the height change");
+            .find(on_step_line)
+            .unwrap();
         assert_eq!(
             r.exposure,
             WallExposure::SemiExposed,
@@ -1321,9 +1280,6 @@ mod tests {
             rext.iter().all(|v| v.z < 1e-9),
             "riser tops at the upper floor level, not the slab band: {rext:?}"
         );
-        let mut ids: Vec<_> = storey.walls.regions.iter().map(|r| r.id).collect();
-        ids.sort_by_key(|id| id.0);
-        assert_eq!(ids, ids0, "the thickness edit AMENDS every wall");
     }
 
     /// RELOAD of a thickness-set record AMENDS every perimeter wall (the
@@ -1367,7 +1323,7 @@ mod tests {
             0.0,
         )
         .unwrap();
-        let (id0, cid0) = (
+        let (_id0, cid0) = (
             storey.walls.regions[marked_idx].id,
             storey.walls.regions[marked_idx].construction_id,
         );
@@ -1378,16 +1334,12 @@ mod tests {
         // and re-resolve against the PERSISTED region set.
         ber.storeys[1] = storey;
         let storey2 = resolve_storey(&doc, &ber, 1, &[], &[], &[]);
-        let mut ids2: Vec<_> = storey2.walls.regions.iter().map(|r| r.id).collect();
-        ids2.sort_by_key(|id| id.0);
-        assert_eq!(ids2, ids0, "every perimeter wall AMENDS, none recreated");
         let wall = storey2
             .walls
             .regions
             .iter()
-            .find(|r| r.id == id0)
-            .expect("the marked wall keeps its identity");
-        assert_eq!(wall.opes.doors, vec![door_id], "openings survive");
+            .find(|r| r.opes.doors == vec![door_id])
+            .expect("the marked wall keeps its opening across reload");
         assert_eq!(wall.construction_id, cid0, "construction survives");
         assert_eq!(
             wall.exposure,
@@ -1687,25 +1639,25 @@ mod tests {
             "the surviving riser is the east one: {risers:?}"
         );
 
-        // AMEND IDENTITY: a re-resolve against the merged result keeps every
-        // region's id and re-derives the polygons byte-identically.
-        let fingerprint = format!("{:?}", storey.walls);
-        let (south_id, west_id) = (south.id, west.id);
+        // GEOMETRY FIXPOINT: ids are freshly minted now, so compare the merged
+        // POLYGONS — a re-resolve over the merged result re-derives them
+        // byte-identically (and the two merged walls still resolve).
+        let geom = |w: &WallRegions| {
+            w.regions
+                .iter()
+                .map(|r| format!("{:?}", r.polygon))
+                .collect::<Vec<_>>()
+        };
+        let fingerprint = geom(&storey.walls);
         ber.storeys[0] = storey;
         let storey2 = resolve_storey(&doc, &ber, 0, &[], &[], &steps);
         assert_eq!(
-            format!("{:?}", storey2.walls),
+            geom(&storey2.walls),
             fingerprint,
-            "re-resolve is a fixpoint over the merged walls"
+            "re-resolve is a geometry fixpoint over the merged walls"
         );
-        assert_eq!(
-            wall_with_base(&storey2, (8.2184, 2.5205), (4.2184, 2.5205)).id,
-            south_id
-        );
-        assert_eq!(
-            wall_with_base(&storey2, (3.2184, 5.5205), (3.2184, 6.5205)).id,
-            west_id
-        );
+        let _ = wall_with_base(&storey2, (8.2184, 2.5205), (4.2184, 2.5205));
+        let _ = wall_with_base(&storey2, (3.2184, 5.5205), (3.2184, 6.5205));
     }
 
     /// Exposure painted on a HOST wall survives the merge and the amend: the
@@ -1755,16 +1707,15 @@ mod tests {
         assert!(secs[0].start_m.abs() < 1e-3 && (secs[0].end_m - len).abs() < 1e-3);
 
         // The amend keeps the painted exposure across a re-resolve.
-        let south_id = south.id;
+        let _south_id = south.id;
         ber.storeys[0] = storey;
         let storey2 = resolve_storey(&doc, &ber, 0, &[], &[], &steps);
-        let south2 = storey2
+        let _south2 = storey2
             .walls
             .regions
             .iter()
-            .find(|r| r.id == south_id)
-            .expect("identity stable");
-        assert_eq!(south2.exposure, WallExposure::SemiExposed);
+            .find(|r| r.exposure == WallExposure::SemiExposed)
+            .expect("the painted exposure re-applies from wall_sections");
     }
 
     /// Empty `step_regions` performs NO geo ops: the floor ring's stored points
@@ -2559,7 +2510,6 @@ mod tests {
             .iter()
             .find(|r| r.exposure == WallExposure::Exposed && !is_riser(r))
             .unwrap();
-        assert_eq!(wall.id, id0, "same base edge → same wall (amend)");
         assert_eq!(wall.construction_id, cid0);
         assert_eq!(wall.opes.doors, vec![door_id], "openings survive");
         // Vertex-order contract intact: ext[0]/ext[1] are the base edge…
@@ -2576,17 +2526,16 @@ mod tests {
 
         // Re-resolve once more from storey2: the riser AMENDS — its id is
         // stable across re-derivations.
-        let riser_id = riser.id;
+        let _riser_id = riser.id;
         let mut ber2 = ber.clone();
         ber2.storeys[0] = storey2.clone();
         let storey3 = resolve_storey(&doc, &ber2, 0, &[], &[], &[step]);
-        let riser3 = storey3
+        storey3
             .walls
             .regions
             .iter()
             .find(|r| is_riser(r))
             .expect("riser re-derives");
-        assert_eq!(riser3.id, riser_id, "riser id stable across re-resolves");
     }
 
     /// WALL-UNDER-RIDGE confidence: a marked wall keeps its identity when a
@@ -2613,7 +2562,7 @@ mod tests {
         // Flat resolve first — capture the marked wall's identity (the full
         // perimeter resolves; select by exposure, not index).
         ber.storeys[0] = resolve_storey(&doc, &ber, 0, &[], &[], &[]);
-        let id0 = ber.storeys[0]
+        let _id0 = ber.storeys[0]
             .walls
             .regions
             .iter()
@@ -2639,7 +2588,6 @@ mod tests {
             .iter()
             .find(|r| r.exposure == WallExposure::Exposed)
             .unwrap();
-        assert_eq!(wall.id, id0, "same base edge → same wall (amend)");
         // The marked wall is on the footprint boundary: every roof triangle
         // meets it along an eaves edge at the base height — flat top (hip).
         assert!(wall
@@ -2662,7 +2610,6 @@ mod tests {
                 Point2f64::new(4.0, 2.0),
                 WallExposure::Exposed,
             )],
-            &WallRegions::default(),
             &storey.roofs,
             &FloorRegions::default(),
             0.0,
@@ -3309,15 +3256,19 @@ mod tests {
             "top at z = 2.2 (under the 2.4 ceiling): {:?}",
             win.vertices
         );
+        let host_id = match ber.storeys[0].windows[0].placement {
+            Some(OpeningPlacement::Wall { wall_id, .. }) => wall_id,
+            _ => panic!("still a wall placement"),
+        };
         let host = ber.storeys[0]
             .walls
             .regions
             .iter()
-            .find(|r| r.id == wall_id)
-            .expect("wall id stable across re-resolve");
+            .find(|r| r.id == host_id)
+            .expect("the window re-homed onto a live wall");
         assert!(
             host.opes.windows.contains(&win_id),
-            "the opes reference survives the amend"
+            "the opes index links the (re-derived) host wall"
         );
     }
 

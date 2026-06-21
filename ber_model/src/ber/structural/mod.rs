@@ -400,7 +400,6 @@ mod tests {
         let default_cid = ItemId::default();
         let walls = WallRegions::regenerate(
             vec![(a, b, WallExposure::SemiExposed)],
-            &WallRegions::default(),
             &CeilingRegions::default(),
             &FloorRegions::default(),
             0.0,
@@ -420,151 +419,6 @@ mod tests {
         assert_eq!((ext[1].x, ext[1].y, ext[1].z), (4.0, 0.0, 0.0));
         assert_eq!((ext[2].x, ext[2].y, ext[2].z), (4.0, 0.0, 2.4));
         assert_eq!((ext[3].x, ext[3].y, ext[3].z), (0.0, 0.0, 2.4));
-    }
-
-    #[test]
-    fn regenerate_covered_split_inherits_construction_id_only() {
-        let a = Point2f64::new(0.0, 0.0);
-        let b = Point2f64::new(10.0, 0.0);
-        // A whole-wall region pointing at some shared construction, carrying
-        // an opening.
-        let orig_cid = ItemId::default();
-        let mut previous = WallRegions::regenerate(
-            vec![(a, b, WallExposure::Exposed)],
-            &WallRegions::default(),
-            &CeilingRegions::default(),
-            &FloorRegions::default(),
-            0.0,
-            2.4,
-            orig_cid,
-        );
-        previous.regions[0].opes.windows.push(ItemId::default());
-        let prev_id = previous.regions[0].id;
-        assert_eq!(previous.regions[0].construction_id, orig_cid);
-
-        // Split it into 3 pieces; each inherits the covered construction
-        // (NOT the fresh default) but NOT the id or the opes — a split is
-        // positional, ambiguous to carry openings through.
-        let fresh_cid = ItemId::default();
-        let split = WallRegions::regenerate(
-            vec![
-                (a, Point2f64::new(2.0, 0.0), WallExposure::Exposed),
-                (
-                    Point2f64::new(2.0, 0.0),
-                    Point2f64::new(5.0, 0.0),
-                    WallExposure::SemiExposed,
-                ),
-                (Point2f64::new(5.0, 0.0), b, WallExposure::Exposed),
-            ],
-            &previous,
-            &CeilingRegions::default(),
-            &FloorRegions::default(),
-            0.0,
-            2.4,
-            fresh_cid,
-        );
-        assert_eq!(split.regions.len(), 3);
-        for r in &split.regions {
-            assert_eq!(r.construction_id, orig_cid);
-            assert_ne!(r.id, prev_id, "split pieces get fresh ids");
-            assert!(r.opes.windows.is_empty(), "opes are not split");
-        }
-        // Exposure still set per piece.
-        assert_eq!(split.regions[1].exposure, WallExposure::SemiExposed);
-    }
-
-    /// AMEND: a segment whose base edge matches a previous region's (within
-    /// 1e-2 m, either orientation) keeps that region's id, construction AND
-    /// openings — a roof change re-shapes the wall without orphaning them.
-    #[test]
-    fn regenerate_amend_keeps_id_cid_and_opes() {
-        let a = Point2f64::new(0.0, 0.0);
-        let b = Point2f64::new(6.0, 0.0);
-        let cid = ItemId::default();
-        let mut previous = WallRegions::regenerate(
-            vec![(a, b, WallExposure::Exposed)],
-            &WallRegions::default(),
-            &CeilingRegions::default(),
-            &FloorRegions::default(),
-            0.0,
-            2.4,
-            cid,
-        );
-        let ope = ItemId::default();
-        previous.regions[0].opes.doors.push(ope);
-        let prev_id = previous.regions[0].id;
-
-        // Same wall, nudged within tolerance AND flipped in orientation; the
-        // top now reaches a different height (the roof changed).
-        let walls = WallRegions::regenerate(
-            vec![(
-                Point2f64::new(6.004, 0.0),
-                Point2f64::new(0.0, 0.003),
-                WallExposure::SemiExposed,
-            )],
-            &previous,
-            &CeilingRegions::default(),
-            &FloorRegions::default(),
-            0.0,
-            3.1,
-            ItemId::default(),
-        );
-        assert_eq!(walls.regions.len(), 1);
-        let w = &walls.regions[0];
-        assert_eq!(w.id, prev_id, "same wall keeps its id");
-        assert_eq!(w.construction_id, cid);
-        assert_eq!(w.opes.doors, vec![ope], "openings survive the amend");
-        assert_eq!(w.exposure, WallExposure::SemiExposed, "exposure is new");
-        assert!(w.polygon.exterior.iter().any(|v| (v.z - 3.1).abs() < 1e-9));
-    }
-
-    /// INJECTIVE matching: when two new segments both fall within tolerance
-    /// of ONE previous region, only the best match (smallest endpoint error)
-    /// inherits its id — ids are never duplicated.
-    #[test]
-    fn regenerate_amend_matching_is_injective_best_match() {
-        let a = Point2f64::new(0.0, 0.0);
-        let b = Point2f64::new(6.0, 0.0);
-        let cid = ItemId::default();
-        let previous = WallRegions::regenerate(
-            vec![(a, b, WallExposure::Exposed)],
-            &WallRegions::default(),
-            &CeilingRegions::default(),
-            &FloorRegions::default(),
-            0.0,
-            2.4,
-            cid,
-        );
-        let prev_id = previous.regions[0].id;
-
-        // Worse-but-qualifying candidate FIRST, exact match second — the
-        // exact one must still win the id.
-        let walls = WallRegions::regenerate(
-            vec![
-                (
-                    Point2f64::new(0.008, 0.0),
-                    Point2f64::new(6.008, 0.0),
-                    WallExposure::Exposed,
-                ),
-                (a, b, WallExposure::Exposed),
-            ],
-            &previous,
-            &CeilingRegions::default(),
-            &FloorRegions::default(),
-            0.0,
-            2.4,
-            ItemId::default(),
-        );
-        assert_eq!(walls.regions.len(), 2);
-        assert_ne!(
-            walls.regions[0].id, prev_id,
-            "near-match loses to the exact match"
-        );
-        assert_eq!(walls.regions[1].id, prev_id, "best match keeps the id");
-        assert_ne!(walls.regions[0].id, walls.regions[1].id, "ids unique");
-        // The loser still sits on the old base, so it inherits the
-        // construction via the covered-split rule.
-        assert_eq!(walls.regions[0].construction_id, cid);
     }
 
     // ── Riser faces + with_risers ───────────────────────────────────────────
@@ -705,237 +559,6 @@ mod tests {
         }
     }
 
-    /// `with_risers` amend identity: a re-derived riser keeps its previous
-    /// id, construction and opes; a riser face landing on an id the
-    /// perimeter pass already claimed can never duplicate it (exclusion);
-    /// an unmatched-but-covered face inherits the construction only.
-    #[test]
-    fn with_risers_amend_keeps_identity_and_never_duplicates_ids() {
-        let cid = ItemId::default();
-        let segs = || {
-            vec![(
-                Point2f64::new(0.0, 0.0),
-                Point2f64::new(4.0, 0.0),
-                WallExposure::Exposed,
-            )]
-        };
-        let riser = || {
-            Polygon3D::new(vec![
-                Point3f64::new(0.0, 2.0, -0.3),
-                Point3f64::new(4.0, 2.0, -0.3),
-                Point3f64::new(4.0, 2.0, 0.0),
-                Point3f64::new(0.0, 2.0, 0.0),
-            ])
-        };
-        // First derivation: one perimeter wall + one interior riser.
-        let mut walls1 = WallRegions::regenerate(
-            segs(),
-            &WallRegions::default(),
-            &CeilingRegions::default(),
-            &FloorRegions::default(),
-            0.0,
-            2.4,
-            cid,
-        )
-        .with_risers(
-            vec![(riser(), WallExposure::Ground)],
-            &WallRegions::default(),
-            cid,
-        );
-        assert_eq!(walls1.regions.len(), 2);
-        let wall_id = walls1.regions[0].id;
-        let riser_id = walls1.regions[1].id;
-        assert_ne!(wall_id, riser_id, "ids unique on first derivation");
-        assert_eq!(walls1.regions[1].exposure, WallExposure::Ground);
-        // Decorate the riser as later edits would: its own cid + an ope + a
-        // user-overridden exposure.
-        let riser_cid = ItemId::default();
-        let ope = ItemId::default();
-        walls1.regions[1].construction_id = riser_cid;
-        walls1.regions[1].opes.doors.push(ope);
-        walls1.regions[1].exposure = WallExposure::SemiExposed;
-
-        // Re-derive from walls1: the perimeter amends, the riser re-derives
-        // deterministically — and keeps its identity.
-        let walls2 = WallRegions::regenerate(
-            segs(),
-            &walls1,
-            &CeilingRegions::default(),
-            &FloorRegions::default(),
-            0.0,
-            2.4,
-            ItemId::default(),
-        )
-        .with_risers(
-            vec![(riser(), WallExposure::Ground)],
-            &walls1,
-            ItemId::default(),
-        );
-        assert_eq!(walls2.regions.len(), 2);
-        assert_eq!(walls2.regions[0].id, wall_id, "perimeter amend keeps id");
-        let r = &walls2.regions[1];
-        assert_eq!(r.id, riser_id, "riser amend keeps id across re-derivation");
-        assert_eq!(r.construction_id, riser_cid);
-        assert_eq!(r.opes.doors, vec![ope], "openings survive the amend");
-        assert_eq!(
-            r.exposure,
-            WallExposure::SemiExposed,
-            "the overridden exposure survives the amend (durability rule) — \
-             the caller's freshly-supplied default never re-stamps it"
-        );
-
-        // EXCLUSION: a riser face whose base coincides with the perimeter
-        // wall's base can't steal its already-claimed id — it gets a fresh
-        // id and inherits the construction via the covered-split rule.
-        let on_wall = Polygon3D::new(vec![
-            Point3f64::new(0.0, 0.0, -0.3),
-            Point3f64::new(4.0, 0.0, -0.3),
-            Point3f64::new(4.0, 0.0, 0.0),
-            Point3f64::new(0.0, 0.0, 0.0),
-        ]);
-        let walls3 = WallRegions::regenerate(
-            segs(),
-            &walls1,
-            &CeilingRegions::default(),
-            &FloorRegions::default(),
-            0.0,
-            2.4,
-            ItemId::default(),
-        )
-        .with_risers(
-            vec![(on_wall, WallExposure::Ground)],
-            &walls1,
-            ItemId::default(),
-        );
-        assert_eq!(walls3.regions.len(), 2);
-        assert_eq!(walls3.regions[0].id, wall_id);
-        assert_ne!(
-            walls3.regions[1].id, wall_id,
-            "a claimed id is never duplicated"
-        );
-        assert_ne!(walls3.regions[1].id, riser_id);
-        assert_eq!(
-            walls3.regions[1].construction_id, cid,
-            "covered base inherits the construction only"
-        );
-        assert!(walls3.regions[1].opes.doors.is_empty(), "no opes inherited");
-        assert_eq!(
-            walls3.regions[1].exposure,
-            WallExposure::Ground,
-            "a FRESH (unmatched) riser takes the derived default"
-        );
-    }
-
-    /// A floor riser and a ceiling riser SHARE the plan base edge under a
-    /// step line — the z-aware ranking keeps each matched to its OWN
-    /// previous region. In particular a floor face appearing for the first
-    /// time next to an existing ceiling riser must NOT steal its identity
-    /// (id/opes/exposure): the ceiling face out-ranks it on z, the floor
-    /// face derives fresh with the caller's default.
-    #[test]
-    fn with_risers_never_swaps_colocated_floor_and_ceiling_risers() {
-        let cid = ItemId::default();
-        let face_at = |z_lo: f64, z_hi: f64| {
-            Polygon3D::new(vec![
-                Point3f64::new(0.0, 2.0, z_lo),
-                Point3f64::new(4.0, 2.0, z_lo),
-                Point3f64::new(4.0, 2.0, z_hi),
-                Point3f64::new(0.0, 2.0, z_hi),
-            ])
-        };
-        // Previous state: only the CEILING riser exists (2.4 → 2.7).
-        let prev = WallRegions::default().with_risers(
-            vec![(face_at(2.4, 2.7), WallExposure::Exposed)],
-            &WallRegions::default(),
-            cid,
-        );
-        let ceiling_id = prev.regions[0].id;
-        // A floor step now lands on the SAME plan line: the new derive has
-        // both faces. The ceiling face keeps its id; the floor face is
-        // FRESH and takes the caller's supplied default (Ground here —
-        // arbitrary for this test; the app supplies Unset).
-        let walls = WallRegions::default().with_risers(
-            vec![
-                (face_at(-0.3, 0.0), WallExposure::Ground),
-                (face_at(2.4, 2.7), WallExposure::Exposed),
-            ],
-            &prev,
-            cid,
-        );
-        assert_eq!(walls.regions.len(), 2);
-        let floor = &walls.regions[0];
-        let ceiling = &walls.regions[1];
-        assert_eq!(ceiling.id, ceiling_id, "ceiling riser keeps its identity");
-        assert_ne!(floor.id, ceiling_id, "floor riser never steals it");
-        assert_eq!(floor.exposure, WallExposure::Ground, "fresh → default");
-        assert_eq!(ceiling.exposure, WallExposure::Exposed);
-    }
-
-    /// Durability across a GEOMETRY edit: the perimeter changes (so the
-    /// perimeter pass re-derives different segments) but the riser's base
-    /// edge is unchanged — the amend still base-matches and the overridden
-    /// exposure survives the fresh derivation.
-    #[test]
-    fn with_risers_override_survives_a_geometry_edit_that_still_base_matches() {
-        let cid = ItemId::default();
-        let riser = || {
-            Polygon3D::new(vec![
-                Point3f64::new(0.0, 2.0, -0.3),
-                Point3f64::new(4.0, 2.0, -0.3),
-                Point3f64::new(4.0, 2.0, 0.0),
-                Point3f64::new(0.0, 2.0, 0.0),
-            ])
-        };
-        let segs_before = vec![(
-            Point2f64::new(0.0, 0.0),
-            Point2f64::new(4.0, 0.0),
-            WallExposure::Exposed,
-        )];
-        // The wall moved to y = -1 (an outline edit); the step line did not.
-        let segs_after = vec![(
-            Point2f64::new(0.0, -1.0),
-            Point2f64::new(4.0, -1.0),
-            WallExposure::Exposed,
-        )];
-        let mut walls1 = WallRegions::regenerate(
-            segs_before,
-            &WallRegions::default(),
-            &CeilingRegions::default(),
-            &FloorRegions::default(),
-            0.0,
-            2.4,
-            cid,
-        )
-        .with_risers(
-            vec![(riser(), WallExposure::Ground)],
-            &WallRegions::default(),
-            cid,
-        );
-        let riser_id = walls1.regions[1].id;
-        walls1.regions[1].exposure = WallExposure::Exposed; // user override
-
-        let walls2 = WallRegions::regenerate(
-            segs_after,
-            &walls1,
-            &CeilingRegions::default(),
-            &FloorRegions::default(),
-            0.0,
-            2.4,
-            cid,
-        )
-        .with_risers(vec![(riser(), WallExposure::Ground)], &walls1, cid);
-        let r = walls2
-            .regions
-            .iter()
-            .find(|r| r.id == riser_id)
-            .expect("riser amends across the geometry edit");
-        assert_eq!(
-            r.exposure,
-            WallExposure::Exposed,
-            "override survives the fresh derive after the edit"
-        );
-    }
-
     // ── Coplanar-flush riser merging ────────────────────────────────────────
 
     /// A ring's (x, z) profile (y is constant in these fixtures), for terse
@@ -952,7 +575,6 @@ mod tests {
                 Point2f64::new(4.0, 0.0),
                 WallExposure::Exposed,
             )],
-            &WallRegions::default(),
             &CeilingRegions::default(),
             &FloorRegions::default(),
             0.0,
@@ -986,7 +608,6 @@ mod tests {
         walls.regions[0].opes.doors.push(ope);
         let walls = walls.with_risers(
             vec![(coplanar_face(4.0, 6.0, 1.0, 2.4), WallExposure::Unset)],
-            &WallRegions::default(),
             cid,
         );
         assert_eq!(walls.regions.len(), 1, "the flush riser merged");
@@ -1019,7 +640,6 @@ mod tests {
             // Beside the wall and ABOVE its top: only the corner (4, 0, 2.4)
             // is shared.
             vec![(coplanar_face(4.0, 6.0, 2.4, 3.4), WallExposure::Unset)],
-            &WallRegions::default(),
             cid,
         );
         assert_eq!(walls.regions.len(), 2, "a point touch never merges");
@@ -1036,11 +656,7 @@ mod tests {
             Point3f64::new(6.0, 0.5, 2.4),
             Point3f64::new(4.0, 0.5, 2.4),
         ]);
-        let walls = flat_wall(cid).with_risers(
-            vec![(riser, WallExposure::Unset)],
-            &WallRegions::default(),
-            cid,
-        );
+        let walls = flat_wall(cid).with_risers(vec![(riser, WallExposure::Unset)], cid);
         assert_eq!(walls.regions.len(), 2, "different plane — no merge");
     }
 
@@ -1058,7 +674,6 @@ mod tests {
                 (coplanar_face(4.0, 6.0, 1.0, 2.4), WallExposure::Unset),
                 (coplanar_face(6.0, 8.0, 1.0, 2.4), WallExposure::Unset),
             ],
-            &WallRegions::default(),
             cid,
         );
         assert_eq!(walls.regions.len(), 1, "the whole chain merged");
@@ -1097,7 +712,6 @@ mod tests {
                     WallExposure::SemiExposed,
                 ),
             ],
-            &WallRegions::default(),
             &CeilingRegions::default(),
             &FloorRegions::default(),
             0.0,
@@ -1108,7 +722,6 @@ mod tests {
         let walls = walls.with_risers(
             // Flush with wall A's right edge AND wall B's left edge.
             vec![(coplanar_face(4.0, 6.0, 1.0, 2.4), WallExposure::Unset)],
-            &WallRegions::default(),
             cid,
         );
         assert_eq!(walls.regions.len(), 2, "walls never merge into each other");
@@ -1123,77 +736,19 @@ mod tests {
         assert_eq!(b.polygon.exterior.len(), 4, "the other wall is untouched");
     }
 
-    /// THE DELIBERATE BEHAVIOUR CHANGE: a riser the user previously painted
-    /// (separate region, overridden exposure, own opes) that NOW comes out
-    /// flush with a wall merges into it — the HOST's exposure wins and the
-    /// riser's old identity/opes/exposure are discarded.
-    #[test]
-    fn painted_riser_that_now_merges_loses_to_the_host_exposure() {
-        let cid = ItemId::default();
-        // Previous state, as persisted by an older derivation: the wall and
-        // a SEPARATE riser region the user painted SemiExposed.
-        let mut previous = flat_wall(cid);
-        let wall_id = previous.regions[0].id;
-        let old_riser = WallRegion {
-            id: ItemId::default(),
-            polygon: coplanar_face(4.0, 6.0, 1.0, 2.4),
-            exposure: WallExposure::SemiExposed, // the user's old override
-            opes: Opes::default(),
-            construction_id: cid,
-        };
-        let old_riser_id = old_riser.id;
-        previous.regions.push(old_riser);
-
-        // Re-derive: the riser face amends its old region (picking up the
-        // override) and THEN merges — the host's attribution wins.
-        let walls = WallRegions::regenerate(
-            vec![(
-                Point2f64::new(0.0, 0.0),
-                Point2f64::new(4.0, 0.0),
-                WallExposure::Exposed,
-            )],
-            &previous,
-            &CeilingRegions::default(),
-            &FloorRegions::default(),
-            0.0,
-            2.4,
-            cid,
-        )
-        .with_risers(
-            vec![(coplanar_face(4.0, 6.0, 1.0, 2.4), WallExposure::Unset)],
-            &previous,
-            cid,
-        );
-        assert_eq!(walls.regions.len(), 1, "merged despite the old override");
-        assert_eq!(walls.regions[0].id, wall_id);
-        assert_eq!(
-            walls.regions[0].exposure,
-            WallExposure::Exposed,
-            "the host wall's exposure wins over the riser's old override"
-        );
-        assert!(
-            walls.regions.iter().all(|r| r.id != old_riser_id),
-            "the merged riser's identity is gone"
-        );
-    }
-
-    /// Merging is IDEMPOTENT across re-derivations: feeding the merged
-    /// result back as `previous` re-derives the identical merged region
-    /// (id stable, polygon byte-identical).
+    /// Merging is IDEMPOTENT across re-derivations: re-deriving produces the
+    /// identical merged region (polygon byte-identical). Ids are freshly minted
+    /// each derive now (the amend is retired), so identity isn't asserted here.
     #[test]
     fn merged_wall_rederives_identically() {
         let cid = ItemId::default();
-        let segs = || {
-            vec![(
-                Point2f64::new(0.0, 0.0),
-                Point2f64::new(4.0, 0.0),
-                WallExposure::Exposed,
-            )]
-        };
-        let derive = |previous: &WallRegions| {
+        let derive = || {
             WallRegions::regenerate(
-                segs(),
-                previous,
+                vec![(
+                    Point2f64::new(0.0, 0.0),
+                    Point2f64::new(4.0, 0.0),
+                    WallExposure::Exposed,
+                )],
                 &CeilingRegions::default(),
                 &FloorRegions::default(),
                 0.0,
@@ -1202,15 +757,13 @@ mod tests {
             )
             .with_risers(
                 vec![(coplanar_face(4.0, 6.0, 1.0, 2.4), WallExposure::Unset)],
-                previous,
                 cid,
             )
         };
-        let walls1 = derive(&WallRegions::default());
-        let walls2 = derive(&walls1);
+        let walls1 = derive();
+        let walls2 = derive();
         assert_eq!(walls1.regions.len(), 1);
         assert_eq!(walls2.regions.len(), 1);
-        assert_eq!(walls2.regions[0].id, walls1.regions[0].id, "id stable");
         assert_eq!(
             walls2.regions[0].polygon, walls1.regions[0].polygon,
             "the merged polygon re-derives identically"
@@ -1231,7 +784,6 @@ mod tests {
         let b = Point2f64::new(10.0, 0.0);
         let walls = WallRegions::regenerate(
             vec![(a, b, WallExposure::Exposed)],
-            &WallRegions::default(),
             &roofs,
             &FloorRegions::default(),
             0.0,
@@ -1278,7 +830,6 @@ mod tests {
         let b = Point2f64::new(4.0, 4.0);
         let walls = WallRegions::regenerate(
             vec![(a, b, WallExposure::Exposed)],
-            &WallRegions::default(),
             &CeilingRegions::default(),
             &floors,
             0.0,
@@ -1308,7 +859,6 @@ mod tests {
         let b = Point2f64::new(4.0, 0.0);
         let walls = WallRegions::regenerate(
             vec![(a, b, WallExposure::Exposed)],
-            &WallRegions::default(),
             &CeilingRegions::default(),
             &floors,
             0.0,
@@ -1349,7 +899,6 @@ mod tests {
         // Reference: no floors at all (the legacy flat base).
         let flat = WallRegions::regenerate(
             segs(),
-            &WallRegions::default(),
             &CeilingRegions::default(),
             &FloorRegions::default(),
             0.0,
@@ -1359,15 +908,8 @@ mod tests {
         // A SINGLE region at level 0, plus a SAME-LEVEL partition seam at x=2
         // (a phase split, not a step): the base must still collapse to [a, b].
         let floors = stepped_floor(square(0.0, 0.0, 2.0, 4.0), square(2.0, 0.0, 4.0, 4.0), 0.0);
-        let stepped = WallRegions::regenerate(
-            segs(),
-            &WallRegions::default(),
-            &CeilingRegions::default(),
-            &floors,
-            0.0,
-            2.4,
-            cid,
-        );
+        let stepped =
+            WallRegions::regenerate(segs(), &CeilingRegions::default(), &floors, 0.0, 2.4, cid);
         assert_eq!(
             stepped.regions[0].polygon, flat.regions[0].polygon,
             "a same-level floor seam leaves the base byte-identical to flat"
@@ -1398,7 +940,6 @@ mod tests {
         let b = Point2f64::new(10.0, 0.0);
         let walls = WallRegions::regenerate(
             vec![(a, b, WallExposure::Exposed)],
-            &WallRegions::default(),
             &roofs,
             &FloorRegions::default(),
             0.0,
@@ -1425,7 +966,6 @@ mod tests {
         let b = Point2f64::new(10.0, 0.0);
         let walls = WallRegions::regenerate(
             vec![(a, b, WallExposure::Exposed)],
-            &WallRegions::default(),
             &roofs,
             &FloorRegions::default(),
             0.0,
@@ -3018,15 +2558,8 @@ mod tests {
         let segments: Vec<(Point2f64, Point2f64, WallExposure)> = (0..4)
             .map(|i| (ring[i], ring[(i + 1) % 4], WallExposure::Unset))
             .collect();
-        let walls = WallRegions::regenerate(
-            segments,
-            &WallRegions::default(),
-            &roofs,
-            &FloorRegions::default(),
-            0.0,
-            2.4,
-            cid,
-        );
+        let walls =
+            WallRegions::regenerate(segments, &roofs, &FloorRegions::default(), 0.0, 2.4, cid);
         assert_eq!(walls.regions.len(), 4);
         // The GABLE wall y = 0 (under the ridge end at (2, 0)): base edge,
         // then the top traced b → a as eaves → apex → eaves.
@@ -3534,7 +3067,7 @@ mod tests {
         };
         // Vertical cut line at x = 1 crossing the base edge.
         let cut = [Point2f64::new(1.0, -1.0), Point2f64::new(1.0, 1.0)];
-        let out = walls.apply_splits(&[cut], &WallRegions { regions: vec![] });
+        let out = walls.apply_splits(&[cut]);
         assert_eq!(out.regions.len(), 2, "one cut → two sub-walls");
         for r in &out.regions {
             assert_eq!(r.exposure, WallExposure::Exposed, "exposure copied to both");
@@ -3560,32 +3093,8 @@ mod tests {
             regions: vec![four_m_wall(cid, WallExposure::Exposed)],
         };
         let cut = [Point2f64::new(10.0, -1.0), Point2f64::new(10.0, 1.0)]; // misses the wall
-        let out = walls.apply_splits(&[cut], &WallRegions { regions: vec![] });
+        let out = walls.apply_splits(&[cut]);
         assert_eq!(out.regions.len(), 1, "untouched wall survives the miss");
-    }
-
-    #[test]
-    fn apply_splits_recovers_sub_wall_ids_on_re_resolve() {
-        let cid = ItemId::default();
-        let cut = [Point2f64::new(1.0, -1.0), Point2f64::new(1.0, 1.0)];
-        // First split mints two fresh sub-wall ids.
-        let first = WallRegions {
-            regions: vec![four_m_wall(cid, WallExposure::Exposed)],
-        }
-        .apply_splits(&[cut], &WallRegions { regions: vec![] });
-        let ids_first: std::collections::HashSet<_> = first.regions.iter().map(|r| r.id).collect();
-        // Re-resolve: `regenerate` re-makes the FULL wall (fresh id), then
-        // apply_splits re-splits against `first` → must recover the SAME ids.
-        let second = WallRegions {
-            regions: vec![four_m_wall(cid, WallExposure::Exposed)],
-        }
-        .apply_splits(&[cut], &first);
-        let ids_second: std::collections::HashSet<_> =
-            second.regions.iter().map(|r| r.id).collect();
-        assert_eq!(
-            ids_first, ids_second,
-            "sub-wall ids stable across re-resolve"
-        );
     }
 
     #[test]
@@ -3596,7 +3105,7 @@ mod tests {
         let out = WallRegions {
             regions: vec![wall],
         }
-        .apply_splits(&[], &WallRegions { regions: vec![] });
+        .apply_splits(&[]);
         assert_eq!(out.regions.len(), 1);
         assert_eq!(out.regions[0].id, id, "empty cuts → untouched");
     }

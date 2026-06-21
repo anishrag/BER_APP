@@ -2,9 +2,7 @@ use geo::{LineString, Point as GeoPoint, Polygon};
 use serde::{Deserialize, Serialize};
 
 use crate::ber::common::ItemId;
-use domain::points::{
-    point_to_segment_distance, segment_cross_param, Point2f64, Point3f64, Vector3f64,
-};
+use domain::points::{segment_cross_param, Point2f64, Point3f64, Vector3f64};
 
 #[allow(unused_imports)]
 use super::*;
@@ -242,129 +240,45 @@ impl WallRegions {
     /// [`base_frame`]: WallRegion::base_frame
     /// [`base_midpoint`]: WallRegion::base_midpoint
     ///
-    /// Identity (amend-vs-create):
-    /// - AMEND: a segment whose base edge matches a previous region's (both
-    ///   endpoints within 1e-2 m, either orientation) keeps that region's
-    ///   `id`, `construction_id` AND `opes` — a roof change re-shapes a
-    ///   marked wall without orphaning its openings. Matching is INJECTIVE:
-    ///   the best match (smallest endpoint error) wins and a previous region
-    ///   amends at most one new segment, so ids are never duplicated.
-    /// - COVERED SPLIT: an unmatched segment whose midpoint a previous
-    ///   region covers (`region_covering`) inherits `construction_id` only —
-    ///   fresh `id`, empty `opes` (positional: ambiguous to split).
-    /// - FRESH: anything else gets `default_construction_id` (the caller
-    ///   supplies the id of an "uninitialised" construction it has ensured
-    ///   exists in the BER).
+    /// Identity: every region is FRESH-minted (`ItemId::default()`) with
+    /// `default_construction_id` and empty `opes`; exposure comes from the
+    /// segment (the painted sections via `wall_exposure_segments`). Durable
+    /// per-wall data is recovered downstream by parametric key, not by an id the
+    /// projection tries to keep stable: openings re-home from their `wall_anchor`
+    /// (`reanchor_openings`), riser exposure from the `riser_exposure` table
+    /// (`stamp_riser_exposure`), wall construction from the `wall_constructions`
+    /// store (`stamp_wall_constructions`), and the phase axis is re-derived by
+    /// `stamp_wall_phases`. (Before 2026-06 this ran an injective base-edge amend
+    /// against the previous regions to carry ids/opes/exposure/construction; that
+    /// is retired now nothing durable rides the wall id.)
     ///
-    /// Runs on every materialize: O(segments × previous + segments × roof
-    /// vertices), no caching.
+    /// Runs on every materialize: O(segments × roof vertices), no caching.
     pub fn regenerate(
         segments: Vec<(Point2f64, Point2f64, WallExposure)>,
-        previous: &WallRegions,
         roofs: &CeilingRegions,
         floors: &FloorRegions,
         base_z: f64,
         fallback_top_z: f64,
         default_construction_id: ItemId,
     ) -> Self {
-        // ── Injective base-edge matching (amend) ─────────────────────────
-        let bases: Vec<(Point2f64, Point2f64, f64)> =
-            segments.iter().map(|(a, b, _)| (*a, *b, base_z)).collect();
-        let mut prev_used = vec![false; previous.regions.len()];
-        let amend_from = Self::match_bases_to_previous(&bases, previous, &mut prev_used);
-
         let regions = segments
             .into_iter()
-            .enumerate()
-            .map(|(si, (a, b, exposure))| {
+            .map(|(a, b, exposure)| {
                 // Base profile first (a→b, tracing the floor steps — a flat
                 // base collapses to the 2-vertex `[a, b]` of the contract),
                 // then the roof-profile top (b→a) to close the ring.
                 let mut ext = floor_profile_base(floors, a, b, base_z);
                 ext.extend(roof_profile_top(roofs, a, b, fallback_top_z));
-                let polygon = Polygon3D::new(ext);
-                match amend_from[si] {
-                    Some(pi) => {
-                        let src = &previous.regions[pi];
-                        WallRegion {
-                            id: src.id,
-                            polygon,
-                            exposure,
-                            opes: src.opes.clone(),
-                            construction_id: src.construction_id,
-                        }
-                    }
-                    None => {
-                        let mid = Point2f64::new((a.x + b.x) * 0.5, (a.y + b.y) * 0.5);
-                        let construction_id = match previous.region_covering(mid) {
-                            Some(src) => src.construction_id,
-                            None => default_construction_id,
-                        };
-                        WallRegion {
-                            id: ItemId::default(),
-                            polygon,
-                            exposure,
-                            opes: Opes::default(),
-                            construction_id,
-                        }
-                    }
+                WallRegion {
+                    id: ItemId::default(),
+                    polygon: Polygon3D::new(ext),
+                    exposure,
+                    opes: Opes::default(),
+                    construction_id: default_construction_id,
                 }
             })
             .collect();
         Self { regions }
-    }
-
-    /// `regenerate`'s injective amend matcher, shared with [`with_risers`]:
-    /// a base edge matches a previous region when both endpoints sit within
-    /// [`MATCH_EPS_M`] of its base edge IN PLAN (either orientation). Every
-    /// qualifying (error, base, previous) pair is assigned greedily
-    /// best-first, so a previous region amends at most one base and ids are
-    /// never duplicated. The RANKING error adds the |Δz| of the base levels
-    /// (each base is z-constant; the third tuple element is its z): a floor
-    /// riser and a ceiling riser share the same PLAN edge under a step line,
-    /// and without the z term the greedy pass could hand one the other's
-    /// identity (id + opes + exposure). The z term is rank-only — it never
-    /// gates, so an edge whose level moved (a re-assigned step level, a
-    /// ceiling-height change) still amends when nothing closer claims its
-    /// previous region. `prev_used` marks previous regions already CLAIMED
-    /// on entry (how `with_risers` excludes the ids the perimeter pass kept)
-    /// and is updated with the assignments made.
-    ///
-    /// [`with_risers`]: WallRegions::with_risers
-    fn match_bases_to_previous(
-        bases: &[(Point2f64, Point2f64, f64)],
-        previous: &WallRegions,
-        prev_used: &mut [bool],
-    ) -> Vec<Option<usize>> {
-        let dist =
-            |u: Point2f64, vx: f64, vy: f64| ((u.x - vx).powi(2) + (u.y - vy).powi(2)).sqrt();
-        let mut candidates: Vec<(f64, usize, usize)> = Vec::new();
-        for (si, (a, b, z)) in bases.iter().enumerate() {
-            for (pi, r) in previous.regions.iter().enumerate() {
-                // The FULL base edge (a→last base vertex), robust to a
-                // previous region whose base stepped: comparing against the
-                // raw `exterior[1]` would miss a stepped perimeter wall whose
-                // index-1 vertex is a step breakpoint, not the far endpoint.
-                let Some((e0, e1)) = r.base_edge() else {
-                    continue;
-                };
-                let fwd = dist(*a, e0.x, e0.y).max(dist(*b, e1.x, e1.y));
-                let rev = dist(*a, e1.x, e1.y).max(dist(*b, e0.x, e0.y));
-                let err = fwd.min(rev);
-                if err <= MATCH_EPS_M {
-                    candidates.push((err + (z - e0.z).abs(), si, pi));
-                }
-            }
-        }
-        candidates.sort_by(|x, y| x.0.partial_cmp(&y.0).unwrap_or(std::cmp::Ordering::Equal));
-        let mut matched: Vec<Option<usize>> = vec![None; bases.len()];
-        for (_, si, pi) in candidates {
-            if matched[si].is_none() && !prev_used[pi] {
-                matched[si] = Some(pi);
-                prev_used[pi] = true;
-            }
-        }
-        matched
     }
 
     /// Divide walls crossed by structure-phase `cuts` (each a plan SEGMENT of a
@@ -383,158 +297,59 @@ impl WallRegions {
     /// base-edge match — EXCLUDING ids the untouched perimeter walls already
     /// hold. A first split (no previous half) takes fresh ids; the controller
     /// then re-homes the crossing wall's openings onto those ids at commit.
-    pub fn apply_splits(self, cuts: &[[Point2f64; 2]], previous: &WallRegions) -> Self {
+    pub fn apply_splits(self, cuts: &[[Point2f64; 2]]) -> Self {
         if cuts.is_empty() {
             return self;
         }
-        // ── Geometric split pass ─────────────────────────────────────────
-        // Untouched walls keep `regenerate`'s id; each split yields two halves
-        // flagged as split-children needing identity recovery below.
+        // Geometric split pass: each crossed wall yields two halves, each with
+        // the parent's exposure/construction and a fresh id (per
+        // `split_wall_by_segment`). Openings re-home onto the correct half from
+        // their `wall_anchor` at the resolve tail, so no id recovery is needed.
         let mut regions = self.regions;
-        let mut is_child = vec![false; regions.len()];
         for cut in cuts {
             let mut next: Vec<WallRegion> = Vec::new();
-            let mut next_child: Vec<bool> = Vec::new();
-            for (wall, child) in regions.into_iter().zip(is_child) {
+            for wall in regions.into_iter() {
                 match split_wall_by_segment(&wall, cut) {
                     Some((h0, h1)) => {
                         next.push(h0);
-                        next_child.push(true);
                         next.push(h1);
-                        next_child.push(true);
                     }
-                    None => {
-                        next.push(wall);
-                        next_child.push(child);
-                    }
+                    None => next.push(wall),
                 }
             }
             regions = next;
-            is_child = next_child;
-        }
-        // ── Identity recovery for the split-children ─────────────────────
-        // Exclude previous ids already kept by the untouched perimeter walls.
-        let mut prev_used: Vec<bool> = previous
-            .regions
-            .iter()
-            .map(|p| {
-                regions
-                    .iter()
-                    .zip(&is_child)
-                    .any(|(r, &c)| !c && r.id == p.id)
-            })
-            .collect();
-        let child_indices: Vec<usize> = (0..regions.len()).filter(|&i| is_child[i]).collect();
-        let bases: Vec<(Point2f64, Point2f64, f64)> = child_indices
-            .iter()
-            .map(|&i| match regions[i].base_edge() {
-                Some((a, b)) => (Point2f64::new(a.x, a.y), Point2f64::new(b.x, b.y), a.z),
-                None => (Point2f64::origin(), Point2f64::origin(), 0.0),
-            })
-            .collect();
-        let matched = Self::match_bases_to_previous(&bases, previous, &mut prev_used);
-        for (k, &i) in child_indices.iter().enumerate() {
-            if let Some(pi) = matched[k] {
-                let src = &previous.regions[pi];
-                regions[i].id = src.id;
-                regions[i].construction_id = src.construction_id;
-                regions[i].exposure = src.exposure;
-                regions[i].opes = src.opes.clone();
-            }
         }
         Self { regions }
     }
 
-    /// Append derived RISER faces (`faces` pairs each face with the exposure
-    /// the caller derived as its DEFAULT) with `regenerate`'s amend identity:
-    /// the same injective best-match on the base edge (`exterior[0]`/`[1]`,
-    /// within [`MATCH_EPS_M`]) against `previous` — EXCLUDING the previous
-    /// ids `self` already holds, so a riser can never duplicate an id the
-    /// perimeter pass kept. A matched face keeps the previous region's `id`,
-    /// `construction_id`, `opes` AND `exposure` — the DURABILITY RULE: a
-    /// user-overridden riser exposure survives every re-derivation (and a
-    /// reload, since the first materialize after load amends against the
-    /// persisted set), where stamping the freshly-derived default would wipe
-    /// it. Only a FRESH (unmatched) riser takes the caller's derived default;
-    /// an unmatched face whose base midpoint a previous region covers
-    /// inherits its `construction_id` only; anything else gets
-    /// `default_construction_id`. Perimeter walls are untouched by this rule
-    /// — their exposure comes from the painted sections via `regenerate`.
-    /// The faces are re-derived deterministically every materialize, so the
-    /// match keeps riser identity stable across re-resolves.
+    /// Append derived RISER faces (`faces` pairs each face with the exposure the
+    /// caller derived as its DEFAULT — `Unset`). Each becomes a FRESH region with
+    /// `default_construction_id` and empty `opes`. A user's riser exposure
+    /// override is NOT recovered here: it's stamped afterward from the durable
+    /// `riser_exposure` table (`stamp_riser_exposure`), keyed by the riser's base
+    /// edge — its parametric identity now the amend is gone.
     ///
-    /// THE COPLANAR-FLUSH MERGE runs last ([`merge_coplanar_flush`]): a
-    /// riser that is a coplanar continuation of another wall region — same
-    /// vertical plane, sharing a positive-length boundary segment — is the
-    /// same physical wall, so it merges INTO that region (the host keeps
-    /// its id/base/exposure/opes/construction; the riser's own identity and
-    /// any previously-painted riser exposure are discarded). Only risers
-    /// that REMAIN separate regions reach the output — those are what the
-    /// 2D dashed-line riser picker lists; a merged riser is selected and
-    /// painted through its host wall's normal exposure flow.
+    /// THE COPLANAR-FLUSH MERGE runs last ([`merge_coplanar_flush`]): a riser
+    /// that is a coplanar continuation of another wall region (same vertical
+    /// plane, sharing a positive-length boundary segment) is the same physical
+    /// wall, so it merges INTO that region. Only risers that REMAIN separate
+    /// reach the output — those the 2D dashed-line picker lists.
     ///
     /// [`merge_coplanar_flush`]: WallRegions::merge_coplanar_flush
     pub fn with_risers(
         mut self,
         faces: Vec<(Polygon3D, WallExposure)>,
-        previous: &WallRegions,
         default_construction_id: ItemId,
     ) -> Self {
-        let faces: Vec<(Polygon3D, WallExposure)> = faces
-            .into_iter()
-            .filter(|(p, _)| p.exterior.len() >= 3)
-            .collect();
-        // Previous regions whose id survived into `self` are already claimed.
-        let mut prev_used: Vec<bool> = previous
-            .regions
-            .iter()
-            .map(|p| self.regions.iter().any(|r| r.id == p.id))
-            .collect();
-        let bases: Vec<(Point2f64, Point2f64, f64)> = faces
-            .iter()
-            .map(|(p, _)| {
-                (
-                    Point2f64::new(p.exterior[0].x, p.exterior[0].y),
-                    Point2f64::new(p.exterior[1].x, p.exterior[1].y),
-                    p.exterior[0].z,
-                )
-            })
-            .collect();
-        let matched = Self::match_bases_to_previous(&bases, previous, &mut prev_used);
         let first_riser = self.regions.len();
-        for ((polygon, exposure), m) in faces.into_iter().zip(matched) {
-            let region = match m {
-                Some(pi) => {
-                    let src = &previous.regions[pi];
-                    WallRegion {
-                        id: src.id,
-                        polygon,
-                        // Durability rule: the previous exposure wins over the
-                        // freshly-derived default — a user override survives.
-                        exposure: src.exposure,
-                        opes: src.opes.clone(),
-                        construction_id: src.construction_id,
-                    }
-                }
-                None => {
-                    let mid = Point2f64::new(
-                        (polygon.exterior[0].x + polygon.exterior[1].x) * 0.5,
-                        (polygon.exterior[0].y + polygon.exterior[1].y) * 0.5,
-                    );
-                    let construction_id = match previous.region_covering(mid) {
-                        Some(src) => src.construction_id,
-                        None => default_construction_id,
-                    };
-                    WallRegion {
-                        id: ItemId::default(),
-                        polygon,
-                        exposure,
-                        opes: Opes::default(),
-                        construction_id,
-                    }
-                }
-            };
-            self.regions.push(region);
+        for (polygon, exposure) in faces.into_iter().filter(|(p, _)| p.exterior.len() >= 3) {
+            self.regions.push(WallRegion {
+                id: ItemId::default(),
+                polygon,
+                exposure,
+                opes: Opes::default(),
+                construction_id: default_construction_id,
+            });
         }
         self.merge_coplanar_flush(first_riser)
     }
@@ -609,22 +424,8 @@ impl WallRegions {
         }
         self
     }
-
-    /// The region whose base edge (the wall footprint) passes through `p`, used
-    /// to inherit fabric properties when re-deriving. `None` if no region covers
-    /// the point (e.g. a freshly drawn wall).
-    pub(crate) fn region_covering(&self, p: Point2f64) -> Option<&WallRegion> {
-        self.regions.iter().find(|r| {
-            r.base_edge().is_some_and(|(a, b)| {
-                point_to_segment_distance(p.x, p.y, a.x, a.y, b.x, b.y) < 1e-2
-            })
-        })
-    }
 }
 
-/// Both endpoints of a base edge must sit within this (m) of a previous
-/// region's for it to be the SAME wall — the amend-matching tolerance of
-/// [`WallRegions::regenerate`] and [`WallRegions::with_risers`].
 /// Split one wall along the vertical plane where the plan `cut` segment crosses
 /// its base edge, via [`Polygon3D::split_by_line`]. Returns the two sub-walls
 /// (each with the parent's `exposure`/`construction_id`, a fresh id, empty
@@ -665,8 +466,6 @@ fn split_wall_by_segment(
     };
     Some((mk(h0), mk(h1)))
 }
-
-const MATCH_EPS_M: f64 = 1e-2;
 
 /// Half-width (m) of the FLOOR BAND used by [`WallRegion::base_edge`] to tell
 /// a wall's base profile apart from a coplanar-flush-merged riser arm that
