@@ -12,8 +12,30 @@
 //! and holds the transient selected set (app-shell interaction state — the
 //! regions live on the BER record, not the editing `Document`).
 use super::*;
-use ber_model::ber::structural::Storey;
+use ber_model::ber::common::ConstructionPhase;
+use ber_model::ber::structural::{ConstructionMakeup, Storey, WallConstructionType};
 use domain::points::Point2f32;
+
+/// One attribute-GROUP in the exploded "Edit attributes" session: the selected
+/// surfaces that currently share a construction, plus the `(type, make-up)` the
+/// popup edits. `phase` is the derived axis (floor zones), shown read-only.
+#[derive(Debug, Clone)]
+pub struct EditGroup {
+    pub ids: Vec<ItemId>,
+    pub ty: WallConstructionType,
+    pub makeup: ConstructionMakeup,
+    pub phase: ConstructionPhase,
+}
+
+/// The in-flight "Edit attributes" session: the current selection partitioned by
+/// shared construction, plus which group's popup is active. Walls only for now
+/// (construction has a parametric home only for walls).
+#[derive(Debug, Clone)]
+pub struct StructureEdit {
+    pub kind: SurfaceKind,
+    pub groups: Vec<EditGroup>,
+    pub active: usize,
+}
 
 impl AppController {
     /// The Structure-phase selected region ids — the canvas shades exactly these.
@@ -64,6 +86,101 @@ impl AppController {
                 .insert(r, (ty, makeup.clone()));
         }
         let _ = self.mark_dirty();
+    }
+
+    /// The in-flight "Edit attributes" session, if any.
+    pub fn structure_edit(&self) -> Option<&StructureEdit> {
+        self.structure_edit.as_ref()
+    }
+
+    /// Open the "Edit attributes" session: partition the current WALL selection
+    /// by shared construction `(type, make-up, phase)` into groups (each editable
+    /// separately). No-op for a non-wall mode, an empty selection, or no storey.
+    pub fn begin_structure_edit(&mut self) {
+        if self.structure_kind != SurfaceKind::Walls || self.structure_selected.is_empty() {
+            return;
+        }
+        let Some(idx) = self.current_storey_idx else {
+            return;
+        };
+        let Some(record) = self.current_record.as_ref() else {
+            return;
+        };
+        let Some(storey) = record.data.storeys.get(idx) else {
+            return;
+        };
+        let mut groups: Vec<EditGroup> = Vec::new();
+        for id in &self.structure_selected {
+            let Some(r) = storey.walls.regions.iter().find(|r| r.id == *id) else {
+                continue;
+            };
+            let (ty, makeup, phase) = record
+                .data
+                .wall_construction(r.construction_id)
+                .map(|c| {
+                    (
+                        c.construction_type,
+                        c.base.construction_makeup.clone(),
+                        c.base.construction_phase.clone(),
+                    )
+                })
+                .unwrap_or_default();
+            match groups
+                .iter_mut()
+                .find(|g| g.ty == ty && g.makeup == makeup && g.phase == phase)
+            {
+                Some(g) => g.ids.push(*id),
+                None => groups.push(EditGroup {
+                    ids: vec![*id],
+                    ty,
+                    makeup,
+                    phase,
+                }),
+            }
+        }
+        if !groups.is_empty() {
+            self.structure_edit = Some(StructureEdit {
+                kind: SurfaceKind::Walls,
+                groups,
+                active: 0,
+            });
+        }
+    }
+
+    /// Switch which attribute-group's popup is active (one at a time).
+    pub fn set_active_structure_group(&mut self, i: usize) {
+        if let Some(e) = self.structure_edit.as_mut() {
+            if i < e.groups.len() {
+                e.active = i;
+            }
+        }
+    }
+
+    /// Set a group's construction `(type, make-up)` and apply it to that group's
+    /// surfaces (writes the durable store, snapshots for undo).
+    pub fn set_structure_group_attrs(
+        &mut self,
+        group: usize,
+        ty: WallConstructionType,
+        makeup: ConstructionMakeup,
+    ) {
+        let ids = {
+            let Some(e) = self.structure_edit.as_mut() else {
+                return;
+            };
+            let Some(g) = e.groups.get_mut(group) else {
+                return;
+            };
+            g.ty = ty;
+            g.makeup = makeup.clone();
+            g.ids.clone()
+        };
+        self.set_wall_construction_for(&ids, ty, makeup);
+    }
+
+    /// Close the "Edit attributes" session (attributes apply as they're set).
+    pub fn end_structure_edit(&mut self) {
+        self.structure_edit = None;
     }
 
     /// Toggle the surface under a tapped point (world metres) in/out of the

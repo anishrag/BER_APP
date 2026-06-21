@@ -68,6 +68,7 @@ impl AppController {
         self.structure_selected.clear();
         self.pending_structure_cut = None;
         self.structure_split_kind = None;
+        self.structure_edit = None;
         self.current_phase = phase;
         let display = match phase {
             AssessmentPhase::Mapping => DisplayMode::FloorMapDims,
@@ -110,6 +111,7 @@ impl AppController {
             self.structure_selected.clear();
             self.pending_structure_cut = None;
             self.structure_split_kind = None;
+            self.structure_edit = None;
             if matches!(
                 self.structure_select,
                 Some(SelectMode::All | SelectMode::Remaining)

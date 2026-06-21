@@ -27,8 +27,8 @@ use egui::Pos2;
 use crate::controller::app_controller::{
     AssessmentPhase, ChecklistItem, DimensionPromptUiData, EditDragPromptUiData, ElevationView,
     ExposureSelection, NewStoreyPromptUiData, OpeningPromptUiData, OpeningToolKind,
-    PositionPromptUiData, RiserView, SelectMode, SnapTagView, SurfaceKind, VertexDropPromptUiData,
-    WallExposureView,
+    PositionPromptUiData, RiserView, SelectMode, SnapTagView, StructureEdit, SurfaceKind,
+    VertexDropPromptUiData, WallExposureView,
 };
 use crate::ui::pages::events::UiEvent;
 use crate::ui::render::ViewParams;
@@ -493,6 +493,20 @@ pub enum SketchEvent {
         world_x: f64,
         world_y: f64,
     },
+    /// Structure phase: open the "Edit attributes" session over the current
+    /// selection — groups it by shared construction (walls only for now).
+    BeginStructureEdit,
+    /// Structure phase: make attribute-group `usize` the active popup.
+    SetActiveStructureGroup(usize),
+    /// Structure phase: set a group's wall construction (type + make-up); applies
+    /// to that group's surfaces.
+    SetStructureGroupAttrs {
+        group: usize,
+        ty: ber_model::ber::structural::WallConstructionType,
+        makeup: ber_model::ber::structural::ConstructionMakeup,
+    },
+    /// Structure phase: close the "Edit attributes" session.
+    EndStructureEdit,
 }
 
 /// Everything the Sketch page needs for one frame, built by the app shell
@@ -746,6 +760,9 @@ pub struct SketchView<'a> {
     pub structure_select: Option<SelectMode>,
     /// Region ids selected in the Structure phase — the canvas shades these.
     pub structure_selected: &'a HashSet<ItemId>,
+    /// The in-flight "Edit attributes" session (selection grouped by
+    /// construction), so the panel renders the per-group popups. `None` = none.
+    pub structure_edit: Option<&'a StructureEdit>,
     /// Candidate regions of a pending Structure carve/cut (world coords) — drawn
     /// to tap between. Empty when no carve is awaiting a pick.
     pub structure_cut_regions: &'a [Vec<(f64, f64)>],

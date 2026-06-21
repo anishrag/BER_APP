@@ -34,6 +34,7 @@ mod phase_regions;
 mod structure;
 
 pub use assessment_phase::{AssessmentPhase, SelectMode};
+pub use structure::{EditGroup, StructureEdit};
 // `SurfaceKind` is the data-model surface taxonomy — it lives in `ber_model`
 // (the queries dispatch on it) and is re-exported here so UI + controller call
 // sites keep reaching it via `app_controller::SurfaceKind`.
@@ -327,6 +328,10 @@ pub struct AppController {
     /// pushes onto and which surfaces auto-select. `None` when no split is
     /// in-flight. Transient — cleared on phase switch / storey switch / commit.
     structure_split_kind: Option<SurfaceKind>,
+    /// The in-flight "Edit attributes" session — the current selection grouped by
+    /// shared construction, with one group's popup active. `None` when not
+    /// editing. Transient; cleared on phase switch / kind change.
+    structure_edit: Option<StructureEdit>,
 }
 
 impl AppController {
@@ -386,6 +391,7 @@ impl AppController {
             structure_selected: HashSet::new(),
             pending_structure_cut: None,
             structure_split_kind: None,
+            structure_edit: None,
         }
     }
 }

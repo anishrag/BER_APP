@@ -11,7 +11,7 @@
 //! ceiling steps) keep their controller-enforced exclusive-mode semantics.
 
 use super::{structure, SketchEvent, SketchView};
-use crate::controller::app_controller::{AssessmentPhase, SelectMode, SurfaceKind};
+use crate::controller::app_controller::{AssessmentPhase, SelectMode, StructureEdit, SurfaceKind};
 use crate::number_entry::parse_dimension_expression;
 use crate::ui::pages::events::UiEvent;
 use crate::ui::widgets::{metre_input, HintExt};
@@ -226,6 +226,9 @@ pub struct ToolFlags {
     pub structure_kind: SurfaceKind,
     /// The active global Select subtool — drives which reads as selected.
     pub structure_select: Option<SelectMode>,
+    /// The in-flight "Edit attributes" session (selection grouped by
+    /// construction), so the panel renders the group editor. `None` = none.
+    pub structure_edit: Option<StructureEdit>,
     /// Current storey's wall / roof / floor counts — the Structure panel's
     /// per-surface read-out.
     pub surface_counts: SurfaceCounts,
@@ -261,6 +264,7 @@ impl ToolFlags {
             phase: view.current_phase,
             structure_kind: view.structure_kind,
             structure_select: view.structure_select,
+            structure_edit: view.structure_edit.cloned(),
             surface_counts: view.surface_counts,
         }
     }
@@ -281,6 +285,7 @@ pub fn ribbon<F: FnMut(UiEvent)>(
             ui,
             flags.structure_kind,
             flags.structure_select,
+            flags.structure_edit.as_ref(),
             flags.surface_counts,
             !flags.read_only,
             on_event,
@@ -322,6 +327,7 @@ pub fn side_panel<F: FnMut(UiEvent)>(
             ui,
             flags.structure_kind,
             flags.structure_select,
+            flags.structure_edit.as_ref(),
             flags.surface_counts,
             !flags.read_only,
             on_event,

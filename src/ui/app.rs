@@ -830,6 +830,9 @@ impl eframe::App for BerApp {
                                 .borrow()
                                 .structure_selected_ids()
                                 .clone();
+                            // Owned copy of the in-flight "Edit attributes" session.
+                            let structure_edit =
+                                self.app_controller.borrow().structure_edit().cloned();
                             // Candidate regions of a pending Structure carve.
                             let structure_cut_regions =
                                 self.app_controller.borrow().structure_cut_regions();
@@ -977,6 +980,7 @@ impl eframe::App for BerApp {
                                 structure_kind,
                                 structure_select,
                                 structure_selected: &structure_selected,
+                                structure_edit: structure_edit.as_ref(),
                                 structure_cut_regions: &structure_cut_regions,
                                 pending_structure_split_polygon: &pending_structure_split_polygon,
                             };
@@ -1652,6 +1656,20 @@ impl eframe::App for BerApp {
                                             world_x as f32,
                                             world_y as f32,
                                         );
+                                    }
+                                    SketchEvent::BeginStructureEdit => {
+                                        controller.borrow_mut().begin_structure_edit();
+                                    }
+                                    SketchEvent::SetActiveStructureGroup(i) => {
+                                        controller.borrow_mut().set_active_structure_group(i);
+                                    }
+                                    SketchEvent::SetStructureGroupAttrs { group, ty, makeup } => {
+                                        controller
+                                            .borrow_mut()
+                                            .set_structure_group_attrs(group, ty, makeup);
+                                    }
+                                    SketchEvent::EndStructureEdit => {
+                                        controller.borrow_mut().end_structure_edit();
                                     }
                                     SketchEvent::EditMouseDown {
                                         world_x,
