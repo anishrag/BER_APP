@@ -336,6 +336,9 @@ impl AppController {
     ) -> Result<(), String> {
         match result {
             Ok(()) => {
+                if let Some(idx) = self.current_storey_idx {
+                    self.reseed_opening_anchors(idx);
+                }
                 let _ = self.mark_dirty();
                 self.push_history_snapshot(undo_snap);
                 Ok(())
@@ -343,6 +346,66 @@ impl AppController {
             Err(e) => {
                 self.pending_opening = Some(pending);
                 Err(opening_error_msg(e))
+            }
+        }
+    }
+
+    /// Recompute the durable parametric `wall_anchor` of every wall opening on
+    /// storey `idx` from its current (live) placement — so the anchor is the
+    /// source of truth after a placement / move / auto-redistribute, and the
+    /// resolve re-derives the `wall_id`/`along_m` cache from it (no revert).
+    /// Cheap and idempotent; roof openings are left alone.
+    fn reseed_opening_anchors(&mut self, idx: usize) {
+        use ber_model::ber::fenestration::OpeningPlacement;
+        let anchor_of = |storey: &ber_model::ber::structural::Storey,
+                         plan: &manip_plan::FloorPlan,
+                         placement: &Option<OpeningPlacement>| {
+            let Some(OpeningPlacement::Wall {
+                wall_id, along_m, ..
+            }) = placement
+            else {
+                return None; // roof / unplaced
+            };
+            let r = storey.walls.regions.iter().find(|r| r.id == *wall_id)?;
+            document::opening_wall_anchor(plan, r, *along_m)
+        };
+        let (win, drs) = {
+            let Some(record) = self.current_record.as_ref() else {
+                return;
+            };
+            let Some(storey) = record.data.storeys.get(idx) else {
+                return;
+            };
+            let Some(sd) = self.document.storeys.get(idx) else {
+                return;
+            };
+            let plan = &sd.outline.floor_plan;
+            let win: Vec<_> = storey
+                .windows
+                .iter()
+                .map(|w| anchor_of(storey, plan, &w.placement))
+                .collect();
+            let drs: Vec<_> = storey
+                .doors
+                .iter()
+                .map(|d| anchor_of(storey, plan, &d.placement))
+                .collect();
+            (win, drs)
+        };
+        if let Some(storey) = self
+            .current_record
+            .as_mut()
+            .and_then(|r| r.data.storeys.get_mut(idx))
+        {
+            for (w, a) in storey.windows.iter_mut().zip(win) {
+                if a.is_some() {
+                    w.wall_anchor = a;
+                }
+            }
+            for (d, a) in storey.doors.iter_mut().zip(drs) {
+                if a.is_some() {
+                    d.wall_anchor = a;
+                }
             }
         }
     }
@@ -434,6 +497,7 @@ impl AppController {
                 let _ = openings::move_opening(storey, r, along_m, new_sill);
             }
         }
+        self.reseed_opening_anchors(idx);
         let _ = self.mark_dirty();
     }
 

@@ -38,7 +38,7 @@ pub use phase::{
     inherited_phase_regions, phase_regions_from_floors, stamp_wall_phases, PhaseRegion,
 };
 pub use position::{PositionOption, PositionPrompt, PositionPromptKind};
-pub use resolve::{ensure_storey_constructions, resolve_storey};
+pub use resolve::{ensure_storey_constructions, opening_wall_anchor, resolve_storey};
 pub use roof_point::{
     centred_rect_lo, centred_ridge_cross, centred_ridge_start, resolve_ridge_slope_side,
     ridge_region_ring, validate_roof_apex, validate_roof_rect_length, validate_roof_rect_placement,

@@ -434,68 +434,70 @@ fn stamp_riser_exposure(s: &StoreyDoc, storey: &mut Storey) {
 /// their own keep `wall_id` valid via `rehome`, so this no-ops there.
 fn reanchor_openings(s: &StoreyDoc, storey: &mut Storey) {
     use ber_model::ber::common::ItemId;
-    use ber_model::ber::fenestration::OpeningPlacement;
-    use manip_plan::{FloorPlan, SurfaceRef};
+    use ber_model::ber::fenestration::{OpeningPlacement, WallAnchor};
     use std::collections::HashSet;
 
     const TOL_M: f64 = 0.05;
-    let plan: &FloorPlan = &s.outline.floor_plan;
+    let plan = &s.outline.floor_plan;
     let walls = &storey.walls;
     let live: HashSet<ItemId> = walls.regions.iter().map(|r| r.id).collect();
 
-    // The perimeter SurfaceRef under an opening currently homed on `wall_id`:
-    // its host region's base midpoint mapped back onto the outline edge.
-    let seed_for = |wall_id: ItemId| -> Option<SurfaceRef> {
-        let r = walls.regions.iter().find(|r| r.id == wall_id)?;
-        let (e0, e1) = r.base_edge()?;
-        let mid = Point2f32::new(((e0.x + e1.x) * 0.5) as f32, ((e0.y + e1.y) * 0.5) as f32);
-        plan.surface_ref_at(mid, TOL_M as f32)
-    };
-    // The single live wall region lying along the perimeter edge `sref` names,
-    // plus its base length. `None` if absent or ambiguous (the wall was split).
-    let region_for = |sref: SurfaceRef| -> Option<(ItemId, f32)> {
-        let start = sref.wall_start()?;
-        let (a, b) = plan.wall_endpoints(start)?;
-        let (ax, ay, bx, by) = (a.x as f64, a.y as f64, b.x as f64, b.y as f64);
-        let on = |x: f64, y: f64| {
-            domain::points::point_to_segment_distance(x, y, ax, ay, bx, by) <= TOL_M
-        };
-        let mut hit: Option<(ItemId, f32)> = None;
+    // The live wall region whose base CONTAINS world point `p`, plus the centre
+    // distance along it — picks the correct sub-wall after a structure split.
+    let host_at = |p: Point2f64| -> Option<(ItemId, f32)> {
+        let mut best: Option<(f64, ItemId, f32)> = None;
         for r in &walls.regions {
-            let Some((e0, e1)) = r.base_edge() else {
+            let Some((origin, (ux, uy), wlen, _)) = r.base_frame() else {
                 continue;
             };
-            if on(e0.x, e0.y) && on(e1.x, e1.y) {
-                if hit.is_some() {
-                    return None; // ambiguous — the perimeter edge was split
-                }
-                let len = ((e1.x - e0.x).powi(2) + (e1.y - e0.y).powi(2)).sqrt() as f32;
-                hit = Some((r.id, len));
+            let t = (p.x - origin.x) * ux + (p.y - origin.y) * uy;
+            if t < -TOL_M || t > wlen + TOL_M {
+                continue;
+            }
+            let (px, py) = (origin.x + ux * t, origin.y + uy * t);
+            let d = ((p.x - px).powi(2) + (p.y - py).powi(2)).sqrt();
+            if d <= TOL_M && best.is_none_or(|(bd, _, _)| d < bd) {
+                best = Some((d, r.id, t.clamp(0.0, wlen) as f32));
             }
         }
-        hit
+        best.map(|(_, id, along)| (id, along))
     };
-    // (anchor-to-set, (wall_id, clamped along_m)-to-set) for one opening.
+
+    // (anchor-to-set, (wall_id, along_m)-to-set) for one opening.
     let compute = |placement: &Option<OpeningPlacement>,
-                   anchor: Option<SurfaceRef>|
-     -> (Option<SurfaceRef>, Option<(ItemId, f32)>) {
+                   anchor: Option<WallAnchor>|
+     -> (Option<WallAnchor>, Option<(ItemId, f32)>) {
         let Some(OpeningPlacement::Wall {
             wall_id, along_m, ..
         }) = placement
         else {
             return (None, None); // roof opening / unplaced — nothing to anchor
         };
-        if live.contains(wall_id) {
-            let set = if anchor.is_none() {
-                seed_for(*wall_id)
-            } else {
-                None
-            };
-            (set, None)
-        } else if let Some((id, len)) = anchor.and_then(region_for) {
-            (None, Some((id, along_m.clamp(0.0, len))))
-        } else {
-            (None, None) // no anchor or ambiguous — prune handles it
+        match anchor {
+            // Anchored: the anchor is the truth. Re-derive the wall_id/along_m
+            // cache from it — covers fresh ids, outline reshape, and picking the
+            // right sub-wall after a split (the parent-relative fraction lands in
+            // exactly one sub-wall).
+            Some(a) => {
+                let repoint = a
+                    .wall
+                    .wall_start()
+                    .and_then(|st| plan.wall_point_at_fraction(st, a.along_fraction))
+                    .and_then(|c| host_at(Point2f64::new(c.x as f64, c.y as f64)));
+                (None, repoint)
+            }
+            // Not yet anchored: seed from the live host wall. The controller also
+            // seeds after each opening op; this catches legacy / first-resolve
+            // openings while a live id is still available (i.e. while the amend
+            // preserves ids — Stage 2c's load-migration covers the rest).
+            None => {
+                let set = live
+                    .contains(wall_id)
+                    .then(|| walls.regions.iter().find(|r| r.id == *wall_id))
+                    .flatten()
+                    .and_then(|r| opening_wall_anchor(plan, r, *along_m));
+                (set, None)
+            }
         }
     };
 
@@ -511,8 +513,8 @@ fn reanchor_openings(s: &StoreyDoc, storey: &mut Storey) {
         .collect();
 
     let apply = |placement: &mut Option<OpeningPlacement>,
-                 anchor: &mut Option<SurfaceRef>,
-                 up: (Option<SurfaceRef>, Option<(ItemId, f32)>)| {
+                 anchor: &mut Option<WallAnchor>,
+                 up: (Option<WallAnchor>, Option<(ItemId, f32)>)| {
         if let Some(a) = up.0 {
             *anchor = Some(a);
         }
@@ -532,6 +534,33 @@ fn reanchor_openings(s: &StoreyDoc, storey: &mut Storey) {
     for (d, up) in storey.doors.iter_mut().zip(drs) {
         apply(&mut d.placement, &mut d.wall_anchor, up);
     }
+}
+
+/// The durable [`WallAnchor`] for an opening centred at `along_m` on the live
+/// wall region `wall`: the parent perimeter wall (by `VertexId`) + the centre's
+/// parent-relative along-fraction. `None` if the centre isn't on the outline
+/// perimeter (e.g. a riser) or the plan can't place it. Shared by the resolve
+/// tail and the controller (which seeds after each opening op), so both produce
+/// identical anchors.
+pub fn opening_wall_anchor(
+    plan: &manip_plan::FloorPlan,
+    wall: &ber_model::ber::structural::WallRegion,
+    along_m: f32,
+) -> Option<ber_model::ber::fenestration::WallAnchor> {
+    use ber_model::ber::fenestration::WallAnchor;
+    const TOL_M: f32 = 0.05;
+    let (origin, (ux, uy), _wlen, _bz) = wall.base_frame()?;
+    let centre = Point2f32::new(
+        (origin.x + ux * along_m as f64) as f32,
+        (origin.y + uy * along_m as f64) as f32,
+    );
+    let sref = plan.surface_ref_at(centre, TOL_M)?;
+    let start = sref.wall_start()?;
+    let frac = plan.wall_along_fraction(start, centre)?;
+    Some(WallAnchor {
+        wall: sref,
+        along_fraction: frac,
+    })
 }
 
 #[cfg(test)]

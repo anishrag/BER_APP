@@ -40,6 +40,18 @@ pub struct WindowType {
     pub notes: Option<String>,
 }
 
+/// Durable PARAMETRIC anchor for a wall opening: the perimeter wall it sits on
+/// (by stable `VertexId`, via [`SurfaceRef`]) plus the opening centre's
+/// along-position as a fraction (0..1) of that perimeter wall. The fraction is
+/// PARENT-relative, so a structure split is handled for free — the fraction
+/// picks which sub-wall the centre falls in. The `wall_id`/`along_m` inside the
+/// opening's `placement` are a per-resolve CACHE re-derived from this anchor.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq)]
+pub struct WallAnchor {
+    pub wall: SurfaceRef,
+    pub along_fraction: f32,
+}
+
 /// Where an opening sits, parametrically — the DURABLE record of its location.
 /// The 3D `vertices` on `Window`/`Door` are a CACHE derived from this at resolve
 /// (`super::openings::derive_opening_vertices`); `placement: None` marks a legacy
@@ -92,7 +104,7 @@ pub struct Window {
     /// `wall_id` from this anchor (and seeds the anchor for new/legacy openings).
     /// `None` for roof openings and not-yet-seeded records.
     #[serde(default)]
-    pub wall_anchor: Option<SurfaceRef>,
+    pub wall_anchor: Option<WallAnchor>,
     /// Groups the members of a door+sidelights assembly (this window is a
     /// sidelight/transom of the door with the same id). `None` for standalone.
     #[serde(default)]
@@ -116,7 +128,7 @@ pub struct Door {
     pub placement: Option<OpeningPlacement>,
     /// Durable parametric anchor for a wall opening — see [`Window::wall_anchor`].
     #[serde(default)]
-    pub wall_anchor: Option<SurfaceRef>,
+    pub wall_anchor: Option<WallAnchor>,
     /// Set on the door panel of a door+sidelights assembly; its sidelight/
     /// transom `Window`s carry the same id.
     #[serde(default)]
