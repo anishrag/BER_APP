@@ -247,6 +247,19 @@ impl AppController {
         let Some(idx) = self.current_storey_idx else {
             return;
         };
+        // Capture the selected riser's durable base-edge key BEFORE the
+        // re-resolve mints fresh region ids, so the selection can be re-pointed
+        // to the riser's new id afterward (riser selection survives the
+        // re-derive — its id is otherwise unstable without the amend).
+        let sel_riser_key = self.selected_riser.and_then(|id| {
+            let storey = self.current_record.as_ref()?.data.storeys.get(idx)?;
+            let r = storey.walls.regions.iter().find(|r| r.id == id)?;
+            let (e0, e1) = r.base_edge()?;
+            Some(document::riser_key(
+                domain::points::Point2f64::new(e0.x, e0.y),
+                domain::points::Point2f64::new(e1.x, e1.y),
+            ))
+        });
         // Flush the active buffer into its slot, then ensure the storey slot + its
         // constructions exist — the two `&mut` prerequisites of the otherwise
         // read-only projection (`document::resolve_storey`).
@@ -286,6 +299,25 @@ impl AppController {
         // Compose each wall's ASSIGNED construction (type + make-up, from the
         // parametric store) onto the just-derived phase.
         document::stamp_wall_constructions(&mut record.data, idx, &self.document.storeys[idx]);
+        // Re-point the riser selection to the (re-derived) riser with the same
+        // base edge — keeps the selection valid across the fresh ids.
+        if let Some(key) = sel_riser_key {
+            let new_id = record.data.storeys.get(idx).and_then(|s| {
+                s.walls
+                    .regions
+                    .iter()
+                    .find(|r| {
+                        r.base_edge().is_some_and(|(e0, e1)| {
+                            document::riser_key(
+                                domain::points::Point2f64::new(e0.x, e0.y),
+                                domain::points::Point2f64::new(e1.x, e1.y),
+                            ) == key
+                        })
+                    })
+                    .map(|r| r.id)
+            });
+            self.selected_riser = new_id;
+        }
     }
 
     /// Mirror the active storey's same-height DIVIDERS (the delta-0 entries of
