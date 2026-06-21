@@ -223,6 +223,7 @@ pub fn add_wall_window(
             along_m,
             sill_m,
         }),
+        wall_anchor: None,
         assembly_id: None,
     });
     link_window(storey, wall_id, id);
@@ -261,6 +262,7 @@ pub fn add_wall_door(
             along_m,
             sill_m,
         }),
+        wall_anchor: None,
         assembly_id: None,
     });
     link_door(storey, wall_id, id);
@@ -301,6 +303,7 @@ pub fn add_roof_window(
             roof_region_id,
             plan,
         }),
+        wall_anchor: None,
         assembly_id: None,
     });
     Ok(id)
@@ -341,6 +344,7 @@ pub fn compose_door_sidelights(
                 along_m: centre,
                 sill_m: sill,
             }),
+            wall_anchor: None,
             assembly_id: Some(assembly_id),
         });
         link_window(storey, wall_id, id);
@@ -388,6 +392,7 @@ pub fn compose_door_sidelights(
             along_m: door_centre,
             sill_m: 0.0,
         }),
+        wall_anchor: None,
         assembly_id: Some(assembly_id),
     });
     link_door(storey, wall_id, door_id);
@@ -1008,6 +1013,7 @@ mod tests {
             height_m: h,
             window_type_id: ItemId::default(),
             placement,
+            wall_anchor: None,
             assembly_id: None,
         }
     }
@@ -1269,6 +1275,7 @@ mod tests {
                 height_m: 0.0,
                 kind: None,
                 placement: None, // legacy
+                wall_anchor: None,
                 assembly_id: None,
             }],
             ..Storey::default()

@@ -1,5 +1,6 @@
 // src/data/fenestration.rs
 
+use manip_plan::SurfaceRef;
 use serde::{Deserialize, Serialize};
 
 use super::common::{ItemId, Photo, Year};
@@ -83,6 +84,15 @@ pub struct Window {
     pub window_type_id: ItemId,
     #[serde(default)]
     pub placement: Option<OpeningPlacement>,
+    /// Durable PARAMETRIC anchor for a wall opening: the perimeter wall it sits
+    /// on, by stable [`SurfaceRef`]. The host `wall_id` inside `placement` is a
+    /// resolved-region id that the wall amend-match recovers across derivation
+    /// edits and `rehome` rebases across splits — but an outline RESHAPE mints a
+    /// fresh wall id it can't recover. The resolve tail re-points a stale
+    /// `wall_id` from this anchor (and seeds the anchor for new/legacy openings).
+    /// `None` for roof openings and not-yet-seeded records.
+    #[serde(default)]
+    pub wall_anchor: Option<SurfaceRef>,
     /// Groups the members of a door+sidelights assembly (this window is a
     /// sidelight/transom of the door with the same id). `None` for standalone.
     #[serde(default)]
@@ -104,6 +114,9 @@ pub struct Door {
     pub kind: Option<DoorKind>,
     #[serde(default)]
     pub placement: Option<OpeningPlacement>,
+    /// Durable parametric anchor for a wall opening — see [`Window::wall_anchor`].
+    #[serde(default)]
+    pub wall_anchor: Option<SurfaceRef>,
     /// Set on the door panel of a door+sidelights assembly; its sidelight/
     /// transom `Window`s carry the same id.
     #[serde(default)]

@@ -61,6 +61,56 @@ impl FloorPlan {
         Some((a, b))
     }
 
+    /// The normalized position (0.0 = start, 1.0 = end) of `point` projected
+    /// onto the wall starting at vertex `start`. This is the durable along-key
+    /// for items attached to a wall (openings, split points): it's invariant
+    /// under the wall translating or rescaling, because it's a fraction of the
+    /// wall's own length. Clamped to `[0, 1]`. `None` when the vertex is gone or
+    /// its edge is degenerate.
+    pub fn wall_along_fraction(&self, start: VertexId, point: Point2f32) -> Option<f32> {
+        let (a, b) = self.wall_endpoints(start)?;
+        let (dx, dy) = (b.x - a.x, b.y - a.y);
+        let len2 = dx * dx + dy * dy;
+        if len2 <= f32::EPSILON {
+            return Some(0.0);
+        }
+        let t = ((point.x - a.x) * dx + (point.y - a.y) * dy) / len2;
+        Some(t.clamp(0.0, 1.0))
+    }
+
+    /// The world point at along-`fraction` of the wall starting at vertex
+    /// `start` — the inverse of [`wall_along_fraction`](Self::wall_along_fraction).
+    /// `fraction` is clamped to `[0, 1]`. `None` when the vertex is gone or its
+    /// edge is degenerate.
+    pub fn wall_point_at_fraction(&self, start: VertexId, fraction: f32) -> Option<Point2f32> {
+        let (a, b) = self.wall_endpoints(start)?;
+        let t = fraction.clamp(0.0, 1.0);
+        Some(Point2f32::new(a.x + (b.x - a.x) * t, a.y + (b.y - a.y) * t))
+    }
+
+    /// The ring-0 perimeter wall nearest to `point` (within `tol`), as a
+    /// [`SurfaceRef::Wall`](crate::SurfaceRef) keyed by its stable start
+    /// `VertexId`. Used to anchor an opening placed on a resolved wall back onto
+    /// the durable parametric outline. `None` when no perimeter edge is within
+    /// `tol`.
+    pub fn surface_ref_at(&self, point: Point2f32, tol: f32) -> Option<crate::SurfaceRef> {
+        let mut best: Option<(f64, VertexId)> = None;
+        for (vid, a, b) in self.perimeter_walls() {
+            let d = domain::points::point_to_segment_distance(
+                point.x as f64,
+                point.y as f64,
+                a.x as f64,
+                a.y as f64,
+                b.x as f64,
+                b.y as f64,
+            );
+            if d <= tol as f64 && best.is_none_or(|(bd, _)| d < bd) {
+                best = Some((d, vid));
+            }
+        }
+        best.map(|(_, vid)| crate::SurfaceRef::wall(vid))
+    }
+
     /// For each wall in ring 0 whose length is KNOWN (its parameter is in
     /// `known_params`), its endpoints and length: `((ax, ay), (bx, by), len)`
     /// with coordinates in f64. The label set the UI draws on dimensioned
@@ -653,5 +703,67 @@ impl FloorPlan {
     /// [`ParametricPlan::aesthetic_rescale`](parametric::ParametricPlan::aesthetic_rescale).
     pub fn aesthetic_rescale(&mut self, known: &HashSet<ParameterId>) {
         self.parametric.aesthetic_rescale(known)
+    }
+}
+
+#[cfg(test)]
+mod along_fraction_tests {
+    use super::*;
+    use crate::SurfaceRef;
+
+    fn square() -> FloorPlan {
+        let pts = [
+            Point2f32::new(0.0, 0.0),
+            Point2f32::new(4.0, 0.0),
+            Point2f32::new(4.0, 3.0),
+            Point2f32::new(0.0, 3.0),
+        ];
+        FloorPlan::from_points_to_orthogonal(&pts, 0.01, true).unwrap()
+    }
+
+    #[test]
+    fn midpoint_is_half() {
+        let plan = square();
+        let walls = plan.perimeter_walls();
+        assert_eq!(walls.len(), 4);
+        for (vid, a, b) in walls {
+            let mid = Point2f32::new((a.x + b.x) * 0.5, (a.y + b.y) * 0.5);
+            let f = plan.wall_along_fraction(vid, mid).unwrap();
+            assert!((f - 0.5).abs() < 1e-4, "mid fraction {f}");
+        }
+    }
+
+    #[test]
+    fn round_trips_point_and_fraction() {
+        let plan = square();
+        for (vid, _a, _b) in plan.perimeter_walls() {
+            for frac in [0.0_f32, 0.25, 0.5, 0.75, 1.0] {
+                let p = plan.wall_point_at_fraction(vid, frac).unwrap();
+                let back = plan.wall_along_fraction(vid, p).unwrap();
+                assert!((back - frac).abs() < 1e-4, "round trip {frac} -> {back}");
+            }
+        }
+    }
+
+    #[test]
+    fn endpoints_are_zero_and_one() {
+        let plan = square();
+        for (vid, a, b) in plan.perimeter_walls() {
+            assert!(plan.wall_along_fraction(vid, a).unwrap() < 1e-4);
+            assert!((plan.wall_along_fraction(vid, b).unwrap() - 1.0).abs() < 1e-4);
+        }
+    }
+
+    #[test]
+    fn missing_vertex_is_none() {
+        let plan = square();
+        let p = Point2f32::new(0.0, 0.0);
+        assert!(plan.wall_along_fraction(u64::MAX, p).is_none());
+        assert!(plan.wall_point_at_fraction(u64::MAX, 0.5).is_none());
+    }
+
+    #[test]
+    fn surface_ref_wall_accessor() {
+        assert_eq!(SurfaceRef::wall(7).wall_start(), Some(7));
     }
 }

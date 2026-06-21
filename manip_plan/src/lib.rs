@@ -25,6 +25,7 @@ mod region;
 mod simplification;
 mod snap;
 mod splice;
+mod surface_ref;
 
 pub use carve::SubareaOutcome;
 pub use debug_stages::{take_splice_debug, SplicePhase};
@@ -42,6 +43,7 @@ pub use snap::{
     clear_snap_policy, set_snap_policy, snap_stroke_to_ring, take_snap_decisions, SnapCandidate,
     SnapChoice, SnapDecision, SnapKind,
 };
+pub use surface_ref::SurfaceRef;
 
 use domain::points::Point2f32;
 

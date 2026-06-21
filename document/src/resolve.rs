@@ -7,7 +7,7 @@ use ber_model::ber::common::{ConstructionPhase, ItemId};
 use ber_model::ber::structural::{
     CeilingRegions, FloorRegions, Polygon3D, Storey, WallExposure, WallRegions,
 };
-use domain::points::{to_f64, Point2f64};
+use domain::points::{to_f64, Point2f32, Point2f64};
 
 /// Placeholder top for derived wall quads until the storey's ceiling height is
 /// set — never visible in 3D (gated); walls re-extrude on the next materialize
@@ -376,17 +376,132 @@ pub fn resolve_storey(
             }
         }
     }
-    // OPENINGS tail: walls/roofs are now final, so recompute each placed
-    // window/door's derived `vertices` cache from its durable placement, then
-    // drop any opening whose host region the edit replaced. Pure data transform
-    // over the just-resolved storey (the geometry projection above never reads
-    // openings) — same post-resolve discipline as `stamp_wall_phases`.
+    // OPENINGS tail: walls/roofs are now final. First re-point any wall opening
+    // whose `wall_id` went stale (an outline RESHAPE mints a fresh wall id the
+    // amend-match can't recover) from its durable parametric `wall_anchor`, and
+    // seed that anchor for openings that don't have one yet — the outline plan
+    // `s` is the only source of stable perimeter ids. Then recompute each placed
+    // opening's derived `vertices` cache and drop any whose host region the edit
+    // replaced. Pure data transforms over the just-resolved storey (the geometry
+    // projection above never reads openings) — same discipline as
+    // `stamp_wall_phases`.
+    reanchor_openings(s, &mut storey);
     ber_model::ber::openings::derive_opening_vertices(&mut storey);
     ber_model::ber::openings::prune_orphaned_openings(&mut storey);
     // Each wall/roof region's `opes` is a DERIVED index of the openings on it,
     // rebuilt from placements (ceiling ids regenerate, so it can't be carried).
     ber_model::ber::openings::rebuild_opes(&mut storey);
     storey
+}
+
+/// Keep each wall opening homed across edits via its durable parametric anchor.
+/// For a wall opening whose `wall_id` is still live, SEED `wall_anchor` if unset
+/// (the host wall's base midpoint maps back to a perimeter `VertexId`). For one
+/// whose `wall_id` went stale (outline reshape), RE-POINT it onto the wall now
+/// lying along the anchor's perimeter edge, clamping `along_m` to that wall's
+/// length. A wall that's both split and reshaped is ambiguous (the perimeter
+/// edge carries two sub-walls) and is left for the orphan-prune. Wall splits on
+/// their own keep `wall_id` valid via `rehome`, so this no-ops there.
+fn reanchor_openings(s: &StoreyDoc, storey: &mut Storey) {
+    use ber_model::ber::common::ItemId;
+    use ber_model::ber::fenestration::OpeningPlacement;
+    use manip_plan::{FloorPlan, SurfaceRef};
+    use std::collections::HashSet;
+
+    const TOL_M: f64 = 0.05;
+    let plan: &FloorPlan = &s.outline.floor_plan;
+    let walls = &storey.walls;
+    let live: HashSet<ItemId> = walls.regions.iter().map(|r| r.id).collect();
+
+    // The perimeter SurfaceRef under an opening currently homed on `wall_id`:
+    // its host region's base midpoint mapped back onto the outline edge.
+    let seed_for = |wall_id: ItemId| -> Option<SurfaceRef> {
+        let r = walls.regions.iter().find(|r| r.id == wall_id)?;
+        let (e0, e1) = r.base_edge()?;
+        let mid = Point2f32::new(((e0.x + e1.x) * 0.5) as f32, ((e0.y + e1.y) * 0.5) as f32);
+        plan.surface_ref_at(mid, TOL_M as f32)
+    };
+    // The single live wall region lying along the perimeter edge `sref` names,
+    // plus its base length. `None` if absent or ambiguous (the wall was split).
+    let region_for = |sref: SurfaceRef| -> Option<(ItemId, f32)> {
+        let start = sref.wall_start()?;
+        let (a, b) = plan.wall_endpoints(start)?;
+        let (ax, ay, bx, by) = (a.x as f64, a.y as f64, b.x as f64, b.y as f64);
+        let on = |x: f64, y: f64| {
+            domain::points::point_to_segment_distance(x, y, ax, ay, bx, by) <= TOL_M
+        };
+        let mut hit: Option<(ItemId, f32)> = None;
+        for r in &walls.regions {
+            let Some((e0, e1)) = r.base_edge() else {
+                continue;
+            };
+            if on(e0.x, e0.y) && on(e1.x, e1.y) {
+                if hit.is_some() {
+                    return None; // ambiguous — the perimeter edge was split
+                }
+                let len = ((e1.x - e0.x).powi(2) + (e1.y - e0.y).powi(2)).sqrt() as f32;
+                hit = Some((r.id, len));
+            }
+        }
+        hit
+    };
+    // (anchor-to-set, (wall_id, clamped along_m)-to-set) for one opening.
+    let compute = |placement: &Option<OpeningPlacement>,
+                   anchor: Option<SurfaceRef>|
+     -> (Option<SurfaceRef>, Option<(ItemId, f32)>) {
+        let Some(OpeningPlacement::Wall {
+            wall_id, along_m, ..
+        }) = placement
+        else {
+            return (None, None); // roof opening / unplaced — nothing to anchor
+        };
+        if live.contains(wall_id) {
+            let set = if anchor.is_none() {
+                seed_for(*wall_id)
+            } else {
+                None
+            };
+            (set, None)
+        } else if let Some((id, len)) = anchor.and_then(region_for) {
+            (None, Some((id, along_m.clamp(0.0, len))))
+        } else {
+            (None, None) // no anchor or ambiguous — prune handles it
+        }
+    };
+
+    let win: Vec<_> = storey
+        .windows
+        .iter()
+        .map(|w| compute(&w.placement, w.wall_anchor))
+        .collect();
+    let drs: Vec<_> = storey
+        .doors
+        .iter()
+        .map(|d| compute(&d.placement, d.wall_anchor))
+        .collect();
+
+    let apply = |placement: &mut Option<OpeningPlacement>,
+                 anchor: &mut Option<SurfaceRef>,
+                 up: (Option<SurfaceRef>, Option<(ItemId, f32)>)| {
+        if let Some(a) = up.0 {
+            *anchor = Some(a);
+        }
+        if let Some((id, along)) = up.1 {
+            if let Some(OpeningPlacement::Wall {
+                wall_id, along_m, ..
+            }) = placement
+            {
+                *wall_id = id;
+                *along_m = along;
+            }
+        }
+    };
+    for (w, up) in storey.windows.iter_mut().zip(win) {
+        apply(&mut w.placement, &mut w.wall_anchor, up);
+    }
+    for (d, up) in storey.doors.iter_mut().zip(drs) {
+        apply(&mut d.placement, &mut d.wall_anchor, up);
+    }
 }
 
 #[cfg(test)]
@@ -665,6 +780,7 @@ mod tests {
                 along_m: 1.0, // left of the x = 2 cut
                 sill_m: 0.8,
             }),
+            wall_anchor: None,
             assembly_id: None,
         });
         // Split the bottom wall at x = 2.
@@ -3004,6 +3120,7 @@ mod tests {
                 along_m: (len / 2.0) as f32,
                 sill_m: 1.0,
             }),
+            wall_anchor: None,
             assembly_id: None,
         });
         let widx = ber.storeys[0]
@@ -3037,6 +3154,85 @@ mod tests {
         assert!(
             host.opes.windows.contains(&win_id),
             "the opes reference survives the amend"
+        );
+    }
+
+    /// A wall window survives an outline RESHAPE: the move breaks the base-edge
+    /// amend (the wall gets a fresh id), but the durable parametric `wall_anchor`
+    /// — seeded on the prior resolve — re-points the opening onto the
+    /// regenerated wall instead of letting the orphan-prune drop it.
+    #[test]
+    fn placed_window_survives_outline_reshape_via_anchor() {
+        use ber_model::ber::fenestration::{OpeningPlacement, Window};
+        let mut doc = square_doc(&[
+            Point2f32::new(0.0, 0.0),
+            Point2f32::new(4.0, 0.0),
+            Point2f32::new(4.0, 4.0),
+            Point2f32::new(0.0, 4.0),
+        ]);
+        let mut ber = Ber::default();
+        ensure_storey_constructions(&mut ber, 0, &[]);
+        ber.set_default_ceiling_height(Some(0), 2.4);
+        ber.storeys[0] = resolve_storey(&doc, &ber, 0, &[], &[], &[]);
+        let wall = &ber.storeys[0].walls.regions[0];
+        let wall_id = wall.id;
+        let (_, _, len, _) = wall.base_frame().unwrap();
+        let win_id = ItemId::default();
+        ber.storeys[0].windows.push(Window {
+            id: win_id,
+            vertices: vec![],
+            width_m: 1.0,
+            height_m: 1.2,
+            window_type_id: ItemId::default(),
+            placement: Some(OpeningPlacement::Wall {
+                wall_id,
+                along_m: (len / 2.0) as f32,
+                sill_m: 1.0,
+            }),
+            wall_anchor: None,
+            assembly_id: None,
+        });
+
+        // Resolve once to SEED the parametric anchor from the (still live) wall.
+        ber.storeys[0] = resolve_storey(&doc, &ber, 0, &[], &[], &[]);
+        assert!(
+            ber.storeys[0].windows[0].wall_anchor.is_some(),
+            "anchor seeded from the live host wall"
+        );
+
+        // RESHAPE: translate the whole outline far past the amend tolerance, so
+        // every wall is regenerated with a FRESH id (the window's stored wall_id
+        // goes stale). VertexIds are invariant under translation, so the anchor
+        // still names the same perimeter wall.
+        doc.outline.floor_plan.translate_all(5.0, 5.0);
+        ber.storeys[0] = resolve_storey(&doc, &ber, 0, &[], &[], &[]);
+
+        assert_eq!(
+            ber.storeys[0].windows.len(),
+            1,
+            "the window survived the reshape (not orphan-pruned)"
+        );
+        let win = &ber.storeys[0].windows[0];
+        let Some(OpeningPlacement::Wall {
+            wall_id: new_id, ..
+        }) = win.placement
+        else {
+            panic!("still a wall placement");
+        };
+        assert!(
+            ber.storeys[0].walls.regions.iter().any(|r| r.id == new_id),
+            "re-pointed onto a live regenerated wall"
+        );
+        assert_eq!(win.vertices.len(), 4, "vertices re-derived on the new wall");
+        let host = ber.storeys[0]
+            .walls
+            .regions
+            .iter()
+            .find(|r| r.id == new_id)
+            .unwrap();
+        assert!(
+            host.opes.windows.contains(&win_id),
+            "the opes index links the re-pointed wall"
         );
     }
 }

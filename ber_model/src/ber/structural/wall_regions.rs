@@ -98,7 +98,7 @@ impl WallRegion {
     /// merged wall's base edge stays its original footprint, keeping the amend
     /// match stable across re-derivation. For a clean fresh ring this is just
     /// the last base vertex (`exterior[top_start_index() - 1]`).
-    pub(crate) fn base_edge(&self) -> Option<(Point3f64, Point3f64)> {
+    pub fn base_edge(&self) -> Option<(Point3f64, Point3f64)> {
         let e = &self.polygon.exterior;
         let k = self.top_start_index();
         if e.len() < 2 || k < 2 {
