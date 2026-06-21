@@ -355,6 +355,9 @@ pub fn resolve_storey(
         .map(|f| (f, WallExposure::Unset))
         .collect();
     storey.walls = walls.with_risers(risers, &previous_walls, wall_cid);
+    // Stamp riser exposure from the durable side-table (keyed by base edge) —
+    // risers have no perimeter VertexId, so this is their durable identity.
+    stamp_riser_exposure(s, &mut storey);
     // Wall-split opening re-home: a structure wall split replaced a parent wall
     // with two sub-walls, so each opening still placed on the (now-gone) parent
     // must move onto the correct sub-wall BEFORE the orphan-prune below drops
@@ -392,6 +395,33 @@ pub fn resolve_storey(
     // rebuilt from placements (ceiling ids regenerate, so it can't be carried).
     ber_model::ber::openings::rebuild_opes(&mut storey);
     storey
+}
+
+/// Stamp riser exposure overrides from the durable `s.riser_exposure` table onto
+/// the just-built riser walls (keyed by quantized base edge). A riser is a wall
+/// whose base midpoint is NOT on the outline perimeter (perimeter exposure comes
+/// from `wall_sections`). An entry overrides the derived/amended exposure; an
+/// absent key leaves it untouched (so un-seeded risers keep working off the
+/// amend until Stage 2c retires it). Runs after `with_risers`.
+fn stamp_riser_exposure(s: &StoreyDoc, storey: &mut Storey) {
+    if s.riser_exposure.is_empty() {
+        return;
+    }
+    const TOL_M: f32 = 0.05;
+    let plan = &s.outline.floor_plan;
+    for region in &mut storey.walls.regions {
+        let Some((e0, e1)) = region.base_edge() else {
+            continue;
+        };
+        let mid = Point2f32::new(((e0.x + e1.x) * 0.5) as f32, ((e0.y + e1.y) * 0.5) as f32);
+        if plan.surface_ref_at(mid, TOL_M).is_some() {
+            continue; // perimeter wall — exposure comes from wall_sections
+        }
+        let key = crate::riser_key(Point2f64::new(e0.x, e0.y), Point2f64::new(e1.x, e1.y));
+        if let Some(e) = s.riser_exposure.get(&key) {
+            region.exposure = *e;
+        }
+    }
 }
 
 /// Keep each wall opening homed across edits via its durable parametric anchor.
@@ -935,6 +965,58 @@ mod tests {
             r.exposure,
             WallExposure::SemiExposed,
             "override survives the re-extrusion re-derive"
+        );
+    }
+
+    /// The durable `StoreyDoc.riser_exposure` table drives riser exposure
+    /// INDEPENDENTLY of the amend: with an EMPTY previous set (so the amend can
+    /// carry nothing), a riser still resolves to the table's exposure rather than
+    /// the derived `Unset` default. This is the mechanism that lets Stage 2c
+    /// retire the amend without losing riser overrides.
+    #[test]
+    fn riser_exposure_table_drives_exposure_without_amend() {
+        let mut doc = square_doc(&[
+            Point2f32::new(0.0, 0.0),
+            Point2f32::new(4.0, 0.0),
+            Point2f32::new(4.0, 4.0),
+            Point2f32::new(0.0, 4.0),
+        ]);
+        let steps = vec![crate::StepRegion {
+            polygon: vec![
+                Point2f32::new(0.0, 0.0),
+                Point2f32::new(2.0, 0.0),
+                Point2f32::new(2.0, 4.0),
+                Point2f32::new(0.0, 4.0),
+            ],
+            level_m: -0.3,
+        }];
+        let on_step_line = |r: &&ber_model::ber::structural::WallRegion| {
+            let e = &r.polygon.exterior;
+            (e[0].x - 2.0).abs() < 1e-6 && (e[1].x - 2.0).abs() < 1e-6
+        };
+        let mut ber = Ber::default();
+        ensure_storey_constructions(&mut ber, 0, &[]);
+        // First resolve only to read the riser's base edge for its key.
+        let storey = resolve_storey(&doc, &ber, 0, &[], &steps, &[]);
+        let (e0, e1) = storey
+            .walls
+            .regions
+            .iter()
+            .find(on_step_line)
+            .unwrap()
+            .base_edge()
+            .unwrap();
+        let key = crate::riser_key(Point2f64::new(e0.x, e0.y), Point2f64::new(e1.x, e1.y));
+        doc.riser_exposure.insert(key, WallExposure::SemiExposed);
+
+        // Resolve again WITHOUT assigning the prior storey back — `previous` is
+        // the still-empty `ber.storeys[0]`, so the amend has nothing to carry.
+        let storey2 = resolve_storey(&doc, &ber, 0, &[], &steps, &[]);
+        let riser = storey2.walls.regions.iter().find(on_step_line).unwrap();
+        assert_eq!(
+            riser.exposure,
+            WallExposure::SemiExposed,
+            "riser exposure came from the durable table, not the amend"
         );
     }
 

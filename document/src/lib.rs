@@ -33,7 +33,7 @@ pub use ceiling_step::{
 };
 pub use debug::debug_dump_storey;
 /// Derive full per-wall exposure coverage — the shell's `commit_to_ber` uses it.
-pub use exposure::{range_at, wall_coverage, RiserKind, RiserWall};
+pub use exposure::{range_at, riser_key, wall_coverage, RiserKey, RiserKind, RiserWall};
 pub use phase::{
     inherited_phase_regions, phase_regions_from_floors, stamp_wall_phases, PhaseRegion,
 };
@@ -263,6 +263,15 @@ pub struct StoreyDoc {
     /// document (editable, undoable) but keyed to the outline, not the active
     /// shape.
     pub wall_sections: HashMap<VertexId, Vec<ExposureSection>>,
+
+    /// Exposure OVERRIDES of derived RISER (interior step-face) walls, keyed by
+    /// the riser's quantized base edge ([`riser_key`]). Risers have no perimeter
+    /// `VertexId`, so this geometric key is their durable identity: `resolve`
+    /// stamps a riser's exposure from here, surviving the wall re-derivation
+    /// without relying on the amend-match. `#[serde(default)]` so older snapshots
+    /// load (empty) and seed from their resolved risers.
+    #[serde(default)]
+    pub riser_exposure: HashMap<RiserKey, WallExposure>,
 }
 
 /// Of the available `pieces`, the one to carve the `stroke` against. Scored by

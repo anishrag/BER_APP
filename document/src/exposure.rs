@@ -10,6 +10,24 @@ use domain::points::{Point2f32, Point2f64};
 use manip_plan::{project_distance_along, segment_len, VertexId};
 use std::collections::HashMap;
 
+/// Durable identity for a RISER (interior step-face) wall: its base edge as a
+/// quantized, orientation-independent plan segment (millimetre grid). Risers
+/// have no perimeter `VertexId`, so this geometric key is how a riser's exposure
+/// override persists across the wall re-derivation (the source of truth once the
+/// amend-match is retired).
+pub type RiserKey = (i64, i64, i64, i64);
+
+/// Quantize a riser base edge `(a, b)` to a [`RiserKey`]: each endpoint to the
+/// nearest millimetre, with the two endpoints ordered so the key is independent
+/// of the `a`→`b` direction.
+pub fn riser_key(a: Point2f64, b: Point2f64) -> RiserKey {
+    let q = |v: f64| (v * 1000.0).round() as i64;
+    let pa = (q(a.x), q(a.y));
+    let pb = (q(b.x), q(b.y));
+    let (lo, hi) = if pa <= pb { (pa, pb) } else { (pb, pa) };
+    (lo.0, lo.1, hi.0, hi.1)
+}
+
 /// Paint `[start, end]` of a wall with `exposure`: the new mark WINS over any
 /// overlap (existing sections are trimmed to their non-overlapping remnants),
 /// then the new section is inserted and the list re-sorted. No merging of

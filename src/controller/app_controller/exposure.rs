@@ -302,6 +302,12 @@ impl AppController {
         let Some(idx) = self.current_storey_idx else {
             return;
         };
+        // The riser's durable base-edge key, computed before the &mut borrow.
+        let key = self
+            .riser_walls()
+            .into_iter()
+            .find(|r| r.id == id)
+            .map(|r| document::riser_key(r.a, r.b));
         let Some(region) = self
             .current_record
             .as_mut()
@@ -314,6 +320,11 @@ impl AppController {
             return;
         }
         region.exposure = exposure;
+        // Record the override in the durable side-table — the source of truth the
+        // resolve stamps from, so it survives the wall re-derivation.
+        if let (Some(key), Some(sd)) = (key, self.document.storeys.get_mut(idx)) {
+            sd.riser_exposure.insert(key, exposure);
+        }
         let _ = self.mark_dirty();
     }
 
