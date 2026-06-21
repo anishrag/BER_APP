@@ -21,6 +21,51 @@ impl AppController {
         &self.structure_selected
     }
 
+    /// Assign a wall CONSTRUCTION (type + make-up) to the given resolved WALL
+    /// region ids, keyed by each wall's parametric `SurfaceRef` so it survives
+    /// the re-derivation. The PHASE axis stays derived from the floor zones; the
+    /// next materialize composes the two (`document::stamp_wall_constructions`).
+    /// Snapshots for undo.
+    pub fn set_wall_construction_for(
+        &mut self,
+        ids: &[ItemId],
+        ty: ber_model::ber::structural::WallConstructionType,
+        makeup: ber_model::ber::structural::ConstructionMakeup,
+    ) {
+        let Some(idx) = self.current_storey_idx else {
+            return;
+        };
+        // Map each resolved wall id → its parametric SurfaceRef (base midpoint).
+        let refs: Vec<manip_plan::SurfaceRef> = {
+            let Some(record) = self.current_record.as_ref() else {
+                return;
+            };
+            let Some(storey) = record.data.storeys.get(idx) else {
+                return;
+            };
+            let plan = &self.document.storeys[idx].outline.floor_plan;
+            ids.iter()
+                .filter_map(|id| storey.walls.regions.iter().find(|r| r.id == *id))
+                .filter_map(|r| {
+                    let (e0, e1) = r.base_edge()?;
+                    let mid =
+                        Point2f32::new(((e0.x + e1.x) * 0.5) as f32, ((e0.y + e1.y) * 0.5) as f32);
+                    plan.surface_ref_at(mid, 0.05)
+                })
+                .collect()
+        };
+        if refs.is_empty() {
+            return;
+        }
+        self.record_history();
+        for r in refs {
+            self.document.storeys[idx]
+                .wall_constructions
+                .insert(r, (ty, makeup.clone()));
+        }
+        let _ = self.mark_dirty();
+    }
+
     /// Toggle the surface under a tapped point (world metres) in/out of the
     /// selection. The active [`StructureSelection::kind`] decides which regions
     /// are hit-tested; no-op when no Select subtool is active.

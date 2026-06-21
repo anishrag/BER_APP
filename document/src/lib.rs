@@ -35,7 +35,8 @@ pub use debug::debug_dump_storey;
 /// Derive full per-wall exposure coverage — the shell's `commit_to_ber` uses it.
 pub use exposure::{range_at, riser_key, wall_coverage, RiserKey, RiserKind, RiserWall};
 pub use phase::{
-    inherited_phase_regions, phase_regions_from_floors, stamp_wall_phases, PhaseRegion,
+    inherited_phase_regions, phase_regions_from_floors, stamp_wall_constructions,
+    stamp_wall_phases, PhaseRegion,
 };
 pub use position::{PositionOption, PositionPrompt, PositionPromptKind};
 pub use resolve::{ensure_storey_constructions, opening_wall_anchor, resolve_storey};
@@ -47,10 +48,11 @@ pub use roof_point::{
 };
 pub use step::{inherited_step_regions, step_regions_from_floors, StepRegion};
 
-use ber_model::ber::structural::WallExposure;
+use ber_model::ber::structural::{ConstructionMakeup, WallConstructionType, WallExposure};
 use domain::points::{to_f64, Point2f32, Point2f64};
 use manip_plan::{
-    Error, FloorPlan, ParameterAxis, ParameterId, SubareaOutcome, SubareaTuning, VertexId,
+    Error, FloorPlan, ParameterAxis, ParameterId, SubareaOutcome, SubareaTuning, SurfaceRef,
+    VertexId,
 };
 use std::collections::{HashMap, HashSet};
 use std::ops::{Deref, DerefMut};
@@ -272,6 +274,15 @@ pub struct StoreyDoc {
     /// load (empty) and seed from their resolved risers.
     #[serde(default)]
     pub riser_exposure: HashMap<RiserKey, WallExposure>,
+
+    /// Assigned wall CONSTRUCTION (type + make-up) per perimeter wall, keyed by
+    /// the wall's parametric [`SurfaceRef`] (stable across edits). The PHASE
+    /// axis stays derived from the floor zones (`stamp_wall_phases`); resolve
+    /// composes the stored `(type, makeup)` with that phase
+    /// (`stamp_wall_constructions`). This is construction's parametric home —
+    /// it survives the wall re-derivation without the amend-match.
+    #[serde(default)]
+    pub wall_constructions: HashMap<SurfaceRef, (WallConstructionType, ConstructionMakeup)>,
 }
 
 /// Of the available `pieces`, the one to carve the `stroke` against. Scored by

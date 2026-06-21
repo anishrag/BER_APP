@@ -1049,6 +1049,59 @@ mod tests {
         );
     }
 
+    /// An assigned wall construction (type + make-up) in the durable
+    /// `wall_constructions` store, keyed by SurfaceRef, is stamped onto the
+    /// re-derived perimeter wall — composed with its derived phase. This is
+    /// construction's parametric home (independent of the amend).
+    #[test]
+    fn assigned_wall_construction_stamps_from_the_store() {
+        use ber_model::ber::structural::{ConstructionMakeup, WallConstructionType};
+        let mut doc = square_doc(&[
+            Point2f32::new(0.0, 0.0),
+            Point2f32::new(4.0, 0.0),
+            Point2f32::new(4.0, 4.0),
+            Point2f32::new(0.0, 4.0),
+        ]);
+        let mut ber = Ber::default();
+        ensure_storey_constructions(&mut ber, 0, &[]);
+        ber.set_default_ceiling_height(Some(0), 2.4);
+        ber.storeys[0] = resolve_storey(&doc, &ber, 0, &[], &[], &[]);
+
+        // Assign Timber / Default to the first wall by its SurfaceRef.
+        let (e0, e1) = ber.storeys[0].walls.regions[0].base_edge().unwrap();
+        let mid = Point2f32::new(((e0.x + e1.x) * 0.5) as f32, ((e0.y + e1.y) * 0.5) as f32);
+        let sref = doc.outline.floor_plan.surface_ref_at(mid, 0.05).unwrap();
+        doc.wall_constructions.insert(
+            sref,
+            (
+                WallConstructionType::TimberConstruction,
+                ConstructionMakeup::Default,
+            ),
+        );
+
+        // Re-resolve + stamp (mirroring refresh_storey's tail).
+        ber.storeys[0] = resolve_storey(&doc, &ber, 0, &[], &[], &[]);
+        crate::stamp_wall_phases(&mut ber, 0);
+        crate::stamp_wall_constructions(&mut ber, 0, &doc);
+
+        let wall = ber.storeys[0]
+            .walls
+            .regions
+            .iter()
+            .find(|r| {
+                let (a, b) = r.base_edge().unwrap();
+                let m = Point2f32::new(((a.x + b.x) * 0.5) as f32, ((a.y + b.y) * 0.5) as f32);
+                doc.outline.floor_plan.surface_ref_at(m, 0.05) == Some(sref)
+            })
+            .expect("the assigned wall re-derives");
+        let wc = ber.wall_construction(wall.construction_id).unwrap();
+        assert_eq!(
+            wc.construction_type,
+            WallConstructionType::TimberConstruction
+        );
+        assert_eq!(wc.base.construction_makeup, ConstructionMakeup::Default);
+    }
+
     // ── Floor thickness in the perimeter walls (DEAP floor-to-floor) ───────
 
     /// LEGACY GUARD: a storey without a floor thickness (`None` — storey 0

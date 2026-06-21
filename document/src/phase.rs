@@ -127,6 +127,47 @@ pub fn stamp_wall_phases(ber: &mut Ber, idx: usize) {
     }
 }
 
+/// Compose each perimeter wall's ASSIGNED construction (type + make-up, from
+/// `doc.wall_constructions` keyed by [`SurfaceRef`](manip_plan::SurfaceRef)) with
+/// its DERIVED phase (already set by [`stamp_wall_phases`]), re-`ensure`ing the
+/// construction and pointing the wall at it. Runs AFTER `stamp_wall_phases`. A
+/// wall with no stored assignment keeps its derived construction. This is what
+/// makes a user-set wall construction survive the re-derivation: its durable
+/// home is the parametric `SurfaceRef` key, not the resolved wall id.
+pub fn stamp_wall_constructions(ber: &mut Ber, idx: usize, doc: &crate::StoreyDoc) {
+    if ber.storeys.len() <= idx || doc.wall_constructions.is_empty() {
+        return;
+    }
+    const TOL_M: f32 = 0.05;
+    let plan = &doc.outline.floor_plan;
+    let n = ber.storeys[idx].walls.regions.len();
+    for i in 0..n {
+        // The wall's perimeter SurfaceRef (by base midpoint) + its current phase.
+        let (sref, phase) = {
+            let r = &ber.storeys[idx].walls.regions[i];
+            let Some((e0, e1)) = r.base_edge() else {
+                continue;
+            };
+            let mid = domain::points::Point2f32::new(
+                ((e0.x + e1.x) * 0.5) as f32,
+                ((e0.y + e1.y) * 0.5) as f32,
+            );
+            let Some(sref) = plan.surface_ref_at(mid, TOL_M) else {
+                continue; // riser / non-perimeter — no parametric wall key
+            };
+            let phase = ber
+                .wall_construction(r.construction_id)
+                .map(|c| c.base.construction_phase.clone())
+                .unwrap_or_default();
+            (sref, phase)
+        };
+        if let Some((ty, makeup)) = doc.wall_constructions.get(&sref) {
+            let cid = ber.ensure_wall_construction(*ty, makeup.clone(), phase);
+            ber.storeys[idx].walls.regions[i].construction_id = cid;
+        }
+    }
+}
+
 /// The phase regions a NEW upper storey INHERITS from the storey below it: the
 /// below storey's tagged zones (rebuilt from its persisted floors), seeded onto
 /// the new storey so a two-storey extension carries its construction date up

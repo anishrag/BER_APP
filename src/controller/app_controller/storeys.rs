@@ -283,6 +283,9 @@ impl AppController {
         // Floors are already phase-correct from the partition; this stamps the
         // phase onto the just-rebuilt WALLS by reading those partitioned floors.
         document::stamp_wall_phases(&mut record.data, idx);
+        // Compose each wall's ASSIGNED construction (type + make-up, from the
+        // parametric store) onto the just-derived phase.
+        document::stamp_wall_constructions(&mut record.data, idx, &self.document.storeys[idx]);
     }
 
     /// Mirror the active storey's same-height DIVIDERS (the delta-0 entries of
@@ -343,6 +346,9 @@ impl AppController {
                 ceiling_steps,
             );
             document::stamp_wall_phases(&mut record.data, idx);
+            // Compose each wall's ASSIGNED construction (type + make-up, from the
+            // parametric store) onto the just-derived phase.
+            document::stamp_wall_constructions(&mut record.data, idx, &self.document.storeys[idx]);
         }
     }
 
