@@ -90,6 +90,18 @@ pub enum WallConstructionType {
     Uninitialised,
 }
 
+/// A construction TYPE tagged by its surface kind — the unified value the
+/// Structure-phase "Edit attributes" editor carries so one group/event type
+/// covers walls, floors and ceilings/roofs. Each variant wraps that kind's own
+/// type enum. Transient editor/UI state, not persisted (the durable record is a
+/// surface's `construction_id`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ConstructionType {
+    Wall(WallConstructionType),
+    Floor(FloorConstructionType),
+    Ceiling(CeilingConstructionType),
+}
+
 /// Thermal exposure classification
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum WallExposure {
@@ -292,5 +304,11 @@ impl Ber {
     /// Resolve a floor construction by id.
     pub fn floor_construction(&self, id: ItemId) -> Option<&FloorConstruction> {
         self.floor_constructions.iter().find(|c| c.base.id == id)
+    }
+
+    /// Resolve a ceiling/roof construction by id (the inverse of
+    /// `ensure_ceiling_construction`).
+    pub fn ceiling_construction(&self, id: ItemId) -> Option<&CeilingConstruction> {
+        self.ceiling_constructions.iter().find(|c| c.base.id == id)
     }
 }

@@ -187,7 +187,17 @@ mod tests {
         let step = doc0
             .ceiling_step_region(ParameterAxis::X, 2.0, LineSide::Greater, 0.3)
             .unwrap();
-        ber.storeys[0] = resolve_storey(&doc0, &ber, 0, &[], &[], &[step]);
+        // Regions-as-truth: seed the flat default, then apply the ceiling step
+        // as a one-shot onto the stored roofs (resolve no longer replays it).
+        ber.storeys[0] = resolve_storey(&doc0, &ber, 0, &[], &[], &[]);
+        let areas = vec![(
+            step.polygon
+                .iter()
+                .map(|p| domain::points::to_f64(*p))
+                .collect::<Vec<_>>(),
+            step.delta_m,
+        )];
+        ber.storeys[0].roofs = std::mem::take(&mut ber.storeys[0].roofs).with_z_deltas(&areas);
         let seeded = inherited_step_regions(&ber.storeys[0], &footprint);
         assert_eq!(seeded.len(), 1, "one proud piece");
         assert!((seeded[0].level_m - 0.3).abs() < 1e-6, "z − anchor");
@@ -229,7 +239,16 @@ mod tests {
         let step = doc0
             .ceiling_step_region(ParameterAxis::X, 2.0, LineSide::Greater, 0.3)
             .unwrap();
-        ber.storeys[0] = resolve_storey(&doc0, &ber, 0, &[], &[], &[step]);
+        // Regions-as-truth: seed flat, then apply the ceiling step one-shot.
+        ber.storeys[0] = resolve_storey(&doc0, &ber, 0, &[], &[], &[]);
+        let areas = vec![(
+            step.polygon
+                .iter()
+                .map(|p| domain::points::to_f64(*p))
+                .collect::<Vec<_>>(),
+            step.delta_m,
+        )];
+        ber.storeys[0].roofs = std::mem::take(&mut ber.storeys[0].roofs).with_z_deltas(&areas);
 
         // SUGGEST: take a two-level candidate (it spans both ceiling pieces).
         let suggestions = suggest_storey_outlines(&ber.storeys[0], 6);

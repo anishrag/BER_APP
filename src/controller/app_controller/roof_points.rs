@@ -343,10 +343,10 @@ impl AppController {
             );
         self.pending_roof_point = None;
         self.mark_dirty()?;
-        // Canonicalize: derive now, then rebuild the session ceiling-step
-        // list from the derived roofs (apex-aware — a fan over a stepped
-        // piece becomes triangle step areas). In-session state thus matches
-        // what a reload would reconstruct — idempotence by construction.
+        // Regions-as-truth: recompose the roofs from the durable apexes (+ the
+        // session steps) ONCE, then re-derive. The session ceiling-step list is
+        // a display cache, refreshed from the resulting roofs.
+        self.recompose_roofs(idx);
         self.materialize();
         self.reconstruct_ceiling_step_regions_for(idx);
         Ok(())
@@ -385,16 +385,16 @@ impl AppController {
             return;
         };
         let idx = self.current_storey_idx.unwrap_or(0);
-        let in_range = record
-            .data
-            .storeys
-            .get(idx)
-            .is_some_and(|s| index < s.roof_apexes.len());
-        if !in_range {
+        let Some(storey) = record.data.storeys.get(idx) else {
+            return;
+        };
+        if index >= storey.roof_apexes.len() {
             return;
         }
+        let _ = storey; // index checked above; recompose rebuilds from inputs
         record.data.remove_roof_apex(idx, index);
         let _ = self.mark_dirty();
+        self.recompose_roofs(idx);
         self.materialize();
         self.reconstruct_ceiling_step_regions_for(idx);
     }

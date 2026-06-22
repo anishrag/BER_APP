@@ -13,23 +13,27 @@
 //! regions live on the BER record, not the editing `Document`).
 use super::*;
 use ber_model::ber::common::ConstructionPhase;
-use ber_model::ber::structural::{ConstructionMakeup, Storey, WallConstructionType};
+use ber_model::ber::structural::{
+    CeilingConstructionType, ConstructionMakeup, ConstructionType, FloorConstructionType, Storey,
+};
 use domain::points::Point2f32;
 
 /// One attribute-GROUP in the exploded "Edit attributes" session: the selected
 /// surfaces that currently share a construction, plus the `(type, make-up)` the
-/// popup edits. `phase` is the derived axis (floor zones), shown read-only.
+/// popup edits. `ty` is kind-tagged (`ConstructionType`) so one group type spans
+/// walls/floors/ceilings. `phase` is the derived axis (floor zones), read-only.
 #[derive(Debug, Clone)]
 pub struct EditGroup {
     pub ids: Vec<ItemId>,
-    pub ty: WallConstructionType,
+    pub ty: ConstructionType,
     pub makeup: ConstructionMakeup,
     pub phase: ConstructionPhase,
 }
 
 /// The in-flight "Edit attributes" session: the current selection partitioned by
-/// shared construction, plus which group's popup is active. Walls only for now
-/// (construction has a parametric home only for walls).
+/// shared construction, plus which group's popup is active. `kind` is the
+/// surface kind the session edits (walls / floors / ceilings-roofs) — each kind
+/// has a durable parametric/centroid home for its construction.
 #[derive(Debug, Clone)]
 pub struct StructureEdit {
     pub kind: SurfaceKind,
@@ -88,43 +92,154 @@ impl AppController {
         let _ = self.mark_dirty();
     }
 
+    /// Assign a FLOOR construction (type + make-up) to the given resolved FLOOR
+    /// region ids, keyed by each region's plan [`centroid`](ber_model::ber::structural::FloorRegion::centroid)
+    /// so it survives the re-derivation. The PHASE axis stays derived; the next
+    /// materialize composes the two (`document::stamp_floor_constructions`).
+    pub fn set_floor_construction_for(
+        &mut self,
+        ids: &[ItemId],
+        ty: FloorConstructionType,
+        makeup: ConstructionMakeup,
+    ) {
+        let Some(idx) = self.current_storey_idx else {
+            return;
+        };
+        let keys: Vec<document::CentroidKey> = {
+            let Some(record) = self.current_record.as_ref() else {
+                return;
+            };
+            let Some(storey) = record.data.storeys.get(idx) else {
+                return;
+            };
+            ids.iter()
+                .filter_map(|id| storey.floors.regions.iter().find(|r| r.id == *id))
+                .map(|r| document::centroid_key(r.centroid()))
+                .collect()
+        };
+        if keys.is_empty() {
+            return;
+        }
+        self.record_history();
+        for k in keys {
+            self.document.storeys[idx]
+                .floor_constructions
+                .insert(k, (ty, makeup.clone()));
+        }
+        let _ = self.mark_dirty();
+    }
+
+    /// Assign a CEILING/ROOF construction (type + make-up) to the given resolved
+    /// ROOF region ids, keyed by each region's plan centroid. Mirror of
+    /// [`set_floor_construction_for`](Self::set_floor_construction_for) over the
+    /// storey's `roofs` regions (`document::stamp_ceiling_constructions`).
+    pub fn set_ceiling_construction_for(
+        &mut self,
+        ids: &[ItemId],
+        ty: CeilingConstructionType,
+        makeup: ConstructionMakeup,
+    ) {
+        let Some(idx) = self.current_storey_idx else {
+            return;
+        };
+        let keys: Vec<document::CentroidKey> = {
+            let Some(record) = self.current_record.as_ref() else {
+                return;
+            };
+            let Some(storey) = record.data.storeys.get(idx) else {
+                return;
+            };
+            ids.iter()
+                .filter_map(|id| storey.roofs.regions.iter().find(|r| r.id == *id))
+                .map(|r| document::centroid_key(r.centroid()))
+                .collect()
+        };
+        if keys.is_empty() {
+            return;
+        }
+        self.record_history();
+        for k in keys {
+            self.document.storeys[idx]
+                .ceiling_constructions
+                .insert(k, (ty, makeup.clone()));
+        }
+        let _ = self.mark_dirty();
+    }
+
     /// The in-flight "Edit attributes" session, if any.
     pub fn structure_edit(&self) -> Option<&StructureEdit> {
         self.structure_edit.as_ref()
     }
 
-    /// Open the "Edit attributes" session: partition the current WALL selection
-    /// by shared construction `(type, make-up, phase)` into groups (each editable
-    /// separately). No-op for a non-wall mode, an empty selection, or no storey.
+    /// Open the "Edit attributes" session: partition the current selection by
+    /// shared construction `(type, make-up, phase)` into groups (each editable
+    /// separately). Works for the active surface kind — walls, floors, or
+    /// ceilings/roofs. No-op for an empty selection or no storey.
     pub fn begin_structure_edit(&mut self) {
-        if self.structure_kind != SurfaceKind::Walls || self.structure_selected.is_empty() {
+        if self.structure_selected.is_empty() {
             return;
         }
         let Some(idx) = self.current_storey_idx else {
             return;
         };
+        let kind = self.structure_kind;
         let Some(record) = self.current_record.as_ref() else {
             return;
         };
         let Some(storey) = record.data.storeys.get(idx) else {
             return;
         };
+        // Per kind: find the region by id, read its construction's (type-kind,
+        // make-up, phase), and tag the type with `ConstructionType` so the rest
+        // of the editor is kind-agnostic.
+        let attrs_of =
+            |id: ItemId| -> Option<(ConstructionType, ConstructionMakeup, ConstructionPhase)> {
+                match kind {
+                    SurfaceKind::Walls => {
+                        let r = storey.walls.regions.iter().find(|r| r.id == id)?;
+                        let c = record.data.wall_construction(r.construction_id)?;
+                        Some((
+                            ConstructionType::Wall(c.construction_type),
+                            c.base.construction_makeup.clone(),
+                            c.base.construction_phase.clone(),
+                        ))
+                    }
+                    SurfaceKind::Floors => {
+                        let r = storey.floors.regions.iter().find(|r| r.id == id)?;
+                        let c = record.data.floor_construction(r.construction_id)?;
+                        Some((
+                            ConstructionType::Floor(c.construction_type),
+                            c.base.construction_makeup.clone(),
+                            c.base.construction_phase.clone(),
+                        ))
+                    }
+                    SurfaceKind::Roofs => {
+                        let r = storey.roofs.regions.iter().find(|r| r.id == id)?;
+                        let c = record.data.ceiling_construction(r.construction_id)?;
+                        Some((
+                            ConstructionType::Ceiling(c.construction_type),
+                            c.base.construction_makeup.clone(),
+                            c.base.construction_phase.clone(),
+                        ))
+                    }
+                }
+            };
         let mut groups: Vec<EditGroup> = Vec::new();
         for id in &self.structure_selected {
-            let Some(r) = storey.walls.regions.iter().find(|r| r.id == *id) else {
-                continue;
-            };
-            let (ty, makeup, phase) = record
-                .data
-                .wall_construction(r.construction_id)
-                .map(|c| {
-                    (
-                        c.construction_type,
-                        c.base.construction_makeup.clone(),
-                        c.base.construction_phase.clone(),
-                    )
-                })
-                .unwrap_or_default();
+            let (ty, makeup, phase) = attrs_of(*id).unwrap_or_else(|| {
+                // A region whose construction is missing reads as that kind's
+                // default type + default make-up / Original phase.
+                let ty = match kind {
+                    SurfaceKind::Walls => ConstructionType::Wall(Default::default()),
+                    SurfaceKind::Floors => ConstructionType::Floor(Default::default()),
+                    SurfaceKind::Roofs => ConstructionType::Ceiling(Default::default()),
+                };
+                (
+                    ty,
+                    ConstructionMakeup::default(),
+                    ConstructionPhase::default(),
+                )
+            });
             match groups
                 .iter_mut()
                 .find(|g| g.ty == ty && g.makeup == makeup && g.phase == phase)
@@ -140,7 +255,7 @@ impl AppController {
         }
         if !groups.is_empty() {
             self.structure_edit = Some(StructureEdit {
-                kind: SurfaceKind::Walls,
+                kind,
                 groups,
                 active: 0,
             });
@@ -157,11 +272,12 @@ impl AppController {
     }
 
     /// Set a group's construction `(type, make-up)` and apply it to that group's
-    /// surfaces (writes the durable store, snapshots for undo).
+    /// surfaces, dispatching to the right durable store by the type's kind
+    /// (writes the store, snapshots for undo).
     pub fn set_structure_group_attrs(
         &mut self,
         group: usize,
-        ty: WallConstructionType,
+        ty: ConstructionType,
         makeup: ConstructionMakeup,
     ) {
         let ids = {
@@ -175,7 +291,11 @@ impl AppController {
             g.makeup = makeup.clone();
             g.ids.clone()
         };
-        self.set_wall_construction_for(&ids, ty, makeup);
+        match ty {
+            ConstructionType::Wall(t) => self.set_wall_construction_for(&ids, t, makeup),
+            ConstructionType::Floor(t) => self.set_floor_construction_for(&ids, t, makeup),
+            ConstructionType::Ceiling(t) => self.set_ceiling_construction_for(&ids, t, makeup),
+        }
     }
 
     /// Close the "Edit attributes" session (attributes apply as they're set).
@@ -419,6 +539,13 @@ impl AppController {
             return;
         };
         storey.push_structure_split(kind, &ring64, wall_cuts);
+
+        // Regions-as-truth: a ROOF carve is a one-shot coplanar face split on
+        // the stored roofs (floors/walls still replay their durable splits in
+        // `resolve_storey`). The split survives reload via the persisted roofs.
+        if kind == SurfaceKind::Roofs {
+            self.recompose_roofs(idx);
+        }
 
         self.abandon_structure_split_shape();
         let _ = self.mark_dirty();

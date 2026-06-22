@@ -494,15 +494,15 @@ pub enum SketchEvent {
         world_y: f64,
     },
     /// Structure phase: open the "Edit attributes" session over the current
-    /// selection — groups it by shared construction (walls only for now).
+    /// selection — groups it by shared construction (walls / floors / roofs).
     BeginStructureEdit,
     /// Structure phase: make attribute-group `usize` the active popup.
     SetActiveStructureGroup(usize),
-    /// Structure phase: set a group's wall construction (type + make-up); applies
-    /// to that group's surfaces.
+    /// Structure phase: set a group's construction (kind-tagged type + make-up);
+    /// applies to that group's surfaces.
     SetStructureGroupAttrs {
         group: usize,
-        ty: ber_model::ber::structural::WallConstructionType,
+        ty: ber_model::ber::structural::ConstructionType,
         makeup: ber_model::ber::structural::ConstructionMakeup,
     },
     /// Structure phase: close the "Edit attributes" session.

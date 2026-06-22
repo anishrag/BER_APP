@@ -2,7 +2,7 @@ use geo::{LineString, MultiPolygon, Polygon};
 use serde::{Deserialize, Serialize};
 
 use crate::ber::common::ItemId;
-use domain::points::Point2f64;
+use domain::points::{ring_centroid, Point2f64};
 
 #[allow(unused_imports)]
 use super::*;
@@ -20,6 +20,21 @@ pub struct FloorRegion {
     /// unstepped storey floor, positive = raised, negative = lowered (steps).
     #[serde(default)]
     pub level_m: f64,
+}
+
+impl FloorRegion {
+    /// The region's plan centroid — the durable geometric key for an assigned
+    /// construction (floors have no parametric `SurfaceRef`, so the centroid is
+    /// their stable identity across the re-derive; mirrors a riser's base edge).
+    pub fn centroid(&self) -> Point2f64 {
+        let ring: Vec<Point2f64> = self
+            .polygon
+            .exterior()
+            .coords()
+            .map(|c| Point2f64::new(c.x, c.y))
+            .collect();
+        ring_centroid(&ring)
+    }
 }
 
 /// A planar region of the floor

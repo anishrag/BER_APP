@@ -302,6 +302,8 @@ impl AppController {
         }
         self.pending_roof_rect = None;
         self.mark_dirty()?;
+        // Regions-as-truth: recompose the roofs from the inputs once.
+        self.recompose_roofs(idx);
         self.materialize();
         self.reconstruct_ceiling_step_regions_for(idx);
         Ok(())

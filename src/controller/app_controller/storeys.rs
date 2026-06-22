@@ -302,6 +302,9 @@ impl AppController {
         // Compose each wall's ASSIGNED construction (type + make-up, from the
         // parametric store) onto the just-derived phase.
         document::stamp_wall_constructions(&mut record.data, idx, &self.document.storeys[idx]);
+        // Same for FLOOR + CEILING/ROOF area constructions (keyed by centroid).
+        document::stamp_floor_constructions(&mut record.data, idx, &self.document.storeys[idx]);
+        document::stamp_ceiling_constructions(&mut record.data, idx, &self.document.storeys[idx]);
         // Re-point the riser selection to the (re-derived) riser with the same
         // base edge — keeps the selection valid across the fresh ids.
         if let Some(key) = sel_riser_key {
@@ -360,6 +363,84 @@ impl AppController {
         }
     }
 
+    /// Recompose storey `idx`'s truth roofs from its ceiling EDIT inputs — the
+    /// session ±Δ steps, durable dividers, durable apexes, and structure carves
+    /// — in the canonical order (default → steps/dividers → apexes → carves).
+    /// `resolve_storey` no longer rebuilds the roofs from these; it trusts the
+    /// stored `roofs` and only re-fits to the outline. So a ceiling edit updates
+    /// its input (session list / durable field), calls this ONCE, then
+    /// `materialize` re-fits + re-derives the walls and `reconstruct` refreshes
+    /// the session display cache. No-op without a ceiling height.
+    pub(super) fn recompose_roofs(&mut self, idx: usize) {
+        use ber_model::ber::structural::CeilingRegions;
+        let footprint: Vec<Vec<domain::points::Point2f64>> = self
+            .document
+            .storeys
+            .get(idx)
+            .map(|s| {
+                s.outline
+                    .floor_plan
+                    .polygons()
+                    .into_iter()
+                    .map(|ring| ring.into_iter().map(domain::points::to_f64).collect())
+                    .collect()
+            })
+            .unwrap_or_default();
+        if !footprint.iter().any(|r| r.len() >= 3) {
+            return;
+        }
+        let session_steps = self
+            .ceiling_step_regions
+            .get(&idx)
+            .cloned()
+            .unwrap_or_default();
+        let Some(record) = self.current_record.as_mut() else {
+            return;
+        };
+        let Some(storey) = record.data.storeys.get(idx) else {
+            return;
+        };
+        let Some(height) = storey.ceiling_height_m else {
+            return;
+        };
+        let apexes = storey.roof_apexes.clone();
+        let hints = storey.roof_apex_hints.clone();
+        let splits = storey.roof_splits.clone();
+        let Some(cid) = record.data.ceiling_construction_id(
+            Default::default(),
+            Default::default(),
+            Default::default(),
+        ) else {
+            return;
+        };
+        // `session_steps` already carries delta-0 dividers (the reconstruct
+        // re-emits them from the durable `ceiling_dividers`), so they compose
+        // here without a separate pass.
+        let areas: Vec<(Vec<domain::points::Point2f64>, f64)> = session_steps
+            .iter()
+            .map(|r| {
+                (
+                    r.polygon
+                        .iter()
+                        .map(|p| domain::points::to_f64(*p))
+                        .collect(),
+                    r.delta_m,
+                )
+            })
+            .collect();
+        let mut roofs = CeilingRegions::default_for_footprint(footprint, height, cid);
+        if !areas.is_empty() {
+            roofs = roofs.with_z_deltas(&areas);
+        }
+        if !apexes.is_empty() {
+            roofs = roofs.with_apexes_hinted(&apexes, &hints);
+        }
+        if !splits.is_empty() {
+            roofs = roofs.split_faces_coplanar(&splits);
+        }
+        record.data.storeys[idx].roofs = roofs;
+    }
+
     /// Derive EVERY storey's geometry into `current_record` — the all-storeys
     /// analogue of [`refresh_storey`](Self::refresh_storey), for changes that
     /// touch all storeys at once (e.g. the All-tab default ceiling height).
@@ -402,6 +483,13 @@ impl AppController {
             // Compose each wall's ASSIGNED construction (type + make-up, from the
             // parametric store) onto the just-derived phase.
             document::stamp_wall_constructions(&mut record.data, idx, &self.document.storeys[idx]);
+            // Same for FLOOR + CEILING/ROOF area constructions (keyed by centroid).
+            document::stamp_floor_constructions(&mut record.data, idx, &self.document.storeys[idx]);
+            document::stamp_ceiling_constructions(
+                &mut record.data,
+                idx,
+                &self.document.storeys[idx],
+            );
         }
     }
 

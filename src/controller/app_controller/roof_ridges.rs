@@ -951,10 +951,9 @@ impl AppController {
         }
         self.pending_roof_ridge = None;
         self.mark_dirty()?;
-        // Canonicalize: derive now, then rebuild the session ceiling-step
-        // list from the derived roofs (group-aware — a ridge over a stepped
-        // piece re-emits ONE merged step area). In-session state thus matches
-        // what a reload would reconstruct — idempotence by construction.
+        // Regions-as-truth: recompose the roofs from the inputs once, then
+        // re-derive. The session ceiling-step list is a display cache.
+        self.recompose_roofs(idx);
         self.materialize();
         self.reconstruct_ceiling_step_regions_for(idx);
         Ok(())
@@ -989,6 +988,7 @@ impl AppController {
             record.data.push_roof_apex_hint(idx, p, inside);
         }
         self.mark_dirty()?;
+        self.recompose_roofs(idx);
         self.materialize();
         self.reconstruct_ceiling_step_regions_for(idx);
         Ok(())

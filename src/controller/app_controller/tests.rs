@@ -1382,6 +1382,74 @@ fn wall_construction_is_preserved_when_splitting() {
     assert_eq!(r[1].exposure, WallExposure::SemiExposed, "middle is semi");
 }
 
+/// A FLOOR construction assigned via the durable centroid-keyed store survives
+/// the re-derivation (the area analogue of the wall-construction test): the
+/// floor region re-resolves to the assigned `(type, make-up)`.
+#[test]
+fn floor_construction_survives_rederive() {
+    use ber_model::ber::structural::FloorConstructionType;
+    let mut c = dimensioned_square_controller();
+    c.materialize(); // derive the single floor region
+    let floor0 = c.current_record.as_ref().unwrap().data.storeys[0]
+        .floors
+        .regions[0]
+        .id;
+    c.set_floor_construction_for(
+        &[floor0],
+        FloorConstructionType::SuspendedFloor,
+        Default::default(),
+    );
+    c.materialize(); // re-resolve mints a fresh region id
+
+    let rec = c.current_record.as_ref().unwrap();
+    let r = &rec.data.storeys[0].floors.regions[0];
+    let fc = rec.data.floor_construction(r.construction_id).unwrap();
+    assert_eq!(
+        fc.construction_type,
+        FloorConstructionType::SuspendedFloor,
+        "the floor re-resolves to the assigned construction (centroid-keyed)"
+    );
+}
+
+/// The "Edit attributes" group editor now works for FLOORS end to end: select
+/// all floors, open the session (one default-construction group), set a type on
+/// the group, and the assigned floor construction lands on the region.
+#[test]
+fn structure_edit_sets_floor_group_construction() {
+    use ber_model::ber::structural::{ConstructionType, FloorConstructionType};
+    let mut c = dimensioned_square_controller();
+    c.materialize();
+
+    c.set_structure_kind(SurfaceKind::Floors);
+    c.set_structure_select_mode(Some(SelectMode::All));
+    assert_eq!(
+        c.structure_selected_ids().len(),
+        1,
+        "the one floor selected"
+    );
+
+    c.begin_structure_edit();
+    let e = c.structure_edit().expect("a session opened for floors");
+    assert_eq!(e.kind, SurfaceKind::Floors);
+    assert_eq!(e.groups.len(), 1, "one default-construction group");
+    assert!(
+        matches!(e.groups[0].ty, ConstructionType::Floor(_)),
+        "the group's type is kind-tagged for floors"
+    );
+
+    c.set_structure_group_attrs(
+        0,
+        ConstructionType::Floor(FloorConstructionType::SuspendedFloor),
+        Default::default(),
+    );
+    c.materialize();
+
+    let rec = c.current_record.as_ref().unwrap();
+    let r = &rec.data.storeys[0].floors.regions[0];
+    let fc = rec.data.floor_construction(r.construction_id).unwrap();
+    assert_eq!(fc.construction_type, FloorConstructionType::SuspendedFloor);
+}
+
 /// A wall's resolved construction phase, via its region's `construction_id`.
 fn wall_phase(c: &AppController, region_idx: usize) -> ConstructionPhase {
     let rec = c.current_record.as_ref().unwrap();
@@ -4644,6 +4712,7 @@ fn roof_ridge_default_wall_bounds_its_own_arm() {
         .expect("divider region builds");
     c.ceiling_step_regions.entry(0).or_default().push(divider);
     c.mark_dirty().unwrap();
+    c.recompose_roofs(0); // regions-as-truth: compose the divider into the roofs
     c.materialize();
     c.reconstruct_ceiling_step_regions_for(0);
     assert_eq!(roof_flat_zs(&c).len(), 2, "two same-height regions");
@@ -4998,8 +5067,9 @@ fn boundary_ridge_over_a_step_full_fixpoint_and_gable_walls() {
         );
     }
     c.mark_dirty().unwrap();
-    // Commit-style canonicalize: derive, then rebuild the session step list
-    // from the derived roofs (exactly assign_roof_ridge_height's shape).
+    // Commit-style canonicalize: compose the apexes into the roofs (regions-as-
+    // truth), derive, then rebuild the session step list from the derived roofs.
+    c.recompose_roofs(0);
     c.materialize();
     c.reconstruct_ceiling_step_regions_for(0);
     let before = roof_vertex_fingerprint(&c);
@@ -5921,6 +5991,7 @@ fn flush_riser_merge_survives_reload_and_rederive_fixpoint() {
         }],
     );
     c.mark_dirty().unwrap();
+    c.recompose_roofs(0); // regions-as-truth: compose the step into the roofs
     c.materialize();
     let walls_fingerprint = |c: &AppController| {
         c.current_record.as_ref().unwrap().data.storeys[0]
@@ -5980,6 +6051,7 @@ fn roof_rect_touching_one_wall_makes_a_mono_gable_wall() {
         );
     }
     c.mark_dirty().unwrap();
+    c.recompose_roofs(0); // regions-as-truth: compose the apexes into the roofs
     c.materialize();
     c.reconstruct_ceiling_step_regions_for(0);
     let storey = &c.current_record.as_ref().unwrap().data.storeys[0];
@@ -7057,6 +7129,7 @@ fn stepped_ceiling_below_controller() -> AppController {
         .expect("step region builds");
     c.ceiling_step_regions.entry(0).or_default().push(region);
     c.mark_dirty().unwrap();
+    c.recompose_roofs(0); // regions-as-truth: compose the step into the roofs
     c.materialize();
     c.reconstruct_ceiling_step_regions_for(0); // canonicalize, assign parity
     c

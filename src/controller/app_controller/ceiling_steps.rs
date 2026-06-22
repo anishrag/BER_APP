@@ -625,9 +625,11 @@ impl AppController {
         }
         self.pending_ceiling_step = None;
         self.mark_dirty()?;
-        // Canonicalize: derive now, then make the session list the EXACT
-        // derived pieces (delta = flat z − default). In-session state thus
-        // matches what a reload would reconstruct — idempotence by construction.
+        // Regions-as-truth: recompose the roofs from the session step list (now
+        // including this step) + the durable apexes, then re-derive (re-fit +
+        // walls). `reconstruct` canonicalizes the session list — the DISPLAY
+        // cache — from the resulting roofs.
+        self.recompose_roofs(idx);
         self.materialize();
         self.reconstruct_ceiling_step_regions_for(idx);
         Ok(())
@@ -742,6 +744,11 @@ impl AppController {
                 .expect("entry exists")
                 .remove(raw);
             let _ = self.mark_dirty();
+            // Regions-as-truth: recompose from the remaining session steps so the
+            // removed step's pieces re-flatten, then re-derive + re-canonicalize.
+            self.recompose_roofs(idx);
+            self.materialize();
+            self.reconstruct_ceiling_step_regions_for(idx);
         }
     }
 }

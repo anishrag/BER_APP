@@ -2,7 +2,7 @@ use geo::{Contains, LineString, MultiPolygon, Point as GeoPoint, Polygon};
 use serde::{Deserialize, Serialize};
 
 use crate::ber::common::ItemId;
-use domain::points::{point_to_segment_distance, Point2f64, Point3f64};
+use domain::points::{point_to_segment_distance, ring_centroid, Point2f64, Point3f64};
 
 #[allow(unused_imports)]
 use super::*;
@@ -210,6 +210,102 @@ impl CeilingRegions {
                         continue;
                     }
                     next.push(mk(&poly, base_z));
+                }
+            }
+            regions = next;
+        }
+        Self { regions }
+    }
+
+    /// Split the regions by each of `rings` (world plan rings) WITHOUT changing
+    /// the surface: every output vertex's z is read from the source region's
+    /// own plane ([`region_plane`]), so a sloped fan/ridge face splits into
+    /// COPLANAR sub-faces — same geometry, just more pieces to attribute. This
+    /// is the Structure-phase ROOF carve, and the reason it runs AFTER
+    /// [`with_apexes`](Self::with_apexes) (unlike the flat-stamping
+    /// [`with_z_deltas`](Self::with_z_deltas) steps/dividers, which run BEFORE):
+    /// the assessor carves an already-shaped roof into attributable pieces and
+    /// the shape must NOT be re-derived — carving across a ridge into the two
+    /// halves before the apexes would re-pitch each half as its own roof.
+    ///
+    /// A face the carve straddles splits into its inside/outside pieces; a face
+    /// the carve misses (or fully covers) is kept INTACT — same id, same opes —
+    /// so unrelated faces and their assigned constructions are untouched. Split
+    /// pieces inherit `construction_id`, get fresh ids and default `opes`
+    /// (re-homed at the resolve tail by plan point). Boolean results carrying
+    /// interior rings are decomposed (`split_to_simple`) and sub-[`SLIVER_AREA_M2`]
+    /// slivers dropped; rings with < 3 vertices are skipped; empty `rings` →
+    /// `self`. A region degenerate in plan (no plane) passes through unsplit.
+    ///
+    /// [`region_plane`]: super::region_plane
+    pub fn split_faces_coplanar(self, rings: &[Vec<Point2f64>]) -> Self {
+        use geo::bool_ops::BooleanOps;
+        use geo::Area;
+        if rings.is_empty() {
+            return self;
+        }
+        let to_poly = |ring: &[Point2f64]| {
+            Polygon::new(
+                LineString::from(ring.iter().map(|p| (p.x, p.y)).collect::<Vec<_>>()),
+                vec![],
+            )
+        };
+        let mut regions = self.regions;
+        for ring in rings {
+            if ring.len() < 3 {
+                continue;
+            }
+            let area_poly = to_poly(ring);
+            let mut next: Vec<CeilingRegion> = Vec::new();
+            for region in regions {
+                let Some((c0, cx, cy)) = region_plane(&region) else {
+                    next.push(region); // plan-degenerate — nothing to split
+                    continue;
+                };
+                let region_poly: Polygon<f64> = region.polygon.clone().into();
+                let inside = region_poly.intersection(&area_poly);
+                let inside_area: f64 = inside.0.iter().map(|p| p.unsigned_area()).sum();
+                if inside_area < SLIVER_AREA_M2 {
+                    next.push(region); // carve misses this face — keep it intact
+                    continue;
+                }
+                let outside = region_poly.difference(&area_poly);
+                let outside_area: f64 = outside.0.iter().map(|p| p.unsigned_area()).sum();
+                if outside_area < SLIVER_AREA_M2 {
+                    next.push(region); // carve fully covers this face — keep it intact
+                    continue;
+                }
+                // Straddled: cut it in two, each piece coplanar with the source
+                // face (z from its plane, not a flat stamp), so the surface is
+                // bit-identical and only the region count grows.
+                let cid = region.construction_id;
+                let mk = |poly: &Polygon<f64>| {
+                    let mut pts: Vec<Point3f64> = poly
+                        .exterior()
+                        .coords()
+                        .map(|c| Point3f64::new(c.x, c.y, c0 + cx * c.x + cy * c.y))
+                        .collect();
+                    if pts.len() > 1 && pts.first() == pts.last() {
+                        pts.pop();
+                    }
+                    CeilingRegion {
+                        id: ItemId::default(),
+                        polygon: Polygon3D::new(pts),
+                        opes: Opes::default(),
+                        construction_id: cid,
+                    }
+                };
+                for poly in inside.0.iter().flat_map(split_to_simple) {
+                    if poly.unsigned_area() < SLIVER_AREA_M2 {
+                        continue;
+                    }
+                    next.push(mk(&poly));
+                }
+                for poly in outside.0.iter().flat_map(split_to_simple) {
+                    if poly.unsigned_area() < SLIVER_AREA_M2 {
+                        continue;
+                    }
+                    next.push(mk(&poly));
                 }
             }
             regions = next;
@@ -582,6 +678,129 @@ impl CeilingRegions {
             .collect()
     }
 
+    /// Reset every apex-shaped roof (fan / ridge / hip) back to ONE FLAT region
+    /// at its base (eave) height — the "un-shape" primitive behind clear-and-
+    /// redraw ceiling editing and the outline re-fit of a sloped region. Each
+    /// [`apex_groups`](Self::apex_groups) group's member faces are replaced by a
+    /// single flat [`CeilingRegion`] per `merged_ring` at the group's `base_z`,
+    /// inheriting the first member's `construction_id` and default `opes`.
+    /// Regions in no group (flat steps, the flat default) pass through
+    /// untouched. Empty `apexes` (or no group) → `self` unchanged.
+    pub fn unshaped(self, apexes: &[RoofApex]) -> Self {
+        let groups = self.apex_groups(apexes);
+        if groups.is_empty() {
+            return self;
+        }
+        let grouped: std::collections::HashSet<usize> = groups
+            .iter()
+            .flat_map(|g| g.region_idxs.iter().copied())
+            .collect();
+        let mut next: Vec<CeilingRegion> = Vec::new();
+        // Flat / ungrouped regions survive verbatim (id + opes preserved).
+        for (ri, region) in self.regions.iter().enumerate() {
+            if !grouped.contains(&ri) {
+                next.push(region.clone());
+            }
+        }
+        // Each shaped group collapses to one flat region per merged ring.
+        for g in &groups {
+            let cid = g
+                .region_idxs
+                .first()
+                .map(|&ri| self.regions[ri].construction_id)
+                .unwrap_or_default();
+            for ring in &g.merged_rings {
+                if ring.len() < 3 {
+                    continue;
+                }
+                let pts: Vec<Point3f64> = ring
+                    .iter()
+                    .map(|p| Point3f64::new(p.x, p.y, g.base_z))
+                    .collect();
+                next.push(CeilingRegion {
+                    id: ItemId::default(),
+                    polygon: Polygon3D::new(pts),
+                    opes: Opes::default(),
+                    construction_id: cid,
+                });
+            }
+        }
+        Self { regions: next }
+    }
+
+    /// Re-fit the regions to a changed outline `footprint` (the regions-as-truth
+    /// answer to an outline edit, kept deliberately simple since the outline is
+    /// frozen before ceiling work in practice). Every stored region is
+    /// COPLANAR-clipped to the footprint (its plan ∩ footprint, z read from the
+    /// region's own plane — a sloped face stays sloped where it survives), and
+    /// any newly-EXPOSED area (the outline grew, or a region clipped away) is
+    /// filled with flat region(s) at `default_height` referencing `fill_cid`. A
+    /// step or ridge near a moved boundary may end short / clip away — the
+    /// assessor touches it up (the accepted lossy trade). Sub-[`SLIVER_AREA_M2`]
+    /// pieces dropped; an empty footprint → empty regions.
+    pub fn refit_to_footprint(
+        self,
+        footprint: &[Vec<Point2f64>],
+        default_height: f64,
+        fill_cid: ItemId,
+    ) -> Self {
+        use geo::bool_ops::BooleanOps;
+        use geo::Area;
+        let fp_polys: Vec<Polygon<f64>> = footprint
+            .iter()
+            .filter(|r| r.len() >= 3)
+            .map(|r| ring_to_poly(r))
+            .collect();
+        if fp_polys.is_empty() {
+            return Self::default();
+        }
+        let fp = MultiPolygon(fp_polys);
+        let mk = |poly: &Polygon<f64>, z: Box<dyn Fn(f64, f64) -> f64>, cid: ItemId| {
+            let mut pts: Vec<Point3f64> = poly
+                .exterior()
+                .coords()
+                .map(|c| Point3f64::new(c.x, c.y, z(c.x, c.y)))
+                .collect();
+            if pts.len() > 1 && pts.first() == pts.last() {
+                pts.pop();
+            }
+            CeilingRegion {
+                id: ItemId::default(),
+                polygon: Polygon3D::new(pts),
+                opes: Opes::default(),
+                construction_id: cid,
+            }
+        };
+        let mut next: Vec<CeilingRegion> = Vec::new();
+        let mut covered = MultiPolygon::<f64>(Vec::new());
+        for region in &self.regions {
+            let Some((c0, cx, cy)) = region_plane(region) else {
+                continue;
+            };
+            let region_poly: Polygon<f64> = region.polygon.clone().into();
+            let clipped = region_poly.intersection(&fp);
+            for poly in clipped.0.iter().flat_map(split_to_simple) {
+                if poly.unsigned_area() < SLIVER_AREA_M2 {
+                    continue;
+                }
+                next.push(mk(
+                    &poly,
+                    Box::new(move |x, y| c0 + cx * x + cy * y),
+                    region.construction_id,
+                ));
+                covered = covered.union(&MultiPolygon(vec![poly]));
+            }
+        }
+        // Newly-exposed footprint (grew, or a region clipped away) → flat default.
+        for poly in fp.difference(&covered).0.iter().flat_map(split_to_simple) {
+            if poly.unsigned_area() < SLIVER_AREA_M2 {
+                continue;
+            }
+            next.push(mk(&poly, Box::new(move |_, _| default_height), fill_cid));
+        }
+        Self { regions: next }
+    }
+
     /// The LOWEST flat ceiling height over `footprint`: the minimum
     /// [`flat_z`] among regions whose plan polygon overlaps `footprint` by
     /// more than [`SLIVER_AREA_M2`] (a boundary graze is not coverage).
@@ -805,6 +1024,19 @@ pub struct CeilingRegion {
 }
 
 impl CeilingRegion {
+    /// The region's plan centroid (exterior projected to xy) — the durable
+    /// geometric key for an assigned ceiling/roof construction, mirroring
+    /// [`FloorRegion::centroid`](super::FloorRegion::centroid).
+    pub fn centroid(&self) -> Point2f64 {
+        let ring: Vec<Point2f64> = self
+            .polygon
+            .exterior
+            .iter()
+            .map(|v| Point2f64::new(v.x, v.y))
+            .collect();
+        ring_centroid(&ring)
+    }
+
     /// The region's single height when it is FLAT (every vertex z within
     /// 1e-6 m), `None` for sloped/degenerate regions. Used to reconstruct
     /// session step areas and label heights in 2D.

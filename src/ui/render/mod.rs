@@ -26,10 +26,11 @@ pub mod all_storeys_2d;
 pub mod full_house_3d;
 pub mod storey_2d;
 pub mod storey_3d;
+pub mod structure_fan;
 
 use std::collections::HashSet;
 
-use crate::controller::app_controller::{ExposureSelection, WallExposureView};
+use crate::controller::app_controller::{ExposureSelection, StructureEdit, WallExposureView};
 use ber_model::ber::ber_struct::Ber;
 use ber_model::ber::common::ItemId;
 use ber_model::ber::structural::WallExposure;
@@ -95,6 +96,9 @@ pub fn render_ber(
     view: ViewParams,
     // Structure-phase selected region ids — shaded on the current storey.
     selected: &HashSet<ItemId>,
+    // The in-flight "Edit attributes" session. When set, the 2D storey switches
+    // to the fanned group view instead of the normal shaded render.
+    structure_edit: Option<&StructureEdit>,
 ) {
     let Some(ber) = ber else {
         painter.text(
@@ -119,18 +123,24 @@ pub fn render_ber(
                 } else {
                     None
                 };
-                storey_2d::render(
-                    painter,
-                    rect,
-                    storey,
-                    display_mode,
-                    highlight,
-                    dimensioned_walls,
-                    view,
-                    watermark.as_deref(),
-                    None,
-                    selected,
-                );
+                // An open "Edit attributes" session takes over the canvas with
+                // the fanned group view; otherwise the normal shaded render.
+                if let Some(edit) = structure_edit {
+                    structure_fan::render_structure_fan(painter, rect, storey, edit, view);
+                } else {
+                    storey_2d::render(
+                        painter,
+                        rect,
+                        storey,
+                        display_mode,
+                        highlight,
+                        dimensioned_walls,
+                        view,
+                        watermark.as_deref(),
+                        None,
+                        selected,
+                    );
+                }
             } else {
                 empty_storey_hint(painter, rect);
             }

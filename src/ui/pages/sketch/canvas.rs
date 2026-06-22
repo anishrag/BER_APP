@@ -93,7 +93,46 @@ pub(super) fn render<F: FnMut(UiEvent)>(
         dimensioned_walls,
         vp,
         view.structure_selected,
+        view.structure_edit,
     );
+
+    // Structure "Edit attributes": when a fan session is open, place one small
+    // popup per group at its pulled-out position — clicking a popup makes that
+    // group active (the side panel edits the active group's attributes).
+    if let (Some(edit), Some(storey)) = (
+        view.structure_edit,
+        ber.and_then(|b| current_storey_idx.and_then(|i| b.storeys.get(i))),
+    ) {
+        if matches!(mode, SketchMode::Storey2D) {
+            if let Some(t) = render::structure_fan::fan_transform(rect, storey, vp) {
+                for fan in render::structure_fan::group_fan_layout(storey, edit) {
+                    let (wx, wy) = fan.fanned_centroid();
+                    let at = t.apply(wx, wy);
+                    let active = fan.group_index == edit.active;
+                    egui::Area::new(ui.id().with(("structure_fan", fan.group_index)))
+                        .order(egui::Order::Foreground)
+                        .fixed_pos(at)
+                        .show(ui.ctx(), |ui| {
+                            egui::Frame::popup(ui.style())
+                                .fill(if active {
+                                    fan.color.gamma_multiply(0.5)
+                                } else {
+                                    ui.style().visuals.window_fill
+                                })
+                                .show(ui, |ui| {
+                                    let label =
+                                        format!("Group {}  ·  {}", fan.group_index + 1, fan.count);
+                                    if ui.add(egui::Button::selectable(active, label)).clicked() {
+                                        on_event(UiEvent::Sketch(
+                                            SketchEvent::SetActiveStructureGroup(fan.group_index),
+                                        ));
+                                    }
+                                });
+                        });
+                }
+            }
+        }
+    }
 
     // New-storey browse stage: tint the current outline suggestion's ring
     // translucently over the previous-storey watermark so the assessor sees

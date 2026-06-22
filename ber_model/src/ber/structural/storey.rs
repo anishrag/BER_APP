@@ -93,9 +93,10 @@ pub struct Storey {
     #[serde(default)]
     pub floor_splits: Vec<Vec<Point2f64>>,
     /// Structure-phase ROOF/CEILING splits — same contract as `floor_splits`,
-    /// over the ceiling regions. Replayed as a delta-0 split alongside the
-    /// `ceiling_dividers` (`CeilingRegions::with_z_deltas`, BEFORE the apexes),
-    /// so a split piece keeps its height and confines an apex/ridge to itself.
+    /// over the ceiling regions. Replayed by `CeilingRegions::split_faces_coplanar`
+    /// AFTER the apexes: it cuts the already-resolved faces in place (z read
+    /// from each face's plane), so a split piece keeps the exact surface — a
+    /// carve across a ridge yields coplanar sub-faces, never re-pitched halves.
     /// `#[serde(default)]` so older records load.
     #[serde(default)]
     pub roof_splits: Vec<Vec<Point2f64>>,

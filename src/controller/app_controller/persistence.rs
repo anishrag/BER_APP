@@ -229,6 +229,10 @@ impl AppController {
         // risers (legacy records / pre-table snapshots) BEFORE the first
         // re-resolve mints fresh risers that would otherwise default Unset.
         self.seed_riser_exposure_from_record();
+        // Same for the durable FLOOR + CEILING construction stores (keyed by
+        // region centroid) — legacy records carry an assigned area construction
+        // only on its resolved region, which the first re-resolve would reset.
+        self.seed_construction_stores_from_record();
         // An in-flight ceiling-step line belongs to the PREVIOUS record — its
         // prompt holds VertexIds into that record's outline plan. A pending
         // roof point's / ridge's prompt does too.
@@ -282,6 +286,78 @@ impl AppController {
             let sd = &mut self.document.storeys[idx];
             for (k, e) in entries {
                 sd.riser_exposure.entry(k).or_insert(e);
+            }
+        }
+    }
+
+    /// Seed the durable FLOOR + CEILING/ROOF construction stores from the
+    /// persisted resolved regions — legacy records (and any whose snapshot
+    /// predates the stores) carry an assigned area construction only on its
+    /// resolved region, which the first fresh-id re-resolve would otherwise drop
+    /// back to the derived default. Idempotent: fills only gaps, keyed by the
+    /// region's quantized centroid; skips regions still at the default
+    /// (type + make-up), which carry no assignment to preserve.
+    fn seed_construction_stores_from_record(&mut self) {
+        use ber_model::ber::structural::{
+            CeilingConstructionType, ConstructionMakeup, FloorConstructionType,
+        };
+        let n = self
+            .current_record
+            .as_ref()
+            .map(|r| r.data.storeys.len())
+            .unwrap_or(0)
+            .min(self.document.storeys.len());
+        for idx in 0..n {
+            let (floors, ceilings): (
+                Vec<(
+                    document::CentroidKey,
+                    (FloorConstructionType, ConstructionMakeup),
+                )>,
+                Vec<(
+                    document::CentroidKey,
+                    (CeilingConstructionType, ConstructionMakeup),
+                )>,
+            ) = {
+                let Some(record) = self.current_record.as_ref() else {
+                    break;
+                };
+                let Some(storey) = record.data.storeys.get(idx) else {
+                    continue;
+                };
+                let floors = storey
+                    .floors
+                    .regions
+                    .iter()
+                    .filter_map(|r| {
+                        let c = record.data.floor_construction(r.construction_id)?;
+                        let ty = c.construction_type;
+                        let mk = c.base.construction_makeup.clone();
+                        (ty != FloorConstructionType::default()
+                            || mk != ConstructionMakeup::default())
+                        .then(|| (document::centroid_key(r.centroid()), (ty, mk)))
+                    })
+                    .collect();
+                let ceilings = storey
+                    .roofs
+                    .regions
+                    .iter()
+                    .filter_map(|r| {
+                        let c = record.data.ceiling_construction(r.construction_id)?;
+                        let ty = c.construction_type;
+                        let mk = c.base.construction_makeup.clone();
+                        (ty != CeilingConstructionType::default()
+                            || mk != ConstructionMakeup::default())
+                        .then(|| (document::centroid_key(r.centroid()), (ty, mk)))
+                    })
+                    .collect();
+                (floors, ceilings)
+            };
+            let sd = &mut self.document.storeys[idx];
+            for (k, v) in floors {
+                sd.floor_constructions.entry(k).or_insert(v);
+            }
+            for (k, v) in ceilings {
+                sd.ceiling_constructions.entry(k).or_insert(v);
             }
         }
     }

@@ -8,7 +8,21 @@
 //! from persisted floors — lives here.
 use ber_model::ber::ber_struct::Ber;
 use ber_model::ber::common::ConstructionPhase;
-use domain::points::{to_f32, Point2f32};
+use domain::points::{to_f32, Point2f32, Point2f64};
+
+/// Durable geometric key for an AREA region (floor / ceiling): its plan centroid
+/// quantized to the mm grid. Area regions have no parametric `SurfaceRef`, so the
+/// centroid is their stable identity across the re-derive — the area analogue of
+/// [`riser_key`](crate::riser_key), with the same quantization and the same
+/// caveat: it tracks a region that keeps its shape, but not one that gets
+/// subdivided (the sub-regions' centroids differ).
+pub type CentroidKey = (i64, i64);
+
+/// Quantize a region centroid to a [`CentroidKey`] (each coord to the nearest mm).
+pub fn centroid_key(c: Point2f64) -> CentroidKey {
+    let q = |v: f64| (v * 1000.0).round() as i64;
+    (q(c.x), q(c.y))
+}
 
 /// A session-only tagged area: a world-space (metre) ring + the phase to stamp
 /// onto surfaces inside it.
@@ -164,6 +178,59 @@ pub fn stamp_wall_constructions(ber: &mut Ber, idx: usize, doc: &crate::StoreyDo
         if let Some((ty, makeup)) = doc.wall_constructions.get(&sref) {
             let cid = ber.ensure_wall_construction(*ty, makeup.clone(), phase);
             ber.storeys[idx].walls.regions[i].construction_id = cid;
+        }
+    }
+}
+
+/// Compose each FLOOR region's ASSIGNED construction (type + make-up, from
+/// `doc.floor_constructions` keyed by [`CentroidKey`]) with its DERIVED phase
+/// (already set on the partitioned region's construction), re-`ensure`ing the
+/// construction and pointing the region at it. The area analogue of
+/// [`stamp_wall_constructions`]: a floor region's quantized centroid is its
+/// durable key, so a user-set floor construction survives the re-derivation. A
+/// region with no stored assignment keeps its derived (phase-only) construction.
+pub fn stamp_floor_constructions(ber: &mut Ber, idx: usize, doc: &crate::StoreyDoc) {
+    if ber.storeys.len() <= idx || doc.floor_constructions.is_empty() {
+        return;
+    }
+    let n = ber.storeys[idx].floors.regions.len();
+    for i in 0..n {
+        let (key, phase) = {
+            let r = &ber.storeys[idx].floors.regions[i];
+            let phase = ber
+                .floor_construction(r.construction_id)
+                .map(|c| c.base.construction_phase.clone())
+                .unwrap_or_default();
+            (centroid_key(r.centroid()), phase)
+        };
+        if let Some((ty, makeup)) = doc.floor_constructions.get(&key) {
+            let cid = ber.ensure_floor_construction(*ty, makeup.clone(), phase);
+            ber.storeys[idx].floors.regions[i].construction_id = cid;
+        }
+    }
+}
+
+/// Compose each CEILING/ROOF region's ASSIGNED construction (type + make-up,
+/// from `doc.ceiling_constructions` keyed by [`CentroidKey`]) with its DERIVED
+/// phase, re-`ensure`ing the construction and pointing the region at it. Mirror
+/// of [`stamp_floor_constructions`] over the storey's `roofs` regions.
+pub fn stamp_ceiling_constructions(ber: &mut Ber, idx: usize, doc: &crate::StoreyDoc) {
+    if ber.storeys.len() <= idx || doc.ceiling_constructions.is_empty() {
+        return;
+    }
+    let n = ber.storeys[idx].roofs.regions.len();
+    for i in 0..n {
+        let (key, phase) = {
+            let r = &ber.storeys[idx].roofs.regions[i];
+            let phase = ber
+                .ceiling_construction(r.construction_id)
+                .map(|c| c.base.construction_phase.clone())
+                .unwrap_or_default();
+            (centroid_key(r.centroid()), phase)
+        };
+        if let Some((ty, makeup)) = doc.ceiling_constructions.get(&key) {
+            let cid = ber.ensure_ceiling_construction(*ty, makeup.clone(), phase);
+            ber.storeys[idx].roofs.regions[i].construction_id = cid;
         }
     }
 }

@@ -51,7 +51,10 @@ pub fn resolve_storey(
     idx: usize,
     phase_regions: &[PhaseRegion],
     step_regions: &[StepRegion],
-    ceiling_steps: &[CeilingStepRegion],
+    // Regions-as-truth: ceiling steps are applied one-shot at edit time, not
+    // replayed here. Param retained until the controller call sites are rewired
+    // (then removed in cleanup); resolve no longer reads it.
+    _ceiling_steps: &[CeilingStepRegion],
 ) -> Storey {
     // The storey footprint is always the OUTLINE (never a living area, even
     // when one is active). One ring → one FloorRegion.
@@ -162,73 +165,82 @@ pub fn resolve_storey(
             .ceiling_construction_id(Default::default(), Default::default(), Default::default())
             .expect("base ceiling construction ensured before resolve");
         if polygons_f64.iter().any(|p| p.len() >= 3) {
-            let mut roofs =
-                CeilingRegions::default_for_footprint(polygons_f64, height_m, ceiling_cid);
-            if !ceiling_steps.is_empty()
-                || !storey.ceiling_dividers.is_empty()
-                || !storey.roof_splits.is_empty()
-            {
-                // The session ±Δ steps (and any in-flight delta-0 divider the
-                // controller hasn't synced to the durable field yet), PLUS the
-                // durable same-height DIVIDERS as delta-0 splits. A divider
-                // leaves no z-trace, so the stored ring is the only durable
-                // record; applying it (idempotently — re-applying a delta-0
-                // split is a no-op on z) re-establishes the boundary BEFORE
-                // `with_apexes`, keeping a ridge confined to its own piece.
-                let mut areas: Vec<(Vec<Point2f64>, f64)> = ceiling_steps
+            // REGIONS-AS-TRUTH: the stored `roofs` ARE the ceiling model, not a
+            // cache re-derived from declarative inputs. Resolve only:
+            //   - SEEDS a flat default ceiling when there are none yet (the
+            //     height was just set), or
+            //   - RE-FITS the existing regions to the current outline so an
+            //     outline edit re-clips / extends them (idempotent when the
+            //     footprint is unchanged — see the resolve-fixpoint test).
+            // Ceiling steps, roof apexes and structure face-splits are applied
+            // ONCE at edit time as one-shot mutations on `storey.roofs`
+            // (controller), never replayed here — so there is no reconstruction
+            // and no reload fixpoint to maintain.
+            // Re-fit only on a REAL outline change. An unchanged footprint keeps
+            // the stored roofs verbatim — a re-fit's boolean clip + plane-eval
+            // would perturb a flat region's z by ~1e-15 and break exact reload
+            // fixpoints. "Unchanged" = equal total plan area AND bounding box.
+            fn outline_unchanged(roofs: &CeilingRegions, footprint: &[Vec<Point2f64>]) -> bool {
+                let shoelace = |xy: &[(f64, f64)]| -> f64 {
+                    let n = xy.len();
+                    if n < 3 {
+                        return 0.0;
+                    }
+                    let mut s = 0.0;
+                    for i in 0..n {
+                        let (a, b) = (xy[i], xy[(i + 1) % n]);
+                        s += a.0 * b.1 - b.0 * a.1;
+                    }
+                    s.abs() / 2.0
+                };
+                let fp: Vec<Vec<(f64, f64)>> = footprint
                     .iter()
-                    .map(|r| {
-                        let ring: Vec<Point2f64> = r.polygon.iter().copied().map(to_f64).collect();
-                        (ring, r.delta_m)
-                    })
+                    .map(|r| r.iter().map(|p| (p.x, p.y)).collect())
                     .collect();
-                for ring in &storey.ceiling_dividers {
-                    areas.push((ring.clone(), 0.0));
+                let rf: Vec<Vec<(f64, f64)>> = roofs
+                    .regions
+                    .iter()
+                    .map(|r| r.polygon.exterior.iter().map(|v| (v.x, v.y)).collect())
+                    .collect();
+                let area = |ps: &[Vec<(f64, f64)>]| -> f64 { ps.iter().map(|r| shoelace(r)).sum() };
+                if (area(&fp) - area(&rf)).abs() > 1e-6 {
+                    return false;
                 }
-                // Structure-phase ROOF splits are delta-0 ceiling splits too —
-                // both pieces keep their height + construction (opes re-home by
-                // plan point in `rebuild_opes` at the tail), so the assessor can
-                // attribute each separately. Composed with steps/dividers,
-                // BEFORE the apexes, keeping a ridge confined to its piece.
-                for ring in &storey.roof_splits {
-                    areas.push((ring.clone(), 0.0));
-                }
-                roofs = roofs.with_z_deltas(&areas);
-                // Composed-delta sanity: a step is validated against the
-                // default at assign time only, so stacked steps can drive a
-                // piece's ceiling to (or through) the floor. Accepted — the
-                // assessor may be mid-edit — but never silently.
-                for region in &roofs.regions {
-                    if let Some(z) = region.flat_z() {
-                        if z <= 0.1 {
-                            log::warn!(
-                                "ceiling-step composition left a region at z = {z:.3} m \
-                                 (≤ 0.1 m) on storey {idx} — stacked deltas have all but \
-                                 eliminated the ceiling height there"
-                            );
+                let bbox = |ps: &[Vec<(f64, f64)>]| {
+                    let (mut lx, mut ly, mut hx, mut hy) = (
+                        f64::INFINITY,
+                        f64::INFINITY,
+                        f64::NEG_INFINITY,
+                        f64::NEG_INFINITY,
+                    );
+                    for r in ps {
+                        for &(x, y) in r {
+                            lx = lx.min(x);
+                            ly = ly.min(y);
+                            hx = hx.max(x);
+                            hy = hy.max(y);
                         }
                     }
-                }
+                    (lx, ly, hx, hy)
+                };
+                let (a, b, c, d) = bbox(&fp);
+                let (e, f, g, h) = bbox(&rf);
+                (a - e).abs() < 1e-6
+                    && (b - f).abs() < 1e-6
+                    && (c - g).abs() < 1e-6
+                    && (d - h).abs() < 1e-6
             }
-            // Apexes LAST: each fans the region containing it up (or down) to
-            // its ABSOLUTE z. The apexes ride the cloned storey — durable
-            // input, like the ceiling height itself. Like the composed-delta
-            // sanity above, a near-floor apex is accepted but never silently.
-            if !storey.roof_apexes.is_empty() {
-                for apex in &storey.roof_apexes {
-                    if apex.z_m <= 0.1 {
-                        log::warn!(
-                            "roof apex at ({:.3}, {:.3}) on storey {idx} has z = {:.3} m \
-                             (≤ 0.1 m) — it all but eliminates the ceiling height there",
-                            apex.point.x,
-                            apex.point.y,
-                            apex.z_m
-                        );
-                    }
-                }
-                roofs = roofs.with_apexes_hinted(&storey.roof_apexes, &storey.roof_apex_hints);
-            }
-            storey.roofs = roofs;
+            storey.roofs = if storey.roofs.regions.is_empty() {
+                CeilingRegions::default_for_footprint(polygons_f64.clone(), height_m, ceiling_cid)
+            } else if outline_unchanged(&storey.roofs, &polygons_f64) {
+                std::mem::take(&mut storey.roofs)
+            } else {
+                std::mem::take(&mut storey.roofs).refit_to_footprint(
+                    &polygons_f64,
+                    height_m,
+                    ceiling_cid,
+                )
+            };
         }
     }
     // Step areas re-split the (possibly phase-partitioned) floor regions and
@@ -710,7 +722,7 @@ mod tests {
             Point2f64::new(2.0, 4.0),
             Point2f64::new(0.0, 4.0),
         ]];
-        let storey = resolve_storey(&doc, &ber, 0, &[], &[], &[]);
+        let storey = resolve_storey_t(&doc, &mut ber, 0, &[], &[], &[]);
         assert_eq!(storey.roofs.regions.len(), 2, "the cut split the ceiling");
         assert!(
             storey
@@ -723,6 +735,318 @@ mod tests {
         ber.storeys[0] = storey;
         let storey2 = resolve_storey(&doc, &ber, 0, &[], &[], &[]);
         assert_eq!(storey2.roofs.regions.len(), 2, "split survives re-resolve");
+    }
+
+    /// The roof surface z at plan `(x, y)` — the containing region's plane,
+    /// evaluated there — for asserting a carve re-TILES the surface without
+    /// re-deriving it. `None` when no region's plan polygon contains the point.
+    fn roof_z_at(storey: &Storey, x: f64, y: f64) -> Option<f64> {
+        let plane = |r: &ber_model::ber::structural::CeilingRegion| -> Option<(f64, f64, f64)> {
+            let ext = &r.polygon.exterior;
+            let o = ext.first()?;
+            for i in 1..ext.len() {
+                for j in (i + 1)..ext.len() {
+                    let (ux, uy, uz) = (ext[i].x - o.x, ext[i].y - o.y, ext[i].z - o.z);
+                    let (vx, vy, vz) = (ext[j].x - o.x, ext[j].y - o.y, ext[j].z - o.z);
+                    let det = ux * vy - uy * vx;
+                    if det.abs() > 1e-12 {
+                        let cx = (uz * vy - vz * uy) / det;
+                        let cy = (vz * ux - uz * vx) / det;
+                        return Some((o.z - cx * o.x - cy * o.y, cx, cy));
+                    }
+                }
+            }
+            None
+        };
+        let contains = |r: &ber_model::ber::structural::CeilingRegion| -> bool {
+            let ext = &r.polygon.exterior;
+            let n = ext.len();
+            let mut inside = false;
+            let mut j = n - 1;
+            for i in 0..n {
+                let (xi, yi) = (ext[i].x, ext[i].y);
+                let (xj, yj) = (ext[j].x, ext[j].y);
+                if (yi > y) != (yj > y) && x < (xj - xi) * (y - yi) / (yj - yi) + xi {
+                    inside = !inside;
+                }
+                j = i;
+            }
+            inside
+        };
+        storey
+            .roofs
+            .regions
+            .iter()
+            .find(|r| contains(r))
+            .and_then(|r| plane(r).map(|(c, cx, cy)| c + cx * x + cy * y))
+    }
+
+    /// Carving ACROSS a pitched roof's ridge SPLITS the resolved faces in place
+    /// — the surface is bit-identical (the z-field at every interior point is
+    /// unchanged), only the region count grows. Guards the bug where the carve
+    /// ran BEFORE the apexes and re-pitched each half into its own roof (the
+    /// ridge collapsed into two pyramids with a valley between the apexes).
+    #[test]
+    fn roof_carve_across_ridge_splits_faces_without_re_pitching() {
+        let (doc, mut ber) = ceiling_test_setup(2.4);
+        // A ridge along x = 2 (apexes (2,1) and (2,3) at 4.2) over the 4×4.
+        ber.storeys[0].roof_apexes = vec![
+            RoofApex {
+                point: Point2f64::new(2.0, 1.0),
+                z_m: 4.2,
+            },
+            RoofApex {
+                point: Point2f64::new(2.0, 3.0),
+                z_m: 4.2,
+            },
+        ];
+        ber.storeys[0] = resolve_storey_t(&doc, &mut ber, 0, &[], &[], &[]);
+        let before_n = ber.storeys[0].roofs.regions.len();
+        // Sample the surface at asymmetric interior points (off the ridge line
+        // and region boundaries) — the tiling-independent fingerprint.
+        let probes = [
+            (0.7, 0.6),
+            (1.3, 2.0),
+            (1.1, 3.4),
+            (2.9, 0.7),
+            (3.4, 2.4),
+            (2.6, 3.3),
+        ];
+        let before: Vec<f64> = probes
+            .iter()
+            .map(|&(x, y)| roof_z_at(&ber.storeys[0], x, y).expect("probe inside a region"))
+            .collect();
+        // Mid-ridge is the discriminator: 4.2 for one ridge, a valley for two
+        // pyramids.
+        assert!(
+            (roof_z_at(&ber.storeys[0], 1.9, 2.0).unwrap() - (2.4 + 1.8 * 0.95)).abs() < 1e-6,
+            "left slope rises toward the ridge"
+        );
+
+        // Carve the lower strip (y ≤ 1.5) — straddles the ridge's apex at y = 1,
+        // exactly the "split in the middle of the ridge" case.
+        ber.storeys[0].roof_splits = vec![vec![
+            Point2f64::new(0.0, 0.0),
+            Point2f64::new(4.0, 0.0),
+            Point2f64::new(4.0, 1.5),
+            Point2f64::new(0.0, 1.5),
+        ]];
+        ber.storeys[0] = resolve_storey_t(&doc, &mut ber, 0, &[], &[], &[]);
+
+        assert!(
+            ber.storeys[0].roofs.regions.len() > before_n,
+            "the carve split faces (more regions): {} → {}",
+            before_n,
+            ber.storeys[0].roofs.regions.len()
+        );
+        let after: Vec<f64> = probes
+            .iter()
+            .map(|&(x, y)| roof_z_at(&ber.storeys[0], x, y).expect("probe still inside a region"))
+            .collect();
+        for ((x, y), (b, a)) in probes.iter().zip(before.iter().zip(&after)) {
+            assert!(
+                (b - a).abs() < 1e-6,
+                "surface changed at ({x}, {y}): {b:.4} → {a:.4} (the carve re-pitched it)"
+            );
+        }
+        assert!(
+            (roof_z_at(&ber.storeys[0], 1.9, 2.0).unwrap() - (2.4 + 1.8 * 0.95)).abs() < 1e-6,
+            "the ridge is intact, not collapsed into two pyramids"
+        );
+        // Total plan area is conserved (nothing lost to the split).
+        assert!(
+            (ber.storeys[0]
+                .roofs
+                .regions
+                .iter()
+                .map(roof_plan_area)
+                .sum::<f64>()
+                - 16.0)
+                .abs()
+                < 1e-4
+        );
+
+        // Re-resolve is a fixpoint: the split replays to the same region count.
+        let n1 = ber.storeys[0].roofs.regions.len();
+        ber.storeys[0] = resolve_storey(&doc, &ber, 0, &[], &[], &[]);
+        assert_eq!(ber.storeys[0].roofs.regions.len(), n1, "split is stable");
+    }
+
+    /// SPIKE (regions-as-truth refactor): the `unshaped` primitive resets a
+    /// resolved ridge back to ONE flat region at its eave height — the
+    /// load-bearing op behind clear-and-redraw editing and the outline re-fit.
+    /// A ridge over the 4×4 must collapse to a single flat 16 m² region at 2.4.
+    #[test]
+    fn unshape_resets_a_ridge_to_one_flat_region_at_the_eave() {
+        let (doc, mut ber) = ceiling_test_setup(2.4);
+        let apexes = vec![
+            RoofApex {
+                point: Point2f64::new(2.0, 1.0),
+                z_m: 4.2,
+            },
+            RoofApex {
+                point: Point2f64::new(2.0, 3.0),
+                z_m: 4.2,
+            },
+        ];
+        ber.storeys[0].roof_apexes = apexes.clone();
+        ber.storeys[0] = resolve_storey_t(&doc, &mut ber, 0, &[], &[], &[]);
+        assert!(
+            ber.storeys[0].roofs.regions.len() > 1,
+            "the ridge resolved into multiple faces"
+        );
+        let flat = ber.storeys[0].roofs.clone().unshaped(&apexes);
+        assert_eq!(flat.regions.len(), 1, "un-shape collapses to one region");
+        assert!(
+            flat.regions[0]
+                .flat_z()
+                .is_some_and(|z| (z - 2.4).abs() < 1e-6),
+            "back at the eave height"
+        );
+        assert!(
+            (roof_plan_area(&flat.regions[0]) - 16.0).abs() < 1e-4,
+            "covering the whole footprint"
+        );
+    }
+
+    /// SPIKE: un-shape preserves a flat STEP that sits beside a ridge — only the
+    /// apex-shaped faces collapse, the un-grouped flat regions pass through. A
+    /// stepped half + a ridge over it → un-shape → two flat regions (the step
+    /// level and the ridge's eave), not one fused region.
+    #[test]
+    fn unshape_keeps_a_neighbouring_flat_step() {
+        let (doc, mut ber) = ceiling_test_setup(2.4);
+        // Left half (x ≤ 2) stepped to 2.7; a ridge over the right (default) half.
+        let step = doc
+            .ceiling_step_region(
+                manip_plan::ParameterAxis::X,
+                2.0,
+                crate::LineSide::Less,
+                0.3,
+            )
+            .unwrap();
+        let apexes = vec![
+            RoofApex {
+                point: Point2f64::new(3.0, 1.0),
+                z_m: 4.2,
+            },
+            RoofApex {
+                point: Point2f64::new(3.0, 3.0),
+                z_m: 4.2,
+            },
+        ];
+        ber.storeys[0].roof_apexes = apexes.clone();
+        ber.storeys[0] = resolve_storey_t(&doc, &mut ber, 0, &[], &[], &[step]);
+        let flat = ber.storeys[0].roofs.clone().unshaped(&apexes);
+        let mut zs: Vec<f64> = flat
+            .regions
+            .iter()
+            .map(|r| r.flat_z().expect("all regions flat after un-shape"))
+            .collect();
+        zs.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        assert_eq!(zs.len(), 2, "the step and the ridge's eave, both flat");
+        assert!((zs[0] - 2.4).abs() < 1e-6, "ridge eave at default 2.4");
+        assert!((zs[1] - 2.7).abs() < 1e-6, "stepped half preserved at 2.7");
+        assert!(
+            (flat.regions.iter().map(roof_plan_area).sum::<f64>() - 16.0).abs() < 1e-4,
+            "area conserved"
+        );
+    }
+
+    /// SPIKE: outline re-fit GROWS the footprint — the ridge is coplanar-clipped
+    /// (slope preserved where it survives) and the newly-exposed strip fills flat
+    /// at the default height.
+    #[test]
+    fn refit_grows_footprint_and_fills_exposed_area_flat() {
+        let (doc, mut ber) = ceiling_test_setup(2.4);
+        ber.storeys[0].roof_apexes = vec![
+            RoofApex {
+                point: Point2f64::new(2.0, 1.0),
+                z_m: 4.2,
+            },
+            RoofApex {
+                point: Point2f64::new(2.0, 3.0),
+                z_m: 4.2,
+            },
+        ];
+        ber.storeys[0] = resolve_storey_t(&doc, &mut ber, 0, &[], &[], &[]);
+        let cid = ber.storeys[0].roofs.regions[0].construction_id;
+        // Grow the 4×4 to 6×4 (extra 2×4 strip at x ∈ [4, 6]).
+        let grown = ber.storeys[0].roofs.clone().refit_to_footprint(
+            &[vec![
+                Point2f64::new(0.0, 0.0),
+                Point2f64::new(6.0, 0.0),
+                Point2f64::new(6.0, 4.0),
+                Point2f64::new(0.0, 4.0),
+            ]],
+            2.4,
+            cid,
+        );
+        assert!(
+            (grown.regions.iter().map(roof_plan_area).sum::<f64>() - 24.0).abs() < 1e-3,
+            "covers the grown footprint"
+        );
+        assert!(
+            grown.regions.iter().any(|r| r
+                .polygon
+                .exterior
+                .iter()
+                .any(|v| (v.z - 4.2).abs() < 1e-9)),
+            "the ridge survived the clip (still rises to 4.2)"
+        );
+        // The exposed strip is flat default; its only flat-2.4 area is that 2×4.
+        let flat_area: f64 = grown
+            .regions
+            .iter()
+            .filter(|r| r.flat_z().is_some_and(|z| (z - 2.4).abs() < 1e-6))
+            .map(roof_plan_area)
+            .sum();
+        assert!(
+            (flat_area - 8.0).abs() < 1e-3,
+            "exposed 2×4 strip filled flat"
+        );
+    }
+
+    /// SPIKE: outline re-fit SHRINKS the footprint — regions clip down, no
+    /// exposed fill, the ridge (apexes still inside) survives.
+    #[test]
+    fn refit_shrinks_footprint_clipping_regions() {
+        let (doc, mut ber) = ceiling_test_setup(2.4);
+        ber.storeys[0].roof_apexes = vec![
+            RoofApex {
+                point: Point2f64::new(2.0, 1.0),
+                z_m: 4.2,
+            },
+            RoofApex {
+                point: Point2f64::new(2.0, 3.0),
+                z_m: 4.2,
+            },
+        ];
+        ber.storeys[0] = resolve_storey_t(&doc, &mut ber, 0, &[], &[], &[]);
+        let cid = ber.storeys[0].roofs.regions[0].construction_id;
+        // Shrink the 4×4 to 3×4 (drop x ∈ [3, 4]); apexes at x = 2 stay inside.
+        let shrunk = ber.storeys[0].roofs.clone().refit_to_footprint(
+            &[vec![
+                Point2f64::new(0.0, 0.0),
+                Point2f64::new(3.0, 0.0),
+                Point2f64::new(3.0, 4.0),
+                Point2f64::new(0.0, 4.0),
+            ]],
+            2.4,
+            cid,
+        );
+        assert!(
+            (shrunk.regions.iter().map(roof_plan_area).sum::<f64>() - 12.0).abs() < 1e-3,
+            "clipped to the shrunk footprint"
+        );
+        assert!(
+            shrunk.regions.iter().any(|r| r
+                .polygon
+                .exterior
+                .iter()
+                .any(|v| (v.z - 4.2).abs() < 1e-9)),
+            "the ridge survives (apexes still inside)"
+        );
     }
 
     /// A structure-phase WALL split divides the crossed wall into two sub-walls
@@ -1485,7 +1809,7 @@ mod tests {
     /// floor riser face), defaulting `Unset` like every other wall.
     #[test]
     fn riser_walls_classify_ceiling_risers() {
-        let (doc, ber) = ceiling_test_setup(2.4);
+        let (doc, mut ber) = ceiling_test_setup(2.4);
         let step = doc
             .ceiling_step_region(
                 manip_plan::ParameterAxis::X,
@@ -1494,7 +1818,7 @@ mod tests {
                 0.3,
             )
             .unwrap();
-        let storey = resolve_storey(&doc, &ber, 0, &[], &[], &[step]);
+        let storey = resolve_storey_t(&doc, &mut ber, 0, &[], &[], &[step]);
         let risers = doc.riser_walls(&storey);
         assert_eq!(risers.len(), 1, "one ceiling riser on the step line");
         assert_eq!(risers[0].kind, crate::RiserKind::Ceiling);
@@ -1552,7 +1876,7 @@ mod tests {
     #[test]
     fn flush_coplanar_risers_merge_into_their_continuation_walls() {
         let (doc, mut ber, steps) = flush_riser_fixture();
-        let storey = resolve_storey(&doc, &ber, 0, &[], &[], &steps);
+        let storey = resolve_storey_t(&doc, &mut ber, 0, &[], &[], &steps);
         assert_eq!(
             storey.walls.regions.len(),
             11,
@@ -1684,7 +2008,7 @@ mod tests {
         let len = manip_plan::segment_len(a, b);
         doc.set_wall_section(vid, 0.0, len, len, WallExposure::SemiExposed);
 
-        let storey = resolve_storey(&doc, &ber, 0, &[], &[], &steps);
+        let storey = resolve_storey_t(&doc, &mut ber, 0, &[], &[], &steps);
         assert_eq!(storey.walls.regions.len(), 11);
         let south = storey
             .walls
@@ -1882,18 +2206,33 @@ mod tests {
             Point2f32::new(0.0, 4.0),
         ]);
         let storey2 = resolve_storey(&doc2, &ber, 0, &[], &[], &[]);
-        assert_eq!(storey2.roofs.regions.len(), 1);
-        let roof = &storey2.roofs.regions[0];
-        assert!(roof
-            .polygon
-            .exterior
+        // Regions-as-truth: the outline change RE-FITS the stored roof — the old
+        // 4×4 region is kept (clipped) and the newly-exposed 2×4 band fills flat
+        // at the default, so the surface now tiles the 6×4 in two flat pieces
+        // (no rebuild-from-scratch single region). All at the ceiling height.
+        assert!(
+            (storey2
+                .roofs
+                .regions
+                .iter()
+                .map(roof_plan_area)
+                .sum::<f64>()
+                - 24.0)
+                .abs()
+                < 1e-6,
+            "the roof follows the grown footprint"
+        );
+        assert!(storey2
+            .roofs
+            .regions
             .iter()
+            .flat_map(|r| r.polygon.exterior.iter())
             .any(|v| (v.x - 6.0).abs() < 1e-6 && (v.y - 4.0).abs() < 1e-6));
-        assert!(roof
-            .polygon
-            .exterior
+        assert!(storey2
+            .roofs
+            .regions
             .iter()
-            .all(|v| (v.z - 2.5).abs() < 1e-9));
+            .all(|r| r.flat_z().is_some_and(|z| (z - 2.5).abs() < 1e-9)));
     }
 
     // ── Ceiling-step derivation ─────────────────────────────────────────────
@@ -1936,12 +2275,127 @@ mod tests {
         (doc, ber)
     }
 
+    /// Build ceiling geometry the REGIONS-AS-TRUTH way — exactly what the
+    /// controller does at EDIT time. Seed the flat default via resolve, apply
+    /// the ceiling `steps` (±Δ) and roof `apexes` ONCE onto the stored roofs,
+    /// then re-resolve (re-fit + derive walls). After this `ber.storeys[idx]`
+    /// holds the truth roofs; tests assert against them and any later re-resolve
+    /// only re-fits.
+    fn build_ceiling(
+        doc: &StoreyDoc,
+        ber: &mut Ber,
+        idx: usize,
+        phase: &[PhaseRegion],
+        floor_steps: &[StepRegion],
+        ceiling_steps: &[CeilingStepRegion],
+        apexes: &[RoofApex],
+    ) {
+        ber.storeys[idx] = resolve_storey(doc, ber, idx, phase, floor_steps, &[]);
+        if !ceiling_steps.is_empty() || !apexes.is_empty() {
+            let areas: Vec<(Vec<Point2f64>, f64)> = ceiling_steps
+                .iter()
+                .map(|r| (r.polygon.iter().copied().map(to_f64).collect(), r.delta_m))
+                .collect();
+            let mut roofs = std::mem::take(&mut ber.storeys[idx].roofs);
+            if !areas.is_empty() {
+                roofs = roofs.with_z_deltas(&areas);
+            }
+            if !apexes.is_empty() {
+                roofs = roofs.with_apexes(apexes);
+            }
+            ber.storeys[idx].roofs = roofs;
+        }
+        ber.storeys[idx] = resolve_storey(doc, ber, idx, phase, floor_steps, &[]);
+    }
+
+    /// Legacy-style test shim: apply the storey's declarative ceiling EDITS
+    /// (`roof_apexes` / `ceiling_dividers` / `roof_splits`) plus the passed
+    /// `ceiling_steps` ONCE onto the freshly-seeded roofs (old composition order
+    /// — steps+dividers → apexes → face-splits), then resolve. Lets the
+    /// pre-existing roof tests keep their declarative setup while exercising the
+    /// regions-as-truth pipeline. Use for the FIRST (edit-applying) resolve on a
+    /// fresh storey; later refit-only resolves call `resolve_storey` directly.
+    fn resolve_storey_t(
+        doc: &StoreyDoc,
+        ber: &mut Ber,
+        idx: usize,
+        phase: &[PhaseRegion],
+        floor_steps: &[StepRegion],
+        ceiling_steps: &[CeilingStepRegion],
+    ) -> Storey {
+        let apexes = ber.storeys[idx].roof_apexes.clone();
+        let hints = ber.storeys[idx].roof_apex_hints.clone();
+        let dividers = ber.storeys[idx].ceiling_dividers.clone();
+        let splits = ber.storeys[idx].roof_splits.clone();
+        ber.storeys[idx] = resolve_storey(doc, ber, idx, phase, floor_steps, &[]);
+        let mut areas: Vec<(Vec<Point2f64>, f64)> = ceiling_steps
+            .iter()
+            .map(|r| (r.polygon.iter().copied().map(to_f64).collect(), r.delta_m))
+            .collect();
+        for ring in &dividers {
+            areas.push((ring.clone(), 0.0));
+        }
+        let mut roofs = std::mem::take(&mut ber.storeys[idx].roofs);
+        if !areas.is_empty() {
+            roofs = roofs.with_z_deltas(&areas);
+        }
+        if !apexes.is_empty() {
+            roofs = roofs.with_apexes_hinted(&apexes, &hints);
+        }
+        if !splits.is_empty() {
+            roofs = roofs.split_faces_coplanar(&splits);
+        }
+        ber.storeys[idx].roofs = roofs;
+        ber.storeys[idx] = resolve_storey(doc, ber, idx, phase, floor_steps, &[]);
+        ber.storeys[idx].clone()
+    }
+
+    /// REGIONS-AS-TRUTH FIXPOINT: once the roofs hold a stepped + ridged
+    /// surface, re-resolving (which re-fits to the unchanged outline) leaves
+    /// them bit-stable — the always-refit is idempotent, so there is no drift
+    /// across resolves and no reload-fixpoint contract to maintain.
+    #[test]
+    fn re_resolve_is_a_fixpoint_for_truth_roofs() {
+        let (doc, mut ber) = ceiling_test_setup(2.4);
+        let step = doc
+            .ceiling_step_region(
+                manip_plan::ParameterAxis::X,
+                2.0,
+                crate::LineSide::Greater,
+                0.3,
+            )
+            .unwrap();
+        let apexes = vec![
+            RoofApex {
+                point: Point2f64::new(3.0, 1.0),
+                z_m: 4.2,
+            },
+            RoofApex {
+                point: Point2f64::new(3.0, 3.0),
+                z_m: 4.2,
+            },
+        ];
+        build_ceiling(&doc, &mut ber, 0, &[], &[], &[step], &apexes);
+        let before = roof_surface_multiset(&ber.storeys[0]);
+        let n = ber.storeys[0].roofs.regions.len();
+        assert!(n >= 5, "stepped + ridged surface resolved");
+        // Two more pure re-resolves (no edits) — refit only.
+        ber.storeys[0] = resolve_storey(&doc, &ber, 0, &[], &[], &[]);
+        ber.storeys[0] = resolve_storey(&doc, &ber, 0, &[], &[], &[]);
+        assert_eq!(
+            ber.storeys[0].roofs.regions.len(),
+            n,
+            "region count stable across re-resolve"
+        );
+        assert_same_surface(&before, &roof_surface_multiset(&ber.storeys[0]));
+    }
+
     /// One ceiling-step region (the line at x = 1, Greater side, +0.3) splits
     /// the derived roofs into the default piece at h and the stepped piece at
     /// h + Δ — and the overhanging half-rect is clipped to the footprint.
     #[test]
     fn one_ceiling_step_splits_roofs_into_default_and_stepped() {
-        let (doc, ber) = ceiling_test_setup(2.4);
+        let (doc, mut ber) = ceiling_test_setup(2.4);
         let step = doc
             .ceiling_step_region(
                 manip_plan::ParameterAxis::X,
@@ -1950,7 +2404,7 @@ mod tests {
                 0.3,
             )
             .unwrap();
-        let storey = resolve_storey(&doc, &ber, 0, &[], &[], &[step]);
+        let storey = resolve_storey_t(&doc, &mut ber, 0, &[], &[], &[step]);
 
         assert_eq!(storey.roofs.regions.len(), 2);
         assert!((roof_area_at(&storey, 2.4) - 4.0).abs() < 1e-6, "left 1×4");
@@ -1965,60 +2419,6 @@ mod tests {
                 assert!((-1e-6..=4.0 + 1e-6).contains(&v.y));
             }
         }
-    }
-
-    /// IDEMPOTENT RELOAD: derive → reconstruct the session areas from the
-    /// derived roofs → re-derive is a FIXPOINT — the reconstruction and the
-    /// region set are unchanged by the round trip (canonicalize-at-commit
-    /// makes in-session == post-reload).
-    #[test]
-    fn ceiling_step_reconstruct_then_re_resolve_is_a_fixpoint() {
-        let (doc, mut ber) = ceiling_test_setup(2.4);
-        let step = doc
-            .ceiling_step_region(
-                manip_plan::ParameterAxis::Y,
-                3.0,
-                crate::LineSide::Less,
-                -0.2,
-            )
-            .unwrap();
-        ber.storeys[0] = resolve_storey(&doc, &ber, 0, &[], &[], &[step]);
-
-        // Reconstruct (what reload / canonicalize does) → exact pieces.
-        let rec1 = crate::ceiling_step_regions_from_roofs(&ber, 0);
-        assert_eq!(rec1.len(), 1, "one off-default piece");
-        assert!((rec1[0].delta_m - (-0.2)).abs() < 1e-9);
-
-        // Re-derive from the reconstruction → identical region set.
-        let before: Vec<(f64, f64)> = ber.storeys[0]
-            .roofs
-            .regions
-            .iter()
-            .map(|r| (r.flat_z().unwrap(), roof_plan_area(r)))
-            .collect();
-        ber.storeys[0] = resolve_storey(&doc, &ber, 0, &[], &[], &rec1);
-        let mut after: Vec<(f64, f64)> = ber.storeys[0]
-            .roofs
-            .regions
-            .iter()
-            .map(|r| (r.flat_z().unwrap(), roof_plan_area(r)))
-            .collect();
-        let mut before = before;
-        before.sort_by(|a, b| a.partial_cmp(b).unwrap());
-        after.sort_by(|a, b| a.partial_cmp(b).unwrap());
-        assert_eq!(before.len(), after.len());
-        for ((bz, ba), (az, aa)) in before.iter().zip(&after) {
-            assert!((bz - az).abs() < 1e-9 && (ba - aa).abs() < 1e-6);
-        }
-        // And the reconstruction itself is stable across the round trip.
-        let rec2 = crate::ceiling_step_regions_from_roofs(&ber, 0);
-        assert_eq!(rec2.len(), 1);
-        assert!((rec2[0].delta_m - (-0.2)).abs() < 1e-9);
-        assert!(
-            (crate::step::ring_area2(&rec2[0].polygon) - crate::step::ring_area2(&rec1[0].polygon))
-                .abs()
-                < 1e-6
-        );
     }
 
     /// Ceiling steps are deltas against the storey default: while the height
@@ -2054,7 +2454,7 @@ mod tests {
     fn two_crossing_ceiling_steps_compose_into_four_heights() {
         let h = 2.4;
         let (a, b) = (0.3, -0.2);
-        let (doc, ber) = ceiling_test_setup(h);
+        let (doc, mut ber) = ceiling_test_setup(h);
         let right = doc
             .ceiling_step_region(
                 manip_plan::ParameterAxis::X,
@@ -2071,7 +2471,7 @@ mod tests {
                 b,
             )
             .unwrap();
-        let storey = resolve_storey(&doc, &ber, 0, &[], &[], &[right, top]);
+        let storey = resolve_storey_t(&doc, &mut ber, 0, &[], &[], &[right, top]);
 
         assert_eq!(storey.roofs.regions.len(), 4, "four quadrants");
         for z in [h, h + a, h + b, h + a + b] {
@@ -2082,47 +2482,11 @@ mod tests {
         }
     }
 
-    /// An outline change re-derives the roofs to the new footprint AND
-    /// re-clips the session step areas against it: the grown band comes back
-    /// at the default height (un-stepped), the step keeps its own extent.
-    #[test]
-    fn outline_change_re_derives_and_re_clips_ceiling_steps() {
-        let (doc1, mut ber) = ceiling_test_setup(2.4);
-        let step = doc1
-            .ceiling_step_region(
-                manip_plan::ParameterAxis::X,
-                2.0,
-                crate::LineSide::Less,
-                0.3,
-            )
-            .unwrap();
-        ber.storeys[0] = resolve_storey(&doc1, &ber, 0, &[], &[], &[step]);
-        // Canonicalized session list — the exact stepped piece (x ∈ [0, 2]).
-        let steps = crate::ceiling_step_regions_from_roofs(&ber, 0);
-        assert_eq!(steps.len(), 1);
-
-        // Outline grows to 8×4 → re-resolve with the SAME session list.
-        let doc2 = square_doc(&[
-            Point2f32::new(0.0, 0.0),
-            Point2f32::new(8.0, 0.0),
-            Point2f32::new(8.0, 4.0),
-            Point2f32::new(0.0, 4.0),
-        ]);
-        let storey = resolve_storey(&doc2, &ber, 0, &[], &[], &steps);
-        // Stepped piece keeps its extent (2×4 = 8 m²); everything else —
-        // including the grown band — is at the default.
-        assert!((roof_area_at(&storey, 2.7) - 8.0).abs() < 1e-6, "step kept");
-        assert!(
-            (roof_area_at(&storey, 2.4) - 24.0).abs() < 1e-6,
-            "remainder + grown band at the default"
-        );
-    }
-
     /// Stacked deltas that drive a piece's ceiling to z ≤ 0.1 m are ACCEPTED
     /// (warn-logged, not rejected) — single-delta validation happens at assign.
     #[test]
     fn composed_ceiling_z_at_or_below_floor_is_accepted() {
-        let (doc, ber) = ceiling_test_setup(2.4);
+        let (doc, mut ber) = ceiling_test_setup(2.4);
         let step = doc
             .ceiling_step_region(
                 manip_plan::ParameterAxis::X,
@@ -2131,7 +2495,7 @@ mod tests {
                 -2.4,
             )
             .unwrap();
-        let storey = resolve_storey(&doc, &ber, 0, &[], &[], &[step]);
+        let storey = resolve_storey_t(&doc, &mut ber, 0, &[], &[], &[step]);
         assert!(
             (roof_area_at(&storey, 0.0) - 8.0).abs() < 1e-6,
             "the z = 0 piece survives (warned, not dropped)"
@@ -2172,204 +2536,6 @@ mod tests {
                  ({aa:.6}, {al:.3}, {ah:.3})"
             );
         }
-    }
-
-    /// THE APEX-OVER-STEP RELOAD FIXPOINT (the load-bearing invariant):
-    /// resolve with a step + an apex over the stepped piece, reconstruct the
-    /// session steps group-aware (the fan's group merges back into ONE step
-    /// area at the step delta), re-resolve from the reconstruction → the
-    /// identical surface.
-    #[test]
-    fn apex_over_step_reload_fixpoint() {
-        let (doc, mut ber) = ceiling_test_setup(2.4);
-        // Right half (x ≥ 2) stepped to 2.7, apex at (3, 2) fanning it to 4.2.
-        let step = doc
-            .ceiling_step_region(
-                manip_plan::ParameterAxis::X,
-                2.0,
-                crate::LineSide::Greater,
-                0.3,
-            )
-            .unwrap();
-        ber.storeys[0].roof_apexes = vec![RoofApex {
-            point: Point2f64::new(3.0, 2.0),
-            z_m: 4.2,
-        }];
-        ber.storeys[0] = resolve_storey(&doc, &ber, 0, &[], &[], &[step]);
-
-        // Derived: the flat left half + one fan triangle per stepped-piece
-        // edge, bases at 2.7, apex at 4.2.
-        assert_eq!(ber.storeys[0].roofs.regions.len(), 5);
-        let before = roof_surface_multiset(&ber.storeys[0]);
-        assert!((before.iter().map(|r| r.0).sum::<f64>() - 16.0).abs() < 1e-4);
-
-        // GROUP-AWARE reconstruction: the fan's group merges back into ONE
-        // step area (the whole 2×4 stepped half) at delta 0.3.
-        let rec1 = crate::ceiling_step_regions_from_roofs(&ber, 0);
-        assert_eq!(rec1.len(), 1, "one merged area, not the fan's triangles");
-        assert!((rec1[0].delta_m - 0.3).abs() < 1e-9);
-        assert!(
-            (crate::step::ring_area2(&rec1[0].polygon) / 2.0 - 8.0).abs() < 1e-4,
-            "the merged ring is the 2×4 half"
-        );
-
-        // Re-resolve from the reconstruction → identical surface (the apex
-        // re-fans its own triangles to themselves — sliver-drop identity).
-        ber.storeys[0] = resolve_storey(&doc, &ber, 0, &[], &[], &rec1);
-        let after = roof_surface_multiset(&ber.storeys[0]);
-        assert_same_surface(&before, &after);
-
-        // And the reconstruction itself is stable across the round trip.
-        let rec2 = crate::ceiling_step_regions_from_roofs(&ber, 0);
-        assert_eq!(rec2.len(), rec1.len());
-        assert!(rec2.iter().all(|r| (r.delta_m - 0.3).abs() < 1e-9));
-    }
-
-    /// A fan in the DEFAULT (unstepped) region reconstructs to NO step areas
-    /// (its base equals the default) and re-resolves to the same surface.
-    #[test]
-    fn fan_in_default_region_reload_fixpoint() {
-        let (doc, mut ber) = ceiling_test_setup(2.4);
-        ber.storeys[0].roof_apexes = vec![RoofApex {
-            point: Point2f64::new(1.0, 1.0),
-            z_m: 4.0,
-        }];
-        ber.storeys[0] = resolve_storey(&doc, &ber, 0, &[], &[], &[]);
-        assert_eq!(ber.storeys[0].roofs.regions.len(), 4, "one fan per edge");
-        let before = roof_surface_multiset(&ber.storeys[0]);
-
-        let rec = crate::ceiling_step_regions_from_roofs(&ber, 0);
-        assert!(rec.is_empty(), "fan over the default base is not a step");
-
-        ber.storeys[0] = resolve_storey(&doc, &ber, 0, &[], &[], &rec);
-        let after = roof_surface_multiset(&ber.storeys[0]);
-        assert_same_surface(&before, &after);
-    }
-
-    /// Total plan area per (min z, max z) signature, sorted — the "z → area
-    /// multiset" view of the roof surface. Coarser than the per-region
-    /// multiset: robust to how the surface is tiled into regions, which is
-    /// exactly what the FIRST resolve→reconstruct→re-resolve round may
-    /// change (the union can canonicalize ring vertices).
-    fn roof_z_area_multiset(storey: &Storey) -> Vec<(f64, f64, f64)> {
-        let mut agg: Vec<(f64, f64, f64)> = Vec::new();
-        for (area, lo, hi) in roof_surface_multiset(storey) {
-            match agg
-                .iter_mut()
-                .find(|(l, h, _)| (l - lo).abs() < 1e-6 && (h - hi).abs() < 1e-6)
-            {
-                Some((_, _, a)) => *a += area,
-                None => agg.push((lo, hi, area)),
-            }
-        }
-        agg.sort_by(|a, b| a.partial_cmp(b).unwrap());
-        agg
-    }
-
-    fn assert_same_z_areas(before: &[(f64, f64, f64)], after: &[(f64, f64, f64)]) {
-        assert_eq!(before.len(), after.len(), "same set of z signatures");
-        for ((bl, bh, ba), (al, ah, aa)) in before.iter().zip(after) {
-            assert!(
-                (bl - al).abs() < 1e-6 && (bh - ah).abs() < 1e-6 && (ba - aa).abs() < 1e-4,
-                "z→area changed: before ({bl:.3}, {bh:.3}, {ba:.6}) vs after \
-                 ({al:.3}, {ah:.3}, {aa:.6})"
-            );
-        }
-    }
-
-    /// THE END-TO-END RIDGE FIXPOINT: a step + a RIDGE (two apexes) over the
-    /// stepped area → resolve → reconstruct (ONE merged step area — the
-    /// fragmentation wart is dead) → re-resolve → geometrically equal roofs
-    /// (z → area multiset) → reconstruct + re-resolve once more → still
-    /// equal (settled after the first canonicalize).
-    #[test]
-    fn ridge_over_step_reload_fixpoint() {
-        let (doc, mut ber) = ceiling_test_setup(2.4);
-        // Right half (x ≥ 2) stepped to 2.7; a ridge along x = 3 over it.
-        let step = doc
-            .ceiling_step_region(
-                manip_plan::ParameterAxis::X,
-                2.0,
-                crate::LineSide::Greater,
-                0.3,
-            )
-            .unwrap();
-        ber.add_roof_apex(
-            0,
-            RoofApex {
-                point: Point2f64::new(3.0, 1.0),
-                z_m: 4.2,
-            },
-        );
-        ber.add_roof_apex(
-            0,
-            RoofApex {
-                point: Point2f64::new(3.0, 3.0),
-                z_m: 4.2,
-            },
-        );
-        ber.storeys[0] = resolve_storey(&doc, &ber, 0, &[], &[], &[step]);
-        // The flat left half + the ridge's hub/transition triangles, with the
-        // ridge tops at 4.2 and the eaves at the STEPPED base 2.7.
-        let before = roof_z_area_multiset(&ber.storeys[0]);
-        assert!(
-            (before.iter().map(|r| r.2).sum::<f64>() - 16.0).abs() < 1e-4,
-            "the surface tiles the footprint"
-        );
-        assert!(
-            ber.storeys[0].roofs.regions.iter().any(|r| r
-                .polygon
-                .exterior
-                .iter()
-                .any(|v| (v.z - 4.2).abs() < 1e-9)),
-            "the ridge rises"
-        );
-        // The coplanar merge gives the classic shape: the stepped half comes
-        // out as 2 planar trapezoids (each holding BOTH ridge ends) + 2 end
-        // triangles, plus the flat left half — 5 regions, not 9 triangles.
-        assert_eq!(ber.storeys[0].roofs.regions.len(), 5);
-        let sloped: Vec<_> = ber.storeys[0]
-            .roofs
-            .regions
-            .iter()
-            .filter(|r| r.flat_z().is_none())
-            .collect();
-        let mut counts: Vec<usize> = sloped.iter().map(|r| r.polygon.exterior.len()).collect();
-        counts.sort();
-        assert_eq!(counts, vec![3, 3, 4, 4], "2 trapezoids + 2 end triangles");
-        for r in sloped.iter().filter(|r| r.polygon.exterior.len() == 4) {
-            for ay in [1.0, 3.0] {
-                assert!(
-                    r.polygon.exterior.iter().any(|v| (v.x - 3.0).abs() < 1e-9
-                        && (v.y - ay).abs() < 1e-9
-                        && (v.z - 4.2).abs() < 1e-9),
-                    "trapezoid holds the ridge end at y = {ay}"
-                );
-            }
-        }
-
-        // Reconstruct: ONE merged step area (the whole 2×4 stepped half).
-        let rec1 = crate::ceiling_step_regions_from_roofs(&ber, 0);
-        assert_eq!(rec1.len(), 1, "one merged area under the ridge");
-        assert!((rec1[0].delta_m - 0.3).abs() < 1e-9);
-        assert!((crate::step::ring_area2(&rec1[0].polygon) / 2.0 - 8.0).abs() < 1e-4);
-
-        // Re-resolve from the reconstruction → geometrically equal roofs.
-        ber.storeys[0] = resolve_storey(&doc, &ber, 0, &[], &[], &rec1);
-        let after = roof_z_area_multiset(&ber.storeys[0]);
-        assert_same_z_areas(&before, &after);
-        // Round 1 is the SETTLED state (the f32 quantization has happened):
-        // from here the spec's claim is the STRONG per-region invariant, not
-        // just the z→area aggregate — a tiling oscillation must fail this.
-        let settled = roof_surface_multiset(&ber.storeys[0]);
-
-        // Once more: reconstruct again, re-resolve again → still equal.
-        let rec2 = crate::ceiling_step_regions_from_roofs(&ber, 0);
-        assert_eq!(rec2.len(), 1);
-        assert!((rec2[0].delta_m - 0.3).abs() < 1e-9);
-        ber.storeys[0] = resolve_storey(&doc, &ber, 0, &[], &[], &rec2);
-        assert_same_z_areas(&before, &roof_z_area_multiset(&ber.storeys[0]));
-        assert_same_surface(&settled, &roof_surface_multiset(&ber.storeys[0]));
     }
 
     /// While the ceiling height is unset there is no default ceiling to fan:
@@ -2475,7 +2641,7 @@ mod tests {
                 0.3,
             )
             .unwrap();
-        let storey2 = resolve_storey(&doc, &ber, 0, &[], &[], &[step.clone()]);
+        let storey2 = resolve_storey_t(&doc, &mut ber, 0, &[], &[], &[step.clone()]);
 
         // 4 perimeter regions + the step's ONE interior riser face.
         assert_eq!(storey2.walls.regions.len(), 5);
@@ -2580,7 +2746,7 @@ mod tests {
                 },
             );
         }
-        let storey = resolve_storey(&doc, &ber, 0, &[], &[], &[]);
+        let storey = resolve_storey_t(&doc, &mut ber, 0, &[], &[], &[]);
         assert_eq!(storey.walls.regions.len(), 4);
         let wall = storey
             .walls
@@ -2679,7 +2845,7 @@ mod tests {
         ] {
             ber.add_roof_apex(0, apex);
         }
-        let storey = resolve_storey(&doc, &ber, 0, &[], &[], &[step]);
+        let storey = resolve_storey_t(&doc, &mut ber, 0, &[], &[], &[step]);
         // One region per perimeter edge + the raised jut's interior riser
         // face along the step line x = 4 (the ridge's own seams are
         // continuous and emit nothing).
@@ -2810,238 +2976,6 @@ mod tests {
         );
     }
 
-    /// The SAME scenario through the APP'S ACTUAL LOOP: non-integer (real
-    /// sketch) coordinates, interior ridge apexes (the two-apex flow
-    /// validates them strictly inside the stepped region), and the shell's
-    /// canonicalize step after every assign (resolve → reconstruct the
-    /// session ceiling-step list from the derived roofs → re-resolve). The
-    /// jut's perimeter walls must still top out at the RAISED eaves.
-    #[test]
-    fn walls_join_the_raised_ridged_roof_through_the_canonicalize_loop() {
-        let mut doc = square_doc(&[
-            Point2f32::new(0.13, 0.27),
-            Point2f32::new(6.41, 0.27),
-            Point2f32::new(6.41, 2.33),
-            Point2f32::new(4.22, 2.33),
-            Point2f32::new(4.22, 4.51),
-            Point2f32::new(0.13, 4.51),
-        ]);
-        for (vid, a, b) in doc.outline.floor_plan.perimeter_walls() {
-            let len = manip_plan::segment_len(a, b);
-            doc.set_wall_section(vid, 0.0, len, len, WallExposure::Exposed);
-        }
-        let mut ber = Ber::default();
-        ensure_storey_constructions(&mut ber, 0, &[]);
-        ber.set_default_ceiling_height(Some(0), 2.43);
-
-        // Step assign: raise the jut (x ≥ 4.22, snapped to the inner wall)
-        // by 1 m, then canonicalize (materialize → reconstruct → re-resolve).
-        let step = doc
-            .ceiling_step_region(
-                manip_plan::ParameterAxis::X,
-                4.22,
-                crate::LineSide::Greater,
-                1.0,
-            )
-            .unwrap();
-        ber.storeys[0] = resolve_storey(&doc, &ber, 0, &[], &[], &[step]);
-        let steps = crate::ceiling_step_regions_from_roofs(&ber, 0);
-        ber.storeys[0] = resolve_storey(&doc, &ber, 0, &[], &[], &steps);
-
-        // Ridge assign: two apexes strictly inside the raised jut piece
-        // (validate_roof_ridge guarantees this in the app), then the
-        // canonicalize loop again.
-        let raised_eaves = 2.43 + 1.0;
-        for apex in [
-            RoofApex {
-                point: Point2f64::new(4.8, 1.3),
-                z_m: 4.4,
-            },
-            RoofApex {
-                point: Point2f64::new(5.9, 1.3),
-                z_m: 4.4,
-            },
-        ] {
-            ber.add_roof_apex(0, apex);
-        }
-        ber.storeys[0] = resolve_storey(&doc, &ber, 0, &[], &[], &steps);
-        let steps2 = crate::ceiling_step_regions_from_roofs(&ber, 0);
-        assert_eq!(steps2.len(), 1, "one merged step area under the ridge");
-        ber.storeys[0] = resolve_storey(&doc, &ber, 0, &[], &[], &steps2);
-        let storey = &ber.storeys[0];
-
-        let wall_with_base = |a: Point2f64, b: Point2f64| {
-            storey
-                .walls
-                .regions
-                .iter()
-                .find(|r| {
-                    let e = &r.polygon.exterior;
-                    let close = |p: &domain::points::Point3f64, q: Point2f64| {
-                        (p.x - q.x).abs() < 1e-3 && (p.y - q.y).abs() < 1e-3
-                    };
-                    close(&e[0], a) && close(&e[1], b) || close(&e[0], b) && close(&e[1], a)
-                })
-                .unwrap_or_else(|| panic!("no wall with base ({a:?}, {b:?})"))
-        };
-        let tops = |r: &ber_model::ber::structural::WallRegion| -> Vec<domain::points::Point3f64> {
-            r.polygon
-                .exterior
-                .iter()
-                .filter(|v| v.z > 1e-9)
-                .copied()
-                .collect()
-        };
-
-        // The jut's own perimeter walls (east + jut-north): hip ends are
-        // strictly inside, so the whole top is the RAISED eaves — flat 3.43.
-        for (a, b, name) in [
-            (
-                Point2f64::new(6.41, 0.27),
-                Point2f64::new(6.41, 2.33),
-                "east",
-            ),
-            (
-                Point2f64::new(6.41, 2.33),
-                Point2f64::new(4.22, 2.33),
-                "jut north",
-            ),
-        ] {
-            let w = wall_with_base(a, b);
-            let ts = tops(w);
-            assert!(
-                ts.iter().all(|v| (v.z - raised_eaves).abs() < 1e-3),
-                "{name} wall must top out at the raised eaves {raised_eaves}: {ts:?}"
-            );
-        }
-
-        // The long south wall: default height over the main span, raised
-        // eaves over the jut span, one vertical jump at the step.
-        let south = wall_with_base(Point2f64::new(0.13, 0.27), Point2f64::new(6.41, 0.27));
-        let s_tops = tops(south);
-        let max_z_where = |pred: &dyn Fn(&domain::points::Point3f64) -> bool| {
-            s_tops
-                .iter()
-                .filter(|v| pred(v))
-                .map(|v| v.z)
-                .fold(f64::NEG_INFINITY, f64::max)
-        };
-        assert!(
-            (max_z_where(&|v| v.x < 4.0) - 2.43).abs() < 1e-3,
-            "south wall main span at the default height: {s_tops:?}"
-        );
-        assert!(
-            (max_z_where(&|v| v.x > 4.5) - raised_eaves).abs() < 1e-3,
-            "south wall jut span at the RAISED eaves: {s_tops:?}"
-        );
-    }
-
-    /// THE REGRESSION GUARD for the raised+ridged-jut wall bug: 200
-    /// pseudo-random L-footprints (messy real-sketch f32 coordinates)
-    /// through the full step → canonicalize → ridge → canonicalize loop.
-    /// Pre-fix, ~20% of trials left the jut's perimeter walls flat at the
-    /// DEFAULT height: the boolean-op output (i_overlay grid snapping, plus
-    /// the f32 round-trip of canonicalization) displaces the stepped roof
-    /// piece's boundary a few 1e-7 m off the wall line, the exact
-    /// boundary-inclusive containment pick in `covering_roof_plane` then
-    /// misses, and `fallback_top_z` silently flattens the wall. Fixed by the
-    /// metric-tolerance sampling in ber_model (`PROFILE_EPS_M`).
-    #[test]
-    fn stress_walls_join_raised_ridged_roof() {
-        let mut seed: u64 = 0x9E3779B97F4A7C15;
-        let mut next = move || {
-            seed ^= seed << 13;
-            seed ^= seed >> 7;
-            seed ^= seed << 17;
-            (seed >> 11) as f64 / (1u64 << 53) as f64
-        };
-        let mut failures = 0;
-        for trial in 0..200 {
-            // Messy f32 sketch-like coords.
-            let x0 = (0.0 + next() * 0.5) as f32;
-            let y0 = (0.0 + next() * 0.5) as f32;
-            let xm = x0 + (3.5 + next()) as f32; // inner corner x
-            let x1 = xm + (1.5 + next()) as f32; // east extent
-            let y1 = y0 + (1.5 + next()) as f32; // jut north
-            let y2 = y1 + (1.5 + next()) as f32; // main north
-            let doc = {
-                let mut doc = square_doc(&[
-                    Point2f32::new(x0, y0),
-                    Point2f32::new(x1, y0),
-                    Point2f32::new(x1, y1),
-                    Point2f32::new(xm, y1),
-                    Point2f32::new(xm, y2),
-                    Point2f32::new(x0, y2),
-                ]);
-                for (vid, a, b) in doc.outline.floor_plan.perimeter_walls() {
-                    let len = manip_plan::segment_len(a, b);
-                    doc.set_wall_section(vid, 0.0, len, len, WallExposure::Exposed);
-                }
-                doc
-            };
-            let h = 2.4;
-            let mut ber = Ber::default();
-            ensure_storey_constructions(&mut ber, 0, &[]);
-            ber.set_default_ceiling_height(Some(0), h);
-            let step = doc
-                .ceiling_step_region(
-                    manip_plan::ParameterAxis::X,
-                    xm,
-                    crate::LineSide::Greater,
-                    1.0,
-                )
-                .unwrap();
-            ber.storeys[0] = resolve_storey(&doc, &ber, 0, &[], &[], &[step]);
-            let steps = crate::ceiling_step_regions_from_roofs(&ber, 0);
-            ber.storeys[0] = resolve_storey(&doc, &ber, 0, &[], &[], &steps);
-            // Ridge strictly inside the jut, along its mid-y.
-            let my = (y0 as f64 + y1 as f64) / 2.0;
-            for apex in [
-                RoofApex {
-                    point: Point2f64::new(xm as f64 + 0.4, my),
-                    z_m: h + 2.0,
-                },
-                RoofApex {
-                    point: Point2f64::new(x1 as f64 - 0.4, my),
-                    z_m: h + 2.0,
-                },
-            ] {
-                ber.add_roof_apex(0, apex);
-            }
-            ber.storeys[0] = resolve_storey(&doc, &ber, 0, &[], &[], &steps);
-            let steps2 = crate::ceiling_step_regions_from_roofs(&ber, 0);
-            ber.storeys[0] = resolve_storey(&doc, &ber, 0, &[], &[], &steps2);
-            let storey = &ber.storeys[0];
-            let raised = h + 1.0;
-            // Jut perimeter walls: east (x1,y0)-(x1,y1) and north (x1,y1)-(xm,y1).
-            for r in &storey.walls.regions {
-                let e = &r.polygon.exterior;
-                let (a, b) = (e[0], e[1]);
-                let on_jut = (a.x - x1 as f64).abs() < 1e-6 && (b.x - x1 as f64).abs() < 1e-6
-                    || (a.y - y1 as f64).abs() < 1e-6
-                        && (b.y - y1 as f64).abs() < 1e-6
-                        && a.x > xm as f64 - 1e-6
-                        && b.x > xm as f64 - 1e-6;
-                if !on_jut {
-                    continue;
-                }
-                let bad: Vec<_> = e
-                    .iter()
-                    .filter(|v| v.z > 1e-9 && (v.z - raised).abs() > 1e-3)
-                    .collect();
-                if !bad.is_empty() {
-                    failures += 1;
-                    eprintln!(
-                        "trial {trial}: wall base ({:.4},{:.4})-({:.4},{:.4}) tops wrong: {bad:?} \
-                         [xm={xm}, x1={x1}, y0={y0}, y1={y1}]",
-                        a.x, a.y, b.x, b.y
-                    );
-                }
-            }
-        }
-        assert_eq!(failures, 0, "{failures} failing trials");
-    }
-
     /// Exposure recovery round-trips SLOPED-TOP walls: the base edge stays at
     /// `exterior[0..2]` whatever the top does, so `sections_from_wall_regions`
     /// reads back exactly the painted sections — and the Unset regions (the
@@ -3076,7 +3010,7 @@ mod tests {
                 0.3,
             )
             .unwrap();
-        let storey = resolve_storey(&doc, &ber, 0, &[], &[], &[step]);
+        let storey = resolve_storey_t(&doc, &mut ber, 0, &[], &[], &[step]);
 
         // One region per coverage range: gap/Semi/gap on the painted wall +
         // one whole-wall Unset region for each of the three unmarked walls +

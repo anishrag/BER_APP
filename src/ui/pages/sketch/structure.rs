@@ -7,10 +7,14 @@
 //! attributes" button opens a per-construction GROUP editor over the selection:
 //! the selection is partitioned by shared construction, and each group's
 //! `(type, build-up)` is editable separately (one group active at a time). The
-//! phase axis stays derived from the floor zones (shown read-only). Walls only
-//! for now (construction has a parametric home only for walls).
+//! phase axis stays derived from the floor zones (shown read-only). Works for
+//! every kind — walls key construction by parametric `SurfaceRef`, floors and
+//! ceilings/roofs by region centroid.
 
-use ber_model::ber::structural::{ConstructionMakeup, SurfaceCounts, WallConstructionType};
+use ber_model::ber::structural::{
+    CeilingConstructionType, ConstructionMakeup, ConstructionType, FloorConstructionType,
+    SurfaceCounts, WallConstructionType,
+};
 
 use super::SketchEvent;
 use crate::controller::app_controller::{SelectMode, StructureEdit, SurfaceKind};
@@ -38,6 +42,31 @@ const WALL_TYPES: &[(WallConstructionType, &str)] = &[
     (WallConstructionType::ConcreteHollowBlocks, "Hollow block"),
     (WallConstructionType::TimberConstruction, "Timber"),
     (WallConstructionType::ICF, "ICF"),
+];
+
+/// Floor construction TYPE options (the group editor).
+const FLOOR_TYPES: &[(FloorConstructionType, &str)] = &[
+    (FloorConstructionType::SolidFloor, "Solid"),
+    (FloorConstructionType::SuspendedFloor, "Suspended"),
+    (FloorConstructionType::ExposedSemiExposedFloor, "Exposed"),
+    (FloorConstructionType::NonHeatLossFloor, "Non-heat-loss"),
+    (FloorConstructionType::Other, "Other"),
+];
+
+/// Ceiling/roof construction TYPE options (the group editor).
+const CEILING_TYPES: &[(CeilingConstructionType, &str)] = &[
+    (CeilingConstructionType::FlatRoof, "Flat"),
+    (CeilingConstructionType::SlopedInsOnRafter, "Ins. on rafter"),
+    (
+        CeilingConstructionType::SlopedInsOnCeiling,
+        "Ins. on ceiling",
+    ),
+    (
+        CeilingConstructionType::SlopedInsOnCeilingAndRafter,
+        "Ins. both",
+    ),
+    (CeilingConstructionType::NonHeatLossCeiling, "Non-heat-loss"),
+    (CeilingConstructionType::Other, "Other"),
 ];
 
 /// Render the Structure tool area: the global MODE row + the global SELECT row +
@@ -95,14 +124,11 @@ pub fn structure_panel<F: FnMut(UiEvent)>(
     ui.add_space(4.0);
     ui.separator();
     match edit {
-        // No session: offer to open one (walls only for now).
+        // No session: offer to open one (any kind — walls / floors / roofs).
         None => {
             if ui
-                .add_enabled(
-                    enabled && kind == SurfaceKind::Walls,
-                    egui::Button::new("Edit attributes"),
-                )
-                .on_hover_text("Set construction for the selected walls")
+                .add_enabled(enabled, egui::Button::new("Edit attributes"))
+                .on_hover_text("Set construction for the selected surfaces")
                 .clicked()
             {
                 on_event(UiEvent::Sketch(SketchEvent::BeginStructureEdit));
@@ -113,7 +139,8 @@ pub fn structure_panel<F: FnMut(UiEvent)>(
 }
 
 /// The per-group attribute editor: pick a group (one active), then set that
-/// group's wall type + build-up. The phase is the group's derived value (shown
+/// group's construction type + build-up (the type row is kind-appropriate —
+/// wall / floor / roof). The phase is the group's derived value (shown
 /// read-only). Mixed selections appear as several groups (e.g. an older + a
 /// newer phase), each editable separately.
 fn edit_session<F: FnMut(UiEvent)>(
@@ -153,17 +180,33 @@ fn edit_session<F: FnMut(UiEvent)>(
                 .size(11.0)
                 .weak(),
         );
-        ui.label(egui::RichText::new("Wall type").size(11.0).weak());
+        ui.label(egui::RichText::new(type_label(e.kind)).size(11.0).weak());
         ui.horizontal_wrapped(|ui| {
-            for (t, label) in WALL_TYPES {
-                let sel = g.ty == *t;
+            // Each kind offers its own type buttons; the chosen type is tagged
+            // with `ConstructionType` so the event/controller stay kind-agnostic.
+            let types: Vec<(ConstructionType, &str)> = match e.kind {
+                SurfaceKind::Walls => WALL_TYPES
+                    .iter()
+                    .map(|(t, l)| (ConstructionType::Wall(*t), *l))
+                    .collect(),
+                SurfaceKind::Floors => FLOOR_TYPES
+                    .iter()
+                    .map(|(t, l)| (ConstructionType::Floor(*t), *l))
+                    .collect(),
+                SurfaceKind::Roofs => CEILING_TYPES
+                    .iter()
+                    .map(|(t, l)| (ConstructionType::Ceiling(*t), *l))
+                    .collect(),
+            };
+            for (ty, label) in types {
+                let sel = g.ty == ty;
                 if ui
-                    .add_enabled(enabled, egui::Button::selectable(sel, *label))
+                    .add_enabled(enabled, egui::Button::selectable(sel, label))
                     .clicked()
                 {
                     on_event(UiEvent::Sketch(SketchEvent::SetStructureGroupAttrs {
                         group: e.active,
-                        ty: *t,
+                        ty,
                         makeup: g.makeup.clone(),
                     }));
                 }
@@ -192,6 +235,15 @@ fn edit_session<F: FnMut(UiEvent)>(
     ui.add_space(2.0);
     if ui.add_enabled(enabled, egui::Button::new("Done")).clicked() {
         on_event(UiEvent::Sketch(SketchEvent::EndStructureEdit));
+    }
+}
+
+/// The type-row heading for the active mode.
+fn type_label(kind: SurfaceKind) -> &'static str {
+    match kind {
+        SurfaceKind::Walls => "Wall type",
+        SurfaceKind::Floors => "Floor type",
+        SurfaceKind::Roofs => "Roof type",
     }
 }
 

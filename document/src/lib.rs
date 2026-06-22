@@ -35,8 +35,9 @@ pub use debug::debug_dump_storey;
 /// Derive full per-wall exposure coverage — the shell's `commit_to_ber` uses it.
 pub use exposure::{range_at, riser_key, wall_coverage, RiserKey, RiserKind, RiserWall};
 pub use phase::{
-    inherited_phase_regions, phase_regions_from_floors, stamp_wall_constructions,
-    stamp_wall_phases, PhaseRegion,
+    centroid_key, inherited_phase_regions, phase_regions_from_floors, stamp_ceiling_constructions,
+    stamp_floor_constructions, stamp_wall_constructions, stamp_wall_phases, CentroidKey,
+    PhaseRegion,
 };
 pub use position::{PositionOption, PositionPrompt, PositionPromptKind};
 pub use resolve::{ensure_storey_constructions, opening_wall_anchor, resolve_storey};
@@ -48,7 +49,10 @@ pub use roof_point::{
 };
 pub use step::{inherited_step_regions, step_regions_from_floors, StepRegion};
 
-use ber_model::ber::structural::{ConstructionMakeup, WallConstructionType, WallExposure};
+use ber_model::ber::structural::{
+    CeilingConstructionType, ConstructionMakeup, FloorConstructionType, WallConstructionType,
+    WallExposure,
+};
 use domain::points::{to_f64, Point2f32, Point2f64};
 use manip_plan::{
     Error, FloorPlan, ParameterAxis, ParameterId, SubareaOutcome, SubareaTuning, SurfaceRef,
@@ -283,6 +287,28 @@ pub struct StoreyDoc {
     /// it survives the wall re-derivation without the amend-match.
     #[serde(default)]
     pub wall_constructions: HashMap<SurfaceRef, (WallConstructionType, ConstructionMakeup)>,
+
+    /// Assigned FLOOR construction (type + make-up) per floor region, keyed by
+    /// the region's plan [`CentroidKey`] (floors have no perimeter `SurfaceRef`,
+    /// so their quantized centroid is the durable identity — like a riser's base
+    /// edge in [`riser_exposure`](Self::riser_exposure)). Composed with the
+    /// derived phase by
+    /// [`stamp_floor_constructions`](crate::stamp_floor_constructions) so a
+    /// user-set floor construction survives the re-derivation. NB the centroid
+    /// is stable while the region keeps its shape, but a later re-PARTITION that
+    /// SUBDIVIDES the region (a new phase zone / step / split) yields sub-regions
+    /// with different centroids that fall back to the derived construction — the
+    /// same "re-split loses the override" property the riser key has, weaker than
+    /// the wall `SurfaceRef`.
+    #[serde(default)]
+    pub floor_constructions: HashMap<CentroidKey, (FloorConstructionType, ConstructionMakeup)>,
+
+    /// Assigned CEILING/ROOF construction (type + make-up) per ceiling region,
+    /// keyed by the region's plan [`CentroidKey`]. Mirror of
+    /// `floor_constructions`; composed by
+    /// [`stamp_ceiling_constructions`](crate::stamp_ceiling_constructions).
+    #[serde(default)]
+    pub ceiling_constructions: HashMap<CentroidKey, (CeilingConstructionType, ConstructionMakeup)>,
 }
 
 /// Of the available `pieces`, the one to carve the `stroke` against. Scored by
