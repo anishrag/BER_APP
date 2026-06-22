@@ -290,16 +290,20 @@ impl AppController {
         }
     }
 
-    /// Seed the durable FLOOR + CEILING/ROOF construction stores from the
+    /// Seed the durable WALL + FLOOR + CEILING/ROOF construction stores from the
     /// persisted resolved regions — legacy records (and any whose snapshot
-    /// predates the stores) carry an assigned area construction only on its
-    /// resolved region, which the first fresh-id re-resolve would otherwise drop
-    /// back to the derived default. Idempotent: fills only gaps, keyed by the
-    /// region's quantized centroid; skips regions still at the default
-    /// (type + make-up), which carry no assignment to preserve.
-    fn seed_construction_stores_from_record(&mut self) {
+    /// predates the stores) carry an assigned construction only on its resolved
+    /// region, which the first fresh-id re-resolve would otherwise drop back to
+    /// the derived default. Idempotent: fills only gaps; floors/ceilings keyed by
+    /// the region's quantized centroid, walls by their parametric `SurfaceRef`
+    /// (base-edge midpoint → outline vertex, the same key
+    /// `stamp_wall_constructions` reads). Skips regions still at the default
+    /// (type + make-up), which carry no assignment to preserve, and walls with no
+    /// perimeter `SurfaceRef` (risers — their construction isn't `SurfaceRef`-keyed).
+    pub(super) fn seed_construction_stores_from_record(&mut self) {
         use ber_model::ber::structural::{
             CeilingConstructionType, ConstructionMakeup, FloorConstructionType,
+            WallConstructionType,
         };
         let n = self
             .current_record
@@ -308,7 +312,12 @@ impl AppController {
             .unwrap_or(0)
             .min(self.document.storeys.len());
         for idx in 0..n {
-            let (floors, ceilings): (
+            #[allow(clippy::type_complexity)]
+            let (walls, floors, ceilings): (
+                Vec<(
+                    manip_plan::SurfaceRef,
+                    (WallConstructionType, ConstructionMakeup),
+                )>,
                 Vec<(
                     document::CentroidKey,
                     (FloorConstructionType, ConstructionMakeup),
@@ -324,6 +333,31 @@ impl AppController {
                 let Some(storey) = record.data.storeys.get(idx) else {
                     continue;
                 };
+                // Map each resolved wall's base midpoint back to its parametric
+                // SurfaceRef (perimeter walls only — risers return None).
+                let plan = &self.document.storeys[idx].outline.floor_plan;
+                let walls = storey
+                    .walls
+                    .regions
+                    .iter()
+                    .filter_map(|r| {
+                        let c = record.data.wall_construction(r.construction_id)?;
+                        let ty = c.construction_type;
+                        let mk = c.base.construction_makeup.clone();
+                        if ty == WallConstructionType::default()
+                            && mk == ConstructionMakeup::default()
+                        {
+                            return None;
+                        }
+                        let (e0, e1) = r.base_edge()?;
+                        let mid = domain::points::Point2f32::new(
+                            ((e0.x + e1.x) * 0.5) as f32,
+                            ((e0.y + e1.y) * 0.5) as f32,
+                        );
+                        let sref = plan.surface_ref_at(mid, 0.05)?;
+                        Some((sref, (ty, mk)))
+                    })
+                    .collect();
                 let floors = storey
                     .floors
                     .regions
@@ -350,9 +384,12 @@ impl AppController {
                         .then(|| (document::centroid_key(r.centroid()), (ty, mk)))
                     })
                     .collect();
-                (floors, ceilings)
+                (walls, floors, ceilings)
             };
             let sd = &mut self.document.storeys[idx];
+            for (k, v) in walls {
+                sd.wall_constructions.entry(k).or_insert(v);
+            }
             for (k, v) in floors {
                 sd.floor_constructions.entry(k).or_insert(v);
             }

@@ -1382,6 +1382,55 @@ fn wall_construction_is_preserved_when_splitting() {
     assert_eq!(r[1].exposure, WallExposure::SemiExposed, "middle is semi");
 }
 
+/// A non-default WALL construction carried on a resolved region is RECOVERED
+/// into the durable SurfaceRef store on load (the snapshot-less / legacy path),
+/// so the first fresh-id re-resolve doesn't reset it to the default. Mirror of
+/// the floor/ceiling seeding — regression for the missing walls branch in
+/// `seed_construction_stores_from_record`.
+#[test]
+fn wall_construction_seeded_from_record_on_load() {
+    use ber_model::ber::structural::WallConstructionType;
+    let mut c = dimensioned_square_controller();
+    // Mark a wall so it derives to a region, then assign it a known construction.
+    let (_, a0, b0) = c.document.outline.floor_plan.perimeter_walls()[0];
+    let mid = ((a0.x + b0.x) * 0.5, (a0.y + b0.y) * 0.5);
+    c.set_exposure_mode(true);
+    c.exposure_pointer_down(mid.0 as f64, mid.1 as f64, 0.5);
+    c.set_wall_exposure(WallExposure::Exposed);
+    c.materialize();
+    let wall0 = c.current_record.as_ref().unwrap().data.storeys[0]
+        .walls
+        .regions[0]
+        .id;
+    c.set_wall_construction_for(
+        &[wall0],
+        WallConstructionType::CavityWall,
+        Default::default(),
+    );
+    c.materialize();
+
+    // Simulate a snapshot-less reload: the resolved record keeps the construction
+    // on its wall region, but the editing store is rebuilt EMPTY (`from_storey`
+    // doesn't reconstruct it). The seeding fallback must recover it.
+    c.document.storeys[0].wall_constructions.clear();
+    c.seed_construction_stores_from_record();
+    assert!(
+        !c.document.storeys[0].wall_constructions.is_empty(),
+        "the wall construction was seeded back into the durable SurfaceRef store"
+    );
+
+    // End to end: it survives the next re-resolve (would reset to default
+    // without the seed, since wall ids are freshly minted every resolve).
+    c.commit_to_ber().unwrap();
+    let rec = c.current_record.as_ref().unwrap();
+    let kept = rec.data.storeys[0].walls.regions.iter().any(|r| {
+        rec.data
+            .wall_construction(r.construction_id)
+            .is_some_and(|wc| wc.construction_type == WallConstructionType::CavityWall)
+    });
+    assert!(kept, "the seeded wall construction survives the re-resolve");
+}
+
 /// A FLOOR construction assigned via the durable centroid-keyed store survives
 /// the re-derivation (the area analogue of the wall-construction test): the
 /// floor region re-resolves to the assigned `(type, make-up)`.
@@ -1448,6 +1497,56 @@ fn structure_edit_sets_floor_group_construction() {
     let r = &rec.data.storeys[0].floors.regions[0];
     let fc = rec.data.floor_construction(r.construction_id).unwrap();
     assert_eq!(fc.construction_type, FloorConstructionType::SuspendedFloor);
+}
+
+/// The Structure selection + an open "Edit attributes" session SURVIVE a
+/// re-resolve. Walls (and floors) re-mint region ids on every resolve, so
+/// without re-pointing by durable key the selected ids would dangle: the canvas
+/// shading blanks out and a multi-group edit silently drops every apply after
+/// the first (the apply itself bumps the revision and triggers the re-resolve).
+/// Regression for that bug — the selection must follow the geometry, like the
+/// riser/elevation selection.
+#[test]
+fn structure_selection_survives_re_resolve() {
+    let mut c = dimensioned_square_controller();
+    c.materialize();
+
+    c.set_structure_kind(SurfaceKind::Walls);
+    c.set_structure_select_mode(Some(SelectMode::All));
+    let n = c.structure_selected_ids().len();
+    assert!(n >= 1, "at least one wall selected");
+    c.begin_structure_edit();
+    assert!(c.structure_edit().is_some(), "edit session opened");
+
+    // Force a re-resolve — re-mints every wall region id.
+    c.commit_to_ber().unwrap();
+
+    let rec = c.current_record.as_ref().unwrap();
+    let live: std::collections::HashSet<_> = rec.data.storeys[0]
+        .walls
+        .regions
+        .iter()
+        .map(|r| r.id)
+        .collect();
+    assert_eq!(
+        c.structure_selected_ids().len(),
+        n,
+        "selection count preserved across the re-resolve"
+    );
+    assert!(
+        c.structure_selected_ids()
+            .iter()
+            .all(|id| live.contains(id)),
+        "every selected id re-pointed onto a LIVE wall region (not a stale id)"
+    );
+    let edit = c.structure_edit().expect("session still open");
+    assert!(
+        edit.groups
+            .iter()
+            .flat_map(|g| &g.ids)
+            .all(|id| live.contains(id)),
+        "the edit session's group ids re-pointed onto live regions too"
+    );
 }
 
 /// A wall's resolved construction phase, via its region's `construction_id`.

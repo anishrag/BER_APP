@@ -76,8 +76,10 @@ pub struct Storey {
     /// is RESTORED on reload instead of re-inferred from the roof geometry. The
     /// controller keeps it in step with the session list at each edit; the
     /// regions-as-truth roofs are the geometric truth, this is the editable
-    /// INPUT behind them. Empty on records saved before this field existed —
-    /// such a record is migrated once on load by re-deriving from its roofs.
+    /// INPUT behind them. Empty on records saved before this field existed:
+    /// reload RESTORES the durable list only — there is NO geometry-inference
+    /// migration (the step-inference subsystem was removed), so such a record
+    /// simply has no editable steps to restore until the assessor re-draws them.
     /// `#[serde(default)]` so older records load.
     #[serde(default)]
     pub ceiling_steps: Vec<(Vec<Point2f64>, f64)>,

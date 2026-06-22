@@ -2,7 +2,93 @@
 //! into the editor, and the deferred derive (mark-dirty/materialize) pipeline.
 use super::*;
 
+/// The durable, geometry-independent key a Structure-phase SELECTION re-points
+/// by across the id-churning re-resolve: a wall's quantized base edge, or a
+/// floor/roof area's quantized plan centroid. Walls and floors mint fresh
+/// region ids on EVERY resolve (`WallRegions::regenerate` / `FloorRegions`
+/// partition), so a selection (or open "Edit attributes" session) keyed by raw
+/// id would dangle after any re-derive — silently dropping later edits. This is
+/// the selection analogue of the attribute side-tables' `SurfaceRef` /
+/// `CentroidKey`. (Roof ids are stable — regions-as-truth — so re-pointing them
+/// is a harmless no-op, handled uniformly.)
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum SurfaceKey {
+    Wall((i64, i64, i64, i64)),
+    Area((i64, i64)),
+}
+
+/// The live region id of `kind` whose durable [`SurfaceKey`] matches `key`, in
+/// `storey`'s freshly re-derived geometry — the inverse of
+/// [`AppController::structure_surface_key`]. `None` when no region matches (the
+/// surface the edit removed).
+fn structure_id_for_key(storey: &Storey, kind: SurfaceKind, key: SurfaceKey) -> Option<ItemId> {
+    let wall_key = |r: &ber_model::ber::structural::WallRegion| {
+        r.base_edge().map(|(e0, e1)| {
+            document::riser_key(
+                domain::points::Point2f64::new(e0.x, e0.y),
+                domain::points::Point2f64::new(e1.x, e1.y),
+            )
+        })
+    };
+    match (kind, key) {
+        (SurfaceKind::Walls, SurfaceKey::Wall(k)) => storey
+            .walls
+            .regions
+            .iter()
+            .find(|r| wall_key(r) == Some(k))
+            .map(|r| r.id),
+        (SurfaceKind::Floors, SurfaceKey::Area(k)) => storey
+            .floors
+            .regions
+            .iter()
+            .find(|r| document::centroid_key(r.centroid()) == k)
+            .map(|r| r.id),
+        (SurfaceKind::Roofs, SurfaceKey::Area(k)) => storey
+            .roofs
+            .regions
+            .iter()
+            .find(|r| document::centroid_key(r.centroid()) == k)
+            .map(|r| r.id),
+        _ => None,
+    }
+}
+
 impl AppController {
+    /// The durable [`SurfaceKey`] of resolved region `id` of `kind` in storey
+    /// `idx`'s CURRENT geometry — `None` if it isn't a live region of that kind.
+    /// Captured BEFORE a re-resolve so the Structure selection can re-point to
+    /// the region's fresh id afterward.
+    fn structure_surface_key(
+        &self,
+        idx: usize,
+        kind: SurfaceKind,
+        id: ItemId,
+    ) -> Option<SurfaceKey> {
+        let storey = self.current_record.as_ref()?.data.storeys.get(idx)?;
+        match kind {
+            SurfaceKind::Walls => {
+                let (e0, e1) = storey
+                    .walls
+                    .regions
+                    .iter()
+                    .find(|r| r.id == id)?
+                    .base_edge()?;
+                Some(SurfaceKey::Wall(document::riser_key(
+                    domain::points::Point2f64::new(e0.x, e0.y),
+                    domain::points::Point2f64::new(e1.x, e1.y),
+                )))
+            }
+            SurfaceKind::Floors => {
+                let r = storey.floors.regions.iter().find(|r| r.id == id)?;
+                Some(SurfaceKey::Area(document::centroid_key(r.centroid())))
+            }
+            SurfaceKind::Roofs => {
+                let r = storey.roofs.regions.iter().find(|r| r.id == id)?;
+                Some(SurfaceKey::Area(document::centroid_key(r.centroid())))
+            }
+        }
+    }
+
     /// Which storey the editor is currently acting on. `Some(i)` = storey `i`
     /// is being edited; `None` = the "All storeys" overview (read-only, no
     /// drawing). Default `Some(0)` on create/open.
@@ -264,6 +350,32 @@ impl AppController {
         let sel_riser_key = self.selected_riser.and_then(|id| wall_key(self, id));
         // Same for the open elevation's wall — its id is just as unstable.
         let sel_elev_key = self.elevation_wall.and_then(|id| wall_key(self, id));
+        // Capture the Structure-phase selection + open "Edit attributes" session
+        // by durable key BEFORE the re-resolve mints fresh wall/floor ids, so
+        // both re-point to the new ids afterward (same survival mechanism as the
+        // riser/elevation selection — across an attribute edit the geometry is
+        // identical and only the ids churn, so the selection stays meaningful).
+        let struct_kind = self.structure_kind;
+        let sel_struct_keys: Vec<SurfaceKey> = self
+            .structure_selected
+            .iter()
+            .filter_map(|id| self.structure_surface_key(idx, struct_kind, *id))
+            .collect();
+        let edit_struct_keys: Option<(SurfaceKind, Vec<Vec<SurfaceKey>>)> =
+            self.structure_edit.as_ref().map(|e| {
+                let kind = e.kind;
+                let groups = e
+                    .groups
+                    .iter()
+                    .map(|g| {
+                        g.ids
+                            .iter()
+                            .filter_map(|id| self.structure_surface_key(idx, kind, *id))
+                            .collect()
+                    })
+                    .collect();
+                (kind, groups)
+            });
         // Flush the active buffer into its slot, then ensure the storey slot + its
         // constructions exist — the two `&mut` prerequisites of the otherwise
         // read-only projection (`document::resolve_storey`).
@@ -341,6 +453,45 @@ impl AppController {
                     .map(|r| r.id)
             });
             self.elevation_wall = new_id;
+        }
+        // Re-point the Structure selection + open edit session onto the
+        // re-derived regions by durable key. Without this, the stored ids go
+        // stale on the very next resolve (walls/floors re-mint every time), so a
+        // multi-group "Edit attributes" session would silently drop every edit
+        // after the first (the apply itself triggers the re-resolve) and the
+        // canvas shading would blank out. Group ids that no longer match (the
+        // surface was carved away) drop out.
+        let new_sel: std::collections::HashSet<ItemId> = record
+            .data
+            .storeys
+            .get(idx)
+            .map(|storey| {
+                sel_struct_keys
+                    .iter()
+                    .filter_map(|k| structure_id_for_key(storey, struct_kind, *k))
+                    .collect()
+            })
+            .unwrap_or_default();
+        self.structure_selected = new_sel;
+        let new_group_ids: Option<Vec<Vec<ItemId>>> =
+            edit_struct_keys.as_ref().and_then(|(kind, group_keys)| {
+                record.data.storeys.get(idx).map(|storey| {
+                    group_keys
+                        .iter()
+                        .map(|keys| {
+                            keys.iter()
+                                .filter_map(|k| structure_id_for_key(storey, *kind, *k))
+                                .collect()
+                        })
+                        .collect()
+                })
+            });
+        if let Some(new_ids) = new_group_ids {
+            if let Some(edit) = self.structure_edit.as_mut() {
+                for (g, ids) in edit.groups.iter_mut().zip(new_ids) {
+                    g.ids = ids;
+                }
+            }
         }
     }
 
