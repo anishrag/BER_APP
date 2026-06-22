@@ -678,56 +678,6 @@ impl CeilingRegions {
             .collect()
     }
 
-    /// Reset every apex-shaped roof (fan / ridge / hip) back to ONE FLAT region
-    /// at its base (eave) height — the "un-shape" primitive behind clear-and-
-    /// redraw ceiling editing and the outline re-fit of a sloped region. Each
-    /// [`apex_groups`](Self::apex_groups) group's member faces are replaced by a
-    /// single flat [`CeilingRegion`] per `merged_ring` at the group's `base_z`,
-    /// inheriting the first member's `construction_id` and default `opes`.
-    /// Regions in no group (flat steps, the flat default) pass through
-    /// untouched. Empty `apexes` (or no group) → `self` unchanged.
-    pub fn unshaped(self, apexes: &[RoofApex]) -> Self {
-        let groups = self.apex_groups(apexes);
-        if groups.is_empty() {
-            return self;
-        }
-        let grouped: std::collections::HashSet<usize> = groups
-            .iter()
-            .flat_map(|g| g.region_idxs.iter().copied())
-            .collect();
-        let mut next: Vec<CeilingRegion> = Vec::new();
-        // Flat / ungrouped regions survive verbatim (id + opes preserved).
-        for (ri, region) in self.regions.iter().enumerate() {
-            if !grouped.contains(&ri) {
-                next.push(region.clone());
-            }
-        }
-        // Each shaped group collapses to one flat region per merged ring.
-        for g in &groups {
-            let cid = g
-                .region_idxs
-                .first()
-                .map(|&ri| self.regions[ri].construction_id)
-                .unwrap_or_default();
-            for ring in &g.merged_rings {
-                if ring.len() < 3 {
-                    continue;
-                }
-                let pts: Vec<Point3f64> = ring
-                    .iter()
-                    .map(|p| Point3f64::new(p.x, p.y, g.base_z))
-                    .collect();
-                next.push(CeilingRegion {
-                    id: ItemId::default(),
-                    polygon: Polygon3D::new(pts),
-                    opes: Opes::default(),
-                    construction_id: cid,
-                });
-            }
-        }
-        Self { regions: next }
-    }
-
     /// Re-fit the regions to a changed outline `footprint` (the regions-as-truth
     /// answer to an outline edit, kept deliberately simple since the outline is
     /// frozen before ceiling work in practice). Every stored region is

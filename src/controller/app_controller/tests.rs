@@ -5913,15 +5913,18 @@ fn roof_rect_over_a_step_full_fixpoint() {
         before.iter().any(|v| (v.2 - 2.7).abs() < 1e-6),
         "eaves rise from the STEPPED base"
     );
-    // Canonicalize emitted ONE merged step area covering the whole stepped
-    // piece — the all-apex TOP joined the merge (no hole) — at the delta.
+    // The canonical session list is the ONE drawn step area (the stepped half),
+    // clipped to the outline — the apex composes on top without changing it.
     let session = &c.ceiling_step_regions[&0];
-    assert_eq!(session.len(), 1, "one merged area, top included");
+    assert_eq!(session.len(), 1, "one step area, the drawn half");
     assert!((session[0].delta_m - 0.3).abs() < 1e-6);
-    assert!(
-        (document::ceiling_step_regions_from_roofs(&c.current_record.as_ref().unwrap().data, 0)
-            .len())
-            == 1
+    // It is mirrored to the durable field for reload.
+    assert_eq!(
+        c.current_record.as_ref().unwrap().data.storeys[0]
+            .ceiling_steps
+            .len(),
+        1,
+        "durable step list mirrors the session"
     );
     let storey = &c.current_record.as_ref().unwrap().data.storeys[0];
     let groups = storey.roofs.apex_groups(&storey.roof_apexes);
@@ -5992,6 +5995,7 @@ fn flush_riser_merge_survives_reload_and_rederive_fixpoint() {
     );
     c.mark_dirty().unwrap();
     c.recompose_roofs(0); // regions-as-truth: compose the step into the roofs
+    c.reconstruct_ceiling_step_regions_for(0); // mirror to the durable field
     c.materialize();
     let walls_fingerprint = |c: &AppController| {
         c.current_record.as_ref().unwrap().data.storeys[0]
@@ -7133,34 +7137,6 @@ fn stepped_ceiling_below_controller() -> AppController {
     c.materialize();
     c.reconstruct_ceiling_step_regions_for(0); // canonicalize, assign parity
     c
-}
-
-/// An OLD record (no durable `ceiling_steps`) but stepped roofs is MIGRATED on
-/// load: `load_ceiling_step_regions_for` re-derives the step list from the
-/// geometry once and repopulates the durable field for next time.
-#[test]
-fn old_record_without_durable_steps_migrates_from_roofs() {
-    let mut c = stepped_ceiling_below_controller();
-    // Edit-time reconstruct already filled the durable field; an old record had
-    // none. Clear it (keep the stepped roofs) to simulate that record.
-    c.current_record.as_mut().unwrap().data.storeys[0]
-        .ceiling_steps
-        .clear();
-    c.ceiling_step_regions.clear();
-
-    c.load_ceiling_step_regions_for(0);
-    assert_eq!(
-        c.ceiling_step_regions.get(&0).map(|v| v.len()),
-        Some(1),
-        "the step is recovered from the stepped roofs"
-    );
-    assert_eq!(
-        c.current_record.as_ref().unwrap().data.storeys[0]
-            .ceiling_steps
-            .len(),
-        1,
-        "migration repopulates the durable field"
-    );
 }
 
 /// A record SAVED WITH the durable field restores its step list on load WITHOUT

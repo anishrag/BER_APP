@@ -268,10 +268,6 @@ impl AppController {
         // constructions exist — the two `&mut` prerequisites of the otherwise
         // read-only projection (`document::resolve_storey`).
         self.sync_active();
-        // Mirror the active storey's same-height dividers into the DURABLE field
-        // BEFORE resolve clones the storey — they leave no z-trace, so this is
-        // their only record (and `resolve_storey` re-applies them from it).
-        self.sync_ceiling_dividers(idx);
         let regions: &[PhaseRegion] = self
             .phase_regions
             .get(&idx)
@@ -345,25 +341,6 @@ impl AppController {
         }
     }
 
-    /// Mirror the active storey's same-height DIVIDERS (the delta-0 entries of
-    /// its session ceiling-step list) into the DURABLE `Storey::ceiling_dividers`
-    /// — the only record of a divider, which leaves no z-trace in the resolved
-    /// roofs. ACTIVE storey only: `refresh_all_storeys` deliberately does NOT
-    /// call this, so an unvisited storey (empty session list) keeps its
-    /// persisted dividers instead of having them wiped.
-    pub(super) fn sync_ceiling_dividers(&mut self, idx: usize) {
-        let dividers = self
-            .ceiling_step_regions
-            .get(&idx)
-            .map(|steps| document::ceiling_dividers_from_step_regions(steps))
-            .unwrap_or_default();
-        if let Some(record) = self.current_record.as_mut() {
-            if let Some(storey) = record.data.storeys.get_mut(idx) {
-                storey.ceiling_dividers = dividers;
-            }
-        }
-    }
-
     /// Recompose storey `idx`'s truth roofs from its ceiling EDIT inputs — the
     /// session ±Δ steps, durable dividers, durable apexes, and structure carves
     /// — in the canonical order (default → steps/dividers → apexes → carves).
@@ -414,9 +391,8 @@ impl AppController {
         ) else {
             return;
         };
-        // `session_steps` already carries delta-0 dividers (the reconstruct
-        // re-emits them from the durable `ceiling_dividers`), so they compose
-        // here without a separate pass.
+        // `session_steps` carries delta-0 dividers too (restored from the durable
+        // `ceiling_steps`), so they compose here without a separate pass.
         let areas: Vec<(Vec<domain::points::Point2f64>, f64)> = session_steps
             .iter()
             .map(|r| {
@@ -559,27 +535,37 @@ impl AppController {
         }
     }
 
-    /// Rebuild the session ceiling-step areas for storey `idx` from its
-    /// persisted roofs (each flat region off the default height by ≥ 1 mm → a
-    /// step area with `delta = z − default`). Ceiling-step areas are
-    /// session-only, so on reload they'd otherwise be empty and the NEXT
-    /// commit would re-derive the default flat ceiling — flattening the steps.
-    /// Also called after each assign to CANONICALIZE the session list to the
-    /// exact derived pieces. No-op (entry removed) when nothing is stepped.
+    /// CANONICALIZE the session ceiling-step list for storey `idx`: clip each
+    /// drawn step input to the outline ([`document::canonicalize_ceiling_steps`])
+    /// — no geometry inference — and mirror the result into the storey's DURABLE
+    /// `ceiling_steps`, so a reload RESTORES it. Called after each ceiling edit.
+    /// No-op (entry removed) when nothing is stepped.
     pub(super) fn reconstruct_ceiling_step_regions_for(&mut self, idx: usize) {
-        let Some(record) = self.current_record.as_ref() else {
-            return;
-        };
-        let regions = document::ceiling_step_regions_from_roofs(&record.data, idx);
-        // Mirror the canonical list into the storey's DURABLE `ceiling_steps`, so
-        // a reload RESTORES it (no re-inference). Edit-time inference is fine —
-        // the roofs it reads were just recomposed and are correct.
+        let footprint: Vec<Vec<domain::points::Point2f64>> = self
+            .document
+            .storeys
+            .get(idx)
+            .map(|s| {
+                s.outline
+                    .floor_plan
+                    .polygons()
+                    .into_iter()
+                    .map(|ring| ring.into_iter().map(domain::points::to_f64).collect())
+                    .collect()
+            })
+            .unwrap_or_default();
+        let steps = self
+            .ceiling_step_regions
+            .get(&idx)
+            .cloned()
+            .unwrap_or_default();
+        let canon = document::canonicalize_ceiling_steps(&footprint, &steps);
         if let Some(storey) = self
             .current_record
             .as_mut()
             .and_then(|r| r.data.storeys.get_mut(idx))
         {
-            storey.ceiling_steps = regions
+            storey.ceiling_steps = canon
                 .iter()
                 .map(|r| {
                     (
@@ -592,18 +578,16 @@ impl AppController {
                 })
                 .collect();
         }
-        if regions.is_empty() {
+        if canon.is_empty() {
             self.ceiling_step_regions.remove(&idx);
         } else {
-            self.ceiling_step_regions.insert(idx, regions);
+            self.ceiling_step_regions.insert(idx, canon);
         }
     }
 
     /// Restore storey `idx`'s session ceiling-step list from its DURABLE
     /// `ceiling_steps` — the reload/switch path, no geometry inference. Returns
-    /// `false` when the durable field is empty (an old record saved before the
-    /// field existed), so the caller falls back to the one-time
-    /// reconstruct-from-roofs migration.
+    /// `false` (and clears the entry) when the durable field is empty.
     pub(super) fn restore_ceiling_step_regions_for(&mut self, idx: usize) -> bool {
         let Some(storey) = self
             .current_record
@@ -614,8 +598,6 @@ impl AppController {
         };
         if storey.ceiling_steps.is_empty() {
             self.ceiling_step_regions.remove(&idx);
-            // An empty durable field is ambiguous (genuinely no steps vs. an
-            // unmigrated old record); the caller disambiguates against the roofs.
             return false;
         }
         let regions: Vec<CeilingStepRegion> = storey
@@ -633,17 +615,11 @@ impl AppController {
         true
     }
 
-    /// Reload/switch entry for the session ceiling-step list: RESTORE from the
-    /// durable field, or — for an old record with stepped roofs but no durable
-    /// field — MIGRATE by reconstructing from the roofs once (which repopulates
-    /// the durable field for next time).
+    /// Reload/switch entry for the session ceiling-step list: RESTORE it from the
+    /// durable `ceiling_steps`. Records saved before that field existed have no
+    /// steps to restore (accepted — there is no geometry-inference migration).
     pub(super) fn load_ceiling_step_regions_for(&mut self, idx: usize) {
-        if self.restore_ceiling_step_regions_for(idx) {
-            return;
-        }
-        // Migrate only when the roofs actually carry an off-default/divider trace
-        // — otherwise the reconstruct is a no-op and we avoid a needless infer.
-        self.reconstruct_ceiling_step_regions_for(idx);
+        self.restore_ceiling_step_regions_for(idx);
     }
 
     /// The previous storey's outline ring as `Point2f32` (world/metre coords),

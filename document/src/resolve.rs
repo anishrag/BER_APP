@@ -872,87 +872,6 @@ mod tests {
         assert_eq!(ber.storeys[0].roofs.regions.len(), n1, "split is stable");
     }
 
-    /// SPIKE (regions-as-truth refactor): the `unshaped` primitive resets a
-    /// resolved ridge back to ONE flat region at its eave height — the
-    /// load-bearing op behind clear-and-redraw editing and the outline re-fit.
-    /// A ridge over the 4×4 must collapse to a single flat 16 m² region at 2.4.
-    #[test]
-    fn unshape_resets_a_ridge_to_one_flat_region_at_the_eave() {
-        let (doc, mut ber) = ceiling_test_setup(2.4);
-        let apexes = vec![
-            RoofApex {
-                point: Point2f64::new(2.0, 1.0),
-                z_m: 4.2,
-            },
-            RoofApex {
-                point: Point2f64::new(2.0, 3.0),
-                z_m: 4.2,
-            },
-        ];
-        ber.storeys[0].roof_apexes = apexes.clone();
-        ber.storeys[0] = resolve_storey_t(&doc, &mut ber, 0, &[], &[], &[]);
-        assert!(
-            ber.storeys[0].roofs.regions.len() > 1,
-            "the ridge resolved into multiple faces"
-        );
-        let flat = ber.storeys[0].roofs.clone().unshaped(&apexes);
-        assert_eq!(flat.regions.len(), 1, "un-shape collapses to one region");
-        assert!(
-            flat.regions[0]
-                .flat_z()
-                .is_some_and(|z| (z - 2.4).abs() < 1e-6),
-            "back at the eave height"
-        );
-        assert!(
-            (roof_plan_area(&flat.regions[0]) - 16.0).abs() < 1e-4,
-            "covering the whole footprint"
-        );
-    }
-
-    /// SPIKE: un-shape preserves a flat STEP that sits beside a ridge — only the
-    /// apex-shaped faces collapse, the un-grouped flat regions pass through. A
-    /// stepped half + a ridge over it → un-shape → two flat regions (the step
-    /// level and the ridge's eave), not one fused region.
-    #[test]
-    fn unshape_keeps_a_neighbouring_flat_step() {
-        let (doc, mut ber) = ceiling_test_setup(2.4);
-        // Left half (x ≤ 2) stepped to 2.7; a ridge over the right (default) half.
-        let step = doc
-            .ceiling_step_region(
-                manip_plan::ParameterAxis::X,
-                2.0,
-                crate::LineSide::Less,
-                0.3,
-            )
-            .unwrap();
-        let apexes = vec![
-            RoofApex {
-                point: Point2f64::new(3.0, 1.0),
-                z_m: 4.2,
-            },
-            RoofApex {
-                point: Point2f64::new(3.0, 3.0),
-                z_m: 4.2,
-            },
-        ];
-        ber.storeys[0].roof_apexes = apexes.clone();
-        ber.storeys[0] = resolve_storey_t(&doc, &mut ber, 0, &[], &[], &[step]);
-        let flat = ber.storeys[0].roofs.clone().unshaped(&apexes);
-        let mut zs: Vec<f64> = flat
-            .regions
-            .iter()
-            .map(|r| r.flat_z().expect("all regions flat after un-shape"))
-            .collect();
-        zs.sort_by(|a, b| a.partial_cmp(b).unwrap());
-        assert_eq!(zs.len(), 2, "the step and the ridge's eave, both flat");
-        assert!((zs[0] - 2.4).abs() < 1e-6, "ridge eave at default 2.4");
-        assert!((zs[1] - 2.7).abs() < 1e-6, "stepped half preserved at 2.7");
-        assert!(
-            (flat.regions.iter().map(roof_plan_area).sum::<f64>() - 16.0).abs() < 1e-4,
-            "area conserved"
-        );
-    }
-
     /// SPIKE: outline re-fit GROWS the footprint — the ridge is coplanar-clipped
     /// (slope preserved where it survives) and the newly-exposed strip fills flat
     /// at the default height.
@@ -2309,12 +2228,12 @@ mod tests {
     }
 
     /// Legacy-style test shim: apply the storey's declarative ceiling EDITS
-    /// (`roof_apexes` / `ceiling_dividers` / `roof_splits`) plus the passed
-    /// `ceiling_steps` ONCE onto the freshly-seeded roofs (old composition order
-    /// — steps+dividers → apexes → face-splits), then resolve. Lets the
-    /// pre-existing roof tests keep their declarative setup while exercising the
-    /// regions-as-truth pipeline. Use for the FIRST (edit-applying) resolve on a
-    /// fresh storey; later refit-only resolves call `resolve_storey` directly.
+    /// (`roof_apexes` / `roof_splits`) plus the passed `ceiling_steps` (delta-0
+    /// dividers included) ONCE onto the freshly-seeded roofs (composition order —
+    /// steps → apexes → face-splits), then resolve. Lets the pre-existing roof
+    /// tests keep their declarative setup while exercising the regions-as-truth
+    /// pipeline. Use for the FIRST (edit-applying) resolve on a fresh storey;
+    /// later refit-only resolves call `resolve_storey` directly.
     fn resolve_storey_t(
         doc: &StoreyDoc,
         ber: &mut Ber,
@@ -2325,16 +2244,12 @@ mod tests {
     ) -> Storey {
         let apexes = ber.storeys[idx].roof_apexes.clone();
         let hints = ber.storeys[idx].roof_apex_hints.clone();
-        let dividers = ber.storeys[idx].ceiling_dividers.clone();
         let splits = ber.storeys[idx].roof_splits.clone();
         ber.storeys[idx] = resolve_storey(doc, ber, idx, phase, floor_steps, &[]);
-        let mut areas: Vec<(Vec<Point2f64>, f64)> = ceiling_steps
+        let areas: Vec<(Vec<Point2f64>, f64)> = ceiling_steps
             .iter()
             .map(|r| (r.polygon.iter().copied().map(to_f64).collect(), r.delta_m))
             .collect();
-        for ring in &dividers {
-            areas.push((ring.clone(), 0.0));
-        }
         let mut roofs = std::mem::take(&mut ber.storeys[idx].roofs);
         if !areas.is_empty() {
             roofs = roofs.with_z_deltas(&areas);

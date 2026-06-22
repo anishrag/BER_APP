@@ -1,26 +1,22 @@
 //! Ceiling-step logic: session-only areas that raise or lower part of the
 //! storey ceiling at commit, entered as an AXIS-ALIGNED LINE + side + delta.
 //!
-//! A ceiling step is NOT persisted as a record of its own — the durable record
-//! is the per-vertex z on the persisted `CeilingRegions` it re-splits
-//! (`with_z_deltas` in the resolve projection). The shell owns the per-storey
-//! region *storage* (session state, deliberately outside undo and the editing
-//! snapshot); the logic over the regions — fitting/validating the input line,
-//! the position prompt for its coordinate, building the half-rect area, and
-//! rebuilding the session list from persisted roofs — lives here.
+//! A ceiling step is a DURABLE input: its canonical `(ring, delta)` is stored on
+//! `Storey::ceiling_steps`, and the resolve composes the roofs from it (the
+//! regions-as-truth roofs are the geometric truth, the step list is the editable
+//! input behind them). The logic over the step regions — fitting/validating the
+//! input line, the position prompt for its coordinate, building the half-rect
+//! area, and clipping it to the outline — lives here.
 //!
 //! The line (axis + coordinate + side) is input UX only. The session record is
-//! the REGION: the shell canonicalizes after each assign by materializing and
-//! rebuilding its list from the derived roofs
-//! ([`ceiling_step_regions_from_roofs`]), so the in-session list equals the
-//! post-reload reconstruction — idempotent reload by construction.
+//! the REGION: after each assign the shell CLIPS each drawn step to the outline
+//! ([`canonicalize_ceiling_steps`]) — no geometry inference — and mirrors the
+//! result into the durable field, so a reload simply RESTORES it.
 
 use crate::position::reference_walls;
-use crate::step::ring_area2;
 use crate::StoreyDoc;
-use ber_model::ber::ber_struct::Ber;
 use ber_model::ber::structural::{CeilingRegions, FloorRegions};
-use domain::points::{to_f64, Point2f32, Point2f64};
+use domain::points::{Point2f32, Point2f64};
 use manip_plan::{ParameterAxis, VertexId};
 
 /// Coordinate tolerance (metres) for the "is this wall on the region's extent
@@ -149,123 +145,61 @@ impl CeilingStepRegion {
     }
 }
 
-/// The durable same-height DIVIDER rings (world metres, f64) among `regions` —
-/// the delta-0 entries, for `Storey::ceiling_dividers`. A divider leaves no
-/// z-trace in the resolved roofs, so it must be stored durably; this projects
-/// the session step list onto that field. ACTIVE storey only (the caller skips
-/// unvisited storeys so their empty session lists don't wipe persisted
-/// dividers).
-pub fn ceiling_dividers_from_step_regions(regions: &[CeilingStepRegion]) -> Vec<Vec<Point2f64>> {
-    regions
+/// Clip each ceiling-step input ring to the storey `footprint` — the canonical
+/// session list, with NO geometry inference. Ceiling steps are durable INPUTS
+/// now (`Storey::ceiling_steps`): a step is the user's drawn area bounded to the
+/// outline, and the apexes compose on top in the resolve, so a step's canonical
+/// area is just its own clipped ring (delta-0 dividers included — they survive
+/// here, no separate durable field). Empties / sub-mm² slivers dropped; deltas
+/// preserved. Replaces the old reconstruct-from-roofs canonicalization.
+pub fn canonicalize_ceiling_steps(
+    footprint: &[Vec<Point2f64>],
+    steps: &[CeilingStepRegion],
+) -> Vec<CeilingStepRegion> {
+    use geo::bool_ops::BooleanOps;
+    use geo::{Area, LineString, MultiPolygon, Polygon};
+    let to_poly = |ring: Vec<(f64, f64)>| Polygon::new(LineString::from(ring), vec![]);
+    let fp_polys: Vec<Polygon<f64>> = footprint
         .iter()
-        .filter(|r| r.is_divider())
-        .map(|r| r.polygon.iter().copied().map(to_f64).collect())
-        .collect()
-}
-
-/// Rebuild the session ceiling-step regions for storey `idx` from its
-/// persisted roofs — GROUP-AWARE: the storey's roof apexes are grouped with
-/// the regions they shape (`CeilingRegions::apex_groups`, THE grouping
-/// authority), and each group whose shared base differs from the storey's
-/// default by ≥ 1 mm emits ONE step region per merged ring at
-/// `delta = base − default` — a fan or ridge over a stepped area
-/// reconstructs as the whole conceptual area it was raised over, not a
-/// triangle list. Plain FLAT regions in no group whose height is off the
-/// default by ≥ 1 mm emit their own ring, as before; SLOPED regions in no
-/// group (nothing durable explains their slope) are warn-skipped. Degenerate
-/// sub-mm² slivers are dropped. Empty when the storey is missing or its
-/// ceiling height is unset (steps only exist relative to a default).
-///
-/// SAME-HEIGHT DIVIDERS. A flat region AT the default height carries no `delta`
-/// and leaves NO z-trace in the resolved roofs, yet a same-height divider drawn
-/// purely to bound a later ridge to its own area is a real subdivision that must
-/// survive reload. Geometry CANNOT record it (a `+Δ` carve's default remainder
-/// is byte-identical to a deliberate divider), so the divider is stored
-/// DURABLY on the storey (`Storey::ceiling_dividers`) — like `roof_apexes` — and
-/// re-emitted here from that field as a `delta_m = 0.0` area. The next derive
-/// then re-applies it (`resolve_storey`) BEFORE the apexes, so a ridge over one
-/// piece stays confined instead of fanning over the whole footprint (the
-/// L-spanning bug). Nothing about dividers is inferred from geometry any more;
-/// a flat default-z region with no stored divider emits nothing (a carve's
-/// remainder is not a step).
-pub fn ceiling_step_regions_from_roofs(ber: &Ber, idx: usize) -> Vec<CeilingStepRegion> {
-    let Some(storey) = ber.storeys.get(idx) else {
-        return Vec::new();
-    };
-    let Some(default_z) = storey.ceiling_height_m else {
-        return Vec::new();
-    };
-    let mut regions: Vec<CeilingStepRegion> = Vec::new();
-    let mut push_ring = |ring: Vec<Point2f32>, delta: f64| {
-        if ring.len() >= 3 && ring_area2(&ring) >= 2e-6 {
-            regions.push(CeilingStepRegion {
-                polygon: ring,
-                delta_m: delta,
-            });
-        }
-    };
-    let groups = storey.roofs.apex_groups(&storey.roof_apexes);
-    let grouped: std::collections::HashSet<usize> = groups
-        .iter()
-        .flat_map(|g| g.region_idxs.iter().copied())
+        .filter(|r| r.len() >= 3)
+        .map(|r| to_poly(r.iter().map(|p| (p.x, p.y)).collect()))
         .collect();
-    // OFF-default apex groups emit one area per merged ring at `delta =
-    // base − default`. An AT-default group leaves no z-trace and is NOT
-    // re-emitted from geometry — any divider that bounds it is restored from the
-    // durable `ceiling_dividers` below, not inferred.
-    for group in &groups {
-        let delta = group.base_z - default_z;
-        if delta.abs() < 1e-3 {
+    if fp_polys.is_empty() {
+        return Vec::new();
+    }
+    let fp = MultiPolygon(fp_polys);
+    let mut out = Vec::new();
+    for step in steps {
+        if step.polygon.len() < 3 {
             continue;
         }
-        for ring in &group.merged_rings {
-            let ring32: Vec<Point2f32> = ring
+        let sp = to_poly(
+            step.polygon
                 .iter()
-                .map(|v| Point2f32::new(v.x as f32, v.y as f32))
+                .map(|p| (p.x as f64, p.y as f64))
+                .collect(),
+        );
+        for piece in sp.intersection(&fp).0.iter() {
+            if piece.unsigned_area() < 1e-6 {
+                continue;
+            }
+            let mut ring: Vec<Point2f32> = piece
+                .exterior()
+                .coords()
+                .map(|c| Point2f32::new(c.x as f32, c.y as f32))
                 .collect();
-            push_ring(ring32, delta);
+            if ring.len() > 1 && ring.first() == ring.last() {
+                ring.pop();
+            }
+            if ring.len() >= 3 {
+                out.push(CeilingStepRegion {
+                    polygon: ring,
+                    delta_m: step.delta_m,
+                });
+            }
         }
     }
-    // Plain (un-apexed) regions: flat OFF-default ones emit their delta. A flat
-    // default-z region leaves no z-trace — it is a divider piece or a `+Δ`
-    // carve's remainder, indistinguishable from geometry, so it is never emitted
-    // from here (dividers come from the durable store; remainders aren't steps).
-    // Sloped regions in no group are irregular — warn-skip.
-    for (ri, region) in storey.roofs.regions.iter().enumerate() {
-        if grouped.contains(&ri) {
-            continue;
-        }
-        let Some(z) = region.flat_z() else {
-            log::warn!(
-                "sloped ceiling region in no apex group on storey {idx} — \
-                 skipped by the ceiling-step reconstruction"
-            );
-            continue;
-        };
-        let delta = z - default_z;
-        if delta.abs() < 1e-3 {
-            continue;
-        }
-        let ring: Vec<Point2f32> = region
-            .polygon
-            .exterior
-            .iter()
-            .map(|v| Point2f32::new(v.x as f32, v.y as f32))
-            .collect();
-        push_ring(ring, delta);
-    }
-    // Same-height DIVIDERS are restored from the DURABLE store, not geometry
-    // (they leave no z-trace). Re-emit each stored ring as a delta-0 area so the
-    // session list round-trips and the next derive re-establishes the boundary
-    // before the apexes — keeping a ridge confined to its own piece.
-    for ring in &storey.ceiling_dividers {
-        let ring32: Vec<Point2f32> = ring
-            .iter()
-            .map(|v| Point2f32::new(v.x as f32, v.y as f32))
-            .collect();
-        push_ring(ring32, 0.0);
-    }
-    regions
+    out
 }
 
 /// The "how far is the step line from an outline wall?" question — the line
@@ -614,10 +548,22 @@ impl StoreyDoc {
 mod tests {
     use super::*;
     use crate::{DimensionState, ShapeSlot};
+    use ber_model::ber::structural::Storey;
     use manip_plan::FloorPlan;
 
     fn p(x: f32, y: f32) -> Point2f32 {
         Point2f32::new(x, y)
+    }
+
+    /// A world-metre rectangle ring x ∈ [x0, x1], y ∈ [0, 6] — the ceiling test
+    /// footprint / step half-rect helper.
+    fn square64(x0: f64, x1: f64) -> Vec<Point2f64> {
+        vec![
+            Point2f64::new(x0, 0.0),
+            Point2f64::new(x1, 0.0),
+            Point2f64::new(x1, 6.0),
+            Point2f64::new(x0, 6.0),
+        ]
     }
 
     /// A StoreyDoc with a finalised 10×6 metre outline in its slot.
@@ -1012,410 +958,6 @@ mod tests {
         assert!(StoreyDoc::default()
             .snap_roof_ridge_end(ParameterAxis::X, 1.0)
             .is_none());
-    }
-
-    /// Reconstruction from persisted roofs: flat regions off the default by
-    /// ≥ 1 mm become step regions with `delta = z − default`; the default
-    /// piece, slivers, and a height-unset storey yield nothing.
-    #[test]
-    fn reconstruction_from_roofs_keeps_only_stepped_flat_regions() {
-        use ber_model::ber::structural::{CeilingRegions, Storey};
-        use domain::points::Point2f64;
-
-        let square = |x0: f64, x1: f64| {
-            vec![
-                Point2f64::new(x0, 0.0),
-                Point2f64::new(x1, 0.0),
-                Point2f64::new(x1, 6.0),
-                Point2f64::new(x0, 6.0),
-            ]
-        };
-        let cid = Default::default();
-        let mut roofs = CeilingRegions::default_for_footprint(vec![square(0.0, 4.0)], 2.4, cid);
-        roofs.regions.extend(
-            CeilingRegions::default_for_footprint(vec![square(4.0, 10.0)], 2.7, cid).regions,
-        );
-        let mut ber = Ber::default();
-        ber.storeys.push(Storey {
-            roofs,
-            ceiling_height_m: Some(2.4),
-            ..Storey::default()
-        });
-
-        let regions = ceiling_step_regions_from_roofs(&ber, 0);
-        assert_eq!(regions.len(), 1, "only the off-default region");
-        assert!((regions[0].delta_m - 0.3).abs() < 1e-9);
-        assert!(regions[0].polygon.iter().any(|p| (p.x - 10.0).abs() < 1e-6));
-
-        // Height unset → no default to be relative to → empty.
-        ber.storeys[0].ceiling_height_m = None;
-        assert!(ceiling_step_regions_from_roofs(&ber, 0).is_empty());
-        // Missing storey → empty.
-        assert!(ceiling_step_regions_from_roofs(&ber, 7).is_empty());
-    }
-
-    /// GROUP-AWARE reconstruction: a fan whose group BASE is off the default
-    /// emits ONE merged step region (the whole area it was raised over, not
-    /// its triangles); a fan over the default base emits nothing; a genuinely
-    /// irregular slope (no apex group) is warn-skipped.
-    #[test]
-    fn reconstruction_is_group_aware() {
-        use ber_model::ber::structural::{
-            CeilingRegion, CeilingRegions, Polygon3D, RoofApex, Storey,
-        };
-        use domain::points::{Point2f64, Point3f64};
-
-        let square = |x0: f64, x1: f64| {
-            vec![
-                Point2f64::new(x0, 0.0),
-                Point2f64::new(x1, 0.0),
-                Point2f64::new(x1, 4.0),
-                Point2f64::new(x0, 4.0),
-            ]
-        };
-        let cid = Default::default();
-        // Left half: stepped to 2.7 then fanned to an apex at (1, 2, 4.2).
-        let apex = RoofApex {
-            point: Point2f64::new(1.0, 2.0),
-            z_m: 4.2,
-        };
-        let mut roofs = CeilingRegions::default_for_footprint(vec![square(0.0, 2.0)], 2.7, cid)
-            .with_apexes(std::slice::from_ref(&apex));
-        let n_fan = roofs.regions.len();
-        assert_eq!(n_fan, 4, "one triangle per boundary edge");
-        // Right half: fanned at the DEFAULT base — reconstructs to nothing.
-        roofs.regions.extend(
-            CeilingRegions::default_for_footprint(vec![square(2.0, 4.0)], 2.4, cid)
-                .with_apexes(&[RoofApex {
-                    point: Point2f64::new(3.0, 2.0),
-                    z_m: 3.5,
-                }])
-                .regions,
-        );
-        // An irregular slope no apex explains → skipped.
-        roofs.regions.push(CeilingRegion {
-            id: Default::default(),
-            polygon: Polygon3D::new(vec![
-                Point3f64::new(10.0, 0.0, 2.0),
-                Point3f64::new(12.0, 0.0, 2.5),
-                Point3f64::new(11.0, 2.0, 3.0),
-            ]),
-            opes: Default::default(),
-            construction_id: cid,
-        });
-        let mut ber = Ber::default();
-        ber.storeys.push(Storey {
-            roofs,
-            ceiling_height_m: Some(2.4),
-            roof_apexes: vec![
-                apex,
-                RoofApex {
-                    point: Point2f64::new(3.0, 2.0),
-                    z_m: 3.5,
-                },
-            ],
-            ..Storey::default()
-        });
-
-        let regions = ceiling_step_regions_from_roofs(&ber, 0);
-        assert_eq!(regions.len(), 1, "ONE merged area, not the fan's triangles");
-        assert!(
-            (regions[0].delta_m - 0.3).abs() < 1e-9,
-            "recovers the delta"
-        );
-        assert!(
-            (ring_area2(&regions[0].polygon) / 2.0 - 8.0).abs() < 1e-4,
-            "the merged ring is the whole 2×4 stepped half"
-        );
-    }
-
-    // ── Same-height divider reconstruction (Slice A1) ───────────────────────
-    use ber_model::ber::structural::{CeilingRegions, Storey};
-    use domain::points::Point2f64;
-
-    /// A 0..10 × 0..6 rectangle in f64 plan coords for the divider tests.
-    fn square64(x0: f64, x1: f64) -> Vec<Point2f64> {
-        vec![
-            Point2f64::new(x0, 0.0),
-            Point2f64::new(x1, 0.0),
-            Point2f64::new(x1, 6.0),
-            Point2f64::new(x0, 6.0),
-        ]
-    }
-
-    /// A storey whose roofs are exactly `rings`, each flat at the matching
-    /// `z`, with the given default ceiling height.
-    fn storey_with_flat_regions(rings: &[(Vec<Point2f64>, f64)], default_z: f64) -> Ber {
-        let cid = Default::default();
-        let mut roofs = CeilingRegions::default();
-        for (ring, z) in rings {
-            roofs
-                .regions
-                .extend(CeilingRegions::default_for_footprint(vec![ring.clone()], *z, cid).regions);
-        }
-        let mut ber = Ber::default();
-        ber.storeys.push(Storey {
-            roofs,
-            ceiling_height_m: Some(default_z),
-            ..Storey::default()
-        });
-        ber
-    }
-
-    /// A-T1: reconstruction emits one delta-0 divider per ring in the DURABLE
-    /// `ceiling_dividers` — and same-height flats with NO stored divider emit
-    /// nothing (a divider is never inferred from geometry).
-    #[test]
-    fn reconstruction_emits_one_divider_per_stored_ring() {
-        // Two same-height flats but no stored divider → geometry alone emits
-        // nothing (a `+Δ` carve's remainder would look identical, so neither is
-        // a step).
-        let ber = storey_with_flat_regions(
-            &[(square64(0.0, 4.0), 2.4), (square64(4.0, 10.0), 2.4)],
-            2.4,
-        );
-        assert!(
-            ceiling_step_regions_from_roofs(&ber, 0).is_empty(),
-            "a same-height split is not inferred from geometry"
-        );
-        // With the divider stored durably, it round-trips back as a delta-0 area.
-        let mut ber = storey_with_flat_regions(&[(square64(0.0, 10.0), 2.4)], 2.4);
-        ber.storeys[0].ceiling_dividers = vec![square64(0.0, 4.0)];
-        let regions = ceiling_step_regions_from_roofs(&ber, 0);
-        assert_eq!(regions.len(), 1, "one delta-0 divider per stored ring");
-        assert!(regions[0].delta_m.abs() < 1e-12, "divider carries delta 0");
-    }
-
-    /// A-T2: a lone default-z flat emits NOTHING (no spurious divider); a
-    /// default-z flat alongside an OFF-default flat emits only the off-default
-    /// one (flat-default count is 1 → no divider).
-    #[test]
-    fn reconstruction_no_spurious_divider() {
-        // One flat covering the whole outline → count 1 → empty.
-        let ber = storey_with_flat_regions(&[(square64(0.0, 10.0), 2.4)], 2.4);
-        assert!(
-            ceiling_step_regions_from_roofs(&ber, 0).is_empty(),
-            "a lone default-z flat is not a divider"
-        );
-
-        // One default-z flat + one off-default flat: only the off-default emits.
-        let ber = storey_with_flat_regions(
-            &[(square64(0.0, 4.0), 2.4), (square64(4.0, 10.0), 2.7)],
-            2.4,
-        );
-        let regions = ceiling_step_regions_from_roofs(&ber, 0);
-        assert_eq!(regions.len(), 1, "only the off-default region emits");
-        assert!((regions[0].delta_m - 0.3).abs() < 1e-9);
-    }
-
-    /// A-T3: a stored divider is a fixpoint — resolve splits the default ring
-    /// into two same-height pieces, reconstruction returns the stored DIVIDER
-    /// (one, not the two pieces), and re-deriving reproduces the identical
-    /// two-piece split.
-    #[test]
-    fn reconstruction_divider_is_a_fixpoint() {
-        let default_z = 2.4;
-        let cid = Default::default();
-        let divider = square64(0.0, 4.0);
-        // The roofs are the divider's resolved split of the default ring.
-        let split =
-            CeilingRegions::default_for_footprint(vec![square64(0.0, 10.0)], default_z, cid)
-                .with_z_deltas(&[(divider.clone(), 0.0)]);
-        assert_eq!(
-            split.regions.len(),
-            2,
-            "the divider splits the default ring"
-        );
-
-        let mut ber = Ber::default();
-        ber.storeys.push(Storey {
-            roofs: split.clone(),
-            ceiling_height_m: Some(default_z),
-            ceiling_dividers: vec![divider],
-            ..Storey::default()
-        });
-        let recon = ceiling_step_regions_from_roofs(&ber, 0);
-        assert_eq!(
-            recon.len(),
-            1,
-            "the stored divider reconstructs, not the pieces"
-        );
-        assert!(recon[0].delta_m.abs() < 1e-12);
-
-        // Re-derive from the reconstructed divider over the SAME default ring.
-        let recon_areas: Vec<(Vec<Point2f64>, f64)> = recon
-            .iter()
-            .map(|r| {
-                (
-                    r.polygon
-                        .iter()
-                        .map(|p| Point2f64::new(p.x as f64, p.y as f64))
-                        .collect(),
-                    r.delta_m,
-                )
-            })
-            .collect();
-        let rederived =
-            CeilingRegions::default_for_footprint(vec![square64(0.0, 10.0)], default_z, cid)
-                .with_z_deltas(&recon_areas);
-
-        // Same number of pieces, same total footprint area, all at default z.
-        assert_eq!(rederived.regions.len(), split.regions.len());
-        for region in &rederived.regions {
-            assert!((region.flat_z().unwrap() - default_z).abs() < 1e-9);
-        }
-        let total: f64 = rederived
-            .regions
-            .iter()
-            .map(|r| {
-                let ring: Vec<Point2f32> = r
-                    .polygon
-                    .exterior
-                    .iter()
-                    .map(|v| Point2f32::new(v.x as f32, v.y as f32))
-                    .collect();
-                (ring_area2(&ring) / 2.0) as f64
-            })
-            .sum();
-        assert!((total - 60.0).abs() < 1e-3, "areas tile the 10×6 footprint");
-    }
-
-    /// A-T4: a ridged half + a flat half emits NO delta-0 divider (the ridged
-    /// half is grouped → flat-default count is 1; its apexes re-split the ring
-    /// on re-derive). The ridged half still reconstructs via its group when
-    /// its base is off the default.
-    #[test]
-    fn reconstruction_ridged_half_no_divider() {
-        use ber_model::ber::structural::RoofApex;
-        let cid = Default::default();
-        let default_z = 2.4;
-        // Right half ridged at a base OFF the default (so the group emits).
-        let apex = RoofApex {
-            point: Point2f64::new(7.0, 3.0),
-            z_m: 4.0,
-        };
-        let mut roofs =
-            CeilingRegions::default_for_footprint(vec![square64(0.0, 4.0)], default_z, cid);
-        roofs.regions.extend(
-            CeilingRegions::default_for_footprint(vec![square64(4.0, 10.0)], 2.7, cid)
-                .with_apexes(std::slice::from_ref(&apex))
-                .regions,
-        );
-        let mut ber = Ber::default();
-        ber.storeys.push(Storey {
-            roofs,
-            ceiling_height_m: Some(default_z),
-            roof_apexes: vec![apex],
-            ..Storey::default()
-        });
-        let regions = ceiling_step_regions_from_roofs(&ber, 0);
-        // The grouped (ridged) half emits ONE merged area at +0.3; the lone
-        // flat-default half emits NO delta-0 divider (count is 1).
-        assert!(
-            regions.iter().all(|r| r.delta_m.abs() > 1e-9),
-            "no delta-0 divider emitted; only the off-default ridge group"
-        );
-        assert_eq!(regions.len(), 1, "just the ridged half's merged area");
-    }
-
-    /// A-T4b (regression): a ridge over one half AT the DEFAULT base stays
-    /// confined to its half ONLY because the bounding divider is stored durably.
-    /// Reconstruction returns that divider (the at-default ridge group leaves no
-    /// z-trace and is NOT re-emitted from geometry), and re-deriving
-    /// (`with_z_deltas` then `with_apexes`) keeps the ridge in the right half
-    /// instead of fanning over the whole footprint (the L-spanning bug).
-    #[test]
-    fn reconstruction_at_default_ridge_keeps_divider() {
-        use ber_model::ber::structural::RoofApex;
-        let cid = Default::default();
-        let default_z = 2.4;
-        let divider = square64(4.0, 10.0); // the right half, stored as the boundary
-                                           // Right half ridged at the DEFAULT base (apex raised above it).
-        let apex = RoofApex {
-            point: Point2f64::new(7.0, 3.0),
-            z_m: 4.0,
-        };
-        let mut roofs =
-            CeilingRegions::default_for_footprint(vec![square64(0.0, 4.0)], default_z, cid);
-        roofs.regions.extend(
-            CeilingRegions::default_for_footprint(vec![square64(4.0, 10.0)], default_z, cid)
-                .with_apexes(std::slice::from_ref(&apex))
-                .regions,
-        );
-        let mut ber = Ber::default();
-        ber.storeys.push(Storey {
-            roofs,
-            ceiling_height_m: Some(default_z),
-            roof_apexes: vec![apex.clone()],
-            ceiling_dividers: vec![divider],
-            ..Storey::default()
-        });
-        let recon = ceiling_step_regions_from_roofs(&ber, 0);
-        // The stored divider survives; the at-default ridge group is NOT
-        // re-emitted from geometry (it leaves no z-trace).
-        assert_eq!(recon.len(), 1, "only the stored divider reconstructs");
-        assert!(
-            recon.iter().all(|r| r.delta_m.abs() < 1e-9),
-            "it is a delta-0 divider"
-        );
-        // Re-derive: re-split the default ring, then apply the ridge. It must
-        // land ONLY in the right half (x ≥ 4) — never spanning to x = 0.
-        let areas: Vec<(Vec<Point2f64>, f64)> = recon
-            .iter()
-            .map(|r| {
-                (
-                    r.polygon
-                        .iter()
-                        .map(|p| Point2f64::new(p.x as f64, p.y as f64))
-                        .collect(),
-                    r.delta_m,
-                )
-            })
-            .collect();
-        let rederived =
-            CeilingRegions::default_for_footprint(vec![square64(0.0, 10.0)], default_z, cid)
-                .with_z_deltas(&areas)
-                .with_apexes(std::slice::from_ref(&apex));
-        let groups = rederived.apex_groups(std::slice::from_ref(&apex));
-        assert_eq!(groups.len(), 1, "one ridge group");
-        let min_x = groups[0]
-            .merged_rings
-            .iter()
-            .flatten()
-            .map(|p| p.x)
-            .fold(f64::INFINITY, f64::min);
-        assert!(
-            min_x >= 4.0 - 1e-6,
-            "the ridge stays in the right half (min x = {min_x}), not spanning the footprint"
-        );
-    }
-
-    /// A-T9 (THE live L-shape regression): a same-height divider COEXISTS with
-    /// an unrelated OFF-default step elsewhere on the storey. The old inference
-    /// dropped every divider the moment any off-default region existed (so the
-    /// boundary vanished and a ridge fanned to the far wall). The durable model
-    /// keeps it — reconstruction returns the off-default step (from geometry)
-    /// AND the stored divider.
-    #[test]
-    fn reconstruction_keeps_divider_alongside_an_off_default_step() {
-        let pt = |x: f64, y: f64| Point2f64::new(x, y);
-        let rect = |x0: f64, y0: f64, x1: f64, y1: f64| {
-            vec![pt(x0, y0), pt(x1, y0), pt(x1, y1), pt(x0, y1)]
-        };
-        // Roofs: a +0.5 step over the right strip, the left column at default.
-        let mut ber =
-            storey_with_flat_regions(&[(square64(0.0, 4.0), 2.4), (square64(4.0, 6.0), 2.9)], 2.4);
-        // A same-height divider splits the left column at y = 3 — stored durably.
-        ber.storeys[0].ceiling_dividers = vec![rect(0.0, 0.0, 4.0, 3.0)];
-        let regions = ceiling_step_regions_from_roofs(&ber, 0);
-        let steps = regions.iter().filter(|r| r.delta_m.abs() >= 1e-3).count();
-        let dividers = regions.iter().filter(|r| r.delta_m.abs() < 1e-3).count();
-        assert_eq!(steps, 1, "the off-default step still emits");
-        assert_eq!(dividers, 1, "the divider survives alongside the step");
-        assert!(
-            regions.iter().any(|r| (r.delta_m - 0.5).abs() < 1e-9),
-            "the step carries its +0.5 delta"
-        );
     }
 
     // ── Smarter default reference wall (Slice B1) ───────────────────────────

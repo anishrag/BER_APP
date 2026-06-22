@@ -71,17 +71,6 @@ pub struct Storey {
     /// `#[serde(default)]` so older records load.
     #[serde(default)]
     pub floor_thickness_m: Option<f64>,
-    /// Same-height ceiling DIVIDERS: world-metre plan rings that subdivide the
-    /// ceiling at the SAME height, drawn purely to bound a roof ridge to its own
-    /// area. Durable INPUT like `roof_apexes` — unlike a `±Δ` step a divider
-    /// leaves NO z-trace in the resolved roofs (both sides stay at the default),
-    /// so it cannot be reconstructed from geometry and must be stored. Resolve
-    /// re-applies each as a delta-0 split, BEFORE the apexes (composition order:
-    /// default ceiling → steps → dividers → apexes), so a ridge over one piece
-    /// stays confined instead of fanning across the whole footprint.
-    /// `#[serde(default)]` so older records load.
-    #[serde(default)]
-    pub ceiling_dividers: Vec<Vec<Point2f64>>,
     /// Durable CANONICAL ceiling-step list (`(world-metre plan ring, z delta)`)
     /// — the explicit record of the storey's ceiling steps, so the editing list
     /// is RESTORED on reload instead of re-inferred from the roof geometry. The
@@ -187,7 +176,7 @@ impl Storey {
     /// (roofs derived over a pixel footprint are pixel units too, so the apexes
     /// that fan them go with it), and the DB only ever holds finalised geometry.
     /// The durable INPUTS (`ceiling_height_m`, `roof_apex_hints`,
-    /// `floor_thickness_m`, `ceiling_dividers`) are left untouched.
+    /// `floor_thickness_m`, `ceiling_steps`) are left untouched.
     pub fn clear_derived_geometry(&mut self) {
         self.floors = FloorRegions::default();
         self.walls = WallRegions::default();

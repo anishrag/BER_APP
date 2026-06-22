@@ -224,7 +224,7 @@ impl AppController {
         self.step_regions.clear();
         self.reconstruct_step_regions_for(idx);
         self.ceiling_step_regions.clear();
-        self.load_ceiling_step_regions_for(idx); // restore durable, else migrate
+        self.load_ceiling_step_regions_for(idx); // restore the durable step list
                                                  // Seed the durable riser-exposure table from the persisted resolved
                                                  // risers (legacy records / pre-table snapshots) BEFORE the first
                                                  // re-resolve mints fresh risers that would otherwise default Unset.
@@ -441,7 +441,7 @@ impl AppController {
         self.step_regions.clear();
         self.reconstruct_step_regions_for(0);
         self.ceiling_step_regions.clear();
-        self.load_ceiling_step_regions_for(0); // restore durable, else migrate
+        self.load_ceiling_step_regions_for(0); // restore the durable step list
                                                // Same as open_ber: drop any line/point state from the previous session.
         self.pending_ceiling_step = None;
         self.ceiling_step_mode = false;
