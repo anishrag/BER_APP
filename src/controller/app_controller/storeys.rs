@@ -299,6 +299,9 @@ impl AppController {
         // Compose each wall's ASSIGNED construction (type + make-up, from the
         // parametric store) onto the just-derived phase.
         document::stamp_wall_constructions(&mut record.data, idx, &self.document.storeys[idx]);
+        // The phase areas carve the ROOFS too (in resolve, like the floors);
+        // stamp the phase onto those carved regions from the partitioned floors.
+        document::stamp_ceiling_phases(&mut record.data, idx);
         // Same for FLOOR + CEILING/ROOF area constructions (keyed by centroid).
         document::stamp_floor_constructions(&mut record.data, idx, &self.document.storeys[idx]);
         document::stamp_ceiling_constructions(&mut record.data, idx, &self.document.storeys[idx]);
@@ -460,6 +463,9 @@ impl AppController {
             // Compose each wall's ASSIGNED construction (type + make-up, from the
             // parametric store) onto the just-derived phase.
             document::stamp_wall_constructions(&mut record.data, idx, &self.document.storeys[idx]);
+            // The phase areas carve the ROOFS too (in resolve, like the floors);
+            // stamp the phase onto those carved regions from the partitioned floors.
+            document::stamp_ceiling_phases(&mut record.data, idx);
             // Same for FLOOR + CEILING/ROOF area constructions (keyed by centroid).
             document::stamp_floor_constructions(&mut record.data, idx, &self.document.storeys[idx]);
             document::stamp_ceiling_constructions(

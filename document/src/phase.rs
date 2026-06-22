@@ -141,6 +141,47 @@ pub fn stamp_wall_phases(ber: &mut Ber, idx: usize) {
     }
 }
 
+/// Stamp the construction PHASE onto storey `idx`'s ROOF/CEILING regions from
+/// the already phase-partitioned FLOORS — the area analogue of
+/// [`stamp_wall_phases`]. The phase areas CARVE the roofs in `resolve_storey`
+/// (mirroring the floor partition), so each roof region lands fully within one
+/// floor phase zone; this reads the floor phase under the region's CENTROID and
+/// re-`ensure`s the ceiling construction with it. Type/make-up are preserved —
+/// only the phase axis changes. A region whose centroid is over no floor zone
+/// (degenerate) keeps its current phase. Runs BEFORE
+/// [`stamp_ceiling_constructions`], so the user's assigned make-up composes on
+/// top of the derived phase (same order as the wall pair).
+pub fn stamp_ceiling_phases(ber: &mut Ber, idx: usize) {
+    if ber.storeys.len() <= idx {
+        return;
+    }
+    let n = ber.storeys[idx].roofs.regions.len();
+    for i in 0..n {
+        let (c, cur_cid) = {
+            let r = &ber.storeys[idx].roofs.regions[i];
+            (r.centroid(), r.construction_id)
+        };
+        let (ty, makeup, cur_phase) = match ber.ceiling_construction(cur_cid) {
+            Some(cc) => (
+                cc.construction_type,
+                cc.base.construction_makeup.clone(),
+                cc.base.construction_phase.clone(),
+            ),
+            None => (
+                Default::default(),
+                Default::default(),
+                ConstructionPhase::Original,
+            ),
+        };
+        let new_phase =
+            floor_phase_at(ber, idx, c.x as f32, c.y as f32).unwrap_or_else(|| cur_phase.clone());
+        if new_phase != cur_phase {
+            let cid = ber.ensure_ceiling_construction(ty, makeup, new_phase);
+            ber.storeys[idx].roofs.regions[i].construction_id = cid;
+        }
+    }
+}
+
 /// Compose each perimeter wall's ASSIGNED construction (type + make-up, from
 /// `doc.wall_constructions` keyed by [`SurfaceRef`](manip_plan::SurfaceRef)) with
 /// its DERIVED phase (already set by [`stamp_wall_phases`]), re-`ensure`ing the
@@ -467,5 +508,83 @@ mod tests {
         assert_eq!(regions[0].polygon.len(), 4);
         // Missing storey → empty.
         assert!(phase_regions_from_floors(&ber, 7).is_empty());
+    }
+
+    /// `stamp_ceiling_phases` reads the floor phase under each ROOF region's
+    /// centroid and re-points the region's construction at the matching phase —
+    /// the ceiling analogue of `stamp_wall_phases`. With the roof already carved
+    /// to one region per floor zone (resolve does this), the left half stays
+    /// Original and the right half takes Extension1.
+    #[test]
+    fn stamp_ceiling_phases_tags_roofs_from_floor_zones() {
+        let mut ber = Ber::default();
+        let orig_cid = ber.ensure_floor_construction(
+            Default::default(),
+            Default::default(),
+            ConstructionPhase::Original,
+        );
+        let ext_cid = ber.ensure_floor_construction(
+            Default::default(),
+            Default::default(),
+            ConstructionPhase::Extension1,
+        );
+        let ceil_cid = ber.ensure_ceiling_construction(
+            Default::default(),
+            Default::default(),
+            Default::default(),
+        );
+        let left = vec![
+            Point2f64::new(0.0, 0.0),
+            Point2f64::new(5.0, 0.0),
+            Point2f64::new(5.0, 5.0),
+            Point2f64::new(0.0, 5.0),
+        ];
+        let right = vec![
+            Point2f64::new(5.0, 0.0),
+            Point2f64::new(10.0, 0.0),
+            Point2f64::new(10.0, 5.0),
+            Point2f64::new(5.0, 5.0),
+        ];
+        let mut floors = FloorRegions::from_vertex_lists(vec![left.clone()], orig_cid);
+        floors
+            .regions
+            .extend(FloorRegions::from_vertex_lists(vec![right.clone()], ext_cid).regions);
+        // Two flat roof regions over the two halves, both starting at the
+        // default (Original) ceiling construction.
+        let roofs = CeilingRegions::default_for_footprint(vec![left, right], 2.4, ceil_cid);
+        ber.storeys.push(Storey {
+            floors,
+            roofs,
+            ..Storey::default()
+        });
+
+        stamp_ceiling_phases(&mut ber, 0);
+
+        let phase_at = |x: f64, y: f64| -> ConstructionPhase {
+            let r = ber.storeys[0]
+                .roofs
+                .regions
+                .iter()
+                .find(|r| {
+                    let c = r.centroid();
+                    (c.x - x).abs() < 0.6 && (c.y - y).abs() < 0.6
+                })
+                .expect("a roof region near that centroid");
+            ber.ceiling_construction(r.construction_id)
+                .unwrap()
+                .base
+                .construction_phase
+                .clone()
+        };
+        assert_eq!(
+            phase_at(2.5, 2.5),
+            ConstructionPhase::Original,
+            "left roof → original"
+        );
+        assert_eq!(
+            phase_at(7.5, 2.5),
+            ConstructionPhase::Extension1,
+            "right roof → extension"
+        );
     }
 }

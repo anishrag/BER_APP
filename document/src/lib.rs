@@ -36,8 +36,8 @@ pub use debug::debug_dump_storey;
 pub use exposure::{range_at, riser_key, wall_coverage, RiserKey, RiserKind, RiserWall};
 pub use phase::{
     centroid_key, inherited_phase_regions, phase_regions_from_floors, stamp_ceiling_constructions,
-    stamp_floor_constructions, stamp_wall_constructions, stamp_wall_phases, CentroidKey,
-    PhaseRegion,
+    stamp_ceiling_phases, stamp_floor_constructions, stamp_wall_constructions, stamp_wall_phases,
+    CentroidKey, PhaseRegion,
 };
 pub use position::{PositionOption, PositionPrompt, PositionPromptKind};
 pub use resolve::{ensure_storey_constructions, opening_wall_anchor, resolve_storey};

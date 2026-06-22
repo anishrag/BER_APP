@@ -241,6 +241,24 @@ pub fn resolve_storey(
                     ceiling_cid,
                 )
             };
+            // CARVE the roofs by the phase areas — the ceiling analogue of the
+            // floor partition above. A surface-preserving coplanar split (the
+            // same primitive the structure roof-carve uses): a roof face the
+            // boundary straddles cuts in two, the z-field is bit-identical, only
+            // the region count grows — so each piece lands fully within ONE
+            // floor phase zone and `stamp_ceiling_phases` (post-resolve) can tag
+            // it. Replayed every resolve (a fixpoint: an already-carved face is
+            // intact), so it survives `recompose_roofs` overwrites the way the
+            // floor partition survives — phases are session-driven, not durable
+            // roof inputs. Skipped when untagged, keeping the no-phase roof
+            // byte-identical (no geo ops).
+            if !phase_area_rings.is_empty() {
+                let rings: Vec<Vec<Point2f64>> = phase_area_rings
+                    .iter()
+                    .map(|(ring, _)| ring.clone())
+                    .collect();
+                storey.roofs = std::mem::take(&mut storey.roofs).split_faces_coplanar(&rings);
+            }
         }
     }
     // Step areas re-split the (possibly phase-partitioned) floor regions and
@@ -318,11 +336,24 @@ pub fn resolve_storey(
         fallback_top_z,
         wall_cid,
     );
-    // Structure-phase WALL splits: divide any wall a cut segment crosses into
-    // two sub-walls (each copies the parent's exposure + construction, fresh
-    // id). Openings re-home onto the correct sub-wall from their parametric
-    // `wall_anchor` at the resolve tail.
-    let walls = walls.apply_splits(&storey.wall_splits);
+    // WALL splits: divide any wall a cut segment crosses into two sub-walls
+    // (each copies the parent's exposure + construction, fresh id). Openings
+    // re-home onto the correct sub-wall from their parametric `wall_anchor` at
+    // the resolve tail. Two sources, applied together:
+    //  - durable structure-phase `wall_splits` (the assessor's per-wall carves);
+    //  - construction-PHASE boundaries — each phase area's INTERIOR edges (the
+    //    zone dividers, via `interior_cut_edges`: edges NOT running along the
+    //    outline), so a perimeter wall a phase boundary CROSSES splits and each
+    //    sub-wall takes its own zone's phase (`stamp_wall_phases`, post-resolve).
+    //    A boundary running ALONG a wall (a party wall) is collinear, so it
+    //    crosses nothing and stays one wall — `stamp_wall_phases` then gives it
+    //    the OLDER zone's phase. The ceiling analogue of the floor partition +
+    //    roof carve; session-driven, recomputed every resolve like those.
+    let mut wall_cuts: Vec<[Point2f64; 2]> = storey.wall_splits.clone();
+    for region in phase_regions {
+        wall_cuts.extend(s.outline.floor_plan.interior_cut_edges(&region.polygon));
+    }
+    let walls = walls.apply_splits(&wall_cuts);
     // RISER regions append after the perimeter rebuild — derived geometry,
     // re-derived on every materialize like the walls themselves:
     //  - FLOOR risers: the vertical faces between adjacent floor regions
@@ -737,6 +768,56 @@ mod tests {
         assert_eq!(storey2.roofs.regions.len(), 2, "split survives re-resolve");
     }
 
+    /// A construction-PHASE area over half a storey CARVES the roof in two — the
+    /// ceiling analogue of the floor partition — keeping both halves flat at the
+    /// ceiling height (a surface-preserving coplanar split), with the plan area
+    /// conserved. The carve is a re-resolve FIXPOINT: an already-carved face is
+    /// kept intact, so feeding the result back never over-splits.
+    #[test]
+    fn phase_area_carves_roof_like_the_floor() {
+        let doc = unit_square_doc();
+        let phase = vec![PhaseRegion {
+            polygon: vec![
+                Point2f32::new(0.0, 0.0),
+                Point2f32::new(2.0, 0.0),
+                Point2f32::new(2.0, 4.0),
+                Point2f32::new(0.0, 4.0),
+            ],
+            phase: ConstructionPhase::Extension1,
+        }];
+        let mut ber = Ber::default();
+        ensure_storey_constructions(&mut ber, 0, &phase);
+        ber.set_default_ceiling_height(Some(0), 2.4);
+        let storey = resolve_storey(&doc, &ber, 0, &phase, &[], &[]);
+        assert_eq!(
+            storey.roofs.regions.len(),
+            2,
+            "the phase area carved the roof in two"
+        );
+        assert!(
+            storey
+                .roofs
+                .regions
+                .iter()
+                .all(|r| r.flat_z().is_some_and(|z| (z - 2.4).abs() < 1e-6)),
+            "both halves stay flat at the ceiling height"
+        );
+        assert!(
+            (storey.roofs.regions.iter().map(roof_plan_area).sum::<f64>() - 16.0).abs() < 1e-4,
+            "plan area conserved"
+        );
+        // The floor partition still happened alongside the roof carve.
+        assert_eq!(storey.floors.regions.len(), 2, "floor partitioned too");
+        // Fixpoint: feed the carved storey back and re-resolve.
+        ber.storeys[0] = storey;
+        let storey2 = resolve_storey(&doc, &ber, 0, &phase, &[], &[]);
+        assert_eq!(
+            storey2.roofs.regions.len(),
+            2,
+            "carve replays as a fixpoint, no over-split"
+        );
+    }
+
     /// The roof surface z at plan `(x, y)` — the containing region's plane,
     /// evaluated there — for asserting a carve re-TILES the surface without
     /// re-deriving it. `None` when no region's plan polygon contains the point.
@@ -983,6 +1064,42 @@ mod tests {
         ber.storeys[0] = storey;
         let storey2 = resolve_storey(&doc, &ber, 0, &[], &[], &[]);
         assert_eq!(storey2.walls.regions.len(), 5, "split survives re-resolve");
+    }
+
+    /// A construction-PHASE area covering the left half of a square SPLITS the
+    /// two perimeter walls its interior boundary (x = 2) crosses — top + bottom
+    /// — so each becomes two sub-walls: 4 → 6. The party-wall divider itself runs
+    /// along no perimeter wall, so it adds no spurious split. This is the wall
+    /// analogue of the floor partition + roof carve.
+    #[test]
+    fn phase_area_splits_the_walls_it_crosses() {
+        let doc = unit_square_doc();
+        let phase = vec![PhaseRegion {
+            polygon: vec![
+                Point2f32::new(0.0, 0.0),
+                Point2f32::new(2.0, 0.0),
+                Point2f32::new(2.0, 4.0),
+                Point2f32::new(0.0, 4.0),
+            ],
+            phase: ConstructionPhase::Extension1,
+        }];
+        let mut ber = Ber::default();
+        ensure_storey_constructions(&mut ber, 0, &phase);
+        ber.storeys[0].ceiling_height_m = Some(2.4);
+        let storey = resolve_storey(&doc, &ber, 0, &phase, &[], &[]);
+        assert_eq!(
+            storey.walls.regions.len(),
+            6,
+            "the boundary at x = 2 split the top + bottom walls"
+        );
+        // The split is a re-resolve fixpoint (walls regenerate full, then re-split).
+        ber.storeys[0] = storey;
+        let storey2 = resolve_storey(&doc, &ber, 0, &phase, &[], &[]);
+        assert_eq!(
+            storey2.walls.regions.len(),
+            6,
+            "wall split survives re-resolve"
+        );
     }
 
     /// A corner/notch carve yields TWO interior cut edges, each crossing a
