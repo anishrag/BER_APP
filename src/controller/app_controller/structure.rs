@@ -39,6 +39,12 @@ pub struct StructureEdit {
     pub kind: SurfaceKind,
     pub groups: Vec<EditGroup>,
     pub active: usize,
+    /// Canvas presentation of the session. `false` (default) keeps the plan in
+    /// place — zoomed out, each group recoloured where it sits, with one full
+    /// attribute window floating over each group. `true` is the exploded "fan"
+    /// view (groups pulled radially out from the centre) — wired but not yet the
+    /// default; a future toggle flips this.
+    pub exploded: bool,
 }
 
 impl AppController {
@@ -258,6 +264,7 @@ impl AppController {
                 kind,
                 groups,
                 active: 0,
+                exploded: false,
             });
         }
     }
@@ -300,6 +307,14 @@ impl AppController {
 
     /// Close the "Edit attributes" session (attributes apply as they're set).
     pub fn end_structure_edit(&mut self) {
+        self.close_structure_edit();
+    }
+
+    /// Tear down any open "Edit attributes" session. Safe to call when none is
+    /// open. The single close path for every clear site (Done, phase switch, kind
+    /// switch). The in-place edit view is UI-computed (the canvas fits the plan
+    /// around the floating windows), so closing touches no controller view state.
+    pub(super) fn close_structure_edit(&mut self) {
         self.structure_edit = None;
     }
 

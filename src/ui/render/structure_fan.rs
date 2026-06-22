@@ -217,6 +217,29 @@ pub(crate) fn render_structure_fan(
     }
 }
 
+/// Paint each construction GROUP's surfaces in its group colour, IN PLACE (no
+/// fan offset) — the default Edit-attributes view, where the plan stays where it
+/// sits (zoomed out by the controller) and the selection is recoloured per group
+/// under the floating attribute windows. The base plan is drawn first by
+/// `storey_2d`; this only overlays the group colours. `t` is that same plan
+/// transform so the overlay registers exactly. The exploded fan
+/// ([`render_structure_fan`]) is the alternative view.
+pub(crate) fn render_groups_inplace(
+    painter: &egui::Painter,
+    t: &Transform2d,
+    storey: &Storey,
+    edit: &StructureEdit,
+) {
+    for (i, group) in edit.groups.iter().enumerate() {
+        let color = group_color(i);
+        for id in &group.ids {
+            // `active = true` for every group: in place, all groups are shown
+            // full-strength (each has its own editable window — none is dimmed).
+            draw_fanned_surface(painter, t, storey, edit.kind, *id, (0.0, 0.0), color, true);
+        }
+    }
+}
+
 /// Draw one surface of `kind` translated by `offset`, in `color` (full-strength
 /// for the active group, dimmed otherwise).
 fn draw_fanned_surface(
@@ -242,10 +265,15 @@ fn draw_fanned_surface(
             }
             let a = t.apply(v[0].x + offset.0, v[0].y + offset.1);
             let b = t.apply(v[1].x + offset.0, v[1].y + offset.1);
+            // A dark casing under the coloured core so the group highlight reads
+            // clearly even when painted over the wall-exposure colours — the
+            // selection has to be unmistakable on top of everything below it.
+            let (casing, core) = if active { (9.0, 5.5) } else { (6.0, 3.0) };
             painter.line_segment(
                 [a, b],
-                egui::Stroke::new(if active { 5.0 } else { 3.0 }, line),
+                egui::Stroke::new(casing, egui::Color32::from_black_alpha(180)),
             );
+            painter.line_segment([a, b], egui::Stroke::new(core, line));
         }
         SurfaceKind::Floors => {
             let Some(r) = storey.floors.regions.iter().find(|r| r.id == id) else {

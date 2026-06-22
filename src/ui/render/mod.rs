@@ -123,23 +123,49 @@ pub fn render_ber(
                 } else {
                     None
                 };
-                // An open "Edit attributes" session takes over the canvas with
-                // the fanned group view; otherwise the normal shaded render.
-                if let Some(edit) = structure_edit {
-                    structure_fan::render_structure_fan(painter, rect, storey, edit, view);
-                } else {
-                    storey_2d::render(
-                        painter,
-                        rect,
-                        storey,
-                        display_mode,
-                        highlight,
-                        dimensioned_walls,
-                        view,
-                        watermark.as_deref(),
-                        None,
-                        selected,
-                    );
+                // An open "Edit attributes" session takes over the canvas. The
+                // default (in-place) view keeps the plan where it sits — the
+                // controller has zoomed it out — and recolours each group on top
+                // of the normal render. The exploded `fan` view pulls each group
+                // radially out instead (wired but not the default).
+                match structure_edit {
+                    Some(edit) if edit.exploded => {
+                        structure_fan::render_structure_fan(painter, rect, storey, edit, view);
+                    }
+                    Some(_) => {
+                        // In-place edit: draw the base plan with the selection
+                        // highlight suppressed. The per-group colour overlay is
+                        // painted by the canvas AFTER the wall-exposure layer (so
+                        // it sits on top and stays prominent) — see
+                        // `structure_fan::render_groups_inplace`.
+                        let no_selection = std::collections::HashSet::new();
+                        storey_2d::render(
+                            painter,
+                            rect,
+                            storey,
+                            display_mode,
+                            highlight,
+                            dimensioned_walls,
+                            view,
+                            watermark.as_deref(),
+                            None,
+                            &no_selection,
+                        );
+                    }
+                    None => {
+                        storey_2d::render(
+                            painter,
+                            rect,
+                            storey,
+                            display_mode,
+                            highlight,
+                            dimensioned_walls,
+                            view,
+                            watermark.as_deref(),
+                            None,
+                            selected,
+                        );
+                    }
                 }
             } else {
                 empty_storey_hint(painter, rect);
@@ -1295,7 +1321,7 @@ pub(crate) fn fit_transform(
 /// a loaded BER, a selected storey, and a fittable bbox — then returns that
 /// storey together with its fit transform. Each overlay adds its own
 /// collection-empty early-out on top. `None` means "nothing to draw, return".
-fn storey_transform(
+pub(crate) fn storey_transform(
     rect: egui::Rect,
     ber: Option<&Ber>,
     current_storey_idx: Option<usize>,

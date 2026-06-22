@@ -14,6 +14,126 @@ use crate::ui::widgets::HintExt;
 use ber_model::ber::ber_struct::Ber;
 use domain::sketch::{EditTools, SketchMode};
 
+/// Estimated width an in-place "Edit attributes" window occupies, and the
+/// vertical slot each is stacked into. egui sizes the windows lazily, so the
+/// layout reserves space from these estimates; the slot is generous enough that
+/// stacked windows don't overlap, and the window's own content is capped to
+/// `EDIT_BOX_W` so it stays narrow (construction type is a dropdown).
+const EDIT_BOX_W: f32 = 200.0;
+const EDIT_SLOT_H: f32 = 158.0;
+/// Gap between a window column and the canvas edge.
+const EDIT_COL_PAD: f32 = 10.0;
+/// Top/bottom inset reserved for the window columns.
+const EDIT_TOP_PAD: f32 = 12.0;
+
+/// One in-place attribute window's placement (see [`compute_structure_edit_layout`]).
+struct EditWindow {
+    group_index: usize,
+    /// Top-left of the floating `Area` (screen px).
+    pos: egui::Pos2,
+    /// Where the connector leaves the window — its inner-edge midpoint (screen px).
+    inner_anchor: egui::Pos2,
+    /// The group's true plan centroid (world) — the connector's target.
+    centroid: (f64, f64),
+    color: egui::Color32,
+}
+
+/// The in-place "Edit attributes" layout: the per-group windows stacked in
+/// columns flanking the plan, plus the view that fits the plan into the gap.
+struct StructureEditLayout {
+    view: ViewParams,
+    windows: Vec<EditWindow>,
+}
+
+/// Lay the in-place attribute windows into left/right columns (each group on the
+/// side its surfaces sit, stacked top-to-bottom), then fit the plan into the gap
+/// between the columns — "place the windows first, then zoom the plan to fill
+/// what's left". Returns the windows + the fitted view. `None` when there's no
+/// fittable plan or the canvas is too small to reserve a column, leaving the
+/// caller on the normal view.
+fn compute_structure_edit_layout(
+    rect: egui::Rect,
+    ber: Option<&Ber>,
+    current_storey_idx: Option<usize>,
+    storey: &ber_model::ber::structural::Storey,
+    edit: &crate::controller::app_controller::StructureEdit,
+    base: ViewParams,
+) -> Option<StructureEditLayout> {
+    let i = current_storey_idx?;
+    let ber = ber?;
+    let (min_xy, max_xy) = render::fit_bbox_for_storey(ber, i)?;
+    let fans = render::structure_fan::group_fan_layout(storey, edit);
+    if fans.is_empty() {
+        return None;
+    }
+    let center_x = (min_xy.0 + max_xy.0) * 0.5;
+
+    // Each group goes to the column on the side of the plan its surfaces sit.
+    let (mut left, mut right): (Vec<_>, Vec<_>) =
+        fans.iter().partition(|f| f.centroid.0 < center_x);
+
+    let col_w = EDIT_BOX_W + 2.0 * EDIT_COL_PAD;
+    let left_w = if left.is_empty() { EDIT_COL_PAD } else { col_w };
+    let right_w = if right.is_empty() {
+        EDIT_COL_PAD
+    } else {
+        col_w
+    };
+    let inner = egui::Rect::from_min_max(
+        egui::pos2(rect.left() + left_w, rect.top() + EDIT_TOP_PAD),
+        egui::pos2(rect.right() - right_w, rect.bottom() - EDIT_TOP_PAD),
+    );
+    if inner.width() < 60.0 || inner.height() < 60.0 {
+        return None;
+    }
+
+    // Fit the plan into `inner`: zoom relative to the full-rect auto-fit, and
+    // offset to recentre on the (possibly asymmetric) gap between the columns.
+    let base_scale = render::auto_fit_scale(rect, min_xy, max_xy);
+    let inner_scale = render::auto_fit_scale(inner, min_xy, max_xy);
+    let view = ViewParams {
+        zoom: (inner_scale / base_scale) as f32,
+        offset_x: inner.center().x - rect.center().x,
+        offset_y: inner.center().y - rect.center().y,
+        yaw_deg: base.yaw_deg,
+        pitch_deg: base.pitch_deg,
+    };
+    let t = render::fit_transform(rect, min_xy, max_xy, view);
+
+    let mut windows = Vec::with_capacity(fans.len());
+    for (column, left_side) in [(&mut left, true), (&mut right, false)] {
+        // Order each column by on-screen height so connectors don't cross.
+        column.sort_by(|a, b| {
+            let ya = t.apply(a.centroid.0, a.centroid.1).y;
+            let yb = t.apply(b.centroid.0, b.centroid.1).y;
+            ya.partial_cmp(&yb).unwrap_or(std::cmp::Ordering::Equal)
+        });
+        let total_h = column.len() as f32 * EDIT_SLOT_H;
+        let mut y = (rect.center().y - total_h * 0.5).max(rect.top() + EDIT_TOP_PAD);
+        let x = if left_side {
+            rect.left() + EDIT_COL_PAD
+        } else {
+            rect.right() - EDIT_COL_PAD - EDIT_BOX_W
+        };
+        for fan in column.iter() {
+            let inner_anchor = if left_side {
+                egui::pos2(x + EDIT_BOX_W, y + EDIT_SLOT_H * 0.5)
+            } else {
+                egui::pos2(x, y + EDIT_SLOT_H * 0.5)
+            };
+            windows.push(EditWindow {
+                group_index: fan.group_index,
+                pos: egui::pos2(x, y),
+                inner_anchor,
+                centroid: fan.centroid,
+                color: fan.color,
+            });
+            y += EDIT_SLOT_H;
+        }
+    }
+    Some(StructureEditLayout { view, windows })
+}
+
 pub(super) fn render<F: FnMut(UiEvent)>(
     ui: &mut egui::Ui,
     view: &SketchView<'_>,
@@ -56,6 +176,20 @@ pub(super) fn render<F: FnMut(UiEvent)>(
         return;
     }
 
+    // Structure "Edit attributes" (in-place view): lay the per-group windows out
+    // in columns flanking the plan, then fit the plan into the gap between them.
+    // The fitted view REPLACES the normal pan/zoom for the whole render so the
+    // plan, its overlays, and the windows all share one transform. `None` (no
+    // session, the exploded view, 3D, or a canvas too small) leaves `vp` as-is.
+    let structure_edit_layout = view
+        .structure_edit
+        .filter(|e| !e.exploded && matches!(mode, SketchMode::Storey2D))
+        .and_then(|edit| {
+            let storey = ber.and_then(|b| current_storey_idx.and_then(|i| b.storeys.get(i)))?;
+            compute_structure_edit_layout(rect, ber, current_storey_idx, storey, edit, vp)
+        });
+    let vp = structure_edit_layout.as_ref().map(|l| l.view).unwrap_or(vp);
+
     let painter = ui.painter_at(rect);
     painter.rect_filled(rect, 0.0, egui::Color32::from_gray(30));
 
@@ -96,14 +230,15 @@ pub(super) fn render<F: FnMut(UiEvent)>(
         view.structure_edit,
     );
 
-    // Structure "Edit attributes": when a fan session is open, place one small
-    // popup per group at its pulled-out position — clicking a popup makes that
-    // group active (the side panel edits the active group's attributes).
+    // Structure "Edit attributes" — EXPLODED view only: place a small group-picker
+    // popup at each group's pulled-out position (clicking makes that group active;
+    // the side panel edits it). The DEFAULT in-place windows are drawn later, on
+    // top of the wall-exposure layer, by `structure_edit_overlay`.
     if let (Some(edit), Some(storey)) = (
         view.structure_edit,
         ber.and_then(|b| current_storey_idx.and_then(|i| b.storeys.get(i))),
     ) {
-        if matches!(mode, SketchMode::Storey2D) {
+        if edit.exploded && matches!(mode, SketchMode::Storey2D) {
             if let Some(t) = render::structure_fan::fan_transform(rect, storey, vp) {
                 for fan in render::structure_fan::group_fan_layout(storey, edit) {
                     let (wx, wy) = fan.fanned_centroid();
@@ -532,6 +667,55 @@ pub(super) fn render<F: FnMut(UiEvent)>(
         view.exposure_selection.as_ref(),
         view.exposure_mode,
     );
+
+    // Structure "Edit attributes" (in-place): now the wall-exposure colours are
+    // down, recolour each group's surfaces in its group colour ON TOP (so the
+    // selection is unmistakable over exposure), draw a connector from each group
+    // to its window, and float the per-group attribute editors in their columns.
+    if let (Some(layout), Some(edit), Some(storey)) = (
+        structure_edit_layout.as_ref(),
+        view.structure_edit,
+        ber.and_then(|b| current_storey_idx.and_then(|i| b.storeys.get(i))),
+    ) {
+        if let Some((_s, t)) = render::storey_transform(rect, ber, current_storey_idx, mode, vp) {
+            render::structure_fan::render_groups_inplace(&painter, &t, storey, edit);
+            let editable = !reviewing && !dim_prompting;
+            for w in &layout.windows {
+                let i = w.group_index;
+                let Some(group) = edit.groups.get(i) else {
+                    continue;
+                };
+                // Connector from the window's inner edge to the group's true
+                // centroid, ending in a dot on the recoloured surfaces.
+                let target = t.apply(w.centroid.0, w.centroid.1);
+                painter.line_segment([w.inner_anchor, target], egui::Stroke::new(2.0, w.color));
+                painter.circle_filled(target, 3.5, w.color);
+                egui::Area::new(ui.id().with(("structure_attr", i)))
+                    .order(egui::Order::Foreground)
+                    .fixed_pos(w.pos)
+                    .show(ui.ctx(), |ui| {
+                        egui::Frame::popup(ui.style())
+                            .fill(w.color.gamma_multiply(0.22))
+                            .stroke(egui::Stroke::new(2.0, w.color))
+                            .show(ui, |ui| {
+                                ui.set_max_width(EDIT_BOX_W - 16.0);
+                                ui.label(
+                                    egui::RichText::new(format!(
+                                        "Group {}  ·  {}",
+                                        i + 1,
+                                        group.ids.len()
+                                    ))
+                                    .size(13.5)
+                                    .strong(),
+                                );
+                                super::structure::group_editor_ui(
+                                    ui, edit.kind, i, group, editable, on_event,
+                                );
+                            });
+                    });
+            }
+        }
+    }
 
     // Move-mode selection highlight: paint the selected wall
     // in red so the user sees which wall their drag is moving.

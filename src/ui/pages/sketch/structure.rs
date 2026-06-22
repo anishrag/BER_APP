@@ -17,8 +17,13 @@ use ber_model::ber::structural::{
 };
 
 use super::SketchEvent;
-use crate::controller::app_controller::{SelectMode, StructureEdit, SurfaceKind};
+use crate::controller::app_controller::{EditGroup, SelectMode, StructureEdit, SurfaceKind};
 use crate::ui::pages::events::UiEvent;
+
+/// Font size for the per-group attribute editor (the floating windows + the
+/// exploded-view side panel). Larger than the tool-row labels so the editable
+/// controls read clearly at the zoomed-out edit scale.
+const EDITOR_FONT: f32 = 13.5;
 
 /// The three MODES, in panel order.
 const MODES: &[(SurfaceKind, &str)] = &[
@@ -138,11 +143,14 @@ pub fn structure_panel<F: FnMut(UiEvent)>(
     }
 }
 
-/// The per-group attribute editor: pick a group (one active), then set that
-/// group's construction type + build-up (the type row is kind-appropriate —
-/// wall / floor / roof). The phase is the group's derived value (shown
-/// read-only). Mixed selections appear as several groups (e.g. an older + a
-/// newer phase), each editable separately.
+/// The side-panel summary for an open "Edit attributes" session. In the default
+/// (in-place) view the editing happens in the floating per-group windows the
+/// canvas anchors over each group, so the panel only states the group count and
+/// offers "Done". In the exploded `fan` view the canvas popups merely switch the
+/// active group, so the panel hosts the group selector + the active group's
+/// editor (via [`group_editor_ui`]). The phase is each group's derived value
+/// (shown read-only). Mixed selections appear as several groups (e.g. an older +
+/// a newer phase), each editable separately.
 fn edit_session<F: FnMut(UiEvent)>(
     ui: &mut egui::Ui,
     e: &StructureEdit,
@@ -154,88 +162,132 @@ fn edit_session<F: FnMut(UiEvent)>(
             .size(11.0)
             .weak(),
     );
-    // Group selector (one active at a time).
-    if e.groups.len() > 1 {
-        ui.horizontal_wrapped(|ui| {
-            for (i, g) in e.groups.iter().enumerate() {
-                let active = i == e.active;
-                if ui
-                    .add_enabled(
-                        enabled,
-                        egui::Button::selectable(
-                            active,
-                            format!("Group {}  ·  {}", i + 1, g.ids.len()),
-                        ),
-                    )
-                    .clicked()
-                {
-                    on_event(UiEvent::Sketch(SketchEvent::SetActiveStructureGroup(i)));
+    if e.exploded {
+        // Group selector (one active at a time) + the active group's editor.
+        if e.groups.len() > 1 {
+            ui.horizontal_wrapped(|ui| {
+                for (i, g) in e.groups.iter().enumerate() {
+                    let active = i == e.active;
+                    if ui
+                        .add_enabled(
+                            enabled,
+                            egui::Button::selectable(
+                                active,
+                                format!("Group {}  ·  {}", i + 1, g.ids.len()),
+                            ),
+                        )
+                        .clicked()
+                    {
+                        on_event(UiEvent::Sketch(SketchEvent::SetActiveStructureGroup(i)));
+                    }
                 }
-            }
-        });
-    }
-    if let Some(g) = e.groups.get(e.active) {
+            });
+        }
+        if let Some(g) = e.groups.get(e.active) {
+            group_editor_ui(ui, e.kind, e.active, g, enabled, on_event);
+        }
+    } else {
         ui.label(
-            egui::RichText::new(format!("Phase: {:?}", g.phase))
+            egui::RichText::new("Set each group's construction in its window on the plan.")
                 .size(11.0)
                 .weak(),
         );
-        ui.label(egui::RichText::new(type_label(e.kind)).size(11.0).weak());
-        ui.horizontal_wrapped(|ui| {
-            // Each kind offers its own type buttons; the chosen type is tagged
-            // with `ConstructionType` so the event/controller stay kind-agnostic.
-            let types: Vec<(ConstructionType, &str)> = match e.kind {
-                SurfaceKind::Walls => WALL_TYPES
-                    .iter()
-                    .map(|(t, l)| (ConstructionType::Wall(*t), *l))
-                    .collect(),
-                SurfaceKind::Floors => FLOOR_TYPES
-                    .iter()
-                    .map(|(t, l)| (ConstructionType::Floor(*t), *l))
-                    .collect(),
-                SurfaceKind::Roofs => CEILING_TYPES
-                    .iter()
-                    .map(|(t, l)| (ConstructionType::Ceiling(*t), *l))
-                    .collect(),
-            };
-            for (ty, label) in types {
-                let sel = g.ty == ty;
-                if ui
-                    .add_enabled(enabled, egui::Button::selectable(sel, label))
-                    .clicked()
-                {
-                    on_event(UiEvent::Sketch(SketchEvent::SetStructureGroupAttrs {
-                        group: e.active,
-                        ty,
-                        makeup: g.makeup.clone(),
-                    }));
-                }
-            }
-        });
-        ui.label(egui::RichText::new("Build-up").size(11.0).weak());
-        ui.horizontal_wrapped(|ui| {
-            for (label, mk) in [
-                ("Default", ConstructionMakeup::Default),
-                ("Non-heat-loss", ConstructionMakeup::NonHeatLoss),
-            ] {
-                let sel = g.makeup == mk;
-                if ui
-                    .add_enabled(enabled, egui::Button::selectable(sel, label))
-                    .clicked()
-                {
-                    on_event(UiEvent::Sketch(SketchEvent::SetStructureGroupAttrs {
-                        group: e.active,
-                        ty: g.ty,
-                        makeup: mk.clone(),
-                    }));
-                }
-            }
-        });
     }
     ui.add_space(2.0);
     if ui.add_enabled(enabled, egui::Button::new("Done")).clicked() {
         on_event(UiEvent::Sketch(SketchEvent::EndStructureEdit));
     }
+}
+
+/// One group's attribute editor: the phase (read-only, derived), then the
+/// construction TYPE row (kind-appropriate — wall / floor / roof) and the
+/// build-up row. Each button emits [`SketchEvent::SetStructureGroupAttrs`] for
+/// `group_index`. Shared by the side panel (exploded view's active group) and
+/// the canvas's floating per-group windows (the default in-place view), so both
+/// edit a group identically.
+pub(crate) fn group_editor_ui<F: FnMut(UiEvent)>(
+    ui: &mut egui::Ui,
+    kind: SurfaceKind,
+    group_index: usize,
+    g: &EditGroup,
+    enabled: bool,
+    on_event: &mut F,
+) {
+    ui.label(
+        egui::RichText::new(format!("Phase: {}", g.phase.default_name()))
+            .size(EDITOR_FONT)
+            .weak(),
+    );
+    // Each kind offers its own types; the chosen type is tagged with
+    // `ConstructionType` so the event/controller stay kind-agnostic. The TYPE is
+    // a dropdown (not a button row) to keep the floating window narrow.
+    let types: Vec<(ConstructionType, &str)> = match kind {
+        SurfaceKind::Walls => WALL_TYPES
+            .iter()
+            .map(|(t, l)| (ConstructionType::Wall(*t), *l))
+            .collect(),
+        SurfaceKind::Floors => FLOOR_TYPES
+            .iter()
+            .map(|(t, l)| (ConstructionType::Floor(*t), *l))
+            .collect(),
+        SurfaceKind::Roofs => CEILING_TYPES
+            .iter()
+            .map(|(t, l)| (ConstructionType::Ceiling(*t), *l))
+            .collect(),
+    };
+    let current = types
+        .iter()
+        .find(|(t, _)| *t == g.ty)
+        .map(|(_, l)| *l)
+        .unwrap_or("Select…");
+    ui.label(
+        egui::RichText::new(type_label(kind))
+            .size(EDITOR_FONT)
+            .weak(),
+    );
+    ui.add_enabled_ui(enabled, |ui| {
+        egui::ComboBox::from_id_salt(("structure_type", group_index))
+            .selected_text(egui::RichText::new(current).size(EDITOR_FONT))
+            .show_ui(ui, |ui| {
+                for (ty, label) in &types {
+                    if ui
+                        .selectable_label(
+                            g.ty == *ty,
+                            egui::RichText::new(*label).size(EDITOR_FONT),
+                        )
+                        .clicked()
+                    {
+                        on_event(UiEvent::Sketch(SketchEvent::SetStructureGroupAttrs {
+                            group: group_index,
+                            ty: *ty,
+                            makeup: g.makeup.clone(),
+                        }));
+                    }
+                }
+            });
+    });
+    ui.label(egui::RichText::new("Build-up").size(EDITOR_FONT).weak());
+    ui.horizontal_wrapped(|ui| {
+        for (label, mk) in [
+            ("Default", ConstructionMakeup::Default),
+            ("Non-heat-loss", ConstructionMakeup::NonHeatLoss),
+        ] {
+            let sel = g.makeup == mk;
+            if ui
+                .add_enabled(
+                    enabled,
+                    egui::Button::selectable(sel, egui::RichText::new(label).size(EDITOR_FONT)),
+                )
+                .clicked()
+            {
+                on_event(UiEvent::Sketch(SketchEvent::SetStructureGroupAttrs {
+                    group: group_index,
+                    ty: g.ty,
+                    makeup: mk.clone(),
+                }));
+            }
+        }
+    });
 }
 
 /// The type-row heading for the active mode.
