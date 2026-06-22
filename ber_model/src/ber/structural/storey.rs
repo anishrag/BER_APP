@@ -82,6 +82,16 @@ pub struct Storey {
     /// `#[serde(default)]` so older records load.
     #[serde(default)]
     pub ceiling_dividers: Vec<Vec<Point2f64>>,
+    /// Durable CANONICAL ceiling-step list (`(world-metre plan ring, z delta)`)
+    /// — the explicit record of the storey's ceiling steps, so the editing list
+    /// is RESTORED on reload instead of re-inferred from the roof geometry. The
+    /// controller keeps it in step with the session list at each edit; the
+    /// regions-as-truth roofs are the geometric truth, this is the editable
+    /// INPUT behind them. Empty on records saved before this field existed —
+    /// such a record is migrated once on load by re-deriving from its roofs.
+    /// `#[serde(default)]` so older records load.
+    #[serde(default)]
+    pub ceiling_steps: Vec<(Vec<Point2f64>, f64)>,
     /// Structure-phase FLOOR splits: world-metre plan rings, each a finalized
     /// (dimensioned) cut whose two sides become separate floor regions with
     /// IDENTICAL properties (`construction_id` + `level_m` copied to both). Like

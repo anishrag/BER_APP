@@ -7135,6 +7135,49 @@ fn stepped_ceiling_below_controller() -> AppController {
     c
 }
 
+/// An OLD record (no durable `ceiling_steps`) but stepped roofs is MIGRATED on
+/// load: `load_ceiling_step_regions_for` re-derives the step list from the
+/// geometry once and repopulates the durable field for next time.
+#[test]
+fn old_record_without_durable_steps_migrates_from_roofs() {
+    let mut c = stepped_ceiling_below_controller();
+    // Edit-time reconstruct already filled the durable field; an old record had
+    // none. Clear it (keep the stepped roofs) to simulate that record.
+    c.current_record.as_mut().unwrap().data.storeys[0]
+        .ceiling_steps
+        .clear();
+    c.ceiling_step_regions.clear();
+
+    c.load_ceiling_step_regions_for(0);
+    assert_eq!(
+        c.ceiling_step_regions.get(&0).map(|v| v.len()),
+        Some(1),
+        "the step is recovered from the stepped roofs"
+    );
+    assert_eq!(
+        c.current_record.as_ref().unwrap().data.storeys[0]
+            .ceiling_steps
+            .len(),
+        1,
+        "migration repopulates the durable field"
+    );
+}
+
+/// A record SAVED WITH the durable field restores its step list on load WITHOUT
+/// touching the geometry — even if the roofs were (hypothetically) flattened,
+/// the durable list is the source the editor restores.
+#[test]
+fn durable_steps_restore_without_inference() {
+    let mut c = stepped_ceiling_below_controller();
+    // Durable field is populated (one step). Restore must use it directly.
+    c.ceiling_step_regions.clear();
+    assert!(
+        c.restore_ceiling_step_regions_for(0),
+        "restore succeeds from the durable field"
+    );
+    assert_eq!(c.ceiling_step_regions.get(&0).map(|v| v.len()), Some(1));
+}
+
 /// `(level_m, plan area)` per floor region of storey `idx`, sorted — the
 /// fingerprint the seed/fixpoint assertions compare.
 fn floor_level_areas(c: &AppController, idx: usize) -> Vec<(f64, f64)> {

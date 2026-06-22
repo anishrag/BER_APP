@@ -224,10 +224,10 @@ impl AppController {
         self.step_regions.clear();
         self.reconstruct_step_regions_for(idx);
         self.ceiling_step_regions.clear();
-        self.reconstruct_ceiling_step_regions_for(idx);
-        // Seed the durable riser-exposure table from the persisted resolved
-        // risers (legacy records / pre-table snapshots) BEFORE the first
-        // re-resolve mints fresh risers that would otherwise default Unset.
+        self.load_ceiling_step_regions_for(idx); // restore durable, else migrate
+                                                 // Seed the durable riser-exposure table from the persisted resolved
+                                                 // risers (legacy records / pre-table snapshots) BEFORE the first
+                                                 // re-resolve mints fresh risers that would otherwise default Unset.
         self.seed_riser_exposure_from_record();
         // Same for the durable FLOOR + CEILING construction stores (keyed by
         // region centroid) — legacy records carry an assigned area construction
@@ -441,8 +441,8 @@ impl AppController {
         self.step_regions.clear();
         self.reconstruct_step_regions_for(0);
         self.ceiling_step_regions.clear();
-        self.reconstruct_ceiling_step_regions_for(0);
-        // Same as open_ber: drop any line/point state from the previous session.
+        self.load_ceiling_step_regions_for(0); // restore durable, else migrate
+                                               // Same as open_ber: drop any line/point state from the previous session.
         self.pending_ceiling_step = None;
         self.ceiling_step_mode = false;
         self.pending_roof_point = None;
