@@ -1567,6 +1567,32 @@ fn structure_modes_are_non_exclusive() {
     );
 }
 
+/// A renamed group's label PERSISTS — it's stored on the construction (the
+/// former `description` field, now `name`), so reopening "Edit attributes" after
+/// a re-resolve shows the chosen name instead of the "Group N" default.
+#[test]
+fn group_name_persists_across_reopen() {
+    let mut c = dimensioned_square_controller();
+    c.materialize();
+
+    set_only_kind(&mut c, SurfaceKind::Floors);
+    c.set_structure_select_mode(Some(SelectMode::All));
+    c.begin_structure_edit();
+    assert_eq!(c.structure_edit().expect("session").groups.len(), 1);
+    assert_eq!(c.structure_edit().unwrap().groups[0].name, "Group 1");
+
+    c.set_structure_group_name(0, "Kitchen".to_string());
+    c.end_structure_edit();
+    c.materialize(); // re-resolve: the name on the construction must survive it
+
+    c.begin_structure_edit();
+    assert_eq!(
+        c.structure_edit().expect("reopened").groups[0].name,
+        "Kitchen",
+        "the stored construction name is read back as the group label"
+    );
+}
+
 /// A carve splits the AREA kind it's drawn over even when a higher-priority mode
 /// (walls) is also active. Regression: the old code split only the single
 /// "primary" kind (wall → roof → floor), so an interior carve in floor+wall mode

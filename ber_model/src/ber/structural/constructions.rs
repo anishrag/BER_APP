@@ -210,7 +210,11 @@ pub struct ConstructionBase {
     pub construction_makeup: ConstructionMakeup,
     pub construction_phase: ConstructionPhase,
     pub photos: Vec<Photo>,
-    pub description: Option<String>,
+    /// The assessor's editable label for this construction (shown as the group's
+    /// name in the Structure editor). `None` falls back to "Group N". `alias`
+    /// keeps records saved under the former field name `description` loadable.
+    #[serde(default, alias = "description")]
+    pub name: Option<String>,
 }
 
 /// A wall construction shared by one or more `WallRegion`s.
@@ -417,6 +421,32 @@ impl Ber {
     /// `ensure_ceiling_construction`).
     pub fn ceiling_construction(&self, id: ItemId) -> Option<&CeilingConstruction> {
         self.ceiling_constructions.iter().find(|c| c.base.id == id)
+    }
+
+    /// Set (or clear, with `None`) the editable NAME of the `kind` construction
+    /// `id` — the durable home for a Structure group's label. Find-by-id within
+    /// the matching registry; no-op if it isn't there.
+    pub fn set_construction_name(&mut self, kind: SurfaceKind, id: ItemId, name: Option<String>) {
+        let base = match kind {
+            SurfaceKind::Walls => self
+                .wall_constructions
+                .iter_mut()
+                .find(|c| c.base.id == id)
+                .map(|c| &mut c.base),
+            SurfaceKind::Floors => self
+                .floor_constructions
+                .iter_mut()
+                .find(|c| c.base.id == id)
+                .map(|c| &mut c.base),
+            SurfaceKind::Roofs => self
+                .ceiling_constructions
+                .iter_mut()
+                .find(|c| c.base.id == id)
+                .map(|c| &mut c.base),
+        };
+        if let Some(base) = base {
+            base.name = name;
+        }
     }
 
     /// The ids of every `kind` surface in storey `idx` whose construction is NOT

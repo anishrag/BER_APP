@@ -207,60 +207,71 @@ impl AppController {
         // phase) read and tagged with `ConstructionType` so the rest of the
         // editor stays kind-agnostic. A region whose construction is missing
         // reads as that kind's default type + default make-up / Original phase.
-        let attrs_of =
-            |id: ItemId| -> Option<(ConstructionType, ConstructionMakeup, ConstructionPhase)> {
-                match storey.surface_kind_of(id)? {
-                    SurfaceKind::Walls => {
-                        let r = storey.walls.regions.iter().find(|r| r.id == id)?;
-                        Some(match record.data.wall_construction(r.construction_id) {
-                            Some(c) => (
-                                ConstructionType::Wall(c.construction_type),
-                                c.base.construction_makeup.clone(),
-                                c.base.construction_phase.clone(),
-                            ),
-                            None => (
-                                ConstructionType::Wall(Default::default()),
-                                Default::default(),
-                                Default::default(),
-                            ),
-                        })
-                    }
-                    SurfaceKind::Floors => {
-                        let r = storey.floors.regions.iter().find(|r| r.id == id)?;
-                        Some(match record.data.floor_construction(r.construction_id) {
-                            Some(c) => (
-                                ConstructionType::Floor(c.construction_type),
-                                c.base.construction_makeup.clone(),
-                                c.base.construction_phase.clone(),
-                            ),
-                            None => (
-                                ConstructionType::Floor(Default::default()),
-                                Default::default(),
-                                Default::default(),
-                            ),
-                        })
-                    }
-                    SurfaceKind::Roofs => {
-                        let r = storey.roofs.regions.iter().find(|r| r.id == id)?;
-                        Some(match record.data.ceiling_construction(r.construction_id) {
-                            Some(c) => (
-                                ConstructionType::Ceiling(c.construction_type),
-                                c.base.construction_makeup.clone(),
-                                c.base.construction_phase.clone(),
-                            ),
-                            None => (
-                                ConstructionType::Ceiling(Default::default()),
-                                Default::default(),
-                                Default::default(),
-                            ),
-                        })
-                    }
+        type Attrs = (
+            ConstructionType,
+            ConstructionMakeup,
+            ConstructionPhase,
+            Option<String>,
+        );
+        let attrs_of = |id: ItemId| -> Option<Attrs> {
+            match storey.surface_kind_of(id)? {
+                SurfaceKind::Walls => {
+                    let r = storey.walls.regions.iter().find(|r| r.id == id)?;
+                    Some(match record.data.wall_construction(r.construction_id) {
+                        Some(c) => (
+                            ConstructionType::Wall(c.construction_type),
+                            c.base.construction_makeup.clone(),
+                            c.base.construction_phase.clone(),
+                            c.base.name.clone(),
+                        ),
+                        None => (
+                            ConstructionType::Wall(Default::default()),
+                            Default::default(),
+                            Default::default(),
+                            None,
+                        ),
+                    })
                 }
-            };
+                SurfaceKind::Floors => {
+                    let r = storey.floors.regions.iter().find(|r| r.id == id)?;
+                    Some(match record.data.floor_construction(r.construction_id) {
+                        Some(c) => (
+                            ConstructionType::Floor(c.construction_type),
+                            c.base.construction_makeup.clone(),
+                            c.base.construction_phase.clone(),
+                            c.base.name.clone(),
+                        ),
+                        None => (
+                            ConstructionType::Floor(Default::default()),
+                            Default::default(),
+                            Default::default(),
+                            None,
+                        ),
+                    })
+                }
+                SurfaceKind::Roofs => {
+                    let r = storey.roofs.regions.iter().find(|r| r.id == id)?;
+                    Some(match record.data.ceiling_construction(r.construction_id) {
+                        Some(c) => (
+                            ConstructionType::Ceiling(c.construction_type),
+                            c.base.construction_makeup.clone(),
+                            c.base.construction_phase.clone(),
+                            c.base.name.clone(),
+                        ),
+                        None => (
+                            ConstructionType::Ceiling(Default::default()),
+                            Default::default(),
+                            Default::default(),
+                            None,
+                        ),
+                    })
+                }
+            }
+        };
         let mut groups: Vec<EditGroup> = Vec::new();
         for id in &self.structure_selected {
             // Skip ids that no longer resolve to a live region of any kind.
-            let Some((ty, makeup, phase)) = attrs_of(*id) else {
+            let Some((ty, makeup, phase, cname)) = attrs_of(*id) else {
                 continue;
             };
             match groups
@@ -273,13 +284,17 @@ impl AppController {
                     ty,
                     makeup,
                     phase,
-                    name: String::new(),
+                    // The construction's stored name, if any (set in a prior
+                    // session); the "Group N" fallback is filled in below.
+                    name: cname.unwrap_or_default(),
                 }),
             }
         }
-        // Default each group's editable label to "Group N" (1-based).
+        // Any group without a stored name defaults to "Group N" (1-based).
         for (i, g) in groups.iter_mut().enumerate() {
-            g.name = format!("Group {}", i + 1);
+            if g.name.trim().is_empty() {
+                g.name = format!("Group {}", i + 1);
+            }
         }
         if !groups.is_empty() {
             self.structure_edit = Some(StructureEdit {
@@ -290,14 +305,71 @@ impl AppController {
         }
     }
 
-    /// Rename a group's editable label (the in-place window's title). A cosmetic
-    /// session-only change — no undo snapshot, no re-resolve.
+    /// Rename a group's editable label — the in-place window title AND the
+    /// group's construction NAME, so the label survives reopening the editor (and
+    /// reload). Updates the session group, then writes the name onto each of the
+    /// group's constructions (`Ber::set_construction_name`). No undo snapshot
+    /// (cosmetic); marks dirty so the rename persists.
     pub fn set_structure_group_name(&mut self, group: usize, name: String) {
-        if let Some(e) = self.structure_edit.as_mut() {
-            if let Some(g) = e.groups.get_mut(group) {
-                g.name = name;
-            }
+        let (kind, ids) = {
+            let Some(e) = self.structure_edit.as_mut() else {
+                return;
+            };
+            let Some(g) = e.groups.get_mut(group) else {
+                return;
+            };
+            g.name = name.clone();
+            (g.ty.kind(), g.ids.clone())
+        };
+        let Some(idx) = self.current_storey_idx else {
+            return;
+        };
+        let Some(record) = self.current_record.as_mut() else {
+            return;
+        };
+        // Each region in the group shares one construction (grouped by it); map
+        // the region ids to their construction ids, then name those.
+        let cids: Vec<ItemId> = {
+            let Some(storey) = record.data.storeys.get(idx) else {
+                return;
+            };
+            let region_cid = |id: ItemId| -> Option<ItemId> {
+                match kind {
+                    SurfaceKind::Walls => storey
+                        .walls
+                        .regions
+                        .iter()
+                        .find(|r| r.id == id)
+                        .map(|r| r.construction_id),
+                    SurfaceKind::Floors => storey
+                        .floors
+                        .regions
+                        .iter()
+                        .find(|r| r.id == id)
+                        .map(|r| r.construction_id),
+                    SurfaceKind::Roofs => storey
+                        .roofs
+                        .regions
+                        .iter()
+                        .find(|r| r.id == id)
+                        .map(|r| r.construction_id),
+                }
+            };
+            let mut seen = std::collections::HashSet::new();
+            ids.iter()
+                .filter_map(|id| region_cid(*id))
+                .filter(|c| seen.insert(*c))
+                .collect()
+        };
+        let stored = if name.trim().is_empty() {
+            None
+        } else {
+            Some(name)
+        };
+        for cid in cids {
+            record.data.set_construction_name(kind, cid, stored.clone());
         }
+        let _ = self.mark_dirty();
     }
 
     /// Switch which attribute-group's popup is active (one at a time).
