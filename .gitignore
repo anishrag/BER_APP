@@ -23,3 +23,6 @@ android/gradlew.bat
 # Release keystore: never check in
 *.keystore
 *keystore.properties
+
+# Runtime photo store (desktop dev) — generated at runtime, not source
+/photos/

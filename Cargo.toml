@@ -67,6 +67,15 @@ eframe = { version = "0.33.3", default-features = false, features = [
     "default_fonts",
 ] }
 android_logger = "0.15"
+# In-app camera bridge: Rust calls MainActivity.requestPhoto(int) over JNI to
+# launch the system camera, and the activity hands the captured file path back
+# through the `Java_..._nativeOnPhoto*` exports (see src/ui/widgets/photo.rs).
+# `ndk-context` exposes the JavaVM + activity that android-activity registers.
+# Both are already in the tree transitively — naming them just makes the bridge
+# code legal. (The Bluetooth laser path stays raw-pointer JNI; this one needs
+# Rust→Java calls + a Java String, where the `jni` crate earns its keep.)
+jni = "0.21"
+ndk-context = "0.1"
 
 [workspace]
 members = ["ber_model", "document", "sketch", "domain", "manip_plan"]
