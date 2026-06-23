@@ -61,23 +61,50 @@ struct EditWindow {
     color: egui::Color32,
 }
 
-/// The in-place "Edit attributes" layout: the per-group windows stacked in
-/// columns flanking the plan, plus the view that fits the plan into the gap.
+/// The in-place "Edit attributes" layout: the per-group windows distributed to
+/// the canvas margins (nearest edge to each group), plus the view that fits the
+/// plan into the gap left in the middle.
 struct StructureEditLayout {
     view: ViewParams,
     windows: Vec<EditWindow>,
 }
 
+/// Place items (window top-left coords, given in their PREFERRED order) along one
+/// axis with no overlap: a forward pass pushes each to at least `spacing` past
+/// the previous (and ≥ `lo`), a backward pass pulls any that overran `hi` back
+/// (keeping `spacing`). The result keeps each near its preferred spot while
+/// staying inside `[lo, hi]`; if there are too many to fit they compress evenly.
+fn declutter_axis(prefs: &mut [f32], spacing: f32, lo: f32, hi: f32) {
+    let n = prefs.len();
+    for i in 0..n {
+        let floor = if i == 0 { lo } else { prefs[i - 1] + spacing };
+        if prefs[i] < floor {
+            prefs[i] = floor;
+        }
+    }
+    for i in (0..n).rev() {
+        let ceil = if i + 1 == n {
+            hi
+        } else {
+            prefs[i + 1] - spacing
+        };
+        if prefs[i] > ceil {
+            prefs[i] = ceil;
+        }
+    }
+}
+
 /// Lay the in-place attribute windows into the canvas MARGINS, then fit the plan
 /// into the gap left over — "place the windows first, then zoom the plan to fill
-/// what's left". Two arrangements are considered: windows in LEFT/RIGHT gutters
-/// (columns) or in TOP/BOTTOM gutters (bands); whichever fits the plan LARGER
-/// wins. That's what stops a wide plan being squeezed into a narrow middle strip
-/// with empty canvas above and below — for a wide plan the bands arrangement
-/// keeps full width and only trims height, so the plan stays big. Each window
-/// goes to the margin nearest its group and is ordered along that margin so the
-/// connectors don't cross. `None` when there's no fittable plan or the canvas is
-/// too small, leaving the caller on the normal view.
+/// what's left". Each group's window goes to whichever canvas EDGE its group is
+/// nearest (top / bottom / left / right) and is positioned along that edge close
+/// to the group's own spot (de-cluttered so windows on the same edge don't
+/// overlap). Spreading across all four margins — rather than forcing every window
+/// into one pair of gutters — keeps each connector short and roughly radial and
+/// keeps the plan large in the centre. Corners are kept clear by confining the
+/// side columns to the un-reserved height and the top/bottom rows to the
+/// un-reserved width. `None` when there's no fittable plan or the canvas is too
+/// small, leaving the caller on the normal view.
 fn compute_structure_edit_layout(
     rect: egui::Rect,
     ber: Option<&Ber>,
@@ -97,149 +124,153 @@ fn compute_structure_edit_layout(
     let col_w = EDIT_BOX_W + 2.0 * EDIT_COL_PAD;
     let band_h = EDIT_SLOT_H + 2.0 * EDIT_TOP_PAD;
 
-    // Each group's on-screen position under the plain full-rect fit — used only
-    // to choose which margin each window is nearest and to order them so
-    // connectors don't cross.
+    // Each group's on-screen position under the plain full-rect fit — picks which
+    // margin each window is nearest and where along it the window sits.
     let t_full = render::fit_transform(rect, min_xy, max_xy, base);
     let screen: Vec<egui::Pos2> = fans
         .iter()
         .map(|f| t_full.apply(f.centroid.0, f.centroid.1))
         .collect();
 
-    // The view that fits the plan into `inner` (zoom relative to the full-rect
-    // fit, recentred on the gap).
-    let view_for = |inner: egui::Rect| -> ViewParams {
-        let base_scale = render::auto_fit_scale(rect, min_xy, max_xy);
-        let inner_scale = render::auto_fit_scale(inner, min_xy, max_xy);
-        ViewParams {
-            zoom: (inner_scale / base_scale) as f32,
-            offset_x: inner.center().x - rect.center().x,
-            offset_y: inner.center().y - rect.center().y,
-            yaw_deg: base.yaw_deg,
-            pitch_deg: base.pitch_deg,
+    // Assign each group to its NEAREST canvas edge.
+    let (mut left, mut right, mut top, mut bottom): (
+        Vec<usize>,
+        Vec<usize>,
+        Vec<usize>,
+        Vec<usize>,
+    ) = (Vec::new(), Vec::new(), Vec::new(), Vec::new());
+    for (k, p) in screen.iter().enumerate() {
+        let dists = [
+            (p.x - rect.left(), 0u8), // left
+            (rect.right() - p.x, 1),  // right
+            (p.y - rect.top(), 2),    // top
+            (rect.bottom() - p.y, 3), // bottom
+        ];
+        let nearest = dists
+            .into_iter()
+            .min_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal))
+            .map(|(_, e)| e)
+            .unwrap_or(0);
+        match nearest {
+            0 => left.push(k),
+            1 => right.push(k),
+            2 => top.push(k),
+            _ => bottom.push(k),
         }
+    }
+
+    // Reserve a margin only on edges that actually hold a window.
+    let left_w = if left.is_empty() { EDIT_COL_PAD } else { col_w };
+    let right_w = if right.is_empty() {
+        EDIT_COL_PAD
+    } else {
+        col_w
+    };
+    let top_h = if top.is_empty() { EDIT_TOP_PAD } else { band_h };
+    let bottom_h = if bottom.is_empty() {
+        EDIT_TOP_PAD
+    } else {
+        band_h
+    };
+    let inner = egui::Rect::from_min_max(
+        egui::pos2(rect.left() + left_w, rect.top() + top_h),
+        egui::pos2(rect.right() - right_w, rect.bottom() - bottom_h),
+    );
+    if inner.width() < 60.0 || inner.height() < 60.0 {
+        return None;
+    }
+
+    // Fit the plan into `inner`: zoom relative to the full-rect auto-fit, offset
+    // to recentre on the gap between the reserved margins.
+    let base_scale = render::auto_fit_scale(rect, min_xy, max_xy);
+    let inner_scale = render::auto_fit_scale(inner, min_xy, max_xy);
+    let view = ViewParams {
+        zoom: (inner_scale / base_scale) as f32,
+        offset_x: inner.center().x - rect.center().x,
+        offset_y: inner.center().y - rect.center().y,
+        yaw_deg: base.yaw_deg,
+        pitch_deg: base.pitch_deg,
     };
 
-    // Candidate A — windows in the LEFT/RIGHT gutters, stacked vertically.
-    let columns = || -> Option<(f32, StructureEditLayout)> {
-        let (mut left, mut right): (Vec<usize>, Vec<usize>) =
-            (0..fans.len()).partition(|&k| screen[k].x < rect.center().x);
-        let left_w = if left.is_empty() { EDIT_COL_PAD } else { col_w };
-        let right_w = if right.is_empty() {
-            EDIT_COL_PAD
+    let mut windows = Vec::with_capacity(fans.len());
+
+    // LEFT / RIGHT columns: window y tracks the group's screen y, confined to the
+    // height not reserved by the top/bottom rows so corners stay clear.
+    let col_lo = rect.top() + top_h;
+    let col_hi = (rect.bottom() - bottom_h - EDIT_SLOT_H).max(col_lo);
+    for (col, left_side) in [(&mut left, true), (&mut right, false)] {
+        col.sort_by(|&a, &b| {
+            screen[a]
+                .y
+                .partial_cmp(&screen[b].y)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
+        let mut ys: Vec<f32> = col
+            .iter()
+            .map(|&k| screen[k].y - EDIT_SLOT_H * 0.5)
+            .collect();
+        declutter_axis(&mut ys, EDIT_SLOT_H, col_lo, col_hi);
+        let x = if left_side {
+            rect.left() + EDIT_COL_PAD
         } else {
-            col_w
+            rect.right() - EDIT_COL_PAD - EDIT_BOX_W
         };
-        let inner = egui::Rect::from_min_max(
-            egui::pos2(rect.left() + left_w, rect.top() + EDIT_TOP_PAD),
-            egui::pos2(rect.right() - right_w, rect.bottom() - EDIT_TOP_PAD),
-        );
-        if inner.width() < 60.0 || inner.height() < 60.0 {
-            return None;
-        }
-        let view = view_for(inner);
-        let mut windows = Vec::with_capacity(fans.len());
-        for (col, left_side) in [(&mut left, true), (&mut right, false)] {
-            // Order by on-screen height so connectors don't cross.
-            col.sort_by(|&a, &b| {
-                screen[a]
-                    .y
-                    .partial_cmp(&screen[b].y)
-                    .unwrap_or(std::cmp::Ordering::Equal)
-            });
-            let total_h = col.len() as f32 * EDIT_SLOT_H;
-            let mut y = (rect.center().y - total_h * 0.5).max(rect.top() + EDIT_TOP_PAD);
-            let x = if left_side {
-                rect.left() + EDIT_COL_PAD
+        for (slot, &k) in col.iter().enumerate() {
+            let y = ys[slot];
+            let inner_anchor = if left_side {
+                egui::pos2(x + EDIT_BOX_W, y + EDIT_SLOT_H * 0.5)
             } else {
-                rect.right() - EDIT_COL_PAD - EDIT_BOX_W
+                egui::pos2(x, y + EDIT_SLOT_H * 0.5)
             };
-            for &k in col.iter() {
-                let inner_anchor = if left_side {
-                    egui::pos2(x + EDIT_BOX_W, y + EDIT_SLOT_H * 0.5)
-                } else {
-                    egui::pos2(x, y + EDIT_SLOT_H * 0.5)
-                };
-                windows.push(EditWindow {
-                    group_index: fans[k].group_index,
-                    pos: egui::pos2(x, y),
-                    inner_anchor,
-                    centroid: fans[k].centroid,
-                    color: fans[k].color,
-                });
-                y += EDIT_SLOT_H;
-            }
+            windows.push(EditWindow {
+                group_index: fans[k].group_index,
+                pos: egui::pos2(x, y),
+                inner_anchor,
+                centroid: fans[k].centroid,
+                color: fans[k].color,
+            });
         }
-        let scale = render::auto_fit_scale(inner, min_xy, max_xy) as f32;
-        Some((scale, StructureEditLayout { view, windows }))
-    };
+    }
 
-    // Candidate B — windows in the TOP/BOTTOM gutters, spread horizontally. One
-    // row per band; bail (let columns win) if a band can't hold its windows side
-    // by side, so we never overlap them.
-    let bands = || -> Option<(f32, StructureEditLayout)> {
-        let (mut top, mut bottom): (Vec<usize>, Vec<usize>) =
-            (0..fans.len()).partition(|&k| screen[k].y < rect.center().y);
-        let fits = |row: &[usize]| (row.len() as f32) * EDIT_BOX_W + EDIT_COL_PAD <= rect.width();
-        if !fits(&top) || !fits(&bottom) {
-            return None;
-        }
-        let top_h = if top.is_empty() { EDIT_TOP_PAD } else { band_h };
-        let bottom_h = if bottom.is_empty() {
-            EDIT_TOP_PAD
+    // TOP / BOTTOM rows: window x tracks the group's screen x, confined to the
+    // width not reserved by the left/right columns.
+    let row_lo = rect.left() + left_w;
+    let row_hi = (rect.right() - right_w - EDIT_BOX_W).max(row_lo);
+    for (row, top_side) in [(&mut top, true), (&mut bottom, false)] {
+        row.sort_by(|&a, &b| {
+            screen[a]
+                .x
+                .partial_cmp(&screen[b].x)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
+        let mut xs: Vec<f32> = row
+            .iter()
+            .map(|&k| screen[k].x - EDIT_BOX_W * 0.5)
+            .collect();
+        declutter_axis(&mut xs, EDIT_BOX_W, row_lo, row_hi);
+        let y = if top_side {
+            rect.top() + EDIT_TOP_PAD
         } else {
-            band_h
+            rect.bottom() - EDIT_TOP_PAD - EDIT_SLOT_H
         };
-        let inner = egui::Rect::from_min_max(
-            egui::pos2(rect.left() + EDIT_COL_PAD, rect.top() + top_h),
-            egui::pos2(rect.right() - EDIT_COL_PAD, rect.bottom() - bottom_h),
-        );
-        if inner.width() < 60.0 || inner.height() < 60.0 {
-            return None;
-        }
-        let view = view_for(inner);
-        let mut windows = Vec::with_capacity(fans.len());
-        for (row, top_side) in [(&mut top, true), (&mut bottom, false)] {
-            // Order by on-screen x so connectors don't cross.
-            row.sort_by(|&a, &b| {
-                screen[a]
-                    .x
-                    .partial_cmp(&screen[b].x)
-                    .unwrap_or(std::cmp::Ordering::Equal)
-            });
-            let total_w = row.len() as f32 * EDIT_BOX_W;
-            let mut x = (rect.center().x - total_w * 0.5).max(rect.left() + EDIT_COL_PAD);
-            let y = if top_side {
-                rect.top() + EDIT_TOP_PAD
+        for (slot, &k) in row.iter().enumerate() {
+            let x = xs[slot];
+            let inner_anchor = if top_side {
+                egui::pos2(x + EDIT_BOX_W * 0.5, y + EDIT_SLOT_H)
             } else {
-                rect.bottom() - EDIT_TOP_PAD - EDIT_SLOT_H
+                egui::pos2(x + EDIT_BOX_W * 0.5, y)
             };
-            for &k in row.iter() {
-                let inner_anchor = if top_side {
-                    egui::pos2(x + EDIT_BOX_W * 0.5, y + EDIT_SLOT_H)
-                } else {
-                    egui::pos2(x + EDIT_BOX_W * 0.5, y)
-                };
-                windows.push(EditWindow {
-                    group_index: fans[k].group_index,
-                    pos: egui::pos2(x, y),
-                    inner_anchor,
-                    centroid: fans[k].centroid,
-                    color: fans[k].color,
-                });
-                x += EDIT_BOX_W;
-            }
+            windows.push(EditWindow {
+                group_index: fans[k].group_index,
+                pos: egui::pos2(x, y),
+                inner_anchor,
+                centroid: fans[k].centroid,
+                color: fans[k].color,
+            });
         }
-        let scale = render::auto_fit_scale(inner, min_xy, max_xy) as f32;
-        Some((scale, StructureEditLayout { view, windows }))
-    };
+    }
 
-    // Keep whichever arrangement fits the plan larger (bigger fitted scale).
-    [columns(), bands()]
-        .into_iter()
-        .flatten()
-        .max_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal))
-        .map(|(_, layout)| layout)
+    Some(StructureEditLayout { view, windows })
 }
 
 pub(super) fn render<F: FnMut(UiEvent)>(
