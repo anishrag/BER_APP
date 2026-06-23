@@ -145,28 +145,65 @@ fn compute_structure_edit_layout(
     // Assign each group to a side by WHERE IT SITS RELATIVE TO THE PLAN'S OWN
     // CENTRE (its quadrant), not the nearest canvas edge — otherwise a
     // letterboxed plan (wide → tall side gaps, or tall → wide top/bottom gaps)
-    // pushes every group onto the same axis and we're back to two-sided. The
-    // dominant offset axis picks the side: a group above-centre goes top, one to
-    // the right goes right, and so on, so all four margins get used.
+    // pushes every group onto the same axis and we're back to two-sided.
+    //
+    // But the quadrant is only a PREFERENCE: an edge that can't fit all the
+    // groups that want it would just overlap-compress them while other edges sit
+    // empty. So each edge has a capacity, and groups are placed onto their most
+    // preferred edge that still has room — decisive groups (clearly on one side)
+    // claim their edge first, and ones near a corner spill to a perpendicular
+    // edge that's free. Edge codes: 0 = left, 1 = right, 2 = top, 3 = bottom.
     let plan_centre = t_full.apply((min_xy.0 + max_xy.0) * 0.5, (min_xy.1 + max_xy.1) * 0.5);
+    // Rough per-edge capacities from the full canvas (the exact reserved margins
+    // depend on the assignment we're computing, so estimate from the whole rect).
+    let cap_v =
+        (((rect.height() - EDIT_TOP_SAFE - EDIT_TOP_PAD) / EDIT_SLOT_H).floor() as usize).max(1);
+    let cap_h = (((rect.width() - 2.0 * EDIT_COL_PAD) / EDIT_BOX_W).floor() as usize).max(1);
+    let cap = [cap_v, cap_v, cap_h, cap_h];
+
+    // Each group's edge preference order (most→least wanted) + how decisively it
+    // belongs to its first choice (bigger = more one-sided, less corner-like).
+    let pref_and_decisiveness = |p: egui::Pos2| -> ([usize; 4], f32) {
+        let (dx, dy) = (p.x - plan_centre.x, p.y - plan_centre.y);
+        let (h, opp_h) = if dx < 0.0 { (0, 1) } else { (1, 0) };
+        let (v, opp_v) = if dy < 0.0 { (2, 3) } else { (3, 2) };
+        let prefs = if dx.abs() >= dy.abs() {
+            [h, v, opp_v, opp_h]
+        } else {
+            [v, h, opp_h, opp_v]
+        };
+        (prefs, (dx.abs() - dy.abs()).abs())
+    };
+
+    // Decisive groups first, so corner-ish ones are the ones that spill over.
+    let mut order: Vec<usize> = (0..fans.len()).collect();
+    order.sort_by(|&a, &b| {
+        let da = pref_and_decisiveness(screen[a]).1;
+        let db = pref_and_decisiveness(screen[b]).1;
+        db.partial_cmp(&da).unwrap_or(std::cmp::Ordering::Equal)
+    });
+
     let (mut left, mut right, mut top, mut bottom): (
         Vec<usize>,
         Vec<usize>,
         Vec<usize>,
         Vec<usize>,
     ) = (Vec::new(), Vec::new(), Vec::new(), Vec::new());
-    for (k, p) in screen.iter().enumerate() {
-        let (dx, dy) = (p.x - plan_centre.x, p.y - plan_centre.y);
-        if dx.abs() >= dy.abs() {
-            if dx < 0.0 {
-                left.push(k);
-            } else {
-                right.push(k);
-            }
-        } else if dy < 0.0 {
-            top.push(k);
-        } else {
-            bottom.push(k);
+    let mut counts = [0usize; 4];
+    for k in order {
+        let (prefs, _) = pref_and_decisiveness(screen[k]);
+        // First preferred edge with spare room; if all are full, fall back to the
+        // first choice (an unavoidable overlap, but only once every edge is full).
+        let edge = prefs
+            .into_iter()
+            .find(|&e| counts[e] < cap[e])
+            .unwrap_or(prefs[0]);
+        counts[edge] += 1;
+        match edge {
+            0 => left.push(k),
+            1 => right.push(k),
+            2 => top.push(k),
+            _ => bottom.push(k),
         }
     }
 
