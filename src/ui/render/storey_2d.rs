@@ -285,10 +285,28 @@ fn draw_floor(
     }
 
     // Outline drawn separately so the stroke stays crisp regardless of fill mode.
-    painter.add(egui::Shape::closed_line(
-        screen_pts,
-        egui::Stroke::new(2.0, line_color),
-    ));
+    let outline = egui::Stroke::new(2.0, line_color);
+    if selected.contains(&region.id) {
+        painter.add(egui::Shape::closed_line(screen_pts.clone(), outline));
+        draw_selection_outline(painter, &screen_pts);
+    } else {
+        painter.add(egui::Shape::closed_line(screen_pts, outline));
+    }
+}
+
+/// A bright dashed marquee around a SELECTED region's screen ring — the
+/// temporary "this is what's selected" outline shown before "Edit attributes"
+/// opens (the edit session has its own per-group colouring, so this only paints
+/// pre-edit, where `selected` is non-empty).
+fn draw_selection_outline(painter: &egui::Painter, ring: &[egui::Pos2]) {
+    let n = ring.len();
+    if n < 2 {
+        return;
+    }
+    let stroke = egui::Stroke::new(3.0, style::SELECTION_LINE);
+    for i in 0..n {
+        super::draw_dashed_segment(painter, ring[i], ring[(i + 1) % n], stroke);
+    }
 }
 
 fn draw_wall_edges(
@@ -355,6 +373,7 @@ fn draw_roof_overlay(
         if pts.len() >= 3 {
             if selected.contains(&region.id) {
                 fill_polygon(painter, &pts, fill);
+                draw_selection_outline(painter, &pts);
             }
             painter.add(egui::Shape::closed_line(pts, stroke));
         }

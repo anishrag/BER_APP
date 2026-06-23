@@ -46,6 +46,9 @@ const EDIT_BOX_W: f32 = 200.0;
 const EDIT_SLOT_H: f32 = 158.0;
 /// Gap between a window column and the canvas edge.
 const EDIT_COL_PAD: f32 = 10.0;
+/// Clear gap kept BETWEEN adjacent floaties along an edge, so the de-clutter
+/// pitch exceeds the window box and they never touch/overlap.
+const EDIT_GAP: f32 = 12.0;
 /// Top/bottom inset reserved for the window columns.
 const EDIT_TOP_PAD: f32 = 12.0;
 /// Clearance kept below the canvas top for the phase signpost + surface banner
@@ -141,6 +144,18 @@ fn compute_structure_edit_layout(
         .iter()
         .map(|f| t_full.apply(f.centroid.0, f.centroid.1))
         .collect();
+    // The connector TARGET per group (walls → nearest selected wall, else the
+    // centroid). Indexed by fan; assignment/ordering still uses the centroid.
+    let anchors: Vec<(f64, f64)> = fans
+        .iter()
+        .map(|f| {
+            render::structure_fan::group_connector_anchor(
+                storey,
+                &edit.groups[f.group_index],
+                f.centroid,
+            )
+        })
+        .collect();
 
     // Assign each group to a side by WHERE IT SITS RELATIVE TO THE PLAN'S OWN
     // CENTRE (its quadrant), not the nearest canvas edge — otherwise a
@@ -156,9 +171,11 @@ fn compute_structure_edit_layout(
     let plan_centre = t_full.apply((min_xy.0 + max_xy.0) * 0.5, (min_xy.1 + max_xy.1) * 0.5);
     // Rough per-edge capacities from the full canvas (the exact reserved margins
     // depend on the assignment we're computing, so estimate from the whole rect).
+    let col_pitch = EDIT_SLOT_H + EDIT_GAP;
+    let row_pitch = EDIT_BOX_W + EDIT_GAP;
     let cap_v =
-        (((rect.height() - EDIT_TOP_SAFE - EDIT_TOP_PAD) / EDIT_SLOT_H).floor() as usize).max(1);
-    let cap_h = (((rect.width() - 2.0 * EDIT_COL_PAD) / EDIT_BOX_W).floor() as usize).max(1);
+        (((rect.height() - EDIT_TOP_SAFE - EDIT_TOP_PAD) / col_pitch).floor() as usize).max(1);
+    let cap_h = (((rect.width() - 2.0 * EDIT_COL_PAD) / row_pitch).floor() as usize).max(1);
     let cap = [cap_v, cap_v, cap_h, cap_h];
 
     // Each group's edge preference order (most→least wanted) + how decisively it
@@ -265,7 +282,7 @@ fn compute_structure_edit_layout(
             .iter()
             .map(|&k| screen[k].y - EDIT_SLOT_H * 0.5)
             .collect();
-        declutter_axis(&mut ys, EDIT_SLOT_H, col_lo, col_hi);
+        declutter_axis(&mut ys, col_pitch, col_lo, col_hi);
         let x = if left_side {
             rect.left() + EDIT_COL_PAD
         } else {
@@ -282,7 +299,7 @@ fn compute_structure_edit_layout(
                 group_index: fans[k].group_index,
                 pos: egui::pos2(x, y),
                 inner_anchor,
-                centroid: fans[k].centroid,
+                centroid: anchors[k],
                 color: fans[k].color,
             });
         }
@@ -303,7 +320,7 @@ fn compute_structure_edit_layout(
             .iter()
             .map(|&k| screen[k].x - EDIT_BOX_W * 0.5)
             .collect();
-        declutter_axis(&mut xs, EDIT_BOX_W, row_lo, row_hi);
+        declutter_axis(&mut xs, row_pitch, row_lo, row_hi);
         let y = if top_side {
             rect.top() + EDIT_TOP_SAFE // clear the phase signpost / banner
         } else {
@@ -320,7 +337,7 @@ fn compute_structure_edit_layout(
                 group_index: fans[k].group_index,
                 pos: egui::pos2(x, y),
                 inner_anchor,
-                centroid: fans[k].centroid,
+                centroid: anchors[k],
                 color: fans[k].color,
             });
         }

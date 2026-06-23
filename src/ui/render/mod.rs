@@ -1227,6 +1227,9 @@ pub(crate) mod style {
     pub const GROUND_WALL: Color32 = Color32::from_rgb(150, 105, 60);
     pub const WINDOW_FILL: Color32 = Color32::from_rgba_premultiplied(130, 200, 230, 180);
     pub const DOOR_FILL: Color32 = Color32::from_rgba_premultiplied(180, 130, 80, 200);
+    /// Bright marquee colour for the Structure pre-edit SELECTION outline — a
+    /// vivid gold that pops against the floor-blue / roof-orange fills.
+    pub const SELECTION_LINE: Color32 = Color32::from_rgb(255, 215, 0);
     pub const DIMENSION_TEXT: Color32 = Color32::from_rgb(200, 200, 200);
     pub const HINT_TEXT: Color32 = Color32::from_rgb(140, 140, 140);
     pub const FADED_OPACITY: u8 = 50;

@@ -142,6 +142,33 @@ fn group_centroid(
     (n > 0).then(|| (sum.0 / n as f64, sum.1 / n as f64))
 }
 
+/// The point a group's in-place connector LINE should target. Floors/roofs use
+/// the group `centroid`; WALLS use the base midpoint of the wall (in the group)
+/// NEAREST that centroid — pointing at an actual selected wall reads clearer
+/// than at the average position, which can land in empty space (e.g. an
+/// L-shaped wall run). Falls back to the centroid if no wall resolves.
+pub(crate) fn group_connector_anchor(
+    storey: &Storey,
+    group: &crate::controller::app_controller::EditGroup,
+    centroid: (f64, f64),
+) -> (f64, f64) {
+    let kind = group.ty.kind();
+    if kind != SurfaceKind::Walls {
+        return centroid;
+    }
+    let dist2 = |p: &(f64, f64)| (p.0 - centroid.0).powi(2) + (p.1 - centroid.1).powi(2);
+    group
+        .ids
+        .iter()
+        .filter_map(|id| region_centroid(storey, kind, *id))
+        .min_by(|a, b| {
+            dist2(a)
+                .partial_cmp(&dist2(b))
+                .unwrap_or(std::cmp::Ordering::Equal)
+        })
+        .unwrap_or(centroid)
+}
+
 /// A single region's plan centroid for `kind` (wall → base midpoint; floor /
 /// roof → region centroid).
 fn region_centroid(

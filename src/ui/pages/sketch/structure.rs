@@ -240,9 +240,9 @@ pub(crate) fn group_editor_ui<F: FnMut(UiEvent)>(
     }
 
     // PHASE dropdown — defaults to the value derived from the stage-1 zones, but
-    // the assessor can override it here. Falls back to the phase's built-in name
+    // the assessor can override it here. No label: the populated value (e.g.
+    // "Original") makes clear what it is. Falls back to the phase's built-in name
     // if it isn't among the defined choices.
-    ui.label(egui::RichText::new("Phase").size(EDITOR_FONT).weak());
     let phase_text = phases
         .iter()
         .find(|(p, _)| *p == g.phase)
@@ -315,15 +315,15 @@ pub(crate) fn group_editor_ui<F: FnMut(UiEvent)>(
                 }
             });
     });
-    ui.label(egui::RichText::new("Build-up").size(EDITOR_FONT).weak());
     ui.horizontal_wrapped(|ui| {
-        // Default fabric, Unknown (a real choice — counts as done, unlike the
-        // unset `Tbd` default which is not offered), or Specify a custom layer
-        // build-up (`Layers`; the layer editor itself is future work).
-        for (label, mk) in [
-            ("Default", ConstructionMakeup::Default),
-            ("Unknown", ConstructionMakeup::Unknown),
-            ("Specify…", ConstructionMakeup::Layers(Vec::new())),
+        // Build-up as ICON buttons (no label — hover for the meaning): the
+        // standard default fabric (≡), Unknown (a real choice — counts as done,
+        // unlike the unset `Tbd` default which is not offered), or Specify a
+        // custom layer build-up (ℹ; the layer editor itself is future work).
+        for (icon, tip, mk) in [
+            ("≡", "Default", ConstructionMakeup::Default),
+            ("?", "Unknown", ConstructionMakeup::Unknown),
+            ("ℹ", "Specify…", ConstructionMakeup::Layers(Vec::new())),
         ] {
             let sel = match (&g.makeup, &mk) {
                 (ConstructionMakeup::Layers(_), ConstructionMakeup::Layers(_)) => true,
@@ -332,8 +332,12 @@ pub(crate) fn group_editor_ui<F: FnMut(UiEvent)>(
             if ui
                 .add_enabled(
                     enabled,
-                    egui::Button::selectable(sel, egui::RichText::new(label).size(EDITOR_FONT)),
+                    egui::Button::selectable(
+                        sel,
+                        egui::RichText::new(icon).size(EDITOR_FONT + 3.0),
+                    ),
                 )
+                .on_hover_text(tip)
                 .clicked()
             {
                 on_event(UiEvent::Sketch(SketchEvent::SetStructureGroupAttrs {
