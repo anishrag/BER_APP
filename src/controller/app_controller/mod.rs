@@ -330,6 +330,12 @@ pub struct AppController {
     /// active kind) — the canvas shades exactly these. Transient; cleared on
     /// phase switch / kind change / Deselect all.
     structure_selected: HashSet<ItemId>,
+    /// Dimensioned CARVE rings (plan coords) selected but NOT yet split — the
+    /// split is DEFERRED to "Edit attributes" (`commit_pending_structure_carves`)
+    /// so a carve selection that turns out wrong changes no geometry. Each ring
+    /// splits every active kind at commit time. Transient; cleared on Deselect
+    /// all / phase switch / storey switch, and drained when the edit opens.
+    pending_structure_carves: Vec<Vec<Point2f64>>,
     /// A Structure-phase straight CUT that split the storey into two candidate
     /// slots (each a dimensionable sub-area); the assessor taps one, which
     /// becomes the in-flight split shape and is then dimensioned. `None` when no
@@ -402,6 +408,7 @@ impl AppController {
             structure_kinds: std::collections::BTreeSet::from([SurfaceKind::Walls]),
             structure_select: None,
             structure_selected: HashSet::new(),
+            pending_structure_carves: Vec::new(),
             pending_structure_cut: None,
             structure_split_kind: None,
             structure_edit: None,

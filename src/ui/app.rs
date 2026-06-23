@@ -849,6 +849,12 @@ impl eframe::App for BerApp {
                                 .app_controller
                                 .borrow()
                                 .pending_structure_split_polygon();
+                            // Staged (not-yet-split) carve rings — the pending
+                            // selection shading until "Edit attributes" commits.
+                            let pending_structure_carves = self
+                                .app_controller
+                                .borrow()
+                                .pending_structure_carve_polygons();
 
                             let view = SketchView {
                                 current: stroke.as_ref().map(EguiStroke::from),
@@ -995,6 +1001,7 @@ impl eframe::App for BerApp {
                                 structure_edit: structure_edit.as_ref(),
                                 structure_cut_regions: &structure_cut_regions,
                                 pending_structure_split_polygon: &pending_structure_split_polygon,
+                                pending_structure_carves: &pending_structure_carves,
                             };
                             let touch_nav = &mut self.sketch_state.touch_nav;
                             SketchPage::render(ui, view, touch_nav, |event| match event {

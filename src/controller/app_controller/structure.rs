@@ -183,6 +183,10 @@ impl AppController {
     /// separately). Works for the active surface kind — walls, floors, or
     /// ceilings/roofs. No-op for an empty selection or no storey.
     pub fn begin_structure_edit(&mut self) {
+        // "Edit attributes" is when we commit to the selection — NOW perform any
+        // deferred carve splits (turning staged rings into real sub-regions and
+        // selecting them), so selecting a carve never changed geometry on its own.
+        self.commit_pending_structure_carves();
         if self.structure_selected.is_empty() {
             return;
         }
@@ -365,17 +369,28 @@ impl AppController {
     /// active Select subtool, so the assessor can keep picking.
     pub fn clear_structure_surface_selection(&mut self) {
         self.structure_selected.clear();
+        self.pending_structure_carves.clear();
         self.pending_structure_cut = None;
         self.structure_split_kind = None;
     }
 
+    /// The staged (not-yet-split) carve rings, plan coords, for the canvas to
+    /// shade as the pending selection. Empty when no carve is staged.
+    pub fn pending_structure_carve_polygons(&self) -> Vec<Vec<(f64, f64)>> {
+        self.pending_structure_carves
+            .iter()
+            .map(|ring| ring.iter().map(|p| (p.x, p.y)).collect())
+            .collect()
+    }
+
     /// A Structure-phase CARVE/CUT stroke (world coords): an approximate stroke
-    /// that the assessor then DIMENSIONS, which SPLITS the surface, after which
-    /// the chosen piece auto-selects. Carve the storey the SAME way a phase area
-    /// is drawn. A straight cut splits it into two candidate slots to pick from
-    /// (see [`structure_cut_regions`]); any other stroke becomes a dimensionable
-    /// sub-area straight away. The split itself happens at commit, once the
-    /// drawn walls are dimensioned (see [`commit_structure_split`]).
+    /// that the assessor then DIMENSIONS, which STAGES a pending sub-region (NOT
+    /// yet split). Carve the storey the SAME way a phase area is drawn. A straight
+    /// cut splits it into two candidate slots to pick from (see
+    /// [`structure_cut_regions`]); any other stroke becomes a dimensionable
+    /// sub-area straight away. Once dimensioned the ring is staged
+    /// ([`stage_structure_carve`]); the actual geometry split is DEFERRED to
+    /// "Edit attributes" ([`commit_pending_structure_carves`]).
     pub fn apply_structure_carve_stroke(&mut self, world_points: &[(f32, f32)]) {
         let _ = self.sketch_engine.take_stroke_raw();
         if self.structure_select.is_none() {
@@ -481,7 +496,7 @@ impl AppController {
         self.structure_split_kind = Some(kind);
         self.maybe_start_dimensioning();
         self.push_history_snapshot(undo);
-        self.maybe_commit_structure_split();
+        self.maybe_stage_structure_carve();
     }
 
     /// The in-flight split ring (world coords) for the UI to highlight — the
@@ -510,13 +525,13 @@ impl AppController {
             && self.document.floor_plan.get_points().len() >= 3
     }
 
-    /// Commit the split if its drawn walls are fully dimensioned — a cheap
-    /// no-op unless a structure split is in-flight and ready. Called at the end
-    /// of every dimension/position apply so a split that finishes on either kind
-    /// of prompt commits.
-    pub fn maybe_commit_structure_split(&mut self) {
+    /// STAGE the carve if its drawn walls are fully dimensioned — a cheap no-op
+    /// unless a structure carve is in-flight and ready. Called at the end of
+    /// every dimension/position apply so a carve that finishes on either kind of
+    /// prompt is staged.
+    pub fn maybe_stage_structure_carve(&mut self) {
         if self.structure_split_dimensioned() {
-            self.commit_structure_split();
+            self.stage_structure_carve();
         }
     }
 
@@ -537,93 +552,119 @@ impl AppController {
         }
     }
 
-    /// Commit the dimensioned split for EVERY active mode: push its ring onto
-    /// each active kind's durable split field (walls: the fixed interior cut
-    /// segment; floors/roofs: the whole carved ring), re-resolve so the splits
-    /// replay, re-home any wall openings across a wall split, then auto-select
-    /// the chosen piece's surfaces. With several modes active the SAME carve
-    /// splits each of them — so carving half a roof in roof+wall mode still
-    /// splits the roof (and the wall too, where the cut crosses one). Mirrors the
-    /// construction-phase commit but writes the BER's durable split fields
-    /// (replayed by `resolve_storey`), not session-only regions.
-    fn commit_structure_split(&mut self) {
+    /// STAGE the dimensioned carve as a PENDING selection — capture its ring and
+    /// drop the in-flight shape, WITHOUT touching any geometry. The actual split
+    /// is deferred to "Edit attributes" (`commit_pending_structure_carves`), so a
+    /// carve the assessor then decides is wrong changes nothing. The pending ring
+    /// is shaded on the canvas as the selection until then.
+    fn stage_structure_carve(&mut self) {
         if self.structure_split_kind.is_none() {
             return;
         }
-        // A split needs an active storey (never the read-only All-storeys tab —
-        // its `current_storey_idx` is `None` and `refresh_storey` would no-op).
-        let Some(idx) = self.current_storey_idx else {
-            return;
-        };
         let ring32 = self.document.floor_plan.get_points();
         if ring32.len() < 3 {
+            self.abandon_structure_split_shape();
             return;
         }
         let ring64: Vec<Point2f64> = ring32.iter().map(|p| domain::points::to_f64(*p)).collect();
-        let kinds: Vec<SurfaceKind> = self.structure_kinds.iter().copied().collect();
+        self.pending_structure_carves.push(ring64);
+        self.abandon_structure_split_shape();
+    }
 
-        // Walls store the fixed cut SEGMENT(s) — every interior edge of the
-        // carved region, each crossing at most one wall. An interior-area carve
-        // crosses no wall, so walls simply don't split there (only the area kinds
-        // do). Computed before the storey is borrowed mutably below.
-        let wall_cuts = if kinds.contains(&SurfaceKind::Walls) {
-            self.document.outline.floor_plan.interior_cut_edges(&ring32)
-        } else {
-            Vec::new()
+    /// COMMIT every pending carve into real splits — the deferred half of
+    /// [`stage_structure_carve`], run when "Edit attributes" opens. For each
+    /// staged ring, push it onto each active kind's durable split field (walls:
+    /// the fixed interior cut segment, only where the cut crosses a wall;
+    /// floors/roofs: the whole ring), then re-resolve ONCE and auto-select the
+    /// resulting pieces across every active kind. Snapshots for undo so opening
+    /// the editor stays reversible. No-op when nothing is pending.
+    pub(super) fn commit_pending_structure_carves(&mut self) {
+        if self.pending_structure_carves.is_empty() {
+            return;
+        }
+        // A split needs an active storey (never the read-only All-storeys tab).
+        let Some(idx) = self.current_storey_idx else {
+            self.pending_structure_carves.clear();
+            return;
         };
+        let kinds: Vec<SurfaceKind> = self.structure_kinds.iter().copied().collect();
+        let rings = std::mem::take(&mut self.pending_structure_carves);
 
-        // Push each active kind's split onto its durable field; `resolve_storey`
-        // replays them (and, for walls, re-homes the crossed walls' openings onto
-        // the sub-walls before the orphan-prune).
-        let (mut pushed_any, mut pushed_roof) = (false, false);
-        let Some(storey) = self
+        // Walls split only along a carve ring's INTERIOR edges (where it crosses a
+        // wall); floors/roofs take the whole ring. Compute the wall cuts per ring
+        // up front (needs `&self.document`) before the `&mut` record borrow.
+        let want_walls = kinds.contains(&SurfaceKind::Walls);
+        let per_ring: Vec<(Vec<Point2f64>, Vec<[Point2f64; 2]>)> = rings
+            .into_iter()
+            .map(|ring64| {
+                let cuts = if want_walls {
+                    let ring32: Vec<Point2f32> =
+                        ring64.iter().map(|p| domain::points::to_f32(*p)).collect();
+                    self.document.outline.floor_plan.interior_cut_edges(&ring32)
+                } else {
+                    Vec::new()
+                };
+                (ring64, cuts)
+            })
+            .collect();
+
+        // Anything to split at all? (an area kind active, or a cut that crossed a
+        // wall). If not, drop the staged rings rather than shade nothing.
+        let will_split = kinds
+            .iter()
+            .any(|k| matches!(k, SurfaceKind::Floors | SurfaceKind::Roofs))
+            || per_ring.iter().any(|(_, c)| !c.is_empty());
+        if !will_split {
+            log::warn!("structure carve split nothing — no area kind active and no wall crossed");
+            return;
+        }
+
+        self.record_history();
+        let mut pushed_roof = false;
+        if let Some(storey) = self
             .current_record
             .as_mut()
             .and_then(|r| r.data.storeys.get_mut(idx))
-        else {
-            return;
-        };
-        for kind in &kinds {
-            match kind {
-                SurfaceKind::Walls => {
-                    if !wall_cuts.is_empty() {
-                        storey.push_structure_split(SurfaceKind::Walls, &ring64, wall_cuts.clone());
-                        pushed_any = true;
+        {
+            for (ring64, cuts) in &per_ring {
+                for kind in &kinds {
+                    match kind {
+                        SurfaceKind::Walls => {
+                            if !cuts.is_empty() {
+                                storey.push_structure_split(
+                                    SurfaceKind::Walls,
+                                    ring64,
+                                    cuts.clone(),
+                                );
+                            }
+                        }
+                        SurfaceKind::Floors => {
+                            storey.push_structure_split(SurfaceKind::Floors, ring64, Vec::new());
+                        }
+                        SurfaceKind::Roofs => {
+                            storey.push_structure_split(SurfaceKind::Roofs, ring64, Vec::new());
+                            pushed_roof = true;
+                        }
                     }
                 }
-                SurfaceKind::Floors => {
-                    storey.push_structure_split(SurfaceKind::Floors, &ring64, Vec::new());
-                    pushed_any = true;
-                }
-                SurfaceKind::Roofs => {
-                    storey.push_structure_split(SurfaceKind::Roofs, &ring64, Vec::new());
-                    pushed_any = true;
-                    pushed_roof = true;
-                }
             }
-        }
-
-        // Nothing split (no area kind active and the cut crossed no wall) — bail
-        // rather than shade a region nothing actually split.
-        if !pushed_any {
-            log::warn!("structure carve split nothing — no area kind active and no wall crossed");
-            self.abandon_structure_split_shape();
+        } else {
             return;
         }
 
         // Regions-as-truth: a ROOF carve is a one-shot coplanar face split on the
-        // stored roofs (floors/walls still replay their durable splits in
-        // `resolve_storey`). The split survives reload via the persisted roofs.
+        // stored roofs (replayed via `recompose_roofs`); floors/walls replay their
+        // durable splits in `resolve_storey`.
         if pushed_roof {
             self.recompose_roofs(idx);
         }
-
-        self.abandon_structure_split_shape();
         let _ = self.mark_dirty();
         self.materialize(); // re-resolve applies the splits + re-homes openings
 
-        // Auto-select the chosen piece's surfaces across every active kind.
-        self.select_surfaces_in_region(&ring64);
+        // Auto-select the resulting pieces across every active kind.
+        for (ring64, _) in &per_ring {
+            self.select_surfaces_in_region(ring64);
+        }
     }
 
     /// Add every surface of the active kind inside `region_ring` (world coords)

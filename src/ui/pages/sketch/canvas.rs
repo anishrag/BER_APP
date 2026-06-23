@@ -441,6 +441,26 @@ pub(super) fn render<F: FnMut(UiEvent)>(
             egui::Color32::from_rgb(120, 200, 255), // blue: structure split
         );
     }
+    // Staged carve rings: the pending SELECTION (not yet split). Shaded green so
+    // the assessor sees what's selected; the geometry only splits at "Edit
+    // attributes".
+    if !view.pending_structure_carves.is_empty() {
+        let labelled: Vec<(Vec<(f64, f64)>, String)> = view
+            .pending_structure_carves
+            .iter()
+            .map(|ring| (ring.clone(), String::new()))
+            .collect();
+        render::render_phase_regions(
+            &painter,
+            rect,
+            ber,
+            current_storey_idx,
+            mode,
+            vp,
+            &labelled,
+            egui::Color32::from_rgb(120, 210, 130), // green: pending selection
+        );
+    }
 
     // DEBUG: splice-pipeline phases of the last extend/trim.
     render::render_splice_debug(

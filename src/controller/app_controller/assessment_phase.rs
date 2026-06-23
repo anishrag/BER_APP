@@ -78,6 +78,7 @@ impl AppController {
         self.structure_kinds = std::collections::BTreeSet::from([SurfaceKind::Walls]);
         self.structure_select = None;
         self.structure_selected.clear();
+        self.pending_structure_carves.clear();
         self.pending_structure_cut = None;
         self.structure_split_kind = None;
         self.close_structure_edit();

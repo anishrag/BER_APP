@@ -181,6 +181,7 @@ impl AppController {
         // Structure-phase selection holds the OUTGOING storey's region ids —
         // drop it (and any pending carve) so nothing carries onto the new storey.
         self.structure_selected.clear();
+        self.pending_structure_carves.clear();
         self.pending_structure_cut = None;
         self.structure_split_kind = None;
         match target {

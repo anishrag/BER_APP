@@ -818,6 +818,10 @@ pub struct SketchView<'a> {
     /// The in-flight Structure split ring (world coords) — drawn highlighted
     /// while the assessor dimensions it. Empty when no split is in-flight.
     pub pending_structure_split_polygon: &'a [(f64, f64)],
+    /// STAGED carve rings (world coords) selected but not yet split — shaded as
+    /// the pending selection until "Edit attributes" commits them. Empty when
+    /// no carve is staged.
+    pub pending_structure_carves: &'a [Vec<(f64, f64)>],
 }
 
 #[derive(Default)]

@@ -1589,6 +1589,13 @@ fn carve_splits_the_area_kind_even_with_walls_also_active() {
     c.apply_structure_carve_stroke(&[(2.0, 2.0), (6.0, 2.0), (6.0, 6.0), (2.0, 6.0), (2.1, 2.1)]);
     complete_interior_length_loop(&mut c);
     skip_position_prompts(&mut c);
+    // The carve is staged (deferred); the split happens when Edit attributes opens.
+    assert_eq!(
+        c.current_surface_counts().floors,
+        1,
+        "split deferred until edit"
+    );
+    c.begin_structure_edit();
 
     assert_eq!(
         c.current_surface_counts().floors,
@@ -8333,11 +8340,11 @@ fn elevation_move_and_delete_openings() {
     );
 }
 
-/// Structure-phase FLOOR split: in Carve mode the assessor draws an
-/// approximate interior region, DIMENSIONS it, and the floor surface SPLITS at
-/// the dimensioned ring — the chosen piece's floor auto-selects. The split is
-/// durable (stored on `Storey.floor_splits`, replayed by `resolve_storey`), so
-/// the floor count goes from one region to two.
+/// Structure-phase FLOOR split: in Carve mode the assessor draws an approximate
+/// interior region and DIMENSIONS it — which STAGES the carve as a pending
+/// selection, changing NO geometry. Only "Edit attributes" commits it: then the
+/// floor splits at the dimensioned ring (durable `Storey.floor_splits`, replayed
+/// by `resolve_storey`), one region becomes two, and the piece auto-selects.
 #[test]
 fn structure_floor_carve_dimensions_then_splits_and_selects() {
     let mut c = dimensioned_square_controller();
@@ -8369,12 +8376,35 @@ fn structure_floor_carve_dimensions_then_splits_and_selects() {
     complete_interior_length_loop(&mut c);
     skip_position_prompts(&mut c);
 
-    // The split committed: floor regions split in two, the chosen piece's floor
-    // is selected, and the durable field carries the ring.
+    // DEFERRED: the dimensioned ring is STAGED, not split — geometry is unchanged
+    // until "Edit attributes", so a carve the assessor reconsiders costs nothing.
+    assert_eq!(
+        c.current_surface_counts().floors,
+        1,
+        "still one floor — the split is deferred to Edit attributes"
+    );
+    assert_eq!(
+        c.pending_structure_carve_polygons().len(),
+        1,
+        "the carve is staged as a pending selection"
+    );
+    assert!(
+        c.current_record.as_ref().unwrap().data.storeys[0]
+            .floor_splits
+            .is_empty(),
+        "nothing durable written yet"
+    );
+    // The in-flight split shape is gone — back on the outline.
+    assert_eq!(c.document.active, ActiveShape::Outline);
+    assert!(!c.structure_cut_pending());
+
+    // Opening "Edit attributes" commits the staged carve: NOW the floor splits in
+    // two, the durable field carries the ring, and the chosen piece is selected.
+    c.begin_structure_edit();
     assert_eq!(
         c.current_surface_counts().floors,
         2,
-        "the dimensioned ring split the floor into two regions"
+        "the staged ring split the floor into two regions"
     );
     assert!(
         !c.structure_selected_ids().is_empty(),
@@ -8388,9 +8418,10 @@ fn structure_floor_carve_dimensions_then_splits_and_selects() {
         1,
         "the split is stored durably on the storey"
     );
-    // The in-flight split shape is gone — back on the outline.
-    assert_eq!(c.document.active, ActiveShape::Outline);
-    assert!(!c.structure_cut_pending());
+    assert!(
+        c.pending_structure_carve_polygons().is_empty(),
+        "the staged carve was consumed"
+    );
 }
 
 /// Structure-phase WALL split via a straight CUT: the cut splits the storey
@@ -8428,7 +8459,7 @@ fn structure_wall_cut_picks_dimensions_then_stores_a_durable_segment() {
     );
 
     // Accept the drawn cut (skip the length prompts so it stays at y=5) +
-    // accept positions; the split commits on the last skip.
+    // accept positions; the cut is STAGED on the last skip.
     let mut guard = 0;
     while c.dimensioning_active() && guard < 12 {
         c.skip_current_dimension();
@@ -8436,7 +8467,26 @@ fn structure_wall_cut_picks_dimensions_then_stores_a_durable_segment() {
     }
     skip_position_prompts(&mut c);
 
-    // Walls store a SEGMENT (not a ring), durably, replayed on re-resolve.
+    // DEFERRED: nothing durable written yet — the cut is staged as a pending
+    // selection until "Edit attributes".
+    assert!(
+        c.current_record.as_ref().unwrap().data.storeys[0]
+            .wall_splits
+            .is_empty(),
+        "no wall split until Edit attributes commits the staged cut"
+    );
+    assert_eq!(
+        c.pending_structure_carve_polygons().len(),
+        1,
+        "the cut is staged as a pending selection"
+    );
+    // The in-flight split shape is gone — back on the outline.
+    assert_eq!(c.document.active, ActiveShape::Outline);
+    assert!(!c.structure_cut_pending());
+
+    // Opening "Edit attributes" commits it: walls store a SEGMENT (not a ring),
+    // durably, replayed on re-resolve.
+    c.begin_structure_edit();
     assert_eq!(
         c.current_record.as_ref().unwrap().data.storeys[0]
             .wall_splits
@@ -8450,9 +8500,6 @@ fn structure_wall_cut_picks_dimensions_then_stores_a_durable_segment() {
             .is_empty(),
         "a wall split must NOT touch floor_splits"
     );
-    // The in-flight split shape is gone — back on the outline.
-    assert_eq!(c.document.active, ActiveShape::Outline);
-    assert!(!c.structure_cut_pending());
 
     // And the split actually took effect: the cut runs left-wall→right-wall,
     // landing at the MIDSPAN of each (cut endpoint = wall t≈0.5), so BOTH the
