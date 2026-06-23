@@ -819,6 +819,67 @@ pub fn render_phase_regions(
     }
 }
 
+/// Move each screen-space ring vertex `px` toward the ring's centroid — an
+/// approximate inward inset so a selection outline sits just INSIDE a region's
+/// edges instead of coinciding with (and disappearing into) the surface outline.
+pub(crate) fn inset_ring(pts: &[egui::Pos2], px: f32) -> Vec<egui::Pos2> {
+    let n = pts.len();
+    if n < 3 {
+        return pts.to_vec();
+    }
+    let (mut cx, mut cy) = (0.0f32, 0.0f32);
+    for p in pts {
+        cx += p.x;
+        cy += p.y;
+    }
+    let c = egui::pos2(cx / n as f32, cy / n as f32);
+    pts.iter()
+        .map(|p| {
+            let d = egui::vec2(c.x - p.x, c.y - p.y);
+            let len = d.length();
+            if len < 1.0 {
+                *p
+            } else {
+                *p + d * (px / len)
+            }
+        })
+        .collect()
+}
+
+/// Draw a bright gold DASHED outline (inset just inside each ring) around the
+/// given world-space `rings` — the pre-edit "selected area" marquee for carve
+/// selections, painted on top so it reads clearly even where a ring's edges run
+/// along the surface perimeter. Outline only, no fill.
+pub fn render_selection_area(
+    painter: &egui::Painter,
+    rect: egui::Rect,
+    ber: Option<&Ber>,
+    current_storey_idx: Option<usize>,
+    sketch_mode: SketchMode,
+    view: ViewParams,
+    rings: &[Vec<(f64, f64)>],
+) {
+    if rings.is_empty() {
+        return;
+    }
+    let Some((_storey, t)) = storey_transform(rect, ber, current_storey_idx, sketch_mode, view)
+    else {
+        return;
+    };
+    let stroke = egui::Stroke::new(3.0, style::SELECTION_LINE);
+    for ring in rings {
+        if ring.len() < 3 {
+            continue;
+        }
+        let pts: Vec<egui::Pos2> = ring.iter().map(|(x, y)| t.apply(*x, *y)).collect();
+        let inset = inset_ring(&pts, 5.0);
+        let n = inset.len();
+        for k in 0..n {
+            draw_dashed_segment(painter, inset[k], inset[(k + 1) % n], stroke);
+        }
+    }
+}
+
 /// Tint the CURRENT new-storey outline suggestion's ring translucently over
 /// the previous-storey watermark (the browse stage of the new-storey flow):
 /// a sky-blue fill — a hue none of the other overlays use — plus a crisp

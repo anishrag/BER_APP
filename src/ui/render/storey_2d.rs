@@ -344,6 +344,9 @@ fn draw_selection_outline(painter: &egui::Painter, ring: &[egui::Pos2]) {
     if n < 2 {
         return;
     }
+    // Inset so the marquee sits just inside the surface edges (it'd otherwise
+    // coincide with the perimeter outline of a whole-outline floor and vanish).
+    let ring = super::inset_ring(ring, 5.0);
     let stroke = egui::Stroke::new(3.0, style::SELECTION_LINE);
     for i in 0..n {
         super::draw_dashed_segment(painter, ring[i], ring[(i + 1) % n], stroke);

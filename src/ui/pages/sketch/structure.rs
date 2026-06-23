@@ -321,7 +321,7 @@ pub(crate) fn group_editor_ui<F: FnMut(UiEvent)>(
         // unlike the unset `Tbd` default which is not offered), or Specify a
         // custom layer build-up (ℹ; the layer editor itself is future work).
         for (icon, tip, mk) in [
-            ("≡", "Default", ConstructionMakeup::Default),
+            ("✓", "Default", ConstructionMakeup::Default),
             ("?", "Unknown", ConstructionMakeup::Unknown),
             ("ℹ", "Specify…", ConstructionMakeup::Layers(Vec::new())),
         ] {

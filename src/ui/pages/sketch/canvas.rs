@@ -175,7 +175,10 @@ fn compute_structure_edit_layout(
     let row_pitch = EDIT_BOX_W + EDIT_GAP;
     let cap_v =
         (((rect.height() - EDIT_TOP_SAFE - EDIT_TOP_PAD) / col_pitch).floor() as usize).max(1);
-    let cap_h = (((rect.width() - 2.0 * EDIT_COL_PAD) / row_pitch).floor() as usize).max(1);
+    // A top/bottom row only has the width BETWEEN the side columns — subtract a
+    // column on each side, else rows get over-filled and the windows overlap
+    // when columns are also occupied.
+    let cap_h = (((rect.width() - 2.0 * col_w) / row_pitch).floor() as usize).max(1);
     let cap = [cap_v, cap_v, cap_h, cap_h];
 
     // Each group's edge preference order (most→least wanted) + how decisively it
@@ -546,26 +549,19 @@ pub(super) fn render<F: FnMut(UiEvent)>(
             egui::Color32::from_rgb(120, 200, 255), // blue: structure split
         );
     }
-    // Staged carve rings: the pending SELECTION (not yet split). Shaded green so
-    // the assessor sees what's selected; the geometry only splits at "Edit
-    // attributes".
-    if !view.pending_structure_carves.is_empty() {
-        let labelled: Vec<(Vec<(f64, f64)>, String)> = view
-            .pending_structure_carves
-            .iter()
-            .map(|ring| (ring.clone(), String::new()))
-            .collect();
-        render::render_phase_regions(
-            &painter,
-            rect,
-            ber,
-            current_storey_idx,
-            mode,
-            vp,
-            &labelled,
-            egui::Color32::from_rgb(120, 210, 130), // green: pending selection
-        );
-    }
+    // Staged carve rings: the pending SELECTION (not yet split). A gold dashed
+    // marquee INSET just inside the carved area, so the selected region reads
+    // clearly even where its edges run along the plan perimeter (outline only,
+    // no fill). The geometry only splits at "Edit attributes".
+    render::render_selection_area(
+        &painter,
+        rect,
+        ber,
+        current_storey_idx,
+        mode,
+        vp,
+        view.pending_structure_carves,
+    );
 
     // DEBUG: splice-pipeline phases of the last extend/trim.
     render::render_splice_debug(
