@@ -810,7 +810,7 @@ impl eframe::App for BerApp {
                                 current_phase,
                                 mapping_complete,
                                 surface_counts,
-                                structure_kind,
+                                structure_kinds,
                                 structure_select,
                                 checklist,
                             ) = {
@@ -825,7 +825,7 @@ impl eframe::App for BerApp {
                                     phase,
                                     c.mapping_complete(),
                                     c.current_surface_counts(),
-                                    c.structure_kind(),
+                                    c.structure_kinds().clone(),
                                     c.structure_select(),
                                     checklist,
                                 )
@@ -989,7 +989,7 @@ impl eframe::App for BerApp {
                                 current_phase,
                                 mapping_complete,
                                 surface_counts,
-                                structure_kind,
+                                structure_kinds,
                                 structure_select,
                                 structure_selected: &structure_selected,
                                 structure_edit: structure_edit.as_ref(),
@@ -1665,7 +1665,7 @@ impl eframe::App for BerApp {
                                         controller.borrow_mut().set_current_phase(phase);
                                     }
                                     SketchEvent::SetStructureKind(kind) => {
-                                        controller.borrow_mut().set_structure_kind(kind);
+                                        controller.borrow_mut().toggle_structure_kind(kind);
                                     }
                                     SketchEvent::SetStructureSelectMode(mode) => {
                                         controller.borrow_mut().set_structure_select_mode(mode);

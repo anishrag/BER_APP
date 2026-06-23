@@ -55,11 +55,11 @@ pub enum ConstructionMakeup {
 /// Construction types (example: 5-6 options)
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub enum FloorConstructionType {
-    #[default]
     SolidFloor,
     SuspendedFloor,
     ExposedSemiExposedFloor,
     NonHeatLossFloor,
+    #[default]
     Uninitialised,
     Other,
 }
@@ -90,6 +90,39 @@ pub enum WallConstructionType {
     Uninitialised,
 }
 
+impl ConstructionMakeup {
+    /// Whether a build-up has actually been chosen — anything but the `Tbd`
+    /// ("to be determined") placeholder. Half of the per-surface "done" test
+    /// (the other half is the construction TYPE being set).
+    pub fn is_set(&self) -> bool {
+        !matches!(self, ConstructionMakeup::Tbd)
+    }
+}
+
+impl WallConstructionType {
+    /// Whether a real wall type has been chosen (not the `Uninitialised`
+    /// placeholder). Part of [`WallConstruction::is_complete`].
+    pub fn is_set(&self) -> bool {
+        !matches!(self, WallConstructionType::Uninitialised)
+    }
+}
+
+impl FloorConstructionType {
+    /// Whether a real floor type has been chosen (not the `Uninitialised`
+    /// placeholder). Part of [`FloorConstruction::is_complete`].
+    pub fn is_set(&self) -> bool {
+        !matches!(self, FloorConstructionType::Uninitialised)
+    }
+}
+
+impl CeilingConstructionType {
+    /// Whether a real ceiling/roof type has been chosen (not the `Uninitialised`
+    /// placeholder). Part of [`CeilingConstruction::is_complete`].
+    pub fn is_set(&self) -> bool {
+        !matches!(self, CeilingConstructionType::Uninitialised)
+    }
+}
+
 /// A construction TYPE tagged by its surface kind — the unified value the
 /// Structure-phase "Edit attributes" editor carries so one group/event type
 /// covers walls, floors and ceilings/roofs. Each variant wraps that kind's own
@@ -100,6 +133,19 @@ pub enum ConstructionType {
     Wall(WallConstructionType),
     Floor(FloorConstructionType),
     Ceiling(CeilingConstructionType),
+}
+
+impl ConstructionType {
+    /// The surface kind this construction type belongs to — lets the
+    /// kind-agnostic "Edit attributes" group carry its own kind (so a single
+    /// session can span walls, floors and roofs at once).
+    pub fn kind(&self) -> SurfaceKind {
+        match self {
+            ConstructionType::Wall(_) => SurfaceKind::Walls,
+            ConstructionType::Floor(_) => SurfaceKind::Floors,
+            ConstructionType::Ceiling(_) => SurfaceKind::Roofs,
+        }
+    }
 }
 
 /// Thermal exposure classification
@@ -186,6 +232,31 @@ pub struct FloorConstruction {
 pub struct CeilingConstruction {
     pub base: ConstructionBase,
     pub construction_type: CeilingConstructionType,
+}
+
+impl WallConstruction {
+    /// A wall construction is DONE once both its type and its build-up are set
+    /// (no `Uninitialised` type, no `Tbd` make-up) — the per-surface "done" test
+    /// the Structure-phase `Remaining` tool filters on.
+    pub fn is_complete(&self) -> bool {
+        self.construction_type.is_set() && self.base.construction_makeup.is_set()
+    }
+}
+
+impl FloorConstruction {
+    /// A floor construction is DONE once both its type and its build-up are set.
+    /// See [`WallConstruction::is_complete`].
+    pub fn is_complete(&self) -> bool {
+        self.construction_type.is_set() && self.base.construction_makeup.is_set()
+    }
+}
+
+impl CeilingConstruction {
+    /// A ceiling/roof construction is DONE once both its type and its build-up
+    /// are set. See [`WallConstruction::is_complete`].
+    pub fn is_complete(&self) -> bool {
+        self.construction_type.is_set() && self.base.construction_makeup.is_set()
+    }
 }
 
 /// House-level construction registry. Regions reference a construction by id;
@@ -346,5 +417,50 @@ impl Ber {
     /// `ensure_ceiling_construction`).
     pub fn ceiling_construction(&self, id: ItemId) -> Option<&CeilingConstruction> {
         self.ceiling_constructions.iter().find(|c| c.base.id == id)
+    }
+
+    /// The ids of every `kind` surface in storey `idx` whose construction is NOT
+    /// yet done — its type or build-up is still unset (see
+    /// [`WallConstruction::is_complete`]). A region whose construction can't be
+    /// resolved counts as incomplete, matching the editor's "missing reads as
+    /// default" rule. The complement of the done surfaces within
+    /// [`Storey::surface_ids`]; drives the Structure-phase `Remaining` select
+    /// tool. Empty when `idx` is out of range.
+    pub fn incomplete_surface_ids(&self, idx: usize, kind: SurfaceKind) -> Vec<ItemId> {
+        let Some(storey) = self.storeys.get(idx) else {
+            return Vec::new();
+        };
+        match kind {
+            SurfaceKind::Walls => storey
+                .walls
+                .regions
+                .iter()
+                .filter(|r| {
+                    self.wall_construction(r.construction_id)
+                        .map_or(true, |c| !c.is_complete())
+                })
+                .map(|r| r.id)
+                .collect(),
+            SurfaceKind::Floors => storey
+                .floors
+                .regions
+                .iter()
+                .filter(|r| {
+                    self.floor_construction(r.construction_id)
+                        .map_or(true, |c| !c.is_complete())
+                })
+                .map(|r| r.id)
+                .collect(),
+            SurfaceKind::Roofs => storey
+                .roofs
+                .regions
+                .iter()
+                .filter(|r| {
+                    self.ceiling_construction(r.construction_id)
+                        .map_or(true, |c| !c.is_complete())
+                })
+                .map(|r| r.id)
+                .collect(),
+        }
     }
 }

@@ -229,9 +229,9 @@ pub struct ToolFlags {
     /// The current assessment phase — selects which toolset the panel shows
     /// (Mapping categories vs. the Structure surface panel).
     pub phase: AssessmentPhase,
-    /// The active Structure-phase MODE (Wall/Roof/Floor) — drives which mode
-    /// button reads as selected.
-    pub structure_kind: SurfaceKind,
+    /// The active Structure-phase MODES (Walls/Roofs/Floors; non-exclusive) —
+    /// drives which mode buttons read as selected.
+    pub structure_kinds: std::collections::BTreeSet<SurfaceKind>,
     /// The active global Select subtool — drives which reads as selected.
     pub structure_select: Option<SelectMode>,
     /// The in-flight "Edit attributes" session (selection grouped by
@@ -271,7 +271,7 @@ impl ToolFlags {
             can_redo: view.can_redo,
             autosave_status: view.autosave_status.clone(),
             phase: view.current_phase,
-            structure_kind: view.structure_kind,
+            structure_kinds: view.structure_kinds.clone(),
             structure_select: view.structure_select,
             structure_edit: view.structure_edit.cloned(),
             surface_counts: view.surface_counts,
@@ -292,7 +292,7 @@ pub fn ribbon<F: FnMut(UiEvent)>(
     if flags.phase == AssessmentPhase::Structure {
         structure::structure_panel(
             ui,
-            flags.structure_kind,
+            &flags.structure_kinds,
             flags.structure_select,
             flags.structure_edit.as_ref(),
             flags.surface_counts,
@@ -334,7 +334,7 @@ pub fn side_panel<F: FnMut(UiEvent)>(
     if flags.phase == AssessmentPhase::Structure {
         structure::structure_panel(
             ui,
-            flags.structure_kind,
+            &flags.structure_kinds,
             flags.structure_select,
             flags.structure_edit.as_ref(),
             flags.surface_counts,

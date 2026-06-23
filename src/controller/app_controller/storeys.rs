@@ -89,6 +89,24 @@ impl AppController {
         }
     }
 
+    /// Like [`structure_surface_key`](Self::structure_surface_key) but DETECTS
+    /// the kind of `id` (the selection can mix walls / floors / roofs), returning
+    /// the kind alongside its durable key. `None` if `id` isn't a live region.
+    fn structure_surface_key_any(
+        &self,
+        idx: usize,
+        id: ItemId,
+    ) -> Option<(SurfaceKind, SurfaceKey)> {
+        let kind = self
+            .current_record
+            .as_ref()?
+            .data
+            .storeys
+            .get(idx)?
+            .surface_kind_of(id)?;
+        Some((kind, self.structure_surface_key(idx, kind, id)?))
+    }
+
     /// Which storey the editor is currently acting on. `Some(i)` = storey `i`
     /// is being edited; `None` = the "All storeys" overview (read-only, no
     /// drawing). Default `Some(0)` on create/open.
@@ -357,26 +375,28 @@ impl AppController {
         // both re-point to the new ids afterward (same survival mechanism as the
         // riser/elevation selection — across an attribute edit the geometry is
         // identical and only the ids churn, so the selection stays meaningful).
-        let struct_kind = self.structure_kind;
-        let sel_struct_keys: Vec<SurfaceKey> = self
+        // Capture each selected id WITH its kind (the selection can span kinds),
+        // so each re-points by the right durable key after the re-resolve.
+        let sel_struct_keys: Vec<(SurfaceKind, SurfaceKey)> = self
             .structure_selected
             .iter()
-            .filter_map(|id| self.structure_surface_key(idx, struct_kind, *id))
+            .filter_map(|id| self.structure_surface_key_any(idx, *id))
             .collect();
-        let edit_struct_keys: Option<(SurfaceKind, Vec<Vec<SurfaceKey>>)> =
+        // Each edit group already knows its kind (from its construction type).
+        let edit_struct_keys: Option<Vec<(SurfaceKind, Vec<SurfaceKey>)>> =
             self.structure_edit.as_ref().map(|e| {
-                let kind = e.kind;
-                let groups = e
-                    .groups
+                e.groups
                     .iter()
                     .map(|g| {
-                        g.ids
+                        let kind = g.ty.kind();
+                        let keys = g
+                            .ids
                             .iter()
                             .filter_map(|id| self.structure_surface_key(idx, kind, *id))
-                            .collect()
+                            .collect();
+                        (kind, keys)
                     })
-                    .collect();
-                (kind, groups)
+                    .collect()
             });
         // Flush the active buffer into its slot, then ensure the storey slot + its
         // constructions exist — the two `&mut` prerequisites of the otherwise
@@ -470,18 +490,19 @@ impl AppController {
             .map(|storey| {
                 sel_struct_keys
                     .iter()
-                    .filter_map(|k| structure_id_for_key(storey, struct_kind, *k))
+                    .filter_map(|(kind, k)| structure_id_for_key(storey, *kind, *k))
                     .collect()
             })
             .unwrap_or_default();
         self.structure_selected = new_sel;
         let new_group_ids: Option<Vec<Vec<ItemId>>> =
-            edit_struct_keys.as_ref().and_then(|(kind, group_keys)| {
+            edit_struct_keys.as_ref().and_then(|groups| {
                 record.data.storeys.get(idx).map(|storey| {
-                    group_keys
+                    groups
                         .iter()
-                        .map(|keys| {
-                            keys.iter()
+                        .map(|(kind, group_keys)| {
+                            group_keys
+                                .iter()
                                 .filter_map(|k| structure_id_for_key(storey, *kind, *k))
                                 .collect()
                         })

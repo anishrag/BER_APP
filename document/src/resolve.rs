@@ -819,6 +819,58 @@ mod tests {
         assert_eq!(storey2.roofs.regions.len(), 2, "split survives re-resolve");
     }
 
+    /// An L-shaped storey split into two phase zones whose divider edge ENDS at a
+    /// perimeter wall (a T-junction) rather than crossing between two walls (the
+    /// `phase_area_carves_roof_like_the_floor` case). The phase split still: cuts
+    /// the spanning perimeter wall in two (6 → 7 walls), carves the roof in two,
+    /// and partitions the floor in two. Regression for a stale save that kept the
+    /// roof/walls un-split (the floor partition predated the roof+wall split).
+    #[test]
+    fn l_shape_phase_split_through_a_t_junction() {
+        let pts = vec![
+            Point2f32::new(1.3, 2.3),
+            Point2f32::new(1.3, 7.3),
+            Point2f32::new(6.3, 7.3),
+            Point2f32::new(6.3, 5.3),
+            Point2f32::new(4.3, 5.3),
+            Point2f32::new(4.3, 2.3),
+        ];
+        let plan = FloorPlan::from_clean_ring(&pts).unwrap();
+        let mut doc = StoreyDoc::default();
+        doc.dimensioning.scale_set = true;
+        doc.floor_plan = plan.clone();
+        doc.outline = ShapeSlot {
+            floor_plan: plan,
+            dimensioning: doc.dimensioning.clone(),
+        };
+        // Only the Extension zone is a phase region (Original = remainder), as
+        // `phase_regions_from_floors` reconstructs it.
+        let phase = vec![PhaseRegion {
+            polygon: vec![
+                Point2f32::new(1.3, 5.3),
+                Point2f32::new(1.3, 2.3),
+                Point2f32::new(4.3, 2.3),
+                Point2f32::new(4.3, 5.3),
+            ],
+            phase: ConstructionPhase::Extension1,
+        }];
+        let mut ber = Ber::default();
+        ensure_storey_constructions(&mut ber, 0, &phase);
+        ber.set_default_ceiling_height(Some(0), 2.0);
+        let storey = resolve_storey(&doc, &ber, 0, &phase, &[], &[]);
+        assert_eq!(
+            storey.walls.regions.len(),
+            7,
+            "the left wall spanning the phase boundary splits in two"
+        );
+        assert_eq!(storey.roofs.regions.len(), 2, "the roof carves in two");
+        assert_eq!(
+            storey.floors.regions.len(),
+            2,
+            "the floor partitions in two"
+        );
+    }
+
     /// A construction-PHASE area over half a storey CARVES the roof in two — the
     /// ceiling analogue of the floor partition — keeping both halves flat at the
     /// ceiling height (a surface-preserving coplanar split), with the plan area

@@ -1462,6 +1462,20 @@ fn floor_construction_survives_rederive() {
 
 /// The "Edit attributes" group editor now works for FLOORS end to end: select
 /// all floors, open the session (one default-construction group), set a type on
+/// Set EXACTLY one active Structure mode (the modes are non-exclusive now, so a
+/// test that wants a single kind has to add it then clear the others — adding
+/// first keeps ≥1 active so each removal succeeds).
+fn set_only_kind(c: &mut AppController, kind: SurfaceKind) {
+    if !c.structure_kinds().contains(&kind) {
+        c.toggle_structure_kind(kind);
+    }
+    for k in [SurfaceKind::Walls, SurfaceKind::Roofs, SurfaceKind::Floors] {
+        if k != kind && c.structure_kinds().contains(&k) {
+            c.toggle_structure_kind(k);
+        }
+    }
+}
+
 /// the group, and the assigned floor construction lands on the region.
 #[test]
 fn structure_edit_sets_floor_group_construction() {
@@ -1469,7 +1483,7 @@ fn structure_edit_sets_floor_group_construction() {
     let mut c = dimensioned_square_controller();
     c.materialize();
 
-    c.set_structure_kind(SurfaceKind::Floors);
+    set_only_kind(&mut c, SurfaceKind::Floors);
     c.set_structure_select_mode(Some(SelectMode::All));
     assert_eq!(
         c.structure_selected_ids().len(),
@@ -1479,7 +1493,7 @@ fn structure_edit_sets_floor_group_construction() {
 
     c.begin_structure_edit();
     let e = c.structure_edit().expect("a session opened for floors");
-    assert_eq!(e.kind, SurfaceKind::Floors);
+    assert_eq!(e.groups[0].ty.kind(), SurfaceKind::Floors);
     assert_eq!(e.groups.len(), 1, "one default-construction group");
     assert!(
         matches!(e.groups[0].ty, ConstructionType::Floor(_)),
@@ -1499,6 +1513,97 @@ fn structure_edit_sets_floor_group_construction() {
     assert_eq!(fc.construction_type, FloorConstructionType::SuspendedFloor);
 }
 
+/// The Structure MODES are non-exclusive: several kinds can be active at once,
+/// the `All` seed spans them, an "Edit attributes" session groups across them,
+/// and the last active kind can't be toggled off (≥1 always stays).
+#[test]
+fn structure_modes_are_non_exclusive() {
+    let mut c = dimensioned_square_controller();
+    c.materialize();
+
+    // Default: only Walls.
+    assert_eq!(
+        c.structure_kinds().iter().copied().collect::<Vec<_>>(),
+        vec![SurfaceKind::Walls]
+    );
+
+    // Add Floors → both active; `All` selects walls AND the one floor.
+    c.toggle_structure_kind(SurfaceKind::Floors);
+    assert!(c.structure_kinds().contains(&SurfaceKind::Walls));
+    assert!(c.structure_kinds().contains(&SurfaceKind::Floors));
+    c.set_structure_select_mode(Some(SelectMode::All));
+    assert!(
+        c.structure_selected_ids().len() >= 2,
+        "selection spans walls + floor: {}",
+        c.structure_selected_ids().len()
+    );
+
+    // An edit session groups across both active kinds.
+    c.begin_structure_edit();
+    let kinds: std::collections::BTreeSet<_> = c
+        .structure_edit()
+        .expect("session")
+        .groups
+        .iter()
+        .map(|g| g.ty.kind())
+        .collect();
+    assert!(
+        kinds.contains(&SurfaceKind::Walls) && kinds.contains(&SurfaceKind::Floors),
+        "groups span both active kinds: {kinds:?}"
+    );
+    c.end_structure_edit();
+
+    // Toggle Walls off → {Floors}; toggling the last one off is a no-op.
+    c.toggle_structure_kind(SurfaceKind::Walls);
+    assert_eq!(
+        c.structure_kinds().iter().copied().collect::<Vec<_>>(),
+        vec![SurfaceKind::Floors]
+    );
+    c.toggle_structure_kind(SurfaceKind::Floors);
+    assert_eq!(
+        c.structure_kinds().iter().copied().collect::<Vec<_>>(),
+        vec![SurfaceKind::Floors],
+        "the last active mode stays active"
+    );
+}
+
+/// A carve splits the AREA kind it's drawn over even when a higher-priority mode
+/// (walls) is also active. Regression: the old code split only the single
+/// "primary" kind (wall → roof → floor), so an interior carve in floor+wall mode
+/// tried to split the WALL, found no crossed wall, and abandoned — leaving the
+/// floor unsplit and the whole region merely selected. Now every active kind's
+/// split is applied, so the floor (and roof, by the same path) splits.
+#[test]
+fn carve_splits_the_area_kind_even_with_walls_also_active() {
+    let mut c = dimensioned_square_controller();
+    c.materialize();
+    assert_eq!(c.current_surface_counts().floors, 1, "one floor to start");
+
+    // Floors + Walls both active (walls outranks floors in the priority order).
+    set_only_kind(&mut c, SurfaceKind::Floors);
+    c.toggle_structure_kind(SurfaceKind::Walls);
+    assert_eq!(c.structure_kinds().len(), 2);
+
+    c.set_structure_select_mode(Some(SelectMode::Carve));
+    // Interior 4×4 region — crosses no wall, so only the floor should split.
+    c.apply_structure_carve_stroke(&[(2.0, 2.0), (6.0, 2.0), (6.0, 6.0), (2.0, 6.0), (2.1, 2.1)]);
+    complete_interior_length_loop(&mut c);
+    skip_position_prompts(&mut c);
+
+    assert_eq!(
+        c.current_surface_counts().floors,
+        2,
+        "the floor split even though wall mode was also active"
+    );
+    assert_eq!(
+        c.current_record.as_ref().unwrap().data.storeys[0]
+            .floor_splits
+            .len(),
+        1,
+        "the floor split is stored durably"
+    );
+}
+
 /// The Structure selection + an open "Edit attributes" session SURVIVE a
 /// re-resolve. Walls (and floors) re-mint region ids on every resolve, so
 /// without re-pointing by durable key the selected ids would dangle: the canvas
@@ -1511,7 +1616,7 @@ fn structure_selection_survives_re_resolve() {
     let mut c = dimensioned_square_controller();
     c.materialize();
 
-    c.set_structure_kind(SurfaceKind::Walls);
+    set_only_kind(&mut c, SurfaceKind::Walls);
     c.set_structure_select_mode(Some(SelectMode::All));
     let n = c.structure_selected_ids().len();
     assert!(n >= 1, "at least one wall selected");
@@ -8245,7 +8350,7 @@ fn structure_floor_carve_dimensions_then_splits_and_selects() {
 
     // Carve mode on Floors (no phase switch needed — the carve handler only
     // needs a Structure selection).
-    c.set_structure_kind(SurfaceKind::Floors);
+    set_only_kind(&mut c, SurfaceKind::Floors);
     c.set_structure_select_mode(Some(SelectMode::Carve));
 
     // An interior 4x4 region at (2,2)-(6,6): a carve (not a straight cut), so it
@@ -8301,7 +8406,7 @@ fn structure_wall_cut_picks_dimensions_then_stores_a_durable_segment() {
     let mut c = dimensioned_square_controller();
     c.materialize();
 
-    c.set_structure_kind(SurfaceKind::Walls);
+    set_only_kind(&mut c, SurfaceKind::Walls);
     c.set_structure_select_mode(Some(SelectMode::Carve));
 
     // A straight cut across the storey (left wall to right wall at y=5) splits

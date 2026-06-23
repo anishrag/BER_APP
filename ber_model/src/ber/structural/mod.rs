@@ -2688,6 +2688,88 @@ mod tests {
     }
 
     #[test]
+    fn construction_is_complete_requires_type_and_build_up() {
+        // Wall: default type is `Uninitialised` — incomplete even once a build-up
+        // is chosen, until a real type is set.
+        let mut w = WallConstruction::default();
+        assert!(!w.is_complete());
+        w.base.construction_makeup = ConstructionMakeup::Default;
+        assert!(!w.is_complete(), "type still Uninitialised");
+        w.construction_type = WallConstructionType::CavityWall;
+        assert!(w.is_complete());
+
+        // Floor: like walls, the default type is `Uninitialised` — nothing reads
+        // as set until the assessor picks a type AND a build-up.
+        let mut f = FloorConstruction::default();
+        assert!(!f.construction_type.is_set(), "default floor type is unset");
+        f.base.construction_makeup = ConstructionMakeup::NonHeatLoss;
+        assert!(!f.is_complete(), "type still Uninitialised");
+        f.construction_type = FloorConstructionType::SolidFloor;
+        assert!(f.is_complete());
+
+        // Ceiling: default type is `Uninitialised`.
+        let mut c = CeilingConstruction::default();
+        c.base.construction_makeup = ConstructionMakeup::Default;
+        assert!(!c.is_complete());
+        c.construction_type = CeilingConstructionType::FlatRoof;
+        assert!(c.is_complete());
+    }
+
+    #[test]
+    fn incomplete_surface_ids_lists_only_unfinished_walls() {
+        let mut ber = Ber::default();
+        ber.storeys.push(Storey::default());
+
+        // One DONE wall construction (type + build-up set) and one whose build-up
+        // is still TBD.
+        let done = ber.ensure_wall_construction(
+            WallConstructionType::CavityWall,
+            ConstructionMakeup::Default,
+            ConstructionPhase::default(),
+        );
+        let tbd = ber.ensure_wall_construction(
+            WallConstructionType::CavityWall,
+            ConstructionMakeup::Tbd,
+            ConstructionPhase::default(),
+        );
+
+        let mk = |cid: ItemId| WallRegion {
+            id: ItemId::default(),
+            polygon: Polygon3D::new(vec![
+                Point3f64::new(0.0, 0.0, 0.0),
+                Point3f64::new(1.0, 0.0, 0.0),
+                Point3f64::new(1.0, 0.0, 2.4),
+                Point3f64::new(0.0, 0.0, 2.4),
+            ]),
+            exposure: WallExposure::Exposed,
+            opes: Opes::default(),
+            construction_id: cid,
+        };
+
+        let done_region = mk(done);
+        let tbd_region = mk(tbd);
+        // A region whose construction can't be resolved reads as incomplete.
+        let orphan_region = mk(ItemId::default());
+        let (done_id, tbd_id, orphan_id) = (done_region.id, tbd_region.id, orphan_region.id);
+
+        let mut walls = WallRegions::default();
+        walls.regions = vec![done_region, tbd_region, orphan_region];
+        ber.storeys[0].walls = walls;
+
+        let incomplete = ber.incomplete_surface_ids(0, SurfaceKind::Walls);
+        assert!(!incomplete.contains(&done_id), "finished wall excluded");
+        assert!(incomplete.contains(&tbd_id), "TBD build-up still remaining");
+        assert!(
+            incomplete.contains(&orphan_id),
+            "unresolved construction is remaining"
+        );
+        assert_eq!(incomplete.len(), 2);
+
+        // Out-of-range storey is empty, not a panic.
+        assert!(ber.incomplete_surface_ids(9, SurfaceKind::Walls).is_empty());
+    }
+
+    #[test]
     fn storey_json_without_roof_apexes_deserializes_to_empty() {
         // JSON produced by the OLD shape (no `roof_apexes` field): serialize
         // the current shape and strip the field.

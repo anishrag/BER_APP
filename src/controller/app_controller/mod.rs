@@ -316,10 +316,13 @@ pub struct AppController {
     /// The assessor's current workflow phase (Mapping → Structure → Objects) —
     /// drives the Sketch page's toolset, checklist, and canvas overlays.
     current_phase: AssessmentPhase,
-    /// The active Structure-phase MODE — which surface kind (Wall/Roof/Floor)
-    /// the global Select tools act on and the canvas shades. Defaults to Walls;
-    /// reset on phase switch.
-    structure_kind: SurfaceKind,
+    /// The active Structure-phase MODES — the surface kinds (Walls/Roofs/Floors)
+    /// the global Select tools act on and the canvas shades. NON-EXCLUSIVE: the
+    /// assessor can have several active at once (e.g. Walls + Floors), so the
+    /// selection and the "Edit attributes" floaties span every active kind.
+    /// Defaults to {Walls}; reset on phase switch. Ordered (Walls < Roofs <
+    /// Floors) for deterministic iteration / display.
+    structure_kinds: std::collections::BTreeSet<SurfaceKind>,
     /// The active global Select subtool (Click/Carve/All/Remaining), or `None`.
     /// Transient interaction state — Structure-only, cleared on phase switch.
     structure_select: Option<SelectMode>,
@@ -396,7 +399,7 @@ impl AppController {
             view: ViewTransform::default(),
             tuning: crate::config::Tuning::load(),
             current_phase: AssessmentPhase::default(),
-            structure_kind: SurfaceKind::Walls,
+            structure_kinds: std::collections::BTreeSet::from([SurfaceKind::Walls]),
             structure_select: None,
             structure_selected: HashSet::new(),
             pending_structure_cut: None,

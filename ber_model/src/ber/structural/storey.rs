@@ -285,6 +285,21 @@ impl Storey {
         }
     }
 
+    /// Which kind of surface region `id` is, if any — lets a mixed-kind
+    /// selection (walls + floors + roofs) recover each id's kind. `None` when no
+    /// region of any kind has that id.
+    pub fn surface_kind_of(&self, id: ItemId) -> Option<SurfaceKind> {
+        if self.walls.regions.iter().any(|r| r.id == id) {
+            Some(SurfaceKind::Walls)
+        } else if self.roofs.regions.iter().any(|r| r.id == id) {
+            Some(SurfaceKind::Roofs)
+        } else if self.floors.regions.iter().any(|r| r.id == id) {
+            Some(SurfaceKind::Floors)
+        } else {
+            None
+        }
+    }
+
     /// Every surface id of `kind` on the storey (the `Select all` seed).
     pub fn surface_ids(&self, kind: SurfaceKind) -> Vec<ItemId> {
         match kind {
@@ -308,7 +323,7 @@ pub struct SurfaceCounts {
 /// Floors) the surface queries and the assessor's Select/Set subtools hang
 /// under. The data-model taxonomy the queries above (`surface_at`,
 /// `surfaces_in_ring`, `surface_ids`) dispatch on.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub enum SurfaceKind {
     Walls,
     Roofs,

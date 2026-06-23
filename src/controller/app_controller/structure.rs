@@ -1,8 +1,9 @@
 //! Structure-phase surface SELECTION: the app-shell interaction layer over the
 //! current storey's resolved regions (walls / roofs / floors). The selected set
 //! holds region [`ItemId`]s of the active [`SurfaceKind`]; it's seeded by the
-//! Select subtools (`Select all` / `Select remaining` fill it, `Select` starts
-//! empty) and refined by tapping or by carving a region to pick.
+//! Select subtools (`Select all` fills it with every surface, `Select
+//! remaining` with only the ones not yet done, `Select` starts empty) and
+//! refined by tapping or by carving a region to pick.
 //!
 //! The hit-testing/geometry itself lives one crate down: which surface a tap
 //! lands on and which surfaces sit inside a carved region are pure read-only
@@ -31,12 +32,12 @@ pub struct EditGroup {
 }
 
 /// The in-flight "Edit attributes" session: the current selection partitioned by
-/// shared construction, plus which group's popup is active. `kind` is the
-/// surface kind the session edits (walls / floors / ceilings-roofs) — each kind
-/// has a durable parametric/centroid home for its construction.
+/// shared construction, plus which group's popup is active. The session can span
+/// several surface kinds at once (Walls + Floors + …) — each group's kind is
+/// carried by its `ty` ([`ConstructionType::kind`]), so the session itself isn't
+/// tied to one kind.
 #[derive(Debug, Clone)]
 pub struct StructureEdit {
-    pub kind: SurfaceKind,
     pub groups: Vec<EditGroup>,
     pub active: usize,
     /// Canvas presentation of the session. `false` (default) keeps the plan in
@@ -188,64 +189,73 @@ impl AppController {
         let Some(idx) = self.current_storey_idx else {
             return;
         };
-        let kind = self.structure_kind;
         let Some(record) = self.current_record.as_ref() else {
             return;
         };
         let Some(storey) = record.data.storeys.get(idx) else {
             return;
         };
-        // Per kind: find the region by id, read its construction's (type-kind,
-        // make-up, phase), and tag the type with `ConstructionType` so the rest
-        // of the editor is kind-agnostic.
+        // The selection can span kinds (Walls + Floors + …); each id's kind is
+        // detected from the storey, then its construction's (type-kind, make-up,
+        // phase) read and tagged with `ConstructionType` so the rest of the
+        // editor stays kind-agnostic. A region whose construction is missing
+        // reads as that kind's default type + default make-up / Original phase.
         let attrs_of =
             |id: ItemId| -> Option<(ConstructionType, ConstructionMakeup, ConstructionPhase)> {
-                match kind {
+                match storey.surface_kind_of(id)? {
                     SurfaceKind::Walls => {
                         let r = storey.walls.regions.iter().find(|r| r.id == id)?;
-                        let c = record.data.wall_construction(r.construction_id)?;
-                        Some((
-                            ConstructionType::Wall(c.construction_type),
-                            c.base.construction_makeup.clone(),
-                            c.base.construction_phase.clone(),
-                        ))
+                        Some(match record.data.wall_construction(r.construction_id) {
+                            Some(c) => (
+                                ConstructionType::Wall(c.construction_type),
+                                c.base.construction_makeup.clone(),
+                                c.base.construction_phase.clone(),
+                            ),
+                            None => (
+                                ConstructionType::Wall(Default::default()),
+                                Default::default(),
+                                Default::default(),
+                            ),
+                        })
                     }
                     SurfaceKind::Floors => {
                         let r = storey.floors.regions.iter().find(|r| r.id == id)?;
-                        let c = record.data.floor_construction(r.construction_id)?;
-                        Some((
-                            ConstructionType::Floor(c.construction_type),
-                            c.base.construction_makeup.clone(),
-                            c.base.construction_phase.clone(),
-                        ))
+                        Some(match record.data.floor_construction(r.construction_id) {
+                            Some(c) => (
+                                ConstructionType::Floor(c.construction_type),
+                                c.base.construction_makeup.clone(),
+                                c.base.construction_phase.clone(),
+                            ),
+                            None => (
+                                ConstructionType::Floor(Default::default()),
+                                Default::default(),
+                                Default::default(),
+                            ),
+                        })
                     }
                     SurfaceKind::Roofs => {
                         let r = storey.roofs.regions.iter().find(|r| r.id == id)?;
-                        let c = record.data.ceiling_construction(r.construction_id)?;
-                        Some((
-                            ConstructionType::Ceiling(c.construction_type),
-                            c.base.construction_makeup.clone(),
-                            c.base.construction_phase.clone(),
-                        ))
+                        Some(match record.data.ceiling_construction(r.construction_id) {
+                            Some(c) => (
+                                ConstructionType::Ceiling(c.construction_type),
+                                c.base.construction_makeup.clone(),
+                                c.base.construction_phase.clone(),
+                            ),
+                            None => (
+                                ConstructionType::Ceiling(Default::default()),
+                                Default::default(),
+                                Default::default(),
+                            ),
+                        })
                     }
                 }
             };
         let mut groups: Vec<EditGroup> = Vec::new();
         for id in &self.structure_selected {
-            let (ty, makeup, phase) = attrs_of(*id).unwrap_or_else(|| {
-                // A region whose construction is missing reads as that kind's
-                // default type + default make-up / Original phase.
-                let ty = match kind {
-                    SurfaceKind::Walls => ConstructionType::Wall(Default::default()),
-                    SurfaceKind::Floors => ConstructionType::Floor(Default::default()),
-                    SurfaceKind::Roofs => ConstructionType::Ceiling(Default::default()),
-                };
-                (
-                    ty,
-                    ConstructionMakeup::default(),
-                    ConstructionPhase::default(),
-                )
-            });
+            // Skip ids that no longer resolve to a live region of any kind.
+            let Some((ty, makeup, phase)) = attrs_of(*id) else {
+                continue;
+            };
             match groups
                 .iter_mut()
                 .find(|g| g.ty == ty && g.makeup == makeup && g.phase == phase)
@@ -261,7 +271,6 @@ impl AppController {
         }
         if !groups.is_empty() {
             self.structure_edit = Some(StructureEdit {
-                kind,
                 groups,
                 active: 0,
                 exploded: false,
@@ -306,8 +315,16 @@ impl AppController {
     }
 
     /// Close the "Edit attributes" session (attributes apply as they're set).
+    /// When the `Remaining` subtool is active this is the "work until done" loop:
+    /// re-seed it so the surfaces just completed drop out and the selection
+    /// shrinks toward empty (materialize first so the re-resolved constructions
+    /// the seed reads are current).
     pub fn end_structure_edit(&mut self) {
         self.close_structure_edit();
+        if self.structure_select == Some(SelectMode::Remaining) {
+            self.materialize();
+            self.reseed_structure_selection();
+        }
     }
 
     /// Tear down any open "Edit attributes" session. Safe to call when none is
@@ -325,10 +342,18 @@ impl AppController {
         if self.structure_select.is_none() {
             return;
         }
-        let kind = self.structure_kind;
-        let hit = self
-            .current_storey()
-            .and_then(|s| s.surface_at(kind, world_x, world_y, tol));
+        // With several modes active, a tap can land on more than one kind (a
+        // wall edge over a floor, say). Resolve by priority — wall → roof →
+        // floor — and toggle the first hit (see the overlap-pick rule).
+        let hit = {
+            let Some(storey) = self.current_storey() else {
+                return;
+            };
+            [SurfaceKind::Walls, SurfaceKind::Roofs, SurfaceKind::Floors]
+                .into_iter()
+                .filter(|k| self.structure_kinds.contains(k))
+                .find_map(|k| storey.surface_at(k, world_x, world_y, tol))
+        };
         if let Some(id) = hit {
             if !self.structure_selected.insert(id) {
                 self.structure_selected.remove(&id);
@@ -380,9 +405,12 @@ impl AppController {
                 if plan.validate_simple().is_err() {
                     return;
                 }
+                let Some(kind) = self.primary_structure_kind() else {
+                    return;
+                };
                 let undo = self.current_history_snapshot();
                 let slot = self.pinned_subarea_slot(&boundary, plan);
-                self.begin_structure_split_dimensioning(slot, self.structure_kind, undo);
+                self.begin_structure_split_dimensioning(slot, kind, undo);
             }
             Err(e) => log::error!("structure carve_or_cut: {}", e),
         }
@@ -425,8 +453,11 @@ impl AppController {
             None
         };
         if let Some(slot) = chosen {
+            let Some(kind) = self.primary_structure_kind() else {
+                return;
+            };
             let undo = self.current_history_snapshot();
-            self.begin_structure_split_dimensioning(slot, self.structure_kind, undo);
+            self.begin_structure_split_dimensioning(slot, kind, undo);
         }
     }
 
@@ -506,16 +537,19 @@ impl AppController {
         }
     }
 
-    /// Commit the dimensioned split: push its ring (walls: the fixed interior
-    /// cut segment) onto the storey's durable split field, re-resolve so the
-    /// split replays, re-home any wall openings across a wall split, then
-    /// auto-select the chosen piece's surfaces. Mirrors the construction-phase
-    /// commit but writes the BER's durable split fields (replayed by
-    /// `resolve_storey`), not session-only regions.
+    /// Commit the dimensioned split for EVERY active mode: push its ring onto
+    /// each active kind's durable split field (walls: the fixed interior cut
+    /// segment; floors/roofs: the whole carved ring), re-resolve so the splits
+    /// replay, re-home any wall openings across a wall split, then auto-select
+    /// the chosen piece's surfaces. With several modes active the SAME carve
+    /// splits each of them — so carving half a roof in roof+wall mode still
+    /// splits the roof (and the wall too, where the cut crosses one). Mirrors the
+    /// construction-phase commit but writes the BER's durable split fields
+    /// (replayed by `resolve_storey`), not session-only regions.
     fn commit_structure_split(&mut self) {
-        let Some(kind) = self.structure_split_kind else {
+        if self.structure_split_kind.is_none() {
             return;
-        };
+        }
         // A split needs an active storey (never the read-only All-storeys tab —
         // its `current_storey_idx` is `None` and `refresh_storey` would no-op).
         let Some(idx) = self.current_storey_idx else {
@@ -526,59 +560,69 @@ impl AppController {
             return;
         }
         let ring64: Vec<Point2f64> = ring32.iter().map(|p| domain::points::to_f64(*p)).collect();
+        let kinds: Vec<SurfaceKind> = self.structure_kinds.iter().copied().collect();
 
         // Walls store the fixed cut SEGMENT(s) — every interior edge of the
-        // carved region, each crossing at most one wall; floors/roofs store the
-        // whole carved ring.
-        let wall_cuts = if kind == SurfaceKind::Walls {
+        // carved region, each crossing at most one wall. An interior-area carve
+        // crosses no wall, so walls simply don't split there (only the area kinds
+        // do). Computed before the storey is borrowed mutably below.
+        let wall_cuts = if kinds.contains(&SurfaceKind::Walls) {
             self.document.outline.floor_plan.interior_cut_edges(&ring32)
         } else {
             Vec::new()
         };
 
-        // A wall carve whose ring runs entirely along existing walls (it crosses
-        // none mid-span — e.g. lassoing an already-bounded region like a step or
-        // an extension leg) yields no interior cut edge. There's nothing to
-        // subdivide, but carve IS a selection gesture: skip the no-op durable
-        // split and go straight to selecting the enclosed walls. Floors/roofs
-        // always carry a whole ring, so they always split.
-        let needs_split = !(kind == SurfaceKind::Walls && wall_cuts.is_empty());
-
-        if needs_split {
-            // Push onto the storey's durable split field; `resolve_storey`
-            // replays it (and, for walls, re-homes the crossed walls' openings
-            // onto the sub-walls before the orphan-prune).
-            let Some(storey) = self
-                .current_record
-                .as_mut()
-                .and_then(|r| r.data.storeys.get_mut(idx))
-            else {
-                return;
-            };
-            storey.push_structure_split(kind, &ring64, wall_cuts);
-
-            // Regions-as-truth: a ROOF carve is a one-shot coplanar face split on
-            // the stored roofs (floors/walls still replay their durable splits in
-            // `resolve_storey`). The split survives reload via the persisted roofs.
-            if kind == SurfaceKind::Roofs {
-                self.recompose_roofs(idx);
+        // Push each active kind's split onto its durable field; `resolve_storey`
+        // replays them (and, for walls, re-homes the crossed walls' openings onto
+        // the sub-walls before the orphan-prune).
+        let (mut pushed_any, mut pushed_roof) = (false, false);
+        let Some(storey) = self
+            .current_record
+            .as_mut()
+            .and_then(|r| r.data.storeys.get_mut(idx))
+        else {
+            return;
+        };
+        for kind in &kinds {
+            match kind {
+                SurfaceKind::Walls => {
+                    if !wall_cuts.is_empty() {
+                        storey.push_structure_split(SurfaceKind::Walls, &ring64, wall_cuts.clone());
+                        pushed_any = true;
+                    }
+                }
+                SurfaceKind::Floors => {
+                    storey.push_structure_split(SurfaceKind::Floors, &ring64, Vec::new());
+                    pushed_any = true;
+                }
+                SurfaceKind::Roofs => {
+                    storey.push_structure_split(SurfaceKind::Roofs, &ring64, Vec::new());
+                    pushed_any = true;
+                    pushed_roof = true;
+                }
             }
-        } else {
-            log::debug!(
-                "structure wall carve crossed no wall — selecting the enclosed walls without splitting"
-            );
+        }
+
+        // Nothing split (no area kind active and the cut crossed no wall) — bail
+        // rather than shade a region nothing actually split.
+        if !pushed_any {
+            log::warn!("structure carve split nothing — no area kind active and no wall crossed");
+            self.abandon_structure_split_shape();
+            return;
+        }
+
+        // Regions-as-truth: a ROOF carve is a one-shot coplanar face split on the
+        // stored roofs (floors/walls still replay their durable splits in
+        // `resolve_storey`). The split survives reload via the persisted roofs.
+        if pushed_roof {
+            self.recompose_roofs(idx);
         }
 
         self.abandon_structure_split_shape();
+        let _ = self.mark_dirty();
+        self.materialize(); // re-resolve applies the splits + re-homes openings
 
-        if needs_split {
-            let _ = self.mark_dirty();
-            self.materialize(); // re-resolve applies the split + re-homes openings
-        }
-
-        // Select the chosen piece's surfaces of the split kind (carve is a
-        // selection gesture). With no split, the already-resolved regions are
-        // current, so this still picks the walls bounding the carved region.
+        // Auto-select the chosen piece's surfaces across every active kind.
         self.select_surfaces_in_region(&ring64);
     }
 
@@ -588,22 +632,67 @@ impl AppController {
         if self.structure_select.is_none() {
             return;
         }
-        let kind = self.structure_kind;
-        let hits = match self.current_storey() {
-            Some(storey) => storey.surfaces_in_ring(kind, region_ring),
+        let kinds: Vec<SurfaceKind> = self.structure_kinds.iter().copied().collect();
+        let hits: Vec<ItemId> = match self.current_storey() {
+            Some(storey) => kinds
+                .iter()
+                .flat_map(|k| storey.surfaces_in_ring(*k, region_ring))
+                .collect(),
             None => return,
         };
         self.structure_selected.extend(hits);
     }
 
-    /// Replace the selection with every surface id of `kind` (drives `Select
-    /// all` / — as a placeholder until the criteria land — `Select remaining`).
-    pub(super) fn select_all_structure_surfaces(&mut self, kind: SurfaceKind) {
-        let ids = self
-            .current_storey()
-            .map(|s| s.surface_ids(kind))
-            .unwrap_or_default();
-        self.structure_selected = ids.into_iter().collect();
+    /// Re-seed the selection for an active `All`/`Remaining` subtool ACROSS every
+    /// active mode (the union): `All` takes every surface of each active kind;
+    /// `Remaining` takes only the ones still left to do — those whose
+    /// construction isn't complete yet ([`Ber::incomplete_surface_ids`]).
+    /// No-op when no seed tool is active.
+    pub(super) fn reseed_structure_selection(&mut self) {
+        let Some(mode) = self.structure_select else {
+            return;
+        };
+        if !matches!(mode, SelectMode::All | SelectMode::Remaining) {
+            return;
+        }
+        let kinds: Vec<SurfaceKind> = self.structure_kinds.iter().copied().collect();
+        let mut ids: HashSet<ItemId> = HashSet::new();
+        for kind in kinds {
+            match mode {
+                SelectMode::All => {
+                    if let Some(s) = self.current_storey() {
+                        ids.extend(s.surface_ids(kind));
+                    }
+                }
+                SelectMode::Remaining => {
+                    if let (Some(record), Some(idx)) =
+                        (self.current_record.as_ref(), self.current_storey_idx)
+                    {
+                        ids.extend(record.data.incomplete_surface_ids(idx, kind));
+                    }
+                }
+                _ => {}
+            }
+        }
+        self.structure_selected = ids;
+    }
+
+    /// Drop every selected id belonging to `kind` (used when a mode is toggled
+    /// OFF in an additive `Click`/`Carve` selection — the rest stays put).
+    pub(super) fn drop_selection_of_kind(&mut self, kind: SurfaceKind) {
+        let drop_ids: HashSet<ItemId> = match self.current_storey() {
+            Some(s) => s.surface_ids(kind).into_iter().collect(),
+            None => return,
+        };
+        self.structure_selected.retain(|id| !drop_ids.contains(id));
+    }
+
+    /// The highest-priority active mode (wall → roof → floor) — the kind a carve
+    /// SPLIT acts on when several modes are active. `None` when no mode is active.
+    pub(super) fn primary_structure_kind(&self) -> Option<SurfaceKind> {
+        [SurfaceKind::Walls, SurfaceKind::Roofs, SurfaceKind::Floors]
+            .into_iter()
+            .find(|k| self.structure_kinds.contains(k))
     }
 
     /// The current storey's resolved regions, if a storey is in scope.

@@ -80,7 +80,7 @@ const CEILING_TYPES: &[(CeilingConstructionType, &str)] = &[
 /// `enabled` gates interaction.
 pub fn structure_panel<F: FnMut(UiEvent)>(
     ui: &mut egui::Ui,
-    kind: SurfaceKind,
+    kinds: &std::collections::BTreeSet<SurfaceKind>,
     select: Option<SelectMode>,
     edit: Option<&StructureEdit>,
     counts: SurfaceCounts,
@@ -89,8 +89,11 @@ pub fn structure_panel<F: FnMut(UiEvent)>(
 ) {
     ui.label(egui::RichText::new("Mode").size(11.0).weak());
     ui.horizontal_wrapped(|ui| {
+        // The mode buttons are NON-EXCLUSIVE — each toggles its kind in/out of
+        // the active set, so the assessor can work several at once (Walls +
+        // Floors). The event toggles; the controller keeps ≥1 active.
         for (m, label) in MODES {
-            let active = kind == *m;
+            let active = kinds.contains(m);
             let count = count_for(*m, counts);
             if ui
                 .add_enabled(
@@ -98,7 +101,6 @@ pub fn structure_panel<F: FnMut(UiEvent)>(
                     egui::Button::selectable(active, format!("{label}  ·  {count}")),
                 )
                 .clicked()
-                && !active
             {
                 on_event(UiEvent::Sketch(SketchEvent::SetStructureKind(*m)));
             }
@@ -184,7 +186,7 @@ fn edit_session<F: FnMut(UiEvent)>(
             });
         }
         if let Some(g) = e.groups.get(e.active) {
-            group_editor_ui(ui, e.kind, e.active, g, enabled, on_event);
+            group_editor_ui(ui, g.ty.kind(), e.active, g, enabled, on_event);
         }
     } else {
         ui.label(

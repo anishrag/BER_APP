@@ -506,8 +506,9 @@ pub enum SketchEvent {
     /// Switch the workspace onto another assessment phase (clicked in the phase
     /// signpost). The controller gates which phases are reachable.
     SetAssessmentPhase(AssessmentPhase),
-    /// Structure phase: set the active MODE (Wall/Roof/Floor) — which surface
-    /// kind the global Select tools act on. The controller shades that kind.
+    /// Structure phase: TOGGLE a MODE (Walls/Roofs/Floors) in/out of the active
+    /// set — the buttons are non-exclusive, so several kinds can be active at
+    /// once. The controller shades every active kind (≥1 always stays active).
     SetStructureKind(SurfaceKind),
     /// Structure phase: set (or clear with `None`) the active global Select
     /// subtool. It acts on the current mode's surface kind.
@@ -801,8 +802,9 @@ pub struct SketchView<'a> {
     /// Current storey's wall / roof / floor counts — the Structure-phase tool
     /// read-out.
     pub surface_counts: SurfaceCounts,
-    /// The active Structure-phase MODE (Wall/Roof/Floor), so the panel shows it.
-    pub structure_kind: SurfaceKind,
+    /// The active Structure-phase MODES (Walls/Roofs/Floors; non-exclusive), so
+    /// the panel shows which are selected.
+    pub structure_kinds: std::collections::BTreeSet<SurfaceKind>,
     /// The active global Select subtool, so the panel shows it. `None` = none.
     pub structure_select: Option<SelectMode>,
     /// Region ids selected in the Structure phase — the canvas shades these.

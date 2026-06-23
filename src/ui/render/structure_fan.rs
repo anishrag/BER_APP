@@ -111,7 +111,7 @@ pub(crate) fn group_fan_layout(storey: &Storey, edit: &StructureEdit) -> Vec<Gro
                     -std::f64::consts::FRAC_PI_2 + std::f64::consts::TAU * (i as f64) / (n as f64);
                 (r * angle.cos(), r * angle.sin())
             };
-            let centroid = group_centroid(storey, edit.kind, g).unwrap_or(centre);
+            let centroid = group_centroid(storey, g.ty.kind(), g).unwrap_or(centre);
             GroupFan {
                 group_index: i,
                 offset,
@@ -209,9 +209,10 @@ pub(crate) fn render_structure_fan(
             );
         }
         let group = &edit.groups[fan.group_index];
+        let kind = group.ty.kind();
         for id in &group.ids {
             draw_fanned_surface(
-                painter, &t, storey, edit.kind, *id, fan.offset, fan.color, active,
+                painter, &t, storey, kind, *id, fan.offset, fan.color, active,
             );
         }
     }
@@ -232,10 +233,11 @@ pub(crate) fn render_groups_inplace(
 ) {
     for (i, group) in edit.groups.iter().enumerate() {
         let color = group_color(i);
+        let kind = group.ty.kind();
         for id in &group.ids {
             // `active = true` for every group: in place, all groups are shown
             // full-strength (each has its own editable window — none is dimmed).
-            draw_fanned_surface(painter, t, storey, edit.kind, *id, (0.0, 0.0), color, true);
+            draw_fanned_surface(painter, t, storey, kind, *id, (0.0, 0.0), color, true);
         }
     }
 }
