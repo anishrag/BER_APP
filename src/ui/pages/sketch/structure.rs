@@ -407,8 +407,11 @@ pub(crate) fn photos_view_ui<F: FnMut(UiEvent)>(
         .show(ui, |ui| {
             ui.horizontal_wrapped(|ui| {
                 for p in &g.photos {
+                    // Prefer the lightweight preview; fall back to the original
+                    // for photos saved before thumbnails existed.
+                    let src = p.thumbnail_path.as_deref().unwrap_or(&p.file_path);
                     ui.add(
-                        egui::Image::new(format!("file://{}", p.file_path))
+                        egui::Image::new(format!("file://{src}"))
                             .max_size(egui::vec2(120.0, 120.0))
                             .maintain_aspect_ratio(true)
                             .corner_radius(4.0),

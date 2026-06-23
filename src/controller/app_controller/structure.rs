@@ -409,11 +409,34 @@ impl AppController {
         let id = ItemId::default();
         let dest = dir.join(format!("{}.{ext}", id.0));
         std::fs::copy(source, &dest).ok()?;
+        // Generate a small preview. Phone photos are ~12 MP; rendering the
+        // full-res original as a thumbnail is slow to decode and costs ~48 MB
+        // of texture each — unworkable on a tablet. Best-effort: on failure we
+        // leave `thumbnail_path` None and fall back to the original.
+        let thumb_dest = dir.join(format!("{}_thumb.jpg", id.0));
+        let thumbnail_path = Self::write_thumbnail(&dest, &thumb_dest)
+            .then(|| thumb_dest.to_string_lossy().into_owned());
         Some(ber_model::ber::common::Photo {
             id,
             file_path: dest.to_string_lossy().into_owned(),
+            thumbnail_path,
             description: None,
         })
+    }
+
+    /// Decode `src`, downscale to fit `THUMB_MAX` px on the long edge, and write
+    /// a JPEG to `dest`. Returns `false` (and writes nothing) on any failure.
+    fn write_thumbnail(src: &std::path::Path, dest: &std::path::Path) -> bool {
+        const THUMB_MAX: u32 = 480;
+        let Ok(reader) = image::ImageReader::open(src).and_then(|r| r.with_guessed_format()) else {
+            return false;
+        };
+        let Ok(img) = reader.decode() else {
+            return false;
+        };
+        // `thumbnail` preserves aspect ratio and fits within the bounds.
+        let thumb = img.thumbnail(THUMB_MAX, THUMB_MAX);
+        thumb.to_rgb8().save(dest).is_ok()
     }
 
     /// Attach a photo (from `source`) to a Structure group's construction(s) —

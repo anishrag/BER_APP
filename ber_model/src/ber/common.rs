@@ -35,7 +35,12 @@ impl FromStr for ItemId {
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct Photo {
     pub id: ItemId,
-    pub file_path: String, // local path to image
+    pub file_path: String, // local path to the full-resolution image
+    /// Local path to a small downscaled preview, generated at attach time.
+    /// `None` for older photos (fall back to `file_path`); rendering the
+    /// full-res original as a thumbnail is slow and memory-heavy on a tablet.
+    #[serde(default)]
+    pub thumbnail_path: Option<String>,
     pub description: Option<String>,
 }
 
