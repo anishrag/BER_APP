@@ -2713,6 +2713,21 @@ mod tests {
         assert!(!c.is_complete());
         c.construction_type = CeilingConstructionType::FlatRoof;
         assert!(c.is_complete());
+
+        // UNSET vs UNKNOWN: `Tbd` (the pre-edit default) is NOT set, but a
+        // declared `Unknown` build-up IS — so a typed wall marked Unknown is done.
+        assert!(!ConstructionMakeup::Tbd.is_set(), "Tbd is unset");
+        assert!(
+            ConstructionMakeup::Unknown.is_set(),
+            "Unknown is a real choice"
+        );
+        let mut w = WallConstruction {
+            construction_type: WallConstructionType::CavityWall,
+            ..Default::default()
+        };
+        assert!(!w.is_complete(), "default build-up Tbd is unset");
+        w.base.construction_makeup = ConstructionMakeup::Unknown;
+        assert!(w.is_complete(), "Unknown build-up counts as done");
     }
 
     #[test]

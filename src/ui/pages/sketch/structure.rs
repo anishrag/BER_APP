@@ -284,11 +284,12 @@ pub(crate) fn group_editor_ui<F: FnMut(UiEvent)>(
     });
     ui.label(egui::RichText::new("Build-up").size(EDITOR_FONT).weak());
     ui.horizontal_wrapped(|ui| {
-        // Default fabric, Unknown (`Tbd` — still "not done"), or Specify a custom
-        // layer build-up (`Layers`; the layer editor itself is future work).
+        // Default fabric, Unknown (a real choice — counts as done, unlike the
+        // unset `Tbd` default which is not offered), or Specify a custom layer
+        // build-up (`Layers`; the layer editor itself is future work).
         for (label, mk) in [
             ("Default", ConstructionMakeup::Default),
-            ("Unknown", ConstructionMakeup::Tbd),
+            ("Unknown", ConstructionMakeup::Unknown),
             ("Specify…", ConstructionMakeup::Layers(Vec::new())),
         ] {
             let sel = match (&g.makeup, &mk) {

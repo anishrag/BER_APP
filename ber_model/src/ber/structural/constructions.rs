@@ -48,7 +48,8 @@ pub enum ConstructionMakeup {
     NonHeatLoss, // no heat loss
     Default,     // use default construction
     #[default]
-    Tbd, // to be determined
+    Tbd, // UNSET — not yet classified (the pre-edit default); counts as not done
+    Unknown,     // the assessor DECLARED it unknown — a real choice, counts as done
     Layers(Vec<ConstructionLayer>), // custom stack of layers
 }
 
@@ -91,9 +92,10 @@ pub enum WallConstructionType {
 }
 
 impl ConstructionMakeup {
-    /// Whether a build-up has actually been chosen — anything but the `Tbd`
-    /// ("to be determined") placeholder. Half of the per-surface "done" test
-    /// (the other half is the construction TYPE being set).
+    /// Whether the assessor has MADE A CHOICE — anything but the `Tbd` UNSET
+    /// placeholder. Note `Unknown` counts as set: declaring a build-up unknown is
+    /// a real decision (done), unlike `Tbd` which is "not looked at yet". Half of
+    /// the per-surface "done" test (the other half is the construction TYPE).
     pub fn is_set(&self) -> bool {
         !matches!(self, ConstructionMakeup::Tbd)
     }
