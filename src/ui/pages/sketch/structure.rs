@@ -410,9 +410,12 @@ pub(crate) fn photos_view_ui<F: FnMut(UiEvent)>(
                     // Prefer the lightweight preview; fall back to the original
                     // for photos saved before thumbnails existed.
                     let src = p.thumbnail_path.as_deref().unwrap_or(&p.file_path);
+                    // `fit_to_exact_size` ignores the available layout space (a
+                    // thin text-line height inside `horizontal_wrapped`) and
+                    // renders the preview into a real box, keeping aspect ratio.
                     ui.add(
                         egui::Image::new(format!("file://{src}"))
-                            .max_size(egui::vec2(200.0, 200.0))
+                            .fit_to_exact_size(egui::vec2(200.0, 200.0))
                             .maintain_aspect_ratio(true)
                             .corner_radius(4.0),
                     );
