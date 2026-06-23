@@ -125,14 +125,20 @@ fn compute_structure_edit_layout(
     let band_h = EDIT_SLOT_H + 2.0 * EDIT_TOP_PAD;
 
     // Each group's on-screen position under the plain full-rect fit — picks which
-    // margin each window is nearest and where along it the window sits.
+    // side of the plan each window goes to and where along that edge it sits.
     let t_full = render::fit_transform(rect, min_xy, max_xy, base);
     let screen: Vec<egui::Pos2> = fans
         .iter()
         .map(|f| t_full.apply(f.centroid.0, f.centroid.1))
         .collect();
 
-    // Assign each group to its NEAREST canvas edge.
+    // Assign each group to a side by WHERE IT SITS RELATIVE TO THE PLAN'S OWN
+    // CENTRE (its quadrant), not the nearest canvas edge — otherwise a
+    // letterboxed plan (wide → tall side gaps, or tall → wide top/bottom gaps)
+    // pushes every group onto the same axis and we're back to two-sided. The
+    // dominant offset axis picks the side: a group above-centre goes top, one to
+    // the right goes right, and so on, so all four margins get used.
+    let plan_centre = t_full.apply((min_xy.0 + max_xy.0) * 0.5, (min_xy.1 + max_xy.1) * 0.5);
     let (mut left, mut right, mut top, mut bottom): (
         Vec<usize>,
         Vec<usize>,
@@ -140,22 +146,17 @@ fn compute_structure_edit_layout(
         Vec<usize>,
     ) = (Vec::new(), Vec::new(), Vec::new(), Vec::new());
     for (k, p) in screen.iter().enumerate() {
-        let dists = [
-            (p.x - rect.left(), 0u8), // left
-            (rect.right() - p.x, 1),  // right
-            (p.y - rect.top(), 2),    // top
-            (rect.bottom() - p.y, 3), // bottom
-        ];
-        let nearest = dists
-            .into_iter()
-            .min_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal))
-            .map(|(_, e)| e)
-            .unwrap_or(0);
-        match nearest {
-            0 => left.push(k),
-            1 => right.push(k),
-            2 => top.push(k),
-            _ => bottom.push(k),
+        let (dx, dy) = (p.x - plan_centre.x, p.y - plan_centre.y);
+        if dx.abs() >= dy.abs() {
+            if dx < 0.0 {
+                left.push(k);
+            } else {
+                right.push(k);
+            }
+        } else if dy < 0.0 {
+            top.push(k);
+        } else {
+            bottom.push(k);
         }
     }
 
