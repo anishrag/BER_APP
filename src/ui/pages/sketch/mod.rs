@@ -564,12 +564,6 @@ pub enum SketchEvent {
         group: usize,
         layers: Vec<ber_model::ber::structural::ConstructionLayer>,
     },
-    /// Structure phase: a newly TYPED layer — save it to the app-wide library and
-    /// append it to `group`'s build-up.
-    AddTypedLayer {
-        group: usize,
-        layer: ber_model::ber::structural::ConstructionLayer,
-    },
     /// Structure phase: close the "Edit attributes" session.
     EndStructureEdit,
 }

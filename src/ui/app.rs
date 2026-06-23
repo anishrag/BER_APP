@@ -1740,9 +1740,6 @@ impl eframe::App for BerApp {
                                             .borrow_mut()
                                             .set_structure_group_layers(group, layers);
                                     }
-                                    SketchEvent::AddTypedLayer { group, layer } => {
-                                        controller.borrow_mut().add_typed_layer(group, layer);
-                                    }
                                     SketchEvent::EndStructureEdit => {
                                         controller.borrow_mut().end_structure_edit();
                                     }

@@ -377,10 +377,20 @@ pub(crate) fn layer_editor_ui<F: FnMut(UiEvent)>(
     library: &[ConstructionLayer],
     on_event: &mut F,
 ) {
-    let current: Vec<ConstructionLayer> = match &g.makeup {
-        ConstructionMakeup::Layers(v) => v.clone(),
-        _ => Vec::new(),
-    };
+    // Editing happens in a local (name, thickness-text) working list held in egui
+    // memory keyed by the group; seeded from the group's current layers the first
+    // time it's opened, committed to the build-up + library only on Done.
+    let id = ui.id().with(("buildup_work", group_index));
+    let mut work: Vec<(String, String)> = ui
+        .ctx()
+        .data_mut(|d| d.get_temp::<Vec<(String, String)>>(id))
+        .unwrap_or_else(|| match &g.makeup {
+            ConstructionMakeup::Layers(v) => v
+                .iter()
+                .map(|l| (l.name(), l.thickness_mm.to_string()))
+                .collect(),
+            _ => Vec::new(),
+        });
 
     ui.label(
         egui::RichText::new(format!("{} build-up", kind_heading(g.ty.kind())))
@@ -393,116 +403,107 @@ pub(crate) fn layer_editor_ui<F: FnMut(UiEvent)>(
             .weak(),
     );
 
-    // Current layers (inside→outside), each removable.
-    if current.is_empty() {
-        ui.label(
-            egui::RichText::new("no layers yet")
-                .size(EDITOR_FONT)
-                .italics()
-                .weak(),
-        );
+    // A "+" anywhere inserts a layer at that position — either blank (to type) or
+    // picked from the reusable library (the common path). Collected, applied
+    // after the row loop so we don't mutate `work` mid-iteration.
+    let mut insert_at: Option<(usize, (String, String))> = None;
+    let mut remove: Option<usize> = None;
+
+    // Insert-at-top.
+    if let Some(pair) = insert_menu(ui, ("ins", group_index, usize::MAX), library) {
+        insert_at = Some((0, pair));
     }
-    for (i, l) in current.iter().enumerate() {
+    for i in 0..work.len() {
         ui.horizontal(|ui| {
             if ui.small_button("✕").on_hover_text("Remove").clicked() {
-                let mut v = current.clone();
-                v.remove(i);
-                on_event(UiEvent::Sketch(SketchEvent::SetStructureGroupLayers {
-                    group: group_index,
-                    layers: v,
-                }));
+                remove = Some(i);
             }
-            ui.label(egui::RichText::new(layer_summary(l)).size(EDITOR_FONT));
+            ui.add(
+                egui::TextEdit::singleline(&mut work[i].0)
+                    .desired_width(110.0)
+                    .hint_text("layer"),
+            );
+            ui.add(
+                egui::TextEdit::singleline(&mut work[i].1)
+                    .desired_width(40.0)
+                    .hint_text("mm"),
+            );
+            ui.label(egui::RichText::new("mm").size(EDITOR_FONT));
+            // "+" after this layer → insert below (between layers).
+            if let Some(pair) = insert_menu(ui, ("ins", group_index, i), library) {
+                insert_at = Some((i + 1, pair));
+            }
         });
     }
-
-    ui.separator();
-    // Pick from the app-wide library (most common path).
-    ui.add_enabled_ui(!library.is_empty(), |ui| {
-        egui::ComboBox::from_id_salt(("layer_library", group_index))
-            .selected_text(egui::RichText::new("+ add from library").size(EDITOR_FONT))
-            .show_ui(ui, |ui| {
-                for l in library {
-                    if ui
-                        .selectable_label(
-                            false,
-                            egui::RichText::new(layer_summary(l)).size(EDITOR_FONT),
-                        )
-                        .clicked()
-                    {
-                        let mut v = current.clone();
-                        v.push(l.clone());
-                        on_event(UiEvent::Sketch(SketchEvent::SetStructureGroupLayers {
-                            group: group_index,
-                            layers: v,
-                        }));
-                    }
-                }
-            });
-    });
-
-    ui.separator();
-    // Type a NEW layer — buffers persisted in egui memory keyed by the group.
-    ui.label(egui::RichText::new("New layer").size(EDITOR_FONT).weak());
-    let id = ui.id().with(("new_layer", group_index));
-    let (mut name, mut thickness, mut lambda, mut bridged) = ui
-        .ctx()
-        .data_mut(|d| d.get_temp::<(String, String, String, bool)>(id))
-        .unwrap_or_default();
-    ui.horizontal(|ui| {
-        ui.label(egui::RichText::new("Name").size(EDITOR_FONT));
-        ui.add(egui::TextEdit::singleline(&mut name).desired_width(120.0));
-    });
-    ui.horizontal(|ui| {
-        ui.label(egui::RichText::new("mm").size(EDITOR_FONT));
-        ui.add(egui::TextEdit::singleline(&mut thickness).desired_width(46.0));
-        ui.label(egui::RichText::new("λ").size(EDITOR_FONT));
-        ui.add(egui::TextEdit::singleline(&mut lambda).desired_width(46.0));
-    });
-    ui.checkbox(
-        &mut bridged,
-        egui::RichText::new("Bridged").size(EDITOR_FONT),
-    );
-    let thickness_ok = thickness.trim().parse::<u32>().is_ok();
-    let lambda_ok = lambda.trim().parse::<f32>().is_ok();
-    let can_add = !name.trim().is_empty() && thickness_ok && lambda_ok;
-    if ui
-        .add_enabled(can_add, egui::Button::new("Add layer"))
-        .clicked()
-    {
-        let layer = ConstructionLayer::typed(
-            name.trim().to_string(),
-            thickness.trim().parse().unwrap_or(0),
-            lambda.trim().parse().unwrap_or(0.0),
-            bridged,
-        );
-        on_event(UiEvent::Sketch(SketchEvent::AddTypedLayer {
-            group: group_index,
-            layer,
-        }));
-        name.clear();
-        thickness.clear();
-        lambda.clear();
-        bridged = false;
+    if let Some((at, pair)) = insert_at {
+        work.insert(at.min(work.len()), pair);
     }
-    ui.ctx()
-        .data_mut(|d| d.insert_temp(id, (name, thickness, lambda, bridged)));
+    if let Some(i) = remove {
+        if i < work.len() {
+            work.remove(i);
+        }
+    }
 
     ui.separator();
-    if ui.button("Done").clicked() {
+    let done = ui.button("Done").clicked();
+    if done {
+        // Commit: drop unnamed rows, parse thickness, set the build-up (which also
+        // saves the named layers to the library), then close + clear the buffer.
+        let layers: Vec<ConstructionLayer> = work
+            .iter()
+            .filter(|(n, _)| !n.trim().is_empty())
+            .map(|(n, t)| {
+                ConstructionLayer::typed(
+                    n.trim().to_string(),
+                    t.trim().parse().unwrap_or(0),
+                    0.0,
+                    false,
+                )
+            })
+            .collect();
+        on_event(UiEvent::Sketch(SketchEvent::SetStructureGroupLayers {
+            group: group_index,
+            layers,
+        }));
         on_event(UiEvent::Sketch(SketchEvent::EndSpecifyLayers));
+        ui.ctx().data_mut(|d| d.remove::<Vec<(String, String)>>(id));
+    } else {
+        ui.ctx().data_mut(|d| d.insert_temp(id, work));
     }
 }
 
-/// One-line summary of a layer for the list + library picker.
+/// A "+" button that opens a menu to insert a layer: a blank one to type, or any
+/// previously-typed library layer. Returns the chosen `(name, thickness-text)`
+/// when an item is clicked. `salt` disambiguates the multiple "+" menus.
+fn insert_menu(
+    ui: &mut egui::Ui,
+    salt: (&'static str, usize, usize),
+    library: &[ConstructionLayer],
+) -> Option<(String, String)> {
+    let mut picked = None;
+    ui.push_id(salt, |ui| {
+        ui.menu_button("+", |ui| {
+            if ui.button("Blank layer").clicked() {
+                picked = Some((String::new(), String::new()));
+                ui.close();
+            }
+            if !library.is_empty() {
+                ui.separator();
+                for l in library {
+                    if ui.button(layer_summary(l)).clicked() {
+                        picked = Some((l.name(), l.thickness_mm.to_string()));
+                        ui.close();
+                    }
+                }
+            }
+        });
+    });
+    picked
+}
+
+/// One-line summary of a layer for the library pick menu.
 fn layer_summary(l: &ConstructionLayer) -> String {
-    format!(
-        "{} · {}mm · λ{:.3}{}",
-        l.name(),
-        l.thickness_mm,
-        l.lambda(),
-        if l.bridged { " · bridged" } else { "" }
-    )
+    format!("{} · {}mm", l.name(), l.thickness_mm)
 }
 
 /// Heading-level-1 label for a group: the surface kind.

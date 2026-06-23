@@ -348,7 +348,9 @@ impl AppController {
     }
 
     /// Replace `group`'s build-up with `layers` (its make-up becomes
-    /// `Layers(layers)`) and apply it durably — the pick/remove/reorder path.
+    /// `Layers(layers)`) and apply it durably. Also saves each NAMED layer to the
+    /// app-wide library (idempotent) so a typed layer becomes pickable next time —
+    /// the build-up editor commits the whole list here on close.
     pub fn set_structure_group_layers(
         &mut self,
         group: usize,
@@ -362,33 +364,18 @@ impl AppController {
         else {
             return;
         };
-        self.set_structure_group_attrs(group, ty, ConstructionMakeup::Layers(layers), phase);
-    }
-
-    /// A newly TYPED layer: save it to the app-wide library (so it's pickable
-    /// next time) AND append it to `group`'s build-up.
-    pub fn add_typed_layer(
-        &mut self,
-        group: usize,
-        layer: ber_model::ber::structural::ConstructionLayer,
-    ) {
-        // Persist to the library + refresh the cache.
+        // Persist any named layers to the reusable library + refresh the cache.
         let repo = crate::engine::ber_repository::BerRepository::new(&self.conn);
-        if repo.add_construction_layer(&layer).is_ok() {
+        let mut added = false;
+        for l in &layers {
+            if !l.name().trim().is_empty() && repo.add_construction_layer(l).is_ok() {
+                added = true;
+            }
+        }
+        if added {
             self.layer_library = repo.list_construction_layers().unwrap_or_default();
         }
-        // Append to the group's current build-up.
-        let mut layers = self
-            .structure_edit
-            .as_ref()
-            .and_then(|e| e.groups.get(group))
-            .and_then(|g| match &g.makeup {
-                ConstructionMakeup::Layers(v) => Some(v.clone()),
-                _ => None,
-            })
-            .unwrap_or_default();
-        layers.push(layer);
-        self.set_structure_group_layers(group, layers);
+        self.set_structure_group_attrs(group, ty, ConstructionMakeup::Layers(layers), phase);
     }
 
     /// Rename a group's editable label — the in-place window title AND the

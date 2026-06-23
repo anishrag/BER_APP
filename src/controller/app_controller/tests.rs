@@ -1592,8 +1592,11 @@ fn specify_layers_saves_to_library_and_builds_up() {
         ConstructionMakeup::Layers(_)
     ));
 
-    // Type a new layer → saved to the library AND appended to the build-up.
-    c.add_typed_layer(0, ConstructionLayer::typed("EPS".into(), 100, 0.035, false));
+    // Set the build-up to one typed layer → saved to the library too.
+    c.set_structure_group_layers(
+        0,
+        vec![ConstructionLayer::typed("EPS".into(), 100, 0.0, false)],
+    );
     assert!(
         c.construction_layer_library()
             .iter()
