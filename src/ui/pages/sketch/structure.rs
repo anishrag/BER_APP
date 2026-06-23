@@ -24,7 +24,7 @@ use crate::ui::pages::events::UiEvent;
 /// Font size for the per-group attribute editor (the floating windows + the
 /// exploded-view side panel). Larger than the tool-row labels so the editable
 /// controls read clearly at the zoomed-out edit scale.
-const EDITOR_FONT: f32 = 13.5;
+const EDITOR_FONT: f32 = 12.5;
 /// Width of the editable group-name field in the attribute editor.
 const EDIT_NAME_W: f32 = 130.0;
 

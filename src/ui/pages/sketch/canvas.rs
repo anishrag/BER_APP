@@ -42,8 +42,8 @@ fn ceiling_exposure_tint(e: CeilingExposure) -> egui::Color32 {
 /// layout reserves space from these estimates; the slot is generous enough that
 /// stacked windows don't overlap, and the window's own content is capped to
 /// `EDIT_BOX_W` so it stays narrow (construction type is a dropdown).
-const EDIT_BOX_W: f32 = 200.0;
-const EDIT_SLOT_H: f32 = 158.0;
+const EDIT_BOX_W: f32 = 165.0;
+const EDIT_SLOT_H: f32 = 155.0;
 /// Gap between a window column and the canvas edge.
 const EDIT_COL_PAD: f32 = 10.0;
 /// Clear gap kept BETWEEN adjacent floaties along an edge, so the de-clutter
