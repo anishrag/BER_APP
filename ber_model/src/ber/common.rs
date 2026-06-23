@@ -41,7 +41,11 @@ pub struct Photo {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Hash, Default)]
 pub enum ConstructionPhase {
+    /// Untagged base fabric: skipped implicit default, never year-dated, never
+    /// offered in the phase picker. The starting state of a region until the
+    /// assessor assigns it a dated phase.
     #[default]
+    Unassigned,
     Original,
     Extension1,
     Extension2,
@@ -55,6 +59,7 @@ impl ConstructionPhase {
     /// what the UI shows when no nickname has been given.
     pub fn default_name(&self) -> String {
         match self {
+            ConstructionPhase::Unassigned => "Unassigned".to_string(),
             ConstructionPhase::Original => "Original".to_string(),
             ConstructionPhase::Extension1 => "Extension 1".to_string(),
             ConstructionPhase::Extension2 => "Extension 2".to_string(),

@@ -110,6 +110,7 @@ impl CeilingRegions {
                 polygon: Polygon3D::new(vertices),
                 opes: Opes::default(),
                 construction_id,
+                exposure: CeilingExposure::default(),
             }],
         }
     }
@@ -136,6 +137,7 @@ impl CeilingRegions {
                     polygon: Polygon3D::new(vertices),
                     opes: Opes::default(),
                     construction_id,
+                    exposure: CeilingExposure::default(),
                 }
             })
             .collect();
@@ -195,6 +197,7 @@ impl CeilingRegions {
                         polygon: Polygon3D::new(pts),
                         opes: Opes::default(),
                         construction_id: region.construction_id,
+                        exposure: region.exposure,
                     }
                 };
                 let piece = region_poly.intersection(&area_poly);
@@ -279,6 +282,7 @@ impl CeilingRegions {
                 // face (z from its plane, not a flat stamp), so the surface is
                 // bit-identical and only the region count grows.
                 let cid = region.construction_id;
+                let exposure = region.exposure;
                 let mk = |poly: &Polygon<f64>| {
                     let mut pts: Vec<Point3f64> = poly
                         .exterior()
@@ -293,6 +297,7 @@ impl CeilingRegions {
                         polygon: Polygon3D::new(pts),
                         opes: Opes::default(),
                         construction_id: cid,
+                        exposure,
                     }
                 };
                 for poly in inside.0.iter().flat_map(split_to_simple) {
@@ -705,7 +710,10 @@ impl CeilingRegions {
             return Self::default();
         }
         let fp = MultiPolygon(fp_polys);
-        let mk = |poly: &Polygon<f64>, z: Box<dyn Fn(f64, f64) -> f64>, cid: ItemId| {
+        let mk = |poly: &Polygon<f64>,
+                  z: Box<dyn Fn(f64, f64) -> f64>,
+                  cid: ItemId,
+                  exposure: CeilingExposure| {
             let mut pts: Vec<Point3f64> = poly
                 .exterior()
                 .coords()
@@ -719,6 +727,7 @@ impl CeilingRegions {
                 polygon: Polygon3D::new(pts),
                 opes: Opes::default(),
                 construction_id: cid,
+                exposure,
             }
         };
         let mut next: Vec<CeilingRegion> = Vec::new();
@@ -737,6 +746,7 @@ impl CeilingRegions {
                     &poly,
                     Box::new(move |x, y| c0 + cx * x + cy * y),
                     region.construction_id,
+                    region.exposure,
                 ));
                 covered = covered.union(&MultiPolygon(vec![poly]));
             }
@@ -746,7 +756,12 @@ impl CeilingRegions {
             if poly.unsigned_area() < SLIVER_AREA_M2 {
                 continue;
             }
-            next.push(mk(&poly, Box::new(move |_, _| default_height), fill_cid));
+            next.push(mk(
+                &poly,
+                Box::new(move |_, _| default_height),
+                fill_cid,
+                CeilingExposure::default(),
+            ));
         }
         Self { regions: next }
     }
@@ -971,6 +986,9 @@ pub struct CeilingRegion {
     pub polygon: Polygon3D, // 2D polygon boundary
     pub opes: Opes,
     pub construction_id: ItemId,
+    /// Thermal exposure (boundary condition) set in the Mapping phase.
+    #[serde(default)]
+    pub exposure: CeilingExposure,
 }
 
 impl CeilingRegion {

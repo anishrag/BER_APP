@@ -3,7 +3,7 @@
 //! `(f32, f32)` points, plus edge-sign comparison.
 
 use crate::ParameterAxis;
-use domain::points::Point2f32;
+use domain::points::{Point2f32, Point2f64};
 
 /// Fit a straight line to a (hand-drawn, possibly wavy) point set by total
 /// least squares: returns the centroid and a unit direction vector along the
@@ -641,6 +641,96 @@ pub fn ring_contains_point(pts: &[Point2f32], x: f32, y: f32) -> bool {
     inside
 }
 
+/// Whether the closed ring `inner` is FULLY contained within the closed ring
+/// `outer` (a conservative containment test, world metres). Every `inner`
+/// vertex must lie inside `outer` OR within `tol` of an `outer` edge (so a
+/// shared/coincident boundary counts as contained, not outside), AND no `inner`
+/// edge may properly cross an `outer` edge (which would mean `inner` pokes out
+/// between two sampled vertices). Degenerate rings (< 3 vertices) are never
+/// contained. Used by horizontal-exposure auto-derivation: a floor/ceiling
+/// region only auto-classifies as Party/NonHeatLoss when it sits ENTIRELY over
+/// the adjacent storey's footprint — a partial overlap (cantilever / setback)
+/// stays ambiguous for manual marking.
+pub fn ring_within_ring(inner: &[Point2f64], outer: &[Point2f64], tol: f64) -> bool {
+    if inner.len() < 3 || outer.len() < 3 {
+        return false;
+    }
+    let on_or_inside = |p: Point2f64| -> bool {
+        if point_in_ring_f64(outer, p.x, p.y) {
+            return true;
+        }
+        // Just outside by float noise, or exactly on the boundary → on an edge.
+        let n = outer.len();
+        for i in 0..n {
+            let a = outer[i];
+            let b = outer[(i + 1) % n];
+            if domain::points::point_to_segment_distance(p.x, p.y, a.x, a.y, b.x, b.y) <= tol {
+                return true;
+            }
+        }
+        false
+    };
+    if !inner.iter().all(|p| on_or_inside(*p)) {
+        return false;
+    }
+    // No inner edge may properly cross an outer edge (a poke-out the
+    // vertex-sampling above can't see).
+    let m = inner.len();
+    let n = outer.len();
+    for i in 0..m {
+        let a1 = inner[i];
+        let a2 = inner[(i + 1) % m];
+        for j in 0..n {
+            let b1 = outer[j];
+            let b2 = outer[(j + 1) % n];
+            if segments_cross_f64(a1, a2, b1, b2) {
+                return false;
+            }
+        }
+    }
+    true
+}
+
+/// Even-odd point-in-ring test for an f64 ring (the f64 analogue of
+/// [`ring_contains_point`]; implicitly closed). `< 3` vertices contain nothing.
+fn point_in_ring_f64(pts: &[Point2f64], x: f64, y: f64) -> bool {
+    let n = pts.len();
+    if n < 3 {
+        return false;
+    }
+    let mut inside = false;
+    let mut j = n - 1;
+    for i in 0..n {
+        let (a, b) = (pts[i], pts[j]);
+        if (a.y > y) != (b.y > y) {
+            let xc = a.x + (y - a.y) / (b.y - a.y) * (b.x - a.x);
+            if x < xc {
+                inside = !inside;
+            }
+        }
+        j = i;
+    }
+    inside
+}
+
+/// Whether f64 segments `a1→a2` and `b1→b2` cross at a single strictly-interior
+/// point (the f64, point-discarding analogue of [`segment_crossing`]): excludes
+/// shared endpoints and collinear touches, so a coincident/shared boundary edge
+/// is NOT reported as a crossing.
+fn segments_cross_f64(a1: Point2f64, a2: Point2f64, b1: Point2f64, b2: Point2f64) -> bool {
+    let (rx, ry) = (a2.x - a1.x, a2.y - a1.y);
+    let (sx, sy) = (b2.x - b1.x, b2.y - b1.y);
+    let denom = rx * sy - ry * sx;
+    if denom.abs() < 1e-12 {
+        return false; // parallel or collinear
+    }
+    let (qpx, qpy) = (b1.x - a1.x, b1.y - a1.y);
+    let t = (qpx * sy - qpy * sx) / denom;
+    let u = (qpx * ry - qpy * rx) / denom;
+    let m = 1e-9;
+    t > m && t < 1.0 - m && u > m && u < 1.0 - m
+}
+
 /// If segments `a1→a2` and `b1→b2` cross at a single interior point (not at a
 /// shared endpoint, not collinear), return that point. This is the
 /// proper-crossing half of [`segments_properly_intersect`] (which ALSO flags
@@ -969,6 +1059,35 @@ fn axis_aligned_segments_cross(a1: Point2f32, a2: Point2f32, b1: Point2f32, b2: 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn ring64(pts: &[(f64, f64)]) -> Vec<Point2f64> {
+        pts.iter().map(|&(x, y)| Point2f64::new(x, y)).collect()
+    }
+
+    /// `ring_within_ring`: a fully-enclosed inner ring is contained; a coincident
+    /// (equal) ring counts as contained (shared boundary within tolerance); an
+    /// inner ring that POKES OUT past the outer is not; degenerate rings never are.
+    #[test]
+    fn ring_within_ring_is_conservative_full_containment() {
+        let outer = ring64(&[(0.0, 0.0), (4.0, 0.0), (4.0, 4.0), (0.0, 4.0)]);
+        // Strictly inside.
+        let inside = ring64(&[(1.0, 1.0), (3.0, 1.0), (3.0, 3.0), (1.0, 3.0)]);
+        assert!(ring_within_ring(&inside, &outer, 0.05));
+        // Coincident / shared boundary → contained (within tolerance).
+        assert!(ring_within_ring(&outer, &outer, 0.05));
+        // Pokes out to the right (x up to 6) → NOT contained.
+        let pokes = ring64(&[(1.0, 1.0), (6.0, 1.0), (6.0, 3.0), (1.0, 3.0)]);
+        assert!(!ring_within_ring(&pokes, &outer, 0.05));
+        // Fully outside → not contained.
+        let outside = ring64(&[(5.0, 5.0), (6.0, 5.0), (6.0, 6.0), (5.0, 6.0)]);
+        assert!(!ring_within_ring(&outside, &outer, 0.05));
+        // Degenerate inner → never contained.
+        assert!(!ring_within_ring(
+            &ring64(&[(1.0, 1.0), (2.0, 2.0)]),
+            &outer,
+            0.05
+        ));
+    }
 
     // A vertical split: a region flush with the outline's left edge yields the
     // shared cut at its RIGHT edge; the complementary half yields the same x.

@@ -45,7 +45,9 @@ use document::{
     MovedCoordKind, PendingArc, PhaseRegion, ShapeSlot, StepRegion, StoreyDoc,
 };
 pub use document::{ExposureSection, PositionPromptKind, RiserKind};
-pub use exposure::{ExposureSelection, RiserView, SectionHandle, WallExposureView};
+pub use exposure::{
+    ExposureSelection, RiserView, SectionHandle, SurfaceExposureView, WallExposureView,
+};
 // `ExposureSection` is re-exported above (the controller's public surface).
 
 use chrono::NaiveDate;
@@ -169,6 +171,13 @@ pub struct AppController {
     /// (not persisted / not in undo history); `None` when nothing is awaiting a
     /// choice.
     pending_cut: Option<[ShapeSlot; 2]>,
+    /// True when the editor is marking HORIZONTAL-surface (floor/ceiling)
+    /// exposure: tapping a region picks it and the type buttons set its
+    /// FloorExposure/CeilingExposure. Mutually exclusive with the sibling
+    /// Mapping tools (wall exposure / living-area / phase / step). Toggled by
+    /// the UI. Manual marks are keyed by region centroid (durable; outside undo,
+    /// like the riser exposure).
+    surface_exposure_mode: bool,
     /// True when the editor is tagging construction-phase areas (year of
     /// construction). Routes `DrawPerpWalls` to phase carving; mutually
     /// exclusive with living-area / exposure modes. Toggled by the UI.
@@ -351,6 +360,7 @@ impl AppController {
             exposure_sel: None,
             exposure_drag: None,
             selected_riser: None,
+            surface_exposure_mode: false,
             pending_cut: None,
             phase_mode: false,
             phase_regions: HashMap::new(),

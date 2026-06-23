@@ -529,44 +529,56 @@ impl AppController {
 
         // Walls store the fixed cut SEGMENT(s) — every interior edge of the
         // carved region, each crossing at most one wall; floors/roofs store the
-        // whole carved ring. A wall carve touching no wall (all edges on the
-        // outline) yields no cut — warn and bail rather than shade nothing split.
+        // whole carved ring.
         let wall_cuts = if kind == SurfaceKind::Walls {
-            let edges = self.document.outline.floor_plan.interior_cut_edges(&ring32);
-            if edges.is_empty() {
-                log::warn!("structure wall carve produced no interior cut edge — no split");
-                self.abandon_structure_split_shape();
-                return;
-            }
-            edges
+            self.document.outline.floor_plan.interior_cut_edges(&ring32)
         } else {
             Vec::new()
         };
 
-        // Push onto the storey's durable split field; `resolve_storey` replays it
-        // (and, for walls, re-homes the crossed walls' openings onto the
-        // sub-walls before the orphan-prune).
-        let Some(storey) = self
-            .current_record
-            .as_mut()
-            .and_then(|r| r.data.storeys.get_mut(idx))
-        else {
-            return;
-        };
-        storey.push_structure_split(kind, &ring64, wall_cuts);
+        // A wall carve whose ring runs entirely along existing walls (it crosses
+        // none mid-span — e.g. lassoing an already-bounded region like a step or
+        // an extension leg) yields no interior cut edge. There's nothing to
+        // subdivide, but carve IS a selection gesture: skip the no-op durable
+        // split and go straight to selecting the enclosed walls. Floors/roofs
+        // always carry a whole ring, so they always split.
+        let needs_split = !(kind == SurfaceKind::Walls && wall_cuts.is_empty());
 
-        // Regions-as-truth: a ROOF carve is a one-shot coplanar face split on
-        // the stored roofs (floors/walls still replay their durable splits in
-        // `resolve_storey`). The split survives reload via the persisted roofs.
-        if kind == SurfaceKind::Roofs {
-            self.recompose_roofs(idx);
+        if needs_split {
+            // Push onto the storey's durable split field; `resolve_storey`
+            // replays it (and, for walls, re-homes the crossed walls' openings
+            // onto the sub-walls before the orphan-prune).
+            let Some(storey) = self
+                .current_record
+                .as_mut()
+                .and_then(|r| r.data.storeys.get_mut(idx))
+            else {
+                return;
+            };
+            storey.push_structure_split(kind, &ring64, wall_cuts);
+
+            // Regions-as-truth: a ROOF carve is a one-shot coplanar face split on
+            // the stored roofs (floors/walls still replay their durable splits in
+            // `resolve_storey`). The split survives reload via the persisted roofs.
+            if kind == SurfaceKind::Roofs {
+                self.recompose_roofs(idx);
+            }
+        } else {
+            log::debug!(
+                "structure wall carve crossed no wall — selecting the enclosed walls without splitting"
+            );
         }
 
         self.abandon_structure_split_shape();
-        let _ = self.mark_dirty();
-        self.materialize(); // re-resolve applies the split + re-homes openings
 
-        // Auto-select the chosen piece's surfaces of the split kind.
+        if needs_split {
+            let _ = self.mark_dirty();
+            self.materialize(); // re-resolve applies the split + re-homes openings
+        }
+
+        // Select the chosen piece's surfaces of the split kind (carve is a
+        // selection gesture). With no split, the already-resolved regions are
+        // current, so this still picks the walls bounding the carved region.
         self.select_surfaces_in_region(&ring64);
     }
 

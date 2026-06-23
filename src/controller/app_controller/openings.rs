@@ -91,6 +91,7 @@ impl AppController {
             self.sync_active();
             self.set_living_area_mode(false);
             self.exposure_mode = false;
+            self.surface_exposure_mode = false;
             self.selected_exposure_wall = None;
             self.exposure_sel = None;
             self.exposure_drag = None;

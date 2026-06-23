@@ -394,6 +394,12 @@ pub fn resolve_storey(
     // Stamp riser exposure from the durable side-table (keyed by base edge) —
     // risers have no perimeter VertexId, so this is their durable identity.
     stamp_riser_exposure(s, &mut storey);
+    // Stamp floor/ceiling horizontal exposure from the durable centroid-keyed
+    // side-tables — the area analogue of the riser stamp. Floors are final
+    // (phase partition + steps + splits all ran), roofs are final (the phase
+    // carve ran), so each region's centroid keys its override.
+    stamp_floor_exposure(s, &mut storey);
+    stamp_ceiling_exposure(s, &mut storey);
     // OPENINGS tail: walls/roofs are now final. Every wall id is freshly minted
     // (no amend), so re-derive each wall opening's `wall_id`/`along_m` from its
     // durable parametric `wall_anchor` (picking the right sub-wall after a
@@ -435,6 +441,51 @@ fn stamp_riser_exposure(s: &StoreyDoc, storey: &mut Storey) {
             region.exposure = *e;
         }
     }
+}
+
+/// Stamp floor exposure overrides from the durable `s.floor_exposure` table onto
+/// the just-built FLOOR regions (keyed by quantized plan centroid). An entry
+/// overrides the resolved region's `exposure`; an absent key leaves it at the
+/// `Unset` default. The area analogue of [`stamp_riser_exposure`]; runs after
+/// the floor partition / steps / splits are final.
+fn stamp_floor_exposure(s: &StoreyDoc, storey: &mut Storey) {
+    if s.floor_exposure.is_empty() {
+        return;
+    }
+    for region in &mut storey.floors.regions {
+        let key = crate::centroid_key(region.centroid());
+        if let Some(e) = s.floor_exposure.get(&key) {
+            region.exposure = *e;
+        }
+    }
+}
+
+/// Stamp ceiling exposure overrides from the durable `s.ceiling_exposure` table
+/// onto the just-built CEILING/ROOF regions (keyed by quantized plan centroid).
+/// Mirror of [`stamp_floor_exposure`]; runs after the phase roof-carve is final.
+fn stamp_ceiling_exposure(s: &StoreyDoc, storey: &mut Storey) {
+    if s.ceiling_exposure.is_empty() {
+        return;
+    }
+    for region in &mut storey.roofs.regions {
+        let key = crate::centroid_key(region.centroid());
+        if let Some(e) = s.ceiling_exposure.get(&key) {
+            region.exposure = *e;
+        }
+    }
+}
+
+/// Re-apply the floor + ceiling horizontal-exposure overrides from `doc`'s
+/// durable centroid-keyed maps onto an ALREADY-RESOLVED `storey` — the public
+/// face of the two private stamp passes that run inside [`resolve_storey`]. The
+/// controller's auto-derive pre-pass fills the doc maps AFTER every storey
+/// resolves (it needs the neighbours' resolved footprints), then calls this so
+/// the just-derived values land on the resolved regions in the SAME frame,
+/// across non-active/lower storeys too — without a full re-resolve. Idempotent:
+/// only regions whose centroid is keyed in the map change; the rest stay put.
+pub fn stamp_horizontal_exposure(doc: &StoreyDoc, storey: &mut Storey) {
+    stamp_floor_exposure(doc, storey);
+    stamp_ceiling_exposure(doc, storey);
 }
 
 /// Keep each wall opening homed across edits via its durable parametric anchor.
@@ -1365,6 +1416,67 @@ mod tests {
             riser.exposure,
             WallExposure::SemiExposed,
             "riser exposure came from the durable table, not the amend"
+        );
+    }
+
+    /// A floor/ceiling horizontal-exposure override in the durable
+    /// `floor_exposure`/`ceiling_exposure` tables (keyed by region centroid) is
+    /// stamped onto the resolved `FloorRegion.exposure`/`CeilingRegion.exposure`
+    /// and SURVIVES a re-resolve — the area analogue of
+    /// `riser_exposure_override_survives_re_resolves`.
+    #[test]
+    fn horizontal_exposure_override_survives_re_resolves() {
+        use ber_model::ber::structural::{CeilingExposure, FloorExposure};
+        let mut doc = square_doc(&[
+            Point2f32::new(0.0, 0.0),
+            Point2f32::new(4.0, 0.0),
+            Point2f32::new(4.0, 4.0),
+            Point2f32::new(0.0, 4.0),
+        ]);
+        let mut ber = Ber::default();
+        ensure_storey_constructions(&mut ber, 0, &[]);
+        ber.storeys[0].ceiling_height_m = Some(2.4);
+
+        // Resolve once to learn the floor + ceiling region centroids.
+        let storey = resolve_storey(&doc, &ber, 0, &[], &[], &[]);
+        let fkey = crate::centroid_key(storey.floors.regions[0].centroid());
+        let ckey = crate::centroid_key(storey.roofs.regions[0].centroid());
+        assert_eq!(
+            storey.floors.regions[0].exposure,
+            FloorExposure::Unset,
+            "fresh → Unset"
+        );
+        assert_eq!(storey.roofs.regions[0].exposure, CeilingExposure::Unset);
+        doc.floor_exposure.insert(fkey, FloorExposure::Ground);
+        doc.ceiling_exposure
+            .insert(ckey, CeilingExposure::ExposedRoof);
+
+        // Re-resolve: the overrides are stamped from the tables.
+        ber.storeys[0] = resolve_storey(&doc, &ber, 0, &[], &[], &[]);
+        assert_eq!(
+            ber.storeys[0].floors.regions[0].exposure,
+            FloorExposure::Ground,
+            "floor exposure stamped from the durable table"
+        );
+        assert_eq!(
+            ber.storeys[0].roofs.regions[0].exposure,
+            CeilingExposure::ExposedRoof,
+            "ceiling exposure stamped from the durable table"
+        );
+
+        // Geometry-affecting re-resolve (height change): the region keeps its
+        // shape → its centroid still keys the table.
+        ber.storeys[0].ceiling_height_m = Some(2.7);
+        ber.storeys[0] = resolve_storey(&doc, &ber, 0, &[], &[], &[]);
+        assert_eq!(
+            ber.storeys[0].floors.regions[0].exposure,
+            FloorExposure::Ground,
+            "floor override survives the re-derive"
+        );
+        assert_eq!(
+            ber.storeys[0].roofs.regions[0].exposure,
+            CeilingExposure::ExposedRoof,
+            "ceiling override survives the re-derive"
         );
     }
 

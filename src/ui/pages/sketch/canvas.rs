@@ -5,14 +5,37 @@
 use egui::epaint::PathShape;
 
 use super::touch::TouchNav;
-use super::{EguiStroke, SketchEvent, SketchView};
+use super::{ArmedSurfaceExposure, EguiStroke, SketchEvent, SketchView};
 use crate::controller::app_controller::{AssessmentPhase, SelectMode};
 use crate::ui::pages::events::UiEvent;
 use crate::ui::render;
 use crate::ui::render::ViewParams;
 use crate::ui::widgets::HintExt;
 use ber_model::ber::ber_struct::Ber;
+use ber_model::ber::structural::{CeilingExposure, FloorExposure};
 use domain::sketch::{EditTools, SketchMode};
+
+/// Faint fill tint for a floor region by its boundary condition (Unset = grey,
+/// so unmarked surfaces read as "to do").
+fn floor_exposure_tint(e: FloorExposure) -> egui::Color32 {
+    match e {
+        FloorExposure::Unset => egui::Color32::from_rgba_unmultiplied(140, 140, 140, 70),
+        FloorExposure::Ground => egui::Color32::from_rgba_unmultiplied(150, 110, 60, 90),
+        FloorExposure::Exposed => egui::Color32::from_rgba_unmultiplied(220, 80, 60, 90),
+        FloorExposure::SemiExposed => egui::Color32::from_rgba_unmultiplied(220, 160, 60, 90),
+        FloorExposure::NonHeatLoss => egui::Color32::from_rgba_unmultiplied(80, 160, 220, 90),
+    }
+}
+
+/// Outline tint for a ceiling region by its boundary condition.
+fn ceiling_exposure_tint(e: CeilingExposure) -> egui::Color32 {
+    match e {
+        CeilingExposure::Unset => egui::Color32::from_rgb(150, 150, 150),
+        CeilingExposure::ExposedRoof => egui::Color32::from_rgb(230, 90, 70),
+        CeilingExposure::Party => egui::Color32::from_rgb(90, 170, 230),
+        CeilingExposure::Unheated => egui::Color32::from_rgb(230, 170, 70),
+    }
+}
 
 /// Estimated width an in-place "Edit attributes" window occupies, and the
 /// vertical slot each is stacked into. egui sizes the windows lazily, so the
@@ -668,6 +691,32 @@ pub(super) fn render<F: FnMut(UiEvent)>(
         view.exposure_mode,
     );
 
+    // Horizontal-surface exposure: tint each floor/ceiling region by its current
+    // boundary condition so the assessor sees which surfaces still need marking.
+    // Floors fill solid (faint); ceilings outline (so a region shows both).
+    if view.surface_exposure_mode && !view.surface_exposure_views.is_empty() {
+        if let Some((_s, t)) = render::storey_transform(rect, ber, current_storey_idx, mode, vp) {
+            for sv in view.surface_exposure_views {
+                if sv.ring.len() < 3 {
+                    continue;
+                }
+                let pts: Vec<egui::Pos2> = sv.ring.iter().map(|(x, y)| t.apply(*x, *y)).collect();
+                if let Some(e) = sv.floor {
+                    let c = floor_exposure_tint(e);
+                    painter.add(egui::Shape::convex_polygon(
+                        pts.clone(),
+                        c,
+                        egui::Stroke::NONE,
+                    ));
+                }
+                if let Some(e) = sv.ceiling {
+                    let c = ceiling_exposure_tint(e);
+                    painter.add(egui::Shape::closed_line(pts, egui::Stroke::new(2.0, c)));
+                }
+            }
+        }
+    }
+
     // Structure "Edit attributes" (in-place): now the wall-exposure colours are
     // down, recolour each group's surfaces in its group colour ON TOP (so the
     // selection is unmistakable over exposure), draw a connector from each group
@@ -1217,6 +1266,39 @@ pub(super) fn render<F: FnMut(UiEvent)>(
         }
     }
 
+    // Surface-exposure mode: a tap applies the SINGLE armed boundary condition
+    // (floor XOR ceiling) to ONLY the matching surface kind — never both — so the
+    // tap can't clobber the other surface's (auto-derived) value. The region
+    // under the tap is resolved controller-side
+    // (`set_floor_exposure_at` / `set_ceiling_exposure_at`); a no-op if no region
+    // of that kind is under the point.
+    if view.surface_exposure_mode && !cut_pending && !touch_nav_active {
+        if let Some(t) = canvas_transform(ber, current_storey_idx, rect, vp, false) {
+            let tap = response.clicked_by(egui::PointerButton::Primary)
+                || response.drag_started_by(egui::PointerButton::Primary);
+            if tap {
+                if let Some(pos) = response.interact_pointer_pos() {
+                    let (wx, wy) = t.inverse(pos.x, pos.y);
+                    let ev = match *view.armed_surface_exposure {
+                        ArmedSurfaceExposure::Floor(exposure) => SketchEvent::SetFloorExposure {
+                            world_x: wx,
+                            world_y: wy,
+                            exposure,
+                        },
+                        ArmedSurfaceExposure::Ceiling(exposure) => {
+                            SketchEvent::SetCeilingExposure {
+                                world_x: wx,
+                                world_y: wy,
+                                exposure,
+                            }
+                        }
+                    };
+                    on_event(UiEvent::Sketch(ev));
+                }
+            }
+        }
+    }
+
     // Openings mode (no elevation open): a tap near a wall drops the selected
     // opening type on the nearest wall (or opens the wall's elevation in Edit).
     // The elevation overlay, when open, captures its own input (see the
@@ -1257,6 +1339,7 @@ pub(super) fn render<F: FnMut(UiEvent)>(
         && !view.roof_ridge_pending
         && !view.roof_rect_pending
         && !view.exposure_mode
+        && !view.surface_exposure_mode
         && !view.openings_mode
         // Structure phase owns the canvas with its own selection tools.
         && !structure_phase;

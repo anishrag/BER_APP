@@ -1386,6 +1386,7 @@ mod tests {
             ]),
             opes: Default::default(),
             construction_id: Default::default(),
+            exposure: Default::default(),
         });
         let err = validate_roof_apex(&storey, Point2f64::new(12.0, 1.0), 4.0).unwrap_err();
         assert_eq!(err, REGION_IRREGULAR_SLOPE_MSG);

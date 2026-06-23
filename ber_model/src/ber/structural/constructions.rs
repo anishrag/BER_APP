@@ -117,6 +117,42 @@ pub enum WallExposure {
     Ground,
 }
 
+/// Thermal exposure (boundary condition) of a horizontal FLOOR region — set in
+/// the Mapping phase, parallel to [`WallExposure`]. The Structure-phase
+/// construction type/make-up stays separate (on the referenced
+/// `FloorConstruction`); this is purely the boundary condition.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub enum FloorExposure {
+    /// No exposure marked yet (the default; auto-derivation/manual marking fill it).
+    #[default]
+    Unset,
+    /// Ground-bearing slab / ground floor.
+    Ground,
+    /// Exposed to outside air below (floor over a passage/overhang).
+    Exposed,
+    /// Over an unheated space.
+    SemiExposed,
+    /// Party floor to another dwelling (no heat loss).
+    NonHeatLoss,
+}
+
+/// Thermal exposure (boundary condition) of a horizontal CEILING region — set in
+/// the Mapping phase, parallel to [`WallExposure`]. The Structure-phase
+/// construction type/make-up stays separate (on the referenced
+/// `CeilingConstruction`); this is purely the boundary condition.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub enum CeilingExposure {
+    /// No exposure marked yet (the default; auto-derivation/manual marking fill it).
+    #[default]
+    Unset,
+    /// Exposed roof / ceiling under roof to outside.
+    ExposedRoof,
+    /// Party ceiling to another dwelling.
+    Party,
+    /// Under an unheated space (ceiling below an unheated attic).
+    Unheated,
+}
+
 /// Shared construction identity + fabric properties. A handful of these exist
 /// per dwelling (e.g. "300mm filled cavity, original"); many regions reference
 /// one by `construction_id`. Geometry (polygon, exposure, openings) lives on the

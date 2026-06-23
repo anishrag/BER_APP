@@ -27,8 +27,8 @@ use egui::Pos2;
 use crate::controller::app_controller::{
     AssessmentPhase, ChecklistItem, DimensionPromptUiData, EditDragPromptUiData, ElevationView,
     ExposureSelection, NewStoreyPromptUiData, OpeningPromptUiData, OpeningToolKind,
-    PositionPromptUiData, RiserView, SelectMode, SnapTagView, StructureEdit, SurfaceKind,
-    VertexDropPromptUiData, WallExposureView,
+    PositionPromptUiData, RiserView, SelectMode, SnapTagView, StructureEdit, SurfaceExposureView,
+    SurfaceKind, VertexDropPromptUiData, WallExposureView,
 };
 use crate::ui::pages::events::UiEvent;
 use crate::ui::render::ViewParams;
@@ -36,10 +36,29 @@ use crate::ui::widgets::HintExt;
 use ber_model::ber::ber_struct::Ber;
 use ber_model::ber::common::{ConstructionPhase, ItemId};
 use ber_model::ber::fenestration::{Frame, Glazing};
-use ber_model::ber::structural::{SurfaceCounts, WallExposure};
+use ber_model::ber::structural::{CeilingExposure, FloorExposure, SurfaceCounts, WallExposure};
 use domain::sketch::{DisplayMode, EditTools, SketchMode};
 use manip_plan::CollinearitySuggestion;
 use std::collections::HashSet;
+
+/// The SINGLE boundary condition the surface-exposure toolbar has ARMED — a
+/// canvas tap then applies it to ONLY the matching surface kind (`Floor` →
+/// [`SketchEvent::SetFloorExposure`], `Ceiling` → [`SketchEvent::SetCeilingExposure`]),
+/// never both, so the tap can't clobber an auto-derived value the user didn't
+/// mean to touch. Arming a floor button replaces a ceiling arm and vice versa.
+/// Pure page state (lives on `SketchState`); defaults to ground floor (the
+/// common ground-storey case).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ArmedSurfaceExposure {
+    Floor(FloorExposure),
+    Ceiling(CeilingExposure),
+}
+
+impl Default for ArmedSurfaceExposure {
+    fn default() -> Self {
+        ArmedSurfaceExposure::Floor(FloorExposure::Ground)
+    }
+}
 
 /// The UI-friendly version of a stroke
 pub struct EguiStroke {
@@ -225,6 +244,10 @@ pub enum SketchEvent {
     CancelPendingPhase,
     /// Delete the current storey's phase region at the given index.
     DeletePhaseRegion(usize),
+    /// Stamp the storey's leftover fabric (outline minus the phase areas drawn)
+    /// as explicit `Original` region(s) — the "everything else is the original
+    /// build" one-tap that satisfies the Construction-phase checklist.
+    AssignRestOriginal,
     /// Toggle floor-step tagging mode: when on, DrawPerpWalls carves an area
     /// whose floor is raised or lowered relative to the storey datum.
     SetStepMode(bool),
@@ -373,6 +396,23 @@ pub enum SketchEvent {
     ClearWallExposure,
     /// Mark every outline wall not yet set as exposed.
     SetAllRemainingExposed,
+    /// Toggle horizontal-surface (floor/ceiling) exposure mode: when on, a
+    /// canvas tap inside a region sets its boundary condition via the toolbar
+    /// buttons.
+    SetSurfaceExposureMode(bool),
+    /// Set the FLOOR exposure of the resolved floor region under the plan point.
+    SetFloorExposure {
+        world_x: f64,
+        world_y: f64,
+        exposure: FloorExposure,
+    },
+    /// Set the CEILING exposure of the resolved ceiling region under the plan
+    /// point.
+    SetCeilingExposure {
+        world_x: f64,
+        world_y: f64,
+        exposure: CeilingExposure,
+    },
     // ── Windows/doors ──────────────────────────────────────────────────────
     /// Toggle windows/doors mode.
     SetOpeningsMode(bool),
@@ -563,6 +603,13 @@ pub struct SketchView<'a> {
     /// The active storey's derived RISER walls (dashed 2D lines; selectable
     /// in exposure mode — the type buttons then act on the selected riser).
     pub riser_views: &'a [RiserView],
+    /// Horizontal-surface (floor/ceiling) exposure mode + the resolved
+    /// floor/ceiling regions (world rings) with their current boundary
+    /// condition, to tint, plus the toolbar's currently-armed exposure (a tap
+    /// inside a region applies it). `armed` lives on `SketchState`.
+    pub surface_exposure_mode: bool,
+    pub surface_exposure_views: &'a [SurfaceExposureView],
+    pub armed_surface_exposure: &'a mut ArmedSurfaceExposure,
     /// Construction-phase (year-of-construction) tagging: mode flag, the
     /// committed regions `(ring, label)` to tint, the carved area awaiting a
     /// phase pick, the cut candidates to tap between, the phase choices for

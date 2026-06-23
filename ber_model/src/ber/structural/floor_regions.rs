@@ -1,7 +1,7 @@
 use geo::{LineString, MultiPolygon, Polygon};
 use serde::{Deserialize, Serialize};
 
-use crate::ber::common::ItemId;
+use crate::ber::common::{ConstructionPhase, ItemId};
 use domain::points::{ring_centroid, Point2f64};
 
 #[allow(unused_imports)]
@@ -20,6 +20,9 @@ pub struct FloorRegion {
     /// unstepped storey floor, positive = raised, negative = lowered (steps).
     #[serde(default)]
     pub level_m: f64,
+    /// Thermal exposure (boundary condition) set in the Mapping phase.
+    #[serde(default)]
+    pub exposure: FloorExposure,
 }
 
 impl FloorRegion {
@@ -56,6 +59,7 @@ impl FloorRegions {
             polygon,
             construction_id,
             level_m: 0.0,
+            exposure: FloorExposure::default(),
         };
 
         Self {
@@ -81,6 +85,7 @@ impl FloorRegions {
                     polygon,
                     construction_id,
                     level_m: 0.0,
+                    exposure: FloorExposure::default(),
                 }
             })
             .collect();
@@ -150,6 +155,54 @@ impl FloorRegions {
         strip_collinear(&ring)
     }
 
+    /// Group the floor regions by the construction PHASE their `construction_id`
+    /// resolves to (via `phase_of`) and union each group's polygons, returning
+    /// one ring per connected component per phase. A step (`level_m`) or a
+    /// differing make-up splits the FLOOR into several regions, but they're
+    /// still ONE phase — so a phase ZONE is the union of all same-phase floor
+    /// area, not one zone per floor region. Deriving it per-region instead lets
+    /// a stepped storey seed spurious phase boundaries onto the storey above
+    /// (which has no step), splitting its floor where the phase is actually
+    /// uniform. Rings are open (no repeated closing vertex) with collinear
+    /// vertices stripped, matching `merged_outline`; disjoint same-phase area
+    /// yields several rings (one per connected component). First-seen phase
+    /// order is preserved for determinism.
+    pub fn phase_zone_rings(
+        &self,
+        phase_of: impl Fn(ItemId) -> ConstructionPhase,
+    ) -> Vec<(ConstructionPhase, Vec<Point2f64>)> {
+        use geo::bool_ops::BooleanOps;
+        let mut groups: Vec<(ConstructionPhase, MultiPolygon<f64>)> = Vec::new();
+        for r in &self.regions {
+            if r.polygon.exterior().0.len() < 4 {
+                continue;
+            }
+            let phase = phase_of(r.construction_id);
+            match groups.iter_mut().find(|(p, _)| *p == phase) {
+                Some((_, mp)) => *mp = mp.union(&r.polygon),
+                None => groups.push((phase, MultiPolygon::new(vec![r.polygon.clone()]))),
+            }
+        }
+        let mut out = Vec::new();
+        for (phase, mp) in groups {
+            for poly in &mp.0 {
+                let mut ring: Vec<Point2f64> = poly
+                    .exterior()
+                    .coords()
+                    .map(|c| Point2f64::new(c.x, c.y))
+                    .collect();
+                if ring.len() > 1 && ring.first() == ring.last() {
+                    ring.pop();
+                }
+                let ring = strip_collinear(&ring);
+                if ring.len() >= 3 {
+                    out.push((phase.clone(), ring));
+                }
+            }
+        }
+        out
+    }
+
     /// The storey footprint as ONE usable ring: when the floor is split into
     /// several phase zones, merge them back (`merged_outline`); otherwise the
     /// single region's exact stored points (no geo ops, so they round-trip).
@@ -195,6 +248,7 @@ impl FloorRegions {
             polygon: poly.clone(),
             construction_id: cid,
             level_m: 0.0,
+            exposure: FloorExposure::default(),
         };
         let outline_poly = to_poly(outline);
         let mut regions: Vec<FloorRegion> = Vec::new();
@@ -249,6 +303,7 @@ impl FloorRegions {
                 polygon: poly.clone(),
                 construction_id: region.construction_id,
                 level_m,
+                exposure: region.exposure,
             };
             let mut claimed: MultiPolygon<f64> = MultiPolygon::new(vec![]);
             for (ring, level) in areas {
@@ -312,6 +367,7 @@ impl FloorRegions {
                     polygon: poly.clone(),
                     construction_id: region.construction_id,
                     level_m: region.level_m,
+                    exposure: region.exposure,
                 };
                 // inside ∪ outside == the whole region, so a region that the cut
                 // misses (or fully covers) emits its whole self re-id'd — never
@@ -390,6 +446,7 @@ impl Default for FloorRegion {
             polygon: Polygon::new(LineString::new(vec![]), vec![]),
             construction_id: ItemId::default(),
             level_m: 0.0,
+            exposure: FloorExposure::default(),
         }
     }
 }

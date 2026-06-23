@@ -153,6 +153,7 @@ impl AppController {
         self.vertex_drop_prompt = None;
         self.living_area_mode = false;
         self.exposure_mode = false;
+        self.surface_exposure_mode = false;
         self.phase_mode = false;
         self.step_mode = false;
         self.selected_exposure_wall = None;
@@ -296,6 +297,7 @@ impl AppController {
         // outline mode. Step mode is the same kind of tool — same reset.
         self.phase_mode = false;
         self.step_mode = false;
+        self.surface_exposure_mode = false;
         self.selected_exposure_wall = None;
         self.exposure_sel = None;
         self.exposure_drag = None;
@@ -493,6 +495,11 @@ impl AppController {
                 }
             }
         }
+        // Floor/ceiling exposure auto-derivation, as a FINAL pass over every
+        // storey (it reads the neighbours' resolved footprints). `or_insert`
+        // keeps any manual override; the pass also STAMPS the derived values onto
+        // the resolved regions this same frame (derive-all then stamp-all).
+        self.derive_horizontal_exposure_all();
     }
 
     /// Recompose storey `idx`'s truth roofs from its ceiling EDIT inputs — the
@@ -623,6 +630,51 @@ impl AppController {
                 &mut record.data,
                 idx,
                 &self.document.storeys[idx],
+            );
+        }
+        // Floor/ceiling exposure auto-derivation runs as a FINAL pass, after
+        // every storey resolved — it reads the neighbours' resolved footprints (a
+        // ground floor → Ground, a top ceiling → ExposedRoof, fully-stacked
+        // surfaces → party). `or_insert` keeps any manual override, and the pass
+        // STAMPS the result straight onto the resolved regions this same frame
+        // (derive-all then stamp-all), so the gate settles in one commit.
+        self.derive_horizontal_exposure_all();
+    }
+
+    /// Auto-derive every storey's floor/ceiling exposure into its `StoreyDoc`
+    /// maps, THEN stamp the result onto the resolved regions in the SAME frame.
+    /// Each storey reads its neighbours' resolved footprints (ground floor →
+    /// Ground, top ceiling → ExposedRoof, fully stacked → party); `or_insert`
+    /// never clobbers a manual override. The two-pass shape (derive-all, then
+    /// stamp-all) is what makes a lower storey's Party ceiling re-stamp even
+    /// though `refresh_storey` only re-resolves the active storey.
+    fn derive_horizontal_exposure_all(&mut self) {
+        let Some(record) = self.current_record.as_ref() else {
+            return;
+        };
+        let n = record.data.storeys.len().min(self.document.storeys.len());
+        // Pass 1 — DERIVE every storey's doc maps. Reads the neighbours' resolved
+        // footprints from `current_record` (immutable) while writing each
+        // `StoreyDoc`'s exposure (mutable) — disjoint fields, so split the borrow.
+        {
+            let ber = &record.data;
+            let storeys = &mut self.document.storeys;
+            for idx in 0..n {
+                document::auto_derive_horizontal_exposure(&mut storeys[idx], ber, idx, n);
+            }
+        }
+        // Pass 2 — STAMP the just-derived maps onto every storey's RESOLVED
+        // regions this frame. The resolve's own stamp ran from the PRE-derive
+        // maps, so without this the Store-A regions would lag a cycle (the
+        // "Surfaces" gate would stay red until an unrelated edit), and a
+        // non-active/lower storey would never re-stamp at all.
+        let Some(record) = self.current_record.as_mut() else {
+            return;
+        };
+        for idx in 0..n {
+            document::stamp_horizontal_exposure(
+                &self.document.storeys[idx],
+                &mut record.data.storeys[idx],
             );
         }
     }

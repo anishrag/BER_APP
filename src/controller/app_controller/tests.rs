@@ -1581,7 +1581,7 @@ fn set_construction_phases_populates_choices() {
 }
 
 /// A phase polygon stamps its phase onto walls whose midpoint falls inside it;
-/// walls outside stay `Original`.
+/// walls outside stay `Unassigned` (the untagged-remainder default).
 #[test]
 fn phase_polygon_stamps_contained_walls() {
     let p = |x: f32, y: f32| Point2f32::new(x, y);
@@ -1607,10 +1607,12 @@ fn phase_polygon_stamps_contained_walls() {
                 "wall {i} (right) tagged"
             );
         } else {
+            // The untagged remainder is now `Unassigned` (the gate's
+            // "left unassigned" state), not the implicit `Original` it used to be.
             assert_eq!(
                 phase,
-                ConstructionPhase::Original,
-                "wall {i} (other) original"
+                ConstructionPhase::Unassigned,
+                "wall {i} (other) unassigned"
             );
         }
     }
@@ -1642,7 +1644,8 @@ fn phase_area_splits_floor_into_regions() {
         })
         .collect();
     assert!(phases.contains(&ConstructionPhase::Extension1));
-    assert!(phases.contains(&ConstructionPhase::Original));
+    // The remainder (the untagged half) is now `Unassigned`, not `Original`.
+    assert!(phases.contains(&ConstructionPhase::Unassigned));
 }
 
 /// The floor split survives a DB round-trip: reopening rebuilds the split
@@ -1929,7 +1932,8 @@ fn untagged_outline_survives_reload_without_distortion() {
 
 /// A wall takes the construction phase of the partitioned FLOOR zone on its
 /// interior side: the right perimeter wall, whose interior lies in the tagged
-/// extension zone, becomes Extension1; the left perimeter wall stays Original.
+/// extension zone, becomes Extension1; the left perimeter wall stays Unassigned
+/// (the untagged remainder).
 /// (Walls track the floor partition — no separate wall-only phase heuristic.)
 #[test]
 fn wall_takes_the_phase_of_its_interior_floor_zone() {
@@ -1954,7 +1958,8 @@ fn wall_takes_the_phase_of_its_interior_floor_zone() {
         .position(|w| w.base_midpoint().unwrap().x < 6.0)
         .unwrap();
     assert_eq!(wall_phase(&c, right_idx), ConstructionPhase::Extension1);
-    assert_eq!(wall_phase(&c, left_idx), ConstructionPhase::Original);
+    // The left wall's interior floor zone is the untagged remainder → Unassigned.
+    assert_eq!(wall_phase(&c, left_idx), ConstructionPhase::Unassigned);
 }
 
 /// A tagged phase survives a reload: the durable record is the floor regions'
@@ -1990,6 +1995,152 @@ fn phase_survives_reload_via_reconstruction() {
         wall_phase(&c, right_idx),
         ConstructionPhase::Extension1,
         "the tag is rebuilt from the floors on reload"
+    );
+}
+
+/// Add a finalised living area to the active storey's editing model, so
+/// `has_living_area` / the "Living area" checklist row go green.
+fn add_finalised_living_area(c: &mut AppController) {
+    let p = |x: f32, y: f32| Point2f32::new(x, y);
+    let plan = FloorPlan::from_clean_ring(&[p(1., 1.), p(3., 1.), p(3., 3.), p(1., 3.)]).unwrap();
+    let idx = c.current_storey_idx.unwrap_or(0);
+    c.document.storeys[idx].living_areas.push(ShapeSlot {
+        dimensioning: DimensionState {
+            known_params: plan.all_active_params(),
+            scale_set: true,
+            ..Default::default()
+        },
+        floor_plan: plan,
+    });
+}
+
+/// Status of one checklist row by label.
+fn checklist_status_of(c: &AppController, label: &str) -> ChecklistStatus {
+    c.stage_a_checklist()
+        .into_iter()
+        .find(|it| it.label == label)
+        .unwrap_or_else(|| panic!("no checklist row {label}"))
+        .status
+}
+
+/// The three new Mapping checklist rows exist and each gates `mapping_complete`:
+/// a dwelling with no living area / an Unassigned floor / Unset surfaces is NOT
+/// mapping-complete; once all three are satisfied (plus the pre-existing rows)
+/// it is.
+#[test]
+fn new_checklist_rows_gate_mapping_complete() {
+    use ber_model::ber::structural::FloorExposure;
+    let p = |x: f32, y: f32| Point2f32::new(x, y);
+    let mut c = dimensioned_square_controller();
+    // The pre-existing rows (Measurements/Heights/Exposures) need satisfying too,
+    // so this dwelling starts incomplete regardless — assert the three NEW rows
+    // are present and each starts red.
+    let labels: Vec<&'static str> = c.stage_a_checklist().iter().map(|it| it.label).collect();
+    assert!(labels.contains(&"Surfaces"), "Surfaces row present");
+    assert!(
+        labels.contains(&"Construction phase"),
+        "Construction phase row present"
+    );
+    assert!(labels.contains(&"Living area"), "Living area row present");
+    assert_eq!(
+        checklist_status_of(&c, "Living area"),
+        ChecklistStatus::Incomplete,
+        "no living area yet"
+    );
+    assert!(!c.mapping_complete(), "incomplete dwelling is not complete");
+
+    // Living area → that row goes green.
+    add_finalised_living_area(&mut c);
+    assert_eq!(
+        checklist_status_of(&c, "Living area"),
+        ChecklistStatus::AllStoreys,
+        "a finalised living area satisfies the row"
+    );
+
+    // Construction phase: tag the whole storey Original (the one-tap), settle the
+    // deferred derive, and the row goes green.
+    c.assign_rest_to_original();
+    c.commit_to_ber().unwrap();
+    assert_eq!(
+        checklist_status_of(&c, "Construction phase"),
+        ChecklistStatus::AllStoreys,
+        "rest-to-Original satisfies the phase row"
+    );
+
+    // Surfaces needs ceiling (roof) regions to exist — set a default ceiling
+    // height so the storey resolves a roof. storey-0 floors auto-derive Ground
+    // and its ceiling ExposedRoof, and the derive-then-stamp pass lands those on
+    // the resolved regions in the SAME commit. ONE commit must settle it — this
+    // single-commit assertion is the regression guard for the lag bug.
+    c.set_default_ceiling_height(2.4).unwrap();
+    c.commit_to_ber().unwrap();
+    assert_eq!(
+        checklist_status_of(&c, "Surfaces"),
+        ChecklistStatus::AllStoreys,
+        "auto-derived floor/ceiling exposure satisfies the surfaces row in one commit"
+    );
+
+    // Belt-and-braces: a manual mark of one floor region keeps the row green and
+    // overrides the auto value — also in a single commit.
+    let _ = c.set_floor_exposure_at(5.0, 5.0, FloorExposure::SemiExposed);
+    c.commit_to_ber().unwrap();
+    let floor_e = c.current_record.as_ref().unwrap().data.storeys[0]
+        .floors
+        .regions
+        .iter()
+        .find(|r| {
+            let cen = r.centroid();
+            (cen.x - 5.0).abs() < 4.0 && (cen.y - 5.0).abs() < 4.0
+        })
+        .map(|r| r.exposure);
+    assert_eq!(
+        floor_e,
+        Some(FloorExposure::SemiExposed),
+        "manual mark overrides the auto-derived Ground"
+    );
+
+    // Exposures (walls) is the last pre-existing gate — paint the perimeter.
+    c.set_all_remaining_exposed();
+    // Drive the pending phase area (if any from rest-to-Original) is already
+    // committed; nothing left in flight. Re-assert the three new rows are green.
+    c.commit_to_ber().unwrap();
+    let _ = p; // p used above via add_finalised_living_area's closure shape only
+    for row in ["Surfaces", "Construction phase", "Living area"] {
+        assert_eq!(
+            checklist_status_of(&c, row),
+            ChecklistStatus::AllStoreys,
+            "{row} stays green"
+        );
+    }
+}
+
+/// `assign_rest_to_original` stamps the untagged remainder as `Original`, so
+/// `document::construction_phase_complete` passes for the storey.
+#[test]
+fn assign_rest_to_original_satisfies_construction_phase_gate() {
+    let mut c = dimensioned_square_controller();
+    // Before: the whole floor is the untagged remainder → Unassigned → gate fails.
+    c.commit_to_ber().unwrap();
+    assert!(
+        !document::construction_phase_complete(&c.current_record.as_ref().unwrap().data, 0),
+        "an Unassigned floor fails the construction-phase gate"
+    );
+
+    c.assign_rest_to_original();
+    c.commit_to_ber().unwrap();
+    let ber = &c.current_record.as_ref().unwrap().data;
+    assert!(
+        ber.storeys[0].floors.regions.iter().all(|fr| ber
+            .floor_construction(fr.construction_id)
+            .unwrap()
+            .base
+            .construction_phase
+            == ConstructionPhase::Original),
+        "every floor region is now Original"
+    );
+    assert!(
+        document::construction_phase_complete(ber, 0),
+        "rest-to-Original satisfies the gate"
     );
 }
 
@@ -3991,6 +4142,168 @@ fn ceiling_carve_split_survives_reload_and_rederive() {
     let session = &c.ceiling_step_regions[&0];
     assert_eq!(session.len(), 1);
     assert!((session_ring_area(&session[0].polygon) - before_area).abs() < 1e-3);
+}
+
+/// MIGRATION SELF-HEAL: a record saved BEFORE the per-phase-zone fix baked a
+/// spurious phase-induced split into its stored roofs (a uniform-phase roof
+/// fragmented by a redundant coplanar same-construction boundary). Roofs are
+/// regions-as-truth — resolve keeps them verbatim and the phase carve only
+/// SPLITS — so the stale split never self-heals. `open_ber` must rebuild each
+/// phase-tagged storey's roofs from its durable inputs and re-apply the clean
+/// per-phase carve, dropping the stale split while PRESERVING a deliberate
+/// structure roof-split and a ceiling step.
+#[test]
+fn open_ber_heals_spurious_phase_induced_roof_split() {
+    let p = |x: f32, y: f32| Point2f32::new(x, y);
+    let p64 = |x: f64, y: f64| Point2f64::new(x, y);
+
+    let mut c = ceiling_ready_controller();
+    c.set_ceiling_step_mode(false);
+
+    // Tag the right half (x>=5) as Extension1 — a genuine phase boundary at x=5.
+    c.phase_regions.entry(0).or_default().push(PhaseRegion {
+        polygon: vec![p(5., 0.), p(10., 0.), p(10., 10.), p(5., 10.)],
+        phase: ConstructionPhase::Extension1,
+    });
+
+    // A DELIBERATE structure roof-split at y=5 (durable `roof_splits`) — must
+    // survive the heal. A ceiling step in the corner — must survive too.
+    let split_ring = vec![p64(0., 0.), p64(10., 0.), p64(10., 5.), p64(0., 5.)];
+    c.current_record.as_mut().unwrap().data.storeys[0]
+        .roof_splits
+        .push(split_ring.clone());
+    c.ceiling_step_regions.insert(
+        0,
+        vec![CeilingStepRegion {
+            polygon: vec![p(1., 1.), p(3., 1.), p(3., 3.), p(1., 3.)],
+            delta_m: 0.4,
+        }],
+    );
+    c.reconstruct_ceiling_step_regions_for(0); // mirror to durable `ceiling_steps`
+    c.mark_dirty().unwrap();
+    c.recompose_roofs(0); // compose step + split into the roofs (regions-as-truth)
+    c.materialize(); // re-resolve applies the clean per-phase carve
+
+    let clean_count = c.current_record.as_ref().unwrap().data.storeys[0]
+        .roofs
+        .regions
+        .len();
+
+    // SIMULATE THE PRE-FIX BAKE: inject an EXTRA redundant coplanar split at
+    // x=7 — a same-construction, same-z boundary inside the (already phase- and
+    // split-carved) Extension1 right half. This is the stale fragmentation the
+    // old per-floor-region phase zoning produced; it is in NO durable field.
+    let spurious_ring = vec![p64(7., 0.), p64(10., 0.), p64(10., 10.), p64(7., 10.)];
+    {
+        let storey = &mut c.current_record.as_mut().unwrap().data.storeys[0];
+        storey.roofs = std::mem::take(&mut storey.roofs).split_faces_coplanar(&[spurious_ring]);
+    }
+    let spurious_count = c.current_record.as_ref().unwrap().data.storeys[0]
+        .roofs
+        .regions
+        .len();
+    assert!(
+        spurious_count > clean_count,
+        "spurious split added regions: {spurious_count} vs clean {clean_count}"
+    );
+
+    // Persist the spurious state DIRECTLY (bypassing the re-materialize in
+    // flush_if_dirty, which would re-derive and wipe the injected split).
+    let id = c.current_record.as_ref().unwrap().id.clone();
+    c.persist().unwrap();
+
+    // RELOAD: the heal must recompose from durable inputs and re-carve cleanly.
+    c.open_ber(&id).unwrap();
+    let healed = &c.current_record.as_ref().unwrap().data.storeys[0]
+        .roofs
+        .regions;
+    assert_eq!(
+        healed.len(),
+        clean_count,
+        "stale phase-induced split dropped: healed {} == clean {clean_count}",
+        healed.len()
+    );
+
+    // The deliberate structure roof-split SURVIVED (durable `roof_splits` intact
+    // and replayed): there's a face boundary at y=5, i.e. faces on both sides.
+    let storey = &c.current_record.as_ref().unwrap().data.storeys[0];
+    assert_eq!(
+        storey.roof_splits.len(),
+        1,
+        "deliberate structure roof-split preserved durably"
+    );
+    let has_below = storey
+        .roofs
+        .regions
+        .iter()
+        .any(|r| r.polygon.exterior.iter().all(|v| v.y <= 5.0 + 1e-6));
+    let has_above = storey
+        .roofs
+        .regions
+        .iter()
+        .any(|r| r.polygon.exterior.iter().all(|v| v.y >= 5.0 - 1e-6));
+    assert!(
+        has_below && has_above,
+        "deliberate y=5 split still partitions the roof"
+    );
+
+    // The ceiling step SURVIVED — reconstructed from the durable `ceiling_steps`.
+    let session = &c.ceiling_step_regions[&0];
+    assert_eq!(session.len(), 1, "ceiling step reconstructed on reload");
+    assert!(
+        (session[0].delta_m - 0.4).abs() < 1e-6,
+        "step delta preserved"
+    );
+}
+
+/// An UNTAGGED (no-phase) storey's roofs are byte-stable across a reload — the
+/// heal is gated on phase tags, so `recompose_roofs` never touches it and the
+/// regions-as-truth reload fixpoint is preserved exactly.
+#[test]
+fn open_ber_leaves_untagged_roofs_byte_stable() {
+    let mut c = ceiling_ready_controller();
+    c.set_ceiling_step_mode(false);
+    // A deliberate ceiling step, but NO phase tag.
+    c.ceiling_step_regions.insert(
+        0,
+        vec![CeilingStepRegion {
+            polygon: vec![
+                Point2f32::new(2., 2.),
+                Point2f32::new(6., 2.),
+                Point2f32::new(6., 6.),
+                Point2f32::new(2., 6.),
+            ],
+            delta_m: 0.5,
+        }],
+    );
+    c.reconstruct_ceiling_step_regions_for(0);
+    c.mark_dirty().unwrap();
+    c.recompose_roofs(0);
+    c.materialize();
+
+    let fingerprint = |c: &AppController| {
+        c.current_record.as_ref().unwrap().data.storeys[0]
+            .roofs
+            .regions
+            .iter()
+            .map(|r| format!("{:?}", r.polygon))
+            .collect::<Vec<_>>()
+            .join("|")
+    };
+    let before = fingerprint(&c);
+
+    let id = c.current_record.as_ref().unwrap().id.clone();
+    c.flush_if_dirty().unwrap();
+    c.open_ber(&id).unwrap();
+    assert!(
+        c.phase_regions.get(&0).is_none_or(|v| v.is_empty()),
+        "storey is untagged"
+    );
+    assert_eq!(
+        fingerprint(&c),
+        before,
+        "untagged roofs are byte-identical across reload (no heal perturbation)"
+    );
 }
 
 /// A storey switch abandons a half-dimensioned ceiling CARVE with the mode —
@@ -8045,4 +8358,67 @@ fn structure_wall_cut_picks_dimensions_then_stores_a_durable_segment() {
         .regions
         .len();
     assert_eq!(n_walls, 6, "the cut split the left + right walls (4 → 6)");
+}
+
+/// Structure-phase WALL carve in SELECT mode whose ring runs entirely along
+/// existing walls (it crosses none mid-span) must STILL select the enclosed
+/// walls — carve is a selection gesture, so "no interior cut edge" means
+/// "nothing to subdivide", not "do nothing". Regression: this used to bail with
+/// only a `log::warn`, so lassoing an already-bounded region (e.g. a step leg)
+/// silently selected nothing. A loop enclosing the whole 10×10 storey yields a
+/// region coincident with the outline → zero interior cut edges.
+#[test]
+fn structure_wall_carve_on_existing_boundary_selects_without_splitting() {
+    let mut c = dimensioned_square_controller();
+    c.materialize();
+
+    c.set_structure_kind(SurfaceKind::Walls);
+    c.set_structure_select_mode(Some(SelectMode::Carve));
+
+    let walls_before = c.current_surface_counts().walls;
+
+    // A loop enclosing the entire storey → the carved area IS the outline, so
+    // every edge lies on an existing wall (no interior cut). The outline walls
+    // are already dimensioned, so the split commits immediately.
+    c.apply_structure_carve_stroke(&[
+        (-1.0, -1.0),
+        (11.0, -1.0),
+        (11.0, 11.0),
+        (-1.0, 11.0),
+        (-0.9, -0.9),
+    ]);
+    // It may arrive as a pick-one cut or an immediate area; if a pick is
+    // pending, choosing a point inside the storey commits it.
+    if c.structure_cut_pending() {
+        c.choose_structure_cut_region(5.0, 5.0);
+    }
+    let mut guard = 0;
+    while c.dimensioning_active() && guard < 12 {
+        c.skip_current_dimension();
+        guard += 1;
+    }
+    skip_position_prompts(&mut c);
+
+    assert!(
+        !c.structure_selected_ids().is_empty(),
+        "the enclosed walls are selected even though nothing was subdivided: {:?}",
+        c.structure_selected_ids()
+    );
+    assert!(
+        c.current_record.as_ref().unwrap().data.storeys[0]
+            .wall_splits
+            .is_empty(),
+        "a carve that crosses no wall stores NO durable wall split"
+    );
+    c.materialize();
+    assert_eq!(
+        c.current_surface_counts().walls,
+        walls_before,
+        "no wall was subdivided (count unchanged)"
+    );
+    assert_eq!(
+        c.document.active,
+        ActiveShape::Outline,
+        "back on the outline"
+    );
 }

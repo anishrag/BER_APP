@@ -84,6 +84,9 @@ pub struct SketchState {
     /// Backing strings for the exposure section's typed start/end inputs.
     pub exposure_start_input: String,
     pub exposure_end_input: String,
+    /// The floor/ceiling boundary condition armed by the surface-exposure
+    /// toolbar — a canvas tap inside a region applies it. Pure page state.
+    pub armed_surface_exposure: crate::ui::pages::sketch::ArmedSurfaceExposure,
     /// Backing string for the floor-step amount input (metres).
     pub step_amount_input: String,
     // Error surfacing follows the established per-flow pattern (one
@@ -477,6 +480,8 @@ impl eframe::App for BerApp {
                                 exposure_walls,
                                 exposure_selection,
                                 riser_views,
+                                surface_exposure_mode,
+                                surface_exposure_views,
                                 edit_selected_wall,
                                 edit_selected_vertex,
                                 edit_drag_prompt,
@@ -565,6 +570,8 @@ impl eframe::App for BerApp {
                                     controller_ref.wall_exposure_views(),
                                     controller_ref.exposure_selection(),
                                     controller_ref.riser_views(),
+                                    controller_ref.surface_exposure_mode(),
+                                    controller_ref.surface_exposure_views(),
                                     controller_ref.edit_selected_wall_positions(),
                                     controller_ref.edit_selected_vertex_position(),
                                     controller_ref.edit_drag_prompt_for_ui(),
@@ -875,6 +882,11 @@ impl eframe::App for BerApp {
                                 riser_views: &riser_views,
                                 exposure_start_input: &mut self.sketch_state.exposure_start_input,
                                 exposure_end_input: &mut self.sketch_state.exposure_end_input,
+                                surface_exposure_mode,
+                                surface_exposure_views: &surface_exposure_views,
+                                armed_surface_exposure: &mut self
+                                    .sketch_state
+                                    .armed_surface_exposure,
                                 phase_mode,
                                 phase_region_polygons: &phase_region_polygons,
                                 pending_phase_polygon: &pending_phase_polygon,
@@ -1165,6 +1177,9 @@ impl eframe::App for BerApp {
                                     SketchEvent::DeletePhaseRegion(index) => {
                                         controller.borrow_mut().delete_phase_region(index);
                                     }
+                                    SketchEvent::AssignRestOriginal => {
+                                        controller.borrow_mut().assign_rest_to_original();
+                                    }
                                     SketchEvent::SetStepMode(on) => {
                                         controller.borrow_mut().set_step_mode(on);
                                     }
@@ -1435,6 +1450,27 @@ impl eframe::App for BerApp {
                                     }
                                     SketchEvent::SetAllRemainingExposed => {
                                         controller.borrow_mut().set_all_remaining_exposed();
+                                    }
+                                    SketchEvent::SetSurfaceExposureMode(on) => {
+                                        controller.borrow_mut().set_surface_exposure_mode(on);
+                                    }
+                                    SketchEvent::SetFloorExposure {
+                                        world_x,
+                                        world_y,
+                                        exposure,
+                                    } => {
+                                        controller
+                                            .borrow_mut()
+                                            .set_floor_exposure_at(world_x, world_y, exposure);
+                                    }
+                                    SketchEvent::SetCeilingExposure {
+                                        world_x,
+                                        world_y,
+                                        exposure,
+                                    } => {
+                                        controller
+                                            .borrow_mut()
+                                            .set_ceiling_exposure_at(world_x, world_y, exposure);
                                     }
                                     SketchEvent::SetOpeningsMode(on) => {
                                         controller.borrow_mut().set_openings_mode(on);

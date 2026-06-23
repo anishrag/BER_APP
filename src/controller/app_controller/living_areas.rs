@@ -57,6 +57,8 @@ impl AppController {
         self.pending_cut = None;
         if on {
             self.exit_openings_mode();
+            // Mutually exclusive with the horizontal-surface exposure tool too.
+            self.surface_exposure_mode = false;
             // Mutually exclusive with the ceiling-step line and roof-point
             // tools (the other area tools clear each other the same way).
             self.ceiling_step_mode = false;

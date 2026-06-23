@@ -6,7 +6,7 @@
 //! logic is unchanged from the old bottom toolbar; only the location is
 //! unified.
 
-use super::{SketchEvent, SketchView};
+use super::{ArmedSurfaceExposure, SketchEvent, SketchView};
 use crate::controller::app_controller::{
     ExposureSelection, NewStoreyPromptUiData, OpeningPromptUiData, OpeningToolKind,
     VertexDropPromptUiData,
@@ -16,7 +16,7 @@ use crate::ui::pages::events::UiEvent;
 use crate::ui::widgets::{metre_input, HintExt};
 use ber_model::ber::common::ConstructionPhase;
 use ber_model::ber::fenestration::{Frame, Glazing};
-use ber_model::ber::structural::WallExposure;
+use ber_model::ber::structural::{CeilingExposure, FloorExposure, WallExposure};
 
 /// Whether the dock has anything to show this frame. When false the bottom
 /// panel is skipped entirely so the canvas gets the space.
@@ -36,6 +36,7 @@ pub(super) fn has_content(view: &SketchView<'_>) -> bool {
         || view.vertex_drop_prompt.is_some()
         || view.review.is_some()
         || view.exposure_mode
+        || view.surface_exposure_mode
         || view.openings_mode
         || (view.has_floor_plan
             && ((!view.phase_choices.is_empty() && (view.phase_mode || view.phase_pick_pending))
@@ -98,6 +99,8 @@ pub(super) fn render<F: FnMut(UiEvent)>(
                 view.exposure_end_input,
                 on_event,
             );
+        } else if view.surface_exposure_mode {
+            surface_exposure_toolbar(ui, view.armed_surface_exposure);
         }
 
         if view.has_floor_plan {
@@ -606,6 +609,18 @@ fn phase_toolbar<F: FnMut(UiEvent)>(
                 }
             });
         }
+        // One-tap "everything else is the original build": stamps the leftover
+        // fabric Original so the Construction-phase checklist row goes green
+        // without drawing an area for the bulk of the storey.
+        if ui
+            .button("Set rest to Original")
+            .hint(
+                "Tag all untagged fabric (the outline minus the areas above) as the original build",
+            )
+            .clicked()
+        {
+            on_event(UiEvent::Sketch(SketchEvent::AssignRestOriginal));
+        }
     }
 }
 
@@ -906,5 +921,69 @@ fn exposure_toolbar<F: FnMut(UiEvent)>(
         {
             on_event(UiEvent::Sketch(SketchEvent::SetAllRemainingExposed));
         }
+    });
+}
+
+/// Horizontal-surface (floor/ceiling) exposure mode toolbar: ARM a SINGLE
+/// boundary condition (floor XOR ceiling — picking one disarms the other), then
+/// a canvas tap applies it to ONLY the matching surface kind. So a deliberate
+/// floor edit can't clobber the (auto-derived) ceiling and vice versa.
+/// Pure page state; no controller round-trip until the canvas tap.
+/// Auto-derivation already fills the common ground/top/party cases — these are
+/// for overriding the rest.
+fn surface_exposure_toolbar(ui: &mut egui::Ui, armed: &mut ArmedSurfaceExposure) {
+    let floor_label = |e: FloorExposure| match e {
+        FloorExposure::Unset => "Unset",
+        FloorExposure::Ground => "Ground",
+        FloorExposure::Exposed => "Exposed",
+        FloorExposure::SemiExposed => "Semi-exposed",
+        FloorExposure::NonHeatLoss => "Party (no heat loss)",
+    };
+    let ceiling_label = |e: CeilingExposure| match e {
+        CeilingExposure::Unset => "Unset",
+        CeilingExposure::ExposedRoof => "Exposed roof",
+        CeilingExposure::Party => "Party",
+        CeilingExposure::Unheated => "Unheated above",
+    };
+    ui.vertical(|ui| {
+        ui.label(
+            egui::RichText::new("Arm a floor OR ceiling type, then tap that region")
+                .color(egui::Color32::from_rgb(255, 200, 60)),
+        );
+        ui.horizontal_wrapped(|ui| {
+            ui.label("Floor:");
+            for e in [
+                FloorExposure::Ground,
+                FloorExposure::Exposed,
+                FloorExposure::SemiExposed,
+                FloorExposure::NonHeatLoss,
+                FloorExposure::Unset,
+            ] {
+                let on = *armed == ArmedSurfaceExposure::Floor(e);
+                if ui
+                    .add(egui::Button::selectable(on, floor_label(e)))
+                    .clicked()
+                {
+                    *armed = ArmedSurfaceExposure::Floor(e);
+                }
+            }
+        });
+        ui.horizontal_wrapped(|ui| {
+            ui.label("Ceiling:");
+            for e in [
+                CeilingExposure::ExposedRoof,
+                CeilingExposure::Party,
+                CeilingExposure::Unheated,
+                CeilingExposure::Unset,
+            ] {
+                let on = *armed == ArmedSurfaceExposure::Ceiling(e);
+                if ui
+                    .add(egui::Button::selectable(on, ceiling_label(e)))
+                    .clicked()
+                {
+                    *armed = ArmedSurfaceExposure::Ceiling(e);
+                }
+            }
+        });
     });
 }

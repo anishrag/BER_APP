@@ -52,7 +52,57 @@ impl AppController {
                 label: "Exposures",
                 status: self.checklist_status(|s, _| s.exposure_complete()),
             },
+            ChecklistItem {
+                label: "Surfaces",
+                status: self.ber_storey_status(document::surfaces_exposure_complete),
+            },
+            ChecklistItem {
+                label: "Construction phase",
+                status: self.ber_storey_status(document::construction_phase_complete),
+            },
+            ChecklistItem {
+                label: "Living area",
+                status: self.living_area_status(),
+            },
         ]
+    }
+
+    /// Per-DWELLING living-area gate: green ([`ChecklistStatus::AllStoreys`])
+    /// when ANY storey has a finalised living area (the assessor only needs to
+    /// mark the heated living space once per dwelling), red otherwise. Reads the
+    /// editing model ([`StoreyDoc::has_living_area`]).
+    fn living_area_status(&self) -> ChecklistStatus {
+        if self.document.storeys.iter().any(StoreyDoc::has_living_area) {
+            ChecklistStatus::AllStoreys
+        } else {
+            ChecklistStatus::Incomplete
+        }
+    }
+
+    /// Roll a per-storey predicate over the RESOLVED [`Ber`] (Store A) up against
+    /// the current scope — the read-from-resolved-storey analogue of
+    /// [`checklist_status`](Self::checklist_status), for the "Surfaces" and
+    /// "Construction phase" rows (`document::surfaces_exposure_complete` /
+    /// `document::construction_phase_complete`, which read the committed regions).
+    fn ber_storey_status(&self, ok: impl Fn(&Ber, usize) -> bool) -> ChecklistStatus {
+        let Some(record) = self.current_record.as_ref() else {
+            return ChecklistStatus::Incomplete;
+        };
+        let storeys = &record.data.storeys;
+        if storeys.is_empty() {
+            return ChecklistStatus::Incomplete;
+        }
+        let done = |i: usize| ok(&record.data, i);
+        if (0..storeys.len()).all(done) {
+            ChecklistStatus::AllStoreys
+        } else if self
+            .current_storey_idx
+            .is_some_and(|i| i < storeys.len() && done(i))
+        {
+            ChecklistStatus::ThisStorey
+        } else {
+            ChecklistStatus::Incomplete
+        }
     }
 
     /// Whether the Mapping (Stage A) phase is complete — every checklist item

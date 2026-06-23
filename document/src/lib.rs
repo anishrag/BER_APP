@@ -33,14 +33,19 @@ pub use ceiling_step::{
 };
 pub use debug::debug_dump_storey;
 /// Derive full per-wall exposure coverage — the shell's `commit_to_ber` uses it.
-pub use exposure::{range_at, riser_key, wall_coverage, RiserKey, RiserKind, RiserWall};
+pub use exposure::{
+    auto_derive_horizontal_exposure, range_at, riser_key, surfaces_exposure_complete,
+    wall_coverage, RiserKey, RiserKind, RiserWall,
+};
 pub use phase::{
-    centroid_key, inherited_phase_regions, phase_regions_from_floors, stamp_ceiling_constructions,
-    stamp_ceiling_phases, stamp_floor_constructions, stamp_wall_constructions, stamp_wall_phases,
-    CentroidKey, PhaseRegion,
+    centroid_key, construction_phase_complete, inherited_phase_regions, phase_regions_from_floors,
+    stamp_ceiling_constructions, stamp_ceiling_phases, stamp_floor_constructions,
+    stamp_wall_constructions, stamp_wall_phases, CentroidKey, PhaseRegion,
 };
 pub use position::{PositionOption, PositionPrompt, PositionPromptKind};
-pub use resolve::{ensure_storey_constructions, opening_wall_anchor, resolve_storey};
+pub use resolve::{
+    ensure_storey_constructions, opening_wall_anchor, resolve_storey, stamp_horizontal_exposure,
+};
 pub use roof_point::{
     centred_rect_lo, centred_ridge_cross, centred_ridge_start, resolve_ridge_slope_side,
     ridge_region_ring, validate_roof_apex, validate_roof_rect_length, validate_roof_rect_placement,
@@ -50,8 +55,8 @@ pub use roof_point::{
 pub use step::{inherited_step_regions, step_regions_from_floors, StepRegion};
 
 use ber_model::ber::structural::{
-    CeilingConstructionType, ConstructionMakeup, FloorConstructionType, WallConstructionType,
-    WallExposure,
+    CeilingConstructionType, CeilingExposure, ConstructionMakeup, FloorConstructionType,
+    FloorExposure, WallConstructionType, WallExposure,
 };
 use domain::points::{to_f64, Point2f32, Point2f64};
 use manip_plan::{
@@ -276,7 +281,7 @@ pub struct StoreyDoc {
     /// stamps a riser's exposure from here, surviving the wall re-derivation
     /// without relying on the amend-match. `#[serde(default)]` so older snapshots
     /// load (empty) and seed from their resolved risers.
-    #[serde(default)]
+    #[serde(default, with = "tuple_key_map")]
     pub riser_exposure: HashMap<RiserKey, WallExposure>,
 
     /// Assigned wall CONSTRUCTION (type + make-up) per perimeter wall, keyed by
@@ -300,15 +305,66 @@ pub struct StoreyDoc {
     /// with different centroids that fall back to the derived construction — the
     /// same "re-split loses the override" property the riser key has, weaker than
     /// the wall `SurfaceRef`.
-    #[serde(default)]
+    #[serde(default, with = "tuple_key_map")]
     pub floor_constructions: HashMap<CentroidKey, (FloorConstructionType, ConstructionMakeup)>,
 
     /// Assigned CEILING/ROOF construction (type + make-up) per ceiling region,
     /// keyed by the region's plan [`CentroidKey`]. Mirror of
     /// `floor_constructions`; composed by
     /// [`stamp_ceiling_constructions`](crate::stamp_ceiling_constructions).
-    #[serde(default)]
+    #[serde(default, with = "tuple_key_map")]
     pub ceiling_constructions: HashMap<CentroidKey, (CeilingConstructionType, ConstructionMakeup)>,
+
+    /// Per-FLOOR-region horizontal exposure (boundary condition below the
+    /// region), keyed by the region's plan [`CentroidKey`] — the floor/ceiling
+    /// analogue of [`riser_exposure`](Self::riser_exposure). The durable home of
+    /// the Mapping-phase floor exposure: `resolve` stamps it onto the resolved
+    /// `FloorRegion.exposure` ([`stamp_floor_exposure`](crate::resolve)), and the
+    /// auto-derive pre-pass seeds it via `entry().or_insert()` so a manual
+    /// override always wins. Absent → the region resolves `Unset` (ambiguous,
+    /// left for manual marking).
+    #[serde(default, with = "tuple_key_map")]
+    pub floor_exposure: HashMap<CentroidKey, FloorExposure>,
+
+    /// Per-CEILING-region horizontal exposure (boundary condition above the
+    /// region), keyed by the region's plan [`CentroidKey`]. Mirror of
+    /// [`floor_exposure`](Self::floor_exposure) over the storey's `roofs`.
+    #[serde(default, with = "tuple_key_map")]
+    pub ceiling_exposure: HashMap<CentroidKey, CeilingExposure>,
+}
+
+/// (De)serialize a `HashMap` whose KEY is a tuple (`CentroidKey`, `RiserKey`) as
+/// a SEQUENCE of `(key, value)` pairs. `serde_json` rejects a map with a
+/// non-string key ("key must be a string"), so the durable [`Document`] snapshot
+/// would silently fail to save once any of these side-tables is populated (the
+/// auto-derived floor/ceiling exposure populates them on every commit). A
+/// sequence of pairs round-trips cleanly for any key type. Applied to every
+/// tuple-keyed side-table on [`StoreyDoc`].
+mod tuple_key_map {
+    use serde::de::Deserialize;
+    use serde::ser::Serialize;
+    use std::collections::HashMap;
+    use std::hash::Hash;
+
+    pub fn serialize<K, V, S>(map: &HashMap<K, V>, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        K: Serialize,
+        V: Serialize,
+        S: serde::Serializer,
+    {
+        let pairs: Vec<(&K, &V)> = map.iter().collect();
+        pairs.serialize(serializer)
+    }
+
+    pub fn deserialize<'de, K, V, D>(deserializer: D) -> Result<HashMap<K, V>, D::Error>
+    where
+        K: Deserialize<'de> + Eq + Hash,
+        V: Deserialize<'de>,
+        D: serde::Deserializer<'de>,
+    {
+        let pairs: Vec<(K, V)> = Vec::deserialize(deserializer)?;
+        Ok(pairs.into_iter().collect())
+    }
 }
 
 /// Of the available `pieces`, the one to carve the `stroke` against. Scored by
@@ -405,6 +461,31 @@ impl StoreyDoc {
             .iter()
             .filter(|s| s.finalised())
             .map(|s| s.floor_plan.get_points().into_iter().map(to_f64).collect())
+            .collect()
+    }
+
+    /// True when this storey has at least one FINALISED living area — the
+    /// per-dwelling "living area" checklist gate (reads the EDITING model, so
+    /// sync the active storey first). An in-progress (still pixel / incomplete)
+    /// living area does not count.
+    pub fn has_living_area(&self) -> bool {
+        self.living_areas.iter().any(ShapeSlot::finalised)
+    }
+
+    /// The AVAILABLE region of the outline — the outline MINUS `holes` (the
+    /// already-drawn rings of the same kind, e.g. existing phase areas) — as
+    /// world-metre rings. Reuses `subtract_all` (the same boolean the carve
+    /// path uses), so the leftover can be disconnected → several rings. Empty
+    /// `holes` → the whole outline; an outline fully covered by `holes` → no
+    /// rings. The "set rest to Original" path stamps each returned ring as an
+    /// explicit phase region.
+    pub fn available_region_rings(&self, holes: &[Vec<Point2f32>]) -> Vec<Vec<Point2f32>> {
+        self.outline
+            .floor_plan
+            .subtract_all(holes)
+            .into_iter()
+            .map(|piece| piece.get_points())
+            .filter(|ring| ring.len() >= 3)
             .collect()
     }
 
@@ -713,6 +794,64 @@ mod tests {
         assert!(doc.dimensioning.scale_set, "previous adoption intact");
     }
 
+    /// `has_living_area` is true only when at least one living area is
+    /// FINALISED: a fresh storey has none, an in-progress (un-dimensioned)
+    /// living area doesn't count, and a finalised one flips it true.
+    #[test]
+    fn has_living_area_requires_a_finalised_sub_area() {
+        let mut doc = StoreyDoc::default();
+        assert!(!doc.has_living_area(), "fresh storey has none");
+
+        let plan =
+            FloorPlan::from_clean_ring(&[p(0., 0.), p(2., 0.), p(2., 2.), p(0., 2.)]).unwrap();
+        // A living area with NO known params is still mid-dimensioning →
+        // not finalised → doesn't count.
+        doc.living_areas.push(ShapeSlot {
+            floor_plan: plan.clone(),
+            dimensioning: DimensionState::default(),
+        });
+        assert!(
+            !doc.has_living_area(),
+            "an un-dimensioned living area doesn't count"
+        );
+
+        // Mark every active param known → finalised → counts.
+        doc.living_areas.push(ShapeSlot {
+            dimensioning: DimensionState {
+                known_params: plan.all_active_params(),
+                scale_set: true,
+                ..Default::default()
+            },
+            floor_plan: plan,
+        });
+        assert!(doc.has_living_area(), "a finalised living area counts");
+    }
+
+    /// `available_region_rings` returns the outline minus the holes: empty
+    /// holes → the whole outline (one ring); a hole over half → the leftover
+    /// half.
+    #[test]
+    fn available_region_rings_subtracts_holes_from_the_outline() {
+        let mut doc = StoreyDoc::default();
+        doc.adopt_finalised_outline(&[p(0., 0.), p(4., 0.), p(4., 4.), p(0., 4.)])
+            .unwrap();
+
+        // No holes → the whole outline as one ring.
+        let whole = doc.available_region_rings(&[]);
+        assert_eq!(whole.len(), 1);
+        assert_eq!(whole[0].len(), 4);
+
+        // A hole over the left half → the right half remains.
+        let hole = vec![p(0., 0.), p(2., 0.), p(2., 4.), p(0., 4.)];
+        let rest = doc.available_region_rings(&[hole]);
+        assert_eq!(rest.len(), 1, "the right half is one piece");
+        // Every remaining vertex sits in x ∈ [2, 4].
+        assert!(
+            rest[0].iter().all(|v| v.x >= 2.0 - 1e-4),
+            "the leftover is the right half"
+        );
+    }
+
     /// An active `StepArea` round-trips through `step_shape`: `begin_step_area`
     /// checks the slot out into the live buffer, `sync_active` writes buffer
     /// changes back to the slot, and `load_active_into_buffer` restores them.
@@ -739,5 +878,49 @@ mod tests {
         doc.load_active_into_buffer();
         assert!(doc.dimensioning.scale_set);
         assert_eq!(doc.floor_plan.get_points().len(), 4);
+    }
+
+    /// The durable snapshot path is `serde_json::to_string(&Document)` — it must
+    /// survive POPULATED tuple-keyed side-tables (`floor_exposure`,
+    /// `ceiling_exposure`, `riser_exposure`). serde_json rejects a map with a
+    /// non-string key, so a plain `HashMap<(i64,...), _>` would fail to serialize
+    /// the moment the auto-derive fills it — and the save path swallows the error
+    /// (`.ok()?`), silently dropping the snapshot. The `tuple_key_map` adapter
+    /// serializes them as a sequence of pairs; assert the WHOLE Document
+    /// round-trips through serde_json with the maps intact.
+    #[test]
+    fn document_serde_json_round_trips_populated_tuple_keyed_maps() {
+        let mut doc = Document::default();
+        let sd = &mut doc.storeys[0];
+        sd.floor_exposure
+            .insert((1234, 5678), FloorExposure::NonHeatLoss);
+        sd.floor_exposure.insert((-42, 99), FloorExposure::Ground);
+        sd.ceiling_exposure
+            .insert((1234, 5678), CeilingExposure::Party);
+        sd.riser_exposure
+            .insert((1, 2, 3, 4), WallExposure::SemiExposed);
+
+        // The exact call the snapshot save makes — must be Ok, not silently None.
+        let json = serde_json::to_string(&doc).expect("Document with populated maps serializes");
+        let back: Document = serde_json::from_str(&json).expect("round-trips back");
+
+        let sd = &back.storeys[0];
+        assert_eq!(
+            sd.floor_exposure.get(&(1234, 5678)),
+            Some(&FloorExposure::NonHeatLoss)
+        );
+        assert_eq!(
+            sd.floor_exposure.get(&(-42, 99)),
+            Some(&FloorExposure::Ground)
+        );
+        assert_eq!(sd.floor_exposure.len(), 2);
+        assert_eq!(
+            sd.ceiling_exposure.get(&(1234, 5678)),
+            Some(&CeilingExposure::Party)
+        );
+        assert_eq!(
+            sd.riser_exposure.get(&(1, 2, 3, 4)),
+            Some(&WallExposure::SemiExposed)
+        );
     }
 }

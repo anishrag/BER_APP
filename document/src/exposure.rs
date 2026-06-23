@@ -3,11 +3,14 @@
 //! the resolved storey's derived RISER walls (the dashed-line picker's
 //! data). Pure model logic — the shell owns pointer selection, undo, and
 //! persistence.
-use crate::{ExposureSection, StoreyDoc};
+use crate::{centroid_key, CentroidKey, ExposureSection, StoreyDoc};
+use ber_model::ber::ber_struct::Ber;
 use ber_model::ber::common::ItemId;
-use ber_model::ber::structural::{Storey, WallExposure, WallRegions};
+use ber_model::ber::structural::{
+    CeilingExposure, FloorExposure, Storey, SurfaceKind, WallExposure, WallRegions,
+};
 use domain::points::{Point2f32, Point2f64};
-use manip_plan::{project_distance_along, segment_len, VertexId};
+use manip_plan::{project_distance_along, ring_within_ring, segment_len, VertexId};
 use std::collections::HashMap;
 
 /// Durable identity for a RISER (interior step-face) wall: its base edge as a
@@ -192,6 +195,46 @@ impl StoreyDoc {
     /// Remove all exposure sections from outline wall `vid`.
     pub fn clear_wall_section(&mut self, vid: VertexId) {
         self.wall_sections.remove(&vid);
+    }
+
+    /// Set the FLOOR exposure of the resolved floor region under plan point
+    /// `(x, y)` — the manual-marking op behind a canvas tap. The region is
+    /// located in the resolved `storey` ([`Storey::surface_at`]); its quantized
+    /// centroid keys the durable override ([`floor_exposure`](StoreyDoc::floor_exposure)),
+    /// which `resolve` stamps back onto the re-derived region. A manual write
+    /// takes precedence over the auto-derive (which only `or_insert`s). Returns
+    /// the [`CentroidKey`] written, or `None` when no floor region is under the
+    /// tap.
+    pub fn set_floor_exposure_at(
+        &mut self,
+        storey: &Storey,
+        x: f64,
+        y: f64,
+        e: FloorExposure,
+    ) -> Option<CentroidKey> {
+        let id = storey.surface_at(SurfaceKind::Floors, x, y, 0.0)?;
+        let region = storey.floors.regions.iter().find(|r| r.id == id)?;
+        let key = centroid_key(region.centroid());
+        self.floor_exposure.insert(key, e);
+        Some(key)
+    }
+
+    /// Set the CEILING exposure of the resolved ceiling/roof region under plan
+    /// point `(x, y)` — the ceiling mirror of
+    /// [`set_floor_exposure_at`](StoreyDoc::set_floor_exposure_at). `None` when
+    /// no ceiling region is under the tap.
+    pub fn set_ceiling_exposure_at(
+        &mut self,
+        storey: &Storey,
+        x: f64,
+        y: f64,
+        e: CeilingExposure,
+    ) -> Option<CentroidKey> {
+        let id = storey.surface_at(SurfaceKind::Roofs, x, y, 0.0)?;
+        let region = storey.roofs.regions.iter().find(|r| r.id == id)?;
+        let key = centroid_key(region.centroid());
+        self.ceiling_exposure.insert(key, e);
+        Some(key)
     }
 
     /// This storey's heat-loss wall SEGMENTS over the FULL perimeter: every
@@ -427,6 +470,113 @@ impl StoreyDoc {
     }
 }
 
+/// Plan ring (world metres) of a ceiling region — its `Polygon3D` exterior
+/// projected to xy. `< 3` vertices → empty.
+fn ceiling_ring_xy(region: &ber_model::ber::structural::CeilingRegion) -> Vec<Point2f64> {
+    region
+        .polygon
+        .exterior
+        .iter()
+        .map(|v| Point2f64::new(v.x, v.y))
+        .collect()
+}
+
+/// Tolerance for the conservative full-containment overlap test (metres): a
+/// region vertex within this of the neighbour footprint's edge still counts as
+/// contained, so a shared/coincident stack boundary reads as fully overlapping.
+const CONTAINMENT_TOL_M: f64 = 0.05;
+
+/// Auto-derive this storey's floor/ceiling exposure from the resolved stack and
+/// write it into the StoreyDoc maps — a controller-driven pre-pass run AFTER all
+/// storeys resolve (it needs the neighbours' resolved footprints). Precedence is
+/// **manual > auto > Unset**: every write is `entry(key).or_insert(derived)`, so
+/// a value the assessor set manually is never clobbered.
+///
+/// Derivation (CONSERVATIVE FULL-CONTAINMENT — a region only auto-classifies as
+/// Party / NonHeatLoss when it sits ENTIRELY over the neighbour footprint;
+/// partial overlap from a cantilever/setback stays absent → resolves `Unset`,
+/// left for manual marking):
+///  - storey-0 floor → `Ground`; an intermediate floor fully covered by the
+///    storey BELOW → `NonHeatLoss` (party floor to the dwelling below);
+///  - top-storey ceiling → `ExposedRoof`; an intermediate ceiling fully covered
+///    by the storey ABOVE → `Party` (party ceiling to the dwelling above).
+pub fn auto_derive_horizontal_exposure(
+    doc: &mut StoreyDoc,
+    ber: &Ber,
+    idx: usize,
+    n_storeys: usize,
+) {
+    let Some(storey) = ber.storeys.get(idx) else {
+        return;
+    };
+    // Floors: storey 0 is ground-bearing; an intermediate floor fully over the
+    // storey below is a party floor.
+    let below_footprint = idx
+        .checked_sub(1)
+        .and_then(|b| ber.storeys.get(b))
+        .and_then(|s| s.floors.footprint_ring());
+    let floor_rings = storey.floors.to_vertex_lists();
+    for (region, ring) in storey.floors.regions.iter().zip(&floor_rings) {
+        let derived = if idx == 0 {
+            Some(FloorExposure::Ground)
+        } else if let Some(below) = &below_footprint {
+            ring_within_ring(ring, below, CONTAINMENT_TOL_M).then_some(FloorExposure::NonHeatLoss)
+        } else {
+            None
+        };
+        if let Some(e) = derived {
+            doc.floor_exposure
+                .entry(centroid_key(region.centroid()))
+                .or_insert(e);
+        }
+    }
+    // Ceilings: the top storey's ceiling is the exposed roof; an intermediate
+    // ceiling fully under the storey above is a party ceiling.
+    let above_footprint = (idx + 1 < n_storeys)
+        .then(|| ber.storeys.get(idx + 1))
+        .flatten()
+        .and_then(|s| s.floors.footprint_ring());
+    for region in &storey.roofs.regions {
+        let ring = ceiling_ring_xy(region);
+        let derived = if idx + 1 >= n_storeys {
+            Some(CeilingExposure::ExposedRoof)
+        } else if let Some(above) = &above_footprint {
+            ring_within_ring(&ring, above, CONTAINMENT_TOL_M).then_some(CeilingExposure::Party)
+        } else {
+            None
+        };
+        if let Some(e) = derived {
+            doc.ceiling_exposure
+                .entry(centroid_key(region.centroid()))
+                .or_insert(e);
+        }
+    }
+}
+
+/// True when storey `idx`'s horizontal surfaces are fully classified: EVERY
+/// resolved floor region AND every ceiling/roof region carries a non-`Unset`
+/// exposure. An empty / missing storey (or one with no floor or no ceiling
+/// regions) is NOT complete. Reads the RESOLVED storey (Store A) — the
+/// checklist's per-storey "Surfaces" rollup, kept separate from wall Exposures.
+pub fn surfaces_exposure_complete(ber: &Ber, idx: usize) -> bool {
+    let Some(storey) = ber.storeys.get(idx) else {
+        return false;
+    };
+    if storey.floors.regions.is_empty() || storey.roofs.regions.is_empty() {
+        return false;
+    }
+    storey
+        .floors
+        .regions
+        .iter()
+        .all(|r| r.exposure != FloorExposure::Unset)
+        && storey
+            .roofs
+            .regions
+            .iter()
+            .all(|r| r.exposure != CeilingExposure::Unset)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -597,5 +747,153 @@ mod tests {
         }
         // Nothing Unset remains → a second pass changes nothing.
         assert!(!doc.set_all_remaining_exposed(), "idempotent");
+    }
+
+    use ber_model::ber::structural::{CeilingRegions, FloorRegions, Storey};
+
+    fn square_ring(off: f64, size: f64) -> Vec<Point2f64> {
+        vec![
+            Point2f64::new(off, 0.0),
+            Point2f64::new(off + size, 0.0),
+            Point2f64::new(off + size, size),
+            Point2f64::new(off, size),
+        ]
+    }
+
+    /// Build a storey whose floor + ceiling are the single ring `footprint`.
+    fn storey_with(footprint: Vec<Point2f64>) -> Storey {
+        let cid = ItemId::default();
+        Storey {
+            floors: FloorRegions::from_vertex_lists(vec![footprint.clone()], cid),
+            roofs: CeilingRegions::default_for_footprint(vec![footprint], 2.4, cid),
+            ..Storey::default()
+        }
+    }
+
+    /// Auto-derive on a clean 2-storey stack: storey-0 floor → Ground, the top
+    /// (storey-1) ceiling → ExposedRoof. The intermediate surfaces between the
+    /// two FULLY-overlapping footprints derive Party (ceiling under the upper)
+    /// and NonHeatLoss (floor over the lower).
+    #[test]
+    fn auto_derive_ground_roof_and_party_on_a_clean_stack() {
+        let mut ber = Ber::default();
+        ber.storeys.push(storey_with(square_ring(0.0, 4.0)));
+        ber.storeys.push(storey_with(square_ring(0.0, 4.0)));
+
+        let mut d0 = StoreyDoc::default();
+        let mut d1 = StoreyDoc::default();
+        auto_derive_horizontal_exposure(&mut d0, &ber, 0, 2);
+        auto_derive_horizontal_exposure(&mut d1, &ber, 1, 2);
+
+        let f0 = centroid_key(ber.storeys[0].floors.regions[0].centroid());
+        let c0 = centroid_key(ber.storeys[0].roofs.regions[0].centroid());
+        let f1 = centroid_key(ber.storeys[1].floors.regions[0].centroid());
+        let c1 = centroid_key(ber.storeys[1].roofs.regions[0].centroid());
+
+        assert_eq!(d0.floor_exposure.get(&f0), Some(&FloorExposure::Ground));
+        assert_eq!(d0.ceiling_exposure.get(&c0), Some(&CeilingExposure::Party));
+        assert_eq!(
+            d1.floor_exposure.get(&f1),
+            Some(&FloorExposure::NonHeatLoss)
+        );
+        assert_eq!(
+            d1.ceiling_exposure.get(&c1),
+            Some(&CeilingExposure::ExposedRoof)
+        );
+    }
+
+    /// Auto-derive never clobbers a manual value: a manual Exposed floor on
+    /// storey 0 stays Exposed even though the auto-pass would write Ground.
+    #[test]
+    fn auto_derive_does_not_clobber_a_manual_value() {
+        let mut ber = Ber::default();
+        ber.storeys.push(storey_with(square_ring(0.0, 4.0)));
+
+        let mut doc = StoreyDoc::default();
+        let key = centroid_key(ber.storeys[0].floors.regions[0].centroid());
+        doc.floor_exposure.insert(key, FloorExposure::Exposed);
+
+        auto_derive_horizontal_exposure(&mut doc, &ber, 0, 1);
+        assert_eq!(
+            doc.floor_exposure.get(&key),
+            Some(&FloorExposure::Exposed),
+            "manual override wins over the auto Ground"
+        );
+    }
+
+    /// PARTIAL overlap stays Unset (absent): an upper storey whose footprint
+    /// only partly covers the lower (a cantilever / setback) does NOT
+    /// auto-classify the lower floor as NonHeatLoss — it's left for manual
+    /// marking. The lower floor (storey 1 here) overhangs the storey below
+    /// (storey 0), so the conservative full-containment test fails.
+    #[test]
+    fn auto_derive_partial_overlap_stays_unset() {
+        let mut ber = Ber::default();
+        // Storey 0 footprint is the small 0..4 square; storey 1 is a LARGER
+        // 0..6 square that overhangs it — so storey-1's floor is NOT fully
+        // within storey-0's footprint.
+        ber.storeys.push(storey_with(square_ring(0.0, 4.0)));
+        ber.storeys.push(storey_with(square_ring(0.0, 6.0)));
+
+        let mut d1 = StoreyDoc::default();
+        auto_derive_horizontal_exposure(&mut d1, &ber, 1, 2);
+        let f1 = centroid_key(ber.storeys[1].floors.regions[0].centroid());
+        assert_eq!(
+            d1.floor_exposure.get(&f1),
+            None,
+            "partial overlap leaves the floor absent → resolves Unset"
+        );
+    }
+
+    /// `set_floor_exposure_at` / `set_ceiling_exposure_at` round-trip: a tap
+    /// inside a region writes the centroid-keyed override and returns the key;
+    /// a tap outside any region returns None and writes nothing.
+    #[test]
+    fn set_floor_ceiling_exposure_at_round_trips_via_centroid() {
+        let storey = storey_with(square_ring(0.0, 4.0));
+        let mut doc = StoreyDoc::default();
+
+        let fkey = doc
+            .set_floor_exposure_at(&storey, 2.0, 2.0, FloorExposure::Ground)
+            .expect("a floor region under (2, 2)");
+        assert_eq!(fkey, centroid_key(storey.floors.regions[0].centroid()));
+        assert_eq!(doc.floor_exposure.get(&fkey), Some(&FloorExposure::Ground));
+
+        let ckey = doc
+            .set_ceiling_exposure_at(&storey, 2.0, 2.0, CeilingExposure::ExposedRoof)
+            .expect("a ceiling region under (2, 2)");
+        assert_eq!(
+            doc.ceiling_exposure.get(&ckey),
+            Some(&CeilingExposure::ExposedRoof)
+        );
+
+        // A tap outside the footprint hits nothing and writes nothing.
+        assert!(doc
+            .set_floor_exposure_at(&storey, 99.0, 99.0, FloorExposure::Exposed)
+            .is_none());
+        assert_eq!(doc.floor_exposure.len(), 1, "no spurious write");
+    }
+
+    /// `surfaces_exposure_complete` requires EVERY floor AND ceiling region
+    /// non-Unset; an Unset region or an empty storey fails.
+    #[test]
+    fn surfaces_exposure_complete_requires_all_surfaces_classified() {
+        let mut ber = Ber::default();
+        ber.storeys.push(storey_with(square_ring(0.0, 4.0)));
+        // Fresh storey: every surface Unset → not complete.
+        assert!(!surfaces_exposure_complete(&ber, 0));
+
+        // Classify the floor only → still not complete (ceiling Unset).
+        ber.storeys[0].floors.regions[0].exposure = FloorExposure::Ground;
+        assert!(!surfaces_exposure_complete(&ber, 0));
+
+        // Classify the ceiling too → complete.
+        ber.storeys[0].roofs.regions[0].exposure = CeilingExposure::ExposedRoof;
+        assert!(surfaces_exposure_complete(&ber, 0));
+
+        // Empty / missing storey → never complete.
+        ber.storeys.push(Storey::default());
+        assert!(!surfaces_exposure_complete(&ber, 1));
+        assert!(!surfaces_exposure_complete(&ber, 9));
     }
 }

@@ -17,6 +17,7 @@
 //! by giving `ExposureSection` a face subdivision — see the plan; the BER output
 //! (`WallRegion.polygon` is an arbitrary `Polygon3D`) already allows it.
 use super::*;
+use ber_model::ber::structural::{CeilingExposure, FloorExposure};
 use document::{range_at, RiserKind};
 use manip_plan::{lerp_along, project_distance_along as project_distance, segment_len as wall_len};
 
@@ -53,6 +54,16 @@ pub struct ExposureSelection {
     pub start_m: f32,
     pub end_m: f32,
     pub length_m: f32,
+}
+
+/// One horizontal surface (floor OR ceiling) region for the surface-exposure
+/// overlay: its world-coord ring and its current boundary condition. Exactly one
+/// of `floor`/`ceiling` is `Some` (the kind it came from). The UI tints the ring
+/// by the exposure and lets a tap inside it set a new one.
+pub struct SurfaceExposureView {
+    pub ring: Vec<(f64, f64)>,
+    pub floor: Option<FloorExposure>,
+    pub ceiling: Option<CeilingExposure>,
 }
 
 /// One derived RISER wall for rendering/selection: its stable region id, its
@@ -95,6 +106,10 @@ impl AppController {
             // reads it). Then leave living-area mode and act on the outline.
             self.sync_active();
             self.set_living_area_mode(false);
+            // Mutually exclusive with the horizontal-surface exposure tool too.
+            self.surface_exposure_mode = false;
+            self.phase_mode = false;
+            self.step_mode = false;
             // Mutually exclusive with the ceiling-step line and roof-point
             // tools too.
             self.ceiling_step_mode = false;
@@ -378,6 +393,133 @@ impl AppController {
             let _ = self.mark_dirty();
             self.push_history_snapshot(undo_snap);
         }
+    }
+
+    /// True when the editor is marking HORIZONTAL-surface (floor/ceiling)
+    /// exposure (drives the UI toggle and routes a canvas tap to region pick).
+    pub fn surface_exposure_mode(&self) -> bool {
+        self.surface_exposure_mode
+    }
+
+    /// Enter or leave horizontal-surface exposure mode. Like the sibling Mapping
+    /// tools it forces the storey OUTLINE active and is mutually exclusive with
+    /// wall-exposure / living-area / phase / step / ceiling-step / roof-point
+    /// modes. No selection state of its own (a tap sets the region under it).
+    pub fn set_surface_exposure_mode(&mut self, on: bool) {
+        self.surface_exposure_mode = on;
+        if on {
+            self.exit_openings_mode();
+            // Flush the live buffer to its slot first (same reason as
+            // `set_exposure_mode`: the renderer reads `outline.floor_plan`).
+            self.sync_active();
+            self.set_living_area_mode(false);
+            self.exposure_mode = false;
+            self.selected_exposure_wall = None;
+            self.exposure_sel = None;
+            self.exposure_drag = None;
+            self.selected_riser = None;
+            self.phase_mode = false;
+            self.step_mode = false;
+            self.ceiling_step_mode = false;
+            self.pending_ceiling_step = None;
+            self.roof_point_mode = false;
+            self.pending_roof_point = None;
+            self.pending_roof_ridge = None;
+            self.pending_roof_rect = None;
+        }
+    }
+
+    /// Set the FLOOR exposure of the resolved floor region under the plan point —
+    /// the canvas-tap manual-marking op. OUTSIDE undo (like `set_riser_exposure`):
+    /// the override lives on the durable `StoreyDoc::floor_exposure` side-table
+    /// (centroid-keyed), which the next resolve stamps back onto the re-derived
+    /// region, so it survives the id churn and the reload (autosave persists the
+    /// snapshot). Materializes first so the tap hits current geometry. No-op when
+    /// no record/storey, or no floor region is under the tap.
+    pub fn set_floor_exposure_at(&mut self, world_x: f64, world_y: f64, e: FloorExposure) {
+        self.materialize();
+        let Some(idx) = self.current_storey_idx else {
+            return;
+        };
+        let storey = match self
+            .current_record
+            .as_ref()
+            .and_then(|r| r.data.storeys.get(idx))
+        {
+            Some(s) => s.clone(),
+            None => return,
+        };
+        if let Some(sd) = self.document.storeys.get_mut(idx) {
+            if sd
+                .set_floor_exposure_at(&storey, world_x, world_y, e)
+                .is_some()
+            {
+                let _ = self.mark_dirty();
+            }
+        }
+    }
+
+    /// Set the CEILING exposure of the resolved ceiling/roof region under the
+    /// plan point — the ceiling mirror of
+    /// [`set_floor_exposure_at`](Self::set_floor_exposure_at). Same durable,
+    /// outside-undo semantics.
+    pub fn set_ceiling_exposure_at(&mut self, world_x: f64, world_y: f64, e: CeilingExposure) {
+        self.materialize();
+        let Some(idx) = self.current_storey_idx else {
+            return;
+        };
+        let storey = match self
+            .current_record
+            .as_ref()
+            .and_then(|r| r.data.storeys.get(idx))
+        {
+            Some(s) => s.clone(),
+            None => return,
+        };
+        if let Some(sd) = self.document.storeys.get_mut(idx) {
+            if sd
+                .set_ceiling_exposure_at(&storey, world_x, world_y, e)
+                .is_some()
+            {
+                let _ = self.mark_dirty();
+            }
+        }
+    }
+
+    /// The active storey's resolved horizontal-surface regions (floors then
+    /// ceilings) with their current boundary condition, for the surface-exposure
+    /// overlay — parallel to [`wall_exposure_views`](Self::wall_exposure_views)
+    /// but reading the RESOLVED `FloorRegion.exposure` / `CeilingRegion.exposure`
+    /// (the durable store flows there via the resolve stamp). Empty when no
+    /// record/storey.
+    pub fn surface_exposure_views(&self) -> Vec<SurfaceExposureView> {
+        let Some(idx) = self.current_storey_idx else {
+            return Vec::new();
+        };
+        let Some(storey) = self
+            .current_record
+            .as_ref()
+            .and_then(|r| r.data.storeys.get(idx))
+        else {
+            return Vec::new();
+        };
+        let mut views = Vec::new();
+        let floor_rings = storey.floors.to_vertex_lists();
+        for (region, ring) in storey.floors.regions.iter().zip(&floor_rings) {
+            views.push(SurfaceExposureView {
+                ring: ring.iter().map(|p| (p.x, p.y)).collect(),
+                floor: Some(region.exposure),
+                ceiling: None,
+            });
+        }
+        for region in &storey.roofs.regions {
+            views.push(SurfaceExposureView {
+                ring: region.polygon.exterior.iter().map(|v| (v.x, v.y)).collect(),
+                floor: None,
+                ceiling: Some(region.exposure),
+            });
+        }
+        views
     }
 
     /// The outline perimeter walls with their sections + selection state, for

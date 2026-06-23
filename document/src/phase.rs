@@ -41,8 +41,8 @@ const SIDE_SAMPLE_OFFSET_M: f64 = 0.02;
 /// on storey `idx`, or `None` when the point lies outside the building (in no
 /// floor region — e.g. the open-air side of a perimeter wall). The floors are
 /// already phase-correct from the commit-time partition, so they are the
-/// authoritative zone map: the Original remainder reads `Original`, each
-/// extension zone reads its own phase.
+/// authoritative zone map: the untagged remainder reads `Unassigned`, each
+/// tagged zone (Original / an extension) reads its own phase.
 fn floor_phase_at(ber: &Ber, idx: usize, x: f32, y: f32) -> Option<ConstructionPhase> {
     let storey = ber.storeys.get(idx)?;
     for (fr, verts) in storey
@@ -56,20 +56,22 @@ fn floor_phase_at(ber: &Ber, idx: usize, x: f32, y: f32) -> Option<ConstructionP
             return Some(
                 ber.floor_construction(fr.construction_id)
                     .map(|c| c.base.construction_phase.clone())
-                    .unwrap_or(ConstructionPhase::Original),
+                    .unwrap_or(ConstructionPhase::Unassigned),
             );
         }
     }
     None
 }
 
-/// Sort key for "older wins": smaller = older. `Original` is the oldest fabric
-/// by definition (it predates every extension), so it floors the scale; an
-/// extension orders by its construction year. A phase with no year set (can't
-/// normally happen — only dated phases are assignable) sorts as newest.
+/// Sort key for "older wins": smaller = older. `Unassigned` is the untagged
+/// base fabric — older than anything dated — so it floors the scale; `Original`
+/// is the oldest DATED fabric (it predates every extension), one notch above;
+/// an extension orders by its construction year. A phase with no year set
+/// (can't normally happen — only dated phases are assignable) sorts as newest.
 fn phase_age(ber: &Ber, phase: &ConstructionPhase) -> u32 {
     match phase {
-        ConstructionPhase::Original => u32::MIN,
+        ConstructionPhase::Unassigned => u32::MIN,
+        ConstructionPhase::Original => u32::MIN + 1,
         p => ber.construction_phases.year_of(p).unwrap_or(u32::MAX),
     }
 }
@@ -121,7 +123,7 @@ pub fn stamp_wall_phases(ber: &mut Ber, idx: usize) {
             None => (
                 Default::default(),
                 Default::default(),
-                ConstructionPhase::Original,
+                ConstructionPhase::Unassigned,
             ),
         };
         // The zones on each side (open-air samples drop out); the OLDER wins.
@@ -170,7 +172,7 @@ pub fn stamp_ceiling_phases(ber: &mut Ber, idx: usize) {
             None => (
                 Default::default(),
                 Default::default(),
-                ConstructionPhase::Original,
+                ConstructionPhase::Unassigned,
             ),
         };
         let new_phase =
@@ -290,38 +292,56 @@ pub fn inherited_phase_regions(ber: &Ber, below_idx: usize) -> Vec<PhaseRegion> 
 }
 
 /// Rebuild the session phase regions for storey `idx` from its persisted floor
-/// regions (each non-`Original` floor region → a phase region). Phase regions
-/// are session-only, so on reload they'd otherwise be empty and the NEXT commit
-/// would re-partition with no areas — wiping the split. Reconstructing keeps
-/// the partition reproducible and lets a new selection still snap to the
-/// existing zones. Empty when nothing is tagged.
+/// regions — ONE zone per distinct phase (the union of all same-phase floor
+/// area), NOT one per floor region. Phase regions are session-only, so on
+/// reload they'd otherwise be empty and the NEXT commit would re-partition with
+/// no areas — wiping the split. Reconstructing keeps the partition reproducible
+/// and lets a new selection still snap to the existing zones.
+///
+/// Crucially the zones are unioned PER PHASE (`FloorRegions::phase_zone_rings`):
+/// a step or a differing make-up splits the floor into several regions that are
+/// still one phase, and deriving a zone per region would seed those spurious
+/// sub-divisions onto the storey above (which has no step) — splitting its
+/// floor where the phase is actually uniform. `Unassigned` (the implicit
+/// remainder) is skipped. Empty when nothing is tagged.
 pub fn phase_regions_from_floors(ber: &Ber, idx: usize) -> Vec<PhaseRegion> {
     let Some(storey) = ber.storeys.get(idx) else {
         return Vec::new();
     };
-    let mut regions: Vec<PhaseRegion> = Vec::new();
-    for (fr, verts) in storey
+    storey
         .floors
-        .regions
-        .iter()
-        .zip(storey.floors.to_vertex_lists())
-    {
-        let phase = ber
-            .floor_construction(fr.construction_id)
-            .map(|c| c.base.construction_phase.clone())
-            .unwrap_or(ConstructionPhase::Original);
-        if phase == ConstructionPhase::Original {
-            continue;
-        }
-        let ring: Vec<Point2f32> = verts.iter().copied().map(to_f32).collect();
-        if ring.len() >= 3 {
-            regions.push(PhaseRegion {
-                polygon: ring,
-                phase,
-            });
-        }
+        .phase_zone_rings(|cid| {
+            ber.floor_construction(cid)
+                .map(|c| c.base.construction_phase.clone())
+                .unwrap_or(ConstructionPhase::Unassigned)
+        })
+        .into_iter()
+        .filter(|(phase, _)| *phase != ConstructionPhase::Unassigned)
+        .map(|(phase, ring)| PhaseRegion {
+            polygon: ring.iter().copied().map(to_f32).collect(),
+            phase,
+        })
+        .collect()
+}
+
+/// True when storey `idx`'s construction phase is fully assigned: every resolved
+/// FLOOR region carries a construction whose `construction_phase` is NOT
+/// `Unassigned` (the gate's "left unassigned" state). An empty / missing storey
+/// is NOT complete. Reads the RESOLVED floors (Store A), so the caller must have
+/// committed/materialized before this is meaningful — the checklist's
+/// per-storey "Construction phase" rollup.
+pub fn construction_phase_complete(ber: &Ber, idx: usize) -> bool {
+    let Some(storey) = ber.storeys.get(idx) else {
+        return false;
+    };
+    if storey.floors.regions.is_empty() {
+        return false;
     }
-    regions
+    storey.floors.regions.iter().all(|fr| {
+        ber.floor_construction(fr.construction_id)
+            .map(|c| c.base.construction_phase != ConstructionPhase::Unassigned)
+            .unwrap_or(false)
+    })
 }
 
 #[cfg(test)]
@@ -332,8 +352,10 @@ mod tests {
     };
     use domain::points::Point2f64;
 
-    /// A 10×5 storey split into an Original zone (x < 5) and an Extension1 zone
-    /// (x > 5), with walls along `segs`. Years: Original 1980, Extension1 2008.
+    /// A 10×5 storey split into an UNASSIGNED (untagged base fabric) zone
+    /// (x < 5) and an Extension1 zone (x > 5), with walls along `segs`. Years:
+    /// Original 1980, Extension1 2008. The base zone is `Unassigned` (the
+    /// untagged-remainder default), not `Original`.
     fn split_storey(segs: Vec<(Point2f64, Point2f64, WallExposure)>) -> Ber {
         let mut ber = Ber::default();
         ber.construction_phases
@@ -343,7 +365,7 @@ mod tests {
         let orig_cid = ber.ensure_floor_construction(
             Default::default(),
             Default::default(),
-            ConstructionPhase::Original,
+            ConstructionPhase::Unassigned,
         );
         let ext_cid = ber.ensure_floor_construction(
             Default::default(),
@@ -410,13 +432,19 @@ mod tests {
     }
 
     #[test]
-    fn phase_age_orders_original_oldest_then_by_year() {
+    fn phase_age_orders_unassigned_then_original_then_by_year() {
         let mut ber = Ber::default();
         ber.construction_phases
             .set_year(ConstructionPhase::Extension1, 2008);
         ber.construction_phases
             .set_year(ConstructionPhase::Extension2, 1995);
-        // Original is the oldest fabric regardless of any extension's year.
+        // Unassigned (untagged base fabric) is older than the oldest DATED
+        // fabric, Original.
+        assert!(
+            phase_age(&ber, &ConstructionPhase::Unassigned)
+                < phase_age(&ber, &ConstructionPhase::Original)
+        );
+        // Original is the oldest DATED fabric regardless of any extension's year.
         assert!(
             phase_age(&ber, &ConstructionPhase::Original)
                 < phase_age(&ber, &ConstructionPhase::Extension2)
@@ -453,14 +481,14 @@ mod tests {
         );
         assert_eq!(
             wall_phase_by_base(&ber, (0.0, 5.0), (0.0, 0.0)),
-            ConstructionPhase::Original,
-            "left perimeter → original"
+            ConstructionPhase::Unassigned,
+            "left perimeter → unassigned (untagged base)"
         );
-        // The party wall straddles two ages → the OLDER (Original) wins.
+        // The party wall straddles two ages → the OLDER (Unassigned base) wins.
         assert_eq!(
             wall_phase_by_base(&ber, (5.0, 0.0), (5.0, 5.0)),
-            ConstructionPhase::Original,
-            "party wall → older structure (original)"
+            ConstructionPhase::Unassigned,
+            "party wall → older structure (unassigned base)"
         );
     }
 
@@ -473,12 +501,12 @@ mod tests {
     }
 
     #[test]
-    fn phase_regions_from_floors_skips_original_regions() {
+    fn phase_regions_from_floors_skips_unassigned_regions() {
         let mut ber = Ber::default();
-        let original_cid = ber.ensure_floor_construction(
+        let base_cid = ber.ensure_floor_construction(
             Default::default(),
             Default::default(),
-            ConstructionPhase::Original,
+            ConstructionPhase::Unassigned,
         );
         let ext_cid = ber.ensure_floor_construction(
             Default::default(),
@@ -493,7 +521,7 @@ mod tests {
                 Point2f64::new(off, 4.0),
             ]
         };
-        let mut floors = FloorRegions::from_vertex_lists(vec![square(0.0)], original_cid);
+        let mut floors = FloorRegions::from_vertex_lists(vec![square(0.0)], base_cid);
         floors
             .regions
             .extend(FloorRegions::from_vertex_lists(vec![square(4.0)], ext_cid).regions);
@@ -508,6 +536,74 @@ mod tests {
         assert_eq!(regions[0].polygon.len(), 4);
         // Missing storey → empty.
         assert!(phase_regions_from_floors(&ber, 7).is_empty());
+    }
+
+    /// A floor split into two ADJACENT regions that share ONE phase but carry
+    /// DIFFERENT construction ids (the step case: the lowered piece gets its own
+    /// construction, same phase) must reconstruct as a SINGLE phase zone — the
+    /// union — not one zone per floor region. Regression for the bug where a
+    /// stepped storey seeded two spurious phase boundaries onto the storey above
+    /// (no step), splitting its uniform-phase floor. The merged ring is the
+    /// whole 10×4 rectangle (the dissolved internal edge stripped).
+    #[test]
+    fn phase_zones_union_same_phase_floor_splits_into_one_zone() {
+        use ber_model::ber::structural::FloorConstructionType;
+        let mut ber = Ber::default();
+        ber.construction_phases
+            .set_year(ConstructionPhase::Original, 1980);
+        // Two DIFFERENT floor constructions, SAME phase (Original) — as a step
+        // would produce (distinct construction id, identical phase).
+        let cid_a = ber.ensure_floor_construction(
+            FloorConstructionType::SolidFloor,
+            Default::default(),
+            ConstructionPhase::Original,
+        );
+        let cid_b = ber.ensure_floor_construction(
+            FloorConstructionType::SuspendedFloor,
+            Default::default(),
+            ConstructionPhase::Original,
+        );
+        assert_ne!(
+            cid_a, cid_b,
+            "the two pieces have distinct construction ids"
+        );
+        let left = vec![
+            Point2f64::new(0.0, 0.0),
+            Point2f64::new(5.0, 0.0),
+            Point2f64::new(5.0, 4.0),
+            Point2f64::new(0.0, 4.0),
+        ];
+        let right = vec![
+            Point2f64::new(5.0, 0.0),
+            Point2f64::new(10.0, 0.0),
+            Point2f64::new(10.0, 4.0),
+            Point2f64::new(5.0, 4.0),
+        ];
+        let mut floors = FloorRegions::from_vertex_lists(vec![left], cid_a);
+        floors
+            .regions
+            .extend(FloorRegions::from_vertex_lists(vec![right], cid_b).regions);
+        ber.storeys.push(Storey {
+            floors,
+            ..Storey::default()
+        });
+
+        let regions = phase_regions_from_floors(&ber, 0);
+        assert_eq!(
+            regions.len(),
+            1,
+            "one Original phase zone, not one per floor region: {:?}",
+            regions.iter().map(|r| &r.phase).collect::<Vec<_>>()
+        );
+        assert_eq!(regions[0].phase, ConstructionPhase::Original);
+        // The union of the two 5×4 halves is the 10×4 rectangle — 4 corners, the
+        // dissolved internal edge at x=5 stripped as collinear.
+        assert_eq!(
+            regions[0].polygon.len(),
+            4,
+            "merged into one rectangle (collinear seam stripped): {:?}",
+            regions[0].polygon
+        );
     }
 
     /// `stamp_ceiling_phases` reads the floor phase under each ROOF region's
@@ -585,6 +681,65 @@ mod tests {
             phase_at(7.5, 2.5),
             ConstructionPhase::Extension1,
             "right roof → extension"
+        );
+    }
+
+    /// `construction_phase_complete` is true only when EVERY floor region's
+    /// construction is non-`Unassigned`: an Unassigned remainder fails the gate,
+    /// an all-tagged storey passes, and an empty / missing storey fails.
+    #[test]
+    fn construction_phase_complete_requires_every_floor_tagged() {
+        let mut ber = Ber::default();
+        let unassigned_cid = ber.ensure_floor_construction(
+            Default::default(),
+            Default::default(),
+            ConstructionPhase::Unassigned,
+        );
+        let ext_cid = ber.ensure_floor_construction(
+            Default::default(),
+            Default::default(),
+            ConstructionPhase::Extension1,
+        );
+        let square = |off: f64| {
+            vec![
+                Point2f64::new(off, 0.0),
+                Point2f64::new(off + 4.0, 0.0),
+                Point2f64::new(off + 4.0, 4.0),
+                Point2f64::new(off, 4.0),
+            ]
+        };
+        // One Unassigned + one Extension1 region → NOT complete (the gate's
+        // "left unassigned" state).
+        let mut floors = FloorRegions::from_vertex_lists(vec![square(0.0)], unassigned_cid);
+        floors
+            .regions
+            .extend(FloorRegions::from_vertex_lists(vec![square(4.0)], ext_cid).regions);
+        ber.storeys.push(Storey {
+            floors,
+            ..Storey::default()
+        });
+        assert!(
+            !construction_phase_complete(&ber, 0),
+            "an Unassigned floor region fails the gate"
+        );
+
+        // Re-point the Unassigned region at the Extension1 construction → all
+        // tagged → complete.
+        ber.storeys[0].floors.regions[0].construction_id = ext_cid;
+        assert!(
+            construction_phase_complete(&ber, 0),
+            "all floors tagged → complete"
+        );
+
+        // Empty / missing storey → never complete.
+        ber.storeys.push(Storey::default());
+        assert!(
+            !construction_phase_complete(&ber, 1),
+            "a storey with no floor regions fails"
+        );
+        assert!(
+            !construction_phase_complete(&ber, 9),
+            "a missing storey fails"
         );
     }
 }

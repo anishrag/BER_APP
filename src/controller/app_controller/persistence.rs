@@ -7,7 +7,9 @@ use super::*;
 /// load and the editor rebuilds from the resolved BER points instead.
 // v2: snapshot is now a multi-storey `Document` ({ storeys, active_storey })
 // rather than a single storey's flat fields.
-pub(super) const PARAMETRIC_SNAPSHOT_VERSION: i64 = 2;
+// v3: StoreyDoc gained `floor_exposure` / `ceiling_exposure` maps — old
+// snapshots lack them; discard + rebuild from Store A (then seed/auto-derive).
+pub(super) const PARAMETRIC_SNAPSHOT_VERSION: i64 = 3;
 
 impl AppController {
     pub fn load_data_async(&self, tx: Sender<(String, f32)>) {
@@ -130,6 +132,7 @@ impl AppController {
         self.exposure_sel = None;
         self.exposure_drag = None;
         self.selected_riser = None;
+        self.surface_exposure_mode = false;
         self.pending_cut = None;
         self.phase_mode = false;
         self.phase_regions.clear();
@@ -215,20 +218,44 @@ impl AppController {
         // new-storey FLOW itself is not restored (`load_storey_into_editor`
         // cleared it); only the seed transition survives.
         self.rederive_inherited_seed_pending();
-        let idx = self.current_storey_idx.unwrap_or(0);
         // Phase + step + ceiling-step areas are session-only — rebuild them
-        // from the loaded storey's tagged/levelled floor regions (and stepped
-        // roof regions) so the splits stay reproducible.
+        // from each loaded storey's tagged/levelled floor regions (and the
+        // durable ceiling-step list) so the splits stay reproducible. Done for
+        // EVERY storey, not just the active one: `heal_phase_induced_roof_splits`
+        // below recomposes each phase-tagged storey's roofs from its OWN durable
+        // ceiling-step inputs, which must be reconstructed first.
         self.phase_regions.clear();
-        self.reconstruct_phase_regions_for(idx);
         self.step_regions.clear();
-        self.reconstruct_step_regions_for(idx);
         self.ceiling_step_regions.clear();
-        self.load_ceiling_step_regions_for(idx); // restore the durable step list
-                                                 // Seed the durable riser-exposure table from the persisted resolved
-                                                 // risers (legacy records / pre-table snapshots) BEFORE the first
-                                                 // re-resolve mints fresh risers that would otherwise default Unset.
+        let n_storeys = self
+            .current_record
+            .as_ref()
+            .map(|r| r.data.storeys.len())
+            .unwrap_or(0)
+            .min(self.document.storeys.len());
+        for i in 0..n_storeys {
+            self.reconstruct_phase_regions_for(i);
+            self.reconstruct_step_regions_for(i);
+            self.load_ceiling_step_regions_for(i); // restore the durable step list
+        }
+        // MIGRATION self-heal: a record saved before the per-phase-zone fix
+        // baked a spurious phase-induced split into its stored roofs (a uniform
+        // phase fragmented by a floor step below seeded a redundant boundary).
+        // Roofs are regions-as-truth — resolve keeps them verbatim and the phase
+        // carve only SPLITS — so the stale split never self-heals. Rebuild each
+        // phase-tagged storey's roofs from its durable declarative inputs, which
+        // do NOT reproduce the split; the re-resolve below then re-applies the
+        // (now clean, per-phase) carve. Untagged storeys are left byte-stable.
+        self.heal_phase_induced_roof_splits();
+        // Seed the durable riser-exposure table from the persisted resolved
+        // risers (legacy records / pre-table snapshots) BEFORE the first
+        // re-resolve mints fresh risers that would otherwise default Unset.
         self.seed_riser_exposure_from_record();
+        // Same self-heal for the durable FLOOR + CEILING exposure maps (keyed by
+        // region centroid) — a legacy/pre-map record carries the boundary
+        // condition only on its resolved region, which the first re-resolve would
+        // otherwise reset to Unset before the auto-derive re-runs.
+        self.seed_horizontal_exposure_from_record();
         // Same for the durable FLOOR + CEILING construction stores (keyed by
         // region centroid) — legacy records carry an assigned area construction
         // only on its resolved region, which the first re-resolve would reset.
@@ -246,11 +273,63 @@ impl AppController {
         self.document.edit_state = EditState::default();
         self.review = None;
         self.compute_next_dimension_prompt();
+        // Re-resolve every storey so the recomposed roofs (above) get the clean,
+        // per-phase carve re-applied — this is what drops the stale split while
+        // preserving the deliberate structure splits + steps + apexes that
+        // `heal_phase_induced_roof_splits` replayed. Runs AFTER the exposure /
+        // construction seeds so the resolve's fresh-id stamp reads the seeded
+        // durable maps rather than resetting them to Unset. Resolve keeps roofs
+        // verbatim when the outline is unchanged, so an untagged storey (not
+        // recomposed) stays byte-identical.
+        self.refresh_all_storeys();
         self.history.clear();
         self.redo.clear();
-        // Freshly loaded → nothing pending against disk.
+        // Freshly loaded → nothing pending against disk, and the geometry was
+        // just resolved above, so the next no-edit `materialize` is a no-op.
         self.saved_revision = self.revision;
+        self.derived_revision = self.revision;
         Ok(())
+    }
+
+    /// MIGRATION self-heal for the per-phase-zone roof fix: records saved before
+    /// the fix baked a spurious phase-induced split into their stored roofs
+    /// (a uniform-phase floor fragmented by a step below seeded a redundant
+    /// coplanar same-construction boundary onto the storey above, splitting its
+    /// roof). Roofs are regions-as-truth — `resolve_storey` keeps them verbatim
+    /// and the phase carve only ever SPLITS — so that stale boundary survives
+    /// every reload.
+    ///
+    /// Rebuild each PHASE-TAGGED storey's roofs from its durable declarative
+    /// inputs via [`recompose_roofs`](Self::recompose_roofs) (default footprint →
+    /// ceiling steps → apexes → structure roof-splits). Recompose does NOT
+    /// reproduce the phase carve, so the stale split is dropped; the re-resolve
+    /// at the end of `open_ber` then re-applies the now-clean per-phase carve.
+    /// Deliberate structure roof-splits, ceiling steps, and apexes are replayed
+    /// from their durable fields, so they all survive.
+    ///
+    /// GUARD: gated on the storey being phase-tagged (its phase regions were
+    /// reconstructed above). A spurious phase-induced roof split can only exist
+    /// where there were phase boundaries, so an untagged storey needs no heal —
+    /// and `recompose_roofs` is skipped there, keeping its stored roofs
+    /// byte-identical (the regions-as-truth reload fixpoint). Recompose is
+    /// deterministic, so re-running it on an already-clean phase-tagged storey
+    /// reproduces identical geometry — the fixpoint holds there too.
+    ///
+    /// Requires the per-storey ceiling-step regions to be reconstructed first
+    /// (`recompose_roofs` reads `ceiling_step_regions[idx]`).
+    fn heal_phase_induced_roof_splits(&mut self) {
+        let n = self
+            .current_record
+            .as_ref()
+            .map(|r| r.data.storeys.len())
+            .unwrap_or(0)
+            .min(self.document.storeys.len());
+        for idx in 0..n {
+            // Phase-tagged ⇔ reconstructed phase regions exist for this storey.
+            if self.phase_regions.get(&idx).is_some_and(|v| !v.is_empty()) {
+                self.recompose_roofs(idx);
+            }
+        }
     }
 
     /// Seed the durable `riser_exposure` table from the persisted resolved
@@ -286,6 +365,60 @@ impl AppController {
             let sd = &mut self.document.storeys[idx];
             for (k, e) in entries {
                 sd.riser_exposure.entry(k).or_insert(e);
+            }
+        }
+    }
+
+    /// Seed the durable `floor_exposure` / `ceiling_exposure` maps from the
+    /// persisted resolved regions — legacy records (and any whose snapshot
+    /// predates the maps) carry a floor/ceiling boundary condition only on its
+    /// resolved `FloorRegion` / `CeilingRegion`, which the first fresh-id
+    /// re-resolve would otherwise reset to `Unset`. Idempotent: fills only gaps,
+    /// keyed by the region's quantized centroid (the same key the resolve stamp
+    /// and the manual-marking ops use). Skips `Unset` regions (no value to
+    /// preserve — those re-derive from the stack).
+    pub(super) fn seed_horizontal_exposure_from_record(&mut self) {
+        use ber_model::ber::structural::{CeilingExposure, FloorExposure};
+        let n = self
+            .current_record
+            .as_ref()
+            .map(|r| r.data.storeys.len())
+            .unwrap_or(0)
+            .min(self.document.storeys.len());
+        for idx in 0..n {
+            #[allow(clippy::type_complexity)]
+            let (floors, ceilings): (
+                Vec<(document::CentroidKey, FloorExposure)>,
+                Vec<(document::CentroidKey, CeilingExposure)>,
+            ) = {
+                let Some(record) = self.current_record.as_ref() else {
+                    break;
+                };
+                let Some(storey) = record.data.storeys.get(idx) else {
+                    continue;
+                };
+                let floors = storey
+                    .floors
+                    .regions
+                    .iter()
+                    .filter(|r| r.exposure != FloorExposure::Unset)
+                    .map(|r| (document::centroid_key(r.centroid()), r.exposure))
+                    .collect();
+                let ceilings = storey
+                    .roofs
+                    .regions
+                    .iter()
+                    .filter(|r| r.exposure != CeilingExposure::Unset)
+                    .map(|r| (document::centroid_key(r.centroid()), r.exposure))
+                    .collect();
+                (floors, ceilings)
+            };
+            let sd = &mut self.document.storeys[idx];
+            for (k, e) in floors {
+                sd.floor_exposure.entry(k).or_insert(e);
+            }
+            for (k, e) in ceilings {
+                sd.ceiling_exposure.entry(k).or_insert(e);
             }
         }
     }
@@ -467,11 +600,38 @@ impl AppController {
             date_assessed: chrono::Local::now().naive_local().date(),
             data: ber,
         };
-        self.current_storey_idx = Some(0);
-        self.load_storey_into_editor(record.data.storeys.first());
         self.current_record = Some(record);
-        // Same restart-safe re-derivation as open_ber (a single-storey
-        // checkpoint just yields the empty set).
+        // Size the editor to EVERY storey and load each into its slot — mirrors
+        // `open_ber`. A multi-storey checkpoint otherwise leaves `document.storeys`
+        // at one entry while the data has more, panicking the moment a storey > 0
+        // is resolved (`resolve_storey` indexes `self.document.storeys[idx]`).
+        let n = self
+            .current_record
+            .as_ref()
+            .unwrap()
+            .data
+            .storeys
+            .len()
+            .max(1);
+        self.document = Document::default();
+        for _ in 1..n {
+            self.document.push_storey();
+        }
+        for i in 0..n {
+            self.document.set_active_storey(i);
+            let storey = self
+                .current_record
+                .as_ref()
+                .unwrap()
+                .data
+                .storeys
+                .get(i)
+                .cloned();
+            self.load_storey_into_editor(storey.as_ref());
+        }
+        self.document.set_active_storey(0);
+        self.current_storey_idx = Some(0);
+        // Same restart-safe re-derivation as open_ber.
         self.rederive_inherited_seed_pending();
         self.phase_regions.clear();
         self.reconstruct_phase_regions_for(0);

@@ -67,6 +67,7 @@ mod tests {
             ),
             opes: Opes::default(),
             construction_id: ItemId::default(),
+            exposure: CeilingExposure::default(),
         }
     }
 
@@ -510,6 +511,7 @@ mod tests {
             polygon: Polygon3D::new(pts),
             opes: Opes::default(),
             construction_id: cid,
+            exposure: CeilingExposure::default(),
         };
         // Shared edge (0,0)→(2,0): A flat at 0.5 below it, B sloped z = x/2
         // above it — the profiles cross at (1, 0, 0.5).
@@ -934,6 +936,7 @@ mod tests {
                 ]),
                 opes: Opes::default(),
                 construction_id: cid,
+                exposure: CeilingExposure::default(),
             }],
         };
         let a = Point2f64::new(0.0, 0.0);
@@ -1192,6 +1195,7 @@ mod tests {
             ]),
             opes: Opes::default(),
             construction_id: cid,
+            exposure: CeilingExposure::default(),
         };
         assert_eq!(sloped.flat_z(), None);
 
@@ -1203,6 +1207,7 @@ mod tests {
             ]),
             opes: Opes::default(),
             construction_id: cid,
+            exposure: CeilingExposure::default(),
         };
         assert_eq!(degenerate.flat_z(), None, "< 3 vertices is degenerate");
     }
@@ -1397,6 +1402,7 @@ mod tests {
             ]),
             opes: Opes::default(),
             construction_id: cid,
+            exposure: CeilingExposure::default(),
         };
         assert_eq!(sloped.fan_base_z(&[]), None);
 
@@ -1422,6 +1428,7 @@ mod tests {
             ]),
             opes: Opes::default(),
             construction_id: cid,
+            exposure: CeilingExposure::default(),
         };
         assert_eq!(needle.fan_base_z(&[apex]), Some(2.4));
 
@@ -1435,6 +1442,7 @@ mod tests {
             ]),
             opes: Opes::default(),
             construction_id: cid,
+            exposure: CeilingExposure::default(),
         };
         assert_eq!(
             all_apex.fan_base_z(&[RoofApex {
@@ -1633,6 +1641,7 @@ mod tests {
                     ]),
                     opes: Opes::default(),
                     construction_id: ItemId::default(),
+                    exposure: CeilingExposure::default(),
                 }],
             };
             let before = tri.regions[0].polygon.clone();
@@ -2868,6 +2877,7 @@ mod tests {
             ]),
             opes: Opes::default(),
             construction_id: ItemId::default(),
+            exposure: CeilingExposure::default(),
         });
         // The sloped half is covered but warn-logged out — no levels.
         assert!(roofs

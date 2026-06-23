@@ -97,6 +97,7 @@ fn ring_signed_plan_area(ext: &[Point3f64]) -> f64 {
 /// `construction_id`.
 pub(crate) fn fan_triangles(region: CeilingRegion, apex: &RoofApex) -> Vec<CeilingRegion> {
     let cid = region.construction_id;
+    let exposure = region.exposure;
     let ext = pre_lift(region.polygon.exterior, &[apex]);
     let apex_v = Point3f64::new(apex.point.x, apex.point.y, apex.z_m);
     let n = ext.len();
@@ -112,6 +113,7 @@ pub(crate) fn fan_triangles(region: CeilingRegion, apex: &RoofApex) -> Vec<Ceili
             polygon: Polygon3D::new(vec![a, b, apex_v]),
             opes: Opes::default(),
             construction_id: cid,
+            exposure,
         });
     }
     out
@@ -240,6 +242,7 @@ pub(crate) fn ridge_triangles(
     b: &RoofApex,
 ) -> Vec<CeilingRegion> {
     let cid = region.construction_id;
+    let exposure = region.exposure;
     let ext = pre_lift(region.polygon.exterior, &[a, b]);
     let ext = ridge_split_ring(ext, a.point, b.point);
     let plan: Vec<(f64, f64)> = ext.iter().map(|v| (v.x, v.y)).collect();
@@ -255,6 +258,7 @@ pub(crate) fn ridge_triangles(
                 polygon: Polygon3D::new(ext),
                 opes: Opes::default(),
                 construction_id: cid,
+                exposure,
             },
             a,
         );
@@ -268,6 +272,7 @@ pub(crate) fn ridge_triangles(
         polygon: Polygon3D::new(verts),
         opes: Opes::default(),
         construction_id: cid,
+        exposure,
     };
     let n = ext.len();
     let mut out = Vec::new();
@@ -460,11 +465,13 @@ pub(crate) fn rect_ridge_faces(
         corner_at(x0, y1),
     ];
     let ext = pre_lift(region.polygon.exterior, &corners[..]);
+    let exposure = region.exposure;
     let mk = |verts: Vec<Point3f64>| CeilingRegion {
         id: ItemId::default(),
         polygon: Polygon3D::new(verts),
         opes: Opes::default(),
         construction_id: cid,
+        exposure,
     };
     let n = ext.len();
     let sides: Vec<usize> = (0..n)
@@ -679,11 +686,13 @@ pub(crate) fn merge_coplanar_faces(mut faces: Vec<CeilingRegion>) -> Vec<Ceiling
                     merge_coplanar_pair(&faces[i].polygon.exterior, &faces[j].polygon.exterior)
                 {
                     let construction_id = faces[i].construction_id;
+                    let exposure = faces[i].exposure;
                     faces[i] = CeilingRegion {
                         id: ItemId::default(),
                         polygon: Polygon3D::new(merged),
                         opes: Opes::default(),
                         construction_id,
+                        exposure,
                     };
                     faces.remove(j);
                     continue 'outer;

@@ -891,8 +891,8 @@ mod tests {
     use crate::ber::common::ItemId;
     use crate::ber::fenestration::{Door, OpeningPlacement, Window};
     use crate::ber::structural::{
-        CeilingRegion, CeilingRegions, Opes, Polygon3D, Storey, WallExposure, WallRegion,
-        WallRegions,
+        CeilingExposure, CeilingRegion, CeilingRegions, Opes, Polygon3D, Storey, WallExposure,
+        WallRegion, WallRegions,
     };
     use domain::points::Point3f64;
 
@@ -1011,6 +1011,7 @@ mod tests {
             ]),
             opes: Opes::default(),
             construction_id: ItemId::default(),
+            exposure: CeilingExposure::default(),
         };
         let mut storey = Storey {
             roofs: CeilingRegions {
@@ -1284,6 +1285,7 @@ mod tests {
             ]),
             opes: Opes::default(),
             construction_id: ItemId::default(),
+            exposure: CeilingExposure::default(),
         };
         let r1 = ItemId::default();
         let mut storey = Storey {
@@ -1333,6 +1335,7 @@ mod tests {
                     ]),
                     opes: Opes::default(),
                     construction_id: ItemId::default(),
+                    exposure: CeilingExposure::default(),
                 }],
             },
             ..Storey::default()

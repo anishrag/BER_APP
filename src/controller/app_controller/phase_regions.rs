@@ -30,6 +30,7 @@ impl AppController {
             self.exit_openings_mode();
             self.living_area_mode = false;
             self.exposure_mode = false;
+            self.surface_exposure_mode = false;
             self.step_mode = false;
             self.ceiling_step_mode = false;
             self.pending_ceiling_step = None;
@@ -282,6 +283,36 @@ impl AppController {
                 (p, label)
             })
             .collect()
+    }
+
+    /// Stamp the storey's LEFTOVER fabric — the outline minus the phase areas
+    /// already drawn — as explicit `Original` region(s) and re-commit. The
+    /// untagged remainder otherwise resolves as `Unassigned` (the gate's "not yet
+    /// assigned" state); this is the one-tap "everything else is the original
+    /// build" affordance that satisfies the Construction-phase checklist row.
+    /// Each leftover ring becomes a session [`PhaseRegion`] tagged `Original`
+    /// (the durable record is the floor regions' `construction_id`, like every
+    /// other phase area). No-op when the outline is fully covered already.
+    pub fn assign_rest_to_original(&mut self) {
+        self.sync_active();
+        let idx = self.current_storey_idx.unwrap_or(0);
+        let phase_rings: Vec<Vec<Point2f32>> = self
+            .phase_regions
+            .get(&idx)
+            .map(|rs| rs.iter().map(|r| r.polygon.clone()).collect())
+            .unwrap_or_default();
+        let rings = self.document.available_region_rings(&phase_rings);
+        if rings.is_empty() {
+            return;
+        }
+        let entry = self.phase_regions.entry(idx).or_default();
+        for polygon in rings {
+            entry.push(PhaseRegion {
+                polygon,
+                phase: ConstructionPhase::Original,
+            });
+        }
+        let _ = self.mark_dirty();
     }
 
     /// Delete the current storey's phase region at `index` and re-commit (so
