@@ -140,12 +140,10 @@ fn compute_structure_edit_layout(
     // Each group's on-screen position under the plain full-rect fit — picks which
     // side of the plan each window goes to and where along that edge it sits.
     let t_full = render::fit_transform(rect, min_xy, max_xy, base);
-    let screen: Vec<egui::Pos2> = fans
-        .iter()
-        .map(|f| t_full.apply(f.centroid.0, f.centroid.1))
-        .collect();
     // The connector TARGET per group (walls → nearest selected wall, else the
-    // centroid). Indexed by fan; assignment/ordering still uses the centroid.
+    // centroid). Placement — edge assignment AND ordering — is driven by the
+    // anchor (where the line points), not the bare centroid, so the boxes sit
+    // near their targets and the connectors don't cross.
     let anchors: Vec<(f64, f64)> = fans
         .iter()
         .map(|f| {
@@ -156,6 +154,7 @@ fn compute_structure_edit_layout(
             )
         })
         .collect();
+    let screen: Vec<egui::Pos2> = anchors.iter().map(|a| t_full.apply(a.0, a.1)).collect();
 
     // Assign each group to a side by WHERE IT SITS RELATIVE TO THE PLAN'S OWN
     // CENTRE (its quadrant), not the nearest canvas edge — otherwise a

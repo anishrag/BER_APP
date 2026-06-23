@@ -282,7 +282,11 @@ fn draw_fanned_surface(
     active: bool,
 ) {
     let line = if active { color } else { style::faded(color) };
-    let fill = style::highlight_fill(if active { color } else { style::faded(color) });
+    // A LIGHT translucent tint (proper non-premultiplied alpha) so the group
+    // reads as a coloured wash with a solid coloured boundary — not the near-
+    // white, washed-out fill the premultiplied `highlight_fill` produced.
+    let [r, g, b, _] = line.to_array();
+    let fill = egui::Color32::from_rgba_unmultiplied(r, g, b, 55);
     match kind {
         SurfaceKind::Walls => {
             let Some(r) = storey.walls.regions.iter().find(|r| r.id == id) else {
