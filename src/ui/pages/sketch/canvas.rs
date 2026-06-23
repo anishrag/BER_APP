@@ -48,6 +48,10 @@ const EDIT_SLOT_H: f32 = 158.0;
 const EDIT_COL_PAD: f32 = 10.0;
 /// Top/bottom inset reserved for the window columns.
 const EDIT_TOP_PAD: f32 = 12.0;
+/// Clearance kept below the canvas top for the phase signpost + surface banner
+/// (the floating bar at `center_top + 8` and the banner just under it), so the
+/// top row of attribute windows and the side columns don't sit on top of them.
+const EDIT_TOP_SAFE: f32 = 84.0;
 
 /// One in-place attribute window's placement (see [`compute_structure_edit_layout`]).
 struct EditWindow {
@@ -91,6 +95,12 @@ fn declutter_axis(prefs: &mut [f32], spacing: f32, lo: f32, hi: f32) {
         if prefs[i] > ceil {
             prefs[i] = ceil;
         }
+    }
+    // The backward pass can push the leftmost items below `lo` when there are
+    // more than fit; clamp so nothing ever lands off-screen (they overlap-compress
+    // at the `lo` end instead of running off the canvas).
+    for p in prefs.iter_mut() {
+        *p = p.clamp(lo, hi);
     }
 }
 
@@ -167,7 +177,13 @@ fn compute_structure_edit_layout(
     } else {
         col_w
     };
-    let top_h = if top.is_empty() { EDIT_TOP_PAD } else { band_h };
+    // A top row sits BELOW the signpost, so the plan must clear the signpost band
+    // PLUS the row height; the bottom has no overlay, so a normal band suffices.
+    let top_h = if top.is_empty() {
+        EDIT_TOP_PAD
+    } else {
+        EDIT_TOP_SAFE + EDIT_SLOT_H + EDIT_TOP_PAD
+    };
     let bottom_h = if bottom.is_empty() {
         EDIT_TOP_PAD
     } else {
@@ -195,10 +211,12 @@ fn compute_structure_edit_layout(
 
     let mut windows = Vec::with_capacity(fans.len());
 
-    // LEFT / RIGHT columns: window y tracks the group's screen y, confined to the
-    // height not reserved by the top/bottom rows so corners stay clear.
-    let col_lo = rect.top() + top_h;
-    let col_hi = (rect.bottom() - bottom_h - EDIT_SLOT_H).max(col_lo);
+    // LEFT / RIGHT columns: window y tracks the group's screen y. Columns flank
+    // the plan for the full height (below the signpost), and never collide with
+    // the top/bottom rows because those are confined to the inner WIDTH — see
+    // `row_lo`/`row_hi` below — which excludes the column x-ranges.
+    let col_lo = rect.top() + EDIT_TOP_SAFE;
+    let col_hi = (rect.bottom() - EDIT_TOP_PAD - EDIT_SLOT_H).max(col_lo);
     for (col, left_side) in [(&mut left, true), (&mut right, false)] {
         col.sort_by(|&a, &b| {
             screen[a]
@@ -250,7 +268,7 @@ fn compute_structure_edit_layout(
             .collect();
         declutter_axis(&mut xs, EDIT_BOX_W, row_lo, row_hi);
         let y = if top_side {
-            rect.top() + EDIT_TOP_PAD
+            rect.top() + EDIT_TOP_SAFE // clear the phase signpost / banner
         } else {
             rect.bottom() - EDIT_TOP_PAD - EDIT_SLOT_H
         };
@@ -317,7 +335,8 @@ pub(super) fn render<F: FnMut(UiEvent)>(
     }
 
     // Structure "Edit attributes" (in-place view): lay the per-group windows out
-    // in columns flanking the plan, then fit the plan into the gap between them.
+    // in the margins (each on the side nearest its group), then fit the plan into
+    // the gap they leave.
     // The fitted view REPLACES the normal pan/zoom for the whole render so the
     // plan, its overlays, and the windows all share one transform. `None` (no
     // session, the exploded view, 3D, or a canvas too small) leaves `vp` as-is.
