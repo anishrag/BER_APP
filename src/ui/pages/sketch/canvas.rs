@@ -954,6 +954,19 @@ pub(super) fn render<F: FnMut(UiEvent)>(
                             });
                         });
                 }
+            } else if let Some(pg) = edit.viewing_photos {
+                // Camera button is open: a centred PHOTOS view (thumbnails + add).
+                if let Some(group) = edit.groups.get(pg) {
+                    egui::Area::new(ui.id().with("view_photos"))
+                        .order(egui::Order::Foreground)
+                        .anchor(egui::Align2::CENTER_CENTER, egui::vec2(0.0, 0.0))
+                        .show(ui.ctx(), |ui| {
+                            egui::Frame::popup(ui.style()).show(ui, |ui| {
+                                ui.set_max_width(320.0);
+                                super::structure::photos_view_ui(ui, pg, group, on_event);
+                            });
+                        });
+                }
             } else {
                 for w in &layout.windows {
                     let i = w.group_index;

@@ -36,9 +36,14 @@ pub struct PhotoConfig {
 /// obtained (a chosen file on desktop, a captured file on Android), else `None`.
 /// The caller copies/attaches the file (via its controller); this only triggers
 /// the platform capture.
-pub fn photo_button(ui: &mut egui::Ui, enabled: bool, config: PhotoConfig) -> Option<PathBuf> {
+pub fn photo_button(
+    ui: &mut egui::Ui,
+    label: &str,
+    enabled: bool,
+    config: PhotoConfig,
+) -> Option<PathBuf> {
     let clicked = ui
-        .add_enabled(enabled, egui::Button::new("📷"))
+        .add_enabled(enabled, egui::Button::new(label))
         .on_hover_text("Add photo")
         .clicked();
     if clicked {

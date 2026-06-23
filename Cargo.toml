@@ -30,7 +30,10 @@ sketch = { path = "sketch" }
 egui = "0.33.3"
 strum = "0.27.2"
 strum_macros = "0.27.2"
-egui_extras = { version = "0.33.3", features = ["datepicker"] }
+egui_extras = { version = "0.33.3", features = ["datepicker", "file", "image"] }
+# Image decoding for photo thumbnails (used by egui_extras' image loader). Only
+# the formats a phone camera / attached file produces.
+image = { version = "0.25", default-features = false, features = ["jpeg", "png"] }
 
 # Bluetooth laser meter (Leica DISTO) support — behind the `bluetooth` feature
 # (off by default so the normal build + tests need no radio stack). btleplug is

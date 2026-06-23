@@ -13,7 +13,7 @@
 //! and holds the transient selected set (app-shell interaction state — the
 //! regions live on the BER record, not the editing `Document`).
 use super::*;
-use ber_model::ber::common::ConstructionPhase;
+use ber_model::ber::common::{ConstructionPhase, Photo};
 use ber_model::ber::structural::{
     CeilingConstructionType, ConstructionMakeup, ConstructionType, FloorConstructionType, Storey,
 };
@@ -32,6 +32,9 @@ pub struct EditGroup {
     /// Editable label for the group, defaulting to "Group 1", "Group 2", … —
     /// the assessor can rename it. Session-scoped (reset when the edit reopens).
     pub name: String,
+    /// The group construction's attached photos (session copy, seeded from the
+    /// construction; the photos view shows these and the camera button appends).
+    pub photos: Vec<Photo>,
 }
 
 /// The in-flight "Edit attributes" session: the current selection partitioned by
@@ -48,6 +51,9 @@ pub struct StructureEdit {
     /// the reusable library, ordered inside→outside — instead of the group's
     /// normal attribute window. `None` = no layer editor open.
     pub specifying: Option<usize>,
+    /// When `Some(i)`, the PHOTOS view is open for group `i` (the camera button):
+    /// the canvas shows that group's photo thumbnails with a `+` to add more.
+    pub viewing_photos: Option<usize>,
     /// Canvas presentation of the session. `false` (default) keeps the plan in
     /// place — zoomed out, each group recoloured where it sits, with one full
     /// attribute window floating over each group. `true` is the exploded "fan"
@@ -220,6 +226,7 @@ impl AppController {
             ConstructionMakeup,
             ConstructionPhase,
             Option<String>,
+            Vec<Photo>,
         );
         let attrs_of = |id: ItemId| -> Option<Attrs> {
             match storey.surface_kind_of(id)? {
@@ -231,12 +238,14 @@ impl AppController {
                             c.base.construction_makeup.clone(),
                             c.base.construction_phase.clone(),
                             c.base.name.clone(),
+                            c.base.photos.clone(),
                         ),
                         None => (
                             ConstructionType::Wall(Default::default()),
                             Default::default(),
                             Default::default(),
                             None,
+                            Vec::new(),
                         ),
                     })
                 }
@@ -248,12 +257,14 @@ impl AppController {
                             c.base.construction_makeup.clone(),
                             c.base.construction_phase.clone(),
                             c.base.name.clone(),
+                            c.base.photos.clone(),
                         ),
                         None => (
                             ConstructionType::Floor(Default::default()),
                             Default::default(),
                             Default::default(),
                             None,
+                            Vec::new(),
                         ),
                     })
                 }
@@ -265,12 +276,14 @@ impl AppController {
                             c.base.construction_makeup.clone(),
                             c.base.construction_phase.clone(),
                             c.base.name.clone(),
+                            c.base.photos.clone(),
                         ),
                         None => (
                             ConstructionType::Ceiling(Default::default()),
                             Default::default(),
                             Default::default(),
                             None,
+                            Vec::new(),
                         ),
                     })
                 }
@@ -279,7 +292,7 @@ impl AppController {
         let mut groups: Vec<EditGroup> = Vec::new();
         for id in &self.structure_selected {
             // Skip ids that no longer resolve to a live region of any kind.
-            let Some((ty, makeup, phase, cname)) = attrs_of(*id) else {
+            let Some((ty, makeup, phase, cname, photos)) = attrs_of(*id) else {
                 continue;
             };
             match groups
@@ -295,6 +308,7 @@ impl AppController {
                     // The construction's stored name, if any (set in a prior
                     // session); the "Group N" fallback is filled in below.
                     name: cname.unwrap_or_default(),
+                    photos,
                 }),
             }
         }
@@ -310,6 +324,7 @@ impl AppController {
                 active: 0,
                 exploded: false,
                 specifying: None,
+                viewing_photos: None,
             });
         }
     }
@@ -386,9 +401,13 @@ impl AppController {
         source: &std::path::Path,
     ) -> Option<ber_model::ber::common::Photo> {
         std::fs::create_dir_all(&self.photos_dir).ok()?;
+        // Canonicalize to an ABSOLUTE dir so the stored path loads as a
+        // `file://` thumbnail regardless of the process's cwd.
+        let dir =
+            std::fs::canonicalize(&self.photos_dir).unwrap_or_else(|_| self.photos_dir.clone());
         let ext = source.extension().and_then(|e| e.to_str()).unwrap_or("jpg");
         let id = ItemId::default();
-        let dest = self.photos_dir.join(format!("{}.{ext}", id.0));
+        let dest = dir.join(format!("{}.{ext}", id.0));
         std::fs::copy(source, &dest).ok()?;
         Some(ber_model::ber::common::Photo {
             id,
@@ -453,7 +472,31 @@ impl AppController {
         for cid in cids {
             record.data.add_construction_photo(kind, cid, photo.clone());
         }
+        // Mirror onto the session group so the open photos view updates at once.
+        if let Some(g) = self
+            .structure_edit
+            .as_mut()
+            .and_then(|e| e.groups.get_mut(group))
+        {
+            g.photos.push(photo);
+        }
         let _ = self.mark_dirty();
+    }
+
+    /// Open / close the PHOTOS view for a group (the camera button): shows the
+    /// group's thumbnails with a `+` to add more.
+    pub fn begin_view_photos(&mut self, group: usize) {
+        if let Some(e) = self.structure_edit.as_mut() {
+            if group < e.groups.len() {
+                e.viewing_photos = Some(group);
+            }
+        }
+    }
+
+    pub fn end_view_photos(&mut self) {
+        if let Some(e) = self.structure_edit.as_mut() {
+            e.viewing_photos = None;
+        }
     }
 
     /// Rename a group's editable label — the in-place window title AND the

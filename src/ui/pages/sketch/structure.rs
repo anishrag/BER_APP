@@ -362,11 +362,67 @@ pub(crate) fn group_editor_ui<F: FnMut(UiEvent)>(
             }));
         }
     });
-    // Photos (next line): the modular camera/attach button. Desktop → file
-    // dialog; Android → camera. Construction close-ups default to High quality.
+    // Photos (next line): the camera button opens the photos view (thumbnails +
+    // add). Shows a count when there are any.
+    let cam = if g.photos.is_empty() {
+        "📷".to_string()
+    } else {
+        format!("📷 {}", g.photos.len())
+    };
+    if ui
+        .add_enabled(enabled, egui::Button::new(cam))
+        .on_hover_text("Photos")
+        .clicked()
+    {
+        on_event(UiEvent::Sketch(SketchEvent::BeginViewPhotos {
+            group: group_index,
+        }));
+    }
+}
+
+/// The PHOTOS view for a group (the camera button → centred window): the
+/// group's photo thumbnails, with a "+" to add another (desktop file dialog /
+/// Android camera). `Done` closes it.
+pub(crate) fn photos_view_ui<F: FnMut(UiEvent)>(
+    ui: &mut egui::Ui,
+    group_index: usize,
+    g: &EditGroup,
+    on_event: &mut F,
+) {
+    ui.label(
+        egui::RichText::new(format!("{} photos", kind_heading(g.ty.kind())))
+            .size(EDITOR_FONT + 2.0)
+            .strong(),
+    );
+    if g.photos.is_empty() {
+        ui.label(
+            egui::RichText::new("no photos yet")
+                .size(EDITOR_FONT)
+                .italics()
+                .weak(),
+        );
+    }
+    egui::ScrollArea::vertical()
+        .max_height(260.0)
+        .show(ui, |ui| {
+            ui.horizontal_wrapped(|ui| {
+                for p in &g.photos {
+                    ui.add(
+                        egui::Image::new(format!("file://{}", p.file_path))
+                            .max_size(egui::vec2(120.0, 120.0))
+                            .maintain_aspect_ratio(true)
+                            .corner_radius(4.0),
+                    );
+                }
+            });
+        });
+
+    ui.separator();
+    // "+" adds another photo (the modular capture button).
     if let Some(path) = crate::ui::widgets::photo_button(
         ui,
-        enabled,
+        "➕  Add photo",
+        true,
         crate::ui::widgets::PhotoConfig {
             default_quality: crate::ui::widgets::PhotoQuality::High,
         },
@@ -375,6 +431,10 @@ pub(crate) fn group_editor_ui<F: FnMut(UiEvent)>(
             group: group_index,
             path,
         }));
+    }
+    ui.separator();
+    if ui.button("Done").clicked() {
+        on_event(UiEvent::Sketch(SketchEvent::EndViewPhotos));
     }
 }
 

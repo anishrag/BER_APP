@@ -49,6 +49,11 @@ fn launch(
     eframe::run_native(
         "BER App",
         options,
-        Box::new(|_cc| Ok(Box::new(BerApp::new(controller)))),
+        Box::new(|cc| {
+            // Photo thumbnails load via `file://` URIs — install egui_extras'
+            // file + image loaders once at startup.
+            egui_extras::install_image_loaders(&cc.egui_ctx);
+            Ok(Box::new(BerApp::new(controller)))
+        }),
     )
 }
