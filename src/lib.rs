@@ -26,6 +26,7 @@ pub fn bootstrap(paths: &Paths) -> Rc<RefCell<AppController>> {
     let db = paths.db_file();
     let conn = engine::open_db(&db).expect("Failed to open database");
     let mut controller = AppController::new(conn);
+    controller.set_photos_dir(paths.photos_dir());
     // Background writer (its own connection, WAL) so idle autosaves don't block
     // the UI on SQLite. If it can't spawn, fall back to synchronous saves.
     match engine::PersistenceWriter::spawn(db) {

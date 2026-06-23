@@ -479,6 +479,31 @@ impl Ber {
         }
     }
 
+    /// Attach a `photo` to the `kind` construction `id` (its build-up photos).
+    /// Find-by-id within the matching registry; no-op if it isn't there.
+    pub fn add_construction_photo(&mut self, kind: SurfaceKind, id: ItemId, photo: Photo) {
+        let base = match kind {
+            SurfaceKind::Walls => self
+                .wall_constructions
+                .iter_mut()
+                .find(|c| c.base.id == id)
+                .map(|c| &mut c.base),
+            SurfaceKind::Floors => self
+                .floor_constructions
+                .iter_mut()
+                .find(|c| c.base.id == id)
+                .map(|c| &mut c.base),
+            SurfaceKind::Roofs => self
+                .ceiling_constructions
+                .iter_mut()
+                .find(|c| c.base.id == id)
+                .map(|c| &mut c.base),
+        };
+        if let Some(base) = base {
+            base.photos.push(photo);
+        }
+    }
+
     /// The ids of every `kind` surface in storey `idx` whose construction is NOT
     /// yet done — its type or build-up is still unset (see
     /// [`WallConstruction::is_complete`]). A region whose construction can't be

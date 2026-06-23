@@ -362,6 +362,20 @@ pub(crate) fn group_editor_ui<F: FnMut(UiEvent)>(
             }));
         }
     });
+    // Photos (next line): the modular camera/attach button. Desktop → file
+    // dialog; Android → camera. Construction close-ups default to High quality.
+    if let Some(path) = crate::ui::widgets::photo_button(
+        ui,
+        enabled,
+        crate::ui::widgets::PhotoConfig {
+            default_quality: crate::ui::widgets::PhotoQuality::High,
+        },
+    ) {
+        on_event(UiEvent::Sketch(SketchEvent::AddGroupPhoto {
+            group: group_index,
+            path,
+        }));
+    }
 }
 
 /// The build-up LAYER editor for a group (the "Specify…" flow): the current

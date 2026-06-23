@@ -1740,6 +1740,9 @@ impl eframe::App for BerApp {
                                             .borrow_mut()
                                             .set_structure_group_layers(group, layers);
                                     }
+                                    SketchEvent::AddGroupPhoto { group, path } => {
+                                        controller.borrow_mut().add_group_photo(group, &path);
+                                    }
                                     SketchEvent::EndStructureEdit => {
                                         controller.borrow_mut().end_structure_edit();
                                     }

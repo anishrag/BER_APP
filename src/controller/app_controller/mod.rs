@@ -121,6 +121,9 @@ pub struct AppController {
     /// Cached app-wide construction-layer library (the build-up editor's pick
     /// list); loaded on create, refreshed when a typed layer is saved.
     layer_library: Vec<ber_model::ber::structural::ConstructionLayer>,
+    /// Where attached/captured photo files are stored. Set from `Paths` in
+    /// `bootstrap`; a relative default keeps tests (no photos) working.
+    photos_dir: std::path::PathBuf,
     sketch_engine: SketchEngine,
     loader_engine: DataLoader,
     /// The BER record being edited. `commit_to_ber` writes through this to SQLite.
@@ -366,6 +369,7 @@ impl AppController {
         Self {
             conn,
             layer_library,
+            photos_dir: std::path::PathBuf::from("photos"),
             loader_engine: DataLoader::new(),
             sketch_engine: SketchEngine::new(),
             current_record: None,

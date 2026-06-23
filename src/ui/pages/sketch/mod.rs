@@ -564,6 +564,13 @@ pub enum SketchEvent {
         group: usize,
         layers: Vec<ber_model::ber::structural::ConstructionLayer>,
     },
+    /// Structure phase: attach a photo (from `path`) to a group's construction
+    /// (the build-up floaty's camera button). The controller copies the file
+    /// into the photo store.
+    AddGroupPhoto {
+        group: usize,
+        path: std::path::PathBuf,
+    },
     /// Structure phase: close the "Edit attributes" session.
     EndStructureEdit,
 }

@@ -1623,6 +1623,41 @@ fn specify_layers_saves_to_library_and_builds_up() {
     assert_eq!(c.structure_edit().unwrap().specifying, None);
 }
 
+/// A photo attached to a group is copied into the photo store and recorded on
+/// the group's construction (the build-up floaty's camera button → controller).
+#[test]
+fn group_photo_copies_into_store_and_attaches() {
+    let mut c = dimensioned_square_controller();
+    c.materialize();
+    let tmp = std::env::temp_dir().join(format!("ber_photos_{}", ItemId::default().0));
+    c.set_photos_dir(tmp.clone());
+    let src = std::env::temp_dir().join(format!("ber_src_{}.jpg", ItemId::default().0));
+    std::fs::write(&src, b"jpeg-bytes").unwrap();
+
+    set_only_kind(&mut c, SurfaceKind::Walls);
+    c.set_structure_select_mode(Some(SelectMode::All));
+    c.begin_structure_edit();
+    c.add_group_photo(0, &src);
+
+    let g0 = &c.structure_edit().unwrap().groups[0];
+    let rec = c.current_record.as_ref().unwrap();
+    let cid = rec.data.storeys[0]
+        .walls
+        .regions
+        .iter()
+        .find(|r| g0.ids.contains(&r.id))
+        .unwrap()
+        .construction_id;
+    let photos = &rec.data.wall_construction(cid).unwrap().base.photos;
+    assert_eq!(photos.len(), 1, "photo recorded on the construction");
+    let stored = std::path::Path::new(&photos[0].file_path);
+    assert!(stored.exists(), "photo copied into the store");
+    assert!(stored.starts_with(&tmp), "stored under the photos dir");
+
+    let _ = std::fs::remove_dir_all(&tmp);
+    let _ = std::fs::remove_file(&src);
+}
+
 /// The group PHASE is editable — defaulted to the derived value but overridable
 /// in the editor, and the override survives the re-resolve (stored in the
 /// durable side-table alongside type + make-up).

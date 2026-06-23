@@ -378,6 +378,84 @@ impl AppController {
         self.set_structure_group_attrs(group, ty, ConstructionMakeup::Layers(layers), phase);
     }
 
+    /// Copy a source image into the photo store and return a `Photo` pointing at
+    /// the stored copy. The MODULAR core every photo-attach site shares (file
+    /// I/O lives here, not in the UI). `None` on an I/O failure.
+    pub(super) fn store_photo_file(
+        &self,
+        source: &std::path::Path,
+    ) -> Option<ber_model::ber::common::Photo> {
+        std::fs::create_dir_all(&self.photos_dir).ok()?;
+        let ext = source.extension().and_then(|e| e.to_str()).unwrap_or("jpg");
+        let id = ItemId::default();
+        let dest = self.photos_dir.join(format!("{}.{ext}", id.0));
+        std::fs::copy(source, &dest).ok()?;
+        Some(ber_model::ber::common::Photo {
+            id,
+            file_path: dest.to_string_lossy().into_owned(),
+            description: None,
+        })
+    }
+
+    /// Attach a photo (from `source`) to a Structure group's construction(s) —
+    /// the build-up floaty's camera button. Stores the file, then pushes the
+    /// `Photo` onto each of the group's (shared) constructions. Marks dirty.
+    pub fn add_group_photo(&mut self, group: usize, source: &std::path::Path) {
+        let Some(photo) = self.store_photo_file(source) else {
+            return;
+        };
+        let (kind, ids) = match self
+            .structure_edit
+            .as_ref()
+            .and_then(|e| e.groups.get(group))
+        {
+            Some(g) => (g.ty.kind(), g.ids.clone()),
+            None => return,
+        };
+        let Some(idx) = self.current_storey_idx else {
+            return;
+        };
+        let Some(record) = self.current_record.as_mut() else {
+            return;
+        };
+        let cids: Vec<ItemId> = {
+            let Some(storey) = record.data.storeys.get(idx) else {
+                return;
+            };
+            let region_cid = |id: ItemId| -> Option<ItemId> {
+                match kind {
+                    SurfaceKind::Walls => storey
+                        .walls
+                        .regions
+                        .iter()
+                        .find(|r| r.id == id)
+                        .map(|r| r.construction_id),
+                    SurfaceKind::Floors => storey
+                        .floors
+                        .regions
+                        .iter()
+                        .find(|r| r.id == id)
+                        .map(|r| r.construction_id),
+                    SurfaceKind::Roofs => storey
+                        .roofs
+                        .regions
+                        .iter()
+                        .find(|r| r.id == id)
+                        .map(|r| r.construction_id),
+                }
+            };
+            let mut seen = HashSet::new();
+            ids.iter()
+                .filter_map(|id| region_cid(*id))
+                .filter(|c| seen.insert(*c))
+                .collect()
+        };
+        for cid in cids {
+            record.data.add_construction_photo(kind, cid, photo.clone());
+        }
+        let _ = self.mark_dirty();
+    }
+
     /// Rename a group's editable label — the in-place window title AND the
     /// group's construction NAME, so the label survives reopening the editor (and
     /// reload). Updates the session group, then writes the name onto each of the
