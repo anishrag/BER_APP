@@ -962,7 +962,7 @@ pub(super) fn render<F: FnMut(UiEvent)>(
                         .anchor(egui::Align2::CENTER_CENTER, egui::vec2(0.0, 0.0))
                         .show(ui.ctx(), |ui| {
                             egui::Frame::popup(ui.style()).show(ui, |ui| {
-                                ui.set_max_width(320.0);
+                                ui.set_max_width(440.0);
                                 super::structure::photos_view_ui(ui, pg, group, on_event);
                             });
                         });

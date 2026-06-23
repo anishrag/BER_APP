@@ -403,7 +403,7 @@ pub(crate) fn photos_view_ui<F: FnMut(UiEvent)>(
         );
     }
     egui::ScrollArea::vertical()
-        .max_height(260.0)
+        .max_height(420.0)
         .show(ui, |ui| {
             ui.horizontal_wrapped(|ui| {
                 for p in &g.photos {
@@ -412,7 +412,7 @@ pub(crate) fn photos_view_ui<F: FnMut(UiEvent)>(
                     let src = p.thumbnail_path.as_deref().unwrap_or(&p.file_path);
                     ui.add(
                         egui::Image::new(format!("file://{src}"))
-                            .max_size(egui::vec2(120.0, 120.0))
+                            .max_size(egui::vec2(200.0, 200.0))
                             .maintain_aspect_ratio(true)
                             .corner_radius(4.0),
                     );
