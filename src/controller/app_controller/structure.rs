@@ -43,6 +43,11 @@ pub struct EditGroup {
 pub struct StructureEdit {
     pub groups: Vec<EditGroup>,
     pub active: usize,
+    /// When `Some(i)`, the build-up LAYER editor is open for group `i` (the
+    /// "Specify…" flow): the canvas shows that editor — type a layer or pick from
+    /// the reusable library, ordered inside→outside — instead of the group's
+    /// normal attribute window. `None` = no layer editor open.
+    pub specifying: Option<usize>,
     /// Canvas presentation of the session. `false` (default) keeps the plan in
     /// place — zoomed out, each group recoloured where it sits, with one full
     /// attribute window floating over each group. `true` is the exploded "fan"
@@ -304,8 +309,86 @@ impl AppController {
                 groups,
                 active: 0,
                 exploded: false,
+                specifying: None,
             });
         }
+    }
+
+    /// The app-wide reusable construction-layer library (the build-up editor's
+    /// "previously typed layers" pick list).
+    pub fn construction_layer_library(&self) -> &[ber_model::ber::structural::ConstructionLayer] {
+        &self.layer_library
+    }
+
+    /// Open the build-up LAYER editor for `group` (the "Specify…" flow). Ensures
+    /// the group's make-up is `Layers` (starting empty if it was something else),
+    /// then marks the editor open.
+    pub fn begin_specify_layers(&mut self, group: usize) {
+        let makeup = self
+            .structure_edit
+            .as_ref()
+            .and_then(|e| e.groups.get(group))
+            .map(|g| g.makeup.clone());
+        let Some(makeup) = makeup else {
+            return;
+        };
+        if !matches!(makeup, ConstructionMakeup::Layers(_)) {
+            self.set_structure_group_layers(group, Vec::new());
+        }
+        if let Some(e) = self.structure_edit.as_mut() {
+            e.specifying = Some(group);
+        }
+    }
+
+    /// Close the build-up layer editor.
+    pub fn end_specify_layers(&mut self) {
+        if let Some(e) = self.structure_edit.as_mut() {
+            e.specifying = None;
+        }
+    }
+
+    /// Replace `group`'s build-up with `layers` (its make-up becomes
+    /// `Layers(layers)`) and apply it durably — the pick/remove/reorder path.
+    pub fn set_structure_group_layers(
+        &mut self,
+        group: usize,
+        layers: Vec<ber_model::ber::structural::ConstructionLayer>,
+    ) {
+        let Some((ty, phase)) = self
+            .structure_edit
+            .as_ref()
+            .and_then(|e| e.groups.get(group))
+            .map(|g| (g.ty, g.phase.clone()))
+        else {
+            return;
+        };
+        self.set_structure_group_attrs(group, ty, ConstructionMakeup::Layers(layers), phase);
+    }
+
+    /// A newly TYPED layer: save it to the app-wide library (so it's pickable
+    /// next time) AND append it to `group`'s build-up.
+    pub fn add_typed_layer(
+        &mut self,
+        group: usize,
+        layer: ber_model::ber::structural::ConstructionLayer,
+    ) {
+        // Persist to the library + refresh the cache.
+        let repo = crate::engine::ber_repository::BerRepository::new(&self.conn);
+        if repo.add_construction_layer(&layer).is_ok() {
+            self.layer_library = repo.list_construction_layers().unwrap_or_default();
+        }
+        // Append to the group's current build-up.
+        let mut layers = self
+            .structure_edit
+            .as_ref()
+            .and_then(|e| e.groups.get(group))
+            .and_then(|g| match &g.makeup {
+                ConstructionMakeup::Layers(v) => Some(v.clone()),
+                _ => None,
+            })
+            .unwrap_or_default();
+        layers.push(layer);
+        self.set_structure_group_layers(group, layers);
     }
 
     /// Rename a group's editable label — the in-place window title AND the

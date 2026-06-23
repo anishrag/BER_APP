@@ -552,6 +552,24 @@ pub enum SketchEvent {
         group: usize,
         name: String,
     },
+    /// Structure phase: open the build-up LAYER editor for `group` ("Specify…").
+    BeginSpecifyLayers {
+        group: usize,
+    },
+    /// Structure phase: close the build-up layer editor.
+    EndSpecifyLayers,
+    /// Structure phase: replace `group`'s build-up layers (pick / remove /
+    /// reorder in the layer editor).
+    SetStructureGroupLayers {
+        group: usize,
+        layers: Vec<ber_model::ber::structural::ConstructionLayer>,
+    },
+    /// Structure phase: a newly TYPED layer — save it to the app-wide library and
+    /// append it to `group`'s build-up.
+    AddTypedLayer {
+        group: usize,
+        layer: ber_model::ber::structural::ConstructionLayer,
+    },
     /// Structure phase: close the "Edit attributes" session.
     EndStructureEdit,
 }
@@ -828,6 +846,9 @@ pub struct SketchView<'a> {
     /// the pending selection until "Edit attributes" commits them. Empty when
     /// no carve is staged.
     pub pending_structure_carves: &'a [Vec<(f64, f64)>],
+    /// The app-wide reusable construction-layer library — the build-up layer
+    /// editor's "previously typed layers" pick list.
+    pub layer_library: &'a [ber_model::ber::structural::ConstructionLayer],
 }
 
 #[derive(Default)]

@@ -840,6 +840,13 @@ impl eframe::App for BerApp {
                             // Owned copy of the in-flight "Edit attributes" session.
                             let structure_edit =
                                 self.app_controller.borrow().structure_edit().cloned();
+                            // Owned copy of the reusable construction-layer library
+                            // (the build-up editor's pick list).
+                            let layer_library = self
+                                .app_controller
+                                .borrow()
+                                .construction_layer_library()
+                                .to_vec();
                             // Candidate regions of a pending Structure carve.
                             let structure_cut_regions =
                                 self.app_controller.borrow().structure_cut_regions();
@@ -1002,6 +1009,7 @@ impl eframe::App for BerApp {
                                 structure_cut_regions: &structure_cut_regions,
                                 pending_structure_split_polygon: &pending_structure_split_polygon,
                                 pending_structure_carves: &pending_structure_carves,
+                                layer_library: &layer_library,
                             };
                             let touch_nav = &mut self.sketch_state.touch_nav;
                             SketchPage::render(ui, view, touch_nav, |event| match event {
@@ -1720,6 +1728,20 @@ impl eframe::App for BerApp {
                                         controller
                                             .borrow_mut()
                                             .set_structure_group_name(group, name);
+                                    }
+                                    SketchEvent::BeginSpecifyLayers { group } => {
+                                        controller.borrow_mut().begin_specify_layers(group);
+                                    }
+                                    SketchEvent::EndSpecifyLayers => {
+                                        controller.borrow_mut().end_specify_layers();
+                                    }
+                                    SketchEvent::SetStructureGroupLayers { group, layers } => {
+                                        controller
+                                            .borrow_mut()
+                                            .set_structure_group_layers(group, layers);
+                                    }
+                                    SketchEvent::AddTypedLayer { group, layer } => {
+                                        controller.borrow_mut().add_typed_layer(group, layer);
                                     }
                                     SketchEvent::EndStructureEdit => {
                                         controller.borrow_mut().end_structure_edit();

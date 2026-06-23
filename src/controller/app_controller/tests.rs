@@ -1571,6 +1571,55 @@ fn structure_modes_are_non_exclusive() {
     );
 }
 
+/// "Specify…" build-up: opening the layer editor sets the group make-up to
+/// `Layers`; a TYPED layer is saved to the app-wide library AND appended to the
+/// build-up; picking via `set_structure_group_layers` replaces the layers.
+#[test]
+fn specify_layers_saves_to_library_and_builds_up() {
+    use ber_model::ber::structural::{ConstructionLayer, ConstructionMakeup};
+    let mut c = dimensioned_square_controller();
+    c.materialize();
+
+    set_only_kind(&mut c, SurfaceKind::Walls);
+    c.set_structure_select_mode(Some(SelectMode::All));
+    c.begin_structure_edit();
+
+    // Open the layer editor for group 0 → make-up becomes Layers, editor marked.
+    c.begin_specify_layers(0);
+    assert_eq!(c.structure_edit().unwrap().specifying, Some(0));
+    assert!(matches!(
+        c.structure_edit().unwrap().groups[0].makeup,
+        ConstructionMakeup::Layers(_)
+    ));
+
+    // Type a new layer → saved to the library AND appended to the build-up.
+    c.add_typed_layer(0, ConstructionLayer::typed("EPS".into(), 100, 0.035, false));
+    assert!(
+        c.construction_layer_library()
+            .iter()
+            .any(|l| l.name() == "EPS" && l.thickness_mm == 100),
+        "typed layer joined the reusable library"
+    );
+    let layers = match &c.structure_edit().unwrap().groups[0].makeup {
+        ConstructionMakeup::Layers(v) => v.clone(),
+        _ => panic!("expected Layers"),
+    };
+    assert_eq!(layers.len(), 1);
+    assert_eq!(layers[0].name(), "EPS");
+
+    // Pick/append another (the library-pick path) → build-up has two, inside→out.
+    let mut two = layers;
+    two.push(ConstructionLayer::typed("Block".into(), 215, 1.33, false));
+    c.set_structure_group_layers(0, two);
+    assert!(matches!(
+        &c.structure_edit().unwrap().groups[0].makeup,
+        ConstructionMakeup::Layers(v) if v.len() == 2
+    ));
+
+    c.end_specify_layers();
+    assert_eq!(c.structure_edit().unwrap().specifying, None);
+}
+
 /// The group PHASE is editable — defaulted to the derived value but overridable
 /// in the editor, and the override survives the re-resolve (stored in the
 /// durable side-table alongside type + make-up).

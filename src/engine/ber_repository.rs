@@ -4,6 +4,7 @@ use serde_json;
 
 use ber_model::ber::ber_struct::Ber;
 use ber_model::ber::common::ItemId;
+use ber_model::ber::structural::ConstructionLayer;
 
 #[derive(Debug, Clone)]
 pub struct BerRecord {
@@ -53,7 +54,57 @@ impl<'a> BerRepository<'a> {
                 storey_idx    INTEGER NOT NULL,
                 snapshot_json TEXT NOT NULL
             );
+
+            -- APP-WIDE reusable construction-layer library (NOT tied to a BER):
+            -- the build-up editor's 'previously typed layers'. A typed layer is
+            -- saved here once and offered in every future assessment. UNIQUE keeps
+            -- re-typing the same layer idempotent.
+            CREATE TABLE IF NOT EXISTS construction_layer (
+                name         TEXT NOT NULL,
+                thickness_mm INTEGER NOT NULL,
+                lambda       REAL NOT NULL,
+                bridged      INTEGER NOT NULL,
+                UNIQUE(name, thickness_mm, lambda, bridged)
+            );
             ",
+        )?;
+        Ok(())
+    }
+
+    /// Every layer in the app-wide library (the build-up editor's pick list),
+    /// ordered by name then thickness.
+    pub fn list_construction_layers(&self) -> Result<Vec<ConstructionLayer>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT name, thickness_mm, lambda, bridged FROM construction_layer
+             ORDER BY name, thickness_mm",
+        )?;
+        let rows = stmt.query_map([], |r| {
+            let name: String = r.get(0)?;
+            let thickness_mm: i64 = r.get(1)?;
+            let lambda: f64 = r.get(2)?;
+            let bridged: i64 = r.get(3)?;
+            Ok(ConstructionLayer::typed(
+                name,
+                thickness_mm as u32,
+                lambda as f32,
+                bridged != 0,
+            ))
+        })?;
+        rows.collect()
+    }
+
+    /// Add a typed layer to the app-wide library (idempotent — re-adding an
+    /// identical layer is a no-op via the UNIQUE constraint).
+    pub fn add_construction_layer(&self, layer: &ConstructionLayer) -> Result<()> {
+        self.conn.execute(
+            "INSERT OR IGNORE INTO construction_layer (name, thickness_mm, lambda, bridged)
+             VALUES (?1, ?2, ?3, ?4)",
+            params![
+                layer.name(),
+                layer.thickness_mm as i64,
+                layer.lambda() as f64,
+                layer.bridged as i64,
+            ],
         )?;
         Ok(())
     }
