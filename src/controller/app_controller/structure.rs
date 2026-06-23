@@ -706,60 +706,65 @@ impl AppController {
             })
             .collect();
 
-        // Anything to split at all? (an area kind active, or a cut that crossed a
-        // wall). If not, drop the staged rings rather than shade nothing.
+        // Does anything actually SUBDIVIDE? (an area kind active, or a cut that
+        // crossed a wall). A wall carve whose ring runs entirely along existing
+        // walls crosses none mid-span → nothing to split, but carve is still a
+        // SELECTION gesture, so we select the enclosed surfaces regardless.
         let will_split = kinds
             .iter()
             .any(|k| matches!(k, SurfaceKind::Floors | SurfaceKind::Roofs))
             || per_ring.iter().any(|(_, c)| !c.is_empty());
-        if !will_split {
-            log::warn!("structure carve split nothing — no area kind active and no wall crossed");
-            return;
-        }
 
-        self.record_history();
-        let mut pushed_roof = false;
-        if let Some(storey) = self
-            .current_record
-            .as_mut()
-            .and_then(|r| r.data.storeys.get_mut(idx))
-        {
-            for (ring64, cuts) in &per_ring {
-                for kind in &kinds {
-                    match kind {
-                        SurfaceKind::Walls => {
-                            if !cuts.is_empty() {
+        if will_split {
+            self.record_history();
+            let mut pushed_roof = false;
+            if let Some(storey) = self
+                .current_record
+                .as_mut()
+                .and_then(|r| r.data.storeys.get_mut(idx))
+            {
+                for (ring64, cuts) in &per_ring {
+                    for kind in &kinds {
+                        match kind {
+                            SurfaceKind::Walls => {
+                                if !cuts.is_empty() {
+                                    storey.push_structure_split(
+                                        SurfaceKind::Walls,
+                                        ring64,
+                                        cuts.clone(),
+                                    );
+                                }
+                            }
+                            SurfaceKind::Floors => {
                                 storey.push_structure_split(
-                                    SurfaceKind::Walls,
+                                    SurfaceKind::Floors,
                                     ring64,
-                                    cuts.clone(),
+                                    Vec::new(),
                                 );
                             }
-                        }
-                        SurfaceKind::Floors => {
-                            storey.push_structure_split(SurfaceKind::Floors, ring64, Vec::new());
-                        }
-                        SurfaceKind::Roofs => {
-                            storey.push_structure_split(SurfaceKind::Roofs, ring64, Vec::new());
-                            pushed_roof = true;
+                            SurfaceKind::Roofs => {
+                                storey.push_structure_split(SurfaceKind::Roofs, ring64, Vec::new());
+                                pushed_roof = true;
+                            }
                         }
                     }
                 }
+            } else {
+                return;
             }
-        } else {
-            return;
+            // Regions-as-truth: a ROOF carve is a one-shot coplanar face split on
+            // the stored roofs (replayed via `recompose_roofs`); floors/walls
+            // replay their durable splits in `resolve_storey`.
+            if pushed_roof {
+                self.recompose_roofs(idx);
+            }
+            let _ = self.mark_dirty();
+            self.materialize(); // re-resolve applies the splits + re-homes openings
         }
 
-        // Regions-as-truth: a ROOF carve is a one-shot coplanar face split on the
-        // stored roofs (replayed via `recompose_roofs`); floors/walls replay their
-        // durable splits in `resolve_storey`.
-        if pushed_roof {
-            self.recompose_roofs(idx);
-        }
-        let _ = self.mark_dirty();
-        self.materialize(); // re-resolve applies the splits + re-homes openings
-
-        // Auto-select the resulting pieces across every active kind.
+        // Select the carved area's surfaces across every active kind — whether or
+        // not anything was subdivided (with no split the already-resolved regions
+        // are current, so this picks the surfaces the ring encloses).
         for (ring64, _) in &per_ring {
             self.select_surfaces_in_region(ring64);
         }

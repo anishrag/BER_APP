@@ -8588,7 +8588,7 @@ fn structure_wall_carve_on_existing_boundary_selects_without_splitting() {
     let mut c = dimensioned_square_controller();
     c.materialize();
 
-    c.set_structure_kind(SurfaceKind::Walls);
+    set_only_kind(&mut c, SurfaceKind::Walls);
     c.set_structure_select_mode(Some(SelectMode::Carve));
 
     let walls_before = c.current_surface_counts().walls;
@@ -8614,6 +8614,10 @@ fn structure_wall_carve_on_existing_boundary_selects_without_splitting() {
         guard += 1;
     }
     skip_position_prompts(&mut c);
+
+    // Carve is now deferred: the ring is staged, and "Edit attributes" commits
+    // it — which, finding no wall to subdivide, just selects the enclosed walls.
+    c.begin_structure_edit();
 
     assert!(
         !c.structure_selected_ids().is_empty(),
