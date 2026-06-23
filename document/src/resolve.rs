@@ -1559,6 +1559,7 @@ mod tests {
             (
                 WallConstructionType::TimberConstruction,
                 ConstructionMakeup::Default,
+                ConstructionPhase::default(),
             ),
         );
 

@@ -948,6 +948,7 @@ pub(super) fn render<F: FnMut(UiEvent)>(
                                     group.ty.kind(),
                                     i,
                                     group,
+                                    view.phase_choices,
                                     editable,
                                     on_event,
                                 );

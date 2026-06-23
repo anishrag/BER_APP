@@ -449,15 +449,19 @@ impl AppController {
             let (walls, floors, ceilings): (
                 Vec<(
                     manip_plan::SurfaceRef,
-                    (WallConstructionType, ConstructionMakeup),
+                    (WallConstructionType, ConstructionMakeup, ConstructionPhase),
                 )>,
                 Vec<(
                     document::CentroidKey,
-                    (FloorConstructionType, ConstructionMakeup),
+                    (FloorConstructionType, ConstructionMakeup, ConstructionPhase),
                 )>,
                 Vec<(
                     document::CentroidKey,
-                    (CeilingConstructionType, ConstructionMakeup),
+                    (
+                        CeilingConstructionType,
+                        ConstructionMakeup,
+                        ConstructionPhase,
+                    ),
                 )>,
             ) = {
                 let Some(record) = self.current_record.as_ref() else {
@@ -477,6 +481,7 @@ impl AppController {
                         let c = record.data.wall_construction(r.construction_id)?;
                         let ty = c.construction_type;
                         let mk = c.base.construction_makeup.clone();
+                        let ph = c.base.construction_phase.clone();
                         if ty == WallConstructionType::default()
                             && mk == ConstructionMakeup::default()
                         {
@@ -488,7 +493,7 @@ impl AppController {
                             ((e0.y + e1.y) * 0.5) as f32,
                         );
                         let sref = plan.surface_ref_at(mid, 0.05)?;
-                        Some((sref, (ty, mk)))
+                        Some((sref, (ty, mk, ph)))
                     })
                     .collect();
                 let floors = storey
@@ -499,9 +504,10 @@ impl AppController {
                         let c = record.data.floor_construction(r.construction_id)?;
                         let ty = c.construction_type;
                         let mk = c.base.construction_makeup.clone();
+                        let ph = c.base.construction_phase.clone();
                         (ty != FloorConstructionType::default()
                             || mk != ConstructionMakeup::default())
-                        .then(|| (document::centroid_key(r.centroid()), (ty, mk)))
+                        .then(|| (document::centroid_key(r.centroid()), (ty, mk, ph)))
                     })
                     .collect();
                 let ceilings = storey
@@ -512,9 +518,10 @@ impl AppController {
                         let c = record.data.ceiling_construction(r.construction_id)?;
                         let ty = c.construction_type;
                         let mk = c.base.construction_makeup.clone();
+                        let ph = c.base.construction_phase.clone();
                         (ty != CeilingConstructionType::default()
                             || mk != ConstructionMakeup::default())
-                        .then(|| (document::centroid_key(r.centroid()), (ty, mk)))
+                        .then(|| (document::centroid_key(r.centroid()), (ty, mk, ph)))
                     })
                     .collect();
                 (walls, floors, ceilings)

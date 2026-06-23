@@ -11,6 +11,7 @@
 //! every kind — walls key construction by parametric `SurfaceRef`, floors and
 //! ceilings/roofs by region centroid.
 
+use ber_model::ber::common::ConstructionPhase;
 use ber_model::ber::structural::{
     CeilingConstructionType, ConstructionMakeup, ConstructionType, FloorConstructionType,
     SurfaceCounts, WallConstructionType,
@@ -86,6 +87,7 @@ pub fn structure_panel<F: FnMut(UiEvent)>(
     select: Option<SelectMode>,
     edit: Option<&StructureEdit>,
     counts: SurfaceCounts,
+    phases: &[(ConstructionPhase, String)],
     enabled: bool,
     on_event: &mut F,
 ) {
@@ -143,7 +145,7 @@ pub fn structure_panel<F: FnMut(UiEvent)>(
                 on_event(UiEvent::Sketch(SketchEvent::BeginStructureEdit));
             }
         }
-        Some(e) => edit_session(ui, e, enabled, on_event),
+        Some(e) => edit_session(ui, e, phases, enabled, on_event),
     }
 }
 
@@ -152,12 +154,13 @@ pub fn structure_panel<F: FnMut(UiEvent)>(
 /// canvas anchors over each group, so the panel only states the group count and
 /// offers "Done". In the exploded `fan` view the canvas popups merely switch the
 /// active group, so the panel hosts the group selector + the active group's
-/// editor (via [`group_editor_ui`]). The phase is each group's derived value
-/// (shown read-only). Mixed selections appear as several groups (e.g. an older +
-/// a newer phase), each editable separately.
+/// editor (via [`group_editor_ui`]). The phase defaults to each group's derived
+/// value but is editable. Mixed selections appear as several groups (e.g. an
+/// older + a newer phase), each editable separately.
 fn edit_session<F: FnMut(UiEvent)>(
     ui: &mut egui::Ui,
     e: &StructureEdit,
+    phases: &[(ConstructionPhase, String)],
     enabled: bool,
     on_event: &mut F,
 ) {
@@ -182,7 +185,7 @@ fn edit_session<F: FnMut(UiEvent)>(
             });
         }
         if let Some(g) = e.groups.get(e.active) {
-            group_editor_ui(ui, g.ty.kind(), e.active, g, enabled, on_event);
+            group_editor_ui(ui, g.ty.kind(), e.active, g, phases, enabled, on_event);
         }
     } else {
         ui.label(
@@ -209,15 +212,18 @@ pub(crate) fn group_editor_ui<F: FnMut(UiEvent)>(
     kind: SurfaceKind,
     group_index: usize,
     g: &EditGroup,
+    phases: &[(ConstructionPhase, String)],
     enabled: bool,
     on_event: &mut F,
 ) {
-    // Heading level 1: the surface kind.
-    ui.label(
-        egui::RichText::new(kind_heading(kind))
-            .size(EDITOR_FONT + 2.0)
-            .strong(),
-    );
+    // Heading level 1: the surface kind — centred + bold.
+    ui.vertical_centered(|ui| {
+        ui.label(
+            egui::RichText::new(kind_heading(kind))
+                .size(EDITOR_FONT + 2.0)
+                .strong(),
+        );
+    });
     // Heading level 2: the editable group name (defaults to "Group N").
     let mut name = g.name.clone();
     let renamed = ui
@@ -233,11 +239,37 @@ pub(crate) fn group_editor_ui<F: FnMut(UiEvent)>(
         }));
     }
 
-    ui.label(
-        egui::RichText::new(format!("Phase: {}", g.phase.default_name()))
-            .size(EDITOR_FONT)
-            .weak(),
-    );
+    // PHASE dropdown — defaults to the value derived from the stage-1 zones, but
+    // the assessor can override it here. Falls back to the phase's built-in name
+    // if it isn't among the defined choices.
+    ui.label(egui::RichText::new("Phase").size(EDITOR_FONT).weak());
+    let phase_text = phases
+        .iter()
+        .find(|(p, _)| *p == g.phase)
+        .map(|(_, n)| n.clone())
+        .unwrap_or_else(|| g.phase.default_name());
+    ui.add_enabled_ui(enabled, |ui| {
+        egui::ComboBox::from_id_salt(("structure_phase", group_index))
+            .selected_text(egui::RichText::new(phase_text).size(EDITOR_FONT))
+            .show_ui(ui, |ui| {
+                for (p, pname) in phases {
+                    if ui
+                        .selectable_label(
+                            g.phase == *p,
+                            egui::RichText::new(pname).size(EDITOR_FONT),
+                        )
+                        .clicked()
+                    {
+                        on_event(UiEvent::Sketch(SketchEvent::SetStructureGroupAttrs {
+                            group: group_index,
+                            ty: g.ty,
+                            makeup: g.makeup.clone(),
+                            phase: p.clone(),
+                        }));
+                    }
+                }
+            });
+    });
     // Each kind offers its own types; the chosen type is tagged with
     // `ConstructionType` so the event/controller stay kind-agnostic. The TYPE is
     // a dropdown (not a button row) to keep the window narrow; its UNSET text is
@@ -277,6 +309,7 @@ pub(crate) fn group_editor_ui<F: FnMut(UiEvent)>(
                             group: group_index,
                             ty: *ty,
                             makeup: g.makeup.clone(),
+                            phase: g.phase.clone(),
                         }));
                     }
                 }
@@ -307,6 +340,7 @@ pub(crate) fn group_editor_ui<F: FnMut(UiEvent)>(
                     group: group_index,
                     ty: g.ty,
                     makeup: mk.clone(),
+                    phase: g.phase.clone(),
                 }));
             }
         }

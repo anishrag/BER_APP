@@ -57,16 +57,17 @@ impl AppController {
         &self.structure_selected
     }
 
-    /// Assign a wall CONSTRUCTION (type + make-up) to the given resolved WALL
-    /// region ids, keyed by each wall's parametric `SurfaceRef` so it survives
-    /// the re-derivation. The PHASE axis stays derived from the floor zones; the
-    /// next materialize composes the two (`document::stamp_wall_constructions`).
+    /// Assign a wall CONSTRUCTION (type + make-up + phase) to the given resolved
+    /// WALL region ids, keyed by each wall's parametric `SurfaceRef` so it
+    /// survives the re-derivation. `phase` defaults to the derived one but is
+    /// editable; the next materialize stamps it (`stamp_wall_constructions`).
     /// Snapshots for undo.
     pub fn set_wall_construction_for(
         &mut self,
         ids: &[ItemId],
         ty: ber_model::ber::structural::WallConstructionType,
         makeup: ber_model::ber::structural::ConstructionMakeup,
+        phase: ConstructionPhase,
     ) {
         let Some(idx) = self.current_storey_idx else {
             return;
@@ -97,7 +98,7 @@ impl AppController {
         for r in refs {
             self.document.storeys[idx]
                 .wall_constructions
-                .insert(r, (ty, makeup.clone()));
+                .insert(r, (ty, makeup.clone(), phase.clone()));
         }
         let _ = self.mark_dirty();
     }
@@ -111,6 +112,7 @@ impl AppController {
         ids: &[ItemId],
         ty: FloorConstructionType,
         makeup: ConstructionMakeup,
+        phase: ConstructionPhase,
     ) {
         let Some(idx) = self.current_storey_idx else {
             return;
@@ -134,7 +136,7 @@ impl AppController {
         for k in keys {
             self.document.storeys[idx]
                 .floor_constructions
-                .insert(k, (ty, makeup.clone()));
+                .insert(k, (ty, makeup.clone(), phase.clone()));
         }
         let _ = self.mark_dirty();
     }
@@ -148,6 +150,7 @@ impl AppController {
         ids: &[ItemId],
         ty: CeilingConstructionType,
         makeup: ConstructionMakeup,
+        phase: ConstructionPhase,
     ) {
         let Some(idx) = self.current_storey_idx else {
             return;
@@ -171,7 +174,7 @@ impl AppController {
         for k in keys {
             self.document.storeys[idx]
                 .ceiling_constructions
-                .insert(k, (ty, makeup.clone()));
+                .insert(k, (ty, makeup.clone(), phase.clone()));
         }
         let _ = self.mark_dirty();
     }
@@ -381,14 +384,16 @@ impl AppController {
         }
     }
 
-    /// Set a group's construction `(type, make-up)` and apply it to that group's
-    /// surfaces, dispatching to the right durable store by the type's kind
-    /// (writes the store, snapshots for undo).
+    /// Set a group's construction `(type, make-up, phase)` and apply it to that
+    /// group's surfaces, dispatching to the right durable store by the type's
+    /// kind (writes the store, snapshots for undo). `phase` defaults to the
+    /// group's derived value but is editable in the attribute editor.
     pub fn set_structure_group_attrs(
         &mut self,
         group: usize,
         ty: ConstructionType,
         makeup: ConstructionMakeup,
+        phase: ConstructionPhase,
     ) {
         let ids = {
             let Some(e) = self.structure_edit.as_mut() else {
@@ -399,12 +404,15 @@ impl AppController {
             };
             g.ty = ty;
             g.makeup = makeup.clone();
+            g.phase = phase.clone();
             g.ids.clone()
         };
         match ty {
-            ConstructionType::Wall(t) => self.set_wall_construction_for(&ids, t, makeup),
-            ConstructionType::Floor(t) => self.set_floor_construction_for(&ids, t, makeup),
-            ConstructionType::Ceiling(t) => self.set_ceiling_construction_for(&ids, t, makeup),
+            ConstructionType::Wall(t) => self.set_wall_construction_for(&ids, t, makeup, phase),
+            ConstructionType::Floor(t) => self.set_floor_construction_for(&ids, t, makeup, phase),
+            ConstructionType::Ceiling(t) => {
+                self.set_ceiling_construction_for(&ids, t, makeup, phase)
+            }
         }
     }
 

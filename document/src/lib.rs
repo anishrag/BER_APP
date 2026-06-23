@@ -54,6 +54,7 @@ pub use roof_point::{
 };
 pub use step::{inherited_step_regions, step_regions_from_floors, StepRegion};
 
+use ber_model::ber::common::ConstructionPhase;
 use ber_model::ber::structural::{
     CeilingConstructionType, CeilingExposure, ConstructionMakeup, FloorConstructionType,
     FloorExposure, WallConstructionType, WallExposure,
@@ -285,13 +286,15 @@ pub struct StoreyDoc {
     pub riser_exposure: HashMap<RiserKey, WallExposure>,
 
     /// Assigned wall CONSTRUCTION (type + make-up) per perimeter wall, keyed by
-    /// the wall's parametric [`SurfaceRef`] (stable across edits). The PHASE
-    /// axis stays derived from the floor zones (`stamp_wall_phases`); resolve
-    /// composes the stored `(type, makeup)` with that phase
-    /// (`stamp_wall_constructions`). This is construction's parametric home —
-    /// it survives the wall re-derivation without the amend-match.
+    /// the wall's parametric [`SurfaceRef`] (stable across edits). The stored
+    /// PHASE defaults to the one derived from the floor zones
+    /// (`stamp_wall_phases`) but is editable in the attribute editor; resolve
+    /// uses the stored phase (`stamp_wall_constructions`). This is construction's
+    /// parametric home — it survives the wall re-derivation without the
+    /// amend-match.
     #[serde(default)]
-    pub wall_constructions: HashMap<SurfaceRef, (WallConstructionType, ConstructionMakeup)>,
+    pub wall_constructions:
+        HashMap<SurfaceRef, (WallConstructionType, ConstructionMakeup, ConstructionPhase)>,
 
     /// Assigned FLOOR construction (type + make-up) per floor region, keyed by
     /// the region's plan [`CentroidKey`] (floors have no perimeter `SurfaceRef`,
@@ -306,14 +309,22 @@ pub struct StoreyDoc {
     /// same "re-split loses the override" property the riser key has, weaker than
     /// the wall `SurfaceRef`.
     #[serde(default, with = "tuple_key_map")]
-    pub floor_constructions: HashMap<CentroidKey, (FloorConstructionType, ConstructionMakeup)>,
+    pub floor_constructions:
+        HashMap<CentroidKey, (FloorConstructionType, ConstructionMakeup, ConstructionPhase)>,
 
     /// Assigned CEILING/ROOF construction (type + make-up) per ceiling region,
     /// keyed by the region's plan [`CentroidKey`]. Mirror of
     /// `floor_constructions`; composed by
     /// [`stamp_ceiling_constructions`](crate::stamp_ceiling_constructions).
     #[serde(default, with = "tuple_key_map")]
-    pub ceiling_constructions: HashMap<CentroidKey, (CeilingConstructionType, ConstructionMakeup)>,
+    pub ceiling_constructions: HashMap<
+        CentroidKey,
+        (
+            CeilingConstructionType,
+            ConstructionMakeup,
+            ConstructionPhase,
+        ),
+    >,
 
     /// Per-FLOOR-region horizontal exposure (boundary condition below the
     /// region), keyed by the region's plan [`CentroidKey`] — the floor/ceiling

@@ -1706,10 +1706,15 @@ impl eframe::App for BerApp {
                                     SketchEvent::SetActiveStructureGroup(i) => {
                                         controller.borrow_mut().set_active_structure_group(i);
                                     }
-                                    SketchEvent::SetStructureGroupAttrs { group, ty, makeup } => {
+                                    SketchEvent::SetStructureGroupAttrs {
+                                        group,
+                                        ty,
+                                        makeup,
+                                        phase,
+                                    } => {
                                         controller
                                             .borrow_mut()
-                                            .set_structure_group_attrs(group, ty, makeup);
+                                            .set_structure_group_attrs(group, ty, makeup, phase);
                                     }
                                     SketchEvent::SetStructureGroupName { group, name } => {
                                         controller

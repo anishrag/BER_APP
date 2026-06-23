@@ -1359,6 +1359,7 @@ fn wall_construction_is_preserved_when_splitting() {
         &[wall0],
         WallConstructionType::CavityWall,
         Default::default(),
+        Default::default(),
     );
 
     // Exposure-split wall0: mark the middle semi-exposed → 3 regions.
@@ -1406,6 +1407,7 @@ fn wall_construction_seeded_from_record_on_load() {
         &[wall0],
         WallConstructionType::CavityWall,
         Default::default(),
+        Default::default(),
     );
     c.materialize();
 
@@ -1446,6 +1448,7 @@ fn floor_construction_survives_rederive() {
     c.set_floor_construction_for(
         &[floor0],
         FloorConstructionType::SuspendedFloor,
+        Default::default(),
         Default::default(),
     );
     c.materialize(); // re-resolve mints a fresh region id
@@ -1503,6 +1506,7 @@ fn structure_edit_sets_floor_group_construction() {
     c.set_structure_group_attrs(
         0,
         ConstructionType::Floor(FloorConstructionType::SuspendedFloor),
+        Default::default(),
         Default::default(),
     );
     c.materialize();
@@ -1564,6 +1568,40 @@ fn structure_modes_are_non_exclusive() {
         c.structure_kinds().iter().copied().collect::<Vec<_>>(),
         vec![SurfaceKind::Floors],
         "the last active mode stays active"
+    );
+}
+
+/// The group PHASE is editable — defaulted to the derived value but overridable
+/// in the editor, and the override survives the re-resolve (stored in the
+/// durable side-table alongside type + make-up).
+#[test]
+fn group_phase_is_overridable() {
+    use ber_model::ber::common::ConstructionPhase;
+    use ber_model::ber::structural::{ConstructionType, FloorConstructionType};
+    let mut c = dimensioned_square_controller();
+    c.materialize();
+
+    set_only_kind(&mut c, SurfaceKind::Floors);
+    c.set_structure_select_mode(Some(SelectMode::All));
+    c.begin_structure_edit();
+
+    // Override the floor group's phase to Extension1 (the storey has no drawn
+    // zones, so the derived phase is Original).
+    c.set_structure_group_attrs(
+        0,
+        ConstructionType::Floor(FloorConstructionType::SolidFloor),
+        Default::default(),
+        ConstructionPhase::Extension1,
+    );
+    c.materialize();
+
+    let rec = c.current_record.as_ref().unwrap();
+    let r = &rec.data.storeys[0].floors.regions[0];
+    let fc = rec.data.floor_construction(r.construction_id).unwrap();
+    assert_eq!(
+        fc.base.construction_phase,
+        ConstructionPhase::Extension1,
+        "the chosen phase overrides the derived one and survives re-resolve"
     );
 }
 

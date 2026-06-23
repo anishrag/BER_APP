@@ -15,6 +15,7 @@ use crate::controller::app_controller::{AssessmentPhase, SelectMode, StructureEd
 use crate::number_entry::parse_dimension_expression;
 use crate::ui::pages::events::UiEvent;
 use crate::ui::widgets::{metre_input, HintExt};
+use ber_model::ber::common::ConstructionPhase;
 use ber_model::ber::structural::SurfaceCounts;
 use domain::sketch::EditTools;
 
@@ -240,6 +241,9 @@ pub struct ToolFlags {
     /// Current storey's wall / roof / floor counts — the Structure panel's
     /// per-surface read-out.
     pub surface_counts: SurfaceCounts,
+    /// The defined construction phases (Original + extensions) — the choices for
+    /// the Structure attribute editor's phase dropdown.
+    pub phase_choices: Vec<(ConstructionPhase, String)>,
 }
 
 impl ToolFlags {
@@ -275,6 +279,7 @@ impl ToolFlags {
             structure_select: view.structure_select,
             structure_edit: view.structure_edit.cloned(),
             surface_counts: view.surface_counts,
+            phase_choices: view.phase_choices.to_vec(),
         }
     }
 }
@@ -296,6 +301,7 @@ pub fn ribbon<F: FnMut(UiEvent)>(
             flags.structure_select,
             flags.structure_edit.as_ref(),
             flags.surface_counts,
+            &flags.phase_choices,
             !flags.read_only,
             on_event,
         );
@@ -338,6 +344,7 @@ pub fn side_panel<F: FnMut(UiEvent)>(
             flags.structure_select,
             flags.structure_edit.as_ref(),
             flags.surface_counts,
+            &flags.phase_choices,
             !flags.read_only,
             on_event,
         );
