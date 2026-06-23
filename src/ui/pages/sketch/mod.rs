@@ -546,6 +546,11 @@ pub enum SketchEvent {
         ty: ber_model::ber::structural::ConstructionType,
         makeup: ber_model::ber::structural::ConstructionMakeup,
     },
+    /// Structure phase: rename attribute-group `group`'s editable label.
+    SetStructureGroupName {
+        group: usize,
+        name: String,
+    },
     /// Structure phase: close the "Edit attributes" session.
     EndStructureEdit,
 }

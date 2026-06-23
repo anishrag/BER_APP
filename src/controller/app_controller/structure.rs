@@ -29,6 +29,9 @@ pub struct EditGroup {
     pub ty: ConstructionType,
     pub makeup: ConstructionMakeup,
     pub phase: ConstructionPhase,
+    /// Editable label for the group, defaulting to "Group 1", "Group 2", … —
+    /// the assessor can rename it. Session-scoped (reset when the edit reopens).
+    pub name: String,
 }
 
 /// The in-flight "Edit attributes" session: the current selection partitioned by
@@ -270,8 +273,13 @@ impl AppController {
                     ty,
                     makeup,
                     phase,
+                    name: String::new(),
                 }),
             }
+        }
+        // Default each group's editable label to "Group N" (1-based).
+        for (i, g) in groups.iter_mut().enumerate() {
+            g.name = format!("Group {}", i + 1);
         }
         if !groups.is_empty() {
             self.structure_edit = Some(StructureEdit {
@@ -279,6 +287,16 @@ impl AppController {
                 active: 0,
                 exploded: false,
             });
+        }
+    }
+
+    /// Rename a group's editable label (the in-place window's title). A cosmetic
+    /// session-only change — no undo snapshot, no re-resolve.
+    pub fn set_structure_group_name(&mut self, group: usize, name: String) {
+        if let Some(e) = self.structure_edit.as_mut() {
+            if let Some(g) = e.groups.get_mut(group) {
+                g.name = name;
+            }
         }
     }
 

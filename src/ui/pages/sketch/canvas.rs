@@ -941,15 +941,8 @@ pub(super) fn render<F: FnMut(UiEvent)>(
                             .stroke(egui::Stroke::new(2.0, w.color))
                             .show(ui, |ui| {
                                 ui.set_max_width(EDIT_BOX_W - 16.0);
-                                ui.label(
-                                    egui::RichText::new(format!(
-                                        "Group {}  ·  {}",
-                                        i + 1,
-                                        group.ids.len()
-                                    ))
-                                    .size(13.5)
-                                    .strong(),
-                                );
+                                // The two-level heading (kind + editable name) is
+                                // rendered by `group_editor_ui` itself now.
                                 super::structure::group_editor_ui(
                                     ui,
                                     group.ty.kind(),

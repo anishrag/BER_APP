@@ -1711,6 +1711,11 @@ impl eframe::App for BerApp {
                                             .borrow_mut()
                                             .set_structure_group_attrs(group, ty, makeup);
                                     }
+                                    SketchEvent::SetStructureGroupName { group, name } => {
+                                        controller
+                                            .borrow_mut()
+                                            .set_structure_group_name(group, name);
+                                    }
                                     SketchEvent::EndStructureEdit => {
                                         controller.borrow_mut().end_structure_edit();
                                     }
