@@ -6,9 +6,9 @@
 //! logic is unchanged from the old bottom toolbar; only the location is
 //! unified.
 
-use super::{ArmedSurfaceExposure, SketchEvent, SketchView};
+use super::{SketchEvent, SketchView};
 use crate::controller::app_controller::{
-    ExposureSelection, NewStoreyPromptUiData, OpeningPromptUiData, OpeningToolKind,
+    ExposureSelection, NewStoreyPromptUiData, OpeningPromptUiData, OpeningToolKind, PartitionView,
     VertexDropPromptUiData,
 };
 use crate::number_entry::parse_dimension_expression;
@@ -16,7 +16,7 @@ use crate::ui::pages::events::UiEvent;
 use crate::ui::widgets::{metre_input, HintExt};
 use ber_model::ber::common::ConstructionPhase;
 use ber_model::ber::fenestration::{Frame, Glazing};
-use ber_model::ber::structural::{CeilingExposure, FloorExposure, WallExposure};
+use ber_model::ber::structural::WallExposure;
 
 /// Whether the dock has anything to show this frame. When false the bottom
 /// panel is skipped entirely so the canvas gets the space.
@@ -36,7 +36,7 @@ pub(super) fn has_content(view: &SketchView<'_>) -> bool {
         || view.vertex_drop_prompt.is_some()
         || view.review.is_some()
         || view.exposure_mode
-        || view.surface_exposure_mode
+        || view.partition_mode
         || view.openings_mode
         || (view.has_floor_plan
             && ((!view.phase_choices.is_empty() && (view.phase_mode || view.phase_pick_pending))
@@ -89,6 +89,10 @@ pub(super) fn render<F: FnMut(UiEvent)>(
             );
         } else if view.review.is_some() {
             review_toolbar(ui, view.review_remaining, on_event);
+        } else if view.partition_mode {
+            if let Some(pv) = view.partition_view {
+                partition_toolbar(ui, pv, on_event);
+            }
         } else if view.exposure_mode {
             exposure_toolbar(
                 ui,
@@ -99,8 +103,6 @@ pub(super) fn render<F: FnMut(UiEvent)>(
                 view.exposure_end_input,
                 on_event,
             );
-        } else if view.surface_exposure_mode {
-            surface_exposure_toolbar(ui, view.armed_surface_exposure);
         }
 
         if view.has_floor_plan {
@@ -806,9 +808,13 @@ fn exposure_toolbar<F: FnMut(UiEvent)>(
     let unset = walls
         .iter()
         .filter(|w| {
-            document::wall_coverage(w.length_m, &w.sections)
-                .iter()
-                .any(|(_, _, e)| *e == WallExposure::Unset)
+            // Face-partitioned walls are classified in the partition view, not by
+            // this bulk button — exclude them (their empty `sections` would
+            // otherwise read as a full Unset wall and over-count).
+            w.partition_exposures.is_empty()
+                && document::wall_coverage(w.length_m, &w.sections)
+                    .iter()
+                    .any(|(_, _, e)| *e == WallExposure::Unset)
         })
         .count();
     ui.horizontal(|ui| {
@@ -903,6 +909,13 @@ fn exposure_toolbar<F: FnMut(UiEvent)>(
             {
                 on_event(UiEvent::Sketch(SketchEvent::ClearWallExposure));
             }
+            if ui
+                .button("⊟ Partition & set")
+                .hint("Divide this wall's face and set each part")
+                .clicked()
+            {
+                on_event(UiEvent::Sketch(SketchEvent::OpenWallPartition));
+            }
         } else {
             let hint = if risers.is_empty() {
                 "Tap a wall to mark its exposure"
@@ -924,65 +937,52 @@ fn exposure_toolbar<F: FnMut(UiEvent)>(
     });
 }
 
-/// Horizontal-surface (floor/ceiling) exposure mode toolbar: ARM a SINGLE
-/// boundary condition (floor XOR ceiling — picking one disarms the other), then
-/// a canvas tap applies it to ONLY the matching surface kind. So a deliberate
-/// floor edit can't clobber the (auto-derived) ceiling and vice versa.
-/// Pure page state; no controller round-trip until the canvas tap.
-/// Auto-derivation already fills the common ground/top/party cases — these are
-/// for overriding the rest.
-fn surface_exposure_toolbar(ui: &mut egui::Ui, armed: &mut ArmedSurfaceExposure) {
-    let floor_label = |e: FloorExposure| match e {
-        FloorExposure::Unset => "Unset",
-        FloorExposure::Ground => "Ground",
-        FloorExposure::Exposed => "Exposed",
-        FloorExposure::SemiExposed => "Semi-exposed",
-        FloorExposure::NonHeatLoss => "Party (no heat loss)",
-    };
-    let ceiling_label = |e: CeilingExposure| match e {
-        CeilingExposure::Unset => "Unset",
-        CeilingExposure::ExposedRoof => "Exposed roof",
-        CeilingExposure::Party => "Party",
-        CeilingExposure::Unheated => "Unheated above",
-    };
+/// Wall-face partition toolbar: while a face is open, divide it (drag on the
+/// canvas) and set each part's exposure. When a region is selected the three
+/// exposure buttons apply to it; when a cut is mid-dimensioning the prompt's
+/// metre entry + Skip resolve the next free coordinate. Always: "Remove
+/// partition" (back to one face) and "Done" (close the overlay).
+fn partition_toolbar<F: FnMut(UiEvent)>(ui: &mut egui::Ui, pv: &PartitionView, on_event: &mut F) {
     ui.vertical(|ui| {
-        ui.label(
-            egui::RichText::new("Arm a floor OR ceiling type, then tap that region")
-                .color(egui::Color32::from_rgb(255, 200, 60)),
-        );
+        // The cut's dimension is entered in the floating number box (same
+        // keypad / laser as plan dimensioning — see `number_box`); the dock
+        // keeps only the region exposure controls.
         ui.horizontal_wrapped(|ui| {
-            ui.label("Floor:");
-            for e in [
-                FloorExposure::Ground,
-                FloorExposure::Exposed,
-                FloorExposure::SemiExposed,
-                FloorExposure::NonHeatLoss,
-                FloorExposure::Unset,
+            let has_selection = pv.regions.iter().any(|r| r.selected);
+            ui.label(
+                egui::RichText::new(if has_selection {
+                    "Set the selected part:"
+                } else {
+                    "Tap a part to select it"
+                })
+                .color(egui::Color32::from_rgb(255, 200, 60)),
+            );
+            for (label, exposure) in [
+                ("Exposed", WallExposure::Exposed),
+                ("Semi-exposed", WallExposure::SemiExposed),
+                ("Non-heat-loss", WallExposure::NonHeatLoss),
+                ("Ground", WallExposure::Ground),
+                ("Unset", WallExposure::Unset),
             ] {
-                let on = *armed == ArmedSurfaceExposure::Floor(e);
                 if ui
-                    .add(egui::Button::selectable(on, floor_label(e)))
+                    .add_enabled(has_selection, egui::Button::new(label))
                     .clicked()
                 {
-                    *armed = ArmedSurfaceExposure::Floor(e);
+                    on_event(UiEvent::Sketch(SketchEvent::SetPartitionRegionExposure(
+                        exposure,
+                    )));
                 }
             }
-        });
-        ui.horizontal_wrapped(|ui| {
-            ui.label("Ceiling:");
-            for e in [
-                CeilingExposure::ExposedRoof,
-                CeilingExposure::Party,
-                CeilingExposure::Unheated,
-                CeilingExposure::Unset,
-            ] {
-                let on = *armed == ArmedSurfaceExposure::Ceiling(e);
-                if ui
-                    .add(egui::Button::selectable(on, ceiling_label(e)))
-                    .clicked()
-                {
-                    *armed = ArmedSurfaceExposure::Ceiling(e);
-                }
+            ui.separator();
+            if ui
+                .button("Remove partition")
+                .hint("Back to a single face")
+                .clicked()
+            {
+                on_event(UiEvent::Sketch(SketchEvent::ClearWallPartition));
+            }
+            if ui.button("Done").clicked() {
+                on_event(UiEvent::Sketch(SketchEvent::CloseWallPartition));
             }
         });
     });

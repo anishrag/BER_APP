@@ -977,7 +977,7 @@ fn snapped_walls_are_pinned_so_only_drawn_walls_dimension() {
 /// Helper: a 10×10 dimensioned storey with a BER record, ready for exposure
 /// marking. Returns the controller.
 #[cfg(test)]
-fn dimensioned_square_controller() -> AppController {
+pub(super) fn dimensioned_square_controller() -> AppController {
     let p = |x: f32, y: f32| Point2f32::new(x, y);
     let mut c = AppController::new(crate::engine::open_db(":memory:").unwrap());
     let _ = c.create_ber(
@@ -2205,7 +2205,6 @@ fn checklist_status_of(c: &AppController, label: &str) -> ChecklistStatus {
 /// it is.
 #[test]
 fn new_checklist_rows_gate_mapping_complete() {
-    use ber_model::ber::structural::FloorExposure;
     let p = |x: f32, y: f32| Point2f32::new(x, y);
     let mut c = dimensioned_square_controller();
     // The pre-existing rows (Measurements/Heights/Exposures) need satisfying too,
@@ -2254,25 +2253,6 @@ fn new_checklist_rows_gate_mapping_complete() {
         checklist_status_of(&c, "Surfaces"),
         ChecklistStatus::AllStoreys,
         "auto-derived floor/ceiling exposure satisfies the surfaces row in one commit"
-    );
-
-    // Belt-and-braces: a manual mark of one floor region keeps the row green and
-    // overrides the auto value — also in a single commit.
-    let _ = c.set_floor_exposure_at(5.0, 5.0, FloorExposure::SemiExposed);
-    c.commit_to_ber().unwrap();
-    let floor_e = c.current_record.as_ref().unwrap().data.storeys[0]
-        .floors
-        .regions
-        .iter()
-        .find(|r| {
-            let cen = r.centroid();
-            (cen.x - 5.0).abs() < 4.0 && (cen.y - 5.0).abs() < 4.0
-        })
-        .map(|r| r.exposure);
-    assert_eq!(
-        floor_e,
-        Some(FloorExposure::SemiExposed),
-        "manual mark overrides the auto-derived Ground"
     );
 
     // Exposures (walls) is the last pre-existing gate — paint the perimeter.

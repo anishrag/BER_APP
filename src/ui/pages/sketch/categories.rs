@@ -30,8 +30,6 @@ pub enum Tool {
     ConstructionYear,
     /// Wall-exposure painting mode toggle.
     Exposure,
-    /// Horizontal-surface (floor/ceiling) exposure marking mode toggle.
-    Surfaces,
     /// The storey's default ceiling height: a metres field + "Set", showing
     /// the current value when one is set. Re-entering overwrites; on the All
     /// tab one value fills every still-unset storey.
@@ -92,12 +90,7 @@ pub const CATEGORIES: &[Category] = &[
     },
     Category {
         name: "Area",
-        tools: &[
-            Tool::LivingArea,
-            Tool::ConstructionYear,
-            Tool::Exposure,
-            Tool::Surfaces,
-        ],
+        tools: &[Tool::LivingArea, Tool::ConstructionYear, Tool::Exposure],
     },
     Category {
         name: "Heights",
@@ -200,7 +193,6 @@ pub struct ToolFlags {
     pub living_area_mode: bool,
     pub active_living_area: Option<usize>,
     pub exposure_mode: bool,
-    pub surface_exposure_mode: bool,
     pub phase_mode: bool,
     /// Construction years exist (entered in Key Details) — without them the
     /// phase picker would be empty, so the toggle is disabled.
@@ -257,7 +249,6 @@ impl ToolFlags {
             living_area_mode: view.living_area_mode,
             active_living_area: view.active_living_area,
             exposure_mode: view.exposure_mode,
-            surface_exposure_mode: view.surface_exposure_mode,
             phase_mode: view.phase_mode,
             has_phase_choices: !view.phase_choices.is_empty(),
             step_mode: view.step_mode,
@@ -499,25 +490,6 @@ fn tool_ui<F: FnMut(UiEvent)>(
             {
                 on_event(UiEvent::Sketch(SketchEvent::SetExposureMode(
                     !flags.exposure_mode,
-                )));
-            }
-        }
-        Tool::Surfaces => {
-            let enabled = !flags.read_only && flags.has_floor_plan;
-            if ui
-                .add_enabled(
-                    enabled,
-                    egui::Button::selectable(flags.surface_exposure_mode, "⬓ Surfaces"),
-                )
-                .hint(
-                    "Mark each floor/ceiling region's boundary condition: arm a \
-                     type, then tap the region. Ground floors / top ceilings / \
-                     party surfaces are auto-derived; this overrides the rest.",
-                )
-                .clicked()
-            {
-                on_event(UiEvent::Sketch(SketchEvent::SetSurfaceExposureMode(
-                    !flags.surface_exposure_mode,
                 )));
             }
         }

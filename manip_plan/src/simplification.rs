@@ -27,6 +27,28 @@ pub(crate) fn simplify_open(points: &[Point2f32], tolerance: f32) -> Vec<Point2f
         .collect()
 }
 
+/// Reduce a shaky freehand "partition cut" stroke to a single straight cut
+/// segment. The stroke is RDP-simplified ([`simplify_open`], which tolerates a
+/// 2-point result) and the simplified polyline's FIRST and LAST points are
+/// taken as the cut endpoints — for a near-straight stroke RDP collapses to
+/// exactly those two, and even when residual wobble leaves intermediate points
+/// the wall-face model only cares about the infinite line through the ends.
+/// `None` for a stroke that can't define a line (< 2 points, or both endpoints
+/// coincident after simplification).
+pub fn simplify_to_cut(stroke: &[Point2f32], tolerance: f32) -> Option<[Point2f32; 2]> {
+    if stroke.len() < 2 {
+        return None;
+    }
+    let simplified = simplify_open(stroke, tolerance);
+    let a = *simplified.first()?;
+    let b = *simplified.last()?;
+    let (dx, dy) = (b.x - a.x, b.y - a.y);
+    if dx * dx + dy * dy < 1e-12 {
+        return None;
+    }
+    Some([a, b])
+}
+
 /// Simplify a stroke using the Ramer-Douglas-Peucker algorithm
 pub(crate) fn simplify_stroke(
     points: &[Point2f32],

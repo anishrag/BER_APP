@@ -119,6 +119,42 @@ pub(super) fn render<F: FnMut(UiEvent)>(
 
     laser_autodetect(ctx, view);
 
+    // ── Wall-face partition cut dimension ────────────────────────────────────
+    // Routes through the SAME floating box / keypad / laser as every other
+    // single-value prompt, so a laser reading drops straight into a cut
+    // measurement. Partition mode is exclusive with the plan prompts below, so
+    // this branch is safe to take first.
+    if let Some(prompt) = view.partition_view.and_then(|pv| pv.dim_prompt.as_ref()) {
+        let actions = vec![
+            Action::new("Apply", "Apply this measurement to the cut", |v| {
+                SketchEvent::PartitionDimEntry(v)
+            })
+            .primary(),
+            Action::new(
+                "Skip",
+                "Keep the drawn position for this measurement",
+                |_| SketchEvent::PartitionDimSkip,
+            )
+            .bare()
+            .with_clear(),
+        ];
+        show_box(
+            ctx,
+            rect,
+            &prompt.label,
+            None,
+            "e.g. 1.2",
+            None,
+            view.partition_dim_input,
+            &actions,
+            &mut view.cat_state.input_mode,
+            &mut view.cat_state.input_mode_pinned,
+            view.laser,
+            on_event,
+        );
+        return;
+    }
+
     // ── Default ceiling height (opened from the Heights tool button) ─────────
     if view.ceiling_entry_open {
         let sub = view

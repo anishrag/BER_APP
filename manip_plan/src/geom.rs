@@ -691,6 +691,152 @@ pub fn ring_within_ring(inner: &[Point2f64], outer: &[Point2f64], tol: f64) -> b
     true
 }
 
+/// Whether `p` lies inside the closed polygon `poly` (even-odd ray cast). A
+/// thin `Point2f32` wrapper over [`ring_contains_point`] — the single
+/// point-in-polygon primitive in this crate — for the wall-face partition
+/// helpers (which work in `Point2f32` wall-local space). Degenerate polygons
+/// (< 3 vertices) contain nothing.
+pub fn point_in_polygon(poly: &[Point2f32], p: Point2f32) -> bool {
+    ring_contains_point(poly, p.x, p.y)
+}
+
+/// Result of [`snap_on_face`]: the (possibly adjusted) point plus which of its
+/// coordinates were snapped to a face feature. An un-fixed coordinate is left
+/// untouched (a higher layer prompts the user for it).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct FaceSnap {
+    pub point: Point2f32,
+    pub x_fixed: bool,
+    pub y_fixed: bool,
+}
+
+/// Snap a wall-face point `p` to the face's existing features, each axis
+/// independently. The wall face is the rectangle `[(0,0), (len,0), (len,
+/// height), (0,height)]` in wall-local coordinates (`x` = distance along the
+/// wall, `y` = height off the floor).
+///
+/// - `p.x` snaps to the nearest of `{0.0, len}` ∪ {x of every cut endpoint}
+///   within `eps`; on a hit, `x_fixed = true`.
+/// - `p.y` snaps to the nearest of `{0.0, height}` ∪ {y of every cut endpoint}
+///   within `eps`; on a hit, `y_fixed = true`.
+///
+/// The two axes are resolved separately, so a point can snap in x (to a cut
+/// endpoint's column) while its y stays free at mid-height. An un-snapped
+/// coordinate is returned unchanged.
+pub fn snap_on_face(
+    p: Point2f32,
+    len: f32,
+    height: f32,
+    cuts: &[[Point2f32; 2]],
+    eps: f32,
+) -> FaceSnap {
+    // Nearest candidate to `v` within `eps`, returning `(value, snapped)`.
+    let snap_axis = |v: f32, edges: [f32; 2], pick: fn(&Point2f32) -> f32| -> (f32, bool) {
+        let mut best: Option<f32> = None;
+        let mut consider = |cand: f32| {
+            let d = (cand - v).abs();
+            if d <= eps && best.map_or(true, |b: f32| d < (b - v).abs()) {
+                best = Some(cand);
+            }
+        };
+        consider(edges[0]);
+        consider(edges[1]);
+        for c in cuts {
+            consider(pick(&c[0]));
+            consider(pick(&c[1]));
+        }
+        match best {
+            Some(c) => (c, true),
+            None => (v, false),
+        }
+    };
+    let (x, x_fixed) = snap_axis(p.x, [0.0, len], |q| q.x);
+    let (y, y_fixed) = snap_axis(p.y, [0.0, height], |q| q.y);
+    FaceSnap {
+        point: Point2f32::new(x, y),
+        x_fixed,
+        y_fixed,
+    }
+}
+
+/// Subdivide a wall face into regions by a sequence of straight cuts. The face
+/// starts as the rectangle `[(0,0), (len,0), (len,height), (0,height)]` (CCW)
+/// in wall-local coordinates. Each cut is treated as an INFINITE straight line
+/// through its two endpoints; it splits every current region into its two
+/// half-polygons (a region the line misses passes through unchanged), via a
+/// robust half-plane split — the 2-D analogue of [`Polygon3D::split_by_line`]
+/// (`poly3d.rs`): classify vertices by signed distance to the line, interpolate
+/// the crossing points, drop degenerate (< 3-vertex) halves. Cuts may be
+/// diagonal; the model is a convex rectangle subdivided by lines, so every
+/// region stays convex. A zero-length cut (both endpoints equal) is skipped.
+pub fn subdivide_face(len: f32, height: f32, cuts: &[[Point2f32; 2]]) -> Vec<Vec<Point2f32>> {
+    let mut regions = vec![vec![
+        Point2f32::new(0.0, 0.0),
+        Point2f32::new(len, 0.0),
+        Point2f32::new(len, height),
+        Point2f32::new(0.0, height),
+    ]];
+    for cut in cuts {
+        let (a, b) = (cut[0], cut[1]);
+        let (dx, dy) = (b.x - a.x, b.y - a.y);
+        if dx * dx + dy * dy < 1e-12 {
+            continue; // degenerate cut — no line to split by
+        }
+        // Left normal of the cut direction; signed distance of a point to the
+        // infinite line through `a` is the dot of (p - a) with this normal.
+        let (nx, ny) = (-dy, dx);
+        let signed = |p: Point2f32| (p.x - a.x) * nx + (p.y - a.y) * ny;
+        let mut next = Vec::with_capacity(regions.len() * 2);
+        for region in &regions {
+            let (left, right) = split_polygon_by_line(region, signed);
+            if left.len() >= 3 {
+                next.push(left);
+            }
+            if right.len() >= 3 {
+                next.push(right);
+            }
+        }
+        regions = next;
+    }
+    regions
+}
+
+/// Split a convex polygon by an infinite line, given a `signed`-distance
+/// function for that line (positive on one side, negative on the other). Walks
+/// the ring like [`Polygon3D::split_by_line`]: a vertex on the `>= 0` side
+/// joins `left`, a vertex on the `<= 0` side joins `right` (a vertex on the
+/// line joins both), and every edge that strictly straddles the line
+/// contributes its interpolated crossing point to both halves. Either half may
+/// come back with fewer than 3 vertices when the line misses or merely grazes
+/// the polygon — the caller drops those.
+fn split_polygon_by_line(
+    poly: &[Point2f32],
+    signed: impl Fn(Point2f32) -> f32,
+) -> (Vec<Point2f32>, Vec<Point2f32>) {
+    let n = poly.len();
+    let mut left = Vec::new();
+    let mut right = Vec::new();
+    for i in 0..n {
+        let a = poly[i];
+        let b = poly[(i + 1) % n];
+        let da = signed(a);
+        let db = signed(b);
+        if da >= 0.0 {
+            left.push(a);
+        }
+        if da <= 0.0 {
+            right.push(a);
+        }
+        if da * db < 0.0 {
+            let t = da / (da - db);
+            let p = Point2f32::new(a.x + t * (b.x - a.x), a.y + t * (b.y - a.y));
+            left.push(p);
+            right.push(p);
+        }
+    }
+    (left, right)
+}
+
 /// Even-odd point-in-ring test for an f64 ring (the f64 analogue of
 /// [`ring_contains_point`]; implicitly closed). `< 3` vertices contain nothing.
 fn point_in_ring_f64(pts: &[Point2f64], x: f64, y: f64) -> bool {
@@ -1511,5 +1657,132 @@ mod tests {
         assert_eq!(project_distance_along(a, b, 10.0, -5.0, 0.0), 0.0);
         assert_eq!(project_distance_along(a, b, 10.0, 15.0, 0.0), 10.0);
         assert_eq!(project_distance_along(a, a, 0.0, 5.0, 5.0), 0.0);
+    }
+
+    // ── Wall-face partition helpers ─────────────────────────────────────────
+
+    /// Unsigned polygon area via the shoelace (half of `ring_signed_area2`).
+    fn area(poly: &[Point2f32]) -> f32 {
+        ring_signed_area2(poly).abs() * 0.5
+    }
+
+    #[test]
+    fn point_in_polygon_basic_in_out() {
+        let square = vec![p(0.0, 0.0), p(4.0, 0.0), p(4.0, 4.0), p(0.0, 4.0)];
+        assert!(point_in_polygon(&square, p(2.0, 2.0)));
+        assert!(!point_in_polygon(&square, p(5.0, 2.0)));
+        assert!(!point_in_polygon(&square, p(-1.0, 2.0)));
+        // Degenerate polygon contains nothing.
+        assert!(!point_in_polygon(&[p(0.0, 0.0), p(1.0, 1.0)], p(0.5, 0.5)));
+    }
+
+    #[test]
+    fn subdivide_face_single_diagonal_yields_two_regions() {
+        let (len, height) = (4.0_f32, 3.0_f32);
+        // Diagonal corner-to-corner cut.
+        let cuts = [[p(0.0, 0.0), p(len, height)]];
+        let regions = subdivide_face(len, height, &cuts);
+        assert_eq!(regions.len(), 2, "one cut → two regions: {regions:?}");
+        let total: f32 = regions.iter().map(|r| area(r)).sum();
+        assert!(
+            (total - len * height).abs() < 1e-3,
+            "areas sum to len*height, got {total}"
+        );
+    }
+
+    #[test]
+    fn subdivide_face_two_crossing_cuts_yield_four_regions() {
+        let (len, height) = (4.0_f32, 2.0_f32);
+        // A vertical-ish and a horizontal-ish cut, both crossing the interior.
+        let cuts = [
+            [p(2.0, -1.0), p(2.0, 3.0)], // infinite vertical line at x=2
+            [p(-1.0, 1.0), p(5.0, 1.0)], // infinite horizontal line at y=1
+        ];
+        let regions = subdivide_face(len, height, &cuts);
+        assert_eq!(regions.len(), 4, "two crossing cuts → four regions");
+        let total: f32 = regions.iter().map(|r| area(r)).sum();
+        assert!(
+            (total - len * height).abs() < 1e-3,
+            "areas still sum to len*height, got {total}"
+        );
+        // Each quadrant is a 2x1 rectangle.
+        for r in &regions {
+            assert!(
+                (area(r) - 2.0).abs() < 1e-3,
+                "quadrant area 2, got {}",
+                area(r)
+            );
+        }
+    }
+
+    #[test]
+    fn subdivide_face_line_that_misses_passes_region_through() {
+        let (len, height) = (4.0_f32, 3.0_f32);
+        // A line entirely below the face (y = -1) misses the rectangle.
+        let cuts = [[p(0.0, -1.0), p(len, -1.0)]];
+        let regions = subdivide_face(len, height, &cuts);
+        assert_eq!(regions.len(), 1, "missing line leaves one region");
+        assert!((area(&regions[0]) - len * height).abs() < 1e-3);
+    }
+
+    #[test]
+    fn subdivide_face_skips_degenerate_cut() {
+        let (len, height) = (4.0_f32, 3.0_f32);
+        let cuts = [[p(1.0, 1.0), p(1.0, 1.0)]]; // zero-length
+        let regions = subdivide_face(len, height, &cuts);
+        assert_eq!(regions.len(), 1);
+        assert!((area(&regions[0]) - len * height).abs() < 1e-3);
+    }
+
+    #[test]
+    fn snap_on_face_fixes_x_to_edge_and_leaves_mid_height_y_free() {
+        let (len, height) = (5.0_f32, 2.5_f32);
+        // x near the right edge (5.0); y at mid-height (free).
+        let res = snap_on_face(p(4.98, 1.25), len, height, &[], 0.05);
+        assert!(res.x_fixed, "x snaps to the near edge");
+        assert!((res.point.x - 5.0).abs() < 1e-6, "x → len");
+        assert!(!res.y_fixed, "mid-height y stays free");
+        assert_eq!(res.point.y, 1.25, "free y unchanged");
+    }
+
+    #[test]
+    fn snap_on_face_snaps_to_cut_endpoints_independently() {
+        let (len, height) = (6.0_f32, 3.0_f32);
+        // An existing cut whose endpoints introduce snap columns/rows.
+        let cuts = [[p(2.0, 0.0), p(2.0, 3.0)]];
+        // Point near the cut's x=2 column, y mid (free).
+        let res = snap_on_face(p(2.02, 1.5), len, height, &cuts, 0.05);
+        assert!(res.x_fixed && (res.point.x - 2.0).abs() < 1e-6);
+        assert!(!res.y_fixed);
+        // y near the cut endpoint at y=0 → snaps to floor (0 also an edge).
+        let res2 = snap_on_face(p(3.5, 0.03), len, height, &cuts, 0.05);
+        assert!(res2.y_fixed && res2.point.y.abs() < 1e-6);
+        assert!(!res2.x_fixed, "x mid-wall stays free");
+        // Nothing within eps → neither fixed, point untouched.
+        let res3 = snap_on_face(p(3.5, 1.5), len, height, &cuts, 0.05);
+        assert!(!res3.x_fixed && !res3.y_fixed);
+        assert_eq!(res3.point, p(3.5, 1.5));
+    }
+
+    #[test]
+    fn simplify_to_cut_takes_first_and_last_of_a_shaky_stroke() {
+        // A shaky near-straight diagonal stroke.
+        let stroke = vec![p(0.0, 0.0), p(1.02, 0.98), p(1.98, 2.05), p(3.0, 3.0)];
+        let cut = crate::simplify_to_cut(&stroke, 0.3).expect("near-straight stroke yields a cut");
+        assert!(
+            (cut[0].x).abs() < 1e-6 && (cut[0].y).abs() < 1e-6,
+            "first point"
+        );
+        assert!(
+            (cut[1].x - 3.0).abs() < 1e-6 && (cut[1].y - 3.0).abs() < 1e-6,
+            "last point"
+        );
+        // Too few points → None.
+        assert_eq!(crate::simplify_to_cut(&[p(0.0, 0.0)], 0.3), None);
+        // Coincident endpoints (a tap) → None.
+        assert_eq!(
+            crate::simplify_to_cut(&[p(1.0, 1.0), p(1.0, 1.0)], 0.3),
+            None
+        );
     }
 }

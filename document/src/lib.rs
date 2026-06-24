@@ -26,6 +26,7 @@ mod position;
 mod resolve;
 mod roof_point;
 mod step;
+mod wall_partition;
 
 pub use ceiling_step::{
     canonicalize_ceiling_steps, ceiling_line_coords, region_line_coords, CeilingStepRegion,
@@ -233,6 +234,24 @@ pub struct ExposureSection {
     pub exposure: WallExposure,
 }
 
+/// One straight partition cut on a wall's internal elevation, in WALL-LOCAL
+/// coords: x = along_m (0..wall_len from the wall's start vertex), y = height_m (0 = floor).
+#[derive(Debug, Clone, Copy, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct PartitionCut {
+    pub a: Point2f32,
+    pub b: Point2f32,
+}
+
+/// A partitioned wall face: ordered `cuts` (each a full cross-cut of the face)
+/// plus per-region exposure attribution by a CONTAINED sample point (durable
+/// across re-draws, like the floor/ceiling centroid keys). A region with no
+/// matching sample point resolves `Unset`.
+#[derive(Debug, Clone, Default, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct WallFacePartition {
+    pub cuts: Vec<PartitionCut>,
+    pub regions: Vec<(Point2f32, WallExposure)>, // (wall-local sample point, exposure)
+}
+
 /// One storey's editable shapes and which is active. The building-level
 /// [`Document`] holds one of these per storey; it `Deref`s to the active one, so
 /// per-storey field/method access reads through transparently.
@@ -275,6 +294,19 @@ pub struct StoreyDoc {
     /// document (editable, undoable) but keyed to the outline, not the active
     /// shape.
     pub wall_sections: HashMap<VertexId, Vec<ExposureSection>>,
+
+    /// Face-PARTITIONED outline perimeter walls, keyed by the wall's stable start
+    /// `VertexId`. A wall present here has its 2-D internal elevation divided by
+    /// drawn cut lines into regions, each carrying its own [`WallExposure`]; this
+    /// SUPERSEDES that wall's 1-D [`wall_sections`](Self::wall_sections) entry (a
+    /// wall is either 1-D sectioned OR face-partitioned, never both). Stored in
+    /// wall-local coords (x = along_m from the start vertex, y = height_m); the
+    /// 2-D split + per-region exposure carve into BER geometry happens in the
+    /// resolve pass. `#[serde(default)]` so older snapshots load empty; like
+    /// `wall_sections`, the `VertexId` key serializes as a valid JSON map key (no
+    /// `tuple_key_map` adapter needed).
+    #[serde(default)]
+    pub wall_face_partitions: HashMap<VertexId, WallFacePartition>,
 
     /// Exposure OVERRIDES of derived RISER (interior step-face) walls, keyed by
     /// the riser's quantized base edge ([`riser_key`]). Risers have no perimeter

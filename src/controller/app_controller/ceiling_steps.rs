@@ -125,7 +125,6 @@ impl AppController {
             self.exit_openings_mode();
             self.living_area_mode = false;
             self.exposure_mode = false;
-            self.surface_exposure_mode = false;
             self.phase_mode = false;
             self.step_mode = false;
             self.roof_point_mode = false;

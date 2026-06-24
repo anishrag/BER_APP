@@ -84,9 +84,8 @@ pub struct SketchState {
     /// Backing strings for the exposure section's typed start/end inputs.
     pub exposure_start_input: String,
     pub exposure_end_input: String,
-    /// The floor/ceiling boundary condition armed by the surface-exposure
-    /// toolbar — a canvas tap inside a region applies it. Pure page state.
-    pub armed_surface_exposure: crate::ui::pages::sketch::ArmedSurfaceExposure,
+    /// Backing string for the wall-partition dimension prompt's metre input.
+    pub partition_dim_input: String,
     /// Backing string for the floor-step amount input (metres).
     pub step_amount_input: String,
     // Error surfacing follows the established per-flow pattern (one
@@ -480,8 +479,7 @@ impl eframe::App for BerApp {
                                 exposure_walls,
                                 exposure_selection,
                                 riser_views,
-                                surface_exposure_mode,
-                                surface_exposure_views,
+                                partition_mode,
                                 edit_selected_wall,
                                 edit_selected_vertex,
                                 edit_drag_prompt,
@@ -570,8 +568,7 @@ impl eframe::App for BerApp {
                                     controller_ref.wall_exposure_views(),
                                     controller_ref.exposure_selection(),
                                     controller_ref.riser_views(),
-                                    controller_ref.surface_exposure_mode(),
-                                    controller_ref.surface_exposure_views(),
+                                    controller_ref.partition_mode(),
                                     controller_ref.edit_selected_wall_positions(),
                                     controller_ref.edit_selected_vertex_position(),
                                     controller_ref.edit_drag_prompt_for_ui(),
@@ -776,6 +773,9 @@ impl eframe::App for BerApp {
                                     c.elevation_view(),
                                 )
                             };
+                            // Owned partition view (the overlay takes a `&`); `None`
+                            // when not partitioning.
+                            let partition_view = self.app_controller.borrow().partition_view();
                             let opening_error = self.sketch_state.opening_error.clone();
 
                             let controller = self.app_controller.clone();
@@ -888,11 +888,9 @@ impl eframe::App for BerApp {
                                 riser_views: &riser_views,
                                 exposure_start_input: &mut self.sketch_state.exposure_start_input,
                                 exposure_end_input: &mut self.sketch_state.exposure_end_input,
-                                surface_exposure_mode,
-                                surface_exposure_views: &surface_exposure_views,
-                                armed_surface_exposure: &mut self
-                                    .sketch_state
-                                    .armed_surface_exposure,
+                                partition_mode,
+                                partition_view: partition_view.as_ref(),
+                                partition_dim_input: &mut self.sketch_state.partition_dim_input,
                                 phase_mode,
                                 phase_region_polygons: &phase_region_polygons,
                                 pending_phase_polygon: &pending_phase_polygon,
@@ -1458,26 +1456,38 @@ impl eframe::App for BerApp {
                                     SketchEvent::SetAllRemainingExposed => {
                                         controller.borrow_mut().set_all_remaining_exposed();
                                     }
-                                    SketchEvent::SetSurfaceExposureMode(on) => {
-                                        controller.borrow_mut().set_surface_exposure_mode(on);
+                                    SketchEvent::OpenWallPartition => {
+                                        controller.borrow_mut().open_wall_partition();
                                     }
-                                    SketchEvent::SetFloorExposure {
-                                        world_x,
-                                        world_y,
-                                        exposure,
-                                    } => {
+                                    SketchEvent::CloseWallPartition => {
+                                        controller.borrow_mut().close_wall_partition();
+                                    }
+                                    SketchEvent::PartitionStrokePoint { along_m, height_m } => {
                                         controller
                                             .borrow_mut()
-                                            .set_floor_exposure_at(world_x, world_y, exposure);
+                                            .partition_stroke_point(along_m, height_m);
                                     }
-                                    SketchEvent::SetCeilingExposure {
-                                        world_x,
-                                        world_y,
-                                        exposure,
-                                    } => {
+                                    SketchEvent::PartitionStrokeEnd => {
+                                        controller.borrow_mut().partition_stroke_end();
+                                    }
+                                    SketchEvent::PartitionSelectRegion { along_m, height_m } => {
                                         controller
                                             .borrow_mut()
-                                            .set_ceiling_exposure_at(world_x, world_y, exposure);
+                                            .select_partition_region(along_m, height_m);
+                                    }
+                                    SketchEvent::SetPartitionRegionExposure(exposure) => {
+                                        controller
+                                            .borrow_mut()
+                                            .set_partition_region_exposure(exposure);
+                                    }
+                                    SketchEvent::PartitionDimEntry(value) => {
+                                        controller.borrow_mut().partition_dim_entry(value);
+                                    }
+                                    SketchEvent::PartitionDimSkip => {
+                                        controller.borrow_mut().partition_dim_skip();
+                                    }
+                                    SketchEvent::ClearWallPartition => {
+                                        controller.borrow_mut().clear_active_wall_partition();
                                     }
                                     SketchEvent::SetOpeningsMode(on) => {
                                         controller.borrow_mut().set_openings_mode(on);

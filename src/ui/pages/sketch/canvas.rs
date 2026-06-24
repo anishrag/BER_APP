@@ -5,37 +5,15 @@
 use egui::epaint::PathShape;
 
 use super::touch::TouchNav;
-use super::{ArmedSurfaceExposure, EguiStroke, SketchEvent, SketchView};
+use super::{EguiStroke, SketchEvent, SketchView};
 use crate::controller::app_controller::{AssessmentPhase, SelectMode};
 use crate::ui::pages::events::UiEvent;
 use crate::ui::render;
 use crate::ui::render::ViewParams;
 use crate::ui::widgets::HintExt;
 use ber_model::ber::ber_struct::Ber;
-use ber_model::ber::structural::{CeilingExposure, FloorExposure};
+use ber_model::ber::structural::WallExposure;
 use domain::sketch::{EditTools, SketchMode};
-
-/// Faint fill tint for a floor region by its boundary condition (Unset = grey,
-/// so unmarked surfaces read as "to do").
-fn floor_exposure_tint(e: FloorExposure) -> egui::Color32 {
-    match e {
-        FloorExposure::Unset => egui::Color32::from_rgba_unmultiplied(140, 140, 140, 70),
-        FloorExposure::Ground => egui::Color32::from_rgba_unmultiplied(150, 110, 60, 90),
-        FloorExposure::Exposed => egui::Color32::from_rgba_unmultiplied(220, 80, 60, 90),
-        FloorExposure::SemiExposed => egui::Color32::from_rgba_unmultiplied(220, 160, 60, 90),
-        FloorExposure::NonHeatLoss => egui::Color32::from_rgba_unmultiplied(80, 160, 220, 90),
-    }
-}
-
-/// Outline tint for a ceiling region by its boundary condition.
-fn ceiling_exposure_tint(e: CeilingExposure) -> egui::Color32 {
-    match e {
-        CeilingExposure::Unset => egui::Color32::from_rgb(150, 150, 150),
-        CeilingExposure::ExposedRoof => egui::Color32::from_rgb(230, 90, 70),
-        CeilingExposure::Party => egui::Color32::from_rgb(90, 170, 230),
-        CeilingExposure::Unheated => egui::Color32::from_rgb(230, 170, 70),
-    }
-}
 
 /// Estimated width an in-place "Edit attributes" window occupies, and the
 /// vertical slot each is stacked into. egui sizes the windows lazily, so the
@@ -387,6 +365,14 @@ pub(super) fn render<F: FnMut(UiEvent)>(
     // canvas — the unrolled wall with draggable openings. Owns its own input.
     if let Some(elev) = view.elevation_view.as_ref() {
         elevation_overlay(ui, rect, &response, elev, vp, on_event);
+        return;
+    }
+
+    // Wall-face PARTITION editor: like the elevation, when a face is open for
+    // partitioning it REPLACES the plan canvas (flat-top unrolled face + cuts +
+    // tinted regions + a you-are-here plan inset). Owns its own input.
+    if let Some(pv) = view.partition_view {
+        partition_overlay(ui, rect, &response, pv, vp, on_event);
         return;
     }
 
@@ -895,32 +881,6 @@ pub(super) fn render<F: FnMut(UiEvent)>(
         view.exposure_selection.as_ref(),
         view.exposure_mode,
     );
-
-    // Horizontal-surface exposure: tint each floor/ceiling region by its current
-    // boundary condition so the assessor sees which surfaces still need marking.
-    // Floors fill solid (faint); ceilings outline (so a region shows both).
-    if view.surface_exposure_mode && !view.surface_exposure_views.is_empty() {
-        if let Some((_s, t)) = render::storey_transform(rect, ber, current_storey_idx, mode, vp) {
-            for sv in view.surface_exposure_views {
-                if sv.ring.len() < 3 {
-                    continue;
-                }
-                let pts: Vec<egui::Pos2> = sv.ring.iter().map(|(x, y)| t.apply(*x, *y)).collect();
-                if let Some(e) = sv.floor {
-                    let c = floor_exposure_tint(e);
-                    painter.add(egui::Shape::convex_polygon(
-                        pts.clone(),
-                        c,
-                        egui::Stroke::NONE,
-                    ));
-                }
-                if let Some(e) = sv.ceiling {
-                    let c = ceiling_exposure_tint(e);
-                    painter.add(egui::Shape::closed_line(pts, egui::Stroke::new(2.0, c)));
-                }
-            }
-        }
-    }
 
     // Structure "Edit attributes" (in-place): now the wall-exposure colours are
     // down, recolour each group's surfaces in its group colour ON TOP (so the
@@ -1432,7 +1392,13 @@ pub(super) fn render<F: FnMut(UiEvent)>(
     // the wall. Takes priority over stroke/edit input (suppressed via
     // `primary_available` above).
     if view.exposure_mode && !cut_pending && !touch_nav_active {
-        if let Some(t) = canvas_transform(ber, current_storey_idx, rect, vp, false) {
+        // Watermark-inclusive fit (`true`) so this matches the SAME transform the
+        // exposure walls are RENDERED with (`render_wall_exposure` →
+        // `storey_transform` → `fit_bbox_for_storey`). On a setback upper storey
+        // the watermark enlarges the fit box; using the storey-alone box here
+        // (`false`) put clicks in a different scale/origin than the drawn walls,
+        // so only a near-coincident wall stayed selectable.
+        if let Some(t) = canvas_transform(ber, current_storey_idx, rect, vp, true) {
             let tol_world = (12.0 / t.scale()) as f64;
             if response.drag_started_by(egui::PointerButton::Primary) {
                 if let Some(pos) = response.interact_pointer_pos() {
@@ -1465,39 +1431,6 @@ pub(super) fn render<F: FnMut(UiEvent)>(
                         world_y: wy,
                         tol: tol_world,
                     }));
-                }
-            }
-        }
-    }
-
-    // Surface-exposure mode: a tap applies the SINGLE armed boundary condition
-    // (floor XOR ceiling) to ONLY the matching surface kind — never both — so the
-    // tap can't clobber the other surface's (auto-derived) value. The region
-    // under the tap is resolved controller-side
-    // (`set_floor_exposure_at` / `set_ceiling_exposure_at`); a no-op if no region
-    // of that kind is under the point.
-    if view.surface_exposure_mode && !cut_pending && !touch_nav_active {
-        if let Some(t) = canvas_transform(ber, current_storey_idx, rect, vp, false) {
-            let tap = response.clicked_by(egui::PointerButton::Primary)
-                || response.drag_started_by(egui::PointerButton::Primary);
-            if tap {
-                if let Some(pos) = response.interact_pointer_pos() {
-                    let (wx, wy) = t.inverse(pos.x, pos.y);
-                    let ev = match *view.armed_surface_exposure {
-                        ArmedSurfaceExposure::Floor(exposure) => SketchEvent::SetFloorExposure {
-                            world_x: wx,
-                            world_y: wy,
-                            exposure,
-                        },
-                        ArmedSurfaceExposure::Ceiling(exposure) => {
-                            SketchEvent::SetCeilingExposure {
-                                world_x: wx,
-                                world_y: wy,
-                                exposure,
-                            }
-                        }
-                    };
-                    on_event(UiEvent::Sketch(ev));
                 }
             }
         }
@@ -1543,7 +1476,7 @@ pub(super) fn render<F: FnMut(UiEvent)>(
         && !view.roof_ridge_pending
         && !view.roof_rect_pending
         && !view.exposure_mode
-        && !view.surface_exposure_mode
+        && !view.partition_mode
         && !view.openings_mode
         // Structure phase owns the canvas with its own selection tools.
         && !structure_phase;
@@ -2003,4 +1936,281 @@ fn elevation_colors(
     let fill = egui::Color32::from_rgba_unmultiplied(base.r(), base.g(), base.b(), a);
     let stroke = if selected { egui::Color32::WHITE } else { base };
     (fill, stroke)
+}
+
+/// The base exposure-class colour for a wall partition region — the SAME
+/// `WallExposure`→colour mapping the 2D plan exposure overlay uses
+/// (`render::style`), so a face reads consistently in plan and partition views.
+fn partition_exposure_color(e: WallExposure) -> egui::Color32 {
+    use crate::ui::render::style;
+    match e {
+        WallExposure::Exposed => style::EXPOSED_WALL,
+        WallExposure::SemiExposed => style::SEMI_EXPOSED_WALL,
+        WallExposure::NonHeatLoss => style::NON_HEAT_LOSS_WALL,
+        WallExposure::Ground => style::GROUND_WALL,
+        WallExposure::Unset => style::UNSET_WALL,
+    }
+}
+
+/// Render the wall-face PARTITION editor: the flat-top unrolled face with each
+/// subdivided region tinted by its exposure, the committed/in-flight cuts, and a
+/// little plan inset that orients the viewer. Owns its own primary-button input
+/// — a drag draws a cut, a click selects the region under it — emitting
+/// `Partition*` events in the canonical a→b (un-flipped) wall frame.
+fn partition_overlay<F: FnMut(UiEvent)>(
+    ui: &mut egui::Ui,
+    rect: egui::Rect,
+    response: &egui::Response,
+    pv: &crate::controller::app_controller::PartitionView,
+    vp: render::ViewParams,
+    on_event: &mut F,
+) {
+    let painter = ui.painter_at(rect);
+    painter.rect_filled(rect, 0.0, egui::Color32::from_gray(24));
+
+    let len = (pv.wall_len_m as f64).max(0.1);
+    let height = (pv.height_m as f64).max(0.1);
+    // World frame: x = along (0..len), y = -z (height grows UP on screen), base
+    // = 0. A small margin keeps the face off the panel edges.
+    let margin = height.max(0.5) * 0.12;
+    let t = render::fit_transform(
+        rect,
+        (-len * 0.05, -(height + margin)),
+        (len * 1.05, margin),
+        vp,
+    );
+    // `flip_along`: a→b runs right→left from inside, so mirror the along-axis at
+    // the screen boundary (both forward draw and inverse hit-test) — emitted
+    // events stay in the canonical a→b frame.
+    let flip = pv.inset.flip_along;
+    let p = |along: f64, z: f64| {
+        let a = if flip { len - along } else { along };
+        t.apply(a, -z)
+    };
+    let line = |a: egui::Pos2, b: egui::Pos2, w: f32, c: egui::Color32| {
+        painter.line_segment([a, b], egui::Stroke::new(w, c));
+    };
+
+    // Tinted regions first (so cuts + the face frame draw on top).
+    for r in &pv.regions {
+        if r.poly.len() < 3 {
+            continue;
+        }
+        let pts: Vec<egui::Pos2> = r
+            .poly
+            .iter()
+            .map(|(a, z)| p(*a as f64, *z as f64))
+            .collect();
+        let base = partition_exposure_color(r.exposure);
+        // Unset stays a faint grey so the user can see what's still unmarked;
+        // the real exposure classes read as saturated tints (matching/exceeding
+        // the elevation openings' selected alpha of 130).
+        let alpha = if r.exposure == WallExposure::Unset {
+            60
+        } else {
+            150
+        };
+        let fill = egui::Color32::from_rgba_unmultiplied(base.r(), base.g(), base.b(), alpha);
+        painter.add(egui::Shape::convex_polygon(
+            pts.clone(),
+            fill,
+            egui::Stroke::NONE,
+        ));
+        // Region border: brighter + heavier on the selected region.
+        let (bw, bc) = if r.selected {
+            (2.5, egui::Color32::WHITE)
+        } else {
+            (1.0, base)
+        };
+        painter.add(egui::Shape::closed_line(pts, egui::Stroke::new(bw, bc)));
+    }
+
+    // The flat-top face frame: corners (0,0),(len,0),(len,height),(0,height).
+    let wall_col = egui::Color32::from_gray(150);
+    line(p(0.0, 0.0), p(len, 0.0), 2.0, wall_col);
+    line(p(len, 0.0), p(len, height), 2.0, wall_col);
+    line(p(len, height), p(0.0, height), 2.0, wall_col);
+    line(p(0.0, height), p(0.0, 0.0), 2.0, wall_col);
+
+    // Committed cuts solid; the in-flight pending cut highlighted (dashed).
+    let cut_col = egui::Color32::from_rgb(220, 220, 120);
+    for c in &pv.cuts {
+        line(
+            p(c[0].0 as f64, c[0].1 as f64),
+            p(c[1].0 as f64, c[1].1 as f64),
+            2.0,
+            cut_col,
+        );
+    }
+    if let Some(pc) = &pv.pending {
+        let a = p(pc[0].0 as f64, pc[0].1 as f64);
+        let b = p(pc[1].0 as f64, pc[1].1 as f64);
+        let hi = egui::Color32::from_rgb(255, 210, 70);
+        // Dashed: sample the segment so the pending cut reads apart from the
+        // committed solid ones.
+        let segs = 14;
+        for i in (0..segs).step_by(2) {
+            let f0 = i as f32 / segs as f32;
+            let f1 = (i + 1) as f32 / segs as f32;
+            line(a + (b - a) * f0, a + (b - a) * f1, 2.5, hi);
+        }
+    }
+
+    // Live freehand ink: the in-flight stroke tracking the pen as it's drawn.
+    if pv.stroke.len() >= 2 {
+        let ink = egui::Color32::from_rgb(120, 200, 255);
+        let pts: Vec<egui::Pos2> = pv
+            .stroke
+            .iter()
+            .map(|(a, z)| p(*a as f64, *z as f64))
+            .collect();
+        painter.add(egui::Shape::line(pts, egui::Stroke::new(2.0, ink)));
+    }
+
+    // Dimension prompt: an on-elevation measurement arrow for the quantity being
+    // typed (the plan's `render_dimension_prompt` feel, in elevation space). A
+    // "distance along" prompt draws a horizontal arrow from the start edge to
+    // the cut's column; a "height" prompt a vertical arrow from the floor.
+    if let Some(dp) = &pv.dim_prompt {
+        use crate::controller::app_controller::PartitionDimAxis;
+        let dim_col = egui::Color32::from_rgb(120, 230, 160);
+        // The arrow endpoints in wall-local coords.
+        let (wa, wb): ((f64, f64), (f64, f64)) = match dp.axis {
+            PartitionDimAxis::Along => (
+                (0.0, dp.height_m as f64),
+                (dp.along_m as f64, dp.height_m as f64),
+            ),
+            PartitionDimAxis::Height => (
+                (dp.along_m as f64, 0.0),
+                (dp.along_m as f64, dp.height_m as f64),
+            ),
+        };
+        let sa = p(wa.0, wa.1);
+        let sb = p(wb.0, wb.1);
+        line(sa, sb, 2.0, dim_col);
+        // Arrowheads at both ends.
+        let dir = (sb - sa).normalized();
+        let perp = egui::vec2(-dir.y, dir.x);
+        let head = 8.0;
+        for (tip, into) in [(sa, dir), (sb, -dir)] {
+            line(tip, tip + into * head + perp * (head * 0.5), 2.0, dim_col);
+            line(tip, tip + into * head - perp * (head * 0.5), 2.0, dim_col);
+        }
+        // Label with the value being measured (the drawn/pending magnitude).
+        let value_m = match dp.axis {
+            PartitionDimAxis::Along => dp.along_m,
+            PartitionDimAxis::Height => dp.height_m,
+        };
+        let mid = sa + (sb - sa) * 0.5;
+        painter.text(
+            mid + perp * 12.0,
+            egui::Align2::CENTER_CENTER,
+            format!("{value_m:.2} m"),
+            egui::FontId::proportional(13.0),
+            dim_col,
+        );
+    }
+
+    painter.text(
+        rect.left_top() + egui::vec2(8.0, 8.0),
+        egui::Align2::LEFT_TOP,
+        "Draw a partition · tap a region to set its exposure · Done in the toolbar",
+        egui::FontId::proportional(13.0),
+        egui::Color32::from_gray(160),
+    );
+
+    partition_inset(&painter, rect, &pv.inset);
+
+    // Primary input → wall-local (along, height-above-base), un-flipped so the
+    // emitted events stay in the canonical a→b frame.
+    let to_local = |pos: egui::Pos2| {
+        let (wx, wy) = t.inverse(pos.x, pos.y);
+        let along = if flip { len - wx } else { wx };
+        (along as f32, (-wy) as f32)
+    };
+    if response.drag_started_by(egui::PointerButton::Primary)
+        || response.dragged_by(egui::PointerButton::Primary)
+    {
+        if let Some(pos) = response.interact_pointer_pos() {
+            let (along_m, height_m) = to_local(pos);
+            on_event(UiEvent::Sketch(SketchEvent::PartitionStrokePoint {
+                along_m,
+                height_m,
+            }));
+        }
+    }
+    if response.drag_stopped_by(egui::PointerButton::Primary) {
+        on_event(UiEvent::Sketch(SketchEvent::PartitionStrokeEnd));
+    }
+    if response.clicked_by(egui::PointerButton::Primary) {
+        if let Some(pos) = response.interact_pointer_pos() {
+            let (along_m, height_m) = to_local(pos);
+            on_event(UiEvent::Sketch(SketchEvent::PartitionSelectRegion {
+                along_m,
+                height_m,
+            }));
+        }
+    }
+}
+
+/// The plan-view you-are-here inset for the partition overlay: the active
+/// shape's outline ring scaled into a small top-right corner, with the active
+/// wall highlighted and the interior-side eye + view direction drawn so the
+/// assessor can tell which way they're looking at the face.
+fn partition_inset(
+    painter: &egui::Painter,
+    rect: egui::Rect,
+    inset: &crate::controller::app_controller::PartitionInset,
+) {
+    if inset.outline.len() < 2 {
+        return;
+    }
+    // A square sub-rect in the top-right corner, ~22% of the panel min dim.
+    let side = rect.size().min_elem() * 0.22;
+    let pad = 10.0;
+    let sub = egui::Rect::from_min_size(
+        egui::pos2(rect.right() - side - pad, rect.top() + pad),
+        egui::vec2(side, side),
+    );
+    painter.rect_filled(sub, 4.0, egui::Color32::from_gray(18));
+
+    // Fit the outline bbox into the sub-rect, with the eye folded in so the
+    // arrow stays inside view too.
+    let mut min = (f64::MAX, f64::MAX);
+    let mut max = (f64::MIN, f64::MIN);
+    let mut grow = |x: f64, y: f64| {
+        min.0 = min.0.min(x);
+        min.1 = min.1.min(y);
+        max.0 = max.0.max(x);
+        max.1 = max.1.max(y);
+    };
+    for (x, y) in &inset.outline {
+        grow(*x, *y);
+    }
+    grow(inset.eye.0, inset.eye.1);
+    let inner = sub.shrink(6.0);
+    // Plan y grows downward on screen (no z-flip), aspect-preserving fit.
+    let t = render::fit_transform(inner, (min.0, min.1), (max.0, max.1), ViewParams::default());
+
+    let ring: Vec<egui::Pos2> = inset.outline.iter().map(|(x, y)| t.apply(*x, *y)).collect();
+    painter.add(egui::Shape::closed_line(
+        ring,
+        egui::Stroke::new(1.5, egui::Color32::from_gray(170)),
+    ));
+    // Active wall in a bright colour.
+    painter.line_segment(
+        [
+            t.apply(inset.wall_a.0, inset.wall_a.1),
+            t.apply(inset.wall_b.0, inset.wall_b.1),
+        ],
+        egui::Stroke::new(3.0, egui::Color32::from_rgb(255, 210, 70)),
+    );
+    // The interior-side eye + a short look-direction arrow toward the wall.
+    let eye = t.apply(inset.eye.0, inset.eye.1);
+    painter.circle_filled(eye, 3.5, egui::Color32::from_rgb(120, 200, 255));
+    let tip = eye + egui::vec2(inset.view_dir.0 as f32, inset.view_dir.1 as f32) * (side * 0.25);
+    painter.line_segment(
+        [eye, tip],
+        egui::Stroke::new(2.0, egui::Color32::from_rgb(120, 200, 255)),
+    );
 }

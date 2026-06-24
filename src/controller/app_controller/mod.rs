@@ -30,6 +30,7 @@ mod editing;
 mod exposure;
 mod living_areas;
 mod openings;
+mod partition;
 mod phase_regions;
 mod structure;
 
@@ -45,9 +46,7 @@ use document::{
     MovedCoordKind, PendingArc, PhaseRegion, ShapeSlot, StepRegion, StoreyDoc,
 };
 pub use document::{ExposureSection, PositionPromptKind, RiserKind};
-pub use exposure::{
-    ExposureSelection, RiserView, SectionHandle, SurfaceExposureView, WallExposureView,
-};
+pub use exposure::{ExposureSelection, RiserView, SectionHandle, WallExposureView};
 // `ExposureSection` is re-exported above (the controller's public surface).
 
 use chrono::NaiveDate;
@@ -93,6 +92,10 @@ pub use new_storey::NewStoreyPromptUiData;
 use new_storey::{NewStoreyStage, PendingNewStorey};
 use openings::PendingOpening;
 pub use openings::{ElevationView, OpeningPromptUiData, OpeningToolKind, OpeningViewKind};
+use partition::PendingCut;
+pub use partition::{
+    PartitionDimAxis, PartitionDimPrompt, PartitionInset, PartitionRegionView, PartitionView,
+};
 #[cfg(test)]
 use persistence::PARAMETRIC_SNAPSHOT_VERSION;
 pub use review::CollinearityReview;
@@ -172,12 +175,6 @@ pub struct AppController {
     /// choice.
     pending_cut: Option<[ShapeSlot; 2]>,
     /// True when the editor is marking HORIZONTAL-surface (floor/ceiling)
-    /// exposure: tapping a region picks it and the type buttons set its
-    /// FloorExposure/CeilingExposure. Mutually exclusive with the sibling
-    /// Mapping tools (wall exposure / living-area / phase / step). Toggled by
-    /// the UI. Manual marks are keyed by region centroid (durable; outside undo,
-    /// like the riser exposure).
-    surface_exposure_mode: bool,
     /// True when the editor is tagging construction-phase areas (year of
     /// construction). Routes `DrawPerpWalls` to phase carving; mutually
     /// exclusive with living-area / exposure modes. Toggled by the UI.
@@ -259,6 +256,23 @@ pub struct AppController {
     elevation_drag: Option<ber_model::ber::openings::OpeningRef>,
     /// The opening selected in the elevation, for Delete (transient).
     elevation_selection: Option<ber_model::ber::openings::OpeningRef>,
+    /// When `Some`, the PARTITION overlay is open for this outline wall (by its
+    /// stable start `VertexId`): the canvas shows the unrolled wall face and
+    /// strokes/taps cut + attribute it. Opened from the wall-exposure toolbar.
+    /// Transient — cleared on storey switch / mode exit. The DURABLE record is
+    /// `StoreyDoc::wall_face_partitions`; see `partition.rs`.
+    partition_wall: Option<VertexId>,
+    /// The in-flight freehand partition stroke in WALL-LOCAL coords (along,
+    /// height) — the UI converts screen → wall-local before pushing. Cleared on
+    /// stroke end. Transient.
+    partition_stroke: Vec<Point2f32>,
+    /// A partition cut mid-dimensioning: its snapped endpoints + per-coordinate
+    /// free flags, awaiting typed dimensions for the un-snapped coords. Transient
+    /// (outside undo); `None` when no cut is in flight.
+    partition_pending: Option<PendingCut>,
+    /// The wall-local sample point of the face region tapped, for assigning its
+    /// exposure. Transient; `None` when no region is selected.
+    partition_selected_region: Option<Point2f32>,
     /// The in-flight NEW-STOREY flow (thickness → method choice → suggestion
     /// browse). Controller-transient — OUTSIDE undo, never persisted; set by
     /// `add_storey`, cleared on storey switch / load / open / exit. See
@@ -369,7 +383,6 @@ impl AppController {
             exposure_sel: None,
             exposure_drag: None,
             selected_riser: None,
-            surface_exposure_mode: false,
             pending_cut: None,
             phase_mode: false,
             phase_regions: HashMap::new(),
@@ -390,6 +403,10 @@ impl AppController {
             elevation_wall: None,
             elevation_drag: None,
             elevation_selection: None,
+            partition_wall: None,
+            partition_stroke: Vec::new(),
+            partition_pending: None,
+            partition_selected_region: None,
             pending_new_storey: None,
             inherited_seed_pending: HashSet::new(),
             splice_debug: Vec::new(),

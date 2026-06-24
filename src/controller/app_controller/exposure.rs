@@ -17,7 +17,6 @@
 //! by giving `ExposureSection` a face subdivision — see the plan; the BER output
 //! (`WallRegion.polygon` is an arbitrary `Polygon3D`) already allows it.
 use super::*;
-use ber_model::ber::structural::{CeilingExposure, FloorExposure};
 use document::{range_at, RiserKind};
 use manip_plan::{lerp_along, project_distance_along as project_distance, segment_len as wall_len};
 
@@ -44,6 +43,11 @@ pub struct WallExposureView {
     pub b: (f64, f64),
     pub length_m: f32,
     pub sections: Vec<ExposureSection>,
+    /// For a FACE-PARTITIONED wall (which has no 1-D `sections`): the DISTINCT
+    /// exposures across its face regions, first-seen order. Empty for an
+    /// ordinary wall. The plan draws this wall as an INTERLEAVED line cycling
+    /// these colours, so a mixed wall reads as mixed at a glance.
+    pub partition_exposures: Vec<WallExposure>,
 }
 
 /// The selected wall's current section selection, for drawing handles and the
@@ -54,16 +58,6 @@ pub struct ExposureSelection {
     pub start_m: f32,
     pub end_m: f32,
     pub length_m: f32,
-}
-
-/// One horizontal surface (floor OR ceiling) region for the surface-exposure
-/// overlay: its world-coord ring and its current boundary condition. Exactly one
-/// of `floor`/`ceiling` is `Some` (the kind it came from). The UI tints the ring
-/// by the exposure and lets a tap inside it set a new one.
-pub struct SurfaceExposureView {
-    pub ring: Vec<(f64, f64)>,
-    pub floor: Option<FloorExposure>,
-    pub ceiling: Option<CeilingExposure>,
 }
 
 /// One derived RISER wall for rendering/selection: its stable region id, its
@@ -93,6 +87,9 @@ impl AppController {
     /// envelope, so entering forces the outline active (and leaves living-area
     /// mode). All selection/drag state is cleared.
     pub fn set_exposure_mode(&mut self, on: bool) {
+        // The wall-face partition view lives under exposure mode; leaving (or
+        // re-entering) exposure must not leave it stranded over another tool.
+        self.close_wall_partition();
         self.exposure_mode = on;
         self.selected_exposure_wall = None;
         self.exposure_sel = None;
@@ -106,8 +103,6 @@ impl AppController {
             // reads it). Then leave living-area mode and act on the outline.
             self.sync_active();
             self.set_living_area_mode(false);
-            // Mutually exclusive with the horizontal-surface exposure tool too.
-            self.surface_exposure_mode = false;
             self.phase_mode = false;
             self.step_mode = false;
             // Mutually exclusive with the ceiling-step line and roof-point
@@ -172,13 +167,22 @@ impl AppController {
         //    marked section or an un-marked gap) containing the tapped distance.
         //    So once a wall is split, tapping a leftover piece selects only that
         //    piece, not the whole wall.
+        // Hit-test against the OUTLINE slot — the same source the renderer
+        // (`wall_exposure_views`) and `selected_wall_geom` read. Exposure mode
+        // does NOT load the outline into the live edit buffer
+        // (`document.floor_plan`, see `set_exposure_mode`); on a storey whose
+        // active shape is a living area (etc.) the live buffer holds DIFFERENT
+        // geometry + VertexIds, so hit-testing it yields a vid absent from the
+        // outline's `perimeter_walls()` and the wall silently fails to select.
         match self
             .document
+            .outline
             .floor_plan
             .hit_test_wall(world_x, world_y, tol)
         {
             Some((0, edge_start)) => {
-                self.selected_exposure_wall = self.document.floor_plan.vertex_id_at(0, edge_start);
+                self.selected_exposure_wall =
+                    self.document.outline.floor_plan.vertex_id_at(0, edge_start);
                 self.selected_riser = None;
                 self.exposure_drag = None;
                 self.exposure_sel = if let Some((a, b, len)) = self.selected_wall_geom() {
@@ -395,133 +399,6 @@ impl AppController {
         }
     }
 
-    /// True when the editor is marking HORIZONTAL-surface (floor/ceiling)
-    /// exposure (drives the UI toggle and routes a canvas tap to region pick).
-    pub fn surface_exposure_mode(&self) -> bool {
-        self.surface_exposure_mode
-    }
-
-    /// Enter or leave horizontal-surface exposure mode. Like the sibling Mapping
-    /// tools it forces the storey OUTLINE active and is mutually exclusive with
-    /// wall-exposure / living-area / phase / step / ceiling-step / roof-point
-    /// modes. No selection state of its own (a tap sets the region under it).
-    pub fn set_surface_exposure_mode(&mut self, on: bool) {
-        self.surface_exposure_mode = on;
-        if on {
-            self.exit_openings_mode();
-            // Flush the live buffer to its slot first (same reason as
-            // `set_exposure_mode`: the renderer reads `outline.floor_plan`).
-            self.sync_active();
-            self.set_living_area_mode(false);
-            self.exposure_mode = false;
-            self.selected_exposure_wall = None;
-            self.exposure_sel = None;
-            self.exposure_drag = None;
-            self.selected_riser = None;
-            self.phase_mode = false;
-            self.step_mode = false;
-            self.ceiling_step_mode = false;
-            self.pending_ceiling_step = None;
-            self.roof_point_mode = false;
-            self.pending_roof_point = None;
-            self.pending_roof_ridge = None;
-            self.pending_roof_rect = None;
-        }
-    }
-
-    /// Set the FLOOR exposure of the resolved floor region under the plan point —
-    /// the canvas-tap manual-marking op. OUTSIDE undo (like `set_riser_exposure`):
-    /// the override lives on the durable `StoreyDoc::floor_exposure` side-table
-    /// (centroid-keyed), which the next resolve stamps back onto the re-derived
-    /// region, so it survives the id churn and the reload (autosave persists the
-    /// snapshot). Materializes first so the tap hits current geometry. No-op when
-    /// no record/storey, or no floor region is under the tap.
-    pub fn set_floor_exposure_at(&mut self, world_x: f64, world_y: f64, e: FloorExposure) {
-        self.materialize();
-        let Some(idx) = self.current_storey_idx else {
-            return;
-        };
-        let storey = match self
-            .current_record
-            .as_ref()
-            .and_then(|r| r.data.storeys.get(idx))
-        {
-            Some(s) => s.clone(),
-            None => return,
-        };
-        if let Some(sd) = self.document.storeys.get_mut(idx) {
-            if sd
-                .set_floor_exposure_at(&storey, world_x, world_y, e)
-                .is_some()
-            {
-                let _ = self.mark_dirty();
-            }
-        }
-    }
-
-    /// Set the CEILING exposure of the resolved ceiling/roof region under the
-    /// plan point — the ceiling mirror of
-    /// [`set_floor_exposure_at`](Self::set_floor_exposure_at). Same durable,
-    /// outside-undo semantics.
-    pub fn set_ceiling_exposure_at(&mut self, world_x: f64, world_y: f64, e: CeilingExposure) {
-        self.materialize();
-        let Some(idx) = self.current_storey_idx else {
-            return;
-        };
-        let storey = match self
-            .current_record
-            .as_ref()
-            .and_then(|r| r.data.storeys.get(idx))
-        {
-            Some(s) => s.clone(),
-            None => return,
-        };
-        if let Some(sd) = self.document.storeys.get_mut(idx) {
-            if sd
-                .set_ceiling_exposure_at(&storey, world_x, world_y, e)
-                .is_some()
-            {
-                let _ = self.mark_dirty();
-            }
-        }
-    }
-
-    /// The active storey's resolved horizontal-surface regions (floors then
-    /// ceilings) with their current boundary condition, for the surface-exposure
-    /// overlay — parallel to [`wall_exposure_views`](Self::wall_exposure_views)
-    /// but reading the RESOLVED `FloorRegion.exposure` / `CeilingRegion.exposure`
-    /// (the durable store flows there via the resolve stamp). Empty when no
-    /// record/storey.
-    pub fn surface_exposure_views(&self) -> Vec<SurfaceExposureView> {
-        let Some(idx) = self.current_storey_idx else {
-            return Vec::new();
-        };
-        let Some(storey) = self
-            .current_record
-            .as_ref()
-            .and_then(|r| r.data.storeys.get(idx))
-        else {
-            return Vec::new();
-        };
-        let mut views = Vec::new();
-        let floor_rings = storey.floors.to_vertex_lists();
-        for (region, ring) in storey.floors.regions.iter().zip(&floor_rings) {
-            views.push(SurfaceExposureView {
-                ring: ring.iter().map(|p| (p.x, p.y)).collect(),
-                floor: Some(region.exposure),
-                ceiling: None,
-            });
-        }
-        for region in &storey.roofs.regions {
-            views.push(SurfaceExposureView {
-                ring: region.polygon.exterior.iter().map(|v| (v.x, v.y)).collect(),
-                floor: None,
-                ceiling: Some(region.exposure),
-            });
-        }
-        views
-    }
-
     /// The outline perimeter walls with their sections + selection state, for
     /// rendering. World coords (f64), ring order.
     ///
@@ -536,21 +413,41 @@ impl AppController {
         // Sections come DIRECTLY from the editing model (`document.wall_sections`,
         // where paint/clear/set-remaining mutate) — no round-trip through the
         // committed BER's `WallRegions`. Selection is live interaction state.
+        let height = self.face_height();
         self.document
             .outline
             .floor_plan
             .perimeter_walls()
             .into_iter()
-            .map(|(vid, a, b)| WallExposureView {
-                a: (a.x as f64, a.y as f64),
-                b: (b.x as f64, b.y as f64),
-                length_m: wall_len(a, b),
-                sections: self
-                    .document
-                    .wall_sections
-                    .get(&vid)
-                    .cloned()
-                    .unwrap_or_default(),
+            .map(|(vid, a, b)| {
+                let length_m = wall_len(a, b);
+                // A face-partitioned wall carries its exposure in 2-D face
+                // regions, not 1-D sections — collect the DISTINCT exposures so
+                // the plan can draw it interleaved. (The exposure SET is
+                // height-independent, so any positive face height works.)
+                let partition_exposures = if self.document.is_wall_partitioned(vid) {
+                    let mut exps: Vec<WallExposure> = Vec::new();
+                    for (_, e) in self.document.partition_face_regions(vid, length_m, height) {
+                        if !exps.contains(&e) {
+                            exps.push(e);
+                        }
+                    }
+                    exps
+                } else {
+                    Vec::new()
+                };
+                WallExposureView {
+                    a: (a.x as f64, a.y as f64),
+                    b: (b.x as f64, b.y as f64),
+                    length_m,
+                    sections: self
+                        .document
+                        .wall_sections
+                        .get(&vid)
+                        .cloned()
+                        .unwrap_or_default(),
+                    partition_exposures,
+                }
             })
             .collect()
     }

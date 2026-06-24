@@ -244,17 +244,19 @@ impl StoreyDoc {
     /// along the wall by distance). The shell projects these into BER
     /// `WallRegion`s, so every wall exists in the resolved geometry whether
     /// it's been marked or not.
+    ///
+    /// A FACE-PARTITIONED wall (present in
+    /// [`wall_face_partitions`](StoreyDoc::wall_face_partitions)) emits a SINGLE
+    /// full-length `Unset` segment — just the base extent. Its 2-D face split and
+    /// per-region exposure carve happen later in the resolve pass (from
+    /// [`partition_face_regions`](StoreyDoc::partition_face_regions)), not here in
+    /// the 1-D coverage path.
     pub fn wall_exposure_segments(&self) -> Vec<(Point2f64, Point2f64, WallExposure)> {
         self.outline
             .floor_plan
             .perimeter_walls()
             .into_iter()
             .flat_map(|(vid, a, b)| {
-                let sections = self
-                    .wall_sections
-                    .get(&vid)
-                    .map(Vec::as_slice)
-                    .unwrap_or(&[]);
                 let len = ((b.x - a.x).powi(2) + (b.y - a.y).powi(2)).sqrt();
                 let lerp = move |d: f32| {
                     let t = if len > 1e-6 { d / len } else { 0.0 };
@@ -263,6 +265,16 @@ impl StoreyDoc {
                         (a.y + t * (b.y - a.y)) as f64,
                     )
                 };
+                // Partitioned walls bypass the 1-D section expansion: one
+                // full-length Unset base segment; the 2-D carve is resolve's job.
+                if self.is_wall_partitioned(vid) {
+                    return vec![(lerp(0.0), lerp(len), WallExposure::Unset)];
+                }
+                let sections = self
+                    .wall_sections
+                    .get(&vid)
+                    .map(Vec::as_slice)
+                    .unwrap_or(&[]);
                 wall_coverage(len, sections)
                     .into_iter()
                     .map(move |(s, e, exposure)| (lerp(s), lerp(e), exposure))
@@ -421,6 +433,12 @@ impl StoreyDoc {
     pub fn set_all_remaining_exposed(&mut self) -> bool {
         let mut changed = false;
         for (vid, a, b) in self.outline.floor_plan.perimeter_walls() {
+            // A FACE-PARTITIONED wall is classified by its 2-D regions, not 1-D
+            // sections — skip it. Painting a section here would both miscount it
+            // as "remaining" and corrupt it (it has no `wall_sections`).
+            if self.wall_face_partitions.contains_key(&vid) {
+                continue;
+            }
             let len = segment_len(a, b);
             let unset: Vec<(f32, f32)> = wall_coverage(
                 len,
@@ -455,6 +473,25 @@ impl StoreyDoc {
         }
         walls.into_iter().all(|(vid, a, b)| {
             let len = segment_len(a, b);
+            // A FACE-PARTITIONED wall is complete iff none of its face regions is
+            // left `Unset`. The stored samples/cuts carry ABSOLUTE heights, so
+            // subdivide against a face height tall enough to contain them all
+            // (region arrangement is height-invariant; the height only has to
+            // keep every sample inside its region).
+            if let Some(part) = self.wall_face_partitions.get(&vid) {
+                let mut h = 1.0_f32;
+                for c in &part.cuts {
+                    h = h.max(c.a.y).max(c.b.y);
+                }
+                for (s, _) in &part.regions {
+                    h = h.max(s.y);
+                }
+                h += 1.0;
+                return self
+                    .partition_face_regions(vid, len, h)
+                    .iter()
+                    .all(|(_, e)| *e != WallExposure::Unset);
+            }
             wall_coverage(
                 len,
                 self.wall_sections
@@ -720,6 +757,56 @@ mod tests {
         );
     }
 
+    /// A face-PARTITIONED wall emits exactly ONE full-length `Unset` segment,
+    /// regardless of any prior 1-D sections — vs. the multi-range expansion a
+    /// sectioned (non-partitioned) wall yields. The 2-D carve is resolve's job.
+    #[test]
+    fn partitioned_wall_emits_single_unset_segment() {
+        use crate::PartitionCut;
+        let mut doc = square_doc();
+        let (vid, a, b) = doc.outline.floor_plan.perimeter_walls()[0];
+        let len = segment_len(a, b);
+        // Sectioned wall: a painted mid-range expands to gap/mark/gap (3 ranges).
+        doc.set_wall_section(vid, 1.0, 3.0, len, WallExposure::SemiExposed);
+        let n_sectioned = doc
+            .wall_exposure_segments()
+            .into_iter()
+            .filter(|(p, q, _)| {
+                // segments belonging to wall0 lie along its span
+                domain::points::point_to_segment_distance(
+                    p.x, p.y, a.x as f64, a.y as f64, b.x as f64, b.y as f64,
+                ) < 1e-6
+                    && domain::points::point_to_segment_distance(
+                        q.x, q.y, a.x as f64, a.y as f64, b.x as f64, b.y as f64,
+                    ) < 1e-6
+            })
+            .count();
+        assert_eq!(n_sectioned, 3, "sectioned wall expands to 3 ranges");
+
+        // Partition the wall → commit clears its sections; now ONE Unset segment.
+        doc.commit_partition_cut(
+            vid,
+            PartitionCut {
+                a: Point2f32::new(0.0, 1.0),
+                b: Point2f32::new(len, 1.0),
+            },
+        );
+        let wall0_segs: Vec<_> = doc
+            .wall_exposure_segments()
+            .into_iter()
+            .filter(|(p, q, _)| {
+                domain::points::point_to_segment_distance(
+                    p.x, p.y, a.x as f64, a.y as f64, b.x as f64, b.y as f64,
+                ) < 1e-6
+                    && domain::points::point_to_segment_distance(
+                        q.x, q.y, a.x as f64, a.y as f64, b.x as f64, b.y as f64,
+                    ) < 1e-6
+            })
+            .collect();
+        assert_eq!(wall0_segs.len(), 1, "partitioned wall → single segment");
+        assert_eq!(wall0_segs[0].2, WallExposure::Unset);
+    }
+
     /// "Set remaining → Exposed" paints every Unset coverage range: whole
     /// unmarked walls AND the gaps around painted sections. Idempotent.
     #[test]
@@ -895,5 +982,66 @@ mod tests {
         ber.storeys.push(Storey::default());
         assert!(!surfaces_exposure_complete(&ber, 1));
         assert!(!surfaces_exposure_complete(&ber, 9));
+    }
+
+    /// A FACE-PARTITIONED wall is owned by the 2-D partition, not the 1-D
+    /// "remaining → Exposed" machinery: it's excluded from the bulk paint (which
+    /// must not corrupt it), and `exposure_complete` keys off whether its face
+    /// regions are all classified — not its (cleared) `wall_sections`. Regression
+    /// for the "partition a wall → it shows as 1 remaining" report.
+    #[test]
+    fn partitioned_wall_excluded_from_remaining_and_completes_when_set() {
+        let mut doc = square_doc();
+        let walls = doc.outline.floor_plan.perimeter_walls();
+        let (vid, a, b) = walls[0];
+        let len = segment_len(a, b);
+        // Classify the other three walls fully Exposed.
+        for (v, a2, b2) in &walls {
+            if *v != vid {
+                let l = segment_len(*a2, *b2);
+                doc.set_wall_section(*v, 0.0, l, l, WallExposure::Exposed);
+            }
+        }
+        // Partition wall 0 with a vertical cut into two halves (sections cleared).
+        doc.commit_partition_cut(
+            vid,
+            crate::PartitionCut {
+                a: Point2f32::new(len * 0.5, 0.0),
+                b: Point2f32::new(len * 0.5, 2.4),
+            },
+        );
+        // One half still Unset → storey not complete; the bulk button leaves the
+        // partitioned wall alone (no spurious section, no change).
+        assert!(
+            !doc.exposure_complete(),
+            "an unset face region blocks completion"
+        );
+        assert!(
+            !doc.set_all_remaining_exposed(),
+            "partitioned wall isn't bulk-painted"
+        );
+        assert!(
+            !doc.wall_sections.contains_key(&vid),
+            "partitioned wall stays section-free"
+        );
+        // Set both halves → the wall (and storey) is complete.
+        doc.set_partition_region_exposure(
+            vid,
+            Point2f32::new(len * 0.25, 1.0),
+            WallExposure::Exposed,
+            len,
+            2.4,
+        );
+        doc.set_partition_region_exposure(
+            vid,
+            Point2f32::new(len * 0.75, 1.0),
+            WallExposure::SemiExposed,
+            len,
+            2.4,
+        );
+        assert!(
+            doc.exposure_complete(),
+            "all face regions classified → complete"
+        );
     }
 }

@@ -82,6 +82,7 @@ impl AppController {
     /// Enter/leave windows/doors mode. Mutually exclusive with the other area
     /// tools (mirrors `set_exposure_mode`).
     pub fn set_openings_mode(&mut self, on: bool) {
+        self.close_wall_partition();
         self.openings_mode = on;
         self.pending_opening = None;
         self.elevation_wall = None;
@@ -91,7 +92,6 @@ impl AppController {
             self.sync_active();
             self.set_living_area_mode(false);
             self.exposure_mode = false;
-            self.surface_exposure_mode = false;
             self.selected_exposure_wall = None;
             self.exposure_sel = None;
             self.exposure_drag = None;
@@ -115,6 +115,9 @@ impl AppController {
         self.elevation_wall = None;
         self.elevation_drag = None;
         self.elevation_selection = None;
+        // Every sibling area-mode setter routes through here, so this is the one
+        // chokepoint that also closes any open wall-face partition view.
+        self.close_wall_partition();
     }
 
     pub fn set_openings_tool(&mut self, tool: OpeningToolKind) {

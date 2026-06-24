@@ -467,6 +467,40 @@ fn split_wall_by_segment(
     Some((mk(h0), mk(h1)))
 }
 
+/// Split one wall along the in-plane line through plan/height points `p0`→`p1`
+/// (both on the wall's plane), the ARBITRARY-DIAGONAL generalisation of
+/// [`split_wall_by_segment`] (which only cuts on a VERTICAL plane through the
+/// base). Returns one sub-wall per non-degenerate half (≥ 3 vertices) the cut
+/// produces — usually two, but one (or even zero) when the line misses or only
+/// grazes the face. Each sub-wall copies the parent's `exposure` +
+/// `construction_id`, gets a fresh id and empty `opes`; the CALLER re-attributes
+/// exposure per half. `p0`/`p1` carry the height (z) directly, so the line may
+/// be diagonal across the elevation — the wall-face partition's drawn cut.
+pub fn split_wall_by_line(wall: &WallRegion, p0: Point3f64, p1: Point3f64) -> Vec<WallRegion> {
+    let dir = p1 - p0;
+    let len = (dir.x * dir.x + dir.y * dir.y + dir.z * dir.z).sqrt();
+    if len < 1e-9 {
+        return vec![wall.clone()]; // degenerate cut — no division
+    }
+    let line = SplitLine3D {
+        point: p0,
+        direction: Vector3f64::new(dir.x / len, dir.y / len, dir.z / len),
+        normal: Vector3f64::new(0.0, 0.0, 0.0), // unused by `split_by_line`
+    };
+    wall.polygon
+        .split_by_line(&line)
+        .into_iter()
+        .filter(|poly| poly.exterior.len() >= 3)
+        .map(|polygon| WallRegion {
+            id: ItemId::default(),
+            polygon,
+            exposure: wall.exposure,
+            opes: Opes::default(),
+            construction_id: wall.construction_id,
+        })
+        .collect()
+}
+
 /// Half-width (m) of the FLOOR BAND used by [`WallRegion::base_edge`] to tell
 /// a wall's base profile apart from a coplanar-flush-merged riser arm that
 /// continues the wall LINE: a base vertex sits within this of the base z (a

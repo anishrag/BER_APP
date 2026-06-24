@@ -1019,7 +1019,9 @@ pub fn render_wall_exposure(
     if walls.is_empty() && risers.is_empty() {
         return;
     }
-    let any_set = walls.iter().any(|w| !w.sections.is_empty());
+    let any_set = walls
+        .iter()
+        .any(|w| !w.sections.is_empty() || !w.partition_exposures.is_empty());
     if !exposure_mode && !any_set && risers.is_empty() {
         return;
     }
@@ -1051,6 +1053,22 @@ pub fn render_wall_exposure(
     };
 
     for w in walls {
+        // A FACE-PARTITIONED wall (2-D regions, no 1-D sections): draw the whole
+        // wall as an INTERLEAVED line cycling its distinct region exposures, so a
+        // mixed wall reads as mixed in the plan. Dense enough that each colour
+        // recurs several times along the wall.
+        if !w.partition_exposures.is_empty() {
+            let segs = (w.partition_exposures.len() * 6).max(12);
+            for k in 0..segs {
+                let d0 = w.length_m * (k as f32) / (segs as f32);
+                let d1 = w.length_m * ((k + 1) as f32) / (segs as f32);
+                let c = color_of(w.partition_exposures[k % w.partition_exposures.len()]);
+                let pa = along(w.a, w.b, w.length_m, d0);
+                let pb = along(w.a, w.b, w.length_m, d1);
+                painter.line_segment([pa, pb], egui::Stroke::new(width, c));
+            }
+            continue;
+        }
         // Faint full wall in mode, so un-marked gaps stay visible under the
         // coloured sections drawn on top.
         if exposure_mode {

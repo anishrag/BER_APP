@@ -171,7 +171,6 @@ impl AppController {
         self.vertex_drop_prompt = None;
         self.living_area_mode = false;
         self.exposure_mode = false;
-        self.surface_exposure_mode = false;
         self.phase_mode = false;
         self.step_mode = false;
         self.selected_exposure_wall = None;
@@ -316,7 +315,6 @@ impl AppController {
         // outline mode. Step mode is the same kind of tool — same reset.
         self.phase_mode = false;
         self.step_mode = false;
-        self.surface_exposure_mode = false;
         self.selected_exposure_wall = None;
         self.exposure_sel = None;
         self.exposure_drag = None;

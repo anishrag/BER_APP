@@ -132,7 +132,6 @@ impl AppController {
         self.exposure_sel = None;
         self.exposure_drag = None;
         self.selected_riser = None;
-        self.surface_exposure_mode = false;
         self.pending_cut = None;
         self.phase_mode = false;
         self.phase_regions.clear();

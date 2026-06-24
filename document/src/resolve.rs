@@ -5,9 +5,9 @@ use crate::{CeilingStepRegion, PhaseRegion, StepRegion, StoreyDoc};
 use ber_model::ber::ber_struct::Ber;
 use ber_model::ber::common::{ConstructionPhase, ItemId};
 use ber_model::ber::structural::{
-    CeilingRegions, FloorRegions, Polygon3D, Storey, WallExposure, WallRegions,
+    split_wall_by_line, CeilingRegions, FloorRegions, Polygon3D, Storey, WallExposure, WallRegions,
 };
-use domain::points::{to_f64, Point2f32, Point2f64};
+use domain::points::{to_f64, Point2f32, Point2f64, Point3f64};
 
 /// Placeholder top for derived wall quads until the storey's ceiling height is
 /// set — never visible in 3D (gated); walls re-extrude on the next materialize
@@ -391,6 +391,13 @@ pub fn resolve_storey(
         .map(|f| (f, WallExposure::Unset))
         .collect();
     storey.walls = walls.with_risers(risers, wall_cid);
+    // WALL FACE PARTITIONS: a perimeter wall the assessor split along arbitrary
+    // (diagonal) in-plane lines resolves to one region per face partition, each
+    // carrying its own painted exposure. Runs HERE — after `with_risers` (the
+    // perimeter set is final + risers appended) and BEFORE the stamp passes /
+    // openings tail (which see the now-final walls). Mirrors the floor/roof
+    // carve-label: session-driven, recomputed every resolve.
+    apply_face_partitions(s, &mut storey);
     // Stamp riser exposure from the durable side-table (keyed by base edge) —
     // risers have no perimeter VertexId, so this is their durable identity.
     stamp_riser_exposure(s, &mut storey);
@@ -414,6 +421,140 @@ pub fn resolve_storey(
     // rebuilt from placements (ceiling ids regenerate, so it can't be carried).
     ber_model::ber::openings::rebuild_opes(&mut storey);
     storey
+}
+
+/// Rebuild `storey.walls.regions`, splitting every face-partitioned perimeter
+/// wall into one [`WallRegion`] per drawn face region and attributing each its
+/// painted exposure. Mirrors [`stamp_riser_exposure`]'s shape (read `s`, mutate
+/// `storey`); runs after `with_risers` so the perimeter + risers are final.
+///
+/// A wall is matched to its perimeter edge by the SAME base-midpoint-on-segment
+/// test the exposure recovery uses ([`StoreyDoc::sections_from_wall_regions`]):
+/// the region's `base_frame` midpoint within 1e-2 m of a perimeter segment. A
+/// region that matches no perimeter wall, or whose wall is not partitioned, is
+/// kept unchanged (risers, plain perimeter walls, phase-split sub-walls of an
+/// un-partitioned wall). A partitioned wall that enters as N ≥ 1 regions (e.g. a
+/// phase boundary also crossed it) is processed region-by-region.
+///
+/// Each [`PartitionCut`](crate::PartitionCut) is wall-LOCAL `(along_m, height_m)`
+/// from the wall's start `a` with z measured from the FLOOR (z = 0), so the two
+/// cut endpoints lift to 3-D on the wall plane via the perimeter direction. The
+/// cut is an INFINITE line (matching the 2-D `subdivide_face` model), so it
+/// divides the whole running set of sub-polygons. Exposure is attributed
+/// base_z-AGNOSTICALLY (the wall may extend below the floor on upper storeys):
+/// each sub-poly vertex and each stored sample project to wall-local `(along, z)`
+/// and the containing sample's exposure wins (default [`WallExposure::Unset`]).
+fn apply_face_partitions(s: &StoreyDoc, storey: &mut Storey) {
+    if s.wall_face_partitions.is_empty() {
+        return;
+    }
+    const TOL_M: f64 = 1e-2;
+    let perim = s.outline.floor_plan.perimeter_walls();
+    let mut out: Vec<ber_model::ber::structural::WallRegion> = Vec::new();
+    for region in std::mem::take(&mut storey.walls.regions) {
+        // The perimeter wall this region's base lies on (midpoint-on-segment).
+        let matched = region.base_frame().and_then(|(origin, (ux, uy), wlen, _)| {
+            let mid = Point2f64::new(origin.x + ux * wlen * 0.5, origin.y + uy * wlen * 0.5);
+            perim.iter().copied().find(|(_, a, b)| {
+                domain::points::point_to_segment_distance(
+                    mid.x, mid.y, a.x as f64, a.y as f64, b.x as f64, b.y as f64,
+                ) < TOL_M
+            })
+        });
+        let Some((vid, a, b)) = matched.filter(|(vid, _, _)| s.is_wall_partitioned(*vid)) else {
+            out.push(region); // riser / plain / un-partitioned wall — unchanged
+            continue;
+        };
+        out.extend(split_partitioned_wall(s, &region, vid, a, b));
+    }
+    storey.walls.regions = out;
+}
+
+/// Split one partitioned perimeter `region` (matched to perimeter edge `a`→`b`,
+/// wall `vid`) into one [`WallRegion`] per face region with its painted
+/// exposure. The split + exposure-attribution body of [`apply_face_partitions`].
+fn split_partitioned_wall(
+    s: &StoreyDoc,
+    region: &ber_model::ber::structural::WallRegion,
+    vid: manip_plan::VertexId,
+    a: Point2f32,
+    b: Point2f32,
+) -> Vec<ber_model::ber::structural::WallRegion> {
+    let part = &s.wall_face_partitions[&vid];
+    // Plan direction a→b (the partition's along-axis), in f64.
+    let (a64, b64) = (
+        Point2f64::new(a.x as f64, a.y as f64),
+        Point2f64::new(b.x as f64, b.y as f64),
+    );
+    let (dx, dy) = (b64.x - a64.x, b64.y - a64.y);
+    let plen = (dx * dx + dy * dy).sqrt();
+    if plen < 1e-9 {
+        return vec![region.clone()];
+    }
+    let (dirx, diry) = (dx / plen, dy / plen);
+    // Iteratively cut the running sub-poly set by each cut's infinite line.
+    let mut subs: Vec<Polygon3D> = vec![region.polygon.clone()];
+    for cut in &part.cuts {
+        // Lift each wall-local cut endpoint (along, height) onto the wall plane,
+        // z = height from the floor (z = 0), NOT base_z.
+        let p0 = Point3f64::new(
+            a64.x + cut.a.x as f64 * dirx,
+            a64.y + cut.a.x as f64 * diry,
+            cut.a.y as f64,
+        );
+        let p1 = Point3f64::new(
+            a64.x + cut.b.x as f64 * dirx,
+            a64.y + cut.b.x as f64 * diry,
+            cut.b.y as f64,
+        );
+        let mut next: Vec<Polygon3D> = Vec::new();
+        for poly in &subs {
+            // Reuse the wall-minting split to keep both halves' rings (≥ 3 v),
+            // then take just the polygons back (exposure is attributed below).
+            let tmp = ber_model::ber::structural::WallRegion {
+                id: ItemId::default(),
+                polygon: poly.clone(),
+                exposure: region.exposure,
+                opes: Default::default(),
+                construction_id: region.construction_id,
+            };
+            next.extend(
+                split_wall_by_line(&tmp, p0, p1)
+                    .into_iter()
+                    .map(|w| w.polygon),
+            );
+        }
+        subs = next;
+    }
+    // Attribute exposure per sub-poly base_z-agnostically: project sub-poly
+    // vertices to wall-local (along, height) and test each stored sample.
+    subs.into_iter()
+        .map(|poly| {
+            let projected: Vec<Point2f32> = poly
+                .exterior
+                .iter()
+                .map(|v| {
+                    let along = (v.x - a64.x) * dirx + (v.y - a64.y) * diry;
+                    Point2f32::new(along as f32, v.z as f32)
+                })
+                .collect();
+            let exposure = part
+                .regions
+                .iter()
+                .find(|(sample, _)| {
+                    manip_plan::point_in_polygon(&projected, Point2f32::new(sample.x, sample.y))
+                })
+                .map(|(_, e)| *e)
+                .unwrap_or(WallExposure::Unset);
+            ber_model::ber::structural::WallRegion {
+                id: ItemId::default(),
+                polygon: poly,
+                exposure,
+                opes: Default::default(),
+                construction_id: region.construction_id,
+            }
+        })
+        .collect()
 }
 
 /// Stamp riser exposure overrides from the durable `s.riser_exposure` table onto
@@ -3480,5 +3621,183 @@ mod tests {
             host.opes.windows.contains(&win_id),
             "the opes index links the re-pointed wall"
         );
+    }
+
+    /// The signed planar area of a (possibly non-axis-aligned) vertical wall
+    /// polygon: project to its own (along, z) frame using the first base edge
+    /// direction and shoelace. Enough for "the two halves sum to the whole".
+    fn wall_face_area(poly: &Polygon3D) -> f64 {
+        let e = &poly.exterior;
+        if e.len() < 3 {
+            return 0.0;
+        }
+        // Along-axis from the first edge that has plan extent.
+        let a = e[0];
+        let (mut dx, mut dy) = (0.0, 0.0);
+        for v in &e[1..] {
+            let (cx, cy) = (v.x - a.x, v.y - a.y);
+            if cx.hypot(cy) > 1e-9 {
+                let l = cx.hypot(cy);
+                dx = cx / l;
+                dy = cy / l;
+                break;
+            }
+        }
+        let pts: Vec<(f64, f64)> = e
+            .iter()
+            .map(|v| ((v.x - a.x) * dx + (v.y - a.y) * dy, v.z))
+            .collect();
+        let mut acc = 0.0;
+        for i in 0..pts.len() {
+            let (x0, y0) = pts[i];
+            let (x1, y1) = pts[(i + 1) % pts.len()];
+            acc += x0 * y1 - x1 * y0;
+        }
+        (acc * 0.5).abs()
+    }
+
+    /// A face-partitioned perimeter wall (one diagonal cut, two region samples)
+    /// resolves to TWO wall regions carrying the painted exposures; the other
+    /// three walls stay one Unset region each, and the two sub-faces' planar
+    /// areas sum to the original full-face area.
+    #[test]
+    fn face_partition_diagonal_splits_one_wall_into_two_exposures() {
+        let mut doc = square_doc(&[
+            Point2f32::new(0.0, 0.0),
+            Point2f32::new(4.0, 0.0),
+            Point2f32::new(4.0, 4.0),
+            Point2f32::new(0.0, 4.0),
+        ]);
+        let (vid, a, b) = doc.outline.floor_plan.perimeter_walls()[0];
+        let len = manip_plan::segment_len(a, b);
+        let mut ber = Ber::default();
+        ensure_storey_constructions(&mut ber, 0, &[]);
+        ber.set_default_ceiling_height(Some(0), 2.4);
+        let height = 2.4_f32;
+        let full_area = (len * height) as f64;
+
+        // A corner-to-corner diagonal splits the elevation into two triangles.
+        doc.commit_partition_cut(
+            vid,
+            crate::PartitionCut {
+                a: Point2f32::new(0.0, 0.0),
+                b: Point2f32::new(len, height),
+            },
+        );
+        // Below the diagonal (large along, small height) → Exposed;
+        // above (small along, large height) → SemiExposed.
+        doc.set_partition_region_exposure(
+            vid,
+            Point2f32::new(len * 0.75, height * 0.15),
+            WallExposure::Exposed,
+            len,
+            height,
+        );
+        doc.set_partition_region_exposure(
+            vid,
+            Point2f32::new(len * 0.25, height * 0.85),
+            WallExposure::SemiExposed,
+            len,
+            height,
+        );
+
+        let storey = resolve_storey(&doc, &ber, 0, &[], &[], &[]);
+
+        // 3 untouched walls (one region each) + the partitioned wall as 2.
+        assert_eq!(storey.walls.regions.len(), 5, "3 + 2 = 5 wall regions");
+        let by = |e: WallExposure| {
+            storey
+                .walls
+                .regions
+                .iter()
+                .filter(move |r| r.exposure == e)
+                .count()
+        };
+        assert_eq!(by(WallExposure::Exposed), 1);
+        assert_eq!(by(WallExposure::SemiExposed), 1);
+        assert_eq!(by(WallExposure::Unset), 3, "the other three walls");
+
+        // The two sub-faces of the partitioned wall sum to its full face.
+        let sub_area: f64 = storey
+            .walls
+            .regions
+            .iter()
+            .filter(|r| {
+                matches!(
+                    r.exposure,
+                    WallExposure::Exposed | WallExposure::SemiExposed
+                )
+            })
+            .map(|r| wall_face_area(&r.polygon))
+            .sum();
+        assert!(
+            (sub_area - full_area).abs() < 1e-3,
+            "two halves ({sub_area}) sum to the full face ({full_area})"
+        );
+        let _ = (a, b);
+    }
+
+    /// A partitioned wall with NO cuts + a single Ground sample resolves to ONE
+    /// region carrying Ground (no split, just exposure attribution).
+    #[test]
+    fn face_partition_no_cuts_one_sample_one_ground_region() {
+        let mut doc = square_doc(&[
+            Point2f32::new(0.0, 0.0),
+            Point2f32::new(4.0, 0.0),
+            Point2f32::new(4.0, 4.0),
+            Point2f32::new(0.0, 4.0),
+        ]);
+        let (vid, _a, _b) = doc.outline.floor_plan.perimeter_walls()[0];
+        let len = manip_plan::segment_len(vid_edge(&doc, vid).0, vid_edge(&doc, vid).1);
+        let height = 2.4_f32;
+        // Create the partition entry with no cuts, then attribute one sample.
+        doc.wall_face_partitions.entry(vid).or_default();
+        doc.set_partition_region_exposure(
+            vid,
+            Point2f32::new(len * 0.5, height * 0.5),
+            WallExposure::Ground,
+            len,
+            height,
+        );
+        assert!(doc.is_wall_partitioned(vid));
+        assert!(doc.wall_face_partitions[&vid].cuts.is_empty());
+
+        let mut ber = Ber::default();
+        ensure_storey_constructions(&mut ber, 0, &[]);
+        ber.set_default_ceiling_height(Some(0), 2.4);
+        let storey = resolve_storey(&doc, &ber, 0, &[], &[], &[]);
+
+        assert_eq!(storey.walls.regions.len(), 4, "no split — still four walls");
+        assert_eq!(
+            storey
+                .walls
+                .regions
+                .iter()
+                .filter(|r| r.exposure == WallExposure::Ground)
+                .count(),
+            1,
+            "the no-cut partitioned wall carries its single Ground sample"
+        );
+        assert_eq!(
+            storey
+                .walls
+                .regions
+                .iter()
+                .filter(|r| r.exposure == WallExposure::Unset)
+                .count(),
+            3
+        );
+    }
+
+    /// The perimeter edge endpoints for `vid`.
+    fn vid_edge(doc: &StoreyDoc, vid: manip_plan::VertexId) -> (Point2f32, Point2f32) {
+        let (_, a, b) = doc
+            .outline
+            .floor_plan
+            .perimeter_walls()
+            .into_iter()
+            .find(|(v, _, _)| *v == vid)
+            .unwrap();
+        (a, b)
     }
 }
