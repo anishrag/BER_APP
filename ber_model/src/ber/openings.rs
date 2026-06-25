@@ -488,109 +488,158 @@ pub fn delete_opening(storey: &mut Storey, opening: OpeningRef) {
     }
 }
 
-/// Space the wall's openings so none overlap: order-preserving, within
-/// `[margin, len-margin]`, min-gap `g`, each kept as close to its desired centre
-/// as possible. A door+sidelights assembly is treated as ONE rigid unit (its
-/// bounding width) and its members translate together. `WallTooShort` when the
-/// total can't fit; the storey is left unchanged in that case.
+/// Space the wall's openings so none overlap as 2D rectangles (along × height):
+/// openings that share a VERTICAL band (their height ranges overlap) compete for
+/// along-space and are order-preserving-packed apart within `[margin, len-margin]`
+/// at min-gap `g`; openings that are vertically DISJOINT (a window stacked above
+/// another) don't compete and may share an along. A door+sidelights assembly is
+/// ONE rigid unit (its bounding box). `WallTooShort` if some band can't fit; the
+/// storey is left unchanged in that case.
 pub(crate) fn redistribute_wall_openings(
     storey: &mut Storey,
     wall_id: ItemId,
 ) -> Result<(), OpeningError> {
     let len = wall_length(storey, wall_id).ok_or(OpeningError::NoHostRegion)?;
-    // Gather (ref, centre, width, assembly) for every opening on this wall.
-    let items: Vec<(OpeningRef, f32, f32, Option<ItemId>)> = wall_openings(storey, wall_id)
-        .into_iter()
-        .map(|o| (o.opening, o.along_m, o.width_m, o.assembly_id))
-        .collect();
-    if items.is_empty() {
+    let raw = wall_openings(storey, wall_id);
+    if raw.is_empty() {
         return Ok(());
     }
-    // Group into UNITS (an assembly = one unit; everything else singleton).
+    // A packing UNIT (an assembly = one rigid unit; everything else singleton),
+    // with its vertical band `[vmin, vmax] = [sill, sill + height]`.
     struct Unit {
         members: Vec<(OpeningRef, f32)>, // (ref, current centre)
         centre: f32,
         width: f32,
+        vmin: f32,
+        vmax: f32,
     }
-    let mut by_assembly: std::collections::HashMap<ItemId, Vec<(OpeningRef, f32, f32)>> =
+    let mut by_assembly: std::collections::HashMap<ItemId, Vec<WallOpening>> =
         std::collections::HashMap::new();
     let mut units: Vec<Unit> = Vec::new();
-    for (r, c, w, a) in &items {
-        match a {
-            Some(aid) => by_assembly.entry(*aid).or_default().push((*r, *c, *w)),
+    for o in &raw {
+        match o.assembly_id {
+            Some(aid) => by_assembly.entry(aid).or_default().push(*o),
             None => units.push(Unit {
-                members: vec![(*r, *c)],
-                centre: *c,
-                width: *w,
+                members: vec![(o.opening, o.along_m)],
+                centre: o.along_m,
+                width: o.width_m,
+                vmin: o.sill_m,
+                vmax: o.sill_m + o.height_m,
             }),
         }
     }
     for (_, members) in by_assembly {
         let left = members
             .iter()
-            .map(|(_, c, w)| c - w / 2.0)
+            .map(|o| o.along_m - o.width_m / 2.0)
             .fold(f32::INFINITY, f32::min);
         let right = members
             .iter()
-            .map(|(_, c, w)| c + w / 2.0)
+            .map(|o| o.along_m + o.width_m / 2.0)
+            .fold(f32::NEG_INFINITY, f32::max);
+        let vmin = members
+            .iter()
+            .map(|o| o.sill_m)
+            .fold(f32::INFINITY, f32::min);
+        let vmax = members
+            .iter()
+            .map(|o| o.sill_m + o.height_m)
             .fold(f32::NEG_INFINITY, f32::max);
         units.push(Unit {
-            members: members.iter().map(|(r, c, _)| (*r, *c)).collect(),
+            members: members.iter().map(|o| (o.opening, o.along_m)).collect(),
             centre: (left + right) / 2.0,
             width: right - left,
+            vmin,
+            vmax,
         });
     }
-    units.sort_by(|a, b| a.centre.partial_cmp(&b.centre).unwrap());
+
+    // Group units into VERTICAL BANDS: connected components over "vertical
+    // ranges overlap" (transitive, conservative). Units in different bands are
+    // vertically disjoint, so they pack independently and may share an along —
+    // a window directly above another is allowed; only a true 2D overlap (same
+    // band AND same along-span) is resolved by spacing.
     let n = units.len();
+    let mut comp = vec![usize::MAX; n];
+    let mut ncomp = 0usize;
+    for i in 0..n {
+        if comp[i] != usize::MAX {
+            continue;
+        }
+        let id = ncomp;
+        ncomp += 1;
+        let mut stack = vec![i];
+        comp[i] = id;
+        while let Some(u) = stack.pop() {
+            for v in 0..n {
+                if comp[v] == usize::MAX
+                    && units[u].vmin < units[v].vmax - 1e-4
+                    && units[v].vmin < units[u].vmax - 1e-4
+                {
+                    comp[v] = id;
+                    stack.push(v);
+                }
+            }
+        }
+    }
+
     let g = MIN_GAP_M;
     let m = END_MARGIN_M;
-    let needed: f32 = units.iter().map(|u| u.width).sum::<f32>() + g * (n as f32 - 1.0) + 2.0 * m;
-    if needed > len + 1e-4 {
-        return Err(OpeningError::WallTooShort {
-            needed_m: needed,
-            available_m: len,
-        });
-    }
-    // Left-packed lower bounds and right-packed upper bounds on each unit's
-    // LEFT edge, then relax toward the desired left edge, order-preserving.
-    let mut lo = vec![0.0f32; n];
-    let mut hi = vec![0.0f32; n];
-    lo[0] = m;
-    for i in 1..n {
-        lo[i] = lo[i - 1] + units[i - 1].width + g;
-    }
-    hi[n - 1] = len - m - units[n - 1].width;
-    for i in (0..n - 1).rev() {
-        hi[i] = hi[i + 1] - g - units[i].width;
-    }
-    let mut left = vec![0.0f32; n];
-    for i in 0..n {
-        // `hi` can dip a hair below `lo` from float rounding at an exact fit;
-        // raising the cap keeps `clamp` well-formed (it panics if min > max).
-        let hi_i = hi[i].max(lo[i]);
-        let desired = (units[i].centre - units[i].width / 2.0).clamp(lo[i], hi_i);
-        left[i] = if i == 0 {
-            desired
-        } else {
-            desired.max(left[i - 1] + units[i - 1].width + g)
-        };
-    }
-    for i in (0..n).rev() {
-        let cap = if i == n - 1 {
-            len - m - units[i].width
-        } else {
-            left[i + 1] - g - units[i].width
-        };
-        left[i] = left[i].min(cap).max(lo[i]);
-    }
-    // New centre per ref, applied as a translation of the unit's members.
     let mut new_centre: std::collections::HashMap<OpeningRef, f32> =
         std::collections::HashMap::new();
-    for (i, u) in units.iter().enumerate() {
-        let unit_new_centre = left[i] + u.width / 2.0;
-        let delta = unit_new_centre - u.centre;
-        for (r, c) in &u.members {
-            new_centre.insert(*r, *c + delta);
+    // Pack each band independently over the full [m, len-m] along range.
+    for id in 0..ncomp {
+        let mut idx: Vec<usize> = (0..n).filter(|&i| comp[i] == id).collect();
+        idx.sort_by(|&a, &b| units[a].centre.partial_cmp(&units[b].centre).unwrap());
+        let k = idx.len();
+        let needed: f32 =
+            idx.iter().map(|&i| units[i].width).sum::<f32>() + g * (k as f32 - 1.0) + 2.0 * m;
+        if needed > len + 1e-4 {
+            return Err(OpeningError::WallTooShort {
+                needed_m: needed,
+                available_m: len,
+            });
+        }
+        // Left-packed lower bounds and right-packed upper bounds on each unit's
+        // LEFT edge, then relax toward the desired left edge, order-preserving.
+        let mut lo = vec![0.0f32; k];
+        let mut hi = vec![0.0f32; k];
+        lo[0] = m;
+        for j in 1..k {
+            lo[j] = lo[j - 1] + units[idx[j - 1]].width + g;
+        }
+        hi[k - 1] = len - m - units[idx[k - 1]].width;
+        for j in (0..k - 1).rev() {
+            hi[j] = hi[j + 1] - g - units[idx[j]].width;
+        }
+        let mut left = vec![0.0f32; k];
+        for j in 0..k {
+            // `hi` can dip a hair below `lo` from float rounding at an exact fit;
+            // raising the cap keeps `clamp` well-formed (it panics if min > max).
+            let hi_j = hi[j].max(lo[j]);
+            let desired = (units[idx[j]].centre - units[idx[j]].width / 2.0).clamp(lo[j], hi_j);
+            left[j] = if j == 0 {
+                desired
+            } else {
+                desired.max(left[j - 1] + units[idx[j - 1]].width + g)
+            };
+        }
+        for j in (0..k).rev() {
+            let cap = if j == k - 1 {
+                len - m - units[idx[j]].width
+            } else {
+                left[j + 1] - g - units[idx[j]].width
+            };
+            left[j] = left[j].min(cap).max(lo[j]);
+        }
+        // New centre per ref, applied as a translation of the unit's members.
+        for (pos, &i) in idx.iter().enumerate() {
+            let u = &units[i];
+            let unit_new_centre = left[pos] + u.width / 2.0;
+            let delta = unit_new_centre - u.centre;
+            for (r, c) in &u.members {
+                new_centre.insert(*r, *c + delta);
+            }
         }
     }
     let apply = |p: &mut Option<OpeningPlacement>, r: OpeningRef| {
@@ -1202,6 +1251,37 @@ mod tests {
         assert!(
             sp[1].0 - sp[0].1 >= MIN_GAP_M - 1e-4,
             "no overlap after move: {sp:?}"
+        );
+    }
+
+    #[test]
+    fn vertically_disjoint_windows_may_share_an_along() {
+        let (mut s, wid) = storey_with_wall(4.0);
+        // A low window (sill 0.2, height 0.9 → top 1.1) and a high window (sill
+        // 1.3, height 0.9 → top 2.2) both dropped at along 2.0. Being vertically
+        // disjoint, they must NOT be pushed apart — a window above another is
+        // allowed; only a true 2D overlap is resolved.
+        add_wall_window(&mut s, wid, 2.0, 1.0, 0.9, 0.2, ItemId::default()).unwrap();
+        add_wall_window(&mut s, wid, 2.0, 1.0, 0.9, 1.3, ItemId::default()).unwrap();
+        let ops = wall_openings(&s, wid);
+        assert_eq!(ops.len(), 2);
+        for o in &ops {
+            assert!(
+                (o.along_m - 2.0).abs() < 1e-3,
+                "stacked window kept its along (got {})",
+                o.along_m
+            );
+        }
+
+        // But two windows in the SAME vertical band at the same along still
+        // separate (no 2D overlap).
+        let (mut s2, wid2) = storey_with_wall(4.0);
+        add_wall_window(&mut s2, wid2, 2.0, 1.0, 1.0, 0.5, ItemId::default()).unwrap();
+        add_wall_window(&mut s2, wid2, 2.0, 1.0, 1.0, 0.5, ItemId::default()).unwrap();
+        let sp = spans(&s2);
+        assert!(
+            sp[1].0 - sp[0].1 >= MIN_GAP_M - 1e-4,
+            "same-band windows still separate: {sp:?}"
         );
     }
 
