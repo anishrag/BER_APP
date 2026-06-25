@@ -49,6 +49,11 @@ bluetooth = ["dep:btleplug", "dep:tokio", "dep:futures"]
 # android build opts out of defaults and re-adds only what it needs.
 [target.'cfg(not(target_os = "android"))'.dependencies]
 eframe = "0.33.3"
+# Desktop file picker for attaching external photos (Front/Right/Left/Back).
+# `xdg-portal` is the default Linux backend; this is a DESKTOP-only stand-in —
+# real on-device Android camera capture is a follow-up (see
+# src/controller/app_controller/photos.rs TODO). UI-layer only (src/ui).
+rfd = "0.15"
 
 # Android entry-point deps. `AndroidApp` is always named THROUGH winit
 # (`winit::platform::android::activity::AndroidApp`) so the android-activity

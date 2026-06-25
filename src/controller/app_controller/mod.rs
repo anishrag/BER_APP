@@ -34,6 +34,7 @@ mod living_areas;
 mod openings;
 mod partition;
 mod phase_regions;
+mod photos;
 mod structure;
 
 pub use assessment_phase::{AssessmentPhase, SelectMode};
@@ -102,6 +103,7 @@ pub use partition::{
 };
 #[cfg(test)]
 use persistence::PARAMETRIC_SNAPSHOT_VERSION;
+pub use photos::PhotoView;
 pub use review::CollinearityReview;
 use roof_points::PendingRoofPoint;
 use roof_rects::PendingRoofRect;

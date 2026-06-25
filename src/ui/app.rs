@@ -830,6 +830,10 @@ impl eframe::App for BerApp {
                                     checklist,
                                 )
                             };
+                            // External elevation photos (Front/Right/Left/Back)
+                            // for the floating "Add external pictures" panel.
+                            let external_photos = self.app_controller.borrow().external_photos();
+
                             // Owned copy of the selected region ids so the view
                             // can borrow it without holding the controller.
                             let structure_selected = self
@@ -1033,6 +1037,7 @@ impl eframe::App for BerApp {
                                 opening_error: opening_error.as_deref(),
                                 elevation_view,
                                 checklist,
+                                external_photos,
                                 current_phase,
                                 mapping_complete,
                                 surface_counts,
@@ -1882,6 +1887,12 @@ impl eframe::App for BerApp {
                                     }
                                     SketchEvent::AssignCeilingExposure(exposure) => {
                                         controller.borrow_mut().set_ceiling_exposure_for(exposure);
+                                    }
+                                    SketchEvent::AddExternalPhoto { side, path } => {
+                                        controller.borrow_mut().add_external_photo(side, path);
+                                    }
+                                    SketchEvent::RemoveExternalPhoto { side } => {
+                                        controller.borrow_mut().remove_external_photo(side);
                                     }
                                     SketchEvent::EditMouseDown {
                                         world_x,

@@ -49,12 +49,16 @@ impl AppController {
                 status: self.checklist_status(|_, h| h.is_some()),
             },
             ChecklistItem {
-                label: "Exposures",
+                label: "Wall exposures",
                 status: self.checklist_status(|s, _| s.exposure_complete()),
             },
             ChecklistItem {
-                label: "Surfaces",
-                status: self.ber_storey_status(document::surfaces_exposure_complete),
+                label: "Floor exposures",
+                status: self.ber_storey_status(document::floor_exposure_complete),
+            },
+            ChecklistItem {
+                label: "Ceiling exposures",
+                status: self.ber_storey_status(document::ceiling_exposure_complete),
             },
             ChecklistItem {
                 label: "Construction phase",
@@ -64,7 +68,23 @@ impl AppController {
                 label: "Living area",
                 status: self.living_area_status(),
             },
+            ChecklistItem {
+                label: "External photos",
+                status: self.external_photos_status(),
+            },
         ]
+    }
+
+    /// Per-DWELLING external-photos gate: green ([`ChecklistStatus::AllStoreys`])
+    /// when all four sides (Front/Right/Left/Back) have a photo, red otherwise.
+    /// A dwelling-level gate (like [`living_area_status`](Self::living_area_status));
+    /// reads `Ber.photos` via [`external_photos_complete`](Self::external_photos_complete).
+    fn external_photos_status(&self) -> ChecklistStatus {
+        if self.external_photos_complete() {
+            ChecklistStatus::AllStoreys
+        } else {
+            ChecklistStatus::Incomplete
+        }
     }
 
     /// Per-DWELLING living-area gate: green ([`ChecklistStatus::AllStoreys`])

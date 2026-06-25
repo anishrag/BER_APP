@@ -399,6 +399,13 @@ pub(super) fn render<F: FnMut(UiEvent)>(
     // clicks — same pattern as the snap-tag menus).
     view_buttons(ui, rect, view, on_event);
 
+    // Floating "Add external pictures" button + panel, anchored BOTTOM-RIGHT
+    // (mirror of `view_buttons`, pivoted to the bottom-right corner). Shown in
+    // the Mapping phase once a record is loaded.
+    if matches!(view.current_phase, AssessmentPhase::Mapping) && ber.is_some() {
+        external_photos_button(ui, rect, view, on_event);
+    }
+
     // Floating phase signpost (top-centre) + the live per-phase completion
     // checklist (a draggable window), both painted over the canvas. The
     // signpost is clickable: clicking a reachable box switches the workspace
@@ -1982,6 +1989,100 @@ fn view_buttons<F: FnMut(UiEvent)>(
                 }
             });
         });
+}
+
+/// The floating "📷 Add external pictures" control, anchored to the canvas's
+/// BOTTOM-RIGHT corner. A button toggles a small panel listing the four sides
+/// (Front / Right / Left / Back), each showing a ✓ + filename when it has a
+/// photo or "missing" when it doesn't, with an Add/Replace action that opens a
+/// desktop file picker (`rfd`). The chosen path is emitted as
+/// [`SketchEvent::AddExternalPhoto`]; the controller never sees a file dialog.
+///
+/// TODO(android-camera): the file picker is a DESKTOP stand-in. On Android the
+/// Add/Replace action should instead launch the camera; it would emit the same
+/// `AddExternalPhoto { side, path }` with the captured image's path, so nothing
+/// downstream changes.
+fn external_photos_button<F: FnMut(UiEvent)>(
+    ui: &mut egui::Ui,
+    rect: egui::Rect,
+    view: &SketchView<'_>,
+    on_event: &mut F,
+) {
+    // Anchor by the bottom-right pivot so the panel grows UP-and-LEFT into the
+    // canvas (mirror of the top-right `view_buttons`).
+    egui::Area::new(ui.id().with("canvas_external_photos"))
+        .order(egui::Order::Foreground)
+        .pivot(egui::Align2::RIGHT_BOTTOM)
+        .fixed_pos(rect.right_bottom() + egui::vec2(-8.0, -8.0))
+        .show(ui.ctx(), |ui| {
+            egui::Frame::popup(ui.style()).show(ui, |ui| {
+                ui.vertical(|ui| {
+                    // Collapsing header doubles as the toggle button; the panel
+                    // body is self-contained so no cross-frame page state is
+                    // needed for open/closed.
+                    egui::CollapsingHeader::new("📷 Add external pictures")
+                        .default_open(false)
+                        .show(ui, |ui| {
+                            ui.set_max_width(230.0);
+                            for (side, photo) in &view.external_photos {
+                                ui.horizontal(|ui| match photo {
+                                    Some(p) => {
+                                        let name = std::path::Path::new(&p.file_path)
+                                            .file_name()
+                                            .and_then(|n| n.to_str())
+                                            .unwrap_or(p.file_path.as_str());
+                                        ui.label(format!("✓ {}: {}", side.label(), name))
+                                            .on_hover_text(&p.file_path);
+                                    }
+                                    None => {
+                                        ui.colored_label(
+                                            egui::Color32::from_rgb(220, 120, 120),
+                                            format!("✗ {}: missing", side.label()),
+                                        );
+                                    }
+                                });
+                                ui.horizontal(|ui| {
+                                    let action = if photo.is_some() { "Replace" } else { "Add" };
+                                    if ui.button(action).clicked() {
+                                        if let Some(path) = pick_image_path() {
+                                            on_event(UiEvent::Sketch(
+                                                SketchEvent::AddExternalPhoto { side: *side, path },
+                                            ));
+                                        }
+                                    }
+                                    if photo.is_some() && ui.button("Remove").clicked() {
+                                        on_event(UiEvent::Sketch(
+                                            SketchEvent::RemoveExternalPhoto { side: *side },
+                                        ));
+                                    }
+                                });
+                                ui.separator();
+                            }
+                        });
+                });
+            });
+        });
+}
+
+/// Open a desktop file picker for an image and return the chosen path as a
+/// String. DESKTOP-only (the file dialog is a UI concern); returns `None` on
+/// cancel. The Android camera path replaces this later (see the TODO on
+/// [`external_photos_button`]).
+#[cfg(not(target_os = "android"))]
+fn pick_image_path() -> Option<String> {
+    rfd::FileDialog::new()
+        .add_filter("Images", &["png", "jpg", "jpeg", "heic", "webp", "bmp"])
+        .pick_file()
+        .map(|p| p.to_string_lossy().into_owned())
+}
+
+/// Android has no `rfd` file dialog (and `rfd` isn't in the Android dep set):
+/// the desktop file-pick is a stand-in until real camera capture lands. Returns
+/// `None` so the Add/Replace button is a no-op on-device for now.
+#[cfg(target_os = "android")]
+fn pick_image_path() -> Option<String> {
+    log::warn!("external photo capture not yet implemented on Android (camera follow-up)");
+    None
 }
 
 /// The current storey's screen↔world transform for the 2D canvas, or `None`

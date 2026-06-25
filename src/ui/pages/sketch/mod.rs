@@ -27,14 +27,14 @@ use egui::Pos2;
 use crate::controller::app_controller::{
     AssessmentPhase, ChecklistItem, DimensionPromptUiData, EditDragPromptUiData, ElevationView,
     ExposureSelection, NewStoreyPromptUiData, OpeningPromptUiData, OpeningToolKind, PartitionView,
-    PositionPromptUiData, RiserView, SelectMode, SnapTagView, StructureEdit, SurfaceKind,
-    VertexDropPromptUiData, WallExposureView,
+    PhotoView, PositionPromptUiData, RiserView, SelectMode, SnapTagView, StructureEdit,
+    SurfaceKind, VertexDropPromptUiData, WallExposureView,
 };
 use crate::ui::pages::events::UiEvent;
 use crate::ui::render::ViewParams;
 use crate::ui::widgets::HintExt;
 use ber_model::ber::ber_struct::Ber;
-use ber_model::ber::common::{ConstructionPhase, ItemId};
+use ber_model::ber::common::{ConstructionPhase, ExternalSide, ItemId};
 use ber_model::ber::fenestration::{Frame, Glazing};
 use ber_model::ber::structural::{SurfaceCounts, WallExposure};
 use domain::sketch::{DisplayMode, EditTools, SketchMode};
@@ -619,6 +619,19 @@ pub enum SketchEvent {
     DeselectAllCeilingExposure,
     /// Assign a ceiling exposure to the current ceiling-region selection.
     AssignCeilingExposure(ber_model::ber::structural::CeilingExposure),
+    // ── External photos ───────────────────────────────────────────────────────
+    /// Attach (or replace) the external photo for `side`. `path` is the file the
+    /// UI's file picker returned. (The file dialog itself runs in the UI layer;
+    /// the controller just gets the path — keeping it camera/file-dialog
+    /// agnostic for a future Android camera path.)
+    AddExternalPhoto {
+        side: ExternalSide,
+        path: String,
+    },
+    /// Remove the external photo for `side`.
+    RemoveExternalPhoto {
+        side: ExternalSide,
+    },
 }
 
 /// Everything the Sketch page needs for one frame, built by the app shell
@@ -864,6 +877,11 @@ pub struct SketchView<'a> {
     /// recomputed each frame from the editing model — drawn as the floating,
     /// draggable checklist window over the canvas.
     pub checklist: Vec<ChecklistItem>,
+    /// External elevation photos: the four sides (Front/Right/Left/Back) in
+    /// [`ExternalSide::ALL`] order, each with its current photo or `None`.
+    /// Backs the floating "Add external pictures" panel. Shown in the Mapping
+    /// phase when a record is loaded.
+    pub external_photos: Vec<(ExternalSide, Option<PhotoView>)>,
     /// The assessor's current workflow phase — drives the phase signpost
     /// highlight, the checklist title, and which toolset the left panel shows.
     pub current_phase: AssessmentPhase,

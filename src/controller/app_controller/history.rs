@@ -31,6 +31,11 @@ pub struct HistorySnapshot {
     /// `record_storey` write); `None` (the common case) keeps the active-only
     /// behaviour. The normal `current_history_snapshot` leaves this `None`.
     pub(super) all_storeys: Option<Vec<ber_model::ber::structural::Storey>>,
+    /// The dwelling-level photo list AS IT WAS — external pictures (Front /
+    /// Right / Left / Back) live on `Ber.photos`, not on a storey, so they're
+    /// captured here so an external-photo add/replace/remove undoes. `None`
+    /// when no record is loaded.
+    pub(super) photos: Option<Vec<ber_model::ber::common::Photo>>,
 }
 
 impl AppController {
@@ -52,12 +57,14 @@ impl AppController {
             .current_record
             .as_ref()
             .map(|r| r.data.window_types.clone());
+        let photos = self.current_record.as_ref().map(|r| r.data.photos.clone());
         HistorySnapshot {
             document: self.document.clone(),
             living_area_mode: self.living_area_mode,
             record_storey,
             window_types,
             all_storeys: None,
+            photos,
         }
     }
 
@@ -80,6 +87,10 @@ impl AppController {
         if let Some(record) = self.current_record.as_mut() {
             if let Some(types) = snap.window_types {
                 record.data.window_types = types;
+            }
+            // Dwelling-level external photos (not part of a storey).
+            if let Some(photos) = snap.photos {
+                record.data.photos = photos;
             }
             // A full snapshot restores the WHOLE stack (and SKIPS the
             // single-storey write); otherwise restore just the active storey.

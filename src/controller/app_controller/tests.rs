@@ -2211,7 +2211,14 @@ fn new_checklist_rows_gate_mapping_complete() {
     // so this dwelling starts incomplete regardless — assert the three NEW rows
     // are present and each starts red.
     let labels: Vec<&'static str> = c.stage_a_checklist().iter().map(|it| it.label).collect();
-    assert!(labels.contains(&"Surfaces"), "Surfaces row present");
+    assert!(
+        labels.contains(&"Floor exposures"),
+        "Floor exposures row present"
+    );
+    assert!(
+        labels.contains(&"Ceiling exposures"),
+        "Ceiling exposures row present"
+    );
     assert!(
         labels.contains(&"Construction phase"),
         "Construction phase row present"
@@ -2273,18 +2280,28 @@ fn new_checklist_rows_gate_mapping_complete() {
     );
     c.commit_to_ber().unwrap();
     assert_eq!(
-        checklist_status_of(&c, "Surfaces"),
+        checklist_status_of(&c, "Floor exposures"),
         ChecklistStatus::AllStoreys,
-        "labelled floor + auto-derived ceiling exposure satisfies the surfaces row in one commit"
+        "the labelled floor satisfies the floor-exposures row in one commit"
+    );
+    assert_eq!(
+        checklist_status_of(&c, "Ceiling exposures"),
+        ChecklistStatus::AllStoreys,
+        "the labelled ceiling satisfies the ceiling-exposures row in one commit"
     );
 
-    // Exposures (walls) is the last pre-existing gate — paint the perimeter.
+    // Wall exposures is the last pre-existing gate — paint the perimeter.
     c.set_all_remaining_exposed();
     // Drive the pending phase area (if any from rest-to-Original) is already
-    // committed; nothing left in flight. Re-assert the three new rows are green.
+    // committed; nothing left in flight. Re-assert the new rows are green.
     c.commit_to_ber().unwrap();
     let _ = p; // p used above via add_finalised_living_area's closure shape only
-    for row in ["Surfaces", "Construction phase", "Living area"] {
+    for row in [
+        "Floor exposures",
+        "Ceiling exposures",
+        "Construction phase",
+        "Living area",
+    ] {
         assert_eq!(
             checklist_status_of(&c, row),
             ChecklistStatus::AllStoreys,
@@ -3655,7 +3672,7 @@ fn stage_a_checklist_rolls_up_red_yellow_green() {
     assert_eq!(status(&c, "Measurements"), ChecklistStatus::AllStoreys);
     // Heights + exposures untouched → red.
     assert_eq!(status(&c, "Heights"), ChecklistStatus::Incomplete);
-    assert_eq!(status(&c, "Exposures"), ChecklistStatus::Incomplete);
+    assert_eq!(status(&c, "Wall exposures"), ChecklistStatus::Incomplete);
 
     // Setting the height completes it on the only storey → green.
     c.set_default_ceiling_height(2.4).unwrap();
@@ -9860,5 +9877,104 @@ fn ceiling_exposure_carve_snaps_to_roof_division_through_carve_or_cut() {
     assert!(
         (min_x - 4.0).abs() < 1e-2,
         "carved edge landed on the division x=4 (got {min_x}): {poly:?}"
+    );
+}
+
+// ── External photos ─────────────────────────────────────────────────────────
+
+/// Adding a photo for each of the four sides completes the external-photos gate
+/// and turns the "External photos" checklist row green; missing one leaves it
+/// red. Re-adding a side REPLACES rather than duplicating.
+#[test]
+fn external_photos_gate_and_checklist_row() {
+    use ber_model::ber::common::ExternalSide;
+    let mut c = dimensioned_square_controller();
+
+    // Row present and starts red (no photos yet).
+    assert!(
+        c.stage_a_checklist()
+            .iter()
+            .any(|it| it.label == "External photos"),
+        "External photos row present"
+    );
+    assert_eq!(
+        checklist_status_of(&c, "External photos"),
+        ChecklistStatus::Incomplete,
+        "no photos yet"
+    );
+    assert!(!c.external_photos_complete());
+
+    // Three of four sides → still incomplete, mapping not complete.
+    c.add_external_photo(ExternalSide::Front, "front.jpg".into());
+    c.add_external_photo(ExternalSide::Right, "right.jpg".into());
+    c.add_external_photo(ExternalSide::Left, "left.jpg".into());
+    assert!(!c.external_photos_complete(), "three sides is not enough");
+    assert_eq!(
+        checklist_status_of(&c, "External photos"),
+        ChecklistStatus::Incomplete
+    );
+    assert!(!c.mapping_complete(), "missing a side blocks Mapping");
+
+    // The fourth side completes the gate → row green.
+    c.add_external_photo(ExternalSide::Back, "back.jpg".into());
+    assert!(c.external_photos_complete(), "all four sides present");
+    assert_eq!(
+        checklist_status_of(&c, "External photos"),
+        ChecklistStatus::AllStoreys
+    );
+
+    // Re-adding a side REPLACES (no duplicate) — still four photos, new path.
+    c.add_external_photo(ExternalSide::Front, "front-v2.jpg".into());
+    let externals: Vec<_> = c
+        .current_record
+        .as_ref()
+        .unwrap()
+        .data
+        .photos
+        .iter()
+        .filter(|p| p.side.is_some())
+        .collect();
+    assert_eq!(externals.len(), 4, "re-shoot replaces, no duplicate");
+    let front = externals
+        .iter()
+        .find(|p| p.side == Some(ExternalSide::Front))
+        .unwrap();
+    assert_eq!(front.file_path, "front-v2.jpg", "Front overwritten");
+
+    // The view data carries all four in ALL order with their paths.
+    let view = c.external_photos();
+    assert_eq!(view.len(), 4);
+    assert_eq!(view[0].0, ExternalSide::Front);
+    assert_eq!(view[0].1.as_ref().unwrap().file_path, "front-v2.jpg");
+
+    // Remove a side → gate fails again.
+    c.remove_external_photo(ExternalSide::Back);
+    assert!(!c.external_photos_complete());
+    assert_eq!(
+        checklist_status_of(&c, "External photos"),
+        ChecklistStatus::Incomplete
+    );
+}
+
+/// External photos round-trip through persistence: they live on `Ber.photos`,
+/// so the existing autosave/persist path writes them and a reload restores them.
+#[test]
+fn external_photos_persist_and_reload() {
+    use ber_model::ber::common::ExternalSide;
+    let mut c = dimensioned_square_controller();
+    for (side, path) in [
+        (ExternalSide::Front, "f.jpg"),
+        (ExternalSide::Right, "r.jpg"),
+        (ExternalSide::Left, "l.jpg"),
+        (ExternalSide::Back, "b.jpg"),
+    ] {
+        c.add_external_photo(side, path.into());
+    }
+    c.flush_if_dirty().unwrap();
+    let id = c.current_record.as_ref().unwrap().id;
+    c.open_ber(&id).unwrap();
+    assert!(
+        c.external_photos_complete(),
+        "all four external photos survive a reload"
     );
 }

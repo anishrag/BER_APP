@@ -288,11 +288,13 @@ fn create_full_ber(id: ItemId) -> Ber {
             id: ItemId::default(),
             file_path: "assets/front.jpg".to_string(),
             description: Some("Front".to_string()),
+            side: None,
         },
         Photo {
             id: ItemId::default(),
             file_path: "assets/living.jpg".to_string(),
             description: Some("Living".to_string()),
+            side: None,
         },
     ];
 

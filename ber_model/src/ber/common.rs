@@ -32,11 +32,47 @@ impl FromStr for ItemId {
     }
 }
 
+/// Which elevation an external photo documents. An external photo is a
+/// [`Photo`] whose `side` is `Some(_)`; the four sides together make the
+/// Mapping "External photos" checklist row complete.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum ExternalSide {
+    Front,
+    Right,
+    Left,
+    Back,
+}
+
+impl ExternalSide {
+    /// Every side, in canonical display order (Front, Right, Left, Back).
+    pub const ALL: [ExternalSide; 4] = [
+        ExternalSide::Front,
+        ExternalSide::Right,
+        ExternalSide::Left,
+        ExternalSide::Back,
+    ];
+
+    /// Human label for the side ("Front", "Right", …).
+    pub fn label(&self) -> &'static str {
+        match self {
+            ExternalSide::Front => "Front",
+            ExternalSide::Right => "Right",
+            ExternalSide::Left => "Left",
+            ExternalSide::Back => "Back",
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct Photo {
     pub id: ItemId,
     pub file_path: String, // local path to image
     pub description: Option<String>,
+    /// Which external elevation this photo documents, if it's an EXTERNAL
+    /// picture. `None` for ordinary item photos. `serde(default)` so records
+    /// written before this field load with `None`.
+    #[serde(default)]
+    pub side: Option<ExternalSide>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Hash, Default)]
@@ -220,4 +256,35 @@ pub struct Item {
     pub item_type: ItemType,
     pub photos: Vec<Photo>,
     pub description: Option<String>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn external_side_all_has_four() {
+        assert_eq!(ExternalSide::ALL.len(), 4);
+    }
+
+    #[test]
+    fn photo_side_round_trips() {
+        let photo = Photo {
+            file_path: "front.jpg".to_string(),
+            side: Some(ExternalSide::Right),
+            ..Default::default()
+        };
+        let json = serde_json::to_string(&photo).unwrap();
+        let back: Photo = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.side, Some(ExternalSide::Right));
+        assert_eq!(back.file_path, "front.jpg");
+    }
+
+    #[test]
+    fn photo_side_defaults_to_none_for_old_records() {
+        // A record serialized before `side` existed has no such key.
+        let legacy = r#"{"id":"00000000-0000-0000-0000-000000000000","file_path":"x.jpg","description":null}"#;
+        let photo: Photo = serde_json::from_str(legacy).unwrap();
+        assert_eq!(photo.side, None);
+    }
 }

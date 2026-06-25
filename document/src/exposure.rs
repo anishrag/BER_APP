@@ -859,28 +859,45 @@ pub fn auto_derive_horizontal_exposure(
     }
 }
 
-/// True when storey `idx`'s horizontal surfaces are fully classified: EVERY
-/// resolved floor region AND every ceiling/roof region carries a non-`Unset`
-/// exposure. An empty / missing storey (or one with no floor or no ceiling
-/// regions) is NOT complete. Reads the RESOLVED storey (Store A) — the
-/// checklist's per-storey "Surfaces" rollup, kept separate from wall Exposures.
-pub fn surfaces_exposure_complete(ber: &Ber, idx: usize) -> bool {
+/// True when storey `idx`'s FLOOR regions are fully classified: at least one
+/// floor region, and EVERY one carries a non-`Unset` exposure. Reads the
+/// RESOLVED storey (Store A) — the checklist's per-storey "Floor exposures"
+/// rollup. `Unset` floors are the still-to-label ones the floor-exposure tool
+/// shows; party floors resolve `NonHeatLoss` (already classified).
+pub fn floor_exposure_complete(ber: &Ber, idx: usize) -> bool {
     let Some(storey) = ber.storeys.get(idx) else {
         return false;
     };
-    if storey.floors.regions.is_empty() || storey.roofs.regions.is_empty() {
+    !storey.floors.regions.is_empty()
+        && storey
+            .floors
+            .regions
+            .iter()
+            .all(|r| r.exposure != FloorExposure::Unset)
+}
+
+/// True when storey `idx`'s CEILING/roof regions are fully classified: at least
+/// one ceiling region, and EVERY one carries a non-`Unset` exposure. The ceiling
+/// mirror of [`floor_exposure_complete`] — the checklist's "Ceiling exposures"
+/// rollup.
+pub fn ceiling_exposure_complete(ber: &Ber, idx: usize) -> bool {
+    let Some(storey) = ber.storeys.get(idx) else {
         return false;
-    }
-    storey
-        .floors
-        .regions
-        .iter()
-        .all(|r| r.exposure != FloorExposure::Unset)
+    };
+    !storey.roofs.regions.is_empty()
         && storey
             .roofs
             .regions
             .iter()
             .all(|r| r.exposure != CeilingExposure::Unset)
+}
+
+/// True when storey `idx`'s horizontal surfaces are fully classified — both
+/// [`floor_exposure_complete`] AND [`ceiling_exposure_complete`]. (Kept as the
+/// combined predicate; the Mapping checklist now shows floor and ceiling as
+/// separate rows.)
+pub fn surfaces_exposure_complete(ber: &Ber, idx: usize) -> bool {
+    floor_exposure_complete(ber, idx) && ceiling_exposure_complete(ber, idx)
 }
 
 #[cfg(test)]
