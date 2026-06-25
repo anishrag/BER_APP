@@ -23,6 +23,7 @@
 //! once the assessor sets a scale.
 
 pub mod all_storeys_2d;
+pub mod all_storeys_ceilings;
 pub mod all_storeys_floors;
 pub mod full_house_3d;
 pub mod storey_2d;
@@ -727,6 +728,7 @@ pub(crate) fn snap_kind_label(kind: manip_plan::SnapKind) -> &'static str {
         manip_plan::SnapKind::ToEdge => "edge",
         manip_plan::SnapKind::ToPreviousOutline => "prev outline",
         manip_plan::SnapKind::ToParallelWall => "parallel wall",
+        manip_plan::SnapKind::ToReferenceSegment => "ref edge",
     }
 }
 

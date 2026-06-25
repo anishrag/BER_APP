@@ -392,6 +392,8 @@ impl AppController {
         self.maybe_stage_structure_carve();
         // …and the same for a floor-exposure carve (shared dimensioning buffer).
         self.maybe_stage_floor_exposure_carve();
+        // …and the ceiling-exposure carve (same shared dimensioning buffer).
+        self.maybe_stage_ceiling_exposure_carve();
         Ok(())
     }
 
@@ -501,6 +503,8 @@ impl AppController {
         // A Structure split whose last position prompt was SKIPPED commits here.
         self.maybe_stage_structure_carve();
         self.maybe_stage_floor_exposure_carve();
+        // …and the ceiling-exposure carve (same shared dimensioning buffer).
+        self.maybe_stage_ceiling_exposure_carve();
         Ok(())
     }
 
@@ -557,6 +561,8 @@ impl AppController {
         // (no-op unless a split is in-flight and fully dimensioned).
         self.maybe_stage_structure_carve();
         self.maybe_stage_floor_exposure_carve();
+        // …and the ceiling-exposure carve (same shared dimensioning buffer).
+        self.maybe_stage_ceiling_exposure_carve();
         Ok(())
     }
 
@@ -570,6 +576,8 @@ impl AppController {
         // A Structure split whose last length prompt was SKIPPED commits here.
         self.maybe_stage_structure_carve();
         self.maybe_stage_floor_exposure_carve();
+        // …and the ceiling-exposure carve (same shared dimensioning buffer).
+        self.maybe_stage_ceiling_exposure_carve();
     }
 
     /// Recompute `current_prompt` based on which params are still unknown — see

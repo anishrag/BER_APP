@@ -2243,12 +2243,15 @@ fn new_checklist_rows_gate_mapping_complete() {
     );
 
     // Surfaces needs ceiling (roof) regions to exist — set a default ceiling
-    // height so the storey resolves a roof (its ceiling auto-derives ExposedRoof).
-    // The lowest floor is NO LONGER auto-classified (left for the assessor), so
-    // label it, then the derive-then-stamp pass lands floor + ceiling on the
-    // resolved regions in the SAME commit. ONE commit must settle it — this
-    // single-commit assertion is the regression guard for the lag bug.
+    // height so the storey resolves a roof. Neither the lowest floor nor the top
+    // ceiling is auto-classified any more (both are left for the assessor), so
+    // label BOTH manually, then the stamp pass lands them on the resolved regions
+    // in the SAME commit. ONE commit must settle it — this single-commit
+    // assertion is the regression guard for the lag bug.
     c.set_default_ceiling_height(2.4).unwrap();
+    // Materialize so the roof region exists to read its centroid (the floor
+    // already exists; the roof only resolves once a ceiling height is set).
+    c.materialize();
     let fkey = document::centroid_key(
         c.current_record.as_ref().unwrap().data.storeys[0]
             .floors
@@ -2258,6 +2261,16 @@ fn new_checklist_rows_gate_mapping_complete() {
     c.document.storeys[0]
         .floor_exposure
         .insert(fkey, ber_model::ber::structural::FloorExposure::Ground);
+    let ckey = document::centroid_key(
+        c.current_record.as_ref().unwrap().data.storeys[0]
+            .roofs
+            .regions[0]
+            .centroid(),
+    );
+    c.document.storeys[0].ceiling_exposure.insert(
+        ckey,
+        ber_model::ber::structural::CeilingExposure::ExposedRoof,
+    );
     c.commit_to_ber().unwrap();
     assert_eq!(
         checklist_status_of(&c, "Surfaces"),
@@ -8886,16 +8899,23 @@ fn floor_exposure_carve_dimensions_then_splits_the_labellable_floor() {
         "the carved lower piece is selected for exposure-setting"
     );
 
-    // Assigning an exposure marks the carved lower piece; the upper floor stays party.
+    // Assigning an exposure marks ONLY the carved lower piece — NOT the frame
+    // remainder around it. (This is an interior carve, so the remainder is a
+    // concave frame whose area-weighted centroid falls in the carved hole; the
+    // old centroid-based select grabbed it too and set the whole floor. The
+    // area-fraction select picks only the piece actually inside the ring.)
     c.set_floor_exposure_for(FloorExposure::Exposed);
     c.materialize();
     let s = &c.current_record.as_ref().unwrap().data.storeys;
-    assert!(
-        s[0].floors
-            .regions
-            .iter()
-            .any(|r| r.exposure == FloorExposure::Exposed),
-        "the carved lower piece took the assigned exposure"
+    let exposed = s[0]
+        .floors
+        .regions
+        .iter()
+        .filter(|r| r.exposure == FloorExposure::Exposed)
+        .count();
+    assert_eq!(
+        exposed, 1,
+        "exactly the one carved piece is set — not the surrounding remainder"
     );
     assert_eq!(
         s[1].floors.regions[0].exposure,
@@ -8961,6 +8981,422 @@ fn floor_exposure_carve_clips_to_whole_building_not_reference_storey() {
     assert!(
         max_x - min_x > 8.0,
         "containment spans the whole building (~10 wide), not the upper storey (~6)"
+    );
+}
+
+/// Floor-exposure straight CUT: an edge-to-edge stroke splits the whole building
+/// into two candidate halves and WAITS for a side pick (nothing split yet);
+/// tapping one half begins dimensioning it; once dimensioned the chosen side
+/// splits the labellable floor and is selected — mirrors the structure-phase cut
+/// + the floor-exposure Area carve.
+#[test]
+fn floor_exposure_cut_picks_side_dimensions_then_splits_the_labellable_floor() {
+    use ber_model::ber::structural::FloorExposure;
+
+    // Two storeys, SAME 10×10 footprint. Auto-exposure makes the UPPER floor
+    // party (hidden) and leaves the LOWER floor Unset (labellable).
+    let mut c = dimensioned_square_controller(); // storey 0 = 10×10 at origin
+    c.set_default_ceiling_height(2.4).unwrap();
+    c.add_storey().unwrap();
+    finalise_current_storey_as_offset_square(&mut c, 10.0, 0.0, 0.0); // storey 1 = 10×10 @ origin
+    c.set_default_ceiling_height(2.4).unwrap();
+    c.materialize();
+
+    c.set_floor_exposure_mode(true);
+    c.confirm_all_storeys_added();
+    c.materialize();
+    {
+        let s = &c.current_record.as_ref().unwrap().data.storeys;
+        assert_eq!(s[0].floors.regions[0].exposure, FloorExposure::Unset);
+        assert_eq!(s[1].floors.regions[0].exposure, FloorExposure::NonHeatLoss);
+        assert_eq!(s[0].floors.regions.len(), 1, "lower floor whole");
+    }
+    c.set_floor_exposure_select_mode(Some(SelectMode::Carve));
+
+    // A straight edge-to-edge cut at y=5 (left wall to right wall) splits the
+    // whole building into two halves — it WAITS for the side pick.
+    c.apply_floor_exposure_carve_stroke(&[(0.0, 5.0), (10.0, 5.0)]);
+    assert!(
+        c.floor_exposure_cut_pending(),
+        "a straight cut offers two candidate halves to pick"
+    );
+    assert_eq!(c.floor_exposure_cut_regions().len(), 2, "two candidates");
+    assert!(
+        !c.dimensioning_active(),
+        "the cut does NOT begin dimensioning until a side is picked"
+    );
+    // Nothing split yet — the lower floor is still whole.
+    assert_eq!(
+        c.current_record.as_ref().unwrap().data.storeys[0]
+            .floors
+            .regions
+            .len(),
+        1,
+        "no split until a side is chosen"
+    );
+
+    // Pick the lower half (y<5) → it becomes the in-flight carve shape and starts
+    // dimensioning.
+    c.choose_floor_exposure_cut_region(5.0, 2.0);
+    assert!(
+        !c.floor_exposure_cut_pending(),
+        "pick consumed the candidates"
+    );
+    assert!(
+        c.dimensioning_active() || c.document.dimensioning.current_position_prompt.is_some(),
+        "the picked half prompts to be dimensioned"
+    );
+
+    // Accept the drawn cut (skip lengths so it stays at y=5) + accept positions;
+    // the chosen side stages + commits on the last skip.
+    let mut guard = 0;
+    while c.dimensioning_active() && guard < 12 {
+        c.skip_current_dimension();
+        guard += 1;
+    }
+    skip_position_prompts(&mut c);
+    c.materialize();
+
+    // The labellable LOWER floor split in two; the party UPPER floor untouched.
+    {
+        let s = &c.current_record.as_ref().unwrap().data.storeys;
+        assert_eq!(
+            s[0].floors.regions.len(),
+            2,
+            "lower (labellable) floor cut in two"
+        );
+        assert_eq!(s[1].floors.regions.len(), 1, "party upper floor untouched");
+    }
+    assert!(
+        !c.floor_exposure_selected_ids().is_empty(),
+        "the chosen side is selected for exposure-setting"
+    );
+}
+
+// ── Ceiling-exposure tool (mirror of the floor-exposure tool tests) ──────────
+
+/// Ceiling-exposure tool — Set-all then assign: entering raises the gate,
+/// confirm runs the shared auto-pass + reveals the view, `Set all` seeds every
+/// (non-party) ceiling region across the stack, and `set_ceiling_exposure_for`
+/// stamps each one. Single storey, so its top ceiling is Unset (labellable).
+#[test]
+fn ceiling_exposure_set_all_then_assign_marks_every_ceiling() {
+    use ber_model::ber::structural::CeilingExposure;
+    let mut c = dimensioned_square_controller();
+    c.set_default_ceiling_height(2.4).unwrap();
+    c.materialize();
+
+    c.set_ceiling_exposure_mode(true);
+    assert!(c.ceiling_exposure_mode());
+    assert!(
+        c.ceiling_exposure_gate_pending(),
+        "entering the tool raises the storey-count gate"
+    );
+
+    c.confirm_all_storeys_added_ceiling();
+    assert!(
+        !c.ceiling_exposure_gate_pending(),
+        "confirming lowers the gate (auto-pass has run)"
+    );
+
+    c.set_ceiling_exposure_select_mode(Some(SelectMode::All));
+    let n_regions: usize = c.current_record.as_ref().unwrap().data.storeys[0]
+        .roofs
+        .regions
+        .len();
+    assert!(n_regions >= 1);
+    assert_eq!(
+        c.ceiling_exposure_selected_ids().len(),
+        n_regions,
+        "Set all seeds every ceiling region across the stack"
+    );
+
+    c.set_ceiling_exposure_for(CeilingExposure::ExposedRoof);
+    c.materialize();
+    let rec = c.current_record.as_ref().unwrap();
+    assert!(
+        rec.data.storeys[0]
+            .roofs
+            .regions
+            .iter()
+            .all(|r| r.exposure == CeilingExposure::ExposedRoof),
+        "every ceiling region resolves to the assigned ExposedRoof exposure"
+    );
+}
+
+/// Ceiling-exposure CLICK toggles a single region in and back out of the
+/// selection, and the gate blocks selection until confirmed.
+#[test]
+fn ceiling_exposure_click_toggles_one_region() {
+    let mut c = dimensioned_square_controller();
+    c.set_default_ceiling_height(2.4).unwrap();
+    c.materialize();
+    let region = &c.current_record.as_ref().unwrap().data.storeys[0]
+        .roofs
+        .regions[0];
+    let centre = region.centroid();
+
+    c.set_ceiling_exposure_mode(true);
+    c.set_ceiling_exposure_select_mode(Some(SelectMode::Click));
+    // Gate still up → select mode is rejected, taps do nothing.
+    c.toggle_ceiling_exposure_at(centre.x, centre.y, 0.5);
+    assert!(
+        c.ceiling_exposure_selected_ids().is_empty(),
+        "the gate blocks selection until storeys are confirmed"
+    );
+
+    c.confirm_all_storeys_added_ceiling();
+    c.set_ceiling_exposure_select_mode(Some(SelectMode::Click));
+    c.toggle_ceiling_exposure_at(centre.x, centre.y, 0.5);
+    assert_eq!(
+        c.ceiling_exposure_selected_ids().len(),
+        1,
+        "a tap selects the ceiling region under it"
+    );
+    c.toggle_ceiling_exposure_at(centre.x, centre.y, 0.5);
+    assert!(
+        c.ceiling_exposure_selected_ids().is_empty(),
+        "a second tap toggles it back out"
+    );
+}
+
+/// The shared auto-pass on a same-footprint 2-storey stack now leaves the TOP
+/// ceiling Unset (the assessor's call — exposed roof vs unheated attic) and only
+/// the intermediate ceiling under the storey above derives Party.
+#[test]
+fn ceiling_exposure_auto_leaves_top_ceiling_unset() {
+    use ber_model::ber::structural::CeilingExposure;
+    let mut c = dimensioned_square_controller(); // storey 0 = 10×10 at origin
+    c.set_default_ceiling_height(2.4).unwrap();
+    c.add_storey().unwrap();
+    finalise_current_storey_as_offset_square(&mut c, 10.0, 0.0, 0.0); // storey 1 = 10×10 @ origin
+    c.set_default_ceiling_height(2.4).unwrap();
+
+    c.set_ceiling_exposure_mode(true);
+    c.confirm_all_storeys_added_ceiling();
+    c.materialize();
+
+    let s = &c.current_record.as_ref().unwrap().data.storeys;
+    assert_eq!(
+        s[0].roofs.regions[0].exposure,
+        CeilingExposure::Party,
+        "the intermediate ceiling (under the storey above) auto-derives Party"
+    );
+    assert_eq!(
+        s[1].roofs.regions[0].exposure,
+        CeilingExposure::Unset,
+        "the top ceiling is left Unset for the assessor, not auto ExposedRoof"
+    );
+}
+
+/// Ceiling-exposure CARVE: drawing + dimensioning a carve SPLITS the ROOFS
+/// (regions-as-truth, via recompose) and selects the carved piece. Only the
+/// LABELLABLE (non-party) ceiling is split: on a same-footprint stack the LOWER
+/// ceiling is an auto party (hidden) and is left untouched, while the TOP (Unset)
+/// ceiling carves and selects.
+#[test]
+fn ceiling_exposure_carve_dimensions_then_splits_the_labellable_ceiling() {
+    use ber_model::ber::structural::CeilingExposure;
+    let mut c = dimensioned_square_controller(); // storey 0 = 10×10 at origin
+    c.set_default_ceiling_height(2.4).unwrap();
+    c.add_storey().unwrap();
+    finalise_current_storey_as_offset_square(&mut c, 10.0, 0.0, 0.0); // storey 1 = 10×10 @ origin
+    c.set_default_ceiling_height(2.4).unwrap();
+    c.materialize();
+    {
+        let s = &c.current_record.as_ref().unwrap().data.storeys;
+        assert_eq!(s[0].roofs.regions.len(), 1);
+        assert_eq!(s[1].roofs.regions.len(), 1);
+    }
+
+    c.set_ceiling_exposure_mode(true);
+    c.confirm_all_storeys_added_ceiling();
+    c.materialize();
+    {
+        let s = &c.current_record.as_ref().unwrap().data.storeys;
+        assert_eq!(s[0].roofs.regions[0].exposure, CeilingExposure::Party);
+        assert_eq!(s[1].roofs.regions[0].exposure, CeilingExposure::Unset);
+    }
+    c.set_ceiling_exposure_select_mode(Some(SelectMode::Carve));
+
+    // An interior 4×4 carve overlapping both footprints; only the labellable top
+    // ceiling is split.
+    c.apply_ceiling_exposure_carve_stroke(&[
+        (2.0, 2.0),
+        (6.0, 2.0),
+        (6.0, 6.0),
+        (2.0, 6.0),
+        (2.1, 2.1),
+    ]);
+    assert!(
+        c.dimensioning_active(),
+        "the carve prompts to be dimensioned before it splits"
+    );
+    complete_interior_length_loop(&mut c);
+    skip_position_prompts(&mut c);
+    c.materialize();
+
+    {
+        let s = &c.current_record.as_ref().unwrap().data.storeys;
+        // The roof carve splits the top ceiling into the inner piece + its
+        // surrounding frame (`split_faces_coplanar` may tessellate the frame into
+        // more than one piece, unlike the floor boolean — so assert "carved", > 1).
+        assert!(
+            s[1].roofs.regions.len() > 1,
+            "top (labellable) ceiling carved into the inner piece + frame"
+        );
+        assert_eq!(
+            s[0].roofs.regions.len(),
+            1,
+            "party lower ceiling left untouched"
+        );
+    }
+    assert!(
+        !c.ceiling_exposure_selected_ids().is_empty(),
+        "the carved top piece is selected for exposure-setting"
+    );
+
+    c.set_ceiling_exposure_for(CeilingExposure::ExposedRoof);
+    c.materialize();
+    let s = &c.current_record.as_ref().unwrap().data.storeys;
+    assert!(
+        s[1].roofs
+            .regions
+            .iter()
+            .any(|r| r.exposure == CeilingExposure::ExposedRoof),
+        "the carved top piece took the assigned exposure"
+    );
+    assert_eq!(
+        s[0].roofs.regions[0].exposure,
+        CeilingExposure::Party,
+        "the party lower ceiling is unaffected"
+    );
+}
+
+/// Regression mirror: the ceiling-exposure carve clips to the WHOLE BUILDING
+/// footprint (union of all storeys), not the reference storey's outline. Opening
+/// the tool from the smaller UPPER storey and carving over area that exists only
+/// on the LOWER storey must still produce a valid carve.
+#[test]
+fn ceiling_exposure_carve_clips_to_whole_building_not_reference_storey() {
+    let mut c = dimensioned_square_controller(); // storey 0 = 10×10 at origin
+    c.set_default_ceiling_height(2.4).unwrap();
+    c.add_storey().unwrap();
+    finalise_current_storey_as_offset_square(&mut c, 6.0, 0.0, 0.0); // storey 1 = 6×6 @ origin (setback)
+    c.set_default_ceiling_height(2.4).unwrap();
+    c.materialize();
+    assert_eq!(c.current_storey_idx(), Some(1));
+
+    c.set_ceiling_exposure_mode(true);
+    c.confirm_all_storeys_added_ceiling();
+    c.set_ceiling_exposure_select_mode(Some(SelectMode::Carve));
+
+    // Carve near the (10,10) corner — inside the LOWER 10×10 but entirely OUTSIDE
+    // the upper 6×6 (the reference). The whole-building union is the 10×10, so
+    // this survives; clipped to the upper outline it would be empty.
+    c.apply_ceiling_exposure_carve_stroke(&[
+        (7.0, 7.0),
+        (9.0, 7.0),
+        (9.0, 9.0),
+        (7.0, 9.0),
+        (7.1, 7.1),
+    ]);
+    assert!(
+        c.dimensioning_active(),
+        "the carve survives — clipped to the whole building, not the smaller upper storey"
+    );
+    assert!(
+        c.pending_ceiling_exposure_carve_polygon().len() >= 3,
+        "the in-flight carve region is live"
+    );
+    let ov = c.document.storeys[1]
+        .subarea_containment_override
+        .as_ref()
+        .expect("the carve sets a whole-building containment override");
+    let ((min_x, _), (max_x, _)) = ov.bounding_box().expect("override has a bbox");
+    assert!(
+        max_x - min_x > 8.0,
+        "containment spans the whole building (~10 wide), not the upper storey (~6)"
+    );
+}
+
+/// Ceiling-exposure straight CUT (mirror of the floor cut): an edge-to-edge
+/// stroke splits the whole building into two candidate halves and WAITS for a
+/// side pick; tapping one half dimensions it; the chosen side then splits the
+/// labellable top ceiling and is selected.
+#[test]
+fn ceiling_exposure_cut_picks_side_dimensions_then_splits_the_labellable_ceiling() {
+    use ber_model::ber::structural::CeilingExposure;
+
+    let mut c = dimensioned_square_controller(); // storey 0 = 10×10 at origin
+    c.set_default_ceiling_height(2.4).unwrap();
+    c.add_storey().unwrap();
+    finalise_current_storey_as_offset_square(&mut c, 10.0, 0.0, 0.0); // storey 1 = 10×10 @ origin
+    c.set_default_ceiling_height(2.4).unwrap();
+    c.materialize();
+
+    c.set_ceiling_exposure_mode(true);
+    c.confirm_all_storeys_added_ceiling();
+    c.materialize();
+    {
+        let s = &c.current_record.as_ref().unwrap().data.storeys;
+        assert_eq!(s[0].roofs.regions[0].exposure, CeilingExposure::Party);
+        assert_eq!(s[1].roofs.regions[0].exposure, CeilingExposure::Unset);
+        assert_eq!(s[1].roofs.regions.len(), 1, "top ceiling whole");
+    }
+    c.set_ceiling_exposure_select_mode(Some(SelectMode::Carve));
+
+    // A straight edge-to-edge cut at y=5 splits the whole building into two
+    // halves — it WAITS for the side pick (nothing split yet).
+    c.apply_ceiling_exposure_carve_stroke(&[(0.0, 5.0), (10.0, 5.0)]);
+    assert!(
+        c.ceiling_exposure_cut_pending(),
+        "a straight cut offers two candidate halves to pick"
+    );
+    assert_eq!(c.ceiling_exposure_cut_regions().len(), 2, "two candidates");
+    assert!(
+        !c.dimensioning_active(),
+        "the cut does NOT begin dimensioning until a side is picked"
+    );
+    assert_eq!(
+        c.current_record.as_ref().unwrap().data.storeys[1]
+            .roofs
+            .regions
+            .len(),
+        1,
+        "no split until a side is chosen"
+    );
+
+    // Pick the lower half (y<5) → it starts dimensioning.
+    c.choose_ceiling_exposure_cut_region(5.0, 2.0);
+    assert!(
+        !c.ceiling_exposure_cut_pending(),
+        "pick consumed the candidates"
+    );
+    assert!(
+        c.dimensioning_active() || c.document.dimensioning.current_position_prompt.is_some(),
+        "the picked half prompts to be dimensioned"
+    );
+
+    let mut guard = 0;
+    while c.dimensioning_active() && guard < 12 {
+        c.skip_current_dimension();
+        guard += 1;
+    }
+    skip_position_prompts(&mut c);
+    c.materialize();
+
+    {
+        let s = &c.current_record.as_ref().unwrap().data.storeys;
+        assert!(
+            s[1].roofs.regions.len() > 1,
+            "top (labellable) ceiling cut into pieces"
+        );
+        assert_eq!(s[0].roofs.regions.len(), 1, "party lower ceiling untouched");
+    }
+    assert!(
+        !c.ceiling_exposure_selected_ids().is_empty(),
+        "the chosen side is selected for exposure-setting"
     );
 }
 
@@ -9310,5 +9746,119 @@ fn face_partitioned_wall_group_is_exposure_locked() {
     assert!(
         e.groups.iter().any(|g| g.exposure_locked),
         "the partitioned wall's group is exposure-locked"
+    );
+}
+
+// ─── Ceiling-exposure carve pre-snap to interior reference edges ─────────────
+
+/// The ceiling-exposure carve gathers the interior roof-region division edges
+/// as snap references. A ceiling step at x=4 splits the 10×10 roof into two
+/// regions whose shared boundary is the vertical line x=4 ("end of the roof" /
+/// flat-vs-sloped division). `ceiling_carve_reference_segments` must surface
+/// that division so a carve traced near it can snap onto it — even though it's
+/// NOT on the whole-building clip outline.
+#[test]
+fn ceiling_carve_reference_segments_include_the_roof_division() {
+    let mut c = ceiling_ready_controller();
+    ceiling_step_to_amount_at_x4(&mut c);
+    c.assign_ceiling_step_delta(0.3).expect("amount applies");
+    c.materialize();
+    // Two roof regions now, divided at x=4.
+    assert_eq!(
+        c.current_record.as_ref().unwrap().data.storeys[0]
+            .roofs
+            .regions
+            .len(),
+        2,
+        "ceiling step split the roof in two"
+    );
+
+    let segs = c.ceiling_carve_reference_segments();
+    // A vertical reference segment along x=4 (the division) must be present.
+    let has_division = segs.iter().any(|[a, b]| {
+        (a.x - 4.0).abs() < 1e-3 && (b.x - 4.0).abs() < 1e-3 && (a.y - b.y).abs() > 1.0
+    });
+    assert!(
+        has_division,
+        "the flat/sloped roof division at x=4 is a snap reference: {segs:?}"
+    );
+}
+
+/// A carve stroke whose edge runs NEAR (slightly off) the interior roof
+/// division pre-snaps ONTO the division before `carve_or_cut` — so the carved
+/// ceiling piece's boundary lands on the division, not the drawn offset. This
+/// asserts the pre-snap step (the part `carve_or_cut`'s outline alignment can't
+/// do, because the division isn't on the clip outline).
+#[test]
+fn ceiling_carve_stroke_presnaps_onto_the_roof_division() {
+    let mut c = ceiling_ready_controller();
+    ceiling_step_to_amount_at_x4(&mut c);
+    c.assign_ceiling_step_delta(0.3).expect("amount applies");
+    c.materialize();
+
+    let segs = c.ceiling_carve_reference_segments();
+    let tol = c.tuning.subarea.corner_snap_m;
+    // A carve traced with its left edge ~5 cm to the right of the division
+    // (x≈4.05) — within the corner-snap tol of x=4.
+    let raw = vec![
+        Point2f32::new(4.05, 2.0),
+        Point2f32::new(9.0, 2.0),
+        Point2f32::new(9.0, 8.0),
+        Point2f32::new(4.06, 8.0),
+    ];
+    let snapped = manip_plan::snap_stroke_to_segments(&raw, &segs, tol);
+    // The two near-division vertices moved exactly ONTO x=4.
+    assert!(
+        (snapped[0].x - 4.0).abs() < 1e-3,
+        "near vertex snapped to division: {:?}",
+        snapped[0]
+    );
+    assert!(
+        (snapped[3].x - 4.0).abs() < 1e-3,
+        "near vertex snapped to division: {:?}",
+        snapped[3]
+    );
+    // The far vertices (x=9, well past tol) are untouched.
+    assert_eq!(snapped[1], raw[1], "far vertex untouched");
+    assert_eq!(snapped[2], raw[2], "far vertex untouched");
+}
+
+/// END-TO-END: a ceiling-exposure CARVE traced with one edge slightly off the
+/// interior roof division (x≈4.05) lands its carved-region edge exactly ON the
+/// division (x=4) — proving the pre-snap survives `carve_or_cut` (whose
+/// whole-building outline alignment can't reach an interior division). The
+/// in-flight carve polygon is inspected right after the stroke, before
+/// dimensioning, so it reflects the snapped+carved ring.
+#[test]
+fn ceiling_exposure_carve_snaps_to_roof_division_through_carve_or_cut() {
+    let mut c = ceiling_ready_controller();
+    ceiling_step_to_amount_at_x4(&mut c);
+    c.assign_ceiling_step_delta(0.3).expect("amount applies");
+    c.set_ceiling_step_mode(false);
+    c.materialize();
+
+    // Enter the ceiling-exposure tool, clear the storey-count gate, pick Carve.
+    c.set_ceiling_exposure_mode(true);
+    c.confirm_all_storeys_added_ceiling();
+    c.set_ceiling_exposure_select_mode(Some(SelectMode::Carve));
+
+    // Carve a rectangle whose LEFT edge runs ~5 cm right of the division at x=4
+    // (within corner-snap tol), the other edges well clear of it.
+    c.apply_ceiling_exposure_carve_stroke(&[
+        (4.05, 2.0),
+        (8.0, 2.0),
+        (8.0, 8.0),
+        (4.06, 8.0),
+        (4.05, 2.1),
+    ]);
+
+    let poly = c.pending_ceiling_exposure_carve_polygon();
+    assert!(poly.len() >= 4, "a carve is in flight: {poly:?}");
+    // The carved region's LEFT edge sits at x=4 (snapped to the division), not
+    // at the drawn ~4.05.
+    let min_x = poly.iter().map(|(x, _)| *x).fold(f64::INFINITY, f64::min);
+    assert!(
+        (min_x - 4.0).abs() < 1e-2,
+        "carved edge landed on the division x=4 (got {min_x}): {poly:?}"
     );
 }

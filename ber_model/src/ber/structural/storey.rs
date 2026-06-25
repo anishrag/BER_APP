@@ -285,6 +285,98 @@ impl Storey {
         }
     }
 
+    /// Does `ring` (world coords) genuinely SUBDIVIDE a labellable (non-party)
+    /// FLOOR region — i.e. cross it so a split would yield more than one piece?
+    /// True iff some labellable region's polygon both overlaps the ring (positive
+    /// intersection area) AND isn't fully covered by it (positive difference
+    /// area). The carve/cut split-overlap test: an interior carve and an
+    /// edge-to-edge cut both pass, while a ring that misses a storey (or coincides
+    /// with its whole footprint) doesn't.
+    pub fn ring_splits_labellable_floor(&self, ring: &[Point2f64]) -> bool {
+        use geo::bool_ops::BooleanOps;
+        use geo::Area;
+        const SLIVER_AREA_M2: f64 = 1e-6;
+        if ring.len() < 3 {
+            return false;
+        }
+        let cut = ring_to_geo(ring);
+        self.floors
+            .regions
+            .iter()
+            .filter(|r| r.exposure != FloorExposure::NonHeatLoss)
+            .any(|r| {
+                let inside = r.polygon.intersection(&cut).unsigned_area();
+                let outside = r.polygon.difference(&cut).unsigned_area();
+                inside >= SLIVER_AREA_M2 && outside >= SLIVER_AREA_M2
+            })
+    }
+
+    /// Mirror of [`ring_splits_labellable_floor`](Self::ring_splits_labellable_floor)
+    /// over the storey's labellable (non-`Party`) ceiling/roof regions.
+    pub fn ring_splits_labellable_ceiling(&self, ring: &[Point2f64]) -> bool {
+        use geo::bool_ops::BooleanOps;
+        use geo::Area;
+        const SLIVER_AREA_M2: f64 = 1e-6;
+        if ring.len() < 3 {
+            return false;
+        }
+        let cut = ring_to_geo(ring);
+        self.roofs
+            .regions
+            .iter()
+            .filter(|r| r.exposure != CeilingExposure::Party)
+            .any(|r| {
+                let roof_ring = ceiling_ring(&r.polygon);
+                let poly = ring_to_geo(&roof_ring);
+                let inside = poly.intersection(&cut).unsigned_area();
+                let outside = poly.difference(&cut).unsigned_area();
+                inside >= SLIVER_AREA_M2 && outside >= SLIVER_AREA_M2
+            })
+    }
+
+    /// Region ids of `kind` that lie MOSTLY inside `ring` (world coords): the
+    /// region∩ring area is at least `min_frac` of the region's OWN area. Unlike
+    /// the centroid test in [`surfaces_in_ring`](Self::surfaces_in_ring), this
+    /// doesn't mis-select a concave region whose area-weighted centroid happens
+    /// to fall inside the ring — e.g. an L-shaped cut REMAINDER, whose centroid
+    /// sits in the notch (inside the chosen half) but which is almost entirely
+    /// OUTSIDE it. The carve/cut SELECT uses this so only the piece actually
+    /// carved out is picked, never the rest of the floor/ceiling.
+    pub fn surfaces_mostly_in_ring(
+        &self,
+        kind: SurfaceKind,
+        ring: &[Point2f64],
+        min_frac: f64,
+    ) -> Vec<ItemId> {
+        use geo::bool_ops::BooleanOps;
+        use geo::Area;
+        if ring.len() < 3 {
+            return Vec::new();
+        }
+        let cut = ring_to_geo(ring);
+        let mostly = |poly: &geo::Polygon<f64>| {
+            let area = poly.unsigned_area();
+            area > 0.0 && poly.intersection(&cut).unsigned_area() >= min_frac * area
+        };
+        match kind {
+            SurfaceKind::Floors => self
+                .floors
+                .regions
+                .iter()
+                .filter(|r| mostly(&r.polygon))
+                .map(|r| r.id)
+                .collect(),
+            SurfaceKind::Roofs => self
+                .roofs
+                .regions
+                .iter()
+                .filter(|r| mostly(&ring_to_geo(&ceiling_ring(&r.polygon))))
+                .map(|r| r.id)
+                .collect(),
+            SurfaceKind::Walls => Vec::new(),
+        }
+    }
+
     /// Which kind of surface region `id` is, if any — lets a mixed-kind
     /// selection (walls + floors + roofs) recover each id's kind. `None` when no
     /// region of any kind has that id.

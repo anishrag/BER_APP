@@ -421,6 +421,7 @@ pub(super) fn render<F: FnMut(UiEvent)>(
     // it shows every storey). While the gate is up, fall through to the normal
     // plan so the assessor still sees their work behind the gate prompt.
     let floor_exposure_active = view.floor_exposure_mode && !view.floor_exposure_gate_pending;
+    let ceiling_exposure_active = view.ceiling_exposure_mode && !view.ceiling_exposure_gate_pending;
     if floor_exposure_active {
         if let Some(ber) = ber {
             render::all_storeys_floors::render(
@@ -447,6 +448,42 @@ pub(super) fn render<F: FnMut(UiEvent)>(
                     painter.add(egui::Shape::convex_polygon(pts, fill, stroke));
                 }
             }
+            // Pending straight-cut candidates: shade the two halves so the
+            // assessor taps the side they want (routed to ChooseFloorExposureCut).
+            shade_exposure_cut_candidates(&painter, rect, ber, vp, view.floor_exposure_cut_regions);
+        }
+    } else if ceiling_exposure_active {
+        // The OVERLAID all-storeys CEILING view REPLACES the normal plan (mirror
+        // of the floor branch above). Both fit to the same footprint-union
+        // transform, so the in-flight carve lines up with the ceilings beneath it.
+        if let Some(ber) = ber {
+            render::all_storeys_ceilings::render(
+                &painter,
+                rect,
+                ber,
+                vp,
+                view.ceiling_exposure_storeys,
+            );
+            if view.ceiling_exposure_carve_polygon.len() >= 3 {
+                if let Some(t) = floor_exposure_transform(Some(ber), rect, vp) {
+                    let pts: Vec<egui::Pos2> = view
+                        .ceiling_exposure_carve_polygon
+                        .iter()
+                        .map(|(x, y)| t.apply(*x, *y))
+                        .collect();
+                    let fill = egui::Color32::from_rgba_unmultiplied(120, 200, 255, 70);
+                    let stroke = egui::Stroke::new(2.5, egui::Color32::from_rgb(120, 200, 255));
+                    painter.add(egui::Shape::convex_polygon(pts, fill, stroke));
+                }
+            }
+            // Pending straight-cut candidates (mirror of the floor branch).
+            shade_exposure_cut_candidates(
+                &painter,
+                rect,
+                ber,
+                vp,
+                view.ceiling_exposure_cut_regions,
+            );
         }
     } else {
         // BER view layer with optional collinearity highlight overlay.
@@ -1449,6 +1486,20 @@ pub(super) fn render<F: FnMut(UiEvent)>(
                         }
                     }
                 }
+                Some(SelectMode::Carve) if !view.floor_exposure_cut_regions.is_empty() => {
+                    // A straight cut is awaiting a side pick — a primary tap
+                    // chooses which half to dimension + split (carve stroke is
+                    // suppressed until the pick is made).
+                    if response.clicked_by(egui::PointerButton::Primary) {
+                        if let Some(pos) = response.interact_pointer_pos() {
+                            let (wx, wy) = t.inverse(pos.x, pos.y);
+                            on_event(UiEvent::Sketch(SketchEvent::ChooseFloorExposureCutRegion {
+                                world_x: wx,
+                                world_y: wy,
+                            }));
+                        }
+                    }
+                }
                 Some(SelectMode::Carve) => {
                     if response.drag_started_by(egui::PointerButton::Primary) {
                         if let Some(pos) = response.interact_pointer_pos() {
@@ -1477,6 +1528,90 @@ pub(super) fn render<F: FnMut(UiEvent)>(
                                 .collect();
                             on_event(UiEvent::Sketch(
                                 SketchEvent::FloorExposureCarveStrokeWorld {
+                                    points: world_points,
+                                },
+                            ));
+                        } else {
+                            on_event(UiEvent::Sketch(SketchEvent::CancelStroke));
+                        }
+                    }
+                    if let Some(stroke) = &view.current {
+                        draw_stroke(&painter, rect, stroke);
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+
+    // Ceiling-exposure tool (post-gate): the canvas input mirror of the floor
+    // tool — Click toggles the ceiling region under a tap (across the stack);
+    // Carve captures a stroke that DIMENSIONS the carve, which then splits the
+    // roofs. Uses the same footprint-union transform the overlaid view fits to.
+    if ceiling_exposure_active
+        && matches!(mode, SketchMode::Storey2D)
+        && !touch_nav_active
+        && !dim_prompting
+        && view.position_prompt.is_none()
+    {
+        if let Some(t) = floor_exposure_transform(ber, rect, vp) {
+            let tol_world = (12.0 / t.scale()) as f64;
+            match view.ceiling_exposure_select {
+                Some(SelectMode::Click) => {
+                    if response.clicked_by(egui::PointerButton::Primary) {
+                        if let Some(pos) = response.interact_pointer_pos() {
+                            let (wx, wy) = t.inverse(pos.x, pos.y);
+                            on_event(UiEvent::Sketch(SketchEvent::CeilingExposureTap {
+                                world_x: wx,
+                                world_y: wy,
+                                tol: tol_world,
+                            }));
+                        }
+                    }
+                }
+                Some(SelectMode::Carve) if !view.ceiling_exposure_cut_regions.is_empty() => {
+                    // A straight cut is awaiting a side pick — a primary tap
+                    // chooses which half to dimension + split.
+                    if response.clicked_by(egui::PointerButton::Primary) {
+                        if let Some(pos) = response.interact_pointer_pos() {
+                            let (wx, wy) = t.inverse(pos.x, pos.y);
+                            on_event(UiEvent::Sketch(
+                                SketchEvent::ChooseCeilingExposureCutRegion {
+                                    world_x: wx,
+                                    world_y: wy,
+                                },
+                            ));
+                        }
+                    }
+                }
+                Some(SelectMode::Carve) => {
+                    if response.drag_started_by(egui::PointerButton::Primary) {
+                        if let Some(pos) = response.interact_pointer_pos() {
+                            on_event(UiEvent::Sketch(SketchEvent::StartStroke(
+                                pos - rect.left_top().to_vec2(),
+                            )));
+                        }
+                    }
+                    if response.dragged_by(egui::PointerButton::Primary) {
+                        if let Some(pos) = response.interact_pointer_pos() {
+                            on_event(UiEvent::Sketch(SketchEvent::AddPoint(
+                                pos - rect.left_top().to_vec2(),
+                            )));
+                        }
+                    }
+                    if response.drag_stopped_by(egui::PointerButton::Primary) {
+                        if let Some(stroke) = view.current.as_ref() {
+                            let topleft = rect.left_top();
+                            let world_points: Vec<(f32, f32)> = stroke
+                                .points
+                                .iter()
+                                .map(|p| {
+                                    let (wx, wy) = t.inverse(p.x + topleft.x, p.y + topleft.y);
+                                    (wx as f32, wy as f32)
+                                })
+                                .collect();
+                            on_event(UiEvent::Sketch(
+                                SketchEvent::CeilingExposureCarveStrokeWorld {
                                     points: world_points,
                                 },
                             ));
@@ -1583,6 +1718,7 @@ pub(super) fn render<F: FnMut(UiEvent)>(
         && !view.roof_rect_pending
         && !view.exposure_mode
         && !view.floor_exposure_mode
+        && !view.ceiling_exposure_mode
         && !view.partition_mode
         && !view.openings_mode
         // Structure phase owns the canvas with its own selection tools.
@@ -1887,6 +2023,69 @@ fn floor_exposure_transform(
         .filter_map(render::storey_2d::bounding_box)
         .fold(None, |acc, x| render::union_bbox(acc, Some(x)))?;
     Some(render::fit_transform(rect, bb.0, bb.1, view))
+}
+
+/// Shade the two candidate halves of a pending floor/ceiling-exposure straight
+/// CUT over the overlaid all-storeys view, in the SAME footprint-union transform
+/// the floors/ceilings are drawn with, so the assessor taps the side they want.
+/// The two halves take distinct tints (amber / teal) for clarity. No-op when no
+/// cut is pending (empty slice).
+fn shade_exposure_cut_candidates(
+    painter: &egui::Painter,
+    rect: egui::Rect,
+    ber: &Ber,
+    vp: ViewParams,
+    regions: &[Vec<(f64, f64)>],
+) {
+    if regions.is_empty() {
+        return;
+    }
+    let Some(t) = floor_exposure_transform(Some(ber), rect, vp) else {
+        return;
+    };
+    // Mirror the Structure-phase cut pick (`render::render_cut_candidates`): each
+    // half a thick DISTINCT-colour outline + a "tap ①/②" label at its centroid,
+    // so the two pickable sides read clearly. (Per-edge line segments rather than
+    // a polygon FILL — a cut half can be concave, which `convex_polygon` would
+    // mis-fill; outlines are concave-safe and match the other cut UIs.)
+    let colors = [
+        egui::Color32::from_rgb(255, 180, 40), // amber
+        egui::Color32::from_rgb(40, 190, 255), // cyan
+    ];
+    let labels = ["tap ①", "tap ②"];
+    for (i, ring) in regions.iter().enumerate() {
+        if ring.len() < 3 {
+            continue;
+        }
+        let pts: Vec<egui::Pos2> = ring.iter().map(|(x, y)| t.apply(*x, *y)).collect();
+        let color = colors[i % colors.len()];
+        let n = pts.len();
+        for k in 0..n {
+            painter.line_segment([pts[k], pts[(k + 1) % n]], egui::Stroke::new(4.0, color));
+        }
+        // Label at the centroid — the two centroids sit on opposite sides of the
+        // cut, so they disambiguate the shared boundary.
+        let (mut cx, mut cy) = (0.0f32, 0.0f32);
+        for p in &pts {
+            cx += p.x;
+            cy += p.y;
+        }
+        let c = egui::pos2(cx / n as f32, cy / n as f32);
+        painter.text(
+            c,
+            egui::Align2::CENTER_CENTER,
+            labels[i % labels.len()],
+            egui::FontId::proportional(15.0),
+            color,
+        );
+    }
+    painter.text(
+        rect.center_top() + egui::vec2(0.0, 8.0),
+        egui::Align2::CENTER_TOP,
+        "Tap the side you want to set",
+        egui::FontId::proportional(14.0),
+        egui::Color32::from_rgb(230, 160, 60),
+    );
 }
 
 /// World coords of a canvas-pixel position via the storey's own fit transform.

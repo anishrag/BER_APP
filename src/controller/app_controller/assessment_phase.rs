@@ -102,6 +102,9 @@ impl AppController {
         // overlaid view; leaving Mapping must drop it so Structure shows the
         // ordinary per-storey diagram again.
         self.set_floor_exposure_mode(false);
+        // The ceiling-exposure tool likewise owns the canvas with its overlaid
+        // all-storeys ceiling view — drop it on the phase switch too.
+        self.set_ceiling_exposure_mode(false);
         self.set_phase_mode(false);
         self.set_step_mode(false);
         self.set_ceiling_step_mode(false);

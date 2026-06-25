@@ -32,6 +32,8 @@ pub enum Tool {
     Exposure,
     /// Floor-exposure tool toggle (all-storeys overlaid floor view + select).
     FloorExposure,
+    /// Ceiling-exposure tool toggle (all-storeys overlaid ceiling view + select).
+    CeilingExposure,
     /// The storey's default ceiling height: a metres field + "Set", showing
     /// the current value when one is set. Re-entering overwrites; on the All
     /// tab one value fills every still-unset storey.
@@ -97,6 +99,7 @@ pub const CATEGORIES: &[Category] = &[
             Tool::ConstructionYear,
             Tool::Exposure,
             Tool::FloorExposure,
+            Tool::CeilingExposure,
         ],
     },
     Category {
@@ -202,6 +205,8 @@ pub struct ToolFlags {
     pub exposure_mode: bool,
     /// The floor-exposure tool is active (all-storeys overlaid floor view).
     pub floor_exposure_mode: bool,
+    /// The ceiling-exposure tool is active (all-storeys overlaid ceiling view).
+    pub ceiling_exposure_mode: bool,
     pub phase_mode: bool,
     /// Construction years exist (entered in Key Details) — without them the
     /// phase picker would be empty, so the toggle is disabled.
@@ -259,6 +264,7 @@ impl ToolFlags {
             active_living_area: view.active_living_area,
             exposure_mode: view.exposure_mode,
             floor_exposure_mode: view.floor_exposure_mode,
+            ceiling_exposure_mode: view.ceiling_exposure_mode,
             phase_mode: view.phase_mode,
             has_phase_choices: !view.phase_choices.is_empty(),
             step_mode: view.step_mode,
@@ -523,6 +529,28 @@ fn tool_ui<F: FnMut(UiEvent)>(
             {
                 on_event(UiEvent::Sketch(SketchEvent::SetFloorExposureMode(
                     !flags.floor_exposure_mode,
+                )));
+            }
+        }
+        Tool::CeilingExposure => {
+            // Spans the whole storey stack (independent of the current tab), so
+            // it's available whenever a floor plan exists. Enabled on the All
+            // tab too. Mirrors the floor-exposure tool.
+            let enabled = flags.has_floor_plan;
+            if ui
+                .add_enabled(
+                    enabled,
+                    egui::Button::selectable(flags.ceiling_exposure_mode, "▤ Ceiling exposure"),
+                )
+                .hint(
+                    "Mark each ceiling's heat-loss exposure across every storey: \
+                     confirm all storeys are added (runs the party auto-pass), \
+                     then select ceilings and pick exposed roof / party / unheated",
+                )
+                .clicked()
+            {
+                on_event(UiEvent::Sketch(SketchEvent::SetCeilingExposureMode(
+                    !flags.ceiling_exposure_mode,
                 )));
             }
         }

@@ -156,10 +156,12 @@ impl AppController {
         self.floor_exposure_mode = on;
         self.floor_exposure_select = None;
         self.floor_exposure_selected.clear();
+        self.floor_exposure_pending_cut = None;
         if on {
             self.floor_exposure_gate_pending = true;
             // Leave every other Mapping mode (each setter clears its own
             // pick/drag state) so the canvas isn't shared.
+            self.set_ceiling_exposure_mode(false);
             self.set_exposure_mode(false);
             self.set_openings_mode(false);
             self.set_living_area_mode(false);
@@ -196,9 +198,13 @@ impl AppController {
         if self.floor_exposure_gate_pending {
             return;
         }
-        // Switching away from Carve drops any in-flight (half-dimensioned) carve.
-        if self.floor_exposure_carve_in_flight && mode != Some(SelectMode::Carve) {
-            self.abandon_floor_exposure_carve_shape();
+        // Switching away from Carve drops any in-flight (half-dimensioned) carve
+        // and any cut awaiting its side pick.
+        if mode != Some(SelectMode::Carve) {
+            if self.floor_exposure_carve_in_flight {
+                self.abandon_floor_exposure_carve_shape();
+            }
+            self.floor_exposure_pending_cut = None;
         }
         self.floor_exposure_select = mode;
         if matches!(mode, Some(SelectMode::All | SelectMode::Remaining)) {
@@ -313,15 +319,7 @@ impl AppController {
         // (`with_splits`), so the union is just the outer bound. Falls back to the
         // reference storey's outline if no union can be built.
         let boundary = self
-            .current_record
-            .as_ref()
-            .and_then(|r| r.data.floors_footprint_union())
-            .map(|ring| {
-                ring.iter()
-                    .map(|p| domain::points::to_f32(*p))
-                    .collect::<Vec<_>>()
-            })
-            .and_then(|ring| manip_plan::FloorPlan::from_clean_ring(&ring).ok())
+            .floor_exposure_whole_building_boundary()
             .unwrap_or_else(|| self.document.outline.floor_plan.clone());
         match boundary.carve_or_cut(&pts, &self.tuning.subarea, false) {
             Ok(SubareaOutcome::Area(plan)) => {
@@ -336,18 +334,110 @@ impl AppController {
                 self.document.subarea_containment_override = Some(boundary);
                 self.begin_floor_exposure_carve_dimensioning(slot, ref_idx, undo);
             }
-            // A straight cut produces two halves, not an enclosed carve region —
-            // this tool requires a closed region, so ignore it.
-            Ok(SubareaOutcome::Cut(..)) => {}
+            // A straight edge-to-edge cut splits the whole building into two
+            // candidate halves; pin both against the SAME whole-building boundary
+            // (so a later pick can dimension either) and stash the pending cut.
+            // The side pick (`choose_floor_exposure_cut_region`) sets the
+            // containment override + begins dimensioning, mirroring the Area path.
+            // The active storey stays `ref_idx` (set above) so the pick can host it.
+            Ok(SubareaOutcome::Cut(a, b)) => {
+                self.floor_exposure_pending_cut = Some([
+                    self.pinned_subarea_slot(&boundary, a),
+                    self.pinned_subarea_slot(&boundary, b),
+                ]);
+            }
             Err(e) => log::error!("floor exposure carve_or_cut: {}", e),
         }
+    }
+
+    /// The two candidate halves of a pending floor-exposure cut (world coords),
+    /// for the overlaid view to shade while the assessor picks a side. Empty when
+    /// no cut is pending. Mirror of
+    /// [`structure_cut_regions`](Self::structure_cut_regions).
+    pub fn floor_exposure_cut_regions(&self) -> Vec<Vec<(f64, f64)>> {
+        self.floor_exposure_pending_cut
+            .as_ref()
+            .map(|regions| {
+                regions
+                    .iter()
+                    .map(|slot| {
+                        slot.floor_plan
+                            .get_points()
+                            .iter()
+                            .map(|p| (p.x as f64, p.y as f64))
+                            .collect()
+                    })
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    /// True while a floor-exposure cut is awaiting the assessor's side pick.
+    pub fn floor_exposure_cut_pending(&self) -> bool {
+        self.floor_exposure_pending_cut.is_some()
+    }
+
+    /// Pick which candidate half a floor-exposure cut should dimension + split:
+    /// take the pending cut, choose the slot whose plan holds the tap (a tap
+    /// outside both cancels — clears the pending cut), set the whole-building
+    /// containment override (as the Area carve does), then begin dimensioning the
+    /// chosen half. From there it's the SAME dimension → stage → commit path as
+    /// the Area carve. The active storey is already `ref_idx` (set when the cut
+    /// stroke was applied), so the carve hosts there.
+    pub fn choose_floor_exposure_cut_region(&mut self, world_x: f32, world_y: f32) {
+        if self.floor_exposure_gate_pending
+            || !matches!(self.floor_exposure_select, Some(SelectMode::Carve))
+        {
+            return;
+        }
+        let Some([a, b]) = self.floor_exposure_pending_cut.take() else {
+            return;
+        };
+        let chosen = if a.floor_plan.contains_point(world_x, world_y) {
+            Some(a)
+        } else if b.floor_plan.contains_point(world_x, world_y) {
+            Some(b)
+        } else {
+            None
+        };
+        let Some(slot) = chosen else {
+            return; // tap outside both — cancel (pending cut already cleared)
+        };
+        // Host the chosen half's dimensioning on the reference storey's outline
+        // (the same storey + buffer the cut stroke set up — re-establish it in
+        // case a re-resolve happened between stroke and pick).
+        let Some(ref_idx) = self.floor_exposure_reference_storey() else {
+            return;
+        };
+        self.document.set_active_storey(ref_idx);
+        self.document.active = ActiveShape::Outline;
+        self.load_active_into_buffer();
+        let undo = self.current_history_snapshot_full();
+        // The chosen half dimensions against the WHOLE building, so the "stay
+        // inside the storey" guardrail must check the union too (as the Area path).
+        if let Some(boundary) = self.floor_exposure_whole_building_boundary() {
+            self.document.subarea_containment_override = Some(boundary);
+        }
+        self.begin_floor_exposure_carve_dimensioning(slot, ref_idx, undo);
+    }
+
+    /// The whole-building floor-footprint union as a [`FloorPlan`] — the boundary
+    /// a floor-exposure carve/cut clips + dimensions against (so a region drawn
+    /// over another storey's area isn't lost). `None` when no union can be built.
+    pub(super) fn floor_exposure_whole_building_boundary(&self) -> Option<manip_plan::FloorPlan> {
+        let ring = self
+            .current_record
+            .as_ref()
+            .and_then(|r| r.data.floors_footprint_union())?;
+        let ring32: Vec<Point2f32> = ring.iter().map(|p| domain::points::to_f32(*p)).collect();
+        manip_plan::FloorPlan::from_clean_ring(&ring32).ok()
     }
 
     /// The reference storey whose outline a floor-exposure carve is dimensioned
     /// against: the active storey if it has a non-empty outline, else the storey
     /// with the largest footprint (falling back to storey 0). `None` when there
     /// are no storeys with an outline at all.
-    fn floor_exposure_reference_storey(&self) -> Option<usize> {
+    pub(super) fn floor_exposure_reference_storey(&self) -> Option<usize> {
         let outline_len = |i: usize| {
             self.document
                 .storeys
@@ -508,16 +598,14 @@ impl AppController {
                 .storeys
                 .iter()
                 .enumerate()
-                // Only split storeys with a LABELLABLE (non-party) floor under the
-                // ring — party (NonHeatLoss) floors are auto-classified and hidden,
-                // so there's nothing to subdivide there.
-                .filter(|(_, s)| {
-                    let ids = s.surfaces_in_ring(SurfaceKind::Floors, ring);
-                    s.floors
-                        .regions
-                        .iter()
-                        .any(|r| ids.contains(&r.id) && r.exposure != FloorExposure::NonHeatLoss)
-                })
+                // Only split storeys whose ring genuinely SUBDIVIDES a labellable
+                // (non-party) floor — party (NonHeatLoss) floors are auto-classified
+                // and hidden, so there's nothing to subdivide there. An interior
+                // carve and an edge-to-edge cut both pass (the cut's half-ring
+                // shares the outline on three sides, so the whole-floor centroid
+                // sits on the cut edge — an intersection test, not a centroid test,
+                // is what catches it).
+                .filter(|(_, s)| s.ring_splits_labellable_floor(ring))
                 .map(|(idx, _)| idx)
                 .collect()
         };
@@ -557,7 +645,10 @@ impl AppController {
             .iter()
             .enumerate()
             .flat_map(|(idx, s)| {
-                let ids = s.surfaces_in_ring(SurfaceKind::Floors, region_ring);
+                // Area-fraction test (not centroid): select only the floor pieces
+                // actually INSIDE the carved/chosen ring, so an L-shaped cut
+                // remainder (whose centroid falls in the notch) is NOT picked.
+                let ids = s.surfaces_mostly_in_ring(SurfaceKind::Floors, region_ring, 0.5);
                 s.floors
                     .regions
                     .iter()

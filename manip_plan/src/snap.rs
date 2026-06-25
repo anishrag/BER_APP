@@ -33,6 +33,10 @@ pub enum SnapKind {
     ToParallelWall,
     /// A stroke point snapped onto the PREVIOUS storey's outline.
     ToPreviousOutline,
+    /// A stroke point snapped onto a REFERENCE segment supplied from outside the
+    /// plan (e.g. an interior roof-region division or a floor-above wall base the
+    /// ceiling carve should follow), not part of the carve's boundary ring.
+    ToReferenceSegment,
 }
 
 /// One option an elective snap considered: a `kind`, the point it would move to,
@@ -241,7 +245,7 @@ fn aggressiveness(kind: SnapKind) -> u8 {
     match kind {
         SnapKind::ToVertex | SnapKind::ToCorner => 0,
         SnapKind::ToEdge => 1,
-        SnapKind::ToPreviousOutline => 2,
+        SnapKind::ToPreviousOutline | SnapKind::ToReferenceSegment => 2,
         SnapKind::ToParallelWall => 3,
     }
 }
@@ -478,6 +482,62 @@ pub fn snap_stroke_to_ring(
         .collect()
 }
 
+/// Snap each point of `stroke` onto the nearest of a set of REFERENCE
+/// `segments` when within `tol`, leaving points farther away untouched.
+///
+/// Unlike [`snap_stroke_to_ring`], the references are an arbitrary, unconnected
+/// COLLECTION of segments (not one closed ring) — supplied from outside the
+/// plan so a carve can follow features that aren't on its clipping boundary
+/// (the "end of the roof" interior division, the floor-above wall base). For
+/// each stroke vertex it finds the nearest point on any segment; if within
+/// `tol` it moves the vertex there, PREFERRING a segment ENDPOINT when the
+/// vertex is also within `tol` of one (so corners catch and shared corners of
+/// two segments stay coincident), else the nearest point along the segment.
+/// A point with no segment in reach is left exactly as drawn. Each applied move
+/// is routed through [`elective_snap`] (recorded as a `ToReferenceSegment`
+/// decision) so the controller's snap-tag replay machinery sees it. Pure aside
+/// from that recording; degenerate (zero-length) reference segments are
+/// skipped, and an empty `segments` leaves the whole stroke untouched.
+pub fn snap_stroke_to_segments(
+    stroke: &[Point2f32],
+    segments: &[[Point2f32; 2]],
+    tol: f32,
+) -> Vec<Point2f32> {
+    if segments.is_empty() {
+        return stroke.to_vec();
+    }
+    stroke
+        .iter()
+        .map(|&p| {
+            // Track the nearest ENDPOINT and the nearest mid-segment FOOT
+            // independently: an endpoint in reach is PREFERRED (corners catch)
+            // even when a foot is marginally closer, so a vertex near a corner
+            // lands ON the corner rather than just beside it on the edge.
+            let mut best_end: Option<(f32, Point2f32)> = None;
+            let mut best_foot: Option<(f32, Point2f32)> = None;
+            let consider = |slot: &mut Option<(f32, Point2f32)>, dist: f32, target| {
+                if dist <= tol && slot.is_none_or(|(bd, _)| dist < bd) {
+                    *slot = Some((dist, target));
+                }
+            };
+            for seg in segments {
+                let (a, b) = (seg[0], seg[1]);
+                if geom::segment_len(a, b) < 1e-6 {
+                    continue; // degenerate reference segment
+                }
+                consider(&mut best_end, geom::segment_len(p, a), a);
+                consider(&mut best_end, geom::segment_len(p, b), b);
+                let (q, _t, dist) = geom::project_point_to_segment(p, a, b);
+                consider(&mut best_foot, dist, q);
+            }
+            match best_end.or(best_foot) {
+                Some((_, target)) => elective_snap(SnapKind::ToReferenceSegment, p, target, true),
+                None => p,
+            }
+        })
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -635,5 +695,74 @@ mod tests {
         assert_eq!(snap_to_corner(p(9.95, 10.05), &ring, 0.2), p(10.0, 10.0));
         // mid-edge, far from any corner → unchanged
         assert_eq!(snap_to_corner(p(5.0, 0.05), &ring, 0.2), p(5.0, 0.05));
+    }
+
+    #[test]
+    fn snap_stroke_to_segments_moves_near_vertex_onto_segment() {
+        let p = |x, y| Point2f32::new(x, y);
+        let _ = take_snap_decisions();
+        // A vertical division line at x = 5, running y ∈ [0, 10].
+        let segs = [[p(5.0, 0.0), p(5.0, 10.0)]];
+        let stroke = vec![p(5.08, 4.0), p(8.0, 4.0)]; // first near the line, second far
+        let out = snap_stroke_to_segments(&stroke, &segs, 0.15);
+        // Within tol → snapped onto the line (x becomes 5); mid-segment foot.
+        assert!(
+            (out[0].x - 5.0).abs() < 1e-4,
+            "snapped onto x=5: {:?}",
+            out[0]
+        );
+        assert!((out[0].y - 4.0).abs() < 1e-4, "y unchanged along the line");
+        // Outside tol → untouched.
+        assert_eq!(out[1], p(8.0, 4.0));
+    }
+
+    #[test]
+    fn snap_stroke_to_segments_prefers_endpoint_for_corner() {
+        let p = |x, y| Point2f32::new(x, y);
+        let _ = take_snap_decisions();
+        let segs = [[p(5.0, 0.0), p(5.0, 10.0)]];
+        // Near the BOTTOM endpoint (5,0): both endpoint and edge-foot are in
+        // reach, but the corner should win so the vertex lands on (5,0).
+        let stroke = vec![p(5.05, 0.05)];
+        let out = snap_stroke_to_segments(&stroke, &segs, 0.15);
+        assert_eq!(out[0], p(5.0, 0.0), "snapped onto the endpoint corner");
+    }
+
+    #[test]
+    fn snap_stroke_to_segments_leaves_far_points_and_records_only_moves() {
+        let p = |x, y| Point2f32::new(x, y);
+        let _ = take_snap_decisions();
+        let segs = [[p(5.0, 0.0), p(5.0, 10.0)]];
+        let stroke = vec![p(0.0, 0.0), p(5.05, 6.0), p(9.0, 9.0)];
+        let out = snap_stroke_to_segments(&stroke, &segs, 0.15);
+        assert_eq!(out[0], p(0.0, 0.0), "far point untouched");
+        assert!((out[1].x - 5.0).abs() < 1e-4, "near point snapped");
+        assert_eq!(out[2], p(9.0, 9.0), "far point untouched");
+        // Only the one moved vertex records an elective decision.
+        let decisions = take_snap_decisions();
+        assert_eq!(decisions.len(), 1);
+        assert_eq!(
+            decisions[0].candidates[0].kind,
+            SnapKind::ToReferenceSegment
+        );
+    }
+
+    #[test]
+    fn snap_stroke_to_segments_empty_segments_is_identity() {
+        let p = |x, y| Point2f32::new(x, y);
+        let stroke = vec![p(1.0, 2.0), p(3.0, 4.0)];
+        assert_eq!(snap_stroke_to_segments(&stroke, &[], 0.15), stroke);
+    }
+
+    #[test]
+    fn snap_stroke_to_segments_skips_degenerate_segments() {
+        let p = |x, y| Point2f32::new(x, y);
+        let _ = take_snap_decisions();
+        // A zero-length "segment" is no snap target.
+        let segs = [[p(5.0, 5.0), p(5.0, 5.0)]];
+        let stroke = vec![p(5.02, 5.02)];
+        let out = snap_stroke_to_segments(&stroke, &segs, 0.15);
+        assert_eq!(out[0], p(5.02, 5.02), "degenerate segment ignored");
+        assert!(take_snap_decisions().is_empty());
     }
 }

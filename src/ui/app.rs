@@ -864,6 +864,7 @@ impl eframe::App for BerApp {
                                 floor_exposure_select,
                                 floor_exposure_storeys,
                                 floor_exposure_carve_polygon,
+                                floor_exposure_cut_regions,
                             ) = {
                                 let c = self.app_controller.borrow();
                                 (
@@ -872,6 +873,29 @@ impl eframe::App for BerApp {
                                     c.floor_exposure_select(),
                                     c.floor_exposure_view(),
                                     c.pending_floor_exposure_carve_polygon(),
+                                    c.floor_exposure_cut_regions(),
+                                )
+                            };
+
+                            // Ceiling-exposure tool: mode flags + the overlaid
+                            // all-storeys ceiling view data (mirror of the floor
+                            // tool above).
+                            let (
+                                ceiling_exposure_mode,
+                                ceiling_exposure_gate_pending,
+                                ceiling_exposure_select,
+                                ceiling_exposure_storeys,
+                                ceiling_exposure_carve_polygon,
+                                ceiling_exposure_cut_regions,
+                            ) = {
+                                let c = self.app_controller.borrow();
+                                (
+                                    c.ceiling_exposure_mode(),
+                                    c.ceiling_exposure_gate_pending(),
+                                    c.ceiling_exposure_select(),
+                                    c.ceiling_exposure_view(),
+                                    c.pending_ceiling_exposure_carve_polygon(),
+                                    c.ceiling_exposure_cut_regions(),
                                 )
                             };
 
@@ -1024,6 +1048,13 @@ impl eframe::App for BerApp {
                                 floor_exposure_select,
                                 floor_exposure_storeys: &floor_exposure_storeys,
                                 floor_exposure_carve_polygon: &floor_exposure_carve_polygon,
+                                floor_exposure_cut_regions: &floor_exposure_cut_regions,
+                                ceiling_exposure_mode,
+                                ceiling_exposure_gate_pending,
+                                ceiling_exposure_select,
+                                ceiling_exposure_storeys: &ceiling_exposure_storeys,
+                                ceiling_exposure_carve_polygon: &ceiling_exposure_carve_polygon,
+                                ceiling_exposure_cut_regions: &ceiling_exposure_cut_regions,
                             };
                             let touch_nav = &mut self.sketch_state.touch_nav;
                             SketchPage::render(ui, view, touch_nav, |event| match event {
@@ -1794,11 +1825,63 @@ impl eframe::App for BerApp {
                                             .borrow_mut()
                                             .apply_floor_exposure_carve_stroke(&points);
                                     }
+                                    SketchEvent::ChooseFloorExposureCutRegion {
+                                        world_x,
+                                        world_y,
+                                    } => {
+                                        controller.borrow_mut().choose_floor_exposure_cut_region(
+                                            world_x as f32,
+                                            world_y as f32,
+                                        );
+                                    }
                                     SketchEvent::DeselectAllFloorExposure => {
                                         controller.borrow_mut().clear_floor_exposure_selection();
                                     }
                                     SketchEvent::AssignFloorExposure(exposure) => {
                                         controller.borrow_mut().set_floor_exposure_for(exposure);
+                                    }
+                                    SketchEvent::SetCeilingExposureMode(on) => {
+                                        controller.borrow_mut().set_ceiling_exposure_mode(on);
+                                    }
+                                    SketchEvent::ConfirmAllStoreysAddedCeiling => {
+                                        controller.borrow_mut().confirm_all_storeys_added_ceiling();
+                                    }
+                                    SketchEvent::DeferStoreyCountCeiling => {
+                                        controller.borrow_mut().defer_storey_count_ceiling();
+                                    }
+                                    SketchEvent::SetCeilingExposureSelectMode(mode) => {
+                                        controller
+                                            .borrow_mut()
+                                            .set_ceiling_exposure_select_mode(mode);
+                                    }
+                                    SketchEvent::CeilingExposureTap {
+                                        world_x,
+                                        world_y,
+                                        tol,
+                                    } => {
+                                        controller
+                                            .borrow_mut()
+                                            .toggle_ceiling_exposure_at(world_x, world_y, tol);
+                                    }
+                                    SketchEvent::CeilingExposureCarveStrokeWorld { points } => {
+                                        controller
+                                            .borrow_mut()
+                                            .apply_ceiling_exposure_carve_stroke(&points);
+                                    }
+                                    SketchEvent::ChooseCeilingExposureCutRegion {
+                                        world_x,
+                                        world_y,
+                                    } => {
+                                        controller.borrow_mut().choose_ceiling_exposure_cut_region(
+                                            world_x as f32,
+                                            world_y as f32,
+                                        );
+                                    }
+                                    SketchEvent::DeselectAllCeilingExposure => {
+                                        controller.borrow_mut().clear_ceiling_exposure_selection();
+                                    }
+                                    SketchEvent::AssignCeilingExposure(exposure) => {
+                                        controller.borrow_mut().set_ceiling_exposure_for(exposure);
                                     }
                                     SketchEvent::EditMouseDown {
                                         world_x,

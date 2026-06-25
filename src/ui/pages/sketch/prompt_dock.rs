@@ -16,8 +16,8 @@ use crate::ui::pages::events::UiEvent;
 use crate::ui::widgets::{metre_input, HintExt};
 use ber_model::ber::common::ConstructionPhase;
 use ber_model::ber::fenestration::{Frame, Glazing};
-use ber_model::ber::structural::FloorExposure;
 use ber_model::ber::structural::WallExposure;
+use ber_model::ber::structural::{CeilingExposure, FloorExposure};
 
 /// Whether the dock has anything to show this frame. When false the bottom
 /// panel is skipped entirely so the canvas gets the space.
@@ -38,6 +38,7 @@ pub(super) fn has_content(view: &SketchView<'_>) -> bool {
         || view.review.is_some()
         || view.exposure_mode
         || view.floor_exposure_mode
+        || view.ceiling_exposure_mode
         || view.partition_mode
         || view.openings_mode
         || (view.has_floor_plan
@@ -76,6 +77,17 @@ pub(super) fn render<F: FnMut(UiEvent)>(
                 floor_exposure_gate_toolbar(ui, on_event);
             } else {
                 floor_exposure_toolbar(ui, view.floor_exposure_select, on_event);
+            }
+        });
+        return;
+    }
+    // The ceiling-exposure tool likewise spans the whole stack and owns the dock.
+    if view.ceiling_exposure_mode {
+        ui.horizontal_wrapped(|ui| {
+            if view.ceiling_exposure_gate_pending {
+                ceiling_exposure_gate_toolbar(ui, on_event);
+            } else {
+                ceiling_exposure_toolbar(ui, view.ceiling_exposure_select, on_event);
             }
         });
         return;
@@ -1015,6 +1027,76 @@ fn floor_exposure_toolbar<F: FnMut(UiEvent)>(
     ] {
         if ui.button(label).clicked() {
             on_event(UiEvent::Sketch(SketchEvent::AssignFloorExposure(exposure)));
+        }
+    }
+}
+
+/// The ceiling-exposure storey-count GATE (mirror of
+/// [`floor_exposure_gate_toolbar`]): confirm every storey is added before the
+/// auto-exposure pass runs and the overlaid ceiling view appears.
+fn ceiling_exposure_gate_toolbar<F: FnMut(UiEvent)>(ui: &mut egui::Ui, on_event: &mut F) {
+    ui.label(
+        egui::RichText::new("Have you finished adding all storeys?")
+            .strong()
+            .color(egui::Color32::from_rgb(60, 220, 255)),
+    );
+    if ui
+        .button("Yes")
+        .hint("Run the inter-storey party auto-exposure pass, then mark ceilings")
+        .clicked()
+    {
+        on_event(UiEvent::Sketch(SketchEvent::ConfirmAllStoreysAddedCeiling));
+    }
+    if ui
+        .button("Not yet")
+        .hint("Exit the tool so you can add the remaining storeys first")
+        .clicked()
+    {
+        on_event(UiEvent::Sketch(SketchEvent::DeferStoreyCountCeiling));
+    }
+}
+
+/// The ceiling-exposure SELECT + APPLY toolbar (post-gate), mirror of
+/// [`floor_exposure_toolbar`]: the Select subtools (Set all / Click / Carve /
+/// Remaining) plus Deselect, then the exposure buttons that paint the current
+/// ceiling-region selection across the stack.
+fn ceiling_exposure_toolbar<F: FnMut(UiEvent)>(
+    ui: &mut egui::Ui,
+    select: Option<SelectMode>,
+    on_event: &mut F,
+) {
+    let mut subtool = |ui: &mut egui::Ui, mode: SelectMode, label: &str| {
+        let on = select == Some(mode);
+        if ui.add(egui::Button::selectable(on, label)).clicked() {
+            // Re-clicking the active subtool turns it off.
+            let next = if on { None } else { Some(mode) };
+            on_event(UiEvent::Sketch(SketchEvent::SetCeilingExposureSelectMode(
+                next,
+            )));
+        }
+    };
+    subtool(ui, SelectMode::All, "Set all");
+    subtool(ui, SelectMode::Click, "Click");
+    subtool(ui, SelectMode::Carve, "Carve");
+    subtool(ui, SelectMode::Remaining, "Remaining");
+    if ui
+        .button("Deselect all")
+        .hint("Clear the ceiling selection")
+        .clicked()
+    {
+        on_event(UiEvent::Sketch(SketchEvent::DeselectAllCeilingExposure));
+    }
+    ui.separator();
+    for (label, exposure) in [
+        ("Exposed roof", CeilingExposure::ExposedRoof),
+        ("Party", CeilingExposure::Party),
+        ("Unheated", CeilingExposure::Unheated),
+        ("Unset", CeilingExposure::Unset),
+    ] {
+        if ui.button(label).clicked() {
+            on_event(UiEvent::Sketch(SketchEvent::AssignCeilingExposure(
+                exposure,
+            )));
         }
     }
 }

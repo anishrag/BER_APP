@@ -804,8 +804,9 @@ const CONTAINMENT_TOL_M: f64 = 0.05;
 /// left for manual marking):
 ///  - a floor fully covered by the storey BELOW → `NonHeatLoss` (party floor to
 ///    the dwelling below); the lowest floor is left `Unset` for the assessor;
-///  - top-storey ceiling → `ExposedRoof`; an intermediate ceiling fully covered
-///    by the storey ABOVE → `Party` (party ceiling to the dwelling above).
+///  - an intermediate ceiling fully covered by the storey ABOVE → `Party` (party
+///    ceiling to the dwelling above); the TOP ceiling is left `Unset` for the
+///    assessor (it could be an exposed roof OR sit under an unheated attic).
 pub fn auto_derive_horizontal_exposure(
     doc: &mut StoreyDoc,
     ber: &Ber,
@@ -835,21 +836,21 @@ pub fn auto_derive_horizontal_exposure(
                 .or_insert(e);
         }
     }
-    // Ceilings: the top storey's ceiling is the exposed roof; an intermediate
-    // ceiling fully under the storey above is a party ceiling.
+    // Ceilings: an intermediate ceiling fully under the storey above is a party
+    // ceiling. The TOP storey's ceiling is deliberately NOT auto-classified —
+    // it could be an exposed roof OR sit under an unheated attic, so it's left
+    // `Unset` for the assessor to label in the ceiling-exposure view (mirrors
+    // the lowest floor).
     let above_footprint = (idx + 1 < n_storeys)
         .then(|| ber.storeys.get(idx + 1))
         .flatten()
         .and_then(|s| s.floors.footprint_ring());
     for region in &storey.roofs.regions {
         let ring = ceiling_ring_xy(region);
-        let derived = if idx + 1 >= n_storeys {
-            Some(CeilingExposure::ExposedRoof)
-        } else if let Some(above) = &above_footprint {
-            ring_within_ring(&ring, above, CONTAINMENT_TOL_M).then_some(CeilingExposure::Party)
-        } else {
-            None
-        };
+        let derived = above_footprint
+            .as_ref()
+            .filter(|above| ring_within_ring(&ring, above, CONTAINMENT_TOL_M))
+            .map(|_| CeilingExposure::Party);
         if let Some(e) = derived {
             doc.ceiling_exposure
                 .entry(centroid_key(region.centroid()))
@@ -1127,9 +1128,10 @@ mod tests {
 
     /// Auto-derive on a clean 2-storey stack: the lowest (storey-0) floor is NOT
     /// auto-classified (left Unset for the assessor — "ground" isn't always
-    /// right); the top (storey-1) ceiling → ExposedRoof. The intermediate
-    /// surfaces between the two FULLY-overlapping footprints derive Party
-    /// (ceiling under the upper) and NonHeatLoss (floor over the lower).
+    /// right), and neither is the top (storey-1) ceiling (it could be an exposed
+    /// roof OR under an unheated attic). The intermediate surfaces between the
+    /// two FULLY-overlapping footprints derive Party (ceiling under the upper)
+    /// and NonHeatLoss (floor over the lower).
     #[test]
     fn auto_derive_ground_roof_and_party_on_a_clean_stack() {
         let mut ber = Ber::default();
@@ -1158,7 +1160,8 @@ mod tests {
         );
         assert_eq!(
             d1.ceiling_exposure.get(&c1),
-            Some(&CeilingExposure::ExposedRoof)
+            None,
+            "the top ceiling is left for the assessor, not auto-classified"
         );
     }
 

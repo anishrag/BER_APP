@@ -1005,6 +1005,15 @@ impl CeilingRegion {
         ring_centroid(&ring)
     }
 
+    /// The region's plan area (m²) — its `Polygon3D` exterior projected to xy.
+    /// Mirrors [`FloorRegion::area`](super::FloorRegion::area); used by the
+    /// ceiling-exposure tap pick to choose the smallest region under a point.
+    pub fn area(&self) -> f64 {
+        use geo::Area;
+        let ring: Vec<(f64, f64)> = self.polygon.exterior.iter().map(|v| (v.x, v.y)).collect();
+        Polygon::new(LineString::from(ring), vec![]).unsigned_area()
+    }
+
     /// The region's single height when it is FLAT (every vertex z within
     /// 1e-6 m), `None` for sloped/degenerate regions. Used to reconstruct
     /// session step areas and label heights in 2D.

@@ -574,10 +574,51 @@ pub enum SketchEvent {
     FloorExposureCarveStrokeWorld {
         points: Vec<(f32, f32)>,
     },
+    /// Floor-exposure Carve subtool: while a straight-cut split is awaiting a
+    /// side pick, the assessor tapped — choose the half (world coords) to
+    /// dimension + split.
+    ChooseFloorExposureCutRegion {
+        world_x: f64,
+        world_y: f64,
+    },
     /// Clear every selected floor region ("Deselect all").
     DeselectAllFloorExposure,
     /// Assign a floor exposure to the current floor-region selection.
     AssignFloorExposure(ber_model::ber::structural::FloorExposure),
+    // ── Ceiling exposure ──────────────────────────────────────────────────────
+    /// Toggle the ceiling-exposure tool. On enter the storey-count gate is raised
+    /// (the overlaid view + selection wait for `ConfirmAllStoreysAddedCeiling`).
+    SetCeilingExposureMode(bool),
+    /// Gate answer "Yes, finished adding all storeys" — runs the auto-exposure
+    /// pass and reveals the overlaid ceiling view.
+    ConfirmAllStoreysAddedCeiling,
+    /// Gate answer "Not yet" — exit the tool to add the remaining storeys.
+    DeferStoreyCountCeiling,
+    /// Set (or clear with `None`) the ceiling-exposure Select subtool.
+    SetCeilingExposureSelectMode(Option<SelectMode>),
+    /// Ceiling-exposure Click subtool: a tap (world coords) toggling the ceiling
+    /// region under it (across the whole stack) in/out of the selection.
+    CeilingExposureTap {
+        world_x: f64,
+        world_y: f64,
+        tol: f64,
+    },
+    /// Ceiling-exposure Carve subtool: a drawn stroke (world coords) that
+    /// dimensions a carve, splitting the roofs across the stack.
+    CeilingExposureCarveStrokeWorld {
+        points: Vec<(f32, f32)>,
+    },
+    /// Ceiling-exposure Carve subtool: while a straight-cut split is awaiting a
+    /// side pick, the assessor tapped — choose the half (world coords) to
+    /// dimension + split.
+    ChooseCeilingExposureCutRegion {
+        world_x: f64,
+        world_y: f64,
+    },
+    /// Clear every selected ceiling region ("Deselect all").
+    DeselectAllCeilingExposure,
+    /// Assign a ceiling exposure to the current ceiling-region selection.
+    AssignCeilingExposure(ber_model::ber::structural::CeilingExposure),
 }
 
 /// Everything the Sketch page needs for one frame, built by the app shell
@@ -868,6 +909,29 @@ pub struct SketchView<'a> {
     /// dimensioned — highlighted over the overlaid view so the assessor sees the
     /// region tighten as they enter measurements. Empty when no carve is in flight.
     pub floor_exposure_carve_polygon: &'a [(f64, f64)],
+    /// Candidate halves of a pending floor-exposure straight CUT (world coords) —
+    /// shaded over the overlaid view so the assessor taps the side they want.
+    /// Empty when no cut is awaiting a pick.
+    pub floor_exposure_cut_regions: &'a [Vec<(f64, f64)>],
+    // ── Ceiling exposure ──────────────────────────────────────────────────────
+    /// Ceiling-exposure tool active: the canvas shows the overlaid all-storeys
+    /// ceiling view + selection instead of the normal plan, gated until the
+    /// storey-count confirm.
+    pub ceiling_exposure_mode: bool,
+    /// The ceiling-exposure storey-count gate is up.
+    pub ceiling_exposure_gate_pending: bool,
+    /// The active ceiling-exposure Select subtool (Click/Carve/All/Remaining).
+    pub ceiling_exposure_select: Option<SelectMode>,
+    /// Per-storey ceiling regions for the overlaid view (with selection flags).
+    pub ceiling_exposure_storeys:
+        &'a [crate::controller::app_controller::CeilingExposureStoreyView],
+    /// The in-flight ceiling-exposure CARVE ring (world coords) while it's being
+    /// dimensioned. Empty when no carve is in flight.
+    pub ceiling_exposure_carve_polygon: &'a [(f64, f64)],
+    /// Candidate halves of a pending ceiling-exposure straight CUT (world
+    /// coords) — shaded over the overlaid view so the assessor taps a side.
+    /// Empty when no cut is awaiting a pick.
+    pub ceiling_exposure_cut_regions: &'a [Vec<(f64, f64)>],
 }
 
 #[derive(Default)]

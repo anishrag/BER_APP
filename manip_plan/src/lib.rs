@@ -42,8 +42,8 @@ pub use poly3d::{Polygon3D, SplitLine3D};
 pub use region::stroke_is_closed;
 pub use simplification::simplify_to_cut;
 pub use snap::{
-    clear_snap_policy, set_snap_policy, snap_stroke_to_ring, take_snap_decisions, SnapCandidate,
-    SnapChoice, SnapDecision, SnapKind,
+    clear_snap_policy, set_snap_policy, snap_stroke_to_ring, snap_stroke_to_segments,
+    take_snap_decisions, SnapCandidate, SnapChoice, SnapDecision, SnapKind,
 };
 pub use surface_ref::SurfaceRef;
 

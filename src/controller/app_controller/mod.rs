@@ -22,6 +22,7 @@
 //   - `view`          — canvas pan/zoom.
 mod assessment_phase;
 mod ceiling;
+mod ceiling_exposure;
 mod ceiling_steps;
 mod checklist;
 mod debug;
@@ -41,6 +42,7 @@ pub use structure::{EditGroup, StructureEdit};
 // (the queries dispatch on it) and is re-exported here so UI + controller call
 // sites keep reaching it via `app_controller::SurfaceKind`.
 pub use ber_model::ber::structural::SurfaceKind;
+pub use ceiling_exposure::{CeilingExposureRegionView, CeilingExposureStoreyView};
 pub use checklist::{ChecklistItem, ChecklistStatus};
 use document::{
     ActiveShape, CeilingStepRegion, DimensionPrompt, DimensionState, Document, EditState,
@@ -398,6 +400,40 @@ pub struct AppController {
     /// applied to every overlapping storey at commit. `None` when no carve is
     /// in-flight; restores nothing (the buffer is reloaded on exit).
     floor_exposure_carve_ref: Option<usize>,
+    /// A floor-exposure straight CUT that split the whole building into two
+    /// candidate slots (each pinned against the same whole-building boundary the
+    /// carve uses); the assessor taps one, which becomes the in-flight carve
+    /// shape and is then dimensioned + committed like an Area carve. `None` when
+    /// no cut is awaiting a pick. Transient; cleared on tool exit / gate / storey
+    /// switch alongside the other floor-exposure carve state.
+    floor_exposure_pending_cut: Option<[ShapeSlot; 2]>,
+    /// True when the CEILING-exposure tool is active: the canvas shows every
+    /// storey's ceilings overlaid and taps/carves select ceiling regions across
+    /// the stack. The mirror of [`floor_exposure_mode`](Self::floor_exposure_mode);
+    /// mutually exclusive with the other Mapping modes. Toggled by the UI.
+    ceiling_exposure_mode: bool,
+    /// True while the ceiling-exposure storey-count gate prompt is up (entered
+    /// the tool but the assessor hasn't yet confirmed every storey is added).
+    ceiling_exposure_gate_pending: bool,
+    /// The active ceiling-exposure Select subtool (Click/Carve/All/Remaining), or
+    /// `None`. Transient ceiling-exposure interaction state.
+    ceiling_exposure_select: Option<SelectMode>,
+    /// The selected ceiling regions, keyed by `(storey_idx, region centroid key)`
+    /// (the selection spans the whole stack; a centroid key is used because
+    /// ceiling-region ids are re-minted on every resolve). The overlaid view
+    /// halos these. Transient; cleared on tool exit / Deselect.
+    ceiling_exposure_selected: HashSet<(usize, document::CentroidKey)>,
+    /// True while a ceiling-exposure CARVE is in-flight in the dimensioning
+    /// buffer (the carved region drawn as a `PhaseArea` shape). Discriminates the
+    /// shared staging hook: when set, a finished carve splits every overlapping
+    /// storey's ROOFS rather than the floor / Structure carves.
+    ceiling_exposure_carve_in_flight: bool,
+    /// The reference storey whose outline a ceiling-exposure carve is dimensioned
+    /// against (mirror of [`floor_exposure_carve_ref`](Self::floor_exposure_carve_ref)).
+    ceiling_exposure_carve_ref: Option<usize>,
+    /// A ceiling-exposure straight CUT awaiting the assessor's side pick (mirror
+    /// of [`floor_exposure_pending_cut`](Self::floor_exposure_pending_cut)).
+    ceiling_exposure_pending_cut: Option<[ShapeSlot; 2]>,
 }
 
 impl AppController {
@@ -469,6 +505,14 @@ impl AppController {
             floor_exposure_selected: HashSet::new(),
             floor_exposure_carve_in_flight: false,
             floor_exposure_carve_ref: None,
+            floor_exposure_pending_cut: None,
+            ceiling_exposure_mode: false,
+            ceiling_exposure_gate_pending: false,
+            ceiling_exposure_select: None,
+            ceiling_exposure_selected: HashSet::new(),
+            ceiling_exposure_carve_in_flight: false,
+            ceiling_exposure_carve_ref: None,
+            ceiling_exposure_pending_cut: None,
         }
     }
 }
