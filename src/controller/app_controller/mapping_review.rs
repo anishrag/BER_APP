@@ -155,12 +155,20 @@ impl AppController {
                 let _ = openings::move_opening(storey, opref, along_m, sill_m);
             }
         }
-        self.reseed_opening_anchors(si);
-        let _ = self.mark_dirty();
+        // NB: no `mark_dirty` here. The review elevation reads opening PLACEMENTS
+        // directly (`wall_openings`), so the move shows live without a re-derive;
+        // marking dirty every drag-frame re-resolved the whole storey per frame,
+        // which (next to the photo repaint) made dragging jittery. We commit the
+        // re-derive + anchor reseed + persist ONCE on release instead.
     }
 
-    /// Release the dragged opening.
+    /// Release the dragged opening — commit the move: reseed the anchor + mark
+    /// dirty so the storey re-resolves and persists exactly once for the drag.
     pub fn mapping_review_pointer_up(&mut self) {
+        if let Some((si, _, _)) = self.mapping_review_drag {
+            self.reseed_opening_anchors(si);
+            let _ = self.mark_dirty();
+        }
         self.mapping_review_drag = None;
     }
 }
