@@ -1517,6 +1517,81 @@ fn structure_edit_sets_floor_group_construction() {
     assert_eq!(fc.construction_type, FloorConstructionType::SuspendedFloor);
 }
 
+/// A Structure-checklist row's status by label.
+fn structure_row(c: &AppController, label: &str) -> ChecklistStatus {
+    c.structure_checklist()
+        .into_iter()
+        .find(|it| it.label == label)
+        .unwrap_or_else(|| panic!("no structure row {label}"))
+        .status
+}
+
+/// Attribute EVERY surface of `kind` with a real type + the given build-up, via
+/// the Structure "Edit attributes" group editor.
+fn attribute_all_surfaces(
+    c: &mut AppController,
+    kind: SurfaceKind,
+    ty: ber_model::ber::structural::ConstructionType,
+    makeup: ber_model::ber::structural::ConstructionMakeup,
+) {
+    set_only_kind(c, kind);
+    c.set_structure_select_mode(Some(SelectMode::All));
+    c.begin_structure_edit();
+    let n = c.structure_edit().expect("session opened").groups.len();
+    for g in 0..n {
+        c.set_structure_group_attrs(g, ty, makeup.clone(), Default::default());
+    }
+    c.end_structure_edit();
+    c.materialize();
+}
+
+/// The Structure checklist starts RED for every kind (the surfaces default to an
+/// `Uninitialised` type / `Tbd` build-up — it used to be always green), and a
+/// kind only turns green once EVERY surface of that kind is fully attributed.
+/// This single-storey square fixture has walls + a floor but no roof region, so
+/// "Roofs" doubles as a negative case: an absent kind is NOT vacuously green.
+#[test]
+fn structure_checklist_tracks_per_surface_completion() {
+    use ber_model::ber::structural::{
+        ConstructionMakeup, ConstructionType, FloorConstructionType, WallConstructionType,
+    };
+    let mut c = dimensioned_square_controller();
+    c.materialize();
+
+    // Nothing attributed yet → every row red (previously always green).
+    assert_eq!(structure_row(&c, "Walls"), ChecklistStatus::Incomplete);
+    assert_eq!(structure_row(&c, "Floors"), ChecklistStatus::Incomplete);
+    assert_eq!(structure_row(&c, "Roofs"), ChecklistStatus::Incomplete);
+
+    // Attribute the floor (Default build-up — no photo needed) → Floors green
+    // while Walls stays red.
+    attribute_all_surfaces(
+        &mut c,
+        SurfaceKind::Floors,
+        ConstructionType::Floor(FloorConstructionType::SolidFloor),
+        ConstructionMakeup::Default,
+    );
+    assert_eq!(structure_row(&c, "Floors"), ChecklistStatus::AllStoreys);
+    assert_eq!(
+        structure_row(&c, "Walls"),
+        ChecklistStatus::Incomplete,
+        "walls still unattributed"
+    );
+
+    // Attribute the walls too → Walls green.
+    attribute_all_surfaces(
+        &mut c,
+        SurfaceKind::Walls,
+        ConstructionType::Wall(WallConstructionType::CavityWall),
+        ConstructionMakeup::Default,
+    );
+    assert_eq!(structure_row(&c, "Walls"), ChecklistStatus::AllStoreys);
+    assert_eq!(structure_row(&c, "Floors"), ChecklistStatus::AllStoreys);
+
+    // Roofs has no surface in this fixture → it never goes vacuously green.
+    assert_eq!(structure_row(&c, "Roofs"), ChecklistStatus::Incomplete);
+}
+
 /// The Structure MODES are non-exclusive: several kinds can be active at once,
 /// the `All` seed spans them, an "Edit attributes" session groups across them,
 /// and the last active kind can't be toggled off (≥1 always stays).

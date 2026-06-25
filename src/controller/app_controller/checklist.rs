@@ -101,9 +101,9 @@ impl AppController {
 
     /// Roll a per-storey predicate over the RESOLVED [`Ber`] (Store A) up against
     /// the current scope — the read-from-resolved-storey analogue of
-    /// [`checklist_status`](Self::checklist_status), for the "Surfaces" and
-    /// "Construction phase" rows (`document::surfaces_exposure_complete` /
-    /// `document::construction_phase_complete`, which read the committed regions).
+    /// [`checklist_status`](Self::checklist_status). Used for the Mapping rows
+    /// that read committed regions (Floor/Ceiling exposures, Construction phase)
+    /// and the Structure rows ([`Ber::structure_surfaces_complete`]).
     fn ber_storey_status(&self, ok: impl Fn(&Ber, usize) -> bool) -> ChecklistStatus {
         let Some(record) = self.current_record.as_ref() else {
             return ChecklistStatus::Incomplete;
@@ -136,48 +136,31 @@ impl AppController {
     }
 
     /// The Structure phase checklist: one row per surface kind (Walls / Roofs /
-    /// Floors), green where the resolved storey has at least one such surface.
-    /// A first cut that mirrors the Structure toolset; richer per-surface
-    /// completion (construction types/make-ups) is a planned follow-up.
+    /// Floors), green only when EVERY surface of that kind is fully attributed
+    /// (construction type + build-up set, plus a photo where the build-up is a
+    /// specified custom stack) on every storey — see
+    /// [`Ber::structure_surfaces_complete`]. Yellow when only the current storey
+    /// is done, red otherwise.
     pub fn structure_checklist(&self) -> Vec<ChecklistItem> {
+        use ber_model::ber::structural::SurfaceKind;
         vec![
             ChecklistItem {
                 label: "Walls",
-                status: self.surface_status(|c| c.walls > 0),
+                status: self
+                    .ber_storey_status(|b, i| b.structure_surfaces_complete(i, SurfaceKind::Walls)),
             },
             ChecklistItem {
                 label: "Roofs",
-                status: self.surface_status(|c| c.roofs > 0),
+                status: self
+                    .ber_storey_status(|b, i| b.structure_surfaces_complete(i, SurfaceKind::Roofs)),
             },
             ChecklistItem {
                 label: "Floors",
-                status: self.surface_status(|c| c.floors > 0),
+                status: self.ber_storey_status(|b, i| {
+                    b.structure_surfaces_complete(i, SurfaceKind::Floors)
+                }),
             },
         ]
-    }
-
-    /// Roll a per-storey surface-count predicate up against the current scope
-    /// (green = every storey, yellow = current only, red = otherwise), reading
-    /// each storey's derived [`SurfaceCounts`].
-    fn surface_status(&self, ok: impl Fn(SurfaceCounts) -> bool) -> ChecklistStatus {
-        let Some(record) = self.current_record.as_ref() else {
-            return ChecklistStatus::Incomplete;
-        };
-        let storeys = &record.data.storeys;
-        if storeys.is_empty() {
-            return ChecklistStatus::Incomplete;
-        }
-        let done = |i: usize| ok(storeys[i].surface_counts());
-        if (0..storeys.len()).all(done) {
-            ChecklistStatus::AllStoreys
-        } else if self
-            .current_storey_idx
-            .is_some_and(|i| i < storeys.len() && done(i))
-        {
-            ChecklistStatus::ThisStorey
-        } else {
-            ChecklistStatus::Incomplete
-        }
     }
 
     /// Roll a per-storey completion predicate up against the current scope. The

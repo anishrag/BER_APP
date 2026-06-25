@@ -2785,6 +2785,86 @@ mod tests {
     }
 
     #[test]
+    fn specified_build_up_needs_a_photo_but_default_and_unknown_do_not() {
+        // Only a SPECIFIED custom (Layers) build-up requires a backing photo.
+        assert!(!ConstructionMakeup::Default.requires_photo());
+        assert!(!ConstructionMakeup::Unknown.requires_photo());
+        assert!(!ConstructionMakeup::NonHeatLoss.requires_photo());
+        assert!(ConstructionMakeup::Layers(vec![]).requires_photo());
+
+        // A typed wall with a Layers build-up is NOT complete until a photo
+        // backs it; a Default build-up is complete with no photo.
+        let mut specified = WallConstruction {
+            construction_type: WallConstructionType::CavityWall,
+            ..Default::default()
+        };
+        specified.base.construction_makeup = ConstructionMakeup::Layers(vec![]);
+        assert!(
+            !specified.is_complete(),
+            "specified build-up without a photo is not done"
+        );
+        specified.base.photos.push(Photo::default());
+        assert!(specified.is_complete(), "a backing photo completes it");
+
+        let mut default = WallConstruction {
+            construction_type: WallConstructionType::CavityWall,
+            ..Default::default()
+        };
+        default.base.construction_makeup = ConstructionMakeup::Default;
+        assert!(default.is_complete(), "Default build-up needs no photo");
+    }
+
+    #[test]
+    fn structure_surfaces_complete_needs_surfaces_and_photo_backed_build_ups() {
+        let mut ber = Ber::default();
+        ber.storeys.push(Storey::default());
+
+        // An empty kind is NOT vacuously complete.
+        assert!(!ber.structure_surfaces_complete(0, SurfaceKind::Walls));
+
+        // One wall whose construction is a SPECIFIED (Layers) build-up with no
+        // photo yet.
+        let cid = ber.ensure_wall_construction(
+            WallConstructionType::CavityWall,
+            ConstructionMakeup::Layers(vec![]),
+            ConstructionPhase::default(),
+        );
+        let region = WallRegion {
+            id: ItemId::default(),
+            polygon: Polygon3D::new(vec![
+                Point3f64::new(0.0, 0.0, 0.0),
+                Point3f64::new(1.0, 0.0, 0.0),
+                Point3f64::new(1.0, 0.0, 2.4),
+                Point3f64::new(0.0, 0.0, 2.4),
+            ]),
+            exposure: WallExposure::Exposed,
+            opes: Opes::default(),
+            construction_id: cid,
+        };
+        let mut walls = WallRegions::default();
+        walls.regions = vec![region];
+        ber.storeys[0].walls = walls;
+
+        assert!(
+            !ber.structure_surfaces_complete(0, SurfaceKind::Walls),
+            "a specified build-up without a photo leaves the kind incomplete"
+        );
+
+        // Back the construction with a photo → the kind is now complete.
+        ber.wall_constructions
+            .iter_mut()
+            .find(|c| c.base.id == cid)
+            .unwrap()
+            .base
+            .photos
+            .push(Photo::default());
+        assert!(
+            ber.structure_surfaces_complete(0, SurfaceKind::Walls),
+            "a backing photo completes the kind"
+        );
+    }
+
+    #[test]
     fn storey_json_without_roof_apexes_deserializes_to_empty() {
         // JSON produced by the OLD shape (no `roof_apexes` field): serialize
         // the current shape and strip the field.

@@ -127,6 +127,15 @@ impl ConstructionMakeup {
     pub fn is_set(&self) -> bool {
         !matches!(self, ConstructionMakeup::Tbd)
     }
+
+    /// Whether this build-up needs a backing PHOTO to count as done. Only a
+    /// SPECIFIED custom build-up (`Layers`) does — the assessor declared an
+    /// actual fabric stack, so a photo is the evidence for it. `Default` (a
+    /// standard assumed construction), `Unknown` (declared unknown) and
+    /// `NonHeatLoss` are not specified fabric and need no photo.
+    pub fn requires_photo(&self) -> bool {
+        matches!(self, ConstructionMakeup::Layers(_))
+    }
 }
 
 impl WallConstructionType {
@@ -339,28 +348,40 @@ pub struct CeilingConstruction {
     pub construction_type: CeilingConstructionType,
 }
 
+impl ConstructionBase {
+    /// Whether the build-up half of a construction is DONE: the make-up is set
+    /// (not the `Tbd` placeholder) AND — when that make-up is a specified custom
+    /// build-up ([`ConstructionMakeup::requires_photo`]) — at least one backing
+    /// photo is attached. `Default`/`Unknown`/`NonHeatLoss` need no photo.
+    pub fn build_up_done(&self) -> bool {
+        self.construction_makeup.is_set()
+            && (!self.construction_makeup.requires_photo() || !self.photos.is_empty())
+    }
+}
+
 impl WallConstruction {
-    /// A wall construction is DONE once both its type and its build-up are set
-    /// (no `Uninitialised` type, no `Tbd` make-up) — the per-surface "done" test
-    /// the Structure-phase `Remaining` tool filters on.
+    /// A wall construction is DONE once its type is set (no `Uninitialised`) and
+    /// its build-up is done ([`ConstructionBase::build_up_done`] — make-up set,
+    /// plus a photo when the build-up is a specified custom stack). The
+    /// per-surface "done" test the Structure-phase `Remaining` tool filters on.
     pub fn is_complete(&self) -> bool {
-        self.construction_type.is_set() && self.base.construction_makeup.is_set()
+        self.construction_type.is_set() && self.base.build_up_done()
     }
 }
 
 impl FloorConstruction {
-    /// A floor construction is DONE once both its type and its build-up are set.
+    /// A floor construction is DONE once its type is set and its build-up is done.
     /// See [`WallConstruction::is_complete`].
     pub fn is_complete(&self) -> bool {
-        self.construction_type.is_set() && self.base.construction_makeup.is_set()
+        self.construction_type.is_set() && self.base.build_up_done()
     }
 }
 
 impl CeilingConstruction {
-    /// A ceiling/roof construction is DONE once both its type and its build-up
-    /// are set. See [`WallConstruction::is_complete`].
+    /// A ceiling/roof construction is DONE once its type is set and its build-up
+    /// is done. See [`WallConstruction::is_complete`].
     pub fn is_complete(&self) -> bool {
-        self.construction_type.is_set() && self.base.construction_makeup.is_set()
+        self.construction_type.is_set() && self.base.build_up_done()
     }
 }
 
@@ -618,5 +639,23 @@ impl Ber {
                 .map(|r| r.id)
                 .collect(),
         }
+    }
+
+    /// Whether EVERY surface of `kind` on storey `idx` is fully attributed — the
+    /// Structure-phase checklist's per-storey/kind "done" test. True only when
+    /// the storey has at least one such surface and none are
+    /// [incomplete](Self::incomplete_surface_ids) (so an empty kind is NOT
+    /// vacuously done). `false` for an out-of-range storey.
+    pub fn structure_surfaces_complete(&self, idx: usize, kind: SurfaceKind) -> bool {
+        let Some(storey) = self.storeys.get(idx) else {
+            return false;
+        };
+        let counts = storey.surface_counts();
+        let count = match kind {
+            SurfaceKind::Walls => counts.walls,
+            SurfaceKind::Floors => counts.floors,
+            SurfaceKind::Roofs => counts.roofs,
+        };
+        count > 0 && self.incomplete_surface_ids(idx, kind).is_empty()
     }
 }
