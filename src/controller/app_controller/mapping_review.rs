@@ -132,22 +132,17 @@ impl AppController {
         let Some((si, wall_id, opref)) = self.mapping_review_drag else {
             return;
         };
-        let n = self.mapping_review_side.outward_dir();
-        let h = (-n.1, n.0); // horizontal view axis (matches side_elevation)
+        let h = self.mapping_review_side.view_axis();
 
-        // First borrow: recover the wall frame + storey datum and solve the
-        // wall-local along/sill from the composite cursor.
+        // First borrow: recover the wall-local along (the projection inverse lives
+        // in `ber_model`) and the sill (height above the wall's composite base).
         let Some((along_m, sill_m)) = self.current_record.as_ref().and_then(|r| {
             let storey = r.data.storeys.get(si)?;
             let wall = storey.walls.regions.iter().find(|w| w.id == wall_id)?;
-            let (origin, (ux, uy), _len, base_z) = wall.base_frame()?;
-            let denom = h.0 * ux + h.1 * uy;
-            if denom.abs() < 1e-9 {
-                return None;
-            }
+            let along = wall.elevation_along_at(h, x)?;
+            let (_origin, _u, _len, base_z) = wall.base_frame()?;
             let datum = r.data.storey_floor_datums().get(si).copied().unwrap_or(0.0);
             let half_h = openings::opening_height(storey, opref) as f64 / 2.0;
-            let along = (x - (h.0 * origin.x + h.1 * origin.y)) / denom;
             let sill = (z - (base_z + datum) - half_h).max(0.0);
             Some((along as f32, sill as f32))
         }) else {

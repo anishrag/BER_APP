@@ -26,6 +26,16 @@ impl ExternalSide {
             ExternalSide::Left => (-1.0, 0.0),
         }
     }
+
+    /// The horizontal view axis `h = (-n.y, n.x)` (unit, ⟂ the outward normal
+    /// `n`) onto which [`Ber::side_elevation`] projects plan points to get a
+    /// composite elevation x. Its handedness matches a viewer standing OUTSIDE
+    /// the side looking in. THE single source of `h`, shared by the forward
+    /// projection and the drag inverse ([`WallRegion::elevation_along_at`]).
+    pub fn view_axis(self) -> (f64, f64) {
+        let (nx, ny) = self.outward_dir();
+        (-ny, nx)
+    }
 }
 
 /// A window or door in a side elevation, in the composite `(x, z)` elevation
@@ -101,7 +111,7 @@ impl Ber {
         /// Min dot(outward_normal, side_normal) for a wall to count as facing.
         const FACING_MIN: f64 = 0.5;
         let n = side.outward_dir();
-        let h = (-n.1, n.0); // unit horizontal view axis, ⟂ n
+        let h = side.view_axis(); // unit horizontal view axis, ⟂ n
         let datums = self.storey_floor_datums();
 
         let mut panels: Vec<ElevPanel> = Vec::new();
@@ -171,7 +181,10 @@ impl Ber {
 
                 min_x = min_x.min(xa.min(xb));
                 max_x = max_x.max(xa.max(xb));
+                // Fold the base z into BOTH bounds so a panel with an empty top
+                // (a degenerate ≤2-vertex wall) still contributes finite bounds.
                 min_z = min_z.min(bz);
+                max_z = max_z.max(bz);
                 for &(tx, tz) in &top {
                     min_x = min_x.min(tx);
                     max_x = max_x.max(tx);

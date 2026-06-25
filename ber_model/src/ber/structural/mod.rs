@@ -2934,6 +2934,24 @@ mod tests {
         );
         assert!((o.sill_z - 0.9).abs() < 1e-6, "sill above the datum");
 
+        // Forward/inverse round-trip: the projected x_center inverts back to the
+        // opening's along-distance (2 m) via the wall's drag inverse.
+        let front_wall = ber.storeys[0]
+            .walls
+            .regions
+            .iter()
+            .find(|w| w.id == front_id)
+            .unwrap();
+        let recovered = front_wall
+            .elevation_along_at(ExternalSide::Front.view_axis(), o.x_center)
+            .unwrap();
+        assert!(
+            (recovered - 2.0).abs() < 1e-6,
+            "x_center {} inverts back to along 2.0 (got {})",
+            o.x_center,
+            recovered
+        );
+
         // Each of the four sides selects exactly one wall of the square.
         for side in ExternalSide::ALL {
             assert_eq!(

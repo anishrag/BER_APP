@@ -143,6 +143,24 @@ impl WallRegion {
         Some((Point2f64::new(a.x, a.y), (dx / len, dy / len), len, a.z))
     }
 
+    /// Invert the side-elevation projection for this wall: the along-distance
+    /// (metres from the base origin toward the far endpoint) of a composite
+    /// elevation `x`, given the side's view axis `h` (see
+    /// [`ExternalSide::view_axis`](crate::ber::common::ExternalSide::view_axis)).
+    /// The forward projection in [`Ber::side_elevation`](crate::ber::Ber::side_elevation)
+    /// is `x = h·origin + along·(h·u_hat)`; this solves it for `along`. `None`
+    /// for a degenerate wall, or one whose edge is parallel to the view axis
+    /// (`h·u_hat ≈ 0` — which by construction is never a facing wall). The drag
+    /// inverse lives here, next to the forward projection's `base_frame`.
+    pub fn elevation_along_at(&self, h: (f64, f64), x: f64) -> Option<f64> {
+        let (origin, (ux, uy), _len, _base_z) = self.base_frame()?;
+        let denom = h.0 * ux + h.1 * uy;
+        if denom.abs() < 1e-9 {
+            return None;
+        }
+        Some((x - (h.0 * origin.x + h.1 * origin.y)) / denom)
+    }
+
     /// The wall's TOP profile in wall-local coordinates: each vertex of the top
     /// polyline (`exterior[2..]`, running b→a per the vertex-order contract) as
     /// `(along, z)` — `along` projected onto the base direction from the base
