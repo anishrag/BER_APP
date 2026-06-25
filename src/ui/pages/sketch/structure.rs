@@ -13,8 +13,8 @@
 
 use ber_model::ber::common::ConstructionPhase;
 use ber_model::ber::structural::{
-    CeilingConstructionType, ConstructionMakeup, ConstructionType, FloorConstructionType,
-    SurfaceCounts, SurfaceExposure, WallConstructionType,
+    CeilingConstructionType, ConstructionLayer, ConstructionMakeup, ConstructionType,
+    FloorConstructionType, SurfaceCounts, SurfaceExposure, WallConstructionType,
 };
 
 use super::SketchEvent;
@@ -349,19 +349,15 @@ pub(crate) fn group_editor_ui<F: FnMut(UiEvent)>(
             });
     });
     ui.horizontal_wrapped(|ui| {
-        // Build-up as ICON buttons (no label — hover for the meaning): the
-        // standard default fabric (≡), Unknown (a real choice — counts as done,
-        // unlike the unset `Tbd` default which is not offered), or Specify a
-        // custom layer build-up (ℹ; the layer editor itself is future work).
+        // Build-up as ICON buttons (no label — hover for the meaning). Default
+        // (✓) and Unknown (?) set the make-up directly; Specify (ℹ) opens the
+        // LAYER editor (the `Layers` build-up). The unset `Tbd` default isn't
+        // offered.
         for (icon, tip, mk) in [
             ("✓", "Default", ConstructionMakeup::Default),
             ("?", "Unknown", ConstructionMakeup::Unknown),
-            ("ℹ", "Specify…", ConstructionMakeup::Layers(Vec::new())),
         ] {
-            let sel = match (&g.makeup, &mk) {
-                (ConstructionMakeup::Layers(_), ConstructionMakeup::Layers(_)) => true,
-                (a, b) => a == b,
-            };
+            let sel = g.makeup == mk;
             if ui
                 .add_enabled(
                     enabled,
@@ -381,7 +377,249 @@ pub(crate) fn group_editor_ui<F: FnMut(UiEvent)>(
                 }));
             }
         }
+        // Specify… → open the build-up layer editor.
+        let specify_sel = matches!(g.makeup, ConstructionMakeup::Layers(_));
+        if ui
+            .add_enabled(
+                enabled,
+                egui::Button::selectable(
+                    specify_sel,
+                    egui::RichText::new("ℹ").size(EDITOR_FONT + 3.0),
+                ),
+            )
+            .on_hover_text("Specify…")
+            .clicked()
+        {
+            on_event(UiEvent::Sketch(SketchEvent::BeginSpecifyLayers {
+                group: group_index,
+            }));
+        }
     });
+    // Photos (next line): the camera button opens the photos view (thumbnails +
+    // add). Shows a count when there are any.
+    let cam = if g.photos.is_empty() {
+        "📷".to_string()
+    } else {
+        format!("📷 {}", g.photos.len())
+    };
+    if ui
+        .add_enabled(enabled, egui::Button::new(cam))
+        .on_hover_text("Photos")
+        .clicked()
+    {
+        on_event(UiEvent::Sketch(SketchEvent::BeginViewPhotos {
+            group: group_index,
+        }));
+    }
+}
+
+/// The PHOTOS view for a group (the camera button → centred window): the
+/// group's photo thumbnails, with a "+" to add another (desktop file dialog /
+/// Android camera). `Done` closes it.
+pub(crate) fn photos_view_ui<F: FnMut(UiEvent)>(
+    ui: &mut egui::Ui,
+    group_index: usize,
+    g: &EditGroup,
+    on_event: &mut F,
+) {
+    ui.label(
+        egui::RichText::new(format!("{} photos", kind_heading(g.ty.kind())))
+            .size(EDITOR_FONT + 2.0)
+            .strong(),
+    );
+    if g.photos.is_empty() {
+        ui.label(
+            egui::RichText::new("no photos yet")
+                .size(EDITOR_FONT)
+                .italics()
+                .weak(),
+        );
+    }
+    egui::ScrollArea::vertical()
+        .max_height(420.0)
+        .show(ui, |ui| {
+            ui.horizontal_wrapped(|ui| {
+                for p in &g.photos {
+                    // Prefer the lightweight preview; fall back to the original
+                    // for photos saved before thumbnails existed.
+                    let src = p.thumbnail_path.as_deref().unwrap_or(&p.file_path);
+                    // `fit_to_exact_size` ignores the available layout space (a
+                    // thin text-line height inside `horizontal_wrapped`) and
+                    // renders the preview into a real box, keeping aspect ratio.
+                    ui.add(
+                        egui::Image::new(format!("file://{src}"))
+                            .fit_to_exact_size(egui::vec2(200.0, 200.0))
+                            .maintain_aspect_ratio(true)
+                            .corner_radius(4.0),
+                    );
+                }
+            });
+        });
+
+    ui.separator();
+    // "+" adds another photo (the modular capture button). Build-up close-ups
+    // need legible detail, so this site captures at the High tier.
+    let quality = crate::ui::widgets::PhotoQuality::High;
+    if let Some(path) = crate::ui::widgets::photo_button(
+        ui,
+        "➕  Add photo",
+        true,
+        crate::ui::widgets::PhotoConfig {
+            default_quality: quality,
+        },
+    ) {
+        on_event(UiEvent::Sketch(SketchEvent::AddGroupPhoto {
+            group: group_index,
+            path,
+            quality,
+        }));
+    }
+    ui.separator();
+    if ui.button("Done").clicked() {
+        on_event(UiEvent::Sketch(SketchEvent::EndViewPhotos));
+    }
+}
+
+/// The build-up LAYER editor for a group (the "Specify…" flow): the current
+/// layers inside→outside (each removable), a picker over the app-wide library
+/// ("previously typed layers"), and a form to type a NEW layer (which appends to
+/// the build-up AND saves to the library). The new-layer form's text lives in
+/// egui memory keyed by the group, so it persists across frames without page
+/// state. `Done` closes the editor.
+pub(crate) fn layer_editor_ui<F: FnMut(UiEvent)>(
+    ui: &mut egui::Ui,
+    group_index: usize,
+    g: &EditGroup,
+    library: &[ConstructionLayer],
+    on_event: &mut F,
+) {
+    // Editing happens in a local (name, thickness-text) working list held in egui
+    // memory keyed by the group; seeded from the group's current layers the first
+    // time it's opened, committed to the build-up + library only on Done.
+    let id = ui.id().with(("buildup_work", group_index));
+    let mut work: Vec<(String, String)> = ui
+        .ctx()
+        .data_mut(|d| d.get_temp::<Vec<(String, String)>>(id))
+        .unwrap_or_else(|| match &g.makeup {
+            ConstructionMakeup::Layers(v) => v
+                .iter()
+                .map(|l| (l.name(), l.thickness_mm.to_string()))
+                .collect(),
+            _ => Vec::new(),
+        });
+
+    ui.label(
+        egui::RichText::new(format!("{} build-up", kind_heading(g.ty.kind())))
+            .size(EDITOR_FONT + 2.0)
+            .strong(),
+    );
+    ui.label(
+        egui::RichText::new("inside → outside")
+            .size(EDITOR_FONT)
+            .weak(),
+    );
+
+    // A "+" anywhere inserts a layer at that position — either blank (to type) or
+    // picked from the reusable library (the common path). Collected, applied
+    // after the row loop so we don't mutate `work` mid-iteration.
+    let mut insert_at: Option<(usize, (String, String))> = None;
+    let mut remove: Option<usize> = None;
+
+    // Insert-at-top.
+    if let Some(pair) = insert_menu(ui, ("ins", group_index, usize::MAX), library) {
+        insert_at = Some((0, pair));
+    }
+    for i in 0..work.len() {
+        ui.horizontal(|ui| {
+            if ui.small_button("✕").on_hover_text("Remove").clicked() {
+                remove = Some(i);
+            }
+            ui.add(
+                egui::TextEdit::singleline(&mut work[i].0)
+                    .desired_width(110.0)
+                    .hint_text("layer"),
+            );
+            ui.add(
+                egui::TextEdit::singleline(&mut work[i].1)
+                    .desired_width(40.0)
+                    .hint_text("mm"),
+            );
+            ui.label(egui::RichText::new("mm").size(EDITOR_FONT));
+            // "+" after this layer → insert below (between layers).
+            if let Some(pair) = insert_menu(ui, ("ins", group_index, i), library) {
+                insert_at = Some((i + 1, pair));
+            }
+        });
+    }
+    if let Some((at, pair)) = insert_at {
+        work.insert(at.min(work.len()), pair);
+    }
+    if let Some(i) = remove {
+        if i < work.len() {
+            work.remove(i);
+        }
+    }
+
+    ui.separator();
+    let done = ui.button("Done").clicked();
+    if done {
+        // Commit: drop unnamed rows, parse thickness, set the build-up (which also
+        // saves the named layers to the library), then close + clear the buffer.
+        let layers: Vec<ConstructionLayer> = work
+            .iter()
+            .filter(|(n, _)| !n.trim().is_empty())
+            .map(|(n, t)| {
+                ConstructionLayer::typed(
+                    n.trim().to_string(),
+                    t.trim().parse().unwrap_or(0),
+                    0.0,
+                    false,
+                )
+            })
+            .collect();
+        on_event(UiEvent::Sketch(SketchEvent::SetStructureGroupLayers {
+            group: group_index,
+            layers,
+        }));
+        on_event(UiEvent::Sketch(SketchEvent::EndSpecifyLayers));
+        ui.ctx().data_mut(|d| d.remove::<Vec<(String, String)>>(id));
+    } else {
+        ui.ctx().data_mut(|d| d.insert_temp(id, work));
+    }
+}
+
+/// A "+" button that opens a menu to insert a layer: a blank one to type, or any
+/// previously-typed library layer. Returns the chosen `(name, thickness-text)`
+/// when an item is clicked. `salt` disambiguates the multiple "+" menus.
+fn insert_menu(
+    ui: &mut egui::Ui,
+    salt: (&'static str, usize, usize),
+    library: &[ConstructionLayer],
+) -> Option<(String, String)> {
+    let mut picked = None;
+    ui.push_id(salt, |ui| {
+        ui.menu_button("+", |ui| {
+            if ui.button("Blank layer").clicked() {
+                picked = Some((String::new(), String::new()));
+                ui.close();
+            }
+            if !library.is_empty() {
+                ui.separator();
+                for l in library {
+                    if ui.button(layer_summary(l)).clicked() {
+                        picked = Some((l.name(), l.thickness_mm.to_string()));
+                        ui.close();
+                    }
+                }
+            }
+        });
+    });
+    picked
+}
+
+/// One-line summary of a layer for the library pick menu.
+fn layer_summary(l: &ConstructionLayer) -> String {
+    format!("{} · {}mm", l.name(), l.thickness_mm)
 }
 
 /// Heading-level-1 label for a group: the surface kind.

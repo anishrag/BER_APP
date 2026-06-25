@@ -1571,6 +1571,146 @@ fn structure_modes_are_non_exclusive() {
     );
 }
 
+/// "Specify…" build-up: opening the layer editor sets the group make-up to
+/// `Layers`; a TYPED layer is saved to the app-wide library AND appended to the
+/// build-up; picking via `set_structure_group_layers` replaces the layers.
+#[test]
+fn specify_layers_saves_to_library_and_builds_up() {
+    use ber_model::ber::structural::{ConstructionLayer, ConstructionMakeup};
+    let mut c = dimensioned_square_controller();
+    c.materialize();
+
+    set_only_kind(&mut c, SurfaceKind::Walls);
+    c.set_structure_select_mode(Some(SelectMode::All));
+    c.begin_structure_edit();
+
+    // Open the layer editor for group 0 → make-up becomes Layers, editor marked.
+    c.begin_specify_layers(0);
+    assert_eq!(c.structure_edit().unwrap().specifying, Some(0));
+    assert!(matches!(
+        c.structure_edit().unwrap().groups[0].makeup,
+        ConstructionMakeup::Layers(_)
+    ));
+
+    // Set the build-up to one typed layer → saved to the library too.
+    c.set_structure_group_layers(
+        0,
+        vec![ConstructionLayer::typed("EPS".into(), 100, 0.0, false)],
+    );
+    assert!(
+        c.construction_layer_library()
+            .iter()
+            .any(|l| l.name() == "EPS" && l.thickness_mm == 100),
+        "typed layer joined the reusable library"
+    );
+    let layers = match &c.structure_edit().unwrap().groups[0].makeup {
+        ConstructionMakeup::Layers(v) => v.clone(),
+        _ => panic!("expected Layers"),
+    };
+    assert_eq!(layers.len(), 1);
+    assert_eq!(layers[0].name(), "EPS");
+
+    // Pick/append another (the library-pick path) → build-up has two, inside→out.
+    let mut two = layers;
+    two.push(ConstructionLayer::typed("Block".into(), 215, 1.33, false));
+    c.set_structure_group_layers(0, two);
+    assert!(matches!(
+        &c.structure_edit().unwrap().groups[0].makeup,
+        ConstructionMakeup::Layers(v) if v.len() == 2
+    ));
+
+    c.end_specify_layers();
+    assert_eq!(c.structure_edit().unwrap().specifying, None);
+}
+
+/// A photo attached to a group is copied into the photo store and recorded on
+/// the group's construction (the build-up floaty's camera button → controller).
+#[test]
+fn group_photo_copies_into_store_and_attaches() {
+    let mut c = dimensioned_square_controller();
+    c.materialize();
+    let tmp = std::env::temp_dir().join(format!("ber_photos_{}", ItemId::default().0));
+    c.set_photos_dir(tmp.clone());
+    let src = std::env::temp_dir().join(format!("ber_src_{}.jpg", ItemId::default().0));
+    std::fs::write(&src, b"jpeg-bytes").unwrap();
+
+    set_only_kind(&mut c, SurfaceKind::Walls);
+    c.set_structure_select_mode(Some(SelectMode::All));
+    c.begin_structure_edit();
+    c.add_group_photo(0, &src, PhotoQuality::Full);
+
+    let g0 = &c.structure_edit().unwrap().groups[0];
+    let rec = c.current_record.as_ref().unwrap();
+    let cid = rec.data.storeys[0]
+        .walls
+        .regions
+        .iter()
+        .find(|r| g0.ids.contains(&r.id))
+        .unwrap()
+        .construction_id;
+    let photos = &rec.data.wall_construction(cid).unwrap().base.photos;
+    assert_eq!(photos.len(), 1, "photo recorded on the construction");
+    let stored = std::path::Path::new(&photos[0].file_path);
+    assert!(stored.exists(), "photo copied into the store");
+    assert!(stored.starts_with(&tmp), "stored under the photos dir");
+
+    let _ = std::fs::remove_dir_all(&tmp);
+    let _ = std::fs::remove_file(&src);
+}
+
+/// Compact tiers actually downscale + re-encode the capture (not a raw copy): a
+/// large source lands in the store within the tier's pixel cap, as JPEG, and
+/// smaller than the original. (`Full`, covered above, keeps the bytes verbatim.)
+#[test]
+fn store_photo_recompresses_compact_tiers() {
+    use image::GenericImageView;
+
+    let mut c = AppController::new(crate::engine::open_db(":memory:").unwrap());
+    let tmp = std::env::temp_dir().join(format!("ber_recompress_{}", ItemId::default().0));
+    c.set_photos_dir(tmp.clone());
+
+    // A 3000×2000 noisy image: big enough that downscaling to the Low cap
+    // (1280px) and re-encoding is a clear, non-trivial reduction.
+    let src = std::env::temp_dir().join(format!("ber_big_{}.png", ItemId::default().0));
+    let mut img = image::RgbImage::new(3000, 2000);
+    for (x, y, px) in img.enumerate_pixels_mut() {
+        *px = image::Rgb([(x % 256) as u8, (y % 256) as u8, ((x + y) % 256) as u8]);
+    }
+    img.save(&src).unwrap();
+    let src_len = std::fs::metadata(&src).unwrap().len();
+
+    let photo = c
+        .store_photo_file(&src, PhotoQuality::Low)
+        .expect("photo stored");
+    let stored = std::path::Path::new(&photo.file_path);
+    assert!(stored.exists(), "recompressed file written");
+    assert_eq!(
+        stored.extension().and_then(|e| e.to_str()),
+        Some("jpg"),
+        "compact tier re-encodes to JPEG"
+    );
+
+    let (w, h) = image::ImageReader::open(stored)
+        .unwrap()
+        .with_guessed_format()
+        .unwrap()
+        .decode()
+        .unwrap()
+        .dimensions();
+    assert!(
+        w.max(h) <= 1280,
+        "downscaled to the Low tier pixel cap, got {w}x{h}"
+    );
+    let stored_len = std::fs::metadata(stored).unwrap().len();
+    assert!(
+        stored_len < src_len,
+        "recompressed ({stored_len}) smaller than original ({src_len})"
+    );
+
+    let _ = std::fs::remove_dir_all(&tmp);
+    let _ = std::fs::remove_file(&src);
+}
+
 /// The group PHASE is editable — defaulted to the derived value but overridable
 /// in the editor, and the override survives the re-resolve (stored in the
 /// durable side-table alongside type + make-up).

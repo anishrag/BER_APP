@@ -287,12 +287,14 @@ fn create_full_ber(id: ItemId) -> Ber {
         Photo {
             id: ItemId::default(),
             file_path: "assets/front.jpg".to_string(),
+            thumbnail_path: None,
             description: Some("Front".to_string()),
             side: None,
         },
         Photo {
             id: ItemId::default(),
             file_path: "assets/living.jpg".to_string(),
+            thumbnail_path: None,
             description: Some("Living".to_string()),
             side: None,
         },

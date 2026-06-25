@@ -549,6 +549,31 @@ pub enum SketchEvent {
         group_index: usize,
         exposure: ber_model::ber::structural::SurfaceExposure,
     },
+    /// Structure phase: open the build-up LAYER editor for `group` ("Specify…").
+    BeginSpecifyLayers {
+        group: usize,
+    },
+    /// Structure phase: close the build-up layer editor.
+    EndSpecifyLayers,
+    /// Structure phase: replace `group`'s build-up layers (pick / remove /
+    /// reorder in the layer editor).
+    SetStructureGroupLayers {
+        group: usize,
+        layers: Vec<ber_model::ber::structural::ConstructionLayer>,
+    },
+    /// Structure phase: open / close the PHOTOS view for a group (camera button).
+    BeginViewPhotos {
+        group: usize,
+    },
+    EndViewPhotos,
+    /// Structure phase: attach a photo (from `path`) to a group's construction
+    /// (the photos view's `+`). The controller recompresses the file into the
+    /// store at the call site's `quality` tier.
+    AddGroupPhoto {
+        group: usize,
+        path: std::path::PathBuf,
+        quality: crate::ui::widgets::PhotoQuality,
+    },
     /// Structure phase: close the "Edit attributes" session.
     EndStructureEdit,
     // ── Floor exposure ───────────────────────────────────────────────────────
@@ -911,6 +936,9 @@ pub struct SketchView<'a> {
     /// the pending selection until "Edit attributes" commits them. Empty when
     /// no carve is staged.
     pub pending_structure_carves: &'a [Vec<(f64, f64)>],
+    /// The app-wide reusable construction-layer library — the build-up layer
+    /// editor's "previously typed layers" pick list.
+    pub layer_library: &'a [ber_model::ber::structural::ConstructionLayer],
     // ── Floor exposure ───────────────────────────────────────────────────────
     /// Floor-exposure tool active: the canvas shows the overlaid all-storeys
     /// floor view + selection instead of the normal plan, gated until the
@@ -931,7 +959,7 @@ pub struct SketchView<'a> {
     /// shaded over the overlaid view so the assessor taps the side they want.
     /// Empty when no cut is awaiting a pick.
     pub floor_exposure_cut_regions: &'a [Vec<(f64, f64)>],
-    // ── Ceiling exposure ──────────────────────────────────────────────────────
+    // ── Ceiling exposure ─────────────────────────────────────────────────────
     /// Ceiling-exposure tool active: the canvas shows the overlaid all-storeys
     /// ceiling view + selection instead of the normal plan, gated until the
     /// storey-count confirm.

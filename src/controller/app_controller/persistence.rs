@@ -754,6 +754,12 @@ impl AppController {
         self.writer = Some(writer);
     }
 
+    /// Where attached/captured photo files are stored (set from `Paths` in
+    /// `bootstrap`).
+    pub fn set_photos_dir(&mut self, dir: std::path::PathBuf) {
+        self.photos_dir = dir;
+    }
+
     /// Save pending edits WITHOUT blocking the UI on disk I/O: build the filtered
     /// record on this thread, then hand it to the background writer. Falls back
     /// to a synchronous `flush_if_dirty` when no writer is attached (tests).

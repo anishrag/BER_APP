@@ -29,4 +29,9 @@ impl Paths {
     pub fn db_file(&self) -> PathBuf {
         self.data_dir.join("bers.db")
     }
+
+    /// Directory holding attached/captured photo files (created on first save).
+    pub fn photos_dir(&self) -> PathBuf {
+        self.data_dir.join("photos")
+    }
 }

@@ -844,6 +844,13 @@ impl eframe::App for BerApp {
                             // Owned copy of the in-flight "Edit attributes" session.
                             let structure_edit =
                                 self.app_controller.borrow().structure_edit().cloned();
+                            // Owned copy of the reusable construction-layer library
+                            // (the build-up editor's pick list).
+                            let layer_library = self
+                                .app_controller
+                                .borrow()
+                                .construction_layer_library()
+                                .to_vec();
                             // Candidate regions of a pending Structure carve.
                             let structure_cut_regions =
                                 self.app_controller.borrow().structure_cut_regions();
@@ -1048,6 +1055,7 @@ impl eframe::App for BerApp {
                                 structure_cut_regions: &structure_cut_regions,
                                 pending_structure_split_polygon: &pending_structure_split_polygon,
                                 pending_structure_carves: &pending_structure_carves,
+                                layer_library: &layer_library,
                                 floor_exposure_mode,
                                 floor_exposure_gate_pending,
                                 floor_exposure_select,
@@ -1798,6 +1806,32 @@ impl eframe::App for BerApp {
                                         controller
                                             .borrow_mut()
                                             .set_structure_group_exposure(group_index, exposure);
+                                    }
+                                    SketchEvent::BeginSpecifyLayers { group } => {
+                                        controller.borrow_mut().begin_specify_layers(group);
+                                    }
+                                    SketchEvent::EndSpecifyLayers => {
+                                        controller.borrow_mut().end_specify_layers();
+                                    }
+                                    SketchEvent::SetStructureGroupLayers { group, layers } => {
+                                        controller
+                                            .borrow_mut()
+                                            .set_structure_group_layers(group, layers);
+                                    }
+                                    SketchEvent::BeginViewPhotos { group } => {
+                                        controller.borrow_mut().begin_view_photos(group);
+                                    }
+                                    SketchEvent::EndViewPhotos => {
+                                        controller.borrow_mut().end_view_photos();
+                                    }
+                                    SketchEvent::AddGroupPhoto {
+                                        group,
+                                        path,
+                                        quality,
+                                    } => {
+                                        controller
+                                            .borrow_mut()
+                                            .add_group_photo(group, &path, quality);
                                     }
                                     SketchEvent::EndStructureEdit => {
                                         controller.borrow_mut().end_structure_edit();

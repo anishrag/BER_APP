@@ -30,7 +30,10 @@ sketch = { path = "sketch" }
 egui = "0.33.3"
 strum = "0.27.2"
 strum_macros = "0.27.2"
-egui_extras = { version = "0.33.3", features = ["datepicker"] }
+egui_extras = { version = "0.33.3", features = ["datepicker", "file", "image"] }
+# Image decoding for photo thumbnails (used by egui_extras' image loader). Only
+# the formats a phone camera / attached file produces.
+image = { version = "0.25", default-features = false, features = ["jpeg", "png"] }
 
 # Bluetooth laser meter (Leica DISTO) support — behind the `bluetooth` feature
 # (off by default so the normal build + tests need no radio stack). btleplug is
@@ -49,10 +52,10 @@ bluetooth = ["dep:btleplug", "dep:tokio", "dep:futures"]
 # android build opts out of defaults and re-adds only what it needs.
 [target.'cfg(not(target_os = "android"))'.dependencies]
 eframe = "0.33.3"
-# Desktop file picker for attaching external photos (Front/Right/Left/Back).
-# `xdg-portal` is the default Linux backend; this is a DESKTOP-only stand-in —
-# real on-device Android camera capture is a follow-up (see
-# src/controller/app_controller/photos.rs TODO). UI-layer only (src/ui).
+# Native "choose image" dialog for attaching photos on desktop (Android uses the
+# camera instead). Desktop-only — the Android photo path is the in-app camera.
+# Shared by the Structure-phase construction photos and the Mapping-phase
+# external (Front/Right/Left/Back) photos.
 rfd = "0.15"
 
 # Android entry-point deps. `AndroidApp` is always named THROUGH winit
@@ -66,6 +69,15 @@ eframe = { version = "0.33.3", default-features = false, features = [
     "default_fonts",
 ] }
 android_logger = "0.15"
+# In-app camera bridge: Rust calls MainActivity.requestPhoto(int) over JNI to
+# launch the system camera, and the activity hands the captured file path back
+# through the `Java_..._nativeOnPhoto*` exports (see src/ui/widgets/photo.rs).
+# `ndk-context` exposes the JavaVM + activity that android-activity registers.
+# Both are already in the tree transitively — naming them just makes the bridge
+# code legal. (The Bluetooth laser path stays raw-pointer JNI; this one needs
+# Rust→Java calls + a Java String, where the `jni` crate earns its keep.)
+jni = "0.21"
+ndk-context = "0.1"
 
 [workspace]
 members = ["ber_model", "document", "sketch", "domain", "manip_plan"]

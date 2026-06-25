@@ -72,6 +72,33 @@ on first launch. `adb logcat -s ber_app` shows the connect/subscribe/reading
 trace. If R8/minify is ever enabled for release, keep the native-method names
 (`-keep class ie.cannygreen.berapp.MainActivity { *; }`).
 
+## Camera (in-app photos) — status: built, NOT yet device-verified
+
+Photo-attach buttons (e.g. Structure build-ups) use the system camera on
+Android. The flow is the mirror image of the laser bridge — here Rust both
+*calls into* Java and gets a callback:
+
+1. Tapping "add photo" runs `ui::widgets::photo`'s Android path, which uses the
+   `jni` crate + `ndk_context` (the JavaVM + activity android-activity
+   registers) to call `MainActivity.requestPhoto(int quality)`.
+2. `requestPhoto` launches `ACTION_IMAGE_CAPTURE` with a **MediaStore** output
+   URI (no FileProvider/androidx, no storage permission). Flash + quality are
+   the camera app's own controls; `quality` is the per-call-site default,
+   forwarded for a future CameraX capture screen.
+3. `onActivityResult` copies the capture into private app cache, deletes the
+   gallery row (keeps the assessor's library clean), and calls back
+   `nativeOnPhotoCaptured(String path)` (or `nativeOnPhotoCancelled()`).
+4. Rust (`photo::android_cam`) stores the path in a global the next
+   `photo_button` frame polls — the app naturally repaints when it resumes after
+   the camera activity. The controller then copies the file into the photo store
+   and makes a thumbnail, exactly as on desktop.
+
+Manifest: **no CAMERA permission** (the camera app holds it; we only hand off an
+intent), a `<queries>` entry for `IMAGE_CAPTURE` (API 30+ package visibility),
+and an optional `camera.any` feature. If R8/minify is enabled for release, keep
+the native-method names (the `-keep` rule above already covers `MainActivity`).
+Verify on the tablet with `adb logcat -s ber_app` (look for `camera:` lines).
+
 ## Notes
 
 - The Rust side must keep naming `AndroidApp` through

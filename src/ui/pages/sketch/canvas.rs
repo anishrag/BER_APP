@@ -972,38 +972,73 @@ pub(super) fn render<F: FnMut(UiEvent)>(
         if let Some((_s, t)) = render::storey_transform(rect, ber, current_storey_idx, mode, vp) {
             render::structure_fan::render_groups_inplace(&painter, &t, storey, edit);
             let editable = !reviewing && !dim_prompting;
-            for w in &layout.windows {
-                let i = w.group_index;
-                let Some(group) = edit.groups.get(i) else {
-                    continue;
-                };
-                // Connector from the window's inner edge to the group's true
-                // centroid, ending in a dot on the recoloured surfaces.
-                let target = t.apply(w.centroid.0, w.centroid.1);
-                painter.line_segment([w.inner_anchor, target], egui::Stroke::new(2.0, w.color));
-                painter.circle_filled(target, 3.5, w.color);
-                egui::Area::new(ui.id().with(("structure_attr", i)))
-                    .order(egui::Order::Foreground)
-                    .fixed_pos(w.pos)
-                    .show(ui.ctx(), |ui| {
-                        egui::Frame::popup(ui.style())
-                            .fill(w.color.gamma_multiply(0.22))
-                            .stroke(egui::Stroke::new(2.0, w.color))
-                            .show(ui, |ui| {
-                                ui.set_max_width(EDIT_BOX_W - 16.0);
-                                // The two-level heading (kind + editable name) is
-                                // rendered by `group_editor_ui` itself now.
-                                super::structure::group_editor_ui(
+            if let Some(spec) = edit.specifying {
+                // "Specify…" is open: a centred build-up LAYER editor takes over
+                // (the small per-group windows are hidden while it's up).
+                if let Some(group) = edit.groups.get(spec) {
+                    egui::Area::new(ui.id().with("specify_layers"))
+                        .order(egui::Order::Foreground)
+                        .anchor(egui::Align2::CENTER_CENTER, egui::vec2(0.0, 0.0))
+                        .show(ui.ctx(), |ui| {
+                            egui::Frame::popup(ui.style()).show(ui, |ui| {
+                                ui.set_max_width(300.0);
+                                super::structure::layer_editor_ui(
                                     ui,
-                                    group.ty.kind(),
-                                    i,
+                                    spec,
                                     group,
-                                    view.phase_choices,
-                                    editable,
+                                    view.layer_library,
                                     on_event,
                                 );
                             });
-                    });
+                        });
+                }
+            } else if let Some(pg) = edit.viewing_photos {
+                // Camera button is open: a centred PHOTOS view (thumbnails + add).
+                if let Some(group) = edit.groups.get(pg) {
+                    egui::Area::new(ui.id().with("view_photos"))
+                        .order(egui::Order::Foreground)
+                        .anchor(egui::Align2::CENTER_CENTER, egui::vec2(0.0, 0.0))
+                        .show(ui.ctx(), |ui| {
+                            egui::Frame::popup(ui.style()).show(ui, |ui| {
+                                ui.set_max_width(440.0);
+                                super::structure::photos_view_ui(ui, pg, group, on_event);
+                            });
+                        });
+                }
+            } else {
+                for w in &layout.windows {
+                    let i = w.group_index;
+                    let Some(group) = edit.groups.get(i) else {
+                        continue;
+                    };
+                    // Connector from the window's inner edge to the group's true
+                    // centroid, ending in a dot on the recoloured surfaces.
+                    let target = t.apply(w.centroid.0, w.centroid.1);
+                    painter.line_segment([w.inner_anchor, target], egui::Stroke::new(2.0, w.color));
+                    painter.circle_filled(target, 3.5, w.color);
+                    egui::Area::new(ui.id().with(("structure_attr", i)))
+                        .order(egui::Order::Foreground)
+                        .fixed_pos(w.pos)
+                        .show(ui.ctx(), |ui| {
+                            egui::Frame::popup(ui.style())
+                                .fill(w.color.gamma_multiply(0.22))
+                                .stroke(egui::Stroke::new(2.0, w.color))
+                                .show(ui, |ui| {
+                                    ui.set_max_width(EDIT_BOX_W - 16.0);
+                                    // The two-level heading (kind + editable name)
+                                    // is rendered by `group_editor_ui` itself now.
+                                    super::structure::group_editor_ui(
+                                        ui,
+                                        group.ty.kind(),
+                                        i,
+                                        group,
+                                        view.phase_choices,
+                                        editable,
+                                        on_event,
+                                    );
+                                });
+                        });
+                }
             }
         }
     }

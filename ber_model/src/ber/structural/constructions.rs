@@ -43,6 +43,34 @@ pub struct ConstructionLayer {
     pub bridged: bool,                  // true if thermal bridging exists
 }
 
+impl ConstructionLayer {
+    /// Build a layer from the fields the assessor types in the build-up editor
+    /// (name + thickness + thermal conductivity λ + bridged). Typed layers carry
+    /// a `Custom` material so the name + λ travel with them into the reusable
+    /// layer library.
+    pub fn typed(name: String, thickness_mm: u32, lambda: f32, bridged: bool) -> Self {
+        Self {
+            thickness_mm,
+            material: ConstructionMaterial::Custom { lambda, name },
+            bridged,
+        }
+    }
+
+    /// The layer's material name (a preset's name, or the custom name).
+    pub fn name(&self) -> String {
+        self.material.name()
+    }
+
+    /// The layer's thermal conductivity λ (W/m·K); `0.0` for a preset that
+    /// doesn't carry one.
+    pub fn lambda(&self) -> f32 {
+        match &self.material {
+            ConstructionMaterial::Custom { lambda, .. } => *lambda,
+            _ => 0.0,
+        }
+    }
+}
+
 #[derive(Debug, Default, Clone, Serialize, Deserialize, PartialEq)]
 pub enum ConstructionMakeup {
     NonHeatLoss, // no heat loss
@@ -519,6 +547,31 @@ impl Ber {
         };
         if let Some(base) = base {
             base.name = name;
+        }
+    }
+
+    /// Attach a `photo` to the `kind` construction `id` (its build-up photos).
+    /// Find-by-id within the matching registry; no-op if it isn't there.
+    pub fn add_construction_photo(&mut self, kind: SurfaceKind, id: ItemId, photo: Photo) {
+        let base = match kind {
+            SurfaceKind::Walls => self
+                .wall_constructions
+                .iter_mut()
+                .find(|c| c.base.id == id)
+                .map(|c| &mut c.base),
+            SurfaceKind::Floors => self
+                .floor_constructions
+                .iter_mut()
+                .find(|c| c.base.id == id)
+                .map(|c| &mut c.base),
+            SurfaceKind::Roofs => self
+                .ceiling_constructions
+                .iter_mut()
+                .find(|c| c.base.id == id)
+                .map(|c| &mut c.base),
+        };
+        if let Some(base) = base {
+            base.photos.push(photo);
         }
     }
 

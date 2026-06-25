@@ -13,7 +13,7 @@
 //! and holds the transient selected set (app-shell interaction state — the
 //! regions live on the BER record, not the editing `Document`).
 use super::*;
-use ber_model::ber::common::ConstructionPhase;
+use ber_model::ber::common::{ConstructionPhase, Photo};
 use ber_model::ber::structural::{
     CeilingConstructionType, CeilingExposure, ConstructionMakeup, ConstructionType,
     FloorConstructionType, FloorExposure, Storey, SurfaceExposure, WallExposure,
@@ -43,6 +43,9 @@ pub struct EditGroup {
     /// Editable label for the group, defaulting to "Group 1", "Group 2", … —
     /// the assessor can rename it. Session-scoped (reset when the edit reopens).
     pub name: String,
+    /// The group construction's attached photos (session copy, seeded from the
+    /// construction; the photos view shows these and the camera button appends).
+    pub photos: Vec<Photo>,
 }
 
 /// The in-flight "Edit attributes" session: the current selection partitioned by
@@ -54,6 +57,14 @@ pub struct EditGroup {
 pub struct StructureEdit {
     pub groups: Vec<EditGroup>,
     pub active: usize,
+    /// When `Some(i)`, the build-up LAYER editor is open for group `i` (the
+    /// "Specify…" flow): the canvas shows that editor — type a layer or pick from
+    /// the reusable library, ordered inside→outside — instead of the group's
+    /// normal attribute window. `None` = no layer editor open.
+    pub specifying: Option<usize>,
+    /// When `Some(i)`, the PHOTOS view is open for group `i` (the camera button):
+    /// the canvas shows that group's photo thumbnails with a `+` to add more.
+    pub viewing_photos: Option<usize>,
     /// Canvas presentation of the session. `false` (default) keeps the plan in
     /// place — zoomed out, each group recoloured where it sits, with one full
     /// attribute window floating over each group. `true` is the exploded "fan"
@@ -411,6 +422,7 @@ impl AppController {
             SurfaceExposure,
             bool, // exposure_locked
             Option<String>,
+            Vec<Photo>,
         );
         let Some(doc) = self.document.storeys.get(idx) else {
             return;
@@ -425,19 +437,21 @@ impl AppController {
                         .recover_wall_region_span(r)
                         .map(|(vid, ..)| doc.is_wall_partitioned(vid))
                         .unwrap_or(false);
-                    let (ty, makeup, phase, name) =
+                    let (ty, makeup, phase, name, photos) =
                         match record.data.wall_construction(r.construction_id) {
                             Some(c) => (
                                 ConstructionType::Wall(c.construction_type),
                                 c.base.construction_makeup.clone(),
                                 c.base.construction_phase.clone(),
                                 c.base.name.clone(),
+                                c.base.photos.clone(),
                             ),
                             None => (
                                 ConstructionType::Wall(Default::default()),
                                 Default::default(),
                                 Default::default(),
                                 None,
+                                Vec::new(),
                             ),
                         };
                     Some((
@@ -447,23 +461,26 @@ impl AppController {
                         SurfaceExposure::Wall(r.exposure),
                         locked,
                         name,
+                        photos,
                     ))
                 }
                 SurfaceKind::Floors => {
                     let r = storey.floors.regions.iter().find(|r| r.id == id)?;
-                    let (ty, makeup, phase, name) =
+                    let (ty, makeup, phase, name, photos) =
                         match record.data.floor_construction(r.construction_id) {
                             Some(c) => (
                                 ConstructionType::Floor(c.construction_type),
                                 c.base.construction_makeup.clone(),
                                 c.base.construction_phase.clone(),
                                 c.base.name.clone(),
+                                c.base.photos.clone(),
                             ),
                             None => (
                                 ConstructionType::Floor(Default::default()),
                                 Default::default(),
                                 Default::default(),
                                 None,
+                                Vec::new(),
                             ),
                         };
                     Some((
@@ -473,23 +490,26 @@ impl AppController {
                         SurfaceExposure::Floor(r.exposure),
                         false,
                         name,
+                        photos,
                     ))
                 }
                 SurfaceKind::Roofs => {
                     let r = storey.roofs.regions.iter().find(|r| r.id == id)?;
-                    let (ty, makeup, phase, name) =
+                    let (ty, makeup, phase, name, photos) =
                         match record.data.ceiling_construction(r.construction_id) {
                             Some(c) => (
                                 ConstructionType::Ceiling(c.construction_type),
                                 c.base.construction_makeup.clone(),
                                 c.base.construction_phase.clone(),
                                 c.base.name.clone(),
+                                c.base.photos.clone(),
                             ),
                             None => (
                                 ConstructionType::Ceiling(Default::default()),
                                 Default::default(),
                                 Default::default(),
                                 None,
+                                Vec::new(),
                             ),
                         };
                     Some((
@@ -499,6 +519,7 @@ impl AppController {
                         SurfaceExposure::Ceiling(r.exposure),
                         false,
                         name,
+                        photos,
                     ))
                 }
             }
@@ -506,7 +527,8 @@ impl AppController {
         let mut groups: Vec<EditGroup> = Vec::new();
         for id in &self.structure_selected {
             // Skip ids that no longer resolve to a live region of any kind.
-            let Some((ty, makeup, phase, exposure, exposure_locked, cname)) = attrs_of(*id) else {
+            let Some((ty, makeup, phase, exposure, exposure_locked, cname, photos)) = attrs_of(*id)
+            else {
                 continue;
             };
             // `exposure_locked` is part of the key so a face-partitioned wall
@@ -530,6 +552,7 @@ impl AppController {
                     // The construction's stored name, if any (set in a prior
                     // session); the "Group N" fallback is filled in below.
                     name: cname.unwrap_or_default(),
+                    photos,
                 }),
             }
         }
@@ -544,7 +567,277 @@ impl AppController {
                 groups,
                 active: 0,
                 exploded: false,
+                specifying: None,
+                viewing_photos: None,
             });
+        }
+    }
+
+    /// The app-wide reusable construction-layer library (the build-up editor's
+    /// "previously typed layers" pick list).
+    pub fn construction_layer_library(&self) -> &[ber_model::ber::structural::ConstructionLayer] {
+        &self.layer_library
+    }
+
+    /// Open the build-up LAYER editor for `group` (the "Specify…" flow). Ensures
+    /// the group's make-up is `Layers` (starting empty if it was something else),
+    /// then marks the editor open.
+    pub fn begin_specify_layers(&mut self, group: usize) {
+        let makeup = self
+            .structure_edit
+            .as_ref()
+            .and_then(|e| e.groups.get(group))
+            .map(|g| g.makeup.clone());
+        let Some(makeup) = makeup else {
+            return;
+        };
+        if !matches!(makeup, ConstructionMakeup::Layers(_)) {
+            self.set_structure_group_layers(group, Vec::new());
+        }
+        if let Some(e) = self.structure_edit.as_mut() {
+            e.specifying = Some(group);
+        }
+    }
+
+    /// Close the build-up layer editor.
+    pub fn end_specify_layers(&mut self) {
+        if let Some(e) = self.structure_edit.as_mut() {
+            e.specifying = None;
+        }
+    }
+
+    /// Replace `group`'s build-up with `layers` (its make-up becomes
+    /// `Layers(layers)`) and apply it durably. Also saves each NAMED layer to the
+    /// app-wide library (idempotent) so a typed layer becomes pickable next time —
+    /// the build-up editor commits the whole list here on close.
+    pub fn set_structure_group_layers(
+        &mut self,
+        group: usize,
+        layers: Vec<ber_model::ber::structural::ConstructionLayer>,
+    ) {
+        let Some((ty, phase)) = self
+            .structure_edit
+            .as_ref()
+            .and_then(|e| e.groups.get(group))
+            .map(|g| (g.ty, g.phase.clone()))
+        else {
+            return;
+        };
+        // Persist any named layers to the reusable library + refresh the cache.
+        let repo = crate::engine::ber_repository::BerRepository::new(&self.conn);
+        let mut added = false;
+        for l in &layers {
+            if !l.name().trim().is_empty() && repo.add_construction_layer(l).is_ok() {
+                added = true;
+            }
+        }
+        if added {
+            self.layer_library = repo.list_construction_layers().unwrap_or_default();
+        }
+        self.set_structure_group_attrs(group, ty, ConstructionMakeup::Layers(layers), phase);
+    }
+
+    /// Copy a source image into the photo store and return a `Photo` pointing at
+    /// the stored copy. The MODULAR core every photo-attach site shares (file
+    /// I/O lives here, not in the UI). `None` on an I/O failure.
+    ///
+    /// `quality` is the per-site tier: the compact tiers downscale + re-encode
+    /// the capture toward a target byte size (most shots don't need full
+    /// resolution); `Full` keeps the original bytes verbatim (text/OCR shots).
+    pub(super) fn store_photo_file(
+        &self,
+        source: &std::path::Path,
+        quality: PhotoQuality,
+    ) -> Option<ber_model::ber::common::Photo> {
+        std::fs::create_dir_all(&self.photos_dir).ok()?;
+        // Canonicalize to an ABSOLUTE dir so the stored path loads as a
+        // `file://` thumbnail regardless of the process's cwd.
+        let dir =
+            std::fs::canonicalize(&self.photos_dir).unwrap_or_else(|_| self.photos_dir.clone());
+        let id = ItemId::default();
+        // Compact tiers re-encode to JPEG toward their byte budget; `Full` (and
+        // any decode/encode failure) keeps the original bytes, extension and all.
+        let dest = match quality.budget() {
+            Some((max_dim, target_bytes)) => {
+                let dest = dir.join(format!("{}.jpg", id.0));
+                if Self::recompress(source, &dest, max_dim, target_bytes) {
+                    Some(dest)
+                } else {
+                    None
+                }
+            }
+            None => None,
+        };
+        let dest = match dest {
+            Some(dest) => dest,
+            None => {
+                let ext = source.extension().and_then(|e| e.to_str()).unwrap_or("jpg");
+                let dest = dir.join(format!("{}.{ext}", id.0));
+                std::fs::copy(source, &dest).ok()?;
+                dest
+            }
+        };
+        // Generate a small preview. Phone photos are ~12 MP; rendering the
+        // full-res original as a thumbnail is slow to decode and costs ~48 MB
+        // of texture each — unworkable on a tablet. Best-effort: on failure we
+        // leave `thumbnail_path` None and fall back to the original.
+        let thumb_dest = dir.join(format!("{}_thumb.jpg", id.0));
+        let thumbnail_path = Self::write_thumbnail(&dest, &thumb_dest)
+            .then(|| thumb_dest.to_string_lossy().into_owned());
+        Some(ber_model::ber::common::Photo {
+            id,
+            file_path: dest.to_string_lossy().into_owned(),
+            thumbnail_path,
+            description: None,
+            // Construction build-up photos have no elevation side (that's only
+            // for the Mapping-phase external Front/Right/Left/Back photos).
+            side: None,
+        })
+    }
+
+    /// Decode `src`, downscale to fit `THUMB_MAX` px on the long edge, and write
+    /// a JPEG to `dest`. Returns `false` (and writes nothing) on any failure.
+    fn write_thumbnail(src: &std::path::Path, dest: &std::path::Path) -> bool {
+        const THUMB_MAX: u32 = 480;
+        let Ok(reader) = image::ImageReader::open(src).and_then(|r| r.with_guessed_format()) else {
+            return false;
+        };
+        let Ok(img) = reader.decode() else {
+            return false;
+        };
+        // `thumbnail` preserves aspect ratio and fits within the bounds.
+        let thumb = img.thumbnail(THUMB_MAX, THUMB_MAX);
+        thumb.to_rgb8().save(dest).is_ok()
+    }
+
+    /// Decode `src`, downscale to fit `max_dim` px on the long edge, and write a
+    /// JPEG to `dest` no larger than `target_bytes` if achievable by lowering the
+    /// encoder quality (the smallest quality tried is kept regardless). Returns
+    /// `false` and writes nothing on any decode/encode failure, so the caller can
+    /// fall back to storing the original bytes verbatim.
+    fn recompress(
+        src: &std::path::Path,
+        dest: &std::path::Path,
+        max_dim: u32,
+        target_bytes: usize,
+    ) -> bool {
+        use image::ImageEncoder;
+        let Ok(reader) = image::ImageReader::open(src).and_then(|r| r.with_guessed_format()) else {
+            return false;
+        };
+        let Ok(img) = reader.decode() else {
+            return false;
+        };
+        // `thumbnail` only ever shrinks (keeps aspect ratio); flatten to RGB so
+        // the JPEG encoder always accepts the buffer (no alpha channel).
+        let scaled = img.thumbnail(max_dim, max_dim).to_rgb8();
+        let (w, h) = (scaled.width(), scaled.height());
+        // Step quality down until under the byte budget; keep the last (smallest)
+        // encoding if even the lowest quality is still over.
+        let mut chosen: Option<Vec<u8>> = None;
+        for quality in [85u8, 70, 55, 40] {
+            let mut buf = Vec::new();
+            let encoder = image::codecs::jpeg::JpegEncoder::new_with_quality(&mut buf, quality);
+            if encoder
+                .write_image(scaled.as_raw(), w, h, image::ExtendedColorType::Rgb8)
+                .is_err()
+            {
+                return false;
+            }
+            let under_budget = buf.len() <= target_bytes;
+            chosen = Some(buf);
+            if under_budget {
+                break;
+            }
+        }
+        chosen.is_some_and(|buf| std::fs::write(dest, buf).is_ok())
+    }
+
+    /// Attach a photo (from `source`) to a Structure group's construction(s) —
+    /// the build-up floaty's camera button. Stores the file, then pushes the
+    /// `Photo` onto each of the group's (shared) constructions. Marks dirty.
+    pub fn add_group_photo(
+        &mut self,
+        group: usize,
+        source: &std::path::Path,
+        quality: PhotoQuality,
+    ) {
+        let Some(photo) = self.store_photo_file(source, quality) else {
+            return;
+        };
+        let (kind, ids) = match self
+            .structure_edit
+            .as_ref()
+            .and_then(|e| e.groups.get(group))
+        {
+            Some(g) => (g.ty.kind(), g.ids.clone()),
+            None => return,
+        };
+        let Some(idx) = self.current_storey_idx else {
+            return;
+        };
+        let Some(record) = self.current_record.as_mut() else {
+            return;
+        };
+        let cids: Vec<ItemId> = {
+            let Some(storey) = record.data.storeys.get(idx) else {
+                return;
+            };
+            let region_cid = |id: ItemId| -> Option<ItemId> {
+                match kind {
+                    SurfaceKind::Walls => storey
+                        .walls
+                        .regions
+                        .iter()
+                        .find(|r| r.id == id)
+                        .map(|r| r.construction_id),
+                    SurfaceKind::Floors => storey
+                        .floors
+                        .regions
+                        .iter()
+                        .find(|r| r.id == id)
+                        .map(|r| r.construction_id),
+                    SurfaceKind::Roofs => storey
+                        .roofs
+                        .regions
+                        .iter()
+                        .find(|r| r.id == id)
+                        .map(|r| r.construction_id),
+                }
+            };
+            let mut seen = HashSet::new();
+            ids.iter()
+                .filter_map(|id| region_cid(*id))
+                .filter(|c| seen.insert(*c))
+                .collect()
+        };
+        for cid in cids {
+            record.data.add_construction_photo(kind, cid, photo.clone());
+        }
+        // Mirror onto the session group so the open photos view updates at once.
+        if let Some(g) = self
+            .structure_edit
+            .as_mut()
+            .and_then(|e| e.groups.get_mut(group))
+        {
+            g.photos.push(photo);
+        }
+        let _ = self.mark_dirty();
+    }
+
+    /// Open / close the PHOTOS view for a group (the camera button): shows the
+    /// group's thumbnails with a `+` to add more.
+    pub fn begin_view_photos(&mut self, group: usize) {
+        if let Some(e) = self.structure_edit.as_mut() {
+            if group < e.groups.len() {
+                e.viewing_photos = Some(group);
+            }
+        }
+    }
+
+    pub fn end_view_photos(&mut self) {
+        if let Some(e) = self.structure_edit.as_mut() {
+            e.viewing_photos = None;
         }
     }
 
@@ -1086,5 +1379,47 @@ impl AppController {
             .data
             .storeys
             .get(self.current_storey_idx?)
+    }
+}
+
+/// Stored-photo quality tier, chosen per attach site. Drives how a captured
+/// image is recompressed into the photo store: the compact tiers downscale +
+/// re-encode toward a target byte size (most shots don't need full resolution),
+/// while `Full` keeps the original bytes verbatim for shots where text must stay
+/// legible (labels, datasheets — OCR/zoom).
+///
+/// The integer [`level`](Self::level) is also handed to the Android camera
+/// activity over JNI (`requestPhoto(int)`); keep it in sync with the levels in
+/// `android/app/src/main/java/.../MainActivity.java`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PhotoQuality {
+    Low,
+    Medium,
+    High,
+    Full,
+}
+
+impl PhotoQuality {
+    /// Stable integer level passed across the JNI boundary to the camera
+    /// activity. Kept in sync with `requestPhoto(int)` in `MainActivity.java`.
+    #[cfg_attr(not(target_os = "android"), allow(dead_code))]
+    pub fn level(self) -> i32 {
+        match self {
+            PhotoQuality::Low => 0,
+            PhotoQuality::Medium => 1,
+            PhotoQuality::High => 2,
+            PhotoQuality::Full => 3,
+        }
+    }
+
+    /// Recompression budget for the compact tiers: `(max long-edge px, target
+    /// bytes)`. `Full` returns `None` — its original bytes are stored verbatim.
+    fn budget(self) -> Option<(u32, usize)> {
+        match self {
+            PhotoQuality::Low => Some((1280, 80_000)),
+            PhotoQuality::Medium => Some((1600, 130_000)),
+            PhotoQuality::High => Some((2048, 350_000)),
+            PhotoQuality::Full => None,
+        }
     }
 }

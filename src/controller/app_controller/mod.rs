@@ -38,7 +38,7 @@ mod photos;
 mod structure;
 
 pub use assessment_phase::{AssessmentPhase, SelectMode};
-pub use structure::{EditGroup, StructureEdit};
+pub use structure::{EditGroup, PhotoQuality, StructureEdit};
 // `SurfaceKind` is the data-model surface taxonomy — it lives in `ber_model`
 // (the queries dispatch on it) and is re-exported here so UI + controller call
 // sites keep reaching it via `app_controller::SurfaceKind`.
@@ -127,6 +127,12 @@ fn dump_stroke(label: &str, pts: &[Point2f32]) {
 
 pub struct AppController {
     conn: Db,
+    /// Cached app-wide construction-layer library (the build-up editor's pick
+    /// list); loaded on create, refreshed when a typed layer is saved.
+    layer_library: Vec<ber_model::ber::structural::ConstructionLayer>,
+    /// Where attached/captured photo files are stored. Set from `Paths` in
+    /// `bootstrap`; a relative default keeps tests (no photos) working.
+    photos_dir: std::path::PathBuf,
     sketch_engine: SketchEngine,
     loader_engine: DataLoader,
     /// The BER record being edited. `commit_to_ber` writes through this to SQLite.
@@ -440,8 +446,16 @@ pub struct AppController {
 
 impl AppController {
     pub fn new(conn: Db) -> Self {
+        // The app-wide construction-layer library (the build-up editor's pick
+        // list). Cached so the per-frame view build doesn't hit SQLite; refreshed
+        // when a new layer is typed. `open_db` ran `init_db`, so the table exists.
+        let layer_library = crate::engine::ber_repository::BerRepository::new(&conn)
+            .list_construction_layers()
+            .unwrap_or_default();
         Self {
             conn,
+            layer_library,
+            photos_dir: std::path::PathBuf::from("photos"),
             loader_engine: DataLoader::new(),
             sketch_engine: SketchEngine::new(),
             current_record: None,
