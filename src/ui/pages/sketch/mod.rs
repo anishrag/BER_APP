@@ -645,13 +645,15 @@ pub enum SketchEvent {
     /// Assign a ceiling exposure to the current ceiling-region selection.
     AssignCeilingExposure(ber_model::ber::structural::CeilingExposure),
     // ── External photos ───────────────────────────────────────────────────────
-    /// Attach (or replace) the external photo for `side`. `path` is the file the
-    /// UI's file picker returned. (The file dialog itself runs in the UI layer;
-    /// the controller just gets the path — keeping it camera/file-dialog
-    /// agnostic for a future Android camera path.)
+    /// Attach (or replace) the external photo for `side`. `path` is the captured
+    /// image the shared `photo_button` widget returned (desktop file dialog /
+    /// Android camera — the widget owns that platform split). The controller
+    /// recompresses the file into the store at `quality`, staying camera/
+    /// file-dialog agnostic — it only ever sees a path. Mirrors `AddGroupPhoto`.
     AddExternalPhoto {
         side: ExternalSide,
-        path: String,
+        path: std::path::PathBuf,
+        quality: crate::ui::widgets::PhotoQuality,
     },
     /// Remove the external photo for `side`.
     RemoveExternalPhoto {

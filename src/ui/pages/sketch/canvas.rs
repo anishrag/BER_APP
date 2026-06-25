@@ -2059,15 +2059,12 @@ fn external_photos_button<F: FnMut(UiEvent)>(
                         .default_open(false)
                         .show(ui, |ui| {
                             ui.set_max_width(230.0);
+                            // Elevation shots want legible detail; capture High.
+                            let quality = crate::ui::widgets::PhotoQuality::High;
                             for (side, photo) in &view.external_photos {
                                 ui.horizontal(|ui| match photo {
-                                    Some(p) => {
-                                        let name = std::path::Path::new(&p.file_path)
-                                            .file_name()
-                                            .and_then(|n| n.to_str())
-                                            .unwrap_or(p.file_path.as_str());
-                                        ui.label(format!("✓ {}: {}", side.label(), name))
-                                            .on_hover_text(&p.file_path);
+                                    Some(_) => {
+                                        ui.label(format!("✓ {}", side.label()));
                                     }
                                     None => {
                                         ui.colored_label(
@@ -2076,14 +2073,34 @@ fn external_photos_button<F: FnMut(UiEvent)>(
                                         );
                                     }
                                 });
+                                // Thumbnail preview of the stored photo (prefer the
+                                // lightweight thumbnail; fall back to the original).
+                                if let Some(p) = photo {
+                                    let src = p.thumbnail_path.as_deref().unwrap_or(&p.file_path);
+                                    ui.add(
+                                        egui::Image::new(format!("file://{src}"))
+                                            .fit_to_exact_size(egui::vec2(200.0, 150.0))
+                                            .maintain_aspect_ratio(true)
+                                            .corner_radius(4.0),
+                                    );
+                                }
                                 ui.horizontal(|ui| {
+                                    // The shared capture widget: desktop file dialog
+                                    // / Android camera, returning the captured path.
                                     let action = if photo.is_some() { "Replace" } else { "Add" };
-                                    if ui.button(action).clicked() {
-                                        if let Some(path) = pick_image_path() {
-                                            on_event(UiEvent::Sketch(
-                                                SketchEvent::AddExternalPhoto { side: *side, path },
-                                            ));
-                                        }
+                                    if let Some(path) = crate::ui::widgets::photo_button(
+                                        ui,
+                                        action,
+                                        true,
+                                        crate::ui::widgets::PhotoConfig {
+                                            default_quality: quality,
+                                        },
+                                    ) {
+                                        on_event(UiEvent::Sketch(SketchEvent::AddExternalPhoto {
+                                            side: *side,
+                                            path,
+                                            quality,
+                                        }));
                                     }
                                     if photo.is_some() && ui.button("Remove").clicked() {
                                         on_event(UiEvent::Sketch(
@@ -2097,27 +2114,6 @@ fn external_photos_button<F: FnMut(UiEvent)>(
                 });
             });
         });
-}
-
-/// Open a desktop file picker for an image and return the chosen path as a
-/// String. DESKTOP-only (the file dialog is a UI concern); returns `None` on
-/// cancel. The Android camera path replaces this later (see the TODO on
-/// [`external_photos_button`]).
-#[cfg(not(target_os = "android"))]
-fn pick_image_path() -> Option<String> {
-    rfd::FileDialog::new()
-        .add_filter("Images", &["png", "jpg", "jpeg", "heic", "webp", "bmp"])
-        .pick_file()
-        .map(|p| p.to_string_lossy().into_owned())
-}
-
-/// Android has no `rfd` file dialog (and `rfd` isn't in the Android dep set):
-/// the desktop file-pick is a stand-in until real camera capture lands. Returns
-/// `None` so the Add/Replace button is a no-op on-device for now.
-#[cfg(target_os = "android")]
-fn pick_image_path() -> Option<String> {
-    log::warn!("external photo capture not yet implemented on Android (camera follow-up)");
-    None
 }
 
 /// The current storey's screen↔world transform for the 2D canvas, or `None`

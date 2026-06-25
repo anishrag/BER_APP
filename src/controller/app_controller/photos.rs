@@ -6,47 +6,53 @@
 //! The "External photos" Mapping checklist row is complete only when ALL FOUR
 //! sides have a photo (a dwelling-level gate, like the living area).
 //!
-//! TODO(android-camera): the actual capture is a DESKTOP FILE PICK today (the
-//! UI layer opens an `rfd::FileDialog` and hands the controller the chosen
-//! path). Real on-device camera capture on Android is a follow-up: the
-//! controller + model are camera-agnostic (they only ever see a `file_path`
-//! String), so a camera path can replace the file-pick by emitting the same
-//! `AddExternalPhoto { side, path }` event with a captured-image path.
+//! Capture is the SHARED photo module: the UI's `photo_button` widget hands the
+//! controller a captured/picked file path (desktop file dialog / Android camera
+//! — the widget owns that platform split), and this layer recompresses + stores
+//! it through [`store_photo_file`](AppController::store_photo_file), the same
+//! modular core the Structure-phase construction photos use. The controller +
+//! model stay camera/file-dialog agnostic: they only ever see a source `Path`.
 use super::*;
-use ber_model::ber::common::{ExternalSide, Photo};
+use ber_model::ber::common::ExternalSide;
 
-/// One external side's current photo for the UI panel — its stored path and
-/// optional description. The side itself is carried alongside in
+/// One external side's current photo for the UI panel — its stored full-res
+/// path plus the lightweight thumbnail (for the panel preview) and optional
+/// description. The side itself is carried alongside in
 /// [`AppController::external_photos`].
 #[derive(Debug, Clone)]
 pub struct PhotoView {
     pub file_path: String,
+    pub thumbnail_path: Option<String>,
     pub description: Option<String>,
 }
 
 impl AppController {
-    /// Attach (or replace) the external photo for `side`. Snapshots for undo,
-    /// REPLACES any existing photo of that side in `Ber.photos` (re-shooting a
-    /// side overwrites it) — else pushes a new external `Photo`. `mark_dirty`
-    /// re-derives; the snapshot is pushed so the add/replace undoes.
-    pub fn add_external_photo(&mut self, side: ExternalSide, file_path: String) {
+    /// Attach (or replace) the external photo for `side` from a captured/picked
+    /// `source` image. Recompresses + copies into the photo store via
+    /// [`store_photo_file`](Self::store_photo_file) (`quality` is the capture
+    /// tier), tags the stored `Photo` with `side`, and REPLACES any existing
+    /// photo of that side in `Ber.photos` (re-shooting overwrites) — else pushes
+    /// a new external `Photo`. Snapshots for undo; `mark_dirty` re-derives.
+    /// No-op if there's no record or the store I/O fails.
+    pub fn add_external_photo(
+        &mut self,
+        side: ExternalSide,
+        source: &std::path::Path,
+        quality: PhotoQuality,
+    ) {
         if self.current_record.is_none() {
             return;
         }
+        let Some(mut photo) = self.store_photo_file(source, quality) else {
+            return;
+        };
+        photo.side = Some(side);
         let undo_snap = self.current_history_snapshot();
         {
-            let record = self.current_record.as_mut().unwrap();
-            let photos = &mut record.data.photos;
-            if let Some(existing) = photos.iter_mut().find(|p| p.side == Some(side)) {
-                existing.file_path = file_path;
-                existing.description = None;
-            } else {
-                photos.push(Photo {
-                    file_path,
-                    side: Some(side),
-                    ..Default::default()
-                });
-            }
+            let photos = &mut self.current_record.as_mut().unwrap().data.photos;
+            // Re-shooting a side overwrites the prior photo for that side.
+            photos.retain(|p| p.side != Some(side));
+            photos.push(photo);
         }
         let _ = self.mark_dirty();
         self.push_history_snapshot(undo_snap);
@@ -83,6 +89,7 @@ impl AppController {
                     .find(|p| p.side == Some(side))
                     .map(|p| PhotoView {
                         file_path: p.file_path.clone(),
+                        thumbnail_path: p.thumbnail_path.clone(),
                         description: p.description.clone(),
                     });
                 (side, view)

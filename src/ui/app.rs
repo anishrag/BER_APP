@@ -1922,8 +1922,14 @@ impl eframe::App for BerApp {
                                     SketchEvent::AssignCeilingExposure(exposure) => {
                                         controller.borrow_mut().set_ceiling_exposure_for(exposure);
                                     }
-                                    SketchEvent::AddExternalPhoto { side, path } => {
-                                        controller.borrow_mut().add_external_photo(side, path);
+                                    SketchEvent::AddExternalPhoto {
+                                        side,
+                                        path,
+                                        quality,
+                                    } => {
+                                        controller
+                                            .borrow_mut()
+                                            .add_external_photo(side, &path, quality);
                                     }
                                     SketchEvent::RemoveExternalPhoto { side } => {
                                         controller.borrow_mut().remove_external_photo(side);

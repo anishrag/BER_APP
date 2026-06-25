@@ -10029,6 +10029,13 @@ fn ceiling_exposure_carve_snaps_to_roof_division_through_carve_or_cut() {
 fn external_photos_gate_and_checklist_row() {
     use ber_model::ber::common::ExternalSide;
     let mut c = dimensioned_square_controller();
+    // Capture recompresses/copies into the photo store, so point it at a temp
+    // dir and feed real source files (`Full` keeps bytes verbatim — no need for
+    // a valid image).
+    let tmp = std::env::temp_dir().join(format!("ber_ext_photos_{}", ItemId::default().0));
+    c.set_photos_dir(tmp.clone());
+    let src = std::env::temp_dir().join(format!("ber_ext_src_{}.jpg", ItemId::default().0));
+    std::fs::write(&src, b"jpeg-bytes").unwrap();
 
     // Row present and starts red (no photos yet).
     assert!(
@@ -10045,9 +10052,9 @@ fn external_photos_gate_and_checklist_row() {
     assert!(!c.external_photos_complete());
 
     // Three of four sides → still incomplete, mapping not complete.
-    c.add_external_photo(ExternalSide::Front, "front.jpg".into());
-    c.add_external_photo(ExternalSide::Right, "right.jpg".into());
-    c.add_external_photo(ExternalSide::Left, "left.jpg".into());
+    c.add_external_photo(ExternalSide::Front, &src, PhotoQuality::Full);
+    c.add_external_photo(ExternalSide::Right, &src, PhotoQuality::Full);
+    c.add_external_photo(ExternalSide::Left, &src, PhotoQuality::Full);
     assert!(!c.external_photos_complete(), "three sides is not enough");
     assert_eq!(
         checklist_status_of(&c, "External photos"),
@@ -10056,15 +10063,29 @@ fn external_photos_gate_and_checklist_row() {
     assert!(!c.mapping_complete(), "missing a side blocks Mapping");
 
     // The fourth side completes the gate → row green.
-    c.add_external_photo(ExternalSide::Back, "back.jpg".into());
+    c.add_external_photo(ExternalSide::Back, &src, PhotoQuality::Full);
     assert!(c.external_photos_complete(), "all four sides present");
     assert_eq!(
         checklist_status_of(&c, "External photos"),
         ChecklistStatus::AllStoreys
     );
 
-    // Re-adding a side REPLACES (no duplicate) — still four photos, new path.
-    c.add_external_photo(ExternalSide::Front, "front-v2.jpg".into());
+    // The stored Front photo's path before a re-shoot (a copy in the store, not
+    // the source path).
+    let front_before = c
+        .external_photos()
+        .into_iter()
+        .find(|(s, _)| *s == ExternalSide::Front)
+        .and_then(|(_, v)| v)
+        .unwrap()
+        .file_path;
+    assert!(
+        std::path::Path::new(&front_before).starts_with(&tmp),
+        "external photo stored under the photos dir, not the source path"
+    );
+
+    // Re-adding a side REPLACES (no duplicate) — still four photos, new stored copy.
+    c.add_external_photo(ExternalSide::Front, &src, PhotoQuality::Full);
     let externals: Vec<_> = c
         .current_record
         .as_ref()
@@ -10075,17 +10096,22 @@ fn external_photos_gate_and_checklist_row() {
         .filter(|p| p.side.is_some())
         .collect();
     assert_eq!(externals.len(), 4, "re-shoot replaces, no duplicate");
-    let front = externals
+    let front_after = externals
         .iter()
         .find(|p| p.side == Some(ExternalSide::Front))
-        .unwrap();
-    assert_eq!(front.file_path, "front-v2.jpg", "Front overwritten");
+        .unwrap()
+        .file_path
+        .clone();
+    assert_ne!(
+        front_after, front_before,
+        "Front re-stored under a fresh path"
+    );
 
-    // The view data carries all four in ALL order with their paths.
+    // The view data carries all four in ALL order, each with a stored photo.
     let view = c.external_photos();
     assert_eq!(view.len(), 4);
     assert_eq!(view[0].0, ExternalSide::Front);
-    assert_eq!(view[0].1.as_ref().unwrap().file_path, "front-v2.jpg");
+    assert!(view[0].1.is_some());
 
     // Remove a side → gate fails again.
     c.remove_external_photo(ExternalSide::Back);
@@ -10094,6 +10120,9 @@ fn external_photos_gate_and_checklist_row() {
         checklist_status_of(&c, "External photos"),
         ChecklistStatus::Incomplete
     );
+
+    let _ = std::fs::remove_dir_all(&tmp);
+    let _ = std::fs::remove_file(&src);
 }
 
 /// External photos round-trip through persistence: they live on `Ber.photos`,
@@ -10102,13 +10131,12 @@ fn external_photos_gate_and_checklist_row() {
 fn external_photos_persist_and_reload() {
     use ber_model::ber::common::ExternalSide;
     let mut c = dimensioned_square_controller();
-    for (side, path) in [
-        (ExternalSide::Front, "f.jpg"),
-        (ExternalSide::Right, "r.jpg"),
-        (ExternalSide::Left, "l.jpg"),
-        (ExternalSide::Back, "b.jpg"),
-    ] {
-        c.add_external_photo(side, path.into());
+    let tmp = std::env::temp_dir().join(format!("ber_ext_persist_{}", ItemId::default().0));
+    c.set_photos_dir(tmp.clone());
+    let src = std::env::temp_dir().join(format!("ber_ext_psrc_{}.jpg", ItemId::default().0));
+    std::fs::write(&src, b"jpeg-bytes").unwrap();
+    for side in ExternalSide::ALL {
+        c.add_external_photo(side, &src, PhotoQuality::Full);
     }
     c.flush_if_dirty().unwrap();
     let id = c.current_record.as_ref().unwrap().id;
@@ -10117,4 +10145,7 @@ fn external_photos_persist_and_reload() {
         c.external_photos_complete(),
         "all four external photos survive a reload"
     );
+
+    let _ = std::fs::remove_dir_all(&tmp);
+    let _ = std::fs::remove_file(&src);
 }
