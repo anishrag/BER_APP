@@ -150,14 +150,17 @@ impl StoreyDoc {
         self.floor_plan
             .aesthetic_rescale(&self.dimensioning.known_params);
 
-        // Guardrail: a SUB-AREA dimension must not push it outside the storey.
+        // Guardrail: a SUB-AREA dimension must not push it outside its containing
+        // boundary — normally this storey's outline, but the floor-exposure carve
+        // overrides it with the WHOLE-building footprint (it spans the stack), so
+        // a value inside the building but outside this single storey still fits.
         if self.active != ActiveShape::Outline {
-            let tol = (self.outline.floor_plan.bounding_box_diagonal() * 0.01).max(1e-3);
-            if self
-                .outline
-                .floor_plan
-                .any_point_outside(&self.floor_plan, tol)
-            {
+            let containment = self
+                .subarea_containment_override
+                .as_ref()
+                .unwrap_or(&self.outline.floor_plan);
+            let tol = (containment.bounding_box_diagonal() * 0.01).max(1e-3);
+            if containment.any_point_outside(&self.floor_plan, tol) {
                 self.floor_plan = snapshot;
                 self.dimensioning.scale_set = scale_set_before;
                 self.dimensioning.known_params = known_params_before;

@@ -330,6 +330,10 @@ impl AppController {
                 }
                 let undo = self.current_history_snapshot_full();
                 let slot = self.pinned_subarea_slot(&boundary, plan);
+                // The carve dimensions against the WHOLE building, so the
+                // "stay inside the storey" guardrail must check the union too,
+                // not the (possibly smaller) reference storey's outline.
+                self.document.subarea_containment_override = Some(boundary);
                 self.begin_floor_exposure_carve_dimensioning(slot, ref_idx, undo);
             }
             // A straight cut produces two halves, not an enclosed carve region —
@@ -434,6 +438,13 @@ impl AppController {
     /// the active storey to whatever the tab selects (so a later storey switch
     /// stays consistent).
     fn abandon_floor_exposure_carve_shape(&mut self) {
+        // Drop the whole-building containment override set when the carve began
+        // (on the reference storey), so later same-storey carves use the outline.
+        if let Some(ref_idx) = self.floor_exposure_carve_ref {
+            if let Some(sd) = self.document.storeys.get_mut(ref_idx) {
+                sd.subarea_containment_override = None;
+            }
+        }
         self.document.phase_shape = None;
         self.floor_exposure_carve_in_flight = false;
         self.floor_exposure_carve_ref = None;

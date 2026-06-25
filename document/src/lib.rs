@@ -287,6 +287,16 @@ pub struct StoreyDoc {
     /// A provisional curved wall mid-flow against `floor_plan`, if any. Transient.
     #[serde(skip)]
     pub pending_arc: Option<PendingArc>,
+    /// While a SUB-AREA carve is being dimensioned against a boundary OTHER than
+    /// this storey's own outline, the `apply_dimension` "stay inside the storey"
+    /// guardrail checks containment against THIS plan instead of
+    /// `outline.floor_plan`. Set by the floor-exposure carve (which spans the
+    /// WHOLE building, the union of every storey's floor — so a value that's
+    /// inside the building but outside this single storey is still valid).
+    /// `None` for ordinary same-storey carves (phase / step / structure), which
+    /// must stay within the storey outline. Transient (in-flight only).
+    #[serde(skip)]
+    pub subarea_containment_override: Option<FloorPlan>,
 
     /// Exposure SECTIONS of each OUTLINE perimeter wall, keyed by the wall's
     /// stable start `VertexId` (survives edits). Holds ONLY painted sections;

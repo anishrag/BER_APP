@@ -8949,6 +8949,19 @@ fn floor_exposure_carve_clips_to_whole_building_not_reference_storey() {
         c.pending_floor_exposure_carve_polygon().len() >= 3,
         "the in-flight carve region is live"
     );
+    // The "stay inside the storey" dimension guardrail checks the WHOLE-building
+    // containment override (the 10-wide union), not the smaller upper (6-wide)
+    // outline — so dimensioning the carve out toward the lower-storey extent is
+    // accepted. (This is what rejected a valid length before the fix.)
+    let ov = c.document.storeys[1]
+        .subarea_containment_override
+        .as_ref()
+        .expect("the carve sets a whole-building containment override");
+    let ((min_x, _), (max_x, _)) = ov.bounding_box().expect("override has a bbox");
+    assert!(
+        max_x - min_x > 8.0,
+        "containment spans the whole building (~10 wide), not the upper storey (~6)"
+    );
 }
 
 /// FIX 1 (multi-storey undo): on a 2-storey SETBACK stack,
