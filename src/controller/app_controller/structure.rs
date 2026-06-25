@@ -396,19 +396,43 @@ impl AppController {
     /// Copy a source image into the photo store and return a `Photo` pointing at
     /// the stored copy. The MODULAR core every photo-attach site shares (file
     /// I/O lives here, not in the UI). `None` on an I/O failure.
+    ///
+    /// `quality` is the per-site tier: the compact tiers downscale + re-encode
+    /// the capture toward a target byte size (most shots don't need full
+    /// resolution); `Full` keeps the original bytes verbatim (text/OCR shots).
     pub(super) fn store_photo_file(
         &self,
         source: &std::path::Path,
+        quality: PhotoQuality,
     ) -> Option<ber_model::ber::common::Photo> {
         std::fs::create_dir_all(&self.photos_dir).ok()?;
         // Canonicalize to an ABSOLUTE dir so the stored path loads as a
         // `file://` thumbnail regardless of the process's cwd.
         let dir =
             std::fs::canonicalize(&self.photos_dir).unwrap_or_else(|_| self.photos_dir.clone());
-        let ext = source.extension().and_then(|e| e.to_str()).unwrap_or("jpg");
         let id = ItemId::default();
-        let dest = dir.join(format!("{}.{ext}", id.0));
-        std::fs::copy(source, &dest).ok()?;
+        // Compact tiers re-encode to JPEG toward their byte budget; `Full` (and
+        // any decode/encode failure) keeps the original bytes, extension and all.
+        let dest = match quality.budget() {
+            Some((max_dim, target_bytes)) => {
+                let dest = dir.join(format!("{}.jpg", id.0));
+                if Self::recompress(source, &dest, max_dim, target_bytes) {
+                    Some(dest)
+                } else {
+                    None
+                }
+            }
+            None => None,
+        };
+        let dest = match dest {
+            Some(dest) => dest,
+            None => {
+                let ext = source.extension().and_then(|e| e.to_str()).unwrap_or("jpg");
+                let dest = dir.join(format!("{}.{ext}", id.0));
+                std::fs::copy(source, &dest).ok()?;
+                dest
+            }
+        };
         // Generate a small preview. Phone photos are ~12 MP; rendering the
         // full-res original as a thumbnail is slow to decode and costs ~48 MB
         // of texture each — unworkable on a tablet. Best-effort: on failure we
@@ -439,11 +463,59 @@ impl AppController {
         thumb.to_rgb8().save(dest).is_ok()
     }
 
+    /// Decode `src`, downscale to fit `max_dim` px on the long edge, and write a
+    /// JPEG to `dest` no larger than `target_bytes` if achievable by lowering the
+    /// encoder quality (the smallest quality tried is kept regardless). Returns
+    /// `false` and writes nothing on any decode/encode failure, so the caller can
+    /// fall back to storing the original bytes verbatim.
+    fn recompress(
+        src: &std::path::Path,
+        dest: &std::path::Path,
+        max_dim: u32,
+        target_bytes: usize,
+    ) -> bool {
+        use image::ImageEncoder;
+        let Ok(reader) = image::ImageReader::open(src).and_then(|r| r.with_guessed_format()) else {
+            return false;
+        };
+        let Ok(img) = reader.decode() else {
+            return false;
+        };
+        // `thumbnail` only ever shrinks (keeps aspect ratio); flatten to RGB so
+        // the JPEG encoder always accepts the buffer (no alpha channel).
+        let scaled = img.thumbnail(max_dim, max_dim).to_rgb8();
+        let (w, h) = (scaled.width(), scaled.height());
+        // Step quality down until under the byte budget; keep the last (smallest)
+        // encoding if even the lowest quality is still over.
+        let mut chosen: Option<Vec<u8>> = None;
+        for quality in [85u8, 70, 55, 40] {
+            let mut buf = Vec::new();
+            let encoder = image::codecs::jpeg::JpegEncoder::new_with_quality(&mut buf, quality);
+            if encoder
+                .write_image(scaled.as_raw(), w, h, image::ExtendedColorType::Rgb8)
+                .is_err()
+            {
+                return false;
+            }
+            let under_budget = buf.len() <= target_bytes;
+            chosen = Some(buf);
+            if under_budget {
+                break;
+            }
+        }
+        chosen.is_some_and(|buf| std::fs::write(dest, buf).is_ok())
+    }
+
     /// Attach a photo (from `source`) to a Structure group's construction(s) —
     /// the build-up floaty's camera button. Stores the file, then pushes the
     /// `Photo` onto each of the group's (shared) constructions. Marks dirty.
-    pub fn add_group_photo(&mut self, group: usize, source: &std::path::Path) {
-        let Some(photo) = self.store_photo_file(source) else {
+    pub fn add_group_photo(
+        &mut self,
+        group: usize,
+        source: &std::path::Path,
+        quality: PhotoQuality,
+    ) {
+        let Some(photo) = self.store_photo_file(source, quality) else {
             return;
         };
         let (kind, ids) = match self
@@ -1060,5 +1132,47 @@ impl AppController {
             .data
             .storeys
             .get(self.current_storey_idx?)
+    }
+}
+
+/// Stored-photo quality tier, chosen per attach site. Drives how a captured
+/// image is recompressed into the photo store: the compact tiers downscale +
+/// re-encode toward a target byte size (most shots don't need full resolution),
+/// while `Full` keeps the original bytes verbatim for shots where text must stay
+/// legible (labels, datasheets — OCR/zoom).
+///
+/// The integer [`level`](Self::level) is also handed to the Android camera
+/// activity over JNI (`requestPhoto(int)`); keep it in sync with the levels in
+/// `android/app/src/main/java/.../MainActivity.java`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PhotoQuality {
+    Low,
+    Medium,
+    High,
+    Full,
+}
+
+impl PhotoQuality {
+    /// Stable integer level passed across the JNI boundary to the camera
+    /// activity. Kept in sync with `requestPhoto(int)` in `MainActivity.java`.
+    #[cfg_attr(not(target_os = "android"), allow(dead_code))]
+    pub fn level(self) -> i32 {
+        match self {
+            PhotoQuality::Low => 0,
+            PhotoQuality::Medium => 1,
+            PhotoQuality::High => 2,
+            PhotoQuality::Full => 3,
+        }
+    }
+
+    /// Recompression budget for the compact tiers: `(max long-edge px, target
+    /// bytes)`. `Full` returns `None` — its original bytes are stored verbatim.
+    fn budget(self) -> Option<(u32, usize)> {
+        match self {
+            PhotoQuality::Low => Some((1280, 80_000)),
+            PhotoQuality::Medium => Some((1600, 130_000)),
+            PhotoQuality::High => Some((2048, 350_000)),
+            PhotoQuality::Full => None,
+        }
     }
 }

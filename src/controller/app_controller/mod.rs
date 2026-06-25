@@ -34,7 +34,7 @@ mod phase_regions;
 mod structure;
 
 pub use assessment_phase::{AssessmentPhase, SelectMode};
-pub use structure::{EditGroup, StructureEdit};
+pub use structure::{EditGroup, PhotoQuality, StructureEdit};
 // `SurfaceKind` is the data-model surface taxonomy — it lives in `ber_model`
 // (the queries dispatch on it) and is re-exported here so UI + controller call
 // sites keep reaching it via `app_controller::SurfaceKind`.

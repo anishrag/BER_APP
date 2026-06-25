@@ -570,10 +570,12 @@ pub enum SketchEvent {
     },
     EndViewPhotos,
     /// Structure phase: attach a photo (from `path`) to a group's construction
-    /// (the photos view's `+`). The controller copies the file into the store.
+    /// (the photos view's `+`). The controller recompresses the file into the
+    /// store at the call site's `quality` tier.
     AddGroupPhoto {
         group: usize,
         path: std::path::PathBuf,
+        quality: crate::ui::widgets::PhotoQuality,
     },
     /// Structure phase: close the "Edit attributes" session.
     EndStructureEdit,

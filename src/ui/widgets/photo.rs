@@ -17,29 +17,11 @@
 
 use std::path::PathBuf;
 
-/// Capture quality for the camera. Its DEFAULT is chosen per call site (e.g. a
-/// build-up close-up wants higher quality than a context shot).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum PhotoQuality {
-    Low,
-    Medium,
-    High,
-    Full,
-}
-
-impl PhotoQuality {
-    /// Stable integer level passed across the JNI boundary to the activity.
-    /// Kept in sync with `requestPhoto(int)` in `MainActivity.java`.
-    #[cfg_attr(not(target_os = "android"), allow(dead_code))]
-    fn level(self) -> i32 {
-        match self {
-            PhotoQuality::Low => 0,
-            PhotoQuality::Medium => 1,
-            PhotoQuality::High => 2,
-            PhotoQuality::Full => 3,
-        }
-    }
-}
+/// Capture-quality tier, chosen per call site (a build-up close-up wants higher
+/// quality than a context shot). The tier lives controller-side — it drives how
+/// the captured file is recompressed into the photo store — and is re-exported
+/// here so the widget and the Android JNI bridge below share one definition.
+pub use crate::controller::app_controller::PhotoQuality;
 
 /// Per-call-site photo configuration. `default_quality` seeds the camera's
 /// quality (the assessor can still change it, along with flash, on the camera

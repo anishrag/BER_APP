@@ -424,18 +424,21 @@ pub(crate) fn photos_view_ui<F: FnMut(UiEvent)>(
         });
 
     ui.separator();
-    // "+" adds another photo (the modular capture button).
+    // "+" adds another photo (the modular capture button). Build-up close-ups
+    // need legible detail, so this site captures at the High tier.
+    let quality = crate::ui::widgets::PhotoQuality::High;
     if let Some(path) = crate::ui::widgets::photo_button(
         ui,
         "➕  Add photo",
         true,
         crate::ui::widgets::PhotoConfig {
-            default_quality: crate::ui::widgets::PhotoQuality::High,
+            default_quality: quality,
         },
     ) {
         on_event(UiEvent::Sketch(SketchEvent::AddGroupPhoto {
             group: group_index,
             path,
+            quality,
         }));
     }
     ui.separator();

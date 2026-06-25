@@ -1637,7 +1637,7 @@ fn group_photo_copies_into_store_and_attaches() {
     set_only_kind(&mut c, SurfaceKind::Walls);
     c.set_structure_select_mode(Some(SelectMode::All));
     c.begin_structure_edit();
-    c.add_group_photo(0, &src);
+    c.add_group_photo(0, &src, PhotoQuality::Full);
 
     let g0 = &c.structure_edit().unwrap().groups[0];
     let rec = c.current_record.as_ref().unwrap();
@@ -1653,6 +1653,59 @@ fn group_photo_copies_into_store_and_attaches() {
     let stored = std::path::Path::new(&photos[0].file_path);
     assert!(stored.exists(), "photo copied into the store");
     assert!(stored.starts_with(&tmp), "stored under the photos dir");
+
+    let _ = std::fs::remove_dir_all(&tmp);
+    let _ = std::fs::remove_file(&src);
+}
+
+/// Compact tiers actually downscale + re-encode the capture (not a raw copy): a
+/// large source lands in the store within the tier's pixel cap, as JPEG, and
+/// smaller than the original. (`Full`, covered above, keeps the bytes verbatim.)
+#[test]
+fn store_photo_recompresses_compact_tiers() {
+    use image::GenericImageView;
+
+    let mut c = AppController::new(crate::engine::open_db(":memory:").unwrap());
+    let tmp = std::env::temp_dir().join(format!("ber_recompress_{}", ItemId::default().0));
+    c.set_photos_dir(tmp.clone());
+
+    // A 3000×2000 noisy image: big enough that downscaling to the Low cap
+    // (1280px) and re-encoding is a clear, non-trivial reduction.
+    let src = std::env::temp_dir().join(format!("ber_big_{}.png", ItemId::default().0));
+    let mut img = image::RgbImage::new(3000, 2000);
+    for (x, y, px) in img.enumerate_pixels_mut() {
+        *px = image::Rgb([(x % 256) as u8, (y % 256) as u8, ((x + y) % 256) as u8]);
+    }
+    img.save(&src).unwrap();
+    let src_len = std::fs::metadata(&src).unwrap().len();
+
+    let photo = c
+        .store_photo_file(&src, PhotoQuality::Low)
+        .expect("photo stored");
+    let stored = std::path::Path::new(&photo.file_path);
+    assert!(stored.exists(), "recompressed file written");
+    assert_eq!(
+        stored.extension().and_then(|e| e.to_str()),
+        Some("jpg"),
+        "compact tier re-encodes to JPEG"
+    );
+
+    let (w, h) = image::ImageReader::open(stored)
+        .unwrap()
+        .with_guessed_format()
+        .unwrap()
+        .decode()
+        .unwrap()
+        .dimensions();
+    assert!(
+        w.max(h) <= 1280,
+        "downscaled to the Low tier pixel cap, got {w}x{h}"
+    );
+    let stored_len = std::fs::metadata(stored).unwrap().len();
+    assert!(
+        stored_len < src_len,
+        "recompressed ({stored_len}) smaller than original ({src_len})"
+    );
 
     let _ = std::fs::remove_dir_all(&tmp);
     let _ = std::fs::remove_file(&src);
