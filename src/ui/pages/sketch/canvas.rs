@@ -361,6 +361,14 @@ pub(super) fn render<F: FnMut(UiEvent)>(
     let (rect, response) =
         ui.allocate_exact_size(ui.available_size(), egui::Sense::click_and_drag());
 
+    // Stage-1 (Mapping) REVIEW: when open it REPLACES the plan canvas — the
+    // current side's external elevation beside its photo, with draggable
+    // openings and the scroll / confirm controls. Owns its own input.
+    if let Some(rv) = view.mapping_review_view.as_ref() {
+        mapping_review_overlay(ui, rect, &response, rv, vp, on_event);
+        return;
+    }
+
     // Elevation editor: when a wall's elevation is open it REPLACES the plan
     // canvas — the unrolled wall with draggable openings. Owns its own input.
     if let Some(elev) = view.elevation_view.as_ref() {
@@ -412,11 +420,23 @@ pub(super) fn render<F: FnMut(UiEvent)>(
     // phase. Structure unlocks once Mapping is complete (every checklist item
     // green on all storeys); Objects isn't built yet.
     if let Some(phase) =
-        super::overlays::phase_bar(ui, rect, view.current_phase, view.mapping_complete)
+        super::overlays::phase_bar(ui, rect, view.current_phase, view.mapping_reviewed)
     {
         on_event(UiEvent::Sketch(SketchEvent::SetAssessmentPhase(phase)));
     }
-    super::overlays::checklist_window(ui, rect, view.current_phase, &view.checklist);
+    // The checklist window shows a "Review ▸" button in the Mapping phase once
+    // every item is green (`mapping_complete`); clicking it opens the review.
+    let review_clicked = super::overlays::checklist_window(
+        ui,
+        rect,
+        view.current_phase,
+        &view.checklist,
+        view.current_phase == AssessmentPhase::Mapping && view.mapping_complete,
+        view.mapping_reviewed,
+    );
+    if review_clicked {
+        on_event(UiEvent::Sketch(SketchEvent::OpenMappingReview));
+    }
 
     // Structure phase: when a surface kind is selected for highlighting, name it
     // (+ its count) in a banner under the signpost so it's explicit which
@@ -2392,6 +2412,224 @@ fn elevation_colors(
     let fill = egui::Color32::from_rgba_unmultiplied(base.r(), base.g(), base.b(), a);
     let stroke = if selected { egui::Color32::WHITE } else { base };
     (fill, stroke)
+}
+
+/// The Stage-1 (Mapping) REVIEW takeover: the current side's external elevation
+/// beside its external photo (stacked in portrait, side-by-side in landscape),
+/// with a top control bar (scroll the four sides / confirm "all's good"). Drag
+/// an opening to reposition it (the controller constrains it to its wall). Owns
+/// its own input — emits review pointer + nav events.
+fn mapping_review_overlay<F: FnMut(UiEvent)>(
+    ui: &mut egui::Ui,
+    rect: egui::Rect,
+    response: &egui::Response,
+    rv: &crate::controller::app_controller::ReviewView,
+    vp: render::ViewParams,
+    on_event: &mut F,
+) {
+    let painter = ui.painter_at(rect);
+    painter.rect_filled(rect, 0.0, egui::Color32::from_gray(20));
+
+    // Top control bar (its own Area so its buttons own their clicks).
+    let bar_h = 38.0;
+    egui::Area::new(ui.id().with("mapping_review_bar"))
+        .order(egui::Order::Foreground)
+        .fixed_pos(rect.left_top() + egui::vec2(8.0, 6.0))
+        .show(ui.ctx(), |ui| {
+            ui.horizontal(|ui| {
+                if ui.button("◀ Prev").clicked() {
+                    on_event(UiEvent::Sketch(SketchEvent::StepMappingReviewSide(-1)));
+                }
+                ui.label(
+                    egui::RichText::new(format!("Side: {}", rv.side.label()))
+                        .strong()
+                        .size(15.0),
+                );
+                if ui.button("Next ▶").clicked() {
+                    on_event(UiEvent::Sketch(SketchEvent::StepMappingReviewSide(1)));
+                }
+                ui.separator();
+                if ui
+                    .button(egui::RichText::new("✓ All looks good").strong())
+                    .clicked()
+                {
+                    on_event(UiEvent::Sketch(SketchEvent::ConfirmMappingReview));
+                }
+                if ui.button("Close").clicked() {
+                    on_event(UiEvent::Sketch(SketchEvent::CloseMappingReview));
+                }
+            });
+        });
+
+    // Content area below the bar, split elevation | photo by orientation.
+    let content = egui::Rect::from_min_max(
+        egui::pos2(rect.left() + 4.0, rect.top() + bar_h),
+        rect.right_bottom() - egui::vec2(4.0, 4.0),
+    );
+    let portrait = content.height() >= content.width();
+    let (elev_rect, photo_rect) = if portrait {
+        let mid = content.top() + content.height() * 0.55;
+        (
+            egui::Rect::from_min_max(content.min, egui::pos2(content.right(), mid)),
+            egui::Rect::from_min_max(egui::pos2(content.left(), mid), content.max),
+        )
+    } else {
+        let mid = content.left() + content.width() * 0.55;
+        (
+            egui::Rect::from_min_max(content.min, egui::pos2(mid, content.bottom())),
+            egui::Rect::from_min_max(egui::pos2(mid, content.top()), content.max),
+        )
+    };
+
+    // ── Photo panel ──
+    painter.text(
+        photo_rect.left_top() + egui::vec2(6.0, 4.0),
+        egui::Align2::LEFT_TOP,
+        "Photo",
+        egui::FontId::proportional(13.0),
+        egui::Color32::from_gray(160),
+    );
+    let photo_inner = egui::Rect::from_min_max(
+        photo_rect.left_top() + egui::vec2(6.0, 24.0),
+        photo_rect.right_bottom() - egui::vec2(6.0, 6.0),
+    );
+    match &rv.photo {
+        Some(p) => {
+            let src = p.thumbnail_path.as_deref().unwrap_or(&p.file_path);
+            egui::Image::new(format!("file://{src}"))
+                .maintain_aspect_ratio(true)
+                .show_loading_spinner(false)
+                .paint_at(ui, photo_inner);
+        }
+        None => {
+            painter.text(
+                photo_inner.center(),
+                egui::Align2::CENTER_CENTER,
+                format!("No {} photo yet", rv.side.label()),
+                egui::FontId::proportional(14.0),
+                egui::Color32::from_gray(120),
+            );
+        }
+    }
+
+    // ── Elevation panel ──
+    let elev = &rv.elevation;
+    painter.text(
+        elev_rect.left_top() + egui::vec2(6.0, 4.0),
+        egui::Align2::LEFT_TOP,
+        format!(
+            "{} elevation — drag openings to reposition",
+            rv.side.label()
+        ),
+        egui::FontId::proportional(13.0),
+        egui::Color32::from_gray(160),
+    );
+    if elev.panels.is_empty() {
+        painter.text(
+            elev_rect.center(),
+            egui::Align2::CENTER_CENTER,
+            "No external walls face this side.",
+            egui::FontId::proportional(14.0),
+            egui::Color32::from_gray(120),
+        );
+        return;
+    }
+
+    // Fit the composite (x, z) bounds into the elevation sub-rect; world frame
+    // is x = composite x, y = −z (height grows UP on screen).
+    let draw_rect = egui::Rect::from_min_max(
+        elev_rect.left_top() + egui::vec2(6.0, 24.0),
+        elev_rect.right_bottom() - egui::vec2(6.0, 6.0),
+    );
+    let mx = (elev.max_x - elev.min_x).max(0.5) * 0.06;
+    let mz = (elev.max_z - elev.min_z).max(0.5) * 0.10;
+    let t = render::fit_transform(
+        draw_rect,
+        (elev.min_x - mx, -(elev.max_z + mz)),
+        (elev.max_x + mx, -(elev.min_z - mz)),
+        vp,
+    );
+    let p = |x: f64, z: f64| t.apply(x, -z);
+    let wall_col = egui::Color32::from_gray(150);
+    let line = |a: egui::Pos2, b: egui::Pos2, w: f32, c: egui::Color32| {
+        painter.line_segment([a, b], egui::Stroke::new(w, c));
+    };
+    for panel in &elev.panels {
+        // Base edge + the top polyline; close the two ends down to the base.
+        line(
+            p(panel.x0, panel.base_z),
+            p(panel.x1, panel.base_z),
+            2.0,
+            wall_col,
+        );
+        for w in panel.top.windows(2) {
+            line(p(w[0].0, w[0].1), p(w[1].0, w[1].1), 2.0, wall_col);
+        }
+        if let (Some(first), Some(last)) = (panel.top.first(), panel.top.last()) {
+            line(p(first.0, first.1), p(first.0, panel.base_z), 2.0, wall_col);
+            line(p(last.0, last.1), p(last.0, panel.base_z), 2.0, wall_col);
+        }
+    }
+    for o in &elev.openings {
+        let l = o.x_center - o.width_m / 2.0;
+        let r = o.x_center + o.width_m / 2.0;
+        let ro = egui::Rect::from_two_pos(p(l, o.sill_z), p(r, o.sill_z + o.height_m));
+        let selected = rv.selection == Some(o.opening);
+        let base = if o.is_door {
+            egui::Color32::from_rgb(180, 130, 80)
+        } else {
+            egui::Color32::from_rgb(90, 160, 220)
+        };
+        let a = if selected { 130 } else { 70 };
+        painter.rect_filled(
+            ro,
+            1.0,
+            egui::Color32::from_rgba_unmultiplied(base.r(), base.g(), base.b(), a),
+        );
+        let (sw, sc) = if selected {
+            (2.5, egui::Color32::WHITE)
+        } else {
+            (1.5, base)
+        };
+        line(ro.left_top(), ro.right_top(), sw, sc);
+        line(ro.right_top(), ro.right_bottom(), sw, sc);
+        line(ro.right_bottom(), ro.left_bottom(), sw, sc);
+        line(ro.left_bottom(), ro.left_top(), sw, sc);
+    }
+
+    // Input: drag openings within the elevation sub-rect → composite (x, z).
+    let to_comp = |pos: egui::Pos2| {
+        let (wx, wy) = t.inverse(pos.x, pos.y);
+        (wx, -wy)
+    };
+    let in_elev = |pos: egui::Pos2| elev_rect.contains(pos);
+    if response.drag_started_by(egui::PointerButton::Primary)
+        || response.clicked_by(egui::PointerButton::Primary)
+    {
+        if let Some(pos) = response.interact_pointer_pos() {
+            if in_elev(pos) {
+                let (x, z) = to_comp(pos);
+                on_event(UiEvent::Sketch(SketchEvent::MappingReviewPointerDown {
+                    x,
+                    z,
+                }));
+            }
+        }
+    }
+    if response.dragged_by(egui::PointerButton::Primary) {
+        if let Some(pos) = response.interact_pointer_pos() {
+            if in_elev(pos) {
+                let (x, z) = to_comp(pos);
+                on_event(UiEvent::Sketch(SketchEvent::MappingReviewPointerDrag {
+                    x,
+                    z,
+                }));
+            }
+        }
+    }
+    if response.drag_stopped_by(egui::PointerButton::Primary) {
+        on_event(UiEvent::Sketch(SketchEvent::MappingReviewPointerUp));
+    }
 }
 
 /// The base exposure-class colour for a wall partition region — the SAME

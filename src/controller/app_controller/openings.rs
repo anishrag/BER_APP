@@ -359,7 +359,7 @@ impl AppController {
     /// source of truth after a placement / move / auto-redistribute, and the
     /// resolve re-derives the `wall_id`/`along_m` cache from it (no revert).
     /// Cheap and idempotent; roof openings are left alone.
-    fn reseed_opening_anchors(&mut self, idx: usize) {
+    pub(super) fn reseed_opening_anchors(&mut self, idx: usize) {
         use ber_model::ber::fenestration::OpeningPlacement;
         let anchor_of = |storey: &ber_model::ber::structural::Storey,
                          plan: &manip_plan::FloorPlan,

@@ -27,7 +27,7 @@ use egui::Pos2;
 use crate::controller::app_controller::{
     AssessmentPhase, ChecklistItem, DimensionPromptUiData, EditDragPromptUiData, ElevationView,
     ExposureSelection, NewStoreyPromptUiData, OpeningPromptUiData, OpeningToolKind, PartitionView,
-    PhotoView, PositionPromptUiData, RiserView, SelectMode, SnapTagView, StructureEdit,
+    PhotoView, PositionPromptUiData, ReviewView, RiserView, SelectMode, SnapTagView, StructureEdit,
     SurfaceKind, VertexDropPromptUiData, WallExposureView,
 };
 use crate::ui::pages::events::UiEvent;
@@ -455,6 +455,24 @@ pub enum SketchEvent {
     ElevationPointerUp,
     /// Delete the opening selected in the elevation.
     DeleteSelectedOpening,
+    /// Open / close the Stage-1 (Mapping) REVIEW takeover view.
+    OpenMappingReview,
+    CloseMappingReview,
+    /// Step the review's side cursor (+1 next / −1 previous, wraps).
+    StepMappingReviewSide(i32),
+    /// Confirm "all's good": mark the dwelling Mapping-reviewed (unlocks
+    /// Structure) and close the review.
+    ConfirmMappingReview,
+    /// Review elevation press / drag / release at composite `(x, z)` (metres).
+    MappingReviewPointerDown {
+        x: f64,
+        z: f64,
+    },
+    MappingReviewPointerDrag {
+        x: f64,
+        z: f64,
+    },
+    MappingReviewPointerUp,
     /// Close the elevation overlay.
     CloseElevation,
     /// User entered a default ceiling height (m) in the floating number box
@@ -913,8 +931,14 @@ pub struct SketchView<'a> {
     /// highlight, the checklist title, and which toolset the left panel shows.
     pub current_phase: AssessmentPhase,
     /// Whether the Mapping phase is complete (every Stage A item green on all
-    /// storeys). Gates the Structure box in the phase signpost.
+    /// storeys). Enables the "Review" button on the Mapping checklist.
     pub mapping_complete: bool,
+    /// Whether the Mapping REVIEW has been confirmed ("all's good") — the gate
+    /// that unlocks the Structure phase (replaces raw completeness as the gate).
+    pub mapping_reviewed: bool,
+    /// The open Mapping-REVIEW takeover view, if active: the current side's
+    /// external elevation + its photo. When `Some`, it replaces the plan canvas.
+    pub mapping_review_view: Option<ReviewView>,
     /// Current storey's wall / roof / floor counts — the Structure-phase tool
     /// read-out.
     pub surface_counts: SurfaceCounts,

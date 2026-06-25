@@ -22,7 +22,7 @@ pub fn phase_bar(
     ui: &egui::Ui,
     rect: Rect,
     current: AssessmentPhase,
-    mapping_complete: bool,
+    mapping_reviewed: bool,
 ) -> Option<AssessmentPhase> {
     let phases = [
         (AssessmentPhase::Mapping, "Mapping"),
@@ -48,12 +48,12 @@ pub fn phase_bar(
                     // is complete; Objects not built yet.
                     let enabled = match phase {
                         AssessmentPhase::Mapping => true,
-                        AssessmentPhase::Structure => mapping_complete,
+                        AssessmentPhase::Structure => mapping_reviewed,
                         AssessmentPhase::Objects => false,
                     };
-                    // Only Mapping has a completion criterion today; Structure
-                    // earns its ✓ in a later step (per-surface completion).
-                    let complete = matches!(phase, AssessmentPhase::Mapping) && mapping_complete;
+                    // Mapping earns its ✓ once the assessor has confirmed the
+                    // review (which is also what unlocks Structure).
+                    let complete = matches!(phase, AssessmentPhase::Mapping) && mapping_reviewed;
                     if phase_box(ui, label, active, complete, enabled).clicked()
                         && !active
                         && enabled
@@ -179,17 +179,21 @@ pub fn highlight_caption(ui: &egui::Ui, rect: Rect, display: DisplayMode, counts
 /// `items` (so it tracks edits live). The window title reflects the current
 /// `phase`; it keeps its own position + collapsed state in egui memory (keyed
 /// by that title), constrained to the canvas `rect`.
+#[must_use]
 pub fn checklist_window(
     ui: &egui::Ui,
     rect: Rect,
     phase: AssessmentPhase,
     items: &[ChecklistItem],
-) {
+    show_review: bool,
+    reviewed: bool,
+) -> bool {
     let title = match phase {
         AssessmentPhase::Mapping => "Mapping checklist",
         AssessmentPhase::Structure => "Structure checklist",
         AssessmentPhase::Objects => "Objects checklist",
     };
+    let mut review_clicked = false;
     egui::Window::new(title)
         .order(egui::Order::Foreground)
         .default_pos(rect.left_top() + egui::vec2(16.0, 56.0))
@@ -210,7 +214,28 @@ pub fn checklist_window(
             ui.add_space(2.0);
             ui.separator();
             legend(ui);
+            // Once every item is green, the assessor reviews each side's
+            // elevation against its photo before Structure unlocks.
+            if show_review {
+                ui.add_space(4.0);
+                let label = if reviewed {
+                    "Re-review ▸"
+                } else {
+                    "Review ▸"
+                };
+                if ui.button(RichText::new(label).strong()).clicked() {
+                    review_clicked = true;
+                }
+                if !reviewed {
+                    ui.label(
+                        RichText::new("Review each side to unlock Structure.")
+                            .size(11.0)
+                            .weak(),
+                    );
+                }
+            }
         });
+    review_clicked
 }
 
 /// A filled circle in the item's status colour.

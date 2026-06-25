@@ -6,6 +6,7 @@
 
 mod ceiling_regions;
 mod constructions;
+mod elevation;
 mod floor_regions;
 mod roof_geom;
 mod storey;
@@ -13,6 +14,7 @@ mod wall_regions;
 
 pub use ceiling_regions::*;
 pub use constructions::*;
+pub use elevation::*;
 pub use floor_regions::*;
 pub use roof_geom::*;
 pub use storey::*;
@@ -2861,6 +2863,108 @@ mod tests {
         assert!(
             ber.structure_surfaces_complete(0, SurfaceKind::Walls),
             "a backing photo completes the kind"
+        );
+    }
+
+    // ── External per-side elevation ──────────────────────────────────────────
+
+    /// A flat 10×10 storey's four walls at z `[z0, z0+h]`. Returns the walls and
+    /// the id of the FRONT wall (the y=10 edge, whose outward normal is +Y).
+    fn square_storey_walls(z0: f64, h: f64) -> (WallRegions, ItemId) {
+        let wall = |a: (f64, f64), b: (f64, f64)| WallRegion {
+            id: ItemId::default(),
+            polygon: Polygon3D::new(vec![
+                Point3f64::new(a.0, a.1, z0),
+                Point3f64::new(b.0, b.1, z0),
+                Point3f64::new(b.0, b.1, z0 + h),
+                Point3f64::new(a.0, a.1, z0 + h),
+            ]),
+            exposure: WallExposure::Exposed,
+            opes: Opes::default(),
+            construction_id: ItemId::default(),
+        };
+        let front = wall((0.0, 10.0), (10.0, 10.0)); // y=10 edge → outward +Y
+        let front_id = front.id;
+        let mut regions = WallRegions::default();
+        regions.regions = vec![
+            wall((0.0, 0.0), (10.0, 0.0)),   // y=0  → Back (−Y)
+            wall((10.0, 0.0), (10.0, 10.0)), // x=10 → Right (+X)
+            wall((0.0, 0.0), (0.0, 10.0)),   // x=0  → Left (−X)
+            front,
+        ];
+        (regions, front_id)
+    }
+
+    #[test]
+    fn side_elevation_picks_the_facing_wall_and_projects_an_opening() {
+        use crate::ber::common::ExternalSide;
+        use crate::ber::openings::{add_wall_window, OpeningRef};
+
+        let mut ber = Ber::default();
+        let mut storey = Storey::default();
+        let (walls, front_id) = square_storey_walls(0.0, 2.4);
+        storey.walls = walls;
+        ber.storeys.push(storey);
+        // A window centred 2 m along the front wall (from its start vertex).
+        let wid = add_wall_window(
+            &mut ber.storeys[0],
+            front_id,
+            2.0,
+            1.2,
+            1.0,
+            0.9,
+            ItemId::default(),
+        )
+        .expect("window placed");
+
+        // Front picks exactly the one wall facing +Y, and carries the window.
+        let front = ber.side_elevation(ExternalSide::Front);
+        assert_eq!(front.panels.len(), 1, "only the +Y wall faces Front");
+        assert_eq!(front.openings.len(), 1);
+        let o = front.openings[0];
+        assert_eq!(o.opening, OpeningRef::Window(wid));
+        // The opening centre projects to an x within the panel's span.
+        let p = &front.panels[0];
+        assert!(
+            o.x_center >= p.x0 - 1e-6 && o.x_center <= p.x1 + 1e-6,
+            "opening x {} within panel [{}, {}]",
+            o.x_center,
+            p.x0,
+            p.x1
+        );
+        assert!((o.sill_z - 0.9).abs() < 1e-6, "sill above the datum");
+
+        // Each of the four sides selects exactly one wall of the square.
+        for side in ExternalSide::ALL {
+            assert_eq!(
+                ber.side_elevation(side).panels.len(),
+                1,
+                "{} faces exactly one wall",
+                side.label()
+            );
+        }
+    }
+
+    #[test]
+    fn side_elevation_stacks_storeys_by_floor_datum() {
+        use crate::ber::common::ExternalSide;
+
+        let mut ber = Ber::default();
+        for _ in 0..2 {
+            let mut storey = Storey::default();
+            storey.walls = square_storey_walls(0.0, 2.4).0; // walls are storey-LOCAL
+            storey.ceiling_height_m = Some(2.4);
+            ber.storeys.push(storey);
+        }
+        let front = ber.side_elevation(ExternalSide::Front);
+        assert_eq!(front.panels.len(), 2, "one front wall per storey");
+        // The upper storey's wall sits a full ground-storey height higher.
+        let mut bases: Vec<f64> = front.panels.iter().map(|p| p.base_z).collect();
+        bases.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        assert!((bases[0] - 0.0).abs() < 1e-6, "ground storey at datum 0");
+        assert!(
+            (bases[1] - 2.4).abs() < 1e-6,
+            "upper storey offset by storey-0 height"
         );
     }
 

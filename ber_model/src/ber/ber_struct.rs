@@ -39,6 +39,12 @@ pub struct Ber {
     pub orientation_deg: f32,
     pub solar: Vec<SolarElements>,
     pub photos: Vec<Photo>,
+    /// Whether the assessor has completed the Stage-1 (Mapping) REVIEW — stepped
+    /// through each external side's elevation against its photo and confirmed
+    /// "all's good". This (not raw checklist completeness) is what unlocks the
+    /// Structure phase. `#[serde(default)]` so older records load as un-reviewed.
+    #[serde(default)]
+    pub mapping_reviewed: bool,
 }
 
 // Pure data helpers, optional

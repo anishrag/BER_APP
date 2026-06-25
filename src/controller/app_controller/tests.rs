@@ -10224,3 +10224,113 @@ fn external_photos_persist_and_reload() {
     let _ = std::fs::remove_dir_all(&tmp);
     let _ = std::fs::remove_file(&src);
 }
+
+// ── Stage-1 (Mapping) review ─────────────────────────────────────────────────
+
+/// Confirming the review sets the durable `mapping_reviewed` flag (the Structure
+/// gate), closes the review, and persists across a save/reload.
+#[test]
+fn mapping_review_confirm_sets_reviewed_flag_and_persists() {
+    let mut c = dimensioned_square_controller();
+    c.materialize();
+    assert!(!c.mapping_reviewed(), "starts un-reviewed");
+
+    c.set_mapping_review_mode(true);
+    assert!(c.mapping_review_mode());
+    c.confirm_mapping_review();
+    assert!(c.mapping_reviewed(), "confirm marks reviewed");
+    assert!(!c.mapping_review_mode(), "confirm closes the review");
+
+    // Survives a save + reload.
+    c.flush_if_dirty().unwrap();
+    let id = c.current_record.as_ref().unwrap().id;
+    c.open_ber(&id).unwrap();
+    assert!(c.mapping_reviewed(), "reviewed flag persists across reload");
+}
+
+/// Stepping the side cursor wraps through the four sides.
+#[test]
+fn mapping_review_side_cursor_wraps() {
+    use ber_model::ber::common::ExternalSide;
+    let mut c = dimensioned_square_controller();
+    c.materialize();
+    c.set_mapping_review_mode(true);
+    assert_eq!(c.mapping_review_view().unwrap().side, ExternalSide::Front);
+    c.step_mapping_review_side(1);
+    assert_eq!(c.mapping_review_view().unwrap().side, ExternalSide::Right);
+    c.step_mapping_review_side(-1);
+    assert_eq!(c.mapping_review_view().unwrap().side, ExternalSide::Front);
+    c.step_mapping_review_side(-1); // wrap past Front → last (Back)
+    assert_eq!(c.mapping_review_view().unwrap().side, ExternalSide::Back);
+}
+
+/// A drag in the review elevation maps the composite cursor back to the
+/// opening's wall and moves it persistently; an out-of-range drag is clamped by
+/// the existing `move_opening` constraint (the opening never flies off the wall).
+#[test]
+fn mapping_review_drag_moves_opening_and_stays_on_wall() {
+    use ber_model::ber::common::ExternalSide;
+    let mut c = dimensioned_square_controller();
+    c.materialize();
+
+    // The +Y (Front) wall is the one whose base midpoint has the greatest y.
+    let front_id = {
+        let st = &c.current_record.as_ref().unwrap().data.storeys[0];
+        st.walls
+            .regions
+            .iter()
+            .max_by(|a, b| {
+                a.base_midpoint()
+                    .unwrap()
+                    .y
+                    .partial_cmp(&b.base_midpoint().unwrap().y)
+                    .unwrap()
+            })
+            .unwrap()
+            .id
+    };
+    ber_model::ber::openings::add_wall_window(
+        &mut c.current_record.as_mut().unwrap().data.storeys[0],
+        front_id,
+        5.0,
+        1.2,
+        1.0,
+        0.9,
+        ItemId::default(),
+    )
+    .expect("window placed on the front wall");
+
+    c.set_mapping_review_mode(true);
+    c.set_mapping_review_side(ExternalSide::Front);
+    let v = c.mapping_review_view().unwrap();
+    assert_eq!(v.elevation.panels.len(), 1, "front wall faces Front");
+    assert_eq!(v.elevation.openings.len(), 1);
+    let o = v.elevation.openings[0];
+    let (cy, panel) = (o.sill_z + o.height_m / 2.0, v.elevation.panels[0].clone());
+
+    // Grab the opening and drag its centre +2 m along the view axis.
+    c.mapping_review_pointer_down(o.x_center, cy);
+    c.mapping_review_pointer_drag(o.x_center + 2.0, cy);
+    c.mapping_review_pointer_up();
+    let moved = c.mapping_review_view().unwrap().elevation.openings[0];
+    assert!(
+        (moved.x_center - (o.x_center + 2.0)).abs() < 0.3,
+        "opening followed the drag (from {} to {})",
+        o.x_center,
+        moved.x_center
+    );
+
+    // A wild out-of-range drag is constrained: the opening stays within the
+    // wall panel rather than flying off.
+    c.mapping_review_pointer_down(moved.x_center, cy);
+    c.mapping_review_pointer_drag(moved.x_center + 100.0, cy);
+    c.mapping_review_pointer_up();
+    let clamped = c.mapping_review_view().unwrap().elevation.openings[0];
+    assert!(
+        clamped.x_center >= panel.x0 - 1e-6 && clamped.x_center <= panel.x1 + 1e-6,
+        "opening x {} stayed within wall panel [{}, {}]",
+        clamped.x_center,
+        panel.x0,
+        panel.x1
+    );
+}

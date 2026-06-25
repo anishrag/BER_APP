@@ -212,6 +212,7 @@ fn create_minimal_ber(id: ItemId) -> Ber {
         orientation_deg: 0.0,
         solar: vec![],
         photos: vec![],
+        mapping_reviewed: false,
     }
 }
 

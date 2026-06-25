@@ -834,6 +834,19 @@ impl eframe::App for BerApp {
                             // for the floating "Add external pictures" panel.
                             let external_photos = self.app_controller.borrow().external_photos();
 
+                            // Stage-1 review: whether it's confirmed (the Structure
+                            // gate) and, when the review is open, the current side's
+                            // elevation + photo for the takeover overlay.
+                            let (mapping_reviewed, mapping_review_view) = {
+                                let c = self.app_controller.borrow();
+                                let view = if c.mapping_review_mode() {
+                                    c.mapping_review_view()
+                                } else {
+                                    None
+                                };
+                                (c.mapping_reviewed(), view)
+                            };
+
                             // Owned copy of the selected region ids so the view
                             // can borrow it without holding the controller.
                             let structure_selected = self
@@ -1047,6 +1060,8 @@ impl eframe::App for BerApp {
                                 external_photos,
                                 current_phase,
                                 mapping_complete,
+                                mapping_reviewed,
+                                mapping_review_view,
                                 surface_counts,
                                 structure_kinds,
                                 structure_select,
@@ -1647,6 +1662,27 @@ impl eframe::App for BerApp {
                                     }
                                     SketchEvent::CloseElevation => {
                                         controller.borrow_mut().close_elevation();
+                                    }
+                                    SketchEvent::OpenMappingReview => {
+                                        controller.borrow_mut().set_mapping_review_mode(true);
+                                    }
+                                    SketchEvent::CloseMappingReview => {
+                                        controller.borrow_mut().set_mapping_review_mode(false);
+                                    }
+                                    SketchEvent::StepMappingReviewSide(delta) => {
+                                        controller.borrow_mut().step_mapping_review_side(delta);
+                                    }
+                                    SketchEvent::ConfirmMappingReview => {
+                                        controller.borrow_mut().confirm_mapping_review();
+                                    }
+                                    SketchEvent::MappingReviewPointerDown { x, z } => {
+                                        controller.borrow_mut().mapping_review_pointer_down(x, z);
+                                    }
+                                    SketchEvent::MappingReviewPointerDrag { x, z } => {
+                                        controller.borrow_mut().mapping_review_pointer_drag(x, z);
+                                    }
+                                    SketchEvent::MappingReviewPointerUp => {
+                                        controller.borrow_mut().mapping_review_pointer_up();
                                     }
                                     SketchEvent::SetDefaultCeilingHeight(value) => {
                                         match controller

@@ -31,6 +31,7 @@ mod editing;
 mod exposure;
 mod floor_exposure;
 mod living_areas;
+mod mapping_review;
 mod openings;
 mod partition;
 mod phase_regions;
@@ -93,6 +94,7 @@ pub use editing::{
     WallPositions,
 };
 pub use history::HistorySnapshot;
+pub use mapping_review::ReviewView;
 pub use new_storey::NewStoreyPromptUiData;
 use new_storey::{NewStoreyStage, PendingNewStorey};
 use openings::PendingOpening;
@@ -268,6 +270,21 @@ pub struct AppController {
     elevation_drag: Option<ber_model::ber::openings::OpeningRef>,
     /// The opening selected in the elevation, for Delete (transient).
     elevation_selection: Option<ber_model::ber::openings::OpeningRef>,
+    /// The Stage-1 (Mapping) REVIEW takeover view is open (transient). The canvas
+    /// shows the current side's external elevation beside its photo; the assessor
+    /// scrolls the four sides and confirms "all's good" (`mapping_review.rs`).
+    mapping_review_mode: bool,
+    /// Which external side the review is showing (the scroll cursor).
+    mapping_review_side: ber_model::ber::common::ExternalSide,
+    /// The opening grabbed during a review elevation drag: (storey index, wall id,
+    /// opening). Transient.
+    mapping_review_drag: Option<(
+        usize,
+        ber_model::ber::common::ItemId,
+        ber_model::ber::openings::OpeningRef,
+    )>,
+    /// The opening selected in the review elevation (transient).
+    mapping_review_selection: Option<ber_model::ber::openings::OpeningRef>,
     /// When `Some`, the PARTITION overlay is open for this outline wall (by its
     /// stable start `VertexId`): the canvas shows the unrolled wall face and
     /// strokes/taps cut + attribute it. Opened from the wall-exposure toolbar.
@@ -489,6 +506,10 @@ impl AppController {
             elevation_wall: None,
             elevation_drag: None,
             elevation_selection: None,
+            mapping_review_mode: false,
+            mapping_review_side: ber_model::ber::common::ExternalSide::Front,
+            mapping_review_drag: None,
+            mapping_review_selection: None,
             partition_wall: None,
             partition_stroke: Vec::new(),
             partition_pending: None,
