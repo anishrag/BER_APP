@@ -42,29 +42,35 @@ pub fn photo_button(
     enabled: bool,
     config: PhotoConfig,
 ) -> Option<PathBuf> {
-    let clicked = ui
+    let resp = ui
         .add_enabled(enabled, egui::Button::new(label))
-        .on_hover_text("Add photo")
-        .clicked();
+        .on_hover_text("Add photo");
+    let clicked = resp.clicked();
 
     // Android delivers asynchronously: pick up a finished capture on whatever
     // frame it lands (the camera ran as a separate activity in the meantime).
+    // The capture is keyed to THIS button's stable id so that when several
+    // `photo_button`s render in one frame (e.g. the four external-photo sides),
+    // only the one that launched the camera claims the result — not whichever
+    // happens to render first.
     #[cfg(target_os = "android")]
-    if let Some(path) = android_cam::poll() {
-        return Some(path);
+    {
+        let token = resp.id.value();
+        if let Some(path) = android_cam::poll(token) {
+            return Some(path);
+        }
+        if clicked {
+            android_cam::begin(config.default_quality, token);
+        }
+        return None;
     }
-
-    if clicked {
-        #[cfg(not(target_os = "android"))]
-        {
+    #[cfg(not(target_os = "android"))]
+    {
+        if clicked {
             return capture(config);
         }
-        #[cfg(target_os = "android")]
-        {
-            android_cam::begin(config.default_quality);
-        }
+        None
     }
-    None
 }
 
 /// Desktop: a native file-open dialog filtered to images.
@@ -94,27 +100,33 @@ pub mod android_cam {
 
     /// A single in-flight capture at a time (the camera is modal). `in_flight`
     /// dedups repeated taps while the camera is open; `result` carries the path
-    /// back to the polling button.
+    /// back to the polling button; `token` is the id of the button that launched
+    /// the in-flight (or just-delivered) capture, so a multi-button frame routes
+    /// the result to the right caller.
     #[derive(Default)]
     struct Slot {
         in_flight: bool,
+        token: u64,
         result: Option<PathBuf>,
     }
 
     static SLOT: Mutex<Slot> = Mutex::new(Slot {
         in_flight: false,
+        token: 0,
         result: None,
     });
 
-    /// Begin a capture: ask the activity to launch the camera. Idempotent while
-    /// one is already in flight. The result arrives later via [`poll`].
-    pub fn begin(quality: PhotoQuality) {
+    /// Begin a capture for the button identified by `token`: ask the activity to
+    /// launch the camera. Idempotent while one is already in flight. The result
+    /// arrives later via [`poll`], tagged with this `token`.
+    pub fn begin(quality: PhotoQuality, token: u64) {
         {
             let mut slot = SLOT.lock().unwrap();
             if slot.in_flight {
                 return;
             }
             slot.in_flight = true;
+            slot.token = token;
             slot.result = None;
         }
         if let Err(e) = launch(quality.level()) {
@@ -123,9 +135,15 @@ pub mod android_cam {
         }
     }
 
-    /// Take a delivered capture, if any (consumed once).
-    pub fn poll() -> Option<PathBuf> {
-        SLOT.lock().unwrap().result.take()
+    /// Take a delivered capture, if any, but only for the button that launched it
+    /// (`token` matches). Consumed once.
+    pub fn poll(token: u64) -> Option<PathBuf> {
+        let mut slot = SLOT.lock().unwrap();
+        if slot.token == token && slot.result.is_some() {
+            slot.result.take()
+        } else {
+            None
+        }
     }
 
     /// Call `MainActivity.requestPhoto(int)` over JNI to start the camera.
