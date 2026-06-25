@@ -10334,3 +10334,56 @@ fn mapping_review_drag_moves_opening_and_stays_on_wall() {
         panel.x1
     );
 }
+
+/// Dragging an opening upward in the review elevation can't push it above the
+/// wall top — the sill is clamped against the roofline.
+#[test]
+fn mapping_review_drag_clamps_opening_under_the_top() {
+    use ber_model::ber::common::ExternalSide;
+    let mut c = dimensioned_square_controller();
+    c.materialize();
+    let front_id = {
+        let st = &c.current_record.as_ref().unwrap().data.storeys[0];
+        st.walls
+            .regions
+            .iter()
+            .max_by(|a, b| {
+                a.base_midpoint()
+                    .unwrap()
+                    .y
+                    .partial_cmp(&b.base_midpoint().unwrap().y)
+                    .unwrap()
+            })
+            .unwrap()
+            .id
+    };
+    ber_model::ber::openings::add_wall_window(
+        &mut c.current_record.as_mut().unwrap().data.storeys[0],
+        front_id,
+        5.0,
+        1.2,
+        1.0,
+        0.5,
+        ItemId::default(),
+    )
+    .expect("window placed");
+
+    c.set_mapping_review_mode(true);
+    c.set_mapping_review_side(ExternalSide::Front);
+    let v = c.mapping_review_view().unwrap();
+    let o = v.elevation.openings[0];
+    let wall_top = v.elevation.max_z;
+
+    // Drag the centre way above the roof.
+    c.mapping_review_pointer_down(o.x_center, o.sill_z + o.height_m / 2.0);
+    c.mapping_review_pointer_drag(o.x_center, wall_top + 50.0);
+    c.mapping_review_pointer_up();
+
+    let moved = c.mapping_review_view().unwrap().elevation.openings[0];
+    assert!(
+        moved.sill_z + moved.height_m <= wall_top + 1e-6,
+        "opening top {} stayed under the wall top {}",
+        moved.sill_z + moved.height_m,
+        wall_top
+    );
+}

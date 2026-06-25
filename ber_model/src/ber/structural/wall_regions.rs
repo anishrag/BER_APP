@@ -161,6 +161,16 @@ impl WallRegion {
         Some((x - (h.0 * origin.x + h.1 * origin.y)) / denom)
     }
 
+    /// The highest sill (height above `base_z`) an opening of `height_m` can have
+    /// at along-distance `along_m` and still fit UNDER the wall top
+    /// ([`top_z_at_along`](Self::top_z_at_along)) — i.e. `top_z - base_z -
+    /// height`, clamped to ≥ 0. Keeps a dragged opening from poking above the
+    /// roofline. (0 for a wall shorter than the opening: best effort.)
+    pub fn max_sill_for(&self, along_m: f64, height_m: f64) -> f64 {
+        let base_z = self.base_frame().map(|(_, _, _, bz)| bz).unwrap_or(0.0);
+        (self.top_z_at_along(along_m) - base_z - height_m).max(0.0)
+    }
+
     /// The wall's TOP profile in wall-local coordinates: each vertex of the top
     /// polyline (`exterior[2..]`, running b→a per the vertex-order contract) as
     /// `(along, z)` — `along` projected onto the base direction from the base

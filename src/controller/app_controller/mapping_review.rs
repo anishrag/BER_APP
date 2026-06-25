@@ -142,8 +142,11 @@ impl AppController {
             let along = wall.elevation_along_at(h, x)?;
             let (_origin, _u, _len, base_z) = wall.base_frame()?;
             let datum = r.data.storey_floor_datums().get(si).copied().unwrap_or(0.0);
-            let half_h = openings::opening_height(storey, opref) as f64 / 2.0;
-            let sill = (z - (base_z + datum) - half_h).max(0.0);
+            let height = openings::opening_height(storey, opref) as f64;
+            // Clamp the sill between the floor and the roofline so the opening
+            // can't be dragged above the wall top at its along-position.
+            let max_sill = wall.max_sill_for(along, height);
+            let sill = (z - (base_z + datum) - height / 2.0).max(0.0).min(max_sill);
             Some((along as f32, sill as f32))
         }) else {
             return;
