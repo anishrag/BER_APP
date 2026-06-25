@@ -931,6 +931,68 @@ mod tests {
         assert_eq!(storey2.floors.regions.len(), 2, "split survives re-resolve");
     }
 
+    /// Stage 1 party-floor flow end-to-end at resolve level: a `plan_party_floor_carves`
+    /// split ring pushed onto `floor_splits` divides the floor, and stamping the
+    /// returned party sample resolves THAT sub-region `NonHeatLoss` (the other
+    /// half stays Unset). Mirrors `floor_split_divides_floor_and_survives_re_resolve`
+    /// with the exposure stamp added.
+    #[test]
+    fn party_floor_carve_splits_and_stamps_nonheatloss() {
+        use ber_model::ber::structural::FloorExposure;
+        let mut doc = unit_square_doc();
+        let mut ber = Ber::default();
+        ensure_storey_constructions(&mut ber, 0, &[]);
+
+        // Resolve the storey once to get its single floor region, then plan the
+        // party carve against a below footprint covering the left half (x∈[0,2]).
+        let storey = resolve_storey(&doc, &ber, 0, &[], &[], &[]);
+        let below = vec![
+            Point2f64::new(0.0, 0.0),
+            Point2f64::new(2.0, 0.0),
+            Point2f64::new(2.0, 4.0),
+            Point2f64::new(0.0, 4.0),
+        ];
+        let (rings, samples) = doc.plan_party_floor_carves(&storey, &below);
+        assert_eq!(rings.len(), 1, "partial overlap → one split ring");
+
+        // Push the durable split + re-resolve: the floor divides in two.
+        ber.storeys[0].floor_splits = rings;
+        let storey = resolve_storey(&doc, &ber, 0, &[], &[], &[]);
+        assert_eq!(storey.floors.regions.len(), 2, "split divided the floor");
+
+        // Stamp the party sample → that sub-region resolves NonHeatLoss.
+        doc.set_floor_exposure_at(
+            &storey,
+            samples[0].x,
+            samples[0].y,
+            FloorExposure::NonHeatLoss,
+        )
+        .expect("a floor region under the party sample");
+        let mut resolved = resolve_storey(&doc, &ber, 0, &[], &[], &[]);
+        crate::stamp_horizontal_exposure(&doc, &mut resolved);
+        assert_eq!(
+            resolved.floors.regions.len(),
+            2,
+            "split survives re-resolve"
+        );
+
+        // The party half (centroid x<2) is NonHeatLoss; the other half stays Unset.
+        let party = resolved
+            .floors
+            .regions
+            .iter()
+            .find(|r| r.centroid().x < 2.0)
+            .expect("the left (party) half");
+        let other = resolved
+            .floors
+            .regions
+            .iter()
+            .find(|r| r.centroid().x >= 2.0)
+            .expect("the right half");
+        assert_eq!(party.exposure, FloorExposure::NonHeatLoss);
+        assert_eq!(other.exposure, FloorExposure::Unset);
+    }
+
     /// A structure-phase ROOF split divides the ceiling in two at the SAME
     /// height (delta-0), and survives a re-resolve.
     #[test]

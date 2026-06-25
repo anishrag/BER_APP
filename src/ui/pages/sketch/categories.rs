@@ -30,6 +30,8 @@ pub enum Tool {
     ConstructionYear,
     /// Wall-exposure painting mode toggle.
     Exposure,
+    /// Floor-exposure tool toggle (all-storeys overlaid floor view + select).
+    FloorExposure,
     /// The storey's default ceiling height: a metres field + "Set", showing
     /// the current value when one is set. Re-entering overwrites; on the All
     /// tab one value fills every still-unset storey.
@@ -90,7 +92,12 @@ pub const CATEGORIES: &[Category] = &[
     },
     Category {
         name: "Area",
-        tools: &[Tool::LivingArea, Tool::ConstructionYear, Tool::Exposure],
+        tools: &[
+            Tool::LivingArea,
+            Tool::ConstructionYear,
+            Tool::Exposure,
+            Tool::FloorExposure,
+        ],
     },
     Category {
         name: "Heights",
@@ -193,6 +200,8 @@ pub struct ToolFlags {
     pub living_area_mode: bool,
     pub active_living_area: Option<usize>,
     pub exposure_mode: bool,
+    /// The floor-exposure tool is active (all-storeys overlaid floor view).
+    pub floor_exposure_mode: bool,
     pub phase_mode: bool,
     /// Construction years exist (entered in Key Details) — without them the
     /// phase picker would be empty, so the toggle is disabled.
@@ -249,6 +258,7 @@ impl ToolFlags {
             living_area_mode: view.living_area_mode,
             active_living_area: view.active_living_area,
             exposure_mode: view.exposure_mode,
+            floor_exposure_mode: view.floor_exposure_mode,
             phase_mode: view.phase_mode,
             has_phase_choices: !view.phase_choices.is_empty(),
             step_mode: view.step_mode,
@@ -490,6 +500,29 @@ fn tool_ui<F: FnMut(UiEvent)>(
             {
                 on_event(UiEvent::Sketch(SketchEvent::SetExposureMode(
                     !flags.exposure_mode,
+                )));
+            }
+        }
+        Tool::FloorExposure => {
+            // Spans the whole storey stack, so it's available whenever a floor
+            // plan exists (independent of the current storey tab — it shows
+            // every storey regardless). Enabled on the All tab too.
+            let enabled = flags.has_floor_plan;
+            if ui
+                .add_enabled(
+                    enabled,
+                    egui::Button::selectable(flags.floor_exposure_mode, "▦ Floor exposure"),
+                )
+                .hint(
+                    "Mark each floor's heat-loss exposure across every storey: \
+                     confirm all storeys are added (runs the party auto-pass), \
+                     then select floors and pick ground / exposed / semi / \
+                     non-heat-loss",
+                )
+                .clicked()
+            {
+                on_event(UiEvent::Sketch(SketchEvent::SetFloorExposureMode(
+                    !flags.floor_exposure_mode,
                 )));
             }
         }

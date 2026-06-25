@@ -9,13 +9,14 @@
 use super::{SketchEvent, SketchView};
 use crate::controller::app_controller::{
     ExposureSelection, NewStoreyPromptUiData, OpeningPromptUiData, OpeningToolKind, PartitionView,
-    VertexDropPromptUiData,
+    SelectMode, VertexDropPromptUiData,
 };
 use crate::number_entry::parse_dimension_expression;
 use crate::ui::pages::events::UiEvent;
 use crate::ui::widgets::{metre_input, HintExt};
 use ber_model::ber::common::ConstructionPhase;
 use ber_model::ber::fenestration::{Frame, Glazing};
+use ber_model::ber::structural::FloorExposure;
 use ber_model::ber::structural::WallExposure;
 
 /// Whether the dock has anything to show this frame. When false the bottom
@@ -36,6 +37,7 @@ pub(super) fn has_content(view: &SketchView<'_>) -> bool {
         || view.vertex_drop_prompt.is_some()
         || view.review.is_some()
         || view.exposure_mode
+        || view.floor_exposure_mode
         || view.partition_mode
         || view.openings_mode
         || (view.has_floor_plan
@@ -65,6 +67,19 @@ pub(super) fn render<F: FnMut(UiEvent)>(
     view: &mut SketchView<'_>,
     on_event: &mut F,
 ) {
+    // The floor-exposure tool spans the whole storey stack — it works on the
+    // All tab too, so its toolbar renders BEFORE the "pick a storey" notice and
+    // owns the dock while active.
+    if view.floor_exposure_mode {
+        ui.horizontal_wrapped(|ui| {
+            if view.floor_exposure_gate_pending {
+                floor_exposure_gate_toolbar(ui, on_event);
+            } else {
+                floor_exposure_toolbar(ui, view.floor_exposure_select, on_event);
+            }
+        });
+        return;
+    }
     ui.horizontal_wrapped(|ui| {
         if view.current_storey_idx.is_none() {
             ui.label(
@@ -935,6 +950,73 @@ fn exposure_toolbar<F: FnMut(UiEvent)>(
             on_event(UiEvent::Sketch(SketchEvent::SetAllRemainingExposed));
         }
     });
+}
+
+/// The floor-exposure storey-count GATE: confirm every storey is added before
+/// the auto-exposure pass runs and the overlaid floor view appears.
+fn floor_exposure_gate_toolbar<F: FnMut(UiEvent)>(ui: &mut egui::Ui, on_event: &mut F) {
+    ui.label(
+        egui::RichText::new("Have you finished adding all storeys?")
+            .strong()
+            .color(egui::Color32::from_rgb(60, 220, 255)),
+    );
+    if ui
+        .button("Yes")
+        .hint("Run the inter-storey party auto-exposure pass, then mark floors")
+        .clicked()
+    {
+        on_event(UiEvent::Sketch(SketchEvent::ConfirmAllStoreysAdded));
+    }
+    if ui
+        .button("Not yet")
+        .hint("Exit the tool so you can add the remaining storeys first")
+        .clicked()
+    {
+        on_event(UiEvent::Sketch(SketchEvent::DeferStoreyCount));
+    }
+}
+
+/// The floor-exposure SELECT + APPLY toolbar (post-gate): the Select subtools
+/// (Set all / Click / Carve / Remaining) plus Deselect, then the exposure
+/// buttons that paint the current floor-region selection across the stack.
+fn floor_exposure_toolbar<F: FnMut(UiEvent)>(
+    ui: &mut egui::Ui,
+    select: Option<SelectMode>,
+    on_event: &mut F,
+) {
+    let mut subtool = |ui: &mut egui::Ui, mode: SelectMode, label: &str| {
+        let on = select == Some(mode);
+        if ui.add(egui::Button::selectable(on, label)).clicked() {
+            // Re-clicking the active subtool turns it off.
+            let next = if on { None } else { Some(mode) };
+            on_event(UiEvent::Sketch(SketchEvent::SetFloorExposureSelectMode(
+                next,
+            )));
+        }
+    };
+    subtool(ui, SelectMode::All, "Set all");
+    subtool(ui, SelectMode::Click, "Click");
+    subtool(ui, SelectMode::Carve, "Carve");
+    subtool(ui, SelectMode::Remaining, "Remaining");
+    if ui
+        .button("Deselect all")
+        .hint("Clear the floor selection")
+        .clicked()
+    {
+        on_event(UiEvent::Sketch(SketchEvent::DeselectAllFloorExposure));
+    }
+    ui.separator();
+    for (label, exposure) in [
+        ("Ground", FloorExposure::Ground),
+        ("Exposed", FloorExposure::Exposed),
+        ("Semi-exposed", FloorExposure::SemiExposed),
+        ("Non-heat-loss", FloorExposure::NonHeatLoss),
+        ("Unset", FloorExposure::Unset),
+    ] {
+        if ui.button(label).clicked() {
+            on_event(UiEvent::Sketch(SketchEvent::AssignFloorExposure(exposure)));
+        }
+    }
 }
 
 /// Wall-face partition toolbar: while a face is open, divide it (drag on the

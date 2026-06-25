@@ -23,6 +23,7 @@
 //! once the assessor sets a scale.
 
 pub mod all_storeys_2d;
+pub mod all_storeys_floors;
 pub mod full_house_3d;
 pub mod storey_2d;
 pub mod storey_3d;
@@ -1326,6 +1327,26 @@ pub(crate) mod style {
     pub fn highlight_fill(c: Color32) -> Color32 {
         let [r, g, b, _] = c.to_array();
         Color32::from_rgba_premultiplied(r, g, b, HIGHLIGHT_FILL_OPACITY)
+    }
+
+    /// Per-storey distinct translucent fill hues for the overlaid all-storeys
+    /// floor-exposure view, cycled for many storeys. Translucent so overlapping
+    /// floors from different storeys stay readable through each other; the
+    /// exposure is overlaid as a separate coloured OUTLINE on top.
+    const STOREY_FILL_HUES: &[(u8, u8, u8)] = &[
+        (80, 140, 230),  // blue
+        (230, 150, 70),  // orange
+        (110, 200, 120), // green
+        (200, 110, 200), // magenta
+        (210, 200, 90),  // gold
+        (90, 200, 210),  // teal
+    ];
+
+    /// The translucent fill colour for storey `idx` in the overlaid floor view
+    /// (cycles through [`STOREY_FILL_HUES`]).
+    pub fn storey_fill(idx: usize) -> Color32 {
+        let (r, g, b) = STOREY_FILL_HUES[idx % STOREY_FILL_HUES.len()];
+        Color32::from_rgba_unmultiplied(r, g, b, 55)
     }
 }
 

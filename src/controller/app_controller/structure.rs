@@ -15,7 +15,8 @@
 use super::*;
 use ber_model::ber::common::ConstructionPhase;
 use ber_model::ber::structural::{
-    CeilingConstructionType, ConstructionMakeup, ConstructionType, FloorConstructionType, Storey,
+    CeilingConstructionType, CeilingExposure, ConstructionMakeup, ConstructionType,
+    FloorConstructionType, FloorExposure, Storey, SurfaceExposure, WallExposure,
 };
 use domain::points::Point2f32;
 
@@ -29,6 +30,16 @@ pub struct EditGroup {
     pub ty: ConstructionType,
     pub makeup: ConstructionMakeup,
     pub phase: ConstructionPhase,
+    /// The boundary-condition exposure shared by every surface in the group,
+    /// kind-tagged ([`SurfaceExposure`]) so the dropdown spans walls/floors/
+    /// ceilings. Part of the grouping key, so same-construction-but-different-
+    /// exposure surfaces split into separate groups.
+    pub exposure: SurfaceExposure,
+    /// Walls only: `true` when the group's wall(s) are FACE-PARTITIONED (their
+    /// exposure is owned per-2-D-region by the wall partition tool, not by a
+    /// single along-wall value) — the dropdown is shown disabled. Always
+    /// `false` for floors/ceilings.
+    pub exposure_locked: bool,
     /// Editable label for the group, defaulting to "Group 1", "Group 2", … —
     /// the assessor can rename it. Session-scoped (reset when the edit reopens).
     pub name: String,
@@ -179,6 +190,189 @@ impl AppController {
         let _ = self.mark_dirty();
     }
 
+    /// Set the boundary-condition EXPOSURE of an attribute group and apply it to
+    /// that group's surfaces, dispatching to the right durable store by the
+    /// exposure value's kind. Mirror of
+    /// [`set_structure_group_attrs`](Self::set_structure_group_attrs) for the
+    /// exposure dropdown. A locked (face-partitioned) wall group is left to the
+    /// per-region wall-partition tool — the UI disables the dropdown, but skip
+    /// here too as belt-and-braces. A kind mismatch between the picked exposure
+    /// and the group's kind is a no-op (shouldn't happen — the dropdown only
+    /// offers this kind's variants). Updates the in-session `group.exposure` so
+    /// the dropdown reflects the new value immediately.
+    pub fn set_structure_group_exposure(&mut self, group_index: usize, exposure: SurfaceExposure) {
+        let (kind, ids, locked) = {
+            let Some(e) = self.structure_edit.as_ref() else {
+                return;
+            };
+            let Some(g) = e.groups.get(group_index) else {
+                return;
+            };
+            // The picked exposure must match the group's kind; otherwise no-op.
+            if exposure.kind() != g.ty.kind() {
+                return;
+            }
+            (g.ty.kind(), g.ids.clone(), g.exposure_locked)
+        };
+        match (kind, exposure) {
+            (SurfaceKind::Floors, SurfaceExposure::Floor(e)) => {
+                self.set_floor_exposure_for_ids(&ids, e)
+            }
+            (SurfaceKind::Roofs, SurfaceExposure::Ceiling(e)) => {
+                self.set_ceiling_exposure_for_ids(&ids, e)
+            }
+            (SurfaceKind::Walls, SurfaceExposure::Wall(e)) => {
+                if locked {
+                    return; // face-partitioned: owned per-region by the partition tool
+                }
+                self.set_wall_exposure_for_ids(&ids, e)
+            }
+            _ => return, // kind/variant mismatch — no-op
+        }
+        // Reflect the new value in the session group so the dropdown updates.
+        if let Some(g) = self
+            .structure_edit
+            .as_mut()
+            .and_then(|e| e.groups.get_mut(group_index))
+        {
+            g.exposure = exposure;
+        }
+    }
+
+    /// Set the FLOOR exposure of the given resolved FLOOR region ids, keyed by
+    /// each region's plan centroid (`document.floor_exposure`) so it survives
+    /// re-derivation (`stamp_floor_exposure`). Mirror of
+    /// [`set_floor_construction_for`](Self::set_floor_construction_for). One
+    /// snapshot for the whole write.
+    fn set_floor_exposure_for_ids(&mut self, ids: &[ItemId], exposure: FloorExposure) {
+        let Some(idx) = self.current_storey_idx else {
+            return;
+        };
+        let keys: Vec<document::CentroidKey> = {
+            let Some(record) = self.current_record.as_ref() else {
+                return;
+            };
+            let Some(storey) = record.data.storeys.get(idx) else {
+                return;
+            };
+            ids.iter()
+                .filter_map(|id| storey.floors.regions.iter().find(|r| r.id == *id))
+                .map(|r| document::centroid_key(r.centroid()))
+                .collect()
+        };
+        if keys.is_empty() {
+            return;
+        }
+        self.record_history();
+        for k in keys {
+            self.document.storeys[idx]
+                .floor_exposure
+                .insert(k, exposure);
+        }
+        let _ = self.mark_dirty();
+    }
+
+    /// Set the CEILING/ROOF exposure of the given resolved ROOF region ids,
+    /// keyed by each region's plan centroid (`document.ceiling_exposure`,
+    /// `stamp_ceiling_exposure`). Mirror of
+    /// [`set_floor_exposure_for_ids`](Self::set_floor_exposure_for_ids) over the
+    /// storey's `roofs`.
+    fn set_ceiling_exposure_for_ids(&mut self, ids: &[ItemId], exposure: CeilingExposure) {
+        let Some(idx) = self.current_storey_idx else {
+            return;
+        };
+        let keys: Vec<document::CentroidKey> = {
+            let Some(record) = self.current_record.as_ref() else {
+                return;
+            };
+            let Some(storey) = record.data.storeys.get(idx) else {
+                return;
+            };
+            ids.iter()
+                .filter_map(|id| storey.roofs.regions.iter().find(|r| r.id == *id))
+                .map(|r| document::centroid_key(r.centroid()))
+                .collect()
+        };
+        if keys.is_empty() {
+            return;
+        }
+        self.record_history();
+        for k in keys {
+            self.document.storeys[idx]
+                .ceiling_exposure
+                .insert(k, exposure);
+        }
+        let _ = self.mark_dirty();
+    }
+
+    /// Set the WALL exposure of the given resolved WALL region ids. For each
+    /// PERIMETER region, recover its perimeter `VertexId` + along-wall span
+    /// (`document::StoreyDoc::recover_wall_region_span`) and repaint ONLY that
+    /// span (`set_wall_section`), so other sections on the same wall are
+    /// preserved. A FACE-PARTITIONED wall's region is SKIPPED (owned per-region
+    /// by the partition tool). A region with NO perimeter match is a RISER → its
+    /// override goes in `document.riser_exposure` keyed by the base edge. One
+    /// snapshot for the whole group write.
+    fn set_wall_exposure_for_ids(&mut self, ids: &[ItemId], exposure: WallExposure) {
+        let Some(idx) = self.current_storey_idx else {
+            return;
+        };
+        // Resolve each id to (perimeter span | riser key) up front, reading the
+        // resolved record + the document, before the mutable document borrow.
+        enum WallWrite {
+            Section(manip_plan::VertexId, f32, f32, f32), // vid, start_m, end_m, len
+            Riser(document::RiserKey),
+        }
+        let writes: Vec<WallWrite> = {
+            let Some(record) = self.current_record.as_ref() else {
+                return;
+            };
+            let Some(storey) = record.data.storeys.get(idx) else {
+                return;
+            };
+            let Some(doc) = self.document.storeys.get(idx) else {
+                return;
+            };
+            ids.iter()
+                .filter_map(|id| storey.walls.regions.iter().find(|r| r.id == *id))
+                .filter_map(|r| match doc.recover_wall_region_span(r) {
+                    Some((vid, start_m, end_m, len)) => {
+                        // Face-partitioned walls are owned per-2-D-region — skip.
+                        if doc.is_wall_partitioned(vid) {
+                            None
+                        } else {
+                            Some(WallWrite::Section(vid, start_m, end_m, len))
+                        }
+                    }
+                    // No perimeter match → riser: key by its base edge.
+                    None => r.base_edge().map(|(a, b)| {
+                        WallWrite::Riser(document::riser_key(
+                            domain::points::Point2f64::new(a.x, a.y),
+                            domain::points::Point2f64::new(b.x, b.y),
+                        ))
+                    }),
+                })
+                .collect()
+        };
+        if writes.is_empty() {
+            return;
+        }
+        self.record_history();
+        for w in writes {
+            match w {
+                WallWrite::Section(vid, start_m, end_m, len) => {
+                    self.document.storeys[idx].set_wall_section(vid, start_m, end_m, len, exposure);
+                }
+                WallWrite::Riser(key) => {
+                    self.document.storeys[idx]
+                        .riser_exposure
+                        .insert(key, exposure);
+                }
+            }
+        }
+        let _ = self.mark_dirty();
+    }
+
     /// The in-flight "Edit attributes" session, if any.
     pub fn structure_edit(&self) -> Option<&StructureEdit> {
         self.structure_edit.as_ref()
@@ -214,79 +408,125 @@ impl AppController {
             ConstructionType,
             ConstructionMakeup,
             ConstructionPhase,
+            SurfaceExposure,
+            bool, // exposure_locked
             Option<String>,
         );
+        let Some(doc) = self.document.storeys.get(idx) else {
+            return;
+        };
         let attrs_of = |id: ItemId| -> Option<Attrs> {
             match storey.surface_kind_of(id)? {
                 SurfaceKind::Walls => {
                     let r = storey.walls.regions.iter().find(|r| r.id == id)?;
-                    Some(match record.data.wall_construction(r.construction_id) {
-                        Some(c) => (
-                            ConstructionType::Wall(c.construction_type),
-                            c.base.construction_makeup.clone(),
-                            c.base.construction_phase.clone(),
-                            c.base.name.clone(),
-                        ),
-                        None => (
-                            ConstructionType::Wall(Default::default()),
-                            Default::default(),
-                            Default::default(),
-                            None,
-                        ),
-                    })
+                    // A perimeter wall whose recovered VertexId is face-partitioned
+                    // is locked; a riser (no perimeter match) is never locked.
+                    let locked = doc
+                        .recover_wall_region_span(r)
+                        .map(|(vid, ..)| doc.is_wall_partitioned(vid))
+                        .unwrap_or(false);
+                    let (ty, makeup, phase, name) =
+                        match record.data.wall_construction(r.construction_id) {
+                            Some(c) => (
+                                ConstructionType::Wall(c.construction_type),
+                                c.base.construction_makeup.clone(),
+                                c.base.construction_phase.clone(),
+                                c.base.name.clone(),
+                            ),
+                            None => (
+                                ConstructionType::Wall(Default::default()),
+                                Default::default(),
+                                Default::default(),
+                                None,
+                            ),
+                        };
+                    Some((
+                        ty,
+                        makeup,
+                        phase,
+                        SurfaceExposure::Wall(r.exposure),
+                        locked,
+                        name,
+                    ))
                 }
                 SurfaceKind::Floors => {
                     let r = storey.floors.regions.iter().find(|r| r.id == id)?;
-                    Some(match record.data.floor_construction(r.construction_id) {
-                        Some(c) => (
-                            ConstructionType::Floor(c.construction_type),
-                            c.base.construction_makeup.clone(),
-                            c.base.construction_phase.clone(),
-                            c.base.name.clone(),
-                        ),
-                        None => (
-                            ConstructionType::Floor(Default::default()),
-                            Default::default(),
-                            Default::default(),
-                            None,
-                        ),
-                    })
+                    let (ty, makeup, phase, name) =
+                        match record.data.floor_construction(r.construction_id) {
+                            Some(c) => (
+                                ConstructionType::Floor(c.construction_type),
+                                c.base.construction_makeup.clone(),
+                                c.base.construction_phase.clone(),
+                                c.base.name.clone(),
+                            ),
+                            None => (
+                                ConstructionType::Floor(Default::default()),
+                                Default::default(),
+                                Default::default(),
+                                None,
+                            ),
+                        };
+                    Some((
+                        ty,
+                        makeup,
+                        phase,
+                        SurfaceExposure::Floor(r.exposure),
+                        false,
+                        name,
+                    ))
                 }
                 SurfaceKind::Roofs => {
                     let r = storey.roofs.regions.iter().find(|r| r.id == id)?;
-                    Some(match record.data.ceiling_construction(r.construction_id) {
-                        Some(c) => (
-                            ConstructionType::Ceiling(c.construction_type),
-                            c.base.construction_makeup.clone(),
-                            c.base.construction_phase.clone(),
-                            c.base.name.clone(),
-                        ),
-                        None => (
-                            ConstructionType::Ceiling(Default::default()),
-                            Default::default(),
-                            Default::default(),
-                            None,
-                        ),
-                    })
+                    let (ty, makeup, phase, name) =
+                        match record.data.ceiling_construction(r.construction_id) {
+                            Some(c) => (
+                                ConstructionType::Ceiling(c.construction_type),
+                                c.base.construction_makeup.clone(),
+                                c.base.construction_phase.clone(),
+                                c.base.name.clone(),
+                            ),
+                            None => (
+                                ConstructionType::Ceiling(Default::default()),
+                                Default::default(),
+                                Default::default(),
+                                None,
+                            ),
+                        };
+                    Some((
+                        ty,
+                        makeup,
+                        phase,
+                        SurfaceExposure::Ceiling(r.exposure),
+                        false,
+                        name,
+                    ))
                 }
             }
         };
         let mut groups: Vec<EditGroup> = Vec::new();
         for id in &self.structure_selected {
             // Skip ids that no longer resolve to a live region of any kind.
-            let Some((ty, makeup, phase, cname)) = attrs_of(*id) else {
+            let Some((ty, makeup, phase, exposure, exposure_locked, cname)) = attrs_of(*id) else {
                 continue;
             };
-            match groups
-                .iter_mut()
-                .find(|g| g.ty == ty && g.makeup == makeup && g.phase == phase)
-            {
+            // `exposure_locked` is part of the key so a face-partitioned wall
+            // (locked) never shares a group with an editable wall of the same
+            // construction — the dropdown's enabled-ness must be uniform per group.
+            match groups.iter_mut().find(|g| {
+                g.ty == ty
+                    && g.makeup == makeup
+                    && g.phase == phase
+                    && g.exposure == exposure
+                    && g.exposure_locked == exposure_locked
+            }) {
                 Some(g) => g.ids.push(*id),
                 None => groups.push(EditGroup {
                     ids: vec![*id],
                     ty,
                     makeup,
                     phase,
+                    exposure,
+                    exposure_locked,
                     // The construction's stored name, if any (set in a prior
                     // session); the "Group N" fallback is filled in below.
                     name: cname.unwrap_or_default(),

@@ -856,6 +856,25 @@ impl eframe::App for BerApp {
                                 .borrow()
                                 .pending_structure_carve_polygons();
 
+                            // Floor-exposure tool: mode flags + the overlaid
+                            // all-storeys floor view data.
+                            let (
+                                floor_exposure_mode,
+                                floor_exposure_gate_pending,
+                                floor_exposure_select,
+                                floor_exposure_storeys,
+                                floor_exposure_carve_polygon,
+                            ) = {
+                                let c = self.app_controller.borrow();
+                                (
+                                    c.floor_exposure_mode(),
+                                    c.floor_exposure_gate_pending(),
+                                    c.floor_exposure_select(),
+                                    c.floor_exposure_view(),
+                                    c.pending_floor_exposure_carve_polygon(),
+                                )
+                            };
+
                             let view = SketchView {
                                 current: stroke.as_ref().map(EguiStroke::from),
                                 mode,
@@ -1000,6 +1019,11 @@ impl eframe::App for BerApp {
                                 structure_cut_regions: &structure_cut_regions,
                                 pending_structure_split_polygon: &pending_structure_split_polygon,
                                 pending_structure_carves: &pending_structure_carves,
+                                floor_exposure_mode,
+                                floor_exposure_gate_pending,
+                                floor_exposure_select,
+                                floor_exposure_storeys: &floor_exposure_storeys,
+                                floor_exposure_carve_polygon: &floor_exposure_carve_polygon,
                             };
                             let touch_nav = &mut self.sketch_state.touch_nav;
                             SketchPage::render(ui, view, touch_nav, |event| match event {
@@ -1731,8 +1755,50 @@ impl eframe::App for BerApp {
                                             .borrow_mut()
                                             .set_structure_group_name(group, name);
                                     }
+                                    SketchEvent::SetStructureGroupExposure {
+                                        group_index,
+                                        exposure,
+                                    } => {
+                                        controller
+                                            .borrow_mut()
+                                            .set_structure_group_exposure(group_index, exposure);
+                                    }
                                     SketchEvent::EndStructureEdit => {
                                         controller.borrow_mut().end_structure_edit();
+                                    }
+                                    SketchEvent::SetFloorExposureMode(on) => {
+                                        controller.borrow_mut().set_floor_exposure_mode(on);
+                                    }
+                                    SketchEvent::ConfirmAllStoreysAdded => {
+                                        controller.borrow_mut().confirm_all_storeys_added();
+                                    }
+                                    SketchEvent::DeferStoreyCount => {
+                                        controller.borrow_mut().defer_storey_count();
+                                    }
+                                    SketchEvent::SetFloorExposureSelectMode(mode) => {
+                                        controller
+                                            .borrow_mut()
+                                            .set_floor_exposure_select_mode(mode);
+                                    }
+                                    SketchEvent::FloorExposureTap {
+                                        world_x,
+                                        world_y,
+                                        tol,
+                                    } => {
+                                        controller
+                                            .borrow_mut()
+                                            .toggle_floor_exposure_at(world_x, world_y, tol);
+                                    }
+                                    SketchEvent::FloorExposureCarveStrokeWorld { points } => {
+                                        controller
+                                            .borrow_mut()
+                                            .apply_floor_exposure_carve_stroke(&points);
+                                    }
+                                    SketchEvent::DeselectAllFloorExposure => {
+                                        controller.borrow_mut().clear_floor_exposure_selection();
+                                    }
+                                    SketchEvent::AssignFloorExposure(exposure) => {
+                                        controller.borrow_mut().set_floor_exposure_for(exposure);
                                     }
                                     SketchEvent::EditMouseDown {
                                         world_x,

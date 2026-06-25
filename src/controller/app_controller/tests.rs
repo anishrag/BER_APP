@@ -8622,3 +8622,614 @@ fn structure_wall_carve_on_existing_boundary_selects_without_splitting() {
         "back on the outline"
     );
 }
+
+// ----- Stage 1: inter-storey party auto-exposure -----------------------
+
+/// Drop a dimensioned square outline of `side` offset to `(ox, oy)` into the
+/// current storey — for building a SETBACK stack where the upper storey only
+/// partly overlaps the lower.
+fn finalise_current_storey_as_offset_square(c: &mut AppController, side: f32, ox: f32, oy: f32) {
+    let p = |x: f32, y: f32| Point2f32::new(x, y);
+    c.document.floor_plan = FloorPlan::from_points_to_orthogonal(
+        &[
+            p(ox, oy),
+            p(ox + side, oy),
+            p(ox + side, oy + side),
+            p(ox, oy + side),
+            p(ox + 0.05, oy + 0.05),
+        ],
+        0.1,
+        true,
+    )
+    .unwrap();
+    c.document.dimensioning.scale_set = true;
+    c.document.dimensioning.known_params = c.document.floor_plan.all_active_params();
+    c.commit_to_ber().unwrap();
+}
+
+/// On a 2-storey SETBACK stack (lower 10×10 at origin, upper 6×6 offset to
+/// (6,6) so it overhangs the lower on the top-right), `auto_expose_all_storeys`
+/// auto-splits the partial overlaps and stamps the shared sub-regions:
+///  - the upper storey's FLOOR splits, its piece over the lower → NonHeatLoss;
+///  - the lower storey's CEILING splits, its piece under the upper → Party.
+/// The non-overlapping pieces stay Unset (left for manual marking).
+#[test]
+fn auto_expose_all_storeys_carves_and_stamps_setback_party_surfaces() {
+    use ber_model::ber::structural::{CeilingExposure, FloorExposure};
+
+    let mut c = dimensioned_square_controller(); // storey 0 = 10×10 at origin
+                                                 // Give the lower storey a ceiling so it has roof regions to carve.
+    c.set_default_ceiling_height(2.4).unwrap();
+    c.add_storey().unwrap();
+    finalise_current_storey_as_offset_square(&mut c, 6.0, 6.0, 6.0); // upper 6×6 @ (6,6)
+    c.set_default_ceiling_height(2.4).unwrap();
+    c.materialize();
+
+    // Sanity: a clean partial-overlap stack — one floor + one ceiling region each.
+    {
+        let s = &c.current_record.as_ref().unwrap().data.storeys;
+        assert_eq!(s[0].floors.regions.len(), 1);
+        assert_eq!(s[1].floors.regions.len(), 1);
+    }
+
+    c.auto_expose_all_storeys();
+    c.materialize();
+
+    let storeys = &c.current_record.as_ref().unwrap().data.storeys;
+
+    // Upper storey's FLOOR split into the over-lower piece (NonHeatLoss) + the
+    // overhang piece (Unset). The overlap is x∈[6,10], y∈[6,10].
+    assert_eq!(
+        storeys[1].floors.regions.len(),
+        2,
+        "upper floor carved in two"
+    );
+    let party_floor = storeys[1]
+        .floors
+        .regions
+        .iter()
+        .find(|r| r.centroid().x < 10.0 && r.centroid().y < 10.0)
+        .expect("the over-lower floor piece");
+    assert_eq!(
+        party_floor.exposure,
+        FloorExposure::NonHeatLoss,
+        "the piece over the lower storey is a party floor"
+    );
+    assert!(
+        storeys[1]
+            .floors
+            .regions
+            .iter()
+            .any(|r| r.exposure == FloorExposure::Unset),
+        "the overhang piece is left Unset"
+    );
+
+    // Lower storey's CEILING split, the piece under the upper → Party.
+    assert!(
+        storeys[0].roofs.regions.len() >= 2,
+        "lower ceiling carved by the upper footprint"
+    );
+    assert!(
+        storeys[0]
+            .roofs
+            .regions
+            .iter()
+            .any(|r| r.exposure == CeilingExposure::Party),
+        "the piece under the upper storey is a party ceiling"
+    );
+}
+
+/// Floor-exposure tool — Set-all then assign: entering raises the gate, confirm
+/// runs the auto-pass + reveals the view, `Set all` seeds every floor region
+/// across the stack, and `set_floor_exposure_for(Ground)` stamps each one.
+#[test]
+fn floor_exposure_set_all_then_assign_grounds_every_floor() {
+    use ber_model::ber::structural::FloorExposure;
+    let mut c = dimensioned_square_controller();
+    c.materialize();
+
+    c.set_floor_exposure_mode(true);
+    assert!(c.floor_exposure_mode());
+    assert!(
+        c.floor_exposure_gate_pending(),
+        "entering the tool raises the storey-count gate"
+    );
+
+    c.confirm_all_storeys_added();
+    assert!(
+        !c.floor_exposure_gate_pending(),
+        "confirming lowers the gate (auto-pass has run)"
+    );
+
+    c.set_floor_exposure_select_mode(Some(SelectMode::All));
+    let n_regions: usize = c.current_record.as_ref().unwrap().data.storeys[0]
+        .floors
+        .regions
+        .len();
+    assert_eq!(
+        c.floor_exposure_selected_ids().len(),
+        n_regions,
+        "Set all seeds every floor region across the stack"
+    );
+
+    c.set_floor_exposure_for(FloorExposure::Ground);
+    c.materialize();
+
+    let rec = c.current_record.as_ref().unwrap();
+    assert!(
+        rec.data.storeys[0]
+            .floors
+            .regions
+            .iter()
+            .all(|r| r.exposure == FloorExposure::Ground),
+        "every floor region resolves to the assigned Ground exposure"
+    );
+}
+
+/// Floor-exposure CLICK toggles a single region in and back out of the
+/// selection (the smallest-area overlap-pick rule degenerates to the one region
+/// here), and the gate blocks selection until confirmed.
+#[test]
+fn floor_exposure_click_toggles_one_region() {
+    let mut c = dimensioned_square_controller();
+    c.materialize();
+    // A point inside the square footprint (dimensioned_square is ~ a unit-ish
+    // square near the origin; its centroid is well inside).
+    let region = &c.current_record.as_ref().unwrap().data.storeys[0]
+        .floors
+        .regions[0];
+    let centre = region.centroid();
+
+    c.set_floor_exposure_mode(true);
+    c.set_floor_exposure_select_mode(Some(SelectMode::Click));
+    // Gate still up → select mode is rejected, taps do nothing.
+    c.toggle_floor_exposure_at(centre.x, centre.y, 0.5);
+    assert!(
+        c.floor_exposure_selected_ids().is_empty(),
+        "the gate blocks selection until storeys are confirmed"
+    );
+
+    c.confirm_all_storeys_added();
+    c.set_floor_exposure_select_mode(Some(SelectMode::Click));
+    c.toggle_floor_exposure_at(centre.x, centre.y, 0.5);
+    assert_eq!(
+        c.floor_exposure_selected_ids().len(),
+        1,
+        "a tap selects the floor region under it"
+    );
+    c.toggle_floor_exposure_at(centre.x, centre.y, 0.5);
+    assert!(
+        c.floor_exposure_selected_ids().is_empty(),
+        "a second tap toggles it back out"
+    );
+}
+
+/// Floor-exposure CARVE: drawing + dimensioning a carve SPLITS the floor on
+/// EVERY storey the carve overlaps (not just selecting whole regions, the old
+/// behaviour), then SELECTS the carved pieces so an exposure can be assigned to
+/// them alone — the phase-2 carve flow, generalised across the stack.
+#[test]
+fn floor_exposure_carve_dimensions_then_splits_every_overlapped_storey() {
+    use ber_model::ber::structural::FloorExposure;
+
+    // Two storeys with the SAME 10×10 footprint at the origin, so one interior
+    // carve overlaps (and must split) BOTH floors.
+    let mut c = dimensioned_square_controller(); // storey 0 = 10×10 at origin
+    c.set_default_ceiling_height(2.4).unwrap();
+    c.add_storey().unwrap();
+    finalise_current_storey_as_offset_square(&mut c, 10.0, 0.0, 0.0); // storey 1 = 10×10 @ origin (same footprint)
+    c.set_default_ceiling_height(2.4).unwrap();
+    c.materialize();
+    {
+        let s = &c.current_record.as_ref().unwrap().data.storeys;
+        assert_eq!(s[0].floors.regions.len(), 1);
+        assert_eq!(s[1].floors.regions.len(), 1);
+    }
+
+    // Enter the tool, confirm the storey-count gate (a SAME-footprint stack has
+    // only full-containment party surfaces, so the auto-pass writes NO floor
+    // carves — the only split below is ours), then pick the Carve subtool.
+    c.set_floor_exposure_mode(true);
+    c.confirm_all_storeys_added();
+    c.set_floor_exposure_select_mode(Some(SelectMode::Carve));
+
+    // An interior 4×4 carve at (2,2)-(6,6) — overlaps both footprints.
+    c.apply_floor_exposure_carve_stroke(&[
+        (2.0, 2.0),
+        (6.0, 2.0),
+        (6.0, 6.0),
+        (2.0, 6.0),
+        (2.1, 2.1),
+    ]);
+    assert!(
+        c.dimensioning_active(),
+        "the carve prompts to be dimensioned before it splits"
+    );
+
+    // Dimension the carve + accept the interior position prompts → the
+    // floor-exposure carve auto-commits (no separate Edit-attributes step).
+    complete_interior_length_loop(&mut c);
+    skip_position_prompts(&mut c);
+    c.materialize();
+
+    // CORE FIX: the carve SPLITS the floor (it doesn't just select) — on BOTH
+    // storeys the carve overlapped, not only the one it was dimensioned against.
+    {
+        let s = &c.current_record.as_ref().unwrap().data.storeys;
+        assert_eq!(s[0].floors.regions.len(), 2, "lower floor carved in two");
+        assert_eq!(s[1].floors.regions.len(), 2, "upper floor carved in two");
+    }
+    // The carve produced a selectable set spanning the stack.
+    assert!(
+        !c.floor_exposure_selected_ids().is_empty(),
+        "the carved piece(s) are selected for exposure-setting"
+    );
+
+    // The carved piece is now its own settable area: assigning an exposure to the
+    // selection marks the carved (smallest-area) piece on EACH storey.
+    c.set_floor_exposure_for(FloorExposure::Exposed);
+    c.materialize();
+    let s = &c.current_record.as_ref().unwrap().data.storeys;
+    for (i, st) in s.iter().enumerate() {
+        let carved = st
+            .floors
+            .regions
+            .iter()
+            .min_by(|a, b| a.area().partial_cmp(&b.area()).unwrap())
+            .expect("a floor region");
+        assert_eq!(
+            carved.exposure,
+            FloorExposure::Exposed,
+            "storey {i}'s carved piece took the assigned exposure"
+        );
+    }
+}
+
+/// FIX 1 (multi-storey undo): on a 2-storey SETBACK stack,
+/// `auto_expose_all_storeys` pushes carves onto EVERY storey's
+/// `floor_splits`/`roof_splits` — so undo must revert the whole stack, not just
+/// the active storey. Capture every storey's split counts + exposures before the
+/// pass; assert undo restores ALL of them (no leftover carves on the non-active
+/// storey, no surviving party exposure).
+#[test]
+fn auto_expose_all_storeys_undo_reverts_every_storey() {
+    use ber_model::ber::structural::{CeilingExposure, FloorExposure};
+
+    let mut c = dimensioned_square_controller(); // storey 0 = 10×10 at origin
+    c.set_default_ceiling_height(2.4).unwrap();
+    c.add_storey().unwrap();
+    finalise_current_storey_as_offset_square(&mut c, 6.0, 6.0, 6.0); // upper 6×6 @ (6,6)
+    c.set_default_ceiling_height(2.4).unwrap();
+    c.materialize();
+
+    // The active storey is the upper one (idx 1) after add_storey; the carves
+    // land on BOTH storeys' records, so the non-active storey (0) is the one the
+    // old active-only snapshot would have leaked.
+    let split_counts = |c: &AppController| -> Vec<(usize, usize)> {
+        c.current_record
+            .as_ref()
+            .unwrap()
+            .data
+            .storeys
+            .iter()
+            .map(|s| (s.floor_splits.len(), s.roof_splits.len()))
+            .collect()
+    };
+    let before = split_counts(&c);
+    // Pre-pass: nothing is carved yet anywhere.
+    assert!(
+        before.iter().all(|&(f, r)| f == 0 && r == 0),
+        "no splits before the pass"
+    );
+
+    c.auto_expose_all_storeys();
+    c.materialize();
+    let after = split_counts(&c);
+    assert!(
+        after.iter().any(|&(f, _)| f > 0) && after.iter().any(|&(_, r)| r > 0),
+        "the pass carved floor + roof splits onto the stack"
+    );
+    // Party exposures actually got stamped (the per-frame derive does it).
+    {
+        let s = &c.current_record.as_ref().unwrap().data.storeys;
+        assert!(
+            s[1].floors
+                .regions
+                .iter()
+                .any(|r| r.exposure == FloorExposure::NonHeatLoss),
+            "upper floor has a party piece"
+        );
+        assert!(
+            s[0].roofs
+                .regions
+                .iter()
+                .any(|r| r.exposure == CeilingExposure::Party),
+            "lower ceiling has a party piece"
+        );
+    }
+
+    c.undo().unwrap();
+    c.materialize();
+    let restored = split_counts(&c);
+    assert_eq!(
+        restored, before,
+        "undo reverts EVERY storey's floor_splits/roof_splits (no leftover \
+         carves on the non-active storey)"
+    );
+    // And the party exposures are gone — every floor/ceiling region back to its
+    // pre-pass classification (the ground floor stays Ground via the per-frame
+    // derive; the point is no NonHeatLoss/Party leftover from the carved pieces).
+    {
+        let s = &c.current_record.as_ref().unwrap().data.storeys;
+        assert!(
+            !s[1]
+                .floors
+                .regions
+                .iter()
+                .any(|r| r.exposure == FloorExposure::NonHeatLoss),
+            "undo cleared the upper party-floor exposure"
+        );
+        assert!(
+            !s[0]
+                .roofs
+                .regions
+                .iter()
+                .any(|r| r.exposure == CeilingExposure::Party),
+            "undo cleared the lower party-ceiling exposure"
+        );
+    }
+}
+
+/// FIX 4 (dead party-stamp loop removed): the carved party pieces are STILL
+/// marked NonHeatLoss / Party after the explicit stamp loop was deleted — the
+/// per-frame full-containment auto-derive (inside `commit_to_ber`) does it. This
+/// is the same setback geometry as the Stage-1 test, re-asserted post-refactor.
+#[test]
+fn auto_expose_all_storeys_party_pieces_marked_without_explicit_loop() {
+    use ber_model::ber::structural::{CeilingExposure, FloorExposure};
+
+    let mut c = dimensioned_square_controller();
+    c.set_default_ceiling_height(2.4).unwrap();
+    c.add_storey().unwrap();
+    finalise_current_storey_as_offset_square(&mut c, 6.0, 6.0, 6.0);
+    c.set_default_ceiling_height(2.4).unwrap();
+    c.materialize();
+
+    c.auto_expose_all_storeys();
+    c.materialize();
+
+    let s = &c.current_record.as_ref().unwrap().data.storeys;
+    assert!(
+        s[1].floors
+            .regions
+            .iter()
+            .any(|r| r.exposure == FloorExposure::NonHeatLoss),
+        "the over-lower floor piece is still NonHeatLoss"
+    );
+    assert!(
+        s[0].roofs
+            .regions
+            .iter()
+            .any(|r| r.exposure == CeilingExposure::Party),
+        "the under-upper ceiling piece is still Party"
+    );
+}
+
+/// FIX 3 (dedup carve splits): re-running `auto_expose_all_storeys` a second time
+/// replans the SAME (idempotent) party geometry — the dedup must keep
+/// `floor_splits`/`roof_splits` from growing.
+#[test]
+fn auto_expose_all_storeys_twice_does_not_grow_splits() {
+    let mut c = dimensioned_square_controller();
+    c.set_default_ceiling_height(2.4).unwrap();
+    c.add_storey().unwrap();
+    finalise_current_storey_as_offset_square(&mut c, 6.0, 6.0, 6.0);
+    c.set_default_ceiling_height(2.4).unwrap();
+    c.materialize();
+
+    c.auto_expose_all_storeys();
+    c.materialize();
+    let counts = |c: &AppController| -> Vec<(usize, usize)> {
+        c.current_record
+            .as_ref()
+            .unwrap()
+            .data
+            .storeys
+            .iter()
+            .map(|s| (s.floor_splits.len(), s.roof_splits.len()))
+            .collect()
+    };
+    let first = counts(&c);
+
+    c.auto_expose_all_storeys();
+    c.materialize();
+    let second = counts(&c);
+
+    assert_eq!(
+        first, second,
+        "a second auto-pass must not grow floor_splits/roof_splits (dedup)"
+    );
+}
+
+// ── Structure-phase group EXPOSURE (the editable dropdown) ──────────────────
+
+/// (a) Two walls sharing the SAME (default) construction but with DIFFERENT
+/// exposure split into two separate groups — the grouping key now includes
+/// exposure.
+#[test]
+fn structure_groups_split_by_exposure() {
+    let mut c = dimensioned_square_controller();
+    let walls = c.document.outline.floor_plan.perimeter_walls();
+    assert!(walls.len() >= 4);
+    let (vid0, a0, b0) = walls[0];
+    let (vid1, a1, b1) = walls[1];
+    let len0 = ((b0.x - a0.x).powi(2) + (b0.y - a0.y).powi(2)).sqrt();
+    let len1 = ((b1.x - a1.x).powi(2) + (b1.y - a1.y).powi(2)).sqrt();
+    // Paint each wall full-length with a DIFFERENT exposure; construction is
+    // left at its (shared) default, so only exposure distinguishes them.
+    c.document
+        .set_wall_section(vid0, 0.0, len0, len0, WallExposure::Exposed);
+    c.document
+        .set_wall_section(vid1, 0.0, len1, len1, WallExposure::SemiExposed);
+    c.mark_dirty().unwrap(); // direct field writes don't bump the revision
+    c.materialize();
+
+    set_only_kind(&mut c, SurfaceKind::Walls);
+    c.set_structure_select_mode(Some(SelectMode::All));
+    c.begin_structure_edit();
+    let e = c.structure_edit().expect("session opened");
+    // The two painted walls land in distinct groups by their exposure; the two
+    // unmarked walls form their own Unset group(s).
+    use ber_model::ber::structural::SurfaceExposure;
+    let exposed = e
+        .groups
+        .iter()
+        .filter(|g| g.exposure == SurfaceExposure::Wall(WallExposure::Exposed))
+        .count();
+    let semi = e
+        .groups
+        .iter()
+        .filter(|g| g.exposure == SurfaceExposure::Wall(WallExposure::SemiExposed))
+        .count();
+    assert_eq!(exposed, 1, "one Exposed group");
+    assert_eq!(semi, 1, "one Semi-exposed group");
+    assert!(
+        e.groups.len() >= 3,
+        "Exposed, Semi-exposed and at least one Unset group: {}",
+        e.groups.len()
+    );
+}
+
+/// (b) Setting a FLOOR group's exposure stamps every floor region's exposure
+/// after `materialize`.
+#[test]
+fn structure_group_exposure_sets_floor_regions() {
+    use ber_model::ber::structural::{FloorExposure, SurfaceExposure};
+    let mut c = dimensioned_square_controller();
+    c.materialize();
+
+    set_only_kind(&mut c, SurfaceKind::Floors);
+    c.set_structure_select_mode(Some(SelectMode::All));
+    c.begin_structure_edit();
+    assert_eq!(
+        c.structure_edit().unwrap().groups.len(),
+        1,
+        "one floor group"
+    );
+
+    c.set_structure_group_exposure(0, SurfaceExposure::Floor(FloorExposure::Ground));
+    // Reflected immediately in the session group.
+    assert_eq!(
+        c.structure_edit().unwrap().groups[0].exposure,
+        SurfaceExposure::Floor(FloorExposure::Ground),
+    );
+    c.materialize();
+
+    let rec = c.current_record.as_ref().unwrap();
+    assert!(
+        rec.data.storeys[0]
+            .floors
+            .regions
+            .iter()
+            .all(|r| r.exposure == FloorExposure::Ground),
+        "every floor region stamped Ground"
+    );
+}
+
+/// (c) Setting a PERIMETER wall group's exposure repaints ONLY the targeted
+/// regions' spans — a second, differently-exposed section on the SAME wall
+/// keeps its exposure.
+#[test]
+fn structure_group_exposure_repaints_only_targeted_wall_span() {
+    use ber_model::ber::structural::SurfaceExposure;
+    let mut c = dimensioned_square_controller();
+    let (vid0, a0, b0) = c.document.outline.floor_plan.perimeter_walls()[0];
+    let len = ((b0.x - a0.x).powi(2) + (b0.y - a0.y).powi(2)).sqrt();
+    // Two sections on wall0: [0, len/2] SemiExposed and [len/2, len] Exposed.
+    c.document
+        .set_wall_section(vid0, 0.0, len * 0.5, len, WallExposure::SemiExposed);
+    c.document
+        .set_wall_section(vid0, len * 0.5, len, len, WallExposure::Exposed);
+    c.mark_dirty().unwrap(); // direct field writes don't bump the revision
+    c.materialize();
+
+    // Select ONLY the SemiExposed region of wall0 and re-expose it Ground.
+    let semi_id = {
+        let storey = &c.current_record.as_ref().unwrap().data.storeys[0];
+        storey
+            .walls
+            .regions
+            .iter()
+            .find(|r| r.exposure == WallExposure::SemiExposed)
+            .expect("the semi-exposed half")
+            .id
+    };
+    set_only_kind(&mut c, SurfaceKind::Walls);
+    c.set_structure_select_mode(Some(SelectMode::Click));
+    // Begin an edit over a single-id selection by toggling it in directly.
+    c.toggle_structure_surface_at(a0.x as f64, a0.y as f64, 0.5); // ensure a click mode is live
+    c.clear_structure_surface_selection();
+    // Seed the selection with just the SemiExposed region's id.
+    c.structure_selected.insert(semi_id);
+    c.begin_structure_edit();
+    let gi = c
+        .structure_edit()
+        .unwrap()
+        .groups
+        .iter()
+        .position(|g| g.exposure == SurfaceExposure::Wall(WallExposure::SemiExposed))
+        .expect("the semi-exposed group");
+    c.set_structure_group_exposure(gi, SurfaceExposure::Wall(WallExposure::Ground));
+    c.materialize();
+
+    // The other half (Exposed) is untouched; the targeted half is now Ground.
+    let storey = &c.current_record.as_ref().unwrap().data.storeys[0];
+    let on_wall0: Vec<WallExposure> = storey
+        .walls
+        .regions
+        .iter()
+        .filter_map(|r| {
+            c.document.storeys[0]
+                .recover_wall_region_span(r)
+                .filter(|(vid, ..)| *vid == vid0)
+                .map(|_| r.exposure)
+        })
+        .collect();
+    assert!(
+        on_wall0.contains(&WallExposure::Exposed),
+        "the other section keeps Exposed: {on_wall0:?}"
+    );
+    assert!(
+        !on_wall0.contains(&WallExposure::SemiExposed),
+        "the targeted span is no longer SemiExposed: {on_wall0:?}"
+    );
+}
+
+/// (d) A FACE-PARTITIONED wall's group is `exposure_locked` — the dropdown is
+/// shown disabled (the per-region partition tool owns its exposure).
+#[test]
+fn face_partitioned_wall_group_is_exposure_locked() {
+    use document::PartitionCut;
+    let mut c = dimensioned_square_controller();
+    let (vid0, ..) = c.document.outline.floor_plan.perimeter_walls()[0];
+    // Face-partition wall0 with a single horizontal cut.
+    c.document.commit_partition_cut(
+        vid0,
+        PartitionCut {
+            a: Point2f32::new(0.0, 1.2),
+            b: Point2f32::new(10.0, 1.2),
+        },
+    );
+    assert!(c.document.is_wall_partitioned(vid0));
+    c.mark_dirty().unwrap();
+    c.materialize();
+
+    set_only_kind(&mut c, SurfaceKind::Walls);
+    c.set_structure_select_mode(Some(SelectMode::All));
+    c.begin_structure_edit();
+    let e = c.structure_edit().expect("session opened");
+    assert!(
+        e.groups.iter().any(|g| g.exposure_locked),
+        "the partitioned wall's group is exposure-locked"
+    );
+}

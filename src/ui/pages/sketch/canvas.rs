@@ -416,20 +416,54 @@ pub(super) fn render<F: FnMut(UiEvent)>(
     // surfaces the shaded faces on the canvas are.
     super::overlays::highlight_caption(ui, rect, view.display, view.surface_counts);
 
-    // BER view layer with optional collinearity highlight overlay.
-    render::render_ber(
-        &painter,
-        rect,
-        ber,
-        current_storey_idx,
-        mode,
-        display,
-        view.review,
-        dimensioned_walls,
-        vp,
-        view.structure_selected,
-        view.structure_edit,
-    );
+    // Floor-exposure tool (post-gate): the OVERLAID all-storeys floor view
+    // REPLACES the normal single-storey plan (independent of the active tab —
+    // it shows every storey). While the gate is up, fall through to the normal
+    // plan so the assessor still sees their work behind the gate prompt.
+    let floor_exposure_active = view.floor_exposure_mode && !view.floor_exposure_gate_pending;
+    if floor_exposure_active {
+        if let Some(ber) = ber {
+            render::all_storeys_floors::render(
+                &painter,
+                rect,
+                ber,
+                vp,
+                view.floor_exposure_storeys,
+            );
+            // In-flight CARVE ring (being dimensioned): drawn in the SAME
+            // union-fit transform the overlaid floors use, so the region the
+            // assessor is measuring lines up with the floors beneath it. The
+            // floating number box (rendered unconditionally below the canvas)
+            // carries the actual dimension question + current length.
+            if view.floor_exposure_carve_polygon.len() >= 3 {
+                if let Some(t) = floor_exposure_transform(Some(ber), rect, vp) {
+                    let pts: Vec<egui::Pos2> = view
+                        .floor_exposure_carve_polygon
+                        .iter()
+                        .map(|(x, y)| t.apply(*x, *y))
+                        .collect();
+                    let fill = egui::Color32::from_rgba_unmultiplied(120, 200, 255, 70);
+                    let stroke = egui::Stroke::new(2.5, egui::Color32::from_rgb(120, 200, 255));
+                    painter.add(egui::Shape::convex_polygon(pts, fill, stroke));
+                }
+            }
+        }
+    } else {
+        // BER view layer with optional collinearity highlight overlay.
+        render::render_ber(
+            &painter,
+            rect,
+            ber,
+            current_storey_idx,
+            mode,
+            display,
+            view.review,
+            dimensioned_walls,
+            vp,
+            view.structure_selected,
+            view.structure_edit,
+        );
+    }
 
     // Structure "Edit attributes" — EXPLODED view only: place a small group-picker
     // popup at each group's pulled-out position (clicking makes that group active;
@@ -1387,6 +1421,78 @@ pub(super) fn render<F: FnMut(UiEvent)>(
         }
     }
 
+    // Floor-exposure tool (post-gate): the overlaid all-storeys floor view owns
+    // the canvas. In Click a primary tap toggles the floor region under it
+    // (across the stack); in Carve a primary drag captures a stroke (pixels →
+    // world on release) that DIMENSIONS the carve, which then splits the floor.
+    // While a dimension/position prompt is up (the carve is being measured) the
+    // canvas input is suppressed so the floating number box owns interaction.
+    // Uses the union-fit transform so taps/strokes match the drawn floors. 2D only.
+    if floor_exposure_active
+        && matches!(mode, SketchMode::Storey2D)
+        && !touch_nav_active
+        && !dim_prompting
+        && view.position_prompt.is_none()
+    {
+        if let Some(t) = floor_exposure_transform(ber, rect, vp) {
+            let tol_world = (12.0 / t.scale()) as f64;
+            match view.floor_exposure_select {
+                Some(SelectMode::Click) => {
+                    if response.clicked_by(egui::PointerButton::Primary) {
+                        if let Some(pos) = response.interact_pointer_pos() {
+                            let (wx, wy) = t.inverse(pos.x, pos.y);
+                            on_event(UiEvent::Sketch(SketchEvent::FloorExposureTap {
+                                world_x: wx,
+                                world_y: wy,
+                                tol: tol_world,
+                            }));
+                        }
+                    }
+                }
+                Some(SelectMode::Carve) => {
+                    if response.drag_started_by(egui::PointerButton::Primary) {
+                        if let Some(pos) = response.interact_pointer_pos() {
+                            on_event(UiEvent::Sketch(SketchEvent::StartStroke(
+                                pos - rect.left_top().to_vec2(),
+                            )));
+                        }
+                    }
+                    if response.dragged_by(egui::PointerButton::Primary) {
+                        if let Some(pos) = response.interact_pointer_pos() {
+                            on_event(UiEvent::Sketch(SketchEvent::AddPoint(
+                                pos - rect.left_top().to_vec2(),
+                            )));
+                        }
+                    }
+                    if response.drag_stopped_by(egui::PointerButton::Primary) {
+                        if let Some(stroke) = view.current.as_ref() {
+                            let topleft = rect.left_top();
+                            let world_points: Vec<(f32, f32)> = stroke
+                                .points
+                                .iter()
+                                .map(|p| {
+                                    let (wx, wy) = t.inverse(p.x + topleft.x, p.y + topleft.y);
+                                    (wx as f32, wy as f32)
+                                })
+                                .collect();
+                            on_event(UiEvent::Sketch(
+                                SketchEvent::FloorExposureCarveStrokeWorld {
+                                    points: world_points,
+                                },
+                            ));
+                        } else {
+                            on_event(UiEvent::Sketch(SketchEvent::CancelStroke));
+                        }
+                    }
+                    if let Some(stroke) = &view.current {
+                        draw_stroke(&painter, rect, stroke);
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+
     // Exposure mode: a tap selects the wall under the pointer; a
     // primary drag near a selection handle slides that handle along
     // the wall. Takes priority over stroke/edit input (suppressed via
@@ -1476,6 +1582,7 @@ pub(super) fn render<F: FnMut(UiEvent)>(
         && !view.roof_ridge_pending
         && !view.roof_rect_pending
         && !view.exposure_mode
+        && !view.floor_exposure_mode
         && !view.partition_mode
         && !view.openings_mode
         // Structure phase owns the canvas with its own selection tools.
@@ -1762,6 +1869,24 @@ fn canvas_transform(
         b.storeys.get(i).and_then(render::storey_2d::bounding_box)?
     };
     Some(render::fit_transform(rect, min_xy, max_xy, view))
+}
+
+/// The transform the OVERLAID floor-exposure view is drawn with: fitted to the
+/// union of every storey's floor bbox (so it matches
+/// [`render::all_storeys_floors::render`]). Lets taps/strokes convert to world
+/// coords against the same mapping the floors are drawn with.
+fn floor_exposure_transform(
+    ber: Option<&Ber>,
+    rect: egui::Rect,
+    view: ViewParams,
+) -> Option<render::Transform2d> {
+    let b = ber?;
+    let bb = b
+        .storeys
+        .iter()
+        .filter_map(render::storey_2d::bounding_box)
+        .fold(None, |acc, x| render::union_bbox(acc, Some(x)))?;
+    Some(render::fit_transform(rect, bb.0, bb.1, view))
 }
 
 /// World coords of a canvas-pixel position via the storey's own fit transform.

@@ -98,6 +98,10 @@ impl AppController {
         self.set_openings_mode(false);
         self.set_living_area_mode(false);
         self.set_exposure_mode(false);
+        // The floor-exposure tool takes over the canvas with the all-storeys
+        // overlaid view; leaving Mapping must drop it so Structure shows the
+        // ordinary per-storey diagram again.
+        self.set_floor_exposure_mode(false);
         self.set_phase_mode(false);
         self.set_step_mode(false);
         self.set_ceiling_step_mode(false);

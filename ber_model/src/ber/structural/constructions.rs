@@ -150,6 +150,77 @@ impl ConstructionType {
     }
 }
 
+/// An exposure VALUE tagged by its surface kind — the unified value the
+/// Structure-phase "Edit attributes" editor carries for the exposure dropdown,
+/// so one group/event type covers walls, floors and ceilings/roofs (mirrors
+/// [`ConstructionType`] for the type dropdown). Each variant wraps that kind's
+/// own exposure enum. Transient editor/UI state, not persisted (the durable
+/// record is the region's `exposure` field / the `StoreyDoc` exposure tables).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SurfaceExposure {
+    Wall(WallExposure),
+    Floor(FloorExposure),
+    Ceiling(CeilingExposure),
+}
+
+impl SurfaceExposure {
+    /// The exposure values offered for `kind`, in the dropdown's display order —
+    /// the most common boundary first, `Unset` last.
+    pub fn variants_for(kind: SurfaceKind) -> &'static [SurfaceExposure] {
+        match kind {
+            SurfaceKind::Walls => &[
+                SurfaceExposure::Wall(WallExposure::Exposed),
+                SurfaceExposure::Wall(WallExposure::SemiExposed),
+                SurfaceExposure::Wall(WallExposure::NonHeatLoss),
+                SurfaceExposure::Wall(WallExposure::Ground),
+                SurfaceExposure::Wall(WallExposure::Unset),
+            ],
+            SurfaceKind::Floors => &[
+                SurfaceExposure::Floor(FloorExposure::Ground),
+                SurfaceExposure::Floor(FloorExposure::Exposed),
+                SurfaceExposure::Floor(FloorExposure::SemiExposed),
+                SurfaceExposure::Floor(FloorExposure::NonHeatLoss),
+                SurfaceExposure::Floor(FloorExposure::Unset),
+            ],
+            SurfaceKind::Roofs => &[
+                SurfaceExposure::Ceiling(CeilingExposure::ExposedRoof),
+                SurfaceExposure::Ceiling(CeilingExposure::Party),
+                SurfaceExposure::Ceiling(CeilingExposure::Unheated),
+                SurfaceExposure::Ceiling(CeilingExposure::Unset),
+            ],
+        }
+    }
+
+    /// The surface kind this exposure value belongs to.
+    pub fn kind(&self) -> SurfaceKind {
+        match self {
+            SurfaceExposure::Wall(_) => SurfaceKind::Walls,
+            SurfaceExposure::Floor(_) => SurfaceKind::Floors,
+            SurfaceExposure::Ceiling(_) => SurfaceKind::Roofs,
+        }
+    }
+
+    /// Short label for the dropdown.
+    pub fn label(&self) -> &'static str {
+        match self {
+            SurfaceExposure::Wall(WallExposure::Exposed) => "Exposed",
+            SurfaceExposure::Wall(WallExposure::SemiExposed) => "Semi-exposed",
+            SurfaceExposure::Wall(WallExposure::NonHeatLoss) => "Non heat loss",
+            SurfaceExposure::Wall(WallExposure::Ground) => "Ground",
+            SurfaceExposure::Wall(WallExposure::Unset) => "Unset",
+            SurfaceExposure::Floor(FloorExposure::Ground) => "Ground",
+            SurfaceExposure::Floor(FloorExposure::Exposed) => "Exposed",
+            SurfaceExposure::Floor(FloorExposure::SemiExposed) => "Semi-exposed",
+            SurfaceExposure::Floor(FloorExposure::NonHeatLoss) => "Non heat loss",
+            SurfaceExposure::Floor(FloorExposure::Unset) => "Unset",
+            SurfaceExposure::Ceiling(CeilingExposure::ExposedRoof) => "Exposed roof",
+            SurfaceExposure::Ceiling(CeilingExposure::Party) => "Party",
+            SurfaceExposure::Ceiling(CeilingExposure::Unheated) => "Unheated",
+            SurfaceExposure::Ceiling(CeilingExposure::Unset) => "Unset",
+        }
+    }
+}
+
 /// Thermal exposure classification
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum WallExposure {

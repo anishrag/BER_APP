@@ -28,6 +28,7 @@ mod debug;
 mod dimensioning;
 mod editing;
 mod exposure;
+mod floor_exposure;
 mod living_areas;
 mod openings;
 mod partition;
@@ -47,6 +48,7 @@ use document::{
 };
 pub use document::{ExposureSection, PositionPromptKind, RiserKind};
 pub use exposure::{ExposureSelection, RiserView, SectionHandle, WallExposureView};
+pub use floor_exposure::{FloorExposureRegionView, FloorExposureStoreyView};
 // `ExposureSection` is re-exported above (the controller's public surface).
 
 use chrono::NaiveDate;
@@ -364,6 +366,38 @@ pub struct AppController {
     /// shared construction, with one group's popup active. `None` when not
     /// editing. Transient; cleared on phase switch / kind change.
     structure_edit: Option<StructureEdit>,
+    /// True when the FLOOR-exposure tool is active: the canvas shows every
+    /// storey's floors overlaid and taps/carves select floor regions across the
+    /// stack. Mutually exclusive with the other Mapping modes. Toggled by the UI.
+    floor_exposure_mode: bool,
+    /// True while the storey-count gate prompt is up (entered the tool but the
+    /// assessor hasn't yet confirmed every storey is added). The auto-exposure
+    /// pass runs on confirm; the overlaid view + selection are gated until then.
+    floor_exposure_gate_pending: bool,
+    /// The active floor-exposure Select subtool (Click/Carve/All/Remaining), or
+    /// `None`. Transient floor-exposure interaction state.
+    floor_exposure_select: Option<SelectMode>,
+    /// The selected floor regions, keyed by `(storey_idx, region centroid key)`
+    /// since the selection spans the whole stack. A centroid key (not an
+    /// `ItemId`) is used because floor-region ids are re-minted on every resolve
+    /// — and `materialize` re-resolves every frame — so an id-keyed selection
+    /// would go stale the moment a `mark_dirty` fired. The overlaid view halos
+    /// these. Transient; cleared on tool exit / Deselect.
+    floor_exposure_selected: HashSet<(usize, document::CentroidKey)>,
+    /// True while a floor-exposure CARVE is in-flight in the dimensioning buffer
+    /// (the carved region drawn as a `PhaseArea` shape, awaiting its measurements
+    /// so the split ring is pinned). Discriminates the shared
+    /// `maybe_stage_structure_carve` staging hook: when set, a finished carve
+    /// stages into [`pending_floor_exposure_carves`] (splits every overlapping
+    /// storey's FLOOR) rather than the Structure-phase pending carves. `None`
+    /// when no floor-exposure carve is in-flight.
+    floor_exposure_carve_in_flight: bool,
+    /// The reference storey whose outline a floor-exposure carve is dimensioned
+    /// against (the All tab has no active storey, so the carve borrows a storey's
+    /// outline into the live buffer). The carve ring lands in plan/world coords —
+    /// applied to every overlapping storey at commit. `None` when no carve is
+    /// in-flight; restores nothing (the buffer is reloaded on exit).
+    floor_exposure_carve_ref: Option<usize>,
 }
 
 impl AppController {
@@ -429,6 +463,12 @@ impl AppController {
             pending_structure_cut: None,
             structure_split_kind: None,
             structure_edit: None,
+            floor_exposure_mode: false,
+            floor_exposure_gate_pending: false,
+            floor_exposure_select: None,
+            floor_exposure_selected: HashSet::new(),
+            floor_exposure_carve_in_flight: false,
+            floor_exposure_carve_ref: None,
         }
     }
 }

@@ -543,8 +543,41 @@ pub enum SketchEvent {
         group: usize,
         name: String,
     },
+    /// Structure phase: set a group's boundary-condition EXPOSURE (kind-tagged);
+    /// applies to that group's surfaces.
+    SetStructureGroupExposure {
+        group_index: usize,
+        exposure: ber_model::ber::structural::SurfaceExposure,
+    },
     /// Structure phase: close the "Edit attributes" session.
     EndStructureEdit,
+    // ── Floor exposure ───────────────────────────────────────────────────────
+    /// Toggle the floor-exposure tool. On enter the storey-count gate is raised
+    /// (the overlaid view + selection wait for `ConfirmAllStoreysAdded`).
+    SetFloorExposureMode(bool),
+    /// Gate answer "Yes, finished adding all storeys" — runs the auto-exposure
+    /// pass and reveals the overlaid floor view.
+    ConfirmAllStoreysAdded,
+    /// Gate answer "Not yet" — exit the tool to add the remaining storeys.
+    DeferStoreyCount,
+    /// Set (or clear with `None`) the floor-exposure Select subtool.
+    SetFloorExposureSelectMode(Option<SelectMode>),
+    /// Floor-exposure Click subtool: a tap (world coords) toggling the floor
+    /// region under it (across the whole stack) in/out of the selection.
+    FloorExposureTap {
+        world_x: f64,
+        world_y: f64,
+        tol: f64,
+    },
+    /// Floor-exposure Carve subtool: a drawn stroke (world coords) selecting
+    /// every floor region it encloses across the stack.
+    FloorExposureCarveStrokeWorld {
+        points: Vec<(f32, f32)>,
+    },
+    /// Clear every selected floor region ("Deselect all").
+    DeselectAllFloorExposure,
+    /// Assign a floor exposure to the current floor-region selection.
+    AssignFloorExposure(ber_model::ber::structural::FloorExposure),
 }
 
 /// Everything the Sketch page needs for one frame, built by the app shell
@@ -819,6 +852,22 @@ pub struct SketchView<'a> {
     /// the pending selection until "Edit attributes" commits them. Empty when
     /// no carve is staged.
     pub pending_structure_carves: &'a [Vec<(f64, f64)>],
+    // ── Floor exposure ───────────────────────────────────────────────────────
+    /// Floor-exposure tool active: the canvas shows the overlaid all-storeys
+    /// floor view + selection instead of the normal plan, gated until the
+    /// storey-count confirm.
+    pub floor_exposure_mode: bool,
+    /// The storey-count gate is up — show the gate prompt, hide the overlaid
+    /// view + selection until confirmed.
+    pub floor_exposure_gate_pending: bool,
+    /// The active floor-exposure Select subtool (Click/Carve/All/Remaining).
+    pub floor_exposure_select: Option<SelectMode>,
+    /// Per-storey floor regions for the overlaid view (with selection flags).
+    pub floor_exposure_storeys: &'a [crate::controller::app_controller::FloorExposureStoreyView],
+    /// The in-flight floor-exposure CARVE ring (world coords) while it's being
+    /// dimensioned — highlighted over the overlaid view so the assessor sees the
+    /// region tighten as they enter measurements. Empty when no carve is in flight.
+    pub floor_exposure_carve_polygon: &'a [(f64, f64)],
 }
 
 #[derive(Default)]

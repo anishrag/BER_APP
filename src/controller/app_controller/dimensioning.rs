@@ -390,6 +390,8 @@ impl AppController {
         self.push_history_snapshot(undo_snap);
         // A Structure-phase split that finishes on a POSITION prompt commits here.
         self.maybe_stage_structure_carve();
+        // …and the same for a floor-exposure carve (shared dimensioning buffer).
+        self.maybe_stage_floor_exposure_carve();
         Ok(())
     }
 
@@ -498,6 +500,7 @@ impl AppController {
         let _ = self.mark_dirty();
         // A Structure split whose last position prompt was SKIPPED commits here.
         self.maybe_stage_structure_carve();
+        self.maybe_stage_floor_exposure_carve();
         Ok(())
     }
 
@@ -553,6 +556,7 @@ impl AppController {
         // A Structure-phase split that just finished dimensioning commits here
         // (no-op unless a split is in-flight and fully dimensioned).
         self.maybe_stage_structure_carve();
+        self.maybe_stage_floor_exposure_carve();
         Ok(())
     }
 
@@ -565,6 +569,7 @@ impl AppController {
         self.maybe_seed_inherited_levels();
         // A Structure split whose last length prompt was SKIPPED commits here.
         self.maybe_stage_structure_carve();
+        self.maybe_stage_floor_exposure_carve();
     }
 
     /// Recompute `current_prompt` based on which params are still unknown — see

@@ -14,7 +14,7 @@
 use ber_model::ber::common::ConstructionPhase;
 use ber_model::ber::structural::{
     CeilingConstructionType, ConstructionMakeup, ConstructionType, FloorConstructionType,
-    SurfaceCounts, WallConstructionType,
+    SurfaceCounts, SurfaceExposure, WallConstructionType,
 };
 
 use super::SketchEvent;
@@ -216,10 +216,11 @@ pub(crate) fn group_editor_ui<F: FnMut(UiEvent)>(
     enabled: bool,
     on_event: &mut F,
 ) {
-    // Heading level 1: the surface kind — centred + bold.
+    // Heading level 1: the surface kind + the group's surface COUNT — centred,
+    // bold (e.g. "Wall (3)").
     ui.vertical_centered(|ui| {
         ui.label(
-            egui::RichText::new(kind_heading(kind))
+            egui::RichText::new(format!("{} ({})", kind_heading(kind), g.ids.len()))
                 .size(EDITOR_FONT + 2.0)
                 .strong(),
         );
@@ -270,6 +271,38 @@ pub(crate) fn group_editor_ui<F: FnMut(UiEvent)>(
                 }
             });
     });
+    // EXPOSURE dropdown — the boundary condition shared by the group's surfaces,
+    // mirroring the phase dropdown. When the group is LOCKED (a face-partitioned
+    // wall, whose exposure is owned per-2-D-region by the wall partition tool),
+    // it's shown disabled with a hint rather than as an editable control.
+    if g.exposure_locked {
+        ui.add_enabled(
+            false,
+            egui::Button::new(egui::RichText::new(g.exposure.label()).size(EDITOR_FONT)),
+        )
+        .on_disabled_hover_text("Exposure is per-region — set it in the wall partition tool.");
+    } else {
+        ui.add_enabled_ui(enabled, |ui| {
+            egui::ComboBox::from_id_salt(("structure_exposure", group_index))
+                .selected_text(egui::RichText::new(g.exposure.label()).size(EDITOR_FONT))
+                .show_ui(ui, |ui| {
+                    for exp in SurfaceExposure::variants_for(kind) {
+                        if ui
+                            .selectable_label(
+                                g.exposure == *exp,
+                                egui::RichText::new(exp.label()).size(EDITOR_FONT),
+                            )
+                            .clicked()
+                        {
+                            on_event(UiEvent::Sketch(SketchEvent::SetStructureGroupExposure {
+                                group_index,
+                                exposure: *exp,
+                            }));
+                        }
+                    }
+                });
+        });
+    }
     // Each kind offers its own types; the chosen type is tagged with
     // `ConstructionType` so the event/controller stay kind-agnostic. The TYPE is
     // a dropdown (not a button row) to keep the window narrow; its UNSET text is

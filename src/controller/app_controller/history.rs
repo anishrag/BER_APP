@@ -24,6 +24,13 @@ pub struct HistorySnapshot {
     /// The window-type registry (windows reference it by id) — restored with the
     /// storey so an undone window doesn't leave a dangling type reference.
     pub(super) window_types: Option<Vec<ber_model::ber::fenestration::WindowType>>,
+    /// The WHOLE storey stack AS IT WAS — captured only by actions that mutate
+    /// records ACROSS storeys (e.g. `auto_expose_all_storeys`, which pushes
+    /// carves onto every storey's `floor_splits`/`roof_splits`). When `Some`, the
+    /// restore writes back every storey's record (and SKIPS the single
+    /// `record_storey` write); `None` (the common case) keeps the active-only
+    /// behaviour. The normal `current_history_snapshot` leaves this `None`.
+    pub(super) all_storeys: Option<Vec<ber_model::ber::structural::Storey>>,
 }
 
 impl AppController {
@@ -50,7 +57,19 @@ impl AppController {
             living_area_mode: self.living_area_mode,
             record_storey,
             window_types,
+            all_storeys: None,
         }
+    }
+
+    /// A FULL snapshot that also captures the WHOLE storey stack — for actions
+    /// that mutate records across multiple storeys (`auto_expose_all_storeys`).
+    /// Restore writes back every storey's record, so carves pushed onto
+    /// non-active storeys revert too. Otherwise identical to
+    /// [`current_history_snapshot`](Self::current_history_snapshot).
+    pub(super) fn current_history_snapshot_full(&self) -> HistorySnapshot {
+        let mut snap = self.current_history_snapshot();
+        snap.all_storeys = self.current_record.as_ref().map(|r| r.data.storeys.clone());
+        snap
     }
 
     pub(super) fn restore_history_snapshot(&mut self, snap: HistorySnapshot) {
@@ -62,7 +81,11 @@ impl AppController {
             if let Some(types) = snap.window_types {
                 record.data.window_types = types;
             }
-            if let Some((idx, storey)) = snap.record_storey {
+            // A full snapshot restores the WHOLE stack (and SKIPS the
+            // single-storey write); otherwise restore just the active storey.
+            if let Some(all) = snap.all_storeys {
+                record.data.storeys = all;
+            } else if let Some((idx, storey)) = snap.record_storey {
                 if let Some(slot) = record.data.storeys.get_mut(idx) {
                     *slot = storey;
                 }

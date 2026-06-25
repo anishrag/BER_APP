@@ -24,6 +24,37 @@ pub fn centroid_key(c: Point2f64) -> CentroidKey {
     (q(c.x), q(c.y))
 }
 
+/// The [`CentroidKey`] of a plan RING (open or closed) — its area-weighted
+/// polygon centroid quantized to the mm grid. Matches the key a resolved region
+/// carved from this ring will carry, so it's the de-dup identity for a planned
+/// carve against the durable `floor_splits`/`roof_splits`. Degenerate rings
+/// (< 3 distinct pts / zero area) fall back to the vertex mean.
+pub fn ring_centroid_key(ring: &[Point2f64]) -> CentroidKey {
+    let n = ring.len();
+    if n == 0 {
+        return (0, 0);
+    }
+    let mut a = 0.0;
+    let mut cx = 0.0;
+    let mut cy = 0.0;
+    for i in 0..n {
+        let p = ring[i];
+        let q = ring[(i + 1) % n];
+        let cross = p.x * q.y - q.x * p.y;
+        a += cross;
+        cx += (p.x + q.x) * cross;
+        cy += (p.y + q.y) * cross;
+    }
+    let c = if a.abs() > 1e-12 {
+        Point2f64::new(cx / (3.0 * a), cy / (3.0 * a))
+    } else {
+        let sx: f64 = ring.iter().map(|p| p.x).sum();
+        let sy: f64 = ring.iter().map(|p| p.y).sum();
+        Point2f64::new(sx / n as f64, sy / n as f64)
+    };
+    centroid_key(c)
+}
+
 /// A session-only tagged area: a world-space (metre) ring + the phase to stamp
 /// onto surfaces inside it.
 #[derive(Debug, Clone)]

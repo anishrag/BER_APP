@@ -26,6 +26,14 @@ pub struct FloorRegion {
 }
 
 impl FloorRegion {
+    /// The region's plan area in square metres — used to disambiguate a tap
+    /// that lands on overlapping floors from different storeys (the smallest /
+    /// most-specific sub-region wins).
+    pub fn area(&self) -> f64 {
+        use geo::Area;
+        self.polygon.unsigned_area()
+    }
+
     /// The region's plan centroid — the durable geometric key for an assigned
     /// construction (floors have no parametric `SurfaceRef`, so the centroid is
     /// their stable identity across the re-derive; mirrors a riser's base edge).
