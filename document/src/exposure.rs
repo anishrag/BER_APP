@@ -802,8 +802,8 @@ const CONTAINMENT_TOL_M: f64 = 0.05;
 /// Party / NonHeatLoss when it sits ENTIRELY over the neighbour footprint;
 /// partial overlap from a cantilever/setback stays absent → resolves `Unset`,
 /// left for manual marking):
-///  - storey-0 floor → `Ground`; an intermediate floor fully covered by the
-///    storey BELOW → `NonHeatLoss` (party floor to the dwelling below);
+///  - a floor fully covered by the storey BELOW → `NonHeatLoss` (party floor to
+///    the dwelling below); the lowest floor is left `Unset` for the assessor;
 ///  - top-storey ceiling → `ExposedRoof`; an intermediate ceiling fully covered
 ///    by the storey ABOVE → `Party` (party ceiling to the dwelling above).
 pub fn auto_derive_horizontal_exposure(
@@ -815,21 +815,20 @@ pub fn auto_derive_horizontal_exposure(
     let Some(storey) = ber.storeys.get(idx) else {
         return;
     };
-    // Floors: storey 0 is ground-bearing; an intermediate floor fully over the
-    // storey below is a party floor.
+    // Floors: a floor fully over the storey BELOW is a party floor (NonHeatLoss).
+    // The lowest storey's floor is deliberately NOT auto-classified — "ground"
+    // isn't always right (it could sit over a basement/garage, or be exposed), so
+    // it's left `Unset` for the assessor to label in the floor-exposure view.
     let below_footprint = idx
         .checked_sub(1)
         .and_then(|b| ber.storeys.get(b))
         .and_then(|s| s.floors.footprint_ring());
     let floor_rings = storey.floors.to_vertex_lists();
     for (region, ring) in storey.floors.regions.iter().zip(&floor_rings) {
-        let derived = if idx == 0 {
-            Some(FloorExposure::Ground)
-        } else if let Some(below) = &below_footprint {
-            ring_within_ring(ring, below, CONTAINMENT_TOL_M).then_some(FloorExposure::NonHeatLoss)
-        } else {
-            None
-        };
+        let derived = below_footprint
+            .as_ref()
+            .filter(|below| ring_within_ring(ring, below, CONTAINMENT_TOL_M))
+            .map(|_| FloorExposure::NonHeatLoss);
         if let Some(e) = derived {
             doc.floor_exposure
                 .entry(centroid_key(region.centroid()))
@@ -1126,10 +1125,11 @@ mod tests {
         }
     }
 
-    /// Auto-derive on a clean 2-storey stack: storey-0 floor → Ground, the top
-    /// (storey-1) ceiling → ExposedRoof. The intermediate surfaces between the
-    /// two FULLY-overlapping footprints derive Party (ceiling under the upper)
-    /// and NonHeatLoss (floor over the lower).
+    /// Auto-derive on a clean 2-storey stack: the lowest (storey-0) floor is NOT
+    /// auto-classified (left Unset for the assessor — "ground" isn't always
+    /// right); the top (storey-1) ceiling → ExposedRoof. The intermediate
+    /// surfaces between the two FULLY-overlapping footprints derive Party
+    /// (ceiling under the upper) and NonHeatLoss (floor over the lower).
     #[test]
     fn auto_derive_ground_roof_and_party_on_a_clean_stack() {
         let mut ber = Ber::default();
@@ -1146,7 +1146,11 @@ mod tests {
         let f1 = centroid_key(ber.storeys[1].floors.regions[0].centroid());
         let c1 = centroid_key(ber.storeys[1].roofs.regions[0].centroid());
 
-        assert_eq!(d0.floor_exposure.get(&f0), Some(&FloorExposure::Ground));
+        assert_eq!(
+            d0.floor_exposure.get(&f0),
+            None,
+            "the lowest floor is left for the assessor, not auto-classified"
+        );
         assert_eq!(d0.ceiling_exposure.get(&c0), Some(&CeilingExposure::Party));
         assert_eq!(
             d1.floor_exposure.get(&f1),
@@ -1158,22 +1162,24 @@ mod tests {
         );
     }
 
-    /// Auto-derive never clobbers a manual value: a manual Exposed floor on
-    /// storey 0 stays Exposed even though the auto-pass would write Ground.
+    /// Auto-derive never clobbers a manual value: a manual Exposed floor on the
+    /// upper storey stays Exposed even though the auto-pass would write
+    /// NonHeatLoss (it sits fully over the storey below).
     #[test]
     fn auto_derive_does_not_clobber_a_manual_value() {
         let mut ber = Ber::default();
         ber.storeys.push(storey_with(square_ring(0.0, 4.0)));
+        ber.storeys.push(storey_with(square_ring(0.0, 4.0)));
 
         let mut doc = StoreyDoc::default();
-        let key = centroid_key(ber.storeys[0].floors.regions[0].centroid());
+        let key = centroid_key(ber.storeys[1].floors.regions[0].centroid());
         doc.floor_exposure.insert(key, FloorExposure::Exposed);
 
-        auto_derive_horizontal_exposure(&mut doc, &ber, 0, 1);
+        auto_derive_horizontal_exposure(&mut doc, &ber, 1, 2);
         assert_eq!(
             doc.floor_exposure.get(&key),
             Some(&FloorExposure::Exposed),
-            "manual override wins over the auto Ground"
+            "manual override wins over the auto NonHeatLoss"
         );
     }
 

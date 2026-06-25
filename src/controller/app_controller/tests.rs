@@ -2243,16 +2243,26 @@ fn new_checklist_rows_gate_mapping_complete() {
     );
 
     // Surfaces needs ceiling (roof) regions to exist — set a default ceiling
-    // height so the storey resolves a roof. storey-0 floors auto-derive Ground
-    // and its ceiling ExposedRoof, and the derive-then-stamp pass lands those on
-    // the resolved regions in the SAME commit. ONE commit must settle it — this
+    // height so the storey resolves a roof (its ceiling auto-derives ExposedRoof).
+    // The lowest floor is NO LONGER auto-classified (left for the assessor), so
+    // label it, then the derive-then-stamp pass lands floor + ceiling on the
+    // resolved regions in the SAME commit. ONE commit must settle it — this
     // single-commit assertion is the regression guard for the lag bug.
     c.set_default_ceiling_height(2.4).unwrap();
+    let fkey = document::centroid_key(
+        c.current_record.as_ref().unwrap().data.storeys[0]
+            .floors
+            .regions[0]
+            .centroid(),
+    );
+    c.document.storeys[0]
+        .floor_exposure
+        .insert(fkey, ber_model::ber::structural::FloorExposure::Ground);
     c.commit_to_ber().unwrap();
     assert_eq!(
         checklist_status_of(&c, "Surfaces"),
         ChecklistStatus::AllStoreys,
-        "auto-derived floor/ceiling exposure satisfies the surfaces row in one commit"
+        "labelled floor + auto-derived ceiling exposure satisfies the surfaces row in one commit"
     );
 
     // Exposures (walls) is the last pre-existing gate — paint the perimeter.
@@ -8804,20 +8814,23 @@ fn floor_exposure_click_toggles_one_region() {
     );
 }
 
-/// Floor-exposure CARVE: drawing + dimensioning a carve SPLITS the floor on
-/// EVERY storey the carve overlaps (not just selecting whole regions, the old
-/// behaviour), then SELECTS the carved pieces so an exposure can be assigned to
-/// them alone — the phase-2 carve flow, generalised across the stack.
+/// Floor-exposure CARVE: drawing + dimensioning a carve SPLITS the floor (it
+/// doesn't just select whole regions, the old behaviour) and selects the carved
+/// piece so an exposure can be assigned to it — the phase-2 carve flow. Only the
+/// LABELLABLE (non-party) floors are split/selectable: in a same-footprint stack
+/// the upper floor is an auto party (NonHeatLoss) floor and is left untouched,
+/// while the lower (Unset) floor carves and selects.
 #[test]
-fn floor_exposure_carve_dimensions_then_splits_every_overlapped_storey() {
+fn floor_exposure_carve_dimensions_then_splits_the_labellable_floor() {
     use ber_model::ber::structural::FloorExposure;
 
-    // Two storeys with the SAME 10×10 footprint at the origin, so one interior
-    // carve overlaps (and must split) BOTH floors.
+    // Two storeys, SAME 10×10 footprint at the origin. Auto-exposure makes the
+    // UPPER floor party (NonHeatLoss, fully over the lower) and leaves the LOWER
+    // floor Unset (the lowest floor is no longer auto-Ground).
     let mut c = dimensioned_square_controller(); // storey 0 = 10×10 at origin
     c.set_default_ceiling_height(2.4).unwrap();
     c.add_storey().unwrap();
-    finalise_current_storey_as_offset_square(&mut c, 10.0, 0.0, 0.0); // storey 1 = 10×10 @ origin (same footprint)
+    finalise_current_storey_as_offset_square(&mut c, 10.0, 0.0, 0.0); // storey 1 = 10×10 @ origin
     c.set_default_ceiling_height(2.4).unwrap();
     c.materialize();
     {
@@ -8826,14 +8839,19 @@ fn floor_exposure_carve_dimensions_then_splits_every_overlapped_storey() {
         assert_eq!(s[1].floors.regions.len(), 1);
     }
 
-    // Enter the tool, confirm the storey-count gate (a SAME-footprint stack has
-    // only full-containment party surfaces, so the auto-pass writes NO floor
-    // carves — the only split below is ours), then pick the Carve subtool.
     c.set_floor_exposure_mode(true);
     c.confirm_all_storeys_added();
+    c.materialize();
+    // Auto pass: upper floor party (hidden), lower floor still Unset (labellable).
+    {
+        let s = &c.current_record.as_ref().unwrap().data.storeys;
+        assert_eq!(s[0].floors.regions[0].exposure, FloorExposure::Unset);
+        assert_eq!(s[1].floors.regions[0].exposure, FloorExposure::NonHeatLoss);
+    }
     c.set_floor_exposure_select_mode(Some(SelectMode::Carve));
 
-    // An interior 4×4 carve at (2,2)-(6,6) — overlaps both footprints.
+    // An interior 4×4 carve at (2,2)-(6,6) — overlaps both footprints, but only
+    // the labellable lower floor is split.
     c.apply_floor_exposure_carve_stroke(&[
         (2.0, 2.0),
         (6.0, 2.0),
@@ -8845,44 +8863,92 @@ fn floor_exposure_carve_dimensions_then_splits_every_overlapped_storey() {
         c.dimensioning_active(),
         "the carve prompts to be dimensioned before it splits"
     );
-
-    // Dimension the carve + accept the interior position prompts → the
-    // floor-exposure carve auto-commits (no separate Edit-attributes step).
     complete_interior_length_loop(&mut c);
     skip_position_prompts(&mut c);
     c.materialize();
 
-    // CORE FIX: the carve SPLITS the floor (it doesn't just select) — on BOTH
-    // storeys the carve overlapped, not only the one it was dimensioned against.
+    // The labellable LOWER floor split in two; the party UPPER floor is untouched.
     {
         let s = &c.current_record.as_ref().unwrap().data.storeys;
-        assert_eq!(s[0].floors.regions.len(), 2, "lower floor carved in two");
-        assert_eq!(s[1].floors.regions.len(), 2, "upper floor carved in two");
+        assert_eq!(
+            s[0].floors.regions.len(),
+            2,
+            "lower (labellable) floor carved in two"
+        );
+        assert_eq!(
+            s[1].floors.regions.len(),
+            1,
+            "party upper floor left untouched"
+        );
     }
-    // The carve produced a selectable set spanning the stack.
     assert!(
         !c.floor_exposure_selected_ids().is_empty(),
-        "the carved piece(s) are selected for exposure-setting"
+        "the carved lower piece is selected for exposure-setting"
     );
 
-    // The carved piece is now its own settable area: assigning an exposure to the
-    // selection marks the carved (smallest-area) piece on EACH storey.
+    // Assigning an exposure marks the carved lower piece; the upper floor stays party.
     c.set_floor_exposure_for(FloorExposure::Exposed);
     c.materialize();
     let s = &c.current_record.as_ref().unwrap().data.storeys;
-    for (i, st) in s.iter().enumerate() {
-        let carved = st
-            .floors
+    assert!(
+        s[0].floors
             .regions
             .iter()
-            .min_by(|a, b| a.area().partial_cmp(&b.area()).unwrap())
-            .expect("a floor region");
-        assert_eq!(
-            carved.exposure,
-            FloorExposure::Exposed,
-            "storey {i}'s carved piece took the assigned exposure"
-        );
-    }
+            .any(|r| r.exposure == FloorExposure::Exposed),
+        "the carved lower piece took the assigned exposure"
+    );
+    assert_eq!(
+        s[1].floors.regions[0].exposure,
+        FloorExposure::NonHeatLoss,
+        "the party upper floor is unaffected"
+    );
+}
+
+/// Regression: the floor-exposure carve clips to the WHOLE BUILDING footprint
+/// (union of all storeys), not the reference storey's outline. Opening the tool
+/// from the smaller UPPER storey (so it's the reference) and carving over area
+/// that exists only on the LOWER storey must still produce a valid carve + split
+/// the lower floor — the old behaviour clipped the stroke to the upper outline
+/// and lost it.
+#[test]
+fn floor_exposure_carve_clips_to_whole_building_not_reference_storey() {
+    let mut c = dimensioned_square_controller(); // storey 0 = 10×10 at origin
+    c.set_default_ceiling_height(2.4).unwrap();
+    c.add_storey().unwrap();
+    finalise_current_storey_as_offset_square(&mut c, 6.0, 0.0, 0.0); // storey 1 = 6×6 @ origin (setback)
+    c.set_default_ceiling_height(2.4).unwrap();
+    c.materialize();
+    // The upper (smaller) storey is active — as if the assessor clicked it first.
+    assert_eq!(c.current_storey_idx(), Some(1));
+
+    c.set_floor_exposure_mode(true);
+    c.confirm_all_storeys_added();
+    c.set_floor_exposure_select_mode(Some(SelectMode::Carve));
+
+    // Carve a region near the (10,10) corner — inside the LOWER 10×10 floor but
+    // entirely OUTSIDE the upper 6×6 (the reference). The whole-building union is
+    // the 10×10, so this is a valid carve; clipped to the upper outline it would
+    // be empty.
+    c.apply_floor_exposure_carve_stroke(&[
+        (7.0, 7.0),
+        (9.0, 7.0),
+        (9.0, 9.0),
+        (7.0, 9.0),
+        (7.1, 7.1),
+    ]);
+    // The carve produced a valid dimensionable area: it was clipped to the whole
+    // building (the 10×10 union), not the smaller upper storey. Under the old
+    // behaviour the stroke lay entirely outside the reference (upper) outline, so
+    // no area was carved and dimensioning never started. (The split + selection
+    // after dimensioning is covered by the sibling carve test.)
+    assert!(
+        c.dimensioning_active(),
+        "the carve survives — clipped to the whole building, not the smaller upper storey"
+    );
+    assert!(
+        c.pending_floor_exposure_carve_polygon().len() >= 3,
+        "the in-flight carve region is live"
+    );
 }
 
 /// FIX 1 (multi-storey undo): on a 2-storey SETBACK stack,

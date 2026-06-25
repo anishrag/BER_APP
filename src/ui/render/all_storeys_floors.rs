@@ -60,34 +60,52 @@ pub(crate) fn render(
     };
     let t = fit_transform(rect, min_xy, max_xy, view);
 
+    // A filled mesh of `ring` (screen coords) in `color`, earcut-triangulated so
+    // concave footprints fill cleanly. `None` if triangulation fails.
+    let fill_mesh = |screen_pts: &[egui::Pos2], flat: &[f64], color: egui::Color32| {
+        earcutr::earcut(flat, &[], 2).ok().map(|triangles| {
+            let mut mesh = egui::Mesh::default();
+            for &p in screen_pts {
+                mesh.vertices.push(egui::epaint::Vertex {
+                    pos: p,
+                    uv: egui::epaint::WHITE_UV,
+                    color,
+                });
+            }
+            for idx in triangles {
+                mesh.indices.push(idx as u32);
+            }
+            egui::Shape::mesh(mesh)
+        })
+    };
+
     for sv in storeys {
-        let fill = style::storey_fill(sv.idx);
+        let shade = style::storey_fill(sv.idx);
         for region in &sv.regions {
             if region.ring.len() < 3 {
                 continue;
             }
             let screen_pts: Vec<egui::Pos2> =
                 region.ring.iter().map(|(x, y)| t.apply(*x, *y)).collect();
-
-            // Translucent storey-shade fill (earcut so concave footprints fill
-            // without fan artefacts — the floor-fill pattern).
             let flat: Vec<f64> = region.ring.iter().flat_map(|(x, y)| [*x, *y]).collect();
-            if let Ok(triangles) = earcutr::earcut(&flat, &[], 2) {
-                let mut mesh = egui::Mesh::default();
-                for &p in &screen_pts {
-                    mesh.vertices.push(egui::epaint::Vertex {
-                        pos: p,
-                        uv: egui::epaint::WHITE_UV,
-                        color: fill,
-                    });
+            let ec = exposure_color(region.exposure);
+            // SET = the assessor (or auto) has classified it; UNSET = still to do.
+            let is_set = region.exposure != FloorExposure::Unset;
+
+            // Base storey-shade fill (keeps storey identity across the stack).
+            if let Some(m) = fill_mesh(&screen_pts, &flat, shade) {
+                painter.add(m);
+            }
+            // SET floors get an exposure-colour tint on top, so "done" reads at a
+            // glance and you can tell what it was set to.
+            if is_set {
+                let tint = egui::Color32::from_rgba_unmultiplied(ec.r(), ec.g(), ec.b(), 70);
+                if let Some(m) = fill_mesh(&screen_pts, &flat, tint) {
+                    painter.add(m);
                 }
-                for idx in triangles {
-                    mesh.indices.push(idx as u32);
-                }
-                painter.add(egui::Shape::mesh(mesh));
             }
 
-            // Selection halo UNDER the exposure outline so both read.
+            // Selection halo UNDER the outline so both read.
             if region.selected {
                 painter.add(egui::Shape::closed_line(
                     screen_pts.clone(),
@@ -95,11 +113,23 @@ pub(crate) fn render(
                 ));
             }
 
-            // Exposure outline on top.
-            painter.add(egui::Shape::closed_line(
-                screen_pts,
-                egui::Stroke::new(3.0, exposure_color(region.exposure)),
-            ));
+            // Outline: SET → solid exposure colour (thick, "done"); UNSET →
+            // dashed grey ("still to be set").
+            if is_set {
+                painter.add(egui::Shape::closed_line(
+                    screen_pts,
+                    egui::Stroke::new(3.5, ec),
+                ));
+            } else {
+                let mut ring = screen_pts;
+                ring.push(ring[0]); // close it for the dashed run
+                painter.extend(egui::Shape::dashed_line(
+                    &ring,
+                    egui::Stroke::new(2.0, style::UNSET_WALL),
+                    8.0,
+                    6.0,
+                ));
+            }
         }
     }
 
@@ -133,18 +163,28 @@ fn draw_legend(painter: &egui::Painter, rect: egui::Rect, n_storeys: usize) {
         y += 18.0;
     }
     y += 6.0;
-    for (label, color) in [
-        ("Ground", style::GROUND_WALL),
-        ("Exposed", style::EXPOSED_WALL),
-        ("Semi-exposed", style::SEMI_EXPOSED_WALL),
-        ("Non-heat-loss", style::NON_HEAT_LOSS_WALL),
-        ("Unset", style::UNSET_WALL),
+    // Set exposures draw as a SOLID outline; still-to-set (Unset) draws dashed —
+    // mirror that in the key so the two read the same way as on the canvas.
+    for (label, color, dashed) in [
+        ("Ground", style::GROUND_WALL, false),
+        ("Exposed", style::EXPOSED_WALL, false),
+        ("Semi-exposed", style::SEMI_EXPOSED_WALL, false),
+        ("Non-heat-loss", style::NON_HEAT_LOSS_WALL, false),
+        ("To set", style::UNSET_WALL, true),
     ] {
         let p = egui::pos2(rect.left() + 12.0, y);
-        painter.line_segment(
-            [p + egui::vec2(0.0, 6.0), p + egui::vec2(18.0, 6.0)],
-            egui::Stroke::new(4.0, color),
-        );
+        let a = p + egui::vec2(0.0, 6.0);
+        let b = p + egui::vec2(18.0, 6.0);
+        if dashed {
+            painter.extend(egui::Shape::dashed_line(
+                &[a, b],
+                egui::Stroke::new(2.5, color),
+                4.0,
+                3.0,
+            ));
+        } else {
+            painter.line_segment([a, b], egui::Stroke::new(4.0, color));
+        }
         painter.text(
             egui::pos2(p.x + 24.0, p.y + 6.0),
             egui::Align2::LEFT_CENTER,

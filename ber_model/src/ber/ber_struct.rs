@@ -50,6 +50,51 @@ impl Ber {
         }
     }
 
+    /// The whole-building plan footprint: the UNION of every storey's floor
+    /// footprint, returned as one ring (the largest connected component, open —
+    /// no closing duplicate). `None` when no storey has floors. Used to clip a
+    /// tool that spans the whole stack (the floor-exposure carve) to the ENTIRE
+    /// building outline, not just one storey's — so a carve drawn over area that
+    /// belongs to a different storey isn't clipped away.
+    pub fn floors_footprint_union(&self) -> Option<Vec<Point2f64>> {
+        use geo::bool_ops::BooleanOps;
+        use geo::Area;
+        let to_poly = |ring: &[Point2f64]| {
+            geo::Polygon::new(
+                geo::LineString::from(ring.iter().map(|p| (p.x, p.y)).collect::<Vec<_>>()),
+                vec![],
+            )
+        };
+        let mut acc: Option<geo::MultiPolygon<f64>> = None;
+        for s in &self.storeys {
+            let Some(ring) = s.floors.footprint_ring() else {
+                continue;
+            };
+            if ring.len() < 3 {
+                continue;
+            }
+            let poly = to_poly(&ring);
+            acc = Some(match acc {
+                None => geo::MultiPolygon::new(vec![poly]),
+                Some(mp) => mp.union(&poly),
+            });
+        }
+        let best = acc?.0.into_iter().max_by(|a, b| {
+            a.unsigned_area()
+                .partial_cmp(&b.unsigned_area())
+                .unwrap_or(std::cmp::Ordering::Equal)
+        })?;
+        let mut ring: Vec<Point2f64> = best
+            .exterior()
+            .coords()
+            .map(|c| Point2f64::new(c.x, c.y))
+            .collect();
+        if ring.len() > 1 && ring.first() == ring.last() {
+            ring.pop();
+        }
+        (ring.len() >= 3).then_some(ring)
+    }
+
     /// Find-or-create a shared `WindowType` for `(glazing, frame, year)` and
     /// return its id — the window-type analogue of `ensure_*_construction`, so
     /// identical windows share one type.

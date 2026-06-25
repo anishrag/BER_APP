@@ -239,7 +239,13 @@ impl AppController {
         let mut best: Option<(f64, usize, document::CentroidKey)> = None;
         for (idx, storey) in record.data.storeys.iter().enumerate() {
             if let Some(id) = storey.surface_at(SurfaceKind::Floors, world_x, world_y, tol) {
-                if let Some(region) = storey.floors.regions.iter().find(|r| r.id == id) {
+                if let Some(region) = storey
+                    .floors
+                    .regions
+                    .iter()
+                    // Party floors aren't shown, so a tap can't select one.
+                    .find(|r| r.id == id && r.exposure != FloorExposure::NonHeatLoss)
+                {
                     let area = region.area();
                     if best.as_ref().is_none_or(|(a, _, _)| area < *a) {
                         best = Some((area, idx, document::centroid_key(region.centroid())));
@@ -291,21 +297,34 @@ impl AppController {
         if pts.len() < 2 {
             return;
         }
-        // Load the reference storey's outline into the live buffer so the carve
-        // (which runs against `document` = the active storey's outline) has a
-        // real boundary to cut against, even on the All tab.
+        // Host the in-flight carve's dimensioning on a reference storey (the
+        // PhaseArea buffer lives on the active storey).
         let Some(ref_idx) = self.floor_exposure_reference_storey() else {
             return;
         };
         self.document.set_active_storey(ref_idx);
         self.document.active = ActiveShape::Outline;
         self.load_active_into_buffer();
-        self.sync_active();
-        match self
-            .document
-            .carve_or_cut_in_available(&pts, &[], &self.tuning.subarea)
-        {
-            Ok((boundary, SubareaOutcome::Area(plan))) => {
+        // Clip the carve to the WHOLE BUILDING footprint (union of every storey's
+        // floor), NOT just the active/reference storey's outline — otherwise a
+        // carve drawn over area belonging to another storey gets clipped away
+        // (e.g. you opened the tool from the smaller upper storey). Each storey's
+        // floor is still clipped individually when the split is applied
+        // (`with_splits`), so the union is just the outer bound. Falls back to the
+        // reference storey's outline if no union can be built.
+        let boundary = self
+            .current_record
+            .as_ref()
+            .and_then(|r| r.data.floors_footprint_union())
+            .map(|ring| {
+                ring.iter()
+                    .map(|p| domain::points::to_f32(*p))
+                    .collect::<Vec<_>>()
+            })
+            .and_then(|ring| manip_plan::FloorPlan::from_clean_ring(&ring).ok())
+            .unwrap_or_else(|| self.document.outline.floor_plan.clone());
+        match boundary.carve_or_cut(&pts, &self.tuning.subarea, false) {
+            Ok(SubareaOutcome::Area(plan)) => {
                 if plan.validate_simple().is_err() {
                     return;
                 }
@@ -315,7 +334,7 @@ impl AppController {
             }
             // A straight cut produces two halves, not an enclosed carve region —
             // this tool requires a closed region, so ignore it.
-            Ok((_, SubareaOutcome::Cut(..))) => {}
+            Ok(SubareaOutcome::Cut(..)) => {}
             Err(e) => log::error!("floor exposure carve_or_cut: {}", e),
         }
     }
@@ -478,7 +497,16 @@ impl AppController {
                 .storeys
                 .iter()
                 .enumerate()
-                .filter(|(_, s)| !s.surfaces_in_ring(SurfaceKind::Floors, ring).is_empty())
+                // Only split storeys with a LABELLABLE (non-party) floor under the
+                // ring — party (NonHeatLoss) floors are auto-classified and hidden,
+                // so there's nothing to subdivide there.
+                .filter(|(_, s)| {
+                    let ids = s.surfaces_in_ring(SurfaceKind::Floors, ring);
+                    s.floors
+                        .regions
+                        .iter()
+                        .any(|r| ids.contains(&r.id) && r.exposure != FloorExposure::NonHeatLoss)
+                })
                 .map(|(idx, _)| idx)
                 .collect()
         };
@@ -522,7 +550,10 @@ impl AppController {
                 s.floors
                     .regions
                     .iter()
-                    .filter(move |r| ids.contains(&r.id))
+                    // Only the labellable (non-party) floors are shown/selectable.
+                    .filter(move |r| {
+                        ids.contains(&r.id) && r.exposure != FloorExposure::NonHeatLoss
+                    })
                     .map(move |r| (idx, document::centroid_key(r.centroid())))
             })
             .collect();
@@ -542,8 +573,11 @@ impl AppController {
         let mut keys: HashSet<(usize, document::CentroidKey)> = HashSet::new();
         for (idx, storey) in record.data.storeys.iter().enumerate() {
             for region in &storey.floors.regions {
+                // Party (NonHeatLoss) floors aren't shown/labellable, so neither
+                // seed tool touches them. `All` = every labellable floor;
+                // `Remaining` = the still-`Unset` ones.
                 let take = match mode {
-                    SelectMode::All => true,
+                    SelectMode::All => region.exposure != FloorExposure::NonHeatLoss,
                     SelectMode::Remaining => region.exposure == FloorExposure::Unset,
                     _ => false,
                 };
@@ -600,6 +634,9 @@ impl AppController {
                     .floors
                     .regions
                     .iter()
+                    // The view is a labelling worklist: party (NonHeatLoss) floors
+                    // are auto-classified and need no label, so they drop off.
+                    .filter(|r| r.exposure != FloorExposure::NonHeatLoss)
                     .map(|r| {
                         let ring: Vec<(f64, f64)> = {
                             let mut pts: Vec<(f64, f64)> =
