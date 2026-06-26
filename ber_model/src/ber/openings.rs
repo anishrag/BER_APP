@@ -233,8 +233,16 @@ pub fn add_wall_window(
         assembly_id: None,
     });
     link_window(storey, wall_id, id);
-    redistribute_or_rollback(storey, wall_id, &[OpeningRef::Window(id)])?;
-    Ok(id)
+    // Windows may STACK: if the requested row is horizontally full, place above /
+    // below existing openings rather than refusing. (Doors stay at the floor.)
+    let r = OpeningRef::Window(id);
+    match place_window_with_vertical_fallback(storey, wall_id, r, height_m) {
+        Ok(()) => Ok(id),
+        Err(e) => {
+            rollback_added(storey, wall_id, &[r]);
+            Err(e)
+        }
+    }
 }
 
 /// Add a door to a wall at `along_m` (centre), then redistribute.
@@ -779,6 +787,25 @@ fn wall_placement_of(
 
 /// Redistribute; on `WallTooShort`, remove the just-added `refs` (rollback) and
 /// propagate the error so the caller leaves no partial state.
+/// Remove just-added openings + scrub their `opes` refs — the rollback half of a
+/// failed add.
+fn rollback_added(storey: &mut Storey, wall_id: ItemId, added: &[OpeningRef]) {
+    for r in added {
+        match r {
+            OpeningRef::Window(id) => storey.windows.retain(|w| w.id != *id),
+            OpeningRef::Door(id) => storey.doors.retain(|d| d.id != *id),
+        }
+    }
+    if let Some(reg) = storey.walls.regions.iter_mut().find(|r| r.id == wall_id) {
+        reg.opes
+            .windows
+            .retain(|id| !added.contains(&OpeningRef::Window(*id)));
+        reg.opes
+            .doors
+            .retain(|id| !added.contains(&OpeningRef::Door(*id)));
+    }
+}
+
 fn redistribute_or_rollback(
     storey: &mut Storey,
     wall_id: ItemId,
@@ -787,23 +814,84 @@ fn redistribute_or_rollback(
     match redistribute_wall_openings(storey, wall_id) {
         Ok(()) => Ok(()),
         Err(e) => {
-            for r in added {
-                match r {
-                    OpeningRef::Window(id) => storey.windows.retain(|w| w.id != *id),
-                    OpeningRef::Door(id) => storey.doors.retain(|d| d.id != *id),
-                }
-            }
-            if let Some(reg) = storey.walls.regions.iter_mut().find(|r| r.id == wall_id) {
-                reg.opes
-                    .windows
-                    .retain(|id| !added.contains(&OpeningRef::Window(*id)));
-                reg.opes
-                    .doors
-                    .retain(|id| !added.contains(&OpeningRef::Door(*id)));
-            }
+            rollback_added(storey, wall_id, added);
             Err(e)
         }
     }
+}
+
+/// Set a wall opening's sill directly (no redistribute).
+fn set_wall_opening_sill(storey: &mut Storey, opening: OpeningRef, sill: f32) {
+    let set = |p: &mut Option<OpeningPlacement>| {
+        if let Some(OpeningPlacement::Wall { sill_m, .. }) = p {
+            *sill_m = sill;
+        }
+    };
+    match opening {
+        OpeningRef::Window(id) => {
+            if let Some(w) = storey.windows.iter_mut().find(|w| w.id == id) {
+                set(&mut w.placement);
+            }
+        }
+        OpeningRef::Door(id) => {
+            if let Some(d) = storey.doors.iter_mut().find(|d| d.id == id) {
+                set(&mut d.placement);
+            }
+        }
+    }
+}
+
+/// Place a freshly-added wall WINDOW, using VERTICAL space when the row is full.
+/// Tries the requested sill first; if the openings sharing that height can't all
+/// fit along the wall, it STACKS the window — searching sills at the tops of the
+/// existing openings (lowest first) and the floor — so it lands above/below them
+/// rather than being refused. Existing openings auto-rearrange (redistribute) at
+/// each try; the window's height bounds the search under the wall top. A failed
+/// try leaves positions untouched (redistribute applies nothing on error), so the
+/// only state it carries between tries is the candidate sill. Returns the last
+/// `WallTooShort` if no 2D slot fits at all.
+fn place_window_with_vertical_fallback(
+    storey: &mut Storey,
+    wall_id: ItemId,
+    new_ref: OpeningRef,
+    height: f32,
+) -> Result<(), OpeningError> {
+    let (along, requested) = wall_placement_of(storey, new_ref)
+        .map(|(_, a, s, _)| (a, s))
+        .unwrap_or((0.0, 0.0));
+    let max_sill = storey
+        .walls
+        .regions
+        .iter()
+        .find(|r| r.id == wall_id)
+        .map(|r| r.max_sill_for(along as f64, height as f64) as f32)
+        .unwrap_or(0.0);
+    // Candidate sills, in preference order: the requested one, then stacked at the
+    // top of each existing opening (lowest first), then the floor.
+    let mut tops: Vec<f32> = wall_openings(storey, wall_id)
+        .into_iter()
+        .filter(|o| o.opening != new_ref)
+        .map(|o| o.sill_m + o.height_m)
+        .collect();
+    tops.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    let candidates = std::iter::once(requested)
+        .chain(tops)
+        .chain(std::iter::once(0.0));
+    let mut last_err = OpeningError::WallTooShort {
+        needed_m: 0.0,
+        available_m: 0.0,
+    };
+    for sill in candidates {
+        if sill < -1e-4 || sill > max_sill + 1e-4 {
+            continue;
+        }
+        set_wall_opening_sill(storey, new_ref, sill.clamp(0.0, max_sill));
+        match redistribute_wall_openings(storey, wall_id) {
+            Ok(()) => return Ok(()),
+            Err(e) => last_err = e,
+        }
+    }
+    Err(last_err)
 }
 
 /// Recompute the `vertices` cache of every PLACED opening (`placement: Some`)
@@ -1297,10 +1385,62 @@ mod tests {
     #[test]
     fn redistribution_rejects_and_rolls_back_when_too_short() {
         let (mut s, wid) = storey_with_wall(1.0);
+        // 1.2 m window is WIDER than the 1.0 m wall — can't fit at ANY sill, so the
+        // vertical-stack fallback can't rescue it either: it still rolls back.
         let err = add_wall_window(&mut s, wid, 0.5, 1.2, 1.2, 1.0, ItemId::default()).unwrap_err();
         assert!(matches!(err, OpeningError::WallTooShort { .. }));
         assert!(s.windows.is_empty(), "rolled back — no opening added");
         assert!(s.walls.regions[0].opes.windows.is_empty(), "opes scrubbed");
+    }
+
+    /// When the row is horizontally FULL, a newly-placed window STACKS into the
+    /// vertical space above instead of being refused. A 2 m wall fits two 0.9 m
+    /// windows side-by-side; the third can't share that row, so it lands above it.
+    #[test]
+    fn full_row_stacks_the_next_window_into_vertical_space() {
+        let (mut s, wid) = storey_with_wall(2.0); // 2.4 m tall → room to stack
+        let t = ItemId::default();
+        let a = add_wall_window(&mut s, wid, 0.5, 0.9, 0.9, 0.0, t).unwrap();
+        let b = add_wall_window(&mut s, wid, 1.5, 0.9, 0.9, 0.0, t).unwrap();
+        // Row [0,0.9] is full (3×0.9 + gaps > 2.0); this one must stack above.
+        let c = add_wall_window(&mut s, wid, 1.0, 0.9, 0.9, 0.0, t).unwrap();
+
+        assert_eq!(
+            s.windows.len(),
+            3,
+            "all three placed — the third stacked, not refused"
+        );
+        let sill = |id: ItemId| {
+            s.windows
+                .iter()
+                .find(|w| w.id == id)
+                .and_then(|w| match &w.placement {
+                    Some(OpeningPlacement::Wall { sill_m, .. }) => Some(*sill_m),
+                    _ => None,
+                })
+                .unwrap()
+        };
+        assert!(
+            sill(a) < 0.1 && sill(b) < 0.1,
+            "first two stay on the floor row"
+        );
+        assert!(
+            sill(c) >= 0.9 - 1e-3,
+            "third stacked above the row, got sill {}",
+            sill(c)
+        );
+
+        // No 2D overlap anywhere.
+        let ops = wall_openings(&s, wid);
+        for (i, o1) in ops.iter().enumerate() {
+            for o2 in &ops[i + 1..] {
+                let vert = o1.sill_m < o2.sill_m + o2.height_m - 1e-4
+                    && o2.sill_m < o1.sill_m + o1.height_m - 1e-4;
+                let along =
+                    (o1.along_m - o2.along_m).abs() < (o1.width_m + o2.width_m) / 2.0 - 1e-3;
+                assert!(!(vert && along), "2D overlap: {o1:?} vs {o2:?}");
+            }
+        }
     }
 
     #[test]
