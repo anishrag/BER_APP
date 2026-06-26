@@ -414,26 +414,24 @@ pub(super) fn render<F: FnMut(UiEvent)>(
         external_photos_button(ui, rect, view, on_event);
     }
 
-    // Floating phase signpost (top-centre) + the live per-phase completion
-    // checklist (a draggable window), both painted over the canvas. The
-    // signpost is clickable: clicking a reachable box switches the workspace
-    // phase. Structure unlocks once Mapping is complete (every checklist item
-    // green on all storeys); Objects isn't built yet.
-    if let Some(phase) =
-        super::overlays::phase_bar(ui, rect, view.current_phase, view.mapping_reviewed)
-    {
-        on_event(UiEvent::Sketch(SketchEvent::SetAssessmentPhase(phase)));
-    }
-    // The checklist window shows a "Review ▸" button in the Mapping phase once
-    // every item is green (`mapping_complete`); clicking it opens the review.
-    let review_clicked = super::overlays::checklist_window(
+    // Phase signpost (top-centre), clickable to switch phase, with the live
+    // per-phase completion checklist folded in behind a triangle to its right
+    // (collapsed by default). Structure unlocks once Mapping is complete (every
+    // checklist item green on all storeys); Objects isn't built yet. The expanded
+    // checklist shows a "Review ▸" button in the Mapping phase once every item is
+    // green; clicking it opens the review.
+    let (phase_clicked, review_clicked) = super::overlays::phase_bar(
         ui,
         rect,
         view.current_phase,
+        view.mapping_reviewed,
         &view.checklist,
         view.current_phase == AssessmentPhase::Mapping && view.mapping_complete,
         view.mapping_reviewed,
     );
+    if let Some(phase) = phase_clicked {
+        on_event(UiEvent::Sketch(SketchEvent::SetAssessmentPhase(phase)));
+    }
     if review_clicked {
         on_event(UiEvent::Sketch(SketchEvent::OpenMappingReview));
     }

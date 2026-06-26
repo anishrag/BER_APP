@@ -1,9 +1,8 @@
-//! Floating overlays painted ON TOP of the sketch canvas (Foreground `Area`s /
-//! a `Window`, the same layering pattern as the canvas view buttons + snap
-//! tags): the three-phase progress signpost (top-centre) and the Stage A
-//! completion checklist (a draggable, collapsible window). Both read view data
-//! and emit no events — the phase boxes are a roadmap, not a navigator (only
-//! Stage A exists today), and the checklist is a live read-out.
+//! Floating overlays painted ON TOP of the sketch canvas (Foreground `Area`s,
+//! the same layering pattern as the canvas view buttons + snap tags): the
+//! three-phase progress signpost (top-centre), clickable to switch phase, with
+//! the Stage A completion checklist folded in behind a triangle to its right
+//! (collapsed by default, expanding to a live read-out under the bar).
 
 use egui::{Align2, Color32, CornerRadius, Margin, Rect, RichText, Sense, Stroke};
 
@@ -17,19 +16,33 @@ use domain::sketch::DisplayMode;
 /// the assessor clicked, or `None`. Switching onto Structure is gated on
 /// `mapping_complete` (Structure also earns a green ✓ then); going back to
 /// Mapping is always allowed; Objects isn't built yet, so it's never clickable.
+/// Returns `(phase the assessor clicked, review button clicked)`. The checklist
+/// for the current phase is folded into this bar: a triangle to the RIGHT of the
+/// phase boxes expands/collapses it (collapsed by default; the expand state is
+/// kept in egui memory). When expanded it drops down under the bar with the same
+/// status rows + legend + Mapping "Review" button it had as a floating window.
 #[must_use]
 pub fn phase_bar(
     ui: &egui::Ui,
     rect: Rect,
     current: AssessmentPhase,
     mapping_reviewed: bool,
-) -> Option<AssessmentPhase> {
+    items: &[ChecklistItem],
+    show_review: bool,
+    reviewed: bool,
+) -> (Option<AssessmentPhase>, bool) {
     let phases = [
         (AssessmentPhase::Mapping, "Mapping"),
         (AssessmentPhase::Structure, "Structure"),
         (AssessmentPhase::Objects, "Objects"),
     ];
     let mut clicked = None;
+    let mut review_clicked = false;
+    let expand_id = ui.id().with("phase_checklist_expanded");
+    let mut expanded = ui
+        .ctx()
+        .data(|d| d.get_temp::<bool>(expand_id))
+        .unwrap_or(false);
     egui::Area::new(ui.id().with("canvas_phase_bar"))
         .order(egui::Order::Foreground)
         // `pivot(CENTER_TOP)` places the bar's top-centre at the canvas's
@@ -38,32 +51,60 @@ pub fn phase_bar(
         .fixed_pos(rect.center_top() + egui::vec2(0.0, 8.0))
         .pivot(Align2::CENTER_TOP)
         .show(ui.ctx(), |ui| {
-            ui.horizontal(|ui| {
-                for (i, (phase, label)) in phases.iter().enumerate() {
-                    if i > 0 {
-                        ui.label(RichText::new("→").size(18.0).color(Color32::from_gray(170)));
+            ui.vertical(|ui| {
+                ui.horizontal(|ui| {
+                    for (i, (phase, label)) in phases.iter().enumerate() {
+                        if i > 0 {
+                            ui.label(RichText::new("→").size(18.0).color(Color32::from_gray(170)));
+                        }
+                        let active = *phase == current;
+                        // Mapping always reachable (go back); Structure once
+                        // Mapping is complete; Objects not built yet.
+                        let enabled = match phase {
+                            AssessmentPhase::Mapping => true,
+                            AssessmentPhase::Structure => mapping_reviewed,
+                            AssessmentPhase::Objects => false,
+                        };
+                        // Mapping earns its ✓ once the assessor has confirmed the
+                        // review (which is also what unlocks Structure).
+                        let complete =
+                            matches!(phase, AssessmentPhase::Mapping) && mapping_reviewed;
+                        if phase_box(ui, label, active, complete, enabled).clicked()
+                            && !active
+                            && enabled
+                        {
+                            clicked = Some(*phase);
+                        }
                     }
-                    let active = *phase == current;
-                    // Mapping always reachable (go back); Structure once Mapping
-                    // is complete; Objects not built yet.
-                    let enabled = match phase {
-                        AssessmentPhase::Mapping => true,
-                        AssessmentPhase::Structure => mapping_reviewed,
-                        AssessmentPhase::Objects => false,
-                    };
-                    // Mapping earns its ✓ once the assessor has confirmed the
-                    // review (which is also what unlocks Structure).
-                    let complete = matches!(phase, AssessmentPhase::Mapping) && mapping_reviewed;
-                    if phase_box(ui, label, active, complete, enabled).clicked()
-                        && !active
-                        && enabled
-                    {
-                        clicked = Some(*phase);
+                    // Checklist expand/collapse triangle, to the RIGHT of the bar.
+                    let tri = if expanded { "▼" } else { "▶" };
+                    let resp = ui
+                        .add(
+                            egui::Button::new(
+                                RichText::new(tri).size(15.0).color(Color32::from_gray(200)),
+                            )
+                            .frame(false),
+                        )
+                        .on_hover_text(if expanded {
+                            "Hide checklist"
+                        } else {
+                            "Show checklist"
+                        });
+                    if resp.clicked() {
+                        expanded = !expanded;
                     }
+                });
+                if expanded {
+                    ui.add_space(4.0);
+                    egui::Frame::popup(ui.style()).show(ui, |ui| {
+                        ui.set_max_width(260.0);
+                        review_clicked = checklist_body(ui, items, show_review, reviewed);
+                    });
                 }
             });
         });
-    clicked
+    ui.ctx().data_mut(|d| d.insert_temp(expand_id, expanded));
+    (clicked, review_clicked)
 }
 
 /// One phase box — filled + outlined, highlighted when it's the active phase,
@@ -174,67 +215,50 @@ pub fn highlight_caption(ui: &egui::Ui, rect: Rect, display: DisplayMode, counts
         });
 }
 
-/// Floating, draggable, collapsible per-phase checklist over the canvas. Each
-/// item shows a red / yellow / green status dot recomputed every frame from
-/// `items` (so it tracks edits live). The window title reflects the current
-/// `phase`; it keeps its own position + collapsed state in egui memory (keyed
-/// by that title), constrained to the canvas `rect`.
-#[must_use]
-pub fn checklist_window(
-    ui: &egui::Ui,
-    rect: Rect,
-    phase: AssessmentPhase,
+/// The per-phase checklist body — status rows (a red/yellow/green dot recomputed
+/// each frame from `items`) + the legend + the Mapping "Review" button. Rendered
+/// inline under the phase bar when its triangle is expanded. Returns true if the
+/// review button was clicked.
+fn checklist_body(
+    ui: &mut egui::Ui,
     items: &[ChecklistItem],
     show_review: bool,
     reviewed: bool,
 ) -> bool {
-    let title = match phase {
-        AssessmentPhase::Mapping => "Mapping checklist",
-        AssessmentPhase::Structure => "Structure checklist",
-        AssessmentPhase::Objects => "Objects checklist",
-    };
+    if items.is_empty() {
+        ui.label(RichText::new("Open a BER to track progress.").weak());
+        return false;
+    }
     let mut review_clicked = false;
-    egui::Window::new(title)
-        .order(egui::Order::Foreground)
-        .default_pos(rect.left_top() + egui::vec2(16.0, 56.0))
-        .constrain_to(rect)
-        .collapsible(true)
-        .resizable(false)
-        .show(ui.ctx(), |ui| {
-            if items.is_empty() {
-                ui.label(RichText::new("Open a BER to track progress.").weak());
-                return;
-            }
-            for item in items {
-                ui.horizontal(|ui| {
-                    status_dot(ui, item.status);
-                    ui.label(item.label);
-                });
-            }
-            ui.add_space(2.0);
-            ui.separator();
-            legend(ui);
-            // Once every item is green, the assessor reviews each side's
-            // elevation against its photo before Structure unlocks.
-            if show_review {
-                ui.add_space(4.0);
-                let label = if reviewed {
-                    "Re-review ▸"
-                } else {
-                    "Review ▸"
-                };
-                if ui.button(RichText::new(label).strong()).clicked() {
-                    review_clicked = true;
-                }
-                if !reviewed {
-                    ui.label(
-                        RichText::new("Review each side to unlock Structure.")
-                            .size(11.0)
-                            .weak(),
-                    );
-                }
-            }
+    for item in items {
+        ui.horizontal(|ui| {
+            status_dot(ui, item.status);
+            ui.label(item.label);
         });
+    }
+    ui.add_space(2.0);
+    ui.separator();
+    legend(ui);
+    // Once every item is green, the assessor reviews each side's elevation
+    // against its photo before Structure unlocks.
+    if show_review {
+        ui.add_space(4.0);
+        let label = if reviewed {
+            "Re-review ▸"
+        } else {
+            "Review ▸"
+        };
+        if ui.button(RichText::new(label).strong()).clicked() {
+            review_clicked = true;
+        }
+        if !reviewed {
+            ui.label(
+                RichText::new("Review each side to unlock Structure.")
+                    .size(11.0)
+                    .weak(),
+            );
+        }
+    }
     review_clicked
 }
 
