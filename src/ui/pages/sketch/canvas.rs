@@ -402,11 +402,6 @@ pub(super) fn render<F: FnMut(UiEvent)>(
     let painter = ui.painter_at(rect);
     painter.rect_filled(rect, 0.0, egui::Color32::from_gray(30));
 
-    // Floating view buttons in the canvas's top-right corner (an egui Area on
-    // the Foreground order, so they sit above the canvas and own their
-    // clicks — same pattern as the snap-tag menus).
-    view_buttons(ui, rect, view, on_event);
-
     // Floating "Add external pictures" button + panel, anchored BOTTOM-RIGHT
     // (mirror of `view_buttons`, pivoted to the bottom-right corner). Shown in
     // the Mapping phase once a record is loaded.
@@ -419,8 +414,9 @@ pub(super) fn render<F: FnMut(UiEvent)>(
     // (collapsed by default). Structure unlocks once Mapping is complete (every
     // checklist item green on all storeys); Objects isn't built yet. The expanded
     // checklist shows a "Review ▸" button in the Mapping phase once every item is
-    // green; clicking it opens the review.
-    let (phase_clicked, review_clicked) = super::overlays::phase_bar(
+    // green; clicking it opens the review. Drawn BEFORE the view buttons so they
+    // can be positioned to never overlap the (centred, variable-width) signpost.
+    let (phase_clicked, review_clicked, phase_bar_rect) = super::overlays::phase_bar(
         ui,
         rect,
         view.current_phase,
@@ -435,6 +431,11 @@ pub(super) fn render<F: FnMut(UiEvent)>(
     if review_clicked {
         on_event(UiEvent::Sketch(SketchEvent::OpenMappingReview));
     }
+
+    // View buttons (2D/3D toggle) in the top-right — but dropped BELOW the phase
+    // signpost whenever the centred bar would reach their column, so they never
+    // overlap at any screen width.
+    view_buttons(ui, rect, view, on_event, phase_bar_rect);
 
     // Structure phase: when a surface kind is selected for highlighting, name it
     // (+ its count) in a banner under the signpost so it's explicit which
@@ -2056,9 +2057,20 @@ fn view_buttons<F: FnMut(UiEvent)>(
     rect: egui::Rect,
     view: &SketchView<'_>,
     on_event: &mut F,
+    // The phase-signpost rect to steer clear of. The signpost is centred and its
+    // width varies (the triangle, the expanded checklist), so on a narrow screen
+    // its right edge can reach this top-right column — when it does, drop below it.
+    avoid: egui::Rect,
 ) {
+    let left = rect.right() - 110.0;
+    let top = rect.top() + 8.0;
+    let y = if avoid.right() > left - 6.0 {
+        avoid.bottom() + 6.0
+    } else {
+        top
+    };
     egui::Area::new(ui.id().with("canvas_view_buttons"))
-        .fixed_pos(rect.right_top() + egui::vec2(-110.0, 8.0))
+        .fixed_pos(egui::pos2(left, y))
         .order(egui::Order::Foreground)
         .show(ui.ctx(), |ui| {
             ui.vertical(|ui| {

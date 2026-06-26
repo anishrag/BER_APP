@@ -30,7 +30,7 @@ pub fn phase_bar(
     items: &[ChecklistItem],
     show_review: bool,
     reviewed: bool,
-) -> (Option<AssessmentPhase>, bool) {
+) -> (Option<AssessmentPhase>, bool, Rect) {
     let phases = [
         (AssessmentPhase::Mapping, "Mapping"),
         (AssessmentPhase::Structure, "Structure"),
@@ -43,7 +43,7 @@ pub fn phase_bar(
         .ctx()
         .data(|d| d.get_temp::<bool>(expand_id))
         .unwrap_or(false);
-    egui::Area::new(ui.id().with("canvas_phase_bar"))
+    let bar = egui::Area::new(ui.id().with("canvas_phase_bar"))
         .order(egui::Order::Foreground)
         // `pivot(CENTER_TOP)` places the bar's top-centre at the canvas's
         // top-centre, so it stays centred over the canvas (not the whole
@@ -104,7 +104,7 @@ pub fn phase_bar(
             });
         });
     ui.ctx().data_mut(|d| d.insert_temp(expand_id, expanded));
-    (clicked, review_clicked)
+    (clicked, review_clicked, bar.response.rect)
 }
 
 /// One phase box — filled + outlined, highlighted when it's the active phase,
