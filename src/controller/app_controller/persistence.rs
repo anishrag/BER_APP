@@ -284,17 +284,24 @@ impl AppController {
             self.reconstruct_wall_face_partitions_for(i); // Layer-1 recipe → working map
             self.reconstruct_wall_sections_for(i); // resolved walls → 1-D sections
         }
-        // Recompose phase-tagged roofs from their durable inputs (drops a stale
-        // pre-fix phase-induced split); the caller's re-resolve re-applies the
-        // clean carve.
-        self.heal_phase_induced_roof_splits();
         // Backfill the durable exposure + construction maps from the resolved
         // regions — now the SOLE persisted source (these are `skip_serializing`,
         // so the snapshot no longer carries them). Idempotent (`or_insert`): a
         // legacy snapshot that still deserialized them is preserved.
+        //
+        // MUST run BEFORE `heal_phase_induced_roof_splits`: heal recomposes a
+        // phase-tagged storey's roofs via `default_for_footprint` (DEFAULT
+        // exposure), so seeding after it would read the wiped roofs and lose the
+        // ceiling exposure on the snapshot-less (checkpoint) path. Capturing here
+        // takes the saved Layer-1 exposures; the caller's re-resolve then
+        // re-stamps them onto the (deterministically recomposed) roofs.
         self.seed_riser_exposure_from_record();
         self.seed_horizontal_exposure_from_record();
         self.seed_construction_stores_from_record();
+        // Recompose phase-tagged roofs from their durable inputs (drops a stale
+        // pre-fix phase-induced split); the caller's re-resolve re-applies the
+        // clean carve and re-stamps the exposures seeded just above.
+        self.heal_phase_induced_roof_splits();
     }
 
     /// MIGRATION self-heal for the per-phase-zone roof fix: records saved before

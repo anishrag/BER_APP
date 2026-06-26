@@ -325,7 +325,19 @@ pub fn stamp_ceiling_constructions(ber: &mut Ber, idx: usize, doc: &crate::Store
     let n = ber.storeys[idx].roofs.regions.len();
     for i in 0..n {
         let key = centroid_key(ber.storeys[idx].roofs.regions[i].centroid());
-        if let Some((ty, makeup, phase)) = doc.ceiling_constructions.get(&key) {
+        // Exact centroid key first; containment fallback on a miss (the roof was
+        // recomposed/re-carved on load, drifting its centroid off the seeded key).
+        let entry = doc.ceiling_constructions.get(&key).or_else(|| {
+            let ring: Vec<(f64, f64)> = ber.storeys[idx].roofs.regions[i]
+                .polygon
+                .exterior
+                .iter()
+                .map(|v| (v.x, v.y))
+                .collect();
+            let plan = geo::Polygon::new(geo::LineString::from(ring), vec![]);
+            centroid_override_by_containment(&doc.ceiling_constructions, &plan)
+        });
+        if let Some((ty, makeup, phase)) = entry {
             let cid = ber.ensure_ceiling_construction(*ty, makeup.clone(), phase.clone());
             ber.storeys[idx].roofs.regions[i].construction_id = cid;
         }

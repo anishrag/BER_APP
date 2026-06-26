@@ -638,7 +638,16 @@ fn stamp_ceiling_exposure(s: &StoreyDoc, storey: &mut Storey) {
     }
     for region in &mut storey.roofs.regions {
         let key = crate::centroid_key(region.centroid());
-        if let Some(e) = s.ceiling_exposure.get(&key) {
+        // Exact centroid key first; on a miss (the roof was recomposed/re-carved
+        // on load — e.g. by the phase-roof heal — drifting its centroid off the
+        // seeded key) fall back to the override whose stored centroid is inside
+        // this region's PLAN polygon (its 3-D exterior projected to xy).
+        if let Some(e) = s.ceiling_exposure.get(&key).or_else(|| {
+            let ring: Vec<(f64, f64)> =
+                region.polygon.exterior.iter().map(|v| (v.x, v.y)).collect();
+            let plan = geo::Polygon::new(geo::LineString::from(ring), vec![]);
+            crate::phase::centroid_override_by_containment(&s.ceiling_exposure, &plan)
+        }) {
             region.exposure = *e;
         }
     }

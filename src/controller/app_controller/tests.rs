@@ -4615,6 +4615,65 @@ fn ceiling_carve_split_survives_reload_and_rederive() {
     assert!((session_ring_area(&session[0].polygon) - before_area).abs() < 1e-3);
 }
 
+/// A phase-tagged storey's CEILING exposure survives a Layer-1-only reload. The
+/// load-path `heal` recomposes a phase-tagged storey's roofs via
+/// `default_for_footprint` (DEFAULT exposure), so the seed MUST capture the saved
+/// exposures BEFORE heal runs — otherwise it reads the wiped roofs and the
+/// ceiling reverts to `Unset` (red). The snapshot no longer carries
+/// `ceiling_exposure` (it's `skip_serializing`), so this bites the DB path too,
+/// not just the checkpoint.
+#[test]
+fn phase_tagged_ceiling_exposure_survives_reload() {
+    use ber_model::ber::structural::CeilingExposure;
+    let p = |x: f32, y: f32| Point2f32::new(x, y);
+    let mut c = ceiling_ready_controller();
+    c.set_ceiling_step_mode(false);
+    // Phase-tag the right half so the reload heal recomposes this storey's roofs.
+    c.phase_regions.entry(0).or_default().push(PhaseRegion {
+        polygon: vec![p(5., 0.), p(10., 0.), p(10., 10.), p(5., 10.)],
+        phase: ConstructionPhase::Extension1,
+    });
+    c.mark_dirty().unwrap();
+    c.materialize();
+    // Label every roof region's ceiling exposure.
+    let keys: Vec<_> = c.current_record.as_ref().unwrap().data.storeys[0]
+        .roofs
+        .regions
+        .iter()
+        .map(|r| document::centroid_key(r.centroid()))
+        .collect();
+    for k in keys {
+        c.document.storeys[0]
+            .ceiling_exposure
+            .insert(k, CeilingExposure::ExposedRoof);
+    }
+    c.commit_to_ber().unwrap();
+    c.materialize();
+    assert!(
+        c.current_record.as_ref().unwrap().data.storeys[0]
+            .roofs
+            .regions
+            .iter()
+            .all(|r| r.exposure == CeilingExposure::ExposedRoof),
+        "sanity: all roofs labelled before save"
+    );
+
+    let id = c.current_record.as_ref().unwrap().id.clone();
+    c.flush_if_dirty().unwrap();
+    c.open_ber(&id).unwrap();
+
+    let roofs = &c.current_record.as_ref().unwrap().data.storeys[0]
+        .roofs
+        .regions;
+    assert!(!roofs.is_empty(), "roofs exist after reload");
+    assert!(
+        roofs
+            .iter()
+            .all(|r| r.exposure == CeilingExposure::ExposedRoof),
+        "ceiling exposure survived a phase-tagged reload (seed runs before heal)"
+    );
+}
+
 /// MIGRATION SELF-HEAL: a record saved BEFORE the per-phase-zone fix baked a
 /// spurious phase-induced split into its stored roofs (a uniform-phase roof
 /// fragmented by a redundant coplanar same-construction boundary). Roofs are
