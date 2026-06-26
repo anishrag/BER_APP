@@ -69,29 +69,22 @@ pub fn phase_bar(
                         // review (which is also what unlocks Structure).
                         let complete =
                             matches!(phase, AssessmentPhase::Mapping) && mapping_reviewed;
-                        if phase_box(ui, label, active, complete, enabled).clicked()
-                            && !active
-                            && enabled
-                        {
+                        // The CURRENT phase's box carries the checklist-toggle
+                        // triangle (to the right of its label); the others don't.
+                        let (switch_clicked, triangle_clicked) = phase_box(
+                            ui,
+                            label,
+                            active,
+                            complete,
+                            enabled,
+                            active.then_some(expanded),
+                        );
+                        if switch_clicked && enabled {
                             clicked = Some(*phase);
                         }
-                    }
-                    // Checklist expand/collapse triangle, to the RIGHT of the bar.
-                    let tri = if expanded { "▼" } else { "▶" };
-                    let resp = ui
-                        .add(
-                            egui::Button::new(
-                                RichText::new(tri).size(15.0).color(Color32::from_gray(200)),
-                            )
-                            .frame(false),
-                        )
-                        .on_hover_text(if expanded {
-                            "Hide checklist"
-                        } else {
-                            "Show checklist"
-                        });
-                    if resp.clicked() {
-                        expanded = !expanded;
+                        if triangle_clicked {
+                            expanded = !expanded;
+                        }
                     }
                 });
                 if expanded {
@@ -108,16 +101,22 @@ pub fn phase_bar(
 }
 
 /// One phase box — filled + outlined, highlighted when it's the active phase,
-/// prefixed with a green ✓ when complete, dimmed when not yet reachable. The
-/// whole box is a click target (returns its `Response`) so the signpost can
-/// switch phases; a reachable, non-active box shows a pointer cursor.
+/// prefixed with a green ✓ when complete, dimmed when not yet reachable.
+///
+/// `checklist_expanded` is `Some(is_expanded)` ONLY for the current phase: its
+/// box then carries a checklist-toggle triangle to the right of the label.
+/// Returns `(switch_clicked, triangle_clicked)`. The whole box is the phase-SWITCH
+/// target only when it's NOT the active phase; on the active phase the triangle
+/// owns the clicks instead, so tapping it toggles the checklist without also
+/// "clicking the button" (and the active phase never switches anyway).
 fn phase_box(
     ui: &mut egui::Ui,
     label: &str,
     active: bool,
     complete: bool,
     enabled: bool,
-) -> egui::Response {
+    checklist_expanded: Option<bool>,
+) -> (bool, bool) {
     let (fill, stroke_col, text_col) = if active {
         (
             Color32::from_rgb(40, 92, 160),
@@ -138,6 +137,7 @@ fn phase_box(
             Color32::from_gray(110),
         )
     };
+    let mut triangle_clicked = false;
     let inner = egui::Frame::new()
         .fill(fill)
         .stroke(Stroke::new(if active { 2.0 } else { 1.0 }, stroke_col))
@@ -159,19 +159,42 @@ fn phase_box(
                     text = text.strong();
                 }
                 ui.label(text);
+                // Current phase: the checklist-toggle triangle, right of the label.
+                if let Some(exp) = checklist_expanded {
+                    ui.add_space(3.0);
+                    let tri = if exp { "▼" } else { "▶" };
+                    if ui
+                        .add(
+                            egui::Button::new(RichText::new(tri).color(text_col).size(13.0))
+                                .frame(false),
+                        )
+                        .on_hover_text("Show / hide checklist")
+                        .clicked()
+                    {
+                        triangle_clicked = true;
+                    }
+                }
             });
         });
-    // Make the whole framed box (not just the text) the click target.
-    let resp = ui.interact(
-        inner.response.rect,
-        ui.id().with(("phase_box", label)),
-        Sense::click(),
-    );
-    if enabled && !active {
-        resp.on_hover_cursor(egui::CursorIcon::PointingHand)
+    // The box is a phase-switch target only when NOT active (the active phase's
+    // triangle owns the clicks). No outer interact on the active box, so the
+    // triangle tap stays clean.
+    let switch_clicked = if active {
+        false
     } else {
-        resp
-    }
+        let resp = ui.interact(
+            inner.response.rect,
+            ui.id().with(("phase_box", label)),
+            Sense::click(),
+        );
+        if enabled {
+            resp.on_hover_cursor(egui::CursorIcon::PointingHand)
+                .clicked()
+        } else {
+            resp.clicked()
+        }
+    };
+    (switch_clicked, triangle_clicked)
 }
 
 /// A small centred banner just under the phase signpost naming the surface
