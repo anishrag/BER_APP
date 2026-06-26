@@ -3748,6 +3748,66 @@ fn snapshot_version_mismatch_falls_back_to_rebuild() {
     );
 }
 
+/// §6 + snapshot-shrink regression. Floor exposure is single-homed on Layer 1
+/// (`skip_serializing`), so the snapshot no longer carries it and the load path
+/// must SEED it back from the resolved regions. Assert a labelled ground floor
+/// survives a normal reopen AND a subsequent re-resolve — the "floor goes red
+/// after adding a window" bug. The same shared reconstruct+seed pass now runs on
+/// the checkpoint path too, so this covers that fix as well.
+#[test]
+fn floor_exposure_survives_reload_and_edit_via_layer1_seed() {
+    use ber_model::ber::structural::FloorExposure;
+    let mut c = AppController::new(crate::engine::open_db(":memory:").unwrap());
+    let ber = c.create_ber(
+        "T".into(),
+        chrono::NaiveDate::from_ymd_opt(2026, 1, 1).unwrap(),
+    );
+    finalise_current_storey_as_square(&mut c, 10.0);
+    c.set_default_ceiling_height(2.4).unwrap();
+    c.materialize();
+
+    // Manually label the ground floor (auto-derive leaves the lowest floor Unset).
+    let fkey = document::centroid_key(
+        c.current_record.as_ref().unwrap().data.storeys[0]
+            .floors
+            .regions[0]
+            .centroid(),
+    );
+    c.document.storeys[0]
+        .floor_exposure
+        .insert(fkey, FloorExposure::Ground);
+    c.commit_to_ber().unwrap();
+    c.flush_if_dirty().unwrap();
+
+    // Reopen. The snapshot no longer carries floor_exposure, so the working map
+    // is empty after restore — the seed must repopulate it from the Ground region.
+    c.open_ber(&ber.id).unwrap();
+    assert!(
+        !c.document.storeys[0].floor_exposure.is_empty(),
+        "floor_exposure seeded from Layer 1 on load (snapshot omits it)"
+    );
+    assert_eq!(
+        c.current_record.as_ref().unwrap().data.storeys[0]
+            .floors
+            .regions[0]
+            .exposure,
+        FloorExposure::Ground,
+        "exposure intact right after reload"
+    );
+
+    // The §6 trigger: an edit re-resolves; the seeded map keeps it Ground (no red).
+    c.mark_dirty().unwrap();
+    c.materialize();
+    assert_eq!(
+        c.current_record.as_ref().unwrap().data.storeys[0]
+            .floors
+            .regions[0]
+            .exposure,
+        FloorExposure::Ground,
+        "exposure survives a re-resolve after reload (no green→red regression)"
+    );
+}
+
 /// The 3D gate: the UI's 2D/3D toggle is disabled until the scope's heights
 /// are set; the controller guard is defense in depth — requesting 3D before
 /// the current storey has a ceiling height is a SILENT NO-OP (stays 2D).

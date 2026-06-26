@@ -55,6 +55,38 @@ pub fn ring_centroid_key(ring: &[Point2f64]) -> CentroidKey {
     centroid_key(c)
 }
 
+/// Containment fallback for the floor centroid-keyed override side-tables
+/// (`floor_exposure`, `floor_constructions`). The stamp passes look an override
+/// up by the region's EXACT quantized centroid; when the assessor reshapes or
+/// subdivides the floor AFTER attributing it, the region's centroid moves off the
+/// stored key and the exact lookup misses. This recovers the override whose
+/// stored centroid POINT still falls inside the region's polygon. Floor regions
+/// partition the outline (non-overlapping), so a stored point lands in at most one
+/// current region — no ambiguity. Uses `geo::Contains` on the full polygon (NOT
+/// just its exterior ring), so a point in an interior carve hole correctly counts
+/// as OUTSIDE a concave remainder. It only bridges the gap: the map re-keys itself
+/// to the current centroids on the next save (the seed), and an exact match always
+/// takes precedence, so unchanged geometry is unaffected.
+///
+/// LIMITATION: this fully covers RESHAPE (the moved centroid is still inside the
+/// region). For a SUBDIVISION that splits one attributed region into several, only
+/// the child piece CONTAINING the original centroid re-inherits; sibling pieces
+/// fall back to the default. Full subdivision coverage would need the override to
+/// store its region extent (overlap-match), not just a centroid point — deferred.
+pub(crate) fn centroid_override_by_containment<'a, V>(
+    map: &'a std::collections::HashMap<CentroidKey, V>,
+    poly: &geo::Polygon<f64>,
+) -> Option<&'a V> {
+    use geo::Contains;
+    map.iter().find_map(|(k, v)| {
+        let p = geo::Coord {
+            x: k.0 as f64 / 1000.0,
+            y: k.1 as f64 / 1000.0,
+        };
+        poly.contains(&p).then_some(v)
+    })
+}
+
 /// A session-only tagged area: a world-space (metre) ring + the phase to stamp
 /// onto surfaces inside it.
 #[derive(Debug, Clone)]
@@ -268,7 +300,14 @@ pub fn stamp_floor_constructions(ber: &mut Ber, idx: usize, doc: &crate::StoreyD
     let n = ber.storeys[idx].floors.regions.len();
     for i in 0..n {
         let key = centroid_key(ber.storeys[idx].floors.regions[i].centroid());
-        if let Some((ty, makeup, phase)) = doc.floor_constructions.get(&key) {
+        // Exact centroid key first; containment fallback on a miss (reshape/subdivide).
+        let entry = doc.floor_constructions.get(&key).or_else(|| {
+            centroid_override_by_containment(
+                &doc.floor_constructions,
+                &ber.storeys[idx].floors.regions[i].polygon,
+            )
+        });
+        if let Some((ty, makeup, phase)) = entry {
             let cid = ber.ensure_floor_construction(*ty, makeup.clone(), phase.clone());
             ber.storeys[idx].floors.regions[i].construction_id = cid;
         }

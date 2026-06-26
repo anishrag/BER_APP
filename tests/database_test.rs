@@ -261,6 +261,7 @@ fn create_full_ber(id: ItemId) -> Ber {
             floor_splits: vec![],
             roof_splits: vec![],
             wall_splits: vec![],
+            wall_face_partitions: vec![],
         },
         Storey {
             id: ItemId::default(),
@@ -281,6 +282,7 @@ fn create_full_ber(id: ItemId) -> Ber {
             floor_splits: vec![],
             roof_splits: vec![],
             wall_splits: vec![],
+            wall_face_partitions: vec![],
         },
     ];
 

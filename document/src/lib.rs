@@ -61,6 +61,10 @@ use ber_model::ber::structural::{
     CeilingConstructionType, CeilingExposure, ConstructionMakeup, FloorConstructionType,
     FloorExposure, WallConstructionType, WallExposure,
 };
+// Wall-face partition types now live in `ber_model` (so the durable recipe can
+// be a Layer-1 `Storey` field); re-exported here to keep `document::PartitionCut`
+// / `crate::PartitionCut` call sites unchanged.
+pub use ber_model::ber::structural::{wall_face_key, PartitionCut, WallFaceKey, WallFacePartition};
 use domain::points::{to_f64, Point2f32, Point2f64};
 use manip_plan::{
     Error, FloorPlan, ParameterAxis, ParameterId, SubareaOutcome, SubareaTuning, SurfaceRef,
@@ -235,24 +239,6 @@ pub struct ExposureSection {
     pub exposure: WallExposure,
 }
 
-/// One straight partition cut on a wall's internal elevation, in WALL-LOCAL
-/// coords: x = along_m (0..wall_len from the wall's start vertex), y = height_m (0 = floor).
-#[derive(Debug, Clone, Copy, PartialEq, serde::Serialize, serde::Deserialize)]
-pub struct PartitionCut {
-    pub a: Point2f32,
-    pub b: Point2f32,
-}
-
-/// A partitioned wall face: ordered `cuts` (each a full cross-cut of the face)
-/// plus per-region exposure attribution by a CONTAINED sample point (durable
-/// across re-draws, like the floor/ceiling centroid keys). A region with no
-/// matching sample point resolves `Unset`.
-#[derive(Debug, Clone, Default, PartialEq, serde::Serialize, serde::Deserialize)]
-pub struct WallFacePartition {
-    pub cuts: Vec<PartitionCut>,
-    pub regions: Vec<(Point2f32, WallExposure)>, // (wall-local sample point, exposure)
-}
-
 /// One storey's editable shapes and which is active. The building-level
 /// [`Document`] holds one of these per storey; it `Deref`s to the active one, so
 /// per-storey field/method access reads through transparently.
@@ -303,7 +289,11 @@ pub struct StoreyDoc {
     /// un-marked length derives into `Unset` BER `WallRegions` (it exists but
     /// carries no exposure claim until the assessor marks it). Part of the
     /// document (editable, undoable) but keyed to the outline, not the active
-    /// shape.
+    /// shape. Single-homed on Layer 1: reconstructed on load from the resolved
+    /// wall regions (`sections_from_wall_regions`), so it's kept OUT of the
+    /// snapshot — `#[serde(skip_serializing, default)]` (legacy snapshots that
+    /// carry it still deserialize — migration-safe).
+    #[serde(skip_serializing, default)]
     pub wall_sections: HashMap<VertexId, Vec<ExposureSection>>,
 
     /// Face-PARTITIONED outline perimeter walls, keyed by the wall's stable start
@@ -313,19 +303,30 @@ pub struct StoreyDoc {
     /// wall is either 1-D sectioned OR face-partitioned, never both). Stored in
     /// wall-local coords (x = along_m from the start vertex, y = height_m); the
     /// 2-D split + per-region exposure carve into BER geometry happens in the
-    /// resolve pass. `#[serde(default)]` so older snapshots load empty; like
-    /// `wall_sections`, the `VertexId` key serializes as a valid JSON map key (no
-    /// `tuple_key_map` adapter needed).
-    #[serde(default)]
+    /// resolve pass.
+    ///
+    /// This is the editing WORKING COPY. The durable home is the Layer-1
+    /// [`Storey::wall_face_partitions`] recipe (geometric key), which `resolve`
+    /// stamps from this map and `wall_face_partitions_from_storey` reconstructs
+    /// back into it on load — so it is **single-homed on Layer 1**:
+    /// `#[serde(skip_serializing, default)]` keeps it OUT of new snapshots while
+    /// still deserializing legacy snapshots that carry it (migration-safe).
+    #[serde(skip_serializing, default)]
     pub wall_face_partitions: HashMap<VertexId, WallFacePartition>,
 
     /// Exposure OVERRIDES of derived RISER (interior step-face) walls, keyed by
     /// the riser's quantized base edge ([`riser_key`]). Risers have no perimeter
     /// `VertexId`, so this geometric key is their durable identity: `resolve`
     /// stamps a riser's exposure from here, surviving the wall re-derivation
-    /// without relying on the amend-match. `#[serde(default)]` so older snapshots
-    /// load (empty) and seed from their resolved risers.
-    #[serde(default, with = "tuple_key_map")]
+    /// without relying on the amend-match. Single-homed on Layer 1: seeded on
+    /// load from the resolved risers (`seed_riser_exposure_from_record`), so it's
+    /// kept OUT of the snapshot. `skip_serializing` + `default` + a deserialize
+    /// adapter so legacy snapshots that carry it still load (migration-safe).
+    #[serde(
+        default,
+        skip_serializing,
+        deserialize_with = "tuple_key_map::deserialize"
+    )]
     pub riser_exposure: HashMap<RiserKey, WallExposure>,
 
     /// Assigned wall CONSTRUCTION (type + make-up) per perimeter wall, keyed by
@@ -335,7 +336,7 @@ pub struct StoreyDoc {
     /// uses the stored phase (`stamp_wall_constructions`). This is construction's
     /// parametric home — it survives the wall re-derivation without the
     /// amend-match.
-    #[serde(default)]
+    #[serde(default, skip_serializing)]
     pub wall_constructions:
         HashMap<SurfaceRef, (WallConstructionType, ConstructionMakeup, ConstructionPhase)>,
 
@@ -351,7 +352,11 @@ pub struct StoreyDoc {
     /// with different centroids that fall back to the derived construction — the
     /// same "re-split loses the override" property the riser key has, weaker than
     /// the wall `SurfaceRef`.
-    #[serde(default, with = "tuple_key_map")]
+    #[serde(
+        default,
+        skip_serializing,
+        deserialize_with = "tuple_key_map::deserialize"
+    )]
     pub floor_constructions:
         HashMap<CentroidKey, (FloorConstructionType, ConstructionMakeup, ConstructionPhase)>,
 
@@ -359,7 +364,11 @@ pub struct StoreyDoc {
     /// keyed by the region's plan [`CentroidKey`]. Mirror of
     /// `floor_constructions`; composed by
     /// [`stamp_ceiling_constructions`](crate::stamp_ceiling_constructions).
-    #[serde(default, with = "tuple_key_map")]
+    #[serde(
+        default,
+        skip_serializing,
+        deserialize_with = "tuple_key_map::deserialize"
+    )]
     pub ceiling_constructions: HashMap<
         CentroidKey,
         (
@@ -377,13 +386,21 @@ pub struct StoreyDoc {
     /// auto-derive pre-pass seeds it via `entry().or_insert()` so a manual
     /// override always wins. Absent → the region resolves `Unset` (ambiguous,
     /// left for manual marking).
-    #[serde(default, with = "tuple_key_map")]
+    #[serde(
+        default,
+        skip_serializing,
+        deserialize_with = "tuple_key_map::deserialize"
+    )]
     pub floor_exposure: HashMap<CentroidKey, FloorExposure>,
 
     /// Per-CEILING-region horizontal exposure (boundary condition above the
     /// region), keyed by the region's plan [`CentroidKey`]. Mirror of
     /// [`floor_exposure`](Self::floor_exposure) over the storey's `roofs`.
-    #[serde(default, with = "tuple_key_map")]
+    #[serde(
+        default,
+        skip_serializing,
+        deserialize_with = "tuple_key_map::deserialize"
+    )]
     pub ceiling_exposure: HashMap<CentroidKey, CeilingExposure>,
 }
 
@@ -400,6 +417,10 @@ mod tuple_key_map {
     use std::collections::HashMap;
     use std::hash::Hash;
 
+    // Retained for symmetry + format documentation: every tuple-keyed side-table
+    // is now `skip_serializing` (single-homed on Layer 1), so only `deserialize`
+    // below is still wired (for reading legacy snapshots that carry these maps).
+    #[allow(dead_code)]
     pub fn serialize<K, V, S>(map: &HashMap<K, V>, serializer: S) -> Result<S::Ok, S::Error>
     where
         K: Serialize,
@@ -934,43 +955,59 @@ mod tests {
         assert_eq!(doc.floor_plan.get_points().len(), 4);
     }
 
-    /// The durable snapshot path is `serde_json::to_string(&Document)` — it must
-    /// survive POPULATED tuple-keyed side-tables (`floor_exposure`,
-    /// `ceiling_exposure`, `riser_exposure`). serde_json rejects a map with a
-    /// non-string key, so a plain `HashMap<(i64,...), _>` would fail to serialize
-    /// the moment the auto-derive fills it — and the save path swallows the error
-    /// (`.ok()?`), silently dropping the snapshot. The `tuple_key_map` adapter
-    /// serializes them as a sequence of pairs; assert the WHOLE Document
-    /// round-trips through serde_json with the maps intact.
+    /// The category-(a) side-tables (`floor_exposure`, `ceiling_exposure`,
+    /// `riser_exposure`, constructions) are SINGLE-HOMED on Layer 1: they are
+    /// `skip_serializing`, so the `serde_json::to_string(&Document)` snapshot must
+    /// (a) still succeed even when they're populated, and (b) NOT carry them — on
+    /// load they're seeded back from the resolved `Ber` regions instead.
     #[test]
-    fn document_serde_json_round_trips_populated_tuple_keyed_maps() {
+    fn document_snapshot_excludes_category_a_maps() {
         let mut doc = Document::default();
         let sd = &mut doc.storeys[0];
         sd.floor_exposure
             .insert((1234, 5678), FloorExposure::NonHeatLoss);
-        sd.floor_exposure.insert((-42, 99), FloorExposure::Ground);
         sd.ceiling_exposure
             .insert((1234, 5678), CeilingExposure::Party);
         sd.riser_exposure
             .insert((1, 2, 3, 4), WallExposure::SemiExposed);
 
-        // The exact call the snapshot save makes — must be Ok, not silently None.
-        let json = serde_json::to_string(&doc).expect("Document with populated maps serializes");
+        // The exact call the snapshot save makes — still Ok (the maps are simply
+        // omitted, so there's no non-string-map-key error to hit).
+        let json = serde_json::to_string(&doc).expect("Document serializes");
+        assert!(
+            !json.contains("floor_exposure") && !json.contains("riser_exposure"),
+            "category-(a) maps are kept out of the snapshot"
+        );
         let back: Document = serde_json::from_str(&json).expect("round-trips back");
+        let sd = &back.storeys[0];
+        assert!(sd.floor_exposure.is_empty(), "not restored from snapshot");
+        assert!(sd.ceiling_exposure.is_empty());
+        assert!(sd.riser_exposure.is_empty());
+    }
 
+    /// MIGRATION-SAFE: a LEGACY snapshot that carries these maps (serialized as
+    /// the old `tuple_key_map` sequence of pairs) still DESERIALIZES — the
+    /// `deserialize_with` adapter is retained, so an upgrade doesn't drop them
+    /// (they migrate to Layer 1 on the next save). Emulated by injecting the
+    /// sequence form into the snapshot JSON.
+    #[test]
+    fn legacy_category_a_maps_still_deserialize() {
+        let doc = Document::default();
+        let mut v = serde_json::to_value(&doc).unwrap();
+        // The old on-disk shape: the `tuple_key_map` sequence of [key, value]
+        // pairs (built from real values so the enum encoding always matches).
+        let floor_pairs: Vec<((i64, i64), FloorExposure)> =
+            vec![((1234, 5678), FloorExposure::NonHeatLoss)];
+        let riser_pairs: Vec<((i64, i64, i64, i64), WallExposure)> =
+            vec![((1, 2, 3, 4), WallExposure::SemiExposed)];
+        v["storeys"][0]["floor_exposure"] = serde_json::to_value(&floor_pairs).unwrap();
+        v["storeys"][0]["riser_exposure"] = serde_json::to_value(&riser_pairs).unwrap();
+        let back: Document = serde_json::from_value(v).expect("legacy snapshot deserializes");
         let sd = &back.storeys[0];
         assert_eq!(
             sd.floor_exposure.get(&(1234, 5678)),
-            Some(&FloorExposure::NonHeatLoss)
-        );
-        assert_eq!(
-            sd.floor_exposure.get(&(-42, 99)),
-            Some(&FloorExposure::Ground)
-        );
-        assert_eq!(sd.floor_exposure.len(), 2);
-        assert_eq!(
-            sd.ceiling_exposure.get(&(1234, 5678)),
-            Some(&CeilingExposure::Party)
+            Some(&FloorExposure::NonHeatLoss),
+            "legacy floor_exposure still loads (migration-safe)"
         );
         assert_eq!(
             sd.riser_exposure.get(&(1, 2, 3, 4)),

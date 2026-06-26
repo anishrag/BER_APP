@@ -10,6 +10,7 @@ mod elevation;
 mod floor_regions;
 mod roof_geom;
 mod storey;
+mod wall_partition;
 mod wall_regions;
 
 pub use ceiling_regions::*;
@@ -18,6 +19,7 @@ pub use elevation::*;
 pub use floor_regions::*;
 pub use roof_geom::*;
 pub use storey::*;
+pub use wall_partition::*;
 pub use wall_regions::*;
 
 // The 3D polygon primitive lives in `manip_plan` (the geometry crate) and is

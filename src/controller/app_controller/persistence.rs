@@ -217,48 +217,11 @@ impl AppController {
         // new-storey FLOW itself is not restored (`load_storey_into_editor`
         // cleared it); only the seed transition survives.
         self.rederive_inherited_seed_pending();
-        // Phase + step + ceiling-step areas are session-only — rebuild them
-        // from each loaded storey's tagged/levelled floor regions (and the
-        // durable ceiling-step list) so the splits stay reproducible. Done for
-        // EVERY storey, not just the active one: `heal_phase_induced_roof_splits`
-        // below recomposes each phase-tagged storey's roofs from its OWN durable
-        // ceiling-step inputs, which must be reconstructed first.
-        self.phase_regions.clear();
-        self.step_regions.clear();
-        self.ceiling_step_regions.clear();
-        let n_storeys = self
-            .current_record
-            .as_ref()
-            .map(|r| r.data.storeys.len())
-            .unwrap_or(0)
-            .min(self.document.storeys.len());
-        for i in 0..n_storeys {
-            self.reconstruct_phase_regions_for(i);
-            self.reconstruct_step_regions_for(i);
-            self.load_ceiling_step_regions_for(i); // restore the durable step list
-        }
-        // MIGRATION self-heal: a record saved before the per-phase-zone fix
-        // baked a spurious phase-induced split into its stored roofs (a uniform
-        // phase fragmented by a floor step below seeded a redundant boundary).
-        // Roofs are regions-as-truth — resolve keeps them verbatim and the phase
-        // carve only SPLITS — so the stale split never self-heals. Rebuild each
-        // phase-tagged storey's roofs from its durable declarative inputs, which
-        // do NOT reproduce the split; the re-resolve below then re-applies the
-        // (now clean, per-phase) carve. Untagged storeys are left byte-stable.
-        self.heal_phase_induced_roof_splits();
-        // Seed the durable riser-exposure table from the persisted resolved
-        // risers (legacy records / pre-table snapshots) BEFORE the first
-        // re-resolve mints fresh risers that would otherwise default Unset.
-        self.seed_riser_exposure_from_record();
-        // Same self-heal for the durable FLOOR + CEILING exposure maps (keyed by
-        // region centroid) — a legacy/pre-map record carries the boundary
-        // condition only on its resolved region, which the first re-resolve would
-        // otherwise reset to Unset before the auto-derive re-runs.
-        self.seed_horizontal_exposure_from_record();
-        // Same for the durable FLOOR + CEILING construction stores (keyed by
-        // region centroid) — legacy records carry an assigned area construction
-        // only on its resolved region, which the first re-resolve would reset.
-        self.seed_construction_stores_from_record();
+        // Rebuild ALL session + durable-side-table editing state from the
+        // resolved record (Layer 1), for every storey — the shared sequence used
+        // by both load paths. Runs AFTER `try_restore_snapshot` (which replaced
+        // the whole Document) and BEFORE `refresh_all_storeys` re-resolves.
+        self.reconstruct_session_state_from_record();
         // An in-flight ceiling-step line belongs to the PREVIOUS record — its
         // prompt holds VertexIds into that record's outline plan. A pending
         // roof point's / ridge's prompt does too.
@@ -288,6 +251,50 @@ impl AppController {
         self.saved_revision = self.revision;
         self.derived_revision = self.revision;
         Ok(())
+    }
+
+    /// Rebuild ALL session + durable-side-table editing state from the resolved
+    /// record (Layer 1), for EVERY storey. The single shared sequence behind both
+    /// load paths — `open_ber` calls it after `try_restore_snapshot`, and
+    /// `load_checkpoint` calls it as the ONLY source (no snapshot). Keeping it in
+    /// one place is deliberate: the previous duplicated, drifted versions are what
+    /// left the checkpoint path missing the exposure/construction seeds (the
+    /// "floor goes red after adding a window" bug) and reconstructing only
+    /// storey 0.
+    ///
+    /// Order matters: ceiling-step regions must be reconstructed before
+    /// `heal_phase_induced_roof_splits` (it reads them); the seeds backfill the
+    /// durable exposure/construction maps from Layer 1 BEFORE the caller's
+    /// `refresh_all_storeys` re-resolves (so the fresh-id stamps read the seeded
+    /// maps rather than resetting them to `Unset`).
+    fn reconstruct_session_state_from_record(&mut self) {
+        self.phase_regions.clear();
+        self.step_regions.clear();
+        self.ceiling_step_regions.clear();
+        let n = self
+            .current_record
+            .as_ref()
+            .map(|r| r.data.storeys.len())
+            .unwrap_or(0)
+            .min(self.document.storeys.len());
+        for i in 0..n {
+            self.reconstruct_phase_regions_for(i);
+            self.reconstruct_step_regions_for(i);
+            self.load_ceiling_step_regions_for(i); // restore the durable step list
+            self.reconstruct_wall_face_partitions_for(i); // Layer-1 recipe → working map
+            self.reconstruct_wall_sections_for(i); // resolved walls → 1-D sections
+        }
+        // Recompose phase-tagged roofs from their durable inputs (drops a stale
+        // pre-fix phase-induced split); the caller's re-resolve re-applies the
+        // clean carve.
+        self.heal_phase_induced_roof_splits();
+        // Backfill the durable exposure + construction maps from the resolved
+        // regions — now the SOLE persisted source (these are `skip_serializing`,
+        // so the snapshot no longer carries them). Idempotent (`or_insert`): a
+        // legacy snapshot that still deserialized them is preserved.
+        self.seed_riser_exposure_from_record();
+        self.seed_horizontal_exposure_from_record();
+        self.seed_construction_stores_from_record();
     }
 
     /// MIGRATION self-heal for the per-phase-zone roof fix: records saved before
@@ -639,13 +646,16 @@ impl AppController {
         self.current_storey_idx = Some(0);
         // Same restart-safe re-derivation as open_ber.
         self.rederive_inherited_seed_pending();
-        self.phase_regions.clear();
-        self.reconstruct_phase_regions_for(0);
-        self.step_regions.clear();
-        self.reconstruct_step_regions_for(0);
-        self.ceiling_step_regions.clear();
-        self.load_ceiling_step_regions_for(0); // restore the durable step list
-                                               // Same as open_ber: drop any line/point state from the previous session.
+        // Rebuild ALL editing state from Layer 1 (every storey) — the SAME shared
+        // sequence as `open_ber`. The checkpoint has no Document snapshot, so this
+        // is the only source: it reconstructs phase/step/ceiling/partition/section
+        // state AND seeds the durable exposure + construction maps. Seeding here is
+        // what fixes the checkpoint "floor goes red after adding a window" bug
+        // (§6) — previously the seeds ran only on the DB path, so the first
+        // re-resolve reset exposures to `Unset`. It also reconstructs ALL storeys,
+        // not just storey 0.
+        self.reconstruct_session_state_from_record();
+        // Same as open_ber: drop any line/point state from the previous session.
         self.pending_ceiling_step = None;
         self.ceiling_step_mode = false;
         self.pending_roof_point = None;
@@ -656,8 +666,14 @@ impl AppController {
         self.document.edit_state = EditState::default();
         self.review = None;
         self.compute_next_dimension_prompt();
+        // Re-resolve every storey so the seeded maps are stamped onto the geometry
+        // now (not on the first edit) — mirrors `open_ber`, and sets the revision
+        // bookkeeping so the next no-edit `materialize` is a no-op.
+        self.refresh_all_storeys();
         self.history.clear();
         self.redo.clear();
+        self.saved_revision = self.revision;
+        self.derived_revision = self.revision;
         true
     }
 

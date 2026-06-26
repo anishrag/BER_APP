@@ -109,6 +109,16 @@ pub struct Storey {
     /// records load.
     #[serde(default)]
     pub wall_splits: Vec<[Point2f64; 2]>,
+    /// Face-PARTITIONED perimeter walls: the durable partition RECIPE (cut lines
+    /// + per-sub-face exposure samples, wall-local) keyed by the wall's base-edge
+    /// endpoints ([`WallFaceKey`], orientation-preserving). Category-(b): the
+    /// cuts and samples are consumed by `apply_face_partitions` (resolve) and are
+    /// NOT invertible from the split `WallRegion`s, so unlike the exposures they
+    /// must be STORED, not reconstructed. The editing layer keeps a
+    /// `VertexId`-keyed working copy, rebuilt from this on load via
+    /// `surface_ref_at`. `#[serde(default)]` so older records load.
+    #[serde(default)]
+    pub wall_face_partitions: Vec<(WallFaceKey, WallFacePartition)>,
     // No editable sketch snapshot is stored: the resolved geometry above
     // (`floors`/`walls`/`living_areas`) is the only persisted representation,
     // and the editor rebuilds its working state from it on load. The DB only

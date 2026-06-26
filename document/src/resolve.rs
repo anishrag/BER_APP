@@ -398,6 +398,10 @@ pub fn resolve_storey(
     // openings tail (which see the now-final walls). Mirrors the floor/roof
     // carve-label: session-driven, recomputed every resolve.
     apply_face_partitions(s, &mut storey);
+    // Stamp the partition RECIPE onto Layer 1 (durable, geometric key) so it
+    // survives a snapshot-less / version-stale load — it is NOT invertible from
+    // the split walls above, so the recipe itself must be stored.
+    stamp_wall_face_partitions(s, &mut storey);
     // Stamp riser exposure from the durable side-table (keyed by base edge) —
     // risers have no perimeter VertexId, so this is their durable identity.
     stamp_riser_exposure(s, &mut storey);
@@ -468,6 +472,25 @@ fn apply_face_partitions(s: &StoreyDoc, storey: &mut Storey) {
         out.extend(split_partitioned_wall(s, &region, vid, a, b));
     }
     storey.walls.regions = out;
+}
+
+/// Stamp the durable Layer-1 partition recipe onto `storey` from the editing
+/// working copy `s.wall_face_partitions`, re-keying each entry from the
+/// parametric `VertexId` to the wall's geometric [`WallFaceKey`] (base-edge
+/// endpoints from the outline plan). The inverse of
+/// [`StoreyDoc::wall_face_partitions_from_storey`]; recomputed every resolve so
+/// it tracks the current outline geometry. An entry whose `VertexId` no longer
+/// resolves to a wall (stale) is dropped.
+fn stamp_wall_face_partitions(s: &StoreyDoc, storey: &mut Storey) {
+    let plan = &s.outline.floor_plan;
+    storey.wall_face_partitions = s
+        .wall_face_partitions
+        .iter()
+        .filter_map(|(vid, part)| {
+            let (a, b) = plan.wall_endpoints(*vid)?;
+            Some((crate::wall_face_key(a, b), part.clone()))
+        })
+        .collect();
 }
 
 /// Split one partitioned perimeter `region` (matched to perimeter edge `a`→`b`,
@@ -595,7 +618,12 @@ fn stamp_floor_exposure(s: &StoreyDoc, storey: &mut Storey) {
     }
     for region in &mut storey.floors.regions {
         let key = crate::centroid_key(region.centroid());
-        if let Some(e) = s.floor_exposure.get(&key) {
+        // Exact centroid key first; on a miss (region reshaped/subdivided after
+        // attribution), fall back to the override whose stored centroid is inside
+        // this region's polygon.
+        if let Some(e) = s.floor_exposure.get(&key).or_else(|| {
+            crate::phase::centroid_override_by_containment(&s.floor_exposure, &region.polygon)
+        }) {
             region.exposure = *e;
         }
     }
@@ -837,6 +865,50 @@ mod tests {
             dimensioning: doc.dimensioning.clone(),
         };
         doc
+    }
+
+    /// Containment fallback: a floor exposure set BEFORE the assessor reshapes the
+    /// outline survives even though the region's centroid drifts off the stored
+    /// key. Floors are rebuilt-from-footprint each resolve and the override is
+    /// keyed by EXACT centroid, so without the fallback a post-attribution reshape
+    /// silently reverts the floor to `Unset` (the centroid-key fragility).
+    #[test]
+    fn floor_exposure_containment_survives_reshape() {
+        use ber_model::ber::structural::FloorExposure;
+        let mut ber = Ber::default();
+        ensure_storey_constructions(&mut ber, 0, &[]);
+        ber.set_default_ceiling_height(Some(0), 2.4);
+
+        // Attribute the 4×4 floor: capture its centroid — that's the stored key.
+        let small = square_doc(&[
+            Point2f32::new(0.0, 0.0),
+            Point2f32::new(4.0, 0.0),
+            Point2f32::new(4.0, 4.0),
+            Point2f32::new(0.0, 4.0),
+        ]);
+        let old_centroid = resolve_storey(&small, &ber, 0, &[], &[], &[])
+            .floors
+            .regions[0]
+            .centroid();
+
+        // The assessor then RESHAPES the outline to 6×6 — the new floor's centroid
+        // is (3,3), so the exact key (2,2) misses. The old centroid is still INSIDE
+        // the enlarged floor, so the containment fallback must re-apply Ground.
+        let mut big = square_doc(&[
+            Point2f32::new(0.0, 0.0),
+            Point2f32::new(6.0, 0.0),
+            Point2f32::new(6.0, 6.0),
+            Point2f32::new(0.0, 6.0),
+        ]);
+        big.floor_exposure
+            .insert(crate::centroid_key(old_centroid), FloorExposure::Ground);
+
+        let resolved = resolve_storey(&big, &ber, 0, &[], &[], &[]);
+        assert_eq!(
+            resolved.floors.regions[0].exposure,
+            FloorExposure::Ground,
+            "containment fallback re-applies the override after the centroid drifted off its key"
+        );
     }
 
     /// One step region over the left half of a 4×4 storey splits the floor into
@@ -3795,6 +3867,68 @@ mod tests {
         assert!(
             (sub_area - full_area).abs() < 1e-3,
             "two halves ({sub_area}) sum to the full face ({full_area})"
+        );
+        let _ = (a, b);
+    }
+
+    /// LAYER-1 ROUND-TRIP: a face partition survives a snapshot-less reload.
+    /// Resolve stamps the recipe onto `Storey` (Layer 1); serialize ONLY the
+    /// `Ber` (no `Document` snapshot), deserialize, rebuild the editor with
+    /// `from_storey`, and reconstruct the working map — the partition returns on
+    /// the matching wall with its cuts + exposures intact. The old snapshot-only
+    /// design could NOT pass this: the recipe was lost on a Layer-1-only load.
+    #[test]
+    fn face_partition_survives_layer1_only_roundtrip() {
+        let mut doc = square_doc(&[
+            Point2f32::new(0.0, 0.0),
+            Point2f32::new(4.0, 0.0),
+            Point2f32::new(4.0, 4.0),
+            Point2f32::new(0.0, 4.0),
+        ]);
+        let (vid, a, b) = doc.outline.floor_plan.perimeter_walls()[0];
+        let len = manip_plan::segment_len(a, b);
+        let height = 2.4_f32;
+        let mut ber = Ber::default();
+        ensure_storey_constructions(&mut ber, 0, &[]);
+        ber.set_default_ceiling_height(Some(0), 2.4);
+
+        doc.commit_partition_cut(
+            vid,
+            crate::PartitionCut {
+                a: Point2f32::new(0.0, 0.0),
+                b: Point2f32::new(len, height),
+            },
+        );
+        doc.set_partition_region_exposure(
+            vid,
+            Point2f32::new(len * 0.75, height * 0.15),
+            WallExposure::Exposed,
+            len,
+            height,
+        );
+
+        // Resolve → the recipe is stamped onto Layer 1 (the durable Storey).
+        ber.storeys[0] = resolve_storey(&doc, &ber, 0, &[], &[], &[]);
+        assert_eq!(
+            ber.storeys[0].wall_face_partitions.len(),
+            1,
+            "resolve stamps the durable recipe onto Storey"
+        );
+
+        // Serialize ONLY the Ber (no Document snapshot), then deserialize.
+        let json = serde_json::to_string(&ber).unwrap();
+        let ber2: Ber = serde_json::from_str(&json).unwrap();
+
+        // Rebuild the editor from Layer 1 and reconstruct the working map.
+        let new_doc = StoreyDoc::from_storey(&ber2.storeys[0]);
+        let reconstructed = new_doc.wall_face_partitions_from_storey(&ber2.storeys[0]);
+
+        let new_vid = new_doc.outline.floor_plan.perimeter_walls()[0].0;
+        assert_eq!(reconstructed.len(), 1, "one partition reconstructed");
+        assert_eq!(
+            reconstructed.get(&new_vid),
+            doc.wall_face_partitions.get(&vid),
+            "cuts + exposures intact on the matching wall after a Layer-1-only reload"
         );
         let _ = (a, b);
     }

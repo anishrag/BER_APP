@@ -11,9 +11,10 @@
 //! `height` are supplied by the caller (wall length + ceiling height);
 //! `document` does not compute wall geometry here.
 use crate::{PartitionCut, StoreyDoc, WallFacePartition};
-use ber_model::ber::structural::WallExposure;
+use ber_model::ber::structural::{Storey, WallExposure};
 use domain::points::Point2f32;
 use manip_plan::{point_in_polygon, subdivide_face, VertexId};
+use std::collections::HashMap;
 
 /// Two wall-local points are the same to within this tolerance (metres) — a cut
 /// shorter than this is rejected as degenerate.
@@ -115,6 +116,33 @@ impl StoreyDoc {
             })
             .collect()
     }
+
+    /// Reconstruct the `VertexId`-keyed working `wall_face_partitions` map from a
+    /// resolved storey's durable Layer-1 recipe ([`Storey::wall_face_partitions`]),
+    /// matching each geometric [`WallFaceKey`](ber_model::ber::structural::WallFaceKey)
+    /// back to a perimeter wall via `surface_ref_at` on this doc's outline plan.
+    /// The Layer-1 inverse of the resolve-time stamp — the partition analogue of
+    /// [`sections_from_wall_regions`](StoreyDoc::sections_from_wall_regions). An
+    /// entry whose key no longer lands on a wall (outline changed) is dropped.
+    pub fn wall_face_partitions_from_storey(
+        &self,
+        storey: &Storey,
+    ) -> HashMap<VertexId, WallFacePartition> {
+        const TOL_M: f32 = 0.05;
+        let plan = &self.outline.floor_plan;
+        let mut out = HashMap::new();
+        for (key, part) in &storey.wall_face_partitions {
+            // Edge midpoint (mm → m), then geometry → VertexId.
+            let mid = Point2f32::new(
+                (key.0 + key.2) as f32 / 2000.0,
+                (key.1 + key.3) as f32 / 2000.0,
+            );
+            if let Some(vid) = plan.surface_ref_at(mid, TOL_M).and_then(|s| s.wall_start()) {
+                out.insert(vid, part.clone());
+            }
+        }
+        out
+    }
 }
 
 /// The stored cuts as the `[[a, b]; ..]` array `subdivide_face` expects.
@@ -161,10 +189,41 @@ mod tests {
         doc.outline.floor_plan.perimeter_walls()[0].0
     }
 
-    /// A `StoreyDoc` carrying a `wall_face_partitions` entry round-trips through
-    /// serde-JSON unchanged (VertexId is a valid JSON map key — no adapter).
+    /// The partition working map is SINGLE-HOMED on Layer 1: it is excluded from
+    /// the `StoreyDoc` (snapshot) serialization (`#[serde(skip_serializing)]`), so
+    /// a snapshot does not carry it — the durable home is `Storey::wall_face_partitions`.
     #[test]
-    fn serde_round_trip_with_partition() {
+    fn partition_single_homed_not_in_storeydoc_snapshot() {
+        let mut doc = square_doc();
+        let vid = first_wall(&doc);
+        doc.commit_partition_cut(
+            vid,
+            PartitionCut {
+                a: Point2f32::new(0.0, 1.5),
+                b: Point2f32::new(4.0, 1.5),
+            },
+        );
+        assert!(doc.is_wall_partitioned(vid));
+
+        let json = serde_json::to_string(&doc).unwrap();
+        assert!(
+            !json.contains("wall_face_partitions"),
+            "skip_serializing keeps the working map out of the snapshot"
+        );
+        let back: StoreyDoc = serde_json::from_str(&json).unwrap();
+        assert!(
+            back.wall_face_partitions.is_empty(),
+            "not restored from the snapshot — comes from Layer 1 instead"
+        );
+    }
+
+    /// MIGRATION-SAFE: `skip_serializing` (not `skip`) still DESERIALIZES the
+    /// field, so a LEGACY snapshot that carries `wall_face_partitions` loads it —
+    /// the partition isn't dropped on the upgrade (it migrates to Layer 1 on the
+    /// next save). Emulated by injecting the (real serde-shaped) map into the doc
+    /// JSON, as an old snapshot would have stored it.
+    #[test]
+    fn legacy_partition_snapshot_still_deserializes() {
         let mut doc = square_doc();
         let vid = first_wall(&doc);
         doc.commit_partition_cut(
@@ -181,14 +240,19 @@ mod tests {
             4.0,
             2.4,
         );
+        let map = doc.wall_face_partitions.clone();
 
-        let json = serde_json::to_string(&doc).unwrap();
-        let back: StoreyDoc = serde_json::from_str(&json).unwrap();
-        assert_eq!(
-            back.wall_face_partitions, doc.wall_face_partitions,
-            "partition table round-trips"
+        // A legacy snapshot = the doc JSON with the field present (real shape).
+        let mut v = serde_json::to_value(&doc).unwrap();
+        v.as_object_mut().unwrap().insert(
+            "wall_face_partitions".to_string(),
+            serde_json::to_value(&map).unwrap(),
         );
-        assert!(back.is_wall_partitioned(vid));
+        let back: StoreyDoc = serde_json::from_value(v).unwrap();
+        assert_eq!(
+            back.wall_face_partitions, map,
+            "legacy snapshot field still deserializes (migration-safe)"
+        );
     }
 
     /// Committing a cut clears that wall's 1-D `wall_sections`.

@@ -764,6 +764,53 @@ impl AppController {
         }
     }
 
+    /// Rebuild the editing WORKING COPY of storey `idx`'s wall-face partitions
+    /// from its persisted Layer-1 recipe (`Storey::wall_face_partitions`), mapping
+    /// each geometric key back to a `VertexId` via the outline plan. The
+    /// partitions are single-homed on Layer 1 (the working map is
+    /// `#[serde(skip_serializing)]`), so on load it'd otherwise be empty and the
+    /// next resolve would drop every partition. Idempotent (`or_insert`): fills
+    /// only gaps, so a legacy snapshot that still carries the map is preserved.
+    /// MUST run AFTER `try_restore_snapshot` (which replaces the whole `Document`).
+    pub(super) fn reconstruct_wall_face_partitions_for(&mut self, idx: usize) {
+        let entries = {
+            let Some(record) = self.current_record.as_ref() else {
+                return;
+            };
+            let Some(storey) = record.data.storeys.get(idx) else {
+                return;
+            };
+            if storey.wall_face_partitions.is_empty() {
+                return;
+            }
+            self.document.storeys[idx].wall_face_partitions_from_storey(storey)
+        };
+        let sd = &mut self.document.storeys[idx];
+        for (vid, part) in entries {
+            sd.wall_face_partitions.entry(vid).or_insert(part);
+        }
+    }
+
+    /// Rebuild storey `idx`'s 1-D wall-exposure SECTIONS working map from its
+    /// resolved wall regions. `wall_sections` is single-homed on Layer 1
+    /// (`#[serde(skip_serializing)]`) and `from_storey`'s copy is wiped by
+    /// `try_restore_snapshot` (which replaces the whole `Document`), so it must be
+    /// rebuilt here, AFTER any snapshot restore. Lossless inverse (painted
+    /// sections only — `Unset`/`Ground`/risers are skipped), so it overwrites: the
+    /// reconstruction is authoritative.
+    pub(super) fn reconstruct_wall_sections_for(&mut self, idx: usize) {
+        let sections = {
+            let Some(record) = self.current_record.as_ref() else {
+                return;
+            };
+            let Some(storey) = record.data.storeys.get(idx) else {
+                return;
+            };
+            self.document.storeys[idx].sections_from_wall_regions(&storey.walls)
+        };
+        self.document.storeys[idx].wall_sections = sections;
+    }
+
     /// CANONICALIZE the session ceiling-step list for storey `idx`: clip each
     /// drawn step input to the outline ([`document::canonicalize_ceiling_steps`])
     /// — no geometry inference — and mirror the result into the storey's DURABLE
