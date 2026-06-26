@@ -231,6 +231,7 @@ pub fn add_wall_window(
         }),
         wall_anchor: None,
         assembly_id: None,
+        multi_storey: false,
     });
     link_window(storey, wall_id, id);
     // Windows may STACK: if the requested row is horizontally full, place above /
@@ -319,6 +320,7 @@ pub fn add_roof_window(
         }),
         wall_anchor: None,
         assembly_id: None,
+        multi_storey: false,
     });
     Ok(id)
 }
@@ -354,8 +356,51 @@ pub fn add_full_wall_window(
         }),
         wall_anchor: None,
         assembly_id: None,
+        multi_storey: false,
     });
     link_window(storey, wall_id, id);
+    Ok(id)
+}
+
+/// Add a MULTI-STOREY wall window at `along_m`/`sill_m` — a window that may span
+/// UP past this storey's ceiling (its roofline top-clamp is lifted; see
+/// [`Window::multi_storey`]). Placed at the requested sill + full height, then
+/// horizontally redistributed against the wall's other openings (no vertical-stack
+/// fallback — the sill is meaningful for a spanning window). The "Windows"
+/// checklist gate is what validates it doesn't hang off the building.
+pub fn add_multi_storey_window(
+    storey: &mut Storey,
+    wall_id: ItemId,
+    along_m: f32,
+    width_m: f32,
+    height_m: f32,
+    sill_m: f32,
+    window_type_id: ItemId,
+) -> Result<ItemId, OpeningError> {
+    if width_m <= 0.0 || height_m <= 0.0 {
+        return Err(OpeningError::ZeroSize);
+    }
+    if wall_length(storey, wall_id).is_none() {
+        return Err(OpeningError::NoHostRegion);
+    }
+    let id = ItemId::default();
+    storey.windows.push(Window {
+        id,
+        vertices: vec![],
+        width_m,
+        height_m,
+        window_type_id,
+        placement: Some(OpeningPlacement::Wall {
+            wall_id,
+            along_m,
+            sill_m,
+        }),
+        wall_anchor: None,
+        assembly_id: None,
+        multi_storey: true,
+    });
+    link_window(storey, wall_id, id);
+    redistribute_or_rollback(storey, wall_id, &[OpeningRef::Window(id)])?;
     Ok(id)
 }
 
@@ -440,6 +485,7 @@ pub fn compose_door_sidelights(
             }),
             wall_anchor: None,
             assembly_id: Some(assembly_id),
+            multi_storey: false,
         });
         link_window(storey, wall_id, id);
         added.push(OpeningRef::Window(id));
@@ -510,8 +556,14 @@ pub fn move_opening(
     // Clamp the dragged opening's TOP under the wall roofline at its new along
     // (and its bottom at the floor). Lives HERE so every drag path — the review
     // elevation AND the 2D placement view — shares one clamp via this single
-    // mutation, instead of each re-implementing it (only the review path did).
-    let new_sill_m = {
+    // mutation, instead of each re-implementing it (only the review path did). A
+    // MULTI-STOREY window is exempt from the roofline cap (it spans up); only its
+    // floor is clamped.
+    let multi_storey = matches!(opening, OpeningRef::Window(id)
+        if storey.windows.iter().any(|w| w.id == id && w.multi_storey));
+    let new_sill_m = if multi_storey {
+        new_sill_m.max(0.0)
+    } else {
         let h = opening_height(storey, opening) as f64;
         let max_sill = storey
             .walls
@@ -987,7 +1039,7 @@ pub fn derive_opening_vertices(storey: &mut Storey) {
         .map(|w| {
             w.placement
                 .as_ref()
-                .and_then(|p| opening_vertices(storey, p, w.width_m, w.height_m))
+                .and_then(|p| opening_vertices(storey, p, w.width_m, w.height_m, w.multi_storey))
         })
         .collect();
     for (w, v) in storey.windows.iter_mut().zip(win) {
@@ -1001,7 +1053,7 @@ pub fn derive_opening_vertices(storey: &mut Storey) {
         .map(|d| {
             d.placement
                 .as_ref()
-                .and_then(|p| opening_vertices(storey, p, d.width_m, d.height_m))
+                .and_then(|p| opening_vertices(storey, p, d.width_m, d.height_m, false))
         })
         .collect();
     for (d, v) in storey.doors.iter_mut().zip(dr) {
@@ -1129,6 +1181,7 @@ fn opening_vertices(
     placement: &OpeningPlacement,
     width_m: f32,
     height_m: f32,
+    multi_storey: bool,
 ) -> Option<Vec<(f32, f32, f32)>> {
     match placement {
         OpeningPlacement::Wall {
@@ -1143,8 +1196,14 @@ fn opening_vertices(
             let left = (centre - half).clamp(0.0, len);
             let right = (centre + half).clamp(0.0, len);
             let bottom = base_z + *sill_m as f64;
-            let top_cap = wall.top_z_at_along(left).min(wall.top_z_at_along(right));
-            let top = (bottom + height_m as f64).min(top_cap).max(bottom);
+            // A multi-storey window may rise past THIS storey's roofline (it spans
+            // up the same-type wall run) — so don't cap its top at the wall top.
+            let top = if multi_storey {
+                bottom + height_m as f64
+            } else {
+                let top_cap = wall.top_z_at_along(left).min(wall.top_z_at_along(right));
+                (bottom + height_m as f64).min(top_cap).max(bottom)
+            };
             let p = |d: f64| (origin.x + ux * d, origin.y + uy * d);
             let (lx, ly) = p(left);
             let (rx, ry) = p(right);
@@ -1218,6 +1277,7 @@ mod tests {
             placement,
             wall_anchor: None,
             assembly_id: None,
+            multi_storey: false,
         }
     }
 
@@ -1293,6 +1353,43 @@ mod tests {
         // cap = min(top_z_at_along(1.5)=2.375, top_z_at_along(2.5)=2.625) = 2.375.
         let top = storey.windows[0].vertices[2].2;
         assert!((top - 2.375).abs() < 1e-3, "clamped top = {top}");
+    }
+
+    #[test]
+    fn derive_multi_storey_window_is_not_clamped_under_the_wall_top() {
+        let wid = ItemId::default();
+        // Same 2.4 m-tall flat wall, but a multi-storey window whose sill+height
+        // (2.0 + 1.0 = 3.0) pokes a clear 0.6 m above the wall top: the clamp is
+        // LIFTED, so its top must read 3.0, not the 2.4 a plain window would get.
+        let mut w = window(
+            ItemId::default(),
+            1.0,
+            1.0,
+            Some(OpeningPlacement::Wall {
+                wall_id: wid,
+                along_m: 2.0,
+                sill_m: 2.0,
+            }),
+        );
+        w.multi_storey = true;
+        let mut storey = Storey {
+            walls: WallRegions {
+                regions: vec![wall(
+                    wid,
+                    vec![
+                        p3(0.0, 0.0, 0.0),
+                        p3(4.0, 0.0, 0.0),
+                        p3(4.0, 0.0, 2.4),
+                        p3(0.0, 0.0, 2.4),
+                    ],
+                )],
+            },
+            windows: vec![w],
+            ..Storey::default()
+        };
+        derive_opening_vertices(&mut storey);
+        let top = storey.windows[0].vertices[2].2;
+        assert!((top - 3.0).abs() < 1e-3, "unclamped top = {top}");
     }
 
     #[test]
@@ -1496,6 +1593,7 @@ mod tests {
             }),
             wall_anchor: None,
             assembly_id: None,
+            multi_storey: false,
         });
         assert_eq!(
             roof_window_at(&s, 2.3, 2.3),

@@ -207,6 +207,67 @@ impl Ber {
         out
     }
 
+    /// Absolute Z of the highest ceiling reachable straight UP from the wall at
+    /// (storey `idx`, plan position `along_m`) through the CONTIGUOUS run of
+    /// vertically-aligned, SAME-TYPE walls — same `construction_id` AND
+    /// `exposure`, and the same plan base-edge on the storey above. A multi-storey
+    /// window on that wall may rise no higher than this. The run stops at the
+    /// first storey above with no plan-aligned wall (a setback) or a different
+    /// type — which is exactly "the assessor must draw two separate windows".
+    pub fn wall_run_top_z(
+        &self,
+        idx: usize,
+        wall: &crate::ber::structural::WallRegion,
+        along_m: f64,
+    ) -> f64 {
+        use domain::points::Point3f64;
+        let datums = self.storey_floor_datums();
+        let datum = |i: usize| datums.get(i).copied().unwrap_or(0.0);
+        let mut top = datum(idx) + wall.top_z_at_along(along_m);
+        // The window's plan position as a WORLD point on the host wall's base
+        // line. Each wall above is sampled by re-projecting THIS point onto its
+        // own frame — so a wall stored in the opposite base-edge orientation
+        // (the upper storey traces its footprint independently) is sampled at the
+        // same physical place, not its mirror image.
+        let Some((origin, (ux, uy), _len, _bz)) = wall.base_frame() else {
+            return top;
+        };
+        let (wpx, wpy) = (origin.x + ux * along_m, origin.y + uy * along_m);
+        let Some((mut ea, mut eb)) = wall.base_edge() else {
+            return top;
+        };
+        let (want_cid, want_exp) = (wall.construction_id, wall.exposure);
+        let same_edge = |w: &crate::ber::structural::WallRegion, a: Point3f64, b: Point3f64| {
+            let Some((wa, wb)) = w.base_edge() else {
+                return false;
+            };
+            let close = |p: Point3f64, q: Point3f64| (p.x - q.x).hypot(p.y - q.y) < 1e-2;
+            (close(wa, a) && close(wb, b)) || (close(wa, b) && close(wb, a))
+        };
+        for s in (idx + 1)..self.storeys.len() {
+            let Some(up) = self.storeys[s]
+                .walls
+                .regions
+                .iter()
+                .find(|w| same_edge(w, ea, eb))
+            else {
+                break; // setback / no wall above → run ends here
+            };
+            if up.construction_id != want_cid || up.exposure != want_exp {
+                break; // different wall type → can't span further
+            }
+            // Project the world plan point onto THIS wall's own base frame.
+            if let Some((uo, (vx, vy), _, _)) = up.base_frame() {
+                let d = (wpx - uo.x) * vx + (wpy - uo.y) * vy;
+                top = top.max(datum(s) + up.top_z_at_along(d));
+            }
+            if let Some((na, nb)) = up.base_edge() {
+                (ea, eb) = (na, nb);
+            }
+        }
+        top
+    }
+
     /// Append a roof apex to storey `storey_idx`'s durable apex list.
     /// Validation (position strictly inside a ceiling region, sane height)
     /// happens upstream in the document layer at assign time — this just
@@ -253,5 +314,73 @@ impl Ber {
                 storey.roof_apexes.remove(apex_idx);
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::ber::structural::{Opes, Polygon3D, Storey, WallExposure, WallRegion, WallRegions};
+    use domain::points::Point3f64;
+
+    fn p3(x: f64, y: f64, z: f64) -> Point3f64 {
+        Point3f64::new(x, y, z)
+    }
+
+    fn wall(cid: ItemId, exposure: WallExposure, ext: Vec<Point3f64>) -> WallRegion {
+        WallRegion {
+            id: ItemId::default(),
+            polygon: Polygon3D::new(ext),
+            exposure,
+            opes: Opes::default(),
+            construction_id: cid,
+        }
+    }
+
+    /// The run bound samples each wall above at the SAME physical plan point even
+    /// when that wall is stored in the opposite base-edge orientation (the upper
+    /// storey traces its own footprint, so the direction isn't guaranteed). With
+    /// a sloped upper wall, sampling the raw `along_m` would read the mirror end.
+    #[test]
+    fn wall_run_top_z_handles_a_reversed_upper_wall() {
+        let cid = ItemId::default();
+        let exp = WallExposure::Unset;
+        // Lower: flat wall, base (0,0)→(4,0), top 2.4. Window at along 0.5.
+        let lower = wall(
+            cid,
+            exp,
+            vec![
+                p3(0.0, 0.0, 0.0),
+                p3(4.0, 0.0, 0.0),
+                p3(4.0, 0.0, 2.4),
+                p3(0.0, 0.0, 2.4),
+            ],
+        );
+        // Upper: SAME edge but stored REVERSED — base (4,0)→(0,0) — and sloped so
+        // the top is 3.0 above world x=0 and 1.0 above world x=4. At world x=0.5
+        // the top is 3.0 − 2.0·(0.5/4) = 2.75; with datum 2.4 that's 5.15.
+        let upper = wall(
+            cid,
+            exp,
+            vec![
+                p3(4.0, 0.0, 0.0),
+                p3(0.0, 0.0, 0.0),
+                p3(0.0, 0.0, 3.0),
+                p3(4.0, 0.0, 1.0),
+            ],
+        );
+        let storey = |w: WallRegion, h: f64| Storey {
+            walls: WallRegions { regions: vec![w] },
+            ceiling_height_m: Some(h),
+            ..Storey::default()
+        };
+        let ber = Ber {
+            storeys: vec![storey(lower, 2.4), storey(upper, 2.4)],
+            ..Ber::default()
+        };
+        let wall0 = &ber.storeys[0].walls.regions[0];
+        let top = ber.wall_run_top_z(0, wall0, 0.5);
+        // Correct (orientation-aware) answer is 5.15; the raw-`along_m` bug gave 3.65.
+        assert!((top - 5.15).abs() < 1e-3, "run top = {top}, expected 5.15");
     }
 }

@@ -109,6 +109,13 @@ pub struct Window {
     /// sidelight/transom of the door with the same id). `None` for standalone.
     #[serde(default)]
     pub assembly_id: Option<ItemId>,
+    /// A MULTI-STOREY window: it may span up past its host storey's ceiling (the
+    /// roofline top-clamp is lifted in the vertex derivation), as far as the
+    /// same-type vertically-aligned wall run allows. The "Windows" checklist gate
+    /// flags one that hangs off the building. `#[serde(default)]` → false on old
+    /// records.
+    #[serde(default)]
+    pub multi_storey: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

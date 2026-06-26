@@ -272,6 +272,7 @@ fn openings_toolbar<F: FnMut(UiEvent)>(
         }
     };
     pick(ui, Window, "🪟 Window");
+    pick(ui, MultiStoreyWindow, "🪟⇅ Multi-storey window");
     pick(ui, RoofWindow, "🔆 Roof window");
     pick(ui, Door, "🚪 Door");
     pick(ui, DoorSidelights, "🚪+ Sidelights");
@@ -322,7 +323,7 @@ fn openings_toolbar<F: FnMut(UiEvent)>(
     metre_input(ui, width_input, 46.0, "=?");
     ui.label(h_label);
     metre_input(ui, height_input, 46.0, "=?");
-    if matches!(prompt.tool, Window | RoofWindow) && !prompt.on_roof {
+    if matches!(prompt.tool, Window | RoofWindow | MultiStoreyWindow) && !prompt.on_roof {
         ui.label("sill");
         metre_input(ui, sill_input, 46.0, "1.0");
     }
@@ -336,7 +337,10 @@ fn openings_toolbar<F: FnMut(UiEvent)>(
         metre_input(ui, transom_input, 40.0, "—");
     }
     // Glazing / frame / year for any window glass.
-    if matches!(prompt.tool, Window | RoofWindow | DoorSidelights) {
+    if matches!(
+        prompt.tool,
+        Window | RoofWindow | DoorSidelights | MultiStoreyWindow
+    ) {
         egui::ComboBox::from_id_salt("opening_glazing")
             .selected_text(glazing_label(glazing))
             .show_ui(ui, |ui| {
@@ -372,7 +376,7 @@ fn openings_toolbar<F: FnMut(UiEvent)>(
         if let (Some(width_m), Some(height_m)) = (w, h) {
             let year = year_input.trim().parse::<u32>().unwrap_or(0);
             let event = match prompt.tool {
-                Window | RoofWindow => {
+                Window | RoofWindow | MultiStoreyWindow => {
                     let sill_m = if prompt.on_roof {
                         0.0
                     } else {

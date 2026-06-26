@@ -65,6 +65,10 @@ impl AppController {
                 status: self.ber_storey_status(document::construction_phase_complete),
             },
             ChecklistItem {
+                label: "Windows",
+                status: self.windows_status(),
+            },
+            ChecklistItem {
                 label: "Living area",
                 status: self.living_area_status(),
             },
@@ -81,6 +85,23 @@ impl AppController {
     /// reads `Ber.photos` via [`external_photos_complete`](Self::external_photos_complete).
     fn external_photos_status(&self) -> ChecklistStatus {
         if self.external_photos_complete() {
+            ChecklistStatus::AllStoreys
+        } else {
+            ChecklistStatus::Incomplete
+        }
+    }
+
+    /// Per-DWELLING windows gate: green ([`ChecklistStatus::AllStoreys`]) when
+    /// the dwelling has at least four windows house-wide AND every multi-storey
+    /// window stays within its wall's same-type run (doesn't hang off the
+    /// building), red otherwise. Reads the RESOLVED [`Ber`] via
+    /// [`document::windows_complete`].
+    fn windows_status(&self) -> ChecklistStatus {
+        let complete = self
+            .current_record
+            .as_ref()
+            .is_some_and(|r| document::windows_complete(&r.data));
+        if complete {
             ChecklistStatus::AllStoreys
         } else {
             ChecklistStatus::Incomplete

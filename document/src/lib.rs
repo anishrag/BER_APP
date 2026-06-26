@@ -27,6 +27,7 @@ mod resolve;
 mod roof_point;
 mod step;
 mod wall_partition;
+mod windows;
 
 pub use ceiling_step::{
     canonicalize_ceiling_steps, ceiling_line_coords, region_line_coords, CeilingStepRegion,
@@ -55,6 +56,7 @@ pub use roof_point::{
     validate_roof_ridge_length, RidgeSlopeSide,
 };
 pub use step::{inherited_step_regions, step_regions_from_floors, StepRegion};
+pub use windows::windows_complete;
 
 use ber_model::ber::common::ConstructionPhase;
 use ber_model::ber::structural::{

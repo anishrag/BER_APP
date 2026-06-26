@@ -1547,6 +1547,7 @@ mod tests {
             }),
             wall_anchor: None,
             assembly_id: None,
+            multi_storey: false,
         });
         // Split the bottom wall at x = 2.
         ber.storeys[0].wall_splits = vec![[Point2f64::new(2.0, -1.0), Point2f64::new(2.0, 1.0)]];
@@ -3648,6 +3649,7 @@ mod tests {
             }),
             wall_anchor: None,
             assembly_id: None,
+            multi_storey: false,
         });
         let widx = ber.storeys[0]
             .walls
@@ -3721,6 +3723,7 @@ mod tests {
             }),
             wall_anchor: None,
             assembly_id: None,
+            multi_storey: false,
         });
 
         // Resolve once to SEED the parametric anchor from the (still live) wall.

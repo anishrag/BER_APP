@@ -12,6 +12,10 @@ use ber_model::ber::openings::{self, DoorSidelightsSpec, OpeningError, OpeningRe
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum OpeningToolKind {
     Window,
+    /// A window that may span UP past its host storey's ceiling, as far as the
+    /// same-type (construction + exposure) vertically-aligned wall run allows.
+    /// Placed on the LOWER storey; the roofline top-clamp is lifted.
+    MultiStoreyWindow,
     RoofWindow,
     Door,
     DoorSidelights,
@@ -316,6 +320,13 @@ impl AppController {
         let type_id = record.data.ensure_window_type(glazing, frame, year);
         let storey = &mut record.data.storeys[idx];
         let result = match pending.target {
+            PendingOpeningTarget::Wall {
+                wall_id, along_m, ..
+            } if pending.tool == OpeningToolKind::MultiStoreyWindow => {
+                openings::add_multi_storey_window(
+                    storey, wall_id, along_m, width_m, height_m, sill_m, type_id,
+                )
+            }
             PendingOpeningTarget::Wall {
                 wall_id, along_m, ..
             } => openings::add_wall_window(
