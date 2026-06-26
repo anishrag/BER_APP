@@ -764,13 +764,22 @@ impl eframe::App for BerApp {
                                 self.sketch_state.floor_thickness_error.clone();
                             // Windows/doors view data (its own borrow — kept out
                             // of the big tuple above).
-                            let (openings_mode, openings_tool, opening_prompt, elevation_view) = {
+                            let (
+                                openings_mode,
+                                openings_tool,
+                                opening_prompt,
+                                elevation_view,
+                                roof_window_selected,
+                                delete_confirm_pending,
+                            ) = {
                                 let c = self.app_controller.borrow();
                                 (
                                     c.openings_mode(),
                                     c.openings_tool(),
                                     c.pending_opening_prompt(),
                                     c.elevation_view(),
+                                    c.roof_window_selection(),
+                                    c.delete_confirm_pending(),
                                 )
                             };
                             // Owned partition view (the overlay takes a `&`); `None`
@@ -1056,6 +1065,8 @@ impl eframe::App for BerApp {
                                 transom_input: &mut self.sketch_state.transom_input,
                                 opening_error: opening_error.as_deref(),
                                 elevation_view,
+                                roof_window_selected,
+                                delete_confirm_pending,
                                 checklist,
                                 external_photos,
                                 current_phase,
@@ -1641,6 +1652,24 @@ impl eframe::App for BerApp {
                                             Err(e) => self.sketch_state.opening_error = Some(e),
                                         }
                                     }
+                                    SketchEvent::SubmitFullSurfaceWindow {
+                                        glazing,
+                                        frame,
+                                        year,
+                                    } => {
+                                        let r = controller
+                                            .borrow_mut()
+                                            .place_pending_full_surface_window(
+                                                glazing, frame, year,
+                                            );
+                                        match r {
+                                            Ok(()) => {
+                                                self.sketch_state.opening_error = None;
+                                                self.sketch_state.opening_inputs_clear = true;
+                                            }
+                                            Err(e) => self.sketch_state.opening_error = Some(e),
+                                        }
+                                    }
                                     SketchEvent::CancelPendingOpening => {
                                         controller.borrow_mut().cancel_pending_opening();
                                     }
@@ -1657,8 +1686,22 @@ impl eframe::App for BerApp {
                                     SketchEvent::ElevationPointerUp => {
                                         controller.borrow_mut().elevation_pointer_up();
                                     }
+                                    SketchEvent::OpeningsPointerDrag { world_x, world_y } => {
+                                        controller
+                                            .borrow_mut()
+                                            .openings_pointer_drag(world_x, world_y);
+                                    }
+                                    SketchEvent::OpeningsPointerUp => {
+                                        controller.borrow_mut().openings_pointer_up();
+                                    }
                                     SketchEvent::DeleteSelectedOpening => {
-                                        controller.borrow_mut().delete_selected_opening();
+                                        controller.borrow_mut().request_delete_opening();
+                                    }
+                                    SketchEvent::ConfirmDeleteOpening => {
+                                        controller.borrow_mut().confirm_delete_opening();
+                                    }
+                                    SketchEvent::CancelDeleteOpening => {
+                                        controller.borrow_mut().cancel_delete();
                                     }
                                     SketchEvent::CloseElevation => {
                                         controller.borrow_mut().close_elevation();

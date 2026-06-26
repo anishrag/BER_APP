@@ -221,6 +221,8 @@ pub(super) fn render<F: FnMut(UiEvent)>(
                     view.openings_tool,
                     view.opening_prompt.as_ref(),
                     view.elevation_view.is_some(),
+                    view.roof_window_selected.is_some(),
+                    view.delete_confirm_pending,
                     view.opening_width_input,
                     view.opening_height_input,
                     view.opening_sill_input,
@@ -247,6 +249,8 @@ fn openings_toolbar<F: FnMut(UiEvent)>(
     tool: OpeningToolKind,
     prompt: Option<&OpeningPromptUiData>,
     has_elevation: bool,
+    roof_window_selected: bool,
+    delete_confirm: bool,
     width_input: &mut String,
     height_input: &mut String,
     sill_input: &mut String,
@@ -271,14 +275,31 @@ fn openings_toolbar<F: FnMut(UiEvent)>(
     pick(ui, RoofWindow, "🔆 Roof window");
     pick(ui, Door, "🚪 Door");
     pick(ui, DoorSidelights, "🚪+ Sidelights");
-    pick(ui, Edit, "✋ Edit on wall");
+    pick(ui, Edit, "✋ Edit on surface");
 
-    if has_elevation {
+    // Surface-edit selection: a wall opening (in the elevation) or a roof window
+    // (selected in plan). Offer Delete (with a confirm step) + an elevation Done.
+    if has_elevation || roof_window_selected {
         ui.separator();
-        if ui.button("🗑 Delete selected").clicked() {
+        ui.label(if has_elevation {
+            "tap a window to select; drag to move"
+        } else {
+            "roof window selected — drag in plan to move"
+        });
+        if delete_confirm {
+            ui.label("Delete this window?");
+            ui.horizontal(|ui| {
+                if ui.button("🗑 Delete").clicked() {
+                    on_event(UiEvent::Sketch(SketchEvent::ConfirmDeleteOpening));
+                }
+                if ui.button("Cancel").clicked() {
+                    on_event(UiEvent::Sketch(SketchEvent::CancelDeleteOpening));
+                }
+            });
+        } else if ui.button("🗑 Delete selected").clicked() {
             on_event(UiEvent::Sketch(SketchEvent::DeleteSelectedOpening));
         }
-        if ui.button("Done").clicked() {
+        if has_elevation && ui.button("Done").clicked() {
             on_event(UiEvent::Sketch(SketchEvent::CloseElevation));
         }
         return;
@@ -331,6 +352,19 @@ fn openings_toolbar<F: FnMut(UiEvent)>(
             });
         ui.label("year");
         metre_input(ui, year_input, 50.0, "—");
+    }
+    // Full-surface "window wall": no size entry, fills the whole face. Offered
+    // only for a plain Window on an EMPTY wall.
+    if matches!(prompt.tool, Window) && !prompt.on_roof && prompt.wall_empty {
+        ui.separator();
+        if ui.button("🟦 Fill whole surface (window wall)").clicked() {
+            let year = year_input.trim().parse::<u32>().unwrap_or(0);
+            on_event(UiEvent::Sketch(SketchEvent::SubmitFullSurfaceWindow {
+                glazing: glazing.clone(),
+                frame: frame.clone(),
+                year,
+            }));
+        }
     }
     if ui.button("Place").clicked() {
         let w = parse_dimension_expression(width_input);

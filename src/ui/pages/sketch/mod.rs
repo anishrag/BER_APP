@@ -430,6 +430,22 @@ pub enum SketchEvent {
         width_m: f32,
         height_m: f32,
     },
+    /// Turn the (empty) host wall into a full-surface "window wall" — no size
+    /// entry; the whole face becomes one window.
+    SubmitFullSurfaceWindow {
+        glazing: Glazing,
+        frame: Frame,
+        year: u32,
+    },
+    /// Plan drag / release while a ROOF window is grabbed (Edit-on-surface).
+    OpeningsPointerDrag {
+        world_x: f64,
+        world_y: f64,
+    },
+    OpeningsPointerUp,
+    /// Confirm / cancel the pending delete of the selected opening.
+    ConfirmDeleteOpening,
+    CancelDeleteOpening,
     /// Submit a door+sidelights assembly (composer output).
     SubmitDoorSidelights {
         door_w: f32,
@@ -918,6 +934,11 @@ pub struct SketchView<'a> {
     /// The open per-wall ELEVATION overlay, if any (the unrolled wall + its
     /// draggable openings).
     pub elevation_view: Option<ElevationView>,
+    /// A ROOF window is selected in the plan view (Edit-on-surface) — its id, so
+    /// the toolbar can offer Delete and the canvas can highlight it.
+    pub roof_window_selected: Option<ItemId>,
+    /// A delete is awaiting confirmation (show the confirm/cancel controls).
+    pub delete_confirm_pending: bool,
     /// Stage A completion checklist rows (Measurements / Heights / Exposures),
     /// recomputed each frame from the editing model — drawn as the floating,
     /// draggable checklist window over the canvas.

@@ -270,6 +270,15 @@ pub struct AppController {
     elevation_drag: Option<ber_model::ber::openings::OpeningRef>,
     /// The opening selected in the elevation, for Delete (transient).
     elevation_selection: Option<ber_model::ber::openings::OpeningRef>,
+    /// A ROOF window selected in the PLAN view (Edit-on-surface tool), for drag /
+    /// delete — roof windows live in plan, so their "surface" is the footprint.
+    /// Transient.
+    roof_window_sel: Option<ber_model::ber::common::ItemId>,
+    /// The roof window grabbed during a plan drag (transient).
+    roof_window_drag: Option<ber_model::ber::common::ItemId>,
+    /// A delete is awaiting confirmation (the active selection — `elevation_selection`
+    /// for a wall opening, else `roof_window_sel` — names the target). Transient.
+    confirm_delete: bool,
     /// The Stage-1 (Mapping) REVIEW takeover view is open (transient). The canvas
     /// shows the current side's external elevation beside its photo; the assessor
     /// scrolls the four sides and confirms "all's good" (`mapping_review.rs`).
@@ -506,6 +515,9 @@ impl AppController {
             elevation_wall: None,
             elevation_drag: None,
             elevation_selection: None,
+            roof_window_sel: None,
+            roof_window_drag: None,
+            confirm_delete: false,
             mapping_review_mode: false,
             mapping_review_side: ber_model::ber::common::ExternalSide::Front,
             mapping_review_drag: None,

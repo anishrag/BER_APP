@@ -1758,6 +1758,20 @@ pub(super) fn render<F: FnMut(UiEvent)>(
                     }));
                 }
             }
+            // Continue / end a plan drag of a grabbed ROOF window (Edit tool). A
+            // no-op for the placement tools (nothing is grabbed).
+            if response.dragged_by(egui::PointerButton::Primary) {
+                if let Some(pos) = response.interact_pointer_pos() {
+                    let (wx, wy) = t.inverse(pos.x, pos.y);
+                    on_event(UiEvent::Sketch(SketchEvent::OpeningsPointerDrag {
+                        world_x: wx,
+                        world_y: wy,
+                    }));
+                }
+            }
+            if response.drag_stopped_by(egui::PointerButton::Primary) {
+                on_event(UiEvent::Sketch(SketchEvent::OpeningsPointerUp));
+            }
         }
     }
 

@@ -323,6 +323,86 @@ pub fn add_roof_window(
     Ok(id)
 }
 
+/// Add a window that fills the WHOLE wall face — a "window wall". Width = the
+/// wall length (centred, no end margins), sill 0; `height_m` is the face height
+/// (the caller computes it from the wall top). NOT redistributed: it spans the
+/// entire wall, so it's meant for an empty wall (the caller gates this) — any
+/// existing opening would be overlapped.
+pub fn add_full_wall_window(
+    storey: &mut Storey,
+    wall_id: ItemId,
+    height_m: f32,
+    window_type_id: ItemId,
+) -> Result<ItemId, OpeningError> {
+    let Some(len) = wall_length(storey, wall_id) else {
+        return Err(OpeningError::NoHostRegion);
+    };
+    if height_m <= 0.0 || len <= 0.0 {
+        return Err(OpeningError::ZeroSize);
+    }
+    let id = ItemId::default();
+    storey.windows.push(Window {
+        id,
+        vertices: vec![],
+        width_m: len,
+        height_m,
+        window_type_id,
+        placement: Some(OpeningPlacement::Wall {
+            wall_id,
+            along_m: len / 2.0,
+            sill_m: 0.0,
+        }),
+        wall_anchor: None,
+        assembly_id: None,
+    });
+    link_window(storey, wall_id, id);
+    Ok(id)
+}
+
+/// Reposition a ROOF window to a new plan point, re-homing it to the roof region
+/// under that point (so it derives onto the right face). Keeps the old region if
+/// the point is off every roof. No-op if `window_id` isn't a roof window. `opes`
+/// membership is rebuilt at the resolve tail, so it isn't touched here.
+pub fn move_roof_window(storey: &mut Storey, window_id: ItemId, new_plan: (f32, f32)) {
+    let new_region = storey
+        .roofs
+        .region_strictly_containing(domain::points::Point2f64::new(
+            new_plan.0 as f64,
+            new_plan.1 as f64,
+        ))
+        .map(|r| r.id);
+    if let Some(w) = storey.windows.iter_mut().find(|w| w.id == window_id) {
+        if let Some(OpeningPlacement::Roof {
+            roof_region_id,
+            plan,
+        }) = &mut w.placement
+        {
+            *plan = new_plan;
+            if let Some(rid) = new_region {
+                *roof_region_id = rid;
+            }
+        }
+    }
+}
+
+/// The ROOF window whose plan rectangle contains `(x, y)`, if any (topmost — the
+/// last added — wins). Used to pick a rooflight to drag/delete in the plan view.
+pub fn roof_window_at(storey: &Storey, x: f32, y: f32) -> Option<ItemId> {
+    storey
+        .windows
+        .iter()
+        .rev()
+        .find_map(|w| match &w.placement {
+            Some(OpeningPlacement::Roof { plan, .. })
+                if (x - plan.0).abs() <= w.width_m / 2.0
+                    && (y - plan.1).abs() <= w.height_m / 2.0 =>
+            {
+                Some(w.id)
+            }
+            _ => None,
+        })
+}
+
 /// Compose a door+sidelights assembly on a wall at `along_m` (centre): one
 /// `Door` (panel) + flanking sidelight `Window`s + an optional transom, all
 /// sharing a fresh `assembly_id`, laid out left→right. Redistributes the wall
@@ -1379,6 +1459,59 @@ mod tests {
         assert!(
             sp[1].0 - sp[0].1 >= MIN_GAP_M - 1e-4,
             "min gap honoured: {sp:?}"
+        );
+    }
+
+    #[test]
+    fn full_wall_window_fills_the_face() {
+        let (mut s, wid) = storey_with_wall(5.0);
+        let id = add_full_wall_window(&mut s, wid, 2.4, ItemId::default()).unwrap();
+        let w = s.windows.iter().find(|w| w.id == id).unwrap();
+        assert!((w.width_m - 5.0).abs() < 1e-3, "width = wall length");
+        assert!((w.height_m - 2.4).abs() < 1e-3, "height = face height");
+        match &w.placement {
+            Some(OpeningPlacement::Wall {
+                along_m, sill_m, ..
+            }) => {
+                assert!((along_m - 2.5).abs() < 1e-3, "centred on the wall");
+                assert!(sill_m.abs() < 1e-3, "sill at the floor");
+            }
+            _ => panic!("expected a wall placement"),
+        }
+    }
+
+    #[test]
+    fn roof_window_hit_test_and_move() {
+        let mut s = Storey::default();
+        let id = ItemId::default();
+        s.windows.push(Window {
+            id,
+            vertices: vec![],
+            width_m: 1.0,
+            height_m: 1.0,
+            window_type_id: ItemId::default(),
+            placement: Some(OpeningPlacement::Roof {
+                roof_region_id: ItemId::default(),
+                plan: (2.0, 2.0),
+            }),
+            wall_anchor: None,
+            assembly_id: None,
+        });
+        assert_eq!(
+            roof_window_at(&s, 2.3, 2.3),
+            Some(id),
+            "inside the plan rect"
+        );
+        assert_eq!(roof_window_at(&s, 5.0, 5.0), None, "outside the rect");
+        move_roof_window(&mut s, id, (3.5, 4.0));
+        match &s.windows[0].placement {
+            Some(OpeningPlacement::Roof { plan, .. }) => assert_eq!(*plan, (3.5, 4.0)),
+            _ => panic!("expected a roof placement"),
+        }
+        assert_eq!(
+            roof_window_at(&s, 3.5, 4.0),
+            Some(id),
+            "hit-tests at the new spot"
         );
     }
 

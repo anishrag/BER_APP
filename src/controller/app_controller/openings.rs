@@ -66,6 +66,9 @@ pub struct OpeningPromptUiData {
     pub tool: OpeningToolKind,
     /// True when the host is a roof region (no sill; free placement).
     pub on_roof: bool,
+    /// True when the host WALL has no openings yet — the "full surface / window
+    /// wall" shortcut is offered only then (it spans the whole face).
+    pub wall_empty: bool,
 }
 
 impl AppController {
@@ -88,6 +91,9 @@ impl AppController {
         self.elevation_wall = None;
         self.elevation_drag = None;
         self.elevation_selection = None;
+        self.roof_window_sel = None;
+        self.roof_window_drag = None;
+        self.confirm_delete = false;
         if on {
             self.sync_active();
             self.set_living_area_mode(false);
@@ -115,6 +121,9 @@ impl AppController {
         self.elevation_wall = None;
         self.elevation_drag = None;
         self.elevation_selection = None;
+        self.roof_window_sel = None;
+        self.roof_window_drag = None;
+        self.confirm_delete = false;
         // Every sibling area-mode setter routes through here, so this is the one
         // chokepoint that also closes any open wall-face partition view.
         self.close_wall_partition();
@@ -123,11 +132,14 @@ impl AppController {
     pub fn set_openings_tool(&mut self, tool: OpeningToolKind) {
         self.openings_tool = tool;
         self.pending_opening = None;
-        // Leaving Edit closes any open elevation.
+        self.confirm_delete = false;
+        // Leaving Edit closes any open elevation + clears the surface selection.
         if tool != OpeningToolKind::Edit {
             self.elevation_wall = None;
             self.elevation_drag = None;
             self.elevation_selection = None;
+            self.roof_window_sel = None;
+            self.roof_window_drag = None;
         }
     }
 
@@ -149,6 +161,7 @@ impl AppController {
         // mutate self).
         enum Pick {
             Elevation(ItemId),
+            RoofWindowSel(ItemId),
             Wall(ItemId, f32),
             Roof(ItemId, (f32, f32)),
             None,
@@ -162,10 +175,18 @@ impl AppController {
                 return;
             };
             match tool {
-                OpeningToolKind::Edit => match openings::pick_wall_along(storey, wx, wy, tol) {
-                    Some((id, _, _)) => Pick::Elevation(id),
-                    None => Pick::None,
-                },
+                // Edit-on-surface: a roof window (interior) selects for plan
+                // drag/delete; otherwise the nearest wall opens its elevation.
+                OpeningToolKind::Edit => {
+                    if let Some(wid) = openings::roof_window_at(storey, wx as f32, wy as f32) {
+                        Pick::RoofWindowSel(wid)
+                    } else {
+                        match openings::pick_wall_along(storey, wx, wy, tol) {
+                            Some((id, _, _)) => Pick::Elevation(id),
+                            None => Pick::None,
+                        }
+                    }
+                }
                 OpeningToolKind::RoofWindow => match openings::pick_roof_region(storey, wx, wy) {
                     Some((id, plan)) => Pick::Roof(id, plan),
                     None => Pick::None,
@@ -181,6 +202,16 @@ impl AppController {
                 self.elevation_wall = Some(wall_id);
                 self.elevation_selection = None;
                 self.pending_opening = None;
+                self.roof_window_sel = None;
+                self.confirm_delete = false;
+            }
+            Pick::RoofWindowSel(wid) => {
+                self.record_history(); // one snapshot for the (possible) drag
+                self.roof_window_sel = Some(wid);
+                self.roof_window_drag = Some(wid);
+                self.elevation_wall = None;
+                self.pending_opening = None;
+                self.confirm_delete = false;
             }
             Pick::Wall(wall_id, along_m) => {
                 self.pending_opening = Some(PendingOpening {
@@ -200,10 +231,59 @@ impl AppController {
 
     /// What the dock should prompt for the in-flight placement, if any.
     pub fn pending_opening_prompt(&self) -> Option<OpeningPromptUiData> {
-        self.pending_opening.as_ref().map(|p| OpeningPromptUiData {
+        let p = self.pending_opening.as_ref()?;
+        let wall_empty = match p.target {
+            PendingOpeningTarget::Wall { wall_id, .. } => self
+                .current_storey_idx
+                .and_then(|idx| self.current_record.as_ref()?.data.storeys.get(idx))
+                .map(|s| openings::wall_openings(s, wall_id).is_empty())
+                .unwrap_or(false),
+            PendingOpeningTarget::Roof { .. } => false,
+        };
+        Some(OpeningPromptUiData {
             tool: p.tool,
             on_roof: matches!(p.target, PendingOpeningTarget::Roof { .. }),
+            wall_empty,
         })
+    }
+
+    /// Place a FULL-SURFACE window — turn the (empty) host wall into a "window
+    /// wall" filling the whole face. No size entry: width = wall length, height =
+    /// floor-to-roof at the tap, sill 0. Walls only.
+    pub fn place_pending_full_surface_window(
+        &mut self,
+        glazing: Glazing,
+        frame: Frame,
+        year: u32,
+    ) -> Result<(), String> {
+        let Some(pending) = self.pending_opening.take() else {
+            return Ok(());
+        };
+        let PendingOpeningTarget::Wall { wall_id, along_m } = pending.target else {
+            self.pending_opening = Some(pending);
+            return Ok(()); // walls only
+        };
+        let Some(idx) = self.current_storey_idx else {
+            return Ok(());
+        };
+        self.materialize();
+        let undo_snap = self.current_history_snapshot();
+        // Face height = top_z − base at the tap. `max_sill_for(along, 0)` is
+        // exactly that (public), avoiding the crate-private `top_z_at_along`.
+        let height_m = self
+            .current_record
+            .as_ref()
+            .and_then(|r| r.data.storeys.get(idx))
+            .and_then(|s| s.walls.regions.iter().find(|r| r.id == wall_id))
+            .map(|wall| wall.max_sill_for(along_m as f64, 0.0) as f32)
+            .unwrap_or(0.0);
+        let Some(record) = self.current_record.as_mut() else {
+            return Ok(());
+        };
+        let type_id = record.data.ensure_window_type(glazing, frame, year);
+        let storey = &mut record.data.storeys[idx];
+        let result = openings::add_full_wall_window(storey, wall_id, height_m, type_id);
+        self.finish_opening(result.map(|_| ()), undo_snap, pending)
     }
 
     pub fn cancel_pending_opening(&mut self) {
@@ -424,6 +504,9 @@ impl AppController {
         self.elevation_wall = None;
         self.elevation_drag = None;
         self.elevation_selection = None;
+        self.roof_window_sel = None;
+        self.roof_window_drag = None;
+        self.confirm_delete = false;
     }
 
     /// The unrolled selected wall + its openings, for the overlay. `None` when
@@ -509,10 +592,71 @@ impl AppController {
         self.elevation_drag = None;
     }
 
-    /// Delete the opening selected in the elevation (the whole assembly if it's
-    /// a member), undoably.
+    /// Drag a grabbed ROOF window in the plan view to a new point (Edit-on-surface
+    /// tool). No-op if nothing is grabbed. The drag was snapshotted on pointer-down.
+    pub fn openings_pointer_drag(&mut self, wx: f64, wy: f64) {
+        let Some(wid) = self.roof_window_drag else {
+            return;
+        };
+        let Some(idx) = self.current_storey_idx else {
+            return;
+        };
+        if let Some(record) = self.current_record.as_mut() {
+            if let Some(storey) = record.data.storeys.get_mut(idx) {
+                openings::move_roof_window(storey, wid, (wx as f32, wy as f32));
+            }
+        }
+        if let Some(idx) = self.current_storey_idx {
+            self.reseed_opening_anchors(idx);
+        }
+        let _ = self.mark_dirty();
+    }
+
+    pub fn openings_pointer_up(&mut self) {
+        self.roof_window_drag = None;
+    }
+
+    /// The roof window selected in the plan view (Edit-on-surface), for highlight.
+    pub fn roof_window_selection(&self) -> Option<ItemId> {
+        self.roof_window_sel
+    }
+
+    /// Is anything (a wall opening in the elevation, or a roof window in plan)
+    /// selected and thus deletable?
+    pub fn has_deletable_selection(&self) -> bool {
+        self.elevation_selection.is_some() || self.roof_window_sel.is_some()
+    }
+
+    /// True while a delete is awaiting confirmation.
+    pub fn delete_confirm_pending(&self) -> bool {
+        self.confirm_delete
+    }
+
+    /// Ask to delete the selected opening — shows a confirm step rather than
+    /// deleting outright.
+    pub fn request_delete_opening(&mut self) {
+        if self.has_deletable_selection() {
+            self.confirm_delete = true;
+        }
+    }
+
+    pub fn cancel_delete(&mut self) {
+        self.confirm_delete = false;
+    }
+
+    /// Confirm the pending delete and perform it.
+    pub fn confirm_delete_opening(&mut self) {
+        self.confirm_delete = false;
+        self.delete_selected_opening();
+    }
+
+    /// Delete the SELECTED opening — a wall opening (the whole assembly if it's a
+    /// member) from the elevation, or a roof window selected in plan. Undoable.
     pub fn delete_selected_opening(&mut self) {
-        let Some(r) = self.elevation_selection else {
+        let target = self
+            .elevation_selection
+            .or_else(|| self.roof_window_sel.map(OpeningRef::Window));
+        let Some(r) = target else {
             return;
         };
         let Some(idx) = self.current_storey_idx else {
@@ -525,6 +669,7 @@ impl AppController {
             }
         }
         self.elevation_selection = None;
+        self.roof_window_sel = None;
         let _ = self.mark_dirty();
         self.push_history_snapshot(undo_snap);
     }
