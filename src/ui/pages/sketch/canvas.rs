@@ -1775,6 +1775,31 @@ pub(super) fn render<F: FnMut(UiEvent)>(
         }
     }
 
+    // Highlight the roof window selected for Edit-on-surface (a bright border on
+    // its plan footprint), drawn on top of the openings painted by `render_ber`.
+    if view.openings_mode && view.elevation_view.is_none() {
+        if let Some(sel) = view.roof_window_selected {
+            if let (Some(t), Some(storey)) = (
+                canvas_transform(ber, current_storey_idx, rect, vp, false),
+                ber.and_then(|b| current_storey_idx.and_then(|i| b.storeys.get(i))),
+            ) {
+                if let Some(w) = storey.windows.iter().find(|w| w.id == sel) {
+                    let pts: Vec<egui::Pos2> = w
+                        .vertices
+                        .iter()
+                        .map(|(x, y, _z)| t.apply(*x as f64, *y as f64))
+                        .collect();
+                    if pts.len() >= 3 {
+                        painter.add(egui::Shape::closed_line(
+                            pts,
+                            egui::Stroke::new(2.5, egui::Color32::from_rgb(255, 180, 40)),
+                        ));
+                    }
+                }
+            }
+        }
+    }
+
     // Primary-button input: stroke drawing OR Move-mode
     // click/drag, depending on `edit_tool`. Both gated on
     // 2D mode and "no overlay is open" (review / pending
