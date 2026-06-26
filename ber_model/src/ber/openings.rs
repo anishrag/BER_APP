@@ -14,7 +14,13 @@ use domain::points::point_to_segment_distance;
 /// Default door sill height (metres above the wall base) + spacing constants for
 /// auto-redistribution. Tuning-overridable later; sensible Irish-BER defaults.
 pub const DEFAULT_DOOR_SILL_M: f32 = 0.0;
+/// Default minimum gap between side-by-side openings. Auto-spacing aims for this,
+/// but COMPRESSES toward `GAP_FLOOR_M` to cram more openings into a tight wall
+/// before declaring it too short.
 const MIN_GAP_M: f32 = 0.1;
+/// The gap will compress no further than this (openings may touch, never overlap)
+/// before a layout is rejected as `WallTooShort`.
+const GAP_FLOOR_M: f32 = 0.0;
 const END_MARGIN_M: f32 = 0.05;
 
 /// Reasons an opening op can't proceed (mapped to a user message by the shell).
@@ -413,6 +419,21 @@ pub fn move_opening(
     let Some((wall_id, old_along, old_sill, assembly)) = wall_placement_of(storey, opening) else {
         return Ok(());
     };
+    // Clamp the dragged opening's TOP under the wall roofline at its new along
+    // (and its bottom at the floor). Lives HERE so every drag path — the review
+    // elevation AND the 2D placement view — shares one clamp via this single
+    // mutation, instead of each re-implementing it (only the review path did).
+    let new_sill_m = {
+        let h = opening_height(storey, opening) as f64;
+        let max_sill = storey
+            .walls
+            .regions
+            .iter()
+            .find(|r| r.id == wall_id)
+            .map(|r| r.max_sill_for(new_along_m as f64, h) as f32)
+            .unwrap_or(f32::INFINITY);
+        new_sill_m.clamp(0.0, max_sill.max(0.0))
+    };
     let (d_along, d_sill) = (new_along_m - old_along, new_sill_m - old_sill);
     let shift = |p: &mut Option<OpeningPlacement>| {
         if let Some(OpeningPlacement::Wall {
@@ -453,7 +474,13 @@ pub fn move_opening(
             }
         },
     }
-    redistribute_wall_openings(storey, wall_id)
+    // Pin the moved opening: it holds the spot the assessor dragged it to while
+    // the rest auto-arrange minimally around it. (Pinning a member pins its whole
+    // assembly.) If pinning it there is infeasible (e.g. dragged so hard against a
+    // neighbour and the wall that nothing fits), fall back to a full re-arrange
+    // that may nudge the dragged one too — better than refusing the move.
+    redistribute_wall_openings_pinned(storey, wall_id, &[opening])
+        .or_else(|_| redistribute_wall_openings(storey, wall_id))
 }
 
 /// Delete an opening (the whole assembly if it's a member), then redistribute
@@ -488,43 +515,42 @@ pub fn delete_opening(storey: &mut Storey, opening: OpeningRef) {
     }
 }
 
-/// Space the wall's openings so none overlap as 2D rectangles (along × height):
-/// openings that share a VERTICAL band (their height ranges overlap) compete for
-/// along-space and are order-preserving-packed apart within `[margin, len-margin]`
-/// at min-gap `g`; openings that are vertically DISJOINT (a window stacked above
-/// another) don't compete and may share an along. A door+sidelights assembly is
-/// ONE rigid unit (its bounding box). `WallTooShort` if some band can't fit; the
-/// storey is left unchanged in that case.
-pub(crate) fn redistribute_wall_openings(
-    storey: &mut Storey,
-    wall_id: ItemId,
-) -> Result<(), OpeningError> {
-    let len = wall_length(storey, wall_id).ok_or(OpeningError::NoHostRegion)?;
-    let raw = wall_openings(storey, wall_id);
-    if raw.is_empty() {
-        return Ok(());
-    }
-    // A packing UNIT (an assembly = one rigid unit; everything else singleton),
-    // with its vertical band `[vmin, vmax] = [sill, sill + height]`.
-    struct Unit {
-        members: Vec<(OpeningRef, f32)>, // (ref, current centre)
-        centre: f32,
-        width: f32,
-        vmin: f32,
-        vmax: f32,
-    }
+/// A packing unit: a door+sidelights assembly is ONE rigid unit (its bounding
+/// box), everything else a singleton. `centre`/`width` are the along-axis box;
+/// `[vmin, vmax] = [sill, sill + height]` the vertical band. A `pinned` unit
+/// holds its along (a dragged opening keeps the spot the assessor put it in while
+/// the rest flow around it).
+struct PackUnit {
+    members: Vec<(OpeningRef, f32)>, // (ref, current centre)
+    centre: f32,
+    width: f32,
+    vmin: f32,
+    vmax: f32,
+    pinned: bool,
+}
+
+/// Two units must be along-separated iff their vertical bands OVERLAP. This is
+/// PAIRWISE (not the transitive connected-component "band" it replaced): a tall
+/// door no longer bridges a low row and a high window into one packing set, so a
+/// wide window may sit directly above two narrow ones it never actually touches.
+fn units_height_overlap(a: &PackUnit, b: &PackUnit) -> bool {
+    a.vmin < b.vmax - 1e-4 && b.vmin < a.vmax - 1e-4
+}
+
+fn build_pack_units(raw: &[WallOpening], pinned: &[OpeningRef]) -> Vec<PackUnit> {
     let mut by_assembly: std::collections::HashMap<ItemId, Vec<WallOpening>> =
         std::collections::HashMap::new();
-    let mut units: Vec<Unit> = Vec::new();
-    for o in &raw {
+    let mut units: Vec<PackUnit> = Vec::new();
+    for o in raw {
         match o.assembly_id {
             Some(aid) => by_assembly.entry(aid).or_default().push(*o),
-            None => units.push(Unit {
+            None => units.push(PackUnit {
                 members: vec![(o.opening, o.along_m)],
                 centre: o.along_m,
                 width: o.width_m,
                 vmin: o.sill_m,
                 vmax: o.sill_m + o.height_m,
+                pinned: pinned.contains(&o.opening),
             }),
         }
     }
@@ -545,101 +571,155 @@ pub(crate) fn redistribute_wall_openings(
             .iter()
             .map(|o| o.sill_m + o.height_m)
             .fold(f32::NEG_INFINITY, f32::max);
-        units.push(Unit {
+        units.push(PackUnit {
             members: members.iter().map(|o| (o.opening, o.along_m)).collect(),
             centre: (left + right) / 2.0,
             width: right - left,
             vmin,
             vmax,
+            pinned: members.iter().any(|o| pinned.contains(&o.opening)),
         });
     }
+    units
+}
 
-    // Group units into VERTICAL BANDS: connected components over "vertical
-    // ranges overlap" (transitive, conservative). Units in different bands are
-    // vertically disjoint, so they pack independently and may share an along —
-    // a window directly above another is allowed; only a true 2D overlap (same
-    // band AND same along-span) is resolved by spacing.
-    let n = units.len();
-    let mut comp = vec![usize::MAX; n];
-    let mut ncomp = 0usize;
-    for i in 0..n {
-        if comp[i] != usize::MAX {
+/// The minimal wall length these units need at gap `g`: the widest "scanline".
+/// At any height the openings crossing it all pairwise overlap (a clique), so
+/// they must sit side-by-side — sum of widths + gaps + the two end margins. The
+/// max over every height interval is EXACT feasibility (height-overlap is an
+/// interval graph, whose cliques are exactly the scanline sets).
+fn max_scanline_needed(units: &[PackUnit], g: f32) -> f32 {
+    let mut ys: Vec<f32> = Vec::with_capacity(units.len() * 2);
+    for u in units {
+        ys.push(u.vmin);
+        ys.push(u.vmax);
+    }
+    ys.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    let mut needed = 2.0 * END_MARGIN_M;
+    for w in ys.windows(2) {
+        if w[1] - w[0] < 1e-6 {
             continue;
         }
-        let id = ncomp;
-        ncomp += 1;
-        let mut stack = vec![i];
-        comp[i] = id;
-        while let Some(u) = stack.pop() {
-            for v in 0..n {
-                if comp[v] == usize::MAX
-                    && units[u].vmin < units[v].vmax - 1e-4
-                    && units[v].vmin < units[u].vmax - 1e-4
-                {
-                    comp[v] = id;
-                    stack.push(v);
-                }
+        let y = (w[0] + w[1]) / 2.0;
+        let active = units.iter().filter(|u| u.vmin < y && y < u.vmax);
+        let (k, sum_w) = active.fold((0u32, 0.0f32), |(k, s), u| (k + 1, s + u.width));
+        if k == 0 {
+            continue;
+        }
+        needed = needed.max(sum_w + g * (k as f32 - 1.0) + 2.0 * END_MARGIN_M);
+    }
+    needed
+}
+
+/// Place units along the wall NEAR their desired centres, separating every
+/// height-overlapping pair by gap `g`, holding pinned units fixed. Iterative
+/// pairwise projection: only pairs that actually overlap are pushed apart, by the
+/// minimum, so non-conflicting openings keep their place (minimal movement).
+/// Left/right order is taken from the DESIRED centres (stable; a dragged opening's
+/// new centre defines its order, so it can move past a neighbour). Returns `None`
+/// if it can't fully separate within the wall bounds at this gap.
+fn project_along(units: &[PackUnit], len: f32, g: f32) -> Option<Vec<f32>> {
+    let n = units.len();
+    let m = END_MARGIN_M;
+    let lo: Vec<f32> = units.iter().map(|u| m + u.width / 2.0).collect();
+    let hi: Vec<f32> = units.iter().map(|u| len - m - u.width / 2.0).collect();
+    if (0..n).any(|i| lo[i] > hi[i] + 1e-4) {
+        return None; // a single unit is wider than the wall
+    }
+    let mut c: Vec<f32> = (0..n)
+        .map(|i| units[i].centre.clamp(lo[i], hi[i]))
+        .collect();
+    let conflicts: Vec<(usize, usize)> = (0..n)
+        .flat_map(|i| ((i + 1)..n).map(move |j| (i, j)))
+        .filter(|&(i, j)| units_height_overlap(&units[i], &units[j]))
+        .collect();
+    let max_iters = 64 + 16 * n;
+    for _ in 0..max_iters {
+        let mut moved = false;
+        for &(i, j) in &conflicts {
+            let req = (units[i].width + units[j].width) / 2.0 + g;
+            // Order by DESIRED centre so units don't oscillate past each other.
+            let (a, b) = if units[i].centre <= units[j].centre {
+                (i, j)
+            } else {
+                (j, i)
+            };
+            let dist = c[b] - c[a];
+            if dist < req - 1e-5 {
+                let deficit = req - dist;
+                let (da, db) = match (units[a].pinned, units[b].pinned) {
+                    (true, true) => (0.0, 0.0), // can't move either — caught by the final check
+                    (true, false) => (0.0, deficit),
+                    (false, true) => (deficit, 0.0),
+                    (false, false) => (deficit / 2.0, deficit / 2.0),
+                };
+                c[a] = (c[a] - da).max(lo[a]);
+                c[b] = (c[b] + db).min(hi[b]);
+                moved = true;
             }
+        }
+        if !moved {
+            break;
         }
     }
+    // Confirm no residual overlap (clamping to bounds can leave one unresolved).
+    for &(i, j) in &conflicts {
+        let req = (units[i].width + units[j].width) / 2.0 + g;
+        if (c[i] - c[j]).abs() < req - 1e-3 {
+            return None;
+        }
+    }
+    Some(c)
+}
 
-    let g = MIN_GAP_M;
-    let m = END_MARGIN_M;
+/// Space the wall's openings so none overlap as 2D rectangles (along × height).
+/// See [`redistribute_wall_openings_pinned`]; this is the no-pin entry point.
+pub(crate) fn redistribute_wall_openings(
+    storey: &mut Storey,
+    wall_id: ItemId,
+) -> Result<(), OpeningError> {
+    redistribute_wall_openings_pinned(storey, wall_id, &[])
+}
+
+/// Space the wall's openings (true 2D no-overlap), keeping `pinned` openings at
+/// their along while the rest flow around them with minimal movement. Openings
+/// whose vertical bands are disjoint may share an along (stacking); only a real
+/// 2D overlap is resolved. The gap COMPRESSES from `MIN_GAP_M` toward
+/// `GAP_FLOOR_M` to fit more in a tight wall before failing. `WallTooShort` (with
+/// the storey left unchanged) only when even touching openings can't fit.
+pub(crate) fn redistribute_wall_openings_pinned(
+    storey: &mut Storey,
+    wall_id: ItemId,
+    pinned: &[OpeningRef],
+) -> Result<(), OpeningError> {
+    let len = wall_length(storey, wall_id).ok_or(OpeningError::NoHostRegion)?;
+    let raw = wall_openings(storey, wall_id);
+    if raw.is_empty() {
+        return Ok(());
+    }
+    let units = build_pack_units(&raw, pinned);
+    // Try the default gap, then COMPRESS toward the floor to cram more in before
+    // giving up. Feasibility (widest scanline) is checked per gap; if it fits, the
+    // projection places everything near its desired along.
+    let gaps = [MIN_GAP_M, 0.075, 0.05, 0.025, GAP_FLOOR_M];
+    let centres = gaps
+        .iter()
+        .find_map(|&g| {
+            (max_scanline_needed(&units, g) <= len + 1e-4)
+                .then(|| project_along(&units, len, g))
+                .flatten()
+        })
+        .ok_or(OpeningError::WallTooShort {
+            needed_m: max_scanline_needed(&units, GAP_FLOOR_M),
+            available_m: len,
+        })?;
+    // Apply: translate each unit's members by (new centre − unit centre).
     let mut new_centre: std::collections::HashMap<OpeningRef, f32> =
         std::collections::HashMap::new();
-    // Pack each band independently over the full [m, len-m] along range.
-    for id in 0..ncomp {
-        let mut idx: Vec<usize> = (0..n).filter(|&i| comp[i] == id).collect();
-        idx.sort_by(|&a, &b| units[a].centre.partial_cmp(&units[b].centre).unwrap());
-        let k = idx.len();
-        let needed: f32 =
-            idx.iter().map(|&i| units[i].width).sum::<f32>() + g * (k as f32 - 1.0) + 2.0 * m;
-        if needed > len + 1e-4 {
-            return Err(OpeningError::WallTooShort {
-                needed_m: needed,
-                available_m: len,
-            });
-        }
-        // Left-packed lower bounds and right-packed upper bounds on each unit's
-        // LEFT edge, then relax toward the desired left edge, order-preserving.
-        let mut lo = vec![0.0f32; k];
-        let mut hi = vec![0.0f32; k];
-        lo[0] = m;
-        for j in 1..k {
-            lo[j] = lo[j - 1] + units[idx[j - 1]].width + g;
-        }
-        hi[k - 1] = len - m - units[idx[k - 1]].width;
-        for j in (0..k - 1).rev() {
-            hi[j] = hi[j + 1] - g - units[idx[j]].width;
-        }
-        let mut left = vec![0.0f32; k];
-        for j in 0..k {
-            // `hi` can dip a hair below `lo` from float rounding at an exact fit;
-            // raising the cap keeps `clamp` well-formed (it panics if min > max).
-            let hi_j = hi[j].max(lo[j]);
-            let desired = (units[idx[j]].centre - units[idx[j]].width / 2.0).clamp(lo[j], hi_j);
-            left[j] = if j == 0 {
-                desired
-            } else {
-                desired.max(left[j - 1] + units[idx[j - 1]].width + g)
-            };
-        }
-        for j in (0..k).rev() {
-            let cap = if j == k - 1 {
-                len - m - units[idx[j]].width
-            } else {
-                left[j + 1] - g - units[idx[j]].width
-            };
-            left[j] = left[j].min(cap).max(lo[j]);
-        }
-        // New centre per ref, applied as a translation of the unit's members.
-        for (pos, &i) in idx.iter().enumerate() {
-            let u = &units[i];
-            let unit_new_centre = left[pos] + u.width / 2.0;
-            let delta = unit_new_centre - u.centre;
-            for (r, c) in &u.members {
-                new_centre.insert(*r, *c + delta);
-            }
+    for (i, u) in units.iter().enumerate() {
+        let delta = centres[i] - u.centre;
+        for (r, c) in &u.members {
+            new_centre.insert(*r, *c + delta);
         }
     }
     let apply = |p: &mut Option<OpeningPlacement>, r: OpeningRef| {
@@ -1282,6 +1362,102 @@ mod tests {
         assert!(
             sp[1].0 - sp[0].1 >= MIN_GAP_M - 1e-4,
             "same-band windows still separate: {sp:?}"
+        );
+    }
+
+    /// The motivating case: a 5 m wall with a row of 3 windows + 1 tall door, plus
+    /// a wide low window stacked ABOVE the leftmost windows. The old transitive
+    /// band packer rejected this — the 1.8 m door's band bridged the low row and
+    /// the high window into one packing set needing 7 m > 5 m (`WallTooShort`).
+    /// The 2D solver sees the door and the wide window never share an along, so it
+    /// places all five with no real overlap.
+    #[test]
+    fn wide_window_stacks_above_a_row_with_a_tall_door() {
+        let (mut s, wid) = storey_with_wall(5.0);
+        let t = ItemId::default();
+        add_wall_window(&mut s, wid, 0.6, 1.0, 1.0, 0.0, t).unwrap(); // band [0,1]
+        add_wall_window(&mut s, wid, 1.7, 1.0, 1.0, 0.0, t).unwrap();
+        add_wall_window(&mut s, wid, 2.8, 1.0, 1.0, 0.0, t).unwrap();
+        add_wall_door(&mut s, wid, 3.9, 1.0, 1.8, DoorKind::Solid, "D".into(), 0.0).unwrap(); // [0,1.8]
+                                                                                              // Wide window directly above the leftmost two (sill 1.0 → band [1.0,1.2]).
+        add_wall_window(&mut s, wid, 1.15, 2.5, 0.2, 1.0, t).unwrap();
+
+        let ops = wall_openings(&s, wid);
+        assert_eq!(ops.len(), 5, "all five openings placed, none rolled back");
+
+        // No genuine 2D overlap (overlap in BOTH along and height) between any pair.
+        for (i, a) in ops.iter().enumerate() {
+            for b in &ops[i + 1..] {
+                let vert = a.sill_m < b.sill_m + b.height_m - 1e-4
+                    && b.sill_m < a.sill_m + a.height_m - 1e-4;
+                let along = (a.along_m - b.along_m).abs() < (a.width_m + b.width_m) / 2.0 - 1e-3;
+                assert!(!(vert && along), "2D overlap: {a:?} vs {b:?}");
+            }
+        }
+
+        // The wide window genuinely shares along-space with a bottom-row window —
+        // i.e. it sits ABOVE it (the thing the old 1D-band packer forbade).
+        let wide = ops.iter().find(|o| (o.width_m - 2.5).abs() < 1e-3).unwrap();
+        let stacked = ops.iter().any(|o| {
+            (o.width_m - 1.0).abs() < 1e-3
+                && o.sill_m < 0.5
+                && (o.along_m - wide.along_m).abs() < (o.width_m + wide.width_m) / 2.0
+        });
+        assert!(stacked, "wide window stacks above a bottom-row window");
+    }
+
+    /// The gap COMPRESSES below the default to fit more openings before declaring
+    /// the wall too short. 3 × 1 m windows in a 3.2 m wall need 3.3 m at the
+    /// default 0.1 m gap (would be `WallTooShort`), but fit at a 0.05 m gap.
+    #[test]
+    fn gap_compresses_to_fit_more_before_failing() {
+        let (mut s, wid) = storey_with_wall(3.2);
+        let t = ItemId::default();
+        add_wall_window(&mut s, wid, 0.6, 1.0, 1.0, 0.5, t).unwrap();
+        add_wall_window(&mut s, wid, 1.6, 1.0, 1.0, 0.5, t).unwrap();
+        add_wall_window(&mut s, wid, 2.6, 1.0, 1.0, 0.5, t).unwrap(); // fixed-gap would fail here
+        let sp = spans(&s);
+        assert_eq!(sp.len(), 3, "all three fit via gap compression");
+        assert!(
+            sp[1].0 - sp[0].1 >= -1e-3 && sp[2].0 - sp[1].1 >= -1e-3,
+            "compressed but no overlap: {sp:?}"
+        );
+    }
+
+    /// A pinned opening holds its along while the rest flow around it (the drag
+    /// case: the grabbed opening wins, others rearrange minimally).
+    #[test]
+    fn pinned_opening_holds_while_others_move() {
+        let (mut s, wid) = storey_with_wall(4.0);
+        let t = ItemId::default();
+        let a = add_wall_window(&mut s, wid, 1.0, 1.0, 1.0, 0.5, t).unwrap();
+        let _b = add_wall_window(&mut s, wid, 3.0, 1.0, 1.0, 0.5, t).unwrap();
+        // Force both to the same along (a 2D overlap), then redistribute, A pinned.
+        for w in &mut s.windows {
+            if let Some(OpeningPlacement::Wall { along_m, .. }) = &mut w.placement {
+                *along_m = 2.0;
+            }
+        }
+        redistribute_wall_openings_pinned(&mut s, wid, &[OpeningRef::Window(a)]).unwrap();
+        let along = |id: ItemId| {
+            s.windows
+                .iter()
+                .find(|w| w.id == id)
+                .and_then(|w| match &w.placement {
+                    Some(OpeningPlacement::Wall { along_m, .. }) => Some(*along_m),
+                    _ => None,
+                })
+                .unwrap()
+        };
+        assert!(
+            (along(a) - 2.0).abs() < 1e-3,
+            "pinned A held at 2.0, got {}",
+            along(a)
+        );
+        assert!(
+            (along(_b) - along(a)).abs() >= 1.0 - 1e-3,
+            "B moved clear of pinned A, got {}",
+            along(_b)
         );
     }
 

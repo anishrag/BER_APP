@@ -143,10 +143,9 @@ impl AppController {
             let (_origin, _u, _len, base_z) = wall.base_frame()?;
             let datum = r.data.storey_floor_datums().get(si).copied().unwrap_or(0.0);
             let height = openings::opening_height(storey, opref) as f64;
-            // Clamp the sill between the floor and the roofline so the opening
-            // can't be dragged above the wall top at its along-position.
-            let max_sill = wall.max_sill_for(along, height);
-            let sill = (z - (base_z + datum) - height / 2.0).max(0.0).min(max_sill);
+            // The sill (centre the opening on the cursor); the floor + roofline
+            // clamp now lives in `openings::move_opening`, shared by every drag.
+            let sill = (z - (base_z + datum) - height / 2.0).max(0.0);
             Some((along as f32, sill as f32))
         }) else {
             return;
