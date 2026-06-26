@@ -98,7 +98,10 @@ pub use mapping_review::ReviewView;
 pub use new_storey::NewStoreyPromptUiData;
 use new_storey::{NewStoreyStage, PendingNewStorey};
 use openings::PendingOpening;
-pub use openings::{ElevationView, OpeningPromptUiData, OpeningToolKind, OpeningViewKind};
+pub use openings::{
+    ElevationView, OpeningDimField, OpeningDimPromptUiData, OpeningPromptUiData, OpeningToolKind,
+    OpeningViewKind,
+};
 use partition::PendingCut;
 pub use partition::{
     PartitionDimAxis, PartitionDimPrompt, PartitionInset, PartitionRegionView, PartitionView,
@@ -262,6 +265,14 @@ pub struct AppController {
     /// The in-flight placement (a wall/roof pick) awaiting size + type entry.
     /// Transient — outside undo, cleared on storey switch / mode exit.
     pending_opening: Option<PendingOpening>,
+    /// The staged numeric-entry flow for the in-flight placement: after the tap
+    /// picks the host, each measurement (width → height → sill, or the
+    /// door+sidelights fields) is collected one at a time in the floating number
+    /// box (keypad / laser), not the dock. Transient. `None` once placed/cancelled.
+    opening_dim: Option<openings::OpeningDimFlow>,
+    /// Inline error for the staged placement (e.g. wall too short), shown in the
+    /// floating box. Transient.
+    opening_dim_error: Option<String>,
     /// When `Some`, the ELEVATION overlay is open for this wall (by id): the
     /// canvas shows the unrolled wall and drags reposition its openings.
     /// Transient.
@@ -512,6 +523,8 @@ impl AppController {
             openings_mode: false,
             openings_tool: OpeningToolKind::Window,
             pending_opening: None,
+            opening_dim: None,
+            opening_dim_error: None,
             elevation_wall: None,
             elevation_drag: None,
             elevation_selection: None,

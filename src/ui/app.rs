@@ -164,23 +164,16 @@ pub struct SketchState {
     /// ceiling-height input buffer.
     pub categories: categories::CategoryUiState,
     // ── Windows/doors ──────────────────────────────────────────────────────
-    /// Size + glazing inputs for the in-flight opening placement.
+    /// Per-field measurement buffers for the staged placement: one is bound to
+    /// the floating number box at a time (width → height → sill, or the
+    /// door+sidelights fields). The box clears the active one on Apply.
     pub opening_width_input: String,
     pub opening_height_input: String,
     pub opening_sill_input: String,
-    pub opening_glazing: ber_model::ber::fenestration::Glazing,
-    pub opening_frame: ber_model::ber::fenestration::Frame,
-    pub opening_year_input: String,
     /// Door+sidelights composer inputs (sidelight widths + transom height).
     pub sidelight_left_input: String,
     pub sidelight_right_input: String,
     pub transom_input: String,
-    /// Last error from an opening submit (wall too short, etc.).
-    pub opening_error: Option<String>,
-    /// One-shot clear-on-success for the opening size inputs: the event closure
-    /// can't clear them while the view borrows them, so the next frame's
-    /// pre-render housekeeping does it.
-    pub opening_inputs_clear: bool,
     /// Whether the floating default-ceiling-height entry box is open. Lives here
     /// (not on `categories`, which the view borrows) so the event handler can
     /// toggle it; the view reads it by value. Opened by the Heights tool button,
@@ -738,18 +731,6 @@ impl eframe::App for BerApp {
                                 self.sketch_state.categories.floor_thickness_input.clear();
                                 self.sketch_state.floor_thickness_input_clear = false;
                             }
-                            // Deferred clear for the opening size inputs (raised
-                            // by a successful opening submit last frame).
-                            if self.sketch_state.opening_inputs_clear {
-                                self.sketch_state.opening_width_input.clear();
-                                self.sketch_state.opening_height_input.clear();
-                                self.sketch_state.opening_sill_input.clear();
-                                self.sketch_state.opening_year_input.clear();
-                                self.sketch_state.sidelight_left_input.clear();
-                                self.sketch_state.sidelight_right_input.clear();
-                                self.sketch_state.transom_input.clear();
-                                self.sketch_state.opening_inputs_clear = false;
-                            }
 
                             let current_storey_idx =
                                 self.app_controller.borrow().current_storey_idx();
@@ -767,7 +748,8 @@ impl eframe::App for BerApp {
                             let (
                                 openings_mode,
                                 openings_tool,
-                                opening_prompt,
+                                opening_dim_prompt,
+                                opening_dim_error,
                                 elevation_view,
                                 roof_window_selected,
                                 delete_confirm_pending,
@@ -776,7 +758,8 @@ impl eframe::App for BerApp {
                                 (
                                     c.openings_mode(),
                                     c.openings_tool(),
-                                    c.pending_opening_prompt(),
+                                    c.opening_dim_prompt(),
+                                    c.opening_dim_error().map(str::to_owned),
                                     c.elevation_view(),
                                     c.roof_window_selection(),
                                     c.delete_confirm_pending(),
@@ -785,7 +768,6 @@ impl eframe::App for BerApp {
                             // Owned partition view (the overlay takes a `&`); `None`
                             // when not partitioning.
                             let partition_view = self.app_controller.borrow().partition_view();
-                            let opening_error = self.sketch_state.opening_error.clone();
 
                             let controller = self.app_controller.clone();
                             let splice_debug = self.app_controller.borrow().splice_debug_overlay();
@@ -1053,17 +1035,14 @@ impl eframe::App for BerApp {
                                 autosave_status,
                                 openings_mode,
                                 openings_tool,
-                                opening_prompt,
+                                opening_dim_prompt,
+                                opening_dim_error: opening_dim_error.as_deref(),
                                 opening_width_input: &mut self.sketch_state.opening_width_input,
                                 opening_height_input: &mut self.sketch_state.opening_height_input,
                                 opening_sill_input: &mut self.sketch_state.opening_sill_input,
-                                opening_glazing: &mut self.sketch_state.opening_glazing,
-                                opening_frame: &mut self.sketch_state.opening_frame,
-                                opening_year_input: &mut self.sketch_state.opening_year_input,
                                 sidelight_left_input: &mut self.sketch_state.sidelight_left_input,
                                 sidelight_right_input: &mut self.sketch_state.sidelight_right_input,
                                 transom_input: &mut self.sketch_state.transom_input,
-                                opening_error: opening_error.as_deref(),
                                 elevation_view,
                                 roof_window_selected,
                                 delete_confirm_pending,
@@ -1586,8 +1565,8 @@ impl eframe::App for BerApp {
                                     SketchEvent::SetOpeningsMode(on) => {
                                         controller.borrow_mut().set_openings_mode(on);
                                     }
-                                    SketchEvent::SetOpeningTool(tool) => {
-                                        controller.borrow_mut().set_openings_tool(tool);
+                                    SketchEvent::SelectOpeningTool(tool) => {
+                                        controller.borrow_mut().select_opening_tool(tool);
                                     }
                                     SketchEvent::OpeningsPointerDown {
                                         world_x,
@@ -1598,80 +1577,20 @@ impl eframe::App for BerApp {
                                             .borrow_mut()
                                             .openings_pointer_down(world_x, world_y, tol);
                                     }
-                                    SketchEvent::SubmitWindow {
-                                        width_m,
-                                        height_m,
-                                        sill_m,
-                                        glazing,
-                                        frame,
-                                        year,
-                                    } => {
-                                        let r = controller.borrow_mut().place_pending_window(
-                                            width_m, height_m, sill_m, glazing, frame, year,
-                                        );
-                                        match r {
-                                            Ok(()) => {
-                                                self.sketch_state.opening_error = None;
-                                                self.sketch_state.opening_inputs_clear = true;
-                                            }
-                                            Err(e) => self.sketch_state.opening_error = Some(e),
-                                        }
+                                    // The staged-placement methods set their own inline
+                                    // error (read back via `opening_dim_error()`), so the
+                                    // Result is intentionally dropped here.
+                                    SketchEvent::ApplyOpeningDim(value) => {
+                                        let _ = controller.borrow_mut().apply_opening_dim(value);
                                     }
-                                    SketchEvent::SubmitDoor { width_m, height_m } => {
-                                        let r = controller
-                                            .borrow_mut()
-                                            .place_pending_door(width_m, height_m);
-                                        match r {
-                                            Ok(()) => {
-                                                self.sketch_state.opening_error = None;
-                                                self.sketch_state.opening_inputs_clear = true;
-                                            }
-                                            Err(e) => self.sketch_state.opening_error = Some(e),
-                                        }
+                                    SketchEvent::SkipOpeningDim => {
+                                        let _ = controller.borrow_mut().skip_opening_dim();
                                     }
-                                    SketchEvent::SubmitDoorSidelights {
-                                        door_w,
-                                        door_h,
-                                        left,
-                                        right,
-                                        transom,
-                                        glazing,
-                                        frame,
-                                        year,
-                                    } => {
-                                        let r =
-                                            controller.borrow_mut().place_pending_door_sidelights(
-                                                door_w, door_h, left, right, transom, glazing,
-                                                frame, year,
-                                            );
-                                        match r {
-                                            Ok(()) => {
-                                                self.sketch_state.opening_error = None;
-                                                self.sketch_state.opening_inputs_clear = true;
-                                            }
-                                            Err(e) => self.sketch_state.opening_error = Some(e),
-                                        }
+                                    SketchEvent::FillOpeningSurface => {
+                                        let _ = controller.borrow_mut().fill_opening_surface();
                                     }
-                                    SketchEvent::SubmitFullSurfaceWindow {
-                                        glazing,
-                                        frame,
-                                        year,
-                                    } => {
-                                        let r = controller
-                                            .borrow_mut()
-                                            .place_pending_full_surface_window(
-                                                glazing, frame, year,
-                                            );
-                                        match r {
-                                            Ok(()) => {
-                                                self.sketch_state.opening_error = None;
-                                                self.sketch_state.opening_inputs_clear = true;
-                                            }
-                                            Err(e) => self.sketch_state.opening_error = Some(e),
-                                        }
-                                    }
-                                    SketchEvent::CancelPendingOpening => {
-                                        controller.borrow_mut().cancel_pending_opening();
+                                    SketchEvent::CancelOpeningPlacement => {
+                                        controller.borrow_mut().cancel_opening_placement();
                                     }
                                     SketchEvent::ElevationPointerDown { along_m, height_m } => {
                                         controller

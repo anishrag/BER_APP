@@ -36,6 +36,104 @@ pub(super) struct PendingOpening {
     pub target: PendingOpeningTarget,
 }
 
+/// One numeric measurement collected, one at a time, in the floating number box
+/// during a staged placement (keypad / laser). Ordered per tool by
+/// [`OpeningDimFlow::new`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OpeningDimField {
+    Width,
+    Height,
+    Sill,
+    DoorWidth,
+    DoorHeight,
+    LeftLight,
+    RightLight,
+    Transom,
+}
+
+impl OpeningDimField {
+    fn label(self) -> &'static str {
+        match self {
+            Self::Width => "width (m)",
+            Self::Height => "height (m)",
+            Self::Sill => "sill above floor (m)",
+            Self::DoorWidth => "door width (m)",
+            Self::DoorHeight => "door height (m)",
+            Self::LeftLight => "left sidelight width (m)",
+            Self::RightLight => "right sidelight width (m)",
+            Self::Transom => "transom height (m)",
+        }
+    }
+    /// Optional fields offer a Skip — the door+sidelights flanking/top lights.
+    fn optional(self) -> bool {
+        matches!(self, Self::LeftLight | Self::RightLight | Self::Transom)
+    }
+    fn hint(self) -> &'static str {
+        match self {
+            Self::Width | Self::DoorWidth => "e.g. 1.2",
+            Self::Height | Self::DoorHeight => "e.g. 1.4",
+            Self::Sill => "e.g. 0.9",
+            Self::LeftLight | Self::RightLight | Self::Transom => "e.g. 0.4",
+        }
+    }
+}
+
+/// The staged numeric-entry flow for one in-flight placement: the picked host +
+/// tool, the ordered fields still to collect, and the values gathered so far.
+/// Each field is entered in the floating number box; on the last one the opening
+/// is placed. Skipped optional fields hold `None`.
+pub(super) struct OpeningDimFlow {
+    tool: OpeningToolKind,
+    target: PendingOpeningTarget,
+    fields: Vec<OpeningDimField>,
+    idx: usize,
+    values: Vec<Option<f32>>,
+}
+
+impl OpeningDimFlow {
+    fn new(tool: OpeningToolKind, target: PendingOpeningTarget) -> Self {
+        use OpeningDimField::*;
+        let fields = match tool {
+            OpeningToolKind::Window | OpeningToolKind::MultiStoreyWindow => {
+                vec![Width, Height, Sill]
+            }
+            OpeningToolKind::RoofWindow => vec![Width, Height],
+            OpeningToolKind::Door => vec![Width, Height],
+            OpeningToolKind::DoorSidelights => {
+                vec![DoorWidth, DoorHeight, LeftLight, RightLight, Transom]
+            }
+            OpeningToolKind::Edit => vec![],
+        };
+        Self {
+            tool,
+            target,
+            fields,
+            idx: 0,
+            values: Vec::new(),
+        }
+    }
+    fn current(&self) -> Option<OpeningDimField> {
+        self.fields.get(self.idx).copied()
+    }
+}
+
+/// What the floating box should ask for the current staged-placement field.
+pub struct OpeningDimPromptUiData {
+    /// Box title, e.g. `"Window · width (m)"`.
+    pub title: String,
+    /// The active field — the UI binds the matching text buffer + Apply event.
+    pub field: OpeningDimField,
+    /// 1-based position + count, for a `"(2/3)"` progress hint.
+    pub step: usize,
+    pub total: usize,
+    /// The field offers a Skip (optional door+sidelights lights).
+    pub skippable: bool,
+    /// Offer the "fill whole surface" shortcut (first field, plain Window, empty
+    /// wall) — no measurements, turns the face into a window wall.
+    pub offer_full_surface: bool,
+    pub hint: String,
+}
+
 /// What kind of opening a view rectangle is (for colour/label in plan + elevation).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum OpeningViewKind {
@@ -92,6 +190,8 @@ impl AppController {
         self.close_wall_partition();
         self.openings_mode = on;
         self.pending_opening = None;
+        self.opening_dim = None;
+        self.opening_dim_error = None;
         self.elevation_wall = None;
         self.elevation_drag = None;
         self.elevation_selection = None;
@@ -122,6 +222,8 @@ impl AppController {
     pub(super) fn exit_openings_mode(&mut self) {
         self.openings_mode = false;
         self.pending_opening = None;
+        self.opening_dim = None;
+        self.opening_dim_error = None;
         self.elevation_wall = None;
         self.elevation_drag = None;
         self.elevation_selection = None;
@@ -133,9 +235,21 @@ impl AppController {
         self.close_wall_partition();
     }
 
+    /// Pick a placement/edit tool from the toolbar — enters openings mode (if not
+    /// already) and selects the tool in one step. The toolbar's 6 opening tools
+    /// all route through here.
+    pub fn select_opening_tool(&mut self, tool: OpeningToolKind) {
+        if !self.openings_mode {
+            self.set_openings_mode(true);
+        }
+        self.set_openings_tool(tool);
+    }
+
     pub fn set_openings_tool(&mut self, tool: OpeningToolKind) {
         self.openings_tool = tool;
         self.pending_opening = None;
+        self.opening_dim = None;
+        self.opening_dim_error = None;
         self.confirm_delete = false;
         // Leaving Edit closes any open elevation + clears the surface selection.
         if tool != OpeningToolKind::Edit {
@@ -218,16 +332,14 @@ impl AppController {
                 self.confirm_delete = false;
             }
             Pick::Wall(wall_id, along_m) => {
-                self.pending_opening = Some(PendingOpening {
-                    tool,
-                    target: PendingOpeningTarget::Wall { wall_id, along_m },
-                });
+                let target = PendingOpeningTarget::Wall { wall_id, along_m };
+                self.pending_opening = Some(PendingOpening { tool, target });
+                self.start_opening_flow(tool, target);
             }
             Pick::Roof(region_id, plan) => {
-                self.pending_opening = Some(PendingOpening {
-                    tool,
-                    target: PendingOpeningTarget::Roof { region_id, plan },
-                });
+                let target = PendingOpeningTarget::Roof { region_id, plan };
+                self.pending_opening = Some(PendingOpening { tool, target });
+                self.start_opening_flow(tool, target);
             }
             Pick::None => {}
         }
@@ -292,6 +404,239 @@ impl AppController {
 
     pub fn cancel_pending_opening(&mut self) {
         self.pending_opening = None;
+    }
+
+    // ── staged numeric placement (floating box + laser) ───────────────────────
+
+    /// Begin collecting an opening's measurements one field at a time in the
+    /// floating number box (so the laser feeds them). Started on the host pick.
+    fn start_opening_flow(&mut self, tool: OpeningToolKind, target: PendingOpeningTarget) {
+        self.opening_dim = Some(OpeningDimFlow::new(tool, target));
+        self.opening_dim_error = None;
+    }
+
+    /// What the floating box should ask for next, if a staged placement is live.
+    pub fn opening_dim_prompt(&self) -> Option<OpeningDimPromptUiData> {
+        let flow = self.opening_dim.as_ref()?;
+        let field = flow.current()?;
+        let offer_full_surface =
+            flow.idx == 0 && flow.tool == OpeningToolKind::Window && self.flow_wall_empty(flow);
+        Some(OpeningDimPromptUiData {
+            title: format!("{} · {}", tool_label(flow.tool), field.label()),
+            field,
+            step: flow.idx + 1,
+            total: flow.fields.len(),
+            skippable: field.optional(),
+            offer_full_surface,
+            hint: field.hint().to_string(),
+        })
+    }
+
+    /// The staged-placement inline error (wall too short, …), for the box.
+    pub fn opening_dim_error(&self) -> Option<&str> {
+        self.opening_dim_error.as_deref()
+    }
+
+    /// True when the flow's host wall has no openings yet (so the full-surface
+    /// shortcut is offered).
+    fn flow_wall_empty(&self, flow: &OpeningDimFlow) -> bool {
+        let PendingOpeningTarget::Wall { wall_id, .. } = flow.target else {
+            return false;
+        };
+        self.current_storey_idx
+            .and_then(|idx| self.current_record.as_ref()?.data.storeys.get(idx))
+            .map(|s| openings::wall_openings(s, wall_id).is_empty())
+            .unwrap_or(false)
+    }
+
+    /// Record the entered value for the current field and advance — placing the
+    /// opening once the last field is in.
+    pub fn apply_opening_dim(&mut self, value: f32) -> Result<(), String> {
+        let Some(flow) = self.opening_dim.as_mut() else {
+            return Ok(());
+        };
+        flow.values.push(Some(value));
+        flow.idx += 1;
+        self.opening_dim_error = None;
+        if self
+            .opening_dim
+            .as_ref()
+            .and_then(|f| f.current())
+            .is_some()
+        {
+            return Ok(());
+        }
+        self.finalize_opening_placement()
+    }
+
+    /// Skip the current (optional) field and advance — placing once it was last.
+    pub fn skip_opening_dim(&mut self) -> Result<(), String> {
+        let Some(flow) = self.opening_dim.as_mut() else {
+            return Ok(());
+        };
+        flow.values.push(None);
+        flow.idx += 1;
+        self.opening_dim_error = None;
+        if self
+            .opening_dim
+            .as_ref()
+            .and_then(|f| f.current())
+            .is_some()
+        {
+            return Ok(());
+        }
+        self.finalize_opening_placement()
+    }
+
+    /// Abandon the in-flight staged placement.
+    pub fn cancel_opening_placement(&mut self) {
+        self.opening_dim = None;
+        self.opening_dim_error = None;
+        self.pending_opening = None;
+    }
+
+    /// Place the opening from the collected fields, with a DEFAULT window type
+    /// (the assessor refines glazing/frame/year later in Edit on surface). On a
+    /// model error the flow re-opens at the last field with the error shown.
+    fn finalize_opening_placement(&mut self) -> Result<(), String> {
+        let Some(flow) = self.opening_dim.take() else {
+            return Ok(());
+        };
+        self.pending_opening = None;
+        let Some(idx) = self.current_storey_idx else {
+            return Ok(());
+        };
+        self.materialize();
+        let undo_snap = self.current_history_snapshot();
+        let vals = flow.values.clone();
+        let v = |i: usize| vals.get(i).copied().flatten();
+        let req = |i: usize| v(i).unwrap_or(0.0);
+        let Some(record) = self.current_record.as_mut() else {
+            return Ok(());
+        };
+        let type_id = record
+            .data
+            .ensure_window_type(Glazing::Double, Frame::WoodUPVC, 0);
+        let storey = &mut record.data.storeys[idx];
+        let result: Result<(), OpeningError> = match (flow.tool, flow.target) {
+            (OpeningToolKind::Window, PendingOpeningTarget::Wall { wall_id, along_m }) => {
+                openings::add_wall_window(storey, wall_id, along_m, req(0), req(1), req(2), type_id)
+                    .map(|_| ())
+            }
+            (
+                OpeningToolKind::MultiStoreyWindow,
+                PendingOpeningTarget::Wall { wall_id, along_m },
+            ) => openings::add_multi_storey_window(
+                storey,
+                wall_id,
+                along_m,
+                req(0),
+                req(1),
+                req(2),
+                type_id,
+            )
+            .map(|_| ()),
+            (OpeningToolKind::RoofWindow, PendingOpeningTarget::Roof { region_id, plan }) => {
+                openings::add_roof_window(storey, region_id, plan, req(0), req(1), type_id)
+                    .map(|_| ())
+            }
+            (OpeningToolKind::Door, PendingOpeningTarget::Wall { wall_id, along_m }) => {
+                openings::add_wall_door(
+                    storey,
+                    wall_id,
+                    along_m,
+                    req(0),
+                    req(1),
+                    DoorKind::Solid,
+                    "Door".to_string(),
+                    openings::DEFAULT_DOOR_SILL_M,
+                )
+                .map(|_| ())
+            }
+            (OpeningToolKind::DoorSidelights, PendingOpeningTarget::Wall { wall_id, along_m }) => {
+                openings::compose_door_sidelights(
+                    storey,
+                    wall_id,
+                    along_m,
+                    DoorSidelightsSpec {
+                        door_width_m: req(0),
+                        door_height_m: req(1),
+                        left_sidelight_m: v(2),
+                        right_sidelight_m: v(3),
+                        transom_m: v(4),
+                        window_type_id: type_id,
+                        door_type_name: "Door".to_string(),
+                    },
+                )
+                .map(|_| ())
+            }
+            _ => return Ok(()), // tool/target mismatch — nothing to place
+        };
+        match result {
+            Ok(()) => {
+                self.reseed_opening_anchors(idx);
+                let _ = self.mark_dirty();
+                self.push_history_snapshot(undo_snap);
+                self.opening_dim_error = None;
+                Ok(())
+            }
+            Err(e) => {
+                // Re-open at the last field so the value can be re-entered.
+                let mut flow = flow;
+                flow.idx = flow.idx.saturating_sub(1);
+                flow.values.pop();
+                self.opening_dim = Some(flow);
+                let msg = opening_error_msg(e);
+                self.opening_dim_error = Some(msg.clone());
+                Err(msg)
+            }
+        }
+    }
+
+    /// Full-surface "window wall" shortcut from the first staged field: no
+    /// measurements, the whole face becomes a window. Walls only.
+    pub fn fill_opening_surface(&mut self) -> Result<(), String> {
+        let Some(flow) = self.opening_dim.take() else {
+            return Ok(());
+        };
+        let PendingOpeningTarget::Wall { wall_id, along_m } = flow.target else {
+            self.opening_dim = Some(flow);
+            return Ok(());
+        };
+        self.pending_opening = None;
+        let Some(idx) = self.current_storey_idx else {
+            return Ok(());
+        };
+        self.materialize();
+        let undo_snap = self.current_history_snapshot();
+        let height_m = self
+            .current_record
+            .as_ref()
+            .and_then(|r| r.data.storeys.get(idx))
+            .and_then(|s| s.walls.regions.iter().find(|r| r.id == wall_id))
+            .map(|wall| wall.max_sill_for(along_m as f64, 0.0) as f32)
+            .unwrap_or(0.0);
+        let Some(record) = self.current_record.as_mut() else {
+            return Ok(());
+        };
+        let type_id = record
+            .data
+            .ensure_window_type(Glazing::Double, Frame::WoodUPVC, 0);
+        let storey = &mut record.data.storeys[idx];
+        match openings::add_full_wall_window(storey, wall_id, height_m, type_id) {
+            Ok(_) => {
+                self.reseed_opening_anchors(idx);
+                let _ = self.mark_dirty();
+                self.push_history_snapshot(undo_snap);
+                Ok(())
+            }
+            Err(e) => {
+                let msg = opening_error_msg(e);
+                self.opening_dim_error = Some(msg.clone());
+                self.opening_dim = Some(flow);
+                Err(msg)
+            }
+        }
     }
 
     // ── apply: place the opening ──────────────────────────────────────────────
@@ -707,6 +1052,18 @@ impl AppController {
                 (o.opening, kind, o.along_m, o.sill_m, o.width_m, o.height_m)
             })
             .collect()
+    }
+}
+
+/// Display name of a placement tool, for the floating-box title.
+fn tool_label(tool: OpeningToolKind) -> &'static str {
+    match tool {
+        OpeningToolKind::Window => "Window",
+        OpeningToolKind::MultiStoreyWindow => "Multi-storey window",
+        OpeningToolKind::RoofWindow => "Roof window",
+        OpeningToolKind::Door => "Door",
+        OpeningToolKind::DoorSidelights => "Door + sidelights",
+        OpeningToolKind::Edit => "Edit",
     }
 }
 

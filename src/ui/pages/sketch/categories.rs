@@ -11,7 +11,9 @@
 //! ceiling steps) keep their controller-enforced exclusive-mode semantics.
 
 use super::{structure, SketchEvent, SketchView};
-use crate::controller::app_controller::{AssessmentPhase, SelectMode, StructureEdit, SurfaceKind};
+use crate::controller::app_controller::{
+    AssessmentPhase, OpeningToolKind, SelectMode, StructureEdit, SurfaceKind,
+};
 use crate::number_entry::parse_dimension_expression;
 use crate::ui::pages::events::UiEvent;
 use crate::ui::widgets::{metre_input, HintExt};
@@ -48,9 +50,11 @@ pub enum Tool {
     CeilingSteps,
     /// Roof-point (apex) tagging mode toggle (same gate as the ceiling steps).
     RoofPoints,
-    /// Windows/doors placement mode toggle (place openings from the plan, then
-    /// reposition them in a per-wall elevation).
-    Openings,
+    /// One of the windows/doors tools (5 placement tools + Edit on surface):
+    /// selecting it enters openings mode and makes it the active tool. After a
+    /// placement tool taps the plan, each measurement is entered in the floating
+    /// number box (keypad / laser).
+    Opening(OpeningToolKind),
     Undo,
     Redo,
     /// Reset the view to pure auto-fit.
@@ -114,7 +118,14 @@ pub const CATEGORIES: &[Category] = &[
     },
     Category {
         name: "Openings",
-        tools: &[Tool::Openings],
+        tools: &[
+            Tool::Opening(OpeningToolKind::Window),
+            Tool::Opening(OpeningToolKind::MultiStoreyWindow),
+            Tool::Opening(OpeningToolKind::RoofWindow),
+            Tool::Opening(OpeningToolKind::Door),
+            Tool::Opening(OpeningToolKind::DoorSidelights),
+            Tool::Opening(OpeningToolKind::Edit),
+        ],
     },
     Category {
         name: "Dimensions",
@@ -217,6 +228,8 @@ pub struct ToolFlags {
     pub roof_point_mode: bool,
     pub roof_point_available: bool,
     pub openings_mode: bool,
+    /// The active windows/doors tool, so the toolbar highlights it.
+    pub openings_tool: OpeningToolKind,
     /// The current scope's default ceiling height, when set — the Heights
     /// field shows it ("2.40 m") next to the entry box.
     pub default_ceiling_height: Option<f64>,
@@ -273,6 +286,7 @@ impl ToolFlags {
             roof_point_mode: view.roof_point_mode,
             roof_point_available: view.roof_point_available,
             openings_mode: view.openings_mode,
+            openings_tool: view.openings_tool,
             default_ceiling_height: view.default_ceiling_height,
             ceiling_height_error: view.ceiling_height_error.map(str::to_owned),
             upper_storey: matches!(view.current_storey_idx, Some(i) if i >= 1),
@@ -392,6 +406,37 @@ fn bottom_tools<F: FnMut(UiEvent)>(
             tool_ui(ui, *tool, flags, state, on_event);
         }
     });
+}
+
+/// Button label + hover hint for each windows/doors tool.
+fn opening_tool_label(tool: OpeningToolKind) -> (&'static str, &'static str) {
+    match tool {
+        OpeningToolKind::Window => (
+            "🪟 Window",
+            "Tap near a wall, then enter width / height / sill in the floating box \
+             (keypad or laser).",
+        ),
+        OpeningToolKind::MultiStoreyWindow => (
+            "🪟⇅ Multi-storey window",
+            "A window that spans up past this storey's ceiling, as far as the \
+             same-type wall run allows. Tap a wall, then enter its size.",
+        ),
+        OpeningToolKind::RoofWindow => (
+            "🔆 Roof window",
+            "Tap inside a roof/ceiling area, then enter width / height.",
+        ),
+        OpeningToolKind::Door => ("🚪 Door", "Tap near a wall, then enter width / height."),
+        OpeningToolKind::DoorSidelights => (
+            "🚪+ Door + sidelights",
+            "Tap near a wall, then enter the door size and optional side / top \
+             lights one at a time.",
+        ),
+        OpeningToolKind::Edit => (
+            "✋ Edit on surface",
+            "Tap a wall to open its elevation and reposition openings; tap a roof \
+             window to move or delete it.",
+        ),
+    }
 }
 
 fn edit_tool_label(tool: EditTools) -> &'static str {
@@ -554,23 +599,17 @@ fn tool_ui<F: FnMut(UiEvent)>(
                 )));
             }
         }
-        Tool::Openings => {
+        Tool::Opening(kind) => {
             let enabled = !flags.read_only && flags.has_floor_plan;
+            let (label, hint) = opening_tool_label(kind);
+            // Selected when this is the active tool AND openings mode is on.
+            let selected = flags.openings_mode && flags.openings_tool == kind;
             if ui
-                .add_enabled(
-                    enabled,
-                    egui::Button::selectable(flags.openings_mode, "🪟 Windows/Doors"),
-                )
-                .hint(
-                    "Place windows, roof windows and doors: pick a type, tap near \
-                     a wall to drop it, then enter its size. Tap a wall in Edit to \
-                     reposition openings on its elevation.",
-                )
+                .add_enabled(enabled, egui::Button::selectable(selected, label))
+                .hint(hint)
                 .clicked()
             {
-                on_event(UiEvent::Sketch(SketchEvent::SetOpeningsMode(
-                    !flags.openings_mode,
-                )));
+                on_event(UiEvent::Sketch(SketchEvent::SelectOpeningTool(kind)));
             }
         }
         Tool::DefaultCeilingHeight => {

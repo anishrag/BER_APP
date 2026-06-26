@@ -26,16 +26,15 @@ use egui::Pos2;
 
 use crate::controller::app_controller::{
     AssessmentPhase, ChecklistItem, DimensionPromptUiData, EditDragPromptUiData, ElevationView,
-    ExposureSelection, NewStoreyPromptUiData, OpeningPromptUiData, OpeningToolKind, PartitionView,
-    PhotoView, PositionPromptUiData, ReviewView, RiserView, SelectMode, SnapTagView, StructureEdit,
-    SurfaceKind, VertexDropPromptUiData, WallExposureView,
+    ExposureSelection, NewStoreyPromptUiData, OpeningDimPromptUiData, OpeningToolKind,
+    PartitionView, PhotoView, PositionPromptUiData, ReviewView, RiserView, SelectMode, SnapTagView,
+    StructureEdit, SurfaceKind, VertexDropPromptUiData, WallExposureView,
 };
 use crate::ui::pages::events::UiEvent;
 use crate::ui::render::ViewParams;
 use crate::ui::widgets::HintExt;
 use ber_model::ber::ber_struct::Ber;
 use ber_model::ber::common::{ConstructionPhase, ExternalSide, ItemId};
-use ber_model::ber::fenestration::{Frame, Glazing};
 use ber_model::ber::structural::{SurfaceCounts, WallExposure};
 use domain::sketch::{DisplayMode, EditTools, SketchMode};
 use manip_plan::CollinearitySuggestion;
@@ -407,8 +406,9 @@ pub enum SketchEvent {
     // ── Windows/doors ──────────────────────────────────────────────────────
     /// Toggle windows/doors mode.
     SetOpeningsMode(bool),
-    /// Pick which opening type the toolbar places next.
-    SetOpeningTool(OpeningToolKind),
+    /// Pick one of the 6 opening tools from the toolbar — enters openings mode
+    /// (if needed) and selects the tool in one step.
+    SelectOpeningTool(OpeningToolKind),
     /// Plan tap in openings mode: pick the nearest wall/roof (or open the
     /// tapped wall's elevation in Edit).
     OpeningsPointerDown {
@@ -416,27 +416,16 @@ pub enum SketchEvent {
         world_y: f64,
         tol: f64,
     },
-    /// Submit a window placement (wall or roof) with size + glazing.
-    SubmitWindow {
-        width_m: f32,
-        height_m: f32,
-        sill_m: f32,
-        glazing: Glazing,
-        frame: Frame,
-        year: u32,
-    },
-    /// Submit a plain door placement.
-    SubmitDoor {
-        width_m: f32,
-        height_m: f32,
-    },
-    /// Turn the (empty) host wall into a full-surface "window wall" — no size
-    /// entry; the whole face becomes one window.
-    SubmitFullSurfaceWindow {
-        glazing: Glazing,
-        frame: Frame,
-        year: u32,
-    },
+    /// Apply the value entered in the floating box for the current staged
+    /// placement field, advancing to the next (or placing on the last).
+    ApplyOpeningDim(f32),
+    /// Skip the current (optional) staged field — door+sidelights lights.
+    SkipOpeningDim,
+    /// Abandon the in-flight staged placement.
+    CancelOpeningPlacement,
+    /// First-field shortcut: turn the (empty) host wall into a full-surface
+    /// "window wall" — no measurements; the whole face becomes one window.
+    FillOpeningSurface,
     /// Plan drag / release while a ROOF window is grabbed (Edit-on-surface).
     OpeningsPointerDrag {
         world_x: f64,
@@ -446,19 +435,6 @@ pub enum SketchEvent {
     /// Confirm / cancel the pending delete of the selected opening.
     ConfirmDeleteOpening,
     CancelDeleteOpening,
-    /// Submit a door+sidelights assembly (composer output).
-    SubmitDoorSidelights {
-        door_w: f32,
-        door_h: f32,
-        left: Option<f32>,
-        right: Option<f32>,
-        transom: Option<f32>,
-        glazing: Glazing,
-        frame: Frame,
-        year: u32,
-    },
-    /// Cancel the in-flight placement.
-    CancelPendingOpening,
     /// Elevation overlay press / drag / release at wall-local `(along, height)`.
     ElevationPointerDown {
         along_m: f32,
@@ -915,22 +891,22 @@ pub struct SketchView<'a> {
     /// The opening type the toolbar places next (window / roof window / door /
     /// door+sidelights / edit-elevation).
     pub openings_tool: OpeningToolKind,
-    /// What the dock should prompt for the in-flight placement, if any.
-    pub opening_prompt: Option<OpeningPromptUiData>,
+    /// The active staged-placement field for the floating number box (width →
+    /// height → sill, or the door+sidelights fields), if a placement is in
+    /// flight. The box collects each measurement (keypad / laser); window type
+    /// is defaulted and refined later in Edit on surface.
+    pub opening_dim_prompt: Option<OpeningDimPromptUiData>,
+    /// Inline error for the staged placement, shown in the floating box.
+    pub opening_dim_error: Option<&'a str>,
+    /// Per-field measurement buffers — the box binds one at a time by the active
+    /// `opening_dim_prompt.field`.
     pub opening_width_input: &'a mut String,
     pub opening_height_input: &'a mut String,
     pub opening_sill_input: &'a mut String,
-    /// Window glazing/frame/year selection — the dock's combos mutate these in
-    /// place (the submit event then reads them).
-    pub opening_glazing: &'a mut Glazing,
-    pub opening_frame: &'a mut Frame,
-    pub opening_year_input: &'a mut String,
-    /// Door+sidelights composer inputs (door size + optional left/right
-    /// sidelight + transom).
+    /// Door+sidelights composer inputs (optional left/right sidelight + transom).
     pub sidelight_left_input: &'a mut String,
     pub sidelight_right_input: &'a mut String,
     pub transom_input: &'a mut String,
-    pub opening_error: Option<&'a str>,
     /// The open per-wall ELEVATION overlay, if any (the unrolled wall + its
     /// draggable openings).
     pub elevation_view: Option<ElevationView>,

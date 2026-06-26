@@ -31,6 +31,7 @@ use std::time::Duration;
 use egui::{Align2, Color32, Id, RichText};
 
 use super::{SketchEvent, SketchView};
+use crate::controller::app_controller::OpeningDimField;
 use crate::number_entry::bluetooth::{LaserSource, Status};
 use crate::number_entry::{apply, parse_dimension_expression, Key};
 use crate::ui::pages::events::UiEvent;
@@ -118,6 +119,78 @@ pub(super) fn render<F: FnMut(UiEvent)>(
     use manip_plan::ParameterAxis::{X, Y};
 
     laser_autodetect(ctx, view);
+
+    // ── Window/door placement: one measurement at a time ─────────────────────
+    // The staged opening fields (width → height → sill, or the door+sidelights
+    // fields) run through the SAME floating box / keypad / laser as every other
+    // measurement. Openings mode is exclusive with the plan prompts below, so
+    // this branch is safe to take first.
+    if let Some(p) = view.opening_dim_prompt.as_ref() {
+        let field = p.field;
+        let title = p.title.clone();
+        let subtitle = format!("step {} of {}", p.step, p.total);
+        let hint = p.hint.clone();
+        let (skippable, offer_full) = (p.skippable, p.offer_full_surface);
+        let error = view.opening_dim_error;
+        let mut actions = vec![Action::new(
+            "Place",
+            "Use this measurement",
+            SketchEvent::ApplyOpeningDim,
+        )
+        .primary()];
+        if skippable {
+            actions.push(
+                Action::new("Skip", "Leave this one out", |_| {
+                    SketchEvent::SkipOpeningDim
+                })
+                .bare()
+                .with_clear(),
+            );
+        }
+        if offer_full {
+            actions.push(
+                Action::new(
+                    "Fill whole surface",
+                    "Make the whole wall one window (no size needed)",
+                    |_| SketchEvent::FillOpeningSurface,
+                )
+                .bare()
+                .with_clear(),
+            );
+        }
+        actions.push(
+            Action::new("Cancel", "Abandon this placement", |_| {
+                SketchEvent::CancelOpeningPlacement
+            })
+            .bare()
+            .with_clear(),
+        );
+        let buf = match field {
+            OpeningDimField::Width | OpeningDimField::DoorWidth => &mut *view.opening_width_input,
+            OpeningDimField::Height | OpeningDimField::DoorHeight => {
+                &mut *view.opening_height_input
+            }
+            OpeningDimField::Sill => &mut *view.opening_sill_input,
+            OpeningDimField::LeftLight => &mut *view.sidelight_left_input,
+            OpeningDimField::RightLight => &mut *view.sidelight_right_input,
+            OpeningDimField::Transom => &mut *view.transom_input,
+        };
+        show_box(
+            ctx,
+            rect,
+            &title,
+            Some(&subtitle),
+            &hint,
+            error,
+            buf,
+            &actions,
+            &mut view.cat_state.input_mode,
+            &mut view.cat_state.input_mode_pinned,
+            view.laser,
+            on_event,
+        );
+        return;
+    }
 
     // ── Wall-face partition cut dimension ────────────────────────────────────
     // Routes through the SAME floating box / keypad / laser as every other
