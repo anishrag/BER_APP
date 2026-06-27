@@ -1093,20 +1093,22 @@ impl SketchPage {
             // (constrained to it), rather than in the bottom prompt dock.
             number_box::render(ui.ctx(), canvas_rect, &mut view, &mut on_event);
             // The contextual flow controls (exposure / phase / step / roof /
-            // new-storey / redraw / curve / vertex / review) float over the
-            // canvas, parked along the bottom; the bottom bar shows only the
-            // instruction for them.
+            // new-storey / redraw / curve / vertex / review) live in a DRAGGABLE
+            // floating window over the canvas, opening roughly centred; the
+            // bottom bar shows only the instruction for them. Stable id so its
+            // dragged position survives the title changing per mode.
             if prompt_dock::has_controls(&view) {
-                egui::Area::new(ui.id().with("sketch_flow_panel"))
+                egui::Window::new(prompt_dock::panel_title(&view))
+                    .id(egui::Id::new("sketch_flow_panel"))
                     .order(egui::Order::Foreground)
-                    .fixed_pos(canvas_rect.center_bottom() + egui::vec2(0.0, -8.0))
-                    .pivot(egui::Align2::CENTER_BOTTOM)
+                    .default_pos(canvas_rect.center())
+                    .pivot(egui::Align2::CENTER_CENTER)
                     .constrain_to(canvas_rect)
+                    .resizable(false)
+                    .collapsible(true)
                     .show(ui.ctx(), |ui| {
-                        egui::Frame::popup(ui.style()).show(ui, |ui| {
-                            ui.set_max_width(canvas_rect.width() - 24.0);
-                            prompt_dock::render_controls(ui, &mut view, &mut on_event);
-                        });
+                        ui.set_max_width((canvas_rect.width() - 24.0).min(520.0));
+                        prompt_dock::render_controls(ui, &mut view, &mut on_event);
                     });
             }
             // Top-right floating action buttons for the active selection.

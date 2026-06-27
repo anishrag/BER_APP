@@ -51,6 +51,61 @@ pub(super) fn has_controls(view: &SketchView<'_>) -> bool {
                 || !view.roof_ridge_area_options.is_empty()))
 }
 
+/// A short title for the floating flow panel's title bar (also its drag handle).
+/// Matches whichever control set [`render_controls`] shows; approximate when
+/// several are active at once (picks the primary).
+pub(super) fn panel_title(view: &SketchView<'_>) -> &'static str {
+    if view.floor_exposure_mode {
+        return "Floor exposures";
+    }
+    if view.ceiling_exposure_mode {
+        return "Ceiling exposures";
+    }
+    if view
+        .new_storey_prompt
+        .as_ref()
+        .is_some_and(|p| !p.thickness_pending)
+    {
+        return "New storey";
+    }
+    if view.pending_redraw {
+        return "New stroke";
+    }
+    if view.curve_bulge.is_some() {
+        return "Curve";
+    }
+    if view.vertex_drop_prompt.is_some() {
+        return "Place vertex";
+    }
+    if view.review.is_some() {
+        return "Review";
+    }
+    if view.partition_mode {
+        return "Wall partition";
+    }
+    if view.exposure_mode {
+        return "Wall exposures";
+    }
+    if view.has_floor_plan {
+        if !view.phase_choices.is_empty() && (view.phase_mode || view.phase_pick_pending) {
+            return "Construction year";
+        }
+        if view.step_mode {
+            return "Floor steps";
+        }
+        if view.ceiling_step_mode
+            || view.ceiling_step_orientation_pending
+            || view.ceiling_step_side_pending
+        {
+            return "Ceiling steps";
+        }
+        if !view.roof_ridge_area_options.is_empty() {
+            return "Ridge";
+        }
+    }
+    "Roof shape"
+}
+
 /// The contextual one-line INSTRUCTION for the bottom bar — what the assessor
 /// should do in the current mode/flow. The controls themselves live in the
 /// floating flow panel (and the top-right action buttons); this strip is purely
