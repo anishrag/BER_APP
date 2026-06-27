@@ -643,6 +643,7 @@ impl AppController {
                 Ok(())
             }
             Err(e) => {
+                discard_stored_photos(&stored_photos); // placement failed — no leak on retry
                 self.pending_opening = Some(pending); // keep the box open
                 let msg = opening_error_msg(e);
                 self.opening_dim_error = Some(msg.clone());
@@ -702,6 +703,7 @@ impl AppController {
                 Ok(())
             }
             Err(e) => {
+                discard_stored_photos(&stored_photos); // placement failed — no leak on retry
                 self.pending_opening = Some(pending);
                 let msg = opening_error_msg(e);
                 self.opening_dim_error = Some(msg.clone());
@@ -1147,6 +1149,18 @@ fn tool_label(tool: OpeningToolKind) -> &'static str {
         OpeningToolKind::Door => "Door",
         OpeningToolKind::DoorSidelights => "Door + sidelights",
         OpeningToolKind::Edit => "Edit",
+    }
+}
+
+/// Remove photo files copied into the store for a placement that then failed —
+/// so a retry doesn't leave orphaned images (each `store_photo_file` mints fresh
+/// files). Best-effort; missing files are ignored.
+fn discard_stored_photos(photos: &[Photo]) {
+    for p in photos {
+        let _ = std::fs::remove_file(&p.file_path);
+        if let Some(t) = &p.thumbnail_path {
+            let _ = std::fs::remove_file(t);
+        }
     }
 }
 

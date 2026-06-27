@@ -8995,6 +8995,58 @@ fn window_photo_is_attached_at_placement() {
     );
 }
 
+/// A FAILED placement (wall too short) must not leave its picked photos copied
+/// in the store — else each retry would leak orphaned image files.
+#[test]
+fn failed_placement_discards_copied_photos() {
+    use ber_model::ber::fenestration::{Frame, Glazing, Overshading};
+
+    let mut c = dimensioned_square_controller();
+    c.materialize();
+    let tmp = std::env::temp_dir().join(format!("ber_photos_{}", ItemId::default().0));
+    c.set_photos_dir(tmp.clone());
+    let src = std::env::temp_dir().join(format!("ber_failsrc_{}.jpg", ItemId::default().0));
+    std::fs::write(&src, b"jpeg-bytes").unwrap();
+
+    c.select_opening_tool(OpeningToolKind::Window);
+    c.openings_pointer_down(5.0, -0.2, 0.5);
+    // A window far wider than the wall → WallTooShort → placement fails.
+    let r = c.place_opening(
+        999.0,
+        1.2,
+        None,
+        None,
+        None,
+        None,
+        None,
+        false,
+        WindowTypeChoice::New {
+            glazing: Glazing::Double,
+            frame: Frame::WoodUPVC,
+            year: 0,
+            certified: false,
+            gap: Vec::new(),
+            name: Some("Model A".to_string()),
+        },
+        Overshading::Average,
+        vec![src],
+        PhotoQuality::Full,
+    );
+    assert!(r.is_err(), "oversized window fails to place");
+    c.materialize();
+    assert!(
+        c.current_record.as_ref().unwrap().data.storeys[0]
+            .windows
+            .is_empty(),
+        "no window placed"
+    );
+    let leaked = std::fs::read_dir(&tmp).map(|d| d.count()).unwrap_or(0);
+    assert_eq!(
+        leaked, 0,
+        "no orphaned photo files after a failed placement"
+    );
+}
+
 /// A placed window survives save + reload: the placement is durable, and the
 /// reload re-derives vertices and re-links `opes` via the amend.
 #[test]
