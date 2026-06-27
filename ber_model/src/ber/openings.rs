@@ -7,7 +7,7 @@
 //! derivation here so all opening logic is in one pure module the controller
 //! drives.
 use super::common::ItemId;
-use super::fenestration::{Door, DoorKind, OpeningPlacement, Window};
+use super::fenestration::{Door, DoorKind, OpeningPlacement, Overshading, Window};
 use super::structural::Storey;
 use domain::points::point_to_segment_distance;
 
@@ -246,6 +246,7 @@ pub fn add_wall_window(
         assembly_id: None,
         multi_storey: false,
         arched: false,
+        overshading: Overshading::Average,
     });
     link_window(storey, wall_id, id);
     // Windows may STACK: if the requested row is horizontally full, place above /
@@ -336,6 +337,7 @@ pub fn add_roof_window(
         assembly_id: None,
         multi_storey: false,
         arched: false,
+        overshading: Overshading::Average,
     });
     Ok(id)
 }
@@ -373,6 +375,7 @@ pub fn add_full_wall_window(
         assembly_id: None,
         multi_storey: false,
         arched: false,
+        overshading: Overshading::Average,
     });
     link_window(storey, wall_id, id);
     Ok(id)
@@ -415,6 +418,7 @@ pub fn add_multi_storey_window(
         assembly_id: None,
         multi_storey: true,
         arched: false,
+        overshading: Overshading::Average,
     });
     link_window(storey, wall_id, id);
     redistribute_or_rollback(storey, wall_id, &[OpeningRef::Window(id)])?;
@@ -505,6 +509,7 @@ pub fn compose_door_sidelights(
                 assembly_id: Some(assembly_id),
                 multi_storey: false,
                 arched,
+                overshading: Overshading::Average,
             });
             link_window(storey, wall_id, id);
             added.push(OpeningRef::Window(id));
@@ -1326,6 +1331,7 @@ mod tests {
             assembly_id: None,
             multi_storey: false,
             arched: false,
+            overshading: Overshading::Average,
         }
     }
 
@@ -1643,6 +1649,7 @@ mod tests {
             assembly_id: None,
             multi_storey: false,
             arched: false,
+            overshading: Overshading::Average,
         });
         assert_eq!(
             roof_window_at(&s, 2.3, 2.3),

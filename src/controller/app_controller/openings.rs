@@ -5,7 +5,7 @@
 //! ber_model ops; this only sequences them.
 use super::*;
 use ber_model::ber::common::ItemId;
-use ber_model::ber::fenestration::{DoorKind, Frame, Glazing};
+use ber_model::ber::fenestration::{DoorKind, Frame, Glazing, Overshading};
 use ber_model::ber::openings::{self, DoorSidelightsSpec, OpeningError, OpeningRef};
 
 /// Which opening the toolbar places next (or `Edit` to open an elevation).
@@ -529,6 +529,7 @@ impl AppController {
         transom: Option<f32>,
         transom_semicircular: bool,
         window_type: WindowTypeChoice,
+        overshading: Overshading,
     ) -> Result<(), String> {
         /// Sill the placement defaults to; the assessor drags it in the 2D view.
         const DEFAULT_SILL_M: f32 = 1.0;
@@ -550,6 +551,9 @@ impl AppController {
         } else {
             resolve_window_type(&mut record.data, window_type)
         };
+        // Per-window overshading is applied after the add to whatever window(s)
+        // this placement appends (one window, or several for door+sidelights).
+        let windows_before = record.data.storeys[idx].windows.len();
         let storey = &mut record.data.storeys[idx];
         let result: Result<(), OpeningError> = match (pending.tool, pending.target) {
             (OpeningToolKind::Window, PendingOpeningTarget::Wall { wall_id, along_m }) => {
@@ -616,6 +620,11 @@ impl AppController {
             }
             _ => return Ok(()), // tool/target mismatch — nothing to place
         };
+        if result.is_ok() {
+            for w in record.data.storeys[idx].windows[windows_before..].iter_mut() {
+                w.overshading = overshading;
+            }
+        }
         match result {
             Ok(()) => {
                 self.reseed_opening_anchors(idx);
@@ -635,7 +644,11 @@ impl AppController {
 
     /// Full-surface "window wall" shortcut: no measurements, the whole face
     /// becomes a window. Walls only.
-    pub fn fill_opening_surface(&mut self, window_type: WindowTypeChoice) -> Result<(), String> {
+    pub fn fill_opening_surface(
+        &mut self,
+        window_type: WindowTypeChoice,
+        overshading: Overshading,
+    ) -> Result<(), String> {
         let Some(pending) = self.pending_opening.take() else {
             return Ok(());
         };
@@ -659,9 +672,13 @@ impl AppController {
             return Ok(());
         };
         let type_id = resolve_window_type(&mut record.data, window_type);
+        let windows_before = record.data.storeys[idx].windows.len();
         let storey = &mut record.data.storeys[idx];
         match openings::add_full_wall_window(storey, wall_id, height_m, type_id) {
             Ok(_) => {
+                for w in record.data.storeys[idx].windows[windows_before..].iter_mut() {
+                    w.overshading = overshading;
+                }
                 self.reseed_opening_anchors(idx);
                 let _ = self.mark_dirty();
                 self.push_history_snapshot(undo_snap);

@@ -37,7 +37,7 @@ use crate::number_entry::{apply, parse_dimension_expression, Key};
 use crate::ui::pages::events::UiEvent;
 use crate::ui::widgets::HintExt;
 use ber_model::ber::common::ItemId;
-use ber_model::ber::fenestration::{Frame, Glazing};
+use ber_model::ber::fenestration::{Frame, Glazing, Overshading};
 
 /// Minimum finger-target size for keypad keys (mirrors the on-screen pads).
 const KEY: f32 = 46.0;
@@ -175,6 +175,7 @@ pub(super) fn render<F: FnMut(UiEvent)>(
         // mutates it for the NEXT frame; a Place click reads the settled value),
         // captured by value into the action events.
         let window_type = current_window_type(view);
+        let overshading = *view.overshading;
         let place_window_type = window_type.clone();
         let mut actions = vec![Action::new_multi("Place", "Place this opening", move |vs| {
             // Field order (the controller's contract): door W, door H, left W,
@@ -190,6 +191,7 @@ pub(super) fn render<F: FnMut(UiEvent)>(
                 transom: g(6),
                 transom_semicircular: semicircular,
                 window_type: place_window_type.clone(),
+                overshading,
             }
         })
         .primary()];
@@ -201,6 +203,7 @@ pub(super) fn render<F: FnMut(UiEvent)>(
                     "Make the whole wall one window (no size needed)",
                     move |_| SketchEvent::FillOpeningSurface {
                         window_type: fill_window_type.clone(),
+                        overshading,
                     },
                 )
                 .bare()
@@ -307,6 +310,9 @@ pub(super) fn render<F: FnMut(UiEvent)>(
                 &mut *view.wt_gap_input,
                 &mut *view.wt_name_input,
             );
+            // Overshading is per-WINDOW (not per type), so it shows for every
+            // window placement regardless of the type choice above.
+            overshading_picker(ui, &mut *view.overshading);
         };
         show_box_multi(
             ctx,
@@ -891,6 +897,34 @@ fn frame_label(f: &Frame) -> String {
         Frame::Metal => "Metal".to_string(),
         Frame::Other(s) => s.clone(),
     }
+}
+
+fn overshading_label(o: Overshading) -> &'static str {
+    match o {
+        Overshading::Heavy => "Heavy",
+        Overshading::MoreThanAverage => "More than average",
+        Overshading::Average => "Average",
+        Overshading::VeryLittle => "Very little",
+    }
+}
+
+/// Per-window overshading dropdown for the placement box (defaults to Average).
+fn overshading_picker(ui: &mut egui::Ui, overshading: &mut Overshading) {
+    ui.horizontal(|ui| {
+        ui.label("overshading");
+        egui::ComboBox::from_id_salt("opening_overshading")
+            .selected_text(overshading_label(*overshading))
+            .show_ui(ui, |ui| {
+                for o in [
+                    Overshading::Heavy,
+                    Overshading::MoreThanAverage,
+                    Overshading::Average,
+                    Overshading::VeryLittle,
+                ] {
+                    ui.selectable_value(overshading, o, overshading_label(o));
+                }
+            });
+    });
 }
 
 /// Render the window-type picker for the placement box: a dropdown of the types

@@ -36,7 +36,7 @@ use crate::ui::render::ViewParams;
 use crate::ui::widgets::HintExt;
 use ber_model::ber::ber_struct::Ber;
 use ber_model::ber::common::{ConstructionPhase, ExternalSide, ItemId};
-use ber_model::ber::fenestration::{Frame, Glazing};
+use ber_model::ber::fenestration::{Frame, Glazing, Overshading};
 use ber_model::ber::structural::{SurfaceCounts, WallExposure};
 use domain::sketch::{DisplayMode, EditTools, SketchMode};
 use manip_plan::CollinearitySuggestion;
@@ -432,6 +432,8 @@ pub enum SketchEvent {
         /// Which shared window type the placed window joins (an existing id, or a
         /// new attribute set find-or-created on Place). Ignored for a plain Door.
         window_type: WindowTypeChoice,
+        /// Per-window overshading (DEAP solar-gain input), defaulting to Average.
+        overshading: Overshading,
     },
     /// Abandon the in-flight placement.
     CancelOpeningPlacement,
@@ -440,6 +442,8 @@ pub enum SketchEvent {
     FillOpeningSurface {
         /// Which shared window type the window-wall joins (see [`Self::PlaceOpening`]).
         window_type: WindowTypeChoice,
+        /// Per-window overshading (see [`Self::PlaceOpening`]).
+        overshading: Overshading,
     },
     /// Plan drag / release while a ROOF window is grabbed (Edit-on-surface).
     OpeningsPointerDrag {
@@ -942,6 +946,9 @@ pub struct SketchView<'a> {
     pub wt_certified: &'a mut bool,
     pub wt_gap_input: &'a mut String,
     pub wt_name_input: &'a mut String,
+    /// Per-window overshading selected in the placement box. See
+    /// [`crate::ui::app::SketchState`].
+    pub overshading: &'a mut Overshading,
     /// Window types already in use on the record — offered in the placement box's
     /// picker so a new window can JOIN an existing type. Empty when none exist.
     pub existing_window_types: Vec<ExistingWindowType>,

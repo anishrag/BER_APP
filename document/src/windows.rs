@@ -108,6 +108,7 @@ mod tests {
             assembly_id: None,
             multi_storey,
             arched: false,
+            overshading: Default::default(),
         }
     }
 

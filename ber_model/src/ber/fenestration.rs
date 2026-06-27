@@ -22,6 +22,18 @@ pub enum Frame {
     Other(String),
 }
 
+/// How overshadowed a window is by surrounding obstacles (buildings, trees) —
+/// a DEAP solar-gain input that is per-WINDOW, not per type (two identical
+/// windows on different walls can be shaded differently). Defaults to `Average`.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+pub enum Overshading {
+    Heavy,
+    MoreThanAverage,
+    #[default]
+    Average,
+    VeryLittle,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub enum WindowNameSpecifics {
     Standard,
@@ -148,6 +160,10 @@ pub struct Window {
     /// records.
     #[serde(default)]
     pub arched: bool,
+    /// Per-window overshading (DEAP solar-gain input). `#[serde(default)]` →
+    /// `Average` on records written before the field existed.
+    #[serde(default)]
+    pub overshading: Overshading,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

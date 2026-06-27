@@ -8731,6 +8731,7 @@ fn multi_field_window_places_with_default_sill() {
         None,
         false,
         WindowTypeChoice::default(),
+        ber_model::ber::fenestration::Overshading::Average,
     )
     .expect("window places");
     assert!(c.opening_fields_prompt().is_none(), "placement finished");
@@ -8762,7 +8763,7 @@ fn multi_field_window_places_with_default_sill() {
 /// they differ. Mirrors the "assign to existing / only add if different" rule.
 #[test]
 fn window_type_picker_reuses_existing_and_adds_only_when_different() {
-    use ber_model::ber::fenestration::{Frame, Glazing};
+    use ber_model::ber::fenestration::{Frame, Glazing, Overshading};
 
     let mut c = dimensioned_square_controller();
     c.materialize();
@@ -8771,8 +8772,19 @@ fn window_type_picker_reuses_existing_and_adds_only_when_different() {
     let place = |c: &mut AppController, choice: WindowTypeChoice| {
         c.select_opening_tool(OpeningToolKind::Window);
         c.openings_pointer_down(5.0, -0.2, 0.5);
-        c.place_opening(1.0, 1.2, None, None, None, None, None, false, choice)
-            .expect("window places");
+        c.place_opening(
+            1.0,
+            1.2,
+            None,
+            None,
+            None,
+            None,
+            None,
+            false,
+            choice,
+            Overshading::Average,
+        )
+        .expect("window places");
         c.materialize();
     };
 
@@ -8882,6 +8894,50 @@ fn window_type_picker_reuses_existing_and_adds_only_when_different() {
         ber.storeys[0].windows.last().unwrap().window_type_id,
         reuse_id,
         "the placed window joined the picked existing type"
+    );
+}
+
+/// Overshading is a PER-WINDOW input: the placement box's choice lands on the
+/// placed window, and defaults to Average — two windows can differ.
+#[test]
+fn overshading_is_applied_per_window_at_placement() {
+    use ber_model::ber::fenestration::Overshading;
+
+    let mut c = dimensioned_square_controller();
+    c.materialize();
+
+    let place = |c: &mut AppController, overshading: Overshading| {
+        c.select_opening_tool(OpeningToolKind::Window);
+        c.openings_pointer_down(5.0, -0.2, 0.5);
+        c.place_opening(
+            1.0,
+            1.2,
+            None,
+            None,
+            None,
+            None,
+            None,
+            false,
+            WindowTypeChoice::default(),
+            overshading,
+        )
+        .expect("window places");
+        c.materialize();
+    };
+
+    place(&mut c, Overshading::Heavy);
+    place(&mut c, Overshading::VeryLittle);
+    let windows = &c.current_record.as_ref().unwrap().data.storeys[0].windows;
+    assert_eq!(windows.len(), 2);
+    assert_eq!(
+        windows[0].overshading,
+        Overshading::Heavy,
+        "first window keeps its overshading"
+    );
+    assert_eq!(
+        windows[1].overshading,
+        Overshading::VeryLittle,
+        "second window has its own (per-window, not shared)"
     );
 }
 
