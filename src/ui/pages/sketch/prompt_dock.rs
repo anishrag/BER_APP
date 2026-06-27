@@ -493,12 +493,14 @@ pub(super) fn has_deletables(view: &SketchView<'_>) -> bool {
         || !view.roof_apex_views.is_empty()
 }
 
-/// The floating "Delete" panel — a single home for removing things you've added
+/// The "Delete" panel — a single home for removing things you've added
 /// (construction-year areas, floor steps, ceiling steps, roof points), grouped
 /// into clearly-labelled SECTIONS. These deletes used to clutter each tool's
 /// floating control box; they live here instead so the control boxes stay
-/// input-only. Renders nothing when there's nothing to delete; collapsible and
-/// parked top-left.
+/// input-only. FIXED at the canvas bottom-left (just above the instruction bar),
+/// a collapsing "🗑 Delete" header that expands UPWARD — the left-side mirror of
+/// the bottom-right "Add external pictures" button. Renders nothing when there's
+/// nothing to delete.
 pub(super) fn render_delete_panel<F: FnMut(UiEvent)>(
     ctx: &egui::Context,
     rect: egui::Rect,
@@ -508,67 +510,75 @@ pub(super) fn render_delete_panel<F: FnMut(UiEvent)>(
     if !has_deletables(view) {
         return;
     }
-    // One labelled row with a 🗑 button; the section header groups them.
+    // One section header grouping its 🗑 rows.
     fn section(ui: &mut egui::Ui, title: &str) {
         ui.add_space(2.0);
         ui.label(egui::RichText::new(title).strong().size(13.0));
     }
-    egui::Window::new("🗑 Delete")
-        .id(egui::Id::new("sketch_delete_panel"))
+    // Bottom-left pivot → the panel grows UP into the canvas as the header
+    // expands (mirror of the bottom-right external-photos button).
+    egui::Area::new(egui::Id::new("sketch_delete_panel"))
         .order(egui::Order::Foreground)
-        .default_pos(rect.left_top() + egui::vec2(8.0, 64.0))
-        .pivot(egui::Align2::LEFT_TOP)
-        .constrain_to(rect)
-        .resizable(false)
-        .collapsible(true)
+        .pivot(egui::Align2::LEFT_BOTTOM)
+        .fixed_pos(rect.left_bottom() + egui::vec2(8.0, -8.0))
         .show(ctx, |ui| {
-            ui.set_max_width(240.0);
-            if !view.phase_region_polygons.is_empty() {
-                section(ui, "Construction years");
-                for (i, (_ring, label)) in view.phase_region_polygons.iter().enumerate() {
-                    ui.horizontal(|ui| {
-                        if ui.button("🗑").clicked() {
-                            on_event(UiEvent::Sketch(SketchEvent::DeletePhaseRegion(i)));
+            egui::Frame::popup(ui.style()).show(ui, |ui| {
+                egui::CollapsingHeader::new("🗑 Delete")
+                    .default_open(false)
+                    .show(ui, |ui| {
+                        ui.set_max_width(240.0);
+                        if !view.phase_region_polygons.is_empty() {
+                            section(ui, "Construction years");
+                            for (i, (_ring, label)) in view.phase_region_polygons.iter().enumerate()
+                            {
+                                ui.horizontal(|ui| {
+                                    if ui.button("🗑").clicked() {
+                                        on_event(UiEvent::Sketch(SketchEvent::DeletePhaseRegion(
+                                            i,
+                                        )));
+                                    }
+                                    ui.label(label);
+                                });
+                            }
                         }
-                        ui.label(label);
-                    });
-                }
-            }
-            if !view.step_region_polygons.is_empty() {
-                section(ui, "Floor steps");
-                for (i, (_ring, label)) in view.step_region_polygons.iter().enumerate() {
-                    ui.horizontal(|ui| {
-                        if ui.button("🗑").clicked() {
-                            on_event(UiEvent::Sketch(SketchEvent::DeleteStepRegion(i)));
+                        if !view.step_region_polygons.is_empty() {
+                            section(ui, "Floor steps");
+                            for (i, (_ring, label)) in view.step_region_polygons.iter().enumerate()
+                            {
+                                ui.horizontal(|ui| {
+                                    if ui.button("🗑").clicked() {
+                                        on_event(UiEvent::Sketch(SketchEvent::DeleteStepRegion(i)));
+                                    }
+                                    ui.label(label);
+                                });
+                            }
                         }
-                        ui.label(label);
-                    });
-                }
-            }
-            if !view.ceiling_step_region_polygons.is_empty() {
-                section(ui, "Ceiling steps");
-                for (ring, label) in view.ceiling_step_region_polygons.iter() {
-                    ui.horizontal(|ui| {
-                        if ui.button("🗑").clicked() {
-                            on_event(UiEvent::Sketch(SketchEvent::DeleteCeilingStepRegion(
-                                ring.clone(),
-                            )));
+                        if !view.ceiling_step_region_polygons.is_empty() {
+                            section(ui, "Ceiling steps");
+                            for (ring, label) in view.ceiling_step_region_polygons.iter() {
+                                ui.horizontal(|ui| {
+                                    if ui.button("🗑").clicked() {
+                                        on_event(UiEvent::Sketch(
+                                            SketchEvent::DeleteCeilingStepRegion(ring.clone()),
+                                        ));
+                                    }
+                                    ui.label(label);
+                                });
+                            }
                         }
-                        ui.label(label);
-                    });
-                }
-            }
-            if !view.roof_apex_views.is_empty() {
-                section(ui, "Roof points");
-                for (i, (_pos, label)) in view.roof_apex_views.iter().enumerate() {
-                    ui.horizontal(|ui| {
-                        if ui.button("🗑").clicked() {
-                            on_event(UiEvent::Sketch(SketchEvent::DeleteRoofApex(i)));
+                        if !view.roof_apex_views.is_empty() {
+                            section(ui, "Roof points");
+                            for (i, (_pos, label)) in view.roof_apex_views.iter().enumerate() {
+                                ui.horizontal(|ui| {
+                                    if ui.button("🗑").clicked() {
+                                        on_event(UiEvent::Sketch(SketchEvent::DeleteRoofApex(i)));
+                                    }
+                                    ui.label(label);
+                                });
+                            }
                         }
-                        ui.label(label);
                     });
-                }
-            }
+            });
         });
 }
 
