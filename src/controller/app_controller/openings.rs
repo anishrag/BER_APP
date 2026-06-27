@@ -4,7 +4,7 @@
 //! and derives the UI-facing view data. All geometry/model mutation lives in the
 //! ber_model ops; this only sequences them.
 use super::*;
-use ber_model::ber::common::ItemId;
+use ber_model::ber::common::{ItemId, Photo};
 use ber_model::ber::fenestration::{DoorKind, Frame, Glazing, Overshading};
 use ber_model::ber::openings::{self, DoorSidelightsSpec, OpeningError, OpeningRef};
 
@@ -530,6 +530,8 @@ impl AppController {
         transom_semicircular: bool,
         window_type: WindowTypeChoice,
         overshading: Overshading,
+        photos: Vec<std::path::PathBuf>,
+        photo_quality: PhotoQuality,
     ) -> Result<(), String> {
         /// Sill the placement defaults to; the assessor drags it in the 2D view.
         const DEFAULT_SILL_M: f32 = 1.0;
@@ -541,6 +543,12 @@ impl AppController {
         };
         self.materialize();
         let undo_snap = self.current_history_snapshot();
+        // Store the picked photos into the photo store up front (needs `&self`,
+        // before the mutable record borrow below); attached to the new window(s).
+        let stored_photos: Vec<Photo> = photos
+            .iter()
+            .filter_map(|p| self.store_photo_file(p, photo_quality))
+            .collect();
         let Some(record) = self.current_record.as_mut() else {
             return Ok(());
         };
@@ -623,6 +631,7 @@ impl AppController {
         if result.is_ok() {
             for w in record.data.storeys[idx].windows[windows_before..].iter_mut() {
                 w.overshading = overshading;
+                w.photos.extend(stored_photos.iter().cloned());
             }
         }
         match result {
@@ -648,6 +657,8 @@ impl AppController {
         &mut self,
         window_type: WindowTypeChoice,
         overshading: Overshading,
+        photos: Vec<std::path::PathBuf>,
+        photo_quality: PhotoQuality,
     ) -> Result<(), String> {
         let Some(pending) = self.pending_opening.take() else {
             return Ok(());
@@ -661,6 +672,10 @@ impl AppController {
         };
         self.materialize();
         let undo_snap = self.current_history_snapshot();
+        let stored_photos: Vec<Photo> = photos
+            .iter()
+            .filter_map(|p| self.store_photo_file(p, photo_quality))
+            .collect();
         let height_m = self
             .current_record
             .as_ref()
@@ -678,6 +693,7 @@ impl AppController {
             Ok(_) => {
                 for w in record.data.storeys[idx].windows[windows_before..].iter_mut() {
                     w.overshading = overshading;
+                    w.photos.extend(stored_photos.iter().cloned());
                 }
                 self.reseed_opening_anchors(idx);
                 let _ = self.mark_dirty();

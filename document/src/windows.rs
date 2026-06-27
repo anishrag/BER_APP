@@ -109,6 +109,7 @@ mod tests {
             multi_storey,
             arched: false,
             overshading: Default::default(),
+            photos: vec![],
         }
     }
 

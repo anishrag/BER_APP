@@ -164,6 +164,10 @@ pub struct Window {
     /// `Average` on records written before the field existed.
     #[serde(default)]
     pub overshading: Overshading,
+    /// Per-window photos (the installed window on site). Per-instance, not on the
+    /// shared `WindowType`. `#[serde(default)]` → empty on older records.
+    #[serde(default)]
+    pub photos: Vec<Photo>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

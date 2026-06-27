@@ -8732,6 +8732,8 @@ fn multi_field_window_places_with_default_sill() {
         false,
         WindowTypeChoice::default(),
         ber_model::ber::fenestration::Overshading::Average,
+        Vec::new(),
+        PhotoQuality::High,
     )
     .expect("window places");
     assert!(c.opening_fields_prompt().is_none(), "placement finished");
@@ -8783,6 +8785,8 @@ fn window_type_picker_reuses_existing_and_adds_only_when_different() {
             false,
             choice,
             Overshading::Average,
+            Vec::new(),
+            PhotoQuality::High,
         )
         .expect("window places");
         c.materialize();
@@ -8920,6 +8924,8 @@ fn overshading_is_applied_per_window_at_placement() {
             false,
             WindowTypeChoice::default(),
             overshading,
+            Vec::new(),
+            PhotoQuality::High,
         )
         .expect("window places");
         c.materialize();
@@ -8938,6 +8944,54 @@ fn overshading_is_applied_per_window_at_placement() {
         windows[1].overshading,
         Overshading::VeryLittle,
         "second window has its own (per-window, not shared)"
+    );
+}
+
+/// A photo picked in the placement box is copied into the store and attached to
+/// the placed window (per-window, like overshading).
+#[test]
+fn window_photo_is_attached_at_placement() {
+    use ber_model::ber::fenestration::Overshading;
+
+    let mut c = dimensioned_square_controller();
+    c.materialize();
+    let tmp = std::env::temp_dir().join(format!("ber_photos_{}", ItemId::default().0));
+    c.set_photos_dir(tmp);
+    let src = std::env::temp_dir().join(format!("ber_winsrc_{}.jpg", ItemId::default().0));
+    std::fs::write(&src, b"jpeg-bytes").unwrap();
+
+    c.select_opening_tool(OpeningToolKind::Window);
+    c.openings_pointer_down(5.0, -0.2, 0.5);
+    c.place_opening(
+        1.0,
+        1.2,
+        None,
+        None,
+        None,
+        None,
+        None,
+        false,
+        WindowTypeChoice::New {
+            glazing: ber_model::ber::fenestration::Glazing::Double,
+            frame: ber_model::ber::fenestration::Frame::WoodUPVC,
+            year: 0,
+            certified: false,
+            gap: Vec::new(),
+            name: Some("Model A".to_string()),
+        },
+        Overshading::Average,
+        vec![src],
+        PhotoQuality::Full,
+    )
+    .expect("window places");
+    c.materialize();
+
+    let windows = &c.current_record.as_ref().unwrap().data.storeys[0].windows;
+    assert_eq!(windows.len(), 1);
+    assert_eq!(windows[0].photos.len(), 1, "photo attached to the window");
+    assert!(
+        std::path::Path::new(&windows[0].photos[0].file_path).exists(),
+        "photo copied into the store"
     );
 }
 

@@ -199,6 +199,10 @@ pub struct SketchState {
     /// Per-window overshading selected in the placement box (defaults to Average).
     /// Persists across placements; applied to each window as it's placed.
     pub overshading: ber_model::ber::fenestration::Overshading,
+    /// Source paths of photos picked in the placement box for the window being
+    /// placed (a window photo is per-instance). Cleared at the start of each new
+    /// placement; consumed (attached) when the window is placed.
+    pub pending_window_photos: Vec<std::path::PathBuf>,
     /// Whether the floating default-ceiling-height entry box is open. Lives here
     /// (not on `categories`, which the view borrows) so the event handler can
     /// toggle it; the view reads it by value. Opened by the Heights tool button,
@@ -1106,6 +1110,7 @@ impl eframe::App for BerApp {
                                 wt_gap_input: &mut self.sketch_state.wt_gap_input,
                                 wt_name_input: &mut self.sketch_state.wt_name_input,
                                 overshading: &mut self.sketch_state.overshading,
+                                pending_window_photos: &mut self.sketch_state.pending_window_photos,
                                 existing_window_types,
                                 elevation_view,
                                 roof_window_selected,
@@ -1661,6 +1666,8 @@ impl eframe::App for BerApp {
                                         transom_semicircular,
                                         window_type,
                                         overshading,
+                                        photos,
+                                        photo_quality,
                                     } => {
                                         let _ = controller.borrow_mut().place_opening(
                                             width_m,
@@ -1673,15 +1680,22 @@ impl eframe::App for BerApp {
                                             transom_semicircular,
                                             window_type,
                                             overshading,
+                                            photos,
+                                            photo_quality,
                                         );
                                     }
                                     SketchEvent::FillOpeningSurface {
                                         window_type,
                                         overshading,
+                                        photos,
+                                        photo_quality,
                                     } => {
-                                        let _ = controller
-                                            .borrow_mut()
-                                            .fill_opening_surface(window_type, overshading);
+                                        let _ = controller.borrow_mut().fill_opening_surface(
+                                            window_type,
+                                            overshading,
+                                            photos,
+                                            photo_quality,
+                                        );
                                     }
                                     SketchEvent::CancelOpeningPlacement => {
                                         controller.borrow_mut().cancel_opening_placement();

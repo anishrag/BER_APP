@@ -36,6 +36,7 @@ use crate::number_entry::bluetooth::{LaserSource, Status};
 use crate::number_entry::{apply, parse_dimension_expression, Key};
 use crate::ui::pages::events::UiEvent;
 use crate::ui::widgets::HintExt;
+use crate::ui::widgets::{photo_button, PhotoConfig, PhotoQuality};
 use ber_model::ber::common::ItemId;
 use ber_model::ber::fenestration::{Frame, Glazing, Overshading};
 
@@ -72,6 +73,9 @@ struct Action {
     /// Clear the expression buffer(s) after firing (the prefilled prompts —
     /// position, roof lengths — keep their value instead).
     clear: bool,
+    /// Additionally gated by the box's `extra_valid` flag — used by the openings
+    /// Place/Fill actions so they're disabled until the window-type name is given.
+    gated: bool,
     /// Builds the event from the parsed field values (index-aligned with the
     /// box's fields; `None` where a field is blank/unparsable). Single-value
     /// prompts get a one-element slice.
@@ -102,11 +106,17 @@ impl Action {
             needs_value: true,
             primary: false,
             clear: true,
+            gated: false,
             event: Box::new(event),
         }
     }
     fn primary(mut self) -> Self {
         self.primary = true;
+        self
+    }
+    /// Also require the box's `extra_valid` flag (e.g. window-type name present).
+    fn gated(mut self) -> Self {
+        self.gated = true;
         self
     }
     /// Fires regardless of the buffer, and never clears it.
@@ -161,6 +171,9 @@ pub(super) fn render<F: FnMut(UiEvent)>(
             *view.sidelight_left_has_sill = false;
             *view.sidelight_right_has_sill = false;
             *view.transom_semicircular = false;
+            // Photos are per-window, so a fresh placement starts with none (unlike
+            // the window type / overshading, which persist across placements).
+            view.pending_window_photos.clear();
         }
         // The toggles are captured into the Place event by value (the checkboxes
         // below mutate them for the NEXT frame; a Place click is always a separate
@@ -176,7 +189,12 @@ pub(super) fn render<F: FnMut(UiEvent)>(
         // captured by value into the action events.
         let window_type = current_window_type(view);
         let overshading = *view.overshading;
+        // Photos picked so far for this placement, captured by value into the
+        // events (the photo button below adds to the list for a later frame).
+        let photos = view.pending_window_photos.clone();
+        let photo_quality = PhotoQuality::High;
         let place_window_type = window_type.clone();
+        let place_photos = photos.clone();
         let mut actions = vec![Action::new_multi("Place", "Place this opening", move |vs| {
             // Field order (the controller's contract): door W, door H, left W,
             // left sill, right W, right sill, transom H.
@@ -192,11 +210,15 @@ pub(super) fn render<F: FnMut(UiEvent)>(
                 transom_semicircular: semicircular,
                 window_type: place_window_type.clone(),
                 overshading,
+                photos: place_photos.clone(),
+                photo_quality,
             }
         })
-        .primary()];
+        .primary()
+        .gated()];
         if prompt.offer_full_surface {
             let fill_window_type = window_type.clone();
+            let fill_photos = photos.clone();
             actions.push(
                 Action::new(
                     "Fill whole surface",
@@ -204,10 +226,13 @@ pub(super) fn render<F: FnMut(UiEvent)>(
                     move |_| SketchEvent::FillOpeningSurface {
                         window_type: fill_window_type.clone(),
                         overshading,
+                        photos: fill_photos.clone(),
+                        photo_quality,
                     },
                 )
                 .bare()
-                .with_clear(),
+                .with_clear()
+                .gated(),
             );
         }
         actions.push(
@@ -313,6 +338,14 @@ pub(super) fn render<F: FnMut(UiEvent)>(
             // Overshading is per-WINDOW (not per type), so it shows for every
             // window placement regardless of the type choice above.
             overshading_picker(ui, &mut *view.overshading);
+            // A photo of the window being placed (per-window, like overshading).
+            window_photo_picker(ui, &mut *view.pending_window_photos);
+        };
+        // A NEW window type must be named (the model is required, not optional);
+        // an existing type or a non-window tool needs nothing extra. Gates Place.
+        let extra_valid = match &window_type {
+            WindowTypeChoice::Existing(_) => true,
+            WindowTypeChoice::New { name, .. } => !prompt.offer_window_type || name.is_some(),
         };
         show_box_multi(
             ctx,
@@ -327,6 +360,7 @@ pub(super) fn render<F: FnMut(UiEvent)>(
             &mut view.cat_state.input_mode_pinned,
             view.laser,
             &mut picker,
+            extra_valid,
             on_event,
         );
         return;
@@ -927,6 +961,34 @@ fn overshading_picker(ui: &mut egui::Ui, overshading: &mut Overshading) {
     });
 }
 
+/// Per-window photo control for the placement box: thumbnails of the photos
+/// picked so far for this window plus an "add photo" button (file dialog on
+/// desktop, camera on Android). The paths are attached to the window on Place.
+fn window_photo_picker(ui: &mut egui::Ui, pending: &mut Vec<std::path::PathBuf>) {
+    ui.horizontal(|ui| {
+        ui.label("photo");
+        for p in pending.iter() {
+            let src = p.to_string_lossy();
+            ui.add(
+                egui::Image::new(format!("file://{src}"))
+                    .fit_to_exact_size(egui::vec2(40.0, 40.0))
+                    .maintain_aspect_ratio(true)
+                    .corner_radius(3.0),
+            );
+        }
+        if let Some(path) = photo_button(
+            ui,
+            "📷 Add photo",
+            true,
+            PhotoConfig {
+                default_quality: PhotoQuality::High,
+            },
+        ) {
+            pending.push(path);
+        }
+    });
+}
+
 /// Render the window-type picker for the placement box: a dropdown of the types
 /// already in use (pick one to JOIN it by id) plus "New type…", and — when New —
 /// the glazing/frame/year/cert fields. `ensure_window_type` dedups on Place, so a
@@ -1006,9 +1068,14 @@ fn window_type_picker(
             ui.add(
                 egui::TextEdit::singleline(name)
                     .desired_width(KEY * 3.0)
-                    .hint_text("model (optional)"),
+                    .hint_text("model (required)"),
             );
         });
+        // The model name is required for a new type (it disambiguates two
+        // otherwise-identical windows installed at once). Gates the Place button.
+        if name.trim().is_empty() {
+            ui.label(RichText::new("⚠ enter a model name").color(Color32::from_rgb(255, 120, 90)));
+        }
     }
 }
 
@@ -1049,6 +1116,7 @@ fn show_box<F: FnMut(UiEvent)>(
         mode_pinned,
         laser,
         &mut |_| {},
+        true,
         on_event,
     );
 }
@@ -1074,6 +1142,10 @@ fn show_box_multi<F: FnMut(UiEvent)>(
     // Extra controls drawn in the box body, under the toggles and above the
     // keypad — e.g. the openings window-type picker. A no-op for most prompts.
     extra: &mut dyn FnMut(&mut egui::Ui),
+    // Extra validity gate for actions marked `.gated()` (e.g. the openings
+    // Place/Fill, disabled until the window-type name is entered). Always `true`
+    // for prompts with no such requirement.
+    extra_valid: bool,
     on_event: &mut F,
 ) {
     let focus_id = Id::new(FOCUS_MEM);
@@ -1198,7 +1270,7 @@ fn show_box_multi<F: FnMut(UiEvent)>(
                     .all(|(f, v)| !f.required || v.is_some());
                 ui.vertical(|ui| {
                     for (ai, a) in actions.iter().enumerate() {
-                        let enabled = !a.needs_value || all_required;
+                        let enabled = (!a.needs_value || all_required) && (!a.gated || extra_valid);
                         if action_button(ui, a, enabled) {
                             fired = Some(ai);
                         }
@@ -1218,7 +1290,9 @@ fn show_box_multi<F: FnMut(UiEvent)>(
             // Enter triggers the primary action when its value requirement is met.
             if enter && fired.is_none() {
                 if let Some(ai) = actions.iter().position(|a| a.primary) {
-                    if !actions[ai].needs_value || all_required {
+                    if (!actions[ai].needs_value || all_required)
+                        && (!actions[ai].gated || extra_valid)
+                    {
                         fired = Some(ai);
                     }
                 }

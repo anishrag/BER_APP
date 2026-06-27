@@ -434,6 +434,10 @@ pub enum SketchEvent {
         window_type: WindowTypeChoice,
         /// Per-window overshading (DEAP solar-gain input), defaulting to Average.
         overshading: Overshading,
+        /// Source paths of photos picked in the box, attached to the window(s)
+        /// this placement creates. Ignored for a plain Door.
+        photos: Vec<std::path::PathBuf>,
+        photo_quality: crate::ui::widgets::PhotoQuality,
     },
     /// Abandon the in-flight placement.
     CancelOpeningPlacement,
@@ -444,6 +448,9 @@ pub enum SketchEvent {
         window_type: WindowTypeChoice,
         /// Per-window overshading (see [`Self::PlaceOpening`]).
         overshading: Overshading,
+        /// Photos to attach to the window-wall (see [`Self::PlaceOpening`]).
+        photos: Vec<std::path::PathBuf>,
+        photo_quality: crate::ui::widgets::PhotoQuality,
     },
     /// Plan drag / release while a ROOF window is grabbed (Edit-on-surface).
     OpeningsPointerDrag {
@@ -949,6 +956,9 @@ pub struct SketchView<'a> {
     /// Per-window overshading selected in the placement box. See
     /// [`crate::ui::app::SketchState`].
     pub overshading: &'a mut Overshading,
+    /// Photos picked in the placement box for the window being placed. See
+    /// [`crate::ui::app::SketchState`].
+    pub pending_window_photos: &'a mut Vec<std::path::PathBuf>,
     /// Window types already in use on the record — offered in the placement box's
     /// picker so a new window can JOIN an existing type. Empty when none exist.
     pub existing_window_types: Vec<ExistingWindowType>,
