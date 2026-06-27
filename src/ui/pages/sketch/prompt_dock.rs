@@ -912,9 +912,9 @@ fn exposure_toolbar<F: FnMut(UiEvent)>(
                     WallExposure::NonHeatLoss,
                 )));
             }
-            // Ground is riser-only (outline walls keep their three buttons):
-            // DEAP's ground-contact category applies to below-grade faces,
-            // which today only risers (floor/ceiling step faces) can be.
+            // Ground (below-grade contact) — DEAP treats it separately and a tall
+            // ground wall is reclassified as a floor at export. Offered for both
+            // risers and outline walls (e.g. a basement perimeter / deep step).
             if ui
                 .button("Ground")
                 .hint("In contact with the ground (below grade)")
@@ -969,6 +969,18 @@ fn exposure_toolbar<F: FnMut(UiEvent)>(
             if ui.button("Non-heat-loss").clicked() {
                 on_event(UiEvent::Sketch(SketchEvent::SetWallExposure(
                     WallExposure::NonHeatLoss,
+                )));
+            }
+            if ui
+                .button("Ground")
+                .hint(
+                    "In contact with the ground (below grade — e.g. a basement / \
+                     deep step wall). DEAP reclassifies a tall ground wall as a floor.",
+                )
+                .clicked()
+            {
+                on_event(UiEvent::Sketch(SketchEvent::SetWallExposure(
+                    WallExposure::Ground,
                 )));
             }
             if ui
