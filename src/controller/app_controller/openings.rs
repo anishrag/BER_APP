@@ -5,7 +5,7 @@
 //! ber_model ops; this only sequences them.
 use super::*;
 use ber_model::ber::common::ItemId;
-use ber_model::ber::fenestration::{DoorKind, Frame, Glazing};
+use ber_model::ber::fenestration::{DoorKind, Frame, Glazing, WindowNameSpecifics};
 use ber_model::ber::openings::{self, DoorSidelightsSpec, OpeningError, OpeningRef};
 
 /// Which opening the toolbar places next (or `Edit` to open an elevation).
@@ -59,6 +59,10 @@ pub struct OpeningFieldsPrompt {
     pub offer_full_surface: bool,
     /// Show the "semicircular transom" checkbox (door+sidelights only).
     pub offer_semicircular_transom: bool,
+    /// Show the window-type picker (glazing/frame/year/cert, or reuse an existing
+    /// type) — for tools that place a window: Window / Multi-storey / Roof window
+    /// and the glazed parts of Door + sidelights. A plain solid Door has none.
+    pub offer_window_type: bool,
     /// Bumped on every fresh host pick — the UI resets the box's field focus when
     /// it changes, so a new placement starts on the first field.
     pub seq: u64,
@@ -103,6 +107,48 @@ pub struct OpeningPromptUiData {
     /// True when the host WALL has no openings yet — the "full surface / window
     /// wall" shortcut is offered only then (it spans the whole face).
     pub wall_empty: bool,
+}
+
+/// The window type the placement box resolved to: either an EXISTING shared type
+/// (reuse its id) or a NEW set of attributes (find-or-create, so it only mints a
+/// type when it differs from every existing one — the user's "only add if
+/// different" rule, enforced by `ensure_window_type`'s dedup).
+#[derive(Debug, Clone, PartialEq)]
+pub enum WindowTypeChoice {
+    Existing(ItemId),
+    New {
+        glazing: Glazing,
+        frame: Frame,
+        year: u32,
+        certified: bool,
+    },
+}
+
+impl Default for WindowTypeChoice {
+    /// The placement box's starting point when no existing type is picked: a new
+    /// double-glazed Wood/UPVC, uncertified, unknown year — the old hardcoded
+    /// default, now overridable in the box.
+    fn default() -> Self {
+        WindowTypeChoice::New {
+            glazing: Glazing::Double,
+            frame: Frame::WoodUPVC,
+            year: 0,
+            certified: false,
+        }
+    }
+}
+
+/// A window type already in use on the record — offered in the placement box so a
+/// new window can JOIN an existing type by id instead of minting a duplicate.
+#[derive(Debug, Clone)]
+pub struct ExistingWindowType {
+    pub id: ItemId,
+    pub glazing: Glazing,
+    pub frame: Frame,
+    pub year: u32,
+    pub certified: bool,
+    /// Human label, e.g. `"Double · Wood/UPVC · 2010 · Cert"`.
+    pub label: String,
 }
 
 impl AppController {
@@ -294,6 +340,36 @@ impl AppController {
         })
     }
 
+    /// Window types already in use on this record (referenced by ≥1 window), for
+    /// the placement box's "use an existing type" picker — deduped by id, in
+    /// registry order. Empty when no windows exist yet (the box then only offers
+    /// the new-type fields).
+    pub fn existing_window_types(&self) -> Vec<ExistingWindowType> {
+        let Some(record) = self.current_record.as_ref() else {
+            return Vec::new();
+        };
+        let mut used = std::collections::HashSet::new();
+        for s in &record.data.storeys {
+            for w in &s.windows {
+                used.insert(w.window_type_id);
+            }
+        }
+        record
+            .data
+            .window_types
+            .iter()
+            .filter(|t| used.contains(&t.id) && t.specifics == WindowNameSpecifics::Standard)
+            .map(|t| ExistingWindowType {
+                id: t.id,
+                glazing: t.glazing.clone(),
+                frame: t.frame.clone(),
+                year: t.year,
+                certified: t.certified,
+                label: window_type_label(&t.glazing, &t.frame, t.year, t.certified),
+            })
+            .collect()
+    }
+
     /// Place a FULL-SURFACE window — turn the (empty) host wall into a "window
     /// wall" filling the whole face. No size entry: width = wall length, height =
     /// floor-to-roof at the tap, sill 0. Walls only.
@@ -327,7 +403,7 @@ impl AppController {
         let Some(record) = self.current_record.as_mut() else {
             return Ok(());
         };
-        let type_id = record.data.ensure_window_type(glazing, frame, year);
+        let type_id = record.data.ensure_window_type(glazing, frame, year, false);
         let storey = &mut record.data.storeys[idx];
         let result = openings::add_full_wall_window(storey, wall_id, height_m, type_id);
         self.finish_opening(result.map(|_| ()), undo_snap, pending)
@@ -372,11 +448,19 @@ impl AppController {
         let offer_full_surface = p.tool == OpeningToolKind::Window
             && matches!(p.target, PendingOpeningTarget::Wall { .. })
             && self.pending_wall_empty();
+        let offer_window_type = matches!(
+            p.tool,
+            OpeningToolKind::Window
+                | OpeningToolKind::MultiStoreyWindow
+                | OpeningToolKind::RoofWindow
+                | OpeningToolKind::DoorSidelights
+        );
         Some(OpeningFieldsPrompt {
             title: format!("{} · size", tool_label(p.tool)),
             fields,
             offer_full_surface,
             offer_semicircular_transom: p.tool == OpeningToolKind::DoorSidelights,
+            offer_window_type,
             seq: self.placement_seq,
         })
     }
@@ -405,12 +489,12 @@ impl AppController {
         self.opening_dim_error = None;
     }
 
-    /// Place the pending opening from the floating box's measurements, with a
-    /// DEFAULT window type (glazing/frame/year refined later in Edit on surface)
-    /// and a DEFAULT 1 m sill (moved later in the 2D elevation). The `left*` /
-    /// `right*` / `transom*` args are the optional door+sidelights extras
-    /// (`0`/`None` → that piece is absent). On a model error the box stays open
-    /// with the error shown.
+    /// Place the pending opening from the floating box's measurements, with the
+    /// window type the box's picker resolved to (`window_type` — an existing
+    /// shared type or new attributes, deduped) and a DEFAULT 1 m sill (moved
+    /// later in the 2D elevation). The `left*` / `right*` / `transom*` args are
+    /// the optional door+sidelights extras (`0`/`None` → that piece is absent).
+    /// On a model error the box stays open with the error shown.
     #[allow(clippy::too_many_arguments)]
     pub fn place_opening(
         &mut self,
@@ -422,6 +506,7 @@ impl AppController {
         right_sill: Option<f32>,
         transom: Option<f32>,
         transom_semicircular: bool,
+        window_type: WindowTypeChoice,
     ) -> Result<(), String> {
         /// Sill the placement defaults to; the assessor drags it in the 2D view.
         const DEFAULT_SILL_M: f32 = 1.0;
@@ -436,9 +521,13 @@ impl AppController {
         let Some(record) = self.current_record.as_mut() else {
             return Ok(());
         };
-        let type_id = record
-            .data
-            .ensure_window_type(Glazing::Double, Frame::WoodUPVC, 0);
+        // A plain solid Door carries no window type — don't touch the type
+        // registry for it (the dummy id is never read by the Door arm).
+        let type_id = if matches!(pending.tool, OpeningToolKind::Door) {
+            ItemId::default()
+        } else {
+            resolve_window_type(&mut record.data, window_type)
+        };
         let storey = &mut record.data.storeys[idx];
         let result: Result<(), OpeningError> = match (pending.tool, pending.target) {
             (OpeningToolKind::Window, PendingOpeningTarget::Wall { wall_id, along_m }) => {
@@ -524,7 +613,7 @@ impl AppController {
 
     /// Full-surface "window wall" shortcut: no measurements, the whole face
     /// becomes a window. Walls only.
-    pub fn fill_opening_surface(&mut self) -> Result<(), String> {
+    pub fn fill_opening_surface(&mut self, window_type: WindowTypeChoice) -> Result<(), String> {
         let Some(pending) = self.pending_opening.take() else {
             return Ok(());
         };
@@ -547,9 +636,7 @@ impl AppController {
         let Some(record) = self.current_record.as_mut() else {
             return Ok(());
         };
-        let type_id = record
-            .data
-            .ensure_window_type(Glazing::Double, Frame::WoodUPVC, 0);
+        let type_id = resolve_window_type(&mut record.data, window_type);
         let storey = &mut record.data.storeys[idx];
         match openings::add_full_wall_window(storey, wall_id, height_m, type_id) {
             Ok(_) => {
@@ -591,7 +678,7 @@ impl AppController {
         let Some(record) = self.current_record.as_mut() else {
             return Ok(());
         };
-        let type_id = record.data.ensure_window_type(glazing, frame, year);
+        let type_id = record.data.ensure_window_type(glazing, frame, year, false);
         let storey = &mut record.data.storeys[idx];
         let result = match pending.target {
             PendingOpeningTarget::Wall {
@@ -676,7 +763,7 @@ impl AppController {
         let Some(record) = self.current_record.as_mut() else {
             return Ok(());
         };
-        let window_type_id = record.data.ensure_window_type(glazing, frame, year);
+        let window_type_id = record.data.ensure_window_type(glazing, frame, year, false);
         let storey = &mut record.data.storeys[idx];
         let result = openings::compose_door_sidelights(
             storey,
@@ -1000,6 +1087,48 @@ fn tool_label(tool: OpeningToolKind) -> &'static str {
         OpeningToolKind::Door => "Door",
         OpeningToolKind::DoorSidelights => "Door + sidelights",
         OpeningToolKind::Edit => "Edit",
+    }
+}
+
+/// A short label for a window type, e.g. `"Double · Wood/UPVC · 2010 · Cert"`.
+/// Year `0` (unknown) is omitted.
+fn window_type_label(glazing: &Glazing, frame: &Frame, year: u32, certified: bool) -> String {
+    let g = match glazing {
+        Glazing::Single => "Single".to_string(),
+        Glazing::Double => "Double".to_string(),
+        Glazing::Triple => "Triple".to_string(),
+        Glazing::Other(s) => s.clone(),
+    };
+    let f = match frame {
+        Frame::WoodUPVC => "Wood/UPVC".to_string(),
+        Frame::Metal => "Metal".to_string(),
+        Frame::Other(s) => s.clone(),
+    };
+    let mut label = format!("{g} · {f}");
+    if year != 0 {
+        label.push_str(&format!(" · {year}"));
+    }
+    label.push_str(if certified { " · Cert" } else { " · No cert" });
+    label
+}
+
+/// Resolve a [`WindowTypeChoice`] to a concrete shared-type id on the record: an
+/// existing id (verified to still exist), or a new attribute set find-or-created
+/// via [`Ber::ensure_window_type`] (which dedups, so a "new" type that matches an
+/// existing one joins it — the "only add if different" rule).
+fn resolve_window_type(data: &mut Ber, choice: WindowTypeChoice) -> ItemId {
+    match choice {
+        WindowTypeChoice::Existing(id) if data.window_types.iter().any(|t| t.id == id) => id,
+        // Stale id (type since deleted) → fall back to the default new type.
+        WindowTypeChoice::Existing(_) => {
+            data.ensure_window_type(Glazing::Double, Frame::WoodUPVC, 0, false)
+        }
+        WindowTypeChoice::New {
+            glazing,
+            frame,
+            year,
+            certified,
+        } => data.ensure_window_type(glazing, frame, year, certified),
     }
 }
 

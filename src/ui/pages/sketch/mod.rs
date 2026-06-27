@@ -26,15 +26,17 @@ use egui::Pos2;
 
 use crate::controller::app_controller::{
     AssessmentPhase, ChecklistItem, DimensionPromptUiData, EditDragPromptUiData, ElevationView,
-    ExistingGroup, ExposureSelection, NewStoreyPromptUiData, OpeningFieldsPrompt, OpeningToolKind,
-    PartitionView, PhotoView, PositionPromptUiData, ReviewView, RiserView, SelectMode, SnapTagView,
-    StructureEdit, SurfaceKind, VertexDropPromptUiData, WallExposureView,
+    ExistingGroup, ExistingWindowType, ExposureSelection, NewStoreyPromptUiData,
+    OpeningFieldsPrompt, OpeningToolKind, PartitionView, PhotoView, PositionPromptUiData,
+    ReviewView, RiserView, SelectMode, SnapTagView, StructureEdit, SurfaceKind,
+    VertexDropPromptUiData, WallExposureView, WindowTypeChoice,
 };
 use crate::ui::pages::events::UiEvent;
 use crate::ui::render::ViewParams;
 use crate::ui::widgets::HintExt;
 use ber_model::ber::ber_struct::Ber;
 use ber_model::ber::common::{ConstructionPhase, ExternalSide, ItemId};
+use ber_model::ber::fenestration::{Frame, Glazing};
 use ber_model::ber::structural::{SurfaceCounts, WallExposure};
 use domain::sketch::{DisplayMode, EditTools, SketchMode};
 use manip_plan::CollinearitySuggestion;
@@ -427,12 +429,18 @@ pub enum SketchEvent {
         right_sill: Option<f32>,
         transom: Option<f32>,
         transom_semicircular: bool,
+        /// Which shared window type the placed window joins (an existing id, or a
+        /// new attribute set find-or-created on Place). Ignored for a plain Door.
+        window_type: WindowTypeChoice,
     },
     /// Abandon the in-flight placement.
     CancelOpeningPlacement,
     /// First-field shortcut: turn the (empty) host wall into a full-surface
     /// "window wall" — no measurements; the whole face becomes one window.
-    FillOpeningSurface,
+    FillOpeningSurface {
+        /// Which shared window type the window-wall joins (see [`Self::PlaceOpening`]).
+        window_type: WindowTypeChoice,
+    },
     /// Plan drag / release while a ROOF window is grabbed (Edit-on-surface).
     OpeningsPointerDrag {
         world_x: f64,
@@ -923,6 +931,18 @@ pub struct SketchView<'a> {
     pub sidelight_right_has_sill: &'a mut bool,
     pub transom_input: &'a mut String,
     pub transom_semicircular: &'a mut bool,
+    /// Window-type picker state for the placement box. `wt_existing_id = Some`
+    /// reuses an existing shared type by id; `None` defines a new one from the
+    /// glazing/frame/year/cert fields below (deduped on Place). See
+    /// [`crate::ui::app::SketchState`].
+    pub wt_existing_id: &'a mut Option<ItemId>,
+    pub wt_glazing: &'a mut Glazing,
+    pub wt_frame: &'a mut Frame,
+    pub wt_year_input: &'a mut String,
+    pub wt_certified: &'a mut bool,
+    /// Window types already in use on the record — offered in the placement box's
+    /// picker so a new window can JOIN an existing type. Empty when none exist.
+    pub existing_window_types: Vec<ExistingWindowType>,
     /// The open per-wall ELEVATION overlay, if any (the unrolled wall + its
     /// draggable openings).
     pub elevation_view: Option<ElevationView>,

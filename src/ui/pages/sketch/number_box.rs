@@ -31,10 +31,13 @@ use std::time::Duration;
 use egui::{Align2, Color32, Id, RichText};
 
 use super::{SketchEvent, SketchView};
+use crate::controller::app_controller::{ExistingWindowType, WindowTypeChoice};
 use crate::number_entry::bluetooth::{LaserSource, Status};
 use crate::number_entry::{apply, parse_dimension_expression, Key};
 use crate::ui::pages::events::UiEvent;
 use crate::ui::widgets::HintExt;
+use ber_model::ber::common::ItemId;
+use ber_model::ber::fenestration::{Frame, Glazing};
 
 /// Minimum finger-target size for keypad keys (mirrors the on-screen pads).
 const KEY: f32 = 46.0;
@@ -168,6 +171,11 @@ pub(super) fn render<F: FnMut(UiEvent)>(
             *view.sidelight_left_has_sill,
             *view.sidelight_right_has_sill,
         );
+        // The window-type choice settled on a previous frame (the picker below
+        // mutates it for the NEXT frame; a Place click reads the settled value),
+        // captured by value into the action events.
+        let window_type = current_window_type(view);
+        let place_window_type = window_type.clone();
         let mut actions = vec![Action::new_multi("Place", "Place this opening", move |vs| {
             // Field order (the controller's contract): door W, door H, left W,
             // left sill, right W, right sill, transom H.
@@ -181,15 +189,19 @@ pub(super) fn render<F: FnMut(UiEvent)>(
                 right_sill: if right_has_sill { g(5) } else { None },
                 transom: g(6),
                 transom_semicircular: semicircular,
+                window_type: place_window_type.clone(),
             }
         })
         .primary()];
         if prompt.offer_full_surface {
+            let fill_window_type = window_type.clone();
             actions.push(
                 Action::new(
                     "Fill whole surface",
                     "Make the whole wall one window (no size needed)",
-                    |_| SketchEvent::FillOpeningSurface,
+                    move |_| SketchEvent::FillOpeningSurface {
+                        window_type: fill_window_type.clone(),
+                    },
                 )
                 .bare()
                 .with_clear(),
@@ -276,6 +288,24 @@ pub(super) fn render<F: FnMut(UiEvent)>(
                 value: &mut *view.transom_semicircular,
             });
         }
+        // The window-type picker (for window-bearing tools), rendered in the box
+        // body. Captures the wt_* state fields (disjoint from the box fields).
+        let existing_types = view.existing_window_types.clone();
+        let offer_wt = prompt.offer_window_type;
+        let mut picker = |ui: &mut egui::Ui| {
+            if !offer_wt {
+                return;
+            }
+            window_type_picker(
+                ui,
+                &existing_types,
+                &mut *view.wt_existing_id,
+                &mut *view.wt_glazing,
+                &mut *view.wt_frame,
+                &mut *view.wt_year_input,
+                &mut *view.wt_certified,
+            );
+        };
         show_box_multi(
             ctx,
             rect,
@@ -288,6 +318,7 @@ pub(super) fn render<F: FnMut(UiEvent)>(
             &mut view.cat_state.input_mode,
             &mut view.cat_state.input_mode_pinned,
             view.laser,
+            &mut picker,
             on_event,
         );
         return;
@@ -811,6 +842,108 @@ struct BoxCheck<'a> {
     value: &'a mut bool,
 }
 
+/// The window-type choice currently selected in the placement box's picker — an
+/// existing shared type (when its id is still in the list) or a new attribute set
+/// from the glazing/frame/year/cert fields. Read by value into the Place event.
+fn current_window_type(view: &SketchView<'_>) -> WindowTypeChoice {
+    match *view.wt_existing_id {
+        Some(id) if view.existing_window_types.iter().any(|t| t.id == id) => {
+            WindowTypeChoice::Existing(id)
+        }
+        _ => WindowTypeChoice::New {
+            glazing: view.wt_glazing.clone(),
+            frame: view.wt_frame.clone(),
+            year: view.wt_year_input.trim().parse().unwrap_or(0),
+            certified: *view.wt_certified,
+        },
+    }
+}
+
+fn glazing_label(g: &Glazing) -> String {
+    match g {
+        Glazing::Single => "Single".to_string(),
+        Glazing::Double => "Double".to_string(),
+        Glazing::Triple => "Triple".to_string(),
+        Glazing::Other(s) => s.clone(),
+    }
+}
+
+fn frame_label(f: &Frame) -> String {
+    match f {
+        Frame::WoodUPVC => "Wood/UPVC".to_string(),
+        Frame::Metal => "Metal".to_string(),
+        Frame::Other(s) => s.clone(),
+    }
+}
+
+/// Render the window-type picker for the placement box: a dropdown of the types
+/// already in use (pick one to JOIN it by id) plus "New type…", and — when New —
+/// the glazing/frame/year/cert fields. `ensure_window_type` dedups on Place, so a
+/// New type that matches an existing one joins it ("only add if different").
+fn window_type_picker(
+    ui: &mut egui::Ui,
+    existing: &[ExistingWindowType],
+    existing_id: &mut Option<ItemId>,
+    glazing: &mut Glazing,
+    frame: &mut Frame,
+    year: &mut String,
+    certified: &mut bool,
+) {
+    ui.separator();
+    ui.label(RichText::new("Window type").color(Color32::from_gray(170)));
+    // Drop a stale selection (its type was since deleted) so the combo reads New.
+    let stale = match existing_id {
+        Some(id) => !existing.iter().any(|t| t.id == *id),
+        None => false,
+    };
+    if stale {
+        *existing_id = None;
+    }
+    let selected_text = match existing_id {
+        Some(id) => existing
+            .iter()
+            .find(|t| t.id == *id)
+            .map(|t| t.label.clone())
+            .unwrap_or_else(|| "New type…".to_string()),
+        None => "New type…".to_string(),
+    };
+    egui::ComboBox::from_id_salt("opening_window_type")
+        .selected_text(selected_text)
+        .show_ui(ui, |ui| {
+            for t in existing {
+                ui.selectable_value(existing_id, Some(t.id), &t.label);
+            }
+            ui.selectable_value(existing_id, None, "New type…");
+        });
+    // New-type fields: shown only when defining a new type (not reusing one).
+    if existing_id.is_none() {
+        ui.horizontal(|ui| {
+            egui::ComboBox::from_id_salt("opening_wt_glazing")
+                .selected_text(glazing_label(glazing))
+                .show_ui(ui, |ui| {
+                    ui.selectable_value(glazing, Glazing::Single, "Single");
+                    ui.selectable_value(glazing, Glazing::Double, "Double");
+                    ui.selectable_value(glazing, Glazing::Triple, "Triple");
+                });
+            egui::ComboBox::from_id_salt("opening_wt_frame")
+                .selected_text(frame_label(frame))
+                .show_ui(ui, |ui| {
+                    ui.selectable_value(frame, Frame::WoodUPVC, "Wood/UPVC");
+                    ui.selectable_value(frame, Frame::Metal, "Metal");
+                });
+        });
+        ui.horizontal(|ui| {
+            ui.label("year");
+            ui.add(
+                egui::TextEdit::singleline(year)
+                    .desired_width(60.0)
+                    .hint_text("e.g. 2010"),
+            );
+            ui.checkbox(certified, "certified");
+        });
+    }
+}
+
 /// Single-value floating box — the common case (one unlabelled field). Thin
 /// wrapper over [`show_box_multi`] so every prompt shares one renderer.
 #[allow(clippy::too_many_arguments)]
@@ -847,6 +980,7 @@ fn show_box<F: FnMut(UiEvent)>(
         mode,
         mode_pinned,
         laser,
+        &mut |_| {},
         on_event,
     );
 }
@@ -869,6 +1003,9 @@ fn show_box_multi<F: FnMut(UiEvent)>(
     mode: &mut InputMode,
     mode_pinned: &mut bool,
     laser: &mut LaserSource,
+    // Extra controls drawn in the box body, under the toggles and above the
+    // keypad — e.g. the openings window-type picker. A no-op for most prompts.
+    extra: &mut dyn FnMut(&mut egui::Ui),
     on_event: &mut F,
 ) {
     let focus_id = Id::new(FOCUS_MEM);
@@ -952,6 +1089,9 @@ fn show_box_multi<F: FnMut(UiEvent)>(
             for c in checks.iter_mut() {
                 ui.checkbox(c.value, c.label);
             }
+
+            // Prompt-specific extra controls (e.g. the window-type picker).
+            extra(ui);
 
             ui.add_space(4.0);
             let mut fired: Option<usize> = None;

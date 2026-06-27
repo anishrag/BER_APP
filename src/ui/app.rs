@@ -180,6 +180,17 @@ pub struct SketchState {
     pub sidelight_right_has_sill: bool,
     pub transom_input: String,
     pub transom_semicircular: bool,
+    /// Window-type picker (the placement box): which shared type a placed window
+    /// joins. `wt_existing_id = Some` reuses an existing type by id; `None`
+    /// defines a new one from glazing/frame/year/cert (find-or-created on Place,
+    /// so a "new" type that matches an existing one joins it — "only add if
+    /// different"). Persists across placements so repeated windows of one type
+    /// are a single pick.
+    pub wt_existing_id: Option<ber_model::ber::common::ItemId>,
+    pub wt_glazing: ber_model::ber::fenestration::Glazing,
+    pub wt_frame: ber_model::ber::fenestration::Frame,
+    pub wt_year_input: String,
+    pub wt_certified: bool,
     /// Whether the floating default-ceiling-height entry box is open. Lives here
     /// (not on `categories`, which the view borrows) so the event handler can
     /// toggle it; the view reads it by value. Opened by the Heights tool button,
@@ -756,16 +767,25 @@ impl eframe::App for BerApp {
                                 openings_tool,
                                 opening_fields_prompt,
                                 opening_dim_error,
+                                existing_window_types,
                                 elevation_view,
                                 roof_window_selected,
                                 delete_confirm_pending,
                             ) = {
                                 let c = self.app_controller.borrow();
+                                let prompt = c.opening_fields_prompt();
+                                // The window-type picker list is only needed while a
+                                // placement that offers it is in flight.
+                                let existing_types = match &prompt {
+                                    Some(p) if p.offer_window_type => c.existing_window_types(),
+                                    _ => Vec::new(),
+                                };
                                 (
                                     c.openings_mode(),
                                     c.openings_tool(),
-                                    c.opening_fields_prompt(),
+                                    prompt,
                                     c.opening_dim_error().map(str::to_owned),
+                                    existing_types,
                                     c.elevation_view(),
                                     c.roof_window_selection(),
                                     c.delete_confirm_pending(),
@@ -1070,6 +1090,12 @@ impl eframe::App for BerApp {
                                     .sidelight_right_has_sill,
                                 transom_input: &mut self.sketch_state.transom_input,
                                 transom_semicircular: &mut self.sketch_state.transom_semicircular,
+                                wt_existing_id: &mut self.sketch_state.wt_existing_id,
+                                wt_glazing: &mut self.sketch_state.wt_glazing,
+                                wt_frame: &mut self.sketch_state.wt_frame,
+                                wt_year_input: &mut self.sketch_state.wt_year_input,
+                                wt_certified: &mut self.sketch_state.wt_certified,
+                                existing_window_types,
                                 elevation_view,
                                 roof_window_selected,
                                 delete_confirm_pending,
@@ -1622,6 +1648,7 @@ impl eframe::App for BerApp {
                                         right_sill,
                                         transom,
                                         transom_semicircular,
+                                        window_type,
                                     } => {
                                         let _ = controller.borrow_mut().place_opening(
                                             width_m,
@@ -1632,10 +1659,13 @@ impl eframe::App for BerApp {
                                             right_sill,
                                             transom,
                                             transom_semicircular,
+                                            window_type,
                                         );
                                     }
-                                    SketchEvent::FillOpeningSurface => {
-                                        let _ = controller.borrow_mut().fill_opening_surface();
+                                    SketchEvent::FillOpeningSurface { window_type } => {
+                                        let _ = controller
+                                            .borrow_mut()
+                                            .fill_opening_surface(window_type);
                                     }
                                     SketchEvent::CancelOpeningPlacement => {
                                         controller.borrow_mut().cancel_opening_placement();

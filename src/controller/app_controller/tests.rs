@@ -8721,8 +8721,18 @@ fn multi_field_window_places_with_default_sill() {
     assert_eq!(p.fields.len(), 2, "width + height only (no sill)");
     assert!(p.fields.iter().all(|f| f.required));
     // Width + height entered together; sill is NOT supplied (defaults to 1 m).
-    c.place_opening(1.0, 1.2, None, None, None, None, None, false)
-        .expect("window places");
+    c.place_opening(
+        1.0,
+        1.2,
+        None,
+        None,
+        None,
+        None,
+        None,
+        false,
+        WindowTypeChoice::default(),
+    )
+    .expect("window places");
     assert!(c.opening_fields_prompt().is_none(), "placement finished");
     c.materialize();
     let ber = &c.current_record.as_ref().unwrap().data;
@@ -8745,6 +8755,92 @@ fn multi_field_window_places_with_default_sill() {
     assert!(c.current_record.as_ref().unwrap().data.storeys[0]
         .windows
         .is_empty());
+}
+
+/// The window-type picker shares a single shared `WindowType` across windows of
+/// the same (glazing, frame, year, certified) — and only mints a new type when
+/// they differ. Mirrors the "assign to existing / only add if different" rule.
+#[test]
+fn window_type_picker_reuses_existing_and_adds_only_when_different() {
+    use ber_model::ber::fenestration::{Frame, Glazing};
+
+    let mut c = dimensioned_square_controller();
+    c.materialize();
+
+    // Helper: stage a placement on the south wall and place with a given choice.
+    let place = |c: &mut AppController, choice: WindowTypeChoice| {
+        c.select_opening_tool(OpeningToolKind::Window);
+        c.openings_pointer_down(5.0, -0.2, 0.5);
+        c.place_opening(1.0, 1.2, None, None, None, None, None, false, choice)
+            .expect("window places");
+        c.materialize();
+    };
+
+    // 1) First NEW double / Wood-UPVC / 2010 / uncertified type.
+    place(
+        &mut c,
+        WindowTypeChoice::New {
+            glazing: Glazing::Double,
+            frame: Frame::WoodUPVC,
+            year: 2010,
+            certified: false,
+        },
+    );
+    assert_eq!(
+        c.current_record.as_ref().unwrap().data.window_types.len(),
+        1,
+        "first type registered"
+    );
+
+    // 2) An IDENTICAL New choice joins the same type — no new type added.
+    place(
+        &mut c,
+        WindowTypeChoice::New {
+            glazing: Glazing::Double,
+            frame: Frame::WoodUPVC,
+            year: 2010,
+            certified: false,
+        },
+    );
+    let ber = &c.current_record.as_ref().unwrap().data;
+    assert_eq!(ber.window_types.len(), 1, "identical attrs reuse the type");
+    assert_eq!(
+        ber.storeys[0].windows[0].window_type_id, ber.storeys[0].windows[1].window_type_id,
+        "both windows share one type id"
+    );
+
+    // 3) Same attrs but CERTIFIED → a distinct type (cert is part of identity).
+    place(
+        &mut c,
+        WindowTypeChoice::New {
+            glazing: Glazing::Double,
+            frame: Frame::WoodUPVC,
+            year: 2010,
+            certified: true,
+        },
+    );
+    assert_eq!(
+        c.current_record.as_ref().unwrap().data.window_types.len(),
+        2,
+        "certified variant is a new type"
+    );
+
+    // 4) Existing types surface for the picker; reusing one by id adds none.
+    let existing = c.existing_window_types();
+    assert_eq!(existing.len(), 2, "two types in use are offered");
+    let reuse_id = existing[0].id;
+    place(&mut c, WindowTypeChoice::Existing(reuse_id));
+    let ber = &c.current_record.as_ref().unwrap().data;
+    assert_eq!(
+        ber.window_types.len(),
+        2,
+        "reusing an existing adds no type"
+    );
+    assert_eq!(
+        ber.storeys[0].windows.last().unwrap().window_type_id,
+        reuse_id,
+        "the placed window joined the picked existing type"
+    );
 }
 
 /// A placed window survives save + reload: the placement is durable, and the

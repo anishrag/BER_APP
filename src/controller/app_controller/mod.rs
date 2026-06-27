@@ -99,8 +99,8 @@ pub use new_storey::NewStoreyPromptUiData;
 use new_storey::{NewStoreyStage, PendingNewStorey};
 use openings::PendingOpening;
 pub use openings::{
-    ElevationView, OpeningFieldSpec, OpeningFieldsPrompt, OpeningPromptUiData, OpeningToolKind,
-    OpeningViewKind,
+    ElevationView, ExistingWindowType, OpeningFieldSpec, OpeningFieldsPrompt, OpeningPromptUiData,
+    OpeningToolKind, OpeningViewKind, WindowTypeChoice,
 };
 use partition::PendingCut;
 pub use partition::{

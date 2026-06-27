@@ -35,6 +35,13 @@ pub struct WindowType {
     pub glazing: Glazing,
     pub gap: Vec<u32>, // gap in mm for double/triple glazing
     pub frame: Frame,
+    /// Whether this window has a CERTIFIED U-/g-value (manufacturer / NSAI cert)
+    /// versus an uncertified type that falls back to DEAP default table values.
+    /// Part of the type identity, so a certified and an uncertified window of the
+    /// same glazing/frame/year are distinct types. `#[serde(default)]` → `false`
+    /// (uncertified) on records written before the field existed.
+    #[serde(default)]
+    pub certified: bool,
     pub specifics: WindowNameSpecifics,
     pub photos: Vec<Photo>,
     pub notes: Option<String>,
