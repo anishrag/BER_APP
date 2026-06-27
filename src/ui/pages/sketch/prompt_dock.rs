@@ -497,13 +497,11 @@ pub(super) fn has_deletables(view: &SketchView<'_>) -> bool {
 /// (construction-year areas, floor steps, ceiling steps, roof points), grouped
 /// into clearly-labelled SECTIONS. These deletes used to clutter each tool's
 /// floating control box; they live here instead so the control boxes stay
-/// input-only. FIXED at the canvas bottom-left (just above the instruction bar),
-/// a collapsing "🗑 Delete" header that expands UPWARD — the left-side mirror of
-/// the bottom-right "Add external pictures" button. Renders nothing when there's
-/// nothing to delete.
+/// input-only. FIXED at the very bottom-left of the WINDOW — the same level as
+/// the workspace "Continue →" bar — as a collapsing "🗑 Delete" header that
+/// expands UPWARD. Renders nothing when there's nothing to delete.
 pub(super) fn render_delete_panel<F: FnMut(UiEvent)>(
     ctx: &egui::Context,
-    rect: egui::Rect,
     view: &SketchView<'_>,
     on_event: &mut F,
 ) {
@@ -515,12 +513,13 @@ pub(super) fn render_delete_panel<F: FnMut(UiEvent)>(
         ui.add_space(2.0);
         ui.label(egui::RichText::new(title).strong().size(13.0));
     }
-    // Bottom-left pivot → the panel grows UP into the canvas as the header
-    // expands (mirror of the bottom-right external-photos button).
+    // Anchor to the WINDOW bottom-left (over the workspace Continue bar's empty
+    // left side), bottom pivot → the list grows UP as the header expands.
+    let bl = ctx.content_rect().left_bottom();
     egui::Area::new(egui::Id::new("sketch_delete_panel"))
         .order(egui::Order::Foreground)
         .pivot(egui::Align2::LEFT_BOTTOM)
-        .fixed_pos(rect.left_bottom() + egui::vec2(8.0, -8.0))
+        .fixed_pos(bl + egui::vec2(8.0, -6.0))
         .show(ctx, |ui| {
             egui::Frame::popup(ui.style()).show(ui, |ui| {
                 egui::CollapsingHeader::new("🗑 Delete")
