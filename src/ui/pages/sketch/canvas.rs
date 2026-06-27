@@ -2397,32 +2397,7 @@ fn elevation_overlay<F: FnMut(UiEvent)>(
         let tp = b + o.height_m as f64;
         let (fill, stroke) = elevation_colors(o.kind, o.selected);
         let sw = if o.selected { 2.5 } else { 1.5 };
-        if o.arched {
-            // Flat bottom (BL → BR) then a half-ellipse arch back to BL.
-            let (centre, half, rise) = (o.along_m as f64, (r - l) / 2.0, tp - b);
-            let mut pts = vec![p(l, b), p(r, b)];
-            const N: usize = 16;
-            for i in 1..N {
-                let th = std::f64::consts::PI * (i as f64) / (N as f64);
-                pts.push(p(centre + half * th.cos(), b + rise * th.sin()));
-            }
-            painter.add(egui::Shape::convex_polygon(
-                pts.clone(),
-                fill,
-                egui::Stroke::NONE,
-            ));
-            for w in pts.windows(2) {
-                line(w[0], w[1], sw, stroke);
-            }
-            line(pts[pts.len() - 1], pts[0], sw, stroke);
-        } else {
-            let ro = egui::Rect::from_two_pos(p(l, b), p(r, tp));
-            painter.rect_filled(ro, 1.0, fill);
-            line(ro.left_top(), ro.right_top(), sw, stroke);
-            line(ro.right_top(), ro.right_bottom(), sw, stroke);
-            line(ro.right_bottom(), ro.left_bottom(), sw, stroke);
-            line(ro.left_bottom(), ro.left_top(), sw, stroke);
-        }
+        draw_elevation_opening(&painter, &p, l, r, b, tp, o.arched, fill, stroke, sw);
     }
     painter.text(
         rect.left_top() + egui::vec2(8.0, 8.0),
@@ -2469,6 +2444,54 @@ fn elevation_overlay<F: FnMut(UiEvent)>(
 
 /// Fill + border colour for an opening rectangle in the elevation (glass blue /
 /// door brown; brighter + white-bordered when selected).
+/// Draw one opening in an elevation — a filled rectangle, or a half-ellipse
+/// (flat bottom + arched top) for a semicircular transom — given its bounds in
+/// the elevation `(x, z)` frame and a mapping `p(x, z) → screen`. Shared by BOTH
+/// the edit-on-surface elevation and the Mapping review elevation so an arched
+/// window looks the same wherever it's drawn.
+#[allow(clippy::too_many_arguments)]
+fn draw_elevation_opening(
+    painter: &egui::Painter,
+    p: &impl Fn(f64, f64) -> egui::Pos2,
+    l: f64,
+    r: f64,
+    b: f64,
+    tp: f64,
+    arched: bool,
+    fill: egui::Color32,
+    stroke: egui::Color32,
+    sw: f32,
+) {
+    let line =
+        |a: egui::Pos2, c: egui::Pos2| painter.line_segment([a, c], egui::Stroke::new(sw, stroke));
+    if arched {
+        // Flat bottom (BL → BR) then a half-ellipse arch back over to BL.
+        let (centre, half, rise) = ((l + r) / 2.0, (r - l) / 2.0, tp - b);
+        let mut pts = vec![p(l, b), p(r, b)];
+        const N: usize = 16;
+        for i in 1..N {
+            let th = std::f64::consts::PI * (i as f64) / (N as f64);
+            pts.push(p(centre + half * th.cos(), b + rise * th.sin()));
+        }
+        painter.add(egui::Shape::convex_polygon(
+            pts.clone(),
+            fill,
+            egui::Stroke::NONE,
+        ));
+        for w in pts.windows(2) {
+            line(w[0], w[1]);
+        }
+        line(pts[pts.len() - 1], pts[0]);
+    } else {
+        let ro = egui::Rect::from_two_pos(p(l, b), p(r, tp));
+        painter.rect_filled(ro, 1.0, fill);
+        line(ro.left_top(), ro.right_top());
+        line(ro.right_top(), ro.right_bottom());
+        line(ro.right_bottom(), ro.left_bottom());
+        line(ro.left_bottom(), ro.left_top());
+    }
+}
+
 fn elevation_colors(
     kind: crate::controller::app_controller::OpeningViewKind,
     selected: bool,
@@ -2643,7 +2666,7 @@ fn mapping_review_overlay<F: FnMut(UiEvent)>(
     for o in &elev.openings {
         let l = o.x_center - o.width_m / 2.0;
         let r = o.x_center + o.width_m / 2.0;
-        let ro = egui::Rect::from_two_pos(p(l, o.sill_z), p(r, o.sill_z + o.height_m));
+        let (b, tp) = (o.sill_z, o.sill_z + o.height_m);
         let selected = rv.selection == Some(o.opening);
         let base = if o.is_door {
             egui::Color32::from_rgb(180, 130, 80)
@@ -2651,20 +2674,13 @@ fn mapping_review_overlay<F: FnMut(UiEvent)>(
             egui::Color32::from_rgb(90, 160, 220)
         };
         let a = if selected { 130 } else { 70 };
-        painter.rect_filled(
-            ro,
-            1.0,
-            egui::Color32::from_rgba_unmultiplied(base.r(), base.g(), base.b(), a),
-        );
+        let fill = egui::Color32::from_rgba_unmultiplied(base.r(), base.g(), base.b(), a);
         let (sw, sc) = if selected {
             (2.5, egui::Color32::WHITE)
         } else {
             (1.5, base)
         };
-        line(ro.left_top(), ro.right_top(), sw, sc);
-        line(ro.right_top(), ro.right_bottom(), sw, sc);
-        line(ro.right_bottom(), ro.left_bottom(), sw, sc);
-        line(ro.left_bottom(), ro.left_top(), sw, sc);
+        draw_elevation_opening(&painter, &p, l, r, b, tp, o.arched, fill, sc, sw);
     }
 
     // Input: drag openings within the elevation sub-rect → composite (x, z).

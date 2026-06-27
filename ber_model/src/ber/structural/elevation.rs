@@ -49,6 +49,9 @@ pub struct ElevOpening {
     pub wall_id: ItemId,
     pub opening: OpeningRef,
     pub is_door: bool,
+    /// The window is arched (a half-ellipse fanlight) — drawn as an arch, not a
+    /// rectangle. Always `false` for doors.
+    pub arched: bool,
     /// Composite x of the opening's CENTRE.
     pub x_center: f64,
     pub width_m: f64,
@@ -200,6 +203,7 @@ impl Ber {
                         wall_id: w.id,
                         opening: op.opening,
                         is_door: op.is_door,
+                        arched: op.arched,
                         x_center: h.0 * px + h.1 * py,
                         width_m: op.width_m as f64,
                         sill_z: bz + op.sill_m as f64,
