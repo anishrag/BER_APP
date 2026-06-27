@@ -18,7 +18,7 @@ use ber_model::ber::structural::{
     CeilingConstructionType, CeilingExposure, ConstructionMakeup, ConstructionType,
     FloorConstructionType, FloorExposure, Storey, SurfaceExposure, WallExposure,
 };
-use domain::points::Point2f32;
+use domain::points::{Point2f32, Point2f64};
 
 /// One attribute-GROUP in the exploded "Edit attributes" session: the selected
 /// surfaces that currently share a construction, plus the `(type, make-up)` the
@@ -94,8 +94,12 @@ impl AppController {
         let Some(idx) = self.current_storey_idx else {
             return;
         };
-        // Map each resolved wall id → its parametric SurfaceRef (base midpoint).
-        let refs: Vec<manip_plan::SurfaceRef> = {
+        // Map each resolved wall id to its durable key: a perimeter wall by its
+        // parametric SurfaceRef (base midpoint), a RISER (interior step face, no
+        // perimeter ref) by its quantized base edge — mirroring riser exposure, so
+        // step-face constructions survive the re-derivation too.
+        #[allow(clippy::type_complexity)]
+        let (refs, riser_keys): (Vec<manip_plan::SurfaceRef>, Vec<document::RiserKey>) = {
             let Some(record) = self.current_record.as_ref() else {
                 return;
             };
@@ -103,24 +107,40 @@ impl AppController {
                 return;
             };
             let plan = &self.document.storeys[idx].outline.floor_plan;
-            ids.iter()
+            let mut refs = Vec::new();
+            let mut risers = Vec::new();
+            for r in ids
+                .iter()
                 .filter_map(|id| storey.walls.regions.iter().find(|r| r.id == *id))
-                .filter_map(|r| {
-                    let (e0, e1) = r.base_edge()?;
-                    let mid =
-                        Point2f32::new(((e0.x + e1.x) * 0.5) as f32, ((e0.y + e1.y) * 0.5) as f32);
-                    plan.surface_ref_at(mid, 0.05)
-                })
-                .collect()
+            {
+                let Some((e0, e1)) = r.base_edge() else {
+                    continue;
+                };
+                let mid =
+                    Point2f32::new(((e0.x + e1.x) * 0.5) as f32, ((e0.y + e1.y) * 0.5) as f32);
+                if let Some(sref) = plan.surface_ref_at(mid, 0.05) {
+                    refs.push(sref);
+                } else {
+                    risers.push(document::riser_key(
+                        Point2f64::new(e0.x, e0.y),
+                        Point2f64::new(e1.x, e1.y),
+                    ));
+                }
+            }
+            (refs, risers)
         };
-        if refs.is_empty() {
+        if refs.is_empty() && riser_keys.is_empty() {
             return;
         }
         self.record_history();
+        let sd = &mut self.document.storeys[idx];
         for r in refs {
-            self.document.storeys[idx]
-                .wall_constructions
+            sd.wall_constructions
                 .insert(r, (ty, makeup.clone(), phase.clone()));
+        }
+        for k in riser_keys {
+            sd.riser_constructions
+                .insert(k, (ty, makeup.clone(), phase.clone()));
         }
         let _ = self.mark_dirty();
     }

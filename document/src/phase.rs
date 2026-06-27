@@ -255,31 +255,30 @@ pub fn stamp_ceiling_phases(ber: &mut Ber, idx: usize) {
 /// makes a user-set wall construction survive the re-derivation: its durable
 /// home is the parametric `SurfaceRef` key, not the resolved wall id.
 pub fn stamp_wall_constructions(ber: &mut Ber, idx: usize, doc: &crate::StoreyDoc) {
-    if ber.storeys.len() <= idx || doc.wall_constructions.is_empty() {
+    if ber.storeys.len() <= idx
+        || (doc.wall_constructions.is_empty() && doc.riser_constructions.is_empty())
+    {
         return;
     }
+    use domain::points::{Point2f32, Point2f64};
     const TOL_M: f32 = 0.05;
     let plan = &doc.outline.floor_plan;
     let n = ber.storeys[idx].walls.regions.len();
     for i in 0..n {
-        // The wall's perimeter SurfaceRef (by base midpoint).
-        let sref = {
-            let r = &ber.storeys[idx].walls.regions[i];
-            let Some((e0, e1)) = r.base_edge() else {
-                continue;
-            };
-            let mid = domain::points::Point2f32::new(
-                ((e0.x + e1.x) * 0.5) as f32,
-                ((e0.y + e1.y) * 0.5) as f32,
-            );
-            let Some(sref) = plan.surface_ref_at(mid, TOL_M) else {
-                continue; // riser / non-perimeter — no parametric wall key
-            };
-            sref
+        let Some((e0, e1)) = ber.storeys[idx].walls.regions[i].base_edge() else {
+            continue;
         };
-        // The stored entry carries its own phase (editable; defaulted to the
-        // derived one), so compose with THAT rather than the derived phase.
-        if let Some((ty, makeup, phase)) = doc.wall_constructions.get(&sref) {
+        let mid = Point2f32::new(((e0.x + e1.x) * 0.5) as f32, ((e0.y + e1.y) * 0.5) as f32);
+        // A perimeter wall is keyed by its parametric SurfaceRef; a RISER (interior
+        // step face, no perimeter ref) by its quantized base edge — mirroring
+        // riser exposure. The stored entry carries its own (editable) phase.
+        let assigned = if let Some(sref) = plan.surface_ref_at(mid, TOL_M) {
+            doc.wall_constructions.get(&sref)
+        } else {
+            let key = crate::riser_key(Point2f64::new(e0.x, e0.y), Point2f64::new(e1.x, e1.y));
+            doc.riser_constructions.get(&key)
+        };
+        if let Some((ty, makeup, phase)) = assigned {
             let cid = ber.ensure_wall_construction(*ty, makeup.clone(), phase.clone());
             ber.storeys[idx].walls.regions[i].construction_id = cid;
         }

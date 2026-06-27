@@ -342,6 +342,22 @@ pub struct StoreyDoc {
     pub wall_constructions:
         HashMap<SurfaceRef, (WallConstructionType, ConstructionMakeup, ConstructionPhase)>,
 
+    /// Assigned wall CONSTRUCTION of derived RISER (interior step-face) walls,
+    /// keyed by the riser's quantized base edge ([`riser_key`]) — the construction
+    /// analogue of [`riser_exposure`](Self::riser_exposure). Risers have no
+    /// perimeter `SurfaceRef`, so this geometric key is their durable construction
+    /// home; resolve stamps it via
+    /// [`stamp_wall_constructions`](crate::stamp_wall_constructions). Single-homed
+    /// on Layer 1 (seeded from the resolved risers on load), kept out of the
+    /// snapshot.
+    #[serde(
+        default,
+        skip_serializing,
+        deserialize_with = "tuple_key_map::deserialize"
+    )]
+    pub riser_constructions:
+        HashMap<RiserKey, (WallConstructionType, ConstructionMakeup, ConstructionPhase)>,
+
     /// Assigned FLOOR construction (type + make-up) per floor region, keyed by
     /// the region's plan [`CentroidKey`] (floors have no perimeter `SurfaceRef`,
     /// so their quantized centroid is the durable identity — like a riser's base

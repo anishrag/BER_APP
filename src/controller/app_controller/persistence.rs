@@ -458,12 +458,11 @@ impl AppController {
             .unwrap_or(0)
             .min(self.document.storeys.len());
         for idx in 0..n {
+            type WallEntry = (WallConstructionType, ConstructionMakeup, ConstructionPhase);
             #[allow(clippy::type_complexity)]
-            let (walls, floors, ceilings): (
-                Vec<(
-                    manip_plan::SurfaceRef,
-                    (WallConstructionType, ConstructionMakeup, ConstructionPhase),
-                )>,
+            let (walls, risers, floors, ceilings): (
+                Vec<(manip_plan::SurfaceRef, WallEntry)>,
+                Vec<(document::RiserKey, WallEntry)>,
                 Vec<(
                     document::CentroidKey,
                     (FloorConstructionType, ConstructionMakeup, ConstructionPhase),
@@ -483,32 +482,39 @@ impl AppController {
                 let Some(storey) = record.data.storeys.get(idx) else {
                     continue;
                 };
-                // Map each resolved wall's base midpoint back to its parametric
-                // SurfaceRef (perimeter walls only — risers return None).
+                // Map each resolved wall's base midpoint back to its durable key —
+                // a perimeter SurfaceRef, or (for a riser) its quantized base edge.
                 let plan = &self.document.storeys[idx].outline.floor_plan;
-                let walls = storey
-                    .walls
-                    .regions
-                    .iter()
-                    .filter_map(|r| {
-                        let c = record.data.wall_construction(r.construction_id)?;
-                        let ty = c.construction_type;
-                        let mk = c.base.construction_makeup.clone();
-                        let ph = c.base.construction_phase.clone();
-                        if ty == WallConstructionType::default()
-                            && mk == ConstructionMakeup::default()
-                        {
-                            return None;
-                        }
-                        let (e0, e1) = r.base_edge()?;
-                        let mid = domain::points::Point2f32::new(
-                            ((e0.x + e1.x) * 0.5) as f32,
-                            ((e0.y + e1.y) * 0.5) as f32,
+                let mut walls = Vec::new();
+                let mut risers = Vec::new();
+                for r in &storey.walls.regions {
+                    let Some(c) = record.data.wall_construction(r.construction_id) else {
+                        continue;
+                    };
+                    let ty = c.construction_type;
+                    let mk = c.base.construction_makeup.clone();
+                    let ph = c.base.construction_phase.clone();
+                    if ty == WallConstructionType::default() && mk == ConstructionMakeup::default()
+                    {
+                        continue;
+                    }
+                    let Some((e0, e1)) = r.base_edge() else {
+                        continue;
+                    };
+                    let mid = domain::points::Point2f32::new(
+                        ((e0.x + e1.x) * 0.5) as f32,
+                        ((e0.y + e1.y) * 0.5) as f32,
+                    );
+                    if let Some(sref) = plan.surface_ref_at(mid, 0.05) {
+                        walls.push((sref, (ty, mk, ph)));
+                    } else {
+                        let key = document::riser_key(
+                            domain::points::Point2f64::new(e0.x, e0.y),
+                            domain::points::Point2f64::new(e1.x, e1.y),
                         );
-                        let sref = plan.surface_ref_at(mid, 0.05)?;
-                        Some((sref, (ty, mk, ph)))
-                    })
-                    .collect();
+                        risers.push((key, (ty, mk, ph)));
+                    }
+                }
                 let floors = storey
                     .floors
                     .regions
@@ -537,11 +543,14 @@ impl AppController {
                         .then(|| (document::centroid_key(r.centroid()), (ty, mk, ph)))
                     })
                     .collect();
-                (walls, floors, ceilings)
+                (walls, risers, floors, ceilings)
             };
             let sd = &mut self.document.storeys[idx];
             for (k, v) in walls {
                 sd.wall_constructions.entry(k).or_insert(v);
+            }
+            for (k, v) in risers {
+                sd.riser_constructions.entry(k).or_insert(v);
             }
             for (k, v) in floors {
                 sd.floor_constructions.entry(k).or_insert(v);

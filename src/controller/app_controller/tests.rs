@@ -7744,6 +7744,66 @@ fn users_l_session_raised_section_wall_tops_follow_the_step() {
     );
 }
 
+/// Structure phase: assigning a wall construction to a RISER (interior step face)
+/// must stick — risers have no perimeter SurfaceRef, so they're keyed by their
+/// base edge like riser exposure. Regression: previously the assign + stamp
+/// silently skipped risers, so "Walls" never went green when a step existed.
+#[test]
+fn riser_walls_receive_and_keep_a_structure_construction() {
+    use ber_model::ber::structural::{ConstructionMakeup, SurfaceKind, WallConstructionType};
+    let (mut c, [_min_x, max_x, _min_y, max_y, inner_x, inner_y]) = users_l_session_controller();
+    apply_users_ceiling_step(&mut c, inner_x, inner_y, max_x, max_y);
+    // Drop the jut's floor too → a floor-step riser as well as the ceiling one.
+    let p = |x: f32, y: f32| Point2f32::new(x, y);
+    c.step_regions.entry(0).or_default().push(StepRegion {
+        polygon: vec![
+            p(inner_x, inner_y),
+            p(max_x, inner_y),
+            p(max_x, max_y),
+            p(inner_x, max_y),
+        ],
+        level_m: -0.3,
+    });
+    c.commit_to_ber().unwrap();
+
+    // Assign Timber + Default to EVERY wall, including the two interior risers.
+    let ids: Vec<_> = c.current_record.as_ref().unwrap().data.storeys[0]
+        .walls
+        .regions
+        .iter()
+        .map(|r| r.id)
+        .collect();
+    c.set_wall_construction_for(
+        &ids,
+        WallConstructionType::TimberConstruction,
+        ConstructionMakeup::Default,
+        ConstructionPhase::default(),
+    );
+    c.commit_to_ber().unwrap();
+
+    // Now every wall — risers included — carries a complete construction, so the
+    // Structure "Walls" row is done. Previously the risers stayed incomplete.
+    let ber = &c.current_record.as_ref().unwrap().data;
+    assert!(
+        ber.structure_surfaces_complete(0, SurfaceKind::Walls),
+        "all walls incl. risers complete: {}",
+        document::debug_dump_storey(&ber.storeys[0], "riser-construction")
+    );
+
+    // And it survives persist → reload → re-derive (riser key seeded from record).
+    let id = c.current_record.as_ref().unwrap().id;
+    c.open_ber(&id).unwrap();
+    c.commit_to_ber().unwrap();
+    assert!(
+        c.current_record
+            .as_ref()
+            .unwrap()
+            .data
+            .structure_surfaces_complete(0, SurfaceKind::Walls),
+        "riser construction survives reload"
+    );
+}
+
 /// The END-OF-SESSION ridge from the live report, under the Length-first
 /// order: a near-vertical ridge stroke at x ≈ 3.73–3.78 (y 1.66 → 2.67)
 /// over the RAISED jut (its ceiling piece runs 2.0 m, inner_y → max_y, at
