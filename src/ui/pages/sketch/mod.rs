@@ -910,11 +910,14 @@ pub struct SketchView<'a> {
     pub opening_width_input: &'a mut String,
     pub opening_height_input: &'a mut String,
     /// Door+sidelights composer inputs (optional left/right sidelight + per-side
-    /// sill + transom height + the semicircular-transom toggle).
+    /// sill + transom height + the semicircular-transom toggle). A sidelight's
+    /// sill field is active only when its `*_has_sill` toggle is on.
     pub sidelight_left_input: &'a mut String,
     pub sidelight_left_sill_input: &'a mut String,
+    pub sidelight_left_has_sill: &'a mut bool,
     pub sidelight_right_input: &'a mut String,
     pub sidelight_right_sill_input: &'a mut String,
+    pub sidelight_right_has_sill: &'a mut bool,
     pub transom_input: &'a mut String,
     pub transom_semicircular: &'a mut bool,
     /// The open per-wall ELEVATION overlay, if any (the unrolled wall + its

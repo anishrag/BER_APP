@@ -154,11 +154,20 @@ pub(super) fn render<F: FnMut(UiEvent)>(
                 d.insert_temp(seq_id, prompt.seq);
                 d.insert_temp(Id::new(FOCUS_MEM), 0usize);
             });
+            // A new placement starts with the door+sidelights toggles cleared.
+            *view.sidelight_left_has_sill = false;
+            *view.sidelight_right_has_sill = false;
+            *view.transom_semicircular = false;
         }
-        // The semicircular toggle is captured into the Place event by value (the
-        // checkbox below mutates it for the NEXT frame; a Place click is always a
-        // separate interaction, so it reads the settled value).
+        // The toggles are captured into the Place event by value (the checkboxes
+        // below mutate them for the NEXT frame; a Place click is always a separate
+        // interaction, so it reads the settled values). A sidelight sill only
+        // counts when its box is ticked.
         let semicircular = *view.transom_semicircular;
+        let (left_has_sill, right_has_sill) = (
+            *view.sidelight_left_has_sill,
+            *view.sidelight_right_has_sill,
+        );
         let mut actions = vec![Action::new_multi("Place", "Place this opening", move |vs| {
             // Field order (the controller's contract): door W, door H, left W,
             // left sill, right W, right sill, transom H.
@@ -167,9 +176,9 @@ pub(super) fn render<F: FnMut(UiEvent)>(
                 width_m: g(0).unwrap_or(0.0),
                 height_m: g(1).unwrap_or(0.0),
                 left: g(2),
-                left_sill: g(3),
+                left_sill: if left_has_sill { g(3) } else { None },
                 right: g(4),
-                right_sill: g(5),
+                right_sill: if right_has_sill { g(5) } else { None },
                 transom: g(6),
                 transom_semicircular: semicircular,
             }
@@ -203,12 +212,14 @@ pub(super) fn render<F: FnMut(UiEvent)>(
                 hint: f[0].hint,
                 buf: &mut *view.opening_width_input,
                 required: f[0].required,
+                enabled: true,
             },
             BoxField {
                 label: &f[1].label,
                 hint: f[1].hint,
                 buf: &mut *view.opening_height_input,
                 required: f[1].required,
+                enabled: true,
             },
         ];
         if f.len() > 2 {
@@ -217,34 +228,49 @@ pub(super) fn render<F: FnMut(UiEvent)>(
                 hint: f[2].hint,
                 buf: &mut *view.sidelight_left_input,
                 required: false,
+                enabled: true,
             });
+            // Left sill — only active when its box is ticked.
             box_fields.push(BoxField {
                 label: &f[3].label,
                 hint: f[3].hint,
                 buf: &mut *view.sidelight_left_sill_input,
                 required: false,
+                enabled: left_has_sill,
             });
             box_fields.push(BoxField {
                 label: &f[4].label,
                 hint: f[4].hint,
                 buf: &mut *view.sidelight_right_input,
                 required: false,
+                enabled: true,
             });
+            // Right sill — only active when its box is ticked.
             box_fields.push(BoxField {
                 label: &f[5].label,
                 hint: f[5].hint,
                 buf: &mut *view.sidelight_right_sill_input,
                 required: false,
+                enabled: right_has_sill,
             });
             box_fields.push(BoxField {
                 label: &f[6].label,
                 hint: f[6].hint,
                 buf: &mut *view.transom_input,
                 required: false,
+                enabled: true,
             });
         }
         let mut checks = Vec::new();
         if prompt.offer_semicircular_transom {
+            checks.push(BoxCheck {
+                label: "left sidelight has a sill",
+                value: &mut *view.sidelight_left_has_sill,
+            });
+            checks.push(BoxCheck {
+                label: "right sidelight has a sill",
+                value: &mut *view.sidelight_right_has_sill,
+            });
             checks.push(BoxCheck {
                 label: "semicircular transom",
                 value: &mut *view.transom_semicircular,
@@ -772,6 +798,10 @@ struct BoxField<'a> {
     /// An action that `needs_value` is enabled only once every REQUIRED field
     /// parses; optional fields (e.g. door+sidelights lights) may stay blank.
     required: bool,
+    /// A disabled field is greyed out and can't take keypad/laser focus (e.g. a
+    /// sidelight sill until its "sill" box is ticked). Always `true` for the
+    /// single-value box.
+    enabled: bool,
 }
 
 /// A boolean toggle shown under the fields (e.g. the door+sidelights
@@ -803,6 +833,7 @@ fn show_box<F: FnMut(UiEvent)>(
         hint,
         buf,
         required: true,
+        enabled: true,
     }];
     show_box_multi(
         ctx,
@@ -874,6 +905,11 @@ fn show_box_multi<F: FnMut(UiEvent)>(
                 .data(|d| d.get_temp::<usize>(focus_id))
                 .unwrap_or(0)
                 .min(fields.len().saturating_sub(1));
+            // Never drive a disabled field — snap to the next enabled one (the
+            // first field is always enabled, so this terminates).
+            if fields.get(focus).is_some_and(|f| !f.enabled) {
+                focus = fields.iter().position(|f| f.enabled).unwrap_or(0);
+            }
 
             // One row per field: optional label + an editable expression box
             // (so a hardware keyboard still works). Tapping a box focuses it.
@@ -883,7 +919,9 @@ fn show_box_multi<F: FnMut(UiEvent)>(
             for (i, f) in fields.iter_mut().enumerate() {
                 ui.horizontal(|ui| {
                     if labelled {
-                        let col = if i == focus {
+                        let col = if !f.enabled {
+                            Color32::from_gray(90)
+                        } else if i == focus {
                             Color32::WHITE
                         } else {
                             Color32::from_gray(150)
@@ -893,7 +931,8 @@ fn show_box_multi<F: FnMut(UiEvent)>(
                             egui::Label::new(RichText::new(f.label).color(col)).selectable(false),
                         );
                     }
-                    let resp = ui.add(
+                    let resp = ui.add_enabled(
+                        f.enabled,
                         egui::TextEdit::singleline(f.buf)
                             .desired_width(KEY * 4.0 + 18.0)
                             .font(egui::TextStyle::Heading)
@@ -985,10 +1024,13 @@ fn show_box_multi<F: FnMut(UiEvent)>(
                     }
                     focus = 0;
                 }
-            } else if laser_advanced && focus + 1 < fields.len() {
-                // Move to the next field and give it the cursor for the next shot.
-                focus += 1;
-                responses[focus].request_focus();
+            } else if laser_advanced {
+                // Move to the next ENABLED field and give it the cursor for the
+                // next shot (skip greyed-out fields like an unticked sill).
+                if let Some(next) = (focus + 1..fields.len()).find(|&i| fields[i].enabled) {
+                    focus = next;
+                    responses[focus].request_focus();
+                }
             }
             ui.ctx().data_mut(|d| d.insert_temp(focus_id, focus));
         });

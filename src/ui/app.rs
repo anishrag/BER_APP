@@ -170,11 +170,14 @@ pub struct SketchState {
     pub opening_width_input: String,
     pub opening_height_input: String,
     /// Door+sidelights composer inputs (sidelight widths + per-side sills +
-    /// transom height + the semicircular-transom toggle).
+    /// transom height + the semicircular-transom toggle). A sidelight's sill
+    /// field is only active when its `*_has_sill` box is ticked.
     pub sidelight_left_input: String,
     pub sidelight_left_sill_input: String,
+    pub sidelight_left_has_sill: bool,
     pub sidelight_right_input: String,
     pub sidelight_right_sill_input: String,
+    pub sidelight_right_has_sill: bool,
     pub transom_input: String,
     pub transom_semicircular: bool,
     /// Whether the floating default-ceiling-height entry box is open. Lives here
@@ -1046,10 +1049,16 @@ impl eframe::App for BerApp {
                                 sidelight_left_sill_input: &mut self
                                     .sketch_state
                                     .sidelight_left_sill_input,
+                                sidelight_left_has_sill: &mut self
+                                    .sketch_state
+                                    .sidelight_left_has_sill,
                                 sidelight_right_input: &mut self.sketch_state.sidelight_right_input,
                                 sidelight_right_sill_input: &mut self
                                     .sketch_state
                                     .sidelight_right_sill_input,
+                                sidelight_right_has_sill: &mut self
+                                    .sketch_state
+                                    .sidelight_right_has_sill,
                                 transom_input: &mut self.sketch_state.transom_input,
                                 transom_semicircular: &mut self.sketch_state.transom_semicircular,
                                 elevation_view,

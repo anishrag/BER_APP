@@ -82,6 +82,8 @@ pub struct ElevationOpening {
     pub width_m: f32,
     pub height_m: f32,
     pub selected: bool,
+    /// Draw it as a half-ellipse arch (a semicircular transom) instead of a rect.
+    pub arched: bool,
 }
 
 /// The unrolled selected wall + its openings, for the elevation overlay.
@@ -808,13 +810,14 @@ impl AppController {
         let openings = self
             .wall_openings(storey, wall_id)
             .into_iter()
-            .map(|(r, kind, along, sill, w, h)| ElevationOpening {
+            .map(|(r, kind, along, sill, w, h, arched)| ElevationOpening {
                 kind,
                 along_m: along,
                 sill_m: sill,
                 width_m: w,
                 height_m: h,
                 selected: self.elevation_selection == Some(r),
+                arched,
             })
             .collect();
         Some(ElevationView {
@@ -962,14 +965,15 @@ impl AppController {
 
     // ── helpers ───────────────────────────────────────────────────────────────
 
-    /// Every wall opening on `wall_id`: `(ref, kind, along, sill, width, height)`.
-    /// The model owns the gather ([`openings::wall_openings`]); the shell only
-    /// maps `is_door` + assembly membership to its own view kind.
+    /// Every wall opening on `wall_id`: `(ref, kind, along, sill, width, height,
+    /// arched)`. The model owns the gather ([`openings::wall_openings`]); the
+    /// shell only maps `is_door` + assembly membership to its own view kind.
+    #[allow(clippy::type_complexity)]
     fn wall_openings(
         &self,
         storey: &Storey,
         wall_id: ItemId,
-    ) -> Vec<(OpeningRef, OpeningViewKind, f32, f32, f32, f32)> {
+    ) -> Vec<(OpeningRef, OpeningViewKind, f32, f32, f32, f32, bool)> {
         openings::wall_openings(storey, wall_id)
             .into_iter()
             .map(|o| {
@@ -979,7 +983,9 @@ impl AppController {
                     (true, false) => OpeningViewKind::Door,
                     (true, true) => OpeningViewKind::DoorPanel,
                 };
-                (o.opening, kind, o.along_m, o.sill_m, o.width_m, o.height_m)
+                (
+                    o.opening, kind, o.along_m, o.sill_m, o.width_m, o.height_m, o.arched,
+                )
             })
             .collect()
     }

@@ -56,6 +56,9 @@ pub struct WallOpening {
     pub sill_m: f32,
     pub width_m: f32,
     pub height_m: f32,
+    /// The window is arched (a half-ellipse fanlight) — the elevation draws it as
+    /// an arch, not a rectangle. Always `false` for doors.
+    pub arched: bool,
 }
 
 /// Every opening placed on wall `wall_id` (windows then doors, placement order),
@@ -79,6 +82,7 @@ pub fn wall_openings(storey: &Storey, wall_id: ItemId) -> Vec<WallOpening> {
                     sill_m: *sill_m,
                     width_m: w.width_m,
                     height_m: w.height_m,
+                    arched: w.arched,
                 });
             }
         }
@@ -99,6 +103,7 @@ pub fn wall_openings(storey: &Storey, wall_id: ItemId) -> Vec<WallOpening> {
                     sill_m: *sill_m,
                     width_m: d.width_m,
                     height_m: d.height_m,
+                    arched: false,
                 });
             }
         }

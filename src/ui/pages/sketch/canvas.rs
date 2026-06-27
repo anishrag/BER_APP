@@ -2388,20 +2388,41 @@ fn elevation_overlay<F: FnMut(UiEvent)>(
         line(p(len, base), p(len, top_max), 2.0, wall_col);
         line(p(0.0, top_max), p(len, top_max), 2.0, wall_col);
     }
-    // Openings as filled rectangles with a (heavier when selected) border.
+    // Openings as filled shapes with a (heavier when selected) border — a
+    // rectangle, or a half-ellipse arch for a semicircular transom.
     for o in &elev.openings {
         let l = (o.along_m - o.width_m / 2.0) as f64;
         let r = (o.along_m + o.width_m / 2.0) as f64;
         let b = base + o.sill_m as f64;
         let tp = b + o.height_m as f64;
-        let ro = egui::Rect::from_two_pos(p(l, b), p(r, tp));
         let (fill, stroke) = elevation_colors(o.kind, o.selected);
-        painter.rect_filled(ro, 1.0, fill);
         let sw = if o.selected { 2.5 } else { 1.5 };
-        line(ro.left_top(), ro.right_top(), sw, stroke);
-        line(ro.right_top(), ro.right_bottom(), sw, stroke);
-        line(ro.right_bottom(), ro.left_bottom(), sw, stroke);
-        line(ro.left_bottom(), ro.left_top(), sw, stroke);
+        if o.arched {
+            // Flat bottom (BL → BR) then a half-ellipse arch back to BL.
+            let (centre, half, rise) = (o.along_m as f64, (r - l) / 2.0, tp - b);
+            let mut pts = vec![p(l, b), p(r, b)];
+            const N: usize = 16;
+            for i in 1..N {
+                let th = std::f64::consts::PI * (i as f64) / (N as f64);
+                pts.push(p(centre + half * th.cos(), b + rise * th.sin()));
+            }
+            painter.add(egui::Shape::convex_polygon(
+                pts.clone(),
+                fill,
+                egui::Stroke::NONE,
+            ));
+            for w in pts.windows(2) {
+                line(w[0], w[1], sw, stroke);
+            }
+            line(pts[pts.len() - 1], pts[0], sw, stroke);
+        } else {
+            let ro = egui::Rect::from_two_pos(p(l, b), p(r, tp));
+            painter.rect_filled(ro, 1.0, fill);
+            line(ro.left_top(), ro.right_top(), sw, stroke);
+            line(ro.right_top(), ro.right_bottom(), sw, stroke);
+            line(ro.right_bottom(), ro.left_bottom(), sw, stroke);
+            line(ro.left_bottom(), ro.left_top(), sw, stroke);
+        }
     }
     painter.text(
         rect.left_top() + egui::vec2(8.0, 8.0),
