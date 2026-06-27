@@ -338,12 +338,11 @@ pub(super) fn render<F: FnMut(UiEvent)>(
             // Overshading is per-WINDOW (not per type), so it shows for every
             // window placement regardless of the type choice above.
             overshading_picker(ui, &mut *view.overshading);
-            // Photos belong to the GROUP (window type). They're collected only
-            // when defining a NEW group (an existing group already has its own);
-            // at least one is required there.
-            if view.wt_existing_id.is_none() {
-                window_photo_picker(ui, &mut *view.pending_window_photos);
-            }
+            // Photos belong to the GROUP (window type). At least one is REQUIRED
+            // when defining a new group; for an existing group adding more is
+            // optional (it already has its own).
+            let photo_required = view.wt_existing_id.is_none();
+            window_photo_picker(ui, &mut *view.pending_window_photos, photo_required);
         };
         // A NEW window type (group) must be named AND have at least one photo —
         // both belong to the group, required only when creating it. Reusing an
@@ -968,11 +967,12 @@ fn overshading_picker(ui: &mut egui::Ui, overshading: &mut Overshading) {
     });
 }
 
-/// Photo control for a NEW window-type group in the placement box: thumbnails of
-/// the photos picked so far plus an "add photo" button (file dialog on desktop,
-/// camera on Android). The paths are attached to the window type on Place; at
-/// least one is required for a new group.
-fn window_photo_picker(ui: &mut egui::Ui, pending: &mut Vec<std::path::PathBuf>) {
+/// Photo control for a window-type group in the placement box: thumbnails of the
+/// photos picked so far plus an "add photo" button (file dialog on desktop,
+/// camera on Android). The paths are attached to the window type on Place. At
+/// least one is required for a NEW group (`required`); adding to an existing
+/// group is optional.
+fn window_photo_picker(ui: &mut egui::Ui, pending: &mut Vec<std::path::PathBuf>, required: bool) {
     ui.horizontal(|ui| {
         ui.label("photo");
         for p in pending.iter() {
@@ -995,7 +995,7 @@ fn window_photo_picker(ui: &mut egui::Ui, pending: &mut Vec<std::path::PathBuf>)
             pending.push(path);
         }
     });
-    if pending.is_empty() {
+    if required && pending.is_empty() {
         ui.label(RichText::new("⚠ add at least one photo").color(Color32::from_rgb(255, 120, 90)));
     }
 }
