@@ -57,30 +57,23 @@ pub(super) fn has_controls(view: &SketchView<'_>) -> bool {
     }
     if view.has_floor_plan {
         // Construction year: the picker (pending) or the "Set rest to Original"
-        // shortcut + region list are always a real action.
+        // Construction year: the year picker (pending) or the always-available
+        // "Set rest to Original" shortcut. (Committed-area deletes → Delete panel.)
         if !view.phase_choices.is_empty() && (view.phase_mode || view.phase_pick_pending) {
             return true;
         }
-        // Floor steps: the amount is in the number box, so the ONLY panel content
-        // is the committed-region list — show it only when there's one to manage.
-        if view.step_mode && !view.step_region_polygons.is_empty() {
+        // Floor steps: NO floating control — amount in the number box, deletes in
+        // the Delete panel. (Nothing here.)
+        //
+        // Ceiling steps: only the direction / side STAGE buttons.
+        if view.ceiling_step_orientation_pending || view.ceiling_step_side_pending {
             return true;
         }
-        // Ceiling steps: the direction / side stages have buttons; otherwise only
-        // the region list (amount is in the number box).
-        if view.ceiling_step_orientation_pending
-            || view.ceiling_step_side_pending
-            || (view.ceiling_step_mode && !view.ceiling_step_region_polygons.is_empty())
-        {
-            return true;
-        }
-        // Roof: the which-area-slopes buttons, a position-stage Cancel, or the
-        // committed-apex list (heights/lengths are in the number box).
+        // Roof: the which-area-slopes buttons or a position-stage Cancel.
         if !view.roof_ridge_area_options.is_empty()
             || view.roof_point_position_pending
             || view.roof_ridge_position_pending
             || view.roof_rect_position_pending
-            || (view.roof_point_mode && !view.roof_apex_views.is_empty())
         {
             return true;
         }
@@ -394,37 +387,20 @@ pub(super) fn render_controls<F: FnMut(UiEvent)>(
             // after reopen): the pick blocks drawing, so its prompt must stay
             // reachable.
             if !view.phase_choices.is_empty() && (view.phase_mode || view.phase_pick_pending) {
-                phase_toolbar(
-                    ui,
-                    view.phase_choices,
-                    view.phase_region_polygons,
-                    view.phase_pick_pending,
-                    on_event,
-                );
+                phase_toolbar(ui, view.phase_choices, view.phase_pick_pending, on_event);
             }
-            // The step AMOUNT (Raise/Lower) is entered in the floating box; the
-            // dock keeps only the region list (and the draw hint when idle).
-            if view.step_mode {
-                step_toolbar(
-                    ui,
-                    view.step_region_polygons,
-                    view.step_pick_pending,
-                    on_event,
-                );
-            }
-            // The ceiling-step AMOUNT (Up/Down) is entered in the floating box;
-            // the dock keeps the orientation/side stages, the region list, and
-            // the draw hint (suppressed while the amount box is active).
-            if view.ceiling_step_mode
-                || view.ceiling_step_orientation_pending
-                || view.ceiling_step_side_pending
-            {
+            // Floor steps have NO floating control: the amount is in the number
+            // box, and the committed-region deletes live in the Delete panel.
+            // (Nothing to render here.)
+            //
+            // The ceiling-step AMOUNT (Up/Down) is entered in the number box; the
+            // floating box keeps only the orientation / side STAGE buttons (the
+            // committed-region deletes live in the Delete panel).
+            if view.ceiling_step_orientation_pending || view.ceiling_step_side_pending {
                 ceiling_step_toolbar(
                     ui,
-                    view.ceiling_step_region_polygons,
                     view.ceiling_step_orientation_pending,
                     view.ceiling_step_side_pending,
-                    view.ceiling_step_amount_pending,
                     on_event,
                 );
             }
@@ -441,26 +417,18 @@ pub(super) fn render_controls<F: FnMut(UiEvent)>(
                 if ui.button("Cancel").clicked() {
                     on_event(UiEvent::Sketch(SketchEvent::CancelPendingRoofRidge));
                 }
-            } else if view.roof_point_mode
-                || view.roof_point_position_pending
+            } else if view.roof_point_position_pending
                 || view.roof_ridge_position_pending
                 || view.roof_rect_position_pending
             {
-                // Heights and lengths are entered in the floating box; the dock
-                // keeps the position-stage Cancels, the apex list, and the
-                // tap/stroke hint (suppressed while a box stage is active).
-                let number_pending = view.roof_point_height_pending
-                    || view.roof_ridge_height_pending
-                    || view.roof_ridge_length_pending
-                    || view.roof_rect_height_pending
-                    || view.roof_rect_length_axis.is_some();
+                // Only the position-stage Cancel buttons live here; heights/
+                // lengths are in the number box and the committed-apex deletes
+                // are in the Delete panel.
                 roof_point_toolbar(
                     ui,
-                    view.roof_apex_views,
                     view.roof_point_position_pending,
                     view.roof_ridge_position_pending,
                     view.roof_rect_position_pending,
-                    number_pending,
                     on_event,
                 );
             }
@@ -514,6 +482,93 @@ pub(super) fn render_corner_actions<F: FnMut(UiEvent)>(
                     }
                 });
             });
+        });
+}
+
+/// Whether there's anything deletable to list in the Delete panel.
+pub(super) fn has_deletables(view: &SketchView<'_>) -> bool {
+    !view.phase_region_polygons.is_empty()
+        || !view.step_region_polygons.is_empty()
+        || !view.ceiling_step_region_polygons.is_empty()
+        || !view.roof_apex_views.is_empty()
+}
+
+/// The floating "Delete" panel — a single home for removing things you've added
+/// (construction-year areas, floor steps, ceiling steps, roof points), grouped
+/// into clearly-labelled SECTIONS. These deletes used to clutter each tool's
+/// floating control box; they live here instead so the control boxes stay
+/// input-only. Renders nothing when there's nothing to delete; collapsible and
+/// parked top-left.
+pub(super) fn render_delete_panel<F: FnMut(UiEvent)>(
+    ctx: &egui::Context,
+    rect: egui::Rect,
+    view: &SketchView<'_>,
+    on_event: &mut F,
+) {
+    if !has_deletables(view) {
+        return;
+    }
+    // One labelled row with a 🗑 button; the section header groups them.
+    fn section(ui: &mut egui::Ui, title: &str) {
+        ui.add_space(2.0);
+        ui.label(egui::RichText::new(title).strong().size(13.0));
+    }
+    egui::Window::new("🗑 Delete")
+        .id(egui::Id::new("sketch_delete_panel"))
+        .order(egui::Order::Foreground)
+        .default_pos(rect.left_top() + egui::vec2(8.0, 64.0))
+        .pivot(egui::Align2::LEFT_TOP)
+        .constrain_to(rect)
+        .resizable(false)
+        .collapsible(true)
+        .show(ctx, |ui| {
+            ui.set_max_width(240.0);
+            if !view.phase_region_polygons.is_empty() {
+                section(ui, "Construction years");
+                for (i, (_ring, label)) in view.phase_region_polygons.iter().enumerate() {
+                    ui.horizontal(|ui| {
+                        if ui.button("🗑").clicked() {
+                            on_event(UiEvent::Sketch(SketchEvent::DeletePhaseRegion(i)));
+                        }
+                        ui.label(label);
+                    });
+                }
+            }
+            if !view.step_region_polygons.is_empty() {
+                section(ui, "Floor steps");
+                for (i, (_ring, label)) in view.step_region_polygons.iter().enumerate() {
+                    ui.horizontal(|ui| {
+                        if ui.button("🗑").clicked() {
+                            on_event(UiEvent::Sketch(SketchEvent::DeleteStepRegion(i)));
+                        }
+                        ui.label(label);
+                    });
+                }
+            }
+            if !view.ceiling_step_region_polygons.is_empty() {
+                section(ui, "Ceiling steps");
+                for (ring, label) in view.ceiling_step_region_polygons.iter() {
+                    ui.horizontal(|ui| {
+                        if ui.button("🗑").clicked() {
+                            on_event(UiEvent::Sketch(SketchEvent::DeleteCeilingStepRegion(
+                                ring.clone(),
+                            )));
+                        }
+                        ui.label(label);
+                    });
+                }
+            }
+            if !view.roof_apex_views.is_empty() {
+                section(ui, "Roof points");
+                for (i, (_pos, label)) in view.roof_apex_views.iter().enumerate() {
+                    ui.horizontal(|ui| {
+                        if ui.button("🗑").clicked() {
+                            on_event(UiEvent::Sketch(SketchEvent::DeleteRoofApex(i)));
+                        }
+                        ui.label(label);
+                    });
+                }
+            }
         });
 }
 
@@ -710,13 +765,13 @@ fn review_toolbar<F: FnMut(UiEvent)>(ui: &mut egui::Ui, remaining: usize, on_eve
     });
 }
 
-/// Construction-phase tagging controls. While a carved area is pending,
-/// shows the year picker (one button per defined phase) + Cancel; otherwise
-/// lists the committed phase regions with delete buttons.
+/// Construction-phase tagging controls. While a carved area is pending, shows
+/// the year picker (one button per defined phase) + Cancel; otherwise the
+/// "Set rest to Original" shortcut. Committed-region deletes live in the Delete
+/// panel.
 fn phase_toolbar<F: FnMut(UiEvent)>(
     ui: &mut egui::Ui,
     choices: &[(ConstructionPhase, String)],
-    regions: &[(Vec<(f64, f64)>, String)],
     pick_pending: bool,
     on_event: &mut F,
 ) {
@@ -733,15 +788,8 @@ fn phase_toolbar<F: FnMut(UiEvent)>(
             }
         });
     } else {
-        // (The "draw an area" instruction is in the bottom bar.) Region list:
-        for (i, (_ring, label)) in regions.iter().enumerate() {
-            ui.horizontal(|ui| {
-                ui.label(label);
-                if ui.button("🗑").hint("Delete this phase area").clicked() {
-                    on_event(UiEvent::Sketch(SketchEvent::DeletePhaseRegion(i)));
-                }
-            });
-        }
+        // (The "draw an area" instruction is in the bottom bar; the committed
+        // regions' deletes live in the Delete panel.)
         // One-tap "everything else is the original build": stamps the leftover
         // fabric Original so the Construction-phase checklist row goes green
         // without drawing an area for the bulk of the storey.
@@ -757,40 +805,13 @@ fn phase_toolbar<F: FnMut(UiEvent)>(
     }
 }
 
-/// Floor-step region list + draw hint. The step AMOUNT (the Raise/Lower entry
-/// for a pending area) is typed in the floating number box; the dock keeps the
-/// committed-region list with deletes, plus the "draw an area" hint while no
-/// pick is in flight.
-fn step_toolbar<F: FnMut(UiEvent)>(
-    ui: &mut egui::Ui,
-    regions: &[(Vec<(f64, f64)>, String)],
-    pick_pending: bool,
-    on_event: &mut F,
-) {
-    // (The "draw an area to raise/lower" instruction is in the bottom bar.)
-    let _ = pick_pending;
-    for (i, (_ring, label)) in regions.iter().enumerate() {
-        ui.horizontal(|ui| {
-            ui.label(label);
-            if ui.button("🗑").hint("Delete this step area").clicked() {
-                on_event(UiEvent::Sketch(SketchEvent::DeleteStepRegion(i)));
-            }
-        });
-    }
-}
-
-/// Ceiling-step controls, stage by stage: the H/V picker for a tapped point;
-/// the "tap the side" hint while the side pick is pending; otherwise the
-/// committed-region list with deletes. The AMOUNT (Up/Down) once the line is
-/// resolved is typed in the floating number box, and the position stage shows
-/// in that box too — so the "draw a line" hint is suppressed while an amount
-/// entry is open.
+/// Ceiling-step STAGE buttons: the H/V direction picker for a tapped point, or
+/// just a Cancel while the side pick is pending. The AMOUNT (Up/Down) is in the
+/// number box; the committed-region deletes are in the Delete panel.
 fn ceiling_step_toolbar<F: FnMut(UiEvent)>(
     ui: &mut egui::Ui,
-    regions: &[(Vec<(f64, f64)>, String)],
     orientation_pending: bool,
     side_pending: bool,
-    amount_pending: bool,
     on_event: &mut F,
 ) {
     if orientation_pending {
@@ -821,23 +842,6 @@ fn ceiling_step_toolbar<F: FnMut(UiEvent)>(
         if ui.button("Cancel").clicked() {
             on_event(UiEvent::Sketch(SketchEvent::CancelPendingCeilingStep));
         }
-    } else {
-        // (The "draw a line" instruction is in the bottom bar.) Region list:
-        let _ = amount_pending;
-        for (ring, label) in regions.iter() {
-            ui.horizontal(|ui| {
-                ui.label(label);
-                if ui
-                    .button("🗑")
-                    .hint("Delete this ceiling step (re-flattens to the default)")
-                    .clicked()
-                {
-                    on_event(UiEvent::Sketch(SketchEvent::DeleteCeilingStepRegion(
-                        ring.clone(),
-                    )));
-                }
-            });
-        }
     }
 }
 
@@ -848,15 +852,14 @@ fn ceiling_step_toolbar<F: FnMut(UiEvent)>(
 /// while a number stage is active (`number_pending`) so the box has the floor.
 fn roof_point_toolbar<F: FnMut(UiEvent)>(
     ui: &mut egui::Ui,
-    apexes: &[((f64, f64), String)],
     point_position_pending: bool,
     ridge_position_pending: bool,
     rect_position_pending: bool,
-    number_pending: bool,
     on_event: &mut F,
 ) {
-    // The three position stages each keep only their Cancel reachable (the
-    // instruction is in the bottom bar; the distance is typed in the box).
+    // Each position stage keeps only its Cancel (the instruction is in the
+    // bottom bar; the distance is typed in the box; apex deletes are in the
+    // Delete panel).
     let position_cancel = |ui: &mut egui::Ui, ev: SketchEvent, on_event: &mut F| {
         if ui.button("Cancel").clicked() {
             on_event(UiEvent::Sketch(ev));
@@ -868,22 +871,6 @@ fn roof_point_toolbar<F: FnMut(UiEvent)>(
         position_cancel(ui, SketchEvent::CancelPendingRoofRidge, on_event);
     } else if point_position_pending {
         position_cancel(ui, SketchEvent::CancelPendingRoofPoint, on_event);
-    } else {
-        // (The "tap a high point / draw a ridge" instruction is in the bottom
-        // bar.) Committed-apex list:
-        let _ = number_pending;
-        for (i, (_pos, label)) in apexes.iter().enumerate() {
-            ui.horizontal(|ui| {
-                ui.label(label);
-                if ui
-                    .button("🗑")
-                    .hint("Delete this roof point (the area re-flattens)")
-                    .clicked()
-                {
-                    on_event(UiEvent::Sketch(SketchEvent::DeleteRoofApex(i)));
-                }
-            });
-        }
     }
 }
 

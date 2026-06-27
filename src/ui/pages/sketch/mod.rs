@@ -1136,6 +1136,10 @@ impl SketchPage {
             }
             // Top-right floating action buttons for the active selection.
             prompt_dock::render_corner_actions(ui.ctx(), canvas_rect, &view, &mut on_event);
+            // The single "Delete" panel (top-left) — remove committed steps /
+            // phases / roof points here, grouped in sections, instead of from
+            // each tool's control box.
+            prompt_dock::render_delete_panel(ui.ctx(), canvas_rect, &view, &mut on_event);
         });
 
         // Keyboard shortcuts: Ctrl+Z undo, Ctrl+Shift+Z or Ctrl+Y redo.
