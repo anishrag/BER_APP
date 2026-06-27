@@ -80,6 +80,18 @@ pub(super) fn has_controls(view: &SketchView<'_>) -> bool {
     false
 }
 
+/// Whether the floating panel is a PERSISTENT select-then-set tool — you pick a
+/// target on the canvas, then set it in the box, and may repeat for several
+/// targets. For these a button press must NOT close the box (you still need to
+/// set the selection, and to set more); only the box's own "Done" closes it (by
+/// exiting the mode). Other panels keep the press-to-close behaviour.
+pub(super) fn panel_persists(view: &SketchView<'_>) -> bool {
+    view.floor_exposure_mode
+        || view.ceiling_exposure_mode
+        || view.exposure_mode
+        || view.partition_mode
+}
+
 /// A short title for the floating flow panel's title bar (also its drag handle).
 /// Matches whichever control set [`render_controls`] shows; approximate when
 /// several are active at once (picks the primary).
@@ -986,6 +998,10 @@ fn exposure_toolbar<F: FnMut(UiEvent)>(
         {
             on_event(UiEvent::Sketch(SketchEvent::SetAllRemainingExposed));
         }
+        // Persistent tool: stays open while you select + set walls; Done finishes.
+        if ui.button("Done").clicked() {
+            on_event(UiEvent::Sketch(SketchEvent::SetExposureMode(false)));
+        }
     });
 }
 
@@ -1049,6 +1065,11 @@ fn floor_exposure_toolbar<F: FnMut(UiEvent)>(
         if ui.button(label).clicked() {
             on_event(UiEvent::Sketch(SketchEvent::AssignFloorExposure(exposure)));
         }
+    }
+    ui.separator();
+    // Persistent tool: stays open while you select + set floors; Done finishes.
+    if ui.button("Done").clicked() {
+        on_event(UiEvent::Sketch(SketchEvent::SetFloorExposureMode(false)));
     }
 }
 
@@ -1115,6 +1136,11 @@ fn ceiling_exposure_toolbar<F: FnMut(UiEvent)>(
                 exposure,
             )));
         }
+    }
+    ui.separator();
+    // Persistent tool: stays open while you select + set ceilings; Done finishes.
+    if ui.button("Done").clicked() {
+        on_event(UiEvent::Sketch(SketchEvent::SetCeilingExposureMode(false)));
     }
 }
 

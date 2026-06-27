@@ -1131,7 +1131,10 @@ impl SketchPage {
                             };
                             prompt_dock::render_controls(ui, &mut view, &mut catch);
                         });
-                    if pressed {
+                    // Persistent select-then-set tools (exposure / partition) stay
+                    // open across clicks — you select then set, possibly several
+                    // times — and close only via their own "Done".
+                    if pressed && !prompt_dock::panel_persists(&view) {
                         ui.ctx()
                             .data_mut(|d| d.insert_temp(dismiss_id, token.clone()));
                     }
