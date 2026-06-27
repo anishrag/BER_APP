@@ -1094,22 +1094,45 @@ impl SketchPage {
             number_box::render(ui.ctx(), canvas_rect, &mut view, &mut on_event);
             // The contextual flow controls (exposure / phase / step / roof /
             // new-storey / redraw / curve / vertex / review) live in a DRAGGABLE
-            // floating window over the canvas, opening roughly centred; the
-            // bottom bar shows only the instruction for them. Stable id so its
-            // dragged position survives the title changing per mode.
+            // floating window over the canvas, opening roughly centred — buttons
+            // and inputs only; the bottom bar carries the instruction. Pressing a
+            // button CLOSES the panel (it reopens when the panel's activation
+            // token changes — a new selection / stage / target). The curve slider
+            // is a continuous drag, not a "press", so it doesn't dismiss.
             if prompt_dock::has_controls(&view) {
-                egui::Window::new(prompt_dock::panel_title(&view))
-                    .id(egui::Id::new("sketch_flow_panel"))
-                    .order(egui::Order::Foreground)
-                    .default_pos(canvas_rect.center())
-                    .pivot(egui::Align2::CENTER_CENTER)
-                    .constrain_to(canvas_rect)
-                    .resizable(false)
-                    .collapsible(true)
-                    .show(ui.ctx(), |ui| {
-                        ui.set_max_width((canvas_rect.width() - 24.0).min(520.0));
-                        prompt_dock::render_controls(ui, &mut view, &mut on_event);
-                    });
+                let token = prompt_dock::panel_token(&view);
+                let dismiss_id = egui::Id::new("sketch_flow_panel_dismissed");
+                let dismissed = ui
+                    .ctx()
+                    .data(|d| d.get_temp::<String>(dismiss_id))
+                    .is_some_and(|t| t == token);
+                if !dismissed {
+                    let mut pressed = false;
+                    egui::Window::new(prompt_dock::panel_title(&view))
+                        .id(egui::Id::new("sketch_flow_panel"))
+                        .order(egui::Order::Foreground)
+                        .default_pos(canvas_rect.center())
+                        .pivot(egui::Align2::CENTER_CENTER)
+                        .constrain_to(canvas_rect)
+                        .resizable(false)
+                        .collapsible(true)
+                        .show(ui.ctx(), |ui| {
+                            ui.set_max_width((canvas_rect.width() - 24.0).min(520.0));
+                            let mut catch = |ev: UiEvent| {
+                                // A button press dismisses the panel; the curve
+                                // slider's continuous updates do not.
+                                if !matches!(ev, UiEvent::Sketch(SketchEvent::SetCurveBulge(_))) {
+                                    pressed = true;
+                                }
+                                on_event(ev);
+                            };
+                            prompt_dock::render_controls(ui, &mut view, &mut catch);
+                        });
+                    if pressed {
+                        ui.ctx()
+                            .data_mut(|d| d.insert_temp(dismiss_id, token.clone()));
+                    }
+                }
             }
             // Top-right floating action buttons for the active selection.
             prompt_dock::render_corner_actions(ui.ctx(), canvas_rect, &view, &mut on_event);

@@ -17,38 +17,75 @@ use ber_model::ber::common::ConstructionPhase;
 use ber_model::ber::structural::WallExposure;
 use ber_model::ber::structural::{CeilingExposure, FloorExposure};
 
-/// Whether the floating flow panel has interactive controls to show this frame.
-/// When false the panel is skipped so it doesn't draw an empty window. Pure
-/// instruction-only states (no storey, openings placement) are NOT listed — they
-/// surface as the bottom instruction bar / top-right actions, not the panel.
+/// Whether the floating flow panel has a REAL interactive control to show this
+/// frame — a button to press or a value to type. It is NOT enough for a mode to
+/// merely be active: a draw-on-canvas mode with nothing pending (e.g. floor
+/// steps before any area is drawn, with no committed regions) shows NO box — the
+/// bottom bar carries its instruction instead. Single-value number prompts and
+/// openings placement also don't count (they use the number box / top-right).
 pub(super) fn has_controls(view: &SketchView<'_>) -> bool {
-    // Single-value number prompts (dimension/position/edit-drag/thickness/step
-    // & ceiling amounts/roof heights & lengths) are NOT listed here — they
-    // render in the floating number-entry box. Openings placement is NOT here
-    // either (its measurements use the number box; its edit actions are the
-    // top-right floating buttons).
-    view.new_storey_prompt
+    // Always-has-a-control flows (buttons / inputs / slider).
+    if view
+        .new_storey_prompt
         .as_ref()
         .is_some_and(|p| !p.thickness_pending)
         || view.pending_redraw
         || view.curve_bulge.is_some()
         || view.vertex_drop_prompt.is_some()
         || view.review.is_some()
-        || view.exposure_mode
+        || view.partition_mode
         || view.floor_exposure_mode
         || view.ceiling_exposure_mode
-        || view.partition_mode
-        || (view.has_floor_plan
-            && ((!view.phase_choices.is_empty() && (view.phase_mode || view.phase_pick_pending))
-                || view.step_mode
-                || view.ceiling_step_mode
-                || view.ceiling_step_orientation_pending
-                || view.ceiling_step_side_pending
-                || view.roof_point_mode
-                || view.roof_point_position_pending
-                || view.roof_ridge_position_pending
-                || view.roof_rect_position_pending
-                || !view.roof_ridge_area_options.is_empty()))
+    {
+        return true;
+    }
+    // Wall exposure: only when there's a target to set (a selected section /
+    // riser) or unset coverage the bulk button can paint.
+    if view.exposure_mode {
+        let riser_selected = view.riser_views.iter().any(|r| r.selected);
+        let unset = view
+            .exposure_walls
+            .iter()
+            .filter(|w| {
+                w.partition_exposures.is_empty()
+                    && document::wall_coverage(w.length_m, &w.sections)
+                        .iter()
+                        .any(|(_, _, e)| *e == WallExposure::Unset)
+            })
+            .count();
+        return view.exposure_selection.is_some() || riser_selected || unset > 0;
+    }
+    if view.has_floor_plan {
+        // Construction year: the picker (pending) or the "Set rest to Original"
+        // shortcut + region list are always a real action.
+        if !view.phase_choices.is_empty() && (view.phase_mode || view.phase_pick_pending) {
+            return true;
+        }
+        // Floor steps: the amount is in the number box, so the ONLY panel content
+        // is the committed-region list — show it only when there's one to manage.
+        if view.step_mode && !view.step_region_polygons.is_empty() {
+            return true;
+        }
+        // Ceiling steps: the direction / side stages have buttons; otherwise only
+        // the region list (amount is in the number box).
+        if view.ceiling_step_orientation_pending
+            || view.ceiling_step_side_pending
+            || (view.ceiling_step_mode && !view.ceiling_step_region_polygons.is_empty())
+        {
+            return true;
+        }
+        // Roof: the which-area-slopes buttons, a position-stage Cancel, or the
+        // committed-apex list (heights/lengths are in the number box).
+        if !view.roof_ridge_area_options.is_empty()
+            || view.roof_point_position_pending
+            || view.roof_ridge_position_pending
+            || view.roof_rect_position_pending
+            || (view.roof_point_mode && !view.roof_apex_views.is_empty())
+        {
+            return true;
+        }
+    }
+    false
 }
 
 /// A short title for the floating flow panel's title bar (also its drag handle).
@@ -106,6 +143,91 @@ pub(super) fn panel_title(view: &SketchView<'_>) -> &'static str {
     "Roof shape"
 }
 
+/// A token identifying the CURRENT panel activation — what's selected / which
+/// stage. The floating panel closes when a button is pressed and stays closed
+/// until this token changes (a new selection, stage, or target reopens it). It
+/// deliberately excludes terminal VALUES (e.g. the exposure picked), so applying
+/// one keeps the panel closed; changing the selection reopens it.
+pub(super) fn panel_token(view: &SketchView<'_>) -> String {
+    if view.floor_exposure_mode {
+        return format!("fe-{}", view.floor_exposure_gate_pending);
+    }
+    if view.ceiling_exposure_mode {
+        return format!("ce-{}", view.ceiling_exposure_gate_pending);
+    }
+    if let Some(p) = &view.new_storey_prompt {
+        return if p.method_pending {
+            "ns-method".into()
+        } else {
+            format!("ns-{}", p.suggestion.as_ref().map(|s| s.2).unwrap_or(0))
+        };
+    }
+    if view.pending_redraw {
+        return "redraw".into();
+    }
+    if view.curve_bulge.is_some() {
+        return "curve".into();
+    }
+    if let Some(vp) = &view.vertex_drop_prompt {
+        return format!("vd-{}", vp.active.len());
+    }
+    if view.review.is_some() {
+        return format!("rev-{}", view.review_remaining);
+    }
+    if view.partition_mode {
+        let sel = view
+            .partition_view
+            .and_then(|pv| pv.regions.iter().position(|r| r.selected));
+        return format!("part-{sel:?}");
+    }
+    if view.exposure_mode {
+        return match view.exposure_selection.as_ref() {
+            Some(s) => format!("exp-{:.3}-{:.3}", s.start_m, s.end_m),
+            None => "exp-idle".into(),
+        };
+    }
+    if view.has_floor_plan {
+        if !view.phase_choices.is_empty() && (view.phase_mode || view.phase_pick_pending) {
+            return format!(
+                "phase-{}-{}",
+                view.phase_pick_pending,
+                view.phase_region_polygons.len()
+            );
+        }
+        if view.step_mode {
+            return format!("step-{}", view.step_region_polygons.len());
+        }
+        if view.ceiling_step_mode
+            || view.ceiling_step_orientation_pending
+            || view.ceiling_step_side_pending
+        {
+            return format!(
+                "cs-{}-{}-{}",
+                view.ceiling_step_orientation_pending,
+                view.ceiling_step_side_pending,
+                view.ceiling_step_region_polygons.len()
+            );
+        }
+        if !view.roof_ridge_area_options.is_empty() {
+            return "ridge-area".into();
+        }
+        if view.roof_point_mode
+            || view.roof_point_position_pending
+            || view.roof_ridge_position_pending
+            || view.roof_rect_position_pending
+        {
+            return format!(
+                "rp-{}-{}-{}-{}",
+                view.roof_point_position_pending,
+                view.roof_ridge_position_pending,
+                view.roof_rect_position_pending,
+                view.roof_apex_views.len()
+            );
+        }
+    }
+    "none".into()
+}
+
 /// The contextual one-line INSTRUCTION for the bottom bar — what the assessor
 /// should do in the current mode/flow. The controls themselves live in the
 /// floating flow panel (and the top-right action buttons); this strip is purely
@@ -115,10 +237,18 @@ pub(super) fn instruction(view: &SketchView<'_>) -> Option<&'static str> {
         return Some("Pick a storey tab to edit.");
     }
     if view.floor_exposure_mode {
-        return Some("Floor exposures — select floors, then pick their heat-loss exposure.");
+        return Some(if view.floor_exposure_gate_pending {
+            "Have you finished adding all storeys? (needed before the auto-exposure pass)"
+        } else {
+            "Floor exposures — select floors, then pick their heat-loss exposure."
+        });
     }
     if view.ceiling_exposure_mode {
-        return Some("Ceiling exposures — select ceilings, then pick their heat-loss exposure.");
+        return Some(if view.ceiling_exposure_gate_pending {
+            "Have you finished adding all storeys? (needed before the auto-exposure pass)"
+        } else {
+            "Ceiling exposures — select ceilings, then pick their heat-loss exposure."
+        });
     }
     if view
         .new_storey_prompt
@@ -140,7 +270,7 @@ pub(super) fn instruction(view: &SketchView<'_>) -> Option<&'static str> {
         return Some("Review the suggested straightening.");
     }
     if view.partition_mode {
-        return Some("Split the wall face — draw a cut line across it.");
+        return Some("Wall partition — draw a cut line, then tap a part and set its exposure.");
     }
     if view.exposure_mode {
         return Some("Wall exposures — select a wall, then pick its heat-loss exposure.");
@@ -161,20 +291,25 @@ pub(super) fn instruction(view: &SketchView<'_>) -> Option<&'static str> {
         if view.step_mode {
             return Some("Floor steps — draw the step line across the area.");
         }
-        if view.ceiling_step_mode
-            || view.ceiling_step_orientation_pending
-            || view.ceiling_step_side_pending
-        {
+        if view.ceiling_step_orientation_pending {
+            return Some("Ceiling step — choose the step line's direction.");
+        }
+        if view.ceiling_step_side_pending {
+            return Some("Ceiling step — tap the side of the line where the ceiling steps.");
+        }
+        if view.ceiling_step_mode {
             return Some("Ceiling steps — draw the step line, then set the level change.");
         }
         if !view.roof_ridge_area_options.is_empty() {
             return Some("Choose which area this ridge should slope.");
         }
-        if view.roof_point_mode
-            || view.roof_point_position_pending
+        if view.roof_point_position_pending
             || view.roof_ridge_position_pending
             || view.roof_rect_position_pending
         {
+            return Some("Pin the position on the plan — the distance is entered in the box.");
+        }
+        if view.roof_point_mode {
             return Some("Roof shape — tap an apex, or draw a ridge / flat-top, then set heights.");
         }
     }
@@ -297,13 +432,7 @@ pub(super) fn render_controls<F: FnMut(UiEvent)>(
             // RECT (the stroke flows sharing roof-point mode) keeps it
             // reachable too.
             if !view.roof_ridge_area_options.is_empty() {
-                // The ridge sits on an internal boundary — ask which area slopes.
-                ui.label(
-                    egui::RichText::new(
-                        "Which area should this ridge slope? (the other gets a step)",
-                    )
-                    .strong(),
-                );
+                // Which-area-slopes buttons (the question is in the bottom bar).
                 for (i, label) in view.roof_ridge_area_options.iter().enumerate() {
                     if ui.button(label).clicked() {
                         on_event(UiEvent::Sketch(SketchEvent::ChooseRoofRidgeArea(i)));
@@ -408,11 +537,7 @@ fn vertex_drop_prompt_toolbar<F: FnMut(UiEvent)>(
 ) {
     use crate::controller::app_controller::VertexMeasurementKind;
     use manip_plan::ParameterAxis;
-    ui.label(
-        egui::RichText::new("Place vertex — fill in any 2 distances (m):")
-            .strong()
-            .color(egui::Color32::from_rgb(60, 220, 255)),
-    );
+    // (The "fill in any 2 distances" instruction is in the bottom bar.)
     // One column per active measurement. Each shows: kind label,
     // current value for orientation, textbox, Apply button.
     for m in &prompt.active {
@@ -455,11 +580,7 @@ fn vertex_drop_prompt_toolbar<F: FnMut(UiEvent)>(
 /// Dragging it reshapes the amber preview live; "Accept curve" bakes it in.
 /// `bulge` is the signed sagitta / chord (0 = flat, larger = more curved).
 fn curve_radius_toolbar<F: FnMut(UiEvent)>(ui: &mut egui::Ui, bulge: f32, on_event: &mut F) {
-    ui.label(
-        egui::RichText::new("Curve radius:")
-            .strong()
-            .color(egui::Color32::from_rgb(255, 200, 60)),
-    );
+    // (The "drag to set the curve radius" instruction is in the bottom bar.)
     let mut b = bulge;
     if ui
         .add(
@@ -498,11 +619,7 @@ fn new_storey_toolbar<F: FnMut(UiEvent)>(
     on_event: &mut F,
 ) {
     if prompt.method_pending {
-        ui.label(
-            egui::RichText::new("How should this storey's outline start?")
-                .strong()
-                .color(egui::Color32::from_rgb(60, 220, 255)),
-        );
+        // (The "how should the outline start?" instruction is in the bottom bar.)
         if ui
             .button("Draw outline")
             .hint("Draw it over the faint previous storey (just drawing a stroke works too)")
@@ -521,11 +638,8 @@ fn new_storey_toolbar<F: FnMut(UiEvent)>(
             on_event(UiEvent::Sketch(SketchEvent::ChooseSuggestOutlines));
         }
     } else if let Some((_ring, label, idx, count)) = &prompt.suggestion {
-        ui.label(
-            egui::RichText::new("Suggested outline:")
-                .strong()
-                .color(egui::Color32::from_rgb(60, 220, 255)),
-        );
+        // The suggestion name + count are functional read-outs (what you're
+        // browsing), not instructions, so they stay with the controls.
         ui.label(label);
         if ui.button("◀").hint("Previous suggestion").clicked() {
             on_event(UiEvent::Sketch(SketchEvent::PrevSuggestion));
@@ -556,11 +670,7 @@ fn new_storey_toolbar<F: FnMut(UiEvent)>(
 }
 
 fn pending_redraw_toolbar<F: FnMut(UiEvent)>(ui: &mut egui::Ui, on_event: &mut F) {
-    ui.label(
-        egui::RichText::new("A storey already exists. What should this new stroke do?")
-            .strong()
-            .color(egui::Color32::from_rgb(255, 200, 60)),
-    );
+    // (The "what should this stroke do?" instruction is in the bottom bar.)
     if ui
         .button("Replace this storey")
         .hint("Discard the current outline and replace it with this stroke")
@@ -586,11 +696,8 @@ fn pending_redraw_toolbar<F: FnMut(UiEvent)>(ui: &mut egui::Ui, on_event: &mut F
 
 fn review_toolbar<F: FnMut(UiEvent)>(ui: &mut egui::Ui, remaining: usize, on_event: &mut F) {
     ui.horizontal(|ui| {
-        ui.label(
-            egui::RichText::new(format!("Same line? {} remaining", remaining))
-                .strong()
-                .color(egui::Color32::from_rgb(255, 200, 60)),
-        );
+        // "Same line?" instruction is in the bottom bar; keep the count read-out.
+        ui.label(format!("{remaining} left"));
         if ui.button("Yes").clicked() {
             on_event(UiEvent::Sketch(SketchEvent::AcceptCollinearity));
         }
@@ -614,7 +721,7 @@ fn phase_toolbar<F: FnMut(UiEvent)>(
     on_event: &mut F,
 ) {
     if pick_pending {
-        ui.label(egui::RichText::new("Assign year to area:").strong());
+        // (The "assign a year" instruction is in the bottom bar.)
         ui.horizontal_wrapped(|ui| {
             for (phase, label) in choices {
                 if ui.button(label).clicked() {
@@ -626,7 +733,7 @@ fn phase_toolbar<F: FnMut(UiEvent)>(
             }
         });
     } else {
-        ui.label("Draw an area to tag its year of construction.");
+        // (The "draw an area" instruction is in the bottom bar.) Region list:
         for (i, (_ring, label)) in regions.iter().enumerate() {
             ui.horizontal(|ui| {
                 ui.label(label);
@@ -660,9 +767,8 @@ fn step_toolbar<F: FnMut(UiEvent)>(
     pick_pending: bool,
     on_event: &mut F,
 ) {
-    if !pick_pending {
-        ui.label("Draw an area to raise or lower its floor.");
-    }
+    // (The "draw an area to raise/lower" instruction is in the bottom bar.)
+    let _ = pick_pending;
     for (i, (_ring, label)) in regions.iter().enumerate() {
         ui.horizontal(|ui| {
             ui.label(label);
@@ -688,7 +794,7 @@ fn ceiling_step_toolbar<F: FnMut(UiEvent)>(
     on_event: &mut F,
 ) {
     if orientation_pending {
-        ui.label(egui::RichText::new("Line direction:").strong());
+        // (The "line direction" instruction is in the bottom bar.)
         if ui
             .button("Horizontal")
             .hint("A horizontal step line through the tapped point")
@@ -711,19 +817,13 @@ fn ceiling_step_toolbar<F: FnMut(UiEvent)>(
             on_event(UiEvent::Sketch(SketchEvent::CancelPendingCeilingStep));
         }
     } else if side_pending {
-        ui.label(
-            egui::RichText::new("Tap the side of the line where the ceiling steps")
-                .color(egui::Color32::from_rgb(255, 200, 60)),
-        );
+        // (The "tap the side" instruction is in the bottom bar.)
         if ui.button("Cancel").clicked() {
             on_event(UiEvent::Sketch(SketchEvent::CancelPendingCeilingStep));
         }
     } else {
-        if !amount_pending {
-            ui.label(
-                "Draw a straight line across the plan — or a closed area — to step the ceiling.",
-            );
-        }
+        // (The "draw a line" instruction is in the bottom bar.) Region list:
+        let _ = amount_pending;
         for (ring, label) in regions.iter() {
             ui.horizontal(|ui| {
                 ui.label(label);
@@ -755,43 +855,23 @@ fn roof_point_toolbar<F: FnMut(UiEvent)>(
     number_pending: bool,
     on_event: &mut F,
 ) {
-    // The three position stages each keep their own Cancel reachable while the
-    // distance is typed in the box.
-    let position_cancel = |ui: &mut egui::Ui, text: &str, ev: SketchEvent, on_event: &mut F| {
-        ui.label(egui::RichText::new(text).color(egui::Color32::from_rgb(255, 200, 60)));
+    // The three position stages each keep only their Cancel reachable (the
+    // instruction is in the bottom bar; the distance is typed in the box).
+    let position_cancel = |ui: &mut egui::Ui, ev: SketchEvent, on_event: &mut F| {
         if ui.button("Cancel").clicked() {
             on_event(UiEvent::Sketch(ev));
         }
     };
     if rect_position_pending {
-        position_cancel(
-            ui,
-            "Pin the flat top's position (the distance question is in the box)",
-            SketchEvent::CancelPendingRoofRect,
-            on_event,
-        );
+        position_cancel(ui, SketchEvent::CancelPendingRoofRect, on_event);
     } else if ridge_position_pending {
-        position_cancel(
-            ui,
-            "Pin the ridge's position (the distance question is in the box)",
-            SketchEvent::CancelPendingRoofRidge,
-            on_event,
-        );
+        position_cancel(ui, SketchEvent::CancelPendingRoofRidge, on_event);
     } else if point_position_pending {
-        position_cancel(
-            ui,
-            "Pin the point's position (the distance question is in the box)",
-            SketchEvent::CancelPendingRoofPoint,
-            on_event,
-        );
+        position_cancel(ui, SketchEvent::CancelPendingRoofPoint, on_event);
     } else {
-        if !number_pending {
-            ui.label(
-                "Tap a high point inside a ceiling area to slope the roof, draw a \
-                 straight stroke along a ridge line, or a closed rectangle for a \
-                 flat-topped roof.",
-            );
-        }
+        // (The "tap a high point / draw a ridge" instruction is in the bottom
+        // bar.) Committed-apex list:
+        let _ = number_pending;
         for (i, (_pos, label)) in apexes.iter().enumerate() {
             ui.horizontal(|ui| {
                 ui.label(label);
@@ -940,14 +1020,9 @@ fn exposure_toolbar<F: FnMut(UiEvent)>(
             {
                 on_event(UiEvent::Sketch(SketchEvent::OpenWallPartition));
             }
-        } else {
-            let hint = if risers.is_empty() {
-                "Tap a wall to mark its exposure"
-            } else {
-                "Tap a wall — or a dashed riser line — to mark its exposure"
-            };
-            ui.label(egui::RichText::new(hint).color(egui::Color32::from_rgb(255, 200, 60)));
         }
+        // (The "tap a wall to mark its exposure" instruction is in the bottom
+        // bar.) The bulk "set remaining" button is always available:
         ui.separator();
         if ui
             .add_enabled(
@@ -964,11 +1039,7 @@ fn exposure_toolbar<F: FnMut(UiEvent)>(
 /// The floor-exposure storey-count GATE: confirm every storey is added before
 /// the auto-exposure pass runs and the overlaid floor view appears.
 fn floor_exposure_gate_toolbar<F: FnMut(UiEvent)>(ui: &mut egui::Ui, on_event: &mut F) {
-    ui.label(
-        egui::RichText::new("Have you finished adding all storeys?")
-            .strong()
-            .color(egui::Color32::from_rgb(60, 220, 255)),
-    );
+    // (The "finished adding all storeys?" question is in the bottom bar.)
     if ui
         .button("Yes")
         .hint("Run the inter-storey party auto-exposure pass, then mark floors")
@@ -1032,11 +1103,7 @@ fn floor_exposure_toolbar<F: FnMut(UiEvent)>(
 /// [`floor_exposure_gate_toolbar`]): confirm every storey is added before the
 /// auto-exposure pass runs and the overlaid ceiling view appears.
 fn ceiling_exposure_gate_toolbar<F: FnMut(UiEvent)>(ui: &mut egui::Ui, on_event: &mut F) {
-    ui.label(
-        egui::RichText::new("Have you finished adding all storeys?")
-            .strong()
-            .color(egui::Color32::from_rgb(60, 220, 255)),
-    );
+    // (The "finished adding all storeys?" question is in the bottom bar.)
     if ui
         .button("Yes")
         .hint("Run the inter-storey party auto-exposure pass, then mark ceilings")
@@ -1109,15 +1176,9 @@ fn partition_toolbar<F: FnMut(UiEvent)>(ui: &mut egui::Ui, pv: &PartitionView, o
         // keypad / laser as plan dimensioning — see `number_box`); the dock
         // keeps only the region exposure controls.
         ui.horizontal_wrapped(|ui| {
+            // (The "tap a part / set the selected part" instruction is in the
+            // bottom bar.)
             let has_selection = pv.regions.iter().any(|r| r.selected);
-            ui.label(
-                egui::RichText::new(if has_selection {
-                    "Set the selected part:"
-                } else {
-                    "Tap a part to select it"
-                })
-                .color(egui::Color32::from_rgb(255, 200, 60)),
-            );
             for (label, exposure) in [
                 ("Exposed", WallExposure::Exposed),
                 ("Semi-exposed", WallExposure::SemiExposed),
