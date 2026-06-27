@@ -10784,6 +10784,98 @@ fn mapping_review_confirm_sets_reviewed_flag_and_persists() {
     assert!(c.mapping_reviewed(), "reviewed flag persists across reload");
 }
 
+/// Confirming the Structure review records the durable `structure_reviewed` flag,
+/// closes the review, and persists across a save/reload.
+#[test]
+fn structure_review_confirm_sets_reviewed_flag_and_persists() {
+    let mut c = dimensioned_square_controller();
+    c.materialize();
+    assert!(!c.structure_reviewed(), "starts un-reviewed");
+
+    c.set_structure_review_mode(true);
+    assert!(c.structure_review_mode());
+    c.confirm_structure_review();
+    assert!(c.structure_reviewed(), "confirm marks reviewed");
+    assert!(!c.structure_review_mode(), "confirm closes the review");
+
+    c.flush_if_dirty().unwrap();
+    let id = c.current_record.as_ref().unwrap().id;
+    c.open_ber(&id).unwrap();
+    assert!(
+        c.structure_reviewed(),
+        "reviewed flag persists across reload"
+    );
+}
+
+/// The Structure review enumerates a review item per construction group / window
+/// type (whole house), each highlighting its surfaces; the cursor wraps.
+#[test]
+fn structure_review_items_cover_groups_and_cursor_wraps() {
+    use ber_model::ber::fenestration::{Frame, Glazing};
+    use ber_model::ber::structural::{ConstructionMakeup, ConstructionType, WallConstructionType};
+
+    let mut c = dimensioned_square_controller();
+    c.materialize();
+
+    // Attribute all walls to one timber construction → one wall group.
+    attribute_all_surfaces(
+        &mut c,
+        SurfaceKind::Walls,
+        ConstructionType::Wall(WallConstructionType::TimberConstruction),
+        ConstructionMakeup::Default,
+    );
+
+    // Add a window of a registered type → one window-type group.
+    let wall_id = c.current_record.as_ref().unwrap().data.storeys[0]
+        .walls
+        .regions[0]
+        .id;
+    let type_id = c.current_record.as_mut().unwrap().data.ensure_window_type(
+        Glazing::Double,
+        Frame::WoodUPVC,
+        0,
+        false,
+        Vec::new(),
+        Some("Model A".to_string()),
+    );
+    ber_model::ber::openings::add_wall_window(
+        &mut c.current_record.as_mut().unwrap().data.storeys[0],
+        wall_id,
+        1.0,
+        1.0,
+        1.0,
+        0.9,
+        type_id,
+    )
+    .expect("window placed");
+    c.materialize();
+
+    c.set_structure_review_mode(true);
+    let total = c.structure_review_view().expect("has review items").total;
+    assert!(total >= 2, "at least a wall group + a window-type group");
+
+    // Walk every item: a wall group and a window-type group are present, each
+    // highlighting ≥1 surface.
+    let (mut saw_wall, mut saw_window) = (false, false);
+    for _ in 0..total {
+        let v = c.structure_review_view().unwrap();
+        assert!(
+            !v.highlight.is_empty(),
+            "every item highlights its surfaces"
+        );
+        match v.kind {
+            StructureReviewKind::Wall => saw_wall = true,
+            StructureReviewKind::WindowType => saw_window = true,
+            _ => {}
+        }
+        c.step_structure_review(1);
+    }
+    assert!(saw_wall, "a wall construction group is reviewed");
+    assert!(saw_window, "a window-type group is reviewed");
+    // A full lap of `total` steps returns to the first item.
+    assert_eq!(c.structure_review_view().unwrap().cursor, 0, "cursor wraps");
+}
+
 /// Stepping the side cursor wraps through the four sides.
 #[test]
 fn mapping_review_side_cursor_wraps() {

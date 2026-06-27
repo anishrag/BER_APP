@@ -37,6 +37,7 @@ mod partition;
 mod phase_regions;
 mod photos;
 mod structure;
+mod structure_review;
 
 pub use assessment_phase::{AssessmentPhase, SelectMode};
 pub use structure::{EditGroup, ExistingGroup, PhotoQuality, StructureEdit};
@@ -116,6 +117,7 @@ use roof_ridges::{PendingRoofRidge, RidgeQuestion};
 pub use snap::SnapTagView;
 use snap::{LastSnapAction, SnapAction};
 pub use strokes::PendingRedraw;
+pub use structure_review::{StructureReviewKind, StructureReviewView};
 pub use view::{ViewTransform, DEFAULT_PITCH_DEG, DEFAULT_YAW_DEG};
 
 /// Print a stroke as a `vec![p(x,y), …]` literal (matching the curve-debug
@@ -309,6 +311,13 @@ pub struct AppController {
     )>,
     /// The opening selected in the review elevation (transient).
     mapping_review_selection: Option<ber_model::ber::openings::OpeningRef>,
+    /// Stage-2 (Structure) REVIEW takeover: when on, the canvas shows the current
+    /// review item's details beside the orbitable 3D house with that group's
+    /// surfaces shaded (`structure_review.rs`).
+    structure_review_mode: bool,
+    /// Which review item (group) is showing — index into the whole-house item
+    /// list built each frame; clamped/wrapped against its length.
+    structure_review_cursor: usize,
     /// When `Some`, the PARTITION overlay is open for this outline wall (by its
     /// stable start `VertexId`): the canvas shows the unrolled wall face and
     /// strokes/taps cut + attribute it. Opened from the wall-exposure toolbar.
@@ -540,6 +549,8 @@ impl AppController {
             mapping_review_side: ber_model::ber::common::ExternalSide::Front,
             mapping_review_drag: None,
             mapping_review_selection: None,
+            structure_review_mode: false,
+            structure_review_cursor: 0,
             partition_wall: None,
             partition_stroke: Vec::new(),
             partition_pending: None,

@@ -119,11 +119,27 @@ pub(crate) fn render_at_z_offset(
     // is degenerate. Drawn after the walls so they sit on the face.
     for window in &storey.windows {
         let c = color_for(DisplayMode::Walls, display_mode, style::WINDOW_FILL);
-        draw_opening_3d(painter, t, &window.vertices, z_offset, view, c);
+        draw_opening_3d(
+            painter,
+            t,
+            &window.vertices,
+            z_offset,
+            view,
+            c,
+            selected.contains(&window.id),
+        );
     }
     for door in &storey.doors {
         let c = color_for(DisplayMode::Walls, display_mode, style::DOOR_FILL);
-        draw_opening_3d(painter, t, &door.vertices, z_offset, view, c);
+        draw_opening_3d(
+            painter,
+            t,
+            &door.vertices,
+            z_offset,
+            view,
+            c,
+            selected.contains(&door.id),
+        );
     }
     // Roofs at their REAL per-vertex z (ceiling steps). Fallback when the
     // resolved roofs are missing (defensive: height set but the resolve
@@ -386,6 +402,10 @@ fn draw_opening_3d(
     z_offset: f64,
     view: ViewParams,
     color: egui::Color32,
+    // When true (the surface is in the `selected` set — e.g. the Structure-review
+    // group being inspected), the opening gets a bold white outline so it reads
+    // as highlighted against the rest.
+    highlight: bool,
 ) {
     if vertices.len() < 4 {
         return;
@@ -397,9 +417,10 @@ fn draw_opening_3d(
             t.apply(px, py)
         })
         .collect();
-    painter.add(egui::Shape::convex_polygon(
-        pts,
-        color,
-        egui::Stroke::new(1.0, color),
-    ));
+    let stroke = if highlight {
+        egui::Stroke::new(3.0, egui::Color32::WHITE)
+    } else {
+        egui::Stroke::new(1.0, color)
+    };
+    painter.add(egui::Shape::convex_polygon(pts, color, stroke));
 }

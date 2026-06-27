@@ -369,6 +369,16 @@ pub(super) fn render<F: FnMut(UiEvent)>(
         return;
     }
 
+    // Stage-2 (Structure) REVIEW: when open it REPLACES the plan canvas — the
+    // current group's details + photos beside the orbitable 3D house with that
+    // group's surfaces shaded. Owns its own input (orbit on the 3D side).
+    if let Some(srv) = view.structure_review_view.as_ref() {
+        if let Some(ber) = ber {
+            structure_review_overlay(ui, rect, &response, srv, ber, vp, on_event);
+        }
+        return;
+    }
+
     // Elevation editor: when a wall's elevation is open it REPLACES the plan
     // canvas — the unrolled wall with draggable openings. Owns its own input.
     if let Some(elev) = view.elevation_view.as_ref() {
@@ -416,20 +426,32 @@ pub(super) fn render<F: FnMut(UiEvent)>(
     // checklist shows a "Review ▸" button in the Mapping phase once every item is
     // green; clicking it opens the review. Drawn BEFORE the view buttons so they
     // can be positioned to never overlap the (centred, variable-width) signpost.
+    // The "Review ▸" entry + its ✓ are per-phase: Mapping uses its checklist
+    // completeness / reviewed flag; Structure uses the whole-house attribution
+    // completeness / its own reviewed flag.
+    let (show_review, reviewed) = match view.current_phase {
+        AssessmentPhase::Mapping => (view.mapping_complete, view.mapping_reviewed),
+        AssessmentPhase::Structure => (view.structure_complete, view.structure_reviewed),
+        AssessmentPhase::Objects => (false, false),
+    };
     let (phase_clicked, review_clicked, phase_bar_rect) = super::overlays::phase_bar(
         ui,
         rect,
         view.current_phase,
         view.mapping_reviewed,
         &view.checklist,
-        view.current_phase == AssessmentPhase::Mapping && view.mapping_complete,
-        view.mapping_reviewed,
+        show_review,
+        reviewed,
     );
     if let Some(phase) = phase_clicked {
         on_event(UiEvent::Sketch(SketchEvent::SetAssessmentPhase(phase)));
     }
     if review_clicked {
-        on_event(UiEvent::Sketch(SketchEvent::OpenMappingReview));
+        let ev = match view.current_phase {
+            AssessmentPhase::Structure => SketchEvent::OpenStructureReview,
+            _ => SketchEvent::OpenMappingReview,
+        };
+        on_event(UiEvent::Sketch(ev));
     }
 
     // View buttons (2D/3D toggle) in the top-right — but dropped BELOW the phase
@@ -2545,6 +2567,158 @@ fn elevation_colors(
 /// with a top control bar (scroll the four sides / confirm "all's good"). Drag
 /// an opening to reposition it (the controller constrains it to its wall). Owns
 /// its own input — emits review pointer + nav events.
+#[allow(clippy::too_many_arguments)]
+fn structure_review_overlay<F: FnMut(UiEvent)>(
+    ui: &mut egui::Ui,
+    rect: egui::Rect,
+    response: &egui::Response,
+    srv: &crate::controller::app_controller::StructureReviewView,
+    ber: &ber_model::ber::ber_struct::Ber,
+    vp: render::ViewParams,
+    on_event: &mut F,
+) {
+    let painter = ui.painter_at(rect);
+    painter.rect_filled(rect, 0.0, egui::Color32::from_gray(20));
+
+    // Top control bar (its own Area so its buttons own their clicks).
+    let bar_h = 38.0;
+    egui::Area::new(ui.id().with("structure_review_bar"))
+        .order(egui::Order::Foreground)
+        .fixed_pos(rect.left_top() + egui::vec2(8.0, 6.0))
+        .show(ui.ctx(), |ui| {
+            ui.horizontal(|ui| {
+                if ui.button("◀ Prev").clicked() {
+                    on_event(UiEvent::Sketch(SketchEvent::StepStructureReview(-1)));
+                }
+                ui.label(
+                    egui::RichText::new(format!("{} / {}", srv.cursor + 1, srv.total))
+                        .strong()
+                        .size(15.0),
+                );
+                if ui.button("Next ▶").clicked() {
+                    on_event(UiEvent::Sketch(SketchEvent::StepStructureReview(1)));
+                }
+                ui.separator();
+                if ui
+                    .button(egui::RichText::new("✓ All looks good").strong())
+                    .clicked()
+                {
+                    on_event(UiEvent::Sketch(SketchEvent::ConfirmStructureReview));
+                }
+                if ui.button("Close").clicked() {
+                    on_event(UiEvent::Sketch(SketchEvent::CloseStructureReview));
+                }
+            });
+        });
+
+    // Content area below the bar, split details | 3D by orientation.
+    let content = egui::Rect::from_min_max(
+        egui::pos2(rect.left() + 4.0, rect.top() + bar_h),
+        rect.right_bottom() - egui::vec2(4.0, 4.0),
+    );
+    let portrait = content.height() >= content.width();
+    let (details_rect, three_d_rect) = if portrait {
+        let mid = content.top() + content.height() * 0.42;
+        (
+            egui::Rect::from_min_max(content.min, egui::pos2(content.right(), mid)),
+            egui::Rect::from_min_max(egui::pos2(content.left(), mid), content.max),
+        )
+    } else {
+        let mid = content.left() + content.width() * 0.4;
+        (
+            egui::Rect::from_min_max(content.min, egui::pos2(mid, content.bottom())),
+            egui::Rect::from_min_max(egui::pos2(mid, content.top()), content.max),
+        )
+    };
+
+    // ── 3D panel: the whole house with this group's surfaces shaded ──
+    painter.rect_filled(three_d_rect, 4.0, egui::Color32::from_gray(28));
+    let three_d_painter = ui.painter_at(three_d_rect);
+    render::full_house_3d::render(
+        &three_d_painter,
+        three_d_rect,
+        ber,
+        domain::sketch::DisplayMode::AllSurfaces,
+        vp,
+        &srv.highlight,
+    );
+    painter.text(
+        three_d_rect.right_bottom() - egui::vec2(8.0, 6.0),
+        egui::Align2::RIGHT_BOTTOM,
+        "drag to orbit",
+        egui::FontId::proportional(11.0),
+        egui::Color32::from_gray(110),
+    );
+    // Primary-drag over the 3D side orbits the camera (same feel as the 3D view).
+    if response.dragged_by(egui::PointerButton::Primary) {
+        let over_3d = ui
+            .input(|i| i.pointer.interact_pos())
+            .is_some_and(|p| three_d_rect.contains(p));
+        if over_3d {
+            const ORBIT_DEG_PER_PIXEL: f32 = 0.4;
+            let d = response.drag_delta();
+            on_event(UiEvent::Sketch(SketchEvent::OrbitView {
+                dyaw: -d.x * ORBIT_DEG_PER_PIXEL,
+                dpitch: d.y * ORBIT_DEG_PER_PIXEL,
+            }));
+        }
+    }
+
+    // ── Details panel: kind + title + attribute lines + photos ──
+    let details_inner = egui::Rect::from_min_max(
+        details_rect.left_top() + egui::vec2(10.0, 8.0),
+        details_rect.right_bottom() - egui::vec2(10.0, 8.0),
+    );
+    let builder = egui::UiBuilder::new()
+        .max_rect(details_inner)
+        .layout(egui::Layout::top_down(egui::Align::Min));
+    ui.scope_builder(builder, |ui| {
+        ui.set_max_width(details_inner.width());
+        egui::ScrollArea::vertical()
+            .max_height(details_inner.height())
+            .show(ui, |ui| {
+                ui.label(
+                    egui::RichText::new(srv.kind.label())
+                        .color(egui::Color32::from_gray(160))
+                        .size(13.0),
+                );
+                ui.label(egui::RichText::new(&srv.title).strong().size(20.0));
+                ui.add_space(8.0);
+                for (label, value) in &srv.detail_lines {
+                    ui.horizontal(|ui| {
+                        ui.label(
+                            egui::RichText::new(format!("{label}:"))
+                                .color(egui::Color32::from_gray(160)),
+                        );
+                        ui.label(egui::RichText::new(value).strong());
+                    });
+                }
+                ui.add_space(10.0);
+                if srv.photos.is_empty() {
+                    ui.label(
+                        egui::RichText::new("No photos")
+                            .italics()
+                            .color(egui::Color32::from_gray(120)),
+                    );
+                } else {
+                    ui.label(egui::RichText::new("Photos").color(egui::Color32::from_gray(160)));
+                    ui.horizontal_wrapped(|ui| {
+                        for p in &srv.photos {
+                            let src = p.thumbnail_path.as_deref().unwrap_or(&p.file_path);
+                            ui.add(
+                                egui::Image::new(format!("file://{src}"))
+                                    .fit_to_exact_size(egui::vec2(120.0, 120.0))
+                                    .maintain_aspect_ratio(true)
+                                    .corner_radius(4.0)
+                                    .show_loading_spinner(false),
+                            );
+                        }
+                    });
+                }
+            });
+    });
+}
+
 fn mapping_review_overlay<F: FnMut(UiEvent)>(
     ui: &mut egui::Ui,
     rect: egui::Rect,

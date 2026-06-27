@@ -875,6 +875,15 @@ impl eframe::App for BerApp {
                                 };
                                 (c.mapping_reviewed(), view)
                             };
+                            let (structure_reviewed, structure_complete, structure_review_view) = {
+                                let c = self.app_controller.borrow();
+                                let view = if c.structure_review_mode() {
+                                    c.structure_review_view()
+                                } else {
+                                    None
+                                };
+                                (c.structure_reviewed(), c.structure_complete(), view)
+                            };
 
                             // Owned copy of the selected region ids so the view
                             // can borrow it without holding the controller.
@@ -1121,6 +1130,9 @@ impl eframe::App for BerApp {
                                 mapping_complete,
                                 mapping_reviewed,
                                 mapping_review_view,
+                                structure_complete,
+                                structure_reviewed,
+                                structure_review_view,
                                 surface_counts,
                                 structure_kinds,
                                 structure_select,
@@ -1753,6 +1765,18 @@ impl eframe::App for BerApp {
                                     }
                                     SketchEvent::MappingReviewPointerUp => {
                                         controller.borrow_mut().mapping_review_pointer_up();
+                                    }
+                                    SketchEvent::OpenStructureReview => {
+                                        controller.borrow_mut().set_structure_review_mode(true)
+                                    }
+                                    SketchEvent::CloseStructureReview => {
+                                        controller.borrow_mut().set_structure_review_mode(false)
+                                    }
+                                    SketchEvent::StepStructureReview(delta) => {
+                                        controller.borrow_mut().step_structure_review(delta)
+                                    }
+                                    SketchEvent::ConfirmStructureReview => {
+                                        controller.borrow_mut().confirm_structure_review()
                                     }
                                     SketchEvent::SetDefaultCeilingHeight(value) => {
                                         match controller

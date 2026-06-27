@@ -9,7 +9,10 @@
 //! storeys' projected bounding boxes so the whole building sits inside the
 //! canvas.
 
+use std::collections::HashSet;
+
 use ber_model::ber::ber_struct::Ber;
+use ber_model::ber::common::ItemId;
 use domain::sketch::DisplayMode;
 use eframe::egui;
 
@@ -21,6 +24,9 @@ pub fn render(
     ber: &Ber,
     display_mode: DisplayMode,
     view: ViewParams,
+    // Surface / opening ids to shade across the whole stack — empty for the plain
+    // all-storeys overview, the current group's surfaces in the Structure review.
+    selected: &HashSet<ItemId>,
 ) {
     if ber.storeys.is_empty() {
         painter.text(
@@ -84,8 +90,6 @@ pub fn render(
     // Iterate top-down so lower storeys' floors don't paint over upper-storey walls
     // (closer-to-camera in the default view is drawn last; with a free orbit
     // this ordering is approximate — wireframe rendering keeps it readable).
-    // No Structure-phase selection in the stacked all-storeys overview.
-    let selected = std::collections::HashSet::new();
     for (i, storey) in ber.storeys.iter().enumerate().rev() {
         storey_3d::render_at_z_offset(
             painter,
@@ -94,7 +98,7 @@ pub fn render(
             display_mode,
             z_offsets[i],
             view,
-            &selected,
+            selected,
         );
     }
 }

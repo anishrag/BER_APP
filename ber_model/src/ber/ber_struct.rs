@@ -45,6 +45,12 @@ pub struct Ber {
     /// Structure phase. `#[serde(default)]` so older records load as un-reviewed.
     #[serde(default)]
     pub mapping_reviewed: bool,
+    /// Whether the assessor has completed the Stage-2 (Structure) REVIEW — cycled
+    /// through each construction group / window type / door, checking the details
+    /// against the highlighted 3D surfaces. Recorded on confirm. `#[serde(default)]`
+    /// so older records load as un-reviewed.
+    #[serde(default)]
+    pub structure_reviewed: bool,
 }
 
 // Pure data helpers, optional

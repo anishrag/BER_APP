@@ -92,6 +92,22 @@ impl AppController {
         &self.structure_selected
     }
 
+    /// Whether the WHOLE house's Structure attribution is complete: every
+    /// storey's walls, roofs and floors are fully attributed. Gates the
+    /// Structure-phase "Review" entry. `false` with no record / no storeys.
+    pub fn structure_complete(&self) -> bool {
+        let Some(record) = self.current_record.as_ref() else {
+            return false;
+        };
+        let b = &record.data;
+        !b.storeys.is_empty()
+            && (0..b.storeys.len()).all(|i| {
+                b.structure_surfaces_complete(i, SurfaceKind::Walls)
+                    && b.structure_surfaces_complete(i, SurfaceKind::Roofs)
+                    && b.structure_surfaces_complete(i, SurfaceKind::Floors)
+            })
+    }
+
     /// Distinct COMPLETE constructions already assigned to the current storey's
     /// surfaces (walls, floors, ceilings) — the "existing groups" the attribute
     /// editor offers so a selection can join one rather than re-typing its

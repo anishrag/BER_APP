@@ -28,8 +28,8 @@ use crate::controller::app_controller::{
     AssessmentPhase, ChecklistItem, DimensionPromptUiData, EditDragPromptUiData, ElevationView,
     ExistingGroup, ExistingWindowType, ExposureSelection, NewStoreyPromptUiData,
     OpeningFieldsPrompt, OpeningToolKind, PartitionView, PhotoView, PositionPromptUiData,
-    ReviewView, RiserView, SelectMode, SnapTagView, StructureEdit, SurfaceKind,
-    VertexDropPromptUiData, WallExposureView, WindowTypeChoice,
+    ReviewView, RiserView, SelectMode, SnapTagView, StructureEdit, StructureReviewView,
+    SurfaceKind, VertexDropPromptUiData, WallExposureView, WindowTypeChoice,
 };
 use crate::ui::pages::events::UiEvent;
 use crate::ui::render::ViewParams;
@@ -491,6 +491,13 @@ pub enum SketchEvent {
         z: f64,
     },
     MappingReviewPointerUp,
+    /// Open / close the Stage-2 (Structure) REVIEW takeover view.
+    OpenStructureReview,
+    CloseStructureReview,
+    /// Step the review's item cursor (+1 next / −1 previous, wraps).
+    StepStructureReview(i32),
+    /// Confirm "all's good": record the dwelling Structure-reviewed and close.
+    ConfirmStructureReview,
     /// Close the elevation overlay.
     CloseElevation,
     /// User entered a default ceiling height (m) in the floating number box
@@ -991,6 +998,14 @@ pub struct SketchView<'a> {
     /// The open Mapping-REVIEW takeover view, if active: the current side's
     /// external elevation + its photo. When `Some`, it replaces the plan canvas.
     pub mapping_review_view: Option<ReviewView>,
+    /// Whether the whole house's Structure attribution is complete — gates the
+    /// Structure-phase "Review" entry.
+    pub structure_complete: bool,
+    /// Whether the Structure REVIEW has been confirmed (recorded on the record).
+    pub structure_reviewed: bool,
+    /// The open Structure-REVIEW takeover view, if active: the current group's
+    /// details + photos + highlight set. When `Some`, it replaces the plan canvas.
+    pub structure_review_view: Option<StructureReviewView>,
     /// Current storey's wall / roof / floor counts — the Structure-phase tool
     /// read-out.
     pub surface_counts: SurfaceCounts,
