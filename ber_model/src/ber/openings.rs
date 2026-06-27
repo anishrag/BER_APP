@@ -247,7 +247,6 @@ pub fn add_wall_window(
         multi_storey: false,
         arched: false,
         overshading: Overshading::Average,
-        photos: vec![],
     });
     link_window(storey, wall_id, id);
     // Windows may STACK: if the requested row is horizontally full, place above /
@@ -339,7 +338,6 @@ pub fn add_roof_window(
         multi_storey: false,
         arched: false,
         overshading: Overshading::Average,
-        photos: vec![],
     });
     Ok(id)
 }
@@ -378,7 +376,6 @@ pub fn add_full_wall_window(
         multi_storey: false,
         arched: false,
         overshading: Overshading::Average,
-        photos: vec![],
     });
     link_window(storey, wall_id, id);
     Ok(id)
@@ -422,7 +419,6 @@ pub fn add_multi_storey_window(
         multi_storey: true,
         arched: false,
         overshading: Overshading::Average,
-        photos: vec![],
     });
     link_window(storey, wall_id, id);
     redistribute_or_rollback(storey, wall_id, &[OpeningRef::Window(id)])?;
@@ -514,7 +510,6 @@ pub fn compose_door_sidelights(
                 multi_storey: false,
                 arched,
                 overshading: Overshading::Average,
-                photos: vec![],
             });
             link_window(storey, wall_id, id);
             added.push(OpeningRef::Window(id));
@@ -1337,7 +1332,6 @@ mod tests {
             multi_storey: false,
             arched: false,
             overshading: Overshading::Average,
-            photos: vec![],
         }
     }
 
@@ -1656,7 +1650,6 @@ mod tests {
             multi_storey: false,
             arched: false,
             overshading: Overshading::Average,
-            photos: vec![],
         });
         assert_eq!(
             roof_window_at(&s, 2.3, 2.3),

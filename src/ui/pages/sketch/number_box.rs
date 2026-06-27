@@ -338,14 +338,21 @@ pub(super) fn render<F: FnMut(UiEvent)>(
             // Overshading is per-WINDOW (not per type), so it shows for every
             // window placement regardless of the type choice above.
             overshading_picker(ui, &mut *view.overshading);
-            // A photo of the window being placed (per-window, like overshading).
-            window_photo_picker(ui, &mut *view.pending_window_photos);
+            // Photos belong to the GROUP (window type). They're collected only
+            // when defining a NEW group (an existing group already has its own);
+            // at least one is required there.
+            if view.wt_existing_id.is_none() {
+                window_photo_picker(ui, &mut *view.pending_window_photos);
+            }
         };
-        // A NEW window type must be named (the model is required, not optional);
-        // an existing type or a non-window tool needs nothing extra. Gates Place.
+        // A NEW window type (group) must be named AND have at least one photo —
+        // both belong to the group, required only when creating it. Reusing an
+        // existing group, or a non-window tool, needs nothing extra. Gates Place.
         let extra_valid = match &window_type {
             WindowTypeChoice::Existing(_) => true,
-            WindowTypeChoice::New { name, .. } => !prompt.offer_window_type || name.is_some(),
+            WindowTypeChoice::New { name, .. } => {
+                !prompt.offer_window_type || (name.is_some() && !photos.is_empty())
+            }
         };
         show_box_multi(
             ctx,
@@ -961,9 +968,10 @@ fn overshading_picker(ui: &mut egui::Ui, overshading: &mut Overshading) {
     });
 }
 
-/// Per-window photo control for the placement box: thumbnails of the photos
-/// picked so far for this window plus an "add photo" button (file dialog on
-/// desktop, camera on Android). The paths are attached to the window on Place.
+/// Photo control for a NEW window-type group in the placement box: thumbnails of
+/// the photos picked so far plus an "add photo" button (file dialog on desktop,
+/// camera on Android). The paths are attached to the window type on Place; at
+/// least one is required for a new group.
 fn window_photo_picker(ui: &mut egui::Ui, pending: &mut Vec<std::path::PathBuf>) {
     ui.horizontal(|ui| {
         ui.label("photo");
@@ -987,6 +995,9 @@ fn window_photo_picker(ui: &mut egui::Ui, pending: &mut Vec<std::path::PathBuf>)
             pending.push(path);
         }
     });
+    if pending.is_empty() {
+        ui.label(RichText::new("⚠ add at least one photo").color(Color32::from_rgb(255, 120, 90)));
+    }
 }
 
 /// Render the window-type picker for the placement box: a dropdown of the types

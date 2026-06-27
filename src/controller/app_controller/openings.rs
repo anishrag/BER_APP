@@ -631,7 +631,18 @@ impl AppController {
         if result.is_ok() {
             for w in record.data.storeys[idx].windows[windows_before..].iter_mut() {
                 w.overshading = overshading;
-                w.photos.extend(stored_photos.iter().cloned());
+            }
+            // Photos belong to the GROUP (window type), shared by all its
+            // windows — append to the resolved type (none for a plain Door).
+            if !stored_photos.is_empty() {
+                if let Some(t) = record
+                    .data
+                    .window_types
+                    .iter_mut()
+                    .find(|t| t.id == type_id)
+                {
+                    t.photos.extend(stored_photos.iter().cloned());
+                }
             }
         }
         match result {
@@ -694,7 +705,17 @@ impl AppController {
             Ok(_) => {
                 for w in record.data.storeys[idx].windows[windows_before..].iter_mut() {
                     w.overshading = overshading;
-                    w.photos.extend(stored_photos.iter().cloned());
+                }
+                // Photos belong to the GROUP (window type), shared by its windows.
+                if !stored_photos.is_empty() {
+                    if let Some(t) = record
+                        .data
+                        .window_types
+                        .iter_mut()
+                        .find(|t| t.id == type_id)
+                    {
+                        t.photos.extend(stored_photos.iter().cloned());
+                    }
                 }
                 self.reseed_opening_anchors(idx);
                 let _ = self.mark_dirty();

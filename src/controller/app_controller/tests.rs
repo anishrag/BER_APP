@@ -8948,7 +8948,8 @@ fn overshading_is_applied_per_window_at_placement() {
 }
 
 /// A photo picked in the placement box is copied into the store and attached to
-/// the placed window (per-window, like overshading).
+/// the placed window's TYPE (group) — photos belong to the group, shared by all
+/// its windows, not the individual window.
 #[test]
 fn window_photo_is_attached_at_placement() {
     use ber_model::ber::fenestration::Overshading;
@@ -8986,11 +8987,22 @@ fn window_photo_is_attached_at_placement() {
     .expect("window places");
     c.materialize();
 
-    let windows = &c.current_record.as_ref().unwrap().data.storeys[0].windows;
-    assert_eq!(windows.len(), 1);
-    assert_eq!(windows[0].photos.len(), 1, "photo attached to the window");
+    let ber = &c.current_record.as_ref().unwrap().data;
+    assert_eq!(ber.storeys[0].windows.len(), 1);
+    // The photo lives on the window's TYPE (the shared group), not the window.
+    let type_id = ber.storeys[0].windows[0].window_type_id;
+    let wt = ber
+        .window_types
+        .iter()
+        .find(|t| t.id == type_id)
+        .expect("window type registered");
+    assert_eq!(
+        wt.photos.len(),
+        1,
+        "photo attached to the window type (group)"
+    );
     assert!(
-        std::path::Path::new(&windows[0].photos[0].file_path).exists(),
+        std::path::Path::new(&wt.photos[0].file_path).exists(),
         "photo copied into the store"
     );
 }
