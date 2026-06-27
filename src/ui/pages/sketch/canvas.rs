@@ -1326,6 +1326,32 @@ pub(super) fn render<F: FnMut(UiEvent)>(
             }));
         }
     }
+    // In 2D NAVIGATION mode (no tool selected) the primary drag PANS — there's
+    // no stroke to draw, so the canvas moves like every other CAD navigate tool.
+    // Gated on every tool/mode being idle so it never double-fires with a tool's
+    // own drag (a mode picked after navigation was entered, or Structure phase).
+    let tools_idle = !view.openings_mode
+        && !view.exposure_mode
+        && !view.floor_exposure_mode
+        && !view.ceiling_exposure_mode
+        && !view.phase_mode
+        && !view.step_mode
+        && !view.ceiling_step_mode
+        && !view.roof_point_mode
+        && !view.partition_mode
+        && !view.living_area_mode
+        && view.current_phase != AssessmentPhase::Structure;
+    if matches!(mode, SketchMode::Storey2D)
+        && view.navigation
+        && tools_idle
+        && !touch_nav_active
+        && response.dragged_by(egui::PointerButton::Primary)
+    {
+        let d = response.drag_delta();
+        if d.x.abs() > 0.0 || d.y.abs() > 0.0 {
+            on_event(UiEvent::Sketch(SketchEvent::PanView { dx: d.x, dy: d.y }));
+        }
+    }
 
     // Pending cut: a primary click picks which candidate region to
     // keep as the living area. Takes priority over stroke/edit input.
@@ -1742,7 +1768,12 @@ pub(super) fn render<F: FnMut(UiEvent)>(
     // opening type on the nearest wall (or opens the wall's elevation in Edit).
     // The elevation overlay, when open, captures its own input (see the
     // elevation render path), so plan taps are gated on it being closed.
-    if view.openings_mode && view.elevation_view.is_none() && !cut_pending && !touch_nav_active {
+    if view.openings_mode
+        && matches!(mode, SketchMode::Storey2D)
+        && view.elevation_view.is_none()
+        && !cut_pending
+        && !touch_nav_active
+    {
         if let Some(t) = canvas_transform(ber, current_storey_idx, rect, vp, false) {
             let tol_world = (14.0 / t.scale()) as f64;
             let tap = response.clicked_by(egui::PointerButton::Primary)
@@ -1804,6 +1835,7 @@ pub(super) fn render<F: FnMut(UiEvent)>(
     // 2D mode and "no overlay is open" (review / pending
     // redraw / dim prompt / cut-pick take priority).
     let primary_available = matches!(mode, SketchMode::Storey2D)
+        && !view.navigation
         && !reviewing
         && !view.pending_redraw
         && !dim_prompting

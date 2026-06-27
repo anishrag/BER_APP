@@ -72,12 +72,38 @@ impl AppController {
     }
 
     pub fn set_edit_mode(&mut self, mode: EditTools) {
+        // Picking an edit tool leaves navigation mode (clicks/drags act again).
+        self.navigation_mode = false;
         if !matches!(mode, EditTools::Move) {
             // Leaving Move mode clears the selection so a stale highlight
             // doesn't carry over into the next tool.
             self.document.edit_state = EditState::default();
         }
         self.sketch_engine.set_edit_tools(mode);
+    }
+
+    /// Whether the canvas is in CAD-style navigation mode (no tool selected — a
+    /// click/drag only moves the view).
+    pub fn navigation_mode(&self) -> bool {
+        self.navigation_mode
+    }
+
+    /// Drop into navigation mode: deselect every tool so the canvas does nothing
+    /// on a tap. Called on a view (2D↔3D) or page change. Turning each area tool
+    /// off also clears its transient state; the edit-tool drawing is gated on the
+    /// `navigation_mode` flag (there's no "no edit tool" otherwise).
+    pub fn enter_navigation_mode(&mut self) {
+        self.set_openings_mode(false);
+        self.set_exposure_mode(false);
+        self.set_floor_exposure_mode(false);
+        self.set_ceiling_exposure_mode(false);
+        self.set_phase_mode(false);
+        self.set_step_mode(false);
+        self.set_ceiling_step_mode(false);
+        self.set_roof_point_mode(false);
+        self.set_living_area_mode(false);
+        self.close_wall_partition();
+        self.navigation_mode = true;
     }
 
     pub fn edit_mode(&self) -> EditTools {

@@ -259,6 +259,12 @@ pub struct AppController {
     /// with no pending placement opens that wall's ELEVATION editor. Mutually
     /// exclusive with the other area tools; gated on a finalised outline.
     openings_mode: bool,
+    /// CAD-style navigation mode: no tool is selected, so a click/drag on the
+    /// canvas only moves the view (pan/orbit) — it draws/places nothing. Entered
+    /// automatically on a view (2D↔3D) or page change so a tool never persists
+    /// into a context where a stray tap would do something unexpected; left by
+    /// picking any tool. Transient session state.
+    navigation_mode: bool,
     /// Which opening the toolbar places next (window / roof window / door /
     /// door+sidelights).
     openings_tool: OpeningToolKind,
@@ -519,6 +525,7 @@ impl AppController {
             pending_roof_ridge: None,
             pending_roof_rect: None,
             openings_mode: false,
+            navigation_mode: false,
             openings_tool: OpeningToolKind::Window,
             pending_opening: None,
             opening_dim_error: None,

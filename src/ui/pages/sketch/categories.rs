@@ -203,6 +203,8 @@ impl Default for CategoryUiState {
 /// so the panel closures don't hold a borrow of it.
 pub struct ToolFlags {
     pub edit_tool: EditTools,
+    /// Navigation mode: no tool selected, so no edit tool is highlighted.
+    pub navigation: bool,
     /// The All-storeys tab is read-only: every mutating tool is disabled,
     /// matching the old toolbar which offered only Fit there.
     pub read_only: bool,
@@ -269,6 +271,7 @@ impl ToolFlags {
     pub fn from_view(view: &SketchView<'_>) -> Self {
         Self {
             edit_tool: view.edit_tool,
+            navigation: view.navigation,
             read_only: view.current_storey_idx.is_none(),
             measurement_prompt_active: view.edit_drag_prompt.is_some()
                 || view.vertex_drop_prompt.is_some(),
@@ -474,7 +477,9 @@ fn tool_ui<F: FnMut(UiEvent)>(
             let enabled = !flags.read_only
                 && !flags.measurement_prompt_active
                 && (matches!(t, EditTools::DrawPerpWalls) || flags.has_floor_plan);
-            let selected = flags.edit_tool == t;
+            // In navigation mode no edit tool is selected (the canvas only
+            // moves the view), so none is highlighted.
+            let selected = !flags.navigation && flags.edit_tool == t;
             let mut resp = ui.add_enabled(
                 enabled,
                 egui::Button::selectable(selected, edit_tool_label(t)),

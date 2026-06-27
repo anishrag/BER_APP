@@ -687,6 +687,9 @@ pub struct SketchView<'a> {
     pub mode: SketchMode,
     pub display: DisplayMode,
     pub edit_tool: EditTools,
+    /// CAD-style navigation mode: no tool selected — canvas clicks/drags only
+    /// move the view (pan/orbit), placing/drawing nothing.
+    pub navigation: bool,
     pub ber: Option<&'a Ber>,
     pub current_storey_idx: Option<usize>,
     pub review: Option<&'a CollinearitySuggestion>,

@@ -920,11 +920,13 @@ impl eframe::App for BerApp {
                                 )
                             };
 
+                            let navigation = self.app_controller.borrow().navigation_mode();
                             let view = SketchView {
                                 current: stroke.as_ref().map(EguiStroke::from),
                                 mode,
                                 display: display_mode,
                                 edit_tool: edit_mode,
+                                navigation,
                                 ber: ber.as_ref(),
                                 current_storey_idx,
                                 review: review.as_ref(),
@@ -1120,7 +1122,12 @@ impl eframe::App for BerApp {
                                             .sketch_start_stroke(pos2_to_point2f(p)),
                                     ),
                                     SketchEvent::ChangeMode(m) => {
-                                        controller.borrow_mut().set_sketch_mode(m)
+                                        // Switching 2D↔3D drops the active tool —
+                                        // CAD-style: the canvas returns to plain
+                                        // navigation so a stray tap does nothing.
+                                        let mut c = controller.borrow_mut();
+                                        c.set_sketch_mode(m);
+                                        c.enter_navigation_mode();
                                     }
                                     SketchEvent::ChangeEditTool(m) => {
                                         controller.borrow_mut().set_edit_mode(m)
@@ -2094,6 +2101,9 @@ impl eframe::App for BerApp {
                     self.sketch_state = SketchState::default();
                     self.navigate_to(Page::Home);
                 } else if let Some(p) = next_page {
+                    // Leaving the current section drops the active sketch tool —
+                    // CAD-style: returning lands in plain navigation, not mid-tool.
+                    self.app_controller.borrow_mut().enter_navigation_mode();
                     self.navigate_to(p);
                 }
             }
