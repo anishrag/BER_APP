@@ -169,7 +169,6 @@ pub struct SketchState {
     /// door+sidelights fields). The box clears the active one on Apply.
     pub opening_width_input: String,
     pub opening_height_input: String,
-    pub opening_sill_input: String,
     /// Door+sidelights composer inputs (sidelight widths + transom height).
     pub sidelight_left_input: String,
     pub sidelight_right_input: String,
@@ -748,7 +747,7 @@ impl eframe::App for BerApp {
                             let (
                                 openings_mode,
                                 openings_tool,
-                                opening_dim_prompt,
+                                opening_fields_prompt,
                                 opening_dim_error,
                                 elevation_view,
                                 roof_window_selected,
@@ -758,7 +757,7 @@ impl eframe::App for BerApp {
                                 (
                                     c.openings_mode(),
                                     c.openings_tool(),
-                                    c.opening_dim_prompt(),
+                                    c.opening_fields_prompt(),
                                     c.opening_dim_error().map(str::to_owned),
                                     c.elevation_view(),
                                     c.roof_window_selection(),
@@ -1035,11 +1034,10 @@ impl eframe::App for BerApp {
                                 autosave_status,
                                 openings_mode,
                                 openings_tool,
-                                opening_dim_prompt,
+                                opening_fields_prompt,
                                 opening_dim_error: opening_dim_error.as_deref(),
                                 opening_width_input: &mut self.sketch_state.opening_width_input,
                                 opening_height_input: &mut self.sketch_state.opening_height_input,
-                                opening_sill_input: &mut self.sketch_state.opening_sill_input,
                                 sidelight_left_input: &mut self.sketch_state.sidelight_left_input,
                                 sidelight_right_input: &mut self.sketch_state.sidelight_right_input,
                                 transom_input: &mut self.sketch_state.transom_input,
@@ -1577,14 +1575,19 @@ impl eframe::App for BerApp {
                                             .borrow_mut()
                                             .openings_pointer_down(world_x, world_y, tol);
                                     }
-                                    // The staged-placement methods set their own inline
-                                    // error (read back via `opening_dim_error()`), so the
+                                    // The placement methods set their own inline error
+                                    // (read back via `opening_dim_error()`), so the
                                     // Result is intentionally dropped here.
-                                    SketchEvent::ApplyOpeningDim(value) => {
-                                        let _ = controller.borrow_mut().apply_opening_dim(value);
-                                    }
-                                    SketchEvent::SkipOpeningDim => {
-                                        let _ = controller.borrow_mut().skip_opening_dim();
+                                    SketchEvent::PlaceOpening {
+                                        width_m,
+                                        height_m,
+                                        left,
+                                        right,
+                                        transom,
+                                    } => {
+                                        let _ = controller
+                                            .borrow_mut()
+                                            .place_opening(width_m, height_m, left, right, transom);
                                     }
                                     SketchEvent::FillOpeningSurface => {
                                         let _ = controller.borrow_mut().fill_opening_surface();

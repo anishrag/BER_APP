@@ -8642,33 +8642,43 @@ fn place_window_via_controller_persists_and_undoes() {
     );
 }
 
-/// The STAGED placement flow (toolbar tool → tap → floating box per field):
-/// selecting the tool enters openings mode, the tap starts a width→height→sill
-/// flow, and feeding the three measurements places a window with a DEFAULT
-/// window type (glazing/frame refined later in Edit on surface).
+/// The multi-field placement (toolbar tool → tap → floating box with Width +
+/// Height): selecting the tool enters openings mode, the tap stages the host and
+/// asks for both measurements at once, and `place_opening` lands a window with a
+/// DEFAULT window type + DEFAULT 1 m sill (both refined later — type in Edit on
+/// surface, sill in the 2D view).
 #[test]
-fn staged_window_flow_places_after_three_measurements() {
+fn multi_field_window_places_with_default_sill() {
     let mut c = dimensioned_square_controller();
     c.materialize();
     // One toolbar action both enters openings mode and selects the tool.
     c.select_opening_tool(OpeningToolKind::Window);
     assert!(c.openings_mode());
     c.openings_pointer_down(5.0, -0.2, 0.5);
-    // The floating box now asks for the width (step 1 of 3).
-    let p = c.opening_dim_prompt().expect("flow started");
-    assert_eq!((p.step, p.total), (1, 3));
-    c.apply_opening_dim(1.0).expect("width");
-    assert_eq!(c.opening_dim_prompt().expect("height stage").step, 2);
-    c.apply_opening_dim(1.2).expect("height");
-    assert_eq!(c.opening_dim_prompt().expect("sill stage").step, 3);
-    c.apply_opening_dim(1.0).expect("sill places the window");
-    // Last field placed it: the flow is gone and the window is in.
-    assert!(c.opening_dim_prompt().is_none(), "flow finished");
+    // The floating box asks for Width + Height (two fields, both required) — no
+    // sill field.
+    let p = c.opening_fields_prompt().expect("placement staged");
+    assert_eq!(p.fields.len(), 2, "width + height only (no sill)");
+    assert!(p.fields.iter().all(|f| f.required));
+    // Width + height entered together; sill is NOT supplied (defaults to 1 m).
+    c.place_opening(1.0, 1.2, None, None, None)
+        .expect("window places");
+    assert!(c.opening_fields_prompt().is_none(), "placement finished");
     c.materialize();
     let ber = &c.current_record.as_ref().unwrap().data;
     assert_eq!(ber.storeys[0].windows.len(), 1, "window placed");
     assert_eq!(ber.window_types.len(), 1, "default window type registered");
     assert!(!ber.storeys[0].windows[0].multi_storey, "plain window");
+    // The default 1 m sill landed on the placement.
+    match &ber.storeys[0].windows[0].placement {
+        Some(ber_model::ber::fenestration::OpeningPlacement::Wall { sill_m, .. }) => {
+            assert!(
+                (sill_m - 1.0).abs() < 1e-4,
+                "default 1 m sill, got {sill_m}"
+            );
+        }
+        other => panic!("expected a wall placement, got {other:?}"),
+    }
     // Undo removes it (BER-side state is snapshotted).
     c.undo().expect("undo");
     c.materialize();

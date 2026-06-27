@@ -31,7 +31,6 @@ use std::time::Duration;
 use egui::{Align2, Color32, Id, RichText};
 
 use super::{SketchEvent, SketchView};
-use crate::controller::app_controller::OpeningDimField;
 use crate::number_entry::bluetooth::{LaserSource, Status};
 use crate::number_entry::{apply, parse_dimension_expression, Key};
 use crate::ui::pages::events::UiEvent;
@@ -63,18 +62,32 @@ struct Action {
     /// Hardware-Enter in the expression field triggers this action. At most one
     /// action per prompt is the primary.
     primary: bool,
-    /// Clear the expression buffer after firing (the prefilled prompts —
+    /// Clear the expression buffer(s) after firing (the prefilled prompts —
     /// position, roof lengths — keep their value instead).
     clear: bool,
-    /// Builds the event from the parsed value (0.0 for `needs_value == false`).
-    event: Box<dyn Fn(f32) -> SketchEvent>,
+    /// Builds the event from the parsed field values (index-aligned with the
+    /// box's fields; `None` where a field is blank/unparsable). Single-value
+    /// prompts get a one-element slice.
+    event: Box<dyn Fn(&[Option<f32>]) -> SketchEvent>,
 }
 
 impl Action {
+    /// A single-value action — the common case. The closure gets the one field's
+    /// value (0.0 if somehow blank, but `needs_value` gates that away).
     fn new(
         label: impl Into<String>,
         hint: &'static str,
         event: impl Fn(f32) -> SketchEvent + 'static,
+    ) -> Self {
+        Action::new_multi(label, hint, move |vs| {
+            event(vs.first().copied().flatten().unwrap_or(0.0))
+        })
+    }
+    /// A multi-field action — the closure gets every field's parsed value.
+    fn new_multi(
+        label: impl Into<String>,
+        hint: &'static str,
+        event: impl Fn(&[Option<f32>]) -> SketchEvent + 'static,
     ) -> Self {
         Action {
             label: label.into(),
@@ -120,34 +133,25 @@ pub(super) fn render<F: FnMut(UiEvent)>(
 
     laser_autodetect(ctx, view);
 
-    // ── Window/door placement: one measurement at a time ─────────────────────
-    // The staged opening fields (width → height → sill, or the door+sidelights
-    // fields) run through the SAME floating box / keypad / laser as every other
-    // measurement. Openings mode is exclusive with the plan prompts below, so
-    // this branch is safe to take first.
-    if let Some(p) = view.opening_dim_prompt.as_ref() {
-        let field = p.field;
-        let title = p.title.clone();
-        let subtitle = format!("step {} of {}", p.step, p.total);
-        let hint = p.hint.clone();
-        let (skippable, offer_full) = (p.skippable, p.offer_full_surface);
+    // ── Window/door placement: size entry in ONE multi-field box ─────────────
+    // Width + Height (and the door+sidelights lights) live together in the same
+    // floating box, sharing the keypad / laser — a laser shot fills the focused
+    // field then jumps to the next. Openings mode is exclusive with the plan
+    // prompts below, so this branch is safe to take first.
+    if let Some(prompt) = view.opening_fields_prompt.as_ref() {
+        let title = prompt.title.clone();
         let error = view.opening_dim_error;
-        let mut actions = vec![Action::new(
-            "Place",
-            "Use this measurement",
-            SketchEvent::ApplyOpeningDim,
-        )
+        let mut actions = vec![Action::new_multi("Place", "Place this opening", |vs| {
+            SketchEvent::PlaceOpening {
+                width_m: vs.first().copied().flatten().unwrap_or(0.0),
+                height_m: vs.get(1).copied().flatten().unwrap_or(0.0),
+                left: vs.get(2).copied().flatten(),
+                right: vs.get(3).copied().flatten(),
+                transom: vs.get(4).copied().flatten(),
+            }
+        })
         .primary()];
-        if skippable {
-            actions.push(
-                Action::new("Skip", "Leave this one out", |_| {
-                    SketchEvent::SkipOpeningDim
-                })
-                .bare()
-                .with_clear(),
-            );
-        }
-        if offer_full {
+        if prompt.offer_full_surface {
             actions.push(
                 Action::new(
                     "Fill whole surface",
@@ -165,24 +169,50 @@ pub(super) fn render<F: FnMut(UiEvent)>(
             .bare()
             .with_clear(),
         );
-        let buf = match field {
-            OpeningDimField::Width | OpeningDimField::DoorWidth => &mut *view.opening_width_input,
-            OpeningDimField::Height | OpeningDimField::DoorHeight => {
-                &mut *view.opening_height_input
-            }
-            OpeningDimField::Sill => &mut *view.opening_sill_input,
-            OpeningDimField::LeftLight => &mut *view.sidelight_left_input,
-            OpeningDimField::RightLight => &mut *view.sidelight_right_input,
-            OpeningDimField::Transom => &mut *view.transom_input,
-        };
-        show_box(
+        // Bind each field to its own buffer (disjoint borrows of distinct view
+        // fields). Width + Height are always present; lights only when listed.
+        let f = &prompt.fields;
+        let mut box_fields = vec![
+            BoxField {
+                label: &f[0].label,
+                hint: f[0].hint,
+                buf: &mut *view.opening_width_input,
+                required: f[0].required,
+            },
+            BoxField {
+                label: &f[1].label,
+                hint: f[1].hint,
+                buf: &mut *view.opening_height_input,
+                required: f[1].required,
+            },
+        ];
+        if f.len() > 2 {
+            box_fields.push(BoxField {
+                label: &f[2].label,
+                hint: f[2].hint,
+                buf: &mut *view.sidelight_left_input,
+                required: false,
+            });
+            box_fields.push(BoxField {
+                label: &f[3].label,
+                hint: f[3].hint,
+                buf: &mut *view.sidelight_right_input,
+                required: false,
+            });
+            box_fields.push(BoxField {
+                label: &f[4].label,
+                hint: f[4].hint,
+                buf: &mut *view.transom_input,
+                required: false,
+            });
+        }
+        show_box_multi(
             ctx,
             rect,
             &title,
-            Some(&subtitle),
-            &hint,
+            None,
             error,
-            buf,
+            &mut box_fields,
             &actions,
             &mut view.cat_state.input_mode,
             &mut view.cat_state.input_mode_pinned,
@@ -686,9 +716,21 @@ fn roof_ridge_cancel() -> Action {
     .with_clear()
 }
 
-/// Draw the floating window: the input-mode toggle, the question (title bar /
-/// drag handle), the running expression, the input area (keypad or laser), then
-/// the action buttons.
+/// One labelled text field in the floating box. Most prompts have a single one
+/// (no label); the window/door placement has several (Width, Height, …) sharing
+/// one keypad / laser, with focus moving between them.
+struct BoxField<'a> {
+    /// Shown to the left of the box; empty for a single-value prompt.
+    label: &'a str,
+    hint: &'a str,
+    buf: &'a mut String,
+    /// An action that `needs_value` is enabled only once every REQUIRED field
+    /// parses; optional fields (e.g. door+sidelights lights) may stay blank.
+    required: bool,
+}
+
+/// Single-value floating box — the common case (one unlabelled field). Thin
+/// wrapper over [`show_box_multi`] so every prompt shares one renderer.
 #[allow(clippy::too_many_arguments)]
 fn show_box<F: FnMut(UiEvent)>(
     ctx: &egui::Context,
@@ -704,6 +746,53 @@ fn show_box<F: FnMut(UiEvent)>(
     laser: &mut LaserSource,
     on_event: &mut F,
 ) {
+    let mut fields = [BoxField {
+        label: "",
+        hint,
+        buf,
+        required: true,
+    }];
+    show_box_multi(
+        ctx,
+        rect,
+        title,
+        subtitle,
+        error,
+        &mut fields,
+        actions,
+        mode,
+        mode_pinned,
+        laser,
+        on_event,
+    );
+}
+
+/// Draw the floating window: the input-mode toggle, the question (title bar /
+/// drag handle), one or more labelled expression fields, the shared input area
+/// (keypad or laser), then the action buttons. The keypad / laser act on the
+/// FOCUSED field; a laser reading auto-advances focus to the next field, so the
+/// assessor can shoot Width, then Height, without touching the screen.
+#[allow(clippy::too_many_arguments)]
+fn show_box_multi<F: FnMut(UiEvent)>(
+    ctx: &egui::Context,
+    rect: egui::Rect,
+    title: &str,
+    subtitle: Option<&str>,
+    error: Option<&str>,
+    fields: &mut [BoxField<'_>],
+    actions: &[Action],
+    mode: &mut InputMode,
+    mode_pinned: &mut bool,
+    laser: &mut LaserSource,
+    on_event: &mut F,
+) {
+    let focus_id = Id::new("ber_number_entry_focus");
+    let parse_all = |fields: &[BoxField<'_>]| -> Vec<Option<f32>> {
+        fields
+            .iter()
+            .map(|f| parse_dimension_expression(f.buf.as_str()))
+            .collect()
+    };
     egui::Window::new(title)
         // Stable id (the title changes per prompt) so the dragged position is
         // remembered across prompts.
@@ -724,46 +813,88 @@ fn show_box<F: FnMut(UiEvent)>(
                 ui.label(RichText::new(sub).color(Color32::from_gray(170)));
             }
 
-            // Running expression: editable so a hardware keyboard still works on
-            // desktop; the keypad (or laser) below edits the same buffer.
-            let resp = ui.add(
-                egui::TextEdit::singleline(buf)
-                    .desired_width(KEY * 4.0 + 18.0)
-                    .font(egui::TextStyle::Heading)
-                    .hint_text(hint),
-            );
-            let enter = resp.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
+            // Which field the keypad / laser drives. Persisted across frames so a
+            // button press doesn't lose it; updated when a field gains focus.
+            let mut focus = ui
+                .ctx()
+                .data(|d| d.get_temp::<usize>(focus_id))
+                .unwrap_or(0)
+                .min(fields.len().saturating_sub(1));
+
+            // One row per field: optional label + an editable expression box
+            // (so a hardware keyboard still works). Tapping a box focuses it.
+            let mut responses = Vec::with_capacity(fields.len());
+            let mut enter = false;
+            let labelled = fields.iter().any(|f| !f.label.is_empty());
+            for (i, f) in fields.iter_mut().enumerate() {
+                ui.horizontal(|ui| {
+                    if labelled {
+                        let col = if i == focus {
+                            Color32::WHITE
+                        } else {
+                            Color32::from_gray(150)
+                        };
+                        ui.add_sized(
+                            [54.0, KEY * 0.5],
+                            egui::Label::new(RichText::new(f.label).color(col)).selectable(false),
+                        );
+                    }
+                    let resp = ui.add(
+                        egui::TextEdit::singleline(f.buf)
+                            .desired_width(KEY * 4.0 + 18.0)
+                            .font(egui::TextStyle::Heading)
+                            .hint_text(f.hint),
+                    );
+                    if resp.gained_focus() {
+                        focus = i;
+                    }
+                    if resp.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
+                        enter = true;
+                    }
+                    responses.push(resp);
+                });
+            }
 
             ui.add_space(4.0);
-            // One row: the input area (keypad in Keypad mode, the laser
-            // connect/status panel in Laser mode), then the prompt's action
-            // buttons (big and colour-coded) down the right.
-            let mut fired: Option<&Action> = None;
+            let mut fired: Option<usize> = None;
+            let mut laser_advanced = false;
             ui.horizontal(|ui| {
                 match mode {
                     InputMode::Keypad => {
                         // Stay attached for detection, but don't let readings
                         // pile up while the keypad's in charge.
                         let _ = laser.poll();
-                        digit_grid(ui, buf);
-                        plus_minus(ui, buf);
+                        digit_grid(ui, &mut fields[focus].buf);
+                        plus_minus(ui, &mut fields[focus].buf);
                     }
                     InputMode::Laser => {
-                        // The laser fills the buffer; +/− are still here so the
-                        // assessor can sum several shots (point, +, point, …).
-                        laser_panel(ctx, ui, laser, buf);
-                        plus_minus(ui, buf);
+                        // A reading sets the focused field, then focus advances to
+                        // the next one (shoot Width → Height → … hands-free). +/−
+                        // still sum several shots into one field.
+                        if let Some(reading) = laser.poll() {
+                            crate::number_entry::set_current_term(
+                                &mut fields[focus].buf,
+                                reading.metres,
+                            );
+                            laser_advanced = true;
+                        }
+                        laser_status_panel(ctx, ui, laser);
+                        plus_minus(ui, &mut fields[focus].buf);
                     }
                 }
                 ui.add_space(8.0);
                 // Parse AFTER the input edits so a just-pressed key (or a fresh
                 // laser reading) enables the action buttons this same frame.
-                let parsed = parse_dimension_expression(buf);
+                let parsed = parse_all(fields);
+                let all_required = fields
+                    .iter()
+                    .zip(&parsed)
+                    .all(|(f, v)| !f.required || v.is_some());
                 ui.vertical(|ui| {
-                    for a in actions {
-                        let enabled = !a.needs_value || parsed.is_some();
+                    for (ai, a) in actions.iter().enumerate() {
+                        let enabled = !a.needs_value || all_required;
                         if action_button(ui, a, enabled) {
-                            fired = Some(a);
+                            fired = Some(ai);
                         }
                     }
                 });
@@ -773,21 +904,34 @@ fn show_box<F: FnMut(UiEvent)>(
                 ui.label(RichText::new(format!("⚠ {err}")).color(Color32::from_rgb(255, 120, 90)));
             }
 
-            let parsed = parse_dimension_expression(buf);
+            let parsed = parse_all(fields);
+            let all_required = fields
+                .iter()
+                .zip(&parsed)
+                .all(|(f, v)| !f.required || v.is_some());
             // Enter triggers the primary action when its value requirement is met.
             if enter && fired.is_none() {
-                if let Some(a) = actions.iter().find(|a| a.primary) {
-                    if !a.needs_value || parsed.is_some() {
-                        fired = Some(a);
+                if let Some(ai) = actions.iter().position(|a| a.primary) {
+                    if !actions[ai].needs_value || all_required {
+                        fired = Some(ai);
                     }
                 }
             }
-            if let Some(a) = fired {
-                on_event(UiEvent::Sketch((a.event)(parsed.unwrap_or(0.0))));
+            if let Some(ai) = fired {
+                let a = &actions[ai];
+                on_event(UiEvent::Sketch((a.event)(&parsed)));
                 if a.clear {
-                    buf.clear();
+                    for f in fields.iter_mut() {
+                        f.buf.clear();
+                    }
+                    focus = 0;
                 }
+            } else if laser_advanced && focus + 1 < fields.len() {
+                // Move to the next field and give it the cursor for the next shot.
+                focus += 1;
+                responses[focus].request_focus();
             }
+            ui.ctx().data_mut(|d| d.insert_temp(focus_id, focus));
         });
 }
 
@@ -924,18 +1068,13 @@ fn laser_autodetect(ctx: &egui::Context, view: &mut SketchView<'_>) {
     }
 }
 
-/// Laser-mode input area (replaces the keypad): pure RECEIVING. There's no
+/// Laser-mode status panel (replaces the keypad): pure DISPLAY. There's no
 /// connect button and no scan — entering Laser mode auto-attaches to the
 /// already-paired Disto and listens. The assessor points the device and presses
-/// ITS button; the reading streams in and fills the expression, then they press
-/// Apply (or re-shoot). Shows a status line, and a Retry only if attaching
+/// ITS button; the reading is polled + applied by the caller ([`show_box_multi`],
+/// which then advances focus). Shows a status line, and a Retry only if attaching
 /// failed. Sized to roughly match the keypad's footprint so the box doesn't jump.
-fn laser_panel(ctx: &egui::Context, ui: &mut egui::Ui, laser: &mut LaserSource, buf: &mut String) {
-    // A fresh reading sets the CURRENT term — overwriting an unconfirmed value,
-    // or starting a new term after a pressed +/− (so shots can be summed).
-    if let Some(reading) = laser.poll() {
-        crate::number_entry::set_current_term(buf, reading.metres);
-    }
+fn laser_status_panel(ctx: &egui::Context, ui: &mut egui::Ui, laser: &mut LaserSource) {
     // Attaching is owned by `laser_autodetect` (runs every frame); here we just
     // reflect status and offer a manual Retry on error.
     let status = laser.status();

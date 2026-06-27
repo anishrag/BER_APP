@@ -26,9 +26,9 @@ use egui::Pos2;
 
 use crate::controller::app_controller::{
     AssessmentPhase, ChecklistItem, DimensionPromptUiData, EditDragPromptUiData, ElevationView,
-    ExposureSelection, NewStoreyPromptUiData, OpeningDimPromptUiData, OpeningToolKind,
-    PartitionView, PhotoView, PositionPromptUiData, ReviewView, RiserView, SelectMode, SnapTagView,
-    StructureEdit, SurfaceKind, VertexDropPromptUiData, WallExposureView,
+    ExposureSelection, NewStoreyPromptUiData, OpeningFieldsPrompt, OpeningToolKind, PartitionView,
+    PhotoView, PositionPromptUiData, ReviewView, RiserView, SelectMode, SnapTagView, StructureEdit,
+    SurfaceKind, VertexDropPromptUiData, WallExposureView,
 };
 use crate::ui::pages::events::UiEvent;
 use crate::ui::render::ViewParams;
@@ -416,12 +416,16 @@ pub enum SketchEvent {
         world_y: f64,
         tol: f64,
     },
-    /// Apply the value entered in the floating box for the current staged
-    /// placement field, advancing to the next (or placing on the last).
-    ApplyOpeningDim(f32),
-    /// Skip the current (optional) staged field — door+sidelights lights.
-    SkipOpeningDim,
-    /// Abandon the in-flight staged placement.
+    /// Place the in-flight opening from the floating box's measurements (Width +
+    /// Height, plus the optional door+sidelights lights). Sill defaults to 1 m.
+    PlaceOpening {
+        width_m: f32,
+        height_m: f32,
+        left: Option<f32>,
+        right: Option<f32>,
+        transom: Option<f32>,
+    },
+    /// Abandon the in-flight placement.
     CancelOpeningPlacement,
     /// First-field shortcut: turn the (empty) host wall into a full-surface
     /// "window wall" — no measurements; the whole face becomes one window.
@@ -891,18 +895,17 @@ pub struct SketchView<'a> {
     /// The opening type the toolbar places next (window / roof window / door /
     /// door+sidelights / edit-elevation).
     pub openings_tool: OpeningToolKind,
-    /// The active staged-placement field for the floating number box (width →
-    /// height → sill, or the door+sidelights fields), if a placement is in
-    /// flight. The box collects each measurement (keypad / laser); window type
-    /// is defaulted and refined later in Edit on surface.
-    pub opening_dim_prompt: Option<OpeningDimPromptUiData>,
+    /// The measurement fields the floating box should collect for the in-flight
+    /// placement (Width + Height together; door+sidelights adds the optional
+    /// lights), if a placement is in flight. Window type is defaulted and the
+    /// sill defaults to 1 m — both refined later in Edit on surface / the 2D view.
+    pub opening_fields_prompt: Option<OpeningFieldsPrompt>,
     /// Inline error for the staged placement, shown in the floating box.
     pub opening_dim_error: Option<&'a str>,
-    /// Per-field measurement buffers — the box binds one at a time by the active
-    /// `opening_dim_prompt.field`.
+    /// Per-field measurement buffers — the multi-field box binds each by the
+    /// matching `opening_fields_prompt` entry (Width, Height, then the lights).
     pub opening_width_input: &'a mut String,
     pub opening_height_input: &'a mut String,
-    pub opening_sill_input: &'a mut String,
     /// Door+sidelights composer inputs (optional left/right sidelight + transom).
     pub sidelight_left_input: &'a mut String,
     pub sidelight_right_input: &'a mut String,
