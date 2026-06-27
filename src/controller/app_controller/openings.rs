@@ -5,7 +5,7 @@
 //! ber_model ops; this only sequences them.
 use super::*;
 use ber_model::ber::common::ItemId;
-use ber_model::ber::fenestration::{DoorKind, Frame, Glazing, WindowNameSpecifics};
+use ber_model::ber::fenestration::{DoorKind, Frame, Glazing};
 use ber_model::ber::openings::{self, DoorSidelightsSpec, OpeningError, OpeningRef};
 
 /// Which opening the toolbar places next (or `Edit` to open an elevation).
@@ -121,19 +121,25 @@ pub enum WindowTypeChoice {
         frame: Frame,
         year: u32,
         certified: bool,
+        /// Pane gap(s) in mm (one for double, two for triple). Part of identity.
+        gap: Vec<u32>,
+        /// Optional model name — distinguishes two otherwise-identical types.
+        name: Option<String>,
     },
 }
 
 impl Default for WindowTypeChoice {
     /// The placement box's starting point when no existing type is picked: a new
-    /// double-glazed Wood/UPVC, uncertified, unknown year — the old hardcoded
-    /// default, now overridable in the box.
+    /// double-glazed Wood/UPVC, uncertified, unknown year, no gap/name — the old
+    /// hardcoded default, now overridable in the box.
     fn default() -> Self {
         WindowTypeChoice::New {
             glazing: Glazing::Double,
             frame: Frame::WoodUPVC,
             year: 0,
             certified: false,
+            gap: Vec::new(),
+            name: None,
         }
     }
 }
@@ -147,7 +153,9 @@ pub struct ExistingWindowType {
     pub frame: Frame,
     pub year: u32,
     pub certified: bool,
-    /// Human label, e.g. `"Double · Wood/UPVC · 2010 · Cert"`.
+    pub gap: Vec<u32>,
+    pub name: Option<String>,
+    /// Human label, e.g. `"North bay — Double · Wood/UPVC · 16mm · 2010 · Cert"`.
     pub label: String,
 }
 
@@ -358,14 +366,26 @@ impl AppController {
             .data
             .window_types
             .iter()
-            .filter(|t| used.contains(&t.id) && t.specifics == WindowNameSpecifics::Standard)
-            .map(|t| ExistingWindowType {
-                id: t.id,
-                glazing: t.glazing.clone(),
-                frame: t.frame.clone(),
-                year: t.year,
-                certified: t.certified,
-                label: window_type_label(&t.glazing, &t.frame, t.year, t.certified),
+            .filter(|t| used.contains(&t.id))
+            .map(|t| {
+                let name = t.specifics.name().map(str::to_owned);
+                ExistingWindowType {
+                    id: t.id,
+                    glazing: t.glazing.clone(),
+                    frame: t.frame.clone(),
+                    year: t.year,
+                    certified: t.certified,
+                    gap: t.gap.clone(),
+                    name: name.clone(),
+                    label: window_type_label(
+                        &t.glazing,
+                        &t.frame,
+                        t.year,
+                        t.certified,
+                        &t.gap,
+                        name.as_deref(),
+                    ),
+                }
             })
             .collect()
     }
@@ -403,7 +423,9 @@ impl AppController {
         let Some(record) = self.current_record.as_mut() else {
             return Ok(());
         };
-        let type_id = record.data.ensure_window_type(glazing, frame, year, false);
+        let type_id = record
+            .data
+            .ensure_window_type(glazing, frame, year, false, Vec::new(), None);
         let storey = &mut record.data.storeys[idx];
         let result = openings::add_full_wall_window(storey, wall_id, height_m, type_id);
         self.finish_opening(result.map(|_| ()), undo_snap, pending)
@@ -678,7 +700,9 @@ impl AppController {
         let Some(record) = self.current_record.as_mut() else {
             return Ok(());
         };
-        let type_id = record.data.ensure_window_type(glazing, frame, year, false);
+        let type_id = record
+            .data
+            .ensure_window_type(glazing, frame, year, false, Vec::new(), None);
         let storey = &mut record.data.storeys[idx];
         let result = match pending.target {
             PendingOpeningTarget::Wall {
@@ -763,7 +787,10 @@ impl AppController {
         let Some(record) = self.current_record.as_mut() else {
             return Ok(());
         };
-        let window_type_id = record.data.ensure_window_type(glazing, frame, year, false);
+        let window_type_id =
+            record
+                .data
+                .ensure_window_type(glazing, frame, year, false, Vec::new(), None);
         let storey = &mut record.data.storeys[idx];
         let result = openings::compose_door_sidelights(
             storey,
@@ -1090,9 +1117,17 @@ fn tool_label(tool: OpeningToolKind) -> &'static str {
     }
 }
 
-/// A short label for a window type, e.g. `"Double · Wood/UPVC · 2010 · Cert"`.
-/// Year `0` (unknown) is omitted.
-fn window_type_label(glazing: &Glazing, frame: &Frame, year: u32, certified: bool) -> String {
+/// A short label for a window type, e.g.
+/// `"North bay — Double · Wood/UPVC · 16mm · 2010 · Cert"`. A name (model) is
+/// prefixed; year `0` (unknown) and an empty gap are omitted.
+fn window_type_label(
+    glazing: &Glazing,
+    frame: &Frame,
+    year: u32,
+    certified: bool,
+    gap: &[u32],
+    name: Option<&str>,
+) -> String {
     let g = match glazing {
         Glazing::Single => "Single".to_string(),
         Glazing::Double => "Double".to_string(),
@@ -1105,11 +1140,22 @@ fn window_type_label(glazing: &Glazing, frame: &Frame, year: u32, certified: boo
         Frame::Other(s) => s.clone(),
     };
     let mut label = format!("{g} · {f}");
+    if !gap.is_empty() {
+        let gaps = gap
+            .iter()
+            .map(|n| n.to_string())
+            .collect::<Vec<_>>()
+            .join("/");
+        label.push_str(&format!(" · {gaps}mm"));
+    }
     if year != 0 {
         label.push_str(&format!(" · {year}"));
     }
     label.push_str(if certified { " · Cert" } else { " · No cert" });
-    label
+    match name {
+        Some(n) if !n.trim().is_empty() => format!("{} — {label}", n.trim()),
+        _ => label,
+    }
 }
 
 /// Resolve a [`WindowTypeChoice`] to a concrete shared-type id on the record: an
@@ -1121,14 +1167,16 @@ fn resolve_window_type(data: &mut Ber, choice: WindowTypeChoice) -> ItemId {
         WindowTypeChoice::Existing(id) if data.window_types.iter().any(|t| t.id == id) => id,
         // Stale id (type since deleted) → fall back to the default new type.
         WindowTypeChoice::Existing(_) => {
-            data.ensure_window_type(Glazing::Double, Frame::WoodUPVC, 0, false)
+            data.ensure_window_type(Glazing::Double, Frame::WoodUPVC, 0, false, Vec::new(), None)
         }
         WindowTypeChoice::New {
             glazing,
             frame,
             year,
             certified,
-        } => data.ensure_window_type(glazing, frame, year, certified),
+            gap,
+            name,
+        } => data.ensure_window_type(glazing, frame, year, certified, gap, name),
     }
 }
 

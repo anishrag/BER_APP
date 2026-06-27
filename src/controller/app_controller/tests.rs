@@ -8784,6 +8784,8 @@ fn window_type_picker_reuses_existing_and_adds_only_when_different() {
             frame: Frame::WoodUPVC,
             year: 2010,
             certified: false,
+            gap: Vec::new(),
+            name: None,
         },
     );
     assert_eq!(
@@ -8800,6 +8802,8 @@ fn window_type_picker_reuses_existing_and_adds_only_when_different() {
             frame: Frame::WoodUPVC,
             year: 2010,
             certified: false,
+            gap: Vec::new(),
+            name: None,
         },
     );
     let ber = &c.current_record.as_ref().unwrap().data;
@@ -8817,6 +8821,8 @@ fn window_type_picker_reuses_existing_and_adds_only_when_different() {
             frame: Frame::WoodUPVC,
             year: 2010,
             certified: true,
+            gap: Vec::new(),
+            name: None,
         },
     );
     assert_eq!(
@@ -8825,15 +8831,51 @@ fn window_type_picker_reuses_existing_and_adds_only_when_different() {
         "certified variant is a new type"
     );
 
+    // 3b) Same attrs but a different NAME (model) → a distinct type.
+    place(
+        &mut c,
+        WindowTypeChoice::New {
+            glazing: Glazing::Double,
+            frame: Frame::WoodUPVC,
+            year: 2010,
+            certified: false,
+            gap: Vec::new(),
+            name: Some("Model B".to_string()),
+        },
+    );
+    assert_eq!(
+        c.current_record.as_ref().unwrap().data.window_types.len(),
+        3,
+        "a named model is a new type even with identical attrs"
+    );
+
+    // 3c) Same attrs but a different GAP → a distinct type.
+    place(
+        &mut c,
+        WindowTypeChoice::New {
+            glazing: Glazing::Double,
+            frame: Frame::WoodUPVC,
+            year: 2010,
+            certified: false,
+            gap: vec![16],
+            name: None,
+        },
+    );
+    assert_eq!(
+        c.current_record.as_ref().unwrap().data.window_types.len(),
+        4,
+        "a different gap is a new type"
+    );
+
     // 4) Existing types surface for the picker; reusing one by id adds none.
     let existing = c.existing_window_types();
-    assert_eq!(existing.len(), 2, "two types in use are offered");
+    assert_eq!(existing.len(), 4, "all four types in use are offered");
     let reuse_id = existing[0].id;
     place(&mut c, WindowTypeChoice::Existing(reuse_id));
     let ber = &c.current_record.as_ref().unwrap().data;
     assert_eq!(
         ber.window_types.len(),
-        2,
+        4,
         "reusing an existing adds no type"
     );
     assert_eq!(

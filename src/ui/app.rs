@@ -191,6 +191,11 @@ pub struct SketchState {
     pub wt_frame: ber_model::ber::fenestration::Frame,
     pub wt_year_input: String,
     pub wt_certified: bool,
+    /// Pane gap(s) in mm for a new window type (comma/space separated for the two
+    /// gaps of triple glazing); and an optional model name distinguishing two
+    /// otherwise-identical types.
+    pub wt_gap_input: String,
+    pub wt_name_input: String,
     /// Whether the floating default-ceiling-height entry box is open. Lives here
     /// (not on `categories`, which the view borrows) so the event handler can
     /// toggle it; the view reads it by value. Opened by the Heights tool button,
@@ -1095,6 +1100,8 @@ impl eframe::App for BerApp {
                                 wt_frame: &mut self.sketch_state.wt_frame,
                                 wt_year_input: &mut self.sketch_state.wt_year_input,
                                 wt_certified: &mut self.sketch_state.wt_certified,
+                                wt_gap_input: &mut self.sketch_state.wt_gap_input,
+                                wt_name_input: &mut self.sketch_state.wt_name_input,
                                 existing_window_types,
                                 elevation_view,
                                 roof_window_selected,

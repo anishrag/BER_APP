@@ -101,24 +101,29 @@ impl Ber {
         (ring.len() >= 3).then_some(ring)
     }
 
-    /// Find-or-create a shared `WindowType` for `(glazing, frame, year, certified)`
-    /// and return its id — the window-type analogue of `ensure_*_construction`, so
-    /// identical windows share one type. `certified` is part of the identity (a
-    /// certified and an uncertified window of the same glazing/frame/year are
-    /// distinct types).
+    /// Find-or-create a shared `WindowType` for the full identity
+    /// `(glazing, frame, year, certified, gap, name)` and return its id — the
+    /// window-type analogue of `ensure_*_construction`, so identical windows share
+    /// one type. Every component is part of the identity: in particular a `name`
+    /// distinguishes two otherwise-identical models, and `certified` separates a
+    /// certified from an uncertified type.
     pub fn ensure_window_type(
         &mut self,
         glazing: Glazing,
         frame: Frame,
         year: Year,
         certified: bool,
+        gap: Vec<u32>,
+        name: Option<String>,
     ) -> ItemId {
+        let specifics = WindowNameSpecifics::from_name(name);
         if let Some(t) = self.window_types.iter().find(|t| {
             t.glazing == glazing
                 && t.frame == frame
                 && t.year == year
                 && t.certified == certified
-                && t.specifics == WindowNameSpecifics::Standard
+                && t.gap == gap
+                && t.specifics == specifics
         }) {
             return t.id;
         }
@@ -127,10 +132,10 @@ impl Ber {
             id,
             year,
             glazing,
-            gap: vec![],
+            gap,
             frame,
             certified,
-            specifics: WindowNameSpecifics::Standard,
+            specifics,
             photos: vec![],
             notes: None,
         });

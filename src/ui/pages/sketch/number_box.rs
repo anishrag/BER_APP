@@ -304,6 +304,8 @@ pub(super) fn render<F: FnMut(UiEvent)>(
                 &mut *view.wt_frame,
                 &mut *view.wt_year_input,
                 &mut *view.wt_certified,
+                &mut *view.wt_gap_input,
+                &mut *view.wt_name_input,
             );
         };
         show_box_multi(
@@ -855,8 +857,23 @@ fn current_window_type(view: &SketchView<'_>) -> WindowTypeChoice {
             frame: view.wt_frame.clone(),
             year: view.wt_year_input.trim().parse().unwrap_or(0),
             certified: *view.wt_certified,
+            gap: parse_gaps(view.wt_gap_input),
+            name: {
+                let n = view.wt_name_input.trim();
+                (!n.is_empty()).then(|| n.to_string())
+            },
         },
     }
+}
+
+/// Parse the gap field into mm values — comma/space/slash separated (triple
+/// glazing has two gaps). Non-numeric and zero entries are dropped.
+fn parse_gaps(input: &str) -> Vec<u32> {
+    input
+        .split([',', ' ', '/'])
+        .filter_map(|s| s.trim().parse::<u32>().ok())
+        .filter(|&n| n > 0)
+        .collect()
 }
 
 fn glazing_label(g: &Glazing) -> String {
@@ -880,6 +897,7 @@ fn frame_label(f: &Frame) -> String {
 /// already in use (pick one to JOIN it by id) plus "New type…", and — when New —
 /// the glazing/frame/year/cert fields. `ensure_window_type` dedups on Place, so a
 /// New type that matches an existing one joins it ("only add if different").
+#[allow(clippy::too_many_arguments)]
 fn window_type_picker(
     ui: &mut egui::Ui,
     existing: &[ExistingWindowType],
@@ -888,6 +906,8 @@ fn window_type_picker(
     frame: &mut Frame,
     year: &mut String,
     certified: &mut bool,
+    gap: &mut String,
+    name: &mut String,
 ) {
     ui.separator();
     ui.label(RichText::new("Window type").color(Color32::from_gray(170)));
@@ -936,10 +956,24 @@ fn window_type_picker(
             ui.label("year");
             ui.add(
                 egui::TextEdit::singleline(year)
-                    .desired_width(60.0)
-                    .hint_text("e.g. 2010"),
+                    .desired_width(54.0)
+                    .hint_text("2010"),
+            );
+            ui.label("gap");
+            ui.add(
+                egui::TextEdit::singleline(gap)
+                    .desired_width(54.0)
+                    .hint_text("mm"),
             );
             ui.checkbox(certified, "certified");
+        });
+        ui.horizontal(|ui| {
+            ui.label("name");
+            ui.add(
+                egui::TextEdit::singleline(name)
+                    .desired_width(KEY * 3.0)
+                    .hint_text("model (optional)"),
+            );
         });
     }
 }

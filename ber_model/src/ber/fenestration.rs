@@ -28,6 +28,24 @@ pub enum WindowNameSpecifics {
     Custom(String),
 }
 
+impl WindowNameSpecifics {
+    /// A user-given name (`Custom`), or `None` for the unnamed `Standard` type.
+    pub fn name(&self) -> Option<&str> {
+        match self {
+            WindowNameSpecifics::Standard => None,
+            WindowNameSpecifics::Custom(s) => Some(s),
+        }
+    }
+
+    /// Build from an optional name: a non-empty name → `Custom`, else `Standard`.
+    pub fn from_name(name: Option<String>) -> Self {
+        match name.map(|s| s.trim().to_string()).filter(|s| !s.is_empty()) {
+            Some(s) => WindowNameSpecifics::Custom(s),
+            None => WindowNameSpecifics::Standard,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct WindowType {
     pub id: ItemId,

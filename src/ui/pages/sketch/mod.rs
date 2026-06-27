@@ -940,6 +940,8 @@ pub struct SketchView<'a> {
     pub wt_frame: &'a mut Frame,
     pub wt_year_input: &'a mut String,
     pub wt_certified: &'a mut bool,
+    pub wt_gap_input: &'a mut String,
+    pub wt_name_input: &'a mut String,
     /// Window types already in use on the record — offered in the placement box's
     /// picker so a new window can JOIN an existing type. Empty when none exist.
     pub existing_window_types: Vec<ExistingWindowType>,
