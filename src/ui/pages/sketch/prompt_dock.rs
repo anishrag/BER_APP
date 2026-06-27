@@ -56,25 +56,24 @@ pub(super) fn has_controls(view: &SketchView<'_>) -> bool {
         return view.exposure_selection.is_some() || riser_selected || unset > 0;
     }
     if view.has_floor_plan {
-        // Construction year: the picker (pending) or the "Set rest to Original"
         // Construction year: the year picker (pending) or the always-available
         // "Set rest to Original" shortcut. (Committed-area deletes → Delete panel.)
         if !view.phase_choices.is_empty() && (view.phase_mode || view.phase_pick_pending) {
             return true;
         }
         // Floor steps: NO floating control — amount in the number box, deletes in
-        // the Delete panel. (Nothing here.)
+        // the Delete panel.
         //
-        // Ceiling steps: only the direction / side STAGE buttons.
-        if view.ceiling_step_orientation_pending || view.ceiling_step_side_pending {
+        // Ceiling steps: only the DIRECTION choice (Horizontal / Vertical) is a
+        // real in-box decision. "Tap the side" is a canvas action — its Cancel is
+        // a top-right corner action, not a box.
+        if view.ceiling_step_orientation_pending {
             return true;
         }
-        // Roof: the which-area-slopes buttons or a position-stage Cancel.
-        if !view.roof_ridge_area_options.is_empty()
-            || view.roof_point_position_pending
-            || view.roof_ridge_position_pending
-            || view.roof_rect_position_pending
-        {
+        // Roof: only the which-area-slopes choice is an in-box decision. Pinning a
+        // position is a canvas action (distance in the number box) — its Cancel is
+        // a top-right corner action, not a box.
+        if !view.roof_ridge_area_options.is_empty() {
             return true;
         }
     }
@@ -393,20 +392,15 @@ pub(super) fn render_controls<F: FnMut(UiEvent)>(
             // box, and the committed-region deletes live in the Delete panel.
             // (Nothing to render here.)
             //
-            // The ceiling-step AMOUNT (Up/Down) is entered in the number box; the
-            // floating box keeps only the orientation / side STAGE buttons (the
-            // committed-region deletes live in the Delete panel).
-            if view.ceiling_step_orientation_pending || view.ceiling_step_side_pending {
-                ceiling_step_toolbar(
-                    ui,
-                    view.ceiling_step_orientation_pending,
-                    view.ceiling_step_side_pending,
-                    on_event,
-                );
+            // Ceiling steps: only the DIRECTION choice is an in-box decision; the
+            // amount is in the number box, the "tap a side" Cancel is top-right,
+            // and the deletes are in the Delete panel.
+            if view.ceiling_step_orientation_pending {
+                ceiling_step_toolbar(ui, on_event);
             }
-            // Same pending-with-mode-off rule again. A pending RIDGE or
-            // RECT (the stroke flows sharing roof-point mode) keeps it
-            // reachable too.
+            // Roof: the which-area-slopes choice is the only in-box decision; the
+            // position-stage Cancel is top-right, heights/lengths in the number
+            // box, and apex deletes in the Delete panel.
             if !view.roof_ridge_area_options.is_empty() {
                 // Which-area-slopes buttons (the question is in the bottom bar).
                 for (i, label) in view.roof_ridge_area_options.iter().enumerate() {
@@ -417,42 +411,38 @@ pub(super) fn render_controls<F: FnMut(UiEvent)>(
                 if ui.button("Cancel").clicked() {
                     on_event(UiEvent::Sketch(SketchEvent::CancelPendingRoofRidge));
                 }
-            } else if view.roof_point_position_pending
-                || view.roof_ridge_position_pending
-                || view.roof_rect_position_pending
-            {
-                // Only the position-stage Cancel buttons live here; heights/
-                // lengths are in the number box and the committed-apex deletes
-                // are in the Delete panel.
-                roof_point_toolbar(
-                    ui,
-                    view.roof_point_position_pending,
-                    view.roof_ridge_position_pending,
-                    view.roof_rect_position_pending,
-                    on_event,
-                );
             }
         }
     });
 }
 
-/// Top-right floating ACTION buttons for the active selection — the openings
-/// edit-on-surface controls (Delete, with a confirm step, and the elevation
-/// Done). These are dismiss/confirm actions, so they sit as floating buttons in
-/// the top-right corner of the canvas rather than in the bottom bar. Renders
-/// nothing when there's no actionable selection.
+/// Top-right floating ACTION buttons — dismiss/confirm actions that don't belong
+/// in a control box or the bottom bar: the openings edit-on-surface Delete/Done,
+/// and the Cancel for a canvas-positioning stage (ceiling-step side pick, roof
+/// position pin) whose actual input is a tap on the canvas. Renders nothing when
+/// none apply.
 pub(super) fn render_corner_actions<F: FnMut(UiEvent)>(
     ctx: &egui::Context,
     rect: egui::Rect,
     view: &SketchView<'_>,
     on_event: &mut F,
 ) {
-    if !view.openings_mode {
-        return;
-    }
     let has_elevation = view.elevation_view.is_some();
-    let has_selection = has_elevation || view.roof_window_selected.is_some();
-    if !has_selection {
+    let openings_selection =
+        view.openings_mode && (has_elevation || view.roof_window_selected.is_some());
+    // A canvas-positioning stage in progress → offer just its Cancel here.
+    let stage_cancel = if view.ceiling_step_side_pending {
+        Some(SketchEvent::CancelPendingCeilingStep)
+    } else if view.roof_rect_position_pending {
+        Some(SketchEvent::CancelPendingRoofRect)
+    } else if view.roof_ridge_position_pending {
+        Some(SketchEvent::CancelPendingRoofRidge)
+    } else if view.roof_point_position_pending {
+        Some(SketchEvent::CancelPendingRoofPoint)
+    } else {
+        None
+    };
+    if !openings_selection && stage_cancel.is_none() {
         return;
     }
     let delete_confirm = view.delete_confirm_pending;
@@ -464,21 +454,28 @@ pub(super) fn render_corner_actions<F: FnMut(UiEvent)>(
         .show(ctx, |ui| {
             egui::Frame::popup(ui.style()).show(ui, |ui| {
                 ui.vertical(|ui| {
-                    if delete_confirm {
-                        ui.label("Delete this window?");
-                        ui.horizontal(|ui| {
-                            if ui.button("🗑 Delete").clicked() {
-                                on_event(UiEvent::Sketch(SketchEvent::ConfirmDeleteOpening));
-                            }
-                            if ui.button("Cancel").clicked() {
-                                on_event(UiEvent::Sketch(SketchEvent::CancelDeleteOpening));
-                            }
-                        });
-                    } else if ui.button("🗑 Delete selected").clicked() {
-                        on_event(UiEvent::Sketch(SketchEvent::DeleteSelectedOpening));
+                    if openings_selection {
+                        if delete_confirm {
+                            ui.label("Delete this window?");
+                            ui.horizontal(|ui| {
+                                if ui.button("🗑 Delete").clicked() {
+                                    on_event(UiEvent::Sketch(SketchEvent::ConfirmDeleteOpening));
+                                }
+                                if ui.button("Cancel").clicked() {
+                                    on_event(UiEvent::Sketch(SketchEvent::CancelDeleteOpening));
+                                }
+                            });
+                        } else if ui.button("🗑 Delete selected").clicked() {
+                            on_event(UiEvent::Sketch(SketchEvent::DeleteSelectedOpening));
+                        }
+                        if has_elevation && ui.button("Done").clicked() {
+                            on_event(UiEvent::Sketch(SketchEvent::CloseElevation));
+                        }
                     }
-                    if has_elevation && ui.button("Done").clicked() {
-                        on_event(UiEvent::Sketch(SketchEvent::CloseElevation));
+                    if let Some(ev) = stage_cancel {
+                        if ui.button("Cancel").clicked() {
+                            on_event(UiEvent::Sketch(ev));
+                        }
                     }
                 });
             });
@@ -814,72 +811,32 @@ fn phase_toolbar<F: FnMut(UiEvent)>(
     }
 }
 
-/// Ceiling-step STAGE buttons: the H/V direction picker for a tapped point, or
-/// just a Cancel while the side pick is pending. The AMOUNT (Up/Down) is in the
-/// number box; the committed-region deletes are in the Delete panel.
-fn ceiling_step_toolbar<F: FnMut(UiEvent)>(
-    ui: &mut egui::Ui,
-    orientation_pending: bool,
-    side_pending: bool,
-    on_event: &mut F,
-) {
-    if orientation_pending {
-        // (The "line direction" instruction is in the bottom bar.)
-        if ui
-            .button("Horizontal")
-            .hint("A horizontal step line through the tapped point")
-            .clicked()
-        {
-            on_event(UiEvent::Sketch(SketchEvent::ChooseCeilingStepOrientation {
-                horizontal: true,
-            }));
-        }
-        if ui
-            .button("Vertical")
-            .hint("A vertical step line through the tapped point")
-            .clicked()
-        {
-            on_event(UiEvent::Sketch(SketchEvent::ChooseCeilingStepOrientation {
-                horizontal: false,
-            }));
-        }
-        if ui.button("Cancel").clicked() {
-            on_event(UiEvent::Sketch(SketchEvent::CancelPendingCeilingStep));
-        }
-    } else if side_pending {
-        // (The "tap the side" instruction is in the bottom bar.)
-        if ui.button("Cancel").clicked() {
-            on_event(UiEvent::Sketch(SketchEvent::CancelPendingCeilingStep));
-        }
+/// Ceiling-step DIRECTION picker (Horizontal / Vertical) for a tapped point — the
+/// only in-box decision of the ceiling-step flow. The amount is in the number
+/// box; "tap a side" is a canvas action (its Cancel is a corner action); deletes
+/// are in the Delete panel.
+fn ceiling_step_toolbar<F: FnMut(UiEvent)>(ui: &mut egui::Ui, on_event: &mut F) {
+    // (The "line direction" instruction is in the bottom bar.)
+    if ui
+        .button("Horizontal")
+        .hint("A horizontal step line through the tapped point")
+        .clicked()
+    {
+        on_event(UiEvent::Sketch(SketchEvent::ChooseCeilingStepOrientation {
+            horizontal: true,
+        }));
     }
-}
-
-/// Roof-point (and roof-RIDGE / roof-RECT) NON-numeric controls. The heights
-/// and lengths are entered in the floating number box; the dock keeps the
-/// position-stage Cancels (the distance itself is typed in the box), the
-/// committed-apex list with deletes, and the tap/stroke hint — suppressed
-/// while a number stage is active (`number_pending`) so the box has the floor.
-fn roof_point_toolbar<F: FnMut(UiEvent)>(
-    ui: &mut egui::Ui,
-    point_position_pending: bool,
-    ridge_position_pending: bool,
-    rect_position_pending: bool,
-    on_event: &mut F,
-) {
-    // Each position stage keeps only its Cancel (the instruction is in the
-    // bottom bar; the distance is typed in the box; apex deletes are in the
-    // Delete panel).
-    let position_cancel = |ui: &mut egui::Ui, ev: SketchEvent, on_event: &mut F| {
-        if ui.button("Cancel").clicked() {
-            on_event(UiEvent::Sketch(ev));
-        }
-    };
-    if rect_position_pending {
-        position_cancel(ui, SketchEvent::CancelPendingRoofRect, on_event);
-    } else if ridge_position_pending {
-        position_cancel(ui, SketchEvent::CancelPendingRoofRidge, on_event);
-    } else if point_position_pending {
-        position_cancel(ui, SketchEvent::CancelPendingRoofPoint, on_event);
+    if ui
+        .button("Vertical")
+        .hint("A vertical step line through the tapped point")
+        .clicked()
+    {
+        on_event(UiEvent::Sketch(SketchEvent::ChooseCeilingStepOrientation {
+            horizontal: false,
+        }));
+    }
+    if ui.button("Cancel").clicked() {
+        on_event(UiEvent::Sketch(SketchEvent::CancelPendingCeilingStep));
     }
 }
 
