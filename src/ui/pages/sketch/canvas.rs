@@ -1052,6 +1052,7 @@ pub(super) fn render<F: FnMut(UiEvent)>(
                                         i,
                                         group,
                                         view.phase_choices,
+                                        &view.structure_existing_groups,
                                         editable,
                                         on_event,
                                     );

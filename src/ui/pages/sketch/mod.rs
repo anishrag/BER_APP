@@ -26,9 +26,9 @@ use egui::Pos2;
 
 use crate::controller::app_controller::{
     AssessmentPhase, ChecklistItem, DimensionPromptUiData, EditDragPromptUiData, ElevationView,
-    ExposureSelection, NewStoreyPromptUiData, OpeningFieldsPrompt, OpeningToolKind, PartitionView,
-    PhotoView, PositionPromptUiData, ReviewView, RiserView, SelectMode, SnapTagView, StructureEdit,
-    SurfaceKind, VertexDropPromptUiData, WallExposureView,
+    ExistingGroup, ExposureSelection, NewStoreyPromptUiData, OpeningFieldsPrompt, OpeningToolKind,
+    PartitionView, PhotoView, PositionPromptUiData, ReviewView, RiserView, SelectMode, SnapTagView,
+    StructureEdit, SurfaceKind, VertexDropPromptUiData, WallExposureView,
 };
 use crate::ui::pages::events::UiEvent;
 use crate::ui::render::ViewParams;
@@ -965,6 +965,10 @@ pub struct SketchView<'a> {
     /// The in-flight "Edit attributes" session (selection grouped by
     /// construction), so the panel renders the per-group popups. `None` = none.
     pub structure_edit: Option<&'a StructureEdit>,
+    /// Constructions already in use on this storey — offered in the attribute
+    /// editor so a selection can JOIN an existing group instead of re-entering
+    /// attributes. Empty when no edit session is open.
+    pub structure_existing_groups: Vec<ExistingGroup>,
     /// Candidate regions of a pending Structure carve/cut (world coords) — drawn
     /// to tap between. Empty when no carve is awaiting a pick.
     pub structure_cut_regions: &'a [Vec<(f64, f64)>],

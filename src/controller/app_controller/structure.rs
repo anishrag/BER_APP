@@ -73,10 +73,100 @@ pub struct StructureEdit {
     pub exploded: bool,
 }
 
+/// A construction already in use on the current storey — offered in the attribute
+/// editor so a selection can JOIN an existing group instead of re-entering its
+/// attributes. Picking one applies its `(ty, make-up, phase)` to the active group
+/// (so they share one construction / DEAP group). `name` is the construction's
+/// stored label, for the pick list.
+#[derive(Debug, Clone)]
+pub struct ExistingGroup {
+    pub ty: ConstructionType,
+    pub makeup: ConstructionMakeup,
+    pub phase: ConstructionPhase,
+    pub name: Option<String>,
+}
+
 impl AppController {
     /// The Structure-phase selected region ids — the canvas shades exactly these.
     pub fn structure_selected_ids(&self) -> &HashSet<ItemId> {
         &self.structure_selected
+    }
+
+    /// Distinct COMPLETE constructions already assigned to the current storey's
+    /// surfaces (walls, floors, ceilings) — the "existing groups" the attribute
+    /// editor offers so a selection can join one rather than re-typing its
+    /// attributes. Each `ty` is kind-tagged, so the editor filters to its kind.
+    pub fn structure_existing_groups(&self) -> Vec<ExistingGroup> {
+        fn add(
+            out: &mut Vec<ExistingGroup>,
+            ty: ConstructionType,
+            makeup: ConstructionMakeup,
+            phase: ConstructionPhase,
+            name: Option<String>,
+        ) {
+            if out
+                .iter()
+                .any(|g| g.ty == ty && g.makeup == makeup && g.phase == phase)
+            {
+                return;
+            }
+            out.push(ExistingGroup {
+                ty,
+                makeup,
+                phase,
+                name,
+            });
+        }
+        let mut out = Vec::new();
+        let Some(idx) = self.current_storey_idx else {
+            return out;
+        };
+        let Some(record) = self.current_record.as_ref() else {
+            return out;
+        };
+        let Some(storey) = record.data.storeys.get(idx) else {
+            return out;
+        };
+        for r in &storey.walls.regions {
+            if let Some(c) = record.data.wall_construction(r.construction_id) {
+                if c.is_complete() {
+                    add(
+                        &mut out,
+                        ConstructionType::Wall(c.construction_type),
+                        c.base.construction_makeup.clone(),
+                        c.base.construction_phase.clone(),
+                        c.base.name.clone(),
+                    );
+                }
+            }
+        }
+        for r in &storey.floors.regions {
+            if let Some(c) = record.data.floor_construction(r.construction_id) {
+                if c.is_complete() {
+                    add(
+                        &mut out,
+                        ConstructionType::Floor(c.construction_type),
+                        c.base.construction_makeup.clone(),
+                        c.base.construction_phase.clone(),
+                        c.base.name.clone(),
+                    );
+                }
+            }
+        }
+        for r in &storey.roofs.regions {
+            if let Some(c) = record.data.ceiling_construction(r.construction_id) {
+                if c.is_complete() {
+                    add(
+                        &mut out,
+                        ConstructionType::Ceiling(c.construction_type),
+                        c.base.construction_makeup.clone(),
+                        c.base.construction_phase.clone(),
+                        c.base.name.clone(),
+                    );
+                }
+            }
+        }
+        out
     }
 
     /// Assign a wall CONSTRUCTION (type + make-up + phase) to the given resolved

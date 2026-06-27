@@ -854,6 +854,13 @@ impl eframe::App for BerApp {
                             // Owned copy of the in-flight "Edit attributes" session.
                             let structure_edit =
                                 self.app_controller.borrow().structure_edit().cloned();
+                            // The existing constructions a selection can join (only
+                            // needed while an edit session is open).
+                            let structure_existing_groups = if structure_edit.is_some() {
+                                self.app_controller.borrow().structure_existing_groups()
+                            } else {
+                                Vec::new()
+                            };
                             // Owned copy of the reusable construction-layer library
                             // (the build-up editor's pick list).
                             let layer_library = self
@@ -1077,6 +1084,7 @@ impl eframe::App for BerApp {
                                 structure_select,
                                 structure_selected: &structure_selected,
                                 structure_edit: structure_edit.as_ref(),
+                                structure_existing_groups,
                                 structure_cut_regions: &structure_cut_regions,
                                 pending_structure_split_polygon: &pending_structure_split_polygon,
                                 pending_structure_carves: &pending_structure_carves,

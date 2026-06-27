@@ -12,7 +12,7 @@
 
 use super::{structure, SketchEvent, SketchView};
 use crate::controller::app_controller::{
-    AssessmentPhase, OpeningToolKind, SelectMode, StructureEdit, SurfaceKind,
+    AssessmentPhase, ExistingGroup, OpeningToolKind, SelectMode, StructureEdit, SurfaceKind,
 };
 use crate::number_entry::parse_dimension_expression;
 use crate::ui::pages::events::UiEvent;
@@ -265,6 +265,9 @@ pub struct ToolFlags {
     /// The defined construction phases (Original + extensions) — the choices for
     /// the Structure attribute editor's phase dropdown.
     pub phase_choices: Vec<(ConstructionPhase, String)>,
+    /// Constructions already attributed elsewhere on this storey — the choices
+    /// for the attribute editor's "Add to existing group" picker.
+    pub structure_existing_groups: Vec<ExistingGroup>,
 }
 
 impl ToolFlags {
@@ -304,6 +307,7 @@ impl ToolFlags {
             structure_edit: view.structure_edit.cloned(),
             surface_counts: view.surface_counts,
             phase_choices: view.phase_choices.to_vec(),
+            structure_existing_groups: view.structure_existing_groups.clone(),
         }
     }
 }
@@ -326,6 +330,7 @@ pub fn ribbon<F: FnMut(UiEvent)>(
             flags.structure_edit.as_ref(),
             flags.surface_counts,
             &flags.phase_choices,
+            &flags.structure_existing_groups,
             !flags.read_only,
             on_event,
         );
@@ -369,6 +374,7 @@ pub fn side_panel<F: FnMut(UiEvent)>(
             flags.structure_edit.as_ref(),
             flags.surface_counts,
             &flags.phase_choices,
+            &flags.structure_existing_groups,
             !flags.read_only,
             on_event,
         );

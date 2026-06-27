@@ -18,7 +18,9 @@ use ber_model::ber::structural::{
 };
 
 use super::SketchEvent;
-use crate::controller::app_controller::{EditGroup, SelectMode, StructureEdit, SurfaceKind};
+use crate::controller::app_controller::{
+    EditGroup, ExistingGroup, SelectMode, StructureEdit, SurfaceKind,
+};
 use crate::ui::pages::events::UiEvent;
 
 /// Font size for the per-group attribute editor (the floating windows + the
@@ -77,6 +79,22 @@ const CEILING_TYPES: &[(CeilingConstructionType, &str)] = &[
     (CeilingConstructionType::Other, "Other"),
 ];
 
+/// Label for an existing-group entry in the "Add to existing group" picker:
+/// the group's name if it has one, else its construction-type label.
+fn existing_group_label(eg: &ExistingGroup) -> String {
+    if let Some(n) = eg.name.as_ref().map(|s| s.trim()).filter(|s| !s.is_empty()) {
+        return n.to_string();
+    }
+    let label = match eg.ty {
+        ConstructionType::Wall(t) => WALL_TYPES.iter().find(|(x, _)| *x == t).map(|(_, l)| *l),
+        ConstructionType::Floor(t) => FLOOR_TYPES.iter().find(|(x, _)| *x == t).map(|(_, l)| *l),
+        ConstructionType::Ceiling(t) => {
+            CEILING_TYPES.iter().find(|(x, _)| *x == t).map(|(_, l)| *l)
+        }
+    };
+    label.unwrap_or("—").to_string()
+}
+
 /// Render the Structure tool area: the global MODE row + the global SELECT row +
 /// the "Edit attributes" group editor (when a session is open). `kind` is the
 /// active mode; `select` the active Select subtool; `edit` the in-flight session;
@@ -88,6 +106,7 @@ pub fn structure_panel<F: FnMut(UiEvent)>(
     edit: Option<&StructureEdit>,
     counts: SurfaceCounts,
     phases: &[(ConstructionPhase, String)],
+    existing: &[ExistingGroup],
     enabled: bool,
     on_event: &mut F,
 ) {
@@ -145,7 +164,7 @@ pub fn structure_panel<F: FnMut(UiEvent)>(
                 on_event(UiEvent::Sketch(SketchEvent::BeginStructureEdit));
             }
         }
-        Some(e) => edit_session(ui, e, phases, enabled, on_event),
+        Some(e) => edit_session(ui, e, phases, existing, enabled, on_event),
     }
 }
 
@@ -161,6 +180,7 @@ fn edit_session<F: FnMut(UiEvent)>(
     ui: &mut egui::Ui,
     e: &StructureEdit,
     phases: &[(ConstructionPhase, String)],
+    existing: &[ExistingGroup],
     enabled: bool,
     on_event: &mut F,
 ) {
@@ -185,7 +205,16 @@ fn edit_session<F: FnMut(UiEvent)>(
             });
         }
         if let Some(g) = e.groups.get(e.active) {
-            group_editor_ui(ui, g.ty.kind(), e.active, g, phases, enabled, on_event);
+            group_editor_ui(
+                ui,
+                g.ty.kind(),
+                e.active,
+                g,
+                phases,
+                existing,
+                enabled,
+                on_event,
+            );
         }
     } else {
         ui.label(
@@ -207,12 +236,14 @@ fn edit_session<F: FnMut(UiEvent)>(
 /// emits the matching event for `group_index`. Shared by the side panel
 /// (exploded view's active group) and the canvas's floating per-group windows
 /// (the default in-place view), so both edit a group identically.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn group_editor_ui<F: FnMut(UiEvent)>(
     ui: &mut egui::Ui,
     kind: SurfaceKind,
     group_index: usize,
     g: &EditGroup,
     phases: &[(ConstructionPhase, String)],
+    existing: &[ExistingGroup],
     enabled: bool,
     on_event: &mut F,
 ) {
@@ -238,6 +269,47 @@ pub(crate) fn group_editor_ui<F: FnMut(UiEvent)>(
             group: group_index,
             name: name.clone(),
         }));
+    }
+
+    // "Add to an existing group": apply a construction already in use elsewhere
+    // (its type + build-up + phase) to this selection, so they share one group /
+    // DEAP entry — instead of re-entering the attributes. Picking nothing and
+    // editing the fields below just creates a new group, as before.
+    let relevant: Vec<&ExistingGroup> = existing.iter().filter(|e| e.ty.kind() == kind).collect();
+    if !relevant.is_empty() {
+        ui.add_enabled_ui(enabled, |ui| {
+            egui::ComboBox::from_id_salt(("structure_existing", group_index))
+                .selected_text(egui::RichText::new("Add to existing group…").size(EDITOR_FONT))
+                .show_ui(ui, |ui| {
+                    for eg in &relevant {
+                        if ui
+                            .selectable_label(
+                                false,
+                                egui::RichText::new(existing_group_label(eg)).size(EDITOR_FONT),
+                            )
+                            .clicked()
+                        {
+                            on_event(UiEvent::Sketch(SketchEvent::SetStructureGroupAttrs {
+                                group: group_index,
+                                ty: eg.ty,
+                                makeup: eg.makeup.clone(),
+                                phase: eg.phase.clone(),
+                            }));
+                            // Also adopt the picked group's name so the editor
+                            // visibly reflects the join (attributes alone would
+                            // leave the local name field unchanged).
+                            if let Some(n) =
+                                eg.name.as_ref().map(|s| s.trim()).filter(|s| !s.is_empty())
+                            {
+                                on_event(UiEvent::Sketch(SketchEvent::SetStructureGroupName {
+                                    group: group_index,
+                                    name: n.to_string(),
+                                }));
+                            }
+                        }
+                    }
+                });
+        });
     }
 
     // PHASE dropdown — defaults to the value derived from the stage-1 zones, but
