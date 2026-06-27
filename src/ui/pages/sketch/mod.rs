@@ -1061,11 +1061,14 @@ impl SketchPage {
             }
         });
 
-        // --- Prompt dock: every contextual flow panel renders here, in both
-        // orientations. Collapsed entirely when nothing needs showing.
-        if prompt_dock::has_content(&view) {
+        // --- Bottom bar: the contextual INSTRUCTION line only ("what to do" in
+        // the current mode/flow). The controls themselves float over the canvas
+        // (the flow panel + the top-right action buttons, below).
+        if let Some(text) = prompt_dock::instruction(&view) {
             egui::TopBottomPanel::bottom("sketch_prompt_dock").show_inside(ui, |ui| {
-                prompt_dock::render(ui, &mut view, &mut on_event);
+                ui.add_space(2.0);
+                ui.label(egui::RichText::new(text).color(egui::Color32::from_rgb(195, 195, 195)));
+                ui.add_space(2.0);
             });
         }
 
@@ -1089,6 +1092,25 @@ impl SketchPage {
             // prompt is typed here, in a draggable window over the canvas
             // (constrained to it), rather than in the bottom prompt dock.
             number_box::render(ui.ctx(), canvas_rect, &mut view, &mut on_event);
+            // The contextual flow controls (exposure / phase / step / roof /
+            // new-storey / redraw / curve / vertex / review) float over the
+            // canvas, parked along the bottom; the bottom bar shows only the
+            // instruction for them.
+            if prompt_dock::has_controls(&view) {
+                egui::Area::new(ui.id().with("sketch_flow_panel"))
+                    .order(egui::Order::Foreground)
+                    .fixed_pos(canvas_rect.center_bottom() + egui::vec2(0.0, -8.0))
+                    .pivot(egui::Align2::CENTER_BOTTOM)
+                    .constrain_to(canvas_rect)
+                    .show(ui.ctx(), |ui| {
+                        egui::Frame::popup(ui.style()).show(ui, |ui| {
+                            ui.set_max_width(canvas_rect.width() - 24.0);
+                            prompt_dock::render_controls(ui, &mut view, &mut on_event);
+                        });
+                    });
+            }
+            // Top-right floating action buttons for the active selection.
+            prompt_dock::render_corner_actions(ui.ctx(), canvas_rect, &view, &mut on_event);
         });
 
         // Keyboard shortcuts: Ctrl+Z undo, Ctrl+Shift+Z or Ctrl+Y redo.

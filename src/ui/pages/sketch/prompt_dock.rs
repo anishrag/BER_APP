@@ -17,19 +17,19 @@ use ber_model::ber::common::ConstructionPhase;
 use ber_model::ber::structural::WallExposure;
 use ber_model::ber::structural::{CeilingExposure, FloorExposure};
 
-/// Whether the dock has anything to show this frame. When false the bottom
-/// panel is skipped entirely so the canvas gets the space.
-pub(super) fn has_content(view: &SketchView<'_>) -> bool {
+/// Whether the floating flow panel has interactive controls to show this frame.
+/// When false the panel is skipped so it doesn't draw an empty window. Pure
+/// instruction-only states (no storey, openings placement) are NOT listed — they
+/// surface as the bottom instruction bar / top-right actions, not the panel.
+pub(super) fn has_controls(view: &SketchView<'_>) -> bool {
     // Single-value number prompts (dimension/position/edit-drag/thickness/step
     // & ceiling amounts/roof heights & lengths) are NOT listed here — they
-    // render in the floating number-entry box, not the dock. Only the dock's
-    // own content (mode lists, non-numeric stages, multi-field prompts) counts,
-    // so the dock never draws an empty strip behind the box.
-    view.current_storey_idx.is_none()
-        || view
-            .new_storey_prompt
-            .as_ref()
-            .is_some_and(|p| !p.thickness_pending)
+    // render in the floating number-entry box. Openings placement is NOT here
+    // either (its measurements use the number box; its edit actions are the
+    // top-right floating buttons).
+    view.new_storey_prompt
+        .as_ref()
+        .is_some_and(|p| !p.thickness_pending)
         || view.pending_redraw
         || view.curve_bulge.is_some()
         || view.vertex_drop_prompt.is_some()
@@ -38,7 +38,6 @@ pub(super) fn has_content(view: &SketchView<'_>) -> bool {
         || view.floor_exposure_mode
         || view.ceiling_exposure_mode
         || view.partition_mode
-        || view.openings_mode
         || (view.has_floor_plan
             && ((!view.phase_choices.is_empty() && (view.phase_mode || view.phase_pick_pending))
                 || view.step_mode
@@ -52,6 +51,81 @@ pub(super) fn has_content(view: &SketchView<'_>) -> bool {
                 || !view.roof_ridge_area_options.is_empty()))
 }
 
+/// The contextual one-line INSTRUCTION for the bottom bar — what the assessor
+/// should do in the current mode/flow. The controls themselves live in the
+/// floating flow panel (and the top-right action buttons); this strip is purely
+/// the "what to do" hint. `None` hides the bar.
+pub(super) fn instruction(view: &SketchView<'_>) -> Option<&'static str> {
+    if view.current_storey_idx.is_none() {
+        return Some("Pick a storey tab to edit.");
+    }
+    if view.floor_exposure_mode {
+        return Some("Floor exposures — select floors, then pick their heat-loss exposure.");
+    }
+    if view.ceiling_exposure_mode {
+        return Some("Ceiling exposures — select ceilings, then pick their heat-loss exposure.");
+    }
+    if view
+        .new_storey_prompt
+        .as_ref()
+        .is_some_and(|p| !p.thickness_pending)
+    {
+        return Some("New storey — choose how its outline starts, or draw it.");
+    }
+    if view.pending_redraw {
+        return Some("A storey already exists — choose what this stroke should do.");
+    }
+    if view.curve_bulge.is_some() {
+        return Some("Drag the slider to set the curve radius, then accept it.");
+    }
+    if view.vertex_drop_prompt.is_some() {
+        return Some("Place the vertex — enter any two distances.");
+    }
+    if view.review.is_some() {
+        return Some("Review the suggested straightening.");
+    }
+    if view.partition_mode {
+        return Some("Split the wall face — draw a cut line across it.");
+    }
+    if view.exposure_mode {
+        return Some("Wall exposures — select a wall, then pick its heat-loss exposure.");
+    }
+    if view.openings_mode {
+        return Some(if view.elevation_view.is_some() {
+            "Tap a window to select; drag to move. Use the buttons (top-right) to delete or finish."
+        } else if view.roof_window_selected.is_some() {
+            "Roof window selected — drag in the plan to move it, or delete it (top-right)."
+        } else {
+            "Windows & doors — pick a tool, tap the plan, then enter the size in the box."
+        });
+    }
+    if view.has_floor_plan {
+        if !view.phase_choices.is_empty() && (view.phase_mode || view.phase_pick_pending) {
+            return Some("Construction year — draw an area, then tag its build period.");
+        }
+        if view.step_mode {
+            return Some("Floor steps — draw the step line across the area.");
+        }
+        if view.ceiling_step_mode
+            || view.ceiling_step_orientation_pending
+            || view.ceiling_step_side_pending
+        {
+            return Some("Ceiling steps — draw the step line, then set the level change.");
+        }
+        if !view.roof_ridge_area_options.is_empty() {
+            return Some("Choose which area this ridge should slope.");
+        }
+        if view.roof_point_mode
+            || view.roof_point_position_pending
+            || view.roof_ridge_position_pending
+            || view.roof_rect_position_pending
+        {
+            return Some("Roof shape — tap an apex, or draw a ridge / flat-top, then set heights.");
+        }
+    }
+    None
+}
+
 /// Render the dock. Priority of the prompt chain: read-only notice >
 /// new-storey flow > pending redraw > curve radius > dimension prompt >
 /// position prompt > edit-drag prompt > vertex-drop prompt > collinearity
@@ -61,7 +135,7 @@ pub(super) fn has_content(view: &SketchView<'_>) -> bool {
 /// phase / step / ceiling-step flow toolbars render ALONGSIDE the chain
 /// (as before): e.g. a position prompt can be up while a step amount is
 /// still pending.
-pub(super) fn render<F: FnMut(UiEvent)>(
+pub(super) fn render_controls<F: FnMut(UiEvent)>(
     ui: &mut egui::Ui,
     view: &mut SketchView<'_>,
     on_event: &mut F,
@@ -91,13 +165,6 @@ pub(super) fn render<F: FnMut(UiEvent)>(
         return;
     }
     ui.horizontal_wrapped(|ui| {
-        if view.current_storey_idx.is_none() {
-            ui.label(
-                egui::RichText::new("Pick a storey tab to edit.")
-                    .color(egui::Color32::from_rgb(180, 180, 180)),
-            );
-            return;
-        }
         if let Some(p) = &view.new_storey_prompt {
             new_storey_toolbar(ui, p, view.new_storey_error, on_event);
         } else if view.pending_redraw {
@@ -213,63 +280,57 @@ pub(super) fn render<F: FnMut(UiEvent)>(
                     on_event,
                 );
             }
-            if view.openings_mode {
-                openings_toolbar(
-                    ui,
-                    view.elevation_view.is_some(),
-                    view.roof_window_selected.is_some(),
-                    view.delete_confirm_pending,
-                    on_event,
-                );
-            }
         }
     });
 }
 
-/// The windows/doors DOCK strip. The tool picker now lives in the toolbar and
-/// each placement's measurements are entered in the floating number box (keypad
-/// / laser), so the dock only carries the Edit-on-surface selection controls
-/// (Delete / elevation Done) — plus a short hint otherwise.
-fn openings_toolbar<F: FnMut(UiEvent)>(
-    ui: &mut egui::Ui,
-    has_elevation: bool,
-    roof_window_selected: bool,
-    delete_confirm: bool,
+/// Top-right floating ACTION buttons for the active selection — the openings
+/// edit-on-surface controls (Delete, with a confirm step, and the elevation
+/// Done). These are dismiss/confirm actions, so they sit as floating buttons in
+/// the top-right corner of the canvas rather than in the bottom bar. Renders
+/// nothing when there's no actionable selection.
+pub(super) fn render_corner_actions<F: FnMut(UiEvent)>(
+    ctx: &egui::Context,
+    rect: egui::Rect,
+    view: &SketchView<'_>,
     on_event: &mut F,
 ) {
-    // Surface-edit selection: a wall opening (in the elevation) or a roof window
-    // (selected in plan). Offer Delete (with a confirm step) + an elevation Done.
-    if has_elevation || roof_window_selected {
-        ui.separator();
-        ui.label(if has_elevation {
-            "tap a window to select; drag to move"
-        } else {
-            "roof window selected — drag in plan to move"
-        });
-        if delete_confirm {
-            ui.label("Delete this window?");
-            ui.horizontal(|ui| {
-                if ui.button("🗑 Delete").clicked() {
-                    on_event(UiEvent::Sketch(SketchEvent::ConfirmDeleteOpening));
-                }
-                if ui.button("Cancel").clicked() {
-                    on_event(UiEvent::Sketch(SketchEvent::CancelDeleteOpening));
-                }
-            });
-        } else if ui.button("🗑 Delete selected").clicked() {
-            on_event(UiEvent::Sketch(SketchEvent::DeleteSelectedOpening));
-        }
-        if has_elevation && ui.button("Done").clicked() {
-            on_event(UiEvent::Sketch(SketchEvent::CloseElevation));
-        }
+    if !view.openings_mode {
         return;
     }
-
-    ui.separator();
-    ui.label(
-        egui::RichText::new("  pick a tool, then tap the plan — measurements pop up in the box")
-            .color(egui::Color32::from_rgb(170, 170, 170)),
-    );
+    let has_elevation = view.elevation_view.is_some();
+    let has_selection = has_elevation || view.roof_window_selected.is_some();
+    if !has_selection {
+        return;
+    }
+    let delete_confirm = view.delete_confirm_pending;
+    egui::Area::new(egui::Id::new("sketch_corner_actions"))
+        .order(egui::Order::Foreground)
+        // Down the right edge, below the floating canvas view buttons.
+        .fixed_pos(rect.right_top() + egui::vec2(-8.0, 64.0))
+        .pivot(egui::Align2::RIGHT_TOP)
+        .show(ctx, |ui| {
+            egui::Frame::popup(ui.style()).show(ui, |ui| {
+                ui.vertical(|ui| {
+                    if delete_confirm {
+                        ui.label("Delete this window?");
+                        ui.horizontal(|ui| {
+                            if ui.button("🗑 Delete").clicked() {
+                                on_event(UiEvent::Sketch(SketchEvent::ConfirmDeleteOpening));
+                            }
+                            if ui.button("Cancel").clicked() {
+                                on_event(UiEvent::Sketch(SketchEvent::CancelDeleteOpening));
+                            }
+                        });
+                    } else if ui.button("🗑 Delete selected").clicked() {
+                        on_event(UiEvent::Sketch(SketchEvent::DeleteSelectedOpening));
+                    }
+                    if has_elevation && ui.button("Done").clicked() {
+                        on_event(UiEvent::Sketch(SketchEvent::CloseElevation));
+                    }
+                });
+            });
+        });
 }
 
 /// Surface a rejected entry inline, next to the input that produced it, so
