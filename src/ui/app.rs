@@ -169,10 +169,14 @@ pub struct SketchState {
     /// door+sidelights fields). The box clears the active one on Apply.
     pub opening_width_input: String,
     pub opening_height_input: String,
-    /// Door+sidelights composer inputs (sidelight widths + transom height).
+    /// Door+sidelights composer inputs (sidelight widths + per-side sills +
+    /// transom height + the semicircular-transom toggle).
     pub sidelight_left_input: String,
+    pub sidelight_left_sill_input: String,
     pub sidelight_right_input: String,
+    pub sidelight_right_sill_input: String,
     pub transom_input: String,
+    pub transom_semicircular: bool,
     /// Whether the floating default-ceiling-height entry box is open. Lives here
     /// (not on `categories`, which the view borrows) so the event handler can
     /// toggle it; the view reads it by value. Opened by the Heights tool button,
@@ -1039,8 +1043,15 @@ impl eframe::App for BerApp {
                                 opening_width_input: &mut self.sketch_state.opening_width_input,
                                 opening_height_input: &mut self.sketch_state.opening_height_input,
                                 sidelight_left_input: &mut self.sketch_state.sidelight_left_input,
+                                sidelight_left_sill_input: &mut self
+                                    .sketch_state
+                                    .sidelight_left_sill_input,
                                 sidelight_right_input: &mut self.sketch_state.sidelight_right_input,
+                                sidelight_right_sill_input: &mut self
+                                    .sketch_state
+                                    .sidelight_right_sill_input,
                                 transom_input: &mut self.sketch_state.transom_input,
+                                transom_semicircular: &mut self.sketch_state.transom_semicircular,
                                 elevation_view,
                                 roof_window_selected,
                                 delete_confirm_pending,
@@ -1582,12 +1593,22 @@ impl eframe::App for BerApp {
                                         width_m,
                                         height_m,
                                         left,
+                                        left_sill,
                                         right,
+                                        right_sill,
                                         transom,
+                                        transom_semicircular,
                                     } => {
-                                        let _ = controller
-                                            .borrow_mut()
-                                            .place_opening(width_m, height_m, left, right, transom);
+                                        let _ = controller.borrow_mut().place_opening(
+                                            width_m,
+                                            height_m,
+                                            left,
+                                            left_sill,
+                                            right,
+                                            right_sill,
+                                            transom,
+                                            transom_semicircular,
+                                        );
                                     }
                                     SketchEvent::FillOpeningSurface => {
                                         let _ = controller.borrow_mut().fill_opening_surface();

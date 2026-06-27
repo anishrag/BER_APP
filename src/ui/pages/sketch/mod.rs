@@ -417,13 +417,16 @@ pub enum SketchEvent {
         tol: f64,
     },
     /// Place the in-flight opening from the floating box's measurements (Width +
-    /// Height, plus the optional door+sidelights lights). Sill defaults to 1 m.
+    /// Height, plus the optional door+sidelights extras). Sill defaults to 1 m.
     PlaceOpening {
         width_m: f32,
         height_m: f32,
         left: Option<f32>,
+        left_sill: Option<f32>,
         right: Option<f32>,
+        right_sill: Option<f32>,
         transom: Option<f32>,
+        transom_semicircular: bool,
     },
     /// Abandon the in-flight placement.
     CancelOpeningPlacement,
@@ -906,10 +909,14 @@ pub struct SketchView<'a> {
     /// matching `opening_fields_prompt` entry (Width, Height, then the lights).
     pub opening_width_input: &'a mut String,
     pub opening_height_input: &'a mut String,
-    /// Door+sidelights composer inputs (optional left/right sidelight + transom).
+    /// Door+sidelights composer inputs (optional left/right sidelight + per-side
+    /// sill + transom height + the semicircular-transom toggle).
     pub sidelight_left_input: &'a mut String,
+    pub sidelight_left_sill_input: &'a mut String,
     pub sidelight_right_input: &'a mut String,
+    pub sidelight_right_sill_input: &'a mut String,
     pub transom_input: &'a mut String,
+    pub transom_semicircular: &'a mut bool,
     /// The open per-wall ELEVATION overlay, if any (the unrolled wall + its
     /// draggable openings).
     pub elevation_view: Option<ElevationView>,

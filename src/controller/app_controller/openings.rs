@@ -57,6 +57,8 @@ pub struct OpeningFieldsPrompt {
     /// Offer the "fill whole surface" shortcut (plain Window on an empty wall) —
     /// no measurements, turns the face into a window wall.
     pub offer_full_surface: bool,
+    /// Show the "semicircular transom" checkbox (door+sidelights only).
+    pub offer_semicircular_transom: bool,
     /// Bumped on every fresh host pick — the UI resets the box's field focus when
     /// it changes, so a new placement starts on the first field.
     pub seq: u64,
@@ -352,14 +354,18 @@ impl AppController {
         };
         let mut fields = vec![req(w_label, "e.g. 1.2"), req(h_label, "e.g. 1.4")];
         if p.tool == OpeningToolKind::DoorSidelights {
-            let opt = |label: &str| OpeningFieldSpec {
+            let opt = |label: &str, hint| OpeningFieldSpec {
                 label: label.to_string(),
-                hint: "0 = none",
+                hint,
                 required: false,
             };
-            fields.push(opt("left light (m)"));
-            fields.push(opt("right light (m)"));
-            fields.push(opt("transom (m)"));
+            // Order is the binding contract with the UI + `place_opening`:
+            // [door W, door H, left W, left sill, right W, right sill, transom H].
+            fields.push(opt("left light (m)", "0 = none"));
+            fields.push(opt("left sill (m)", "0 = floor"));
+            fields.push(opt("right light (m)", "0 = none"));
+            fields.push(opt("right sill (m)", "0 = floor"));
+            fields.push(opt("transom (m)", "0 = none"));
         }
         let offer_full_surface = p.tool == OpeningToolKind::Window
             && matches!(p.target, PendingOpeningTarget::Wall { .. })
@@ -368,6 +374,7 @@ impl AppController {
             title: format!("{} · size", tool_label(p.tool)),
             fields,
             offer_full_surface,
+            offer_semicircular_transom: p.tool == OpeningToolKind::DoorSidelights,
             seq: self.placement_seq,
         })
     }
@@ -398,16 +405,21 @@ impl AppController {
 
     /// Place the pending opening from the floating box's measurements, with a
     /// DEFAULT window type (glazing/frame/year refined later in Edit on surface)
-    /// and a DEFAULT 1 m sill (moved later in the 2D elevation). `left`/`right`/
-    /// `transom` are the optional door+sidelights lights. On a model error the
-    /// box stays open with the error shown.
+    /// and a DEFAULT 1 m sill (moved later in the 2D elevation). The `left*` /
+    /// `right*` / `transom*` args are the optional door+sidelights extras
+    /// (`0`/`None` → that piece is absent). On a model error the box stays open
+    /// with the error shown.
+    #[allow(clippy::too_many_arguments)]
     pub fn place_opening(
         &mut self,
         width_m: f32,
         height_m: f32,
         left: Option<f32>,
+        left_sill: Option<f32>,
         right: Option<f32>,
+        right_sill: Option<f32>,
         transom: Option<f32>,
+        transom_semicircular: bool,
     ) -> Result<(), String> {
         /// Sill the placement defaults to; the assessor drags it in the 2D view.
         const DEFAULT_SILL_M: f32 = 1.0;
@@ -479,7 +491,10 @@ impl AppController {
                         door_height_m: height_m,
                         left_sidelight_m: left,
                         right_sidelight_m: right,
+                        left_sill_m: left_sill,
+                        right_sill_m: right_sill,
                         transom_m: transom,
+                        transom_semicircular,
                         window_type_id: type_id,
                         door_type_name: "Door".to_string(),
                     },
@@ -670,7 +685,10 @@ impl AppController {
                 door_height_m: door_h,
                 left_sidelight_m: left,
                 right_sidelight_m: right,
+                left_sill_m: None,
+                right_sill_m: None,
                 transom_m: transom,
+                transom_semicircular: false,
                 window_type_id,
                 door_type_name: "Door".to_string(),
             },

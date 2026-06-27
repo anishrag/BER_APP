@@ -155,13 +155,23 @@ pub(super) fn render<F: FnMut(UiEvent)>(
                 d.insert_temp(Id::new(FOCUS_MEM), 0usize);
             });
         }
-        let mut actions = vec![Action::new_multi("Place", "Place this opening", |vs| {
+        // The semicircular toggle is captured into the Place event by value (the
+        // checkbox below mutates it for the NEXT frame; a Place click is always a
+        // separate interaction, so it reads the settled value).
+        let semicircular = *view.transom_semicircular;
+        let mut actions = vec![Action::new_multi("Place", "Place this opening", move |vs| {
+            // Field order (the controller's contract): door W, door H, left W,
+            // left sill, right W, right sill, transom H.
+            let g = |i: usize| vs.get(i).copied().flatten();
             SketchEvent::PlaceOpening {
-                width_m: vs.first().copied().flatten().unwrap_or(0.0),
-                height_m: vs.get(1).copied().flatten().unwrap_or(0.0),
-                left: vs.get(2).copied().flatten(),
-                right: vs.get(3).copied().flatten(),
-                transom: vs.get(4).copied().flatten(),
+                width_m: g(0).unwrap_or(0.0),
+                height_m: g(1).unwrap_or(0.0),
+                left: g(2),
+                left_sill: g(3),
+                right: g(4),
+                right_sill: g(5),
+                transom: g(6),
+                transom_semicircular: semicircular,
             }
         })
         .primary()];
@@ -184,7 +194,8 @@ pub(super) fn render<F: FnMut(UiEvent)>(
             .with_clear(),
         );
         // Bind each field to its own buffer (disjoint borrows of distinct view
-        // fields). Width + Height are always present; lights only when listed.
+        // fields). Width + Height are always present; the door+sidelights extras
+        // (left W, left sill, right W, right sill, transom H) only when listed.
         let f = &prompt.fields;
         let mut box_fields = vec![
             BoxField {
@@ -210,14 +221,33 @@ pub(super) fn render<F: FnMut(UiEvent)>(
             box_fields.push(BoxField {
                 label: &f[3].label,
                 hint: f[3].hint,
-                buf: &mut *view.sidelight_right_input,
+                buf: &mut *view.sidelight_left_sill_input,
                 required: false,
             });
             box_fields.push(BoxField {
                 label: &f[4].label,
                 hint: f[4].hint,
+                buf: &mut *view.sidelight_right_input,
+                required: false,
+            });
+            box_fields.push(BoxField {
+                label: &f[5].label,
+                hint: f[5].hint,
+                buf: &mut *view.sidelight_right_sill_input,
+                required: false,
+            });
+            box_fields.push(BoxField {
+                label: &f[6].label,
+                hint: f[6].hint,
                 buf: &mut *view.transom_input,
                 required: false,
+            });
+        }
+        let mut checks = Vec::new();
+        if prompt.offer_semicircular_transom {
+            checks.push(BoxCheck {
+                label: "semicircular transom",
+                value: &mut *view.transom_semicircular,
             });
         }
         show_box_multi(
@@ -227,6 +257,7 @@ pub(super) fn render<F: FnMut(UiEvent)>(
             None,
             error,
             &mut box_fields,
+            &mut checks,
             &actions,
             &mut view.cat_state.input_mode,
             &mut view.cat_state.input_mode_pinned,
@@ -743,6 +774,13 @@ struct BoxField<'a> {
     required: bool,
 }
 
+/// A boolean toggle shown under the fields (e.g. the door+sidelights
+/// "semicircular transom" option). Most prompts have none.
+struct BoxCheck<'a> {
+    label: &'a str,
+    value: &'a mut bool,
+}
+
 /// Single-value floating box — the common case (one unlabelled field). Thin
 /// wrapper over [`show_box_multi`] so every prompt shares one renderer.
 #[allow(clippy::too_many_arguments)]
@@ -773,6 +811,7 @@ fn show_box<F: FnMut(UiEvent)>(
         subtitle,
         error,
         &mut fields,
+        &mut [],
         actions,
         mode,
         mode_pinned,
@@ -794,6 +833,7 @@ fn show_box_multi<F: FnMut(UiEvent)>(
     subtitle: Option<&str>,
     error: Option<&str>,
     fields: &mut [BoxField<'_>],
+    checks: &mut [BoxCheck<'_>],
     actions: &[Action],
     mode: &mut InputMode,
     mode_pinned: &mut bool,
@@ -867,6 +907,11 @@ fn show_box_multi<F: FnMut(UiEvent)>(
                     }
                     responses.push(resp);
                 });
+            }
+
+            // Boolean toggles (e.g. "semicircular transom"), under the fields.
+            for c in checks.iter_mut() {
+                ui.checkbox(c.value, c.label);
             }
 
             ui.add_space(4.0);

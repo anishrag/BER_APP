@@ -116,6 +116,13 @@ pub struct Window {
     /// records.
     #[serde(default)]
     pub multi_storey: bool,
+    /// An ARCHED window: the top edge is a half-ellipse rising `height_m` above a
+    /// flat bottom (spanning `width_m`), instead of a flat rectangle top. Used for
+    /// a semicircular/fanlight transom over a door+sidelights assembly. The
+    /// derived `vertices` tessellate the arch. `#[serde(default)]` → false on old
+    /// records.
+    #[serde(default)]
+    pub arched: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

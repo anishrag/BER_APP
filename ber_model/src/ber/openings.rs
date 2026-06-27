@@ -151,11 +151,19 @@ pub fn opening_height(storey: &Storey, r: OpeningRef) -> f32 {
 pub struct DoorSidelightsSpec {
     pub door_width_m: f32,
     pub door_height_m: f32,
-    /// Width of the left/right sidelight window (full door height), if present.
+    /// Width of the left/right sidelight window, if present (`None`/`0` → absent).
     pub left_sidelight_m: Option<f32>,
     pub right_sidelight_m: Option<f32>,
-    /// Height of the transom over the door (door width), if present.
+    /// Sill height (m above floor) of the left/right sidelight — `None`/`0` sits
+    /// it on the floor; a value lifts it (its top still aligns with the door top,
+    /// so its height shrinks to `door_height − sill`).
+    pub left_sill_m: Option<f32>,
+    pub right_sill_m: Option<f32>,
+    /// Height of the transom over the door, if present (`None`/`0` → absent). The
+    /// transom spans the WHOLE assembly width (door + both sidelights).
     pub transom_m: Option<f32>,
+    /// Make the transom a half-ellipse (arched/fanlight) instead of a rectangle.
+    pub transom_semicircular: bool,
     pub window_type_id: ItemId,
     pub door_type_name: String,
 }
@@ -232,6 +240,7 @@ pub fn add_wall_window(
         wall_anchor: None,
         assembly_id: None,
         multi_storey: false,
+        arched: false,
     });
     link_window(storey, wall_id, id);
     // Windows may STACK: if the requested row is horizontally full, place above /
@@ -321,6 +330,7 @@ pub fn add_roof_window(
         wall_anchor: None,
         assembly_id: None,
         multi_storey: false,
+        arched: false,
     });
     Ok(id)
 }
@@ -357,6 +367,7 @@ pub fn add_full_wall_window(
         wall_anchor: None,
         assembly_id: None,
         multi_storey: false,
+        arched: false,
     });
     link_window(storey, wall_id, id);
     Ok(id)
@@ -398,6 +409,7 @@ pub fn add_multi_storey_window(
         wall_anchor: None,
         assembly_id: None,
         multi_storey: true,
+        arched: false,
     });
     link_window(storey, wall_id, id);
     redistribute_or_rollback(storey, wall_id, &[OpeningRef::Window(id)])?;
@@ -470,52 +482,64 @@ pub fn compose_door_sidelights(
     let total_w = left_w + spec.door_width_m + right_w;
     let assembly_left = along_m - total_w / 2.0;
     let mut added: Vec<OpeningRef> = Vec::new();
-    let mut place_window = |storey: &mut Storey, centre: f32, w: f32, h: f32, sill: f32| {
-        let id = ItemId::default();
-        storey.windows.push(Window {
-            id,
-            vertices: vec![],
-            width_m: w,
-            height_m: h,
-            window_type_id: spec.window_type_id,
-            placement: Some(OpeningPlacement::Wall {
-                wall_id,
-                along_m: centre,
-                sill_m: sill,
-            }),
-            wall_anchor: None,
-            assembly_id: Some(assembly_id),
-            multi_storey: false,
-        });
-        link_window(storey, wall_id, id);
-        added.push(OpeningRef::Window(id));
-    };
+    let mut place_window =
+        |storey: &mut Storey, centre: f32, w: f32, h: f32, sill: f32, arched: bool| {
+            let id = ItemId::default();
+            storey.windows.push(Window {
+                id,
+                vertices: vec![],
+                width_m: w,
+                height_m: h,
+                window_type_id: spec.window_type_id,
+                placement: Some(OpeningPlacement::Wall {
+                    wall_id,
+                    along_m: centre,
+                    sill_m: sill,
+                }),
+                wall_anchor: None,
+                assembly_id: Some(assembly_id),
+                multi_storey: false,
+                arched,
+            });
+            link_window(storey, wall_id, id);
+            added.push(OpeningRef::Window(id));
+        };
+    // A sidelight's sill lifts it off the floor; its top still aligns with the
+    // door top, so its height shrinks to `door_height − sill`.
+    let sidelight_sill = |s: Option<f32>| s.unwrap_or(0.0).clamp(0.0, spec.door_height_m);
     if left_w > 0.0 {
+        let sill = sidelight_sill(spec.left_sill_m);
         place_window(
             storey,
             assembly_left + left_w / 2.0,
             left_w,
-            spec.door_height_m,
-            0.0,
+            (spec.door_height_m - sill).max(0.01),
+            sill,
+            false,
         );
     }
-    let door_centre = assembly_left + left_w + spec.door_width_m / 2.0;
     if right_w > 0.0 {
+        let sill = sidelight_sill(spec.right_sill_m);
         place_window(
             storey,
             assembly_left + left_w + spec.door_width_m + right_w / 2.0,
             right_w,
-            spec.door_height_m,
-            0.0,
+            (spec.door_height_m - sill).max(0.01),
+            sill,
+            false,
         );
     }
+    let door_centre = assembly_left + left_w + spec.door_width_m / 2.0;
     if let Some(th) = spec.transom_m.filter(|t| *t > 0.0) {
+        // The transom spans the WHOLE assembly width, centred on it, sitting on
+        // the door top; semicircular → a half-ellipse fanlight.
         place_window(
             storey,
-            door_centre,
-            spec.door_width_m,
+            along_m,
+            total_w,
             th,
             spec.door_height_m,
+            spec.transom_semicircular,
         );
     }
     let door_id = ItemId::default();
@@ -1037,9 +1061,9 @@ pub fn derive_opening_vertices(storey: &mut Storey) {
         .windows
         .iter()
         .map(|w| {
-            w.placement
-                .as_ref()
-                .and_then(|p| opening_vertices(storey, p, w.width_m, w.height_m, w.multi_storey))
+            w.placement.as_ref().and_then(|p| {
+                opening_vertices(storey, p, w.width_m, w.height_m, w.multi_storey, w.arched)
+            })
         })
         .collect();
     for (w, v) in storey.windows.iter_mut().zip(win) {
@@ -1053,7 +1077,7 @@ pub fn derive_opening_vertices(storey: &mut Storey) {
         .map(|d| {
             d.placement
                 .as_ref()
-                .and_then(|p| opening_vertices(storey, p, d.width_m, d.height_m, false))
+                .and_then(|p| opening_vertices(storey, p, d.width_m, d.height_m, false, false))
         })
         .collect();
     for (d, v) in storey.doors.iter_mut().zip(dr) {
@@ -1182,6 +1206,7 @@ fn opening_vertices(
     width_m: f32,
     height_m: f32,
     multi_storey: bool,
+    arched: bool,
 ) -> Option<Vec<(f32, f32, f32)>> {
     match placement {
         OpeningPlacement::Wall {
@@ -1207,6 +1232,23 @@ fn opening_vertices(
             let p = |d: f64| (origin.x + ux * d, origin.y + uy * d);
             let (lx, ly) = p(left);
             let (rx, ry) = p(right);
+            if arched {
+                // Flat bottom (BL → BR) then a half-ellipse arch back over to BL:
+                // a fanlight whose top rises `top − bottom` at the centre.
+                let (centre_d, half_d, rise) =
+                    ((left + right) * 0.5, (right - left) * 0.5, top - bottom);
+                let mut v = vec![
+                    (lx as f32, ly as f32, bottom as f32),
+                    (rx as f32, ry as f32, bottom as f32),
+                ];
+                const N: usize = 16;
+                for i in 1..N {
+                    let th = std::f64::consts::PI * (i as f64) / (N as f64);
+                    let (ax, ay) = p(centre_d + half_d * th.cos());
+                    v.push((ax as f32, ay as f32, (bottom + rise * th.sin()) as f32));
+                }
+                return Some(v);
+            }
             Some(vec![
                 (lx as f32, ly as f32, bottom as f32),
                 (rx as f32, ry as f32, bottom as f32),
@@ -1278,6 +1320,7 @@ mod tests {
             wall_anchor: None,
             assembly_id: None,
             multi_storey: false,
+            arched: false,
         }
     }
 
@@ -1594,6 +1637,7 @@ mod tests {
             wall_anchor: None,
             assembly_id: None,
             multi_storey: false,
+            arched: false,
         });
         assert_eq!(
             roof_window_at(&s, 2.3, 2.3),
@@ -1855,7 +1899,10 @@ mod tests {
                 door_height_m: 2.0,
                 left_sidelight_m: Some(0.4),
                 right_sidelight_m: Some(0.4),
+                left_sill_m: None,
+                right_sill_m: None,
                 transom_m: Some(0.4),
+                transom_semicircular: false,
                 window_type_id: ItemId::default(),
                 door_type_name: "front".into(),
             },
@@ -1882,6 +1929,63 @@ mod tests {
         assert!(
             sidelight_touch,
             "sidelights are flush against the door panel"
+        );
+    }
+
+    #[test]
+    fn door_sidelights_custom_sill_full_width_and_semicircular_transom() {
+        let (mut s, wid) = storey_with_wall(6.0);
+        compose_door_sidelights(
+            &mut s,
+            wid,
+            3.0,
+            DoorSidelightsSpec {
+                door_width_m: 1.0,
+                door_height_m: 2.0,
+                left_sidelight_m: Some(0.4),
+                right_sidelight_m: Some(0.0), // 0 → no right sidelight
+                left_sill_m: Some(0.6),       // custom sill lifts the left light
+                right_sill_m: None,
+                transom_m: Some(0.5),
+                transom_semicircular: true,
+                window_type_id: ItemId::default(),
+                door_type_name: "front".into(),
+            },
+        )
+        .unwrap();
+        derive_opening_vertices(&mut s);
+        // Door + left sidelight + transom = 2 windows (right was 0 → absent).
+        assert_eq!(s.windows.len(), 2, "right sidelight (0) omitted");
+        let total_w = 0.4 + 1.0; // left + door (no right)
+                                 // The left sidelight: custom 0.6 sill, height shrunk so its top meets the
+                                 // door top (2.0 − 0.6 = 1.4).
+        let left = s
+            .windows
+            .iter()
+            .find(|w| (w.width_m - 0.4).abs() < 1e-4)
+            .expect("left sidelight");
+        match &left.placement {
+            Some(OpeningPlacement::Wall { sill_m, .. }) => {
+                assert!((sill_m - 0.6).abs() < 1e-4, "custom sill, got {sill_m}");
+            }
+            _ => panic!(),
+        }
+        assert!(
+            (left.height_m - 1.4).abs() < 1e-4,
+            "top aligns with door top"
+        );
+        // The transom spans the WHOLE assembly width and is arched (its derived
+        // outline is a tessellated arch, not a 4-corner rectangle).
+        let transom = s.windows.iter().find(|w| w.arched).expect("arched transom");
+        assert!(
+            (transom.width_m - total_w).abs() < 1e-4,
+            "transom spans the assembly: {} vs {total_w}",
+            transom.width_m
+        );
+        assert!(
+            transom.vertices.len() > 4,
+            "arched transom is tessellated, got {} verts",
+            transom.vertices.len()
         );
     }
 

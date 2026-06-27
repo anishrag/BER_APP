@@ -8661,7 +8661,7 @@ fn multi_field_window_places_with_default_sill() {
     assert_eq!(p.fields.len(), 2, "width + height only (no sill)");
     assert!(p.fields.iter().all(|f| f.required));
     // Width + height entered together; sill is NOT supplied (defaults to 1 m).
-    c.place_opening(1.0, 1.2, None, None, None)
+    c.place_opening(1.0, 1.2, None, None, None, None, None, false)
         .expect("window places");
     assert!(c.opening_fields_prompt().is_none(), "placement finished");
     c.materialize();
