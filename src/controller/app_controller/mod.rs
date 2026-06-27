@@ -99,8 +99,8 @@ pub use new_storey::NewStoreyPromptUiData;
 use new_storey::{NewStoreyStage, PendingNewStorey};
 use openings::PendingOpening;
 pub use openings::{
-    ElevationView, OpeningField, OpeningFieldSpec, OpeningFieldsPrompt, OpeningPromptUiData,
-    OpeningToolKind, OpeningViewKind,
+    ElevationView, OpeningFieldSpec, OpeningFieldsPrompt, OpeningPromptUiData, OpeningToolKind,
+    OpeningViewKind,
 };
 use partition::PendingCut;
 pub use partition::{
@@ -268,6 +268,9 @@ pub struct AppController {
     /// Inline error for the in-flight placement (e.g. wall too short), shown in
     /// the floating measurement box. Transient.
     opening_dim_error: Option<String>,
+    /// Monotonic counter bumped on each fresh opening host pick. Surfaced in the
+    /// fields prompt so the UI resets the floating box's field focus per placement.
+    placement_seq: u64,
     /// When `Some`, the ELEVATION overlay is open for this wall (by id): the
     /// canvas shows the unrolled wall and drags reposition its openings.
     /// Transient.
@@ -519,6 +522,7 @@ impl AppController {
             openings_tool: OpeningToolKind::Window,
             pending_opening: None,
             opening_dim_error: None,
+            placement_seq: 0,
             elevation_wall: None,
             elevation_drag: None,
             elevation_selection: None,

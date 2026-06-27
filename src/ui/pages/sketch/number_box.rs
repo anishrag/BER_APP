@@ -39,6 +39,10 @@ use crate::ui::widgets::HintExt;
 /// Minimum finger-target size for keypad keys (mirrors the on-screen pads).
 const KEY: f32 = 46.0;
 
+/// egui temp-memory id holding the multi-field box's focused-field index, shared
+/// by [`show_box_multi`] and the openings branch (which resets it per placement).
+const FOCUS_MEM: &str = "ber_number_entry_focus";
+
 /// How the assessor feeds a measurement into the box: the on-screen keypad, or
 /// a paired Bluetooth laser meter. A per-page preference (kept on
 /// [`super::categories::CategoryUiState`]) so it persists across prompts.
@@ -141,6 +145,16 @@ pub(super) fn render<F: FnMut(UiEvent)>(
     if let Some(prompt) = view.opening_fields_prompt.as_ref() {
         let title = prompt.title.clone();
         let error = view.opening_dim_error;
+        // A fresh host pick (new seq) starts the box on its first field, so the
+        // keypad/laser don't keep editing whichever field the last placement left
+        // focused.
+        let seq_id = Id::new("ber_opening_seq");
+        if ctx.data(|d| d.get_temp::<u64>(seq_id)) != Some(prompt.seq) {
+            ctx.data_mut(|d| {
+                d.insert_temp(seq_id, prompt.seq);
+                d.insert_temp(Id::new(FOCUS_MEM), 0usize);
+            });
+        }
         let mut actions = vec![Action::new_multi("Place", "Place this opening", |vs| {
             SketchEvent::PlaceOpening {
                 width_m: vs.first().copied().flatten().unwrap_or(0.0),
@@ -786,7 +800,7 @@ fn show_box_multi<F: FnMut(UiEvent)>(
     laser: &mut LaserSource,
     on_event: &mut F,
 ) {
-    let focus_id = Id::new("ber_number_entry_focus");
+    let focus_id = Id::new(FOCUS_MEM);
     let parse_all = |fields: &[BoxField<'_>]| -> Vec<Option<f32>> {
         fields
             .iter()

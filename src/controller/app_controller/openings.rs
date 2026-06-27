@@ -36,21 +36,10 @@ pub(super) struct PendingOpening {
     pub target: PendingOpeningTarget,
 }
 
-/// One measurement field of an in-flight placement — the UI binds each to a text
-/// buffer in the multi-field floating box (keypad / laser). The window/door case
-/// shows Width + Height together; door+sidelights adds the optional lights.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum OpeningField {
-    Width,
-    Height,
-    LeftLight,
-    RightLight,
-    Transom,
-}
-
-/// One field's presentation in the floating box.
+/// One field's presentation in the multi-field floating box. The UI binds these
+/// to buffers POSITIONALLY (Width, Height, then the door+sidelights lights), so
+/// there's no field-kind tag — the order is the contract.
 pub struct OpeningFieldSpec {
-    pub field: OpeningField,
     pub label: String,
     pub hint: &'static str,
     /// Required fields gate the Place button; optional ones (the door+sidelights
@@ -59,7 +48,8 @@ pub struct OpeningFieldSpec {
 }
 
 /// What the floating box should collect for the in-flight placement: the fields
-/// (one or more), plus whether the "fill whole surface" shortcut is offered.
+/// (always Width + Height, plus the three optional door+sidelights lights), plus
+/// whether the "fill whole surface" shortcut is offered.
 pub struct OpeningFieldsPrompt {
     /// Box title, e.g. `"Window · size"`.
     pub title: String,
@@ -67,6 +57,9 @@ pub struct OpeningFieldsPrompt {
     /// Offer the "fill whole surface" shortcut (plain Window on an empty wall) —
     /// no measurements, turns the face into a window wall.
     pub offer_full_surface: bool,
+    /// Bumped on every fresh host pick — the UI resets the box's field focus when
+    /// it changes, so a new placement starts on the first field.
+    pub seq: u64,
 }
 
 /// What kind of opening a view rectangle is (for colour/label in plan + elevation).
@@ -267,11 +260,13 @@ impl AppController {
                 let target = PendingOpeningTarget::Wall { wall_id, along_m };
                 self.pending_opening = Some(PendingOpening { tool, target });
                 self.opening_dim_error = None;
+                self.placement_seq = self.placement_seq.wrapping_add(1);
             }
             Pick::Roof(region_id, plan) => {
                 let target = PendingOpeningTarget::Roof { region_id, plan };
                 self.pending_opening = Some(PendingOpening { tool, target });
                 self.opening_dim_error = None;
+                self.placement_seq = self.placement_seq.wrapping_add(1);
             }
             Pick::None => {}
         }
@@ -345,32 +340,26 @@ impl AppController {
     /// or `None` when no placement is pending. Window type is defaulted, so no
     /// glazing/frame/year fields — the assessor refines those in Edit on surface.
     pub fn opening_fields_prompt(&self) -> Option<OpeningFieldsPrompt> {
-        use OpeningField::*;
         let p = self.pending_opening.as_ref()?;
         let (w_label, h_label) = match p.tool {
             OpeningToolKind::DoorSidelights => ("door width (m)", "door height (m)"),
             _ => ("width (m)", "height (m)"),
         };
-        let req = |field, label: &str, hint| OpeningFieldSpec {
-            field,
+        let req = |label: &str, hint| OpeningFieldSpec {
             label: label.to_string(),
             hint,
             required: true,
         };
-        let mut fields = vec![
-            req(Width, w_label, "e.g. 1.2"),
-            req(Height, h_label, "e.g. 1.4"),
-        ];
+        let mut fields = vec![req(w_label, "e.g. 1.2"), req(h_label, "e.g. 1.4")];
         if p.tool == OpeningToolKind::DoorSidelights {
-            let opt = |field, label: &str| OpeningFieldSpec {
-                field,
+            let opt = |label: &str| OpeningFieldSpec {
                 label: label.to_string(),
-                hint: "e.g. 0.4",
+                hint: "0 = none",
                 required: false,
             };
-            fields.push(opt(LeftLight, "left light (m)"));
-            fields.push(opt(RightLight, "right light (m)"));
-            fields.push(opt(Transom, "transom (m)"));
+            fields.push(opt("left light (m)"));
+            fields.push(opt("right light (m)"));
+            fields.push(opt("transom (m)"));
         }
         let offer_full_surface = p.tool == OpeningToolKind::Window
             && matches!(p.target, PendingOpeningTarget::Wall { .. })
@@ -379,6 +368,7 @@ impl AppController {
             title: format!("{} · size", tool_label(p.tool)),
             fields,
             offer_full_surface,
+            seq: self.placement_seq,
         })
     }
 
