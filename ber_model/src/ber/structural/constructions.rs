@@ -93,6 +93,20 @@ pub enum FloorConstructionType {
     Other,
 }
 
+impl FloorConstructionType {
+    /// Short display label — the single source for the type's name.
+    pub fn label(self) -> &'static str {
+        match self {
+            FloorConstructionType::SolidFloor => "Solid",
+            FloorConstructionType::SuspendedFloor => "Suspended",
+            FloorConstructionType::ExposedSemiExposedFloor => "Exposed",
+            FloorConstructionType::NonHeatLossFloor => "Non-heat-loss",
+            FloorConstructionType::Other => "Other",
+            FloorConstructionType::Uninitialised => "Unset",
+        }
+    }
+}
+
 /// Construction types (example: 5-6 options)
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub enum CeilingConstructionType {
@@ -106,6 +120,21 @@ pub enum CeilingConstructionType {
     Other,
 }
 
+impl CeilingConstructionType {
+    /// Short display label — the single source for the type's name.
+    pub fn label(self) -> &'static str {
+        match self {
+            CeilingConstructionType::FlatRoof => "Flat",
+            CeilingConstructionType::SlopedInsOnRafter => "Ins. on rafter",
+            CeilingConstructionType::SlopedInsOnCeiling => "Ins. on ceiling",
+            CeilingConstructionType::SlopedInsOnCeilingAndRafter => "Ins. both",
+            CeilingConstructionType::NonHeatLossCeiling => "Non-heat-loss",
+            CeilingConstructionType::Other => "Other",
+            CeilingConstructionType::Uninitialised => "Unset",
+        }
+    }
+}
+
 /// Wall construction types
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub enum WallConstructionType {
@@ -117,6 +146,22 @@ pub enum WallConstructionType {
     Floor,
     #[default]
     Uninitialised,
+}
+
+impl WallConstructionType {
+    /// Short display label — the single source for the type's name (the Structure
+    /// editor dropdown and the Structure review both use this).
+    pub fn label(self) -> &'static str {
+        match self {
+            WallConstructionType::CavityWall => "Cavity",
+            WallConstructionType::FilledCavityWall => "Filled cavity",
+            WallConstructionType::ConcreteHollowBlocks => "Hollow block",
+            WallConstructionType::TimberConstruction => "Timber",
+            WallConstructionType::ICF => "ICF",
+            WallConstructionType::Floor => "Floor",
+            WallConstructionType::Uninitialised => "Unset",
+        }
+    }
 }
 
 impl ConstructionMakeup {

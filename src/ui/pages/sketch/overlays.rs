@@ -22,11 +22,13 @@ use domain::sketch::DisplayMode;
 /// kept in egui memory). When expanded it drops down under the bar with the same
 /// status rows + legend + Mapping "Review" button it had as a floating window.
 #[must_use]
+#[allow(clippy::too_many_arguments)]
 pub fn phase_bar(
     ui: &egui::Ui,
     rect: Rect,
     current: AssessmentPhase,
     mapping_reviewed: bool,
+    structure_reviewed: bool,
     items: &[ChecklistItem],
     show_review: bool,
     reviewed: bool,
@@ -65,10 +67,13 @@ pub fn phase_bar(
                             AssessmentPhase::Structure => mapping_reviewed,
                             AssessmentPhase::Objects => false,
                         };
-                        // Mapping earns its ✓ once the assessor has confirmed the
-                        // review (which is also what unlocks Structure).
-                        let complete =
-                            matches!(phase, AssessmentPhase::Mapping) && mapping_reviewed;
+                        // Each phase earns its ✓ once its review is confirmed —
+                        // Mapping unlocks Structure; Structure is its own record.
+                        let complete = match phase {
+                            AssessmentPhase::Mapping => mapping_reviewed,
+                            AssessmentPhase::Structure => structure_reviewed,
+                            AssessmentPhase::Objects => false,
+                        };
                         // The CURRENT phase's box carries the checklist-toggle
                         // triangle (to the right of its label); the others don't.
                         let (switch_clicked, triangle_clicked) = phase_box(

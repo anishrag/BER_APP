@@ -45,38 +45,36 @@ const SELECT_MODES: &[(SelectMode, &str)] = &[
     (SelectMode::Remaining, "Remaining"),
 ];
 
+// The TYPE options OFFERED in the group-editor dropdown (a subset of each enum —
+// `Uninitialised` etc. aren't user-pickable). The display strings come from each
+// type's `label()` (the single source, shared with the Structure review), so the
+// options list here is just the offered variants in order.
 /// Wall construction TYPE options (the group editor).
-const WALL_TYPES: &[(WallConstructionType, &str)] = &[
-    (WallConstructionType::CavityWall, "Cavity"),
-    (WallConstructionType::FilledCavityWall, "Filled cavity"),
-    (WallConstructionType::ConcreteHollowBlocks, "Hollow block"),
-    (WallConstructionType::TimberConstruction, "Timber"),
-    (WallConstructionType::ICF, "ICF"),
+const WALL_TYPES: &[WallConstructionType] = &[
+    WallConstructionType::CavityWall,
+    WallConstructionType::FilledCavityWall,
+    WallConstructionType::ConcreteHollowBlocks,
+    WallConstructionType::TimberConstruction,
+    WallConstructionType::ICF,
 ];
 
 /// Floor construction TYPE options (the group editor).
-const FLOOR_TYPES: &[(FloorConstructionType, &str)] = &[
-    (FloorConstructionType::SolidFloor, "Solid"),
-    (FloorConstructionType::SuspendedFloor, "Suspended"),
-    (FloorConstructionType::ExposedSemiExposedFloor, "Exposed"),
-    (FloorConstructionType::NonHeatLossFloor, "Non-heat-loss"),
-    (FloorConstructionType::Other, "Other"),
+const FLOOR_TYPES: &[FloorConstructionType] = &[
+    FloorConstructionType::SolidFloor,
+    FloorConstructionType::SuspendedFloor,
+    FloorConstructionType::ExposedSemiExposedFloor,
+    FloorConstructionType::NonHeatLossFloor,
+    FloorConstructionType::Other,
 ];
 
 /// Ceiling/roof construction TYPE options (the group editor).
-const CEILING_TYPES: &[(CeilingConstructionType, &str)] = &[
-    (CeilingConstructionType::FlatRoof, "Flat"),
-    (CeilingConstructionType::SlopedInsOnRafter, "Ins. on rafter"),
-    (
-        CeilingConstructionType::SlopedInsOnCeiling,
-        "Ins. on ceiling",
-    ),
-    (
-        CeilingConstructionType::SlopedInsOnCeilingAndRafter,
-        "Ins. both",
-    ),
-    (CeilingConstructionType::NonHeatLossCeiling, "Non-heat-loss"),
-    (CeilingConstructionType::Other, "Other"),
+const CEILING_TYPES: &[CeilingConstructionType] = &[
+    CeilingConstructionType::FlatRoof,
+    CeilingConstructionType::SlopedInsOnRafter,
+    CeilingConstructionType::SlopedInsOnCeiling,
+    CeilingConstructionType::SlopedInsOnCeilingAndRafter,
+    CeilingConstructionType::NonHeatLossCeiling,
+    CeilingConstructionType::Other,
 ];
 
 /// Label for an existing-group entry in the "Add to existing group" picker:
@@ -85,14 +83,12 @@ fn existing_group_label(eg: &ExistingGroup) -> String {
     if let Some(n) = eg.name.as_ref().map(|s| s.trim()).filter(|s| !s.is_empty()) {
         return n.to_string();
     }
-    let label = match eg.ty {
-        ConstructionType::Wall(t) => WALL_TYPES.iter().find(|(x, _)| *x == t).map(|(_, l)| *l),
-        ConstructionType::Floor(t) => FLOOR_TYPES.iter().find(|(x, _)| *x == t).map(|(_, l)| *l),
-        ConstructionType::Ceiling(t) => {
-            CEILING_TYPES.iter().find(|(x, _)| *x == t).map(|(_, l)| *l)
-        }
-    };
-    label.unwrap_or("—").to_string()
+    match eg.ty {
+        ConstructionType::Wall(t) => t.label(),
+        ConstructionType::Floor(t) => t.label(),
+        ConstructionType::Ceiling(t) => t.label(),
+    }
+    .to_string()
 }
 
 /// Render the Structure tool area: the global MODE row + the global SELECT row +
@@ -382,15 +378,15 @@ pub(crate) fn group_editor_ui<F: FnMut(UiEvent)>(
     let types: Vec<(ConstructionType, &str)> = match kind {
         SurfaceKind::Walls => WALL_TYPES
             .iter()
-            .map(|(t, l)| (ConstructionType::Wall(*t), *l))
+            .map(|t| (ConstructionType::Wall(*t), t.label()))
             .collect(),
         SurfaceKind::Floors => FLOOR_TYPES
             .iter()
-            .map(|(t, l)| (ConstructionType::Floor(*t), *l))
+            .map(|t| (ConstructionType::Floor(*t), t.label()))
             .collect(),
         SurfaceKind::Roofs => CEILING_TYPES
             .iter()
-            .map(|(t, l)| (ConstructionType::Ceiling(*t), *l))
+            .map(|t| (ConstructionType::Ceiling(*t), t.label()))
             .collect(),
     };
     let current = types

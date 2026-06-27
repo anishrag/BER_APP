@@ -12,9 +12,7 @@ use std::collections::HashSet;
 
 use ber_model::ber::common::ItemId;
 use ber_model::ber::fenestration::{Frame, Glazing, WindowType};
-use ber_model::ber::structural::{
-    CeilingConstructionType, ConstructionMakeup, FloorConstructionType, WallConstructionType,
-};
+use ber_model::ber::structural::ConstructionMakeup;
 
 use super::*;
 
@@ -132,9 +130,9 @@ impl AppController {
                 cursor: 0,
                 total: 0,
                 kind: StructureReviewKind::Wall,
-                title: group_title(&c.base.name, wall_type_label(c.construction_type)),
+                title: group_title(&c.base.name, c.construction_type.label()),
                 detail_lines: construction_lines(
-                    wall_type_label(c.construction_type),
+                    c.construction_type.label(),
                     &c.base,
                     ids.len(),
                     "Walls",
@@ -152,9 +150,9 @@ impl AppController {
                 cursor: 0,
                 total: 0,
                 kind: StructureReviewKind::Floor,
-                title: group_title(&c.base.name, floor_type_label(c.construction_type)),
+                title: group_title(&c.base.name, c.construction_type.label()),
                 detail_lines: construction_lines(
-                    floor_type_label(c.construction_type),
+                    c.construction_type.label(),
                     &c.base,
                     ids.len(),
                     "Floors",
@@ -172,9 +170,9 @@ impl AppController {
                 cursor: 0,
                 total: 0,
                 kind: StructureReviewKind::Roof,
-                title: group_title(&c.base.name, ceiling_type_label(c.construction_type)),
+                title: group_title(&c.base.name, c.construction_type.label()),
                 detail_lines: construction_lines(
-                    ceiling_type_label(c.construction_type),
+                    c.construction_type.label(),
                     &c.base,
                     ids.len(),
                     "Roofs",
@@ -343,41 +341,6 @@ fn window_type_lines(t: &WindowType, window_count: usize) -> Vec<(String, String
     }
     lines.push(("Windows".to_string(), window_count.to_string()));
     lines
-}
-
-fn wall_type_label(t: WallConstructionType) -> &'static str {
-    match t {
-        WallConstructionType::CavityWall => "Cavity",
-        WallConstructionType::FilledCavityWall => "Filled cavity",
-        WallConstructionType::ConcreteHollowBlocks => "Hollow block",
-        WallConstructionType::TimberConstruction => "Timber",
-        WallConstructionType::ICF => "ICF",
-        WallConstructionType::Floor => "Floor",
-        WallConstructionType::Uninitialised => "Unset",
-    }
-}
-
-fn floor_type_label(t: FloorConstructionType) -> &'static str {
-    match t {
-        FloorConstructionType::SolidFloor => "Solid",
-        FloorConstructionType::SuspendedFloor => "Suspended",
-        FloorConstructionType::ExposedSemiExposedFloor => "Exposed",
-        FloorConstructionType::NonHeatLossFloor => "Non-heat-loss",
-        FloorConstructionType::Other => "Other",
-        FloorConstructionType::Uninitialised => "Unset",
-    }
-}
-
-fn ceiling_type_label(t: CeilingConstructionType) -> &'static str {
-    match t {
-        CeilingConstructionType::FlatRoof => "Flat",
-        CeilingConstructionType::SlopedInsOnRafter => "Ins. on rafter",
-        CeilingConstructionType::SlopedInsOnCeiling => "Ins. on ceiling",
-        CeilingConstructionType::SlopedInsOnCeilingAndRafter => "Ins. both",
-        CeilingConstructionType::NonHeatLossCeiling => "Non-heat-loss",
-        CeilingConstructionType::Other => "Other",
-        CeilingConstructionType::Uninitialised => "Unset",
-    }
 }
 
 fn makeup_label(m: &ConstructionMakeup) -> String {

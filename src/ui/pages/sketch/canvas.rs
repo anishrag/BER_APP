@@ -439,6 +439,7 @@ pub(super) fn render<F: FnMut(UiEvent)>(
         rect,
         view.current_phase,
         view.mapping_reviewed,
+        view.structure_reviewed,
         &view.checklist,
         show_review,
         reviewed,
