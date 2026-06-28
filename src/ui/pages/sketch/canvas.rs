@@ -379,6 +379,15 @@ pub(super) fn render<F: FnMut(UiEvent)>(
         return;
     }
 
+    // Phase-3 (Objects) REVIEW: house-wide object counts beside the 3D house,
+    // with the selected kind's locations marked.
+    if let Some(orv) = view.object_review_view.as_ref() {
+        if let Some(ber) = ber {
+            object_review_overlay(ui, rect, &response, orv, ber, vp, on_event);
+        }
+        return;
+    }
+
     // Elevation editor: when a wall's elevation is open it REPLACES the plan
     // canvas — the unrolled wall with draggable openings. Owns its own input.
     if let Some(elev) = view.elevation_view.as_ref() {
@@ -432,7 +441,7 @@ pub(super) fn render<F: FnMut(UiEvent)>(
     let (show_review, reviewed) = match view.current_phase {
         AssessmentPhase::Mapping => (view.mapping_complete, view.mapping_reviewed),
         AssessmentPhase::Structure => (view.structure_complete, view.structure_reviewed),
-        AssessmentPhase::Objects => (false, false),
+        AssessmentPhase::Objects => (view.objects_present, false),
     };
     let (phase_clicked, review_clicked, phase_bar_rect) = super::overlays::phase_bar(
         ui,
@@ -450,6 +459,7 @@ pub(super) fn render<F: FnMut(UiEvent)>(
     if review_clicked {
         let ev = match view.current_phase {
             AssessmentPhase::Structure => SketchEvent::OpenStructureReview,
+            AssessmentPhase::Objects => SketchEvent::OpenObjectReview,
             _ => SketchEvent::OpenMappingReview,
         };
         on_event(UiEvent::Sketch(ev));
@@ -2630,6 +2640,116 @@ fn elevation_colors(
 /// with a top control bar (scroll the four sides / confirm "all's good"). Drag
 /// an opening to reposition it (the controller constrains it to its wall). Owns
 /// its own input — emits review pointer + nav events.
+fn object_review_overlay<F: FnMut(UiEvent)>(
+    ui: &mut egui::Ui,
+    rect: egui::Rect,
+    response: &egui::Response,
+    orv: &crate::controller::app_controller::ObjectReviewView,
+    ber: &ber_model::ber::ber_struct::Ber,
+    vp: render::ViewParams,
+    on_event: &mut F,
+) {
+    let painter = ui.painter_at(rect);
+    painter.rect_filled(rect, 0.0, egui::Color32::from_gray(20));
+
+    let bar_h = 38.0;
+    egui::Area::new(ui.id().with("object_review_bar"))
+        .order(egui::Order::Foreground)
+        .fixed_pos(rect.left_top() + egui::vec2(8.0, 6.0))
+        .show(ui.ctx(), |ui| {
+            ui.horizontal(|ui| {
+                ui.label(
+                    egui::RichText::new("Objects — house totals")
+                        .strong()
+                        .size(15.0),
+                );
+                if ui.button("Close").clicked() {
+                    on_event(UiEvent::Sketch(SketchEvent::CloseObjectReview));
+                }
+            });
+        });
+
+    let content = egui::Rect::from_min_max(
+        egui::pos2(rect.left() + 4.0, rect.top() + bar_h),
+        rect.right_bottom() - egui::vec2(4.0, 4.0),
+    );
+    let portrait = content.height() >= content.width();
+    let (list_rect, three_d_rect) = if portrait {
+        let mid = content.top() + content.height() * 0.4;
+        (
+            egui::Rect::from_min_max(content.min, egui::pos2(content.right(), mid)),
+            egui::Rect::from_min_max(egui::pos2(content.left(), mid), content.max),
+        )
+    } else {
+        let mid = content.left() + content.width() * 0.36;
+        (
+            egui::Rect::from_min_max(content.min, egui::pos2(mid, content.bottom())),
+            egui::Rect::from_min_max(egui::pos2(mid, content.top()), content.max),
+        )
+    };
+
+    // ── 3D house with the selected kind's hotspots ──
+    painter.rect_filled(three_d_rect, 4.0, egui::Color32::from_gray(28));
+    let three_d_painter = ui.painter_at(three_d_rect);
+    render::full_house_3d::render(
+        &three_d_painter,
+        three_d_rect,
+        ber,
+        domain::sketch::DisplayMode::AllSurfaces,
+        vp,
+        &std::collections::HashSet::new(),
+        &orv.hotspots,
+    );
+    painter.text(
+        three_d_rect.right_bottom() - egui::vec2(8.0, 6.0),
+        egui::Align2::RIGHT_BOTTOM,
+        "drag to orbit",
+        egui::FontId::proportional(11.0),
+        egui::Color32::from_gray(110),
+    );
+    if response.dragged_by(egui::PointerButton::Primary) {
+        let over_3d = ui
+            .input(|i| i.pointer.interact_pos())
+            .is_some_and(|p| three_d_rect.contains(p));
+        if over_3d {
+            const ORBIT_DEG_PER_PIXEL: f32 = 0.4;
+            let d = response.drag_delta();
+            on_event(UiEvent::Sketch(SketchEvent::OrbitView {
+                dyaw: -d.x * ORBIT_DEG_PER_PIXEL,
+                dpitch: d.y * ORBIT_DEG_PER_PIXEL,
+            }));
+        }
+    }
+
+    // ── The flat totals list (click a row to locate it) ──
+    let inner = egui::Rect::from_min_max(
+        list_rect.left_top() + egui::vec2(10.0, 8.0),
+        list_rect.right_bottom() - egui::vec2(10.0, 8.0),
+    );
+    let builder = egui::UiBuilder::new()
+        .max_rect(inner)
+        .layout(egui::Layout::top_down(egui::Align::Min));
+    ui.scope_builder(builder, |ui| {
+        ui.set_max_width(inner.width());
+        ui.label(
+            egui::RichText::new("Click an object to see where it is")
+                .color(egui::Color32::from_gray(150))
+                .size(12.0),
+        );
+        ui.add_space(4.0);
+        egui::ScrollArea::vertical()
+            .max_height(inner.height())
+            .show(ui, |ui| {
+                for (i, row) in orv.totals.iter().enumerate() {
+                    let text = format!("{}  ·  {}", row.count, row.label);
+                    if ui.selectable_label(row.selected, text).clicked() {
+                        on_event(UiEvent::Sketch(SketchEvent::SelectObjectReviewKind(i)));
+                    }
+                }
+            });
+    });
+}
+
 #[allow(clippy::too_many_arguments)]
 fn structure_review_overlay<F: FnMut(UiEvent)>(
     ui: &mut egui::Ui,
@@ -2704,6 +2824,7 @@ fn structure_review_overlay<F: FnMut(UiEvent)>(
         domain::sketch::DisplayMode::AllSurfaces,
         vp,
         &srv.highlight,
+        &[],
     );
     painter.text(
         three_d_rect.right_bottom() - egui::vec2(8.0, 6.0),

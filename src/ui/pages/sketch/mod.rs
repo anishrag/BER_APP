@@ -28,9 +28,10 @@ use egui::Pos2;
 use crate::controller::app_controller::{
     ActiveObjectRoomView, AssessmentPhase, ChecklistItem, DimensionPromptUiData,
     EditDragPromptUiData, ElevationView, ExistingGroup, ExistingWindowType, ExposureSelection,
-    NewStoreyPromptUiData, ObjectPinView, OpeningFieldsPrompt, OpeningToolKind, PartitionView,
-    PhotoView, PositionPromptUiData, ReviewView, RiserView, SelectMode, SnapTagView, StructureEdit,
-    StructureReviewView, SurfaceKind, VertexDropPromptUiData, WallExposureView, WindowTypeChoice,
+    NewStoreyPromptUiData, ObjectPinView, ObjectReviewView, OpeningFieldsPrompt, OpeningToolKind,
+    PartitionView, PhotoView, PositionPromptUiData, ReviewView, RiserView, SelectMode, SnapTagView,
+    StructureEdit, StructureReviewView, SurfaceKind, VertexDropPromptUiData, WallExposureView,
+    WindowTypeChoice,
 };
 use crate::ui::pages::events::UiEvent;
 use crate::ui::render::ViewParams;
@@ -525,6 +526,11 @@ pub enum SketchEvent {
     },
     /// Delete a whole object room pin (the Delete panel).
     DeleteObjectRoom(ItemId),
+    /// Open / close the Objects REVIEW takeover (house-wide counts + 3D hotspots).
+    OpenObjectReview,
+    CloseObjectReview,
+    /// Select an object-kind row in the review (by index) — drives the hotspots.
+    SelectObjectReviewKind(usize),
     /// Close the elevation overlay.
     CloseElevation,
     /// User entered a default ceiling height (m) in the floating number box
@@ -1048,6 +1054,11 @@ pub struct SketchView<'a> {
     pub object_note_input: &'a mut String,
     pub object_other_name: &'a mut String,
     pub object_pending_photos: &'a mut Vec<std::path::PathBuf>,
+    /// Whether any object pin exists house-wide — gates the Objects "Review" entry.
+    pub objects_present: bool,
+    /// The open Objects-REVIEW takeover (house-wide counts + selected-kind 3D
+    /// hotspots), or `None`. When `Some`, it replaces the plan canvas.
+    pub object_review_view: Option<ObjectReviewView>,
     /// Current storey's wall / roof / floor counts — the Structure-phase tool
     /// read-out.
     pub surface_counts: SurfaceCounts,

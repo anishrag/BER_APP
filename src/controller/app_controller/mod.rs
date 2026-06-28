@@ -99,7 +99,9 @@ pub use history::HistorySnapshot;
 pub use mapping_review::ReviewView;
 pub use new_storey::NewStoreyPromptUiData;
 use new_storey::{NewStoreyStage, PendingNewStorey};
-pub use objects::{ActiveObjectRoomView, ObjectPinView, ObjectRowView};
+pub use objects::{
+    ActiveObjectRoomView, ObjectPinView, ObjectReviewView, ObjectRowView, ObjectTotalView,
+};
 use openings::PendingOpening;
 pub use openings::{
     ElevationView, ExistingWindowType, OpeningFieldSpec, OpeningFieldsPrompt, OpeningPromptUiData,
@@ -323,6 +325,11 @@ pub struct AppController {
     /// Phase-3 (Objects): the room pin currently OPEN for adding objects, by
     /// `ObjectRoom` id. `None` = no room open (tap the plan to drop/open one).
     active_object_room: Option<ItemId>,
+    /// Objects REVIEW takeover open?
+    object_review_mode: bool,
+    /// Which object kind is selected in the review (index into the flat totals
+    /// list built each frame; clamped). Drives the 3D hotspot highlight.
+    object_review_selected: usize,
     /// When `Some`, the PARTITION overlay is open for this outline wall (by its
     /// stable start `VertexId`): the canvas shows the unrolled wall face and
     /// strokes/taps cut + attribute it. Opened from the wall-exposure toolbar.
@@ -557,6 +564,8 @@ impl AppController {
             structure_review_mode: false,
             structure_review_cursor: 0,
             active_object_room: None,
+            object_review_mode: false,
+            object_review_selected: 0,
             partition_wall: None,
             partition_stroke: Vec::new(),
             partition_pending: None,

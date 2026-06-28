@@ -27,6 +27,9 @@ pub fn render(
     // Surface / opening ids to shade across the whole stack — empty for the plain
     // all-storeys overview, the current group's surfaces in the Structure review.
     selected: &HashSet<ItemId>,
+    // World-3D points to mark with a bright dot (the Objects review's hotspots
+    // for the selected kind). Empty otherwise.
+    hotspots: &[(f64, f64, f64)],
 ) {
     if ber.storeys.is_empty() {
         painter.text(
@@ -100,5 +103,13 @@ pub fn render(
             view,
             selected,
         );
+    }
+
+    // Hotspot markers (Objects review): a bright dot at each world point.
+    for &(x, y, z) in hotspots {
+        let (px, py) = view.project_3d(x, y, z);
+        let sp = t.apply(px, py);
+        painter.circle_filled(sp, 7.0, egui::Color32::from_rgb(255, 210, 70));
+        painter.circle_stroke(sp, 7.0, egui::Stroke::new(1.5, egui::Color32::BLACK));
     }
 }

@@ -38,6 +38,21 @@ pub struct ActiveObjectRoomView {
     pub categories_present: Vec<ber_model::ber::objects::ObjectCategory>,
 }
 
+/// One row in the Objects review: an object kind's house-wide total.
+pub struct ObjectTotalView {
+    pub label: String,
+    pub count: u32,
+    pub selected: bool,
+}
+
+/// The Objects review takeover: the flat house-wide totals, the selected row,
+/// and the 3D world points where the selected kind is located (the hotspots).
+pub struct ObjectReviewView {
+    pub totals: Vec<ObjectTotalView>,
+    pub selected: usize,
+    pub hotspots: Vec<(f64, f64, f64)>,
+}
+
 impl AppController {
     /// The currently open room pin, if any.
     pub fn active_object_room(&self) -> Option<ItemId> {
@@ -232,4 +247,93 @@ impl AppController {
             .iter_mut()
             .find(|r| r.id == room_id)
     }
+
+    // ── Review ────────────────────────────────────────────────────────────────
+
+    /// Whether any object pin exists house-wide (gates the review entry).
+    pub fn has_object_rooms(&self) -> bool {
+        self.current_record
+            .as_ref()
+            .is_some_and(|r| r.data.storeys.iter().any(|s| !s.object_rooms.is_empty()))
+    }
+
+    /// Whether the Objects review takeover is open.
+    pub fn object_review_mode(&self) -> bool {
+        self.object_review_mode
+    }
+
+    /// Open / close the Objects review. Entering resets the selection + camera.
+    pub fn set_object_review_mode(&mut self, on: bool) {
+        self.object_review_mode = on;
+        if on {
+            self.object_review_selected = 0;
+            self.reset_view();
+        }
+    }
+
+    /// Select an object-kind row in the review (drives the 3D hotspots).
+    pub fn select_object_review(&mut self, idx: usize) {
+        self.object_review_selected = idx;
+    }
+
+    /// The Objects review view: the flat house-wide totals + the selected kind's
+    /// hotspots. `None` when no record / no objects recorded.
+    pub fn object_review_view(&self) -> Option<ObjectReviewView> {
+        let data = &self.current_record.as_ref()?.data;
+        let order = object_label_totals(data);
+        if order.is_empty() {
+            return None;
+        }
+        let selected = self.object_review_selected.min(order.len() - 1);
+        let selected_label = order[selected].0.clone();
+        let hotspots = object_hotspots(data, &selected_label);
+        let totals = order
+            .into_iter()
+            .enumerate()
+            .map(|(i, (label, count))| ObjectTotalView {
+                label,
+                count,
+                selected: i == selected,
+            })
+            .collect();
+        Some(ObjectReviewView {
+            totals,
+            selected,
+            hotspots,
+        })
+    }
+}
+
+/// House-wide object totals as (label, count), in first-seen order.
+fn object_label_totals(data: &Ber) -> Vec<(String, u32)> {
+    let mut order: Vec<String> = Vec::new();
+    let mut counts: std::collections::HashMap<String, u32> = std::collections::HashMap::new();
+    for s in &data.storeys {
+        for room in &s.object_rooms {
+            for o in &room.objects {
+                let label = o.kind.label();
+                if !counts.contains_key(&label) {
+                    order.push(label.clone());
+                }
+                *counts.entry(label).or_default() += o.count;
+            }
+        }
+    }
+    order.into_iter().map(|l| (l.clone(), counts[&l])).collect()
+}
+
+/// World-3D points (per occurrence) where an object with `label` was recorded —
+/// each room holding it, lifted to its storey's floor datum + 1 m.
+fn object_hotspots(data: &Ber, label: &str) -> Vec<(f64, f64, f64)> {
+    let datums = data.storey_floor_datums();
+    let mut pts = Vec::new();
+    for (i, s) in data.storeys.iter().enumerate() {
+        let z = datums.get(i).copied().unwrap_or(0.0) + 1.0;
+        for room in &s.object_rooms {
+            if room.objects.iter().any(|o| o.kind.label() == label) {
+                pts.push((room.plan_position.x as f64, room.plan_position.y as f64, z));
+            }
+        }
+    }
+    pts
 }

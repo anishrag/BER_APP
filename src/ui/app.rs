@@ -897,12 +897,27 @@ impl eframe::App for BerApp {
                             };
                             // Phase-3 (Objects) view-data: room pins + the open
                             // room's panel (only while in the Objects phase).
-                            let (object_pins, active_object_room) = {
+                            let (
+                                object_pins,
+                                active_object_room,
+                                object_review_view,
+                                objects_present,
+                            ) = {
                                 let c = self.app_controller.borrow();
                                 if c.current_phase() == AssessmentPhase::Objects {
-                                    (c.object_rooms_view(), c.active_object_room_view())
+                                    let rv = if c.object_review_mode() {
+                                        c.object_review_view()
+                                    } else {
+                                        None
+                                    };
+                                    (
+                                        c.object_rooms_view(),
+                                        c.active_object_room_view(),
+                                        rv,
+                                        c.has_object_rooms(),
+                                    )
                                 } else {
-                                    (Vec::new(), None)
+                                    (Vec::new(), None, None, false)
                                 }
                             };
 
@@ -1164,6 +1179,8 @@ impl eframe::App for BerApp {
                                 object_note_input: &mut self.sketch_state.object_note_input,
                                 object_other_name: &mut self.sketch_state.object_other_name,
                                 object_pending_photos: &mut self.sketch_state.object_pending_photos,
+                                objects_present,
+                                object_review_view,
                                 surface_counts,
                                 structure_kinds,
                                 structure_select,
@@ -1844,6 +1861,15 @@ impl eframe::App for BerApp {
                                     }
                                     SketchEvent::DeleteObjectRoom(room) => {
                                         controller.borrow_mut().delete_object_room(room);
+                                    }
+                                    SketchEvent::OpenObjectReview => {
+                                        controller.borrow_mut().set_object_review_mode(true);
+                                    }
+                                    SketchEvent::CloseObjectReview => {
+                                        controller.borrow_mut().set_object_review_mode(false);
+                                    }
+                                    SketchEvent::SelectObjectReviewKind(idx) => {
+                                        controller.borrow_mut().select_object_review(idx);
                                     }
                                     SketchEvent::SetDefaultCeilingHeight(value) => {
                                         match controller

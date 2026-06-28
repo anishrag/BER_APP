@@ -10923,6 +10923,68 @@ fn objects_capture_pins_counts_and_undo() {
     assert_eq!(c.object_rooms_view().len(), 1, "undo removed the new pin");
 }
 
+/// The Objects review sums counts house-wide (flat list) and locates the
+/// selected kind in 3D (one hotspot per room holding it).
+#[test]
+fn object_review_totals_and_hotspots() {
+    use ber_model::ber::objects::{BoilerFuel, ObjectKind, RadiatorTrv};
+
+    let mut c = dimensioned_square_controller();
+    c.materialize();
+    // Room 1: 1 gas boiler + 3 radiators-with-TRV.
+    c.objects_pointer_down(2.0, 2.0, 0.5);
+    c.add_object(
+        ObjectKind::Boiler(BoilerFuel::Gas),
+        1,
+        None,
+        Vec::new(),
+        PhotoQuality::Full,
+    );
+    c.add_object(
+        ObjectKind::Radiator(RadiatorTrv::WithTrv),
+        3,
+        None,
+        Vec::new(),
+        PhotoQuality::Full,
+    );
+    c.close_object_room();
+    // Room 2: 2 more radiators-with-TRV.
+    c.objects_pointer_down(8.0, 8.0, 0.5);
+    c.add_object(
+        ObjectKind::Radiator(RadiatorTrv::WithTrv),
+        2,
+        None,
+        Vec::new(),
+        PhotoQuality::Full,
+    );
+    c.close_object_room();
+
+    c.set_object_review_mode(true);
+    let rv = c.object_review_view().expect("has totals");
+    let rad_idx = rv
+        .totals
+        .iter()
+        .position(|t| t.label.contains("With TRV"))
+        .expect("radiator row");
+    assert_eq!(rv.totals[rad_idx].count, 5, "3 + 2 radiators");
+    assert_eq!(
+        rv.totals
+            .iter()
+            .find(|t| t.label.contains("Boiler"))
+            .unwrap()
+            .count,
+        1
+    );
+
+    // Selecting the radiator row locates it in both rooms (two hotspots).
+    c.select_object_review(rad_idx);
+    assert_eq!(
+        c.object_review_view().unwrap().hotspots.len(),
+        2,
+        "radiators in two rooms → two hotspots"
+    );
+}
+
 /// Stepping the side cursor wraps through the four sides.
 #[test]
 fn mapping_review_side_cursor_wraps() {
