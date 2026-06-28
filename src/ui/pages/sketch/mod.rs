@@ -559,6 +559,8 @@ pub enum SketchEvent {
     SetFinalMode(FinalMode),
     /// Phase-4 north-align: finish aligning (records north, back to form).
     ConfirmAlign,
+    /// DEV: attach a generated fake satellite image to practice aligning.
+    LoadTestSatellite,
     /// Phase-4: confirm the final review (BER complete) — raises the popup.
     ConfirmFinalReview,
     /// Completion popup: "Go back" (dismiss) / "Take me to summary" (open).

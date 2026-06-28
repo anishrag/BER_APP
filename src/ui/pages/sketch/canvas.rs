@@ -400,6 +400,9 @@ pub(super) fn render<F: FnMut(UiEvent)>(
         if let Some(ber) = ber {
             final_overlay(ui, rect, view, ber, vp, on_event);
         }
+        // Keep the phase signpost + checklist on top (the "Mark BER complete"
+        // action lives in the Final checklist) — the takeover reserves room for it.
+        phase_signpost(ui, rect, view, on_event);
         return;
     }
 
@@ -453,50 +456,7 @@ pub(super) fn render<F: FnMut(UiEvent)>(
     // The "Review ▸" entry + its ✓ are per-phase: Mapping uses its checklist
     // completeness / reviewed flag; Structure uses the whole-house attribution
     // completeness / its own reviewed flag.
-    let (show_review, reviewed) = match view.current_phase {
-        AssessmentPhase::Mapping => (view.mapping_complete, view.mapping_reviewed),
-        AssessmentPhase::Structure => (view.structure_complete, view.structure_reviewed),
-        AssessmentPhase::Objects => (view.objects_present, view.objects_reviewed),
-        // Final: the checklist's action is "Mark BER complete", shown once all
-        // three parts are done.
-        AssessmentPhase::Final => (view.final_complete, view.details_reviewed),
-    };
-    // The checklist action button's label is per-phase.
-    let review_label = match view.current_phase {
-        AssessmentPhase::Final => {
-            if view.details_reviewed {
-                "BER complete ✓"
-            } else {
-                "Mark BER complete"
-            }
-        }
-        _ if reviewed => "Re-review ▸",
-        _ => "Review ▸",
-    };
-    let (phase_clicked, review_clicked, phase_bar_rect) = super::overlays::phase_bar(
-        ui,
-        rect,
-        view.current_phase,
-        view.mapping_reviewed,
-        view.structure_reviewed,
-        view.objects_reviewed,
-        view.details_reviewed,
-        &view.checklist,
-        show_review,
-        review_label,
-    );
-    if let Some(phase) = phase_clicked {
-        on_event(UiEvent::Sketch(SketchEvent::SetAssessmentPhase(phase)));
-    }
-    if review_clicked {
-        let ev = match view.current_phase {
-            AssessmentPhase::Structure => SketchEvent::OpenStructureReview,
-            AssessmentPhase::Objects => SketchEvent::OpenObjectReview,
-            AssessmentPhase::Final => SketchEvent::ConfirmFinalReview,
-            _ => SketchEvent::OpenMappingReview,
-        };
-        on_event(UiEvent::Sketch(ev));
-    }
+    let phase_bar_rect = phase_signpost(ui, rect, view, on_event);
 
     // View buttons (2D/3D toggle) in the top-right — but dropped BELOW the phase
     // signpost whenever the centred bar would reach their column, so they never
@@ -2829,6 +2789,59 @@ fn object_pin_dropdown<F: FnMut(UiEvent)>(
         });
 }
 
+/// The phase signpost (Mapping → … → Final) + its per-phase checklist/action
+/// button. Drawn in every phase — including the Final takeover, which is why it's
+/// factored out. Returns the bar's rect (for laying the view buttons beside it).
+fn phase_signpost<F: FnMut(UiEvent)>(
+    ui: &egui::Ui,
+    rect: egui::Rect,
+    view: &SketchView<'_>,
+    on_event: &mut F,
+) -> egui::Rect {
+    let (show_review, reviewed) = match view.current_phase {
+        AssessmentPhase::Mapping => (view.mapping_complete, view.mapping_reviewed),
+        AssessmentPhase::Structure => (view.structure_complete, view.structure_reviewed),
+        AssessmentPhase::Objects => (view.objects_present, view.objects_reviewed),
+        AssessmentPhase::Final => (view.final_complete, view.details_reviewed),
+    };
+    let review_label = match view.current_phase {
+        AssessmentPhase::Final => {
+            if view.details_reviewed {
+                "BER complete ✓"
+            } else {
+                "Mark BER complete"
+            }
+        }
+        _ if reviewed => "Re-review ▸",
+        _ => "Review ▸",
+    };
+    let (phase_clicked, review_clicked, phase_bar_rect) = super::overlays::phase_bar(
+        ui,
+        rect,
+        view.current_phase,
+        view.mapping_reviewed,
+        view.structure_reviewed,
+        view.objects_reviewed,
+        view.details_reviewed,
+        &view.checklist,
+        show_review,
+        review_label,
+    );
+    if let Some(phase) = phase_clicked {
+        on_event(UiEvent::Sketch(SketchEvent::SetAssessmentPhase(phase)));
+    }
+    if review_clicked {
+        let ev = match view.current_phase {
+            AssessmentPhase::Structure => SketchEvent::OpenStructureReview,
+            AssessmentPhase::Objects => SketchEvent::OpenObjectReview,
+            AssessmentPhase::Final => SketchEvent::ConfirmFinalReview,
+            _ => SketchEvent::OpenMappingReview,
+        };
+        on_event(UiEvent::Sketch(ev));
+    }
+    phase_bar_rect
+}
+
 /// Phase-4 (Final) full-phase view: details + mode controls on one side; the
 /// reduced plan over the (movable) satellite image on the other.
 fn final_overlay<F: FnMut(UiEvent)>(
@@ -2842,6 +2855,10 @@ fn final_overlay<F: FnMut(UiEvent)>(
     use crate::controller::app_controller::FinalMode;
     let painter = ui.painter_at(rect);
     painter.rect_filled(rect, 0.0, egui::Color32::from_gray(20));
+
+    // Reserve a strip at the top for the phase signpost (drawn on top by the
+    // caller) so the details/plan don't sit under it.
+    let rect = egui::Rect::from_min_max(rect.left_top() + egui::vec2(0.0, 64.0), rect.max);
 
     // Details on top (portrait) / left (landscape); plan on the other side. The
     // plan keeps roughly the Phase-3 footprint share.

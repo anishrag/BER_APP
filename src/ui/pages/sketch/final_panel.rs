@@ -178,6 +178,16 @@ pub(super) fn details_panel<F: FnMut(UiEvent)>(
                     )));
                 }
             });
+            if view.site_satellite_image.is_none() {
+                if ui.button("Load test image (practice)").clicked() {
+                    on_event(UiEvent::Sketch(SketchEvent::LoadTestSatellite));
+                }
+                ui.label(
+                    RichText::new("No satellite image yet — load a test one to try aligning.")
+                        .size(11.0)
+                        .color(egui::Color32::from_gray(150)),
+                );
+            }
             ui.label(
                 RichText::new("Tick \"Mark BER complete\" in the checklist when done.")
                     .size(11.0)

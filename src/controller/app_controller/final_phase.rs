@@ -3,7 +3,7 @@
 //! house-level fields on `Ber` (Layer 1) and persists; the UI renders the form /
 //! sheltered-sides / north-align steps and calls these.
 use super::*;
-use ber_model::ber::common::ExternalSide;
+use ber_model::ber::common::{ExternalSide, Photo};
 use ber_model::ber::final_details::{FloorKind, HeatingKind, ShelteringBySide, WallFinish};
 
 /// Which wall-finish field the form is setting.
@@ -163,6 +163,47 @@ impl AppController {
     pub fn reset_north_image(&mut self) {
         self.north_img_offset = (0.0, 0.0);
         self.north_img_zoom = 1.0;
+    }
+
+    /// DEV/practice helper: generate a fake north-up satellite image (a building
+    /// footprint + roads + a blue "north" strip along the top) and attach it as
+    /// the site image, so the north-align step can be tried without a real one.
+    pub fn load_test_satellite_image(&mut self) {
+        let (w, h) = (600u32, 600u32);
+        let mut img = image::RgbImage::from_pixel(w, h, image::Rgb([70, 95, 70]));
+        let mut fill = |x0: u32, x1: u32, y0: u32, y1: u32, c: [u8; 3]| {
+            for y in y0..y1.min(h) {
+                for x in x0..x1.min(w) {
+                    img.put_pixel(x, y, image::Rgb(c));
+                }
+            }
+        };
+        fill(0, w, 270, 330, [120, 120, 120]); // horizontal road
+        fill(150, 210, 0, h, [120, 120, 120]); // vertical road
+        fill(330, 520, 360, 500, [160, 130, 95]); // building footprint
+        fill(0, w, 0, 16, [60, 90, 200]); // north strip (top = north)
+
+        let dir = self.photos_dir.clone();
+        if std::fs::create_dir_all(&dir).is_err() {
+            return;
+        }
+        let path = dir.join(format!("test_satellite_{}.png", ItemId::default().0));
+        if img.save(&path).is_err() {
+            return;
+        }
+        let file_path = std::fs::canonicalize(&path)
+            .map(|p| p.to_string_lossy().to_string())
+            .unwrap_or_else(|_| path.to_string_lossy().to_string());
+        if let Some(r) = self.current_record.as_mut() {
+            r.data.site_satellite_image = Some(Photo {
+                id: ItemId::default(),
+                file_path,
+                thumbnail_path: None,
+                description: Some("Test satellite (practice)".to_string()),
+                side: None,
+            });
+            let _ = self.mark_dirty();
+        }
     }
 
     /// Advance one side's shelter category on a tap (Unset→Sheltered→Half→

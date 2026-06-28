@@ -1974,6 +1974,9 @@ impl eframe::App for BerApp {
                                     SketchEvent::ConfirmAlign => {
                                         controller.borrow_mut().confirm_align();
                                     }
+                                    SketchEvent::LoadTestSatellite => {
+                                        controller.borrow_mut().load_test_satellite_image();
+                                    }
                                     SketchEvent::ConfirmFinalReview => {
                                         controller.borrow_mut().confirm_final_review();
                                     }
