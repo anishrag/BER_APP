@@ -216,6 +216,10 @@ fn create_minimal_ber(id: ItemId) -> Ber {
         structure_reviewed: false,
         objects_no_items_confirmed: vec![],
         objects_reviewed: false,
+        final_details: Default::default(),
+        sheltering: Default::default(),
+        site_satellite_image: None,
+        details_reviewed: false,
     }
 }
 

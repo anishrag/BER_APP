@@ -1042,6 +1042,10 @@ pub struct SketchView<'a> {
     pub structure_complete: bool,
     /// Whether the Structure REVIEW has been confirmed (recorded on the record).
     pub structure_reviewed: bool,
+    /// Whether the Objects review has been confirmed (gates the Final phase).
+    pub objects_reviewed: bool,
+    /// Whether the Final-phase review has been confirmed (its ✓).
+    pub details_reviewed: bool,
     /// The open Structure-REVIEW takeover view, if active: the current group's
     /// details + photos + highlight set. When `Some`, it replaces the plan canvas.
     pub structure_review_view: Option<StructureReviewView>,

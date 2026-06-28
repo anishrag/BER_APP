@@ -860,6 +860,7 @@ impl eframe::App for BerApp {
                                     AssessmentPhase::Mapping => c.stage_a_checklist(),
                                     AssessmentPhase::Structure => c.structure_checklist(),
                                     AssessmentPhase::Objects => c.objects_checklist(),
+                                    AssessmentPhase::Final => c.final_details_checklist(),
                                 };
                                 (
                                     phase,
@@ -894,6 +895,10 @@ impl eframe::App for BerApp {
                                     None
                                 };
                                 (c.structure_reviewed(), c.structure_complete(), view)
+                            };
+                            let (objects_reviewed, details_reviewed) = {
+                                let c = self.app_controller.borrow();
+                                (c.objects_reviewed(), c.details_reviewed())
                             };
                             // Phase-3 (Objects) view-data: room pins + the open
                             // room's panel (only while in the Objects phase).
@@ -1168,6 +1173,8 @@ impl eframe::App for BerApp {
                                 mapping_review_view,
                                 structure_complete,
                                 structure_reviewed,
+                                objects_reviewed,
+                                details_reviewed,
                                 structure_review_view,
                                 object_pins,
                                 active_object_room,

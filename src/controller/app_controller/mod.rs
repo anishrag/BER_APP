@@ -29,6 +29,7 @@ mod debug;
 mod dimensioning;
 mod editing;
 mod exposure;
+mod final_phase;
 mod floor_exposure;
 mod living_areas;
 mod mapping_review;
@@ -95,6 +96,7 @@ pub use editing::{
     VertexDropPromptUiData, VertexMeasurement, VertexMeasurementKind, VertexMeasurementUiData,
     WallPositions,
 };
+pub use final_phase::WallFinishField;
 pub use history::HistorySnapshot;
 pub use mapping_review::ReviewView;
 pub use new_storey::NewStoreyPromptUiData;

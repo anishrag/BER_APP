@@ -62,6 +62,21 @@ pub struct Ber {
     /// Recorded on confirm. `#[serde(default)]` so older records load as un-reviewed.
     #[serde(default)]
     pub objects_reviewed: bool,
+    /// Phase-4 ("Final") dropdown form: floor / wall-finish / heating details.
+    #[serde(default)]
+    pub final_details: crate::ber::final_details::FinalDetails,
+    /// Phase-4 per-side sheltering (the [`crate::ber::common::ExternalSide`]s).
+    #[serde(default)]
+    pub sheltering: crate::ber::final_details::ShelteringBySide,
+    /// North-up satellite/aerial image of the site, used in Phase 4 to align the
+    /// plan to true north. POPULATED EXTERNALLY (alongside address/eircode), not
+    /// by this app — read-only here. `None` until provided.
+    #[serde(default)]
+    pub site_satellite_image: Option<crate::ber::common::Photo>,
+    /// Whether the assessor has completed the Phase-4 (Final) review.
+    /// `#[serde(default)]` so older records load as un-reviewed.
+    #[serde(default)]
+    pub details_reviewed: bool,
 }
 
 // Pure data helpers, optional

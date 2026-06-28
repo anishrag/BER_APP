@@ -29,6 +29,8 @@ pub fn phase_bar(
     current: AssessmentPhase,
     mapping_reviewed: bool,
     structure_reviewed: bool,
+    objects_reviewed: bool,
+    details_reviewed: bool,
     items: &[ChecklistItem],
     show_review: bool,
     reviewed: bool,
@@ -37,6 +39,7 @@ pub fn phase_bar(
         (AssessmentPhase::Mapping, "Mapping"),
         (AssessmentPhase::Structure, "Structure"),
         (AssessmentPhase::Objects, "Objects"),
+        (AssessmentPhase::Final, "Final"),
     ];
     let mut clicked = None;
     let mut review_clicked = false;
@@ -66,13 +69,15 @@ pub fn phase_bar(
                             AssessmentPhase::Mapping => true,
                             AssessmentPhase::Structure => mapping_reviewed,
                             AssessmentPhase::Objects => structure_reviewed,
+                            AssessmentPhase::Final => objects_reviewed,
                         };
                         // Each phase earns its ✓ once its review is confirmed —
-                        // Mapping unlocks Structure; Structure is its own record.
+                        // each unlocks the next; Final is the dwelling's last.
                         let complete = match phase {
                             AssessmentPhase::Mapping => mapping_reviewed,
                             AssessmentPhase::Structure => structure_reviewed,
-                            AssessmentPhase::Objects => false,
+                            AssessmentPhase::Objects => objects_reviewed,
+                            AssessmentPhase::Final => details_reviewed,
                         };
                         // The CURRENT phase's box carries the checklist-toggle
                         // triangle (to the right of its label); the others don't.

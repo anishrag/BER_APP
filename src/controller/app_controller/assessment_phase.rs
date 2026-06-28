@@ -51,8 +51,11 @@ pub enum AssessmentPhase {
     Mapping,
     /// Phase 2 — identify/inspect the wall / roof / floor surfaces.
     Structure,
-    /// Phase 3 — discrete plant / appliance counts (not built yet).
+    /// Phase 3 — discrete plant / appliance counts.
     Objects,
+    /// Phase 4 — final details: the dropdown form, north alignment, sheltered
+    /// sides, then completion.
+    Final,
 }
 
 impl AppController {
@@ -87,6 +90,7 @@ impl AppController {
             AssessmentPhase::Mapping => DisplayMode::FloorMapDims,
             AssessmentPhase::Structure => display_mode_for_kinds(&self.structure_kinds),
             AssessmentPhase::Objects => DisplayMode::AllSurfaces,
+            AssessmentPhase::Final => DisplayMode::AllSurfaces,
         };
         self.set_display_mode(display);
     }

@@ -444,7 +444,9 @@ pub(super) fn render<F: FnMut(UiEvent)>(
     let (show_review, reviewed) = match view.current_phase {
         AssessmentPhase::Mapping => (view.mapping_complete, view.mapping_reviewed),
         AssessmentPhase::Structure => (view.structure_complete, view.structure_reviewed),
-        AssessmentPhase::Objects => (view.objects_present, false),
+        AssessmentPhase::Objects => (view.objects_present, view.objects_reviewed),
+        // The Final phase has no "Review" takeover — it's a wizard shown inline.
+        AssessmentPhase::Final => (false, false),
     };
     let (phase_clicked, review_clicked, phase_bar_rect) = super::overlays::phase_bar(
         ui,
@@ -452,6 +454,8 @@ pub(super) fn render<F: FnMut(UiEvent)>(
         view.current_phase,
         view.mapping_reviewed,
         view.structure_reviewed,
+        view.objects_reviewed,
+        view.details_reviewed,
         &view.checklist,
         show_review,
         reviewed,
