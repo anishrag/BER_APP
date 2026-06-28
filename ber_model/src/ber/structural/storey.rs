@@ -119,6 +119,13 @@ pub struct Storey {
     /// `surface_ref_at`. `#[serde(default)]` so older records load.
     #[serde(default)]
     pub wall_face_partitions: Vec<(WallFaceKey, WallFacePartition)>,
+    /// Phase-3 (Objects) survey: the fixed building-services objects the assessor
+    /// recorded on this storey, grouped by the approximate room location they
+    /// were captured at. Durable INPUT (a pin position + counted, photographed
+    /// objects) — not derived from anything. `#[serde(default)]` so older records
+    /// load with no objects.
+    #[serde(default)]
+    pub object_rooms: Vec<crate::ber::objects::ObjectRoom>,
     // No editable sketch snapshot is stored: the resolved geometry above
     // (`floors`/`walls`/`living_areas`) is the only persisted representation,
     // and the editor rebuilds its working state from it on load. The DB only

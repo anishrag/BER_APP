@@ -61,11 +61,11 @@ pub fn phase_bar(
                         }
                         let active = *phase == current;
                         // Mapping always reachable (go back); Structure once
-                        // Mapping is complete; Objects not built yet.
+                        // Mapping is reviewed; Objects once Structure is reviewed.
                         let enabled = match phase {
                             AssessmentPhase::Mapping => true,
                             AssessmentPhase::Structure => mapping_reviewed,
-                            AssessmentPhase::Objects => false,
+                            AssessmentPhase::Objects => structure_reviewed,
                         };
                         // Each phase earns its ✓ once its review is confirmed —
                         // Mapping unlocks Structure; Structure is its own record.
