@@ -340,6 +340,9 @@ pub(super) fn render<F: FnMut(UiEvent)>(
     let display = view.display;
     let edit_tool = view.edit_tool;
     let vp = view.view_params;
+    // In the Objects phase the plan is kept minimal (a sense of place) — the
+    // ceiling-step and roof-apex/ridge overlays are suppressed.
+    let objects_phase = matches!(view.current_phase, AssessmentPhase::Objects);
 
     // Wall-length labels gated on the Dimensions-category toggle: passing
     // empty label lists leaves the geometry untouched and just drops the
@@ -822,27 +825,29 @@ pub(super) fn render<F: FnMut(UiEvent)>(
     // the two side half-rects while the side tap is pending, and
     // the dashed provisional line.
     let ceiling_step_tint = egui::Color32::from_rgb(255, 170, 60); // amber
-    render::render_phase_regions(
-        &painter,
-        rect,
-        ber,
-        current_storey_idx,
-        mode,
-        vp,
-        view.ceiling_step_region_polygons,
-        ceiling_step_tint,
-    );
-    // Same-height dividers: a faint dashed pass, distinct from the amber
-    // height steps (divider regions are filtered out of the amber feed above).
-    render::render_ceiling_dividers(
-        &painter,
-        rect,
-        ber,
-        current_storey_idx,
-        mode,
-        vp,
-        view.ceiling_divider_lines,
-    );
+    if !objects_phase {
+        render::render_phase_regions(
+            &painter,
+            rect,
+            ber,
+            current_storey_idx,
+            mode,
+            vp,
+            view.ceiling_step_region_polygons,
+            ceiling_step_tint,
+        );
+        // Same-height dividers: a faint dashed pass, distinct from the amber
+        // height steps (divider regions are filtered out of the amber feed above).
+        render::render_ceiling_dividers(
+            &painter,
+            rect,
+            ber,
+            current_storey_idx,
+            mode,
+            vp,
+            view.ceiling_divider_lines,
+        );
+    }
     render::render_cut_candidates(
         &painter,
         rect,
@@ -894,16 +899,19 @@ pub(super) fn render<F: FnMut(UiEvent)>(
 
     // Roof apexes: committed high points ("▲ 4.20 m" markers) plus the
     // pending tapped point as a hollow dot, in a distinct rose-magenta.
-    render::render_roof_apexes(
-        &painter,
-        rect,
-        ber,
-        current_storey_idx,
-        mode,
-        vp,
-        view.roof_apex_views,
-        view.pending_roof_point,
-    );
+    // Suppressed in the Objects phase (ceiling points aren't relevant there).
+    if !objects_phase {
+        render::render_roof_apexes(
+            &painter,
+            rect,
+            ber,
+            current_storey_idx,
+            mode,
+            vp,
+            view.roof_apex_views,
+            view.pending_roof_point,
+        );
+    }
 
     // The pending roof point's wall snap(s) as ONE tag, mirroring the
     // ceiling-step line's: drawn through the same snap-tag renderer, but
@@ -943,33 +951,38 @@ pub(super) fn render<F: FnMut(UiEvent)>(
     // Roof ridges: committed two-apex groups as solid labelled segments
     // ("⌃ 4.20 m"), plus the pending ridge as a dashed SEGMENT between its
     // own endpoints (the stroke's extent, not bbox-spanning). Violet-blue,
-    // distinct from the apex rose-magenta.
-    render::render_roof_ridges(
-        &painter,
-        rect,
-        ber,
-        current_storey_idx,
-        mode,
-        vp,
-        view.roof_ridge_views,
-    );
+    // distinct from the apex rose-magenta. Suppressed in the Objects phase.
+    if !objects_phase {
+        render::render_roof_ridges(
+            &painter,
+            rect,
+            ber,
+            current_storey_idx,
+            mode,
+            vp,
+            view.roof_ridge_views,
+        );
+    }
     if let Some((a, b)) = view.pending_roof_ridge_line {
         render::render_roof_ridge_line(&painter, rect, ber, current_storey_idx, mode, vp, a, b);
     }
 
     // Roof RECTS (flat tops): committed four-apex rect groups as solid
     // labelled outlines, plus the pending rect as a dashed outline — the
-    // ridge family's closed-stroke sibling, same violet-blue.
-    render::render_roof_rects(
-        &painter,
-        rect,
-        ber,
-        current_storey_idx,
-        mode,
-        vp,
-        view.roof_rect_views,
-        view.pending_roof_rect_outline,
-    );
+    // ridge family's closed-stroke sibling, same violet-blue. Suppressed in
+    // the Objects phase.
+    if !objects_phase {
+        render::render_roof_rects(
+            &painter,
+            rect,
+            ber,
+            current_storey_idx,
+            mode,
+            vp,
+            view.roof_rect_views,
+            view.pending_roof_rect_outline,
+        );
+    }
 
     // The pending ridge's wall snap, mirroring the ceiling-step line's:
     // drawn through the same snap-tag renderer, but its menu is a separate
