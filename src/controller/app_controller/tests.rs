@@ -10985,6 +10985,47 @@ fn object_review_totals_and_hotspots() {
     );
 }
 
+/// Phase-4 form + sheltering setters write to the record, sheltering syncs the
+/// legacy count, and confirm marks the BER's final review.
+#[test]
+fn final_phase_form_sheltering_and_confirm() {
+    use ber_model::ber::common::ExternalSide;
+    use ber_model::ber::final_details::{FloorKind, HeatingKind, ShelterCategory, WallFinish};
+
+    let mut c = dimensioned_square_controller();
+    c.materialize();
+
+    c.set_final_floor(FloorKind::SuspendedSealed);
+    c.set_final_wall_finish(WallFinishField::External, WallFinish::HardPlaster);
+    c.set_final_heating(HeatingKind::Both);
+    let d = c.final_details();
+    assert_eq!(d.floor, FloorKind::SuspendedSealed);
+    assert_eq!(d.external_wall, WallFinish::HardPlaster);
+    assert_eq!(d.heating, HeatingKind::Both);
+
+    // Cycling a side advances its category and syncs the sheltered count.
+    c.cycle_shelter(ExternalSide::Front); // Unset → Sheltered (= 1.0)
+    assert_eq!(c.sheltering().front, ShelterCategory::Sheltered);
+    c.cycle_shelter(ExternalSide::Right); // → Sheltered (another 1.0)
+    let ber = &c.current_record.as_ref().unwrap().data;
+    assert!(
+        (ber.sheltered_sides - 2.0).abs() < 1e-4,
+        "two sheltered sides → count 2.0, got {}",
+        ber.sheltered_sides
+    );
+
+    assert!(!c.details_reviewed());
+    c.confirm_final_review();
+    assert!(c.details_reviewed(), "confirm marks the final review");
+
+    // Survives reload.
+    c.flush_if_dirty().unwrap();
+    let id = c.current_record.as_ref().unwrap().id;
+    c.open_ber(&id).unwrap();
+    assert!(c.details_reviewed());
+    assert_eq!(c.final_details().heating, HeatingKind::Both);
+}
+
 /// The review prompts to confirm each EMPTY category one at a time: "Yes"
 /// records it absent (durably, drops out), "No" skips it for the session
 /// (re-offered on the next review).

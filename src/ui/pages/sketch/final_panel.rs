@@ -53,14 +53,7 @@ pub(super) fn render<F: FnMut(UiEvent)>(
                             .color(egui::Color32::from_gray(150)),
                     );
                 }
-                _ => {
-                    ui.label("Sheltered sides — tap each side of the plan.");
-                    ui.label(
-                        RichText::new("(coming next)")
-                            .italics()
-                            .color(egui::Color32::from_gray(150)),
-                    );
-                }
+                _ => sheltered_sides(ui, view, on_event),
             }
 
             ui.separator();
@@ -150,6 +143,39 @@ fn wall_combo<F: FnMut(UiEvent)>(
                 }
             }
         });
+}
+
+fn sheltered_sides<F: FnMut(UiEvent)>(ui: &mut egui::Ui, view: &SketchView<'_>, on_event: &mut F) {
+    use ber_model::ber::common::ExternalSide;
+    use ber_model::ber::final_details::ShelterCategory;
+
+    ui.label("Tap each side to set how sheltered it is.");
+    ui.add_space(4.0);
+    let color = |c: ShelterCategory| match c {
+        ShelterCategory::Sheltered => egui::Color32::from_rgb(90, 190, 110),
+        ShelterCategory::HalfSheltered => egui::Color32::from_rgb(225, 190, 70),
+        ShelterCategory::Unsheltered => egui::Color32::from_rgb(220, 110, 90),
+        ShelterCategory::Unset => egui::Color32::from_gray(110),
+    };
+    for &side in &ExternalSide::ALL {
+        let cat = view.sheltering.get(side);
+        let btn = egui::Button::new(
+            RichText::new(format!("{}:  {}", side.label(), cat.label()))
+                .color(egui::Color32::WHITE),
+        )
+        .fill(color(cat))
+        .min_size(egui::vec2(260.0, 34.0));
+        if ui.add(btn).clicked() {
+            on_event(UiEvent::Sketch(SketchEvent::CycleShelter(side)));
+        }
+    }
+    if !view.sheltering.all_set() {
+        ui.label(
+            RichText::new("Set all four sides.")
+                .size(11.0)
+                .color(egui::Color32::from_gray(150)),
+        );
+    }
 }
 
 fn heating_combo<F: FnMut(UiEvent)>(ui: &mut egui::Ui, current: HeatingKind, on_event: &mut F) {
