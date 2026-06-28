@@ -32,6 +32,7 @@ mod exposure;
 mod floor_exposure;
 mod living_areas;
 mod mapping_review;
+mod objects;
 mod openings;
 mod partition;
 mod phase_regions;
@@ -98,6 +99,7 @@ pub use history::HistorySnapshot;
 pub use mapping_review::ReviewView;
 pub use new_storey::NewStoreyPromptUiData;
 use new_storey::{NewStoreyStage, PendingNewStorey};
+pub use objects::{ActiveObjectRoomView, ObjectPinView, ObjectRowView};
 use openings::PendingOpening;
 pub use openings::{
     ElevationView, ExistingWindowType, OpeningFieldSpec, OpeningFieldsPrompt, OpeningPromptUiData,
@@ -318,6 +320,9 @@ pub struct AppController {
     /// Which review item (group) is showing — index into the whole-house item
     /// list built each frame; clamped/wrapped against its length.
     structure_review_cursor: usize,
+    /// Phase-3 (Objects): the room pin currently OPEN for adding objects, by
+    /// `ObjectRoom` id. `None` = no room open (tap the plan to drop/open one).
+    active_object_room: Option<ItemId>,
     /// When `Some`, the PARTITION overlay is open for this outline wall (by its
     /// stable start `VertexId`): the canvas shows the unrolled wall face and
     /// strokes/taps cut + attribute it. Opened from the wall-exposure toolbar.
@@ -551,6 +556,7 @@ impl AppController {
             mapping_review_selection: None,
             structure_review_mode: false,
             structure_review_cursor: 0,
+            active_object_room: None,
             partition_wall: None,
             partition_stroke: Vec::new(),
             partition_pending: None,

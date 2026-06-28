@@ -10876,6 +10876,53 @@ fn structure_review_items_cover_groups_and_cursor_wraps() {
     assert_eq!(c.structure_review_view().unwrap().cursor, 0, "cursor wraps");
 }
 
+/// Phase-3 objects: tapping drops/opens a room pin, objects accumulate (summing
+/// counts), a near tap reopens the same pin (no duplicate), a far tap makes a
+/// new one, and undo removes it.
+#[test]
+fn objects_capture_pins_counts_and_undo() {
+    use ber_model::ber::objects::{BoilerFuel, ObjectKind, RadiatorTrv};
+
+    let mut c = dimensioned_square_controller();
+    c.materialize();
+
+    // Drop a pin and add two object entries (1 boiler + 5 radiators = 6).
+    c.objects_pointer_down(2.0, 2.0, 0.5);
+    let room = c.active_object_room().expect("a room opened");
+    c.add_object(
+        ObjectKind::Boiler(BoilerFuel::Gas),
+        1,
+        None,
+        Vec::new(),
+        PhotoQuality::Full,
+    );
+    c.add_object(
+        ObjectKind::Radiator(RadiatorTrv::WithTrv),
+        5,
+        None,
+        Vec::new(),
+        PhotoQuality::Full,
+    );
+    let pins = c.object_rooms_view();
+    assert_eq!(pins.len(), 1, "one pin");
+    assert_eq!(pins[0].count, 6, "1 boiler + 5 radiators");
+    let av = c.active_object_room_view().expect("room open");
+    assert_eq!(av.objects.len(), 2, "two object entries");
+
+    // Closing then tapping NEAR reopens the same pin (no duplicate).
+    c.close_object_room();
+    assert!(c.active_object_room().is_none());
+    c.objects_pointer_down(2.1, 2.1, 0.5);
+    assert_eq!(c.active_object_room(), Some(room), "near tap reopens it");
+    assert_eq!(c.object_rooms_view().len(), 1, "no new pin");
+
+    // Tapping FAR drops a second pin; undo removes it.
+    c.objects_pointer_down(8.0, 8.0, 0.5);
+    assert_eq!(c.object_rooms_view().len(), 2, "a far tap adds a pin");
+    c.undo().expect("undo");
+    assert_eq!(c.object_rooms_view().len(), 1, "undo removed the new pin");
+}
+
 /// Stepping the side cursor wraps through the four sides.
 #[test]
 fn mapping_review_side_cursor_wraps() {

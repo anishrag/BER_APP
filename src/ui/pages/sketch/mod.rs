@@ -16,6 +16,7 @@
 mod canvas;
 pub mod categories;
 mod number_box;
+mod objects_panel;
 pub mod overlays;
 mod prompt_dock;
 mod structure;
@@ -25,11 +26,11 @@ use egui::epaint::PathStroke;
 use egui::Pos2;
 
 use crate::controller::app_controller::{
-    AssessmentPhase, ChecklistItem, DimensionPromptUiData, EditDragPromptUiData, ElevationView,
-    ExistingGroup, ExistingWindowType, ExposureSelection, NewStoreyPromptUiData,
-    OpeningFieldsPrompt, OpeningToolKind, PartitionView, PhotoView, PositionPromptUiData,
-    ReviewView, RiserView, SelectMode, SnapTagView, StructureEdit, StructureReviewView,
-    SurfaceKind, VertexDropPromptUiData, WallExposureView, WindowTypeChoice,
+    ActiveObjectRoomView, AssessmentPhase, ChecklistItem, DimensionPromptUiData,
+    EditDragPromptUiData, ElevationView, ExistingGroup, ExistingWindowType, ExposureSelection,
+    NewStoreyPromptUiData, ObjectPinView, OpeningFieldsPrompt, OpeningToolKind, PartitionView,
+    PhotoView, PositionPromptUiData, ReviewView, RiserView, SelectMode, SnapTagView, StructureEdit,
+    StructureReviewView, SurfaceKind, VertexDropPromptUiData, WallExposureView, WindowTypeChoice,
 };
 use crate::ui::pages::events::UiEvent;
 use crate::ui::render::ViewParams;
@@ -37,6 +38,7 @@ use crate::ui::widgets::HintExt;
 use ber_model::ber::ber_struct::Ber;
 use ber_model::ber::common::{ConstructionPhase, ExternalSide, ItemId};
 use ber_model::ber::fenestration::{Frame, Glazing, Overshading};
+use ber_model::ber::objects::ObjectKind;
 use ber_model::ber::structural::{SurfaceCounts, WallExposure};
 use domain::sketch::{DisplayMode, EditTools, SketchMode};
 use manip_plan::CollinearitySuggestion;
@@ -498,6 +500,31 @@ pub enum SketchEvent {
     StepStructureReview(i32),
     /// Confirm "all's good": record the dwelling Structure-reviewed and close.
     ConfirmStructureReview,
+    /// Phase-3 (Objects): tap the plan to drop / open a room pin at world `(x, y)`.
+    ObjectsPointerDown {
+        world_x: f64,
+        world_y: f64,
+        tol: f64,
+    },
+    /// Close the open object room (the panel's "Done").
+    CloseObjectRoom,
+    /// Rename the open object room.
+    RenameObjectRoom(String),
+    /// Add an object to the open room: its kind, count, optional note, and photos.
+    AddObject {
+        kind: ObjectKind,
+        count: u32,
+        note: Option<String>,
+        photos: Vec<std::path::PathBuf>,
+        photo_quality: crate::ui::widgets::PhotoQuality,
+    },
+    /// Delete one object from a room (the Delete panel).
+    DeleteObject {
+        room: ItemId,
+        object: ItemId,
+    },
+    /// Delete a whole object room pin (the Delete panel).
+    DeleteObjectRoom(ItemId),
     /// Close the elevation overlay.
     CloseElevation,
     /// User entered a default ceiling height (m) in the floating number box
@@ -1006,6 +1033,21 @@ pub struct SketchView<'a> {
     /// The open Structure-REVIEW takeover view, if active: the current group's
     /// details + photos + highlight set. When `Some`, it replaces the plan canvas.
     pub structure_review_view: Option<StructureReviewView>,
+    /// Phase-3 (Objects): the room pins on the current storey, for the plan
+    /// overlay. Empty outside the Objects phase.
+    pub object_pins: Vec<ObjectPinView>,
+    /// The open object room's panel view (objects so far + categories present),
+    /// or `None` when none is open.
+    pub active_object_room: Option<ActiveObjectRoomView>,
+    /// Object-entry UI state (the open room's panel): the category chosen (to
+    /// show its subtypes), the count / note / "Other" buffers, and the photos
+    /// picked for the object being added. See [`crate::ui::app::SketchState`].
+    pub object_selected_category: &'a mut Option<ber_model::ber::objects::ObjectCategory>,
+    pub object_selected_kind: &'a mut Option<ObjectKind>,
+    pub object_count_input: &'a mut String,
+    pub object_note_input: &'a mut String,
+    pub object_other_name: &'a mut String,
+    pub object_pending_photos: &'a mut Vec<std::path::PathBuf>,
     /// Current storey's wall / roof / floor counts — the Structure-phase tool
     /// read-out.
     pub surface_counts: SurfaceCounts,
@@ -1153,6 +1195,9 @@ impl SketchPage {
             // prompt is typed here, in a draggable window over the canvas
             // (constrained to it), rather than in the bottom prompt dock.
             number_box::render(ui.ctx(), canvas_rect, &mut view, &mut on_event);
+            // Phase-3 (Objects): the open room's entry panel (category → subtype
+            // → count + photos → Add), a floating window over the canvas.
+            objects_panel::render(ui.ctx(), canvas_rect, &mut view, &mut on_event);
             // The contextual flow controls (exposure / phase / step / roof /
             // new-storey / redraw / curve / vertex / review) live in a DRAGGABLE
             // floating window over the canvas, opening roughly centred — buttons

@@ -203,6 +203,17 @@ pub struct SketchState {
     /// placed (a window photo is per-instance). Cleared at the start of each new
     /// placement; consumed (attached) when the window is placed.
     pub pending_window_photos: Vec<std::path::PathBuf>,
+    /// Phase-3 (Objects) entry-panel state: the chosen category (to show its
+    /// subtypes), the count / note / "Other"-name buffers, and the photos picked
+    /// for the object being added. Cleared after each Add.
+    pub object_selected_category: Option<ber_model::ber::objects::ObjectCategory>,
+    /// The concrete kind chosen (a subtype picked, or a singleton category).
+    /// `None` while a category is selected but its subtype hasn't been picked yet.
+    pub object_selected_kind: Option<ber_model::ber::objects::ObjectKind>,
+    pub object_count_input: String,
+    pub object_note_input: String,
+    pub object_other_name: String,
+    pub object_pending_photos: Vec<std::path::PathBuf>,
     /// Whether the floating default-ceiling-height entry box is open. Lives here
     /// (not on `categories`, which the view borrows) so the event handler can
     /// toggle it; the view reads it by value. Opened by the Heights tool button,
@@ -884,6 +895,16 @@ impl eframe::App for BerApp {
                                 };
                                 (c.structure_reviewed(), c.structure_complete(), view)
                             };
+                            // Phase-3 (Objects) view-data: room pins + the open
+                            // room's panel (only while in the Objects phase).
+                            let (object_pins, active_object_room) = {
+                                let c = self.app_controller.borrow();
+                                if c.current_phase() == AssessmentPhase::Objects {
+                                    (c.object_rooms_view(), c.active_object_room_view())
+                                } else {
+                                    (Vec::new(), None)
+                                }
+                            };
 
                             // Owned copy of the selected region ids so the view
                             // can borrow it without holding the controller.
@@ -1133,6 +1154,16 @@ impl eframe::App for BerApp {
                                 structure_complete,
                                 structure_reviewed,
                                 structure_review_view,
+                                object_pins,
+                                active_object_room,
+                                object_selected_category: &mut self
+                                    .sketch_state
+                                    .object_selected_category,
+                                object_selected_kind: &mut self.sketch_state.object_selected_kind,
+                                object_count_input: &mut self.sketch_state.object_count_input,
+                                object_note_input: &mut self.sketch_state.object_note_input,
+                                object_other_name: &mut self.sketch_state.object_other_name,
+                                object_pending_photos: &mut self.sketch_state.object_pending_photos,
                                 surface_counts,
                                 structure_kinds,
                                 structure_select,
@@ -1777,6 +1808,42 @@ impl eframe::App for BerApp {
                                     }
                                     SketchEvent::ConfirmStructureReview => {
                                         controller.borrow_mut().confirm_structure_review()
+                                    }
+                                    SketchEvent::ObjectsPointerDown {
+                                        world_x,
+                                        world_y,
+                                        tol,
+                                    } => {
+                                        controller
+                                            .borrow_mut()
+                                            .objects_pointer_down(world_x, world_y, tol);
+                                    }
+                                    SketchEvent::CloseObjectRoom => {
+                                        controller.borrow_mut().close_object_room();
+                                    }
+                                    SketchEvent::RenameObjectRoom(name) => {
+                                        controller.borrow_mut().rename_object_room(name);
+                                    }
+                                    SketchEvent::AddObject {
+                                        kind,
+                                        count,
+                                        note,
+                                        photos,
+                                        photo_quality,
+                                    } => {
+                                        controller.borrow_mut().add_object(
+                                            kind,
+                                            count,
+                                            note,
+                                            photos,
+                                            photo_quality,
+                                        );
+                                    }
+                                    SketchEvent::DeleteObject { room, object } => {
+                                        controller.borrow_mut().delete_object(room, object);
+                                    }
+                                    SketchEvent::DeleteObjectRoom(room) => {
+                                        controller.borrow_mut().delete_object_room(room);
                                     }
                                     SketchEvent::SetDefaultCeilingHeight(value) => {
                                         match controller

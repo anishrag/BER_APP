@@ -1829,6 +1829,68 @@ pub(super) fn render<F: FnMut(UiEvent)>(
         }
     }
 
+    // Phase-3 (Objects): a primary tap on the 2D plan drops / opens a room pin
+    // at that world point (the entry panel then adds objects to it). Gated to the
+    // Objects phase + 2D, and off while navigating / two-finger panning.
+    // A CLICK places/opens a pin; a DRAG still pans (handled by nav), so no
+    // navigation gate here — only suppress while two-finger panning.
+    if matches!(view.current_phase, AssessmentPhase::Objects)
+        && matches!(mode, SketchMode::Storey2D)
+        && !touch_nav_active
+    {
+        if let Some(t) = canvas_transform(ber, current_storey_idx, rect, vp, false) {
+            let tol_world = (16.0 / t.scale()) as f64;
+            if response.clicked_by(egui::PointerButton::Primary) {
+                if let Some(pos) = response.interact_pointer_pos() {
+                    let (wx, wy) = t.inverse(pos.x, pos.y);
+                    on_event(UiEvent::Sketch(SketchEvent::ObjectsPointerDown {
+                        world_x: wx,
+                        world_y: wy,
+                        tol: tol_world,
+                    }));
+                }
+            }
+        }
+    }
+
+    // Phase-3 (Objects): draw the room pins on the 2D plan — a dot per pin with
+    // its object count, the open one ringed.
+    if matches!(view.current_phase, AssessmentPhase::Objects)
+        && matches!(mode, SketchMode::Storey2D)
+        && !view.object_pins.is_empty()
+    {
+        if let Some(t) = canvas_transform(ber, current_storey_idx, rect, vp, false) {
+            for pin in &view.object_pins {
+                let sp = t.apply(pin.x, pin.y);
+                let fill = if pin.active {
+                    egui::Color32::from_rgb(90, 200, 180)
+                } else {
+                    egui::Color32::from_rgb(70, 150, 200)
+                };
+                if pin.active {
+                    painter.circle_stroke(sp, 13.0, egui::Stroke::new(2.0, egui::Color32::WHITE));
+                }
+                painter.circle_filled(sp, 9.0, fill);
+                painter.text(
+                    sp,
+                    egui::Align2::CENTER_CENTER,
+                    pin.count.to_string(),
+                    egui::FontId::proportional(11.0),
+                    egui::Color32::WHITE,
+                );
+                if !pin.name.trim().is_empty() {
+                    painter.text(
+                        sp + egui::vec2(0.0, -16.0),
+                        egui::Align2::CENTER_BOTTOM,
+                        &pin.name,
+                        egui::FontId::proportional(11.0),
+                        egui::Color32::from_gray(220),
+                    );
+                }
+            }
+        }
+    }
+
     // Highlight the roof window selected for Edit-on-surface (a bright border on
     // its plan footprint), drawn on top of the openings painted by `render_ber`.
     if view.openings_mode && view.elevation_view.is_none() {
