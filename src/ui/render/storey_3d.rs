@@ -37,6 +37,7 @@ use eframe::egui;
 
 use super::{color_for, fill_polygon, fit_transform, style, Transform2d, ViewParams};
 
+#[allow(clippy::too_many_arguments)]
 pub fn render(
     painter: &egui::Painter,
     rect: egui::Rect,
@@ -46,6 +47,9 @@ pub fn render(
     // Region ids the assessor has SELECTED in the Structure phase — these faces
     // are shaded. Empty outside that phase / with nothing selected.
     selected: &HashSet<ItemId>,
+    // World-3D points (storey-local) to mark with a bright dot — the Objects
+    // phase's room pins. Empty otherwise.
+    hotspots: &[(f64, f64, f64)],
 ) {
     if storey.ceiling_height_m.is_none() {
         painter.text(
@@ -62,6 +66,12 @@ pub fn render(
     };
     let t = fit_transform(rect, min_xy, max_xy, view);
     render_at_z_offset(painter, &t, storey, display_mode, 0.0, view, selected);
+    for &(x, y, z) in hotspots {
+        let (px, py) = view.project_3d(x, y, z);
+        let sp = t.apply(px, py);
+        painter.circle_filled(sp, 7.0, egui::Color32::from_rgb(255, 210, 70));
+        painter.circle_stroke(sp, 7.0, egui::Stroke::new(1.5, egui::Color32::BLACK));
+    }
 }
 
 /// The lowest floor level in the storey (metres relative to its datum) — the

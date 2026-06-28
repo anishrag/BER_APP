@@ -84,6 +84,8 @@ pub fn render(
             global_bbox,
             // No Structure-phase selection in the all-storeys overview.
             &std::collections::HashSet::new(),
+            // Full plan (not the reduced Objects view) in the overview.
+            false,
         );
     }
 }

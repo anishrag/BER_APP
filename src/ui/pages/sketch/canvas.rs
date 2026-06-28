@@ -545,7 +545,15 @@ pub(super) fn render<F: FnMut(UiEvent)>(
             );
         }
     } else {
-        // BER view layer with optional collinearity highlight overlay.
+        // BER view layer with optional collinearity highlight overlay. In the
+        // Objects phase the plan is reduced (no roofs / roof windows) and the
+        // room pins show as hotspots in 3D — lifted ~1 m above the storey floor.
+        let objects_view = matches!(view.current_phase, AssessmentPhase::Objects);
+        let hotspots: Vec<(f64, f64, f64)> = if objects_view {
+            view.object_pins.iter().map(|p| (p.x, p.y, 1.0)).collect()
+        } else {
+            Vec::new()
+        };
         render::render_ber(
             &painter,
             rect,
@@ -558,6 +566,8 @@ pub(super) fn render<F: FnMut(UiEvent)>(
             vp,
             view.structure_selected,
             view.structure_edit,
+            objects_view,
+            &hotspots,
         );
     }
 

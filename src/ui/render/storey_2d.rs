@@ -9,7 +9,7 @@
 use std::collections::HashSet;
 
 use ber_model::ber::common::ItemId;
-use ber_model::ber::fenestration::{Door, Window};
+use ber_model::ber::fenestration::{Door, OpeningPlacement, Window};
 use ber_model::ber::structural::{CeilingRegion, FloorRegion, Storey};
 use domain::sketch::DisplayMode;
 use eframe::egui;
@@ -47,6 +47,10 @@ pub fn render(
     // shaded; everything else draws at its normal style. Empty outside that
     // phase / with nothing selected.
     selected: &HashSet<ItemId>,
+    // Objects-phase plan: a REDUCED view (walls + wall-windows + floors, plus the
+    // living-area overlay the canvas adds) — roof outlines, roof windows and
+    // ceiling-height labels are suppressed so the plan just gives a sense of place.
+    objects_view: bool,
 ) {
     // Build the fit bbox from BOTH the storey and the watermark — a new (empty)
     // storey has no bbox of its own; the previous-storey watermark supplies one
@@ -84,14 +88,19 @@ pub fn render(
 
     // Roof regions (when populated) — drawn as dashed outlines above the floor.
     // Today Storey.roofs.regions is empty by default; this loop renders nothing
-    // until the controller populates ceilings.
-    if !storey.roofs.regions.is_empty() {
+    // until the controller populates ceilings. Suppressed in the Objects view.
+    if !storey.roofs.regions.is_empty() && !objects_view {
         draw_roof_overlay(painter, &t, storey, display_mode);
     }
 
     // Windows + doors. Roof windows (windows whose vertices form a horizontal quad)
-    // are drawn as translucent rectangles since they're visible looking down.
+    // are drawn as translucent rectangles since they're visible looking down. In
+    // the Objects view, roof windows are skipped (only wall windows give a sense
+    // of place).
     for window in &storey.windows {
+        if objects_view && matches!(window.placement, Some(OpeningPlacement::Roof { .. })) {
+            continue;
+        }
         draw_window(painter, &t, window, display_mode);
     }
     for door in &storey.doors {

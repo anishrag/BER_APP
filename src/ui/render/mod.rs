@@ -101,6 +101,12 @@ pub fn render_ber(
     // The in-flight "Edit attributes" session. When set, the 2D storey switches
     // to the fanned group view instead of the normal shaded render.
     structure_edit: Option<&StructureEdit>,
+    // Objects phase: render the REDUCED 2D plan (no roofs / roof windows) and the
+    // 3D hotspot markers below.
+    objects_view: bool,
+    // World-3D points to mark as hotspots in the 3D views (the Objects phase's
+    // room pins). Empty otherwise.
+    hotspots: &[(f64, f64, f64)],
 ) {
     let Some(ber) = ber else {
         painter.text(
@@ -152,6 +158,7 @@ pub fn render_ber(
                             watermark.as_deref(),
                             None,
                             &no_selection,
+                            objects_view,
                         );
                     }
                     None => {
@@ -166,6 +173,7 @@ pub fn render_ber(
                             watermark.as_deref(),
                             None,
                             selected,
+                            objects_view,
                         );
                     }
                 }
@@ -175,7 +183,15 @@ pub fn render_ber(
         }
         (SketchMode::Storey3D, Some(i)) => {
             if let Some(storey) = ber.storeys.get(i) {
-                storey_3d::render(painter, rect, storey, display_mode, view, selected);
+                storey_3d::render(
+                    painter,
+                    rect,
+                    storey,
+                    display_mode,
+                    view,
+                    selected,
+                    hotspots,
+                );
             } else {
                 empty_storey_hint(painter, rect);
             }
@@ -184,7 +200,7 @@ pub fn render_ber(
             all_storeys_2d::render(painter, rect, ber, display_mode, view);
         }
         (SketchMode::Storey3D, None) => {
-            full_house_3d::render(painter, rect, ber, display_mode, view, selected, &[]);
+            full_house_3d::render(painter, rect, ber, display_mode, view, selected, hotspots);
         }
     }
 }
