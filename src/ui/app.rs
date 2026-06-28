@@ -903,17 +903,28 @@ impl eframe::App for BerApp {
                                 (c.objects_reviewed(), c.details_reviewed())
                             };
                             // Phase-4 (Final) view-data (only while in that phase).
-                            let (final_details, sheltering, orientation_deg, site_satellite_image) = {
+                            let (
+                                final_details,
+                                sheltering,
+                                orientation_deg,
+                                site_satellite_image,
+                                north_image,
+                            ) = {
                                 let c = self.app_controller.borrow();
                                 if c.current_phase() == AssessmentPhase::Final {
+                                    // The image overlay only shows on the north-align step.
+                                    let north = (self.sketch_state.final_step == 1)
+                                        .then(|| c.north_image())
+                                        .flatten();
                                     (
                                         c.final_details(),
                                         c.sheltering(),
                                         c.orientation_deg(),
                                         c.site_satellite_image_path(),
+                                        north,
                                     )
                                 } else {
-                                    (Default::default(), Default::default(), 0.0, None)
+                                    (Default::default(), Default::default(), 0.0, None, None)
                                 }
                             };
                             // Phase-3 (Objects) view-data: room pins + the open
@@ -1195,6 +1206,7 @@ impl eframe::App for BerApp {
                                 sheltering,
                                 orientation_deg,
                                 site_satellite_image,
+                                north_image,
                                 final_step: &mut self.sketch_state.final_step,
                                 structure_review_view,
                                 object_pins,
@@ -1921,6 +1933,22 @@ impl eframe::App for BerApp {
                                     }
                                     SketchEvent::SetOrientationDeg(deg) => {
                                         controller.borrow_mut().set_orientation_deg(deg);
+                                    }
+                                    SketchEvent::NorthImageGesture {
+                                        pan_dx,
+                                        pan_dy,
+                                        zoom_factor,
+                                        rotate_deg,
+                                    } => {
+                                        controller.borrow_mut().apply_north_gesture(
+                                            pan_dx,
+                                            pan_dy,
+                                            zoom_factor,
+                                            rotate_deg,
+                                        );
+                                    }
+                                    SketchEvent::ResetNorthImage => {
+                                        controller.borrow_mut().reset_north_image();
                                     }
                                     SketchEvent::CycleShelter(side) => {
                                         controller.borrow_mut().cycle_shelter(side);

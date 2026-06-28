@@ -545,6 +545,16 @@ pub enum SketchEvent {
     SetFinalHeating(HeatingKind),
     /// Phase-4 north-align: set the dwelling orientation (degrees from north).
     SetOrientationDeg(f32),
+    /// Phase-4 north-align: one frame of moving / zooming / rotating the image
+    /// over the fixed plan (pan in canvas px, zoom factor, rotation degrees).
+    NorthImageGesture {
+        pan_dx: f32,
+        pan_dy: f32,
+        zoom_factor: f32,
+        rotate_deg: f32,
+    },
+    /// Recenter the north-align image (reset pan + zoom).
+    ResetNorthImage,
     /// Phase-4 sheltered sides: advance one side's shelter category on a tap.
     CycleShelter(ExternalSide),
     /// Phase-4: confirm the final review (BER complete).
@@ -1066,6 +1076,9 @@ pub struct SketchView<'a> {
     pub orientation_deg: f32,
     /// Pre-populated north-up site image path (`file://`), if any.
     pub site_satellite_image: Option<String>,
+    /// The north-align satellite image + its current transform over the plan
+    /// (the canvas overlay), while in Phase-4 step 2. `None` otherwise.
+    pub north_image: Option<crate::controller::app_controller::NorthImageView>,
     /// Which Phase-4 wizard step is showing (0 = form, 1 = north, 2 = sheltered).
     /// See [`crate::ui::app::SketchState`].
     pub final_step: &'a mut u8,

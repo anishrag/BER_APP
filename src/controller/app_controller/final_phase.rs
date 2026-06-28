@@ -16,6 +16,15 @@ pub enum WallFinishField {
     External,
 }
 
+/// The north-align satellite image + its current transform over the fixed plan,
+/// for the canvas overlay. `rotation_deg` is the recorded north (orientation).
+pub struct NorthImageView {
+    pub path: String,
+    pub offset: (f32, f32),
+    pub zoom: f32,
+    pub rotation_deg: f32,
+}
+
 impl AppController {
     /// Whether the Final-phase review has been confirmed.
     pub fn details_reviewed(&self) -> bool {
@@ -87,6 +96,46 @@ impl AppController {
             r.data.orientation_deg = deg.rem_euclid(360.0);
             let _ = self.mark_dirty();
         }
+    }
+
+    /// The north-align image + transform for the canvas overlay, or `None` when
+    /// no site image is present on the record.
+    pub fn north_image(&self) -> Option<NorthImageView> {
+        let path = self.site_satellite_image_path()?;
+        Some(NorthImageView {
+            path,
+            offset: self.north_img_offset,
+            zoom: self.north_img_zoom,
+            rotation_deg: self.orientation_deg(),
+        })
+    }
+
+    /// Apply one frame of the north-align gesture: pan (canvas px) + zoom factor
+    /// (session-only) + rotation delta (degrees → the persisted orientation).
+    pub fn apply_north_gesture(
+        &mut self,
+        pan_dx: f32,
+        pan_dy: f32,
+        zoom_factor: f32,
+        rotate_deg: f32,
+    ) {
+        self.north_img_offset.0 += pan_dx;
+        self.north_img_offset.1 += pan_dy;
+        if zoom_factor.is_finite() && zoom_factor > 0.0 {
+            self.north_img_zoom = (self.north_img_zoom * zoom_factor).clamp(0.05, 40.0);
+        }
+        if rotate_deg != 0.0 {
+            if let Some(r) = self.current_record.as_mut() {
+                r.data.orientation_deg = (r.data.orientation_deg + rotate_deg).rem_euclid(360.0);
+                let _ = self.mark_dirty();
+            }
+        }
+    }
+
+    /// Recenter the north-align image (reset pan + zoom; keeps the rotation).
+    pub fn reset_north_image(&mut self) {
+        self.north_img_offset = (0.0, 0.0);
+        self.north_img_zoom = 1.0;
     }
 
     /// Advance one side's shelter category on a tap (Unset→Sheltered→Half→

@@ -343,6 +343,9 @@ pub(super) fn render<F: FnMut(UiEvent)>(
     // In the Objects phase the plan is kept minimal (a sense of place) — the
     // ceiling-step and roof-apex/ridge overlays are suppressed.
     let objects_phase = matches!(view.current_phase, AssessmentPhase::Objects);
+    // Phase-4 north-align step: the satellite image is being moved/rotated over
+    // the fixed plan, so the canvas owns input (no nav/draw).
+    let final_north = view.north_image.is_some();
 
     // Wall-length labels gated on the Dimensions-category toggle: passing
     // empty label lists leaves the geometry untouched and just drops the
@@ -575,6 +578,68 @@ pub(super) fn render<F: FnMut(UiEvent)>(
             view.structure_edit,
             objects_view,
             &hotspots,
+        );
+    }
+
+    // Phase-4 north-align: the satellite image, moved / zoomed / rotated over the
+    // FIXED plan. The image's rotation is the recorded north. Two-finger gestures
+    // (Android) or left-drag = move, right-drag = rotate, scroll = zoom (PC).
+    if let Some(img) = view.north_image.as_ref() {
+        let base = (rect.width().min(rect.height()) * 0.6 * img.zoom).max(20.0);
+        let center = rect.center() + egui::vec2(img.offset.0, img.offset.1);
+        let img_rect = egui::Rect::from_center_size(center, egui::vec2(base, base));
+        egui::Image::new(format!("file://{}", img.path))
+            .rotate(img.rotation_deg.to_radians(), egui::vec2(0.5, 0.5))
+            .tint(egui::Color32::from_white_alpha(170))
+            .show_loading_spinner(false)
+            .paint_at(ui, img_rect);
+
+        // One gesture per frame → NorthImageGesture.
+        let mt = ui.input(|i| i.multi_touch());
+        if let Some(mt) = mt {
+            on_event(UiEvent::Sketch(SketchEvent::NorthImageGesture {
+                pan_dx: mt.translation_delta.x,
+                pan_dy: mt.translation_delta.y,
+                zoom_factor: mt.zoom_delta,
+                rotate_deg: mt.rotation_delta.to_degrees(),
+            }));
+        } else {
+            let mut pan = egui::vec2(0.0, 0.0);
+            let mut rotate_deg = 0.0;
+            let mut zoom_factor = 1.0;
+            if response.dragged_by(egui::PointerButton::Primary) {
+                pan = response.drag_delta();
+            }
+            if response.dragged_by(egui::PointerButton::Secondary) {
+                rotate_deg = response.drag_delta().x * 0.4;
+            }
+            let scroll = ui.input(|i| i.smooth_scroll_delta.y);
+            if scroll.abs() > 0.0 {
+                zoom_factor = (scroll * 0.002).exp();
+            }
+            if pan != egui::vec2(0.0, 0.0) || rotate_deg != 0.0 || zoom_factor != 1.0 {
+                on_event(UiEvent::Sketch(SketchEvent::NorthImageGesture {
+                    pan_dx: pan.x,
+                    pan_dy: pan.y,
+                    zoom_factor,
+                    rotate_deg,
+                }));
+            }
+        }
+        // A north indicator: an arrow pointing where the image's north now is.
+        let north_dir = egui::Vec2::angled((img.rotation_deg - 90.0).to_radians());
+        let origin = rect.right_top() + egui::vec2(-40.0, 40.0);
+        painter.arrow(
+            origin,
+            north_dir * 26.0,
+            egui::Stroke::new(3.0, egui::Color32::from_rgb(255, 80, 80)),
+        );
+        painter.text(
+            origin + north_dir * 34.0,
+            egui::Align2::CENTER_CENTER,
+            "N",
+            egui::FontId::proportional(13.0),
+            egui::Color32::from_rgb(255, 80, 80),
         );
     }
 
@@ -1406,6 +1471,7 @@ pub(super) fn render<F: FnMut(UiEvent)>(
         && view.navigation
         && tools_idle
         && !touch_nav_active
+        && !final_north
         && response.dragged_by(egui::PointerButton::Primary)
     {
         let d = response.drag_delta();
@@ -1986,7 +2052,9 @@ pub(super) fn render<F: FnMut(UiEvent)>(
         // Objects phase owns it too (tap to drop pins) — neither should let a
         // primary drag run the mapping draw/edit tools (which replace geometry).
         && !structure_phase
-        && !matches!(view.current_phase, AssessmentPhase::Objects);
+        && !matches!(view.current_phase, AssessmentPhase::Objects)
+        // North-align owns input (the image is being moved/rotated, not the plan).
+        && !final_north;
 
     if primary_available && !touch_nav_active && !matches!(edit_tool, EditTools::Move) {
         if response.drag_started_by(egui::PointerButton::Primary) {

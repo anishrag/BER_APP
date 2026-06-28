@@ -96,7 +96,7 @@ pub use editing::{
     VertexDropPromptUiData, VertexMeasurement, VertexMeasurementKind, VertexMeasurementUiData,
     WallPositions,
 };
-pub use final_phase::WallFinishField;
+pub use final_phase::{NorthImageView, WallFinishField};
 pub use history::HistorySnapshot;
 pub use mapping_review::ReviewView;
 pub use new_storey::NewStoreyPromptUiData;
@@ -337,6 +337,11 @@ pub struct AppController {
     /// the session. Cleared each time the review opens. (A "Yes" persists on the
     /// record instead — `Ber.objects_no_items_confirmed`.)
     object_review_skipped: std::collections::HashSet<ber_model::ber::objects::ObjectCategory>,
+    /// Phase-4 north-align: the satellite IMAGE's transient pan offset (canvas
+    /// px) and zoom over the fixed plan. The image's ROTATION is the persisted
+    /// `orientation_deg` (the plan's north). Pan/zoom are session-only.
+    north_img_offset: (f32, f32),
+    north_img_zoom: f32,
     /// When `Some`, the PARTITION overlay is open for this outline wall (by its
     /// stable start `VertexId`): the canvas shows the unrolled wall face and
     /// strokes/taps cut + attribute it. Opened from the wall-exposure toolbar.
@@ -574,6 +579,8 @@ impl AppController {
             object_review_mode: false,
             object_review_selected: 0,
             object_review_skipped: std::collections::HashSet::new(),
+            north_img_offset: (0.0, 0.0),
+            north_img_zoom: 1.0,
             partition_wall: None,
             partition_stroke: Vec::new(),
             partition_pending: None,

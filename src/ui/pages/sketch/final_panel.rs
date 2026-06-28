@@ -46,12 +46,30 @@ pub(super) fn render<F: FnMut(UiEvent)>(
             match *view.final_step {
                 0 => details_form(ui, view, on_event),
                 1 => {
-                    ui.label("North alignment — align the plan to the satellite image.");
-                    ui.label(
-                        RichText::new("(coming next)")
-                            .italics()
+                    if view.site_satellite_image.is_some() {
+                        ui.label("Move / rotate / zoom the satellite image to line it up");
+                        ui.label("with the plan. The red N shows the recorded north.");
+                        ui.label(
+                            RichText::new(
+                                "Two fingers (tablet) · left-drag move, right-drag rotate, \
+                                 scroll zoom (PC)",
+                            )
+                            .size(11.0)
                             .color(egui::Color32::from_gray(150)),
-                    );
+                        );
+                        ui.horizontal(|ui| {
+                            ui.label(format!("North: {:.0}°", view.orientation_deg));
+                            if ui.button("Recenter").clicked() {
+                                on_event(UiEvent::Sketch(SketchEvent::ResetNorthImage));
+                            }
+                        });
+                    } else {
+                        ui.label(
+                            RichText::new("No satellite image on this record yet.")
+                                .italics()
+                                .color(egui::Color32::from_gray(150)),
+                        );
+                    }
                 }
                 _ => sheltered_sides(ui, view, on_event),
             }
