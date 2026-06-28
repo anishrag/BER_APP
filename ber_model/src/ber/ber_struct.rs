@@ -57,6 +57,11 @@ pub struct Ber {
     /// so older records load with nothing confirmed.
     #[serde(default)]
     pub objects_no_items_confirmed: Vec<crate::ber::objects::ObjectCategory>,
+    /// Whether the assessor has confirmed the Phase-3 (Objects) review — walked
+    /// the counts + confirmed the empty categories and pressed "all reviewed".
+    /// Recorded on confirm. `#[serde(default)]` so older records load as un-reviewed.
+    #[serde(default)]
+    pub objects_reviewed: bool,
 }
 
 // Pure data helpers, optional

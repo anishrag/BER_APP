@@ -215,6 +215,7 @@ fn create_minimal_ber(id: ItemId) -> Ber {
         mapping_reviewed: false,
         structure_reviewed: false,
         objects_no_items_confirmed: vec![],
+        objects_reviewed: false,
     }
 }
 

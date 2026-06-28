@@ -535,6 +535,8 @@ pub enum SketchEvent {
     ConfirmObjectAbsent(ObjectCategory),
     /// Review absence prompt: skip this category for now (there is one to add).
     SkipObjectAbsent(ObjectCategory),
+    /// Confirm the Objects review ("all reviewed & OK") — records it and closes.
+    ConfirmObjectReview,
     /// Close the elevation overlay.
     CloseElevation,
     /// User entered a default ceiling height (m) in the floating number box

@@ -301,6 +301,23 @@ impl AppController {
         self.object_review_skipped.insert(cat);
     }
 
+    /// Whether the Objects review has been confirmed ("all reviewed & OK").
+    pub fn objects_reviewed(&self) -> bool {
+        self.current_record
+            .as_ref()
+            .is_some_and(|r| r.data.objects_reviewed)
+    }
+
+    /// Confirm the Objects review (counts + absences all checked): record it on
+    /// the dwelling and close the review.
+    pub fn confirm_objects_review(&mut self) {
+        if let Some(record) = self.current_record.as_mut() {
+            record.data.objects_reviewed = true;
+        }
+        let _ = self.mark_dirty();
+        self.set_object_review_mode(false);
+    }
+
     /// The Objects review view: the flat house-wide totals + the selected kind's
     /// hotspots. `None` when no record / no objects recorded.
     pub fn object_review_view(&self) -> Option<ObjectReviewView> {

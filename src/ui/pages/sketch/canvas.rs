@@ -2757,6 +2757,13 @@ fn object_review_overlay<F: FnMut(UiEvent)>(
                         .strong()
                         .size(15.0),
                 );
+                ui.separator();
+                if ui
+                    .button(egui::RichText::new("✓ All reviewed & OK").strong())
+                    .clicked()
+                {
+                    on_event(UiEvent::Sketch(SketchEvent::ConfirmObjectReview));
+                }
                 if ui.button("Close").clicked() {
                     on_event(UiEvent::Sketch(SketchEvent::CloseObjectReview));
                 }
