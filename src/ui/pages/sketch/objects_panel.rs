@@ -44,6 +44,11 @@ pub(super) fn render<F: FnMut(UiEvent)>(
     if !matches!(view.current_phase, AssessmentPhase::Objects) {
         return;
     }
+    // The Objects REVIEW takeover owns the screen — don't draw the category bar /
+    // details / hint over it.
+    if view.object_review_view.is_some() {
+        return;
+    }
     // No room open: a small hint to tap the plan.
     let Some(room) = view.active_object_room.as_ref() else {
         egui::Area::new(Id::new("ber_objects_hint"))
