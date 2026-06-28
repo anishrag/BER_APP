@@ -51,6 +51,12 @@ pub struct Ber {
     /// so older records load as un-reviewed.
     #[serde(default)]
     pub structure_reviewed: bool,
+    /// Phase-3 (Objects) review: the object categories the assessor has confirmed
+    /// have NO items in the dwelling (e.g. "no cylinder", "no thermostat") — the
+    /// review prompts for each empty category one at a time. `#[serde(default)]`
+    /// so older records load with nothing confirmed.
+    #[serde(default)]
+    pub objects_no_items_confirmed: Vec<crate::ber::objects::ObjectCategory>,
 }
 
 // Pure data helpers, optional

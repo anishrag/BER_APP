@@ -330,6 +330,11 @@ pub struct AppController {
     /// Which object kind is selected in the review (index into the flat totals
     /// list built each frame; clamped). Drives the 3D hotspot highlight.
     object_review_selected: usize,
+    /// Empty categories the assessor said "No" to during THIS review (there is one
+    /// — they'll go add it), so the absent-confirmation prompt skips past them for
+    /// the session. Cleared each time the review opens. (A "Yes" persists on the
+    /// record instead — `Ber.objects_no_items_confirmed`.)
+    object_review_skipped: std::collections::HashSet<ber_model::ber::objects::ObjectCategory>,
     /// When `Some`, the PARTITION overlay is open for this outline wall (by its
     /// stable start `VertexId`): the canvas shows the unrolled wall face and
     /// strokes/taps cut + attribute it. Opened from the wall-exposure toolbar.
@@ -566,6 +571,7 @@ impl AppController {
             active_object_room: None,
             object_review_mode: false,
             object_review_selected: 0,
+            object_review_skipped: std::collections::HashSet::new(),
             partition_wall: None,
             partition_stroke: Vec::new(),
             partition_pending: None,

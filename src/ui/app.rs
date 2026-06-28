@@ -1871,6 +1871,12 @@ impl eframe::App for BerApp {
                                     SketchEvent::SelectObjectReviewKind(idx) => {
                                         controller.borrow_mut().select_object_review(idx);
                                     }
+                                    SketchEvent::ConfirmObjectAbsent(cat) => {
+                                        controller.borrow_mut().confirm_object_absent(cat);
+                                    }
+                                    SketchEvent::SkipObjectAbsent(cat) => {
+                                        controller.borrow_mut().skip_object_absent(cat);
+                                    }
                                     SketchEvent::SetDefaultCeilingHeight(value) => {
                                         match controller
                                             .borrow_mut()

@@ -7,7 +7,7 @@
 //! needed — objects don't affect geometry.
 use super::*;
 use ber_model::ber::common::Photo;
-use ber_model::ber::objects::{BuildingObject, ObjectKind, ObjectRoom};
+use ber_model::ber::objects::{BuildingObject, ObjectCategory, ObjectKind, ObjectRoom};
 use domain::points::Point2f32;
 
 /// A room pin for the plan overlay: where it is, its name, how many objects it
@@ -51,6 +51,11 @@ pub struct ObjectReviewView {
     pub totals: Vec<ObjectTotalView>,
     pub selected: usize,
     pub hotspots: Vec<(f64, f64, f64)>,
+    /// The next empty category awaiting an absence confirmation ("No X?"), or
+    /// `None` when every empty category has been confirmed or skipped.
+    pub absent_prompt: Option<ber_model::ber::objects::ObjectCategory>,
+    /// How many empty categories still await confirmation (incl. the current one).
+    pub absent_remaining: usize,
 }
 
 impl AppController {
@@ -262,11 +267,14 @@ impl AppController {
         self.object_review_mode
     }
 
-    /// Open / close the Objects review. Entering resets the selection + camera.
+    /// Open / close the Objects review. Entering resets the selection + camera
+    /// and clears the session "skipped" absences (so every empty category is
+    /// re-offered for confirmation).
     pub fn set_object_review_mode(&mut self, on: bool) {
         self.object_review_mode = on;
         if on {
             self.object_review_selected = 0;
+            self.object_review_skipped.clear();
             self.reset_view();
         }
     }
@@ -276,17 +284,38 @@ impl AppController {
         self.object_review_selected = idx;
     }
 
+    /// Confirm an empty category has NO items in the dwelling ("No cylinder?" →
+    /// Yes). Recorded durably on the record; the next empty category is offered.
+    pub fn confirm_object_absent(&mut self, cat: ber_model::ber::objects::ObjectCategory) {
+        if let Some(record) = self.current_record.as_mut() {
+            if !record.data.objects_no_items_confirmed.contains(&cat) {
+                record.data.objects_no_items_confirmed.push(cat);
+                let _ = self.mark_dirty();
+            }
+        }
+    }
+
+    /// Skip an empty category's absence prompt for THIS review ("No X?" → No,
+    /// there is one — I'll add it). Session-only; re-offered on the next review.
+    pub fn skip_object_absent(&mut self, cat: ber_model::ber::objects::ObjectCategory) {
+        self.object_review_skipped.insert(cat);
+    }
+
     /// The Objects review view: the flat house-wide totals + the selected kind's
     /// hotspots. `None` when no record / no objects recorded.
     pub fn object_review_view(&self) -> Option<ObjectReviewView> {
         let data = &self.current_record.as_ref()?.data;
         let order = object_label_totals(data);
-        if order.is_empty() {
-            return None;
-        }
-        let selected = self.object_review_selected.min(order.len() - 1);
-        let selected_label = order[selected].0.clone();
-        let hotspots = object_hotspots(data, &selected_label);
+        // Open even with no objects yet (a pin was dropped) so the absence
+        // confirmations can still be worked through.
+        let selected = self
+            .object_review_selected
+            .min(order.len().saturating_sub(1));
+        let selected_label = order.get(selected).map(|(l, _)| l.clone());
+        let hotspots = selected_label
+            .as_deref()
+            .map(|l| object_hotspots(data, l))
+            .unwrap_or_default();
         let totals = order
             .into_iter()
             .enumerate()
@@ -296,10 +325,30 @@ impl AppController {
                 selected: i == selected,
             })
             .collect();
+        // Absence prompts: standard categories (not "Other") with NO items, that
+        // haven't been confirmed-absent on the record nor skipped this session.
+        let present: std::collections::HashSet<ObjectCategory> = data
+            .storeys
+            .iter()
+            .flat_map(|s| s.object_rooms.iter())
+            .flat_map(|r| r.objects.iter())
+            .map(|o| o.kind.category())
+            .collect();
+        let remaining: Vec<ObjectCategory> = ObjectCategory::ALL
+            .into_iter()
+            .filter(|c| {
+                *c != ObjectCategory::Other
+                    && !present.contains(c)
+                    && !data.objects_no_items_confirmed.contains(c)
+                    && !self.object_review_skipped.contains(c)
+            })
+            .collect();
         Some(ObjectReviewView {
             totals,
             selected,
             hotspots,
+            absent_prompt: remaining.first().copied(),
+            absent_remaining: remaining.len(),
         })
     }
 }

@@ -18,7 +18,7 @@ use domain::points::Point2f32;
 /// Top-level object category — what the assessor picks first. Most have a
 /// SUBTYPE chosen next (see [`ObjectCategory::subtypes`]); a few are singletons
 /// (the category IS the object, no sub-choice).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum ObjectCategory {
     Vent,
     Fan,

@@ -214,6 +214,7 @@ fn create_minimal_ber(id: ItemId) -> Ber {
         photos: vec![],
         mapping_reviewed: false,
         structure_reviewed: false,
+        objects_no_items_confirmed: vec![],
     }
 }
 

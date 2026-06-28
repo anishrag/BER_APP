@@ -2832,7 +2832,7 @@ fn object_review_overlay<F: FnMut(UiEvent)>(
         );
         ui.add_space(4.0);
         egui::ScrollArea::vertical()
-            .max_height(inner.height())
+            .max_height(inner.height() - 70.0)
             .show(ui, |ui| {
                 for (i, row) in orv.totals.iter().enumerate() {
                     let text = format!("{}  ·  {}", row.count, row.label);
@@ -2841,6 +2841,35 @@ fn object_review_overlay<F: FnMut(UiEvent)>(
                     }
                 }
             });
+
+        // Absence confirmation, one empty category at a time ("No cylinder?").
+        if let Some(cat) = orv.absent_prompt {
+            ui.separator();
+            ui.label(
+                egui::RichText::new(format!("No {}?", cat.label().to_lowercase()))
+                    .strong()
+                    .size(15.0),
+            );
+            ui.horizontal(|ui| {
+                if ui.button("Yes — none").clicked() {
+                    on_event(UiEvent::Sketch(SketchEvent::ConfirmObjectAbsent(cat)));
+                }
+                if ui.button("No — there is one").clicked() {
+                    on_event(UiEvent::Sketch(SketchEvent::SkipObjectAbsent(cat)));
+                }
+            });
+            ui.label(
+                egui::RichText::new(format!("{} left to confirm", orv.absent_remaining))
+                    .size(11.0)
+                    .color(egui::Color32::from_gray(150)),
+            );
+        } else {
+            ui.separator();
+            ui.label(
+                egui::RichText::new("All empty categories confirmed ✓")
+                    .color(egui::Color32::from_gray(150)),
+            );
+        }
     });
 }
 

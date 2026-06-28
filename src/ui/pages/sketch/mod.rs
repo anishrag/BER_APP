@@ -39,7 +39,7 @@ use crate::ui::widgets::HintExt;
 use ber_model::ber::ber_struct::Ber;
 use ber_model::ber::common::{ConstructionPhase, ExternalSide, ItemId};
 use ber_model::ber::fenestration::{Frame, Glazing, Overshading};
-use ber_model::ber::objects::ObjectKind;
+use ber_model::ber::objects::{ObjectCategory, ObjectKind};
 use ber_model::ber::structural::{SurfaceCounts, WallExposure};
 use domain::sketch::{DisplayMode, EditTools, SketchMode};
 use manip_plan::CollinearitySuggestion;
@@ -531,6 +531,10 @@ pub enum SketchEvent {
     CloseObjectReview,
     /// Select an object-kind row in the review (by index) — drives the hotspots.
     SelectObjectReviewKind(usize),
+    /// Review absence prompt: confirm an empty category really has no items.
+    ConfirmObjectAbsent(ObjectCategory),
+    /// Review absence prompt: skip this category for now (there is one to add).
+    SkipObjectAbsent(ObjectCategory),
     /// Close the elevation overlay.
     CloseElevation,
     /// User entered a default ceiling height (m) in the floating number box

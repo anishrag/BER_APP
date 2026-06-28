@@ -10985,6 +10985,74 @@ fn object_review_totals_and_hotspots() {
     );
 }
 
+/// The review prompts to confirm each EMPTY category one at a time: "Yes"
+/// records it absent (durably, drops out), "No" skips it for the session
+/// (re-offered on the next review).
+#[test]
+fn object_review_absence_confirmation() {
+    use ber_model::ber::objects::{BoilerFuel, ObjectCategory, ObjectKind};
+
+    let mut c = dimensioned_square_controller();
+    c.materialize();
+    c.objects_pointer_down(2.0, 2.0, 0.5);
+    c.add_object(
+        ObjectKind::Boiler(BoilerFuel::Gas),
+        1,
+        None,
+        Vec::new(),
+        PhotoQuality::Full,
+    );
+    c.close_object_room();
+
+    c.set_object_review_mode(true);
+    let rv = c.object_review_view().expect("review open");
+    let first = rv.absent_prompt.expect("an empty category to confirm");
+    assert_ne!(
+        first,
+        ObjectCategory::Boiler,
+        "boiler has one — not prompted"
+    );
+    let remaining0 = rv.absent_remaining;
+
+    // "Yes — none" records it absent and advances.
+    c.confirm_object_absent(first);
+    assert!(c
+        .current_record
+        .as_ref()
+        .unwrap()
+        .data
+        .objects_no_items_confirmed
+        .contains(&first));
+    let rv2 = c.object_review_view().unwrap();
+    assert_eq!(rv2.absent_remaining, remaining0 - 1, "one fewer to confirm");
+    assert_ne!(
+        rv2.absent_prompt,
+        Some(first),
+        "advanced past the confirmed one"
+    );
+
+    // "No — there is one" skips for the session only.
+    let second = rv2.absent_prompt.expect("next empty category");
+    c.skip_object_absent(second);
+    assert_ne!(
+        c.object_review_view().unwrap().absent_prompt,
+        Some(second),
+        "skipped one advances within the session"
+    );
+
+    // Reopening the review clears the session skip → `second` is re-offered,
+    // while the confirmed `first` stays recorded (never re-offered).
+    c.set_object_review_mode(false);
+    c.set_object_review_mode(true);
+    assert!(c
+        .current_record
+        .as_ref()
+        .unwrap()
+        .data
+        .objects_no_items_confirmed
+        .contains(&first));
+}
+
 /// Stepping the side cursor wraps through the four sides.
 #[test]
 fn mapping_review_side_cursor_wraps() {
