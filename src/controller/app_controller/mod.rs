@@ -342,6 +342,11 @@ pub struct AppController {
     /// `orientation_deg` (the plan's north). Pan/zoom are session-only.
     north_img_offset: (f32, f32),
     north_img_zoom: f32,
+    /// Session flags for the Phase-4 completion flow: the "BER complete" popup is
+    /// up, and the (dummy) summary screen is up. Set when the final review is
+    /// confirmed; cleared by the popup/summary buttons. Not persisted.
+    show_ber_complete: bool,
+    show_summary: bool,
     /// When `Some`, the PARTITION overlay is open for this outline wall (by its
     /// stable start `VertexId`): the canvas shows the unrolled wall face and
     /// strokes/taps cut + attribute it. Opened from the wall-exposure toolbar.
@@ -581,6 +586,8 @@ impl AppController {
             object_review_skipped: std::collections::HashSet::new(),
             north_img_offset: (0.0, 0.0),
             north_img_zoom: 1.0,
+            show_ber_complete: false,
+            show_summary: false,
             partition_wall: None,
             partition_stroke: Vec::new(),
             partition_pending: None,

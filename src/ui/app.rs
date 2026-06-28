@@ -902,6 +902,10 @@ impl eframe::App for BerApp {
                                 let c = self.app_controller.borrow();
                                 (c.objects_reviewed(), c.details_reviewed())
                             };
+                            let (show_ber_complete, show_summary) = {
+                                let c = self.app_controller.borrow();
+                                (c.show_ber_complete(), c.show_summary())
+                            };
                             // Phase-4 (Final) view-data (only while in that phase).
                             let (
                                 final_details,
@@ -1208,6 +1212,8 @@ impl eframe::App for BerApp {
                                 site_satellite_image,
                                 north_image,
                                 final_step: &mut self.sketch_state.final_step,
+                                show_ber_complete,
+                                show_summary,
                                 structure_review_view,
                                 object_pins,
                                 active_object_room,
@@ -1955,6 +1961,15 @@ impl eframe::App for BerApp {
                                     }
                                     SketchEvent::ConfirmFinalReview => {
                                         controller.borrow_mut().confirm_final_review();
+                                    }
+                                    SketchEvent::DismissBerComplete => {
+                                        controller.borrow_mut().dismiss_ber_complete();
+                                    }
+                                    SketchEvent::OpenSummary => {
+                                        controller.borrow_mut().open_summary();
+                                    }
+                                    SketchEvent::CloseSummary => {
+                                        controller.borrow_mut().close_summary();
                                     }
                                     SketchEvent::SetDefaultCeilingHeight(value) => {
                                         match controller

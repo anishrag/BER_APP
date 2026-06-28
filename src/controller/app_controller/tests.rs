@@ -11015,8 +11015,18 @@ fn final_phase_form_sheltering_and_confirm() {
     );
 
     assert!(!c.details_reviewed());
+    assert!(!c.show_ber_complete());
     c.confirm_final_review();
     assert!(c.details_reviewed(), "confirm marks the final review");
+    assert!(c.show_ber_complete(), "confirm raises the completion popup");
+    // Completion flow: popup → summary → back.
+    c.open_summary();
+    assert!(
+        !c.show_ber_complete() && c.show_summary(),
+        "popup → summary"
+    );
+    c.close_summary();
+    assert!(!c.show_summary(), "summary closed");
 
     // Survives reload.
     c.flush_if_dirty().unwrap();

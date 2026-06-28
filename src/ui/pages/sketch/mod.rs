@@ -557,8 +557,13 @@ pub enum SketchEvent {
     ResetNorthImage,
     /// Phase-4 sheltered sides: advance one side's shelter category on a tap.
     CycleShelter(ExternalSide),
-    /// Phase-4: confirm the final review (BER complete).
+    /// Phase-4: confirm the final review (BER complete) — raises the popup.
     ConfirmFinalReview,
+    /// Completion popup: "Go back" (dismiss) / "Take me to summary" (open).
+    DismissBerComplete,
+    OpenSummary,
+    /// Summary: "Back to phases" (close the summary).
+    CloseSummary,
     /// Close the elevation overlay.
     CloseElevation,
     /// User entered a default ceiling height (m) in the floating number box
@@ -1082,6 +1087,10 @@ pub struct SketchView<'a> {
     /// Which Phase-4 wizard step is showing (0 = form, 1 = north, 2 = sheltered).
     /// See [`crate::ui::app::SketchState`].
     pub final_step: &'a mut u8,
+    /// The Phase-4 "BER complete" popup is up.
+    pub show_ber_complete: bool,
+    /// The (dummy) summary screen is up.
+    pub show_summary: bool,
     /// The open Structure-REVIEW takeover view, if active: the current group's
     /// details + photos + highlight set. When `Some`, it replaces the plan canvas.
     pub structure_review_view: Option<StructureReviewView>,

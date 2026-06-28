@@ -158,12 +158,36 @@ impl AppController {
         }
     }
 
-    /// Confirm the Final review — record the dwelling Final-reviewed (BER complete).
+    /// Confirm the Final review — record the dwelling Final-reviewed (BER
+    /// complete) and raise the completion popup.
     pub fn confirm_final_review(&mut self) {
         if let Some(r) = self.current_record.as_mut() {
             r.data.details_reviewed = true;
             let _ = self.mark_dirty();
         }
+        self.show_ber_complete = true;
+    }
+
+    /// Whether the "BER complete" popup is showing.
+    pub fn show_ber_complete(&self) -> bool {
+        self.show_ber_complete
+    }
+    /// Whether the (dummy) summary screen is showing.
+    pub fn show_summary(&self) -> bool {
+        self.show_summary
+    }
+    /// Dismiss the completion popup (the "Go back" choice).
+    pub fn dismiss_ber_complete(&mut self) {
+        self.show_ber_complete = false;
+    }
+    /// From the completion popup → open the summary.
+    pub fn open_summary(&mut self) {
+        self.show_ber_complete = false;
+        self.show_summary = true;
+    }
+    /// Close the summary (back to the phases).
+    pub fn close_summary(&mut self) {
+        self.show_summary = false;
     }
 
     /// The Phase-4 checklist: progress rows for the form, north, and sheltering.

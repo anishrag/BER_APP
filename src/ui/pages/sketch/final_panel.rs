@@ -19,6 +19,64 @@ pub(super) fn render<F: FnMut(UiEvent)>(
     view: &mut SketchView<'_>,
     on_event: &mut F,
 ) {
+    // Completion flow (independent of the current phase, since it's set on
+    // confirm and may outlive a phase switch).
+    if view.show_summary {
+        egui::Window::new("BER summary")
+            .id(Id::new("ber_summary"))
+            .order(egui::Order::Foreground)
+            .anchor(Align2::CENTER_CENTER, egui::vec2(0.0, 0.0))
+            .collapsible(false)
+            .resizable(false)
+            .show(ctx, |ui| {
+                ui.set_min_width(360.0);
+                ui.label(RichText::new("BER summary").strong().size(18.0));
+                ui.add_space(6.0);
+                ui.label(
+                    RichText::new("(summary — coming soon)")
+                        .italics()
+                        .color(egui::Color32::from_gray(150)),
+                );
+                ui.add_space(10.0);
+                ui.horizontal(|ui| {
+                    if ui.button("Back to phases").clicked() {
+                        on_event(UiEvent::Sketch(SketchEvent::CloseSummary));
+                    }
+                    if ui
+                        .button(RichText::new("Save & exit BER").strong())
+                        .clicked()
+                    {
+                        on_event(UiEvent::ExitBer);
+                    }
+                });
+            });
+        return;
+    }
+    if view.show_ber_complete {
+        egui::Window::new("BER complete")
+            .id(Id::new("ber_complete_popup"))
+            .order(egui::Order::Foreground)
+            .anchor(Align2::CENTER_CENTER, egui::vec2(0.0, 0.0))
+            .collapsible(false)
+            .resizable(false)
+            .show(ctx, |ui| {
+                ui.label(RichText::new("BER is complete 🎉").strong().size(18.0));
+                ui.add_space(10.0);
+                ui.horizontal(|ui| {
+                    if ui
+                        .button(RichText::new("Take me to summary").strong())
+                        .clicked()
+                    {
+                        on_event(UiEvent::Sketch(SketchEvent::OpenSummary));
+                    }
+                    if ui.button("Go back").clicked() {
+                        on_event(UiEvent::Sketch(SketchEvent::DismissBerComplete));
+                    }
+                });
+            });
+        // Fall through: the wizard stays behind the popup.
+    }
+
     if !matches!(view.current_phase, AssessmentPhase::Final) {
         return;
     }
