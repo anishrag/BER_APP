@@ -8,7 +8,7 @@
 //! UI-only: reads the controller's `ActiveObjectRoomView` and emits
 //! `SketchEvent`s; the controller owns the data + photo store.
 
-use egui::{Align2, Color32, Id, RichText};
+use egui::{Align2, Id, RichText};
 
 use super::{SketchEvent, SketchView};
 use crate::controller::app_controller::AssessmentPhase;
@@ -57,18 +57,7 @@ pub(super) fn render<F: FnMut(UiEvent)>(
             });
         return;
     };
-    let room_id = room.id;
-    let title = if room.name.trim().is_empty() {
-        "Objects here".to_string()
-    } else {
-        room.name.clone()
-    };
     let present = room.categories_present.clone();
-    let existing: Vec<(ber_model::ber::common::ItemId, String, u32, usize)> = room
-        .objects
-        .iter()
-        .map(|o| (o.id, o.label.clone(), o.count, o.photo_count))
-        .collect();
 
     // ── Big category bar across the top, below the phase signpost ──
     egui::Area::new(Id::new("ber_objects_category_bar"))
@@ -105,57 +94,21 @@ pub(super) fn render<F: FnMut(UiEvent)>(
             });
         });
 
-    // ── Floating options window: room context + the picked category's entry ──
-    egui::Window::new("Objects in this room")
-        .id(Id::new("ber_objects_panel"))
-        .order(egui::Order::Foreground)
-        .default_pos(rect.left_top() + egui::vec2(16.0, 150.0))
-        .pivot(Align2::LEFT_TOP)
-        .constrain_to(rect)
-        .collapsible(true)
-        .resizable(false)
-        .show(ctx, |ui| {
-            ui.set_min_width(260.0);
-            ui.horizontal(|ui| {
-                ui.label(RichText::new(&title).strong().size(15.0));
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    if ui.button("Done").clicked() {
-                        on_event(UiEvent::Sketch(SketchEvent::CloseObjectRoom));
-                    }
-                });
-            });
-
-            if existing.is_empty() {
-                ui.label(
-                    RichText::new("No objects yet — pick a category above.")
-                        .italics()
-                        .color(Color32::from_gray(150)),
-                );
-            } else {
-                for (oid, label, count, photos) in &existing {
-                    ui.horizontal(|ui| {
-                        ui.label(format!("{label}  ×{count}"));
-                        if *photos > 0 {
-                            ui.label(
-                                RichText::new(format!("📷{photos}")).color(Color32::from_gray(150)),
-                            );
-                        }
-                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                            if ui.small_button("✕").on_hover_text("Remove").clicked() {
-                                on_event(UiEvent::Sketch(SketchEvent::DeleteObject {
-                                    room: room_id,
-                                    object: *oid,
-                                }));
-                            }
-                        });
-                    });
-                }
-            }
-
-            // The picked category's options.
-            if let Some(cat) = *view.object_selected_category {
-                ui.separator();
-                ui.label(RichText::new(cat.label()).strong());
+    // ── Details window: shown only once a category is picked from the top bar.
+    // Positioned bottom-left, clear of the centred top bar and the pin dropdown.
+    // OK adds the object to the room (appears in the pin dropdown) and closes this
+    // window; the room stays selected so the next category can be added.
+    if let Some(cat) = *view.object_selected_category {
+        egui::Window::new(format!("Add {}", cat.label()))
+            .id(Id::new("ber_objects_details"))
+            .order(egui::Order::Foreground)
+            .default_pos(rect.left_bottom() + egui::vec2(16.0, -240.0))
+            .pivot(Align2::LEFT_TOP)
+            .constrain_to(rect)
+            .collapsible(false)
+            .resizable(false)
+            .show(ctx, |ui| {
+                ui.set_min_width(240.0);
                 let subtypes = cat.subtypes();
                 if !subtypes.is_empty() {
                     ui.horizontal_wrapped(|ui| {
@@ -221,7 +174,7 @@ pub(super) fn render<F: FnMut(UiEvent)>(
                         }
                     });
                     if ui
-                        .add(egui::Button::new(RichText::new("Add").strong()))
+                        .add(egui::Button::new(RichText::new("OK").strong()))
                         .clicked()
                     {
                         if let Some(kind) = view.object_selected_kind.clone() {
@@ -246,6 +199,6 @@ pub(super) fn render<F: FnMut(UiEvent)>(
                         }
                     }
                 }
-            }
-        });
+            });
+    }
 }

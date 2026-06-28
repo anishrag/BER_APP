@@ -1880,6 +1880,7 @@ pub(super) fn render<F: FnMut(UiEvent)>(
         && !view.object_pins.is_empty()
     {
         if let Some(t) = canvas_transform(ber, current_storey_idx, rect, vp, false) {
+            let mut active_sp = None;
             for pin in &view.object_pins {
                 let sp = t.apply(pin.x, pin.y);
                 let fill = if pin.active {
@@ -1889,6 +1890,7 @@ pub(super) fn render<F: FnMut(UiEvent)>(
                 };
                 if pin.active {
                     painter.circle_stroke(sp, 13.0, egui::Stroke::new(2.0, egui::Color32::WHITE));
+                    active_sp = Some(sp);
                 }
                 painter.circle_filled(sp, 9.0, fill);
                 painter.text(
@@ -1907,6 +1909,10 @@ pub(super) fn render<F: FnMut(UiEvent)>(
                         egui::Color32::from_gray(220),
                     );
                 }
+            }
+            // Dropdown of the OPEN room's objects, anchored just below its pin.
+            if let (Some(sp), Some(room)) = (active_sp, view.active_object_room.as_ref()) {
+                object_pin_dropdown(ui, sp, room, on_event);
             }
         }
     }
@@ -2653,6 +2659,68 @@ fn elevation_colors(
 /// with a top control bar (scroll the four sides / confirm "all's good"). Drag
 /// an opening to reposition it (the controller constrains it to its wall). Owns
 /// its own input — emits review pointer + nav events.
+/// The open room's objects as a small dropdown list anchored just below its pin
+/// (`sp` = the pin's screen position). Each row can be removed; a "Done" closes
+/// the room. New objects added via the top bar appear here.
+fn object_pin_dropdown<F: FnMut(UiEvent)>(
+    ui: &mut egui::Ui,
+    sp: egui::Pos2,
+    room: &crate::controller::app_controller::ActiveObjectRoomView,
+    on_event: &mut F,
+) {
+    let title = if room.name.trim().is_empty() {
+        "Room".to_string()
+    } else {
+        room.name.clone()
+    };
+    egui::Area::new(egui::Id::new("ber_object_pin_dropdown"))
+        .order(egui::Order::Foreground)
+        .fixed_pos(sp + egui::vec2(14.0, 10.0))
+        .show(ui.ctx(), |ui| {
+            egui::Frame::popup(ui.style()).show(ui, |ui| {
+                ui.set_max_width(220.0);
+                ui.horizontal(|ui| {
+                    ui.label(egui::RichText::new(&title).strong());
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        if ui.button("Done").clicked() {
+                            on_event(UiEvent::Sketch(SketchEvent::CloseObjectRoom));
+                        }
+                    });
+                });
+                if room.objects.is_empty() {
+                    ui.label(
+                        egui::RichText::new("Pick a category above to add.")
+                            .italics()
+                            .color(egui::Color32::from_gray(150)),
+                    );
+                } else {
+                    for o in &room.objects {
+                        ui.horizontal(|ui| {
+                            ui.label(format!("{}  ×{}", o.label, o.count));
+                            if o.photo_count > 0 {
+                                ui.label(
+                                    egui::RichText::new(format!("📷{}", o.photo_count))
+                                        .color(egui::Color32::from_gray(150)),
+                                );
+                            }
+                            ui.with_layout(
+                                egui::Layout::right_to_left(egui::Align::Center),
+                                |ui| {
+                                    if ui.small_button("✕").on_hover_text("Remove").clicked() {
+                                        on_event(UiEvent::Sketch(SketchEvent::DeleteObject {
+                                            room: room.id,
+                                            object: o.id,
+                                        }));
+                                    }
+                                },
+                            );
+                        });
+                    }
+                }
+            });
+        });
+}
+
 fn object_review_overlay<F: FnMut(UiEvent)>(
     ui: &mut egui::Ui,
     rect: egui::Rect,
