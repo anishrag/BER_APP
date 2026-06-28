@@ -15,6 +15,7 @@
 
 mod canvas;
 pub mod categories;
+mod final_panel;
 mod number_box;
 mod objects_panel;
 pub mod overlays;
@@ -31,7 +32,7 @@ use crate::controller::app_controller::{
     NewStoreyPromptUiData, ObjectPinView, ObjectReviewView, OpeningFieldsPrompt, OpeningToolKind,
     PartitionView, PhotoView, PositionPromptUiData, ReviewView, RiserView, SelectMode, SnapTagView,
     StructureEdit, StructureReviewView, SurfaceKind, VertexDropPromptUiData, WallExposureView,
-    WindowTypeChoice,
+    WallFinishField, WindowTypeChoice,
 };
 use crate::ui::pages::events::UiEvent;
 use crate::ui::render::ViewParams;
@@ -39,6 +40,7 @@ use crate::ui::widgets::HintExt;
 use ber_model::ber::ber_struct::Ber;
 use ber_model::ber::common::{ConstructionPhase, ExternalSide, ItemId};
 use ber_model::ber::fenestration::{Frame, Glazing, Overshading};
+use ber_model::ber::final_details::{FinalDetails, FloorKind, HeatingKind, WallFinish};
 use ber_model::ber::objects::{ObjectCategory, ObjectKind};
 use ber_model::ber::structural::{SurfaceCounts, WallExposure};
 use domain::sketch::{DisplayMode, EditTools, SketchMode};
@@ -537,6 +539,16 @@ pub enum SketchEvent {
     SkipObjectAbsent(ObjectCategory),
     /// Confirm the Objects review ("all reviewed & OK") — records it and closes.
     ConfirmObjectReview,
+    /// Phase-4 form: set the floor / wall-finish / heating values.
+    SetFinalFloor(FloorKind),
+    SetFinalWallFinish(WallFinishField, WallFinish),
+    SetFinalHeating(HeatingKind),
+    /// Phase-4 north-align: set the dwelling orientation (degrees from north).
+    SetOrientationDeg(f32),
+    /// Phase-4 sheltered sides: advance one side's shelter category on a tap.
+    CycleShelter(ExternalSide),
+    /// Phase-4: confirm the final review (BER complete).
+    ConfirmFinalReview,
     /// Close the elevation overlay.
     CloseElevation,
     /// User entered a default ceiling height (m) in the floating number box
@@ -1046,6 +1058,17 @@ pub struct SketchView<'a> {
     pub objects_reviewed: bool,
     /// Whether the Final-phase review has been confirmed (its ✓).
     pub details_reviewed: bool,
+    /// Phase-4 form values (floor / wall finish / heating), for the form panel.
+    pub final_details: FinalDetails,
+    /// Phase-4 per-side sheltering, for the sheltered-sides step.
+    pub sheltering: ber_model::ber::final_details::ShelteringBySide,
+    /// Phase-4 dwelling orientation (degrees from north) for the north-align step.
+    pub orientation_deg: f32,
+    /// Pre-populated north-up site image path (`file://`), if any.
+    pub site_satellite_image: Option<String>,
+    /// Which Phase-4 wizard step is showing (0 = form, 1 = north, 2 = sheltered).
+    /// See [`crate::ui::app::SketchState`].
+    pub final_step: &'a mut u8,
     /// The open Structure-REVIEW takeover view, if active: the current group's
     /// details + photos + highlight set. When `Some`, it replaces the plan canvas.
     pub structure_review_view: Option<StructureReviewView>,
@@ -1219,6 +1242,8 @@ impl SketchPage {
             // Phase-3 (Objects): the open room's entry panel (category → subtype
             // → count + photos → Add), a floating window over the canvas.
             objects_panel::render(ui.ctx(), canvas_rect, &mut view, &mut on_event);
+            // Phase-4 (Final) wizard: form / north / sheltered + completion.
+            final_panel::render(ui.ctx(), canvas_rect, &mut view, &mut on_event);
             // The contextual flow controls (exposure / phase / step / roof /
             // new-storey / redraw / curve / vertex / review) live in a DRAGGABLE
             // floating window over the canvas, opening roughly centred — buttons

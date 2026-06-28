@@ -214,6 +214,8 @@ pub struct SketchState {
     pub object_note_input: String,
     pub object_other_name: String,
     pub object_pending_photos: Vec<std::path::PathBuf>,
+    /// Phase-4 wizard step (0 = form, 1 = north-align, 2 = sheltered sides).
+    pub final_step: u8,
     /// Whether the floating default-ceiling-height entry box is open. Lives here
     /// (not on `categories`, which the view borrows) so the event handler can
     /// toggle it; the view reads it by value. Opened by the Heights tool button,
@@ -900,6 +902,20 @@ impl eframe::App for BerApp {
                                 let c = self.app_controller.borrow();
                                 (c.objects_reviewed(), c.details_reviewed())
                             };
+                            // Phase-4 (Final) view-data (only while in that phase).
+                            let (final_details, sheltering, orientation_deg, site_satellite_image) = {
+                                let c = self.app_controller.borrow();
+                                if c.current_phase() == AssessmentPhase::Final {
+                                    (
+                                        c.final_details(),
+                                        c.sheltering(),
+                                        c.orientation_deg(),
+                                        c.site_satellite_image_path(),
+                                    )
+                                } else {
+                                    (Default::default(), Default::default(), 0.0, None)
+                                }
+                            };
                             // Phase-3 (Objects) view-data: room pins + the open
                             // room's panel (only while in the Objects phase).
                             let (
@@ -1175,6 +1191,11 @@ impl eframe::App for BerApp {
                                 structure_reviewed,
                                 objects_reviewed,
                                 details_reviewed,
+                                final_details,
+                                sheltering,
+                                orientation_deg,
+                                site_satellite_image,
+                                final_step: &mut self.sketch_state.final_step,
                                 structure_review_view,
                                 object_pins,
                                 active_object_room,
@@ -1886,6 +1907,26 @@ impl eframe::App for BerApp {
                                     }
                                     SketchEvent::ConfirmObjectReview => {
                                         controller.borrow_mut().confirm_objects_review();
+                                    }
+                                    SketchEvent::SetFinalFloor(floor) => {
+                                        controller.borrow_mut().set_final_floor(floor);
+                                    }
+                                    SketchEvent::SetFinalWallFinish(field, finish) => {
+                                        controller
+                                            .borrow_mut()
+                                            .set_final_wall_finish(field, finish);
+                                    }
+                                    SketchEvent::SetFinalHeating(heating) => {
+                                        controller.borrow_mut().set_final_heating(heating);
+                                    }
+                                    SketchEvent::SetOrientationDeg(deg) => {
+                                        controller.borrow_mut().set_orientation_deg(deg);
+                                    }
+                                    SketchEvent::CycleShelter(side) => {
+                                        controller.borrow_mut().cycle_shelter(side);
+                                    }
+                                    SketchEvent::ConfirmFinalReview => {
+                                        controller.borrow_mut().confirm_final_review();
                                     }
                                     SketchEvent::SetDefaultCeilingHeight(value) => {
                                         match controller
