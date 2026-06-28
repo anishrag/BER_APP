@@ -859,7 +859,7 @@ impl eframe::App for BerApp {
                                 let checklist = match phase {
                                     AssessmentPhase::Mapping => c.stage_a_checklist(),
                                     AssessmentPhase::Structure => c.structure_checklist(),
-                                    AssessmentPhase::Objects => Vec::new(),
+                                    AssessmentPhase::Objects => c.objects_checklist(),
                                 };
                                 (
                                     phase,

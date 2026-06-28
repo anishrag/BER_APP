@@ -184,6 +184,46 @@ impl AppController {
         ]
     }
 
+    /// The Phase-3 (Objects) checklist. There's no fixed completion target — the
+    /// survey is as thorough as the assessor makes it — so these rows are
+    /// PROGRESS indicators (green once present, red while empty): whether any room
+    /// pin has been dropped, and whether any object has been recorded. Both red
+    /// when no BER is loaded.
+    pub fn objects_checklist(&self) -> Vec<ChecklistItem> {
+        let (rooms, objects) = self
+            .current_record
+            .as_ref()
+            .map(|r| {
+                let rooms: usize = r.data.storeys.iter().map(|s| s.object_rooms.len()).sum();
+                let objects: usize = r
+                    .data
+                    .storeys
+                    .iter()
+                    .flat_map(|s| s.object_rooms.iter())
+                    .map(|rm| rm.objects.len())
+                    .sum();
+                (rooms, objects)
+            })
+            .unwrap_or((0, 0));
+        let dot = |n: usize| {
+            if n > 0 {
+                ChecklistStatus::AllStoreys
+            } else {
+                ChecklistStatus::Incomplete
+            }
+        };
+        vec![
+            ChecklistItem {
+                label: "Rooms recorded",
+                status: dot(rooms),
+            },
+            ChecklistItem {
+                label: "Objects recorded",
+                status: dot(objects),
+            },
+        ]
+    }
+
     /// Roll a per-storey completion predicate up against the current scope. The
     /// predicate gets each storey's editing model plus its durable ceiling
     /// height (which lives on the BER `Storey`, not the `StoreyDoc`).
