@@ -394,6 +394,15 @@ pub(super) fn render<F: FnMut(UiEvent)>(
         return;
     }
 
+    // Phase-4 (Final): a full phase view — the details form + mode controls on one
+    // side, the reduced plan (over the satellite image) on the other.
+    if matches!(view.current_phase, AssessmentPhase::Final) {
+        if let Some(ber) = ber {
+            final_overlay(ui, rect, view, ber, vp, on_event);
+        }
+        return;
+    }
+
     // Elevation editor: when a wall's elevation is open it REPLACES the plan
     // canvas — the unrolled wall with draggable openings. Owns its own input.
     if let Some(elev) = view.elevation_view.as_ref() {
@@ -448,8 +457,21 @@ pub(super) fn render<F: FnMut(UiEvent)>(
         AssessmentPhase::Mapping => (view.mapping_complete, view.mapping_reviewed),
         AssessmentPhase::Structure => (view.structure_complete, view.structure_reviewed),
         AssessmentPhase::Objects => (view.objects_present, view.objects_reviewed),
-        // The Final phase has no "Review" takeover — it's a wizard shown inline.
-        AssessmentPhase::Final => (false, false),
+        // Final: the checklist's action is "Mark BER complete", shown once all
+        // three parts are done.
+        AssessmentPhase::Final => (view.final_complete, view.details_reviewed),
+    };
+    // The checklist action button's label is per-phase.
+    let review_label = match view.current_phase {
+        AssessmentPhase::Final => {
+            if view.details_reviewed {
+                "BER complete ✓"
+            } else {
+                "Mark BER complete"
+            }
+        }
+        _ if reviewed => "Re-review ▸",
+        _ => "Review ▸",
     };
     let (phase_clicked, review_clicked, phase_bar_rect) = super::overlays::phase_bar(
         ui,
@@ -461,7 +483,7 @@ pub(super) fn render<F: FnMut(UiEvent)>(
         view.details_reviewed,
         &view.checklist,
         show_review,
-        reviewed,
+        review_label,
     );
     if let Some(phase) = phase_clicked {
         on_event(UiEvent::Sketch(SketchEvent::SetAssessmentPhase(phase)));
@@ -470,6 +492,7 @@ pub(super) fn render<F: FnMut(UiEvent)>(
         let ev = match view.current_phase {
             AssessmentPhase::Structure => SketchEvent::OpenStructureReview,
             AssessmentPhase::Objects => SketchEvent::OpenObjectReview,
+            AssessmentPhase::Final => SketchEvent::ConfirmFinalReview,
             _ => SketchEvent::OpenMappingReview,
         };
         on_event(UiEvent::Sketch(ev));
@@ -2804,6 +2827,219 @@ fn object_pin_dropdown<F: FnMut(UiEvent)>(
                 }
             });
         });
+}
+
+/// Phase-4 (Final) full-phase view: details + mode controls on one side; the
+/// reduced plan over the (movable) satellite image on the other.
+fn final_overlay<F: FnMut(UiEvent)>(
+    ui: &mut egui::Ui,
+    rect: egui::Rect,
+    view: &SketchView<'_>,
+    ber: &ber_model::ber::ber_struct::Ber,
+    vp: render::ViewParams,
+    on_event: &mut F,
+) {
+    use crate::controller::app_controller::FinalMode;
+    let painter = ui.painter_at(rect);
+    painter.rect_filled(rect, 0.0, egui::Color32::from_gray(20));
+
+    // Details on top (portrait) / left (landscape); plan on the other side. The
+    // plan keeps roughly the Phase-3 footprint share.
+    let landscape = rect.width() > rect.height();
+    let (details_rect, plan_rect) = if landscape {
+        let mid = rect.left() + rect.width() * 0.38;
+        (
+            egui::Rect::from_min_max(rect.min, egui::pos2(mid, rect.bottom())),
+            egui::Rect::from_min_max(egui::pos2(mid, rect.top()), rect.max),
+        )
+    } else {
+        let mid = rect.top() + rect.height() * 0.42;
+        (
+            egui::Rect::from_min_max(rect.min, egui::pos2(rect.right(), mid)),
+            egui::Rect::from_min_max(egui::pos2(rect.left(), mid), rect.max),
+        )
+    };
+
+    // ── Plan side ──
+    painter.rect_filled(plan_rect, 4.0, egui::Color32::from_gray(28));
+    // Satellite image BEHIND the plan, transformed (only while aligning).
+    if let Some(img) = view.north_image.as_ref() {
+        let base = (plan_rect.size().min_elem() * 0.7 * img.zoom).max(20.0);
+        let center = plan_rect.center() + egui::vec2(img.offset.0, img.offset.1);
+        let img_rect = egui::Rect::from_center_size(center, egui::vec2(base, base));
+        let b = egui::UiBuilder::new().max_rect(plan_rect);
+        ui.scope_builder(b, |ui| {
+            ui.set_clip_rect(plan_rect);
+            egui::Image::new(format!("file://{}", img.path))
+                .rotate(img.rotation_deg.to_radians(), egui::vec2(0.5, 0.5))
+                .tint(egui::Color32::from_white_alpha(180))
+                .show_loading_spinner(false)
+                .paint_at(ui, img_rect);
+        });
+    }
+    // The reduced plan (walls + wall-windows + floors), clipped to the plan side.
+    let plan_painter = ui.painter_at(plan_rect);
+    render::render_ber(
+        &plan_painter,
+        plan_rect,
+        Some(ber),
+        view.current_storey_idx,
+        SketchMode::Storey2D,
+        domain::sketch::DisplayMode::AllSurfaces,
+        None,
+        &[],
+        vp,
+        &std::collections::HashSet::new(),
+        None,
+        true, // objects_view: reduced plan
+        &[],
+    );
+
+    let resp = ui.interact(
+        plan_rect,
+        ui.id().with("ber_final_plan"),
+        egui::Sense::click_and_drag(),
+    );
+
+    match view.final_mode {
+        FinalMode::Align => {
+            // Move / rotate / zoom the image (two-finger or left/right-drag/scroll).
+            let mt = ui.input(|i| i.multi_touch());
+            if let Some(mt) = mt {
+                on_event(UiEvent::Sketch(SketchEvent::NorthImageGesture {
+                    pan_dx: mt.translation_delta.x,
+                    pan_dy: mt.translation_delta.y,
+                    zoom_factor: mt.zoom_delta,
+                    rotate_deg: mt.rotation_delta.to_degrees(),
+                }));
+            } else {
+                let mut pan = egui::vec2(0.0, 0.0);
+                let mut rotate_deg = 0.0;
+                let mut zoom_factor = 1.0;
+                if resp.dragged_by(egui::PointerButton::Primary) {
+                    pan = resp.drag_delta();
+                }
+                if resp.dragged_by(egui::PointerButton::Secondary) {
+                    rotate_deg = resp.drag_delta().x * 0.4;
+                }
+                if resp.hovered() {
+                    let scroll = ui.input(|i| i.smooth_scroll_delta.y);
+                    if scroll.abs() > 0.0 {
+                        zoom_factor = (scroll * 0.002).exp();
+                    }
+                }
+                if pan != egui::vec2(0.0, 0.0) || rotate_deg != 0.0 || zoom_factor != 1.0 {
+                    on_event(UiEvent::Sketch(SketchEvent::NorthImageGesture {
+                        pan_dx: pan.x,
+                        pan_dy: pan.y,
+                        zoom_factor,
+                        rotate_deg,
+                    }));
+                }
+            }
+            // North arrow.
+            let dir = egui::Vec2::angled((view.orientation_deg - 90.0).to_radians());
+            let o = plan_rect.right_top() + egui::vec2(-30.0, 30.0);
+            painter.arrow(o, dir * 22.0, egui::Stroke::new(3.0, egui::Color32::RED));
+            painter.text(
+                o + dir * 30.0,
+                egui::Align2::CENTER_CENTER,
+                "N",
+                egui::FontId::proportional(13.0),
+                egui::Color32::RED,
+            );
+        }
+        FinalMode::Sheltered => {
+            use ber_model::ber::common::ExternalSide;
+            // Coloured bands on the four edges; tap a side to cycle it.
+            let band = 18.0;
+            let edges = [
+                (
+                    ExternalSide::Back,
+                    egui::Rect::from_min_max(
+                        plan_rect.left_top(),
+                        egui::pos2(plan_rect.right(), plan_rect.top() + band),
+                    ),
+                ),
+                (
+                    ExternalSide::Front,
+                    egui::Rect::from_min_max(
+                        egui::pos2(plan_rect.left(), plan_rect.bottom() - band),
+                        plan_rect.right_bottom(),
+                    ),
+                ),
+                (
+                    ExternalSide::Left,
+                    egui::Rect::from_min_max(
+                        plan_rect.left_top(),
+                        egui::pos2(plan_rect.left() + band, plan_rect.bottom()),
+                    ),
+                ),
+                (
+                    ExternalSide::Right,
+                    egui::Rect::from_min_max(
+                        egui::pos2(plan_rect.right() - band, plan_rect.top()),
+                        plan_rect.right_bottom(),
+                    ),
+                ),
+            ];
+            for (side, er) in edges {
+                let c = shelter_color(view.sheltering.get(side));
+                painter.rect_filled(er, 0.0, c);
+                painter.text(
+                    er.center(),
+                    egui::Align2::CENTER_CENTER,
+                    side.label(),
+                    egui::FontId::proportional(11.0),
+                    egui::Color32::WHITE,
+                );
+            }
+            if resp.clicked() {
+                if let Some(p) = resp.interact_pointer_pos() {
+                    let d = p - plan_rect.center();
+                    let side = if d.x.abs() > d.y.abs() {
+                        if d.x > 0.0 {
+                            ExternalSide::Right
+                        } else {
+                            ExternalSide::Left
+                        }
+                    } else if d.y > 0.0 {
+                        ExternalSide::Front
+                    } else {
+                        ExternalSide::Back
+                    };
+                    on_event(UiEvent::Sketch(SketchEvent::CycleShelter(side)));
+                }
+            }
+        }
+        FinalMode::Form => {}
+    }
+
+    // ── Details side ──
+    let inner = egui::Rect::from_min_max(
+        details_rect.left_top() + egui::vec2(10.0, 8.0),
+        details_rect.right_bottom() - egui::vec2(10.0, 8.0),
+    );
+    let b = egui::UiBuilder::new()
+        .max_rect(inner)
+        .layout(egui::Layout::top_down(egui::Align::Min));
+    ui.scope_builder(b, |ui| {
+        ui.set_max_width(inner.width());
+        egui::ScrollArea::vertical().show(ui, |ui| {
+            super::final_panel::details_panel(ui, view, on_event);
+        });
+    });
+}
+
+/// Colour for a shelter category band.
+fn shelter_color(c: ber_model::ber::final_details::ShelterCategory) -> egui::Color32 {
+    use ber_model::ber::final_details::ShelterCategory::*;
+    match c {
+        Sheltered => egui::Color32::from_rgb(90, 190, 110),
+        HalfSheltered => egui::Color32::from_rgb(225, 190, 70),
+        Unsheltered => egui::Color32::from_rgb(220, 110, 90),
+        Unset => egui::Color32::from_gray(90),
+    }
 }
 
 fn object_review_overlay<F: FnMut(UiEvent)>(

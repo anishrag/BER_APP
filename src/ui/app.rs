@@ -214,8 +214,6 @@ pub struct SketchState {
     pub object_note_input: String,
     pub object_other_name: String,
     pub object_pending_photos: Vec<std::path::PathBuf>,
-    /// Phase-4 wizard step (0 = form, 1 = north-align, 2 = sheltered sides).
-    pub final_step: u8,
     /// Whether the floating default-ceiling-height entry box is open. Lives here
     /// (not on `categories`, which the view borrows) so the event handler can
     /// toggle it; the view reads it by value. Opened by the Heights tool button,
@@ -913,11 +911,14 @@ impl eframe::App for BerApp {
                                 orientation_deg,
                                 site_satellite_image,
                                 north_image,
+                                final_mode,
+                                final_complete,
                             ) = {
                                 let c = self.app_controller.borrow();
                                 if c.current_phase() == AssessmentPhase::Final {
-                                    // The image overlay only shows on the north-align step.
-                                    let north = (self.sketch_state.final_step == 1)
+                                    // The image overlay shows only while aligning.
+                                    let north = (c.final_mode()
+                                        == crate::controller::app_controller::FinalMode::Align)
                                         .then(|| c.north_image())
                                         .flatten();
                                     (
@@ -926,9 +927,19 @@ impl eframe::App for BerApp {
                                         c.orientation_deg(),
                                         c.site_satellite_image_path(),
                                         north,
+                                        c.final_mode(),
+                                        c.final_complete(),
                                     )
                                 } else {
-                                    (Default::default(), Default::default(), 0.0, None, None)
+                                    (
+                                        Default::default(),
+                                        Default::default(),
+                                        0.0,
+                                        None,
+                                        None,
+                                        crate::controller::app_controller::FinalMode::Form,
+                                        false,
+                                    )
                                 }
                             };
                             // Phase-3 (Objects) view-data: room pins + the open
@@ -1211,7 +1222,8 @@ impl eframe::App for BerApp {
                                 orientation_deg,
                                 site_satellite_image,
                                 north_image,
-                                final_step: &mut self.sketch_state.final_step,
+                                final_mode,
+                                final_complete,
                                 show_ber_complete,
                                 show_summary,
                                 structure_review_view,
@@ -1937,9 +1949,6 @@ impl eframe::App for BerApp {
                                     SketchEvent::SetFinalHeating(heating) => {
                                         controller.borrow_mut().set_final_heating(heating);
                                     }
-                                    SketchEvent::SetOrientationDeg(deg) => {
-                                        controller.borrow_mut().set_orientation_deg(deg);
-                                    }
                                     SketchEvent::NorthImageGesture {
                                         pan_dx,
                                         pan_dy,
@@ -1958,6 +1967,12 @@ impl eframe::App for BerApp {
                                     }
                                     SketchEvent::CycleShelter(side) => {
                                         controller.borrow_mut().cycle_shelter(side);
+                                    }
+                                    SketchEvent::SetFinalMode(mode) => {
+                                        controller.borrow_mut().set_final_mode(mode);
+                                    }
+                                    SketchEvent::ConfirmAlign => {
+                                        controller.borrow_mut().confirm_align();
                                     }
                                     SketchEvent::ConfirmFinalReview => {
                                         controller.borrow_mut().confirm_final_review();

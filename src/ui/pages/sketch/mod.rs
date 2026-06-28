@@ -29,10 +29,10 @@ use egui::Pos2;
 use crate::controller::app_controller::{
     ActiveObjectRoomView, AssessmentPhase, ChecklistItem, DimensionPromptUiData,
     EditDragPromptUiData, ElevationView, ExistingGroup, ExistingWindowType, ExposureSelection,
-    NewStoreyPromptUiData, ObjectPinView, ObjectReviewView, OpeningFieldsPrompt, OpeningToolKind,
-    PartitionView, PhotoView, PositionPromptUiData, ReviewView, RiserView, SelectMode, SnapTagView,
-    StructureEdit, StructureReviewView, SurfaceKind, VertexDropPromptUiData, WallExposureView,
-    WallFinishField, WindowTypeChoice,
+    FinalMode, NewStoreyPromptUiData, ObjectPinView, ObjectReviewView, OpeningFieldsPrompt,
+    OpeningToolKind, PartitionView, PhotoView, PositionPromptUiData, ReviewView, RiserView,
+    SelectMode, SnapTagView, StructureEdit, StructureReviewView, SurfaceKind,
+    VertexDropPromptUiData, WallExposureView, WallFinishField, WindowTypeChoice,
 };
 use crate::ui::pages::events::UiEvent;
 use crate::ui::render::ViewParams;
@@ -543,8 +543,6 @@ pub enum SketchEvent {
     SetFinalFloor(FloorKind),
     SetFinalWallFinish(WallFinishField, WallFinish),
     SetFinalHeating(HeatingKind),
-    /// Phase-4 north-align: set the dwelling orientation (degrees from north).
-    SetOrientationDeg(f32),
     /// Phase-4 north-align: one frame of moving / zooming / rotating the image
     /// over the fixed plan (pan in canvas px, zoom factor, rotation degrees).
     NorthImageGesture {
@@ -557,6 +555,10 @@ pub enum SketchEvent {
     ResetNorthImage,
     /// Phase-4 sheltered sides: advance one side's shelter category on a tap.
     CycleShelter(ExternalSide),
+    /// Phase-4: switch the view sub-mode (form / align / sheltered).
+    SetFinalMode(FinalMode),
+    /// Phase-4 north-align: finish aligning (records north, back to form).
+    ConfirmAlign,
     /// Phase-4: confirm the final review (BER complete) — raises the popup.
     ConfirmFinalReview,
     /// Completion popup: "Go back" (dismiss) / "Take me to summary" (open).
@@ -1084,9 +1086,10 @@ pub struct SketchView<'a> {
     /// The north-align satellite image + its current transform over the plan
     /// (the canvas overlay), while in Phase-4 step 2. `None` otherwise.
     pub north_image: Option<crate::controller::app_controller::NorthImageView>,
-    /// Which Phase-4 wizard step is showing (0 = form, 1 = north, 2 = sheltered).
-    /// See [`crate::ui::app::SketchState`].
-    pub final_step: &'a mut u8,
+    /// The Phase-4 view sub-mode (form / align / sheltered).
+    pub final_mode: FinalMode,
+    /// Whether all three Phase-4 parts are done (gates "Mark BER complete").
+    pub final_complete: bool,
     /// The Phase-4 "BER complete" popup is up.
     pub show_ber_complete: bool,
     /// The (dummy) summary screen is up.

@@ -219,6 +219,7 @@ fn create_minimal_ber(id: ItemId) -> Ber {
         final_details: Default::default(),
         sheltering: Default::default(),
         site_satellite_image: None,
+        north_aligned: false,
         details_reviewed: false,
     }
 }

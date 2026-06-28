@@ -73,6 +73,10 @@ pub struct Ber {
     /// by this app — read-only here. `None` until provided.
     #[serde(default)]
     pub site_satellite_image: Option<crate::ber::common::Photo>,
+    /// Whether the assessor has aligned the plan to the satellite image and
+    /// confirmed (Phase-4 north step "OK"). `#[serde(default)]`.
+    #[serde(default)]
+    pub north_aligned: bool,
     /// Whether the assessor has completed the Phase-4 (Final) review.
     /// `#[serde(default)]` so older records load as un-reviewed.
     #[serde(default)]

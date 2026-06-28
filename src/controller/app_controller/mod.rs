@@ -96,7 +96,7 @@ pub use editing::{
     VertexDropPromptUiData, VertexMeasurement, VertexMeasurementKind, VertexMeasurementUiData,
     WallPositions,
 };
-pub use final_phase::{NorthImageView, WallFinishField};
+pub use final_phase::{FinalMode, NorthImageView, WallFinishField};
 pub use history::HistorySnapshot;
 pub use mapping_review::ReviewView;
 pub use new_storey::NewStoreyPromptUiData;
@@ -347,6 +347,9 @@ pub struct AppController {
     /// confirmed; cleared by the popup/summary buttons. Not persisted.
     show_ber_complete: bool,
     show_summary: bool,
+    /// Phase-4 view sub-mode (form / aligning the image / marking sheltered
+    /// sides). Session-only.
+    final_mode: final_phase::FinalMode,
     /// When `Some`, the PARTITION overlay is open for this outline wall (by its
     /// stable start `VertexId`): the canvas shows the unrolled wall face and
     /// strokes/taps cut + attribute it. Opened from the wall-exposure toolbar.
@@ -588,6 +591,7 @@ impl AppController {
             north_img_zoom: 1.0,
             show_ber_complete: false,
             show_summary: false,
+            final_mode: final_phase::FinalMode::Form,
             partition_wall: None,
             partition_stroke: Vec::new(),
             partition_pending: None,

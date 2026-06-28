@@ -11014,6 +11014,15 @@ fn final_phase_form_sheltering_and_confirm() {
         ber.sheltered_sides
     );
 
+    // North align: confirming records it (and the checklist/north row reflects it).
+    assert!(!c.north_aligned());
+    assert!(
+        !c.final_complete(),
+        "not complete until form + north + all sides"
+    );
+    c.confirm_align();
+    assert!(c.north_aligned(), "align OK records north");
+
     assert!(!c.details_reviewed());
     assert!(!c.show_ber_complete());
     c.confirm_final_review();

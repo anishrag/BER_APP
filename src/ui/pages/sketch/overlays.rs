@@ -33,7 +33,7 @@ pub fn phase_bar(
     details_reviewed: bool,
     items: &[ChecklistItem],
     show_review: bool,
-    reviewed: bool,
+    review_label: &str,
 ) -> (Option<AssessmentPhase>, bool, Rect) {
     let phases = [
         (AssessmentPhase::Mapping, "Mapping"),
@@ -101,7 +101,7 @@ pub fn phase_bar(
                     ui.add_space(4.0);
                     egui::Frame::popup(ui.style()).show(ui, |ui| {
                         ui.set_max_width(260.0);
-                        review_clicked = checklist_body(ui, items, show_review, reviewed);
+                        review_clicked = checklist_body(ui, items, show_review, review_label);
                     });
                 }
             });
@@ -256,7 +256,7 @@ fn checklist_body(
     ui: &mut egui::Ui,
     items: &[ChecklistItem],
     show_review: bool,
-    reviewed: bool,
+    review_label: &str,
 ) -> bool {
     if items.is_empty() {
         ui.label(RichText::new("Open a BER to track progress.").weak());
@@ -272,24 +272,12 @@ fn checklist_body(
     ui.add_space(2.0);
     ui.separator();
     legend(ui);
-    // Once every item is green, the assessor reviews each side's elevation
-    // against its photo before Structure unlocks.
+    // The per-phase action button (Review / Mark BER complete) — once every item
+    // is green. `reviewed` already-done variants show in the label.
     if show_review {
         ui.add_space(4.0);
-        let label = if reviewed {
-            "Re-review ▸"
-        } else {
-            "Review ▸"
-        };
-        if ui.button(RichText::new(label).strong()).clicked() {
+        if ui.button(RichText::new(review_label).strong()).clicked() {
             review_clicked = true;
-        }
-        if !reviewed {
-            ui.label(
-                RichText::new("Review each side to unlock Structure.")
-                    .size(11.0)
-                    .weak(),
-            );
         }
     }
     review_clicked

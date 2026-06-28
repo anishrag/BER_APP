@@ -4,9 +4,7 @@
 //! sheltered-sides / north-align steps and calls these.
 use super::*;
 use ber_model::ber::common::ExternalSide;
-use ber_model::ber::final_details::{
-    FloorKind, HeatingKind, ShelterCategory, ShelteringBySide, WallFinish,
-};
+use ber_model::ber::final_details::{FloorKind, HeatingKind, ShelteringBySide, WallFinish};
 
 /// Which wall-finish field the form is setting.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -14,6 +12,17 @@ pub enum WallFinishField {
     Internal,
     Separating,
     External,
+}
+
+/// What the Final phase view is doing: showing the form (default), aligning the
+/// satellite image (gestures move the image), or marking sheltered sides (taps
+/// on the plan's sides).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum FinalMode {
+    #[default]
+    Form,
+    Align,
+    Sheltered,
 }
 
 /// The north-align satellite image + its current transform over the fixed plan,
@@ -90,12 +99,30 @@ impl AppController {
         }
     }
 
-    /// Set the orientation (true-north offset, degrees) from the north-align step.
-    pub fn set_orientation_deg(&mut self, deg: f32) {
+    /// The current Phase-4 sub-mode (form / align / sheltered).
+    pub fn final_mode(&self) -> FinalMode {
+        self.final_mode
+    }
+
+    /// Switch the Phase-4 sub-mode (e.g. enter align / sheltered, or back to form).
+    pub fn set_final_mode(&mut self, mode: FinalMode) {
+        self.final_mode = mode;
+    }
+
+    /// Finish aligning: record the north as confirmed and return to the form.
+    pub fn confirm_align(&mut self) {
         if let Some(r) = self.current_record.as_mut() {
-            r.data.orientation_deg = deg.rem_euclid(360.0);
+            r.data.north_aligned = true;
             let _ = self.mark_dirty();
         }
+        self.final_mode = FinalMode::Form;
+    }
+
+    /// Whether the plan's north has been aligned + confirmed.
+    pub fn north_aligned(&self) -> bool {
+        self.current_record
+            .as_ref()
+            .is_some_and(|r| r.data.north_aligned)
     }
 
     /// The north-align image + transform for the canvas overlay, or `None` when
@@ -149,15 +176,6 @@ impl AppController {
         }
     }
 
-    /// Directly set one side's shelter category (keeping `sheltered_sides` synced).
-    pub fn set_shelter(&mut self, side: ExternalSide, c: ShelterCategory) {
-        if let Some(r) = self.current_record.as_mut() {
-            r.data.sheltering.set(side, c);
-            r.data.sheltered_sides = r.data.sheltering.sheltered_count();
-            let _ = self.mark_dirty();
-        }
-    }
-
     /// Confirm the Final review — record the dwelling Final-reviewed (BER
     /// complete) and raise the completion popup.
     pub fn confirm_final_review(&mut self) {
@@ -190,15 +208,25 @@ impl AppController {
         self.show_summary = false;
     }
 
-    /// The Phase-4 checklist: progress rows for the form, north, and sheltering.
-    pub fn final_details_checklist(&self) -> Vec<ChecklistItem> {
+    /// Whether the form is fully filled (every dropdown set).
+    fn final_form_done(&self) -> bool {
         let d = self.final_details();
-        let form_done = d.floor != FloorKind::Unset
+        d.floor != FloorKind::Unset
             && d.internal_wall != WallFinish::Unset
             && d.separating_wall != WallFinish::Unset
             && d.external_wall != WallFinish::Unset
-            && d.heating != HeatingKind::Unset;
-        let north_done = self.orientation_deg() != 0.0;
+            && d.heating != HeatingKind::Unset
+    }
+
+    /// Whether all three Phase-4 parts are done — gates "Mark BER complete".
+    pub fn final_complete(&self) -> bool {
+        self.final_form_done() && self.north_aligned() && self.sheltering().all_set()
+    }
+
+    /// The Phase-4 checklist: progress rows for the form, north, and sheltering.
+    pub fn final_details_checklist(&self) -> Vec<ChecklistItem> {
+        let form_done = self.final_form_done();
+        let north_done = self.north_aligned();
         let shelter_done = self.sheltering().all_set();
         let dot = |b: bool| {
             if b {
