@@ -1949,8 +1949,11 @@ pub(super) fn render<F: FnMut(UiEvent)>(
         && !view.ceiling_exposure_mode
         && !view.partition_mode
         && !view.openings_mode
-        // Structure phase owns the canvas with its own selection tools.
-        && !structure_phase;
+        // Structure phase owns the canvas with its own selection tools; the
+        // Objects phase owns it too (tap to drop pins) — neither should let a
+        // primary drag run the mapping draw/edit tools (which replace geometry).
+        && !structure_phase
+        && !matches!(view.current_phase, AssessmentPhase::Objects);
 
     if primary_available && !touch_nav_active && !matches!(edit_tool, EditTools::Move) {
         if response.drag_started_by(egui::PointerButton::Primary) {
