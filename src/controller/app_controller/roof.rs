@@ -5,6 +5,7 @@
 //! is the top one there (context + roof separation). The roof-area
 //! proposal/drawing + geometry land in later stages.
 use super::*;
+use ber_model::ber::structural::{CeilingExposure, SurfaceKind};
 
 /// One storey's footprint for the roof-context overlay: its outline ring (world
 /// metres) + storey index. The UI draws these bottom→top so the TOP storey shows
@@ -12,6 +13,15 @@ use super::*;
 pub struct RoofContextRegion {
     pub storey_idx: usize,
     pub ring: Vec<(f64, f64)>,
+}
+
+/// One selectable ceiling region in the roof step: its plan ring (world metres,
+/// no closing duplicate), the owning storey, and whether it's currently grouped
+/// into the roof-area-in-progress.
+pub struct RoofRegionView {
+    pub storey_idx: usize,
+    pub ring: Vec<(f64, f64)>,
+    pub selected: bool,
 }
 
 impl AppController {
@@ -32,6 +42,7 @@ impl AppController {
     /// Mutually exclusive with the other Mapping modes.
     pub fn set_roof_mode(&mut self, on: bool) {
         self.roof_mode = on;
+        self.roof_selected.clear();
         if on {
             self.roof_gate_pending = true;
             self.set_floor_exposure_mode(false);
@@ -85,5 +96,76 @@ impl AppController {
                 })
             })
             .collect()
+    }
+
+    /// The selectable ceiling regions for the roof step — every non-party ceiling
+    /// across the stack (those have sky / attic above, i.e. a roof), with the
+    /// grouped-in-progress flag from `roof_selected`. Empty while the gate is up.
+    pub fn roof_regions_view(&self) -> Vec<RoofRegionView> {
+        if self.roof_gate_pending {
+            return Vec::new();
+        }
+        let Some(record) = self.current_record.as_ref() else {
+            return Vec::new();
+        };
+        let mut out = Vec::new();
+        for (storey_idx, storey) in record.data.storeys.iter().enumerate() {
+            for r in storey
+                .roofs
+                .regions
+                .iter()
+                // Party ceilings have a dwelling above, not a roof — not selectable.
+                .filter(|r| r.exposure != CeilingExposure::Party)
+            {
+                let mut ring: Vec<(f64, f64)> =
+                    r.polygon.exterior.iter().map(|v| (v.x, v.y)).collect();
+                if ring.len() >= 2 && ring[0] == ring[ring.len() - 1] {
+                    ring.pop();
+                }
+                let selected = self
+                    .roof_selected
+                    .contains(&(storey_idx, document::centroid_key(r.centroid())));
+                out.push(RoofRegionView {
+                    storey_idx,
+                    ring,
+                    selected,
+                });
+            }
+        }
+        out
+    }
+
+    /// Toggle the ceiling region under a tapped point (world metres) in/out of the
+    /// roof-area-in-progress — hit-tested across every storey, smallest-area
+    /// region wins. No-op while the gate is up.
+    pub fn roof_region_tap(&mut self, world_x: f64, world_y: f64, tol: f64) {
+        if self.roof_gate_pending {
+            return;
+        }
+        let Some(record) = self.current_record.as_ref() else {
+            return;
+        };
+        let mut best: Option<(f64, usize, document::CentroidKey)> = None;
+        for (idx, storey) in record.data.storeys.iter().enumerate() {
+            if let Some(id) = storey.surface_at(SurfaceKind::Roofs, world_x, world_y, tol) {
+                if let Some(region) = storey
+                    .roofs
+                    .regions
+                    .iter()
+                    .find(|r| r.id == id && r.exposure != CeilingExposure::Party)
+                {
+                    let area = region.area();
+                    if best.as_ref().is_none_or(|(a, _, _)| area < *a) {
+                        best = Some((area, idx, document::centroid_key(region.centroid())));
+                    }
+                }
+            }
+        }
+        if let Some((_, idx, key)) = best {
+            let sel = (idx, key);
+            if !self.roof_selected.insert(sel) {
+                self.roof_selected.remove(&sel);
+            }
+        }
     }
 }

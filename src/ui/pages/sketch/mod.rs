@@ -741,6 +741,13 @@ pub enum SketchEvent {
     ConfirmAllStoreysAddedRoof,
     /// Gate answer "Not yet" — exit the roof step to add the remaining storeys.
     DeferStoreyCountRoof,
+    /// Roof step: a tap (world coords) toggling the ceiling region under it in/out
+    /// of the roof-area-in-progress.
+    RoofRegionTap {
+        world_x: f64,
+        world_y: f64,
+        tol: f64,
+    },
     /// Set (or clear with `None`) the ceiling-exposure Select subtool.
     SetCeilingExposureSelectMode(Option<SelectMode>),
     /// Ceiling-exposure Click subtool: a tap (world coords) toggling the ceiling
@@ -1188,6 +1195,9 @@ pub struct SketchView<'a> {
     /// Each storey's footprint ring (world metres) for the top-storey-shaded
     /// context overlay, drawn bottom→top. Empty while the gate is up.
     pub roof_context: &'a [crate::controller::app_controller::RoofContextRegion],
+    /// Selectable ceiling regions (non-party) for grouping into a roof area, with
+    /// the in-progress selection flag. Empty while the gate is up.
+    pub roof_regions: &'a [crate::controller::app_controller::RoofRegionView],
     // ── Ceiling exposure ─────────────────────────────────────────────────────
     /// Ceiling-exposure tool active: the canvas shows the overlaid all-storeys
     /// ceiling view + selection instead of the normal plan, gated until the

@@ -263,7 +263,7 @@ pub(super) fn instruction(view: &SketchView<'_>) -> Option<&'static str> {
         return Some(if view.roof_gate_pending {
             "Have you finished adding all storeys? (the roof covers the top storey everywhere)"
         } else {
-            "Roof — the outline is shaded by top storey. Roof-area drawing is coming next."
+            "Roof — tap the ceiling areas (shaded by top storey) to group them into one roof area."
         });
     }
     if view

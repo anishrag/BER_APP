@@ -1053,9 +1053,14 @@ impl eframe::App for BerApp {
 
                             // Phase-1 roof step: mode flags + the whole-house
                             // top-storey-shaded context.
-                            let (roof_mode, roof_gate_pending, roof_context) = {
+                            let (roof_mode, roof_gate_pending, roof_context, roof_regions) = {
                                 let c = self.app_controller.borrow();
-                                (c.roof_mode(), c.roof_gate_pending(), c.roof_context())
+                                (
+                                    c.roof_mode(),
+                                    c.roof_gate_pending(),
+                                    c.roof_context(),
+                                    c.roof_regions_view(),
+                                )
                             };
 
                             let navigation = self.app_controller.borrow().navigation_mode();
@@ -1265,6 +1270,7 @@ impl eframe::App for BerApp {
                                 roof_mode,
                                 roof_gate_pending,
                                 roof_context: &roof_context,
+                                roof_regions: &roof_regions,
                                 ceiling_exposure_mode,
                                 ceiling_exposure_gate_pending,
                                 ceiling_exposure_select,
@@ -2247,6 +2253,15 @@ impl eframe::App for BerApp {
                                     }
                                     SketchEvent::DeferStoreyCountRoof => {
                                         controller.borrow_mut().defer_storey_count_roof();
+                                    }
+                                    SketchEvent::RoofRegionTap {
+                                        world_x,
+                                        world_y,
+                                        tol,
+                                    } => {
+                                        controller
+                                            .borrow_mut()
+                                            .roof_region_tap(world_x, world_y, tol);
                                     }
                                     SketchEvent::SetCeilingExposureSelectMode(mode) => {
                                         controller

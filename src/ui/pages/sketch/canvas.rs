@@ -482,28 +482,40 @@ pub(super) fn render<F: FnMut(UiEvent)>(
     let roof_active = view.roof_mode && !view.roof_gate_pending;
     if roof_active {
         if let Some(t) = floor_exposure_transform(ber, rect, vp) {
+            // Faint whole-house footprints first: the top-storey-shading CONTEXT
+            // (drawn bottom→top so the top storey shows = the roof there).
             for region in view.roof_context {
                 if region.ring.len() < 3 {
                     continue;
                 }
                 let pts: Vec<egui::Pos2> =
                     region.ring.iter().map(|(x, y)| t.apply(*x, *y)).collect();
-                // Distinct tint per storey index; higher storeys read brighter.
                 let (r, g, b) = roof_storey_tint(region.storey_idx);
-                let fill = egui::Color32::from_rgba_unmultiplied(r, g, b, 110);
-                let stroke = egui::Stroke::new(2.0, egui::Color32::from_rgb(r, g, b));
-                painter.add(egui::Shape::convex_polygon(pts.clone(), fill, stroke));
-                // Label the region with its storey number at the centroid.
-                let n = pts.len() as f32;
-                let cx = pts.iter().map(|p| p.x).sum::<f32>() / n;
-                let cy = pts.iter().map(|p| p.y).sum::<f32>() / n;
-                painter.text(
-                    egui::pos2(cx, cy),
-                    egui::Align2::CENTER_CENTER,
-                    format!("Storey {}", region.storey_idx + 1),
-                    egui::FontId::proportional(13.0),
-                    egui::Color32::from_rgb(30, 30, 30),
-                );
+                let fill = egui::Color32::from_rgba_unmultiplied(r, g, b, 45);
+                let stroke = egui::Stroke::new(1.0, egui::Color32::from_rgb(r, g, b));
+                painter.add(egui::Shape::convex_polygon(pts, fill, stroke));
+            }
+            // Selectable ceiling regions on top: tap to group into a roof area.
+            // Selected regions read bright; the rest show their storey tint.
+            for region in view.roof_regions {
+                if region.ring.len() < 3 {
+                    continue;
+                }
+                let pts: Vec<egui::Pos2> =
+                    region.ring.iter().map(|(x, y)| t.apply(*x, *y)).collect();
+                let (fill, stroke) = if region.selected {
+                    (
+                        egui::Color32::from_rgba_unmultiplied(120, 220, 140, 150),
+                        egui::Stroke::new(3.0, egui::Color32::from_rgb(60, 180, 90)),
+                    )
+                } else {
+                    let (r, g, b) = roof_storey_tint(region.storey_idx);
+                    (
+                        egui::Color32::from_rgba_unmultiplied(r, g, b, 90),
+                        egui::Stroke::new(1.5, egui::Color32::from_rgb(r, g, b)),
+                    )
+                };
+                painter.add(egui::Shape::convex_polygon(pts, fill, stroke));
             }
         }
     } else if floor_exposure_active {
@@ -1853,6 +1865,30 @@ pub(super) fn render<F: FnMut(UiEvent)>(
                     }
                 }
                 _ => {}
+            }
+        }
+    }
+
+    // Roof step (post-gate): a primary tap toggles the ceiling region under it
+    // in/out of the roof-area-in-progress. Same footprint-union transform the
+    // overlaid context fits to.
+    if roof_active
+        && matches!(mode, SketchMode::Storey2D)
+        && !touch_nav_active
+        && !dim_prompting
+        && view.position_prompt.is_none()
+    {
+        if let Some(t) = floor_exposure_transform(ber, rect, vp) {
+            if response.clicked_by(egui::PointerButton::Primary) {
+                if let Some(pos) = response.interact_pointer_pos() {
+                    let (wx, wy) = t.inverse(pos.x, pos.y);
+                    let tol_world = (12.0 / t.scale()) as f64;
+                    on_event(UiEvent::Sketch(SketchEvent::RoofRegionTap {
+                        world_x: wx,
+                        world_y: wy,
+                        tol: tol_world,
+                    }));
+                }
             }
         }
     }
