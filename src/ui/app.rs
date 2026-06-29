@@ -1051,6 +1051,13 @@ impl eframe::App for BerApp {
                                 )
                             };
 
+                            // Phase-1 roof step: mode flags + the whole-house
+                            // top-storey-shaded context.
+                            let (roof_mode, roof_gate_pending, roof_context) = {
+                                let c = self.app_controller.borrow();
+                                (c.roof_mode(), c.roof_gate_pending(), c.roof_context())
+                            };
+
                             let navigation = self.app_controller.borrow().navigation_mode();
                             let view = SketchView {
                                 current: stroke.as_ref().map(EguiStroke::from),
@@ -1255,6 +1262,9 @@ impl eframe::App for BerApp {
                                 floor_exposure_storeys: &floor_exposure_storeys,
                                 floor_exposure_carve_polygon: &floor_exposure_carve_polygon,
                                 floor_exposure_cut_regions: &floor_exposure_cut_regions,
+                                roof_mode,
+                                roof_gate_pending,
+                                roof_context: &roof_context,
                                 ceiling_exposure_mode,
                                 ceiling_exposure_gate_pending,
                                 ceiling_exposure_select,
@@ -2228,6 +2238,15 @@ impl eframe::App for BerApp {
                                     }
                                     SketchEvent::DeferStoreyCountCeiling => {
                                         controller.borrow_mut().defer_storey_count_ceiling();
+                                    }
+                                    SketchEvent::SetRoofMode(on) => {
+                                        controller.borrow_mut().set_roof_mode(on);
+                                    }
+                                    SketchEvent::ConfirmAllStoreysAddedRoof => {
+                                        controller.borrow_mut().confirm_all_storeys_added_roof();
+                                    }
+                                    SketchEvent::DeferStoreyCountRoof => {
+                                        controller.borrow_mut().defer_storey_count_roof();
                                     }
                                     SketchEvent::SetCeilingExposureSelectMode(mode) => {
                                         controller

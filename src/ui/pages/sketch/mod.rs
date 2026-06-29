@@ -732,6 +732,15 @@ pub enum SketchEvent {
     ConfirmAllStoreysAddedCeiling,
     /// Gate answer "Not yet" — exit the tool to add the remaining storeys.
     DeferStoreyCountCeiling,
+    // ── Roof (Phase-1 roof step) ───────────────────────────────────────────────
+    /// Toggle the Phase-1 roof step. On enter the storey-count gate is raised
+    /// (the whole-house context waits for `ConfirmAllStoreysAddedRoof`).
+    SetRoofMode(bool),
+    /// Gate answer "Yes, finished adding all storeys" — reveals the whole-house
+    /// top-storey-shaded roof context.
+    ConfirmAllStoreysAddedRoof,
+    /// Gate answer "Not yet" — exit the roof step to add the remaining storeys.
+    DeferStoreyCountRoof,
     /// Set (or clear with `None`) the ceiling-exposure Select subtool.
     SetCeilingExposureSelectMode(Option<SelectMode>),
     /// Ceiling-exposure Click subtool: a tap (world coords) toggling the ceiling
@@ -1169,6 +1178,16 @@ pub struct SketchView<'a> {
     /// shaded over the overlaid view so the assessor taps the side they want.
     /// Empty when no cut is awaiting a pick.
     pub floor_exposure_cut_regions: &'a [Vec<(f64, f64)>],
+    // ── Roof (Phase-1 roof step) ───────────────────────────────────────────────
+    /// Roof step active: the canvas shows the whole-house roof-drawing takeover
+    /// (top-storey-shaded outline) instead of the normal plan, gated until the
+    /// storey-count confirm.
+    pub roof_mode: bool,
+    /// The roof storey-count gate is up.
+    pub roof_gate_pending: bool,
+    /// Each storey's footprint ring (world metres) for the top-storey-shaded
+    /// context overlay, drawn bottom→top. Empty while the gate is up.
+    pub roof_context: &'a [crate::controller::app_controller::RoofContextRegion],
     // ── Ceiling exposure ─────────────────────────────────────────────────────
     /// Ceiling-exposure tool active: the canvas shows the overlaid all-storeys
     /// ceiling view + selection instead of the normal plan, gated until the

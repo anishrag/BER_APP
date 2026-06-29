@@ -50,6 +50,9 @@ pub enum Tool {
     CeilingSteps,
     /// Roof-point (apex) tagging mode toggle (same gate as the ceiling steps).
     RoofPoints,
+    /// Phase-1 roof step toggle: gated whole-house roof-drawing takeover
+    /// (whole-house outline shaded by top storey + roof controls).
+    Roof,
     /// One of the windows/doors tools (5 placement tools + Edit on surface):
     /// selecting it enters openings mode and makes it the active tool. After a
     /// placement tool taps the plan, each measurement is entered in the floating
@@ -114,6 +117,7 @@ pub const CATEGORIES: &[Category] = &[
             Tool::FloorSteps,
             Tool::CeilingSteps,
             Tool::RoofPoints,
+            Tool::Roof,
         ],
     },
     Category {
@@ -220,6 +224,8 @@ pub struct ToolFlags {
     pub floor_exposure_mode: bool,
     /// The ceiling-exposure tool is active (all-storeys overlaid ceiling view).
     pub ceiling_exposure_mode: bool,
+    /// The Phase-1 roof step is active (whole-house roof-drawing takeover).
+    pub roof_mode: bool,
     pub phase_mode: bool,
     /// Construction years exist (entered in Key Details) — without them the
     /// phase picker would be empty, so the toggle is disabled.
@@ -284,6 +290,7 @@ impl ToolFlags {
             exposure_mode: view.exposure_mode,
             floor_exposure_mode: view.floor_exposure_mode,
             ceiling_exposure_mode: view.ceiling_exposure_mode,
+            roof_mode: view.roof_mode,
             phase_mode: view.phase_mode,
             has_phase_choices: !view.phase_choices.is_empty(),
             step_mode: view.step_mode,
@@ -767,6 +774,27 @@ fn tool_ui<F: FnMut(UiEvent)>(
                 on_event(UiEvent::Sketch(SketchEvent::SetRoofPointMode(
                     !flags.roof_point_mode,
                 )));
+            }
+        }
+        Tool::Roof => {
+            // The roof spans the whole house (top storey per location), so —
+            // like the exposure tools — it's available whenever a floor plan
+            // exists, on the All tab too. The controller raises the
+            // storey-count gate on enter.
+            let enabled = flags.has_floor_plan;
+            if ui
+                .add_enabled(
+                    enabled,
+                    egui::Button::selectable(flags.roof_mode, "🏠 Roof"),
+                )
+                .hint(
+                    "Draw the roof over the whole house: confirm all storeys are \
+                     added, then the outline is shaded by top storey and you draw \
+                     the roof area by area",
+                )
+                .clicked()
+            {
+                on_event(UiEvent::Sketch(SketchEvent::SetRoofMode(!flags.roof_mode)));
             }
         }
         Tool::Undo => {

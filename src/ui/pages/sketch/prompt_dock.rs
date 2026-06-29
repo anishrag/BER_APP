@@ -36,6 +36,7 @@ pub(super) fn has_controls(view: &SketchView<'_>) -> bool {
         || view.partition_mode
         || view.floor_exposure_mode
         || view.ceiling_exposure_mode
+        || view.roof_mode
     {
         return true;
     }
@@ -88,6 +89,7 @@ pub(super) fn has_controls(view: &SketchView<'_>) -> bool {
 pub(super) fn panel_persists(view: &SketchView<'_>) -> bool {
     view.floor_exposure_mode
         || view.ceiling_exposure_mode
+        || view.roof_mode
         || view.exposure_mode
         || view.partition_mode
 }
@@ -101,6 +103,9 @@ pub(super) fn panel_title(view: &SketchView<'_>) -> &'static str {
     }
     if view.ceiling_exposure_mode {
         return "Ceiling exposures";
+    }
+    if view.roof_mode {
+        return "Roof";
     }
     if view
         .new_storey_prompt
@@ -254,6 +259,13 @@ pub(super) fn instruction(view: &SketchView<'_>) -> Option<&'static str> {
             "Ceiling exposures — select ceilings, then pick their heat-loss exposure."
         });
     }
+    if view.roof_mode {
+        return Some(if view.roof_gate_pending {
+            "Have you finished adding all storeys? (the roof covers the top storey everywhere)"
+        } else {
+            "Roof — the outline is shaded by top storey. Roof-area drawing is coming next."
+        });
+    }
     if view
         .new_storey_prompt
         .as_ref()
@@ -343,6 +355,17 @@ pub(super) fn render_controls<F: FnMut(UiEvent)>(
                 floor_exposure_gate_toolbar(ui, on_event);
             } else {
                 floor_exposure_toolbar(ui, view.floor_exposure_select, on_event);
+            }
+        });
+        return;
+    }
+    // The roof step likewise spans the whole house and owns the dock.
+    if view.roof_mode {
+        ui.horizontal_wrapped(|ui| {
+            if view.roof_gate_pending {
+                roof_gate_toolbar(ui, on_event);
+            } else {
+                roof_toolbar(ui, on_event);
             }
         });
         return;
@@ -1103,6 +1126,33 @@ fn ceiling_exposure_gate_toolbar<F: FnMut(UiEvent)>(ui: &mut egui::Ui, on_event:
         .clicked()
     {
         on_event(UiEvent::Sketch(SketchEvent::DeferStoreyCountCeiling));
+    }
+}
+
+/// The roof-step storey-count GATE toolbar: confirm all storeys are added (the
+/// roof covers the top storey everywhere) or defer to add the rest first.
+fn roof_gate_toolbar<F: FnMut(UiEvent)>(ui: &mut egui::Ui, on_event: &mut F) {
+    if ui
+        .button("Yes")
+        .hint("Show the whole-house outline shaded by top storey, ready to draw the roof")
+        .clicked()
+    {
+        on_event(UiEvent::Sketch(SketchEvent::ConfirmAllStoreysAddedRoof));
+    }
+    if ui
+        .button("Not yet")
+        .hint("Exit the roof step so you can add the remaining storeys first")
+        .clicked()
+    {
+        on_event(UiEvent::Sketch(SketchEvent::DeferStoreyCountRoof));
+    }
+}
+
+/// The roof-step toolbar (post-gate). Stage 1: just an exit button — the
+/// per-area roof drawing (shape pick + ridge + pitch) lands in the next stage.
+fn roof_toolbar<F: FnMut(UiEvent)>(ui: &mut egui::Ui, on_event: &mut F) {
+    if ui.button("Done").hint("Leave the roof step").clicked() {
+        on_event(UiEvent::Sketch(SketchEvent::SetRoofMode(false)));
     }
 }
 

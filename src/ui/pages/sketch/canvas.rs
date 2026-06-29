@@ -474,7 +474,39 @@ pub(super) fn render<F: FnMut(UiEvent)>(
     // plan so the assessor still sees their work behind the gate prompt.
     let floor_exposure_active = view.floor_exposure_mode && !view.floor_exposure_gate_pending;
     let ceiling_exposure_active = view.ceiling_exposure_mode && !view.ceiling_exposure_gate_pending;
-    if floor_exposure_active {
+    // Roof step (post-gate): the whole-house outline shaded by which storey is
+    // the top one at each location. Footprints are drawn bottom→top in the same
+    // footprint-union transform the exposure overlays use, so the higher (later)
+    // storeys cover the lower ones — what shows at a location IS its top storey
+    // (= the roof there). While the gate is up, fall through to the normal plan.
+    let roof_active = view.roof_mode && !view.roof_gate_pending;
+    if roof_active {
+        if let Some(t) = floor_exposure_transform(ber, rect, vp) {
+            for region in view.roof_context {
+                if region.ring.len() < 3 {
+                    continue;
+                }
+                let pts: Vec<egui::Pos2> =
+                    region.ring.iter().map(|(x, y)| t.apply(*x, *y)).collect();
+                // Distinct tint per storey index; higher storeys read brighter.
+                let (r, g, b) = roof_storey_tint(region.storey_idx);
+                let fill = egui::Color32::from_rgba_unmultiplied(r, g, b, 110);
+                let stroke = egui::Stroke::new(2.0, egui::Color32::from_rgb(r, g, b));
+                painter.add(egui::Shape::convex_polygon(pts.clone(), fill, stroke));
+                // Label the region with its storey number at the centroid.
+                let n = pts.len() as f32;
+                let cx = pts.iter().map(|p| p.x).sum::<f32>() / n;
+                let cy = pts.iter().map(|p| p.y).sum::<f32>() / n;
+                painter.text(
+                    egui::pos2(cx, cy),
+                    egui::Align2::CENTER_CENTER,
+                    format!("Storey {}", region.storey_idx + 1),
+                    egui::FontId::proportional(13.0),
+                    egui::Color32::from_rgb(30, 30, 30),
+                );
+            }
+        }
+    } else if floor_exposure_active {
         if let Some(ber) = ber {
             render::all_storeys_floors::render(
                 &painter,
@@ -2029,6 +2061,7 @@ pub(super) fn render<F: FnMut(UiEvent)>(
         && !view.exposure_mode
         && !view.floor_exposure_mode
         && !view.ceiling_exposure_mode
+        && !view.roof_mode
         && !view.partition_mode
         && !view.openings_mode
         // Structure phase owns the canvas with its own selection tools; the
@@ -2427,6 +2460,20 @@ fn canvas_transform(
 /// union of every storey's floor bbox (so it matches
 /// [`render::all_storeys_floors::render`]). Lets taps/strokes convert to world
 /// coords against the same mapping the floors are drawn with.
+/// A distinct fill tint per storey index for the roof-context overlay (cycles
+/// through a small palette; higher storeys land on top so their colour shows at
+/// each location = the top storey there).
+fn roof_storey_tint(storey_idx: usize) -> (u8, u8, u8) {
+    const PALETTE: &[(u8, u8, u8)] = &[
+        (120, 170, 230), // storey 1 — blue
+        (235, 175, 90),  // storey 2 — amber
+        (140, 200, 140), // storey 3 — green
+        (210, 140, 200), // storey 4 — mauve
+        (230, 130, 120), // storey 5 — terracotta
+    ];
+    PALETTE[storey_idx % PALETTE.len()]
+}
+
 fn floor_exposure_transform(
     ber: Option<&Ber>,
     rect: egui::Rect,

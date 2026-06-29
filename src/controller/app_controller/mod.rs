@@ -38,6 +38,7 @@ mod openings;
 mod partition;
 mod phase_regions;
 mod photos;
+mod roof;
 mod structure;
 mod structure_review;
 
@@ -56,6 +57,7 @@ use document::{
 pub use document::{ExposureSection, PositionPromptKind, RiserKind};
 pub use exposure::{ExposureSelection, RiserView, SectionHandle, WallExposureView};
 pub use floor_exposure::{FloorExposureRegionView, FloorExposureStoreyView};
+pub use roof::RoofContextRegion;
 // `ExposureSection` is re-exported above (the controller's public surface).
 
 use chrono::NaiveDate;
@@ -505,6 +507,11 @@ pub struct AppController {
     /// True while the ceiling-exposure storey-count gate prompt is up (entered
     /// the tool but the assessor hasn't yet confirmed every storey is added).
     ceiling_exposure_gate_pending: bool,
+    /// Phase-1 ROOF step: when on, the canvas shows the whole-house outline
+    /// shaded by top storey and the roof-drawing controls. Gated (after all
+    /// storeys) like the exposure tools.
+    roof_mode: bool,
+    roof_gate_pending: bool,
     /// The active ceiling-exposure Select subtool (Click/Carve/All/Remaining), or
     /// `None`. Transient ceiling-exposure interaction state.
     ceiling_exposure_select: Option<SelectMode>,
@@ -627,6 +634,8 @@ impl AppController {
             floor_exposure_pending_cut: None,
             ceiling_exposure_mode: false,
             ceiling_exposure_gate_pending: false,
+            roof_mode: false,
+            roof_gate_pending: false,
             ceiling_exposure_select: None,
             ceiling_exposure_selected: HashSet::new(),
             ceiling_exposure_carve_in_flight: false,

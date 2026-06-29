@@ -113,6 +113,7 @@ impl AppController {
         self.set_step_mode(false);
         self.set_ceiling_step_mode(false);
         self.set_roof_point_mode(false);
+        self.set_roof_mode(false);
     }
 
     /// The active Structure-phase MODES — the surface kinds the global Select
