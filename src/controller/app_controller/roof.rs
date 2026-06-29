@@ -198,6 +198,14 @@ impl AppController {
             }
         }
         if let Some((_, idx, key)) = best {
+            // A roof area sits on ONE storey (apexes are per-storey). Once a
+            // region is grouped, ignore taps on a different storey rather than
+            // silently committing a partial roof to just one of them.
+            if let Some((existing_idx, _)) = self.roof_selected.iter().next() {
+                if *existing_idx != idx {
+                    return;
+                }
+            }
             let sel = (idx, key);
             if !self.roof_selected.insert(sel) {
                 self.roof_selected.remove(&sel);
@@ -299,6 +307,11 @@ impl AppController {
     /// height is computed from pitch at assign time. Returns a user-facing error
     /// if the stroke isn't line-like or the storey has no ceiling height.
     pub fn apply_roof_area_ridge(&mut self, world_points: &[(f32, f32)]) -> Result<(), String> {
+        // Drain the raw stroke buffer (mirror the exposure-carve handler): the
+        // engine EXTENDS an in-flight stroke when the next StartStroke lands near
+        // a leftover endpoint, so a second roof area's ridge would otherwise
+        // append to this one's stale points.
+        let _ = self.sketch_engine.take_stroke_raw();
         let Some(PendingRoofArea::DrawRidge { shape, storey_idx }) =
             self.pending_roof_area.as_ref()
         else {

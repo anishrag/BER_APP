@@ -1487,6 +1487,7 @@ pub(super) fn render<F: FnMut(UiEvent)>(
         && !view.exposure_mode
         && !view.floor_exposure_mode
         && !view.ceiling_exposure_mode
+        && !view.roof_mode
         && !view.phase_mode
         && !view.step_mode
         && !view.ceiling_step_mode

@@ -5163,6 +5163,70 @@ fn roof_point_tap_x_y_height_flow_fans_the_region() {
     assert_eq!(c.roof_apex_views(), vec![((4.0, 5.0), "▲ 4.20 m".into())]);
 }
 
+/// Phase-1 roof step: group the ceiling area, pick GABLE, draw a ridge, type a
+/// pitch — the apex height is derived from pitch (`eave + perp_half·tan`) and a
+/// gable extends the ridge to the area's full span. Over the 10×10 base with a
+/// vertical ridge at x = 5 and a 45° pitch: perp_half = 5, z = 2.4 + 5 = 7.4,
+/// and the two apexes land at (5, 0) / (5, 10).
+#[test]
+fn roof_area_gable_pitch_stamps_apexes_at_derived_height() {
+    let mut c = dimensioned_square_controller();
+    c.set_default_ceiling_height(2.4).unwrap();
+    c.set_roof_mode(true);
+    assert!(c.roof_mode());
+    c.confirm_all_storeys_added_roof();
+    assert!(!c.roof_gate_pending());
+
+    c.roof_region_tap(5.0, 5.0, 0.5);
+    assert!(c.roof_area_can_pick_shape(), "the area is grouped");
+
+    c.pick_roof_area_shape(RoofShape::Gable);
+    assert!(c.roof_area_ridge_pending());
+    // A vertical ridge drawn down the middle (x = 5), short of the end walls.
+    c.apply_roof_area_ridge(&[(5.0, 3.0), (5.0, 7.0)]).unwrap();
+    assert!(c.roof_area_pitch_pending());
+
+    c.assign_roof_area_pitch(45.0).unwrap();
+    assert!(!c.roof_area_pitch_pending(), "committed");
+    let storey = &c.current_record.as_ref().unwrap().data.storeys[0];
+    assert_eq!(storey.roof_apexes.len(), 2, "a ridge is two apexes");
+    for apex in &storey.roof_apexes {
+        assert!(
+            (apex.z_m - 7.4).abs() < 1e-4,
+            "z = eave 2.4 + perp_half 5 · tan(45°): got {}",
+            apex.z_m
+        );
+        assert!((apex.point.x - 5.0).abs() < 1e-3, "ridge stays at x = 5");
+    }
+    let ys: Vec<f64> = storey.roof_apexes.iter().map(|a| a.point.y).collect();
+    assert!(
+        ys.iter().any(|y| y.abs() < 1e-3) && ys.iter().any(|y| (y - 10.0).abs() < 1e-3),
+        "a gable extends the ridge to the area span (y 0..10): {ys:?}"
+    );
+}
+
+/// A HIP keeps the DRAWN ridge length (the ends slope in) rather than extending
+/// to the end walls — same pitch math, but the apex y-coords are the drawn 3 / 7.
+#[test]
+fn roof_area_hip_keeps_drawn_ridge_length() {
+    let mut c = dimensioned_square_controller();
+    c.set_default_ceiling_height(2.4).unwrap();
+    c.set_roof_mode(true);
+    c.confirm_all_storeys_added_roof();
+    c.roof_region_tap(5.0, 5.0, 0.5);
+    c.pick_roof_area_shape(RoofShape::Hip);
+    c.apply_roof_area_ridge(&[(5.0, 3.0), (5.0, 7.0)]).unwrap();
+    c.assign_roof_area_pitch(45.0).unwrap();
+    let storey = &c.current_record.as_ref().unwrap().data.storeys[0];
+    let mut ys: Vec<f64> = storey.roof_apexes.iter().map(|a| a.point.y).collect();
+    ys.sort_by(|a, b| a.partial_cmp(b).unwrap());
+    assert_eq!(ys.len(), 2);
+    assert!(
+        (ys[0] - 3.0).abs() < 1e-3 && (ys[1] - 7.0).abs() < 1e-3,
+        "a hip keeps the drawn ridge extent (y 3..7): {ys:?}"
+    );
+}
+
 /// A tap within snap tolerance of a parallel wall on ONE axis snaps that
 /// axis: its position prompt is SKIPPED (the coordinate is a reference
 /// wall's, exact by construction), the single tag renders, the OTHER axis is
