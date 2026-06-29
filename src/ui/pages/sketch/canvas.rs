@@ -1869,9 +1869,10 @@ pub(super) fn render<F: FnMut(UiEvent)>(
         }
     }
 
-    // Roof step (post-gate): a primary tap toggles the ceiling region under it
-    // in/out of the roof-area-in-progress. Same footprint-union transform the
-    // overlaid context fits to.
+    // Roof step (post-gate). Two input modes share the takeover transform:
+    // while a ridge is awaited (`roof_area_ridge_pending`) a primary DRAG
+    // captures the ridge stroke; otherwise (grouping) a primary TAP toggles the
+    // ceiling region under it in/out of the roof-area-in-progress.
     if roof_active
         && matches!(mode, SketchMode::Storey2D)
         && !touch_nav_active
@@ -1879,7 +1880,45 @@ pub(super) fn render<F: FnMut(UiEvent)>(
         && view.position_prompt.is_none()
     {
         if let Some(t) = floor_exposure_transform(ber, rect, vp) {
-            if response.clicked_by(egui::PointerButton::Primary) {
+            if view.roof_area_ridge_pending {
+                if response.drag_started_by(egui::PointerButton::Primary) {
+                    if let Some(pos) = response.interact_pointer_pos() {
+                        on_event(UiEvent::Sketch(SketchEvent::StartStroke(
+                            pos - rect.left_top().to_vec2(),
+                        )));
+                    }
+                }
+                if response.dragged_by(egui::PointerButton::Primary) {
+                    if let Some(pos) = response.interact_pointer_pos() {
+                        on_event(UiEvent::Sketch(SketchEvent::AddPoint(
+                            pos - rect.left_top().to_vec2(),
+                        )));
+                    }
+                }
+                if response.drag_stopped_by(egui::PointerButton::Primary) {
+                    if let Some(stroke) = view.current.as_ref() {
+                        let topleft = rect.left_top();
+                        let world_points: Vec<(f32, f32)> = stroke
+                            .points
+                            .iter()
+                            .map(|p| {
+                                let (wx, wy) = t.inverse(p.x + topleft.x, p.y + topleft.y);
+                                (wx as f32, wy as f32)
+                            })
+                            .collect();
+                        on_event(UiEvent::Sketch(SketchEvent::RoofAreaRidgeStroke {
+                            points: world_points,
+                        }));
+                    } else {
+                        on_event(UiEvent::Sketch(SketchEvent::CancelStroke));
+                    }
+                }
+                if let Some(stroke) = &view.current {
+                    draw_stroke(&painter, rect, stroke);
+                }
+            } else if !view.roof_area_pitch_pending
+                && response.clicked_by(egui::PointerButton::Primary)
+            {
                 if let Some(pos) = response.interact_pointer_pos() {
                     let (wx, wy) = t.inverse(pos.x, pos.y);
                     let tol_world = (12.0 / t.scale()) as f64;
@@ -1889,6 +1928,15 @@ pub(super) fn render<F: FnMut(UiEvent)>(
                         tol: tol_world,
                     }));
                 }
+            }
+            // Pending ridge (awaiting its pitch): dashed segment over the area.
+            if let Some(((ax, ay), (bx, by))) = view.roof_area_ridge_line {
+                let a = t.apply(ax, ay);
+                let b = t.apply(bx, by);
+                painter.line_segment(
+                    [a, b],
+                    egui::Stroke::new(2.5, egui::Color32::from_rgb(60, 180, 90)),
+                );
             }
         }
     }

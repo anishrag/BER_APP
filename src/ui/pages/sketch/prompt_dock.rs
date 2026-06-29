@@ -262,6 +262,12 @@ pub(super) fn instruction(view: &SketchView<'_>) -> Option<&'static str> {
     if view.roof_mode {
         return Some(if view.roof_gate_pending {
             "Have you finished adding all storeys? (the roof covers the top storey everywhere)"
+        } else if view.roof_area_pitch_pending {
+            "Roof — type the pitch (degrees) for this ridge."
+        } else if view.roof_area_ridge_pending {
+            "Roof — draw the ridge line across the grouped area."
+        } else if view.roof_area_can_pick_shape {
+            "Roof — pick the shape for the grouped area (Flat / Gable / Hip)."
         } else {
             "Roof — tap the ceiling areas (shaded by top storey) to group them into one roof area."
         });
@@ -361,13 +367,11 @@ pub(super) fn render_controls<F: FnMut(UiEvent)>(
     }
     // The roof step likewise spans the whole house and owns the dock.
     if view.roof_mode {
-        ui.horizontal_wrapped(|ui| {
-            if view.roof_gate_pending {
-                roof_gate_toolbar(ui, on_event);
-            } else {
-                roof_toolbar(ui, on_event);
-            }
-        });
+        if view.roof_gate_pending {
+            ui.horizontal_wrapped(|ui| roof_gate_toolbar(ui, on_event));
+        } else {
+            roof_toolbar(ui, view, on_event);
+        }
         return;
     }
     // The ceiling-exposure tool likewise spans the whole stack and owns the dock.
@@ -1148,12 +1152,67 @@ fn roof_gate_toolbar<F: FnMut(UiEvent)>(ui: &mut egui::Ui, on_event: &mut F) {
     }
 }
 
-/// The roof-step toolbar (post-gate). Stage 1: just an exit button — the
-/// per-area roof drawing (shape pick + ridge + pitch) lands in the next stage.
-fn roof_toolbar<F: FnMut(UiEvent)>(ui: &mut egui::Ui, on_event: &mut F) {
-    if ui.button("Done").hint("Leave the roof step").clicked() {
-        on_event(UiEvent::Sketch(SketchEvent::SetRoofMode(false)));
-    }
+/// The roof-step toolbar (post-gate): drives the per-area drawing flow —
+/// group areas (tap on the canvas) → pick Flat/Gable/Hip → draw a ridge → type
+/// the pitch. Which controls show depends on the in-flight stage.
+fn roof_toolbar<F: FnMut(UiEvent)>(ui: &mut egui::Ui, view: &mut SketchView<'_>, on_event: &mut F) {
+    use crate::controller::app_controller::RoofShape;
+    ui.horizontal_wrapped(|ui| {
+        if view.roof_area_pitch_pending {
+            ui.label("Pitch:");
+            let resp = ui.add(
+                egui::TextEdit::singleline(view.roof_pitch_input)
+                    .desired_width(54.0)
+                    .hint_text("°"),
+            );
+            let submit = (resp.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)))
+                | ui.button("Set").clicked();
+            if submit {
+                if let Ok(deg) = view.roof_pitch_input.trim().parse::<f32>() {
+                    on_event(UiEvent::Sketch(SketchEvent::AssignRoofPitch(deg)));
+                }
+            }
+            if ui.button("Cancel").clicked() {
+                on_event(UiEvent::Sketch(SketchEvent::CancelRoofArea));
+            }
+        } else if view.roof_area_ridge_pending {
+            ui.label("Draw the ridge line across the area.");
+            if ui.button("Cancel").clicked() {
+                on_event(UiEvent::Sketch(SketchEvent::CancelRoofArea));
+            }
+        } else if view.roof_area_can_pick_shape {
+            ui.label("Shape:");
+            if ui
+                .button("Flat")
+                .hint("Flat roof — keeps the ceiling level")
+                .clicked()
+            {
+                on_event(UiEvent::Sketch(SketchEvent::PickRoofShape(RoofShape::Flat)));
+            }
+            if ui
+                .button("Gable")
+                .hint("Ridge to the end walls (vertical gable ends)")
+                .clicked()
+            {
+                on_event(UiEvent::Sketch(SketchEvent::PickRoofShape(
+                    RoofShape::Gable,
+                )));
+            }
+            if ui
+                .button("Hip")
+                .hint("Ridge inset from the ends (the ends slope down too)")
+                .clicked()
+            {
+                on_event(UiEvent::Sketch(SketchEvent::PickRoofShape(RoofShape::Hip)));
+            }
+        }
+        if ui.button("Done").hint("Leave the roof step").clicked() {
+            on_event(UiEvent::Sketch(SketchEvent::SetRoofMode(false)));
+        }
+        if let Some(err) = view.roof_error {
+            ui.colored_label(egui::Color32::from_rgb(200, 60, 60), err);
+        }
+    });
 }
 
 /// The ceiling-exposure SELECT + APPLY toolbar (post-gate), mirror of

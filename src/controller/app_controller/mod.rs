@@ -57,7 +57,7 @@ use document::{
 pub use document::{ExposureSection, PositionPromptKind, RiserKind};
 pub use exposure::{ExposureSelection, RiserView, SectionHandle, WallExposureView};
 pub use floor_exposure::{FloorExposureRegionView, FloorExposureStoreyView};
-pub use roof::{RoofContextRegion, RoofRegionView};
+pub use roof::{RoofContextRegion, RoofRegionView, RoofShape};
 // `ExposureSection` is re-exported above (the controller's public surface).
 
 use chrono::NaiveDate;
@@ -515,6 +515,9 @@ pub struct AppController {
     /// The ceiling regions tapped into the current roof-area-in-progress, keyed
     /// by `(storey_idx, centroid key)` (stable across re-resolves, unlike ItemId).
     roof_selected: HashSet<(usize, document::CentroidKey)>,
+    /// The in-flight per-area roof drawing (ridge stroke → pitch), once a sloped
+    /// shape is picked for the grouped area. `None` while only grouping.
+    pending_roof_area: Option<roof::PendingRoofArea>,
     /// The active ceiling-exposure Select subtool (Click/Carve/All/Remaining), or
     /// `None`. Transient ceiling-exposure interaction state.
     ceiling_exposure_select: Option<SelectMode>,
@@ -640,6 +643,7 @@ impl AppController {
             roof_mode: false,
             roof_gate_pending: false,
             roof_selected: HashSet::new(),
+            pending_roof_area: None,
             ceiling_exposure_select: None,
             ceiling_exposure_selected: HashSet::new(),
             ceiling_exposure_carve_in_flight: false,

@@ -748,6 +748,17 @@ pub enum SketchEvent {
         world_y: f64,
         tol: f64,
     },
+    /// Roof step: pick the shape for the grouped roof area (Flat commits; Gable/Hip
+    /// start the ridge-draw flow).
+    PickRoofShape(crate::controller::app_controller::RoofShape),
+    /// Roof step: the ridge stroke (world coords) for the grouped area.
+    RoofAreaRidgeStroke {
+        points: Vec<(f32, f32)>,
+    },
+    /// Roof step: assign the pitch (degrees) to the placed ridge.
+    AssignRoofPitch(f32),
+    /// Roof step: discard the in-flight per-area drawing (keeps the grouping).
+    CancelRoofArea,
     /// Set (or clear with `None`) the ceiling-exposure Select subtool.
     SetCeilingExposureSelectMode(Option<SelectMode>),
     /// Ceiling-exposure Click subtool: a tap (world coords) toggling the ceiling
@@ -1198,6 +1209,18 @@ pub struct SketchView<'a> {
     /// Selectable ceiling regions (non-party) for grouping into a roof area, with
     /// the in-progress selection flag. Empty while the gate is up.
     pub roof_regions: &'a [crate::controller::app_controller::RoofRegionView],
+    /// At least one area is grouped and no per-area drawing is in flight — the
+    /// shape buttons (Flat/Gable/Hip) are offered.
+    pub roof_area_can_pick_shape: bool,
+    /// The grouped area awaits its ridge stroke.
+    pub roof_area_ridge_pending: bool,
+    /// The placed ridge awaits its pitch (degrees).
+    pub roof_area_pitch_pending: bool,
+    /// The placed ridge's endpoints (world coords) for the dashed overlay while
+    /// the pitch is entered.
+    pub roof_area_ridge_line: Option<((f64, f64), (f64, f64))>,
+    /// Backing string for the roof pitch input (degrees).
+    pub roof_pitch_input: &'a mut String,
     // ── Ceiling exposure ─────────────────────────────────────────────────────
     /// Ceiling-exposure tool active: the canvas shows the overlaid all-storeys
     /// ceiling view + selection instead of the normal plan, gated until the
