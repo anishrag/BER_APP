@@ -5,39 +5,31 @@
 //! is the top one there (context + roof separation). The roof-area
 //! proposal/drawing + geometry land in later stages.
 use super::*;
-use ber_model::ber::structural::{CeilingExposure, RoofApex, SurfaceKind};
+use ber_model::ber::roof::RoofArea;
+use ber_model::ber::structural::{CeilingExposure, SurfaceKind};
 use domain::points::Point2f64;
 use manip_plan::ParameterAxis;
 
-/// The roof shape the assessor picks for a grouped roof area. `Flat` keeps the
-/// ceiling level (a flat roof, no apex); `Gable`/`Hip` slope up to a ridge — the
-/// difference is whether the ridge reaches the end walls (gable: vertical end;
-/// hip: the end slopes down too), which we realise by extending the ridge to the
-/// area extent for a gable and keeping the drawn length for a hip.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub enum RoofShape {
-    Flat,
-    Gable,
-    Hip,
-}
+// The persisted roof-shape enum; re-exported (and again from `mod.rs`) so the UI
+// keeps reaching it via `crate::controller::app_controller::RoofShape`.
+pub use ber_model::ber::roof::RoofShape;
 
 /// The in-flight per-area roof drawing, after the assessor grouped some ceiling
-/// areas (`roof_selected`) and picked a sloped shape. Session-only, outside undo
-/// (roof apexes are durable inputs re-applied on every resolve), cleared on mode
-/// exit / cancel / commit.
+/// areas (`roof_selected`) and picked a sloped shape. Session-only, cleared on
+/// mode exit / cancel / commit. The committed roof area lands on `Ber.roof`
+/// (SEPARATE from the ceiling) — it does NOT touch the ceiling apexes.
 #[derive(Clone, Debug)]
 pub enum PendingRoofArea {
     /// Awaiting the ridge STROKE for `shape` over the grouped area on `storey_idx`.
     DrawRidge { shape: RoofShape, storey_idx: usize },
-    /// Ridge placed (endpoints `a`/`b`); awaiting the PITCH in degrees. `perp_half`
-    /// is half the area's span perpendicular to the ridge and `eave_z` the eave
-    /// height (the storey ceiling height) — together they turn pitch into the apex
-    /// height: `z = eave_z + perp_half · tan(pitch)`.
+    /// Ridge placed (endpoints `a`/`b`); awaiting the PITCH in degrees. `shape` is
+    /// Gable or Hip; `eave_z` is the covered storey's ceiling height (the eave),
+    /// the ridge rises from there by the pitch.
     PickPitch {
         storey_idx: usize,
+        shape: RoofShape,
         a: Point2f64,
         b: Point2f64,
-        perp_half: f64,
         eave_z: f64,
     },
 }
@@ -273,14 +265,85 @@ impl AppController {
 
     /// The storey the grouped area belongs to — the storey index of the grouped
     /// regions (first one). First cut: a roof area is assumed to sit on a single
-    /// storey (apexes are per-storey).
+    /// storey (the eave is that storey's ceiling height).
     fn roof_target_storey(&self) -> Option<usize> {
         self.roof_selected.iter().map(|(idx, _)| *idx).min()
     }
 
+    /// The grouped ceiling-area rings on `storey_idx` (plan, world metres, no
+    /// closing duplicate) — the roof area's covered footprint.
+    fn roof_selected_rings(&self, storey_idx: usize) -> Vec<Vec<Point2f64>> {
+        let Some(storey) = self
+            .current_record
+            .as_ref()
+            .and_then(|r| r.data.storeys.get(storey_idx))
+        else {
+            return Vec::new();
+        };
+        storey
+            .roofs
+            .regions
+            .iter()
+            .filter(|r| {
+                self.roof_selected
+                    .contains(&(storey_idx, document::centroid_key(r.centroid())))
+            })
+            .map(|r| {
+                let mut ring: Vec<Point2f64> = r
+                    .polygon
+                    .exterior
+                    .iter()
+                    .map(|v| Point2f64::new(v.x, v.y))
+                    .collect();
+                if ring.len() >= 2 && ring[0] == ring[ring.len() - 1] {
+                    ring.pop();
+                }
+                ring
+            })
+            .collect()
+    }
+
+    /// The covered storey's ceiling height (the eave height for a roof over it).
+    fn roof_eave_z(&self, storey_idx: usize) -> Option<f64> {
+        self.current_record
+            .as_ref()
+            .and_then(|r| r.data.storeys.get(storey_idx))
+            .and_then(|s| s.ceiling_height_m)
+    }
+
+    /// Commit a finished roof area onto `Ber.roof` (SEPARATE from the ceiling — it
+    /// does NOT touch the ceiling apexes), then clear the grouping + pending state.
+    fn commit_roof_area(
+        &mut self,
+        storey_idx: usize,
+        shape: RoofShape,
+        pitch_deg: f32,
+        eave_z: f64,
+        ridge: Option<(Point2f64, Point2f64)>,
+    ) -> Result<(), String> {
+        let footprint = self.roof_selected_rings(storey_idx);
+        let record = self
+            .current_record
+            .as_mut()
+            .ok_or("No record to add the roof to.")?;
+        record.data.roof.areas.push(RoofArea {
+            id: ItemId::default(),
+            storey_idx,
+            shape,
+            pitch_deg,
+            eave_z,
+            ridge,
+            footprint,
+        });
+        self.pending_roof_area = None;
+        self.roof_selected.clear();
+        self.mark_dirty()?;
+        Ok(())
+    }
+
     /// Pick the shape for the grouped roof area. `Flat` commits immediately (a
-    /// flat roof keeps the ceiling level — no apex) and clears the grouping;
-    /// `Gable`/`Hip` start the ridge-draw flow. No-op without a grouped area.
+    /// flat roof needs no ridge/pitch); `Gable`/`Hip` start the ridge-draw flow.
+    /// No-op without a grouped area.
     pub fn pick_roof_area_shape(&mut self, shape: RoofShape) {
         if !self.roof_area_can_pick_shape() {
             return;
@@ -290,9 +353,9 @@ impl AppController {
         };
         match shape {
             RoofShape::Flat => {
-                // A flat roof is the default ceiling — nothing to apex. Clear the
-                // grouping so the assessor can move to the next area.
-                self.roof_selected.clear();
+                // A flat roof sits level at the eave — no ridge, no pitch.
+                let eave_z = self.roof_eave_z(storey_idx).unwrap_or(0.0);
+                let _ = self.commit_roof_area(storey_idx, RoofShape::Flat, 0.0, eave_z, None);
             }
             RoofShape::Gable | RoofShape::Hip => {
                 self.pending_roof_area = Some(PendingRoofArea::DrawRidge { shape, storey_idx });
@@ -331,16 +394,13 @@ impl AppController {
             .roof_selected_bbox(storey_idx)
             .ok_or("No grouped roof area to place the ridge in.")?;
         let eave_z = self
-            .current_record
-            .as_ref()
-            .and_then(|r| r.data.storeys.get(storey_idx))
-            .and_then(|s| s.ceiling_height_m)
+            .roof_eave_z(storey_idx)
             .ok_or("Set this storey's ceiling height before drawing its roof.")?;
         // `axis == X` ⇒ ridge runs along Y at x = coord, slopes fall in X;
         // `axis == Y` ⇒ ridge runs along X at y = coord, slopes fall in Y.
-        let (along_lo, along_hi, perp_half) = match axis {
-            ParameterAxis::X => (miny, maxy, (maxx - minx) / 2.0),
-            ParameterAxis::Y => (minx, maxx, (maxy - miny) / 2.0),
+        let (along_lo, along_hi) = match axis {
+            ParameterAxis::X => (miny, maxy),
+            ParameterAxis::Y => (minx, maxx),
         };
         // A gable spans the full area along the ridge (vertical end walls); a hip
         // keeps the drawn length (the ends slope in).
@@ -360,52 +420,35 @@ impl AppController {
         };
         self.pending_roof_area = Some(PendingRoofArea::PickPitch {
             storey_idx,
+            shape,
             a,
             b,
-            perp_half,
             eave_z,
         });
         Ok(())
     }
 
-    /// Assign the PITCH (degrees) to the placed ridge: derive the apex height
-    /// (`eave_z + perp_half · tan(pitch)`), stamp BOTH ridge endpoints as durable
-    /// apexes on the storey, recompose the roofs, and clear the grouping. Pitch
-    /// must be in `(0, 90)`. No-op unless the pitch stage is up.
+    /// Assign the PITCH (degrees) to the placed ridge and commit the roof area to
+    /// `Ber.roof` (SEPARATE from the ceiling — no apexes, the ceiling is
+    /// untouched). The 3-D roof planes are derived from shape + pitch + ridge +
+    /// footprint on resolve. Pitch must be in `(0, 90)`. No-op unless the pitch
+    /// stage is up.
     pub fn assign_roof_area_pitch(&mut self, pitch_deg: f32) -> Result<(), String> {
         let Some(PendingRoofArea::PickPitch {
             storey_idx,
+            shape,
             a,
             b,
-            perp_half,
             eave_z,
         }) = self.pending_roof_area.as_ref()
         else {
             return Ok(());
         };
-        let (storey_idx, a, b, perp_half, eave_z) = (*storey_idx, *a, *b, *perp_half, *eave_z);
+        let (storey_idx, shape, a, b, eave_z) = (*storey_idx, *shape, *a, *b, *eave_z);
         if !(pitch_deg > 0.0 && pitch_deg < 90.0) {
             return Err("Enter a roof pitch between 0 and 90 degrees.".to_string());
         }
-        let z_m = eave_z + perp_half * (pitch_deg as f64).to_radians().tan();
-        let record = self
-            .current_record
-            .as_mut()
-            .ok_or("No storey to assign the roof to.")?;
-        for p in [a, b] {
-            record
-                .data
-                .add_roof_apex(storey_idx, RoofApex { point: p, z_m });
-        }
-        self.pending_roof_area = None;
-        self.roof_selected.clear();
-        self.mark_dirty()?;
-        // Regions-as-truth: recompose the roofs from the durable inputs, then
-        // re-derive, and keep the ceiling-step display cache in step.
-        self.recompose_roofs(storey_idx);
-        self.materialize();
-        self.reconstruct_ceiling_step_regions_for(storey_idx);
-        Ok(())
+        self.commit_roof_area(storey_idx, shape, pitch_deg, eave_z, Some((a, b)))
     }
 
     /// Discard the in-flight per-area roof drawing (keeps the grouping).

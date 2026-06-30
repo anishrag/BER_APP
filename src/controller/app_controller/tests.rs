@@ -5221,12 +5221,11 @@ fn roof_point_tap_x_y_height_flow_fans_the_region() {
 }
 
 /// Phase-1 roof step: group the ceiling area, pick GABLE, draw a ridge, type a
-/// pitch — the apex height is derived from pitch (`eave + perp_half·tan`) and a
-/// gable extends the ridge to the area's full span. Over the 10×10 base with a
-/// vertical ridge at x = 5 and a 45° pitch: perp_half = 5, z = 2.4 + 5 = 7.4,
-/// and the two apexes land at (5, 0) / (5, 10).
+/// pitch. The roof lands on `Ber.roof` as a SEPARATE structure — the ceiling
+/// (`storey.roof_apexes`) is left UNTOUCHED (the bug this replaced reshaped the
+/// ceiling). A gable extends the ridge to the area's full span (x = 5, y 0..10).
 #[test]
-fn roof_area_gable_pitch_stamps_apexes_at_derived_height() {
+fn roof_area_gable_commits_to_ber_roof_without_touching_ceiling() {
     let mut c = dimensioned_square_controller();
     c.set_default_ceiling_height(2.4).unwrap();
     c.set_roof_mode(true);
@@ -5245,25 +5244,41 @@ fn roof_area_gable_pitch_stamps_apexes_at_derived_height() {
 
     c.assign_roof_area_pitch(45.0).unwrap();
     assert!(!c.roof_area_pitch_pending(), "committed");
-    let storey = &c.current_record.as_ref().unwrap().data.storeys[0];
-    assert_eq!(storey.roof_apexes.len(), 2, "a ridge is two apexes");
-    for apex in &storey.roof_apexes {
-        assert!(
-            (apex.z_m - 7.4).abs() < 1e-4,
-            "z = eave 2.4 + perp_half 5 · tan(45°): got {}",
-            apex.z_m
-        );
-        assert!((apex.point.x - 5.0).abs() < 1e-3, "ridge stays at x = 5");
-    }
-    let ys: Vec<f64> = storey.roof_apexes.iter().map(|a| a.point.y).collect();
+
+    let ber = &c.current_record.as_ref().unwrap().data;
+    // The CEILING is untouched — no apexes were stamped.
     assert!(
-        ys.iter().any(|y| y.abs() < 1e-3) && ys.iter().any(|y| (y - 10.0).abs() < 1e-3),
+        ber.storeys[0].roof_apexes.is_empty(),
+        "the roof must NOT reshape the ceiling"
+    );
+    // The roof landed on Ber.roof as a separate area.
+    assert_eq!(ber.roof.areas.len(), 1, "one roof area on Ber.roof");
+    let area = &ber.roof.areas[0];
+    assert_eq!(area.shape, ber_model::ber::roof::RoofShape::Gable);
+    assert!((area.pitch_deg - 45.0).abs() < 1e-4);
+    assert!(
+        (area.eave_z - 2.4).abs() < 1e-6,
+        "eave at the ceiling height"
+    );
+    let (a, b) = area.ridge.expect("gable has a ridge");
+    assert!(
+        (a.x - 5.0).abs() < 1e-3 && (b.x - 5.0).abs() < 1e-3,
+        "ridge at x = 5"
+    );
+    let mut ys = [a.y, b.y];
+    ys.sort_by(|p, q| p.partial_cmp(q).unwrap());
+    assert!(
+        ys[0].abs() < 1e-3 && (ys[1] - 10.0).abs() < 1e-3,
         "a gable extends the ridge to the area span (y 0..10): {ys:?}"
+    );
+    assert!(
+        !area.footprint.is_empty(),
+        "the covered footprint is recorded"
     );
 }
 
 /// A HIP keeps the DRAWN ridge length (the ends slope in) rather than extending
-/// to the end walls — same pitch math, but the apex y-coords are the drawn 3 / 7.
+/// to the end walls — the recorded ridge endpoints are the drawn 3 / 7.
 #[test]
 fn roof_area_hip_keeps_drawn_ridge_length() {
     let mut c = dimensioned_square_controller();
@@ -5274,14 +5289,38 @@ fn roof_area_hip_keeps_drawn_ridge_length() {
     c.pick_roof_area_shape(RoofShape::Hip);
     c.apply_roof_area_ridge(&[(5.0, 3.0), (5.0, 7.0)]).unwrap();
     c.assign_roof_area_pitch(45.0).unwrap();
-    let storey = &c.current_record.as_ref().unwrap().data.storeys[0];
-    let mut ys: Vec<f64> = storey.roof_apexes.iter().map(|a| a.point.y).collect();
-    ys.sort_by(|a, b| a.partial_cmp(b).unwrap());
-    assert_eq!(ys.len(), 2);
+
+    let ber = &c.current_record.as_ref().unwrap().data;
+    assert!(ber.storeys[0].roof_apexes.is_empty(), "ceiling untouched");
+    let area = &ber.roof.areas[0];
+    assert_eq!(area.shape, ber_model::ber::roof::RoofShape::Hip);
+    let (a, b) = area.ridge.expect("hip has a ridge");
+    let mut ys = [a.y, b.y];
+    ys.sort_by(|p, q| p.partial_cmp(q).unwrap());
     assert!(
         (ys[0] - 3.0).abs() < 1e-3 && (ys[1] - 7.0).abs() < 1e-3,
         "a hip keeps the drawn ridge extent (y 3..7): {ys:?}"
     );
+}
+
+/// A FLAT roof commits immediately (no ridge/pitch) to `Ber.roof`, ceiling
+/// untouched.
+#[test]
+fn roof_area_flat_commits_without_ridge() {
+    let mut c = dimensioned_square_controller();
+    c.set_default_ceiling_height(2.4).unwrap();
+    c.set_roof_mode(true);
+    c.confirm_all_storeys_added_roof();
+    c.roof_region_tap(5.0, 5.0, 0.5);
+    c.pick_roof_area_shape(RoofShape::Flat);
+
+    let ber = &c.current_record.as_ref().unwrap().data;
+    assert!(ber.storeys[0].roof_apexes.is_empty(), "ceiling untouched");
+    assert_eq!(ber.roof.areas.len(), 1);
+    let area = &ber.roof.areas[0];
+    assert_eq!(area.shape, ber_model::ber::roof::RoofShape::Flat);
+    assert!(area.ridge.is_none(), "a flat roof has no ridge");
+    assert!(!c.roof_area_pitch_pending(), "no pitch question for flat");
 }
 
 /// A tap within snap tolerance of a parallel wall on ONE axis snaps that

@@ -39,6 +39,13 @@ pub struct Ber {
     pub orientation_deg: f32,
     pub solar: Vec<SolarElements>,
     pub photos: Vec<Photo>,
+    /// The dwelling ROOF — the external roof structure(s) over the top storey,
+    /// SEPARATE from each storey's ceiling (`Storey::roofs` / the roof-point
+    /// apexes). Drawn area-by-area in the Phase-1 roof step; only modelled when it
+    /// matters (dual attic insulation, solar on the roof). `#[serde(default)]` so
+    /// older records load with no roof.
+    #[serde(default)]
+    pub roof: crate::ber::roof::Roof,
     /// Whether the assessor has completed the Stage-1 (Mapping) REVIEW — stepped
     /// through each external side's elevation against its photo and confirmed
     /// "all's good". This (not raw checklist completeness) is what unlocks the

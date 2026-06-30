@@ -212,6 +212,7 @@ fn create_minimal_ber(id: ItemId) -> Ber {
         orientation_deg: 0.0,
         solar: vec![],
         photos: vec![],
+        roof: Default::default(),
         mapping_reviewed: false,
         structure_reviewed: false,
         objects_no_items_confirmed: vec![],

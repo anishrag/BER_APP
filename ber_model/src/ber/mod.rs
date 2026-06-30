@@ -5,6 +5,7 @@ pub mod fenestration;
 pub mod final_details;
 pub mod objects;
 pub mod openings;
+pub mod roof;
 pub mod structural;
 pub mod suggest;
 pub mod systems;
