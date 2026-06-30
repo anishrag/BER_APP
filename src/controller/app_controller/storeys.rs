@@ -43,8 +43,8 @@ fn structure_id_for_key(storey: &Storey, kind: SurfaceKind, key: SurfaceKey) -> 
             .iter()
             .find(|r| document::centroid_key(r.centroid()) == k)
             .map(|r| r.id),
-        (SurfaceKind::Roofs, SurfaceKey::Area(k)) => storey
-            .roofs
+        (SurfaceKind::Ceilings, SurfaceKey::Area(k)) => storey
+            .ceilings
             .regions
             .iter()
             .find(|r| document::centroid_key(r.centroid()) == k)
@@ -82,15 +82,15 @@ impl AppController {
                 let r = storey.floors.regions.iter().find(|r| r.id == id)?;
                 Some(SurfaceKey::Area(document::centroid_key(r.centroid())))
             }
-            SurfaceKind::Roofs => {
-                let r = storey.roofs.regions.iter().find(|r| r.id == id)?;
+            SurfaceKind::Ceilings => {
+                let r = storey.ceilings.regions.iter().find(|r| r.id == id)?;
                 Some(SurfaceKey::Area(document::centroid_key(r.centroid())))
             }
         }
     }
 
     /// Like [`structure_surface_key`](Self::structure_surface_key) but DETECTS
-    /// the kind of `id` (the selection can mix walls / floors / roofs), returning
+    /// the kind of `id` (the selection can mix walls / floors / ceilings), returning
     /// the kind alongside its durable key. `None` if `id` isn't a live region.
     fn structure_surface_key_any(
         &self,
@@ -199,7 +199,7 @@ impl AppController {
                     self.reconstruct_step_regions_for(i);
                 }
                 // And its ceiling-step areas (restore the durable list, else
-                // migrate an old record by re-deriving from the stepped roofs).
+                // migrate an old record by re-deriving from the stepped ceilings).
                 if !self.ceiling_step_regions.contains_key(&i) {
                     self.load_ceiling_step_regions_for(i);
                 }
@@ -522,15 +522,15 @@ impl AppController {
         self.derive_horizontal_exposure_all();
     }
 
-    /// Recompose storey `idx`'s truth roofs from its ceiling EDIT inputs — the
+    /// Recompose storey `idx`'s truth ceilings from its ceiling EDIT inputs — the
     /// session ±Δ steps, durable dividers, durable apexes, and structure carves
     /// — in the canonical order (default → steps/dividers → apexes → carves).
-    /// `resolve_storey` no longer rebuilds the roofs from these; it trusts the
-    /// stored `roofs` and only re-fits to the outline. So a ceiling edit updates
+    /// `resolve_storey` no longer rebuilds the ceilings from these; it trusts the
+    /// stored `ceilings` and only re-fits to the outline. So a ceiling edit updates
     /// its input (session list / durable field), calls this ONCE, then
     /// `materialize` re-fits + re-derives the walls and `reconstruct` refreshes
     /// the session display cache. No-op without a ceiling height.
-    pub(super) fn recompose_roofs(&mut self, idx: usize) {
+    pub(super) fn recompose_ceilings(&mut self, idx: usize) {
         use ber_model::ber::structural::CeilingRegions;
         let footprint: Vec<Vec<domain::points::Point2f64>> = self
             .document
@@ -562,9 +562,9 @@ impl AppController {
         let Some(height) = storey.ceiling_height_m else {
             return;
         };
-        let apexes = storey.roof_apexes.clone();
-        let hints = storey.roof_apex_hints.clone();
-        let splits = storey.roof_splits.clone();
+        let apexes = storey.ceiling_apexes.clone();
+        let hints = storey.ceiling_apex_hints.clone();
+        let splits = storey.ceiling_splits.clone();
         let Some(cid) = record.data.ceiling_construction_id(
             Default::default(),
             Default::default(),
@@ -586,17 +586,17 @@ impl AppController {
                 )
             })
             .collect();
-        let mut roofs = CeilingRegions::default_for_footprint(footprint, height, cid);
+        let mut ceilings = CeilingRegions::default_for_footprint(footprint, height, cid);
         if !areas.is_empty() {
-            roofs = roofs.with_z_deltas(&areas);
+            ceilings = ceilings.with_z_deltas(&areas);
         }
         if !apexes.is_empty() {
-            roofs = roofs.with_apexes_hinted(&apexes, &hints);
+            ceilings = ceilings.with_apexes_hinted(&apexes, &hints);
         }
         if !splits.is_empty() {
-            roofs = roofs.split_faces_coplanar(&splits);
+            ceilings = ceilings.split_faces_coplanar(&splits);
         }
-        record.data.storeys[idx].roofs = roofs;
+        record.data.storeys[idx].ceilings = ceilings;
     }
 
     /// Derive EVERY storey's geometry into `current_record` — the all-storeys

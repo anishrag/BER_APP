@@ -31,7 +31,7 @@ impl AppController {
             return;
         }
         // FULL snapshot — this pass pushes carves onto EVERY storey's
-        // `floor_splits`/`roof_splits`, so undo must revert the whole stack, not
+        // `floor_splits`/`ceiling_splits`, so undo must revert the whole stack, not
         // just the active storey's record.
         let snap = self.current_history_snapshot_full();
         let n = self
@@ -83,16 +83,16 @@ impl AppController {
             let record = self.current_record.as_mut().unwrap();
             Self::extend_splits_deduped(&mut record.data.storeys[idx].floor_splits, floor_rings);
             let has_roof_split = {
-                let before = record.data.storeys[idx].roof_splits.len();
-                Self::extend_splits_deduped(&mut record.data.storeys[idx].roof_splits, roof_rings);
-                record.data.storeys[idx].roof_splits.len() > before
+                let before = record.data.storeys[idx].ceiling_splits.len();
+                Self::extend_splits_deduped(&mut record.data.storeys[idx].ceiling_splits, roof_rings);
+                record.data.storeys[idx].ceiling_splits.len() > before
             };
-            // Roofs are regions-as-truth — `resolve_storey` only re-fits them, so
-            // the `roof_splits` carve must be applied via `recompose_roofs` (it
+            // Ceilings are regions-as-truth — `resolve_storey` only re-fits them, so
+            // the `ceiling_splits` carve must be applied via `recompose_ceilings` (it
             // reads the durable field). Floors: `resolve_storey` applies
             // `floor_splits` every resolve, so no extra call there.
             if has_roof_split {
-                self.recompose_roofs(idx);
+                self.recompose_ceilings(idx);
             }
         }
 

@@ -46,7 +46,7 @@ impl AppController {
     /// non-finite/≤0; stamps the current scope (`Ber::set_default_ceiling_height`
     /// — overwriting on the current storey, or filling every UNSET storey from
     /// the All-storeys tab), marks dirty (the next materialize derives the
-    /// roofs and re-extrudes the walls). Stays in the current view — switching
+    /// ceilings and re-extrudes the walls). Stays in the current view — switching
     /// to 3D is the floating canvas button's separate action.
     pub fn set_default_ceiling_height(&mut self, height_m: f32) -> Result<(), String> {
         if !height_m.is_finite() || height_m <= 0.0 {
@@ -61,7 +61,7 @@ impl AppController {
         // On the All-storeys tab the deferred per-storey derive never runs
         // (`refresh_storey` early-returns with no active storey), so re-derive
         // every storey EAGERLY — otherwise walls keep their provisional 2.4 m
-        // extrusion and roofs stay missing until each storey is revisited.
+        // extrusion and ceilings stay missing until each storey is revisited.
         if self.current_storey_idx.is_none() {
             self.refresh_all_storeys();
         }

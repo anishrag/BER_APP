@@ -11,7 +11,7 @@
 //!   - `FloorMapDims` — show dimensions labels (default — best with `Storey2D`)
 //!   - `Floors`      — highlight floor polygons
 //!   - `Walls`       — highlight wall edges
-//!   - `Roofs`       — highlight ceiling regions / roof-height labels
+//!   - `Ceilings`       — highlight ceiling regions / roof-height labels
 //!   - `AllSurfaces` — render every category at full opacity
 //!
 //! Rendering reads from a `Ber` clone supplied by the controller, so the user
@@ -101,7 +101,7 @@ pub fn render_ber(
     // The in-flight "Edit attributes" session. When set, the 2D storey switches
     // to the fanned group view instead of the normal shaded render.
     structure_edit: Option<&StructureEdit>,
-    // Objects phase: render the REDUCED 2D plan (no roofs / roof windows) and the
+    // Objects phase: render the REDUCED 2D plan (no ceilings / roof windows) and the
     // 3D hotspot markers below.
     objects_view: bool,
     // World-3D points to mark as hotspots in the 3D views (the Objects phase's

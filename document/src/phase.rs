@@ -27,7 +27,7 @@ pub fn centroid_key(c: Point2f64) -> CentroidKey {
 /// The [`CentroidKey`] of a plan RING (open or closed) — its area-weighted
 /// polygon centroid quantized to the mm grid. Matches the key a resolved region
 /// carved from this ring will carry, so it's the de-dup identity for a planned
-/// carve against the durable `floor_splits`/`roof_splits`. Degenerate rings
+/// carve against the durable `floor_splits`/`ceiling_splits`. Degenerate rings
 /// (< 3 distinct pts / zero area) fall back to the vertex mean.
 pub fn ring_centroid_key(ring: &[Point2f64]) -> CentroidKey {
     let n = ring.len();
@@ -208,7 +208,7 @@ pub fn stamp_wall_phases(ber: &mut Ber, idx: usize) {
 
 /// Stamp the construction PHASE onto storey `idx`'s ROOF/CEILING regions from
 /// the already phase-partitioned FLOORS — the area analogue of
-/// [`stamp_wall_phases`]. The phase areas CARVE the roofs in `resolve_storey`
+/// [`stamp_wall_phases`]. The phase areas CARVE the ceilings in `resolve_storey`
 /// (mirroring the floor partition), so each roof region lands fully within one
 /// floor phase zone; this reads the floor phase under the region's CENTROID and
 /// re-`ensure`s the ceiling construction with it. Type/make-up are preserved —
@@ -220,10 +220,10 @@ pub fn stamp_ceiling_phases(ber: &mut Ber, idx: usize) {
     if ber.storeys.len() <= idx {
         return;
     }
-    let n = ber.storeys[idx].roofs.regions.len();
+    let n = ber.storeys[idx].ceilings.regions.len();
     for i in 0..n {
         let (c, cur_cid) = {
-            let r = &ber.storeys[idx].roofs.regions[i];
+            let r = &ber.storeys[idx].ceilings.regions[i];
             (r.centroid(), r.construction_id)
         };
         let (ty, makeup, cur_phase) = match ber.ceiling_construction(cur_cid) {
@@ -242,7 +242,7 @@ pub fn stamp_ceiling_phases(ber: &mut Ber, idx: usize) {
             floor_phase_at(ber, idx, c.x as f32, c.y as f32).unwrap_or_else(|| cur_phase.clone());
         if new_phase != cur_phase {
             let cid = ber.ensure_ceiling_construction(ty, makeup, new_phase);
-            ber.storeys[idx].roofs.regions[i].construction_id = cid;
+            ber.storeys[idx].ceilings.regions[i].construction_id = cid;
         }
     }
 }
@@ -316,18 +316,18 @@ pub fn stamp_floor_constructions(ber: &mut Ber, idx: usize, doc: &crate::StoreyD
 /// Apply each CEILING/ROOF region's ASSIGNED construction (type + make-up +
 /// phase, from `doc.ceiling_constructions` keyed by [`CentroidKey`]), re-
 /// `ensure`ing the construction and pointing the region at it. Mirror of
-/// [`stamp_floor_constructions`] over the storey's `roofs` regions.
+/// [`stamp_floor_constructions`] over the storey's `ceilings` regions.
 pub fn stamp_ceiling_constructions(ber: &mut Ber, idx: usize, doc: &crate::StoreyDoc) {
     if ber.storeys.len() <= idx || doc.ceiling_constructions.is_empty() {
         return;
     }
-    let n = ber.storeys[idx].roofs.regions.len();
+    let n = ber.storeys[idx].ceilings.regions.len();
     for i in 0..n {
-        let key = centroid_key(ber.storeys[idx].roofs.regions[i].centroid());
+        let key = centroid_key(ber.storeys[idx].ceilings.regions[i].centroid());
         // Exact centroid key first; containment fallback on a miss (the roof was
         // recomposed/re-carved on load, drifting its centroid off the seeded key).
         let entry = doc.ceiling_constructions.get(&key).or_else(|| {
-            let ring: Vec<(f64, f64)> = ber.storeys[idx].roofs.regions[i]
+            let ring: Vec<(f64, f64)> = ber.storeys[idx].ceilings.regions[i]
                 .polygon
                 .exterior
                 .iter()
@@ -338,7 +338,7 @@ pub fn stamp_ceiling_constructions(ber: &mut Ber, idx: usize, doc: &crate::Store
         });
         if let Some((ty, makeup, phase)) = entry {
             let cid = ber.ensure_ceiling_construction(*ty, makeup.clone(), phase.clone());
-            ber.storeys[idx].roofs.regions[i].construction_id = cid;
+            ber.storeys[idx].ceilings.regions[i].construction_id = cid;
         }
     }
 }
@@ -712,10 +712,10 @@ mod tests {
             .extend(FloorRegions::from_vertex_lists(vec![right.clone()], ext_cid).regions);
         // Two flat roof regions over the two halves, both starting at the
         // default (Original) ceiling construction.
-        let roofs = CeilingRegions::default_for_footprint(vec![left, right], 2.4, ceil_cid);
+        let ceilings = CeilingRegions::default_for_footprint(vec![left, right], 2.4, ceil_cid);
         ber.storeys.push(Storey {
             floors,
-            roofs,
+            ceilings,
             ..Storey::default()
         });
 
@@ -723,7 +723,7 @@ mod tests {
 
         let phase_at = |x: f64, y: f64| -> ConstructionPhase {
             let r = ber.storeys[0]
-                .roofs
+                .ceilings
                 .regions
                 .iter()
                 .find(|r| {

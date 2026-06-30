@@ -7,12 +7,12 @@
 use super::*;
 
 /// The canvas display mode that shades a given surface kind — Structure-phase
-/// Walls/Roofs/Floors highlighting. (`SurfaceKind` itself is the data-model
+/// Walls/Ceilings/Floors highlighting. (`SurfaceKind` itself is the data-model
 /// taxonomy in `ber_model`; this canvas mapping is app-shell.)
 fn display_mode_for(kind: SurfaceKind) -> DisplayMode {
     match kind {
         SurfaceKind::Walls => DisplayMode::Walls,
-        SurfaceKind::Roofs => DisplayMode::Roofs,
+        SurfaceKind::Ceilings => DisplayMode::Ceilings,
         SurfaceKind::Floors => DisplayMode::Floors,
     }
 }
@@ -67,7 +67,7 @@ impl AppController {
     /// Switch the workspace onto `phase`. Resets the canvas display mode to the
     /// phase's default so a Structure-phase surface highlight doesn't bleed back
     /// into Mapping (and vice-versa): Mapping shows the dimensioned floor map,
-    /// Structure shows every surface until a Walls/Roofs/Floors tool is picked.
+    /// Structure shows every surface until a Walls/Ceilings/Floors tool is picked.
     /// The caller (UI dispatch) is responsible for only offering reachable
     /// phases — see [`mapping_complete`](Self::mapping_complete).
     pub fn set_current_phase(&mut self, phase: AssessmentPhase) {
@@ -117,7 +117,7 @@ impl AppController {
     }
 
     /// The active Structure-phase MODES — the surface kinds the global Select
-    /// tools act on (any of Walls / Roofs / Floors; non-exclusive).
+    /// tools act on (any of Walls / Ceilings / Floors; non-exclusive).
     pub fn structure_kinds(&self) -> &std::collections::BTreeSet<SurfaceKind> {
         &self.structure_kinds
     }
@@ -171,7 +171,7 @@ impl AppController {
         self.set_display_mode(display_mode_for_kinds(&self.structure_kinds));
     }
 
-    /// Surface counts for the current storey (walls / roofs / floors) — the
+    /// Surface counts for the current storey (walls / ceilings / floors) — the
     /// Structure-phase tool read-out. Zeroed when there's no current storey
     /// (the read-only "All storeys" tab) or no BER is loaded.
     pub fn current_surface_counts(&self) -> SurfaceCounts {

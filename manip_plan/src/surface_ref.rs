@@ -1,6 +1,6 @@
 //! Durable, geometry-independent references to derived surfaces.
 //!
-//! Walls / floors / roofs are *derived* every resolve (their region ids are
+//! Walls / floors / ceilings are *derived* every resolve (their region ids are
 //! freshly minted), so they can't be durable handles for per-surface data
 //! (openings, construction). A [`SurfaceRef`] instead names a surface by the
 //! **parametric** entities that generate it — chiefly a wall's stable start

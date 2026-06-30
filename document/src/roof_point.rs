@@ -2,12 +2,12 @@
 //! the ceiling region containing them — one apex fans it, two apexes in one
 //! group form a ridge.
 //!
-//! The apexes are DURABLE input (`Storey::roof_apexes`, applied by the
+//! The apexes are DURABLE input (`Storey::ceiling_apexes`, applied by the
 //! resolve projection AFTER the ceiling-step areas — composition order is
 //! law: default ceiling → steps → apexes). A ridge is NOT a separate model
 //! object: it is simply two apexes grouped with the regions they shape
 //! ([`CeilingRegions::apex_groups`], THE grouping authority). What lives here
-//! are the assign-time validations the shell runs before `Ber::add_roof_apex`:
+//! are the assign-time validations the shell runs before `Ber::add_ceiling_apex`:
 //!
 //! - [`StoreyDoc::validate_roof_point`] — the cheap tap-time check against
 //!   the OUTLINE (no `Ber` needed): the point must be strictly inside the
@@ -17,7 +17,7 @@
 //!   ridge line (axis-aligned, endpoints = the stroke's own extent), again
 //!   against the OUTLINE only.
 //! - [`validate_roof_apex`] — the materialized check against the storey's
-//!   RESOLVED roofs, GROUP-AWARE: the region strictly containing the point is
+//!   RESOLVED ceilings, GROUP-AWARE: the region strictly containing the point is
 //!   looked up in the apex groups — 0 apexes is the first-point path (flat
 //!   region required), 1 apex ALLOWS the second point (the ridge forms),
 //!   ≥ 2 rejects (two high points per ceiling area for now).
@@ -46,7 +46,7 @@
 
 use crate::StoreyDoc;
 use ber_model::ber::structural::{
-    rect_hip_switches, ridge_hub_switches, CeilingRegion, RoofApex, RoofApexGroup, Storey,
+    rect_hip_switches, ridge_hub_switches, CeilingRegion, CeilingApex, CeilingApexGroup, Storey,
     APEX_BOUNDARY_EPS_M,
 };
 use domain::points::{to_f32, Point2f32, Point2f64};
@@ -215,11 +215,11 @@ const MIN_APEX_DELTA_M: f64 = 0.01;
 /// region index.)
 fn region_idx_strictly_containing(storey: &Storey, p: Point2f64) -> Result<usize, String> {
     let region = storey
-        .roofs
+        .ceilings
         .region_strictly_containing(p)
         .ok_or_else(|| POINT_OUTSIDE_CEILING_MSG.to_string())?;
     Ok(storey
-        .roofs
+        .ceilings
         .regions
         .iter()
         .position(|r| r.id == region.id)
@@ -232,7 +232,7 @@ fn region_idx_strictly_containing(storey: &Storey, p: Point2f64) -> Result<usize
 /// INTERNAL boundary shared by several (ambiguous which it slopes). Matches the
 /// boundary-inclusive predicate the fan (`with_apexes`) re-applies with.
 fn region_idx_uniquely_claiming(storey: &Storey, p: Point2f64) -> Result<usize, String> {
-    match storey.roofs.claim_regions(p).as_slice() {
+    match storey.ceilings.claim_regions(p).as_slice() {
         [] => Err(POINT_OUTSIDE_CEILING_MSG.to_string()),
         [i] => Ok(*i),
         _ => Err(POINT_ON_SHARED_BOUNDARY_MSG.to_string()),
@@ -247,7 +247,7 @@ fn region_idx_uniquely_claiming(storey: &Storey, p: Point2f64) -> Result<usize, 
 /// from the merge) skips the check with a warning — resolve warns and
 /// proceeds on foldover anyway.
 fn check_group_ridge(
-    group: &RoofApexGroup,
+    group: &CeilingApexGroup,
     existing: Point2f64,
     p: Point2f64,
 ) -> Result<(), String> {
@@ -271,8 +271,8 @@ fn check_group_ridge(
     }
 }
 
-/// Validate a roof apex against the storey's RESOLVED roofs (the assign-time
-/// check, run on the materialized `Storey` before `Ber::add_roof_apex`),
+/// Validate a roof apex against the storey's RESOLVED ceilings (the assign-time
+/// check, run on the materialized `Storey` before `Ber::add_ceiling_apex`),
 /// GROUP-AWARE:
 ///
 /// - `z_m` must be finite and > 0 (it's ABSOLUTE height above the storey's
@@ -283,7 +283,7 @@ fn check_group_ridge(
 ///   is rejected up front; re-application uses the boundary-INCLUSIVE
 ///   predicate instead, two deliberately different predicates).
 /// - That region is looked up in the storey's apex groups
-///   ([`apex_groups`] against `storey.roof_apexes`):
+///   ([`apex_groups`] against `storey.ceiling_apexes`):
 ///   - in NO group → the first-point path: the region must be FLAT
 ///     (`flat_z()` — a sloped region no apex explains is irregular) and the
 ///     base for the slope check is its height;
@@ -309,13 +309,13 @@ pub fn validate_roof_apex(storey: &Storey, p: Point2f64, z_m: f64) -> Result<(),
         ));
     }
     let ri = region_idx_uniquely_claiming(storey, p)?;
-    let groups = storey.roofs.apex_groups(&storey.roof_apexes);
+    let groups = storey.ceilings.apex_groups(&storey.ceiling_apexes);
     let base = match groups.iter().find(|g| g.region_idxs.contains(&ri)) {
-        None => storey.roofs.regions[ri]
+        None => storey.ceilings.regions[ri]
             .flat_z()
             .ok_or_else(|| REGION_IRREGULAR_SLOPE_MSG.to_string())?,
         Some(g) if g.apex_idxs.len() == 1 => {
-            let existing = storey.roof_apexes[g.apex_idxs[0]].point;
+            let existing = storey.ceiling_apexes[g.apex_idxs[0]].point;
             check_group_ridge(g, existing, p)?;
             g.base_z
         }
@@ -339,7 +339,7 @@ pub fn validate_roof_apex(storey: &Storey, p: Point2f64, z_m: f64) -> Result<(),
 /// [`CeilingRegions::claim_regions`]:
 /// ber_model::ber::structural::CeilingRegions::claim_regions
 fn check_end_claims(storey: &Storey, q: Point2f64, ridx: usize) -> Result<(), String> {
-    let claims = storey.roofs.claim_regions(q);
+    let claims = storey.ceilings.claim_regions(q);
     // The end may be strictly inside the region, on its OUTER boundary (gable),
     // OR on an INTERNAL boundary that includes it (a mono-pitch ridge along the
     // junction — the area it slopes is fixed by the apex side hint at resolve).
@@ -353,12 +353,12 @@ fn check_end_claims(storey: &Storey, q: Point2f64, ridx: usize) -> Result<(), St
 }
 
 /// Validate a roof RIDGE (the line input, which places BOTH apexes at once
-/// via `Ber::add_roof_apex` ×2) against the storey's RESOLVED roofs:
+/// via `Ber::add_ceiling_apex` ×2) against the storey's RESOLVED ceilings:
 ///
 /// - `z_m` finite and > 0 (one typed height — a level ridge; a sloping ridge
 ///   is entered via the two-point flow instead).
 /// - The endpoints must stay DISTINCT after the f32 quantization
-///   `add_roof_apex` applies (a zero-length ridge is a fan, not a ridge).
+///   `add_ceiling_apex` applies (a zero-length ridge is a fan, not a ridge).
 /// - The ridge's region is claimed by its MIDPOINT, which must sit STRICTLY
 ///   inside one ceiling region — the midpoint, never the ends, picks the
 ///   region (the determinism dodge: the ends may legally sit ON the
@@ -387,9 +387,9 @@ pub fn validate_roof_ridge(
             "height must be a positive number of metres (got {z_m})"
         ));
     }
-    // Work on the endpoints exactly as add_roof_apex will store them.
-    let qa = RoofApex::quantize_point(a);
-    let qb = RoofApex::quantize_point(b);
+    // Work on the endpoints exactly as add_ceiling_apex will store them.
+    let qa = CeilingApex::quantize_point(a);
+    let qb = CeilingApex::quantize_point(b);
     if qa.x == qb.x && qa.y == qb.y {
         return Err(RIDGE_ENDS_COINCIDE_MSG.to_string());
     }
@@ -398,7 +398,7 @@ pub fn validate_roof_ridge(
     // a junction ridge on a shared boundary is valid if it slopes EITHER
     // neighbour; a strict-interior midpoint has one claimant. Most specific
     // rejection wins.
-    let claims = storey.roofs.claim_regions(mid);
+    let claims = storey.ceilings.claim_regions(mid);
     if claims.is_empty() {
         return Err(RIDGE_OUTSIDE_CEILING_MSG.to_string());
     }
@@ -427,11 +427,11 @@ fn ridge_fits_region_height(
     for q in [qa, qb] {
         check_end_claims(storey, q, ra)?;
     }
-    let groups = storey.roofs.apex_groups(&storey.roof_apexes);
+    let groups = storey.ceilings.apex_groups(&storey.ceiling_apexes);
     if groups.iter().any(|g| g.region_idxs.contains(&ra)) {
         return Err(RIDGE_REGION_OCCUPIED_MSG.to_string());
     }
-    let region = &storey.roofs.regions[ra];
+    let region = &storey.ceilings.regions[ra];
     let base = region
         .flat_z()
         .ok_or_else(|| REGION_IRREGULAR_SLOPE_MSG.to_string())?;
@@ -453,7 +453,7 @@ fn ridge_fits_region_height(
     Ok(())
 }
 
-/// Validate a typed roof-ridge LENGTH against the storey's RESOLVED roofs —
+/// Validate a typed roof-ridge LENGTH against the storey's RESOLVED ceilings —
 /// the LENGTH stage's check, asked FIRST in the flow, before any location
 /// question, so only an OPTIMISTIC bound is knowable:
 ///
@@ -480,9 +480,9 @@ pub fn validate_roof_ridge_length(
     // Only flat, un-apexed regions can host a new ridge — the same region
     // predicates the finalize check applies, lifted to the optimistic
     // "could ANY area take it" form.
-    let groups = storey.roofs.apex_groups(&storey.roof_apexes);
+    let groups = storey.ceilings.apex_groups(&storey.ceiling_apexes);
     let max_extent = storey
-        .roofs
+        .ceilings
         .regions
         .iter()
         .enumerate()
@@ -510,7 +510,7 @@ pub fn validate_roof_ridge_length(
 }
 
 /// Validate the pending ridge's PLACEMENT against the storey's RESOLVED
-/// roofs — THE FINALIZE CHECK, run at the moment the geometry becomes fully
+/// ceilings — THE FINALIZE CHECK, run at the moment the geometry becomes fully
 /// determined (the last open location stage, or straight after the typed
 /// length when every location was snapped), so its rejection always attaches
 /// to a value the user just entered:
@@ -577,7 +577,7 @@ pub fn validate_roof_ridge_extent(
     // (the ChooseArea prompt) and the other gets a step. A strict-interior
     // midpoint has exactly one claimant, so this preserves the prior single-
     // region behaviour. The most specific rejection is surfaced.
-    let claims = storey.roofs.claim_regions(mid);
+    let claims = storey.ceilings.claim_regions(mid);
     if claims.is_empty() {
         return Err(RIDGE_OUTSIDE_CEILING_MSG.to_string());
     }
@@ -610,11 +610,11 @@ fn ridge_fits_region_extent(
     lo: f32,
     len_m: f32,
 ) -> Result<(), String> {
-    let groups = storey.roofs.apex_groups(&storey.roof_apexes);
+    let groups = storey.ceilings.apex_groups(&storey.ceiling_apexes);
     if groups.iter().any(|g| g.region_idxs.contains(&ridx)) {
         return Err(RIDGE_REGION_OCCUPIED_MSG.to_string());
     }
-    let region = &storey.roofs.regions[ridx];
+    let region = &storey.ceilings.regions[ridx];
     if region.flat_z().is_none() {
         return Err(REGION_IRREGULAR_SLOPE_MSG.to_string());
     }
@@ -647,7 +647,7 @@ fn ridge_fits_region_extent(
         ),
     };
     for q in [qa, qb] {
-        check_end_claims(storey, RoofApex::quantize_point(q), ridx)?;
+        check_end_claims(storey, CeilingApex::quantize_point(q), ridx)?;
     }
     // The foldover fence, on the quantized prospective ends — the SAME check
     // the Height stage re-runs ([`validate_roof_ridge`]'s hub-switch guard).
@@ -661,8 +661,8 @@ fn ridge_fits_region_extent(
         .collect();
     if ridge_hub_switches(
         &ring,
-        RoofApex::quantize_point(qa),
-        RoofApex::quantize_point(qb),
+        CeilingApex::quantize_point(qa),
+        CeilingApex::quantize_point(qb),
     ) > 2
     {
         return Err(RIDGE_TOO_IRREGULAR_MSG.to_string());
@@ -695,7 +695,7 @@ pub fn ridge_region_ring(
         ParameterAxis::X => Point2f64::new(coord_m as f64, mid_along),
         ParameterAxis::Y => Point2f64::new(mid_along, coord_m as f64),
     };
-    let region = storey.roofs.region_strictly_containing(mid)?;
+    let region = storey.ceilings.region_strictly_containing(mid)?;
     Some(
         region
             .polygon
@@ -727,7 +727,7 @@ fn ridge_span_through_midpoint(
     };
     let ridx = region_idx_strictly_containing(storey, mid)
         .map_err(|_| RIDGE_OUTSIDE_CEILING_MSG.to_string())?;
-    storey.roofs.regions[ridx]
+    storey.ceilings.regions[ridx]
         .plan_span_through(mid, dir)
         .ok_or_else(|| RIDGE_OUTSIDE_CEILING_MSG.to_string())
 }
@@ -804,11 +804,11 @@ pub fn centred_ridge_start(
 // ── The closed-stroke RECT ridge (flat-topped hip / pavilion) ───────────────
 
 /// The four corners of the rect `(lo, hi)`, QUANTIZED exactly as
-/// `Ber::add_roof_apex` will store them, in the canonical CCW order
+/// `Ber::add_ceiling_apex` will store them, in the canonical CCW order
 /// c00 → c10 → c11 → c01.
 fn rect_corners(lo: Point2f64, hi: Point2f64) -> [Point2f64; 4] {
-    let qlo = RoofApex::quantize_point(lo);
-    let qhi = RoofApex::quantize_point(hi);
+    let qlo = CeilingApex::quantize_point(lo);
+    let qhi = CeilingApex::quantize_point(hi);
     [
         qlo,
         Point2f64::new(qhi.x, qlo.y),
@@ -823,7 +823,7 @@ fn rect_corners(lo: Point2f64, hi: Point2f64) -> [Point2f64; 4] {
 /// (a boundary-touching side is the mono-gable case); an internal shared
 /// boundary, a different region, or no claimant rejects.
 fn check_rect_corner_claims(storey: &Storey, q: Point2f64, ridx: usize) -> Result<(), String> {
-    let claims = storey.roofs.claim_regions(q);
+    let claims = storey.ceilings.claim_regions(q);
     if claims == [ridx] {
         return Ok(());
     }
@@ -837,7 +837,7 @@ fn check_rect_corner_claims(storey: &Storey, q: Point2f64, ridx: usize) -> Resul
 }
 
 /// Validate the two typed flat-top SIDE LENGTHS against the storey's
-/// RESOLVED roofs — the rect flow's stage-1 check (per axis, the rect
+/// RESOLVED ceilings — the rect flow's stage-1 check (per axis, the rect
 /// analogue of [`validate_roof_ridge_length`], run progressively as each
 /// length is typed): both must exceed a centimetre, and each must fit SOME
 /// flat, un-apexed ceiling area's plan-bbox extent along its axis (the
@@ -877,7 +877,7 @@ pub fn validate_roof_rect_length(
     validate_roof_ridge_length(storey, axis.other(), len)
 }
 
-/// Validate the flat top's PLACEMENT against the storey's RESOLVED roofs —
+/// Validate the flat top's PLACEMENT against the storey's RESOLVED ceilings —
 /// the rect flow's FINALIZE check, run at the last open location stage
 /// (the rect analogue of [`validate_roof_ridge_extent`]):
 ///
@@ -910,11 +910,11 @@ pub fn validate_roof_rect_placement(
     let centre = Point2f64::new((qlo.x + qhi.x) / 2.0, (qlo.y + qhi.y) / 2.0);
     let ridx = region_idx_strictly_containing(storey, centre)
         .map_err(|_| RECT_OUTSIDE_CEILING_MSG.to_string())?;
-    let groups = storey.roofs.apex_groups(&storey.roof_apexes);
+    let groups = storey.ceilings.apex_groups(&storey.ceiling_apexes);
     if groups.iter().any(|g| g.region_idxs.contains(&ridx)) {
         return Err(RECT_REGION_OCCUPIED_MSG.to_string());
     }
-    let region = &storey.roofs.regions[ridx];
+    let region = &storey.ceilings.regions[ridx];
     if region.flat_z().is_none() {
         return Err(REGION_IRREGULAR_SLOPE_MSG.to_string());
     }
@@ -967,12 +967,12 @@ pub fn validate_roof_rect_ridge(
         ));
     }
     validate_roof_rect_placement(storey, lo, hi)?;
-    let qlo = RoofApex::quantize_point(lo);
-    let qhi = RoofApex::quantize_point(hi);
+    let qlo = CeilingApex::quantize_point(lo);
+    let qhi = CeilingApex::quantize_point(hi);
     let centre = Point2f64::new((qlo.x + qhi.x) / 2.0, (qlo.y + qhi.y) / 2.0);
     let ridx = region_idx_strictly_containing(storey, centre)
         .map_err(|_| RECT_OUTSIDE_CEILING_MSG.to_string())?;
-    let base = storey.roofs.regions[ridx]
+    let base = storey.ceilings.regions[ridx]
         .flat_z()
         .ok_or_else(|| REGION_IRREGULAR_SLOPE_MSG.to_string())?;
     if (z_m - base).abs() < MIN_APEX_DELTA_M {
@@ -1004,7 +1004,7 @@ pub fn centred_rect_lo(
         ParameterAxis::X => (Point2f64::new(1.0, 0.0), hi.x - lo.x, centre.x),
         ParameterAxis::Y => (Point2f64::new(0.0, 1.0), hi.y - lo.y, centre.y),
     };
-    let (t_min, t_max) = storey.roofs.regions[ridx]
+    let (t_min, t_max) = storey.ceilings.regions[ridx]
         .plan_span_through(centre, dir)
         .ok_or_else(|| RECT_OUTSIDE_CEILING_MSG.to_string())?;
     let span = t_max - t_min;
@@ -1020,7 +1020,7 @@ pub fn centred_rect_lo(
 
 impl StoreyDoc {
     /// The cheap tap-time validation of a roof-point position against the
-    /// OUTLINE (no `Ber` needed — the resolved-roofs check is
+    /// OUTLINE (no `Ber` needed — the resolved-ceilings check is
     /// [`validate_roof_apex`]): the point must be strictly inside the
     /// footprint bbox on BOTH axes. Reuses the ceiling-step line test per
     /// axis ([`validate_ceiling_step_line`]) with a point-flavoured message.
@@ -1193,18 +1193,18 @@ pub fn resolve_ridge_slope_side(
         ParameterAxis::X => (dc, mid.y as f32),
         ParameterAxis::Y => (mid.x as f32, dc),
     });
-    let claims = storey.roofs.claim_regions(mid);
+    let claims = storey.ceilings.claim_regions(mid);
     let drawn_inside = drawn_side.and_then(|(hx, hy)| {
         let hp = Point2f64::new(hx as f64, hy as f64);
-        let r = storey.roofs.region_strictly_containing(hp)?;
-        let ri = storey.roofs.regions.iter().position(|x| x.id == r.id)?;
+        let r = storey.ceilings.region_strictly_containing(hp)?;
+        let ri = storey.ceilings.regions.iter().position(|x| x.id == r.id)?;
         claims.contains(&ri).then_some(ri)
     });
     if claims.len() >= 2 && drawn_inside.is_none() {
         let options = claims
             .iter()
             .map(|&ri| {
-                let inside = area_inside_point(&storey.roofs.regions[ri], mid);
+                let inside = area_inside_point(&storey.ceilings.regions[ri], mid);
                 (area_side_label(axis, coord_m, inside), inside)
             })
             .collect();
@@ -1213,7 +1213,7 @@ pub fn resolve_ridge_slope_side(
     // Unambiguous: the clearly-drawn area's interior, else the drawn side
     // (harmless on an outline wall — single claimant), else no hint.
     let chosen = drawn_inside
-        .map(|ri| area_inside_point(&storey.roofs.regions[ri], mid))
+        .map(|ri| area_inside_point(&storey.ceilings.regions[ri], mid))
         .or(drawn_side);
     RidgeSlopeSide::Resolved(chosen)
 }
@@ -1222,7 +1222,7 @@ pub fn resolve_ridge_slope_side(
 mod tests {
     use super::*;
     use crate::{DimensionState, ShapeSlot};
-    use ber_model::ber::structural::{CeilingRegion, CeilingRegions, Polygon3D, RoofApex, Storey};
+    use ber_model::ber::structural::{CeilingRegion, CeilingRegions, Polygon3D, CeilingApex, Storey};
     use domain::points::Point3f64;
     use manip_plan::FloorPlan;
 
@@ -1230,23 +1230,23 @@ mod tests {
         Point2f32::new(x, y)
     }
 
-    fn apex(x: f64, y: f64, z: f64) -> RoofApex {
-        RoofApex {
+    fn apex(x: f64, y: f64, z: f64) -> CeilingApex {
+        CeilingApex {
             point: Point2f64::new(x, y),
             z_m: z,
         }
     }
 
-    /// A Storey whose roofs are one flat region at `height` over `ring`.
+    /// A Storey whose ceilings are one flat region at `height` over `ring`.
     fn storey_with_flat_ring(ring: Vec<Point2f64>, height: f64) -> Storey {
         Storey {
-            roofs: CeilingRegions::default_for_footprint(vec![ring], height, Default::default()),
+            ceilings: CeilingRegions::default_for_footprint(vec![ring], height, Default::default()),
             ceiling_height_m: Some(height),
             ..Storey::default()
         }
     }
 
-    /// A Storey whose roofs are one flat 4×4 region at the given height.
+    /// A Storey whose ceilings are one flat 4×4 region at the given height.
     fn storey_with_flat_roof(height: f64) -> Storey {
         storey_with_flat_ring(
             vec![
@@ -1260,10 +1260,10 @@ mod tests {
     }
 
     /// Apply `apexes` to the storey EXACTLY the way resolve does: stamp the
-    /// durable list and re-shape the roofs with the FULL list in one pass.
-    fn apply_apexes(storey: &mut Storey, apexes: Vec<RoofApex>) {
-        storey.roof_apexes = apexes;
-        storey.roofs = std::mem::take(&mut storey.roofs).with_apexes(&storey.roof_apexes);
+    /// durable list and re-shape the ceilings with the FULL list in one pass.
+    fn apply_apexes(storey: &mut Storey, apexes: Vec<CeilingApex>) {
+        storey.ceiling_apexes = apexes;
+        storey.ceilings = std::mem::take(&mut storey.ceilings).with_apexes(&storey.ceiling_apexes);
     }
 
     /// A 10×4 footprint with a deep SLOT cut from the right (y ∈ [1, 3],
@@ -1303,7 +1303,7 @@ mod tests {
     }
 
     /// Strict containment: a point on a region boundary, outside every region,
-    /// or in a storey with no roofs at all gets the stable outside-ceiling
+    /// or in a storey with no ceilings at all gets the stable outside-ceiling
     /// message.
     #[test]
     fn apex_outside_rejected_but_single_region_edge_and_corner_allowed() {
@@ -1377,7 +1377,7 @@ mod tests {
     #[test]
     fn sloped_region_in_no_group_is_rejected_as_irregular() {
         let mut storey = storey_with_flat_roof(2.4);
-        storey.roofs.regions.push(CeilingRegion {
+        storey.ceilings.regions.push(CeilingRegion {
             id: Default::default(),
             polygon: Polygon3D::new(vec![
                 Point3f64::new(10.0, 0.0, 2.0),
@@ -1487,7 +1487,7 @@ mod tests {
         .is_ok());
         // Two flat regions side by side.
         let mut storey = storey_with_flat_roof(2.4);
-        storey.roofs.regions.extend(
+        storey.ceilings.regions.extend(
             CeilingRegions::default_for_footprint(
                 vec![vec![
                     Point2f64::new(4.0, 0.0),
@@ -1732,7 +1732,7 @@ mod tests {
             err.starts_with(RIDGE_LENGTH_NO_AREA_MSG) && err.contains("under 0.00 m"),
             "got: {err}"
         );
-        // …and a storey with no roofs at all does too.
+        // …and a storey with no ceilings at all does too.
         let err =
             validate_roof_ridge_length(&Storey::default(), ParameterAxis::X, 1.0).unwrap_err();
         assert!(err.starts_with(RIDGE_LENGTH_NO_AREA_MSG), "got: {err}");
@@ -1740,7 +1740,7 @@ mod tests {
         // With a SECOND, longer flat region the bound is the MAX over the
         // candidates.
         let mut storey = storey_with_flat_roof(2.4);
-        storey.roofs.regions.extend(
+        storey.ceilings.regions.extend(
             CeilingRegions::default_for_footprint(
                 vec![vec![
                     Point2f64::new(4.0, 0.0),
@@ -1807,7 +1807,7 @@ mod tests {
         // wall and slopes the area).
         assert!(validate_roof_ridge_extent(&storey, ParameterAxis::X, 0.0, 1.0, 2.0).is_ok());
         // A ridge whose MIDPOINT leaves every ceiling area — far overrun, a
-        // position outside every region, or a storey with no roofs at all: the
+        // position outside every region, or a storey with no ceilings at all: the
         // stable ridge-outside message.
         for (storey, coord, lo, len) in [
             (&storey, 2.0, 1.0, 9.0), // midpoint (2, 5.5): overrun
@@ -2039,7 +2039,7 @@ mod tests {
         // A corner ON an internal shared boundary: two flat regions side by
         // side, rect in region 0 reaching the shared line x = 4.
         let mut two = storey_with_flat_roof(2.4);
-        two.roofs.regions.extend(
+        two.ceilings.regions.extend(
             CeilingRegions::default_for_footprint(
                 vec![vec![
                     Point2f64::new(4.0, 0.0),
@@ -2194,7 +2194,7 @@ mod tests {
     #[test]
     fn validate_ridge_extent_rejects_an_end_on_an_internal_shared_boundary() {
         let mut storey = storey_with_flat_roof(2.4);
-        storey.roofs.regions.extend(
+        storey.ceilings.regions.extend(
             CeilingRegions::default_for_footprint(
                 vec![vec![
                     Point2f64::new(4.0, 0.0),
@@ -2224,7 +2224,7 @@ mod tests {
     #[test]
     fn ridge_along_an_internal_shared_boundary_is_accepted_by_both_validators() {
         let mut storey = storey_with_flat_roof(2.4);
-        storey.roofs.regions.extend(
+        storey.ceilings.regions.extend(
             CeilingRegions::default_for_footprint(
                 vec![vec![
                     Point2f64::new(4.0, 0.0),

@@ -235,12 +235,12 @@ impl AppController {
         self.document.edit_state = EditState::default();
         self.review = None;
         self.compute_next_dimension_prompt();
-        // Re-resolve every storey so the recomposed roofs (above) get the clean,
+        // Re-resolve every storey so the recomposed ceilings (above) get the clean,
         // per-phase carve re-applied — this is what drops the stale split while
         // preserving the deliberate structure splits + steps + apexes that
         // `heal_phase_induced_roof_splits` replayed. Runs AFTER the exposure /
         // construction seeds so the resolve's fresh-id stamp reads the seeded
-        // durable maps rather than resetting them to Unset. Resolve keeps roofs
+        // durable maps rather than resetting them to Unset. Resolve keeps ceilings
         // verbatim when the outline is unchanged, so an untagged storey (not
         // recomposed) stays byte-identical.
         self.refresh_all_storeys();
@@ -290,30 +290,30 @@ impl AppController {
         // legacy snapshot that still deserialized them is preserved.
         //
         // MUST run BEFORE `heal_phase_induced_roof_splits`: heal recomposes a
-        // phase-tagged storey's roofs via `default_for_footprint` (DEFAULT
-        // exposure), so seeding after it would read the wiped roofs and lose the
+        // phase-tagged storey's ceilings via `default_for_footprint` (DEFAULT
+        // exposure), so seeding after it would read the wiped ceilings and lose the
         // ceiling exposure on the snapshot-less (checkpoint) path. Capturing here
         // takes the saved Layer-1 exposures; the caller's re-resolve then
-        // re-stamps them onto the (deterministically recomposed) roofs.
+        // re-stamps them onto the (deterministically recomposed) ceilings.
         self.seed_riser_exposure_from_record();
         self.seed_horizontal_exposure_from_record();
         self.seed_construction_stores_from_record();
-        // Recompose phase-tagged roofs from their durable inputs (drops a stale
+        // Recompose phase-tagged ceilings from their durable inputs (drops a stale
         // pre-fix phase-induced split); the caller's re-resolve re-applies the
         // clean carve and re-stamps the exposures seeded just above.
         self.heal_phase_induced_roof_splits();
     }
 
     /// MIGRATION self-heal for the per-phase-zone roof fix: records saved before
-    /// the fix baked a spurious phase-induced split into their stored roofs
+    /// the fix baked a spurious phase-induced split into their stored ceilings
     /// (a uniform-phase floor fragmented by a step below seeded a redundant
     /// coplanar same-construction boundary onto the storey above, splitting its
-    /// roof). Roofs are regions-as-truth — `resolve_storey` keeps them verbatim
+    /// roof). Ceilings are regions-as-truth — `resolve_storey` keeps them verbatim
     /// and the phase carve only ever SPLITS — so that stale boundary survives
     /// every reload.
     ///
-    /// Rebuild each PHASE-TAGGED storey's roofs from its durable declarative
-    /// inputs via [`recompose_roofs`](Self::recompose_roofs) (default footprint →
+    /// Rebuild each PHASE-TAGGED storey's ceilings from its durable declarative
+    /// inputs via [`recompose_ceilings`](Self::recompose_ceilings) (default footprint →
     /// ceiling steps → apexes → structure roof-splits). Recompose does NOT
     /// reproduce the phase carve, so the stale split is dropped; the re-resolve
     /// at the end of `open_ber` then re-applies the now-clean per-phase carve.
@@ -323,13 +323,13 @@ impl AppController {
     /// GUARD: gated on the storey being phase-tagged (its phase regions were
     /// reconstructed above). A spurious phase-induced roof split can only exist
     /// where there were phase boundaries, so an untagged storey needs no heal —
-    /// and `recompose_roofs` is skipped there, keeping its stored roofs
+    /// and `recompose_ceilings` is skipped there, keeping its stored ceilings
     /// byte-identical (the regions-as-truth reload fixpoint). Recompose is
     /// deterministic, so re-running it on an already-clean phase-tagged storey
     /// reproduces identical geometry — the fixpoint holds there too.
     ///
     /// Requires the per-storey ceiling-step regions to be reconstructed first
-    /// (`recompose_roofs` reads `ceiling_step_regions[idx]`).
+    /// (`recompose_ceilings` reads `ceiling_step_regions[idx]`).
     fn heal_phase_induced_roof_splits(&mut self) {
         let n = self
             .current_record
@@ -340,7 +340,7 @@ impl AppController {
         for idx in 0..n {
             // Phase-tagged ⇔ reconstructed phase regions exist for this storey.
             if self.phase_regions.get(&idx).is_some_and(|v| !v.is_empty()) {
-                self.recompose_roofs(idx);
+                self.recompose_ceilings(idx);
             }
         }
     }
@@ -418,7 +418,7 @@ impl AppController {
                     .map(|r| (document::centroid_key(r.centroid()), r.exposure))
                     .collect();
                 let ceilings = storey
-                    .roofs
+                    .ceilings
                     .regions
                     .iter()
                     .filter(|r| r.exposure != CeilingExposure::Unset)
@@ -530,7 +530,7 @@ impl AppController {
                     })
                     .collect();
                 let ceilings = storey
-                    .roofs
+                    .ceilings
                     .regions
                     .iter()
                     .filter_map(|r| {

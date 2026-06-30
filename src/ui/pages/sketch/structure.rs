@@ -9,7 +9,7 @@
 //! `(type, build-up)` is editable separately (one group active at a time). The
 //! phase axis stays derived from the floor zones (shown read-only). Works for
 //! every kind — walls key construction by parametric `SurfaceRef`, floors and
-//! ceilings/roofs by region centroid.
+//! ceilings/ceilings by region centroid.
 
 use ber_model::ber::common::ConstructionPhase;
 use ber_model::ber::structural::{
@@ -33,7 +33,7 @@ const EDIT_NAME_W: f32 = 130.0;
 /// The three MODES, in panel order.
 const MODES: &[(SurfaceKind, &str)] = &[
     (SurfaceKind::Walls, "Walls"),
-    (SurfaceKind::Roofs, "Roofs"),
+    (SurfaceKind::Ceilings, "Ceilings"),
     (SurfaceKind::Floors, "Floors"),
 ];
 
@@ -150,7 +150,7 @@ pub fn structure_panel<F: FnMut(UiEvent)>(
     ui.add_space(4.0);
     ui.separator();
     match edit {
-        // No session: offer to open one (any kind — walls / floors / roofs).
+        // No session: offer to open one (any kind — walls / floors / ceilings).
         None => {
             if ui
                 .add_enabled(enabled, egui::Button::new("Edit attributes"))
@@ -384,7 +384,7 @@ pub(crate) fn group_editor_ui<F: FnMut(UiEvent)>(
             .iter()
             .map(|t| (ConstructionType::Floor(*t), t.label()))
             .collect(),
-        SurfaceKind::Roofs => CEILING_TYPES
+        SurfaceKind::Ceilings => CEILING_TYPES
             .iter()
             .map(|t| (ConstructionType::Ceiling(*t), t.label()))
             .collect(),
@@ -695,7 +695,7 @@ fn kind_heading(kind: SurfaceKind) -> &'static str {
     match kind {
         SurfaceKind::Walls => "Wall",
         SurfaceKind::Floors => "Floor",
-        SurfaceKind::Roofs => "Roof",
+        SurfaceKind::Ceilings => "Roof",
     }
 }
 
@@ -704,14 +704,14 @@ fn type_label(kind: SurfaceKind) -> &'static str {
     match kind {
         SurfaceKind::Walls => "Wall type",
         SurfaceKind::Floors => "Floor type",
-        SurfaceKind::Roofs => "Roof type",
+        SurfaceKind::Ceilings => "Roof type",
     }
 }
 
 fn count_for(kind: SurfaceKind, counts: SurfaceCounts) -> usize {
     match kind {
         SurfaceKind::Walls => counts.walls,
-        SurfaceKind::Roofs => counts.roofs,
+        SurfaceKind::Ceilings => counts.ceilings,
         SurfaceKind::Floors => counts.floors,
     }
 }

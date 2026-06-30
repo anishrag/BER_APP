@@ -11,7 +11,7 @@ pub enum SketchMode {
 pub enum DisplayMode {
     #[default]
     FloorMapDims,
-    Roofs,
+    Ceilings,
     Walls,
     Floors,
     AllSurfaces,

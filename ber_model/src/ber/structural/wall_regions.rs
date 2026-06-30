@@ -241,7 +241,7 @@ pub struct WallRegions {
 impl WallRegions {
     /// Re-derive the storey's walls from `segments` (each a footprint edge
     /// `(a, b)` with its thermal `exposure`), tracing each wall's BASE along
-    /// the `floors` step profile and its TOP along the `roofs` profile, and
+    /// the `floors` step profile and its TOP along the `ceilings` profile, and
     /// carrying identity over from the `previous` regions (replaces the
     /// flat-top `rebuild_preserving`).
     ///
@@ -256,10 +256,10 @@ impl WallRegions {
     /// raised/lowered floor region lifts/drops the base under it, with a
     /// VERTICAL JUMP where a step line crosses the wall (symmetric to a
     /// ceiling step's top jump); a same-level partition seam (a phase split)
-    /// leaves the base a straight edge. The TOP follows the `roofs` profile:
+    /// leaves the base a straight edge. The TOP follows the `ceilings` profile:
     /// piecewise-LINEAR across each planar roof region (flat pieces and fan
     /// triangles alike), with a VERTICAL JUMP where a ceiling step crosses
-    /// the wall. Spans the roofs don't cover — including when `roofs` is
+    /// the wall. Spans the ceilings don't cover — including when `ceilings` is
     /// empty (ceiling height unset) — top out flat at `fallback_top_z`
     /// (ABSOLUTE z). A flat roof over a flat floor yields the classic
     /// 4-vertex quad: a-bottom, b-bottom, b-top, a-top.
@@ -283,7 +283,7 @@ impl WallRegions {
     /// Runs on every materialize: O(segments × roof vertices), no caching.
     pub fn regenerate(
         segments: Vec<(Point2f64, Point2f64, WallExposure)>,
-        roofs: &CeilingRegions,
+        ceilings: &CeilingRegions,
         floors: &FloorRegions,
         base_z: f64,
         fallback_top_z: f64,
@@ -296,7 +296,7 @@ impl WallRegions {
                 // base collapses to the 2-vertex `[a, b]` of the contract),
                 // then the roof-profile top (b→a) to close the ring.
                 let mut ext = floor_profile_base(floors, a, b, base_z);
-                ext.extend(roof_profile_top(roofs, a, b, fallback_top_z));
+                ext.extend(roof_profile_top(ceilings, a, b, fallback_top_z));
                 WallRegion {
                     id: ItemId::default(),
                     polygon: Polygon3D::new(ext),
@@ -889,14 +889,14 @@ pub(crate) fn region_plane(region: &CeilingRegion) -> Option<(f64, f64, f64)> {
 /// height. The exact pick stays first so behaviour on clean geometry — tie
 /// order included — is unchanged.
 fn covering_roof_plane(
-    roofs: &CeilingRegions,
+    ceilings: &CeilingRegions,
     p: Point2f64,
     n: (f64, f64),
 ) -> Option<(usize, (f64, f64, f64))> {
     use geo::Intersects;
     let pick = |q: Point2f64| {
         let gq = GeoPoint::new(q.x, q.y);
-        roofs.regions.iter().enumerate().find_map(|(i, r)| {
+        ceilings.regions.iter().enumerate().find_map(|(i, r)| {
             Polygon::<f64>::from(r.polygon.clone())
                 .intersects(&gq)
                 .then(|| region_plane(r).map(|plane| (i, plane)))
@@ -926,7 +926,7 @@ fn covering_roof_plane(
 /// [`PROFILE_EPS_M`] (in metres, scaled to its own parameter) short of the
 /// wall line and still contribute (the old `s` tolerance of 1e-9 dropped
 /// step-boundary edges that stopped ~1e-7 m shy, losing the step's jump).
-fn profile_breakpoints(roofs: &CeilingRegions, a: Point2f64, b: Point2f64) -> Vec<f64> {
+fn profile_breakpoints(ceilings: &CeilingRegions, a: Point2f64, b: Point2f64) -> Vec<f64> {
     let (dx, dy) = (b.x - a.x, b.y - a.y);
     let len2 = dx * dx + dy * dy;
     let mut ts = vec![0.0, 1.0];
@@ -934,7 +934,7 @@ fn profile_breakpoints(roofs: &CeilingRegions, a: Point2f64, b: Point2f64) -> Ve
         return ts;
     }
     let len = len2.sqrt();
-    for r in &roofs.regions {
+    for r in &ceilings.regions {
         let ext = &r.polygon.exterior;
         let n = ext.len();
         if n < 2 {
@@ -990,10 +990,10 @@ fn profile_breakpoints(roofs: &CeilingRegions, a: Point2f64, b: Point2f64) -> Ve
 /// crossing), `fallback_top_z` over uncovered spans. Where adjacent spans
 /// disagree at a breakpoint, both vertices are kept — the VERTICAL JUMP of a
 /// ceiling step crossing the wall; where they agree, consecutive duplicates
-/// collapse, so a flat roof (or empty `roofs`) yields exactly
+/// collapse, so a flat roof (or empty `ceilings`) yields exactly
 /// `[b_top, a_top]`.
 fn roof_profile_top(
-    roofs: &CeilingRegions,
+    ceilings: &CeilingRegions,
     a: Point2f64,
     b: Point2f64,
     fallback_top_z: f64,
@@ -1009,7 +1009,7 @@ fn roof_profile_top(
     let at = |t: f64| Point2f64::new(a.x + dx * t, a.y + dy * t);
     // (t0, t1, z at t0, z at t1) per interval, ascending t.
     let mut spans: Vec<(f64, f64, f64, f64)> = Vec::new();
-    for w in profile_breakpoints(roofs, a, b).windows(2) {
+    for w in profile_breakpoints(ceilings, a, b).windows(2) {
         let (t0, t1) = (w[0], w[1]);
         // Skip degenerate and sub-µm spans (boolean-op noise can put two
         // breakpoints ~1e-8 m apart; a hairline span samples unreliably and
@@ -1018,7 +1018,7 @@ fn roof_profile_top(
             continue;
         }
         let mid = at((t0 + t1) / 2.0);
-        let span = match covering_roof_plane(roofs, mid, n) {
+        let span = match covering_roof_plane(ceilings, mid, n) {
             Some((ri, (c0, cx, cy))) => {
                 let (p0, p1) = (at(t0), at(t1));
                 let (z0, z1) = (c0 + cx * p0.x + cy * p0.y, c0 + cx * p1.x + cy * p1.y);

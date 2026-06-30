@@ -32,7 +32,10 @@ pub struct Storey {
     pub storey_number: i32,
     pub floors: FloorRegions,
     pub walls: WallRegions,
-    pub roofs: CeilingRegions,
+    // Renamed from `roofs` (it's the heat-loss CEILING, not the dwelling roof);
+    // alias keeps records saved under the old key loadable.
+    #[serde(alias = "roofs")]
+    pub ceilings: CeilingRegions,
     pub windows: Vec<Window>,
     pub doors: Vec<Door>,
     pub rooms: Vec<Room>,
@@ -54,14 +57,14 @@ pub struct Storey {
     /// materialize, AFTER the ceiling-step areas (composition order is law:
     /// default ceiling → steps → apexes). `#[serde(default)]` so older
     /// records load.
-    #[serde(default)]
-    pub roof_apexes: Vec<RoofApex>,
+    #[serde(default, alias = "roof_apexes")]
+    pub ceiling_apexes: Vec<CeilingApex>,
     /// Side hints for apexes on an internal shared boundary (a mono-pitch ridge
     /// along the house↔extension junction) — which ceiling area each slopes.
-    /// Keyed by apex point (see [`RoofApexHint`]); empty for normal apexes.
+    /// Keyed by apex point (see [`CeilingApexHint`]); empty for normal apexes.
     /// `#[serde(default)]` so older records load.
-    #[serde(default)]
-    pub roof_apex_hints: Vec<RoofApexHint>,
+    #[serde(default, alias = "roof_apex_hints")]
+    pub ceiling_apex_hints: Vec<CeilingApexHint>,
     /// Floor-slab thickness in metres between this storey's floor and the
     /// ceiling of the storey below it bears on. Durable INPUT like
     /// `ceiling_height_m` — asked first when the storey is added (never on
@@ -75,7 +78,7 @@ pub struct Storey {
     /// — the explicit record of the storey's ceiling steps, so the editing list
     /// is RESTORED on reload instead of re-inferred from the roof geometry. The
     /// controller keeps it in step with the session list at each edit; the
-    /// regions-as-truth roofs are the geometric truth, this is the editable
+    /// regions-as-truth ceilings are the geometric truth, this is the editable
     /// INPUT behind them. Empty on records saved before this field existed:
     /// reload RESTORES the durable list only — there is NO geometry-inference
     /// migration (the step-inference subsystem was removed), so such a record
@@ -99,8 +102,8 @@ pub struct Storey {
     /// from each face's plane), so a split piece keeps the exact surface — a
     /// carve across a ridge yields coplanar sub-faces, never re-pitched halves.
     /// `#[serde(default)]` so older records load.
-    #[serde(default)]
-    pub roof_splits: Vec<Vec<Point2f64>>,
+    #[serde(default, alias = "roof_splits")]
+    pub ceiling_splits: Vec<Vec<Point2f64>>,
     /// Structure-phase WALL splits: each the plan SEGMENT of a finalized cut
     /// that crosses a wall's base edge. A wall split is a vertical plane (not an
     /// area), so the segment — not a closed ring — is stored: resolve lifts it to
@@ -134,7 +137,7 @@ pub struct Storey {
 
 impl Storey {
     /// Record a dimensioned Structure-phase split onto the durable split field
-    /// for `kind` (replayed by `resolve_storey`). Floors/roofs store the whole
+    /// for `kind` (replayed by `resolve_storey`). Floors/ceilings store the whole
     /// carved `ring`; walls store the fixed interior cut SEGMENT(s) in
     /// `wall_cuts` (each crossing at most one wall) — the ring is unused for
     /// walls. This owns which field a split lands in; the caller supplies the
@@ -147,7 +150,7 @@ impl Storey {
     ) {
         match kind {
             SurfaceKind::Floors => self.floor_splits.push(ring.to_vec()),
-            SurfaceKind::Roofs => self.roof_splits.push(ring.to_vec()),
+            SurfaceKind::Ceilings => self.ceiling_splits.push(ring.to_vec()),
             SurfaceKind::Walls => self.wall_splits.extend(wall_cuts),
         }
     }
@@ -189,37 +192,37 @@ impl Storey {
         None
     }
 
-    /// Drop all DERIVED geometry — floors, walls, living areas, roofs, and the
+    /// Drop all DERIVED geometry — floors, walls, living areas, ceilings, and the
     /// fan apexes over them — back to empty. The persist path calls this when
     /// the outline isn't finalised yet: that geometry is still pixel/incomplete
-    /// (roofs derived over a pixel footprint are pixel units too, so the apexes
+    /// (ceilings derived over a pixel footprint are pixel units too, so the apexes
     /// that fan them go with it), and the DB only ever holds finalised geometry.
-    /// The durable INPUTS (`ceiling_height_m`, `roof_apex_hints`,
+    /// The durable INPUTS (`ceiling_height_m`, `ceiling_apex_hints`,
     /// `floor_thickness_m`, `ceiling_steps`) are left untouched.
     pub fn clear_derived_geometry(&mut self) {
         self.floors = FloorRegions::default();
         self.walls = WallRegions::default();
         self.living_areas = FloorRegions::default();
-        self.roofs = CeilingRegions::default();
-        self.roof_apexes = Vec::new();
+        self.ceilings = CeilingRegions::default();
+        self.ceiling_apexes = Vec::new();
     }
 
     /// How many of each structural surface the storey holds — the
-    /// Structure-phase tool read-out (how many walls / roofs / floors the
+    /// Structure-phase tool read-out (how many walls / ceilings / floors the
     /// diagram shows). Counts the derived regions, so they're meaningful only
-    /// after the outline is finalised (walls/roofs/floors are re-derived by
+    /// after the outline is finalised (walls/ceilings/floors are re-derived by
     /// `document::resolve_storey`).
     pub fn surface_counts(&self) -> SurfaceCounts {
         SurfaceCounts {
             walls: self.walls.regions.len(),
-            roofs: self.roofs.regions.len(),
+            ceilings: self.ceilings.regions.len(),
             floors: self.floors.regions.len(),
         }
     }
 
     /// The id of the surface of `kind` under (or, for walls, nearest within
     /// `tol` of) the plan point `(x, y)` — the Structure-phase tap hit-test.
-    /// Floors/roofs: point-in-polygon over the region footprint; walls: nearest
+    /// Floors/ceilings: point-in-polygon over the region footprint; walls: nearest
     /// base edge within tolerance (a wall collapses to its base edge in plan).
     pub fn surface_at(&self, kind: SurfaceKind, x: f64, y: f64, tol: f64) -> Option<ItemId> {
         match kind {
@@ -229,8 +232,8 @@ impl Storey {
                 .iter()
                 .find(|r| r.polygon.contains(&GeoPoint::new(x, y)))
                 .map(|r| r.id),
-            SurfaceKind::Roofs => self
-                .roofs
+            SurfaceKind::Ceilings => self
+                .ceilings
                 .regions
                 .iter()
                 .find(|r| polygon3d_contains_plan(&r.polygon, x, y))
@@ -257,7 +260,7 @@ impl Storey {
 
     /// Every surface id of `kind` whose footprint lies inside the carved
     /// `region_ring` (world metres) — the Structure-phase carve pick. Floors and
-    /// roofs match when their footprint centre is inside; a wall (a BOUNDARY
+    /// ceilings match when their footprint centre is inside; a wall (a BOUNDARY
     /// edge, never strictly inside) matches when its base-edge midpoint sits on
     /// the ring's perimeter OR strictly inside (an interior riser between
     /// stepped sections), the spanning wall claimed by whichever region holds
@@ -276,8 +279,8 @@ impl Storey {
                 })
                 .map(|r| r.id)
                 .collect(),
-            SurfaceKind::Roofs => self
-                .roofs
+            SurfaceKind::Ceilings => self
+                .ceilings
                 .regions
                 .iter()
                 .filter(|r| {
@@ -338,7 +341,7 @@ impl Storey {
             return false;
         }
         let cut = ring_to_geo(ring);
-        self.roofs
+        self.ceilings
             .regions
             .iter()
             .filter(|r| r.exposure != CeilingExposure::Party)
@@ -383,8 +386,8 @@ impl Storey {
                 .filter(|r| mostly(&r.polygon))
                 .map(|r| r.id)
                 .collect(),
-            SurfaceKind::Roofs => self
-                .roofs
+            SurfaceKind::Ceilings => self
+                .ceilings
                 .regions
                 .iter()
                 .filter(|r| mostly(&ring_to_geo(&ceiling_ring(&r.polygon))))
@@ -395,13 +398,13 @@ impl Storey {
     }
 
     /// Which kind of surface region `id` is, if any — lets a mixed-kind
-    /// selection (walls + floors + roofs) recover each id's kind. `None` when no
+    /// selection (walls + floors + ceilings) recover each id's kind. `None` when no
     /// region of any kind has that id.
     pub fn surface_kind_of(&self, id: ItemId) -> Option<SurfaceKind> {
         if self.walls.regions.iter().any(|r| r.id == id) {
             Some(SurfaceKind::Walls)
-        } else if self.roofs.regions.iter().any(|r| r.id == id) {
-            Some(SurfaceKind::Roofs)
+        } else if self.ceilings.regions.iter().any(|r| r.id == id) {
+            Some(SurfaceKind::Ceilings)
         } else if self.floors.regions.iter().any(|r| r.id == id) {
             Some(SurfaceKind::Floors)
         } else {
@@ -413,7 +416,7 @@ impl Storey {
     pub fn surface_ids(&self, kind: SurfaceKind) -> Vec<ItemId> {
         match kind {
             SurfaceKind::Walls => self.walls.regions.iter().map(|r| r.id).collect(),
-            SurfaceKind::Roofs => self.roofs.regions.iter().map(|r| r.id).collect(),
+            SurfaceKind::Ceilings => self.ceilings.regions.iter().map(|r| r.id).collect(),
             SurfaceKind::Floors => self.floors.regions.iter().map(|r| r.id).collect(),
         }
     }
@@ -424,18 +427,18 @@ impl Storey {
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct SurfaceCounts {
     pub walls: usize,
-    pub roofs: usize,
+    pub ceilings: usize,
     pub floors: usize,
 }
 
-/// A structural surface kind — the Structure-phase headings (Walls / Roofs /
+/// A structural surface kind — the Structure-phase headings (Walls / Ceilings /
 /// Floors) the surface queries and the assessor's Select/Set subtools hang
 /// under. The data-model taxonomy the queries above (`surface_at`,
 /// `surfaces_in_ring`, `surface_ids`) dispatch on.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub enum SurfaceKind {
     Walls,
-    Roofs,
+    Ceilings,
     Floors,
 }
 

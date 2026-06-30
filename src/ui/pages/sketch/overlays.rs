@@ -209,12 +209,12 @@ fn phase_box(
 
 /// A small centred banner just under the phase signpost naming the surface
 /// kind currently highlighted (+ its count), so the shaded faces on the canvas
-/// are explicit ("Highlighting Roofs · 3"). Painted only when a single surface
-/// is selected (`Walls` / `Roofs` / `Floors`); nothing otherwise.
+/// are explicit ("Highlighting Ceilings · 3"). Painted only when a single surface
+/// is selected (`Walls` / `Ceilings` / `Floors`); nothing otherwise.
 pub fn highlight_caption(ui: &egui::Ui, rect: Rect, display: DisplayMode, counts: SurfaceCounts) {
     let (label, count, accent) = match display {
         DisplayMode::Walls => ("Walls", counts.walls, Color32::from_rgb(230, 230, 230)),
-        DisplayMode::Roofs => ("Roofs", counts.roofs, Color32::from_rgb(220, 160, 80)),
+        DisplayMode::Ceilings => ("Ceilings", counts.ceilings, Color32::from_rgb(220, 160, 80)),
         DisplayMode::Floors => ("Floors", counts.floors, Color32::from_rgb(120, 170, 240)),
         _ => return,
     };

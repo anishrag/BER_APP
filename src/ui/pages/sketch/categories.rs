@@ -257,7 +257,7 @@ pub struct ToolFlags {
     /// The current assessment phase — selects which toolset the panel shows
     /// (Mapping categories vs. the Structure surface panel).
     pub phase: AssessmentPhase,
-    /// The active Structure-phase MODES (Walls/Roofs/Floors; non-exclusive) —
+    /// The active Structure-phase MODES (Walls/Ceilings/Floors; non-exclusive) —
     /// drives which mode buttons read as selected.
     pub structure_kinds: std::collections::BTreeSet<SurfaceKind>,
     /// The active global Select subtool — drives which reads as selected.

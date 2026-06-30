@@ -413,7 +413,7 @@ pub struct StoreyDoc {
 
     /// Per-CEILING-region horizontal exposure (boundary condition above the
     /// region), keyed by the region's plan [`CentroidKey`]. Mirror of
-    /// [`floor_exposure`](Self::floor_exposure) over the storey's `roofs`.
+    /// [`floor_exposure`](Self::floor_exposure) over the storey's `ceilings`.
     #[serde(
         default,
         skip_serializing,

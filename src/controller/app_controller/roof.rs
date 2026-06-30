@@ -139,7 +139,7 @@ impl AppController {
         let mut out = Vec::new();
         for (storey_idx, storey) in record.data.storeys.iter().enumerate() {
             for r in storey
-                .roofs
+                .ceilings
                 .regions
                 .iter()
                 // Party ceilings have a dwelling above, not a roof — not selectable.
@@ -175,9 +175,9 @@ impl AppController {
         };
         let mut best: Option<(f64, usize, document::CentroidKey)> = None;
         for (idx, storey) in record.data.storeys.iter().enumerate() {
-            if let Some(id) = storey.surface_at(SurfaceKind::Roofs, world_x, world_y, tol) {
+            if let Some(id) = storey.surface_at(SurfaceKind::Ceilings, world_x, world_y, tol) {
                 if let Some(region) = storey
-                    .roofs
+                    .ceilings
                     .regions
                     .iter()
                     .find(|r| r.id == id && r.exposure != CeilingExposure::Party)
@@ -244,7 +244,7 @@ impl AppController {
     fn roof_selected_bbox(&self, storey_idx: usize) -> Option<((f64, f64), (f64, f64))> {
         let storey = self.current_record.as_ref()?.data.storeys.get(storey_idx)?;
         let mut bb: Option<(f64, f64, f64, f64)> = None;
-        for r in &storey.roofs.regions {
+        for r in &storey.ceilings.regions {
             if !self
                 .roof_selected
                 .contains(&(storey_idx, document::centroid_key(r.centroid())))
@@ -281,7 +281,7 @@ impl AppController {
             return Vec::new();
         };
         storey
-            .roofs
+            .ceilings
             .regions
             .iter()
             .filter(|r| {

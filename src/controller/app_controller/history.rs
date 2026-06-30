@@ -26,7 +26,7 @@ pub struct HistorySnapshot {
     pub(super) window_types: Option<Vec<ber_model::ber::fenestration::WindowType>>,
     /// The WHOLE storey stack AS IT WAS — captured only by actions that mutate
     /// records ACROSS storeys (e.g. `auto_expose_all_storeys`, which pushes
-    /// carves onto every storey's `floor_splits`/`roof_splits`). When `Some`, the
+    /// carves onto every storey's `floor_splits`/`ceiling_splits`). When `Some`, the
     /// restore writes back every storey's record (and SKIPS the single
     /// `record_storey` write); `None` (the common case) keeps the active-only
     /// behaviour. The normal `current_history_snapshot` leaves this `None`.

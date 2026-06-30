@@ -47,7 +47,7 @@ const DEDUP_SYM_DIFF_FRAC: f64 = 0.02;
 pub struct OutlineSuggestion {
     /// The closed outline ring in world metres, OPEN representation (no
     /// closing duplicate), f32-quantized at this boundary (the
-    /// `Ber::add_roof_apex` precedent — the document layer round-trips rings
+    /// `Ber::add_ceiling_apex` precedent — the document layer round-trips rings
     /// through `Point2f32`) and collinear-stripped.
     pub ring: Vec<Point2f64>,
     /// Plan area of `ring` (m²).
@@ -119,7 +119,7 @@ pub fn has_suggestion_inputs(below: &Storey) -> bool {
             .footprint_ring()
             .is_some_and(|fp| ring_to_poly(&fp).unsigned_area() > SLIVER_AREA_M2)
         && below
-            .roofs
+            .ceilings
             .regions
             .iter()
             .any(|r| r.polygon.exterior.len() >= 3 && r.flat_z().is_some())
@@ -152,7 +152,7 @@ pub fn suggest_storey_outlines(below: &Storey, max: usize) -> Vec<OutlineSuggest
     }
     let mut flats: Vec<(Vec<Point2f64>, f64)> = Vec::new();
     let mut all_flat = true;
-    for r in &below.roofs.regions {
+    for r in &below.ceilings.regions {
         if r.polygon.exterior.len() < 3 {
             continue; // degenerate — neither flat nor sloped
         }
@@ -517,7 +517,7 @@ mod tests {
         let cid = ItemId::default();
         Storey {
             floors: FloorRegions::new(l_ring(), cid),
-            roofs: CeilingRegions::default_for_footprint(vec![l_ring()], 2.4, cid)
+            ceilings: CeilingRegions::default_for_footprint(vec![l_ring()], 2.4, cid)
                 .with_z_deltas(&[(square(0.0, 0.0, 10.0, 4.0), 0.3)]),
             ceiling_height_m: Some(2.4),
             ..Storey::default()
@@ -589,7 +589,7 @@ mod tests {
         let ring = square(0.0, 0.0, 6.0, 8.0);
         let below = Storey {
             floors: FloorRegions::new(ring.clone(), cid),
-            roofs: CeilingRegions::default_for_footprint(vec![ring], 2.4, cid),
+            ceilings: CeilingRegions::default_for_footprint(vec![ring], 2.4, cid),
             ceiling_height_m: Some(2.4),
             ..Storey::default()
         };
@@ -610,8 +610,8 @@ mod tests {
     fn small_storey_still_yields_the_obvious_suggestion() {
         let cid = ItemId::default();
         let ring = square(0.7728, 0.7387, 1.7728, 1.7387);
-        let mut roofs = CeilingRegions::default_for_footprint(vec![ring.clone()], 2.4, cid);
-        roofs.regions.extend(
+        let mut ceilings = CeilingRegions::default_for_footprint(vec![ring.clone()], 2.4, cid);
+        ceilings.regions.extend(
             CeilingRegions::default_for_footprint(
                 vec![square(1.0978, 1.1137, 1.4478, 1.3637)],
                 4.0,
@@ -621,7 +621,7 @@ mod tests {
         );
         let below = Storey {
             floors: FloorRegions::new(ring, cid),
-            roofs,
+            ceilings,
             ceiling_height_m: Some(2.4),
             ..Storey::default()
         };
@@ -648,7 +648,7 @@ mod tests {
         let ring = square(0.0, 0.0, 0.6, 0.6); // 0.36 m² < the 0.5 floor
         let below = Storey {
             floors: FloorRegions::new(ring.clone(), cid),
-            roofs: CeilingRegions::default_for_footprint(vec![ring], 2.4, cid),
+            ceilings: CeilingRegions::default_for_footprint(vec![ring], 2.4, cid),
             ceiling_height_m: Some(2.4),
             ..Storey::default()
         };

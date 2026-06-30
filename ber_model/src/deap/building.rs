@@ -6,7 +6,7 @@ use uuid::Uuid;
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Building {
     pub floors: Floors,
-    pub roofs: Roofs,
+    pub ceilings: Ceilings,
     pub walls: Walls,
     pub doors: Doors,
     pub windows: WindowGroups,
@@ -54,7 +54,7 @@ pub struct Floors {
     pub elements: Vec<FloorElement>,
 }
 
-// ------------------- Roofs -------------------
+// ------------------- Ceilings -------------------
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum RoofHeatLossType {
@@ -75,7 +75,7 @@ pub struct RoofElement {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct Roofs {
+pub struct Ceilings {
     pub id: Uuid,
     pub elements: Vec<RoofElement>,
 }

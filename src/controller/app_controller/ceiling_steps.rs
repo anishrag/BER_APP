@@ -22,7 +22,7 @@
 //!
 //! The line (axis + coordinate + side) is input UX only — the session record
 //! is the REGION. After each assign the shell CANONICALIZES: materialize, then
-//! rebuild the session list from the derived roofs, so the in-session list
+//! rebuild the session list from the derived ceilings, so the in-session list
 //! equals the post-reload reconstruction (idempotent reload by construction).
 use super::*;
 use document::{LinePositionPrompt, LineSide};
@@ -261,7 +261,7 @@ impl AppController {
         let mut coords = Vec::new();
         let mut gather = |storey: &ber_model::ber::structural::Storey| {
             coords.extend(document::region_line_coords(&storey.floors, axis));
-            coords.extend(document::ceiling_line_coords(&storey.roofs, axis));
+            coords.extend(document::ceiling_line_coords(&storey.ceilings, axis));
         };
         if let Some(storey) = record.data.storeys.get(idx) {
             gather(storey);
@@ -558,7 +558,7 @@ impl AppController {
     /// reach the floor); the pending line/area stays open on rejection so the
     /// user can retype. On success: push the region — the line's half-rect
     /// (the resolve projection clips it) or the carve's dimensioned ring —
-    /// re-derive, then CANONICALIZE the session list from the derived roofs
+    /// re-derive, then CANONICALIZE the session list from the derived ceilings
     /// so it equals the post-reload reconstruction. Outside undo —
     /// phases/steps parity.
     pub fn assign_ceiling_step_delta(&mut self, delta_m: f32) -> Result<(), String> {
@@ -625,11 +625,11 @@ impl AppController {
         }
         self.pending_ceiling_step = None;
         self.mark_dirty()?;
-        // Regions-as-truth: recompose the roofs from the session step list (now
+        // Regions-as-truth: recompose the ceilings from the session step list (now
         // including this step) + the durable apexes, then re-derive (re-fit +
         // walls). `reconstruct` canonicalizes the session list — the DISPLAY
-        // cache — from the resulting roofs.
-        self.recompose_roofs(idx);
+        // cache — from the resulting ceilings.
+        self.recompose_ceilings(idx);
         self.materialize();
         self.reconstruct_ceiling_step_regions_for(idx);
         Ok(())
@@ -746,7 +746,7 @@ impl AppController {
             let _ = self.mark_dirty();
             // Regions-as-truth: recompose from the remaining session steps so the
             // removed step's pieces re-flatten, then re-derive + re-canonicalize.
-            self.recompose_roofs(idx);
+            self.recompose_ceilings(idx);
             self.materialize();
             self.reconstruct_ceiling_step_regions_for(idx);
         }

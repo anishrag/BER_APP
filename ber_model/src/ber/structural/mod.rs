@@ -395,7 +395,7 @@ mod tests {
         assert!(area_at(0.0).abs() < 1e-6, "no unstepped remainder left");
     }
 
-    /// FLAT PARITY with the old `rebuild_preserving`: empty roofs → a fresh
+    /// FLAT PARITY with the old `rebuild_preserving`: empty ceilings → a fresh
     /// segment becomes the classic 4-vertex vertical quad at the fallback
     /// top, with the supplied default construction.
     #[test]
@@ -470,11 +470,11 @@ mod tests {
     #[test]
     fn ceiling_riser_faces_emit_one_face_per_step_boundary() {
         let cid = ItemId::default();
-        let roofs =
+        let ceilings =
             CeilingRegions::default_for_footprint(vec![square(0.0, 0.0, 4.0, 4.0)], 2.4, cid)
                 .with_z_deltas(&[(square(2.0, 0.0, 4.0, 4.0), 0.3)]);
-        assert_eq!(roofs.regions.len(), 2);
-        let faces = roofs.riser_faces();
+        assert_eq!(ceilings.regions.len(), 2);
+        let faces = ceilings.riser_faces();
         assert_eq!(faces.len(), 1);
         let ext = &faces[0].exterior;
         assert_eq!(ext.len(), 4);
@@ -492,7 +492,7 @@ mod tests {
     fn ceiling_riser_faces_skip_fan_and_ridge_seams() {
         let cid = ItemId::default();
         let fan = CeilingRegions::default_for_footprint(vec![square(0.0, 0.0, 4.0, 4.0)], 2.4, cid)
-            .with_apexes(&[RoofApex {
+            .with_apexes(&[CeilingApex {
                 point: Point2f64::new(2.0, 2.0),
                 z_m: 4.0,
             }]);
@@ -783,14 +783,14 @@ mod tests {
         let cid = ItemId::default();
         // Two flat roof pieces over a 10×4 footprint: z = 2.4 left of x = 5,
         // z = 2.7 right of it.
-        let roofs =
+        let ceilings =
             CeilingRegions::default_for_footprint(vec![square(0.0, 0.0, 10.0, 4.0)], 2.4, cid)
                 .with_z_deltas(&[(square(5.0, 0.0, 10.0, 4.0), 0.3)]);
         let a = Point2f64::new(0.0, 0.0);
         let b = Point2f64::new(10.0, 0.0);
         let walls = WallRegions::regenerate(
             vec![(a, b, WallExposure::Exposed)],
-            &roofs,
+            &ceilings,
             &FloorRegions::default(),
             0.0,
             9.9, // fallback must NOT be used — the roof covers the base
@@ -929,7 +929,7 @@ mod tests {
     fn regenerate_fan_slope_makes_linear_top() {
         let cid = ItemId::default();
         // A planar sloped rectangle: z = 2.0 + 0.1·x over [0,10] × [0,4].
-        let roofs = CeilingRegions {
+        let ceilings = CeilingRegions {
             regions: vec![CeilingRegion {
                 id: ItemId::default(),
                 polygon: Polygon3D::new(vec![
@@ -947,7 +947,7 @@ mod tests {
         let b = Point2f64::new(10.0, 0.0);
         let walls = WallRegions::regenerate(
             vec![(a, b, WallExposure::Exposed)],
-            &roofs,
+            &ceilings,
             &FloorRegions::default(),
             0.0,
             9.9,
@@ -961,19 +961,19 @@ mod tests {
         assert!(ext[3].x.abs() < 1e-9 && (ext[3].z - 2.0).abs() < 1e-9);
     }
 
-    /// Spans of the base the roofs DON'T cover top out at `fallback_top_z`,
+    /// Spans of the base the ceilings DON'T cover top out at `fallback_top_z`,
     /// with a jump where coverage ends.
     #[test]
     fn regenerate_uncovered_span_uses_fallback_top() {
         let cid = ItemId::default();
         // Roof over the left half of the base only.
-        let roofs =
+        let ceilings =
             CeilingRegions::default_for_footprint(vec![square(0.0, 0.0, 5.0, 4.0)], 2.6, cid);
         let a = Point2f64::new(0.0, 0.0);
         let b = Point2f64::new(10.0, 0.0);
         let walls = WallRegions::regenerate(
             vec![(a, b, WallExposure::Exposed)],
-            &roofs,
+            &ceilings,
             &FloorRegions::default(),
             0.0,
             2.4,
@@ -1227,7 +1227,7 @@ mod tests {
     #[test]
     fn with_apexes_fans_containing_region_into_edge_triangles() {
         let cid = ItemId::default();
-        let apex = RoofApex {
+        let apex = CeilingApex {
             point: Point2f64::new(2.0, 2.0),
             z_m: 4.2,
         };
@@ -1254,7 +1254,7 @@ mod tests {
     /// piece drop as slivers; the third is the piece itself).
     #[test]
     fn with_apexes_apex_as_corner_refan_is_identity() {
-        let apex = RoofApex {
+        let apex = CeilingApex {
             point: Point2f64::new(1.5, 2.5),
             z_m: 3.8,
         };
@@ -1277,7 +1277,7 @@ mod tests {
     fn with_apexes_over_stepped_piece_keeps_stepped_base_and_fan_base_z_recovers_it() {
         let h = 2.4;
         let delta = 0.3;
-        let apex = RoofApex {
+        let apex = CeilingApex {
             point: Point2f64::new(7.5, 2.0), // inside the stepped right half
             z_m: 4.0,
         };
@@ -1324,7 +1324,7 @@ mod tests {
         );
         let before_id = ceilings.regions[0].id;
         let before_poly = ceilings.regions[0].polygon.clone();
-        let out = ceilings.with_apexes(&[RoofApex {
+        let out = ceilings.with_apexes(&[CeilingApex {
             point: Point2f64::new(50.0, 50.0),
             z_m: 4.0,
         }]);
@@ -1343,11 +1343,11 @@ mod tests {
             ItemId::default(),
         )
         .with_apexes(&[
-            RoofApex {
+            CeilingApex {
                 point: Point2f64::new(2.0, 2.0),
                 z_m: 4.0,
             },
-            RoofApex {
+            CeilingApex {
                 point: Point2f64::new(8.0, 2.0),
                 z_m: 3.5,
             },
@@ -1411,7 +1411,7 @@ mod tests {
         assert_eq!(sloped.fan_base_z(&[]), None);
 
         // The same triangle WITH its apex declared: base recovered.
-        let apex = RoofApex {
+        let apex = CeilingApex {
             point: Point2f64::new(2.0, 2.0),
             z_m: 4.0,
         };
@@ -1449,7 +1449,7 @@ mod tests {
             exposure: CeilingExposure::default(),
         };
         assert_eq!(
-            all_apex.fan_base_z(&[RoofApex {
+            all_apex.fan_base_z(&[CeilingApex {
                 point: Point2f64::new(2.0, 2.0),
                 z_m: 4.0,
             }]),
@@ -1475,7 +1475,7 @@ mod tests {
 
     /// How many of the region's vertices plan-match one of `apexes`
     /// (1e-6 m) — 1 for a hub triangle, 2 for a transition triangle.
-    fn apex_vertex_count(r: &CeilingRegion, apexes: &[RoofApex]) -> usize {
+    fn apex_vertex_count(r: &CeilingRegion, apexes: &[CeilingApex]) -> usize {
         r.polygon
             .exterior
             .iter()
@@ -1496,13 +1496,13 @@ mod tests {
     }
 
     /// A level gable over the 10×4 footprint: apexes at (2,2) and (8,2).
-    fn gable_apexes() -> (RoofApex, RoofApex) {
+    fn gable_apexes() -> (CeilingApex, CeilingApex) {
         (
-            RoofApex {
+            CeilingApex {
                 point: Point2f64::new(2.0, 2.0),
                 z_m: 4.2,
             },
-            RoofApex {
+            CeilingApex {
                 point: Point2f64::new(8.0, 2.0),
                 z_m: 4.2,
             },
@@ -1548,7 +1548,7 @@ mod tests {
             .iter()
             .filter(|r| r.polygon.exterior.len() == 4)
             .collect();
-        let at = |v: &Point3f64, apex: &RoofApex| {
+        let at = |v: &Point3f64, apex: &CeilingApex| {
             (v.x - apex.point.x).abs() <= 1e-9
                 && (v.y - apex.point.y).abs() <= 1e-9
                 && (v.z - apex.z_m).abs() <= 1e-9
@@ -1693,11 +1693,11 @@ mod tests {
     /// carries zB, and the boundary keeps the base.
     #[test]
     fn with_apexes_sloping_ridge_carries_each_apexes_z() {
-        let a = RoofApex {
+        let a = CeilingApex {
             point: Point2f64::new(2.0, 2.0),
             z_m: 4.0,
         };
-        let b = RoofApex {
+        let b = CeilingApex {
             point: Point2f64::new(8.0, 2.0),
             z_m: 4.5,
         };
@@ -1728,11 +1728,11 @@ mod tests {
     /// triangles still tile the footprint with nothing under the threshold.
     #[test]
     fn ridge_triangles_drop_corner_apex_slivers() {
-        let a = RoofApex {
+        let a = CeilingApex {
             point: Point2f64::new(0.0, 0.0), // ON the footprint corner
             z_m: 4.0,
         };
-        let b = RoofApex {
+        let b = CeilingApex {
             point: Point2f64::new(8.0, 2.0),
             z_m: 4.0,
         };
@@ -1770,7 +1770,7 @@ mod tests {
     #[test]
     fn with_apexes_three_apexes_use_the_first_two() {
         let (a, b) = gable_apexes();
-        let c = RoofApex {
+        let c = CeilingApex {
             point: Point2f64::new(5.0, 1.0),
             z_m: 5.0,
         };
@@ -1822,11 +1822,11 @@ mod tests {
     fn apex_groups_keep_unlinked_fans_separate() {
         use geo::Area;
         let apexes = vec![
-            RoofApex {
+            CeilingApex {
                 point: Point2f64::new(2.0, 2.0),
                 z_m: 4.0,
             },
-            RoofApex {
+            CeilingApex {
                 point: Point2f64::new(8.0, 2.0),
                 z_m: 3.5,
             },
@@ -1853,7 +1853,7 @@ mod tests {
         }
         // An apex matched by no region joins no group.
         assert!(regions
-            .apex_groups(&[RoofApex {
+            .apex_groups(&[CeilingApex {
                 point: Point2f64::new(50.0, 50.0),
                 z_m: 4.0,
             }])
@@ -1932,7 +1932,7 @@ mod tests {
             );
             r
         };
-        let apex = RoofApex {
+        let apex = CeilingApex {
             point: Point2f64::new(4.0, 2.0), // ON the shared boundary x = 4
             z_m: 4.2,
         };
@@ -1987,11 +1987,11 @@ mod tests {
     fn with_apexes_boundary_ridge_makes_two_gable_slopes_and_reapplies_identically() {
         let cid = ItemId::default();
         let apexes = [
-            RoofApex {
+            CeilingApex {
                 point: Point2f64::new(2.0, 0.0), // ON the bottom wall
                 z_m: 4.2,
             },
-            RoofApex {
+            CeilingApex {
                 point: Point2f64::new(2.0, 4.0), // ON the top wall
                 z_m: 4.2,
             },
@@ -2042,26 +2042,26 @@ mod tests {
     fn with_apexes_hint_picks_the_sloped_side_of_a_shared_boundary() {
         let cid = ItemId::default();
         // Left area x0..4, right area x4..8, both flat at 2.4.
-        let mut roofs =
+        let mut ceilings =
             CeilingRegions::default_for_footprint(vec![square(0.0, 0.0, 4.0, 4.0)], 2.4, cid);
-        roofs.regions.extend(
+        ceilings.regions.extend(
             CeilingRegions::default_for_footprint(vec![square(4.0, 0.0, 8.0, 4.0)], 2.4, cid)
                 .regions,
         );
         // A ridge along the shared line x = 4 at z = 4.0.
         let apexes = vec![
-            RoofApex {
+            CeilingApex {
                 point: Point2f64::new(4.0, 0.0),
                 z_m: 4.0,
             },
-            RoofApex {
+            CeilingApex {
                 point: Point2f64::new(4.0, 4.0),
                 z_m: 4.0,
             },
         ];
         // Does any output face on side `right_of_4` reach the ridge height?
-        let side_slopes = |roofs: &CeilingRegions, right_of_4: bool| {
-            roofs.regions.iter().any(|r| {
+        let side_slopes = |ceilings: &CeilingRegions, right_of_4: bool| {
+            ceilings.regions.iter().any(|r| {
                 let cx = r.polygon.exterior.iter().map(|v| v.x).sum::<f64>()
                     / r.polygon.exterior.len().max(1) as f64;
                 let on_side = if right_of_4 { cx > 4.0 } else { cx < 4.0 };
@@ -2070,16 +2070,16 @@ mod tests {
         };
         // Hint into the RIGHT area → it slopes, the left stays flat.
         let hints = vec![
-            RoofApexHint {
+            CeilingApexHint {
                 apex: (4.0, 0.0),
                 region: (6.0, 2.0),
             },
-            RoofApexHint {
+            CeilingApexHint {
                 apex: (4.0, 4.0),
                 region: (6.0, 2.0),
             },
         ];
-        let hinted = roofs.clone().with_apexes_hinted(&apexes, &hints);
+        let hinted = ceilings.clone().with_apexes_hinted(&apexes, &hints);
         assert!(side_slopes(&hinted, true), "the hinted (right) area slopes");
         assert!(!side_slopes(&hinted, false), "the left area stays flat");
         // The apex group must claim ONLY the sloped side — even though the
@@ -2103,7 +2103,7 @@ mod tests {
             groups[0].region_idxs
         );
         // No hint → first claim (region 0, the LEFT) slopes instead.
-        let unhinted = roofs.with_apexes_hinted(&apexes, &[]);
+        let unhinted = ceilings.with_apexes_hinted(&apexes, &[]);
         assert!(
             side_slopes(&unhinted, false),
             "without a hint the left slopes"
@@ -2115,10 +2115,10 @@ mod tests {
     /// The four corner apexes of the canonical pavilion, over the rect
     /// `(1,1)..(5,3)` at z = 4 — equal 1 m eaves offsets inside the 6×4
     /// footprint.
-    fn pavilion_apexes() -> Vec<RoofApex> {
+    fn pavilion_apexes() -> Vec<CeilingApex> {
         [(1.0, 1.0), (5.0, 1.0), (5.0, 3.0), (1.0, 3.0)]
             .into_iter()
-            .map(|(x, y)| RoofApex {
+            .map(|(x, y)| CeilingApex {
                 point: Point2f64::new(x, y),
                 z_m: 4.0,
             })
@@ -2141,7 +2141,7 @@ mod tests {
     #[test]
     fn apexes_form_rect_recognizes_corner_sets() {
         let apexes = pavilion_apexes();
-        let mut refs: Vec<&RoofApex> = apexes.iter().collect();
+        let mut refs: Vec<&CeilingApex> = apexes.iter().collect();
         let (lo, hi) = apexes_form_rect(&refs).expect("a rect");
         assert_eq!((lo.x, lo.y, hi.x, hi.y), (1.0, 1.0, 5.0, 3.0));
         refs.swap(0, 2); // order-free
@@ -2156,9 +2156,9 @@ mod tests {
         bad[3].point = bad[0].point;
         assert!(apexes_form_rect(&bad.iter().collect::<Vec<_>>()).is_none());
         // A degenerate side (all four on one line).
-        let line: Vec<RoofApex> = [(1.0, 1.0), (2.0, 1.0), (3.0, 1.0), (4.0, 1.0)]
+        let line: Vec<CeilingApex> = [(1.0, 1.0), (2.0, 1.0), (3.0, 1.0), (4.0, 1.0)]
             .into_iter()
-            .map(|(x, y)| RoofApex {
+            .map(|(x, y)| CeilingApex {
                 point: Point2f64::new(x, y),
                 z_m: 4.0,
             })
@@ -2285,14 +2285,14 @@ mod tests {
     fn rect_unequal_offsets_loft_four_planar_quads_no_inserted_vertices() {
         use geo::Area;
         let cid = ItemId::default();
-        let apexes: Vec<RoofApex> = [
+        let apexes: Vec<CeilingApex> = [
             (1.0978, 1.1137),
             (1.4478, 1.1137),
             (1.4478, 1.3637),
             (1.0978, 1.3637),
         ]
         .into_iter()
-        .map(|(x, y)| RoofApex {
+        .map(|(x, y)| CeilingApex {
             point: Point2f64::new(x, y),
             z_m: 4.0,
         })
@@ -2351,9 +2351,9 @@ mod tests {
             Point2f64::new(4.0, 6.0),
             Point2f64::new(0.0, 6.0),
         ];
-        let apexes: Vec<RoofApex> = [(1.0, 1.0), (3.0, 1.0), (3.0, 3.0), (1.0, 3.0)]
+        let apexes: Vec<CeilingApex> = [(1.0, 1.0), (3.0, 1.0), (3.0, 3.0), (1.0, 3.0)]
             .into_iter()
-            .map(|(x, y)| RoofApex {
+            .map(|(x, y)| CeilingApex {
                 point: Point2f64::new(x, y),
                 z_m: 4.0,
             })
@@ -2435,9 +2435,9 @@ mod tests {
         use geo::Area;
         let cid = ItemId::default();
         // Rect (1,0)..(5,2): its bottom side lies ON the footprint edge y=0.
-        let apexes: Vec<RoofApex> = [(1.0, 0.0), (5.0, 0.0), (5.0, 2.0), (1.0, 2.0)]
+        let apexes: Vec<CeilingApex> = [(1.0, 0.0), (5.0, 0.0), (5.0, 2.0), (1.0, 2.0)]
             .into_iter()
-            .map(|(x, y)| RoofApex {
+            .map(|(x, y)| CeilingApex {
                 point: Point2f64::new(x, y),
                 z_m: 4.0,
             })
@@ -2494,9 +2494,9 @@ mod tests {
     #[test]
     fn rect_over_a_wrapping_ring_warns_and_proceeds() {
         let cid = ItemId::default();
-        let apexes: Vec<RoofApex> = [(0.5, 0.5), (9.0, 0.5), (9.0, 3.5), (0.5, 3.5)]
+        let apexes: Vec<CeilingApex> = [(0.5, 0.5), (9.0, 0.5), (9.0, 3.5), (0.5, 3.5)]
             .into_iter()
-            .map(|(x, y)| RoofApex {
+            .map(|(x, y)| CeilingApex {
                 point: Point2f64::new(x, y),
                 z_m: 4.0,
             })
@@ -2555,16 +2555,16 @@ mod tests {
     fn regenerate_boundary_ridge_makes_a_triangular_gable_wall_top() {
         let cid = ItemId::default();
         let apexes = [
-            RoofApex {
+            CeilingApex {
                 point: Point2f64::new(2.0, 0.0),
                 z_m: 4.2,
             },
-            RoofApex {
+            CeilingApex {
                 point: Point2f64::new(2.0, 4.0),
                 z_m: 4.2,
             },
         ];
-        let roofs =
+        let ceilings =
             CeilingRegions::default_for_footprint(vec![square(0.0, 0.0, 4.0, 4.0)], 2.4, cid)
                 .with_apexes(&apexes);
         let ring = square(0.0, 0.0, 4.0, 4.0);
@@ -2572,7 +2572,7 @@ mod tests {
             .map(|i| (ring[i], ring[(i + 1) % 4], WallExposure::Unset))
             .collect();
         let walls =
-            WallRegions::regenerate(segments, &roofs, &FloorRegions::default(), 0.0, 2.4, cid);
+            WallRegions::regenerate(segments, &ceilings, &FloorRegions::default(), 0.0, 2.4, cid);
         assert_eq!(walls.regions.len(), 4);
         // The GABLE wall y = 0 (under the ridge end at (2, 0)): base edge,
         // then the top traced b → a as eaves → apex → eaves.
@@ -2632,7 +2632,7 @@ mod tests {
         // The apex sits ON the left wall (a gable end at x = x0).
         let apex_p = Point2f64::new(x0, 2.0);
         assert_eq!(
-            RoofApex::quantize_point(apex_p),
+            CeilingApex::quantize_point(apex_p),
             apex_p,
             "quantization is the identity on an outline coordinate"
         );
@@ -2653,7 +2653,7 @@ mod tests {
             "the boundary band claims through boolean noise"
         );
         // …and with_apexes still shapes the noisy region (no warn-skip).
-        let shaped = noisy.with_apexes(&[RoofApex {
+        let shaped = noisy.with_apexes(&[CeilingApex {
             point: apex_p,
             z_m: 4.2,
         }]);
@@ -2672,23 +2672,23 @@ mod tests {
         let mut ber = Ber::default();
         ber.storeys.push(Storey::default());
         ber.storeys.push(Storey::default());
-        let apex = RoofApex {
+        let apex = CeilingApex {
             point: Point2f64::new(1.0, 1.0),
             z_m: 4.2,
         };
-        ber.add_roof_apex(1, apex.clone());
+        ber.add_ceiling_apex(1, apex.clone());
         assert!(
-            ber.storeys[0].roof_apexes.is_empty(),
+            ber.storeys[0].ceiling_apexes.is_empty(),
             "other storey untouched"
         );
-        assert_eq!(ber.storeys[1].roof_apexes, vec![apex.clone()]);
+        assert_eq!(ber.storeys[1].ceiling_apexes, vec![apex.clone()]);
         // Out-of-range indices are no-ops.
-        ber.add_roof_apex(7, apex.clone());
+        ber.add_ceiling_apex(7, apex.clone());
         ber.remove_roof_apex(1, 5);
         ber.remove_roof_apex(7, 0);
-        assert_eq!(ber.storeys[1].roof_apexes.len(), 1);
+        assert_eq!(ber.storeys[1].ceiling_apexes.len(), 1);
         ber.remove_roof_apex(1, 0);
-        assert!(ber.storeys[1].roof_apexes.is_empty());
+        assert!(ber.storeys[1].ceiling_apexes.is_empty());
     }
 
     #[test]
@@ -2990,17 +2990,17 @@ mod tests {
 
     #[test]
     fn storey_json_without_roof_apexes_deserializes_to_empty() {
-        // JSON produced by the OLD shape (no `roof_apexes` field): serialize
+        // JSON produced by the OLD shape (no `ceiling_apexes` field): serialize
         // the current shape and strip the field.
         let storey = Storey::default();
         let mut json = serde_json::to_value(&storey).expect("serialize");
         assert!(json
             .as_object_mut()
             .unwrap()
-            .remove("roof_apexes")
+            .remove("ceiling_apexes")
             .is_some());
         let old: Storey = serde_json::from_value(json).expect("old JSON still loads");
-        assert!(old.roof_apexes.is_empty());
+        assert!(old.ceiling_apexes.is_empty());
     }
 
     #[test]
@@ -3097,32 +3097,32 @@ mod tests {
 
     #[test]
     fn lowest_flat_z_over_takes_min_of_overlapping_flats() {
-        let roofs = stepped_l_roofs();
+        let ceilings = stepped_l_roofs();
         // Footprint covering both arms → the LOWER level anchors.
-        assert_approx(roofs.lowest_flat_z_over(&square(0.0, 0.0, 10.0, 10.0)), 2.4);
+        assert_approx(ceilings.lowest_flat_z_over(&square(0.0, 0.0, 10.0, 10.0)), 2.4);
         // Footprint strictly inside the raised bottom arm only.
-        assert_approx(roofs.lowest_flat_z_over(&square(1.0, 1.0, 9.0, 3.0)), 2.7);
+        assert_approx(ceilings.lowest_flat_z_over(&square(1.0, 1.0, 9.0, 3.0)), 2.7);
         // Off to the side → no coverage.
         assert_eq!(
-            roofs.lowest_flat_z_over(&square(20.0, 20.0, 30.0, 30.0)),
+            ceilings.lowest_flat_z_over(&square(20.0, 20.0, 30.0, 30.0)),
             None
         );
         // A boundary graze (sub-sliver overlap) is not coverage.
         assert_eq!(
-            roofs.lowest_flat_z_over(&square(10.0, 0.0, 20.0, 4.0)),
+            ceilings.lowest_flat_z_over(&square(10.0, 0.0, 20.0, 4.0)),
             None
         );
         // Degenerate footprint.
-        assert_eq!(roofs.lowest_flat_z_over(&[]), None);
+        assert_eq!(ceilings.lowest_flat_z_over(&[]), None);
     }
 
     #[test]
     fn inherited_floor_levels_pieces_at_z_minus_anchor() {
         use geo::Area;
-        let roofs = stepped_l_roofs();
+        let ceilings = stepped_l_roofs();
         // Footprint over both arms: anchor 2.4, ONE inherited level — the
         // bottom arm at 2.7 − 2.4 = 0.3 (the slab thickness cancels).
-        let levels = roofs.inherited_floor_levels(&square(0.0, 0.0, 10.0, 10.0));
+        let levels = ceilings.inherited_floor_levels(&square(0.0, 0.0, 10.0, 10.0));
         assert_eq!(levels.len(), 1, "{levels:?}");
         let (ring, level) = &levels[0];
         assert!((level - 0.3).abs() < 1e-9);
@@ -3131,14 +3131,14 @@ mod tests {
             (area - 40.0).abs() < 1e-6,
             "the whole bottom arm, got {area}"
         );
-        // f32-quantized at the boundary (the add_roof_apex precedent).
+        // f32-quantized at the boundary (the add_ceiling_apex precedent).
         for p in ring {
             assert_eq!(p.x, p.x as f32 as f64);
             assert_eq!(p.y, p.y as f32 as f64);
         }
         // A footprint clipped to part of both arms inherits only the covered
         // piece of the raised arm: (2..10, 0..4) = 32 m².
-        let clipped = roofs.inherited_floor_levels(&square(2.0, 0.0, 10.0, 10.0));
+        let clipped = ceilings.inherited_floor_levels(&square(2.0, 0.0, 10.0, 10.0));
         assert_eq!(clipped.len(), 1, "{clipped:?}");
         let clipped_area = ring_to_poly(&clipped[0].0).unsigned_area();
         assert!(
@@ -3149,13 +3149,13 @@ mod tests {
 
     #[test]
     fn inherited_floor_levels_anchor_level_and_no_anchor_yield_empty() {
-        let roofs = stepped_l_roofs();
+        let ceilings = stepped_l_roofs();
         // Footprint on the raised arm only: it IS the anchor — no step.
-        assert!(roofs
+        assert!(ceilings
             .inherited_floor_levels(&square(1.0, 1.0, 9.0, 3.0))
             .is_empty());
         // No coverage at all → no anchor → empty.
-        assert!(roofs
+        assert!(ceilings
             .inherited_floor_levels(&square(20.0, 20.0, 30.0, 30.0))
             .is_empty());
     }
@@ -3163,12 +3163,12 @@ mod tests {
     #[test]
     fn inherited_floor_levels_sloped_regions_contribute_nothing() {
         // Flat anchor on the left half, a sloped region on the right half.
-        let mut roofs = CeilingRegions::default_for_footprint(
+        let mut ceilings = CeilingRegions::default_for_footprint(
             vec![square(0.0, 0.0, 5.0, 10.0)],
             2.4,
             ItemId::default(),
         );
-        roofs.regions.push(CeilingRegion {
+        ceilings.regions.push(CeilingRegion {
             id: ItemId::default(),
             polygon: Polygon3D::new(vec![
                 Point3f64::new(5.0, 0.0, 2.4),
@@ -3181,12 +3181,12 @@ mod tests {
             exposure: CeilingExposure::default(),
         });
         // The sloped half is covered but warn-logged out — no levels.
-        assert!(roofs
+        assert!(ceilings
             .inherited_floor_levels(&square(0.0, 0.0, 10.0, 10.0))
             .is_empty());
         // And it never anchors: only the flat half does.
         assert_eq!(
-            roofs.lowest_flat_z_over(&square(0.0, 0.0, 10.0, 10.0)),
+            ceilings.lowest_flat_z_over(&square(0.0, 0.0, 10.0, 10.0)),
             Some(2.4)
         );
     }
@@ -3231,7 +3231,7 @@ mod tests {
         let cid = ItemId::default();
         let below = Storey {
             floors: FloorRegions::new(square(0.0, 0.0, 10.0, 10.0), cid),
-            roofs: stepped_l_roofs(),
+            ceilings: stepped_l_roofs(),
             ceiling_height_m: Some(2.4),
             ..Storey::default()
         };

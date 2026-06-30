@@ -2,8 +2,8 @@
 //! storey ceiling at commit, entered as an AXIS-ALIGNED LINE + side + delta.
 //!
 //! A ceiling step is a DURABLE input: its canonical `(ring, delta)` is stored on
-//! `Storey::ceiling_steps`, and the resolve composes the roofs from it (the
-//! regions-as-truth roofs are the geometric truth, the step list is the editable
+//! `Storey::ceiling_steps`, and the resolve composes the ceilings from it (the
+//! regions-as-truth ceilings are the geometric truth, the step list is the editable
 //! input behind them). The logic over the step regions — fitting/validating the
 //! input line, the position prompt for its coordinate, building the half-rect
 //! area, and clipping it to the outline — lives here.
@@ -151,7 +151,7 @@ impl CeilingStepRegion {
 /// outline, and the apexes compose on top in the resolve, so a step's canonical
 /// area is just its own clipped ring (delta-0 dividers included — they survive
 /// here, no separate durable field). Empties / sub-mm² slivers dropped; deltas
-/// preserved. Replaces the old reconstruct-from-roofs canonicalization.
+/// preserved. Replaces the old reconstruct-from-ceilings canonicalization.
 pub fn canonicalize_ceiling_steps(
     footprint: &[Vec<Point2f64>],
     steps: &[CeilingStepRegion],
@@ -905,7 +905,7 @@ mod tests {
     #[test]
     fn ceiling_line_coords_counts_the_wrap_edge_of_unclosed_rings() {
         use ber_model::ber::common::ItemId;
-        let roofs = CeilingRegions::default_for_footprint(
+        let ceilings = CeilingRegions::default_for_footprint(
             vec![vec![
                 Point2f64::new(0.0, 0.0),
                 Point2f64::new(4.0, 0.0),
@@ -915,10 +915,10 @@ mod tests {
             2.4,
             ItemId::default(),
         );
-        let mut xs = ceiling_line_coords(&roofs, ParameterAxis::X);
+        let mut xs = ceiling_line_coords(&ceilings, ParameterAxis::X);
         xs.sort_by(f32::total_cmp);
         assert_eq!(xs, vec![0.0, 4.0], "both vertical edges incl. the wrap");
-        let mut ys = ceiling_line_coords(&roofs, ParameterAxis::Y);
+        let mut ys = ceiling_line_coords(&ceilings, ParameterAxis::Y);
         ys.sort_by(f32::total_cmp);
         assert_eq!(ys, vec![0.0, 3.0]);
     }
@@ -1083,7 +1083,7 @@ mod tests {
         let base = CeilingRegions::default_for_footprint(vec![square64(0.0, 10.0)], default_z, cid)
             .with_z_deltas(&[(square64(0.0, 4.0), 0.0), (square64(4.0, 10.0), 0.0)]);
         let storey = Storey {
-            roofs: base,
+            ceilings: base,
             ceiling_height_m: Some(default_z),
             ..Storey::default()
         };

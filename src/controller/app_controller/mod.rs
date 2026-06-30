@@ -249,19 +249,19 @@ pub struct AppController {
     /// The in-flight roof point, advanced stage by stage (tap → per-axis
     /// position → height). Transient — outside undo, cleared on storey
     /// switch / mode exit / cancel. The DURABLE record is
-    /// `Storey::roof_apexes`; see `roof_points.rs`.
+    /// `Storey::ceiling_apexes`; see `roof_points.rs`.
     pending_roof_point: Option<PendingRoofPoint>,
     /// The in-flight roof RIDGE (a stroke in roof-point mode placing TWO
     /// apexes at once), advanced stage by stage (stroke → cross-coordinate
     /// position → height). Transient — outside undo, cleared everywhere
     /// `pending_roof_point` is. The DURABLE record is the same
-    /// `Storey::roof_apexes`; see `roof_ridges.rs`.
+    /// `Storey::ceiling_apexes`; see `roof_ridges.rs`.
     pending_roof_ridge: Option<PendingRoofRidge>,
     /// The in-flight roof RECT (a CLOSED stroke in roof-point mode placing
     /// FOUR corner apexes at once — the flat-topped hip), advanced stage by
     /// stage (stroke → side lengths → lo positions → height). Transient —
     /// outside undo, cleared everywhere `pending_roof_ridge` is. The
-    /// DURABLE record is the same `Storey::roof_apexes`; see
+    /// DURABLE record is the same `Storey::ceiling_apexes`; see
     /// `roof_rects.rs`.
     pending_roof_rect: Option<PendingRoofRect>,
     /// True when the editor is placing windows/doors. A tap near a wall drops
@@ -426,17 +426,17 @@ pub struct AppController {
     /// The assessor's current workflow phase (Mapping → Structure → Objects) —
     /// drives the Sketch page's toolset, checklist, and canvas overlays.
     current_phase: AssessmentPhase,
-    /// The active Structure-phase MODES — the surface kinds (Walls/Roofs/Floors)
+    /// The active Structure-phase MODES — the surface kinds (Walls/Ceilings/Floors)
     /// the global Select tools act on and the canvas shades. NON-EXCLUSIVE: the
     /// assessor can have several active at once (e.g. Walls + Floors), so the
     /// selection and the "Edit attributes" floaties span every active kind.
-    /// Defaults to {Walls}; reset on phase switch. Ordered (Walls < Roofs <
+    /// Defaults to {Walls}; reset on phase switch. Ordered (Walls < Ceilings <
     /// Floors) for deterministic iteration / display.
     structure_kinds: std::collections::BTreeSet<SurfaceKind>,
     /// The active global Select subtool (Click/Carve/All/Remaining), or `None`.
     /// Transient interaction state — Structure-only, cleared on phase switch.
     structure_select: Option<SelectMode>,
-    /// The Structure-phase SELECTED region ids (walls/roofs/floors of the
+    /// The Structure-phase SELECTED region ids (walls/ceilings/floors of the
     /// active kind) — the canvas shades exactly these. Transient; cleared on
     /// phase switch / kind change / Deselect all.
     structure_selected: HashSet<ItemId>,

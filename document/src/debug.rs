@@ -13,7 +13,7 @@ fn short(id: &ItemId) -> String {
 }
 
 /// Multi-line report of one storey's resolved geometry: ceiling height, roof
-/// apexes, floors, roofs (with flat/fan classification), walls (with their
+/// apexes, floors, ceilings (with flat/fan classification), walls (with their
 /// full top-profile vertex lists), and the apex-group summary. `label` tags
 /// the header so multi-storey dumps stay distinguishable.
 pub fn debug_dump_storey(storey: &Storey, label: &str) -> String {
@@ -21,8 +21,8 @@ pub fn debug_dump_storey(storey: &Storey, label: &str) -> String {
     let _ = writeln!(s, "=== STOREY DUMP[{label}] ===");
     let _ = writeln!(s, "ceiling_height_m: {:?}", storey.ceiling_height_m);
 
-    let _ = writeln!(s, "roof_apexes ({}):", storey.roof_apexes.len());
-    for (i, a) in storey.roof_apexes.iter().enumerate() {
+    let _ = writeln!(s, "ceiling_apexes ({}):", storey.ceiling_apexes.len());
+    for (i, a) in storey.ceiling_apexes.iter().enumerate() {
         let _ = writeln!(
             s,
             "  apex[{i}] ({:.4},{:.4}) z={:.4}",
@@ -48,9 +48,9 @@ pub fn debug_dump_storey(storey: &Storey, label: &str) -> String {
         );
     }
 
-    let _ = writeln!(s, "roofs ({}):", storey.roofs.regions.len());
-    for (i, r) in storey.roofs.regions.iter().enumerate() {
-        let class = match (r.flat_z(), r.fan_base_z(&storey.roof_apexes)) {
+    let _ = writeln!(s, "ceilings ({}):", storey.ceilings.regions.len());
+    for (i, r) in storey.ceilings.regions.iter().enumerate() {
+        let class = match (r.flat_z(), r.fan_base_z(&storey.ceiling_apexes)) {
             (Some(z), _) => format!("flat_z={z:.4}"),
             (None, Some(b)) => format!("sloped fan_base_z={b:.4}"),
             (None, None) => "sloped fan_base_z=None".to_string(),
@@ -96,7 +96,7 @@ pub fn debug_dump_storey(storey: &Storey, label: &str) -> String {
         );
     }
 
-    let groups = storey.roofs.apex_groups(&storey.roof_apexes);
+    let groups = storey.ceilings.apex_groups(&storey.ceiling_apexes);
     let _ = writeln!(s, "apex_groups ({}):", groups.len());
     for (i, g) in groups.iter().enumerate() {
         let rings: Vec<String> = g
@@ -126,7 +126,7 @@ pub fn debug_dump_storey(storey: &Storey, label: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ber_model::ber::structural::{CeilingRegions, FloorRegions, RoofApex};
+    use ber_model::ber::structural::{CeilingRegions, FloorRegions, CeilingApex};
     use domain::points::Point2f64;
 
     /// The dump is stable + greppable: header/footer with the label, one
@@ -142,14 +142,14 @@ mod tests {
         let mut storey = Storey {
             floors: FloorRegions::from_vertex_lists(vec![square.clone()], Default::default()),
             ceiling_height_m: Some(2.4),
-            roof_apexes: vec![RoofApex {
+            ceiling_apexes: vec![CeilingApex {
                 point: Point2f64::new(2.0, 2.0),
                 z_m: 4.0,
             }],
             ..Storey::default()
         };
-        storey.roofs = CeilingRegions::default_for_footprint(vec![square], 2.4, Default::default())
-            .with_apexes(&storey.roof_apexes);
+        storey.ceilings = CeilingRegions::default_for_footprint(vec![square], 2.4, Default::default())
+            .with_apexes(&storey.ceiling_apexes);
 
         let dump = debug_dump_storey(&storey, "GF");
         assert!(dump.starts_with("=== STOREY DUMP[GF] ===\n"));
@@ -157,7 +157,7 @@ mod tests {
         assert!(dump.contains("ceiling_height_m: Some(2.4)"));
         assert!(dump.contains("apex[0] (2.0000,2.0000) z=4.0000"));
         assert!(dump.contains("floor[0]"));
-        assert!(dump.contains("roofs (4):"), "{dump}");
+        assert!(dump.contains("ceilings (4):"), "{dump}");
         assert!(dump.contains("sloped fan_base_z=2.4000"));
         assert!(dump.contains("walls (0):"));
         assert!(dump.contains("group[0]"));

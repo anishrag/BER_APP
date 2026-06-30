@@ -379,8 +379,8 @@ impl StoreyDoc {
         y: f64,
         e: CeilingExposure,
     ) -> Option<CentroidKey> {
-        let id = storey.surface_at(SurfaceKind::Roofs, x, y, 0.0)?;
-        let region = storey.roofs.regions.iter().find(|r| r.id == id)?;
+        let id = storey.surface_at(SurfaceKind::Ceilings, x, y, 0.0)?;
+        let region = storey.ceilings.regions.iter().find(|r| r.id == id)?;
         let key = centroid_key(region.centroid());
         self.ceiling_exposure.insert(key, e);
         Some(key)
@@ -472,7 +472,7 @@ impl StoreyDoc {
     /// Plan the party-CEILING carves of resolved `storey` against the storey
     /// ABOVE's footprint `above_fp` — the ceiling mirror of
     /// [`plan_party_floor_carves`](Self::plan_party_floor_carves). Returns
-    /// `(split rings for `roof_splits`, party sample points)` over the storey's
+    /// `(split rings for `ceiling_splits`, party sample points)` over the storey's
     /// ceiling/roof region rings; a partial overlap with the storey above yields
     /// the `ceiling ∩ above_fp` piece (its boundary ring + centroid).
     pub fn plan_party_ceiling_carves(
@@ -482,7 +482,7 @@ impl StoreyDoc {
     ) -> (Vec<Vec<Point2f64>>, Vec<Point2f64>) {
         let mut rings = Vec::new();
         let mut samples = Vec::new();
-        for region in &storey.roofs.regions {
+        for region in &storey.ceilings.regions {
             let ring = ceiling_ring_xy(region);
             for (piece, c) in party_overlap_pieces(&ring, above_fp) {
                 rings.push(piece);
@@ -845,7 +845,7 @@ pub fn auto_derive_horizontal_exposure(
         .then(|| ber.storeys.get(idx + 1))
         .flatten()
         .and_then(|s| s.floors.footprint_ring());
-    for region in &storey.roofs.regions {
+    for region in &storey.ceilings.regions {
         let ring = ceiling_ring_xy(region);
         let derived = above_footprint
             .as_ref()
@@ -884,9 +884,9 @@ pub fn ceiling_exposure_complete(ber: &Ber, idx: usize) -> bool {
     let Some(storey) = ber.storeys.get(idx) else {
         return false;
     };
-    !storey.roofs.regions.is_empty()
+    !storey.ceilings.regions.is_empty()
         && storey
-            .roofs
+            .ceilings
             .regions
             .iter()
             .all(|r| r.exposure != CeilingExposure::Unset)
@@ -1138,7 +1138,7 @@ mod tests {
         let cid = ItemId::default();
         Storey {
             floors: FloorRegions::from_vertex_lists(vec![footprint.clone()], cid),
-            roofs: CeilingRegions::default_for_footprint(vec![footprint], 2.4, cid),
+            ceilings: CeilingRegions::default_for_footprint(vec![footprint], 2.4, cid),
             ..Storey::default()
         }
     }
@@ -1161,9 +1161,9 @@ mod tests {
         auto_derive_horizontal_exposure(&mut d1, &ber, 1, 2);
 
         let f0 = centroid_key(ber.storeys[0].floors.regions[0].centroid());
-        let c0 = centroid_key(ber.storeys[0].roofs.regions[0].centroid());
+        let c0 = centroid_key(ber.storeys[0].ceilings.regions[0].centroid());
         let f1 = centroid_key(ber.storeys[1].floors.regions[0].centroid());
-        let c1 = centroid_key(ber.storeys[1].roofs.regions[0].centroid());
+        let c1 = centroid_key(ber.storeys[1].ceilings.regions[0].centroid());
 
         assert_eq!(
             d0.floor_exposure.get(&f0),
@@ -1270,7 +1270,7 @@ mod tests {
         assert!(!surfaces_exposure_complete(&ber, 0));
 
         // Classify the ceiling too → complete.
-        ber.storeys[0].roofs.regions[0].exposure = CeilingExposure::ExposedRoof;
+        ber.storeys[0].ceilings.regions[0].exposure = CeilingExposure::ExposedRoof;
         assert!(surfaces_exposure_complete(&ber, 0));
 
         // Empty / missing storey → never complete.

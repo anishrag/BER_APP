@@ -50,7 +50,7 @@ impl AppController {
     }
 
     pub fn set_sketch_mode(&mut self, mode: SketchMode) {
-        // 3D needs real storey heights (walls/roofs are extruded to them).
+        // 3D needs real storey heights (walls/ceilings are extruded to them).
         // The UI's floating 2D/3D toggle is disabled until the scope's
         // heights are set (entered via the Heights category); this guard is
         // defense in depth — a 3D request without heights is a silent no-op.
@@ -65,7 +65,7 @@ impl AppController {
     }
 
     /// Set the canvas display mode (which surface kind is highlighted; the
-    /// others fade). Drives the Structure-phase Walls/Roofs/Floors tools and is
+    /// others fade). Drives the Structure-phase Walls/Ceilings/Floors tools and is
     /// reset to a sensible default on phase switch.
     pub fn set_display_mode(&mut self, mode: DisplayMode) {
         self.sketch_engine.display = mode;

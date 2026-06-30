@@ -583,7 +583,7 @@ pub(super) fn render<F: FnMut(UiEvent)>(
         }
     } else {
         // BER view layer with optional collinearity highlight overlay. In the
-        // Objects phase the plan is reduced (no roofs / roof windows) and the
+        // Objects phase the plan is reduced (no ceilings / roof windows) and the
         // room pins show as hotspots in 3D — lifted ~1 m above the storey floor.
         let objects_view = matches!(view.current_phase, AssessmentPhase::Objects);
         let hotspots: Vec<(f64, f64, f64)> = if objects_view {
@@ -1004,7 +1004,7 @@ pub(super) fn render<F: FnMut(UiEvent)>(
             current_storey_idx,
             mode,
             vp,
-            view.roof_apex_views,
+            view.ceiling_apex_views,
             view.pending_roof_point,
         );
     }
@@ -1789,7 +1789,7 @@ pub(super) fn render<F: FnMut(UiEvent)>(
     // Ceiling-exposure tool (post-gate): the canvas input mirror of the floor
     // tool — Click toggles the ceiling region under a tap (across the stack);
     // Carve captures a stroke that DIMENSIONS the carve, which then splits the
-    // roofs. Uses the same footprint-union transform the overlaid view fits to.
+    // ceilings. Uses the same footprint-union transform the overlaid view fits to.
     if ceiling_exposure_active
         && matches!(mode, SketchMode::Storey2D)
         && !touch_nav_active

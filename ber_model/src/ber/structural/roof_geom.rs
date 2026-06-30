@@ -57,7 +57,7 @@ pub(crate) const SLIVER_AREA_M2: f64 = 1e-6;
 /// back through `with_apexes` carries the apexes as ring CORNERS, and the
 /// emitted hub/transition triangles keep the (lifted) boundary z — without
 /// the lift a re-emitted corner could revert to a stale height.
-fn pre_lift(mut ext: Vec<Point3f64>, apexes: &[&RoofApex]) -> Vec<Point3f64> {
+fn pre_lift(mut ext: Vec<Point3f64>, apexes: &[&CeilingApex]) -> Vec<Point3f64> {
     const EPS_M: f64 = 1e-6;
     for v in &mut ext {
         if let Some(a) = apexes
@@ -95,7 +95,7 @@ fn ring_signed_plan_area(ext: &[Point3f64]) -> f64 {
 /// sub-[`SLIVER_AREA_M2`] slivers — exactly the degenerate pair incident to
 /// an apex that is already a corner. Fresh ids, default `opes`, inherited
 /// `construction_id`.
-pub(crate) fn fan_triangles(region: CeilingRegion, apex: &RoofApex) -> Vec<CeilingRegion> {
+pub(crate) fn fan_triangles(region: CeilingRegion, apex: &CeilingApex) -> Vec<CeilingRegion> {
     let cid = region.construction_id;
     let exposure = region.exposure;
     let ext = pre_lift(region.polygon.exterior, &[apex]);
@@ -238,8 +238,8 @@ pub fn ridge_hub_switches(ring: &[Point2f64], a: Point2f64, b: Point2f64) -> usi
 /// neighbours afterwards ([`merge_coplanar_faces`]).
 pub(crate) fn ridge_triangles(
     region: CeilingRegion,
-    a: &RoofApex,
-    b: &RoofApex,
+    a: &CeilingApex,
+    b: &CeilingApex,
 ) -> Vec<CeilingRegion> {
     let cid = region.construction_id;
     let exposure = region.exposure;
@@ -313,7 +313,7 @@ const RECT_MIN_SIDE_M: f64 = 0.01;
 /// committed-rect view applies the SAME predicate the resolve does.
 ///
 /// [`with_apexes`]: CeilingRegions::with_apexes
-pub fn apexes_form_rect(apexes: &[&RoofApex]) -> Option<(Point2f64, Point2f64)> {
+pub fn apexes_form_rect(apexes: &[&CeilingApex]) -> Option<(Point2f64, Point2f64)> {
     const Z_EPS: f64 = 1e-6;
     if apexes.len() != 4 {
         return None;
@@ -324,7 +324,7 @@ pub fn apexes_form_rect(apexes: &[&RoofApex]) -> Option<(Point2f64, Point2f64)> 
     }
     let pts: Vec<Point2f64> = apexes
         .iter()
-        .map(|a| RoofApex::quantize_point(a.point))
+        .map(|a| CeilingApex::quantize_point(a.point))
         .collect();
     let (mut x0, mut y0) = (f64::INFINITY, f64::INFINITY);
     let (mut x1, mut y1) = (f64::NEG_INFINITY, f64::NEG_INFINITY);
@@ -432,13 +432,13 @@ pub fn rect_hip_switches(ring: &[Point2f64], lo: Point2f64, hi: Point2f64) -> us
 /// maximal).
 pub(crate) fn rect_ridge_faces(
     region: CeilingRegion,
-    corners: [&RoofApex; 4],
+    corners: [&CeilingApex; 4],
 ) -> Vec<CeilingRegion> {
     let cid = region.construction_id;
     let (mut x0, mut y0) = (f64::INFINITY, f64::INFINITY);
     let (mut x1, mut y1) = (f64::NEG_INFINITY, f64::NEG_INFINITY);
     for a in &corners {
-        let q = RoofApex::quantize_point(a.point);
+        let q = CeilingApex::quantize_point(a.point);
         x0 = x0.min(q.x);
         y0 = y0.min(q.y);
         x1 = x1.max(q.x);
@@ -452,7 +452,7 @@ pub(crate) fn rect_ridge_faces(
         corners
             .iter()
             .find(|a| {
-                let q = RoofApex::quantize_point(a.point);
+                let q = CeilingApex::quantize_point(a.point);
                 q.x == cx && q.y == cy
             })
             .map(|a| Point3f64::new(a.point.x, a.point.y, a.z_m))

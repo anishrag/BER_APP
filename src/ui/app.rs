@@ -558,7 +558,7 @@ impl eframe::App for BerApp {
                                 ceiling_step_pending,
                                 roof_point_mode,
                                 roof_point_available,
-                                roof_apex_views,
+                                ceiling_apex_views,
                                 pending_roof_point,
                                 roof_point_snap_tag,
                                 roof_point_position_pending,
@@ -647,7 +647,7 @@ impl eframe::App for BerApp {
                                     controller_ref.ceiling_step_pending(),
                                     controller_ref.roof_point_mode(),
                                     controller_ref.roof_point_available(),
-                                    controller_ref.roof_apex_views(),
+                                    controller_ref.ceiling_apex_views(),
                                     controller_ref.pending_roof_point_position(),
                                     controller_ref.roof_point_snap_tag(),
                                     controller_ref.roof_point_position_pending(),
@@ -1154,7 +1154,7 @@ impl eframe::App for BerApp {
                                 ceiling_step_error: ceiling_step_error.as_deref(),
                                 roof_point_mode,
                                 roof_point_available,
-                                roof_apex_views: &roof_apex_views,
+                                ceiling_apex_views: &ceiling_apex_views,
                                 pending_roof_point,
                                 roof_point_snap_tag: roof_point_snap_tag.as_ref(),
                                 roof_point_position_pending,
@@ -1616,7 +1616,7 @@ impl eframe::App for BerApp {
                                         self.sketch_state.roof_error = None;
                                     }
                                     SketchEvent::DeleteRoofApex(index) => {
-                                        controller.borrow_mut().delete_roof_apex(index);
+                                        controller.borrow_mut().delete_ceiling_apex(index);
                                     }
                                     SketchEvent::RoofRidgeStrokeWorld { points } => {
                                         controller

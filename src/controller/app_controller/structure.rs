@@ -1,5 +1,5 @@
 //! Structure-phase surface SELECTION: the app-shell interaction layer over the
-//! current storey's resolved regions (walls / roofs / floors). The selected set
+//! current storey's resolved regions (walls / ceilings / floors). The selected set
 //! holds region [`ItemId`]s of the active [`SurfaceKind`]; it's seeded by the
 //! Select subtools (`Select all` fills it with every surface, `Select
 //! remaining` with only the ones not yet done, `Select` starts empty) and
@@ -93,7 +93,7 @@ impl AppController {
     }
 
     /// Whether the WHOLE house's Structure attribution is complete: every
-    /// storey's walls, roofs and floors are fully attributed. Gates the
+    /// storey's walls, ceilings and floors are fully attributed. Gates the
     /// Structure-phase "Review" entry. `false` with no record / no storeys.
     pub fn structure_complete(&self) -> bool {
         let Some(record) = self.current_record.as_ref() else {
@@ -103,7 +103,7 @@ impl AppController {
         !b.storeys.is_empty()
             && (0..b.storeys.len()).all(|i| {
                 b.structure_surfaces_complete(i, SurfaceKind::Walls)
-                    && b.structure_surfaces_complete(i, SurfaceKind::Roofs)
+                    && b.structure_surfaces_complete(i, SurfaceKind::Ceilings)
                     && b.structure_surfaces_complete(i, SurfaceKind::Floors)
             })
     }
@@ -169,7 +169,7 @@ impl AppController {
                 }
             }
         }
-        for r in &storey.roofs.regions {
+        for r in &storey.ceilings.regions {
             if let Some(c) = record.data.ceiling_construction(r.construction_id) {
                 if c.is_complete() {
                     add(
@@ -292,7 +292,7 @@ impl AppController {
     /// Assign a CEILING/ROOF construction (type + make-up) to the given resolved
     /// ROOF region ids, keyed by each region's plan centroid. Mirror of
     /// [`set_floor_construction_for`](Self::set_floor_construction_for) over the
-    /// storey's `roofs` regions (`document::stamp_ceiling_constructions`).
+    /// storey's `ceilings` regions (`document::stamp_ceiling_constructions`).
     pub fn set_ceiling_construction_for(
         &mut self,
         ids: &[ItemId],
@@ -311,7 +311,7 @@ impl AppController {
                 return;
             };
             ids.iter()
-                .filter_map(|id| storey.roofs.regions.iter().find(|r| r.id == *id))
+                .filter_map(|id| storey.ceilings.regions.iter().find(|r| r.id == *id))
                 .map(|r| document::centroid_key(r.centroid()))
                 .collect()
         };
@@ -355,7 +355,7 @@ impl AppController {
             (SurfaceKind::Floors, SurfaceExposure::Floor(e)) => {
                 self.set_floor_exposure_for_ids(&ids, e)
             }
-            (SurfaceKind::Roofs, SurfaceExposure::Ceiling(e)) => {
+            (SurfaceKind::Ceilings, SurfaceExposure::Ceiling(e)) => {
                 self.set_ceiling_exposure_for_ids(&ids, e)
             }
             (SurfaceKind::Walls, SurfaceExposure::Wall(e)) => {
@@ -413,7 +413,7 @@ impl AppController {
     /// keyed by each region's plan centroid (`document.ceiling_exposure`,
     /// `stamp_ceiling_exposure`). Mirror of
     /// [`set_floor_exposure_for_ids`](Self::set_floor_exposure_for_ids) over the
-    /// storey's `roofs`.
+    /// storey's `ceilings`.
     fn set_ceiling_exposure_for_ids(&mut self, ids: &[ItemId], exposure: CeilingExposure) {
         let Some(idx) = self.current_storey_idx else {
             return;
@@ -426,7 +426,7 @@ impl AppController {
                 return;
             };
             ids.iter()
-                .filter_map(|id| storey.roofs.regions.iter().find(|r| r.id == *id))
+                .filter_map(|id| storey.ceilings.regions.iter().find(|r| r.id == *id))
                 .map(|r| document::centroid_key(r.centroid()))
                 .collect()
         };
@@ -518,7 +518,7 @@ impl AppController {
     /// Open the "Edit attributes" session: partition the current selection by
     /// shared construction `(type, make-up, phase)` into groups (each editable
     /// separately). Works for the active surface kind — walls, floors, or
-    /// ceilings/roofs. No-op for an empty selection or no storey.
+    /// ceilings/ceilings. No-op for an empty selection or no storey.
     pub fn begin_structure_edit(&mut self) {
         // "Edit attributes" is when we commit to the selection — NOW perform any
         // deferred carve splits (turning staged rings into real sub-regions and
@@ -619,8 +619,8 @@ impl AppController {
                         photos,
                     ))
                 }
-                SurfaceKind::Roofs => {
-                    let r = storey.roofs.regions.iter().find(|r| r.id == id)?;
+                SurfaceKind::Ceilings => {
+                    let r = storey.ceilings.regions.iter().find(|r| r.id == id)?;
                     let (ty, makeup, phase, name, photos) =
                         match record.data.ceiling_construction(r.construction_id) {
                             Some(c) => (
@@ -1031,8 +1031,8 @@ impl AppController {
                         .iter()
                         .find(|r| r.id == id)
                         .map(|r| r.construction_id),
-                    SurfaceKind::Roofs => storey
-                        .roofs
+                    SurfaceKind::Ceilings => storey
+                        .ceilings
                         .regions
                         .iter()
                         .find(|r| r.id == id)
@@ -1117,8 +1117,8 @@ impl AppController {
                         .iter()
                         .find(|r| r.id == id)
                         .map(|r| r.construction_id),
-                    SurfaceKind::Roofs => storey
-                        .roofs
+                    SurfaceKind::Ceilings => storey
+                        .ceilings
                         .regions
                         .iter()
                         .find(|r| r.id == id)
@@ -1218,7 +1218,7 @@ impl AppController {
             let Some(storey) = self.current_storey() else {
                 return;
             };
-            [SurfaceKind::Walls, SurfaceKind::Roofs, SurfaceKind::Floors]
+            [SurfaceKind::Walls, SurfaceKind::Ceilings, SurfaceKind::Floors]
                 .into_iter()
                 .filter(|k| self.structure_kinds.contains(k))
                 .find_map(|k| storey.surface_at(k, world_x, world_y, tol))
@@ -1440,7 +1440,7 @@ impl AppController {
     /// [`stage_structure_carve`], run when "Edit attributes" opens. For each
     /// staged ring, push it onto each active kind's durable split field (walls:
     /// the fixed interior cut segment, only where the cut crosses a wall;
-    /// floors/roofs: the whole ring), then re-resolve ONCE and auto-select the
+    /// floors/ceilings: the whole ring), then re-resolve ONCE and auto-select the
     /// resulting pieces across every active kind. Snapshots for undo so opening
     /// the editor stays reversible. No-op when nothing is pending.
     pub(super) fn commit_pending_structure_carves(&mut self) {
@@ -1456,7 +1456,7 @@ impl AppController {
         let rings = std::mem::take(&mut self.pending_structure_carves);
 
         // Walls split only along a carve ring's INTERIOR edges (where it crosses a
-        // wall); floors/roofs take the whole ring. Compute the wall cuts per ring
+        // wall); floors/ceilings take the whole ring. Compute the wall cuts per ring
         // up front (needs `&self.document`) before the `&mut` record borrow.
         let want_walls = kinds.contains(&SurfaceKind::Walls);
         let per_ring: Vec<(Vec<Point2f64>, Vec<[Point2f64; 2]>)> = rings
@@ -1479,7 +1479,7 @@ impl AppController {
         // SELECTION gesture, so we select the enclosed surfaces regardless.
         let will_split = kinds
             .iter()
-            .any(|k| matches!(k, SurfaceKind::Floors | SurfaceKind::Roofs))
+            .any(|k| matches!(k, SurfaceKind::Floors | SurfaceKind::Ceilings))
             || per_ring.iter().any(|(_, c)| !c.is_empty());
 
         if will_split {
@@ -1509,8 +1509,8 @@ impl AppController {
                                     Vec::new(),
                                 );
                             }
-                            SurfaceKind::Roofs => {
-                                storey.push_structure_split(SurfaceKind::Roofs, ring64, Vec::new());
+                            SurfaceKind::Ceilings => {
+                                storey.push_structure_split(SurfaceKind::Ceilings, ring64, Vec::new());
                                 pushed_roof = true;
                             }
                         }
@@ -1520,10 +1520,10 @@ impl AppController {
                 return;
             }
             // Regions-as-truth: a ROOF carve is a one-shot coplanar face split on
-            // the stored roofs (replayed via `recompose_roofs`); floors/walls
+            // the stored ceilings (replayed via `recompose_ceilings`); floors/walls
             // replay their durable splits in `resolve_storey`.
             if pushed_roof {
-                self.recompose_roofs(idx);
+                self.recompose_ceilings(idx);
             }
             let _ = self.mark_dirty();
             self.materialize(); // re-resolve applies the splits + re-homes openings
@@ -1601,7 +1601,7 @@ impl AppController {
     /// The highest-priority active mode (wall → roof → floor) — the kind a carve
     /// SPLIT acts on when several modes are active. `None` when no mode is active.
     pub(super) fn primary_structure_kind(&self) -> Option<SurfaceKind> {
-        [SurfaceKind::Walls, SurfaceKind::Roofs, SurfaceKind::Floors]
+        [SurfaceKind::Walls, SurfaceKind::Ceilings, SurfaceKind::Floors]
             .into_iter()
             .find(|k| self.structure_kinds.contains(k))
     }

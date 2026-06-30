@@ -13,7 +13,7 @@
 //!   coloured by its exposure class (the 2D scheme). EVERY perimeter wall
 //!   resolves to a region now (unmarked walls come through as `Unset`, drawn
 //!   grey), so the walls themselves carry the building's volume and Unset
-//!   walls genuinely follow raised/ridged roofs — the old faint volume-hint
+//!   walls genuinely follow raised/ridged ceilings — the old faint volume-hint
 //!   band is gone. RISER faces between stepped sections are derived too
 //!   (defaulting `Unset` like other walls; `Ground` is the riser-only
 //!   assessor choice, earth-toned) and draw through the same wall-region
@@ -151,12 +151,12 @@ pub(crate) fn render_at_z_offset(
             selected.contains(&door.id),
         );
     }
-    // Roofs at their REAL per-vertex z (ceiling steps). Fallback when the
-    // resolved roofs are missing (defensive: height set but the resolve
+    // Ceilings at their REAL per-vertex z (ceiling steps). Fallback when the
+    // resolved ceilings are missing (defensive: height set but the resolve
     // projection not yet run): flat rings over each floor region at the
     // default height, matching the old uniform extrusion.
-    if storey.roofs.regions.is_empty() {
-        let roof_color = color_for(DisplayMode::Roofs, display_mode, style::ROOF_LINE);
+    if storey.ceilings.regions.is_empty() {
+        let roof_color = color_for(DisplayMode::Ceilings, display_mode, style::ROOF_LINE);
         for region in &storey.floors.regions {
             let pts: Vec<egui::Pos2> = region
                 .polygon
@@ -175,7 +175,7 @@ pub(crate) fn render_at_z_offset(
             }
         }
     } else {
-        for roof in &storey.roofs.regions {
+        for roof in &storey.ceilings.regions {
             draw_roof_region(painter, t, roof, z_offset, display_mode, view, selected);
         }
     }
@@ -213,7 +213,7 @@ pub(crate) fn projected_bb_for_storey(
             }
         }
     }
-    for region in &storey.roofs.regions {
+    for region in &storey.ceilings.regions {
         for v in &region.polygon.exterior {
             let (px, py) = view.project_3d(v.x, v.y, z_offset + v.z);
             add(px, py);
@@ -335,7 +335,7 @@ fn draw_roof_region(
             t.apply(px, py)
         })
         .collect();
-    let roof_color = color_for(DisplayMode::Roofs, display_mode, style::ROOF_LINE);
+    let roof_color = color_for(DisplayMode::Ceilings, display_mode, style::ROOF_LINE);
     // A SELECTED roof region's face is SHADED so sloped fans/ridges read as
     // surfaces, not just outlines.
     if selected.contains(&region.id) {
@@ -356,7 +356,7 @@ mod tests {
 
     /// The fitted view must include WALL vertices: a wall whose top rises
     /// above the default ceiling height (under a ridge) extends the projected
-    /// bounding box beyond the floors+roofs extent.
+    /// bounding box beyond the floors+ceilings extent.
     #[test]
     fn projected_bb_includes_wall_tops_above_the_default_height() {
         let square = vec![

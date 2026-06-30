@@ -156,7 +156,7 @@ impl AppController {
                 .all(|item| item.status == ChecklistStatus::AllStoreys)
     }
 
-    /// The Structure phase checklist: one row per surface kind (Walls / Roofs /
+    /// The Structure phase checklist: one row per surface kind (Walls / Ceilings /
     /// Floors), green only when EVERY surface of that kind is fully attributed
     /// (construction type + build-up set, plus a photo where the build-up is a
     /// specified custom stack) on every storey — see
@@ -171,9 +171,9 @@ impl AppController {
                     .ber_storey_status(|b, i| b.structure_surfaces_complete(i, SurfaceKind::Walls)),
             },
             ChecklistItem {
-                label: "Roofs",
+                label: "Ceilings",
                 status: self
-                    .ber_storey_status(|b, i| b.structure_surfaces_complete(i, SurfaceKind::Roofs)),
+                    .ber_storey_status(|b, i| b.structure_surfaces_complete(i, SurfaceKind::Ceilings)),
             },
             ChecklistItem {
                 label: "Floors",

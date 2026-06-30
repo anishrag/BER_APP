@@ -18,11 +18,11 @@
 //! The FINALIZE placement check ([`document::validate_roof_ridge_extent`])
 //! runs at the moment the geometry becomes fully determined — the last open
 //! stage — so its rejection always attaches to a value the user just typed.
-//! Then one typed height places BOTH apexes at once (`Ber::add_roof_apex`
+//! Then one typed height places BOTH apexes at once (`Ber::add_ceiling_apex`
 //! ×2) — a level ridge. A sloping ridge is entered via the two-point tap
 //! flow instead.
 //!
-//! Like the roof point, the ridge's durable record is `Storey::roof_apexes`
+//! Like the roof point, the ridge's durable record is `Storey::ceiling_apexes`
 //! (a ridge is just two apexes grouped with the regions they shape —
 //! `CeilingRegions::apex_groups` is the grouping authority); the shell owns
 //! the in-flight stroke → length → cross → start → height state machine and
@@ -30,7 +30,7 @@
 //! phases/steps/ceiling-steps/roof-points parity.
 use super::ceiling_steps::CeilingLineSnap;
 use super::*;
-use ber_model::ber::structural::RoofApex;
+use ber_model::ber::structural::CeilingApex;
 use document::LinePositionPrompt;
 
 /// Which of the pending ridge's two POSITION questions still need asking, in
@@ -298,7 +298,7 @@ impl AppController {
     /// value stands). No questions left → the geometry is fully determined:
     /// run the FINALIZE placement check
     /// ([`document::validate_roof_ridge_extent`] against the RESOLVED
-    /// roofs) and move to the Height stage.
+    /// ceilings) and move to the Height stage.
     ///
     /// On a finalize rejection the pending state is left UNTOUCHED —
     /// whichever stage the caller was on stays open — so the `Err` lands on
@@ -324,7 +324,7 @@ impl AppController {
         // region, so on an L-shape the default isn't the globally-nearest wall
         // in the other arm. Same ridge → same ring for Cross and Start (the
         // Start question measures on `axis.other()`, but the region is the
-        // ridge's region either way). `materialize` brings the roofs current
+        // ridge's region either way). `materialize` brings the ceilings current
         // so the lookup sees this ridge's area.
         let idx = self.current_storey_idx.unwrap_or(0);
         self.materialize();
@@ -374,13 +374,13 @@ impl AppController {
             // None → logged auto-resolve: the drawn value is accepted.
         }
         // No location questions remain — the geometry is fully determined.
-        // FINALIZE: bring the derived roofs current (explicitly, not riding
+        // FINALIZE: bring the derived ceilings current (explicitly, not riding
         // the render loop) and run the binding placement check — the
         // MIDPOINT strictly inside one flat un-apexed region, the extent
         // within that region's run through it (boundary touch allowed — a
         // wall-to-wall gable) — before opening the Height stage. (`idx` and a
         // materialize are already in hand from the prefer-region lookup above;
-        // the loop only reads, so the roofs are still current.)
+        // the loop only reads, so the ceilings are still current.)
         let storey = self
             .current_record
             .as_ref()
@@ -400,7 +400,7 @@ impl AppController {
     }
 
     /// Set the pending ridge's LENGTH (question 1): materialize (the
-    /// validation runs against the RESOLVED roofs — explicitly, not riding
+    /// validation runs against the RESOLVED ceilings — explicitly, not riding
     /// the render loop), validate the typed value optimistically
     /// ([`document::validate_roof_ridge_length`] — > 1 cm and fits SOME
     /// flat, un-apexed ceiling area's bbox; no location is known yet, so
@@ -429,7 +429,7 @@ impl AppController {
         let (axis, coord_m, lo, len_m) = (*axis, *coord_m, *lo, *len_m);
         let (cross_snap, start_snap, end_snap) = (*cross_snap, *start_snap, *end_snap);
         let idx = self.current_storey_idx.unwrap_or(0);
-        // Bring the derived roofs current — the length is validated against
+        // Bring the derived ceilings current — the length is validated against
         // the resolved ceiling regions, not the editing buffer.
         self.materialize();
         let storey = self
@@ -492,7 +492,7 @@ impl AppController {
     }
 
     /// The 'Centre' button on the pending ridge's OPEN location stage:
-    /// materialize (the suggestion reads the RESOLVED roofs), compute the
+    /// materialize (the suggestion reads the RESOLVED ceilings), compute the
     /// centred value for that stage — the cross coordinate
     /// ([`document::centred_ridge_cross`]) or the extent start
     /// ([`document::centred_ridge_start`]), both the midpoint of the
@@ -505,7 +505,7 @@ impl AppController {
     /// (user-facing) the pending stage is untouched, so the prompt stays
     /// open. No-op when no location stage is up.
     pub fn centre_roof_ridge_position(&mut self) -> Result<(), String> {
-        // Bring the derived roofs current — the centred value is computed
+        // Bring the derived ceilings current — the centred value is computed
         // against the resolved ceiling regions, not the editing buffer.
         let idx = self.current_storey_idx.unwrap_or(0);
         match self.pending_roof_ridge.as_ref() {
@@ -880,15 +880,15 @@ impl AppController {
     }
 
     /// Assign the ridge height to the pending line: materialize (the
-    /// validation runs against the RESOLVED roofs), validate
+    /// validation runs against the RESOLVED ceilings), validate
     /// ([`document::validate_roof_ridge`] — the midpoint strictly inside one
     /// un-apexed flat region, both endpoints claimed by exactly it (inside
     /// or on its OUTER boundary — a gable end), a height that actually
     /// slopes it, no boundary foldover; all re-checked cheaply even though
     /// finalize passed — `materialize` may have shifted derived rings), then stamp
-    /// BOTH apexes as DURABLE input (`Ber::add_roof_apex` ×2 — quantization
+    /// BOTH apexes as DURABLE input (`Ber::add_ceiling_apex` ×2 — quantization
     /// included), re-derive, and CANONICALIZE the session ceiling-step list
-    /// from the derived roofs (the roof-point parity). The endpoints are
+    /// from the derived ceilings (the roof-point parity). The endpoints are
     /// the RESOLVED `(coord, lo)`/`(coord, lo + len)` — typed answers land
     /// exactly; skipped ones keep the drawn values. The pending ridge stays
     /// open on rejection so the user can retype. Outside undo.
@@ -911,7 +911,7 @@ impl AppController {
         let drawn_cross = cross_snap.as_ref().map(|cs| cs.drawn_coord_m);
         let (a, b) = Self::ridge_endpoints(axis, coord_m, lo, len_m);
         let idx = self.current_storey_idx.unwrap_or(0);
-        // Bring the derived roofs current — the ridge is validated against
+        // Bring the derived ceilings current — the ridge is validated against
         // the resolved ceiling regions, not the editing buffer.
         self.materialize();
         let storey = self
@@ -938,22 +938,22 @@ impl AppController {
             };
         let record = self.current_record.as_mut().expect("checked above");
         for p in [a, b] {
-            record.data.add_roof_apex(
+            record.data.add_ceiling_apex(
                 idx,
-                RoofApex {
+                CeilingApex {
                     point: p,
                     z_m: z_m as f64,
                 },
             );
             if let Some(region) = chosen_hint {
-                record.data.push_roof_apex_hint(idx, p, region);
+                record.data.push_ceiling_apex_hint(idx, p, region);
             }
         }
         self.pending_roof_ridge = None;
         self.mark_dirty()?;
-        // Regions-as-truth: recompose the roofs from the inputs once, then
+        // Regions-as-truth: recompose the ceilings from the inputs once, then
         // re-derive. The session ceiling-step list is a display cache.
-        self.recompose_roofs(idx);
+        self.recompose_ceilings(idx);
         self.materialize();
         self.reconstruct_ceiling_step_regions_for(idx);
         Ok(())
@@ -984,11 +984,11 @@ impl AppController {
             .as_mut()
             .ok_or("no storey for the roof ridge")?;
         for p in [a, b] {
-            record.data.add_roof_apex(idx, RoofApex { point: p, z_m });
-            record.data.push_roof_apex_hint(idx, p, inside);
+            record.data.add_ceiling_apex(idx, CeilingApex { point: p, z_m });
+            record.data.push_ceiling_apex_hint(idx, p, inside);
         }
         self.mark_dirty()?;
-        self.recompose_roofs(idx);
+        self.recompose_ceilings(idx);
         self.materialize();
         self.reconstruct_ceiling_step_regions_for(idx);
         Ok(())
@@ -1082,7 +1082,7 @@ impl AppController {
     /// `CeilingRegions::apex_groups`, over the materialized record). Label
     /// "⌃ 4.20 m" for a level ridge, "4.20→4.50 m" when the two end heights
     /// differ (> 1e-6 — a sloping ridge from the two-point flow). The apex
-    /// dots/labels themselves still come from `roof_apex_views`.
+    /// dots/labels themselves still come from `ceiling_apex_views`.
     pub fn roof_ridge_views(&self) -> Vec<((f64, f64), (f64, f64), String)> {
         let idx = self.current_storey_idx.unwrap_or(0);
         let Some(storey) = self
@@ -1093,13 +1093,13 @@ impl AppController {
             return Vec::new();
         };
         storey
-            .roofs
-            .apex_groups(&storey.roof_apexes)
+            .ceilings
+            .apex_groups(&storey.ceiling_apexes)
             .into_iter()
             .filter(|g| g.apex_idxs.len() == 2)
             .map(|g| {
-                let a = &storey.roof_apexes[g.apex_idxs[0]];
-                let b = &storey.roof_apexes[g.apex_idxs[1]];
+                let a = &storey.ceiling_apexes[g.apex_idxs[0]];
+                let b = &storey.ceiling_apexes[g.apex_idxs[1]];
                 let label = if (a.z_m - b.z_m).abs() > 1e-6 {
                     format!("{:.2}→{:.2} m", a.z_m, b.z_m)
                 } else {

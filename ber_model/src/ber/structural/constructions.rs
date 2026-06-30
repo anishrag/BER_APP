@@ -209,7 +209,7 @@ impl CeilingConstructionType {
 
 /// A construction TYPE tagged by its surface kind — the unified value the
 /// Structure-phase "Edit attributes" editor carries so one group/event type
-/// covers walls, floors and ceilings/roofs. Each variant wraps that kind's own
+/// covers walls, floors and ceilings/ceilings. Each variant wraps that kind's own
 /// type enum. Transient editor/UI state, not persisted (the durable record is a
 /// surface's `construction_id`).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -222,19 +222,19 @@ pub enum ConstructionType {
 impl ConstructionType {
     /// The surface kind this construction type belongs to — lets the
     /// kind-agnostic "Edit attributes" group carry its own kind (so a single
-    /// session can span walls, floors and roofs at once).
+    /// session can span walls, floors and ceilings at once).
     pub fn kind(&self) -> SurfaceKind {
         match self {
             ConstructionType::Wall(_) => SurfaceKind::Walls,
             ConstructionType::Floor(_) => SurfaceKind::Floors,
-            ConstructionType::Ceiling(_) => SurfaceKind::Roofs,
+            ConstructionType::Ceiling(_) => SurfaceKind::Ceilings,
         }
     }
 }
 
 /// An exposure VALUE tagged by its surface kind — the unified value the
 /// Structure-phase "Edit attributes" editor carries for the exposure dropdown,
-/// so one group/event type covers walls, floors and ceilings/roofs (mirrors
+/// so one group/event type covers walls, floors and ceilings/ceilings (mirrors
 /// [`ConstructionType`] for the type dropdown). Each variant wraps that kind's
 /// own exposure enum. Transient editor/UI state, not persisted (the durable
 /// record is the region's `exposure` field / the `StoreyDoc` exposure tables).
@@ -264,7 +264,7 @@ impl SurfaceExposure {
                 SurfaceExposure::Floor(FloorExposure::NonHeatLoss),
                 SurfaceExposure::Floor(FloorExposure::Unset),
             ],
-            SurfaceKind::Roofs => &[
+            SurfaceKind::Ceilings => &[
                 SurfaceExposure::Ceiling(CeilingExposure::ExposedRoof),
                 SurfaceExposure::Ceiling(CeilingExposure::Party),
                 SurfaceExposure::Ceiling(CeilingExposure::Unheated),
@@ -278,7 +278,7 @@ impl SurfaceExposure {
         match self {
             SurfaceExposure::Wall(_) => SurfaceKind::Walls,
             SurfaceExposure::Floor(_) => SurfaceKind::Floors,
-            SurfaceExposure::Ceiling(_) => SurfaceKind::Roofs,
+            SurfaceExposure::Ceiling(_) => SurfaceKind::Ceilings,
         }
     }
 
@@ -605,7 +605,7 @@ impl Ber {
                 .iter_mut()
                 .find(|c| c.base.id == id)
                 .map(|c| &mut c.base),
-            SurfaceKind::Roofs => self
+            SurfaceKind::Ceilings => self
                 .ceiling_constructions
                 .iter_mut()
                 .find(|c| c.base.id == id)
@@ -630,7 +630,7 @@ impl Ber {
                 .iter_mut()
                 .find(|c| c.base.id == id)
                 .map(|c| &mut c.base),
-            SurfaceKind::Roofs => self
+            SurfaceKind::Ceilings => self
                 .ceiling_constructions
                 .iter_mut()
                 .find(|c| c.base.id == id)
@@ -673,8 +673,8 @@ impl Ber {
                 })
                 .map(|r| r.id)
                 .collect(),
-            SurfaceKind::Roofs => storey
-                .roofs
+            SurfaceKind::Ceilings => storey
+                .ceilings
                 .regions
                 .iter()
                 .filter(|r| {
@@ -699,7 +699,7 @@ impl Ber {
         let count = match kind {
             SurfaceKind::Walls => counts.walls,
             SurfaceKind::Floors => counts.floors,
-            SurfaceKind::Roofs => counts.roofs,
+            SurfaceKind::Ceilings => counts.ceilings,
         };
         count > 0 && self.incomplete_surface_ids(idx, kind).is_empty()
     }

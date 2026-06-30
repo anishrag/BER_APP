@@ -208,7 +208,7 @@ pub fn pick_wall_along(storey: &Storey, wx: f64, wy: f64, tol: f64) -> Option<(I
 /// echoed back. `None` if the point is inside no region.
 pub fn pick_roof_region(storey: &Storey, wx: f64, wy: f64) -> Option<(ItemId, (f32, f32))> {
     storey
-        .roofs
+        .ceilings
         .region_strictly_containing(domain::points::Point2f64::new(wx, wy))
         .map(|r| (r.id, (wx as f32, wy as f32)))
 }
@@ -314,7 +314,7 @@ pub fn add_roof_window(
         return Err(OpeningError::ZeroSize);
     }
     let Some(r) = storey
-        .roofs
+        .ceilings
         .regions
         .iter_mut()
         .find(|r| r.id == roof_region_id)
@@ -431,7 +431,7 @@ pub fn add_multi_storey_window(
 /// membership is rebuilt at the resolve tail, so it isn't touched here.
 pub fn move_roof_window(storey: &mut Storey, window_id: ItemId, new_plan: (f32, f32)) {
     let new_region = storey
-        .roofs
+        .ceilings
         .region_strictly_containing(domain::points::Point2f64::new(
             new_plan.0 as f64,
             new_plan.1 as f64,
@@ -680,7 +680,7 @@ pub fn delete_opening(storey: &mut Storey, opening: OpeningRef) {
         r.opes.windows.retain(|id| win_ids.contains(id));
         r.opes.doors.retain(|id| door_ids.contains(id));
     }
-    for r in &mut storey.roofs.regions {
+    for r in &mut storey.ceilings.regions {
         r.opes.windows.retain(|id| win_ids.contains(id));
         r.opes.doors.retain(|id| door_ids.contains(id));
     }
@@ -1063,7 +1063,7 @@ fn place_window_with_vertical_fallback(
 /// Recompute the `vertices` cache of every PLACED opening (`placement: Some`)
 /// from its durable placement + the resolved host region geometry. Legacy
 /// openings (`placement: None`) keep their stored vertices. Call at the END of
-/// `resolve_storey`, after walls/roofs are regenerated, so the host geometry is
+/// `resolve_storey`, after walls/ceilings are regenerated, so the host geometry is
 /// final. An opening whose host id no longer resolves keeps its last vertices
 /// (then [`prune_orphaned_openings`] drops it).
 pub fn derive_opening_vertices(storey: &mut Storey) {
@@ -1110,7 +1110,7 @@ pub fn prune_orphaned_openings(storey: &mut Storey) {
         // Ceiling ids are NOT stable across resolve — keep a roof window while
         // its plan point still falls inside some roof region.
         Some(OpeningPlacement::Roof { plan, .. }) => storey
-            .roofs
+            .ceilings
             .region_strictly_containing(domain::points::Point2f64::new(
                 plan.0 as f64,
                 plan.1 as f64,
@@ -1146,7 +1146,7 @@ pub fn rebuild_opes(storey: &mut Storey) {
         r.opes.windows.clear();
         r.opes.doors.clear();
     }
-    for r in &mut storey.roofs.regions {
+    for r in &mut storey.ceilings.regions {
         r.opes.windows.clear();
         r.opes.doors.clear();
     }
@@ -1168,9 +1168,9 @@ pub fn rebuild_opes(storey: &mut Storey) {
             }
             Some(OpeningPlacement::Roof { plan, .. }) => {
                 let pt = domain::points::Point2f64::new(plan.0 as f64, plan.1 as f64);
-                let id = storey.roofs.region_strictly_containing(pt)?.id;
+                let id = storey.ceilings.region_strictly_containing(pt)?.id;
                 storey
-                    .roofs
+                    .ceilings
                     .regions
                     .iter()
                     .position(|r| r.id == id)
@@ -1192,14 +1192,14 @@ pub fn rebuild_opes(storey: &mut Storey) {
     for (id, t) in win {
         match t {
             Some(Tgt::Wall(i)) => storey.walls.regions[i].opes.windows.push(id),
-            Some(Tgt::Roof(i)) => storey.roofs.regions[i].opes.windows.push(id),
+            Some(Tgt::Roof(i)) => storey.ceilings.regions[i].opes.windows.push(id),
             None => {}
         }
     }
     for (id, t) in drs {
         match t {
             Some(Tgt::Wall(i)) => storey.walls.regions[i].opes.doors.push(id),
-            Some(Tgt::Roof(i)) => storey.roofs.regions[i].opes.doors.push(id),
+            Some(Tgt::Roof(i)) => storey.ceilings.regions[i].opes.doors.push(id),
             None => {}
         }
     }
@@ -1272,7 +1272,7 @@ fn opening_vertices(
             // region containing it rather than trusting the stored id.
             let (cx, cy) = (plan.0 as f64, plan.1 as f64);
             let region = storey
-                .roofs
+                .ceilings
                 .region_strictly_containing(domain::points::Point2f64::new(cx, cy))?;
             let (hw, hh) = (width_m as f64 * 0.5, height_m as f64 * 0.5);
             // Plan rectangle corners (CCW); lift each onto the region plane.
@@ -1462,7 +1462,7 @@ mod tests {
             exposure: CeilingExposure::default(),
         };
         let mut storey = Storey {
-            roofs: CeilingRegions {
+            ceilings: CeilingRegions {
                 regions: vec![region],
             },
             windows: vec![window(
@@ -2032,7 +2032,7 @@ mod tests {
         };
         let r1 = ItemId::default();
         let mut storey = Storey {
-            roofs: CeilingRegions {
+            ceilings: CeilingRegions {
                 regions: vec![region(r1)],
             },
             ..Storey::default()
@@ -2040,7 +2040,7 @@ mod tests {
         let wid =
             add_roof_window(&mut storey, r1, (3.0, 3.0), 1.0, 1.0, ItemId::default()).unwrap();
         // Re-resolve regenerates the ceiling with a FRESH id.
-        storey.roofs.regions = vec![region(ItemId::default())];
+        storey.ceilings.regions = vec![region(ItemId::default())];
         derive_opening_vertices(&mut storey);
         prune_orphaned_openings(&mut storey);
         assert_eq!(storey.windows.len(), 1, "the roof window is not pruned");
@@ -2067,7 +2067,7 @@ mod tests {
                     ],
                 )],
             },
-            roofs: CeilingRegions {
+            ceilings: CeilingRegions {
                 regions: vec![CeilingRegion {
                     id: rid,
                     polygon: Polygon3D::new(vec![
@@ -2088,7 +2088,7 @@ mod tests {
             add_roof_window(&mut storey, rid, (2.0, 2.0), 1.0, 1.0, ItemId::default()).unwrap();
         // Wipe opes to prove rebuild repopulates them from placements alone.
         storey.walls.regions[0].opes = Opes::default();
-        storey.roofs.regions[0].opes = Opes::default();
+        storey.ceilings.regions[0].opes = Opes::default();
         rebuild_opes(&mut storey);
         assert_eq!(
             storey.walls.regions[0].opes.windows,
@@ -2096,7 +2096,7 @@ mod tests {
             "the wall knows its window"
         );
         assert_eq!(
-            storey.roofs.regions[0].opes.windows,
+            storey.ceilings.regions[0].opes.windows,
             vec![w2],
             "the roof region knows its roof window"
         );

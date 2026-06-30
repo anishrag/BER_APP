@@ -230,7 +230,7 @@ pub(super) fn panel_token(view: &SketchView<'_>) -> String {
                 view.roof_point_position_pending,
                 view.roof_ridge_position_pending,
                 view.roof_rect_position_pending,
-                view.roof_apex_views.len()
+                view.ceiling_apex_views.len()
             );
         }
     }
@@ -526,7 +526,7 @@ pub(super) fn has_deletables(view: &SketchView<'_>) -> bool {
     !view.phase_region_polygons.is_empty()
         || !view.step_region_polygons.is_empty()
         || !view.ceiling_step_region_polygons.is_empty()
-        || !view.roof_apex_views.is_empty()
+        || !view.ceiling_apex_views.is_empty()
 }
 
 /// The "Delete" panel — a single home for removing things you've added
@@ -601,9 +601,9 @@ pub(super) fn render_delete_panel<F: FnMut(UiEvent)>(
                                 });
                             }
                         }
-                        if !view.roof_apex_views.is_empty() {
+                        if !view.ceiling_apex_views.is_empty() {
                             section(ui, "Roof points");
-                            for (i, (_pos, label)) in view.roof_apex_views.iter().enumerate() {
+                            for (i, (_pos, label)) in view.ceiling_apex_views.iter().enumerate() {
                                 ui.horizontal(|ui| {
                                     if ui.button("🗑").clicked() {
                                         on_event(UiEvent::Sketch(SketchEvent::DeleteRoofApex(i)));

@@ -142,7 +142,7 @@ fn group_centroid(
     (n > 0).then(|| (sum.0 / n as f64, sum.1 / n as f64))
 }
 
-/// The point a group's in-place connector LINE should target. Floors/roofs use
+/// The point a group's in-place connector LINE should target. Floors/ceilings use
 /// the group `centroid`; WALLS use the base midpoint of the wall (in the group)
 /// NEAREST that centroid — pointing at an actual selected wall reads clearer
 /// than at the average position, which can land in empty space (e.g. an
@@ -188,7 +188,7 @@ fn region_centroid(
             let c = r.centroid();
             (c.x, c.y)
         }),
-        SurfaceKind::Roofs => storey.roofs.regions.iter().find(|r| r.id == id).map(|r| {
+        SurfaceKind::Ceilings => storey.ceilings.regions.iter().find(|r| r.id == id).map(|r| {
             let c = r.centroid();
             (c.x, c.y)
         }),
@@ -314,8 +314,8 @@ fn draw_fanned_surface(
             };
             fill_outline(painter, t, &floor_ring(r), offset, fill, line, active);
         }
-        SurfaceKind::Roofs => {
-            let Some(r) = storey.roofs.regions.iter().find(|r| r.id == id) else {
+        SurfaceKind::Ceilings => {
+            let Some(r) = storey.ceilings.regions.iter().find(|r| r.id == id) else {
                 return;
             };
             let ring: Vec<(f64, f64)> = r.polygon.exterior.iter().map(|p| (p.x, p.y)).collect();

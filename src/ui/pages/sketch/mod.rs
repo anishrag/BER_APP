@@ -610,7 +610,7 @@ pub enum SketchEvent {
     /// Switch the workspace onto another assessment phase (clicked in the phase
     /// signpost). The controller gates which phases are reachable.
     SetAssessmentPhase(AssessmentPhase),
-    /// Structure phase: TOGGLE a MODE (Walls/Roofs/Floors) in/out of the active
+    /// Structure phase: TOGGLE a MODE (Walls/Ceilings/Floors) in/out of the active
     /// set — the buttons are non-exclusive, so several kinds can be active at
     /// once. The controller shades every active kind (≥1 always stays active).
     SetStructureKind(SurfaceKind),
@@ -639,7 +639,7 @@ pub enum SketchEvent {
         world_y: f64,
     },
     /// Structure phase: open the "Edit attributes" session over the current
-    /// selection — groups it by shared construction (walls / floors / roofs).
+    /// selection — groups it by shared construction (walls / floors / ceilings).
     BeginStructureEdit,
     /// Structure phase: make attribute-group `usize` the active popup.
     SetActiveStructureGroup(usize),
@@ -769,7 +769,7 @@ pub enum SketchEvent {
         tol: f64,
     },
     /// Ceiling-exposure Carve subtool: a drawn stroke (world coords) that
-    /// dimensions a carve, splitting the roofs across the stack.
+    /// dimensions a carve, splitting the ceilings across the stack.
     CeilingExposureCarveStrokeWorld {
         points: Vec<(f32, f32)>,
     },
@@ -918,7 +918,7 @@ pub struct SketchView<'a> {
     /// backing string. The position stage shows as the shared position panel.
     pub roof_point_mode: bool,
     pub roof_point_available: bool,
-    pub roof_apex_views: &'a [((f64, f64), String)],
+    pub ceiling_apex_views: &'a [((f64, f64), String)],
     pub pending_roof_point: Option<(f64, f64)>,
     /// The pending point's wall snap as one standard snap tag (its menu
     /// offers only "Don't snap", routed to UnsnapRoofPoint).
@@ -1149,7 +1149,7 @@ pub struct SketchView<'a> {
     /// Current storey's wall / roof / floor counts — the Structure-phase tool
     /// read-out.
     pub surface_counts: SurfaceCounts,
-    /// The active Structure-phase MODES (Walls/Roofs/Floors; non-exclusive), so
+    /// The active Structure-phase MODES (Walls/Ceilings/Floors; non-exclusive), so
     /// the panel shows which are selected.
     pub structure_kinds: std::collections::BTreeSet<SurfaceKind>,
     /// The active global Select subtool, so the panel shows it. `None` = none.

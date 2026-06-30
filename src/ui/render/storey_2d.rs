@@ -87,9 +87,9 @@ pub fn render(
     }
 
     // Roof regions (when populated) — drawn as dashed outlines above the floor.
-    // Today Storey.roofs.regions is empty by default; this loop renders nothing
+    // Today Storey.ceilings.regions is empty by default; this loop renders nothing
     // until the controller populates ceilings. Suppressed in the Objects view.
-    if !storey.roofs.regions.is_empty() && !objects_view {
+    if !storey.ceilings.regions.is_empty() && !objects_view {
         draw_roof_overlay(painter, &t, storey, display_mode);
     }
 
@@ -136,11 +136,11 @@ pub fn render(
     // stack identical labels on top of each other. First region wins.
     if matches!(
         display_mode,
-        DisplayMode::Roofs | DisplayMode::AllSurfaces | DisplayMode::FloorMapDims
+        DisplayMode::Ceilings | DisplayMode::AllSurfaces | DisplayMode::FloorMapDims
     ) {
         let mut seen_corners: std::collections::HashSet<(i64, i64)> =
             std::collections::HashSet::new();
-        for region in &storey.roofs.regions {
+        for region in &storey.ceilings.regions {
             draw_corner_height_labels(painter, &t, region, &mut seen_corners);
         }
     }
@@ -193,7 +193,7 @@ fn draw_selection_overlay(
             draw_selection_outline(painter, &pts);
         }
     }
-    for region in &storey.roofs.regions {
+    for region in &storey.ceilings.regions {
         if selected.contains(&region.id) {
             let pts: Vec<egui::Pos2> = region
                 .polygon
@@ -392,10 +392,10 @@ fn draw_roof_overlay(
     storey: &Storey,
     display_mode: DisplayMode,
 ) {
-    let color = color_for(DisplayMode::Roofs, display_mode, style::ROOF_LINE);
+    let color = color_for(DisplayMode::Ceilings, display_mode, style::ROOF_LINE);
     let stroke = egui::Stroke::new(1.0, color);
     // The SELECTION is shown by the gold marquee overlay, not a fill here.
-    for region in &storey.roofs.regions {
+    for region in &storey.ceilings.regions {
         let pts: Vec<egui::Pos2> = region
             .polygon
             .exterior

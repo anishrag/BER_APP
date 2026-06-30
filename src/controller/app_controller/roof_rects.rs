@@ -9,14 +9,14 @@
 //! The FINALIZE placement check ([`document::validate_roof_rect_placement`])
 //! runs at the last open location stage; the height stage re-checks it
 //! cheaply ([`document::validate_roof_rect_ridge`]) and stamps FOUR corner
-//! apexes (`Ber::add_roof_apex` ×4 — quantization included) as the DURABLE
+//! apexes (`Ber::add_ceiling_apex` ×4 — quantization included) as the DURABLE
 //! record: one apex group, no new serde. Commit shape is byte-for-byte the
 //! ridge's: mark dirty → materialize → canonicalize the session
 //! ceiling-step list. Per-side snapping is deferred (Centre + typed
 //! positions cover the pavilion case); the shell owns this in-flight state
 //! machine, outside undo — roof-ridge parity throughout.
 use super::*;
-use ber_model::ber::structural::{apexes_form_rect, RoofApex};
+use ber_model::ber::structural::{apexes_form_rect, CeilingApex};
 use document::LinePositionPrompt;
 
 /// The in-flight roof-RECT input, advanced stage by stage: closed stroke →
@@ -110,7 +110,7 @@ impl AppController {
     /// document — the drawn value stands). No questions left → the geometry
     /// is fully determined: run the FINALIZE placement check
     /// ([`document::validate_roof_rect_placement`] against the RESOLVED
-    /// roofs) and move to the Height stage. On a finalize rejection the
+    /// ceilings) and move to the Height stage. On a finalize rejection the
     /// pending state is left UNTOUCHED — the rejection lands on whichever
     /// stage the caller was on (the ridge's no-late-rejection shape).
     fn advance_roof_rect(
@@ -267,7 +267,7 @@ impl AppController {
     /// Assign the flat top's HEIGHT: materialize, validate
     /// ([`document::validate_roof_rect_ridge`] — placement re-checked + the
     /// height itself), then stamp FOUR corner apexes as DURABLE input
-    /// (`Ber::add_roof_apex` ×4 — quantization included), re-derive, and
+    /// (`Ber::add_ceiling_apex` ×4 — quantization included), re-derive, and
     /// canonicalize the session ceiling-step list — byte-for-byte the
     /// ridge's commit shape. The pending rect stays open on rejection.
     /// Outside undo.
@@ -292,9 +292,9 @@ impl AppController {
             phi,
             Point2f64::new(plo.x, phi.y),
         ] {
-            record.data.add_roof_apex(
+            record.data.add_ceiling_apex(
                 idx,
-                RoofApex {
+                CeilingApex {
                     point: p,
                     z_m: z_m as f64,
                 },
@@ -302,8 +302,8 @@ impl AppController {
         }
         self.pending_roof_rect = None;
         self.mark_dirty()?;
-        // Regions-as-truth: recompose the roofs from the inputs once.
-        self.recompose_roofs(idx);
+        // Regions-as-truth: recompose the ceilings from the inputs once.
+        self.recompose_ceilings(idx);
         self.materialize();
         self.reconstruct_ceiling_step_regions_for(idx);
         Ok(())
@@ -368,7 +368,7 @@ impl AppController {
     /// apex group with exactly FOUR apexes forming a rect (the same
     /// predicate resolve applies, [`apexes_form_rect`]), labelled
     /// "⌃ 4.20 m". The apex dots themselves still come from
-    /// `roof_apex_views`.
+    /// `ceiling_apex_views`.
     pub fn roof_rect_views(&self) -> Vec<([(f64, f64); 4], String)> {
         let idx = self.current_storey_idx.unwrap_or(0);
         let Some(storey) = self
@@ -379,15 +379,15 @@ impl AppController {
             return Vec::new();
         };
         storey
-            .roofs
-            .apex_groups(&storey.roof_apexes)
+            .ceilings
+            .apex_groups(&storey.ceiling_apexes)
             .into_iter()
             .filter(|g| g.apex_idxs.len() == 4)
             .filter_map(|g| {
-                let quad: Vec<&RoofApex> = g
+                let quad: Vec<&CeilingApex> = g
                     .apex_idxs
                     .iter()
-                    .map(|&i| &storey.roof_apexes[i])
+                    .map(|&i| &storey.ceiling_apexes[i])
                     .collect();
                 let (lo, hi) = apexes_form_rect(&quad)?;
                 let label = format!("⌃ {:.2} m", quad[0].z_m);

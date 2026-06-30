@@ -1,6 +1,6 @@
 //! The dwelling ROOF — a structure SEPARATE from the habitable-area ceiling.
 //!
-//! Distinct from the ceiling (`Storey::roofs` / the roof-point apexes, which
+//! Distinct from the ceiling (`Storey::ceilings` / the roof-point apexes, which
 //! shape the heat-loss ceiling at the top of a storey): the roof here is the
 //! external structure that sits ABOVE the top storey, on its own plane(s). It is
 //! only modelled when it matters for the assessment:
@@ -17,7 +17,7 @@
 use serde::{Deserialize, Serialize};
 
 use crate::ber::common::ItemId;
-use crate::ber::structural::{CeilingRegions, RoofApex};
+use crate::ber::structural::{CeilingRegions, CeilingApex};
 use domain::points::Point2f64;
 
 /// The shape of one roof area's planes. `Flat` keeps the roof level at the eave
@@ -75,7 +75,7 @@ impl RoofArea {
     /// footprint span perpendicular to the ridge). Empty for a flat roof (or no
     /// ridge): the roof stays level at the eave. These feed the SAME apex/ridge
     /// fan the ceiling uses ([`CeilingRegions::with_apexes`]).
-    pub fn apexes(&self) -> Vec<RoofApex> {
+    pub fn apexes(&self) -> Vec<CeilingApex> {
         let Some((a, b)) = self.ridge.filter(|_| self.shape != RoofShape::Flat) else {
             return Vec::new();
         };
@@ -89,7 +89,7 @@ impl RoofArea {
             (y1 - y0) / 2.0
         };
         let z = self.eave_z + perp_half * (self.pitch_deg as f64).to_radians().tan();
-        vec![RoofApex { point: a, z_m: z }, RoofApex { point: b, z_m: z }]
+        vec![CeilingApex { point: a, z_m: z }, CeilingApex { point: b, z_m: z }]
     }
 
     /// The roof as `CeilingRegions` — built with the SAME machinery as the ceiling

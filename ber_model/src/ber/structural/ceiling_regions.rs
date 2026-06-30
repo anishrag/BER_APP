@@ -13,11 +13,11 @@ use super::*;
 /// declarative form is stored and resolve re-applies it on every materialize
 /// (composition order is law: default ceiling → step areas → apexes).
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-pub struct RoofApex {
+pub struct CeilingApex {
     /// Plan position of the apex, in storey/world metres. Must be
     /// f32-representable (the reload reconstruction round-trips rings through
     /// f32, and the fan's exact vertex matching depends on it) —
-    /// `Ber::add_roof_apex` quantizes, so go through it.
+    /// `Ber::add_ceiling_apex` quantizes, so go through it.
     pub point: Point2f64,
     /// ABSOLUTE height of the apex in metres above the storey's floor datum
     /// ("ridge at 4.2 m"), NOT a delta against the region it lands in.
@@ -31,18 +31,18 @@ pub struct RoofApex {
 /// stored on the `Storey` parallel to (but keyed by point, not index) the
 /// apexes, so `with_apexes` resolves the side deterministically every resolve.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-pub struct RoofApexHint {
+pub struct CeilingApexHint {
     pub apex: (f32, f32),
     pub region: (f32, f32),
 }
 
-impl RoofApex {
+impl CeilingApex {
     /// Quantize a plan position to the f32 grid — exactly the rounding
-    /// [`Ber::add_roof_apex`] applies on store. Callers that must reason
+    /// [`Ber::add_ceiling_apex`] applies on store. Callers that must reason
     /// about an apex BEFORE storing it (e.g. "are these two endpoints still
     /// distinct?") use this so their answer matches the stored value.
     ///
-    /// [`Ber::add_roof_apex`]: super::ber_struct::Ber::add_roof_apex
+    /// [`Ber::add_ceiling_apex`]: super::ber_struct::Ber::add_ceiling_apex
     pub fn quantize_point(p: Point2f64) -> Point2f64 {
         Point2f64::new(p.x as f32 as f64, p.y as f32 as f64)
     }
@@ -71,7 +71,7 @@ pub const APEX_BOUNDARY_EPS_M: f64 = 1e-4;
 ///
 /// [`fan_base_z`]: CeilingRegion::fan_base_z
 #[derive(Clone, Debug, PartialEq)]
-pub struct RoofApexGroup {
+pub struct CeilingApexGroup {
     /// Indices into the `apexes` slice passed to `apex_groups`, ascending.
     pub apex_idxs: Vec<usize>,
     /// Indices into [`CeilingRegions::regions`] of every member region
@@ -157,7 +157,7 @@ impl CeilingRegions {
     /// `construction_id`, get fresh ids and default `opes` (openings are
     /// dropped on split — region identity doesn't survive a re-split).
     /// Assumes FLAT input regions (all current content is — see `flat_z`);
-    /// sloped regions are the later roofs feature.
+    /// sloped regions are the later ceilings feature.
     pub fn with_z_deltas(self, areas: &[(Vec<Point2f64>, f64)]) -> Self {
         use geo::bool_ops::BooleanOps;
         use geo::Area;
@@ -374,7 +374,7 @@ impl CeilingRegions {
     /// triangulation re-fragments each face and the merge folds it back).
     ///
     /// [`region_strictly_containing`]: CeilingRegions::region_strictly_containing
-    pub fn with_apexes(self, apexes: &[RoofApex]) -> Self {
+    pub fn with_apexes(self, apexes: &[CeilingApex]) -> Self {
         self.with_apexes_hinted(apexes, &[])
     }
 
@@ -384,7 +384,7 @@ impl CeilingRegions {
     /// `region` point, instead of the first claimant. An apex with no matching
     /// hint, or whose hint lands in no claimed area, keeps first-claim (so normal
     /// apexes and old records are byte-identical).
-    pub fn with_apexes_hinted(self, apexes: &[RoofApex], hints: &[RoofApexHint]) -> Self {
+    pub fn with_apexes_hinted(self, apexes: &[CeilingApex], hints: &[CeilingApexHint]) -> Self {
         if apexes.is_empty() {
             return self;
         }
@@ -510,17 +510,17 @@ impl CeilingRegions {
     }
 
     /// Group `apexes` with the regions they shape — THE grouping authority
-    /// (see [`RoofApexGroup`]). Incidence is quantized plan-corner identity
+    /// (see [`CeilingApexGroup`]). Incidence is quantized plan-corner identity
     /// (a region vertex within 1e-6 m of the apex point — the
     /// [`fan_base_z`] predicate), closed transitively over shared regions
     /// (a ridge's transition triangles carry both endpoints, linking A to
     /// B). Apexes incident to no region join no group (e.g. mid-edit, or a
     /// dormant apex outside every ring). Groups come out ordered by their
     /// smallest apex index; `base_z` and the warn-excluded merge are per
-    /// the [`RoofApexGroup`] field docs.
+    /// the [`CeilingApexGroup`] field docs.
     ///
     /// [`fan_base_z`]: CeilingRegion::fan_base_z
-    pub fn apex_groups(&self, apexes: &[RoofApex]) -> Vec<RoofApexGroup> {
+    pub fn apex_groups(&self, apexes: &[CeilingApex]) -> Vec<CeilingApexGroup> {
         use geo::bool_ops::BooleanOps;
         use geo::Area;
         const EPS_M: f64 = 1e-6;
@@ -535,7 +535,7 @@ impl CeilingRegions {
         // flat AND keeps non-apex corners only TOUCHES an apex at a shared
         // boundary corner (the flat neighbour of a junction mono-pitch ridge) —
         // it is NOT shaped, so it must not be claimed/merged by the group. (All
-        // callers run on RESOLVED roofs, so `flat_z` reflects the real slope.)
+        // callers run on RESOLVED ceilings, so `flat_z` reflects the real slope.)
         let is_shaped = |r: &CeilingRegion| -> bool {
             if r.flat_z().is_none() {
                 return true;
@@ -673,7 +673,7 @@ impl CeilingRegions {
                     })
                     .filter(|ring| ring.len() >= 3)
                     .collect();
-                RoofApexGroup {
+                CeilingApexGroup {
                     apex_idxs,
                     region_idxs,
                     base_z: base_z.unwrap_or(0.0),
@@ -773,7 +773,7 @@ impl CeilingRegions {
     /// ANCHOR the storey above's floor slab sits on
     /// (`Ber::storey_floor_datums`) and the zero its inherited floor steps
     /// are measured from ([`inherited_floor_levels`]). `None` when no flat
-    /// region overlaps — sloped-only coverage, empty roofs, or a degenerate
+    /// region overlaps — sloped-only coverage, empty ceilings, or a degenerate
     /// footprint (< 3 vertices).
     ///
     /// [`flat_z`]: CeilingRegion::flat_z
@@ -805,12 +805,12 @@ impl CeilingRegions {
     /// decomposed via `split_to_simple` (`Polygon3D`-style exterior-only
     /// consumers would fill the hole) and sub-[`SLIVER_AREA_M2`] pieces are
     /// dropped. Piece rings are OPEN (no closing duplicate) and
-    /// f32-QUANTIZED (the `Ber::add_roof_apex` precedent: the document
+    /// f32-QUANTIZED (the `Ber::add_ceiling_apex` precedent: the document
     /// layer round-trips step rings through `Point2f32`, and the
     /// seed → reload fixpoint needs the stored ring to survive that
     /// round-trip). Sloped regions overlapping the footprint are
     /// warn-logged and contribute nothing (sloped-under-floor is later
-    /// roofs work). Empty when there is no anchor.
+    /// ceilings work). Empty when there is no anchor.
     ///
     /// [`lowest_flat_z_over`]: CeilingRegions::lowest_flat_z_over
     pub fn inherited_floor_levels(&self, footprint: &[Point2f64]) -> Vec<(Vec<Point2f64>, f64)> {
@@ -1046,7 +1046,7 @@ impl CeilingRegion {
     /// reconstruction's `ring_area2` filter.
     ///
     /// [`flat_z`]: CeilingRegion::flat_z
-    pub fn fan_base_z(&self, apexes: &[RoofApex]) -> Option<f64> {
+    pub fn fan_base_z(&self, apexes: &[CeilingApex]) -> Option<f64> {
         const EPS_M: f64 = 1e-6;
         if self.polygon.exterior.len() < 3 {
             return None;

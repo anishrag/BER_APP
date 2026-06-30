@@ -175,7 +175,7 @@ impl AppController {
                     c.construction_type.label(),
                     &c.base,
                     ids.len(),
-                    "Roofs",
+                    "Ceilings",
                 ),
                 photos: photo_views(&c.base.photos),
                 highlight: ids,
@@ -262,7 +262,7 @@ fn floor_region_ids(data: &Ber, cid: ItemId) -> HashSet<ItemId> {
 fn roof_region_ids(data: &Ber, cid: ItemId) -> HashSet<ItemId> {
     data.storeys
         .iter()
-        .flat_map(|s| s.roofs.regions.iter())
+        .flat_map(|s| s.ceilings.regions.iter())
         .filter(|r| r.construction_id == cid)
         .map(|r| r.id)
         .collect()

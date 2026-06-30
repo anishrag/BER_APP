@@ -1472,7 +1472,7 @@ fn set_only_kind(c: &mut AppController, kind: SurfaceKind) {
     if !c.structure_kinds().contains(&kind) {
         c.toggle_structure_kind(kind);
     }
-    for k in [SurfaceKind::Walls, SurfaceKind::Roofs, SurfaceKind::Floors] {
+    for k in [SurfaceKind::Walls, SurfaceKind::Ceilings, SurfaceKind::Floors] {
         if k != kind && c.structure_kinds().contains(&k) {
             c.toggle_structure_kind(k);
         }
@@ -1549,7 +1549,7 @@ fn attribute_all_surfaces(
 /// `Uninitialised` type / `Tbd` build-up — it used to be always green), and a
 /// kind only turns green once EVERY surface of that kind is fully attributed.
 /// This single-storey square fixture has walls + a floor but no roof region, so
-/// "Roofs" doubles as a negative case: an absent kind is NOT vacuously green.
+/// "Ceilings" doubles as a negative case: an absent kind is NOT vacuously green.
 #[test]
 fn structure_checklist_tracks_per_surface_completion() {
     use ber_model::ber::structural::{
@@ -1561,7 +1561,7 @@ fn structure_checklist_tracks_per_surface_completion() {
     // Nothing attributed yet → every row red (previously always green).
     assert_eq!(structure_row(&c, "Walls"), ChecklistStatus::Incomplete);
     assert_eq!(structure_row(&c, "Floors"), ChecklistStatus::Incomplete);
-    assert_eq!(structure_row(&c, "Roofs"), ChecklistStatus::Incomplete);
+    assert_eq!(structure_row(&c, "Ceilings"), ChecklistStatus::Incomplete);
 
     // Attribute the floor (Default build-up — no photo needed) → Floors green
     // while Walls stays red.
@@ -1588,8 +1588,8 @@ fn structure_checklist_tracks_per_surface_completion() {
     assert_eq!(structure_row(&c, "Walls"), ChecklistStatus::AllStoreys);
     assert_eq!(structure_row(&c, "Floors"), ChecklistStatus::AllStoreys);
 
-    // Roofs has no surface in this fixture → it never goes vacuously green.
-    assert_eq!(structure_row(&c, "Roofs"), ChecklistStatus::Incomplete);
+    // Ceilings has no surface in this fixture → it never goes vacuously green.
+    assert_eq!(structure_row(&c, "Ceilings"), ChecklistStatus::Incomplete);
 }
 
 /// The Structure MODES are non-exclusive: several kinds can be active at once,
@@ -2542,7 +2542,7 @@ fn new_checklist_rows_gate_mapping_complete() {
         .insert(fkey, ber_model::ber::structural::FloorExposure::Ground);
     let ckey = document::centroid_key(
         c.current_record.as_ref().unwrap().data.storeys[0]
-            .roofs
+            .ceilings
             .regions[0]
             .centroid(),
     );
@@ -3883,7 +3883,7 @@ fn requesting_3d_without_ceiling_height_is_a_silent_noop() {
 
 /// Setting the height (a Heights-category action) does NOT switch the view —
 /// the editor stays in 2D. It opens the 3D gate (the switch now succeeds),
-/// and the next materialize derives the roofs at that height (one flat
+/// and the next materialize derives the ceilings at that height (one flat
 /// region per outline ring) with the walls extruded to it.
 #[test]
 fn setting_ceiling_height_stays_2d_and_opens_the_3d_gate() {
@@ -3909,9 +3909,9 @@ fn setting_ceiling_height_stays_2d_and_opens_the_3d_gate() {
         (storey.ceiling_height_m.unwrap() - 2.7).abs() < 1e-6,
         "height stamped on the storey"
     );
-    assert_eq!(storey.roofs.regions.len(), 1, "one region per outline ring");
+    assert_eq!(storey.ceilings.regions.len(), 1, "one region per outline ring");
     assert!(
-        storey.roofs.regions[0]
+        storey.ceilings.regions[0]
             .polygon
             .exterior
             .iter()
@@ -4040,7 +4040,7 @@ fn ceiling_ready_controller() -> AppController {
 fn roof_flat_zs(c: &AppController) -> Vec<f64> {
     let storey = &c.current_record.as_ref().unwrap().data.storeys[0];
     let mut zs: Vec<f64> = storey
-        .roofs
+        .ceilings
         .regions
         .iter()
         .filter_map(|r| r.flat_z())
@@ -4075,7 +4075,7 @@ fn debug_dump_current_reports_session_state_and_storey() {
     assert!(dump.contains("ceiling_step_region[storey 0][0] delta_m=0.3000"));
     assert!(dump.contains("=== STOREY DUMP[0] ==="));
     assert!(dump.contains("ceiling_height_m: Some(2.4"), "{dump}");
-    assert!(dump.contains("roofs (2):"), "{dump}");
+    assert!(dump.contains("ceilings (2):"), "{dump}");
     assert!(dump.contains("=== END STOREY DUMP[0] ==="));
 }
 
@@ -4119,7 +4119,7 @@ fn ceiling_step_stroke_side_position_amount_splits_roofs() {
     assert!((zs[1] - 2.7).abs() < 1e-6, "stepped piece at h + Δ");
     // The RAISED piece is the one right of the line.
     let storey = &c.current_record.as_ref().unwrap().data.storeys[0];
-    for region in &storey.roofs.regions {
+    for region in &storey.ceilings.regions {
         let n = region.polygon.exterior.len() as f64;
         let cx = region.polygon.exterior.iter().map(|v| v.x).sum::<f64>() / n;
         let z = region.flat_z().expect("flat");
@@ -4203,7 +4203,7 @@ fn ceiling_step_position_skip_keeps_the_drawn_line() {
     );
 }
 
-/// Reload reconstructs the session regions from the persisted roofs, and a
+/// Reload reconstructs the session regions from the persisted ceilings, and a
 /// no-edit re-derive keeps the split — the canonicalize-at-commit fixpoint.
 #[test]
 fn ceiling_step_split_survives_reload_and_rederive() {
@@ -4217,7 +4217,7 @@ fn ceiling_step_split_survives_reload_and_rederive() {
     let id = c.current_record.as_ref().unwrap().id.clone();
     c.flush_if_dirty().unwrap();
     c.open_ber(&id).unwrap();
-    // Session regions rebuilt from the persisted roofs.
+    // Session regions rebuilt from the persisted ceilings.
     let session = &c.ceiling_step_regions[&0];
     assert_eq!(session.len(), 1, "reconstructed from the stepped roof");
     assert!((session[0].delta_m - 0.3).abs() < 1e-6);
@@ -4648,7 +4648,7 @@ fn ceiling_carve_split_survives_reload_and_rederive() {
     let id = c.current_record.as_ref().unwrap().id.clone();
     c.flush_if_dirty().unwrap();
     c.open_ber(&id).unwrap();
-    // Session regions rebuilt from the persisted roofs — the same piece.
+    // Session regions rebuilt from the persisted ceilings — the same piece.
     let session = &c.ceiling_step_regions[&0];
     assert_eq!(session.len(), 1, "reconstructed from the stepped roof");
     assert!((session[0].delta_m - 0.3).abs() < 1e-6);
@@ -4673,9 +4673,9 @@ fn ceiling_carve_split_survives_reload_and_rederive() {
 }
 
 /// A phase-tagged storey's CEILING exposure survives a Layer-1-only reload. The
-/// load-path `heal` recomposes a phase-tagged storey's roofs via
+/// load-path `heal` recomposes a phase-tagged storey's ceilings via
 /// `default_for_footprint` (DEFAULT exposure), so the seed MUST capture the saved
-/// exposures BEFORE heal runs — otherwise it reads the wiped roofs and the
+/// exposures BEFORE heal runs — otherwise it reads the wiped ceilings and the
 /// ceiling reverts to `Unset` (red). The snapshot no longer carries
 /// `ceiling_exposure` (it's `skip_serializing`), so this bites the DB path too,
 /// not just the checkpoint.
@@ -4685,7 +4685,7 @@ fn phase_tagged_ceiling_exposure_survives_reload() {
     let p = |x: f32, y: f32| Point2f32::new(x, y);
     let mut c = ceiling_ready_controller();
     c.set_ceiling_step_mode(false);
-    // Phase-tag the right half so the reload heal recomposes this storey's roofs.
+    // Phase-tag the right half so the reload heal recomposes this storey's ceilings.
     c.phase_regions.entry(0).or_default().push(PhaseRegion {
         polygon: vec![p(5., 0.), p(10., 0.), p(10., 10.), p(5., 10.)],
         phase: ConstructionPhase::Extension1,
@@ -4694,7 +4694,7 @@ fn phase_tagged_ceiling_exposure_survives_reload() {
     c.materialize();
     // Label every roof region's ceiling exposure.
     let keys: Vec<_> = c.current_record.as_ref().unwrap().data.storeys[0]
-        .roofs
+        .ceilings
         .regions
         .iter()
         .map(|r| document::centroid_key(r.centroid()))
@@ -4708,23 +4708,23 @@ fn phase_tagged_ceiling_exposure_survives_reload() {
     c.materialize();
     assert!(
         c.current_record.as_ref().unwrap().data.storeys[0]
-            .roofs
+            .ceilings
             .regions
             .iter()
             .all(|r| r.exposure == CeilingExposure::ExposedRoof),
-        "sanity: all roofs labelled before save"
+        "sanity: all ceilings labelled before save"
     );
 
     let id = c.current_record.as_ref().unwrap().id.clone();
     c.flush_if_dirty().unwrap();
     c.open_ber(&id).unwrap();
 
-    let roofs = &c.current_record.as_ref().unwrap().data.storeys[0]
-        .roofs
+    let ceilings = &c.current_record.as_ref().unwrap().data.storeys[0]
+        .ceilings
         .regions;
-    assert!(!roofs.is_empty(), "roofs exist after reload");
+    assert!(!ceilings.is_empty(), "ceilings exist after reload");
     assert!(
-        roofs
+        ceilings
             .iter()
             .all(|r| r.exposure == CeilingExposure::ExposedRoof),
         "ceiling exposure survived a phase-tagged reload (seed runs before heal)"
@@ -4732,11 +4732,11 @@ fn phase_tagged_ceiling_exposure_survives_reload() {
 }
 
 /// MIGRATION SELF-HEAL: a record saved BEFORE the per-phase-zone fix baked a
-/// spurious phase-induced split into its stored roofs (a uniform-phase roof
-/// fragmented by a redundant coplanar same-construction boundary). Roofs are
+/// spurious phase-induced split into its stored ceilings (a uniform-phase roof
+/// fragmented by a redundant coplanar same-construction boundary). Ceilings are
 /// regions-as-truth — resolve keeps them verbatim and the phase carve only
 /// SPLITS — so the stale split never self-heals. `open_ber` must rebuild each
-/// phase-tagged storey's roofs from its durable inputs and re-apply the clean
+/// phase-tagged storey's ceilings from its durable inputs and re-apply the clean
 /// per-phase carve, dropping the stale split while PRESERVING a deliberate
 /// structure roof-split and a ceiling step.
 #[test]
@@ -4753,11 +4753,11 @@ fn open_ber_heals_spurious_phase_induced_roof_split() {
         phase: ConstructionPhase::Extension1,
     });
 
-    // A DELIBERATE structure roof-split at y=5 (durable `roof_splits`) — must
+    // A DELIBERATE structure roof-split at y=5 (durable `ceiling_splits`) — must
     // survive the heal. A ceiling step in the corner — must survive too.
     let split_ring = vec![p64(0., 0.), p64(10., 0.), p64(10., 5.), p64(0., 5.)];
     c.current_record.as_mut().unwrap().data.storeys[0]
-        .roof_splits
+        .ceiling_splits
         .push(split_ring.clone());
     c.ceiling_step_regions.insert(
         0,
@@ -4768,11 +4768,11 @@ fn open_ber_heals_spurious_phase_induced_roof_split() {
     );
     c.reconstruct_ceiling_step_regions_for(0); // mirror to durable `ceiling_steps`
     c.mark_dirty().unwrap();
-    c.recompose_roofs(0); // compose step + split into the roofs (regions-as-truth)
+    c.recompose_ceilings(0); // compose step + split into the ceilings (regions-as-truth)
     c.materialize(); // re-resolve applies the clean per-phase carve
 
     let clean_count = c.current_record.as_ref().unwrap().data.storeys[0]
-        .roofs
+        .ceilings
         .regions
         .len();
 
@@ -4783,10 +4783,10 @@ fn open_ber_heals_spurious_phase_induced_roof_split() {
     let spurious_ring = vec![p64(7., 0.), p64(10., 0.), p64(10., 10.), p64(7., 10.)];
     {
         let storey = &mut c.current_record.as_mut().unwrap().data.storeys[0];
-        storey.roofs = std::mem::take(&mut storey.roofs).split_faces_coplanar(&[spurious_ring]);
+        storey.ceilings = std::mem::take(&mut storey.ceilings).split_faces_coplanar(&[spurious_ring]);
     }
     let spurious_count = c.current_record.as_ref().unwrap().data.storeys[0]
-        .roofs
+        .ceilings
         .regions
         .len();
     assert!(
@@ -4802,7 +4802,7 @@ fn open_ber_heals_spurious_phase_induced_roof_split() {
     // RELOAD: the heal must recompose from durable inputs and re-carve cleanly.
     c.open_ber(&id).unwrap();
     let healed = &c.current_record.as_ref().unwrap().data.storeys[0]
-        .roofs
+        .ceilings
         .regions;
     assert_eq!(
         healed.len(),
@@ -4811,21 +4811,21 @@ fn open_ber_heals_spurious_phase_induced_roof_split() {
         healed.len()
     );
 
-    // The deliberate structure roof-split SURVIVED (durable `roof_splits` intact
+    // The deliberate structure roof-split SURVIVED (durable `ceiling_splits` intact
     // and replayed): there's a face boundary at y=5, i.e. faces on both sides.
     let storey = &c.current_record.as_ref().unwrap().data.storeys[0];
     assert_eq!(
-        storey.roof_splits.len(),
+        storey.ceiling_splits.len(),
         1,
         "deliberate structure roof-split preserved durably"
     );
     let has_below = storey
-        .roofs
+        .ceilings
         .regions
         .iter()
         .any(|r| r.polygon.exterior.iter().all(|v| v.y <= 5.0 + 1e-6));
     let has_above = storey
-        .roofs
+        .ceilings
         .regions
         .iter()
         .any(|r| r.polygon.exterior.iter().all(|v| v.y >= 5.0 - 1e-6));
@@ -4843,8 +4843,8 @@ fn open_ber_heals_spurious_phase_induced_roof_split() {
     );
 }
 
-/// An UNTAGGED (no-phase) storey's roofs are byte-stable across a reload — the
-/// heal is gated on phase tags, so `recompose_roofs` never touches it and the
+/// An UNTAGGED (no-phase) storey's ceilings are byte-stable across a reload — the
+/// heal is gated on phase tags, so `recompose_ceilings` never touches it and the
 /// regions-as-truth reload fixpoint is preserved exactly.
 #[test]
 fn open_ber_leaves_untagged_roofs_byte_stable() {
@@ -4865,12 +4865,12 @@ fn open_ber_leaves_untagged_roofs_byte_stable() {
     );
     c.reconstruct_ceiling_step_regions_for(0);
     c.mark_dirty().unwrap();
-    c.recompose_roofs(0);
+    c.recompose_ceilings(0);
     c.materialize();
 
     let fingerprint = |c: &AppController| {
         c.current_record.as_ref().unwrap().data.storeys[0]
-            .roofs
+            .ceilings
             .regions
             .iter()
             .map(|r| format!("{:?}", r.polygon))
@@ -4889,7 +4889,7 @@ fn open_ber_leaves_untagged_roofs_byte_stable() {
     assert_eq!(
         fingerprint(&c),
         before,
-        "untagged roofs are byte-identical across reload (no heal perturbation)"
+        "untagged ceilings are byte-identical across reload (no heal perturbation)"
     );
 }
 
@@ -5187,11 +5187,11 @@ fn roof_point_tap_x_y_height_flow_fans_the_region() {
     c.materialize();
     let storey = &c.current_record.as_ref().unwrap().data.storeys[0];
     assert_eq!(
-        storey.roofs.regions.len(),
+        storey.ceilings.regions.len(),
         4,
         "one fan triangle per boundary edge"
     );
-    for region in &storey.roofs.regions {
+    for region in &storey.ceilings.regions {
         assert_eq!(region.polygon.exterior.len(), 3, "triangles");
         assert!(
             region
@@ -5212,17 +5212,17 @@ fn roof_point_tap_x_y_height_flow_fans_the_region() {
             "boundary corners stay at the base"
         );
     }
-    assert_eq!(storey.roof_apexes.len(), 1, "the durable input");
+    assert_eq!(storey.ceiling_apexes.len(), 1, "the durable input");
     assert!(
         c.ceiling_step_regions.get(&0).is_none(),
         "a fan over the default base needs NO session step state"
     );
-    assert_eq!(c.roof_apex_views(), vec![((4.0, 5.0), "▲ 4.20 m".into())]);
+    assert_eq!(c.ceiling_apex_views(), vec![((4.0, 5.0), "▲ 4.20 m".into())]);
 }
 
 /// Phase-1 roof step: group the ceiling area, pick GABLE, draw a ridge, type a
 /// pitch. The roof lands on `Ber.roof` as a SEPARATE structure — the ceiling
-/// (`storey.roof_apexes`) is left UNTOUCHED (the bug this replaced reshaped the
+/// (`storey.ceiling_apexes`) is left UNTOUCHED (the bug this replaced reshaped the
 /// ceiling). A gable extends the ridge to the area's full span (x = 5, y 0..10).
 #[test]
 fn roof_area_gable_commits_to_ber_roof_without_touching_ceiling() {
@@ -5248,7 +5248,7 @@ fn roof_area_gable_commits_to_ber_roof_without_touching_ceiling() {
     let ber = &c.current_record.as_ref().unwrap().data;
     // The CEILING is untouched — no apexes were stamped.
     assert!(
-        ber.storeys[0].roof_apexes.is_empty(),
+        ber.storeys[0].ceiling_apexes.is_empty(),
         "the roof must NOT reshape the ceiling"
     );
     // The roof landed on Ber.roof as a separate area.
@@ -5291,7 +5291,7 @@ fn roof_area_hip_keeps_drawn_ridge_length() {
     c.assign_roof_area_pitch(45.0).unwrap();
 
     let ber = &c.current_record.as_ref().unwrap().data;
-    assert!(ber.storeys[0].roof_apexes.is_empty(), "ceiling untouched");
+    assert!(ber.storeys[0].ceiling_apexes.is_empty(), "ceiling untouched");
     let area = &ber.roof.areas[0];
     assert_eq!(area.shape, ber_model::ber::roof::RoofShape::Hip);
     let (a, b) = area.ridge.expect("hip has a ridge");
@@ -5315,7 +5315,7 @@ fn roof_area_flat_commits_without_ridge() {
     c.pick_roof_area_shape(RoofShape::Flat);
 
     let ber = &c.current_record.as_ref().unwrap().data;
-    assert!(ber.storeys[0].roof_apexes.is_empty(), "ceiling untouched");
+    assert!(ber.storeys[0].ceiling_apexes.is_empty(), "ceiling untouched");
     assert_eq!(ber.roof.areas.len(), 1);
     let area = &ber.roof.areas[0];
     assert_eq!(area.shape, ber_model::ber::roof::RoofShape::Flat);
@@ -5361,7 +5361,7 @@ fn roof_point_snapped_axis_skips_its_prompt_and_lands_exactly() {
 
     c.assign_roof_apex(4.0).expect("apex assigns");
     let storey = &c.current_record.as_ref().unwrap().data.storeys[0];
-    let apex = &storey.roof_apexes[0];
+    let apex = &storey.ceiling_apexes[0];
     assert!((apex.point.x - 3.5).abs() < 1e-6);
     assert!(
         (apex.point.y - 4.0).abs() < 1e-6,
@@ -5433,8 +5433,8 @@ fn roof_apex_survives_reload_with_no_session_state_and_rederive_fixpoint() {
     c.flush_if_dirty().unwrap();
     c.open_ber(&id).unwrap();
     let storey = &c.current_record.as_ref().unwrap().data.storeys[0];
-    assert_eq!(storey.roofs.regions.len(), 4, "fan persisted");
-    assert_eq!(storey.roof_apexes.len(), 1, "apex input persisted");
+    assert_eq!(storey.ceilings.regions.len(), 4, "fan persisted");
+    assert_eq!(storey.ceiling_apexes.len(), 1, "apex input persisted");
     assert!(
         c.ceiling_step_regions.get(&0).is_none(),
         "no session state to reconstruct for a default-base fan"
@@ -5445,12 +5445,12 @@ fn roof_apex_survives_reload_with_no_session_state_and_rederive_fixpoint() {
     c.materialize();
     let storey = &c.current_record.as_ref().unwrap().data.storeys[0];
     assert_eq!(
-        storey.roofs.regions.len(),
+        storey.ceilings.regions.len(),
         4,
         "fan kept across the re-derive"
     );
     let max_z = storey
-        .roofs
+        .ceilings
         .regions
         .iter()
         .flat_map(|r| r.polygon.exterior.iter().map(|v| v.z))
@@ -5489,7 +5489,7 @@ fn roof_apex_over_a_ceiling_step_canonicalizes_and_survives_reload() {
     let zs_of = |c: &AppController| {
         let storey = &c.current_record.as_ref().unwrap().data.storeys[0];
         let mut zs: Vec<f64> = storey
-            .roofs
+            .ceilings
             .regions
             .iter()
             .flat_map(|r| r.polygon.exterior.iter().map(|v| v.z))
@@ -5514,7 +5514,7 @@ fn roof_apex_over_a_ceiling_step_canonicalizes_and_survives_reload() {
     c.flush_if_dirty().unwrap();
     c.open_ber(&id).unwrap();
     let session = &c.ceiling_step_regions[&0];
-    assert_eq!(session.len(), 1, "merged area reconstructed from the roofs");
+    assert_eq!(session.len(), 1, "merged area reconstructed from the ceilings");
     assert!(session.iter().all(|r| (r.delta_m - 0.3).abs() < 1e-6));
     c.mark_dirty().unwrap();
     c.materialize();
@@ -5537,20 +5537,20 @@ fn deleting_a_roof_apex_reflattens_the_fan() {
     c.materialize();
     assert_eq!(
         c.current_record.as_ref().unwrap().data.storeys[0]
-            .roofs
+            .ceilings
             .regions
             .len(),
         4
     );
 
-    c.delete_roof_apex(0);
+    c.delete_ceiling_apex(0);
     c.materialize();
     let storey = &c.current_record.as_ref().unwrap().data.storeys[0];
-    assert!(storey.roof_apexes.is_empty(), "durable input removed");
-    assert_eq!(storey.roofs.regions.len(), 1, "back to one flat region");
+    assert!(storey.ceiling_apexes.is_empty(), "durable input removed");
+    assert_eq!(storey.ceilings.regions.len(), 1, "back to one flat region");
     assert!(
         storey
-            .roofs
+            .ceilings
             .regions
             .iter()
             .all(|r| r.flat_z().is_some_and(|z| (z - 2.4).abs() < 1e-6)),
@@ -5558,7 +5558,7 @@ fn deleting_a_roof_apex_reflattens_the_fan() {
     );
     assert!(c.ceiling_step_regions.get(&0).is_none());
     // Out-of-range delete is a no-op.
-    c.delete_roof_apex(7);
+    c.delete_ceiling_apex(7);
 }
 
 /// A storey switch abandons the in-flight point and leaves the mode — its
@@ -5593,9 +5593,9 @@ fn second_roof_point_forms_a_ridge_and_a_third_is_rejected() {
     c.assign_roof_apex(3.5)
         .expect("second point forms the ridge");
     let storey = &c.current_record.as_ref().unwrap().data.storeys[0];
-    assert_eq!(storey.roof_apexes.len(), 2, "both apexes durable");
+    assert_eq!(storey.ceiling_apexes.len(), 2, "both apexes durable");
     let zs: Vec<f64> = storey
-        .roofs
+        .ceilings
         .regions
         .iter()
         .flat_map(|r| r.polygon.exterior.iter().map(|v| v.z))
@@ -5618,7 +5618,7 @@ fn second_roof_point_forms_a_ridge_and_a_third_is_rejected() {
     assert!(err.contains("already has a ridge"), "got: {err}");
     assert!(c.roof_point_height_pending(), "pending intact on rejection");
     let storey = &c.current_record.as_ref().unwrap().data.storeys[0];
-    assert_eq!(storey.roof_apexes.len(), 2, "nothing committed");
+    assert_eq!(storey.ceiling_apexes.len(), 2, "nothing committed");
     c.cancel_pending_roof_point();
     assert!(!c.roof_point_pending());
 }
@@ -5630,7 +5630,7 @@ fn second_roof_point_forms_a_ridge_and_a_third_is_rejected() {
 fn roof_vertex_fingerprint(c: &AppController) -> Vec<(f64, f64, f64)> {
     let storey = &c.current_record.as_ref().unwrap().data.storeys[0];
     let mut vs: Vec<(f64, f64, f64)> = storey
-        .roofs
+        .ceilings
         .regions
         .iter()
         .flat_map(|r| r.polygon.exterior.iter().map(|v| (v.x, v.y, v.z)))
@@ -5726,8 +5726,8 @@ fn roof_ridge_length_cross_start_height_flow_forms_a_pitched_roof() {
     assert!(!c.roof_ridge_pending(), "flow complete");
     c.materialize();
     let storey = &c.current_record.as_ref().unwrap().data.storeys[0];
-    assert_eq!(storey.roof_apexes.len(), 2, "both apexes durable");
-    for (apex, want_y) in storey.roof_apexes.iter().zip([3.0, 7.0]) {
+    assert_eq!(storey.ceiling_apexes.len(), 2, "both apexes durable");
+    for (apex, want_y) in storey.ceiling_apexes.iter().zip([3.0, 7.0]) {
         assert!((apex.point.x - 4.0).abs() < 1e-6);
         assert!(
             (apex.point.y - want_y).abs() < 1e-4,
@@ -5735,7 +5735,7 @@ fn roof_ridge_length_cross_start_height_flow_forms_a_pitched_roof() {
         );
         assert!((apex.z_m - 4.2).abs() < 1e-6);
     }
-    let groups = storey.roofs.apex_groups(&storey.roof_apexes);
+    let groups = storey.ceilings.apex_groups(&storey.ceiling_apexes);
     assert_eq!(groups.len(), 1, "one connected roof group");
     assert_eq!(
         groups[0].apex_idxs.len(),
@@ -5743,7 +5743,7 @@ fn roof_ridge_length_cross_start_height_flow_forms_a_pitched_roof() {
         "…holding BOTH apexes: a ridge"
     );
     let zs: Vec<f64> = storey
-        .roofs
+        .ceilings
         .regions
         .iter()
         .flat_map(|r| r.polygon.exterior.iter().map(|v| v.z))
@@ -5814,7 +5814,7 @@ fn roof_ridge_default_wall_bounds_its_own_arm() {
         .expect("divider region builds");
     c.ceiling_step_regions.entry(0).or_default().push(divider);
     c.mark_dirty().unwrap();
-    c.recompose_roofs(0); // regions-as-truth: compose the divider into the roofs
+    c.recompose_ceilings(0); // regions-as-truth: compose the divider into the ceilings
     c.materialize();
     c.reconstruct_ceiling_step_regions_for(0);
     assert_eq!(roof_flat_zs(&c).len(), 2, "two same-height regions");
@@ -5969,8 +5969,8 @@ fn roof_ridge_snap_skips_the_cross_question_and_lands_on_the_wall() {
     assert!(c.roof_ridge_snap_tag().is_some(), "tag still clickable");
     c.assign_roof_ridge_height(4.0).expect("ridge assigns");
     let storey = &c.current_record.as_ref().unwrap().data.storeys[0];
-    assert_eq!(storey.roof_apexes.len(), 2);
-    for (apex, want_y) in storey.roof_apexes.iter().zip([0.5, 3.5]) {
+    assert_eq!(storey.ceiling_apexes.len(), 2);
+    for (apex, want_y) in storey.ceiling_apexes.iter().zip([0.5, 3.5]) {
         assert!(
             (apex.point.x - 6.0).abs() < 1e-9,
             "snapped cross coordinate lands EXACTLY on the wall"
@@ -6054,7 +6054,7 @@ fn roof_ridge_start_snap_skips_its_question_and_unsnap_reopens_it() {
     c.apply_position_dimension(5.0).expect("start applies"); // y = 5
     c.assign_roof_ridge_height(4.0).expect("ridge assigns");
     let storey = &c.current_record.as_ref().unwrap().data.storeys[0];
-    for (apex, want_y) in storey.roof_apexes.iter().zip([5.0, 9.4]) {
+    for (apex, want_y) in storey.ceiling_apexes.iter().zip([5.0, 9.4]) {
         assert!((apex.point.x - 2.5).abs() < 1e-6);
         assert!((apex.point.y - want_y).abs() < 1e-4);
     }
@@ -6095,7 +6095,7 @@ fn unsnap_roof_ridge_cross_reopens_the_cross_question_with_the_drawn_coord() {
     let storey = &c.current_record.as_ref().unwrap().data.storeys[0];
     assert!(
         storey
-            .roof_apexes
+            .ceiling_apexes
             .iter()
             .all(|a| (a.point.x - 5.9).abs() < 0.05),
         "assigned at the drawn coordinate"
@@ -6120,8 +6120,8 @@ fn roof_ridge_survives_reload_and_rederive_fixpoint() {
     c.flush_if_dirty().unwrap();
     c.open_ber(&id).unwrap();
     let storey = &c.current_record.as_ref().unwrap().data.storeys[0];
-    assert_eq!(storey.roof_apexes.len(), 2, "apex pair persisted");
-    let groups = storey.roofs.apex_groups(&storey.roof_apexes);
+    assert_eq!(storey.ceiling_apexes.len(), 2, "apex pair persisted");
+    let groups = storey.ceilings.apex_groups(&storey.ceiling_apexes);
     assert_eq!(groups.len(), 1);
     assert_eq!(groups[0].apex_idxs.len(), 2, "still a ridge after reload");
     assert!(
@@ -6144,14 +6144,14 @@ fn roof_ridge_survives_reload_and_rederive_fixpoint() {
 /// STEPPED piece — the apexes sit exactly ON the outline, the derived step
 /// ring is boolean-op output (the noisy path the EPS claim band exists for).
 /// Resolve → commit-style reconstruct (canonicalize the session step list
-/// from the derived roofs) → persist → reload → re-resolve must reproduce
+/// from the derived ceilings) → persist → reload → re-resolve must reproduce
 /// the surface identically, and the wall under each ridge end must carry the
 /// gable apex on its top. (The apexes are stamped directly — the typed-start
 /// flow can't reach the boundary until the end snaps land; this is the
 /// durable-input path a snap will drive.)
 #[test]
 fn boundary_ridge_over_a_step_full_fixpoint_and_gable_walls() {
-    use ber_model::ber::structural::RoofApex;
+    use ber_model::ber::structural::CeilingApex;
     let mut c = ceiling_ready_controller();
     ceiling_step_to_amount_at_x4(&mut c);
     c.assign_ceiling_step_delta(0.3).unwrap(); // right of x = 4 at 2.7
@@ -6160,18 +6160,18 @@ fn boundary_ridge_over_a_step_full_fixpoint_and_gable_walls() {
     // outline walls y = 0 / y = 10 at x = 7.
     let record = c.current_record.as_mut().unwrap();
     for y in [0.0, 10.0] {
-        record.data.add_roof_apex(
+        record.data.add_ceiling_apex(
             0,
-            RoofApex {
+            CeilingApex {
                 point: Point2f64::new(7.0, y),
                 z_m: 4.5,
             },
         );
     }
     c.mark_dirty().unwrap();
-    // Commit-style canonicalize: compose the apexes into the roofs (regions-as-
-    // truth), derive, then rebuild the session step list from the derived roofs.
-    c.recompose_roofs(0);
+    // Commit-style canonicalize: compose the apexes into the ceilings (regions-as-
+    // truth), derive, then rebuild the session step list from the derived ceilings.
+    c.recompose_ceilings(0);
     c.materialize();
     c.reconstruct_ceiling_step_regions_for(0);
     let before = roof_vertex_fingerprint(&c);
@@ -6189,7 +6189,7 @@ fn boundary_ridge_over_a_step_full_fixpoint_and_gable_walls() {
     assert!((session[0].delta_m - 0.3).abs() < 1e-6);
     // The grouping authority links both boundary apexes into ONE ridge.
     let storey = &c.current_record.as_ref().unwrap().data.storeys[0];
-    let groups = storey.roofs.apex_groups(&storey.roof_apexes);
+    let groups = storey.ceilings.apex_groups(&storey.ceiling_apexes);
     assert_eq!(groups.len(), 1);
     assert_eq!(groups[0].apex_idxs.len(), 2, "a gable ridge");
     // The gable walls: the outline walls under the ridge ends (y = 0 and
@@ -6212,7 +6212,7 @@ fn boundary_ridge_over_a_step_full_fixpoint_and_gable_walls() {
     c.flush_if_dirty().unwrap();
     c.open_ber(&id).unwrap();
     let storey = &c.current_record.as_ref().unwrap().data.storeys[0];
-    assert_eq!(storey.roof_apexes.len(), 2, "apex pair persisted");
+    assert_eq!(storey.ceiling_apexes.len(), 2, "apex pair persisted");
     let session = &c.ceiling_step_regions[&0];
     assert_eq!(session.len(), 1, "merged area reconstructed");
     c.mark_dirty().unwrap();
@@ -6236,16 +6236,16 @@ fn deleting_one_ridge_apex_degrades_to_a_fan() {
     c.assign_roof_ridge_height(4.2).unwrap();
     c.materialize();
 
-    c.delete_roof_apex(0);
+    c.delete_ceiling_apex(0);
     c.materialize();
     let storey = &c.current_record.as_ref().unwrap().data.storeys[0];
-    assert_eq!(storey.roof_apexes.len(), 1, "one apex left");
-    let groups = storey.roofs.apex_groups(&storey.roof_apexes);
+    assert_eq!(storey.ceiling_apexes.len(), 1, "one apex left");
+    let groups = storey.ceilings.apex_groups(&storey.ceiling_apexes);
     assert_eq!(groups.len(), 1);
     assert_eq!(groups[0].apex_idxs.len(), 1, "ridge degraded to a fan");
     assert!(c.roof_ridge_views().is_empty(), "no two-apex overlay left");
     let zs: Vec<f64> = storey
-        .roofs
+        .ceilings
         .regions
         .iter()
         .flat_map(|r| r.polygon.exterior.iter().map(|v| v.z))
@@ -6316,7 +6316,7 @@ fn roof_ridge_rejections_keep_the_pending_and_bad_strokes_never_pend() {
     assert!(err.contains("within a centimetre"), "got: {err}");
     assert!(c.roof_ridge_height_pending(), "pending intact on rejection");
     let storey = &c.current_record.as_ref().unwrap().data.storeys[0];
-    assert!(storey.roof_apexes.is_empty(), "nothing committed");
+    assert!(storey.ceiling_apexes.is_empty(), "nothing committed");
 
     c.assign_roof_ridge_height(4.2).expect("valid height lands");
     assert!(!c.roof_ridge_pending());
@@ -6389,7 +6389,7 @@ fn roof_ridge_foldover_is_rejected_at_finalize_not_the_height_stage() {
         "the un-fixable Height stage is never reached"
     );
     let storey = &c.current_record.as_ref().unwrap().data.storeys[0];
-    assert!(storey.roof_apexes.is_empty(), "nothing committed");
+    assert!(storey.ceiling_apexes.is_empty(), "nothing committed");
 }
 
 /// SKIP-PATH FINALIZE REJECTIONS SURFACE (L1): a Skip at the last open
@@ -6548,8 +6548,8 @@ fn roof_ridge_wall_to_wall_draw_succeeds_end_to_end() {
     assert!(!c.roof_ridge_pending(), "flow complete");
     c.materialize();
     let storey = &c.current_record.as_ref().unwrap().data.storeys[0];
-    assert_eq!(storey.roof_apexes.len(), 2, "both apexes durable");
-    for (apex, want_y) in storey.roof_apexes.iter().zip([0.0, 10.0]) {
+    assert_eq!(storey.ceiling_apexes.len(), 2, "both apexes durable");
+    for (apex, want_y) in storey.ceiling_apexes.iter().zip([0.0, 10.0]) {
         assert!(
             (apex.point.y - want_y).abs() < 1e-9,
             "apex exactly ON the wall (got {:?})",
@@ -6606,8 +6606,8 @@ fn roof_ridge_along_an_outline_wall_raises_it_as_a_mono_pitch() {
     c.assign_roof_ridge_height(3.0).expect("height applies");
     assert!(!c.roof_ridge_pending(), "ridge finalized");
     let storey = &c.current_record.as_ref().unwrap().data.storeys[0];
-    assert_eq!(storey.roof_apexes.len(), 2, "both apexes durable");
-    for apex in &storey.roof_apexes {
+    assert_eq!(storey.ceiling_apexes.len(), 2, "both apexes durable");
+    for apex in &storey.ceiling_apexes {
         assert!(
             (apex.point.x - 6.0).abs() < 1e-6,
             "apex on the outline wall x = 6 (got {:?})",
@@ -6658,7 +6658,7 @@ fn centre_button_centres_cross_and_start_within_the_area() {
 
     c.assign_roof_ridge_height(4.2).expect("ridge assigns");
     let storey = &c.current_record.as_ref().unwrap().data.storeys[0];
-    for (apex, want_y) in storey.roof_apexes.iter().zip([3.0, 7.0]) {
+    for (apex, want_y) in storey.ceiling_apexes.iter().zip([3.0, 7.0]) {
         assert!((apex.point.x - 5.0).abs() < 1e-6);
         assert!((apex.point.y - want_y).abs() < 1e-6);
     }
@@ -6791,13 +6791,13 @@ fn roof_rect_closed_stroke_flow_with_centre_forms_a_pavilion() {
     assert!(!c.roof_rect_pending(), "flow complete");
     c.materialize();
     let storey = &c.current_record.as_ref().unwrap().data.storeys[0];
-    assert_eq!(storey.roof_apexes.len(), 4, "four corner apexes durable");
-    let groups = storey.roofs.apex_groups(&storey.roof_apexes);
+    assert_eq!(storey.ceiling_apexes.len(), 4, "four corner apexes durable");
+    let groups = storey.ceilings.apex_groups(&storey.ceiling_apexes);
     assert_eq!(groups.len(), 1, "ONE group");
     assert_eq!(groups[0].apex_idxs.len(), 4, "…holding all four corners");
     assert!(
         storey
-            .roofs
+            .ceilings
             .regions
             .iter()
             .any(|r| r.flat_z().is_some_and(|z| (z - 4.2).abs() < 1e-6)
@@ -6877,7 +6877,7 @@ fn roof_rect_rejections_keep_stages_open_and_cancel_recovers() {
     assert!(err.contains("centimetre"), "got: {err}");
     assert!(c.roof_rect_height_pending());
     let storey = &c.current_record.as_ref().unwrap().data.storeys[0];
-    assert!(storey.roof_apexes.is_empty(), "nothing committed");
+    assert!(storey.ceiling_apexes.is_empty(), "nothing committed");
     c.cancel_pending_roof_rect();
     assert!(!c.roof_rect_pending(), "cancel recovers");
 }
@@ -6955,8 +6955,8 @@ fn roof_rect_survives_reload_and_rederive_fixpoint() {
     c.flush_if_dirty().unwrap();
     c.open_ber(&id).unwrap();
     let storey = &c.current_record.as_ref().unwrap().data.storeys[0];
-    assert_eq!(storey.roof_apexes.len(), 4, "corner apexes persisted");
-    let groups = storey.roofs.apex_groups(&storey.roof_apexes);
+    assert_eq!(storey.ceiling_apexes.len(), 4, "corner apexes persisted");
+    let groups = storey.ceilings.apex_groups(&storey.ceiling_apexes);
     assert_eq!(groups.len(), 1);
     assert_eq!(groups[0].apex_idxs.len(), 4, "still one rect group");
     assert!(
@@ -7029,7 +7029,7 @@ fn roof_rect_over_a_step_full_fixpoint() {
         "durable step list mirrors the session"
     );
     let storey = &c.current_record.as_ref().unwrap().data.storeys[0];
-    let groups = storey.roofs.apex_groups(&storey.roof_apexes);
+    let groups = storey.ceilings.apex_groups(&storey.ceiling_apexes);
     assert_eq!(groups.len(), 1);
     assert_eq!(groups[0].apex_idxs.len(), 4);
 
@@ -7038,7 +7038,7 @@ fn roof_rect_over_a_step_full_fixpoint() {
     c.flush_if_dirty().unwrap();
     c.open_ber(&id).unwrap();
     let storey = &c.current_record.as_ref().unwrap().data.storeys[0];
-    assert_eq!(storey.roof_apexes.len(), 4, "apexes persisted");
+    assert_eq!(storey.ceiling_apexes.len(), 4, "apexes persisted");
     let session = &c.ceiling_step_regions[&0];
     assert_eq!(session.len(), 1, "merged area reconstructed");
     c.mark_dirty().unwrap();
@@ -7096,7 +7096,7 @@ fn flush_riser_merge_survives_reload_and_rederive_fixpoint() {
         }],
     );
     c.mark_dirty().unwrap();
-    c.recompose_roofs(0); // regions-as-truth: compose the step into the roofs
+    c.recompose_ceilings(0); // regions-as-truth: compose the step into the ceilings
     c.reconstruct_ceiling_step_regions_for(0); // mirror to the durable field
     c.materialize();
     let walls_fingerprint = |c: &AppController| {
@@ -7144,24 +7144,24 @@ fn flush_riser_merge_survives_reload_and_rederive_fixpoint() {
 /// drawn flow can't land EXACTLY on the wall yet.)
 #[test]
 fn roof_rect_touching_one_wall_makes_a_mono_gable_wall() {
-    use ber_model::ber::structural::RoofApex;
+    use ber_model::ber::structural::CeilingApex;
     let mut c = roof_ready_controller();
     let record = c.current_record.as_mut().unwrap();
     for (x, y) in [(3.0, 0.0), (7.0, 0.0), (7.0, 4.0), (3.0, 4.0)] {
-        record.data.add_roof_apex(
+        record.data.add_ceiling_apex(
             0,
-            RoofApex {
+            CeilingApex {
                 point: Point2f64::new(x, y),
                 z_m: 4.5,
             },
         );
     }
     c.mark_dirty().unwrap();
-    c.recompose_roofs(0); // regions-as-truth: compose the apexes into the roofs
+    c.recompose_ceilings(0); // regions-as-truth: compose the apexes into the ceilings
     c.materialize();
     c.reconstruct_ceiling_step_regions_for(0);
     let storey = &c.current_record.as_ref().unwrap().data.storeys[0];
-    let groups = storey.roofs.apex_groups(&storey.roof_apexes);
+    let groups = storey.ceilings.apex_groups(&storey.ceiling_apexes);
     assert_eq!(groups.len(), 1);
     assert_eq!(groups[0].apex_idxs.len(), 4, "one rect group");
     // The wall under the touching side (y = 0) carries the on-wall corners
@@ -7224,7 +7224,7 @@ fn roof_ridge_end_snap_reanchors_a_typed_length_at_the_wall() {
     );
     c.assign_roof_ridge_height(4.0).expect("gable end assigns");
     let storey = &c.current_record.as_ref().unwrap().data.storeys[0];
-    for (apex, want_y) in storey.roof_apexes.iter().zip([7.0, 10.0]) {
+    for (apex, want_y) in storey.ceiling_apexes.iter().zip([7.0, 10.0]) {
         assert!((apex.point.y - want_y).abs() < 1e-6);
     }
 }
@@ -7735,9 +7735,9 @@ fn users_l_session_raised_section_wall_tops_follow_the_step() {
     let storey = &c.current_record.as_ref().unwrap().data.storeys[0];
     println!("{}", document::debug_dump_storey(storey, "users-L"));
 
-    // Roofs: raised piece at 3.4 over the jut, remainder at 2.4.
+    // Ceilings: raised piece at 3.4 over the jut, remainder at 2.4.
     let zs: Vec<f64> = storey
-        .roofs
+        .ceilings
         .regions
         .iter()
         .filter_map(|r| r.flat_z())
@@ -7862,7 +7862,7 @@ fn users_l_session_raised_section_wall_tops_follow_the_step() {
     assert_eq!(ids.len(), 8, "ids unique");
 
     // And the raised tops + risers SURVIVE persist → reload → re-derive (the
-    // session step areas are reconstructed from the persisted floors/roofs;
+    // session step areas are reconstructed from the persisted floors/ceilings;
     // without that the next commit would flatten the walls back to 2.4).
     c.commit_to_ber().unwrap();
     let id = c.current_record.as_ref().unwrap().id;
@@ -8038,7 +8038,7 @@ fn users_l_session_ridge_placement_is_limited_to_the_raised_area_and_height_land
         .expect("no late rejection at the height stage");
     assert!(!c.roof_ridge_pending(), "flow complete");
     let storey = &c.current_record.as_ref().unwrap().data.storeys[0];
-    assert_eq!(storey.roof_apexes.len(), 2, "both apexes durable");
+    assert_eq!(storey.ceiling_apexes.len(), 2, "both apexes durable");
 }
 
 // ─── Riser exposure: the 2D dashed-line picker ──────────────────────────────
@@ -8295,14 +8295,14 @@ fn stepped_ceiling_below_controller() -> AppController {
         .expect("step region builds");
     c.ceiling_step_regions.entry(0).or_default().push(region);
     c.mark_dirty().unwrap();
-    c.recompose_roofs(0); // regions-as-truth: compose the step into the roofs
+    c.recompose_ceilings(0); // regions-as-truth: compose the step into the ceilings
     c.materialize();
     c.reconstruct_ceiling_step_regions_for(0); // canonicalize, assign parity
     c
 }
 
 /// A record SAVED WITH the durable field restores its step list on load WITHOUT
-/// touching the geometry — even if the roofs were (hypothetically) flattened,
+/// touching the geometry — even if the ceilings were (hypothetically) flattened,
 /// the durable list is the source the editor restores.
 #[test]
 fn durable_steps_restore_without_inference() {
@@ -8517,7 +8517,7 @@ fn choose_suggest_with_only_sliver_flat_areas_says_too_small() {
             Point2f64::new(0.0, 0.6),
         ];
         below.floors = FloorRegions::new(ring.clone(), Default::default());
-        below.roofs = CeilingRegions::default_for_footprint(vec![ring], 2.4, Default::default());
+        below.ceilings = CeilingRegions::default_for_footprint(vec![ring], 2.4, Default::default());
     }
     assert!(
         c.new_storey_prompt().unwrap().can_suggest,
@@ -9666,12 +9666,12 @@ fn auto_expose_all_storeys_carves_and_stamps_setback_party_surfaces() {
 
     // Lower storey's CEILING split, the piece under the upper → Party.
     assert!(
-        storeys[0].roofs.regions.len() >= 2,
+        storeys[0].ceilings.regions.len() >= 2,
         "lower ceiling carved by the upper footprint"
     );
     assert!(
         storeys[0]
-            .roofs
+            .ceilings
             .regions
             .iter()
             .any(|r| r.exposure == CeilingExposure::Party),
@@ -10038,7 +10038,7 @@ fn ceiling_exposure_set_all_then_assign_marks_every_ceiling() {
 
     c.set_ceiling_exposure_select_mode(Some(SelectMode::All));
     let n_regions: usize = c.current_record.as_ref().unwrap().data.storeys[0]
-        .roofs
+        .ceilings
         .regions
         .len();
     assert!(n_regions >= 1);
@@ -10053,7 +10053,7 @@ fn ceiling_exposure_set_all_then_assign_marks_every_ceiling() {
     let rec = c.current_record.as_ref().unwrap();
     assert!(
         rec.data.storeys[0]
-            .roofs
+            .ceilings
             .regions
             .iter()
             .all(|r| r.exposure == CeilingExposure::ExposedRoof),
@@ -10069,7 +10069,7 @@ fn ceiling_exposure_click_toggles_one_region() {
     c.set_default_ceiling_height(2.4).unwrap();
     c.materialize();
     let region = &c.current_record.as_ref().unwrap().data.storeys[0]
-        .roofs
+        .ceilings
         .regions[0];
     let centre = region.centroid();
 
@@ -10115,12 +10115,12 @@ fn ceiling_exposure_auto_leaves_top_ceiling_unset() {
 
     let s = &c.current_record.as_ref().unwrap().data.storeys;
     assert_eq!(
-        s[0].roofs.regions[0].exposure,
+        s[0].ceilings.regions[0].exposure,
         CeilingExposure::Party,
         "the intermediate ceiling (under the storey above) auto-derives Party"
     );
     assert_eq!(
-        s[1].roofs.regions[0].exposure,
+        s[1].ceilings.regions[0].exposure,
         CeilingExposure::Unset,
         "the top ceiling is left Unset for the assessor, not auto ExposedRoof"
     );
@@ -10142,8 +10142,8 @@ fn ceiling_exposure_carve_dimensions_then_splits_the_labellable_ceiling() {
     c.materialize();
     {
         let s = &c.current_record.as_ref().unwrap().data.storeys;
-        assert_eq!(s[0].roofs.regions.len(), 1);
-        assert_eq!(s[1].roofs.regions.len(), 1);
+        assert_eq!(s[0].ceilings.regions.len(), 1);
+        assert_eq!(s[1].ceilings.regions.len(), 1);
     }
 
     c.set_ceiling_exposure_mode(true);
@@ -10151,8 +10151,8 @@ fn ceiling_exposure_carve_dimensions_then_splits_the_labellable_ceiling() {
     c.materialize();
     {
         let s = &c.current_record.as_ref().unwrap().data.storeys;
-        assert_eq!(s[0].roofs.regions[0].exposure, CeilingExposure::Party);
-        assert_eq!(s[1].roofs.regions[0].exposure, CeilingExposure::Unset);
+        assert_eq!(s[0].ceilings.regions[0].exposure, CeilingExposure::Party);
+        assert_eq!(s[1].ceilings.regions[0].exposure, CeilingExposure::Unset);
     }
     c.set_ceiling_exposure_select_mode(Some(SelectMode::Carve));
 
@@ -10179,11 +10179,11 @@ fn ceiling_exposure_carve_dimensions_then_splits_the_labellable_ceiling() {
         // surrounding frame (`split_faces_coplanar` may tessellate the frame into
         // more than one piece, unlike the floor boolean — so assert "carved", > 1).
         assert!(
-            s[1].roofs.regions.len() > 1,
+            s[1].ceilings.regions.len() > 1,
             "top (labellable) ceiling carved into the inner piece + frame"
         );
         assert_eq!(
-            s[0].roofs.regions.len(),
+            s[0].ceilings.regions.len(),
             1,
             "party lower ceiling left untouched"
         );
@@ -10197,14 +10197,14 @@ fn ceiling_exposure_carve_dimensions_then_splits_the_labellable_ceiling() {
     c.materialize();
     let s = &c.current_record.as_ref().unwrap().data.storeys;
     assert!(
-        s[1].roofs
+        s[1].ceilings
             .regions
             .iter()
             .any(|r| r.exposure == CeilingExposure::ExposedRoof),
         "the carved top piece took the assigned exposure"
     );
     assert_eq!(
-        s[0].roofs.regions[0].exposure,
+        s[0].ceilings.regions[0].exposure,
         CeilingExposure::Party,
         "the party lower ceiling is unaffected"
     );
@@ -10277,9 +10277,9 @@ fn ceiling_exposure_cut_picks_side_dimensions_then_splits_the_labellable_ceiling
     c.materialize();
     {
         let s = &c.current_record.as_ref().unwrap().data.storeys;
-        assert_eq!(s[0].roofs.regions[0].exposure, CeilingExposure::Party);
-        assert_eq!(s[1].roofs.regions[0].exposure, CeilingExposure::Unset);
-        assert_eq!(s[1].roofs.regions.len(), 1, "top ceiling whole");
+        assert_eq!(s[0].ceilings.regions[0].exposure, CeilingExposure::Party);
+        assert_eq!(s[1].ceilings.regions[0].exposure, CeilingExposure::Unset);
+        assert_eq!(s[1].ceilings.regions.len(), 1, "top ceiling whole");
     }
     c.set_ceiling_exposure_select_mode(Some(SelectMode::Carve));
 
@@ -10297,7 +10297,7 @@ fn ceiling_exposure_cut_picks_side_dimensions_then_splits_the_labellable_ceiling
     );
     assert_eq!(
         c.current_record.as_ref().unwrap().data.storeys[1]
-            .roofs
+            .ceilings
             .regions
             .len(),
         1,
@@ -10326,10 +10326,10 @@ fn ceiling_exposure_cut_picks_side_dimensions_then_splits_the_labellable_ceiling
     {
         let s = &c.current_record.as_ref().unwrap().data.storeys;
         assert!(
-            s[1].roofs.regions.len() > 1,
+            s[1].ceilings.regions.len() > 1,
             "top (labellable) ceiling cut into pieces"
         );
-        assert_eq!(s[0].roofs.regions.len(), 1, "party lower ceiling untouched");
+        assert_eq!(s[0].ceilings.regions.len(), 1, "party lower ceiling untouched");
     }
     assert!(
         !c.ceiling_exposure_selected_ids().is_empty(),
@@ -10339,7 +10339,7 @@ fn ceiling_exposure_cut_picks_side_dimensions_then_splits_the_labellable_ceiling
 
 /// FIX 1 (multi-storey undo): on a 2-storey SETBACK stack,
 /// `auto_expose_all_storeys` pushes carves onto EVERY storey's
-/// `floor_splits`/`roof_splits` — so undo must revert the whole stack, not just
+/// `floor_splits`/`ceiling_splits` — so undo must revert the whole stack, not just
 /// the active storey. Capture every storey's split counts + exposures before the
 /// pass; assert undo restores ALL of them (no leftover carves on the non-active
 /// storey, no surviving party exposure).
@@ -10364,7 +10364,7 @@ fn auto_expose_all_storeys_undo_reverts_every_storey() {
             .data
             .storeys
             .iter()
-            .map(|s| (s.floor_splits.len(), s.roof_splits.len()))
+            .map(|s| (s.floor_splits.len(), s.ceiling_splits.len()))
             .collect()
     };
     let before = split_counts(&c);
@@ -10392,7 +10392,7 @@ fn auto_expose_all_storeys_undo_reverts_every_storey() {
             "upper floor has a party piece"
         );
         assert!(
-            s[0].roofs
+            s[0].ceilings
                 .regions
                 .iter()
                 .any(|r| r.exposure == CeilingExposure::Party),
@@ -10405,7 +10405,7 @@ fn auto_expose_all_storeys_undo_reverts_every_storey() {
     let restored = split_counts(&c);
     assert_eq!(
         restored, before,
-        "undo reverts EVERY storey's floor_splits/roof_splits (no leftover \
+        "undo reverts EVERY storey's floor_splits/ceiling_splits (no leftover \
          carves on the non-active storey)"
     );
     // And the party exposures are gone — every floor/ceiling region back to its
@@ -10423,7 +10423,7 @@ fn auto_expose_all_storeys_undo_reverts_every_storey() {
         );
         assert!(
             !s[0]
-                .roofs
+                .ceilings
                 .regions
                 .iter()
                 .any(|r| r.exposure == CeilingExposure::Party),
@@ -10459,7 +10459,7 @@ fn auto_expose_all_storeys_party_pieces_marked_without_explicit_loop() {
         "the over-lower floor piece is still NonHeatLoss"
     );
     assert!(
-        s[0].roofs
+        s[0].ceilings
             .regions
             .iter()
             .any(|r| r.exposure == CeilingExposure::Party),
@@ -10469,7 +10469,7 @@ fn auto_expose_all_storeys_party_pieces_marked_without_explicit_loop() {
 
 /// FIX 3 (dedup carve splits): re-running `auto_expose_all_storeys` a second time
 /// replans the SAME (idempotent) party geometry — the dedup must keep
-/// `floor_splits`/`roof_splits` from growing.
+/// `floor_splits`/`ceiling_splits` from growing.
 #[test]
 fn auto_expose_all_storeys_twice_does_not_grow_splits() {
     let mut c = dimensioned_square_controller();
@@ -10488,7 +10488,7 @@ fn auto_expose_all_storeys_twice_does_not_grow_splits() {
             .data
             .storeys
             .iter()
-            .map(|s| (s.floor_splits.len(), s.roof_splits.len()))
+            .map(|s| (s.floor_splits.len(), s.ceiling_splits.len()))
             .collect()
     };
     let first = counts(&c);
@@ -10499,7 +10499,7 @@ fn auto_expose_all_storeys_twice_does_not_grow_splits() {
 
     assert_eq!(
         first, second,
-        "a second auto-pass must not grow floor_splits/roof_splits (dedup)"
+        "a second auto-pass must not grow floor_splits/ceiling_splits (dedup)"
     );
 }
 
@@ -10703,7 +10703,7 @@ fn ceiling_carve_reference_segments_include_the_roof_division() {
     // Two roof regions now, divided at x=4.
     assert_eq!(
         c.current_record.as_ref().unwrap().data.storeys[0]
-            .roofs
+            .ceilings
             .regions
             .len(),
         2,

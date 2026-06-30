@@ -1,5 +1,5 @@
 //! The CEILING-exposure TOOL (Stages 2-4) — the mirror of the floor-exposure
-//! tool ([`floor_exposure`](super::floor_exposure)) for the storey `roofs`
+//! tool ([`floor_exposure`](super::floor_exposure)) for the storey `ceilings`
 //! regions and [`CeilingExposure`]. The tool drives the manual half of
 //! ceiling-exposure marking, layered on top of the shared Stage-1 inter-storey
 //! party auto-pass ([`auto_expose_all_storeys`](Self::auto_expose_all_storeys),
@@ -12,9 +12,9 @@
 //! HIDDEN/auto class is `Party` (the ceiling analogue of floors' `NonHeatLoss`):
 //! the view + selection + carve filter OUT `Party` ceilings, showing only the
 //! to-be-set ones. Differences from the floor tool: surfaces are
-//! `storey.roofs.regions` (`SurfaceKind::Roofs`); a carve splits ROOFS — it
-//! pushes the dimensioned ring onto each overlapped storey's `roof_splits`, then
-//! `recompose_roofs` applies it (roofs are regions-as-truth).
+//! `storey.ceilings.regions` (`SurfaceKind::Ceilings`); a carve splits ROOFS — it
+//! pushes the dimensioned ring onto each overlapped storey's `ceiling_splits`, then
+//! `recompose_ceilings` applies it (ceilings are regions-as-truth).
 use super::*;
 use crate::controller::app_controller::SelectMode;
 use ber_model::ber::structural::CeilingExposure;
@@ -139,9 +139,9 @@ impl AppController {
         // store its centroid key (stable across re-resolves, unlike the id).
         let mut best: Option<(f64, usize, document::CentroidKey)> = None;
         for (idx, storey) in record.data.storeys.iter().enumerate() {
-            if let Some(id) = storey.surface_at(SurfaceKind::Roofs, world_x, world_y, tol) {
+            if let Some(id) = storey.surface_at(SurfaceKind::Ceilings, world_x, world_y, tol) {
                 if let Some(region) = storey
-                    .roofs
+                    .ceilings
                     .regions
                     .iter()
                     // Party ceilings aren't shown, so a tap can't select one.
@@ -168,7 +168,7 @@ impl AppController {
     /// [`apply_floor_exposure_carve_stroke`](Self::apply_floor_exposure_carve_stroke).
     /// Drawing the region puts it into the live dimensioning buffer as a
     /// `PhaseArea` shape; once fully dimensioned the ring is staged + committed
-    /// ([`stage_ceiling_exposure_carve`]), splitting the roofs on every
+    /// ([`stage_ceiling_exposure_carve`]), splitting the ceilings on every
     /// overlapping storey and selecting the resulting piece(s). A straight cut
     /// (two halves) isn't supported — this tool requires a closed carve region —
     /// so a `Cut` outcome is ignored.
@@ -202,7 +202,7 @@ impl AppController {
         let pts = manip_plan::snap_stroke_to_segments(&raw, &ref_segments, snap_tol);
         // Host the in-flight carve's dimensioning on a reference storey (the
         // PhaseArea buffer lives on the active storey). Reuse the floor tool's
-        // reference-storey pick (footprints are shared by floors + roofs).
+        // reference-storey pick (footprints are shared by floors + ceilings).
         let Some(ref_idx) = self.floor_exposure_reference_storey() else {
             return;
         };
@@ -210,7 +210,7 @@ impl AppController {
         self.document.active = ActiveShape::Outline;
         self.load_active_into_buffer();
         // Clip the carve to the WHOLE BUILDING footprint (union of every storey's
-        // floor — roofs share the footprint extent), NOT just the active/reference
+        // floor — ceilings share the footprint extent), NOT just the active/reference
         // storey's outline, so a carve drawn over area belonging to another storey
         // isn't clipped away. Each storey's roof is still clipped individually when
         // the split is applied. Falls back to the reference storey's outline.
@@ -249,7 +249,7 @@ impl AppController {
     /// onto BEFORE the whole-building clip — features that aren't on the carve's
     /// boundary outline but ARE real ceiling edges the assessor traces toward:
     ///
-    /// - **Roof-region division edges** — every storey's `roofs.regions[*]`
+    /// - **Roof-region division edges** — every storey's `ceilings.regions[*]`
     ///   exterior, as consecutive vertex pairs projected to xy (z dropped). This
     ///   includes the flat/sloped-ridge split ("end of the roof").
     /// - **Wall base edges** — every storey's `walls.regions[*].base_edge()`
@@ -269,7 +269,7 @@ impl AppController {
         let mut segments: Vec<[Point2f32; 2]> = Vec::new();
         for storey in &record.data.storeys {
             // Roof-region edges (incl. the flat/sloped division).
-            for region in &storey.roofs.regions {
+            for region in &storey.ceilings.regions {
                 let ext = &region.polygon.exterior;
                 let n = ext.len();
                 for i in 0..n {
@@ -437,7 +437,7 @@ impl AppController {
         }
     }
 
-    /// Capture the dimensioned carve ring and SPLIT the roofs on every storey
+    /// Capture the dimensioned carve ring and SPLIT the ceilings on every storey
     /// whose footprint the ring overlaps, then SELECT the resulting carved
     /// piece(s) — the ceiling mirror of
     /// [`stage_floor_exposure_carve`](Self::stage_floor_exposure_carve). The undo
@@ -459,8 +459,8 @@ impl AppController {
         self.commit_ceiling_exposure_carve(&ring);
     }
 
-    /// Push the carve `ring` onto the durable `roof_splits` of every storey whose
-    /// ROOF footprint it overlaps, recompose each (roofs are regions-as-truth),
+    /// Push the carve `ring` onto the durable `ceiling_splits` of every storey whose
+    /// ROOF footprint it overlaps, recompose each (ceilings are regions-as-truth),
     /// re-resolve the whole stack, then add the resulting carved ceiling piece(s)
     /// to the selection. Only storeys with a LABELLABLE (non-party) ceiling under
     /// the ring are split. No undo snapshot here — the caller pushed the full
@@ -496,15 +496,15 @@ impl AppController {
                 .as_mut()
                 .and_then(|r| r.data.storeys.get_mut(*idx))
             {
-                storey.push_structure_split(SurfaceKind::Roofs, ring, Vec::new());
+                storey.push_structure_split(SurfaceKind::Ceilings, ring, Vec::new());
             }
-            // Roofs are regions-as-truth — `resolve_storey` only re-fits them, so
-            // the `roof_splits` carve must be applied via `recompose_roofs` (it
+            // Ceilings are regions-as-truth — `resolve_storey` only re-fits them, so
+            // the `ceiling_splits` carve must be applied via `recompose_ceilings` (it
             // reads the durable field) before the re-resolve.
-            self.recompose_roofs(*idx);
+            self.recompose_ceilings(*idx);
         }
         let _ = self.mark_dirty();
-        // Re-resolve EVERY storey so each overlapping storey's recomposed roofs +
+        // Re-resolve EVERY storey so each overlapping storey's recomposed ceilings +
         // stamps land; keep the derived revision in step so a later no-edit
         // materialize is a no-op.
         self.refresh_all_storeys();
@@ -529,8 +529,8 @@ impl AppController {
                 // Area-fraction test (not centroid): select only the ceiling
                 // pieces actually INSIDE the carved/chosen ring, so an L-shaped
                 // cut remainder (centroid in the notch) is NOT picked.
-                let ids = s.surfaces_mostly_in_ring(SurfaceKind::Roofs, region_ring, 0.5);
-                s.roofs
+                let ids = s.surfaces_mostly_in_ring(SurfaceKind::Ceilings, region_ring, 0.5);
+                s.ceilings
                     .regions
                     .iter()
                     // Only the labellable (non-party) ceilings are shown/selectable.
@@ -553,7 +553,7 @@ impl AppController {
         };
         let mut keys: HashSet<(usize, document::CentroidKey)> = HashSet::new();
         for (idx, storey) in record.data.storeys.iter().enumerate() {
-            for region in &storey.roofs.regions {
+            for region in &storey.ceilings.regions {
                 // Party ceilings aren't shown/labellable, so neither seed tool
                 // touches them. `All` = every labellable ceiling; `Remaining` =
                 // the still-`Unset` ones.
@@ -610,7 +610,7 @@ impl AppController {
             .map(|(idx, storey)| CeilingExposureStoreyView {
                 idx,
                 regions: storey
-                    .roofs
+                    .ceilings
                     .regions
                     .iter()
                     // Party ceilings are auto-classified and need no label.

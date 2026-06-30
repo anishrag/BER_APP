@@ -3,7 +3,7 @@ use serde::{Deserialize, Serialize};
 use super::common::{ConstructionPhases, ItemId, Photo, Year};
 use super::fenestration::{Frame, Glazing, WindowNameSpecifics, WindowType};
 use super::structural::{
-    CeilingConstruction, FloorConstruction, RoofApex, RoofApexHint, Storey, ThermalMassInfo,
+    CeilingConstruction, FloorConstruction, CeilingApex, CeilingApexHint, Storey, ThermalMassInfo,
     WallConstruction,
 };
 use super::systems::{HeatingSystem, SolarElements, VentilationSystem};
@@ -40,7 +40,7 @@ pub struct Ber {
     pub solar: Vec<SolarElements>,
     pub photos: Vec<Photo>,
     /// The dwelling ROOF — the external roof structure(s) over the top storey,
-    /// SEPARATE from each storey's ceiling (`Storey::roofs` / the roof-point
+    /// SEPARATE from each storey's ceiling (`Storey::ceilings` / the roof-point
     /// apexes). Drawn area-by-area in the Phase-1 roof step; only modelled when it
     /// matters (dual attic insulation, solar on the roof). `#[serde(default)]` so
     /// older records load with no roof.
@@ -315,7 +315,7 @@ impl Ber {
                         let anchor = storey
                             .floors
                             .footprint_ring()
-                            .and_then(|fp| below.roofs.lowest_flat_z_over(&fp))
+                            .and_then(|fp| below.ceilings.lowest_flat_z_over(&fp))
                             .unwrap_or(below_height);
                         anchor + t
                     }
@@ -398,26 +398,26 @@ impl Ber {
     /// matching only holds when the stored apex survives that round-trip.
     /// Shell-originated coordinates already do; this makes the fixpoint hold
     /// for ANY caller (imports, fixtures) by construction.
-    pub fn add_roof_apex(&mut self, storey_idx: usize, mut apex: RoofApex) {
-        apex.point = RoofApex::quantize_point(apex.point);
+    pub fn add_ceiling_apex(&mut self, storey_idx: usize, mut apex: CeilingApex) {
+        apex.point = CeilingApex::quantize_point(apex.point);
         if let Some(storey) = self.storeys.get_mut(storey_idx) {
-            storey.roof_apexes.push(apex);
+            storey.ceiling_apexes.push(apex);
         }
     }
 
     /// Record a side hint for a boundary apex (a mono-pitch ridge along an
     /// internal junction): `apex_point` is matched to a stored apex; `region` is
     /// a point inside the area it should slope. The apex point is quantized to
-    /// match `add_roof_apex`'s storage so the hint keys correctly.
-    pub fn push_roof_apex_hint(
+    /// match `add_ceiling_apex`'s storage so the hint keys correctly.
+    pub fn push_ceiling_apex_hint(
         &mut self,
         storey_idx: usize,
         apex_point: Point2f64,
         region: (f32, f32),
     ) {
-        let q = RoofApex::quantize_point(apex_point);
+        let q = CeilingApex::quantize_point(apex_point);
         if let Some(storey) = self.storeys.get_mut(storey_idx) {
-            storey.roof_apex_hints.push(RoofApexHint {
+            storey.ceiling_apex_hints.push(CeilingApexHint {
                 apex: (q.x as f32, q.y as f32),
                 region,
             });
@@ -429,8 +429,8 @@ impl Ber {
     /// of range.
     pub fn remove_roof_apex(&mut self, storey_idx: usize, apex_idx: usize) {
         if let Some(storey) = self.storeys.get_mut(storey_idx) {
-            if apex_idx < storey.roof_apexes.len() {
-                storey.roof_apexes.remove(apex_idx);
+            if apex_idx < storey.ceiling_apexes.len() {
+                storey.ceiling_apexes.remove(apex_idx);
             }
         }
     }

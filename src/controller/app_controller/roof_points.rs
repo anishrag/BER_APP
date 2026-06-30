@@ -5,7 +5,7 @@
 //! Assigning fans the containing ceiling region up (or down) to the apex —
 //! one triangle per boundary edge.
 //!
-//! Unlike the ceiling steps, an apex IS durable input (`Storey::roof_apexes`,
+//! Unlike the ceiling steps, an apex IS durable input (`Storey::ceiling_apexes`,
 //! applied by the resolve projection AFTER the step areas — composition order
 //! is law: default ceiling → steps → apexes). What the shell owns here is the
 //! in-flight tap → position → height state machine, and the canonicalize step
@@ -15,7 +15,7 @@
 //! equals the post-reload reconstruction — the apex-over-step reload fixpoint.
 //! Outside undo — phases/steps/ceiling-steps parity.
 use super::*;
-use ber_model::ber::structural::RoofApex;
+use ber_model::ber::structural::CeilingApex;
 use document::LinePositionPrompt;
 
 /// The elective wall snap a pending roof point is carrying on ONE axis: the
@@ -117,7 +117,7 @@ impl AppController {
 
     /// Canvas tap dispatch for the roof-point flow: with the mode on and
     /// nothing pending, the tap places the point. Validated cheaply against
-    /// the outline ([`StoreyDoc::validate_roof_point`] — the resolved-roofs
+    /// the outline ([`StoreyDoc::validate_roof_point`] — the resolved-ceilings
     /// check runs at assign); then each axis tries the elective wall snap
     /// ([`StoreyDoc::snap_ceiling_step_line`], reused per axis — both snapped
     /// = a corner snap for free), and the first UN-snapped axis opens its
@@ -306,11 +306,11 @@ impl AppController {
     }
 
     /// Assign the apex height to the pending point: materialize (the
-    /// validation runs against the RESOLVED roofs), validate
+    /// validation runs against the RESOLVED ceilings), validate
     /// ([`document::validate_roof_apex`] — strictly inside one FLAT ceiling
     /// region, height that actually slopes it), then stamp the DURABLE input
-    /// (`Ber::add_roof_apex`), re-derive, and CANONICALIZE the session
-    /// ceiling-step list from the derived roofs (a fan over a stepped piece
+    /// (`Ber::add_ceiling_apex`), re-derive, and CANONICALIZE the session
+    /// ceiling-step list from the derived ceilings (a fan over a stepped piece
     /// re-emits the step as the fan's triangles — the in-session list must
     /// equal the post-reload reconstruction). The pending point stays open on
     /// rejection so the user can retype. Outside undo —
@@ -321,7 +321,7 @@ impl AppController {
         };
         let p = Point2f64::new(point.x as f64, point.y as f64);
         let idx = self.current_storey_idx.unwrap_or(0);
-        // Bring the derived roofs current — the apex is validated against the
+        // Bring the derived ceilings current — the apex is validated against the
         // resolved ceiling regions, not the editing buffer.
         self.materialize();
         let storey = self
@@ -334,19 +334,19 @@ impl AppController {
             .as_mut()
             .expect("checked above")
             .data
-            .add_roof_apex(
+            .add_ceiling_apex(
                 idx,
-                RoofApex {
+                CeilingApex {
                     point: p,
                     z_m: z_m as f64,
                 },
             );
         self.pending_roof_point = None;
         self.mark_dirty()?;
-        // Regions-as-truth: recompose the roofs from the durable apexes (+ the
+        // Regions-as-truth: recompose the ceilings from the durable apexes (+ the
         // session steps) ONCE, then re-derive. The session ceiling-step list is
-        // a display cache, refreshed from the resulting roofs.
-        self.recompose_roofs(idx);
+        // a display cache, refreshed from the resulting ceilings.
+        self.recompose_ceilings(idx);
         self.materialize();
         self.reconstruct_ceiling_step_regions_for(idx);
         Ok(())
@@ -360,14 +360,14 @@ impl AppController {
     /// The current storey's committed roof apexes as `(position, label)` in
     /// world coords (label e.g. "▲ 4.20 m") for the UI's markers + the
     /// toolbar list. Index-aligned with deletion (see
-    /// [`delete_roof_apex`](Self::delete_roof_apex)).
-    pub fn roof_apex_views(&self) -> Vec<((f64, f64), String)> {
+    /// [`delete_ceiling_apex`](Self::delete_ceiling_apex)).
+    pub fn ceiling_apex_views(&self) -> Vec<((f64, f64), String)> {
         let idx = self.current_storey_idx.unwrap_or(0);
         self.current_record
             .as_ref()
             .and_then(|r| r.data.storeys.get(idx))
             .map(|s| {
-                s.roof_apexes
+                s.ceiling_apexes
                     .iter()
                     .map(|a| ((a.point.x, a.point.y), format!("▲ {:.2} m", a.z_m)))
                     .collect()
@@ -380,7 +380,7 @@ impl AppController {
     /// re-flattens to its base on the next derive. Canonicalizes the session
     /// ceiling-step list afterwards, same as assign: the fan's triangle step
     /// pieces re-merge into the derived flat pieces. No-op if out of range.
-    pub fn delete_roof_apex(&mut self, index: usize) {
+    pub fn delete_ceiling_apex(&mut self, index: usize) {
         let Some(record) = self.current_record.as_mut() else {
             return;
         };
@@ -388,13 +388,13 @@ impl AppController {
         let Some(storey) = record.data.storeys.get(idx) else {
             return;
         };
-        if index >= storey.roof_apexes.len() {
+        if index >= storey.ceiling_apexes.len() {
             return;
         }
         let _ = storey; // index checked above; recompose rebuilds from inputs
         record.data.remove_roof_apex(idx, index);
         let _ = self.mark_dirty();
-        self.recompose_roofs(idx);
+        self.recompose_ceilings(idx);
         self.materialize();
         self.reconstruct_ceiling_step_regions_for(idx);
     }
