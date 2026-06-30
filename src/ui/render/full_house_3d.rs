@@ -105,6 +105,32 @@ pub fn render(
         );
     }
 
+    // The dwelling ROOF: a SEPARATE structure above the ceiling (not the ceiling
+    // itself). Each roof area's planes are derived from its shape/pitch/ridge/
+    // footprint, with z LOCAL to its covered storey — add that storey's floor
+    // datum to place them in world z, then draw each plane as a wireframe.
+    let roof_stroke = egui::Stroke::new(1.5, egui::Color32::from_rgb(150, 90, 60));
+    for area in &ber.roof.areas {
+        let Some(&datum) = z_offsets.get(area.storey_idx) else {
+            continue;
+        };
+        for plane in area.planes(ber_model::ber::roof::DEFAULT_OVERHANG_M) {
+            if plane.len() < 3 {
+                continue;
+            }
+            let pts: Vec<egui::Pos2> = plane
+                .iter()
+                .map(|v| {
+                    let (px, py) = view.project_3d(v.x, v.y, datum + v.z);
+                    t.apply(px, py)
+                })
+                .collect();
+            for i in 0..pts.len() {
+                painter.line_segment([pts[i], pts[(i + 1) % pts.len()]], roof_stroke);
+            }
+        }
+    }
+
     // Hotspot markers (Objects review): a bright dot at each world point.
     for &(x, y, z) in hotspots {
         let (px, py) = view.project_3d(x, y, z);
