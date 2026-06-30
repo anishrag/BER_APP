@@ -13,8 +13,8 @@
 //   - `persistence`   — BER record lifecycle, persist/autosave/snapshot.
 //   - `phase_regions` — construction-phase tagging workflow.
 //   - `review`        — the collinearity-review cursor.
-//   - `roof_points`   — roof-point (apex / sloped-ceiling) tagging.
-//   - `roof_ridges`   — roof-RIDGE line input (a stroke placing two apexes).
+//   - `ceiling_points`   — roof-point (apex / sloped-ceiling) tagging.
+//   - `ceiling_ridges`   — roof-RIDGE line input (a stroke placing two apexes).
 //   - `snap`          — elective-snap tags, choose/un-snap replay.
 //   - `step_regions`  — floor-step (raise/lower area) tagging workflow.
 //   - `storeys`       — storey switching + the deferred-derive pipeline.
@@ -82,9 +82,9 @@ mod history;
 mod new_storey;
 mod persistence;
 mod review;
-mod roof_points;
-mod roof_rects;
-mod roof_ridges;
+mod ceiling_points;
+mod ceiling_rects;
+mod ceiling_ridges;
 mod snap;
 mod step_regions;
 mod storeys;
@@ -119,9 +119,9 @@ pub use partition::{
 use persistence::PARAMETRIC_SNAPSHOT_VERSION;
 pub use photos::PhotoView;
 pub use review::CollinearityReview;
-use roof_points::PendingRoofPoint;
-use roof_rects::PendingRoofRect;
-use roof_ridges::{PendingRoofRidge, RidgeQuestion};
+use ceiling_points::PendingCeilingPoint;
+use ceiling_rects::PendingCeilingRect;
+use ceiling_ridges::{PendingCeilingRidge, RidgeQuestion};
 pub use snap::SnapTagView;
 use snap::{LastSnapAction, SnapAction};
 pub use strokes::PendingRedraw;
@@ -245,25 +245,25 @@ pub struct AppController {
     /// region up to a height, entered as a tap + per-axis position + height).
     /// Routes canvas taps to the point input; mutually exclusive with the
     /// other area tools. Toggled by the UI; same gate as the ceiling steps.
-    roof_point_mode: bool,
+    ceiling_point_mode: bool,
     /// The in-flight roof point, advanced stage by stage (tap → per-axis
     /// position → height). Transient — outside undo, cleared on storey
     /// switch / mode exit / cancel. The DURABLE record is
-    /// `Storey::ceiling_apexes`; see `roof_points.rs`.
-    pending_roof_point: Option<PendingRoofPoint>,
+    /// `Storey::ceiling_apexes`; see `ceiling_points.rs`.
+    pending_roof_point: Option<PendingCeilingPoint>,
     /// The in-flight roof RIDGE (a stroke in roof-point mode placing TWO
     /// apexes at once), advanced stage by stage (stroke → cross-coordinate
     /// position → height). Transient — outside undo, cleared everywhere
     /// `pending_roof_point` is. The DURABLE record is the same
-    /// `Storey::ceiling_apexes`; see `roof_ridges.rs`.
-    pending_roof_ridge: Option<PendingRoofRidge>,
+    /// `Storey::ceiling_apexes`; see `ceiling_ridges.rs`.
+    pending_roof_ridge: Option<PendingCeilingRidge>,
     /// The in-flight roof RECT (a CLOSED stroke in roof-point mode placing
     /// FOUR corner apexes at once — the flat-topped hip), advanced stage by
     /// stage (stroke → side lengths → lo positions → height). Transient —
     /// outside undo, cleared everywhere `pending_roof_ridge` is. The
     /// DURABLE record is the same `Storey::ceiling_apexes`; see
-    /// `roof_rects.rs`.
-    pending_roof_rect: Option<PendingRoofRect>,
+    /// `ceiling_rects.rs`.
+    pending_roof_rect: Option<PendingCeilingRect>,
     /// True when the editor is placing windows/doors. A tap near a wall drops
     /// the selected opening type on the nearest wall (then prompts size); a tap
     /// with no pending placement opens that wall's ELEVATION editor. Mutually
@@ -581,7 +581,7 @@ impl AppController {
             ceiling_step_mode: false,
             ceiling_step_regions: HashMap::new(),
             pending_ceiling_step: None,
-            roof_point_mode: false,
+            ceiling_point_mode: false,
             pending_roof_point: None,
             pending_roof_ridge: None,
             pending_roof_rect: None,

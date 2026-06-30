@@ -24,7 +24,7 @@ mod load;
 mod phase;
 mod position;
 mod resolve;
-mod roof_point;
+mod ceiling_point;
 mod step;
 mod wall_partition;
 mod windows;
@@ -49,7 +49,7 @@ pub use position::{PositionOption, PositionPrompt, PositionPromptKind};
 pub use resolve::{
     ensure_storey_constructions, opening_wall_anchor, resolve_storey, stamp_horizontal_exposure,
 };
-pub use roof_point::{
+pub use ceiling_point::{
     centred_rect_lo, centred_ridge_cross, centred_ridge_start, resolve_ridge_slope_side,
     ridge_region_ring, validate_roof_apex, validate_roof_rect_length, validate_roof_rect_placement,
     validate_roof_rect_ridge, validate_roof_ridge, validate_roof_ridge_extent,

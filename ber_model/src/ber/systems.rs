@@ -65,7 +65,7 @@ pub enum Direction {
 pub struct SolarElements {
     pub id: ItemId,
     pub num_panels: u32,
-    pub roof_element_id: ItemId,
+    pub ceiling_element_id: ItemId,
     pub estimated_angle_degs: f32,
     pub estimated_direction: Direction,
     pub photo: Option<Photo>,

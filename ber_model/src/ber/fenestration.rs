@@ -106,7 +106,7 @@ pub enum OpeningPlacement {
     /// On a (possibly sloped) roof/ceiling region — free placement at a plan
     /// point inside the region; the z's derive from the region plane.
     Roof {
-        roof_region_id: ItemId,
+        ceiling_region_id: ItemId,
         plan: (f32, f32),
     },
 }

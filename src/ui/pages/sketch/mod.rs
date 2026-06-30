@@ -295,66 +295,66 @@ pub enum SketchEvent {
     DeleteCeilingStepRegion(Vec<(f64, f64)>),
     /// Toggle roof-point mode: when on, tapping a point inside a ceiling area
     /// starts the apex flow (per-axis position questions, then the height).
-    SetRoofPointMode(bool),
+    SetCeilingPointMode(bool),
     /// Tap (world coords) in roof-point mode placing the apex's position.
-    RoofPointTap {
+    CeilingPointTap {
         world_x: f64,
         world_y: f64,
     },
     /// User entered the apex height (metres, ABSOLUTE above the storey floor
     /// datum) for the pending roof point.
-    AssignRoofApexHeight(f32),
+    AssignCeilingApexHeight(f32),
     /// "Don't snap" on the pending roof point's snap tag: revert BOTH axes to
     /// their tapped coordinates and restart the position questions. Routed to
     /// the controller's dedicated `unsnap_roof_point` — NOT
     /// `ChooseSnap`/`UnsnapLast`, whose rewind-and-replay machinery must not
     /// touch a point outside history.
-    UnsnapRoofPoint,
+    UnsnapCeilingPoint,
     /// Discard the in-flight roof point at any stage.
-    CancelPendingRoofPoint,
+    CancelPendingCeilingPoint,
     /// Delete the current storey's roof apex at the given index.
-    DeleteRoofApex(usize),
+    DeleteCeilingApex(usize),
     /// A roof-RIDGE stroke (world coords) drawn in roof-point mode — fitted
     /// to an axis-aligned segment placing TWO apexes at once (stroke = ridge,
     /// tap = point: the ceiling-step stroke/tap routing pattern).
-    RoofRidgeStrokeWorld {
+    CeilingRidgeStrokeWorld {
         points: Vec<(f32, f32)>,
     },
     /// User entered the ridge LENGTH (metres along the ridge axis — the
     /// extent becomes `[start, start + length]`) for the pending roof ridge.
-    AssignRoofRidgeLength(f32),
+    AssignCeilingRidgeLength(f32),
     /// Skip the pending roof ridge's length question — accept the drawn
     /// length as-is.
-    SkipRoofRidgeLength,
+    SkipCeilingRidgeLength,
     /// User entered the ridge height (metres, ABSOLUTE above the storey floor
     /// datum — both endpoints get it) for the pending roof ridge.
-    AssignRoofRidgeHeight(f32),
+    AssignCeilingRidgeHeight(f32),
     /// Pick which area a boundary ridge slopes (the ChooseArea stage) — index
     /// into the offered options.
-    ChooseRoofRidgeArea(usize),
+    ChooseCeilingRidgeArea(usize),
     /// The 'Centre' button on an open roof location stage (ridge cross /
     /// start): apply the computed centre-it-within-its-ceiling-area value
     /// through the same path as a typed distance.
     CentreRoofPosition,
     /// User entered a SIDE LENGTH (metres) for the pending roof RECT's open
     /// length stage (LenX, then LenY — the closed-stroke flat-top flow).
-    AssignRoofRectLength(f32),
+    AssignCeilingRectLength(f32),
     /// Skip the pending roof rect's open side-length question — accept the
     /// drawn length as-is.
-    SkipRoofRectLength,
+    SkipCeilingRectLength,
     /// User entered the flat top's height (metres, ABSOLUTE above the storey
     /// floor datum — all four corners get it) for the pending roof rect.
-    AssignRoofRectHeight(f32),
+    AssignCeilingRectHeight(f32),
     /// Discard the in-flight roof rect at any stage.
-    CancelPendingRoofRect,
+    CancelPendingCeilingRect,
     /// "Don't snap" on the pending roof ridge's snap tag: revert the cross
     /// coordinate to its drawn value and reopen the position question. Routed
     /// to the controller's dedicated `unsnap_roof_ridge` — NOT
     /// `ChooseSnap`/`UnsnapLast`, whose rewind-and-replay machinery must not
     /// touch a ridge outside history.
-    UnsnapRoofRidge,
+    UnsnapCeilingRidge,
     /// Discard the in-flight roof ridge at any stage.
-    CancelPendingRoofRidge,
+    CancelPendingCeilingRidge,
     /// Toggle wall-exposure mode: when on, tapping an outline wall selects it
     /// (and the section handles), the type buttons mark the selected range.
     SetExposureMode(bool),
@@ -916,50 +916,50 @@ pub struct SketchView<'a> {
     /// ("▲ 4.20 m"), the pending point's position for the provisional dot,
     /// the per-stage flags (height entry / any stage), and the height input's
     /// backing string. The position stage shows as the shared position panel.
-    pub roof_point_mode: bool,
-    pub roof_point_available: bool,
+    pub ceiling_point_mode: bool,
+    pub ceiling_point_available: bool,
     pub ceiling_apex_views: &'a [((f64, f64), String)],
     pub pending_roof_point: Option<(f64, f64)>,
     /// The pending point's wall snap as one standard snap tag (its menu
-    /// offers only "Don't snap", routed to UnsnapRoofPoint).
-    pub roof_point_snap_tag: Option<&'a SnapTagView>,
-    pub roof_point_position_pending: bool,
-    pub roof_point_height_pending: bool,
-    pub roof_point_pending: bool,
-    pub roof_apex_input: &'a mut String,
+    /// offers only "Don't snap", routed to UnsnapCeilingPoint).
+    pub ceiling_point_snap_tag: Option<&'a SnapTagView>,
+    pub ceiling_point_position_pending: bool,
+    pub ceiling_point_height_pending: bool,
+    pub ceiling_point_pending: bool,
+    pub ceiling_apex_input: &'a mut String,
     /// Roof-RIDGE line input (a stroke in roof-point mode): the committed
     /// ridges `(end_a, end_b, label)` to overlay ("⌃ 4.20 m" /
     /// "4.20→4.50 m"), the pending ridge SEGMENT for the dashed overlay, its
-    /// snap tag (menu offers only "Don't snap", routed to UnsnapRoofRidge),
+    /// snap tag (menu offers only "Don't snap", routed to UnsnapCeilingRidge),
     /// and the per-stage flags (position questions / length entry / height
-    /// entry). The height entry reuses `roof_apex_input`; the length entry
+    /// entry). The height entry reuses `ceiling_apex_input`; the length entry
     /// has its own buffer (prefilled with the drawn length on stage open).
-    pub roof_ridge_views: &'a [((f64, f64), (f64, f64), String)],
+    pub ceiling_ridge_views: &'a [((f64, f64), (f64, f64), String)],
     pub pending_roof_ridge_line: Option<((f64, f64), (f64, f64))>,
-    pub roof_ridge_snap_tag: Option<&'a SnapTagView>,
-    pub roof_ridge_position_pending: bool,
-    pub roof_ridge_length_pending: bool,
+    pub ceiling_ridge_snap_tag: Option<&'a SnapTagView>,
+    pub ceiling_ridge_position_pending: bool,
+    pub ceiling_ridge_length_pending: bool,
     /// The open length question's extent starts at a SNAPPED wall coordinate
     /// — the panel's "from the highlighted end" hover shows only then.
-    pub roof_ridge_length_anchored: bool,
-    pub roof_ridge_height_pending: bool,
-    pub roof_ridge_pending: bool,
+    pub ceiling_ridge_length_anchored: bool,
+    pub ceiling_ridge_height_pending: bool,
+    pub ceiling_ridge_pending: bool,
     /// When the placed ridge sits on an internal area boundary: the labels of
     /// the areas to choose between (which one slopes). Empty otherwise.
-    pub roof_ridge_area_options: Vec<String>,
+    pub ceiling_ridge_area_options: Vec<String>,
     /// Roof-RECT (flat-topped hip) input — the closed-stroke sibling of the
     /// ridge: committed flat tops `(corners, label)` to overlay, the pending
     /// rect's corners for the dashed overlay, and the per-stage flags. The
     /// open length stage is identified by its AXIS (LenX/LenY share the
     /// ridge length input buffer — the two flows are never pending at once);
-    /// the height entry reuses `roof_apex_input`.
-    pub roof_rect_views: &'a [([(f64, f64); 4], String)],
+    /// the height entry reuses `ceiling_apex_input`.
+    pub ceiling_rect_views: &'a [([(f64, f64); 4], String)],
     pub pending_roof_rect_outline: Option<[(f64, f64); 4]>,
-    pub roof_rect_position_pending: bool,
-    pub roof_rect_length_axis: Option<manip_plan::ParameterAxis>,
-    pub roof_rect_height_pending: bool,
-    pub roof_rect_pending: bool,
-    pub roof_ridge_length_input: &'a mut String,
+    pub ceiling_rect_position_pending: bool,
+    pub ceiling_rect_length_axis: Option<manip_plan::ParameterAxis>,
+    pub ceiling_rect_height_pending: bool,
+    pub ceiling_rect_pending: bool,
+    pub ceiling_ridge_length_input: &'a mut String,
     /// Last error from the roof assigns (apex height / ridge length / ridge
     /// height), shown inline in the shared roof toolbar — one field because
     /// the three stages are mutually exclusive within it.

@@ -304,7 +304,7 @@ pub fn add_wall_door(
 /// redistribution — rooflights don't line up like wall windows).
 pub fn add_roof_window(
     storey: &mut Storey,
-    roof_region_id: ItemId,
+    ceiling_region_id: ItemId,
     plan: (f32, f32),
     width_m: f32,
     height_m: f32,
@@ -317,7 +317,7 @@ pub fn add_roof_window(
         .ceilings
         .regions
         .iter_mut()
-        .find(|r| r.id == roof_region_id)
+        .find(|r| r.id == ceiling_region_id)
     else {
         return Err(OpeningError::NoHostRegion);
     };
@@ -330,7 +330,7 @@ pub fn add_roof_window(
         height_m,
         window_type_id,
         placement: Some(OpeningPlacement::Roof {
-            roof_region_id,
+            ceiling_region_id,
             plan,
         }),
         wall_anchor: None,
@@ -439,13 +439,13 @@ pub fn move_roof_window(storey: &mut Storey, window_id: ItemId, new_plan: (f32, 
         .map(|r| r.id);
     if let Some(w) = storey.windows.iter_mut().find(|w| w.id == window_id) {
         if let Some(OpeningPlacement::Roof {
-            roof_region_id,
+            ceiling_region_id,
             plan,
         }) = &mut w.placement
         {
             *plan = new_plan;
             if let Some(rid) = new_region {
-                *roof_region_id = rid;
+                *ceiling_region_id = rid;
             }
         }
     }
@@ -1470,7 +1470,7 @@ mod tests {
                 1.0,
                 1.0,
                 Some(OpeningPlacement::Roof {
-                    roof_region_id: rid,
+                    ceiling_region_id: rid,
                     plan: (2.0, 2.0),
                 }),
             )],
@@ -1642,7 +1642,7 @@ mod tests {
             height_m: 1.0,
             window_type_id: ItemId::default(),
             placement: Some(OpeningPlacement::Roof {
-                roof_region_id: ItemId::default(),
+                ceiling_region_id: ItemId::default(),
                 plan: (2.0, 2.0),
             }),
             wall_anchor: None,

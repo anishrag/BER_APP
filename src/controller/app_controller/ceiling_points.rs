@@ -18,27 +18,27 @@ use super::*;
 use ber_model::ber::structural::CeilingApex;
 use document::LinePositionPrompt;
 
-/// The elective wall snap a pending roof point is carrying on ONE axis: the
+/// The elective wall snap a pending ceiling point is carrying on ONE axis: the
 /// point's coordinate on that axis already HOLDS the snapped (reference
 /// wall's) coordinate; this remembers where the point was actually TAPPED so
 /// "Don't snap" can revert, and which outline wall it snapped onto. A snapped
 /// axis skips its position prompt — its coordinate is a reference wall's,
 /// exact by construction.
 #[derive(Debug, Clone, Copy)]
-pub(super) struct RoofPointAxisSnap {
+pub(super) struct CeilingPointAxisSnap {
     /// The tapped coordinate on this axis before snapping — the un-snap target.
     pub(super) drawn_coord_m: f32,
     /// The outline wall the axis snapped onto (start vertex, outline plan).
     pub(super) outline_wall_vid: VertexId,
 }
 
-/// The in-flight roof-point input, advanced stage by stage: tap →
+/// The in-flight ceiling-point input, advanced stage by stage: tap →
 /// ([`Position`] per un-snapped axis, X then Y →) [`Height`] → assign.
 /// Session-only, outside undo; cleared on storey switch, mode exit, and
 /// cancel. The snaps ride through every stage so the single snap tag stays
 /// clickable until assign.
 #[derive(Debug, Clone)]
-pub(super) enum PendingRoofPoint {
+pub(super) enum PendingCeilingPoint {
     /// One axis's coordinate is being measured from an outline reference
     /// wall — the ceiling-step line prompt reused per axis. Shell-resolved
     /// (`StoreyDoc::resolve_ceiling_line_position`); never enters the
@@ -49,46 +49,46 @@ pub(super) enum PendingRoofPoint {
         point: Point2f32,
         axis: ParameterAxis,
         prompt: LinePositionPrompt,
-        snap_x: Option<RoofPointAxisSnap>,
-        snap_y: Option<RoofPointAxisSnap>,
+        snap_x: Option<CeilingPointAxisSnap>,
+        snap_y: Option<CeilingPointAxisSnap>,
     },
     /// Both axes resolved; awaiting the apex height (metres, ABSOLUTE above
     /// the storey floor datum).
     Height {
         point: Point2f32,
-        snap_x: Option<RoofPointAxisSnap>,
-        snap_y: Option<RoofPointAxisSnap>,
+        snap_x: Option<CeilingPointAxisSnap>,
+        snap_y: Option<CeilingPointAxisSnap>,
     },
 }
 
 impl AppController {
-    /// True when the roof-point tool can be used — exactly the ceiling-step
+    /// True when the ceiling-point tool can be used — exactly the ceiling-step
     /// gate ([`ceiling_step_available`](Self::ceiling_step_available)): a
     /// storey is being edited, its outline is finalised, and its default
     /// ceiling height is set (the apex fans a derived ceiling region, which
     /// only exists once the height is). Drives the UI toggle's enablement AND
     /// guards the setter (gate double-enforced).
-    pub fn roof_point_available(&self) -> bool {
+    pub fn ceiling_point_available(&self) -> bool {
         self.ceiling_step_available()
     }
 
-    /// True when the editor is tagging roof points (drives the UI toggle and
+    /// True when the editor is tagging ceiling points (drives the UI toggle and
     /// routes canvas taps to the point input).
-    pub fn roof_point_mode(&self) -> bool {
-        self.roof_point_mode
+    pub fn ceiling_point_mode(&self) -> bool {
+        self.ceiling_point_mode
     }
 
-    /// Enter/leave roof-point mode. Entering is a NO-OP while the tool is
-    /// unavailable (see [`roof_point_available`](Self::roof_point_available));
+    /// Enter/leave ceiling-point mode. Entering is a NO-OP while the tool is
+    /// unavailable (see [`ceiling_point_available`](Self::ceiling_point_available));
     /// otherwise it drops into draw mode, forces the OUTLINE active (so no
     /// carved-area position prompt can coexist with the point's), and is
     /// mutually exclusive with living-area / exposure / phase / floor-step /
     /// ceiling-step modes. Leaving clears any half-finished point.
     pub fn set_roof_point_mode(&mut self, on: bool) {
-        if on && !self.roof_point_available() {
+        if on && !self.ceiling_point_available() {
             return;
         }
-        self.roof_point_mode = on;
+        self.ceiling_point_mode = on;
         self.pending_roof_point = None;
         self.pending_roof_ridge = None;
         self.pending_roof_rect = None;
@@ -115,18 +115,18 @@ impl AppController {
         }
     }
 
-    /// Canvas tap dispatch for the roof-point flow: with the mode on and
+    /// Canvas tap dispatch for the ceiling-point flow: with the mode on and
     /// nothing pending, the tap places the point. Validated cheaply against
     /// the outline ([`StoreyDoc::validate_roof_point`] — the resolved-ceilings
     /// check runs at assign); then each axis tries the elective wall snap
     /// ([`StoreyDoc::snap_ceiling_step_line`], reused per axis — both snapped
     /// = a corner snap for free), and the first UN-snapped axis opens its
     /// position prompt (X then Y; both snapped → straight to the height).
-    pub fn roof_point_tap(&mut self, world_x: f32, world_y: f32) {
-        if !self.roof_point_mode
+    pub fn ceiling_point_tap(&mut self, world_x: f32, world_y: f32) {
+        if !self.ceiling_point_mode
             || self.pending_roof_point.is_some()
-            || self.roof_ridge_pending()
-            || self.roof_rect_pending()
+            || self.ceiling_ridge_pending()
+            || self.ceiling_rect_pending()
         {
             return;
         }
@@ -135,7 +135,7 @@ impl AppController {
         self.sync_active();
         let tapped = Point2f32::new(world_x, world_y);
         if let Err(e) = self.document.validate_roof_point(tapped) {
-            log::error!("roof point: {}", e);
+            log::error!("ceiling point: {}", e);
             return;
         }
         let (x, snap_x) = match self
@@ -144,7 +144,7 @@ impl AppController {
         {
             Some((snapped, outline_wall_vid)) => (
                 snapped,
-                Some(RoofPointAxisSnap {
+                Some(CeilingPointAxisSnap {
                     drawn_coord_m: tapped.x,
                     outline_wall_vid,
                 }),
@@ -157,7 +157,7 @@ impl AppController {
         {
             Some((snapped, outline_wall_vid)) => (
                 snapped,
-                Some(RoofPointAxisSnap {
+                Some(CeilingPointAxisSnap {
                     drawn_coord_m: tapped.y,
                     outline_wall_vid,
                 }),
@@ -181,8 +181,8 @@ impl AppController {
     pub(super) fn advance_roof_point(
         &mut self,
         point: Point2f32,
-        snap_x: Option<RoofPointAxisSnap>,
-        snap_y: Option<RoofPointAxisSnap>,
+        snap_x: Option<CeilingPointAxisSnap>,
+        snap_y: Option<CeilingPointAxisSnap>,
         remaining: &[ParameterAxis],
     ) {
         for &axis in remaining {
@@ -197,7 +197,7 @@ impl AppController {
                 .document
                 .ceiling_line_position_prompt(axis, coord, None)
             {
-                self.pending_roof_point = Some(PendingRoofPoint::Position {
+                self.pending_roof_point = Some(PendingCeilingPoint::Position {
                     point,
                     axis,
                     prompt,
@@ -208,7 +208,7 @@ impl AppController {
             }
             // None → logged auto-resolve: the tapped coordinate is accepted.
         }
-        self.pending_roof_point = Some(PendingRoofPoint::Height {
+        self.pending_roof_point = Some(PendingCeilingPoint::Height {
             point,
             snap_x,
             snap_y,
@@ -228,13 +228,13 @@ impl AppController {
             return;
         };
         let (point, snap_x, snap_y) = match pending {
-            PendingRoofPoint::Position {
+            PendingCeilingPoint::Position {
                 point,
                 snap_x,
                 snap_y,
                 ..
             }
-            | PendingRoofPoint::Height {
+            | PendingCeilingPoint::Height {
                 point,
                 snap_x,
                 snap_y,
@@ -250,7 +250,7 @@ impl AppController {
             snap_y.map_or(point.y, |s| s.drawn_coord_m),
         );
         log::debug!(
-            "roof point un-snapped from outline wall(s) x: {:?} / y: {:?} back to the \
+            "ceiling point un-snapped from outline wall(s) x: {:?} / y: {:?} back to the \
              drawn ({:.3}, {:.3}); restarting from X",
             snap_x.map(|s| s.outline_wall_vid),
             snap_y.map(|s| s.outline_wall_vid),
@@ -268,15 +268,15 @@ impl AppController {
     /// choose-snap replay — the point is outside history). Both axes snapped
     /// shows as a corner snap. `None` while the point isn't snapped on either
     /// axis or nothing is pending.
-    pub fn roof_point_snap_tag(&self) -> Option<SnapTagView> {
+    pub fn ceiling_point_snap_tag(&self) -> Option<SnapTagView> {
         let (point, snap_x, snap_y) = match self.pending_roof_point.as_ref()? {
-            PendingRoofPoint::Position {
+            PendingCeilingPoint::Position {
                 point,
                 snap_x,
                 snap_y,
                 ..
             }
-            | PendingRoofPoint::Height {
+            | PendingCeilingPoint::Height {
                 point,
                 snap_x,
                 snap_y,
@@ -316,7 +316,7 @@ impl AppController {
     /// rejection so the user can retype. Outside undo —
     /// phases/steps/ceiling-steps parity.
     pub fn assign_roof_apex(&mut self, z_m: f32) -> Result<(), String> {
-        let Some(PendingRoofPoint::Height { point, .. }) = self.pending_roof_point.as_ref() else {
+        let Some(PendingCeilingPoint::Height { point, .. }) = self.pending_roof_point.as_ref() else {
             return Ok(()); // nothing awaiting a height — no-op
         };
         let p = Point2f64::new(point.x as f64, point.y as f64);
@@ -328,7 +328,7 @@ impl AppController {
             .current_record
             .as_ref()
             .and_then(|r| r.data.storeys.get(idx))
-            .ok_or("no storey to assign a roof point to")?;
+            .ok_or("no storey to assign a ceiling point to")?;
         document::validate_roof_apex(storey, p, z_m as f64)?;
         self.current_record
             .as_mut()
@@ -352,12 +352,12 @@ impl AppController {
         Ok(())
     }
 
-    /// Discard the in-flight roof point at any stage.
+    /// Discard the in-flight ceiling point at any stage.
     pub fn cancel_pending_roof_point(&mut self) {
         self.pending_roof_point = None;
     }
 
-    /// The current storey's committed roof apexes as `(position, label)` in
+    /// The current storey's committed ceiling apexes as `(position, label)` in
     /// world coords (label e.g. "▲ 4.20 m") for the UI's markers + the
     /// toolbar list. Index-aligned with deletion (see
     /// [`delete_ceiling_apex`](Self::delete_ceiling_apex)).
@@ -375,7 +375,7 @@ impl AppController {
             .unwrap_or_default()
     }
 
-    /// Delete the current storey's roof apex at `index`
+    /// Delete the current storey's ceiling apex at `index`
     /// (`Ber::remove_roof_apex`) and re-derive — the fan it raised
     /// re-flattens to its base on the next derive. Canonicalizes the session
     /// ceiling-step list afterwards, same as assign: the fan's triangle step
@@ -401,32 +401,32 @@ impl AppController {
 
     /// True while one axis's position question is up (shows as the shared
     /// position panel, kind `Point`).
-    pub fn roof_point_position_pending(&self) -> bool {
+    pub fn ceiling_point_position_pending(&self) -> bool {
         matches!(
             self.pending_roof_point,
-            Some(PendingRoofPoint::Position { .. })
+            Some(PendingCeilingPoint::Position { .. })
         )
     }
 
     /// True while the resolved point awaits its apex height.
-    pub fn roof_point_height_pending(&self) -> bool {
+    pub fn ceiling_point_height_pending(&self) -> bool {
         matches!(
             self.pending_roof_point,
-            Some(PendingRoofPoint::Height { .. })
+            Some(PendingCeilingPoint::Height { .. })
         )
     }
 
-    /// True while ANY roof-point input is in flight. The UI uses this to keep
+    /// True while ANY ceiling-point input is in flight. The UI uses this to keep
     /// the toolbar reachable with the mode off and to suppress stroke capture
     /// while a stage is pending.
-    pub fn roof_point_pending(&self) -> bool {
+    pub fn ceiling_point_pending(&self) -> bool {
         self.pending_roof_point.is_some()
     }
 
     /// The pending point's current position (world coords) for the UI's
     /// provisional dot marker. `None` when nothing is pending.
     pub fn pending_roof_point_position(&self) -> Option<(f64, f64)> {
-        let (PendingRoofPoint::Position { point, .. } | PendingRoofPoint::Height { point, .. }) =
+        let (PendingCeilingPoint::Position { point, .. } | PendingCeilingPoint::Height { point, .. }) =
             self.pending_roof_point.as_ref()?;
         Some((point.x as f64, point.y as f64))
     }

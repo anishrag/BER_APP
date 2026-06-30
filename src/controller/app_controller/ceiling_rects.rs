@@ -1,4 +1,4 @@
-//! Roof RECT-ridge input: in roof-point mode a CLOSED stroke (instead of a
+//! Roof RECT-ridge input: in ceiling-point mode a CLOSED stroke (instead of a
 //! line stroke or a tap) draws the FLAT TOP of a flat-topped hip roof — a
 //! pavilion. The stroke is APPROXIMATE, so each degree of freedom gets its
 //! own question in the ridge's assessor order (dimensions first, then where
@@ -14,7 +14,7 @@
 //! ridge's: mark dirty → materialize → canonicalize the session
 //! ceiling-step list. Per-side snapping is deferred (Centre + typed
 //! positions cover the pavilion case); the shell owns this in-flight state
-//! machine, outside undo — roof-ridge parity throughout.
+//! machine, outside undo — ceiling-ridge parity throughout.
 use super::*;
 use ber_model::ber::structural::{apexes_form_rect, CeilingApex};
 use document::LinePositionPrompt;
@@ -26,13 +26,13 @@ use document::LinePositionPrompt;
 /// lengths (`lo + len` is the HI corner); a typed length keeps `lo` fixed,
 /// a typed/centred position moves `lo` on its axis.
 ///
-/// [`LenX`]: PendingRoofRect::LenX
-/// [`LenY`]: PendingRoofRect::LenY
-/// [`PosX`]: PendingRoofRect::PosX
-/// [`PosY`]: PendingRoofRect::PosY
-/// [`Height`]: PendingRoofRect::Height
+/// [`LenX`]: PendingCeilingRect::LenX
+/// [`LenY`]: PendingCeilingRect::LenY
+/// [`PosX`]: PendingCeilingRect::PosX
+/// [`PosY`]: PendingCeilingRect::PosY
+/// [`Height`]: PendingCeilingRect::Height
 #[derive(Debug, Clone)]
-pub(super) enum PendingRoofRect {
+pub(super) enum PendingCeilingRect {
     /// Question 1: the flat top's side length along X (typed, prefilled
     /// with the drawn width, skippable).
     LenX { lo: (f32, f32), len: (f32, f32) },
@@ -58,15 +58,15 @@ pub(super) enum PendingRoofRect {
     Height { lo: (f32, f32), len: (f32, f32) },
 }
 
-impl PendingRoofRect {
+impl PendingCeilingRect {
     /// The accumulating `(lo, len)`, whatever the stage.
     fn geometry(&self) -> ((f32, f32), (f32, f32)) {
         match self {
-            PendingRoofRect::LenX { lo, len }
-            | PendingRoofRect::LenY { lo, len }
-            | PendingRoofRect::PosX { lo, len, .. }
-            | PendingRoofRect::PosY { lo, len, .. }
-            | PendingRoofRect::Height { lo, len } => (*lo, *len),
+            PendingCeilingRect::LenX { lo, len }
+            | PendingCeilingRect::LenY { lo, len }
+            | PendingCeilingRect::PosX { lo, len, .. }
+            | PendingCeilingRect::PosY { lo, len, .. }
+            | PendingCeilingRect::Height { lo, len } => (*lo, *len),
         }
     }
 }
@@ -81,7 +81,7 @@ impl AppController {
         )
     }
 
-    /// A CLOSED stroke in roof-point mode (routed here by
+    /// A CLOSED stroke in ceiling-point mode (routed here by
     /// [`apply_roof_ridge_stroke_event`](Self::apply_roof_ridge_stroke_event)'s
     /// closure test): fit it to an axis-aligned flat-top rectangle
     /// ([`StoreyDoc::fit_roof_rect`] — every point near the bbox boundary,
@@ -89,15 +89,15 @@ impl AppController {
     /// LenX question, prefilled with the drawn width. A blob or an
     /// off-footprint rect is rejected (logged), like a ridge fit failure.
     pub(super) fn apply_roof_rect_stroke(&mut self, pts: &[Point2f32]) {
-        dump_stroke("roof-rect", pts);
+        dump_stroke("ceiling-rect", pts);
         let (lo, hi) = match self.document.fit_roof_rect(pts) {
             Ok(fit) => fit,
             Err(e) => {
-                log::error!("roof rect: {}", e);
+                log::error!("ceiling rect: {}", e);
                 return;
             }
         };
-        self.pending_roof_rect = Some(PendingRoofRect::LenX {
+        self.pending_roof_rect = Some(PendingCeilingRect::LenX {
             lo: (lo.x, lo.y),
             len: (hi.x - lo.x, hi.y - lo.y),
         });
@@ -129,8 +129,8 @@ impl AppController {
                 .ceiling_line_position_prompt(axis, coord, None)
             {
                 self.pending_roof_rect = Some(match axis {
-                    ParameterAxis::X => PendingRoofRect::PosX { lo, len, prompt },
-                    ParameterAxis::Y => PendingRoofRect::PosY { lo, len, prompt },
+                    ParameterAxis::X => PendingCeilingRect::PosX { lo, len, prompt },
+                    ParameterAxis::Y => PendingCeilingRect::PosY { lo, len, prompt },
                 });
                 return Ok(());
             }
@@ -142,10 +142,10 @@ impl AppController {
             .current_record
             .as_ref()
             .and_then(|r| r.data.storeys.get(idx))
-            .ok_or("no storey to assign a roof rect to")?;
+            .ok_or("no storey to assign a ceiling rect to")?;
         let (plo, phi) = Self::rect_corners_f64(lo, len);
         document::validate_roof_rect_placement(storey, plo, phi)?;
-        self.pending_roof_rect = Some(PendingRoofRect::Height { lo, len });
+        self.pending_roof_rect = Some(PendingCeilingRect::Height { lo, len });
         Ok(())
     }
 
@@ -159,13 +159,13 @@ impl AppController {
     /// LenY, LenY → the position questions. The pending rect stays open on
     /// rejection. No-op unless a length stage is up.
     pub fn assign_roof_rect_length(&mut self, len_m: f32) -> Result<(), String> {
-        let Some(PendingRoofRect::LenX { lo, len } | PendingRoofRect::LenY { lo, len }) =
+        let Some(PendingCeilingRect::LenX { lo, len } | PendingCeilingRect::LenY { lo, len }) =
             self.pending_roof_rect.as_ref()
         else {
             return Ok(()); // nothing awaiting a length — no-op
         };
         let (lo, len) = (*lo, *len);
-        let on_x = matches!(self.pending_roof_rect, Some(PendingRoofRect::LenX { .. }));
+        let on_x = matches!(self.pending_roof_rect, Some(PendingCeilingRect::LenX { .. }));
         let axis = if on_x {
             ParameterAxis::X
         } else {
@@ -178,10 +178,10 @@ impl AppController {
             .current_record
             .as_ref()
             .and_then(|r| r.data.storeys.get(idx))
-            .ok_or("no storey to assign a roof rect to")?;
+            .ok_or("no storey to assign a ceiling rect to")?;
         document::validate_roof_rect_length(storey, axis, len_m)?;
         if on_x {
-            self.pending_roof_rect = Some(PendingRoofRect::LenY { lo, len: proposed });
+            self.pending_roof_rect = Some(PendingCeilingRect::LenY { lo, len: proposed });
             Ok(())
         } else {
             self.advance_roof_rect(lo, proposed, &[ParameterAxis::X, ParameterAxis::Y])
@@ -194,12 +194,12 @@ impl AppController {
     /// the stage open. No-op unless a length stage is up.
     pub fn skip_roof_rect_length(&mut self) -> Result<(), String> {
         match self.pending_roof_rect.as_ref() {
-            Some(PendingRoofRect::LenX { lo, len }) => {
+            Some(PendingCeilingRect::LenX { lo, len }) => {
                 let (lo, len) = (*lo, *len);
-                self.pending_roof_rect = Some(PendingRoofRect::LenY { lo, len });
+                self.pending_roof_rect = Some(PendingCeilingRect::LenY { lo, len });
                 Ok(())
             }
-            Some(PendingRoofRect::LenY { lo, len }) => {
+            Some(PendingCeilingRect::LenY { lo, len }) => {
                 let (lo, len) = (*lo, *len);
                 self.advance_roof_rect(lo, len, &[ParameterAxis::X, ParameterAxis::Y])
             }
@@ -216,11 +216,11 @@ impl AppController {
     /// [`centre_roof_rect_position`](Self::centre_roof_rect_position).
     pub(super) fn resolve_roof_rect_position(&mut self, coord: f32) -> Result<(), String> {
         match self.pending_roof_rect.as_ref() {
-            Some(PendingRoofRect::PosX { lo, len, .. }) => {
+            Some(PendingCeilingRect::PosX { lo, len, .. }) => {
                 let (lo, len) = ((coord, lo.1), *len);
                 self.advance_roof_rect(lo, len, &[ParameterAxis::Y])
             }
-            Some(PendingRoofRect::PosY { lo, len, .. }) => {
+            Some(PendingCeilingRect::PosY { lo, len, .. }) => {
                 let (lo, len) = ((lo.0, coord), *len);
                 self.advance_roof_rect(lo, len, &[])
             }
@@ -236,8 +236,8 @@ impl AppController {
     /// stage is up.
     pub fn centre_roof_rect_position(&mut self) -> Result<(), String> {
         let axis = match self.pending_roof_rect.as_ref() {
-            Some(PendingRoofRect::PosX { .. }) => ParameterAxis::X,
-            Some(PendingRoofRect::PosY { .. }) => ParameterAxis::Y,
+            Some(PendingCeilingRect::PosX { .. }) => ParameterAxis::X,
+            Some(PendingCeilingRect::PosY { .. }) => ParameterAxis::Y,
             _ => return Ok(()), // no location stage up — no-op
         };
         let (lo, len) = self.pending_roof_rect.as_ref().unwrap().geometry();
@@ -247,7 +247,7 @@ impl AppController {
             .current_record
             .as_ref()
             .and_then(|r| r.data.storeys.get(idx))
-            .ok_or("no storey to centre a roof rect in")?;
+            .ok_or("no storey to centre a ceiling rect in")?;
         let (plo, phi) = Self::rect_corners_f64(lo, len);
         let centred = document::centred_rect_lo(storey, axis, plo, phi)?;
         self.resolve_roof_rect_position(centred)
@@ -272,7 +272,7 @@ impl AppController {
     /// ridge's commit shape. The pending rect stays open on rejection.
     /// Outside undo.
     pub fn assign_roof_rect_height(&mut self, z_m: f32) -> Result<(), String> {
-        let Some(PendingRoofRect::Height { lo, len }) = self.pending_roof_rect.as_ref() else {
+        let Some(PendingCeilingRect::Height { lo, len }) = self.pending_roof_rect.as_ref() else {
             return Ok(()); // nothing awaiting a height — no-op
         };
         let (lo, len) = (*lo, *len);
@@ -283,7 +283,7 @@ impl AppController {
             .current_record
             .as_ref()
             .and_then(|r| r.data.storeys.get(idx))
-            .ok_or("no storey to assign a roof rect to")?;
+            .ok_or("no storey to assign a ceiling rect to")?;
         document::validate_roof_rect_ridge(storey, plo, phi, z_m as f64)?;
         let record = self.current_record.as_mut().expect("checked above");
         for p in [
@@ -309,23 +309,23 @@ impl AppController {
         Ok(())
     }
 
-    /// Discard the in-flight roof rect at any stage.
+    /// Discard the in-flight ceiling rect at any stage.
     pub fn cancel_pending_roof_rect(&mut self) {
         self.pending_roof_rect = None;
     }
 
-    /// True while ANY roof-rect input is in flight.
-    pub fn roof_rect_pending(&self) -> bool {
+    /// True while ANY ceiling-rect input is in flight.
+    pub fn ceiling_rect_pending(&self) -> bool {
         self.pending_roof_rect.is_some()
     }
 
     /// Which side-length question is up — `Some(X)` at LenX, `Some(Y)` at
     /// LenY, `None` otherwise. The UI keys its prefill on the axis (LenX →
     /// LenY must refill).
-    pub fn roof_rect_length_pending(&self) -> Option<ParameterAxis> {
+    pub fn ceiling_rect_length_pending(&self) -> Option<ParameterAxis> {
         match self.pending_roof_rect.as_ref()? {
-            PendingRoofRect::LenX { .. } => Some(ParameterAxis::X),
-            PendingRoofRect::LenY { .. } => Some(ParameterAxis::Y),
+            PendingCeilingRect::LenX { .. } => Some(ParameterAxis::X),
+            PendingCeilingRect::LenY { .. } => Some(ParameterAxis::Y),
             _ => None,
         }
     }
@@ -334,24 +334,24 @@ impl AppController {
     /// length on the open stage's axis. `None` unless a length stage is up.
     pub fn pending_roof_rect_length(&self) -> Option<f32> {
         match self.pending_roof_rect.as_ref()? {
-            PendingRoofRect::LenX { len, .. } => Some(len.0),
-            PendingRoofRect::LenY { len, .. } => Some(len.1),
+            PendingCeilingRect::LenX { len, .. } => Some(len.0),
+            PendingCeilingRect::LenY { len, .. } => Some(len.1),
             _ => None,
         }
     }
 
     /// True while either rect position question is up (both show as the
     /// shared position panel, kind `Line`).
-    pub fn roof_rect_position_pending(&self) -> bool {
+    pub fn ceiling_rect_position_pending(&self) -> bool {
         matches!(
             self.pending_roof_rect,
-            Some(PendingRoofRect::PosX { .. } | PendingRoofRect::PosY { .. })
+            Some(PendingCeilingRect::PosX { .. } | PendingCeilingRect::PosY { .. })
         )
     }
 
     /// True while the resolved rect awaits its height.
-    pub fn roof_rect_height_pending(&self) -> bool {
-        matches!(self.pending_roof_rect, Some(PendingRoofRect::Height { .. }))
+    pub fn ceiling_rect_height_pending(&self) -> bool {
+        matches!(self.pending_roof_rect, Some(PendingCeilingRect::Height { .. }))
     }
 
     /// The pending rect's four corners (world coords, CCW) for the UI's
@@ -364,12 +364,12 @@ impl AppController {
     }
 
     /// The current storey's COMMITTED flat tops as `(corners, label)` for
-    /// the UI's outline + label overlay — `roof_ridge_views`' sibling: every
+    /// the UI's outline + label overlay — `ceiling_ridge_views`' sibling: every
     /// apex group with exactly FOUR apexes forming a rect (the same
     /// predicate resolve applies, [`apexes_form_rect`]), labelled
     /// "⌃ 4.20 m". The apex dots themselves still come from
     /// `ceiling_apex_views`.
-    pub fn roof_rect_views(&self) -> Vec<([(f64, f64); 4], String)> {
+    pub fn ceiling_rect_views(&self) -> Vec<([(f64, f64); 4], String)> {
         let idx = self.current_storey_idx.unwrap_or(0);
         let Some(storey) = self
             .current_record

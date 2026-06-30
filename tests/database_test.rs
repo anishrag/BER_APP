@@ -317,7 +317,7 @@ fn create_full_ber(id: ItemId) -> Ber {
     ber.solar = vec![SolarElements {
         id: ItemId::default(),
         num_panels: 10,
-        roof_element_id: ItemId::default(),
+        ceiling_element_id: ItemId::default(),
         estimated_angle_degs: 30.0,
         estimated_direction: Direction::South,
         photo: None,

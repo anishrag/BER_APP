@@ -8,7 +8,7 @@ mod ceiling_regions;
 mod constructions;
 mod elevation;
 mod floor_regions;
-mod roof_geom;
+mod ceiling_geom;
 mod storey;
 mod wall_partition;
 mod wall_regions;
@@ -17,7 +17,7 @@ pub use ceiling_regions::*;
 pub use constructions::*;
 pub use elevation::*;
 pub use floor_regions::*;
-pub use roof_geom::*;
+pub use ceiling_geom::*;
 pub use storey::*;
 pub use wall_partition::*;
 pub use wall_regions::*;
@@ -76,7 +76,7 @@ mod tests {
     }
 
     /// A 10×4 ring with a deep SLOT cut from the right (y ∈ [1, 3], reaching
-    /// in to x = 3) — a C-shape (the roof_point notched ring).
+    /// in to x = 3) — a C-shape (the ceiling_point notched ring).
     fn notched_ring() -> Vec<Point2f64> {
         vec![
             Point2f64::new(0.0, 0.0),
@@ -2463,7 +2463,7 @@ mod tests {
             "nothing lofts past the wall-side boundary"
         );
         // The flat top carries the two on-wall corners at the apex height —
-        // the wall under them gets the gable profile from roof_profile_top.
+        // the wall under them gets the gable profile from ceiling_profile_top.
         let top = out
             .regions
             .iter()

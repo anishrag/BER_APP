@@ -1,4 +1,4 @@
-//! Roof-point (apex) and roof-ridge validation: declared high points shape
+//! Roof-point (apex) and ceiling-ridge validation: declared high points shape
 //! the ceiling region containing them — one apex fans it, two apexes in one
 //! group form a ridge.
 //!
@@ -265,13 +265,13 @@ fn check_group_ridge(
         }
         Some(_) => Ok(()),
         None => {
-            log::warn!("roof apex group has no merged ring — skipping the ridge hub-switch check");
+            log::warn!("ceiling apex group has no merged ring — skipping the ridge hub-switch check");
             Ok(())
         }
     }
 }
 
-/// Validate a roof apex against the storey's RESOLVED ceilings (the assign-time
+/// Validate a ceiling apex against the storey's RESOLVED ceilings (the assign-time
 /// check, run on the materialized `Storey` before `Ber::add_ceiling_apex`),
 /// GROUP-AWARE:
 ///
@@ -453,7 +453,7 @@ fn ridge_fits_region_height(
     Ok(())
 }
 
-/// Validate a typed roof-ridge LENGTH against the storey's RESOLVED ceilings —
+/// Validate a typed ceiling-ridge LENGTH against the storey's RESOLVED ceilings —
 /// the LENGTH stage's check, asked FIRST in the flow, before any location
 /// question, so only an OPTIMISTIC bound is knowable:
 ///
@@ -1019,7 +1019,7 @@ pub fn centred_rect_lo(
 }
 
 impl StoreyDoc {
-    /// The cheap tap-time validation of a roof-point position against the
+    /// The cheap tap-time validation of a ceiling-point position against the
     /// OUTLINE (no `Ber` needed — the resolved-ceilings check is
     /// [`validate_roof_apex`]): the point must be strictly inside the
     /// footprint bbox on BOTH axes. Reuses the ceiling-step line test per
@@ -1593,7 +1593,7 @@ mod tests {
     /// edges, outside points, and an empty outline get the point-flavoured
     /// footprint message.
     #[test]
-    fn roof_point_must_be_strictly_inside_the_outline_bbox() {
+    fn ceiling_point_must_be_strictly_inside_the_outline_bbox() {
         let doc = storey_10x6();
         assert!(doc.validate_roof_point(p(5.0, 3.0)).is_ok());
         for q in [

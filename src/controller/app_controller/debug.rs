@@ -19,13 +19,13 @@ impl AppController {
         let _ = writeln!(s, "=== SESSION STATE ===");
         let _ = writeln!(
             s,
-            "modes: living_area={} exposure={} phase={} step={} ceiling_step={} roof_point={}",
+            "modes: living_area={} exposure={} phase={} step={} ceiling_step={} ceiling_point={}",
             self.living_area_mode,
             self.exposure_mode,
             self.phase_mode,
             self.step_mode,
             self.ceiling_step_mode,
-            self.roof_point_mode
+            self.ceiling_point_mode
         );
         let _ = writeln!(s, "current_storey_idx: {:?}", self.current_storey_idx);
         for (idx, regions) in &self.step_regions {

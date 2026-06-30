@@ -32,7 +32,7 @@ impl WallRegion {
     /// Index where the wall's TOP profile begins in `exterior` — equivalently
     /// the BASE profile's vertex count. The ring is `[base a→b][top b→a]`: the
     /// base traces the FLOOR steps (`floor_profile_base`) along `a`→`b`, the
-    /// top traces the ROOF (`roof_profile_top`) back `b`→`a`. A flat base is
+    /// top traces the ROOF (`ceiling_profile_top`) back `b`→`a`. A flat base is
     /// exactly `[a, b]` (the legacy 2-vertex contract), so this returns 2 —
     /// `top_*` readers stay byte-for-byte identical there; a STEPPED base
     /// inserts the step breakpoints (and a vertical jump) before `b`, pushing
@@ -296,7 +296,7 @@ impl WallRegions {
                 // base collapses to the 2-vertex `[a, b]` of the contract),
                 // then the roof-profile top (b→a) to close the ring.
                 let mut ext = floor_profile_base(floors, a, b, base_z);
-                ext.extend(roof_profile_top(ceilings, a, b, fallback_top_z));
+                ext.extend(ceiling_profile_top(ceilings, a, b, fallback_top_z));
                 WallRegion {
                     id: ItemId::default(),
                     polygon: Polygon3D::new(ext),
@@ -992,7 +992,7 @@ fn profile_breakpoints(ceilings: &CeilingRegions, a: Point2f64, b: Point2f64) ->
 /// ceiling step crossing the wall; where they agree, consecutive duplicates
 /// collapse, so a flat roof (or empty `ceilings`) yields exactly
 /// `[b_top, a_top]`.
-fn roof_profile_top(
+fn ceiling_profile_top(
     ceilings: &CeilingRegions,
     a: Point2f64,
     b: Point2f64,
@@ -1178,11 +1178,11 @@ fn covering_floor_level(floors: &FloorRegions, p: Point2f64, n: (f64, f64)) -> O
 }
 
 /// The wall BASE for the base edge `a`→`b`, traced from `a` to `b` (the
-/// caller's ring opens with this, then closes via [`roof_profile_top`] running
+/// caller's ring opens with this, then closes via [`ceiling_profile_top`] running
 /// `b`→`a`): one flat span per [`floor_breakpoints`] interval, z =
 /// `base_z + covering_region.level_m` (the slab-band offset already in
 /// `base_z` composed with the local floor step), `base_z` over uncovered
-/// spans. The floor analogue of [`roof_profile_top`], but SIMPLER — floor
+/// spans. The floor analogue of [`ceiling_profile_top`], but SIMPLER — floor
 /// regions are flat, so a span's z is constant (no slope), and the only
 /// breakpoints that matter are STEP lines (a level change). Where adjacent
 /// spans disagree at a breakpoint, both vertices are kept — the VERTICAL JUMP

@@ -65,7 +65,7 @@ impl AppController {
             // full-containment derive marks the carved pieces.
             let storey = self.current_record.as_ref().unwrap().data.storeys[idx].clone();
             let mut floor_rings: Vec<Vec<Point2f64>> = Vec::new();
-            let mut roof_rings: Vec<Vec<Point2f64>> = Vec::new();
+            let mut ceiling_rings: Vec<Vec<Point2f64>> = Vec::new();
             if let Some(below) = &below_fp {
                 let (rings, _) = self.document.storeys[idx].plan_party_floor_carves(&storey, below);
                 floor_rings = rings;
@@ -73,7 +73,7 @@ impl AppController {
             if let Some(above) = &above_fp {
                 let (rings, _) =
                     self.document.storeys[idx].plan_party_ceiling_carves(&storey, above);
-                roof_rings = rings;
+                ceiling_rings = rings;
             }
 
             // De-dup against the durable splits already present (re-entering the
@@ -84,7 +84,7 @@ impl AppController {
             Self::extend_splits_deduped(&mut record.data.storeys[idx].floor_splits, floor_rings);
             let has_roof_split = {
                 let before = record.data.storeys[idx].ceiling_splits.len();
-                Self::extend_splits_deduped(&mut record.data.storeys[idx].ceiling_splits, roof_rings);
+                Self::extend_splits_deduped(&mut record.data.storeys[idx].ceiling_splits, ceiling_rings);
                 record.data.storeys[idx].ceiling_splits.len() > before
             };
             // Ceilings are regions-as-truth — `resolve_storey` only re-fits them, so
@@ -169,7 +169,7 @@ impl AppController {
             self.step_mode = false;
             self.ceiling_step_mode = false;
             self.pending_ceiling_step = None;
-            self.roof_point_mode = false;
+            self.ceiling_point_mode = false;
             self.pending_roof_point = None;
             self.pending_roof_ridge = None;
             self.pending_roof_rect = None;

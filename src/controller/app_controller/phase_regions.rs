@@ -33,7 +33,7 @@ impl AppController {
             self.step_mode = false;
             self.ceiling_step_mode = false;
             self.pending_ceiling_step = None;
-            self.roof_point_mode = false;
+            self.ceiling_point_mode = false;
             self.pending_roof_point = None;
             self.pending_roof_ridge = None;
             self.pending_roof_rect = None;

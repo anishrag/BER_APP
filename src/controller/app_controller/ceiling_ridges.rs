@@ -1,4 +1,4 @@
-//! Roof-RIDGE line input: in roof-point mode a STROKE (instead of a tap)
+//! Roof-RIDGE line input: in ceiling-point mode a STROKE (instead of a tap)
 //! draws an axis-aligned ridge line. The stroke is APPROXIMATE — like every
 //! other stroke — so each of its three degrees of freedom gets its own
 //! question, prefilled with the drawn value and individually skippable, in
@@ -22,12 +22,12 @@
 //! ×2) — a level ridge. A sloping ridge is entered via the two-point tap
 //! flow instead.
 //!
-//! Like the roof point, the ridge's durable record is `Storey::ceiling_apexes`
+//! Like the ceiling point, the ridge's durable record is `Storey::ceiling_apexes`
 //! (a ridge is just two apexes grouped with the regions they shape —
 //! `CeilingRegions::apex_groups` is the grouping authority); the shell owns
 //! the in-flight stroke → length → cross → start → height state machine and
 //! the canonicalize step after assign. Outside undo —
-//! phases/steps/ceiling-steps/roof-points parity.
+//! phases/steps/ceiling-steps/ceiling-points parity.
 use super::ceiling_steps::CeilingLineSnap;
 use super::*;
 use ber_model::ber::structural::CeilingApex;
@@ -36,7 +36,7 @@ use document::LinePositionPrompt;
 /// Which of the pending ridge's two POSITION questions still need asking, in
 /// flow order — the `remaining` argument of
 /// [`AppController::advance_roof_ridge`], consumed AFTER the Length stage
-/// (the roof point's `remaining` axes, ridge-flavoured: the two questions
+/// (the ceiling point's `remaining` axes, ridge-flavoured: the two questions
 /// live on different axes AND measure different things). The length question
 /// is not listed: it has no auto-resolve and is always asked first.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -47,7 +47,7 @@ pub(super) enum RidgeQuestion {
     Start,
 }
 
-/// The in-flight roof-ridge input, advanced stage by stage: stroke →
+/// The in-flight ceiling-ridge input, advanced stage by stage: stroke →
 /// ([`Length`] unless BOTH extent ends snapped →) ([`CrossPosition`] when
 /// un-snapped →) ([`StartPosition`] when NEITHER end snapped →) finalize →
 /// [`Height`] → assign. Session-only, outside undo; cleared on storey
@@ -65,14 +65,14 @@ pub(super) enum RidgeQuestion {
 /// typed length RE-ANCHORS at the snapped hi (`lo = hi − len`), which fixes
 /// the position DOF and skips the Start question too. Each snap rides along
 /// so the tag stays clickable, ONE tag at a time — the stage owns which
-/// (see [`AppController::roof_ridge_snap_tag`]).
+/// (see [`AppController::ceiling_ridge_snap_tag`]).
 ///
-/// [`CrossPosition`]: PendingRoofRidge::CrossPosition
-/// [`StartPosition`]: PendingRoofRidge::StartPosition
-/// [`Length`]: PendingRoofRidge::Length
-/// [`Height`]: PendingRoofRidge::Height
+/// [`CrossPosition`]: PendingCeilingRidge::CrossPosition
+/// [`StartPosition`]: PendingCeilingRidge::StartPosition
+/// [`Length`]: PendingCeilingRidge::Length
+/// [`Height`]: PendingCeilingRidge::Height
 #[derive(Debug, Clone)]
-pub(super) enum PendingRoofRidge {
+pub(super) enum PendingCeilingRidge {
     /// Question 1: the ridge LENGTH (metres along the ridge axis — the
     /// extent becomes `[lo, lo + len]`). No reference wall: it's the
     /// ridge's own dimension. Prefilled with the drawn (possibly
@@ -146,7 +146,7 @@ pub(super) enum PendingRoofRidge {
 
 impl AppController {
     /// UI entry point: a ridge stroke (world/metre coords) drawn in
-    /// roof-point mode. Fits it to an axis-aligned segment
+    /// ceiling-point mode. Fits it to an axis-aligned segment
     /// ([`StoreyDoc::fit_roof_ridge_line`] — axis + cross coordinate + the
     /// stroke's own extent), then tries the elective wall snap on all THREE
     /// drawn degrees of freedom — the CROSS coordinate against parallel
@@ -165,10 +165,10 @@ impl AppController {
     /// end-snap tolerance) is rejected (logged).
     pub fn apply_roof_ridge_stroke_event(&mut self, world_points: &[(f32, f32)]) {
         let _ = self.sketch_engine.take_stroke_raw();
-        if !self.roof_point_mode
-            || self.roof_point_pending()
-            || self.roof_ridge_pending()
-            || self.roof_rect_pending()
+        if !self.ceiling_point_mode
+            || self.ceiling_point_pending()
+            || self.ceiling_ridge_pending()
+            || self.ceiling_rect_pending()
         {
             return;
         }
@@ -192,11 +192,11 @@ impl AppController {
             return;
         }
         // Paste-ready stroke dump (matches the ceiling-step / area dumps).
-        dump_stroke("roof-ridge", &pts);
+        dump_stroke("ceiling-ridge", &pts);
         let (axis, coord_m, (lo, hi)) = match self.document.fit_roof_ridge_line(&pts) {
             Ok(fit) => fit,
             Err(e) => {
-                log::error!("roof ridge: {}", e);
+                log::error!("ceiling ridge: {}", e);
                 return;
             }
         };
@@ -272,12 +272,12 @@ impl AppController {
                 end_snap,
                 &[RidgeQuestion::Cross, RidgeQuestion::Start],
             ) {
-                log::error!("roof ridge: {}", e);
+                log::error!("ceiling ridge: {}", e);
                 self.pending_roof_ridge = None;
             }
             return;
         }
-        self.pending_roof_ridge = Some(PendingRoofRidge::Length {
+        self.pending_roof_ridge = Some(PendingCeilingRidge::Length {
             axis,
             coord_m,
             lo,
@@ -349,7 +349,7 @@ impl AppController {
                 prefer_region.as_deref(),
             ) {
                 self.pending_roof_ridge = Some(match question {
-                    RidgeQuestion::Cross => PendingRoofRidge::CrossPosition {
+                    RidgeQuestion::Cross => PendingCeilingRidge::CrossPosition {
                         axis,
                         coord_m,
                         lo,
@@ -360,7 +360,7 @@ impl AppController {
                     },
                     // The Start question only opens when NEITHER end
                     // snapped — `StartPosition` carries no end snap.
-                    RidgeQuestion::Start => PendingRoofRidge::StartPosition {
+                    RidgeQuestion::Start => PendingCeilingRidge::StartPosition {
                         axis,
                         coord_m,
                         lo,
@@ -385,9 +385,9 @@ impl AppController {
             .current_record
             .as_ref()
             .and_then(|r| r.data.storeys.get(idx))
-            .ok_or("no storey to assign a roof ridge to")?;
+            .ok_or("no storey to assign a ceiling ridge to")?;
         document::validate_roof_ridge_extent(storey, axis, coord_m, lo, len_m)?;
-        self.pending_roof_ridge = Some(PendingRoofRidge::Height {
+        self.pending_roof_ridge = Some(PendingCeilingRidge::Height {
             axis,
             coord_m,
             lo,
@@ -414,7 +414,7 @@ impl AppController {
     /// rejection so the user can retype. No-op unless the length stage is
     /// up.
     pub fn assign_roof_ridge_length(&mut self, len: f32) -> Result<(), String> {
-        let Some(PendingRoofRidge::Length {
+        let Some(PendingCeilingRidge::Length {
             axis,
             coord_m,
             lo,
@@ -436,7 +436,7 @@ impl AppController {
             .current_record
             .as_ref()
             .and_then(|r| r.data.storeys.get(idx))
-            .ok_or("no storey to assign a roof ridge to")?;
+            .ok_or("no storey to assign a ceiling ridge to")?;
         document::validate_roof_ridge_length(storey, axis, len)?;
         // A snapped hi (with the start un-snapped — both-snapped never
         // reaches this stage) re-anchors the typed length at the wall.
@@ -465,7 +465,7 @@ impl AppController {
     /// check runs right here; its rejection keeps the Length stage open.
     /// No-op unless the length stage is up.
     pub fn skip_roof_ridge_length(&mut self) -> Result<(), String> {
-        let Some(PendingRoofRidge::Length {
+        let Some(PendingCeilingRidge::Length {
             axis,
             coord_m,
             lo,
@@ -509,7 +509,7 @@ impl AppController {
         // against the resolved ceiling regions, not the editing buffer.
         let idx = self.current_storey_idx.unwrap_or(0);
         match self.pending_roof_ridge.as_ref() {
-            Some(PendingRoofRidge::CrossPosition {
+            Some(PendingCeilingRidge::CrossPosition {
                 axis,
                 coord_m,
                 lo,
@@ -525,7 +525,7 @@ impl AppController {
                     .current_record
                     .as_ref()
                     .and_then(|r| r.data.storeys.get(idx))
-                    .ok_or("no storey to centre a roof ridge in")?;
+                    .ok_or("no storey to centre a ceiling ridge in")?;
                 let centred = document::centred_ridge_cross(storey, axis, coord_m, lo, len_m)?;
                 // Cross stage implies the cross was un-snapped — none to
                 // carry (apply_position_dimension's CrossPosition shape).
@@ -540,7 +540,7 @@ impl AppController {
                     &[RidgeQuestion::Start],
                 )
             }
-            Some(PendingRoofRidge::StartPosition {
+            Some(PendingCeilingRidge::StartPosition {
                 axis,
                 coord_m,
                 lo,
@@ -555,7 +555,7 @@ impl AppController {
                     .current_record
                     .as_ref()
                     .and_then(|r| r.data.storeys.get(idx))
-                    .ok_or("no storey to centre a roof ridge in")?;
+                    .ok_or("no storey to centre a ceiling ridge in")?;
                 let centred = document::centred_ridge_start(storey, axis, coord_m, lo, len_m)?;
                 // Start stage implies NEITHER end was snapped — none to
                 // carry (apply_position_dimension's StartPosition shape).
@@ -568,7 +568,7 @@ impl AppController {
     /// The snap tag's "Don't snap": revert the SHOWING snap's degree of
     /// freedom to its DRAWN value, drop that snap, and REOPEN its skipped
     /// question (or auto-resolve onward, logged). One tag at a time, owned
-    /// by the stage ([`roof_ridge_snap_tag`](Self::roof_ridge_snap_tag)) —
+    /// by the stage ([`ceiling_ridge_snap_tag`](Self::ceiling_ridge_snap_tag)) —
     /// the normative un-snap transition table:
     ///
     /// - the END tag (at Cross or Height) reverts `hi` to its drawn value
@@ -581,7 +581,7 @@ impl AppController {
     /// - the CROSS tag (at StartPosition, or at Height when neither end
     ///   snapped) un-snaps `coord_m` and restarts from the cross question —
     ///   re-asking an answered start question is cheaper than remembering
-    ///   whether it was answered (the roof point's restart-from-X
+    ///   whether it was answered (the ceiling point's restart-from-X
     ///   reasoning); the resolved length stands either way (its question
     ///   came first).
     ///
@@ -600,7 +600,7 @@ impl AppController {
             // Height). Revert hi to the drawn value and reopen the Length
             // question with the surviving snaps riding; the Length stage
             // always opens (no auto-resolve), so this never fails.
-            PendingRoofRidge::CrossPosition {
+            PendingCeilingRidge::CrossPosition {
                 axis,
                 coord_m,
                 lo,
@@ -609,7 +609,7 @@ impl AppController {
                 end_snap: Some(snap),
                 ..
             }
-            | PendingRoofRidge::Height {
+            | PendingCeilingRidge::Height {
                 axis,
                 coord_m,
                 lo,
@@ -619,7 +619,7 @@ impl AppController {
                 end_snap: Some(snap),
             } => {
                 log::debug!(
-                    "roof ridge END un-snapped from outline wall {:?} back to {:.3}; \
+                    "ceiling ridge END un-snapped from outline wall {:?} back to {:.3}; \
                      reopening the length question",
                     snap.outline_wall_vid,
                     snap.drawn_coord_m
@@ -627,10 +627,10 @@ impl AppController {
                 // The cross snap rides only where it exists (at the Cross
                 // stage it is None by construction — its question is open).
                 let cross_snap = match &restore {
-                    PendingRoofRidge::Height { cross_snap, .. } => *cross_snap,
+                    PendingCeilingRidge::Height { cross_snap, .. } => *cross_snap,
                     _ => None,
                 };
-                self.pending_roof_ridge = Some(PendingRoofRidge::Length {
+                self.pending_roof_ridge = Some(PendingCeilingRidge::Length {
                     axis,
                     coord_m,
                     lo,
@@ -644,7 +644,7 @@ impl AppController {
             // START tag showing: the Height stage with a start snap and no
             // end snap (the only post-start-question stage under the
             // Length-first order; an end snap would outrank).
-            PendingRoofRidge::Height {
+            PendingCeilingRidge::Height {
                 axis,
                 coord_m,
                 lo: _,
@@ -654,7 +654,7 @@ impl AppController {
                 end_snap: None,
             } => {
                 log::debug!(
-                    "roof ridge START un-snapped from outline wall {:?} back to {:.3}; \
+                    "ceiling ridge START un-snapped from outline wall {:?} back to {:.3}; \
                      reopening the start question",
                     snap.outline_wall_vid,
                     snap.drawn_coord_m
@@ -672,7 +672,7 @@ impl AppController {
             }
             // CROSS tag showing: a post-cross-question stage with a cross
             // snap (and no start/end snap outranking it).
-            PendingRoofRidge::StartPosition {
+            PendingCeilingRidge::StartPosition {
                 axis,
                 coord_m: _,
                 lo,
@@ -680,7 +680,7 @@ impl AppController {
                 cross_snap: Some(snap),
                 ..
             }
-            | PendingRoofRidge::Height {
+            | PendingCeilingRidge::Height {
                 axis,
                 coord_m: _,
                 lo,
@@ -690,7 +690,7 @@ impl AppController {
                 end_snap: None,
             } => {
                 log::debug!(
-                    "roof ridge CROSS un-snapped from outline wall {:?} back to {:.3}; \
+                    "ceiling ridge CROSS un-snapped from outline wall {:?} back to {:.3}; \
                      restarting from the cross question",
                     snap.outline_wall_vid,
                     snap.drawn_coord_m
@@ -715,7 +715,7 @@ impl AppController {
             // Every reopened question auto-resolved (no reference walls)
             // and the finalize check rejected the drawn geometry: keep the
             // snapped stage rather than stranding the user with no stage.
-            log::warn!("roof ridge un-snap rejected: {e} — keeping the snapped value");
+            log::warn!("ceiling ridge un-snap rejected: {e} — keeping the snapped value");
             self.pending_roof_ridge = Some(restore);
         }
     }
@@ -736,7 +736,7 @@ impl AppController {
     /// [`unsnap_roof_ridge`](Self::unsnap_roof_ridge) (NOT the generic
     /// choose-snap replay — the ridge is outside history). `None` while the
     /// showing stage has no snap or nothing is pending.
-    pub fn roof_ridge_snap_tag(&self) -> Option<SnapTagView> {
+    pub fn ceiling_ridge_snap_tag(&self) -> Option<SnapTagView> {
         #[derive(Clone, Copy)]
         enum Tag {
             End,
@@ -746,32 +746,32 @@ impl AppController {
         let (axis, snap, tag) = match self.pending_roof_ridge.as_ref()? {
             // Question 1 (length) is pre-snap-question: nothing snapped
             // that the user could reject yet.
-            PendingRoofRidge::Length { .. } => return None,
+            PendingCeilingRidge::Length { .. } => return None,
             // At the cross question the Length question has been passed:
             // an END snap's tag shows (the cross stage itself implies an
             // un-snapped cross; a start snap's question hasn't arrived).
-            PendingRoofRidge::CrossPosition {
+            PendingCeilingRidge::CrossPosition {
                 axis,
                 end_snap: Some(snap),
                 ..
             } => (*axis, *snap, Tag::End),
-            PendingRoofRidge::CrossPosition { .. } => return None,
-            PendingRoofRidge::StartPosition {
+            PendingCeilingRidge::CrossPosition { .. } => return None,
+            PendingCeilingRidge::StartPosition {
                 axis,
                 cross_snap: Some(snap),
                 ..
             } => (*axis, *snap, Tag::Cross),
-            PendingRoofRidge::Height {
+            PendingCeilingRidge::Height {
                 axis,
                 end_snap: Some(snap),
                 ..
             } => (*axis, *snap, Tag::End),
-            PendingRoofRidge::Height {
+            PendingCeilingRidge::Height {
                 axis,
                 start_snap: Some(snap),
                 ..
             } => (*axis, *snap, Tag::Start),
-            PendingRoofRidge::Height {
+            PendingCeilingRidge::Height {
                 axis,
                 cross_snap: Some(snap),
                 ..
@@ -845,28 +845,28 @@ impl AppController {
     /// The pending ridge's accumulated `(axis, coord_m, lo, len_m)`,
     /// whatever the stage.
     fn pending_ridge_geometry(&self) -> Option<(ParameterAxis, f32, f32, f32)> {
-        let (PendingRoofRidge::Length {
+        let (PendingCeilingRidge::Length {
             axis,
             coord_m,
             lo,
             len_m,
             ..
         }
-        | PendingRoofRidge::CrossPosition {
+        | PendingCeilingRidge::CrossPosition {
             axis,
             coord_m,
             lo,
             len_m,
             ..
         }
-        | PendingRoofRidge::StartPosition {
+        | PendingCeilingRidge::StartPosition {
             axis,
             coord_m,
             lo,
             len_m,
             ..
         }
-        | PendingRoofRidge::Height {
+        | PendingCeilingRidge::Height {
             axis,
             coord_m,
             lo,
@@ -888,12 +888,12 @@ impl AppController {
     /// finalize passed — `materialize` may have shifted derived rings), then stamp
     /// BOTH apexes as DURABLE input (`Ber::add_ceiling_apex` ×2 — quantization
     /// included), re-derive, and CANONICALIZE the session ceiling-step list
-    /// from the derived ceilings (the roof-point parity). The endpoints are
+    /// from the derived ceilings (the ceiling-point parity). The endpoints are
     /// the RESOLVED `(coord, lo)`/`(coord, lo + len)` — typed answers land
     /// exactly; skipped ones keep the drawn values. The pending ridge stays
     /// open on rejection so the user can retype. Outside undo.
     pub fn assign_roof_ridge_height(&mut self, z_m: f32) -> Result<(), String> {
-        let Some(PendingRoofRidge::Height {
+        let Some(PendingCeilingRidge::Height {
             axis,
             coord_m,
             lo,
@@ -918,7 +918,7 @@ impl AppController {
             .current_record
             .as_ref()
             .and_then(|r| r.data.storeys.get(idx))
-            .ok_or("no storey to assign a roof ridge to")?;
+            .ok_or("no storey to assign a ceiling ridge to")?;
         document::validate_roof_ridge(storey, a, b, z_m as f64)?;
         // Which area slopes? The model decides: a junction ridge shared by ≥ 2
         // areas with no clear drawn side is AMBIGUOUS (we ask); otherwise it
@@ -926,7 +926,7 @@ impl AppController {
         let chosen_hint =
             match document::resolve_ridge_slope_side(storey, a, b, drawn_cross, axis, coord_m) {
                 document::RidgeSlopeSide::Ambiguous(options) => {
-                    self.pending_roof_ridge = Some(PendingRoofRidge::ChooseArea {
+                    self.pending_roof_ridge = Some(PendingCeilingRidge::ChooseArea {
                         a,
                         b,
                         z_m: z_m as f64,
@@ -959,7 +959,7 @@ impl AppController {
         Ok(())
     }
 
-    /// Discard the in-flight roof ridge at any stage.
+    /// Discard the in-flight ceiling ridge at any stage.
     pub fn cancel_pending_roof_ridge(&mut self) {
         self.pending_roof_ridge = None;
     }
@@ -968,21 +968,21 @@ impl AppController {
     /// two apexes plus the chosen area's interior point as their side hint, so
     /// the resolve slopes that area (the other gets a step at the boundary).
     pub fn choose_roof_ridge_area(&mut self, option_idx: usize) -> Result<(), String> {
-        let Some(PendingRoofRidge::ChooseArea { a, b, z_m, options }) =
+        let Some(PendingCeilingRidge::ChooseArea { a, b, z_m, options }) =
             self.pending_roof_ridge.take()
         else {
             return Ok(());
         };
         let Some(&(_, inside)) = options.get(option_idx) else {
             // Out-of-range — keep the stage open.
-            self.pending_roof_ridge = Some(PendingRoofRidge::ChooseArea { a, b, z_m, options });
+            self.pending_roof_ridge = Some(PendingCeilingRidge::ChooseArea { a, b, z_m, options });
             return Ok(());
         };
         let idx = self.current_storey_idx.unwrap_or(0);
         let record = self
             .current_record
             .as_mut()
-            .ok_or("no storey for the roof ridge")?;
+            .ok_or("no storey for the ceiling ridge")?;
         for p in [a, b] {
             record.data.add_ceiling_apex(idx, CeilingApex { point: p, z_m });
             record.data.push_ceiling_apex_hint(idx, p, inside);
@@ -996,9 +996,9 @@ impl AppController {
 
     /// The area-choice labels for a boundary ridge, if the ChooseArea stage is
     /// up (else empty). The UI shows one button per label.
-    pub fn roof_ridge_area_options(&self) -> Vec<String> {
+    pub fn ceiling_ridge_area_options(&self) -> Vec<String> {
         match &self.pending_roof_ridge {
-            Some(PendingRoofRidge::ChooseArea { options, .. }) => {
+            Some(PendingCeilingRidge::ChooseArea { options, .. }) => {
                 options.iter().map(|(l, _)| l.clone()).collect()
             }
             _ => Vec::new(),
@@ -1008,18 +1008,18 @@ impl AppController {
     /// True while either position question is up — the cross's (question 2)
     /// or the start's (question 3). Both show as the shared position panel,
     /// kind `Line`.
-    pub fn roof_ridge_position_pending(&self) -> bool {
+    pub fn ceiling_ridge_position_pending(&self) -> bool {
         matches!(
             self.pending_roof_ridge,
-            Some(PendingRoofRidge::CrossPosition { .. } | PendingRoofRidge::StartPosition { .. })
+            Some(PendingCeilingRidge::CrossPosition { .. } | PendingCeilingRidge::StartPosition { .. })
         )
     }
 
     /// True while the ridge LENGTH question (question 1) is up.
-    pub fn roof_ridge_length_pending(&self) -> bool {
+    pub fn ceiling_ridge_length_pending(&self) -> bool {
         matches!(
             self.pending_roof_ridge,
-            Some(PendingRoofRidge::Length { .. })
+            Some(PendingCeilingRidge::Length { .. })
         )
     }
 
@@ -1027,7 +1027,7 @@ impl AppController {
     /// length in metres. `None` unless the length stage is up.
     pub fn pending_roof_ridge_length(&self) -> Option<f32> {
         match self.pending_roof_ridge.as_ref()? {
-            PendingRoofRidge::Length { len_m, .. } => Some(*len_m),
+            PendingCeilingRidge::Length { len_m, .. } => Some(*len_m),
             _ => None,
         }
     }
@@ -1039,13 +1039,13 @@ impl AppController {
     /// only then). False on every other stage and while neither end is
     /// snapped (a typed length still anchors at the drawn `lo`, but nothing
     /// is exact to point at).
-    pub fn roof_ridge_length_anchored(&self) -> bool {
+    pub fn ceiling_ridge_length_anchored(&self) -> bool {
         matches!(
             self.pending_roof_ridge,
-            Some(PendingRoofRidge::Length {
+            Some(PendingCeilingRidge::Length {
                 start_snap: Some(_),
                 ..
-            }) | Some(PendingRoofRidge::Length {
+            }) | Some(PendingCeilingRidge::Length {
                 end_snap: Some(_),
                 ..
             })
@@ -1053,17 +1053,17 @@ impl AppController {
     }
 
     /// True while the resolved ridge awaits its height.
-    pub fn roof_ridge_height_pending(&self) -> bool {
+    pub fn ceiling_ridge_height_pending(&self) -> bool {
         matches!(
             self.pending_roof_ridge,
-            Some(PendingRoofRidge::Height { .. })
+            Some(PendingCeilingRidge::Height { .. })
         )
     }
 
-    /// True while ANY roof-ridge input is in flight. The UI uses this to keep
+    /// True while ANY ceiling-ridge input is in flight. The UI uses this to keep
     /// the toolbar reachable with the mode off and to suppress stroke/tap
     /// capture while a stage is pending.
-    pub fn roof_ridge_pending(&self) -> bool {
+    pub fn ceiling_ridge_pending(&self) -> bool {
         self.pending_roof_ridge.is_some()
     }
 
@@ -1083,7 +1083,7 @@ impl AppController {
     /// "⌃ 4.20 m" for a level ridge, "4.20→4.50 m" when the two end heights
     /// differ (> 1e-6 — a sloping ridge from the two-point flow). The apex
     /// dots/labels themselves still come from `ceiling_apex_views`.
-    pub fn roof_ridge_views(&self) -> Vec<((f64, f64), (f64, f64), String)> {
+    pub fn ceiling_ridge_views(&self) -> Vec<((f64, f64), (f64, f64), String)> {
         let idx = self.current_storey_idx.unwrap_or(0);
         let Some(storey) = self
             .current_record

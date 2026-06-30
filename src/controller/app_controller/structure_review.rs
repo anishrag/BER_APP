@@ -162,7 +162,7 @@ impl AppController {
             });
         }
         for c in &data.ceiling_constructions {
-            let ids = roof_region_ids(data, c.base.id);
+            let ids = ceiling_region_ids(data, c.base.id);
             if ids.is_empty() {
                 continue;
             }
@@ -259,7 +259,7 @@ fn floor_region_ids(data: &Ber, cid: ItemId) -> HashSet<ItemId> {
 }
 
 /// Ids of roof/ceiling regions (across all storeys) referencing construction `cid`.
-fn roof_region_ids(data: &Ber, cid: ItemId) -> HashSet<ItemId> {
+fn ceiling_region_ids(data: &Ber, cid: ItemId) -> HashSet<ItemId> {
     data.storeys
         .iter()
         .flat_map(|s| s.ceilings.regions.iter())

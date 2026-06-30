@@ -130,7 +130,7 @@ impl AppController {
         // endpoints coincide; the canvas's highlight + arrow degrade
         // gracefully to a dot + an arrow to it. Kind `Point` keeps the UI
         // prefill identity distinct from line and shape prompts.
-        if let Some(PendingRoofPoint::Position {
+        if let Some(PendingCeilingPoint::Position {
             point,
             axis,
             prompt,
@@ -160,7 +160,7 @@ impl AppController {
         // shape as the ceiling-step line's (it reuses that prompt machinery):
         // the "area wall" is the ridge SEGMENT itself (its extent endpoints),
         // the reference wall resolves in the OUTLINE plan, kind `Line`.
-        if let Some(PendingRoofRidge::CrossPosition { axis, prompt, .. }) =
+        if let Some(PendingCeilingRidge::CrossPosition { axis, prompt, .. }) =
             self.pending_roof_ridge.as_ref()
         {
             let option = prompt.options.get(prompt.current_idx)?;
@@ -189,7 +189,7 @@ impl AppController {
         // degrade gracefully to a dot + an arrow to it). The prompt's axis is
         // the ALONG axis, so the identity key (axis, kind, option) still
         // refreshes the prefill after the cross question.
-        if let Some(PendingRoofRidge::StartPosition { prompt, .. }) =
+        if let Some(PendingCeilingRidge::StartPosition { prompt, .. }) =
             self.pending_roof_ridge.as_ref()
         {
             let option = prompt.options.get(prompt.current_idx)?;
@@ -215,7 +215,7 @@ impl AppController {
         // is the rect's LO SIDE on the open stage's axis (the LEFT side for
         // PosX, the BOTTOM for PosY), the reference wall resolves in the
         // OUTLINE plan, kind `Line`. Both offer the Centre suggestion.
-        if let Some(PendingRoofRect::PosX { lo, len, prompt }) = self.pending_roof_rect.as_ref() {
+        if let Some(PendingCeilingRect::PosX { lo, len, prompt }) = self.pending_roof_rect.as_ref() {
             let option = prompt.options.get(prompt.current_idx)?;
             return Some(PositionPromptUiData {
                 area_wall: WallPositions {
@@ -234,7 +234,7 @@ impl AppController {
                 offers_centre: true,
             });
         }
-        if let Some(PendingRoofRect::PosY { lo, len, prompt }) = self.pending_roof_rect.as_ref() {
+        if let Some(PendingCeilingRect::PosY { lo, len, prompt }) = self.pending_roof_rect.as_ref() {
             let option = prompt.options.get(prompt.current_idx)?;
             return Some(PositionPromptUiData {
                 area_wall: WallPositions {
@@ -302,7 +302,7 @@ impl AppController {
         // the model moves — the resolved coordinate just rides into the next
         // stage (Y's question, or the height) — so no undo snapshot and no
         // mark_dirty (there's nothing to re-derive yet).
-        if let Some(PendingRoofPoint::Position {
+        if let Some(PendingCeilingPoint::Position {
             point,
             axis,
             prompt,
@@ -335,7 +335,7 @@ impl AppController {
         // runs the FINALIZE placement check once no questions remain; on its
         // rejection the pending stays at THIS stage (advance only replaces
         // it on success), so the `Err` lands on the open prompt.
-        if let Some(PendingRoofRidge::CrossPosition {
+        if let Some(PendingCeilingRidge::CrossPosition {
             axis,
             lo,
             len_m,
@@ -360,7 +360,7 @@ impl AppController {
                 &[RidgeQuestion::Start],
             );
         }
-        if let Some(PendingRoofRidge::StartPosition {
+        if let Some(PendingCeilingRidge::StartPosition {
             axis,
             coord_m,
             len_m,
@@ -378,7 +378,7 @@ impl AppController {
         // shell-resolved shape — the resolved LO coordinate rides into the
         // next stage (PosY, or finalize + the height); a finalize rejection
         // keeps THIS stage open (advance only replaces it on success).
-        if let Some(PendingRoofRect::PosX { prompt, .. } | PendingRoofRect::PosY { prompt, .. }) =
+        if let Some(PendingCeilingRect::PosX { prompt, .. } | PendingCeilingRect::PosY { prompt, .. }) =
             self.pending_roof_rect.as_ref()
         {
             let coord = self.document.resolve_ceiling_line_position(prompt, value)?;
@@ -426,7 +426,7 @@ impl AppController {
         // Roof-point per-axis prompt: accept the TAPPED coordinate as-is and
         // advance (Y's question, or the height). No history / no mark_dirty —
         // nothing moved.
-        if let Some(PendingRoofPoint::Position {
+        if let Some(PendingCeilingPoint::Position {
             point,
             axis,
             snap_x,
@@ -449,7 +449,7 @@ impl AppController {
         // mark_dirty — nothing moved. A finalize rejection is RETURNED with
         // the prompt left open, so the shell surfaces it inline exactly
         // like a typed rejection.
-        if let Some(PendingRoofRidge::CrossPosition {
+        if let Some(PendingCeilingRidge::CrossPosition {
             axis,
             coord_m,
             lo,
@@ -472,7 +472,7 @@ impl AppController {
                 &[RidgeQuestion::Start],
             );
         }
-        if let Some(PendingRoofRidge::StartPosition {
+        if let Some(PendingCeilingRidge::StartPosition {
             axis,
             coord_m,
             lo,
@@ -488,11 +488,11 @@ impl AppController {
         // Roof-RECT position questions: accept the DRAWN lo coordinate
         // as-is and advance; a finalize rejection is returned with the
         // prompt left open (the ridge's skip shape).
-        if let Some(PendingRoofRect::PosX { lo, .. } | PendingRoofRect::PosY { lo, .. }) =
+        if let Some(PendingCeilingRect::PosX { lo, .. } | PendingCeilingRect::PosY { lo, .. }) =
             self.pending_roof_rect.as_ref()
         {
             let coord = match self.pending_roof_rect.as_ref() {
-                Some(PendingRoofRect::PosX { .. }) => lo.0,
+                Some(PendingCeilingRect::PosX { .. }) => lo.0,
                 _ => lo.1,
             };
             return self.resolve_roof_rect_position(coord);
@@ -519,15 +519,15 @@ impl AppController {
             return;
         }
         // Roof-point per-axis prompt: cycle ITS reference options.
-        if let Some(PendingRoofPoint::Position { prompt, .. }) = self.pending_roof_point.as_mut() {
+        if let Some(PendingCeilingPoint::Position { prompt, .. }) = self.pending_roof_point.as_mut() {
             prompt.cycle();
             return;
         }
         // Roof-ridge position questions (cross or start): cycle the open
         // one's reference options.
         if let Some(
-            PendingRoofRidge::CrossPosition { prompt, .. }
-            | PendingRoofRidge::StartPosition { prompt, .. },
+            PendingCeilingRidge::CrossPosition { prompt, .. }
+            | PendingCeilingRidge::StartPosition { prompt, .. },
         ) = self.pending_roof_ridge.as_mut()
         {
             prompt.cycle();
@@ -535,7 +535,7 @@ impl AppController {
         }
         // Roof-rect position questions (PosX or PosY): cycle the open
         // one's reference options.
-        if let Some(PendingRoofRect::PosX { prompt, .. } | PendingRoofRect::PosY { prompt, .. }) =
+        if let Some(PendingCeilingRect::PosX { prompt, .. } | PendingCeilingRect::PosY { prompt, .. }) =
             self.pending_roof_rect.as_mut()
         {
             prompt.cycle();

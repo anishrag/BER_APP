@@ -24,7 +24,7 @@ pub struct CeilingApex {
     pub z_m: f64,
 }
 
-/// Disambiguates a roof apex that sits on an INTERNAL boundary shared by two
+/// Disambiguates a ceiling apex that sits on an INTERNAL boundary shared by two
 /// ceiling areas (a mono-pitch ridge along the house↔extension junction): which
 /// area should it slope? `apex` is the apex plan point it applies to; `region`
 /// is a point INSIDE the intended area (the drawn pre-snap location). Durable,
@@ -56,7 +56,7 @@ impl CeilingApex {
 /// flattens on re-resolve (a fixpoint break).
 pub const APEX_BOUNDARY_EPS_M: f64 = 1e-4;
 
-/// A connected GROUP of roof apexes and the ceiling regions they shape — the
+/// A connected GROUP of ceiling apexes and the ceiling regions they shape — the
 /// session-derived view (never persisted; no serde) that is THE grouping
 /// authority: ridge validation ("does this region already have a high
 /// point?") and the group-aware ceiling-step reconstruction both consume it
@@ -404,7 +404,7 @@ impl CeilingRegions {
             let claims = self.claim_regions(apex.point);
             match claims.split_first() {
                 None => log::warn!(
-                    "roof apex at ({:.3}, {:.3}) lies in no ceiling region — skipped",
+                    "ceiling apex at ({:.3}, {:.3}) lies in no ceiling region — skipped",
                     apex.point.x,
                     apex.point.y
                 ),
@@ -432,7 +432,7 @@ impl CeilingRegions {
                             Some(ri) => ri,
                             None => {
                                 log::warn!(
-                                    "roof apex at ({:.3}, {:.3}) sits on a boundary shared by {} \
+                                    "ceiling apex at ({:.3}, {:.3}) sits on a boundary shared by {} \
                                      regions — claimed by the first (#{first})",
                                     apex.point.x,
                                     apex.point.y,
@@ -494,7 +494,7 @@ impl CeilingRegions {
                     }
                     if n >= 3 {
                         log::warn!(
-                            "ceiling region contains {n} roof apexes — \
+                            "ceiling region contains {n} ceiling apexes — \
                              ridging from the first two in apex-list order"
                         );
                     }
@@ -642,13 +642,13 @@ impl CeilingRegions {
                         }
                         (Some(z), Some(b)) if (z - b).abs() <= EPS_M => merge.push(r),
                         (got, _) => log::warn!(
-                            "roof apex group: region base z {got:?} disagrees with the \
+                            "ceiling apex group: region base z {got:?} disagrees with the \
                              group's base {base_z:?} — excluded from the merged ring"
                         ),
                     }
                 }
                 if base_z.is_none() {
-                    log::warn!("roof apex group has no level-based member region — base_z = 0");
+                    log::warn!("ceiling apex group has no level-based member region — base_z = 0");
                 }
                 // Plan union of the agreeing members → simple exterior rings.
                 let mut acc = MultiPolygon::<f64>(Vec::new());

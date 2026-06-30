@@ -57,13 +57,13 @@ pub struct Storey {
     /// materialize, AFTER the ceiling-step areas (composition order is law:
     /// default ceiling → steps → apexes). `#[serde(default)]` so older
     /// records load.
-    #[serde(default, alias = "roof_apexes")]
+    #[serde(default, alias = "ceiling_apexes")]
     pub ceiling_apexes: Vec<CeilingApex>,
     /// Side hints for apexes on an internal shared boundary (a mono-pitch ridge
     /// along the house↔extension junction) — which ceiling area each slopes.
     /// Keyed by apex point (see [`CeilingApexHint`]); empty for normal apexes.
     /// `#[serde(default)]` so older records load.
-    #[serde(default, alias = "roof_apex_hints")]
+    #[serde(default, alias = "ceiling_apex_hints")]
     pub ceiling_apex_hints: Vec<CeilingApexHint>,
     /// Floor-slab thickness in metres between this storey's floor and the
     /// ceiling of the storey below it bears on. Durable INPUT like
@@ -102,7 +102,7 @@ pub struct Storey {
     /// from each face's plane), so a split piece keeps the exact surface — a
     /// carve across a ridge yields coplanar sub-faces, never re-pitched halves.
     /// `#[serde(default)]` so older records load.
-    #[serde(default, alias = "roof_splits")]
+    #[serde(default, alias = "ceiling_splits")]
     pub ceiling_splits: Vec<Vec<Point2f64>>,
     /// Structure-phase WALL splits: each the plan SEGMENT of a finalized cut
     /// that crosses a wall's base edge. A wall split is a vertical plane (not an
@@ -346,8 +346,8 @@ impl Storey {
             .iter()
             .filter(|r| r.exposure != CeilingExposure::Party)
             .any(|r| {
-                let roof_ring = ceiling_ring(&r.polygon);
-                let poly = ring_to_geo(&roof_ring);
+                let ceiling_ring = ceiling_ring(&r.polygon);
+                let poly = ring_to_geo(&ceiling_ring);
                 let inside = poly.intersection(&cut).unsigned_area();
                 let outside = poly.difference(&cut).unsigned_area();
                 inside >= SLIVER_AREA_M2 && outside >= SLIVER_AREA_M2

@@ -127,7 +127,7 @@ impl AppController {
             self.exposure_mode = false;
             self.phase_mode = false;
             self.step_mode = false;
-            self.roof_point_mode = false;
+            self.ceiling_point_mode = false;
             self.pending_roof_point = None;
             self.pending_roof_ridge = None;
             self.pending_roof_rect = None;

@@ -74,7 +74,7 @@ pub(super) fn has_controls(view: &SketchView<'_>) -> bool {
         // Roof: only the which-area-slopes choice is an in-box decision. Pinning a
         // position is a canvas action (distance in the number box) — its Cancel is
         // a top-right corner action, not a box.
-        if !view.roof_ridge_area_options.is_empty() {
+        if !view.ceiling_ridge_area_options.is_empty() {
             return true;
         }
     }
@@ -145,11 +145,11 @@ pub(super) fn panel_title(view: &SketchView<'_>) -> &'static str {
         {
             return "Ceiling steps";
         }
-        if !view.roof_ridge_area_options.is_empty() {
+        if !view.ceiling_ridge_area_options.is_empty() {
             return "Ridge";
         }
     }
-    "Roof shape"
+    "Ceiling shape"
 }
 
 /// A token identifying the CURRENT panel activation — what's selected / which
@@ -217,19 +217,19 @@ pub(super) fn panel_token(view: &SketchView<'_>) -> String {
                 view.ceiling_step_region_polygons.len()
             );
         }
-        if !view.roof_ridge_area_options.is_empty() {
+        if !view.ceiling_ridge_area_options.is_empty() {
             return "ridge-area".into();
         }
-        if view.roof_point_mode
-            || view.roof_point_position_pending
-            || view.roof_ridge_position_pending
-            || view.roof_rect_position_pending
+        if view.ceiling_point_mode
+            || view.ceiling_point_position_pending
+            || view.ceiling_ridge_position_pending
+            || view.ceiling_rect_position_pending
         {
             return format!(
                 "rp-{}-{}-{}-{}",
-                view.roof_point_position_pending,
-                view.roof_ridge_position_pending,
-                view.roof_rect_position_pending,
+                view.ceiling_point_position_pending,
+                view.ceiling_ridge_position_pending,
+                view.ceiling_rect_position_pending,
                 view.ceiling_apex_views.len()
             );
         }
@@ -322,17 +322,19 @@ pub(super) fn instruction(view: &SketchView<'_>) -> Option<&'static str> {
         if view.ceiling_step_mode {
             return Some("Ceiling steps — draw the step line, then set the level change.");
         }
-        if !view.roof_ridge_area_options.is_empty() {
+        if !view.ceiling_ridge_area_options.is_empty() {
             return Some("Choose which area this ridge should slope.");
         }
-        if view.roof_point_position_pending
-            || view.roof_ridge_position_pending
-            || view.roof_rect_position_pending
+        if view.ceiling_point_position_pending
+            || view.ceiling_ridge_position_pending
+            || view.ceiling_rect_position_pending
         {
             return Some("Pin the position on the plan — the distance is entered in the box.");
         }
-        if view.roof_point_mode {
-            return Some("Roof shape — tap an apex, or draw a ridge / flat-top, then set heights.");
+        if view.ceiling_point_mode {
+            return Some(
+                "Ceiling shape — tap an apex, or draw a ridge / flat-top, then set heights.",
+            );
         }
     }
     None
@@ -440,15 +442,15 @@ pub(super) fn render_controls<F: FnMut(UiEvent)>(
             // Roof: the which-area-slopes choice is the only in-box decision; the
             // position-stage Cancel is top-right, heights/lengths in the number
             // box, and apex deletes in the Delete panel.
-            if !view.roof_ridge_area_options.is_empty() {
+            if !view.ceiling_ridge_area_options.is_empty() {
                 // Which-area-slopes buttons (the question is in the bottom bar).
-                for (i, label) in view.roof_ridge_area_options.iter().enumerate() {
+                for (i, label) in view.ceiling_ridge_area_options.iter().enumerate() {
                     if ui.button(label).clicked() {
-                        on_event(UiEvent::Sketch(SketchEvent::ChooseRoofRidgeArea(i)));
+                        on_event(UiEvent::Sketch(SketchEvent::ChooseCeilingRidgeArea(i)));
                     }
                 }
                 if ui.button("Cancel").clicked() {
-                    on_event(UiEvent::Sketch(SketchEvent::CancelPendingRoofRidge));
+                    on_event(UiEvent::Sketch(SketchEvent::CancelPendingCeilingRidge));
                 }
             }
         }
@@ -472,12 +474,12 @@ pub(super) fn render_corner_actions<F: FnMut(UiEvent)>(
     // A canvas-positioning stage in progress → offer just its Cancel here.
     let stage_cancel = if view.ceiling_step_side_pending {
         Some(SketchEvent::CancelPendingCeilingStep)
-    } else if view.roof_rect_position_pending {
-        Some(SketchEvent::CancelPendingRoofRect)
-    } else if view.roof_ridge_position_pending {
-        Some(SketchEvent::CancelPendingRoofRidge)
-    } else if view.roof_point_position_pending {
-        Some(SketchEvent::CancelPendingRoofPoint)
+    } else if view.ceiling_rect_position_pending {
+        Some(SketchEvent::CancelPendingCeilingRect)
+    } else if view.ceiling_ridge_position_pending {
+        Some(SketchEvent::CancelPendingCeilingRidge)
+    } else if view.ceiling_point_position_pending {
+        Some(SketchEvent::CancelPendingCeilingPoint)
     } else {
         None
     };
@@ -606,7 +608,9 @@ pub(super) fn render_delete_panel<F: FnMut(UiEvent)>(
                             for (i, (_pos, label)) in view.ceiling_apex_views.iter().enumerate() {
                                 ui.horizontal(|ui| {
                                     if ui.button("🗑").clicked() {
-                                        on_event(UiEvent::Sketch(SketchEvent::DeleteRoofApex(i)));
+                                        on_event(UiEvent::Sketch(SketchEvent::DeleteCeilingApex(
+                                            i,
+                                        )));
                                     }
                                     ui.label(label);
                                 });

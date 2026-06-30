@@ -49,7 +49,7 @@ pub enum Tool {
     /// Ceiling-step tagging mode toggle (gated on a default ceiling height).
     CeilingSteps,
     /// Roof-point (apex) tagging mode toggle (same gate as the ceiling steps).
-    RoofPoints,
+    CeilingPoints,
     /// Phase-1 roof step toggle: gated whole-house roof-drawing takeover
     /// (whole-house outline shaded by top storey + roof controls).
     Roof,
@@ -116,7 +116,7 @@ pub const CATEGORIES: &[Category] = &[
             Tool::FloorThickness,
             Tool::FloorSteps,
             Tool::CeilingSteps,
-            Tool::RoofPoints,
+            Tool::CeilingPoints,
             Tool::Roof,
         ],
     },
@@ -233,8 +233,8 @@ pub struct ToolFlags {
     pub step_mode: bool,
     pub ceiling_step_mode: bool,
     pub ceiling_step_available: bool,
-    pub roof_point_mode: bool,
-    pub roof_point_available: bool,
+    pub ceiling_point_mode: bool,
+    pub ceiling_point_available: bool,
     pub openings_mode: bool,
     /// The active windows/doors tool, so the toolbar highlights it.
     pub openings_tool: OpeningToolKind,
@@ -296,8 +296,8 @@ impl ToolFlags {
             step_mode: view.step_mode,
             ceiling_step_mode: view.ceiling_step_mode,
             ceiling_step_available: view.ceiling_step_available,
-            roof_point_mode: view.roof_point_mode,
-            roof_point_available: view.roof_point_available,
+            ceiling_point_mode: view.ceiling_point_mode,
+            ceiling_point_available: view.ceiling_point_available,
             openings_mode: view.openings_mode,
             openings_tool: view.openings_tool,
             default_ceiling_height: view.default_ceiling_height,
@@ -753,26 +753,26 @@ fn tool_ui<F: FnMut(UiEvent)>(
                 )));
             }
         }
-        Tool::RoofPoints => {
+        Tool::CeilingPoints => {
             // Same gate as the ceiling steps (a default ceiling height +
             // finalised outline — the apex fans a derived ceiling region);
             // the controller setter re-enforces it.
-            let enabled = !flags.read_only && flags.has_floor_plan && flags.roof_point_available;
+            let enabled = !flags.read_only && flags.has_floor_plan && flags.ceiling_point_available;
             if ui
                 .add_enabled(
                     enabled,
-                    egui::Button::selectable(flags.roof_point_mode, "⛰ Roof points"),
+                    egui::Button::selectable(flags.ceiling_point_mode, "⛰ Ceiling shape"),
                 )
                 .hint(
-                    "Slope part of the roof: tap a high (or low) point inside \
-                     a ceiling area, or draw a straight stroke for a ridge, \
-                     then enter the height",
+                    "Slope part of the CEILING (a vaulted / sloped ceiling — not \
+                     the roof): tap a high (or low) point inside a ceiling area, \
+                     or draw a straight stroke for a ridge, then enter the height",
                 )
                 .disabled_hint("Set the default ceiling height first (the Heights field above)")
                 .clicked()
             {
-                on_event(UiEvent::Sketch(SketchEvent::SetRoofPointMode(
-                    !flags.roof_point_mode,
+                on_event(UiEvent::Sketch(SketchEvent::SetCeilingPointMode(
+                    !flags.ceiling_point_mode,
                 )));
             }
         }

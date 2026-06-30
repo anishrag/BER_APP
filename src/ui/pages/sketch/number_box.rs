@@ -618,15 +618,15 @@ pub(super) fn render<F: FnMut(UiEvent)>(
     }
 
     // ── Roof: flat-top (rect) height ────────────────────────────────────────
-    if view.roof_rect_height_pending {
+    if view.ceiling_rect_height_pending {
         let actions = vec![
             Action::new(
                 "Set",
                 "Raise the ceiling area to a flat top at this height",
-                |v| SketchEvent::AssignRoofRectHeight(v),
+                |v| SketchEvent::AssignCeilingRectHeight(v),
             )
             .primary(),
-            roof_rect_cancel(),
+            ceiling_rect_cancel(),
         ];
         show_box(
             ctx,
@@ -635,7 +635,7 @@ pub(super) fn render<F: FnMut(UiEvent)>(
             None,
             "e.g. 4.2",
             view.roof_error,
-            view.roof_apex_input,
+            view.ceiling_apex_input,
             &actions,
             &mut view.cat_state.input_mode,
             &mut view.cat_state.input_mode_pinned,
@@ -646,7 +646,7 @@ pub(super) fn render<F: FnMut(UiEvent)>(
     }
 
     // ── Roof: flat-top (rect) side length ───────────────────────────────────
-    if let Some(axis) = view.roof_rect_length_axis {
+    if let Some(axis) = view.ceiling_rect_length_axis {
         let title = match axis {
             X => "Flat-top width, E–W (m)",
             Y => "Flat-top depth, N–S (m)",
@@ -655,15 +655,15 @@ pub(super) fn render<F: FnMut(UiEvent)>(
             Action::new(
                 "Set",
                 "Use exactly this side length (the near corner stays put)",
-                |v| SketchEvent::AssignRoofRectLength(v),
+                |v| SketchEvent::AssignCeilingRectLength(v),
             )
             .primary()
             .keep_buffer(),
             Action::new("Skip", "Accept the drawn length as-is", |_| {
-                SketchEvent::SkipRoofRectLength
+                SketchEvent::SkipCeilingRectLength
             })
             .bare(),
-            roof_rect_cancel(),
+            ceiling_rect_cancel(),
         ];
         show_box(
             ctx,
@@ -672,7 +672,7 @@ pub(super) fn render<F: FnMut(UiEvent)>(
             None,
             "e.g. 4.0",
             view.roof_error,
-            view.roof_ridge_length_input,
+            view.ceiling_ridge_length_input,
             &actions,
             &mut view.cat_state.input_mode,
             &mut view.cat_state.input_mode_pinned,
@@ -683,15 +683,15 @@ pub(super) fn render<F: FnMut(UiEvent)>(
     }
 
     // ── Roof: ridge height ──────────────────────────────────────────────────
-    if view.roof_ridge_height_pending {
+    if view.ceiling_ridge_height_pending {
         let actions = vec![
             Action::new(
                 "Set",
                 "Raise (or lower) the ceiling area to a ridge at this height",
-                |v| SketchEvent::AssignRoofRidgeHeight(v),
+                |v| SketchEvent::AssignCeilingRidgeHeight(v),
             )
             .primary(),
-            roof_ridge_cancel(),
+            ceiling_ridge_cancel(),
         ];
         show_box(
             ctx,
@@ -700,7 +700,7 @@ pub(super) fn render<F: FnMut(UiEvent)>(
             None,
             "e.g. 4.2",
             view.roof_error,
-            view.roof_apex_input,
+            view.ceiling_apex_input,
             &actions,
             &mut view.cat_state.input_mode,
             &mut view.cat_state.input_mode_pinned,
@@ -711,21 +711,21 @@ pub(super) fn render<F: FnMut(UiEvent)>(
     }
 
     // ── Roof: ridge length ──────────────────────────────────────────────────
-    if view.roof_ridge_length_pending {
-        let set_hint = if view.roof_ridge_length_anchored {
+    if view.ceiling_ridge_length_pending {
+        let set_hint = if view.ceiling_ridge_length_anchored {
             "Use exactly this ridge length (from the highlighted end)"
         } else {
             "Use exactly this ridge length"
         };
         let actions = vec![
-            Action::new("Set", set_hint, SketchEvent::AssignRoofRidgeLength)
+            Action::new("Set", set_hint, SketchEvent::AssignCeilingRidgeLength)
                 .primary()
                 .keep_buffer(),
             Action::new("Skip", "Accept the drawn length as-is", |_| {
-                SketchEvent::SkipRoofRidgeLength
+                SketchEvent::SkipCeilingRidgeLength
             })
             .bare(),
-            roof_ridge_cancel(),
+            ceiling_ridge_cancel(),
         ];
         show_box(
             ctx,
@@ -734,7 +734,7 @@ pub(super) fn render<F: FnMut(UiEvent)>(
             None,
             "e.g. 6.0",
             view.roof_error,
-            view.roof_ridge_length_input,
+            view.ceiling_ridge_length_input,
             &actions,
             &mut view.cat_state.input_mode,
             &mut view.cat_state.input_mode_pinned,
@@ -745,16 +745,16 @@ pub(super) fn render<F: FnMut(UiEvent)>(
     }
 
     // ── Roof: apex (single high point) height ───────────────────────────────
-    if view.roof_point_height_pending {
+    if view.ceiling_point_height_pending {
         let actions = vec![
             Action::new(
                 "Set",
                 "Slope the ceiling area up (or down) to this height at the point",
-                |v| SketchEvent::AssignRoofApexHeight(v),
+                |v| SketchEvent::AssignCeilingApexHeight(v),
             )
             .primary(),
             Action::new("Cancel", "Discard this roof point", |_| {
-                SketchEvent::CancelPendingRoofPoint
+                SketchEvent::CancelPendingCeilingPoint
             })
             .bare(),
         ];
@@ -765,7 +765,7 @@ pub(super) fn render<F: FnMut(UiEvent)>(
             None,
             "e.g. 4.2",
             view.roof_error,
-            view.roof_apex_input,
+            view.ceiling_apex_input,
             &actions,
             &mut view.cat_state.input_mode,
             &mut view.cat_state.input_mode_pinned,
@@ -850,17 +850,17 @@ pub(super) fn render<F: FnMut(UiEvent)>(
 
 /// The two roof flows share a "Cancel" with distinct events; small helpers keep
 /// the prompt arms above terse.
-fn roof_rect_cancel() -> Action {
+fn ceiling_rect_cancel() -> Action {
     Action::new("Cancel", "Discard this flat-topped roof", |_| {
-        SketchEvent::CancelPendingRoofRect
+        SketchEvent::CancelPendingCeilingRect
     })
     .bare()
     .with_clear()
 }
 
-fn roof_ridge_cancel() -> Action {
+fn ceiling_ridge_cancel() -> Action {
     Action::new("Cancel", "Discard this ridge", |_| {
-        SketchEvent::CancelPendingRoofRidge
+        SketchEvent::CancelPendingCeilingRidge
     })
     .bare()
     .with_clear()

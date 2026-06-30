@@ -1077,7 +1077,7 @@ mod tests {
     /// A structure-phase ROOF split divides the ceiling in two at the SAME
     /// height (delta-0), and survives a re-resolve.
     #[test]
-    fn roof_split_divides_ceiling_keeping_height() {
+    fn ceiling_split_divides_ceiling_keeping_height() {
         let doc = unit_square_doc();
         let mut ber = Ber::default();
         ensure_storey_constructions(&mut ber, 0, &[]);
@@ -1190,7 +1190,7 @@ mod tests {
             "both halves stay flat at the ceiling height"
         );
         assert!(
-            (storey.ceilings.regions.iter().map(roof_plan_area).sum::<f64>() - 16.0).abs() < 1e-4,
+            (storey.ceilings.regions.iter().map(ceiling_plan_area).sum::<f64>() - 16.0).abs() < 1e-4,
             "plan area conserved"
         );
         // The floor partition still happened alongside the roof carve.
@@ -1208,7 +1208,7 @@ mod tests {
     /// The roof surface z at plan `(x, y)` — the containing region's plane,
     /// evaluated there — for asserting a carve re-TILES the surface without
     /// re-deriving it. `None` when no region's plan polygon contains the point.
-    fn roof_z_at(storey: &Storey, x: f64, y: f64) -> Option<f64> {
+    fn ceiling_z_at(storey: &Storey, x: f64, y: f64) -> Option<f64> {
         let plane = |r: &ber_model::ber::structural::CeilingRegion| -> Option<(f64, f64, f64)> {
             let ext = &r.polygon.exterior;
             let o = ext.first()?;
@@ -1255,7 +1255,7 @@ mod tests {
     /// ran BEFORE the apexes and re-pitched each half into its own roof (the
     /// ridge collapsed into two pyramids with a valley between the apexes).
     #[test]
-    fn roof_carve_across_ridge_splits_faces_without_re_pitching() {
+    fn ceiling_carve_across_ridge_splits_faces_without_re_pitching() {
         let (doc, mut ber) = ceiling_test_setup(2.4);
         // A ridge along x = 2 (apexes (2,1) and (2,3) at 4.2) over the 4×4.
         ber.storeys[0].ceiling_apexes = vec![
@@ -1282,12 +1282,12 @@ mod tests {
         ];
         let before: Vec<f64> = probes
             .iter()
-            .map(|&(x, y)| roof_z_at(&ber.storeys[0], x, y).expect("probe inside a region"))
+            .map(|&(x, y)| ceiling_z_at(&ber.storeys[0], x, y).expect("probe inside a region"))
             .collect();
         // Mid-ridge is the discriminator: 4.2 for one ridge, a valley for two
         // pyramids.
         assert!(
-            (roof_z_at(&ber.storeys[0], 1.9, 2.0).unwrap() - (2.4 + 1.8 * 0.95)).abs() < 1e-6,
+            (ceiling_z_at(&ber.storeys[0], 1.9, 2.0).unwrap() - (2.4 + 1.8 * 0.95)).abs() < 1e-6,
             "left slope rises toward the ridge"
         );
 
@@ -1309,7 +1309,7 @@ mod tests {
         );
         let after: Vec<f64> = probes
             .iter()
-            .map(|&(x, y)| roof_z_at(&ber.storeys[0], x, y).expect("probe still inside a region"))
+            .map(|&(x, y)| ceiling_z_at(&ber.storeys[0], x, y).expect("probe still inside a region"))
             .collect();
         for ((x, y), (b, a)) in probes.iter().zip(before.iter().zip(&after)) {
             assert!(
@@ -1318,7 +1318,7 @@ mod tests {
             );
         }
         assert!(
-            (roof_z_at(&ber.storeys[0], 1.9, 2.0).unwrap() - (2.4 + 1.8 * 0.95)).abs() < 1e-6,
+            (ceiling_z_at(&ber.storeys[0], 1.9, 2.0).unwrap() - (2.4 + 1.8 * 0.95)).abs() < 1e-6,
             "the ridge is intact, not collapsed into two pyramids"
         );
         // Total plan area is conserved (nothing lost to the split).
@@ -1327,7 +1327,7 @@ mod tests {
                 .ceilings
                 .regions
                 .iter()
-                .map(roof_plan_area)
+                .map(ceiling_plan_area)
                 .sum::<f64>()
                 - 16.0)
                 .abs()
@@ -1370,7 +1370,7 @@ mod tests {
             cid,
         );
         assert!(
-            (grown.regions.iter().map(roof_plan_area).sum::<f64>() - 24.0).abs() < 1e-3,
+            (grown.regions.iter().map(ceiling_plan_area).sum::<f64>() - 24.0).abs() < 1e-3,
             "covers the grown footprint"
         );
         assert!(
@@ -1386,7 +1386,7 @@ mod tests {
             .regions
             .iter()
             .filter(|r| r.flat_z().is_some_and(|z| (z - 2.4).abs() < 1e-6))
-            .map(roof_plan_area)
+            .map(ceiling_plan_area)
             .sum();
         assert!(
             (flat_area - 8.0).abs() < 1e-3,
@@ -1423,7 +1423,7 @@ mod tests {
             cid,
         );
         assert!(
-            (shrunk.regions.iter().map(roof_plan_area).sum::<f64>() - 12.0).abs() < 1e-3,
+            (shrunk.regions.iter().map(ceiling_plan_area).sum::<f64>() - 12.0).abs() < 1e-3,
             "clipped to the shrunk footprint"
         );
         assert!(
@@ -2703,7 +2703,7 @@ mod tests {
                 .ceilings
                 .regions
                 .iter()
-                .map(roof_plan_area)
+                .map(ceiling_plan_area)
                 .sum::<f64>()
                 - 24.0)
                 .abs()
@@ -2727,7 +2727,7 @@ mod tests {
 
     /// Unsigned shoelace area of a roof region's plan projection (no geo
     /// dependency in this crate).
-    fn roof_plan_area(region: &ber_model::ber::structural::CeilingRegion) -> f64 {
+    fn ceiling_plan_area(region: &ber_model::ber::structural::CeilingRegion) -> f64 {
         let ring = &region.polygon.exterior;
         let n = ring.len();
         let mut s = 0.0;
@@ -2739,13 +2739,13 @@ mod tests {
     }
 
     /// Total plan area of the roof regions whose flat height is `z`.
-    fn roof_area_at(storey: &Storey, z: f64) -> f64 {
+    fn ceiling_area_at(storey: &Storey, z: f64) -> f64 {
         storey
             .ceilings
             .regions
             .iter()
             .filter(|r| r.flat_z().is_some_and(|rz| (rz - z).abs() < 1e-9))
-            .map(roof_plan_area)
+            .map(ceiling_plan_area)
             .sum()
     }
 
@@ -2860,7 +2860,7 @@ mod tests {
             },
         ];
         build_ceiling(&doc, &mut ber, 0, &[], &[], &[step], &apexes);
-        let before = roof_surface_multiset(&ber.storeys[0]);
+        let before = ceiling_surface_multiset(&ber.storeys[0]);
         let n = ber.storeys[0].ceilings.regions.len();
         assert!(n >= 5, "stepped + ridged surface resolved");
         // Two more pure re-resolves (no edits) — refit only.
@@ -2871,7 +2871,7 @@ mod tests {
             n,
             "region count stable across re-resolve"
         );
-        assert_same_surface(&before, &roof_surface_multiset(&ber.storeys[0]));
+        assert_same_surface(&before, &ceiling_surface_multiset(&ber.storeys[0]));
     }
 
     /// One ceiling-step region (the line at x = 1, Greater side, +0.3) splits
@@ -2891,9 +2891,9 @@ mod tests {
         let storey = resolve_storey_t(&doc, &mut ber, 0, &[], &[], &[step]);
 
         assert_eq!(storey.ceilings.regions.len(), 2);
-        assert!((roof_area_at(&storey, 2.4) - 4.0).abs() < 1e-6, "left 1×4");
+        assert!((ceiling_area_at(&storey, 2.4) - 4.0).abs() < 1e-6, "left 1×4");
         assert!(
-            (roof_area_at(&storey, 2.7) - 12.0).abs() < 1e-6,
+            (ceiling_area_at(&storey, 2.7) - 12.0).abs() < 1e-6,
             "right 3×4"
         );
         // Clipped to the footprint: no vertex from the half-rect's overhang.
@@ -2960,7 +2960,7 @@ mod tests {
         assert_eq!(storey.ceilings.regions.len(), 4, "four quadrants");
         for z in [h, h + a, h + b, h + a + b] {
             assert!(
-                (roof_area_at(&storey, z) - 4.0).abs() < 1e-6,
+                (ceiling_area_at(&storey, z) - 4.0).abs() < 1e-6,
                 "one 2×2 quadrant at z = {z}"
             );
         }
@@ -2981,7 +2981,7 @@ mod tests {
             .unwrap();
         let storey = resolve_storey_t(&doc, &mut ber, 0, &[], &[], &[step]);
         assert!(
-            (roof_area_at(&storey, 0.0) - 8.0).abs() < 1e-6,
+            (ceiling_area_at(&storey, 0.0) - 8.0).abs() < 1e-6,
             "the z = 0 piece survives (warned, not dropped)"
         );
     }
@@ -2993,7 +2993,7 @@ mod tests {
     /// Multiset fingerprint of the roof SURFACE: per region `(plan area,
     /// min z, max z)`, sorted — robust to region order and to collinear
     /// vertices boolean ops insert.
-    fn roof_surface_multiset(storey: &Storey) -> Vec<(f64, f64, f64)> {
+    fn ceiling_surface_multiset(storey: &Storey) -> Vec<(f64, f64, f64)> {
         let mut v: Vec<(f64, f64, f64)> = storey
             .ceilings
             .regions
@@ -3001,7 +3001,7 @@ mod tests {
             .map(|r| {
                 let zs = r.polygon.exterior.iter().map(|p| p.z);
                 (
-                    roof_plan_area(r),
+                    ceiling_plan_area(r),
                     zs.clone().fold(f64::INFINITY, f64::min),
                     zs.fold(f64::NEG_INFINITY, f64::max),
                 )
@@ -3062,7 +3062,7 @@ mod tests {
         }];
         let storey = resolve_storey(&doc, &ber, 0, &[], &[], &[]);
         assert_eq!(storey.ceilings.regions.len(), 1, "flat — the fan is dormant");
-        assert!((roof_area_at(&storey, 2.4) - 16.0).abs() < 1e-6);
+        assert!((ceiling_area_at(&storey, 2.4) - 16.0).abs() < 1e-6);
         assert_eq!(storey.ceiling_apexes.len(), 1, "the apex is kept");
     }
 

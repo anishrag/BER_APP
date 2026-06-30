@@ -1011,10 +1011,10 @@ pub(super) fn render<F: FnMut(UiEvent)>(
 
     // The pending roof point's wall snap(s) as ONE tag, mirroring the
     // ceiling-step line's: drawn through the same snap-tag renderer, but
-    // its menu is a separate widget routed to UnsnapRoofPoint, never
+    // its menu is a separate widget routed to UnsnapCeilingPoint, never
     // ChooseSnap — the generic replay rewinds history, and the pending
     // point lives outside it. The menu offers exactly "Don't snap".
-    if let Some(tag) = view.roof_point_snap_tag {
+    if let Some(tag) = view.ceiling_point_snap_tag {
         render::render_snap_tags(
             &painter,
             rect,
@@ -1030,13 +1030,13 @@ pub(super) fn render<F: FnMut(UiEvent)>(
                 Some(k) => format!("{} ▾", render::snap_kind_label(k)),
                 None => "no snap ▾".to_string(),
             };
-            egui::Area::new(ui.id().with("roof_point_snap_tag"))
+            egui::Area::new(ui.id().with("ceiling_point_snap_tag"))
                 .fixed_pos(sp + egui::vec2(7.0, -7.0))
                 .order(egui::Order::Foreground)
                 .show(ui.ctx(), |ui| {
                     ui.menu_button(label, |ui| {
                         if tag.skippable && ui.button("Don't snap").clicked() {
-                            on_event(UiEvent::Sketch(SketchEvent::UnsnapRoofPoint));
+                            on_event(UiEvent::Sketch(SketchEvent::UnsnapCeilingPoint));
                             ui.close();
                         }
                     });
@@ -1056,7 +1056,7 @@ pub(super) fn render<F: FnMut(UiEvent)>(
             current_storey_idx,
             mode,
             vp,
-            view.roof_ridge_views,
+            view.ceiling_ridge_views,
         );
     }
     if let Some((a, b)) = view.pending_roof_ridge_line {
@@ -1075,17 +1075,17 @@ pub(super) fn render<F: FnMut(UiEvent)>(
             current_storey_idx,
             mode,
             vp,
-            view.roof_rect_views,
+            view.ceiling_rect_views,
             view.pending_roof_rect_outline,
         );
     }
 
     // The pending ridge's wall snap, mirroring the ceiling-step line's:
     // drawn through the same snap-tag renderer, but its menu is a separate
-    // widget routed to UnsnapRoofRidge, never ChooseSnap — the generic
+    // widget routed to UnsnapCeilingRidge, never ChooseSnap — the generic
     // replay rewinds history, and the pending ridge lives outside it. The
     // menu offers exactly "Don't snap".
-    if let Some(tag) = view.roof_ridge_snap_tag {
+    if let Some(tag) = view.ceiling_ridge_snap_tag {
         render::render_snap_tags(
             &painter,
             rect,
@@ -1101,13 +1101,13 @@ pub(super) fn render<F: FnMut(UiEvent)>(
                 Some(k) => format!("{} ▾", render::snap_kind_label(k)),
                 None => "no snap ▾".to_string(),
             };
-            egui::Area::new(ui.id().with("roof_ridge_snap_tag"))
+            egui::Area::new(ui.id().with("ceiling_ridge_snap_tag"))
                 .fixed_pos(sp + egui::vec2(7.0, -7.0))
                 .order(egui::Order::Foreground)
                 .show(ui.ctx(), |ui| {
                     ui.menu_button(label, |ui| {
                         if tag.skippable && ui.button("Don't snap").clicked() {
-                            on_event(UiEvent::Sketch(SketchEvent::UnsnapRoofRidge));
+                            on_event(UiEvent::Sketch(SketchEvent::UnsnapCeilingRidge));
                             ui.close();
                         }
                     });
@@ -1491,7 +1491,7 @@ pub(super) fn render<F: FnMut(UiEvent)>(
         && !view.phase_mode
         && !view.step_mode
         && !view.ceiling_step_mode
-        && !view.roof_point_mode
+        && !view.ceiling_point_mode
         && !view.partition_mode
         && !view.living_area_mode
         && view.current_phase != AssessmentPhase::Structure;
@@ -1593,10 +1593,10 @@ pub(super) fn render<F: FnMut(UiEvent)>(
     // pending cut-pick owns the tap instead. Once a stage is pending —
     // a point's OR a ridge's (stroke = ridge shares the mode) — taps do
     // nothing (the prompts are toolbar/panel-driven).
-    if view.roof_point_mode
-        && !view.roof_point_pending
-        && !view.roof_ridge_pending
-        && !view.roof_rect_pending
+    if view.ceiling_point_mode
+        && !view.ceiling_point_pending
+        && !view.ceiling_ridge_pending
+        && !view.ceiling_rect_pending
         && matches!(edit_tool, EditTools::DrawPerpWalls)
         && !cut_pending
         && !phase_cut_pending
@@ -1607,7 +1607,7 @@ pub(super) fn render<F: FnMut(UiEvent)>(
                 .interact_pointer_pos()
                 .and_then(|pos| screen_to_world(ber, current_storey_idx, rect, vp, pos))
             {
-                on_event(UiEvent::Sketch(SketchEvent::RoofPointTap {
+                on_event(UiEvent::Sketch(SketchEvent::CeilingPointTap {
                     world_x: wx,
                     world_y: wy,
                 }));
@@ -2140,9 +2140,9 @@ pub(super) fn render<F: FnMut(UiEvent)>(
         && !step_cut_pending
         && !view.step_pick_pending
         && !view.ceiling_step_pending
-        && !view.roof_point_pending
-        && !view.roof_ridge_pending
-        && !view.roof_rect_pending
+        && !view.ceiling_point_pending
+        && !view.ceiling_ridge_pending
+        && !view.ceiling_rect_pending
         && !view.exposure_mode
         && !view.floor_exposure_mode
         && !view.ceiling_exposure_mode
@@ -2197,8 +2197,8 @@ pub(super) fn render<F: FnMut(UiEvent)>(
                 // In roof-point mode a STROKE draws a RIDGE (taps stay
                 // the point input — the ceiling-step stroke/tap split),
                 // in metre space too.
-                let roof_ridge_draw =
-                    view.roof_point_mode && matches!(edit_tool, EditTools::DrawPerpWalls);
+                let ceiling_ridge_draw =
+                    view.ceiling_point_mode && matches!(edit_tool, EditTools::DrawPerpWalls);
                 // First outline of a fresh upper storey: drawn over
                 // the previous-storey watermark, so it must be
                 // captured in that storey's metre space (mirrors the
@@ -2208,7 +2208,7 @@ pub(super) fn render<F: FnMut(UiEvent)>(
                     && !view.phase_mode
                     && !view.step_mode
                     && !view.ceiling_step_mode
-                    && !view.roof_point_mode
+                    && !view.ceiling_point_mode
                     && matches!(current_storey_idx, Some(i) if i > 0)
                     && ber
                         .and_then(|b| b.storeys.get(current_storey_idx?))
@@ -2217,7 +2217,7 @@ pub(super) fn render<F: FnMut(UiEvent)>(
                     || phase_draw
                     || step_draw
                     || ceiling_step_draw
-                    || roof_ridge_draw
+                    || ceiling_ridge_draw
                     || outline_on_watermark
                     || matches!(
                         edit_tool,
@@ -2268,8 +2268,8 @@ pub(super) fn render<F: FnMut(UiEvent)>(
                             SketchEvent::CeilingStepStrokeWorld {
                                 points: world_points,
                             }
-                        } else if roof_ridge_draw {
-                            SketchEvent::RoofRidgeStrokeWorld {
+                        } else if ceiling_ridge_draw {
+                            SketchEvent::CeilingRidgeStrokeWorld {
                                 points: world_points,
                             }
                         } else if outline_on_watermark {

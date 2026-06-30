@@ -156,7 +156,7 @@ pub(crate) fn render_at_z_offset(
     // projection not yet run): flat rings over each floor region at the
     // default height, matching the old uniform extrusion.
     if storey.ceilings.regions.is_empty() {
-        let roof_color = color_for(DisplayMode::Ceilings, display_mode, style::ROOF_LINE);
+        let ceiling_color = color_for(DisplayMode::Ceilings, display_mode, style::ROOF_LINE);
         for region in &storey.floors.regions {
             let pts: Vec<egui::Pos2> = region
                 .polygon
@@ -170,7 +170,7 @@ pub(crate) fn render_at_z_offset(
             if pts.len() >= 3 {
                 painter.add(egui::Shape::closed_line(
                     pts,
-                    egui::Stroke::new(1.5, roof_color),
+                    egui::Stroke::new(1.5, ceiling_color),
                 ));
             }
         }
@@ -335,7 +335,7 @@ fn draw_roof_region(
             t.apply(px, py)
         })
         .collect();
-    let roof_color = color_for(DisplayMode::Ceilings, display_mode, style::ROOF_LINE);
+    let ceiling_color = color_for(DisplayMode::Ceilings, display_mode, style::ROOF_LINE);
     // A SELECTED roof region's face is SHADED so sloped fans/ridges read as
     // surfaces, not just outlines.
     if selected.contains(&region.id) {
@@ -343,7 +343,7 @@ fn draw_roof_region(
     }
     painter.add(egui::Shape::closed_line(
         pts,
-        egui::Stroke::new(1.5, roof_color),
+        egui::Stroke::new(1.5, ceiling_color),
     ));
 }
 
