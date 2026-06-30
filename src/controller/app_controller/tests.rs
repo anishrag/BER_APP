@@ -1733,20 +1733,21 @@ fn group_photo_copies_into_store_and_attaches() {
     let _ = std::fs::remove_file(&src);
 }
 
-/// Compact tiers actually downscale + re-encode the capture (not a raw copy): a
-/// large source lands in the store within the tier's pixel cap, as JPEG, and
-/// smaller than the original. (`Full`, covered above, keeps the bytes verbatim.)
+/// The compact-tier recompression unit (the Android path — desktop now stores
+/// originals verbatim, so this tests `recompress` directly to stay
+/// platform-independent): a large source downscales to within the tier's pixel
+/// cap, re-encodes to JPEG at the tier quality, and lands smaller than the
+/// original.
 #[test]
-fn store_photo_recompresses_compact_tiers() {
+fn recompress_downscales_and_shrinks() {
     use image::GenericImageView;
 
-    let mut c = AppController::new(crate::engine::open_db(":memory:").unwrap());
     let tmp = std::env::temp_dir().join(format!("ber_recompress_{}", ItemId::default().0));
-    c.set_photos_dir(tmp.clone());
+    std::fs::create_dir_all(&tmp).unwrap();
 
     // A 3000×2000 noisy image: big enough that downscaling to the Low cap
     // (1280px) and re-encoding is a clear, non-trivial reduction.
-    let src = std::env::temp_dir().join(format!("ber_big_{}.png", ItemId::default().0));
+    let src = tmp.join("big.png");
     let mut img = image::RgbImage::new(3000, 2000);
     for (x, y, px) in img.enumerate_pixels_mut() {
         *px = image::Rgb([(x % 256) as u8, (y % 256) as u8, ((x + y) % 256) as u8]);
@@ -1754,18 +1755,15 @@ fn store_photo_recompresses_compact_tiers() {
     img.save(&src).unwrap();
     let src_len = std::fs::metadata(&src).unwrap().len();
 
-    let photo = c
-        .store_photo_file(&src, PhotoQuality::Low)
-        .expect("photo stored");
-    let stored = std::path::Path::new(&photo.file_path);
-    assert!(stored.exists(), "recompressed file written");
-    assert_eq!(
-        stored.extension().and_then(|e| e.to_str()),
-        Some("jpg"),
-        "compact tier re-encodes to JPEG"
+    // Low tier: 1280 px cap, quality 50.
+    let dest = tmp.join("out.jpg");
+    assert!(
+        AppController::recompress(&src, &dest, 1280, 50),
+        "recompress succeeds"
     );
+    assert!(dest.exists(), "recompressed file written");
 
-    let (w, h) = image::ImageReader::open(stored)
+    let (w, h) = image::ImageReader::open(&dest)
         .unwrap()
         .with_guessed_format()
         .unwrap()
@@ -1776,14 +1774,13 @@ fn store_photo_recompresses_compact_tiers() {
         w.max(h) <= 1280,
         "downscaled to the Low tier pixel cap, got {w}x{h}"
     );
-    let stored_len = std::fs::metadata(stored).unwrap().len();
+    let stored_len = std::fs::metadata(&dest).unwrap().len();
     assert!(
         stored_len < src_len,
         "recompressed ({stored_len}) smaller than original ({src_len})"
     );
 
     let _ = std::fs::remove_dir_all(&tmp);
-    let _ = std::fs::remove_file(&src);
 }
 
 /// The group PHASE is editable — defaulted to the derived value but overridable

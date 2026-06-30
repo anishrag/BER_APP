@@ -781,12 +781,21 @@ impl AppController {
         let dir =
             std::fs::canonicalize(&self.photos_dir).unwrap_or_else(|_| self.photos_dir.clone());
         let id = ItemId::default();
-        // Compact tiers re-encode to JPEG toward their byte budget; `Full` (and
-        // any decode/encode failure) keeps the original bytes, extension and all.
-        let dest = match quality.budget() {
-            Some((max_dim, target_bytes)) => {
+        // Recompression is an ANDROID concern: phone cameras hand us full-res
+        // ~12 MP JPEGs, so each compact tier downscales + re-encodes once at a
+        // fixed quality. On desktop (dev) the picked file is stored verbatim —
+        // no point spending the decode/encode there. `Full`, the desktop path,
+        // and any decode/encode failure all keep the original bytes (extension
+        // and all).
+        let spec = if cfg!(target_os = "android") {
+            quality.compression()
+        } else {
+            None
+        };
+        let dest = match spec {
+            Some((max_dim, jpeg_quality)) => {
                 let dest = dir.join(format!("{}.jpg", id.0));
-                if Self::recompress(source, &dest, max_dim, target_bytes) {
+                if Self::recompress(source, &dest, max_dim, jpeg_quality) {
                     Some(dest)
                 } else {
                     None
@@ -837,15 +846,14 @@ impl AppController {
     }
 
     /// Decode `src`, downscale to fit `max_dim` px on the long edge, and write a
-    /// JPEG to `dest` no larger than `target_bytes` if achievable by lowering the
-    /// encoder quality (the smallest quality tried is kept regardless). Returns
-    /// `false` and writes nothing on any decode/encode failure, so the caller can
-    /// fall back to storing the original bytes verbatim.
-    fn recompress(
+    /// JPEG to `dest` at `jpeg_quality` (1..=100) in a SINGLE encode pass.
+    /// Returns `false` and writes nothing on any decode/encode failure, so the
+    /// caller can fall back to storing the original bytes verbatim.
+    pub(super) fn recompress(
         src: &std::path::Path,
         dest: &std::path::Path,
         max_dim: u32,
-        target_bytes: usize,
+        jpeg_quality: u8,
     ) -> bool {
         use image::ImageEncoder;
         let Ok(reader) = image::ImageReader::open(src).and_then(|r| r.with_guessed_format()) else {
@@ -858,25 +866,15 @@ impl AppController {
         // the JPEG encoder always accepts the buffer (no alpha channel).
         let scaled = img.thumbnail(max_dim, max_dim).to_rgb8();
         let (w, h) = (scaled.width(), scaled.height());
-        // Step quality down until under the byte budget; keep the last (smallest)
-        // encoding if even the lowest quality is still over.
-        let mut chosen: Option<Vec<u8>> = None;
-        for quality in [85u8, 70, 55, 40] {
-            let mut buf = Vec::new();
-            let encoder = image::codecs::jpeg::JpegEncoder::new_with_quality(&mut buf, quality);
-            if encoder
-                .write_image(scaled.as_raw(), w, h, image::ExtendedColorType::Rgb8)
-                .is_err()
-            {
-                return false;
-            }
-            let under_budget = buf.len() <= target_bytes;
-            chosen = Some(buf);
-            if under_budget {
-                break;
-            }
+        let mut buf = Vec::new();
+        let encoder = image::codecs::jpeg::JpegEncoder::new_with_quality(&mut buf, jpeg_quality);
+        if encoder
+            .write_image(scaled.as_raw(), w, h, image::ExtendedColorType::Rgb8)
+            .is_err()
+        {
+            return false;
         }
-        chosen.is_some_and(|buf| std::fs::write(dest, buf).is_ok())
+        std::fs::write(dest, buf).is_ok()
     }
 
     /// Attach a photo (from `source`) to a Structure group's construction(s) —
@@ -1538,13 +1536,16 @@ impl PhotoQuality {
         }
     }
 
-    /// Recompression budget for the compact tiers: `(max long-edge px, target
-    /// bytes)`. `Full` returns `None` — its original bytes are stored verbatim.
-    fn budget(self) -> Option<(u32, usize)> {
+    /// Recompression spec for the compact tiers: `(max long-edge px, JPEG
+    /// quality 1..=100)`. `Full` returns `None` — its original bytes are stored
+    /// verbatim. The quality is applied in a SINGLE encode pass (no byte-budget
+    /// search), so the stored size varies with the photo but the work is one
+    /// downscale + one encode.
+    fn compression(self) -> Option<(u32, u8)> {
         match self {
-            PhotoQuality::Low => Some((1280, 80_000)),
-            PhotoQuality::Medium => Some((1600, 130_000)),
-            PhotoQuality::High => Some((2048, 350_000)),
+            PhotoQuality::Low => Some((1280, 50)),
+            PhotoQuality::Medium => Some((1600, 70)),
+            PhotoQuality::High => Some((2048, 85)),
             PhotoQuality::Full => None,
         }
     }
