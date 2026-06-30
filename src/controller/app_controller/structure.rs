@@ -770,23 +770,88 @@ impl AppController {
     /// `quality` is the per-site tier: the compact tiers downscale + re-encode
     /// the capture toward a target byte size (most shots don't need full
     /// resolution); `Full` keeps the original bytes verbatim (text/OCR shots).
-    pub(super) fn store_photo_file(
+    /// Attach a photo from `source` WITHOUT blocking the UI: synchronously
+    /// fast-copy the bytes into the store (a plain file copy, no decode) so the
+    /// model has a stable file to display immediately, then do the heavy work
+    /// (downscale/recompress on Android + thumbnail) on a BACKGROUND thread. The
+    /// finished paths are swapped into the photo by id by
+    /// [`apply_finished_photos`](Self::apply_finished_photos), polled each frame.
+    /// If Android wrote a fast subsampled thumbnail beside the capture (the
+    /// `<source>.thumb.jpg` convention — see `MainActivity.java`), it seeds a
+    /// LIGHT preview until the job's own thumbnail lands; otherwise the preview
+    /// is the full copy. Returns the provisional `Photo` to attach to the model,
+    /// or `None` if even the fast copy fails.
+    pub(super) fn ingest_photo(
         &self,
         source: &std::path::Path,
         quality: PhotoQuality,
     ) -> Option<ber_model::ber::common::Photo> {
         std::fs::create_dir_all(&self.photos_dir).ok()?;
         // Canonicalize to an ABSOLUTE dir so the stored path loads as a
-        // `file://` thumbnail regardless of the process's cwd.
+        // `file://` image regardless of the process's cwd.
         let dir =
             std::fs::canonicalize(&self.photos_dir).unwrap_or_else(|_| self.photos_dir.clone());
         let id = ItemId::default();
-        // Recompression is an ANDROID concern: phone cameras hand us full-res
-        // ~12 MP JPEGs, so each compact tier downscales + re-encodes once at a
-        // fixed quality. On desktop (dev) the picked file is stored verbatim —
-        // no point spending the decode/encode there. `Full`, the desktop path,
-        // and any decode/encode failure all keep the original bytes (extension
-        // and all).
+        // Fast provisional copy (no decode): the model points here until the
+        // background job produces the recompressed file + thumbnail. On copy
+        // failure, point at the source directly (still displays).
+        let ext = source.extension().and_then(|e| e.to_str()).unwrap_or("jpg");
+        let provisional = dir.join(format!("{}_orig.{ext}", id.0));
+        let provisional_path = if std::fs::copy(source, &provisional).is_ok() {
+            provisional.to_string_lossy().into_owned()
+        } else {
+            source.to_string_lossy().into_owned()
+        };
+        // Android's camera bridge writes a fast subsampled thumbnail next to the
+        // capture; use it as the interim LIGHT preview if present (the background
+        // job replaces it with the stored thumbnail). No-op on desktop.
+        let provisional_thumb = {
+            let mut s = source.as_os_str().to_os_string();
+            s.push(".thumb.jpg");
+            let p = std::path::PathBuf::from(s);
+            p.exists().then(|| p.to_string_lossy().into_owned())
+        };
+        // Heavy work off-thread; the result lands in `photo_results`.
+        let results = self.photo_results.clone();
+        let inflight = self.photo_jobs_inflight.clone();
+        let dir_t = dir.clone();
+        let source_t = source.to_path_buf();
+        let provisional_for_job = provisional_path.clone();
+        inflight.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        std::thread::spawn(move || {
+            let outcome = Self::process_photo_files(&dir_t, &source_t, quality, id);
+            if let Ok(mut q) = results.lock() {
+                q.push(PhotoJobResult {
+                    id,
+                    outcome,
+                    provisional: provisional_for_job,
+                });
+            }
+            inflight.fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
+        });
+        Some(ber_model::ber::common::Photo {
+            id,
+            file_path: provisional_path,
+            thumbnail_path: provisional_thumb,
+            description: None,
+            // Construction build-up photos have no elevation side (that's only
+            // for the Mapping-phase external Front/Right/Left/Back photos).
+            side: None,
+        })
+    }
+
+    /// The heavy photo work — decode/recompress + thumbnail — runnable OFF the UI
+    /// thread (no `&self`). Recompression is an Android concern: phone cameras
+    /// hand us full-res ~12 MP JPEGs, so each compact tier downscales + re-encodes
+    /// once at a fixed quality; on desktop (dev), `Full`, and any encode failure
+    /// the original bytes are stored verbatim. Returns the final `(file_path,
+    /// thumbnail_path)`; `None` on I/O failure (the provisional copy then stands).
+    fn process_photo_files(
+        dir: &std::path::Path,
+        source: &std::path::Path,
+        quality: PhotoQuality,
+        id: ItemId,
+    ) -> Option<(String, Option<String>)> {
         let spec = if cfg!(target_os = "android") {
             quality.compression()
         } else {
@@ -795,11 +860,7 @@ impl AppController {
         let dest = match spec {
             Some((max_dim, jpeg_quality)) => {
                 let dest = dir.join(format!("{}.jpg", id.0));
-                if Self::recompress(source, &dest, max_dim, jpeg_quality) {
-                    Some(dest)
-                } else {
-                    None
-                }
+                Self::recompress(source, &dest, max_dim, jpeg_quality).then_some(dest)
             }
             None => None,
         };
@@ -813,21 +874,70 @@ impl AppController {
             }
         };
         // Generate a small preview. Phone photos are ~12 MP; rendering the
-        // full-res original as a thumbnail is slow to decode and costs ~48 MB
-        // of texture each — unworkable on a tablet. Best-effort: on failure we
-        // leave `thumbnail_path` None and fall back to the original.
+        // full-res original costs ~48 MB of texture each — unworkable on a
+        // tablet. Best-effort: on failure leave `None` and fall back to the full.
         let thumb_dest = dir.join(format!("{}_thumb.jpg", id.0));
         let thumbnail_path = Self::write_thumbnail(&dest, &thumb_dest)
             .then(|| thumb_dest.to_string_lossy().into_owned());
-        Some(ber_model::ber::common::Photo {
-            id,
-            file_path: dest.to_string_lossy().into_owned(),
-            thumbnail_path,
-            description: None,
-            // Construction build-up photos have no elevation side (that's only
-            // for the Mapping-phase external Front/Right/Left/Back photos).
-            side: None,
-        })
+        Some((dest.to_string_lossy().into_owned(), thumbnail_path))
+    }
+
+    /// Drain finished background photo jobs (call each frame): swap each job's
+    /// final paths into its photo by id, delete the superseded provisional copy,
+    /// and mark dirty. A job whose photo was meanwhile removed (e.g. a failed
+    /// opening placement) cleans up its produced files instead. A FAILED job
+    /// leaves the provisional copy standing as the photo. Returns `true` if any
+    /// photo changed (so the UI repaints to pick up the new paths).
+    pub fn apply_finished_photos(&mut self) -> bool {
+        let drained: Vec<PhotoJobResult> = {
+            let Ok(mut q) = self.photo_results.lock() else {
+                return false;
+            };
+            if q.is_empty() {
+                return false;
+            }
+            std::mem::take(&mut *q)
+        };
+        let mut changed = false;
+        for job in drained {
+            let Some((file_path, thumbnail_path)) = job.outcome else {
+                // Failed — the provisional copy stands as the photo. Nothing to do.
+                continue;
+            };
+            let found = self
+                .current_record
+                .as_mut()
+                .map(|r| {
+                    r.data
+                        .set_photo_paths(job.id, file_path.clone(), thumbnail_path.clone())
+                })
+                .unwrap_or(false);
+            if found {
+                if job.provisional != file_path {
+                    let _ = std::fs::remove_file(&job.provisional);
+                }
+                changed = true;
+            } else {
+                // The photo was removed before the job finished — clean up orphans.
+                let _ = std::fs::remove_file(&file_path);
+                if let Some(t) = &thumbnail_path {
+                    let _ = std::fs::remove_file(t);
+                }
+                let _ = std::fs::remove_file(&job.provisional);
+            }
+        }
+        if changed {
+            let _ = self.mark_dirty();
+        }
+        changed
+    }
+
+    /// Whether any photo job is still processing on a background thread — the UI
+    /// keeps repainting/polling while true so finished photos appear promptly.
+    pub fn photos_processing(&self) -> bool {
+        self.photo_jobs_inflight
+            .load(std::sync::atomic::Ordering::SeqCst)
+            > 0
     }
 
     /// Decode `src`, downscale to fit `THUMB_MAX` px on the long edge, and write
@@ -886,7 +996,7 @@ impl AppController {
         source: &std::path::Path,
         quality: PhotoQuality,
     ) {
-        let Some(photo) = self.store_photo_file(source, quality) else {
+        let Some(photo) = self.ingest_photo(source, quality) else {
             return;
         };
         let (kind, ids) = match self
@@ -1506,11 +1616,25 @@ impl AppController {
     }
 }
 
+/// A completed background photo-processing job, queued for
+/// [`apply_finished_photos`](AppController::apply_finished_photos) to fold into
+/// the model by id.
+pub(super) struct PhotoJobResult {
+    /// The provisional photo's id (minted at ingest), used to find it in the model.
+    id: ItemId,
+    /// Final `(file_path, thumbnail_path)` on success; `None` if processing failed
+    /// (the provisional copy then stands as the photo).
+    outcome: Option<(String, Option<String>)>,
+    /// The provisional fast-copy path, deleted once the final file supersedes it.
+    provisional: String,
+}
+
 /// Stored-photo quality tier, chosen per attach site. Drives how a captured
 /// image is recompressed into the photo store: the compact tiers downscale +
-/// re-encode toward a target byte size (most shots don't need full resolution),
-/// while `Full` keeps the original bytes verbatim for shots where text must stay
-/// legible (labels, datasheets — OCR/zoom).
+/// re-encode at a fixed quality (most shots don't need full resolution), while
+/// `Full` keeps the original bytes verbatim for shots where text must stay
+/// legible (labels, datasheets — OCR/zoom). Recompression runs on Android only;
+/// desktop stores the picked file as-is.
 ///
 /// The integer [`level`](Self::level) is also handed to the Android camera
 /// activity over JNI (`requestPhoto(int)`); keep it in sync with the levels in

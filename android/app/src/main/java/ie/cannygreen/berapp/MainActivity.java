@@ -17,6 +17,8 @@ import android.content.Context;
 import android.content.Intent;
 import android.content.pm.PackageManager;
 import android.net.Uri;
+import android.graphics.Bitmap;
+import android.graphics.BitmapFactory;
 import android.os.Build;
 import android.os.Bundle;
 import android.provider.MediaStore;
@@ -298,11 +300,55 @@ public class MainActivity extends NativeActivity {
             }
             getContentResolver().delete(uri, null, null);
             Log.i(TAG, "camera: saved to " + out.getAbsolutePath());
+            // Write a fast subsampled thumbnail next to the capture, at the
+            // "<path>.thumb.jpg" convention the Rust side probes for (ingest_photo).
+            // Best-effort: a failure just means the interim preview is the full
+            // image until the background job's own thumbnail lands.
+            writeFastThumbnail(out);
             nativeOnPhotoCaptured(out.getAbsolutePath());
         } catch (Exception e) {
             Log.e(TAG, "camera: failed to copy capture", e);
             getContentResolver().delete(uri, null, null);
             nativeOnPhotoCancelled();
+        }
+    }
+
+    /**
+     * Write a small JPEG thumbnail of {@code src} to {@code src + ".thumb.jpg"}
+     * using a SUBSAMPLED decode ({@link BitmapFactory.Options#inSampleSize}) — it
+     * skips most pixels at the native level, so it's far faster than decoding the
+     * full ~12 MP image. The Rust photo ingest probes for this sibling file and
+     * uses it as the interim light preview while the full image is processed in
+     * the background. Best-effort: any failure is logged and ignored.
+     */
+    private void writeFastThumbnail(File src) {
+        final int target = 512; // long-edge px for the preview
+        try {
+            BitmapFactory.Options bounds = new BitmapFactory.Options();
+            bounds.inJustDecodeBounds = true;
+            BitmapFactory.decodeFile(src.getAbsolutePath(), bounds);
+            int longEdge = Math.max(bounds.outWidth, bounds.outHeight);
+            if (longEdge <= 0) {
+                return;
+            }
+            int sample = 1;
+            while (longEdge / (sample * 2) >= target) {
+                sample *= 2;
+            }
+            BitmapFactory.Options opts = new BitmapFactory.Options();
+            opts.inSampleSize = sample;
+            Bitmap bmp = BitmapFactory.decodeFile(src.getAbsolutePath(), opts);
+            if (bmp == null) {
+                return;
+            }
+            File thumb = new File(src.getAbsolutePath() + ".thumb.jpg");
+            try (OutputStream os = new FileOutputStream(thumb)) {
+                bmp.compress(Bitmap.CompressFormat.JPEG, 75, os);
+            }
+            bmp.recycle();
+            Log.i(TAG, "camera: wrote thumbnail " + thumb.getAbsolutePath());
+        } catch (Exception e) {
+            Log.w(TAG, "camera: thumbnail failed (ignored)", e);
         }
     }
 

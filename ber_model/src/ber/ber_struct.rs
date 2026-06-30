@@ -85,6 +85,67 @@ pub struct Ber {
 
 // Pure data helpers, optional
 impl Ber {
+    /// Update a stored photo's file paths by `id`, wherever it lives in the
+    /// model (external photos, window types, wall/floor/ceiling constructions,
+    /// doors, and Objects-phase building objects). Returns `true` if a photo
+    /// with that id was found. The controller uses this to apply a background
+    /// recompress/thumbnail job to the provisional photo it attached up front —
+    /// `false` means the photo was meanwhile removed (e.g. a failed opening
+    /// placement), so the caller can clean up the produced files.
+    pub fn set_photo_paths(
+        &mut self,
+        id: ItemId,
+        file_path: String,
+        thumbnail_path: Option<String>,
+    ) -> bool {
+        let mut found = false;
+        let mut visit = |p: &mut Photo| {
+            if p.id == id {
+                p.file_path = file_path.clone();
+                p.thumbnail_path = thumbnail_path.clone();
+                found = true;
+            }
+        };
+        for p in &mut self.photos {
+            visit(p);
+        }
+        for t in &mut self.window_types {
+            for p in &mut t.photos {
+                visit(p);
+            }
+        }
+        for c in &mut self.wall_constructions {
+            for p in &mut c.base.photos {
+                visit(p);
+            }
+        }
+        for c in &mut self.floor_constructions {
+            for p in &mut c.base.photos {
+                visit(p);
+            }
+        }
+        for c in &mut self.ceiling_constructions {
+            for p in &mut c.base.photos {
+                visit(p);
+            }
+        }
+        for s in &mut self.storeys {
+            for d in &mut s.doors {
+                for p in &mut d.photos {
+                    visit(p);
+                }
+            }
+            for room in &mut s.object_rooms {
+                for o in &mut room.objects {
+                    for p in &mut o.photos {
+                        visit(p);
+                    }
+                }
+            }
+        }
+        found
+    }
+
     pub fn new() -> Self {
         Self {
             number_of_storeys: 1,

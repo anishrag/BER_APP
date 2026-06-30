@@ -1733,6 +1733,66 @@ fn group_photo_copies_into_store_and_attaches() {
     let _ = std::fs::remove_file(&src);
 }
 
+/// `ingest_photo` returns a provisional photo IMMEDIATELY (a fast byte-copy, no
+/// decode) and finishes the heavy work on a background thread; once the job
+/// lands, `apply_finished_photos` swaps the recompressed file + thumbnail into
+/// the photo by id and deletes the provisional copy.
+#[test]
+fn ingest_photo_upgrades_provisional_in_background() {
+    let mut c = dimensioned_square_controller();
+    let tmp = std::env::temp_dir().join(format!("ber_ingest_{}", ItemId::default().0));
+    c.set_photos_dir(tmp.clone());
+
+    let src = tmp.join("src.png");
+    std::fs::create_dir_all(&tmp).unwrap();
+    image::RgbImage::from_pixel(800, 600, image::Rgb([10, 20, 30]))
+        .save(&src)
+        .unwrap();
+
+    // Synchronous: a provisional photo pointing at a fast copy (no decode yet).
+    let photo = c
+        .ingest_photo(&src, PhotoQuality::Low)
+        .expect("provisional photo");
+    let id = photo.id;
+    assert!(
+        photo.file_path.contains("_orig"),
+        "provisional points at the fast copy: {}",
+        photo.file_path
+    );
+    assert!(photo.thumbnail_path.is_none(), "no thumbnail yet");
+    c.current_record.as_mut().unwrap().data.photos.push(photo);
+
+    // Wait for the background job, then apply it.
+    let mut spins = 0;
+    while c.photos_processing() && spins < 2000 {
+        std::thread::sleep(std::time::Duration::from_millis(2));
+        spins += 1;
+    }
+    assert!(spins < 2000, "background job finished");
+    assert!(c.apply_finished_photos(), "a photo was upgraded");
+
+    let stored = &c.current_record.as_ref().unwrap().data.photos[0];
+    assert_eq!(stored.id, id);
+    assert!(
+        !stored.file_path.contains("_orig"),
+        "upgraded off the provisional copy: {}",
+        stored.file_path
+    );
+    assert!(
+        stored
+            .thumbnail_path
+            .as_ref()
+            .is_some_and(|t| std::path::Path::new(t).exists()),
+        "thumbnail generated"
+    );
+    assert!(
+        std::path::Path::new(&stored.file_path).exists(),
+        "final file exists"
+    );
+
+    let _ = std::fs::remove_dir_all(&tmp);
+}
+
 /// The compact-tier recompression unit (the Android path — desktop now stores
 /// originals verbatim, so this tests `recompress` directly to stay
 /// platform-independent): a large source downscales to within the tier's pixel
@@ -9113,6 +9173,15 @@ fn failed_placement_discards_copied_photos() {
             .is_empty(),
         "no window placed"
     );
+    // Photo ingest is async: the failed placement discards the provisional copy
+    // immediately, and the background job — finding its photo gone from the model
+    // — cleans up its own produced files when `apply_finished_photos` next runs.
+    let mut spins = 0;
+    while c.photos_processing() && spins < 2000 {
+        std::thread::sleep(std::time::Duration::from_millis(2));
+        spins += 1;
+    }
+    c.apply_finished_photos();
     let leaked = std::fs::read_dir(&tmp).map(|d| d.count()).unwrap_or(0);
     assert_eq!(
         leaked, 0,

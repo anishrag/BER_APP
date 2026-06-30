@@ -140,7 +140,7 @@ impl AppController {
         // Store photos up front (needs `&self`) before the mutable borrow.
         let stored: Vec<Photo> = photos
             .iter()
-            .filter_map(|p| self.store_photo_file(p, photo_quality))
+            .filter_map(|p| self.ingest_photo(p, photo_quality))
             .collect();
         let snap = self.current_history_snapshot();
         if let Some(room) = self.object_room_mut(idx, room_id) {

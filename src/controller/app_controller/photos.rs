@@ -43,7 +43,7 @@ impl AppController {
         if self.current_record.is_none() {
             return;
         }
-        let Some(mut photo) = self.store_photo_file(source, quality) else {
+        let Some(mut photo) = self.ingest_photo(source, quality) else {
             return;
         };
         photo.side = Some(side);

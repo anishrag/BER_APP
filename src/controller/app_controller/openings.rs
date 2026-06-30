@@ -547,7 +547,7 @@ impl AppController {
         // before the mutable record borrow below); attached to the new window(s).
         let stored_photos: Vec<Photo> = photos
             .iter()
-            .filter_map(|p| self.store_photo_file(p, photo_quality))
+            .filter_map(|p| self.ingest_photo(p, photo_quality))
             .collect();
         let Some(record) = self.current_record.as_mut() else {
             return Ok(());
@@ -686,7 +686,7 @@ impl AppController {
         let undo_snap = self.current_history_snapshot();
         let stored_photos: Vec<Photo> = photos
             .iter()
-            .filter_map(|p| self.store_photo_file(p, photo_quality))
+            .filter_map(|p| self.ingest_photo(p, photo_quality))
             .collect();
         let height_m = self
             .current_record
@@ -1174,8 +1174,10 @@ fn tool_label(tool: OpeningToolKind) -> &'static str {
 }
 
 /// Remove photo files copied into the store for a placement that then failed —
-/// so a retry doesn't leave orphaned images (each `store_photo_file` mints fresh
-/// files). Best-effort; missing files are ignored.
+/// so a retry doesn't leave orphaned images (each `ingest_photo` mints fresh
+/// files). Best-effort; missing files are ignored. A still-running background
+/// job for one of these finishes to a now-missing photo and cleans up its own
+/// produced files (see `apply_finished_photos`).
 fn discard_stored_photos(photos: &[Photo]) {
     for p in photos {
         let _ = std::fs::remove_file(&p.file_path);

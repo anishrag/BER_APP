@@ -398,6 +398,17 @@ impl eframe::App for BerApp {
                 let _ = self.app_controller.borrow_mut().autosave();
             }
         }
+        // Background photo jobs: fold in any that finished (swap the recompressed
+        // file + thumbnail into the photo by id), and keep repainting while any
+        // are still processing so the upgrade appears without needing an event.
+        {
+            let mut c = self.app_controller.borrow_mut();
+            c.apply_finished_photos();
+            if c.photos_processing() {
+                ctx.request_repaint_after(std::time::Duration::from_millis(120));
+            }
+        }
+
         // Check for progress updates if on splash screen
         if self.current_page == Page::Splash {
             self.check_progress();

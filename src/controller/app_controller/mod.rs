@@ -518,6 +518,13 @@ pub struct AppController {
     /// The in-flight per-area roof drawing (ridge stroke → pitch), once a sloped
     /// shape is picked for the grouped area. `None` while only grouping.
     pending_roof_area: Option<roof::PendingRoofArea>,
+    /// Completed background photo-processing jobs, awaiting application to the
+    /// model by id ([`apply_finished_photos`](Self::apply_finished_photos)).
+    /// Pushed from worker threads; drained each frame.
+    photo_results: std::sync::Arc<std::sync::Mutex<Vec<structure::PhotoJobResult>>>,
+    /// Count of photo jobs still processing on background threads — the UI keeps
+    /// polling / repainting while this is non-zero so finished photos appear.
+    photo_jobs_inflight: std::sync::Arc<std::sync::atomic::AtomicUsize>,
     /// The active ceiling-exposure Select subtool (Click/Carve/All/Remaining), or
     /// `None`. Transient ceiling-exposure interaction state.
     ceiling_exposure_select: Option<SelectMode>,
@@ -644,6 +651,8 @@ impl AppController {
             roof_gate_pending: false,
             roof_selected: HashSet::new(),
             pending_roof_area: None,
+            photo_results: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
+            photo_jobs_inflight: std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)),
             ceiling_exposure_select: None,
             ceiling_exposure_selected: HashSet::new(),
             ceiling_exposure_carve_in_flight: false,
