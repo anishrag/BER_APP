@@ -114,11 +114,14 @@ pub fn render(
         let Some(&datum) = z_offsets.get(area.storey_idx) else {
             continue;
         };
-        for plane in area.planes(ber_model::ber::roof::DEFAULT_OVERHANG_M) {
-            if plane.len() < 3 {
+        // Built via the SAME apex/ridge fan the ceiling uses, over the grouped
+        // ceiling footprint — so the roof shares the ceiling's plan vertices.
+        for region in area.regions(ItemId::default()).regions {
+            let ring = &region.polygon.exterior;
+            if ring.len() < 3 {
                 continue;
             }
-            let pts: Vec<egui::Pos2> = plane
+            let pts: Vec<egui::Pos2> = ring
                 .iter()
                 .map(|v| {
                     let (px, py) = view.project_3d(v.x, v.y, datum + v.z);
