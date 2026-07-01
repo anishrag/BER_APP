@@ -71,6 +71,27 @@ impl AppController {
         self.push_history_snapshot(undo_snap);
     }
 
+    /// The current storey's construction-phase region edges as world-metre
+    /// reference walls — the segments a carve (living area, ceiling step, …) can
+    /// level onto and be pinned to, so a wall drawn beside a phase "year" line
+    /// lands on it. Empty when the storey has no phase regions. Shared by every
+    /// sub-area carve that opts into phase-line snapping.
+    pub(super) fn phase_reference_walls(&self) -> Vec<[Point2f32; 2]> {
+        let idx = self.current_storey_idx.unwrap_or(0);
+        let Some(regions) = self.phase_regions.get(&idx) else {
+            return Vec::new();
+        };
+        let mut segments: Vec<[Point2f32; 2]> = Vec::new();
+        for region in regions {
+            let ring = &region.polygon;
+            let n = ring.len();
+            for i in 0..n {
+                segments.push([ring[i], ring[(i + 1) % n]]);
+            }
+        }
+        segments
+    }
+
     /// UI entry point: a phase-tagging `DrawPerpWalls` stroke in world coords
     /// (the area sits in the storey's metre space). Like living areas: a single
     /// straight CUT splits the storey into two regions to pick from; any other

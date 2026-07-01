@@ -146,13 +146,18 @@ impl AppController {
         }
     }
 
-    /// UI entry point: a ceiling-step stroke in world (metre) coords. An OPEN
-    /// stroke fits to an axis-aligned line
-    /// ([`StoreyDoc::fit_ceiling_step_line`]) and, on success, advances
-    /// straight to the side pick; a stroke that isn't line-like or doesn't
-    /// cross the footprint is rejected (logged). A CLOSED stroke (the same
-    /// closure test the floor-step carve uses) CARVES an area instead —
-    /// see [`apply_ceiling_carve_stroke`](Self::apply_ceiling_carve_stroke).
+    /// UI entry point: a ceiling-step stroke in world (metre) coords. Three
+    /// shapes route three ways:
+    /// - a single straight axis-aligned stroke is a step LINE
+    ///   ([`StoreyDoc::fit_ceiling_step_line`]) → advances to the side pick;
+    /// - a CLOSED stroke is an AREA (the floor-step parity path) → carved;
+    /// - any OTHER open stroke — e.g. a CUT with three drawn sides whose open
+    ///   ends meet the outline (the fourth side) — is also carved as an area
+    ///   (the carve auto-picks the cut-off region), so it's accepted rather
+    ///   than rejected as "not a straight line".
+    ///
+    /// Both carve routes go through
+    /// [`apply_ceiling_carve_stroke`](Self::apply_ceiling_carve_stroke).
     pub fn apply_ceiling_step_stroke_event(&mut self, world_points: &[(f32, f32)]) {
         let _ = self.sketch_engine.take_stroke_raw();
         let pts: Vec<Point2f32> = world_points
@@ -172,20 +177,28 @@ impl AppController {
             self.apply_ceiling_carve_stroke(&pts);
             return;
         }
+        // A single straight stroke is a step LINE; any other open stroke (a
+        // multi-side cut whose ends meet the outline) is an AREA cut — carve it
+        // through the same pipeline instead of rejecting it as "not a line".
+        if manip_plan::fit_axis_line(&pts).is_none() {
+            self.apply_ceiling_carve_stroke(&pts);
+            return;
+        }
         match self.document.fit_ceiling_step_line(&pts) {
             Ok((axis, coord_m)) => self.begin_ceiling_step_side(axis, coord_m),
             Err(e) => log::error!("ceiling-step line: {}", e),
         }
     }
 
-    /// A CLOSED ceiling-step stroke: carve the area against the AVAILABLE
-    /// region — the outline minus the ceiling steps already committed —
-    /// exactly as the floor step does (shared edges snap, no overlap), and
-    /// start dimensioning it as the active `StepArea` shape: wall lengths,
-    /// then the position prompts (snapped-to-wall axes skip the question via
-    /// the pinned slot's `position_free_axes`). The SAME delta prompt as the
-    /// line flow follows once dimensioning resolves. Rejections are logged;
-    /// nothing is mutated on failure.
+    /// Carve a ceiling-step AREA against the AVAILABLE region — the outline
+    /// minus the ceiling steps already committed — exactly as the floor step
+    /// does (shared edges snap, no overlap), and start dimensioning it as the
+    /// active `StepArea` shape: wall lengths, then the position prompts
+    /// (snapped-to-wall axes skip the question via the pinned slot's
+    /// `position_free_axes`). Handles both a CLOSED loop and an OPEN cut whose
+    /// ends meet the outline (the carve resolves the latter to an auto-picked
+    /// area). The SAME delta prompt as the line flow follows once dimensioning
+    /// resolves. Rejections are logged; nothing is mutated on failure.
     fn apply_ceiling_carve_stroke(&mut self, pts: &[Point2f32]) {
         let idx = self.current_storey_idx.unwrap_or(0);
         let step_rings: Vec<Vec<Point2f32>> = self
@@ -193,27 +206,38 @@ impl AppController {
             .get(&idx)
             .map(|rs| rs.iter().map(|r| r.polygon.clone()).collect())
             .unwrap_or_default();
-        match self
-            .document
-            .carve_or_cut_in_available(pts, &step_rings, &self.tuning.subarea, &[])
-        {
+        // Level onto (and pin to) the construction-phase lines, so a ceiling step
+        // drawn beside a phase "year" boundary lands on it — same as living areas.
+        let ref_walls = self.phase_reference_walls();
+        match self.document.carve_or_cut_in_available(
+            pts,
+            &step_rings,
+            &self.tuning.subarea,
+            &ref_walls,
+        ) {
             Ok((boundary, SubareaOutcome::Area(plan))) => {
                 if let Err(e) = plan.validate_simple() {
                     log::warn!("ceiling step area rejected (walls cross): {:?}", e);
                     return;
                 }
                 let undo_snap = self.current_history_snapshot();
-                let slot = self.pinned_subarea_slot(&boundary, plan);
+                let slot = self.pinned_subarea_slot_refs(&boundary, plan, &ref_walls);
                 // No session tag: the active `StepArea` shape under
                 // ceiling-step mode IS the in-flight carve, so undo (a
                 // document restore) cleanly rewinds the whole pending state.
                 self.begin_step_area_dimensioning(slot, undo_snap);
             }
-            // `stroke_is_closed` gated this path and a closed loop always
-            // carves to an Area — defensive (a cut would need a side pick
-            // this flow doesn't have).
-            Ok((_, SubareaOutcome::Cut(..))) => {
-                log::warn!("ceiling-step carve: closed stroke resolved to a cut — ignored");
+            // A cut with corners whose ends reach the outline at two different
+            // walls splits the region in TWO — reuse the floor step's side-pick
+            // machinery verbatim: the pending regions highlight, a tap routes to
+            // `choose_step_cut_region`, and `begin_step_area_dimensioning` (which
+            // it calls) is mode-agnostic, so under ceiling-step mode the chosen
+            // region dimensions and then awaits a ceiling DELTA, not a floor
+            // level. No ceiling-specific cut UI — the floor cut IS the pipeline.
+            Ok((boundary, SubareaOutcome::Cut(a, b))) => {
+                let sa = self.pinned_subarea_slot_refs(&boundary, a, &ref_walls);
+                let sb = self.pinned_subarea_slot_refs(&boundary, b, &ref_walls);
+                self.pending_step_cut = Some([sa, sb]);
             }
             Err(e) => log::error!("ceiling-step carve: {}", e),
         }

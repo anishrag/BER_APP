@@ -4616,6 +4616,45 @@ fn ceiling_carve_closed_stroke_dimensions_then_takes_the_delta() {
     assert!(zs.iter().any(|z| (z - 2.4).abs() < 1e-6), "{zs:?}");
 }
 
+/// An OPEN cut with three drawn sides whose ends meet the outline — NOT a
+/// closed loop and NOT a single straight line — must be accepted through the
+/// SAME cut pipeline the floor step uses (a two-region side-pick), not rejected
+/// as "not a straight line". Regression: this stroke previously fell into the
+/// step-LINE fit and was dropped; the fix reuses `pending_step_cut` /
+/// `choose_step_cut_region` (no ceiling-specific cut UI).
+#[test]
+fn ceiling_open_three_sided_cut_reuses_the_step_cut_pick() {
+    let mut c = ceiling_ready_controller();
+    // Three drawn sides whose ends meet two different outline walls (left x=0 &
+    // right x=10): a cornered cut that splits the ceiling in two.
+    c.apply_ceiling_step_stroke_event(&[(0.0, 7.0), (6.0, 7.0), (6.0, 2.0), (10.0, 2.0)]);
+    assert!(
+        !c.ceiling_step_side_pending(),
+        "a cornered cut is not a straight step line"
+    );
+    let regions = c.pending_step_cut_regions();
+    assert_eq!(
+        regions.len(),
+        2,
+        "the cut splits the ceiling into two regions to pick from (reused floor-step pick)"
+    );
+    // Pick the lower region → it dimensions as the StepArea; under ceiling-step
+    // mode it awaits a DELTA afterward, so the floor level UI never shows.
+    c.choose_step_cut_region(5.0, 1.0);
+    assert!(
+        c.pending_step_cut_regions().is_empty(),
+        "the tap consumed the cut pick"
+    );
+    assert!(
+        c.dimensioning_active(),
+        "the chosen region dimensions its drawn walls"
+    );
+    assert!(
+        !c.step_pick_pending(),
+        "still a ceiling step — the floor level UI never shows"
+    );
+}
+
 /// Carve-flow guards, floor-step parity: the delta validations reject without
 /// dropping the pending area; Cancel abandons it back to the outline; undo
 /// after the carve restores the outline (the carve pushed a history snapshot,

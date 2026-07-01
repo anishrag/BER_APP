@@ -243,7 +243,7 @@ impl AppController {
         // lands flush on it (post-carve per-line leveling in `snap_walls`), and —
         // because a snapped wall is a known wall — is then pinned pre-known so
         // dimensioning doesn't prompt for it (`pinned_subarea_slot_refs`).
-        let ref_walls = self.living_area_reference_segments();
+        let ref_walls = self.phase_reference_walls();
         // Living areas never overlap: carve against the outline MINUS the existing
         // living areas (the available region), so a new one tiles against them and
         // snaps to their shared walls. The available region may be disconnected;
@@ -278,27 +278,6 @@ impl AppController {
             }
             Err(e) => log::error!("living-area carve_or_cut: {}", e),
         }
-    }
-
-    /// Reference walls a living area levels onto (and is pinned to) besides the
-    /// outline (world-metre segments): the active storey's construction-PHASE
-    /// region edges, so a living area drawn beside a phase "year" line lands on
-    /// that line and its length isn't re-prompted. Empty when the storey has no
-    /// phase regions.
-    fn living_area_reference_segments(&self) -> Vec<[Point2f32; 2]> {
-        let idx = self.current_storey_idx.unwrap_or(0);
-        let Some(regions) = self.phase_regions.get(&idx) else {
-            return Vec::new();
-        };
-        let mut segments: Vec<[Point2f32; 2]> = Vec::new();
-        for region in regions {
-            let ring = &region.polygon;
-            let n = ring.len();
-            for i in 0..n {
-                segments.push([ring[i], ring[(i + 1) % n]]);
-            }
-        }
-        segments
     }
 
     /// The two candidate regions of a pending cut (world coords), for the UI to
