@@ -454,6 +454,14 @@ impl WallRegions {
     }
 }
 
+/// The shortest sub-wall a straight cut may leave (m). A cut that would leave a
+/// piece shorter than this on either side is rejected as GRAZING an endpoint or
+/// an existing near-coincident cut — never a real division. Sized to swallow the
+/// ~sub-mm coordinate drift a reload's geo-boolean phase/exposure reconstruction
+/// introduces (the reported 0.8 mm sliver) while staying orders of magnitude
+/// below any genuine wall segment.
+const MIN_SUBWALL_M: f64 = 0.01;
+
 /// Split one wall along the vertical plane where the plan `cut` segment crosses
 /// its base edge, via [`Polygon3D::split_by_line`]. Returns the two sub-walls
 /// (each with the parent's `exposure`/`construction_id`, a fresh id, empty
@@ -472,9 +480,19 @@ fn split_wall_by_segment(
         cut[0],
         cut[1],
     )?;
-    const END_EPS: f64 = 1e-6;
-    if !(END_EPS..=1.0 - END_EPS).contains(&t) {
-        return None; // the cut grazes an endpoint — no real split
+    // Reject a cut that would leave a sub-[`MIN_SUBWALL_M`] sliver on either side.
+    // The guard is ABSOLUTE, not fractional: two cut lines that should COINCIDE
+    // but drift apart on reload (a construction-phase boundary vs an
+    // exposure/partition boundary reconstructed by geo booleans, ~sub-mm apart)
+    // would otherwise each split the wall and spawn a sub-mm "sliver" wall between
+    // them — mis-counting the walls and destabilising `host_wall_at`, so an
+    // opening near the boundary re-homes onto the wrong sub-wall. A drifted cut is
+    // treated as GRAZING the existing boundary (no split), collapsing the pair to
+    // one. No real wall region is ever this short. (A fractional epsilon caught
+    // only cuts within microns of an endpoint on a metres-long wall.)
+    let wall_len = ((b.x - a.x).powi(2) + (b.y - a.y).powi(2)).sqrt();
+    if t.min(1.0 - t) * wall_len < MIN_SUBWALL_M {
+        return None; // the cut grazes an endpoint / an existing near-cut — no real split
     }
     let line = SplitLine3D {
         point: Point3f64::new(a.x + t * (b.x - a.x), a.y + t * (b.y - a.y), a.z),

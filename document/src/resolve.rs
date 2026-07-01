@@ -4070,4 +4070,117 @@ mod tests {
             .unwrap();
         (a, b)
     }
+
+    /// REGRESSION: two wall-cut lines that should COINCIDE but drift ~0.8 mm
+    /// apart (the reported failure: a construction-phase boundary vs an
+    /// exposure/partition boundary, both meant to be at y = 8.927008 but landing
+    /// at 8.9270 and 8.9278 after a reload's geo-boolean reconstruction) must NOT
+    /// spawn a sub-mm "sliver" wall between them. The sliver both mis-counts the
+    /// walls AND destabilises `host_wall_at`, so an opening near the boundary
+    /// re-homes onto the wrong sub-wall. A 4 m x 13 m storey cut at 8.9270 and
+    /// 8.9278: the left/right walls must split ONCE (into 2, not 3), and a window
+    /// just above the boundary must stay on the SAME wall across a re-resolve.
+    #[test]
+    fn near_coincident_wall_cuts_do_not_spawn_a_sliver() {
+        use ber_model::ber::fenestration::{OpeningPlacement, Window};
+        let doc = square_doc(&[
+            Point2f32::new(2.2785, 4.3270),
+            Point2f32::new(6.2785, 4.3270),
+            Point2f32::new(6.2785, 17.3270),
+            Point2f32::new(2.2785, 17.3270),
+        ]);
+        let mut ber = Ber::default();
+        ensure_storey_constructions(&mut ber, 0, &[]);
+        ber.set_default_ceiling_height(Some(0), 2.4);
+        // Two near-coincident cut lines across the storey at y = 8.9270 and
+        // 8.9278 (0.8 mm apart) — the exact drift the report describes.
+        ber.storeys[0].wall_splits = vec![
+            [Point2f64::new(1.0, 8.9270), Point2f64::new(7.0, 8.9270)],
+            [Point2f64::new(1.0, 8.9278), Point2f64::new(7.0, 8.9278)],
+        ];
+        ber.storeys[0] = resolve_storey(&doc, &ber, 0, &[], &[], &[]);
+
+        // No sub-mm sliver wall: every wall region is a real wall (>= 1 cm long).
+        for r in &ber.storeys[0].walls.regions {
+            if let Some((a, b)) = r.base_edge() {
+                let len = ((b.x - a.x).powi(2) + (b.y - a.y).powi(2)).sqrt();
+                assert!(
+                    len > 0.01,
+                    "sliver wall of length {len:.6} m at {:?}->{:?}",
+                    (a.x, a.y),
+                    (b.x, b.y)
+                );
+            }
+        }
+        // The left wall (x = 2.2785) splits into exactly TWO sub-walls, not three.
+        let left = ber.storeys[0]
+            .walls
+            .regions
+            .iter()
+            .filter(|r| {
+                r.base_edge().is_some_and(|(a, b)| {
+                    (a.x - 2.2785).abs() < 1e-3 && (b.x - 2.2785).abs() < 1e-3
+                })
+            })
+            .count();
+        assert_eq!(
+            left, 2,
+            "left wall split once (no sliver), got {left} sub-walls"
+        );
+
+        // Place a window just above the boundary on the left wall and confirm it
+        // homes and stays put across a re-resolve (a sliver would steal it).
+        let host = ber.storeys[0]
+            .walls
+            .regions
+            .iter()
+            .find(|r| {
+                r.base_midpoint()
+                    .is_some_and(|m| (m.x - 2.2785).abs() < 1e-3 && m.y > 8.9278 && m.y < 17.0)
+            })
+            .expect("the upper-left sub-wall");
+        let host_id = host.id;
+        let (_, _, len, _) = host.base_frame().unwrap();
+        ber.storeys[0].windows.push(Window {
+            id: ItemId::default(),
+            vertices: vec![],
+            width_m: 0.6,
+            height_m: 1.0,
+            window_type_id: ItemId::default(),
+            placement: Some(OpeningPlacement::Wall {
+                wall_id: host_id,
+                along_m: (len * 0.05) as f32, // near the boundary end
+                sill_m: 0.8,
+            }),
+            wall_anchor: None,
+            assembly_id: None,
+            multi_storey: false,
+            arched: false,
+            overshading: Default::default(),
+        });
+        ber.storeys[0] = resolve_storey(&doc, &ber, 0, &[], &[], &[]);
+        let mid1 = window_host_mid(&ber.storeys[0], 0);
+        ber.storeys[0] = resolve_storey(&doc, &ber, 0, &[], &[], &[]);
+        let mid2 = window_host_mid(&ber.storeys[0], 0);
+        assert_eq!(
+            mid1, mid2,
+            "window's host wall stayed stable across re-resolve"
+        );
+    }
+
+    /// The base midpoint (mm-quantised) of the wall hosting window `i`.
+    fn window_host_mid(storey: &Storey, i: usize) -> (i64, i64) {
+        use ber_model::ber::fenestration::OpeningPlacement;
+        let Some(OpeningPlacement::Wall { wall_id, .. }) = storey.windows[i].placement else {
+            return (0, 0);
+        };
+        let m = storey
+            .walls
+            .regions
+            .iter()
+            .find(|r| r.id == wall_id)
+            .and_then(|r| r.base_midpoint())
+            .expect("window homed on a live wall");
+        ((m.x * 1000.0).round() as i64, (m.y * 1000.0).round() as i64)
+    }
 }

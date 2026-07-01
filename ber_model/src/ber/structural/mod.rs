@@ -4,20 +4,20 @@
 //! the Storey container. Split from a single file for navigability;
 //! the public surface is unchanged via the re-exports below.
 
+mod ceiling_geom;
 mod ceiling_regions;
 mod constructions;
 mod elevation;
 mod floor_regions;
-mod ceiling_geom;
 mod storey;
 mod wall_partition;
 mod wall_regions;
 
+pub use ceiling_geom::*;
 pub use ceiling_regions::*;
 pub use constructions::*;
 pub use elevation::*;
 pub use floor_regions::*;
-pub use ceiling_geom::*;
 pub use storey::*;
 pub use wall_partition::*;
 pub use wall_regions::*;
@@ -587,6 +587,54 @@ mod tests {
             2.4,
             cid,
         )
+    }
+
+    /// Two cut lines that should COINCIDE but drift ~0.8 mm apart (a construction
+    /// -phase boundary vs an exposure/partition boundary reconstructed by geo
+    /// booleans on reload) must NOT spawn a sub-mm "sliver" wall between them: the
+    /// near-coincident second cut is treated as grazing the first, so the wall
+    /// splits ONCE (2 sub-walls), not twice (3, with a 0.8 mm sliver).
+    #[test]
+    fn apply_splits_drops_near_coincident_sliver_cut() {
+        let cid = ItemId::default();
+        // A 13 m-long wall (base (0,0)->(0,13)) split at y = 8.9270 and 8.9278.
+        let wall = WallRegions::regenerate(
+            vec![(
+                Point2f64::new(0.0, 0.0),
+                Point2f64::new(0.0, 13.0),
+                WallExposure::Exposed,
+            )],
+            &CeilingRegions::default(),
+            &FloorRegions::default(),
+            0.0,
+            2.4,
+            cid,
+        );
+        let cuts = [
+            [Point2f64::new(-1.0, 8.9270), Point2f64::new(1.0, 8.9270)],
+            [Point2f64::new(-1.0, 8.9278), Point2f64::new(1.0, 8.9278)],
+        ];
+        let split = wall.apply_splits(&cuts);
+        assert_eq!(
+            split.regions.len(),
+            2,
+            "near-coincident cuts split the wall once, not twice (no sliver)"
+        );
+        for r in &split.regions {
+            let (a, b) = r.base_edge().unwrap();
+            let len = ((b.x - a.x).powi(2) + (b.y - a.y).powi(2)).sqrt();
+            assert!(len > 0.01, "no sub-mm sliver sub-wall (got {len:.6} m)");
+        }
+    }
+
+    /// A cut that genuinely divides the wall well away from its ends still splits
+    /// it — the sliver guard only rejects sub-[`MIN_SUBWALL_M`] pieces.
+    #[test]
+    fn apply_splits_still_splits_a_real_cut() {
+        let cid = ItemId::default();
+        let wall = flat_wall(cid); // base (0,0)->(4,0)
+        let split = wall.apply_splits(&[[Point2f64::new(2.0, -1.0), Point2f64::new(2.0, 1.0)]]);
+        assert_eq!(split.regions.len(), 2, "a mid-wall cut still divides it");
     }
 
     /// A vertical quad on the wall plane y = 0 over plan x ∈ [x0, x1],
@@ -3099,9 +3147,15 @@ mod tests {
     fn lowest_flat_z_over_takes_min_of_overlapping_flats() {
         let ceilings = stepped_l_roofs();
         // Footprint covering both arms → the LOWER level anchors.
-        assert_approx(ceilings.lowest_flat_z_over(&square(0.0, 0.0, 10.0, 10.0)), 2.4);
+        assert_approx(
+            ceilings.lowest_flat_z_over(&square(0.0, 0.0, 10.0, 10.0)),
+            2.4,
+        );
         // Footprint strictly inside the raised bottom arm only.
-        assert_approx(ceilings.lowest_flat_z_over(&square(1.0, 1.0, 9.0, 3.0)), 2.7);
+        assert_approx(
+            ceilings.lowest_flat_z_over(&square(1.0, 1.0, 9.0, 3.0)),
+            2.7,
+        );
         // Off to the side → no coverage.
         assert_eq!(
             ceilings.lowest_flat_z_over(&square(20.0, 20.0, 30.0, 30.0)),
