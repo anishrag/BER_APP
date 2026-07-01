@@ -2475,6 +2475,29 @@ fn checklist_status_of(c: &AppController, label: &str) -> ChecklistStatus {
         .status
 }
 
+/// The "Roof" checklist row gates Mapping: red until at least one roof area is
+/// drawn, green after — so `mapping_complete` requires a roof.
+#[test]
+fn roof_row_gates_mapping_complete() {
+    let mut c = dimensioned_square_controller();
+    assert_eq!(
+        checklist_status_of(&c, "Roof"),
+        ChecklistStatus::Incomplete,
+        "no roof yet"
+    );
+    // Draw a (flat) roof over the storey's ceiling.
+    c.set_default_ceiling_height(2.4).unwrap();
+    c.set_roof_mode(true);
+    c.confirm_all_storeys_added_roof();
+    c.roof_region_tap(5.0, 5.0, 0.5);
+    c.pick_roof_area_shape(RoofShape::Flat);
+    assert_eq!(
+        checklist_status_of(&c, "Roof"),
+        ChecklistStatus::AllStoreys,
+        "a roof area satisfies the row"
+    );
+}
+
 /// The three new Mapping checklist rows exist and each gates `mapping_complete`:
 /// a dwelling with no living area / an Unassigned floor / Unset surfaces is NOT
 /// mapping-complete; once all three are satisfied (plus the pre-existing rows)

@@ -61,6 +61,10 @@ impl AppController {
                 status: self.ber_storey_status(document::ceiling_exposure_complete),
             },
             ChecklistItem {
+                label: "Roof",
+                status: self.roof_status(),
+            },
+            ChecklistItem {
                 label: "Construction phase",
                 status: self.ber_storey_status(document::construction_phase_complete),
             },
@@ -102,6 +106,22 @@ impl AppController {
             .as_ref()
             .is_some_and(|r| document::windows_complete(&r.data));
         if complete {
+            ChecklistStatus::AllStoreys
+        } else {
+            ChecklistStatus::Incomplete
+        }
+    }
+
+    /// Per-DWELLING roof gate: green ([`ChecklistStatus::AllStoreys`]) once at
+    /// least one roof area has been drawn ([`Ber::roof`]), red otherwise. The roof
+    /// step runs at the end of Mapping (after every storey), so this is a
+    /// dwelling-level gate like the living area / external photos.
+    fn roof_status(&self) -> ChecklistStatus {
+        let done = self
+            .current_record
+            .as_ref()
+            .is_some_and(|r| !r.data.roof.is_empty());
+        if done {
             ChecklistStatus::AllStoreys
         } else {
             ChecklistStatus::Incomplete
@@ -172,8 +192,9 @@ impl AppController {
             },
             ChecklistItem {
                 label: "Ceilings",
-                status: self
-                    .ber_storey_status(|b, i| b.structure_surfaces_complete(i, SurfaceKind::Ceilings)),
+                status: self.ber_storey_status(|b, i| {
+                    b.structure_surfaces_complete(i, SurfaceKind::Ceilings)
+                }),
             },
             ChecklistItem {
                 label: "Floors",
