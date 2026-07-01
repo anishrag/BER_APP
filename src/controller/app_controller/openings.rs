@@ -1014,58 +1014,42 @@ impl AppController {
     /// source of truth after a placement / move / auto-redistribute, and the
     /// resolve re-derives the `wall_id`/`along_m` cache from it (no revert).
     /// Cheap and idempotent; roof openings are left alone.
+    /// Re-seed EVERY storey's opening anchors from its saved walls — the
+    /// load-time heal for the VertexId RE-INDEXING a snapshot-less reload causes
+    /// (the outline is rebuilt via `from_clean_ring`, re-minting perimeter
+    /// VertexIds in the reconstructed footprint's order, so persisted anchors
+    /// name the wrong walls and every opening re-homes wrong). Both load paths
+    /// call this AFTER the outlines are rebuilt and BEFORE `refresh_all_storeys`
+    /// re-mints the walls (while the saved `wall_id`s the placements reference are
+    /// still live). Idempotent — a no-op on the snapshot path (VertexIds intact).
+    pub(super) fn reseed_all_opening_anchors(&mut self) {
+        let n = self
+            .current_record
+            .as_ref()
+            .map_or(0, |r| r.data.storeys.len());
+        for i in 0..n {
+            self.reseed_opening_anchors(i);
+        }
+    }
+
     pub(super) fn reseed_opening_anchors(&mut self, idx: usize) {
-        use ber_model::ber::fenestration::OpeningPlacement;
-        let anchor_of = |storey: &ber_model::ber::structural::Storey,
-                         plan: &manip_plan::FloorPlan,
-                         placement: &Option<OpeningPlacement>| {
-            let Some(OpeningPlacement::Wall {
-                wall_id, along_m, ..
-            }) = placement
-            else {
-                return None; // roof / unplaced
-            };
-            let r = storey.walls.regions.iter().find(|r| r.id == *wall_id)?;
-            document::opening_wall_anchor(plan, r, *along_m)
-        };
-        let (win, drs) = {
-            let Some(record) = self.current_record.as_ref() else {
-                return;
-            };
-            let Some(storey) = record.data.storeys.get(idx) else {
-                return;
-            };
-            let Some(sd) = self.document.storeys.get(idx) else {
-                return;
-            };
-            let plan = &sd.outline.floor_plan;
-            let win: Vec<_> = storey
-                .windows
-                .iter()
-                .map(|w| anchor_of(storey, plan, &w.placement))
-                .collect();
-            let drs: Vec<_> = storey
-                .doors
-                .iter()
-                .map(|d| anchor_of(storey, plan, &d.placement))
-                .collect();
-            (win, drs)
+        // Snapshot the outline plan first (releases the &document borrow before
+        // the &mut current_record one), then re-derive each opening's anchor from
+        // its host wall against that plan — the model mutation lives in `document`.
+        let Some(plan) = self
+            .document
+            .storeys
+            .get(idx)
+            .map(|sd| sd.outline.floor_plan.clone())
+        else {
+            return;
         };
         if let Some(storey) = self
             .current_record
             .as_mut()
             .and_then(|r| r.data.storeys.get_mut(idx))
         {
-            for (w, a) in storey.windows.iter_mut().zip(win) {
-                if a.is_some() {
-                    w.wall_anchor = a;
-                }
-            }
-            for (d, a) in storey.doors.iter_mut().zip(drs) {
-                if a.is_some() {
-                    d.wall_anchor = a;
-                }
-            }
+            document::reseed_wall_anchors_on_load(&plan, storey);
         }
     }
 

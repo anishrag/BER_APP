@@ -780,6 +780,66 @@ pub fn opening_wall_anchor(
     })
 }
 
+/// RE-SEED every wall opening's durable [`WallAnchor`] from its OWN host wall's
+/// geometry against `plan` — the load-time heal for stale anchors.
+///
+/// A wall opening's `wall_anchor` names its perimeter wall by parametric
+/// [`VertexId`]. That id is stable across in-place outline edits (drag, reshape,
+/// splice), so the anchor is the durable source of truth THERE. But a
+/// snapshot-less RELOAD (a dev checkpoint, or a version-stale/absent Document
+/// snapshot) rebuilds the outline as a FRESH [`manip_plan::FloorPlan`] via
+/// `from_clean_ring(footprint_ring)`, which re-mints VertexIds `0..n-1` in the
+/// RECONSTRUCTED footprint's ring order. That order need not match the original
+/// outline's — a phase-split storey's footprint comes from a geo boolean UNION
+/// (`merged_outline`) whose exterior ring geo emits from its OWN canonical start
+/// vertex — so a persisted anchor's VertexId now names a DIFFERENT wall and
+/// EVERY opening re-homes onto the wrong wall (the reported "all windows moved").
+///
+/// The heal: right after the reload rebuilds the outline and BEFORE the first
+/// resolve re-mints the walls, the just-loaded `storey.walls` still carry the
+/// SAVED ids each opening's `placement.wall_id` references. So re-derive each
+/// anchor from its host wall's geometry (`along_m` on that wall's base edge)
+/// against the freshly-rebuilt `plan` — via [`opening_wall_anchor`], the same
+/// primitive the placement seed uses, now sourced from the reload's own wall
+/// set. Idempotent: on the snapshot path (VertexIds preserved) it recomputes the
+/// identical anchor, so it is safe to run on EVERY load. A roof opening, an
+/// unplaced one, or one whose host wall / centre can't be re-placed is left
+/// untouched (its existing anchor stands).
+pub fn reseed_wall_anchors_on_load(plan: &manip_plan::FloorPlan, storey: &mut Storey) {
+    use ber_model::ber::fenestration::OpeningPlacement;
+    // The freshly-derived anchor for one opening, from its host wall's geometry.
+    let anchor_of = |placement: &Option<OpeningPlacement>| {
+        let Some(OpeningPlacement::Wall {
+            wall_id, along_m, ..
+        }) = placement
+        else {
+            return None; // roof / unplaced
+        };
+        let wall = storey.walls.regions.iter().find(|r| r.id == *wall_id)?;
+        opening_wall_anchor(plan, wall, *along_m)
+    };
+    let win: Vec<_> = storey
+        .windows
+        .iter()
+        .map(|w| anchor_of(&w.placement))
+        .collect();
+    let drs: Vec<_> = storey
+        .doors
+        .iter()
+        .map(|d| anchor_of(&d.placement))
+        .collect();
+    for (w, a) in storey.windows.iter_mut().zip(win) {
+        if a.is_some() {
+            w.wall_anchor = a;
+        }
+    }
+    for (d, a) in storey.doors.iter_mut().zip(drs) {
+        if a.is_some() {
+            d.wall_anchor = a;
+        }
+    }
+}
+
 /// The live wall region whose base CONTAINS world point `p`, plus the centre
 /// distance along it — picks the correct sub-wall after a structure split.
 /// Shared by [`reanchor_openings`] and [`resolve_wall_anchor`].
@@ -885,6 +945,160 @@ mod tests {
         assert!(storey.ceilings.regions.is_empty());
 
         assert!(storey.living_areas.regions.is_empty());
+    }
+
+    /// REGRESSION: on a CHECKPOINT reload a phase-split storey's outline is
+    /// rebuilt via `from_clean_ring(footprint_ring)`, re-minting perimeter
+    /// VertexIds in the reconstructed footprint's ring order — which (for a
+    /// phase-split floor, whose footprint is a geo UNION) need not match the
+    /// drawing outline's order. A persisted opening anchor keyed on the OLD
+    /// VertexId then names a DIFFERENT wall, so EVERY window re-homes onto the
+    /// wrong wall. `reseed_wall_anchors_on_load` heals the anchors from the saved
+    /// walls before the first resolve, so homing is preserved.
+    #[test]
+    fn openings_survive_checkpoint_reload_that_reindexes_vertex_ids() {
+        use ber_model::ber::fenestration::{OpeningPlacement, Window};
+        let y = 8.927008_f32;
+        let mut pts = vec![
+            Point2f32::new(2.2785, 4.3270),
+            Point2f32::new(9.7785, 4.3270),
+            Point2f32::new(9.7785, 16.9270),
+            Point2f32::new(7.2785, 16.9270),
+            Point2f32::new(7.2785, 18.8270),
+            Point2f32::new(5.2785, 18.8270),
+            Point2f32::new(5.2785, 17.3270),
+            Point2f32::new(2.2785, 17.3270),
+        ];
+        // Start the drawing ring at a non-canonical vertex, so the reload's
+        // geo-union footprint re-mints VertexIds in a ROTATED order.
+        pts.rotate_left(4);
+        let mut ortho = pts.clone();
+        ortho.push(Point2f32::new(pts[0].x + 0.02, pts[0].y + 0.02));
+        let plan = FloorPlan::from_points_to_orthogonal(&ortho, 0.1, true).unwrap();
+        let mut doc = StoreyDoc::default();
+        doc.dimensioning.scale_set = true;
+        doc.dimensioning.known_params = plan.all_active_params();
+        doc.floor_plan = plan.clone();
+        doc.outline = ShapeSlot {
+            floor_plan: plan,
+            dimensioning: doc.dimensioning.clone(),
+        };
+        let phase = vec![
+            PhaseRegion {
+                polygon: vec![
+                    Point2f32::new(2.2785, 4.3270),
+                    Point2f32::new(9.7785, 4.3270),
+                    Point2f32::new(9.7785, y),
+                    Point2f32::new(2.2785, y),
+                ],
+                phase: ConstructionPhase::Extension1,
+            },
+            PhaseRegion {
+                polygon: vec![
+                    Point2f32::new(2.2785, y),
+                    Point2f32::new(9.7785, y),
+                    Point2f32::new(9.7785, 16.9270),
+                    Point2f32::new(7.2785, 16.9270),
+                    Point2f32::new(7.2785, 18.8270),
+                    Point2f32::new(5.2785, 18.8270),
+                    Point2f32::new(5.2785, 17.3270),
+                    Point2f32::new(2.2785, 17.3270),
+                ],
+                phase: ConstructionPhase::Original,
+            },
+        ];
+        let mut ber = Ber::default();
+        ensure_storey_constructions(&mut ber, 0, &phase);
+        ber.set_default_ceiling_height(Some(0), 2.4);
+        ber.storeys[0] = resolve_storey(&doc, &ber, 0, &phase, &[], &[]);
+
+        // One window centred on each resolved perimeter wall; resolve to home
+        // them and seed anchors. This is the SAVED state.
+        let wall_ids: Vec<ItemId> = ber.storeys[0].walls.regions.iter().map(|r| r.id).collect();
+        for wid in &wall_ids {
+            let region = ber.storeys[0]
+                .walls
+                .regions
+                .iter()
+                .find(|r| r.id == *wid)
+                .unwrap();
+            let (_, _, len, _) = region.base_frame().unwrap();
+            ber.storeys[0].windows.push(Window {
+                id: ItemId::default(),
+                vertices: vec![],
+                width_m: 0.6,
+                height_m: 1.0,
+                window_type_id: ItemId::default(),
+                placement: Some(OpeningPlacement::Wall {
+                    wall_id: *wid,
+                    along_m: (len / 2.0) as f32,
+                    sill_m: 0.8,
+                }),
+                wall_anchor: None,
+                assembly_id: None,
+                multi_storey: false,
+                arched: false,
+                overshading: Default::default(),
+            });
+        }
+        ber.storeys[0] = resolve_storey(&doc, &ber, 0, &phase, &[], &[]);
+        let host_mid = |storey: &Storey, w: &Window| -> (i64, i64) {
+            let Some(OpeningPlacement::Wall { wall_id, .. }) = w.placement else {
+                return (0, 0);
+            };
+            let m = storey
+                .walls
+                .regions
+                .iter()
+                .find(|r| r.id == wall_id)
+                .unwrap()
+                .base_midpoint()
+                .unwrap();
+            ((m.x * 1000.0).round() as i64, (m.y * 1000.0).round() as i64)
+        };
+        let saved: Vec<(i64, i64)> = ber.storeys[0]
+            .windows
+            .iter()
+            .map(|w| host_mid(&ber.storeys[0], w))
+            .collect();
+
+        // ---- CHECKPOINT RELOAD: rebuild outline (re-mints + rotates vids) ----
+        let phase2 = crate::phase::phase_regions_from_floors(&ber, 0);
+        let doc2 = StoreyDoc::from_storey(&ber.storeys[0]);
+
+        // WITHOUT the heal: every window re-homes wrong (the reported bug).
+        {
+            let mut ber_bug = ber.clone();
+            ensure_storey_constructions(&mut ber_bug, 0, &phase2);
+            ber_bug.storeys[0] = resolve_storey(&doc2, &ber_bug, 0, &phase2, &[], &[]);
+            let bug: Vec<(i64, i64)> = ber_bug.storeys[0]
+                .windows
+                .iter()
+                .map(|w| host_mid(&ber_bug.storeys[0], w))
+                .collect();
+            let moved = saved.iter().zip(&bug).filter(|(s, b)| s != b).count();
+            assert!(
+                moved > 0,
+                "precondition: the reload re-indexes vids and mis-homes without the heal"
+            );
+        }
+
+        // WITH the heal: re-seed anchors from the saved walls against the rebuilt
+        // outline, THEN resolve — homing is preserved.
+        let mut ber2 = ber.clone();
+        ensure_storey_constructions(&mut ber2, 0, &phase2);
+        crate::reseed_wall_anchors_on_load(&doc2.outline.floor_plan, &mut ber2.storeys[0]);
+        ber2.storeys[0] = resolve_storey(&doc2, &ber2, 0, &phase2, &[], &[]);
+        let healed: Vec<(i64, i64)> = ber2.storeys[0]
+            .windows
+            .iter()
+            .map(|w| host_mid(&ber2.storeys[0], w))
+            .collect();
+        let moved = saved.iter().zip(&healed).filter(|(s, h)| s != h).count();
+        assert_eq!(
+            moved, 0,
+            "every window stayed on its wall after the load-time anchor re-seed"
+        );
     }
 
     /// A finalised square StoreyDoc with the given corner points as its outline.

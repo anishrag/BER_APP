@@ -53,8 +53,8 @@ pub use phase::{
 };
 pub use position::{PositionOption, PositionPrompt, PositionPromptKind};
 pub use resolve::{
-    ensure_storey_constructions, opening_wall_anchor, resolve_storey, resolve_wall_anchor,
-    stamp_horizontal_exposure,
+    ensure_storey_constructions, opening_wall_anchor, reseed_wall_anchors_on_load, resolve_storey,
+    resolve_wall_anchor, stamp_horizontal_exposure,
 };
 pub use step::{inherited_step_regions, step_regions_from_floors, StepRegion};
 pub use windows::windows_complete;

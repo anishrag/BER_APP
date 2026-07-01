@@ -235,6 +235,10 @@ impl AppController {
         self.document.edit_state = EditState::default();
         self.review = None;
         self.compute_next_dimension_prompt();
+        // Heal opening anchors against the (possibly re-minted) outline VertexIds
+        // BEFORE the re-resolve re-mints the walls — otherwise a snapshot-less
+        // load re-homes every opening onto the wrong wall.
+        self.reseed_all_opening_anchors();
         // Re-resolve every storey so the recomposed ceilings (above) get the clean,
         // per-phase carve re-applied — this is what drops the stale split while
         // preserving the deliberate structure splits + steps + apexes that
@@ -682,6 +686,11 @@ impl AppController {
         self.document.edit_state = EditState::default();
         self.review = None;
         self.compute_next_dimension_prompt();
+        // Heal opening anchors against the re-minted outline VertexIds BEFORE the
+        // re-resolve re-mints the walls — the checkpoint has no Document snapshot,
+        // so its outline is rebuilt via `from_clean_ring` and its perimeter
+        // VertexIds are re-indexed; without this every opening re-homes wrong.
+        self.reseed_all_opening_anchors();
         // Re-resolve every storey so the seeded maps are stamped onto the geometry
         // now (not on the first edit) — mirrors `open_ber`, and sets the revision
         // bookkeeping so the next no-edit `materialize` is a no-op.
