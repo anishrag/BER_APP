@@ -2,6 +2,16 @@
 //! apply-stroke family (outline/add-section/extend/trim), pending-redraw
 //! decisions, and provisional arcs.
 use super::*;
+use std::sync::OnceLock;
+
+/// The extend/trim splice-pipeline overlay (`render_splice_debug`) is a
+/// development aid — the coloured raw→simplified→snapped→…→spliced phases. It's
+/// OFF by default (it lingered on the canvas after every trim); set
+/// `BER_SPLICE_DEBUG=1` to see it. Cached like `BER_TOUCH`.
+fn splice_debug_enabled() -> bool {
+    static ENABLED: OnceLock<bool> = OnceLock::new();
+    *ENABLED.get_or_init(|| std::env::var("BER_SPLICE_DEBUG").is_ok_and(|v| v != "0"))
+}
 
 /// A completed stroke that's waiting for the user to confirm what to do with it.
 /// Populated when `DrawPerpWalls` finishes a stroke while a floor plan already
@@ -469,7 +479,7 @@ impl AppController {
         dump_stroke("extend", &pts);
         let _ = manip_plan::take_splice_debug(); // clear stale phases
         let res = self.apply_extend_stroke(&pts);
-        self.splice_debug = manip_plan::take_splice_debug();
+        self.splice_debug = self.take_splice_debug_if_enabled();
         if let Err(e) = res {
             log::error!("apply_extend_stroke: {}", e);
         }
@@ -545,8 +555,8 @@ impl AppController {
         let _ = manip_plan::take_splice_debug(); // clear stale phases
         let res = self.apply_trim_stroke(&pts);
         // Capture the pipeline phases (recorded even when the splice is rejected)
-        // for the UI's coloured debug overlay.
-        self.splice_debug = manip_plan::take_splice_debug();
+        // for the UI's coloured debug overlay — only when explicitly enabled.
+        self.splice_debug = self.take_splice_debug_if_enabled();
         if let Err(e) = res {
             log::error!("apply_trim_stroke: {}", e);
         }
@@ -555,6 +565,19 @@ impl AppController {
             points: pts,
             closed: false,
         });
+    }
+
+    /// Drain the splice pipeline's recorded phases, KEEPING them for the overlay
+    /// only when `BER_SPLICE_DEBUG` is set; otherwise discard them so nothing is
+    /// drawn (the phases always accumulate in `manip_plan` and must be drained
+    /// each op regardless, else they'd leak into the next stroke).
+    fn take_splice_debug_if_enabled(&self) -> Vec<manip_plan::SplicePhase> {
+        let phases = manip_plan::take_splice_debug();
+        if splice_debug_enabled() {
+            phases
+        } else {
+            Vec::new()
+        }
     }
 
     /// DEBUG: the splice-pipeline phases captured from the last extend/trim, as
