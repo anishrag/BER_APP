@@ -27,14 +27,19 @@ impl ExternalSide {
         }
     }
 
-    /// The horizontal view axis `h = (-n.y, n.x)` (unit, ⟂ the outward normal
+    /// The horizontal view axis `h = (n.y, -n.x)` (unit, ⟂ the outward normal
     /// `n`) onto which [`Ber::side_elevation`] projects plan points to get a
     /// composite elevation x. Its handedness matches a viewer standing OUTSIDE
-    /// the side looking in. THE single source of `h`, shared by the forward
-    /// projection and the drag inverse ([`WallRegion::elevation_along_at`]).
+    /// the side looking IN — the same view a facade PHOTO is taken from, so the
+    /// drawn elevation reads the same way round as the photo it's compared to.
+    /// (Plan convention: `Transform2d::apply` has no Y-flip, so plan +X is
+    /// screen-right, +Y screen-down, +Z up; a viewer outside side `n` looking in
+    /// has screen-right `cross(up, -n) = (n.y, -n.x)`.) THE single source of `h`,
+    /// shared by the forward projection and the drag inverse
+    /// ([`WallRegion::elevation_along_at`]), so the opening drag stays consistent.
     pub fn view_axis(self) -> (f64, f64) {
         let (nx, ny) = self.outward_dir();
-        (-ny, nx)
+        (ny, -nx)
     }
 }
 
