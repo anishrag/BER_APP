@@ -234,6 +234,29 @@ impl Roof {
     pub fn is_empty(&self) -> bool {
         self.areas.is_empty()
     }
+
+    /// True when plan point `p` lies inside some roof area on `storey_idx` — i.e.
+    /// a roof is assigned over that spot. Deliberately LENIENT (plan containment
+    /// of the point): whether the roof's eave drops short or overhangs doesn't
+    /// matter — only that something covers the ceiling area there.
+    pub fn covers_on(&self, storey_idx: usize, p: Point2f64) -> bool {
+        use geo::Contains;
+        let pt = geo::Point::new(p.x, p.y);
+        self.areas
+            .iter()
+            .filter(|a| a.storey_idx == storey_idx)
+            .flat_map(|a| a.footprint.iter())
+            .any(|ring| ring_polygon(ring).contains(&pt))
+    }
+}
+
+/// A plan ring → a `geo` polygon (no holes) for point-in-polygon tests.
+fn ring_polygon(ring: &[Point2f64]) -> geo::Polygon<f64> {
+    let coords: Vec<geo::Coord<f64>> = ring
+        .iter()
+        .map(|p| geo::coord! { x: p.x, y: p.y })
+        .collect();
+    geo::Polygon::new(geo::LineString::new(coords), vec![])
 }
 
 #[cfg(test)]
@@ -247,6 +270,33 @@ mod tests {
             Point2f64::new(10.0, 10.0),
             Point2f64::new(0.0, 10.0),
         ]]
+    }
+
+    #[test]
+    fn covers_on_matches_storey_and_plan_containment() {
+        let area = RoofArea {
+            id: ItemId::default(),
+            storey_idx: 1,
+            shape: RoofShape::Flat,
+            pitch_deg: 0.0,
+            eave_z: 2.4,
+            ridge: None,
+            footprint: square_10(),
+            apexes: Vec::new(),
+        };
+        let roof = Roof { areas: vec![area] };
+        assert!(
+            roof.covers_on(1, Point2f64::new(5.0, 5.0)),
+            "inside the footprint on the owning storey"
+        );
+        assert!(
+            !roof.covers_on(1, Point2f64::new(15.0, 5.0)),
+            "outside the footprint in plan"
+        );
+        assert!(
+            !roof.covers_on(0, Point2f64::new(5.0, 5.0)),
+            "a roof on storey 1 doesn't cover storey 0"
+        );
     }
 
     fn z_extent(regions: &CeilingRegions) -> (f64, f64) {

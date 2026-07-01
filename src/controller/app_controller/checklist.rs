@@ -112,15 +112,37 @@ impl AppController {
         }
     }
 
-    /// Per-DWELLING roof gate: green ([`ChecklistStatus::AllStoreys`]) once at
-    /// least one roof area has been drawn ([`Ber::roof`]), red otherwise. The roof
-    /// step runs at the end of Mapping (after every storey), so this is a
-    /// dwelling-level gate like the living area / external photos.
+    /// Per-DWELLING roof gate: green ([`ChecklistStatus::AllStoreys`]) once EVERY
+    /// top-storey ceiling area — every non-party ceiling region, i.e. the ones
+    /// with sky / attic above that the roof step lets you group — has a roof
+    /// assigned over it ([`Roof::covers_on`]), red otherwise. Lenient on geometry:
+    /// whether the roof's eave drops short or overhangs doesn't matter, only that
+    /// something covers each area. A dwelling-level gate (the roof step runs at the
+    /// end of Mapping, after every storey).
     fn roof_status(&self) -> ChecklistStatus {
-        let done = self
-            .current_record
-            .as_ref()
-            .is_some_and(|r| !r.data.roof.is_empty());
+        use ber_model::ber::structural::CeilingExposure;
+        let Some(record) = self.current_record.as_ref() else {
+            return ChecklistStatus::Incomplete;
+        };
+        let ber = &record.data;
+        // Every non-party ceiling region across the stack (a spot with sky/attic
+        // above) paired with its owning storey.
+        let regions: Vec<(usize, _)> = ber
+            .storeys
+            .iter()
+            .enumerate()
+            .flat_map(|(idx, s)| {
+                s.ceilings
+                    .regions
+                    .iter()
+                    .filter(|r| r.exposure != CeilingExposure::Party)
+                    .map(move |r| (idx, r.centroid()))
+            })
+            .collect();
+        // Not vacuous: there must be at least one area to cover (heights set →
+        // ceilings resolved), and a roof must cover every one of them.
+        let done =
+            !regions.is_empty() && regions.iter().all(|(idx, c)| ber.roof.covers_on(*idx, *c));
         if done {
             ChecklistStatus::AllStoreys
         } else {
