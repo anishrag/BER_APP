@@ -572,6 +572,7 @@ impl eframe::App for BerApp {
                                 ceiling_ridge_length_anchored,
                                 pending_roof_ridge_length,
                                 ceiling_ridge_height_pending,
+                                ceiling_ridge_meet_edge_height,
                                 ceiling_ridge_pending,
                                 ceiling_rect_views,
                                 pending_roof_rect_outline,
@@ -661,6 +662,7 @@ impl eframe::App for BerApp {
                                     controller_ref.ceiling_ridge_length_anchored(),
                                     controller_ref.pending_roof_ridge_length(),
                                     controller_ref.ceiling_ridge_height_pending(),
+                                    controller_ref.ceiling_ridge_meet_edge_height(),
                                     controller_ref.ceiling_ridge_pending(),
                                     controller_ref.ceiling_rect_views(),
                                     controller_ref.pending_roof_rect_outline(),
@@ -1170,6 +1172,7 @@ impl eframe::App for BerApp {
                                 ceiling_ridge_length_pending,
                                 ceiling_ridge_length_anchored,
                                 ceiling_ridge_height_pending,
+                                ceiling_ridge_meet_edge_height,
                                 ceiling_ridge_pending,
                                 ceiling_ridge_area_options: self
                                     .app_controller
@@ -1684,6 +1687,25 @@ impl eframe::App for BerApp {
                                             Err(e) => {
                                                 log::error!("centre_roof_position: {}", e);
                                                 self.sketch_state.position_error = Some(e);
+                                            }
+                                        }
+                                    }
+                                    SketchEvent::MeetOtherEdgeRidgeHeight => {
+                                        // Sets the ridge to the raised neighbour's
+                                        // height; a rejection lands on the height stage.
+                                        match controller
+                                            .borrow_mut()
+                                            .meet_other_edge_roof_ridge_height()
+                                        {
+                                            Ok(()) => {
+                                                self.sketch_state.roof_error = None;
+                                            }
+                                            Err(e) => {
+                                                log::error!(
+                                                    "meet_other_edge_roof_ridge_height: {}",
+                                                    e
+                                                );
+                                                self.sketch_state.roof_error = Some(e);
                                             }
                                         }
                                     }

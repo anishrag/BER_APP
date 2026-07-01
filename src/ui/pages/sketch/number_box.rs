@@ -684,15 +684,24 @@ pub(super) fn render<F: FnMut(UiEvent)>(
 
     // ── Roof: ridge height ──────────────────────────────────────────────────
     if view.ceiling_ridge_height_pending {
-        let actions = vec![
-            Action::new(
-                "Set",
-                "Raise (or lower) the ceiling area to a ridge at this height",
-                |v| SketchEvent::AssignCeilingRidgeHeight(v),
-            )
-            .primary(),
-            ceiling_ridge_cancel(),
-        ];
+        let mut actions = vec![Action::new(
+            "Set",
+            "Raise (or lower) the ceiling area to a ridge at this height",
+            |v| SketchEvent::AssignCeilingRidgeHeight(v),
+        )
+        .primary()];
+        // Only when the ridge abuts a raised neighbour: slope up to meet it flush.
+        if view.ceiling_ridge_meet_edge_height.is_some() {
+            actions.push(
+                Action::new(
+                    "Meet other edge",
+                    "Slope up to meet the raised area's ceiling",
+                    |_| SketchEvent::MeetOtherEdgeRidgeHeight,
+                )
+                .bare(),
+            );
+        }
+        actions.push(ceiling_ridge_cancel());
         show_box(
             ctx,
             rect,

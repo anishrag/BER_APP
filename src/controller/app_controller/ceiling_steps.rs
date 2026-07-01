@@ -250,7 +250,7 @@ impl AppController {
     /// the snap record so the tag's "Don't snap" can revert. Then await the
     /// side tap.
     fn begin_ceiling_step_side(&mut self, axis: ParameterAxis, coord_m: f32) {
-        let extras = self.ceiling_step_snap_references(axis);
+        let extras = self.region_snap_references(axis);
         let (coord_m, snap) = match self.document.snap_ceiling_step_line(axis, coord_m, &extras) {
             Some((snapped, outline_wall_vid)) => (
                 snapped,
@@ -268,14 +268,16 @@ impl AppController {
         });
     }
 
-    /// Extra reference coordinates (on `axis`) a drawn ceiling-step line may
-    /// snap to, beyond the current outline walls: the parallel edges of EXISTING
-    /// floor AND ceiling regions in this storey (internal floor/ceiling step
-    /// boundaries) and of the storey BELOW (its outline + floor/ceiling steps) —
-    /// so a line drawn near any existing line locks onto it. Gathered from the
-    /// materialized records the shell already holds; the geometry extraction is
-    /// [`document::region_line_coords`] / [`document::ceiling_line_coords`].
-    fn ceiling_step_snap_references(&self, axis: ParameterAxis) -> Vec<f32> {
+    /// Extra reference coordinates (on `axis`) a drawn ceiling-step line OR roof
+    /// RIDGE may snap to, beyond the current outline walls: the parallel edges of
+    /// EXISTING floor AND ceiling regions in this storey (internal floor/ceiling
+    /// step boundaries — e.g. a raised ceiling area's edge) and of the storey
+    /// BELOW — so a line/ridge drawn near any existing area edge locks onto it.
+    /// Gathered from the materialized records the shell already holds; the
+    /// geometry extraction is [`document::region_line_coords`] /
+    /// [`document::ceiling_line_coords`]. Shared by the ceiling-step line and the
+    /// ridge (`apply_roof_ridge_stroke_event`).
+    pub(super) fn region_snap_references(&self, axis: ParameterAxis) -> Vec<f32> {
         let Some(idx) = self.current_storey_idx else {
             return Vec::new();
         };

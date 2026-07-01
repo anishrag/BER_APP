@@ -200,27 +200,39 @@ impl AppController {
                 return;
             }
         };
-        // The CROSS snaps to the nearest parallel wall INCLUDING the outline's
-        // outer walls and area boundaries: a ridge along a wall is now a valid
-        // mono-pitch (it raises that wall / boundary and slopes away), so the
-        // ridge must be able to land exactly on it.
-        let (coord_m, cross_snap) = match self.document.snap_roof_point_coord(axis, coord_m) {
-            Some((snapped, outline_wall_vid)) => (
-                snapped,
-                Some(CeilingLineSnap {
-                    drawn_coord_m: coord_m,
-                    outline_wall_vid: Some(outline_wall_vid),
-                }),
-            ),
-            None => (coord_m, None),
-        };
-        // Both extent ends try the end snap (extremes included). Same-wall
-        // guard: a short stroke near one wall can put both ends in
-        // tolerance of it — only the nearer end keeps its snap.
-        let mut lo_hit = self.document.snap_roof_ridge_end(axis.other(), lo);
-        let mut hi_hit = self.document.snap_roof_ridge_end(axis.other(), hi);
-        if let (Some((lc, lv)), Some((hc, hv))) = (lo_hit, hi_hit) {
-            if lv == hv {
+        // The CROSS snaps to the nearest parallel reference INCLUDING the
+        // outline's outer walls AND internal ceiling/floor area boundaries (a
+        // raised ceiling area's edge) — so a ridge drawn near an area edge lands
+        // exactly on it; a ridge along a wall/boundary is a valid mono-pitch.
+        let cross_refs = self.region_snap_references(axis);
+        let (coord_m, cross_snap) =
+            match self
+                .document
+                .snap_roof_ridge_coord(axis, coord_m, &cross_refs)
+            {
+                Some((snapped, outline_wall_vid)) => (
+                    snapped,
+                    Some(CeilingLineSnap {
+                        drawn_coord_m: coord_m,
+                        outline_wall_vid,
+                    }),
+                ),
+                None => (coord_m, None),
+            };
+        // Both extent ends try the end snap (extremes + area boundaries
+        // included). Same-wall guard: a short stroke near one reference can put
+        // both ends in tolerance of it — only the nearer end keeps its snap
+        // (compared by the snapped coordinate, since an internal boundary carries
+        // no vertex id to compare).
+        let end_refs = self.region_snap_references(axis.other());
+        let mut lo_hit = self
+            .document
+            .snap_roof_ridge_coord(axis.other(), lo, &end_refs);
+        let mut hi_hit = self
+            .document
+            .snap_roof_ridge_coord(axis.other(), hi, &end_refs);
+        if let (Some((lc, _)), Some((hc, _))) = (lo_hit, hi_hit) {
+            if lc == hc {
                 if (lc - lo).abs() <= (hc - hi).abs() {
                     hi_hit = None;
                 } else {
@@ -233,7 +245,7 @@ impl AppController {
                 snapped,
                 Some(CeilingLineSnap {
                     drawn_coord_m: lo,
-                    outline_wall_vid: Some(outline_wall_vid),
+                    outline_wall_vid,
                 }),
             ),
             None => (lo, None),
@@ -243,7 +255,7 @@ impl AppController {
                 snapped,
                 Some(CeilingLineSnap {
                     drawn_coord_m: hi,
-                    outline_wall_vid: Some(outline_wall_vid),
+                    outline_wall_vid,
                 }),
             ),
             None => (hi, None),
@@ -923,19 +935,26 @@ impl AppController {
         // Which area slopes? The model decides: a junction ridge shared by ≥ 2
         // areas with no clear drawn side is AMBIGUOUS (we ask); otherwise it
         // resolves to the interior hint to stamp (or none).
-        let chosen_hint =
-            match document::resolve_ridge_slope_side(storey, a, b, drawn_cross, axis, coord_m) {
-                document::RidgeSlopeSide::Ambiguous(options) => {
-                    self.pending_roof_ridge = Some(PendingCeilingRidge::ChooseArea {
-                        a,
-                        b,
-                        z_m: z_m as f64,
-                        options,
-                    });
-                    return Ok(());
-                }
-                document::RidgeSlopeSide::Resolved(hint) => hint,
-            };
+        let chosen_hint = match document::resolve_ridge_slope_side(
+            storey,
+            a,
+            b,
+            drawn_cross,
+            axis,
+            coord_m,
+            z_m as f64,
+        ) {
+            document::RidgeSlopeSide::Ambiguous(options) => {
+                self.pending_roof_ridge = Some(PendingCeilingRidge::ChooseArea {
+                    a,
+                    b,
+                    z_m: z_m as f64,
+                    options,
+                });
+                return Ok(());
+            }
+            document::RidgeSlopeSide::Resolved(hint) => hint,
+        };
         let record = self.current_record.as_mut().expect("checked above");
         for p in [a, b] {
             record.data.add_ceiling_apex(
@@ -957,6 +976,40 @@ impl AppController {
         self.materialize();
         self.reconstruct_ceiling_step_regions_for(idx);
         Ok(())
+    }
+
+    /// The height the "meet other edge" button would set the pending ridge to —
+    /// the RAISED neighbour's ceiling height, so the sloped area rises to meet it
+    /// flush — or `None` when the ridge isn't on the boundary of a higher flat
+    /// area (the button is then hidden). Read from the already-materialized
+    /// ceilings (finalize left them current); cheap enough for a per-frame call.
+    pub fn ceiling_ridge_meet_edge_height(&self) -> Option<f32> {
+        let Some(PendingCeilingRidge::Height {
+            axis,
+            coord_m,
+            lo,
+            len_m,
+            ..
+        }) = self.pending_roof_ridge.as_ref()
+        else {
+            return None;
+        };
+        let (a, b) = Self::ridge_endpoints(*axis, *coord_m, *lo, *len_m);
+        let idx = self.current_storey_idx.unwrap_or(0);
+        let storey = self.current_record.as_ref()?.data.storeys.get(idx)?;
+        document::ridge_meet_edge_height(storey, a, b).map(|z| z as f32)
+    }
+
+    /// "Meet other edge": set the pending ridge's height to the raised
+    /// neighbour's ceiling so the sloped area rises to meet it flush. No-op when
+    /// the ridge isn't on such a boundary. Routes through
+    /// [`assign_roof_ridge_height`](Self::assign_roof_ridge_height) — the same
+    /// validate + slope-side resolve + canonicalize as a typed height.
+    pub fn meet_other_edge_roof_ridge_height(&mut self) -> Result<(), String> {
+        let Some(z) = self.ceiling_ridge_meet_edge_height() else {
+            return Ok(());
+        };
+        self.assign_roof_ridge_height(z)
     }
 
     /// Discard the in-flight ceiling ridge at any stage.
@@ -984,7 +1037,9 @@ impl AppController {
             .as_mut()
             .ok_or("no storey for the ceiling ridge")?;
         for p in [a, b] {
-            record.data.add_ceiling_apex(idx, CeilingApex { point: p, z_m });
+            record
+                .data
+                .add_ceiling_apex(idx, CeilingApex { point: p, z_m });
             record.data.push_ceiling_apex_hint(idx, p, inside);
         }
         self.mark_dirty()?;
@@ -1011,7 +1066,10 @@ impl AppController {
     pub fn ceiling_ridge_position_pending(&self) -> bool {
         matches!(
             self.pending_roof_ridge,
-            Some(PendingCeilingRidge::CrossPosition { .. } | PendingCeilingRidge::StartPosition { .. })
+            Some(
+                PendingCeilingRidge::CrossPosition { .. }
+                    | PendingCeilingRidge::StartPosition { .. }
+            )
         )
     }
 

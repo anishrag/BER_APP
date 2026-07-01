@@ -1165,15 +1165,21 @@ fn area_side_label(axis: ParameterAxis, coord_m: f32, inside: (f32, f32)) -> Str
 }
 
 /// Decide which ceiling area a level ridge `a→b` (cross axis `axis`, coordinate
-/// `coord_m`) slopes, given the DRAWN (pre-snap) cross coordinate `drawn_cross`
-/// (the side the assessor drew over, `None` when the cross didn't snap).
+/// `coord_m`) at height `z_m` slopes, given the DRAWN (pre-snap) cross coordinate
+/// `drawn_cross` (the side the assessor drew over, `None` when the cross didn't
+/// snap).
 ///
 /// The ridge's region is claimed by its midpoint ([`CeilingRegions::claim_regions`]):
-/// - claimed by ONE area, or the drawn side falls clearly inside one of several
-///   → [`RidgeSlopeSide::Resolved`] with that area's interior hint (or the drawn
-///   side itself / `None`);
-/// - claimed by ≥ 2 with no clear drawn side (a junction ridge on an internal
-///   boundary) → [`RidgeSlopeSide::Ambiguous`] with one option per claiming area.
+/// - claimed by ONE area (a strict-interior GABLE ridge) → [`RidgeSlopeSide::Resolved`]
+///   with the drawn side's hint (or `None` — both halves slope);
+/// - claimed by ≥ 2 (a junction ridge on an internal boundary): the ridge slopes
+///   ONE neighbour and steps the other. It can only slope a neighbour whose flat
+///   height DIFFERS from `z_m` — a ridge at height == a region's own base is a
+///   no-op for it (ridging to its own base collapses back to flat). So:
+///   - exactly ONE such slope-able neighbour → resolve to it deterministically
+///     (a mono-pitch drawn on the joint of an already-raised area slopes the
+///     LOWER neighbour, regardless of which side the line was drawn on);
+///   - ≥ 2 slope-able neighbours with no clear drawn side → [`RidgeSlopeSide::Ambiguous`].
 ///
 /// This keeps the claim/contain walks and the centroid/side math in the model
 /// layer; the shell only matches on the result.
@@ -1187,6 +1193,7 @@ pub fn resolve_ridge_slope_side(
     drawn_cross: Option<f32>,
     axis: ParameterAxis,
     coord_m: f32,
+    z_m: f64,
 ) -> RidgeSlopeSide {
     let mid = Point2f64::new((a.x + b.x) / 2.0, (a.y + b.y) / 2.0);
     // The drawn side as a plan point: the midpoint with its CROSS coordinate
@@ -1196,28 +1203,81 @@ pub fn resolve_ridge_slope_side(
         ParameterAxis::Y => (mid.x as f32, dc),
     });
     let claims = storey.ceilings.claim_regions(mid);
-    let drawn_inside = drawn_side.and_then(|(hx, hy)| {
+    let drawn_inside = |candidates: &[usize]| -> Option<usize> {
+        let (hx, hy) = drawn_side?;
         let hp = Point2f64::new(hx as f64, hy as f64);
         let r = storey.ceilings.region_strictly_containing(hp)?;
         let ri = storey.ceilings.regions.iter().position(|x| x.id == r.id)?;
-        claims.contains(&ri).then_some(ri)
-    });
-    if claims.len() >= 2 && drawn_inside.is_none() {
-        let options = claims
+        candidates.contains(&ri).then_some(ri)
+    };
+
+    // Junction ridge (≥ 2 claimants): choose among the neighbours the ridge can
+    // ACTUALLY slope — those whose flat height differs from z_m. A ridge at
+    // height == a region's own base does nothing to it, so it must be meant for
+    // the neighbour. This slopes the lower area deterministically instead of
+    // coin-flipping on the drawn side onto the no-op (already-raised) side.
+    if claims.len() >= 2 {
+        let sloped: Vec<usize> = claims
             .iter()
-            .map(|&ri| {
-                let inside = area_inside_point(&storey.ceilings.regions[ri], mid);
-                (area_side_label(axis, coord_m, inside), inside)
+            .copied()
+            .filter(|&ri| match storey.ceilings.regions[ri].flat_z() {
+                Some(fz) => (fz - z_m).abs() >= MIN_APEX_DELTA_M,
+                None => true, // already non-flat — the ridge would re-shape it
             })
             .collect();
-        return RidgeSlopeSide::Ambiguous(options);
+        // The set to pick among: the real slope targets if any, else all
+        // claimants (a degenerate all-no-op ridge keeps the prior behaviour).
+        let candidates: &[usize] = if sloped.is_empty() { &claims } else { &sloped };
+        if candidates.len() == 1 {
+            return RidgeSlopeSide::Resolved(Some(area_inside_point(
+                &storey.ceilings.regions[candidates[0]],
+                mid,
+            )));
+        }
+        return match drawn_inside(candidates) {
+            Some(ri) => {
+                RidgeSlopeSide::Resolved(Some(area_inside_point(&storey.ceilings.regions[ri], mid)))
+            }
+            None => RidgeSlopeSide::Ambiguous(
+                candidates
+                    .iter()
+                    .map(|&ri| {
+                        let inside = area_inside_point(&storey.ceilings.regions[ri], mid);
+                        (area_side_label(axis, coord_m, inside), inside)
+                    })
+                    .collect(),
+            ),
+        };
     }
-    // Unambiguous: the clearly-drawn area's interior, else the drawn side
-    // (harmless on an outline wall — single claimant), else no hint.
-    let chosen = drawn_inside
+
+    // Strict-interior ridge (single claimant): a full gable — the drawn side's
+    // hint if any (harmless on an outline wall), else no hint (both halves slope).
+    let chosen = drawn_inside(&claims)
         .map(|ri| area_inside_point(&storey.ceilings.regions[ri], mid))
         .or(drawn_side);
     RidgeSlopeSide::Resolved(chosen)
+}
+
+/// The height the "meet other edge" shortcut sets a boundary ridge to: the flat
+/// height of the RAISED neighbour it abuts, so the sloped (lower) area rises to
+/// meet that area's ceiling flush. `None` unless the ridge's midpoint sits on a
+/// shared boundary between two flat areas whose heights differ by ≥ 1 cm (i.e.
+/// there IS a raised edge to meet).
+pub fn ridge_meet_edge_height(storey: &Storey, a: Point2f64, b: Point2f64) -> Option<f64> {
+    let mid = Point2f64::new((a.x + b.x) / 2.0, (a.y + b.y) / 2.0);
+    let claims = storey.ceilings.claim_regions(mid);
+    if claims.len() < 2 {
+        return None;
+    }
+    let heights: Vec<f64> = claims
+        .iter()
+        .filter_map(|&ri| storey.ceilings.regions[ri].flat_z())
+        .collect();
+    let lo = heights.iter().copied().fold(f64::INFINITY, f64::min);
+    let hi = heights.iter().copied().fold(f64::NEG_INFINITY, f64::max);
+    // A genuine step: the highest neighbour must sit at least a centimetre above
+    // the lowest, else there's no raised edge to meet.
+    (hi - lo >= MIN_APEX_DELTA_M).then_some(hi)
 }
 
 #[cfg(test)]
@@ -1304,6 +1364,95 @@ mod tests {
             let err = validate_roof_apex(&storey, Point2f64::new(2.0, 2.0), z).unwrap_err();
             assert!(err.contains("positive"), "z = {z} got: {err}");
         }
+    }
+
+    /// A ridge drawn on the joint between an already-RAISED area (flat height ==
+    /// the ridge height) and a LOWER flat area resolves to the LOWER area — the
+    /// only one the ridge can actually slope. A ridge at height == a region's own
+    /// base is a no-op for it, so the resolver must ignore the drawn side and
+    /// pick the lower neighbour. (Regression: the apexes landed on the raised
+    /// neighbour, whose re-ridge collapsed back to flat — nothing sloped, and
+    /// `apex_groups` was empty.)
+    #[test]
+    fn boundary_ridge_slopes_the_lower_area_not_the_already_raised_one() {
+        let cid = Default::default();
+        let sq = |x0: f64, y0: f64, x1: f64, y1: f64| {
+            vec![
+                Point2f64::new(x0, y0),
+                Point2f64::new(x1, y0),
+                Point2f64::new(x1, y1),
+                Point2f64::new(x0, y1),
+            ]
+        };
+        // Lower area y0..2 at 2.4; raised area y2..5 at 3.4; shared joint y = 2.
+        let mut ceilings =
+            CeilingRegions::default_for_footprint(vec![sq(0.0, 0.0, 6.0, 2.0)], 2.4, cid);
+        ceilings.regions.extend(
+            CeilingRegions::default_for_footprint(vec![sq(0.0, 2.0, 6.0, 5.0)], 3.4, cid).regions,
+        );
+        let storey = Storey {
+            ceilings,
+            ceiling_height_m: Some(2.4),
+            ..Storey::default()
+        };
+
+        let a = Point2f64::new(0.0, 2.0);
+        let b = Point2f64::new(6.0, 2.0);
+        // Draw on the RAISED side (drawn_cross just above the joint) at the raised
+        // height (3.4): it must STILL resolve into the lower area.
+        match resolve_ridge_slope_side(&storey, a, b, Some(2.1), ParameterAxis::Y, 2.0, 3.4) {
+            RidgeSlopeSide::Resolved(Some((_, hy))) => assert!(
+                (hy as f64) < 2.0,
+                "hint sits inside the lower area (y < 2), got y = {hy}"
+            ),
+            RidgeSlopeSide::Resolved(None) => panic!("expected a lower-area hint, got no hint"),
+            RidgeSlopeSide::Ambiguous(_) => {
+                panic!("expected a deterministic resolve to the lower area, got Ambiguous")
+            }
+        }
+    }
+
+    /// `ridge_meet_edge_height` returns the RAISED neighbour's height for a
+    /// ridge on the joint of a stepped ceiling, and `None` when the two
+    /// neighbours are level (no raised edge to meet).
+    #[test]
+    fn meet_edge_height_is_the_raised_neighbours_ceiling() {
+        let cid = Default::default();
+        let sq = |x0: f64, y0: f64, x1: f64, y1: f64| {
+            vec![
+                Point2f64::new(x0, y0),
+                Point2f64::new(x1, y0),
+                Point2f64::new(x1, y1),
+                Point2f64::new(x0, y1),
+            ]
+        };
+        let stepped = |raised: f64| {
+            let mut c =
+                CeilingRegions::default_for_footprint(vec![sq(0.0, 0.0, 6.0, 2.0)], 2.4, cid);
+            c.regions.extend(
+                CeilingRegions::default_for_footprint(vec![sq(0.0, 2.0, 6.0, 5.0)], raised, cid)
+                    .regions,
+            );
+            Storey {
+                ceilings: c,
+                ceiling_height_m: Some(2.4),
+                ..Storey::default()
+            }
+        };
+        let a = Point2f64::new(0.0, 2.0);
+        let b = Point2f64::new(6.0, 2.0);
+        // Raised neighbour at 3.4 → meet it.
+        assert_eq!(
+            ridge_meet_edge_height(&stepped(3.4), a, b),
+            Some(3.4),
+            "meet the raised neighbour"
+        );
+        // Level neighbours (both 2.4) → nothing to meet.
+        assert_eq!(
+            ridge_meet_edge_height(&stepped(2.4), a, b),
+            None,
+            "no raised edge → no meet height"
+        );
     }
 
     /// Strict containment: a point on a region boundary, outside every region,

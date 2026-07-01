@@ -336,6 +336,9 @@ pub enum SketchEvent {
     /// start): apply the computed centre-it-within-its-ceiling-area value
     /// through the same path as a typed distance.
     CentreRoofPosition,
+    /// The 'Meet other edge' button on the ridge HEIGHT stage: set the ridge to
+    /// the raised neighbour's ceiling height so the sloped area meets it flush.
+    MeetOtherEdgeRidgeHeight,
     /// User entered a SIDE LENGTH (metres) for the pending roof RECT's open
     /// length stage (LenX, then LenY — the closed-stroke flat-top flow).
     AssignCeilingRectLength(f32),
@@ -943,6 +946,10 @@ pub struct SketchView<'a> {
     /// — the panel's "from the highlighted end" hover shows only then.
     pub ceiling_ridge_length_anchored: bool,
     pub ceiling_ridge_height_pending: bool,
+    /// On the ridge HEIGHT stage, the raised neighbour's ceiling height when the
+    /// ridge abuts one (drives the 'Meet other edge' button + its value); `None`
+    /// otherwise, so the button is hidden.
+    pub ceiling_ridge_meet_edge_height: Option<f32>,
     pub ceiling_ridge_pending: bool,
     /// When the placed ridge sits on an internal area boundary: the labels of
     /// the areas to choose between (which one slopes). Empty otherwise.
