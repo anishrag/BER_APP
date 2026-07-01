@@ -15,6 +15,7 @@
 //! the shell — undo, persistence, UI prompts — stay on `AppController` and call
 //! in here.
 
+mod ceiling_point;
 mod ceiling_step;
 mod debug;
 mod dimensioning;
@@ -24,11 +25,16 @@ mod load;
 mod phase;
 mod position;
 mod resolve;
-mod ceiling_point;
 mod step;
 mod wall_partition;
 mod windows;
 
+pub use ceiling_point::{
+    centred_rect_lo, centred_ridge_cross, centred_ridge_start, resolve_ridge_slope_side,
+    ridge_region_ring, validate_roof_apex, validate_roof_rect_length, validate_roof_rect_placement,
+    validate_roof_rect_ridge, validate_roof_ridge, validate_roof_ridge_extent,
+    validate_roof_ridge_length, RidgeSlopeSide,
+};
 pub use ceiling_step::{
     canonicalize_ceiling_steps, ceiling_line_coords, region_line_coords, CeilingStepRegion,
     LinePositionOption, LinePositionPrompt, LineSide,
@@ -47,13 +53,8 @@ pub use phase::{
 };
 pub use position::{PositionOption, PositionPrompt, PositionPromptKind};
 pub use resolve::{
-    ensure_storey_constructions, opening_wall_anchor, resolve_storey, stamp_horizontal_exposure,
-};
-pub use ceiling_point::{
-    centred_rect_lo, centred_ridge_cross, centred_ridge_start, resolve_ridge_slope_side,
-    ridge_region_ring, validate_roof_apex, validate_roof_rect_length, validate_roof_rect_placement,
-    validate_roof_rect_ridge, validate_roof_ridge, validate_roof_ridge_extent,
-    validate_roof_ridge_length, RidgeSlopeSide,
+    ensure_storey_constructions, opening_wall_anchor, resolve_storey, resolve_wall_anchor,
+    stamp_horizontal_exposure,
 };
 pub use step::{inherited_step_regions, step_regions_from_floors, StepRegion};
 pub use windows::windows_complete;

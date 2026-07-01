@@ -9019,6 +9019,103 @@ fn place_window_via_controller_persists_and_undoes() {
     );
 }
 
+/// Regression (window/opening placement): the wall + ceiling region ids re-mint
+/// on every resolve, so if a revision bump lands BETWEEN the tap (host pick) and
+/// the confirm — e.g. attaching a photo in the details box calls `mark_dirty` —
+/// the confirm's `materialize` re-resolves and the tap-time `wall_id` dangles.
+/// The pending WALL target now carries a durable anchor and re-derives the live
+/// id at confirm; before the fix this errored `NoHostRegion`.
+#[test]
+fn wall_window_survives_id_remint_between_tap_and_confirm() {
+    use super::openings::PendingOpeningTarget;
+    use ber_model::ber::fenestration::{Frame, Glazing, OpeningPlacement};
+    let mut c = dimensioned_square_controller();
+    c.materialize();
+    c.select_opening_tool(OpeningToolKind::Window);
+    // Tap 0.2 m outside the bottom wall (y=0) at x=5 → picks it + captures the
+    // durable parametric anchor.
+    c.openings_pointer_down(5.0, -0.2, 0.5);
+    assert!(c.pending_opening_prompt().is_some(), "a wall was picked");
+    match c.pending_opening.as_ref().map(|p| p.target) {
+        Some(PendingOpeningTarget::Wall { anchor, .. }) => {
+            assert!(anchor.is_some(), "the tap captured a durable wall anchor")
+        }
+        other => panic!("expected a pending wall target, got {other:?}"),
+    }
+    // Simulate attaching a photo in the details box: bumps the revision so the
+    // confirm's `materialize` re-resolves and RE-MINTS every wall id.
+    c.mark_dirty().unwrap();
+    // Confirm: without the anchor re-home this errors NoHostRegion.
+    c.place_pending_window(1.0, 1.2, 1.0, Glazing::Double, Frame::WoodUPVC, 2010)
+        .expect("window still places on the re-minted wall");
+    c.materialize();
+    let ber = &c.current_record.as_ref().unwrap().data;
+    assert_eq!(ber.storeys[0].windows.len(), 1, "window added");
+    // It landed on a LIVE wall region (its host id is present) which is the
+    // bottom edge (y≈0), and the wall's opes link back to it.
+    let host = match &ber.storeys[0].windows[0].placement {
+        Some(OpeningPlacement::Wall { wall_id, .. }) => *wall_id,
+        other => panic!("expected a wall placement, got {other:?}"),
+    };
+    let wall = ber.storeys[0]
+        .walls
+        .regions
+        .iter()
+        .find(|r| r.id == host)
+        .expect("placement points at a LIVE wall region");
+    assert!(
+        wall.opes.windows.contains(&ber.storeys[0].windows[0].id),
+        "opes linked to the live wall"
+    );
+    let (origin, _, _, _) = wall.base_frame().unwrap();
+    assert!(
+        origin.y.abs() < 0.2,
+        "landed on the bottom wall (y≈0), got y={}",
+        origin.y
+    );
+}
+
+/// Roof twin of the above: a roof window's pending target stores the world plan
+/// point, so a revision bump between tap and confirm (photo attach → re-mint of
+/// ceiling region ids) is survived by re-running the region pick from that point
+/// at confirm instead of trusting the tap-time `region_id`.
+#[test]
+fn roof_window_survives_id_remint_between_tap_and_confirm() {
+    use ber_model::ber::fenestration::{Frame, Glazing, OpeningPlacement};
+    let mut c = dimensioned_square_controller();
+    // The roof (ceiling) region only resolves once a ceiling height is set.
+    c.set_default_ceiling_height(2.4).unwrap();
+    c.materialize();
+    c.select_opening_tool(OpeningToolKind::RoofWindow);
+    // Tap inside the ceiling region (centre of the 10×10 storey).
+    c.openings_pointer_down(5.0, 5.0, 0.5);
+    assert!(
+        c.pending_opening_prompt().is_some(),
+        "a roof region was picked"
+    );
+    // Re-mint the ceiling region ids under the pending target.
+    c.mark_dirty().unwrap();
+    c.place_pending_window(1.0, 1.0, 0.0, Glazing::Double, Frame::WoodUPVC, 2010)
+        .expect("roof window still places on the re-minted region");
+    c.materialize();
+    let ber = &c.current_record.as_ref().unwrap().data;
+    assert_eq!(ber.storeys[0].windows.len(), 1, "roof window added");
+    let region = match &ber.storeys[0].windows[0].placement {
+        Some(OpeningPlacement::Roof {
+            ceiling_region_id, ..
+        }) => *ceiling_region_id,
+        other => panic!("expected a roof placement, got {other:?}"),
+    };
+    assert!(
+        ber.storeys[0]
+            .ceilings
+            .regions
+            .iter()
+            .any(|r| r.id == region),
+        "placement points at a LIVE ceiling region"
+    );
+}
+
 /// The multi-field placement (toolbar tool → tap → floating box with Width +
 /// Height): selecting the tool enters openings mode, the tap stages the host and
 /// asks for both measurements at once, and `place_opening` lands a window with a

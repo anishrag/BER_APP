@@ -197,7 +197,8 @@ mod tests {
                 .collect::<Vec<_>>(),
             step.delta_m,
         )];
-        ber.storeys[0].ceilings = std::mem::take(&mut ber.storeys[0].ceilings).with_z_deltas(&areas);
+        ber.storeys[0].ceilings =
+            std::mem::take(&mut ber.storeys[0].ceilings).with_z_deltas(&areas);
         let seeded = inherited_step_regions(&ber.storeys[0], &footprint);
         assert_eq!(seeded.len(), 1, "one proud piece");
         assert!((seeded[0].level_m - 0.3).abs() < 1e-6, "z − anchor");
@@ -248,7 +249,8 @@ mod tests {
                 .collect::<Vec<_>>(),
             step.delta_m,
         )];
-        ber.storeys[0].ceilings = std::mem::take(&mut ber.storeys[0].ceilings).with_z_deltas(&areas);
+        ber.storeys[0].ceilings =
+            std::mem::take(&mut ber.storeys[0].ceilings).with_z_deltas(&areas);
 
         // SUGGEST: take a two-level candidate (it spans both ceiling pieces).
         let suggestions = suggest_storey_outlines(&ber.storeys[0], 6);

@@ -678,30 +678,12 @@ fn reanchor_openings(s: &StoreyDoc, storey: &mut Storey, previous: &WallRegions)
     use ber_model::ber::common::ItemId;
     use ber_model::ber::fenestration::{OpeningPlacement, WallAnchor};
 
-    const TOL_M: f64 = 0.05;
     let plan = &s.outline.floor_plan;
     let walls = &storey.walls;
 
     // The live wall region whose base CONTAINS world point `p`, plus the centre
     // distance along it — picks the correct sub-wall after a structure split.
-    let host_at = |p: Point2f64| -> Option<(ItemId, f32)> {
-        let mut best: Option<(f64, ItemId, f32)> = None;
-        for r in &walls.regions {
-            let Some((origin, (ux, uy), wlen, _)) = r.base_frame() else {
-                continue;
-            };
-            let t = (p.x - origin.x) * ux + (p.y - origin.y) * uy;
-            if t < -TOL_M || t > wlen + TOL_M {
-                continue;
-            }
-            let (px, py) = (origin.x + ux * t, origin.y + uy * t);
-            let d = ((p.x - px).powi(2) + (p.y - py).powi(2)).sqrt();
-            if d <= TOL_M && best.is_none_or(|(bd, _, _)| d < bd) {
-                best = Some((d, r.id, t.clamp(0.0, wlen) as f32));
-            }
-        }
-        best.map(|(_, id, along)| (id, along))
-    };
+    let host_at = |p: Point2f64| -> Option<(ItemId, f32)> { host_wall_at(walls, p) };
 
     // (anchor-to-set, (wall_id, along_m)-to-set) for one opening.
     let compute = |placement: &Option<OpeningPlacement>,
@@ -796,6 +778,48 @@ pub fn opening_wall_anchor(
         wall: sref,
         along_fraction: frac,
     })
+}
+
+/// The live wall region whose base CONTAINS world point `p`, plus the centre
+/// distance along it — picks the correct sub-wall after a structure split.
+/// Shared by [`reanchor_openings`] and [`resolve_wall_anchor`].
+fn host_wall_at(walls: &WallRegions, p: Point2f64) -> Option<(ItemId, f32)> {
+    const TOL_M: f64 = 0.05;
+    let mut best: Option<(f64, ItemId, f32)> = None;
+    for r in &walls.regions {
+        let Some((origin, (ux, uy), wlen, _)) = r.base_frame() else {
+            continue;
+        };
+        let t = (p.x - origin.x) * ux + (p.y - origin.y) * uy;
+        if t < -TOL_M || t > wlen + TOL_M {
+            continue;
+        }
+        let (px, py) = (origin.x + ux * t, origin.y + uy * t);
+        let d = ((p.x - px).powi(2) + (p.y - py).powi(2)).sqrt();
+        if d <= TOL_M && best.is_none_or(|(bd, _, _)| d < bd) {
+            best = Some((d, r.id, t.clamp(0.0, wlen) as f32));
+        }
+    }
+    best.map(|(_, id, along)| (id, along))
+}
+
+/// Re-derive the LIVE `(wall_id, along_m)` for a wall opening from its durable
+/// [`WallAnchor`] against a freshly-resolved storey's `walls` + outline `plan`.
+/// This is the exact lookup [`reanchor_openings`] performs (the centre at the
+/// anchor's parent-relative fraction, then the sub-wall containing it), exposed
+/// so the controller can re-home a PENDING placement at confirm time without
+/// trusting the tap-time `wall_id` (re-minted on every resolve). `None` if the
+/// anchor's wall or its point can't be placed on the current plan.
+pub fn resolve_wall_anchor(
+    plan: &manip_plan::FloorPlan,
+    walls: &WallRegions,
+    anchor: &ber_model::ber::fenestration::WallAnchor,
+) -> Option<(ItemId, f32)> {
+    let centre = anchor
+        .wall
+        .wall_start()
+        .and_then(|st| plan.wall_point_at_fraction(st, anchor.along_fraction))?;
+    host_wall_at(walls, Point2f64::new(centre.x as f64, centre.y as f64))
 }
 
 #[cfg(test)]
@@ -1089,7 +1113,11 @@ mod tests {
             Point2f64::new(0.0, 4.0),
         ]];
         let storey = resolve_storey_t(&doc, &mut ber, 0, &[], &[], &[]);
-        assert_eq!(storey.ceilings.regions.len(), 2, "the cut split the ceiling");
+        assert_eq!(
+            storey.ceilings.regions.len(),
+            2,
+            "the cut split the ceiling"
+        );
         assert!(
             storey
                 .ceilings
@@ -1100,7 +1128,11 @@ mod tests {
         );
         ber.storeys[0] = storey;
         let storey2 = resolve_storey(&doc, &ber, 0, &[], &[], &[]);
-        assert_eq!(storey2.ceilings.regions.len(), 2, "split survives re-resolve");
+        assert_eq!(
+            storey2.ceilings.regions.len(),
+            2,
+            "split survives re-resolve"
+        );
     }
 
     /// An L-shaped storey split into two phase zones whose divider edge ENDS at a
@@ -1190,7 +1222,15 @@ mod tests {
             "both halves stay flat at the ceiling height"
         );
         assert!(
-            (storey.ceilings.regions.iter().map(ceiling_plan_area).sum::<f64>() - 16.0).abs() < 1e-4,
+            (storey
+                .ceilings
+                .regions
+                .iter()
+                .map(ceiling_plan_area)
+                .sum::<f64>()
+                - 16.0)
+                .abs()
+                < 1e-4,
             "plan area conserved"
         );
         // The floor partition still happened alongside the roof carve.
@@ -1309,7 +1349,9 @@ mod tests {
         );
         let after: Vec<f64> = probes
             .iter()
-            .map(|&(x, y)| ceiling_z_at(&ber.storeys[0], x, y).expect("probe still inside a region"))
+            .map(|&(x, y)| {
+                ceiling_z_at(&ber.storeys[0], x, y).expect("probe still inside a region")
+            })
             .collect();
         for ((x, y), (b, a)) in probes.iter().zip(before.iter().zip(&after)) {
             assert!(
@@ -2608,7 +2650,11 @@ mod tests {
         ber.set_default_ceiling_height(Some(0), 2.7);
         let storey = resolve_storey(&doc, &ber, 0, &[], &[], &[]);
 
-        assert_eq!(storey.ceilings.regions.len(), 1, "one region per outline ring");
+        assert_eq!(
+            storey.ceilings.regions.len(),
+            1,
+            "one region per outline ring"
+        );
         let roof = &storey.ceilings.regions[0];
         assert_eq!(roof.polygon.exterior.len(), 4);
         assert!(roof
@@ -2891,7 +2937,10 @@ mod tests {
         let storey = resolve_storey_t(&doc, &mut ber, 0, &[], &[], &[step]);
 
         assert_eq!(storey.ceilings.regions.len(), 2);
-        assert!((ceiling_area_at(&storey, 2.4) - 4.0).abs() < 1e-6, "left 1×4");
+        assert!(
+            (ceiling_area_at(&storey, 2.4) - 4.0).abs() < 1e-6,
+            "left 1×4"
+        );
         assert!(
             (ceiling_area_at(&storey, 2.7) - 12.0).abs() < 1e-6,
             "right 3×4"
@@ -3042,7 +3091,10 @@ mod tests {
             z_m: 4.0,
         }];
         let storey = resolve_storey(&doc, &ber, 0, &[], &[], &[]);
-        assert!(storey.ceilings.regions.is_empty(), "no height → no ceilings");
+        assert!(
+            storey.ceilings.regions.is_empty(),
+            "no height → no ceilings"
+        );
         assert!(storey.walls.regions.iter().all(|r| r
             .polygon
             .exterior
@@ -3061,7 +3113,11 @@ mod tests {
             z_m: 4.0,
         }];
         let storey = resolve_storey(&doc, &ber, 0, &[], &[], &[]);
-        assert_eq!(storey.ceilings.regions.len(), 1, "flat — the fan is dormant");
+        assert_eq!(
+            storey.ceilings.regions.len(),
+            1,
+            "flat — the fan is dormant"
+        );
         assert!((ceiling_area_at(&storey, 2.4) - 16.0).abs() < 1e-6);
         assert_eq!(storey.ceiling_apexes.len(), 1, "the apex is kept");
     }

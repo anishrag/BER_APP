@@ -46,7 +46,7 @@
 
 use crate::StoreyDoc;
 use ber_model::ber::structural::{
-    rect_hip_switches, ridge_hub_switches, CeilingRegion, CeilingApex, CeilingApexGroup, Storey,
+    rect_hip_switches, ridge_hub_switches, CeilingApex, CeilingApexGroup, CeilingRegion, Storey,
     APEX_BOUNDARY_EPS_M,
 };
 use domain::points::{to_f32, Point2f32, Point2f64};
@@ -265,7 +265,9 @@ fn check_group_ridge(
         }
         Some(_) => Ok(()),
         None => {
-            log::warn!("ceiling apex group has no merged ring — skipping the ridge hub-switch check");
+            log::warn!(
+                "ceiling apex group has no merged ring — skipping the ridge hub-switch check"
+            );
             Ok(())
         }
     }
@@ -1222,7 +1224,9 @@ pub fn resolve_ridge_slope_side(
 mod tests {
     use super::*;
     use crate::{DimensionState, ShapeSlot};
-    use ber_model::ber::structural::{CeilingRegion, CeilingRegions, Polygon3D, CeilingApex, Storey};
+    use ber_model::ber::structural::{
+        CeilingApex, CeilingRegion, CeilingRegions, Polygon3D, Storey,
+    };
     use domain::points::Point3f64;
     use manip_plan::FloorPlan;
 

@@ -5,7 +5,7 @@
 //! ber_model ops; this only sequences them.
 use super::*;
 use ber_model::ber::common::{ItemId, Photo};
-use ber_model::ber::fenestration::{DoorKind, Frame, Glazing, Overshading};
+use ber_model::ber::fenestration::{DoorKind, Frame, Glazing, Overshading, WallAnchor};
 use ber_model::ber::openings::{self, DoorSidelightsSpec, OpeningError, OpeningRef};
 
 /// Which opening the toolbar places next (or `Edit` to open an elevation).
@@ -24,10 +24,22 @@ pub enum OpeningToolKind {
 }
 
 /// The host a pending placement landed on (awaiting size + type entry).
-#[derive(Clone, Copy)]
+#[derive(Debug, Clone, Copy)]
 pub(super) enum PendingOpeningTarget {
-    Wall { wall_id: ItemId, along_m: f32 },
-    Roof { region_id: ItemId, plan: (f32, f32) },
+    /// A wall pick. `wall_id`/`along_m` are the TAP-TIME cache; `anchor` is the
+    /// durable parametric location captured at tap. Wall + ceiling ids are
+    /// re-minted on every resolve (attaching a photo re-resolves), so at confirm
+    /// the live `(wall_id, along_m)` is re-derived from `anchor` — trusting the
+    /// stale tap-time id would dangle and error `NoHostRegion`.
+    Wall {
+        wall_id: ItemId,
+        along_m: f32,
+        anchor: Option<WallAnchor>,
+    },
+    Roof {
+        region_id: ItemId,
+        plan: (f32, f32),
+    },
 }
 
 #[derive(Clone, Copy)]
@@ -315,7 +327,15 @@ impl AppController {
                 self.confirm_delete = false;
             }
             Pick::Wall(wall_id, along_m) => {
-                let target = PendingOpeningTarget::Wall { wall_id, along_m };
+                // Capture the DURABLE parametric anchor now — the tap-time
+                // `wall_id` re-mints on the next resolve (e.g. attaching a photo
+                // re-resolves), so confirm re-derives the live id from `anchor`.
+                let anchor = self.pending_wall_anchor(idx, wall_id, along_m);
+                let target = PendingOpeningTarget::Wall {
+                    wall_id,
+                    along_m,
+                    anchor,
+                };
                 self.pending_opening = Some(PendingOpening { tool, target });
                 self.opening_dim_error = None;
                 self.placement_seq = self.placement_seq.wrapping_add(1);
@@ -327,6 +347,61 @@ impl AppController {
                 self.placement_seq = self.placement_seq.wrapping_add(1);
             }
             Pick::None => {}
+        }
+    }
+
+    /// The durable [`WallAnchor`] for a tap on wall `wall_id` at `along_m`, from
+    /// the live storey's outline plan — the same anchor `reseed_opening_anchors`
+    /// stamps onto placed openings, so the confirm re-home matches. `None` when
+    /// the tap point isn't on the outline perimeter (e.g. a riser wall); the
+    /// pending target then falls back to the tap-time id at confirm.
+    fn pending_wall_anchor(&self, idx: usize, wall_id: ItemId, along_m: f32) -> Option<WallAnchor> {
+        let storey = self.current_record.as_ref()?.data.storeys.get(idx)?;
+        let plan = &self.document.storeys.get(idx)?.outline.floor_plan;
+        let wall = storey.walls.regions.iter().find(|r| r.id == wall_id)?;
+        document::opening_wall_anchor(plan, wall, along_m)
+    }
+
+    /// Re-home a pending placement's target against the FRESHLY-RESOLVED storey
+    /// (call after `materialize`, which re-mints wall + ceiling ids). A Wall
+    /// target's `(wall_id, along_m)` is re-derived from its durable anchor; a
+    /// Roof target's `region_id` is re-derived from the stored plan point. Both
+    /// fall back to the stored ids when re-derivation fails, so a placement that
+    /// never churned still lands. All the anchor math lives in `document`.
+    fn rehome_pending_target(
+        &self,
+        idx: usize,
+        target: PendingOpeningTarget,
+    ) -> PendingOpeningTarget {
+        match target {
+            PendingOpeningTarget::Wall {
+                wall_id,
+                along_m,
+                anchor,
+            } => {
+                let (wall_id, along_m) = anchor
+                    .and_then(|a| {
+                        let storey = self.current_record.as_ref()?.data.storeys.get(idx)?;
+                        let plan = &self.document.storeys.get(idx)?.outline.floor_plan;
+                        document::resolve_wall_anchor(plan, &storey.walls, &a)
+                    })
+                    .unwrap_or((wall_id, along_m));
+                PendingOpeningTarget::Wall {
+                    wall_id,
+                    along_m,
+                    anchor,
+                }
+            }
+            PendingOpeningTarget::Roof { region_id, plan } => {
+                let region_id = self
+                    .current_record
+                    .as_ref()
+                    .and_then(|r| r.data.storeys.get(idx))
+                    .and_then(|s| openings::pick_roof_region(s, plan.0 as f64, plan.1 as f64))
+                    .map(|(id, _)| id)
+                    .unwrap_or(region_id);
+                PendingOpeningTarget::Roof { region_id, plan }
+            }
         }
     }
 
@@ -402,14 +477,22 @@ impl AppController {
         let Some(pending) = self.pending_opening.take() else {
             return Ok(());
         };
-        let PendingOpeningTarget::Wall { wall_id, along_m } = pending.target else {
+        if !matches!(pending.target, PendingOpeningTarget::Wall { .. }) {
             self.pending_opening = Some(pending);
             return Ok(()); // walls only
-        };
+        }
         let Some(idx) = self.current_storey_idx else {
             return Ok(());
         };
         self.materialize();
+        // Re-derive the live wall id from the durable anchor (resolve re-mints).
+        let PendingOpeningTarget::Wall {
+            wall_id, along_m, ..
+        } = self.rehome_pending_target(idx, pending.target)
+        else {
+            self.pending_opening = Some(pending);
+            return Ok(());
+        };
         let undo_snap = self.current_history_snapshot();
         // Face height = top_z − base at the tap. `max_sill_for(along, 0)` is
         // exactly that (public), avoiding the crate-private `top_z_at_along`.
@@ -542,6 +625,10 @@ impl AppController {
             return Ok(());
         };
         self.materialize();
+        // Re-home the target against the just-resolved storey (resolve re-mints
+        // wall + ceiling ids), so the ops below hit the LIVE host, not the stale
+        // tap-time id (which would error `NoHostRegion`).
+        let target = self.rehome_pending_target(idx, pending.target);
         let undo_snap = self.current_history_snapshot();
         // Store the picked photos into the photo store up front (needs `&self`,
         // before the mutable record borrow below); attached to the new window(s).
@@ -563,22 +650,27 @@ impl AppController {
         // this placement appends (one window, or several for door+sidelights).
         let windows_before = record.data.storeys[idx].windows.len();
         let storey = &mut record.data.storeys[idx];
-        let result: Result<(), OpeningError> = match (pending.tool, pending.target) {
-            (OpeningToolKind::Window, PendingOpeningTarget::Wall { wall_id, along_m }) => {
-                openings::add_wall_window(
-                    storey,
-                    wall_id,
-                    along_m,
-                    width_m,
-                    height_m,
-                    DEFAULT_SILL_M,
-                    type_id,
-                )
-                .map(|_| ())
-            }
+        let result: Result<(), OpeningError> = match (pending.tool, target) {
+            (
+                OpeningToolKind::Window,
+                PendingOpeningTarget::Wall {
+                    wall_id, along_m, ..
+                },
+            ) => openings::add_wall_window(
+                storey,
+                wall_id,
+                along_m,
+                width_m,
+                height_m,
+                DEFAULT_SILL_M,
+                type_id,
+            )
+            .map(|_| ()),
             (
                 OpeningToolKind::MultiStoreyWindow,
-                PendingOpeningTarget::Wall { wall_id, along_m },
+                PendingOpeningTarget::Wall {
+                    wall_id, along_m, ..
+                },
             ) => openings::add_multi_storey_window(
                 storey,
                 wall_id,
@@ -593,39 +685,45 @@ impl AppController {
                 openings::add_roof_window(storey, region_id, plan, width_m, height_m, type_id)
                     .map(|_| ())
             }
-            (OpeningToolKind::Door, PendingOpeningTarget::Wall { wall_id, along_m }) => {
-                openings::add_wall_door(
-                    storey,
-                    wall_id,
-                    along_m,
-                    width_m,
-                    height_m,
-                    DoorKind::Solid,
-                    "Door".to_string(),
-                    openings::DEFAULT_DOOR_SILL_M,
-                )
-                .map(|_| ())
-            }
-            (OpeningToolKind::DoorSidelights, PendingOpeningTarget::Wall { wall_id, along_m }) => {
-                openings::compose_door_sidelights(
-                    storey,
-                    wall_id,
-                    along_m,
-                    DoorSidelightsSpec {
-                        door_width_m: width_m,
-                        door_height_m: height_m,
-                        left_sidelight_m: left,
-                        right_sidelight_m: right,
-                        left_sill_m: left_sill,
-                        right_sill_m: right_sill,
-                        transom_m: transom,
-                        transom_semicircular,
-                        window_type_id: type_id,
-                        door_type_name: "Door".to_string(),
-                    },
-                )
-                .map(|_| ())
-            }
+            (
+                OpeningToolKind::Door,
+                PendingOpeningTarget::Wall {
+                    wall_id, along_m, ..
+                },
+            ) => openings::add_wall_door(
+                storey,
+                wall_id,
+                along_m,
+                width_m,
+                height_m,
+                DoorKind::Solid,
+                "Door".to_string(),
+                openings::DEFAULT_DOOR_SILL_M,
+            )
+            .map(|_| ()),
+            (
+                OpeningToolKind::DoorSidelights,
+                PendingOpeningTarget::Wall {
+                    wall_id, along_m, ..
+                },
+            ) => openings::compose_door_sidelights(
+                storey,
+                wall_id,
+                along_m,
+                DoorSidelightsSpec {
+                    door_width_m: width_m,
+                    door_height_m: height_m,
+                    left_sidelight_m: left,
+                    right_sidelight_m: right,
+                    left_sill_m: left_sill,
+                    right_sill_m: right_sill,
+                    transom_m: transom,
+                    transom_semicircular,
+                    window_type_id: type_id,
+                    door_type_name: "Door".to_string(),
+                },
+            )
+            .map(|_| ()),
             _ => return Ok(()), // tool/target mismatch — nothing to place
         };
         if result.is_ok() {
@@ -675,14 +773,22 @@ impl AppController {
         let Some(pending) = self.pending_opening.take() else {
             return Ok(());
         };
-        let PendingOpeningTarget::Wall { wall_id, along_m } = pending.target else {
+        if !matches!(pending.target, PendingOpeningTarget::Wall { .. }) {
             self.pending_opening = Some(pending);
             return Ok(());
-        };
+        }
         let Some(idx) = self.current_storey_idx else {
             return Ok(());
         };
         self.materialize();
+        // Re-derive the live wall id from the durable anchor (resolve re-mints).
+        let PendingOpeningTarget::Wall {
+            wall_id, along_m, ..
+        } = self.rehome_pending_target(idx, pending.target)
+        else {
+            self.pending_opening = Some(pending);
+            return Ok(());
+        };
         let undo_snap = self.current_history_snapshot();
         let stored_photos: Vec<Photo> = photos
             .iter()
@@ -752,6 +858,9 @@ impl AppController {
             return Ok(());
         };
         self.materialize();
+        // Re-derive the live host from the durable anchor / plan point (resolve
+        // re-mints wall + ceiling ids), so the ops below hit the LIVE host.
+        let target = self.rehome_pending_target(idx, pending.target);
         let undo_snap = self.current_history_snapshot();
         let Some(record) = self.current_record.as_mut() else {
             return Ok(());
@@ -760,7 +869,7 @@ impl AppController {
             .data
             .ensure_window_type(glazing, frame, year, false, Vec::new(), None);
         let storey = &mut record.data.storeys[idx];
-        let result = match pending.target {
+        let result = match target {
             PendingOpeningTarget::Wall {
                 wall_id, along_m, ..
             } if pending.tool == OpeningToolKind::MultiStoreyWindow => {
@@ -788,13 +897,17 @@ impl AppController {
         let Some(idx) = self.current_storey_idx else {
             return Ok(());
         };
+        if !matches!(pending.target, PendingOpeningTarget::Wall { .. }) {
+            return Ok(()); // doors only go on walls
+        }
+        self.materialize();
+        // Re-derive the live wall id from the durable anchor (resolve re-mints).
         let PendingOpeningTarget::Wall {
             wall_id, along_m, ..
-        } = pending.target
+        } = self.rehome_pending_target(idx, pending.target)
         else {
-            return Ok(()); // doors only go on walls
+            return Ok(());
         };
-        self.materialize();
         let undo_snap = self.current_history_snapshot();
         let Some(record) = self.current_record.as_mut() else {
             return Ok(());
@@ -832,13 +945,17 @@ impl AppController {
         let Some(idx) = self.current_storey_idx else {
             return Ok(());
         };
+        if !matches!(pending.target, PendingOpeningTarget::Wall { .. }) {
+            return Ok(());
+        }
+        self.materialize();
+        // Re-derive the live wall id from the durable anchor (resolve re-mints).
         let PendingOpeningTarget::Wall {
             wall_id, along_m, ..
-        } = pending.target
+        } = self.rehome_pending_target(idx, pending.target)
         else {
             return Ok(());
         };
-        self.materialize();
         let undo_snap = self.current_history_snapshot();
         let Some(record) = self.current_record.as_mut() else {
             return Ok(());

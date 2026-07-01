@@ -126,7 +126,7 @@ pub fn debug_dump_storey(storey: &Storey, label: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ber_model::ber::structural::{CeilingRegions, FloorRegions, CeilingApex};
+    use ber_model::ber::structural::{CeilingApex, CeilingRegions, FloorRegions};
     use domain::points::Point2f64;
 
     /// The dump is stable + greppable: header/footer with the label, one
@@ -148,8 +148,9 @@ mod tests {
             }],
             ..Storey::default()
         };
-        storey.ceilings = CeilingRegions::default_for_footprint(vec![square], 2.4, Default::default())
-            .with_apexes(&storey.ceiling_apexes);
+        storey.ceilings =
+            CeilingRegions::default_for_footprint(vec![square], 2.4, Default::default())
+                .with_apexes(&storey.ceiling_apexes);
 
         let dump = debug_dump_storey(&storey, "GF");
         assert!(dump.starts_with("=== STOREY DUMP[GF] ===\n"));
