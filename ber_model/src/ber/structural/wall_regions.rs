@@ -181,13 +181,23 @@ impl WallRegion {
         let Some((origin, (ux, uy), _len, _base_z)) = self.base_frame() else {
             return Vec::new();
         };
-        self.polygon.exterior[self.top_start_index()..]
+        let mut prof: Vec<(f32, f32)> = self.polygon.exterior[self.top_start_index()..]
             .iter()
             .map(|v| {
                 let along = (v.x - origin.x) * ux + (v.y - origin.y) * uy;
                 (along as f32, v.z as f32)
             })
-            .collect()
+            .collect();
+        // If the top polyline doesn't return to above `a` (along ≈ 0), its
+        // CLOSING edge back to `exterior[0]` (`a`) is part of the top boundary —
+        // a ceiling RISER whose base sits at a step and whose top slopes DOWN to
+        // `a`. (A normal floor wall has a top vertex directly above `a`, so it
+        // already ends at along 0 and needs nothing.) Append `a` at along 0 so
+        // that sloped face is drawn (and measured by `top_z_at_along`).
+        if prof.last().is_some_and(|&(along, _)| along.abs() > 1e-3) {
+            prof.push((0.0, self.polygon.exterior[0].z as f32));
+        }
+        prof
     }
 
     /// The top-profile z directly above the base point at along-distance `d`
@@ -206,10 +216,16 @@ impl WallRegion {
         if e.len() <= k {
             return base_z;
         }
-        let tops: Vec<(f64, f64)> = e[k..]
+        let mut tops: Vec<(f64, f64)> = e[k..]
             .iter()
             .map(|v| ((v.x - origin.x) * ux + (v.y - origin.y) * uy, v.z))
             .collect();
+        // Close a ceiling-riser's sloped top back down to `a` (along 0) — the
+        // same wrap `top_profile` draws, so an opening near `a` clamps under the
+        // slope, not the flat top above it.
+        if tops.last().is_some_and(|&(along, _)| along.abs() > 1e-9) {
+            tops.push((0.0, e[0].z));
+        }
         let mut best: Option<f64> = None;
         for w in tops.windows(2) {
             let ((a0, z0), (a1, z1)) = (w[0], w[1]);

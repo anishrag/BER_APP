@@ -2945,6 +2945,45 @@ mod tests {
         (regions, front_id)
     }
 
+    /// A ceiling RISER whose base sits at a step (z=2.0) and whose top slopes
+    /// DOWN to `a` — like the riser between a sloped ceiling and its lower
+    /// neighbour. Its `top_profile` must include the closing slope edge back to
+    /// `a` (along 0, base z), so the sloped face is drawn in the elevation and an
+    /// opening under it clamps to the slope. (Regression: `top_profile` dropped
+    /// that closing edge, so the elevation showed only the flat step part.)
+    #[test]
+    fn sloped_ceiling_riser_top_profile_includes_the_closing_slope() {
+        // x=0 riser: base y 0→4.5 at z=2.0; flat top 3.0 over y 2.0→4.5; slope
+        // from (y2.0,z3.0) back down to a=(y0,z2.0).
+        let riser = WallRegion {
+            id: ItemId::default(),
+            polygon: Polygon3D::new(vec![
+                Point3f64::new(0.0, 0.0, 2.0), // a — low end of the slope
+                Point3f64::new(0.0, 2.0, 2.0), // base mid
+                Point3f64::new(0.0, 4.5, 2.0), // b — base end
+                Point3f64::new(0.0, 4.5, 3.0), // top up
+                Point3f64::new(0.0, 2.0, 3.0), // top, then slopes back to a
+            ]),
+            exposure: WallExposure::Exposed,
+            opes: Opes::default(),
+            construction_id: ItemId::default(),
+        };
+        let prof = riser.top_profile();
+        // Ends at (along 0, base z) — the slope reaches `a`.
+        let last = *prof.last().expect("non-empty");
+        assert!(
+            last.0.abs() < 1e-3 && (last.1 - 2.0).abs() < 1e-3,
+            "top profile closes down to a at (0, 2.0), got {last:?}: {prof:?}"
+        );
+        // The slope actually descends over the near-`a` span (z at along 1 is
+        // strictly between the base 2.0 and the flat top 3.0).
+        let z1 = riser.top_z_at_along(1.0);
+        assert!(
+            z1 > 2.0 + 1e-6 && z1 < 3.0 - 1e-6,
+            "sloped top at along 1 is between 2.0 and 3.0, got {z1}"
+        );
+    }
+
     #[test]
     fn side_elevation_picks_the_facing_wall_and_projects_an_opening() {
         use crate::ber::common::ExternalSide;
