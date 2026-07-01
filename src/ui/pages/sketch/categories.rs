@@ -686,7 +686,7 @@ fn tool_ui<F: FnMut(UiEvent)>(
                         ui.label(format!("{t:.2} m"));
                     }
                     let submitted =
-                        metre_input(ui, &mut state.floor_thickness_input, 50.0, "e.g. 0.3")
+                        metre_input(ui, &mut state.floor_thickness_input, 50.0, "e.g. 0.25")
                             .submitted;
                     let set_clicked = ui
                         .button("Set")
