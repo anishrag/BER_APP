@@ -116,7 +116,10 @@ pub fn render(
         };
         // Built via the SAME apex/ridge fan the ceiling uses, over the grouped
         // ceiling footprint — so the roof shares the ceiling's plan vertices.
-        for region in area.regions(ItemId::default()).regions {
+        for region in area
+            .regions(ber_model::ber::roof::DEFAULT_OVERHANG_M, ItemId::default())
+            .regions
+        {
             let ring = &region.polygon.exterior;
             if ring.len() < 3 {
                 continue;
