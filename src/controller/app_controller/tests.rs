@@ -1472,7 +1472,11 @@ fn set_only_kind(c: &mut AppController, kind: SurfaceKind) {
     if !c.structure_kinds().contains(&kind) {
         c.toggle_structure_kind(kind);
     }
-    for k in [SurfaceKind::Walls, SurfaceKind::Ceilings, SurfaceKind::Floors] {
+    for k in [
+        SurfaceKind::Walls,
+        SurfaceKind::Ceilings,
+        SurfaceKind::Floors,
+    ] {
         if k != kind && c.structure_kinds().contains(&k) {
             c.toggle_structure_kind(k);
         }
@@ -3909,7 +3913,11 @@ fn setting_ceiling_height_stays_2d_and_opens_the_3d_gate() {
         (storey.ceiling_height_m.unwrap() - 2.7).abs() < 1e-6,
         "height stamped on the storey"
     );
-    assert_eq!(storey.ceilings.regions.len(), 1, "one region per outline ring");
+    assert_eq!(
+        storey.ceilings.regions.len(),
+        1,
+        "one region per outline ring"
+    );
     assert!(
         storey.ceilings.regions[0]
             .polygon
@@ -4783,7 +4791,8 @@ fn open_ber_heals_spurious_phase_induced_roof_split() {
     let spurious_ring = vec![p64(7., 0.), p64(10., 0.), p64(10., 10.), p64(7., 10.)];
     {
         let storey = &mut c.current_record.as_mut().unwrap().data.storeys[0];
-        storey.ceilings = std::mem::take(&mut storey.ceilings).split_faces_coplanar(&[spurious_ring]);
+        storey.ceilings =
+            std::mem::take(&mut storey.ceilings).split_faces_coplanar(&[spurious_ring]);
     }
     let spurious_count = c.current_record.as_ref().unwrap().data.storeys[0]
         .ceilings
@@ -5175,7 +5184,10 @@ fn ceiling_point_tap_x_y_height_flow_fans_the_region() {
     assert_eq!(ui.axis, ParameterAxis::Y);
     // Nearest ref is y = 10 (4.8 m), drawn side −: 5 m from it → y = 5.
     c.apply_position_dimension(5.0).expect("Y applies");
-    assert!(c.ceiling_point_height_pending(), "both axes pinned → height");
+    assert!(
+        c.ceiling_point_height_pending(),
+        "both axes pinned → height"
+    );
     assert_eq!(
         c.pending_roof_point_position(),
         Some((4.0, 5.0)),
@@ -5217,7 +5229,10 @@ fn ceiling_point_tap_x_y_height_flow_fans_the_region() {
         c.ceiling_step_regions.get(&0).is_none(),
         "a fan over the default base needs NO session step state"
     );
-    assert_eq!(c.ceiling_apex_views(), vec![((4.0, 5.0), "▲ 4.20 m".into())]);
+    assert_eq!(
+        c.ceiling_apex_views(),
+        vec![((4.0, 5.0), "▲ 4.20 m".into())]
+    );
 }
 
 /// Phase-1 roof step: group the ceiling area, pick GABLE, draw a ridge, type a
@@ -5291,7 +5306,10 @@ fn roof_area_hip_keeps_drawn_ridge_length() {
     c.assign_roof_area_pitch(45.0).unwrap();
 
     let ber = &c.current_record.as_ref().unwrap().data;
-    assert!(ber.storeys[0].ceiling_apexes.is_empty(), "ceiling untouched");
+    assert!(
+        ber.storeys[0].ceiling_apexes.is_empty(),
+        "ceiling untouched"
+    );
     let area = &ber.roof.areas[0];
     assert_eq!(area.shape, ber_model::ber::roof::RoofShape::Hip);
     let (a, b) = area.ridge.expect("hip has a ridge");
@@ -5315,12 +5333,77 @@ fn roof_area_flat_commits_without_ridge() {
     c.pick_roof_area_shape(RoofShape::Flat);
 
     let ber = &c.current_record.as_ref().unwrap().data;
-    assert!(ber.storeys[0].ceiling_apexes.is_empty(), "ceiling untouched");
+    assert!(
+        ber.storeys[0].ceiling_apexes.is_empty(),
+        "ceiling untouched"
+    );
     assert_eq!(ber.roof.areas.len(), 1);
     let area = &ber.roof.areas[0];
     assert_eq!(area.shape, ber_model::ber::roof::RoofShape::Flat);
     assert!(area.ridge.is_none(), "a flat roof has no ridge");
     assert!(!c.roof_area_pitch_pending(), "no pitch question for flat");
+}
+
+/// Converted attic: when the covered storey's ceiling is already sloped, the roof
+/// step offers "Follow ceiling", and picking it commits a roof that ADOPTS the
+/// ceiling's apexes (so the roof coincides with the sloped ceiling) — the ceiling
+/// itself stays untouched.
+#[test]
+fn roof_follows_a_sloped_ceiling_in_a_converted_attic() {
+    use ber_model::ber::structural::CeilingApex;
+    use domain::points::Point2f64;
+
+    let mut c = dimensioned_square_controller();
+    c.set_default_ceiling_height(2.4).unwrap();
+    // Slope the ceiling directly (a ridge at x = 5, height 6.9), then re-derive.
+    {
+        let rec = c.current_record.as_mut().unwrap();
+        rec.data.add_ceiling_apex(
+            0,
+            CeilingApex {
+                point: Point2f64::new(5.0, 0.0),
+                z_m: 6.9,
+            },
+        );
+        rec.data.add_ceiling_apex(
+            0,
+            CeilingApex {
+                point: Point2f64::new(5.0, 10.0),
+                z_m: 6.9,
+            },
+        );
+    }
+    c.recompose_ceilings(0);
+    c.materialize();
+
+    c.set_roof_mode(true);
+    c.confirm_all_storeys_added_roof();
+    // Tap inside the west slope (off the ridge line, which is a shared edge).
+    c.roof_region_tap(2.5, 5.0, 0.5);
+    assert!(c.roof_area_can_pick_shape(), "a ceiling area was grouped");
+    assert!(
+        c.roof_area_ceiling_is_sloped(),
+        "the sloped ceiling is detected"
+    );
+    c.pick_roof_area_shape(RoofShape::FollowCeiling);
+
+    let ber = &c.current_record.as_ref().unwrap().data;
+    assert_eq!(
+        ber.storeys[0].ceiling_apexes.len(),
+        2,
+        "the ceiling itself is untouched"
+    );
+    let area = &ber.roof.areas[0];
+    assert_eq!(area.shape, ber_model::ber::roof::RoofShape::FollowCeiling);
+    assert_eq!(
+        area.apexes.len(),
+        2,
+        "the roof adopted the ceiling's apexes"
+    );
+    assert!(
+        area.apexes.iter().all(|a| (a.z_m - 6.9).abs() < 1e-6),
+        "same apex height as the ceiling"
+    );
 }
 
 /// A tap within snap tolerance of a parallel wall on ONE axis snaps that
@@ -5514,7 +5597,11 @@ fn ceiling_apex_over_a_ceiling_step_canonicalizes_and_survives_reload() {
     c.flush_if_dirty().unwrap();
     c.open_ber(&id).unwrap();
     let session = &c.ceiling_step_regions[&0];
-    assert_eq!(session.len(), 1, "merged area reconstructed from the ceilings");
+    assert_eq!(
+        session.len(),
+        1,
+        "merged area reconstructed from the ceilings"
+    );
     assert!(session.iter().all(|r| (r.delta_m - 0.3).abs() < 1e-6));
     c.mark_dirty().unwrap();
     c.materialize();
@@ -5616,7 +5703,10 @@ fn second_roof_point_forms_a_ridge_and_a_third_is_rejected() {
     assert!(c.ceiling_point_height_pending());
     let err = c.assign_roof_apex(3.0).unwrap_err();
     assert!(err.contains("already has a ridge"), "got: {err}");
-    assert!(c.ceiling_point_height_pending(), "pending intact on rejection");
+    assert!(
+        c.ceiling_point_height_pending(),
+        "pending intact on rejection"
+    );
     let storey = &c.current_record.as_ref().unwrap().data.storeys[0];
     assert_eq!(storey.ceiling_apexes.len(), 2, "nothing committed");
     c.cancel_pending_roof_point();
@@ -5675,7 +5765,10 @@ fn ceiling_ridge_length_cross_start_height_flow_forms_a_pitched_roof() {
     c.assign_roof_ridge_length(4.0).expect("length applies");
 
     // Question 2: the CROSS position.
-    assert!(c.ceiling_ridge_position_pending(), "length resolved → cross");
+    assert!(
+        c.ceiling_ridge_position_pending(),
+        "length resolved → cross"
+    );
     let ui = c.position_prompt_for_ui().expect("cross-coord prompt");
     assert_eq!(ui.kind, PositionPromptKind::Line);
     assert_eq!(ui.axis, ParameterAxis::X);
@@ -5936,7 +6029,10 @@ fn ceiling_ridge_snap_skips_the_cross_question_and_lands_on_the_wall() {
     // extent (y 0.5..3.5) stays inside the L's lower band, beyond snap
     // tolerance of any horizontal wall.
     c.apply_roof_ridge_stroke_event(&[(5.88, 0.5), (5.92, 2.0), (5.9, 3.5)]);
-    assert!(c.ceiling_ridge_length_pending(), "length is always question 1");
+    assert!(
+        c.ceiling_ridge_length_pending(),
+        "length is always question 1"
+    );
     let ((ax, _), _) = c.pending_roof_ridge_line().unwrap();
     assert!((ax - 6.0).abs() < 1e-6, "coordinate snapped to the wall");
     assert!(
@@ -5998,7 +6094,10 @@ fn ceiling_ridge_start_snap_skips_its_question_and_unsnap_reopens_it() {
     // extent (a typed length extends from the exact wall coordinate); no
     // tag yet — the stage owns the tag, and no snap question has arrived.
     assert!(c.ceiling_ridge_length_pending(), "length first");
-    assert!(c.ceiling_ridge_length_anchored(), "start snapped → anchored");
+    assert!(
+        c.ceiling_ridge_length_anchored(),
+        "start snapped → anchored"
+    );
     assert!(c.ceiling_ridge_snap_tag().is_none(), "no tag at the length");
     let ((_, ay), (_, by)) = c.pending_roof_ridge_line().unwrap();
     assert!((ay - 4.0).abs() < 1e-6, "lo snapped onto the wall");
@@ -6075,7 +6174,10 @@ fn unsnap_roof_ridge_cross_reopens_the_cross_question_with_the_drawn_coord() {
     c.skip_roof_ridge_length().unwrap();
     c.skip_position_dimension().unwrap();
     assert!(c.ceiling_ridge_height_pending());
-    assert!(c.ceiling_ridge_snap_tag().is_some(), "cross tag at the height");
+    assert!(
+        c.ceiling_ridge_snap_tag().is_some(),
+        "cross tag at the height"
+    );
 
     c.unsnap_roof_ridge();
     assert!(c.ceiling_ridge_snap_tag().is_none(), "snap dropped");
@@ -6243,7 +6345,10 @@ fn deleting_one_ridge_apex_degrades_to_a_fan() {
     let groups = storey.ceilings.apex_groups(&storey.ceiling_apexes);
     assert_eq!(groups.len(), 1);
     assert_eq!(groups[0].apex_idxs.len(), 1, "ridge degraded to a fan");
-    assert!(c.ceiling_ridge_views().is_empty(), "no two-apex overlay left");
+    assert!(
+        c.ceiling_ridge_views().is_empty(),
+        "no two-apex overlay left"
+    );
     let zs: Vec<f64> = storey
         .ceilings
         .regions
@@ -6278,7 +6383,10 @@ fn ceiling_ridge_rejections_keep_the_pending_and_bad_strokes_never_pend() {
     assert!(c.ceiling_ridge_length_pending(), "length is question 1");
     // A tap while the ridge is pending must not spawn a roof point.
     c.ceiling_point_tap(7.0, 5.0);
-    assert!(!c.ceiling_point_pending(), "tap suppressed while ridge pends");
+    assert!(
+        !c.ceiling_point_pending(),
+        "tap suppressed while ridge pends"
+    );
 
     // Length rejections: zero-ish, then beyond every area's bbox (the
     // 10×10 footprint's one flat region runs 10 m along the ridge axis) —
@@ -6288,7 +6396,10 @@ fn ceiling_ridge_rejections_keep_the_pending_and_bad_strokes_never_pend() {
     let err = c.assign_roof_ridge_length(11.0).unwrap_err();
     assert!(err.contains("No ceiling area is that long"), "got: {err}");
     assert!(err.contains("under 10.00 m"), "got: {err}");
-    assert!(c.ceiling_ridge_length_pending(), "pending intact on rejection");
+    assert!(
+        c.ceiling_ridge_length_pending(),
+        "pending intact on rejection"
+    );
 
     // 9 m fits the bbox → ACCEPTED at Length (the bound is deliberately
     // optimistic — no location is known yet)…
@@ -6314,7 +6425,10 @@ fn ceiling_ridge_rejections_keep_the_pending_and_bad_strokes_never_pend() {
 
     let err = c.assign_roof_ridge_height(2.405).unwrap_err();
     assert!(err.contains("within a centimetre"), "got: {err}");
-    assert!(c.ceiling_ridge_height_pending(), "pending intact on rejection");
+    assert!(
+        c.ceiling_ridge_height_pending(),
+        "pending intact on rejection"
+    );
     let storey = &c.current_record.as_ref().unwrap().data.storeys[0];
     assert!(storey.ceiling_apexes.is_empty(), "nothing committed");
 
@@ -6533,7 +6647,9 @@ fn ceiling_ridge_wall_to_wall_draw_succeeds_end_to_end() {
     );
     // The END tag shows at the cross stage (its question — the Length —
     // has been passed; end outranks the riding start snap), at the HI end.
-    let tag = c.ceiling_ridge_snap_tag().expect("end tag at the cross stage");
+    let tag = c
+        .ceiling_ridge_snap_tag()
+        .expect("end tag at the cross stage");
     assert!((tag.pos.1 - 10.0).abs() < 1e-4, "tag at the HI endpoint");
     assert!((tag.from.1 - 9.9).abs() < 0.05, "identity = the drawn end");
     assert!(tag.options.is_empty() && tag.skippable, "Don't snap only");
@@ -6838,7 +6954,10 @@ fn ceiling_rect_rejections_keep_stages_open_and_cancel_recovers() {
     assert!(c.ceiling_rect_pending());
     // A tap and a new stroke while pending are suppressed.
     c.ceiling_point_tap(8.0, 8.0);
-    assert!(!c.ceiling_point_pending(), "tap suppressed while rect pends");
+    assert!(
+        !c.ceiling_point_pending(),
+        "tap suppressed while rect pends"
+    );
     c.apply_roof_ridge_stroke_event(&[(7.0, 2.0), (7.0, 8.0)]);
     assert!(
         !c.ceiling_ridge_pending(),
@@ -6931,7 +7050,10 @@ fn ceiling_rect_length_stages_validate_only_their_own_axis() {
     );
     c.assign_roof_rect_length(3.0)
         .expect("a fitting depth applies");
-    assert!(c.ceiling_rect_position_pending(), "on to the position stages");
+    assert!(
+        c.ceiling_rect_position_pending(),
+        "on to the position stages"
+    );
 }
 
 /// THE RECT FIXPOINT over the DEFAULT base (design §5's required test):
@@ -7200,7 +7322,10 @@ fn ceiling_ridge_end_snap_reanchors_a_typed_length_at_the_wall() {
     // Vertical stroke y 5.0 → 9.9: hi snaps to y = 10, lo (1 m from the
     // interior wall y = 4) does not.
     c.apply_roof_ridge_stroke_event(&[(2.78, 5.0), (2.8, 9.9)]);
-    assert!(c.ceiling_ridge_length_pending(), "length opens (one end free)");
+    assert!(
+        c.ceiling_ridge_length_pending(),
+        "length opens (one end free)"
+    );
     assert!(
         c.ceiling_ridge_length_anchored(),
         "snapped hi anchors the extent"
@@ -7418,7 +7543,10 @@ fn ceiling_ridge_finalize_rejection_lands_on_the_cross_when_start_snapped() {
     let err = c.apply_position_dimension(2.5).unwrap_err();
     assert!(err.contains("out of its ceiling area"), "got: {err}");
     assert!(err.contains("10.00 m wall to wall"), "got: {err}");
-    assert!(c.ceiling_ridge_position_pending(), "cross prompt stays open");
+    assert!(
+        c.ceiling_ridge_position_pending(),
+        "cross prompt stays open"
+    );
     c.cancel_pending_roof_ridge();
     assert!(!c.ceiling_ridge_pending());
 }
@@ -7997,7 +8125,10 @@ fn users_l_session_ridge_placement_is_limited_to_the_raised_area_and_height_land
         err.contains("No ceiling area is that long"),
         "beyond every bbox → the Length-stage bound: {err}"
     );
-    assert!(c.ceiling_ridge_length_pending(), "pending intact on rejection");
+    assert!(
+        c.ceiling_ridge_length_pending(),
+        "pending intact on rejection"
+    );
     // …but 1.5 m fits SOME area's bbox, so it passes — the binding check
     // is the location stage's.
     c.assign_roof_ridge_length(1.5)
@@ -8031,7 +8162,10 @@ fn users_l_session_ridge_placement_is_limited_to_the_raised_area_and_height_land
     // run): accepted…
     c.apply_position_dimension(0.3)
         .expect("a start the length fits from lands");
-    assert!(c.ceiling_ridge_height_pending(), "on to the height question");
+    assert!(
+        c.ceiling_ridge_height_pending(),
+        "on to the height question"
+    );
     // …and the Height stage must then SUCCEED: finalize acceptance implies
     // the height validation's strict same-region containment.
     c.assign_roof_ridge_height(4.2)
@@ -10329,7 +10463,11 @@ fn ceiling_exposure_cut_picks_side_dimensions_then_splits_the_labellable_ceiling
             s[1].ceilings.regions.len() > 1,
             "top (labellable) ceiling cut into pieces"
         );
-        assert_eq!(s[0].ceilings.regions.len(), 1, "party lower ceiling untouched");
+        assert_eq!(
+            s[0].ceilings.regions.len(),
+            1,
+            "party lower ceiling untouched"
+        );
     }
     assert!(
         !c.ceiling_exposure_selected_ids().is_empty(),

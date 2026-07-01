@@ -1212,6 +1212,9 @@ pub struct SketchView<'a> {
     /// At least one area is grouped and no per-area drawing is in flight — the
     /// shape buttons (Flat/Gable/Hip) are offered.
     pub roof_area_can_pick_shape: bool,
+    /// The grouped area's storey has a sloped ceiling (converted attic) — the
+    /// "Follow ceiling" shape is offered so the roof adopts that slope.
+    pub roof_area_ceiling_sloped: bool,
     /// The grouped area awaits its ridge stroke.
     pub roof_area_ridge_pending: bool,
     /// The placed ridge awaits its pitch (degrees).

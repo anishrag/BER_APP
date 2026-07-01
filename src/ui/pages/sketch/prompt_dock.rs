@@ -267,7 +267,11 @@ pub(super) fn instruction(view: &SketchView<'_>) -> Option<&'static str> {
         } else if view.roof_area_ridge_pending {
             "Roof — draw the ridge line across the grouped area."
         } else if view.roof_area_can_pick_shape {
-            "Roof — pick the shape for the grouped area (Flat / Gable / Hip)."
+            if view.roof_area_ceiling_sloped {
+                "Roof — pick the shape (Follow ceiling / Flat / Gable / Hip)."
+            } else {
+                "Roof — pick the shape for the grouped area (Flat / Gable / Hip)."
+            }
         } else {
             "Roof — tap the ceiling areas (shaded by top storey) to group them into one roof area."
         });
@@ -1186,6 +1190,18 @@ fn roof_toolbar<F: FnMut(UiEvent)>(ui: &mut egui::Ui, view: &mut SketchView<'_>,
             }
         } else if view.roof_area_can_pick_shape {
             ui.label("Shape:");
+            // Converted attic: the ceiling is already sloped — offer to adopt it
+            // (the rafters ARE the ceiling), so no ridge/pitch is re-asked.
+            if view.roof_area_ceiling_sloped
+                && ui
+                    .button("Follow ceiling")
+                    .hint("Converted attic — the roof follows the already-sloped ceiling")
+                    .clicked()
+            {
+                on_event(UiEvent::Sketch(SketchEvent::PickRoofShape(
+                    RoofShape::FollowCeiling,
+                )));
+            }
             if ui
                 .button("Flat")
                 .hint("Flat roof — keeps the ceiling level")

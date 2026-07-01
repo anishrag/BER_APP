@@ -311,8 +311,25 @@ impl AppController {
             .and_then(|s| s.ceiling_height_m)
     }
 
+    /// True when the grouped area's storey has a SLOPED ceiling (it has ceiling
+    /// apexes) — a converted attic / room-in-roof, where the roof should adopt the
+    /// ceiling's slope ("Follow ceiling") rather than a freshly-drawn pitch.
+    pub fn roof_area_ceiling_is_sloped(&self) -> bool {
+        let Some(storey_idx) = self.roof_target_storey() else {
+            return false;
+        };
+        self.current_record
+            .as_ref()
+            .and_then(|r| r.data.storeys.get(storey_idx))
+            .map(|s| !s.ceiling_apexes.is_empty())
+            .unwrap_or(false)
+    }
+
     /// Commit a finished roof area onto `Ber.roof` (SEPARATE from the ceiling — it
     /// does NOT touch the ceiling apexes), then clear the grouping + pending state.
+    /// The geometry-driving apexes are computed by `shape`: `Gable`/`Hip` from the
+    /// drawn ridge + pitch; `FollowCeiling` copies the covered storey's ceiling
+    /// apexes (so the roof reproduces the sloped ceiling); `Flat` has none.
     fn commit_roof_area(
         &mut self,
         storey_idx: usize,
@@ -322,6 +339,20 @@ impl AppController {
         ridge: Option<(Point2f64, Point2f64)>,
     ) -> Result<(), String> {
         let footprint = self.roof_selected_rings(storey_idx);
+        let apexes = match shape {
+            RoofShape::Flat => Vec::new(),
+            RoofShape::Gable | RoofShape::Hip => match ridge {
+                Some(r) => RoofArea::ridge_apexes(r, pitch_deg, eave_z, &footprint),
+                None => Vec::new(),
+            },
+            // Adopt the covered storey's ceiling slope (converted attic).
+            RoofShape::FollowCeiling => self
+                .current_record
+                .as_ref()
+                .and_then(|r| r.data.storeys.get(storey_idx))
+                .map(|s| s.ceiling_apexes.clone())
+                .unwrap_or_default(),
+        };
         let record = self
             .current_record
             .as_mut()
@@ -334,6 +365,7 @@ impl AppController {
             eave_z,
             ridge,
             footprint,
+            apexes,
         });
         self.pending_roof_area = None;
         self.roof_selected.clear();
@@ -341,9 +373,9 @@ impl AppController {
         Ok(())
     }
 
-    /// Pick the shape for the grouped roof area. `Flat` commits immediately (a
-    /// flat roof needs no ridge/pitch); `Gable`/`Hip` start the ridge-draw flow.
-    /// No-op without a grouped area.
+    /// Pick the shape for the grouped roof area. `Flat` and `FollowCeiling` commit
+    /// immediately (no ridge/pitch — FollowCeiling reuses the sloped ceiling);
+    /// `Gable`/`Hip` start the ridge-draw flow. No-op without a grouped area.
     pub fn pick_roof_area_shape(&mut self, shape: RoofShape) {
         if !self.roof_area_can_pick_shape() {
             return;
@@ -352,10 +384,9 @@ impl AppController {
             return;
         };
         match shape {
-            RoofShape::Flat => {
-                // A flat roof sits level at the eave — no ridge, no pitch.
+            RoofShape::Flat | RoofShape::FollowCeiling => {
                 let eave_z = self.roof_eave_z(storey_idx).unwrap_or(0.0);
-                let _ = self.commit_roof_area(storey_idx, RoofShape::Flat, 0.0, eave_z, None);
+                let _ = self.commit_roof_area(storey_idx, shape, 0.0, eave_z, None);
             }
             RoofShape::Gable | RoofShape::Hip => {
                 self.pending_roof_area = Some(PendingRoofArea::DrawRidge { shape, storey_idx });
