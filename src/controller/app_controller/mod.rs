@@ -399,6 +399,9 @@ pub struct AppController {
     /// present, `autosave` hands the disk write to it off the UI thread; when
     /// absent, `autosave` falls back to a synchronous `flush_if_dirty`.
     writer: Option<crate::engine::PersistenceWriter>,
+    /// Optional background cloud-sync worker (attached by the real app when
+    /// sync config is present; absent → the app runs fully offline).
+    sync: Option<crate::engine::SyncWorker>,
     /// The last snapping action (its raw input + pre-action state + the elective
     /// snaps it made), kept so a forced snap choice can REPLAY it — restore the
     /// pre-state, re-run under the policy, rebuild the shape. `None` until the
@@ -623,6 +626,7 @@ impl AppController {
             saved_revision: 0,
             derived_revision: 0,
             writer: None,
+            sync: None,
             last_snap_action: None,
             edit_drag_prompt: None,
             vertex_drop_prompt: None,
