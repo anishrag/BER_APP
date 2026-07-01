@@ -281,9 +281,10 @@ impl FloorPlan {
     pub fn params_pinned_to_outline(
         &self,
         area: &FloorPlan,
+        ref_walls: &[[Point2f32; 2]],
     ) -> std::collections::HashSet<ParameterId> {
         let mut pinned = std::collections::HashSet::new();
-        self.scan_outline_contacts(area, &mut |idx, axis| {
+        self.scan_outline_contacts(area, ref_walls, &mut |idx, axis| {
             let pid = match axis {
                 ParameterAxis::X => area.vertex_x_param(0, idx),
                 ParameterAxis::Y => area.vertex_y_param(0, idx),
@@ -309,9 +310,13 @@ impl FloorPlan {
     /// sits on a curve facet (those fix BOTH axes). Returned in stable order
     /// X then Y; degenerate inputs (<3 vertices on either ring — nothing to
     /// scan) report both axes free.
-    pub fn free_position_axes(&self, area: &FloorPlan) -> Vec<ParameterAxis> {
+    pub fn free_position_axes(
+        &self,
+        area: &FloorPlan,
+        ref_walls: &[[Point2f32; 2]],
+    ) -> Vec<ParameterAxis> {
         let (mut x_fixed, mut y_fixed) = (false, false);
-        self.scan_outline_contacts(area, &mut |_idx, axis| match axis {
+        self.scan_outline_contacts(area, ref_walls, &mut |_idx, axis| match axis {
             ParameterAxis::X => x_fixed = true,
             ParameterAxis::Y => y_fixed = true,
         });
@@ -339,7 +344,18 @@ impl FloorPlan {
     ///    both endpoints;
     ///  - an `area` vertex sitting on a non-axis-aligned outline facet (curve
     ///    facet or diagonal) pins both axes.
-    fn scan_outline_contacts(&self, area: &FloorPlan, pin: &mut dyn FnMut(usize, ParameterAxis)) {
+    ///
+    /// `ref_walls` are extra reference walls (world-metre segments) the area's
+    /// walls were also levelled onto besides the outline — the construction-phase
+    /// lines a living area snaps to. Treated exactly like axis-aligned outline
+    /// walls / corners here, so a wall snapped onto a phase line is pinned known
+    /// too (a snapped wall is a known wall — that's the point of snapping).
+    fn scan_outline_contacts(
+        &self,
+        area: &FloorPlan,
+        ref_walls: &[[Point2f32; 2]],
+        pin: &mut dyn FnMut(usize, ParameterAxis),
+    ) {
         let outline = self.parametric.ring_points(0);
         let no = outline.len();
         let apts = area.get_points();
@@ -351,15 +367,28 @@ impl FloorPlan {
         // Outline walls by axis: vertical (x, ylo, yhi); horizontal (y, xlo, xhi).
         let mut vert: Vec<(f32, f32, f32)> = Vec::new();
         let mut horiz: Vec<(f32, f32, f32)> = Vec::new();
-        for i in 0..no {
-            let a = outline[i];
-            let b = outline[(i + 1) % no];
+        let mut push_axis_aligned = |a: Point2f32, b: Point2f32| {
             if (a.x - b.x).abs() < eps {
                 vert.push((a.x, a.y.min(b.y), a.y.max(b.y)));
             } else if (a.y - b.y).abs() < eps {
                 horiz.push((a.y, a.x.min(b.x), a.x.max(b.x)));
             }
+        };
+        for i in 0..no {
+            push_axis_aligned(outline[i], outline[(i + 1) % no]);
         }
+        // Reference walls (phase lines) the area also levelled onto — pin like
+        // outline walls. Their endpoints join the corner set below.
+        for seg in ref_walls {
+            push_axis_aligned(seg[0], seg[1]);
+        }
+        // Corner set: outline vertices plus reference-wall endpoints. An area
+        // vertex coinciding with one is fully fixed (both axes).
+        let corners: Vec<Point2f32> = outline
+            .iter()
+            .copied()
+            .chain(ref_walls.iter().flat_map(|s| s.iter().copied()))
+            .collect();
         let overlaps = |alo: f32, ahi: f32, blo: f32, bhi: f32| ahi.min(bhi) - alo.max(blo) > eps;
         for i in 0..n {
             let a = apts[i];
@@ -382,13 +411,13 @@ impl FloorPlan {
                 }
             }
         }
-        // Vertices coinciding with an outline corner are fully fixed by the
-        // storey — pin both coordinates. This fixes a shared DIAGONAL wall
-        // (endpoints are corners), so its length isn't prompted; only the
-        // genuinely-drawn walls (e.g. a cut) remain to dimension.
+        // Vertices coinciding with an outline (or reference-wall) corner are
+        // fully fixed by the storey — pin both coordinates. This fixes a shared
+        // DIAGONAL wall (endpoints are corners), so its length isn't prompted;
+        // only the genuinely-drawn walls (e.g. a cut) remain to dimension.
         for i in 0..n {
             let v = apts[i];
-            if outline
+            if corners
                 .iter()
                 .any(|o| (o.x - v.x).abs() < eps && (o.y - v.y).abs() < eps)
             {
@@ -575,7 +604,7 @@ mod position_axis_tests {
             FloorPlan::from_clean_ring(&[p(2.0, 2.0), p(5.0, 2.0), p(5.0, 4.0), p(2.0, 4.0)])
                 .unwrap();
         assert_eq!(
-            outline.free_position_axes(&area),
+            outline.free_position_axes(&area, &[]),
             vec![ParameterAxis::X, ParameterAxis::Y]
         );
     }
@@ -592,12 +621,18 @@ mod position_axis_tests {
         let bottom =
             FloorPlan::from_clean_ring(&[p(2.0, 0.0), p(5.0, 0.0), p(5.0, 3.0), p(2.0, 3.0)])
                 .unwrap();
-        assert_eq!(outline.free_position_axes(&bottom), vec![ParameterAxis::X]);
+        assert_eq!(
+            outline.free_position_axes(&bottom, &[]),
+            vec![ParameterAxis::X]
+        );
         // Hugs the left wall (x = 0): X fixed, Y free.
         let left =
             FloorPlan::from_clean_ring(&[p(0.0, 2.0), p(3.0, 2.0), p(3.0, 5.0), p(0.0, 5.0)])
                 .unwrap();
-        assert_eq!(outline.free_position_axes(&left), vec![ParameterAxis::Y]);
+        assert_eq!(
+            outline.free_position_axes(&left, &[]),
+            vec![ParameterAxis::Y]
+        );
     }
 
     /// An area vertex coinciding with an outline corner fixes both axes.
@@ -607,7 +642,7 @@ mod position_axis_tests {
         let area =
             FloorPlan::from_clean_ring(&[p(0.0, 0.0), p(3.0, 0.0), p(3.0, 3.0), p(0.0, 3.0)])
                 .unwrap();
-        assert!(outline.free_position_axes(&area).is_empty());
+        assert!(outline.free_position_axes(&area, &[]).is_empty());
     }
 
     /// An area vertex sitting on a DIAGONAL outline facet fixes both axes,
@@ -627,7 +662,7 @@ mod position_axis_tests {
         let area =
             FloorPlan::from_clean_ring(&[p(4.0, 4.0), p(8.0, 4.0), p(8.0, 8.0), p(4.0, 8.0)])
                 .unwrap();
-        assert!(outline.free_position_axes(&area).is_empty());
+        assert!(outline.free_position_axes(&area, &[]).is_empty());
     }
 
     /// A CUT region keeps an outline arc including its corners, so both axes
@@ -650,11 +685,11 @@ mod position_axis_tests {
         {
             SubareaOutcome::Cut(a, b) => {
                 assert!(
-                    outline.free_position_axes(&a).is_empty(),
+                    outline.free_position_axes(&a, &[]).is_empty(),
                     "cut region a is position-fixed on both axes"
                 );
                 assert!(
-                    outline.free_position_axes(&b).is_empty(),
+                    outline.free_position_axes(&b, &[]).is_empty(),
                     "cut region b is position-fixed on both axes"
                 );
             }
@@ -667,7 +702,7 @@ mod position_axis_tests {
     fn degenerate_area_reports_both_axes_free() {
         let outline = rect_outline();
         assert_eq!(
-            outline.free_position_axes(&FloorPlan::default()),
+            outline.free_position_axes(&FloorPlan::default(), &[]),
             vec![ParameterAxis::X, ParameterAxis::Y]
         );
     }

@@ -490,7 +490,7 @@ mod tests {
     fn interior_square_slot(doc: &StoreyDoc) -> ShapeSlot {
         let plan =
             FloorPlan::from_clean_ring(&[p(2., 2.), p(4., 2.), p(4., 4.), p(2., 4.)]).unwrap();
-        doc.pinned_slot_for(&doc.outline.floor_plan, plan)
+        doc.pinned_slot_for(&doc.outline.floor_plan, plan, &[])
     }
 
     /// Drive the wall-length loop to completion by confirming each prompted
@@ -532,7 +532,9 @@ mod tests {
         let mut doc = storey_10x10();
         let slot = interior_square_slot(&doc);
         assert_eq!(
-            doc.outline.floor_plan.free_position_axes(&slot.floor_plan),
+            doc.outline
+                .floor_plan
+                .free_position_axes(&slot.floor_plan, &[]),
             vec![ParameterAxis::X, ParameterAxis::Y]
         );
         doc.begin_phase_area(slot);
@@ -628,7 +630,7 @@ mod tests {
         let mut doc = storey_10x10();
         let plan =
             FloorPlan::from_clean_ring(&[p(0., 0.), p(3., 0.), p(3., 3.), p(0., 3.)]).unwrap();
-        let slot = doc.pinned_slot_for(&doc.outline.floor_plan, plan);
+        let slot = doc.pinned_slot_for(&doc.outline.floor_plan, plan, &[]);
         assert!(
             slot.dimensioning.position_free_axes.is_empty(),
             "corner contact pins both axes"
@@ -701,7 +703,7 @@ mod tests {
         // outline, but the cut line at x=4 is approximate.
         let plan =
             FloorPlan::from_clean_ring(&[p(0., 0.), p(4., 0.), p(4., 10.), p(0., 10.)]).unwrap();
-        let slot = doc.pinned_slot_for(&doc.outline.floor_plan, plan);
+        let slot = doc.pinned_slot_for(&doc.outline.floor_plan, plan, &[]);
         assert!(slot.dimensioning.position_free_axes.is_empty());
         doc.begin_phase_area(slot);
         doc.recompute_prompt();

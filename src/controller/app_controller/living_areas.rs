@@ -151,6 +151,7 @@ impl AppController {
         &mut self,
         boundary: &FloorPlan,
         plan: FloorPlan,
+        ref_walls: &[[Point2f32; 2]],
     ) -> Result<(), String> {
         let undo_snap = self.current_history_snapshot();
         log::debug!("── living-area plan ─────────────────────────────────");
@@ -170,7 +171,7 @@ impl AppController {
                 e
             ));
         }
-        let slot = self.pinned_subarea_slot(boundary, plan);
+        let slot = self.pinned_subarea_slot_refs(boundary, plan, ref_walls);
         self.commit_new_living_area(slot, undo_snap);
         Ok(())
     }
@@ -182,10 +183,24 @@ impl AppController {
     /// the available region (outline minus existing phases) for a phase area, so a
     /// wall shared with a neighbour phase is pre-known too.
     pub(super) fn pinned_subarea_slot(&self, boundary: &FloorPlan, plan: FloorPlan) -> ShapeSlot {
-        let slot = self.document.pinned_slot_for(boundary, plan);
+        self.pinned_subarea_slot_refs(boundary, plan, &[])
+    }
+
+    /// [`pinned_subarea_slot`](Self::pinned_subarea_slot) that also pins walls
+    /// levelled onto extra REFERENCE walls (phase lines) as pre-known — a snapped
+    /// wall is a known wall, so dimensioning shouldn't prompt for it. `ref_walls`
+    /// must be the SAME set the carve levelled onto (see `carve_or_cut_refs`), so
+    /// the pin matches the snap.
+    pub(super) fn pinned_subarea_slot_refs(
+        &self,
+        boundary: &FloorPlan,
+        plan: FloorPlan,
+        ref_walls: &[[Point2f32; 2]],
+    ) -> ShapeSlot {
+        let slot = self.document.pinned_slot_for(boundary, plan, ref_walls);
         if !slot.dimensioning.known_params.is_empty() {
             log::debug!(
-                "  pinned-to-outline params (pre-known): {:?}",
+                "  pre-known params (pinned to outline / reference lines): {:?}",
                 slot.dimensioning.known_params
             );
         }
@@ -223,17 +238,12 @@ impl AppController {
         dump_stroke("living-area", &pts);
         // Save the live buffer so the outline we carve against is current.
         self.sync_active();
-        // Pre-snap the stroke onto INTERIOR reference lines the carve can't align
-        // to on its own: the construction-phase region edges, so a living area
-        // drawn beside a phase "year" line lands on it. (The OUTLINE is the carve
-        // boundary, so leveling onto a parallel house wall is handled post-carve
-        // by `snap_walls` — see there — not here.) The carve below still clips +
-        // boundary-follows the outline; a vertex nudged onto a phase line sits
-        // away from the outline, so the follow leaves it on that line. Mirrors the
-        // ceiling-exposure pre-snap (`ceiling_carve_reference_segments`).
-        let ref_segments = self.living_area_reference_segments();
-        let snap_tol = self.tuning.subarea.corner_snap_m;
-        let pts = manip_plan::snap_stroke_to_segments(&pts, &ref_segments, snap_tol);
+        // Reference walls the carve levels the drawn living area onto besides the
+        // outline: the construction-PHASE lines. A wall drawn beside a phase line
+        // lands flush on it (post-carve per-line leveling in `snap_walls`), and —
+        // because a snapped wall is a known wall — is then pinned pre-known so
+        // dimensioning doesn't prompt for it (`pinned_subarea_slot_refs`).
+        let ref_walls = self.living_area_reference_segments();
         // Living areas never overlap: carve against the outline MINUS the existing
         // living areas (the available region), so a new one tiles against them and
         // snaps to their shared walls. The available region may be disconnected;
@@ -246,21 +256,23 @@ impl AppController {
             .collect();
         // One call into `document` does subtract → pick piece → clip → cut-or-carve;
         // we only dispatch the outcome to the right workflow.
-        match self
-            .document
-            .carve_or_cut_in_available(&pts, &holes, &self.tuning.subarea)
-        {
+        match self.document.carve_or_cut_in_available(
+            &pts,
+            &holes,
+            &self.tuning.subarea,
+            &ref_walls,
+        ) {
             // A straight cut → offer both halves to pick from. Each region's walls
-            // along the boundary are pinned (pre-known); only the cut wall is set.
+            // along the boundary / a phase line are pinned; only the cut wall is set.
             Ok((boundary, SubareaOutcome::Cut(a, b))) => {
                 log::debug!("── cut splits the available region into two — tap one to keep ──");
                 self.pending_cut = Some([
-                    self.pinned_subarea_slot(&boundary, a),
-                    self.pinned_subarea_slot(&boundary, b),
+                    self.pinned_subarea_slot_refs(&boundary, a, &ref_walls),
+                    self.pinned_subarea_slot_refs(&boundary, b, &ref_walls),
                 ]);
             }
             Ok((boundary, SubareaOutcome::Area(plan))) => {
-                if let Err(e) = self.commit_living_area_plan(&boundary, plan) {
+                if let Err(e) = self.commit_living_area_plan(&boundary, plan, &ref_walls) {
                     log::error!("living area: {}", e);
                 }
             }
@@ -268,13 +280,11 @@ impl AppController {
         }
     }
 
-    /// Interior reference lines a living-area stroke pre-snaps onto (world-metre
-    /// segments) before the carve: the active storey's construction-PHASE region
-    /// edges, so a living area drawn beside a phase "year" line lands on that
-    /// line. Leveling onto a parallel OUTLINE wall is NOT here — the outline is
-    /// the carve boundary, so that's done post-carve by `snap_walls`. Empty when
-    /// the storey has no phase regions. Mirror of
-    /// [`ceiling_carve_reference_segments`](Self::ceiling_carve_reference_segments).
+    /// Reference walls a living area levels onto (and is pinned to) besides the
+    /// outline (world-metre segments): the active storey's construction-PHASE
+    /// region edges, so a living area drawn beside a phase "year" line lands on
+    /// that line and its length isn't re-prompted. Empty when the storey has no
+    /// phase regions.
     fn living_area_reference_segments(&self) -> Vec<[Point2f32; 2]> {
         let idx = self.current_storey_idx.unwrap_or(0);
         let Some(regions) = self.phase_regions.get(&idx) else {

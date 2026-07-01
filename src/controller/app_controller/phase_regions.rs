@@ -106,7 +106,7 @@ impl AppController {
         // dispatch the outcome. The chosen piece comes back for wall pinning.
         match self
             .document
-            .carve_or_cut_in_available(&pts, &phase_rings, &self.tuning.subarea)
+            .carve_or_cut_in_available(&pts, &phase_rings, &self.tuning.subarea, &[])
         {
             Ok((boundary, SubareaOutcome::Cut(a, b))) => {
                 log::debug!("  → phase cut splits the available region into two — tap one to keep");

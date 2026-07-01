@@ -165,11 +165,27 @@ impl FloorPlan {
         tuning: &SubareaTuning,
         allow_outside: bool,
     ) -> Result<SubareaOutcome, Error> {
+        self.carve_or_cut_refs(stroke, tuning, allow_outside, &[])
+    }
+
+    /// [`carve_or_cut`](Self::carve_or_cut) plus extra REFERENCE walls the drawn
+    /// sub-area levels onto in addition to this outline — world-metre segments
+    /// that aren't on the carve boundary (construction-phase lines, say), so a
+    /// wall drawn beside one lands flush on it. Same per-line leveling as the
+    /// outline snap (`snap_walls`); pass `&[]` for none.
+    pub fn carve_or_cut_refs(
+        &self,
+        stroke: &[Point2f32],
+        tuning: &SubareaTuning,
+        allow_outside: bool,
+        ref_walls: &[[Point2f32; 2]],
+    ) -> Result<SubareaOutcome, Error> {
         carve_or_cut(
             &self.parametric.ring_points(0),
             stroke,
             tuning,
             allow_outside,
+            ref_walls,
         )
     }
 }
@@ -184,18 +200,42 @@ pub enum SubareaOutcome {
     Area(FloorPlan),
 }
 
+thread_local! {
+    /// Extra REFERENCE walls (world-metre segments) the current carve levels its
+    /// drawn walls onto in addition to the outline — construction-phase lines and
+    /// the like, which aren't on the carve boundary. Set once at the top of
+    /// [`carve_or_cut`] from its `ref_walls` argument (empty when there are none)
+    /// and read deep in the finalize by [`snap_walls`], so the reference set
+    /// reaches the leveller without threading through every cut/carve/finalize
+    /// function. Overwritten on every carve, so it never carries stale data.
+    static CARVE_REF_WALLS: std::cell::RefCell<Vec<[Point2f32; 2]>> =
+        const { std::cell::RefCell::new(Vec::new()) };
+}
+
+/// Clears [`CARVE_REF_WALLS`] when it drops, so the reference set never leaks
+/// past the carve that set it — `snap_walls` also runs from the ortho-trim path
+/// (`clean_region_ring` in `path_edits`), which doesn't go through
+/// [`carve_or_cut`] and must see an empty set, not a previous carve's leftovers.
+struct CarveRefWallsGuard;
+impl Drop for CarveRefWallsGuard {
+    fn drop(&mut self) {
+        CARVE_REF_WALLS.with(|c| c.borrow_mut().clear());
+    }
+}
+
 /// Resolve a freehand sub-area stroke against `outline`: clip it onto the storey
 /// ([`region::clip_stroke_inside`]), then either split it (a straight cut → two regions,
 /// [`split_cut`]) or carve it (anything else → one area, [`sub_area`]). The carve
 /// tolerance is derived from the clipped stroke + `tuning`, so the caller passes
 /// neither a pre-clipped stroke nor a tolerance — the whole clip→tol→cut/carve
-/// pipeline lives here, not in the caller.
-
+/// pipeline lives here, not in the caller. `ref_walls` are extra reference walls
+/// the finalize levels onto besides the outline (see [`CARVE_REF_WALLS`]).
 fn carve_or_cut(
     outline: &[Point2f32],
     stroke: &[Point2f32],
     tuning: &SubareaTuning,
     allow_outside: bool,
+    ref_walls: &[[Point2f32; 2]],
 ) -> Result<SubareaOutcome, Error> {
     // No storey footprint to carve against (e.g. a freshly-added storey with no
     // outline yet) — there's nothing to clip/follow, so bail instead of letting
@@ -205,6 +245,8 @@ fn carve_or_cut(
             "no storey outline to carve against".into(),
         ));
     }
+    CARVE_REF_WALLS.with(|c| *c.borrow_mut() = ref_walls.to_vec());
+    let _ref_walls_guard = CarveRefWallsGuard; // clears CARVE_REF_WALLS on any return
     let pts = region::clip_stroke_inside(outline, stroke, tuning.close_gap_m, allow_outside);
     let tol = (geom::bbox_diagonal(&pts) * tuning.rdp_tol_ratio).max(tuning.rdp_tol_floor);
     match split_cut(outline, &pts, tol, tuning)? {
@@ -808,16 +850,25 @@ fn snap_walls(outline: &[Point2f32], pts: &[Point2f32], tol: f32) -> Vec<Point2f
     // (y, xlo, xhi).
     let mut vert: Vec<(f32, f32, f32)> = Vec::new();
     let mut horiz: Vec<(f32, f32, f32)> = Vec::new();
-    for i in 0..no {
-        let a = outline[i];
-        let b = outline[(i + 1) % no];
+    let mut push_axis_aligned = |a: Point2f32, b: Point2f32| {
         if (a.x - b.x).abs() < eps {
             vert.push((a.x, a.y.min(b.y), a.y.max(b.y)));
         } else if (a.y - b.y).abs() < eps {
             horiz.push((a.y, a.x.min(b.x), a.x.max(b.x)));
         }
+    };
+    for i in 0..no {
+        push_axis_aligned(outline[i], outline[(i + 1) % no]);
     }
-    // For each sub-area edge, find the nearest parallel, overlapping outline
+    // Extra reference walls the carve levels onto besides the outline (e.g. the
+    // construction-phase lines), so a drawn wall beside one lands flush on it —
+    // the same per-line leveling. See [`CARVE_REF_WALLS`].
+    CARVE_REF_WALLS.with(|c| {
+        for seg in c.borrow().iter() {
+            push_axis_aligned(seg[0], seg[1]);
+        }
+    });
+    // For each sub-area edge, find the nearest parallel, overlapping reference
     // wall within `tol`; record a coordinate remap.
     let n = pts.len();
     let mut remap_x: Vec<(f32, f32)> = Vec::new();
@@ -982,6 +1033,7 @@ mod cut_line_tests {
             &cut,
             &SubareaTuning::default(),
             false,
+            &[],
         )
         .expect_err("opposite chamfers share no row or column");
         assert!(matches!(err, Error::CutWouldChangeShape), "got {err:?}");
@@ -1513,7 +1565,7 @@ mod cut_line_tests {
             "the right region kept the diagonal"
         );
         let total = diag_region.all_active_params().len();
-        let pinned = outline.params_pinned_to_outline(diag_region).len();
+        let pinned = outline.params_pinned_to_outline(diag_region, &[]).len();
         assert_eq!(
             total - pinned,
             1,
@@ -1647,7 +1699,7 @@ mod boundary_loop_tests {
 
         // The shared diagonal wall is PINNED (fixed by the house), so it won't
         // be prompted for dimensioning — only the interior walls are free.
-        let pinned = outline.params_pinned_to_outline(&room);
+        let pinned = outline.params_pinned_to_outline(&room, &[]);
         let (_, e, _, _) = bad[0];
         let nn = room.polygons()[0].len();
         for idx in [e, (e + 1) % nn] {
@@ -2734,7 +2786,7 @@ mod alignment_snap_tests {
             p(7.0, 10.6222),
             p(5.9, 10.6222),
         ];
-        let outcome = carve_or_cut(&outline, &stroke, &SubareaTuning::default(), false)
+        let outcome = carve_or_cut(&outline, &stroke, &SubareaTuning::default(), false, &[])
             .expect("the closed rect carves");
         let SubareaOutcome::Area(plan) = outcome else {
             panic!("a closed loop is a carve, not a cut");
@@ -2762,6 +2814,64 @@ mod alignment_snap_tests {
             );
         }
         assert_eq!(ring.len(), 4, "a clean rectangle: {ring:?}");
+    }
+
+    /// A living area drawn beside a construction-PHASE line levels its wall onto
+    /// that line (a reference wall off the carve boundary), and — because a
+    /// snapped wall is a KNOWN wall — that levels the area's position on the
+    /// perpendicular axis, so dimensioning won't prompt for it. Mirrors the live
+    /// report: a wall drawn ~0.2 m off a phase line stayed off it and got asked
+    /// to dimension.
+    #[test]
+    fn drawn_wall_levels_onto_a_reference_phase_line_and_pins_its_axis() {
+        // 10×10 storey; a construction-phase line runs vertically at x = 5.
+        let outline =
+            FloorPlan::from_clean_ring(&[p(0., 0.), p(10., 0.), p(10., 10.), p(0., 10.)]).unwrap();
+        let phase_line = [[p(5.0, 0.0), p(5.0, 10.0)]];
+        // A free-standing room whose RIGHT wall is drawn at x = 5.1 — 10 cm off
+        // the phase line, and nearer to it than to any outline wall.
+        let stroke = vec![
+            p(2.0, 2.0),
+            p(3.5, 2.0),
+            p(5.1, 2.0),
+            p(5.1, 4.0),
+            p(5.1, 6.0),
+            p(3.5, 6.0),
+            p(2.0, 6.0),
+            p(2.0, 4.0),
+            p(2.05, 2.05),
+        ];
+        let outcome = outline
+            .carve_or_cut_refs(&stroke, &SubareaTuning::default(), false, &phase_line)
+            .expect("the closed room carves");
+        let SubareaOutcome::Area(plan) = outcome else {
+            panic!("a closed loop is a carve, not a cut");
+        };
+        plan.validate_simple().unwrap();
+        let ring = plan.get_points();
+        // The right wall levelled onto the phase line: a vertex at x = 5.0, none
+        // left at the drawn x = 5.1.
+        assert!(
+            ring.iter().any(|v| (v.x - 5.0).abs() < 1e-3),
+            "right wall levelled onto the phase line x = 5: {ring:?}"
+        );
+        assert!(
+            !ring.iter().any(|v| (v.x - 5.1).abs() < 1e-3),
+            "the drawn x = 5.1 did not survive: {ring:?}"
+        );
+        // A free-standing room is position-free on BOTH axes against the outline
+        // alone; with the phase line as a reference the levelled wall fixes X, so
+        // only Y stays free — that's the pin dimensioning reads to skip the wall.
+        assert_eq!(
+            outline.free_position_axes(&plan, &[]),
+            vec![crate::ParameterAxis::X, crate::ParameterAxis::Y],
+            "no phase reference → both axes free"
+        );
+        assert_eq!(
+            outline.free_position_axes(&plan, &phase_line),
+            vec![crate::ParameterAxis::Y],
+            "the phase-levelled wall fixes X"
+        );
     }
 }
 

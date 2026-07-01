@@ -596,7 +596,7 @@ mod path_edit_tests {
             .iter()
             .position(|q| (q.x - 3.0).abs() < 1e-3 && (q.y - 3.5).abs() < 1e-3)
             .expect("area has the mid-facet vertex");
-        let pinned = outline.params_pinned_to_outline(&area);
+        let pinned = outline.params_pinned_to_outline(&area, &[]);
         let xp = area.vertex_x_param(0, idx);
         let yp = area.vertex_y_param(0, idx);
         assert!(

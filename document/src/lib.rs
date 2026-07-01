@@ -633,11 +633,12 @@ impl StoreyDoc {
         stroke: &[Point2f32],
         holes: &[Vec<Point2f32>],
         tuning: &SubareaTuning,
+        ref_walls: &[[Point2f32; 2]],
     ) -> Result<(FloorPlan, SubareaOutcome), Error> {
         let pieces = self.outline.floor_plan.subtract_all(holes);
         let boundary = pick_piece_for_stroke(pieces, stroke)
             .unwrap_or_else(|| self.outline.floor_plan.clone());
-        let outcome = boundary.carve_or_cut(stroke, tuning, false)?;
+        let outcome = boundary.carve_or_cut_refs(stroke, tuning, false, ref_walls)?;
         Ok((boundary, outcome))
     }
 
@@ -676,7 +677,7 @@ impl StoreyDoc {
         self.dimensioning = DimensionState::default();
         self.dimensioning.scale_set = true;
         self.floor_plan = new_plan;
-        self.dimensioning.known_params = prev_plan.params_pinned_to_outline(&self.floor_plan);
+        self.dimensioning.known_params = prev_plan.params_pinned_to_outline(&self.floor_plan, &[]);
         let active = self.floor_plan.all_active_params();
         Ok((self.dimensioning.known_params.len(), active.len()))
     }
@@ -725,12 +726,17 @@ impl StoreyDoc {
     /// living area, or the available region for a phase area. Also records the
     /// axes the boundary does NOT pin (`position_free_axes`) — the boundary
     /// isn't retained, so the area's positional freedom is captured here, once.
-    pub fn pinned_slot_for(&self, boundary: &FloorPlan, plan: FloorPlan) -> ShapeSlot {
+    pub fn pinned_slot_for(
+        &self,
+        boundary: &FloorPlan,
+        plan: FloorPlan,
+        ref_walls: &[[Point2f32; 2]],
+    ) -> ShapeSlot {
         ShapeSlot {
             dimensioning: DimensionState {
                 scale_set: self.outline.dimensioning.scale_set,
-                known_params: boundary.params_pinned_to_outline(&plan),
-                position_free_axes: boundary.free_position_axes(&plan),
+                known_params: boundary.params_pinned_to_outline(&plan, ref_walls),
+                position_free_axes: boundary.free_position_axes(&plan, ref_walls),
                 ..Default::default()
             },
             floor_plan: plan,

@@ -195,7 +195,7 @@ impl AppController {
             .unwrap_or_default();
         match self
             .document
-            .carve_or_cut_in_available(pts, &step_rings, &self.tuning.subarea)
+            .carve_or_cut_in_available(pts, &step_rings, &self.tuning.subarea, &[])
         {
             Ok((boundary, SubareaOutcome::Area(plan))) => {
                 if let Err(e) = plan.validate_simple() {

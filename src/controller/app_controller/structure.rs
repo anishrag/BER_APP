@@ -1218,10 +1218,14 @@ impl AppController {
             let Some(storey) = self.current_storey() else {
                 return;
             };
-            [SurfaceKind::Walls, SurfaceKind::Ceilings, SurfaceKind::Floors]
-                .into_iter()
-                .filter(|k| self.structure_kinds.contains(k))
-                .find_map(|k| storey.surface_at(k, world_x, world_y, tol))
+            [
+                SurfaceKind::Walls,
+                SurfaceKind::Ceilings,
+                SurfaceKind::Floors,
+            ]
+            .into_iter()
+            .filter(|k| self.structure_kinds.contains(k))
+            .find_map(|k| storey.surface_at(k, world_x, world_y, tol))
         };
         if let Some(id) = hit {
             if !self.structure_selected.insert(id) {
@@ -1273,7 +1277,7 @@ impl AppController {
         self.sync_active();
         match self
             .document
-            .carve_or_cut_in_available(&pts, &[], &self.tuning.subarea)
+            .carve_or_cut_in_available(&pts, &[], &self.tuning.subarea, &[])
         {
             Ok((boundary, SubareaOutcome::Cut(a, b))) => {
                 self.pending_structure_cut = Some([
@@ -1510,7 +1514,11 @@ impl AppController {
                                 );
                             }
                             SurfaceKind::Ceilings => {
-                                storey.push_structure_split(SurfaceKind::Ceilings, ring64, Vec::new());
+                                storey.push_structure_split(
+                                    SurfaceKind::Ceilings,
+                                    ring64,
+                                    Vec::new(),
+                                );
                                 pushed_roof = true;
                             }
                         }
@@ -1601,9 +1609,13 @@ impl AppController {
     /// The highest-priority active mode (wall → roof → floor) — the kind a carve
     /// SPLIT acts on when several modes are active. `None` when no mode is active.
     pub(super) fn primary_structure_kind(&self) -> Option<SurfaceKind> {
-        [SurfaceKind::Walls, SurfaceKind::Ceilings, SurfaceKind::Floors]
-            .into_iter()
-            .find(|k| self.structure_kinds.contains(k))
+        [
+            SurfaceKind::Walls,
+            SurfaceKind::Ceilings,
+            SurfaceKind::Floors,
+        ]
+        .into_iter()
+        .find(|k| self.structure_kinds.contains(k))
     }
 
     /// The current storey's resolved regions, if a storey is in scope.
