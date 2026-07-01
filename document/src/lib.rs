@@ -730,9 +730,14 @@ impl StoreyDoc {
     pub fn pinned_slot_for(
         &self,
         boundary: &FloorPlan,
-        plan: FloorPlan,
+        mut plan: FloorPlan,
         ref_walls: &[[Point2f32; 2]],
     ) -> ShapeSlot {
+        // Turn the area's genuinely-free constant coordinates into parameters so
+        // dimensioning prompts for them — otherwise a drawn edge whose coordinate
+        // landed on the constant V0 anchor (e.g. the only free side of a cornered
+        // cut) is frozen at its drawn length, never asked about.
+        plan.promote_free_walls(boundary, ref_walls);
         ShapeSlot {
             dimensioning: DimensionState {
                 scale_set: self.outline.dimensioning.scale_set,

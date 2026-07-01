@@ -609,6 +609,62 @@ mod path_edit_tests {
         );
     }
 
+    /// A cornered cut whose ONLY free edge's coordinate lands on the constant
+    /// V0 anchor (the ceiling-step bug from the field trace): left edge on the
+    /// outline, top + right on reference lines, bottom edge free. Before
+    /// `promote_free_walls` the free bottom `y` was baked into V0's constant, so
+    /// after pinning EVERY parameter was known and dimensioning asked nothing —
+    /// the step depth froze at its drawn value. Promotion turns that free
+    /// coordinate into a parameter that pinning leaves UNKNOWN, so it's prompted.
+    #[test]
+    fn promote_frees_the_undimensionable_cornered_cut_edge() {
+        // Outline whose left wall is x=0 and top-right region carries the refs.
+        let outline =
+            FloorPlan::from_clean_ring(&[p(0., 0.), p(10., 0.), p(10., 6.), p(0., 6.)]).unwrap();
+        // The cut rectangle: left (x=0) on the outline, top (y=4) on a phase
+        // reference wall, right (x=6) on its continuation, bottom (y=2) FREE.
+        let mut area =
+            FloorPlan::from_clean_ring(&[p(0., 2.), p(0., 4.), p(6., 4.), p(6., 2.)]).unwrap();
+        // Reference walls the carve levelled onto: the horizontal phase line at
+        // y=4, and the vertical continuation at x=6 running PAST the free bottom
+        // corner (down to y=0) — as a real phase line does, so the free corner
+        // (6,2) sits mid-wall (its x pinned) but is NOT a reference endpoint.
+        let refs = [[p(0., 4.), p(6., 4.)], [p(6., 4.), p(6., 0.)]];
+
+        // Before promotion: the free bottom y=2 is V0's constant, so pinning
+        // knows every parameter and nothing is left to prompt.
+        let all_before = area.get_points();
+        let pinned_before = outline.params_pinned_to_outline(&area, &refs);
+        assert_eq!(
+            pinned_before.len(),
+            area.active_parameter_count(),
+            "without promotion every parameter is pinned — nothing to dimension"
+        );
+
+        area.promote_free_walls(&outline, &refs);
+        assert_eq!(area.get_points(), all_before, "geometry unchanged");
+
+        // After promotion there is a parameter that pinning does NOT know — the
+        // free bottom edge — so dimensioning prompts for it.
+        let pinned_after = outline.params_pinned_to_outline(&area, &refs);
+        let free: Vec<_> = area
+            .all_active_params()
+            .into_iter()
+            .filter(|p| !pinned_after.contains(p))
+            .collect();
+        assert_eq!(
+            free.len(),
+            1,
+            "exactly the free bottom edge is left to dimension, got {free:?}"
+        );
+        // And that free parameter carries the drawn value (y=2), unmoved.
+        assert!(
+            free.iter()
+                .all(|p| (area.parameter_value(*p).unwrap() - 2.0).abs() < 1e-4),
+            "the promoted parameter keeps the drawn coordinate"
+        );
+    }
+
     /// `from_points_to_world_orthogonal` aligns a rotated trace to the world
     /// axes, so every edge ends up horizontal or vertical — unlike the
     /// dominant-angle default, which (beyond its ~15° axis-snap window) keeps

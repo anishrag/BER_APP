@@ -296,6 +296,28 @@ impl FloorPlan {
         pinned
     }
 
+    /// Promote this area's genuinely-FREE constant coordinates to parameters so
+    /// dimensioning prompts for them. A carved sub-area anchors its ring-0 V0 as
+    /// a constant, and any coordinate equal to it collapses to a constant too;
+    /// when such a coordinate is a free DRAWN edge (not on `boundary` or a
+    /// `ref_walls` reference line), it has no parameter and dimensioning can't
+    /// ask about it — freezing the wall at its drawn length. This restores the
+    /// prompt.
+    ///
+    /// Purely a REPRESENTATION change (a constant becomes an equal-valued
+    /// parameter) — the geometry is unchanged, so the pin / position scans that
+    /// follow are unaffected. Call it BEFORE
+    /// [`params_pinned_to_outline`](Self::params_pinned_to_outline). `boundary`
+    /// and `ref_walls` must be the SAME the carve levelled onto.
+    pub fn promote_free_walls(&mut self, boundary: &FloorPlan, ref_walls: &[[Point2f32; 2]]) {
+        let mut contacts: std::collections::HashSet<(usize, ParameterAxis)> =
+            std::collections::HashSet::new();
+        boundary.scan_outline_contacts(self, ref_walls, &mut |idx, axis| {
+            contacts.insert((idx, axis));
+        });
+        self.parametric.promote_free_constants(&contacts);
+    }
+
     /// Axes along which `area`'s absolute position is NOT fixed by this
     /// boundary plan — the whole area could translate along a listed axis
     /// without violating any snapped wall / shared corner / diagonal-facet

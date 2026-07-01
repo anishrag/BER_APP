@@ -43,7 +43,7 @@ pub enum Axis {
 
 /// Which Cartesian axis a parameter's value lives on. A parameter is used as
 /// either an `x_expr` or a `y_expr` (never both), so its axis is well-defined.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 #[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
 pub enum ParameterAxis {
     /// Parameter controls an x-coordinate.
@@ -1138,6 +1138,81 @@ impl ParametricPlan {
         self.next_param_id = param_id;
 
         Ok(())
+    }
+
+    /// Promote every ring-0 coordinate that is a `Constant` yet sits on NO
+    /// boundary contact into a fresh parameter, so dimensioning can prompt for
+    /// it. `contacts` is the set of `(vertex_idx, axis)` pairs on ring 0 whose
+    /// coordinate is fixed by the storey outline / a reference line — the
+    /// caller's contact scan.
+    ///
+    /// Carving a sub-area anchors ring 0's V0 as a `Constant` origin (see
+    /// [`apply_orthogonal_constraints`](Self::apply_orthogonal_constraints)),
+    /// and any coordinate equal to V0's collapses to a constant too. When such
+    /// a coordinate is a genuinely FREE drawn edge (not on a reference), it has
+    /// no parameter, so dimensioning treats it as already fixed and never asks —
+    /// freezing that wall at its drawn length. Promoting it restores the
+    /// prompt; a constant that IS on a contact stays constant (already fixed).
+    ///
+    /// Coordinates are grouped by `(axis, value)`: a group promotes to ONE
+    /// shared parameter (so a free edge shared by two vertices stays a single
+    /// wall) and only when NO vertex in the group is a contact (a group that
+    /// touches a reference is pinned, so it's left constant). Ring 0 only —
+    /// sub-areas are single-ring.
+    ///
+    /// Only an axis with at least one contact is touched. On a contact-free
+    /// axis the whole area is free to slide (its drawn position on that axis is
+    /// arbitrary), so V0's constant there is the legitimate anchor the
+    /// length-solver measures from — promoting it would leave every wall with
+    /// two unknown endpoints and STALL dimensioning. A fixed axis always keeps
+    /// its anchor: the contact coordinate (a known param, or a constant left
+    /// alone by the no-contact-in-group rule).
+    pub fn promote_free_constants(&mut self, contacts: &HashSet<(usize, ParameterAxis)>) {
+        if self.rings.is_empty() {
+            return;
+        }
+        for axis in [ParameterAxis::X, ParameterAxis::Y] {
+            // A contact-free axis has no anchor to spare — skip it entirely.
+            if !contacts.iter().any(|(_, a)| *a == axis) {
+                continue;
+            }
+            // (value bits) → (any member is a contact, vertex indices carrying it).
+            // Exact bit-equality is sound: `apply_orthogonal_constraints` already
+            // deduped near-equal coordinates to identical values.
+            let mut groups: HashMap<u32, (bool, Vec<usize>)> = HashMap::new();
+            for (i, v) in self.rings[0].iter().enumerate() {
+                let expr = match axis {
+                    ParameterAxis::X => &v.x_expr,
+                    ParameterAxis::Y => &v.y_expr,
+                };
+                if let CoordinateExpression::Constant(c) = expr {
+                    let entry = groups.entry(c.to_bits()).or_insert((false, Vec::new()));
+                    entry.1.push(i);
+                    if contacts.contains(&(i, axis)) {
+                        entry.0 = true;
+                    }
+                }
+            }
+            for (bits, (any_contact, idxs)) in groups {
+                if any_contact {
+                    continue; // fixed by a reference — keep it constant
+                }
+                let pid = self.next_param_id;
+                self.next_param_id += 1;
+                self.parameters.insert(pid, f32::from_bits(bits));
+                for i in idxs {
+                    match axis {
+                        ParameterAxis::X => {
+                            self.rings[0][i].x_expr = CoordinateExpression::Parameter(pid)
+                        }
+                        ParameterAxis::Y => {
+                            self.rings[0][i].y_expr = CoordinateExpression::Parameter(pid)
+                        }
+                    }
+                }
+            }
+        }
+        self.recompute_active_parameter_count();
     }
 
     /// Detect pairs of axis-aligned edges — possibly in different rings —
