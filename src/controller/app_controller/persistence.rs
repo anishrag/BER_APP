@@ -575,18 +575,29 @@ impl AppController {
         else {
             return;
         };
+        // `storey_idx` is now vestigial — the active storey lives in the Document.
+        let _ = storey_idx;
+        self.restore_document_snapshot(version, &json);
+    }
+
+    /// Replace the rebuilt editor `Document` with a serialized editing-layer
+    /// snapshot `json` of format `version`, when it's compatible. Shared by the
+    /// DB path ([`try_restore_snapshot`](Self::try_restore_snapshot)) and the
+    /// checkpoint path ([`load_checkpoint`](Self::load_checkpoint)). Silently
+    /// keeps the rebuild on a stale/incompatible version, an unparseable
+    /// snapshot, or a storey-count mismatch — the resolved record stays the
+    /// durable source of truth.
+    pub(super) fn restore_document_snapshot(&mut self, version: i64, json: &str) {
         if version != PARAMETRIC_SNAPSHOT_VERSION {
             return;
         }
-        let Ok(mut doc) = serde_json::from_str::<Document>(&json) else {
+        let Ok(mut doc) = serde_json::from_str::<Document>(json) else {
             return;
         };
         // The snapshot is a whole multi-storey Document, written alongside the
         // resolved record — so it must describe the SAME storey count and have at
         // least one storey. On any mismatch keep the rebuild, which is always
-        // consistent with `current_record`. `storey_idx` is now vestigial — the
-        // active storey lives in the Document.
-        let _ = storey_idx;
+        // consistent with `current_record`.
         let n = self
             .current_record
             .as_ref()
@@ -615,18 +626,30 @@ impl AppController {
         // Flush the live editor buffer into `current_record` first, so the
         // checkpoint captures what's on screen right now.
         self.commit_to_ber()?;
+        // Serialize the editing-layer Document snapshot alongside the Ber, so the
+        // reload restores the exact parametric plans (and their VertexIds) instead
+        // of rebuilding a fresh outline — mirrors the DB save's two halves.
+        let doc_json = serde_json::to_string(&self.document).ok();
+        let snapshot = doc_json
+            .as_deref()
+            .map(|j| (PARAMETRIC_SNAPSHOT_VERSION, j));
         let record = self.current_record.as_ref().ok_or("no BER loaded")?;
-        crate::engine::checkpoint::save(&record.data, crate::engine::checkpoint::DEFAULT_PATH)
+        crate::engine::checkpoint::save(
+            &record.data,
+            snapshot,
+            crate::engine::checkpoint::DEFAULT_PATH,
+        )
     }
 
     /// DEV: load the checkpoint file (if present) into the editor and return
     /// whether it succeeded. Mirrors `open_ber`'s reconstruction. Called on
     /// startup when `BER_CHECKPOINT` is set.
     pub fn load_checkpoint(&mut self) -> bool {
-        let Some(ber) = crate::engine::checkpoint::load(crate::engine::checkpoint::DEFAULT_PATH)
+        let Some(loaded) = crate::engine::checkpoint::load(crate::engine::checkpoint::DEFAULT_PATH)
         else {
             return false;
         };
+        let crate::engine::checkpoint::Loaded { ber, snapshot } = loaded;
         let record = BerRecord {
             id: ber.id,
             name: "checkpoint".to_string(),
@@ -664,12 +687,20 @@ impl AppController {
         }
         self.document.set_active_storey(0);
         self.current_storey_idx = Some(0);
+        // Restore the editing-layer Document snapshot the checkpoint carried, so
+        // the exact parametric plans (and their VertexIds) resume — mirrors
+        // `open_ber`'s `try_restore_snapshot`. On a missing / stale-version
+        // snapshot (or a legacy Ber-only checkpoint) this no-ops and the rebuild
+        // above stands; the anchor re-seed below then heals opening homing.
+        if let Some((version, json)) = snapshot {
+            self.restore_document_snapshot(version, &json);
+        }
         // Same restart-safe re-derivation as open_ber.
         self.rederive_inherited_seed_pending();
         // Rebuild ALL editing state from Layer 1 (every storey) — the SAME shared
-        // sequence as `open_ber`. The checkpoint has no Document snapshot, so this
-        // is the only source: it reconstructs phase/step/ceiling/partition/section
-        // state AND seeds the durable exposure + construction maps. Seeding here is
+        // sequence as `open_ber`. Reconstructs phase/step/ceiling/partition/section
+        // state AND seeds the durable exposure + construction maps (idempotent over
+        // a restored snapshot). Seeding here is
         // what fixes the checkpoint "floor goes red after adding a window" bug
         // (§6) — previously the seeds ran only on the DB path, so the first
         // re-resolve reset exposures to `Unset`. It also reconstructs ALL storeys,
