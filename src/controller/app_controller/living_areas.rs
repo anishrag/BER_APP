@@ -223,6 +223,17 @@ impl AppController {
         dump_stroke("living-area", &pts);
         // Save the live buffer so the outline we carve against is current.
         self.sync_active();
+        // Pre-snap the stroke onto INTERIOR reference lines the carve can't align
+        // to on its own: the construction-phase region edges, so a living area
+        // drawn beside a phase "year" line lands on it. (The OUTLINE is the carve
+        // boundary, so leveling onto a parallel house wall is handled post-carve
+        // by `snap_walls` — see there — not here.) The carve below still clips +
+        // boundary-follows the outline; a vertex nudged onto a phase line sits
+        // away from the outline, so the follow leaves it on that line. Mirrors the
+        // ceiling-exposure pre-snap (`ceiling_carve_reference_segments`).
+        let ref_segments = self.living_area_reference_segments();
+        let snap_tol = self.tuning.subarea.corner_snap_m;
+        let pts = manip_plan::snap_stroke_to_segments(&pts, &ref_segments, snap_tol);
         // Living areas never overlap: carve against the outline MINUS the existing
         // living areas (the available region), so a new one tiles against them and
         // snaps to their shared walls. The available region may be disconnected;
@@ -255,6 +266,29 @@ impl AppController {
             }
             Err(e) => log::error!("living-area carve_or_cut: {}", e),
         }
+    }
+
+    /// Interior reference lines a living-area stroke pre-snaps onto (world-metre
+    /// segments) before the carve: the active storey's construction-PHASE region
+    /// edges, so a living area drawn beside a phase "year" line lands on that
+    /// line. Leveling onto a parallel OUTLINE wall is NOT here — the outline is
+    /// the carve boundary, so that's done post-carve by `snap_walls`. Empty when
+    /// the storey has no phase regions. Mirror of
+    /// [`ceiling_carve_reference_segments`](Self::ceiling_carve_reference_segments).
+    fn living_area_reference_segments(&self) -> Vec<[Point2f32; 2]> {
+        let idx = self.current_storey_idx.unwrap_or(0);
+        let Some(regions) = self.phase_regions.get(&idx) else {
+            return Vec::new();
+        };
+        let mut segments: Vec<[Point2f32; 2]> = Vec::new();
+        for region in regions {
+            let ring = &region.polygon;
+            let n = ring.len();
+            for i in 0..n {
+                segments.push([ring[i], ring[(i + 1) % n]]);
+            }
+        }
+        segments
     }
 
     /// The two candidate regions of a pending cut (world coords), for the UI to

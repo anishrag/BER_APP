@@ -184,21 +184,6 @@ pub enum SubareaOutcome {
     Area(FloorPlan),
 }
 
-thread_local! {
-    /// When set, the carve treats the outline as a REFERENCE to align to (the
-    /// storey below in a new-storey trace) rather than a containing fence — so a
-    /// wall snaps onto a parallel boundary wall it's merely ADJACENT to (meets at a
-    /// corner), not only one it OVERLAPS. Set by [`carve_or_cut`] from its
-    /// `allow_outside` flag; defaults off for living-area carving.
-    static ALIGN_TO_REFERENCE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
-}
-
-/// Whether the current carve aligns walls to an adjacent reference wall (see
-/// [`ALIGN_TO_REFERENCE`]).
-fn align_to_reference() -> bool {
-    ALIGN_TO_REFERENCE.with(|f| f.get())
-}
-
 /// Resolve a freehand sub-area stroke against `outline`: clip it onto the storey
 /// ([`region::clip_stroke_inside`]), then either split it (a straight cut → two regions,
 /// [`split_cut`]) or carve it (anything else → one area, [`sub_area`]). The carve
@@ -220,9 +205,6 @@ fn carve_or_cut(
             "no storey outline to carve against".into(),
         ));
     }
-    // A new-storey trace aligns its walls to the storey below even where they only
-    // meet it at a corner (adjacent, not overlapping).
-    ALIGN_TO_REFERENCE.with(|f| f.set(allow_outside));
     let pts = region::clip_stroke_inside(outline, stroke, tuning.close_gap_m, allow_outside);
     let tol = (geom::bbox_diagonal(&pts) * tuning.rdp_tol_ratio).max(tuning.rdp_tol_floor);
     match split_cut(outline, &pts, tol, tuning)? {
@@ -840,16 +822,16 @@ fn snap_walls(outline: &[Point2f32], pts: &[Point2f32], tol: f32) -> Vec<Point2f
     let n = pts.len();
     let mut remap_x: Vec<(f32, f32)> = Vec::new();
     let mut remap_y: Vec<(f32, f32)> = Vec::new();
-    // Normally a wall must OVERLAP a parallel boundary wall — or at least TOUCH
-    // its span end-to-end — to snap onto it. The touching case matters when the
-    // boundary follower pinned part of a drawn line exactly onto an outline edge
-    // it overlapped, leaving the interior remainder ADJACENT at the shared corner
-    // (span overlap exactly zero): without it, one drawn line keeps two
-    // perpendicular coordinates — a jog that later derives a sliver riser wall.
-    // When aligning to a reference (new-storey), also accept walls a full `tol`
-    // APART along the span — so a new wall flush with the storey-below's
-    // neighbouring wall snaps to its line.
-    let min_overlap = if align_to_reference() { -tol } else { -eps };
+    // A drawn wall levels onto a parallel boundary wall it runs NEAR, even when
+    // their spans don't overlap but sit within `tol` APART along the span — so a
+    // living area drawn beside (not straddling) a house wall lands level with it,
+    // and the touching case (span overlap exactly zero, where the boundary
+    // follower pinned part of a drawn line onto an outline edge and left the
+    // interior remainder adjacent at the shared corner) is covered too — without
+    // it that line keeps two perpendicular coordinates, a jog that later derives
+    // a sliver riser wall. The new-storey reference trace used this looser rule
+    // already; it's now the rule for every sub-area carve.
+    let min_overlap = -tol;
     let overlaps =
         |alo: f32, ahi: f32, blo: f32, bhi: f32| ahi.min(bhi) - alo.max(blo) > min_overlap;
     for i in 0..n {
