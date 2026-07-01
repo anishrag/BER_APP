@@ -1409,7 +1409,15 @@ impl Transform2d {
 /// common scale lets the reader compare storey sizes — can compute the shared
 /// value before building each transform.
 pub(crate) fn auto_fit_scale(rect: egui::Rect, min_xy: (f64, f64), max_xy: (f64, f64)) -> f64 {
-    let pad = 30.0_f32;
+    // Padding proportional to the smaller canvas dimension (~8%), so the fitted
+    // geometry keeps a comfortable margin instead of pressing against the edges.
+    // A fixed 30 px was a sliver on a ~900 px-tall tablet canvas — the first
+    // storey outline (fit by height, in raw pixel space) landed edge-to-edge and
+    // read as "too big", so the assessor had to zoom out and pan. Floored at the
+    // historical 30 px so small desktop windows and the "All storeys" overview
+    // cells keep at least the previous margin (their shared-scale fit math is
+    // then bit-for-bit unchanged, since a fraction of a common rect cancels).
+    let pad = (rect.width().min(rect.height()) * 0.08).max(30.0);
     let target_w = (rect.width() - 2.0 * pad).max(1.0);
     let target_h = (rect.height() - 2.0 * pad).max(1.0);
     let src_w = (max_xy.0 - min_xy.0).max(1e-6);
