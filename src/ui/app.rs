@@ -130,8 +130,8 @@ pub struct SketchState {
     /// pending at once). `None` when no rect length stage is up.
     pub ceiling_rect_len_key: Option<manip_plan::ParameterAxis>,
     /// Backing string for the new-storey flow's thickness input. PREFILLED
-    /// "0.30" when the Thickness stage opens (via the one-shot guard below);
-    /// the user overtypes, or "Use 0.30" submits the default directly.
+    /// "0.25" when the Thickness stage opens (via the one-shot guard below);
+    /// the user overtypes, or "Use 0.25" submits the default directly.
     pub new_storey_thickness_input: String,
     /// One-shot guard for the thickness prefill, mirroring
     /// `ceiling_apex_prefilled`: set when the stage's prefill has been written,
@@ -757,7 +757,7 @@ impl eframe::App for BerApp {
                             }
 
                             // Prefill the new-storey thickness box with the typical
-                            // 0.30 m when the Thickness stage OPENS — "Use 0.30" /
+                            // 0.25 m when the Thickness stage OPENS — "Use 0.25" /
                             // Enter then accepts it as-is. Same one-shot guard
                             // pattern as the roof prefills, so the user's typing
                             // on the open stage isn't clobbered every frame.
@@ -768,7 +768,7 @@ impl eframe::App for BerApp {
                                 if !self.sketch_state.new_storey_thickness_prefilled {
                                     self.sketch_state.new_storey_thickness_prefilled = true;
                                     self.sketch_state.new_storey_thickness_input =
-                                        "0.30".to_string();
+                                        "0.25".to_string();
                                 }
                             } else {
                                 self.sketch_state.new_storey_thickness_prefilled = false;

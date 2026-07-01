@@ -61,7 +61,7 @@ pub(super) struct PendingNewStorey {
 #[derive(Debug, Clone)]
 pub struct NewStoreyPromptUiData {
     /// True while the slab thickness is being asked (outline strokes are
-    /// ignored; the dock shows the thickness input, prefilled 0.30).
+    /// ignored; the dock shows the thickness input, prefilled 0.25).
     pub thickness_pending: bool,
     /// True while the draw-vs-suggest choice is being asked.
     pub method_pending: bool,

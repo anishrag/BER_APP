@@ -984,7 +984,7 @@ pub struct SketchView<'a> {
     /// browsing, the canvas tints the current suggestion's ring over the
     /// previous-storey watermark. `None` when no flow is in progress.
     pub new_storey_prompt: Option<NewStoreyPromptUiData>,
-    /// Backing string for the flow's thickness input (prefilled "0.30" when
+    /// Backing string for the flow's thickness input (prefilled "0.25" when
     /// the Thickness stage opens — the one-shot guard lives on `SketchState`).
     pub new_storey_thickness_input: &'a mut String,
     /// Last error from the new-storey flow's toolbar (thickness assign,

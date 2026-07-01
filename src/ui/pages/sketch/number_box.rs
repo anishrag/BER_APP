@@ -457,8 +457,8 @@ pub(super) fn render<F: FnMut(UiEvent)>(
             )
             .primary()
             .keep_buffer(),
-            Action::new("Use 0.30", "Accept the typical 0.30 m slab", |_| {
-                SketchEvent::AssignFloorThickness(0.30)
+            Action::new("Use 0.25", "Accept the typical 0.25 m slab", |_| {
+                SketchEvent::AssignFloorThickness(0.25)
             })
             .bare(),
         ];
@@ -467,7 +467,7 @@ pub(super) fn render<F: FnMut(UiEvent)>(
             rect,
             "Floor thickness to the storey below (m)",
             Some("Drawing is paused until the thickness is set."),
-            "e.g. 0.30",
+            "e.g. 0.25",
             view.new_storey_error,
             view.new_storey_thickness_input,
             &actions,
