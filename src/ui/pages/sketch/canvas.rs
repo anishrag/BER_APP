@@ -2001,7 +2001,14 @@ pub(super) fn render<F: FnMut(UiEvent)>(
         && !cut_pending
         && !touch_nav_active
     {
-        if let Some(t) = canvas_transform(ber, current_storey_idx, rect, vp, false) {
+        // Watermark-inclusive fit (`true`) so this matches the SAME transform the
+        // walls + openings are RENDERED with (`render_ber` → `storey_transform` →
+        // `fit_bbox_for_storey`). On a setback upper storey the watermark enlarges
+        // the fit box; using the storey-alone box here (`false`) put clicks in a
+        // different scale/origin than the drawn walls, so the tap never landed on
+        // a wall — the exposure-mode bug (above), same cause. Ground storey has no
+        // watermark, so it worked; upper setback storeys didn't.
+        if let Some(t) = canvas_transform(ber, current_storey_idx, rect, vp, true) {
             let tol_world = (14.0 / t.scale()) as f64;
             let tap = response.clicked_by(egui::PointerButton::Primary)
                 || response.drag_started_by(egui::PointerButton::Primary);
@@ -2104,8 +2111,11 @@ pub(super) fn render<F: FnMut(UiEvent)>(
     // its plan footprint), drawn on top of the openings painted by `render_ber`.
     if view.openings_mode && view.elevation_view.is_none() {
         if let Some(sel) = view.roof_window_selected {
+            // Watermark-inclusive (`true`) to overlay exactly on the openings
+            // `render_ber` painted (`storey_transform` → `fit_bbox_for_storey`) —
+            // else the highlight drifts off the window on a setback upper storey.
             if let (Some(t), Some(storey)) = (
-                canvas_transform(ber, current_storey_idx, rect, vp, false),
+                canvas_transform(ber, current_storey_idx, rect, vp, true),
                 ber.and_then(|b| current_storey_idx.and_then(|i| b.storeys.get(i))),
             ) {
                 if let Some(w) = storey.windows.iter().find(|w| w.id == sel) {
