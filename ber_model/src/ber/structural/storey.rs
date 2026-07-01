@@ -32,9 +32,8 @@ pub struct Storey {
     pub storey_number: i32,
     pub floors: FloorRegions,
     pub walls: WallRegions,
-    // Renamed from `roofs` (it's the heat-loss CEILING, not the dwelling roof);
-    // alias keeps records saved under the old key loadable.
-    #[serde(alias = "roofs")]
+    /// The heat-loss CEILING regions (the top of the habitable storey) — NOT the
+    /// dwelling roof (that's `Ber::roof`).
     pub ceilings: CeilingRegions,
     pub windows: Vec<Window>,
     pub doors: Vec<Door>,
