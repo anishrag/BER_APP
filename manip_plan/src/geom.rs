@@ -516,6 +516,65 @@ pub fn project_distance_along(a: Point2f32, b: Point2f32, len: f32, px: f32, py:
     (dot / len).clamp(0.0, len)
 }
 
+/// Along-wall distances (metres from `a`) where reference segments CROSS or
+/// TOUCH the wall segment `a→b` of length `len` — the snap candidates for a
+/// point sliding along the wall (e.g. an exposure section handle). A proper
+/// crossing contributes its intersection point; an endpoint graze within
+/// `eps` metres counts as a touch; a COLLINEAR reference contributes its two
+/// endpoints' projections (the overlap's extent on the wall). Results are
+/// clamped to `[0, len]`, deduped within `eps`, and sorted ascending. A
+/// degenerate wall yields nothing.
+pub fn crossing_distances_along(
+    a: Point2f32,
+    b: Point2f32,
+    len: f32,
+    refs: &[[Point2f32; 2]],
+    eps: f32,
+) -> Vec<f32> {
+    if len <= 1e-6 {
+        return Vec::new();
+    }
+    let (dx, dy) = (b.x - a.x, b.y - a.y);
+    let mut out: Vec<f32> = Vec::new();
+    for [p, q] in refs {
+        let (ex, ey) = (q.x - p.x, q.y - p.y);
+        let elen = (ex * ex + ey * ey).sqrt();
+        if elen <= 1e-6 {
+            continue; // degenerate reference
+        }
+        let (wx, wy) = (p.x - a.x, p.y - a.y);
+        // denom = len·elen·sin(angle between) — scale the parallel test by the
+        // segment lengths so it's unit-consistent.
+        let denom = dx * ey - dy * ex;
+        if denom.abs() > 1e-4 * len * elen {
+            // Non-parallel lines: one intersection; keep it if it lies on both
+            // SEGMENTS (allowing an endpoint graze of `eps` metres on each).
+            let t = (wx * ey - wy * ex) / denom; // along the wall, 0..1
+            let u = (wx * dy - wy * dx) / denom; // along the reference, 0..1
+            let (tol_t, tol_u) = (eps / len, eps / elen);
+            if (-tol_t..=1.0 + tol_t).contains(&t) && (-tol_u..=1.0 + tol_u).contains(&u) {
+                out.push((t * len).clamp(0.0, len));
+            }
+        } else {
+            // Parallel: collinear only if the reference lies on the wall's
+            // LINE (perpendicular offset within eps); then each of its
+            // endpoints inside the wall's extent marks the overlap.
+            let off = (wx * dy - wy * dx).abs() / len;
+            if off <= eps {
+                for r in [p, q] {
+                    let d = ((r.x - a.x) * dx + (r.y - a.y) * dy) / len;
+                    if (-eps..=len + eps).contains(&d) {
+                        out.push(d.clamp(0.0, len));
+                    }
+                }
+            }
+        }
+    }
+    out.sort_by(|x, y| x.partial_cmp(y).unwrap_or(std::cmp::Ordering::Equal));
+    out.dedup_by(|x, y| (*x - *y).abs() <= eps);
+    out
+}
+
 /// Distance from `coord` to the nearest edge of `ring` that is PARALLEL to
 /// `axis` (a `Horizontal` axis compares against horizontal edges' y, a
 /// `Vertical` one against vertical edges' x). `None` when the ring has no
@@ -1820,5 +1879,29 @@ mod tests {
             crate::simplify_to_cut(&[p(1.0, 1.0), p(1.0, 1.0)], 0.3),
             None
         );
+    }
+
+    /// `crossing_distances_along`: proper crossings, endpoint touches, and
+    /// collinear overlaps all land as along-wall distances; duplicates within
+    /// eps collapse; the result is sorted; misses contribute nothing.
+    #[test]
+    fn crossing_distances_along_finds_crossings_touches_and_overlaps() {
+        let (a, b, len) = (p(0.0, 0.0), p(10.0, 0.0), 10.0);
+        let refs = [
+            [p(4.0, -1.0), p(4.0, 1.0)],     // proper crossing at 4.0
+            [p(7.0, 0.0), p(7.0, 5.0)],      // endpoint TOUCHES the wall at 7.0
+            [p(2.0, 0.0), p(5.0, 0.0)],      // collinear overlap → 2.0 and 5.0
+            [p(4.003, -2.0), p(4.003, 2.0)], // dup of 4.0 within eps → collapses
+            [p(3.0, 1.0), p(6.0, 1.0)],      // parallel, OFF the wall line → nothing
+            [p(1.0, 0.5), p(1.0, 3.0)],      // stops short of the wall → nothing
+            [p(12.0, -1.0), p(12.0, 1.0)],   // crosses the LINE past the wall end → nothing
+        ];
+        let ds = crossing_distances_along(a, b, len, &refs, 0.01);
+        assert_eq!(ds.len(), 4, "4 distinct candidates: {ds:?}");
+        for (got, want) in ds.iter().zip([2.0, 4.0, 5.0, 7.0]) {
+            assert!((got - want).abs() < 0.01, "sorted candidates: {ds:?}");
+        }
+        // Degenerate wall → nothing.
+        assert!(crossing_distances_along(a, a, 0.0, &refs, 0.01).is_empty());
     }
 }

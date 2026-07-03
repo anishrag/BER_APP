@@ -575,6 +575,22 @@ impl StoreyDoc {
             .collect()
     }
 
+    /// Every living-area wall as a world-metre segment — the reference lines
+    /// an exposure section-handle drag snaps to where they meet the outline.
+    /// All living areas count (an in-progress one still marks a real internal
+    /// boundary); empty when the storey has none.
+    pub fn living_area_wall_segments(&self) -> Vec<[Point2f32; 2]> {
+        let mut segs = Vec::new();
+        for slot in &self.living_areas {
+            let ring = slot.floor_plan.get_points();
+            let n = ring.len();
+            for i in 0..n {
+                segs.push([ring[i], ring[(i + 1) % n]]);
+            }
+        }
+        segs
+    }
+
     /// True when this storey has at least one FINALISED living area — the
     /// per-dwelling "living area" checklist gate (reads the EDITING model, so
     /// sync the active storey first). An in-progress (still pixel / incomplete)

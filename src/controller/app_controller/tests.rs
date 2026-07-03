@@ -2846,13 +2846,119 @@ fn drag_updates_the_section_selection() {
     );
     // Grab the END handle (at the far corner) and drag it to the midpoint.
     c.exposure_pointer_down(b0.x as f64, b0.y as f64, 0.5);
-    c.exposure_pointer_drag(mid.0 as f64, mid.1 as f64);
+    c.exposure_pointer_drag(mid.0 as f64, mid.1 as f64, 0.2);
     let sel1 = c.exposure_selection().unwrap();
     assert!(
         (sel1.end_m - len * 0.5).abs() < 0.1,
         "dragged end to mid: {}",
         sel1.end_m
     );
+    c.exposure_pointer_up();
+}
+
+/// A dragged section handle SNAPS to a construction-phase region edge
+/// crossing the wall when within tolerance — and doesn't when dragged well
+/// away from any candidate.
+#[test]
+fn exposure_drag_snaps_to_a_phase_line() {
+    let mut c = dimensioned_square_controller();
+    let (_, a0, b0) = c.document.outline.floor_plan.perimeter_walls()[0];
+    let len = ((b0.x - a0.x).powi(2) + (b0.y - a0.y).powi(2)).sqrt();
+    let along = |d: f32| {
+        let t = d / len;
+        (a0.x + t * (b0.x - a0.x), a0.y + t * (b0.y - a0.y))
+    };
+    // A phase region attached to wall0's first 4 m: its far edge meets the
+    // wall at 4.0 m along (built perpendicular so it works whatever wall0's
+    // orientation).
+    // (Which normal side the quad sits on doesn't matter — the crossing math
+    // only needs its far edge to TOUCH the wall at 4.0.)
+    let (nx, ny) = (-(b0.y - a0.y) / len, (b0.x - a0.x) / len);
+    let p4 = along(4.0);
+    c.phase_regions.entry(0).or_default().push(PhaseRegion {
+        polygon: vec![
+            a0,
+            Point2f32::new(p4.0, p4.1),
+            Point2f32::new(p4.0 + nx * 3.0, p4.1 + ny * 3.0),
+            Point2f32::new(a0.x + nx * 3.0, a0.y + ny * 3.0),
+        ],
+        phase: ConstructionPhase::Original,
+    });
+
+    c.set_exposure_mode(true);
+    let mid = along(len * 0.5);
+    c.exposure_pointer_down(mid.0 as f64, mid.1 as f64, 0.5); // whole wall
+    c.exposure_pointer_down(b0.x as f64, b0.y as f64, 0.5); // grab END handle
+                                                            // Within tolerance of the phase edge at 4.0 → lands ON it.
+    let near = along(3.93);
+    c.exposure_pointer_drag(near.0 as f64, near.1 as f64, 0.2);
+    let sel = c.exposure_selection().unwrap();
+    assert!(
+        (sel.end_m - 4.0).abs() < 1e-3,
+        "snapped to the phase line at 4.0: {}",
+        sel.end_m
+    );
+    assert_eq!(sel.snap_hint, Some("phase line"));
+    // Well away from every candidate (0, 4, 10) → no snap, hint gone.
+    let far = along(3.0);
+    c.exposure_pointer_drag(far.0 as f64, far.1 as f64, 0.2);
+    let sel2 = c.exposure_selection().unwrap();
+    assert!(
+        (sel2.end_m - 3.0).abs() < 0.01,
+        "no snap when far: {}",
+        sel2.end_m
+    );
+    assert_eq!(sel2.snap_hint, None);
+    c.exposure_pointer_up();
+}
+
+/// A dragged handle snaps to an EXISTING exposure-section boundary on the
+/// same wall, and to the wall's own endpoint.
+#[test]
+fn exposure_drag_snaps_to_section_edges_and_wall_ends() {
+    let mut c = dimensioned_square_controller();
+    let (_, a0, b0) = c.document.outline.floor_plan.perimeter_walls()[0];
+    let len = ((b0.x - a0.x).powi(2) + (b0.y - a0.y).powi(2)).sqrt();
+    let along = |d: f32| {
+        let t = d / len;
+        (a0.x + t * (b0.x - a0.x), a0.y + t * (b0.y - a0.y))
+    };
+    c.set_exposure_mode(true);
+    // Paint [2, 5] semi-exposed → its edges become snap candidates.
+    let mid = along(len * 0.5);
+    c.exposure_pointer_down(mid.0 as f64, mid.1 as f64, 0.5);
+    c.set_exposure_section_range(2.0, 5.0);
+    c.set_wall_exposure(WallExposure::SemiExposed);
+
+    // Select the trailing gap (5, len), grab its START handle (at 5.0) and
+    // drag it slightly off — it snaps back onto the section edge.
+    let gap = along(7.5);
+    c.exposure_pointer_down(gap.0 as f64, gap.1 as f64, 0.5);
+    let start = along(5.0);
+    c.exposure_pointer_down(start.0 as f64, start.1 as f64, 0.2);
+    let off = along(5.12);
+    c.exposure_pointer_drag(off.0 as f64, off.1 as f64, 0.2);
+    let sel = c.exposure_selection().unwrap();
+    assert!(
+        (sel.start_m - 5.0).abs() < 1e-3,
+        "snapped to the section edge at 5.0: {}",
+        sel.start_m
+    );
+    assert_eq!(sel.snap_hint, Some("section edge"));
+    c.exposure_pointer_up();
+
+    // Grab the END handle (at the wall end) and drag it just short of the
+    // corner — it snaps back to the wall's full length.
+    c.exposure_pointer_down(b0.x as f64, b0.y as f64, 0.2);
+    let near_end = along(len - 0.15);
+    c.exposure_pointer_drag(near_end.0 as f64, near_end.1 as f64, 0.2);
+    let sel2 = c.exposure_selection().unwrap();
+    assert!(
+        (sel2.end_m - len).abs() < 1e-3,
+        "snapped to the wall end: {}",
+        sel2.end_m
+    );
+    assert_eq!(sel2.snap_hint, Some("wall end"));
     c.exposure_pointer_up();
 }
 

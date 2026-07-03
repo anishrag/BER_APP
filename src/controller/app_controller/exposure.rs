@@ -18,7 +18,10 @@
 //! (`WallRegion.polygon` is an arbitrary `Polygon3D`) already allows it.
 use super::*;
 use document::{range_at, RiserKind};
-use manip_plan::{lerp_along, project_distance_along as project_distance, segment_len as wall_len};
+use manip_plan::{
+    crossing_distances_along, lerp_along, project_distance_along as project_distance,
+    segment_len as wall_len,
+};
 
 /// A tap selects a riser only within this fraction of the wall-pick
 /// tolerance. Risers get FIRST claim inside the tighter band (their dashed
@@ -34,6 +37,41 @@ pub enum SectionHandle {
     Start,
     End,
 }
+
+/// What a dragged section handle snapped to — the toolbar readout's hint.
+/// Ordering is irrelevant (the nearest candidate wins); the kind only labels
+/// the landing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ExposureSnapKind {
+    /// The wall's own start/end (0 or its full length).
+    WallEnd,
+    /// An existing exposure-section boundary on the same wall.
+    SectionEdge,
+    /// A construction-phase region edge crossing/meeting the wall.
+    PhaseLine,
+    /// A living-area wall meeting the outline wall.
+    LivingAreaWall,
+    /// A floor/ceiling step (riser) line meeting the wall.
+    StepLine,
+}
+
+impl ExposureSnapKind {
+    /// User-facing name for the readout hint.
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::WallEnd => "wall end",
+            Self::SectionEdge => "section edge",
+            Self::PhaseLine => "phase line",
+            Self::LivingAreaWall => "living-area wall",
+            Self::StepLine => "step line",
+        }
+    }
+}
+
+/// Crossing/graze + dedupe tolerance (metres) for the along-wall snap
+/// candidates — how exactly a reference line must meet the wall to count,
+/// NOT the grab distance (that's the screen-scaled `tol` of the drag).
+const SNAP_CANDIDATE_EPS: f32 = 0.01;
 
 /// One outline wall for rendering: endpoints (world coords), its length, and
 /// the exposure sections set on it. (The current selection renders through
@@ -58,6 +96,9 @@ pub struct ExposureSelection {
     pub start_m: f32,
     pub end_m: f32,
     pub length_m: f32,
+    /// What the dragged handle is currently snapped to, as a user-facing
+    /// label ("phase line", "section edge", …) — `None` while not snapped.
+    pub snap_hint: Option<&'static str>,
 }
 
 /// One derived RISER wall for rendering/selection: its stable region id, its
@@ -94,6 +135,7 @@ impl AppController {
         self.selected_exposure_wall = None;
         self.exposure_sel = None;
         self.exposure_drag = None;
+        self.exposure_snap_hint = None;
         self.selected_riser = None;
         if on {
             self.exit_openings_mode();
@@ -133,6 +175,9 @@ impl AppController {
     /// pointer (defaulting its selection to the whole wall). Tapping empty space
     /// clears the selection.
     pub fn exposure_pointer_down(&mut self, world_x: f64, world_y: f64, tol: f64) {
+        // A fresh press starts with no snap landing (the first drag frame
+        // recomputes it).
+        self.exposure_snap_hint = None;
         // 1. Grab a selection handle if the pointer is on one.
         if let (Some((a, b, len)), Some((s_m, e_m))) =
             (self.selected_wall_geom(), self.exposure_sel)
@@ -251,8 +296,15 @@ impl AppController {
     }
 
     /// Drag the grabbed handle: project the pointer onto the wall line and set
-    /// that end's distance (clamped to the wall). No-op if no handle is held.
-    pub fn exposure_pointer_drag(&mut self, world_x: f64, world_y: f64) {
+    /// that end's distance (clamped to the wall), SNAPPING to the nearest
+    /// meaningful along-wall coordinate within `tol` (world metres — the same
+    /// screen-scaled tolerance the handle grab uses): phase-region lines,
+    /// existing section edges, living-area walls, step lines, and the wall's
+    /// own ends (see [`exposure_snap_candidates`]). The landing's kind is kept
+    /// as the readout hint. No-op if no handle is held.
+    ///
+    /// [`exposure_snap_candidates`]: Self::exposure_snap_candidates
+    pub fn exposure_pointer_drag(&mut self, world_x: f64, world_y: f64, tol: f64) {
         let Some(handle) = self.exposure_drag else {
             return;
         };
@@ -262,7 +314,21 @@ impl AppController {
         let Some((mut s_m, mut e_m)) = self.exposure_sel else {
             return;
         };
-        let d = project_distance(a, b, len, world_x as f32, world_y as f32);
+        let mut d = project_distance(a, b, len, world_x as f32, world_y as f32);
+        // Snap to the NEAREST candidate within tolerance (live, every drag
+        // frame — dragging away just as smoothly un-snaps).
+        self.exposure_snap_hint = None;
+        let mut best: Option<(f32, f32, ExposureSnapKind)> = None; // (dist, at, kind)
+        for (at, kind) in self.exposure_snap_candidates(a, b, len) {
+            let dist = (at - d).abs();
+            if dist <= tol as f32 && best.is_none_or(|(bd, _, _)| dist < bd) {
+                best = Some((dist, at, kind));
+            }
+        }
+        if let Some((_, at, kind)) = best {
+            d = at;
+            self.exposure_snap_hint = Some(kind);
+        }
         match handle {
             SectionHandle::Start => s_m = d,
             SectionHandle::End => e_m = d,
@@ -270,9 +336,60 @@ impl AppController {
         self.exposure_sel = Some((s_m, e_m));
     }
 
+    /// The along-wall coordinates a section handle should land on, as
+    /// `(metres-from-start, kind)`: the wall's ends, the wall's existing
+    /// section boundaries, and the crossings of phase-region edges,
+    /// living-area walls, and riser (step) lines with the wall — the shell
+    /// only GATHERS the reference segments; the crossing math is
+    /// `manip_plan::crossing_distances_along`. Unsorted (the drag takes the
+    /// nearest within tolerance).
+    fn exposure_snap_candidates(
+        &self,
+        a: Point2f32,
+        b: Point2f32,
+        len: f32,
+    ) -> Vec<(f32, ExposureSnapKind)> {
+        let mut out = vec![
+            (0.0, ExposureSnapKind::WallEnd),
+            (len, ExposureSnapKind::WallEnd),
+        ];
+        if let Some(secs) = self
+            .selected_exposure_wall
+            .and_then(|v| self.document.wall_sections.get(&v))
+        {
+            for s in secs {
+                out.push((s.start_m, ExposureSnapKind::SectionEdge));
+                out.push((s.end_m, ExposureSnapKind::SectionEdge));
+            }
+        }
+        let mut crossings = |segs: &[[Point2f32; 2]], kind: ExposureSnapKind| {
+            for d in crossing_distances_along(a, b, len, segs, SNAP_CANDIDATE_EPS) {
+                out.push((d, kind));
+            }
+        };
+        crossings(&self.phase_reference_walls(), ExposureSnapKind::PhaseLine);
+        crossings(
+            &self.document.living_area_wall_segments(),
+            ExposureSnapKind::LivingAreaWall,
+        );
+        let riser_segs: Vec<[Point2f32; 2]> = self
+            .riser_walls()
+            .into_iter()
+            .map(|r| {
+                [
+                    Point2f32::new(r.a.x as f32, r.a.y as f32),
+                    Point2f32::new(r.b.x as f32, r.b.y as f32),
+                ]
+            })
+            .collect();
+        crossings(&riser_segs, ExposureSnapKind::StepLine);
+        out
+    }
+
     /// End a handle drag.
     pub fn exposure_pointer_up(&mut self) {
         self.exposure_drag = None;
+        self.exposure_snap_hint = None;
     }
 
     /// Set the selection range directly (the typed-distance path). Clamped to
@@ -528,6 +645,7 @@ impl AppController {
             start_m: s,
             end_m: e,
             length_m: len,
+            snap_hint: self.exposure_snap_hint.map(ExposureSnapKind::label),
         })
     }
 }

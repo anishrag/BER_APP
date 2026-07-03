@@ -369,10 +369,13 @@ pub enum SketchEvent {
         world_y: f64,
         tol: f64,
     },
-    /// Drag the grabbed selection handle along the wall.
+    /// Drag the grabbed selection handle along the wall. `tol` is the
+    /// screen-scaled snap tolerance (world metres) — the handle snaps to
+    /// phase lines / section edges / wall ends within it.
     ExposurePointerDrag {
         world_x: f64,
         world_y: f64,
+        tol: f64,
     },
     /// Release the selection handle.
     ExposurePointerUp,

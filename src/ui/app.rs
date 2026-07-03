@@ -1792,10 +1792,14 @@ impl eframe::App for BerApp {
                                             .borrow_mut()
                                             .exposure_pointer_down(world_x, world_y, tol);
                                     }
-                                    SketchEvent::ExposurePointerDrag { world_x, world_y } => {
+                                    SketchEvent::ExposurePointerDrag {
+                                        world_x,
+                                        world_y,
+                                        tol,
+                                    } => {
                                         controller
                                             .borrow_mut()
-                                            .exposure_pointer_drag(world_x, world_y);
+                                            .exposure_pointer_drag(world_x, world_y, tol);
                                     }
                                     SketchEvent::ExposurePointerUp => {
                                         controller.borrow_mut().exposure_pointer_up();

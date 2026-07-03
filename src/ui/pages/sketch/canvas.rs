@@ -2035,6 +2035,7 @@ pub(super) fn render<F: FnMut(UiEvent)>(
                     on_event(UiEvent::Sketch(SketchEvent::ExposurePointerDrag {
                         world_x: wx,
                         world_y: wy,
+                        tol: tol_world,
                     }));
                 }
             }

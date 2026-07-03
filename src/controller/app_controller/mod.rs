@@ -57,7 +57,9 @@ use document::{
     MovedCoordKind, PendingArc, PhaseRegion, ShapeSlot, StepRegion, StoreyDoc,
 };
 pub use document::{ExposureSection, PositionPromptKind, RiserKind};
-pub use exposure::{ExposureSelection, RiserView, SectionHandle, WallExposureView};
+pub use exposure::{
+    ExposureSelection, ExposureSnapKind, RiserView, SectionHandle, WallExposureView,
+};
 pub use floor_exposure::{FloorExposureRegionView, FloorExposureStoreyView};
 pub use roof::{RoofContextRegion, RoofRegionView, RoofShape};
 // `ExposureSection` is re-exported above (the controller's public surface).
@@ -193,6 +195,10 @@ pub struct AppController {
     exposure_sel: Option<(f32, f32)>,
     /// Which selection handle a canvas drag is currently moving. Transient.
     exposure_drag: Option<SectionHandle>,
+    /// What the dragged section handle currently snaps to (phase line, section
+    /// edge, wall end, …) — the toolbar readout's one-line hint. `None` while
+    /// not snapped. Transient, cleared with the drag/selection.
+    exposure_snap_hint: Option<ExposureSnapKind>,
     /// In exposure mode, the derived RISER wall (by its stable region
     /// `ItemId` — `with_risers`' amend keeps it across re-derivations) the
     /// user last tapped on its dashed 2D line. Mutually exclusive with
@@ -590,6 +596,7 @@ impl AppController {
             selected_exposure_wall: None,
             exposure_sel: None,
             exposure_drag: None,
+            exposure_snap_hint: None,
             selected_riser: None,
             pending_cut: None,
             phase_mode: false,
