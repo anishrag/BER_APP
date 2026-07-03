@@ -143,50 +143,56 @@ impl<'a> BerRepository<'a> {
             .optional()
     }
 
-    /// List BERs as lightweight summaries (extracting address and eircode from JSON)
+    /// List BERs as lightweight summaries (extracting address and eircode from
+    /// JSON). Resilient by design: a record whose id/date/JSON doesn't parse is
+    /// SKIPPED with a warning instead of failing the whole list — one legacy
+    /// row from an older schema must not blank the Load panel. Only the two
+    /// summary fields are deserialized (not the full `Ber`), so schema drift in
+    /// unrelated fields can't poison the listing either; a truly-broken record
+    /// still surfaces its error when actually loaded.
     pub fn list(&self) -> Result<Vec<BerSummary>> {
+        /// The only `Ber` fields the summary needs.
+        #[derive(serde::Deserialize, Default)]
+        struct SummaryFields {
+            #[serde(default)]
+            address: String,
+            #[serde(default)]
+            eircode: String,
+        }
         let mut stmt = self.conn.prepare(
             "SELECT id, name, date_assessed, data_json FROM ber ORDER BY date_assessed DESC",
         )?;
-
-        let rows = stmt.query_map([], |row| {
+        let mut out = Vec::new();
+        let mut rows = stmt.query([])?;
+        while let Some(row) = rows.next()? {
             let id_str: String = row.get(0)?;
-            let id = id_str.parse().map_err(|e| {
-                rusqlite::Error::FromSqlConversionFailure(
-                    0,
-                    rusqlite::types::Type::Text,
-                    Box::new(e),
-                )
-            })?;
-
+            let name: String = row.get(1)?;
             let date_str: String = row.get(2)?;
-            let date_assessed = NaiveDate::parse_from_str(&date_str, "%Y-%m-%d").map_err(|e| {
-                rusqlite::Error::FromSqlConversionFailure(
-                    2,
-                    rusqlite::types::Type::Text,
-                    Box::new(e),
-                )
-            })?;
-
             let json: String = row.get(3)?;
-            let ber: Ber = serde_json::from_str(&json).map_err(|e| {
-                rusqlite::Error::FromSqlConversionFailure(
-                    3,
-                    rusqlite::types::Type::Text,
-                    Box::new(e),
-                )
-            })?;
-
-            Ok(BerSummary {
+            let Ok(id) = id_str.parse() else {
+                log::warn!("[list] skipping BER with unparseable id {id_str:?} ({name})");
+                continue;
+            };
+            let Ok(date_assessed) = NaiveDate::parse_from_str(&date_str, "%Y-%m-%d") else {
+                log::warn!("[list] skipping BER {id_str} ({name}): bad date {date_str:?}");
+                continue;
+            };
+            let fields = match serde_json::from_str::<SummaryFields>(&json) {
+                Ok(f) => f,
+                Err(e) => {
+                    log::warn!("[list] skipping BER {id_str} ({name}): unreadable JSON: {e}");
+                    continue;
+                }
+            };
+            out.push(BerSummary {
                 id,
-                name: row.get(1)?,
+                name,
                 date_assessed,
-                address: ber.address,
-                eircode: ber.eircode,
-            })
-        })?;
-
-        rows.collect()
+                address: fields.address,
+                eircode: fields.eircode,
+            });
+        }
+        Ok(out)
     }
 
     /// Delete a BER by id, including its editing-layer snapshot. The schema's
@@ -304,6 +310,42 @@ mod tests {
             .unwrap();
 
         assert!(exists, "ber table should exist after init_db");
+    }
+
+    /// One poison row (unparseable JSON from an older schema) must NOT blank
+    /// the whole listing — it's skipped; parseable records still list, and a
+    /// record whose JSON merely lacks the summary fields lists with defaults.
+    #[test]
+    fn list_skips_poison_rows_instead_of_failing() {
+        let conn = Connection::open_in_memory().unwrap();
+        let repo = BerRepository::new(&conn);
+        repo.init_db().unwrap();
+
+        let good = make_test_record(ItemId::default());
+        repo.upsert(&good).unwrap();
+        // A legacy row whose JSON no longer parses at all.
+        conn.execute(
+            "INSERT INTO ber (id, name, date_assessed, data_json) VALUES (?1, ?2, ?3, ?4)",
+            params![
+                ItemId::default().to_string(),
+                "poison",
+                "2024-01-02",
+                "{\"broken"
+            ],
+        )
+        .unwrap();
+        // A row with valid JSON that predates the summary fields entirely.
+        conn.execute(
+            "INSERT INTO ber (id, name, date_assessed, data_json) VALUES (?1, ?2, ?3, ?4)",
+            params![ItemId::default().to_string(), "alien", "2024-01-03", "{}"],
+        )
+        .unwrap();
+
+        let list = repo.list().expect("list survives poison rows");
+        assert_eq!(list.len(), 2, "good + alien listed, poison skipped");
+        assert!(list.iter().any(|s| s.name == "Test BER"));
+        let alien = list.iter().find(|s| s.name == "alien").unwrap();
+        assert_eq!(alien.address, "", "missing summary fields default");
     }
 
     #[test]
