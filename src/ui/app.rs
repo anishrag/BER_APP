@@ -966,6 +966,7 @@ impl eframe::App for BerApp {
                             // room's panel (only while in the Objects phase).
                             let (
                                 object_pins,
+                                object_pins_world,
                                 active_object_room,
                                 object_review_view,
                                 objects_present,
@@ -979,12 +980,13 @@ impl eframe::App for BerApp {
                                     };
                                     (
                                         c.object_rooms_view(),
+                                        c.object_pin_world_points(),
                                         c.active_object_room_view(),
                                         rv,
                                         c.has_object_rooms(),
                                     )
                                 } else {
-                                    (Vec::new(), None, None, false)
+                                    (Vec::new(), Vec::new(), None, None, false)
                                 }
                             };
 
@@ -1285,6 +1287,7 @@ impl eframe::App for BerApp {
                                 show_summary,
                                 structure_review_view,
                                 object_pins,
+                                object_pins_world,
                                 active_object_room,
                                 object_selected_category: &mut self
                                     .sketch_state
@@ -1984,6 +1987,18 @@ impl eframe::App for BerApp {
                                         controller
                                             .borrow_mut()
                                             .objects_pointer_down(world_x, world_y, tol);
+                                    }
+                                    SketchEvent::ObjectsPointerDown3D {
+                                        storey_idx,
+                                        world_x,
+                                        world_y,
+                                        z_m,
+                                        pitch_deg,
+                                        tol,
+                                    } => {
+                                        controller.borrow_mut().objects_pointer_down_3d(
+                                            storey_idx, world_x, world_y, z_m, pitch_deg, tol,
+                                        );
                                     }
                                     SketchEvent::CloseObjectRoom => {
                                         controller.borrow_mut().close_object_room();

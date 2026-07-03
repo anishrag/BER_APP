@@ -11682,6 +11682,85 @@ fn objects_capture_pins_counts_and_undo() {
     assert_eq!(c.object_rooms_view().len(), 1, "undo removed the new pin");
 }
 
+/// Phase-3 objects placed from a 3D view: the resolved surface tap stores the
+/// pin ON the surface (storey + height + the sloped surface's pitch), the open
+/// room works even from the full-house view (no current storey), the panel
+/// view exposes the pitch for the dialog, the pin feeds the 3D hotspot views
+/// at its surface height, a near 3D tap reopens the same pin, and undo removes
+/// a dropped pin.
+#[test]
+fn objects_3d_placement_stores_surface_point_and_pitch() {
+    use ber_model::ber::objects::{BoilerFuel, ObjectKind};
+
+    let mut c = dimensioned_square_controller();
+    c.materialize();
+    // The full-house 3D is reached from the All tab: no current storey.
+    c.set_current_storey(None).expect("All tab");
+
+    // A pick on storey 0's roof plane at (2, 3), 2.3 m up, pitched 35°.
+    c.objects_pointer_down_3d(0, 2.0, 3.0, 2.3, Some(35.0), 0.5);
+    let room = c
+        .active_object_room()
+        .expect("a room opened on the surface");
+    let av = c
+        .active_object_room_view()
+        .expect("panel opens without a current storey");
+    assert_eq!(av.id, room);
+    assert_eq!(
+        av.surface_pitch_deg,
+        Some(35.0),
+        "the dialog sees the pitch"
+    );
+
+    // The room accepts objects while no storey is current.
+    c.add_object(
+        ObjectKind::Boiler(BoilerFuel::Gas),
+        1,
+        None,
+        Vec::new(),
+        PhotoQuality::Full,
+    );
+    assert_eq!(
+        c.active_object_room_view().unwrap().objects.len(),
+        1,
+        "object recorded on the 3D-placed pin"
+    );
+
+    // The pin renders at its surface height in the 3D views (world z = storey
+    // 0's datum 0 + 2.3).
+    let world = c.object_pin_world_points();
+    assert_eq!(world.len(), 1);
+    assert!((world[0].0 - 2.0).abs() < 1e-6 && (world[0].1 - 3.0).abs() < 1e-6);
+    assert!(
+        (world[0].2 - 2.3).abs() < 1e-6,
+        "hotspot at the surface height, not the legacy 1 m (z={})",
+        world[0].2
+    );
+
+    // Back on the storey tab, the pin view carries the height too.
+    c.set_current_storey(Some(0)).expect("storey 0");
+    let pins = c.object_rooms_view();
+    assert_eq!(pins.len(), 1);
+    assert_eq!(pins[0].z_m, Some(2.3));
+
+    // A near 3D tap (same surface point) reopens the same pin — no duplicate.
+    c.close_object_room();
+    c.objects_pointer_down_3d(0, 2.1, 3.0, 2.35, None, 0.5);
+    assert_eq!(c.active_object_room(), Some(room), "near tap reopens it");
+    assert_eq!(c.object_rooms_view().len(), 1, "no new pin");
+
+    // A far 3D tap drops a fresh pin (no pitch on a wall pick); undo removes it.
+    c.objects_pointer_down_3d(0, 8.0, 8.0, 1.2, None, 0.5);
+    assert_eq!(c.object_rooms_view().len(), 2);
+    assert_eq!(
+        c.active_object_room_view().unwrap().surface_pitch_deg,
+        None,
+        "a wall placement carries no pitch"
+    );
+    c.undo().expect("undo");
+    assert_eq!(c.object_rooms_view().len(), 1, "undo removed the 3D pin");
+}
+
 /// The Objects review sums counts house-wide (flat list) and locates the
 /// selected kind in 3D (one hotspot per room holding it).
 #[test]

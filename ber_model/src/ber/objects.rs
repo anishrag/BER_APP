@@ -298,6 +298,17 @@ pub struct ObjectRoom {
     pub name: String,
     pub plan_position: Point2f32,
     pub objects: Vec<BuildingObject>,
+    /// Height of the pin above ITS storey's floor datum (metres), recorded when
+    /// the pin was placed on a surface in the 3D view. `None` for plan (2D)
+    /// pins — those render at the legacy datum + 1 m.
+    #[serde(default)]
+    pub z_m: Option<f64>,
+    /// The picked surface's pitch (degrees from horizontal) when the pin was
+    /// placed on a SLOPED surface in 3D — a roof plane (flat roof = 0°) or a
+    /// sloped ceiling. `None` for walls, floors, flat ceilings, and 2D pins.
+    /// Shown read-only in the add-object dialog (e.g. solar panels on a roof).
+    #[serde(default)]
+    pub surface_pitch_deg: Option<f32>,
 }
 
 impl ObjectRoom {
@@ -307,6 +318,22 @@ impl ObjectRoom {
             name: String::new(),
             plan_position,
             objects: Vec::new(),
+            z_m: None,
+            surface_pitch_deg: None,
+        }
+    }
+
+    /// A pin placed on a surface in the 3D view: `z_m` above its storey's floor
+    /// datum, carrying the surface's pitch when the surface is sloped.
+    pub fn new_on_surface(
+        plan_position: Point2f32,
+        z_m: f64,
+        surface_pitch_deg: Option<f32>,
+    ) -> Self {
+        Self {
+            z_m: Some(z_m),
+            surface_pitch_deg,
+            ..Self::new(plan_position)
         }
     }
 

@@ -521,6 +521,20 @@ pub enum SketchEvent {
         world_y: f64,
         tol: f64,
     },
+    /// Phase-3 (Objects): tap a SURFACE in a 3D view — the canvas has already
+    /// resolved the screen point to the closest viewer-facing surface
+    /// ([`crate::ui::render::pick_3d`]). Drops / opens a room pin ON that
+    /// surface: `z_m` is the hit's height above storey `storey_idx`'s floor
+    /// datum; `pitch_deg` is the surface's pitch when it's sloped (a roof
+    /// plane / sloped ceiling), shown in the add-object dialog.
+    ObjectsPointerDown3D {
+        storey_idx: usize,
+        world_x: f64,
+        world_y: f64,
+        z_m: f64,
+        pitch_deg: Option<f32>,
+        tol: f64,
+    },
     /// Close the open object room (the panel's "Done").
     CloseObjectRoom,
     /// Rename the open object room.
@@ -1168,6 +1182,10 @@ pub struct SketchView<'a> {
     /// Phase-3 (Objects): the room pins on the current storey, for the plan
     /// overlay. Empty outside the Objects phase.
     pub object_pins: Vec<ObjectPinView>,
+    /// Phase-3 (Objects): EVERY storey's pins as world-3D points (datum +
+    /// surface height) — the hotspot markers for the full-house 3D view.
+    /// Empty outside the Objects phase.
+    pub object_pins_world: Vec<(f64, f64, f64)>,
     /// The open object room's panel view (objects so far + categories present),
     /// or `None` when none is open.
     pub active_object_room: Option<ActiveObjectRoomView>,

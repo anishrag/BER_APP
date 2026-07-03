@@ -587,7 +587,17 @@ pub(super) fn render<F: FnMut(UiEvent)>(
         // room pins show as hotspots in 3D — lifted ~1 m above the storey floor.
         let objects_view = matches!(view.current_phase, AssessmentPhase::Objects);
         let hotspots: Vec<(f64, f64, f64)> = if objects_view {
-            view.object_pins.iter().map(|p| (p.x, p.y, 1.0)).collect()
+            if current_storey_idx.is_some() {
+                // Single-storey 3D: storey-local points (surface height where
+                // the pin was placed on a surface, the legacy 1 m otherwise).
+                view.object_pins
+                    .iter()
+                    .map(|p| (p.x, p.y, p.z_m.unwrap_or(1.0)))
+                    .collect()
+            } else {
+                // Full-house 3D (the All tab): every storey's pins in world z.
+                view.object_pins_world.clone()
+            }
         } else {
             Vec::new()
         };
@@ -2113,6 +2123,38 @@ pub(super) fn render<F: FnMut(UiEvent)>(
                         tol: tol_world,
                     }));
                 }
+            }
+        }
+    }
+
+    // Phase-3 (Objects) in a 3D view: a primary CLICK (a drag orbits — see the
+    // orbit block above) picks the closest viewer-facing surface under the
+    // cursor — wall / floor / ceiling, plus the dwelling roof planes in the
+    // full-house view (the All tab) — and drops / opens a room pin ON it. The
+    // controller receives the resolved hit (storey + storey-local point +
+    // pitch), never the screen point.
+    if matches!(view.current_phase, AssessmentPhase::Objects)
+        && matches!(mode, SketchMode::Storey3D)
+        && !touch_nav_active
+        && response.clicked_by(egui::PointerButton::Primary)
+    {
+        if let (Some(ber), Some(pos)) = (ber, response.interact_pointer_pos()) {
+            if let Some(hit) =
+                render::pick_3d::pick_surface_3d(rect, ber, current_storey_idx, vp, pos)
+            {
+                // Same 16-px reopen tolerance as the 2D tap, converted to
+                // metres through the 3D view's fit scale.
+                let tol = render::pick_3d::transform_3d(rect, ber, current_storey_idx, vp)
+                    .map(|t| 16.0 / t.scale())
+                    .unwrap_or(0.3);
+                on_event(UiEvent::Sketch(SketchEvent::ObjectsPointerDown3D {
+                    storey_idx: hit.storey_idx,
+                    world_x: hit.world_point.0,
+                    world_y: hit.world_point.1,
+                    z_m: hit.storey_local_z,
+                    pitch_deg: hit.pitch_deg.map(|p| p as f32),
+                    tol,
+                }));
             }
         }
     }

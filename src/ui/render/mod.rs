@@ -26,6 +26,7 @@ pub mod all_storeys_2d;
 pub mod all_storeys_ceilings;
 pub mod all_storeys_floors;
 pub mod full_house_3d;
+pub mod pick_3d;
 pub mod storey_2d;
 pub mod storey_3d;
 pub mod structure_fan;

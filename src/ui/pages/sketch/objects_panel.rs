@@ -57,7 +57,9 @@ pub(super) fn render<F: FnMut(UiEvent)>(
             .pivot(Align2::CENTER_TOP)
             .show(ctx, |ui| {
                 egui::Frame::popup(ui.style()).show(ui, |ui| {
-                    ui.label("Tap the plan where you are to record objects here.");
+                    ui.label(
+                        "Tap the plan — or a surface in the 3D view — to record objects there.",
+                    );
                 });
             });
         return;
@@ -114,6 +116,17 @@ pub(super) fn render<F: FnMut(UiEvent)>(
             .resizable(false)
             .show(ctx, |ui| {
                 ui.set_min_width(240.0);
+                // The pin sits on a SLOPED surface picked in 3D (a roof plane /
+                // sloped ceiling): show its pitch read-only, so e.g. a solar
+                // panel's roof angle is on screen while it's recorded. (No
+                // object subtype carries an angle field yet — when one does,
+                // prefill it from this value.)
+                if let Some(pitch) = room.surface_pitch_deg {
+                    ui.label(
+                        RichText::new(format!("Roof pitch: {pitch:.0}°"))
+                            .color(egui::Color32::from_rgb(220, 160, 80)),
+                    );
+                }
                 let subtypes = cat.subtypes();
                 if !subtypes.is_empty() {
                     ui.horizontal_wrapped(|ui| {
