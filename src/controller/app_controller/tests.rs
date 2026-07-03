@@ -5297,6 +5297,47 @@ fn ceiling_point_tap_x_y_height_flow_fans_the_region() {
     );
 }
 
+/// Entering a plan-takeover Mapping tool (roof / floor-exposure /
+/// ceiling-exposure) from the 3D view drops the canvas back to the 2D plan.
+/// Their takeovers replace the canvas with a 2D plan but their tap input only
+/// routes in `SketchMode::Storey2D` — without the reset the assessor saw the
+/// areas with DEAD input (the "can't click the roof areas after viewing 3D"
+/// bug). The tap assertion proves the input path is live again end-to-end.
+#[test]
+fn entering_plan_takeover_tools_from_3d_returns_to_2d() {
+    let mut c = dimensioned_square_controller();
+    c.set_default_ceiling_height(2.4).unwrap();
+
+    c.set_sketch_mode(SketchMode::Storey3D);
+    assert_eq!(c.sketch_mode(), SketchMode::Storey3D);
+    c.set_roof_mode(true);
+    assert_eq!(
+        c.sketch_mode(),
+        SketchMode::Storey2D,
+        "the roof step is a plan task — entering it leaves 3D"
+    );
+    c.confirm_all_storeys_added_roof();
+    c.roof_region_tap(5.0, 5.0, 0.5);
+    assert!(
+        c.roof_area_can_pick_shape(),
+        "the tap lands — grouping works straight after coming from 3D"
+    );
+    c.set_roof_mode(false);
+
+    c.set_sketch_mode(SketchMode::Storey3D);
+    c.set_floor_exposure_mode(true);
+    assert_eq!(c.sketch_mode(), SketchMode::Storey2D, "floor exposure too");
+    c.set_floor_exposure_mode(false);
+
+    c.set_sketch_mode(SketchMode::Storey3D);
+    c.set_ceiling_exposure_mode(true);
+    assert_eq!(
+        c.sketch_mode(),
+        SketchMode::Storey2D,
+        "ceiling exposure too"
+    );
+}
+
 /// Phase-1 roof step: group the ceiling area, pick GABLE, draw a ridge, type a
 /// pitch. The roof lands on `Ber.roof` as a SEPARATE structure — the ceiling
 /// (`storey.ceiling_apexes`) is left UNTOUCHED (the bug this replaced reshaped the
@@ -5355,7 +5396,9 @@ fn roof_area_gable_commits_to_ber_roof_without_touching_ceiling() {
 }
 
 /// A HIP keeps the DRAWN ridge length (the ends slope in) rather than extending
-/// to the end walls — the recorded ridge endpoints are the drawn 3 / 7.
+/// to the end walls — the recorded ridge endpoints are the drawn 3 / 7. The hip
+/// flow now COLLECTS ridges (an L-shaped hip has several): after the stroke it
+/// stays in the ridge stage until "Finish ridges" moves it to the pitch.
 #[test]
 fn roof_area_hip_keeps_drawn_ridge_length() {
     let mut c = dimensioned_square_controller();
@@ -5365,6 +5408,12 @@ fn roof_area_hip_keeps_drawn_ridge_length() {
     c.roof_region_tap(5.0, 5.0, 0.5);
     c.pick_roof_area_shape(RoofShape::Hip);
     c.apply_roof_area_ridge(&[(5.0, 3.0), (5.0, 7.0)]).unwrap();
+    assert!(
+        c.roof_area_ridge_pending() && c.roof_area_hip_ridge_count() == Some(1),
+        "a hip stays collecting ridges after a stroke"
+    );
+    c.finish_roof_area_ridges().unwrap();
+    assert!(c.roof_area_pitch_pending(), "Finish opens the pitch");
     c.assign_roof_area_pitch(45.0).unwrap();
 
     let ber = &c.current_record.as_ref().unwrap().data;
@@ -5380,6 +5429,157 @@ fn roof_area_hip_keeps_drawn_ridge_length() {
     assert!(
         (ys[0] - 3.0).abs() < 1e-3 && (ys[1] - 7.0).abs() < 1e-3,
         "a hip keeps the drawn ridge extent (y 3..7): {ys:?}"
+    );
+}
+
+/// A HIP accepts SEVERAL ridge strokes before Finish — each contributes its
+/// apex pair to the committed area (4 apexes for 2 ridges), and finishing with
+/// no ridge drawn is refused.
+#[test]
+fn roof_area_hip_collects_multiple_ridges() {
+    let mut c = dimensioned_square_controller();
+    c.set_default_ceiling_height(2.4).unwrap();
+    c.set_roof_mode(true);
+    c.confirm_all_storeys_added_roof();
+    c.roof_region_tap(5.0, 5.0, 0.5);
+    c.pick_roof_area_shape(RoofShape::Hip);
+    assert!(
+        c.finish_roof_area_ridges().is_err(),
+        "finishing with no ridge drawn is refused"
+    );
+    c.apply_roof_area_ridge(&[(5.0, 2.0), (5.0, 5.0)]).unwrap();
+    c.apply_roof_area_ridge(&[(3.0, 5.0), (5.0, 5.0)]).unwrap();
+    assert_eq!(c.roof_area_hip_ridge_count(), Some(2));
+    assert_eq!(
+        c.pending_roof_area_ridge_lines().len(),
+        2,
+        "both collected ridges overlay while drawing"
+    );
+    c.finish_roof_area_ridges().unwrap();
+    c.assign_roof_area_pitch(45.0).unwrap();
+
+    let area = &c.current_record.as_ref().unwrap().data.roof.areas[0];
+    assert_eq!(
+        area.apexes.len(),
+        4,
+        "one apex pair per ridge: {:?}",
+        area.apexes
+    );
+    assert!(area.ridge.is_some(), "the first ridge is recorded");
+}
+
+/// A HIP's DIAGONAL ridge stroke is NOT orthogonalized: drawn at ~45° from
+/// near a footprint corner towards the main ridge's end, it keeps its
+/// direction, its corner end snaps onto the corner, and its inner end snaps
+/// onto the already-drawn main ridge's endpoint. Near-orthogonal strokes
+/// still straighten (the main ridge below).
+#[test]
+fn roof_area_hip_diagonal_ridge_is_not_orthogonalized() {
+    let mut c = dimensioned_square_controller();
+    c.set_default_ceiling_height(2.4).unwrap();
+    c.set_roof_mode(true);
+    c.confirm_all_storeys_added_roof();
+    c.roof_region_tap(5.0, 5.0, 0.5);
+    c.pick_roof_area_shape(RoofShape::Hip);
+    // Main ridge: slightly wobbly vertical stroke → straightens to x = 5.
+    c.apply_roof_area_ridge(&[(4.9, 3.0), (5.1, 7.0)]).unwrap();
+    // Corner ridge: ~45° from near the (10,10) corner to the main ridge's
+    // (5,7) end — must stay diagonal, ends snapped to corner + junction.
+    c.apply_roof_area_ridge(&[(9.8, 9.7), (5.2, 7.3)]).unwrap();
+    c.finish_roof_area_ridges().unwrap();
+    c.assign_roof_area_pitch(35.0).unwrap();
+
+    let area = &c.current_record.as_ref().unwrap().data.roof.areas[0];
+    assert_eq!(area.apexes.len(), 4, "two ridges, one apex pair each");
+    let has_apex_at = |x: f64, y: f64| {
+        area.apexes
+            .iter()
+            .any(|a| (a.point.x - x).abs() < 1e-6 && (a.point.y - y).abs() < 1e-6)
+    };
+    assert!(
+        has_apex_at(5.0, 3.0) && has_apex_at(5.0, 7.0),
+        "the main ridge straightened to x = 5: {:?}",
+        area.apexes
+    );
+    assert!(
+        has_apex_at(10.0, 10.0),
+        "the diagonal's corner end snapped onto (10,10): {:?}",
+        area.apexes
+    );
+    assert!(
+        has_apex_at(5.0, 7.0),
+        "the diagonal's inner end meets the main ridge at (5,7)"
+    );
+}
+
+/// The GABLE pitch stage offers "Centre on roof": a rough off-centre stroke
+/// (x = 3 across the 10-wide square) recentres to x = 5, keeping its
+/// full-span extension along the ridge.
+#[test]
+fn roof_area_gable_ridge_can_be_centred() {
+    let mut c = dimensioned_square_controller();
+    c.set_default_ceiling_height(2.4).unwrap();
+    c.set_roof_mode(true);
+    c.confirm_all_storeys_added_roof();
+    c.roof_region_tap(5.0, 5.0, 0.5);
+    c.pick_roof_area_shape(RoofShape::Gable);
+    c.apply_roof_area_ridge(&[(3.0, 3.0), (3.0, 7.0)]).unwrap();
+    assert!(c.roof_area_can_centre_ridge(), "gable offers centring");
+    // The pending 2D line shows the DRAWN (pre-centre) position first…
+    let lines = c.pending_roof_area_ridge_lines();
+    assert!(
+        (lines[0].0 .0 - 3.0).abs() < 1e-3,
+        "pending line at the drawn x = 3: {lines:?}"
+    );
+    c.centre_pending_roof_ridge();
+    // …and moves to the centre IMMEDIATELY on the button press, so the canvas
+    // redraws the green line centred before the pitch is even entered.
+    let lines = c.pending_roof_area_ridge_lines();
+    assert!(
+        (lines[0].0 .0 - 5.0).abs() < 1e-3 && (lines[0].1 .0 - 5.0).abs() < 1e-3,
+        "pending line recentred to x = 5: {lines:?}"
+    );
+    c.assign_roof_area_pitch(45.0).unwrap();
+
+    let area = &c.current_record.as_ref().unwrap().data.roof.areas[0];
+    let (a, b) = area.ridge.expect("gable has a ridge");
+    assert!(
+        (a.x - 5.0).abs() < 1e-3 && (b.x - 5.0).abs() < 1e-3,
+        "recentred to x = 5: {a:?} {b:?}"
+    );
+    // Centred half-span run: eave 2.4 + 5·tan45 = 7.4.
+    assert!(
+        area.apexes.iter().all(|ap| (ap.z_m - 7.4).abs() < 1e-6),
+        "apex height from the centred run: {:?}",
+        area.apexes
+    );
+}
+
+/// A ridge drawn NEARLY on an eave edge snaps ONTO it (mono-pitch): drawn at
+/// x = 9.8 against the x = 10 wall, the committed ridge sits at 10 and its
+/// apexes rise over the FULL 10 m span.
+#[test]
+fn roof_area_ridge_near_an_edge_snaps_onto_it() {
+    let mut c = dimensioned_square_controller();
+    c.set_default_ceiling_height(2.4).unwrap();
+    c.set_roof_mode(true);
+    c.confirm_all_storeys_added_roof();
+    c.roof_region_tap(5.0, 5.0, 0.5);
+    c.pick_roof_area_shape(RoofShape::Gable);
+    c.apply_roof_area_ridge(&[(9.8, 3.0), (9.8, 7.0)]).unwrap();
+    c.assign_roof_area_pitch(45.0).unwrap();
+
+    let area = &c.current_record.as_ref().unwrap().data.roof.areas[0];
+    let (a, b) = area.ridge.expect("gable has a ridge");
+    assert!(
+        (a.x - 10.0).abs() < 1e-3 && (b.x - 10.0).abs() < 1e-3,
+        "snapped onto the x = 10 edge: {a:?} {b:?}"
+    );
+    // Mono-pitch run is the full span: eave 2.4 + 10·tan45 = 12.4.
+    assert!(
+        area.apexes.iter().all(|ap| (ap.z_m - 12.4).abs() < 1e-6),
+        "apex height from the full-span run: {:?}",
+        area.apexes
     );
 }
 
@@ -8253,6 +8453,47 @@ fn riser_ready_controller() -> AppController {
     c
 }
 
+/// "Set remaining → Exposed" covers RISER faces too: an Unset riser becomes
+/// `Exposed` alongside the outline walls' unset coverage, while a riser the
+/// assessor already classified is untouched (same "painted stays" rule as
+/// the outline sections).
+#[test]
+fn set_all_remaining_exposed_includes_unset_risers() {
+    let mut c = riser_ready_controller();
+    c.set_exposure_mode(true);
+    let views = c.riser_views();
+    assert_eq!(views.len(), 1, "one riser on the step line");
+    assert_eq!(views[0].exposure, WallExposure::Unset);
+
+    c.set_all_remaining_exposed();
+    assert_eq!(
+        c.riser_views()[0].exposure,
+        WallExposure::Exposed,
+        "the bulk pass classified the riser"
+    );
+    // Every outline wall's coverage is painted too (the pre-existing part).
+    for w in c.wall_exposure_views() {
+        assert!(
+            document::wall_coverage(w.length_m, &w.sections)
+                .iter()
+                .all(|(_, _, e)| *e != WallExposure::Unset),
+            "no unset outline coverage remains"
+        );
+    }
+
+    // An already-classified riser is untouched by a later bulk pass.
+    let id = c.riser_views()[0].id;
+    c.selected_riser = Some(id);
+    c.set_riser_exposure(WallExposure::NonHeatLoss);
+    c.selected_riser = None;
+    c.set_all_remaining_exposed();
+    assert_eq!(
+        c.riser_views()[0].exposure,
+        WallExposure::NonHeatLoss,
+        "a classified riser is not repainted by the bulk pass"
+    );
+}
+
 /// Tapping near a riser's dashed line (within the tighter riser tolerance)
 /// selects IT — not an outline wall — and the exposure type buttons then
 /// route to the riser: the override lands in the record, survives the next
@@ -9876,7 +10117,192 @@ fn structure_wall_carve_on_existing_boundary_selects_without_splitting() {
     );
 }
 
-// ----- Stage 1: inter-storey party auto-exposure -----------------------
+/// A STRUCTURE carve levels onto construction-phase lines exactly like a
+/// living-area carve: the wall drawn ~0.3 m past the x=5 phase division lands
+/// ON it, its parameter is pre-known (pinned — the pin matches the snap, so
+/// dimensioning never asks for it), and the leveling surfaces as a skippable
+/// snap tag ("Don't snap").
+#[test]
+fn structure_carve_snaps_to_phase_line_and_pins_the_wall() {
+    let p = |x: f32, y: f32| Point2f32::new(x, y);
+    let mut c = dimensioned_square_controller(); // storey 0 = 10x10 m
+    c.phase_regions.entry(0).or_default().push(PhaseRegion {
+        polygon: vec![p(5., 0.), p(10., 0.), p(10., 10.), p(5., 10.)],
+        phase: ConstructionPhase::Extension1,
+    });
+    c.mark_dirty().unwrap();
+    c.materialize();
+
+    set_only_kind(&mut c, SurfaceKind::Floors);
+    c.set_structure_select_mode(Some(SelectMode::Carve));
+
+    // Interior carve whose right wall is drawn 0.3 m past the phase division.
+    c.apply_structure_carve_stroke(&[(2.0, 2.0), (5.3, 2.0), (5.3, 8.0), (2.0, 8.0), (2.1, 2.1)]);
+    assert!(c.dimensioning_active(), "the carve starts dimensioning");
+    let pts = c.document.floor_plan.get_points();
+    let max_x = pts.iter().map(|v| v.x).fold(f32::MIN, f32::max);
+    assert!(
+        (max_x - 5.0).abs() < 1e-2,
+        "the carved ring's wall snapped onto the phase line x=5: {pts:?}"
+    );
+
+    // The pin matches the snap: the snapped wall's coordinate parameter is
+    // pre-known, so no dimension prompt opens for it.
+    let (ring, edge) = c
+        .document
+        .floor_plan
+        .hit_test_wall(5.0, 5.0, 0.05)
+        .expect("the snapped wall sits at x=5");
+    let (param, _axis) = c
+        .document
+        .floor_plan
+        .wall_movable_param(ring, edge)
+        .expect("the snapped wall has a coordinate parameter");
+    assert!(
+        c.document.dimensioning.known_params.contains(&param),
+        "the phase-snapped wall is pinned pre-known: known {:?}",
+        c.document.dimensioning.known_params
+    );
+
+    // The leveling is elective and visible: a skippable "Don't snap" tag.
+    let tags = c.snap_overlay();
+    assert!(
+        tags.iter()
+            .any(|t| t.skippable && t.current_kind == Some(manip_plan::SnapKind::ToParallelWall)),
+        "the phase-line leveling surfaces as a skippable snap tag: {tags:?}"
+    );
+}
+
+/// Wall inclusion is explicit where AMBIGUOUS: a carve edge on the storey
+/// outline (true exterior — nothing beyond it) auto-includes its wall, while
+/// an interior cut edge that a wall region actually STANDS ON (here a
+/// floor-step RISER along x=5) raises the per-edge ask — exactly ONE ask, for
+/// exactly that edge (interior edges over open floor never ask; see
+/// `interior_structure_carve_through_open_floor_asks_nothing`). Include keeps
+/// the riser; Exclude leaves it out. The two runs differ only in the answer.
+#[test]
+fn structure_carve_asks_for_interior_edge_walls_and_honours_the_answer() {
+    let run = |include: bool| -> (bool, bool) {
+        let p = |x: f32, y: f32| Point2f32::new(x, y);
+        let mut c = dimensioned_square_controller();
+        // A floor step over the right half derives a RISER wall region along
+        // the step line x=5 — the interior wall the ask decides about.
+        c.step_regions.entry(0).or_default().push(StepRegion {
+            polygon: vec![p(5., 0.), p(10., 0.), p(10., 10.), p(5., 10.)],
+            level_m: -0.3,
+        });
+        c.commit_to_ber().unwrap();
+
+        set_only_kind(&mut c, SurfaceKind::Walls);
+        c.set_structure_select_mode(Some(SelectMode::Carve));
+
+        // Straight cut along the step line, pick the RIGHT half: its x=10 edge
+        // lies on the outline (exterior), its x=5 edge is interior.
+        c.apply_structure_carve_stroke(&[(5.0, 0.0), (5.0, 10.0)]);
+        assert!(c.structure_cut_pending(), "the cut offers two candidates");
+        c.choose_structure_cut_region(7.5, 5.0);
+        let mut guard = 0;
+        while c.dimensioning_active() && guard < 12 {
+            c.skip_current_dimension();
+            guard += 1;
+        }
+        skip_position_prompts(&mut c);
+
+        // Only the interior edge asks; the outline edges are auto-included.
+        let prompt = c
+            .wall_inclusion_prompt()
+            .expect("the interior cut edge raises the ask");
+        assert_eq!(prompt.total, 1, "exactly one ambiguous edge (x=5)");
+        assert!(
+            (prompt.edge.0 .0 - 5.0).abs() < 1e-3 && (prompt.edge.1 .0 - 5.0).abs() < 1e-3,
+            "the asked edge runs along x=5: {:?}",
+            prompt.edge
+        );
+        assert_eq!(
+            c.pending_structure_carve_polygons().len(),
+            1,
+            "the ring stays shaded while the ask is up"
+        );
+        c.resolve_wall_inclusion(include);
+        assert!(c.wall_inclusion_prompt().is_none(), "the ask is answered");
+
+        c.begin_structure_edit();
+        let storey = &c.current_record.as_ref().unwrap().data.storeys[0];
+        // Identify walls by their base-edge MIDPOINT (a step z-jump can leave a
+        // perimeter piece with two leading vertices at the same plan point, so
+        // "first two vertices" is not a reliable base signature).
+        let base_at = |r: &&ber_model::ber::structural::WallRegion, x: f64, y: f64| {
+            r.base_midpoint()
+                .is_some_and(|m| (m.x - x).abs() < 1e-3 && (m.y - y).abs() < 1e-3)
+        };
+        let riser = storey
+            .walls
+            .regions
+            .iter()
+            .find(|r| base_at(r, 5.0, 5.0))
+            .expect("the floor-step riser stands on x=5");
+        let right = storey
+            .walls
+            .regions
+            .iter()
+            .find(|r| base_at(r, 10.0, 5.0))
+            .expect("the outline's right wall");
+        (
+            c.structure_selected_ids().contains(&riser.id),
+            c.structure_selected_ids().contains(&right.id),
+        )
+    };
+
+    let (riser_in, right_in) = run(true);
+    assert!(right_in, "the exterior wall (on the outline) auto-included");
+    assert!(riser_in, "Include keeps the wall along the interior edge");
+
+    let (riser_in, right_in) = run(false);
+    assert!(
+        right_in,
+        "the exterior wall is included regardless of the answer"
+    );
+    assert!(!riser_in, "Exclude leaves the interior-edge wall out");
+}
+
+/// A Walls-mode carve with NO outline contact through OPEN FLOOR asks nothing:
+/// its edges are all interior, but no wall region stands on any of them, so
+/// there is no wall whose inclusion could be decided — the carve stages
+/// immediately, with no walls auto-included.
+#[test]
+fn interior_structure_carve_through_open_floor_asks_nothing() {
+    let mut c = dimensioned_square_controller();
+    c.materialize();
+
+    set_only_kind(&mut c, SurfaceKind::Walls);
+    c.set_structure_select_mode(Some(SelectMode::Carve));
+
+    // Interior 4×4 at (2,2)–(6,6): no edge touches the outline, and the plain
+    // 10×10 storey has no interior wall regions (no risers) — open floor.
+    c.apply_structure_carve_stroke(&[(2.0, 2.0), (6.0, 2.0), (6.0, 6.0), (2.0, 6.0), (2.1, 2.1)]);
+    complete_interior_length_loop(&mut c);
+    skip_position_prompts(&mut c);
+
+    assert!(
+        c.wall_inclusion_prompt().is_none(),
+        "no wall stands on any edge — nothing to ask: {:?}",
+        c.wall_inclusion_prompt()
+    );
+    assert_eq!(
+        c.pending_structure_carve_polygons().len(),
+        1,
+        "the carve staged immediately, no ask in the way"
+    );
+
+    c.begin_structure_edit();
+    assert!(
+        c.structure_selected_ids().is_empty(),
+        "no wall was auto-included from a fully interior carve: {:?}",
+        c.structure_selected_ids()
+    );
+}
+
+// ----- Inter-storey derivation through the real pipeline -----------------
 
 /// Drop a dimensioned square outline of `side` offset to `(ox, oy)` into the
 /// current storey — for building a SETBACK stack where the upper storey only
@@ -9901,79 +10327,92 @@ fn finalise_current_storey_as_offset_square(c: &mut AppController, side: f32, ox
 }
 
 /// On a 2-storey SETBACK stack (lower 10×10 at origin, upper 6×6 offset to
-/// (6,6) so it overhangs the lower on the top-right), `auto_expose_all_storeys`
-/// auto-splits the partial overlaps and stamps the shared sub-regions:
-///  - the upper storey's FLOOR splits, its piece over the lower → NonHeatLoss;
-///  - the lower storey's CEILING splits, its piece under the upper → Party.
+/// (6,6) so it overhangs the lower on the top-right), the pipeline's
+/// `derive_inter_storey` tail — no tool pass, just `materialize` — splits the
+/// partial overlaps and stamps the junction sub-regions:
+///  - the upper storey's FLOOR splits, its piece over the lower → InterStorey;
+///  - the lower storey's CEILING splits, its piece under the upper → InterStorey.
 /// The non-overlapping pieces stay Unset (left for manual marking).
 #[test]
-fn auto_expose_all_storeys_carves_and_stamps_setback_party_surfaces() {
+fn setback_stack_derives_inter_storey_floor_and_ceiling_pieces() {
     use ber_model::ber::structural::{CeilingExposure, FloorExposure};
 
     let mut c = dimensioned_square_controller(); // storey 0 = 10×10 at origin
-                                                 // Give the lower storey a ceiling so it has roof regions to carve.
+                                                 // Give the lower storey a ceiling so it has roof regions to split.
     c.set_default_ceiling_height(2.4).unwrap();
     c.add_storey().unwrap();
     finalise_current_storey_as_offset_square(&mut c, 6.0, 6.0, 6.0); // upper 6×6 @ (6,6)
     c.set_default_ceiling_height(2.4).unwrap();
     c.materialize();
 
-    // Sanity: a clean partial-overlap stack — one floor + one ceiling region each.
-    {
-        let s = &c.current_record.as_ref().unwrap().data.storeys;
-        assert_eq!(s[0].floors.regions.len(), 1);
-        assert_eq!(s[1].floors.regions.len(), 1);
-    }
-
-    c.auto_expose_all_storeys();
-    c.materialize();
-
     let storeys = &c.current_record.as_ref().unwrap().data.storeys;
 
-    // Upper storey's FLOOR split into the over-lower piece (NonHeatLoss) + the
+    // Upper storey's FLOOR split into the over-lower piece (InterStorey) + the
     // overhang piece (Unset). The overlap is x∈[6,10], y∈[6,10].
     assert_eq!(
         storeys[1].floors.regions.len(),
         2,
-        "upper floor carved in two"
+        "upper floor split in two by the below footprint"
     );
-    let party_floor = storeys[1]
+    // Identify the pieces by GEOMETRY, not push order: the junction piece is
+    // the 4×4 overlap square [6,10]² (area 16, centroid (8,8)); the overhang
+    // is the L (area 20, centroid ≈(9.8, 9.8) — note its centroid ALSO sits
+    // inside [6,10]², so a bare "x<10 && y<10" match would be order-dependent).
+    let junction_floor = storeys[1]
         .floors
         .regions
         .iter()
-        .find(|r| r.centroid().x < 10.0 && r.centroid().y < 10.0)
-        .expect("the over-lower floor piece");
-    assert_eq!(
-        party_floor.exposure,
-        FloorExposure::NonHeatLoss,
-        "the piece over the lower storey is a party floor"
-    );
+        .find(|r| (r.area() - 16.0).abs() < 1e-3)
+        .expect("the 16 m² over-lower floor piece");
+    let c = junction_floor.centroid();
     assert!(
-        storeys[1]
-            .floors
-            .regions
-            .iter()
-            .any(|r| r.exposure == FloorExposure::Unset),
+        (c.x - 8.0).abs() < 1e-3 && (c.y - 8.0).abs() < 1e-3,
+        "junction piece is the [6,10]² overlap square, centroid {c:?}"
+    );
+    assert_eq!(
+        junction_floor.exposure,
+        FloorExposure::InterStorey,
+        "the piece over the lower storey is a derived storey junction"
+    );
+    let overhang = storeys[1]
+        .floors
+        .regions
+        .iter()
+        .find(|r| (r.area() - 20.0).abs() < 1e-3)
+        .expect("the 20 m² overhang L-piece");
+    assert_eq!(
+        overhang.exposure,
+        FloorExposure::Unset,
         "the overhang piece is left Unset"
     );
 
-    // Lower storey's CEILING split, the piece under the upper → Party.
+    // Lower storey's CEILING split, the piece under the upper → InterStorey.
     assert!(
         storeys[0].ceilings.regions.len() >= 2,
-        "lower ceiling carved by the upper footprint"
+        "lower ceiling split by the upper footprint"
     );
     assert!(
         storeys[0]
             .ceilings
             .regions
             .iter()
-            .any(|r| r.exposure == CeilingExposure::Party),
-        "the piece under the upper storey is a party ceiling"
+            .any(|r| r.exposure == CeilingExposure::InterStorey),
+        "the piece under the upper storey is a derived storey junction"
+    );
+    // Nothing was pushed onto the durable split lists — the floor split is
+    // derived-only and the ceiling split rides regions-as-truth.
+    assert!(
+        storeys.iter().all(|s| s.floor_splits.is_empty()),
+        "no durable floor_splits from the derivation"
+    );
+    assert!(
+        storeys.iter().all(|s| s.ceiling_splits.is_empty()),
+        "no durable ceiling_splits from the derivation"
     );
 }
 
 /// Floor-exposure tool — Set-all then assign: entering raises the gate, confirm
-/// runs the auto-pass + reveals the view, `Set all` seeds every floor region
+/// reveals the view, `Set all` seeds every floor region
 /// across the stack, and `set_floor_exposure_for(Ground)` stamps each one.
 #[test]
 fn floor_exposure_set_all_then_assign_grounds_every_floor() {
@@ -9991,7 +10430,7 @@ fn floor_exposure_set_all_then_assign_grounds_every_floor() {
     c.confirm_all_storeys_added();
     assert!(
         !c.floor_exposure_gate_pending(),
-        "confirming lowers the gate (auto-pass has run)"
+        "confirming lowers the gate"
     );
 
     c.set_floor_exposure_select_mode(Some(SelectMode::All));
@@ -10060,16 +10499,17 @@ fn floor_exposure_click_toggles_one_region() {
 /// Floor-exposure CARVE: drawing + dimensioning a carve SPLITS the floor (it
 /// doesn't just select whole regions, the old behaviour) and selects the carved
 /// piece so an exposure can be assigned to it — the phase-2 carve flow. Only the
-/// LABELLABLE (non-party) floors are split/selectable: in a same-footprint stack
-/// the upper floor is an auto party (NonHeatLoss) floor and is left untouched,
-/// while the lower (Unset) floor carves and selects.
+/// LABELLABLE (non-InterStorey) floors are split/selectable: in a same-footprint
+/// stack the upper floor derives InterStorey (a storey junction) and is left
+/// untouched, while the lower (Unset) floor carves and selects.
 #[test]
 fn floor_exposure_carve_dimensions_then_splits_the_labellable_floor() {
     use ber_model::ber::structural::FloorExposure;
 
-    // Two storeys, SAME 10×10 footprint at the origin. Auto-exposure makes the
-    // UPPER floor party (NonHeatLoss, fully over the lower) and leaves the LOWER
-    // floor Unset (the lowest floor is no longer auto-Ground).
+    // Two storeys, SAME 10×10 footprint at the origin. The pipeline's
+    // InterStorey derivation classifies the UPPER floor (fully over the lower)
+    // and leaves the LOWER floor Unset (the lowest floor is never
+    // auto-classified).
     let mut c = dimensioned_square_controller(); // storey 0 = 10×10 at origin
     c.set_default_ceiling_height(2.4).unwrap();
     c.add_storey().unwrap();
@@ -10085,11 +10525,12 @@ fn floor_exposure_carve_dimensions_then_splits_the_labellable_floor() {
     c.set_floor_exposure_mode(true);
     c.confirm_all_storeys_added();
     c.materialize();
-    // Auto pass: upper floor party (hidden), lower floor still Unset (labellable).
+    // Derivation: upper floor InterStorey (hidden), lower floor still Unset
+    // (labellable).
     {
         let s = &c.current_record.as_ref().unwrap().data.storeys;
         assert_eq!(s[0].floors.regions[0].exposure, FloorExposure::Unset);
-        assert_eq!(s[1].floors.regions[0].exposure, FloorExposure::NonHeatLoss);
+        assert_eq!(s[1].floors.regions[0].exposure, FloorExposure::InterStorey);
     }
     c.set_floor_exposure_select_mode(Some(SelectMode::Carve));
 
@@ -10110,7 +10551,8 @@ fn floor_exposure_carve_dimensions_then_splits_the_labellable_floor() {
     skip_position_prompts(&mut c);
     c.materialize();
 
-    // The labellable LOWER floor split in two; the party UPPER floor is untouched.
+    // The labellable LOWER floor split in two; the InterStorey UPPER floor is
+    // untouched.
     {
         let s = &c.current_record.as_ref().unwrap().data.storeys;
         assert_eq!(
@@ -10121,7 +10563,7 @@ fn floor_exposure_carve_dimensions_then_splits_the_labellable_floor() {
         assert_eq!(
             s[1].floors.regions.len(),
             1,
-            "party upper floor left untouched"
+            "InterStorey upper floor left untouched"
         );
     }
     assert!(
@@ -10149,8 +10591,8 @@ fn floor_exposure_carve_dimensions_then_splits_the_labellable_floor() {
     );
     assert_eq!(
         s[1].floors.regions[0].exposure,
-        FloorExposure::NonHeatLoss,
-        "the party upper floor is unaffected"
+        FloorExposure::InterStorey,
+        "the InterStorey upper floor is unaffected"
     );
 }
 
@@ -10217,14 +10659,14 @@ fn floor_exposure_carve_clips_to_whole_building_not_reference_storey() {
 /// Floor-exposure straight CUT: an edge-to-edge stroke splits the whole building
 /// into two candidate halves and WAITS for a side pick (nothing split yet);
 /// tapping one half begins dimensioning it; once dimensioned the chosen side
-/// splits the labellable floor and is selected — mirrors the structure-phase cut
-/// + the floor-exposure Area carve.
+/// splits the labellable (non-InterStorey) floor and is selected — mirrors the
+/// structure-phase cut + the floor-exposure Area carve.
 #[test]
 fn floor_exposure_cut_picks_side_dimensions_then_splits_the_labellable_floor() {
     use ber_model::ber::structural::FloorExposure;
 
-    // Two storeys, SAME 10×10 footprint. Auto-exposure makes the UPPER floor
-    // party (hidden) and leaves the LOWER floor Unset (labellable).
+    // Two storeys, SAME 10×10 footprint. The InterStorey derivation classifies
+    // the UPPER floor (hidden) and leaves the LOWER floor Unset (labellable).
     let mut c = dimensioned_square_controller(); // storey 0 = 10×10 at origin
     c.set_default_ceiling_height(2.4).unwrap();
     c.add_storey().unwrap();
@@ -10238,7 +10680,7 @@ fn floor_exposure_cut_picks_side_dimensions_then_splits_the_labellable_floor() {
     {
         let s = &c.current_record.as_ref().unwrap().data.storeys;
         assert_eq!(s[0].floors.regions[0].exposure, FloorExposure::Unset);
-        assert_eq!(s[1].floors.regions[0].exposure, FloorExposure::NonHeatLoss);
+        assert_eq!(s[1].floors.regions[0].exposure, FloorExposure::InterStorey);
         assert_eq!(s[0].floors.regions.len(), 1, "lower floor whole");
     }
     c.set_floor_exposure_select_mode(Some(SelectMode::Carve));
@@ -10287,7 +10729,8 @@ fn floor_exposure_cut_picks_side_dimensions_then_splits_the_labellable_floor() {
     skip_position_prompts(&mut c);
     c.materialize();
 
-    // The labellable LOWER floor split in two; the party UPPER floor untouched.
+    // The labellable LOWER floor split in two; the InterStorey UPPER floor
+    // untouched.
     {
         let s = &c.current_record.as_ref().unwrap().data.storeys;
         assert_eq!(
@@ -10295,7 +10738,11 @@ fn floor_exposure_cut_picks_side_dimensions_then_splits_the_labellable_floor() {
             2,
             "lower (labellable) floor cut in two"
         );
-        assert_eq!(s[1].floors.regions.len(), 1, "party upper floor untouched");
+        assert_eq!(
+            s[1].floors.regions.len(),
+            1,
+            "InterStorey upper floor untouched"
+        );
     }
     assert!(
         !c.floor_exposure_selected_ids().is_empty(),
@@ -10306,7 +10753,7 @@ fn floor_exposure_cut_picks_side_dimensions_then_splits_the_labellable_floor() {
 // ── Ceiling-exposure tool (mirror of the floor-exposure tool tests) ──────────
 
 /// Ceiling-exposure tool — Set-all then assign: entering raises the gate,
-/// confirm runs the shared auto-pass + reveals the view, `Set all` seeds every
+/// confirm reveals the view, `Set all` seeds every
 /// (non-party) ceiling region across the stack, and `set_ceiling_exposure_for`
 /// stamps each one. Single storey, so its top ceiling is Unset (labellable).
 #[test]
@@ -10326,7 +10773,7 @@ fn ceiling_exposure_set_all_then_assign_marks_every_ceiling() {
     c.confirm_all_storeys_added_ceiling();
     assert!(
         !c.ceiling_exposure_gate_pending(),
-        "confirming lowers the gate (auto-pass has run)"
+        "confirming lowers the gate"
     );
 
     c.set_ceiling_exposure_select_mode(Some(SelectMode::All));
@@ -10390,11 +10837,12 @@ fn ceiling_exposure_click_toggles_one_region() {
     );
 }
 
-/// The shared auto-pass on a same-footprint 2-storey stack now leaves the TOP
-/// ceiling Unset (the assessor's call — exposed roof vs unheated attic) and only
-/// the intermediate ceiling under the storey above derives Party.
+/// The InterStorey derivation on a same-footprint 2-storey stack leaves the
+/// TOP ceiling Unset (the assessor's call — exposed roof vs unheated attic)
+/// and stamps only the intermediate ceiling under the storey above
+/// `InterStorey` (a storey junction of this dwelling).
 #[test]
-fn ceiling_exposure_auto_leaves_top_ceiling_unset() {
+fn derivation_leaves_top_ceiling_unset_and_stamps_intermediate_inter_storey() {
     use ber_model::ber::structural::CeilingExposure;
     let mut c = dimensioned_square_controller(); // storey 0 = 10×10 at origin
     c.set_default_ceiling_height(2.4).unwrap();
@@ -10409,8 +10857,8 @@ fn ceiling_exposure_auto_leaves_top_ceiling_unset() {
     let s = &c.current_record.as_ref().unwrap().data.storeys;
     assert_eq!(
         s[0].ceilings.regions[0].exposure,
-        CeilingExposure::Party,
-        "the intermediate ceiling (under the storey above) auto-derives Party"
+        CeilingExposure::InterStorey,
+        "the intermediate ceiling (under the storey above) derives InterStorey"
     );
     assert_eq!(
         s[1].ceilings.regions[0].exposure,
@@ -10421,9 +10869,9 @@ fn ceiling_exposure_auto_leaves_top_ceiling_unset() {
 
 /// Ceiling-exposure CARVE: drawing + dimensioning a carve SPLITS the ROOFS
 /// (regions-as-truth, via recompose) and selects the carved piece. Only the
-/// LABELLABLE (non-party) ceiling is split: on a same-footprint stack the LOWER
-/// ceiling is an auto party (hidden) and is left untouched, while the TOP (Unset)
-/// ceiling carves and selects.
+/// LABELLABLE (non-InterStorey) ceiling is split: on a same-footprint stack the
+/// LOWER ceiling derives InterStorey (hidden) and is left untouched, while the
+/// TOP (Unset) ceiling carves and selects.
 #[test]
 fn ceiling_exposure_carve_dimensions_then_splits_the_labellable_ceiling() {
     use ber_model::ber::structural::CeilingExposure;
@@ -10444,7 +10892,10 @@ fn ceiling_exposure_carve_dimensions_then_splits_the_labellable_ceiling() {
     c.materialize();
     {
         let s = &c.current_record.as_ref().unwrap().data.storeys;
-        assert_eq!(s[0].ceilings.regions[0].exposure, CeilingExposure::Party);
+        assert_eq!(
+            s[0].ceilings.regions[0].exposure,
+            CeilingExposure::InterStorey
+        );
         assert_eq!(s[1].ceilings.regions[0].exposure, CeilingExposure::Unset);
     }
     c.set_ceiling_exposure_select_mode(Some(SelectMode::Carve));
@@ -10478,7 +10929,7 @@ fn ceiling_exposure_carve_dimensions_then_splits_the_labellable_ceiling() {
         assert_eq!(
             s[0].ceilings.regions.len(),
             1,
-            "party lower ceiling left untouched"
+            "InterStorey lower ceiling left untouched"
         );
     }
     assert!(
@@ -10498,8 +10949,8 @@ fn ceiling_exposure_carve_dimensions_then_splits_the_labellable_ceiling() {
     );
     assert_eq!(
         s[0].ceilings.regions[0].exposure,
-        CeilingExposure::Party,
-        "the party lower ceiling is unaffected"
+        CeilingExposure::InterStorey,
+        "the InterStorey lower ceiling is unaffected"
     );
 }
 
@@ -10553,7 +11004,7 @@ fn ceiling_exposure_carve_clips_to_whole_building_not_reference_storey() {
 /// Ceiling-exposure straight CUT (mirror of the floor cut): an edge-to-edge
 /// stroke splits the whole building into two candidate halves and WAITS for a
 /// side pick; tapping one half dimensions it; the chosen side then splits the
-/// labellable top ceiling and is selected.
+/// labellable (non-InterStorey) top ceiling and is selected.
 #[test]
 fn ceiling_exposure_cut_picks_side_dimensions_then_splits_the_labellable_ceiling() {
     use ber_model::ber::structural::CeilingExposure;
@@ -10570,7 +11021,10 @@ fn ceiling_exposure_cut_picks_side_dimensions_then_splits_the_labellable_ceiling
     c.materialize();
     {
         let s = &c.current_record.as_ref().unwrap().data.storeys;
-        assert_eq!(s[0].ceilings.regions[0].exposure, CeilingExposure::Party);
+        assert_eq!(
+            s[0].ceilings.regions[0].exposure,
+            CeilingExposure::InterStorey
+        );
         assert_eq!(s[1].ceilings.regions[0].exposure, CeilingExposure::Unset);
         assert_eq!(s[1].ceilings.regions.len(), 1, "top ceiling whole");
     }
@@ -10625,178 +11079,12 @@ fn ceiling_exposure_cut_picks_side_dimensions_then_splits_the_labellable_ceiling
         assert_eq!(
             s[0].ceilings.regions.len(),
             1,
-            "party lower ceiling untouched"
+            "InterStorey lower ceiling untouched"
         );
     }
     assert!(
         !c.ceiling_exposure_selected_ids().is_empty(),
         "the chosen side is selected for exposure-setting"
-    );
-}
-
-/// FIX 1 (multi-storey undo): on a 2-storey SETBACK stack,
-/// `auto_expose_all_storeys` pushes carves onto EVERY storey's
-/// `floor_splits`/`ceiling_splits` — so undo must revert the whole stack, not just
-/// the active storey. Capture every storey's split counts + exposures before the
-/// pass; assert undo restores ALL of them (no leftover carves on the non-active
-/// storey, no surviving party exposure).
-#[test]
-fn auto_expose_all_storeys_undo_reverts_every_storey() {
-    use ber_model::ber::structural::{CeilingExposure, FloorExposure};
-
-    let mut c = dimensioned_square_controller(); // storey 0 = 10×10 at origin
-    c.set_default_ceiling_height(2.4).unwrap();
-    c.add_storey().unwrap();
-    finalise_current_storey_as_offset_square(&mut c, 6.0, 6.0, 6.0); // upper 6×6 @ (6,6)
-    c.set_default_ceiling_height(2.4).unwrap();
-    c.materialize();
-
-    // The active storey is the upper one (idx 1) after add_storey; the carves
-    // land on BOTH storeys' records, so the non-active storey (0) is the one the
-    // old active-only snapshot would have leaked.
-    let split_counts = |c: &AppController| -> Vec<(usize, usize)> {
-        c.current_record
-            .as_ref()
-            .unwrap()
-            .data
-            .storeys
-            .iter()
-            .map(|s| (s.floor_splits.len(), s.ceiling_splits.len()))
-            .collect()
-    };
-    let before = split_counts(&c);
-    // Pre-pass: nothing is carved yet anywhere.
-    assert!(
-        before.iter().all(|&(f, r)| f == 0 && r == 0),
-        "no splits before the pass"
-    );
-
-    c.auto_expose_all_storeys();
-    c.materialize();
-    let after = split_counts(&c);
-    assert!(
-        after.iter().any(|&(f, _)| f > 0) && after.iter().any(|&(_, r)| r > 0),
-        "the pass carved floor + roof splits onto the stack"
-    );
-    // Party exposures actually got stamped (the per-frame derive does it).
-    {
-        let s = &c.current_record.as_ref().unwrap().data.storeys;
-        assert!(
-            s[1].floors
-                .regions
-                .iter()
-                .any(|r| r.exposure == FloorExposure::NonHeatLoss),
-            "upper floor has a party piece"
-        );
-        assert!(
-            s[0].ceilings
-                .regions
-                .iter()
-                .any(|r| r.exposure == CeilingExposure::Party),
-            "lower ceiling has a party piece"
-        );
-    }
-
-    c.undo().unwrap();
-    c.materialize();
-    let restored = split_counts(&c);
-    assert_eq!(
-        restored, before,
-        "undo reverts EVERY storey's floor_splits/ceiling_splits (no leftover \
-         carves on the non-active storey)"
-    );
-    // And the party exposures are gone — every floor/ceiling region back to its
-    // pre-pass classification (the ground floor stays Ground via the per-frame
-    // derive; the point is no NonHeatLoss/Party leftover from the carved pieces).
-    {
-        let s = &c.current_record.as_ref().unwrap().data.storeys;
-        assert!(
-            !s[1]
-                .floors
-                .regions
-                .iter()
-                .any(|r| r.exposure == FloorExposure::NonHeatLoss),
-            "undo cleared the upper party-floor exposure"
-        );
-        assert!(
-            !s[0]
-                .ceilings
-                .regions
-                .iter()
-                .any(|r| r.exposure == CeilingExposure::Party),
-            "undo cleared the lower party-ceiling exposure"
-        );
-    }
-}
-
-/// FIX 4 (dead party-stamp loop removed): the carved party pieces are STILL
-/// marked NonHeatLoss / Party after the explicit stamp loop was deleted — the
-/// per-frame full-containment auto-derive (inside `commit_to_ber`) does it. This
-/// is the same setback geometry as the Stage-1 test, re-asserted post-refactor.
-#[test]
-fn auto_expose_all_storeys_party_pieces_marked_without_explicit_loop() {
-    use ber_model::ber::structural::{CeilingExposure, FloorExposure};
-
-    let mut c = dimensioned_square_controller();
-    c.set_default_ceiling_height(2.4).unwrap();
-    c.add_storey().unwrap();
-    finalise_current_storey_as_offset_square(&mut c, 6.0, 6.0, 6.0);
-    c.set_default_ceiling_height(2.4).unwrap();
-    c.materialize();
-
-    c.auto_expose_all_storeys();
-    c.materialize();
-
-    let s = &c.current_record.as_ref().unwrap().data.storeys;
-    assert!(
-        s[1].floors
-            .regions
-            .iter()
-            .any(|r| r.exposure == FloorExposure::NonHeatLoss),
-        "the over-lower floor piece is still NonHeatLoss"
-    );
-    assert!(
-        s[0].ceilings
-            .regions
-            .iter()
-            .any(|r| r.exposure == CeilingExposure::Party),
-        "the under-upper ceiling piece is still Party"
-    );
-}
-
-/// FIX 3 (dedup carve splits): re-running `auto_expose_all_storeys` a second time
-/// replans the SAME (idempotent) party geometry — the dedup must keep
-/// `floor_splits`/`ceiling_splits` from growing.
-#[test]
-fn auto_expose_all_storeys_twice_does_not_grow_splits() {
-    let mut c = dimensioned_square_controller();
-    c.set_default_ceiling_height(2.4).unwrap();
-    c.add_storey().unwrap();
-    finalise_current_storey_as_offset_square(&mut c, 6.0, 6.0, 6.0);
-    c.set_default_ceiling_height(2.4).unwrap();
-    c.materialize();
-
-    c.auto_expose_all_storeys();
-    c.materialize();
-    let counts = |c: &AppController| -> Vec<(usize, usize)> {
-        c.current_record
-            .as_ref()
-            .unwrap()
-            .data
-            .storeys
-            .iter()
-            .map(|s| (s.floor_splits.len(), s.ceiling_splits.len()))
-            .collect()
-    };
-    let first = counts(&c);
-
-    c.auto_expose_all_storeys();
-    c.materialize();
-    let second = counts(&c);
-
-    assert_eq!(
-        first, second,
-        "a second auto-pass must not grow floor_splits/ceiling_splits (dedup)"
     );
 }
 
@@ -11040,7 +11328,12 @@ fn ceiling_carve_stroke_presnaps_onto_the_roof_division() {
         Point2f32::new(9.0, 8.0),
         Point2f32::new(4.06, 8.0),
     ];
-    let snapped = manip_plan::snap_stroke_to_segments(&raw, &segs, tol);
+    let snapped = manip_plan::snap_stroke_to_segments(
+        &raw,
+        &segs,
+        tol,
+        manip_plan::SnapKind::ToReferenceSegment,
+    );
     // The two near-division vertices moved exactly ONTO x=4.
     assert!(
         (snapped[0].x - 4.0).abs() < 1e-3,
@@ -11717,4 +12010,2081 @@ fn mapping_review_drag_clamps_opening_under_the_top() {
         moved.sill_z + moved.height_m,
         wall_top
     );
+}
+
+/// While TRACING a new upper storey over the watermark, the world stroke
+/// pre-snaps onto the storey-below's INTERIOR construction-phase boundary —
+/// not just onto its outline. A wall drawn ~0.3 m off the phase division at
+/// x=5 (well within the ~8%-of-diagonal tolerance, far from any outline wall)
+/// must land exactly ON x=5, so the inherited phase seed splits the new floor
+/// along the real "year" line instead of a freehand offset.
+#[test]
+fn outline_world_snaps_to_below_storey_phase_boundary() {
+    let p = |x: f32, y: f32| Point2f32::new(x, y);
+    let mut c = dimensioned_square_controller(); // storey 0 = 10x10 m
+
+    // Tag the RIGHT half (x >= 5) of storey 0 as Extension1 and materialize so
+    // the phase partition reaches the persisted floors — what the upper-storey
+    // snap reads back via `document::phase_regions_from_floors`.
+    c.phase_regions.entry(0).or_default().push(PhaseRegion {
+        polygon: vec![p(5., 0.), p(10., 0.), p(10., 10.), p(5., 10.)],
+        phase: ConstructionPhase::Extension1,
+    });
+    c.mark_dirty().unwrap();
+    c.materialize();
+    let data = &c.current_record.as_ref().unwrap().data;
+    assert_eq!(
+        document::phase_regions_from_floors(data, 0).len(),
+        1,
+        "sanity: the tagged zone is reconstructable from the persisted floors"
+    );
+    // The snap references keep ONLY the interior division (both ends touch the
+    // outline but the middle crosses the interior); the zone edges running
+    // along the outline are filtered out (the carve owns those).
+    let prev_ring: Vec<Point2f32> = vec![p(0., 0.), p(10., 0.), p(10., 10.), p(0., 10.)];
+    let segs = document::phase_snap_segments(data, 0, &prev_ring);
+    assert_eq!(
+        segs.len(),
+        1,
+        "only the interior division survives: {segs:?}"
+    );
+    assert!(
+        segs[0].iter().all(|q| (q.x - 5.0).abs() < 1e-3),
+        "the division runs along x=5: {segs:?}"
+    );
+
+    c.add_storey().unwrap();
+    // Trace the LEFT half with the right wall drawn ~0.3 m past the division.
+    let world = vec![(0.2, 0.2), (5.3, 0.2), (5.3, 9.8), (0.2, 9.8), (0.3, 0.3)];
+    c.apply_outline_world_inner(&world, true)
+        .expect("carve applies");
+    assert_eq!(c.document.floor_plan.ring_count(), 1, "outline built");
+    let pts = c.document.floor_plan.get_points();
+    let max_x = pts.iter().map(|v| v.x).fold(f32::MIN, f32::max);
+    assert!(
+        (max_x - 5.0).abs() < 1e-2,
+        "right wall landed ON the phase boundary x=5 (got {max_x}): {pts:?}"
+    );
+    // And the footprint is the left half, not the drawn 5.3-wide sliver.
+    let area = ring_area(&c);
+    assert!((area - 50.0).abs() < 2.0, "footprint ≈ 50 m² (got {area})");
+}
+
+/// PROBE (user repro): add storey → draw → delete → add again → accept
+/// thickness must land back on the draw-vs-suggest CHOICE, with suggestions
+/// still offerable.
+#[test]
+fn probe_delete_readd_reopens_choose_method() {
+    let mut c = dimensioned_square_controller(); // storey 0 = 10x10 m
+    c.set_default_ceiling_height(2.4).unwrap();
+    c.add_storey().unwrap();
+    let p1 = c.new_storey_prompt().expect("flow open on first add");
+    assert!(p1.thickness_pending, "first add asks thickness");
+    c.assign_floor_thickness(0.3).unwrap();
+    let p2 = c.new_storey_prompt().expect("flow open after thickness");
+    assert!(p2.method_pending, "first add asks the method");
+    assert!(p2.can_suggest, "suggestions available on first add");
+    // Draw the outline (implicit choose_draw): full world entry point.
+    c.apply_outline_stroke_world(&[(0.2, 0.2), (9.8, 0.2), (9.8, 9.8), (0.2, 9.8), (0.3, 0.3)]);
+    assert!(
+        c.new_storey_prompt().is_none(),
+        "drawing closed the flow (implicit draw choice)"
+    );
+    // Delete it and add again — the user's sequence.
+    c.delete_current_storey().unwrap();
+    c.add_storey().unwrap();
+    let p3 = c
+        .new_storey_prompt()
+        .expect("flow open on second add (thickness)");
+    assert!(p3.thickness_pending, "second add asks thickness again");
+    c.assign_floor_thickness(0.3).unwrap();
+    let p4 = c
+        .new_storey_prompt()
+        .expect("flow STILL open after second thickness accept");
+    assert!(
+        p4.method_pending,
+        "second add must re-ask draw-vs-suggest, not assume draw"
+    );
+    assert!(
+        p4.can_suggest,
+        "suggestions must still be offerable after delete + re-add"
+    );
+}
+
+/// Dimensioning must not re-ask for a wall that pre-snapped onto the
+/// storey-below's construction-phase boundary: a snapped wall is a known wall
+/// (the same rule the living-area flow applies via its reference walls), so a
+/// left-half trace whose right wall lands ON the x=5 phase division and whose
+/// other walls lie on the previous outline has NOTHING left to dimension — no
+/// wall prompt opens.
+#[test]
+fn outline_world_phase_snapped_wall_is_pinned_pre_known() {
+    let p = |x: f32, y: f32| Point2f32::new(x, y);
+    let mut c = dimensioned_square_controller(); // storey 0 = 10x10 m
+    c.phase_regions.entry(0).or_default().push(PhaseRegion {
+        polygon: vec![p(5., 0.), p(10., 0.), p(10., 10.), p(5., 10.)],
+        phase: ConstructionPhase::Extension1,
+    });
+    c.mark_dirty().unwrap();
+    c.materialize();
+    c.add_storey().unwrap();
+    // Left half: the right wall drawn ~0.3 m past the division, the other
+    // three walls hugging the previous outline.
+    let world = vec![(0.2, 0.2), (5.3, 0.2), (5.3, 9.8), (0.2, 9.8), (0.3, 0.3)];
+    c.apply_outline_world_inner(&world, true)
+        .expect("carve applies");
+    let pts = c.document.floor_plan.get_points();
+    let max_x = pts.iter().map(|v| v.x).fold(f32::MIN, f32::max);
+    assert!(
+        (max_x - 5.0).abs() < 1e-2,
+        "right wall snapped onto the phase boundary x=5: {pts:?}"
+    );
+    // BOTH axes' walls have known coordinates (previous outline + phase
+    // line): every active param is pinned, so no dimension prompt opens —
+    // the log's "pinned N of N".
+    let active = c.document.floor_plan.all_active_params();
+    assert!(
+        active.is_subset(&c.document.dimensioning.known_params),
+        "every wall coordinate pre-known: active {active:?} vs known {:?}",
+        c.document.dimensioning.known_params
+    );
+    assert!(
+        c.document.dimensioning.current_prompt.is_none(),
+        "a wall snapped onto a phase line must not be re-asked"
+    );
+}
+
+/// Declining the phase-boundary snap tag honestly REOPENS the dimension
+/// question: "Don't snap" replays the SAME world stroke through
+/// `apply_outline_world_inner`, the formerly-snapped wall no longer lies on
+/// the phase line, so its param is NOT pinned and a wall prompt IS open.
+#[test]
+fn outline_world_unsnap_phase_boundary_reopens_dimension_prompt() {
+    let p = |x: f32, y: f32| Point2f32::new(x, y);
+    let mut c = dimensioned_square_controller(); // storey 0 = 10x10 m
+    c.phase_regions.entry(0).or_default().push(PhaseRegion {
+        polygon: vec![p(5., 0.), p(10., 0.), p(10., 10.), p(5., 10.)],
+        phase: ConstructionPhase::Extension1,
+    });
+    c.mark_dirty().unwrap();
+    c.materialize();
+    c.add_storey().unwrap();
+    // The full entry point (capture + tags) gates on the slab thickness and
+    // needs an engine stroke for the close-check; the world points below are
+    // what get applied.
+    c.assign_floor_thickness(0.3).unwrap();
+    c.sketch_start_stroke(Point2f32::new(0.0, 0.0)).unwrap();
+    for (x, y) in [(100.0, 0.0), (100.0, 100.0), (0.0, 100.0), (1.0, 1.0)] {
+        c.sketch_add_point(Point2f32::new(x, y)).unwrap();
+    }
+    let world = vec![(0.2, 0.2), (5.3, 0.2), (5.3, 9.8), (0.2, 9.8), (0.3, 0.3)];
+    c.apply_outline_stroke_world(&world);
+    assert!(
+        c.document.dimensioning.current_prompt.is_none(),
+        "while snapped, nothing is left to ask"
+    );
+    // Decline EVERY phase-boundary snap. Each decline replays the stroke and
+    // re-captures fresh tags, so re-fetch the overlay after each one.
+    let mut declined = 0;
+    while let Some(tag) = c
+        .snap_overlay()
+        .into_iter()
+        .find(|t| t.current_kind == Some(manip_plan::SnapKind::ToPhaseBoundary))
+    {
+        c.choose_snap(Point2f32::new(tag.from.0, tag.from.1), None);
+        declined += 1;
+        assert!(declined <= 8, "un-snap loop did not converge");
+    }
+    assert!(declined > 0, "the phase snap surfaced as a clickable tag");
+    // The un-snapped wall sits at its drawn ~5.3, OFF the phase line — its
+    // coordinate is genuinely unknown again.
+    let pts = c.document.floor_plan.get_points();
+    let max_x = pts.iter().map(|v| v.x).fold(f32::MIN, f32::max);
+    assert!(
+        max_x > 5.05,
+        "declined snap leaves the wall off the phase line: {pts:?}"
+    );
+    let active = c.document.floor_plan.all_active_params();
+    assert!(
+        !active.is_subset(&c.document.dimensioning.known_params),
+        "the un-snapped wall's param is no longer pinned"
+    );
+    assert!(
+        c.document.dimensioning.current_prompt.is_some(),
+        "the dimension question honestly returns after \"Don't snap\""
+    );
+}
+
+// ----- delete storey (restart a badly-drawn storey) -------------------------
+
+/// `delete_current_storey` refuses everywhere except on the TOP storey
+/// (index >= 1): no BER loaded, the ground storey, a mid-stack storey, and
+/// the All tab all leave the storeys intact.
+#[test]
+fn delete_storey_refusals() {
+    // No BER loaded.
+    let mut c = AppController::new(crate::engine::open_db(":memory:").unwrap());
+    assert!(c.delete_current_storey().is_err(), "no BER loaded");
+
+    // Ground storey (also the only storey).
+    let mut c = dimensioned_square_controller();
+    assert!(c.delete_current_storey().is_err(), "storey 0 is protected");
+    assert_eq!(c.current_record.as_ref().unwrap().data.storeys.len(), 1);
+    assert_eq!(c.document.storeys.len(), 1);
+
+    // Mid-stack storey: storeys 0,1,2 with the editor on 1.
+    c.add_storey().unwrap();
+    finalise_current_storey_as_square(&mut c, 6.0);
+    c.add_storey().unwrap();
+    finalise_current_storey_as_square(&mut c, 4.0);
+    c.set_current_storey(Some(1)).unwrap();
+    assert!(
+        c.delete_current_storey().is_err(),
+        "mid-stack storey refused (only the top storey deletes)"
+    );
+    assert_eq!(c.current_record.as_ref().unwrap().data.storeys.len(), 3);
+    assert_eq!(c.document.storeys.len(), 3);
+
+    // All-storeys tab — no current storey to delete.
+    c.set_current_storey(None).unwrap();
+    assert!(c.delete_current_storey().is_err(), "All tab has no storey");
+    assert_eq!(c.current_record.as_ref().unwrap().data.storeys.len(), 3);
+
+    // The document model itself refuses to drop its last storey (the
+    // never-empty invariant `Deref` relies on).
+    let mut d = document::Document::default();
+    assert!(!d.remove_last_storey());
+    assert_eq!(d.storeys.len(), 1);
+}
+
+/// Deleting the top storey shrinks BOTH parallel containers in lock-step,
+/// clears every piece of per-storey session state keyed by the dead index,
+/// and lands the editor on the storey below with its geometry intact.
+#[test]
+fn delete_top_storey_shrinks_and_lands_below() {
+    let mut c = dimensioned_square_controller(); // storey 0 = 10x10
+    c.add_storey().unwrap();
+    finalise_current_storey_as_square(&mut c, 6.0); // storey 1 = 6x6
+    assert_eq!(c.current_storey_idx(), Some(1));
+
+    // Plant per-storey session state keyed by the doomed index so the delete
+    // provably clears it (and storey 0's own entries provably survive).
+    let key = document::centroid_key(domain::points::Point2f64::new(3.0, 3.0));
+    c.inherited_seed_pending.insert(1);
+    c.floor_exposure_selected.insert((1, key));
+    c.roof_selected.insert((1, key));
+    c.ceiling_exposure_selected.insert((0, key));
+    c.ceiling_exposure_selected.insert((1, key));
+
+    c.delete_current_storey().expect("top storey deletes");
+
+    assert_eq!(c.current_record.as_ref().unwrap().data.storeys.len(), 1);
+    assert_eq!(c.document.storeys.len(), 1, "lock-step shrink");
+    assert_eq!(
+        c.current_storey_idx(),
+        Some(0),
+        "landed on the storey below"
+    );
+    assert!(!c.phase_regions.contains_key(&1));
+    assert!(!c.step_regions.contains_key(&1));
+    assert!(!c.ceiling_step_regions.contains_key(&1));
+    assert!(!c.inherited_seed_pending.contains(&1));
+    assert!(!c.floor_exposure_selected.iter().any(|(i, _)| *i == 1));
+    assert!(!c.roof_selected.iter().any(|(i, _)| *i == 1));
+    assert!(!c.ceiling_exposure_selected.iter().any(|(i, _)| *i == 1));
+    assert!(
+        c.ceiling_exposure_selected.contains(&(0, key)),
+        "surviving storeys' selections stay"
+    );
+    // The editor shows storey 0's finalised outline again (lossless — the
+    // StoreyDoc was preserved in place).
+    assert_eq!(c.document.floor_plan.ring_count(), 1);
+    assert!(c.document.dimensioning.scale_set);
+    assert!(c.pending_new_storey.is_none(), "no stale new-storey flow");
+    assert!(
+        !c.can_undo(),
+        "a deleted storey is outside the editing history"
+    );
+    assert!(c.redo.is_empty());
+    // The shrunken record still derives cleanly.
+    c.commit_to_ber().expect("commit after delete");
+    assert_eq!(c.current_record.as_ref().unwrap().data.storeys.len(), 1);
+    assert!(!c.current_record.as_ref().unwrap().data.storeys[0]
+        .floors
+        .to_vertex_lists()
+        .is_empty());
+}
+
+/// Delete-then-re-add (the "start again" round trip): the new top storey is
+/// fresh — empty outline, scale uncalibrated — and the new-storey flow
+/// re-opens at the thickness question.
+#[test]
+fn delete_then_readd_storey_starts_fresh() {
+    let mut c = dimensioned_square_controller();
+    c.add_storey().unwrap();
+    finalise_current_storey_as_square(&mut c, 6.0); // the "bad" drawing
+    c.delete_current_storey().unwrap();
+
+    c.add_storey().expect("re-add after delete");
+    assert_eq!(c.current_storey_idx(), Some(1));
+    assert_eq!(c.current_record.as_ref().unwrap().data.storeys.len(), 2);
+    assert_eq!(c.document.storeys.len(), 2);
+    assert_eq!(
+        c.document.floor_plan.ring_count(),
+        0,
+        "fresh empty storey — the deleted 6x6 is gone"
+    );
+    assert!(!c.document.dimensioning.scale_set);
+    let prompt = c.new_storey_prompt().expect("new-storey flow re-opens");
+    assert!(prompt.thickness_pending, "thickness asked first");
+    assert!(c.inherited_seed_pending.contains(&1));
+}
+
+/// CEILING SPLIT AT NEW-STOREY FINALISATION: a new storey whose footprint
+/// PARTIALLY covers the below storey's flat ceiling splits that ceiling in two
+/// along the footprint boundary — the seed tail's commit runs the pipeline's
+/// `derive_inter_storey`, which splits (regions-as-truth) and stamps the
+/// covered piece `InterStorey`; the uncovered piece stays separately
+/// classifiable. DERIVED-ONLY: nothing is pushed onto `ceiling_splits`.
+/// Re-running the tail (a redraw re-pends the seed) is idempotent — no extra
+/// ceiling pieces.
+#[test]
+fn new_storey_partial_cover_derives_inter_storey_ceiling_piece() {
+    use ber_model::ber::structural::CeilingExposure;
+    let p = |x: f32, y: f32| Point2f32::new(x, y);
+    let mut c = dimensioned_square_controller();
+    c.set_default_ceiling_height(2.4).expect("height applies");
+    c.materialize();
+    assert_eq!(
+        c.current_record.as_ref().unwrap().data.storeys[0]
+            .ceilings
+            .regions
+            .len(),
+        1,
+        "one flat ceiling below before the new storey"
+    );
+
+    c.add_storey().unwrap();
+    c.assign_floor_thickness(0.3).unwrap();
+    // Drawn-path finalisation: adopt a FINALISED 4×10 outline covering the
+    // left strip of the 10×10 below, then fire the seed tail (the same entry
+    // `accept_suggestion` and the dimensioning/carve tails funnel into).
+    let ring = vec![p(0., 0.), p(4., 0.), p(4., 10.), p(0., 10.)];
+    c.document.adopt_finalised_outline(&ring).expect("adopts");
+    c.maybe_seed_inherited_levels();
+    assert!(!c.inherited_seed_pending.contains(&1), "seed consumed");
+
+    {
+        let below = &c.current_record.as_ref().unwrap().data.storeys[0];
+        assert!(
+            below.ceiling_splits.is_empty(),
+            "derived-only — no carve ring pushed onto the below storey"
+        );
+        assert_eq!(
+            below.ceilings.regions.len(),
+            2,
+            "the below ceiling split in two along the footprint boundary"
+        );
+        let covered = below
+            .ceilings
+            .regions
+            .iter()
+            .find(|r| r.centroid().x < 4.0)
+            .expect("the piece under the new footprint exists");
+        let uncovered = below
+            .ceilings
+            .regions
+            .iter()
+            .find(|r| r.centroid().x > 4.0)
+            .expect("the uncovered piece exists");
+        assert!(
+            (covered.area() - 40.0).abs() < 1e-3 && (uncovered.area() - 60.0).abs() < 1e-3,
+            "split along x = 4: {} / {}",
+            covered.area(),
+            uncovered.area()
+        );
+        assert_eq!(
+            covered.exposure,
+            CeilingExposure::InterStorey,
+            "the covered piece derives InterStorey"
+        );
+        assert_ne!(
+            uncovered.exposure,
+            CeilingExposure::InterStorey,
+            "the uncovered piece is NOT InterStorey — left for the assessor"
+        );
+    }
+
+    // Re-run the tail as a redraw would (the seed re-pends, the same
+    // footprint finalises again): the derivation is idempotent — no extra
+    // ceiling pieces, still nothing durable pushed.
+    c.inherited_seed_pending.insert(1);
+    c.maybe_seed_inherited_levels();
+    let below = &c.current_record.as_ref().unwrap().data.storeys[0];
+    assert!(below.ceiling_splits.is_empty(), "still nothing durable");
+    assert_eq!(
+        below.ceilings.regions.len(),
+        2,
+        "still two ceiling pieces after the re-run"
+    );
+}
+
+/// Build a two-storey stack whose upper storey PARTIALLY covers the below
+/// storey's flat ceiling (the 4×10 left strip of a 10×10, the
+/// `new_storey_partial_cover_derives_inter_storey_ceiling_piece` fixture):
+/// after finalisation the below ceiling is split in two with the covered piece
+/// derived `InterStorey`. The starting point for the delete/redraw RETRACTION
+/// tests.
+fn partial_cover_two_storey_controller() -> AppController {
+    let p = |x: f32, y: f32| Point2f32::new(x, y);
+    let mut c = dimensioned_square_controller(); // storey 0 = 10x10
+    c.set_default_ceiling_height(2.4).expect("height applies");
+    c.materialize();
+    c.add_storey().unwrap();
+    c.assign_floor_thickness(0.3).unwrap();
+    let ring = vec![p(0., 0.), p(4., 0.), p(4., 10.), p(0., 10.)];
+    c.document.adopt_finalised_outline(&ring).expect("adopts");
+    c.maybe_seed_inherited_levels();
+    // Sanity — the split + InterStorey piece are in place (the classification
+    // the retraction must undo).
+    let below = &c.current_record.as_ref().unwrap().data.storeys[0];
+    assert!(below.ceiling_splits.is_empty(), "fixture: derived-only");
+    assert_eq!(below.ceilings.regions.len(), 2, "fixture: ceiling split");
+    assert!(
+        below
+            .ceilings
+            .regions
+            .iter()
+            .any(|r| r.exposure == ber_model::ber::structural::CeilingExposure::InterStorey),
+        "fixture: the covered piece derived InterStorey"
+    );
+    c
+}
+
+/// DELETING the partially-covering top storey RETRACTS its classification
+/// from the storey below: the commit's `derive_inter_storey` clear pass
+/// un-stamps `InterStorey` (no storey above → nothing re-stamps), so every
+/// piece is classifiable again. The SPLIT pieces themselves may remain —
+/// ceilings are regions-as-truth and the derivation's split is durable there
+/// (accepted: both pieces are Unset and the assessor can label each). Nothing
+/// was ever pushed onto `ceiling_splits`, so there's nothing durable to drop.
+#[test]
+fn delete_storey_retracts_inter_storey_ceiling_classification() {
+    use ber_model::ber::structural::CeilingExposure;
+    let mut c = partial_cover_two_storey_controller();
+
+    c.delete_current_storey().expect("top storey deletes");
+
+    let below = &c.current_record.as_ref().unwrap().data.storeys[0];
+    assert!(below.ceiling_splits.is_empty(), "still nothing durable");
+    assert!(
+        below
+            .ceilings
+            .regions
+            .iter()
+            .all(|r| r.exposure != CeilingExposure::InterStorey),
+        "no resolved region reads InterStorey (all classifiable again)"
+    );
+    // The retraction survives the next derive cycle (nothing re-stamps —
+    // there is no storey above anymore).
+    c.commit_to_ber()
+        .expect("commit stays green after the delete");
+    let below = &c.current_record.as_ref().unwrap().data.storeys[0];
+    assert!(below
+        .ceilings
+        .regions
+        .iter()
+        .all(|r| r.exposure != CeilingExposure::InterStorey));
+}
+
+/// A WHOLESALE REDRAW of the upper storey's outline: the redraw reset (what
+/// `apply_drawperp_stroke` / `apply_outline_world_inner` call right after
+/// replacing the outline) re-pends the seed, and the re-finalisation against
+/// a DIFFERENT partial footprint re-derives the classification — the clear
+/// pass retracts the OLD boundary's `InterStorey` stamp and only the NEW
+/// covered piece classifies. The old boundary's split pieces may remain
+/// (regions-as-truth residue, accepted — they read Unset and stay
+/// labellable); no durable rings are involved.
+#[test]
+fn redraw_rederives_inter_storey_against_the_new_footprint_only() {
+    use ber_model::ber::structural::CeilingExposure;
+    let p = |x: f32, y: f32| Point2f32::new(x, y);
+    let mut c = partial_cover_two_storey_controller(); // old cover: x in 0..4
+
+    // The redraw reset runs BEFORE the new outline commits, so the record
+    // still holds the OLD resolve — exactly like the strokes.rs call sites.
+    c.reset_inherited_seed_for_redraw();
+    assert!(c.inherited_seed_pending.contains(&1), "seed re-pended");
+
+    // Re-finalise with a DIFFERENT partial footprint (the right 4 m strip).
+    let ring = vec![p(6., 0.), p(10., 0.), p(10., 10.), p(6., 10.)];
+    c.document.adopt_finalised_outline(&ring).expect("adopts");
+    c.maybe_seed_inherited_levels();
+
+    let below = &c.current_record.as_ref().unwrap().data.storeys[0];
+    assert!(below.ceiling_splits.is_empty(), "still nothing durable");
+    // ONLY the pieces under the NEW footprint (x > 6) classify InterStorey —
+    // the old x∈[0,4] cover's stamp was cleared by the re-derive.
+    let (mut covered_area, mut uncovered_area) = (0.0_f64, 0.0_f64);
+    for r in &below.ceilings.regions {
+        if r.exposure == CeilingExposure::InterStorey {
+            assert!(
+                r.centroid().x > 6.0,
+                "an InterStorey piece outside the new footprint: {:?}",
+                r.centroid()
+            );
+            covered_area += r.area();
+        } else {
+            assert!(
+                r.centroid().x < 6.0,
+                "a piece under the new footprint failed to classify: {:?}",
+                r.centroid()
+            );
+            uncovered_area += r.area();
+        }
+    }
+    assert!(
+        (covered_area - 40.0).abs() < 1e-3 && (uncovered_area - 60.0).abs() < 1e-3,
+        "classified along x = 6 only: {covered_area} / {uncovered_area}"
+    );
+}
+
+/// Deleting the top storey clears the captured snap action (and any pending
+/// roof area): its `before` snapshot is a whole-`Document` clone with the OLD
+/// storey count, so clicking a stale tag after the delete would restore a
+/// two-storey Document against the one-storey record.
+#[test]
+fn delete_storey_clears_last_snap_action() {
+    let mut c = dimensioned_square_controller(); // storey 0 = 10x10
+    c.add_storey().unwrap();
+    c.assign_floor_thickness(0.3).unwrap();
+    // Drive a world outline stroke with elective snaps (the
+    // `outline_world_stroke_is_captured_for_snap_replay` fixture idiom): the
+    // pixel stroke supplies the close-check, the world points get applied.
+    c.sketch_start_stroke(Point2f32::new(0.0, 0.0)).unwrap();
+    for (x, y) in [(100.0, 0.0), (100.0, 100.0), (0.0, 100.0), (1.0, 1.0)] {
+        c.sketch_add_point(Point2f32::new(x, y)).unwrap();
+    }
+    let world = vec![(0.2, 0.2), (9.8, 0.2), (9.8, 9.8), (0.2, 9.8), (0.3, 0.3)];
+    c.apply_outline_stroke_world(&world);
+    assert!(
+        c.last_snap_action.is_some(),
+        "fixture: a snap action was captured"
+    );
+    assert!(
+        !c.snap_overlay().is_empty(),
+        "fixture: clickable tags exist"
+    );
+
+    c.delete_current_storey().expect("top storey deletes");
+
+    assert!(
+        c.last_snap_action.is_none(),
+        "the stale snap action is cleared — no replay against the shrunken record"
+    );
+    assert!(c.snap_overlay().is_empty(), "no stale tags to click");
+    assert!(c.pending_roof_area.is_none());
+}
+
+// ─── Snap-affordance unification: sub-area carve flows share the tag overlay ─
+//
+// The six carve-family flows (living area, phase, step, structure, floor +
+// ceiling exposure) surface their elective snaps through the SAME snap-tag
+// mechanism as outline/extend/trim strokes: the stroke is captured as a
+// `SnapAction::Subarea`, tags render from `snap_overlay`, and `choose_snap`
+// replays the stroke (plus any recorded cut-region pick) under a forced policy.
+
+/// Fixture: a living-area CARVE (closed loop) whose bottom run hugs the bottom
+/// edge up to near corner (0,0) — records a SKIPPABLE `ToCorner` decision (the
+/// hug entry at ≈(0.12, 0) snaps to the corner) plus `ToParallelWall` levelings
+/// of the near-wall return leg. Commits an area of ≈ 4×3 at the corner.
+fn corner_hug_living_area_stroke(c: &mut AppController) {
+    c.apply_living_area_stroke_event(&[
+        (0.1, 0.05),
+        (2.0, 0.05),
+        (4.0, 0.05),
+        (4.0, 1.5),
+        (4.0, 3.0),
+        (2.0, 3.0),
+        (0.1, 3.0),
+        (0.1, 1.5),
+        (0.12, 0.1),
+    ]);
+}
+
+/// A living-area carve that hugs an outline corner surfaces its elective snaps
+/// as clickable tags; "Don't snap" (`choose_snap(from, None)`) replays the SAME
+/// stroke with that snap skipped — the tag goes grey — and skipping every
+/// elective snap reverts the ring to the drawn coordinates.
+#[test]
+fn living_area_carve_surfaces_snap_tags_and_dont_snap_replays() {
+    let mut c = dimensioned_square_controller(); // 10×10, metres
+    c.set_living_area_mode(true);
+    corner_hug_living_area_stroke(&mut c);
+    assert_eq!(c.living_area_count(), 1, "the carve committed an area");
+    // The hug entry snapped onto the corner: the ring holds (0,0), not (0.12,0).
+    let poly = c.living_area_polygons()[0].clone();
+    assert!(
+        poly.iter().any(|(x, y)| x.abs() < 1e-3 && y.abs() < 1e-3),
+        "hug entry snapped to the corner: {poly:?}"
+    );
+    let tags = c.snap_overlay();
+    let corner = tags
+        .iter()
+        .find(|t| t.current_kind == Some(manip_plan::SnapKind::ToCorner))
+        .expect("the corner hug surfaces as a tag")
+        .clone();
+    assert!(corner.skippable, "a hug-to-corner is elective — skippable");
+
+    // "Don't snap" on the corner tag: the action replays and the tag goes grey.
+    c.choose_snap(Point2f32::new(corner.from.0, corner.from.1), None);
+    assert_eq!(c.living_area_count(), 1, "replay re-committed the area");
+    let grey = c
+        .snap_overlay()
+        .into_iter()
+        .find(|t| {
+            (t.from.0 - corner.from.0).abs() < 1e-3 && (t.from.1 - corner.from.1).abs() < 1e-3
+        })
+        .expect("the corner tag survives the replay");
+    assert_eq!(grey.current_kind, None, "the corner tag went grey");
+
+    // Skip every remaining elective snap, one tag at a time (each pass through
+    // the same choose_snap → replay → re-capture loop the outline tools use).
+    let mut guard = 0;
+    while let Some(tag) = c
+        .snap_overlay()
+        .into_iter()
+        .find(|t| t.skippable && t.current_kind.is_some())
+    {
+        assert!(guard < 8, "un-snap loop failed to converge");
+        c.choose_snap(Point2f32::new(tag.from.0, tag.from.1), None);
+        guard += 1;
+    }
+    assert_eq!(c.living_area_count(), 1);
+    // Every snap skipped → the ring reverts to the DRAWN coordinates: the hug
+    // entry at x≈0.12 (not the corner) and the return-leg nook at ≈(0, 0.2).
+    let poly = c.living_area_polygons()[0].clone();
+    assert!(
+        poly.iter()
+            .any(|(x, y)| (x - 0.12).abs() < 0.02 && y.abs() < 1e-3),
+        "un-snapped: the drawn hug entry is back: {poly:?}"
+    );
+    assert!(
+        !poly.iter().any(|(x, y)| x.abs() < 1e-3 && y.abs() < 1e-3),
+        "un-snapped: the corner vertex is gone: {poly:?}"
+    );
+    assert!(
+        c.snap_overlay()
+            .iter()
+            .all(|t| t.current_kind.is_none() || !t.skippable),
+        "every elective tag shows un-snapped"
+    );
+}
+
+/// A living-area straight (stepped) CUT records its MANDATORY endpoint attach
+/// (skippable = false — the UI omits "Don't snap" for it) and the tags are
+/// clickable while the region pick is still pending; picking a region commits
+/// the area and keeps the tags alive with the pick recorded, so choosing the
+/// alternative attach (corner vs edge) replays stroke + pick in one go.
+#[test]
+fn living_area_cut_tags_survive_the_region_pick_and_replay_reapplies_it() {
+    let mut c = dimensioned_square_controller(); // 10×10, metres
+    c.set_living_area_mode(true);
+    // Stepped cut: bottom edge up to y=5, right to x=9.7, up to near corner
+    // (10,10) — the end within vertex reach of the corner, with the top edge as
+    // the perpendicular (ToEdge) alternative.
+    c.apply_living_area_stroke_event(&[(5.0, 0.2), (5.0, 5.0), (9.7, 5.0), (9.7, 9.75)]);
+    assert!(c.cut_pick_pending(), "the cut awaits its region pick");
+    assert_eq!(c.living_area_count(), 0, "nothing committed until picked");
+    // The mandatory endpoint attach is tagged WHILE the pick is pending.
+    let tag = c
+        .snap_overlay()
+        .into_iter()
+        .find(|t| !t.skippable)
+        .expect("the mandatory attach surfaces as a tag before the pick");
+    assert_eq!(tag.current_kind, Some(manip_plan::SnapKind::ToVertex));
+    let kinds: Vec<_> = tag.options.iter().map(|(k, _)| *k).collect();
+    assert!(
+        kinds.contains(&manip_plan::SnapKind::ToVertex)
+            && kinds.contains(&manip_plan::SnapKind::ToEdge),
+        "corner AND edge alternatives offered: {kinds:?}"
+    );
+
+    // Pick the bottom-right region: commits the area, tags stay up, and the
+    // pick is recorded on the captured action for replay.
+    c.choose_cut_region(7.0, 2.0);
+    assert_eq!(c.living_area_count(), 1, "the picked region committed");
+    assert!(!c.cut_pick_pending());
+    assert!(!c.snap_overlay().is_empty(), "tags survive the pick");
+    match c.last_snap_action.as_ref().map(|l| &l.action) {
+        Some(SnapAction::Subarea { pick, .. }) => {
+            assert_eq!(*pick, Some((7.0, 2.0)), "the pick is recorded for replay")
+        }
+        other => panic!("expected a Subarea capture, got {other:?}"),
+    }
+
+    // Choose the ALTERNATIVE attach (edge instead of corner): the replay re-runs
+    // the stroke under the forced choice AND re-applies the pick.
+    let hlen_before = c.history.len();
+    let edge_idx = tag
+        .options
+        .iter()
+        .find(|(k, _)| *k == manip_plan::SnapKind::ToEdge)
+        .unwrap()
+        .1;
+    c.choose_snap(Point2f32::new(tag.from.0, tag.from.1), Some(edge_idx));
+    assert_eq!(
+        c.living_area_count(),
+        1,
+        "exactly one living area after replay (the first commit was rewound)"
+    );
+    assert!(!c.cut_pick_pending(), "the pick was re-applied");
+    let retagged = c
+        .snap_overlay()
+        .into_iter()
+        .find(|t| !t.skippable)
+        .expect("the mandatory tag re-captured");
+    assert_eq!(
+        retagged.current_kind,
+        Some(manip_plan::SnapKind::ToEdge),
+        "the forced edge attach is now the applied kind"
+    );
+    assert_eq!(
+        c.history.len(),
+        hlen_before,
+        "replay rewound the old commit and pushed exactly the re-run's entry"
+    );
+    // Undo unwinds the replayed commit cleanly.
+    c.undo().unwrap();
+    assert_eq!(c.living_area_count(), 0, "undo removes the replayed area");
+}
+
+/// Cancelling a pending cut (tapping outside both regions) clears the snap
+/// tags — the geometry they describe no longer exists.
+#[test]
+fn cancelling_a_pending_cut_clears_the_snap_tags() {
+    let mut c = dimensioned_square_controller();
+    c.set_living_area_mode(true);
+    c.apply_living_area_stroke_event(&[(5.0, 0.2), (5.0, 5.0), (9.7, 5.0), (9.7, 9.75)]);
+    assert!(c.cut_pick_pending());
+    assert!(!c.snap_overlay().is_empty(), "tags up while pick pending");
+    c.choose_cut_region(50.0, 50.0); // outside both → cancel
+    assert!(!c.cut_pick_pending());
+    assert_eq!(c.living_area_count(), 0);
+    assert!(
+        c.snap_overlay().is_empty(),
+        "cancel dropped the capture — no stale tags"
+    );
+}
+
+/// Leak regression: a living-area carve's decisions are drained into ITS OWN
+/// capture, so a later extend stroke's capture holds ONLY the extend's
+/// decisions (the old silent flows left theirs in the thread-local, where the
+/// next tier-1 capture would swallow them).
+#[test]
+fn subarea_decisions_do_not_leak_into_a_later_extend_capture() {
+    let mut c = dimensioned_square_controller();
+    c.set_living_area_mode(true);
+    corner_hug_living_area_stroke(&mut c); // snaps near y≈0 (bottom-left corner)
+    assert!(
+        !c.snap_overlay().is_empty(),
+        "the carve captured its own decisions"
+    );
+    // Leave the area un-touched (no tag interaction) and extend the OUTLINE:
+    // a porch off the top edge whose left attach lands near corner (0,10) —
+    // a mandatory corner-vs-edge attach decision at y≈10.
+    c.set_living_area_mode(false);
+    c.set_edit_mode(EditTools::ExtendOrtho);
+    c.apply_extend_stroke_event(&[(0.3, 9.8), (0.3, 12.0), (4.0, 12.0), (4.0, 9.9)]);
+    let last = c.last_snap_action.as_ref().expect("the extend captured");
+    assert!(
+        matches!(last.action, SnapAction::Freehand { .. }),
+        "the capture is the extend stroke"
+    );
+    assert!(
+        !last.decisions.is_empty(),
+        "the extend's own attach decision was recorded"
+    );
+    assert!(
+        last.decisions.iter().all(|d| d.from.y > 5.0),
+        "ONLY the extend's decisions (top edge) — nothing leaked from the \
+         living-area carve (bottom corner): {:?}",
+        last.decisions.iter().map(|d| d.from).collect::<Vec<_>>()
+    );
+}
+
+/// A later action that makes NO elective snaps still supersedes the previous
+/// action's capture: the old tags must NOT survive it — replaying them would
+/// truncate/restore history from before the new action and silently wipe its
+/// work.
+#[test]
+fn a_non_snapping_action_clears_the_previous_actions_tags() {
+    let mut c = dimensioned_square_controller(); // 10×10, metres
+    c.set_living_area_mode(true);
+    corner_hug_living_area_stroke(&mut c);
+    assert!(!c.snap_overlay().is_empty(), "carve A's tags are up");
+    // Carve B: a free-standing interior room, well clear of every wall — no
+    // elective snap fires, but it commits (and pushes history entries A's
+    // stale capture knows nothing about).
+    c.apply_living_area_stroke_event(&[(6.0, 6.0), (8.0, 6.0), (8.0, 8.0), (6.0, 8.0), (6.0, 6.0)]);
+    assert_eq!(c.living_area_count(), 2, "carve B committed");
+    assert!(
+        c.snap_overlay().is_empty(),
+        "carve A's stale tags are gone — nothing left to mis-replay"
+    );
+}
+
+/// Undo invalidates the snap capture: its `hlen` indexes into the history
+/// stack undo just popped, so a replay would restore the very state the undo
+/// removed. The tags disappear with the undone action.
+#[test]
+fn undo_clears_the_snap_capture() {
+    let mut c = dimensioned_square_controller();
+    c.set_living_area_mode(true);
+    corner_hug_living_area_stroke(&mut c);
+    assert!(!c.snap_overlay().is_empty(), "the carve's tags are up");
+    c.undo().unwrap();
+    assert_eq!(c.living_area_count(), 0, "the carve was undone");
+    assert!(
+        c.snap_overlay().is_empty(),
+        "the undone action's tags are gone"
+    );
+}
+
+/// Smoke: the phase-region Area path surfaces its carve snaps as tags.
+#[test]
+fn phase_region_carve_surfaces_snap_tags() {
+    let mut c = dimensioned_square_controller();
+    c.apply_phase_region_stroke_event(&[
+        (0.1, 0.05),
+        (2.0, 0.05),
+        (4.0, 0.05),
+        (4.0, 1.5),
+        (4.0, 3.0),
+        (2.0, 3.0),
+        (0.1, 3.0),
+        (0.1, 1.5),
+        (0.12, 0.1),
+    ]);
+    assert_eq!(
+        c.document.active,
+        ActiveShape::PhaseArea,
+        "the carved phase area is dimensioning"
+    );
+    assert!(
+        !c.snap_overlay().is_empty(),
+        "the phase carve's elective snaps surface as tags"
+    );
+}
+
+/// Smoke: the step-region Area path surfaces its carve snaps as tags.
+#[test]
+fn step_region_carve_surfaces_snap_tags() {
+    let mut c = dimensioned_square_controller();
+    c.apply_step_region_stroke_event(&[
+        (0.1, 0.05),
+        (2.0, 0.05),
+        (4.0, 0.05),
+        (4.0, 1.5),
+        (4.0, 3.0),
+        (2.0, 3.0),
+        (0.1, 3.0),
+        (0.1, 1.5),
+        (0.12, 0.1),
+    ]);
+    assert_eq!(
+        c.document.active,
+        ActiveShape::StepArea,
+        "the carved step area is dimensioning"
+    );
+    assert!(
+        !c.snap_overlay().is_empty(),
+        "the step carve's elective snaps surface as tags"
+    );
+}
+
+/// The ceiling-step AREA route (a closed/multi-side stroke under ceiling-step
+/// mode — NOT the straight-line route, which keeps its own bespoke tag)
+/// surfaces its carve snaps as tags like every other carve flow; "Don't snap"
+/// replays the stroke with the snap skipped, and leaving the mode (which
+/// abandons the in-flight carve) drops the tags.
+#[test]
+fn ceiling_step_carve_surfaces_snap_tags_and_mode_exit_clears_them() {
+    let mut c = ceiling_ready_controller(); // 10×10, height set, mode on
+                                            // The corner-hug loop (same shape as the living-area fixture) through the
+                                            // CEILING entry: not a straight line → routed to the AREA carve.
+    c.apply_ceiling_step_stroke_event(&[
+        (0.1, 0.05),
+        (2.0, 0.05),
+        (4.0, 0.05),
+        (4.0, 1.5),
+        (4.0, 3.0),
+        (2.0, 3.0),
+        (0.1, 3.0),
+        (0.1, 1.5),
+        (0.12, 0.1),
+    ]);
+    assert_eq!(
+        c.document.active,
+        ActiveShape::StepArea,
+        "the carved ceiling area is dimensioning"
+    );
+    let corner = c
+        .snap_overlay()
+        .into_iter()
+        .find(|t| t.current_kind == Some(manip_plan::SnapKind::ToCorner))
+        .expect("the corner hug surfaces as a tag");
+    assert!(corner.skippable, "a hug-to-corner is elective");
+    // The area ring holds the snapped corner (0,0).
+    let ring = c.document.floor_plan.get_points();
+    assert!(
+        ring.iter().any(|p| p.x.abs() < 1e-3 && p.y.abs() < 1e-3),
+        "hug entry snapped to the corner: {ring:?}"
+    );
+
+    // "Don't snap": the stroke replays through the ceiling entry (the mode is
+    // still on) and the corner reverts to the drawn coordinate.
+    c.choose_snap(Point2f32::new(corner.from.0, corner.from.1), None);
+    assert_eq!(
+        c.document.active,
+        ActiveShape::StepArea,
+        "the replay re-carved the ceiling area"
+    );
+    let grey = c
+        .snap_overlay()
+        .into_iter()
+        .find(|t| {
+            (t.from.0 - corner.from.0).abs() < 1e-3 && (t.from.1 - corner.from.1).abs() < 1e-3
+        })
+        .expect("the corner tag survives the replay");
+    assert_eq!(grey.current_kind, None, "the corner tag went grey");
+
+    // Leaving the mode abandons the carve — its tags must go with it.
+    c.set_ceiling_step_mode(false);
+    assert!(
+        c.snap_overlay().is_empty(),
+        "mode exit dropped the abandoned carve's tags"
+    );
+}
+
+/// History-truncate regression: entries pushed AFTER the captured stroke (a
+/// dimension answer) are rewound by the replay too — the old `history.pop()`
+/// removed only the newest entry (the dimension's), leaving a stale entry and
+/// corrupting the undo chain.
+#[test]
+fn replay_after_a_dimension_answer_rewinds_history_to_pre_stroke() {
+    let mut c = dimensioned_square_controller();
+    c.set_living_area_mode(true);
+    let h0 = c.history.len();
+    corner_hug_living_area_stroke(&mut c);
+    assert_eq!(c.living_area_count(), 1);
+    assert_eq!(c.history.len(), h0 + 1, "the carve pushed its undo entry");
+    // Answer a dimension prompt for one of the drawn walls — pushes another.
+    assert!(
+        c.document.dimensioning.current_prompt.is_some(),
+        "the drawn walls prompt for dimensions"
+    );
+    c.apply_dimension(3.0).expect("dimension applies");
+    assert_eq!(c.history.len(), h0 + 2, "the answer pushed its own entry");
+
+    // "Don't snap" on the corner tag: the replay must rewind PAST the dimension
+    // answer to the pre-stroke state, then re-run the stroke.
+    let corner = c
+        .snap_overlay()
+        .into_iter()
+        .find(|t| t.current_kind == Some(manip_plan::SnapKind::ToCorner))
+        .expect("corner tag present");
+    c.choose_snap(Point2f32::new(corner.from.0, corner.from.1), None);
+    assert_eq!(c.living_area_count(), 1, "the re-run re-committed the area");
+    assert_eq!(
+        c.history.len(),
+        h0 + 1,
+        "history rewound to pre-stroke plus the re-run's single entry"
+    );
+    // The undo chain is intact: one undo removes the (replayed) area entirely.
+    c.undo().unwrap();
+    assert_eq!(
+        c.living_area_count(),
+        0,
+        "undo lands at the pre-stroke state"
+    );
+    assert_eq!(c.history.len(), h0);
+}
+
+// ─── Wall-face partition: snap tags + "Don't snap" (Phase B) ────────────────
+
+/// Helper: open the partition view on wall 0 of the 10×10 outline (10 m long,
+/// default 2.4 m face height); returns the wall's vid.
+fn open_partition_on_wall0(c: &mut AppController) -> VertexId {
+    let walls = c.document.outline.floor_plan.perimeter_walls();
+    let (vid, a, b) = walls[0];
+    let mid = ((a.x + b.x) * 0.5, (a.y + b.y) * 0.5);
+    c.set_exposure_mode(true);
+    c.exposure_pointer_down(mid.0 as f64, mid.1 as f64, 0.5);
+    c.open_wall_partition();
+    assert!(c.partition_mode());
+    assert_eq!(c.partition_wall(), Some(vid));
+    vid
+}
+
+/// A cut whose A endpoint silently snaps in x (drawn near along=0) exposes ONE
+/// "edge" tag; "Don't snap" reverts a.x to the drawn value and REOPENS its
+/// "distance along" prompt at the head of the queue; typing a value then
+/// commits the cut with the typed coordinate.
+#[test]
+fn partition_unsnap_reverts_the_endpoint_and_reopens_its_prompt() {
+    let mut c = dimensioned_square_controller();
+    let vid = open_partition_on_wall0(&mut c);
+    // A drawn at (0.05, 1.0): x snaps to the start edge (eps 0.15 m), y free.
+    // B drawn at (4.0, 1.8): both free. Genuinely diagonal → per-endpoint slots.
+    c.partition_stroke_point(0.05, 1.0);
+    c.partition_stroke_point(2.0, 1.4);
+    c.partition_stroke_point(4.0, 1.8);
+    c.partition_stroke_end();
+    let view = c.partition_view().unwrap();
+    assert_eq!(view.snap_tags.len(), 1, "one snapped endpoint → one tag");
+    let tag = view.snap_tags[0];
+    assert!(!tag.end_b, "the snapped endpoint is A");
+    assert!(!tag.corner, "one snapped axis reads as an edge tag");
+    assert!(
+        (tag.pos.0 - 0.0).abs() < 1e-6 && (tag.pos.1 - 1.0).abs() < 1e-6,
+        "tag at the snapped position"
+    );
+    // a.x was resolved by the snap, so the queue head is a.y.
+    assert_eq!(
+        c.partition_dim_prompt().unwrap().label,
+        "Height from floor (m)"
+    );
+
+    // Un-snapping end B (nothing snapped there) changes nothing.
+    c.unsnap_partition_end(true);
+    assert_eq!(
+        c.partition_dim_prompt().unwrap().label,
+        "Height from floor (m)"
+    );
+
+    c.unsnap_partition_end(false);
+    let p = c.partition_pending.as_ref().expect("still pending");
+    assert!(
+        (p.a.x - 0.05).abs() < 1e-6,
+        "a.x reverted to the drawn value"
+    );
+    // The freed a.x rejoins the derived queue at its canonical head slot.
+    assert_eq!(
+        c.partition_dim_prompt().unwrap().label,
+        "Distance along (m)"
+    );
+    assert!(
+        c.partition_view().unwrap().snap_tags.is_empty(),
+        "no snapped coordinates left → no tags"
+    );
+
+    // Dimension all four coords; the typed a.x lands in the committed cut.
+    c.partition_dim_entry(0.3); // a.x
+    c.partition_dim_entry(1.0); // a.y
+    c.partition_dim_entry(4.0); // b.x
+    c.partition_dim_entry(1.8); // b.y
+    assert!(c.partition_pending.is_none(), "queue emptied → commit");
+    let part = c.document.wall_face_partitions.get(&vid).unwrap();
+    assert_eq!(part.cuts.len(), 1);
+    assert!(
+        (part.cuts[0].a.x - 0.3).abs() < 1e-3,
+        "the typed (un-snapped) coordinate committed"
+    );
+}
+
+/// Regression on the derived queue: a near-vertical cut with both x's free
+/// still collapses to ONE shared "distance along" slot, and one entry commits
+/// both endpoints — the queue derivation must not split the shared slot.
+#[test]
+fn partition_derived_queue_keeps_the_shared_along_slot() {
+    let mut c = dimensioned_square_controller();
+    let vid = open_partition_on_wall0(&mut c);
+    // Vertical drag mid-wall: y snaps at both ends (floor/ceiling), the two
+    // near-equal free x's collapse to one shared slot.
+    c.partition_stroke_point(5.0, 0.0);
+    c.partition_stroke_point(5.02, 1.2);
+    c.partition_stroke_point(5.0, 2.4);
+    c.partition_stroke_end();
+    let prompt = c.partition_dim_prompt().expect("a free slot to prompt");
+    assert_eq!(prompt.label, "Distance from start corner (m)");
+    // Both endpoints y-snapped → two edge tags.
+    let view = c.partition_view().unwrap();
+    assert_eq!(view.snap_tags.len(), 2);
+    assert!(view.snap_tags.iter().all(|t| !t.corner));
+    // ONE entry resolves both x's and commits.
+    c.partition_dim_entry(5.0);
+    assert!(c.partition_pending.is_none(), "one shared entry → commit");
+    let part = c.document.wall_face_partitions.get(&vid).unwrap();
+    assert_eq!(part.cuts.len(), 1);
+    assert!((part.cuts[0].a.x - 5.0).abs() < 1e-3 && (part.cuts[0].b.x - 5.0).abs() < 1e-3);
+}
+
+/// A fully-snapped stroke commits INSTANTLY but its tags stay visible, and
+/// "Don't snap" UN-COMMITS it: history rewinds past the commit, the cut
+/// reopens as pending with the tapped end's axes freed at the drawn values,
+/// and dimensioning then completes and commits again.
+#[test]
+fn partition_instant_commit_tags_allow_uncommit_and_redimension() {
+    let mut c = dimensioned_square_controller();
+    let vid = open_partition_on_wall0(&mut c);
+    // Both drawn endpoints within eps of the start-edge corners → every
+    // coordinate snaps → the cut commits with no interaction at all.
+    c.partition_stroke_point(0.05, 0.05);
+    c.partition_stroke_point(0.02, 1.2);
+    c.partition_stroke_point(0.03, 2.35);
+    c.partition_stroke_end();
+    assert!(
+        c.partition_pending.is_none(),
+        "fully snapped → instant commit"
+    );
+    assert!(c.document.is_wall_partitioned(vid));
+    let hlen_after = c.history.len();
+    // The tags still show for the just-committed cut.
+    let view = c.partition_view().unwrap();
+    assert_eq!(view.snap_tags.len(), 2, "both endpoints tagged");
+    assert!(
+        view.snap_tags.iter().all(|t| t.corner),
+        "both axes snapped → corner tags"
+    );
+
+    // "Don't snap" on end B un-commits: the commit's undo entry is popped +
+    // restored, and the cut reopens as pending with b's axes freed.
+    c.unsnap_partition_end(true);
+    assert!(
+        !c.document.is_wall_partitioned(vid),
+        "the instant commit rewound"
+    );
+    assert_eq!(
+        c.history.len(),
+        hlen_after - 1,
+        "the commit's undo entry was dropped"
+    );
+    let p = c
+        .partition_pending
+        .as_ref()
+        .expect("cut reopened as pending");
+    assert!(
+        (p.b.x - 0.03).abs() < 1e-6 && (p.b.y - 2.35).abs() < 1e-6,
+        "b back at the drawn point"
+    );
+    assert_eq!(
+        c.partition_dim_prompt().unwrap().label,
+        "Distance along (m)"
+    );
+
+    // Dimensioning completes → the cut commits again with the typed b.
+    c.partition_dim_entry(3.0); // b.x
+    c.partition_dim_entry(2.4); // b.y
+    assert!(c.partition_pending.is_none(), "queue emptied → re-commit");
+    let part = c.document.wall_face_partitions.get(&vid).unwrap();
+    assert_eq!(part.cuts.len(), 1);
+    assert!((part.cuts[0].b.x - 3.0).abs() < 1e-3);
+}
+
+/// After an unrelated mutation the instant-commit record is STALE: its tags
+/// disappear and "Don't snap" is a no-op (no rewind, no pending cut).
+#[test]
+fn partition_instant_commit_record_goes_stale_after_another_mutation() {
+    let mut c = dimensioned_square_controller();
+    let vid = open_partition_on_wall0(&mut c);
+    c.partition_stroke_point(0.05, 0.05);
+    c.partition_stroke_point(0.02, 1.2);
+    c.partition_stroke_point(0.03, 2.35);
+    c.partition_stroke_end();
+    assert!(c.document.is_wall_partitioned(vid));
+    assert_eq!(c.partition_view().unwrap().snap_tags.len(), 2);
+
+    // An unrelated mutation (attributing a region pushes its own undo entry).
+    c.select_partition_region(5.0, 1.2);
+    c.set_partition_region_exposure(WallExposure::Exposed);
+    let hlen = c.history.len();
+
+    assert!(
+        c.partition_view().unwrap().snap_tags.is_empty(),
+        "stale record exposes no tags"
+    );
+    c.unsnap_partition_end(true);
+    assert!(c.partition_pending.is_none(), "stale un-snap is a no-op");
+    assert!(
+        c.document.is_wall_partitioned(vid),
+        "the cut stays committed"
+    );
+    assert_eq!(c.history.len(), hlen, "history untouched");
+}
+
+/// `unsnap_partition_end` with nothing pending and nothing committed is a
+/// clean no-op.
+#[test]
+fn partition_unsnap_with_nothing_pending_is_a_noop() {
+    let mut c = dimensioned_square_controller();
+    let vid = open_partition_on_wall0(&mut c);
+    let hlen = c.history.len();
+    c.unsnap_partition_end(false);
+    c.unsnap_partition_end(true);
+    assert!(c.partition_pending.is_none());
+    assert!(!c.document.is_wall_partitioned(vid));
+    assert_eq!(c.history.len(), hlen);
+    assert!(c.partition_view().unwrap().snap_tags.is_empty());
+}
+
+// ── InterStorey derivation: the riser fixture through the REAL pipeline ─────
+
+/// Walls of `storey` whose base edge lies on the plan line x = `x` (both
+/// endpoints), with their z extent — for asserting the step-line splits.
+fn walls_on_x_with_extent(
+    storey: &ber_model::ber::structural::Storey,
+    x: f64,
+) -> Vec<(&ber_model::ber::structural::WallRegion, f64, f64)> {
+    storey
+        .walls
+        .regions
+        .iter()
+        .filter(|w| {
+            w.base_edge()
+                .is_some_and(|(a, b)| (a.x - x).abs() < 1e-6 && (b.x - x).abs() < 1e-6)
+        })
+        .map(|w| {
+            let (lo, hi) = w
+                .polygon
+                .exterior
+                .iter()
+                .fold((f64::INFINITY, f64::NEG_INFINITY), |(lo, hi), v| {
+                    (lo.min(v.z), hi.max(v.z))
+                });
+            (w, lo, hi)
+        })
+        .collect()
+}
+
+/// THE USER'S RISER FIXTURE through the REAL controller pipeline (spec §6
+/// phase 3): ground storey 10×10 with ceiling 2.4 m, a ceiling STEP at x = 4
+/// raising the right section to 4.0 m (delta +1.6 — a riser wall on the step
+/// line), first floor (slab 0.3 m) adopted over the LOW section x∈[0,4], its
+/// walls painted Exposed. All via controller ops — stroke-fitted step line,
+/// side tap, position + delta prompts, add-storey flow, finalised adoption,
+/// bulk paint. Datums: ground 0, first floor 2.4 + 0.3 = 2.7.
+fn inter_storey_riser_fixture_controller() -> AppController {
+    let p = |x: f32, y: f32| Point2f32::new(x, y);
+    let mut c = ceiling_ready_controller(); // 10×10, height 2.4, step mode on
+    ceiling_step_to_amount_at_x4(&mut c);
+    c.assign_ceiling_step_delta(1.6).expect("delta applies"); // right at 4.0 m
+    c.set_ceiling_step_mode(false);
+    c.materialize();
+
+    c.add_storey().unwrap();
+    c.assign_floor_thickness(0.3).unwrap();
+    // First floor over the LOW section (left strip x∈[0,4]).
+    let ring = vec![p(0., 0.), p(4., 0.), p(4., 10.), p(0., 10.)];
+    c.document.adopt_finalised_outline(&ring).expect("adopts");
+    c.maybe_seed_inherited_levels();
+    c.set_default_ceiling_height(2.4).expect("height applies");
+    // Paint every first-floor wall Exposed (the remainder above the buried
+    // band must KEEP this prior exposure through the split).
+    c.set_all_remaining_exposed();
+    c.materialize();
+    c
+}
+
+/// End-to-end riser fixture (spec §6 phase 3, test 1): the storey-1 wall on
+/// the step line x = 4 splits into a lower InterStorey band (buried behind the
+/// ground storey's TALL section — top at 4.0 abs = 1.3 storey-local) and an
+/// Exposed remainder; the ground storey's LOW ceiling section under storey 1
+/// derives InterStorey (the tall one doesn't); the ground step riser is fully
+/// buried in storey 1's backing band and stamps whole.
+#[test]
+fn riser_fixture_derives_inter_storey_through_the_real_pipeline() {
+    use ber_model::ber::structural::{CeilingExposure, FloorExposure, WallExposure};
+    let c = inter_storey_riser_fixture_controller();
+    let storeys = &c.current_record.as_ref().unwrap().data.storeys;
+
+    // Storey-1 wall on the step line: split into the buried band + remainder.
+    let step_walls = walls_on_x_with_extent(&storeys[1], 4.0);
+    assert_eq!(
+        step_walls.len(),
+        2,
+        "the storey-1 step-line wall split into two bands: {:?}",
+        step_walls
+            .iter()
+            .map(|(w, lo, hi)| (w.exposure, *lo, *hi))
+            .collect::<Vec<_>>()
+    );
+    let (lower, upper) = if step_walls[0].2 <= step_walls[1].1 + 1e-4 {
+        (&step_walls[0], &step_walls[1])
+    } else {
+        (&step_walls[1], &step_walls[0])
+    };
+    // The wall's own base sits at the slab underside (-0.3 storey-local = the
+    // ground ceiling 2.4 abs); the band top is the TALL ground-roof z
+    // (4.0 abs = 1.3 storey-local).
+    assert!(
+        (lower.1 + 0.3).abs() < 1e-4 && (lower.2 - 1.3).abs() < 1e-4,
+        "buried band spans z -0.3..1.3 (top at the tall ground roof), got {}..{}",
+        lower.1,
+        lower.2
+    );
+    assert_eq!(
+        lower.0.exposure,
+        WallExposure::InterStorey,
+        "the buried band derives InterStorey"
+    );
+    assert!(
+        (upper.1 - 1.3).abs() < 1e-4 && (upper.2 - 2.4).abs() < 1e-4,
+        "remainder spans z 1.3..2.4, got {}..{}",
+        upper.1,
+        upper.2
+    );
+    assert_eq!(
+        upper.0.exposure,
+        WallExposure::Exposed,
+        "the remainder keeps its painted exposure"
+    );
+
+    // Ground storey: the LOW ceiling section (flat 2.4, under storey 1) is
+    // InterStorey; the TALL section (4.0) stays labellable.
+    for r in &storeys[0].ceilings.regions {
+        match r.flat_z() {
+            Some(z) if (z - 2.4).abs() < 1e-6 => {
+                assert_eq!(r.exposure, CeilingExposure::InterStorey)
+            }
+            Some(z) if (z - 4.0).abs() < 1e-6 => {
+                assert_ne!(r.exposure, CeilingExposure::InterStorey)
+            }
+            other => panic!("unexpected ceiling z {other:?}"),
+        }
+    }
+    // The ground step riser (z 2.4..4.0 on x=4) is fully inside storey 1's
+    // backing band [2.4, 5.1] → stamped whole.
+    let risers = walls_on_x_with_extent(&storeys[0], 4.0);
+    assert_eq!(risers.len(), 1, "the ground step riser stays whole");
+    assert_eq!(risers[0].0.exposure, WallExposure::InterStorey);
+    // Storey 1's floor sits fully over the ground storey → InterStorey.
+    assert!(storeys[1]
+        .floors
+        .regions
+        .iter()
+        .all(|r| r.exposure == FloorExposure::InterStorey));
+}
+
+/// Save → reload → materialize FIXPOINT over the riser fixture (spec §6
+/// phase 3, test 2), to the standard of
+/// `flush_riser_merge_survives_reload_and_rederive_fixpoint`: the full
+/// region set — geometry AND exposures, every kind, every storey — is stable
+/// across persist → `open_ber` → re-derive.
+#[test]
+fn inter_storey_riser_fixture_reload_and_rederive_fixpoint() {
+    let mut c = inter_storey_riser_fixture_controller();
+    let fingerprint = |c: &AppController| -> String {
+        c.current_record
+            .as_ref()
+            .unwrap()
+            .data
+            .storeys
+            .iter()
+            .map(|s| {
+                let mut out = String::new();
+                for r in &s.walls.regions {
+                    out += &format!("W {:?} {:?};", r.exposure, r.polygon);
+                }
+                for r in &s.floors.regions {
+                    out += &format!("F {:?} {:?};", r.exposure, r.polygon);
+                }
+                for r in &s.ceilings.regions {
+                    out += &format!("C {:?} {:?};", r.exposure, r.polygon);
+                }
+                out
+            })
+            .collect::<Vec<_>>()
+            .join("|")
+    };
+    let before = fingerprint(&c);
+    assert!(before.contains("InterStorey"), "fixture derived something");
+
+    let id = c.current_record.as_ref().unwrap().id;
+    c.flush_if_dirty().unwrap();
+    c.open_ber(&id).unwrap();
+    assert_eq!(
+        fingerprint(&c),
+        before,
+        "reload + first re-derive is a fixpoint"
+    );
+
+    c.mark_dirty().unwrap();
+    c.materialize();
+    assert_eq!(
+        fingerprint(&c),
+        before,
+        "a further no-edit re-derive stays at the fixpoint"
+    );
+}
+
+/// LEGACY-RECORD MIGRATION (spec §6 phase 3, test 3): a record persisted by
+/// the OLD auto-party mechanism — the covered ceiling piece stamped `Party`,
+/// a party carve ring on the below storey's `ceiling_splits`, and the Party
+/// auto-seed in the exposure map — loads to the NEW classification: the
+/// covered piece resolves `InterStorey`, the already-carved face is NOT
+/// re-split (no duplicates), and the load-time purge drops the shadowed map
+/// entry. The legacy ring itself is consumed as-is (it stays until a
+/// delete/redraw retracts it).
+#[test]
+fn legacy_party_record_migrates_to_inter_storey_on_load() {
+    use ber_model::ber::structural::CeilingExposure;
+    let mut c = partial_cover_two_storey_controller(); // covered piece x∈[0,4]
+
+    // Rebuild the OLD-style persisted state directly on the record: the party
+    // carve ring under the upper footprint, the covered piece stamped Party,
+    // and the legacy auto-seeded Party entry in the doc map.
+    let ring: Vec<Point2f64> = vec![
+        Point2f64::new(0.0, 0.0),
+        Point2f64::new(4.0, 0.0),
+        Point2f64::new(4.0, 10.0),
+        Point2f64::new(0.0, 10.0),
+    ];
+    {
+        let below = &mut c.current_record.as_mut().unwrap().data.storeys[0];
+        below.ceiling_splits.push(ring);
+        let covered = below
+            .ceilings
+            .regions
+            .iter_mut()
+            .find(|r| r.centroid().x < 4.0)
+            .expect("the covered piece");
+        covered.exposure = CeilingExposure::Party;
+        let key = document::centroid_key(covered.centroid());
+        c.document.storeys[0]
+            .ceiling_exposure
+            .insert(key, CeilingExposure::Party);
+    }
+    // Persist the legacy state VERBATIM (no materialize — a flush would
+    // re-derive and overwrite the old-style stamps before they hit disk).
+    c.persist().expect("legacy record persists");
+    let id = c.current_record.as_ref().unwrap().id;
+    c.saved_revision = c.revision; // open_ber's boundary flush must not re-derive
+
+    c.open_ber(&id).unwrap();
+    let below = &c.current_record.as_ref().unwrap().data.storeys[0];
+    assert_eq!(
+        below.ceilings.regions.len(),
+        2,
+        "no duplicate split — the already-carved face is intact"
+    );
+    let covered = below
+        .ceilings
+        .regions
+        .iter()
+        .find(|r| r.centroid().x < 4.0)
+        .expect("the covered piece survives");
+    assert_eq!(
+        covered.exposure,
+        CeilingExposure::InterStorey,
+        "the old auto-Party piece resolves InterStorey"
+    );
+    assert!(
+        !c.document.storeys[0]
+            .ceiling_exposure
+            .values()
+            .any(|e| *e == CeilingExposure::Party),
+        "the shadowed legacy Party map entry was purged"
+    );
+    assert_eq!(
+        below.ceiling_splits.len(),
+        1,
+        "the legacy ring is consumed as-is (kept until delete/redraw)"
+    );
+    // Stability: a further re-derive neither duplicates nor reclassifies.
+    c.mark_dirty().unwrap();
+    c.materialize();
+    let below = &c.current_record.as_ref().unwrap().data.storeys[0];
+    assert_eq!(below.ceilings.regions.len(), 2);
+    assert!(below
+        .ceilings
+        .regions
+        .iter()
+        .any(|r| r.exposure == CeilingExposure::InterStorey));
+}
+
+/// GATE TEST (spec §6 phase 3, test 4): the "Wall exposures" checklist row
+/// goes green WITHOUT the assessor ever touching the buried band — paint
+/// everything else (both storeys' bulk pass), and the derived InterStorey
+/// pieces (the storey-1 band, the ground step riser) count as classified.
+#[test]
+fn wall_checklist_goes_green_without_painting_the_buried_band() {
+    use ber_model::ber::structural::WallExposure;
+    // The fixture already bulk-painted storey 1 (active); paint storey 0 too.
+    let mut c = inter_storey_riser_fixture_controller();
+    c.set_current_storey(Some(0)).expect("switch to ground");
+    c.set_all_remaining_exposed();
+    c.materialize();
+
+    // The derived pieces were never painted — still InterStorey.
+    let storeys = &c.current_record.as_ref().unwrap().data.storeys;
+    assert!(
+        storeys[1]
+            .walls
+            .regions
+            .iter()
+            .any(|r| r.exposure == WallExposure::InterStorey),
+        "the buried band is untouched (nothing painted it)"
+    );
+    assert!(
+        storeys[0]
+            .walls
+            .regions
+            .iter()
+            .any(|r| r.exposure == WallExposure::InterStorey),
+        "the ground step riser is untouched (the bulk pass skips it)"
+    );
+    assert!(
+        storeys.iter().all(|s| s
+            .walls
+            .regions
+            .iter()
+            .all(|r| r.exposure != WallExposure::Unset)),
+        "no Unset wall piece remains anywhere"
+    );
+    assert_eq!(
+        checklist_status_of(&c, "Wall exposures"),
+        ChecklistStatus::AllStoreys,
+        "the wall checklist is green without painting the InterStorey pieces"
+    );
+}
+
+/// OPENINGS ON A DERIVATION-SPLIT WALL (review High + user verdict): a window
+/// placed on the riser fixture's step wall — its rectangle in the EXPOSED
+/// remainder above the buried band — stays fully linked through every
+/// materialize and a reload, and is ALWAYS hosted by / counted on the
+/// labellable remainder, never the InterStorey band. The remainder is a
+/// first-class wall now (`rebase_ring_start` gives the horizontal split's
+/// upper piece a real base frame at the cut height); the pipeline's
+/// post-derive re-link re-homes the placement z-aware
+/// (`host_wall_for_rect`), rebasing `sill_m` onto each host's `base_z` so
+/// the world rectangle — and the placement fields at rest — are invariant.
+/// Without the re-link: placement.wall_id matches no live region (dead
+/// opening drag), every piece reads empty `opes`, and an anchor-less
+/// placement is pruned on reload.
+#[test]
+fn window_on_derivation_split_wall_stays_linked_and_survives_reload() {
+    use ber_model::ber::fenestration::{Frame, Glazing, OpeningPlacement};
+    use ber_model::ber::structural::WallExposure;
+    let mut c = inter_storey_riser_fixture_controller();
+
+    // Host = the EXPOSED remainder piece (what `pick_wall_along` returns for a
+    // tap on this wall — it skips the buried band). Its base sits at the cut
+    // height (~1.3 local); a sill of (1.5 − base_z) puts the 0.5 m window at
+    // z 1.5..2.0, fully inside the remainder band (1.3..2.4).
+    let (host_id, sill) = {
+        let storeys = &c.current_record.as_ref().unwrap().data.storeys;
+        let (host, _, _) = walls_on_x_with_extent(&storeys[1], 4.0)
+            .into_iter()
+            .find(|(w, _, _)| w.exposure != WallExposure::InterStorey)
+            .expect("the exposed remainder piece");
+        let base_z = host.base_frame().expect("first-class host").3;
+        (host.id, (1.5 - base_z) as f32)
+    };
+    let type_id = c.current_record.as_mut().unwrap().data.ensure_window_type(
+        Glazing::Double,
+        Frame::WoodUPVC,
+        0,
+        false,
+        Vec::new(),
+        None,
+    );
+    let win_id = ber_model::ber::openings::add_wall_window(
+        &mut c.current_record.as_mut().unwrap().data.storeys[1],
+        host_id,
+        5.0,
+        1.0,
+        0.5,
+        sill,
+        type_id,
+    )
+    .expect("window placed on the step wall");
+    // `add_wall_window`'s vertical-stacking fallback picks its own sill — pin
+    // it back, the state the assessor's sill edit leaves in the record.
+    {
+        use ber_model::ber::fenestration::OpeningPlacement as OP;
+        let w = &mut c.current_record.as_mut().unwrap().data.storeys[1].windows[0];
+        if let Some(OP::Wall { sill_m, .. }) = &mut w.placement {
+            *sill_m = sill;
+        }
+    }
+
+    // The linkage invariants this test pins, checked after every re-derive.
+    // Returns the at-rest placement fields for the stability assertion.
+    let assert_linked = |c: &AppController, when: &str| -> (f32, f32) {
+        let storey = &c.current_record.as_ref().unwrap().data.storeys[1];
+        assert_eq!(storey.windows.len(), 1, "{when}: window survives");
+        let w = &storey.windows[0];
+        assert!(w.wall_anchor.is_some(), "{when}: durable anchor acquired");
+        let Some(OpeningPlacement::Wall {
+            wall_id,
+            along_m,
+            sill_m,
+        }) = w.placement
+        else {
+            panic!("{when}: wall placement present");
+        };
+        let host = storey
+            .walls
+            .regions
+            .iter()
+            .find(|r| r.id == wall_id)
+            .unwrap_or_else(|| panic!("{when}: placement.wall_id matches a live region"));
+        assert_ne!(
+            host.exposure,
+            WallExposure::InterStorey,
+            "{when}: NEVER hosted on the buried InterStorey band"
+        );
+        assert!(
+            host.opes.windows.contains(&win_id),
+            "{when}: the host region's opes contain the window"
+        );
+        // The host is the exposed remainder: base at the cut height.
+        let base_z = host
+            .base_frame()
+            .unwrap_or_else(|| panic!("{when}: first-class host"))
+            .3;
+        assert!(
+            (base_z - 1.3).abs() < 1e-3,
+            "{when}: hosted on the remainder (base at the cut), got base_z {base_z}"
+        );
+        // The window rectangle sits in the exposed remainder (z 1.5..2.0),
+        // never squashed under the buried band's top (1.3).
+        assert!(!w.vertices.is_empty(), "{when}: vertices derived");
+        let (zmin, zmax) = w
+            .vertices
+            .iter()
+            .fold((f32::INFINITY, f32::NEG_INFINITY), |(lo, hi), v| {
+                (lo.min(v.2), hi.max(v.2))
+            });
+        assert!(
+            (zmin - 1.5).abs() < 1e-3 && (zmax - 2.0).abs() < 1e-3,
+            "{when}: window spans z 1.5..2.0 in the exposed remainder, got {zmin}..{zmax}"
+        );
+        (along_m, sill_m)
+    };
+
+    // Two full re-derives: the split + re-link must hold on every materialize,
+    // and the at-rest placement fields must be IDENTICAL (the sill rebase is
+    // deterministic — no ping-pong, no drift).
+    c.mark_dirty().unwrap();
+    c.materialize();
+    let first = assert_linked(&c, "first materialize");
+    c.mark_dirty().unwrap();
+    c.materialize();
+    let second = assert_linked(&c, "second materialize");
+    assert_eq!(
+        first, second,
+        "placement fields identical across materializes"
+    );
+
+    // Save → reload: not pruned, still linked; and a further re-derive holds.
+    let id = c.current_record.as_ref().unwrap().id;
+    c.flush_if_dirty().unwrap();
+    c.open_ber(&id).unwrap();
+    assert_eq!(
+        assert_linked(&c, "after reload"),
+        first,
+        "placement fields identical across a reload"
+    );
+    c.mark_dirty().unwrap();
+    c.materialize();
+    assert_eq!(
+        assert_linked(&c, "re-derive after reload"),
+        first,
+        "placement fields identical after the post-reload re-derive"
+    );
+}
+
+/// SELF-HEAL of a mis-hosted record (user verdict item 4): an ope persisted on
+/// the buried InterStorey band (placed by the pre-fix build) whose rectangle
+/// lies in the stacked exposed remainder MOVES to the remainder on the next
+/// re-derive — placement, `opes`, and sill all re-homed — and stays there
+/// (idempotent).
+#[test]
+fn mis_hosted_ope_on_the_band_self_heals_onto_the_exposed_remainder() {
+    use ber_model::ber::fenestration::{Frame, Glazing, OpeningPlacement};
+    use ber_model::ber::structural::WallExposure;
+    let mut c = inter_storey_riser_fixture_controller();
+
+    // Rebuild the PRE-FIX mis-hosted state directly on the record: the window
+    // placement references the BAND (sill measured above the band's base =
+    // the wall bottom, rectangle z 1.5..2.0 — inside the remainder), the
+    // band's opes carry it, no anchor.
+    let (band_id, band_base_z) = {
+        let storeys = &c.current_record.as_ref().unwrap().data.storeys;
+        let (band, _, _) = walls_on_x_with_extent(&storeys[1], 4.0)
+            .into_iter()
+            .find(|(w, _, _)| w.exposure == WallExposure::InterStorey)
+            .expect("the buried band");
+        (band.id, band.base_frame().expect("band base frame").3)
+    };
+    let type_id = c.current_record.as_mut().unwrap().data.ensure_window_type(
+        Glazing::Double,
+        Frame::WoodUPVC,
+        0,
+        false,
+        Vec::new(),
+        None,
+    );
+    let sill = (1.5 - band_base_z) as f32;
+    let win_id = ber_model::ber::openings::add_wall_window(
+        &mut c.current_record.as_mut().unwrap().data.storeys[1],
+        band_id,
+        5.0,
+        1.0,
+        0.5,
+        sill,
+        type_id,
+    )
+    .expect("window force-placed on the band");
+    {
+        use ber_model::ber::fenestration::OpeningPlacement as OP;
+        let w = &mut c.current_record.as_mut().unwrap().data.storeys[1].windows[0];
+        if let Some(OP::Wall { sill_m, .. }) = &mut w.placement {
+            *sill_m = sill;
+        }
+        w.wall_anchor = None; // pre-fix records may never have acquired one
+    }
+    // Mis-hosted state in place: the band's opes carry the window.
+    assert!(
+        c.current_record.as_ref().unwrap().data.storeys[1]
+            .walls
+            .regions
+            .iter()
+            .find(|r| r.id == band_id)
+            .expect("band live")
+            .opes
+            .windows
+            .contains(&win_id),
+        "fixture: the ope sits on the InterStorey band"
+    );
+
+    let assert_healed = |c: &AppController, when: &str| {
+        let storey = &c.current_record.as_ref().unwrap().data.storeys[1];
+        let w = &storey.windows[0];
+        let Some(OpeningPlacement::Wall { wall_id, .. }) = w.placement else {
+            panic!("{when}: wall placement present");
+        };
+        let host = storey
+            .walls
+            .regions
+            .iter()
+            .find(|r| r.id == wall_id)
+            .unwrap_or_else(|| panic!("{when}: live host"));
+        assert_ne!(
+            host.exposure,
+            WallExposure::InterStorey,
+            "{when}: moved OFF the buried band"
+        );
+        assert!(
+            host.opes.windows.contains(&win_id),
+            "{when}: the exposed remainder's opes carry the window"
+        );
+        // Every InterStorey piece is opes-free.
+        assert!(
+            storey
+                .walls
+                .regions
+                .iter()
+                .filter(|r| r.exposure == WallExposure::InterStorey)
+                .all(|r| r.opes.windows.is_empty() && r.opes.doors.is_empty()),
+            "{when}: no ope remains on any InterStorey piece"
+        );
+        // The world rectangle didn't move (sill was rebased, not reset).
+        let (zmin, zmax) = w
+            .vertices
+            .iter()
+            .fold((f32::INFINITY, f32::NEG_INFINITY), |(lo, hi), v| {
+                (lo.min(v.2), hi.max(v.2))
+            });
+        assert!(
+            (zmin - 1.5).abs() < 1e-3 && (zmax - 2.0).abs() < 1e-3,
+            "{when}: rectangle unchanged at z 1.5..2.0, got {zmin}..{zmax}"
+        );
+    };
+
+    c.mark_dirty().unwrap();
+    c.materialize();
+    assert_healed(&c, "heal on first re-derive");
+    c.mark_dirty().unwrap();
+    c.materialize();
+    assert_healed(&c, "idempotent thereafter");
+}
+
+/// THE USER'S SCENARIO: a window is placed FIRST (low on storey 1's wall,
+/// while the ground ceiling is flat — no junction there yet), and only THEN
+/// the geometry changes: the ground storey gains a tall section (ceiling step
+/// +1.6 at x = 4) whose volume buries the lower band of that wall — right
+/// through the window's rectangle. The window must MOVE AWAY from the newly
+/// buried part: the relink's nudge raises it so its bottom sits on the band
+/// top (1.3 storey-local), hosted on the exposed remainder — never left
+/// looking into the dwelling's own tall section — and the move is durable
+/// (idempotent re-derives, identical placement fields).
+#[test]
+fn window_placed_before_a_burying_section_moves_up_off_the_band() {
+    use ber_model::ber::fenestration::{Frame, Glazing, OpeningPlacement};
+    use ber_model::ber::structural::WallExposure;
+    let p = |x: f32, y: f32| Point2f32::new(x, y);
+
+    // Ground 10×10, FLAT 2.4 ceiling; storey 1 (slab 0.3) over the left strip.
+    let mut c = dimensioned_square_controller();
+    c.set_default_ceiling_height(2.4).unwrap();
+    c.materialize();
+    c.add_storey().unwrap();
+    c.assign_floor_thickness(0.3).unwrap();
+    let ring = vec![p(0., 0.), p(4., 0.), p(4., 10.), p(0., 10.)];
+    c.document.adopt_finalised_outline(&ring).expect("adopts");
+    c.maybe_seed_inherited_levels();
+    c.set_default_ceiling_height(2.4).unwrap();
+    c.materialize();
+
+    // Storey 1's x = 4 wall is UNSPLIT (flat ground → no junction band).
+    let (host_id, sill) = {
+        let storeys = &c.current_record.as_ref().unwrap().data.storeys;
+        let pieces = walls_on_x_with_extent(&storeys[1], 4.0);
+        assert_eq!(pieces.len(), 1, "no band yet — the wall is whole");
+        let host = pieces[0].0;
+        let base_z = host.base_frame().expect("whole wall").3;
+        // A 1×0.5 window LOW on the wall: bottom at z 0.2 (storey-local).
+        (host.id, (0.2 - base_z) as f32)
+    };
+    let type_id = c.current_record.as_mut().unwrap().data.ensure_window_type(
+        Glazing::Double,
+        Frame::WoodUPVC,
+        0,
+        false,
+        Vec::new(),
+        None,
+    );
+    let win_id = ber_model::ber::openings::add_wall_window(
+        &mut c.current_record.as_mut().unwrap().data.storeys[1],
+        host_id,
+        5.0,
+        1.0,
+        0.5,
+        sill,
+        type_id,
+    )
+    .expect("window placed on the (still whole) wall");
+    {
+        use ber_model::ber::fenestration::OpeningPlacement as OP;
+        let w = &mut c.current_record.as_mut().unwrap().data.storeys[1].windows[0];
+        if let Some(OP::Wall { sill_m, .. }) = &mut w.placement {
+            *sill_m = sill;
+        }
+    }
+    c.mark_dirty().unwrap();
+    c.materialize();
+    {
+        // Pre-change sanity: the window sits low (z 0.2..0.7), nothing buried.
+        let w = &c.current_record.as_ref().unwrap().data.storeys[1].windows[0];
+        let zmin = w.vertices.iter().fold(f32::INFINITY, |lo, v| lo.min(v.2));
+        assert!((zmin - 0.2).abs() < 1e-3, "window placed low, got {zmin}");
+    }
+
+    // NOW the geometry changes: back on the ground storey, raise the right
+    // section by 1.6 (ceiling step at x = 4 → the tall section's volume backs
+    // storey 1's x = 4 wall up to z 1.3 storey-local).
+    c.set_current_storey(Some(0)).expect("switch to ground");
+    c.set_ceiling_step_mode(true);
+    ceiling_step_to_amount_at_x4(&mut c);
+    c.assign_ceiling_step_delta(1.6).expect("delta applies");
+    c.set_ceiling_step_mode(false);
+    c.materialize();
+
+    let assert_moved_up = |c: &AppController, when: &str| -> (f32, f32) {
+        let storey = &c.current_record.as_ref().unwrap().data.storeys[1];
+        assert_eq!(storey.windows.len(), 1, "{when}: window survives");
+        let w = &storey.windows[0];
+        let Some(OpeningPlacement::Wall {
+            wall_id,
+            along_m,
+            sill_m,
+        }) = w.placement
+        else {
+            panic!("{when}: wall placement present");
+        };
+        let host = storey
+            .walls
+            .regions
+            .iter()
+            .find(|r| r.id == wall_id)
+            .unwrap_or_else(|| panic!("{when}: live host"));
+        assert_ne!(
+            host.exposure,
+            WallExposure::InterStorey,
+            "{when}: hosted on the exposed remainder, not the buried band"
+        );
+        assert!(
+            host.opes.windows.contains(&win_id),
+            "{when}: opes on the remainder"
+        );
+        // Moved UP, away from the buried band: bottom now ON the band top.
+        let (zmin, zmax) = w
+            .vertices
+            .iter()
+            .fold((f32::INFINITY, f32::NEG_INFINITY), |(lo, hi), v| {
+                (lo.min(v.2), hi.max(v.2))
+            });
+        assert!(
+            (zmin - 1.3).abs() < 1e-3 && (zmax - 1.8).abs() < 1e-3,
+            "{when}: window raised to z 1.3..1.8 (band top), got {zmin}..{zmax}"
+        );
+        (along_m, sill_m)
+    };
+    let first = assert_moved_up(&c, "after the burying section");
+    // Durable + idempotent: a further re-derive and a reload change nothing.
+    c.mark_dirty().unwrap();
+    c.materialize();
+    assert_eq!(
+        assert_moved_up(&c, "second materialize"),
+        first,
+        "placement fields identical once moved"
+    );
+    let id = c.current_record.as_ref().unwrap().id;
+    c.flush_if_dirty().unwrap();
+    c.open_ber(&id).unwrap();
+    assert_eq!(
+        assert_moved_up(&c, "after reload"),
+        first,
+        "the move survives a reload verbatim"
+    );
+}
+
+/// DOWN-nudge through the real pipeline (the "upper storey overhangs with a
+/// step down" case): the ground's RIGHT section is LOWERED to 2.0 m (ceiling
+/// step −0.4), a window is placed high on the ground's front wall over the
+/// TALL left section (z 1.7..2.2), and THEN storey 1 is added over the whole
+/// footprint. Its datum anchors on the LOWEST covered ceiling (2.0), so its
+/// volume backs the front wall's top strip z∈[2.0, 2.4] over the tall run —
+/// right through the window's top edge. Up can't fit (the wall ends at 2.4);
+/// the window must move DOWN, its top landing on the band bottom (2.0).
+#[test]
+fn window_placed_before_a_step_down_overhang_moves_down_off_the_band() {
+    use ber_model::ber::fenestration::{Frame, Glazing, OpeningPlacement};
+    use ber_model::ber::structural::WallExposure;
+    let p = |x: f32, y: f32| Point2f32::new(x, y);
+
+    // Ground 10×10, left section 2.4 / right section 2.0 (step −0.4 at x=4).
+    let mut c = ceiling_ready_controller();
+    ceiling_step_to_amount_at_x4(&mut c);
+    c.assign_ceiling_step_delta(-0.4).expect("delta applies");
+    c.set_ceiling_step_mode(false);
+    c.materialize();
+
+    // The front wall (y = 0): place a 1×0.5 window over the TALL run, high —
+    // z 1.7..2.2 (sill 1.7 above the wall base at z 0).
+    let front_id = {
+        let storey = &c.current_record.as_ref().unwrap().data.storeys[0];
+        storey
+            .walls
+            .regions
+            .iter()
+            .find(|w| {
+                w.base_edge()
+                    .is_some_and(|(a, b)| a.y.abs() < 1e-6 && b.y.abs() < 1e-6)
+            })
+            .expect("the front wall")
+            .id
+    };
+    let type_id = c.current_record.as_mut().unwrap().data.ensure_window_type(
+        Glazing::Double,
+        Frame::WoodUPVC,
+        0,
+        false,
+        Vec::new(),
+        None,
+    );
+    let win_id = ber_model::ber::openings::add_wall_window(
+        &mut c.current_record.as_mut().unwrap().data.storeys[0],
+        front_id,
+        2.0,
+        1.0,
+        0.5,
+        1.7,
+        type_id,
+    )
+    .expect("window placed high on the tall run");
+    {
+        use ber_model::ber::fenestration::OpeningPlacement as OP;
+        let w = &mut c.current_record.as_mut().unwrap().data.storeys[0].windows[0];
+        if let Some(OP::Wall { sill_m, .. }) = &mut w.placement {
+            *sill_m = 1.7;
+        }
+    }
+    c.mark_dirty().unwrap();
+    c.materialize();
+    {
+        let w = &c.current_record.as_ref().unwrap().data.storeys[0].windows[0];
+        let zmax = w
+            .vertices
+            .iter()
+            .fold(f32::NEG_INFINITY, |hi, v| hi.max(v.2));
+        assert!((zmax - 2.2).abs() < 1e-3, "window placed high, got {zmax}");
+    }
+
+    // NOW add storey 1 over the WHOLE footprint (slab 0.3): datum = 2.0 + 0.3,
+    // so its volume's underside (2.0) buries the front wall's top strip.
+    c.add_storey().unwrap();
+    c.assign_floor_thickness(0.3).unwrap();
+    let ring = vec![p(0., 0.), p(10., 0.), p(10., 10.), p(0., 10.)];
+    c.document.adopt_finalised_outline(&ring).expect("adopts");
+    c.maybe_seed_inherited_levels();
+    c.set_default_ceiling_height(2.4).unwrap();
+    c.materialize();
+
+    let storey = &c.current_record.as_ref().unwrap().data.storeys[0];
+    // The band exists on the front wall (its tall-run top strip is buried).
+    assert!(
+        storey
+            .walls
+            .regions
+            .iter()
+            .any(|r| r.exposure == WallExposure::InterStorey
+                && r.base_edge()
+                    .is_some_and(|(a, b)| a.y.abs() < 1e-6 && b.y.abs() < 1e-6)),
+        "the front wall carries a buried top strip"
+    );
+    let w = &storey.windows[0];
+    let Some(OpeningPlacement::Wall {
+        wall_id, sill_m, ..
+    }) = w.placement
+    else {
+        panic!("wall placement present");
+    };
+    let host = storey
+        .walls
+        .regions
+        .iter()
+        .find(|r| r.id == wall_id)
+        .expect("live host");
+    assert_ne!(
+        host.exposure,
+        WallExposure::InterStorey,
+        "hosted on the labellable piece, not the buried strip"
+    );
+    assert!(host.opes.windows.contains(&win_id), "opes on the host");
+    assert!(
+        (sill_m - 1.5).abs() < 1e-3,
+        "moved DOWN: top onto the band bottom (sill 1.5), got {sill_m}"
+    );
+    let (zmin, zmax) = w
+        .vertices
+        .iter()
+        .fold((f32::INFINITY, f32::NEG_INFINITY), |(lo, hi), v| {
+            (lo.min(v.2), hi.max(v.2))
+        });
+    assert!(
+        (zmin - 1.5).abs() < 1e-3 && (zmax - 2.0).abs() < 1e-3,
+        "window dropped to z 1.5..2.0, got {zmin}..{zmax}"
+    );
+    // Idempotent thereafter.
+    c.mark_dirty().unwrap();
+    c.materialize();
+    let w = &c.current_record.as_ref().unwrap().data.storeys[0].windows[0];
+    let Some(OpeningPlacement::Wall { sill_m: s2, .. }) = w.placement else {
+        panic!("wall placement present");
+    };
+    assert_eq!(s2, sill_m, "clear once — never moved again");
 }

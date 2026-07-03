@@ -236,6 +236,11 @@ impl AppController {
             return;
         }
         dump_stroke("living-area", &pts);
+        // Snap-tag capture: the pre-action state (a pending CUT pushes no undo
+        // entry, so its capture carries this `before` itself), and drop stale
+        // decisions from unrelated ops so only THIS stroke's snaps are tagged.
+        let before = self.current_history_snapshot();
+        self.begin_snap_capture();
         // Save the live buffer so the outline we carve against is current.
         self.sync_active();
         // Reference walls the carve levels the drawn living area onto besides the
@@ -270,13 +275,33 @@ impl AppController {
                     self.pinned_subarea_slot_refs(&boundary, a, &ref_walls),
                     self.pinned_subarea_slot_refs(&boundary, b, &ref_walls),
                 ]);
+                self.capture_snap_action_pending(
+                    SnapAction::Subarea {
+                        flow: SubareaFlow::LivingArea,
+                        points: world_points.to_vec(),
+                        pick: None,
+                    },
+                    before,
+                    manip_plan::take_snap_decisions(),
+                );
             }
             Ok((boundary, SubareaOutcome::Area(plan))) => {
                 if let Err(e) = self.commit_living_area_plan(&boundary, plan, &ref_walls) {
                     log::error!("living area: {}", e);
+                    // Nothing committed — drop the failed carve's decisions.
+                    let _ = manip_plan::take_snap_decisions();
+                } else {
+                    self.capture_snap_action(SnapAction::Subarea {
+                        flow: SubareaFlow::LivingArea,
+                        points: world_points.to_vec(),
+                        pick: None,
+                    });
                 }
             }
-            Err(e) => log::error!("living-area carve_or_cut: {}", e),
+            Err(e) => {
+                log::error!("living-area carve_or_cut: {}", e);
+                let _ = manip_plan::take_snap_decisions();
+            }
         }
     }
 
@@ -326,6 +351,11 @@ impl AppController {
             }
             let undo_snap = self.current_history_snapshot();
             self.commit_new_living_area(slot, undo_snap);
+            // The stroke's tags stay live: replay now re-runs stroke + pick.
+            self.record_subarea_pick(SubareaFlow::LivingArea, Some((world_x, world_y)));
+        } else {
+            // Cancelled — the cut (and the snaps its tags describe) is gone.
+            self.record_subarea_pick(SubareaFlow::LivingArea, None);
         }
     }
 

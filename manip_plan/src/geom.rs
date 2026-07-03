@@ -36,6 +36,42 @@ const AXIS_LINE_MIN_SPAN_M: f32 = 0.05;
 /// (~50%) or an L (~30%) blows well past it; freehand waviness stays under.
 const AXIS_LINE_MAX_DEV_RATIO: f32 = 0.15;
 
+/// Fit a FREE-DIRECTION segment to a near-straight stroke: the TLS line
+/// ([`fit_line`]) with endpoints at the stroke's extreme projections onto it,
+/// in draw order (first endpoint nearest the stroke's start). Same
+/// line-likeness guards as [`fit_axis_segment`], but the orientation is kept
+/// AS DRAWN — for lines that are legitimately diagonal (a hip roof's corner
+/// ridges), where the axis snap would be wrong. `None` when the stroke is too
+/// short or not line-like.
+pub fn fit_segment(points: &[Point2f32]) -> Option<(Point2f32, Point2f32)> {
+    if points.len() < 2 {
+        return None;
+    }
+    let (centroid, (dx, dy)) = fit_line(points);
+    let (mut min_t, mut max_t) = (f32::INFINITY, f32::NEG_INFINITY);
+    let mut max_dev = 0.0_f32;
+    for p in points {
+        let rx = p.x - centroid.x;
+        let ry = p.y - centroid.y;
+        let t = rx * dx + ry * dy;
+        min_t = min_t.min(t);
+        max_t = max_t.max(t);
+        max_dev = max_dev.max((rx * dy - ry * dx).abs());
+    }
+    let span = max_t - min_t;
+    if span < AXIS_LINE_MIN_SPAN_M || max_dev > span * AXIS_LINE_MAX_DEV_RATIO {
+        return None;
+    }
+    let at = |t: f32| Point2f32::new(centroid.x + t * dx, centroid.y + t * dy);
+    // Draw order: the stroke's first point projects nearer one extreme.
+    let t0 = (points[0].x - centroid.x) * dx + (points[0].y - centroid.y) * dy;
+    if (t0 - min_t).abs() <= (t0 - max_t).abs() {
+        Some((at(min_t), at(max_t)))
+    } else {
+        Some((at(max_t), at(min_t)))
+    }
+}
+
 /// Fit an AXIS-ALIGNED segment to a near-straight stroke: TLS fit
 /// ([`fit_line`]), orientation snapped to the DOMINANT axis (the step/ridge
 /// line is orthogonal by construction). Returns `(axis, coord, (lo, hi))`:

@@ -795,6 +795,27 @@ impl CeilingRegions {
             .min_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal))
     }
 
+    /// Absolute-z of the ceiling SURFACE over plan point `p` (plane-eval on the
+    /// containing region — fan/ridge faces evaluate their sloped plane, flat
+    /// pieces their constant height), in the storey-LOCAL frame — the caller
+    /// adds the storey's floor datum for world z. Containment is
+    /// boundary-inclusive (`Intersects`), first region in region order wins on
+    /// a shared boundary — callers sample points just INSIDE the footprint,
+    /// never on a step line. `None` when no region covers `p` (or the covering
+    /// region is plan-degenerate). The point-query cousin of
+    /// [`lowest_flat_z_over`](Self::lowest_flat_z_over), which is flat-only and
+    /// area-based.
+    pub fn top_z_at(&self, p: Point2f64) -> Option<f64> {
+        use geo::Intersects;
+        let gp = GeoPoint::new(p.x, p.y);
+        self.regions.iter().find_map(|r| {
+            Polygon::<f64>::from(r.polygon.clone())
+                .intersects(&gp)
+                .then(|| region_plane(r).map(|(c0, cx, cy)| c0 + cx * p.x + cy * p.y))
+                .flatten()
+        })
+    }
+
     /// The floor levels a storey ABOVE inherits from this (below-storey)
     /// ceiling: for every FLAT region overlapping `footprint` (by more than
     /// [`SLIVER_AREA_M2`]) whose height sits more than [`RISER_Z_EPS_M`]

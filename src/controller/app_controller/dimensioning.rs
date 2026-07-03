@@ -215,7 +215,8 @@ impl AppController {
         // is the rect's LO SIDE on the open stage's axis (the LEFT side for
         // PosX, the BOTTOM for PosY), the reference wall resolves in the
         // OUTLINE plan, kind `Line`. Both offer the Centre suggestion.
-        if let Some(PendingCeilingRect::PosX { lo, len, prompt }) = self.pending_roof_rect.as_ref() {
+        if let Some(PendingCeilingRect::PosX { lo, len, prompt }) = self.pending_roof_rect.as_ref()
+        {
             let option = prompt.options.get(prompt.current_idx)?;
             return Some(PositionPromptUiData {
                 area_wall: WallPositions {
@@ -234,7 +235,8 @@ impl AppController {
                 offers_centre: true,
             });
         }
-        if let Some(PendingCeilingRect::PosY { lo, len, prompt }) = self.pending_roof_rect.as_ref() {
+        if let Some(PendingCeilingRect::PosY { lo, len, prompt }) = self.pending_roof_rect.as_ref()
+        {
             let option = prompt.options.get(prompt.current_idx)?;
             return Some(PositionPromptUiData {
                 area_wall: WallPositions {
@@ -378,8 +380,9 @@ impl AppController {
         // shell-resolved shape — the resolved LO coordinate rides into the
         // next stage (PosY, or finalize + the height); a finalize rejection
         // keeps THIS stage open (advance only replaces it on success).
-        if let Some(PendingCeilingRect::PosX { prompt, .. } | PendingCeilingRect::PosY { prompt, .. }) =
-            self.pending_roof_rect.as_ref()
+        if let Some(
+            PendingCeilingRect::PosX { prompt, .. } | PendingCeilingRect::PosY { prompt, .. },
+        ) = self.pending_roof_rect.as_ref()
         {
             let coord = self.document.resolve_ceiling_line_position(prompt, value)?;
             return self.resolve_roof_rect_position(coord);
@@ -519,7 +522,8 @@ impl AppController {
             return;
         }
         // Roof-point per-axis prompt: cycle ITS reference options.
-        if let Some(PendingCeilingPoint::Position { prompt, .. }) = self.pending_roof_point.as_mut() {
+        if let Some(PendingCeilingPoint::Position { prompt, .. }) = self.pending_roof_point.as_mut()
+        {
             prompt.cycle();
             return;
         }
@@ -535,8 +539,9 @@ impl AppController {
         }
         // Roof-rect position questions (PosX or PosY): cycle the open
         // one's reference options.
-        if let Some(PendingCeilingRect::PosX { prompt, .. } | PendingCeilingRect::PosY { prompt, .. }) =
-            self.pending_roof_rect.as_mut()
+        if let Some(
+            PendingCeilingRect::PosX { prompt, .. } | PendingCeilingRect::PosY { prompt, .. },
+        ) = self.pending_roof_rect.as_mut()
         {
             prompt.cycle();
             return;

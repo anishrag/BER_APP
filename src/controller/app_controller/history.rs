@@ -25,8 +25,8 @@ pub struct HistorySnapshot {
     /// storey so an undone window doesn't leave a dangling type reference.
     pub(super) window_types: Option<Vec<ber_model::ber::fenestration::WindowType>>,
     /// The WHOLE storey stack AS IT WAS — captured only by actions that mutate
-    /// records ACROSS storeys (e.g. `auto_expose_all_storeys`, which pushes
-    /// carves onto every storey's `floor_splits`/`ceiling_splits`). When `Some`, the
+    /// records ACROSS storeys (e.g. the floor/ceiling-exposure carves, which
+    /// push splits onto every overlapping storey's record). When `Some`, the
     /// restore writes back every storey's record (and SKIPS the single
     /// `record_storey` write); `None` (the common case) keeps the active-only
     /// behaviour. The normal `current_history_snapshot` leaves this `None`.
@@ -69,8 +69,8 @@ impl AppController {
     }
 
     /// A FULL snapshot that also captures the WHOLE storey stack — for actions
-    /// that mutate records across multiple storeys (`auto_expose_all_storeys`).
-    /// Restore writes back every storey's record, so carves pushed onto
+    /// that mutate records across multiple storeys (the floor/ceiling-exposure
+    /// carves). Restore writes back every storey's record, so carves pushed onto
     /// non-active storeys revert too. Otherwise identical to
     /// [`current_history_snapshot`](Self::current_history_snapshot).
     pub(super) fn current_history_snapshot_full(&self) -> HistorySnapshot {
@@ -112,6 +112,12 @@ impl AppController {
         const MAX_HISTORY: usize = 100;
         if self.history.len() > MAX_HISTORY {
             self.history.remove(0);
+            // The trim shifts every stack index down — the snap capture's and
+            // the partition instant-commit record's `hlen` now point one entry
+            // too high, so a replay/un-commit would rewind to the wrong state.
+            // Both are best-effort conveniences; drop them.
+            self.last_snap_action = None;
+            self.partition_instant_commit = None;
         }
         self.redo.clear();
     }
@@ -122,6 +128,11 @@ impl AppController {
         let Some(snap) = self.history.pop() else {
             return Ok(());
         };
+        // The partition instant-commit record and the snap capture both index
+        // into the history stack — stale (and dangerous to replay) after any
+        // undo/redo.
+        self.partition_instant_commit = None;
+        self.last_snap_action = None;
         let cur = self.current_history_snapshot();
         self.redo.push(cur);
         self.restore_history_snapshot(snap);
@@ -135,6 +146,10 @@ impl AppController {
         let Some(snap) = self.redo.pop() else {
             return Ok(());
         };
+        // See `undo`: the partition instant-commit record and the snap capture
+        // index into the history stack, which redo is about to grow past.
+        self.partition_instant_commit = None;
+        self.last_snap_action = None;
         let cur = self.current_history_snapshot();
         self.history.push(cur);
         self.restore_history_snapshot(snap);

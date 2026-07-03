@@ -476,7 +476,7 @@ impl WallRegions {
 /// ~sub-mm coordinate drift a reload's geo-boolean phase/exposure reconstruction
 /// introduces (the reported 0.8 mm sliver) while staying orders of magnitude
 /// below any genuine wall segment.
-const MIN_SUBWALL_M: f64 = 0.01;
+pub(crate) const MIN_SUBWALL_M: f64 = 0.01;
 
 /// Split one wall along the vertical plane where the plan `cut` segment crosses
 /// its base edge, via [`Polygon3D::split_by_line`]. Returns the two sub-walls
@@ -485,7 +485,7 @@ const MIN_SUBWALL_M: f64 = 0.01;
 /// doesn't actually divide the face. `split_by_line` preserves the base-edge-
 /// first vertex contract for a flat base (the common case): a vertical cut of
 /// `[a, b, b_top, a_top]` yields `[a, x, x_top, a_top]` and `[x, b, b_top, x_top]`.
-fn split_wall_by_segment(
+pub(crate) fn split_wall_by_segment(
     wall: &WallRegion,
     cut: &[Point2f64; 2],
 ) -> Option<(WallRegion, WallRegion)> {
@@ -561,6 +561,53 @@ pub fn split_wall_by_line(wall: &WallRegion, p0: Point3f64, p1: Point3f64) -> Ve
             construction_id: wall.construction_id,
         })
         .collect()
+}
+
+/// ROTATE `region`'s ring so it satisfies the wall vertex-order contract
+/// (base-edge first: `exterior[0]` = the base start `a`, walking the base
+/// forward, then the top back) with the LOWEST possible base — making a
+/// horizontal-cut UPPER piece a first-class wall whose base edge is the full
+/// plan span at the cut height.
+///
+/// `Polygon3D::split_by_line` preserves the contract for the LOWER piece but
+/// the upper piece's ring opens ON the cut line (it starts mid-ring with a
+/// vertical edge), so `base_edge()` degenerates and the piece can neither
+/// host an opening nor recover its painted span. Every cyclic ROTATION of the
+/// ring (never a reversal — orientation is preserved) is scored through the
+/// real `base_frame()`; the rotation with a valid frame at MINIMAL `base_z`
+/// wins (an upper piece's ring also admits an upside-down "base" along its
+/// TOP edge — minimal-z rejects it), ties broken by the longest base edge.
+/// Returns the region unchanged when no rotation yields a valid frame (a
+/// degenerate sliver).
+///
+/// SCOPE: called by the InterStorey derivation on its horizontal-cut outputs
+/// only. The wall-face PARTITION path (the other `split_wall_by_line` caller)
+/// deliberately keeps its raw rings — its pieces are exposure carriers keyed
+/// by the partition recipe, and normalising them would surface their spans to
+/// the 1-D section recovery, which a partitioned wall must stay out of.
+pub(crate) fn rebase_ring_start(mut region: WallRegion) -> WallRegion {
+    let n = region.polygon.exterior.len();
+    if n < 3 || region.base_frame().is_some() {
+        return region; // degenerate, or already contract-conforming
+    }
+    let mut best: Option<(f64, f64, usize)> = None; // (base_z, -len, rotation)
+    for k in 1..n {
+        let mut ring = region.polygon.exterior.clone();
+        ring.rotate_left(k);
+        let candidate = WallRegion {
+            polygon: Polygon3D { exterior: ring },
+            ..region.clone()
+        };
+        if let Some((_, _, len, base_z)) = candidate.base_frame() {
+            if best.is_none_or(|(bz, nl, _)| (base_z, -len) < (bz, nl)) {
+                best = Some((base_z, -len, k));
+            }
+        }
+    }
+    if let Some((_, _, k)) = best {
+        region.polygon.exterior.rotate_left(k);
+    }
+    region
 }
 
 /// Half-width (m) of the FLOOR BAND used by [`WallRegion::base_edge`] to tell
@@ -960,7 +1007,11 @@ fn covering_roof_plane(
 /// [`PROFILE_EPS_M`] (in metres, scaled to its own parameter) short of the
 /// wall line and still contribute (the old `s` tolerance of 1e-9 dropped
 /// step-boundary edges that stopped ~1e-7 m shy, losing the step's jump).
-fn profile_breakpoints(ceilings: &CeilingRegions, a: Point2f64, b: Point2f64) -> Vec<f64> {
+pub(crate) fn profile_breakpoints(
+    ceilings: &CeilingRegions,
+    a: Point2f64,
+    b: Point2f64,
+) -> Vec<f64> {
     let (dx, dy) = (b.x - a.x, b.y - a.y);
     let len2 = dx * dx + dy * dy;
     let mut ts = vec![0.0, 1.0];
@@ -1126,7 +1177,7 @@ fn ceiling_profile_top(
 /// are `geo::Polygon`s (2D, no per-vertex z), so this walks the exterior AND
 /// interior rings in plan. Same metric tolerances ([`PROFILE_EPS_M`]) as the
 /// roof version: floor rings are boolean-op output too.
-fn floor_breakpoints(floors: &FloorRegions, a: Point2f64, b: Point2f64) -> Vec<f64> {
+pub(crate) fn floor_breakpoints(floors: &FloorRegions, a: Point2f64, b: Point2f64) -> Vec<f64> {
     let (dx, dy) = (b.x - a.x, b.y - a.y);
     let len2 = dx * dx + dy * dy;
     let mut ts = vec![0.0, 1.0];

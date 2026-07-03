@@ -227,7 +227,11 @@ impl AppController {
 
     /// The active storey's derived riser walls, classified by the document
     /// model from the materialized record (`StoreyDoc::riser_walls` — the
-    /// geometric discriminator lives there). Empty when no record/storey.
+    /// geometric discriminator lives there). Derived `InterStorey` risers
+    /// (buried behind a neighbour storey — `derive_inter_storey`'s stamp) are
+    /// EXCLUDED: they aren't pickable, drawable or paintable, so every
+    /// consumer (hit-test, views, the bulk pass) sees only the labellable
+    /// ones. Empty when no record/storey.
     fn riser_walls(&self) -> Vec<document::RiserWall> {
         let Some(idx) = self.current_storey_idx else {
             return Vec::new();
@@ -239,7 +243,11 @@ impl AppController {
         else {
             return Vec::new();
         };
-        self.document.riser_walls(storey)
+        self.document
+            .riser_walls(storey)
+            .into_iter()
+            .filter(|r| r.exposure != WallExposure::InterStorey)
+            .collect()
     }
 
     /// Drag the grabbed handle: project the pointer onto the wall line and set
@@ -318,8 +326,25 @@ impl AppController {
         let Some(id) = self.selected_riser else {
             return;
         };
+        if self.set_riser_exposure_by_id(id, exposure) {
+            let _ = self.mark_dirty();
+        }
+    }
+
+    /// The record + side-table mutation of [`set_riser_exposure`], by riser
+    /// id — shared with the bulk "set remaining exposed" pass. Returns whether
+    /// anything changed (the caller marks dirty). Same no-undo semantics.
+    /// No-op when the target riser currently classifies `InterStorey` (the
+    /// derivation owns it) or when `InterStorey` is passed as the value (it's
+    /// derived-only, never assessor-set).
+    ///
+    /// [`set_riser_exposure`]: Self::set_riser_exposure
+    fn set_riser_exposure_by_id(&mut self, id: ItemId, exposure: WallExposure) -> bool {
+        if exposure == WallExposure::InterStorey {
+            return false; // derived-only classification — never assessor-set
+        }
         let Some(idx) = self.current_storey_idx else {
-            return;
+            return false;
         };
         // The riser's durable base-edge key, computed before the &mut borrow.
         let key = self
@@ -333,10 +358,13 @@ impl AppController {
             .and_then(|r| r.data.storeys.get_mut(idx))
             .and_then(|s| s.walls.regions.iter_mut().find(|r| r.id == id))
         else {
-            return;
+            return false;
         };
+        if region.exposure == WallExposure::InterStorey {
+            return false; // the derivation owns this riser — refuse the write
+        }
         if region.exposure == exposure {
-            return;
+            return false;
         }
         region.exposure = exposure;
         // Record the override in the durable side-table — the source of truth the
@@ -344,7 +372,7 @@ impl AppController {
         if let (Some(key), Some(sd)) = (key, self.document.storeys.get_mut(idx)) {
             sd.riser_exposure.insert(key, exposure);
         }
-        let _ = self.mark_dirty();
+        true
     }
 
     /// Revert the selected riser to its DERIVED default exposure — `Unset`
@@ -387,15 +415,34 @@ impl AppController {
     }
 
     /// Paint every unset coverage range on the outline `Exposed` — whole
-    /// unmarked walls and the unset gaps around painted sections. Painted
-    /// sections themselves are untouched. Undoable; persists immediately.
-    /// No-op if nothing changes.
+    /// unmarked walls and the unset gaps around painted sections — AND every
+    /// still-`Unset` riser face. Painted sections and classified risers are
+    /// untouched. The outline part is undoable and persists immediately; the
+    /// riser part is record-level, outside undo, like a single riser set
+    /// ([`set_riser_exposure`]). No-op if nothing changes.
+    ///
+    /// [`set_riser_exposure`]: Self::set_riser_exposure
     pub fn set_all_remaining_exposed(&mut self) {
         self.sync_active();
         let undo_snap = self.current_history_snapshot();
         if self.document.set_all_remaining_exposed() {
             let _ = self.mark_dirty();
             self.push_history_snapshot(undo_snap);
+        }
+        // Risers: whole-face, derived Unset until classified — the bulk pass
+        // is how "everything left is just exposed" covers them too.
+        let unset: Vec<ItemId> = self
+            .riser_walls()
+            .into_iter()
+            .filter(|r| r.exposure == WallExposure::Unset)
+            .map(|r| r.id)
+            .collect();
+        let mut riser_changed = false;
+        for id in unset {
+            riser_changed |= self.set_riser_exposure_by_id(id, WallExposure::Exposed);
+        }
+        if riser_changed {
+            let _ = self.mark_dirty();
         }
     }
 

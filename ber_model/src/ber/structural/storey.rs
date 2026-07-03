@@ -304,8 +304,29 @@ impl Storey {
         }
     }
 
-    /// Does `ring` (world coords) genuinely SUBDIVIDE a labellable (non-party)
-    /// FLOOR region — i.e. cross it so a split would yield more than one piece?
+    /// The wall regions a single carve edge MAPS TO: every wall whose base-edge
+    /// midpoint lies on the segment `a`→`b` (within the same tolerance as
+    /// [`surfaces_in_ring`](Self::surfaces_in_ring)'s boundary test, so an
+    /// exclusion here removes exactly what that inclusion test added). The
+    /// shell's per-edge include/exclude decision for a staged structure carve
+    /// resolves to wall ids through this.
+    pub fn wall_ids_on_segment(&self, a: Point2f64, b: Point2f64) -> Vec<ItemId> {
+        self.walls
+            .regions
+            .iter()
+            .filter(|r| {
+                r.base_midpoint().is_some_and(|m| {
+                    point_to_segment_distance(m.x, m.y, a.x, a.y, b.x, b.y)
+                        <= WALL_ON_BOUNDARY_TOL_M
+                })
+            })
+            .map(|r| r.id)
+            .collect()
+    }
+
+    /// Does `ring` (world coords) genuinely SUBDIVIDE a labellable
+    /// (non-inter-storey) FLOOR region — i.e. cross it so a split would yield
+    /// more than one piece?
     /// True iff some labellable region's polygon both overlaps the ring (positive
     /// intersection area) AND isn't fully covered by it (positive difference
     /// area). The carve/cut split-overlap test: an interior carve and an
@@ -322,7 +343,10 @@ impl Storey {
         self.floors
             .regions
             .iter()
-            .filter(|r| r.exposure != FloorExposure::NonHeatLoss)
+            // InterStorey is the derived hidden class — everything else
+            // (NonHeatLoss/party floors included) is assessor-paintable and
+            // therefore splittable.
+            .filter(|r| r.exposure != FloorExposure::InterStorey)
             .any(|r| {
                 let inside = r.polygon.intersection(&cut).unsigned_area();
                 let outside = r.polygon.difference(&cut).unsigned_area();
@@ -331,7 +355,7 @@ impl Storey {
     }
 
     /// Mirror of [`ring_splits_labellable_floor`](Self::ring_splits_labellable_floor)
-    /// over the storey's labellable (non-`Party`) ceiling/roof regions.
+    /// over the storey's labellable (non-`InterStorey`) ceiling/roof regions.
     pub fn ring_splits_labellable_ceiling(&self, ring: &[Point2f64]) -> bool {
         use geo::bool_ops::BooleanOps;
         use geo::Area;
@@ -343,7 +367,10 @@ impl Storey {
         self.ceilings
             .regions
             .iter()
-            .filter(|r| r.exposure != CeilingExposure::Party)
+            // InterStorey is the derived hidden class — everything else
+            // (Party ceilings included) is assessor-paintable and therefore
+            // splittable.
+            .filter(|r| r.exposure != CeilingExposure::InterStorey)
             .any(|r| {
                 let ceiling_ring = ceiling_ring(&r.polygon);
                 let poly = ring_to_geo(&ceiling_ring);

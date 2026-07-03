@@ -82,6 +82,7 @@ impl AppController {
         self.structure_select = None;
         self.structure_selected.clear();
         self.pending_structure_carves.clear();
+        self.pending_wall_inclusion = None;
         self.pending_structure_cut = None;
         self.structure_split_kind = None;
         self.close_structure_edit();

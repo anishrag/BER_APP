@@ -1,124 +1,17 @@
-//! Stage-1 inter-storey (party) auto-exposure pass: across the whole storey
-//! stack, mark party WALLS shared with the storey above/below, and auto-split
-//! PARTIAL floor/ceiling overlaps so the shared sub-region exists with its own
-//! centroid and resolves NonHeatLoss (party floor) / Party (party ceiling).
-//!
-//! This is the deliberate ONE-SHOT orchestration of the `document` party
-//! helpers (the controller sequences: snapshot → carve → re-resolve → stamp →
-//! mark dirty), distinct from the per-frame full-containment auto-derive
-//! ([`derive_horizontal_exposure_all`]) which only handles fully-stacked
-//! surfaces. The model mutation itself lives in `document`; this file owns the
-//! shell concerns (undo snapshot, re-resolve sequencing, dirty marking).
+//! The FLOOR-exposure TOOL: a storey-count gate, an all-storeys overlaid
+//! floor view, and selection (set-all / click / carve / remaining) + apply.
+//! The inter-storey classification itself is no longer a tool concern: the
+//! `derive_inter_storey` pipeline tail (see `derive_horizontal_exposure_all`)
+//! stamps every storey-junction floor `InterStorey` on every re-resolve, and
+//! the tool simply HIDES those derived pieces — everything else (party
+//! `NonHeatLoss` floors included) is assessor-paintable here.
 use super::*;
 use crate::controller::app_controller::SelectMode;
 use ber_model::ber::structural::FloorExposure;
 use domain::points::Point2f64;
 
 impl AppController {
-    /// Run the inter-storey party auto-exposure pass over the WHOLE stack:
-    /// mark party walls (shared with the storey above/below) and auto-split
-    /// partial floor/ceiling overlaps. Each carved party piece (`r ∩ neighbour`,
-    /// hence fully contained in the neighbour footprint) is marked
-    /// NonHeatLoss / Party by the per-frame full-containment auto-derive
-    /// ([`auto_derive_horizontal_exposure`], run from `commit_to_ber` →
-    /// `derive_horizontal_exposure_all`) — so no explicit per-piece stamp is
-    /// needed here. Respects manual precedence (`or_insert`). One undoable action;
-    /// undo reverts EVERY storey's record (full snapshot). No-op without a record.
-    pub fn auto_expose_all_storeys(&mut self) {
-        // Bring the resolved record current so the planners read live footprints.
-        self.materialize();
-        if self.current_record.is_none() {
-            return;
-        }
-        // FULL snapshot — this pass pushes carves onto EVERY storey's
-        // `floor_splits`/`ceiling_splits`, so undo must revert the whole stack, not
-        // just the active storey's record.
-        let snap = self.current_history_snapshot_full();
-        let n = self
-            .current_record
-            .as_ref()
-            .map(|r| r.data.storeys.len())
-            .unwrap_or(0)
-            .min(self.document.storeys.len());
-
-        for idx in 0..n {
-            // Neighbour footprints from the RESOLVED record (cloned to release the
-            // immutable borrow before the mutable doc / record writes below).
-            let (below_fp, above_fp) = {
-                let storeys = &self.current_record.as_ref().unwrap().data.storeys;
-                let below = idx
-                    .checked_sub(1)
-                    .and_then(|b| storeys.get(b))
-                    .and_then(|s| s.floors.footprint_ring());
-                let above = storeys.get(idx + 1).and_then(|s| s.floors.footprint_ring());
-                (below, above)
-            };
-
-            // Walls: mark the still-Unset party sub-ranges shared with either
-            // neighbour. (Pure model mutation in the StoreyDoc.)
-            self.document.storeys[idx]
-                .auto_mark_party_walls(below_fp.as_deref(), above_fp.as_deref());
-
-            // Floors + ceilings: plan the partial-overlap carves against the
-            // neighbour footprints, reading the resolved storey. The sample
-            // points the planners return are ignored — the per-frame
-            // full-containment derive marks the carved pieces.
-            let storey = self.current_record.as_ref().unwrap().data.storeys[idx].clone();
-            let mut floor_rings: Vec<Vec<Point2f64>> = Vec::new();
-            let mut ceiling_rings: Vec<Vec<Point2f64>> = Vec::new();
-            if let Some(below) = &below_fp {
-                let (rings, _) = self.document.storeys[idx].plan_party_floor_carves(&storey, below);
-                floor_rings = rings;
-            }
-            if let Some(above) = &above_fp {
-                let (rings, _) =
-                    self.document.storeys[idx].plan_party_ceiling_carves(&storey, above);
-                ceiling_rings = rings;
-            }
-
-            // De-dup against the durable splits already present (re-entering the
-            // tool and confirming again replans the same geometry — idempotent —
-            // but `extend` would grow the serialized Vecs unboundedly). Skip any
-            // planned ring whose quantized centroid already keys an existing split.
-            let record = self.current_record.as_mut().unwrap();
-            Self::extend_splits_deduped(&mut record.data.storeys[idx].floor_splits, floor_rings);
-            let has_roof_split = {
-                let before = record.data.storeys[idx].ceiling_splits.len();
-                Self::extend_splits_deduped(&mut record.data.storeys[idx].ceiling_splits, ceiling_rings);
-                record.data.storeys[idx].ceiling_splits.len() > before
-            };
-            // Ceilings are regions-as-truth — `resolve_storey` only re-fits them, so
-            // the `ceiling_splits` carve must be applied via `recompose_ceilings` (it
-            // reads the durable field). Floors: `resolve_storey` applies
-            // `floor_splits` every resolve, so no extra call there.
-            if has_roof_split {
-                self.recompose_ceilings(idx);
-            }
-        }
-
-        // Re-resolve so the carved sub-regions exist with their own centroids;
-        // the per-frame full-containment auto-derive (inside the commit) marks
-        // each contained party piece NonHeatLoss / Party.
-        let _ = self.commit_to_ber();
-        self.push_history_snapshot(snap);
-    }
-
-    /// Append each planned carve `ring` to `splits` UNLESS a split with the same
-    /// quantized centroid key already exists — the de-dup that stops re-runs of
-    /// the (idempotent) auto-pass from growing the serialized split Vecs.
-    fn extend_splits_deduped(splits: &mut Vec<Vec<Point2f64>>, rings: Vec<Vec<Point2f64>>) {
-        let mut seen: HashSet<document::CentroidKey> = splits
-            .iter()
-            .map(|r| document::ring_centroid_key(r))
-            .collect();
-        for ring in rings {
-            if seen.insert(document::ring_centroid_key(&ring)) {
-                splits.push(ring);
-            }
-        }
-    }
-
-    // ── Floor-exposure TOOL (Stages 2-4) ───────────────────────────────────
+    // ── Floor-exposure TOOL ────────────────────────────────────────────────
     //
     // The tool drives the manual half of floor-exposure marking, layered on top
     // of the Stage-1 auto pass: a storey-count gate, an all-storeys overlaid
@@ -133,7 +26,8 @@ impl AppController {
     }
 
     /// True while the storey-count gate prompt is up (the tool is on but the
-    /// auto-pass hasn't run yet). The overlaid view + selection wait for confirm.
+    /// assessor hasn't confirmed the stack is complete). The overlaid view +
+    /// selection wait for confirm.
     pub fn floor_exposure_gate_pending(&self) -> bool {
         self.floor_exposure_gate_pending
     }
@@ -145,9 +39,10 @@ impl AppController {
 
     /// Enter or leave the floor-exposure tool. Mutually exclusive with the other
     /// Mapping modes (mirrors [`set_exposure_mode`](Self::set_exposure_mode)'s
-    /// clearing). On enter the storey-count GATE is raised — the auto-pass only
-    /// runs once the assessor confirms every storey is added. All selection
-    /// state is cleared either way.
+    /// clearing). On enter the storey-count GATE is raised — the overlaid view
+    /// only opens once the assessor confirms every storey is added (the
+    /// InterStorey derivation reads the whole stack, so labelling before it's
+    /// complete would waste work). All selection state is cleared either way.
     pub fn set_floor_exposure_mode(&mut self, on: bool) {
         // Drop any half-dimensioned carve buffer before the tool toggles.
         if self.floor_exposure_carve_in_flight {
@@ -158,6 +53,9 @@ impl AppController {
         self.floor_exposure_selected.clear();
         self.floor_exposure_pending_cut = None;
         if on {
+            // A PLAN task (all-storeys floor takeover, 2D-only input) — see
+            // `set_roof_mode`: entering from 3D would show it with dead input.
+            self.set_sketch_mode(SketchMode::Storey2D);
             self.floor_exposure_gate_pending = true;
             // Leave every other Mapping mode (each setter clears its own
             // pick/drag state) so the canvas isn't shared.
@@ -178,11 +76,14 @@ impl AppController {
         }
     }
 
-    /// Gate answer YES — every storey is added. Lower the gate and run the
-    /// one-shot inter-storey party auto-exposure pass (Stage 1).
+    /// Gate answer YES — every storey is added. Lower the gate and bring the
+    /// resolved record current (the pipeline's `derive_inter_storey` tail has
+    /// then classified every storey-junction surface, so the view opens on the
+    /// final worklist). No one-shot pass any more — the derivation runs on
+    /// every re-resolve.
     pub fn confirm_all_storeys_added(&mut self) {
         self.floor_exposure_gate_pending = false;
-        self.auto_expose_all_storeys();
+        self.materialize();
     }
 
     /// Gate answer NOT-YET — exit the tool so the assessor can add the
@@ -249,8 +150,9 @@ impl AppController {
                     .floors
                     .regions
                     .iter()
-                    // Party floors aren't shown, so a tap can't select one.
-                    .find(|r| r.id == id && r.exposure != FloorExposure::NonHeatLoss)
+                    // Derived InterStorey floors aren't shown, so a tap can't
+                    // select one.
+                    .find(|r| r.id == id && r.exposure != FloorExposure::InterStorey)
                 {
                     let area = region.area();
                     if best.as_ref().is_none_or(|(a, _, _)| area < *a) {
@@ -303,6 +205,15 @@ impl AppController {
         if pts.len() < 2 {
             return;
         }
+        // Snap-tag capture: the pre-action state, taken BEFORE the document
+        // mutation below (set_active_storey / load_active_into_buffer) so a
+        // replay restores the caller's original state. FULL — the eventual
+        // commit touches every overlapping storey's splits. A pending CUT
+        // pushes no undo entry, so its capture carries this `before` itself.
+        // Also drop stale decisions from unrelated ops so only THIS stroke's
+        // snaps are tagged.
+        let before = self.current_history_snapshot_full();
+        self.begin_snap_capture();
         // Host the in-flight carve's dimensioning on a reference storey (the
         // PhaseArea buffer lives on the active storey).
         let Some(ref_idx) = self.floor_exposure_reference_storey() else {
@@ -324,6 +235,8 @@ impl AppController {
         match boundary.carve_or_cut(&pts, &self.tuning.subarea, false) {
             Ok(SubareaOutcome::Area(plan)) => {
                 if plan.validate_simple().is_err() {
+                    // Nothing committed — drop the rejected carve's decisions.
+                    let _ = manip_plan::take_snap_decisions();
                     return;
                 }
                 let undo = self.current_history_snapshot_full();
@@ -333,6 +246,11 @@ impl AppController {
                 // not the (possibly smaller) reference storey's outline.
                 self.document.subarea_containment_override = Some(boundary);
                 self.begin_floor_exposure_carve_dimensioning(slot, ref_idx, undo);
+                self.capture_snap_action(SnapAction::Subarea {
+                    flow: SubareaFlow::FloorExposure,
+                    points: world_points.to_vec(),
+                    pick: None,
+                });
             }
             // A straight edge-to-edge cut splits the whole building into two
             // candidate halves; pin both against the SAME whole-building boundary
@@ -345,8 +263,20 @@ impl AppController {
                     self.pinned_subarea_slot(&boundary, a),
                     self.pinned_subarea_slot(&boundary, b),
                 ]);
+                self.capture_snap_action_pending(
+                    SnapAction::Subarea {
+                        flow: SubareaFlow::FloorExposure,
+                        points: world_points.to_vec(),
+                        pick: None,
+                    },
+                    before,
+                    manip_plan::take_snap_decisions(),
+                );
             }
-            Err(e) => log::error!("floor exposure carve_or_cut: {}", e),
+            Err(e) => {
+                log::error!("floor exposure carve_or_cut: {}", e);
+                let _ = manip_plan::take_snap_decisions();
+            }
         }
     }
 
@@ -401,7 +331,10 @@ impl AppController {
             None
         };
         let Some(slot) = chosen else {
-            return; // tap outside both — cancel (pending cut already cleared)
+            // Tap outside both — cancel (pending cut already cleared); the
+            // stroke's snap tags describe geometry that no longer exists.
+            self.record_subarea_pick(SubareaFlow::FloorExposure, None);
+            return;
         };
         // Host the chosen half's dimensioning on the reference storey's outline
         // (the same storey + buffer the cut stroke set up — re-establish it in
@@ -419,6 +352,8 @@ impl AppController {
             self.document.subarea_containment_override = Some(boundary);
         }
         self.begin_floor_exposure_carve_dimensioning(slot, ref_idx, undo);
+        // The stroke's tags stay live: replay now re-runs stroke + pick.
+        self.record_subarea_pick(SubareaFlow::FloorExposure, Some((world_x, world_y)));
     }
 
     /// The whole-building floor-footprint union as a [`FloorPlan`] — the boundary
@@ -599,9 +534,9 @@ impl AppController {
                 .iter()
                 .enumerate()
                 // Only split storeys whose ring genuinely SUBDIVIDES a labellable
-                // (non-party) floor — party (NonHeatLoss) floors are auto-classified
-                // and hidden, so there's nothing to subdivide there. An interior
-                // carve and an edge-to-edge cut both pass (the cut's half-ring
+                // (non-InterStorey) floor — derived InterStorey floors are
+                // auto-classified and hidden, so there's nothing to subdivide
+                // there. An interior carve and an edge-to-edge cut both pass (the cut's half-ring
                 // shares the outline on three sides, so the whole-floor centroid
                 // sits on the cut edge — an intersection test, not a centroid test,
                 // is what catches it).
@@ -652,9 +587,10 @@ impl AppController {
                 s.floors
                     .regions
                     .iter()
-                    // Only the labellable (non-party) floors are shown/selectable.
+                    // Only the labellable (non-InterStorey) floors are
+                    // shown/selectable.
                     .filter(move |r| {
-                        ids.contains(&r.id) && r.exposure != FloorExposure::NonHeatLoss
+                        ids.contains(&r.id) && r.exposure != FloorExposure::InterStorey
                     })
                     .map(move |r| (idx, document::centroid_key(r.centroid())))
             })
@@ -675,11 +611,11 @@ impl AppController {
         let mut keys: HashSet<(usize, document::CentroidKey)> = HashSet::new();
         for (idx, storey) in record.data.storeys.iter().enumerate() {
             for region in &storey.floors.regions {
-                // Party (NonHeatLoss) floors aren't shown/labellable, so neither
-                // seed tool touches them. `All` = every labellable floor;
-                // `Remaining` = the still-`Unset` ones.
+                // Derived InterStorey floors aren't shown/labellable, so
+                // neither seed tool touches them. `All` = every labellable
+                // floor; `Remaining` = the still-`Unset` ones.
                 let take = match mode {
-                    SelectMode::All => region.exposure != FloorExposure::NonHeatLoss,
+                    SelectMode::All => region.exposure != FloorExposure::InterStorey,
                     SelectMode::Remaining => region.exposure == FloorExposure::Unset,
                     _ => false,
                 };
@@ -736,9 +672,11 @@ impl AppController {
                     .floors
                     .regions
                     .iter()
-                    // The view is a labelling worklist: party (NonHeatLoss) floors
-                    // are auto-classified and need no label, so they drop off.
-                    .filter(|r| r.exposure != FloorExposure::NonHeatLoss)
+                    // The view is a labelling worklist: derived InterStorey
+                    // floors are auto-classified and need no label, so they
+                    // drop off. Party (NonHeatLoss) floors stay visible — the
+                    // assessor paints them.
+                    .filter(|r| r.exposure != FloorExposure::InterStorey)
                     .map(|r| {
                         let ring: Vec<(f64, f64)> = {
                             let mut pts: Vec<(f64, f64)> =

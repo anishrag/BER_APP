@@ -50,7 +50,7 @@ impl AppController {
             },
             ChecklistItem {
                 label: "Wall exposures",
-                status: self.wall_exposure_status(),
+                status: self.ber_storey_status(document::wall_exposure_complete),
             },
             ChecklistItem {
                 label: "Floor exposures",
@@ -113,19 +113,20 @@ impl AppController {
     }
 
     /// Per-DWELLING roof gate: green ([`ChecklistStatus::AllStoreys`]) once EVERY
-    /// top-storey ceiling area — every non-party ceiling region, i.e. the ones
-    /// with sky / attic above that the roof step lets you group — has a roof
-    /// assigned over it ([`Roof::covers_on`]), red otherwise. Lenient on geometry:
-    /// whether the roof's eave drops short or overhangs doesn't matter, only that
-    /// something covers each area. A dwelling-level gate (the roof step runs at the
-    /// end of Mapping, after every storey).
+    /// ceiling region that has sky / attic above it — i.e. everything except a
+    /// `Party` ceiling (another dwelling above) and a derived `InterStorey` one
+    /// (our own storey above) — has a roof assigned over it
+    /// ([`Roof::covers_on`]), red otherwise. Lenient on geometry: whether the
+    /// roof's eave drops short or overhangs doesn't matter, only that something
+    /// covers each area. A dwelling-level gate (the roof step runs at the end
+    /// of Mapping, after every storey).
     fn roof_status(&self) -> ChecklistStatus {
         use ber_model::ber::structural::CeilingExposure;
         let Some(record) = self.current_record.as_ref() else {
             return ChecklistStatus::Incomplete;
         };
         let ber = &record.data;
-        // Every non-party ceiling region across the stack (a spot with sky/attic
+        // Every roofable ceiling region across the stack (a spot with sky/attic
         // above) paired with its owning storey.
         let regions: Vec<(usize, _)> = ber
             .storeys
@@ -135,7 +136,12 @@ impl AppController {
                 s.ceilings
                     .regions
                     .iter()
-                    .filter(|r| r.exposure != CeilingExposure::Party)
+                    .filter(|r| {
+                        !matches!(
+                            r.exposure,
+                            CeilingExposure::Party | CeilingExposure::InterStorey
+                        )
+                    })
                     .map(move |r| (idx, r.centroid()))
             })
             .collect();
@@ -182,41 +188,6 @@ impl AppController {
             .current_storey_idx
             .is_some_and(|i| i < storeys.len() && done(i))
         {
-            ChecklistStatus::ThisStorey
-        } else {
-            ChecklistStatus::Incomplete
-        }
-    }
-
-    /// "Wall exposures" completeness: for each storey, every PERIMETER wall fully
-    /// classified ([`StoreyDoc::exposure_complete`]) AND every derived RISER wall
-    /// classified (exposure ≠ `Unset`). Ceiling/floor-step risers default `Unset`
-    /// and the assessor must set each via the riser picker — an unclassified riser
-    /// is genuinely unclassified, so it keeps this step incomplete (which, via
-    /// [`mapping_complete`](Self::mapping_complete), also keeps the Mapping Review
-    /// button gated). Risers need the RESOLVED storey, so this pairs each
-    /// per-storey [`StoreyDoc`] with its resolved [`Storey`] — the reason it isn't
-    /// a plain [`checklist_status`](Self::checklist_status) closure.
-    fn wall_exposure_status(&self) -> ChecklistStatus {
-        let Some(record) = self.current_record.as_ref() else {
-            return ChecklistStatus::Incomplete;
-        };
-        let storeys = &record.data.storeys;
-        let n = self.document.storeys.len().min(storeys.len());
-        if n == 0 {
-            return ChecklistStatus::Incomplete;
-        }
-        let done = |i: usize| {
-            let sd = &self.document.storeys[i];
-            sd.exposure_complete()
-                && sd
-                    .riser_walls(&storeys[i])
-                    .iter()
-                    .all(|r| r.exposure != WallExposure::Unset)
-        };
-        if (0..n).all(done) {
-            ChecklistStatus::AllStoreys
-        } else if self.current_storey_idx.is_some_and(|i| i < n && done(i)) {
             ChecklistStatus::ThisStorey
         } else {
             ChecklistStatus::Incomplete

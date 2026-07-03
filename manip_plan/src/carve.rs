@@ -869,10 +869,20 @@ fn snap_walls(outline: &[Point2f32], pts: &[Point2f32], tol: f32) -> Vec<Point2f
         }
     });
     // For each sub-area edge, find the nearest parallel, overlapping reference
-    // wall within `tol`; record a coordinate remap.
+    // wall within `tol`; propose leveling the EDGE onto it.
     let n = pts.len();
-    let mut remap_x: Vec<(f32, f32)> = Vec::new();
-    let mut remap_y: Vec<(f32, f32)> = Vec::new();
+    /// One drawn wall edge leveling onto one parallel reference line — the
+    /// granularity of a leveling DECISION: the edge's two endpoints (and, under
+    /// Apply, the ring's other vertices sharing the drawn coordinate) move or
+    /// revert TOGETHER. Per-vertex recording would both spam tags and let a
+    /// Skip on one endpoint split the wall.
+    struct Leveling {
+        edge: usize,
+        vertical: bool,
+        drawn: f32,
+        target: f32,
+    }
+    let mut levelings: Vec<Leveling> = Vec::new();
     // A drawn wall levels onto a parallel boundary wall it runs NEAR, even when
     // their spans don't overlap but sit within `tol` APART along the span — so a
     // living area drawn beside (not straddling) a house wall lands level with it,
@@ -896,7 +906,12 @@ fn snap_walls(outline: &[Point2f32], pts: &[Point2f32], tol: f32) -> Vec<Point2f
                 .min_by(|u, v| (u.0 - a.x).abs().total_cmp(&(v.0 - a.x).abs()))
             {
                 if (ox - a.x).abs() > eps {
-                    remap_x.push((a.x, *ox));
+                    levelings.push(Leveling {
+                        edge: i,
+                        vertical: true,
+                        drawn: a.x,
+                        target: *ox,
+                    });
                 }
             }
         } else if (a.y - b.y).abs() < eps {
@@ -907,23 +922,70 @@ fn snap_walls(outline: &[Point2f32], pts: &[Point2f32], tol: f32) -> Vec<Point2f
                 .min_by(|u, v| (u.0 - a.y).abs().total_cmp(&(v.0 - a.y).abs()))
             {
                 if (oy - a.y).abs() > eps {
-                    remap_y.push((a.y, *oy));
+                    levelings.push(Leveling {
+                        edge: i,
+                        vertical: false,
+                        drawn: a.y,
+                        target: *oy,
+                    });
                 }
             }
         }
     }
+    // ONE elective decision per leveling (per wall edge → target line), keyed
+    // at the edge MIDPOINT's drawn position — deterministic across replays, so
+    // the forced-choice policy finds it. A sub-[`snap::NOOP_SNAP_EPS_M`] move
+    // is invisible: applied silently, no decision recorded.
+    let applied: Vec<bool> = levelings
+        .iter()
+        .map(|lv| {
+            let a = pts[lv.edge];
+            let b = pts[(lv.edge + 1) % n];
+            let from = Point2f32::new((a.x + b.x) * 0.5, (a.y + b.y) * 0.5);
+            let to = if lv.vertical {
+                Point2f32::new(lv.target, from.y)
+            } else {
+                Point2f32::new(from.x, lv.target)
+            };
+            let dist = (lv.target - lv.drawn).abs();
+            dist < snap::NOOP_SNAP_EPS_M
+                || snap::record_grouped_choice(snap::SnapKind::ToParallelWall, from, to, dist)
+        })
+        .collect();
+    // Apply per VERTEX and AXIS. A vertex on a leveled edge follows ITS edge's
+    // decision (both endpoints move or revert together — a Skip must never
+    // split the wall); a vertex on no leveled edge follows any APPLIED leveling
+    // of its shared drawn coordinate (the ring-wide coordinate remap that keeps
+    // collinear vertices aligned and the polygon orthogonal).
     let mut out = pts.to_vec();
-    for p in &mut out {
-        let drawn = *p;
-        if let Some((_, to)) = remap_x.iter().find(|(from, _)| (p.x - from).abs() < eps) {
-            p.x = *to;
-        }
-        if let Some((_, to)) = remap_y.iter().find(|(from, _)| (p.y - from).abs() < eps) {
-            p.y = *to;
-        }
-        // Elective: this vertex moved onto a parallel boundary wall.
-        if *p != drawn {
-            *p = snap::elective_snap(snap::SnapKind::ToParallelWall, drawn, *p, true);
+    for k in 0..n {
+        for vertical in [true, false] {
+            let coord = if vertical { pts[k].x } else { pts[k].y };
+            let mut incident = levelings
+                .iter()
+                .zip(&applied)
+                .filter(|(lv, _)| {
+                    lv.vertical == vertical && (lv.edge == k || (lv.edge + 1) % n == k)
+                })
+                .peekable();
+            let new_coord = if incident.peek().is_some() {
+                incident.find(|(_, ap)| **ap).map(|(lv, _)| lv.target)
+            } else {
+                levelings
+                    .iter()
+                    .zip(&applied)
+                    .find(|(lv, ap)| {
+                        **ap && lv.vertical == vertical && (lv.drawn - coord).abs() < eps
+                    })
+                    .map(|(lv, _)| lv.target)
+            };
+            if let Some(c) = new_coord {
+                if vertical {
+                    out[k].x = c;
+                } else {
+                    out[k].y = c;
+                }
+            }
         }
     }
 
@@ -2872,6 +2934,48 @@ mod alignment_snap_tests {
             vec![crate::ParameterAxis::Y],
             "the phase-levelled wall fixes X"
         );
+    }
+
+    /// A wall EDGE leveling onto a parallel outline wall is ONE decision (keyed
+    /// at the edge midpoint's drawn position), not one per endpoint — and a
+    /// forced Skip reverts BOTH endpoints together (per-endpoint skipping would
+    /// split the wall). Different edges leveling onto different lines stay
+    /// independent.
+    #[test]
+    fn wall_edge_leveling_is_one_decision_and_skip_reverts_both_endpoints() {
+        let _ = snap::take_snap_decisions();
+        let outline = vec![p(0., 0.), p(10., 0.), p(10., 10.), p(0., 10.)];
+        // A carved rect: BOTTOM edge drawn 0.1 above the outline's bottom wall,
+        // LEFT edge 0.15 right of the left wall; top/right well clear.
+        let pts = vec![p(0.15, 0.1), p(4.0, 0.1), p(4.0, 3.0), p(0.15, 3.0)];
+        let out = snap_walls(&outline, &pts, 0.2);
+        assert_eq!(out[0], p(0.0, 0.0), "corner vertex leveled on both axes");
+        assert_eq!(out[1], p(4.0, 0.0), "bottom leveled");
+        assert_eq!(out[2], p(4.0, 3.0), "untouched");
+        assert_eq!(out[3], p(0.0, 3.0), "left leveled");
+        let decisions = snap::take_snap_decisions();
+        assert_eq!(
+            decisions.len(),
+            2,
+            "one decision per wall EDGE, not per endpoint: {decisions:?}"
+        );
+        assert!(decisions
+            .iter()
+            .all(|d| d.skippable && d.candidates[0].kind == snap::SnapKind::ToParallelWall));
+        // The bottom edge's decision sits at the edge MIDPOINT's drawn position.
+        let bottom = decisions
+            .iter()
+            .find(|d| (d.from.y - 0.1).abs() < 1e-6 && (d.from.x - 2.075).abs() < 1e-3)
+            .expect("bottom-edge decision keyed at the edge midpoint");
+        // Skip the bottom leveling: BOTH bottom endpoints revert together while
+        // the left edge's leveling still applies.
+        snap::set_snap_policy(vec![(bottom.from, snap::SnapChoice::Skip)]);
+        let out2 = snap_walls(&outline, &pts, 0.2);
+        snap::clear_snap_policy();
+        let _ = snap::take_snap_decisions();
+        assert_eq!(out2[0], p(0.0, 0.1), "x still leveled, y reverted");
+        assert_eq!(out2[1], p(4.0, 0.1), "the OTHER endpoint reverted too");
+        assert_eq!(out2[3], p(0.0, 3.0), "the left edge stays leveled");
     }
 }
 

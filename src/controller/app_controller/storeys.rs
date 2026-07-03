@@ -142,47 +142,7 @@ impl AppController {
         self.mark_dirty()?;
         // Clear only TRANSIENT state — none of it carries across a switch. The
         // storey's SHAPES + dimensioning (above) are preserved.
-        self.view = ViewTransform::default();
-        self.document.edit_state = EditState::default();
-        self.document.pending_arc = None;
-        self.review = None;
-        self.pending_cut = None;
-        self.pending_redraw = None;
-        // The new-storey flow (thickness/method/browse) belongs to the storey
-        // it was opened on — never carried across a switch. (The inherited-
-        // level SEED set stays: it's consumed at each storey's finalisation.)
-        self.pending_new_storey = None;
-        // Pending phase/step cuts hold the OUTGOING storey's geometry — a pick
-        // after the switch would graft it onto the new storey.
-        self.pending_phase_cut = None;
-        self.pending_step_cut = None;
-        // Same for a half-finished ceiling-step line (its coordinate is in the
-        // outgoing storey's space); the mode resets like the other area tools.
-        self.pending_ceiling_step = None;
-        self.ceiling_step_mode = false;
-        // And a half-finished roof point / ridge (same coordinate space
-        // argument).
-        self.pending_roof_point = None;
-        self.pending_roof_ridge = None;
-        self.pending_roof_rect = None;
-        self.ceiling_point_mode = false;
-        self.exit_openings_mode();
-        self.edit_drag_prompt = None;
-        self.vertex_drop_prompt = None;
-        self.living_area_mode = false;
-        self.exposure_mode = false;
-        self.phase_mode = false;
-        self.step_mode = false;
-        self.selected_exposure_wall = None;
-        self.exposure_sel = None;
-        self.exposure_drag = None;
-        self.selected_riser = None;
-        // Structure-phase selection holds the OUTGOING storey's region ids —
-        // drop it (and any pending carve) so nothing carries onto the new storey.
-        self.structure_selected.clear();
-        self.pending_structure_carves.clear();
-        self.pending_structure_cut = None;
-        self.structure_split_kind = None;
+        self.reset_transient_editing_state();
         match target {
             Some(i) => {
                 // Resume on the outline (canonical entry); load its slot into the
@@ -277,6 +237,149 @@ impl AppController {
         }
         self.history.clear();
         self.redo.clear();
+        Ok(())
+    }
+
+    /// Reset every TRANSIENT editing/session state that must not carry across
+    /// a storey boundary — the shared tail of [`set_current_storey`] (leaving a
+    /// storey for another) and [`delete_current_storey`] (leaving it the hard
+    /// way). The storey's SHAPES + dimensioning are untouched.
+    ///
+    /// [`set_current_storey`]: AppController::set_current_storey
+    /// [`delete_current_storey`]: AppController::delete_current_storey
+    fn reset_transient_editing_state(&mut self) {
+        self.view = ViewTransform::default();
+        self.document.edit_state = EditState::default();
+        self.document.pending_arc = None;
+        self.review = None;
+        self.pending_cut = None;
+        self.pending_redraw = None;
+        // The new-storey flow (thickness/method/browse) belongs to the storey
+        // it was opened on — never carried across a switch. (The inherited-
+        // level SEED set stays: it's consumed at each storey's finalisation.)
+        self.pending_new_storey = None;
+        // Pending phase/step cuts hold the OUTGOING storey's geometry — a pick
+        // after the switch would graft it onto the new storey.
+        self.pending_phase_cut = None;
+        self.pending_step_cut = None;
+        // Same for a half-finished ceiling-step line (its coordinate is in the
+        // outgoing storey's space); the mode resets like the other area tools.
+        self.pending_ceiling_step = None;
+        self.ceiling_step_mode = false;
+        // And a half-finished roof point / ridge (same coordinate space
+        // argument).
+        self.pending_roof_point = None;
+        self.pending_roof_ridge = None;
+        self.pending_roof_rect = None;
+        self.ceiling_point_mode = false;
+        self.exit_openings_mode();
+        self.edit_drag_prompt = None;
+        self.vertex_drop_prompt = None;
+        self.living_area_mode = false;
+        self.exposure_mode = false;
+        self.phase_mode = false;
+        self.step_mode = false;
+        self.selected_exposure_wall = None;
+        self.exposure_sel = None;
+        self.exposure_drag = None;
+        self.selected_riser = None;
+        // Structure-phase selection holds the OUTGOING storey's region ids —
+        // drop it (and any pending carve) so nothing carries onto the new storey.
+        self.structure_selected.clear();
+        self.pending_structure_carves.clear();
+        self.pending_wall_inclusion = None;
+        self.pending_structure_cut = None;
+        self.structure_split_kind = None;
+        // A captured snap action's `before` snapshot is a whole-`Document`
+        // clone of the storey being left — clicking its stale tag after the
+        // boundary would restore that Document (with the OLD active storey,
+        // and after a delete the OLD storey count) against the new session
+        // state. Same per-editing-session scope as history/redo.
+        self.last_snap_action = None;
+    }
+
+    /// Delete the CURRENT storey — the "drew it badly, start again" path. Only
+    /// the TOP storey (last index, and never storey 0) can be deleted: removing
+    /// a mid-stack storey would re-index everything above it (session maps,
+    /// selection keys, floor thicknesses), and the bad-drawing case is always
+    /// the storey just added on top. The editor moves onto the storey below.
+    /// Not undoable via the editing history (the UI's confirm step is the
+    /// guard) — history/redo clear, consistent with add/switch.
+    pub fn delete_current_storey(&mut self) -> Result<(), String> {
+        let Some(record) = self.current_record.as_ref() else {
+            return Err("no BER loaded".into());
+        };
+        let Some(k) = self.current_storey_idx else {
+            return Err("no storey selected".into());
+        };
+        if k == 0 {
+            return Err("the ground storey can't be deleted".into());
+        }
+        if k + 1 != record.data.storeys.len() {
+            return Err("only the top storey can be deleted".into());
+        }
+        // Capture the doomed storey's RESOLVED footprint before it pops — the
+        // retraction below uses it to identify the carve rings this storey's
+        // creation pushed onto the below storey's `ceiling_splits`.
+        let doomed_fp = record.data.storeys[k].floors.footprint_ring();
+        // Drop every transient/in-flight state (the same set a storey SWITCH
+        // resets — none of it may carry onto the storey below). The doomed
+        // storey is never committed: its half-drawn state is the point.
+        self.reset_transient_editing_state();
+        // A pending roof area may hold the doomed storey's index — cleared here
+        // (delete-specific: a storey SWITCH keeps it, the roof tool spans
+        // storeys by design and records its own storey index).
+        self.pending_roof_area = None;
+        // Pop BOTH containers together (lock-step invariant — refresh_storey
+        // indexes them in parallel). The popped `Storey` carries its own
+        // per-storey data (floor thickness, regions) with it.
+        self.current_record.as_mut().unwrap().data.storeys.pop();
+        let removed = self.document.remove_last_storey();
+        debug_assert!(removed, "lock-step invariant: document had storey {k}");
+        // Drop the deleted storey's session state (keyed by its index — with
+        // the last index gone, no re-indexing is needed).
+        self.phase_regions.remove(&k);
+        self.step_regions.remove(&k);
+        self.ceiling_step_regions.remove(&k);
+        self.inherited_seed_pending.remove(&k);
+        self.floor_exposure_selected.retain(|(i, _)| *i != k);
+        self.roof_selected.retain(|(i, _)| *i != k);
+        self.ceiling_exposure_selected.retain(|(i, _)| *i != k);
+        // Move onto the storey below — same landing sequence as a switch:
+        // resume on its outline, lazily rebuild its session areas.
+        let target = k - 1;
+        self.current_storey_idx = Some(target);
+        self.document.set_active_storey(target);
+        self.document.active = ActiveShape::Outline;
+        self.document.load_active_into_buffer();
+        if !self.phase_regions.contains_key(&target) {
+            self.reconstruct_phase_regions_for(target);
+        }
+        if !self.step_regions.contains_key(&target) {
+            self.reconstruct_step_regions_for(target);
+        }
+        if !self.ceiling_step_regions.contains_key(&target) {
+            self.load_ceiling_step_regions_for(target);
+        }
+        self.compute_next_dimension_prompt();
+        self.history.clear();
+        self.redo.clear();
+        // Drop the LEGACY party-carve rings the deleted storey's creation
+        // pushed onto the below storey's `ceiling_splits` (pre-InterStorey
+        // records only — nothing pushes such rings any more), then recompose
+        // so the split ceiling merges back. Classification retraction is
+        // automatic: the commit's `derive_inter_storey` clear pass un-stamps
+        // `InterStorey` once no storey covers the surface.
+        if let Some(fp) = doomed_fp.as_deref() {
+            let below = &mut self.current_record.as_mut().unwrap().data.storeys[target];
+            if document::retract_legacy_party_rings(below, fp) {
+                self.recompose_ceilings(target);
+            }
+        }
+        // Re-derive the now-active storey eagerly, then leave the record dirty
+        // so the normal deferred path persists the shrunken storeys list.
+        self.commit_to_ber()?;
+        self.mark_dirty()?;
         Ok(())
     }
 
@@ -515,10 +618,10 @@ impl AppController {
                 }
             }
         }
-        // Floor/ceiling exposure auto-derivation, as a FINAL pass over every
-        // storey (it reads the neighbours' resolved footprints). `or_insert`
-        // keeps any manual override; the pass also STAMPS the derived values onto
-        // the resolved regions this same frame (derive-all then stamp-all).
+        // FINAL pass over every storey: stamp the assessor exposure maps onto
+        // the resolved regions, then run the cross-storey InterStorey
+        // derivation (it reads the neighbours' resolved geometry, so it must
+        // run after all per-storey resolves).
         self.derive_horizontal_exposure_all();
     }
 
@@ -652,49 +755,58 @@ impl AppController {
                 &self.document.storeys[idx],
             );
         }
-        // Floor/ceiling exposure auto-derivation runs as a FINAL pass, after
-        // every storey resolved — it reads the neighbours' resolved footprints (a
-        // ground floor → Ground, a top ceiling → ExposedRoof, fully-stacked
-        // surfaces → party). `or_insert` keeps any manual override, and the pass
-        // STAMPS the result straight onto the resolved regions this same frame
-        // (derive-all then stamp-all), so the gate settles in one commit.
+        // FINAL pass, after every storey resolved: stamp the assessor exposure
+        // maps onto the resolved regions, then run the cross-storey InterStorey
+        // derivation (it reads the neighbours' resolved geometry), so the gate
+        // settles in one commit.
         self.derive_horizontal_exposure_all();
     }
 
-    /// Auto-derive every storey's floor/ceiling exposure into its `StoreyDoc`
-    /// maps, THEN stamp the result onto the resolved regions in the SAME frame.
-    /// Each storey reads its neighbours' resolved footprints (ground floor →
-    /// Ground, top ceiling → ExposedRoof, fully stacked → party); `or_insert`
-    /// never clobbers a manual override. The two-pass shape (derive-all, then
-    /// stamp-all) is what makes a lower storey's Party ceiling re-stamp even
-    /// though `refresh_storey` only re-resolves the active storey.
+    /// Stamp every storey's assessor floor/ceiling exposure maps onto its
+    /// RESOLVED regions, then run the cross-storey `InterStorey` derivation —
+    /// the FINAL pipeline stage after every resolve (pipeline law: per-storey
+    /// resolve → stamp-all → `derive_inter_storey`, so the derivation always
+    /// wins on the junction surfaces it covers). The stamp-all pass is what
+    /// keeps a non-active/lower storey's marks current even though
+    /// `refresh_storey` only re-resolves the active storey; the derivation is
+    /// stateless, idempotent and self-retracting (its clear pass un-stamps
+    /// junctions that no longer exist).
+    ///
+    /// The derivation SPLITS walls into fresh-id, empty-`opes` pieces — AFTER
+    /// the per-storey resolve already ran its openings tail — so a matching
+    /// openings re-link ([`document::relink_openings_after_derive`]) runs per
+    /// storey afterward: each placement re-homes onto the containing split
+    /// piece via its durable anchor (seeded from the PRE-derivation walls when
+    /// missing) and every region's `opes` rebuilds. Without it, a wall the
+    /// derivation splits leaves its openings unlinked in every
+    /// post-materialize record (dead opening drag, empty `opes`, pruned on
+    /// reload).
     fn derive_horizontal_exposure_all(&mut self) {
-        let Some(record) = self.current_record.as_ref() else {
-            return;
-        };
-        let n = record.data.storeys.len().min(self.document.storeys.len());
-        // Pass 1 — DERIVE every storey's doc maps. Reads the neighbours' resolved
-        // footprints from `current_record` (immutable) while writing each
-        // `StoreyDoc`'s exposure (mutable) — disjoint fields, so split the borrow.
-        {
-            let ber = &record.data;
-            let storeys = &mut self.document.storeys;
-            for idx in 0..n {
-                document::auto_derive_horizontal_exposure(&mut storeys[idx], ber, idx, n);
-            }
-        }
-        // Pass 2 — STAMP the just-derived maps onto every storey's RESOLVED
-        // regions this frame. The resolve's own stamp ran from the PRE-derive
-        // maps, so without this the Store-A regions would lag a cycle (the
-        // "Surfaces" gate would stay red until an unrelated edit), and a
-        // non-active/lower storey would never re-stamp at all.
         let Some(record) = self.current_record.as_mut() else {
             return;
         };
+        let n = record.data.storeys.len().min(self.document.storeys.len());
         for idx in 0..n {
             document::stamp_horizontal_exposure(
                 &self.document.storeys[idx],
                 &mut record.data.storeys[idx],
+            );
+        }
+        // The pre-derivation wall sets — the ids placements still reference —
+        // for anchor seeding in the openings re-link below.
+        let previous_walls: Vec<ber_model::ber::structural::WallRegions> = record
+            .data
+            .storeys
+            .iter()
+            .take(n)
+            .map(|s| s.walls.clone())
+            .collect();
+        ber_model::ber::structural::derive_inter_storey(&mut record.data);
+        for idx in 0..n {
+            document::relink_openings_after_derive(
+                &self.document.storeys[idx],
+                &mut record.data.storeys[idx],
+                &previous_walls[idx],
             );
         }
     }

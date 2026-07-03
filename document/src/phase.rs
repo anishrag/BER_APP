@@ -369,24 +369,56 @@ pub fn inherited_phase_regions(ber: &Ber, below_idx: usize) -> Vec<PhaseRegion> 
 /// sub-divisions onto the storey above (which has no step) — splitting its
 /// floor where the phase is actually uniform. `Unassigned` (the implicit
 /// remainder) is skipped. Empty when nothing is tagged.
+///
+/// The zone derivation itself is [`Ber::storey_phase_zones`] (the data-model
+/// home — the suggestion engine reads the same zones); this fn just projects
+/// its f64 rings into the session `PhaseRegion` (f32) shape.
 pub fn phase_regions_from_floors(ber: &Ber, idx: usize) -> Vec<PhaseRegion> {
-    let Some(storey) = ber.storeys.get(idx) else {
-        return Vec::new();
-    };
-    storey
-        .floors
-        .phase_zone_rings(|cid| {
-            ber.floor_construction(cid)
-                .map(|c| c.base.construction_phase.clone())
-                .unwrap_or(ConstructionPhase::Unassigned)
-        })
+    ber.storey_phase_zones(idx)
         .into_iter()
-        .filter(|(phase, _)| *phase != ConstructionPhase::Unassigned)
         .map(|(phase, ring)| PhaseRegion {
             polygon: ring.iter().copied().map(to_f32).collect(),
             phase,
         })
         .collect()
+}
+
+/// A segment counts as lying ALONG the outline when its endpoints AND midpoint
+/// all sit within this of the ring (metres). 1 cm — far above the float noise
+/// of the resolve partition (whose zone edges coincide with the outline
+/// exactly), far below any real interior division's clearance.
+const ON_OUTLINE_EPS_M: f32 = 0.01;
+
+/// The boundary segments of storey `idx`'s phase zones that cross the
+/// footprint INTERIOR — the snap references for a NEW upper storey's outline
+/// stroke, so a wall traced beside the storey-below's construction-phase
+/// division lands exactly ON it (and the inherited phase seed splits the new
+/// floor along the real line, not a freehand offset).
+///
+/// Zones are rebuilt from the persisted floors ([`phase_regions_from_floors`]);
+/// each zone ring contributes its consecutive vertex pairs (closing edge
+/// included). Segments running ALONG `outline` (the storey's footprint ring)
+/// are dropped — the outline carve already snaps those, and double targets
+/// would fight. "Along" tests the endpoints AND the midpoint: a partition's
+/// interior division runs wall to wall, so its ENDS touch the outline while
+/// its middle crosses the interior — the midpoint keeps it alive. Empty when
+/// nothing below is tagged.
+pub fn phase_snap_segments(ber: &Ber, idx: usize, outline: &[Point2f32]) -> Vec<[Point2f32; 2]> {
+    let on_outline = |p: Point2f32| manip_plan::dist_to_ring(outline, p) <= ON_OUTLINE_EPS_M;
+    let mut segments: Vec<[Point2f32; 2]> = Vec::new();
+    for region in phase_regions_from_floors(ber, idx) {
+        let ring = &region.polygon;
+        let n = ring.len();
+        for i in 0..n {
+            let (a, b) = (ring[i], ring[(i + 1) % n]);
+            let mid = Point2f32::new((a.x + b.x) * 0.5, (a.y + b.y) * 0.5);
+            if on_outline(a) && on_outline(b) && on_outline(mid) {
+                continue;
+            }
+            segments.push([a, b]);
+        }
+    }
+    segments
 }
 
 /// True when storey `idx`'s construction phase is fully assigned: every resolved

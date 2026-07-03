@@ -42,19 +42,20 @@ pub use ceiling_step::{
 pub use debug::debug_dump_storey;
 /// Derive full per-wall exposure coverage — the shell's `commit_to_ber` uses it.
 pub use exposure::{
-    auto_derive_horizontal_exposure, ceiling_exposure_complete, floor_exposure_complete, range_at,
-    riser_key, surfaces_exposure_complete, wall_coverage, RiserKey, RiserKind, RiserWall,
+    ceiling_exposure_complete, floor_exposure_complete, purge_shadowed_exposure_entries, range_at,
+    retract_legacy_party_rings, riser_key, surfaces_exposure_complete, wall_coverage,
+    wall_exposure_complete, RiserKey, RiserKind, RiserWall,
 };
 pub use phase::{
     centroid_key, construction_phase_complete, inherited_phase_regions, phase_regions_from_floors,
-    ring_centroid_key, stamp_ceiling_constructions, stamp_ceiling_phases,
+    phase_snap_segments, ring_centroid_key, stamp_ceiling_constructions, stamp_ceiling_phases,
     stamp_floor_constructions, stamp_wall_constructions, stamp_wall_phases, CentroidKey,
     PhaseRegion,
 };
 pub use position::{PositionOption, PositionPrompt, PositionPromptKind};
 pub use resolve::{
-    ensure_storey_constructions, opening_wall_anchor, reseed_wall_anchors_on_load, resolve_storey,
-    resolve_wall_anchor, stamp_horizontal_exposure,
+    ensure_storey_constructions, opening_wall_anchor, relink_openings_after_derive,
+    reseed_wall_anchors_on_load, resolve_storey, resolve_wall_anchor, stamp_horizontal_exposure,
 };
 pub use step::{inherited_step_regions, step_regions_from_floors, StepRegion};
 pub use windows::windows_complete;
@@ -542,6 +543,22 @@ impl Document {
         self.active_storey = self.storeys.len() - 1;
         self.active_storey
     }
+
+    /// Remove the LAST storey (the "bad drawing — start again" path). Refuses
+    /// (returns `false`) when only one storey remains, preserving the
+    /// never-empty invariant `Deref` relies on. `active_storey` is clamped
+    /// back into range, so if the popped storey was active the one below
+    /// becomes active.
+    pub fn remove_last_storey(&mut self) -> bool {
+        if self.storeys.len() <= 1 {
+            return false;
+        }
+        self.storeys.pop();
+        if self.active_storey >= self.storeys.len() {
+            self.active_storey = self.storeys.len() - 1;
+        }
+        true
+    }
 }
 
 impl StoreyDoc {
@@ -643,6 +660,20 @@ impl StoreyDoc {
         Ok((boundary, outcome))
     }
 
+    /// Classify a carved region's edges against THIS storey's footprint (the
+    /// outline) and return the AMBIGUOUS ones: the edges with house area on the
+    /// other side — strictly interior to the outline — where including the wall
+    /// along the edge in a selection is a judgement call the shell must ask the
+    /// assessor about. Edges lying ON the outline are the storey's true exterior
+    /// boundary (nothing beyond them), so the walls there are included
+    /// automatically and are NOT returned. Multi-storey nuances are deliberately
+    /// out of scope: this storey's own footprint is the test. Delegates the
+    /// per-edge midpoint classification to [`FloorPlan::interior_cut_edges`].
+    pub fn ambiguous_carve_edges(&self, ring: &[Point2f64]) -> Vec<[Point2f64; 2]> {
+        let ring32: Vec<Point2f32> = ring.iter().map(|p| domain::points::to_f32(*p)).collect();
+        self.outline.floor_plan.interior_cut_edges(&ring32)
+    }
+
     /// New storey outline via the living-area carve: trace `prev_ring` (the
     /// previous storey's footprint, in metres) as the reference, follow it where
     /// the `stroke` hugs it and build fresh walls where it diverges —
@@ -650,7 +681,13 @@ impl StoreyDoc {
     /// rather than clamped in. The carved plan is adopted into the live buffer
     /// with the metre scale inherited and every shared wall pinned
     /// ([`FloorPlan::params_pinned_to_outline`]) so it isn't re-prompted — only
-    /// the genuinely-new walls remain to dimension. Returns
+    /// the genuinely-new walls remain to dimension. `ref_walls` are the extra
+    /// REFERENCE segments the caller pre-snapped `stroke` onto besides the
+    /// outline (the storey-below's construction-phase lines): a snapped wall is
+    /// a known wall, so a wall lying on one is pinned pre-known exactly like a
+    /// wall on the previous outline. It must be the SAME set the stroke was
+    /// pre-snapped onto, so the pin matches the snap (a declined snap leaves the
+    /// wall off the line → not pinned → its dimension question stays). Returns
     /// `(pinned, active)` parameter counts for the shell's logging. On error the
     /// buffer is untouched.
     pub fn carve_outline_from_previous(
@@ -658,6 +695,7 @@ impl StoreyDoc {
         stroke: &[Point2f32],
         prev_ring: &[Point2f32],
         tuning: &SubareaTuning,
+        ref_walls: &[[Point2f32; 2]],
     ) -> Result<(usize, usize), String> {
         let prev_plan = FloorPlan::from_clean_ring(prev_ring)
             .map_err(|e| format!("Failed to build reference outline: {:?}", e))?;
@@ -678,7 +716,8 @@ impl StoreyDoc {
         self.dimensioning = DimensionState::default();
         self.dimensioning.scale_set = true;
         self.floor_plan = new_plan;
-        self.dimensioning.known_params = prev_plan.params_pinned_to_outline(&self.floor_plan, &[]);
+        self.dimensioning.known_params =
+            prev_plan.params_pinned_to_outline(&self.floor_plan, ref_walls);
         let active = self.floor_plan.all_active_params();
         Ok((self.dimensioning.known_params.len(), active.len()))
     }
@@ -842,6 +881,53 @@ mod tests {
         );
         // no pieces at all → None
         assert!(pick_piece_for_stroke(vec![], &stroke).is_none());
+    }
+
+    /// `carve_outline_from_previous` pins a wall lying on a REFERENCE segment
+    /// (a storey-below phase line the caller pre-snapped the stroke onto)
+    /// pre-known, exactly like a wall on the previous outline — and without
+    /// the reference the same wall stays unpinned, so its dimension question
+    /// remains.
+    #[test]
+    fn carve_outline_pins_walls_on_reference_phase_lines() {
+        let prev_ring = [p(0., 0.), p(10., 0.), p(10., 10.), p(0., 10.)];
+        // Pre-snapped stroke: the right wall lies exactly ON the phase line
+        // x=5; the other three walls hug the previous outline.
+        let stroke = vec![
+            p(0.2, 0.2),
+            p(5., 0.2),
+            p(5., 9.8),
+            p(0.2, 9.8),
+            p(0.3, 0.3),
+        ];
+        let phase_line = [[p(5., 0.), p(5., 10.)]];
+        let tuning = SubareaTuning::default();
+
+        // WITHOUT the reference: the x=5 wall's coordinate is unknown.
+        let mut doc = StoreyDoc::default();
+        let (pinned, active) = doc
+            .carve_outline_from_previous(&stroke, &prev_ring, &tuning, &[])
+            .expect("carve applies");
+        assert!(
+            pinned < active,
+            "the phase-line wall is not pre-known without the reference \
+             (pinned {pinned} of {active})"
+        );
+
+        // WITH the reference (the SAME set the stroke was pre-snapped onto):
+        // every wall coordinate is known — nothing left to dimension.
+        let mut doc = StoreyDoc::default();
+        let (pinned, active) = doc
+            .carve_outline_from_previous(&stroke, &prev_ring, &tuning, &phase_line)
+            .expect("carve applies");
+        assert_eq!(
+            pinned, active,
+            "outline + phase line pin every wall pre-known"
+        );
+        assert_eq!(
+            doc.dimensioning.known_params,
+            doc.floor_plan.all_active_params()
+        );
     }
 
     /// `adopt_finalised_outline` lands the ring as a FINALISED outline — the

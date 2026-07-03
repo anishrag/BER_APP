@@ -13,8 +13,9 @@
 
 use ber_model::ber::common::ConstructionPhase;
 use ber_model::ber::structural::{
-    CeilingConstructionType, ConstructionLayer, ConstructionMakeup, ConstructionType,
-    FloorConstructionType, SurfaceCounts, SurfaceExposure, WallConstructionType,
+    CeilingConstructionType, CeilingExposure, ConstructionLayer, ConstructionMakeup,
+    ConstructionType, FloorConstructionType, FloorExposure, SurfaceCounts, SurfaceExposure,
+    WallConstructionType, WallExposure,
 };
 
 use super::SketchEvent;
@@ -342,13 +343,30 @@ pub(crate) fn group_editor_ui<F: FnMut(UiEvent)>(
     // EXPOSURE dropdown — the boundary condition shared by the group's surfaces,
     // mirroring the phase dropdown. When the group is LOCKED (a face-partitioned
     // wall, whose exposure is owned per-2-D-region by the wall partition tool),
-    // it's shown disabled with a hint rather than as an editable control.
+    // it's shown disabled with a hint rather than as an editable control. A
+    // derived Inter-storey group is likewise READ-ONLY: `derive_inter_storey`
+    // owns that classification (re-stamped on every re-resolve), so offering
+    // the dropdown would only invite writes the pipeline overrides.
+    let inter_storey = matches!(
+        g.exposure,
+        SurfaceExposure::Wall(WallExposure::InterStorey)
+            | SurfaceExposure::Floor(FloorExposure::InterStorey)
+            | SurfaceExposure::Ceiling(CeilingExposure::InterStorey)
+    );
     if g.exposure_locked {
         ui.add_enabled(
             false,
             egui::Button::new(egui::RichText::new(g.exposure.label()).size(EDITOR_FONT)),
         )
         .on_disabled_hover_text("Exposure is per-region — set it in the wall partition tool.");
+    } else if inter_storey {
+        ui.add_enabled(
+            false,
+            egui::Button::new(egui::RichText::new(g.exposure.label()).size(EDITOR_FONT)),
+        )
+        .on_disabled_hover_text(
+            "Backed by another storey of this dwelling — classified automatically.",
+        );
     } else {
         ui.add_enabled_ui(enabled, |ui| {
             egui::ComboBox::from_id_salt(("structure_exposure", group_index))

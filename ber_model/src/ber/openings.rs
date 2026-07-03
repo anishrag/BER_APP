@@ -188,9 +188,20 @@ fn wall_length(storey: &Storey, wall_id: ItemId) -> Option<f32> {
 /// projected point from that wall's `exterior[0]`. Operates on the resolved
 /// storey's walls (so it returns a real `wall_id`). `(wall_id, along_m, len_m)`
 /// or `None` if no wall base edge is within `tol`.
+///
+/// Derived `InterStorey` pieces (storey junctions buried behind a neighbour
+/// storey — `derive_inter_storey`'s stamp) are SKIPPED: a new opening tap must
+/// never home onto a buried piece. On a derivation-split wall the tap lands on
+/// the exposed remainder (its base runs along the same plan segment at the cut
+/// height); a FULLY buried wall offers no tap target at all — an opening
+/// through it would open into the dwelling's own neighbouring storey, a
+/// modelling error, so the tap is refused rather than mis-hosted.
 pub fn pick_wall_along(storey: &Storey, wx: f64, wy: f64, tol: f64) -> Option<(ItemId, f32, f32)> {
     let mut best: Option<(ItemId, f32, f32, f64)> = None;
     for r in &storey.walls.regions {
+        if r.exposure == super::structural::WallExposure::InterStorey {
+            continue; // buried behind a neighbour storey — never a tap target
+        }
         let Some((origin, (ux, uy), len, _)) = r.base_frame() else {
             continue;
         };
@@ -848,7 +859,9 @@ fn project_along(units: &[PackUnit], len: f32, g: f32) -> Option<Vec<f32>> {
 
 /// Space the wall's openings so none overlap as 2D rectangles (along × height).
 /// See [`redistribute_wall_openings_pinned`]; this is the no-pin entry point.
-pub(crate) fn redistribute_wall_openings(
+/// Public: the document relink's buried-piece NUDGE redistributes each
+/// affected host after moving an opening clear of an inter-storey band.
+pub fn redistribute_wall_openings(
     storey: &mut Storey,
     wall_id: ItemId,
 ) -> Result<(), OpeningError> {

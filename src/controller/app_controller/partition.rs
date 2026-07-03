@@ -28,27 +28,39 @@ const SIMPLIFY_TOL_M: f32 = 0.1;
 const SNAP_EPS_M: f32 = 0.15;
 
 /// A cut mid-dimensioning: its two endpoints in wall-local coords (snapped
-/// coordinates already filled) plus an ordered queue of the coordinate slots
-/// still awaiting a typed dimension. A slot is the drawn value(s) awaiting a
-/// dimension; once the queue empties the cut commits.
+/// coordinates already filled) plus the full snap picture — which coordinates
+/// still await a typed dimension and which were silently snapped (so the
+/// overlay can tag them and "Don't snap" can revert them to the drawn values).
+/// Once nothing is free the cut commits.
 ///
-/// Axis-aligned cuts collapse to ONE shared slot: a near-vertical cut with both
-/// x's free asks a single "distance along" applied to both endpoints; a
-/// near-horizontal cut with both y's free asks a single "height" applied to
-/// both. Genuinely diagonal cuts keep the per-endpoint slots. Slot order is
-/// shared-axis first, then a.x, a.y, b.x, b.y.
+/// The free-slot QUEUE is derived on demand ([`queue`](Self::queue)) from
+/// `free_flags` + the DRAWN coordinates rather than stored, so a coordinate
+/// freed by an un-snap simply rejoins it. Axis-aligned cuts collapse to ONE
+/// shared slot: a near-vertical cut with both x's free asks a single "distance
+/// along" applied to both endpoints; a near-horizontal cut with both y's free
+/// asks a single "height" applied to both. Genuinely diagonal cuts keep the
+/// per-endpoint slots. Slot order is shared-axis first, then a.x, a.y, b.x,
+/// b.y. Flag/index order throughout is `[a.x, a.y, b.x, b.y]`.
 #[derive(Debug, Clone, PartialEq)]
 pub(super) struct PendingCut {
     pub a: Point2f32,
     pub b: Point2f32,
-    /// Coordinate slots still awaiting a typed dimension, head = next.
-    pub free: Vec<FreeSlot>,
+    /// The RDP endpoints as DRAWN, before `snap_on_face` — the un-snap targets.
+    pub drawn_a: Point2f32,
+    pub drawn_b: Point2f32,
+    /// Which coordinates are awaiting a dimension (a.x, a.y, b.x, b.y). The
+    /// free-slot queue is DERIVED from these + the drawn coords (shared-slot
+    /// collapse), so a freed axis can rejoin it after an un-snap.
+    pub free_flags: [bool; 4],
+    /// Which coordinates were SNAPPED by `snap_on_face` and not yet un-snapped
+    /// (a.x, a.y, b.x, b.y) — drives the tags. Typed/skipped axes are neither
+    /// free nor snapped.
+    pub snapped: [bool; 4],
 }
 
 impl PendingCut {
-    /// Build the free-slot queue for a freshly snapped cut, collapsing an
-    /// axis-aligned cut whose shared coordinate is free on both ends to one
-    /// shared slot.
+    /// Build the free-slot queue for a cut, collapsing an axis-aligned cut
+    /// whose shared coordinate is free on both ends to one shared slot.
     fn slots_for(a: Point2f32, b: Point2f32, snaps: [bool; 4]) -> Vec<FreeSlot> {
         let [a_x_free, a_y_free, b_x_free, b_y_free] = snaps;
         let mut free = Vec::new();
@@ -90,10 +102,118 @@ impl PendingCut {
         free
     }
 
+    /// The free-slot queue, derived from `free_flags` + the DRAWN coordinates.
+    /// The drawn coords drive the shared-slot collapse test: at build time a
+    /// free axis's current coordinate IS its drawn one (snap left it
+    /// untouched), so this matches building the queue once at stroke end — and
+    /// because the drawn coords never change, typing answers can't reshuffle
+    /// the remaining slots.
+    fn queue(&self) -> Vec<FreeSlot> {
+        Self::slots_for(self.drawn_a, self.drawn_b, self.free_flags)
+    }
+
+    /// Mark `slot` resolved (typed or skipped): clear its free flag(s) — a
+    /// shared slot clears the axis on BOTH endpoints.
+    fn resolve(&mut self, slot: FreeSlot) {
+        match slot {
+            FreeSlot::SharedX => {
+                self.free_flags[0] = false;
+                self.free_flags[2] = false;
+            }
+            FreeSlot::SharedY => {
+                self.free_flags[1] = false;
+                self.free_flags[3] = false;
+            }
+            FreeSlot::Ax => self.free_flags[0] = false,
+            FreeSlot::Ay => self.free_flags[1] = false,
+            FreeSlot::Bx => self.free_flags[2] = false,
+            FreeSlot::By => self.free_flags[3] = false,
+        }
+    }
+
+    /// Revert the chosen end's SNAPPED coordinates to the drawn values,
+    /// freeing them for dimensioning again. Typed/skipped axes stay put.
+    /// Returns whether anything changed.
+    fn unsnap_end(&mut self, end_b: bool) -> bool {
+        let (ix, iy) = if end_b { (2, 3) } else { (0, 1) };
+        let drawn = if end_b { self.drawn_b } else { self.drawn_a };
+        let mut changed = false;
+        if self.snapped[ix] {
+            if end_b {
+                self.b.x = drawn.x;
+            } else {
+                self.a.x = drawn.x;
+            }
+            self.free_flags[ix] = true;
+            self.snapped[ix] = false;
+            changed = true;
+        }
+        if self.snapped[iy] {
+            if end_b {
+                self.b.y = drawn.y;
+            } else {
+                self.a.y = drawn.y;
+            }
+            self.free_flags[iy] = true;
+            self.snapped[iy] = false;
+            changed = true;
+        }
+        changed
+    }
+
     /// Is any coordinate still awaiting a typed dimension?
     fn any_free(&self) -> bool {
-        !self.free.is_empty()
+        self.free_flags.iter().any(|&f| f)
     }
+}
+
+/// The last INSTANTLY-committed cut (both endpoints fully snapped at stroke
+/// end, so it committed with no interaction): kept so its snap tags can still
+/// be shown and un-snapped. `hlen` is the history length BEFORE the commit
+/// (its undo entry sits at index `hlen`); un-snap pops + restores that entry,
+/// then reopens the cut as pending with the tapped end's axes freed. Valid
+/// only while `history.len() == hlen + 1` (nothing else has happened since);
+/// cleared by the next stroke, open/close, any dimension-path commit, and
+/// undo/redo (see `history.rs`).
+#[derive(Debug, Clone, PartialEq)]
+pub(super) struct PartitionInstantCommit {
+    pub pending: PendingCut,
+    pub hlen: usize,
+}
+
+/// One snap tag on the partition overlay: a pending (or just-instant-
+/// committed) cut endpoint with ≥1 silently-snapped coordinate, at its
+/// wall-local position. The tag's menu offers exactly "Don't snap", which the
+/// UI routes (with `end_b`) to
+/// [`unsnap_partition_end`](AppController::unsnap_partition_end).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct PartitionSnapTag {
+    /// Wall-local `(along, height)` of the (snapped) endpoint.
+    pub pos: (f32, f32),
+    /// Which endpoint the tag reverts (`false` = a, `true` = b).
+    pub end_b: bool,
+    /// Both axes snapped (label "corner") vs one (label "edge").
+    pub corner: bool,
+}
+
+/// The snap tags for a cut: one per endpoint with ≥1 snapped coordinate.
+fn cut_snap_tags(p: &PendingCut) -> Vec<PartitionSnapTag> {
+    let mut tags = Vec::new();
+    if p.snapped[0] || p.snapped[1] {
+        tags.push(PartitionSnapTag {
+            pos: (p.a.x, p.a.y),
+            end_b: false,
+            corner: p.snapped[0] && p.snapped[1],
+        });
+    }
+    if p.snapped[2] || p.snapped[3] {
+        tags.push(PartitionSnapTag {
+            pos: (p.b.x, p.b.y),
+            end_b: true,
+            corner: p.snapped[2] && p.snapped[3],
+        });
+    }
+    tags
 }
 
 /// Which on-elevation axis a dimension prompt measures, so the overlay can draw
@@ -160,6 +280,10 @@ pub struct PartitionView {
     pub regions: Vec<PartitionRegionView>,
     pub inset: PartitionInset,
     pub dim_prompt: Option<PartitionDimPrompt>,
+    /// Snap tags for the pending (or just-instant-committed) cut: one per
+    /// endpoint with ≥1 snapped axis, at the endpoint's wall-local position.
+    /// `corner` when both axes snapped (label "corner") vs one ("edge").
+    pub snap_tags: Vec<PartitionSnapTag>,
 }
 
 impl AppController {
@@ -189,6 +313,7 @@ impl AppController {
         self.partition_wall = Some(vid);
         self.partition_stroke.clear();
         self.partition_pending = None;
+        self.partition_instant_commit = None;
         self.partition_selected_region = None;
     }
 
@@ -199,6 +324,7 @@ impl AppController {
         self.partition_wall = None;
         self.partition_stroke.clear();
         self.partition_pending = None;
+        self.partition_instant_commit = None;
         self.partition_selected_region = None;
     }
 
@@ -263,6 +389,8 @@ impl AppController {
     /// dimensioning. Clears the stroke either way. No-op when there's no cut.
     pub fn partition_stroke_end(&mut self) {
         let stroke = std::mem::take(&mut self.partition_stroke);
+        // A new stroke supersedes the last instant-commit's tags.
+        self.partition_instant_commit = None;
         let Some((_, _, _, len, height)) = self.partition_active_geom() else {
             return;
         };
@@ -272,16 +400,23 @@ impl AppController {
         let cuts = self.active_cuts();
         let sa = snap_on_face(raw_a, len, height, &cuts, SNAP_EPS_M);
         let sb = snap_on_face(raw_b, len, height, &cuts, SNAP_EPS_M);
-        let snaps = [!sa.x_fixed, !sa.y_fixed, !sb.x_fixed, !sb.y_fixed];
         let pending = PendingCut {
             a: sa.point,
             b: sb.point,
-            free: PendingCut::slots_for(sa.point, sb.point, snaps),
+            drawn_a: raw_a,
+            drawn_b: raw_b,
+            free_flags: [!sa.x_fixed, !sa.y_fixed, !sb.x_fixed, !sb.y_fixed],
+            snapped: [sa.x_fixed, sa.y_fixed, sb.x_fixed, sb.y_fixed],
         };
         if pending.any_free() {
             self.partition_pending = Some(pending);
         } else {
-            self.commit_partition(pending);
+            // Fully snapped → instant commit, but keep the cut + pre-commit
+            // history length so its tags still show and "Don't snap" can
+            // un-commit it (see `PartitionInstantCommit`).
+            let hlen = self.history.len();
+            self.commit_partition(pending.clone());
+            self.partition_instant_commit = Some(PartitionInstantCommit { pending, hlen });
         }
     }
 
@@ -293,7 +428,7 @@ impl AppController {
     /// fields carry the cut position the overlay arrow should run to.
     pub fn partition_dim_prompt(&self) -> Option<PartitionDimPrompt> {
         let p = self.partition_pending.as_ref()?;
-        let slot = *p.free.first()?;
+        let slot = p.queue().first().copied()?;
         let (label, axis, along_m, height_m) = match slot {
             FreeSlot::SharedX => (
                 "Distance from start corner (m)",
@@ -341,7 +476,7 @@ impl AppController {
         let Some(mut p) = self.partition_pending.clone() else {
             return;
         };
-        let Some(slot) = p.free.first().copied() else {
+        let Some(slot) = p.queue().first().copied() else {
             return;
         };
         let along = value.clamp(0.0, len);
@@ -360,7 +495,7 @@ impl AppController {
             FreeSlot::Ay => p.a.y = h,
             FreeSlot::By => p.b.y = h,
         }
-        p.free.remove(0);
+        p.resolve(slot);
         self.advance_pending(p);
     }
 
@@ -370,11 +505,49 @@ impl AppController {
         let Some(mut p) = self.partition_pending.clone() else {
             return;
         };
-        if p.free.is_empty() {
+        let Some(slot) = p.queue().first().copied() else {
+            return;
+        };
+        p.resolve(slot);
+        self.advance_pending(p);
+    }
+
+    /// "Don't snap" on a pending cut endpoint's tag: revert that endpoint's
+    /// SNAPPED coordinates to the drawn values and reopen their dimension
+    /// prompts (the derived queue picks the freed axes back up). Bespoke (the
+    /// pending cut lives outside undo) — NOT the generic `choose_snap`
+    /// replay.
+    ///
+    /// When there is no pending cut but the LAST stroke instant-committed
+    /// (both endpoints fully snapped), un-commit it: pop + restore the
+    /// commit's own undo entry and reopen the cut as pending with this end's
+    /// axes freed — so the cut that "just happened" is still negotiable.
+    /// Nothing pending / nothing snapped / stale record → no-op.
+    pub fn unsnap_partition_end(&mut self, end_b: bool) {
+        if let Some(p) = self.partition_pending.as_mut() {
+            p.unsnap_end(end_b);
             return;
         }
-        p.free.remove(0);
-        self.advance_pending(p);
+        let Some(rec) = self.partition_instant_commit.take() else {
+            return;
+        };
+        // Stale: something else happened since the instant commit (its undo
+        // entry is no longer the top of history) — its tags weren't shown
+        // either. Drop the record.
+        if self.history.len() != rec.hlen + 1 {
+            return;
+        }
+        // Un-commit: pop + restore the commit's own undo entry (the
+        // pre-commit state) — the truncate+restore idiom of the generic snap
+        // replay — then persist the rewound document.
+        let Some(before) = self.history.pop() else {
+            return;
+        };
+        self.restore_history_snapshot(before);
+        let _ = self.mark_dirty();
+        let mut p = rec.pending;
+        p.unsnap_end(end_b);
+        self.partition_pending = Some(p);
     }
 
     /// Store the updated pending cut, or commit it when no free slots remain.
@@ -392,6 +565,9 @@ impl AppController {
     /// Commit a fully-resolved cut to the active wall's face partition.
     /// Snapshot → mutate `document` → persist → push undo. Clears any pending.
     fn commit_partition(&mut self, p: PendingCut) {
+        // A dimension-path commit invalidates any earlier instant-commit
+        // record (the instant path re-sets it right after this call).
+        self.partition_instant_commit = None;
         let Some(vid) = self.partition_wall else {
             return;
         };
@@ -454,6 +630,16 @@ impl AppController {
 
     // ── view-model ──────────────────────────────────────────────────────────────
 
+    /// The instantly-committed cut, while its tags are still valid: nothing
+    /// has happened since the commit, i.e. the commit's undo entry is still
+    /// the top of history (see `PartitionInstantCommit`).
+    fn partition_instant_commit_cut(&self) -> Option<&PendingCut> {
+        self.partition_instant_commit
+            .as_ref()
+            .filter(|r| self.history.len() == r.hlen + 1)
+            .map(|r| &r.pending)
+    }
+
     /// The unrolled wall face + its cuts/regions/inset, for the overlay. `None`
     /// when not in partition mode / the wall has gone.
     pub fn partition_view(&self) -> Option<PartitionView> {
@@ -494,6 +680,14 @@ impl AppController {
                 }
             })
             .collect();
+        // Tag the pending cut's snapped endpoints — or the just-instant-
+        // committed cut's, while nothing else has happened since.
+        let snap_tags = self
+            .partition_pending
+            .as_ref()
+            .or_else(|| self.partition_instant_commit_cut())
+            .map(cut_snap_tags)
+            .unwrap_or_default();
         Some(PartitionView {
             wall_len_m: len,
             height_m: height,
@@ -503,6 +697,7 @@ impl AppController {
             regions,
             inset: self.partition_inset(a, b),
             dim_prompt: self.partition_dim_prompt(),
+            snap_tags,
         })
     }
 

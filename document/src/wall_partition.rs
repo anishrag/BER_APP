@@ -44,7 +44,9 @@ impl StoreyDoc {
     /// `sample` (wall-local). Upsert: if an existing stored sample point falls in
     /// the SAME region as `sample`, its exposure is replaced; otherwise the new
     /// `(sample, exposure)` pair is pushed. The goal is one exposure per region.
-    /// No-op when the wall isn't partitioned.
+    /// No-op when the wall isn't partitioned, and when `exposure` is
+    /// [`WallExposure::InterStorey`] (DERIVED-only — `derive_inter_storey`
+    /// stamps and clears it; never assessor-attributed).
     pub fn set_partition_region_exposure(
         &mut self,
         vid: VertexId,
@@ -53,6 +55,9 @@ impl StoreyDoc {
         len: f32,
         height: f32,
     ) {
+        if exposure == WallExposure::InterStorey {
+            return; // derived-only classification — never assessor-painted
+        }
         let Some(part) = self.wall_face_partitions.get(&vid) else {
             return; // not partitioned — nothing to attribute
         };
@@ -368,6 +373,37 @@ mod tests {
         assert_eq!(regions.len(), 1);
         assert_eq!(regions[0].1, WallExposure::Unset);
         assert_eq!(regions[0].0.len(), 4, "a rectangle");
+    }
+
+    /// `InterStorey` is refused as an attribution input — it's the derivation's
+    /// stamp (`derive_inter_storey`), never assessor-painted: the call is a
+    /// no-op and the region keeps its previous exposure.
+    #[test]
+    fn set_partition_region_exposure_refuses_inter_storey() {
+        let mut doc = square_doc();
+        let vid = first_wall(&doc);
+        let (len, height) = (4.0_f32, 2.4_f32);
+        doc.commit_partition_cut(
+            vid,
+            PartitionCut {
+                a: Point2f32::new(0.0, 1.0),
+                b: Point2f32::new(len, 1.0),
+            },
+        );
+        let sample = Point2f32::new(2.0, 0.5);
+        doc.set_partition_region_exposure(vid, sample, WallExposure::InterStorey, len, height);
+        assert!(
+            doc.wall_face_partitions[&vid].regions.is_empty(),
+            "InterStorey attribution refused — nothing stored"
+        );
+        // An existing mark isn't clobbered by a refused InterStorey re-paint.
+        doc.set_partition_region_exposure(vid, sample, WallExposure::Ground, len, height);
+        doc.set_partition_region_exposure(vid, sample, WallExposure::InterStorey, len, height);
+        assert_eq!(
+            doc.wall_face_partitions[&vid].regions,
+            vec![(sample, WallExposure::Ground)],
+            "previous exposure kept"
+        );
     }
 
     /// `clear_wall_partition` returns the wall to the un-partitioned state.

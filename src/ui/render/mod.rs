@@ -131,6 +131,27 @@ pub fn render_ber(
                 } else {
                     None
                 };
+                // While the fresh upper storey's outline is still being TRACED
+                // (no floor regions yet — the same freshness condition as the
+                // canvas's world-space outline capture), also ghost the storey
+                // below's construction-phase zones: faint dashed purple rings
+                // with the phase label, so the assessor can follow the "year"
+                // divisions the stroke snaps to. Gone once the outline lands —
+                // the dimensioning-phase watermark stays outline-only.
+                let phase_watermarks: Vec<(Vec<(f64, f64)>, String)> =
+                    if i > 0 && storey.floors.regions.is_empty() {
+                        document::phase_regions_from_floors(ber, i - 1)
+                            .into_iter()
+                            .map(|r| {
+                                (
+                                    r.polygon.iter().map(|p| (p.x as f64, p.y as f64)).collect(),
+                                    ber.construction_phases.display_label(&r.phase),
+                                )
+                            })
+                            .collect()
+                    } else {
+                        Vec::new()
+                    };
                 // An open "Edit attributes" session takes over the canvas. The
                 // default (in-place) view keeps the plan where it sits — the
                 // controller has zoomed it out — and recolours each group on top
@@ -156,6 +177,7 @@ pub fn render_ber(
                             dimensioned_walls,
                             view,
                             watermark.as_deref(),
+                            &phase_watermarks,
                             None,
                             &no_selection,
                             objects_view,
@@ -171,6 +193,7 @@ pub fn render_ber(
                             dimensioned_walls,
                             view,
                             watermark.as_deref(),
+                            &phase_watermarks,
                             None,
                             selected,
                             objects_view,
@@ -745,6 +768,36 @@ pub(crate) fn snap_kind_label(kind: manip_plan::SnapKind) -> &'static str {
         manip_plan::SnapKind::ToPreviousOutline => "prev outline",
         manip_plan::SnapKind::ToParallelWall => "parallel wall",
         manip_plan::SnapKind::ToReferenceSegment => "ref edge",
+        manip_plan::SnapKind::ToPhaseBoundary => "phase line",
+    }
+}
+
+/// Whether a snap kind aligns a whole WALL onto an existing wall (a parametric
+/// pin — the wall shares that wall's coordinate and is skipped by
+/// dimensioning), as opposed to moving a drawn POINT onto a nearby feature.
+/// Drives the tag's two visual classes: violet square (wall pin) vs orange
+/// circle (point snap).
+pub(crate) fn snap_kind_is_wall(kind: manip_plan::SnapKind) -> bool {
+    matches!(kind, manip_plan::SnapKind::ToParallelWall)
+}
+
+/// One-line consequence of an elective snap, for the tag menu — says what the
+/// snap DID (point moved vs wall pinned) so the assessor knows what "Don't
+/// snap" gives back. A pinned wall's dimension question is skipped; un-snapping
+/// reopens it.
+pub(crate) fn snap_kind_hint(kind: manip_plan::SnapKind) -> &'static str {
+    match kind {
+        manip_plan::SnapKind::ToVertex => "endpoint attached to the corner (reuses that vertex)",
+        manip_plan::SnapKind::ToCorner => "point moved onto the nearby corner",
+        manip_plan::SnapKind::ToEdge => "endpoint attached along the wall",
+        manip_plan::SnapKind::ToPreviousOutline => "point moved onto the storey below's outline",
+        manip_plan::SnapKind::ToParallelWall => {
+            "wall pinned onto the parallel wall — its dimension isn't asked; un-snap reopens it"
+        }
+        manip_plan::SnapKind::ToReferenceSegment => {
+            "point moved onto a reference edge (roof division / wall base)"
+        }
+        manip_plan::SnapKind::ToPhaseBoundary => "point moved onto a construction-phase line",
     }
 }
 
@@ -760,9 +813,11 @@ pub(crate) fn active_storey_transform(
     storey_transform(rect, ber, current_storey_idx, sketch_mode, view).map(|(_storey, t)| t)
 }
 
-/// Render a marker at each elective snap of the last action: orange when applied,
-/// grey when currently un-snapped. The clickable label/menu is an overlay widget
-/// (see the sketch page) placed at the same point.
+/// Render a marker at each elective snap of the last action, in the tag's
+/// visual class: an orange CIRCLE for a point snap, a violet SQUARE for a wall
+/// pin ([`snap_kind_is_wall`]); grey (in the same shape) when currently
+/// un-snapped. The clickable label/menu is an overlay widget (see the sketch
+/// page) placed at the same point.
 pub fn render_snap_tags(
     painter: &egui::Painter,
     rect: egui::Rect,
@@ -781,13 +836,38 @@ pub fn render_snap_tags(
     };
     for tag in tags {
         let p = t.apply(tag.pos.0 as f64, tag.pos.1 as f64);
+        // The shape follows the snap's class even while un-snapped (the
+        // most-aggressive candidate stands in), so a grey tag still says what
+        // KIND of snap it would re-apply.
+        let kind = tag
+            .current_kind
+            .or_else(|| tag.options.first().map(|(k, _)| *k));
+        let wall = kind.is_some_and(snap_kind_is_wall);
         let color = if tag.current_kind.is_some() {
-            egui::Color32::from_rgb(255, 140, 0) // orange — applied
+            if wall {
+                egui::Color32::from_rgb(150, 90, 255) // violet — wall pinned
+            } else {
+                egui::Color32::from_rgb(255, 140, 0) // orange — point applied
+            }
         } else {
             egui::Color32::from_gray(150) // grey — un-snapped
         };
-        painter.circle_filled(p, 5.0, color);
-        painter.circle_stroke(p, 5.0, egui::Stroke::new(1.5, egui::Color32::WHITE));
+        if wall {
+            // White ring drawn as a slightly larger backing square.
+            painter.rect_filled(
+                egui::Rect::from_center_size(p, egui::vec2(13.0, 13.0)),
+                2.0,
+                egui::Color32::WHITE,
+            );
+            painter.rect_filled(
+                egui::Rect::from_center_size(p, egui::vec2(10.0, 10.0)),
+                1.5,
+                color,
+            );
+        } else {
+            painter.circle_filled(p, 5.0, color);
+            painter.circle_stroke(p, 5.0, egui::Stroke::new(1.5, egui::Color32::WHITE));
+        }
     }
 }
 
@@ -897,6 +977,32 @@ pub fn render_selection_area(
             draw_dashed_segment(painter, inset[k], inset[(k + 1) % n], stroke);
         }
     }
+}
+
+/// Highlight ONE carve edge (world coords) — the wall-inclusion ask's current
+/// question — with a wide translucent halo under a solid core line in the
+/// selection gold, so the assessor sees exactly which wall the panel's
+/// Include / Exclude answer applies to.
+pub fn render_wall_inclusion_edge(
+    painter: &egui::Painter,
+    rect: egui::Rect,
+    ber: Option<&Ber>,
+    current_storey_idx: Option<usize>,
+    sketch_mode: SketchMode,
+    view: ViewParams,
+    edge: ((f64, f64), (f64, f64)),
+) {
+    let Some((_storey, t)) = storey_transform(rect, ber, current_storey_idx, sketch_mode, view)
+    else {
+        return;
+    };
+    let a = t.apply(edge.0 .0, edge.0 .1);
+    let b = t.apply(edge.1 .0, edge.1 .1);
+    painter.line_segment(
+        [a, b],
+        egui::Stroke::new(10.0, style::SELECTION_LINE.gamma_multiply(0.35)),
+    );
+    painter.line_segment([a, b], egui::Stroke::new(3.5, style::SELECTION_LINE));
 }
 
 /// Tint the CURRENT new-storey outline suggestion's ring translucently over
@@ -1064,6 +1170,11 @@ pub fn render_wall_exposure(
         // risers, which CAN be Unset or Ground, colour through here too).
         WallExposure::Unset => grey,
         WallExposure::Ground => style::GROUND_WALL,
+        // UNREACHABLE in practice: sections never recover InterStorey
+        // (`sections_from_wall_regions` skips it) and the controller's riser
+        // views exclude InterStorey risers. Kept exhaustive — grey, the
+        // ghost/unclassified read.
+        WallExposure::InterStorey => grey,
     };
     // Point at distance `d` (metres) along wall a→b of length `len`, in screen.
     let along = |a: (f64, f64), b: (f64, f64), len: f32, d: f32| {
@@ -1345,6 +1456,18 @@ pub(crate) mod style {
     pub fn highlight_fill(c: Color32) -> Color32 {
         let [r, g, b, _] = c.to_array();
         Color32::from_rgba_premultiplied(r, g, b, HIGHLIGHT_FILL_OPACITY)
+    }
+
+    /// Alpha for a NON-heat-loss surface's shaded fill in 3D — much fainter
+    /// than a selection highlight: enough to read as "internal, not part of
+    /// the envelope" without hiding the geometry behind it.
+    pub const INTERNAL_FILL_OPACITY: u8 = 30;
+
+    /// `c` as the faint translucent shade for a non-heat-loss (internal)
+    /// surface in the 3D views.
+    pub fn internal_fill(c: Color32) -> Color32 {
+        let [r, g, b, _] = c.to_array();
+        Color32::from_rgba_premultiplied(r, g, b, INTERNAL_FILL_OPACITY)
     }
 
     /// Per-storey distinct translucent fill hues for the overlaid all-storeys

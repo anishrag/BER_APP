@@ -254,7 +254,34 @@ impl AppController {
         // just resolved above, so the next no-edit `materialize` is a no-op.
         self.saved_revision = self.revision;
         self.derived_revision = self.revision;
+        // LOAD-TIME PURGE (legacy migration): drop the floor/ceiling exposure
+        // map entries whose keyed region now resolves InterStorey — the
+        // pre-feature auto-seeded Party/NonHeatLoss entries, shadowed by the
+        // derivation that just ran in the refresh above. Anything dropped
+        // leaves the record dirty so the migrated classification persists.
+        if self.purge_shadowed_exposure_entries_all() {
+            let _ = self.mark_dirty();
+        }
         Ok(())
+    }
+
+    /// Run [`document::purge_shadowed_exposure_entries`] over every storey —
+    /// the shared load-path tail (`open_ber` / `load_checkpoint`), called after
+    /// the first `refresh_all_storeys` so the regions carry the derivation's
+    /// fresh `InterStorey` stamps. Returns whether any entry was dropped.
+    fn purge_shadowed_exposure_entries_all(&mut self) -> bool {
+        let Some(record) = self.current_record.as_ref() else {
+            return false;
+        };
+        let n = record.data.storeys.len().min(self.document.storeys.len());
+        let mut purged = false;
+        for idx in 0..n {
+            purged |= document::purge_shadowed_exposure_entries(
+                &mut self.document.storeys[idx],
+                &record.data.storeys[idx],
+            );
+        }
+        purged
     }
 
     /// Rebuild ALL session + durable-side-table editing state from the resolved
@@ -353,7 +380,10 @@ impl AppController {
     /// risers — legacy records (and any whose snapshot predates the table) carry
     /// a riser's exposure only on its resolved `WallRegion`, which the first
     /// fresh-id re-resolve would otherwise reset to `Unset`. Idempotent: fills
-    /// only gaps, keyed by the riser's base edge.
+    /// only gaps, keyed by the riser's base edge. `InterStorey` risers are
+    /// SKIPPED (like `Unset`): that stamp is `derive_inter_storey`'s, re-derived
+    /// on every resolve — seeding it would freeze a derived mark into the
+    /// assessor override table.
     fn seed_riser_exposure_from_record(&mut self) {
         let n = self
             .current_record
@@ -375,7 +405,11 @@ impl AppController {
                 self.document.storeys[idx]
                     .riser_walls(storey)
                     .into_iter()
-                    .filter(|rw| rw.exposure != ber_model::ber::structural::WallExposure::Unset)
+                    .filter(|rw| {
+                        use ber_model::ber::structural::WallExposure;
+                        rw.exposure != WallExposure::Unset
+                            && rw.exposure != WallExposure::InterStorey
+                    })
                     .map(|rw| (document::riser_key(rw.a, rw.b), rw.exposure))
                     .collect()
             };
@@ -393,7 +427,9 @@ impl AppController {
     /// re-resolve would otherwise reset to `Unset`. Idempotent: fills only gaps,
     /// keyed by the region's quantized centroid (the same key the resolve stamp
     /// and the manual-marking ops use). Skips `Unset` regions (no value to
-    /// preserve — those re-derive from the stack).
+    /// preserve — those re-derive from the stack) and `InterStorey` ones (that
+    /// stamp is `derive_inter_storey`'s, re-derived on every resolve — seeding
+    /// it would freeze a derived mark into the assessor map).
     pub(super) fn seed_horizontal_exposure_from_record(&mut self) {
         use ber_model::ber::structural::{CeilingExposure, FloorExposure};
         let n = self
@@ -418,14 +454,24 @@ impl AppController {
                     .floors
                     .regions
                     .iter()
-                    .filter(|r| r.exposure != FloorExposure::Unset)
+                    .filter(|r| {
+                        !matches!(
+                            r.exposure,
+                            FloorExposure::Unset | FloorExposure::InterStorey
+                        )
+                    })
                     .map(|r| (document::centroid_key(r.centroid()), r.exposure))
                     .collect();
                 let ceilings = storey
                     .ceilings
                     .regions
                     .iter()
-                    .filter(|r| r.exposure != CeilingExposure::Unset)
+                    .filter(|r| {
+                        !matches!(
+                            r.exposure,
+                            CeilingExposure::Unset | CeilingExposure::InterStorey
+                        )
+                    })
                     .map(|r| (document::centroid_key(r.centroid()), r.exposure))
                     .collect();
                 (floors, ceilings)
@@ -730,6 +776,11 @@ impl AppController {
         self.redo.clear();
         self.saved_revision = self.revision;
         self.derived_revision = self.revision;
+        // Same load-time purge as `open_ber` — drop pre-feature auto-seeded
+        // map entries now shadowed by the InterStorey derivation.
+        if self.purge_shadowed_exposure_entries_all() {
+            let _ = self.mark_dirty();
+        }
         true
     }
 

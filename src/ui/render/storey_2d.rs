@@ -27,6 +27,13 @@ use super::{color_for, draw_dashed_segment, fit_transform, style, Transform2d, V
 /// new storey on top of an existing one. It also contributes to the fit
 /// bounding box, so an empty current storey still gets a sensible auto-fit.
 ///
+/// `phase_watermarks` are the previous storey's construction-phase zones
+/// (`(ring, label)` pairs), drawn as faint dashed PURPLE rings over the grey
+/// outline watermark while the fresh upper storey is being traced — so the
+/// assessor can follow (and the stroke can snap to) the phase boundaries
+/// below. They lie within the outline watermark's footprint, so they do NOT
+/// contribute to the fit bbox. Empty outside the fresh-storey trace.
+///
 /// `fit_bbox_override`, when set, is used as the fit bounding box instead of the
 /// storey's own (∪ watermark). The "All storeys" overview passes the GLOBAL
 /// bbox (union of every storey) here so all cells share one world→pixel mapping
@@ -42,6 +49,7 @@ pub fn render(
     dimensioned_walls: &[(usize, usize)],
     view: ViewParams,
     watermark_ring: Option<&[(f64, f64)]>,
+    phase_watermarks: &[(Vec<(f64, f64)>, String)],
     fit_bbox_override: Option<((f64, f64), (f64, f64))>,
     // Region ids the assessor has SELECTED in the Structure phase — these are
     // shaded; everything else draws at its normal style. Empty outside that
@@ -70,10 +78,12 @@ pub fn render(
     };
     let t = fit_transform(rect, min_xy, max_xy, view);
 
-    // Watermark FIRST so the live geometry paints on top.
+    // Watermark FIRST so the live geometry paints on top — the grey outline,
+    // then the purple phase zones over it.
     if let Some(ring) = watermark_ring {
         draw_watermark_ring(painter, &t, ring);
     }
+    draw_phase_watermark_rings(painter, &t, phase_watermarks);
 
     // Floors (background layer).
     for region in &storey.floors.regions {
@@ -273,6 +283,42 @@ fn draw_watermark_ring(painter: &egui::Painter, t: &Transform2d, ring: &[(f64, f
     let n = pts.len();
     for k in 0..n {
         draw_dashed_segment(painter, pts[k], pts[(k + 1) % n], stroke);
+    }
+}
+
+/// Faint dashed PURPLE rings of the previous storey's construction-phase
+/// zones, each labelled at its centroid — drawn with the outline watermark
+/// while a fresh upper storey is traced. Echoes the committed-phase overlay's
+/// purple (`render_phase_regions`) at watermark strength so the two read as
+/// the same concept, one live and one ghosted.
+fn draw_phase_watermark_rings(
+    painter: &egui::Painter,
+    t: &Transform2d,
+    rings: &[(Vec<(f64, f64)>, String)],
+) {
+    let purple = egui::Color32::from_rgba_unmultiplied(200, 120, 255, 130);
+    let stroke = egui::Stroke::new(2.0, purple);
+    for (ring, label) in rings {
+        if ring.len() < 3 {
+            continue;
+        }
+        let pts: Vec<egui::Pos2> = ring.iter().map(|(x, y)| t.apply(*x, *y)).collect();
+        let n = pts.len();
+        for k in 0..n {
+            draw_dashed_segment(painter, pts[k], pts[(k + 1) % n], stroke);
+        }
+        let (mut cx, mut cy) = (0.0f32, 0.0f32);
+        for p in &pts {
+            cx += p.x;
+            cy += p.y;
+        }
+        painter.text(
+            egui::pos2(cx / n as f32, cy / n as f32),
+            egui::Align2::CENTER_CENTER,
+            label,
+            egui::FontId::proportional(12.0),
+            purple,
+        );
     }
 }
 

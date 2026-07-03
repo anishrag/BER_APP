@@ -43,7 +43,9 @@ mod structure;
 mod structure_review;
 
 pub use assessment_phase::{AssessmentPhase, SelectMode};
-pub use structure::{EditGroup, ExistingGroup, PhotoQuality, StructureEdit};
+pub use structure::{
+    EditGroup, ExistingGroup, PhotoQuality, StructureEdit, WallInclusionPromptView,
+};
 // `SurfaceKind` is the data-model surface taxonomy — it lives in `ber_model`
 // (the queries dispatch on it) and is re-exported here so UI + controller call
 // sites keep reaching it via `app_controller::SurfaceKind`.
@@ -78,19 +80,22 @@ use sketch::model::Stroke;
 use sketch::SketchEngine;
 use std::collections::{HashMap, HashSet};
 
+mod ceiling_points;
+mod ceiling_rects;
+mod ceiling_ridges;
 mod history;
 mod new_storey;
 mod persistence;
 mod review;
-mod ceiling_points;
-mod ceiling_rects;
-mod ceiling_ridges;
 mod snap;
 mod step_regions;
 mod storeys;
 mod strokes;
 mod view;
 
+use ceiling_points::PendingCeilingPoint;
+use ceiling_rects::PendingCeilingRect;
+use ceiling_ridges::{PendingCeilingRidge, RidgeQuestion};
 use ceiling_steps::PendingCeilingStep;
 pub use dimensioning::{DimensionPromptUiData, PositionPromptUiData};
 pub use editing::{
@@ -111,19 +116,17 @@ pub use openings::{
     ElevationView, ExistingWindowType, OpeningFieldSpec, OpeningFieldsPrompt, OpeningPromptUiData,
     OpeningToolKind, OpeningViewKind, WindowTypeChoice,
 };
-use partition::PendingCut;
 pub use partition::{
-    PartitionDimAxis, PartitionDimPrompt, PartitionInset, PartitionRegionView, PartitionView,
+    PartitionDimAxis, PartitionDimPrompt, PartitionInset, PartitionRegionView, PartitionSnapTag,
+    PartitionView,
 };
+use partition::{PartitionInstantCommit, PendingCut};
 #[cfg(test)]
 use persistence::PARAMETRIC_SNAPSHOT_VERSION;
 pub use photos::PhotoView;
 pub use review::CollinearityReview;
-use ceiling_points::PendingCeilingPoint;
-use ceiling_rects::PendingCeilingRect;
-use ceiling_ridges::{PendingCeilingRidge, RidgeQuestion};
 pub use snap::SnapTagView;
-use snap::{LastSnapAction, SnapAction};
+use snap::{LastSnapAction, SnapAction, SubareaFlow};
 pub use strokes::PendingRedraw;
 pub use structure_review::{StructureReviewKind, StructureReviewView};
 pub use view::{ViewTransform, DEFAULT_PITCH_DEG, DEFAULT_YAW_DEG};
@@ -366,6 +369,14 @@ pub struct AppController {
     /// free flags, awaiting typed dimensions for the un-snapped coords. Transient
     /// (outside undo); `None` when no cut is in flight.
     partition_pending: Option<PendingCut>,
+    /// The last INSTANTLY-committed partition cut (both endpoints fully
+    /// snapped at stroke end), kept so its snap tags still show and "Don't
+    /// snap" can un-commit + reopen it. Controller-transient, OUTSIDE undo;
+    /// valid only while nothing else has happened since the commit (checked
+    /// against the history length); cleared by the next stroke, partition
+    /// open/close, any dimension-path commit, and undo/redo. See
+    /// `partition.rs`.
+    partition_instant_commit: Option<PartitionInstantCommit>,
     /// The wall-local sample point of the face region tapped, for assigning its
     /// exposure. Transient; `None` when no region is selected.
     partition_selected_region: Option<Point2f32>,
@@ -443,9 +454,17 @@ pub struct AppController {
     /// Dimensioned CARVE rings (plan coords) selected but NOT yet split — the
     /// split is DEFERRED to "Edit attributes" (`commit_pending_structure_carves`)
     /// so a carve selection that turns out wrong changes no geometry. Each ring
-    /// splits every active kind at commit time. Transient; cleared on Deselect
-    /// all / phase switch / storey switch, and drained when the edit opens.
-    pending_structure_carves: Vec<Vec<Point2f64>>,
+    /// splits every active kind at commit time and carries the interior edges
+    /// whose walls the assessor EXCLUDED from the selection. Transient; cleared
+    /// on Deselect all / phase switch / storey switch, and drained when the edit
+    /// opens.
+    pending_structure_carves: Vec<structure::StagedStructureCarve>,
+    /// The in-flight per-edge wall-inclusion ASK for a just-dimensioned
+    /// structure carve: each carve edge with house area beyond it (interior to
+    /// the storey footprint) is ambiguous, so the assessor answers
+    /// Include/Exclude edge by edge before the carve stages. `None` when nothing
+    /// is being asked. Transient — same clear sites as the pending carves.
+    pending_wall_inclusion: Option<structure::WallInclusionPrompt>,
     /// A Structure-phase straight CUT that split the storey into two candidate
     /// slots (each a dimensionable sub-area); the assessor taps one, which
     /// becomes the in-flight split shape and is then dimensioned. `None` when no
@@ -465,8 +484,9 @@ pub struct AppController {
     /// stack. Mutually exclusive with the other Mapping modes. Toggled by the UI.
     floor_exposure_mode: bool,
     /// True while the storey-count gate prompt is up (entered the tool but the
-    /// assessor hasn't yet confirmed every storey is added). The auto-exposure
-    /// pass runs on confirm; the overlaid view + selection are gated until then.
+    /// assessor hasn't yet confirmed every storey is added). The overlaid view
+    /// + selection are gated until confirm (inter-storey surfaces derive from
+    /// the full stack).
     floor_exposure_gate_pending: bool,
     /// The active floor-exposure Select subtool (Click/Carve/All/Remaining), or
     /// `None`. Transient floor-exposure interaction state.
@@ -615,6 +635,7 @@ impl AppController {
             partition_wall: None,
             partition_stroke: Vec::new(),
             partition_pending: None,
+            partition_instant_commit: None,
             partition_selected_region: None,
             pending_new_storey: None,
             inherited_seed_pending: HashSet::new(),
@@ -635,6 +656,7 @@ impl AppController {
             structure_select: None,
             structure_selected: HashSet::new(),
             pending_structure_carves: Vec::new(),
+            pending_wall_inclusion: None,
             pending_structure_cut: None,
             structure_split_kind: None,
             structure_edit: None,

@@ -32,17 +32,17 @@ pub use debug_stages::{take_splice_debug, SplicePhase};
 pub use error::Error;
 pub use geom::{
     bbox_diagonal as ring_diagonal, find_flipped_edge, fit_axis_line, fit_axis_rect,
-    fit_axis_segment, interior_perpendicular_offset, interior_split_edge, intersect_circles,
-    lerp_along, nearest_parallel_edge_distance, point_in_polygon, project_distance_along,
-    project_to_circle, ring_contains_point, ring_within_ring, segment_len, snap_on_face,
-    solve_axis_wall, subdivide_face, FaceSnap,
+    fit_axis_segment, fit_segment, interior_perpendicular_offset, interior_split_edge,
+    intersect_circles, lerp_along, nearest_parallel_edge_distance, point_in_polygon,
+    project_distance_along, project_to_circle, ring_contains_point, ring_within_ring, segment_len,
+    snap_on_face, solve_axis_wall, subdivide_face, FaceSnap,
 };
 pub use parametric::{Axis, CollinearitySuggestion, ParameterAxis, ParameterId, VertexId};
 pub use poly3d::{Polygon3D, SplitLine3D};
 pub use region::stroke_is_closed;
 pub use simplification::simplify_to_cut;
 pub use snap::{
-    clear_snap_policy, set_snap_policy, snap_stroke_to_ring, snap_stroke_to_segments,
+    clear_snap_policy, dist_to_ring, set_snap_policy, snap_stroke_to_ring, snap_stroke_to_segments,
     take_snap_decisions, SnapCandidate, SnapChoice, SnapDecision, SnapKind,
 };
 pub use surface_ref::SurfaceRef;

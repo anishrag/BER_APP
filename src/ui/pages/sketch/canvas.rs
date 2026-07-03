@@ -786,6 +786,19 @@ pub(super) fn render<F: FnMut(UiEvent)>(
         vp,
         view.pending_structure_carves,
     );
+    // Wall-inclusion ask: halo the carve edge currently being asked about, so
+    // the panel's Include / Exclude visibly refers to THAT wall.
+    if let Some(wi) = &view.wall_inclusion_prompt {
+        render::render_wall_inclusion_edge(
+            &painter,
+            rect,
+            ber,
+            current_storey_idx,
+            mode,
+            vp,
+            wi.edge,
+        );
+    }
 
     // DEBUG: splice-pipeline phases of the last extend/trim.
     render::render_splice_debug(
@@ -824,6 +837,19 @@ pub(super) fn render<F: FnMut(UiEvent)>(
                     .order(egui::Order::Foreground)
                     .show(ui.ctx(), |ui| {
                         ui.menu_button(label, |ui| {
+                            // What this snap DID (point moved vs wall pinned),
+                            // so the choice below is informed.
+                            if let Some(k) = tag
+                                .current_kind
+                                .or_else(|| tag.options.first().map(|(k, _)| *k))
+                            {
+                                ui.label(
+                                    egui::RichText::new(render::snap_kind_hint(k))
+                                        .small()
+                                        .weak(),
+                                );
+                                ui.separator();
+                            }
                             for (kind, idx) in &tag.options {
                                 if ui.button(render::snap_kind_label(*kind)).clicked() {
                                     on_event(UiEvent::Sketch(SketchEvent::ChooseSnap {
@@ -984,6 +1010,15 @@ pub(super) fn render<F: FnMut(UiEvent)>(
                 .order(egui::Order::Foreground)
                 .show(ui.ctx(), |ui| {
                     ui.menu_button(label, |ui| {
+                        ui.label(
+                            egui::RichText::new(
+                                "line pinned onto the parallel wall — its position \
+                                 isn't asked; un-snap reopens it",
+                            )
+                            .small()
+                            .weak(),
+                        );
+                        ui.separator();
                         if tag.skippable && ui.button("Don't snap").clicked() {
                             on_event(UiEvent::Sketch(SketchEvent::UnsnapCeilingStepLine));
                             ui.close();
@@ -1035,6 +1070,15 @@ pub(super) fn render<F: FnMut(UiEvent)>(
                 .order(egui::Order::Foreground)
                 .show(ui.ctx(), |ui| {
                     ui.menu_button(label, |ui| {
+                        ui.label(
+                            egui::RichText::new(
+                                "point pinned onto the outline wall(s) — its position \
+                                 isn't asked; un-snap reverts to the tapped point",
+                            )
+                            .small()
+                            .weak(),
+                        );
+                        ui.separator();
                         if tag.skippable && ui.button("Don't snap").clicked() {
                             on_event(UiEvent::Sketch(SketchEvent::UnsnapCeilingPoint));
                             ui.close();
@@ -1106,6 +1150,15 @@ pub(super) fn render<F: FnMut(UiEvent)>(
                 .order(egui::Order::Foreground)
                 .show(ui.ctx(), |ui| {
                     ui.menu_button(label, |ui| {
+                        ui.label(
+                            egui::RichText::new(
+                                "ridge pinned onto the parallel wall — its position \
+                                 isn't asked; un-snap reopens it",
+                            )
+                            .small()
+                            .weak(),
+                        );
+                        ui.separator();
                         if tag.skippable && ui.button("Don't snap").clicked() {
                             on_event(UiEvent::Sketch(SketchEvent::UnsnapCeilingRidge));
                             ui.close();
@@ -1930,10 +1983,11 @@ pub(super) fn render<F: FnMut(UiEvent)>(
                     }));
                 }
             }
-            // Pending ridge (awaiting its pitch): dashed segment over the area.
-            if let Some(((ax, ay), (bx, by))) = view.roof_area_ridge_line {
-                let a = t.apply(ax, ay);
-                let b = t.apply(bx, by);
+            // Pending ridge(s) — a hip's collected set while more are drawn,
+            // the full set while the pitch is entered: segments over the area.
+            for ((ax, ay), (bx, by)) in &view.roof_area_ridge_lines {
+                let a = t.apply(*ax, *ay);
+                let b = t.apply(*bx, *by);
                 painter.line_segment(
                     [a, b],
                     egui::Stroke::new(2.5, egui::Color32::from_rgb(60, 180, 90)),
@@ -3717,6 +3771,11 @@ fn partition_exposure_color(e: WallExposure) -> egui::Color32 {
         WallExposure::NonHeatLoss => style::NON_HEAT_LOSS_WALL,
         WallExposure::Ground => style::GROUND_WALL,
         WallExposure::Unset => style::UNSET_WALL,
+        // UNREACHABLE in practice: partition face regions are assessor-painted
+        // and every setter refuses InterStorey (it's the derivation's stamp,
+        // and a partitioned wall's 2-D regions aren't derivation targets).
+        // Kept exhaustive — grey, the ghost/unclassified read.
+        WallExposure::InterStorey => style::UNSET_WALL,
     }
 }
 
@@ -3822,6 +3881,41 @@ fn partition_overlay<F: FnMut(UiEvent)>(
             let f1 = (i + 1) as f32 / segs as f32;
             line(a + (b - a) * f0, a + (b - a) * f1, 2.5, hi);
         }
+    }
+
+    // Snap tags: one per pending (or just-instant-committed) cut endpoint
+    // with ≥1 silently-snapped coordinate. The dot matches the canvas'
+    // `render_snap_tags` (orange fill, white ring) but is drawn here because
+    // the tag lives on the face overlay's own transform (`p` handles the
+    // along-axis flip). The menu offers exactly "Don't snap", routed to
+    // UnsnapPartitionEnd — never ChooseSnap: the cut lives outside history.
+    for tag in &pv.snap_tags {
+        let sp = p(tag.pos.0 as f64, tag.pos.1 as f64);
+        painter.circle_filled(sp, 5.0, egui::Color32::from_rgb(255, 140, 0));
+        painter.circle_stroke(sp, 5.0, egui::Stroke::new(1.5, egui::Color32::WHITE));
+        let label = if tag.corner { "corner ▾" } else { "edge ▾" };
+        egui::Area::new(ui.id().with(("partition_snap_tag", tag.end_b)))
+            .fixed_pos(sp + egui::vec2(7.0, -7.0))
+            .order(egui::Order::Foreground)
+            .show(ui.ctx(), |ui| {
+                ui.menu_button(label, |ui| {
+                    ui.label(
+                        egui::RichText::new(
+                            "endpoint moved onto the face edge / an existing cut — \
+                             un-snap reverts to the drawn point and asks for it",
+                        )
+                        .small()
+                        .weak(),
+                    );
+                    ui.separator();
+                    if ui.button("Don't snap").clicked() {
+                        on_event(UiEvent::Sketch(SketchEvent::UnsnapPartitionEnd {
+                            end_b: tag.end_b,
+                        }));
+                        ui.close();
+                    }
+                });
+            });
     }
 
     // Live freehand ink: the in-flight stroke tracking the pen as it's drawn.

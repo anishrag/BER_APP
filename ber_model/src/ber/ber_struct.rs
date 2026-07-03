@@ -1,9 +1,9 @@
 use serde::{Deserialize, Serialize};
 
-use super::common::{ConstructionPhases, ItemId, Photo, Year};
+use super::common::{ConstructionPhase, ConstructionPhases, ItemId, Photo, Year};
 use super::fenestration::{Frame, Glazing, WindowNameSpecifics, WindowType};
 use super::structural::{
-    CeilingConstruction, FloorConstruction, CeilingApex, CeilingApexHint, Storey, ThermalMassInfo,
+    CeilingApex, CeilingApexHint, CeilingConstruction, FloorConstruction, Storey, ThermalMassInfo,
     WallConstruction,
 };
 use super::systems::{HeatingSystem, SolarElements, VentilationSystem};
@@ -326,6 +326,37 @@ impl Ber {
         out
     }
 
+    /// Storey `idx`'s construction-PHASE zones: its floor regions grouped by
+    /// the phase their `construction_id` resolves to
+    /// ([`FloorRegions::phase_zone_rings`] with this `Ber`'s floor-construction
+    /// registry as the resolver), one open ring per connected component per
+    /// phase. `Unassigned` zones (the implicit untagged remainder, and any
+    /// region whose id doesn't resolve) are skipped; empty when `idx` is out of
+    /// range or nothing is tagged. Pure projection — no mutation.
+    ///
+    /// Parallels `document::phase::phase_regions_from_floors`, which does the
+    /// same derivation but projects to the session's `f32` `PhaseRegion`s;
+    /// this stays at `f64` for data-model consumers (e.g. the upper-storey
+    /// outline suggestions).
+    ///
+    /// [`FloorRegions::phase_zone_rings`]:
+    /// super::structural::FloorRegions::phase_zone_rings
+    pub fn storey_phase_zones(&self, idx: usize) -> Vec<(ConstructionPhase, Vec<Point2f64>)> {
+        let Some(storey) = self.storeys.get(idx) else {
+            return Vec::new();
+        };
+        storey
+            .floors
+            .phase_zone_rings(|cid| {
+                self.floor_construction(cid)
+                    .map(|c| c.base.construction_phase.clone())
+                    .unwrap_or(ConstructionPhase::Unassigned)
+            })
+            .into_iter()
+            .filter(|(phase, _)| *phase != ConstructionPhase::Unassigned)
+            .collect()
+    }
+
     /// Absolute Z of the highest ceiling reachable straight UP from the wall at
     /// (storey `idx`, plan position `along_m`) through the CONTIGUOUS run of
     /// vertically-aligned, SAME-TYPE walls — same `construction_id` AND
@@ -501,5 +532,46 @@ mod tests {
         let top = ber.wall_run_top_z(0, wall0, 0.5);
         // Correct (orientation-aware) answer is 5.15; the raw-`along_m` bug gave 3.65.
         assert!((top - 5.15).abs() < 1e-3, "run top = {top}, expected 5.15");
+    }
+
+    /// `storey_phase_zones` resolves each floor region's phase through the
+    /// house-level construction registry, SKIPS `Unassigned` (the untagged
+    /// remainder), and returns empty out of range.
+    #[test]
+    fn storey_phase_zones_skips_unassigned_and_handles_out_of_range() {
+        use crate::ber::structural::FloorRegions;
+        let mut ber = Ber::default();
+        let cid_orig = ber.ensure_floor_construction(
+            Default::default(),
+            Default::default(),
+            ConstructionPhase::Original,
+        );
+        let cid_unassigned = ber.ensure_floor_construction(
+            Default::default(),
+            Default::default(),
+            ConstructionPhase::Unassigned,
+        );
+        let sq = |x0: f64, x1: f64| {
+            vec![
+                Point2f64::new(x0, 0.0),
+                Point2f64::new(x1, 0.0),
+                Point2f64::new(x1, 4.0),
+                Point2f64::new(x0, 4.0),
+            ]
+        };
+        // Left half tagged Original; the remainder stays Unassigned.
+        let floors =
+            FloorRegions::partition(&sq(0.0, 8.0), &[(sq(0.0, 4.0), cid_orig)], cid_unassigned);
+        ber.storeys.push(Storey {
+            floors,
+            ..Storey::default()
+        });
+        let zones = ber.storey_phase_zones(0);
+        assert_eq!(zones.len(), 1, "{zones:?}");
+        assert_eq!(zones[0].0, ConstructionPhase::Original);
+        assert!(zones[0].1.len() >= 3);
+        // Out of range → empty, no panic.
+        assert!(ber.storey_phase_zones(1).is_empty());
+        assert!(ber.storey_phase_zones(99).is_empty());
     }
 }

@@ -253,7 +253,7 @@ mod tests {
             std::mem::take(&mut ber.storeys[0].ceilings).with_z_deltas(&areas);
 
         // SUGGEST: take a two-level candidate (it spans both ceiling pieces).
-        let suggestions = suggest_storey_outlines(&ber.storeys[0], 6);
+        let suggestions = suggest_storey_outlines(&ber.storeys[0], &[], 6);
         let chosen = suggestions
             .iter()
             .find(|s| s.levels == 2)

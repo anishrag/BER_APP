@@ -163,6 +163,9 @@ impl AppController {
         };
         if let Some(stroke) = stroke_opt {
             log::debug!("Stroke completed with {} points", stroke.points.len());
+            // Only THIS stroke's elective snaps may end up in the capture below
+            // — drop any stale decisions an unrelated op left behind.
+            self.begin_snap_capture();
             // Keep the raw stroke + tool so this action can be REPLAYED under a
             // forced snap policy (recorded after the dispatch, if it snapped).
             let captured = SnapAction::Freehand {
@@ -366,11 +369,13 @@ impl AppController {
                 return;
             }
         };
+        // Only THIS carve's elective snaps may end up in the capture below —
+        // drop any stale decisions an unrelated op left behind. (Every
+        // capturing entry point clears on entry, so a FAILED carve's leftover
+        // decisions can't be misattributed to the next captured action either.)
+        self.begin_snap_capture();
         if let Err(e) = self.apply_outline_world_inner(world_points, closed) {
             log::error!("[new-storey] apply_outline_stroke_world failed: {}", e);
-            // Drain any decisions the failed carve recorded so they can't be
-            // misattributed to the next captured action.
-            let _ = manip_plan::take_snap_decisions();
             return;
         }
         // If the carve made elective snaps, remember the action so the tag
@@ -398,10 +403,43 @@ impl AppController {
         let prev_ring = self
             .previous_storey_ring()
             .ok_or_else(|| "no previous storey to draw on".to_string())?;
+        // Pre-snap the stroke onto the storey-below's INTERIOR construction-phase
+        // boundaries (the carve only snaps to the outline ring itself): a wall
+        // traced beside the phase "year" division below lands exactly ON it, so
+        // the inherited phase seed splits the new floor along the real line.
+        // Segments lying along the previous outline are already filtered out
+        // (`document::phase_snap_segments`) — double targets would fight the
+        // carve's own outline snap. Same tolerance rule as the outline snap
+        // (`snap_to_previous_storey_outline`); the moves are elective, so the
+        // snap-tag overlay picks them up like any other. The SAME segments then
+        // go to the carve as reference walls: a snapped wall is a known wall,
+        // so a wall lying on a phase line is pinned pre-known instead of
+        // re-prompted — and a replay after "Don't snap" leaves the wall off the
+        // line, so its dimension question correctly reopens.
+        let phase_segs = match (self.current_storey_idx, self.current_record.as_ref()) {
+            (Some(idx), Some(rec)) if idx > 0 => {
+                document::phase_snap_segments(&rec.data, idx - 1, &prev_ring)
+            }
+            _ => Vec::new(),
+        };
+        let pts = {
+            let tol = (manip_plan::ring_diagonal(&prev_ring)
+                * self.tuning.new_storey.snap_tol_ratio)
+                .max(1e-3);
+            manip_plan::snap_stroke_to_segments(
+                &pts,
+                &phase_segs,
+                tol,
+                manip_plan::SnapKind::ToPhaseBoundary,
+            )
+        };
         let undo_snap = self.current_history_snapshot();
-        let (pinned, active) =
-            self.document
-                .carve_outline_from_previous(&pts, &prev_ring, &self.tuning.subarea)?;
+        let (pinned, active) = self.document.carve_outline_from_previous(
+            &pts,
+            &prev_ring,
+            &self.tuning.subarea,
+            &phase_segs,
+        )?;
         self.warn_if_non_orthogonal("draw outline (carve)");
         // The carve replaced the upper storey's outline WHOLESALE: re-pend
         // the inherited-level seed (the tail below / the dimensioning tails
@@ -478,6 +516,7 @@ impl AppController {
         log::debug!("Extend stroke (world coords): {} points", pts.len());
         dump_stroke("extend", &pts);
         let _ = manip_plan::take_splice_debug(); // clear stale phases
+        self.begin_snap_capture();
         let res = self.apply_extend_stroke(&pts);
         self.splice_debug = self.take_splice_debug_if_enabled();
         if let Err(e) = res {
@@ -553,6 +592,7 @@ impl AppController {
         log::debug!("Trim stroke (world coords): {} points", pts.len());
         dump_stroke("trim", &pts);
         let _ = manip_plan::take_splice_debug(); // clear stale phases
+        self.begin_snap_capture();
         let res = self.apply_trim_stroke(&pts);
         // Capture the pipeline phases (recorded even when the splice is rejected)
         // for the UI's coloured debug overlay — only when explicitly enabled.

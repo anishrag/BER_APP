@@ -37,6 +37,12 @@ pub enum SnapKind {
     /// plan (e.g. an interior roof-region division or a floor-above wall base the
     /// ceiling carve should follow), not part of the carve's boundary ring.
     ToReferenceSegment,
+    /// A stroke point snapped onto a CONSTRUCTION-PHASE zone boundary of the
+    /// storey below — the interior "year" division a new upper storey's outline
+    /// follows so the inherited phase seed splits it along the real line. Same
+    /// mechanics as [`SnapKind::ToReferenceSegment`]; the distinct kind keeps
+    /// the snap tag's label honest about WHAT was snapped to.
+    ToPhaseBoundary,
 }
 
 /// One option an elective snap considered: a `kind`, the point it would move to,
@@ -54,6 +60,13 @@ pub struct SnapCandidate {
 /// candidate `i`, or `None` for "didn't snap" (reverted to `from`). The shell
 /// surfaces these as canvas tags; choosing a different candidate (or `None`)
 /// replays the action with that choice forced.
+///
+/// For a GROUPED stroke decision (one per FEATURE the stroke snapped to,
+/// covering every stroke point that snapped to it — see
+/// [`snap_stroke_to_ring`] / [`snap_stroke_to_segments`]), `from` and the
+/// candidate's `to` are the group's REPRESENTATIVE (middle) member — where the
+/// tag renders — while applying or skipping the decision covers the WHOLE
+/// group.
 #[derive(Debug, Clone)]
 pub struct SnapDecision {
     pub from: Point2f32,
@@ -131,7 +144,29 @@ fn resolve(from: Point2f32, n: usize, default: usize, skippable: bool) -> Option
 }
 
 /// Log + store one resolved decision (the single place a `SnapDecision` is born).
+///
+/// EXACT duplicates within one action are dropped: a pipeline that runs twice
+/// per action (the splice pipeline on a two-piece carve) re-records the same
+/// decisions on its second pass; pushing them again would stack identical tags
+/// and double the log lines. A duplicate has the same `from` (within 1e-3) and
+/// the same candidate kinds+targets. The policy lookup keyed by `from` is
+/// unaffected — two such decisions were indistinguishable to it anyway.
 fn commit(from: Point2f32, candidates: Vec<SnapCandidate>, chosen: Option<usize>, skippable: bool) {
+    let duplicate = SNAP_DECISIONS.with(|d| {
+        d.borrow().iter().any(|prev| {
+            (prev.from.x - from.x).abs() < 1e-3
+                && (prev.from.y - from.y).abs() < 1e-3
+                && prev.candidates.len() == candidates.len()
+                && prev.candidates.iter().zip(&candidates).all(|(a, b)| {
+                    a.kind == b.kind
+                        && (a.to.x - b.to.x).abs() < 1e-3
+                        && (a.to.y - b.to.y).abs() < 1e-3
+                })
+        })
+    });
+    if duplicate {
+        return;
+    }
     let to = chosen.map_or(from, |i| candidates[i].to);
     log::info!(
         "[snap] {:?}: ({:.3}, {:.3}) -> ({:.3}, {:.3})  [chosen {:?} of {}]",
@@ -153,18 +188,57 @@ fn commit(from: Point2f32, candidates: Vec<SnapCandidate>, chosen: Option<usize>
     });
 }
 
+/// Below this move distance (metres, ~1 cm on the plan) a SINGLE-candidate
+/// elective snap is INVISIBLE: "snap or don't" moves nothing anyone can see, so
+/// it's applied silently and NO decision is recorded (no tag, no question).
+/// Multi-candidate decisions stay recorded even when the top candidate sits at
+/// `from` — the alternative differs. A perceptual constant (tag legibility),
+/// not a geometric tolerance, so it doesn't scale with `ring_diagonal`.
+pub(crate) const NOOP_SNAP_EPS_M: f32 = 0.01;
+
+/// Is this candidate set an invisible single-candidate elective (see
+/// [`NOOP_SNAP_EPS_M`])? Only SKIPPABLE decisions qualify — a mandatory attach
+/// is recorded regardless (its tag documents the forced join).
+fn is_invisible_single(from: Point2f32, candidates: &[SnapCandidate], skippable: bool) -> bool {
+    skippable
+        && candidates.len() == 1
+        && geom::segment_len(from, candidates[0].to) < NOOP_SNAP_EPS_M
+}
+
 /// Record a (typically single-candidate) decision and return the applied point —
 /// or `from` if the policy skipped a skippable one. The default pick is `default`.
+/// An invisible single-candidate elective ([`is_invisible_single`]) applies
+/// silently without recording.
 pub(crate) fn record_choice(
     from: Point2f32,
     candidates: Vec<SnapCandidate>,
     default: usize,
     skippable: bool,
 ) -> Point2f32 {
+    if is_invisible_single(from, &candidates, skippable) {
+        return candidates[0].to;
+    }
     let chosen = resolve(from, candidates.len(), default, skippable);
     let to = chosen.map_or(from, |i| candidates[i].to);
     commit(from, candidates, chosen, skippable);
     to
+}
+
+/// Record ONE skippable single-candidate decision covering a GROUP of moves (a
+/// stroke's points against one feature, a wall edge's two endpoints leveling
+/// onto one parallel line) and return whether it was APPLIED — the caller moves
+/// or reverts EVERY grouped member together. `from`/`to`/`score` are the
+/// group's REPRESENTATIVE (where the tag renders); the policy is resolved once,
+/// keyed on that `from`.
+pub(crate) fn record_grouped_choice(
+    kind: SnapKind,
+    from: Point2f32,
+    to: Point2f32,
+    score: f32,
+) -> bool {
+    let chosen = resolve(from, 1, 0, true);
+    commit(from, vec![SnapCandidate { kind, to, score }], chosen, true);
+    chosen.is_some()
 }
 
 /// A located point on a ring's boundary — a vertex, or a position along an edge.
@@ -245,7 +319,7 @@ fn aggressiveness(kind: SnapKind) -> u8 {
     match kind {
         SnapKind::ToVertex | SnapKind::ToCorner => 0,
         SnapKind::ToEdge => 1,
-        SnapKind::ToPreviousOutline | SnapKind::ToReferenceSegment => 2,
+        SnapKind::ToPreviousOutline | SnapKind::ToReferenceSegment | SnapKind::ToPhaseBoundary => 2,
         SnapKind::ToParallelWall => 3,
     }
 }
@@ -254,7 +328,10 @@ fn aggressiveness(kind: SnapKind) -> u8 {
 /// broken by closeness), apply the forced-choice policy (default = the top),
 /// record the decision (alternatives preserved for the UI), and return the CHOSEN
 /// candidate — or `None` if the policy skipped the snap. Empty `candidates` is a
-/// programming error: a site with nothing to offer must not call this.
+/// programming error: a site with nothing to offer must not call this. An
+/// invisible single-candidate elective ([`is_invisible_single`]) applies
+/// silently without recording — a `ToCorner (x,y) -> (x,y)` no-op is not a
+/// question.
 pub(crate) fn elective_choice(
     from: Point2f32,
     mut candidates: Vec<SnapCandidate>,
@@ -265,6 +342,9 @@ pub(crate) fn elective_choice(
             .cmp(&aggressiveness(b.kind))
             .then(a.score.total_cmp(&b.score))
     });
+    if is_invisible_single(from, &candidates, skippable) {
+        return Some(candidates[0]);
+    }
     let chosen = resolve(from, candidates.len(), 0, skippable);
     let result = chosen.map(|i| candidates[i]);
     commit(from, candidates, chosen, skippable);
@@ -455,6 +535,79 @@ pub(crate) fn pin_to_edge(p: &mut Point2f32, ring: &[Point2f32], edge: usize) {
     *p = OnRing::Edge { edge, t }.point(ring);
 }
 
+/// The distance from `p` to the nearest point on `ring`'s perimeter (vertices
+/// included — every vertex lies on an edge). `INFINITY` for a degenerate ring.
+/// The pure FIND half of [`find_nearest`], exposed for callers that only need
+/// the distance — e.g. filtering out reference segments that already lie ON an
+/// outline a carve snaps to by itself.
+pub fn dist_to_ring(ring: &[Point2f32], p: Point2f32) -> f32 {
+    find_nearest(ring, p, 0.0).1
+}
+
+/// Apply a stroke's pre-computed per-point snap targets, recording ONE elective
+/// decision per FEATURE: ALL points whose group key `K` compares equal share
+/// one decision, regardless of adjacency — a wobbling raw stroke drifting in
+/// and out of tolerance against the same wall is still ONE question, one per
+/// drawn-wall → target-feature relationship. `targets[i]` is stroke point
+/// `i`'s snap — `(target, dist, key)` — or `None` where nothing was in reach.
+///
+/// The applied GEOMETRY is identical to per-point snapping: under Apply every
+/// member still moves to its OWN target; a `Skip` reverts the WHOLE group to
+/// the drawn points (un-snapping one raw ink point out of a wall run is never
+/// wanted). A group whose members ALL move less than [`NOOP_SNAP_EPS_M`] is
+/// invisible — applied silently, no decision recorded.
+///
+/// The recorded `from`/`to` are the group's REPRESENTATIVE — the MIDDLE member
+/// (by stroke order): drawn point and its target (where the tag renders).
+/// Replay stability of `from`: computing `targets` never consults the
+/// forced-choice policy, so replaying the same input stroke yields the same
+/// groups and hence the same representative `from` points — which the policy
+/// lookup keyed by `from` relies on.
+fn apply_grouped_stroke_snaps<K: PartialEq>(
+    stroke: &[Point2f32],
+    targets: &[Option<(Point2f32, f32, K)>],
+    kind: SnapKind,
+) -> Vec<Point2f32> {
+    // Gather the feature groups in first-appearance order.
+    let mut groups: Vec<(&K, Vec<usize>)> = Vec::new();
+    for (i, t) in targets.iter().enumerate() {
+        if let Some((_, _, key)) = t {
+            match groups.iter_mut().find(|(k, _)| *k == key) {
+                Some((_, members)) => members.push(i),
+                None => groups.push((key, vec![i])),
+            }
+        }
+    }
+    let mut out = stroke.to_vec();
+    for (_, members) in groups {
+        let mid = members[members.len() / 2];
+        let (mid_to, mid_dist, _) = targets[mid].as_ref().unwrap();
+        let max_move = members
+            .iter()
+            .map(|&i| targets[i].as_ref().unwrap().1)
+            .fold(0.0_f32, f32::max);
+        // Zero-effect suppression: EVERY member's move is invisible → apply
+        // silently, ask nothing. (One visible member keeps the group asked.)
+        let apply = max_move < NOOP_SNAP_EPS_M
+            || record_grouped_choice(kind, stroke[mid], *mid_to, *mid_dist);
+        if apply {
+            for &i in &members {
+                out[i] = targets[i].as_ref().unwrap().0;
+            }
+        }
+    }
+    out
+}
+
+/// Group key for [`snap_stroke_to_ring`]: the [`OnRing`] SHAPE of a point's
+/// target — the vertex index, or the edge index (ignoring `t`, which varies
+/// along a run following the edge).
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum RingSnapKey {
+    Vertex(usize),
+    Edge(usize),
+}
+
 /// Snap each point of `stroke` onto `ring`'s perimeter when within `snap_tol`,
 /// leaving points farther away untouched. Used by the multi-storey "draw on
 /// top of the previous storey" flow so endpoints land exactly on the previous
@@ -462,6 +615,11 @@ pub(crate) fn pin_to_edge(p: &mut Point2f32, ring: &[Point2f32], edge: usize) {
 /// A cross-ring consumer: it FINDs on the previous ring, then projects the
 /// result to a COORDINATE ([`OnRing::point`]) — the new storey mints its own
 /// vertices, so the previous ring's vertex identity is correctly discarded.
+///
+/// Recording is GROUPED: all points snapping to the same feature (same vertex,
+/// or same edge) share ONE `ToPreviousOutline` decision via
+/// [`apply_grouped_stroke_snaps`], while each point still moves to its own
+/// nearest spot exactly as before.
 pub fn snap_stroke_to_ring(
     stroke: &[Point2f32],
     ring: &[Point2f32],
@@ -470,16 +628,23 @@ pub fn snap_stroke_to_ring(
     if ring.len() < 2 {
         return stroke.to_vec();
     }
-    stroke
+    // Pass 1 — FIND each point's target (policy-free; see the helper's doc).
+    let targets: Vec<Option<(Point2f32, f32, RingSnapKey)>> = stroke
         .iter()
-        .map(|p| {
-            let (loc, dist) = find_nearest(ring, *p, snap_tol);
+        .map(|&p| {
+            let (loc, dist) = find_nearest(ring, p, snap_tol);
             if dist > snap_tol {
-                return *p;
+                return None;
             }
-            elective_snap(SnapKind::ToPreviousOutline, *p, loc.point(ring), true)
+            let key = match loc {
+                OnRing::Vertex(i) => RingSnapKey::Vertex(i),
+                OnRing::Edge { edge, .. } => RingSnapKey::Edge(edge),
+            };
+            Some((loc.point(ring), dist, key))
         })
-        .collect()
+        .collect();
+    // Pass 2 — group into runs, record one decision per run, apply.
+    apply_grouped_stroke_snaps(stroke, &targets, SnapKind::ToPreviousOutline)
 }
 
 /// Snap each point of `stroke` onto the nearest of a set of REFERENCE
@@ -493,20 +658,59 @@ pub fn snap_stroke_to_ring(
 /// `tol` it moves the vertex there, PREFERRING a segment ENDPOINT when the
 /// vertex is also within `tol` of one (so corners catch and shared corners of
 /// two segments stay coincident), else the nearest point along the segment.
-/// A point with no segment in reach is left exactly as drawn. Each applied move
-/// is routed through [`elective_snap`] (recorded as a `ToReferenceSegment`
-/// decision) so the controller's snap-tag replay machinery sees it. Pure aside
-/// from that recording; degenerate (zero-length) reference segments are
-/// skipped, and an empty `segments` leaves the whole stroke untouched.
+/// A point with no segment in reach is left exactly as drawn; degenerate
+/// (zero-length) reference segments are skipped, and an empty `segments`
+/// leaves the whole stroke untouched.
+///
+/// Recording is GROUPED: all points snapping to the same feature — the same
+/// segment ENDPOINT (keyed by its quantized coordinate, so the shared corner
+/// of two segments is one feature) or a foot on the same infinite LINE (keyed
+/// canonically, so COLLINEAR segments — a boundary split into pieces — are one
+/// feature) — share ONE decision of the supplied `kind` (`ToReferenceSegment`
+/// for a roof/wall-base reference, `ToPhaseBoundary` for a storey-below phase
+/// division) via [`apply_grouped_stroke_snaps`], so the controller's snap-tag
+/// replay machinery sees one tag per drawn-wall → feature relationship, not
+/// one per raw ink point. Endpoint catches at the ends of a line the stroke
+/// also snapped FEET onto MERGE into that line's decision (see the inline
+/// merge rule); an isolated corner catch keeps its own. Each point still moves
+/// to its own per-point target exactly as before.
 pub fn snap_stroke_to_segments(
     stroke: &[Point2f32],
     segments: &[[Point2f32; 2]],
     tol: f32,
+    kind: SnapKind,
 ) -> Vec<Point2f32> {
     if segments.is_empty() {
         return stroke.to_vec();
     }
-    stroke
+    /// Group key: an endpoint target is the endpoint COORDINATE quantized to
+    /// ~1e-4 m (stable comparison; shared corners compare equal); a mid-segment
+    /// foot is the segment's canonical infinite LINE ([`line_key`]).
+    #[derive(Debug, Clone, Copy, PartialEq)]
+    enum SegmentSnapKey {
+        Endpoint(i64, i64),
+        Line(i64, i64, i64),
+    }
+    fn quantize(v: f32) -> i64 {
+        (f64::from(v) / 1e-4).round() as i64
+    }
+    /// Canonical key of the infinite LINE through `a`→`b`: the sign-normalized
+    /// unit normal plus the signed offset from the origin, quantized to ~1e-3 —
+    /// so collinear segments (phase-zone edges, outline continuations split
+    /// into pieces) share one key, and `a`→`b` equals `b`→`a`.
+    fn line_key(a: Point2f32, b: Point2f32) -> SegmentSnapKey {
+        let (dx, dy) = (b.x - a.x, b.y - a.y);
+        let len = (dx * dx + dy * dy).sqrt();
+        let (mut nx, mut ny) = (-dy / len, dx / len);
+        let mut off = nx * a.x + ny * a.y;
+        if nx < -1e-6 || (nx.abs() <= 1e-6 && ny < 0.0) {
+            (nx, ny, off) = (-nx, -ny, -off);
+        }
+        let q = |v: f32| (f64::from(v) / 1e-3).round() as i64;
+        SegmentSnapKey::Line(q(nx), q(ny), q(off))
+    }
+    // Pass 1 — FIND each point's target (policy-free; see the helper's doc).
+    let mut targets: Vec<Option<(Point2f32, f32, SegmentSnapKey)>> = stroke
         .iter()
         .map(|&p| {
             // Track the nearest ENDPOINT and the nearest mid-segment FOOT
@@ -514,28 +718,88 @@ pub fn snap_stroke_to_segments(
             // even when a foot is marginally closer, so a vertex near a corner
             // lands ON the corner rather than just beside it on the edge.
             let mut best_end: Option<(f32, Point2f32)> = None;
-            let mut best_foot: Option<(f32, Point2f32)> = None;
-            let consider = |slot: &mut Option<(f32, Point2f32)>, dist: f32, target| {
-                if dist <= tol && slot.is_none_or(|(bd, _)| dist < bd) {
-                    *slot = Some((dist, target));
-                }
-            };
-            for seg in segments {
+            let mut best_foot: Option<(f32, Point2f32, usize)> = None;
+            for (si, seg) in segments.iter().enumerate() {
                 let (a, b) = (seg[0], seg[1]);
                 if geom::segment_len(a, b) < 1e-6 {
                     continue; // degenerate reference segment
                 }
-                consider(&mut best_end, geom::segment_len(p, a), a);
-                consider(&mut best_end, geom::segment_len(p, b), b);
+                for end in [a, b] {
+                    let dist = geom::segment_len(p, end);
+                    if dist <= tol && best_end.is_none_or(|(bd, _)| dist < bd) {
+                        best_end = Some((dist, end));
+                    }
+                }
                 let (q, _t, dist) = geom::project_point_to_segment(p, a, b);
-                consider(&mut best_foot, dist, q);
+                if dist <= tol && best_foot.is_none_or(|(bd, _, _)| dist < bd) {
+                    best_foot = Some((dist, q, si));
+                }
             }
-            match best_end.or(best_foot) {
-                Some((_, target)) => elective_snap(SnapKind::ToReferenceSegment, p, target, true),
-                None => p,
+            match best_end {
+                Some((dist, end)) => Some((
+                    end,
+                    dist,
+                    SegmentSnapKey::Endpoint(quantize(end.x), quantize(end.y)),
+                )),
+                None => best_foot
+                    .map(|(dist, q, si)| (q, dist, line_key(segments[si][0], segments[si][1]))),
             }
         })
-        .collect()
+        .collect();
+    // MERGE endpoint catches into the line they terminate. A stroke running
+    // along one reference line catches the line's corners at both ends — foot
+    // group + two endpoint groups — but to the user that's ONE relationship
+    // ("snap to the phase line"), not three questions. An endpoint always lies
+    // on the line(s) of the segment(s) it terminates, so: if any of those
+    // lines has FOOT members from this stroke, re-key the endpoint members to
+    // that line's key — Skip then reverts corners and feet together, while
+    // Apply still lands every member on its own pass-1 target (corner members
+    // still land ON the corner). Ambiguity (an endpoint shared by two grouped
+    // lines — a drawn corner between two snapped walls): merge into the line
+    // with the MOST foot members; tie → the line whose foot group appears
+    // first in stroke order. Deterministic over the same input, so the merged
+    // decision's representative `from` is replay-stable like any other. An
+    // isolated corner catch (no grouped line through it) keeps its own
+    // endpoint-keyed decision.
+    let mut line_groups: Vec<(SegmentSnapKey, usize)> = Vec::new(); // stroke order
+    for t in &targets {
+        if let Some((_, _, key @ SegmentSnapKey::Line(..))) = t {
+            match line_groups.iter_mut().find(|(k, _)| k == key) {
+                Some((_, count)) => *count += 1,
+                None => line_groups.push((*key, 1)),
+            }
+        }
+    }
+    if !line_groups.is_empty() {
+        for t in &mut targets {
+            let Some((_, _, key)) = t else { continue };
+            let SegmentSnapKey::Endpoint(qx, qy) = *key else {
+                continue;
+            };
+            let merged = segments
+                .iter()
+                .filter(|seg| {
+                    geom::segment_len(seg[0], seg[1]) >= 1e-6
+                        && seg
+                            .iter()
+                            .any(|e| quantize(e.x) == qx && quantize(e.y) == qy)
+                })
+                .filter_map(|seg| {
+                    let lk = line_key(seg[0], seg[1]);
+                    line_groups
+                        .iter()
+                        .position(|(k, _)| *k == lk)
+                        .map(|pos| (line_groups[pos].1, pos, lk))
+                })
+                // Most foot members wins; tie → earliest group in stroke order.
+                .max_by(|a, b| a.0.cmp(&b.0).then(b.1.cmp(&a.1)));
+            if let Some((_, _, lk)) = merged {
+                *key = lk;
+            }
+        }
+    }
+    // Pass 2 — group by feature, record one decision per group, apply.
+    apply_grouped_stroke_snaps(stroke, &targets, kind)
 }
 
 #[cfg(test)]
@@ -704,7 +968,7 @@ mod tests {
         // A vertical division line at x = 5, running y ∈ [0, 10].
         let segs = [[p(5.0, 0.0), p(5.0, 10.0)]];
         let stroke = vec![p(5.08, 4.0), p(8.0, 4.0)]; // first near the line, second far
-        let out = snap_stroke_to_segments(&stroke, &segs, 0.15);
+        let out = snap_stroke_to_segments(&stroke, &segs, 0.15, SnapKind::ToReferenceSegment);
         // Within tol → snapped onto the line (x becomes 5); mid-segment foot.
         assert!(
             (out[0].x - 5.0).abs() < 1e-4,
@@ -724,7 +988,7 @@ mod tests {
         // Near the BOTTOM endpoint (5,0): both endpoint and edge-foot are in
         // reach, but the corner should win so the vertex lands on (5,0).
         let stroke = vec![p(5.05, 0.05)];
-        let out = snap_stroke_to_segments(&stroke, &segs, 0.15);
+        let out = snap_stroke_to_segments(&stroke, &segs, 0.15, SnapKind::ToReferenceSegment);
         assert_eq!(out[0], p(5.0, 0.0), "snapped onto the endpoint corner");
     }
 
@@ -734,7 +998,7 @@ mod tests {
         let _ = take_snap_decisions();
         let segs = [[p(5.0, 0.0), p(5.0, 10.0)]];
         let stroke = vec![p(0.0, 0.0), p(5.05, 6.0), p(9.0, 9.0)];
-        let out = snap_stroke_to_segments(&stroke, &segs, 0.15);
+        let out = snap_stroke_to_segments(&stroke, &segs, 0.15, SnapKind::ToReferenceSegment);
         assert_eq!(out[0], p(0.0, 0.0), "far point untouched");
         assert!((out[1].x - 5.0).abs() < 1e-4, "near point snapped");
         assert_eq!(out[2], p(9.0, 9.0), "far point untouched");
@@ -751,7 +1015,10 @@ mod tests {
     fn snap_stroke_to_segments_empty_segments_is_identity() {
         let p = |x, y| Point2f32::new(x, y);
         let stroke = vec![p(1.0, 2.0), p(3.0, 4.0)];
-        assert_eq!(snap_stroke_to_segments(&stroke, &[], 0.15), stroke);
+        assert_eq!(
+            snap_stroke_to_segments(&stroke, &[], 0.15, SnapKind::ToReferenceSegment),
+            stroke
+        );
     }
 
     #[test]
@@ -761,8 +1028,367 @@ mod tests {
         // A zero-length "segment" is no snap target.
         let segs = [[p(5.0, 5.0), p(5.0, 5.0)]];
         let stroke = vec![p(5.02, 5.02)];
-        let out = snap_stroke_to_segments(&stroke, &segs, 0.15);
+        let out = snap_stroke_to_segments(&stroke, &segs, 0.15, SnapKind::ToReferenceSegment);
         assert_eq!(out[0], p(5.02, 5.02), "degenerate segment ignored");
         assert!(take_snap_decisions().is_empty());
+    }
+
+    #[test]
+    fn snap_stroke_to_segments_records_the_supplied_kind() {
+        let p = |x, y| Point2f32::new(x, y);
+        let _ = take_snap_decisions();
+        // A phase division at x = 5 — the new-storey outline pre-snap's kind.
+        let segs = [[p(5.0, 0.0), p(5.0, 10.0)]];
+        let stroke = vec![p(5.08, 4.0)];
+        let out = snap_stroke_to_segments(&stroke, &segs, 0.15, SnapKind::ToPhaseBoundary);
+        assert!((out[0].x - 5.0).abs() < 1e-4, "snapped onto the division");
+        let decisions = take_snap_decisions();
+        assert_eq!(decisions.len(), 1);
+        assert_eq!(
+            decisions[0].candidates[0].kind,
+            SnapKind::ToPhaseBoundary,
+            "the decision carries the caller's kind"
+        );
+    }
+
+    #[test]
+    fn stroke_run_on_one_segment_records_one_decision_and_skip_reverts_the_run() {
+        let p = |x, y| Point2f32::new(x, y);
+        let _ = take_snap_decisions();
+        // Horizontal reference y=5, x ∈ [0, 10]; ten raw ink points wobbling
+        // along its middle (all far from the endpoints, so one foot run).
+        let segs = [[p(0.0, 5.0), p(10.0, 5.0)]];
+        let stroke: Vec<Point2f32> = (0..10)
+            .map(|i| p(1.0 + 0.8 * i as f32, if i % 2 == 0 { 5.05 } else { 4.95 }))
+            .collect();
+        let out = snap_stroke_to_segments(&stroke, &segs, 0.15, SnapKind::ToReferenceSegment);
+        // Every point moved to its OWN perpendicular foot (per-point geometry
+        // identical to the old behaviour).
+        for (i, q) in out.iter().enumerate() {
+            assert!(
+                (q.y - 5.0).abs() < 1e-4,
+                "point {i} snapped onto y=5: {q:?}"
+            );
+            assert!((q.x - stroke[i].x).abs() < 1e-4, "x kept along the run");
+        }
+        let decisions = take_snap_decisions();
+        assert_eq!(decisions.len(), 1, "ONE decision for the whole run");
+        let d = &decisions[0];
+        assert_eq!(d.from, stroke[5], "from = the run's MIDDLE drawn point");
+        assert!(d.skippable);
+        assert_eq!(d.candidates.len(), 1);
+        assert_eq!(d.candidates[0].kind, SnapKind::ToReferenceSegment);
+        // Forcing Skip at the recorded `from` reverts ALL ten points to drawn.
+        set_snap_policy(vec![(d.from, SnapChoice::Skip)]);
+        let out2 = snap_stroke_to_segments(&stroke, &segs, 0.15, SnapKind::ToReferenceSegment);
+        clear_snap_policy();
+        assert_eq!(out2, stroke, "Skip reverted the WHOLE run");
+        let d2 = take_snap_decisions();
+        assert_eq!(d2.len(), 1, "the skipped decision is still recorded");
+        assert_eq!(d2[0].chosen, None);
+        assert_eq!(d2[0].from, stroke[5], "same representative from on replay");
+    }
+
+    #[test]
+    fn two_runs_on_two_segments_record_two_independently_skippable_decisions() {
+        let p = |x, y| Point2f32::new(x, y);
+        let _ = take_snap_decisions();
+        // Two vertical references at x=0 and x=20.
+        let segs = [[p(0.0, 0.0), p(0.0, 10.0)], [p(20.0, 0.0), p(20.0, 10.0)]];
+        let stroke = vec![
+            p(0.05, 2.0),
+            p(-0.05, 3.0),
+            p(0.04, 4.0), // run A on segment 0
+            p(10.0, 5.0), // far — breaks the run
+            p(20.05, 2.0),
+            p(19.95, 3.0), // run B on segment 1
+        ];
+        let out = snap_stroke_to_segments(&stroke, &segs, 0.15, SnapKind::ToReferenceSegment);
+        assert!(out[0..3].iter().all(|q| q.x.abs() < 1e-4), "run A snapped");
+        assert_eq!(out[3], stroke[3], "the far point untouched");
+        assert!(
+            out[4..6].iter().all(|q| (q.x - 20.0).abs() < 1e-4),
+            "run B snapped"
+        );
+        let decisions = take_snap_decisions();
+        assert_eq!(decisions.len(), 2, "one decision per run");
+        // Skip run A only: its points revert, run B stays snapped.
+        set_snap_policy(vec![(decisions[0].from, SnapChoice::Skip)]);
+        let out2 = snap_stroke_to_segments(&stroke, &segs, 0.15, SnapKind::ToReferenceSegment);
+        clear_snap_policy();
+        let _ = take_snap_decisions();
+        assert_eq!(&out2[0..3], &stroke[0..3], "run A reverted independently");
+        assert!(
+            out2[4..6].iter().all(|q| (q.x - 20.0).abs() < 1e-4),
+            "run B still snapped"
+        );
+    }
+
+    #[test]
+    fn line_run_with_corner_catches_at_both_ends_is_one_decision() {
+        let p = |x, y| Point2f32::new(x, y);
+        let _ = take_snap_decisions();
+        // The user's shape: a stroke running along one vertical reference line,
+        // catching the line's corners at BOTH ends. One relationship — "snap to
+        // the phase line" — must be ONE question, not foot + two corner groups.
+        let segs = [[p(5.0, 0.0), p(5.0, 10.0)]];
+        let stroke = vec![
+            p(5.05, 0.03), // catches the bottom endpoint (5,0)
+            p(4.95, 2.0),
+            p(5.05, 4.0),
+            p(4.95, 6.0),
+            p(5.05, 8.0),  // perpendicular FEET along the line
+            p(5.03, 9.95), // catches the top endpoint (5,10)
+        ];
+        let out = snap_stroke_to_segments(&stroke, &segs, 0.15, SnapKind::ToReferenceSegment);
+        // Every member keeps its OWN pass-1 target under Apply: corners on the
+        // corners, feet at their own heights on the line.
+        assert_eq!(
+            out[0],
+            p(5.0, 0.0),
+            "corner member still lands ON the corner"
+        );
+        assert_eq!(out[5], p(5.0, 10.0));
+        for i in 1..5 {
+            assert!(
+                (out[i].x - 5.0).abs() < 1e-4 && (out[i].y - stroke[i].y).abs() < 1e-4,
+                "foot member {i} on the line at its own height: {:?}",
+                out[i]
+            );
+        }
+        let decisions = take_snap_decisions();
+        assert_eq!(
+            decisions.len(),
+            1,
+            "corner catches merged into the line's decision: {decisions:?}"
+        );
+        // Skip reverts feet AND corner catches together.
+        set_snap_policy(vec![(decisions[0].from, SnapChoice::Skip)]);
+        let out2 = snap_stroke_to_segments(&stroke, &segs, 0.15, SnapKind::ToReferenceSegment);
+        clear_snap_policy();
+        let _ = take_snap_decisions();
+        assert_eq!(out2, stroke, "Skip reverted the whole merged group");
+    }
+
+    #[test]
+    fn isolated_corner_catch_keeps_its_own_decision() {
+        let p = |x, y| Point2f32::new(x, y);
+        let _ = take_snap_decisions();
+        // Two reference lines: the stroke catches line A's corner WITHOUT
+        // snapping any feet onto A, and runs feet along line B. The corner is
+        // NOT on B's line, so it must not merge into B — it keeps its own
+        // endpoint-keyed decision.
+        let segs = [[p(5.0, 0.0), p(5.0, 10.0)], [p(20.0, 0.0), p(20.0, 10.0)]];
+        let stroke = vec![
+            p(5.05, 0.03), // isolated catch on A's bottom corner
+            p(20.05, 3.0),
+            p(19.95, 5.0), // feet on B
+        ];
+        let out = snap_stroke_to_segments(&stroke, &segs, 0.15, SnapKind::ToReferenceSegment);
+        assert_eq!(out[0], p(5.0, 0.0), "corner point landed ON the endpoint");
+        assert!((out[1].x - 20.0).abs() < 1e-4);
+        let decisions = take_snap_decisions();
+        assert_eq!(
+            decisions.len(),
+            2,
+            "an isolated corner catch stays its own decision: {decisions:?}"
+        );
+    }
+
+    #[test]
+    fn ambiguous_corner_catch_merges_into_the_line_with_most_members() {
+        let p = |x, y| Point2f32::new(x, y);
+        let _ = take_snap_decisions();
+        // A drawn L against two reference walls sharing corner (0,0): three
+        // feet on the vertical line, the corner catch, two feet on the
+        // horizontal. The endpoint lies on BOTH lines; both have foot groups —
+        // it merges into the one with the MOST members (the vertical).
+        let segs = [
+            [p(0.0, 0.0), p(10.0, 0.0)], // horizontal y=0
+            [p(0.0, 0.0), p(0.0, 10.0)], // vertical x=0 (shares corner (0,0))
+        ];
+        let stroke = vec![
+            p(0.05, 6.0),
+            p(-0.04, 4.0),
+            p(0.03, 2.0),  // three feet on the vertical
+            p(0.06, 0.04), // the ambiguous corner catch at (0,0)
+            p(2.0, 0.05),
+            p(4.0, -0.03), // two feet on the horizontal
+        ];
+        let out = snap_stroke_to_segments(&stroke, &segs, 0.15, SnapKind::ToReferenceSegment);
+        assert_eq!(out[3], p(0.0, 0.0), "corner member landed on the corner");
+        let decisions = take_snap_decisions();
+        assert_eq!(
+            decisions.len(),
+            2,
+            "one decision per LINE — the corner merged, not a third question"
+        );
+        // Skipping the VERTICAL line's decision reverts its feet AND the corner
+        // (proving the corner merged into the most-members group), while the
+        // horizontal feet stay snapped.
+        let vertical = decisions
+            .iter()
+            .find(|d| (d.from.x - stroke[2].x).abs() < 1e-6)
+            .expect("vertical group's decision at its middle member");
+        set_snap_policy(vec![(vertical.from, SnapChoice::Skip)]);
+        let out2 = snap_stroke_to_segments(&stroke, &segs, 0.15, SnapKind::ToReferenceSegment);
+        clear_snap_policy();
+        let _ = take_snap_decisions();
+        assert_eq!(
+            &out2[0..4],
+            &stroke[0..4],
+            "vertical feet + corner reverted"
+        );
+        assert!(
+            (out2[4].y).abs() < 1e-4 && (out2[5].y).abs() < 1e-4,
+            "horizontal feet still snapped"
+        );
+    }
+
+    #[test]
+    fn ring_stroke_groups_an_edge_run_and_a_vertex_run_separately() {
+        let p = |x, y| Point2f32::new(x, y);
+        let _ = take_snap_decisions();
+        let ring = unit_square();
+        let stroke = vec![
+            p(2.0, 0.05),
+            p(3.0, -0.05),
+            p(4.0, 0.04), // run along edge 0 (y=0)
+            p(9.9, 0.05),
+            p(10.05, -0.03), // run onto vertex 1 (10,0)
+        ];
+        let out = snap_stroke_to_ring(&stroke, &ring, 0.2);
+        // Edge run: each point dropped onto y=0 at its own x.
+        for i in 0..3 {
+            assert!(out[i].y.abs() < 1e-4, "edge point {i} on y=0: {:?}", out[i]);
+            assert!((out[i].x - stroke[i].x).abs() < 1e-4);
+        }
+        // Vertex run: both points landed on the corner.
+        assert_eq!(out[3], p(10.0, 0.0));
+        assert_eq!(out[4], p(10.0, 0.0));
+        let decisions = take_snap_decisions();
+        assert_eq!(decisions.len(), 2, "edge run + vertex run = two decisions");
+        assert!(decisions
+            .iter()
+            .all(|d| d.candidates[0].kind == SnapKind::ToPreviousOutline));
+        // The vertex run is independently skippable at its representative from.
+        set_snap_policy(vec![(decisions[1].from, SnapChoice::Skip)]);
+        let out2 = snap_stroke_to_ring(&stroke, &ring, 0.2);
+        clear_snap_policy();
+        let _ = take_snap_decisions();
+        assert!(out2[0].y.abs() < 1e-4, "edge run still snapped");
+        assert_eq!(&out2[3..5], &stroke[3..5], "vertex run reverted");
+    }
+
+    #[test]
+    fn wobble_in_and_out_of_tol_against_one_line_is_one_decision() {
+        let p = |x, y| Point2f32::new(x, y);
+        let _ = take_snap_decisions();
+        let segs = [[p(0.0, 5.0), p(10.0, 5.0)]];
+        // A raw stroke drifting IN and OUT of tolerance against the same line:
+        // grouping is by FEATURE, not adjacency, so this is still one question.
+        let stroke = vec![
+            p(2.0, 5.05),
+            p(3.0, 5.5), // out of tol — no longer breaks the group
+            p(4.0, 4.95),
+            p(5.0, 5.5), // out of tol
+            p(6.0, 5.05),
+        ];
+        let out = snap_stroke_to_segments(&stroke, &segs, 0.15, SnapKind::ToReferenceSegment);
+        for i in [0, 2, 4] {
+            assert!((out[i].y - 5.0).abs() < 1e-4, "member {i} snapped");
+        }
+        assert_eq!(out[1], stroke[1], "out-of-tol point untouched");
+        assert_eq!(out[3], stroke[3]);
+        let decisions = take_snap_decisions();
+        assert_eq!(decisions.len(), 1, "ONE decision despite the tol gaps");
+        assert_eq!(
+            decisions[0].from, stroke[2],
+            "from = the middle MEMBER (by stroke order)"
+        );
+        // Skip reverts every member of the group.
+        set_snap_policy(vec![(decisions[0].from, SnapChoice::Skip)]);
+        let out2 = snap_stroke_to_segments(&stroke, &segs, 0.15, SnapKind::ToReferenceSegment);
+        clear_snap_policy();
+        let _ = take_snap_decisions();
+        assert_eq!(out2, stroke, "Skip reverted the whole feature group");
+    }
+
+    #[test]
+    fn collinear_segments_share_one_feature_decision() {
+        let p = |x, y| Point2f32::new(x, y);
+        let _ = take_snap_decisions();
+        let segs = [
+            [p(0.0, 5.0), p(4.0, 5.0)],
+            [p(6.0, 5.0), p(10.0, 5.0)], // collinear continuation of the first
+            [p(20.0, 0.0), p(20.0, 10.0)], // a perpendicular line — separate
+        ];
+        let stroke = vec![p(2.0, 5.05), p(8.0, 4.95), p(20.05, 3.0)];
+        let out = snap_stroke_to_segments(&stroke, &segs, 0.15, SnapKind::ToReferenceSegment);
+        assert!((out[0].y - 5.0).abs() < 1e-4, "onto the first piece");
+        assert!((out[1].y - 5.0).abs() < 1e-4, "onto the collinear piece");
+        assert!((out[2].x - 20.0).abs() < 1e-4, "onto the perpendicular");
+        let decisions = take_snap_decisions();
+        assert_eq!(
+            decisions.len(),
+            2,
+            "collinear pieces are ONE feature; the perpendicular is another"
+        );
+    }
+
+    #[test]
+    fn sub_centimetre_single_candidate_snaps_apply_silently() {
+        let p = |x, y| Point2f32::new(x, y);
+        let _ = take_snap_decisions();
+        // A stroke group whose every member moves < 1 cm: applied, unrecorded.
+        let segs = [[p(5.0, 0.0), p(5.0, 10.0)]];
+        let stroke = vec![p(5.005, 3.0), p(4.996, 4.0)];
+        let out = snap_stroke_to_segments(&stroke, &segs, 0.15, SnapKind::ToReferenceSegment);
+        assert!(
+            (out[0].x - 5.0).abs() < 1e-6 && (out[1].x - 5.0).abs() < 1e-6,
+            "the invisible snap is still APPLIED"
+        );
+        assert!(
+            take_snap_decisions().is_empty(),
+            "an invisible snap asks nothing"
+        );
+        // A single-candidate corner hug already (almost) AT the corner — the
+        // `ToCorner (x,y) -> (x,y)` no-op tag — is applied without a decision.
+        let ring = unit_square();
+        let out = snap_to_corner(p(10.004, 10.003), &ring, 0.2);
+        assert_eq!(out, p(10.0, 10.0));
+        assert!(take_snap_decisions().is_empty());
+        // One VISIBLE member keeps the group's question alive.
+        let stroke = vec![p(5.005, 3.0), p(5.08, 4.0)];
+        let out = snap_stroke_to_segments(&stroke, &segs, 0.15, SnapKind::ToReferenceSegment);
+        assert!((out[0].x - 5.0).abs() < 1e-6 && (out[1].x - 5.0).abs() < 1e-6);
+        assert_eq!(take_snap_decisions().len(), 1);
+    }
+
+    #[test]
+    fn commit_dedupes_identical_decisions_within_one_action() {
+        let p = |x, y| Point2f32::new(x, y);
+        let _ = take_snap_decisions();
+        let segs = [[p(5.0, 0.0), p(5.0, 10.0)]];
+        let stroke = vec![p(5.05, 4.0)];
+        // The splice pipeline runs twice per two-piece carve — the same snap
+        // fires twice within one action. It must record ONCE.
+        let a = snap_stroke_to_segments(&stroke, &segs, 0.15, SnapKind::ToReferenceSegment);
+        let b = snap_stroke_to_segments(&stroke, &segs, 0.15, SnapKind::ToReferenceSegment);
+        assert_eq!(a, b, "the applied geometry is unaffected by the dedup");
+        assert!((a[0].x - 5.0).abs() < 1e-4, "still snapped both times");
+        let decisions = take_snap_decisions();
+        assert_eq!(decisions.len(), 1, "the duplicate was not re-recorded");
+    }
+
+    #[test]
+    fn dist_to_ring_measures_perimeter_distance() {
+        let p = |x, y| Point2f32::new(x, y);
+        let ring = unit_square();
+        assert!((dist_to_ring(&ring, p(5.0, -1.0)) - 1.0).abs() < 1e-4);
+        assert!(dist_to_ring(&ring, p(10.0, 4.0)) < 1e-4, "on the ring");
+        // Interior point: nearest wall, not a vertex.
+        assert!((dist_to_ring(&ring, p(5.0, 2.0)) - 2.0).abs() < 1e-4);
+        assert_eq!(dist_to_ring(&[p(0.0, 0.0)], p(1.0, 1.0)), f32::INFINITY);
     }
 }

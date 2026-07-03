@@ -120,6 +120,12 @@ impl AppController {
         // Drop a half-finished line AND abandon a half-dimensioned carve —
         // BEFORE the flag flips (the carve is detected via the OLD mode).
         self.cancel_pending_ceiling_step();
+        // Leaving abandons the in-flight ceiling carve, so its tags (which
+        // would replay a stroke that only means "ceiling step" under the mode)
+        // must not survive the exit. Entering clears unconditionally below.
+        if !on {
+            self.clear_subarea_capture(SubareaFlow::CeilingStep);
+        }
         self.ceiling_step_mode = on;
         if on {
             self.exit_openings_mode();
@@ -169,19 +175,27 @@ impl AppController {
         }
         // Paste-ready stroke dump (matches the living-area / step-area dumps).
         dump_stroke("ceiling-step", &pts);
+        // Snap-tag capture: supersede any previous action's tags (their replay
+        // could move a wall out from under whatever this stroke creates) and
+        // take the pre-action state — the carve routes below surface their
+        // elective snaps through the generic tag overlay (a Cut outcome pushes
+        // no undo entry, so its capture carries this `before` itself). The
+        // LINE route keeps its own bespoke tag and leaves no generic capture.
+        self.begin_snap_capture();
+        let before = self.current_history_snapshot();
         // Flush the live buffer to its slot: both the fit and the carve work
         // against `document.outline`, which is only synced on shape switches.
         self.sync_active();
         // A CLOSED stroke is an AREA, not a line — the floor-step parity path.
         if manip_plan::stroke_is_closed(&pts, self.tuning.subarea.close_gap_m) {
-            self.apply_ceiling_carve_stroke(&pts);
+            self.apply_ceiling_carve_stroke(&pts, before);
             return;
         }
         // A single straight stroke is a step LINE; any other open stroke (a
         // multi-side cut whose ends meet the outline) is an AREA cut — carve it
         // through the same pipeline instead of rejecting it as "not a line".
         if manip_plan::fit_axis_line(&pts).is_none() {
-            self.apply_ceiling_carve_stroke(&pts);
+            self.apply_ceiling_carve_stroke(&pts, before);
             return;
         }
         match self.document.fit_ceiling_step_line(&pts) {
@@ -199,7 +213,7 @@ impl AppController {
     /// ends meet the outline (the carve resolves the latter to an auto-picked
     /// area). The SAME delta prompt as the line flow follows once dimensioning
     /// resolves. Rejections are logged; nothing is mutated on failure.
-    fn apply_ceiling_carve_stroke(&mut self, pts: &[Point2f32]) {
+    fn apply_ceiling_carve_stroke(&mut self, pts: &[Point2f32], before: HistorySnapshot) {
         let idx = self.current_storey_idx.unwrap_or(0);
         let step_rings: Vec<Vec<Point2f32>> = self
             .ceiling_step_regions
@@ -209,6 +223,7 @@ impl AppController {
         // Level onto (and pin to) the construction-phase lines, so a ceiling step
         // drawn beside a phase "year" boundary lands on it — same as living areas.
         let ref_walls = self.phase_reference_walls();
+        let action_points: Vec<(f32, f32)> = pts.iter().map(|p| (p.x, p.y)).collect();
         match self.document.carve_or_cut_in_available(
             pts,
             &step_rings,
@@ -218,6 +233,8 @@ impl AppController {
             Ok((boundary, SubareaOutcome::Area(plan))) => {
                 if let Err(e) = plan.validate_simple() {
                     log::warn!("ceiling step area rejected (walls cross): {:?}", e);
+                    // Nothing committed — drop the rejected carve's decisions.
+                    let _ = manip_plan::take_snap_decisions();
                     return;
                 }
                 let undo_snap = self.current_history_snapshot();
@@ -226,6 +243,11 @@ impl AppController {
                 // ceiling-step mode IS the in-flight carve, so undo (a
                 // document restore) cleanly rewinds the whole pending state.
                 self.begin_step_area_dimensioning(slot, undo_snap);
+                self.capture_snap_action(SnapAction::Subarea {
+                    flow: SubareaFlow::CeilingStep,
+                    points: action_points,
+                    pick: None,
+                });
             }
             // A cut with corners whose ends reach the outline at two different
             // walls splits the region in TWO — reuse the floor step's side-pick
@@ -238,8 +260,20 @@ impl AppController {
                 let sa = self.pinned_subarea_slot_refs(&boundary, a, &ref_walls);
                 let sb = self.pinned_subarea_slot_refs(&boundary, b, &ref_walls);
                 self.pending_step_cut = Some([sa, sb]);
+                self.capture_snap_action_pending(
+                    SnapAction::Subarea {
+                        flow: SubareaFlow::CeilingStep,
+                        points: action_points,
+                        pick: None,
+                    },
+                    before,
+                    manip_plan::take_snap_decisions(),
+                );
             }
-            Err(e) => log::error!("ceiling-step carve: {}", e),
+            Err(e) => {
+                log::error!("ceiling-step carve: {}", e);
+                let _ = manip_plan::take_snap_decisions();
+            }
         }
     }
 

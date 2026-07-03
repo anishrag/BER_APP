@@ -584,9 +584,9 @@ fn tool_ui<F: FnMut(UiEvent)>(
                 )
                 .hint(
                     "Mark each floor's heat-loss exposure across every storey: \
-                     confirm all storeys are added (runs the party auto-pass), \
-                     then select floors and pick ground / exposed / semi / \
-                     non-heat-loss",
+                     confirm all storeys are added, then select floors and pick \
+                     ground / exposed / semi / non-heat-loss (storey junctions \
+                     classify automatically)",
                 )
                 .clicked()
             {
@@ -607,8 +607,9 @@ fn tool_ui<F: FnMut(UiEvent)>(
                 )
                 .hint(
                     "Mark each ceiling's heat-loss exposure across every storey: \
-                     confirm all storeys are added (runs the party auto-pass), \
-                     then select ceilings and pick exposed roof / party / unheated",
+                     confirm all storeys are added, then select ceilings and pick \
+                     exposed roof / party / unheated (storey junctions classify \
+                     automatically)",
                 )
                 .clicked()
             {

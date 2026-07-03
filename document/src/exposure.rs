@@ -10,157 +10,10 @@ use ber_model::ber::structural::{
     CeilingExposure, FloorExposure, Storey, SurfaceKind, WallExposure, WallRegion, WallRegions,
 };
 use domain::points::{Point2f32, Point2f64};
-use manip_plan::{project_distance_along, ring_within_ring, segment_len, VertexId};
+use manip_plan::{
+    project_distance_along, ring_contains_point, ring_within_ring, segment_len, VertexId,
+};
 use std::collections::HashMap;
-
-/// A floor/ceiling carve below an area epsilon (m²) is boolean-op debris (or a
-/// negligible sliver where two footprints barely touch) — not a real party
-/// surface. Mirrors the `SLIVER_AREA_M2` filter the floor-region splits use.
-const CARVE_AREA_EPS_M2: f64 = 1e-3;
-
-/// A party-wall sub-range shorter than this (m) is a sliver where a wall just
-/// grazes a neighbour footprint corner — not a genuine shared wall.
-const PARTY_WALL_EPS_M: f32 = 1e-2;
-
-/// Unsigned shoelace area of a plan ring (m²); `< 3` vertices → 0.
-fn ring_area(ring: &[Point2f64]) -> f64 {
-    if ring.len() < 3 {
-        return 0.0;
-    }
-    let n = ring.len();
-    let mut s = 0.0;
-    for i in 0..n {
-        let (a, b) = (ring[i], ring[(i + 1) % n]);
-        s += a.x * b.y - b.x * a.y;
-    }
-    s.abs() / 2.0
-}
-
-/// Plan centroid of a ring (area-weighted; falls back to the vertex average for
-/// a degenerate zero-area ring). Matches `FloorRegion::centroid`'s sampling so a
-/// carve's sample point lands inside the region that resolve re-derives from it.
-fn ring_centroid(ring: &[Point2f64]) -> Point2f64 {
-    let n = ring.len();
-    if n == 0 {
-        return Point2f64::new(0.0, 0.0);
-    }
-    let mut a = 0.0;
-    let mut cx = 0.0;
-    let mut cy = 0.0;
-    for i in 0..n {
-        let p = ring[i];
-        let q = ring[(i + 1) % n];
-        let cross = p.x * q.y - q.x * p.y;
-        a += cross;
-        cx += (p.x + q.x) * cross;
-        cy += (p.y + q.y) * cross;
-    }
-    if a.abs() < 1e-12 {
-        let sx: f64 = ring.iter().map(|p| p.x).sum();
-        let sy: f64 = ring.iter().map(|p| p.y).sum();
-        return Point2f64::new(sx / n as f64, sy / n as f64);
-    }
-    Point2f64::new(cx / (3.0 * a), cy / (3.0 * a))
-}
-
-/// A `geo::Polygon` (no holes) from a plan ring.
-fn ring_poly(ring: &[Point2f64]) -> geo::Polygon<f64> {
-    geo::Polygon::new(
-        geo::LineString::from(ring.iter().map(|p| (p.x, p.y)).collect::<Vec<_>>()),
-        vec![],
-    )
-}
-
-/// The exterior ring of a `geo::Polygon` as plan points (drops the closing
-/// repeat so it matches the stored split-ring shape).
-fn poly_exterior_ring(poly: &geo::Polygon<f64>) -> Vec<Point2f64> {
-    let mut ring: Vec<Point2f64> = poly
-        .exterior()
-        .coords()
-        .map(|c| Point2f64::new(c.x, c.y))
-        .collect();
-    if ring.len() >= 2 && ring.first() == ring.last() {
-        ring.pop();
-    }
-    ring
-}
-
-/// Clip wall segment `a`→`b` (plan metres) by footprint polygon `fp`, returning
-/// the along-wall `(start_m, end_m)` sub-ranges of the segment that lie WITHIN
-/// `fp` — the shared length of a party wall. Robust to a wall partly in / out
-/// (geo 1-D `clip` returns one range per inside run). `fp` with `< 3` vertices →
-/// empty. Distances are measured from `a` along `a`→`b`.
-fn wall_ranges_within(a: Point2f32, b: Point2f32, fp: &[Point2f64]) -> Vec<(f32, f32)> {
-    use geo::bool_ops::BooleanOps;
-    if fp.len() < 3 {
-        return Vec::new();
-    }
-    let len = segment_len(a, b);
-    if len < 1e-6 {
-        return Vec::new();
-    }
-    let seg = geo::MultiLineString::new(vec![geo::LineString::from(vec![
-        (a.x as f64, a.y as f64),
-        (b.x as f64, b.y as f64),
-    ])]);
-    let inside = ring_poly(fp).clip(&seg, false);
-    let mut ranges: Vec<(f32, f32)> = Vec::new();
-    for ls in &inside.0 {
-        let mut d_min = f32::MAX;
-        let mut d_max = f32::MIN;
-        for c in ls.coords() {
-            let d = project_distance_along(a, b, len, c.x as f32, c.y as f32);
-            d_min = d_min.min(d);
-            d_max = d_max.max(d);
-        }
-        if d_max - d_min > PARTY_WALL_EPS_M {
-            ranges.push((d_min.max(0.0), d_max.min(len)));
-        }
-    }
-    ranges
-}
-
-/// The party pieces of floor/ceiling region ring `r` against neighbour footprint
-/// `neighbour`: a genuine PARTIAL overlap yields the `r ∩ neighbour` pieces (each
-/// as `(boundary ring, centroid)`); FULL containment yields none (the
-/// full-containment auto-derive already marks it); no overlap yields none. A
-/// piece below [`CARVE_AREA_EPS_M2`], or one that is effectively the whole region
-/// (the `rest = r − neighbour` is a negligible sliver), is dropped.
-fn party_overlap_pieces(
-    r: &[Point2f64],
-    neighbour: &[Point2f64],
-) -> Vec<(Vec<Point2f64>, Point2f64)> {
-    use geo::bool_ops::BooleanOps;
-    if r.len() < 3 || neighbour.len() < 3 {
-        return Vec::new();
-    }
-    // Full containment is the auto-derive's job — emit no carve.
-    if ring_within_ring(r, neighbour, CONTAINMENT_TOL_M) {
-        return Vec::new();
-    }
-    let r_poly = ring_poly(r);
-    let party = r_poly.intersection(&ring_poly(neighbour));
-    let rest = r_poly.difference(&ring_poly(neighbour));
-    let rest_area: f64 = rest
-        .0
-        .iter()
-        .map(|p| ring_area(&poly_exterior_ring(p)))
-        .sum();
-    // The non-party remainder is a negligible sliver → treat as full containment.
-    if rest_area < CARVE_AREA_EPS_M2 {
-        return Vec::new();
-    }
-    let mut out = Vec::new();
-    for piece in &party.0 {
-        let ring = poly_exterior_ring(piece);
-        if ring_area(&ring) < CARVE_AREA_EPS_M2 {
-            continue; // sliver
-        }
-        let c = ring_centroid(&ring);
-        out.push((ring, c));
-    }
-    out
-}
 
 /// Durable identity for a RISER (interior step-face) wall: its base edge as a
 /// quantized, orientation-independent plan segment (millimetre grid). Risers
@@ -322,6 +175,9 @@ impl StoreyDoc {
     /// unmarked length never materializes into sections; it shows up as `Unset`
     /// in the derived coverage instead (single-representation rule: the
     /// in-session model equals the post-reload one with no canonicalize pass).
+    ///
+    /// [`WallExposure::InterStorey`] is DERIVED-only (`derive_inter_storey`
+    /// stamps and clears it) — painting it is refused as a no-op.
     pub fn set_wall_section(
         &mut self,
         vid: VertexId,
@@ -330,6 +186,9 @@ impl StoreyDoc {
         len: f32,
         exposure: WallExposure,
     ) {
+        if exposure == WallExposure::InterStorey {
+            return; // derived-only classification — never assessor-painted
+        }
         let (s, e) = (start.clamp(0.0, len), end.clamp(0.0, len));
         // A zero-length paint is a no-op — bail BEFORE creating the map entry,
         // so an untouched wall stays ABSENT (matching what a reload rebuilds;
@@ -354,6 +213,11 @@ impl StoreyDoc {
     /// takes precedence over the auto-derive (which only `or_insert`s). Returns
     /// the [`CentroidKey`] written, or `None` when no floor region is under the
     /// tap.
+    ///
+    /// [`FloorExposure::InterStorey`] is DERIVED-only: passing it as `e` is
+    /// refused (`None`, nothing written), and a tap on a region that currently
+    /// resolves `InterStorey` is a no-op too (`None`) — the derivation is
+    /// authoritative over that surface.
     pub fn set_floor_exposure_at(
         &mut self,
         storey: &Storey,
@@ -361,8 +225,14 @@ impl StoreyDoc {
         y: f64,
         e: FloorExposure,
     ) -> Option<CentroidKey> {
+        if e == FloorExposure::InterStorey {
+            return None; // derived-only classification — never assessor-set
+        }
         let id = storey.surface_at(SurfaceKind::Floors, x, y, 0.0)?;
         let region = storey.floors.regions.iter().find(|r| r.id == id)?;
+        if region.exposure == FloorExposure::InterStorey {
+            return None; // the derivation owns this surface — refuse the write
+        }
         let key = centroid_key(region.centroid());
         self.floor_exposure.insert(key, e);
         Some(key)
@@ -372,6 +242,11 @@ impl StoreyDoc {
     /// point `(x, y)` — the ceiling mirror of
     /// [`set_floor_exposure_at`](StoreyDoc::set_floor_exposure_at). `None` when
     /// no ceiling region is under the tap.
+    ///
+    /// [`CeilingExposure::InterStorey`] is DERIVED-only: passing it as `e` is
+    /// refused (`None`, nothing written), and a tap on a region that currently
+    /// resolves `InterStorey` is a no-op too (`None`) — the derivation is
+    /// authoritative over that surface.
     pub fn set_ceiling_exposure_at(
         &mut self,
         storey: &Storey,
@@ -379,117 +254,17 @@ impl StoreyDoc {
         y: f64,
         e: CeilingExposure,
     ) -> Option<CentroidKey> {
+        if e == CeilingExposure::InterStorey {
+            return None; // derived-only classification — never assessor-set
+        }
         let id = storey.surface_at(SurfaceKind::Ceilings, x, y, 0.0)?;
         let region = storey.ceilings.regions.iter().find(|r| r.id == id)?;
+        if region.exposure == CeilingExposure::InterStorey {
+            return None; // the derivation owns this surface — refuse the write
+        }
         let key = centroid_key(region.centroid());
         self.ceiling_exposure.insert(key, e);
         Some(key)
-    }
-
-    /// Mark the still-`Unset` sub-ranges of every outline perimeter wall that lie
-    /// over a neighbour footprint (above or below) as [`WallExposure::NonHeatLoss`]
-    /// — a party wall shared with the storey above/below. The one-shot
-    /// inter-storey auto-pass (vs. the per-frame [`auto_derive_horizontal_exposure`]
-    /// for FLOORS/CEILINGS), so it preserves manual marks: a FACE-PARTITIONED wall
-    /// is skipped entirely, and on every other wall only the gaps that
-    /// [`wall_coverage`] still reports `Unset` are painted (an existing section
-    /// survives). `None` footprints contribute nothing.
-    pub fn auto_mark_party_walls(
-        &mut self,
-        below_fp: Option<&[Point2f64]>,
-        above_fp: Option<&[Point2f64]>,
-    ) {
-        for (vid, a, b) in self.outline.floor_plan.perimeter_walls() {
-            // A face-partitioned wall is owned by its 2-D regions, not 1-D
-            // sections — leave it for the partition machinery.
-            if self.is_wall_partitioned(vid) {
-                continue;
-            }
-            let len = segment_len(a, b);
-            if len < 1e-6 {
-                continue;
-            }
-            // The sub-ranges shared with EITHER neighbour (a party wall is shared
-            // whether the overlap is above or below).
-            let mut shared: Vec<(f32, f32)> = Vec::new();
-            if let Some(fp) = below_fp {
-                shared.extend(wall_ranges_within(a, b, fp));
-            }
-            if let Some(fp) = above_fp {
-                shared.extend(wall_ranges_within(a, b, fp));
-            }
-            if shared.is_empty() {
-                continue;
-            }
-            // Only paint the parts that are STILL `Unset` — clip each shared range
-            // against the wall's current `Unset` coverage gaps (preserve marks).
-            let sections = self
-                .wall_sections
-                .get(&vid)
-                .map(Vec::as_slice)
-                .unwrap_or(&[]);
-            let unset: Vec<(f32, f32)> = wall_coverage(len, sections)
-                .into_iter()
-                .filter(|(s, e, exp)| *exp == WallExposure::Unset && e - s > PARTY_WALL_EPS_M)
-                .map(|(s, e, _)| (s, e))
-                .collect();
-            for (gs, ge) in &unset {
-                for (ss, se) in &shared {
-                    let s = ss.max(*gs);
-                    let e = se.min(*ge);
-                    if e - s > PARTY_WALL_EPS_M {
-                        self.set_wall_section(vid, s, e, len, WallExposure::NonHeatLoss);
-                    }
-                }
-            }
-        }
-    }
-
-    /// Plan the party-FLOOR carves of resolved `storey` against the storey BELOW's
-    /// footprint `below_fp`: returns `(split rings to push onto
-    /// `floor_splits`, party sample points)`. A floor region FULLY within
-    /// `below_fp` yields nothing (the full-containment auto-derive marks it
-    /// `NonHeatLoss`); a genuine PARTIAL overlap (cantilever / setback) yields the
-    /// party piece's boundary ring (the durable split) plus its centroid (the
-    /// stamp sample). Negligible slivers are dropped. Pure — the shell pushes the
-    /// rings, re-resolves, then stamps the samples.
-    pub fn plan_party_floor_carves(
-        &self,
-        storey: &Storey,
-        below_fp: &[Point2f64],
-    ) -> (Vec<Vec<Point2f64>>, Vec<Point2f64>) {
-        let mut rings = Vec::new();
-        let mut samples = Vec::new();
-        for ring in storey.floors.to_vertex_lists() {
-            for (piece, c) in party_overlap_pieces(&ring, below_fp) {
-                rings.push(piece);
-                samples.push(c);
-            }
-        }
-        (rings, samples)
-    }
-
-    /// Plan the party-CEILING carves of resolved `storey` against the storey
-    /// ABOVE's footprint `above_fp` — the ceiling mirror of
-    /// [`plan_party_floor_carves`](Self::plan_party_floor_carves). Returns
-    /// `(split rings for `ceiling_splits`, party sample points)` over the storey's
-    /// ceiling/roof region rings; a partial overlap with the storey above yields
-    /// the `ceiling ∩ above_fp` piece (its boundary ring + centroid).
-    pub fn plan_party_ceiling_carves(
-        &self,
-        storey: &Storey,
-        above_fp: &[Point2f64],
-    ) -> (Vec<Vec<Point2f64>>, Vec<Point2f64>) {
-        let mut rings = Vec::new();
-        let mut samples = Vec::new();
-        for region in &storey.ceilings.regions {
-            let ring = ceiling_ring_xy(region);
-            for (piece, c) in party_overlap_pieces(&ring, above_fp) {
-                rings.push(piece);
-                samples.push(c);
-            }
-        }
-        (rings, samples)
     }
 
     /// This storey's heat-loss wall SEGMENTS over the FULL perimeter: every
@@ -579,31 +354,79 @@ impl StoreyDoc {
     /// Rebuild the runtime section model from the persisted `WallRegions` (the
     /// source of truth) on load. Each region's base edge is projected onto the
     /// perimeter wall it lies on to recover its `(start_m, end_m, exposure)`;
-    /// regions are grouped by wall and sorted. `Unset` and `Ground` regions are
-    /// SKIPPED: `Unset` is derived coverage (recovering it would mark every
-    /// wall after one save/load) and `Ground` is riser-only (the assessor's
-    /// explicit choice in the riser toolbar — recovering it would turn risers
-    /// into phantom painted sections). Riser regions never recover anyway —
-    /// their base edges lie on no perimeter wall, so the geometric match below
-    /// drops them whatever their exposure (that's what keeps an overridden
-    /// Exposed/Semi/NonHeatLoss riser out too); the `Ground` skip is
-    /// belt-and-braces on top. Inverse of the commit-time derivation.
+    /// regions are grouped by wall and sorted. `Unset` and `Ground` regions
+    /// are SKIPPED: `Unset` is derived coverage (recovering it would mark
+    /// every wall after one save/load) and `Ground` is riser-only (the
+    /// assessor's explicit choice in the riser toolbar — recovering it would
+    /// turn risers into phantom painted sections). Riser regions never recover
+    /// anyway — their base edges lie on no perimeter wall, so the geometric
+    /// match below drops them whatever their exposure (that's what keeps an
+    /// overridden Exposed/Semi/NonHeatLoss riser out too); the `Ground` skip
+    /// is belt-and-braces on top. Inverse of the commit-time derivation.
+    ///
+    /// A derived `InterStorey` BAND never recovers as its own mark
+    /// (`derive_inter_storey` re-stamps it on every re-derive — recovering it
+    /// would freeze a derived mark into a painted section), BUT it may own the
+    /// wall's only recoverable base span: the derivation's HORIZONTAL split
+    /// leaves the assessor's painted remainder STACKED ABOVE the band with no
+    /// base edge of its own. That paint must survive a reload, so the band's
+    /// span recovers with the stacked piece's exposure
+    /// ([`stacked_exposure_above`]) — the next resolve then repaints the whole
+    /// span and the derivation re-splits it, reproducing band + remainder
+    /// exactly (the reload fixpoint).
+    ///
+    /// The same applies to an ORPHANED-`Unset` band: when the neighbour is
+    /// redrawn/shrunk while THIS storey is non-active, its walls keep the
+    /// stale split and the derivation's clear pass reverts the band piece to
+    /// `Unset` — the painted remainder is still stacked above it with no base
+    /// span of its own. An `Unset` piece with painted stack above therefore
+    /// recovers exactly like an `InterStorey` band (same duplicate guards); a
+    /// plain `Unset` piece with nothing painted above still never recovers.
     pub fn sections_from_wall_regions(
         &self,
         walls: &WallRegions,
     ) -> HashMap<VertexId, Vec<ExposureSection>> {
         let mut out: HashMap<VertexId, Vec<ExposureSection>> = HashMap::new();
+        // Pass 1 — every directly recoverable painted region (remembering
+        // which ones DID recover, so a band never duplicates their span).
+        let mut recovered_ids: std::collections::HashSet<ItemId> = std::collections::HashSet::new();
+        let mut bands: Vec<&WallRegion> = Vec::new();
         for region in &walls.regions {
-            if matches!(region.exposure, WallExposure::Unset | WallExposure::Ground) {
-                continue; // derived, not painted — never recovers to sections
+            match region.exposure {
+                WallExposure::Ground => continue, // riser-only, never recovers
+                // An InterStorey band — or an Unset piece, which may be a
+                // pass-0-reverted (orphaned) band — may carry stacked paint;
+                // pass 2 decides. Neither ever recovers as its OWN mark.
+                WallExposure::Unset | WallExposure::InterStorey => {
+                    bands.push(region);
+                    continue;
+                }
+                _ => {}
             }
             let Some((vid, start_m, end_m, _len)) = self.recover_wall_region_span(region) else {
                 continue; // region's base edge isn't on any current wall (a riser)
             };
+            recovered_ids.insert(region.id);
             out.entry(vid).or_default().push(ExposureSection {
                 start_m,
                 end_m,
                 exposure: region.exposure,
+            });
+        }
+        // Pass 2 — each band's span carries the STACKED remainder's paint (see
+        // the doc above), unless that remainder already recovered itself or a
+        // painted sibling BELOW owns the span.
+        for band in bands {
+            let Some(exposure) = stacked_exposure_above(walls, band, &recovered_ids) else {
+                continue;
+            };
+            let Some((vid, start_m, end_m, _len)) = self.recover_wall_region_span(band) else {
+                continue;
+            };
+            out.entry(vid).or_default().push(ExposureSection {
+                start_m,
+                end_m,
+                exposure,
             });
         }
         for secs in out.values_mut() {
@@ -776,15 +599,66 @@ impl StoreyDoc {
     }
 }
 
-/// Plan ring (world metres) of a ceiling region — its `Polygon3D` exterior
-/// projected to xy. `< 3` vertices → empty.
-fn ceiling_ring_xy(region: &ber_model::ber::structural::CeilingRegion) -> Vec<Point2f64> {
-    region
+/// The assessor's paint carried by the piece STACKED directly above a `band`
+/// — an `InterStorey` piece, or an ORPHANED `Unset` one (the derivation's
+/// clear pass reverted a stale band on a non-active storey; the split
+/// geometry survives) — i.e. the horizontal-split remainder sharing the
+/// band's plan span, its bottom edge on the band's top. `None` when nothing
+/// painted sits above (the band reaches the wall top, or the piece above is
+/// `Unset`/derived), when the piece above already recovered its OWN span
+/// (`recovered_ids`), or when a PAINTED sibling sits BELOW the band (its own
+/// base edge already recovers the span) — in each case recovering the band
+/// too would duplicate the section. Support for
+/// [`StoreyDoc::sections_from_wall_regions`]'s reload fixpoint.
+fn stacked_exposure_above(
+    walls: &WallRegions,
+    band: &WallRegion,
+    recovered_ids: &std::collections::HashSet<ItemId>,
+) -> Option<WallExposure> {
+    const EPS: f64 = 1e-3;
+    let (a, b) = band.base_edge()?;
+    let (band_lo, band_hi) = band
         .polygon
         .exterior
         .iter()
-        .map(|v| Point2f64::new(v.x, v.y))
-        .collect()
+        .fold((f64::INFINITY, f64::NEG_INFINITY), |(lo, hi), v| {
+            (lo.min(v.z), hi.max(v.z))
+        });
+    // A region whose ring touches BOTH of the band's plan endpoints at `z`.
+    let shares_edge_at = |r: &WallRegion, z: f64| {
+        let has = |x: f64, y: f64| {
+            r.polygon
+                .exterior
+                .iter()
+                .any(|v| (v.x - x).abs() < EPS && (v.y - y).abs() < EPS && (v.z - z).abs() < EPS)
+        };
+        has(a.x, a.y) && has(b.x, b.y)
+    };
+    let painted = |e: WallExposure| {
+        !matches!(
+            e,
+            WallExposure::Unset | WallExposure::Ground | WallExposure::InterStorey
+        )
+    };
+    // A painted sibling below the band owns the span via its own base edge.
+    if walls
+        .regions
+        .iter()
+        .any(|r| r.id != band.id && painted(r.exposure) && shares_edge_at(r, band_lo))
+    {
+        return None;
+    }
+    walls
+        .regions
+        .iter()
+        .find(|r| {
+            r.id != band.id
+                // Already recovered its own span in pass 1 — don't duplicate.
+                && !recovered_ids.contains(&r.id)
+                && painted(r.exposure)
+                && shares_edge_at(r, band_hi)
+        })
+        .map(|r| r.exposure)
 }
 
 /// Tolerance for the conservative full-containment overlap test (metres): a
@@ -792,78 +666,30 @@ fn ceiling_ring_xy(region: &ber_model::ber::structural::CeilingRegion) -> Vec<Po
 /// contained, so a shared/coincident stack boundary reads as fully overlapping.
 const CONTAINMENT_TOL_M: f64 = 0.05;
 
-/// Auto-derive this storey's floor/ceiling exposure from the resolved stack and
-/// write it into the StoreyDoc maps — a controller-driven pre-pass run AFTER all
-/// storeys resolve (it needs the neighbours' resolved footprints). Precedence is
-/// **manual > auto > Unset**: every write is `entry(key).or_insert(derived)`, so
-/// a value the assessor set manually is never clobbered.
-///
-/// Derivation (CONSERVATIVE FULL-CONTAINMENT — a region only auto-classifies as
-/// Party / NonHeatLoss when it sits ENTIRELY over the neighbour footprint;
-/// partial overlap from a cantilever/setback stays absent → resolves `Unset`,
-/// left for manual marking):
-///  - a floor fully covered by the storey BELOW → `NonHeatLoss` (party floor to
-///    the dwelling below); the lowest floor is left `Unset` for the assessor;
-///  - an intermediate ceiling fully covered by the storey ABOVE → `Party` (party
-///    ceiling to the dwelling above); the TOP ceiling is left `Unset` for the
-///    assessor (it could be an exposed roof OR sit under an unheated attic).
-pub fn auto_derive_horizontal_exposure(
-    doc: &mut StoreyDoc,
-    ber: &Ber,
-    idx: usize,
-    n_storeys: usize,
-) {
-    let Some(storey) = ber.storeys.get(idx) else {
-        return;
-    };
-    // Floors: a floor fully over the storey BELOW is a party floor (NonHeatLoss).
-    // The lowest storey's floor is deliberately NOT auto-classified — "ground"
-    // isn't always right (it could sit over a basement/garage, or be exposed), so
-    // it's left `Unset` for the assessor to label in the floor-exposure view.
-    let below_footprint = idx
-        .checked_sub(1)
-        .and_then(|b| ber.storeys.get(b))
-        .and_then(|s| s.floors.footprint_ring());
-    let floor_rings = storey.floors.to_vertex_lists();
-    for (region, ring) in storey.floors.regions.iter().zip(&floor_rings) {
-        let derived = below_footprint
-            .as_ref()
-            .filter(|below| ring_within_ring(ring, below, CONTAINMENT_TOL_M))
-            .map(|_| FloorExposure::NonHeatLoss);
-        if let Some(e) = derived {
-            doc.floor_exposure
-                .entry(centroid_key(region.centroid()))
-                .or_insert(e);
-        }
-    }
-    // Ceilings: an intermediate ceiling fully under the storey above is a party
-    // ceiling. The TOP storey's ceiling is deliberately NOT auto-classified —
-    // it could be an exposed roof OR sit under an unheated attic, so it's left
-    // `Unset` for the assessor to label in the ceiling-exposure view (mirrors
-    // the lowest floor).
-    let above_footprint = (idx + 1 < n_storeys)
-        .then(|| ber.storeys.get(idx + 1))
-        .flatten()
-        .and_then(|s| s.floors.footprint_ring());
-    for region in &storey.ceilings.regions {
-        let ring = ceiling_ring_xy(region);
-        let derived = above_footprint
-            .as_ref()
-            .filter(|above| ring_within_ring(&ring, above, CONTAINMENT_TOL_M))
-            .map(|_| CeilingExposure::Party);
-        if let Some(e) = derived {
-            doc.ceiling_exposure
-                .entry(centroid_key(region.centroid()))
-                .or_insert(e);
-        }
-    }
+/// Drop the LEGACY party-carve `ceiling_splits` rings a removed neighbour left
+/// on `below`: every ring FULLY contained in `removed_fp` (the deleted storey's
+/// footprint, or the pre-redraw one — party carve rings were
+/// `ceiling ∩ above_footprint` by construction, so containment identifies
+/// them). The ring-retraction half of the retired (phase-3-deleted)
+/// `retract_party_ceiling_from_below`; the classification half is gone —
+/// `derive_inter_storey`'s clear pass retracts stale `InterStorey` stamps
+/// automatically on the next re-derive. Returns whether any ring was dropped
+/// (the caller then recomposes the ceilings). Accepted edge (unchanged): a
+/// MANUAL ceiling-exposure carve lying fully under the removed footprint is
+/// dropped with them — its purpose died with the storey above.
+pub fn retract_legacy_party_rings(below: &mut Storey, removed_fp: &[Point2f64]) -> bool {
+    let n = below.ceiling_splits.len();
+    below
+        .ceiling_splits
+        .retain(|ring| !ring_within_ring(ring, removed_fp, CONTAINMENT_TOL_M));
+    below.ceiling_splits.len() != n
 }
 
 /// True when storey `idx`'s FLOOR regions are fully classified: at least one
 /// floor region, and EVERY one carries a non-`Unset` exposure. Reads the
 /// RESOLVED storey (Store A) — the checklist's per-storey "Floor exposures"
 /// rollup. `Unset` floors are the still-to-label ones the floor-exposure tool
-/// shows; party floors resolve `NonHeatLoss` (already classified).
+/// shows; a derived `InterStorey` piece counts as classified.
 pub fn floor_exposure_complete(ber: &Ber, idx: usize) -> bool {
     let Some(storey) = ber.storeys.get(idx) else {
         return false;
@@ -898,6 +724,85 @@ pub fn ceiling_exposure_complete(ber: &Ber, idx: usize) -> bool {
 /// separate rows.)
 pub fn surfaces_exposure_complete(ber: &Ber, idx: usize) -> bool {
     floor_exposure_complete(ber, idx) && ceiling_exposure_complete(ber, idx)
+}
+
+/// True when storey `idx`'s WALL regions are fully classified: at least one
+/// wall region, and EVERY one — perimeter pieces AND risers alike — carries a
+/// non-`Unset` exposure. Reads the RESOLVED storey (Store A), like
+/// [`floor_exposure_complete`] — the checklist's per-storey "Wall exposures"
+/// rollup. A derived [`WallExposure::InterStorey`] band counts as classified
+/// (the derivation already accounted for it); only genuine `Unset` remnants
+/// block completion.
+pub fn wall_exposure_complete(ber: &Ber, idx: usize) -> bool {
+    let Some(storey) = ber.storeys.get(idx) else {
+        return false;
+    };
+    !storey.walls.regions.is_empty()
+        && storey
+            .walls
+            .regions
+            .iter()
+            .all(|r| r.exposure != WallExposure::Unset)
+}
+
+/// Drop the floor/ceiling exposure-map entries of `doc` whose keyed plan point
+/// lies INSIDE a region currently resolving [`FloorExposure::InterStorey`] /
+/// [`CeilingExposure::InterStorey`] on the resolved `storey` — the load-time
+/// purge of entries the derivation shadows (it always stamps last, so a
+/// shadowed entry is dead weight that would spring back to life if the storey
+/// above ever moved away). The match is CONTAINMENT (point-in-ring), not
+/// centroid equality: a PRE-FEATURE auto-seeded entry is keyed by the UNSPLIT
+/// region's centroid (no carve ring existed), which coincides with no
+/// post-split piece's centroid — but it does lie inside the covered piece, and
+/// must go, or deleting the storey above would merge the pieces back and
+/// resurrect the stale `Party`/`NonHeatLoss` mark.
+///
+/// Deliberately provenance-blind: an ASSESSOR-painted `Party`/`NonHeatLoss`
+/// mark on a covered surface is dropped too (the map carries no provenance;
+/// while covered, the mark is inert anyway, and the setters refuse new writes
+/// there). Entries whose keyed point lies inside NO `InterStorey` piece —
+/// including assessor marks on surfaces the derivation does not cover — are
+/// kept. Returns whether anything was dropped. Called once per storey from the
+/// load paths after the first `refresh_all_storeys`.
+pub fn purge_shadowed_exposure_entries(doc: &mut StoreyDoc, storey: &Storey) -> bool {
+    // The InterStorey pieces' plan rings, f32 for `ring_contains_point`.
+    let ring32 = |ring: &[Point2f64]| -> Vec<Point2f32> {
+        ring.iter()
+            .map(|p| Point2f32::new(p.x as f32, p.y as f32))
+            .collect()
+    };
+    let floor_rings: Vec<Vec<Point2f32>> = storey
+        .floors
+        .regions
+        .iter()
+        .zip(storey.floors.to_vertex_lists())
+        .filter(|(r, _)| r.exposure == FloorExposure::InterStorey)
+        .map(|(_, ring)| ring32(&ring))
+        .collect();
+    let ceiling_rings: Vec<Vec<Point2f32>> = storey
+        .ceilings
+        .regions
+        .iter()
+        .filter(|r| r.exposure == CeilingExposure::InterStorey)
+        .map(|r| {
+            r.polygon
+                .exterior
+                .iter()
+                .map(|v| Point2f32::new(v.x as f32, v.y as f32))
+                .collect()
+        })
+        .collect();
+    // A CentroidKey is the keyed point quantized to mm — de-quantize and test.
+    let shadowed = |rings: &[Vec<Point2f32>], key: &CentroidKey| {
+        let (x, y) = (key.0 as f32 / 1000.0, key.1 as f32 / 1000.0);
+        rings.iter().any(|ring| ring_contains_point(ring, x, y))
+    };
+    let before = doc.floor_exposure.len() + doc.ceiling_exposure.len();
+    doc.floor_exposure
+        .retain(|key, _| !shadowed(&floor_rings, key));
+    doc.ceiling_exposure
+        .retain(|key, _| !shadowed(&ceiling_rings, key));
+    doc.floor_exposure.len() + doc.ceiling_exposure.len() != before
 }
 
 #[cfg(test)]
@@ -1143,90 +1048,6 @@ mod tests {
         }
     }
 
-    /// Auto-derive on a clean 2-storey stack: the lowest (storey-0) floor is NOT
-    /// auto-classified (left Unset for the assessor — "ground" isn't always
-    /// right), and neither is the top (storey-1) ceiling (it could be an exposed
-    /// roof OR under an unheated attic). The intermediate surfaces between the
-    /// two FULLY-overlapping footprints derive Party (ceiling under the upper)
-    /// and NonHeatLoss (floor over the lower).
-    #[test]
-    fn auto_derive_ground_roof_and_party_on_a_clean_stack() {
-        let mut ber = Ber::default();
-        ber.storeys.push(storey_with(square_ring(0.0, 4.0)));
-        ber.storeys.push(storey_with(square_ring(0.0, 4.0)));
-
-        let mut d0 = StoreyDoc::default();
-        let mut d1 = StoreyDoc::default();
-        auto_derive_horizontal_exposure(&mut d0, &ber, 0, 2);
-        auto_derive_horizontal_exposure(&mut d1, &ber, 1, 2);
-
-        let f0 = centroid_key(ber.storeys[0].floors.regions[0].centroid());
-        let c0 = centroid_key(ber.storeys[0].ceilings.regions[0].centroid());
-        let f1 = centroid_key(ber.storeys[1].floors.regions[0].centroid());
-        let c1 = centroid_key(ber.storeys[1].ceilings.regions[0].centroid());
-
-        assert_eq!(
-            d0.floor_exposure.get(&f0),
-            None,
-            "the lowest floor is left for the assessor, not auto-classified"
-        );
-        assert_eq!(d0.ceiling_exposure.get(&c0), Some(&CeilingExposure::Party));
-        assert_eq!(
-            d1.floor_exposure.get(&f1),
-            Some(&FloorExposure::NonHeatLoss)
-        );
-        assert_eq!(
-            d1.ceiling_exposure.get(&c1),
-            None,
-            "the top ceiling is left for the assessor, not auto-classified"
-        );
-    }
-
-    /// Auto-derive never clobbers a manual value: a manual Exposed floor on the
-    /// upper storey stays Exposed even though the auto-pass would write
-    /// NonHeatLoss (it sits fully over the storey below).
-    #[test]
-    fn auto_derive_does_not_clobber_a_manual_value() {
-        let mut ber = Ber::default();
-        ber.storeys.push(storey_with(square_ring(0.0, 4.0)));
-        ber.storeys.push(storey_with(square_ring(0.0, 4.0)));
-
-        let mut doc = StoreyDoc::default();
-        let key = centroid_key(ber.storeys[1].floors.regions[0].centroid());
-        doc.floor_exposure.insert(key, FloorExposure::Exposed);
-
-        auto_derive_horizontal_exposure(&mut doc, &ber, 1, 2);
-        assert_eq!(
-            doc.floor_exposure.get(&key),
-            Some(&FloorExposure::Exposed),
-            "manual override wins over the auto NonHeatLoss"
-        );
-    }
-
-    /// PARTIAL overlap stays Unset (absent): an upper storey whose footprint
-    /// only partly covers the lower (a cantilever / setback) does NOT
-    /// auto-classify the lower floor as NonHeatLoss — it's left for manual
-    /// marking. The lower floor (storey 1 here) overhangs the storey below
-    /// (storey 0), so the conservative full-containment test fails.
-    #[test]
-    fn auto_derive_partial_overlap_stays_unset() {
-        let mut ber = Ber::default();
-        // Storey 0 footprint is the small 0..4 square; storey 1 is a LARGER
-        // 0..6 square that overhangs it — so storey-1's floor is NOT fully
-        // within storey-0's footprint.
-        ber.storeys.push(storey_with(square_ring(0.0, 4.0)));
-        ber.storeys.push(storey_with(square_ring(0.0, 6.0)));
-
-        let mut d1 = StoreyDoc::default();
-        auto_derive_horizontal_exposure(&mut d1, &ber, 1, 2);
-        let f1 = centroid_key(ber.storeys[1].floors.regions[0].centroid());
-        assert_eq!(
-            d1.floor_exposure.get(&f1),
-            None,
-            "partial overlap leaves the floor absent → resolves Unset"
-        );
-    }
-
     /// `set_floor_exposure_at` / `set_ceiling_exposure_at` round-trip: a tap
     /// inside a region writes the centroid-keyed override and returns the key;
     /// a tap outside any region returns None and writes nothing.
@@ -1340,159 +1161,448 @@ mod tests {
         );
     }
 
-    // ---- Stage 1: inter-storey (party) auto-exposure pass ---------------
+    // ---- InterStorey (derived storey-junction) guards --------------------
 
-    /// `auto_mark_party_walls` marks ONLY the wall sub-range that lies over the
-    /// below footprint, as `NonHeatLoss`; the rest of the wall stays `Unset`.
-    /// The 4×4 square's wall 0 is the bottom edge (0,0)→(4,0); a below footprint
-    /// covering its left half (x∈[0,2]) makes only [0,2] m a party wall.
-    #[test]
-    fn auto_mark_party_walls_marks_only_the_shared_subrange() {
-        let mut doc = square_doc();
-        let (vid, a, b) = doc.outline.floor_plan.perimeter_walls()[0];
-        let len = segment_len(a, b);
-        assert!((len - 4.0).abs() < 1e-6, "wall 0 is the 4 m bottom edge");
-        // Below footprint = a band straddling wall 0 over its [0.5,2.5] m run,
-        // inset from the side walls (x=0 / x=4) so only wall 0 is shared.
-        let below = vec![
-            Point2f64::new(0.5, -1.0),
-            Point2f64::new(2.5, -1.0),
-            Point2f64::new(2.5, 1.0),
-            Point2f64::new(0.5, 1.0),
-        ];
-        doc.auto_mark_party_walls(Some(&below), None);
+    use ber_model::ber::structural::{Opes, Polygon3D};
+    use domain::points::Point3f64;
 
-        let cov = wall_coverage(len, &doc.wall_sections[&vid]);
-        // [0,0.5] Unset, [0.5,2.5] NonHeatLoss, [2.5,4] Unset.
-        assert_eq!(cov.len(), 3);
-        assert_eq!(cov[0].2, WallExposure::Unset);
-        assert_eq!(cov[1], (0.5, 2.5, WallExposure::NonHeatLoss));
-        assert_eq!(cov[2].2, WallExposure::Unset);
-        // Walls 1/2/3 don't overlap the band → no sections written.
-        for (v, _, _) in doc.outline.floor_plan.perimeter_walls() {
-            if v != vid {
-                assert!(
-                    !doc.wall_sections.contains_key(&v),
-                    "untouched wall stays bare"
-                );
-            }
+    /// A flat wall region over base edge `a`→`b` (z 0..2.4) with `exposure`.
+    fn wall_region(a: Point2f64, b: Point2f64, exposure: WallExposure) -> WallRegion {
+        WallRegion {
+            id: ItemId::default(),
+            polygon: Polygon3D::new(vec![
+                Point3f64::new(a.x, a.y, 0.0),
+                Point3f64::new(b.x, b.y, 0.0),
+                Point3f64::new(b.x, b.y, 2.4),
+                Point3f64::new(a.x, a.y, 2.4),
+            ]),
+            exposure,
+            opes: Opes::default(),
+            construction_id: ItemId::default(),
         }
     }
 
-    /// A FACE-PARTITIONED wall is skipped by `auto_mark_party_walls` — it's owned
-    /// by its 2-D partition, never the 1-D party pass.
+    /// Every setter REFUSES `InterStorey` as an input value — it's the
+    /// derivation's stamp, never assessor-paintable: `set_wall_section` is a
+    /// no-op (no section stored), `set_floor_exposure_at` /
+    /// `set_ceiling_exposure_at` return `None` and write nothing.
     #[test]
-    fn auto_mark_party_walls_skips_partitioned_wall() {
-        use crate::PartitionCut;
+    fn setters_refuse_inter_storey_as_input() {
         let mut doc = square_doc();
         let (vid, a, b) = doc.outline.floor_plan.perimeter_walls()[0];
         let len = segment_len(a, b);
-        doc.commit_partition_cut(
-            vid,
-            PartitionCut {
-                a: Point2f32::new(0.0, 1.0),
-                b: Point2f32::new(len, 1.0),
-            },
-        );
-        // A below footprint that fully covers wall 0.
-        let below = vec![
-            Point2f64::new(-1.0, -1.0),
-            Point2f64::new(5.0, -1.0),
-            Point2f64::new(5.0, 1.0),
-            Point2f64::new(-1.0, 1.0),
-        ];
-        doc.auto_mark_party_walls(Some(&below), None);
+        doc.set_wall_section(vid, 0.0, len, len, WallExposure::InterStorey);
         assert!(
             !doc.wall_sections.contains_key(&vid),
-            "partitioned wall is never section-painted by the party pass"
+            "InterStorey is never painted as a section"
         );
-    }
 
-    /// An EXISTING user mark on part of a wall is preserved: the party pass fills
-    /// only the still-`Unset` remainder, never overwriting the manual section.
-    #[test]
-    fn auto_mark_party_walls_preserves_existing_marks() {
-        let mut doc = square_doc();
-        let (vid, a, b) = doc.outline.floor_plan.perimeter_walls()[0];
-        let len = segment_len(a, b);
-        // Assessor marked [0,1] Exposed by hand.
-        doc.set_wall_section(vid, 0.0, 1.0, len, WallExposure::Exposed);
-        // Below footprint fully covers wall 0.
-        let below = vec![
-            Point2f64::new(-1.0, -1.0),
-            Point2f64::new(5.0, -1.0),
-            Point2f64::new(5.0, 1.0),
-            Point2f64::new(-1.0, 1.0),
-        ];
-        doc.auto_mark_party_walls(Some(&below), None);
-
-        let cov = wall_coverage(len, &doc.wall_sections[&vid]);
-        assert_eq!(
-            cov[0],
-            (0.0, 1.0, WallExposure::Exposed),
-            "manual mark kept"
-        );
-        assert_eq!(
-            cov[1],
-            (1.0, 4.0, WallExposure::NonHeatLoss),
-            "only the Unset remainder filled party"
-        );
-    }
-
-    /// `plan_party_floor_carves` on a PARTIAL overlap returns one split ring whose
-    /// area equals the overlap, plus a sample inside that overlap. The 4×4 storey
-    /// over a below footprint covering its left half (x∈[0,2]) carves an 8 m²
-    /// party piece.
-    #[test]
-    fn plan_party_floor_carves_returns_overlap_ring_and_sample() {
-        let doc = square_doc();
         let storey = storey_with(square_ring(0.0, 4.0));
-        let below = vec![
-            Point2f64::new(0.0, 0.0),
-            Point2f64::new(2.0, 0.0),
-            Point2f64::new(2.0, 4.0),
-            Point2f64::new(0.0, 4.0),
-        ];
-        let (rings, samples) = doc.plan_party_floor_carves(&storey, &below);
-        assert_eq!(rings.len(), 1, "one party piece");
-        assert_eq!(samples.len(), 1);
         assert!(
-            (ring_area(&rings[0]) - 8.0).abs() < 1e-3,
-            "the party piece is the left half (8 m²)"
+            doc.set_floor_exposure_at(&storey, 2.0, 2.0, FloorExposure::InterStorey)
+                .is_none(),
+            "InterStorey refused as a floor input"
         );
-        // The sample sits in the overlap (left half: x < 2).
-        assert!(samples[0].x < 2.0 && samples[0].x > 0.0);
-    }
-
-    /// FULL containment carves nothing — the full-containment auto-derive owns it.
-    #[test]
-    fn plan_party_floor_carves_full_containment_returns_none() {
-        let doc = square_doc();
-        let storey = storey_with(square_ring(0.0, 4.0));
-        // Below footprint fully contains the 4×4 floor.
-        let below = square_ring(-1.0, 6.0);
-        let (rings, samples) = doc.plan_party_floor_carves(&storey, &below);
         assert!(
-            rings.is_empty() && samples.is_empty(),
-            "no carve when contained"
+            doc.set_ceiling_exposure_at(&storey, 2.0, 2.0, CeilingExposure::InterStorey)
+                .is_none(),
+            "InterStorey refused as a ceiling input"
+        );
+        assert!(doc.floor_exposure.is_empty(), "nothing written");
+        assert!(doc.ceiling_exposure.is_empty(), "nothing written");
+    }
+
+    /// A tap on a region the derivation currently classifies `InterStorey` is a
+    /// no-op (`None`, nothing written) — the derivation is authoritative over
+    /// that surface, whatever value the assessor tried to paint.
+    #[test]
+    fn setters_no_op_on_an_inter_storey_region() {
+        let mut storey = storey_with(square_ring(0.0, 4.0));
+        storey.floors.regions[0].exposure = FloorExposure::InterStorey;
+        storey.ceilings.regions[0].exposure = CeilingExposure::InterStorey;
+
+        let mut doc = StoreyDoc::default();
+        assert!(
+            doc.set_floor_exposure_at(&storey, 2.0, 2.0, FloorExposure::Ground)
+                .is_none(),
+            "the derivation owns the floor region — write refused"
+        );
+        assert!(
+            doc.set_ceiling_exposure_at(&storey, 2.0, 2.0, CeilingExposure::Party)
+                .is_none(),
+            "the derivation owns the ceiling region — write refused"
+        );
+        assert!(doc.floor_exposure.is_empty(), "no spurious write");
+        assert!(doc.ceiling_exposure.is_empty(), "no spurious write");
+    }
+
+    /// `sections_from_wall_regions` never recovers an `InterStorey` region into
+    /// a painted section — like `Unset`/`Ground`, it's derived, and the
+    /// derivation re-stamps it on every re-derive. A painted `Exposed` piece on
+    /// the same wall still recovers.
+    #[test]
+    fn sections_recovery_skips_inter_storey_regions() {
+        let doc = square_doc();
+        // Wall 0 is the bottom edge (0,0)→(4,0): an Exposed piece over [0,2]
+        // and a derived InterStorey band over [2,4].
+        let walls = WallRegions {
+            regions: vec![
+                wall_region(
+                    Point2f64::new(0.0, 0.0),
+                    Point2f64::new(2.0, 0.0),
+                    WallExposure::Exposed,
+                ),
+                wall_region(
+                    Point2f64::new(2.0, 0.0),
+                    Point2f64::new(4.0, 0.0),
+                    WallExposure::InterStorey,
+                ),
+            ],
+        };
+        let recovered = doc.sections_from_wall_regions(&walls);
+        let (vid, _, _) = doc.outline.floor_plan.perimeter_walls()[0];
+        let secs = recovered.get(&vid).expect("the Exposed piece recovers");
+        assert_eq!(secs.len(), 1, "the InterStorey band does NOT recover");
+        assert_eq!(secs[0].exposure, WallExposure::Exposed);
+        assert!((secs[0].start_m - 0.0).abs() < 1e-3);
+        assert!((secs[0].end_m - 2.0).abs() < 1e-3);
+    }
+
+    /// A flat wall region over base edge `a`→`b` spanning z `z0..z1` with
+    /// `exposure` — for building horizontally-split (band + remainder) stacks.
+    fn wall_region_z(
+        a: Point2f64,
+        b: Point2f64,
+        z0: f64,
+        z1: f64,
+        exposure: WallExposure,
+    ) -> WallRegion {
+        WallRegion {
+            id: ItemId::default(),
+            polygon: Polygon3D::new(vec![
+                Point3f64::new(a.x, a.y, z0),
+                Point3f64::new(b.x, b.y, z0),
+                Point3f64::new(b.x, b.y, z1),
+                Point3f64::new(a.x, a.y, z1),
+            ]),
+            exposure,
+            opes: Opes::default(),
+            construction_id: ItemId::default(),
+        }
+    }
+
+    /// A HORIZONTALLY split wall — the derivation's InterStorey band at the
+    /// bottom, the assessor's Exposed remainder stacked above (which has no
+    /// base edge of its own) — recovers ONE section over the band's span with
+    /// the REMAINDER's exposure, so the paint survives a reload and the next
+    /// derive reproduces band + remainder (the fixpoint).
+    #[test]
+    fn sections_recovery_carries_the_paint_stacked_above_a_band() {
+        let doc = square_doc();
+        // Wall 0 = (0,0)→(4,0): InterStorey band z 0..1.3, Exposed remainder
+        // z 1.3..2.4 stacked on top.
+        let walls = WallRegions {
+            regions: vec![
+                wall_region_z(
+                    Point2f64::new(0.0, 0.0),
+                    Point2f64::new(4.0, 0.0),
+                    0.0,
+                    1.3,
+                    WallExposure::InterStorey,
+                ),
+                wall_region_z(
+                    Point2f64::new(0.0, 0.0),
+                    Point2f64::new(4.0, 0.0),
+                    1.3,
+                    2.4,
+                    WallExposure::Exposed,
+                ),
+            ],
+        };
+        let recovered = doc.sections_from_wall_regions(&walls);
+        let (vid, _, _) = doc.outline.floor_plan.perimeter_walls()[0];
+        let secs = recovered.get(&vid).expect("the stacked paint recovers");
+        assert_eq!(secs.len(), 1, "one section — the band's span, once");
+        assert_eq!(
+            secs[0].exposure,
+            WallExposure::Exposed,
+            "the band's span carries the stacked remainder's paint"
+        );
+        assert!((secs[0].start_m - 0.0).abs() < 1e-3);
+        assert!((secs[0].end_m - 4.0).abs() < 1e-3);
+
+        // With a PAINTED piece BELOW the band instead (a semi-buried wall —
+        // the below piece owns the span via its own base edge), the band
+        // recovers nothing extra: still exactly one section.
+        let walls = WallRegions {
+            regions: vec![
+                wall_region_z(
+                    Point2f64::new(0.0, 0.0),
+                    Point2f64::new(4.0, 0.0),
+                    0.0,
+                    2.1,
+                    WallExposure::Exposed,
+                ),
+                wall_region_z(
+                    Point2f64::new(0.0, 0.0),
+                    Point2f64::new(4.0, 0.0),
+                    2.1,
+                    2.4,
+                    WallExposure::InterStorey,
+                ),
+            ],
+        };
+        let recovered = doc.sections_from_wall_regions(&walls);
+        let secs = recovered.get(&vid).expect("the below paint recovers");
+        assert_eq!(secs.len(), 1, "no duplicate section from the band");
+        assert_eq!(secs[0].exposure, WallExposure::Exposed);
+    }
+
+    /// An ORPHANED-`Unset` band still carries its stacked paint through a
+    /// reload. Sequence: the derivation splits the wall and stamps the band
+    /// `InterStorey`; the assessor paints the remainder; the neighbour is then
+    /// redrawn away while THIS storey is non-active, so its walls keep the
+    /// stale split and the derivation's clear pass reverts the band to `Unset`
+    /// (the exact state pass-0 leaves) — save, reload: the recovery must
+    /// still carry the remainder's paint over the band's span, once, with no
+    /// duplicates. A plain `Unset` wall (nothing stacked above) still
+    /// recovers nothing.
+    #[test]
+    fn sections_recovery_carries_paint_above_a_pass0_reverted_band() {
+        let doc = square_doc();
+        let (vid, _, _) = doc.outline.floor_plan.perimeter_walls()[0];
+        // The stale split: band z 0..1.3 stamped InterStorey, remainder
+        // z 1.3..2.4 painted Exposed…
+        let mut walls = WallRegions {
+            regions: vec![
+                wall_region_z(
+                    Point2f64::new(0.0, 0.0),
+                    Point2f64::new(4.0, 0.0),
+                    0.0,
+                    1.3,
+                    WallExposure::InterStorey,
+                ),
+                wall_region_z(
+                    Point2f64::new(0.0, 0.0),
+                    Point2f64::new(4.0, 0.0),
+                    1.3,
+                    2.4,
+                    WallExposure::Exposed,
+                ),
+            ],
+        };
+        // …then the neighbour goes away and pass 0 reverts the band to Unset
+        // (the split geometry survives on the non-active storey).
+        walls.regions[0].exposure = WallExposure::Unset;
+
+        let recovered = doc.sections_from_wall_regions(&walls);
+        let secs = recovered
+            .get(&vid)
+            .expect("the stacked paint survives the pass-0 revert");
+        assert_eq!(secs.len(), 1, "recovered once — no duplicates");
+        assert_eq!(
+            secs[0].exposure,
+            WallExposure::Exposed,
+            "the orphaned band's span carries the stacked remainder's paint"
+        );
+        assert!((secs[0].start_m - 0.0).abs() < 1e-3);
+        assert!((secs[0].end_m - 4.0).abs() < 1e-3);
+
+        // Regression guard: a plain full-height Unset wall (no stacked paint)
+        // still recovers NOTHING — Unset never becomes a painted section.
+        let walls = WallRegions {
+            regions: vec![wall_region_z(
+                Point2f64::new(0.0, 0.0),
+                Point2f64::new(4.0, 0.0),
+                0.0,
+                2.4,
+                WallExposure::Unset,
+            )],
+        };
+        assert!(
+            doc.sections_from_wall_regions(&walls).is_empty(),
+            "a plain Unset wall recovers no sections"
         );
     }
 
-    /// The ceiling mirror: a partial overlap with the storey ABOVE carves the
-    /// party ceiling piece.
+    /// `wall_exposure_complete`: an `Unset` perimeter piece blocks completion;
+    /// once every wall region — painted perimeter, derived `InterStorey` band,
+    /// classified riser — is non-`Unset`, the storey is complete. Empty or
+    /// missing storeys are never complete.
     #[test]
-    fn plan_party_ceiling_carves_returns_overlap_piece() {
-        let doc = square_doc();
-        let storey = storey_with(square_ring(0.0, 4.0));
-        let above = vec![
-            Point2f64::new(0.0, 0.0),
-            Point2f64::new(2.0, 0.0),
-            Point2f64::new(2.0, 4.0),
-            Point2f64::new(0.0, 4.0),
-        ];
-        let (rings, samples) = doc.plan_party_ceiling_carves(&storey, &above);
-        assert_eq!(rings.len(), 1);
-        assert!((ring_area(&rings[0]) - 8.0).abs() < 1e-3);
-        assert!(samples[0].x < 2.0);
+    fn wall_exposure_complete_counts_inter_storey_as_classified() {
+        let mut ber = Ber::default();
+        ber.storeys.push(Storey {
+            walls: WallRegions {
+                regions: vec![
+                    // Painted perimeter piece.
+                    wall_region(
+                        Point2f64::new(0.0, 0.0),
+                        Point2f64::new(2.0, 0.0),
+                        WallExposure::Unset,
+                    ),
+                    // Derived inter-storey band (buried behind the neighbour).
+                    wall_region(
+                        Point2f64::new(2.0, 0.0),
+                        Point2f64::new(4.0, 0.0),
+                        WallExposure::InterStorey,
+                    ),
+                    // A riser wall (base off the perimeter), classified.
+                    wall_region(
+                        Point2f64::new(1.0, 2.0),
+                        Point2f64::new(3.0, 2.0),
+                        WallExposure::Ground,
+                    ),
+                ],
+            },
+            ..Storey::default()
+        });
+        assert!(
+            !wall_exposure_complete(&ber, 0),
+            "an Unset perimeter piece blocks completion"
+        );
+        ber.storeys[0].walls.regions[0].exposure = WallExposure::Exposed;
+        assert!(
+            wall_exposure_complete(&ber, 0),
+            "painted + InterStorey band + classified riser → complete"
+        );
+        // Empty / missing storey → never complete.
+        ber.storeys.push(Storey::default());
+        assert!(!wall_exposure_complete(&ber, 1));
+        assert!(!wall_exposure_complete(&ber, 9));
+    }
+
+    /// `purge_shadowed_exposure_entries` drops exactly the floor/ceiling map
+    /// entries whose keyed region currently resolves `InterStorey` (pre-feature
+    /// auto-seeds now shadowed by the derivation), and KEEPS the assessor's
+    /// `Party`/`NonHeatLoss` entries on un-shadowed regions. Idempotent.
+    #[test]
+    fn purge_drops_shadowed_entries_keeps_unshadowed() {
+        // Two disjoint floor rings → two floor regions and two ceiling regions.
+        let cid = ItemId::default();
+        let (ring_a, ring_b) = (square_ring(0.0, 4.0), square_ring(6.0, 4.0));
+        let mut storey = Storey {
+            floors: FloorRegions::from_vertex_lists(vec![ring_a.clone(), ring_b.clone()], cid),
+            ceilings: CeilingRegions::default_for_footprint(vec![ring_a, ring_b], 2.4, cid),
+            ..Storey::default()
+        };
+        // The derivation covered region 0 of each kind; region 1 is untouched.
+        storey.floors.regions[0].exposure = FloorExposure::InterStorey;
+        storey.ceilings.regions[0].exposure = CeilingExposure::InterStorey;
+
+        let f_shadowed = centroid_key(storey.floors.regions[0].centroid());
+        let f_kept = centroid_key(storey.floors.regions[1].centroid());
+        let c_shadowed = centroid_key(storey.ceilings.regions[0].centroid());
+        let c_kept = centroid_key(storey.ceilings.regions[1].centroid());
+
+        let mut doc = StoreyDoc::default();
+        // Pre-feature auto-seeds on the now-shadowed regions…
+        doc.floor_exposure
+            .insert(f_shadowed, FloorExposure::NonHeatLoss);
+        doc.ceiling_exposure
+            .insert(c_shadowed, CeilingExposure::Party);
+        // …and genuine assessor marks on un-shadowed ones.
+        doc.floor_exposure
+            .insert(f_kept, FloorExposure::NonHeatLoss);
+        doc.ceiling_exposure.insert(c_kept, CeilingExposure::Party);
+
+        assert!(
+            purge_shadowed_exposure_entries(&mut doc, &storey),
+            "shadowed entries dropped"
+        );
+        assert_eq!(doc.floor_exposure.len(), 1);
+        assert_eq!(
+            doc.floor_exposure.get(&f_kept),
+            Some(&FloorExposure::NonHeatLoss),
+            "un-shadowed NonHeatLoss floor mark kept"
+        );
+        assert_eq!(doc.ceiling_exposure.len(), 1);
+        assert_eq!(
+            doc.ceiling_exposure.get(&c_kept),
+            Some(&CeilingExposure::Party),
+            "un-shadowed Party ceiling mark kept"
+        );
+        assert!(
+            !purge_shadowed_exposure_entries(&mut doc, &storey),
+            "idempotent — nothing left to drop"
+        );
+    }
+
+    /// The purge matches by CONTAINMENT, not centroid equality: a LEGACY
+    /// auto-Party entry from a pre-feature record is keyed by the UNSPLIT
+    /// region's centroid (no carve ring existed), which equals no post-split
+    /// piece's centroid — but it lies inside the covered piece and must be
+    /// dropped, or deleting the storey above would merge the pieces back and
+    /// resurrect the stale mark. An entry keyed inside the UNCOVERED remainder
+    /// is kept.
+    #[test]
+    fn purge_drops_legacy_entry_keyed_by_unsplit_centroid() {
+        let p = Point2f64::new;
+        // A 4×4 storey whose left 3 m are covered by the storey above: the
+        // derivation split each surface into covered [0..3]×[0..4] (stamped
+        // InterStorey) + remainder [3..4]×[0..4].
+        let covered = vec![p(0.0, 0.0), p(3.0, 0.0), p(3.0, 4.0), p(0.0, 4.0)];
+        let rest = vec![p(3.0, 0.0), p(4.0, 0.0), p(4.0, 4.0), p(3.0, 4.0)];
+        let cid = ItemId::default();
+        let mut storey = Storey {
+            floors: FloorRegions::from_vertex_lists(vec![covered.clone(), rest.clone()], cid),
+            ceilings: CeilingRegions::default_for_footprint(vec![covered, rest], 2.4, cid),
+            ..Storey::default()
+        };
+        storey.floors.regions[0].exposure = FloorExposure::InterStorey;
+        storey.ceilings.regions[0].exposure = CeilingExposure::InterStorey;
+
+        // The legacy entries are keyed by the UNSPLIT 4×4 region's centroid
+        // (2, 2) — inside the covered piece, equal to NEITHER piece centroid.
+        let legacy = centroid_key(p(2.0, 2.0));
+        assert_ne!(legacy, centroid_key(storey.floors.regions[0].centroid()));
+        assert_ne!(legacy, centroid_key(storey.floors.regions[1].centroid()));
+        // Assessor marks keyed inside the uncovered remainder survive.
+        let kept = centroid_key(p(3.5, 2.0));
+
+        let mut doc = StoreyDoc::default();
+        doc.floor_exposure
+            .insert(legacy, FloorExposure::NonHeatLoss);
+        doc.ceiling_exposure.insert(legacy, CeilingExposure::Party);
+        doc.floor_exposure.insert(kept, FloorExposure::NonHeatLoss);
+        doc.ceiling_exposure.insert(kept, CeilingExposure::Party);
+
+        assert!(
+            purge_shadowed_exposure_entries(&mut doc, &storey),
+            "the unsplit-keyed legacy entries are dropped by containment"
+        );
+        assert_eq!(doc.floor_exposure.len(), 1);
+        assert!(
+            doc.floor_exposure.contains_key(&kept),
+            "remainder mark kept"
+        );
+        assert_eq!(doc.ceiling_exposure.len(), 1);
+        assert!(doc.ceiling_exposure.contains_key(&kept));
+        assert!(
+            !purge_shadowed_exposure_entries(&mut doc, &storey),
+            "idempotent"
+        );
+    }
+
+    /// `retract_legacy_party_rings` drops exactly the `ceiling_splits` rings
+    /// fully inside the removed footprint (the legacy party-carve rings) and
+    /// keeps the rest; a second call reports no change.
+    #[test]
+    fn retract_legacy_party_rings_drops_contained_rings_only() {
+        let mut below = storey_with(square_ring(0.0, 8.0));
+        let inside = square_ring(1.0, 2.0); // fully inside the removed fp
+        let outside = square_ring(10.0, 2.0); // fully outside it
+        below.ceiling_splits = vec![inside, outside.clone()];
+
+        let removed_fp = square_ring(0.0, 5.0);
+        assert!(
+            retract_legacy_party_rings(&mut below, &removed_fp),
+            "the contained ring is dropped"
+        );
+        assert_eq!(below.ceiling_splits, vec![outside]);
+        assert!(
+            !retract_legacy_party_rings(&mut below, &removed_fp),
+            "nothing left to retract"
+        );
     }
 }

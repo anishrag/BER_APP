@@ -165,7 +165,10 @@ impl AppController {
             return Ok(()); // nothing awaiting a length — no-op
         };
         let (lo, len) = (*lo, *len);
-        let on_x = matches!(self.pending_roof_rect, Some(PendingCeilingRect::LenX { .. }));
+        let on_x = matches!(
+            self.pending_roof_rect,
+            Some(PendingCeilingRect::LenX { .. })
+        );
         let axis = if on_x {
             ParameterAxis::X
         } else {
@@ -351,7 +354,10 @@ impl AppController {
 
     /// True while the resolved rect awaits its height.
     pub fn ceiling_rect_height_pending(&self) -> bool {
-        matches!(self.pending_roof_rect, Some(PendingCeilingRect::Height { .. }))
+        matches!(
+            self.pending_roof_rect,
+            Some(PendingCeilingRect::Height { .. })
+        )
     }
 
     /// The pending rect's four corners (world coords, CCW) for the UI's

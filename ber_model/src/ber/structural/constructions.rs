@@ -289,15 +289,18 @@ impl SurfaceExposure {
             SurfaceExposure::Wall(WallExposure::SemiExposed) => "Semi-exposed",
             SurfaceExposure::Wall(WallExposure::NonHeatLoss) => "Non heat loss",
             SurfaceExposure::Wall(WallExposure::Ground) => "Ground",
+            SurfaceExposure::Wall(WallExposure::InterStorey) => "Inter-storey",
             SurfaceExposure::Wall(WallExposure::Unset) => "Unset",
             SurfaceExposure::Floor(FloorExposure::Ground) => "Ground",
             SurfaceExposure::Floor(FloorExposure::Exposed) => "Exposed",
             SurfaceExposure::Floor(FloorExposure::SemiExposed) => "Semi-exposed",
             SurfaceExposure::Floor(FloorExposure::NonHeatLoss) => "Non heat loss",
+            SurfaceExposure::Floor(FloorExposure::InterStorey) => "Inter-storey",
             SurfaceExposure::Floor(FloorExposure::Unset) => "Unset",
             SurfaceExposure::Ceiling(CeilingExposure::ExposedRoof) => "Exposed roof",
             SurfaceExposure::Ceiling(CeilingExposure::Party) => "Party",
             SurfaceExposure::Ceiling(CeilingExposure::Unheated) => "Unheated",
+            SurfaceExposure::Ceiling(CeilingExposure::InterStorey) => "Inter-storey",
             SurfaceExposure::Ceiling(CeilingExposure::Unset) => "Unset",
         }
     }
@@ -316,6 +319,11 @@ pub enum WallExposure {
     /// In contact with the ground (floor-step risers; DEAP treats
     /// ground-contact walls separately from Exposed).
     Ground,
+    /// DERIVED: this surface is backed by another storey of the SAME dwelling
+    /// (a storey junction). Never assessor-set — `derive_inter_storey` stamps
+    /// and clears it on every re-derive; setters targeting it are no-ops.
+    /// Excluded from heat-loss area at DEAP export.
+    InterStorey,
 }
 
 /// Thermal exposure (boundary condition) of a horizontal FLOOR region — set in
@@ -335,6 +343,11 @@ pub enum FloorExposure {
     SemiExposed,
     /// Party floor to another dwelling (no heat loss).
     NonHeatLoss,
+    /// DERIVED: this surface is backed by another storey of the SAME dwelling
+    /// (a storey junction). Never assessor-set — `derive_inter_storey` stamps
+    /// and clears it on every re-derive; setters targeting it are no-ops.
+    /// Excluded from heat-loss area at DEAP export.
+    InterStorey,
 }
 
 /// Thermal exposure (boundary condition) of a horizontal CEILING region — set in
@@ -348,10 +361,17 @@ pub enum CeilingExposure {
     Unset,
     /// Exposed roof / ceiling under roof to outside.
     ExposedRoof,
-    /// Party ceiling to another dwelling.
+    /// Party ceiling to another dwelling (assessor-paintable: "another
+    /// dwelling above" — NOT the derived same-dwelling junction, which is
+    /// [`CeilingExposure::InterStorey`]).
     Party,
     /// Under an unheated space (ceiling below an unheated attic).
     Unheated,
+    /// DERIVED: this surface is backed by another storey of the SAME dwelling
+    /// (a storey junction). Never assessor-set — `derive_inter_storey` stamps
+    /// and clears it on every re-derive; setters targeting it are no-ops.
+    /// Excluded from heat-loss area at DEAP export.
+    InterStorey,
 }
 
 /// Shared construction identity + fabric properties. A handful of these exist

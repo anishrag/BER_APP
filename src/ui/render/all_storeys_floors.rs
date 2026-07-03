@@ -25,6 +25,10 @@ fn exposure_color(e: FloorExposure) -> egui::Color32 {
         FloorExposure::SemiExposed => style::SEMI_EXPOSED_WALL,
         FloorExposure::NonHeatLoss => style::NON_HEAT_LOSS_WALL,
         FloorExposure::Unset => style::UNSET_WALL,
+        // UNREACHABLE in practice: the controller's `floor_exposure_view`
+        // filters derived InterStorey floors out of this worklist. Kept
+        // exhaustive — grey, the ghost/unclassified read.
+        FloorExposure::InterStorey => style::UNSET_WALL,
     }
 }
 

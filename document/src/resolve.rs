@@ -681,20 +681,37 @@ fn reanchor_openings(s: &StoreyDoc, storey: &mut Storey, previous: &WallRegions)
     let plan = &s.outline.floor_plan;
     let walls = &storey.walls;
 
-    // The live wall region whose base CONTAINS world point `p`, plus the centre
-    // distance along it — picks the correct sub-wall after a structure split.
-    let host_at = |p: Point2f64| -> Option<(ItemId, f32)> { host_wall_at(walls, p) };
-
-    // (anchor-to-set, (wall_id, along_m)-to-set) for one opening.
+    // (anchor-to-set, (wall_id, along_m, sill_m)-to-set) for one opening.
+    // `height_m` bounds the opening's world rectangle for the z-aware host
+    // pick; the SILL REBASE keeps that rectangle invariant across re-homes
+    // (see `host_wall_for_rect` + the sill note below).
     let compute = |placement: &Option<OpeningPlacement>,
-                   anchor: Option<WallAnchor>|
-     -> (Option<WallAnchor>, Option<(ItemId, f32)>) {
+                   anchor: Option<WallAnchor>,
+                   height_m: f32|
+     -> (Option<WallAnchor>, Option<(ItemId, f32, f32)>) {
         let Some(OpeningPlacement::Wall {
-            wall_id, along_m, ..
+            wall_id,
+            along_m,
+            sill_m,
         }) = placement
         else {
             return (None, None); // roof opening / unplaced — nothing to anchor
         };
+        // The opening's WORLD rectangle (storey-local z), from whichever wall
+        // set still carries the placement's host: the current one (id live —
+        // e.g. the relink after `derive_inter_storey`, whose placements still
+        // reference the resolve's ids), else the pre-projection one (a normal
+        // resolve, whose regeneration minted fresh ids).
+        let rect = walls
+            .regions
+            .iter()
+            .find(|r| r.id == *wall_id)
+            .or_else(|| previous.regions.iter().find(|r| r.id == *wall_id))
+            .and_then(|host| host.base_frame())
+            .map(|(_, _, _, base_z)| {
+                let lo = base_z + *sill_m as f64;
+                (lo, lo + height_m as f64)
+            });
         // Seed from the pre-projection wall when this opening has no anchor yet
         // (its placement still references that wall's id — legacy / just-placed).
         let seeded = if anchor.is_none() {
@@ -708,12 +725,40 @@ fn reanchor_openings(s: &StoreyDoc, storey: &mut Storey, previous: &WallRegions)
         };
         // Re-derive the wall_id/along_m cache from the (existing or seeded)
         // anchor: the centre at the parent-relative fraction, then the sub-wall
-        // containing it. Handles fresh ids, reshape, and split sub-walls.
+        // whose z-extent holds the rectangle (`host_wall_for_rect` — the
+        // labellable piece wins; a buried InterStorey band hosts only a
+        // rectangle genuinely inside it). Handles fresh ids, reshape, split
+        // sub-walls, and the derivation's horizontal band/remainder split.
         let repoint = anchor.or(seeded).and_then(|a| {
             a.wall
                 .wall_start()
                 .and_then(|st| plan.wall_point_at_fraction(st, a.along_fraction))
-                .and_then(|c| host_at(Point2f64::new(c.x as f64, c.y as f64)))
+                .and_then(|c| {
+                    host_wall_for_rect(walls, Point2f64::new(c.x as f64, c.y as f64), rect)
+                })
+        });
+        // SILL REBASE: `sill_m` stays host-`base_z`-relative (the model's
+        // meaning), so a re-home onto a host with a DIFFERENT base_z (whole
+        // wall ↔ the split's remainder) recomputes it from the invariant
+        // world rectangle. A near-identity result keeps the CURRENT value
+        // verbatim — same-base re-homes never accumulate rounding drift.
+        let repoint = repoint.map(|(id, along, new_base_z)| {
+            let sill = match rect {
+                Some((lo, _)) => {
+                    // Quantized to the placement grid so a reload's last-bit
+                    // geometry wobble can't flutter the stored value.
+                    let rebased = quantize_placement_m((lo - new_base_z) as f32);
+                    if (rebased - *sill_m).abs() < 5e-5 {
+                        *sill_m
+                    } else {
+                        rebased
+                    }
+                }
+                None => *sill_m,
+            };
+            // `along` quantized like the sill — the anchor→along round-trip
+            // otherwise flutters the cache by one ulp per re-home.
+            (id, quantize_placement_m(along), sill)
         });
         (seeded, repoint)
     };
@@ -721,27 +766,30 @@ fn reanchor_openings(s: &StoreyDoc, storey: &mut Storey, previous: &WallRegions)
     let win: Vec<_> = storey
         .windows
         .iter()
-        .map(|w| compute(&w.placement, w.wall_anchor))
+        .map(|w| compute(&w.placement, w.wall_anchor, w.height_m))
         .collect();
     let drs: Vec<_> = storey
         .doors
         .iter()
-        .map(|d| compute(&d.placement, d.wall_anchor))
+        .map(|d| compute(&d.placement, d.wall_anchor, d.height_m))
         .collect();
 
     let apply = |placement: &mut Option<OpeningPlacement>,
                  anchor: &mut Option<WallAnchor>,
-                 up: (Option<WallAnchor>, Option<(ItemId, f32)>)| {
+                 up: (Option<WallAnchor>, Option<(ItemId, f32, f32)>)| {
         if let Some(a) = up.0 {
             *anchor = Some(a);
         }
-        if let Some((id, along)) = up.1 {
+        if let Some((id, along, sill)) = up.1 {
             if let Some(OpeningPlacement::Wall {
-                wall_id, along_m, ..
+                wall_id,
+                along_m,
+                sill_m,
             }) = placement
             {
                 *wall_id = id;
                 *along_m = along;
+                *sill_m = sill;
             }
         }
     };
@@ -840,14 +888,38 @@ pub fn reseed_wall_anchors_on_load(plan: &manip_plan::FloorPlan, storey: &mut St
     }
 }
 
-/// The live wall region whose base CONTAINS world point `p`, plus the centre
-/// distance along it — picks the correct sub-wall after a structure split.
-/// Shared by [`reanchor_openings`] and [`resolve_wall_anchor`].
-fn host_wall_at(walls: &WallRegions, p: Point2f64) -> Option<(ItemId, f32)> {
+/// The live wall region hosting a wall opening: base CONTAINS world point `p`
+/// in plan, plus the centre distance along it and the host's `base_z` — picks
+/// the correct sub-wall after a structure split, z-aware when the opening's
+/// world rectangle `rect` (storey-local `(bottom, top)`) is known.
+///
+/// TIERED pick, best (nearest-base) candidate within each tier:
+/// 1. a LABELLABLE piece whose z-extent holds the rectangle's BOTTOM (the
+///    sill edge anchors the opening) — after `derive_inter_storey`'s
+///    horizontal split this is the exposed remainder, never the buried band;
+/// 2. an `InterStorey` piece holding the bottom — a rectangle genuinely
+///    inside the buried band (a modelling oddity, but the geometry hosts it
+///    rather than orphaning it);
+/// 3. a labellable piece by plan alone (no rectangle known / no z match —
+///    the ordinary unsplit-wall and vertical-split cases);
+/// 4. any piece (a FULLY buried wall — refusing it would orphan every
+///    opening already on that wall; NEW taps never get here, `pick_wall_along`
+///    skips InterStorey pieces).
+///
+/// An opening is therefore never hosted/counted on an `InterStorey` piece
+/// while its rectangle lies in a labellable piece of the same wall — the
+/// heat-loss accounting invariant.
+fn host_wall_for_rect(
+    walls: &WallRegions,
+    p: Point2f64,
+    rect: Option<(f64, f64)>,
+) -> Option<(ItemId, f32, f64)> {
     const TOL_M: f64 = 0.05;
-    let mut best: Option<(f64, ItemId, f32)> = None;
+    const Z_EPS_M: f64 = 1e-3;
+    // (distance, id, along, base_z) per tier, 0..4 as documented above.
+    let mut tiers: [Option<(f64, ItemId, f32, f64)>; 4] = [None; 4];
     for r in &walls.regions {
-        let Some((origin, (ux, uy), wlen, _)) = r.base_frame() else {
+        let Some((origin, (ux, uy), wlen, base_z)) = r.base_frame() else {
             continue;
         };
         let t = (p.x - origin.x) * ux + (p.y - origin.y) * uy;
@@ -856,11 +928,53 @@ fn host_wall_at(walls: &WallRegions, p: Point2f64) -> Option<(ItemId, f32)> {
         }
         let (px, py) = (origin.x + ux * t, origin.y + uy * t);
         let d = ((p.x - px).powi(2) + (p.y - py).powi(2)).sqrt();
-        if d <= TOL_M && best.is_none_or(|(bd, _, _)| d < bd) {
-            best = Some((d, r.id, t.clamp(0.0, wlen) as f32));
+        if d > TOL_M {
+            continue;
+        }
+        let labellable = r.exposure != WallExposure::InterStorey;
+        let holds_bottom = rect.is_some_and(|(lo, _)| {
+            let (zmin, zmax) = r
+                .polygon
+                .exterior
+                .iter()
+                .fold((f64::INFINITY, f64::NEG_INFINITY), |(a, b), v| {
+                    (a.min(v.z), b.max(v.z))
+                });
+            lo >= zmin - Z_EPS_M && lo <= zmax + Z_EPS_M
+        });
+        let tier = match (labellable, holds_bottom) {
+            (true, true) => 0,
+            (false, true) => 1,
+            (true, false) => 2,
+            (false, false) => 3,
+        };
+        let slot = &mut tiers[tier];
+        if slot.is_none_or(|(bd, _, _, _)| d < bd) {
+            *slot = Some((d, r.id, t.clamp(0.0, wlen) as f32, base_z));
         }
     }
-    best.map(|(_, id, along)| (id, along))
+    tiers
+        .into_iter()
+        .flatten()
+        .next()
+        .map(|(_, id, along, base_z)| (id, along, base_z))
+}
+
+/// Snap a re-homed placement field (`along_m`/`sill_m`, metres) onto a 0.1 mm
+/// grid — far below every geometric tolerance in play, but coarse enough that
+/// a reload's last-bit geometry wobble (a band top recomputed one ulp off)
+/// can't flutter the stored value between saves.
+fn quantize_placement_m(v: f32) -> f32 {
+    (v * 1e4).round() / 1e4
+}
+
+/// Plan-only wrapper of [`host_wall_for_rect`] (tiers 3–4: labellable
+/// preferred, buried fallback) — the confirm-time lookup for a NEW opening,
+/// whose sill isn't known yet. A labellable piece always wins where one
+/// shares the base, so a new placement can only land on an `InterStorey`
+/// piece when the whole wall is buried.
+fn host_wall_at(walls: &WallRegions, p: Point2f64) -> Option<(ItemId, f32)> {
+    host_wall_for_rect(walls, p, None).map(|(id, along, _)| (id, along))
 }
 
 /// Re-derive the LIVE `(wall_id, along_m)` for a wall opening from its durable
@@ -880,6 +994,363 @@ pub fn resolve_wall_anchor(
         .wall_start()
         .and_then(|st| plan.wall_point_at_fraction(st, anchor.along_fraction))?;
     host_wall_at(walls, Point2f64::new(centre.x as f64, centre.y as f64))
+}
+
+/// NUDGE wall openings clear of derived `InterStorey` pieces: when a
+/// geometry change (a new storey, a raised neighbouring section) buries part
+/// of a wall AFTER an opening was placed there, the opening's rectangle can
+/// end up intersecting the buried band — a window looking into the dwelling's
+/// own neighbouring storey. The assessor's intent ("a window on this wall")
+/// survives; its position must move AWAY from the newly buried part:
+///
+/// 1. **Vertically, least displacement first** — UP (rectangle bottom onto
+///    the buried band's top; the canonical case, a neighbour volume rising
+///    over the lower part of the wall) or DOWN (rectangle top onto the band's
+///    bottom; a neighbour volume backing the wall's UPPER strip — an
+///    overhanging storey whose datum anchors on a lower section), whichever
+///    feasible move is smaller;
+/// 2. else **slide along** — move the centre past the buried along-run
+///    (whichever direction displaces least) into a labellable piece that
+///    holds the rectangle at its current height;
+/// 3. else leave it in place (hosted on the buried piece by
+///    [`host_wall_for_rect`]'s tier 2 — nothing labellable can hold it) and
+///    warn.
+///
+/// A moved opening gets its placement re-pointed onto the labellable piece
+/// (along re-measured in that piece's own base frame, sill rebased onto its
+/// `base_z`). Every candidate position is checked IN-FACE (`try_host`: along
+/// span inside the piece, bottom at/above its base, top under its top
+/// profile), so a nudge can never push an opening off the wall area. After
+/// the moves, each affected host wall REDISTRIBUTES
+/// ([`redistribute_wall_openings`](ber_model::ber::openings::redistribute_wall_openings)
+/// — 2D no-overlap within the host's length), so a nudged opening landing on
+/// a neighbour flows apart rather than overlapping; if even touching
+/// openings can't fit, the overlap is left for the assessor (warned). Every
+/// opening on an affected host then gets its durable anchor RE-SEEDED at its
+/// final centre — the anchor drives the next re-home, so both the nudge and
+/// any redistribute shift stick: the pass is DURABLE and idempotent (once
+/// clear, later derives change nothing). Multi-storey windows are exempt
+/// from all of it — they legitimately span storey junctions and may rise
+/// past the host face by design. Runs between the re-home and the vertex
+/// re-derive in [`relink_openings_after_derive`].
+fn nudge_openings_off_buried_pieces(s: &StoreyDoc, storey: &mut Storey) {
+    use ber_model::ber::fenestration::{OpeningPlacement, WallAnchor};
+    const TOL_M: f64 = 0.05; // same-plane test, matches host_wall_for_rect
+    const EPS: f64 = 1e-3; // genuine-overlap threshold (m)
+
+    let plan = &s.outline.floor_plan;
+
+    // The relocation for one opening: `None` = leave it (clear already, or
+    // nothing labellable can hold it). Returns the new
+    // `(wall_id, along_m, sill_m)`.
+    let relocate = |placement: &Option<OpeningPlacement>,
+                    width: f32,
+                    height: f32,
+                    multi_storey: bool|
+     -> Option<(ItemId, f32, f32)> {
+        if multi_storey {
+            return None; // spans storey junctions by design
+        }
+        let Some(OpeningPlacement::Wall {
+            wall_id,
+            along_m,
+            sill_m,
+        }) = placement
+        else {
+            return None;
+        };
+        let walls = &storey.walls;
+        let host = walls.regions.iter().find(|r| r.id == *wall_id)?;
+        let (o, (ux, uy), _hlen, hbz) = host.base_frame()?;
+        // The opening's rectangle in the HOST's base frame (along × local z).
+        let (w, h) = (width as f64, height as f64);
+        let (ra0, ra1) = (*along_m as f64 - w / 2.0, *along_m as f64 + w / 2.0);
+        let rz0 = hbz + *sill_m as f64;
+        let rz1 = rz0 + h;
+
+        // The wall FAMILY: every piece whose base lies on the host's base
+        // line (the parent wall's plane) — the derivation's band/remainder
+        // and vertical sub-pieces — mapped into the host frame.
+        struct Piece {
+            widx: usize, // index into walls.regions
+            t0: f64,     // along-range in the host frame (t0 <= t1)
+            t1: f64,
+            z0: f64,
+            z1: f64,
+            buried: bool,
+            base_z: f64,
+            origin_t: f64, // the piece's own origin in the host frame
+            dir: f64,      // ±1: the piece's base direction vs the host's
+        }
+        let mut family: Vec<Piece> = Vec::new();
+        for (widx, q) in walls.regions.iter().enumerate() {
+            let Some((oq, (qx, qy), lq, bzq)) = q.base_frame() else {
+                continue;
+            };
+            let dot = qx * ux + qy * uy;
+            if dot.abs() < 1.0 - 1e-6 {
+                continue; // not parallel — a different wall
+            }
+            let perp = (oq.x - o.x) * (-uy) + (oq.y - o.y) * ux;
+            if perp.abs() > TOL_M {
+                continue; // parallel but offset — a different wall line
+            }
+            let t0 = (oq.x - o.x) * ux + (oq.y - o.y) * uy;
+            let tend = t0 + lq * dot.signum();
+            let (z0, z1) = q
+                .polygon
+                .exterior
+                .iter()
+                .fold((f64::INFINITY, f64::NEG_INFINITY), |(a, b), v| {
+                    (a.min(v.z), b.max(v.z))
+                });
+            family.push(Piece {
+                widx,
+                t0: t0.min(tend),
+                t1: t0.max(tend),
+                z0,
+                z1,
+                buried: q.exposure == WallExposure::InterStorey,
+                base_z: bzq,
+                origin_t: t0,
+                dir: dot.signum(),
+            });
+        }
+
+        // Buried pieces the rectangle GENUINELY intersects.
+        let hits: Vec<&Piece> = family
+            .iter()
+            .filter(|p| {
+                p.buried
+                    && p.t1.min(ra1) - p.t0.max(ra0) > EPS
+                    && p.z1.min(rz1) - p.z0.max(rz0) > EPS
+            })
+            .collect();
+        if hits.is_empty() {
+            return None; // clear — nothing to do
+        }
+
+        // Can a labellable family piece host the rectangle [a0,a1]×[z0,z1]?
+        // (Along-span inside the piece, bottom at/above its base, top under
+        // its top profile.) Returns the piece + the along/sill in ITS frame.
+        let try_host = |a0: f64, a1: f64, z0: f64, z1: f64| -> Option<(ItemId, f32, f32)> {
+            family
+                .iter()
+                .filter(|p| !p.buried)
+                .find(|p| {
+                    if p.t0 > a0 + EPS || p.t1 < a1 - EPS || z0 < p.z0 - EPS || z1 > p.z1 + EPS {
+                        return false;
+                    }
+                    let q = &walls.regions[p.widx];
+                    // Both rect edges under the piece's top profile
+                    // (`max_sill_for` = top_z_at_along − base_z − height).
+                    let e0 = if p.dir > 0.0 {
+                        a0 - p.origin_t
+                    } else {
+                        p.origin_t - a0
+                    };
+                    let e1 = if p.dir > 0.0 {
+                        a1 - p.origin_t
+                    } else {
+                        p.origin_t - a1
+                    };
+                    let max_sill = q
+                        .max_sill_for(e0.min(e1), z1 - z0)
+                        .min(q.max_sill_for(e0.max(e1), z1 - z0));
+                    z0 - p.base_z <= max_sill + 1e-6
+                })
+                .map(|p| {
+                    let centre = (a0 + a1) / 2.0;
+                    let along_in = if p.dir > 0.0 {
+                        centre - p.origin_t
+                    } else {
+                        p.origin_t - centre
+                    };
+                    (
+                        walls.regions[p.widx].id,
+                        quantize_placement_m(along_in as f32),
+                        quantize_placement_m((z0 - p.base_z) as f32),
+                    )
+                })
+        };
+
+        // 1. VERTICAL, least displacement first: UP puts the bottom onto the
+        // highest intersecting buried top; DOWN puts the top onto the lowest
+        // intersecting buried bottom (`try_host` rejects a down that would
+        // sink below the labellable piece's base, falling through to a slide).
+        let up_bottom = hits.iter().map(|p| p.z1).fold(f64::NEG_INFINITY, f64::max);
+        let down_top = hits.iter().map(|p| p.z0).fold(f64::INFINITY, f64::min);
+        let mut vertical = [
+            (up_bottom - rz0, up_bottom), // (displacement, new bottom)
+            (rz1 - down_top, down_top - h),
+        ];
+        vertical.sort_by(|x, y| x.0.partial_cmp(&y.0).unwrap_or(std::cmp::Ordering::Equal));
+        let moved = vertical
+            .iter()
+            .find_map(|(_, nb)| try_host(ra0, ra1, *nb, *nb + h))
+            .or_else(|| {
+                // 2. SLIDE: past the buried along-run, least displacement first.
+                let bmin = hits.iter().map(|p| p.t0).fold(f64::INFINITY, f64::min);
+                let bmax = hits.iter().map(|p| p.t1).fold(f64::NEG_INFINITY, f64::max);
+                let centre = *along_m as f64;
+                let mut cands = [
+                    (bmax + w / 2.0, bmax, bmax + w),
+                    (bmin - w / 2.0, bmin - w, bmin),
+                ];
+                cands.sort_by(|x, y| {
+                    (x.0 - centre)
+                        .abs()
+                        .partial_cmp(&(y.0 - centre).abs())
+                        .unwrap_or(std::cmp::Ordering::Equal)
+                });
+                cands
+                    .iter()
+                    .find_map(|(_, a0, a1)| try_host(*a0, *a1, rz0, rz1))
+            });
+        let Some((pid, along_in, sill_in)) = moved else {
+            log::warn!(
+                "opening intersects a buried inter-storey piece and no labellable \
+                 piece can hold it — left in place"
+            );
+            return None;
+        };
+        Some((pid, along_in, sill_in))
+    };
+
+    let win: Vec<_> = storey
+        .windows
+        .iter()
+        .map(|w| relocate(&w.placement, w.width_m, w.height_m, w.multi_storey))
+        .collect();
+    let drs: Vec<_> = storey
+        .doors
+        .iter()
+        .map(|d| relocate(&d.placement, d.width_m, d.height_m, false))
+        .collect();
+    // The hosts whose opening set changed — each redistributes below.
+    let mut affected: std::collections::HashSet<ItemId> = std::collections::HashSet::new();
+    let mut apply = |placement: &mut Option<OpeningPlacement>, up: Option<(ItemId, f32, f32)>| {
+        if let Some((id, along, sill)) = up {
+            if let Some(OpeningPlacement::Wall {
+                wall_id,
+                along_m,
+                sill_m,
+            }) = placement
+            {
+                *wall_id = id;
+                *along_m = along;
+                *sill_m = sill;
+                affected.insert(id);
+            }
+        }
+    };
+    for (w, up) in storey.windows.iter_mut().zip(win) {
+        apply(&mut w.placement, up);
+    }
+    for (d, up) in storey.doors.iter_mut().zip(drs) {
+        apply(&mut d.placement, up);
+    }
+    if affected.is_empty() {
+        return;
+    }
+    // REDISTRIBUTE each affected host (2D no-overlap within its length) so a
+    // nudged opening landing on a neighbour flows apart. The host's length
+    // bounds the packing, so nothing leaves the wall area; if even touching
+    // openings can't fit, the overlap stays for the assessor.
+    for id in &affected {
+        if let Err(e) = ber_model::ber::openings::redistribute_wall_openings(storey, *id) {
+            log::warn!(
+                "openings on a nudged wall could not be redistributed ({e:?}) — \
+                 left overlapping for manual adjustment"
+            );
+        }
+    }
+    // Snap every affected opening's along onto the placement grid (the
+    // redistribute writes raw packing floats; the next re-home would quantize
+    // them anyway — doing it now keeps the at-rest fields stable immediately).
+    let quantize = |placement: &mut Option<OpeningPlacement>| {
+        if let Some(OpeningPlacement::Wall {
+            wall_id, along_m, ..
+        }) = placement
+        {
+            if affected.contains(wall_id) {
+                *along_m = quantize_placement_m(*along_m);
+            }
+        }
+    };
+    for w in &mut storey.windows {
+        quantize(&mut w.placement);
+    }
+    for d in &mut storey.doors {
+        quantize(&mut d.placement);
+    }
+    // RE-SEED the durable anchor of EVERY opening on an affected host at its
+    // final centre (the nudge and the redistribute both moved alongs; the
+    // anchor is what the next re-home reads, so a stale one would snap the
+    // opening back).
+    let reseed = |placement: &Option<OpeningPlacement>| -> Option<WallAnchor> {
+        let Some(OpeningPlacement::Wall {
+            wall_id, along_m, ..
+        }) = placement
+        else {
+            return None;
+        };
+        if !affected.contains(wall_id) {
+            return None;
+        }
+        let host = storey.walls.regions.iter().find(|r| r.id == *wall_id)?;
+        opening_wall_anchor(plan, host, *along_m)
+    };
+    let wa: Vec<_> = storey
+        .windows
+        .iter()
+        .map(|w| reseed(&w.placement))
+        .collect();
+    let da: Vec<_> = storey.doors.iter().map(|d| reseed(&d.placement)).collect();
+    for (w, a) in storey.windows.iter_mut().zip(wa) {
+        if a.is_some() {
+            w.wall_anchor = a;
+        }
+    }
+    for (d, a) in storey.doors.iter_mut().zip(da) {
+        if a.is_some() {
+            d.wall_anchor = a;
+        }
+    }
+}
+
+/// Re-home wall openings and re-link every region's `opes` AFTER
+/// `derive_inter_storey` split walls — the openings half of the pipeline's
+/// cross-storey tail. The derivation runs after `resolve_storey`'s own
+/// openings tail and replaces a split wall with fresh-id, EMPTY-`opes` pieces,
+/// so without this every post-materialize record leaves such a wall's
+/// openings unlinked: `placement.wall_id` matches no live region (dead
+/// opening drag) and every piece reads empty `opes`.
+///
+/// Same tail as the resolve: [`reanchor_openings`] re-points each placement
+/// onto the piece whose z-extent holds its rectangle ([`host_wall_for_rect`]
+/// — the labellable remainder, never the buried band, rebasing `sill_m` onto
+/// the new host's `base_z` so the world rectangle is invariant), seeding the
+/// durable anchor from `previous_walls` (the PRE-derivation set, whose ids
+/// the placements still reference) for an opening that never acquired one —
+/// so it survives the next reload instead of being pruned. This is also the
+/// SELF-HEAL for records persisted mis-hosted (an ope on the buried band
+/// whose rectangle lies in the remainder): the re-home moves it. Then the
+/// vertex cache re-derives against the new host (the remainder's top is the
+/// real wall top, so nothing clamps) and `opes` rebuild. NO prune: the
+/// derivation only splits — the geometry still hosts every opening.
+pub fn relink_openings_after_derive(
+    s: &StoreyDoc,
+    storey: &mut Storey,
+    previous_walls: &WallRegions,
+) {
+    reanchor_openings(s, storey, previous_walls);
+    // A geometry change can bury part of a wall UNDER an existing opening —
+    // move the opening clear (up, else along) rather than leave it looking
+    // into the dwelling's own neighbouring storey.
+    nudge_openings_off_buried_pieces(s, storey);
+    ber_model::ber::openings::derive_opening_vertices(storey);
+    ber_model::ber::openings::rebuild_opes(storey);
 }
 
 #[cfg(test)]
@@ -1250,43 +1721,32 @@ mod tests {
         assert_eq!(storey2.floors.regions.len(), 2, "split survives re-resolve");
     }
 
-    /// Stage 1 party-floor flow end-to-end at resolve level: a `plan_party_floor_carves`
-    /// split ring pushed onto `floor_splits` divides the floor, and stamping the
-    /// returned party sample resolves THAT sub-region `NonHeatLoss` (the other
-    /// half stays Unset). Mirrors `floor_split_divides_floor_and_survives_re_resolve`
-    /// with the exposure stamp added.
+    /// A durable `floor_splits` ring (as legacy party carves stored them, or a
+    /// manual floor-exposure carve stores today) divides the floor, and a
+    /// manual `NonHeatLoss` stamp on the carved half resolves onto exactly
+    /// that sub-region (the other half stays Unset). Mirrors
+    /// `floor_split_divides_floor_and_survives_re_resolve` with the exposure
+    /// stamp added.
     #[test]
-    fn party_floor_carve_splits_and_stamps_nonheatloss() {
+    fn floor_split_ring_divides_floor_and_stamps_nonheatloss() {
         use ber_model::ber::structural::FloorExposure;
         let mut doc = unit_square_doc();
         let mut ber = Ber::default();
         ensure_storey_constructions(&mut ber, 0, &[]);
 
-        // Resolve the storey once to get its single floor region, then plan the
-        // party carve against a below footprint covering the left half (x∈[0,2]).
-        let storey = resolve_storey(&doc, &ber, 0, &[], &[], &[]);
-        let below = vec![
+        // A split ring covering the left half of the 4×4 floor (x∈[0,2]).
+        ber.storeys[0].floor_splits = vec![vec![
             Point2f64::new(0.0, 0.0),
             Point2f64::new(2.0, 0.0),
             Point2f64::new(2.0, 4.0),
             Point2f64::new(0.0, 4.0),
-        ];
-        let (rings, samples) = doc.plan_party_floor_carves(&storey, &below);
-        assert_eq!(rings.len(), 1, "partial overlap → one split ring");
-
-        // Push the durable split + re-resolve: the floor divides in two.
-        ber.storeys[0].floor_splits = rings;
+        ]];
         let storey = resolve_storey(&doc, &ber, 0, &[], &[], &[]);
         assert_eq!(storey.floors.regions.len(), 2, "split divided the floor");
 
-        // Stamp the party sample → that sub-region resolves NonHeatLoss.
-        doc.set_floor_exposure_at(
-            &storey,
-            samples[0].x,
-            samples[0].y,
-            FloorExposure::NonHeatLoss,
-        )
-        .expect("a floor region under the party sample");
+        // Stamp inside the carved half → that sub-region resolves NonHeatLoss.
+        doc.set_floor_exposure_at(&storey, 1.0, 2.0, FloorExposure::NonHeatLoss)
+            .expect("a floor region under the sample");
         let mut resolved = resolve_storey(&doc, &ber, 0, &[], &[], &[]);
         crate::stamp_horizontal_exposure(&doc, &mut resolved);
         assert_eq!(
@@ -4396,5 +4856,407 @@ mod tests {
             .and_then(|r| r.base_midpoint())
             .expect("window homed on a live wall");
         ((m.x * 1000.0).round() as i64, (m.y * 1000.0).round() as i64)
+    }
+
+    /// [`host_wall_at`] never returns a derived `InterStorey` piece when a
+    /// labellable base-framed host also contains the point (a tap near a
+    /// vertical derivation cut must pick the labellable side), and falls back
+    /// to the InterStorey piece only when it is the SOLE base-framed host (a
+    /// horizontally split wall — the band carries the wall's only base frame,
+    /// and refusing it would orphan every opening on that wall).
+    #[test]
+    fn host_wall_at_prefers_labellable_over_inter_storey() {
+        use ber_model::ber::common::ItemId;
+        use ber_model::ber::structural::{Opes, Polygon3D, WallRegion, WallRegions};
+        use domain::points::Point3f64;
+        let mk = |x0: f64, x1: f64, z0: f64, z1: f64, e: WallExposure| WallRegion {
+            id: ItemId::default(),
+            polygon: Polygon3D::new(vec![
+                Point3f64::new(x0, 0.0, z0),
+                Point3f64::new(x1, 0.0, z0),
+                Point3f64::new(x1, 0.0, z1),
+                Point3f64::new(x0, 0.0, z1),
+            ]),
+            exposure: e,
+            opes: Opes::default(),
+            construction_id: ItemId::default(),
+        };
+        // Side-by-side pieces on y = 0 (a vertical derivation split at x = 2):
+        // Exposed x∈[0,2], InterStorey x∈[2,4].
+        let exposed = mk(0.0, 2.0, 0.0, 2.4, WallExposure::Exposed);
+        let band = mk(2.0, 4.0, 0.0, 2.4, WallExposure::InterStorey);
+        let (exposed_id, band_id) = (exposed.id, band.id);
+        let walls = WallRegions {
+            regions: vec![band, exposed],
+        };
+        // Exactly on the shared cut (both hosts contain it within tolerance):
+        // the labellable piece wins, whatever the region order.
+        let (id, _) = host_wall_at(&walls, Point2f64::new(2.0, 0.0)).expect("a host");
+        assert_eq!(id, exposed_id, "labellable host preferred at the cut");
+        // Deep inside the band, it is the only containing host — fallback.
+        let (id, along) = host_wall_at(&walls, Point2f64::new(3.0, 0.0)).expect("a host");
+        assert_eq!(id, band_id, "sole-host fallback onto the InterStorey band");
+        assert!((along - 1.0).abs() < 1e-6);
+
+        // STACKED pieces (a horizontal derivation split, both first-class):
+        // the rectangle's BOTTOM picks the host — a window in the exposed
+        // remainder is hosted there, never on the band below it; a rectangle
+        // genuinely inside the band stays on the band.
+        let band = mk(0.0, 4.0, 0.0, 1.3, WallExposure::InterStorey);
+        let remainder = mk(0.0, 4.0, 1.3, 2.4, WallExposure::Exposed);
+        let (band_id, remainder_id) = (band.id, remainder.id);
+        let walls = WallRegions {
+            regions: vec![band, remainder],
+        };
+        let p = Point2f64::new(2.0, 0.0);
+        let (id, _, base_z) =
+            host_wall_for_rect(&walls, p, Some((1.5, 2.0))).expect("a host for the window");
+        assert_eq!(id, remainder_id, "rect in the remainder → remainder hosts");
+        assert!((base_z - 1.3).abs() < 1e-9, "host base at the cut height");
+        let (id, _, _) =
+            host_wall_for_rect(&walls, p, Some((0.5, 1.0))).expect("a host for the band rect");
+        assert_eq!(id, band_id, "rect genuinely inside the band → band hosts");
+    }
+
+    /// NUDGE, slide path: a window whose rectangle intersects a FULL-HEIGHT
+    /// buried sub-run (a vertical derivation split) slides ALONG the wall,
+    /// away from the buried part, into the labellable piece — placement,
+    /// anchor, vertices and `opes` all move; a second relink is a no-op.
+    #[test]
+    fn relink_slides_a_window_off_a_full_height_buried_run() {
+        use ber_model::ber::common::ItemId;
+        use ber_model::ber::fenestration::{OpeningPlacement, Overshading, Window};
+        use ber_model::ber::structural::{Opes, Polygon3D, WallRegion};
+        use domain::points::Point3f64;
+
+        let doc = square_doc(&[
+            Point2f32::new(0.0, 0.0),
+            Point2f32::new(4.0, 0.0),
+            Point2f32::new(4.0, 4.0),
+            Point2f32::new(0.0, 4.0),
+        ]);
+        let mk = |x0: f64, x1: f64, e: WallExposure| WallRegion {
+            id: ItemId::default(),
+            polygon: Polygon3D::new(vec![
+                Point3f64::new(x0, 0.0, 0.0),
+                Point3f64::new(x1, 0.0, 0.0),
+                Point3f64::new(x1, 0.0, 2.4),
+                Point3f64::new(x0, 0.0, 2.4),
+            ]),
+            exposure: e,
+            opes: Opes::default(),
+            construction_id: ItemId::default(),
+        };
+        // Wall 0 split vertically: x∈[0,2] buried full-height, x∈[2,4] exposed.
+        let buried = mk(0.0, 2.0, WallExposure::InterStorey);
+        let exposed = mk(2.0, 4.0, WallExposure::Exposed);
+        let (buried_id, exposed_id) = (buried.id, exposed.id);
+        let mut storey = Storey {
+            walls: ber_model::ber::structural::WallRegions {
+                regions: vec![buried, exposed],
+            },
+            ceiling_height_m: Some(2.4),
+            ..Storey::default()
+        };
+        // A 1×1 window centred at along 1.0 on the buried run, sill 0.9 — the
+        // whole rectangle [0.5,1.5]×[0.9,1.9] is inside the buried piece, and
+        // moving UP can't clear a full-height burial.
+        let win_id = ItemId::default();
+        storey.windows.push(Window {
+            id: win_id,
+            vertices: vec![],
+            width_m: 1.0,
+            height_m: 1.0,
+            window_type_id: ItemId::default(),
+            placement: Some(OpeningPlacement::Wall {
+                wall_id: buried_id,
+                along_m: 1.0,
+                sill_m: 0.9,
+            }),
+            wall_anchor: None,
+            assembly_id: None,
+            multi_storey: false,
+            arched: false,
+            overshading: Overshading::Average,
+        });
+
+        let previous = storey.walls.clone();
+        relink_openings_after_derive(&doc, &mut storey, &previous);
+
+        let w = &storey.windows[0];
+        let Some(OpeningPlacement::Wall {
+            wall_id,
+            along_m,
+            sill_m,
+        }) = w.placement
+        else {
+            panic!("wall placement kept");
+        };
+        assert_eq!(wall_id, exposed_id, "slid onto the exposed piece");
+        // Just past the buried run (the redistribute may add a small edge
+        // gap on top of the slide's minimal displacement).
+        assert!(
+            (0.5..0.7).contains(&along_m),
+            "centre just past the buried run (~0.5 in the piece), got {along_m}"
+        );
+        assert!((sill_m - 0.9).abs() < 1e-4, "sill unchanged, got {sill_m}");
+        assert!(
+            w.wall_anchor.is_some(),
+            "anchor re-seeded at the new centre"
+        );
+        // Vertices moved with it: clear of the buried run (x ≥ 2) and fully
+        // INSIDE the exposed piece (never off the wall area).
+        let (xmin, xmax) = w
+            .vertices
+            .iter()
+            .fold((f32::INFINITY, f32::NEG_INFINITY), |(lo, hi), v| {
+                (lo.min(v.0), hi.max(v.0))
+            });
+        assert!(
+            xmin >= 2.0 - 1e-3 && xmax <= 4.0 + 1e-3,
+            "window slid clear and stays in-face, got {xmin}..{xmax}"
+        );
+        let exposed_region = storey
+            .walls
+            .regions
+            .iter()
+            .find(|r| r.id == exposed_id)
+            .unwrap();
+        assert!(exposed_region.opes.windows.contains(&win_id));
+        assert!(storey
+            .walls
+            .regions
+            .iter()
+            .find(|r| r.id == buried_id)
+            .unwrap()
+            .opes
+            .windows
+            .is_empty());
+
+        // Idempotent: a second relink changes nothing.
+        let snapshot = format!("{:?}", storey.windows[0].placement);
+        let previous = storey.walls.clone();
+        relink_openings_after_derive(&doc, &mut storey, &previous);
+        assert_eq!(
+            format!("{:?}", storey.windows[0].placement),
+            snapshot,
+            "clear once — the nudge never fires again"
+        );
+    }
+
+    /// NUDGE, down path: a buried band across the TOP strip of a wall (an
+    /// overhanging/step-down neighbour volume) intersecting a window's upper
+    /// edge moves the window DOWN — its top lands on the band's bottom — when
+    /// up can't fit and down can.
+    #[test]
+    fn relink_nudges_a_window_down_off_a_top_strip_band() {
+        use ber_model::ber::common::ItemId;
+        use ber_model::ber::fenestration::{OpeningPlacement, Overshading, Window};
+        use ber_model::ber::structural::{Opes, Polygon3D, WallRegion};
+        use domain::points::Point3f64;
+
+        let doc = square_doc(&[
+            Point2f32::new(0.0, 0.0),
+            Point2f32::new(4.0, 0.0),
+            Point2f32::new(4.0, 4.0),
+            Point2f32::new(0.0, 4.0),
+        ]);
+        let mk = |z0: f64, z1: f64, e: WallExposure| WallRegion {
+            id: ItemId::default(),
+            polygon: Polygon3D::new(vec![
+                Point3f64::new(0.0, 0.0, z0),
+                Point3f64::new(4.0, 0.0, z0),
+                Point3f64::new(4.0, 0.0, z1),
+                Point3f64::new(0.0, 0.0, z1),
+            ]),
+            exposure: e,
+            opes: Opes::default(),
+            construction_id: ItemId::default(),
+        };
+        // Wall 0 split horizontally: z∈[0,2.0] exposed, z∈[2.0,2.4] buried —
+        // the overhang's volume backs the wall's TOP strip.
+        let exposed = mk(0.0, 2.0, WallExposure::Exposed);
+        let band = mk(2.0, 2.4, WallExposure::InterStorey);
+        let (exposed_id, band_id) = (exposed.id, band.id);
+        let mut storey = Storey {
+            walls: ber_model::ber::structural::WallRegions {
+                regions: vec![exposed, band],
+            },
+            ceiling_height_m: Some(2.4),
+            ..Storey::default()
+        };
+        // A 1×0.5 window at z 1.7..2.2 — its top edge pokes into the band.
+        // UP would need z 2.4..2.9 (above the wall) → infeasible; DOWN drops
+        // it to z 1.5..2.0.
+        let win_id = ItemId::default();
+        storey.windows.push(Window {
+            id: win_id,
+            vertices: vec![],
+            width_m: 1.0,
+            height_m: 0.5,
+            window_type_id: ItemId::default(),
+            placement: Some(OpeningPlacement::Wall {
+                wall_id: exposed_id,
+                along_m: 2.0,
+                sill_m: 1.7,
+            }),
+            wall_anchor: None,
+            assembly_id: None,
+            multi_storey: false,
+            arched: false,
+            overshading: Overshading::Average,
+        });
+
+        let previous = storey.walls.clone();
+        relink_openings_after_derive(&doc, &mut storey, &previous);
+
+        let w = &storey.windows[0];
+        let Some(OpeningPlacement::Wall {
+            wall_id, sill_m, ..
+        }) = w.placement
+        else {
+            panic!("wall placement kept");
+        };
+        assert_eq!(wall_id, exposed_id, "stays on the exposed piece");
+        assert!(
+            (sill_m - 1.5).abs() < 1e-4,
+            "moved DOWN: top onto the band bottom (sill 1.5), got {sill_m}"
+        );
+        let (zmin, zmax) = w
+            .vertices
+            .iter()
+            .fold((f32::INFINITY, f32::NEG_INFINITY), |(lo, hi), v| {
+                (lo.min(v.2), hi.max(v.2))
+            });
+        assert!(
+            (zmin - 1.5).abs() < 1e-3 && (zmax - 2.0).abs() < 1e-3,
+            "window dropped to z 1.5..2.0, got {zmin}..{zmax}"
+        );
+        assert!(storey
+            .walls
+            .regions
+            .iter()
+            .find(|r| r.id == band_id)
+            .unwrap()
+            .opes
+            .windows
+            .is_empty());
+
+        // Idempotent: clear once, never moved again.
+        let snapshot = format!("{:?}", storey.windows[0].placement);
+        let previous = storey.walls.clone();
+        relink_openings_after_derive(&doc, &mut storey, &previous);
+        assert_eq!(format!("{:?}", storey.windows[0].placement), snapshot);
+    }
+
+    /// NUDGE + REDISTRIBUTE: a nudged window that lands ON an existing window
+    /// of the target piece flows apart from it (2D no-overlap within the
+    /// host), BOTH stay fully inside the wall area, and BOTH get their
+    /// anchors re-seeded at their final centres so the arrangement survives
+    /// the next re-home. Idempotent thereafter.
+    #[test]
+    fn relink_redistributes_a_nudged_window_off_a_neighbour_and_stays_in_face() {
+        use ber_model::ber::common::ItemId;
+        use ber_model::ber::fenestration::{OpeningPlacement, Overshading, Window};
+        use ber_model::ber::structural::{Opes, Polygon3D, WallRegion};
+        use domain::points::Point3f64;
+
+        let doc = square_doc(&[
+            Point2f32::new(0.0, 0.0),
+            Point2f32::new(4.0, 0.0),
+            Point2f32::new(4.0, 4.0),
+            Point2f32::new(0.0, 4.0),
+        ]);
+        let mk = |x0: f64, x1: f64, e: WallExposure| WallRegion {
+            id: ItemId::default(),
+            polygon: Polygon3D::new(vec![
+                Point3f64::new(x0, 0.0, 0.0),
+                Point3f64::new(x1, 0.0, 0.0),
+                Point3f64::new(x1, 0.0, 2.4),
+                Point3f64::new(x0, 0.0, 2.4),
+            ]),
+            exposure: e,
+            opes: Opes::default(),
+            construction_id: ItemId::default(),
+        };
+        let buried = mk(0.0, 2.0, WallExposure::InterStorey);
+        let exposed = mk(2.0, 4.0, WallExposure::Exposed);
+        let (buried_id, exposed_id) = (buried.id, exposed.id);
+        let mut storey = Storey {
+            walls: ber_model::ber::structural::WallRegions {
+                regions: vec![buried, exposed],
+            },
+            ceiling_height_m: Some(2.4),
+            ..Storey::default()
+        };
+        let window = |host: ItemId, along: f32| Window {
+            id: ItemId::default(),
+            vertices: vec![],
+            width_m: 0.8,
+            height_m: 1.0,
+            window_type_id: ItemId::default(),
+            placement: Some(OpeningPlacement::Wall {
+                wall_id: host,
+                along_m: along,
+                sill_m: 0.9,
+            }),
+            wall_anchor: None,
+            assembly_id: None,
+            multi_storey: false,
+            arched: false,
+            overshading: Overshading::Average,
+        };
+        // A sits on the buried run (world centre 1.0) — it must slide right,
+        // landing exactly on B (already on the exposed piece, world centre
+        // 2.4 = along 0.4).
+        storey.windows.push(window(buried_id, 1.0));
+        storey.windows.push(window(exposed_id, 0.4));
+
+        let previous = storey.walls.clone();
+        relink_openings_after_derive(&doc, &mut storey, &previous);
+
+        // Both hosted on the exposed piece, separated, in-face, anchored.
+        let mut centres = Vec::new();
+        for w in &storey.windows {
+            let Some(OpeningPlacement::Wall {
+                wall_id, along_m, ..
+            }) = w.placement
+            else {
+                panic!("wall placement kept");
+            };
+            assert_eq!(wall_id, exposed_id, "both on the exposed piece");
+            assert!(w.wall_anchor.is_some(), "anchor re-seeded");
+            let (xmin, xmax) = w
+                .vertices
+                .iter()
+                .fold((f32::INFINITY, f32::NEG_INFINITY), |(lo, hi), v| {
+                    (lo.min(v.0), hi.max(v.0))
+                });
+            assert!(
+                xmin >= 2.0 - 1e-3 && xmax <= 4.0 + 1e-3,
+                "in-face on the exposed run, got {xmin}..{xmax}"
+            );
+            centres.push(along_m);
+        }
+        assert!(
+            (centres[0] - centres[1]).abs() >= 0.8 - 1e-3,
+            "redistributed apart (no 2D overlap), centres {centres:?}"
+        );
+
+        // Idempotent: nothing moves again.
+        let snapshot = format!(
+            "{:?} {:?}",
+            storey.windows[0].placement, storey.windows[1].placement
+        );
+        let previous = storey.walls.clone();
+        relink_openings_after_derive(&doc, &mut storey, &previous);
+        assert_eq!(
+            format!(
+                "{:?} {:?}",
+                storey.windows[0].placement, storey.windows[1].placement
+            ),
+            snapshot,
+            "clear once — never rearranged again"
+        );
     }
 }

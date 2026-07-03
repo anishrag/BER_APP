@@ -30,7 +30,7 @@ use super::*;
 use ber_model::ber::suggest::{has_suggestion_inputs, suggest_storey_outlines, OutlineSuggestion};
 
 /// At most this many ranked suggestions are offered to browse.
-const MAX_OUTLINE_SUGGESTIONS: usize = 6;
+const MAX_OUTLINE_SUGGESTIONS: usize = 12;
 
 /// Where the in-flight new-storey flow stands.
 #[derive(Debug, Clone)]
@@ -164,12 +164,13 @@ impl AppController {
         if idx == 0 {
             return Err(NO_SUGGESTIONS.into());
         }
-        let below = self
-            .current_record
-            .as_ref()
-            .and_then(|r| r.data.storeys.get(idx - 1))
-            .ok_or(NO_SUGGESTIONS)?;
-        let suggestions = suggest_storey_outlines(below, MAX_OUTLINE_SUGGESTIONS);
+        let record = self.current_record.as_ref().ok_or(NO_SUGGESTIONS)?;
+        let below = record.data.storeys.get(idx - 1).ok_or(NO_SUGGESTIONS)?;
+        // The below storey's construction-phase zoning feeds the phase
+        // heuristics (the phase registry lives on `Ber`, not the `Storey`);
+        // empty (nothing tagged yet) is fine — phases are a bonus input.
+        let phase_zones = record.data.storey_phase_zones(idx - 1);
+        let suggestions = suggest_storey_outlines(below, &phase_zones, MAX_OUTLINE_SUGGESTIONS);
         if suggestions.is_empty() {
             // Attribute the emptiness honestly: with the inputs present
             // (ceiling height + footprint + a flat ceiling area —
@@ -184,9 +185,10 @@ impl AppController {
             .into());
         }
         log::debug!(
-            "[new-storey] {} outline suggestion(s) from storey {}: {:?}",
+            "[new-storey] {} outline suggestion(s) from storey {} ({} phase zone(s)): {:?}",
             suggestions.len(),
             idx - 1,
+            phase_zones.len(),
             suggestions
                 .iter()
                 .map(|s| (s.source, s.area_m2, s.levels))
@@ -388,7 +390,10 @@ impl AppController {
     /// the session list to the exact derived pieces (the ceiling-step assign
     /// pattern — in-session equals post-reload by construction). CONSUMES the
     /// pending seed whether or not anything was inherited (the finalisation
-    /// transition happened either way).
+    /// transition happened either way). The below storey's ceiling
+    /// classification needs no seeding here: the commit's `derive_inter_storey`
+    /// tail splits and stamps the covered piece `InterStorey` on every
+    /// re-resolve (derived-only — nothing is pushed onto `ceiling_splits`).
     fn seed_inherited_levels_now(&mut self, idx: usize, footprint: &[Point2f32]) {
         self.inherited_seed_pending.remove(&idx);
         if idx == 0 {
@@ -448,6 +453,16 @@ impl AppController {
     /// footprint). No-op on storey 0 / the All tab, and harmless on a fresh
     /// (never-seeded) upper storey.
     ///
+    /// Also RETRACTS the LEGACY party-carve rings a pre-InterStorey record's
+    /// finalisation pushed onto the storey BELOW's `ceiling_splits` under the
+    /// old footprint ([`document::retract_legacy_party_rings`]), recomposing
+    /// the below ceilings so the stale split merges back. Classification
+    /// retraction is automatic — `derive_inter_storey`'s clear pass un-stamps
+    /// `InterStorey` wherever the new footprint no longer covers. The callers
+    /// run BEFORE the redraw commits, so `current_record` still holds the
+    /// PRE-redraw resolve — its footprint is exactly the one the old carve
+    /// used; a fresh (never-resolved) storey has none and skips cleanly.
+    ///
     /// [`rederive_inherited_seed_pending`]:
     /// AppController::rederive_inherited_seed_pending
     pub(super) fn reset_inherited_seed_for_redraw(&mut self) {
@@ -462,6 +477,26 @@ impl AppController {
         // The inherited phase zones were canonicalized against the OLD footprint
         // too — drop them so the finalisation tail re-seeds against the new one.
         self.phase_regions.remove(&idx);
+        // Retract the OLD footprint's legacy party-carve rings from the storey
+        // below (see the doc comment above).
+        let old_fp = self
+            .current_record
+            .as_ref()
+            .and_then(|r| r.data.storeys.get(idx))
+            .and_then(|s| s.floors.footprint_ring());
+        let Some(old_fp) = old_fp else {
+            return; // fresh storey — nothing was ever carved against it
+        };
+        let Some(below_ber) = self
+            .current_record
+            .as_mut()
+            .and_then(|r| r.data.storeys.get_mut(idx - 1))
+        else {
+            return;
+        };
+        if document::retract_legacy_party_rings(below_ber, &old_fp) {
+            self.recompose_ceilings(idx - 1);
+        }
     }
 
     /// Re-derive which storeys still await their inherited-level seed —

@@ -93,6 +93,11 @@ pub fn render(
     // Iterate top-down so lower storeys' floors don't paint over upper-storey walls
     // (closer-to-camera in the default view is drawn last; with a free orbit
     // this ordering is approximate — wireframe rendering keeps it readable).
+    // This dwelling's own storey junctions carry the derived `InterStorey`
+    // exposure and are skipped per region inside `render_at_z_offset` (they'd
+    // double-draw the same plane at every junction and say nothing about heat
+    // loss). Non-heat-loss/party surfaces are unambiguously external-dwelling
+    // boundaries now and draw as faint translucent fills with a faded outline.
     for (i, storey) in ber.storeys.iter().enumerate().rev() {
         storey_3d::render_at_z_offset(
             painter,
@@ -102,6 +107,7 @@ pub fn render(
             z_offsets[i],
             view,
             selected,
+            true,
         );
     }
 
@@ -114,6 +120,17 @@ pub fn render(
         let Some(&datum) = z_offsets.get(area.storey_idx) else {
             continue;
         };
+        // Roof lines only carry information where the roof DEPARTS from the
+        // ceiling (a pitched roof over a flat ceiling). A roof that coincides
+        // with the ceiling beneath it (flat-on-flat, or FollowCeiling) would
+        // just double the ceiling's lines — skip it.
+        if ber
+            .storeys
+            .get(area.storey_idx)
+            .is_some_and(|s| area.follows_ceiling(&s.ceilings))
+        {
+            continue;
+        }
         // Built via the SAME apex/ridge fan the ceiling uses, over the grouped
         // ceiling footprint — so the roof shares the ceiling's plan vertices.
         for region in area
@@ -131,7 +148,18 @@ pub fn render(
                     t.apply(px, py)
                 })
                 .collect();
+            // A sloped face's BASE edges (both ends at the eave) lie along the
+            // wall tops / ceiling outline already drawn below — repeating them
+            // just thickens the clutter, so only the RISING edges (rakes,
+            // hips, the ridge) are drawn. An all-at-eave (flat) face keeps its
+            // full outline — skipping its base would erase it entirely.
+            let eave = area.eave_z;
+            let sloped = ring.iter().any(|v| v.z > eave + 1e-3);
             for i in 0..pts.len() {
+                let (a, b) = (&ring[i], &ring[(i + 1) % ring.len()]);
+                if sloped && (a.z - eave).abs() < 1e-3 && (b.z - eave).abs() < 1e-3 {
+                    continue;
+                }
                 painter.line_segment([pts[i], pts[(i + 1) % pts.len()]], roof_stroke);
             }
         }

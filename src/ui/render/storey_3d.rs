@@ -31,7 +31,9 @@
 use std::collections::HashSet;
 
 use ber_model::ber::common::ItemId;
-use ber_model::ber::structural::{CeilingRegion, FloorRegion, Storey, WallExposure, WallRegion};
+use ber_model::ber::structural::{
+    CeilingExposure, CeilingRegion, FloorExposure, FloorRegion, Storey, WallExposure, WallRegion,
+};
 use domain::sketch::DisplayMode;
 use eframe::egui;
 
@@ -65,7 +67,19 @@ pub fn render(
         return;
     };
     let t = fit_transform(rect, min_xy, max_xy, view);
-    render_at_z_offset(painter, &t, storey, display_mode, 0.0, view, selected);
+    // The single-storey view draws every surface — the assessor
+    // reviews/paints exposure here, so nothing is faded or hidden (a derived
+    // InterStorey wall draws as a ghost, but it draws).
+    render_at_z_offset(
+        painter,
+        &t,
+        storey,
+        display_mode,
+        0.0,
+        view,
+        selected,
+        false,
+    );
     for &(x, y, z) in hotspots {
         let (px, py) = view.project_3d(x, y, z);
         let sp = t.apply(px, py);
@@ -94,6 +108,18 @@ fn min_floor_level(storey: &Storey) -> f64 {
 /// the angles the transform's fit bbox was computed at).
 /// Defensive no-op when the storey's ceiling height is unset (`render` and
 /// `full_house_3d` both hint-and-return before getting here).
+///
+/// `fade_internal` (the all-storeys stack sets it): non-heat-loss walls,
+/// floors, and Party ceilings draw as FAINT TRANSLUCENT fills with a faded
+/// outline — "external boundary to another dwelling, no heat loss" — while a
+/// derived `InterStorey` region (this dwelling's own storey junction, stamped
+/// by `derive_inter_storey`) doesn't draw at all: it would double-draw the
+/// same plane at every junction and says nothing about heat loss. A SELECTED
+/// region always draws highlighted (the Structure review must be able to
+/// shade any surface). The single-storey view passes `false` — the assessor
+/// reviews/paints exposure there, so every surface draws (InterStorey walls
+/// as ghosts).
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn render_at_z_offset(
     painter: &egui::Painter,
     t: &Transform2d,
@@ -102,12 +128,19 @@ pub(crate) fn render_at_z_offset(
     z_offset: f64,
     view: ViewParams,
     selected: &HashSet<ItemId>,
+    fade_internal: bool,
 ) {
     let Some(height) = storey.ceiling_height_m else {
         return;
     };
     let wall_top = z_offset + height;
     for region in &storey.floors.regions {
+        if fade_internal
+            && region.exposure == FloorExposure::InterStorey
+            && !selected.contains(&region.id)
+        {
+            continue; // own storey-junction plane — hidden in the stack view
+        }
         draw_floor_region(
             painter,
             t,
@@ -116,12 +149,28 @@ pub(crate) fn render_at_z_offset(
             display_mode,
             view,
             selected,
+            fade_internal,
         );
     }
     // Real wall regions: the exact resolved polygons (tops trace the roof —
     // jumps at ceiling steps, slopes under fans/ridges), coloured by exposure.
     for wall in &storey.walls.regions {
-        draw_wall_region(painter, t, wall, z_offset, display_mode, view, selected);
+        if fade_internal
+            && wall.exposure == WallExposure::InterStorey
+            && !selected.contains(&wall.id)
+        {
+            continue; // buried behind the neighbour storey — hidden in the stack
+        }
+        draw_wall_region(
+            painter,
+            t,
+            wall,
+            z_offset,
+            display_mode,
+            view,
+            selected,
+            fade_internal,
+        );
     }
     // Openings (windows blue, doors brown) — each opening's 4 vertices are a
     // real quad in 3D (in the wall plane, or on the roof plane for roof
@@ -176,7 +225,22 @@ pub(crate) fn render_at_z_offset(
         }
     } else {
         for roof in &storey.ceilings.regions {
-            draw_roof_region(painter, t, roof, z_offset, display_mode, view, selected);
+            if fade_internal
+                && roof.exposure == CeilingExposure::InterStorey
+                && !selected.contains(&roof.id)
+            {
+                continue; // own storey-junction plane — hidden in the stack view
+            }
+            draw_roof_region(
+                painter,
+                t,
+                roof,
+                z_offset,
+                display_mode,
+                view,
+                selected,
+                fade_internal,
+            );
         }
     }
 }
@@ -234,6 +298,7 @@ pub(crate) fn projected_bb_for_storey(
 /// read as offset rings. The building's vertical extent is carried by the
 /// wall regions themselves (every wall resolves, Unset included) — no volume
 /// band is drawn here.
+#[allow(clippy::too_many_arguments)]
 fn draw_floor_region(
     painter: &egui::Painter,
     t: &Transform2d,
@@ -242,6 +307,7 @@ fn draw_floor_region(
     display_mode: DisplayMode,
     view: ViewParams,
     selected: &HashSet<ItemId>,
+    fade_internal: bool,
 ) {
     let floor_pts: Vec<egui::Pos2> = region
         .polygon
@@ -257,24 +323,36 @@ fn draw_floor_region(
     }
     let floor_color = color_for(DisplayMode::Floors, display_mode, style::FLOOR_LINE);
     // A SELECTED floor region's face is SHADED so the surfaces we mean are
-    // unmistakable in 3D (the rest stay wireframe).
+    // unmistakable in 3D; in the all-storeys stack (`fade_internal`) a
+    // NON-HEAT-LOSS floor (a dwelling below — an external fact; own storey
+    // junctions are InterStorey and skipped before this fn) gets a FAINT
+    // translucent shade + faded outline so it reads as "not part of the
+    // envelope". The rest stay wireframe.
+    let internal = fade_internal
+        && region.exposure == FloorExposure::NonHeatLoss
+        && !selected.contains(&region.id);
     if selected.contains(&region.id) {
         fill_polygon(
             painter,
             &floor_pts,
             style::highlight_fill(style::FLOOR_LINE),
         );
+    } else if internal {
+        fill_polygon(painter, &floor_pts, style::internal_fill(style::FLOOR_LINE));
     }
-    painter.add(egui::Shape::closed_line(
-        floor_pts,
-        egui::Stroke::new(2.0, floor_color),
-    ));
+    let stroke = if internal {
+        egui::Stroke::new(1.0, style::faded(floor_color))
+    } else {
+        egui::Stroke::new(2.0, floor_color)
+    };
+    painter.add(egui::Shape::closed_line(floor_pts, stroke));
 }
 
 /// One WALL region's real polygon (base edge at the bottom, top tracing the
 /// roof — jumps at ceiling steps, slopes under fans/ridges), coloured by its
 /// exposure class with the shared 2D scheme so a wall reads the same in both
 /// views. Unset walls draw grey — present, just not classified yet.
+#[allow(clippy::too_many_arguments)]
 fn draw_wall_region(
     painter: &egui::Painter,
     t: &Transform2d,
@@ -283,6 +361,7 @@ fn draw_wall_region(
     display_mode: DisplayMode,
     view: ViewParams,
     selected: &HashSet<ItemId>,
+    fade_internal: bool,
 ) {
     if region.polygon.exterior.len() < 3 {
         return;
@@ -302,18 +381,38 @@ fn draw_wall_region(
         WallExposure::NonHeatLoss => style::NON_HEAT_LOSS_WALL,
         WallExposure::Unset => style::UNSET_WALL,
         WallExposure::Ground => style::GROUND_WALL,
+        // Derived storey junction — grey base; the ghost branch below fades
+        // it further. Only reachable in the SINGLE-storey view (the stack view
+        // skips InterStorey regions before this fn).
+        WallExposure::InterStorey => style::UNSET_WALL,
     };
     let color = color_for(DisplayMode::Walls, display_mode, base);
     // A SELECTED wall region's face is SHADED (keeping its exposure colour) so
-    // it reads as a solid surface, not just an edge.
+    // it reads as a solid surface, not just an edge; in the all-storeys stack
+    // (`fade_internal`) a NON-HEAT-LOSS wall (an external boundary to another
+    // dwelling) gets a FAINT translucent shade + faded outline so it reads as
+    // "not part of the envelope". A derived InterStorey band draws as the same
+    // ghost in EVERY view it reaches (the single-storey view — the stack skips
+    // it): present-but-inert, never a paint target.
+    let internal = ((fade_internal && region.exposure == WallExposure::NonHeatLoss)
+        || region.exposure == WallExposure::InterStorey)
+        && !selected.contains(&region.id);
     if selected.contains(&region.id) {
         fill_polygon(painter, &pts, style::highlight_fill(base));
+    } else if internal {
+        fill_polygon(painter, &pts, style::internal_fill(base));
     }
-    painter.add(egui::Shape::closed_line(pts, egui::Stroke::new(2.0, color)));
+    let stroke = if internal {
+        egui::Stroke::new(1.0, style::faded(color))
+    } else {
+        egui::Stroke::new(2.0, color)
+    };
+    painter.add(egui::Shape::closed_line(pts, stroke));
 }
 
 /// One roof region's outline at its own per-vertex z (`z_offset` + the stored
 /// vertex z, which is metres above the storey's floor datum).
+#[allow(clippy::too_many_arguments)]
 fn draw_roof_region(
     painter: &egui::Painter,
     t: &Transform2d,
@@ -322,6 +421,7 @@ fn draw_roof_region(
     display_mode: DisplayMode,
     view: ViewParams,
     selected: &HashSet<ItemId>,
+    fade_internal: bool,
 ) {
     if region.polygon.exterior.len() < 3 {
         return;
@@ -337,14 +437,24 @@ fn draw_roof_region(
         .collect();
     let ceiling_color = color_for(DisplayMode::Ceilings, display_mode, style::ROOF_LINE);
     // A SELECTED roof region's face is SHADED so sloped fans/ridges read as
-    // surfaces, not just outlines.
+    // surfaces, not just outlines; in the all-storeys stack (`fade_internal`)
+    // a PARTY ceiling (a dwelling above — no heat loss; own storey junctions
+    // are InterStorey and skipped before this fn) gets a FAINT translucent
+    // shade + faded outline so it reads as "not part of the envelope".
+    let internal = fade_internal
+        && region.exposure == CeilingExposure::Party
+        && !selected.contains(&region.id);
     if selected.contains(&region.id) {
         fill_polygon(painter, &pts, style::highlight_fill(style::ROOF_LINE));
+    } else if internal {
+        fill_polygon(painter, &pts, style::internal_fill(style::ROOF_LINE));
     }
-    painter.add(egui::Shape::closed_line(
-        pts,
-        egui::Stroke::new(1.5, ceiling_color),
-    ));
+    let stroke = if internal {
+        egui::Stroke::new(1.0, style::faded(ceiling_color))
+    } else {
+        egui::Stroke::new(1.5, ceiling_color)
+    };
+    painter.add(egui::Shape::closed_line(pts, stroke));
 }
 
 #[cfg(test)]

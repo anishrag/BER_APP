@@ -143,6 +143,11 @@ pub struct SketchState {
     /// are mutually exclusive (the roof-family pattern). Shown inline in it;
     /// cleared on each success.
     pub new_storey_error: Option<String>,
+    /// Armed delete-storey confirm in the storey tab row: `Some(idx)` while
+    /// the inline "Delete Storey N?" confirm is showing for storey `idx`.
+    /// Disarmed by the tab row itself whenever the deletable (top) storey
+    /// changes, and on dispatching the delete.
+    pub delete_storey_armed: Option<usize>,
     /// Last error from the Heights thickness field's `set_floor_thickness`.
     /// Its own field (not `new_storey_error`): the Heights field and the
     /// flow toolbar can be on screen at once, each error renders in the
@@ -1022,6 +1027,10 @@ impl eframe::App for BerApp {
                                 .app_controller
                                 .borrow()
                                 .pending_structure_carve_polygons();
+                            // The wall-inclusion ask for a just-dimensioned
+                            // carve (highlighted edge + Include/Exclude).
+                            let wall_inclusion_prompt =
+                                self.app_controller.borrow().wall_inclusion_prompt();
 
                             // Floor-exposure tool: mode flags + the overlaid
                             // all-storeys floor view data.
@@ -1076,8 +1085,10 @@ impl eframe::App for BerApp {
                                 roof_area_can_pick_shape,
                                 roof_area_ceiling_sloped,
                                 roof_area_ridge_pending,
+                                roof_area_hip_ridge_count,
                                 roof_area_pitch_pending,
-                                roof_area_ridge_line,
+                                roof_area_can_centre_ridge,
+                                roof_area_ridge_lines,
                             ) = {
                                 let c = self.app_controller.borrow();
                                 (
@@ -1088,8 +1099,10 @@ impl eframe::App for BerApp {
                                     c.roof_area_can_pick_shape(),
                                     c.roof_area_ceiling_is_sloped(),
                                     c.roof_area_ridge_pending(),
+                                    c.roof_area_hip_ridge_count(),
                                     c.roof_area_pitch_pending(),
-                                    c.pending_roof_area_ridge_line(),
+                                    c.roof_area_can_centre_ridge(),
+                                    c.pending_roof_area_ridge_lines(),
                                 )
                             };
 
@@ -1212,6 +1225,7 @@ impl eframe::App for BerApp {
                                 splice_debug: &splice_debug,
                                 snap_tags: &snap_tags,
                                 cat_state: &mut self.sketch_state.categories,
+                                delete_storey_armed: &mut self.sketch_state.delete_storey_armed,
                                 laser: &mut self.sketch_state.laser,
                                 ceiling_entry_open: self.sketch_state.ceiling_entry_open,
                                 autosave_status,
@@ -1291,6 +1305,7 @@ impl eframe::App for BerApp {
                                 structure_cut_regions: &structure_cut_regions,
                                 pending_structure_split_polygon: &pending_structure_split_polygon,
                                 pending_structure_carves: &pending_structure_carves,
+                                wall_inclusion_prompt,
                                 layer_library: &layer_library,
                                 floor_exposure_mode,
                                 floor_exposure_gate_pending,
@@ -1305,8 +1320,10 @@ impl eframe::App for BerApp {
                                 roof_area_can_pick_shape,
                                 roof_area_ceiling_sloped,
                                 roof_area_ridge_pending,
+                                roof_area_hip_ridge_count,
                                 roof_area_pitch_pending,
-                                roof_area_ridge_line,
+                                roof_area_can_centre_ridge,
+                                roof_area_ridge_lines,
                                 roof_pitch_input: &mut self.sketch_state.roof_pitch_input,
                                 ceiling_exposure_mode,
                                 ceiling_exposure_gate_pending,
@@ -1824,6 +1841,9 @@ impl eframe::App for BerApp {
                                     SketchEvent::PartitionDimSkip => {
                                         controller.borrow_mut().partition_dim_skip();
                                     }
+                                    SketchEvent::UnsnapPartitionEnd { end_b } => {
+                                        controller.borrow_mut().unsnap_partition_end(end_b);
+                                    }
                                     SketchEvent::ClearWallPartition => {
                                         controller.borrow_mut().clear_active_wall_partition();
                                     }
@@ -2099,6 +2119,14 @@ impl eframe::App for BerApp {
                                     SketchEvent::AddStorey => {
                                         log_err("add_storey", controller.borrow_mut().add_storey());
                                     }
+                                    // (The tab row disarms its confirm before
+                                    // emitting — no page state to reset here.)
+                                    SketchEvent::DeleteStorey => {
+                                        log_err(
+                                            "delete_current_storey",
+                                            controller.borrow_mut().delete_current_storey(),
+                                        );
+                                    }
                                     SketchEvent::AssignFloorThickness(v) => {
                                         match controller.borrow_mut().assign_floor_thickness(v) {
                                             Ok(()) => {
@@ -2190,6 +2218,9 @@ impl eframe::App for BerApp {
                                             world_x as f32,
                                             world_y as f32,
                                         );
+                                    }
+                                    SketchEvent::ResolveWallInclusion { include } => {
+                                        controller.borrow_mut().resolve_wall_inclusion(include);
                                     }
                                     SketchEvent::BeginStructureEdit => {
                                         controller.borrow_mut().begin_structure_edit();
@@ -2330,6 +2361,16 @@ impl eframe::App for BerApp {
                                         } else {
                                             self.sketch_state.roof_error = None;
                                         }
+                                    }
+                                    SketchEvent::FinishRoofRidges => {
+                                        let r = controller.borrow_mut().finish_roof_area_ridges();
+                                        match r {
+                                            Ok(()) => self.sketch_state.roof_error = None,
+                                            Err(e) => self.sketch_state.roof_error = Some(e),
+                                        }
+                                    }
+                                    SketchEvent::CentreRoofRidge => {
+                                        controller.borrow_mut().centre_pending_roof_ridge();
                                     }
                                     SketchEvent::AssignRoofPitch(deg) => {
                                         let r = controller.borrow_mut().assign_roof_area_pitch(deg);

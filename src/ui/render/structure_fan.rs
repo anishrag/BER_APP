@@ -188,10 +188,15 @@ fn region_centroid(
             let c = r.centroid();
             (c.x, c.y)
         }),
-        SurfaceKind::Ceilings => storey.ceilings.regions.iter().find(|r| r.id == id).map(|r| {
-            let c = r.centroid();
-            (c.x, c.y)
-        }),
+        SurfaceKind::Ceilings => storey
+            .ceilings
+            .regions
+            .iter()
+            .find(|r| r.id == id)
+            .map(|r| {
+                let c = r.centroid();
+                (c.x, c.y)
+            }),
     }
 }
 

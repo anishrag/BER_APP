@@ -316,7 +316,8 @@ impl AppController {
     /// rejection so the user can retype. Outside undo —
     /// phases/steps/ceiling-steps parity.
     pub fn assign_roof_apex(&mut self, z_m: f32) -> Result<(), String> {
-        let Some(PendingCeilingPoint::Height { point, .. }) = self.pending_roof_point.as_ref() else {
+        let Some(PendingCeilingPoint::Height { point, .. }) = self.pending_roof_point.as_ref()
+        else {
             return Ok(()); // nothing awaiting a height — no-op
         };
         let p = Point2f64::new(point.x as f64, point.y as f64);
@@ -426,8 +427,8 @@ impl AppController {
     /// The pending point's current position (world coords) for the UI's
     /// provisional dot marker. `None` when nothing is pending.
     pub fn pending_roof_point_position(&self) -> Option<(f64, f64)> {
-        let (PendingCeilingPoint::Position { point, .. } | PendingCeilingPoint::Height { point, .. }) =
-            self.pending_roof_point.as_ref()?;
+        let (PendingCeilingPoint::Position { point, .. }
+        | PendingCeilingPoint::Height { point, .. }) = self.pending_roof_point.as_ref()?;
         Some((point.x as f64, point.y as f64))
     }
 }

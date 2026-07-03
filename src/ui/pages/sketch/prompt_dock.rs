@@ -37,13 +37,19 @@ pub(super) fn has_controls(view: &SketchView<'_>) -> bool {
         || view.floor_exposure_mode
         || view.ceiling_exposure_mode
         || view.roof_mode
+        || view.wall_inclusion_prompt.is_some()
     {
         return true;
     }
     // Wall exposure: only when there's a target to set (a selected section /
-    // riser) or unset coverage the bulk button can paint.
+    // riser) or unset coverage the bulk button can paint (riser faces count —
+    // the bulk button classifies them too).
     if view.exposure_mode {
         let riser_selected = view.riser_views.iter().any(|r| r.selected);
+        let riser_unset = view
+            .riser_views
+            .iter()
+            .any(|r| r.exposure == WallExposure::Unset);
         let unset = view
             .exposure_walls
             .iter()
@@ -54,7 +60,7 @@ pub(super) fn has_controls(view: &SketchView<'_>) -> bool {
                         .any(|(_, _, e)| *e == WallExposure::Unset)
             })
             .count();
-        return view.exposure_selection.is_some() || riser_selected || unset > 0;
+        return view.exposure_selection.is_some() || riser_selected || riser_unset || unset > 0;
     }
     if view.has_floor_plan {
         // Construction year: the year picker (pending) or the always-available
@@ -123,6 +129,9 @@ pub(super) fn panel_title(view: &SketchView<'_>) -> &'static str {
     if view.vertex_drop_prompt.is_some() {
         return "Place vertex";
     }
+    if view.wall_inclusion_prompt.is_some() {
+        return "Include wall?";
+    }
     if view.review.is_some() {
         return "Review";
     }
@@ -179,6 +188,10 @@ pub(super) fn panel_token(view: &SketchView<'_>) -> String {
     }
     if let Some(vp) = &view.vertex_drop_prompt {
         return format!("vd-{}", vp.active.len());
+    }
+    if let Some(wi) = &view.wall_inclusion_prompt {
+        // Keyed by the cursor so each ambiguous edge reopens the panel.
+        return format!("wi-{}-{}", wi.index, wi.total);
     }
     if view.review.is_some() {
         return format!("rev-{}", view.review_remaining);
@@ -247,14 +260,14 @@ pub(super) fn instruction(view: &SketchView<'_>) -> Option<&'static str> {
     }
     if view.floor_exposure_mode {
         return Some(if view.floor_exposure_gate_pending {
-            "Have you finished adding all storeys? (needed before the auto-exposure pass)"
+            "Have you finished adding all storeys? (inter-storey surfaces derive from the full stack)"
         } else {
             "Floor exposures — select floors, then pick their heat-loss exposure."
         });
     }
     if view.ceiling_exposure_mode {
         return Some(if view.ceiling_exposure_gate_pending {
-            "Have you finished adding all storeys? (needed before the auto-exposure pass)"
+            "Have you finished adding all storeys? (inter-storey surfaces derive from the full stack)"
         } else {
             "Ceiling exposures — select ceilings, then pick their heat-loss exposure."
         });
@@ -263,9 +276,13 @@ pub(super) fn instruction(view: &SketchView<'_>) -> Option<&'static str> {
         return Some(if view.roof_gate_pending {
             "Have you finished adding all storeys? (the roof covers the top storey everywhere)"
         } else if view.roof_area_pitch_pending {
-            "Roof — type the pitch (degrees) for this ridge."
+            "Roof — type the pitch (degrees) for the ridge(s)."
         } else if view.roof_area_ridge_pending {
-            "Roof — draw the ridge line across the grouped area."
+            if view.roof_area_hip_ridge_count.is_some() {
+                "Roof — draw ALL the hip's ridge lines, then Finish. Near an edge snaps onto it."
+            } else {
+                "Roof — draw the ridge line across the grouped area (near an edge snaps onto it)."
+            }
         } else if view.roof_area_can_pick_shape {
             if view.roof_area_ceiling_sloped {
                 "Roof — pick the shape (Follow ceiling / Flat / Gable / Hip)."
@@ -291,6 +308,11 @@ pub(super) fn instruction(view: &SketchView<'_>) -> Option<&'static str> {
     }
     if view.vertex_drop_prompt.is_some() {
         return Some("Place the vertex — enter any two distances.");
+    }
+    if view.wall_inclusion_prompt.is_some() {
+        return Some(
+            "The house continues past the highlighted edge — include the wall along it in the selection?",
+        );
     }
     if view.review.is_some() {
         return Some("Review the suggested straightening.");
@@ -406,6 +428,8 @@ pub(super) fn render_controls<F: FnMut(UiEvent)>(
                 view.vertex_drop_error,
                 on_event,
             );
+        } else if let Some(wi) = &view.wall_inclusion_prompt {
+            wall_inclusion_toolbar(ui, wi, on_event);
         } else if view.review.is_some() {
             review_toolbar(ui, view.review_remaining, on_event);
         } else if view.partition_mode {
@@ -802,6 +826,37 @@ fn pending_redraw_toolbar<F: FnMut(UiEvent)>(ui: &mut egui::Ui, on_event: &mut F
     }
 }
 
+/// The structure-carve wall-inclusion ask: one ambiguous carve edge at a time
+/// (highlighted on the canvas), answered Include / Exclude. The label carries
+/// the "Wall N of M" cursor so a multi-edge carve reads as a short sequence.
+fn wall_inclusion_toolbar<F: FnMut(UiEvent)>(
+    ui: &mut egui::Ui,
+    wi: &crate::controller::app_controller::WallInclusionPromptView,
+    on_event: &mut F,
+) {
+    if wi.total > 1 {
+        ui.label(format!("Wall {} of {}:", wi.index + 1, wi.total));
+    }
+    if ui
+        .button("Include")
+        .hint("Keep the wall along the highlighted edge in the selection")
+        .clicked()
+    {
+        on_event(UiEvent::Sketch(SketchEvent::ResolveWallInclusion {
+            include: true,
+        }));
+    }
+    if ui
+        .button("Exclude")
+        .hint("Leave the wall along the highlighted edge out of the selection")
+        .clicked()
+    {
+        on_event(UiEvent::Sketch(SketchEvent::ResolveWallInclusion {
+            include: false,
+        }));
+    }
+}
+
 fn review_toolbar<F: FnMut(UiEvent)>(ui: &mut egui::Ui, remaining: usize, on_event: &mut F) {
     ui.horizontal(|ui| {
         // "Same line?" instruction is in the bottom bar; keep the count read-out.
@@ -920,7 +975,13 @@ fn exposure_toolbar<F: FnMut(UiEvent)>(
                     .iter()
                     .any(|(_, _, e)| *e == WallExposure::Unset)
         })
-        .count();
+        .count()
+        // Riser faces count too — the bulk button classifies them alongside
+        // the outline walls.
+        + risers
+            .iter()
+            .filter(|r| r.exposure == WallExposure::Unset)
+            .count();
     ui.horizontal(|ui| {
         if let Some(r) = selected_riser {
             // Riser context: whole-face only (v1) — no start/end range
@@ -1053,12 +1114,13 @@ fn exposure_toolbar<F: FnMut(UiEvent)>(
 }
 
 /// The floor-exposure storey-count GATE: confirm every storey is added before
-/// the auto-exposure pass runs and the overlaid floor view appears.
+/// the overlaid floor view appears (inter-storey surfaces derive from the
+/// full stack, so labelling earlier would waste work).
 fn floor_exposure_gate_toolbar<F: FnMut(UiEvent)>(ui: &mut egui::Ui, on_event: &mut F) {
     // (The "finished adding all storeys?" question is in the bottom bar.)
     if ui
         .button("Yes")
-        .hint("Run the inter-storey party auto-exposure pass, then mark floors")
+        .hint("Open the all-storeys floor view and mark the floors")
         .clicked()
     {
         on_event(UiEvent::Sketch(SketchEvent::ConfirmAllStoreysAdded));
@@ -1122,12 +1184,13 @@ fn floor_exposure_toolbar<F: FnMut(UiEvent)>(
 
 /// The ceiling-exposure storey-count GATE (mirror of
 /// [`floor_exposure_gate_toolbar`]): confirm every storey is added before the
-/// auto-exposure pass runs and the overlaid ceiling view appears.
+/// overlaid ceiling view appears (inter-storey surfaces derive from the full
+/// stack, so labelling earlier would waste work).
 fn ceiling_exposure_gate_toolbar<F: FnMut(UiEvent)>(ui: &mut egui::Ui, on_event: &mut F) {
     // (The "finished adding all storeys?" question is in the bottom bar.)
     if ui
         .button("Yes")
-        .hint("Run the inter-storey party auto-exposure pass, then mark ceilings")
+        .hint("Open the all-storeys ceiling view and mark the ceilings")
         .clicked()
     {
         on_event(UiEvent::Sketch(SketchEvent::ConfirmAllStoreysAddedCeiling));
@@ -1180,11 +1243,39 @@ fn roof_toolbar<F: FnMut(UiEvent)>(ui: &mut egui::Ui, view: &mut SketchView<'_>,
                     on_event(UiEvent::Sketch(SketchEvent::AssignRoofPitch(deg)));
                 }
             }
+            // A gable's rough stroke can be perfected: recentre it between the
+            // eaves (the drawn position stays available by just not pressing it).
+            if view.roof_area_can_centre_ridge
+                && ui
+                    .button("Centre on roof")
+                    .hint("Move the ridge to the middle of the area it spans")
+                    .clicked()
+            {
+                on_event(UiEvent::Sketch(SketchEvent::CentreRoofRidge));
+            }
             if ui.button("Cancel").clicked() {
                 on_event(UiEvent::Sketch(SketchEvent::CancelRoofArea));
             }
         } else if view.roof_area_ridge_pending {
-            ui.label("Draw the ridge line across the area.");
+            if let Some(count) = view.roof_area_hip_ridge_count {
+                // HIP: several ridges (an L-shaped roof has one per wing) —
+                // keep drawing, then Finish moves to the pitch.
+                ui.label(if count == 0 {
+                    "Draw the hip's ridge lines.".to_string()
+                } else {
+                    format!("{count} ridge(s) drawn — draw the rest, then Finish.")
+                });
+                if count > 0
+                    && ui
+                        .button("Finish ridges")
+                        .hint("All ridges drawn — set the pitch next")
+                        .clicked()
+                {
+                    on_event(UiEvent::Sketch(SketchEvent::FinishRoofRidges));
+                }
+            } else {
+                ui.label("Draw the ridge line across the area.");
+            }
             if ui.button("Cancel").clicked() {
                 on_event(UiEvent::Sketch(SketchEvent::CancelRoofArea));
             }

@@ -86,6 +86,40 @@ pub struct ExistingGroup {
     pub name: Option<String>,
 }
 
+/// A dimensioned structure carve STAGED as a pending selection (not yet split):
+/// the ring, plus the interior edges whose walls the assessor answered
+/// "Exclude" to in the wall-inclusion ask. Walls along the ring's OUTLINE edges
+/// (the storey's true exterior boundary) are always included; the excluded
+/// edges subtract their walls from the committed selection.
+#[derive(Debug, Clone)]
+pub(super) struct StagedStructureCarve {
+    pub(super) ring: Vec<Point2f64>,
+    pub(super) excluded_edges: Vec<[Point2f64; 2]>,
+}
+
+/// The in-flight wall-inclusion ASK over a just-dimensioned structure carve:
+/// the ring being staged, its AMBIGUOUS edges (interior to the storey footprint
+/// — house area continues beyond them, so wall inclusion is a judgement call),
+/// a cursor through them, and the edges excluded so far. Resolves one edge per
+/// Include/Exclude answer; when the last edge is answered the carve stages.
+#[derive(Debug, Clone)]
+pub(super) struct WallInclusionPrompt {
+    ring: Vec<Point2f64>,
+    edges: Vec<[Point2f64; 2]>,
+    cursor: usize,
+    excluded: Vec<[Point2f64; 2]>,
+}
+
+/// UI data for the wall-inclusion ask: the CURRENT ambiguous edge (world
+/// coords, for the canvas to highlight while asking) and the cursor position
+/// (`index` of `total`, 0-based) for the panel's "Wall 1 of 2" label.
+#[derive(Debug, Clone, PartialEq)]
+pub struct WallInclusionPromptView {
+    pub edge: ((f64, f64), (f64, f64)),
+    pub index: usize,
+    pub total: usize,
+}
+
 impl AppController {
     /// The Structure-phase selected region ids — the canvas shades exactly these.
     pub fn structure_selected_ids(&self) -> &HashSet<ItemId> {
@@ -347,6 +381,20 @@ impl AppController {
             };
             // The picked exposure must match the group's kind; otherwise no-op.
             if exposure.kind() != g.ty.kind() {
+                return;
+            }
+            // A derived InterStorey group is read-only (the UI shows a disabled
+            // control), and InterStorey is never a settable value — the
+            // derivation owns that classification. Belt-and-braces here.
+            let is_inter = |e: &SurfaceExposure| {
+                matches!(
+                    e,
+                    SurfaceExposure::Wall(WallExposure::InterStorey)
+                        | SurfaceExposure::Floor(FloorExposure::InterStorey)
+                        | SurfaceExposure::Ceiling(CeilingExposure::InterStorey)
+                )
+            };
+            if is_inter(&exposure) || is_inter(&g.exposure) {
                 return;
             }
             (g.ty.kind(), g.ids.clone(), g.exposure_locked)
@@ -1239,17 +1287,63 @@ impl AppController {
     pub fn clear_structure_surface_selection(&mut self) {
         self.structure_selected.clear();
         self.pending_structure_carves.clear();
+        self.pending_wall_inclusion = None;
         self.pending_structure_cut = None;
         self.structure_split_kind = None;
     }
 
     /// The staged (not-yet-split) carve rings, plan coords, for the canvas to
-    /// shade as the pending selection. Empty when no carve is staged.
+    /// shade as the pending selection — including the ring the wall-inclusion
+    /// ask is currently walking (it's committed to the selection; only its wall
+    /// membership is still being answered). Empty when no carve is staged.
     pub fn pending_structure_carve_polygons(&self) -> Vec<Vec<(f64, f64)>> {
         self.pending_structure_carves
             .iter()
-            .map(|ring| ring.iter().map(|p| (p.x, p.y)).collect())
+            .map(|c| c.ring.iter().map(|p| (p.x, p.y)).collect())
+            .chain(
+                self.pending_wall_inclusion
+                    .as_ref()
+                    .map(|p| p.ring.iter().map(|p| (p.x, p.y)).collect()),
+            )
             .collect()
+    }
+
+    /// The current wall-inclusion question, if a staged carve is awaiting
+    /// per-edge Include/Exclude answers: the edge to highlight plus its cursor
+    /// position. `None` when nothing is being asked.
+    pub fn wall_inclusion_prompt(&self) -> Option<WallInclusionPromptView> {
+        let p = self.pending_wall_inclusion.as_ref()?;
+        let e = p.edges.get(p.cursor)?;
+        Some(WallInclusionPromptView {
+            edge: ((e[0].x, e[0].y), (e[1].x, e[1].y)),
+            index: p.cursor,
+            total: p.edges.len(),
+        })
+    }
+
+    /// Answer the current wall-inclusion question: `include: false` records the
+    /// edge so its walls are subtracted from the committed selection; `true`
+    /// keeps them (the `surfaces_in_ring` boundary test already picks them up).
+    /// Advances to the next ambiguous edge; answering the last one STAGES the
+    /// carve. No-op when nothing is being asked. The decisions apply to this
+    /// staging only.
+    pub fn resolve_wall_inclusion(&mut self, include: bool) {
+        let Some(p) = self.pending_wall_inclusion.as_mut() else {
+            return;
+        };
+        if let Some(edge) = p.edges.get(p.cursor) {
+            if !include {
+                p.excluded.push(*edge);
+            }
+            p.cursor += 1;
+        }
+        if p.cursor >= p.edges.len() {
+            let p = self.pending_wall_inclusion.take().unwrap();
+            self.pending_structure_carves.push(StagedStructureCarve {
+                ring: p.ring,
+                excluded_edges: p.excluded,
+            });
+        }
     }
 
     /// A Structure-phase CARVE/CUT stroke (world coords): an approximate stroke
@@ -1272,31 +1366,63 @@ impl AppController {
         if pts.len() < 2 {
             return;
         }
+        // Snap-tag capture: the pre-action state (a pending CUT pushes no undo
+        // entry, so its capture carries this `before` itself), and drop stale
+        // decisions from unrelated ops so only THIS stroke's snaps are tagged.
+        let before = self.current_history_snapshot();
+        self.begin_snap_capture();
         // Carve against the whole outline (no holes) — the split ring is fixed
         // by dimensioning before it carves the surface.
         self.sync_active();
+        // Reference walls besides the outline: the construction-PHASE lines, as
+        // in the living-area flow. A carve edge drawn beside a phase line lands
+        // flush on it, and — because a snapped wall is a known wall — the SAME
+        // set feeds the pinning below so the snapped edge is pre-known in
+        // dimensioning (the pin matches the snap; declining the snap tag
+        // reopens the question).
+        let ref_walls = self.phase_reference_walls();
         match self
             .document
-            .carve_or_cut_in_available(&pts, &[], &self.tuning.subarea, &[])
+            .carve_or_cut_in_available(&pts, &[], &self.tuning.subarea, &ref_walls)
         {
             Ok((boundary, SubareaOutcome::Cut(a, b))) => {
                 self.pending_structure_cut = Some([
-                    self.pinned_subarea_slot(&boundary, a),
-                    self.pinned_subarea_slot(&boundary, b),
+                    self.pinned_subarea_slot_refs(&boundary, a, &ref_walls),
+                    self.pinned_subarea_slot_refs(&boundary, b, &ref_walls),
                 ]);
+                self.capture_snap_action_pending(
+                    SnapAction::Subarea {
+                        flow: SubareaFlow::Structure,
+                        points: world_points.to_vec(),
+                        pick: None,
+                    },
+                    before,
+                    manip_plan::take_snap_decisions(),
+                );
             }
             Ok((boundary, SubareaOutcome::Area(plan))) => {
                 if plan.validate_simple().is_err() {
+                    // Nothing committed — drop the rejected carve's decisions.
+                    let _ = manip_plan::take_snap_decisions();
                     return;
                 }
                 let Some(kind) = self.primary_structure_kind() else {
+                    let _ = manip_plan::take_snap_decisions();
                     return;
                 };
                 let undo = self.current_history_snapshot();
-                let slot = self.pinned_subarea_slot(&boundary, plan);
+                let slot = self.pinned_subarea_slot_refs(&boundary, plan, &ref_walls);
                 self.begin_structure_split_dimensioning(slot, kind, undo);
+                self.capture_snap_action(SnapAction::Subarea {
+                    flow: SubareaFlow::Structure,
+                    points: world_points.to_vec(),
+                    pick: None,
+                });
             }
-            Err(e) => log::error!("structure carve_or_cut: {}", e),
+            Err(e) => {
+                log::error!("structure carve_or_cut: {}", e);
+                let _ = manip_plan::take_snap_decisions();
+            }
         }
     }
 
@@ -1342,6 +1468,11 @@ impl AppController {
             };
             let undo = self.current_history_snapshot();
             self.begin_structure_split_dimensioning(slot, kind, undo);
+            // The stroke's tags stay live: replay now re-runs stroke + pick.
+            self.record_subarea_pick(SubareaFlow::Structure, Some((world_x, world_y)));
+        } else {
+            // Cancelled — the cut (and the snaps its tags describe) is gone.
+            self.record_subarea_pick(SubareaFlow::Structure, None);
         }
     }
 
@@ -1426,6 +1557,23 @@ impl AppController {
     /// is deferred to "Edit attributes" (`commit_pending_structure_carves`), so a
     /// carve the assessor then decides is wrong changes nothing. The pending ring
     /// is shaded on the canvas as the selection until then.
+    ///
+    /// Wall inclusion along the ring's edges is only automatic where it is
+    /// UNAMBIGUOUS: an edge on the storey OUTLINE has nothing beyond it (true
+    /// exterior boundary), so its wall is definitely part of the carved
+    /// selection. An edge with house area on the other side (interior — a
+    /// straight-cut line, or any edge the dwelling continues past) is a
+    /// judgement call: when Walls mode is active AND a wall region actually
+    /// stands on the edge (a step riser, say — a cut through open floor has no
+    /// wall to include, so it asks nothing), the edge opens the per-edge
+    /// wall-inclusion ask ([`wall_inclusion_prompt`]) and the carve stages once
+    /// the last edge is answered.
+    ///
+    /// Seam note: the interior-vs-outline classification lives in `document`
+    /// ([`document::StoreyDoc::ambiguous_carve_edges`]); the edge→wall-region
+    /// mapping lives on the resolved storey ([`Storey::wall_ids_on_segment`]).
+    /// The shell only SEQUENCES the two at prompt-open time — classify, then
+    /// keep the edges a wall stands on.
     fn stage_structure_carve(&mut self) {
         if self.structure_split_kind.is_none() {
             return;
@@ -1436,8 +1584,42 @@ impl AppController {
             return;
         }
         let ring64: Vec<Point2f64> = ring32.iter().map(|p| domain::points::to_f64(*p)).collect();
-        self.pending_structure_carves.push(ring64);
+        // The classification is the document's (this storey's footprint is the
+        // test); only relevant while the selection acts on Walls.
+        let interior = if self.structure_kinds.contains(&SurfaceKind::Walls) {
+            self.document.ambiguous_carve_edges(&ring64)
+        } else {
+            Vec::new()
+        };
         self.abandon_structure_split_shape();
+        // Only interior edges a wall region actually STANDS ON are worth
+        // asking about. Re-derive first so the wall regions the check reads
+        // are current (a no-op unless an edit is pending).
+        let ambiguous: Vec<[Point2f64; 2]> = if interior.is_empty() {
+            Vec::new()
+        } else {
+            self.materialize();
+            match self.current_storey() {
+                Some(storey) => interior
+                    .into_iter()
+                    .filter(|e| !storey.wall_ids_on_segment(e[0], e[1]).is_empty())
+                    .collect(),
+                None => Vec::new(),
+            }
+        };
+        if ambiguous.is_empty() {
+            self.pending_structure_carves.push(StagedStructureCarve {
+                ring: ring64,
+                excluded_edges: Vec::new(),
+            });
+        } else {
+            self.pending_wall_inclusion = Some(WallInclusionPrompt {
+                ring: ring64,
+                edges: ambiguous,
+                cursor: 0,
+                excluded: Vec::new(),
+            });
+        }
     }
 
     /// COMMIT every pending carve into real splits — the deferred half of
@@ -1448,6 +1630,15 @@ impl AppController {
     /// resulting pieces across every active kind. Snapshots for undo so opening
     /// the editor stays reversible. No-op when nothing is pending.
     pub(super) fn commit_pending_structure_carves(&mut self) {
+        // An unanswered wall-inclusion ask flushes as INCLUDE for the remaining
+        // edges (the pre-ask behaviour) — opening the editor mid-ask shouldn't
+        // silently drop the carve.
+        if let Some(p) = self.pending_wall_inclusion.take() {
+            self.pending_structure_carves.push(StagedStructureCarve {
+                ring: p.ring,
+                excluded_edges: p.excluded,
+            });
+        }
         if self.pending_structure_carves.is_empty() {
             return;
         }
@@ -1457,23 +1648,26 @@ impl AppController {
             return;
         };
         let kinds: Vec<SurfaceKind> = self.structure_kinds.iter().copied().collect();
-        let rings = std::mem::take(&mut self.pending_structure_carves);
+        let carves = std::mem::take(&mut self.pending_structure_carves);
 
         // Walls split only along a carve ring's INTERIOR edges (where it crosses a
         // wall); floors/ceilings take the whole ring. Compute the wall cuts per ring
         // up front (needs `&self.document`) before the `&mut` record borrow.
         let want_walls = kinds.contains(&SurfaceKind::Walls);
-        let per_ring: Vec<(Vec<Point2f64>, Vec<[Point2f64; 2]>)> = rings
+        let per_ring: Vec<(StagedStructureCarve, Vec<[Point2f64; 2]>)> = carves
             .into_iter()
-            .map(|ring64| {
+            .map(|carve| {
                 let cuts = if want_walls {
-                    let ring32: Vec<Point2f32> =
-                        ring64.iter().map(|p| domain::points::to_f32(*p)).collect();
+                    let ring32: Vec<Point2f32> = carve
+                        .ring
+                        .iter()
+                        .map(|p| domain::points::to_f32(*p))
+                        .collect();
                     self.document.outline.floor_plan.interior_cut_edges(&ring32)
                 } else {
                     Vec::new()
                 };
-                (ring64, cuts)
+                (carve, cuts)
             })
             .collect();
 
@@ -1494,14 +1688,14 @@ impl AppController {
                 .as_mut()
                 .and_then(|r| r.data.storeys.get_mut(idx))
             {
-                for (ring64, cuts) in &per_ring {
+                for (carve, cuts) in &per_ring {
                     for kind in &kinds {
                         match kind {
                             SurfaceKind::Walls => {
                                 if !cuts.is_empty() {
                                     storey.push_structure_split(
                                         SurfaceKind::Walls,
-                                        ring64,
+                                        &carve.ring,
                                         cuts.clone(),
                                     );
                                 }
@@ -1509,14 +1703,14 @@ impl AppController {
                             SurfaceKind::Floors => {
                                 storey.push_structure_split(
                                     SurfaceKind::Floors,
-                                    ring64,
+                                    &carve.ring,
                                     Vec::new(),
                                 );
                             }
                             SurfaceKind::Ceilings => {
                                 storey.push_structure_split(
                                     SurfaceKind::Ceilings,
-                                    ring64,
+                                    &carve.ring,
                                     Vec::new(),
                                 );
                                 pushed_roof = true;
@@ -1540,23 +1734,34 @@ impl AppController {
         // Select the carved area's surfaces across every active kind — whether or
         // not anything was subdivided (with no split the already-resolved regions
         // are current, so this picks the surfaces the ring encloses).
-        for (ring64, _) in &per_ring {
-            self.select_surfaces_in_region(ring64);
+        for (carve, _) in &per_ring {
+            self.select_surfaces_in_region(carve);
         }
     }
 
-    /// Add every surface of the active kind inside `region_ring` (world coords)
-    /// to the selection — the carve-pick query, delegated to the storey.
-    fn select_surfaces_in_region(&mut self, region_ring: &[Point2f64]) {
+    /// Add every surface of the active kind inside the staged carve's ring
+    /// (world coords) to the selection — the carve-pick query, delegated to the
+    /// storey — MINUS the walls along the carve edges the assessor excluded in
+    /// the wall-inclusion ask (walls on the ring's outline edges stay: they're
+    /// the storey's exterior boundary, never ambiguous, never excludable).
+    fn select_surfaces_in_region(&mut self, carve: &StagedStructureCarve) {
         if self.structure_select.is_none() {
             return;
         }
         let kinds: Vec<SurfaceKind> = self.structure_kinds.iter().copied().collect();
         let hits: Vec<ItemId> = match self.current_storey() {
-            Some(storey) => kinds
-                .iter()
-                .flat_map(|k| storey.surfaces_in_ring(*k, region_ring))
-                .collect(),
+            Some(storey) => {
+                let excluded: HashSet<ItemId> = carve
+                    .excluded_edges
+                    .iter()
+                    .flat_map(|e| storey.wall_ids_on_segment(e[0], e[1]))
+                    .collect();
+                kinds
+                    .iter()
+                    .flat_map(|k| storey.surfaces_in_ring(*k, &carve.ring))
+                    .filter(|id| !excluded.contains(id))
+                    .collect()
+            }
             None => return,
         };
         self.structure_selected.extend(hits);

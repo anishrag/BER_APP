@@ -32,7 +32,8 @@ use crate::controller::app_controller::{
     FinalMode, NewStoreyPromptUiData, ObjectPinView, ObjectReviewView, OpeningFieldsPrompt,
     OpeningToolKind, PartitionView, PhotoView, PositionPromptUiData, ReviewView, RiserView,
     SelectMode, SnapTagView, StructureEdit, StructureReviewView, SurfaceKind,
-    VertexDropPromptUiData, WallExposureView, WallFinishField, WindowTypeChoice,
+    VertexDropPromptUiData, WallExposureView, WallFinishField, WallInclusionPromptView,
+    WindowTypeChoice,
 };
 use crate::ui::pages::events::UiEvent;
 use crate::ui::render::ViewParams;
@@ -409,6 +410,14 @@ pub enum SketchEvent {
     SetPartitionRegionExposure(WallExposure),
     /// Supply the next free coordinate's typed dimension for the in-flight cut.
     PartitionDimEntry(f32),
+    /// "Don't snap" on a partition-cut endpoint's snap tag: revert that
+    /// endpoint's snapped coordinates to the drawn values and reopen their
+    /// dimension prompts. Routed to the controller's dedicated
+    /// `unsnap_partition_end` — NOT `ChooseSnap`/`UnsnapLast`, whose
+    /// rewind-and-replay machinery must not touch a cut outside history.
+    UnsnapPartitionEnd {
+        end_b: bool,
+    },
     /// Skip dimensioning the in-flight cut's next free coordinate.
     PartitionDimSkip,
     /// Remove the active wall's partition entirely (back to a single face).
@@ -590,6 +599,10 @@ pub enum SketchEvent {
     /// Append a fresh empty storey and switch the editor onto it (method 2:
     /// the previous storey is shown as a watermark while the new one is drawn).
     AddStorey,
+    /// Delete the CURRENT storey (top storey only, never storey 0) and drop
+    /// back to the one below — the "drew it badly, start again" path. Emitted
+    /// by the tab row's armed confirm.
+    DeleteStorey,
     /// New-storey flow: the user answered the THICKNESS question — the
     /// floor-slab thickness to the storey below (metres). Stamps the durable
     /// value and advances the flow to the method choice.
@@ -640,6 +653,13 @@ pub enum SketchEvent {
     ChooseStructureCutRegion {
         world_x: f64,
         world_y: f64,
+    },
+    /// Structure phase: answer the wall-inclusion ask for the current
+    /// highlighted carve edge — `true` keeps the wall along it in the staged
+    /// selection, `false` leaves it out. Answering the last edge stages the
+    /// carve.
+    ResolveWallInclusion {
+        include: bool,
     },
     /// Structure phase: open the "Edit attributes" session over the current
     /// selection — groups it by shared construction (walls / floors / ceilings).
@@ -696,8 +716,9 @@ pub enum SketchEvent {
     /// Toggle the floor-exposure tool. On enter the storey-count gate is raised
     /// (the overlaid view + selection wait for `ConfirmAllStoreysAdded`).
     SetFloorExposureMode(bool),
-    /// Gate answer "Yes, finished adding all storeys" — runs the auto-exposure
-    /// pass and reveals the overlaid floor view.
+    /// Gate answer "Yes, finished adding all storeys" — lowers the gate and
+    /// reveals the overlaid floor view (inter-storey surfaces are already
+    /// derived by the pipeline).
     ConfirmAllStoreysAdded,
     /// Gate answer "Not yet" — exit the tool to add the remaining storeys.
     DeferStoreyCount,
@@ -730,8 +751,9 @@ pub enum SketchEvent {
     /// Toggle the ceiling-exposure tool. On enter the storey-count gate is raised
     /// (the overlaid view + selection wait for `ConfirmAllStoreysAddedCeiling`).
     SetCeilingExposureMode(bool),
-    /// Gate answer "Yes, finished adding all storeys" — runs the auto-exposure
-    /// pass and reveals the overlaid ceiling view.
+    /// Gate answer "Yes, finished adding all storeys" — lowers the gate and
+    /// reveals the overlaid ceiling view (inter-storey surfaces are already
+    /// derived by the pipeline).
     ConfirmAllStoreysAddedCeiling,
     /// Gate answer "Not yet" — exit the tool to add the remaining storeys.
     DeferStoreyCountCeiling,
@@ -754,11 +776,16 @@ pub enum SketchEvent {
     /// Roof step: pick the shape for the grouped roof area (Flat commits; Gable/Hip
     /// start the ridge-draw flow).
     PickRoofShape(crate::controller::app_controller::RoofShape),
-    /// Roof step: the ridge stroke (world coords) for the grouped area.
+    /// Roof step: a ridge stroke (world coords) for the grouped area — a gable's
+    /// single ridge, or one of a hip's several.
     RoofAreaRidgeStroke {
         points: Vec<(f32, f32)>,
     },
-    /// Roof step: assign the pitch (degrees) to the placed ridge.
+    /// Roof step (hip): done drawing ridges — move to the pitch question.
+    FinishRoofRidges,
+    /// Roof step (gable): re-centre the placed ridge between the eaves.
+    CentreRoofRidge,
+    /// Roof step: assign the pitch (degrees) to the placed ridge(s).
     AssignRoofPitch(f32),
     /// Roof step: discard the in-flight per-area drawing (keeps the grouping).
     CancelRoofArea,
@@ -1017,6 +1044,11 @@ pub struct SketchView<'a> {
     /// wall-length label visibility, the number-entry input mode). Lives on
     /// `SketchState`.
     pub cat_state: &'a mut categories::CategoryUiState,
+    /// Armed delete-storey confirm in the tab row: `Some(idx)` while the
+    /// inline "Delete Storey N?" confirm is showing for storey `idx`. Lives on
+    /// `SketchState`; the tab row clears it whenever the deletable storey
+    /// changes.
+    pub delete_storey_armed: &'a mut Option<usize>,
     /// Background Bluetooth laser-meter connection (Leica DISTO), drained by the
     /// number-entry box in Laser mode. Lives on `SketchState`.
     pub laser: &'a mut crate::number_entry::bluetooth::LaserSource,
@@ -1180,6 +1212,11 @@ pub struct SketchView<'a> {
     /// the pending selection until "Edit attributes" commits them. Empty when
     /// no carve is staged.
     pub pending_structure_carves: &'a [Vec<(f64, f64)>],
+    /// The wall-inclusion ask for a just-dimensioned structure carve: the
+    /// current ambiguous edge (highlighted on the canvas) plus its "wall N of
+    /// M" cursor; the panel shows Include / Exclude. `None` when nothing is
+    /// being asked.
+    pub wall_inclusion_prompt: Option<WallInclusionPromptView>,
     /// The app-wide reusable construction-layer library — the build-up layer
     /// editor's "previously typed layers" pick list.
     pub layer_library: &'a [ber_model::ber::structural::ConstructionLayer],
@@ -1222,13 +1259,18 @@ pub struct SketchView<'a> {
     /// The grouped area's storey has a sloped ceiling (converted attic) — the
     /// "Follow ceiling" shape is offered so the roof adopts that slope.
     pub roof_area_ceiling_sloped: bool,
-    /// The grouped area awaits its ridge stroke.
+    /// The grouped area awaits its ridge stroke(s).
     pub roof_area_ridge_pending: bool,
-    /// The placed ridge awaits its pitch (degrees).
+    /// `Some(ridges drawn so far)` while a HIP collects its ridges — shows the
+    /// count and the "Finish ridges" button. `None` for a gable's single stroke.
+    pub roof_area_hip_ridge_count: Option<usize>,
+    /// The placed ridge(s) await their pitch (degrees).
     pub roof_area_pitch_pending: bool,
-    /// The placed ridge's endpoints (world coords) for the dashed overlay while
-    /// the pitch is entered.
-    pub roof_area_ridge_line: Option<((f64, f64), (f64, f64))>,
+    /// A gable ridge is placed — offer "Centre on roof" alongside the pitch.
+    pub roof_area_can_centre_ridge: bool,
+    /// Every placed ridge's endpoints (world coords) for the dashed overlay
+    /// (a hip's collected set while drawing, the full set during the pitch).
+    pub roof_area_ridge_lines: Vec<((f64, f64), (f64, f64))>,
     /// Backing string for the roof pitch input (degrees).
     pub roof_pitch_input: &'a mut String,
     // ── Ceiling exposure ─────────────────────────────────────────────────────
@@ -1289,6 +1331,7 @@ impl SketchPage {
                 view.ber,
                 view.current_storey_idx,
                 &mut view.cat_state.layout_override,
+                view.delete_storey_armed,
                 &mut on_event,
             );
             if portrait {
@@ -1340,13 +1383,17 @@ impl SketchPage {
             // button CLOSES the panel (it reopens when the panel's activation
             // token changes — a new selection / stage / target). The curve slider
             // is a continuous drag, not a "press", so it doesn't dismiss.
+            let dismiss_id = egui::Id::new("sketch_flow_panel_dismissed");
             if prompt_dock::has_controls(&view) {
                 let token = prompt_dock::panel_token(&view);
-                let dismiss_id = egui::Id::new("sketch_flow_panel_dismissed");
-                let dismissed = ui
-                    .ctx()
-                    .data(|d| d.get_temp::<String>(dismiss_id))
-                    .is_some_and(|t| t == token);
+                let stored = ui.ctx().data(|d| d.get_temp::<String>(dismiss_id));
+                let dismissed = stored.as_deref() == Some(token.as_str());
+                if stored.is_some() && !dismissed {
+                    // The remembered dismissal belongs to a PREVIOUS activation
+                    // (another stage/selection) — forget it, or a later return
+                    // to the dismissed stage's token would stay closed.
+                    ui.ctx().data_mut(|d| d.remove::<String>(dismiss_id));
+                }
                 if !dismissed {
                     let mut pressed = false;
                     egui::Window::new(prompt_dock::panel_title(&view))
@@ -1377,6 +1424,15 @@ impl SketchPage {
                             .data_mut(|d| d.insert_temp(dismiss_id, token.clone()));
                     }
                 }
+            } else {
+                // No panel this frame — any remembered dismissal belongs to a
+                // FINISHED activation, so forget it. Tokens are only unique per
+                // stage, not per flow instance: "Draw outline" pressed on one
+                // new-storey flow stores "ns-method", and without this reset a
+                // LATER flow's ChooseMethod (same token, reached via the
+                // panel-less thickness stage) would silently stay dismissed —
+                // the add → draw → delete → add-again case.
+                ui.ctx().data_mut(|d| d.remove::<String>(dismiss_id));
             }
             // Top-right floating action buttons for the active selection.
             prompt_dock::render_corner_actions(ui.ctx(), canvas_rect, &view, &mut on_event);
@@ -1411,12 +1467,16 @@ impl SketchPage {
 /// `[All]` `[Storey 1]` `[Storey 2]` … `[+ Add new]`, plus the
 /// layout-preview cycler (`Layout: Auto ▸ Portrait ▸ Landscape`).
 /// `[All]` (read-only overview) sets `current_storey_idx = None`; each
-/// storey tab sets `Some(i)`; `[+ Add new]` triggers `AddStorey`.
+/// storey tab sets `Some(i)`; `[+ Add new]` triggers `AddStorey`. When the
+/// TOP storey (index ≥ 1) is selected a small delete button follows — first
+/// tap arms an inline confirm (`delete_armed`), the confirm's Delete emits
+/// `DeleteStorey` (the "drew it badly, start again" path).
 fn storey_tabs<F: FnMut(UiEvent)>(
     ui: &mut egui::Ui,
     ber: Option<&Ber>,
     current_storey_idx: Option<usize>,
     layout_override: &mut Option<categories::LayoutOrientation>,
+    delete_armed: &mut Option<usize>,
     on_event: &mut F,
 ) {
     let storeys = ber.map(|b| b.storeys.as_slice()).unwrap_or(&[]);
@@ -1453,6 +1513,42 @@ fn storey_tabs<F: FnMut(UiEvent)>(
             .clicked()
         {
             on_event(UiEvent::Sketch(SketchEvent::AddStorey));
+        }
+        // Delete-storey affordance: only when the SELECTED tab is the last
+        // storey and it isn't the ground storey (the controller enforces the
+        // same rule). First tap arms an inline confirm; any change of the
+        // deletable storey (switch, add, delete) disarms it. Not shown for a
+        // brand-new empty storey's dock flows either way — this tab-row button
+        // is the single affordance.
+        let deletable = current_storey_idx
+            .filter(|&k| k >= 1 && k + 1 == storeys.len())
+            .is_some();
+        if !deletable {
+            *delete_armed = None;
+        } else {
+            let k = current_storey_idx.unwrap();
+            if *delete_armed != Some(k) {
+                *delete_armed = None;
+                if ui
+                    .button("🗑")
+                    .hint("Delete this storey and start again")
+                    .clicked()
+                {
+                    *delete_armed = Some(k);
+                }
+            } else {
+                ui.label(format!(
+                    "Delete Storey {}? Its outline and details are removed.",
+                    k + 1
+                ));
+                if ui.button("Delete").clicked() {
+                    *delete_armed = None;
+                    on_event(UiEvent::Sketch(SketchEvent::DeleteStorey));
+                }
+                if ui.button("Cancel").clicked() {
+                    *delete_armed = None;
+                }
+            }
         }
         // Layout-preview cycler (a preview/dev affordance the user requested):
         // force the category layout to the portrait ribbon or landscape side

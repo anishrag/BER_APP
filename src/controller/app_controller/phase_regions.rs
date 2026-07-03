@@ -108,6 +108,11 @@ impl AppController {
         }
         // Paste-ready stroke dump (matches the living-area / curve-debug dumps).
         dump_stroke("phase-area", &pts);
+        // Snap-tag capture: the pre-action state (a pending CUT pushes no undo
+        // entry, so its capture carries this `before` itself), and drop stale
+        // decisions from unrelated ops so only THIS stroke's snaps are tagged.
+        let before = self.current_history_snapshot();
+        self.begin_snap_capture();
         // Make the outline current, then carve against the AVAILABLE region —
         // the outline MINUS the phases already drawn. Carving against it makes the
         // new phase snap to the neighbours' shared edges (and the outline) and
@@ -135,6 +140,15 @@ impl AppController {
                 let sa = self.pinned_subarea_slot(&boundary, a);
                 let sb = self.pinned_subarea_slot(&boundary, b);
                 self.pending_phase_cut = Some([sa, sb]);
+                self.capture_snap_action_pending(
+                    SnapAction::Subarea {
+                        flow: SubareaFlow::PhaseRegion,
+                        points: world_points.to_vec(),
+                        pick: None,
+                    },
+                    before,
+                    manip_plan::take_snap_decisions(),
+                );
             }
             Ok((boundary, SubareaOutcome::Area(plan))) => {
                 log::debug!("  → phase-area plan: {:?}", plan);
@@ -147,6 +161,8 @@ impl AppController {
                 log::debug!("────────────────────────────────────────────────────");
                 if let Err(e) = plan.validate_simple() {
                     log::warn!("phase area rejected (walls cross): {:?}", e);
+                    // Nothing committed — drop the rejected carve's decisions.
+                    let _ = manip_plan::take_snap_decisions();
                     return;
                 }
                 // Become a dimensionable shape (like a living area): the user
@@ -155,10 +171,16 @@ impl AppController {
                 let undo_snap = self.current_history_snapshot();
                 let slot = self.pinned_subarea_slot(&boundary, plan);
                 self.begin_phase_area_dimensioning(slot, undo_snap);
+                self.capture_snap_action(SnapAction::Subarea {
+                    flow: SubareaFlow::PhaseRegion,
+                    points: world_points.to_vec(),
+                    pick: None,
+                });
             }
             Err(e) => {
                 log::debug!("────────────────────────────────────────────────────");
                 log::error!("phase carve_or_cut: {}", e);
+                let _ = manip_plan::take_snap_decisions();
             }
         }
     }
@@ -227,6 +249,11 @@ impl AppController {
         if let Some(slot) = chosen {
             let undo_snap = self.current_history_snapshot();
             self.begin_phase_area_dimensioning(slot, undo_snap);
+            // The stroke's tags stay live: replay now re-runs stroke + pick.
+            self.record_subarea_pick(SubareaFlow::PhaseRegion, Some((world_x, world_y)));
+        } else {
+            // Cancelled — the cut (and the snaps its tags describe) is gone.
+            self.record_subarea_pick(SubareaFlow::PhaseRegion, None);
         }
     }
 
