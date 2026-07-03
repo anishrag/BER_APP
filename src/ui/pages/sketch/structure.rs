@@ -13,9 +13,9 @@
 
 use ber_model::ber::common::ConstructionPhase;
 use ber_model::ber::structural::{
-    CeilingConstructionType, CeilingExposure, ConstructionLayer, ConstructionMakeup,
-    ConstructionType, FloorConstructionType, FloorExposure, SurfaceCounts, SurfaceExposure,
-    WallConstructionType, WallExposure,
+    CeilingConstructionType, CeilingExposure, CeilingInsulation, ConstructionLayer,
+    ConstructionMakeup, ConstructionType, FloorConstructionType, FloorExposure, SurfaceCounts,
+    SurfaceExposure, WallConstructionType, WallExposure,
 };
 
 use super::SketchEvent;
@@ -221,7 +221,21 @@ fn edit_session<F: FnMut(UiEvent)>(
         );
     }
     ui.add_space(2.0);
-    if ui.add_enabled(enabled, egui::Button::new("Done")).clicked() {
+    // Completing is GATED on the ceiling-insulation rule (`StructureEdit::
+    // blocker`): Done disables with the reason inline (the controller refuses
+    // the event too, belt-and-braces).
+    let blocker = e.blocker();
+    if let Some(msg) = blocker {
+        ui.label(
+            egui::RichText::new(msg)
+                .size(11.0)
+                .color(ui.visuals().warn_fg_color),
+        );
+    }
+    if ui
+        .add_enabled(enabled && blocker.is_none(), egui::Button::new("Done"))
+        .clicked()
+    {
         on_event(UiEvent::Sketch(SketchEvent::EndStructureEdit));
     }
 }
@@ -481,6 +495,15 @@ pub(crate) fn group_editor_ui<F: FnMut(UiEvent)>(
             }));
         }
     });
+    // CEILINGS ONLY: the insulation row — an "Insulation … mm" thickness box
+    // plus an "unknown" checkbox, mutually exclusive (typing a thickness
+    // unchecks "unknown"; checking it clears the box). One of the two must be
+    // given before the session's Done enables, and a specified thickness also
+    // needs a photo (the camera button just below) — the inline hint under the
+    // row says which is missing.
+    if kind == SurfaceKind::Ceilings {
+        ceiling_insulation_ui(ui, group_index, g, enabled, on_event);
+    }
     // Photos (next line): the camera button opens the photos view (thumbnails +
     // add). Shows a count when there are any.
     let cam = if g.photos.is_empty() {
@@ -496,6 +519,105 @@ pub(crate) fn group_editor_ui<F: FnMut(UiEvent)>(
         on_event(UiEvent::Sketch(SketchEvent::BeginViewPhotos {
             group: group_index,
         }));
+    }
+}
+
+/// The CEILING insulation row of the group editor: the thickness box (mm) +
+/// the "unknown" checkbox, plus the inline hint while the spec blocks the
+/// session from completing. The text buffer lives in egui memory keyed by the
+/// group, stored TOGETHER with the model value it corresponds to: when the
+/// group's value changes underneath it (a fresh session, the checkbox, undo)
+/// the buffer re-seeds from the model, while in-flight typing — whose partial
+/// text ("12.") intentionally parses to the same `None` it just emitted —
+/// stays untouched. Both render sites (side panel + canvas window) share the
+/// buffer, so the field reads the same wherever the group is edited.
+fn ceiling_insulation_ui<F: FnMut(UiEvent)>(
+    ui: &mut egui::Ui,
+    group_index: usize,
+    g: &EditGroup,
+    enabled: bool,
+    on_event: &mut F,
+) {
+    let store = egui::Id::new(("ceiling_insulation", group_index));
+    let (mut text, mut synced) = ui
+        .ctx()
+        .data_mut(|d| d.get_temp::<(String, Option<CeilingInsulation>)>(store))
+        .filter(|(_, synced)| *synced == g.insulation)
+        .unwrap_or_else(|| {
+            let t = match g.insulation {
+                Some(CeilingInsulation::ThicknessMm(v)) => format_mm(v),
+                _ => String::new(),
+            };
+            (t, g.insulation)
+        });
+    ui.horizontal(|ui| {
+        ui.label(egui::RichText::new("Insulation").size(EDITOR_FONT));
+        ui.add_enabled_ui(enabled, |ui| {
+            if crate::ui::widgets::pads::metre_input(ui, &mut text, 46.0, "mm").changed {
+                // Typing owns the value: a valid positive number specifies the
+                // thickness (which also unchecks "unknown"); anything else
+                // clears back to unspecified.
+                let parsed = text
+                    .trim()
+                    .parse::<f32>()
+                    .ok()
+                    .filter(|v| v.is_finite() && *v > 0.0)
+                    .map(CeilingInsulation::ThicknessMm);
+                synced = parsed;
+                on_event(UiEvent::Sketch(SketchEvent::SetStructureGroupInsulation {
+                    group: group_index,
+                    insulation: parsed,
+                }));
+            }
+        });
+        ui.label(egui::RichText::new("mm").size(EDITOR_FONT));
+        let mut unknown = matches!(synced, Some(CeilingInsulation::Unknown));
+        if ui
+            .add_enabled(
+                enabled,
+                egui::Checkbox::new(
+                    &mut unknown,
+                    egui::RichText::new("unknown").size(EDITOR_FONT),
+                ),
+            )
+            .changed()
+        {
+            let next = if unknown {
+                text.clear();
+                Some(CeilingInsulation::Unknown)
+            } else {
+                None
+            };
+            synced = next;
+            on_event(UiEvent::Sketch(SketchEvent::SetStructureGroupInsulation {
+                group: group_index,
+                insulation: next,
+            }));
+        }
+    });
+    // The inline "why not done" hint, from the EFFECTIVE state this frame
+    // (`synced` — the value just emitted, one frame fresher than `g`).
+    if !CeilingInsulation::spec_done(synced, !g.photos.is_empty()) {
+        let hint = match synced {
+            Some(CeilingInsulation::ThicknessMm(_)) => "a photo of the insulation is required",
+            _ => "enter the insulation thickness or mark it unknown",
+        };
+        ui.label(
+            egui::RichText::new(hint)
+                .size(EDITOR_FONT - 1.5)
+                .color(ui.visuals().warn_fg_color),
+        );
+    }
+    ui.ctx().data_mut(|d| d.insert_temp(store, (text, synced)));
+}
+
+/// Compact mm display for the insulation box's seed: whole numbers without a
+/// decimal tail ("150"), fractional values as typed ("112.5").
+fn format_mm(v: f32) -> String {
+    if v.fract().abs() < 1e-4 {
+        format!("{v:.0}")
+    } else {
+        format!("{v}")
     }
 }
 

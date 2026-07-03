@@ -15,8 +15,8 @@
 use super::*;
 use ber_model::ber::common::{ConstructionPhase, Photo};
 use ber_model::ber::structural::{
-    CeilingConstructionType, CeilingExposure, ConstructionMakeup, ConstructionType,
-    FloorConstructionType, FloorExposure, Storey, SurfaceExposure, WallExposure,
+    CeilingConstructionType, CeilingExposure, CeilingInsulation, ConstructionMakeup,
+    ConstructionType, FloorConstructionType, FloorExposure, Storey, SurfaceExposure, WallExposure,
 };
 use domain::points::{Point2f32, Point2f64};
 
@@ -46,6 +46,34 @@ pub struct EditGroup {
     /// The group construction's attached photos (session copy, seeded from the
     /// construction; the photos view shows these and the camera button appends).
     pub photos: Vec<Photo>,
+    /// CEILINGS ONLY: the group's insulation spec (session copy, seeded from
+    /// the construction) — the "Insulation thickness (mm)" box + "unknown"
+    /// checkbox in the ceiling attribute editor. Always `None` for walls and
+    /// floors (they carry no such spec). On a ceiling group `None` means "not
+    /// yet specified", which blocks completing the session
+    /// ([`EditGroup::insulation_blocker`]).
+    pub insulation: Option<CeilingInsulation>,
+}
+
+impl EditGroup {
+    /// Why THIS group blocks completing the "Edit attributes" session, if
+    /// anything — the ceiling-insulation gate. A ceiling group must have its
+    /// insulation specified (a thickness, or declared unknown), and a
+    /// specified thickness needs a backing photo
+    /// ([`CeilingInsulation::spec_done`]). `None` for wall/floor groups and
+    /// satisfied ceiling groups. The message doubles as the inline hint the
+    /// UI shows beside the disabled Done.
+    pub fn insulation_blocker(&self) -> Option<&'static str> {
+        if self.ty.kind() != SurfaceKind::Ceilings
+            || CeilingInsulation::spec_done(self.insulation, !self.photos.is_empty())
+        {
+            return None;
+        }
+        Some(match self.insulation {
+            Some(CeilingInsulation::ThicknessMm(_)) => "a photo of the insulation is required",
+            _ => "enter the insulation thickness or mark it unknown",
+        })
+    }
 }
 
 /// The in-flight "Edit attributes" session: the current selection partitioned by
@@ -71,6 +99,17 @@ pub struct StructureEdit {
     /// view (groups pulled radially out from the centre) — wired but not yet the
     /// default; a future toggle flips this.
     pub exploded: bool,
+}
+
+impl StructureEdit {
+    /// Why the session can't COMPLETE yet, if anything — the first group's
+    /// [`EditGroup::insulation_blocker`]. The UI disables Done on `Some` (with
+    /// the message as the hint) and
+    /// [`end_structure_edit`](AppController::end_structure_edit) refuses,
+    /// belt-and-braces. `None` = free to complete.
+    pub fn blocker(&self) -> Option<&'static str> {
+        self.groups.iter().find_map(|g| g.insulation_blocker())
+    }
 }
 
 /// A construction already in use on the current storey — offered in the attribute
@@ -111,13 +150,17 @@ pub(super) struct WallInclusionPrompt {
 }
 
 /// UI data for the wall-inclusion ask: the CURRENT ambiguous edge (world
-/// coords, for the canvas to highlight while asking) and the cursor position
-/// (`index` of `total`, 0-based) for the panel's "Wall 1 of 2" label.
+/// coords, for the canvas to highlight while asking), the cursor position
+/// (`index` of `total`, 0-based) for the panel's "Wall 1 of 2" label, and a
+/// human description of the wall being asked about ("Include the 10.0 m wall
+/// on the left edge (floor-step riser)?") so the question identifies its
+/// target in words as well as by the canvas highlight.
 #[derive(Debug, Clone, PartialEq)]
 pub struct WallInclusionPromptView {
     pub edge: ((f64, f64), (f64, f64)),
     pub index: usize,
     pub total: usize,
+    pub description: String,
 }
 
 impl AppController {
@@ -597,6 +640,7 @@ impl AppController {
             bool, // exposure_locked
             Option<String>,
             Vec<Photo>,
+            Option<CeilingInsulation>, // ceilings only; None for walls/floors
         );
         let Some(doc) = self.document.storeys.get(idx) else {
             return;
@@ -636,6 +680,7 @@ impl AppController {
                         locked,
                         name,
                         photos,
+                        None,
                     ))
                 }
                 SurfaceKind::Floors => {
@@ -665,11 +710,12 @@ impl AppController {
                         false,
                         name,
                         photos,
+                        None,
                     ))
                 }
                 SurfaceKind::Ceilings => {
                     let r = storey.ceilings.regions.iter().find(|r| r.id == id)?;
-                    let (ty, makeup, phase, name, photos) =
+                    let (ty, makeup, phase, name, photos, insulation) =
                         match record.data.ceiling_construction(r.construction_id) {
                             Some(c) => (
                                 ConstructionType::Ceiling(c.construction_type),
@@ -677,6 +723,7 @@ impl AppController {
                                 c.base.construction_phase.clone(),
                                 c.base.name.clone(),
                                 c.base.photos.clone(),
+                                c.insulation,
                             ),
                             None => (
                                 ConstructionType::Ceiling(Default::default()),
@@ -684,6 +731,7 @@ impl AppController {
                                 Default::default(),
                                 None,
                                 Vec::new(),
+                                None,
                             ),
                         };
                     Some((
@@ -694,6 +742,7 @@ impl AppController {
                         false,
                         name,
                         photos,
+                        insulation,
                     ))
                 }
             }
@@ -701,7 +750,8 @@ impl AppController {
         let mut groups: Vec<EditGroup> = Vec::new();
         for id in &self.structure_selected {
             // Skip ids that no longer resolve to a live region of any kind.
-            let Some((ty, makeup, phase, exposure, exposure_locked, cname, photos)) = attrs_of(*id)
+            let Some((ty, makeup, phase, exposure, exposure_locked, cname, photos, insulation)) =
+                attrs_of(*id)
             else {
                 continue;
             };
@@ -727,6 +777,7 @@ impl AppController {
                     // session); the "Group N" fallback is filled in below.
                     name: cname.unwrap_or_default(),
                     photos,
+                    insulation,
                 }),
             }
         }
@@ -1107,6 +1158,66 @@ impl AppController {
         let _ = self.mark_dirty();
     }
 
+    /// Set (or clear with `None`) a CEILING group's INSULATION spec — the
+    /// attribute dialog's "Insulation thickness (mm)" box / "unknown"
+    /// checkbox. Writes the value onto each of the group's (shared) ceiling
+    /// constructions ([`Ber::set_ceiling_insulation`]) and mirrors it onto the
+    /// session group so the open dialog reflects it at once. No-op for
+    /// wall/floor groups. Like the group name/photos, no undo snapshot (the
+    /// box edits value-by-value); marks dirty so it persists.
+    pub fn set_structure_group_insulation(
+        &mut self,
+        group: usize,
+        insulation: Option<CeilingInsulation>,
+    ) {
+        let ids = match self
+            .structure_edit
+            .as_ref()
+            .and_then(|e| e.groups.get(group))
+        {
+            Some(g) if g.ty.kind() == SurfaceKind::Ceilings => g.ids.clone(),
+            _ => return,
+        };
+        let Some(idx) = self.current_storey_idx else {
+            return;
+        };
+        let Some(record) = self.current_record.as_mut() else {
+            return;
+        };
+        // Each region in the group shares one construction; map the region ids
+        // to their construction ids and write those (mirrors the photo attach).
+        let cids: Vec<ItemId> = {
+            let Some(storey) = record.data.storeys.get(idx) else {
+                return;
+            };
+            let mut seen = HashSet::new();
+            ids.iter()
+                .filter_map(|id| {
+                    storey
+                        .ceilings
+                        .regions
+                        .iter()
+                        .find(|r| r.id == *id)
+                        .map(|r| r.construction_id)
+                })
+                .filter(|c| seen.insert(*c))
+                .collect()
+        };
+        for cid in cids {
+            record.data.set_ceiling_insulation(cid, insulation);
+        }
+        // Mirror onto the session group, normalized the same way the model
+        // stores it, so the open dialog sees the stored truth.
+        if let Some(g) = self
+            .structure_edit
+            .as_mut()
+            .and_then(|e| e.groups.get_mut(group))
+        {
+            g.insulation = CeilingInsulation::normalized(insulation);
+        }
+        let _ = self.mark_dirty();
+    }
+
     /// Open / close the PHOTOS view for a group (the camera button): shows the
     /// group's thumbnails with a `+` to add more.
     pub fn begin_view_photos(&mut self, group: usize) {
@@ -1232,11 +1343,23 @@ impl AppController {
     }
 
     /// Close the "Edit attributes" session (attributes apply as they're set).
-    /// When the `Remaining` subtool is active this is the "work until done" loop:
-    /// re-seed it so the surfaces just completed drop out and the selection
-    /// shrinks toward empty (materialize first so the re-resolved constructions
-    /// the seed reads are current).
+    /// REFUSED while a ceiling group's insulation is unresolved
+    /// ([`StructureEdit::blocker`] — unspecified, or a thickness with no
+    /// backing photo): the UI disables Done with the blocker as the hint, and
+    /// this guard is the belt-and-braces behind it. Abandonment paths (phase /
+    /// kind switches) go through [`close_structure_edit`](Self::close_structure_edit)
+    /// and stay ungated. When the `Remaining` subtool is active this is the
+    /// "work until done" loop: re-seed it so the surfaces just completed drop
+    /// out and the selection shrinks toward empty (materialize first so the
+    /// re-resolved constructions the seed reads are current).
     pub fn end_structure_edit(&mut self) {
+        if self
+            .structure_edit
+            .as_ref()
+            .is_some_and(|e| e.blocker().is_some())
+        {
+            return;
+        }
         self.close_structure_edit();
         if self.structure_select == Some(SelectMode::Remaining) {
             self.materialize();
@@ -1318,7 +1441,86 @@ impl AppController {
             edge: ((e[0].x, e[0].y), (e[1].x, e[1].y)),
             index: p.cursor,
             total: p.edges.len(),
+            description: self.wall_inclusion_description(&p.ring, e),
         })
+    }
+
+    /// Compose the human description of the CURRENT wall-inclusion question:
+    /// which side of the carved region the asked edge sits on (screen terms —
+    /// the canvas draws world +x rightward and +y downward, so "top" is what
+    /// the assessor sees at the top), how long the edge is, and what the wall
+    /// standing on it IS (a step riser by kind, else its exposure class).
+    /// UI-facing view derivation over resolved regions, so it lives on the
+    /// shell; the region query is the storey's
+    /// ([`Storey::wall_ids_on_segment`]).
+    fn wall_inclusion_description(&self, ring: &[Point2f64], edge: &[Point2f64; 2]) -> String {
+        let (a, b) = (edge[0], edge[1]);
+        let len = ((b.x - a.x).powi(2) + (b.y - a.y).powi(2)).sqrt();
+        // The side: the edge midpoint's outward direction from the region
+        // centroid, along the dominant axis.
+        let n = ring.len().max(1) as f64;
+        let (sx, sy) = ring
+            .iter()
+            .fold((0.0, 0.0), |(sx, sy), p| (sx + p.x, sy + p.y));
+        let (mx, my) = ((a.x + b.x) * 0.5, (a.y + b.y) * 0.5);
+        let (dx, dy) = (mx - sx / n, my - sy / n);
+        let side = if dx.abs() > dy.abs() {
+            if dx > 0.0 {
+                "right"
+            } else {
+                "left"
+            }
+        } else if dy > 0.0 {
+            "bottom"
+        } else {
+            "top"
+        };
+        format!(
+            "Include the {len:.1} m wall on the {side} edge{}?",
+            self.wall_on_edge_label(a, b)
+        )
+    }
+
+    /// What the wall standing on segment `a`→`b` IS, as a parenthesised label:
+    /// a step riser's kind when one stands there (the same id set the
+    /// exclusion subtracts), otherwise the wall region's exposure class (the
+    /// exposure-toolbar wording). Empty when nothing resolvable stands on the
+    /// segment (the ask filter makes that unreachable in practice).
+    fn wall_on_edge_label(&self, a: Point2f64, b: Point2f64) -> String {
+        let Some(storey) = self.current_storey() else {
+            return String::new();
+        };
+        let ids = storey.wall_ids_on_segment(a, b);
+        let Some(first) = ids.first() else {
+            return String::new();
+        };
+        if let Some(riser) = self
+            .document
+            .riser_walls(storey)
+            .into_iter()
+            .find(|r| ids.contains(&r.id))
+        {
+            return match riser.kind {
+                document::RiserKind::Floor => " (floor-step riser)".into(),
+                document::RiserKind::Ceiling => " (ceiling-step riser)".into(),
+            };
+        }
+        let exposure = storey
+            .walls
+            .regions
+            .iter()
+            .find(|w| w.id == *first)
+            .map(|w| w.exposure);
+        match exposure {
+            Some(WallExposure::Exposed) => " (Exposed wall)",
+            Some(WallExposure::SemiExposed) => " (Semi-exposed wall)",
+            Some(WallExposure::NonHeatLoss) => " (Non-heat-loss wall)",
+            Some(WallExposure::Ground) => " (ground-contact wall)",
+            Some(WallExposure::InterStorey) => " (inter-storey wall)",
+            Some(WallExposure::Unset) => " (unclassified wall)",
+            None => "",
+        }
+        .into()
     }
 
     /// Answer the current wall-inclusion question: `include: false` records the

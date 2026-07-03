@@ -1737,6 +1737,154 @@ fn group_photo_copies_into_store_and_attaches() {
     let _ = std::fs::remove_file(&src);
 }
 
+/// The ceiling-insulation setter writes the spec onto the group's (shared)
+/// ceiling construction — Unknown vs a thickness — mirrors it onto the open
+/// session group, and the value survives a re-derive (the construction
+/// registry persists across `materialize`).
+#[test]
+fn ceiling_insulation_setter_stores_mirrors_and_survives_rederive() {
+    use ber_model::ber::structural::CeilingInsulation;
+    let mut c = dimensioned_square_controller();
+    c.set_default_ceiling_height(2.7).unwrap();
+    c.materialize(); // derive the one flat roof region
+
+    set_only_kind(&mut c, SurfaceKind::Ceilings);
+    c.set_structure_select_mode(Some(SelectMode::All));
+    assert_eq!(c.structure_selected_ids().len(), 1, "the one roof region");
+    c.begin_structure_edit();
+    assert_eq!(
+        c.structure_edit().unwrap().groups[0].insulation,
+        None,
+        "seeded unspecified"
+    );
+
+    c.set_structure_group_insulation(0, Some(CeilingInsulation::ThicknessMm(150.0)));
+    assert_eq!(
+        c.structure_edit().unwrap().groups[0].insulation,
+        Some(CeilingInsulation::ThicknessMm(150.0)),
+        "mirrored onto the session group"
+    );
+    let ceiling_insulation = |c: &AppController| {
+        let rec = c.current_record.as_ref().unwrap();
+        let cid = rec.data.storeys[0].ceilings.regions[0].construction_id;
+        rec.data.ceiling_construction(cid).unwrap().insulation
+    };
+    assert_eq!(
+        ceiling_insulation(&c),
+        Some(CeilingInsulation::ThicknessMm(150.0)),
+        "stored on the construction"
+    );
+
+    c.set_structure_group_insulation(0, Some(CeilingInsulation::Unknown));
+    assert_eq!(ceiling_insulation(&c), Some(CeilingInsulation::Unknown));
+
+    c.materialize(); // the setter marked dirty — force the re-resolve
+    assert_eq!(
+        ceiling_insulation(&c),
+        Some(CeilingInsulation::Unknown),
+        "survives the re-resolve (the construction registry persists)"
+    );
+}
+
+/// Completing "Edit attributes" is GATED on ceiling insulation: Done refuses
+/// while the spec is missing, and while a specified thickness has no backing
+/// photo; attaching the photo unblocks it. Reopening the editor re-seeds the
+/// spec + photos from the construction. (Wall/floor sessions stay ungated —
+/// `structure_checklist_tracks_per_surface_completion` closes those freely.)
+#[test]
+fn structure_edit_completion_gates_on_ceiling_insulation() {
+    use ber_model::ber::structural::CeilingInsulation;
+    let mut c = dimensioned_square_controller();
+    c.set_default_ceiling_height(2.7).unwrap();
+    c.materialize();
+    let tmp = std::env::temp_dir().join(format!("ber_ins_photos_{}", ItemId::default().0));
+    c.set_photos_dir(tmp.clone());
+    let src = std::env::temp_dir().join(format!("ber_ins_src_{}.jpg", ItemId::default().0));
+    std::fs::write(&src, b"jpeg-bytes").unwrap();
+
+    set_only_kind(&mut c, SurfaceKind::Ceilings);
+    c.set_structure_select_mode(Some(SelectMode::All));
+    c.begin_structure_edit();
+    assert_eq!(
+        c.structure_edit().unwrap().blocker(),
+        Some("enter the insulation thickness or mark it unknown")
+    );
+    c.end_structure_edit();
+    assert!(
+        c.structure_edit().is_some(),
+        "Done refused while the insulation is unspecified"
+    );
+
+    c.set_structure_group_insulation(0, Some(CeilingInsulation::ThicknessMm(120.0)));
+    assert_eq!(
+        c.structure_edit().unwrap().blocker(),
+        Some("a photo of the insulation is required")
+    );
+    c.end_structure_edit();
+    assert!(
+        c.structure_edit().is_some(),
+        "a thickness without a photo still blocks"
+    );
+
+    c.add_group_photo(0, &src, PhotoQuality::High);
+    assert_eq!(c.structure_edit().unwrap().blocker(), None);
+    c.end_structure_edit();
+    assert!(c.structure_edit().is_none(), "thickness + photo completes");
+
+    // Reopen: the session re-seeds the spec + photo from the construction, so
+    // the completed group stays completable.
+    c.begin_structure_edit();
+    let g = &c.structure_edit().unwrap().groups[0];
+    assert_eq!(g.insulation, Some(CeilingInsulation::ThicknessMm(120.0)));
+    assert_eq!(g.photos.len(), 1, "photo re-seeded");
+    assert_eq!(c.structure_edit().unwrap().blocker(), None);
+
+    let _ = std::fs::remove_dir_all(&tmp);
+    let _ = std::fs::remove_file(&src);
+}
+
+/// The Ceilings checklist row requires the insulation spec on top of type +
+/// build-up: a fully typed ceiling stays red until the insulation is
+/// specified; declaring it UNKNOWN (which needs no photo) turns it green and
+/// lets the session complete.
+#[test]
+fn ceilings_checklist_requires_insulation_spec() {
+    use ber_model::ber::structural::{
+        CeilingConstructionType, CeilingInsulation, ConstructionMakeup, ConstructionType,
+    };
+    let mut c = dimensioned_square_controller();
+    c.set_default_ceiling_height(2.7).unwrap();
+    c.materialize();
+
+    set_only_kind(&mut c, SurfaceKind::Ceilings);
+    c.set_structure_select_mode(Some(SelectMode::All));
+    c.begin_structure_edit();
+    c.set_structure_group_attrs(
+        0,
+        ConstructionType::Ceiling(CeilingConstructionType::FlatRoof),
+        ConstructionMakeup::Default,
+        Default::default(),
+    );
+    c.materialize(); // re-resolve: the region now references the typed construction
+    assert_eq!(
+        structure_row(&c, "Ceilings"),
+        ChecklistStatus::Incomplete,
+        "type + build-up alone no longer complete a ceiling"
+    );
+
+    c.set_structure_group_insulation(0, Some(CeilingInsulation::Unknown));
+    assert_eq!(
+        structure_row(&c, "Ceilings"),
+        ChecklistStatus::AllStoreys,
+        "declared-unknown insulation completes without a photo"
+    );
+    c.end_structure_edit();
+    assert!(
+        c.structure_edit().is_none(),
+        "unknown insulation lets the session complete"
+    );
+}
+
 /// `ingest_photo` returns a provisional photo IMMEDIATELY (a fast byte-copy, no
 /// decode) and finishes the heavy work on a background thread; once the job
 /// lands, `apply_finished_photos` swaps the recompressed file + thumbnail into
@@ -10218,6 +10366,12 @@ fn structure_carve_asks_for_interior_edge_walls_and_honours_the_answer() {
             "the asked edge runs along x=5: {:?}",
             prompt.edge
         );
+        // The question names its target: the x=5 edge is the LEFT side of the
+        // carved right half, runs the full 10 m, and carries the riser.
+        assert_eq!(
+            prompt.description, "Include the 10.0 m wall on the left edge (floor-step riser)?",
+            "the description identifies side, length and wall kind"
+        );
         assert_eq!(
             c.pending_structure_carve_polygons().len(),
             1,
@@ -10299,6 +10453,91 @@ fn interior_structure_carve_through_open_floor_asks_nothing() {
         c.structure_selected_ids().is_empty(),
         "no wall was auto-included from a fully interior carve: {:?}",
         c.structure_selected_ids()
+    );
+}
+
+/// With SEVERAL ambiguous edges, the ask walks them one at a time and the
+/// question's identification channels stay in lock-step: the highlighted edge
+/// (`prompt.edge` — the canvas badge sits at its midpoint) and the composed
+/// description always refer to the SAME edge, and both advance together with
+/// the cursor. Fixture: two floor steps (left and right columns) derive risers
+/// along x=2 and x=8; an interior carve spanning between them has walls on
+/// exactly those two edges — one "left", one "right".
+#[test]
+fn wall_inclusion_ask_advances_description_and_marker_together() {
+    let p = |x: f32, y: f32| Point2f32::new(x, y);
+    let mut c = dimensioned_square_controller();
+    for polygon in [
+        vec![p(0., 0.), p(2., 0.), p(2., 10.), p(0., 10.)], // left column
+        vec![p(8., 0.), p(10., 0.), p(10., 10.), p(8., 10.)], // right column
+    ] {
+        c.step_regions.entry(0).or_default().push(StepRegion {
+            polygon,
+            level_m: -0.3,
+        });
+    }
+    c.commit_to_ber().unwrap();
+
+    set_only_kind(&mut c, SurfaceKind::Walls);
+    c.set_structure_select_mode(Some(SelectMode::Carve));
+
+    // Interior carve between the risers: left edge on x=2, right edge on x=8,
+    // top/bottom edges over open floor (filtered out — no wall stands there).
+    // The lift point stays within the 5 cm wall-on-edge tolerance of x=2: it
+    // becomes the carve's anchored constant, i.e. the LEFT edge's coordinate.
+    c.apply_structure_carve_stroke(&[(2.0, 2.0), (8.0, 2.0), (8.0, 8.0), (2.0, 8.0), (2.02, 2.02)]);
+    let mut guard = 0;
+    while c.dimensioning_active() && guard < 12 {
+        c.skip_current_dimension();
+        guard += 1;
+    }
+    skip_position_prompts(&mut c);
+
+    // Which side an edge sits on, from its geometry — what the badge shows.
+    let side_of = |edge: ((f64, f64), (f64, f64))| {
+        if (edge.0 .0 + edge.1 .0) * 0.5 < 5.0 {
+            "left"
+        } else {
+            "right"
+        }
+    };
+    // The description restates the edge's own geometry (self-consistency: the
+    // words match the highlight, whatever the exact staged coordinates).
+    let expect_for = |prompt: &WallInclusionPromptView| {
+        let (a, b) = prompt.edge;
+        let len = ((b.0 - a.0).powi(2) + (b.1 - a.1).powi(2)).sqrt();
+        format!(
+            "Include the {len:.1} m wall on the {} edge (floor-step riser)?",
+            side_of(prompt.edge)
+        )
+    };
+
+    let p0 = c.wall_inclusion_prompt().expect("two riser edges ask");
+    assert_eq!(p0.total, 2, "both riser edges are ambiguous, nothing else");
+    assert_eq!(p0.index, 0);
+    assert_eq!(p0.description, expect_for(&p0), "words match the highlight");
+
+    c.resolve_wall_inclusion(true);
+    let p1 = c.wall_inclusion_prompt().expect("the ask advances");
+    assert_eq!(p1.index, 1, "cursor advanced");
+    assert_ne!(p1.edge, p0.edge, "the highlight moved to the OTHER edge");
+    assert_eq!(
+        p1.description,
+        expect_for(&p1),
+        "words follow the highlight"
+    );
+    assert_ne!(
+        side_of(p0.edge),
+        side_of(p1.edge),
+        "one left edge and one right edge were asked"
+    );
+
+    c.resolve_wall_inclusion(true);
+    assert!(c.wall_inclusion_prompt().is_none(), "both edges answered");
+    assert_eq!(
+        c.pending_structure_carve_polygons().len(),
+        1,
+        "the carve staged after the last answer"
     );
 }
 

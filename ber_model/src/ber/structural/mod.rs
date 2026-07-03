@@ -2761,11 +2761,15 @@ mod tests {
         f.construction_type = FloorConstructionType::SolidFloor;
         assert!(f.is_complete());
 
-        // Ceiling: default type is `Uninitialised`.
+        // Ceiling: default type is `Uninitialised`; ceilings additionally need
+        // their INSULATION specified (a photo-backed thickness, or declared
+        // unknown) before they read as complete.
         let mut c = CeilingConstruction::default();
         c.base.construction_makeup = ConstructionMakeup::Default;
         assert!(!c.is_complete());
         c.construction_type = CeilingConstructionType::FlatRoof;
+        assert!(!c.is_complete(), "insulation still unspecified");
+        c.insulation = Some(CeilingInsulation::Unknown);
         assert!(c.is_complete());
 
         // UNSET vs UNKNOWN: `Tbd` (the pre-edit default) is NOT set, but a

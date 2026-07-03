@@ -2277,6 +2277,14 @@ impl eframe::App for BerApp {
                                             .borrow_mut()
                                             .set_structure_group_layers(group, layers);
                                     }
+                                    SketchEvent::SetStructureGroupInsulation {
+                                        group,
+                                        insulation,
+                                    } => {
+                                        controller
+                                            .borrow_mut()
+                                            .set_structure_group_insulation(group, insulation);
+                                    }
                                     SketchEvent::BeginViewPhotos { group } => {
                                         controller.borrow_mut().begin_view_photos(group);
                                     }

@@ -981,9 +981,14 @@ pub fn render_selection_area(
 }
 
 /// Highlight ONE carve edge (world coords) — the wall-inclusion ask's current
-/// question — with a wide translucent halo under a solid core line in the
-/// selection gold, so the assessor sees exactly which wall the panel's
-/// Include / Exclude answer applies to.
+/// question — unmissably: a wide translucent halo under a solid core line in
+/// the selection gold, plus a white-rimmed gold "?" BADGE at the edge
+/// midpoint (the snap-tag dot idiom, but round + larger so it reads as a
+/// question, not a snap). The badge and the panel's description always refer
+/// to the SAME edge — the caller passes the prompt's current one. Steady
+/// strokes only (no animation machinery); the solid core over the wide band
+/// keeps it distinct from the staged-ring dashed marquee that stays visible
+/// underneath during the ask.
 pub fn render_wall_inclusion_edge(
     painter: &egui::Painter,
     rect: egui::Rect,
@@ -1001,9 +1006,20 @@ pub fn render_wall_inclusion_edge(
     let b = t.apply(edge.1 .0, edge.1 .1);
     painter.line_segment(
         [a, b],
-        egui::Stroke::new(10.0, style::SELECTION_LINE.gamma_multiply(0.35)),
+        egui::Stroke::new(14.0, style::SELECTION_LINE.gamma_multiply(0.35)),
     );
-    painter.line_segment([a, b], egui::Stroke::new(3.5, style::SELECTION_LINE));
+    painter.line_segment([a, b], egui::Stroke::new(4.5, style::SELECTION_LINE));
+    // The "?" badge: white rim → gold disc → dark glyph, centred on the edge.
+    let mid = egui::pos2((a.x + b.x) * 0.5, (a.y + b.y) * 0.5);
+    painter.circle_filled(mid, 11.0, egui::Color32::WHITE);
+    painter.circle_filled(mid, 9.0, style::SELECTION_LINE);
+    painter.text(
+        mid,
+        egui::Align2::CENTER_CENTER,
+        "?",
+        egui::FontId::proportional(13.0),
+        egui::Color32::BLACK,
+    );
 }
 
 /// Tint the CURRENT new-storey outline suggestion's ring translucently over

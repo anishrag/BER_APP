@@ -711,6 +711,13 @@ pub enum SketchEvent {
         group: usize,
         layers: Vec<ber_model::ber::structural::ConstructionLayer>,
     },
+    /// Structure phase: set (or clear with `None`) a CEILING group's insulation
+    /// spec — the attribute dialog's "Insulation thickness (mm)" box and its
+    /// "unknown" checkbox.
+    SetStructureGroupInsulation {
+        group: usize,
+        insulation: Option<ber_model::ber::structural::CeilingInsulation>,
+    },
     /// Structure phase: open / close the PHOTOS view for a group (camera button).
     BeginViewPhotos {
         group: usize,

@@ -827,8 +827,10 @@ fn pending_redraw_toolbar<F: FnMut(UiEvent)>(ui: &mut egui::Ui, on_event: &mut F
 }
 
 /// The structure-carve wall-inclusion ask: one ambiguous carve edge at a time
-/// (highlighted on the canvas), answered Include / Exclude. The label carries
-/// the "Wall N of M" cursor so a multi-edge carve reads as a short sequence.
+/// (highlighted on the canvas with a gold "?" badge at its midpoint), answered
+/// Include / Exclude. The controller-composed description identifies the wall
+/// in words (side of the carved region, length, what the wall is); the
+/// "Wall N of M" cursor keeps a multi-edge carve reading as a short sequence.
 fn wall_inclusion_toolbar<F: FnMut(UiEvent)>(
     ui: &mut egui::Ui,
     wi: &crate::controller::app_controller::WallInclusionPromptView,
@@ -837,6 +839,7 @@ fn wall_inclusion_toolbar<F: FnMut(UiEvent)>(
     if wi.total > 1 {
         ui.label(format!("Wall {} of {}:", wi.index + 1, wi.total));
     }
+    ui.label(&wi.description);
     if ui
         .button("Include")
         .hint("Keep the wall along the highlighted edge in the selection")

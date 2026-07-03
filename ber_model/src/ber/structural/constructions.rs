@@ -406,11 +406,56 @@ pub struct FloorConstruction {
     pub construction_type: FloorConstructionType,
 }
 
+/// The assessor's INSULATION spec for a ceiling/roof construction — the
+/// Structure "Edit attributes" dialog's "Insulation thickness (mm)" box plus
+/// its "unknown" checkbox. `None` on the construction means "not yet
+/// specified" (old records load as that via `#[serde(default)]`), which keeps
+/// the ceiling incomplete until one of the two is given.
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+pub enum CeilingInsulation {
+    /// The assessor DECLARED the thickness unknown — a real choice; counts as
+    /// done without a photo (there's nothing measurable to evidence).
+    Unknown,
+    /// A specified insulation thickness in mm. Needs a backing photo to count
+    /// as done — the assessor asserted a measurable fabric property.
+    ThicknessMm(f32),
+}
+
+impl CeilingInsulation {
+    /// Whether an insulation SPEC counts as DONE given photo presence:
+    /// unspecified (`None`) never; `Unknown` outright; a specified thickness
+    /// only when a photo backs it. The single predicate shared by
+    /// [`CeilingConstruction::is_complete`] and the Structure editor's
+    /// session-completion gate.
+    pub fn spec_done(spec: Option<CeilingInsulation>, has_photo: bool) -> bool {
+        match spec {
+            None => false,
+            Some(CeilingInsulation::Unknown) => true,
+            Some(CeilingInsulation::ThicknessMm(_)) => has_photo,
+        }
+    }
+
+    /// Normalize a spec at the model boundary: a non-positive or non-finite
+    /// thickness is no measurement at all, so it collapses to `None`
+    /// (unspecified). The dialog only sends valid parses — belt-and-braces.
+    pub fn normalized(spec: Option<CeilingInsulation>) -> Option<CeilingInsulation> {
+        match spec {
+            Some(CeilingInsulation::ThicknessMm(t)) if !(t.is_finite() && t > 0.0) => None,
+            other => other,
+        }
+    }
+}
+
 /// A ceiling/roof construction shared by one or more `CeilingRegion`s.
 #[derive(Clone, Debug, Serialize, Deserialize, Default)]
 pub struct CeilingConstruction {
     pub base: ConstructionBase,
     pub construction_type: CeilingConstructionType,
+    /// Ceiling insulation as specified in the Structure attribute dialog.
+    /// `None` = not yet specified (and the default for records saved before
+    /// the field existed). Ceilings only — walls/floors carry no such spec.
+    #[serde(default)]
+    pub insulation: Option<CeilingInsulation>,
 }
 
 impl ConstructionBase {
@@ -443,10 +488,14 @@ impl FloorConstruction {
 }
 
 impl CeilingConstruction {
-    /// A ceiling/roof construction is DONE once its type is set and its build-up
-    /// is done. See [`WallConstruction::is_complete`].
+    /// A ceiling/roof construction is DONE once its type is set, its build-up
+    /// is done (see [`WallConstruction::is_complete`]), AND its insulation is
+    /// specified ([`CeilingInsulation::spec_done`] — a thickness needs a
+    /// backing photo; declared-unknown doesn't; unspecified never counts).
     pub fn is_complete(&self) -> bool {
-        self.construction_type.is_set() && self.base.build_up_done()
+        self.construction_type.is_set()
+            && self.base.build_up_done()
+            && CeilingInsulation::spec_done(self.insulation, !self.base.photos.is_empty())
     }
 }
 
@@ -588,6 +637,7 @@ impl Ber {
                 ..Default::default()
             },
             construction_type,
+            insulation: None,
         };
         let id = c.base.id;
         self.ceiling_constructions.push(c);
@@ -661,6 +711,23 @@ impl Ber {
         }
     }
 
+    /// Set (or clear, with `None`) the INSULATION spec of CEILING construction
+    /// `id` — the durable write behind the ceiling attribute dialog's
+    /// thickness box / "unknown" checkbox. Ceilings only (walls/floors carry
+    /// no insulation spec); no-op when the id isn't in the registry. A
+    /// non-positive or non-finite thickness normalizes to `None` (the dialog
+    /// only sends valid parses — belt-and-braces at the model boundary).
+    pub fn set_ceiling_insulation(&mut self, id: ItemId, insulation: Option<CeilingInsulation>) {
+        let insulation = CeilingInsulation::normalized(insulation);
+        if let Some(c) = self
+            .ceiling_constructions
+            .iter_mut()
+            .find(|c| c.base.id == id)
+        {
+            c.insulation = insulation;
+        }
+    }
+
     /// The ids of every `kind` surface in storey `idx` whose construction is NOT
     /// yet done — its type or build-up is still unset (see
     /// [`WallConstruction::is_complete`]). A region whose construction can't be
@@ -722,5 +789,87 @@ impl Ber {
             SurfaceKind::Ceilings => counts.ceilings,
         };
         count > 0 && self.incomplete_surface_ids(idx, kind).is_empty()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Ceiling completeness now includes the INSULATION spec: unspecified
+    /// blocks; declared-unknown completes without a photo; a specified
+    /// thickness completes only once a photo backs it.
+    #[test]
+    fn ceiling_completeness_requires_insulation_spec() {
+        let mut c = CeilingConstruction {
+            construction_type: CeilingConstructionType::FlatRoof,
+            ..Default::default()
+        };
+        c.base.construction_makeup = ConstructionMakeup::Default;
+        assert!(
+            !c.is_complete(),
+            "type + build-up alone no longer complete a ceiling"
+        );
+        c.insulation = Some(CeilingInsulation::Unknown);
+        assert!(c.is_complete(), "declared-unknown needs no photo");
+        c.insulation = Some(CeilingInsulation::ThicknessMm(150.0));
+        assert!(!c.is_complete(), "a thickness needs a backing photo");
+        c.base.photos.push(Photo::default());
+        assert!(c.is_complete(), "thickness + photo completes");
+    }
+
+    /// Old records predate the `insulation` field → they load as `None`
+    /// (unspecified); the two spec values round-trip through serde.
+    #[test]
+    fn ceiling_insulation_serde_default_and_roundtrip() {
+        for spec in [
+            Some(CeilingInsulation::Unknown),
+            Some(CeilingInsulation::ThicknessMm(112.5)),
+            None,
+        ] {
+            let c = CeilingConstruction {
+                construction_type: CeilingConstructionType::FlatRoof,
+                insulation: spec,
+                ..Default::default()
+            };
+            let back: CeilingConstruction =
+                serde_json::from_str(&serde_json::to_string(&c).unwrap()).unwrap();
+            assert_eq!(back.insulation, spec, "round-trip of {spec:?}");
+        }
+
+        // An OLD record: serialize without the field at all, then load.
+        let mut v = serde_json::to_value(CeilingConstruction::default()).unwrap();
+        v.as_object_mut().unwrap().remove("insulation");
+        let old: CeilingConstruction = serde_json::from_value(v).unwrap();
+        assert_eq!(old.insulation, None, "pre-field records load unspecified");
+    }
+
+    /// The `Ber` setter stores Unknown vs ThicknessMm on the addressed ceiling
+    /// construction, normalizes invalid thicknesses to unspecified, and
+    /// no-ops on an unknown id.
+    #[test]
+    fn set_ceiling_insulation_stores_and_normalizes() {
+        let mut ber = Ber::default();
+        let id = ber.ensure_ceiling_construction(
+            CeilingConstructionType::FlatRoof,
+            ConstructionMakeup::Default,
+            ConstructionPhase::default(),
+        );
+        ber.set_ceiling_insulation(id, Some(CeilingInsulation::ThicknessMm(150.0)));
+        assert_eq!(
+            ber.ceiling_construction(id).unwrap().insulation,
+            Some(CeilingInsulation::ThicknessMm(150.0))
+        );
+        ber.set_ceiling_insulation(id, Some(CeilingInsulation::Unknown));
+        assert_eq!(
+            ber.ceiling_construction(id).unwrap().insulation,
+            Some(CeilingInsulation::Unknown)
+        );
+        // Invalid thickness → normalized to unspecified.
+        ber.set_ceiling_insulation(id, Some(CeilingInsulation::ThicknessMm(0.0)));
+        assert_eq!(ber.ceiling_construction(id).unwrap().insulation, None);
+        // Unknown id → no-op (no panic, nothing changed elsewhere).
+        ber.set_ceiling_insulation(ItemId::default(), Some(CeilingInsulation::Unknown));
+        assert_eq!(ber.ceiling_construction(id).unwrap().insulation, None);
     }
 }
