@@ -5,6 +5,7 @@ pub mod controller;
 pub mod engine;
 pub mod number_entry;
 pub mod paths;
+pub mod platform;
 pub mod ui;
 
 #[cfg(target_os = "android")]
@@ -42,6 +43,15 @@ pub fn bootstrap(paths: &Paths) -> Rc<RefCell<AppController>> {
         paths.sync_config_file(),
     ) {
         controller.attach_sync(sync);
+    }
+    // Background bug-report uploader: drains the local capture queue to the
+    // intake backend when WiFi allows. Reuses the same sync config; when
+    // unconfigured, reports still queue locally and upload on a later run.
+    controller.set_bug_reports_dir(paths.bug_reports_dir());
+    if let Some(uploader) =
+        engine::BugReportUploader::spawn(paths.bug_reports_dir(), paths.sync_config_file())
+    {
+        controller.attach_bug_uploader(uploader);
     }
     Rc::new(RefCell::new(controller))
 }

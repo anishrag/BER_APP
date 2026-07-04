@@ -12,6 +12,16 @@
     <uses-feature android:name="android.hardware.bluetooth_le"
         android:required="false" />
 
+    <!-- Voice notes: record audio via MediaRecorder (runtime permission,
+         requested in MainActivity). -->
+    <uses-permission android:name="android.permission.RECORD_AUDIO" />
+
+    <!-- Networking: the bug-report uploader and cloud sync need internet, and
+         the connectivity callback (fires nativeOnNetworkUp when WiFi returns)
+         needs network-state access. -->
+    <uses-permission android:name="android.permission.INTERNET" />
+    <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
+
     <!-- In-app photos: launch the system camera (ACTION_IMAGE_CAPTURE). We don't
          declare the CAMERA permission — the camera app holds it; we just hand
          off via an intent. The capture is written to a MediaStore output URI, so

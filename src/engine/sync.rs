@@ -230,11 +230,7 @@ fn import_one(
     Ok(())
 }
 
-fn download_satellite(
-    client: &SyncClient,
-    photos_dir: &Path,
-    url: &str,
-) -> anyhow::Result<Photo> {
+fn download_satellite(client: &SyncClient, photos_dir: &Path, url: &str) -> anyhow::Result<Photo> {
     let bytes = client.download(url)?;
     std::fs::create_dir_all(photos_dir)?;
     // Canonicalize so the stored path loads as a `file://` image regardless of

@@ -21,6 +21,7 @@
 //   - `strokes`       — sketch entry points + the apply-stroke family.
 //   - `view`          — canvas pan/zoom.
 mod assessment_phase;
+mod bug_report;
 mod ceiling;
 mod ceiling_exposure;
 mod ceiling_steps;
@@ -419,6 +420,15 @@ pub struct AppController {
     /// Optional background cloud-sync worker (attached by the real app when
     /// sync config is present; absent → the app runs fully offline).
     sync: Option<crate::engine::SyncWorker>,
+    /// Where captured bug reports are staged/queued before upload. Set from
+    /// `Paths` in `bootstrap`; a relative default keeps tests working.
+    bug_reports_dir: std::path::PathBuf,
+    /// Optional background bug-report uploader (attached when sync config is
+    /// present). Absent → reports still queue locally, upload on a later run.
+    bug_uploader: Option<crate::engine::BugReportUploader>,
+    /// The staging path of an in-flight audio recording (`Some` between
+    /// `start_bug_recording` and `finish_bug_report`/`cancel_bug_recording`).
+    bug_recording_path: Option<std::path::PathBuf>,
     /// The last snapping action (its raw input + pre-action state + the elective
     /// snaps it made), kept so a forced snap choice can REPLAY it — restore the
     /// pre-state, re-run under the policy, rebuild the shape. `None` until the
@@ -592,6 +602,9 @@ impl AppController {
             conn,
             layer_library,
             photos_dir: std::path::PathBuf::from("photos"),
+            bug_reports_dir: std::path::PathBuf::from("bug-reports"),
+            bug_uploader: None,
+            bug_recording_path: None,
             loader_engine: DataLoader::new(),
             sketch_engine: SketchEngine::new(),
             current_record: None,

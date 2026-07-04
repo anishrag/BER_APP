@@ -1,10 +1,12 @@
 // engine/mod.rs
 pub mod ber_repository;
+pub mod bug_report;
 pub mod checkpoint;
 pub mod dataloader;
 pub mod persistence;
 pub mod sync;
 
+pub use bug_report::{BugReportMeta, BugReportUploader, BugUploadStatus};
 pub use persistence::{DocSnapshot, PersistenceWriter, SaveBundle};
 pub use sync::{SyncStatus, SyncWorker};
 

@@ -19,6 +19,11 @@ import android.content.pm.PackageManager;
 import android.net.Uri;
 import android.graphics.Bitmap;
 import android.graphics.BitmapFactory;
+import android.media.MediaRecorder;
+import android.net.ConnectivityManager;
+import android.net.Network;
+import android.net.NetworkCapabilities;
+import android.net.NetworkRequest;
 import android.os.Build;
 import android.os.Bundle;
 import android.provider.MediaStore;
@@ -75,8 +80,19 @@ public class MainActivity extends NativeActivity {
     private static final int STATUS_BT_OFF = 6;
 
     private static final int REQ_BLUETOOTH = 1001;
+    private static final int REQ_AUDIO = 1003;
 
     private BluetoothGatt gatt;
+
+    // MediaRecorder for voice-note capture, driven synchronously FROM Rust over
+    // JNI (start/stop below). Held between start and stop so stop() can finalize
+    // the .m4a on the same thread the Rust caller invoked start on.
+    private MediaRecorder audioRecorder;
+
+    // WiFi-connectivity watcher: fires nativeOnNetworkUp() when the internet
+    // becomes reachable so queued bug reports / cloud sync flush promptly.
+    private ConnectivityManager connectivityManager;
+    private ConnectivityManager.NetworkCallback networkCallback;
 
     static {
         // NativeActivity dlopen's libber_app.so from native code, which does
@@ -107,10 +123,29 @@ public class MainActivity extends NativeActivity {
 
     private static native void nativeOnPhotoCancelled();
 
+    // Implemented in Rust (libber_app.so) — fired when WiFi/internet becomes
+    // reachable so the bug-report uploader / cloud sync can flush its queue.
+    private static native void nativeOnNetworkUp();
+
     @Override
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
         hideSystemBars();
+        registerNetworkWatcher();
+    }
+
+    @Override
+    protected void onDestroy() {
+        super.onDestroy();
+        if (connectivityManager != null && networkCallback != null) {
+            try {
+                connectivityManager.unregisterNetworkCallback(networkCallback);
+            } catch (Exception e) {
+                Log.w(TAG, "net: unregister callback failed (ignored)", e);
+            }
+        }
+        connectivityManager = null;
+        networkCallback = null;
     }
 
     @Override
@@ -214,6 +249,12 @@ public class MainActivity extends NativeActivity {
             } else {
                 nativeOnStatus(STATUS_NO_PERMISSION);
             }
+        } else if (requestCode == REQ_AUDIO) {
+            // No automatic retry: the assessor re-taps record once granted.
+            boolean granted =
+                    grantResults.length > 0
+                            && grantResults[0] == PackageManager.PERMISSION_GRANTED;
+            Log.i(TAG, "audio: RECORD_AUDIO permission granted=" + granted);
         }
     }
 
@@ -349,6 +390,116 @@ public class MainActivity extends NativeActivity {
             Log.i(TAG, "camera: wrote thumbnail " + thumb.getAbsolutePath());
         } catch (Exception e) {
             Log.w(TAG, "camera: thumbnail failed (ignored)", e);
+        }
+    }
+
+    // ── Audio recording ─────────────────────────────────────────────────────
+
+    /**
+     * Called FROM Rust over JNI when the assessor taps "record voice note".
+     * Starts a {@link MediaRecorder} writing an AAC/MPEG-4 (.m4a) file at
+     * {@code path} and returns {@code true} if recording began. Returns
+     * {@code false} without recording if the {@code RECORD_AUDIO} permission is
+     * missing (we request it and the assessor re-taps record once granted —
+     * mirroring how {@link #startLaser} returns after requesting Bluetooth), or
+     * if the recorder failed to start.
+     *
+     * <p>Runs on the CALLING thread (no {@code runOnUiThread}): the Rust caller
+     * relies on {@link #stopAudioRecording} finalizing the file synchronously on
+     * the same thread. Unlike the camera, this doesn't wait on an Activity
+     * result.
+     */
+    public boolean startAudioRecording(String path) {
+        if (checkSelfPermission(Manifest.permission.RECORD_AUDIO)
+                != PackageManager.PERMISSION_GRANTED) {
+            Log.i(TAG, "audio: RECORD_AUDIO not granted, requesting");
+            requestPermissions(new String[] {Manifest.permission.RECORD_AUDIO}, REQ_AUDIO);
+            return false;
+        }
+        try {
+            MediaRecorder recorder;
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+                recorder = new MediaRecorder(this);
+            } else {
+                recorder = new MediaRecorder();
+            }
+            recorder.setAudioSource(MediaRecorder.AudioSource.MIC);
+            recorder.setOutputFormat(MediaRecorder.OutputFormat.MPEG_4);
+            recorder.setAudioEncoder(MediaRecorder.AudioEncoder.AAC);
+            recorder.setAudioEncodingBitRate(96000);
+            recorder.setAudioSamplingRate(44100);
+            recorder.setOutputFile(path);
+            recorder.prepare();
+            recorder.start();
+            audioRecorder = recorder;
+            Log.i(TAG, "audio: recording to " + path);
+            return true;
+        } catch (Exception e) {
+            Log.e(TAG, "audio: failed to start recording", e);
+            if (audioRecorder != null) {
+                try {
+                    audioRecorder.release();
+                } catch (Exception ignored) {
+                }
+                audioRecorder = null;
+            }
+            return false;
+        }
+    }
+
+    /**
+     * Called FROM Rust over JNI to stop the in-progress recording. Finalizes the
+     * .m4a file synchronously so it's ready when this method returns. A
+     * stop-too-soon exception (recording shorter than a frame) is logged; the
+     * recorder is always released and the field cleared.
+     */
+    public void stopAudioRecording() {
+        if (audioRecorder == null) {
+            return;
+        }
+        try {
+            audioRecorder.stop();
+        } catch (Exception e) {
+            Log.e(TAG, "audio: stop failed", e);
+        }
+        audioRecorder.release();
+        audioRecorder = null;
+        Log.i(TAG, "audio: recording stopped");
+    }
+
+    // ── Connectivity ────────────────────────────────────────────────────────
+
+    /**
+     * Register a {@link ConnectivityManager.NetworkCallback} that fires
+     * {@link #nativeOnNetworkUp} when a WiFi network with internet becomes
+     * available, so queued bug reports / cloud sync flush promptly once WiFi
+     * returns. Unregistered in {@link #onDestroy}.
+     */
+    private void registerNetworkWatcher() {
+        connectivityManager =
+                (ConnectivityManager) getSystemService(Context.CONNECTIVITY_SERVICE);
+        if (connectivityManager == null) {
+            Log.w(TAG, "net: no ConnectivityManager");
+            return;
+        }
+        NetworkRequest request =
+                new NetworkRequest.Builder()
+                        .addTransportType(NetworkCapabilities.TRANSPORT_WIFI)
+                        .addCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET)
+                        .build();
+        networkCallback =
+                new ConnectivityManager.NetworkCallback() {
+                    @Override
+                    public void onAvailable(Network network) {
+                        Log.i(TAG, "net: WiFi internet available");
+                        nativeOnNetworkUp();
+                    }
+                };
+        try {
+            connectivityManager.registerNetworkCallback(request, networkCallback);
+        } catch (Exception e) {
+            Log.w(TAG, "net: register callback failed", e);
+            networkCallback = null;
         }
     }
 

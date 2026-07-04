@@ -40,4 +40,12 @@ impl Paths {
     pub fn sync_config_file(&self) -> PathBuf {
         self.data_dir.join("sync.json")
     }
+
+    /// Local-first queue of captured bug reports (one subdir per report: an
+    /// optional `audio.m4a`, a `state.json` dump, and `meta.json`). The
+    /// background uploader drains it to the intake backend when WiFi allows;
+    /// see [`crate::engine::bug_report`].
+    pub fn bug_reports_dir(&self) -> PathBuf {
+        self.data_dir.join("bug-reports")
+    }
 }

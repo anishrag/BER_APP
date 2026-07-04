@@ -33,6 +33,9 @@ pub struct BerApp {
     pub key_details_state: KeyDetailsState,
     pub sketch_state: SketchState,
 
+    // Global bug-report overlay (available on every page but Splash).
+    pub bug_report: BugReportState,
+
     // Idle-autosave bookkeeping: the controller's edit `revision` last seen, and
     // the app-clock time it last changed. When the revision goes quiet for
     // `IDLE_SAVE_SECS`, we flush un-persisted edits to disk.
@@ -42,6 +45,20 @@ pub struct BerApp {
 
 /// Idle gap (seconds of no edits) before an autosave flush fires.
 const IDLE_SAVE_SECS: f64 = 2.5;
+
+/// State for the global bug-report overlay: the modal's open/recording flags,
+/// the note being typed, when recording began (app-clock seconds, for the live
+/// timer), and the last confirmation/error to show.
+#[derive(Default)]
+pub struct BugReportState {
+    pub open: bool,
+    pub recording: bool,
+    pub started_at: f64,
+    /// Duration of the finalized recording (set on Stop), shown as a ✓ marker.
+    pub recorded_secs: Option<u64>,
+    pub note: String,
+    pub status_msg: Option<String>,
+}
 
 #[derive(Default)]
 pub struct SketchState {
@@ -274,6 +291,7 @@ impl BerApp {
             home_state: HomeState::default(),
             key_details_state: KeyDetailsState::default(),
             sketch_state: SketchState::default(),
+            bug_report: BugReportState::default(),
             last_seen_revision: 0,
             last_change_time: 0.0,
         };
@@ -287,6 +305,201 @@ impl BerApp {
 
     pub fn navigate_to(&mut self, page: Page) {
         self.current_page = page;
+    }
+
+    /// Draw the always-available bug-report overlay: a floating 🐞 button and,
+    /// when opened, a modal to record a spoken description + save a full state
+    /// dump. Handled entirely here (direct controller calls) — the page render
+    /// borrows are already released by the time this runs.
+    fn bug_overlay(&mut self, ctx: &egui::Context) {
+        use crate::ui::widgets::hint::HintExt;
+
+        // A WiFi-up signal (from the Android connectivity callback) means retry
+        // any queued uploads now, rather than waiting for the periodic tick.
+        if crate::platform::net::take_wifi_up() {
+            self.app_controller.borrow().bug_upload_now();
+        }
+
+        // The button is out of place on the transient splash/loading screen.
+        if self.current_page == Page::Splash {
+            return;
+        }
+
+        // Floating button, bottom-right, above everything.
+        let mut open_clicked = false;
+        egui::Area::new(egui::Id::new("bug_report_button"))
+            .anchor(egui::Align2::RIGHT_BOTTOM, egui::vec2(-12.0, -12.0))
+            .order(egui::Order::Foreground)
+            .show(ctx, |ui| {
+                let btn = egui::Button::new(egui::RichText::new("🐞").size(22.0))
+                    .fill(egui::Color32::from_rgb(176, 42, 42))
+                    .min_size(egui::vec2(46.0, 46.0));
+                if ui.add(btn).hint("Report a bug").clicked() {
+                    open_clicked = true;
+                }
+            });
+        if open_clicked {
+            self.bug_report.open = true;
+            self.bug_report.status_msg = None;
+        }
+        if !self.bug_report.open {
+            return;
+        }
+
+        let audio_supported = self.app_controller.borrow().bug_audio_supported();
+        let recording = self.bug_report.recording;
+        // Keep the live timer ticking while recording.
+        if recording {
+            ctx.request_repaint_after(std::time::Duration::from_millis(250));
+        }
+        let elapsed = if recording {
+            (ctx.input(|i| i.time) - self.bug_report.started_at).max(0.0)
+        } else {
+            0.0
+        };
+
+        // Collect intents inside the closure; act after it releases its borrows.
+        let mut do_record = false;
+        let mut do_stop = false;
+        let mut do_save = false;
+        let mut do_cancel = false;
+
+        egui::Window::new("Report a bug")
+            .id(egui::Id::new("bug_report_modal"))
+            .order(egui::Order::Foreground)
+            .anchor(egui::Align2::CENTER_CENTER, egui::vec2(0.0, 0.0))
+            .collapsible(false)
+            .resizable(false)
+            .show(ctx, |ui| {
+                ui.set_min_width(360.0);
+                ui.label(
+                    egui::RichText::new("Describe what went wrong")
+                        .strong()
+                        .size(17.0),
+                );
+                ui.add_space(4.0);
+                ui.label(
+                    egui::RichText::new(
+                        "Records a spoken note and saves the current BER's state so it can \
+                         be debugged later. Uploads automatically once online.",
+                    )
+                    .color(egui::Color32::from_gray(150)),
+                );
+                ui.add_space(10.0);
+
+                // Audio controls.
+                if audio_supported {
+                    ui.horizontal(|ui| {
+                        if recording {
+                            let secs = elapsed as u64;
+                            ui.label(
+                                egui::RichText::new(format!(
+                                    "● Recording  {:02}:{:02}",
+                                    secs / 60,
+                                    secs % 60
+                                ))
+                                .color(egui::Color32::from_rgb(200, 60, 60))
+                                .strong(),
+                            );
+                            if ui.button("■ Stop").clicked() {
+                                do_stop = true;
+                            }
+                        } else if let Some(secs) = self.bug_report.recorded_secs {
+                            ui.label(
+                                egui::RichText::new(format!(
+                                    "✓ Recorded  {:02}:{:02}",
+                                    secs / 60,
+                                    secs % 60
+                                ))
+                                .color(egui::Color32::from_rgb(60, 140, 60)),
+                            );
+                            if ui.button("Re-record").clicked() {
+                                do_record = true;
+                            }
+                        } else if ui.button("● Record spoken description").clicked() {
+                            do_record = true;
+                        }
+                    });
+                } else {
+                    ui.label(
+                        egui::RichText::new("Audio recording is only available on the tablet.")
+                            .italics()
+                            .color(egui::Color32::from_gray(140)),
+                    );
+                }
+
+                ui.add_space(8.0);
+                ui.label("Note (optional):");
+                ui.add(
+                    egui::TextEdit::multiline(&mut self.bug_report.note)
+                        .desired_rows(2)
+                        .desired_width(f32::INFINITY)
+                        .hint_text("Anything to add in text"),
+                );
+
+                if let Some(msg) = &self.bug_report.status_msg {
+                    ui.add_space(6.0);
+                    ui.label(egui::RichText::new(msg).color(egui::Color32::from_rgb(60, 140, 60)));
+                }
+
+                ui.add_space(12.0);
+                ui.horizontal(|ui| {
+                    if ui
+                        .add(egui::Button::new(
+                            egui::RichText::new("Save & send").strong(),
+                        ))
+                        .clicked()
+                    {
+                        do_save = true;
+                    }
+                    if ui.button("Cancel").clicked() {
+                        do_cancel = true;
+                    }
+                });
+            });
+
+        // ---- Act on the collected intents (borrows now released) ----
+        if do_record {
+            // Re-record discards any previously staged take first.
+            self.app_controller.borrow_mut().cancel_bug_recording();
+            self.bug_report.recorded_secs = None;
+            match self.app_controller.borrow_mut().start_bug_recording() {
+                Ok(()) => {
+                    self.bug_report.recording = true;
+                    self.bug_report.started_at = ctx.input(|i| i.time);
+                    self.bug_report.status_msg = None;
+                }
+                Err(e) => self.bug_report.status_msg = Some(e),
+            }
+        }
+        if do_stop {
+            // Finalize but KEEP the take so Save can attach it.
+            self.app_controller.borrow_mut().stop_bug_recording();
+            self.bug_report.recording = false;
+            self.bug_report.recorded_secs = Some(elapsed as u64);
+        }
+        if do_cancel {
+            self.app_controller.borrow_mut().cancel_bug_recording();
+            self.bug_report = BugReportState::default();
+        }
+        if do_save {
+            let mut context = std::collections::BTreeMap::new();
+            context.insert("page".to_string(), format!("{:?}", self.current_page));
+            let note = std::mem::take(&mut self.bug_report.note);
+            let result = self
+                .app_controller
+                .borrow_mut()
+                .finish_bug_report(note, context);
+            match result {
+                Ok(msg) => {
+                    // Close the modal on success.
+                    self.bug_report = BugReportState::default();
+                    self.bug_report.status_msg = Some(msg);
+                    self.bug_report.open = false;
+                }
+                Err(e) => self.bug_report.status_msg = Some(format!("Could not save: {e}")),
+            }
+        }
     }
 
     /// Rebuild the Key Details form's backing strings from the loaded record
@@ -2659,5 +2872,10 @@ impl eframe::App for BerApp {
                 }
             }
         }
+
+        // Global bug-report overlay: a floating button + recording modal drawn
+        // over whatever page is active (so the assessor can flag an issue at any
+        // stage of a BER). Also drains the "WiFi came up" signal to poke uploads.
+        self.bug_overlay(ctx);
     }
 }

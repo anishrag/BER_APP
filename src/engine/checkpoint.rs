@@ -36,15 +36,23 @@ pub struct Loaded {
     pub snapshot: Option<(i64, String)>,
 }
 
-/// Write `ber` + the editing `Document` snapshot `(version, json)` to `path` as
-/// pretty JSON. Pass `None` for `snapshot` to write a `Ber`-only checkpoint.
-pub fn save(ber: &Ber, snapshot: Option<(i64, &str)>, path: &str) -> Result<(), String> {
+/// Serialize `ber` + the editing `Document` snapshot `(version, json)` into the
+/// checkpoint wrapper as pretty JSON. Pass `None` for `snapshot` to serialize a
+/// `Ber`-only checkpoint. Shared by [`save`] and the bug-report state dump
+/// (`engine::bug_report`) so both capture the exact same state shape.
+pub fn to_json(ber: &Ber, snapshot: Option<(i64, &str)>) -> Result<String, String> {
     let cp = Checkpoint {
         ber: ber.clone(),
         snapshot_version: snapshot.map(|(v, _)| v),
         document_json: snapshot.map(|(_, j)| j.to_string()),
     };
-    let json = serde_json::to_string_pretty(&cp).map_err(|e| format!("serialize: {e}"))?;
+    serde_json::to_string_pretty(&cp).map_err(|e| format!("serialize: {e}"))
+}
+
+/// Write `ber` + the editing `Document` snapshot `(version, json)` to `path` as
+/// pretty JSON. Pass `None` for `snapshot` to write a `Ber`-only checkpoint.
+pub fn save(ber: &Ber, snapshot: Option<(i64, &str)>, path: &str) -> Result<(), String> {
+    let json = to_json(ber, snapshot)?;
     std::fs::write(path, json).map_err(|e| format!("write {path}: {e}"))
 }
 
