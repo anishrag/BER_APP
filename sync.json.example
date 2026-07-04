@@ -1,0 +1,4 @@
+{
+  "baseUrl": "https://REPLACE-api-id.execute-api.us-east-1.amazonaws.com",
+  "apiKey": "REPLACE-with-your-SURVEYOR_ACCESS_KEY"
+}

@@ -25,6 +25,70 @@ adb install -r android/app/build/outputs/apk/debug/app-debug.apk
 adb logcat -s ber_app                 # the app's android_logger tag
 ```
 
+## One-shot deploy (build + install + configure)
+
+`scripts/deploy-tablet.sh` does the whole loop in one command: build the APK,
+`adb install` it, and push the cloud config (`sync.json`) into the app's private
+storage.
+
+```sh
+./scripts/deploy-tablet.sh            # debug (default)
+./scripts/deploy-tablet.sh release    # release (needs signing config)
+```
+
+One-time: create `scripts/tablet.env` (git-ignored) with your secrets so you
+never re-type them —
+
+```sh
+BER_SYNC_KEY=your-SURVEYOR_ACCESS_KEY      # the surveyor API shared key
+BER_SYNC_URL=https://<api-id>.execute-api.us-east-1.amazonaws.com  # optional*
+# BER_STACK=ber-intake     # optional (default)
+# AWS_REGION=us-east-1     # optional (default)
+```
+
+\*If `BER_SYNC_URL` is omitted and the `aws` CLI is available, the script derives
+it from the BERintake stack's `ApiUrl` output. Thereafter every run rebuilds and
+redeploys, fully configured, with no extra steps.
+
+## Cloud sync & bug-report upload (`sync.json`)
+
+Both the offline-first **cloud sync** (pull confirmed jobs from the intake
+backend) and the **bug-report upload** (the in-app 🐞 button) read the SAME
+config file — so configuring one configures both. It lives in the app's private
+internal storage at `files/sync.json` (i.e.
+`/data/data/ie.cannygreen.berapp/files/sync.json`) and holds:
+
+```json
+{
+  "baseUrl": "https://<api-id>.execute-api.us-east-1.amazonaws.com",
+  "apiKey":  "<your SURVEYOR_ACCESS_KEY>"
+}
+```
+
+- `baseUrl` = the API Gateway URL — the BERintake stack's `ApiUrl` output
+  (`$default` stage, no `/prod` suffix):
+  ```sh
+  aws cloudformation describe-stacks --stack-name ber-intake --region us-east-1 \
+    --query "Stacks[0].Outputs[?OutputKey=='ApiUrl'].OutputValue" --output text
+  ```
+- `apiKey` = the backend's `SURVEYOR_ACCESS_KEY` (the shared surveyor key).
+
+The file is app-private, so `scripts/deploy-tablet.sh` pushes it via `adb run-as`
+(works because the debug APK is debuggable). To place it by hand instead:
+
+```sh
+adb shell run-as ie.cannygreen.berapp sh -c 'mkdir -p files && cat > files/sync.json' < sync.json
+adb shell run-as ie.cannygreen.berapp cat files/sync.json    # verify
+```
+
+Restart the app afterwards — the sync worker + bug uploader read the config at
+startup. **Without `sync.json`** the app is fully usable offline: bug reports
+capture to `files/bug-reports/` and upload automatically the next launch after a
+config is present (WiFi-triggered via the connectivity callback, plus a periodic
+retry). `sync.json` itself is git-ignored (it carries the key); `sync.json.example`
+in the repo root is the committed template. On **desktop** the same file lives at
+`./sync.json` next to `bers.db`, handy for testing the whole flow off-device.
+
 ## Release signing
 
 Generate a keystore ONCE, keep it out of git (`*.keystore` is ignored):
