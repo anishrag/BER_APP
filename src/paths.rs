@@ -34,4 +34,10 @@ impl Paths {
     pub fn photos_dir(&self) -> PathBuf {
         self.data_dir.join("photos")
     }
+
+    /// Optional cloud-sync config (surveyor API base URL + key). Absent means the
+    /// app runs fully offline; see [`crate::engine::sync::SyncConfig`].
+    pub fn sync_config_file(&self) -> PathBuf {
+        self.data_dir.join("sync.json")
+    }
 }

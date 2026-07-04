@@ -3,8 +3,10 @@ pub mod ber_repository;
 pub mod checkpoint;
 pub mod dataloader;
 pub mod persistence;
+pub mod sync;
 
 pub use persistence::{DocSnapshot, PersistenceWriter, SaveBundle};
+pub use sync::{SyncStatus, SyncWorker};
 
 use std::path::Path;
 

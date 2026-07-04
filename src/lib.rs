@@ -33,5 +33,15 @@ pub fn bootstrap(paths: &Paths) -> Rc<RefCell<AppController>> {
         Ok(writer) => controller.attach_writer(writer),
         Err(e) => log::warn!("persistence writer unavailable, saving synchronously: {e}"),
     }
+    // Background cloud sync with the intake backend (pulls confirmed jobs). Only
+    // active when configured (sync.json / $BER_SYNC_*); otherwise fully offline.
+    // Its own DB connection, like the writer.
+    if let Some(sync) = engine::SyncWorker::spawn(
+        paths.db_file(),
+        paths.photos_dir(),
+        paths.sync_config_file(),
+    ) {
+        controller.attach_sync(sync);
+    }
     Rc::new(RefCell::new(controller))
 }

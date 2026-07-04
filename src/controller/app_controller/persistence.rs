@@ -891,6 +891,24 @@ impl AppController {
         self.writer = Some(writer);
     }
 
+    /// Attach the background cloud-sync worker (real app only; needs config).
+    pub fn attach_sync(&mut self, sync: crate::engine::SyncWorker) {
+        self.sync = Some(sync);
+    }
+
+    /// Trigger an on-demand cloud pull (e.g. a "Sync now" action). No-op when
+    /// sync isn't configured.
+    pub fn sync_now(&self) {
+        if let Some(sync) = &self.sync {
+            sync.trigger_import();
+        }
+    }
+
+    /// Latest cloud-sync outcome for the UI, or `None` when sync is off.
+    pub fn sync_status(&self) -> Option<crate::engine::SyncStatus> {
+        self.sync.as_ref().map(|s| s.status())
+    }
+
     /// Where attached/captured photo files are stored (set from `Paths` in
     /// `bootstrap`).
     pub fn set_photos_dir(&mut self, dir: std::path::PathBuf) {
