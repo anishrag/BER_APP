@@ -613,8 +613,7 @@ impl AppController {
         transom_semicircular: bool,
         window_type: WindowTypeChoice,
         overshading: Overshading,
-        photos: Vec<std::path::PathBuf>,
-        photo_quality: PhotoQuality,
+        photos: Vec<(std::path::PathBuf, PhotoQuality)>,
     ) -> Result<(), String> {
         /// Sill the placement defaults to; the assessor drags it in the 2D view.
         const DEFAULT_SILL_M: f32 = 1.0;
@@ -632,9 +631,10 @@ impl AppController {
         let undo_snap = self.current_history_snapshot();
         // Store the picked photos into the photo store up front (needs `&self`,
         // before the mutable record borrow below); attached to the new window(s).
+        // Each photo carries its own capture tier (dual hi/lo buttons).
         let stored_photos: Vec<Photo> = photos
             .iter()
-            .filter_map(|p| self.ingest_photo(p, photo_quality))
+            .filter_map(|(p, quality)| self.ingest_photo(p, *quality))
             .collect();
         let Some(record) = self.current_record.as_mut() else {
             return Ok(());
@@ -767,8 +767,7 @@ impl AppController {
         &mut self,
         window_type: WindowTypeChoice,
         overshading: Overshading,
-        photos: Vec<std::path::PathBuf>,
-        photo_quality: PhotoQuality,
+        photos: Vec<(std::path::PathBuf, PhotoQuality)>,
     ) -> Result<(), String> {
         let Some(pending) = self.pending_opening.take() else {
             return Ok(());
@@ -792,7 +791,7 @@ impl AppController {
         let undo_snap = self.current_history_snapshot();
         let stored_photos: Vec<Photo> = photos
             .iter()
-            .filter_map(|p| self.ingest_photo(p, photo_quality))
+            .filter_map(|(p, quality)| self.ingest_photo(p, *quality))
             .collect();
         let height_m = self
             .current_record

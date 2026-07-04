@@ -177,16 +177,18 @@ pub fn stamp_wall_phases(ber: &mut Ber, idx: usize) {
             let s2 = ((mx - nx * o) as f32, (my - ny * o) as f32);
             (s1, s2, ber.storeys[idx].walls.regions[i].construction_id)
         };
-        let (ty, makeup, cur_phase) = match ber.wall_construction(cur_cid) {
+        let (ty, makeup, cur_phase, cur_name) = match ber.wall_construction(cur_cid) {
             Some(c) => (
                 c.construction_type,
                 c.base.construction_makeup.clone(),
                 c.base.construction_phase.clone(),
+                c.base.name.clone(),
             ),
             None => (
                 Default::default(),
                 Default::default(),
                 ConstructionPhase::Unassigned,
+                None,
             ),
         };
         // The zones on each side (open-air samples drop out); the OLDER wins.
@@ -200,7 +202,10 @@ pub fn stamp_wall_phases(ber: &mut Ber, idx: usize) {
         .min_by_key(|p| phase_age(ber, p))
         .unwrap_or_else(|| cur_phase.clone());
         if new_phase != cur_phase {
-            let cid = ber.ensure_wall_construction(ty, makeup, new_phase);
+            // Re-phase keeps the wall in ITS group: the name rides along (the
+            // name is part of the construction identity now).
+            let cid =
+                ber.ensure_wall_construction_named(ty, makeup, new_phase, cur_name.as_deref());
             ber.storeys[idx].walls.regions[i].construction_id = cid;
         }
     }
@@ -226,22 +231,25 @@ pub fn stamp_ceiling_phases(ber: &mut Ber, idx: usize) {
             let r = &ber.storeys[idx].ceilings.regions[i];
             (r.centroid(), r.construction_id)
         };
-        let (ty, makeup, cur_phase) = match ber.ceiling_construction(cur_cid) {
+        let (ty, makeup, cur_phase, cur_name) = match ber.ceiling_construction(cur_cid) {
             Some(cc) => (
                 cc.construction_type,
                 cc.base.construction_makeup.clone(),
                 cc.base.construction_phase.clone(),
+                cc.base.name.clone(),
             ),
             None => (
                 Default::default(),
                 Default::default(),
                 ConstructionPhase::Unassigned,
+                None,
             ),
         };
         let new_phase =
             floor_phase_at(ber, idx, c.x as f32, c.y as f32).unwrap_or_else(|| cur_phase.clone());
         if new_phase != cur_phase {
-            let cid = ber.ensure_ceiling_construction(ty, makeup, new_phase);
+            let cid =
+                ber.ensure_ceiling_construction_named(ty, makeup, new_phase, cur_name.as_deref());
             ber.storeys[idx].ceilings.regions[i].construction_id = cid;
         }
     }
@@ -278,8 +286,13 @@ pub fn stamp_wall_constructions(ber: &mut Ber, idx: usize, doc: &crate::StoreyDo
             let key = crate::riser_key(Point2f64::new(e0.x, e0.y), Point2f64::new(e1.x, e1.y));
             doc.riser_constructions.get(&key)
         };
-        if let Some((ty, makeup, phase)) = assigned {
-            let cid = ber.ensure_wall_construction(*ty, makeup.clone(), phase.clone());
+        if let Some((ty, makeup, phase, name)) = assigned {
+            let cid = ber.ensure_wall_construction_named(
+                *ty,
+                makeup.clone(),
+                phase.clone(),
+                name.as_deref(),
+            );
             ber.storeys[idx].walls.regions[i].construction_id = cid;
         }
     }
@@ -306,8 +319,13 @@ pub fn stamp_floor_constructions(ber: &mut Ber, idx: usize, doc: &crate::StoreyD
                 &ber.storeys[idx].floors.regions[i].polygon,
             )
         });
-        if let Some((ty, makeup, phase)) = entry {
-            let cid = ber.ensure_floor_construction(*ty, makeup.clone(), phase.clone());
+        if let Some((ty, makeup, phase, name)) = entry {
+            let cid = ber.ensure_floor_construction_named(
+                *ty,
+                makeup.clone(),
+                phase.clone(),
+                name.as_deref(),
+            );
             ber.storeys[idx].floors.regions[i].construction_id = cid;
         }
     }
@@ -336,8 +354,13 @@ pub fn stamp_ceiling_constructions(ber: &mut Ber, idx: usize, doc: &crate::Store
             let plan = geo::Polygon::new(geo::LineString::from(ring), vec![]);
             centroid_override_by_containment(&doc.ceiling_constructions, &plan)
         });
-        if let Some((ty, makeup, phase)) = entry {
-            let cid = ber.ensure_ceiling_construction(*ty, makeup.clone(), phase.clone());
+        if let Some((ty, makeup, phase, name)) = entry {
+            let cid = ber.ensure_ceiling_construction_named(
+                *ty,
+                makeup.clone(),
+                phase.clone(),
+                name.as_deref(),
+            );
             ber.storeys[idx].ceilings.regions[i].construction_id = cid;
         }
     }

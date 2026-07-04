@@ -508,14 +508,24 @@ impl AppController {
             .unwrap_or(0)
             .min(self.document.storeys.len());
         for idx in 0..n {
-            type WallEntry = (WallConstructionType, ConstructionMakeup, ConstructionPhase);
+            type WallEntry = (
+                WallConstructionType,
+                ConstructionMakeup,
+                ConstructionPhase,
+                Option<String>,
+            );
             #[allow(clippy::type_complexity)]
             let (walls, risers, floors, ceilings): (
                 Vec<(manip_plan::SurfaceRef, WallEntry)>,
                 Vec<(document::RiserKey, WallEntry)>,
                 Vec<(
                     document::CentroidKey,
-                    (FloorConstructionType, ConstructionMakeup, ConstructionPhase),
+                    (
+                        FloorConstructionType,
+                        ConstructionMakeup,
+                        ConstructionPhase,
+                        Option<String>,
+                    ),
                 )>,
                 Vec<(
                     document::CentroidKey,
@@ -523,6 +533,7 @@ impl AppController {
                         CeilingConstructionType,
                         ConstructionMakeup,
                         ConstructionPhase,
+                        Option<String>,
                     ),
                 )>,
             ) = {
@@ -544,6 +555,7 @@ impl AppController {
                     let ty = c.construction_type;
                     let mk = c.base.construction_makeup.clone();
                     let ph = c.base.construction_phase.clone();
+                    let nm = c.base.name.clone();
                     if ty == WallConstructionType::default() && mk == ConstructionMakeup::default()
                     {
                         continue;
@@ -556,13 +568,13 @@ impl AppController {
                         ((e0.y + e1.y) * 0.5) as f32,
                     );
                     if let Some(sref) = plan.surface_ref_at(mid, 0.05) {
-                        walls.push((sref, (ty, mk, ph)));
+                        walls.push((sref, (ty, mk, ph, nm)));
                     } else {
                         let key = document::riser_key(
                             domain::points::Point2f64::new(e0.x, e0.y),
                             domain::points::Point2f64::new(e1.x, e1.y),
                         );
-                        risers.push((key, (ty, mk, ph)));
+                        risers.push((key, (ty, mk, ph, nm)));
                     }
                 }
                 let floors = storey
@@ -574,9 +586,10 @@ impl AppController {
                         let ty = c.construction_type;
                         let mk = c.base.construction_makeup.clone();
                         let ph = c.base.construction_phase.clone();
+                        let nm = c.base.name.clone();
                         (ty != FloorConstructionType::default()
                             || mk != ConstructionMakeup::default())
-                        .then(|| (document::centroid_key(r.centroid()), (ty, mk, ph)))
+                        .then(|| (document::centroid_key(r.centroid()), (ty, mk, ph, nm)))
                     })
                     .collect();
                 let ceilings = storey
@@ -588,9 +601,10 @@ impl AppController {
                         let ty = c.construction_type;
                         let mk = c.base.construction_makeup.clone();
                         let ph = c.base.construction_phase.clone();
+                        let nm = c.base.name.clone();
                         (ty != CeilingConstructionType::default()
                             || mk != ConstructionMakeup::default())
-                        .then(|| (document::centroid_key(r.centroid()), (ty, mk, ph)))
+                        .then(|| (document::centroid_key(r.centroid()), (ty, mk, ph, nm)))
                     })
                     .collect();
                 (walls, risers, floors, ceilings)

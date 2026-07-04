@@ -326,6 +326,20 @@ pub enum WallExposure {
     InterStorey,
 }
 
+impl WallExposure {
+    /// Whether a wall with this boundary condition PARTICIPATES in the
+    /// Structure phase — selectable, groupable, counted by completeness, and
+    /// shown in the Structure review. `NonHeatLoss` (internal / party walls —
+    /// no heat loss, so no construction attribution is needed) and the derived
+    /// `InterStorey` junctions are OUT of scope: they still draw everywhere,
+    /// but every Structure-phase wall query skips them (see the Walls arms of
+    /// [`Storey::surface_at`](super::Storey::surface_at) and friends).
+    /// `Unset` stays IN scope — an unclassified wall must still be reachable.
+    pub fn in_structure_scope(self) -> bool {
+        !matches!(self, WallExposure::NonHeatLoss | WallExposure::InterStorey)
+    }
+}
+
 /// Thermal exposure (boundary condition) of a horizontal FLOOR region — set in
 /// the Mapping phase, parallel to [`WallExposure`]. The Structure-phase
 /// construction type/make-up stays separate (on the referenced
@@ -350,6 +364,23 @@ pub enum FloorExposure {
     InterStorey,
 }
 
+impl FloorExposure {
+    /// Whether a floor with this boundary condition PARTICIPATES in the
+    /// Structure phase — the horizontal mirror of
+    /// [`WallExposure::in_structure_scope`]. `NonHeatLoss` (a party floor to
+    /// another dwelling — no heat loss, so no construction attribution is
+    /// needed) and the derived `InterStorey` junction are OUT of scope: they
+    /// still draw, and the Mapping-phase exposure tools still reach them (to
+    /// repaint the classification), but the Structure phase neither selects,
+    /// counts nor reviews them. `Unset` stays IN scope.
+    pub fn in_structure_scope(self) -> bool {
+        !matches!(
+            self,
+            FloorExposure::NonHeatLoss | FloorExposure::InterStorey
+        )
+    }
+}
+
 /// Thermal exposure (boundary condition) of a horizontal CEILING region — set in
 /// the Mapping phase, parallel to [`WallExposure`]. The Structure-phase
 /// construction type/make-up stays separate (on the referenced
@@ -372,6 +403,21 @@ pub enum CeilingExposure {
     /// and clears it on every re-derive; setters targeting it are no-ops.
     /// Excluded from heat-loss area at DEAP export.
     InterStorey,
+}
+
+impl CeilingExposure {
+    /// Whether a ceiling with this boundary condition PARTICIPATES in the
+    /// Structure phase — the horizontal mirror of
+    /// [`WallExposure::in_structure_scope`]. `Party` (another dwelling above
+    /// — no heat loss) and the derived `InterStorey` junction (this
+    /// dwelling's own storey above — e.g. the ground-floor ceiling under an
+    /// upper storey) are OUT of scope: they still draw, and the
+    /// Mapping-phase exposure tools still reach a `Party` ceiling (to
+    /// repaint the classification), but the Structure phase neither selects,
+    /// counts, suggests nor reviews them. `Unset` stays IN scope.
+    pub fn in_structure_scope(self) -> bool {
+        !matches!(self, CeilingExposure::Party | CeilingExposure::InterStorey)
+    }
 }
 
 /// Shared construction identity + fabric properties. A handful of these exist
@@ -456,6 +502,13 @@ pub struct CeilingConstruction {
     /// the field existed). Ceilings only — walls/floors carry no such spec.
     #[serde(default)]
     pub insulation: Option<CeilingInsulation>,
+}
+
+/// Normalize a construction NAME for identity/collision checks: trimmed;
+/// blank/absent reads as "unnamed" (`None`). The single equality the
+/// name-aware `ensure_*_named` find and the name-integrity rule share.
+fn normalized_name(name: Option<&str>) -> Option<&str> {
+    name.map(str::trim).filter(|s| !s.is_empty())
 }
 
 impl ConstructionBase {
@@ -567,10 +620,29 @@ impl Ber {
         makeup: ConstructionMakeup,
         phase: ConstructionPhase,
     ) -> ItemId {
+        self.ensure_wall_construction_named(construction_type, makeup, phase, None)
+    }
+
+    /// [`ensure_wall_construction`](Self::ensure_wall_construction) with the
+    /// NAME as part of the find-or-create identity: two groups with the SAME
+    /// fabric `(type, make-up, phase)` but DIFFERENT names are DIFFERENT
+    /// groups (e.g. "Porch roof" vs "Main house roof", both sloped/default/
+    /// original) — without the name axis they'd collapse into one shared
+    /// construction and editing either would edit both. `None`/blank matches
+    /// only an unnamed construction.
+    pub fn ensure_wall_construction_named(
+        &mut self,
+        construction_type: WallConstructionType,
+        makeup: ConstructionMakeup,
+        phase: ConstructionPhase,
+        name: Option<&str>,
+    ) -> ItemId {
+        let name = normalized_name(name);
         if let Some(c) = self.wall_constructions.iter().find(|c| {
             c.construction_type == construction_type
                 && c.base.construction_makeup == makeup
                 && c.base.construction_phase == phase
+                && normalized_name(c.base.name.as_deref()) == name
         }) {
             return c.base.id;
         }
@@ -578,6 +650,7 @@ impl Ber {
             base: ConstructionBase {
                 construction_makeup: makeup,
                 construction_phase: phase,
+                name: name.map(str::to_string),
                 ..Default::default()
             },
             construction_type,
@@ -595,10 +668,24 @@ impl Ber {
         makeup: ConstructionMakeup,
         phase: ConstructionPhase,
     ) -> ItemId {
+        self.ensure_floor_construction_named(construction_type, makeup, phase, None)
+    }
+
+    /// Name-aware find-or-create — see
+    /// [`ensure_wall_construction_named`](Self::ensure_wall_construction_named).
+    pub fn ensure_floor_construction_named(
+        &mut self,
+        construction_type: FloorConstructionType,
+        makeup: ConstructionMakeup,
+        phase: ConstructionPhase,
+        name: Option<&str>,
+    ) -> ItemId {
+        let name = normalized_name(name);
         if let Some(c) = self.floor_constructions.iter().find(|c| {
             c.construction_type == construction_type
                 && c.base.construction_makeup == makeup
                 && c.base.construction_phase == phase
+                && normalized_name(c.base.name.as_deref()) == name
         }) {
             return c.base.id;
         }
@@ -606,6 +693,7 @@ impl Ber {
             base: ConstructionBase {
                 construction_makeup: makeup,
                 construction_phase: phase,
+                name: name.map(str::to_string),
                 ..Default::default()
             },
             construction_type,
@@ -623,10 +711,24 @@ impl Ber {
         makeup: ConstructionMakeup,
         phase: ConstructionPhase,
     ) -> ItemId {
+        self.ensure_ceiling_construction_named(construction_type, makeup, phase, None)
+    }
+
+    /// Name-aware find-or-create — see
+    /// [`ensure_wall_construction_named`](Self::ensure_wall_construction_named).
+    pub fn ensure_ceiling_construction_named(
+        &mut self,
+        construction_type: CeilingConstructionType,
+        makeup: ConstructionMakeup,
+        phase: ConstructionPhase,
+        name: Option<&str>,
+    ) -> ItemId {
+        let name = normalized_name(name);
         if let Some(c) = self.ceiling_constructions.iter().find(|c| {
             c.construction_type == construction_type
                 && c.base.construction_makeup == makeup
                 && c.base.construction_phase == phase
+                && normalized_name(c.base.name.as_deref()) == name
         }) {
             return c.base.id;
         }
@@ -634,6 +736,7 @@ impl Ber {
             base: ConstructionBase {
                 construction_makeup: makeup,
                 construction_phase: phase,
+                name: name.map(str::to_string),
                 ..Default::default()
             },
             construction_type,
@@ -662,8 +765,57 @@ impl Ber {
 
     /// Set (or clear, with `None`) the editable NAME of the `kind` construction
     /// `id` — the durable home for a Structure group's label. Find-by-id within
-    /// the matching registry; no-op if it isn't there.
-    pub fn set_construction_name(&mut self, kind: SurfaceKind, id: ItemId, name: Option<String>) {
+    /// the matching registry; a missing id is a successful no-op.
+    ///
+    /// NAME-INTEGRITY rule: a construction name IMPLIES its attributes, so a
+    /// non-empty name already held by ANOTHER construction of the same kind
+    /// is REJECTED with a user-facing hint. There is never a
+    /// same-name-same-attributes duplicate to merge with instead: the
+    /// registry find-or-creates constructions BY their `(type, make-up,
+    /// phase)` key (`ensure_*_construction`), so identical attributes always
+    /// resolve to one shared entry — a colliding name necessarily belongs to
+    /// a construction with DIFFERENT attributes. (Rejection is also the only
+    /// safe reaction: renames stream per keystroke, so "become that group on
+    /// a name match" would silently re-attribute a group the moment a longer
+    /// name passes through a colliding prefix.) `Err` leaves every name
+    /// untouched; clearing (`None`/blank) always succeeds.
+    pub fn set_construction_name(
+        &mut self,
+        kind: SurfaceKind,
+        id: ItemId,
+        name: Option<String>,
+    ) -> Result<(), String> {
+        if let Some(n) = normalized_name(name.as_deref()) {
+            let holds = |base: &ConstructionBase| {
+                base.id != id && normalized_name(base.name.as_deref()) == Some(n)
+            };
+            // Only a construction some region still REFERENCES holds its name
+            // against a rename — an orphaned registry entry (all members
+            // re-pointed elsewhere) doesn't hold the name hostage.
+            let taken = match kind {
+                SurfaceKind::Walls => self.wall_constructions.iter().any(|c| {
+                    holds(&c.base) && !self.construction_member_ids(kind, c.base.id).is_empty()
+                }),
+                SurfaceKind::Floors => self.floor_constructions.iter().any(|c| {
+                    holds(&c.base) && !self.construction_member_ids(kind, c.base.id).is_empty()
+                }),
+                SurfaceKind::Ceilings => self.ceiling_constructions.iter().any(|c| {
+                    holds(&c.base) && !self.construction_member_ids(kind, c.base.id).is_empty()
+                }),
+            };
+            if taken {
+                let kind_word = match kind {
+                    SurfaceKind::Walls => "wall",
+                    SurfaceKind::Floors => "floor",
+                    SurfaceKind::Ceilings => "roof",
+                };
+                return Err(format!(
+                    "\"{n}\" is already another {kind_word} group's name — a name means \
+                     exactly one set of attributes, so pick a different name (matching \
+                     attributes would already be one group)"
+                ));
+            }
+        }
         let base = match kind {
             SurfaceKind::Walls => self
                 .wall_constructions
@@ -683,6 +835,100 @@ impl Ber {
         };
         if let Some(base) = base {
             base.name = name;
+        }
+        Ok(())
+    }
+
+    /// The ids of every RESOLVED region (across all storeys) of `kind` that
+    /// references construction `cid` — the group's current MEMBERS. Drives
+    /// the shell's full-group-vs-subset decision (a subset edit FORKS instead
+    /// of mutating the shared construction) and the referenced-only name
+    /// collision check (an orphaned construction doesn't hold a name
+    /// hostage).
+    pub fn construction_member_ids(&self, kind: SurfaceKind, cid: ItemId) -> Vec<ItemId> {
+        let mut out = Vec::new();
+        for s in &self.storeys {
+            match kind {
+                SurfaceKind::Walls => out.extend(
+                    s.walls
+                        .regions
+                        .iter()
+                        .filter(|r| r.construction_id == cid)
+                        .map(|r| r.id),
+                ),
+                SurfaceKind::Floors => out.extend(
+                    s.floors
+                        .regions
+                        .iter()
+                        .filter(|r| r.construction_id == cid)
+                        .map(|r| r.id),
+                ),
+                SurfaceKind::Ceilings => out.extend(
+                    s.ceilings
+                        .regions
+                        .iter()
+                        .filter(|r| r.construction_id == cid)
+                        .map(|r| r.id),
+                ),
+            }
+        }
+        out
+    }
+
+    /// The `(kind-tagged type, make-up, phase)` attributes of the `kind`
+    /// construction named `name` (trimmed exact match), if any — lets the
+    /// shell tell whether a rename that collided
+    /// ([`set_construction_name`](Self::set_construction_name)) actually
+    /// targets an IDENTICAL-attribute group: same name + same attributes IS
+    /// that group (the write is redundant, not conflicting), while different
+    /// attributes is the real violation.
+    pub fn named_construction_attrs(
+        &self,
+        kind: SurfaceKind,
+        name: &str,
+    ) -> Option<(ConstructionType, ConstructionMakeup, ConstructionPhase)> {
+        let n = normalized_name(Some(name))?;
+        // REFERENCED holders only — an orphan's stale name shouldn't steer
+        // the shell's merge decision.
+        let named = |base: &ConstructionBase| {
+            normalized_name(base.name.as_deref()) == Some(n)
+                && !self.construction_member_ids(kind, base.id).is_empty()
+        };
+        match kind {
+            SurfaceKind::Walls => {
+                self.wall_constructions
+                    .iter()
+                    .find(|c| named(&c.base))
+                    .map(|c| {
+                        (
+                            ConstructionType::Wall(c.construction_type),
+                            c.base.construction_makeup.clone(),
+                            c.base.construction_phase.clone(),
+                        )
+                    })
+            }
+            SurfaceKind::Floors => self
+                .floor_constructions
+                .iter()
+                .find(|c| named(&c.base))
+                .map(|c| {
+                    (
+                        ConstructionType::Floor(c.construction_type),
+                        c.base.construction_makeup.clone(),
+                        c.base.construction_phase.clone(),
+                    )
+                }),
+            SurfaceKind::Ceilings => self
+                .ceiling_constructions
+                .iter()
+                .find(|c| named(&c.base))
+                .map(|c| {
+                    (
+                        ConstructionType::Ceiling(c.construction_type),
+                        c.base.construction_makeup.clone(),
+                        c.base.construction_phase.clone(),
+                    )
+                }),
         }
     }
 
@@ -734,7 +980,10 @@ impl Ber {
     /// resolved counts as incomplete, matching the editor's "missing reads as
     /// default" rule. The complement of the done surfaces within
     /// [`Storey::surface_ids`]; drives the Structure-phase `Remaining` select
-    /// tool. Empty when `idx` is out of range.
+    /// tool. Surfaces OUT of structure scope (see
+    /// [`WallExposure::in_structure_scope`] and its floor/ceiling mirrors —
+    /// non-heat-loss / party / derived inter-storey) are not-applicable, so
+    /// they never count as remaining. Empty when `idx` is out of range.
     pub fn incomplete_surface_ids(&self, idx: usize, kind: SurfaceKind) -> Vec<ItemId> {
         let Some(storey) = self.storeys.get(idx) else {
             return Vec::new();
@@ -744,6 +993,7 @@ impl Ber {
                 .walls
                 .regions
                 .iter()
+                .filter(|r| r.exposure.in_structure_scope())
                 .filter(|r| {
                     self.wall_construction(r.construction_id)
                         .map_or(true, |c| !c.is_complete())
@@ -754,6 +1004,7 @@ impl Ber {
                 .floors
                 .regions
                 .iter()
+                .filter(|r| r.exposure.in_structure_scope())
                 .filter(|r| {
                     self.floor_construction(r.construction_id)
                         .map_or(true, |c| !c.is_complete())
@@ -764,6 +1015,7 @@ impl Ber {
                 .ceilings
                 .regions
                 .iter()
+                .filter(|r| r.exposure.in_structure_scope())
                 .filter(|r| {
                     self.ceiling_construction(r.construction_id)
                         .map_or(true, |c| !c.is_complete())
@@ -773,11 +1025,32 @@ impl Ber {
         }
     }
 
+    /// `(attributed, total)` surfaces of `kind` on storey `idx`, both counted
+    /// over the surfaces IN STRUCTURE SCOPE — the Structure-phase header's
+    /// "N/M" read-out. `total` is [`Storey::surface_ids`]'s count (which
+    /// already skips out-of-scope walls — non-heat-loss / inter-storey);
+    /// `attributed` is the complement of
+    /// [`incomplete_surface_ids`](Self::incomplete_surface_ids) within it, so
+    /// both numbers share the checklist's completeness predicate rather than
+    /// re-deriving it. `(0, 0)` for an out-of-range storey.
+    pub fn structure_surface_progress(&self, idx: usize, kind: SurfaceKind) -> (usize, usize) {
+        let Some(storey) = self.storeys.get(idx) else {
+            return (0, 0);
+        };
+        let total = storey.surface_ids(kind).len();
+        let remaining = self.incomplete_surface_ids(idx, kind).len();
+        (total.saturating_sub(remaining), total)
+    }
+
     /// Whether EVERY surface of `kind` on storey `idx` is fully attributed — the
     /// Structure-phase checklist's per-storey/kind "done" test. True only when
     /// the storey has at least one such surface and none are
     /// [incomplete](Self::incomplete_surface_ids) (so an empty kind is NOT
-    /// vacuously done). `false` for an out-of-range storey.
+    /// vacuously done). Out-of-scope walls (non-heat-loss / inter-storey —
+    /// [`WallExposure::in_structure_scope`]) are not-applicable: they don't
+    /// block going green, though they do still count toward "the storey has
+    /// walls" (the guard is about geometry being derived at all). `false` for
+    /// an out-of-range storey.
     pub fn structure_surfaces_complete(&self, idx: usize, kind: SurfaceKind) -> bool {
         let Some(storey) = self.storeys.get(idx) else {
             return false;

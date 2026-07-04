@@ -49,6 +49,40 @@ pub fn simplify_to_cut(stroke: &[Point2f32], tolerance: f32) -> Option<[Point2f3
     Some([a, b])
 }
 
+/// Close a freehand LASSO stroke into a simple ring: RDP-simplify at the same
+/// stroke-relative tolerance the carve pipeline uses
+/// (`bbox_diagonal * rdp_tol_ratio`, floored), then drop trailing points that
+/// re-approach the start (within `close_gap_m`) so the implicit first↔last
+/// closing edge is clean. `None` when the stroke can't form a ring (< 3
+/// points after simplification).
+///
+/// This is the FREE-LASSO variant of the carve entry: unlike
+/// [`FloorPlan::carve_or_cut`](crate::FloorPlan::carve_or_cut) it runs NONE of
+/// the attach-to-outline / boundary-follow / collapse stages — the stroke may
+/// span several storeys' plans plus the empty gap between them, so there is no
+/// single outline to attach to. The caller clips the ring against each
+/// storey's own footprint instead.
+pub fn lasso_ring(stroke: &[Point2f32], tuning: &crate::SubareaTuning) -> Option<Vec<Point2f32>> {
+    if stroke.len() < 3 {
+        return None;
+    }
+    let tol = (crate::geom::bbox_diagonal(stroke) * tuning.rdp_tol_ratio).max(tuning.rdp_tol_floor);
+    let mut ring = simplify_stroke(stroke, tol).ok()?;
+    // The drawn stroke usually ends back near its start; those tail points
+    // would make the implicit closing edge double back. Trim them.
+    let close2 = tuning.close_gap_m * tuning.close_gap_m;
+    while ring.len() > 3 {
+        let (a, b) = (ring[0], *ring.last().unwrap());
+        let d2 = (a.x - b.x).powi(2) + (a.y - b.y).powi(2);
+        if d2 <= close2 {
+            ring.pop();
+        } else {
+            break;
+        }
+    }
+    (ring.len() >= 3).then_some(ring)
+}
+
 /// Simplify a stroke using the Ramer-Douglas-Peucker algorithm
 pub(crate) fn simplify_stroke(
     points: &[Point2f32],

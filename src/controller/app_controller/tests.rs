@@ -1360,6 +1360,7 @@ fn wall_construction_is_preserved_when_splitting() {
         WallConstructionType::CavityWall,
         Default::default(),
         Default::default(),
+        None,
     );
 
     // Exposure-split wall0: mark the middle semi-exposed → 3 regions.
@@ -1408,6 +1409,7 @@ fn wall_construction_seeded_from_record_on_load() {
         WallConstructionType::CavityWall,
         Default::default(),
         Default::default(),
+        None,
     );
     c.materialize();
 
@@ -1450,6 +1452,7 @@ fn floor_construction_survives_rederive() {
         FloorConstructionType::SuspendedFloor,
         Default::default(),
         Default::default(),
+        None,
     );
     c.materialize(); // re-resolve mints a fresh region id
 
@@ -1793,54 +1796,160 @@ fn ceiling_insulation_setter_stores_mirrors_and_survives_rederive() {
 /// `structure_checklist_tracks_per_surface_completion` closes those freely.)
 #[test]
 fn structure_edit_completion_gates_on_ceiling_insulation() {
-    use ber_model::ber::structural::CeilingInsulation;
+    use ber_model::ber::structural::{
+        CeilingConstructionType, CeilingInsulation, ConstructionMakeup, ConstructionType,
+    };
     let mut c = dimensioned_square_controller();
     c.set_default_ceiling_height(2.7).unwrap();
     c.materialize();
-    let tmp = std::env::temp_dir().join(format!("ber_ins_photos_{}", ItemId::default().0));
-    c.set_photos_dir(tmp.clone());
-    let src = std::env::temp_dir().join(format!("ber_ins_src_{}.jpg", ItemId::default().0));
-    std::fs::write(&src, b"jpeg-bytes").unwrap();
 
+    // Done with NOTHING set: closes the session and deselects — an untouched
+    // group is a legitimate exit, it just stays INCOMPLETE.
     set_only_kind(&mut c, SurfaceKind::Ceilings);
     c.set_structure_select_mode(Some(SelectMode::All));
     c.begin_structure_edit();
+    assert!(!c.structure_edit().unwrap().groups[0].is_complete());
+    c.end_structure_edit();
+    assert!(c.structure_edit().is_none(), "Done always closes");
+    assert!(c.structure_selected_ids().is_empty(), "…and deselects");
+    c.materialize();
     assert_eq!(
-        c.structure_edit().unwrap().blocker(),
-        Some("enter the insulation thickness or mark it unknown")
+        c.structure_progress().ceilings,
+        (0, 1),
+        "the group counts as incomplete"
     );
-    c.end_structure_edit();
-    assert!(
-        c.structure_edit().is_some(),
-        "Done refused while the insulation is unspecified"
-    );
+    assert_eq!(structure_row(&c, "Ceilings"), ChecklistStatus::Incomplete);
 
-    c.set_structure_group_insulation(0, Some(CeilingInsulation::ThicknessMm(120.0)));
-    assert_eq!(
-        c.structure_edit().unwrap().blocker(),
-        Some("a photo of the insulation is required")
-    );
-    c.end_structure_edit();
-    assert!(
-        c.structure_edit().is_some(),
-        "a thickness without a photo still blocks"
-    );
-
-    c.add_group_photo(0, &src, PhotoQuality::High);
-    assert_eq!(c.structure_edit().unwrap().blocker(), None);
-    c.end_structure_edit();
-    assert!(c.structure_edit().is_none(), "thickness + photo completes");
-
-    // Reopen: the session re-seeds the spec + photo from the construction, so
-    // the completed group stays completable.
+    // Type + build-up + a THICKNESS with no photo: Done still closes, and the
+    // insulation rule keeps the group incomplete via the predicate (a
+    // thickness needs a backing photo — the tick/checklist say so).
+    c.set_structure_select_mode(Some(SelectMode::All));
     c.begin_structure_edit();
-    let g = &c.structure_edit().unwrap().groups[0];
-    assert_eq!(g.insulation, Some(CeilingInsulation::ThicknessMm(120.0)));
-    assert_eq!(g.photos.len(), 1, "photo re-seeded");
-    assert_eq!(c.structure_edit().unwrap().blocker(), None);
+    c.set_structure_group_attrs(
+        0,
+        ConstructionType::Ceiling(CeilingConstructionType::FlatRoof),
+        ConstructionMakeup::Default,
+        Default::default(),
+    );
+    c.materialize();
+    c.set_structure_group_insulation(0, Some(CeilingInsulation::ThicknessMm(120.0)));
+    assert!(
+        !c.structure_edit().unwrap().groups[0].is_complete(),
+        "a thickness without a photo has no tick"
+    );
+    c.end_structure_edit();
+    assert!(c.structure_edit().is_none(), "…but Done still closes");
+    c.materialize();
+    assert_eq!(structure_row(&c, "Ceilings"), ChecklistStatus::Incomplete);
 
-    let _ = std::fs::remove_dir_all(&tmp);
-    let _ = std::fs::remove_file(&src);
+    // Declaring the insulation UNKNOWN later completes it — the Remaining
+    // subtool brings the incomplete group back, and once it completes the
+    // Remaining reseed after Done drains to empty (the "work until done"
+    // loop's exit).
+    c.set_structure_select_mode(Some(SelectMode::Remaining));
+    assert!(
+        !c.structure_selected_ids().is_empty(),
+        "Remaining re-offers the incomplete ceiling"
+    );
+    c.begin_structure_edit();
+    c.set_structure_group_insulation(0, Some(CeilingInsulation::Unknown));
+    assert!(c.structure_edit().unwrap().groups[0].is_complete());
+    c.end_structure_edit();
+    assert!(
+        c.structure_selected_ids().is_empty(),
+        "everything complete — the Remaining loop drained"
+    );
+    c.materialize();
+    assert_eq!(structure_row(&c, "Ceilings"), ChecklistStatus::AllStoreys);
+    assert_eq!(c.structure_progress().ceilings, (1, 1));
+}
+
+/// The user's exact scenario: several ceilings carve-selected into ONE group
+/// (same defaults), "Edit attributes" opened — and Done clicked WITHOUT
+/// setting anything, because the intent is to reselect them one by one and
+/// attribute them differently. Done closes; both stay incomplete; then one is
+/// reselected and attributed alone → only that one completes.
+#[test]
+fn done_with_nothing_set_then_attribute_ceilings_one_by_one() {
+    use ber_model::ber::structural::{
+        CeilingConstructionType, CeilingInsulation, ConstructionMakeup, ConstructionType,
+    };
+    let mut c = dimensioned_square_controller();
+    c.set_default_ceiling_height(2.7).unwrap();
+    c.materialize();
+    // Two ceiling regions: replay a durable structure split over the left
+    // half (the same push + recompose the deferred carve commit performs).
+    let ring: Vec<domain::points::Point2f64> = [(0., 0.), (5., 0.), (5., 10.), (0., 10.)]
+        .iter()
+        .map(|(x, y)| domain::points::Point2f64::new(*x, *y))
+        .collect();
+    c.current_record.as_mut().unwrap().data.storeys[0].push_structure_split(
+        SurfaceKind::Ceilings,
+        &ring,
+        Vec::new(),
+    );
+    c.recompose_ceilings(0);
+    let _ = c.mark_dirty();
+    c.materialize();
+    let ceilings: Vec<ItemId> = c.current_record.as_ref().unwrap().data.storeys[0]
+        .ceilings
+        .regions
+        .iter()
+        .map(|r| r.id)
+        .collect();
+    assert_eq!(ceilings.len(), 2, "the split yields two ceiling regions");
+
+    set_only_kind(&mut c, SurfaceKind::Ceilings);
+    c.set_structure_select_mode(Some(SelectMode::Click));
+    c.structure_selected.extend(ceilings);
+    c.begin_structure_edit();
+    let e = c.structure_edit().unwrap();
+    assert_eq!(
+        e.groups.len(),
+        1,
+        "same defaults → the ceilings group together"
+    );
+    assert_eq!(e.groups[0].ids.len(), 2);
+
+    // Done with NOTHING set: the session closes, both remain incomplete.
+    c.end_structure_edit();
+    assert!(c.structure_edit().is_none(), "Done closes unconditionally");
+    assert!(c.structure_selected_ids().is_empty());
+    c.materialize();
+    assert_eq!(c.structure_progress().ceilings, (0, 2));
+
+    // Reselect ONE and attribute it alone.
+    let one = c.current_record.as_ref().unwrap().data.storeys[0]
+        .ceilings
+        .regions[0]
+        .id;
+    c.structure_selected.insert(one);
+    c.begin_structure_edit();
+    c.set_structure_group_attrs(
+        0,
+        ConstructionType::Ceiling(CeilingConstructionType::FlatRoof),
+        ConstructionMakeup::Default,
+        Default::default(),
+    );
+    c.materialize();
+    c.set_structure_group_insulation(0, Some(CeilingInsulation::Unknown));
+    assert!(c.structure_edit().unwrap().groups[0].is_complete());
+    c.end_structure_edit();
+    c.materialize();
+    assert_eq!(
+        c.structure_progress().ceilings,
+        (1, 2),
+        "only the reselected ceiling completed; the other stays to do"
+    );
+    assert_eq!(
+        c.current_record
+            .as_ref()
+            .unwrap()
+            .data
+            .incomplete_surface_ids(0, SurfaceKind::Ceilings)
+            .len(),
+        1
+    );
 }
 
 /// The Ceilings checklist row requires the insulation spec on top of type +
@@ -1995,6 +2104,54 @@ fn recompress_downscales_and_shrinks() {
     let _ = std::fs::remove_dir_all(&tmp);
 }
 
+/// TEMPORARY dual hi/lo capture: the Low tier's tuning (1024 px long edge,
+/// JPEG q30 — see `PhotoQuality::compression`) yields a DECODABLE JPEG that is
+/// meaningfully smaller than the same shot at the High tier's tuning — the
+/// whole point of the explicit low-res button. Bytes in → smaller jpeg out.
+#[test]
+fn low_tier_recompress_is_small_and_decodable() {
+    use image::GenericImageView;
+
+    let tmp = std::env::temp_dir().join(format!("ber_recompress_lo_{}", ItemId::default().0));
+    std::fs::create_dir_all(&tmp).unwrap();
+    let src = tmp.join("shot.png");
+    let mut img = image::RgbImage::new(3000, 2000);
+    for (x, y, px) in img.enumerate_pixels_mut() {
+        *px = image::Rgb([(x % 256) as u8, (y % 256) as u8, ((x * y) % 256) as u8]);
+    }
+    img.save(&src).unwrap();
+    let src_len = std::fs::metadata(&src).unwrap().len();
+
+    // The Low and High tiers' current (max_dim, quality) tunings.
+    let lo = tmp.join("lo.jpg");
+    let hi = tmp.join("hi.jpg");
+    assert!(AppController::recompress(&src, &lo, 1024, 30), "lo encodes");
+    assert!(AppController::recompress(&src, &hi, 2048, 85), "hi encodes");
+
+    // Decodable, and within the Low pixel cap.
+    let (w, h) = image::ImageReader::open(&lo)
+        .unwrap()
+        .with_guessed_format()
+        .unwrap()
+        .decode()
+        .unwrap()
+        .dimensions();
+    assert!(w.max(h) <= 1024, "low tier capped at 1024, got {w}x{h}");
+
+    let lo_len = std::fs::metadata(&lo).unwrap().len();
+    let hi_len = std::fs::metadata(&hi).unwrap().len();
+    assert!(
+        lo_len < src_len,
+        "low ({lo_len}) smaller than source ({src_len})"
+    );
+    assert!(
+        lo_len * 2 < hi_len,
+        "low ({lo_len}) is a small fraction of high ({hi_len})"
+    );
+
+    let _ = std::fs::remove_dir_all(&tmp);
+}
+
 /// The group PHASE is editable — defaulted to the derived value but overridable
 /// in the editor, and the override survives the re-resolve (stored in the
 /// durable side-table alongside type + make-up).
@@ -2047,6 +2204,8 @@ fn group_name_persists_across_reopen() {
     c.end_structure_edit();
     c.materialize(); // re-resolve: the name on the construction must survive it
 
+    // Done deselected everything — re-select before reopening.
+    c.set_structure_select_mode(Some(SelectMode::All));
     c.begin_structure_edit();
     assert_eq!(
         c.structure_edit().expect("reopened").groups[0].name,
@@ -2149,6 +2308,118 @@ fn structure_selection_survives_re_resolve() {
     );
 }
 
+/// Finishing an "Edit attributes" session (Done) DESELECTS everything — the
+/// selection halo must not linger on the just-attributed surfaces.
+#[test]
+fn done_deselects_structure_selection() {
+    use ber_model::ber::structural::{ConstructionMakeup, ConstructionType, WallConstructionType};
+    let mut c = dimensioned_square_controller();
+    c.materialize();
+
+    set_only_kind(&mut c, SurfaceKind::Walls);
+    c.set_structure_select_mode(Some(SelectMode::All));
+    assert!(
+        !c.structure_selected_ids().is_empty(),
+        "walls selected before the edit"
+    );
+
+    c.begin_structure_edit();
+    let n = c.structure_edit().expect("session opened").groups.len();
+    for g in 0..n {
+        c.set_structure_group_attrs(
+            g,
+            ConstructionType::Wall(WallConstructionType::CavityWall),
+            ConstructionMakeup::Default,
+            Default::default(),
+        );
+    }
+    c.end_structure_edit();
+
+    assert!(c.structure_edit().is_none(), "session closed");
+    assert!(
+        c.structure_selected_ids().is_empty(),
+        "Done cleared the selection: {:?}",
+        c.structure_selected_ids()
+    );
+    assert!(
+        c.pending_structure_carve_polygons().is_empty(),
+        "no staged carve shading lingers either"
+    );
+}
+
+/// In the `Remaining` work-until-done loop, Done still clears the selection
+/// FIRST and then re-seeds it with what's left: surfaces the session completed
+/// drop out, still-incomplete ones re-select, and once nothing is left the
+/// selection ends empty.
+#[test]
+fn done_in_remaining_mode_reselects_only_the_still_incomplete() {
+    use ber_model::ber::structural::{ConstructionMakeup, ConstructionType, WallConstructionType};
+    let mut c = dimensioned_square_controller();
+    c.materialize();
+
+    // Walls AND Floors active: the walls get attributed this session, the
+    // floor stays untouched — it's the "remaining" work.
+    set_only_kind(&mut c, SurfaceKind::Walls);
+    c.toggle_structure_kind(SurfaceKind::Floors);
+    c.set_structure_select_mode(Some(SelectMode::Remaining));
+    let seeded = c.structure_selected_ids().len();
+    assert!(seeded >= 2, "walls + floor all incomplete: {seeded}");
+
+    c.begin_structure_edit();
+    // Complete only the WALL groups.
+    let wall_groups: Vec<usize> = c
+        .structure_edit()
+        .expect("session")
+        .groups
+        .iter()
+        .enumerate()
+        .filter(|(_, g)| g.ty.kind() == SurfaceKind::Walls)
+        .map(|(i, _)| i)
+        .collect();
+    assert!(!wall_groups.is_empty(), "session has wall groups");
+    for g in wall_groups {
+        c.set_structure_group_attrs(
+            g,
+            ConstructionType::Wall(WallConstructionType::CavityWall),
+            ConstructionMakeup::Default,
+            Default::default(),
+        );
+    }
+    c.end_structure_edit();
+    assert!(c.structure_edit().is_none(), "session closed");
+
+    // The reseed re-selected ONLY the still-incomplete floor.
+    let remaining: Vec<ItemId> = c.structure_selected_ids().iter().copied().collect();
+    assert_eq!(
+        remaining.len(),
+        1,
+        "just the untouched floor remains selected: {remaining:?}"
+    );
+    let rec = c.current_record.as_ref().unwrap();
+    assert!(
+        rec.data.storeys[0].floors.regions[0].id == remaining[0],
+        "the remaining selection is the floor region"
+    );
+
+    // Second lap: attribute the floor too → Done ends with NOTHING selected.
+    c.begin_structure_edit();
+    let n = c.structure_edit().expect("second session").groups.len();
+    for g in 0..n {
+        use ber_model::ber::structural::FloorConstructionType;
+        c.set_structure_group_attrs(
+            g,
+            ConstructionType::Floor(FloorConstructionType::SuspendedFloor),
+            ConstructionMakeup::Default,
+            Default::default(),
+        );
+    }
+    c.end_structure_edit();
+    assert!(
+        c.structure_selected_ids().is_empty(),
+        "loop finished — nothing left to select"
+    );
+}
+
 /// A wall's resolved construction phase, via its region's `construction_id`.
 fn wall_phase(c: &AppController, region_idx: usize) -> ConstructionPhase {
     let rec = c.current_record.as_ref().unwrap();
@@ -2178,6 +2449,71 @@ fn set_construction_phases_populates_choices() {
     assert!(choices[0].1.contains("1985"), "label carries the year");
     assert_eq!(choices[1].0, ConstructionPhase::Extension1);
     assert!(choices[1].1.contains("2008"));
+}
+
+/// An extension designated with an UNKNOWN year (the Key-Details checkbox)
+/// counts as answered: it's offered in the phase picker (so the sketch
+/// "Construction year" toggle enables), labelled "(unk)", and filling in the
+/// real year later just updates the label.
+#[test]
+fn unknown_year_extension_is_offered_and_fillable_later() {
+    use ber_model::ber::common::ConstructionPhases;
+    let mut c = dimensioned_square_controller();
+    let mut phases = ConstructionPhases::default();
+    phases.set_year(ConstructionPhase::Original, 1985);
+    phases.set_year_unknown(ConstructionPhase::Extension1);
+    c.set_construction_phases(phases);
+
+    let choices = c.construction_phase_choices();
+    assert_eq!(choices.len(), 2, "the unknown-year extension still counts");
+    assert_eq!(choices[1].0, ConstructionPhase::Extension1);
+    assert!(
+        choices[1].1.contains("(unk)"),
+        "unknown year displays as unk: {}",
+        choices[1].1
+    );
+
+    // The assessor learns the year later — same edit path as any year change.
+    let mut phases = c
+        .current_record
+        .as_ref()
+        .unwrap()
+        .data
+        .construction_phases
+        .clone();
+    phases.set_year(ConstructionPhase::Extension1, 2008);
+    c.set_construction_phases(phases);
+    let choices = c.construction_phase_choices();
+    assert!(choices[1].1.contains("2008"), "filled-in year shows");
+}
+
+/// An unknown-year designation is DURABLE: it survives exit → `open_ber`
+/// (i.e. the serialized record round-trips it, distinct from "no phase").
+#[test]
+fn unknown_year_persists_through_reload() {
+    use ber_model::ber::common::ConstructionPhases;
+    let mut c = AppController::new(crate::engine::open_db(":memory:").unwrap());
+    let ber = c.create_ber(
+        "Unknown-year BER".to_string(),
+        NaiveDate::from_ymd_opt(2026, 6, 1).unwrap(),
+    );
+    let mut phases = ConstructionPhases::default();
+    phases.set_year(ConstructionPhase::Original, 1985);
+    phases.set_year_unknown(ConstructionPhase::Extension1);
+    phases.set_nickname(ConstructionPhase::Extension1, "Back extension".to_string());
+    c.set_construction_phases(phases);
+    c.exit_ber().unwrap();
+
+    c.open_ber(&ber.id).unwrap();
+    let (_, _, phases) = c.current_key_details().unwrap();
+    assert!(phases.is_defined(&ConstructionPhase::Extension1));
+    assert!(phases.year_is_unknown(&ConstructionPhase::Extension1));
+    assert_eq!(phases.year_of(&ConstructionPhase::Extension1), None);
+    assert_eq!(
+        phases.display_label(&ConstructionPhase::Extension1),
+        "Back extension (unk)"
+    );
+    assert_eq!(phases.year_of(&ConstructionPhase::Original), Some(1985));
 }
 
 /// A phase polygon stamps its phase onto walls whose midpoint falls inside it;
@@ -4994,6 +5330,143 @@ fn ceiling_carve_split_survives_reload_and_rederive() {
     let session = &c.ceiling_step_regions[&0];
     assert_eq!(session.len(), 1);
     assert!((session_ring_area(&session[0].polygon) - before_area).abs() < 1e-3);
+}
+
+/// THE UNDO-PHANTOM REGRESSION (ceiling flavour): carve a ceiling-step area,
+/// assign its delta, UNDO the whole flow, then carve the SAME footprint again.
+/// The session `ceiling_step_regions` map mirrors committed record state but
+/// lives OUTSIDE `HistorySnapshot`, so before the fix the undone area survived
+/// as a phantom the second carve subtracted from its available region —
+/// collapsing the redraw to a 2-point ring ("Extend failed: carved area
+/// collapsed to a line"). The restore now re-derives the session maps from
+/// the restored record.
+#[test]
+fn ceiling_carve_undo_then_recarve_same_footprint_succeeds() {
+    let mut c = ceiling_ready_controller();
+    ceiling_carve_to_amount(&mut c);
+    c.assign_ceiling_step_delta(0.3).expect("delta applies");
+    assert_eq!(c.ceiling_step_regions[&0].len(), 1, "carve committed");
+
+    // Rewind the whole flow (each dimension/position answer pushed its own
+    // snapshot) back to the plain outline.
+    while c.can_undo() {
+        c.undo().expect("undo applies");
+    }
+    assert_eq!(c.document.active, ActiveShape::Outline);
+    assert!(
+        c.ceiling_step_regions.get(&0).is_none(),
+        "the undone area must not survive as a session phantom: {:?}",
+        c.ceiling_step_regions.get(&0)
+    );
+
+    // The SAME footprint carves again — no phantom left to collapse against.
+    // (`ceiling_carve_to_amount` asserts the carve dimensions; a phantom
+    // would have rejected the stroke before dimensioning started.)
+    ceiling_carve_to_amount(&mut c);
+    c.assign_ceiling_step_delta(0.3).expect("recarve applies");
+    let session = &c.ceiling_step_regions[&0];
+    assert_eq!(session.len(), 1, "one region again, not a phantom pair");
+    assert!((session[0].delta_m - 0.3).abs() < 1e-6);
+    assert!((session_ring_area(&session[0].polygon) - 16.0).abs() < 0.1);
+}
+
+/// Undo/redo round-trip keeps the session ceiling-step map consistent with
+/// the record: undo drops the committed region (map entry cleared), redo
+/// brings it back (reconstructed from the redo snapshot's record).
+#[test]
+fn ceiling_carve_undo_redo_keeps_session_regions_consistent() {
+    let mut c = ceiling_ready_controller();
+    ceiling_carve_to_amount(&mut c);
+    c.assign_ceiling_step_delta(0.3).expect("delta applies");
+    let committed_area = session_ring_area(&c.ceiling_step_regions[&0][0].polygon);
+
+    c.undo().expect("undo applies");
+    assert!(
+        c.ceiling_step_regions.get(&0).is_none(),
+        "undo cleared the session map with the record"
+    );
+
+    c.redo().expect("redo applies");
+    let session = c
+        .ceiling_step_regions
+        .get(&0)
+        .expect("redo restored the session map with the record");
+    assert_eq!(session.len(), 1);
+    assert!((session[0].delta_m - 0.3).abs() < 1e-6);
+    assert!((session_ring_area(&session[0].polygon) - committed_area).abs() < 1e-3);
+}
+
+/// THE UNDO-PHANTOM REGRESSION, floor-step flavour: assign a level to a carved
+/// step area, undo the whole flow, redraw the same footprint — the session
+/// `step_regions` map must not keep the undone area (the second carve would
+/// subtract it and collapse), and the redrawn area commits cleanly.
+#[test]
+fn step_region_undo_then_recarve_same_footprint_succeeds() {
+    let mut c = dimensioned_square_controller();
+    c.set_step_mode(true);
+    let stroke = [(2.0, 2.0), (6.0, 2.0), (6.0, 6.0), (2.0, 6.0), (2.1, 2.1)];
+    c.apply_step_region_stroke_event(&stroke);
+    complete_interior_length_loop(&mut c);
+    skip_position_prompts(&mut c);
+    assert!(c.step_pick_pending(), "amount stage open");
+    c.assign_step_level_to_pending(-0.3).expect("level applies");
+    assert_eq!(c.step_region_polygons().len(), 1, "step committed");
+
+    while c.can_undo() {
+        c.undo().expect("undo applies");
+    }
+    assert_eq!(c.document.active, ActiveShape::Outline);
+    assert!(
+        c.step_regions.get(&0).is_none(),
+        "the undone step area must not survive as a session phantom: {:?}",
+        c.step_regions.get(&0)
+    );
+
+    c.apply_step_region_stroke_event(&stroke);
+    assert!(c.dimensioning_active(), "the redraw carves again");
+    complete_interior_length_loop(&mut c);
+    skip_position_prompts(&mut c);
+    assert!(c.step_pick_pending(), "amount stage open again");
+    c.assign_step_level_to_pending(-0.3)
+        .expect("re-level applies");
+    assert_eq!(c.step_region_polygons().len(), 1, "one region, no phantom");
+}
+
+/// THE UNDO-PHANTOM REGRESSION, phase flavour: tag a carved phase area, undo
+/// the whole flow, redraw the same footprint — same session-map staleness
+/// hazard as the step flows (`phase_regions` is outside the snapshot).
+#[test]
+fn phase_region_undo_then_recarve_same_footprint_succeeds() {
+    let mut c = dimensioned_square_controller();
+    let mut phases = ConstructionPhases::default();
+    phases.set_year(ConstructionPhase::Extension1, 2008);
+    c.set_construction_phases(phases);
+    c.set_phase_mode(true);
+    let stroke = [(2.0, 2.0), (6.0, 2.0), (6.0, 6.0), (2.0, 6.0), (2.1, 2.1)];
+    c.apply_phase_region_stroke_event(&stroke);
+    complete_interior_length_loop(&mut c);
+    skip_position_prompts(&mut c);
+    assert!(c.phase_pick_pending(), "phase pick open");
+    c.assign_phase_to_pending(ConstructionPhase::Extension1);
+    assert_eq!(c.phase_region_polygons().len(), 1, "phase area committed");
+
+    while c.can_undo() {
+        c.undo().expect("undo applies");
+    }
+    assert_eq!(c.document.active, ActiveShape::Outline);
+    assert!(
+        c.phase_regions.get(&0).is_none(),
+        "the undone phase area must not survive as a session phantom: {:?}",
+        c.phase_regions.get(&0)
+    );
+
+    c.apply_phase_region_stroke_event(&stroke);
+    assert!(c.dimensioning_active(), "the redraw carves again");
+    complete_interior_length_loop(&mut c);
+    skip_position_prompts(&mut c);
+    assert!(c.phase_pick_pending(), "phase pick open again");
+    c.assign_phase_to_pending(ConstructionPhase::Extension1);
+    assert_eq!(c.phase_region_polygons().len(), 1, "one region, no phantom");
 }
 
 /// A phase-tagged storey's CEILING exposure survives a Layer-1-only reload. The
@@ -8582,6 +9055,7 @@ fn riser_walls_receive_and_keep_a_structure_construction() {
         WallConstructionType::TimberConstruction,
         ConstructionMakeup::Default,
         ConstructionPhase::default(),
+        None,
     );
     c.commit_to_ber().unwrap();
 
@@ -9681,7 +10155,6 @@ fn multi_field_window_places_with_default_sill() {
         WindowTypeChoice::default(),
         ber_model::ber::fenestration::Overshading::Average,
         Vec::new(),
-        PhotoQuality::High,
     )
     .expect("window places");
     assert!(c.opening_fields_prompt().is_none(), "placement finished");
@@ -9734,7 +10207,6 @@ fn window_type_picker_reuses_existing_and_adds_only_when_different() {
             choice,
             Overshading::Average,
             Vec::new(),
-            PhotoQuality::High,
         )
         .expect("window places");
         c.materialize();
@@ -9873,7 +10345,6 @@ fn overshading_is_applied_per_window_at_placement() {
             WindowTypeChoice::default(),
             overshading,
             Vec::new(),
-            PhotoQuality::High,
         )
         .expect("window places");
         c.materialize();
@@ -9929,8 +10400,7 @@ fn window_photo_is_attached_at_placement() {
             name: Some("Model A".to_string()),
         },
         Overshading::Average,
-        vec![src],
-        PhotoQuality::Full,
+        vec![(src, PhotoQuality::Full)],
     )
     .expect("window places");
     c.materialize();
@@ -9989,8 +10459,7 @@ fn failed_placement_discards_copied_photos() {
             name: Some("Model A".to_string()),
         },
         Overshading::Average,
-        vec![src],
-        PhotoQuality::Full,
+        vec![(src, PhotoQuality::Full)],
     );
     assert!(r.is_err(), "oversized window fails to place");
     c.materialize();
@@ -10562,6 +11031,1391 @@ fn interior_structure_carve_through_open_floor_asks_nothing() {
     );
 }
 
+/// Non-heat-loss walls DON'T participate in the Structure phase: they still
+/// draw, but tap-select ignores them, `Select all` skips them, no attribute
+/// group forms for them (even from a stale selected id), and the Walls
+/// checklist row goes green with the NHL wall left unattributed (it's
+/// not-applicable). The other walls on the same fixture keep selecting and
+/// counting — no over-exclusion.
+#[test]
+fn nhl_wall_is_out_of_structure_scope_for_select_and_completeness() {
+    use ber_model::ber::structural::{ConstructionMakeup, ConstructionType, WallConstructionType};
+    let mut c = dimensioned_square_controller();
+
+    // Paint the first outline wall non-heat-loss (a party wall, say).
+    let (_, a0, b0) = c.document.outline.floor_plan.perimeter_walls()[0];
+    let mid = ((a0.x + b0.x) * 0.5, (a0.y + b0.y) * 0.5);
+    c.set_exposure_mode(true);
+    c.exposure_pointer_down(mid.0 as f64, mid.1 as f64, 0.5);
+    c.set_wall_exposure(WallExposure::NonHeatLoss);
+    c.set_exposure_mode(false);
+    c.materialize();
+
+    let (nhl_id, other_mid) = {
+        let storey = &c.current_record.as_ref().unwrap().data.storeys[0];
+        let nhl = storey
+            .walls
+            .regions
+            .iter()
+            .find(|r| r.exposure == WallExposure::NonHeatLoss)
+            .expect("one wall painted NHL");
+        let other = storey
+            .walls
+            .regions
+            .iter()
+            .find(|r| r.exposure != WallExposure::NonHeatLoss)
+            .expect("the other walls stay in scope");
+        (nhl.id, other.base_midpoint().unwrap())
+    };
+
+    set_only_kind(&mut c, SurfaceKind::Walls);
+    // Tap-select: the NHL wall is no longer a hit target; an in-scope one is.
+    c.set_structure_select_mode(Some(SelectMode::Click));
+    c.toggle_structure_surface_at(mid.0 as f64, mid.1 as f64, 0.2);
+    assert!(
+        c.structure_selected_ids().is_empty(),
+        "tapping the NHL wall selects nothing: {:?}",
+        c.structure_selected_ids()
+    );
+    c.toggle_structure_surface_at(other_mid.x, other_mid.y, 0.2);
+    assert_eq!(
+        c.structure_selected_ids().len(),
+        1,
+        "an in-scope wall still tap-selects"
+    );
+
+    // `Select all` seeds only the in-scope walls (3 of 4).
+    c.set_structure_select_mode(Some(SelectMode::All));
+    assert_eq!(
+        c.structure_selected_ids().len(),
+        3,
+        "Select all skips the NHL wall"
+    );
+    assert!(!c.structure_selected_ids().contains(&nhl_id));
+
+    // The header counter reads 0/3 — the NHL wall is in neither number.
+    assert_eq!(
+        c.structure_progress().walls,
+        (0, 3),
+        "progress counts only in-scope walls"
+    );
+
+    // Even a stale NHL id smuggled into the selection never forms a group.
+    c.structure_selected.insert(nhl_id);
+    c.begin_structure_edit();
+    let e = c
+        .structure_edit()
+        .expect("a session over the in-scope walls");
+    assert_eq!(e.groups.len(), 1, "the three Unset walls share one group");
+    assert!(
+        e.groups.iter().all(|g| !g.ids.contains(&nhl_id)),
+        "no group presents the NHL wall for attribute editing"
+    );
+    assert!(
+        !e.groups[0].is_complete(),
+        "no tick while the group's type/build-up are unset"
+    );
+    c.set_structure_group_attrs(
+        0,
+        ConstructionType::Wall(WallConstructionType::CavityWall),
+        ConstructionMakeup::Default,
+        Default::default(),
+    );
+    assert!(
+        c.structure_edit().unwrap().groups[0].is_complete(),
+        "the tick appears the moment the last attribute lands"
+    );
+    c.end_structure_edit();
+    c.materialize();
+    assert_eq!(
+        c.structure_progress().walls,
+        (3, 3),
+        "all in-scope walls attributed → 3/3 (the NHL wall in neither number)"
+    );
+
+    // Completeness: the unattributed NHL wall doesn't block green.
+    assert!(
+        c.current_record
+            .as_ref()
+            .unwrap()
+            .data
+            .incomplete_surface_ids(0, SurfaceKind::Walls)
+            .is_empty(),
+        "the NHL wall is not-applicable, never `remaining`"
+    );
+    assert_eq!(
+        structure_row(&c, "Walls"),
+        ChecklistStatus::AllStoreys,
+        "Walls goes green with the NHL wall unattributed"
+    );
+}
+
+/// The group-box tick predicate ([`EditGroup::is_complete`]) mirrors
+/// construction completeness per kind: a wall/floor group needs a real type +
+/// a chosen build-up (photo-backed when it's a specified custom stack); a
+/// ceiling group ALSO passes the insulation gate (declared-unknown, or a
+/// thickness with a backing photo) — true only when every attribute is set.
+#[test]
+fn structure_group_tick_predicate_matches_completeness() {
+    use ber_model::ber::common::Photo;
+    use ber_model::ber::structural::{
+        CeilingConstructionType, CeilingExposure, CeilingInsulation, ConstructionMakeup,
+        ConstructionType, SurfaceExposure, WallConstructionType, WallExposure,
+    };
+    let group = |ty: ConstructionType,
+                 makeup: ConstructionMakeup,
+                 photos: Vec<Photo>,
+                 insulation: Option<CeilingInsulation>| EditGroup {
+        ids: Vec::new(),
+        ty,
+        makeup,
+        phase: Default::default(),
+        exposure: match ty.kind() {
+            SurfaceKind::Walls => SurfaceExposure::Wall(WallExposure::Unset),
+            SurfaceKind::Floors => SurfaceExposure::Floor(Default::default()),
+            SurfaceKind::Ceilings => SurfaceExposure::Ceiling(CeilingExposure::Unset),
+        },
+        exposure_locked: false,
+        name: String::new(),
+        explicit_name: None,
+        photos,
+        insulation,
+        show_editor: true,
+        fresh: false,
+    };
+    let wall = |t, m, p| group(ConstructionType::Wall(t), m, p, None);
+    use ConstructionMakeup as M;
+    use WallConstructionType as W;
+    assert!(!wall(W::Uninitialised, M::Tbd, vec![]).is_complete());
+    assert!(
+        !wall(W::CavityWall, M::Tbd, vec![]).is_complete(),
+        "build-up still unset"
+    );
+    assert!(
+        !wall(W::Uninitialised, M::Default, vec![]).is_complete(),
+        "type still unset"
+    );
+    assert!(wall(W::CavityWall, M::Default, vec![]).is_complete());
+    assert!(
+        !wall(W::CavityWall, M::Layers(vec![]), vec![]).is_complete(),
+        "a specified custom stack needs a backing photo"
+    );
+    assert!(wall(W::CavityWall, M::Layers(vec![]), vec![Photo::default()]).is_complete());
+
+    // Ceilings: the insulation gate on top of type + build-up.
+    let ceiling = |insulation, photos| {
+        group(
+            ConstructionType::Ceiling(CeilingConstructionType::FlatRoof),
+            M::Default,
+            photos,
+            insulation,
+        )
+    };
+    assert!(
+        !ceiling(None, vec![]).is_complete(),
+        "insulation unspecified blocks the tick"
+    );
+    assert!(ceiling(Some(CeilingInsulation::Unknown), vec![]).is_complete());
+    assert!(
+        !ceiling(Some(CeilingInsulation::ThicknessMm(150.0)), vec![]).is_complete(),
+        "a thickness needs a backing photo"
+    );
+    assert!(ceiling(
+        Some(CeilingInsulation::ThicknessMm(150.0)),
+        vec![Photo::default()]
+    )
+    .is_complete());
+}
+
+/// The FRESH group box's two-mode entry: an unattributed selection opens on
+/// the existing-group offer (`show_editor == false`), "New group" opens the
+/// blank editor unchanged, and JOINING an existing group (the dropdown's two
+/// events — attrs + name, no materialize in between) fills the box, raises
+/// no name conflict (same name + same attributes IS that group), completes
+/// the members, and converges everything onto ONE shared construction — so
+/// the header counter and checklist move with it.
+#[test]
+fn fresh_group_two_mode_entry_joins_existing_and_completes() {
+    use ber_model::ber::structural::{ConstructionMakeup, ConstructionType, WallConstructionType};
+    let mut c = dimensioned_square_controller();
+    c.materialize();
+    set_only_kind(&mut c, SurfaceKind::Walls);
+    c.set_structure_select_mode(Some(SelectMode::Click));
+
+    // First pair of walls: define the group the hard way ("New group").
+    let first_two: Vec<ItemId> = c.current_record.as_ref().unwrap().data.storeys[0]
+        .walls
+        .regions
+        .iter()
+        .take(2)
+        .map(|r| r.id)
+        .collect();
+    c.structure_selected.extend(first_two);
+    c.begin_structure_edit();
+    assert!(
+        !c.structure_edit().unwrap().groups[0].show_editor,
+        "a fresh group opens on the two-mode entry, not the full editor"
+    );
+    c.begin_new_structure_group(0);
+    let g = &c.structure_edit().unwrap().groups[0];
+    assert!(
+        g.show_editor && !g.is_complete(),
+        "New group opens the blank editor unchanged"
+    );
+    c.set_structure_group_attrs(
+        0,
+        ConstructionType::Wall(WallConstructionType::CavityWall),
+        ConstructionMakeup::Default,
+        Default::default(),
+    );
+    c.materialize(); // regions point at the new construction
+    c.set_structure_group_name(0, "Brick".into());
+    assert!(c.structure_edit().unwrap().name_error.is_none());
+    c.end_structure_edit();
+    c.materialize();
+    assert_eq!(c.structure_progress().walls, (2, 4));
+
+    // Second pair: fresh again — join "Brick" exactly as the dropdown does
+    // (attrs then name, back-to-back).
+    let remaining = c
+        .current_record
+        .as_ref()
+        .unwrap()
+        .data
+        .incomplete_surface_ids(0, SurfaceKind::Walls);
+    assert_eq!(remaining.len(), 2);
+    c.structure_selected.extend(remaining);
+    c.begin_structure_edit();
+    assert!(!c.structure_edit().unwrap().groups[0].show_editor);
+    let eg = c
+        .structure_existing_groups()
+        .into_iter()
+        .find(|e| e.name.as_deref() == Some("Brick"))
+        .expect("the Brick group is offered to join");
+    c.set_structure_group_attrs(0, eg.ty, eg.makeup.clone(), eg.phase.clone());
+    c.set_structure_group_name(0, "Brick".into());
+    let e = c.structure_edit().unwrap();
+    assert!(
+        e.name_error.is_none(),
+        "joining is not a name conflict: {:?}",
+        e.name_error
+    );
+    let g = &e.groups[0];
+    assert!(g.show_editor, "the box now shows the FILLED editor");
+    assert_eq!(g.name, "Brick", "…with the joined group's name");
+    assert!(g.is_complete(), "…and its details (tick on)");
+    c.end_structure_edit();
+    c.materialize();
+
+    let rec = c.current_record.as_ref().unwrap();
+    let cids: HashSet<ItemId> = rec.data.storeys[0]
+        .walls
+        .regions
+        .iter()
+        .map(|r| r.construction_id)
+        .collect();
+    assert_eq!(cids.len(), 1, "all four walls share the ONE construction");
+    let c0 = rec
+        .data
+        .wall_construction(*cids.iter().next().unwrap())
+        .unwrap();
+    assert_eq!(c0.base.name.as_deref(), Some("Brick"));
+    assert_eq!(c.structure_progress().walls, (4, 4), "the counter moved");
+    assert_eq!(structure_row(&c, "Walls"), ChecklistStatus::AllStoreys);
+}
+
+/// The NAME-INTEGRITY rule end-to-end: renaming a group to a name another
+/// same-kind group holds (with DIFFERENT attributes) is rejected — the hint
+/// lands on the session (`StructureEdit::name_error`), the durable name keeps
+/// its last valid value, the typed session name stands so the assessor can
+/// keep editing — and the next accepted rename clears the hint.
+#[test]
+fn group_rename_rejects_collision_and_recovers() {
+    use ber_model::ber::structural::{ConstructionMakeup, ConstructionType, WallConstructionType};
+    let mut c = dimensioned_square_controller();
+    c.materialize();
+    set_only_kind(&mut c, SurfaceKind::Walls);
+    c.set_structure_select_mode(Some(SelectMode::Click));
+
+    // Group 1: two walls named "Brick".
+    let first_two: Vec<ItemId> = c.current_record.as_ref().unwrap().data.storeys[0]
+        .walls
+        .regions
+        .iter()
+        .take(2)
+        .map(|r| r.id)
+        .collect();
+    c.structure_selected.extend(first_two);
+    c.begin_structure_edit();
+    c.set_structure_group_attrs(
+        0,
+        ConstructionType::Wall(WallConstructionType::CavityWall),
+        ConstructionMakeup::Default,
+        Default::default(),
+    );
+    c.materialize();
+    c.set_structure_group_name(0, "Brick".into());
+    c.end_structure_edit();
+    c.materialize();
+
+    // Group 2: the other walls, DIFFERENT attributes.
+    let remaining = c
+        .current_record
+        .as_ref()
+        .unwrap()
+        .data
+        .incomplete_surface_ids(0, SurfaceKind::Walls);
+    c.structure_selected.extend(remaining);
+    c.begin_structure_edit();
+    c.set_structure_group_attrs(
+        0,
+        ConstructionType::Wall(WallConstructionType::ConcreteHollowBlocks),
+        ConstructionMakeup::Default,
+        Default::default(),
+    );
+    c.materialize();
+
+    // Renaming it "Brick" collides with different attributes → rejected.
+    c.set_structure_group_name(0, "Brick".into());
+    let e = c.structure_edit().unwrap();
+    let (gi, hint) = e.name_error.as_ref().expect("the collision is flagged");
+    assert_eq!(*gi, 0);
+    assert!(
+        hint.contains("Brick"),
+        "the hint names the collision: {hint}"
+    );
+    assert_eq!(
+        e.groups[0].name, "Brick",
+        "the typed name stands for editing"
+    );
+    let block_cid = {
+        let rec = c.current_record.as_ref().unwrap();
+        let cid = rec.data.storeys[0]
+            .walls
+            .regions
+            .iter()
+            .filter_map(|r| rec.data.wall_construction(r.construction_id))
+            .find(|cc| cc.construction_type == WallConstructionType::ConcreteHollowBlocks)
+            .map(|cc| cc.base.id)
+            .expect("the hollow-block construction exists");
+        assert_eq!(
+            rec.data.wall_construction(cid).unwrap().base.name,
+            None,
+            "the durable name kept its last valid value"
+        );
+        cid
+    };
+
+    // A non-colliding rename goes through and clears the hint.
+    c.set_structure_group_name(0, "Block".into());
+    assert!(c.structure_edit().unwrap().name_error.is_none());
+    assert_eq!(
+        c.current_record
+            .as_ref()
+            .unwrap()
+            .data
+            .wall_construction(block_cid)
+            .unwrap()
+            .base
+            .name
+            .as_deref(),
+        Some("Block")
+    );
+}
+
+/// Photos are ADDITIVE and GROUP-WIDE regardless of where they're attached: a
+/// photo added from one storey's group box lands on the SHARED construction,
+/// so the group's members on every other storey carry it too.
+#[test]
+fn group_photo_reaches_members_on_other_storeys() {
+    use ber_model::ber::structural::{ConstructionMakeup, ConstructionType, WallConstructionType};
+    let mut c = dimensioned_square_controller();
+    c.add_storey().unwrap();
+    finalise_current_storey_as_square(&mut c, 6.0);
+
+    // Attribute STOREY 1's walls (the active storey after finalise).
+    set_only_kind(&mut c, SurfaceKind::Walls);
+    c.set_structure_select_mode(Some(SelectMode::All));
+    c.begin_structure_edit();
+    c.set_structure_group_attrs(
+        0,
+        ConstructionType::Wall(WallConstructionType::CavityWall),
+        ConstructionMakeup::Default,
+        Default::default(),
+    );
+    c.end_structure_edit();
+    c.materialize();
+
+    // STOREY 0's walls join the same group (identical attributes → the
+    // dwelling-level registry converges on the one construction).
+    c.set_current_storey(Some(0)).unwrap();
+    c.set_structure_select_mode(Some(SelectMode::All));
+    c.begin_structure_edit();
+    c.set_structure_group_attrs(
+        0,
+        ConstructionType::Wall(WallConstructionType::CavityWall),
+        ConstructionMakeup::Default,
+        Default::default(),
+    );
+    c.materialize(); // the group's regions now point at the shared construction
+
+    // Photo from STOREY 0's box…
+    let tmp = std::env::temp_dir().join(format!("ber_photos_{}", ItemId::default().0));
+    c.set_photos_dir(tmp);
+    let src = std::env::temp_dir().join(format!("ber_src_{}.jpg", ItemId::default().0));
+    std::fs::write(&src, b"jpeg-bytes").unwrap();
+    c.add_group_photo(0, &src, PhotoQuality::Full);
+    c.end_structure_edit();
+
+    // …is on STOREY 1's members too (one shared construction).
+    let rec = c.current_record.as_ref().unwrap();
+    let cid0 = rec.data.storeys[0].walls.regions[0].construction_id;
+    let cid1 = rec.data.storeys[1].walls.regions[0].construction_id;
+    assert_eq!(cid0, cid1, "both storeys share the one construction");
+    assert_eq!(
+        rec.data.wall_construction(cid1).unwrap().base.photos.len(),
+        1,
+        "the photo attached group-wide, visible via the other storey's member"
+    );
+}
+
+/// RESET on a session-fresh group box: returns the box to the two-mode entry
+/// (fresh, no editor), detaches ONLY this selection's attribution (the
+/// members end unattributed — the counter moves back), and never damages the
+/// shared construction other members still reference (its name and their
+/// membership survive; it stays offered as an existing group). Also pins the
+/// `fresh` flag that swaps the in-editor "Add to existing group…" combo for
+/// the Reset button: session-fresh groups keep `fresh == true` through "New
+/// group" and attribute applies; a box opened on already-attributed surfaces
+/// is `fresh == false` (combo, no Reset — behaviour unchanged).
+#[test]
+fn reset_returns_group_to_two_mode_without_touching_shared_construction() {
+    use ber_model::ber::structural::{ConstructionMakeup, ConstructionType, WallConstructionType};
+    let mut c = dimensioned_square_controller();
+    c.materialize();
+    set_only_kind(&mut c, SurfaceKind::Walls);
+    c.set_structure_select_mode(Some(SelectMode::Click));
+
+    // Group "Brick" over the first two walls.
+    let first_two: Vec<ItemId> = c.current_record.as_ref().unwrap().data.storeys[0]
+        .walls
+        .regions
+        .iter()
+        .take(2)
+        .map(|r| r.id)
+        .collect();
+    c.structure_selected.extend(first_two.clone());
+    c.begin_structure_edit();
+    c.set_structure_group_attrs(
+        0,
+        ConstructionType::Wall(WallConstructionType::CavityWall),
+        ConstructionMakeup::Default,
+        Default::default(),
+    );
+    c.materialize();
+    c.set_structure_group_name(0, "Brick".into());
+    c.end_structure_edit();
+    c.materialize();
+
+    // The other two walls: fresh box → "New group" → the same attributes
+    // (they JOIN the shared Brick construction).
+    let remaining = c
+        .current_record
+        .as_ref()
+        .unwrap()
+        .data
+        .incomplete_surface_ids(0, SurfaceKind::Walls);
+    c.structure_selected.extend(remaining);
+    c.begin_structure_edit();
+    c.begin_new_structure_group(0);
+    {
+        let g = &c.structure_edit().unwrap().groups[0];
+        assert!(g.fresh && g.show_editor, "session-fresh, editor open");
+    }
+    c.set_structure_group_attrs(
+        0,
+        ConstructionType::Wall(WallConstructionType::CavityWall),
+        ConstructionMakeup::Default,
+        Default::default(),
+    );
+    assert!(
+        c.structure_edit().unwrap().groups[0].fresh,
+        "an attribute apply does NOT clear session-freshness (the box keeps \
+         Reset instead of the in-editor combo)"
+    );
+    c.materialize();
+    assert_eq!(c.structure_progress().walls, (4, 4), "all joined for now");
+
+    // RESET: back to the two-mode entry; this selection un-attributes.
+    c.reset_structure_group(0);
+    {
+        let g = &c.structure_edit().unwrap().groups[0];
+        assert!(!g.show_editor, "the box re-entered the two-mode entry");
+        assert!(g.fresh);
+        assert!(!g.is_complete(), "session mirror cleared to blank");
+        assert!(g.photos.is_empty());
+    }
+    c.materialize();
+    assert_eq!(
+        c.structure_progress().walls,
+        (2, 4),
+        "the reset members ended unattributed; the counter moved back"
+    );
+    assert_eq!(
+        c.current_record
+            .as_ref()
+            .unwrap()
+            .data
+            .incomplete_surface_ids(0, SurfaceKind::Walls)
+            .len(),
+        2
+    );
+    // The shared construction is undamaged: exactly the two original members
+    // still reference it (region ids re-mint on materialize, so count members
+    // by attribution) and it kept its name.
+    {
+        let rec = c.current_record.as_ref().unwrap();
+        let brick_members = rec.data.storeys[0]
+            .walls
+            .regions
+            .iter()
+            .filter(|r| {
+                rec.data
+                    .wall_construction(r.construction_id)
+                    .is_some_and(|cc| cc.base.name.as_deref() == Some("Brick"))
+            })
+            .count();
+        assert_eq!(brick_members, 2, "the other members kept their membership");
+    }
+    assert!(
+        c.structure_existing_groups()
+            .iter()
+            .any(|e| e.name.as_deref() == Some("Brick")),
+        "the Brick group survives Reset and is offered again"
+    );
+    c.end_structure_edit();
+
+    // RESELECT one attributed member after Done: the box opens attributed
+    // (not session-fresh — the in-editor combo shows) and STILL offers Reset.
+    let brick_ids: Vec<ItemId> = {
+        let rec = c.current_record.as_ref().unwrap();
+        rec.data.storeys[0]
+            .walls
+            .regions
+            .iter()
+            .filter(|r| {
+                rec.data
+                    .wall_construction(r.construction_id)
+                    .is_some_and(|cc| cc.base.name.as_deref() == Some("Brick"))
+            })
+            .map(|r| r.id)
+            .collect()
+    };
+    c.structure_selected.insert(brick_ids[0]);
+    c.begin_structure_edit();
+    {
+        let g = &c.structure_edit().unwrap().groups[0];
+        assert!(
+            !g.fresh && g.show_editor,
+            "an attributed box opens straight on its filled editor, not fresh"
+        );
+        assert!(g.is_complete());
+    }
+    // Reset the attributed box: back to the two-mode entry, this member
+    // detaches — the OTHER member keeps the shared group alive and named.
+    c.reset_structure_group(0);
+    {
+        let g = &c.structure_edit().unwrap().groups[0];
+        assert!(
+            g.fresh && !g.show_editor,
+            "Reset returned the box to the two-mode entry"
+        );
+        assert!(!g.is_complete());
+    }
+    c.materialize();
+    assert_eq!(
+        c.structure_progress().walls,
+        (1, 4),
+        "the reset member ended unattributed"
+    );
+    {
+        let rec = c.current_record.as_ref().unwrap();
+        let brick_members = rec.data.storeys[0]
+            .walls
+            .regions
+            .iter()
+            .filter(|r| {
+                rec.data
+                    .wall_construction(r.construction_id)
+                    .is_some_and(|cc| cc.base.name.as_deref() == Some("Brick"))
+            })
+            .count();
+        assert_eq!(brick_members, 1, "the other member kept its membership");
+    }
+    assert!(
+        c.structure_existing_groups()
+            .iter()
+            .any(|e| e.name.as_deref() == Some("Brick")),
+        "the shared group survives and stays offered"
+    );
+    c.end_structure_edit();
+
+    // The user's sequence continues: after Done, RESELECT the reset wall —
+    // it must reopen as an unattributed two-mode box (no memory of "Brick").
+    let a_reset_wall = c
+        .current_record
+        .as_ref()
+        .unwrap()
+        .data
+        .incomplete_surface_ids(0, SurfaceKind::Walls)[0];
+    c.structure_selected.insert(a_reset_wall);
+    c.begin_structure_edit();
+    {
+        let g = &c.structure_edit().unwrap().groups[0];
+        assert!(
+            g.fresh && !g.show_editor && !g.is_complete(),
+            "the reset wall reopens fresh — the old attribution didn't resurrect"
+        );
+    }
+    c.end_structure_edit();
+    assert_eq!(c.structure_progress().walls, (1, 4), "still detached");
+
+    // UNDO restores the detached attribution (Reset snapshotted the doc).
+    c.undo().expect("undo the reset");
+    c.materialize();
+    assert_eq!(
+        c.structure_progress().walls,
+        (2, 4),
+        "undo restored the reset member's attribution"
+    );
+}
+
+/// The user's resurrection bug, on the kind where it actually bites: CEILINGS
+/// are regions-as-truth (resolve keeps the stored regions — and their
+/// `construction_id` — verbatim), so a Reset that merely REMOVED the doc-map
+/// override key let the old attribution stand on the very next materialize.
+/// The detach now writes an explicit DEFAULT assignment, so the sequence
+/// attribute → Done → reselect → Reset → Done → reselect ends on a fresh
+/// unattributed two-mode box — and stays reset through save + reload.
+#[test]
+fn ceiling_reset_survives_done_materialize_and_reload() {
+    use ber_model::ber::structural::{
+        CeilingConstructionType, CeilingInsulation, ConstructionMakeup, ConstructionType,
+    };
+    let mut c = dimensioned_square_controller();
+    c.set_default_ceiling_height(2.7).unwrap();
+    c.materialize();
+    let ber_id = c.current_record.as_ref().unwrap().id;
+    set_only_kind(&mut c, SurfaceKind::Ceilings);
+    c.set_structure_select_mode(Some(SelectMode::Click));
+
+    // Attribute the ceiling, Done.
+    let ceil = c.current_record.as_ref().unwrap().data.storeys[0]
+        .ceilings
+        .regions[0]
+        .id;
+    c.structure_selected.insert(ceil);
+    c.begin_structure_edit();
+    c.set_structure_group_attrs(
+        0,
+        ConstructionType::Ceiling(CeilingConstructionType::FlatRoof),
+        ConstructionMakeup::Default,
+        Default::default(),
+    );
+    c.materialize();
+    c.set_structure_group_insulation(0, Some(CeilingInsulation::Unknown));
+    c.end_structure_edit();
+    c.materialize();
+    assert_eq!(c.structure_progress().ceilings, (1, 1));
+
+    // Reselect → Reset → Done (the exact reported sequence).
+    let ceil = c.current_record.as_ref().unwrap().data.storeys[0]
+        .ceilings
+        .regions[0]
+        .id;
+    c.structure_selected.insert(ceil);
+    c.begin_structure_edit();
+    assert!(
+        !c.structure_edit().unwrap().groups[0].fresh,
+        "reopens attributed before the reset"
+    );
+    c.reset_structure_group(0);
+    c.end_structure_edit();
+    c.materialize();
+    assert_eq!(
+        c.structure_progress().ceilings,
+        (0, 1),
+        "the reset survives Done + materialize — no resurrection"
+    );
+
+    // Reselect again: a fresh two-mode box with nothing remembered.
+    let ceil = c.current_record.as_ref().unwrap().data.storeys[0]
+        .ceilings
+        .regions[0]
+        .id;
+    c.structure_selected.insert(ceil);
+    c.begin_structure_edit();
+    {
+        let g = &c.structure_edit().unwrap().groups[0];
+        assert!(
+            g.fresh && !g.show_editor && !g.is_complete(),
+            "the ceiling reopens unattributed — no memory of the old group"
+        );
+        assert_eq!(g.insulation, None, "no remembered insulation");
+    }
+    c.end_structure_edit();
+
+    // Save + reload: the reset must not resurrect from the DB either.
+    c.flush_if_dirty().unwrap();
+    c.open_ber(&ber_id).unwrap();
+    c.materialize();
+    assert_eq!(
+        c.structure_progress().ceilings,
+        (0, 1),
+        "reload keeps the ceiling unattributed"
+    );
+    set_only_kind(&mut c, SurfaceKind::Ceilings);
+    c.set_structure_select_mode(Some(SelectMode::All));
+    c.begin_structure_edit();
+    let g = &c.structure_edit().unwrap().groups[0];
+    assert!(
+        g.fresh && !g.is_complete(),
+        "after reload the box still opens fresh"
+    );
+}
+
+/// The user's "changed both ceilings" bug: two ceilings shared ONE
+/// construction ("Porch roof"); renaming / re-attributing ONE of them used to
+/// edit the shared object (the construction identity was only
+/// `(type, make-up, phase)`, so a same-fabric "main house roof" WAS the porch
+/// group). The NAME is now part of the identity: a subset rename FORKS the
+/// clicked ceiling into its own group; the other member keeps "Porch roof"
+/// with its photo and insulation untouched, and further edits (insulation)
+/// land only on the fork.
+#[test]
+fn renaming_one_of_two_shared_ceilings_forks_instead_of_editing_both() {
+    use ber_model::ber::structural::{
+        CeilingConstructionType, CeilingInsulation, ConstructionMakeup, ConstructionType,
+    };
+    let mut c = dimensioned_square_controller();
+    c.set_default_ceiling_height(2.7).unwrap();
+    c.materialize();
+    // Two ceiling regions (durable split replay, as in the one-by-one test).
+    let ring: Vec<domain::points::Point2f64> = [(0., 0.), (5., 0.), (5., 10.), (0., 10.)]
+        .iter()
+        .map(|(x, y)| domain::points::Point2f64::new(*x, *y))
+        .collect();
+    c.current_record.as_mut().unwrap().data.storeys[0].push_structure_split(
+        SurfaceKind::Ceilings,
+        &ring,
+        Vec::new(),
+    );
+    c.recompose_ceilings(0);
+    let _ = c.mark_dirty();
+    c.materialize();
+
+    // Attribute BOTH as "Porch roof" (same fabric) with insulation + a photo.
+    let tmp = std::env::temp_dir().join(format!("ber_fork_photos_{}", ItemId::default().0));
+    c.set_photos_dir(tmp.clone());
+    let src = std::env::temp_dir().join(format!("ber_fork_src_{}.jpg", ItemId::default().0));
+    std::fs::write(&src, b"jpeg-bytes").unwrap();
+    set_only_kind(&mut c, SurfaceKind::Ceilings);
+    c.set_structure_select_mode(Some(SelectMode::All));
+    c.begin_structure_edit();
+    c.set_structure_group_attrs(
+        0,
+        ConstructionType::Ceiling(CeilingConstructionType::SlopedInsOnCeiling),
+        ConstructionMakeup::Default,
+        Default::default(),
+    );
+    c.materialize();
+    c.set_structure_group_insulation(0, Some(CeilingInsulation::Unknown));
+    c.set_structure_group_name(0, "Porch roof".into());
+    c.add_group_photo(0, &src, PhotoQuality::Full);
+    c.end_structure_edit();
+    c.materialize();
+    {
+        let rec = c.current_record.as_ref().unwrap();
+        let cids: HashSet<ItemId> = rec.data.storeys[0]
+            .ceilings
+            .regions
+            .iter()
+            .map(|r| r.construction_id)
+            .collect();
+        assert_eq!(cids.len(), 1, "both ceilings share the Porch roof group");
+        let porch = rec
+            .data
+            .ceiling_construction(*cids.iter().next().unwrap())
+            .unwrap();
+        assert_eq!(porch.base.name.as_deref(), Some("Porch roof"));
+        assert_eq!(porch.base.photos.len(), 1);
+    }
+
+    // Reselect ONE ceiling and rename it "Main house roof" — the fork.
+    let one = c.current_record.as_ref().unwrap().data.storeys[0]
+        .ceilings
+        .regions[0]
+        .id;
+    c.structure_selected.insert(one);
+    c.begin_structure_edit();
+    c.set_structure_group_name(0, "Main house roof".into());
+    {
+        let e = c.structure_edit().unwrap();
+        assert!(e.name_error.is_none(), "a fork is not a name conflict");
+        let g = &e.groups[0];
+        assert_eq!(g.explicit_name.as_deref(), Some("Main house roof"));
+        assert!(
+            g.photos.is_empty() && g.insulation.is_none(),
+            "the fork starts with its own (empty) evidence"
+        );
+    }
+    c.materialize();
+    // Different insulation on the fork only (+ its own photo, completing it).
+    c.set_structure_group_insulation(0, Some(CeilingInsulation::ThicknessMm(150.0)));
+    c.add_group_photo(0, &src, PhotoQuality::Full);
+    c.end_structure_edit();
+    c.materialize();
+
+    let rec = c.current_record.as_ref().unwrap();
+    let regions = &rec.data.storeys[0].ceilings.regions;
+    let named = |cid: ItemId| {
+        rec.data
+            .ceiling_construction(cid)
+            .and_then(|cc| cc.base.name.clone())
+    };
+    let main_count = regions
+        .iter()
+        .filter(|r| named(r.construction_id).as_deref() == Some("Main house roof"))
+        .count();
+    let porch_count = regions
+        .iter()
+        .filter(|r| named(r.construction_id).as_deref() == Some("Porch roof"))
+        .count();
+    assert_eq!(
+        (main_count, porch_count),
+        (1, 1),
+        "ONLY the clicked ceiling changed group; the other stayed Porch roof"
+    );
+    let porch = regions
+        .iter()
+        .find(|r| named(r.construction_id).as_deref() == Some("Porch roof"))
+        .map(|r| rec.data.ceiling_construction(r.construction_id).unwrap())
+        .unwrap();
+    assert_eq!(porch.base.photos.len(), 1, "the porch kept its photo");
+    assert_eq!(
+        porch.insulation,
+        Some(CeilingInsulation::Unknown),
+        "…and its insulation"
+    );
+    let main = regions
+        .iter()
+        .find(|r| named(r.construction_id).as_deref() == Some("Main house roof"))
+        .map(|r| rec.data.ceiling_construction(r.construction_id).unwrap())
+        .unwrap();
+    assert_eq!(
+        main.insulation,
+        Some(CeilingInsulation::ThicknessMm(150.0)),
+        "the fork's own insulation landed on the fork alone"
+    );
+    assert_eq!(
+        main.construction_type,
+        CeilingConstructionType::SlopedInsOnCeiling,
+        "same fabric — only the group identity differs"
+    );
+    // Both groups are offered side by side now.
+    let offers: Vec<Option<String>> = c
+        .structure_existing_groups()
+        .into_iter()
+        .filter(|e| matches!(e.ty, ConstructionType::Ceiling(_)))
+        .map(|e| e.name)
+        .collect();
+    assert!(offers.iter().any(|n| n.as_deref() == Some("Porch roof")));
+    assert!(offers
+        .iter()
+        .any(|n| n.as_deref() == Some("Main house roof")));
+
+    let _ = std::fs::remove_dir_all(&tmp);
+    let _ = std::fs::remove_file(&src);
+}
+
+/// A structure carve whose interior edge carries ONLY a non-heat-loss wall
+/// asks no wall-inclusion question (nothing selectable stands there — same
+/// fixture as `structure_carve_asks_for_interior_edge_walls_...`, which
+/// proves the ask DOES fire while the riser is in scope) and the committed
+/// carve selection omits that wall, while the outline wall on the same ring
+/// still auto-includes.
+#[test]
+fn structure_carve_over_nhl_wall_asks_nothing_and_selects_nothing() {
+    let p = |x: f32, y: f32| Point2f32::new(x, y);
+    let mut c = dimensioned_square_controller();
+    // A floor step right of x=4 derives a riser wall along x=4. (x=4, not
+    // x=5: the outline's top/bottom wall MIDPOINTS sit at x=5, so a cut
+    // there would also map those walls onto the cut edge and keep asking.)
+    c.step_regions.entry(0).or_default().push(StepRegion {
+        polygon: vec![p(4., 0.), p(10., 0.), p(10., 10.), p(4., 10.)],
+        level_m: -0.3,
+    });
+    c.commit_to_ber().unwrap();
+
+    // Classify the riser non-heat-loss before carving.
+    c.set_exposure_mode(true);
+    let riser_id = {
+        let views = c.riser_views();
+        assert_eq!(views.len(), 1, "one riser on the step line");
+        views[0].id
+    };
+    c.selected_riser = Some(riser_id);
+    c.set_riser_exposure(WallExposure::NonHeatLoss);
+    c.selected_riser = None;
+    c.set_exposure_mode(false);
+
+    set_only_kind(&mut c, SurfaceKind::Walls);
+    c.set_structure_select_mode(Some(SelectMode::Carve));
+    // Straight cut along the step line; pick the RIGHT half, whose x=4 edge
+    // is interior (the kind of edge that asks while its wall is in scope —
+    // see `structure_carve_asks_for_interior_edge_walls_and_honours_the_answer`).
+    c.apply_structure_carve_stroke(&[(4.0, 0.0), (4.0, 10.0)]);
+    assert!(c.structure_cut_pending(), "the cut offers two candidates");
+    c.choose_structure_cut_region(7.5, 5.0);
+    let mut guard = 0;
+    while c.dimensioning_active() && guard < 12 {
+        c.skip_current_dimension();
+        guard += 1;
+    }
+    skip_position_prompts(&mut c);
+
+    assert!(
+        c.wall_inclusion_prompt().is_none(),
+        "the only wall on the interior edge is out of scope — nothing to ask: {:?}",
+        c.wall_inclusion_prompt()
+    );
+    assert_eq!(
+        c.pending_structure_carve_polygons().len(),
+        1,
+        "the carve staged straight away"
+    );
+
+    c.begin_structure_edit();
+    let storey = &c.current_record.as_ref().unwrap().data.storeys[0];
+    let nhl = storey
+        .walls
+        .regions
+        .iter()
+        .find(|r| r.exposure == WallExposure::NonHeatLoss)
+        .expect("the riser kept its NHL class through the re-resolve");
+    let base_at = |r: &&ber_model::ber::structural::WallRegion, x: f64, y: f64| {
+        r.base_midpoint()
+            .is_some_and(|m| (m.x - x).abs() < 1e-3 && (m.y - y).abs() < 1e-3)
+    };
+    let right = storey
+        .walls
+        .regions
+        .iter()
+        .find(|r| base_at(r, 10.0, 5.0))
+        .expect("the outline's right wall");
+    assert!(
+        !c.structure_selected_ids().contains(&nhl.id),
+        "the NHL riser is not selected by the carve"
+    );
+    assert!(
+        c.structure_selected_ids().contains(&right.id),
+        "the in-scope outline wall still auto-includes"
+    );
+}
+
+/// The Structure review omits out-of-scope walls: a non-heat-loss wall is
+/// neither highlighted nor counted on its construction's review card, and a
+/// construction referenced ONLY by out-of-scope walls drops off the review
+/// list (and out of the "existing groups" offer) entirely.
+#[test]
+fn structure_review_omits_out_of_scope_walls() {
+    use ber_model::ber::structural::{ConstructionMakeup, ConstructionType, WallConstructionType};
+    let mut c = dimensioned_square_controller();
+    c.materialize();
+    attribute_all_surfaces(
+        &mut c,
+        SurfaceKind::Walls,
+        ConstructionType::Wall(WallConstructionType::CavityWall),
+        ConstructionMakeup::Default,
+    );
+
+    // All four walls attributed → one wall card highlighting all four.
+    c.set_structure_review_mode(true);
+    let item = c.structure_review_view().expect("a wall construction card");
+    assert_eq!(item.highlight.len(), 4, "all four walls highlighted");
+    c.set_structure_review_mode(false);
+
+    // Paint one wall non-heat-loss → the card highlights and counts only 3.
+    let walls: Vec<_> = c
+        .document
+        .outline
+        .floor_plan
+        .perimeter_walls()
+        .iter()
+        .map(|(_, a, b)| (((a.x + b.x) * 0.5) as f64, ((a.y + b.y) * 0.5) as f64))
+        .collect();
+    c.set_exposure_mode(true);
+    c.exposure_pointer_down(walls[0].0, walls[0].1, 0.5);
+    c.set_wall_exposure(WallExposure::NonHeatLoss);
+    c.set_exposure_mode(false);
+    c.materialize();
+    let nhl_id = {
+        let storey = &c.current_record.as_ref().unwrap().data.storeys[0];
+        storey
+            .walls
+            .regions
+            .iter()
+            .find(|r| r.exposure == WallExposure::NonHeatLoss)
+            .expect("one wall painted NHL")
+            .id
+    };
+    c.set_structure_review_mode(true);
+    let item = c.structure_review_view().expect("still a wall card");
+    assert_eq!(item.highlight.len(), 3, "the NHL wall is not highlighted");
+    assert!(!item.highlight.contains(&nhl_id));
+    let walls_line = item
+        .detail_lines
+        .iter()
+        .find(|(k, _)| k == "Walls")
+        .map(|(_, v)| v.clone());
+    assert_eq!(
+        walls_line.as_deref(),
+        Some("3"),
+        "the card counts only in-scope walls"
+    );
+    c.set_structure_review_mode(false);
+
+    // Paint the remaining walls NHL too → nothing left to review, and the
+    // construction is no longer offered as an existing group.
+    c.set_exposure_mode(true);
+    for (x, y) in walls.iter().skip(1) {
+        c.exposure_pointer_down(*x, *y, 0.5);
+        c.set_wall_exposure(WallExposure::NonHeatLoss);
+    }
+    c.set_exposure_mode(false);
+    c.materialize();
+    c.set_structure_review_mode(true);
+    // Walls list FIRST in the review order, so if any wall card survived it
+    // would be the first item. (A default floor construction card can remain
+    // — floors are untouched by the wall scope rule.)
+    let leftover = c.structure_review_view().map(|v| v.kind);
+    assert_ne!(
+        leftover,
+        Some(StructureReviewKind::Wall),
+        "a construction referenced only by out-of-scope walls isn't reviewed"
+    );
+    assert!(
+        c.structure_existing_groups().is_empty(),
+        "…nor offered as an existing group"
+    );
+}
+
+/// Two dimensioned storeys (10×10 below, 6×6 above), the editor parked on the
+/// ALL-STOREYS tab with Walls mode + the Carve subtool active — the
+/// cross-storey lasso's starting state.
+fn all_storeys_lasso_controller() -> AppController {
+    let mut c = dimensioned_square_controller();
+    c.add_storey().unwrap();
+    finalise_current_storey_as_square(&mut c, 6.0);
+    c.set_current_storey(None).unwrap();
+    set_only_kind(&mut c, SurfaceKind::Walls);
+    c.set_structure_select_mode(Some(SelectMode::Carve));
+    c
+}
+
+/// A rectangular lasso stroke (already in one storey's world frame), ending
+/// back near its start so `lasso_ring` closes it.
+fn lasso_rect(x0: f32, y0: f32, x1: f32, y1: f32) -> Vec<(f32, f32)> {
+    vec![(x0, y0), (x1, y0), (x1, y1), (x0, y1), (x0, y0 + 0.05)]
+}
+
+/// The ALL-STOREYS lasso carve: one drawn ring, clipped per storey. A stroke
+/// that misses a storey's footprint (the gap between cells) contributes
+/// nothing there; a ring spanning both footprints selects both storeys'
+/// in-scope walls into ONE edit session, and a single attribute apply writes
+/// ONE shared construction covering every selected wall across the stack —
+/// which the all-storeys progress counter then reads as fully attributed.
+#[test]
+fn all_storeys_lasso_selects_across_storeys_and_attributes_once() {
+    use ber_model::ber::structural::{ConstructionMakeup, ConstructionType, WallConstructionType};
+    let mut c = all_storeys_lasso_controller();
+
+    // Storey 0's stroke misses its footprint entirely (the lasso was drawn
+    // over storey 1's cell; in storey 0's frame it lands out in the gap).
+    c.apply_structure_lasso_stroke(&[lasso_rect(20., 20., 30., 30.), lasso_rect(-1., -1., 7., 7.)]);
+    assert!(
+        c.wall_inclusion_prompt().is_none(),
+        "outline-only clip edges ask nothing"
+    );
+    c.begin_structure_edit(); // commits the staged lasso into the selection
+    assert_eq!(
+        c.structure_selected_ids().len(),
+        4,
+        "only storey 1's walls selected — the missed storey contributed nothing"
+    );
+    c.close_structure_edit();
+    c.clear_structure_surface_selection();
+
+    // A lasso enclosing BOTH footprints selects both storeys' walls…
+    c.apply_structure_lasso_stroke(&[lasso_rect(-1., -1., 11., 11.), lasso_rect(-1., -1., 7., 7.)]);
+    c.begin_structure_edit();
+    let e = c.structure_edit().expect("a cross-storey session opened");
+    assert_eq!(e.groups.len(), 1, "one group spans both storeys");
+    assert_eq!(e.groups[0].ids.len(), 8, "4 + 4 walls across the stack");
+    // …and one attribute apply covers them all.
+    c.set_structure_group_attrs(
+        0,
+        ConstructionType::Wall(WallConstructionType::CavityWall),
+        ConstructionMakeup::Default,
+        Default::default(),
+    );
+    c.end_structure_edit();
+    c.materialize();
+    let rec = c.current_record.as_ref().unwrap();
+    for idx in 0..2 {
+        assert!(
+            rec.data
+                .structure_surfaces_complete(idx, SurfaceKind::Walls),
+            "storey {idx}'s walls fully attributed by the one apply"
+        );
+    }
+    let cids: std::collections::HashSet<ItemId> = rec
+        .data
+        .storeys
+        .iter()
+        .flat_map(|s| s.walls.regions.iter())
+        .map(|r| r.construction_id)
+        .collect();
+    assert_eq!(cids.len(), 1, "one shared construction across the stack");
+    // The all-storeys header counter sums the whole house.
+    assert_eq!(c.structure_progress().walls, (8, 8));
+}
+
+/// A group defined on ONE storey is offered as an existing group while
+/// editing ANY other storey — the construction registry is dwelling-level,
+/// so "Brick" typed on the first floor is one pick away on the ground floor
+/// (it was previously seeded from the current storey only, so the offer
+/// vanished the moment you switched storeys).
+#[test]
+fn existing_groups_are_offered_across_storeys() {
+    use ber_model::ber::structural::{ConstructionMakeup, ConstructionType, WallConstructionType};
+    let mut c = dimensioned_square_controller();
+    c.add_storey().unwrap();
+    finalise_current_storey_as_square(&mut c, 6.0);
+
+    // Define "Brick" on STOREY 1 (the active storey after finalise).
+    set_only_kind(&mut c, SurfaceKind::Walls);
+    c.set_structure_select_mode(Some(SelectMode::All));
+    c.begin_structure_edit();
+    c.set_structure_group_attrs(
+        0,
+        ConstructionType::Wall(WallConstructionType::CavityWall),
+        ConstructionMakeup::Default,
+        Default::default(),
+    );
+    c.materialize();
+    c.set_structure_group_name(0, "Brick".into());
+    c.end_structure_edit();
+    c.materialize();
+
+    // Switch to STOREY 0: the offer must still include "Brick".
+    c.set_current_storey(Some(0)).unwrap();
+    let eg = c
+        .structure_existing_groups()
+        .into_iter()
+        .find(|e| e.name.as_deref() == Some("Brick"))
+        .expect("a group defined upstairs is offered on the ground floor");
+
+    // …and joining it from a fresh ground-floor box completes those walls
+    // onto the SAME shared construction.
+    c.set_structure_select_mode(Some(SelectMode::All));
+    c.begin_structure_edit();
+    assert!(
+        !c.structure_edit().unwrap().groups[0].show_editor,
+        "fresh box opens on the two-mode entry (there IS something to join)"
+    );
+    c.set_structure_group_attrs(0, eg.ty, eg.makeup.clone(), eg.phase.clone());
+    c.set_structure_group_name(0, "Brick".into());
+    assert!(c.structure_edit().unwrap().name_error.is_none());
+    c.end_structure_edit();
+    c.materialize();
+    let rec = c.current_record.as_ref().unwrap();
+    let cids: HashSet<ItemId> = rec
+        .data
+        .storeys
+        .iter()
+        .flat_map(|s| s.walls.regions.iter())
+        .map(|r| r.construction_id)
+        .collect();
+    assert_eq!(
+        cids.len(),
+        1,
+        "both storeys share the one Brick construction"
+    );
+    assert_eq!(
+        c.structure_progress().walls,
+        (4, 4),
+        "ground-floor walls completed by the join"
+    );
+}
+
+/// CLICK works on the all-storeys tab too: a tap routed to a storey's cell
+/// (the canvas inverts that cell's transform; the controller receives the
+/// storey index + the point in ITS world frame) toggles that storey's surface
+/// in/out of the one cross-storey selection — so a few taps across cells
+/// build a group spanning storeys, exactly like the lasso. Out-of-scope
+/// surfaces are no more tappable here than on a single storey.
+#[test]
+fn all_storeys_click_toggles_surfaces_across_storeys() {
+    let mut c = all_storeys_lasso_controller();
+    c.set_structure_select_mode(Some(SelectMode::Click));
+
+    // A wall midpoint per storey, each in its OWN world frame (storey 0 is
+    // the 10×10, storey 1 the 6×6 — both have a bottom wall midpoint).
+    c.toggle_structure_surface_at_in(0, 5.0, 0.0, 0.2);
+    assert_eq!(
+        c.structure_selected_ids().len(),
+        1,
+        "storey 0's wall toggled"
+    );
+    c.toggle_structure_surface_at_in(1, 3.0, 0.0, 0.2);
+    assert_eq!(
+        c.structure_selected_ids().len(),
+        2,
+        "the selection spans both storeys"
+    );
+    // Both walls resolve on their own storeys.
+    let rec = c.current_record.as_ref().unwrap();
+    for idx in 0..2 {
+        assert_eq!(
+            rec.data.storeys[idx]
+                .walls
+                .regions
+                .iter()
+                .filter(|r| c.structure_selected_ids().contains(&r.id))
+                .count(),
+            1,
+            "one selected wall on storey {idx}"
+        );
+    }
+    // Tapping again toggles OFF.
+    c.toggle_structure_surface_at_in(1, 3.0, 0.0, 0.2);
+    assert_eq!(c.structure_selected_ids().len(), 1, "second tap deselects");
+    // A tap in the gap (a point outside the storey's footprint) is a no-op.
+    c.toggle_structure_surface_at_in(1, 30.0, 30.0, 0.2);
+    assert_eq!(
+        c.structure_selected_ids().len(),
+        1,
+        "gap tap selects nothing"
+    );
+}
+
+/// Cross-storey lasso wall-inclusion asks: an interior CLIP edge that carries
+/// a wall raises the ask FOR ITS STOREY (the prompt names the storey and tags
+/// its index for the cell highlight), storeys whose clip edges are all on
+/// their outline ask nothing, and the answer's exclusion applies on the right
+/// storey. The single-storey carve ask (its own tests) is untouched.
+#[test]
+fn all_storeys_lasso_asks_per_storey_for_interior_clip_walls() {
+    let p = |x: f32, y: f32| Point2f32::new(x, y);
+    let mut c = dimensioned_square_controller();
+    // A floor step right of x=4 derives an (in-scope, Unset) riser along x=4.
+    c.step_regions.entry(0).or_default().push(StepRegion {
+        polygon: vec![p(4., 0.), p(10., 0.), p(10., 10.), p(4., 10.)],
+        level_m: -0.3,
+    });
+    c.commit_to_ber().unwrap();
+    c.add_storey().unwrap();
+    finalise_current_storey_as_square(&mut c, 6.0);
+    c.set_current_storey(None).unwrap();
+    set_only_kind(&mut c, SurfaceKind::Walls);
+    c.set_structure_select_mode(Some(SelectMode::Carve));
+
+    // Lasso: the right part of storey 0 (clip edge along x=4, where the riser
+    // stands) plus ALL of storey 1 (outline-only clip → no ask there).
+    c.apply_structure_lasso_stroke(&[lasso_rect(4., -1., 11., 11.), lasso_rect(-1., -1., 7., 7.)]);
+
+    let prompt = c
+        .wall_inclusion_prompt()
+        .expect("the storey-0 interior clip edge asks");
+    assert_eq!(
+        prompt.storey_idx,
+        Some(0),
+        "the ask is tagged with its storey"
+    );
+    assert_eq!(
+        prompt.total, 1,
+        "one ambiguous edge on storey 0; storey 1 asks nothing"
+    );
+    let s0 = &c.current_record.as_ref().unwrap().data.storeys[0];
+    let expected_prefix = if s0.name.is_empty() {
+        format!("Storey {}", s0.storey_number + 1)
+    } else {
+        s0.name.clone()
+    };
+    assert!(
+        prompt
+            .description
+            .starts_with(&format!("{expected_prefix}: ")),
+        "the question names its storey: {}",
+        prompt.description
+    );
+    assert!(
+        prompt.description.contains("(floor-step riser)"),
+        "…and identifies the wall: {}",
+        prompt.description
+    );
+    // Storey 1's region staged immediately (tagged for its cell) while the
+    // storey-0 ask is still up.
+    assert!(
+        c.pending_structure_carve_polygons_by_storey()
+            .iter()
+            .any(|(i, _)| *i == 1),
+        "storey 1's clipped ring staged without an ask"
+    );
+
+    // EXCLUDE → the riser stays out of the committed selection; everything
+    // else the two clipped rings enclose selects.
+    c.resolve_wall_inclusion(false);
+    assert!(
+        c.wall_inclusion_prompt().is_none(),
+        "the queue is exhausted after the one ask"
+    );
+    c.begin_structure_edit();
+    let base_at = |r: &&ber_model::ber::structural::WallRegion, x: f64, y: f64| {
+        r.base_midpoint()
+            .is_some_and(|m| (m.x - x).abs() < 1e-3 && (m.y - y).abs() < 1e-3)
+    };
+    let rec = c.current_record.as_ref().unwrap();
+    let riser = rec.data.storeys[0]
+        .walls
+        .regions
+        .iter()
+        .find(|r| base_at(r, 4.0, 5.0))
+        .expect("the riser stands on x=4");
+    let right = rec.data.storeys[0]
+        .walls
+        .regions
+        .iter()
+        .find(|r| base_at(r, 10.0, 5.0))
+        .expect("storey 0's right wall");
+    assert!(
+        !c.structure_selected_ids().contains(&riser.id),
+        "Exclude left the storey-0 riser out"
+    );
+    assert!(
+        c.structure_selected_ids().contains(&right.id),
+        "storey 0's outline wall auto-included"
+    );
+    let storey1_selected = rec.data.storeys[1]
+        .walls
+        .regions
+        .iter()
+        .filter(|r| c.structure_selected_ids().contains(&r.id))
+        .count();
+    assert_eq!(storey1_selected, 4, "all of storey 1's walls selected");
+}
+
 /// With SEVERAL ambiguous edges, the ask walks them one at a time and the
 /// question's identification channels stay in lock-step: the highlighted edge
 /// (`prompt.edge` — the canvas badge sits at its midpoint) and the composed
@@ -10753,6 +12607,143 @@ fn setback_stack_derives_inter_storey_floor_and_ceiling_pieces() {
     assert!(
         storeys.iter().all(|s| s.ceiling_splits.is_empty()),
         "no durable ceiling_splits from the derivation"
+    );
+}
+
+/// The user's report: the ground-floor ceiling piece UNDER the upper storey is
+/// derived `InterStorey` — not an exterior heat-loss surface — so the
+/// Structure phase must stop suggesting it: it isn't seeded by
+/// `All`/`Remaining`, isn't counted, isn't tap-selectable, and the checklist
+/// goes green once the LABELLABLE pieces alone are attributed. (Same for the
+/// upper storey's derived InterStorey floor piece.) The setback fixture from
+/// `setback_stack_derives_inter_storey_floor_and_ceiling_pieces`.
+#[test]
+fn inter_storey_ceiling_is_not_suggested_by_structure() {
+    use ber_model::ber::structural::{
+        CeilingConstructionType, CeilingExposure, CeilingInsulation, ConstructionMakeup,
+        ConstructionType, FloorExposure,
+    };
+    let mut c = dimensioned_square_controller(); // storey 0 = 10×10
+    c.set_default_ceiling_height(2.4).unwrap();
+    c.add_storey().unwrap();
+    finalise_current_storey_as_offset_square(&mut c, 6.0, 6.0, 6.0); // upper 6×6 @ (6,6)
+    c.set_default_ceiling_height(2.4).unwrap();
+    c.materialize();
+
+    // Work the GROUND floor's ceilings.
+    c.set_current_storey(Some(0)).unwrap();
+    let (inter_id, inter_centroid, labellable) = {
+        let s = &c.current_record.as_ref().unwrap().data.storeys[0];
+        let inter = s
+            .ceilings
+            .regions
+            .iter()
+            .find(|r| r.exposure == CeilingExposure::InterStorey)
+            .expect("the piece under the upper storey derived InterStorey");
+        let labellable = s
+            .ceilings
+            .regions
+            .iter()
+            .filter(|r| r.exposure != CeilingExposure::InterStorey)
+            .count();
+        (inter.id, inter.centroid(), labellable)
+    };
+    assert!(labellable >= 1, "the uncovered part stays labellable");
+
+    // Not suggested: Remaining/All never seed it, the counter ignores it…
+    let remaining = c
+        .current_record
+        .as_ref()
+        .unwrap()
+        .data
+        .incomplete_surface_ids(0, SurfaceKind::Ceilings);
+    assert!(
+        !remaining.contains(&inter_id),
+        "the InterStorey ceiling is never suggested as remaining"
+    );
+    assert_eq!(remaining.len(), labellable);
+    assert_eq!(
+        c.structure_progress().ceilings,
+        (0, labellable),
+        "the InterStorey piece is in neither counter"
+    );
+    set_only_kind(&mut c, SurfaceKind::Ceilings);
+    c.set_structure_select_mode(Some(SelectMode::All));
+    assert!(
+        !c.structure_selected_ids().contains(&inter_id),
+        "Select all skips it"
+    );
+    // …and the structure tap can't select it.
+    c.clear_structure_surface_selection();
+    c.set_structure_select_mode(Some(SelectMode::Click));
+    c.toggle_structure_surface_at(inter_centroid.x, inter_centroid.y, 0.0);
+    assert!(
+        c.structure_selected_ids().is_empty(),
+        "tapping the InterStorey ceiling selects nothing"
+    );
+
+    // Attributing the LABELLABLE pieces alone completes the storey's ceilings
+    // — the InterStorey piece no longer holds the row hostage.
+    c.set_structure_select_mode(Some(SelectMode::All));
+    c.begin_structure_edit();
+    let n = c.structure_edit().unwrap().groups.len();
+    for g in 0..n {
+        c.set_structure_group_attrs(
+            g,
+            ConstructionType::Ceiling(CeilingConstructionType::FlatRoof),
+            ConstructionMakeup::Default,
+            Default::default(),
+        );
+    }
+    c.materialize();
+    for g in 0..n {
+        c.set_structure_group_insulation(g, Some(CeilingInsulation::Unknown));
+    }
+    c.end_structure_edit();
+    c.materialize();
+    assert!(
+        c.current_record
+            .as_ref()
+            .unwrap()
+            .data
+            .structure_surfaces_complete(0, SurfaceKind::Ceilings),
+        "ceilings complete with the InterStorey piece untouched"
+    );
+
+    // The review never shows the InterStorey piece on any roof card.
+    c.set_structure_review_mode(true);
+    let total = c.structure_review_view().map(|v| v.total).unwrap_or(0);
+    for _ in 0..total {
+        if let Some(v) = c.structure_review_view() {
+            if v.kind == StructureReviewKind::Roof {
+                assert!(
+                    !v.highlight.contains(&inter_id),
+                    "the review omits the InterStorey ceiling"
+                );
+            }
+        }
+        c.step_structure_review(1);
+    }
+    c.set_structure_review_mode(false);
+
+    // The upper storey's derived InterStorey FLOOR piece is likewise out of
+    // scope: only its overhang piece is applicable.
+    let s1 = &c.current_record.as_ref().unwrap().data.storeys[1];
+    let inter_floor = s1
+        .floors
+        .regions
+        .iter()
+        .find(|r| r.exposure == FloorExposure::InterStorey)
+        .expect("upper floor's over-lower piece derived InterStorey");
+    let remaining_floors = c
+        .current_record
+        .as_ref()
+        .unwrap()
+        .data
+        .incomplete_surface_ids(1, SurfaceKind::Floors);
+    assert!(
+        !remaining_floors.contains(&inter_floor.id),
+        "the InterStorey floor piece isn't suggested either"
     );
 }
 
@@ -11865,6 +13856,67 @@ fn external_photos_persist_and_reload() {
     let _ = std::fs::remove_file(&src);
 }
 
+/// Annotating an external photo (`annotate_external_photo`, the paintbrush
+/// takeover's Save) REPLACES the side's stored photo with the burned-in JPEG:
+/// a fresh store file holding exactly the passed bytes, a regenerated
+/// thumbnail, still one photo for the side — and undo restores the original.
+#[test]
+fn annotate_external_photo_replaces_stored_photo() {
+    use ber_model::ber::common::ExternalSide;
+    let mut c = dimensioned_square_controller();
+    let tmp = std::env::temp_dir().join(format!("ber_ext_annot_{}", ItemId::default().0));
+    c.set_photos_dir(tmp.clone());
+    let src = std::env::temp_dir().join(format!("ber_annot_src_{}.jpg", ItemId::default().0));
+    std::fs::write(&src, b"jpeg-bytes").unwrap();
+
+    // No photo for the side yet → annotation is a no-op (edits an existing shot).
+    c.annotate_external_photo(ExternalSide::Front, b"anything");
+    assert!(c.external_photos().iter().all(|(_, p)| p.is_none()));
+
+    c.add_external_photo(ExternalSide::Front, &src, PhotoQuality::Full);
+    let before = c.external_photos()[0].1.clone().expect("front photo");
+
+    // Save an annotated image: a real (decodable) JPEG so the thumbnail
+    // regenerates — the annotator always hands over freshly encoded bytes.
+    let img = image::RgbImage::from_pixel(24, 24, image::Rgb([200, 40, 40]));
+    let jpeg = {
+        use image::ImageEncoder;
+        let mut buf = Vec::new();
+        image::codecs::jpeg::JpegEncoder::new_with_quality(&mut buf, 85)
+            .write_image(img.as_raw(), 24, 24, image::ExtendedColorType::Rgb8)
+            .unwrap();
+        buf
+    };
+    c.annotate_external_photo(ExternalSide::Front, &jpeg);
+
+    let photos = &c.current_record.as_ref().unwrap().data.photos;
+    assert_eq!(
+        photos
+            .iter()
+            .filter(|p| p.side == Some(ExternalSide::Front))
+            .count(),
+        1,
+        "still exactly one Front photo (replaced, not duplicated)"
+    );
+    let after = c.external_photos()[0].1.clone().expect("front photo");
+    assert_ne!(after.file_path, before.file_path, "a fresh store file");
+    assert_eq!(
+        std::fs::read(&after.file_path).unwrap(),
+        jpeg,
+        "the stored file holds the annotated bytes verbatim"
+    );
+    let thumb = after.thumbnail_path.expect("thumbnail regenerated");
+    assert!(std::path::Path::new(&thumb).exists());
+
+    // Undo restores the pre-annotation photo entry.
+    c.undo().expect("undo");
+    let restored = c.external_photos()[0].1.clone().expect("front photo");
+    assert_eq!(restored.file_path, before.file_path);
+
+    let _ = std::fs::remove_dir_all(&tmp);
+    let _ = std::fs::remove_file(&src);
+}
+
 // ── Stage-1 (Mapping) review ─────────────────────────────────────────────────
 
 /// Confirming the review sets the durable `mapping_reviewed` flag (the Structure
@@ -11993,19 +14045,12 @@ fn objects_capture_pins_counts_and_undo() {
     // Drop a pin and add two object entries (1 boiler + 5 radiators = 6).
     c.objects_pointer_down(2.0, 2.0, 0.5);
     let room = c.active_object_room().expect("a room opened");
-    c.add_object(
-        ObjectKind::Boiler(BoilerFuel::Gas),
-        1,
-        None,
-        Vec::new(),
-        PhotoQuality::Full,
-    );
+    c.add_object(ObjectKind::Boiler(BoilerFuel::Gas), 1, None, Vec::new());
     c.add_object(
         ObjectKind::Radiator(RadiatorTrv::WithTrv),
         5,
         None,
         Vec::new(),
-        PhotoQuality::Full,
     );
     let pins = c.object_rooms_view();
     assert_eq!(pins.len(), 1, "one pin");
@@ -12058,13 +14103,7 @@ fn objects_3d_placement_stores_surface_point_and_pitch() {
     );
 
     // The room accepts objects while no storey is current.
-    c.add_object(
-        ObjectKind::Boiler(BoilerFuel::Gas),
-        1,
-        None,
-        Vec::new(),
-        PhotoQuality::Full,
-    );
+    c.add_object(ObjectKind::Boiler(BoilerFuel::Gas), 1, None, Vec::new());
     assert_eq!(
         c.active_object_room_view().unwrap().objects.len(),
         1,
@@ -12116,19 +14155,12 @@ fn object_review_totals_and_hotspots() {
     c.materialize();
     // Room 1: 1 gas boiler + 3 radiators-with-TRV.
     c.objects_pointer_down(2.0, 2.0, 0.5);
-    c.add_object(
-        ObjectKind::Boiler(BoilerFuel::Gas),
-        1,
-        None,
-        Vec::new(),
-        PhotoQuality::Full,
-    );
+    c.add_object(ObjectKind::Boiler(BoilerFuel::Gas), 1, None, Vec::new());
     c.add_object(
         ObjectKind::Radiator(RadiatorTrv::WithTrv),
         3,
         None,
         Vec::new(),
-        PhotoQuality::Full,
     );
     c.close_object_room();
     // Room 2: 2 more radiators-with-TRV.
@@ -12138,7 +14170,6 @@ fn object_review_totals_and_hotspots() {
         2,
         None,
         Vec::new(),
-        PhotoQuality::Full,
     );
     c.close_object_room();
 
@@ -12238,13 +14269,7 @@ fn object_review_absence_confirmation() {
     let mut c = dimensioned_square_controller();
     c.materialize();
     c.objects_pointer_down(2.0, 2.0, 0.5);
-    c.add_object(
-        ObjectKind::Boiler(BoilerFuel::Gas),
-        1,
-        None,
-        Vec::new(),
-        PhotoQuality::Full,
-    );
+    c.add_object(ObjectKind::Boiler(BoilerFuel::Gas), 1, None, Vec::new());
     c.close_object_room();
 
     c.set_object_review_mode(true);

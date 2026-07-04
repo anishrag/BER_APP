@@ -13,7 +13,7 @@ use egui::{Align2, Id, RichText};
 use super::{SketchEvent, SketchView};
 use crate::controller::app_controller::AssessmentPhase;
 use crate::ui::pages::events::UiEvent;
-use crate::ui::widgets::{photo_button, PhotoConfig, PhotoQuality};
+use crate::ui::widgets::{photo_button_pair, PhotoQuality};
 use ber_model::ber::objects::{ObjectCategory, ObjectKind};
 
 /// A simple glyph per category for the big buttons. Emoji placeholders until a
@@ -171,7 +171,7 @@ pub(super) fn render<F: FnMut(UiEvent)>(
                         );
                     });
                     ui.horizontal_wrapped(|ui| {
-                        for p in view.object_pending_photos.iter() {
+                        for (p, _quality) in view.object_pending_photos.iter() {
                             let src = p.to_string_lossy();
                             ui.add(
                                 egui::Image::new(format!("file://{src}"))
@@ -180,15 +180,11 @@ pub(super) fn render<F: FnMut(UiEvent)>(
                                     .corner_radius(3.0),
                             );
                         }
-                        if let Some(path) = photo_button(
-                            ui,
-                            "📷 Add photo",
-                            true,
-                            PhotoConfig {
-                                default_quality: PhotoQuality::High,
-                            },
-                        ) {
-                            view.object_pending_photos.push(path);
+                        // TEMPORARY dual hi/lo capture (see `photo_button_pair`).
+                        if let Some(captured) =
+                            photo_button_pair(ui, "📷 Add photo", true, PhotoQuality::High)
+                        {
+                            view.object_pending_photos.push(captured);
                         }
                     });
                     if ui
@@ -206,7 +202,6 @@ pub(super) fn render<F: FnMut(UiEvent)>(
                                 count,
                                 note,
                                 photos: view.object_pending_photos.clone(),
-                                photo_quality: PhotoQuality::High,
                             }));
                             *view.object_selected_category = None;
                             *view.object_selected_kind = None;

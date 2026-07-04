@@ -220,9 +220,17 @@ impl Storey {
     }
 
     /// The id of the surface of `kind` under (or, for walls, nearest within
-    /// `tol` of) the plan point `(x, y)` — the Structure-phase tap hit-test.
-    /// Floors/ceilings: point-in-polygon over the region footprint; walls: nearest
-    /// base edge within tolerance (a wall collapses to its base edge in plan).
+    /// `tol` of) the plan point `(x, y)`. Floors/ceilings: point-in-polygon
+    /// over the region footprint; walls: nearest base edge within tolerance
+    /// (a wall collapses to its base edge in plan).
+    ///
+    /// SCOPE: the WALLS arm is structure-scope filtered in place (an
+    /// out-of-scope wall never shadows a selectable one within `tol`; this
+    /// arm has no other callers). The FLOORS/CEILINGS arms are UNFILTERED —
+    /// they're shared with the Mapping-phase exposure taps, which must reach
+    /// a Party/NonHeatLoss region to repaint its classification. The
+    /// Structure-phase tap goes through
+    /// [`structure_surface_at`](Self::structure_surface_at) instead.
     pub fn surface_at(&self, kind: SurfaceKind, x: f64, y: f64, tol: f64) -> Option<ItemId> {
         match kind {
             SurfaceKind::Floors => self
@@ -244,6 +252,7 @@ impl Storey {
                 .walls
                 .regions
                 .iter()
+                .filter(|r| r.exposure.in_structure_scope())
                 .filter_map(|r| {
                     let e = &r.polygon.exterior;
                     if e.len() < 2 {
@@ -263,7 +272,8 @@ impl Storey {
     /// edge, never strictly inside) matches when its base-edge midpoint sits on
     /// the ring's perimeter OR strictly inside (an interior riser between
     /// stepped sections), the spanning wall claimed by whichever region holds
-    /// its midpoint.
+    /// its midpoint. Surfaces out of structure scope (`in_structure_scope`
+    /// on the kind's exposure enum) are never picked.
     pub fn surfaces_in_ring(&self, kind: SurfaceKind, region_ring: &[Point2f64]) -> Vec<ItemId> {
         let ring_poly = ring_to_geo(region_ring);
         let inside = |x: f64, y: f64| ring_poly.contains(&GeoPoint::new(x, y));
@@ -272,6 +282,7 @@ impl Storey {
                 .floors
                 .regions
                 .iter()
+                .filter(|r| r.exposure.in_structure_scope())
                 .filter(|r| {
                     let c = ring_centroid(&floor_ring(&r.polygon));
                     inside(c.x, c.y)
@@ -282,6 +293,7 @@ impl Storey {
                 .ceilings
                 .regions
                 .iter()
+                .filter(|r| r.exposure.in_structure_scope())
                 .filter(|r| {
                     let c = ring_centroid(&ceiling_ring(&r.polygon));
                     inside(c.x, c.y)
@@ -292,6 +304,7 @@ impl Storey {
                 .walls
                 .regions
                 .iter()
+                .filter(|r| r.exposure.in_structure_scope())
                 .filter(|r| match r.base_midpoint() {
                     Some(m) => {
                         point_on_ring_boundary(region_ring, m.x, m.y, WALL_ON_BOUNDARY_TOL_M)
@@ -304,16 +317,62 @@ impl Storey {
         }
     }
 
+    /// [`surface_at`](Self::surface_at) restricted to STRUCTURE scope — the
+    /// Structure-phase tap hit-test. A hit on an out-of-scope floor/ceiling
+    /// (party / derived inter-storey — e.g. the ground-floor ceiling under an
+    /// upper storey) reads as NO hit, so the tap can fall through to another
+    /// active kind instead of selecting a surface the phase doesn't attribute.
+    pub fn structure_surface_at(
+        &self,
+        kind: SurfaceKind,
+        x: f64,
+        y: f64,
+        tol: f64,
+    ) -> Option<ItemId> {
+        let id = self.surface_at(kind, x, y, tol)?;
+        self.surface_in_structure_scope(kind, id).then_some(id)
+    }
+
+    /// Whether region `id` of `kind` participates in the Structure phase —
+    /// the per-kind `in_structure_scope` of its exposure. `false` for an id
+    /// that isn't a live region of that kind.
+    pub fn surface_in_structure_scope(&self, kind: SurfaceKind, id: ItemId) -> bool {
+        match kind {
+            SurfaceKind::Walls => self
+                .walls
+                .regions
+                .iter()
+                .find(|r| r.id == id)
+                .is_some_and(|r| r.exposure.in_structure_scope()),
+            SurfaceKind::Floors => self
+                .floors
+                .regions
+                .iter()
+                .find(|r| r.id == id)
+                .is_some_and(|r| r.exposure.in_structure_scope()),
+            SurfaceKind::Ceilings => self
+                .ceilings
+                .regions
+                .iter()
+                .find(|r| r.id == id)
+                .is_some_and(|r| r.exposure.in_structure_scope()),
+        }
+    }
+
     /// The wall regions a single carve edge MAPS TO: every wall whose base-edge
     /// midpoint lies on the segment `a`→`b` (within the same tolerance as
     /// [`surfaces_in_ring`](Self::surfaces_in_ring)'s boundary test, so an
     /// exclusion here removes exactly what that inclusion test added). The
     /// shell's per-edge include/exclude decision for a staged structure carve
-    /// resolves to wall ids through this.
+    /// resolves to wall ids through this. Walls out of structure scope
+    /// ([`WallExposure::in_structure_scope`]) don't map: an edge whose only
+    /// walls are non-heat-loss / inter-storey has nothing selectable on it, so
+    /// the carve's wall-inclusion ask never asks about it.
     pub fn wall_ids_on_segment(&self, a: Point2f64, b: Point2f64) -> Vec<ItemId> {
         self.walls
             .regions
             .iter()
+            .filter(|r| r.exposure.in_structure_scope())
             .filter(|r| {
                 r.base_midpoint().is_some_and(|m| {
                     point_to_segment_distance(m.x, m.y, a.x, a.y, b.x, b.y)
@@ -380,6 +439,77 @@ impl Storey {
             })
     }
 
+    /// Clip a cross-storey LASSO ring (world coords, THIS storey's frame)
+    /// against the storey's footprint: `ring ∩ footprint` as one or more
+    /// simple rings, each paired with its INTERIOR edges — the clipped-ring
+    /// edges that do NOT lie on the footprint boundary (they were drawn by
+    /// the lasso through the middle of the storey, so house area continues
+    /// beyond them and wall inclusion there is a judgement call, exactly like
+    /// the single-storey carve's interior edges). Edges ON the footprint
+    /// boundary are the storey's true exterior there — never ambiguous. The
+    /// lasso may miss this storey entirely (it spans the all-storeys view,
+    /// gap included): that's simply an empty result.
+    pub fn lasso_regions(&self, ring: &[Point2f64]) -> Vec<(Vec<Point2f64>, Vec<[Point2f64; 2]>)> {
+        use geo::bool_ops::BooleanOps;
+        use geo::Area;
+        const SLIVER_AREA_M2: f64 = 1e-4;
+        if ring.len() < 3 || self.floors.regions.is_empty() {
+            return Vec::new();
+        }
+        // The storey footprint: the union of its floor regions.
+        let mut footprint = geo::MultiPolygon::new(vec![self.floors.regions[0].polygon.clone()]);
+        for r in self.floors.regions.iter().skip(1) {
+            footprint = footprint.union(&geo::MultiPolygon::new(vec![r.polygon.clone()]));
+        }
+        let clipped = footprint.intersection(&geo::MultiPolygon::new(vec![ring_to_geo(ring)]));
+        // Every footprint boundary ring (exteriors + any holes), for the
+        // edge classification below.
+        let boundary_rings: Vec<Vec<Point2f64>> = footprint
+            .iter()
+            .flat_map(|p| {
+                std::iter::once(p.exterior())
+                    .chain(p.interiors().iter())
+                    .map(|ls| {
+                        let mut r: Vec<Point2f64> =
+                            ls.coords().map(|c| Point2f64::new(c.x, c.y)).collect();
+                        // Drop the closing duplicate geo appends.
+                        if r.len() >= 2 {
+                            r.pop();
+                        }
+                        r
+                    })
+            })
+            .collect();
+        let on_boundary = |x: f64, y: f64| {
+            boundary_rings
+                .iter()
+                .any(|r| point_on_ring_boundary(r, x, y, WALL_ON_BOUNDARY_TOL_M))
+        };
+        clipped
+            .iter()
+            .filter(|p| p.unsigned_area() >= SLIVER_AREA_M2)
+            .map(|p| {
+                let mut out: Vec<Point2f64> = p
+                    .exterior()
+                    .coords()
+                    .map(|c| Point2f64::new(c.x, c.y))
+                    .collect();
+                if out.len() >= 2 {
+                    out.pop(); // closing duplicate
+                }
+                let n = out.len();
+                let interior: Vec<[Point2f64; 2]> = (0..n)
+                    .map(|k| [out[k], out[(k + 1) % n]])
+                    .filter(|e| {
+                        let (mx, my) = ((e[0].x + e[1].x) * 0.5, (e[0].y + e[1].y) * 0.5);
+                        !on_boundary(mx, my)
+                    })
+                    .collect();
+                (out, interior)
+            })
+            .collect()
+    }
+
     /// Region ids of `kind` that lie MOSTLY inside `ring` (world coords): the
     /// region∩ring area is at least `min_frac` of the region's OWN area. Unlike
     /// the centroid test in [`surfaces_in_ring`](Self::surfaces_in_ring), this
@@ -439,11 +569,32 @@ impl Storey {
     }
 
     /// Every surface id of `kind` on the storey (the `Select all` seed).
+    /// Surfaces out of structure scope (`in_structure_scope` on the kind's
+    /// exposure enum — non-heat-loss / party / derived inter-storey) are
+    /// skipped — `Select all` never seeds them.
     pub fn surface_ids(&self, kind: SurfaceKind) -> Vec<ItemId> {
         match kind {
-            SurfaceKind::Walls => self.walls.regions.iter().map(|r| r.id).collect(),
-            SurfaceKind::Ceilings => self.ceilings.regions.iter().map(|r| r.id).collect(),
-            SurfaceKind::Floors => self.floors.regions.iter().map(|r| r.id).collect(),
+            SurfaceKind::Walls => self
+                .walls
+                .regions
+                .iter()
+                .filter(|r| r.exposure.in_structure_scope())
+                .map(|r| r.id)
+                .collect(),
+            SurfaceKind::Ceilings => self
+                .ceilings
+                .regions
+                .iter()
+                .filter(|r| r.exposure.in_structure_scope())
+                .map(|r| r.id)
+                .collect(),
+            SurfaceKind::Floors => self
+                .floors
+                .regions
+                .iter()
+                .filter(|r| r.exposure.in_structure_scope())
+                .map(|r| r.id)
+                .collect(),
         }
     }
 }

@@ -114,7 +114,13 @@ impl ConstructionPhase {
 /// BER-level construction dates mapping
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct ConstructionPhases {
-    pub years: HashMap<ConstructionPhase, Year>,
+    /// The DEFINED phases and their build years. A key's presence means the
+    /// phase exists (it's offered in the phase picker); the value is
+    /// `Some(year)` when the year is known and `None` when the assessor has
+    /// designated the phase but marked its year UNKNOWN (to be filled in
+    /// later). Old records — whose values were plain years — deserialize as
+    /// `Some(year)` (serde reads a bare number into `Option` as `Some`).
+    pub years: HashMap<ConstructionPhase, Option<Year>>,
     /// User-given nicknames per phase (e.g. "Back extension", "over garage") —
     /// what the UI shows instead of "Extension 1". Optional per phase.
     #[serde(default)]
@@ -122,7 +128,7 @@ pub struct ConstructionPhases {
 }
 
 impl ConstructionPhases {
-    pub fn new(years: HashMap<ConstructionPhase, Year>) -> Self {
+    pub fn new(years: HashMap<ConstructionPhase, Option<Year>>) -> Self {
         Self {
             years,
             nicknames: HashMap::new(),
@@ -143,27 +149,52 @@ impl ConstructionPhases {
         self.nicknames.get(phase).map(|s| s.as_str())
     }
 
-    /// Non-panicking lookup of a phase's year, if one has been set.
+    /// Non-panicking lookup of a phase's KNOWN year. `None` both when the
+    /// phase isn't defined and when it's defined with an unknown year — use
+    /// [`is_defined`](Self::is_defined) / [`year_is_unknown`](Self::year_is_unknown)
+    /// to tell those apart.
     pub fn year_of(&self, phase: &ConstructionPhase) -> Option<Year> {
-        self.years.get(phase).copied()
+        self.years.get(phase).copied().flatten()
     }
 
-    /// Set (or replace) the year for `phase`.
+    /// True when `phase` has been designated at all — with a known year OR an
+    /// unknown one. This (not a known year) is what makes a phase assignable,
+    /// so "unknown" counts as answered for every year-requiring gate.
+    pub fn is_defined(&self, phase: &ConstructionPhase) -> bool {
+        self.years.contains_key(phase)
+    }
+
+    /// True when `phase` is defined but its year was marked UNKNOWN (the
+    /// Key-Details "unknown" checkbox) — displayed as "unk", fillable later.
+    pub fn year_is_unknown(&self, phase: &ConstructionPhase) -> bool {
+        matches!(self.years.get(phase), Some(None))
+    }
+
+    /// Set (or replace) the year for `phase`. Filling in a real year over a
+    /// previously-unknown one goes through here too.
     pub fn set_year(&mut self, phase: ConstructionPhase, year: Year) {
-        self.years.insert(phase, year);
+        self.years.insert(phase, Some(year));
+    }
+
+    /// Define `phase` with an UNKNOWN year: it becomes assignable now and the
+    /// real year can be set later via [`set_year`](Self::set_year).
+    pub fn set_year_unknown(&mut self, phase: ConstructionPhase) {
+        self.years.insert(phase, None);
     }
 
     /// A human label for `phase`: the user's nickname if given (e.g. "Back
     /// extension"), else the default name ("Original", "Extension 1"), with
-    /// the year appended when known — e.g. "Back extension (2008)",
-    /// "Original (1985)".
+    /// the year appended when the phase is defined — the known year, or "unk"
+    /// while it's still unknown. E.g. "Back extension (2008)",
+    /// "Original (1985)", "Extension 1 (unk)".
     pub fn display_label(&self, phase: &ConstructionPhase) -> String {
         let name = self
             .nickname_of(phase)
             .map(|s| s.to_string())
             .unwrap_or_else(|| phase.default_name());
-        match self.year_of(phase) {
-            Some(year) => format!("{name} ({year})"),
+        match self.years.get(phase) {
+            Some(Some(year)) => format!("{name} ({year})"),
+            Some(None) => format!("{name} (unk)"),
             None => name,
         }
     }
@@ -283,6 +314,60 @@ mod tests {
         let back: Photo = serde_json::from_str(&json).unwrap();
         assert_eq!(back.side, Some(ExternalSide::Right));
         assert_eq!(back.file_path, "front.jpg");
+    }
+
+    /// A record written BEFORE unknown years existed stored plain numbers —
+    /// they must load as known years (`Some`), not as unknown.
+    #[test]
+    fn legacy_plain_year_loads_as_known() {
+        let legacy = r#"{"years":{"Original":1985,"Extension1":2008}}"#;
+        let phases: ConstructionPhases = serde_json::from_str(legacy).unwrap();
+        assert_eq!(phases.year_of(&ConstructionPhase::Original), Some(1985));
+        assert_eq!(phases.year_of(&ConstructionPhase::Extension1), Some(2008));
+        assert!(!phases.year_is_unknown(&ConstructionPhase::Extension1));
+        assert!(phases.is_defined(&ConstructionPhase::Extension1));
+    }
+
+    /// An unknown-year phase survives a serialize → deserialize round-trip
+    /// (it's durable — the assessor fills the real year in later).
+    #[test]
+    fn unknown_year_round_trips() {
+        let mut phases = ConstructionPhases::default();
+        phases.set_year(ConstructionPhase::Original, 1985);
+        phases.set_year_unknown(ConstructionPhase::Extension1);
+        let json = serde_json::to_string(&phases).unwrap();
+        let back: ConstructionPhases = serde_json::from_str(&json).unwrap();
+        assert!(back.is_defined(&ConstructionPhase::Extension1));
+        assert!(back.year_is_unknown(&ConstructionPhase::Extension1));
+        assert_eq!(back.year_of(&ConstructionPhase::Extension1), None);
+        assert_eq!(back.year_of(&ConstructionPhase::Original), Some(1985));
+    }
+
+    /// An unknown-year phase counts as ANSWERED: it's defined (so it appears
+    /// in the assignable list), labels as "unk", and a later `set_year`
+    /// replaces the unknown with the real year.
+    #[test]
+    fn unknown_year_is_defined_labels_unk_and_fills_in_later() {
+        let mut phases = ConstructionPhases::default();
+        phases.set_year_unknown(ConstructionPhase::Extension1);
+        assert_eq!(
+            phases.defined_phases(),
+            vec![ConstructionPhase::Extension1],
+            "unknown-year phase is still assignable"
+        );
+        assert_eq!(
+            phases.display_label(&ConstructionPhase::Extension1),
+            "Extension 1 (unk)"
+        );
+
+        // The assessor learns the year later and fills it in.
+        phases.set_year(ConstructionPhase::Extension1, 2008);
+        assert!(!phases.year_is_unknown(&ConstructionPhase::Extension1));
+        assert_eq!(phases.year_of(&ConstructionPhase::Extension1), Some(2008));
+        assert_eq!(
+            phases.display_label(&ConstructionPhase::Extension1),
+            "Extension 1 (2008)"
+        );
     }
 
     #[test]

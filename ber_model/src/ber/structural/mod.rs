@@ -2842,6 +2842,336 @@ mod tests {
         assert!(ber.incomplete_surface_ids(9, SurfaceKind::Walls).is_empty());
     }
 
+    /// Non-heat-loss and derived inter-storey walls are OUT of structure
+    /// scope ([`WallExposure::in_structure_scope`]): the Storey's structure
+    /// queries (tap hit-test, carve pick, edge→wall map, `Select all` seed)
+    /// skip them, and completeness treats them as not-applicable — while an
+    /// ordinary (here Exposed) wall on the same storey stays fully in scope.
+    #[test]
+    fn out_of_scope_walls_skip_structure_queries_and_completeness() {
+        let mut ber = Ber::default();
+        ber.storeys.push(Storey::default());
+
+        // Three unit walls along y=0: in-scope (Exposed), NonHeatLoss, InterStorey.
+        let mk = |x0: f64, exposure: WallExposure| WallRegion {
+            id: ItemId::default(),
+            polygon: Polygon3D::new(vec![
+                Point3f64::new(x0, 0.0, 0.0),
+                Point3f64::new(x0 + 1.0, 0.0, 0.0),
+                Point3f64::new(x0 + 1.0, 0.0, 2.4),
+                Point3f64::new(x0, 0.0, 2.4),
+            ]),
+            exposure,
+            opes: Opes::default(),
+            construction_id: ItemId::default(),
+        };
+        let exposed = mk(0.0, WallExposure::Exposed);
+        let nhl = mk(1.0, WallExposure::NonHeatLoss);
+        let inter = mk(2.0, WallExposure::InterStorey);
+        let (exposed_id, nhl_id, inter_id) = (exposed.id, nhl.id, inter.id);
+        ber.storeys[0].walls.regions = vec![exposed, nhl, inter];
+        let storey = &ber.storeys[0];
+
+        // Select-all seed: only the in-scope wall.
+        assert_eq!(storey.surface_ids(SurfaceKind::Walls), vec![exposed_id]);
+        // Tap hit-test: the out-of-scope walls are not targets.
+        assert_eq!(
+            storey.surface_at(SurfaceKind::Walls, 0.5, 0.0, 0.1),
+            Some(exposed_id)
+        );
+        assert_eq!(storey.surface_at(SurfaceKind::Walls, 1.5, 0.0, 0.1), None);
+        assert_eq!(storey.surface_at(SurfaceKind::Walls, 2.5, 0.0, 0.1), None);
+        // Edge→wall map (the carve ask's filter): out-of-scope edges map to
+        // nothing, so the ask has nothing to ask about there.
+        let seg = |x0: f64| {
+            storey.wall_ids_on_segment(Point2f64::new(x0, 0.0), Point2f64::new(x0 + 1.0, 0.0))
+        };
+        assert_eq!(seg(0.0), vec![exposed_id]);
+        assert!(seg(1.0).is_empty(), "NHL wall never maps to a carve edge");
+        assert!(seg(2.0).is_empty(), "InterStorey wall never maps either");
+        // Carve pick over a ring enclosing all three: only the in-scope wall.
+        let ring = [
+            Point2f64::new(-1.0, -1.0),
+            Point2f64::new(4.0, -1.0),
+            Point2f64::new(4.0, 1.0),
+            Point2f64::new(-1.0, 1.0),
+        ];
+        assert_eq!(
+            storey.surfaces_in_ring(SurfaceKind::Walls, &ring),
+            vec![exposed_id]
+        );
+
+        // Completeness: only the in-scope wall is remaining; attributing IT
+        // alone turns the kind complete — the others are not-applicable.
+        let remaining = ber.incomplete_surface_ids(0, SurfaceKind::Walls);
+        assert_eq!(remaining, vec![exposed_id]);
+        assert!(!remaining.contains(&nhl_id) && !remaining.contains(&inter_id));
+        assert!(!ber.structure_surfaces_complete(0, SurfaceKind::Walls));
+        let done = ber.ensure_wall_construction(
+            WallConstructionType::CavityWall,
+            ConstructionMakeup::Default,
+            ConstructionPhase::default(),
+        );
+        ber.storeys[0].walls.regions[0].construction_id = done;
+        assert!(
+            ber.structure_surfaces_complete(0, SurfaceKind::Walls),
+            "green with the NHL/InterStorey walls unattributed"
+        );
+
+        // PROGRESS counter ("N/M complete"): both numbers count only the
+        // in-scope walls. With the Exposed wall attributed: 1/1. Adding a
+        // second in-scope wall that stays unattributed: 1/2 — the NHL and
+        // InterStorey walls appear in neither number.
+        assert_eq!(
+            ber.structure_surface_progress(0, SurfaceKind::Walls),
+            (1, 1)
+        );
+        ber.storeys[0]
+            .walls
+            .regions
+            .push(mk(3.0, WallExposure::Exposed));
+        assert_eq!(
+            ber.structure_surface_progress(0, SurfaceKind::Walls),
+            (1, 2),
+            "1 attributed + 1 unattributed in-scope + NHL/InterStorey → 1/2"
+        );
+        assert_eq!(
+            ber.structure_surface_progress(9, SurfaceKind::Walls),
+            (0, 0),
+            "out-of-range storey reads 0/0"
+        );
+    }
+
+    /// The horizontal mirror of the walls scope test: PARTY ceilings /
+    /// NON-HEAT-LOSS floors (another dwelling — no heat loss) and the derived
+    /// `InterStorey` junctions are OUT of structure scope — skipped by the
+    /// Select-all seed, the carve pick, the structure tap and completeness —
+    /// while the plain exposure tap (`surface_at`, shared with the
+    /// Mapping-phase exposure painting) still reaches them to repaint.
+    #[test]
+    fn out_of_scope_floors_and_ceilings_skip_structure_queries() {
+        let mut ber = Ber::default();
+        ber.storeys.push(Storey::default());
+        let floor_sq = |x0: f64| {
+            geo::Polygon::new(
+                geo::LineString::from(vec![(x0, 0.0), (x0 + 1.0, 0.0), (x0 + 1.0, 1.0), (x0, 1.0)]),
+                vec![],
+            )
+        };
+        let mk_floor = |x0: f64, exposure: FloorExposure| FloorRegion {
+            id: ItemId::default(),
+            polygon: floor_sq(x0),
+            construction_id: ItemId::default(),
+            level_m: 0.0,
+            exposure,
+        };
+        let ceil_sq = |x0: f64| {
+            Polygon3D::new(vec![
+                Point3f64::new(x0, 0.0, 2.4),
+                Point3f64::new(x0 + 1.0, 0.0, 2.4),
+                Point3f64::new(x0 + 1.0, 1.0, 2.4),
+                Point3f64::new(x0, 1.0, 2.4),
+            ])
+        };
+        let mk_ceiling = |x0: f64, exposure: CeilingExposure| CeilingRegion {
+            id: ItemId::default(),
+            polygon: ceil_sq(x0),
+            opes: Opes::default(),
+            construction_id: ItemId::default(),
+            exposure,
+        };
+        let in_floor = mk_floor(0.0, FloorExposure::Ground);
+        let nhl_floor = mk_floor(1.0, FloorExposure::NonHeatLoss);
+        let inter_floor = mk_floor(2.0, FloorExposure::InterStorey);
+        let in_ceiling = mk_ceiling(0.0, CeilingExposure::ExposedRoof);
+        let party_ceiling = mk_ceiling(1.0, CeilingExposure::Party);
+        let inter_ceiling = mk_ceiling(2.0, CeilingExposure::InterStorey);
+        let (in_floor_id, in_ceiling_id) = (in_floor.id, in_ceiling.id);
+        let party_ceiling_id = party_ceiling.id;
+        ber.storeys[0].floors.regions = vec![in_floor, nhl_floor, inter_floor];
+        ber.storeys[0].ceilings.regions = vec![in_ceiling, party_ceiling, inter_ceiling];
+        let storey = &ber.storeys[0];
+
+        // Select-all seed + carve pick: in-scope only.
+        assert_eq!(storey.surface_ids(SurfaceKind::Floors), vec![in_floor_id]);
+        assert_eq!(
+            storey.surface_ids(SurfaceKind::Ceilings),
+            vec![in_ceiling_id]
+        );
+        let ring = [
+            Point2f64::new(-1.0, -1.0),
+            Point2f64::new(4.0, -1.0),
+            Point2f64::new(4.0, 2.0),
+            Point2f64::new(-1.0, 2.0),
+        ];
+        assert_eq!(
+            storey.surfaces_in_ring(SurfaceKind::Floors, &ring),
+            vec![in_floor_id]
+        );
+        assert_eq!(
+            storey.surfaces_in_ring(SurfaceKind::Ceilings, &ring),
+            vec![in_ceiling_id]
+        );
+        // The STRUCTURE tap misses an out-of-scope surface; the plain
+        // exposure tap still reaches it (to repaint the classification).
+        assert_eq!(
+            storey.structure_surface_at(SurfaceKind::Ceilings, 1.5, 0.5, 0.0),
+            None,
+            "the structure tap doesn\'t offer the party ceiling"
+        );
+        assert_eq!(
+            storey.surface_at(SurfaceKind::Ceilings, 1.5, 0.5, 0.0),
+            Some(party_ceiling_id),
+            "the exposure tap still reaches it"
+        );
+        assert_eq!(
+            storey.structure_surface_at(SurfaceKind::Ceilings, 0.5, 0.5, 0.0),
+            Some(in_ceiling_id)
+        );
+
+        // Completeness: only the in-scope surfaces are applicable.
+        assert_eq!(
+            ber.incomplete_surface_ids(0, SurfaceKind::Floors),
+            vec![in_floor_id]
+        );
+        assert_eq!(
+            ber.incomplete_surface_ids(0, SurfaceKind::Ceilings),
+            vec![in_ceiling_id]
+        );
+        assert_eq!(
+            ber.structure_surface_progress(0, SurfaceKind::Floors),
+            (0, 1)
+        );
+        assert_eq!(
+            ber.structure_surface_progress(0, SurfaceKind::Ceilings),
+            (0, 1)
+        );
+        let done_floor = ber.ensure_floor_construction(
+            FloorConstructionType::SolidFloor,
+            ConstructionMakeup::Default,
+            ConstructionPhase::default(),
+        );
+        ber.storeys[0].floors.regions[0].construction_id = done_floor;
+        assert!(
+            ber.structure_surfaces_complete(0, SurfaceKind::Floors),
+            "green with the NHL/InterStorey floors unattributed"
+        );
+    }
+
+    /// NAME-INTEGRITY: a construction name implies its attributes. Renaming a
+    /// same-kind construction to a name another one holds is rejected with a
+    /// hint (a colliding name always means different attributes — identical
+    /// attributes find-or-create into ONE shared entry, so no duplicate ever
+    /// exists to merge). Self-renames, other-kind reuse and clearing are fine.
+    #[test]
+    fn construction_rename_enforces_name_integrity() {
+        let mut ber = Ber::default();
+        ber.storeys.push(Storey::default());
+        let brick = ber.ensure_wall_construction(
+            WallConstructionType::CavityWall,
+            ConstructionMakeup::Default,
+            ConstructionPhase::default(),
+        );
+        let block = ber.ensure_wall_construction(
+            WallConstructionType::ConcreteHollowBlocks,
+            ConstructionMakeup::Default,
+            ConstructionPhase::default(),
+        );
+        assert_ne!(brick, block, "different attributes → distinct entries");
+        // Identical UNNAMED attributes never duplicate (same name + same
+        // attributes IS the same group)…
+        assert_eq!(
+            brick,
+            ber.ensure_wall_construction(
+                WallConstructionType::CavityWall,
+                ConstructionMakeup::Default,
+                ConstructionPhase::default(),
+            )
+        );
+        // …but the NAME is part of the identity: the same fabric under a
+        // different name is a DIFFERENT group (e.g. "Porch roof" vs "Main
+        // house roof", both sloped/default/original).
+        let named_twin = ber.ensure_wall_construction_named(
+            WallConstructionType::CavityWall,
+            ConstructionMakeup::Default,
+            ConstructionPhase::default(),
+            Some("Twin"),
+        );
+        assert_ne!(brick, named_twin, "same fabric, different name → distinct");
+        assert_eq!(
+            named_twin,
+            ber.ensure_wall_construction_named(
+                WallConstructionType::CavityWall,
+                ConstructionMakeup::Default,
+                ConstructionPhase::default(),
+                Some("  Twin "),
+            ),
+            "trimmed name variants find the same group"
+        );
+
+        // A name is only HELD by a construction some region still references —
+        // give brick and block members (the rename rule is member-scoped).
+        let mk = |x0: f64, cid: ItemId| WallRegion {
+            id: ItemId::default(),
+            polygon: Polygon3D::new(vec![
+                Point3f64::new(x0, 0.0, 0.0),
+                Point3f64::new(x0 + 1.0, 0.0, 0.0),
+                Point3f64::new(x0 + 1.0, 0.0, 2.4),
+                Point3f64::new(x0, 0.0, 2.4),
+            ]),
+            exposure: WallExposure::Exposed,
+            opes: Opes::default(),
+            construction_id: cid,
+        };
+        ber.storeys[0].walls.regions = vec![mk(0.0, brick), mk(1.0, block)];
+
+        ber.set_construction_name(SurfaceKind::Walls, brick, Some("Brick".into()))
+            .expect("first use of the name");
+        let err = ber
+            .set_construction_name(SurfaceKind::Walls, block, Some("Brick".into()))
+            .expect_err("another wall group already holds \"Brick\"");
+        assert!(err.contains("Brick"), "the hint names the collision: {err}");
+        assert!(
+            err.contains("different name"),
+            "…and says what to do: {err}"
+        );
+        assert_eq!(
+            ber.wall_construction(block).unwrap().base.name,
+            None,
+            "the rejected rename left the name untouched"
+        );
+        // Whitespace variants are the same name.
+        assert!(ber
+            .set_construction_name(SurfaceKind::Walls, block, Some("  Brick ".into()))
+            .is_err());
+        // Re-asserting a group's OWN name is a no-op success.
+        ber.set_construction_name(SurfaceKind::Walls, brick, Some("Brick".into()))
+            .expect("self-rename is not a collision");
+        // Another KIND may reuse the name; clearing always succeeds.
+        let floor = ber.ensure_floor_construction(
+            FloorConstructionType::SolidFloor,
+            ConstructionMakeup::Default,
+            ConstructionPhase::default(),
+        );
+        ber.set_construction_name(SurfaceKind::Floors, floor, Some("Brick".into()))
+            .expect("names are per kind");
+        ber.set_construction_name(SurfaceKind::Walls, block, None)
+            .expect("clearing is always fine");
+        // The holder lookup the shell's same-group acceptance uses.
+        assert_eq!(
+            ber.named_construction_attrs(SurfaceKind::Walls, "Brick"),
+            Some((
+                ConstructionType::Wall(WallConstructionType::CavityWall),
+                ConstructionMakeup::Default,
+                ConstructionPhase::default(),
+            ))
+        );
+        assert_eq!(
+            ber.named_construction_attrs(SurfaceKind::Walls, "nope"),
+            None
+        );
+    }
+
     #[test]
     fn specified_build_up_needs_a_photo_but_default_and_unknown_do_not() {
         // Only a SPECIFIED custom (Layers) build-up requires a backing photo.

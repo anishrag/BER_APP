@@ -36,7 +36,7 @@ use crate::number_entry::bluetooth::{LaserSource, Status};
 use crate::number_entry::{apply, parse_dimension_expression, Key};
 use crate::ui::pages::events::UiEvent;
 use crate::ui::widgets::HintExt;
-use crate::ui::widgets::{photo_button, PhotoConfig, PhotoQuality};
+use crate::ui::widgets::{photo_button_pair, PhotoQuality};
 use ber_model::ber::common::ItemId;
 use ber_model::ber::fenestration::{Frame, Glazing, Overshading};
 
@@ -192,7 +192,6 @@ pub(super) fn render<F: FnMut(UiEvent)>(
         // Photos picked so far for this placement, captured by value into the
         // events (the photo button below adds to the list for a later frame).
         let photos = view.pending_window_photos.clone();
-        let photo_quality = PhotoQuality::High;
         let place_window_type = window_type.clone();
         let place_photos = photos.clone();
         let mut actions = vec![Action::new_multi("Place", "Place this opening", move |vs| {
@@ -211,7 +210,6 @@ pub(super) fn render<F: FnMut(UiEvent)>(
                 window_type: place_window_type.clone(),
                 overshading,
                 photos: place_photos.clone(),
-                photo_quality,
             }
         })
         .primary()
@@ -227,7 +225,6 @@ pub(super) fn render<F: FnMut(UiEvent)>(
                         window_type: fill_window_type.clone(),
                         overshading,
                         photos: fill_photos.clone(),
-                        photo_quality,
                     },
                 )
                 .bare()
@@ -981,10 +978,14 @@ fn overshading_picker(ui: &mut egui::Ui, overshading: &mut Overshading) {
 /// camera on Android). The paths are attached to the window type on Place. At
 /// least one is required for a NEW group (`required`); adding to an existing
 /// group is optional.
-fn window_photo_picker(ui: &mut egui::Ui, pending: &mut Vec<std::path::PathBuf>, required: bool) {
+fn window_photo_picker(
+    ui: &mut egui::Ui,
+    pending: &mut Vec<(std::path::PathBuf, PhotoQuality)>,
+    required: bool,
+) {
     ui.horizontal(|ui| {
         ui.label("photo");
-        for p in pending.iter() {
+        for (p, _quality) in pending.iter() {
             let src = p.to_string_lossy();
             ui.add(
                 egui::Image::new(format!("file://{src}"))
@@ -993,15 +994,9 @@ fn window_photo_picker(ui: &mut egui::Ui, pending: &mut Vec<std::path::PathBuf>,
                     .corner_radius(3.0),
             );
         }
-        if let Some(path) = photo_button(
-            ui,
-            "📷 Add photo",
-            true,
-            PhotoConfig {
-                default_quality: PhotoQuality::High,
-            },
-        ) {
-            pending.push(path);
+        // TEMPORARY dual hi/lo capture (see `photo_button_pair`).
+        if let Some(captured) = photo_button_pair(ui, "📷 Add photo", true, PhotoQuality::High) {
+            pending.push(captured);
         }
     });
     if required && pending.is_empty() {

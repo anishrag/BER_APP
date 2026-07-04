@@ -239,30 +239,41 @@ impl AppController {
 }
 
 /// Ids of wall regions (across all storeys) referencing construction `cid`.
+/// Walls out of structure scope (`WallExposure::in_structure_scope` —
+/// non-heat-loss / inter-storey) are omitted: the review neither lists nor
+/// highlights them, and a construction referenced only by such walls is
+/// skipped entirely (its id set comes back empty).
 fn wall_region_ids(data: &Ber, cid: ItemId) -> HashSet<ItemId> {
     data.storeys
         .iter()
         .flat_map(|s| s.walls.regions.iter())
+        .filter(|r| r.exposure.in_structure_scope())
         .filter(|r| r.construction_id == cid)
         .map(|r| r.id)
         .collect()
 }
 
 /// Ids of floor regions (across all storeys) referencing construction `cid`.
+/// Out-of-scope floors (party / derived inter-storey) are omitted — same
+/// contract as [`wall_region_ids`].
 fn floor_region_ids(data: &Ber, cid: ItemId) -> HashSet<ItemId> {
     data.storeys
         .iter()
         .flat_map(|s| s.floors.regions.iter())
+        .filter(|r| r.exposure.in_structure_scope())
         .filter(|r| r.construction_id == cid)
         .map(|r| r.id)
         .collect()
 }
 
 /// Ids of roof/ceiling regions (across all storeys) referencing construction `cid`.
+/// Out-of-scope ceilings (party / derived inter-storey) are omitted — same
+/// contract as [`wall_region_ids`].
 fn ceiling_region_ids(data: &Ber, cid: ItemId) -> HashSet<ItemId> {
     data.storeys
         .iter()
         .flat_map(|s| s.ceilings.regions.iter())
+        .filter(|r| r.exposure.in_structure_scope())
         .filter(|r| r.construction_id == cid)
         .map(|r| r.id)
         .collect()

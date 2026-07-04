@@ -454,10 +454,11 @@ pub enum SketchEvent {
         window_type: WindowTypeChoice,
         /// Per-window overshading (DEAP solar-gain input), defaulting to Average.
         overshading: Overshading,
-        /// Source paths of photos picked in the box, attached to the window(s)
-        /// this placement creates. Ignored for a plain Door.
-        photos: Vec<std::path::PathBuf>,
-        photo_quality: crate::ui::widgets::PhotoQuality,
+        /// Source paths of photos picked in the box (each with the capture
+        /// tier its button asked for — see the TEMPORARY dual hi/lo buttons,
+        /// `photo_button_pair`), attached to the window(s) this placement
+        /// creates. Ignored for a plain Door.
+        photos: Vec<(std::path::PathBuf, crate::ui::widgets::PhotoQuality)>,
     },
     /// Abandon the in-flight placement.
     CancelOpeningPlacement,
@@ -469,8 +470,7 @@ pub enum SketchEvent {
         /// Per-window overshading (see [`Self::PlaceOpening`]).
         overshading: Overshading,
         /// Photos to attach to the window-wall (see [`Self::PlaceOpening`]).
-        photos: Vec<std::path::PathBuf>,
-        photo_quality: crate::ui::widgets::PhotoQuality,
+        photos: Vec<(std::path::PathBuf, crate::ui::widgets::PhotoQuality)>,
     },
     /// Plan drag / release while a ROOF window is grabbed (Edit-on-surface).
     OpeningsPointerDrag {
@@ -542,13 +542,13 @@ pub enum SketchEvent {
     CloseObjectRoom,
     /// Rename the open object room.
     RenameObjectRoom(String),
-    /// Add an object to the open room: its kind, count, optional note, and photos.
+    /// Add an object to the open room: its kind, count, optional note, and
+    /// photos (each with its capture tier — see [`Self::PlaceOpening`]).
     AddObject {
         kind: ObjectKind,
         count: u32,
         note: Option<String>,
-        photos: Vec<std::path::PathBuf>,
-        photo_quality: crate::ui::widgets::PhotoQuality,
+        photos: Vec<(std::path::PathBuf, crate::ui::widgets::PhotoQuality)>,
     },
     /// Delete one object from a room (the Delete panel).
     DeleteObject {
@@ -657,6 +657,15 @@ pub enum SketchEvent {
         world_y: f64,
         tol: f64,
     },
+    /// Structure phase, ALL-STOREYS tab: toggle the surface under a tap that
+    /// landed in storey `storey_idx`'s cell (coords already in that storey's
+    /// own world frame — the canvas inverted the cell's transform).
+    StructureSurfaceTapAllStoreys {
+        storey_idx: usize,
+        world_x: f64,
+        world_y: f64,
+        tol: f64,
+    },
     /// Structure phase: clear every selected surface ("Deselect all").
     DeselectAllStructure,
     /// Structure phase (Carve subtool): a drawn stroke in world coords. Carves
@@ -665,6 +674,14 @@ pub enum SketchEvent {
     /// `ChooseStructureCutRegion`).
     StructureCarveStrokeWorld {
         points: Vec<(f32, f32)>,
+    },
+    /// Structure phase (Carve subtool) on the ALL-STOREYS tab: one drawn
+    /// LASSO stroke, converted to EVERY storey's own world frame (index =
+    /// storey index; each all-storeys cell has its own screen↔world
+    /// transform). The controller closes the ring, clips it per storey, and
+    /// stages the clipped regions as a cross-storey selection.
+    StructureLassoStrokeWorld {
+        per_storey: Vec<Vec<(f32, f32)>>,
     },
     /// Structure phase: pick which carved candidate region to select from.
     ChooseStructureCutRegion {
@@ -695,6 +712,17 @@ pub enum SketchEvent {
     SetStructureGroupName {
         group: usize,
         name: String,
+    },
+    /// Structure phase: "New group" on a FRESH group box — skip the
+    /// existing-group offer and open the full attribute editor for `group`.
+    BeginNewStructureGroup {
+        group: usize,
+    },
+    /// Structure phase: RESET a session-fresh group box back to the two-mode
+    /// entry — detaches this selection's attribution (the shared construction
+    /// itself is untouched) and clears the session mirror.
+    ResetStructureGroup {
+        group: usize,
     },
     /// Structure phase: set a group's boundary-condition EXPOSURE (kind-tagged);
     /// applies to that group's surfaces.
@@ -852,6 +880,20 @@ pub enum SketchEvent {
     /// Remove the external photo for `side`.
     RemoveExternalPhoto {
         side: ExternalSide,
+    },
+    /// Open the paintbrush ANNOTATION takeover for `side`'s external photo
+    /// (the "🖌" affordance wherever external photos are shown). Handled by the
+    /// app shell, not the controller: it decodes the stored image into the
+    /// page-state annotator (`SketchState::photo_annotator`).
+    BeginAnnotateExternalPhoto {
+        side: ExternalSide,
+    },
+    /// Save the annotation session: `jpeg` is the stored image re-encoded with
+    /// the strokes burned in at image resolution. The controller writes it into
+    /// the photo store and REPLACES `side`'s external photo.
+    AnnotateExternalPhoto {
+        side: ExternalSide,
+        jpeg: Vec<u8>,
     },
 }
 
@@ -1123,9 +1165,10 @@ pub struct SketchView<'a> {
     /// Per-window overshading selected in the placement box. See
     /// [`crate::ui::app::SketchState`].
     pub overshading: &'a mut Overshading,
-    /// Photos picked in the placement box for the window being placed. See
-    /// [`crate::ui::app::SketchState`].
-    pub pending_window_photos: &'a mut Vec<std::path::PathBuf>,
+    /// Photos picked in the placement box for the window being placed, each
+    /// with the capture tier its button asked for (TEMPORARY dual hi/lo
+    /// buttons). See [`crate::ui::app::SketchState`].
+    pub pending_window_photos: &'a mut Vec<(std::path::PathBuf, crate::ui::widgets::PhotoQuality)>,
     /// Window types already in use on the record — offered in the placement box's
     /// picker so a new window can JOIN an existing type. Empty when none exist.
     pub existing_window_types: Vec<ExistingWindowType>,
@@ -1207,7 +1250,12 @@ pub struct SketchView<'a> {
     pub object_count_input: &'a mut String,
     pub object_note_input: &'a mut String,
     pub object_other_name: &'a mut String,
-    pub object_pending_photos: &'a mut Vec<std::path::PathBuf>,
+    pub object_pending_photos: &'a mut Vec<(std::path::PathBuf, crate::ui::widgets::PhotoQuality)>,
+    /// The open external-photo ANNOTATION session (paintbrush over a photo), or
+    /// `None`. Lives on [`crate::ui::app::SketchState`]; opened by
+    /// [`SketchEvent::BeginAnnotateExternalPhoto`], drawn as a takeover window
+    /// over the canvas, closed by its own Save/Cancel.
+    pub photo_annotator: &'a mut Option<crate::ui::widgets::PhotoAnnotator>,
     /// Whether any object pin exists house-wide — gates the Objects "Review" entry.
     pub objects_present: bool,
     /// The open Objects-REVIEW takeover (house-wide counts + selected-kind 3D
@@ -1216,6 +1264,9 @@ pub struct SketchView<'a> {
     /// Current storey's wall / roof / floor counts — the Structure-phase tool
     /// read-out.
     pub surface_counts: SurfaceCounts,
+    /// Per-kind "attributed/total" Structure progress (in-scope surfaces only)
+    /// — the mode buttons' "Walls · 3/12" counters.
+    pub structure_progress: crate::controller::app_controller::StructureProgress,
     /// The active Structure-phase MODES (Walls/Ceilings/Floors; non-exclusive), so
     /// the panel shows which are selected.
     pub structure_kinds: std::collections::BTreeSet<SurfaceKind>,
@@ -1240,6 +1291,10 @@ pub struct SketchView<'a> {
     /// the pending selection until "Edit attributes" commits them. Empty when
     /// no carve is staged.
     pub pending_structure_carves: &'a [Vec<(f64, f64)>],
+    /// The staged carve rings TAGGED by storey (each in its storey's own
+    /// world frame) — the all-storeys canvas shades each into its cell. Empty
+    /// off the all-storeys tab.
+    pub pending_structure_carves_by_storey: &'a [(usize, Vec<(f64, f64)>)],
     /// The wall-inclusion ask for a just-dimensioned structure carve: the
     /// current ambiguous edge (highlighted on the canvas) plus its "wall N of
     /// M" cursor; the panel shows Include / Exclude. `None` when nothing is
@@ -1395,6 +1450,16 @@ impl SketchPage {
         egui::CentralPanel::default().show_inside(ui, |ui| {
             let canvas_rect = ui.max_rect();
             canvas::render(ui, &view, touch, &mut on_event);
+            // External-photo ANNOTATION takeover (paintbrush over the photo):
+            // a centred floating window over the canvas while a session is
+            // open. Saves via `AnnotateExternalPhoto`; Save/Cancel both close
+            // the session by clearing the slot.
+            crate::ui::widgets::photo_annotate::render(
+                ui.ctx(),
+                canvas_rect,
+                &mut *view.photo_annotator,
+                &mut on_event,
+            );
             // The floating number-entry box: every single-value measurement
             // prompt is typed here, in a draggable window over the canvas
             // (constrained to it), rather than in the bottom prompt dock.

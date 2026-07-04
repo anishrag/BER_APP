@@ -14,13 +14,13 @@
 use ber_model::ber::common::ConstructionPhase;
 use ber_model::ber::structural::{
     CeilingConstructionType, CeilingExposure, CeilingInsulation, ConstructionLayer,
-    ConstructionMakeup, ConstructionType, FloorConstructionType, FloorExposure, SurfaceCounts,
-    SurfaceExposure, WallConstructionType, WallExposure,
+    ConstructionMakeup, ConstructionType, FloorConstructionType, FloorExposure, SurfaceExposure,
+    WallConstructionType, WallExposure,
 };
 
 use super::SketchEvent;
 use crate::controller::app_controller::{
-    EditGroup, ExistingGroup, SelectMode, StructureEdit, SurfaceKind,
+    EditGroup, ExistingGroup, SelectMode, StructureEdit, StructureProgress, SurfaceKind,
 };
 use crate::ui::pages::events::UiEvent;
 
@@ -78,33 +78,61 @@ const CEILING_TYPES: &[CeilingConstructionType] = &[
     CeilingConstructionType::Other,
 ];
 
-/// Label for an existing-group entry in the "Add to existing group" picker:
-/// the group's name if it has one, else its construction-type label.
+/// JOIN an existing group: apply its `(type, make-up, phase)` to `group_index`
+/// (the surfaces then share its construction) and adopt its stored name so the
+/// editor visibly reflects the join. Shared by the fresh box's "Existing
+/// group…" dropdown and the full editor's "Add to existing group…" combo.
+fn emit_join_existing<F: FnMut(UiEvent)>(on_event: &mut F, group_index: usize, eg: &ExistingGroup) {
+    on_event(UiEvent::Sketch(SketchEvent::SetStructureGroupAttrs {
+        group: group_index,
+        ty: eg.ty,
+        makeup: eg.makeup.clone(),
+        phase: eg.phase.clone(),
+    }));
+    if let Some(n) = eg.name.as_ref().map(|s| s.trim()).filter(|s| !s.is_empty()) {
+        on_event(UiEvent::Sketch(SketchEvent::SetStructureGroupName {
+            group: group_index,
+            name: n.to_string(),
+        }));
+    }
+}
+
+/// The label an existing group is offered under — its NAME, first and
+/// foremost (names are the assessor's own handles for their groups). A group
+/// that was never named still has a real identity (its attributes), so it
+/// stays offered, but under a clearly-marked fallback — "(unnamed) Cavity" —
+/// so picking it is an informed choice, never mistakable for a named group.
 fn existing_group_label(eg: &ExistingGroup) -> String {
     if let Some(n) = eg.name.as_ref().map(|s| s.trim()).filter(|s| !s.is_empty()) {
         return n.to_string();
     }
-    match eg.ty {
+    let type_label = match eg.ty {
         ConstructionType::Wall(t) => t.label(),
         ConstructionType::Floor(t) => t.label(),
         ConstructionType::Ceiling(t) => t.label(),
-    }
-    .to_string()
+    };
+    format!("(unnamed) {type_label}")
 }
 
 /// Render the Structure tool area: the global MODE row + the global SELECT row +
 /// the "Edit attributes" group editor (when a session is open). `kind` is the
 /// active mode; `select` the active Select subtool; `edit` the in-flight session;
-/// `enabled` gates interaction.
+/// `enabled` gates interaction. Each mode button carries its kind's
+/// "attributed/total" progress counter ("Walls · 3/12" — in-scope surfaces
+/// only, per [`StructureProgress`]).
 pub fn structure_panel<F: FnMut(UiEvent)>(
     ui: &mut egui::Ui,
     kinds: &std::collections::BTreeSet<SurfaceKind>,
     select: Option<SelectMode>,
     edit: Option<&StructureEdit>,
-    counts: SurfaceCounts,
+    progress: StructureProgress,
     phases: &[(ConstructionPhase, String)],
     existing: &[ExistingGroup],
     enabled: bool,
+    // The All-storeys tab: the canvas hosts no per-group floating windows
+    // there, so an open edit session is edited HERE in the panel (group
+    // selector + active group's editor, like the exploded view).
+    all_storeys: bool,
     on_event: &mut F,
 ) {
     ui.label(egui::RichText::new("Mode").size(11.0).weak());
@@ -114,11 +142,11 @@ pub fn structure_panel<F: FnMut(UiEvent)>(
         // Floors). The event toggles; the controller keeps ≥1 active.
         for (m, label) in MODES {
             let active = kinds.contains(m);
-            let count = count_for(*m, counts);
+            let (done, total) = progress_for(*m, progress);
             if ui
                 .add_enabled(
                     enabled,
-                    egui::Button::selectable(active, format!("{label}  ·  {count}")),
+                    egui::Button::selectable(active, format!("{label}  ·  {done}/{total}")),
                 )
                 .clicked()
             {
@@ -161,7 +189,7 @@ pub fn structure_panel<F: FnMut(UiEvent)>(
                 on_event(UiEvent::Sketch(SketchEvent::BeginStructureEdit));
             }
         }
-        Some(e) => edit_session(ui, e, phases, existing, enabled, on_event),
+        Some(e) => edit_session(ui, e, phases, existing, enabled, all_storeys, on_event),
     }
 }
 
@@ -179,6 +207,7 @@ fn edit_session<F: FnMut(UiEvent)>(
     phases: &[(ConstructionPhase, String)],
     existing: &[ExistingGroup],
     enabled: bool,
+    all_storeys: bool,
     on_event: &mut F,
 ) {
     ui.label(
@@ -186,7 +215,9 @@ fn edit_session<F: FnMut(UiEvent)>(
             .size(11.0)
             .weak(),
     );
-    if e.exploded {
+    // The exploded view hosts the editor here; so does the ALL-STOREYS tab
+    // (its canvas draws every storey's cell — no per-group floating windows).
+    if e.exploded || all_storeys {
         // Group selector (one active at a time) + the active group's editor.
         if e.groups.len() > 1 {
             ui.horizontal_wrapped(|ui| {
@@ -210,6 +241,10 @@ fn edit_session<F: FnMut(UiEvent)>(
                 phases,
                 existing,
                 enabled,
+                e.name_error
+                    .as_ref()
+                    .filter(|(gi, _)| *gi == e.active)
+                    .map(|(_, m)| m.as_str()),
                 on_event,
             );
         }
@@ -221,21 +256,12 @@ fn edit_session<F: FnMut(UiEvent)>(
         );
     }
     ui.add_space(2.0);
-    // Completing is GATED on the ceiling-insulation rule (`StructureEdit::
-    // blocker`): Done disables with the reason inline (the controller refuses
-    // the event too, belt-and-braces).
-    let blocker = e.blocker();
-    if let Some(msg) = blocker {
-        ui.label(
-            egui::RichText::new(msg)
-                .size(11.0)
-                .color(ui.visuals().warn_fg_color),
-        );
-    }
-    if ui
-        .add_enabled(enabled && blocker.is_none(), egui::Button::new("Done"))
-        .clicked()
-    {
+    // Done ALWAYS closes the session — an untouched/half-filled group is a
+    // legitimate exit (the assessor may reselect and attribute one by one).
+    // It just stays INCOMPLETE: no tick, still counted by `Remaining` and the
+    // checklist. The group boxes keep their inline warn hints (e.g. the
+    // ceiling-insulation row's) as guidance, not a lock.
+    if ui.add_enabled(enabled, egui::Button::new("Done")).clicked() {
         on_event(UiEvent::Sketch(SketchEvent::EndStructureEdit));
     }
 }
@@ -256,10 +282,16 @@ pub(crate) fn group_editor_ui<F: FnMut(UiEvent)>(
     phases: &[(ConstructionPhase, String)],
     existing: &[ExistingGroup],
     enabled: bool,
+    // The name-integrity rejection hint for THIS group, if its last rename
+    // collided with another group's name — shown under the name box.
+    name_error: Option<&str>,
     on_event: &mut F,
 ) {
     // Heading level 1: the surface kind + the group's surface COUNT — centred,
-    // bold (e.g. "Wall (3)").
+    // bold (e.g. "Wall (3)"). When every attribute of the group's construction
+    // is fully set ([`EditGroup::is_complete`] — same predicate as the
+    // checklist, incl. the ceiling-insulation gate), a tick sits at the TOP
+    // RIGHT of the box (the checklist's green, same glyph).
     ui.vertical_centered(|ui| {
         ui.label(
             egui::RichText::new(format!("{} ({})", kind_heading(kind), g.ids.len()))
@@ -267,6 +299,56 @@ pub(crate) fn group_editor_ui<F: FnMut(UiEvent)>(
                 .strong(),
         );
     });
+    if g.is_complete() {
+        let top_right = ui.max_rect().right_top();
+        ui.painter().text(
+            top_right + egui::vec2(-2.0, 0.0),
+            egui::Align2::RIGHT_TOP,
+            "✓",
+            egui::FontId::proportional(EDITOR_FONT + 3.0),
+            // Same green as the checklist's "all storeys done" dot / phase tick.
+            egui::Color32::from_rgb(80, 180, 95),
+        );
+    }
+
+    let relevant: Vec<&ExistingGroup> = existing.iter().filter(|e| e.ty.kind() == kind).collect();
+
+    // TWO-MODE ENTRY for a fresh group (nothing attributed yet, and there IS
+    // something to join): just an "Existing group…" dropdown — picking one
+    // assigns this selection to that construction and fills the box with its
+    // details — plus a "New group" button that opens the full editor below.
+    if !g.show_editor && !relevant.is_empty() {
+        ui.add_enabled_ui(enabled, |ui| {
+            egui::ComboBox::from_id_salt(("structure_join_existing", group_index))
+                .selected_text(egui::RichText::new("Existing group…").size(EDITOR_FONT))
+                .show_ui(ui, |ui| {
+                    for eg in &relevant {
+                        if ui
+                            .selectable_label(
+                                false,
+                                egui::RichText::new(existing_group_label(eg)).size(EDITOR_FONT),
+                            )
+                            .clicked()
+                        {
+                            emit_join_existing(on_event, group_index, eg);
+                        }
+                    }
+                });
+        });
+        if ui
+            .add_enabled(
+                enabled,
+                egui::Button::new(egui::RichText::new("New group").size(EDITOR_FONT)),
+            )
+            .clicked()
+        {
+            on_event(UiEvent::Sketch(SketchEvent::BeginNewStructureGroup {
+                group: group_index,
+            }));
+        }
+        return;
+    }
+
     // Heading level 2: the editable group name (defaults to "Group N").
     let mut name = g.name.clone();
     let renamed = ui
@@ -281,13 +363,24 @@ pub(crate) fn group_editor_ui<F: FnMut(UiEvent)>(
             name: name.clone(),
         }));
     }
+    // Name-integrity rejection: the durable name kept its last valid value;
+    // the hint tells the assessor why this one didn't stick.
+    if let Some(err) = name_error {
+        ui.label(
+            egui::RichText::new(err)
+                .size(11.0)
+                .color(ui.visuals().warn_fg_color),
+        );
+    }
 
     // "Add to an existing group": apply a construction already in use elsewhere
     // (its type + build-up + phase) to this selection, so they share one group /
     // DEAP entry — instead of re-entering the attributes. Picking nothing and
-    // editing the fields below just creates a new group, as before.
-    let relevant: Vec<&ExistingGroup> = existing.iter().filter(|e| e.ty.kind() == kind).collect();
-    if !relevant.is_empty() {
+    // editing the fields below just creates a new group, as before. This is
+    // the "move to existing group" affordance for a box that OPENED already
+    // attributed; a session-fresh box ("New group" flow) doesn't repeat the
+    // offer — its bottom-right Reset returns to the two-mode entry instead.
+    if !relevant.is_empty() && !g.fresh {
         ui.add_enabled_ui(enabled, |ui| {
             egui::ComboBox::from_id_salt(("structure_existing", group_index))
                 .selected_text(egui::RichText::new("Add to existing group…").size(EDITOR_FONT))
@@ -300,23 +393,7 @@ pub(crate) fn group_editor_ui<F: FnMut(UiEvent)>(
                             )
                             .clicked()
                         {
-                            on_event(UiEvent::Sketch(SketchEvent::SetStructureGroupAttrs {
-                                group: group_index,
-                                ty: eg.ty,
-                                makeup: eg.makeup.clone(),
-                                phase: eg.phase.clone(),
-                            }));
-                            // Also adopt the picked group's name so the editor
-                            // visibly reflects the join (attributes alone would
-                            // leave the local name field unchanged).
-                            if let Some(n) =
-                                eg.name.as_ref().map(|s| s.trim()).filter(|s| !s.is_empty())
-                            {
-                                on_event(UiEvent::Sketch(SketchEvent::SetStructureGroupName {
-                                    group: group_index,
-                                    name: n.to_string(),
-                                }));
-                            }
+                            emit_join_existing(on_event, group_index, eg);
                         }
                     }
                 });
@@ -520,6 +597,32 @@ pub(crate) fn group_editor_ui<F: FnMut(UiEvent)>(
             group: group_index,
         }));
     }
+    // Bottom-right RESET — on EVERY box, fresh or attributed: reselecting an
+    // already-attributed surface after Done must still offer starting again
+    // from scratch. It detaches THIS selection's attribution only (a shared
+    // construction — its other members, name, photos — is untouched) and
+    // returns the box to the two-mode entry so the assessor can choose again.
+    // On an attributed box it sits alongside the "Add to existing group…"
+    // combo above: moving to a group and resetting to nothing are different
+    // intents (the combo lives at the top, Reset at the bottom right — no
+    // crowding).
+    ui.with_layout(egui::Layout::right_to_left(egui::Align::Min), |ui| {
+        if ui
+            .add_enabled(
+                enabled,
+                egui::Button::new(egui::RichText::new("Reset").size(EDITOR_FONT)).small(),
+            )
+            .on_hover_text(
+                "Back to \"Existing group / New group\" — un-attributes this \
+                 selection (an existing group itself is untouched)",
+            )
+            .clicked()
+        {
+            on_event(UiEvent::Sketch(SketchEvent::ResetStructureGroup {
+                group: group_index,
+            }));
+        }
+    });
 }
 
 /// The CEILING insulation row of the group editor: the thickness box (mm) +
@@ -665,23 +768,23 @@ pub(crate) fn photos_view_ui<F: FnMut(UiEvent)>(
         });
 
     ui.separator();
-    // "+" adds another photo (the modular capture button). Build-up close-ups
-    // need legible detail, so this site captures at the High tier.
-    let quality = crate::ui::widgets::PhotoQuality::High;
-    if let Some(path) = crate::ui::widgets::photo_button(
-        ui,
-        "➕  Add photo",
-        true,
-        crate::ui::widgets::PhotoConfig {
-            default_quality: quality,
-        },
-    ) {
-        on_event(UiEvent::Sketch(SketchEvent::AddGroupPhoto {
-            group: group_index,
-            path,
-            quality,
-        }));
-    }
+    // "+" adds another photo (the modular capture pair — TEMPORARY hi/lo
+    // buttons, see `photo_button_pair`). Build-up close-ups need legible
+    // detail, so this site's hi tier is High.
+    ui.horizontal(|ui| {
+        if let Some((path, quality)) = crate::ui::widgets::photo_button_pair(
+            ui,
+            "➕  Add photo",
+            true,
+            crate::ui::widgets::PhotoQuality::High,
+        ) {
+            on_event(UiEvent::Sketch(SketchEvent::AddGroupPhoto {
+                group: group_index,
+                path,
+                quality,
+            }));
+        }
+    });
     ui.separator();
     if ui.button("Done").clicked() {
         on_event(UiEvent::Sketch(SketchEvent::EndViewPhotos));
@@ -848,10 +951,41 @@ fn type_label(kind: SurfaceKind) -> &'static str {
     }
 }
 
-fn count_for(kind: SurfaceKind, counts: SurfaceCounts) -> usize {
+fn progress_for(kind: SurfaceKind, progress: StructureProgress) -> (usize, usize) {
     match kind {
-        SurfaceKind::Walls => counts.walls,
-        SurfaceKind::Ceilings => counts.ceilings,
-        SurfaceKind::Floors => counts.floors,
+        SurfaceKind::Walls => progress.walls,
+        SurfaceKind::Ceilings => progress.ceilings,
+        SurfaceKind::Floors => progress.floors,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The existing-group pickers (the fresh box's "Existing group…" dropdown
+    /// and the in-editor "Add to existing group…" combo share this) label
+    /// entries by NAME first; a group that was never named is offered under a
+    /// clearly-marked "(unnamed) <type>" fallback — honest but unmistakable.
+    #[test]
+    fn existing_group_labels_use_names_first() {
+        let named = ExistingGroup {
+            ty: ConstructionType::Wall(WallConstructionType::CavityWall),
+            makeup: ConstructionMakeup::Default,
+            phase: ConstructionPhase::default(),
+            name: Some("Brick".into()),
+        };
+        assert_eq!(existing_group_label(&named), "Brick");
+        let unnamed = ExistingGroup {
+            name: None,
+            ..named.clone()
+        };
+        assert_eq!(existing_group_label(&unnamed), "(unnamed) Cavity");
+        // Whitespace-only names read as unnamed too.
+        let blank = ExistingGroup {
+            name: Some("   ".into()),
+            ..named
+        };
+        assert_eq!(existing_group_label(&blank), "(unnamed) Cavity");
     }
 }

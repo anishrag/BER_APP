@@ -42,7 +42,7 @@ mod roof;
 mod structure;
 mod structure_review;
 
-pub use assessment_phase::{AssessmentPhase, SelectMode};
+pub use assessment_phase::{AssessmentPhase, SelectMode, StructureProgress};
 pub use structure::{
     EditGroup, ExistingGroup, PhotoQuality, StructureEdit, WallInclusionPromptView,
 };
@@ -471,6 +471,11 @@ pub struct AppController {
     /// Include/Exclude edge by edge before the carve stages. `None` when nothing
     /// is being asked. Transient — same clear sites as the pending carves.
     pending_wall_inclusion: Option<structure::WallInclusionPrompt>,
+    /// Wall-inclusion asks QUEUED behind the active one — a cross-storey lasso
+    /// can raise one ask per storey/clipped region, answered in sequence
+    /// (resolving the active ask pops the next). Empty outside the lasso flow.
+    /// Transient — same clear sites as the pending carves.
+    queued_wall_inclusions: Vec<structure::WallInclusionPrompt>,
     /// A Structure-phase straight CUT that split the storey into two candidate
     /// slots (each a dimensionable sub-area); the assessor taps one, which
     /// becomes the in-flight split shape and is then dimensioned. `None` when no
@@ -664,6 +669,7 @@ impl AppController {
             structure_selected: HashSet::new(),
             pending_structure_carves: Vec::new(),
             pending_wall_inclusion: None,
+            queued_wall_inclusions: Vec::new(),
             pending_structure_cut: None,
             structure_split_kind: None,
             structure_edit: None,

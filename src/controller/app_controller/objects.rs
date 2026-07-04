@@ -183,15 +183,15 @@ impl AppController {
         }
     }
 
-    /// Add an object to the open room: store its photos, then push it. `count`
+    /// Add an object to the open room: store its photos (each at the capture
+    /// tier its button asked for — dual hi/lo buttons), then push it. `count`
     /// is clamped to ≥1. No-op if no room is open.
     pub fn add_object(
         &mut self,
         kind: ObjectKind,
         count: u32,
         note: Option<String>,
-        photos: Vec<std::path::PathBuf>,
-        photo_quality: PhotoQuality,
+        photos: Vec<(std::path::PathBuf, PhotoQuality)>,
     ) {
         let Some(room_id) = self.active_object_room else {
             return;
@@ -199,7 +199,7 @@ impl AppController {
         // Store photos up front (needs `&self`) before the mutable borrow.
         let stored: Vec<Photo> = photos
             .iter()
-            .filter_map(|p| self.ingest_photo(p, photo_quality))
+            .filter_map(|(p, quality)| self.ingest_photo(p, *quality))
             .collect();
         let snap = self.current_history_snapshot();
         if let Some(room) = self.object_room_mut(room_id) {

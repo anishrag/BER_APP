@@ -40,7 +40,7 @@ pub use geom::{
 pub use parametric::{Axis, CollinearitySuggestion, ParameterAxis, ParameterId, VertexId};
 pub use poly3d::{Polygon3D, SplitLine3D};
 pub use region::stroke_is_closed;
-pub use simplification::simplify_to_cut;
+pub use simplification::{lasso_ring, simplify_to_cut};
 pub use snap::{
     clear_snap_policy, dist_to_ring, set_snap_policy, snap_stroke_to_ring, snap_stroke_to_segments,
     take_snap_decisions, SnapCandidate, SnapChoice, SnapDecision, SnapKind,

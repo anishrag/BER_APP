@@ -83,6 +83,7 @@ impl AppController {
         self.structure_selected.clear();
         self.pending_structure_carves.clear();
         self.pending_wall_inclusion = None;
+        self.queued_wall_inclusions.clear();
         self.pending_structure_cut = None;
         self.structure_split_kind = None;
         self.close_structure_edit();
@@ -184,4 +185,42 @@ impl AppController {
             .map(Storey::surface_counts)
             .unwrap_or_default()
     }
+
+    /// The Structure-phase header's per-kind "N/M" read-out
+    /// ([`Ber::structure_surface_progress`] — both numbers count only the
+    /// surfaces in structure scope, so e.g. a non-heat-loss wall appears in
+    /// neither). On a specific storey it reads that storey; on the All-storeys
+    /// tab it sums across the stack (the header there describes the whole
+    /// house). Zeroed when no BER is loaded.
+    pub fn structure_progress(&self) -> StructureProgress {
+        let Some(record) = self.current_record.as_ref() else {
+            return StructureProgress::default();
+        };
+        let b = &record.data;
+        let storeys: Vec<usize> = match self.current_storey_idx {
+            Some(i) => vec![i],
+            None => (0..b.storeys.len()).collect(),
+        };
+        let sum = |kind: SurfaceKind| {
+            storeys.iter().fold((0, 0), |(d, t), i| {
+                let (done, total) = b.structure_surface_progress(*i, kind);
+                (d + done, t + total)
+            })
+        };
+        StructureProgress {
+            walls: sum(SurfaceKind::Walls),
+            ceilings: sum(SurfaceKind::Ceilings),
+            floors: sum(SurfaceKind::Floors),
+        }
+    }
+}
+
+/// Per-kind `(attributed, total)` Structure-phase progress — the header
+/// counters' view data ("Walls · 3/12"). Both numbers count only the surfaces
+/// in structure scope (see [`Ber::structure_surface_progress`]).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct StructureProgress {
+    pub walls: (usize, usize),
+    pub ceilings: (usize, usize),
+    pub floors: (usize, usize),
 }

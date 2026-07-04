@@ -341,8 +341,15 @@ pub struct StoreyDoc {
     /// parametric home — it survives the wall re-derivation without the
     /// amend-match.
     #[serde(default, skip_serializing)]
-    pub wall_constructions:
-        HashMap<SurfaceRef, (WallConstructionType, ConstructionMakeup, ConstructionPhase)>,
+    pub wall_constructions: HashMap<
+        SurfaceRef,
+        (
+            WallConstructionType,
+            ConstructionMakeup,
+            ConstructionPhase,
+            Option<String>,
+        ),
+    >,
 
     /// Assigned wall CONSTRUCTION of derived RISER (interior step-face) walls,
     /// keyed by the riser's quantized base edge ([`riser_key`]) — the construction
@@ -357,8 +364,15 @@ pub struct StoreyDoc {
         skip_serializing,
         deserialize_with = "tuple_key_map::deserialize"
     )]
-    pub riser_constructions:
-        HashMap<RiserKey, (WallConstructionType, ConstructionMakeup, ConstructionPhase)>,
+    pub riser_constructions: HashMap<
+        RiserKey,
+        (
+            WallConstructionType,
+            ConstructionMakeup,
+            ConstructionPhase,
+            Option<String>,
+        ),
+    >,
 
     /// Assigned FLOOR construction (type + make-up) per floor region, keyed by
     /// the region's plan [`CentroidKey`] (floors have no perimeter `SurfaceRef`,
@@ -377,8 +391,15 @@ pub struct StoreyDoc {
         skip_serializing,
         deserialize_with = "tuple_key_map::deserialize"
     )]
-    pub floor_constructions:
-        HashMap<CentroidKey, (FloorConstructionType, ConstructionMakeup, ConstructionPhase)>,
+    pub floor_constructions: HashMap<
+        CentroidKey,
+        (
+            FloorConstructionType,
+            ConstructionMakeup,
+            ConstructionPhase,
+            Option<String>,
+        ),
+    >,
 
     /// Assigned CEILING/ROOF construction (type + make-up) per ceiling region,
     /// keyed by the region's plan [`CentroidKey`]. Mirror of
@@ -395,6 +416,7 @@ pub struct StoreyDoc {
             CeilingConstructionType,
             ConstructionMakeup,
             ConstructionPhase,
+            Option<String>,
         ),
     >,
 

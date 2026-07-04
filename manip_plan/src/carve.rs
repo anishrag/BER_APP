@@ -401,7 +401,10 @@ fn build_region(outline: &[Point2f32], pts: &[Point2f32]) -> Result<FloorPlan, E
     let area_diag = geom::bbox_diagonal(pts);
     let cleaned = clean_region_ring(outline, pts);
     if cleaned.len() < 3 {
-        return Err(Error::ExtendError("living area collapsed to a line".into()));
+        // Flow-neutral wording: this finalize serves every carve flow (living
+        // area, phase, floor/ceiling step, exposure) — the controller prefixes
+        // the flow-specific context.
+        return Err(Error::ExtendError("carved area collapsed to a line".into()));
     }
 
     // Anchor the ring at a vertex coinciding with an outline CORNER (a

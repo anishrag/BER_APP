@@ -43,6 +43,12 @@ pub struct EditGroup {
     /// Editable label for the group, defaulting to "Group 1", "Group 2", … —
     /// the assessor can rename it. Session-scoped (reset when the edit reopens).
     pub name: String,
+    /// The group's EXPLICIT name — the construction's stored name / the name
+    /// the assessor typed this session — `None` for an unnamed group (whose
+    /// display [`name`](Self::name) is just the "Group N" fallback). The name
+    /// is part of the construction IDENTITY, so attribute applies carry this
+    /// (full-group edits keep their group; subset edits fork unnamed).
+    pub explicit_name: Option<String>,
     /// The group construction's attached photos (session copy, seeded from the
     /// construction; the photos view shows these and the camera button appends).
     pub photos: Vec<Photo>,
@@ -50,29 +56,52 @@ pub struct EditGroup {
     /// the construction) — the "Insulation thickness (mm)" box + "unknown"
     /// checkbox in the ceiling attribute editor. Always `None` for walls and
     /// floors (they carry no such spec). On a ceiling group `None` means "not
-    /// yet specified", which blocks completing the session
-    /// ([`EditGroup::insulation_blocker`]).
+    /// yet specified", which keeps the group INCOMPLETE
+    /// ([`EditGroup::is_complete`]) — no tick, counted by `Remaining`, the
+    /// checklist row stays red — but never blocks closing the session (the
+    /// box's inline hint is guidance, not a lock).
     pub insulation: Option<CeilingInsulation>,
+    /// Whether the box shows the FULL attribute editor. A FRESH group (its
+    /// selection carries no attribution yet — type and build-up both unset)
+    /// starts `false`: the box offers just an "Existing group…" dropdown plus
+    /// a "New group" button, so joining an already-defined group is one pick
+    /// instead of re-entering its attributes. "New group" (or picking an
+    /// existing group / any attribute apply) flips it `true`; an
+    /// already-attributed group starts `true` (it IS its group). Session
+    /// UI-flow state, not persisted. (With no existing group of the kind to
+    /// offer, the UI falls through to the full editor regardless.)
+    pub show_editor: bool,
+    /// Whether this group OPENED unattributed this session (the two-mode
+    /// entry's starting state). Purely a COMBO-gating detail now: a
+    /// session-fresh group's editor hides the in-editor "Add to existing
+    /// group…" combo (the two-mode entry it came from already offered that
+    /// list), while a group that opened attributed keeps it. The RESET
+    /// button is on EVERY box regardless — reselecting an attributed surface
+    /// after Done must still offer starting again from scratch. Unlike
+    /// [`show_editor`](Self::show_editor) it never flips on an attribute
+    /// apply. Session UI-flow state, not persisted.
+    pub fresh: bool,
 }
 
 impl EditGroup {
-    /// Why THIS group blocks completing the "Edit attributes" session, if
-    /// anything — the ceiling-insulation gate. A ceiling group must have its
-    /// insulation specified (a thickness, or declared unknown), and a
-    /// specified thickness needs a backing photo
-    /// ([`CeilingInsulation::spec_done`]). `None` for wall/floor groups and
-    /// satisfied ceiling groups. The message doubles as the inline hint the
-    /// UI shows beside the disabled Done.
-    pub fn insulation_blocker(&self) -> Option<&'static str> {
-        if self.ty.kind() != SurfaceKind::Ceilings
-            || CeilingInsulation::spec_done(self.insulation, !self.photos.is_empty())
-        {
-            return None;
-        }
-        Some(match self.insulation {
-            Some(CeilingInsulation::ThicknessMm(_)) => "a photo of the insulation is required",
-            _ => "enter the insulation thickness or mark it unknown",
-        })
+    /// Whether every attribute of this group's construction is fully set —
+    /// the group window's top-right tick. Composes the SAME ber_model
+    /// primitives the per-construction `is_complete` tests use (a real type;
+    /// a chosen build-up, photo-backed when it's a specified custom stack;
+    /// and — ceilings only — the insulation gate), evaluated over the
+    /// session's mirrored fields so the tick appears the moment the last
+    /// attribute lands, without waiting for a re-resolve.
+    pub fn is_complete(&self) -> bool {
+        let type_set = match self.ty {
+            ConstructionType::Wall(t) => t.is_set(),
+            ConstructionType::Floor(t) => t.is_set(),
+            ConstructionType::Ceiling(t) => t.is_set(),
+        };
+        let build_up_done =
+            self.makeup.is_set() && (!self.makeup.requires_photo() || !self.photos.is_empty());
+        let insulation_done = self.ty.kind() != SurfaceKind::Ceilings
+            || CeilingInsulation::spec_done(self.insulation, !self.photos.is_empty());
+        type_set && build_up_done && insulation_done
     }
 }
 
@@ -99,18 +128,22 @@ pub struct StructureEdit {
     /// view (groups pulled radially out from the centre) — wired but not yet the
     /// default; a future toggle flips this.
     pub exploded: bool,
+    /// The rejection hint from the last group RENAME that violated the
+    /// name-integrity rule (`(group index, message)` — see
+    /// `Ber::set_construction_name`): the UI shows it under that group's name
+    /// box. Cleared by the next accepted rename of that group. The typed
+    /// session name stays as typed so the assessor can keep editing toward a
+    /// valid one (renames stream per keystroke); the DURABLE name keeps its
+    /// last valid value.
+    pub name_error: Option<(usize, String)>,
 }
 
-impl StructureEdit {
-    /// Why the session can't COMPLETE yet, if anything — the first group's
-    /// [`EditGroup::insulation_blocker`]. The UI disables Done on `Some` (with
-    /// the message as the hint) and
-    /// [`end_structure_edit`](AppController::end_structure_edit) refuses,
-    /// belt-and-braces. `None` = free to complete.
-    pub fn blocker(&self) -> Option<&'static str> {
-        self.groups.iter().find_map(|g| g.insulation_blocker())
-    }
-}
+// NOTE: there is deliberately no session-level "blocker" any more — Done
+// ALWAYS closes the session. The ceiling-insulation rule keeps its teeth
+// through the completeness predicate alone ([`EditGroup::is_complete`] /
+// `CeilingInsulation::spec_done`): an unspecified group has no tick, doesn't
+// count toward the N/M headers or the checklist row, comes back via the
+// `Remaining` subtool, and holds the Review-entry gate red.
 
 /// A construction already in use on the current storey — offered in the attribute
 /// editor so a selection can JOIN an existing group instead of re-entering its
@@ -134,6 +167,15 @@ pub struct ExistingGroup {
 pub(super) struct StagedStructureCarve {
     pub(super) ring: Vec<Point2f64>,
     pub(super) excluded_edges: Vec<[Point2f64; 2]>,
+    /// Which storey the ring belongs to. `None` = the ACTIVE storey (the
+    /// single-storey carve path, unchanged); `Some(i)` = storey `i` (a
+    /// cross-storey lasso region staged from the all-storeys view).
+    pub(super) storey: Option<usize>,
+    /// `true` for an all-storeys LASSO region: SELECTION-ONLY at commit (the
+    /// lasso ring is a quick approximate gesture, never dimensioned, so it
+    /// must not subdivide any geometry). The single-storey carve path stays
+    /// `false` and keeps its deferred-split behaviour.
+    pub(super) lasso: bool,
 }
 
 /// The in-flight wall-inclusion ASK over a just-dimensioned structure carve:
@@ -147,6 +189,13 @@ pub(super) struct WallInclusionPrompt {
     edges: Vec<[Point2f64; 2]>,
     cursor: usize,
     excluded: Vec<[Point2f64; 2]>,
+    /// Which storey the asked edges live on — `None` = the active storey (the
+    /// single-storey carve path); `Some(i)` for a cross-storey lasso ask (the
+    /// prompt text then names the storey, and the staged carve carries it).
+    storey: Option<usize>,
+    /// Whether the staged carve this ask resolves into is a LASSO region
+    /// (selection-only at commit). See [`StagedStructureCarve::lasso`].
+    lasso: bool,
 }
 
 /// UI data for the wall-inclusion ask: the CURRENT ambiguous edge (world
@@ -161,6 +210,11 @@ pub struct WallInclusionPromptView {
     pub index: usize,
     pub total: usize,
     pub description: String,
+    /// The storey the asked edge lives on — `None` for the single-storey
+    /// carve path (the edge is on the current storey). `Some(i)` for a
+    /// cross-storey lasso ask: the all-storeys canvas highlights the edge in
+    /// storey `i`'s cell, and the description opens with the storey's name.
+    pub storey_idx: Option<usize>,
 }
 
 impl AppController {
@@ -185,10 +239,13 @@ impl AppController {
             })
     }
 
-    /// Distinct COMPLETE constructions already assigned to the current storey's
-    /// surfaces (walls, floors, ceilings) — the "existing groups" the attribute
-    /// editor offers so a selection can join one rather than re-typing its
-    /// attributes. Each `ty` is kind-tagged, so the editor filters to its kind.
+    /// Distinct COMPLETE constructions already assigned to surfaces ANYWHERE
+    /// in the house (walls, floors, ceilings, across every storey) — the
+    /// "existing groups" the attribute editor offers so a selection can join
+    /// one rather than re-typing its attributes. The construction registry is
+    /// DWELLING-level, so a group defined on one storey must be offered while
+    /// editing any other (a house shares its build fabric between storeys).
+    /// Each `ty` is kind-tagged, so the editor filters to its kind.
     pub fn structure_existing_groups(&self) -> Vec<ExistingGroup> {
         fn add(
             out: &mut Vec<ExistingGroup>,
@@ -197,10 +254,17 @@ impl AppController {
             phase: ConstructionPhase,
             name: Option<String>,
         ) {
-            if out
-                .iter()
-                .any(|g| g.ty == ty && g.makeup == makeup && g.phase == phase)
-            {
+            // Name is part of the identity: same-fabric groups with different
+            // names are distinct offers ("Porch roof" vs "Main house roof").
+            let norm = |n: &Option<String>| {
+                n.as_deref()
+                    .map(str::trim)
+                    .filter(|s| !s.is_empty())
+                    .map(str::to_string)
+            };
+            if out.iter().any(|g| {
+                g.ty == ty && g.makeup == makeup && g.phase == phase && norm(&g.name) == norm(&name)
+            }) {
                 return;
             }
             out.push(ExistingGroup {
@@ -211,51 +275,59 @@ impl AppController {
             });
         }
         let mut out = Vec::new();
-        let Some(idx) = self.current_storey_idx else {
-            return out;
-        };
         let Some(record) = self.current_record.as_ref() else {
             return out;
         };
-        let Some(storey) = record.data.storeys.get(idx) else {
-            return out;
-        };
-        for r in &storey.walls.regions {
-            if let Some(c) = record.data.wall_construction(r.construction_id) {
-                if c.is_complete() {
-                    add(
-                        &mut out,
-                        ConstructionType::Wall(c.construction_type),
-                        c.base.construction_makeup.clone(),
-                        c.base.construction_phase.clone(),
-                        c.base.name.clone(),
-                    );
+        for storey in &record.data.storeys {
+            for r in &storey.walls.regions {
+                // Out-of-scope walls (non-heat-loss / inter-storey) don't
+                // participate in the Structure phase — a construction referenced
+                // only by them isn't offered as an existing group.
+                if !r.exposure.in_structure_scope() {
+                    continue;
+                }
+                if let Some(c) = record.data.wall_construction(r.construction_id) {
+                    if c.is_complete() {
+                        add(
+                            &mut out,
+                            ConstructionType::Wall(c.construction_type),
+                            c.base.construction_makeup.clone(),
+                            c.base.construction_phase.clone(),
+                            c.base.name.clone(),
+                        );
+                    }
                 }
             }
-        }
-        for r in &storey.floors.regions {
-            if let Some(c) = record.data.floor_construction(r.construction_id) {
-                if c.is_complete() {
-                    add(
-                        &mut out,
-                        ConstructionType::Floor(c.construction_type),
-                        c.base.construction_makeup.clone(),
-                        c.base.construction_phase.clone(),
-                        c.base.name.clone(),
-                    );
+            for r in &storey.floors.regions {
+                if !r.exposure.in_structure_scope() {
+                    continue;
+                }
+                if let Some(c) = record.data.floor_construction(r.construction_id) {
+                    if c.is_complete() {
+                        add(
+                            &mut out,
+                            ConstructionType::Floor(c.construction_type),
+                            c.base.construction_makeup.clone(),
+                            c.base.construction_phase.clone(),
+                            c.base.name.clone(),
+                        );
+                    }
                 }
             }
-        }
-        for r in &storey.ceilings.regions {
-            if let Some(c) = record.data.ceiling_construction(r.construction_id) {
-                if c.is_complete() {
-                    add(
-                        &mut out,
-                        ConstructionType::Ceiling(c.construction_type),
-                        c.base.construction_makeup.clone(),
-                        c.base.construction_phase.clone(),
-                        c.base.name.clone(),
-                    );
+            for r in &storey.ceilings.regions {
+                if !r.exposure.in_structure_scope() {
+                    continue;
+                }
+                if let Some(c) = record.data.ceiling_construction(r.construction_id) {
+                    if c.is_complete() {
+                        add(
+                            &mut out,
+                            ConstructionType::Ceiling(c.construction_type),
+                            c.base.construction_makeup.clone(),
+                            c.base.construction_phase.clone(),
+                            c.base.name.clone(),
+                        );
+                    }
                 }
             }
         }
@@ -273,57 +345,66 @@ impl AppController {
         ty: ber_model::ber::structural::WallConstructionType,
         makeup: ber_model::ber::structural::ConstructionMakeup,
         phase: ConstructionPhase,
+        name: Option<String>,
     ) {
-        let Some(idx) = self.current_storey_idx else {
-            return;
-        };
-        // Map each resolved wall id to its durable key: a perimeter wall by its
-        // parametric SurfaceRef (base midpoint), a RISER (interior step face, no
-        // perimeter ref) by its quantized base edge — mirroring riser exposure, so
-        // step-face constructions survive the re-derivation too.
+        // Map each resolved wall id to its durable key ON ITS OWN STOREY (a
+        // lasso selection can span the stack; region ids are unique
+        // house-wide): a perimeter wall by its parametric SurfaceRef (base
+        // midpoint), a RISER (interior step face, no perimeter ref) by its
+        // quantized base edge — mirroring riser exposure, so step-face
+        // constructions survive the re-derivation too.
         #[allow(clippy::type_complexity)]
-        let (refs, riser_keys): (Vec<manip_plan::SurfaceRef>, Vec<document::RiserKey>) = {
+        let per_storey: Vec<(usize, Vec<manip_plan::SurfaceRef>, Vec<document::RiserKey>)> = {
             let Some(record) = self.current_record.as_ref() else {
                 return;
             };
-            let Some(storey) = record.data.storeys.get(idx) else {
-                return;
-            };
-            let plan = &self.document.storeys[idx].outline.floor_plan;
-            let mut refs = Vec::new();
-            let mut risers = Vec::new();
-            for r in ids
-                .iter()
-                .filter_map(|id| storey.walls.regions.iter().find(|r| r.id == *id))
-            {
-                let Some((e0, e1)) = r.base_edge() else {
+            let mut out = Vec::new();
+            for idx in 0..record.data.storeys.len() {
+                let storey = &record.data.storeys[idx];
+                let Some(sd) = self.document.storeys.get(idx) else {
                     continue;
                 };
-                let mid =
-                    Point2f32::new(((e0.x + e1.x) * 0.5) as f32, ((e0.y + e1.y) * 0.5) as f32);
-                if let Some(sref) = plan.surface_ref_at(mid, 0.05) {
-                    refs.push(sref);
-                } else {
-                    risers.push(document::riser_key(
-                        Point2f64::new(e0.x, e0.y),
-                        Point2f64::new(e1.x, e1.y),
-                    ));
+                let plan = &sd.outline.floor_plan;
+                let mut refs = Vec::new();
+                let mut risers = Vec::new();
+                for r in ids
+                    .iter()
+                    .filter_map(|id| storey.walls.regions.iter().find(|r| r.id == *id))
+                {
+                    let Some((e0, e1)) = r.base_edge() else {
+                        continue;
+                    };
+                    let mid =
+                        Point2f32::new(((e0.x + e1.x) * 0.5) as f32, ((e0.y + e1.y) * 0.5) as f32);
+                    if let Some(sref) = plan.surface_ref_at(mid, 0.05) {
+                        refs.push(sref);
+                    } else {
+                        risers.push(document::riser_key(
+                            Point2f64::new(e0.x, e0.y),
+                            Point2f64::new(e1.x, e1.y),
+                        ));
+                    }
+                }
+                if !refs.is_empty() || !risers.is_empty() {
+                    out.push((idx, refs, risers));
                 }
             }
-            (refs, risers)
+            out
         };
-        if refs.is_empty() && riser_keys.is_empty() {
+        if per_storey.is_empty() {
             return;
         }
         self.record_history();
-        let sd = &mut self.document.storeys[idx];
-        for r in refs {
-            sd.wall_constructions
-                .insert(r, (ty, makeup.clone(), phase.clone()));
-        }
-        for k in riser_keys {
-            sd.riser_constructions
-                .insert(k, (ty, makeup.clone(), phase.clone()));
+        for (idx, refs, riser_keys) in per_storey {
+            let sd = &mut self.document.storeys[idx];
+            for r in refs {
+                sd.wall_constructions
+                    .insert(r, (ty, makeup.clone(), phase.clone(), name.clone()));
+            }
+            for k in riser_keys {
+                sd.riser_constructions
+                    .insert(k, (ty, makeup.clone(), phase.clone(), name.clone()));
+            }
         }
         let _ = self.mark_dirty();
     }
@@ -338,30 +419,39 @@ impl AppController {
         ty: FloorConstructionType,
         makeup: ConstructionMakeup,
         phase: ConstructionPhase,
+        name: Option<String>,
     ) {
-        let Some(idx) = self.current_storey_idx else {
-            return;
-        };
-        let keys: Vec<document::CentroidKey> = {
+        // Per-storey key resolution — a lasso selection can span the stack.
+        let per_storey: Vec<(usize, Vec<document::CentroidKey>)> = {
             let Some(record) = self.current_record.as_ref() else {
                 return;
             };
-            let Some(storey) = record.data.storeys.get(idx) else {
-                return;
-            };
-            ids.iter()
-                .filter_map(|id| storey.floors.regions.iter().find(|r| r.id == *id))
-                .map(|r| document::centroid_key(r.centroid()))
+            record
+                .data
+                .storeys
+                .iter()
+                .enumerate()
+                .map(|(idx, storey)| {
+                    let keys: Vec<document::CentroidKey> = ids
+                        .iter()
+                        .filter_map(|id| storey.floors.regions.iter().find(|r| r.id == *id))
+                        .map(|r| document::centroid_key(r.centroid()))
+                        .collect();
+                    (idx, keys)
+                })
+                .filter(|(idx, keys)| !keys.is_empty() && *idx < self.document.storeys.len())
                 .collect()
         };
-        if keys.is_empty() {
+        if per_storey.is_empty() {
             return;
         }
         self.record_history();
-        for k in keys {
-            self.document.storeys[idx]
-                .floor_constructions
-                .insert(k, (ty, makeup.clone(), phase.clone()));
+        for (idx, keys) in per_storey {
+            for k in keys {
+                self.document.storeys[idx]
+                    .floor_constructions
+                    .insert(k, (ty, makeup.clone(), phase.clone(), name.clone()));
+            }
         }
         let _ = self.mark_dirty();
     }
@@ -376,30 +466,39 @@ impl AppController {
         ty: CeilingConstructionType,
         makeup: ConstructionMakeup,
         phase: ConstructionPhase,
+        name: Option<String>,
     ) {
-        let Some(idx) = self.current_storey_idx else {
-            return;
-        };
-        let keys: Vec<document::CentroidKey> = {
+        // Per-storey key resolution — a lasso selection can span the stack.
+        let per_storey: Vec<(usize, Vec<document::CentroidKey>)> = {
             let Some(record) = self.current_record.as_ref() else {
                 return;
             };
-            let Some(storey) = record.data.storeys.get(idx) else {
-                return;
-            };
-            ids.iter()
-                .filter_map(|id| storey.ceilings.regions.iter().find(|r| r.id == *id))
-                .map(|r| document::centroid_key(r.centroid()))
+            record
+                .data
+                .storeys
+                .iter()
+                .enumerate()
+                .map(|(idx, storey)| {
+                    let keys: Vec<document::CentroidKey> = ids
+                        .iter()
+                        .filter_map(|id| storey.ceilings.regions.iter().find(|r| r.id == *id))
+                        .map(|r| document::centroid_key(r.centroid()))
+                        .collect();
+                    (idx, keys)
+                })
+                .filter(|(idx, keys)| !keys.is_empty() && *idx < self.document.storeys.len())
                 .collect()
         };
-        if keys.is_empty() {
+        if per_storey.is_empty() {
             return;
         }
         self.record_history();
-        for k in keys {
-            self.document.storeys[idx]
-                .ceiling_constructions
-                .insert(k, (ty, makeup.clone(), phase.clone()));
+        for (idx, keys) in per_storey {
+            for k in keys {
+                self.document.storeys[idx]
+                    .ceiling_constructions
+                    .insert(k, (ty, makeup.clone(), phase.clone(), name.clone()));
+            }
         }
         let _ = self.mark_dirty();
     }
@@ -473,29 +572,37 @@ impl AppController {
     /// [`set_floor_construction_for`](Self::set_floor_construction_for). One
     /// snapshot for the whole write.
     fn set_floor_exposure_for_ids(&mut self, ids: &[ItemId], exposure: FloorExposure) {
-        let Some(idx) = self.current_storey_idx else {
-            return;
-        };
-        let keys: Vec<document::CentroidKey> = {
+        // Per-storey key resolution — a lasso selection can span the stack.
+        let per_storey: Vec<(usize, Vec<document::CentroidKey>)> = {
             let Some(record) = self.current_record.as_ref() else {
                 return;
             };
-            let Some(storey) = record.data.storeys.get(idx) else {
-                return;
-            };
-            ids.iter()
-                .filter_map(|id| storey.floors.regions.iter().find(|r| r.id == *id))
-                .map(|r| document::centroid_key(r.centroid()))
+            record
+                .data
+                .storeys
+                .iter()
+                .enumerate()
+                .map(|(idx, storey)| {
+                    let keys: Vec<document::CentroidKey> = ids
+                        .iter()
+                        .filter_map(|id| storey.floors.regions.iter().find(|r| r.id == *id))
+                        .map(|r| document::centroid_key(r.centroid()))
+                        .collect();
+                    (idx, keys)
+                })
+                .filter(|(idx, keys)| !keys.is_empty() && *idx < self.document.storeys.len())
                 .collect()
         };
-        if keys.is_empty() {
+        if per_storey.is_empty() {
             return;
         }
         self.record_history();
-        for k in keys {
-            self.document.storeys[idx]
-                .floor_exposure
-                .insert(k, exposure);
+        for (idx, keys) in per_storey {
+            for k in keys {
+                self.document.storeys[idx]
+                    .floor_exposure
+                    .insert(k, exposure);
+            }
         }
         let _ = self.mark_dirty();
     }
@@ -506,29 +613,37 @@ impl AppController {
     /// [`set_floor_exposure_for_ids`](Self::set_floor_exposure_for_ids) over the
     /// storey's `ceilings`.
     fn set_ceiling_exposure_for_ids(&mut self, ids: &[ItemId], exposure: CeilingExposure) {
-        let Some(idx) = self.current_storey_idx else {
-            return;
-        };
-        let keys: Vec<document::CentroidKey> = {
+        // Per-storey key resolution — a lasso selection can span the stack.
+        let per_storey: Vec<(usize, Vec<document::CentroidKey>)> = {
             let Some(record) = self.current_record.as_ref() else {
                 return;
             };
-            let Some(storey) = record.data.storeys.get(idx) else {
-                return;
-            };
-            ids.iter()
-                .filter_map(|id| storey.ceilings.regions.iter().find(|r| r.id == *id))
-                .map(|r| document::centroid_key(r.centroid()))
+            record
+                .data
+                .storeys
+                .iter()
+                .enumerate()
+                .map(|(idx, storey)| {
+                    let keys: Vec<document::CentroidKey> = ids
+                        .iter()
+                        .filter_map(|id| storey.ceilings.regions.iter().find(|r| r.id == *id))
+                        .map(|r| document::centroid_key(r.centroid()))
+                        .collect();
+                    (idx, keys)
+                })
+                .filter(|(idx, keys)| !keys.is_empty() && *idx < self.document.storeys.len())
                 .collect()
         };
-        if keys.is_empty() {
+        if per_storey.is_empty() {
             return;
         }
         self.record_history();
-        for k in keys {
-            self.document.storeys[idx]
-                .ceiling_exposure
-                .insert(k, exposure);
+        for (idx, keys) in per_storey {
+            for k in keys {
+                self.document.storeys[idx]
+                    .ceiling_exposure
+                    .insert(k, exposure);
+            }
         }
         let _ = self.mark_dirty();
     }
@@ -542,59 +657,65 @@ impl AppController {
     /// override goes in `document.riser_exposure` keyed by the base edge. One
     /// snapshot for the whole group write.
     fn set_wall_exposure_for_ids(&mut self, ids: &[ItemId], exposure: WallExposure) {
-        let Some(idx) = self.current_storey_idx else {
-            return;
-        };
-        // Resolve each id to (perimeter span | riser key) up front, reading the
-        // resolved record + the document, before the mutable document borrow.
+        // Resolve each id to (perimeter span | riser key) ON ITS OWN STOREY up
+        // front (a lasso selection can span the stack), reading the resolved
+        // record + the document, before the mutable document borrow.
         enum WallWrite {
             Section(manip_plan::VertexId, f32, f32, f32), // vid, start_m, end_m, len
             Riser(document::RiserKey),
         }
-        let writes: Vec<WallWrite> = {
+        let writes: Vec<(usize, Vec<WallWrite>)> = {
             let Some(record) = self.current_record.as_ref() else {
                 return;
             };
-            let Some(storey) = record.data.storeys.get(idx) else {
-                return;
-            };
-            let Some(doc) = self.document.storeys.get(idx) else {
-                return;
-            };
-            ids.iter()
-                .filter_map(|id| storey.walls.regions.iter().find(|r| r.id == *id))
-                .filter_map(|r| match doc.recover_wall_region_span(r) {
-                    Some((vid, start_m, end_m, len)) => {
-                        // Face-partitioned walls are owned per-2-D-region — skip.
-                        if doc.is_wall_partitioned(vid) {
-                            None
-                        } else {
-                            Some(WallWrite::Section(vid, start_m, end_m, len))
+            let mut out = Vec::new();
+            for (idx, storey) in record.data.storeys.iter().enumerate() {
+                let Some(doc) = self.document.storeys.get(idx) else {
+                    continue;
+                };
+                let storey_writes: Vec<WallWrite> = ids
+                    .iter()
+                    .filter_map(|id| storey.walls.regions.iter().find(|r| r.id == *id))
+                    .filter_map(|r| match doc.recover_wall_region_span(r) {
+                        Some((vid, start_m, end_m, len)) => {
+                            // Face-partitioned walls are owned per-2-D-region — skip.
+                            if doc.is_wall_partitioned(vid) {
+                                None
+                            } else {
+                                Some(WallWrite::Section(vid, start_m, end_m, len))
+                            }
                         }
-                    }
-                    // No perimeter match → riser: key by its base edge.
-                    None => r.base_edge().map(|(a, b)| {
-                        WallWrite::Riser(document::riser_key(
-                            domain::points::Point2f64::new(a.x, a.y),
-                            domain::points::Point2f64::new(b.x, b.y),
-                        ))
-                    }),
-                })
-                .collect()
+                        // No perimeter match → riser: key by its base edge.
+                        None => r.base_edge().map(|(a, b)| {
+                            WallWrite::Riser(document::riser_key(
+                                domain::points::Point2f64::new(a.x, a.y),
+                                domain::points::Point2f64::new(b.x, b.y),
+                            ))
+                        }),
+                    })
+                    .collect();
+                if !storey_writes.is_empty() {
+                    out.push((idx, storey_writes));
+                }
+            }
+            out
         };
         if writes.is_empty() {
             return;
         }
         self.record_history();
-        for w in writes {
-            match w {
-                WallWrite::Section(vid, start_m, end_m, len) => {
-                    self.document.storeys[idx].set_wall_section(vid, start_m, end_m, len, exposure);
-                }
-                WallWrite::Riser(key) => {
-                    self.document.storeys[idx]
-                        .riser_exposure
-                        .insert(key, exposure);
+        for (idx, storey_writes) in writes {
+            for w in storey_writes {
+                match w {
+                    WallWrite::Section(vid, start_m, end_m, len) => {
+                        self.document.storeys[idx]
+                            .set_wall_section(vid, start_m, end_m, len, exposure);
+                    }
+                    WallWrite::Riser(key) => {
+                        self.document.storeys[idx]
+                            .riser_exposure
+                            .insert(key, exposure);
+                    }
                 }
             }
         }
@@ -618,20 +739,18 @@ impl AppController {
         if self.structure_selected.is_empty() {
             return;
         }
-        let Some(idx) = self.current_storey_idx else {
-            return;
-        };
         let Some(record) = self.current_record.as_ref() else {
             return;
         };
-        let Some(storey) = record.data.storeys.get(idx) else {
-            return;
-        };
-        // The selection can span kinds (Walls + Floors + …); each id's kind is
-        // detected from the storey, then its construction's (type-kind, make-up,
-        // phase) read and tagged with `ConstructionType` so the rest of the
-        // editor stays kind-agnostic. A region whose construction is missing
-        // reads as that kind's default type + default make-up / Original phase.
+        // The selection can span kinds (Walls + Floors + …) AND — from the
+        // all-storeys lasso — STOREYS: each id is located across the whole
+        // stack (region ids are unique house-wide), then its construction's
+        // (type-kind, make-up, phase) read and tagged with `ConstructionType`
+        // so the rest of the editor stays kind-agnostic. A region whose
+        // construction is missing reads as that kind's default type + default
+        // make-up / Original phase. The construction registry is
+        // dwelling-level, so one group freely covers surfaces on several
+        // storeys.
         type Attrs = (
             ConstructionType,
             ConstructionMakeup,
@@ -642,18 +761,34 @@ impl AppController {
             Vec<Photo>,
             Option<CeilingInsulation>, // ceilings only; None for walls/floors
         );
-        let Some(doc) = self.document.storeys.get(idx) else {
-            return;
-        };
+        let document = &self.document;
         let attrs_of = |id: ItemId| -> Option<Attrs> {
-            match storey.surface_kind_of(id)? {
+            let (idx, storey, kind) = record
+                .data
+                .storeys
+                .iter()
+                .enumerate()
+                .find_map(|(i, s)| s.surface_kind_of(id).map(|k| (i, s, k)))?;
+            match kind {
                 SurfaceKind::Walls => {
                     let r = storey.walls.regions.iter().find(|r| r.id == id)?;
+                    // Out-of-scope walls (non-heat-loss / inter-storey) never form
+                    // a group. The selection paths already skip them
+                    // (`WallExposure::in_structure_scope`); this catches a stale
+                    // id whose wall was repainted out of scope since selection.
+                    if !r.exposure.in_structure_scope() {
+                        return None;
+                    }
                     // A perimeter wall whose recovered VertexId is face-partitioned
-                    // is locked; a riser (no perimeter match) is never locked.
-                    let locked = doc
-                        .recover_wall_region_span(r)
-                        .map(|(vid, ..)| doc.is_wall_partitioned(vid))
+                    // is locked; a riser (no perimeter match) is never locked. The
+                    // partition state lives on the wall's OWN storey doc.
+                    let locked = document
+                        .storeys
+                        .get(idx)
+                        .and_then(|doc| {
+                            doc.recover_wall_region_span(r)
+                                .map(|(vid, ..)| doc.is_wall_partitioned(vid))
+                        })
                         .unwrap_or(false);
                     let (ty, makeup, phase, name, photos) =
                         match record.data.wall_construction(r.construction_id) {
@@ -685,6 +820,11 @@ impl AppController {
                 }
                 SurfaceKind::Floors => {
                     let r = storey.floors.regions.iter().find(|r| r.id == id)?;
+                    // Out-of-scope floors (party / inter-storey) never form a
+                    // group — mirror of the walls arm above.
+                    if !r.exposure.in_structure_scope() {
+                        return None;
+                    }
                     let (ty, makeup, phase, name, photos) =
                         match record.data.floor_construction(r.construction_id) {
                             Some(c) => (
@@ -715,6 +855,11 @@ impl AppController {
                 }
                 SurfaceKind::Ceilings => {
                     let r = storey.ceilings.regions.iter().find(|r| r.id == id)?;
+                    // Out-of-scope ceilings (party / inter-storey) never form
+                    // a group — mirror of the walls arm above.
+                    if !r.exposure.in_structure_scope() {
+                        return None;
+                    }
                     let (ty, makeup, phase, name, photos, insulation) =
                         match record.data.ceiling_construction(r.construction_id) {
                             Some(c) => (
@@ -758,27 +903,49 @@ impl AppController {
             // `exposure_locked` is part of the key so a face-partitioned wall
             // (locked) never shares a group with an editable wall of the same
             // construction — the dropdown's enabled-ness must be uniform per group.
+            // The NAME is part of the key too: same-fabric groups with
+            // different names are DIFFERENT groups ("Porch roof" vs "Main
+            // house roof") and must never merge in a session.
+            let explicit_name = cname
+                .as_deref()
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .map(str::to_string);
             match groups.iter_mut().find(|g| {
                 g.ty == ty
                     && g.makeup == makeup
                     && g.phase == phase
                     && g.exposure == exposure
                     && g.exposure_locked == exposure_locked
+                    && g.explicit_name == explicit_name
             }) {
                 Some(g) => g.ids.push(*id),
-                None => groups.push(EditGroup {
-                    ids: vec![*id],
-                    ty,
-                    makeup,
-                    phase,
-                    exposure,
-                    exposure_locked,
-                    // The construction's stored name, if any (set in a prior
-                    // session); the "Group N" fallback is filled in below.
-                    name: cname.unwrap_or_default(),
-                    photos,
-                    insulation,
-                }),
+                None => {
+                    // A FRESH group (nothing attributed yet) opens on the
+                    // two-mode entry — existing-group dropdown or "New group"
+                    // — instead of the full editor.
+                    let type_set = match ty {
+                        ConstructionType::Wall(t) => t.is_set(),
+                        ConstructionType::Floor(t) => t.is_set(),
+                        ConstructionType::Ceiling(t) => t.is_set(),
+                    };
+                    groups.push(EditGroup {
+                        ids: vec![*id],
+                        ty,
+                        makeup: makeup.clone(),
+                        phase,
+                        exposure,
+                        exposure_locked,
+                        // The construction's stored name, if any (set in a prior
+                        // session); the "Group N" fallback is filled in below.
+                        name: explicit_name.clone().unwrap_or_default(),
+                        explicit_name,
+                        photos,
+                        insulation,
+                        show_editor: type_set || makeup.is_set(),
+                        fresh: !(type_set || makeup.is_set()),
+                    })
+                }
             }
         }
         // Any group without a stored name defaults to "Group N" (1-based).
@@ -794,6 +961,7 @@ impl AppController {
                 exploded: false,
                 specifying: None,
                 viewing_photos: None,
+                name_error: None,
             });
         }
     }
@@ -951,7 +1119,12 @@ impl AppController {
         quality: PhotoQuality,
         id: ItemId,
     ) -> Option<(String, Option<String>)> {
-        let spec = if cfg!(target_os = "android") {
+        // TEMPORARY (dual hi/lo capture, 2026-07): the explicit low-res button
+        // must yield a small file on EVERY platform, so `Low` recompresses on
+        // desktop too (the other tiers keep desktop's store-verbatim shortcut —
+        // dev machines pick already-sized files). Remove the `Low` arm together
+        // with `photo_button_pair`.
+        let spec = if cfg!(target_os = "android") || quality == PhotoQuality::Low {
             quality.compression()
         } else {
             None
@@ -1041,7 +1214,9 @@ impl AppController {
 
     /// Decode `src`, downscale to fit `THUMB_MAX` px on the long edge, and write
     /// a JPEG to `dest`. Returns `false` (and writes nothing) on any failure.
-    fn write_thumbnail(src: &std::path::Path, dest: &std::path::Path) -> bool {
+    /// `pub(super)` so the external-photo annotation path (`photos.rs`) reuses
+    /// it for the re-saved image's preview.
+    pub(super) fn write_thumbnail(src: &std::path::Path, dest: &std::path::Path) -> bool {
         const THUMB_MAX: u32 = 480;
         let Ok(reader) = image::ImageReader::open(src).and_then(|r| r.with_guessed_format()) else {
             return false;
@@ -1106,43 +1281,12 @@ impl AppController {
             Some(g) => (g.ty.kind(), g.ids.clone()),
             None => return,
         };
-        let Some(idx) = self.current_storey_idx else {
-            return;
-        };
+        // Each region in the group shares one construction; the group can
+        // span STOREYS (all-storeys lasso), so resolve construction ids
+        // across the whole stack.
+        let cids = self.construction_ids_for(kind, &ids);
         let Some(record) = self.current_record.as_mut() else {
             return;
-        };
-        let cids: Vec<ItemId> = {
-            let Some(storey) = record.data.storeys.get(idx) else {
-                return;
-            };
-            let region_cid = |id: ItemId| -> Option<ItemId> {
-                match kind {
-                    SurfaceKind::Walls => storey
-                        .walls
-                        .regions
-                        .iter()
-                        .find(|r| r.id == id)
-                        .map(|r| r.construction_id),
-                    SurfaceKind::Floors => storey
-                        .floors
-                        .regions
-                        .iter()
-                        .find(|r| r.id == id)
-                        .map(|r| r.construction_id),
-                    SurfaceKind::Ceilings => storey
-                        .ceilings
-                        .regions
-                        .iter()
-                        .find(|r| r.id == id)
-                        .map(|r| r.construction_id),
-                }
-            };
-            let mut seen = HashSet::new();
-            ids.iter()
-                .filter_map(|id| region_cid(*id))
-                .filter(|c| seen.insert(*c))
-                .collect()
         };
         for cid in cids {
             record.data.add_construction_photo(kind, cid, photo.clone());
@@ -1178,30 +1322,12 @@ impl AppController {
             Some(g) if g.ty.kind() == SurfaceKind::Ceilings => g.ids.clone(),
             _ => return,
         };
-        let Some(idx) = self.current_storey_idx else {
-            return;
-        };
-        let Some(record) = self.current_record.as_mut() else {
-            return;
-        };
         // Each region in the group shares one construction; map the region ids
         // to their construction ids and write those (mirrors the photo attach).
-        let cids: Vec<ItemId> = {
-            let Some(storey) = record.data.storeys.get(idx) else {
-                return;
-            };
-            let mut seen = HashSet::new();
-            ids.iter()
-                .filter_map(|id| {
-                    storey
-                        .ceilings
-                        .regions
-                        .iter()
-                        .find(|r| r.id == *id)
-                        .map(|r| r.construction_id)
-                })
-                .filter(|c| seen.insert(*c))
-                .collect()
+        // Cross-storey like the other group ops.
+        let cids = self.construction_ids_for(SurfaceKind::Ceilings, &ids);
+        let Some(record) = self.current_record.as_mut() else {
+            return;
         };
         for cid in cids {
             record.data.set_ceiling_insulation(cid, insulation);
@@ -1240,7 +1366,7 @@ impl AppController {
     /// group's constructions (`Ber::set_construction_name`). No undo snapshot
     /// (cosmetic); marks dirty so the rename persists.
     pub fn set_structure_group_name(&mut self, group: usize, name: String) {
-        let (kind, ids) = {
+        let (kind, ids, group_attrs) = {
             let Some(e) = self.structure_edit.as_mut() else {
                 return;
             };
@@ -1248,55 +1374,376 @@ impl AppController {
                 return;
             };
             g.name = name.clone();
-            (g.ty.kind(), g.ids.clone())
-        };
-        let Some(idx) = self.current_storey_idx else {
-            return;
-        };
-        let Some(record) = self.current_record.as_mut() else {
-            return;
-        };
-        // Each region in the group shares one construction (grouped by it); map
-        // the region ids to their construction ids, then name those.
-        let cids: Vec<ItemId> = {
-            let Some(storey) = record.data.storeys.get(idx) else {
-                return;
-            };
-            let region_cid = |id: ItemId| -> Option<ItemId> {
-                match kind {
-                    SurfaceKind::Walls => storey
-                        .walls
-                        .regions
-                        .iter()
-                        .find(|r| r.id == id)
-                        .map(|r| r.construction_id),
-                    SurfaceKind::Floors => storey
-                        .floors
-                        .regions
-                        .iter()
-                        .find(|r| r.id == id)
-                        .map(|r| r.construction_id),
-                    SurfaceKind::Ceilings => storey
-                        .ceilings
-                        .regions
-                        .iter()
-                        .find(|r| r.id == id)
-                        .map(|r| r.construction_id),
-                }
-            };
-            let mut seen = std::collections::HashSet::new();
-            ids.iter()
-                .filter_map(|id| region_cid(*id))
-                .filter(|c| seen.insert(*c))
-                .collect()
+            (
+                g.ty.kind(),
+                g.ids.clone(),
+                (g.ty, g.makeup.clone(), g.phase.clone()),
+            )
         };
         let stored = if name.trim().is_empty() {
             None
         } else {
             Some(name)
         };
-        for cid in cids {
-            record.data.set_construction_name(kind, cid, stored.clone());
+        // NAME-INTEGRITY first: a name held by ANOTHER referenced same-kind
+        // group with DIFFERENT attributes is rejected (a name means exactly
+        // one set of attributes). Same attributes = the user's intent to BE
+        // that group — the entry write below merges into it on the next
+        // stamp. On rejection the durable state keeps its last valid value;
+        // the typed session name stands so the assessor can keep typing.
+        let cids = self.construction_ids_for(kind, &ids);
+        let full = self.group_covers_all_members(kind, &ids);
+        let rejection: Option<String> = {
+            let Some(record) = self.current_record.as_ref() else {
+                return;
+            };
+            match stored.as_deref() {
+                Some(n) => match record.data.named_construction_attrs(kind, n) {
+                    // Holder with different attributes — and it isn't just
+                    // this group's own construction (self-rename).
+                    Some(attrs)
+                        if attrs != group_attrs
+                            && !cids.iter().any(|cid| {
+                                record
+                                    .data
+                                    .wall_construction(*cid)
+                                    .map(|c| c.base.name.as_deref().map(str::trim))
+                                    .or_else(|| {
+                                        record
+                                            .data
+                                            .floor_construction(*cid)
+                                            .map(|c| c.base.name.as_deref().map(str::trim))
+                                    })
+                                    .or_else(|| {
+                                        record
+                                            .data
+                                            .ceiling_construction(*cid)
+                                            .map(|c| c.base.name.as_deref().map(str::trim))
+                                    })
+                                    .flatten()
+                                    == Some(n.trim())
+                            }) =>
+                    {
+                        let kind_word = match kind {
+                            SurfaceKind::Walls => "wall",
+                            SurfaceKind::Floors => "floor",
+                            SurfaceKind::Ceilings => "roof",
+                        };
+                        Some(format!(
+                            "\"{n}\" is already another {kind_word} group's name — a name \
+                             means exactly one set of attributes, so pick a different name \
+                             (matching attributes would already be one group)"
+                        ))
+                    }
+                    _ => None,
+                },
+                None => None,
+            }
+        };
+        if let Some(hint) = rejection {
+            if let Some(e) = self.structure_edit.as_mut() {
+                e.name_error = Some((group, hint));
+            }
+            return;
+        }
+        // The NAME is part of the construction identity, so a rename writes
+        // the members' durable ENTRIES (the next stamp find-or-creates the
+        // named construction). FULL group → also rename the construction in
+        // place so its photos/insulation ride along (the group evolves).
+        // SUBSET → entries only: the selected members FORK into their own
+        // group under the new name, while the stay-behind members keep the
+        // old construction untouched (name, photos, insulation, membership).
+        // The fork starts with fresh evidence — photos/insulation belong to
+        // the group they were recorded on.
+        if full {
+            let Some(record) = self.current_record.as_mut() else {
+                return;
+            };
+            for cid in &cids {
+                // Referenced holders were vetted above; orphans don't block.
+                let _ = record
+                    .data
+                    .set_construction_name(kind, *cid, stored.clone());
+            }
+        }
+        let (ty, makeup, phase) = group_attrs;
+        match ty {
+            ConstructionType::Wall(t) => {
+                self.set_wall_construction_for(&ids, t, makeup, phase, stored.clone())
+            }
+            ConstructionType::Floor(t) => {
+                self.set_floor_construction_for(&ids, t, makeup, phase, stored.clone())
+            }
+            ConstructionType::Ceiling(t) => {
+                self.set_ceiling_construction_for(&ids, t, makeup, phase, stored.clone())
+            }
+        }
+        if let Some(e) = self.structure_edit.as_mut() {
+            // An accepted rename clears a stale hint for THIS group.
+            if e.name_error.as_ref().is_some_and(|(g, _)| *g == group) {
+                e.name_error = None;
+            }
+            if let Some(g) = e.groups.get_mut(group) {
+                g.explicit_name = stored.clone();
+                if !full {
+                    // The fork starts without the old group's evidence.
+                    g.photos.clear();
+                    g.insulation = None;
+                }
+            }
+        }
+        let _ = self.mark_dirty();
+    }
+
+    /// "New group" on a fresh group box: skip the existing-group offer and
+    /// open the full attribute editor for `group` (blank, exactly as before
+    /// the two-mode entry existed). No model write — purely session UI flow.
+    pub fn begin_new_structure_group(&mut self, group: usize) {
+        if let Some(g) = self
+            .structure_edit
+            .as_mut()
+            .and_then(|e| e.groups.get_mut(group))
+        {
+            g.show_editor = true;
+        }
+    }
+
+    /// RESET a group box back to the two-mode entry ("choose again") — the
+    /// bottom-right Reset button on EVERY box, fresh-flow or an attributed
+    /// surface reselected after Done. DETACHES this
+    /// selection's attribution: the durable per-surface construction keys are
+    /// removed ([`detach_construction_for`](Self::detach_construction_for)),
+    /// so the next materialize drops these members back to the unattributed
+    /// default. The CONSTRUCTION ITSELF IS NEVER TOUCHED — its name, photos
+    /// and any other members elsewhere stay exactly as they were (a
+    /// construction left with no members simply stops being offered /
+    /// reviewed, since both read member references). The session mirror
+    /// clears to blank defaults and the box re-enters the two-mode entry.
+    pub fn reset_structure_group(&mut self, group: usize) {
+        let (kind, ids) = match self
+            .structure_edit
+            .as_ref()
+            .and_then(|e| e.groups.get(group))
+        {
+            Some(g) => (g.ty.kind(), g.ids.clone()),
+            None => return,
+        };
+        self.detach_construction_for(kind, &ids);
+        if let Some(e) = self.structure_edit.as_mut() {
+            if e.name_error.as_ref().is_some_and(|(g, _)| *g == group) {
+                e.name_error = None;
+            }
+            if let Some(g) = e.groups.get_mut(group) {
+                g.ty = match kind {
+                    SurfaceKind::Walls => ConstructionType::Wall(Default::default()),
+                    SurfaceKind::Floors => ConstructionType::Floor(Default::default()),
+                    SurfaceKind::Ceilings => ConstructionType::Ceiling(Default::default()),
+                };
+                g.makeup = Default::default();
+                g.phase = Default::default();
+                g.name = format!("Group {}", group + 1);
+                g.explicit_name = None;
+                g.photos.clear();
+                g.insulation = None;
+                g.show_editor = false;
+                g.fresh = true;
+            }
+        }
+    }
+
+    /// Detach the durable per-surface construction ASSIGNMENTS for `ids` — the
+    /// inverse of the assign paths (walls by parametric `SurfaceRef` / riser
+    /// base-edge key, floors + ceilings by centroid), across every storey like
+    /// the setters. Detaching writes an EXPLICIT DEFAULT assignment
+    /// (unattributed type + build-up, keeping the region's current phase) —
+    /// NOT a key removal: the stamps only override where a key exists ("no
+    /// stored assignment keeps the derived construction"), and for
+    /// regions-as-truth surfaces the "derived" construction IS the old one
+    /// (stored ceilings survive re-resolves verbatim; an edge-matched wall's
+    /// amend carries its `construction_id` over) — a removed key would let
+    /// the old attribution RESURRECT on the next materialize / reload. The
+    /// default entry makes the detach durable through Done, materialize and
+    /// save/reload. The shared construction registry entry is untouched, so
+    /// other members keep their attribution and the group's name/photos
+    /// survive. Snapshots for undo + marks dirty only when something was
+    /// actually attributed.
+    fn detach_construction_for(&mut self, kind: SurfaceKind, ids: &[ItemId]) {
+        enum Key {
+            WallRef(manip_plan::SurfaceRef),
+            Riser(document::RiserKey),
+            Area(document::CentroidKey),
+        }
+        // Each key with the phase its default entry should carry — the
+        // region's CURRENT phase (the phase axis is derived from the zones;
+        // a reset shouldn't shunt an extension wall back to "Original").
+        let per_storey: Vec<(usize, Vec<(Key, ConstructionPhase)>)> = {
+            let Some(record) = self.current_record.as_ref() else {
+                return;
+            };
+            let mut out = Vec::new();
+            for (idx, storey) in record.data.storeys.iter().enumerate() {
+                let Some(sd) = self.document.storeys.get(idx) else {
+                    continue;
+                };
+                let mut keys = Vec::new();
+                match kind {
+                    SurfaceKind::Walls => {
+                        let plan = &sd.outline.floor_plan;
+                        for r in ids
+                            .iter()
+                            .filter_map(|id| storey.walls.regions.iter().find(|r| r.id == *id))
+                        {
+                            let Some((e0, e1)) = r.base_edge() else {
+                                continue;
+                            };
+                            let phase = record
+                                .data
+                                .wall_construction(r.construction_id)
+                                .map(|c| c.base.construction_phase.clone())
+                                .unwrap_or_default();
+                            let mid = Point2f32::new(
+                                ((e0.x + e1.x) * 0.5) as f32,
+                                ((e0.y + e1.y) * 0.5) as f32,
+                            );
+                            if let Some(sref) = plan.surface_ref_at(mid, 0.05) {
+                                keys.push((Key::WallRef(sref), phase));
+                            } else {
+                                keys.push((
+                                    Key::Riser(document::riser_key(
+                                        Point2f64::new(e0.x, e0.y),
+                                        Point2f64::new(e1.x, e1.y),
+                                    )),
+                                    phase,
+                                ));
+                            }
+                        }
+                    }
+                    SurfaceKind::Floors => {
+                        for r in ids
+                            .iter()
+                            .filter_map(|id| storey.floors.regions.iter().find(|r| r.id == *id))
+                        {
+                            let phase = record
+                                .data
+                                .floor_construction(r.construction_id)
+                                .map(|c| c.base.construction_phase.clone())
+                                .unwrap_or_default();
+                            keys.push((Key::Area(document::centroid_key(r.centroid())), phase));
+                        }
+                    }
+                    SurfaceKind::Ceilings => {
+                        for r in ids
+                            .iter()
+                            .filter_map(|id| storey.ceilings.regions.iter().find(|r| r.id == *id))
+                        {
+                            let phase = record
+                                .data
+                                .ceiling_construction(r.construction_id)
+                                .map(|c| c.base.construction_phase.clone())
+                                .unwrap_or_default();
+                            keys.push((Key::Area(document::centroid_key(r.centroid())), phase));
+                        }
+                    }
+                }
+                if !keys.is_empty() {
+                    out.push((idx, keys));
+                }
+            }
+            out
+        };
+        // Anything actually attributed? (Skip the undo entry for a Reset on a
+        // box where nothing was applied yet.) Attribution can live in either
+        // side of the mirror: a non-default doc-map entry (just applied,
+        // pre-materialize) or a non-default resolved construction (applied
+        // earlier — including regions-as-truth carriers with no map key).
+        let attributed = {
+            let record = self.current_record.as_ref().unwrap();
+            let region_attributed = |id: &ItemId| {
+                record.data.storeys.iter().any(|s| match kind {
+                    SurfaceKind::Walls => s
+                        .walls
+                        .regions
+                        .iter()
+                        .find(|r| r.id == *id)
+                        .and_then(|r| record.data.wall_construction(r.construction_id))
+                        .is_some_and(|c| {
+                            c.construction_type.is_set() || c.base.construction_makeup.is_set()
+                        }),
+                    SurfaceKind::Floors => s
+                        .floors
+                        .regions
+                        .iter()
+                        .find(|r| r.id == *id)
+                        .and_then(|r| record.data.floor_construction(r.construction_id))
+                        .is_some_and(|c| {
+                            c.construction_type.is_set() || c.base.construction_makeup.is_set()
+                        }),
+                    SurfaceKind::Ceilings => s
+                        .ceilings
+                        .regions
+                        .iter()
+                        .find(|r| r.id == *id)
+                        .and_then(|r| record.data.ceiling_construction(r.construction_id))
+                        .is_some_and(|c| {
+                            c.construction_type.is_set() || c.base.construction_makeup.is_set()
+                        }),
+                })
+            };
+            let map_attributed = per_storey.iter().any(|(idx, keys)| {
+                let sd = &self.document.storeys[*idx];
+                keys.iter().any(|(k, _)| match k {
+                    Key::WallRef(r) => sd
+                        .wall_constructions
+                        .get(r)
+                        .is_some_and(|(ty, mk, ..)| ty.is_set() || mk.is_set()),
+                    Key::Riser(rk) => sd
+                        .riser_constructions
+                        .get(rk)
+                        .is_some_and(|(ty, mk, ..)| ty.is_set() || mk.is_set()),
+                    Key::Area(ck) => match kind {
+                        SurfaceKind::Floors => sd
+                            .floor_constructions
+                            .get(ck)
+                            .is_some_and(|(ty, mk, ..)| ty.is_set() || mk.is_set()),
+                        SurfaceKind::Ceilings => sd
+                            .ceiling_constructions
+                            .get(ck)
+                            .is_some_and(|(ty, mk, ..)| ty.is_set() || mk.is_set()),
+                        SurfaceKind::Walls => false,
+                    },
+                })
+            });
+            ids.iter().any(region_attributed) || map_attributed
+        };
+        if !attributed {
+            return;
+        }
+        self.record_history();
+        for (idx, keys) in per_storey {
+            let sd = &mut self.document.storeys[idx];
+            for (k, phase) in keys {
+                match k {
+                    Key::WallRef(r) => {
+                        sd.wall_constructions
+                            .insert(r, (Default::default(), Default::default(), phase, None));
+                    }
+                    Key::Riser(rk) => {
+                        sd.riser_constructions
+                            .insert(rk, (Default::default(), Default::default(), phase, None));
+                    }
+                    Key::Area(ck) => match kind {
+                        SurfaceKind::Floors => {
+                            sd.floor_constructions
+                                .insert(ck, (Default::default(), Default::default(), phase, None));
+                        }
+                        SurfaceKind::Ceilings => {
+                            sd.ceiling_constructions
+                                .insert(ck, (Default::default(), Default::default(), phase, None));
+                        }
+                        SurfaceKind::Walls => {}
+                    },
+                }
+            }
         }
         let _ = self.mark_dirty();
     }
@@ -1314,6 +1761,14 @@ impl AppController {
     /// group's surfaces, dispatching to the right durable store by the type's
     /// kind (writes the store, snapshots for undo). `phase` defaults to the
     /// group's derived value but is editable in the attribute editor.
+    ///
+    /// NAME carry: the name is part of the construction identity. When the
+    /// session group covers ALL of its construction's members, the group's
+    /// explicit name rides along (the group evolves, keeping its name); when
+    /// it covers a SUBSET, the diverging members leave WITHOUT the name (they
+    /// split into a new unnamed group — the stay-behind members keep the
+    /// named one; carrying the name would mint a same-name group with
+    /// different attributes, the very thing the name-integrity rule forbids).
     pub fn set_structure_group_attrs(
         &mut self,
         group: usize,
@@ -1321,7 +1776,17 @@ impl AppController {
         makeup: ConstructionMakeup,
         phase: ConstructionPhase,
     ) {
-        let ids = {
+        let (ids, kind_before) = {
+            let Some(e) = self.structure_edit.as_ref() else {
+                return;
+            };
+            let Some(g) = e.groups.get(group) else {
+                return;
+            };
+            (g.ids.clone(), g.ty.kind())
+        };
+        let full = self.group_covers_all_members(kind_before, &ids);
+        let name = {
             let Some(e) = self.structure_edit.as_mut() else {
                 return;
             };
@@ -1331,36 +1796,67 @@ impl AppController {
             g.ty = ty;
             g.makeup = makeup.clone();
             g.phase = phase.clone();
-            g.ids.clone()
+            // Any attribute apply resolves the fresh two-mode entry — the box
+            // now shows the full (filled) editor, whether the values came
+            // from "New group" typing or an existing-group pick.
+            g.show_editor = true;
+            if !full {
+                // Subset divergence: the members split into a NEW unnamed
+                // group — reflect that in the session too.
+                g.explicit_name = None;
+                g.name = format!("Group {}", group + 1);
+            }
+            g.explicit_name.clone()
         };
         match ty {
-            ConstructionType::Wall(t) => self.set_wall_construction_for(&ids, t, makeup, phase),
-            ConstructionType::Floor(t) => self.set_floor_construction_for(&ids, t, makeup, phase),
+            ConstructionType::Wall(t) => {
+                self.set_wall_construction_for(&ids, t, makeup, phase, name)
+            }
+            ConstructionType::Floor(t) => {
+                self.set_floor_construction_for(&ids, t, makeup, phase, name)
+            }
             ConstructionType::Ceiling(t) => {
-                self.set_ceiling_construction_for(&ids, t, makeup, phase)
+                self.set_ceiling_construction_for(&ids, t, makeup, phase, name)
             }
         }
     }
 
+    /// Whether the session group's `ids` cover EVERY resolved member of the
+    /// construction(s) they currently reference — the full-group-vs-subset
+    /// decision behind name carry and rename forking. A SUBSET edit must
+    /// never mutate/carry what the stay-behind members share.
+    fn group_covers_all_members(&self, kind: SurfaceKind, ids: &[ItemId]) -> bool {
+        let Some(record) = self.current_record.as_ref() else {
+            return false;
+        };
+        let id_set: HashSet<ItemId> = ids.iter().copied().collect();
+        self.construction_ids_for(kind, ids).iter().all(|cid| {
+            record
+                .data
+                .construction_member_ids(kind, *cid)
+                .iter()
+                .all(|m| id_set.contains(m))
+        })
+    }
+
     /// Close the "Edit attributes" session (attributes apply as they're set).
-    /// REFUSED while a ceiling group's insulation is unresolved
-    /// ([`StructureEdit::blocker`] — unspecified, or a thickness with no
-    /// backing photo): the UI disables Done with the blocker as the hint, and
-    /// this guard is the belt-and-braces behind it. Abandonment paths (phase /
-    /// kind switches) go through [`close_structure_edit`](Self::close_structure_edit)
-    /// and stay ungated. When the `Remaining` subtool is active this is the
-    /// "work until done" loop: re-seed it so the surfaces just completed drop
-    /// out and the selection shrinks toward empty (materialize first so the
-    /// re-resolved constructions the seed reads are current).
+    /// Done ALWAYS closes — an untouched or half-filled group is a legitimate
+    /// exit (e.g. two ceilings grouped together that the assessor intends to
+    /// reselect and attribute one by one): it simply stays INCOMPLETE, with
+    /// the completeness predicate ([`EditGroup::is_complete`] /
+    /// `CeilingInsulation::spec_done`) still enforcing the insulation rule in
+    /// the group tick, the N/M headers, the checklist row, the `Remaining`
+    /// subtool and the Review-entry gate. Done DESELECTS everything — the
+    /// halo shouldn't linger once the assessor has finished attributing (any
+    /// staged carve state clears with it). When the `Remaining` subtool is
+    /// active this is the "work until done" loop: AFTER the clear, re-seed it
+    /// so the still-incomplete surfaces — including any just closed
+    /// unattributed — select again and the loop shrinks toward empty
+    /// (materialize first so the re-resolved constructions the seed reads are
+    /// current).
     pub fn end_structure_edit(&mut self) {
-        if self
-            .structure_edit
-            .as_ref()
-            .is_some_and(|e| e.blocker().is_some())
-        {
-            return;
-        }
         self.close_structure_edit();
+        self.clear_structure_surface_selection();
         if self.structure_select == Some(SelectMode::Remaining) {
             self.materialize();
             self.reseed_structure_selection();
@@ -1379,6 +1875,37 @@ impl AppController {
     /// selection. The active [`StructureSelection::kind`] decides which regions
     /// are hit-tested; no-op when no Select subtool is active.
     pub fn toggle_structure_surface_at(&mut self, world_x: f64, world_y: f64, tol: f64) {
+        self.toggle_structure_surface_in(None, world_x, world_y, tol);
+    }
+
+    /// The ALL-STOREYS variant of
+    /// [`toggle_structure_surface_at`](Self::toggle_structure_surface_at):
+    /// the tap landed in storey `idx`'s CELL (the all-storeys canvas resolves
+    /// which cell, and converts the point into that storey's own world
+    /// frame), so hit-test that storey's regions. Same kind priority and
+    /// structure-scope filtering; region ids are unique house-wide, so the
+    /// one selection set spans storeys — a few taps across cells build the
+    /// same cross-storey group a lasso would.
+    pub fn toggle_structure_surface_at_in(
+        &mut self,
+        idx: usize,
+        world_x: f64,
+        world_y: f64,
+        tol: f64,
+    ) {
+        self.toggle_structure_surface_in(Some(idx), world_x, world_y, tol);
+    }
+
+    /// Shared body of the two taps: hit-test `storey_idx` (`None` = the
+    /// active storey) by kind priority and toggle the first hit in/out of the
+    /// selection.
+    fn toggle_structure_surface_in(
+        &mut self,
+        storey_idx: Option<usize>,
+        world_x: f64,
+        world_y: f64,
+        tol: f64,
+    ) {
         if self.structure_select.is_none() {
             return;
         }
@@ -1386,7 +1913,7 @@ impl AppController {
         // wall edge over a floor, say). Resolve by priority — wall → roof →
         // floor — and toggle the first hit (see the overlap-pick rule).
         let hit = {
-            let Some(storey) = self.current_storey() else {
+            let Some(storey) = self.storey_for(storey_idx) else {
                 return;
             };
             [
@@ -1396,7 +1923,7 @@ impl AppController {
             ]
             .into_iter()
             .filter(|k| self.structure_kinds.contains(k))
-            .find_map(|k| storey.surface_at(k, world_x, world_y, tol))
+            .find_map(|k| storey.structure_surface_at(k, world_x, world_y, tol))
         };
         if let Some(id) = hit {
             if !self.structure_selected.insert(id) {
@@ -1411,6 +1938,7 @@ impl AppController {
         self.structure_selected.clear();
         self.pending_structure_carves.clear();
         self.pending_wall_inclusion = None;
+        self.queued_wall_inclusions.clear();
         self.pending_structure_cut = None;
         self.structure_split_kind = None;
     }
@@ -1419,15 +1947,43 @@ impl AppController {
     /// shade as the pending selection — including the ring the wall-inclusion
     /// ask is currently walking (it's committed to the selection; only its wall
     /// membership is still being answered). Empty when no carve is staged.
+    ///
+    /// SINGLE-STOREY canvas view: rings tagged with another storey (lasso
+    /// regions from the all-storeys view) are omitted — their coordinates are
+    /// that storey's frame, not the drawn one. The all-storeys canvas reads
+    /// [`pending_structure_carve_polygons_by_storey`](Self::pending_structure_carve_polygons_by_storey)
+    /// instead.
     pub fn pending_structure_carve_polygons(&self) -> Vec<Vec<(f64, f64)>> {
+        let mine = |storey: Option<usize>| storey.is_none() || storey == self.current_storey_idx;
         self.pending_structure_carves
             .iter()
+            .filter(|c| mine(c.storey))
             .map(|c| c.ring.iter().map(|p| (p.x, p.y)).collect())
             .chain(
                 self.pending_wall_inclusion
                     .as_ref()
+                    .filter(|p| mine(p.storey))
                     .map(|p| p.ring.iter().map(|p| (p.x, p.y)).collect()),
             )
+            .collect()
+    }
+
+    /// The staged carve rings TAGGED by storey, for the all-storeys canvas to
+    /// shade each into its own cell (each ring is in its storey's own world
+    /// frame). Untagged rings (single-storey staging) map to the current
+    /// storey; queued lasso asks' rings are included like the active one.
+    pub fn pending_structure_carve_polygons_by_storey(&self) -> Vec<(usize, Vec<(f64, f64)>)> {
+        let resolve = |storey: Option<usize>| storey.or(self.current_storey_idx);
+        self.pending_structure_carves
+            .iter()
+            .filter_map(|c| Some((resolve(c.storey)?, c.ring.as_slice())))
+            .chain(
+                self.pending_wall_inclusion
+                    .iter()
+                    .chain(self.queued_wall_inclusions.iter())
+                    .filter_map(|p| Some((resolve(p.storey)?, p.ring.as_slice()))),
+            )
+            .map(|(i, ring)| (i, ring.iter().map(|p| (p.x, p.y)).collect()))
             .collect()
     }
 
@@ -1437,12 +1993,43 @@ impl AppController {
     pub fn wall_inclusion_prompt(&self) -> Option<WallInclusionPromptView> {
         let p = self.pending_wall_inclusion.as_ref()?;
         let e = p.edges.get(p.cursor)?;
+        // A cross-storey lasso ask names its storey up front, so the question
+        // identifies its target even where the canvas can't highlight it.
+        let prefix = p
+            .storey
+            .and_then(|i| self.storey_name(i))
+            .map(|n| format!("{n}: "))
+            .unwrap_or_default();
         Some(WallInclusionPromptView {
             edge: ((e[0].x, e[0].y), (e[1].x, e[1].y)),
             index: p.cursor,
             total: p.edges.len(),
-            description: self.wall_inclusion_description(&p.ring, e),
+            description: format!(
+                "{prefix}{}",
+                self.wall_inclusion_description(p.storey, &p.ring, e)
+            ),
+            storey_idx: p.storey,
         })
+    }
+
+    /// Display name of storey `i` ("Ground Floor" / "Storey 2" fallback), for
+    /// prompt text that must identify a storey in the all-storeys view.
+    fn storey_name(&self, i: usize) -> Option<String> {
+        let s = self.current_record.as_ref()?.data.storeys.get(i)?;
+        Some(if s.name.is_empty() {
+            format!("Storey {}", s.storey_number + 1)
+        } else {
+            s.name.clone()
+        })
+    }
+
+    /// The resolved storey a staged carve / ask refers to: `Some(i)` → storey
+    /// `i`; `None` → the active storey (the single-storey paths).
+    fn storey_for(&self, idx: Option<usize>) -> Option<&Storey> {
+        match idx {
+            Some(i) => self.current_record.as_ref()?.data.storeys.get(i),
+            None => self.current_storey(),
+        }
     }
 
     /// Compose the human description of the CURRENT wall-inclusion question:
@@ -1453,7 +2040,12 @@ impl AppController {
     /// UI-facing view derivation over resolved regions, so it lives on the
     /// shell; the region query is the storey's
     /// ([`Storey::wall_ids_on_segment`]).
-    fn wall_inclusion_description(&self, ring: &[Point2f64], edge: &[Point2f64; 2]) -> String {
+    fn wall_inclusion_description(
+        &self,
+        storey_idx: Option<usize>,
+        ring: &[Point2f64],
+        edge: &[Point2f64; 2],
+    ) -> String {
         let (a, b) = (edge[0], edge[1]);
         let len = ((b.x - a.x).powi(2) + (b.y - a.y).powi(2)).sqrt();
         // The side: the edge midpoint's outward direction from the region
@@ -1477,7 +2069,7 @@ impl AppController {
         };
         format!(
             "Include the {len:.1} m wall on the {side} edge{}?",
-            self.wall_on_edge_label(a, b)
+            self.wall_on_edge_label(storey_idx, a, b)
         )
     }
 
@@ -1486,20 +2078,25 @@ impl AppController {
     /// exclusion subtracts), otherwise the wall region's exposure class (the
     /// exposure-toolbar wording). Empty when nothing resolvable stands on the
     /// segment (the ask filter makes that unreachable in practice).
-    fn wall_on_edge_label(&self, a: Point2f64, b: Point2f64) -> String {
-        let Some(storey) = self.current_storey() else {
+    fn wall_on_edge_label(&self, storey_idx: Option<usize>, a: Point2f64, b: Point2f64) -> String {
+        let Some(storey) = self.storey_for(storey_idx) else {
             return String::new();
         };
         let ids = storey.wall_ids_on_segment(a, b);
         let Some(first) = ids.first() else {
             return String::new();
         };
-        if let Some(riser) = self
-            .document
-            .riser_walls(storey)
+        // The riser classifier lives on the storey's OWN editing doc (its
+        // step lines) — index it explicitly so a lasso ask about another
+        // storey classifies against the right one.
+        let doc_idx = storey_idx.or(self.current_storey_idx);
+        let riser = doc_idx
+            .and_then(|i| self.document.storeys.get(i))
+            .map(|d| d.riser_walls(storey))
+            .unwrap_or_default()
             .into_iter()
-            .find(|r| ids.contains(&r.id))
-        {
+            .find(|r| ids.contains(&r.id));
+        if let Some(riser) = riser {
             return match riser.kind {
                 document::RiserKind::Floor => " (floor-step riser)".into(),
                 document::RiserKind::Ceiling => " (ceiling-step riser)".into(),
@@ -1544,7 +2141,20 @@ impl AppController {
             self.pending_structure_carves.push(StagedStructureCarve {
                 ring: p.ring,
                 excluded_edges: p.excluded,
+                storey: p.storey,
+                lasso: p.lasso,
             });
+            // A cross-storey lasso queues one ask per storey/region — answer
+            // them in sequence.
+            self.advance_wall_inclusion_queue();
+        }
+    }
+
+    /// Pop the next queued wall-inclusion ask into the active slot, if the
+    /// slot is free. No-op when an ask is already up or the queue is empty.
+    fn advance_wall_inclusion_queue(&mut self) {
+        if self.pending_wall_inclusion.is_none() && !self.queued_wall_inclusions.is_empty() {
+            self.pending_wall_inclusion = Some(self.queued_wall_inclusions.remove(0));
         }
     }
 
@@ -1626,6 +2236,77 @@ impl AppController {
                 let _ = manip_plan::take_snap_decisions();
             }
         }
+    }
+
+    /// A CROSS-STOREY LASSO carve from the all-storeys 2D view: one drawn
+    /// stroke, delivered by the UI once PER STOREY in that storey's own world
+    /// frame (each all-storeys cell has its own screen↔world transform, so
+    /// the same screen stroke lands at different world coordinates per
+    /// storey). Unlike the single-storey carve, the stroke is a FREE lasso:
+    /// no splice/attach/collapse against any outline (it can span two plans
+    /// plus the gap between them) and no dimensioning — the ring is closed
+    /// and RDP-simplified ([`manip_plan::lasso_ring`]), clipped to each
+    /// storey's footprint ([`Storey::lasso_regions`]; the gap contributes
+    /// nothing), and each clipped region is STAGED as a selection-only carve.
+    /// Interior clip edges that carry a (structure-scope) wall raise the same
+    /// per-edge wall-inclusion ask as the single-storey carve, queued across
+    /// storeys and answered in sequence.
+    pub fn apply_structure_lasso_stroke(&mut self, per_storey: &[Vec<(f32, f32)>]) {
+        let _ = self.sketch_engine.take_stroke_raw();
+        if !matches!(self.structure_select, Some(SelectMode::Carve)) {
+            return;
+        }
+        // Regions must be current before the clip / wall lookups read them.
+        self.materialize();
+        let mut staged: Vec<StagedStructureCarve> = Vec::new();
+        let mut asks: Vec<WallInclusionPrompt> = Vec::new();
+        {
+            let Some(record) = self.current_record.as_ref() else {
+                return;
+            };
+            for (idx, stroke) in per_storey.iter().enumerate() {
+                let Some(storey) = record.data.storeys.get(idx) else {
+                    continue;
+                };
+                let pts: Vec<Point2f32> =
+                    stroke.iter().map(|(x, y)| Point2f32::new(*x, *y)).collect();
+                let Some(ring32) = manip_plan::lasso_ring(&pts, &self.tuning.subarea) else {
+                    continue;
+                };
+                let ring64: Vec<Point2f64> =
+                    ring32.iter().map(|p| domain::points::to_f64(*p)).collect();
+                for (region_ring, interior) in storey.lasso_regions(&ring64) {
+                    // Only interior clip edges a selectable wall actually
+                    // stands on are worth asking about (`wall_ids_on_segment`
+                    // is structure-scope filtered, so an edge whose only wall
+                    // is non-heat-loss / inter-storey asks nothing).
+                    let ambiguous: Vec<[Point2f64; 2]> = interior
+                        .into_iter()
+                        .filter(|e| !storey.wall_ids_on_segment(e[0], e[1]).is_empty())
+                        .collect();
+                    if ambiguous.is_empty() {
+                        staged.push(StagedStructureCarve {
+                            ring: region_ring,
+                            excluded_edges: Vec::new(),
+                            storey: Some(idx),
+                            lasso: true,
+                        });
+                    } else {
+                        asks.push(WallInclusionPrompt {
+                            ring: region_ring,
+                            edges: ambiguous,
+                            cursor: 0,
+                            excluded: Vec::new(),
+                            storey: Some(idx),
+                            lasso: true,
+                        });
+                    }
+                }
+            }
+        }
+        self.pending_structure_carves.extend(staged);
+        self.queued_wall_inclusions.extend(asks);
+        self.advance_wall_inclusion_queue();
     }
 
     /// The two candidate regions of a pending cut (world coords), for the UI to
@@ -1813,6 +2494,8 @@ impl AppController {
             self.pending_structure_carves.push(StagedStructureCarve {
                 ring: ring64,
                 excluded_edges: Vec::new(),
+                storey: None,
+                lasso: false,
             });
         } else {
             self.pending_wall_inclusion = Some(WallInclusionPrompt {
@@ -1820,6 +2503,8 @@ impl AppController {
                 edges: ambiguous,
                 cursor: 0,
                 excluded: Vec::new(),
+                storey: None,
+                lasso: false,
             });
         }
     }
@@ -1834,23 +2519,39 @@ impl AppController {
     pub(super) fn commit_pending_structure_carves(&mut self) {
         // An unanswered wall-inclusion ask flushes as INCLUDE for the remaining
         // edges (the pre-ask behaviour) — opening the editor mid-ask shouldn't
-        // silently drop the carve.
-        if let Some(p) = self.pending_wall_inclusion.take() {
+        // silently drop the carve. Queued lasso asks flush the same way.
+        for p in self
+            .pending_wall_inclusion
+            .take()
+            .into_iter()
+            .chain(std::mem::take(&mut self.queued_wall_inclusions))
+        {
             self.pending_structure_carves.push(StagedStructureCarve {
                 ring: p.ring,
                 excluded_edges: p.excluded,
+                storey: p.storey,
+                lasso: p.lasso,
             });
         }
         if self.pending_structure_carves.is_empty() {
             return;
         }
+        let all_carves = std::mem::take(&mut self.pending_structure_carves);
+        // LASSO regions are SELECTION-ONLY: an approximate all-storeys gesture
+        // is never dimensioned, so it must not subdivide any geometry — just
+        // select what each clipped ring encloses on its own storey.
+        let (lassos, carves): (Vec<_>, Vec<_>) = all_carves.into_iter().partition(|c| c.lasso);
+        for carve in &lassos {
+            self.select_surfaces_in_region(carve);
+        }
+        if carves.is_empty() {
+            return;
+        }
         // A split needs an active storey (never the read-only All-storeys tab).
         let Some(idx) = self.current_storey_idx else {
-            self.pending_structure_carves.clear();
             return;
         };
         let kinds: Vec<SurfaceKind> = self.structure_kinds.iter().copied().collect();
-        let carves = std::mem::take(&mut self.pending_structure_carves);
 
         // Walls split only along a carve ring's INTERIOR edges (where it crosses a
         // wall); floors/ceilings take the whole ring. Compute the wall cuts per ring
@@ -1951,7 +2652,7 @@ impl AppController {
             return;
         }
         let kinds: Vec<SurfaceKind> = self.structure_kinds.iter().copied().collect();
-        let hits: Vec<ItemId> = match self.current_storey() {
+        let hits: Vec<ItemId> = match self.storey_for(carve.storey) {
             Some(storey) => {
                 let excluded: HashSet<ItemId> = carve
                     .excluded_edges
@@ -1983,33 +2684,59 @@ impl AppController {
         }
         let kinds: Vec<SurfaceKind> = self.structure_kinds.iter().copied().collect();
         let mut ids: HashSet<ItemId> = HashSet::new();
-        for kind in kinds {
-            match mode {
-                SelectMode::All => {
-                    if let Some(s) = self.current_storey() {
-                        ids.extend(s.surface_ids(kind));
+        // On a specific storey the seed reads that storey; on the all-storeys
+        // tab it spans the whole stack (the tab's Structure tools act
+        // house-wide — same scope as the lasso carve).
+        for idx in self.structure_storey_indices() {
+            let Some(record) = self.current_record.as_ref() else {
+                break;
+            };
+            for kind in &kinds {
+                match mode {
+                    SelectMode::All => {
+                        if let Some(s) = record.data.storeys.get(idx) {
+                            ids.extend(s.surface_ids(*kind));
+                        }
                     }
-                }
-                SelectMode::Remaining => {
-                    if let (Some(record), Some(idx)) =
-                        (self.current_record.as_ref(), self.current_storey_idx)
-                    {
-                        ids.extend(record.data.incomplete_surface_ids(idx, kind));
+                    SelectMode::Remaining => {
+                        ids.extend(record.data.incomplete_surface_ids(idx, *kind));
                     }
+                    _ => {}
                 }
-                _ => {}
             }
         }
         self.structure_selected = ids;
     }
 
+    /// The storey indices the Structure tools currently act on: just the
+    /// active storey, or every storey on the all-storeys tab.
+    fn structure_storey_indices(&self) -> Vec<usize> {
+        match self.current_storey_idx {
+            Some(i) => vec![i],
+            None => {
+                let n = self
+                    .current_record
+                    .as_ref()
+                    .map(|r| r.data.storeys.len())
+                    .unwrap_or(0);
+                (0..n).collect()
+            }
+        }
+    }
+
     /// Drop every selected id belonging to `kind` (used when a mode is toggled
     /// OFF in an additive `Click`/`Carve` selection — the rest stays put).
     pub(super) fn drop_selection_of_kind(&mut self, kind: SurfaceKind) {
-        let drop_ids: HashSet<ItemId> = match self.current_storey() {
-            Some(s) => s.surface_ids(kind).into_iter().collect(),
-            None => return,
-        };
+        let mut drop_ids: HashSet<ItemId> = HashSet::new();
+        for idx in self.structure_storey_indices() {
+            if let Some(s) = self
+                .current_record
+                .as_ref()
+                .and_then(|r| r.data.storeys.get(idx))
+            {
+                drop_ids.extend(s.surface_ids(kind));
+            }
+        }
         self.structure_selected.retain(|id| !drop_ids.contains(id));
     }
 
@@ -2032,6 +2759,49 @@ impl AppController {
             .data
             .storeys
             .get(self.current_storey_idx?)
+    }
+
+    /// The distinct construction ids referenced by the given region `ids` of
+    /// `kind`, searched across EVERY storey — the group operations (photo
+    /// attach / rename / insulation) can act on an all-storeys lasso group
+    /// whose surfaces span the stack (region ids are unique house-wide, so
+    /// the search never mis-attributes).
+    fn construction_ids_for(&self, kind: SurfaceKind, ids: &[ItemId]) -> Vec<ItemId> {
+        let Some(record) = self.current_record.as_ref() else {
+            return Vec::new();
+        };
+        let mut seen = HashSet::new();
+        let mut out = Vec::new();
+        for storey in &record.data.storeys {
+            for id in ids {
+                let cid = match kind {
+                    SurfaceKind::Walls => storey
+                        .walls
+                        .regions
+                        .iter()
+                        .find(|r| r.id == *id)
+                        .map(|r| r.construction_id),
+                    SurfaceKind::Floors => storey
+                        .floors
+                        .regions
+                        .iter()
+                        .find(|r| r.id == *id)
+                        .map(|r| r.construction_id),
+                    SurfaceKind::Ceilings => storey
+                        .ceilings
+                        .regions
+                        .iter()
+                        .find(|r| r.id == *id)
+                        .map(|r| r.construction_id),
+                };
+                if let Some(c) = cid {
+                    if seen.insert(c) {
+                        out.push(c);
+                    }
+                }
+            }
+        }
+        out
     }
 }
 
@@ -2086,7 +2856,13 @@ impl PhotoQuality {
     /// downscale + one encode.
     fn compression(self) -> Option<(u32, u8)> {
         match self {
-            PhotoQuality::Low => Some((1280, 50)),
+            // TEMPORARY (dual hi/lo capture, 2026-07): `Low` is the explicit
+            // "small file" button's tier (`photo_button_pair` in the UI) —
+            // tuned aggressively (1024 px long edge, JPEG q30: clearly legible,
+            // typically a few tens of KB) and, unlike the other tiers, applied
+            // on EVERY platform (see `process_photo_files`). Retune/remove with
+            // the dual buttons when the smarter size policy lands.
+            PhotoQuality::Low => Some((1024, 30)),
             PhotoQuality::Medium => Some((1600, 70)),
             PhotoQuality::High => Some((2048, 85)),
             PhotoQuality::Full => None,

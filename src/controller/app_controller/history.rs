@@ -80,6 +80,7 @@ impl AppController {
     }
 
     pub(super) fn restore_history_snapshot(&mut self, snap: HistorySnapshot) {
+        let all_storeys_restored = snap.all_storeys.is_some();
         self.document = snap.document;
         self.living_area_mode = snap.living_area_mode;
         // Restore the BER-side openings (and window types) BEFORE the next
@@ -102,9 +103,63 @@ impl AppController {
                 }
             }
         }
+        // The per-storey SESSION region maps (phase / floor-step / ceiling-step
+        // areas) mirror committed record state but live OUTSIDE the snapshot,
+        // so the write-back above left them stale — an undone area would
+        // survive as a phantom the next carve subtracts from its available
+        // region, collapsing a redraw over the same footprint to a line.
+        // Re-derive them from the just-restored record (the storey-switch
+        // landing sequence).
+        self.refresh_session_regions_after_restore(all_storeys_restored);
         // In-flight prompts no longer match the restored state — clear.
         self.edit_drag_prompt = None;
         self.vertex_drop_prompt = None;
+    }
+
+    /// Re-derive the per-storey SESSION region maps (`phase_regions`,
+    /// `step_regions`, `ceiling_step_regions`) from the restored record — the
+    /// tail of every [`restore_history_snapshot`]. Each reconstruct fn
+    /// inserts-or-removes its storey's entry, so this is a full refresh of the
+    /// touched storeys: the active one, or ALL of them after a full-stack
+    /// (`all_storeys`) restore — the cross-storey exposure carves rewrite
+    /// every storey's record. Runs BEFORE the caller's `mark_dirty`, so the
+    /// deferred re-resolve reads maps consistent with the restored record.
+    ///
+    /// SKIPPED for a storey whose restored outline is NOT finalised: before
+    /// finalisation the maps hold FORWARD-LOOKING seeds (the inherited
+    /// floor-level / phase seed lands before the record can carry it — outside
+    /// undo by design), not mirrors of the record. The phantom hazard only
+    /// exists once the outline is finalised — the gate every carve flow sits
+    /// behind — which is exactly when the maps mirror committed record state.
+    ///
+    /// [`restore_history_snapshot`]: Self::restore_history_snapshot
+    fn refresh_session_regions_after_restore(&mut self, all_storeys: bool) {
+        let indices: Vec<usize> = if all_storeys {
+            let n = self
+                .current_record
+                .as_ref()
+                .map(|r| r.data.storeys.len())
+                .unwrap_or(0);
+            (0..n).collect()
+        } else {
+            self.current_storey_idx.into_iter().collect()
+        };
+        for i in indices {
+            // Per-storey `outline_finalised`, on the restored outline SLOT.
+            // (`ShapeSlot::finalised` is vacuously true for an EMPTY plan, so
+            // require a drawn outline too.)
+            let outline_finalised = self.document.storeys.get(i).is_some_and(|s| {
+                !s.outline.floor_plan.get_points().is_empty()
+                    && s.outline.dimensioning.scale_set
+                    && s.outline.finalised()
+            });
+            if !outline_finalised {
+                continue;
+            }
+            self.reconstruct_phase_regions_for(i);
+            self.reconstruct_step_regions_for(i);
+            self.load_ceiling_step_regions_for(i);
+        }
     }
 
     pub(super) fn push_history_snapshot(&mut self, snap: HistorySnapshot) {
@@ -133,6 +188,12 @@ impl AppController {
         // undo/redo.
         self.partition_instant_commit = None;
         self.last_snap_action = None;
+        // Bring the record current BEFORE capturing the redo snapshot: an
+        // action that only marked dirty (e.g. a floor-step level assign) has
+        // its session-map effect derived into the record here, so the
+        // snapshot's record is faithful — the restore-side session-map
+        // reconstruction reads it. No-op when nothing is pending.
+        self.materialize();
         let cur = self.current_history_snapshot();
         self.redo.push(cur);
         self.restore_history_snapshot(snap);
@@ -150,6 +211,9 @@ impl AppController {
         // index into the history stack, which redo is about to grow past.
         self.partition_instant_commit = None;
         self.last_snap_action = None;
+        // See `undo`: capture a MATERIALIZED record so the history snapshot
+        // is faithful for the restore-side session-map reconstruction.
+        self.materialize();
         let cur = self.current_history_snapshot();
         self.history.push(cur);
         self.restore_history_snapshot(snap);

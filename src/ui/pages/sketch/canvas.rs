@@ -797,17 +797,57 @@ pub(super) fn render<F: FnMut(UiEvent)>(
         view.pending_structure_carves,
     );
     // Wall-inclusion ask: halo the carve edge currently being asked about, so
-    // the panel's Include / Exclude visibly refers to THAT wall.
+    // the panel's Include / Exclude visibly refers to THAT wall. Only when the
+    // asked edge is on THIS storey — a cross-storey lasso ask (tagged with its
+    // storey) draws in the all-storeys overlay below instead, and its
+    // coordinates would be wrong in another storey's frame.
     if let Some(wi) = &view.wall_inclusion_prompt {
-        render::render_wall_inclusion_edge(
-            &painter,
-            rect,
-            ber,
-            current_storey_idx,
-            mode,
-            vp,
-            wi.edge,
-        );
+        if wi.storey_idx.is_none() || wi.storey_idx == current_storey_idx {
+            render::render_wall_inclusion_edge(
+                &painter,
+                rect,
+                ber,
+                current_storey_idx,
+                mode,
+                vp,
+                wi.edge,
+            );
+        }
+    }
+
+    // ALL-STOREYS Structure overlays: the staged lasso rings + the ask edge,
+    // each drawn into its own storey's cell with that cell's transform.
+    if current_storey_idx.is_none()
+        && matches!(mode, SketchMode::Storey2D)
+        && view.current_phase == AssessmentPhase::Structure
+    {
+        if let Some(b) = ber {
+            let cells = render::all_storeys_2d::cell_transforms(rect, b, vp);
+            let gold = egui::Color32::from_rgb(235, 195, 80);
+            for (i, ring) in view.pending_structure_carves_by_storey {
+                let (Some(t), true) = (cells.get(*i), ring.len() >= 3) else {
+                    continue;
+                };
+                let pts: Vec<egui::Pos2> = ring.iter().map(|(x, y)| t.apply(*x, *y)).collect();
+                let n = pts.len();
+                for k in 0..n {
+                    painter.line_segment([pts[k], pts[(k + 1) % n]], egui::Stroke::new(2.5, gold));
+                }
+            }
+            if let Some(wi) = &view.wall_inclusion_prompt {
+                if let Some(t) = wi.storey_idx.and_then(|i| cells.get(i)) {
+                    let a = t.apply(wi.edge.0 .0, wi.edge.0 .1);
+                    let b2 = t.apply(wi.edge.1 .0, wi.edge.1 .1);
+                    // Same halo treatment as the single-storey ask edge: a
+                    // thick amber stroke so Include/Exclude visibly refers to
+                    // THAT wall in THAT cell.
+                    painter.line_segment(
+                        [a, b2],
+                        egui::Stroke::new(5.0, egui::Color32::from_rgb(255, 170, 40)),
+                    );
+                }
+            }
+        }
     }
 
     // DEBUG: splice-pipeline phases of the last extend/trim.
@@ -1269,6 +1309,10 @@ pub(super) fn render<F: FnMut(UiEvent)>(
                                         view.phase_choices,
                                         &view.structure_existing_groups,
                                         editable,
+                                        edit.name_error
+                                            .as_ref()
+                                            .filter(|(gi, _)| *gi == i)
+                                            .map(|(_, m)| m.as_str()),
                                         on_event,
                                     );
                                 });
@@ -1700,6 +1744,29 @@ pub(super) fn render<F: FnMut(UiEvent)>(
                     }));
                 }
             }
+        } else if current_storey_idx.is_none() {
+            // ALL-STOREYS tab: route the tap to the CELL it landed in — invert
+            // that cell's transform into its storey's own world frame and let
+            // the controller hit-test that storey. Taps across cells build a
+            // cross-storey selection just like the lasso.
+            if response.clicked_by(egui::PointerButton::Primary) {
+                if let (Some(pos), Some(b)) = (response.interact_pointer_pos(), ber) {
+                    if let Some(i) = render::all_storeys_2d::cell_index_at(rect, b, pos) {
+                        if let Some(t) = render::all_storeys_2d::cell_transforms(rect, b, vp).get(i)
+                        {
+                            let (wx, wy) = t.inverse(pos.x, pos.y);
+                            on_event(UiEvent::Sketch(
+                                SketchEvent::StructureSurfaceTapAllStoreys {
+                                    storey_idx: i,
+                                    world_x: wx,
+                                    world_y: wy,
+                                    tol: (12.0 / t.scale()) as f64,
+                                },
+                            ));
+                        }
+                    }
+                }
+            }
         }
     }
 
@@ -1708,7 +1775,13 @@ pub(super) fn render<F: FnMut(UiEvent)>(
     // carve stroke (captured in pixels, converted to world on release — the
     // same path living-area cuts use), then routed to the carve handler.
     let structure_cut_picking = !view.structure_cut_regions.is_empty();
-    if structure_carve && matches!(mode, SketchMode::Storey2D) && !touch_nav_active {
+    // On the ALL-STOREYS tab the carve is the free LASSO below, not this
+    // single-storey path.
+    if structure_carve
+        && current_storey_idx.is_some()
+        && matches!(mode, SketchMode::Storey2D)
+        && !touch_nav_active
+    {
         if structure_cut_picking {
             if response.clicked_by(egui::PointerButton::Primary) {
                 if let Some((wx, wy)) = response
@@ -1760,6 +1833,63 @@ pub(super) fn render<F: FnMut(UiEvent)>(
             if let Some(stroke) = &view.current {
                 draw_stroke(&painter, rect, stroke);
             }
+        }
+    }
+
+    // Structure CARVE on the ALL-STOREYS tab: a FREE LASSO. The stroke is
+    // captured in pixels like the single-storey carve, but on release it's
+    // converted to EVERY storey's own world frame via the per-cell transforms
+    // (the same screen stroke means a different world polyline per cell — the
+    // controller clips each against its storey's footprint, so the gap
+    // between cells contributes nothing). No outline attach/collapse and no
+    // dimensioning: the lasso is a pure selection gesture.
+    if structure_carve
+        && current_storey_idx.is_none()
+        && matches!(mode, SketchMode::Storey2D)
+        && !touch_nav_active
+    {
+        if response.drag_started_by(egui::PointerButton::Primary) {
+            if let Some(pos) = response.interact_pointer_pos() {
+                on_event(UiEvent::Sketch(SketchEvent::StartStroke(
+                    pos - rect.left_top().to_vec2(),
+                )));
+            }
+        }
+        if response.dragged_by(egui::PointerButton::Primary) {
+            if let Some(pos) = response.interact_pointer_pos() {
+                on_event(UiEvent::Sketch(SketchEvent::AddPoint(
+                    pos - rect.left_top().to_vec2(),
+                )));
+            }
+        }
+        if response.drag_stopped_by(egui::PointerButton::Primary) {
+            let cells = ber
+                .map(|b| render::all_storeys_2d::cell_transforms(rect, b, vp))
+                .unwrap_or_default();
+            if let (Some(stroke), false) = (view.current.as_ref(), cells.is_empty()) {
+                let topleft = rect.left_top();
+                let per_storey: Vec<Vec<(f32, f32)>> = cells
+                    .iter()
+                    .map(|t| {
+                        stroke
+                            .points
+                            .iter()
+                            .map(|p| {
+                                let (wx, wy) = t.inverse(p.x + topleft.x, p.y + topleft.y);
+                                (wx as f32, wy as f32)
+                            })
+                            .collect()
+                    })
+                    .collect();
+                on_event(UiEvent::Sketch(SketchEvent::StructureLassoStrokeWorld {
+                    per_storey,
+                }));
+            } else {
+                on_event(UiEvent::Sketch(SketchEvent::CancelStroke));
+            }
+        }
+        if let Some(stroke) = &view.current {
+            draw_stroke(&painter, rect, stroke);
         }
     }
 
@@ -2568,8 +2698,6 @@ fn external_photos_button<F: FnMut(UiEvent)>(
                         .default_open(false)
                         .show(ui, |ui| {
                             ui.set_max_width(230.0);
-                            // Elevation shots want legible detail; capture High.
-                            let quality = crate::ui::widgets::PhotoQuality::High;
                             for (side, photo) in &view.external_photos {
                                 ui.horizontal(|ui| match photo {
                                     Some(_) => {
@@ -2596,25 +2724,43 @@ fn external_photos_button<F: FnMut(UiEvent)>(
                                 ui.horizontal(|ui| {
                                     // The shared capture widget: desktop file dialog
                                     // / Android camera, returning the captured path.
+                                    // Elevation shots want legible detail, so the hi
+                                    // tier is High (TEMPORARY dual hi/lo buttons —
+                                    // see `photo_button_pair`).
                                     let action = if photo.is_some() { "Replace" } else { "Add" };
-                                    if let Some(path) = crate::ui::widgets::photo_button(
-                                        ui,
-                                        action,
-                                        true,
-                                        crate::ui::widgets::PhotoConfig {
-                                            default_quality: quality,
-                                        },
-                                    ) {
+                                    if let Some((path, quality)) =
+                                        crate::ui::widgets::photo_button_pair(
+                                            ui,
+                                            action,
+                                            true,
+                                            crate::ui::widgets::PhotoQuality::High,
+                                        )
+                                    {
                                         on_event(UiEvent::Sketch(SketchEvent::AddExternalPhoto {
                                             side: *side,
                                             path,
                                             quality,
                                         }));
                                     }
-                                    if photo.is_some() && ui.button("Remove").clicked() {
-                                        on_event(UiEvent::Sketch(
-                                            SketchEvent::RemoveExternalPhoto { side: *side },
-                                        ));
+                                    if photo.is_some() {
+                                        // Paintbrush annotation over the stored photo
+                                        // (opens the takeover; see `photo_annotate`).
+                                        if ui
+                                            .button("🖌")
+                                            .on_hover_text("Draw on this photo")
+                                            .clicked()
+                                        {
+                                            on_event(UiEvent::Sketch(
+                                                SketchEvent::BeginAnnotateExternalPhoto {
+                                                    side: *side,
+                                                },
+                                            ));
+                                        }
+                                        if ui.button("Remove").clicked() {
+                                            on_event(UiEvent::Sketch(
+                                                SketchEvent::RemoveExternalPhoto { side: *side },
+                                            ));
+                                        }
                                     }
                                 });
                                 ui.separator();
@@ -3678,6 +3824,22 @@ fn mapping_review_overlay<F: FnMut(UiEvent)>(
                 .maintain_aspect_ratio(true)
                 .show_loading_spinner(false)
                 .paint_at(ui, photo_inner);
+            // Paintbrush annotation over the stored photo (its own Area so the
+            // button owns its clicks over the painted image).
+            egui::Area::new(ui.id().with("mapping_review_annotate"))
+                .order(egui::Order::Foreground)
+                .fixed_pos(photo_rect.left_top() + egui::vec2(52.0, 0.0))
+                .show(ui.ctx(), |ui| {
+                    if ui
+                        .button("🖌 Annotate")
+                        .on_hover_text("Draw on this photo")
+                        .clicked()
+                    {
+                        on_event(UiEvent::Sketch(SketchEvent::BeginAnnotateExternalPhoto {
+                            side: rv.side,
+                        }));
+                    }
+                });
         }
         None => {
             painter.text(

@@ -207,9 +207,11 @@ pub struct SketchState {
     /// Persists across placements; applied to each window as it's placed.
     pub overshading: ber_model::ber::fenestration::Overshading,
     /// Source paths of photos picked in the placement box for the window being
-    /// placed (a window photo is per-instance). Cleared at the start of each new
-    /// placement; consumed (attached) when the window is placed.
-    pub pending_window_photos: Vec<std::path::PathBuf>,
+    /// placed (a window photo is per-instance), each with the capture tier its
+    /// button asked for (TEMPORARY dual hi/lo buttons — `photo_button_pair`).
+    /// Cleared at the start of each new placement; consumed (attached) when the
+    /// window is placed.
+    pub pending_window_photos: Vec<(std::path::PathBuf, crate::ui::widgets::PhotoQuality)>,
     /// Phase-3 (Objects) entry-panel state: the chosen category (to show its
     /// subtypes), the count / note / "Other"-name buffers, and the photos picked
     /// for the object being added. Cleared after each Add.
@@ -220,7 +222,11 @@ pub struct SketchState {
     pub object_count_input: String,
     pub object_note_input: String,
     pub object_other_name: String,
-    pub object_pending_photos: Vec<std::path::PathBuf>,
+    pub object_pending_photos: Vec<(std::path::PathBuf, crate::ui::widgets::PhotoQuality)>,
+    /// The open external-photo ANNOTATION session (paintbrush over a stored
+    /// photo), or `None`. Opened by `BeginAnnotateExternalPhoto`; drawn as a
+    /// takeover window over the Sketch canvas; closes itself on Save/Cancel.
+    pub photo_annotator: Option<crate::ui::widgets::PhotoAnnotator>,
     /// Whether the floating default-ceiling-height entry box is open. Lives here
     /// (not on `categories`, which the view borrows) so the event handler can
     /// toggle it; the view reads it by value. Opened by the Heights tool button,
@@ -870,6 +876,7 @@ impl eframe::App for BerApp {
                                 current_phase,
                                 mapping_complete,
                                 surface_counts,
+                                structure_progress,
                                 structure_kinds,
                                 structure_select,
                                 checklist,
@@ -886,6 +893,7 @@ impl eframe::App for BerApp {
                                     phase,
                                     c.mapping_complete(),
                                     c.current_surface_counts(),
+                                    c.structure_progress(),
                                     c.structure_kinds().clone(),
                                     c.structure_select(),
                                     checklist,
@@ -1029,6 +1037,12 @@ impl eframe::App for BerApp {
                                 .app_controller
                                 .borrow()
                                 .pending_structure_carve_polygons();
+                            // The same rings tagged by storey, for the
+                            // all-storeys canvas cells.
+                            let pending_structure_carves_by_storey = self
+                                .app_controller
+                                .borrow()
+                                .pending_structure_carve_polygons_by_storey();
                             // The wall-inclusion ask for a just-dimensioned
                             // carve (highlighted edge + Include/Exclude).
                             let wall_inclusion_prompt =
@@ -1297,9 +1311,11 @@ impl eframe::App for BerApp {
                                 object_note_input: &mut self.sketch_state.object_note_input,
                                 object_other_name: &mut self.sketch_state.object_other_name,
                                 object_pending_photos: &mut self.sketch_state.object_pending_photos,
+                                photo_annotator: &mut self.sketch_state.photo_annotator,
                                 objects_present,
                                 object_review_view,
                                 surface_counts,
+                                structure_progress,
                                 structure_kinds,
                                 structure_select,
                                 structure_selected: &structure_selected,
@@ -1308,6 +1324,8 @@ impl eframe::App for BerApp {
                                 structure_cut_regions: &structure_cut_regions,
                                 pending_structure_split_polygon: &pending_structure_split_polygon,
                                 pending_structure_carves: &pending_structure_carves,
+                                pending_structure_carves_by_storey:
+                                    &pending_structure_carves_by_storey,
                                 wall_inclusion_prompt,
                                 layer_library: &layer_library,
                                 floor_exposure_mode,
@@ -1336,6 +1354,14 @@ impl eframe::App for BerApp {
                                 ceiling_exposure_cut_regions: &ceiling_exposure_cut_regions,
                             };
                             let touch_nav = &mut self.sketch_state.touch_nav;
+                            // A `BeginAnnotateExternalPhoto` can't open the
+                            // annotator inside the event closure (the in-render
+                            // view still borrows the page-state slot), so the
+                            // request is parked here and honoured right after
+                            // render.
+                            let annotate_request: std::cell::Cell<
+                                Option<ber_model::ber::common::ExternalSide>,
+                            > = std::cell::Cell::new(None);
                             SketchPage::render(ui, view, touch_nav, |event| match event {
                                 UiEvent::Sketch(sketch_event) => match sketch_event {
                                     // Logged, not expected: after a two-finger
@@ -1884,7 +1910,6 @@ impl eframe::App for BerApp {
                                         window_type,
                                         overshading,
                                         photos,
-                                        photo_quality,
                                     } => {
                                         let _ = controller.borrow_mut().place_opening(
                                             width_m,
@@ -1898,20 +1923,17 @@ impl eframe::App for BerApp {
                                             window_type,
                                             overshading,
                                             photos,
-                                            photo_quality,
                                         );
                                     }
                                     SketchEvent::FillOpeningSurface {
                                         window_type,
                                         overshading,
                                         photos,
-                                        photo_quality,
                                     } => {
                                         let _ = controller.borrow_mut().fill_opening_surface(
                                             window_type,
                                             overshading,
                                             photos,
-                                            photo_quality,
                                         );
                                     }
                                     SketchEvent::CancelOpeningPlacement => {
@@ -2015,15 +2037,10 @@ impl eframe::App for BerApp {
                                         count,
                                         note,
                                         photos,
-                                        photo_quality,
                                     } => {
-                                        controller.borrow_mut().add_object(
-                                            kind,
-                                            count,
-                                            note,
-                                            photos,
-                                            photo_quality,
-                                        );
+                                        controller
+                                            .borrow_mut()
+                                            .add_object(kind, count, note, photos);
                                     }
                                     SketchEvent::DeleteObject { room, object } => {
                                         controller.borrow_mut().delete_object(room, object);
@@ -2224,6 +2241,16 @@ impl eframe::App for BerApp {
                                             .borrow_mut()
                                             .toggle_structure_surface_at(world_x, world_y, tol);
                                     }
+                                    SketchEvent::StructureSurfaceTapAllStoreys {
+                                        storey_idx,
+                                        world_x,
+                                        world_y,
+                                        tol,
+                                    } => {
+                                        controller.borrow_mut().toggle_structure_surface_at_in(
+                                            storey_idx, world_x, world_y, tol,
+                                        );
+                                    }
                                     SketchEvent::DeselectAllStructure => {
                                         controller.borrow_mut().clear_structure_surface_selection();
                                     }
@@ -2231,6 +2258,11 @@ impl eframe::App for BerApp {
                                         controller
                                             .borrow_mut()
                                             .apply_structure_carve_stroke(&points);
+                                    }
+                                    SketchEvent::StructureLassoStrokeWorld { per_storey } => {
+                                        controller
+                                            .borrow_mut()
+                                            .apply_structure_lasso_stroke(&per_storey);
                                     }
                                     SketchEvent::ChooseStructureCutRegion { world_x, world_y } => {
                                         controller.borrow_mut().choose_structure_cut_region(
@@ -2256,6 +2288,12 @@ impl eframe::App for BerApp {
                                         controller
                                             .borrow_mut()
                                             .set_structure_group_attrs(group, ty, makeup, phase);
+                                    }
+                                    SketchEvent::BeginNewStructureGroup { group } => {
+                                        controller.borrow_mut().begin_new_structure_group(group);
+                                    }
+                                    SketchEvent::ResetStructureGroup { group } => {
+                                        controller.borrow_mut().reset_structure_group(group);
                                     }
                                     SketchEvent::SetStructureGroupName { group, name } => {
                                         controller
@@ -2456,6 +2494,18 @@ impl eframe::App for BerApp {
                                     SketchEvent::RemoveExternalPhoto { side } => {
                                         controller.borrow_mut().remove_external_photo(side);
                                     }
+                                    // UI-local: opening the annotator needs the
+                                    // page-state slot the in-render view already
+                                    // borrows, so it's deferred to just after
+                                    // render (see `annotate_request` below).
+                                    SketchEvent::BeginAnnotateExternalPhoto { side } => {
+                                        annotate_request.set(Some(side));
+                                    }
+                                    SketchEvent::AnnotateExternalPhoto { side, jpeg } => {
+                                        controller
+                                            .borrow_mut()
+                                            .annotate_external_photo(side, &jpeg);
+                                    }
                                     SketchEvent::EditMouseDown {
                                         world_x,
                                         world_y,
@@ -2572,6 +2622,23 @@ impl eframe::App for BerApp {
                                 },
                                 _ => {}
                             });
+                            // Deferred annotator open (see `annotate_request`
+                            // above): decode the side's stored full-res photo
+                            // into a fresh session. A missing/undecodable file
+                            // simply doesn't open the takeover.
+                            if let Some(side) = annotate_request.take() {
+                                let path = self
+                                    .app_controller
+                                    .borrow()
+                                    .external_photos()
+                                    .into_iter()
+                                    .find(|(s, _)| *s == side)
+                                    .and_then(|(_, p)| p)
+                                    .map(|p| p.file_path);
+                                self.sketch_state.photo_annotator = path.and_then(|p| {
+                                    crate::ui::widgets::PhotoAnnotator::open(side, &p)
+                                });
+                            }
                         }
                     },
                 );

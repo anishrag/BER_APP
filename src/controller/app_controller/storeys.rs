@@ -288,6 +288,7 @@ impl AppController {
         self.structure_selected.clear();
         self.pending_structure_carves.clear();
         self.pending_wall_inclusion = None;
+        self.queued_wall_inclusions.clear();
         self.pending_structure_cut = None;
         self.structure_split_kind = None;
         // A captured snap action's `before` snapshot is a whole-`Document`
@@ -451,9 +452,15 @@ impl AppController {
         if self.current_record.is_none() {
             return;
         }
-        // No active storey (the "All storeys" overview tab) → nothing to derive;
-        // `current_record` already holds each storey's last-derived geometry.
+        // No active storey — the "All storeys" tab. There is no live editing
+        // buffer there, but the STRUCTURE tools write cross-storey (the lasso
+        // flow assigns constructions/exposure into any storey's doc maps), so
+        // a dirty revision means every storey must re-resolve for those
+        // writes to stamp onto the resolved regions. Selection + edit-session
+        // ids are captured by (storey, kind, durable key) and re-pointed
+        // after, mirroring the single-storey remap below.
         let Some(idx) = self.current_storey_idx else {
+            self.refresh_all_storeys_keeping_selection();
             return;
         };
         // Capture the selected riser's durable base-edge key BEFORE the
@@ -623,6 +630,80 @@ impl AppController {
         // derivation (it reads the neighbours' resolved geometry, so it must
         // run after all per-storey resolves).
         self.derive_horizontal_exposure_all();
+    }
+
+    /// The ALL-STOREYS-tab arm of [`refresh_storey`](Self::refresh_storey):
+    /// re-resolve EVERY storey from its (untouched-there) editing doc so
+    /// cross-storey Structure writes (constructions / exposure from the lasso
+    /// flow) stamp onto the resolved regions. The Structure selection and any
+    /// open edit session are captured by `(storey, kind, durable key)` first
+    /// and re-pointed after — each per-storey resolve mints fresh region ids,
+    /// same as the single-storey path.
+    fn refresh_all_storeys_keeping_selection(&mut self) {
+        if self.current_record.is_none() {
+            return;
+        }
+        let sel_keys: Vec<(usize, SurfaceKind, SurfaceKey)> = self
+            .structure_selected
+            .iter()
+            .filter_map(|id| self.locate_structure_key(*id))
+            .collect();
+        type GroupKeys = Vec<Vec<(usize, SurfaceKind, SurfaceKey)>>;
+        let edit_keys: Option<GroupKeys> = self.structure_edit.as_ref().map(|e| {
+            e.groups
+                .iter()
+                .map(|g| {
+                    g.ids
+                        .iter()
+                        .filter_map(|id| self.locate_structure_key(*id))
+                        .collect()
+                })
+                .collect()
+        });
+        // The existing whole-house resolve+stamp pass (also runs the final
+        // exposure/InterStorey derivation).
+        self.refresh_all_storeys();
+        // Re-point selection + session groups onto the fresh ids.
+        if let Some(record) = self.current_record.as_ref() {
+            let remap = |(idx, kind, key): &(usize, SurfaceKind, SurfaceKey)| {
+                record
+                    .data
+                    .storeys
+                    .get(*idx)
+                    .and_then(|s| structure_id_for_key(s, *kind, *key))
+            };
+            self.structure_selected = sel_keys.iter().filter_map(remap).collect();
+            let new_group_ids: Option<Vec<Vec<ItemId>>> = edit_keys.as_ref().map(|groups| {
+                groups
+                    .iter()
+                    .map(|keys| keys.iter().filter_map(remap).collect())
+                    .collect()
+            });
+            if let Some(new_ids) = new_group_ids {
+                if let Some(edit) = self.structure_edit.as_mut() {
+                    for (g, ids) in edit.groups.iter_mut().zip(new_ids) {
+                        g.ids = ids;
+                    }
+                }
+            }
+        }
+    }
+
+    /// Locate a selected structure region id ACROSS the stack: its storey,
+    /// kind, and durable re-point key — the all-storeys analogue of
+    /// [`structure_surface_key_any`](Self::structure_surface_key_any) (region
+    /// ids are unique house-wide, so the first storey that knows the id owns
+    /// it).
+    fn locate_structure_key(&self, id: ItemId) -> Option<(usize, SurfaceKind, SurfaceKey)> {
+        let record = self.current_record.as_ref()?;
+        for (idx, s) in record.data.storeys.iter().enumerate() {
+            if let Some(kind) = s.surface_kind_of(id) {
+                return self
+                    .structure_surface_key(idx, kind, id)
+                    .map(|k| (idx, kind, k));
+            }
+        }
+        None
     }
 
     /// Recompose storey `idx`'s truth ceilings from its ceiling EDIT inputs — the

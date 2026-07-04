@@ -12,7 +12,8 @@
 
 use super::{structure, SketchEvent, SketchView};
 use crate::controller::app_controller::{
-    AssessmentPhase, ExistingGroup, OpeningToolKind, SelectMode, StructureEdit, SurfaceKind,
+    AssessmentPhase, ExistingGroup, OpeningToolKind, SelectMode, StructureEdit, StructureProgress,
+    SurfaceKind,
 };
 use crate::number_entry::parse_dimension_expression;
 use crate::ui::pages::events::UiEvent;
@@ -268,6 +269,9 @@ pub struct ToolFlags {
     /// Current storey's wall / roof / floor counts — the Structure panel's
     /// per-surface read-out.
     pub surface_counts: SurfaceCounts,
+    /// Per-kind "attributed/total" Structure progress (in-scope surfaces only)
+    /// — the mode buttons' counters.
+    pub structure_progress: StructureProgress,
     /// The defined construction phases (Original + extensions) — the choices for
     /// the Structure attribute editor's phase dropdown.
     pub phase_choices: Vec<(ConstructionPhase, String)>,
@@ -313,6 +317,7 @@ impl ToolFlags {
             structure_select: view.structure_select,
             structure_edit: view.structure_edit.cloned(),
             surface_counts: view.surface_counts,
+            structure_progress: view.structure_progress,
             phase_choices: view.phase_choices.to_vec(),
             structure_existing_groups: view.structure_existing_groups.clone(),
         }
@@ -335,10 +340,15 @@ pub fn ribbon<F: FnMut(UiEvent)>(
             &flags.structure_kinds,
             flags.structure_select,
             flags.structure_edit.as_ref(),
-            flags.surface_counts,
+            flags.structure_progress,
             &flags.phase_choices,
             &flags.structure_existing_groups,
-            !flags.read_only,
+            // The Structure tools also work from the All-storeys tab (the
+            // cross-storey lasso flow), so the panel stays ENABLED there —
+            // `read_only` only tells it to host the group editor itself
+            // (there are no per-group canvas windows on that tab).
+            true,
+            flags.read_only,
             on_event,
         );
         ui.separator();
@@ -379,10 +389,15 @@ pub fn side_panel<F: FnMut(UiEvent)>(
             &flags.structure_kinds,
             flags.structure_select,
             flags.structure_edit.as_ref(),
-            flags.surface_counts,
+            flags.structure_progress,
             &flags.phase_choices,
             &flags.structure_existing_groups,
-            !flags.read_only,
+            // The Structure tools also work from the All-storeys tab (the
+            // cross-storey lasso flow), so the panel stays ENABLED there —
+            // `read_only` only tells it to host the group editor itself
+            // (there are no per-group canvas windows on that tab).
+            true,
+            flags.read_only,
             on_event,
         );
         ui.separator();

@@ -42,9 +42,61 @@ pub fn photo_button(
     enabled: bool,
     config: PhotoConfig,
 ) -> Option<PathBuf> {
+    photo_button_with_hint(ui, label, "Add photo", enabled, config)
+}
+
+/// TEMPORARY (dual hi/lo capture, 2026-07): every photo-attach site renders TWO
+/// capture buttons through this ONE helper — the site's usual button (`label`,
+/// capturing at the site's `hi_quality` tier) plus a compact `📷·lo` button
+/// that captures the same way but is ingested at [`PhotoQuality::Low`]
+/// (downscaled + recompressed to a small JPEG on EVERY platform — see
+/// `PhotoQuality::compression`). Returns the captured/picked path together with
+/// the tier the pressed button asks for; the caller forwards both to its
+/// attach event so the controller's shared `ingest_photo` does the (optional)
+/// recompress. A smarter size policy replaces this later — being one shared
+/// helper, removal is this function plus the Low-tier tuning it leans on.
+pub fn photo_button_pair(
+    ui: &mut egui::Ui,
+    label: &str,
+    enabled: bool,
+    hi_quality: PhotoQuality,
+) -> Option<(PathBuf, PhotoQuality)> {
+    let hi = photo_button(
+        ui,
+        label,
+        enabled,
+        PhotoConfig {
+            default_quality: hi_quality,
+        },
+    )
+    .map(|p| (p, hi_quality));
+    let lo = photo_button_with_hint(
+        ui,
+        "📷·lo",
+        "Add photo (low-res — small file)",
+        enabled,
+        PhotoConfig {
+            default_quality: PhotoQuality::Low,
+        },
+    )
+    .map(|p| (p, PhotoQuality::Low));
+    // At most one button can deliver a path on a given frame (desktop dialogs
+    // are modal; Android routes by button token), so `or` never drops a capture.
+    hi.or(lo)
+}
+
+/// [`photo_button`] with a custom hover hint (the dual-capture pair uses this
+/// to differentiate the low-res button).
+fn photo_button_with_hint(
+    ui: &mut egui::Ui,
+    label: &str,
+    hint: &str,
+    enabled: bool,
+    config: PhotoConfig,
+) -> Option<PathBuf> {
     let resp = ui
         .add_enabled(enabled, egui::Button::new(label))
-        .on_hover_text("Add photo");
+        .on_hover_text(hint);
     let clicked = resp.clicked();
 
     // Android delivers asynchronously: pick up a finished capture on whatever

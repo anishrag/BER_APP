@@ -175,7 +175,9 @@ fn create_minimal_ber(id: ItemId) -> Ber {
         address: "123 Test Street".to_string(),
         eircode: "D01TEST".to_string(),
         construction_phases: ConstructionPhases {
-            years: [(ConstructionPhase::Original, 2000)].into_iter().collect(),
+            years: [(ConstructionPhase::Original, Some(2000))]
+                .into_iter()
+                .collect(),
             nicknames: Default::default(),
         },
         heating_system: HeatingSystem {
@@ -230,8 +232,8 @@ fn create_full_ber(id: ItemId) -> Ber {
 
     ber.construction_phases = ConstructionPhases {
         years: [
-            (ConstructionPhase::Original, 1950),
-            (ConstructionPhase::Extension1, 1970),
+            (ConstructionPhase::Original, Some(1950)),
+            (ConstructionPhase::Extension1, Some(1970)),
         ]
         .into_iter()
         .collect(),

@@ -58,6 +58,57 @@ impl AppController {
         self.push_history_snapshot(undo_snap);
     }
 
+    /// Replace `side`'s external photo with `jpeg` — the ANNOTATED image the UI
+    /// re-encoded with paint strokes burned in at image resolution (see
+    /// `ui::widgets::photo_annotate`). Writes the bytes into the photo store as
+    /// a NEW stored file (fresh id, the same store the capture path uses) and
+    /// regenerates the thumbnail, then swaps it into `Ber.photos` keeping the
+    /// side + description. Snapshots for undo (the superseded file stays on
+    /// disk, so undo still displays it). No-op when there's no record, the side
+    /// has no photo (annotation edits an existing shot), or store I/O fails —
+    /// the prior photo then stands.
+    pub fn annotate_external_photo(&mut self, side: ExternalSide, jpeg: &[u8]) {
+        let Some(description) = self.current_record.as_ref().and_then(|r| {
+            r.data
+                .photos
+                .iter()
+                .find(|p| p.side == Some(side))
+                .map(|p| p.description.clone())
+        }) else {
+            return;
+        };
+        if std::fs::create_dir_all(&self.photos_dir).is_err() {
+            return;
+        }
+        // Canonicalize to an ABSOLUTE dir so the stored path loads as a
+        // `file://` image regardless of the process's cwd (as `ingest_photo`).
+        let dir =
+            std::fs::canonicalize(&self.photos_dir).unwrap_or_else(|_| self.photos_dir.clone());
+        let id = ber_model::ber::common::ItemId::default();
+        let dest = dir.join(format!("{}.jpg", id.0));
+        if std::fs::write(&dest, jpeg).is_err() {
+            return;
+        }
+        let thumb_dest = dir.join(format!("{}_thumb.jpg", id.0));
+        let thumbnail_path = Self::write_thumbnail(&dest, &thumb_dest)
+            .then(|| thumb_dest.to_string_lossy().into_owned());
+        let photo = ber_model::ber::common::Photo {
+            id,
+            file_path: dest.to_string_lossy().into_owned(),
+            thumbnail_path,
+            description,
+            side: Some(side),
+        };
+        let undo_snap = self.current_history_snapshot();
+        {
+            let photos = &mut self.current_record.as_mut().unwrap().data.photos;
+            photos.retain(|p| p.side != Some(side));
+            photos.push(photo);
+        }
+        let _ = self.mark_dirty();
+        self.push_history_snapshot(undo_snap);
+    }
+
     /// Remove the external photo for `side`, if one is attached. Snapshots for
     /// undo like [`add_external_photo`](Self::add_external_photo).
     pub fn remove_external_photo(&mut self, side: ExternalSide) {

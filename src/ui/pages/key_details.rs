@@ -61,6 +61,12 @@ pub struct ExtensionInput {
     /// and orphan any areas tagged with it. A row that never had a valid year
     /// contributes nothing.
     pub last_valid_year: Option<Year>,
+    /// The "unknown" checkbox: the assessor designates the extension NOW and
+    /// fills the real year in later. Mutually exclusive with the year box —
+    /// ticking clears it (and the remembered year); typing a year unticks.
+    /// While ticked the row commits the phase with the year UNKNOWN, which
+    /// counts as answered (the phase is assignable, labelled "(unk)").
+    pub year_unknown: bool,
 }
 
 impl ExtensionInput {
@@ -70,6 +76,7 @@ impl ExtensionInput {
             year: String::new(),
             phase,
             last_valid_year: None,
+            year_unknown: false,
         }
     }
 }
@@ -108,16 +115,20 @@ impl KeyDetailsState {
             .unwrap_or_default();
         // Each set extension keeps its ACTUAL variant (gaps allowed) — the
         // stored phase-region tags reference these variants, so reconstruction
-        // must not re-key them.
+        // must not re-key them. A defined-but-unknown year reconstructs as the
+        // ticked checkbox with an empty year box.
         let extensions = EXTENSION_PHASES
             .iter()
-            .filter_map(|v| {
-                phases.year_of(v).map(|y| ExtensionInput {
+            .filter(|v| phases.is_defined(v))
+            .map(|v| {
+                let year = phases.year_of(v);
+                ExtensionInput {
                     nickname: phases.nickname_of(v).unwrap_or("").to_string(),
-                    year: y.to_string(),
+                    year: year.map(|y| y.to_string()).unwrap_or_default(),
                     phase: v.clone(),
-                    last_valid_year: Some(y),
-                })
+                    last_valid_year: year,
+                    year_unknown: phases.year_is_unknown(v),
+                }
             })
             .collect();
         Self {
@@ -131,9 +142,11 @@ impl KeyDetailsState {
 
 /// Build the BER's construction phases from the form: the house year →
 /// `Original`, each extension row → its OWN stable variant (assigned at
-/// row-add, never re-keyed). A row whose year field is mid-edit unparseable
-/// keeps its last valid year (refreshed here on each successful parse); a row
-/// that never had one contributes nothing.
+/// row-add, never re-keyed). A row with "unknown" ticked commits its phase
+/// with the year UNKNOWN (designated now, filled in later). Otherwise a row
+/// whose year field is mid-edit unparseable keeps its last valid year
+/// (refreshed here on each successful parse); a row that never had one
+/// contributes nothing.
 fn collect_construction_phases(state: &mut KeyDetailsState) -> ConstructionPhases {
     let mut phases = ConstructionPhases::default();
     if let Some(y) = parse_year(&state.construction_year) {
@@ -143,7 +156,10 @@ fn collect_construction_phases(state: &mut KeyDetailsState) -> ConstructionPhase
         if let Some(y) = parse_year(&ext.year) {
             ext.last_valid_year = Some(y);
         }
-        if let Some(y) = ext.last_valid_year {
+        if ext.year_unknown {
+            phases.set_year_unknown(ext.phase.clone());
+            phases.set_nickname(ext.phase.clone(), ext.nickname.clone());
+        } else if let Some(y) = ext.last_valid_year {
             phases.set_year(ext.phase.clone(), y);
             phases.set_nickname(ext.phase.clone(), ext.nickname.clone());
         }
@@ -213,6 +229,18 @@ impl KeyDetailsPage {
                 }
                 ui.label("year");
                 if metre_input(ui, &mut ext.year, 60.0, "2008").changed {
+                    // Typing owns the field — it unticks "unknown" (the two
+                    // are mutually exclusive, like the insulation row).
+                    ext.year_unknown = false;
+                    phases_changed = true;
+                }
+                if ui.checkbox(&mut ext.year_unknown, "unknown").changed() {
+                    if ext.year_unknown {
+                        // Ticking clears the box (and the remembered year):
+                        // the phase commits as year-UNKNOWN, to fill in later.
+                        ext.year.clear();
+                        ext.last_valid_year = None;
+                    }
                     phases_changed = true;
                 }
                 if ui.button("Remove").clicked() {
@@ -323,6 +351,81 @@ mod tests {
         let mut state = state_with(vec![ext(ConstructionPhase::Extension1, "garbage")]);
         let phases = collect_construction_phases(&mut state);
         assert_eq!(phases.year_of(&ConstructionPhase::Extension1), None);
+    }
+
+    /// The "unknown" checkbox commits the row's phase with the year UNKNOWN:
+    /// defined (so it's assignable — the gate counts it as answered), no known
+    /// year, labelled "(unk)".
+    #[test]
+    fn unknown_checkbox_commits_phase_with_unknown_year() {
+        let mut e = ext(ConstructionPhase::Extension1, "");
+        e.nickname = "Back extension".to_string();
+        e.year_unknown = true;
+        let mut state = state_with(vec![e]);
+        let phases = collect_construction_phases(&mut state);
+        assert!(phases.is_defined(&ConstructionPhase::Extension1));
+        assert!(phases.year_is_unknown(&ConstructionPhase::Extension1));
+        assert_eq!(phases.year_of(&ConstructionPhase::Extension1), None);
+        // `state_with` also sets the Original year, so check membership: the
+        // unknown-year extension is offered alongside it.
+        assert!(
+            phases
+                .defined_phases()
+                .contains(&ConstructionPhase::Extension1),
+            "unknown counts as answered — the phase is offered for tagging"
+        );
+        assert_eq!(
+            phases.display_label(&ConstructionPhase::Extension1),
+            "Back extension (unk)"
+        );
+    }
+
+    /// Ticking "unknown" clears the year (box + remembered year) — the mutual
+    /// exclusion the render enforces — and a later typed year (which unticks)
+    /// replaces the unknown with the real year.
+    #[test]
+    fn unknown_then_typed_year_fills_in_later() {
+        let mut state = state_with(vec![ext(ConstructionPhase::Extension1, "2008")]);
+        let phases = collect_construction_phases(&mut state);
+        assert_eq!(phases.year_of(&ConstructionPhase::Extension1), Some(2008));
+
+        // Tick: the render clears the box + remembered year.
+        state.extensions[0].year_unknown = true;
+        state.extensions[0].year.clear();
+        state.extensions[0].last_valid_year = None;
+        let phases = collect_construction_phases(&mut state);
+        assert!(phases.year_is_unknown(&ConstructionPhase::Extension1));
+
+        // The assessor learns the year later and types it (which unticks).
+        state.extensions[0].year = "2012".to_string();
+        state.extensions[0].year_unknown = false;
+        let phases = collect_construction_phases(&mut state);
+        assert!(!phases.year_is_unknown(&ConstructionPhase::Extension1));
+        assert_eq!(phases.year_of(&ConstructionPhase::Extension1), Some(2012));
+    }
+
+    /// `from_record` reconstructs an unknown-year extension as a row with the
+    /// checkbox ticked and an empty year box — so reloading a record keeps the
+    /// designation editable.
+    #[test]
+    fn from_record_reconstructs_unknown_year_row() {
+        let mut phases = ConstructionPhases::default();
+        phases.set_year(ConstructionPhase::Original, 1985);
+        phases.set_year_unknown(ConstructionPhase::Extension2);
+        phases.set_nickname(ConstructionPhase::Extension2, "Side return".to_string());
+
+        let state = KeyDetailsState::from_record(
+            "test".to_string(),
+            NaiveDate::from_ymd_opt(2026, 1, 1).unwrap(),
+            &phases,
+        );
+        assert_eq!(state.extensions.len(), 1);
+        let row = &state.extensions[0];
+        assert_eq!(row.phase, ConstructionPhase::Extension2);
+        assert!(row.year_unknown);
+        assert!(row.year.is_empty());
+        assert_eq!(row.last_valid_year, None);
+        assert_eq!(row.nickname, "Side return");
     }
 
     /// All four variants taken → no free variant → the add button's cap.

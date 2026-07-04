@@ -945,17 +945,17 @@ fn ceiling_step_toolbar<F: FnMut(UiEvent)>(ui: &mut egui::Ui, on_event: &mut F) 
     }
 }
 
-/// Wall-exposure mode toolbar, laid out as TWO rows so the box stays narrow.
-/// With a wall selected — row 1: the type buttons that paint the current
-/// selection + "Clear wall"; row 2: the section readout `start–end` (live
-/// with the drag handles, including the snap-landing hint) plus typed
-/// start/end inputs and the partition button. With a RISER selected (a
-/// dashed line tapped) — row 1: a kind label, the same type buttons plus
-/// "Ground" (they route to the riser), and "Clear" back to the derived
-/// default (`Unset`) — NO range controls, risers are whole-face only (v1).
-/// Row 2 always ends with "Set remaining → Exposed" (bulk-marks every
-/// still-unset coverage range — whole unmarked walls and the unset gaps
-/// around painted sections) and "Done".
+/// Wall-exposure mode toolbar, laid out as THREE rows so the box stays
+/// narrow. With a wall selected — row 1: the type buttons that paint the
+/// current selection + "Clear wall"; row 2: the section readout `start–end`
+/// (live with the drag handles, including the snap-landing hint) plus typed
+/// start/end inputs; row 3: the partition button and the flow controls. With
+/// a RISER selected (a dashed line tapped) — row 1: a kind label, the same
+/// type buttons plus "Ground" (they route to the riser), and "Clear" back to
+/// the derived default (`Unset`) — NO range controls, risers are whole-face
+/// only (v1). The last row always ends with "Set remaining → Exposed"
+/// (bulk-marks every still-unset coverage range — whole unmarked walls and
+/// the unset gaps around painted sections) and "Done".
 fn exposure_toolbar<F: FnMut(UiEvent)>(
     ui: &mut egui::Ui,
     walls: &[crate::controller::app_controller::WallExposureView],
@@ -987,11 +987,11 @@ fn exposure_toolbar<F: FnMut(UiEvent)>(
             .iter()
             .filter(|r| r.exposure == WallExposure::Unset)
             .count();
-    // TWO rows so the box stays narrow: row 1 is WHAT to paint (the exposure
-    // type buttons + Clear, for the selected riser or wall); row 2 is WHERE +
-    // the flow controls (range readout/inputs + partition for a wall, then
-    // the always-available bulk button and Done). With nothing selected only
-    // row 2 shows.
+    // THREE rows so the box stays narrow: row 1 is WHAT to paint (the
+    // exposure type buttons + Clear, for the selected riser or wall); row 2
+    // is WHERE (the range readout/inputs, wall selection only); row 3 is the
+    // flow controls (partition for a wall, then the always-available bulk
+    // button and Done). With nothing selected only row 3 shows.
     ui.vertical(|ui| {
         if let Some(r) = selected_riser {
             // Riser context: whole-face only (v1) — no start/end range
@@ -1078,45 +1078,49 @@ fn exposure_toolbar<F: FnMut(UiEvent)>(
                 }
             });
         }
-        ui.horizontal(|ui| {
-            if selected_riser.is_none() {
-                if let Some(sel) = selection {
-                    let (lo, hi) = (sel.start_m.min(sel.end_m), sel.start_m.max(sel.end_m));
-                    ui.label(
-                        egui::RichText::new(format!(
-                            "Section {lo:.2}–{hi:.2} m (wall {:.2} m):",
-                            sel.length_m
-                        ))
-                        .strong(),
-                    );
-                    // What a dragged handle is currently snapped to.
-                    if let Some(hint) = sel.snap_hint {
-                        ui.label(egui::RichText::new(format!("⌖ {hint}")).weak());
-                    }
-                    ui.label("start");
-                    let rs = metre_input(ui, start_input, 46.0, &format!("{lo:.2}"));
-                    ui.label("end");
-                    let re = metre_input(ui, end_input, 46.0, &format!("{hi:.2}"));
-                    let enter = rs.submitted || re.submitted;
-                    if ui.button("Set range").clicked() || enter {
-                        let s = parse_dimension_expression(start_input).unwrap_or(lo);
-                        let e = parse_dimension_expression(end_input).unwrap_or(hi);
-                        on_event(UiEvent::Sketch(SketchEvent::SetExposureSectionRange {
-                            start_m: s,
-                            end_m: e,
-                        }));
-                        start_input.clear();
-                        end_input.clear();
-                    }
-                    if ui
-                        .button("⊟ Partition & set")
-                        .hint("Divide this wall's face and set each part")
-                        .clicked()
-                    {
-                        on_event(UiEvent::Sketch(SketchEvent::OpenWallPartition));
-                    }
-                    ui.separator();
+        let wall_selected = selected_riser.is_none() && selection.is_some();
+        if wall_selected {
+            let sel = selection.unwrap();
+            ui.horizontal(|ui| {
+                let (lo, hi) = (sel.start_m.min(sel.end_m), sel.start_m.max(sel.end_m));
+                ui.label(
+                    egui::RichText::new(format!(
+                        "Section {lo:.2}–{hi:.2} m (wall {:.2} m):",
+                        sel.length_m
+                    ))
+                    .strong(),
+                );
+                // What a dragged handle is currently snapped to.
+                if let Some(hint) = sel.snap_hint {
+                    ui.label(egui::RichText::new(format!("⌖ {hint}")).weak());
                 }
+                ui.label("start");
+                let rs = metre_input(ui, start_input, 46.0, &format!("{lo:.2}"));
+                ui.label("end");
+                let re = metre_input(ui, end_input, 46.0, &format!("{hi:.2}"));
+                let enter = rs.submitted || re.submitted;
+                if ui.button("Set range").clicked() || enter {
+                    let s = parse_dimension_expression(start_input).unwrap_or(lo);
+                    let e = parse_dimension_expression(end_input).unwrap_or(hi);
+                    on_event(UiEvent::Sketch(SketchEvent::SetExposureSectionRange {
+                        start_m: s,
+                        end_m: e,
+                    }));
+                    start_input.clear();
+                    end_input.clear();
+                }
+            });
+        }
+        ui.horizontal(|ui| {
+            if wall_selected {
+                if ui
+                    .button("⊟ Partition & set")
+                    .hint("Divide this wall's face and set each part")
+                    .clicked()
+                {
+                    on_event(UiEvent::Sketch(SketchEvent::OpenWallPartition));
+                }
+                ui.separator();
             }
             // (The "tap a wall to mark its exposure" instruction is in the
             // bottom bar.) The bulk "set remaining" button is always available:
