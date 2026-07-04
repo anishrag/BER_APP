@@ -79,9 +79,11 @@ fi
 if [ -n "$CONFIG" ] && [ -f "$CONFIG" ]; then
     echo "==> Pushing $CONFIG to $PKG (files/sync.json)"
     # run-as executes as the app uid; mkdir in case the app hasn't launched yet.
-    adb shell run-as "$PKG" sh -c 'mkdir -p files && cat > files/sync.json' < "$CONFIG"
+    # The whole remote command is ONE quoted arg so `adb shell` doesn't re-split
+    # it and lose the inner quotes/redirection (it joins argv with spaces).
+    adb shell "run-as $PKG sh -c 'mkdir -p files && cat > files/sync.json'" < "$CONFIG"
     echo "    verify:"
-    adb shell run-as "$PKG" cat files/sync.json | sed 's/^/    /'
+    adb shell "run-as $PKG cat files/sync.json" | sed 's/^/    /'
 else
     echo "!! No sync.json resolved — APK installed but cloud upload is unconfigured."
     echo "   Reports will queue on-device and upload once a sync.json is present."
