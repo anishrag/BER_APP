@@ -1790,12 +1790,10 @@ pub(super) fn render<F: FnMut(UiEvent)>(
     {
         if structure_cut_picking {
             if response.clicked_by(egui::PointerButton::Primary) {
-                if let Some((wx, wy)) = response.interact_pointer_pos().and_then(|pos| {
-                    // watermark = true: match the render transform on a setback
-                    // upper storey (as the structure click / carve stroke do).
-                    canvas_transform(ber, current_storey_idx, rect, vp, true)
-                        .map(|t| t.inverse(pos.x, pos.y))
-                }) {
+                if let Some((wx, wy)) = response
+                    .interact_pointer_pos()
+                    .and_then(|pos| screen_to_world(ber, current_storey_idx, rect, vp, pos))
+                {
                     on_event(UiEvent::Sketch(SketchEvent::ChooseStructureCutRegion {
                         world_x: wx,
                         world_y: wy,
@@ -2254,7 +2252,9 @@ pub(super) fn render<F: FnMut(UiEvent)>(
         && matches!(mode, SketchMode::Storey2D)
         && !touch_nav_active
     {
-        if let Some(t) = canvas_transform(ber, current_storey_idx, rect, vp, false) {
+        // watermark = true: match the storey render, or the pin drops at the
+        // wrong world point on a setback upper storey (same fix as elsewhere).
+        if let Some(t) = canvas_transform(ber, current_storey_idx, rect, vp, true) {
             let tol_world = (16.0 / t.scale()) as f64;
             if response.clicked_by(egui::PointerButton::Primary) {
                 if let Some(pos) = response.interact_pointer_pos() {
@@ -2307,7 +2307,10 @@ pub(super) fn render<F: FnMut(UiEvent)>(
         && matches!(mode, SketchMode::Storey2D)
         && !view.object_pins.is_empty()
     {
-        if let Some(t) = canvas_transform(ber, current_storey_idx, rect, vp, false) {
+        // watermark = true: draw the pins with the SAME transform the storey is
+        // rendered with, so they sit on the plan on a setback upper storey
+        // (and stay under the taps handled above).
+        if let Some(t) = canvas_transform(ber, current_storey_idx, rect, vp, true) {
             let mut active_sp = None;
             for pin in &view.object_pins {
                 let sp = t.apply(pin.x, pin.y);
@@ -2582,8 +2585,10 @@ pub(super) fn render<F: FnMut(UiEvent)>(
         && view.vertex_drop_prompt.is_none()
     {
         // One transform for both the double-click vertex-insert and
-        // the click/drag below (same storey, same frame).
-        if let Some(t) = canvas_transform(ber, current_storey_idx, rect, vp, false) {
+        // the click/drag below (same storey, same frame). watermark = true to
+        // match the render, or Move-mode wall selection is offset on a setback
+        // upper storey (as the Structure click was).
+        if let Some(t) = canvas_transform(ber, current_storey_idx, rect, vp, true) {
             // World-coord tolerance corresponds to ~12 pixels
             // on screen at the current zoom.
             let tol_world = 12.0 / t.scale();
@@ -2916,7 +2921,11 @@ fn shade_exposure_cut_candidates(
     );
 }
 
-/// World coords of a canvas-pixel position via the storey's own fit transform.
+/// World coords of a canvas-pixel position via the SAME transform the storey is
+/// drawn with. `watermark = true` because the render fits the previous-storey
+/// watermark in on any upper storey (`fit_bbox_for_storey`); inverting through
+/// the storey-alone box instead would offset every tap on a setback upper storey
+/// (the ground storey has no watermark, so the two agree there).
 fn screen_to_world(
     ber: Option<&Ber>,
     current_storey_idx: Option<usize>,
@@ -2924,7 +2933,7 @@ fn screen_to_world(
     view: ViewParams,
     pos: egui::Pos2,
 ) -> Option<(f64, f64)> {
-    canvas_transform(ber, current_storey_idx, rect, view, false).map(|t| t.inverse(pos.x, pos.y))
+    canvas_transform(ber, current_storey_idx, rect, view, true).map(|t| t.inverse(pos.x, pos.y))
 }
 
 fn draw_stroke(painter: &egui::Painter, rect: egui::Rect, stroke: &EguiStroke) {
