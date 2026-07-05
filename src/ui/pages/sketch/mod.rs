@@ -524,6 +524,15 @@ pub enum SketchEvent {
         world_y: f64,
         tol: f64,
     },
+    /// Phase-3 (Objects): a 2D tap on the ALL-STOREYS tab — the cell it landed in
+    /// resolves the target storey, and the point is already in that storey's own
+    /// frame. Drops / opens a plan pin on THAT storey.
+    ObjectsPointerDownAllStoreys {
+        storey_idx: usize,
+        world_x: f64,
+        world_y: f64,
+        tol: f64,
+    },
     /// Phase-3 (Objects): tap a SURFACE in a 3D view — the canvas has already
     /// resolved the screen point to the closest viewer-facing surface
     /// ([`crate::ui::render::pick_3d`]). Drops / opens a room pin ON that

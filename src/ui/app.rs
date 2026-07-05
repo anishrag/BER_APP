@@ -2237,6 +2237,16 @@ impl eframe::App for BerApp {
                                             .borrow_mut()
                                             .objects_pointer_down(world_x, world_y, tol);
                                     }
+                                    SketchEvent::ObjectsPointerDownAllStoreys {
+                                        storey_idx,
+                                        world_x,
+                                        world_y,
+                                        tol,
+                                    } => {
+                                        controller.borrow_mut().objects_pointer_down_on(
+                                            storey_idx, world_x, world_y, tol,
+                                        );
+                                    }
                                     SketchEvent::ObjectsPointerDown3D {
                                         storey_idx,
                                         world_x,

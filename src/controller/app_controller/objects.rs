@@ -79,6 +79,13 @@ impl AppController {
         let Some(idx) = self.current_storey_idx else {
             return;
         };
+        self.objects_pointer_down_on(idx, wx, wy, tol);
+    }
+
+    /// As [`objects_pointer_down`](Self::objects_pointer_down), but on an EXPLICIT
+    /// storey — the all-storeys 2D tab resolves the target storey from the cell
+    /// the tap landed in, so there's no single "current" storey to key off.
+    pub fn objects_pointer_down_on(&mut self, idx: usize, wx: f64, wy: f64, tol: f64) {
         // Open the nearest existing pin within tolerance.
         if let Some(record) = self.current_record.as_ref() {
             if let Some(storey) = record.data.storeys.get(idx) {

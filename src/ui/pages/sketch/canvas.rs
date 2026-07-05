@@ -2266,6 +2266,27 @@ pub(super) fn render<F: FnMut(UiEvent)>(
                     }));
                 }
             }
+        } else if current_storey_idx.is_none() {
+            // ALL-STOREYS tab: canvas_transform is None (no single storey), so
+            // route the tap to the CELL it landed in — invert that cell's
+            // transform into its storey's own frame and drop/open a pin on THAT
+            // storey (mirrors the structure all-storeys tap).
+            if response.clicked_by(egui::PointerButton::Primary) {
+                if let (Some(pos), Some(b)) = (response.interact_pointer_pos(), ber) {
+                    if let Some(i) = render::all_storeys_2d::cell_index_at(rect, b, pos) {
+                        if let Some(t) = render::all_storeys_2d::cell_transforms(rect, b, vp).get(i)
+                        {
+                            let (wx, wy) = t.inverse(pos.x, pos.y);
+                            on_event(UiEvent::Sketch(SketchEvent::ObjectsPointerDownAllStoreys {
+                                storey_idx: i,
+                                world_x: wx,
+                                world_y: wy,
+                                tol: (16.0 / t.scale()) as f64,
+                            }));
+                        }
+                    }
+                }
+            }
         }
     }
 
