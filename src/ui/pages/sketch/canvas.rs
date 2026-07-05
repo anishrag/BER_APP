@@ -2698,73 +2698,89 @@ fn external_photos_button<F: FnMut(UiEvent)>(
                         .default_open(false)
                         .show(ui, |ui| {
                             ui.set_max_width(230.0);
-                            for (side, photo) in &view.external_photos {
-                                ui.horizontal(|ui| match photo {
-                                    Some(_) => {
-                                        ui.label(format!("✓ {}", side.label()));
-                                    }
-                                    None => {
-                                        ui.colored_label(
-                                            egui::Color32::from_rgb(220, 120, 120),
-                                            format!("✗ {}: missing", side.label()),
-                                        );
+                            // With all four sides holding a ~150px thumbnail the
+                            // list would grow up past the top of the screen (the
+                            // panel is anchored bottom-right and grows UP), taking
+                            // the header with it. Cap it to the canvas height and
+                            // scroll the list instead.
+                            let max_h = (rect.height() - 96.0).clamp(160.0, 600.0);
+                            egui::ScrollArea::vertical()
+                                .max_height(max_h)
+                                .show(ui, |ui| {
+                                    for (side, photo) in &view.external_photos {
+                                        ui.horizontal(|ui| match photo {
+                                            Some(_) => {
+                                                ui.label(format!("✓ {}", side.label()));
+                                            }
+                                            None => {
+                                                ui.colored_label(
+                                                    egui::Color32::from_rgb(220, 120, 120),
+                                                    format!("✗ {}: missing", side.label()),
+                                                );
+                                            }
+                                        });
+                                        // Thumbnail preview of the stored photo (prefer the
+                                        // lightweight thumbnail; fall back to the original).
+                                        if let Some(p) = photo {
+                                            let src =
+                                                p.thumbnail_path.as_deref().unwrap_or(&p.file_path);
+                                            ui.add(
+                                                egui::Image::new(format!("file://{src}"))
+                                                    .fit_to_exact_size(egui::vec2(200.0, 150.0))
+                                                    .maintain_aspect_ratio(true)
+                                                    .corner_radius(4.0),
+                                            );
+                                        }
+                                        ui.horizontal(|ui| {
+                                            // The shared capture widget: desktop file dialog
+                                            // / Android camera, returning the captured path.
+                                            // Elevation shots want legible detail, so the hi
+                                            // tier is High (TEMPORARY dual hi/lo buttons —
+                                            // see `photo_button_pair`).
+                                            let action =
+                                                if photo.is_some() { "Replace" } else { "Add" };
+                                            if let Some((path, quality)) =
+                                                crate::ui::widgets::photo_button_pair(
+                                                    ui,
+                                                    action,
+                                                    true,
+                                                    crate::ui::widgets::PhotoQuality::High,
+                                                )
+                                            {
+                                                on_event(UiEvent::Sketch(
+                                                    SketchEvent::AddExternalPhoto {
+                                                        side: *side,
+                                                        path,
+                                                        quality,
+                                                    },
+                                                ));
+                                            }
+                                            if photo.is_some() {
+                                                // Paintbrush annotation over the stored photo
+                                                // (opens the takeover; see `photo_annotate`).
+                                                if ui
+                                                    .button("🖌")
+                                                    .on_hover_text("Draw on this photo")
+                                                    .clicked()
+                                                {
+                                                    on_event(UiEvent::Sketch(
+                                                        SketchEvent::BeginAnnotateExternalPhoto {
+                                                            side: *side,
+                                                        },
+                                                    ));
+                                                }
+                                                if ui.button("Remove").clicked() {
+                                                    on_event(UiEvent::Sketch(
+                                                        SketchEvent::RemoveExternalPhoto {
+                                                            side: *side,
+                                                        },
+                                                    ));
+                                                }
+                                            }
+                                        });
+                                        ui.separator();
                                     }
                                 });
-                                // Thumbnail preview of the stored photo (prefer the
-                                // lightweight thumbnail; fall back to the original).
-                                if let Some(p) = photo {
-                                    let src = p.thumbnail_path.as_deref().unwrap_or(&p.file_path);
-                                    ui.add(
-                                        egui::Image::new(format!("file://{src}"))
-                                            .fit_to_exact_size(egui::vec2(200.0, 150.0))
-                                            .maintain_aspect_ratio(true)
-                                            .corner_radius(4.0),
-                                    );
-                                }
-                                ui.horizontal(|ui| {
-                                    // The shared capture widget: desktop file dialog
-                                    // / Android camera, returning the captured path.
-                                    // Elevation shots want legible detail, so the hi
-                                    // tier is High (TEMPORARY dual hi/lo buttons —
-                                    // see `photo_button_pair`).
-                                    let action = if photo.is_some() { "Replace" } else { "Add" };
-                                    if let Some((path, quality)) =
-                                        crate::ui::widgets::photo_button_pair(
-                                            ui,
-                                            action,
-                                            true,
-                                            crate::ui::widgets::PhotoQuality::High,
-                                        )
-                                    {
-                                        on_event(UiEvent::Sketch(SketchEvent::AddExternalPhoto {
-                                            side: *side,
-                                            path,
-                                            quality,
-                                        }));
-                                    }
-                                    if photo.is_some() {
-                                        // Paintbrush annotation over the stored photo
-                                        // (opens the takeover; see `photo_annotate`).
-                                        if ui
-                                            .button("🖌")
-                                            .on_hover_text("Draw on this photo")
-                                            .clicked()
-                                        {
-                                            on_event(UiEvent::Sketch(
-                                                SketchEvent::BeginAnnotateExternalPhoto {
-                                                    side: *side,
-                                                },
-                                            ));
-                                        }
-                                        if ui.button("Remove").clicked() {
-                                            on_event(UiEvent::Sketch(
-                                                SketchEvent::RemoveExternalPhoto { side: *side },
-                                            ));
-                                        }
-                                    }
-                                });
-                                ui.separator();
-                            }
                         });
                 });
             });
