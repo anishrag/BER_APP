@@ -15,10 +15,22 @@ pub(crate) fn ring_to_poly(ring: &[Point2f64]) -> Polygon<f64> {
     )
 }
 
-/// Drop vertices that lie on the straight line between their neighbours (within
-/// a small cross-product tolerance) — used to clean a merged outline ring and
-/// the suggestion rings in `ber::suggest`.
+/// Drop vertices that lie on (or very nearly on) the straight line between their
+/// neighbours — used to clean a merged outline ring and the suggestion rings in
+/// `ber::suggest`.
+///
+/// `cross` is twice the signed area of the (prev, cur, next) triangle, in m²
+/// (coords are metres). Real building corners are far off collinear — even a
+/// shallow one clears ~0.7 (e.g. a 10° bend of 2 m edges). Spurious vertices —
+/// a corner of the storey below landing on this outline's straight edge, then
+/// snapped exactly collinear by f32 quantization — sit near zero (≤ ~1e-4).
+/// A real outline has no genuine slight bends, so `TOL` sits between the two:
+/// anything below it is noise to drop. (Was 1e-9, which only caught EXACTLY
+/// collinear and so missed near-collinear vertices, splitting one wall in two.)
 pub(crate) fn strip_collinear(ring: &[Point2f64]) -> Vec<Point2f64> {
+    // Perpendicular deviation this catches is TOL / span: ~1–5 mm over typical
+    // 2–8 m edges — far tighter than any real corner, far looser than f32 noise.
+    const TOL: f64 = 1e-2;
     let n = ring.len();
     if n < 3 {
         return ring.to_vec();
@@ -29,7 +41,7 @@ pub(crate) fn strip_collinear(ring: &[Point2f64]) -> Vec<Point2f64> {
         let cur = ring[i];
         let next = ring[(i + 1) % n];
         let cross = (cur.x - prev.x) * (next.y - prev.y) - (cur.y - prev.y) * (next.x - prev.x);
-        if cross.abs() > 1e-9 {
+        if cross.abs() > TOL {
             out.push(cur);
         }
     }
@@ -756,4 +768,48 @@ pub(crate) fn split_to_simple(poly: &Polygon<f64>) -> Vec<Polygon<f64>> {
         .flat_map(|half| poly.intersection(half).0)
         .flat_map(|piece| split_to_simple(&piece))
         .collect()
+}
+
+#[cfg(test)]
+mod strip_collinear_tests {
+    use super::strip_collinear;
+    use domain::points::Point2f64;
+
+    // A vertex a fraction of a mm off the straight top edge — the shape f32
+    // quantization leaves when a storey-below corner lands on this outline's
+    // straight run — must be dropped, so it can't split that wall into two
+    // regions. (Its cross ~8e-4 cleared the old 1e-9 tolerance.)
+    #[test]
+    fn drops_near_collinear_vertex() {
+        let ring = vec![
+            Point2f64::new(0.0, 0.0),
+            Point2f64::new(8.0, 0.0),
+            Point2f64::new(8.0, 5.0),
+            Point2f64::new(4.0, 5.0001), // ~0.1 mm off the top edge
+            Point2f64::new(0.0, 5.0),
+        ];
+        assert_eq!(
+            strip_collinear(&ring).len(),
+            4,
+            "near-collinear top-edge vertex must be stripped"
+        );
+    }
+
+    // A genuine corner (a 2 m bump) is kept — the tolerance is far below any
+    // real bend.
+    #[test]
+    fn keeps_real_corner() {
+        let ring = vec![
+            Point2f64::new(0.0, 0.0),
+            Point2f64::new(8.0, 0.0),
+            Point2f64::new(8.0, 5.0),
+            Point2f64::new(4.0, 7.0), // real bump
+            Point2f64::new(0.0, 5.0),
+        ];
+        assert_eq!(
+            strip_collinear(&ring).len(),
+            5,
+            "a real corner must be kept"
+        );
+    }
 }
