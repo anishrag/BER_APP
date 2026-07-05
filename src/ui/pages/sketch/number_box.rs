@@ -36,7 +36,7 @@ use crate::number_entry::bluetooth::{LaserSource, Status};
 use crate::number_entry::{apply, parse_dimension_expression, Key};
 use crate::ui::pages::events::UiEvent;
 use crate::ui::widgets::HintExt;
-use crate::ui::widgets::{photo_button_pair, PhotoQuality};
+use crate::ui::widgets::{metre_input, photo_button_pair, text_input, PhotoQuality};
 use ber_model::ber::common::ItemId;
 use ber_model::ber::fenestration::{Frame, Glazing, Overshading};
 
@@ -1065,26 +1065,14 @@ fn window_type_picker(
         });
         ui.horizontal(|ui| {
             ui.label("year");
-            ui.add(
-                egui::TextEdit::singleline(year)
-                    .desired_width(54.0)
-                    .hint_text("2010"),
-            );
+            metre_input(ui, year, 54.0, "2010");
             ui.label("gap");
-            ui.add(
-                egui::TextEdit::singleline(gap)
-                    .desired_width(54.0)
-                    .hint_text("mm"),
-            );
+            metre_input(ui, gap, 54.0, "mm");
             ui.checkbox(certified, "certified");
         });
         ui.horizontal(|ui| {
             ui.label("name");
-            ui.add(
-                egui::TextEdit::singleline(name)
-                    .desired_width(KEY * 3.0)
-                    .hint_text("model (required)"),
-            );
+            text_input(ui, name, KEY * 3.0, "model (required)");
         });
         // The model name is required for a new type (it disambiguates two
         // otherwise-identical windows installed at once). Gates the Place button.

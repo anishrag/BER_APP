@@ -30,6 +30,7 @@ import android.provider.MediaStore;
 import android.util.Log;
 import android.view.WindowInsets;
 import android.view.WindowInsetsController;
+import android.view.WindowManager;
 
 import java.io.File;
 import java.io.FileOutputStream;
@@ -273,6 +274,23 @@ public class MainActivity extends NativeActivity {
      * private cache, then delete the gallery row. Runs the launch on the UI
      * thread — the call arrives on Rust's render thread.
      */
+    /**
+     * Toggle the keep-screen-on window flag from native code. The app sets it
+     * while in use and clears it after ~10 min idle (see src/keep_awake.rs), so
+     * the device's own screen timeout takes back over. App-scoped: a window flag,
+     * never a global system setting.
+     */
+    public void setKeepAwake(boolean on) {
+        runOnUiThread(
+                () -> {
+                    if (on) {
+                        getWindow().addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
+                    } else {
+                        getWindow().clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
+                    }
+                });
+    }
+
     public void requestPhoto(int quality) {
         Log.i(TAG, "camera: requestPhoto(quality=" + quality + ")");
         runOnUiThread(

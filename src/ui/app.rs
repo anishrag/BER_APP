@@ -41,6 +41,9 @@ pub struct BerApp {
     // `IDLE_SAVE_SECS`, we flush un-persisted edits to disk.
     last_seen_revision: u64,
     last_change_time: f64,
+
+    // Keeps the screen on while the app is used; releases after 10 min idle.
+    keep_awake: crate::keep_awake::KeepAwake,
 }
 
 /// Idle gap (seconds of no edits) before an autosave flush fires.
@@ -294,6 +297,7 @@ impl BerApp {
             bug_report: BugReportState::default(),
             last_seen_revision: 0,
             last_change_time: 0.0,
+            keep_awake: crate::keep_awake::KeepAwake::default(),
         };
         // Checkpoint path enters the workspace directly — prefill Key Details
         // the same way New/Load do.
@@ -430,11 +434,11 @@ impl BerApp {
 
                 ui.add_space(8.0);
                 ui.label("Note (optional):");
-                ui.add(
-                    egui::TextEdit::multiline(&mut self.bug_report.note)
-                        .desired_rows(2)
-                        .desired_width(f32::INFINITY)
-                        .hint_text("Anything to add in text"),
+                crate::ui::widgets::text_input(
+                    ui,
+                    &mut self.bug_report.note,
+                    f32::INFINITY,
+                    "Anything to add in text",
                 );
 
                 if let Some(msg) = &self.bug_report.status_msg {
@@ -606,6 +610,9 @@ impl eframe::App for BerApp {
             self.start_loading();
             self.splash_state.loading_started = true;
         }
+
+        // Keep the screen on while the app is in use (releases after 10 min idle).
+        self.keep_awake.tick(ctx);
 
         // Idle autosave: edits refresh the in-memory BER (cheap) but no longer
         // write to disk; we flush to SQLite once editing goes quiet. On a change

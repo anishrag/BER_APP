@@ -11,6 +11,7 @@
 //! every kind — walls key construction by parametric `SurfaceRef`, floors and
 //! ceilings/ceilings by region centroid.
 
+use crate::ui::widgets::{metre_input, text_input};
 use ber_model::ber::common::ConstructionPhase;
 use ber_model::ber::structural::{
     CeilingConstructionType, CeilingExposure, CeilingInsulation, ConstructionLayer,
@@ -845,16 +846,8 @@ pub(crate) fn layer_editor_ui<F: FnMut(UiEvent)>(
             if ui.small_button("✕").on_hover_text("Remove").clicked() {
                 remove = Some(i);
             }
-            ui.add(
-                egui::TextEdit::singleline(&mut work[i].0)
-                    .desired_width(110.0)
-                    .hint_text("layer"),
-            );
-            ui.add(
-                egui::TextEdit::singleline(&mut work[i].1)
-                    .desired_width(40.0)
-                    .hint_text("mm"),
-            );
+            text_input(ui, &mut work[i].0, 110.0, "layer");
+            metre_input(ui, &mut work[i].1, 40.0, "mm");
             ui.label(egui::RichText::new("mm").size(EDITOR_FONT));
             // "+" after this layer → insert below (between layers).
             if let Some(pair) = insert_menu(ui, ("ins", group_index, i), library) {

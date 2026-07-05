@@ -1260,12 +1260,7 @@ fn roof_toolbar<F: FnMut(UiEvent)>(ui: &mut egui::Ui, view: &mut SketchView<'_>,
     ui.horizontal_wrapped(|ui| {
         if view.roof_area_pitch_pending {
             ui.label("Pitch:");
-            let resp = ui.add(
-                egui::TextEdit::singleline(view.roof_pitch_input)
-                    .desired_width(54.0)
-                    .hint_text("°"),
-            );
-            let submit = (resp.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)))
+            let submit = metre_input(ui, view.roof_pitch_input, 54.0, "°").submitted
                 | ui.button("Set").clicked();
             if submit {
                 if let Ok(deg) = view.roof_pitch_input.trim().parse::<f32>() {

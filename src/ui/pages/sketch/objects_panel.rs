@@ -13,7 +13,7 @@ use egui::{Align2, Id, RichText};
 use super::{SketchEvent, SketchView};
 use crate::controller::app_controller::AssessmentPhase;
 use crate::ui::pages::events::UiEvent;
-use crate::ui::widgets::{photo_button_pair, PhotoQuality};
+use crate::ui::widgets::{metre_input, photo_button_pair, text_input, PhotoQuality};
 use ber_model::ber::objects::{ObjectCategory, ObjectKind};
 
 /// A simple glyph per category for the big buttons. Emoji placeholders until a
@@ -158,17 +158,9 @@ pub(super) fn render<F: FnMut(UiEvent)>(
                 if kind_ready {
                     ui.horizontal(|ui| {
                         ui.label("count");
-                        ui.add(
-                            egui::TextEdit::singleline(view.object_count_input)
-                                .desired_width(48.0)
-                                .hint_text("1"),
-                        );
+                        metre_input(ui, view.object_count_input, 48.0, "1");
                         ui.label("note");
-                        ui.add(
-                            egui::TextEdit::singleline(view.object_note_input)
-                                .desired_width(110.0)
-                                .hint_text("optional"),
-                        );
+                        text_input(ui, view.object_note_input, 110.0, "optional");
                     });
                     ui.horizontal_wrapped(|ui| {
                         for (p, _quality) in view.object_pending_photos.iter() {
