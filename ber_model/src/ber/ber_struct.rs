@@ -9,11 +9,36 @@ use super::structural::{
 use super::systems::{HeatingSystem, SolarElements, VentilationSystem};
 use domain::points::Point2f64;
 
+/// Client-provided answers from the booking/intake form, surfaced on the Key
+/// Details screen. A staging area: the assessor reads/edits these and (for now)
+/// transcribes them into the DEAP model by hand — they are NOT yet wired into
+/// `heating_system`, `window_types`, constructions, etc. Populated externally at
+/// intake (like address/eircode). `#[serde(default)]` on the `Ber` field keeps
+/// older records loading.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+pub struct IntakeDetails {
+    pub property_type: String,
+    pub heating_system: String,
+    pub window_year: Option<Year>,
+    pub door_year: Option<Year>,
+    pub insulation_walls: bool,
+    pub insulation_roof: bool,
+    pub insulation_floor: bool,
+    pub insulation_notes: String,
+    pub mprn: String,
+    pub reason: String,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct Ber {
     pub id: ItemId,
     pub address: String,
     pub eircode: String,
+    /// Client booking-form answers not yet mapped into the DEAP model, shown on
+    /// the Key Details screen for the assessor to confirm/fill. `#[serde(default)]`
+    /// so older records load.
+    #[serde(default)]
+    pub intake: IntakeDetails,
     pub construction_phases: ConstructionPhases,
     pub heating_system: HeatingSystem,
     pub ventilation_system: VentilationSystem,

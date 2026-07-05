@@ -1,5 +1,6 @@
 use crate::ui::pages::events::UiEvent;
 use crate::ui::widgets::{metre_input, text_input};
+use ber_model::ber::ber_struct::IntakeDetails;
 use ber_model::ber::common::{ConstructionPhase, ConstructionPhases, Year};
 use chrono::NaiveDate;
 use egui::{RichText, Ui};
@@ -20,6 +21,9 @@ pub enum KeyDetailsEvent {
     Rename(String),
     SetDateAssessed(NaiveDate),
     SetConstructionPhases(ConstructionPhases),
+    /// Client-provided intake answers (heating, window/door years, insulation,
+    /// MPRN, property type, reason) — the whole set, recomputed on any edit.
+    SetIntake(IntakeDetails),
 }
 
 /// Parse a year string into a plausible construction year (1700–2100), or
@@ -43,6 +47,17 @@ pub struct KeyDetailsState {
     /// Extensions, in order added. Capped at 4 (one row per `Extension1..4`
     /// variant). Each has a user nickname ("Back extension") + a build year.
     pub extensions: Vec<ExtensionInput>,
+    // --- Client intake answers (staging; not yet in the DEAP model) ---
+    pub property_type: String,
+    pub heating_system: String,
+    pub window_year: String,
+    pub door_year: String,
+    pub insulation_walls: bool,
+    pub insulation_roof: bool,
+    pub insulation_floor: bool,
+    pub insulation_notes: String,
+    pub mprn: String,
+    pub reason: String,
 }
 
 /// One extension row on the form: a descriptive nickname, a year, and the
@@ -108,6 +123,7 @@ impl KeyDetailsState {
         name: String,
         date_assessed: NaiveDate,
         phases: &ConstructionPhases,
+        intake: &IntakeDetails,
     ) -> Self {
         let construction_year = phases
             .year_of(&ConstructionPhase::Original)
@@ -136,6 +152,19 @@ impl KeyDetailsState {
             date_assessed: Some(date_assessed),
             construction_year,
             extensions,
+            property_type: intake.property_type.clone(),
+            heating_system: intake.heating_system.clone(),
+            window_year: intake
+                .window_year
+                .map(|y| y.to_string())
+                .unwrap_or_default(),
+            door_year: intake.door_year.map(|y| y.to_string()).unwrap_or_default(),
+            insulation_walls: intake.insulation_walls,
+            insulation_roof: intake.insulation_roof,
+            insulation_floor: intake.insulation_floor,
+            insulation_notes: intake.insulation_notes.clone(),
+            mprn: intake.mprn.clone(),
+            reason: intake.reason.clone(),
         }
     }
 }
@@ -165,6 +194,23 @@ fn collect_construction_phases(state: &mut KeyDetailsState) -> ConstructionPhase
         }
     }
     phases
+}
+
+/// Gather the client-intake staging fields off the form. Years parse leniently
+/// (blank/garbage → `None`); everything else is taken as-is.
+fn collect_intake(state: &KeyDetailsState) -> IntakeDetails {
+    IntakeDetails {
+        property_type: state.property_type.clone(),
+        heating_system: state.heating_system.clone(),
+        window_year: parse_year(&state.window_year),
+        door_year: parse_year(&state.door_year),
+        insulation_walls: state.insulation_walls,
+        insulation_roof: state.insulation_roof,
+        insulation_floor: state.insulation_floor,
+        insulation_notes: state.insulation_notes.clone(),
+        mprn: state.mprn.clone(),
+        reason: state.reason.clone(),
+    }
 }
 
 pub struct KeyDetailsPage;
@@ -260,6 +306,84 @@ impl KeyDetailsPage {
                 state.extensions.push(ExtensionInput::new(free));
                 // A fresh row has no valid year yet — nothing to write through.
             }
+        }
+
+        ui.add_space(20.0);
+
+        // Client-provided answers from the booking form. Prefilled at intake and
+        // editable here so the assessor can confirm them or fill any blanks. Not
+        // yet wired into the DEAP model — a staging area to transcribe from.
+        ui.label(RichText::new("Property details (from booking form)").strong());
+        ui.label(
+            RichText::new("Prefilled from what the client entered — edit or fill any blanks.")
+                .weak(),
+        );
+        ui.add_space(4.0);
+        let mut intake_changed = false;
+        egui::Grid::new("key_details_intake")
+            .num_columns(2)
+            .spacing([40.0, 10.0])
+            .show(ui, |ui| {
+                ui.label("Property type:");
+                if text_input(ui, &mut state.property_type, 220.0, "e.g. semi-detached").changed {
+                    intake_changed = true;
+                }
+                ui.end_row();
+
+                ui.label("Heating system:");
+                if text_input(ui, &mut state.heating_system, 220.0, "e.g. gas boiler").changed {
+                    intake_changed = true;
+                }
+                ui.end_row();
+
+                ui.label("Windows installed (year):");
+                if metre_input(ui, &mut state.window_year, 80.0, "e.g. 2010").changed {
+                    intake_changed = true;
+                }
+                ui.end_row();
+
+                ui.label("Doors installed (year):");
+                if metre_input(ui, &mut state.door_year, 80.0, "e.g. 2010").changed {
+                    intake_changed = true;
+                }
+                ui.end_row();
+
+                ui.label("Insulation:");
+                ui.horizontal(|ui| {
+                    if ui.checkbox(&mut state.insulation_walls, "Walls").changed() {
+                        intake_changed = true;
+                    }
+                    if ui.checkbox(&mut state.insulation_roof, "Roof").changed() {
+                        intake_changed = true;
+                    }
+                    if ui.checkbox(&mut state.insulation_floor, "Floor").changed() {
+                        intake_changed = true;
+                    }
+                });
+                ui.end_row();
+
+                ui.label("Insulation notes:");
+                if text_input(ui, &mut state.insulation_notes, f32::INFINITY, "").changed {
+                    intake_changed = true;
+                }
+                ui.end_row();
+
+                ui.label("MPRN:");
+                if text_input(ui, &mut state.mprn, 220.0, "electricity meter number").changed {
+                    intake_changed = true;
+                }
+                ui.end_row();
+
+                ui.label("Reason for BER:");
+                if text_input(ui, &mut state.reason, 220.0, "sale / rental / grant / …").changed {
+                    intake_changed = true;
+                }
+                ui.end_row();
+            });
+        if intake_changed {
+            on_event(UiEvent::KeyDetails(KeyDetailsEvent::SetIntake(
+                collect_intake(state),
+            )));
         }
 
         ui.add_space(20.0);
@@ -418,6 +542,7 @@ mod tests {
             "test".to_string(),
             NaiveDate::from_ymd_opt(2026, 1, 1).unwrap(),
             &phases,
+            &IntakeDetails::default(),
         );
         assert_eq!(state.extensions.len(), 1);
         let row = &state.extensions[0];
@@ -456,6 +581,7 @@ mod tests {
             "test".to_string(),
             NaiveDate::from_ymd_opt(2026, 1, 1).unwrap(),
             &phases,
+            &IntakeDetails::default(),
         );
         assert_eq!(state.extensions.len(), 2);
         assert_eq!(state.extensions[0].phase, ConstructionPhase::Extension1);

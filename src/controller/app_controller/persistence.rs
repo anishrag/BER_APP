@@ -67,20 +67,33 @@ impl AppController {
         let _ = self.persist();
     }
 
+    /// Set the loaded BER's client-intake staging fields (Key Details form). No-op
+    /// when no BER is loaded. Persists (same write-through pattern as above).
+    pub fn set_intake(&mut self, intake: IntakeDetails) {
+        if let Some(record) = self.current_record.as_mut() {
+            record.data.intake = intake;
+        }
+        let _ = self.persist();
+    }
+
     /// The loaded record's name, for the workspace top bar. `None` when no BER
     /// is loaded.
     pub fn current_record_name(&self) -> Option<String> {
         self.current_record.as_ref().map(|r| r.name.clone())
     }
 
-    /// The loaded record's Key Details — `(name, date_assessed, phases)` — for
-    /// pre-populating the form on workspace entry. `None` when no BER is loaded.
-    pub fn current_key_details(&self) -> Option<(String, NaiveDate, ConstructionPhases)> {
+    /// The loaded record's Key Details — `(name, date_assessed, phases, intake)`
+    /// — for pre-populating the form on workspace entry. `None` when no BER is
+    /// loaded.
+    pub fn current_key_details(
+        &self,
+    ) -> Option<(String, NaiveDate, ConstructionPhases, IntakeDetails)> {
         self.current_record.as_ref().map(|r| {
             (
                 r.name.clone(),
                 r.date_assessed,
                 r.data.construction_phases.clone(),
+                r.data.intake.clone(),
             )
         })
     }

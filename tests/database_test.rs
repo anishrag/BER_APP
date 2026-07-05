@@ -174,6 +174,7 @@ fn create_minimal_ber(id: ItemId) -> Ber {
         id,
         address: "123 Test Street".to_string(),
         eircode: "D01TEST".to_string(),
+        intake: Default::default(),
         construction_phases: ConstructionPhases {
             years: [(ConstructionPhase::Original, Some(2000))]
                 .into_iter()

@@ -71,7 +71,7 @@ use std::sync::mpsc::Sender;
 use crate::engine::ber_repository::{BerRecord, BerRepository, BerSummary};
 use crate::engine::dataloader::DataLoader;
 use crate::engine::Db;
-use ber_model::ber::ber_struct::Ber;
+use ber_model::ber::ber_struct::{Ber, IntakeDetails};
 use ber_model::ber::common::{ConstructionPhase, ConstructionPhases, ItemId};
 use ber_model::ber::structural::{FloorRegions, Storey, SurfaceCounts, WallExposure};
 use domain::points::{to_f32, Point2f32, Point2f64};

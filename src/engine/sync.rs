@@ -22,8 +22,8 @@ use std::time::Duration;
 use chrono::Utc;
 use serde::Deserialize;
 
-use ber_model::ber::ber_struct::Ber;
-use ber_model::ber::common::{ItemId, Photo};
+use ber_model::ber::ber_struct::{Ber, IntakeDetails};
+use ber_model::ber::common::{ConstructionPhase, ItemId, Photo};
 
 use super::ber_repository::{BerRecord, BerRepository};
 
@@ -90,9 +90,9 @@ struct JobDetail {
     satellite_image_url: Option<String>,
 }
 
-/// Only the seed fields we can map into `Ber` today. Unmapped fields
-/// (propertyType, heatingSystem, extensions, …) are ignored by serde for now —
-/// they stay in the cloud record for the assessor to confirm on-site.
+/// The client-provided seed fields we surface on the tablet. Address/eircode/
+/// storeys seed the core `Ber`; construction year + extensions seed the
+/// construction phases; the rest land in `Ber::intake` (Key Details staging).
 #[derive(Deserialize, Default)]
 struct BerSeed {
     #[serde(default)]
@@ -101,6 +101,44 @@ struct BerSeed {
     eircode: Option<String>,
     #[serde(rename = "numberOfStoreys", default)]
     number_of_storeys: Option<i32>,
+    #[serde(rename = "constructionYear", default)]
+    construction_year: Option<u32>,
+    #[serde(default)]
+    extensions: Vec<SeedExtension>,
+    #[serde(rename = "propertyType", default)]
+    property_type: Option<String>,
+    #[serde(rename = "heatingSystem", default)]
+    heating_system: Option<String>,
+    #[serde(rename = "windowYear", default)]
+    window_year: Option<u32>,
+    #[serde(rename = "doorYear", default)]
+    door_year: Option<u32>,
+    #[serde(default)]
+    insulation: Option<SeedInsulation>,
+    #[serde(default)]
+    mprn: Option<String>,
+    #[serde(default)]
+    reason: Option<String>,
+}
+
+#[derive(Deserialize, Default)]
+struct SeedExtension {
+    #[serde(default)]
+    year: Option<u32>,
+    #[serde(default)]
+    description: Option<String>,
+}
+
+#[derive(Deserialize, Default)]
+struct SeedInsulation {
+    #[serde(default)]
+    walls: Option<bool>,
+    #[serde(default)]
+    roof: Option<bool>,
+    #[serde(default)]
+    floor: Option<bool>,
+    #[serde(default)]
+    notes: Option<String>,
 }
 
 // ---- HTTP client ----------------------------------------------------------
@@ -216,6 +254,51 @@ fn import_one(
         }
     }
     ber.site_satellite_image = site_satellite_image;
+
+    // Construction year + extensions → construction phases (the Key Details
+    // "Year of Construction" + extension rows). Original = year built; each
+    // extension takes the next Extension1..4 variant, with its description as
+    // the row nickname. A description with no year designates the phase with the
+    // year "unknown", matching how the form itself commits such a row.
+    if let Some(y) = seed.construction_year {
+        ber.construction_phases
+            .set_year(ConstructionPhase::Original, y);
+    }
+    let ext_phases = [
+        ConstructionPhase::Extension1,
+        ConstructionPhase::Extension2,
+        ConstructionPhase::Extension3,
+        ConstructionPhase::Extension4,
+    ];
+    for (ext, phase) in seed.extensions.iter().zip(ext_phases) {
+        let has_desc = ext.description.as_deref().is_some_and(|d| !d.is_empty());
+        match ext.year {
+            Some(y) => ber.construction_phases.set_year(phase.clone(), y),
+            None if has_desc => ber.construction_phases.set_year_unknown(phase.clone()),
+            None => continue,
+        }
+        if let Some(desc) = &ext.description {
+            if !desc.is_empty() {
+                ber.construction_phases.set_nickname(phase, desc.clone());
+            }
+        }
+    }
+
+    // The remaining client answers → the Key Details "intake" staging fields
+    // (not yet wired into the DEAP model; the assessor confirms/fills them).
+    let ins = seed.insulation.unwrap_or_default();
+    ber.intake = IntakeDetails {
+        property_type: seed.property_type.unwrap_or_default(),
+        heating_system: seed.heating_system.unwrap_or_default(),
+        window_year: seed.window_year,
+        door_year: seed.door_year,
+        insulation_walls: ins.walls.unwrap_or(false),
+        insulation_roof: ins.roof.unwrap_or(false),
+        insulation_floor: ins.floor.unwrap_or(false),
+        insulation_notes: ins.notes.unwrap_or_default(),
+        mprn: seed.mprn.unwrap_or_default(),
+        reason: seed.reason.unwrap_or_default(),
+    };
 
     // Name the BER by its address, minus the county and any eircode (the eircode
     // is sometimes folded into the address field). Fall back to the eircode if
@@ -465,5 +548,59 @@ mod name_tests {
     #[test]
     fn empty_when_only_county_and_eircode() {
         assert_eq!(ber_name_from_address("Co. Cork, T12 X70P"), "");
+    }
+}
+
+#[cfg(test)]
+mod seed_tests {
+    use super::BerSeed;
+
+    // The wire contract: a seed JSON (camelCase keys) must deserialize onto the
+    // fields we map to the tablet. Guards against serde-rename typos.
+    #[test]
+    fn deserializes_full_seed() {
+        let json = r#"{
+            "address": "12 Main St, Cork",
+            "eircode": "T12 X70P",
+            "numberOfStoreys": 2,
+            "constructionYear": 1985,
+            "extensions": [{"year": 2008, "description": "Back extension"}],
+            "propertyType": "semi-detached",
+            "heatingSystem": "gas boiler",
+            "windowYear": 2010,
+            "doorYear": 2011,
+            "insulation": {"walls": true, "roof": false, "notes": "pumped"},
+            "mprn": "10001234567",
+            "reason": "sale"
+        }"#;
+        let s: BerSeed = serde_json::from_str(json).unwrap();
+        assert_eq!(s.construction_year, Some(1985));
+        assert_eq!(s.extensions.len(), 1);
+        assert_eq!(s.extensions[0].year, Some(2008));
+        assert_eq!(
+            s.extensions[0].description.as_deref(),
+            Some("Back extension")
+        );
+        assert_eq!(s.property_type.as_deref(), Some("semi-detached"));
+        assert_eq!(s.heating_system.as_deref(), Some("gas boiler"));
+        assert_eq!(s.window_year, Some(2010));
+        assert_eq!(s.door_year, Some(2011));
+        let ins = s.insulation.unwrap();
+        assert_eq!(ins.walls, Some(true));
+        assert_eq!(ins.roof, Some(false));
+        assert_eq!(ins.floor, None);
+        assert_eq!(s.mprn.as_deref(), Some("10001234567"));
+        assert_eq!(s.reason.as_deref(), Some("sale"));
+    }
+
+    // A sparse seed (older/telegram job) must still deserialize, everything else
+    // defaulting — the fields are all optional.
+    #[test]
+    fn deserializes_sparse_seed() {
+        let s: BerSeed = serde_json::from_str(r#"{"eircode":"D06 K2X3"}"#).unwrap();
+        assert_eq!(s.eircode.as_deref(), Some("D06 K2X3"));
+        assert_eq!(s.construction_year, None);
+        assert!(s.extensions.is_empty());
+        assert!(s.insulation.is_none());
     }
 }
