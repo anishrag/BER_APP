@@ -124,9 +124,12 @@ impl SyncClient {
     }
 
     fn list_confirmed(&self) -> anyhow::Result<Vec<JobSummary>> {
+        // No status filter: the server returns everything ready to assess
+        // (booked or confirmed) — a job reaches the tablet as soon as the client
+        // books, without waiting on the letter of engagement being signed.
         let resp = self
             .agent
-            .get(&self.url("/surveyor/jobs?status=confirmed"))
+            .get(&self.url("/surveyor/jobs"))
             .set("x-surveyor-key", &self.cfg.api_key)
             .call()?;
         let parsed: ListResponse = resp.into_json()?;
@@ -214,10 +217,12 @@ fn import_one(
     }
     ber.site_satellite_image = site_satellite_image;
 
-    let name = if !ber.address.is_empty() {
-        ber.address.clone()
-    } else {
-        ber.eircode.clone()
+    // Name the BER by its address, minus the county and any eircode (the eircode
+    // is sometimes folded into the address field). Fall back to the eircode if
+    // that leaves nothing.
+    let name = match ber_name_from_address(&ber.address) {
+        n if !n.is_empty() => n,
+        _ => ber.eircode.clone(),
     };
     let record = BerRecord {
         id,
@@ -228,6 +233,74 @@ fn import_one(
     repo.upsert(&record)?;
     log::info!("sync: imported job {job_id}");
     Ok(())
+}
+
+/// Build the BER's display name from the seed address, dropping any county
+/// component and embedded eircode. Seeds arrive comma-separated, e.g.
+/// "12 Main St, Ballincollig, Co. Cork, T12 X70P" (and the eircode is sometimes
+/// appended into the address field itself), which we want shown as
+/// "12 Main St, Ballincollig".
+fn ber_name_from_address(address: &str) -> String {
+    address
+        .split(',')
+        .map(|part| strip_eircode(part.trim()))
+        .filter(|part| !part.is_empty() && !is_county(part))
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+/// True for an address component that is the county, e.g. "Co. Cork",
+/// "Co Cork", "County Cork". Deliberately narrow so town names that merely start
+/// with "Co" (Cobh, Coachford) are kept.
+fn is_county(part: &str) -> bool {
+    let lower = part.to_ascii_lowercase();
+    lower.starts_with("co. ")
+        || lower.starts_with("co ")
+        || lower.starts_with("co.")
+        || lower.starts_with("county ")
+}
+
+/// Remove an eircode from one address component, whether spaced ("T12 X70P") or
+/// solid ("T12X70P"). An eircode is a 3-char routing key (letter, digit,
+/// alphanumeric) plus a 4-char alphanumeric identifier. Case-insensitive.
+fn strip_eircode(part: &str) -> String {
+    let words: Vec<&str> = part.split_whitespace().collect();
+    let mut out: Vec<&str> = Vec::with_capacity(words.len());
+    let mut i = 0;
+    while i < words.len() {
+        if is_eircode_solid(words[i]) {
+            i += 1;
+        } else if is_routing_key(words[i])
+            && i + 1 < words.len()
+            && is_eircode_identifier(words[i + 1])
+        {
+            i += 2;
+        } else {
+            out.push(words[i]);
+            i += 1;
+        }
+    }
+    out.join(" ")
+}
+
+fn is_routing_key(w: &str) -> bool {
+    let b = w.as_bytes();
+    w.len() == 3
+        && b[0].is_ascii_alphabetic()
+        && b[1].is_ascii_digit()
+        && b[2].is_ascii_alphanumeric()
+}
+
+fn is_eircode_identifier(w: &str) -> bool {
+    w.len() == 4 && w.bytes().all(|c| c.is_ascii_alphanumeric())
+}
+
+fn is_eircode_solid(w: &str) -> bool {
+    let b = w.as_bytes();
+    w.len() == 7
+        && b[0].is_ascii_alphabetic()
+        && b[1].is_ascii_digit()
+        && w.bytes().all(|c| c.is_ascii_alphanumeric())
 }
 
 fn download_satellite(client: &SyncClient, photos_dir: &Path, url: &str) -> anyhow::Result<Photo> {
@@ -344,5 +417,53 @@ fn run_pass(
             s.last_error = Some(e.to_string());
             log::warn!("sync: pull failed: {e}");
         }
+    }
+}
+
+#[cfg(test)]
+mod name_tests {
+    use super::ber_name_from_address;
+
+    #[test]
+    fn drops_county_and_spaced_eircode() {
+        assert_eq!(
+            ber_name_from_address("12 Main St, Ballincollig, Co. Cork, T12 X70P"),
+            "12 Main St, Ballincollig"
+        );
+    }
+
+    #[test]
+    fn drops_eircode_folded_into_a_part() {
+        assert_eq!(
+            ber_name_from_address("12 Main St, Ballincollig T12 X70P"),
+            "12 Main St, Ballincollig"
+        );
+    }
+
+    #[test]
+    fn drops_solid_eircode_and_county_word() {
+        assert_eq!(
+            ber_name_from_address("5 Oak Rd, Douglas, County Cork, T12X70P"),
+            "5 Oak Rd, Douglas"
+        );
+    }
+
+    #[test]
+    fn keeps_towns_that_start_with_co() {
+        assert_eq!(ber_name_from_address("Cobh, Co. Cork"), "Cobh");
+        assert_eq!(ber_name_from_address("Coachford, Co Cork"), "Coachford");
+    }
+
+    #[test]
+    fn plain_address_untouched() {
+        assert_eq!(
+            ber_name_from_address("42 Elm Grove, Bishopstown"),
+            "42 Elm Grove, Bishopstown"
+        );
+    }
+
+    #[test]
+    fn empty_when_only_county_and_eircode() {
+        assert_eq!(ber_name_from_address("Co. Cork, T12 X70P"), "");
     }
 }
