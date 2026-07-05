@@ -1732,7 +1732,13 @@ pub(super) fn render<F: FnMut(UiEvent)>(
     let structure_carve =
         structure_phase && matches!(view.structure_select, Some(SelectMode::Carve));
     if structure_click && matches!(mode, SketchMode::Storey2D) && !touch_nav_active {
-        if let Some(t) = canvas_transform(ber, current_storey_idx, rect, vp, false) {
+        // `watermark = true`: the storey is DRAWN with the previous-storey
+        // watermark folded into the fit (`fit_bbox_for_storey`), so a setback
+        // upper storey renders smaller than its own bbox would. Invert the tap
+        // through that SAME transform, or the hit-test point is offset and walls
+        // never get picked on upper storeys (ground storey has no watermark, so
+        // it worked). Matches the other interaction paths already on `true`.
+        if let Some(t) = canvas_transform(ber, current_storey_idx, rect, vp, true) {
             let tol_world = (12.0 / t.scale()) as f64;
             if response.clicked_by(egui::PointerButton::Primary) {
                 if let Some(pos) = response.interact_pointer_pos() {
@@ -1784,10 +1790,12 @@ pub(super) fn render<F: FnMut(UiEvent)>(
     {
         if structure_cut_picking {
             if response.clicked_by(egui::PointerButton::Primary) {
-                if let Some((wx, wy)) = response
-                    .interact_pointer_pos()
-                    .and_then(|pos| screen_to_world(ber, current_storey_idx, rect, vp, pos))
-                {
+                if let Some((wx, wy)) = response.interact_pointer_pos().and_then(|pos| {
+                    // watermark = true: match the render transform on a setback
+                    // upper storey (as the structure click / carve stroke do).
+                    canvas_transform(ber, current_storey_idx, rect, vp, true)
+                        .map(|t| t.inverse(pos.x, pos.y))
+                }) {
                     on_event(UiEvent::Sketch(SketchEvent::ChooseStructureCutRegion {
                         world_x: wx,
                         world_y: wy,
@@ -1812,7 +1820,10 @@ pub(super) fn render<F: FnMut(UiEvent)>(
             if response.drag_stopped_by(egui::PointerButton::Primary) {
                 if let (Some(stroke), Some(t)) = (
                     view.current.as_ref(),
-                    canvas_transform(ber, current_storey_idx, rect, vp, false),
+                    // watermark = true: match the render transform, or the carve
+                    // stroke lands in the wrong world spot on a setback upper
+                    // storey (same fix as the structure click above).
+                    canvas_transform(ber, current_storey_idx, rect, vp, true),
                 ) {
                     let topleft = rect.left_top();
                     let world_points: Vec<(f32, f32)> = stroke
