@@ -126,22 +126,34 @@ fn key(ui: &mut egui::Ui, label: &str) -> bool {
     .clicked()
 }
 
-/// Draw the shared pad (floating, top-right over the canvas) and apply its
-/// presses to `buf`. The prompt dock is a *bottom* panel, so anchoring the pad
-/// to the top keeps both the field being edited and its action buttons
-/// (Apply / Skip / …) fully visible; the y-offset clears the top strip.
+/// Draw the shared pad (a floating window) and apply its presses to `buf`.
+///
+/// It's an `egui::Window` so it comes with a title-bar drag handle — the
+/// assessor can move it aside if it covers a field or a button — and it
+/// remembers its dragged spot (stable `id`), staying on-screen (`constrain_to`).
+/// It defaults to the BOTTOM-CENTRE: most fields sit up the top of the form, so
+/// the bottom keeps them and the pad both visible, and it's the natural
+/// thumb-reach spot on a tablet.
 fn render_pad(ctx: &egui::Context, buf: &mut String, kind: PadKind) -> PadEvent {
     let mut event = PadEvent::None;
-    egui::Area::new(Id::new("ber_touch_pad"))
-        .anchor(Align2::RIGHT_TOP, egui::vec2(-8.0, 56.0))
+    let screen = ctx.content_rect();
+    egui::Window::new("Keyboard")
+        // Stable id so the dragged position is remembered while the pad is up
+        // (the title changes nothing; the pad is keyed by the owning field).
+        .id(Id::new("ber_touch_pad"))
         .order(egui::Order::Foreground)
+        .resizable(false)
+        .collapsible(false)
+        // Default parking spot: centred along the bottom edge, a hair above it.
+        // `pivot(CENTER_BOTTOM)` makes `default_pos` the pad's own bottom-centre.
+        .pivot(Align2::CENTER_BOTTOM)
+        .default_pos(screen.center_bottom() - egui::vec2(0.0, 12.0))
+        .constrain_to(screen)
         .show(ctx, |ui| {
-            egui::Frame::popup(ui.style()).show(ui, |ui| {
-                event = match kind {
-                    PadKind::Numeric => numeric_rows(ui, buf),
-                    PadKind::Qwerty => qwerty_rows(ctx, ui, buf),
-                };
-            });
+            event = match kind {
+                PadKind::Numeric => numeric_rows(ui, buf),
+                PadKind::Qwerty => qwerty_rows(ctx, ui, buf),
+            };
         });
     event
 }
