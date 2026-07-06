@@ -36,7 +36,7 @@ use crate::number_entry::bluetooth::{LaserSource, Status};
 use crate::number_entry::{apply, parse_dimension_expression, Key};
 use crate::ui::pages::events::UiEvent;
 use crate::ui::widgets::HintExt;
-use crate::ui::widgets::{metre_input, photo_button_pair, text_input, PhotoQuality};
+use crate::ui::widgets::{photo_button_pair, text_input, PhotoQuality};
 use ber_model::ber::common::ItemId;
 use ber_model::ber::fenestration::{Frame, Glazing, Overshading};
 
@@ -250,6 +250,7 @@ pub(super) fn render<F: FnMut(UiEvent)>(
                 buf: &mut *view.opening_width_input,
                 required: f[0].required,
                 enabled: true,
+                measurable: true,
             },
             BoxField {
                 label: &f[1].label,
@@ -257,6 +258,7 @@ pub(super) fn render<F: FnMut(UiEvent)>(
                 buf: &mut *view.opening_height_input,
                 required: f[1].required,
                 enabled: true,
+                measurable: true,
             },
         ];
         if f.len() > 2 {
@@ -266,6 +268,7 @@ pub(super) fn render<F: FnMut(UiEvent)>(
                 buf: &mut *view.sidelight_left_input,
                 required: false,
                 enabled: true,
+                measurable: true,
             });
             // Left sill — only active when its box is ticked.
             box_fields.push(BoxField {
@@ -274,6 +277,7 @@ pub(super) fn render<F: FnMut(UiEvent)>(
                 buf: &mut *view.sidelight_left_sill_input,
                 required: false,
                 enabled: left_has_sill,
+                measurable: true,
             });
             box_fields.push(BoxField {
                 label: &f[4].label,
@@ -281,6 +285,7 @@ pub(super) fn render<F: FnMut(UiEvent)>(
                 buf: &mut *view.sidelight_right_input,
                 required: false,
                 enabled: true,
+                measurable: true,
             });
             // Right sill — only active when its box is ticked.
             box_fields.push(BoxField {
@@ -289,6 +294,7 @@ pub(super) fn render<F: FnMut(UiEvent)>(
                 buf: &mut *view.sidelight_right_sill_input,
                 required: false,
                 enabled: right_has_sill,
+                measurable: true,
             });
             box_fields.push(BoxField {
                 label: &f[6].label,
@@ -296,6 +302,28 @@ pub(super) fn render<F: FnMut(UiEvent)>(
                 buf: &mut *view.transom_input,
                 required: false,
                 enabled: true,
+                measurable: true,
+            });
+        }
+        // A NEW window type's YEAR + GAP: typed, non-measurable values. As box
+        // fields they're driven by the box's OWN keypad (no second pad), and the
+        // laser auto-advance skips them. Shown only when defining a new type.
+        if prompt.offer_window_type && view.wt_existing_id.is_none() {
+            box_fields.push(BoxField {
+                label: "year",
+                hint: "2010",
+                buf: &mut *view.wt_year_input,
+                required: false,
+                enabled: true,
+                measurable: false,
+            });
+            box_fields.push(BoxField {
+                label: "gap",
+                hint: "mm",
+                buf: &mut *view.wt_gap_input,
+                required: false,
+                enabled: true,
+                measurable: false,
             });
         }
         let mut checks = Vec::new();
@@ -327,9 +355,7 @@ pub(super) fn render<F: FnMut(UiEvent)>(
                 &mut *view.wt_existing_id,
                 &mut *view.wt_glazing,
                 &mut *view.wt_frame,
-                &mut *view.wt_year_input,
                 &mut *view.wt_certified,
-                &mut *view.wt_gap_input,
                 &mut *view.wt_name_input,
             );
             // Overshading is per-WINDOW (not per type), so it shows for every
@@ -887,6 +913,12 @@ struct BoxField<'a> {
     /// sidelight sill until its "sill" box is ticked). Always `true` for the
     /// single-value box.
     enabled: bool,
+    /// Whether this value can be LASER-measured (a dimension). `true` for
+    /// dimensions (width/height/sidelights); `false` for typed-only values like
+    /// a window type's year or glazing gap. A non-measurable field is skipped by
+    /// the laser auto-advance, and always shows the keypad (never the laser
+    /// panel) when focused — so there's only ever one keypad, the box's own.
+    measurable: bool,
 }
 
 /// A boolean toggle shown under the fields (e.g. the door+sidelights
@@ -1015,9 +1047,7 @@ fn window_type_picker(
     existing_id: &mut Option<ItemId>,
     glazing: &mut Glazing,
     frame: &mut Frame,
-    year: &mut String,
     certified: &mut bool,
-    gap: &mut String,
     name: &mut String,
 ) {
     ui.separator();
@@ -1063,13 +1093,9 @@ fn window_type_picker(
                     ui.selectable_value(frame, Frame::Metal, "Metal");
                 });
         });
-        ui.horizontal(|ui| {
-            ui.label("year");
-            metre_input(ui, year, 54.0, "2010");
-            ui.label("gap");
-            metre_input(ui, gap, 54.0, "mm");
-            ui.checkbox(certified, "certified");
-        });
+        // Year + gap are entered up top as box fields (driven by the box's own
+        // keypad); only the certification toggle + the type NAME stay here.
+        ui.checkbox(certified, "certified");
         ui.horizontal(|ui| {
             ui.label("name");
             text_input(ui, name, KEY * 3.0, "model (required)");
@@ -1105,6 +1131,7 @@ fn show_box<F: FnMut(UiEvent)>(
         buf,
         required: true,
         enabled: true,
+        measurable: true,
     }];
     show_box_multi(
         ctx,
@@ -1248,6 +1275,14 @@ fn show_box_multi<F: FnMut(UiEvent)>(
                         digit_grid(ui, &mut fields[focus].buf);
                         plus_minus(ui, &mut fields[focus].buf);
                     }
+                    // Laser mode, but the focused field can't be measured (a
+                    // year / gap): use the keypad for it, so a typed value never
+                    // needs a second pad — the box's keypad IS the numeric input.
+                    InputMode::Laser if !fields[focus].measurable => {
+                        let _ = laser.poll();
+                        digit_grid(ui, &mut fields[focus].buf);
+                        plus_minus(ui, &mut fields[focus].buf);
+                    }
                     InputMode::Laser => {
                         // A reading sets the focused field, then focus advances to
                         // the next one (shoot Width → Height → … hands-free). +/−
@@ -1310,9 +1345,11 @@ fn show_box_multi<F: FnMut(UiEvent)>(
                     focus = 0;
                 }
             } else if laser_advanced {
-                // Move to the next ENABLED field and give it the cursor for the
-                // next shot (skip greyed-out fields like an unticked sill).
-                if let Some(next) = (focus + 1..fields.len()).find(|&i| fields[i].enabled) {
+                // Move to the next ENABLED, MEASURABLE field for the next shot
+                // (skip greyed-out sills and typed-only fields like year / gap).
+                if let Some(next) =
+                    (focus + 1..fields.len()).find(|&i| fields[i].enabled && fields[i].measurable)
+                {
                     focus = next;
                     responses[focus].request_focus();
                 }
