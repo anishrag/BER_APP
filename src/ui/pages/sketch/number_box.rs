@@ -31,7 +31,9 @@ use std::time::Duration;
 use egui::{Align2, Color32, Id, RichText};
 
 use super::{SketchEvent, SketchView};
-use crate::controller::app_controller::{ExistingWindowType, WindowTypeChoice};
+use crate::controller::app_controller::{
+    DoorSidelightsMode, DoorSidelightsPlacement, ExistingWindowType, WindowTypeChoice,
+};
 use crate::number_entry::bluetooth::{LaserSource, Status};
 use crate::number_entry::{apply, parse_dimension_expression, Key};
 use crate::ui::pages::events::UiEvent;
@@ -39,6 +41,7 @@ use crate::ui::widgets::HintExt;
 use crate::ui::widgets::{photo_button_pair, text_input, PhotoQuality};
 use ber_model::ber::common::ItemId;
 use ber_model::ber::fenestration::{Frame, Glazing, Overshading};
+use ber_model::ber::openings::SidelightLayout;
 
 /// Minimum finger-target size for keypad keys (mirrors the on-screen pads).
 const KEY: f32 = 46.0;
@@ -167,10 +170,13 @@ pub(super) fn render<F: FnMut(UiEvent)>(
                 d.insert_temp(seq_id, prompt.seq);
                 d.insert_temp(Id::new(FOCUS_MEM), 0usize);
             });
-            // A new placement starts with the door+sidelights toggles cleared.
+            // A new placement starts with the door+sidelights toggles cleared and
+            // both sidelights present (Overall mode's default = even split).
             *view.sidelight_left_has_sill = false;
             *view.sidelight_right_has_sill = false;
             *view.transom_semicircular = false;
+            *view.sidelight_left_present = true;
+            *view.sidelight_right_present = true;
             // Photos are per-window, so a fresh placement starts with none (unlike
             // the window type / overshading, which persist across placements).
             view.pending_window_photos.clear();
@@ -184,6 +190,11 @@ pub(super) fn render<F: FnMut(UiEvent)>(
             *view.sidelight_left_has_sill,
             *view.sidelight_right_has_sill,
         );
+        // Door+sidelights input mode + (Overall) which sides carry glass. `None`
+        // for every other tool. Captured by value into the Place event.
+        let ds_mode = prompt.door_sidelights;
+        let (left_present, right_present) =
+            (*view.sidelight_left_present, *view.sidelight_right_present);
         // The window-type choice settled on a previous frame (the picker below
         // mutates it for the NEXT frame; a Place click reads the settled value),
         // captured by value into the action events.
@@ -195,18 +206,47 @@ pub(super) fn render<F: FnMut(UiEvent)>(
         let place_window_type = window_type.clone();
         let place_photos = photos.clone();
         let mut actions = vec![Action::new_multi("Place", "Place this opening", move |vs| {
-            // Field order (the controller's contract): door W, door H, left W,
-            // left sill, right W, right sill, transom H.
             let g = |i: usize| vs.get(i).copied().flatten();
+            // Fields 0/1 are the door leaf's W/H — except in Overall mode, where
+            // the whole-doorset W/H come first and the door leaf shifts to 2/3.
+            let (width_m, height_m) = match ds_mode {
+                Some(DoorSidelightsMode::Overall) => (g(2).unwrap_or(0.0), g(3).unwrap_or(0.0)),
+                _ => (g(0).unwrap_or(0.0), g(1).unwrap_or(0.0)),
+            };
+            let door_sidelights = match ds_mode {
+                None => None,
+                // Overall: [overall W, overall H, door W, door H, sill]. The two
+                // present-checkboxes pick which side(s) the leftover width fills;
+                // neither ticked falls back to an even split.
+                Some(DoorSidelightsMode::Overall) => {
+                    let layout = match (left_present, right_present) {
+                        (true, false) => SidelightLayout::LeftOnly,
+                        (false, true) => SidelightLayout::RightOnly,
+                        _ => SidelightLayout::Both,
+                    };
+                    Some(DoorSidelightsPlacement::Overall {
+                        overall_w: g(0).unwrap_or(0.0),
+                        overall_h: g(1).unwrap_or(0.0),
+                        layout,
+                        sill: if left_has_sill { g(4) } else { None },
+                        transom_semicircular: semicircular,
+                    })
+                }
+                // Detailed: [door W, door H, left W, left sill, right W, right
+                // sill, transom H]. A sidelight sill only counts when ticked.
+                Some(DoorSidelightsMode::Detailed) => Some(DoorSidelightsPlacement::Detailed {
+                    left: g(2),
+                    left_sill: if left_has_sill { g(3) } else { None },
+                    right: g(4),
+                    right_sill: if right_has_sill { g(5) } else { None },
+                    transom: g(6),
+                    transom_semicircular: semicircular,
+                }),
+            };
             SketchEvent::PlaceOpening {
-                width_m: g(0).unwrap_or(0.0),
-                height_m: g(1).unwrap_or(0.0),
-                left: g(2),
-                left_sill: if left_has_sill { g(3) } else { None },
-                right: g(4),
-                right_sill: if right_has_sill { g(5) } else { None },
-                transom: g(6),
-                transom_semicircular: semicircular,
+                width_m,
+                height_m,
+                door_sidelights,
                 window_type: place_window_type.clone(),
                 overshading,
                 photos: place_photos.clone(),
@@ -261,49 +301,84 @@ pub(super) fn render<F: FnMut(UiEvent)>(
                 measurable: true,
             },
         ];
-        if f.len() > 2 {
-            box_fields.push(BoxField {
-                label: &f[2].label,
-                hint: f[2].hint,
-                buf: &mut *view.sidelight_left_input,
-                required: false,
-                enabled: true,
-                measurable: true,
-            });
-            // Left sill — only active when its box is ticked.
-            box_fields.push(BoxField {
-                label: &f[3].label,
-                hint: f[3].hint,
-                buf: &mut *view.sidelight_left_sill_input,
-                required: false,
-                enabled: left_has_sill,
-                measurable: true,
-            });
-            box_fields.push(BoxField {
-                label: &f[4].label,
-                hint: f[4].hint,
-                buf: &mut *view.sidelight_right_input,
-                required: false,
-                enabled: true,
-                measurable: true,
-            });
-            // Right sill — only active when its box is ticked.
-            box_fields.push(BoxField {
-                label: &f[5].label,
-                hint: f[5].hint,
-                buf: &mut *view.sidelight_right_sill_input,
-                required: false,
-                enabled: right_has_sill,
-                measurable: true,
-            });
-            box_fields.push(BoxField {
-                label: &f[6].label,
-                hint: f[6].hint,
-                buf: &mut *view.transom_input,
-                required: false,
-                enabled: true,
-                measurable: true,
-            });
+        // The door+sidelights extra fields, bound by mode. Fields 0/1 (above) are
+        // the whole-doorset W/H in Overall mode, or the door leaf W/H otherwise.
+        match ds_mode {
+            Some(DoorSidelightsMode::Overall) => {
+                // [.., door W, door H, sill]. Door leaf under the overall W/H.
+                box_fields.push(BoxField {
+                    label: &f[2].label,
+                    hint: f[2].hint,
+                    buf: &mut *view.door_width_input,
+                    required: true,
+                    enabled: true,
+                    measurable: true,
+                });
+                box_fields.push(BoxField {
+                    label: &f[3].label,
+                    hint: f[3].hint,
+                    buf: &mut *view.door_height_input,
+                    required: true,
+                    enabled: true,
+                    measurable: true,
+                });
+                // One sill for the whole assembly — active only when ticked.
+                // Reuses the left-sill buffer + the (repurposed) "has a sill" flag.
+                box_fields.push(BoxField {
+                    label: &f[4].label,
+                    hint: f[4].hint,
+                    buf: &mut *view.sidelight_left_sill_input,
+                    required: false,
+                    enabled: left_has_sill,
+                    measurable: true,
+                });
+            }
+            Some(DoorSidelightsMode::Detailed) => {
+                // [.., left W, left sill, right W, right sill, transom H].
+                box_fields.push(BoxField {
+                    label: &f[2].label,
+                    hint: f[2].hint,
+                    buf: &mut *view.sidelight_left_input,
+                    required: false,
+                    enabled: true,
+                    measurable: true,
+                });
+                // Left sill — only active when its box is ticked.
+                box_fields.push(BoxField {
+                    label: &f[3].label,
+                    hint: f[3].hint,
+                    buf: &mut *view.sidelight_left_sill_input,
+                    required: false,
+                    enabled: left_has_sill,
+                    measurable: true,
+                });
+                box_fields.push(BoxField {
+                    label: &f[4].label,
+                    hint: f[4].hint,
+                    buf: &mut *view.sidelight_right_input,
+                    required: false,
+                    enabled: true,
+                    measurable: true,
+                });
+                // Right sill — only active when its box is ticked.
+                box_fields.push(BoxField {
+                    label: &f[5].label,
+                    hint: f[5].hint,
+                    buf: &mut *view.sidelight_right_sill_input,
+                    required: false,
+                    enabled: right_has_sill,
+                    measurable: true,
+                });
+                box_fields.push(BoxField {
+                    label: &f[6].label,
+                    hint: f[6].hint,
+                    buf: &mut *view.transom_input,
+                    required: false,
+                    enabled: true,
+                    measurable: true,
+                });
+            }
+            None => {}
         }
         // A NEW window type's YEAR + GAP: typed, non-measurable values. As box
         // fields they're driven by the box's OWN keypad (no second pad), and the
@@ -327,19 +402,42 @@ pub(super) fn render<F: FnMut(UiEvent)>(
             });
         }
         let mut checks = Vec::new();
-        if prompt.offer_semicircular_transom {
-            checks.push(BoxCheck {
-                label: "left sidelight has a sill",
-                value: &mut *view.sidelight_left_has_sill,
-            });
-            checks.push(BoxCheck {
-                label: "right sidelight has a sill",
-                value: &mut *view.sidelight_right_has_sill,
-            });
-            checks.push(BoxCheck {
-                label: "semicircular transom",
-                value: &mut *view.transom_semicircular,
-            });
+        match ds_mode {
+            Some(DoorSidelightsMode::Overall) => {
+                // Which side(s) the leftover width fills, one shared sill, and the
+                // (auto) transom's shape.
+                checks.push(BoxCheck {
+                    label: "left sidelight",
+                    value: &mut *view.sidelight_left_present,
+                });
+                checks.push(BoxCheck {
+                    label: "right sidelight",
+                    value: &mut *view.sidelight_right_present,
+                });
+                checks.push(BoxCheck {
+                    label: "has a sill",
+                    value: &mut *view.sidelight_left_has_sill,
+                });
+                checks.push(BoxCheck {
+                    label: "semicircular transom",
+                    value: &mut *view.transom_semicircular,
+                });
+            }
+            Some(DoorSidelightsMode::Detailed) => {
+                checks.push(BoxCheck {
+                    label: "left sidelight has a sill",
+                    value: &mut *view.sidelight_left_has_sill,
+                });
+                checks.push(BoxCheck {
+                    label: "right sidelight has a sill",
+                    value: &mut *view.sidelight_right_has_sill,
+                });
+                checks.push(BoxCheck {
+                    label: "semicircular transom",
+                    value: &mut *view.transom_semicircular,
+                });
+            }
+            None => {}
         }
         // The window-type picker (for window-bearing tools), rendered in the box
         // body. Captures the wt_* state fields (disjoint from the box fields).
@@ -376,6 +474,12 @@ pub(super) fn render<F: FnMut(UiEvent)>(
                 !prompt.offer_window_type || (name.is_some() && !photos.is_empty())
             }
         };
+        // The Overall/Detailed mode switch — only for the Door + sidelights tool,
+        // drawn at the top of the box (above the fields it reshapes).
+        let ds_mode_toggle: Option<&mut DoorSidelightsMode> = prompt
+            .door_sidelights
+            .is_some()
+            .then_some(&mut view.cat_state.door_sidelights_mode);
         show_box_multi(
             ctx,
             rect,
@@ -387,6 +491,7 @@ pub(super) fn render<F: FnMut(UiEvent)>(
             &actions,
             &mut view.cat_state.input_mode,
             &mut view.cat_state.input_mode_pinned,
+            ds_mode_toggle,
             view.laser,
             &mut picker,
             extra_valid,
@@ -1146,6 +1251,7 @@ fn show_box<F: FnMut(UiEvent)>(
         actions,
         mode,
         mode_pinned,
+        None,
         laser,
         &mut |_| {},
         true,
@@ -1170,6 +1276,9 @@ fn show_box_multi<F: FnMut(UiEvent)>(
     actions: &[Action],
     mode: &mut InputMode,
     mode_pinned: &mut bool,
+    // The Door + sidelights Overall/Detailed switch, drawn under the keypad/laser
+    // toggle. `None` for every other prompt (no switch shown).
+    ds_mode: Option<&mut DoorSidelightsMode>,
     laser: &mut LaserSource,
     // Extra controls drawn in the box body, under the toggles and above the
     // keypad — e.g. the openings window-type picker. A no-op for most prompts.
@@ -1203,6 +1312,9 @@ fn show_box_multi<F: FnMut(UiEvent)>(
         .show(ctx, |ui| {
             ui.set_min_width(220.0);
             mode_toggle(ui, mode, mode_pinned);
+            if let Some(ds_mode) = ds_mode {
+                door_sidelights_mode_toggle(ui, ds_mode);
+            }
             if let Some(sub) = subtitle {
                 ui.label(RichText::new(sub).color(Color32::from_gray(170)));
             }
@@ -1461,6 +1573,29 @@ fn mode_toggle(ui: &mut egui::Ui, mode: &mut InputMode, pinned: &mut bool) {
         {
             *mode = InputMode::Laser;
             *pinned = true;
+        }
+    });
+    ui.separator();
+}
+
+/// The Door + sidelights input-mode switch, under the keypad/laser toggle:
+/// measure the whole doorset first (Overall) or type each piece (Detailed). The
+/// choice persists on `CategoryUiState`, so it sticks across placements.
+fn door_sidelights_mode_toggle(ui: &mut egui::Ui, mode: &mut DoorSidelightsMode) {
+    ui.horizontal(|ui| {
+        if ui
+            .selectable_label(*mode == DoorSidelightsMode::Overall, "◱ Whole doorset")
+            .hint("Measure the whole doorset, then the door within it (4 shots)")
+            .clicked()
+        {
+            *mode = DoorSidelightsMode::Overall;
+        }
+        if ui
+            .selectable_label(*mode == DoorSidelightsMode::Detailed, "▦ Piece by piece")
+            .hint("Type each piece: door, then each sidelight + sill, then transom")
+            .clicked()
+        {
+            *mode = DoorSidelightsMode::Detailed;
         }
     });
     ui.separator();

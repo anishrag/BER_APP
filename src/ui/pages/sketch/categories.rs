@@ -187,6 +187,10 @@ pub struct CategoryUiState {
     /// auto-switch to Laser when a connected DISTO is detected; after, their
     /// choice is respected.
     pub input_mode_pinned: bool,
+    /// How the Door + sidelights box dimensions the assembly: measure the whole
+    /// doorset first (Overall) or type each piece (Detailed). Pinned like
+    /// `input_mode` — the last-used choice persists across placements.
+    pub door_sidelights_mode: crate::controller::app_controller::DoorSidelightsMode,
 }
 
 impl Default for CategoryUiState {
@@ -199,6 +203,7 @@ impl Default for CategoryUiState {
             floor_thickness_input: String::new(),
             input_mode: super::number_box::InputMode::default(),
             input_mode_pinned: false,
+            door_sidelights_mode: crate::controller::app_controller::DoorSidelightsMode::default(),
         }
     }
 }

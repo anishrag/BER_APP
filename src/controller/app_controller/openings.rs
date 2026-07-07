@@ -6,7 +6,9 @@
 use super::*;
 use ber_model::ber::common::{ItemId, Photo};
 use ber_model::ber::fenestration::{DoorKind, Frame, Glazing, Overshading, WallAnchor};
-use ber_model::ber::openings::{self, DoorSidelightsSpec, OpeningError, OpeningRef};
+use ber_model::ber::openings::{
+    self, DoorSidelightsSpec, OpeningError, OpeningRef, SidelightLayout,
+};
 
 /// Which opening the toolbar places next (or `Edit` to open an elevation).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -21,6 +23,47 @@ pub enum OpeningToolKind {
     DoorSidelights,
     /// Tap a wall to open its elevation editor (reposition existing openings).
     Edit,
+}
+
+/// How the assessor dimensions a door + sidelights placement. Two input styles
+/// that both produce a [`DoorSidelightsSpec`]; toggled in the floating box.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum DoorSidelightsMode {
+    /// Laser-friendly: measure the whole doorset (overall W × H), then the door
+    /// leaf within it (W × H). The leftover width becomes sidelight glass; the
+    /// strip above the door becomes a transom. Four shots and done.
+    #[default]
+    Overall,
+    /// Type each piece: door W/H, then each sidelight's width + sill, then the
+    /// transom height. The original, fully-explicit style.
+    Detailed,
+}
+
+/// The door+sidelights-specific inputs the floating box collects, tagged by the
+/// active [`DoorSidelightsMode`]. The door leaf's own width/height ride on
+/// [`AppController::place_opening`]'s `width_m`/`height_m` (both modes have a
+/// door), so this carries only the mode's extra measurements.
+#[derive(Debug, Clone, PartialEq)]
+pub enum DoorSidelightsPlacement {
+    /// `Overall` mode: the whole-doorset width/height plus the sidelight layout
+    /// and one optional sill for the present sidelight(s).
+    Overall {
+        overall_w: f32,
+        overall_h: f32,
+        layout: SidelightLayout,
+        sill: Option<f32>,
+        transom_semicircular: bool,
+    },
+    /// `Detailed` mode: each sidelight's width + sill and the transom height
+    /// (`None`/`0` → that piece is absent).
+    Detailed {
+        left: Option<f32>,
+        left_sill: Option<f32>,
+        right: Option<f32>,
+        right_sill: Option<f32>,
+        transom: Option<f32>,
+        transom_semicircular: bool,
+    },
 }
 
 /// The host a pending placement landed on (awaiting size + type entry).
@@ -69,8 +112,10 @@ pub struct OpeningFieldsPrompt {
     /// Offer the "fill whole surface" shortcut (plain Window on an empty wall) —
     /// no measurements, turns the face into a window wall.
     pub offer_full_surface: bool,
-    /// Show the "semicircular transom" checkbox (door+sidelights only).
-    pub offer_semicircular_transom: bool,
+    /// `Some(mode)` for the Door + sidelights tool — the box shows the
+    /// Overall/Detailed mode switch and binds/renders the mode's fields and
+    /// checkboxes. `None` for every other tool.
+    pub door_sidelights: Option<DoorSidelightsMode>,
     /// Show the window-type picker (glazing/frame/year/cert, or reuse an existing
     /// type) — for tools that place a window: Window / Multi-storey / Roof window
     /// and the glazed parts of Door + sidelights. A plain solid Door has none.
@@ -524,32 +569,45 @@ impl AppController {
     /// placement (width + height together; door+sidelights adds optional lights),
     /// or `None` when no placement is pending. Window type is defaulted, so no
     /// glazing/frame/year fields — the assessor refines those in Edit on surface.
-    pub fn opening_fields_prompt(&self) -> Option<OpeningFieldsPrompt> {
+    pub fn opening_fields_prompt(
+        &self,
+        ds_mode: DoorSidelightsMode,
+    ) -> Option<OpeningFieldsPrompt> {
         let p = self.pending_opening.as_ref()?;
-        let (w_label, h_label) = match p.tool {
-            OpeningToolKind::DoorSidelights => ("door width (m)", "door height (m)"),
-            _ => ("width (m)", "height (m)"),
-        };
         let req = |label: &str, hint| OpeningFieldSpec {
             label: label.to_string(),
             hint,
             required: true,
         };
-        let mut fields = vec![req(w_label, "e.g. 1.2"), req(h_label, "e.g. 1.4")];
-        if p.tool == OpeningToolKind::DoorSidelights {
-            let opt = |label: &str, hint| OpeningFieldSpec {
-                label: label.to_string(),
-                hint,
-                required: false,
-            };
-            // Order is the binding contract with the UI + `place_opening`:
-            // [door W, door H, left W, left sill, right W, right sill, transom H].
-            fields.push(opt("left light (m)", "0 = none"));
-            fields.push(opt("left sill (m)", "0 = floor"));
-            fields.push(opt("right light (m)", "0 = none"));
-            fields.push(opt("right sill (m)", "0 = floor"));
-            fields.push(opt("transom (m)", "0 = none"));
-        }
+        let opt = |label: &str, hint| OpeningFieldSpec {
+            label: label.to_string(),
+            hint,
+            required: false,
+        };
+        let is_ds = p.tool == OpeningToolKind::DoorSidelights;
+        // The field list is the positional binding contract with the UI +
+        // `place_opening`. Fields 0/1 are always the door leaf's W/H (in Overall
+        // mode the whole-doorset W/H come first, so the door leaf shifts to 2/3 —
+        // the UI rebinds by mode). See `DoorSidelightsPlacement`.
+        let fields = match (is_ds, ds_mode) {
+            (true, DoorSidelightsMode::Overall) => vec![
+                req("overall width (m)", "whole doorset"),
+                req("overall height (m)", "whole doorset"),
+                req("door width (m)", "the leaf"),
+                req("door height (m)", "the leaf"),
+                opt("sill (m)", "0 = floor"),
+            ],
+            (true, DoorSidelightsMode::Detailed) => vec![
+                req("door width (m)", "e.g. 0.9"),
+                req("door height (m)", "e.g. 2.0"),
+                opt("left light (m)", "0 = none"),
+                opt("left sill (m)", "0 = floor"),
+                opt("right light (m)", "0 = none"),
+                opt("right sill (m)", "0 = floor"),
+                opt("transom (m)", "0 = none"),
+            ],
+            (false, _) => vec![req("width (m)", "e.g. 1.2"), req("height (m)", "e.g. 1.4")],
+        };
         let offer_full_surface = p.tool == OpeningToolKind::Window
             && matches!(p.target, PendingOpeningTarget::Wall { .. })
             && self.pending_wall_empty();
@@ -564,7 +622,7 @@ impl AppController {
             title: format!("{} · size", tool_label(p.tool)),
             fields,
             offer_full_surface,
-            offer_semicircular_transom: p.tool == OpeningToolKind::DoorSidelights,
+            door_sidelights: is_ds.then_some(ds_mode),
             offer_window_type,
             seq: self.placement_seq,
         })
@@ -597,20 +655,16 @@ impl AppController {
     /// Place the pending opening from the floating box's measurements, with the
     /// window type the box's picker resolved to (`window_type` — an existing
     /// shared type or new attributes, deduped) and a DEFAULT 1 m sill (moved
-    /// later in the 2D elevation). The `left*` / `right*` / `transom*` args are
-    /// the optional door+sidelights extras (`0`/`None` → that piece is absent).
-    /// On a model error the box stays open with the error shown.
+    /// later in the 2D elevation). `width_m`/`height_m` are the opening (for
+    /// door+sidelights, the DOOR leaf); `door_sidelights` carries the mode's
+    /// extra measurements (sidelights + transom) and is `None` for every other
+    /// tool. On a model error the box stays open with the error shown.
     #[allow(clippy::too_many_arguments)]
     pub fn place_opening(
         &mut self,
         width_m: f32,
         height_m: f32,
-        left: Option<f32>,
-        left_sill: Option<f32>,
-        right: Option<f32>,
-        right_sill: Option<f32>,
-        transom: Option<f32>,
-        transom_semicircular: bool,
+        door_sidelights: Option<DoorSidelightsPlacement>,
         window_type: WindowTypeChoice,
         overshading: Overshading,
         photos: Vec<(std::path::PathBuf, PhotoQuality)>,
@@ -706,24 +760,56 @@ impl AppController {
                 PendingOpeningTarget::Wall {
                     wall_id, along_m, ..
                 },
-            ) => openings::compose_door_sidelights(
-                storey,
-                wall_id,
-                along_m,
-                DoorSidelightsSpec {
-                    door_width_m: width_m,
-                    door_height_m: height_m,
-                    left_sidelight_m: left,
-                    right_sidelight_m: right,
-                    left_sill_m: left_sill,
-                    right_sill_m: right_sill,
-                    transom_m: transom,
-                    transom_semicircular,
-                    window_type_id: type_id,
-                    door_type_name: "Door".to_string(),
-                },
-            )
-            .map(|_| ()),
+            ) => {
+                // Both modes produce a spec; Overall derives the sidelights/transom
+                // from the whole-doorset measurements, Detailed takes them directly.
+                let spec = match door_sidelights.unwrap_or(DoorSidelightsPlacement::Detailed {
+                    left: None,
+                    left_sill: None,
+                    right: None,
+                    right_sill: None,
+                    transom: None,
+                    transom_semicircular: false,
+                }) {
+                    DoorSidelightsPlacement::Overall {
+                        overall_w,
+                        overall_h,
+                        layout,
+                        sill,
+                        transom_semicircular,
+                    } => DoorSidelightsSpec::from_overall(
+                        overall_w,
+                        overall_h,
+                        width_m,
+                        height_m,
+                        layout,
+                        sill,
+                        transom_semicircular,
+                        type_id,
+                        "Door".to_string(),
+                    ),
+                    DoorSidelightsPlacement::Detailed {
+                        left,
+                        left_sill,
+                        right,
+                        right_sill,
+                        transom,
+                        transom_semicircular,
+                    } => DoorSidelightsSpec {
+                        door_width_m: width_m,
+                        door_height_m: height_m,
+                        left_sidelight_m: left,
+                        right_sidelight_m: right,
+                        left_sill_m: left_sill,
+                        right_sill_m: right_sill,
+                        transom_m: transom,
+                        transom_semicircular,
+                        window_type_id: type_id,
+                        door_type_name: "Door".to_string(),
+                    },
+                };
+                openings::compose_door_sidelights(storey, wall_id, along_m, spec).map(|_| ())
+            }
             _ => return Ok(()), // tool/target mismatch — nothing to place
         };
         if result.is_ok() {

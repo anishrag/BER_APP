@@ -28,12 +28,12 @@ use egui::Pos2;
 
 use crate::controller::app_controller::{
     ActiveObjectRoomView, AssessmentPhase, ChecklistItem, DimensionPromptUiData,
-    EditDragPromptUiData, ElevationView, ExistingGroup, ExistingWindowType, ExposureSelection,
-    FinalMode, NewStoreyPromptUiData, ObjectPinView, ObjectReviewView, OpeningFieldsPrompt,
-    OpeningToolKind, PartitionView, PhotoView, PositionPromptUiData, ReviewView, RiserView,
-    SelectMode, SnapTagView, StructureEdit, StructureReviewView, SurfaceKind,
-    VertexDropPromptUiData, WallExposureView, WallFinishField, WallInclusionPromptView,
-    WindowTypeChoice,
+    DoorSidelightsPlacement, EditDragPromptUiData, ElevationView, ExistingGroup,
+    ExistingWindowType, ExposureSelection, FinalMode, NewStoreyPromptUiData, ObjectPinView,
+    ObjectReviewView, OpeningFieldsPrompt, OpeningToolKind, PartitionView, PhotoView,
+    PositionPromptUiData, ReviewView, RiserView, SelectMode, SnapTagView, StructureEdit,
+    StructureReviewView, SurfaceKind, VertexDropPromptUiData, WallExposureView, WallFinishField,
+    WallInclusionPromptView, WindowTypeChoice,
 };
 use crate::ui::pages::events::UiEvent;
 use crate::ui::render::ViewParams;
@@ -438,17 +438,14 @@ pub enum SketchEvent {
         world_y: f64,
         tol: f64,
     },
-    /// Place the in-flight opening from the floating box's measurements (Width +
-    /// Height, plus the optional door+sidelights extras). Sill defaults to 1 m.
+    /// Place the in-flight opening from the floating box's measurements. `width_m`
+    /// / `height_m` are the opening (for door+sidelights, the DOOR leaf);
+    /// `door_sidelights` carries that tool's mode-specific extras (sidelights +
+    /// transom), `None` for every other tool. Sill defaults to 1 m.
     PlaceOpening {
         width_m: f32,
         height_m: f32,
-        left: Option<f32>,
-        left_sill: Option<f32>,
-        right: Option<f32>,
-        right_sill: Option<f32>,
-        transom: Option<f32>,
-        transom_semicircular: bool,
+        door_sidelights: Option<DoorSidelightsPlacement>,
         /// Which shared window type the placed window joins (an existing id, or a
         /// new attribute set find-or-created on Place). Ignored for a plain Door.
         window_type: WindowTypeChoice,
@@ -1156,9 +1153,9 @@ pub struct SketchView<'a> {
     /// matching `opening_fields_prompt` entry (Width, Height, then the lights).
     pub opening_width_input: &'a mut String,
     pub opening_height_input: &'a mut String,
-    /// Door+sidelights composer inputs (optional left/right sidelight + per-side
-    /// sill + transom height + the semicircular-transom toggle). A sidelight's
-    /// sill field is active only when its `*_has_sill` toggle is on.
+    /// Door+sidelights composer inputs. DETAILED mode: optional left/right
+    /// sidelight width + per-side sill + transom height. A sidelight's sill field
+    /// is active only when its `*_has_sill` toggle is on.
     pub sidelight_left_input: &'a mut String,
     pub sidelight_left_sill_input: &'a mut String,
     pub sidelight_left_has_sill: &'a mut bool,
@@ -1167,6 +1164,14 @@ pub struct SketchView<'a> {
     pub sidelight_right_has_sill: &'a mut bool,
     pub transom_input: &'a mut String,
     pub transom_semicircular: &'a mut bool,
+    /// OVERALL mode: the door-leaf W/H typed under the whole-doorset W/H (which
+    /// reuse `opening_width_input`/`opening_height_input`), plus which side(s) the
+    /// leftover width becomes sidelight glass. The single sill reuses
+    /// `sidelight_left_sill_input` (gated by `sidelight_left_has_sill`).
+    pub door_width_input: &'a mut String,
+    pub door_height_input: &'a mut String,
+    pub sidelight_left_present: &'a mut bool,
+    pub sidelight_right_present: &'a mut bool,
     /// Window-type picker state for the placement box. `wt_existing_id = Some`
     /// reuses an existing shared type by id; `None` defines a new one from the
     /// glazing/frame/year/cert fields below (deduped on Place). See

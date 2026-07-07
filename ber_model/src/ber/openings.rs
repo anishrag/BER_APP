@@ -148,6 +148,19 @@ pub fn opening_height(storey: &Storey, r: OpeningRef) -> f32 {
     }
 }
 
+/// Which side(s) the leftover width (`overall − door`) becomes sidelight glass
+/// in the "measure the whole doorset first" input mode (see
+/// [`DoorSidelightsSpec::from_overall`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SidelightLayout {
+    /// Split the leftover evenly into a left and a right sidelight.
+    Both,
+    /// All the leftover goes to a single left sidelight (no right).
+    LeftOnly,
+    /// All the leftover goes to a single right sidelight (no left).
+    RightOnly,
+}
+
 /// A structured door+sidelights assembly: a door panel with optional flanking
 /// sidelights and a transom (top light) over the door. The composer (`compose_
 /// door_sidelights`) lays these out and emits one `Door` + the side/top
@@ -171,6 +184,51 @@ pub struct DoorSidelightsSpec {
     pub transom_semicircular: bool,
     pub window_type_id: ItemId,
     pub door_type_name: String,
+}
+
+impl DoorSidelightsSpec {
+    /// Build a spec from a "measure the whole doorset first" reading: the OVERALL
+    /// width/height of the assembly and the DOOR leaf within it — the four laser
+    /// shots the assessor takes in the field. The leftover width
+    /// (`overall_w − door_w`) becomes sidelight glass per `layout`; the leftover
+    /// height (`overall_h − door_h`) becomes a full-width transom (absent when the
+    /// door reaches the top). `sill_m` (when `Some(>0)`) lifts the present
+    /// sidelight(s) off the floor — the composer clamps them to `[0, door_h]` and
+    /// shrinks their height so their top still meets the door top.
+    #[allow(clippy::too_many_arguments)]
+    pub fn from_overall(
+        overall_w: f32,
+        overall_h: f32,
+        door_w: f32,
+        door_h: f32,
+        layout: SidelightLayout,
+        sill_m: Option<f32>,
+        transom_semicircular: bool,
+        window_type_id: ItemId,
+        door_type_name: String,
+    ) -> Self {
+        let leftover = (overall_w - door_w).max(0.0);
+        let (left, right) = match layout {
+            SidelightLayout::Both => (Some(leftover / 2.0), Some(leftover / 2.0)),
+            SidelightLayout::LeftOnly => (Some(leftover), None),
+            SidelightLayout::RightOnly => (None, Some(leftover)),
+        };
+        // One sill for the whole assembly, applied to whichever sidelight(s) the
+        // layout actually places (`and` keeps it only on the present side).
+        let sill = sill_m.filter(|s| *s > 0.0);
+        DoorSidelightsSpec {
+            door_width_m: door_w,
+            door_height_m: door_h,
+            left_sidelight_m: left,
+            right_sidelight_m: right,
+            left_sill_m: left.and(sill),
+            right_sill_m: right.and(sill),
+            transom_m: Some(overall_h - door_h).filter(|d| *d > 0.0),
+            transom_semicircular,
+            window_type_id,
+            door_type_name,
+        }
+    }
 }
 
 /// The length of the wall with `wall_id`, or `None` if absent/degenerate.
@@ -1910,6 +1968,47 @@ mod tests {
         assert_eq!(s.windows.len(), 1, "one window left");
         assert_eq!(s.walls.regions[0].opes.windows.len(), 1, "opes pruned");
         assert!(!s.walls.regions[0].opes.windows.contains(&a));
+    }
+
+    #[test]
+    fn from_overall_derives_lights_transom_and_sill() {
+        // Both sides: leftover width splits evenly; the top strip (overall −
+        // door height) becomes a transom; no sill given → sidelights on the floor.
+        let s = DoorSidelightsSpec::from_overall(
+            2.1,
+            2.4,
+            0.9,
+            2.05,
+            SidelightLayout::Both,
+            None,
+            false,
+            ItemId::default(),
+            "front".into(),
+        );
+        assert!((s.left_sidelight_m.unwrap() - 0.6).abs() < 1e-4);
+        assert!((s.right_sidelight_m.unwrap() - 0.6).abs() < 1e-4);
+        assert!((s.transom_m.unwrap() - 0.35).abs() < 1e-4);
+        assert_eq!(s.left_sill_m, None);
+        assert_eq!(s.right_sill_m, None);
+
+        // Left only, with a sill and no transom (door reaches the top): all the
+        // leftover goes left, and the sill lands only on the present (left) side.
+        let s = DoorSidelightsSpec::from_overall(
+            2.1,
+            2.05,
+            0.9,
+            2.05,
+            SidelightLayout::LeftOnly,
+            Some(0.15),
+            false,
+            ItemId::default(),
+            "front".into(),
+        );
+        assert!((s.left_sidelight_m.unwrap() - 1.2).abs() < 1e-4);
+        assert_eq!(s.right_sidelight_m, None);
+        assert_eq!(s.left_sill_m, Some(0.15));
+        assert_eq!(s.right_sill_m, None);
+        assert_eq!(s.transom_m, None, "door reaches the top → no transom");
     }
 
     #[test]

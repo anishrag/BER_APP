@@ -198,7 +198,7 @@ pub struct SketchState {
     pub opening_height_input: String,
     /// Door+sidelights composer inputs (sidelight widths + per-side sills +
     /// transom height + the semicircular-transom toggle). A sidelight's sill
-    /// field is only active when its `*_has_sill` box is ticked.
+    /// field is only active when its `*_has_sill` box is ticked. (Detailed mode.)
     pub sidelight_left_input: String,
     pub sidelight_left_sill_input: String,
     pub sidelight_left_has_sill: bool,
@@ -207,6 +207,13 @@ pub struct SketchState {
     pub sidelight_right_has_sill: bool,
     pub transom_input: String,
     pub transom_semicircular: bool,
+    /// Door+sidelights OVERALL-mode inputs: the door-leaf W/H (typed under the
+    /// whole-doorset W/H, which reuse `opening_width_input`/`opening_height_input`)
+    /// and which side(s) carry a sidelight (both default on → even split).
+    pub door_width_input: String,
+    pub door_height_input: String,
+    pub sidelight_left_present: bool,
+    pub sidelight_right_present: bool,
     /// Window-type picker (the placement box): which shared type a placed window
     /// joins. `wt_existing_id = Some` reuses an existing type by id; `None`
     /// defines a new one from glazing/frame/year/cert (find-or-created on Place,
@@ -1055,7 +1062,9 @@ impl eframe::App for BerApp {
                                 delete_confirm_pending,
                             ) = {
                                 let c = self.app_controller.borrow();
-                                let prompt = c.opening_fields_prompt();
+                                let prompt = c.opening_fields_prompt(
+                                    self.sketch_state.categories.door_sidelights_mode,
+                                );
                                 // The window-type picker list is only needed while a
                                 // placement that offers it is in flight.
                                 let existing_types = match &prompt {
@@ -1505,6 +1514,14 @@ impl eframe::App for BerApp {
                                     .sidelight_right_has_sill,
                                 transom_input: &mut self.sketch_state.transom_input,
                                 transom_semicircular: &mut self.sketch_state.transom_semicircular,
+                                door_width_input: &mut self.sketch_state.door_width_input,
+                                door_height_input: &mut self.sketch_state.door_height_input,
+                                sidelight_left_present: &mut self
+                                    .sketch_state
+                                    .sidelight_left_present,
+                                sidelight_right_present: &mut self
+                                    .sketch_state
+                                    .sidelight_right_present,
                                 wt_existing_id: &mut self.sketch_state.wt_existing_id,
                                 wt_glazing: &mut self.sketch_state.wt_glazing,
                                 wt_frame: &mut self.sketch_state.wt_frame,
@@ -2141,12 +2158,7 @@ impl eframe::App for BerApp {
                                     SketchEvent::PlaceOpening {
                                         width_m,
                                         height_m,
-                                        left,
-                                        left_sill,
-                                        right,
-                                        right_sill,
-                                        transom,
-                                        transom_semicircular,
+                                        door_sidelights,
                                         window_type,
                                         overshading,
                                         photos,
@@ -2154,12 +2166,7 @@ impl eframe::App for BerApp {
                                         let _ = controller.borrow_mut().place_opening(
                                             width_m,
                                             height_m,
-                                            left,
-                                            left_sill,
-                                            right,
-                                            right_sill,
-                                            transom,
-                                            transom_semicircular,
+                                            door_sidelights,
                                             window_type,
                                             overshading,
                                             photos,

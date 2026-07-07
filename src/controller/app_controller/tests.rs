@@ -10196,7 +10196,9 @@ fn multi_field_window_places_with_default_sill() {
     c.openings_pointer_down(5.0, -0.2, 0.5);
     // The floating box asks for Width + Height (two fields, both required) — no
     // sill field.
-    let p = c.opening_fields_prompt().expect("placement staged");
+    let p = c
+        .opening_fields_prompt(DoorSidelightsMode::default())
+        .expect("placement staged");
     assert_eq!(p.fields.len(), 2, "width + height only (no sill)");
     assert!(p.fields.iter().all(|f| f.required));
     // Width + height entered together; sill is NOT supplied (defaults to 1 m).
@@ -10204,17 +10206,16 @@ fn multi_field_window_places_with_default_sill() {
         1.0,
         1.2,
         None,
-        None,
-        None,
-        None,
-        None,
-        false,
         WindowTypeChoice::default(),
         ber_model::ber::fenestration::Overshading::Average,
         Vec::new(),
     )
     .expect("window places");
-    assert!(c.opening_fields_prompt().is_none(), "placement finished");
+    assert!(
+        c.opening_fields_prompt(DoorSidelightsMode::default())
+            .is_none(),
+        "placement finished"
+    );
     c.materialize();
     let ber = &c.current_record.as_ref().unwrap().data;
     assert_eq!(ber.storeys[0].windows.len(), 1, "window placed");
@@ -10252,20 +10253,8 @@ fn window_type_picker_reuses_existing_and_adds_only_when_different() {
     let place = |c: &mut AppController, choice: WindowTypeChoice| {
         c.select_opening_tool(OpeningToolKind::Window);
         c.openings_pointer_down(5.0, -0.2, 0.5);
-        c.place_opening(
-            1.0,
-            1.2,
-            None,
-            None,
-            None,
-            None,
-            None,
-            false,
-            choice,
-            Overshading::Average,
-            Vec::new(),
-        )
-        .expect("window places");
+        c.place_opening(1.0, 1.2, None, choice, Overshading::Average, Vec::new())
+            .expect("window places");
         c.materialize();
     };
 
@@ -10394,11 +10383,6 @@ fn overshading_is_applied_per_window_at_placement() {
             1.0,
             1.2,
             None,
-            None,
-            None,
-            None,
-            None,
-            false,
             WindowTypeChoice::default(),
             overshading,
             Vec::new(),
@@ -10443,11 +10427,6 @@ fn window_photo_is_attached_at_placement() {
         1.0,
         1.2,
         None,
-        None,
-        None,
-        None,
-        None,
-        false,
         WindowTypeChoice::New {
             glazing: ber_model::ber::fenestration::Glazing::Double,
             frame: ber_model::ber::fenestration::Frame::WoodUPVC,
@@ -10502,11 +10481,6 @@ fn failed_placement_discards_copied_photos() {
         999.0,
         1.2,
         None,
-        None,
-        None,
-        None,
-        None,
-        false,
         WindowTypeChoice::New {
             glazing: Glazing::Double,
             frame: Frame::WoodUPVC,
@@ -10605,6 +10579,80 @@ fn place_door_sidelights_via_controller() {
     assert!(
         storey.windows.iter().all(|w| w.assembly_id == aid),
         "every glass member shares the assembly"
+    );
+}
+
+/// Door+sidelights, OVERALL input mode: the assessor measures the whole doorset
+/// (overall W × H) and the door leaf; the controller derives the sidelights +
+/// transom via `from_overall`. Left-only layout with a sill → one left sidelight
+/// (the leftover width, lifted by the sill) plus a full-width transom (the strip
+/// above the door).
+#[test]
+fn place_door_sidelights_overall_mode() {
+    use ber_model::ber::fenestration::{OpeningPlacement, Overshading};
+    use ber_model::ber::openings::SidelightLayout;
+    let mut c = dimensioned_square_controller();
+    c.materialize();
+    c.set_openings_mode(true);
+    c.set_openings_tool(OpeningToolKind::DoorSidelights);
+    c.openings_pointer_down(5.0, -0.2, 0.5);
+    // In Overall mode the box asks for overall W/H, door W/H, and one sill.
+    let p = c
+        .opening_fields_prompt(DoorSidelightsMode::Overall)
+        .expect("placement staged");
+    assert_eq!(p.fields.len(), 5, "overall W/H + door W/H + sill");
+    assert_eq!(p.door_sidelights, Some(DoorSidelightsMode::Overall));
+    // Overall 2.1 × 2.4, door 0.9 × 2.05, all leftover on the left, 0.15 m sill.
+    c.place_opening(
+        0.9,
+        2.05,
+        Some(DoorSidelightsPlacement::Overall {
+            overall_w: 2.1,
+            overall_h: 2.4,
+            layout: SidelightLayout::LeftOnly,
+            sill: Some(0.15),
+            transom_semicircular: false,
+        }),
+        WindowTypeChoice::default(),
+        Overshading::Average,
+        Vec::new(),
+    )
+    .expect("assembly places");
+    c.materialize();
+    let storey = &c.current_record.as_ref().unwrap().data.storeys[0];
+    assert_eq!(storey.doors.len(), 1, "one door panel");
+    assert_eq!(
+        storey.windows.len(),
+        2,
+        "left sidelight + transom (right omitted)"
+    );
+    // The sidelight takes the whole leftover width (2.1 − 0.9 = 1.2) and sits on
+    // the 0.15 m sill.
+    let side = storey
+        .windows
+        .iter()
+        .find(|w| (w.width_m - 1.2).abs() < 1e-3)
+        .expect("left sidelight");
+    match &side.placement {
+        Some(OpeningPlacement::Wall { sill_m, .. }) => {
+            assert!(
+                (sill_m - 0.15).abs() < 1e-3,
+                "single sill applied, got {sill_m}"
+            );
+        }
+        other => panic!("expected a wall placement, got {other:?}"),
+    }
+    // The transom is the strip above the door (2.4 − 2.05 = 0.35) spanning the
+    // whole doorset (door + sidelight = 2.1).
+    let transom = storey
+        .windows
+        .iter()
+        .find(|w| (w.width_m - 2.1).abs() < 1e-3)
+        .expect("transom");
+    assert!(
+        (transom.height_m - 0.35).abs() < 1e-3,
+        "transom height = overall − door, got {}",
+        transom.height_m
     );
 }
 
