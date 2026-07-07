@@ -1154,10 +1154,13 @@ fn area_side_label(axis: ParameterAxis, coord_m: f32, inside: (f32, f32)) -> Str
             }
         }
         ParameterAxis::Y => {
+            // Plan y grows DOWNWARD (screen convention), so a SMALLER y sits
+            // higher on the plan ("above" the ridge) and a larger y sits lower
+            // ("below"). (These were previously swapped.)
             if inside.1 < coord_m {
-                "Below the ridge"
-            } else {
                 "Above the ridge"
+            } else {
+                "Below the ridge"
             }
         }
     }
@@ -1291,6 +1294,29 @@ mod tests {
     };
     use domain::points::Point3f64;
     use manip_plan::FloorPlan;
+
+    /// The ridge slope-side labels match the plan's on-screen orientation: y
+    /// grows DOWNWARD, so a smaller y is "above" the ridge and a larger y is
+    /// "below" (these were previously inverted). X is left/right as usual.
+    #[test]
+    fn area_side_label_matches_screen_orientation() {
+        assert_eq!(
+            area_side_label(ParameterAxis::Y, 5.0, (2.0, 3.0)),
+            "Above the ridge"
+        );
+        assert_eq!(
+            area_side_label(ParameterAxis::Y, 5.0, (2.0, 8.0)),
+            "Below the ridge"
+        );
+        assert_eq!(
+            area_side_label(ParameterAxis::X, 5.0, (2.0, 3.0)),
+            "Left of the ridge"
+        );
+        assert_eq!(
+            area_side_label(ParameterAxis::X, 5.0, (8.0, 3.0)),
+            "Right of the ridge"
+        );
+    }
 
     fn p(x: f32, y: f32) -> Point2f32 {
         Point2f32::new(x, y)
