@@ -17007,3 +17007,55 @@ fn stray_redraw_clears_when_switching_mapping_tool() {
         "switching mapping tool discards the stray re-draw"
     );
 }
+
+/// n4 (field report): extensions added in Key Details AFTER the sketch was
+/// started must appear in the sketch's construction-phase picker. This locks the
+/// contract — the picker reads the phases LIVE from the record — which is why the
+/// reported symptom isn't reproducible here; the test guards against a future
+/// regression that would cache/stale the choices.
+#[test]
+fn extensions_added_after_sketch_appear_in_phase_picker() {
+    use ber_model::ber::common::{ConstructionPhase, ConstructionPhases};
+    let mut c = dimensioned_square_controller();
+    c.materialize(); // outline drawn + dimensioned — "started the sketch"
+
+    // The picker starts without the extensions.
+    let before: Vec<ConstructionPhase> = c
+        .construction_phase_choices()
+        .into_iter()
+        .map(|(p, _)| p)
+        .collect();
+    assert!(!before.contains(&ConstructionPhase::Extension1));
+
+    // Assessor goes back to Key Details and adds two extensions.
+    let mut phases = ConstructionPhases::default();
+    phases.set_year(ConstructionPhase::Original, 1970);
+    phases.set_year(ConstructionPhase::Extension1, 1979);
+    phases.set_year(ConstructionPhase::Extension2, 2022);
+    c.set_construction_phases(phases);
+
+    // Back in the sketch, the picker offers the new extensions (with years).
+    let choices = c.construction_phase_choices();
+    let phases_only: Vec<ConstructionPhase> = choices.iter().map(|(p, _)| p.clone()).collect();
+    assert!(
+        phases_only.contains(&ConstructionPhase::Original),
+        "Original present"
+    );
+    assert!(
+        phases_only.contains(&ConstructionPhase::Extension1),
+        "Extension 1 offered"
+    );
+    assert!(
+        phases_only.contains(&ConstructionPhase::Extension2),
+        "Extension 2 offered"
+    );
+    let ext1_label = &choices
+        .iter()
+        .find(|(p, _)| *p == ConstructionPhase::Extension1)
+        .unwrap()
+        .1;
+    assert!(
+        ext1_label.contains("1979"),
+        "label carries the year: {ext1_label}"
+    );
+}
