@@ -12,9 +12,11 @@ import android.bluetooth.BluetoothGattDescriptor;
 import android.bluetooth.BluetoothGattService;
 import android.bluetooth.BluetoothManager;
 import android.bluetooth.BluetoothProfile;
+import android.content.ContentValues;
 import android.content.Context;
 import android.content.Intent;
 import android.content.pm.PackageManager;
+import android.net.Uri;
 import android.graphics.Bitmap;
 import android.graphics.BitmapFactory;
 import android.media.MediaRecorder;
@@ -24,6 +26,7 @@ import android.net.NetworkCapabilities;
 import android.net.NetworkRequest;
 import android.os.Build;
 import android.os.Bundle;
+import android.provider.MediaStore;
 import android.util.Log;
 import android.view.WindowInsets;
 import android.view.WindowInsetsController;
@@ -31,6 +34,7 @@ import android.view.WindowManager;
 
 import java.io.File;
 import java.io.FileOutputStream;
+import java.io.InputStream;
 import java.io.OutputStream;
 import java.nio.ByteBuffer;
 import java.nio.ByteOrder;
@@ -101,6 +105,13 @@ public class MainActivity extends NativeActivity {
     }
 
     private static final int REQ_PHOTO = 1002;
+
+    // The MediaStore row the camera writes the full-size capture into, kept
+    // between launching the camera and its result. We copy it into a private
+    // cache file, hand that path to Rust, then delete the gallery row so the
+    // assessor's photo library isn't cluttered (scoped storage lets us delete
+    // our own insert).
+    private Uri pendingPhotoUri;
 
     // Implemented in Rust (libber_app.so) — see number_entry::bluetooth's
     // `Java_..._nativeOn*` exports (laser) and ui::widgets::photo's
@@ -251,6 +262,19 @@ public class MainActivity extends NativeActivity {
     // ── Camera ──────────────────────────────────────────────────────────────
 
     /**
+     * Called FROM Rust (ui::widgets::photo's JNI launch) when the assessor taps
+     * an "add photo" button. Launches the system camera; the captured photo's
+     * path returns asynchronously via {@link #nativeOnPhotoCaptured} (or
+     * {@link #nativeOnPhotoCancelled}). {@code quality} is the per-site default
+     * (0=Low … 3=Full) — the system camera owns flash/quality, so it's only
+     * logged for now (a future CameraX capture screen would honour it).
+     *
+     * We route the full-size image through a MediaStore output URI (no
+     * FileProvider/androidx needed): the camera writes there, we copy it into
+     * private cache, then delete the gallery row. Runs the launch on the UI
+     * thread — the call arrives on Rust's render thread.
+     */
+    /**
      * Toggle the keep-screen-on window flag from native code. The app sets it
      * while in use and clears it after ~10 min idle (see src/keep_awake.rs), so
      * the device's own screen timeout takes back over. App-scoped: a window flag,
@@ -267,22 +291,35 @@ public class MainActivity extends NativeActivity {
                 });
     }
 
-    /**
-     * Called FROM Rust (ui::widgets::photo's JNI launch) when the assessor taps
-     * an "add photo" button. Launches our own {@link CameraActivity} (CameraX +
-     * flash toggle); the captured photo's path returns asynchronously via
-     * {@link #onActivityResult} → {@link #nativeOnPhotoCaptured} (or
-     * {@link #nativeOnPhotoCancelled}). {@code quality} is the per-site default
-     * (0=Low … 3=Full), forwarded to the capture screen. Runs the launch on the
-     * UI thread — the call arrives on Rust's render thread.
-     */
     public void requestPhoto(int quality) {
         Log.i(TAG, "camera: requestPhoto(quality=" + quality + ")");
         runOnUiThread(
                 () -> {
                     try {
-                        Intent intent = new Intent(this, CameraActivity.class);
-                        intent.putExtra(CameraActivity.EXTRA_QUALITY, quality);
+                        ContentValues values = new ContentValues();
+                        values.put(
+                                MediaStore.Images.Media.DISPLAY_NAME,
+                                "berapp_" + System.currentTimeMillis() + ".jpg");
+                        values.put(MediaStore.Images.Media.MIME_TYPE, "image/jpeg");
+                        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                            values.put(
+                                    MediaStore.Images.Media.RELATIVE_PATH, "Pictures/BERApp");
+                        }
+                        pendingPhotoUri =
+                                getContentResolver()
+                                        .insert(
+                                                MediaStore.Images.Media.EXTERNAL_CONTENT_URI,
+                                                values);
+                        if (pendingPhotoUri == null) {
+                            Log.e(TAG, "camera: could not create MediaStore output");
+                            nativeOnPhotoCancelled();
+                            return;
+                        }
+                        Intent intent = new Intent(MediaStore.ACTION_IMAGE_CAPTURE);
+                        intent.putExtra(MediaStore.EXTRA_OUTPUT, pendingPhotoUri);
+                        intent.addFlags(
+                                Intent.FLAG_GRANT_WRITE_URI_PERMISSION
+                                        | Intent.FLAG_GRANT_READ_URI_PERMISSION);
                         startActivityForResult(intent, REQ_PHOTO);
                     } catch (Exception e) {
                         Log.e(TAG, "camera: launch failed", e);
@@ -297,16 +334,31 @@ public class MainActivity extends NativeActivity {
         if (requestCode != REQ_PHOTO) {
             return;
         }
-        String path = data != null ? data.getStringExtra(CameraActivity.EXTRA_PATH) : null;
-        if (resultCode != RESULT_OK || path == null) {
+        Uri uri = pendingPhotoUri;
+        pendingPhotoUri = null;
+        if (resultCode != RESULT_OK || uri == null) {
             Log.i(TAG, "camera: cancelled (result " + resultCode + ")");
+            if (uri != null) {
+                getContentResolver().delete(uri, null, null);
+            }
             nativeOnPhotoCancelled();
             return;
         }
-        // CameraActivity already saved the JPEG into our private cache; just
-        // write the fast thumbnail the Rust side probes for and hand over.
+        // Copy the captured image into private cache, then drop the gallery row.
         try {
-            File out = new File(path);
+            File dir = new File(getCacheDir(), "camera");
+            dir.mkdirs();
+            File out = new File(dir, "capture_" + System.currentTimeMillis() + ".jpg");
+            try (InputStream in = getContentResolver().openInputStream(uri);
+                    OutputStream os = new FileOutputStream(out)) {
+                byte[] buf = new byte[64 * 1024];
+                int n;
+                while ((n = in.read(buf)) > 0) {
+                    os.write(buf, 0, n);
+                }
+            }
+            getContentResolver().delete(uri, null, null);
+            Log.i(TAG, "camera: saved to " + out.getAbsolutePath());
             // Write a fast subsampled thumbnail next to the capture, at the
             // "<path>.thumb.jpg" convention the Rust side probes for (ingest_photo).
             // Best-effort: a failure just means the interim preview is the full
@@ -314,7 +366,8 @@ public class MainActivity extends NativeActivity {
             writeFastThumbnail(out);
             nativeOnPhotoCaptured(out.getAbsolutePath());
         } catch (Exception e) {
-            Log.e(TAG, "camera: failed to finalize capture", e);
+            Log.e(TAG, "camera: failed to copy capture", e);
+            getContentResolver().delete(uri, null, null);
             nativeOnPhotoCancelled();
         }
     }
