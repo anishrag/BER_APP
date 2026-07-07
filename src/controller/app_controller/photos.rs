@@ -109,6 +109,69 @@ impl AppController {
         self.push_history_snapshot(undo_snap);
     }
 
+    /// Rotate `side`'s external photo a quarter turn (`clockwise`, else
+    /// anti-clockwise) so the assessor can set which way is up / match it to the
+    /// plan. Bakes the turn into a NEW stored file (fresh id) — like
+    /// [`annotate_external_photo`](Self::annotate_external_photo) — so every site
+    /// that shows the photo (review, annotator, report) sees it rotated and undo
+    /// (which restores the prior entry, still on disk) reverts it. Regenerates
+    /// the thumbnail. No-op with no record, no photo for the side, or on
+    /// decode/store failure (the prior photo then stands).
+    pub fn rotate_external_photo(&mut self, side: ExternalSide, clockwise: bool) {
+        let Some((src_path, description)) = self.current_record.as_ref().and_then(|r| {
+            r.data
+                .photos
+                .iter()
+                .find(|p| p.side == Some(side))
+                .map(|p| (p.file_path.clone(), p.description.clone()))
+        }) else {
+            return;
+        };
+        if std::fs::create_dir_all(&self.photos_dir).is_err() {
+            return;
+        }
+        // Decode the stored (already-upright) image and turn it a quarter.
+        let Ok(reader) = image::ImageReader::open(&src_path).and_then(|r| r.with_guessed_format())
+        else {
+            return;
+        };
+        let Ok(img) = reader.decode() else {
+            return;
+        };
+        let rotated = if clockwise {
+            img.rotate90()
+        } else {
+            img.rotate270()
+        };
+        // Absolute dir so the stored path loads as `file://` regardless of cwd
+        // (as `ingest_photo` / `annotate_external_photo`).
+        let dir =
+            std::fs::canonicalize(&self.photos_dir).unwrap_or_else(|_| self.photos_dir.clone());
+        let id = ber_model::ber::common::ItemId::default();
+        let dest = dir.join(format!("{}.jpg", id.0));
+        if rotated.to_rgb8().save(&dest).is_err() {
+            return;
+        }
+        let thumb_dest = dir.join(format!("{}_thumb.jpg", id.0));
+        let thumbnail_path = Self::write_thumbnail(&dest, &thumb_dest)
+            .then(|| thumb_dest.to_string_lossy().into_owned());
+        let photo = ber_model::ber::common::Photo {
+            id,
+            file_path: dest.to_string_lossy().into_owned(),
+            thumbnail_path,
+            description,
+            side: Some(side),
+        };
+        let undo_snap = self.current_history_snapshot();
+        {
+            let photos = &mut self.current_record.as_mut().unwrap().data.photos;
+            photos.retain(|p| p.side != Some(side));
+            photos.push(photo);
+        }
+        let _ = self.mark_dirty();
+        self.push_history_snapshot(undo_snap);
+    }
+
     /// Remove the external photo for `side`, if one is attached. Snapshots for
     /// undo like [`add_external_photo`](Self::add_external_photo).
     pub fn remove_external_photo(&mut self, side: ExternalSide) {

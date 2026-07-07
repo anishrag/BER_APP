@@ -1179,7 +1179,11 @@ fn area_side_label(axis: ParameterAxis, coord_m: f32, inside: (f32, f32)) -> Str
 ///   - exactly ONE such slope-able neighbour → resolve to it deterministically
 ///     (a mono-pitch drawn on the joint of an already-raised area slopes the
 ///     LOWER neighbour, regardless of which side the line was drawn on);
-///   - ≥ 2 slope-able neighbours with no clear drawn side → [`RidgeSlopeSide::Ambiguous`].
+///   - ≥ 2 slope-able neighbours → [`RidgeSlopeSide::Ambiguous`], ALWAYS asking
+///     which side rises to the ridge. The drawn side is NOT used to auto-resolve
+///     here: "the side the line was drawn over" does not reliably match the
+///     assessor's intent ("which side rises to the ridge"), so a genuine two-way
+///     choice is always put to the user.
 ///
 /// This keeps the claim/contain walks and the centroid/side math in the model
 /// layer; the shell only matches on the result.
@@ -1234,20 +1238,18 @@ pub fn resolve_ridge_slope_side(
                 mid,
             )));
         }
-        return match drawn_inside(candidates) {
-            Some(ri) => {
-                RidgeSlopeSide::Resolved(Some(area_inside_point(&storey.ceilings.regions[ri], mid)))
-            }
-            None => RidgeSlopeSide::Ambiguous(
-                candidates
-                    .iter()
-                    .map(|&ri| {
-                        let inside = area_inside_point(&storey.ceilings.regions[ri], mid);
-                        (area_side_label(axis, coord_m, inside), inside)
-                    })
-                    .collect(),
-            ),
-        };
+        // Two or more slope-able neighbours: a genuine two-way choice. Never
+        // guess from the drawn side (it doesn't reliably match "which side rises
+        // to the ridge") — ALWAYS ask.
+        return RidgeSlopeSide::Ambiguous(
+            candidates
+                .iter()
+                .map(|&ri| {
+                    let inside = area_inside_point(&storey.ceilings.regions[ri], mid);
+                    (area_side_label(axis, coord_m, inside), inside)
+                })
+                .collect(),
+        );
     }
 
     // Strict-interior ridge (single claimant): a full gable — the drawn side's
@@ -1408,6 +1410,50 @@ mod tests {
             RidgeSlopeSide::Resolved(None) => panic!("expected a lower-area hint, got no hint"),
             RidgeSlopeSide::Ambiguous(_) => {
                 panic!("expected a deterministic resolve to the lower area, got Ambiguous")
+            }
+        }
+    }
+
+    /// A ridge on the joint between TWO areas the ridge can actually slope (both
+    /// flat heights differ from the ridge height) is a genuine two-way choice:
+    /// it must ALWAYS ask, never auto-resolve from the drawn side. (Regression
+    /// for the surveyor's report: the ridge silently sloped the side the stroke
+    /// was drawn over — the HIGHER area, a barely-visible rise — instead of the
+    /// LOWER area the assessor meant to raise up to the ridge.)
+    #[test]
+    fn boundary_ridge_between_two_slopeable_areas_always_asks() {
+        let cid = Default::default();
+        let sq = |x0: f64, y0: f64, x1: f64, y1: f64| {
+            vec![
+                Point2f64::new(x0, y0),
+                Point2f64::new(x1, y0),
+                Point2f64::new(x1, y1),
+                Point2f64::new(x0, y1),
+            ]
+        };
+        // Lower area y0..2 at 2.0; upper area y2..5 at 2.4; shared joint y = 2.
+        // Ridge height 3.0 is above BOTH, so BOTH are slope-able → two candidates.
+        let mut ceilings =
+            CeilingRegions::default_for_footprint(vec![sq(0.0, 0.0, 6.0, 2.0)], 2.0, cid);
+        ceilings.regions.extend(
+            CeilingRegions::default_for_footprint(vec![sq(0.0, 2.0, 6.0, 5.0)], 2.4, cid).regions,
+        );
+        let storey = Storey {
+            ceilings,
+            ceiling_height_m: Some(2.0),
+            ..Storey::default()
+        };
+
+        let a = Point2f64::new(0.0, 2.0);
+        let b = Point2f64::new(6.0, 2.0);
+        // Drawn clearly on the UPPER side (drawn_cross = 2.1): must NOT auto-pick
+        // it — a genuine two-way choice always asks.
+        match resolve_ridge_slope_side(&storey, a, b, Some(2.1), ParameterAxis::Y, 2.0, 3.0) {
+            RidgeSlopeSide::Ambiguous(opts) => {
+                assert_eq!(opts.len(), 2, "both sides offered, got {}", opts.len())
+            }
+            RidgeSlopeSide::Resolved(_) => {
+                panic!("expected Ambiguous (always ask), got a silent Resolved")
             }
         }
     }

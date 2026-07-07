@@ -42,7 +42,7 @@ pub fn photo_button(
     enabled: bool,
     config: PhotoConfig,
 ) -> Option<PathBuf> {
-    photo_button_with_hint(ui, label, "Add photo", enabled, config)
+    photo_button_with_hint(ui, label, "Add photo", enabled, config, false)
 }
 
 /// TEMPORARY (dual hi/lo capture, 2026-07): every photo-attach site renders TWO
@@ -60,14 +60,19 @@ pub fn photo_button_pair(
     label: &str,
     enabled: bool,
     hi_quality: PhotoQuality,
+    auto_open: bool,
 ) -> Option<(PathBuf, PhotoQuality)> {
-    let hi = photo_button(
+    let hi = photo_button_with_hint(
         ui,
         label,
+        "Add photo",
         enabled,
         PhotoConfig {
             default_quality: hi_quality,
         },
+        // Auto-launch the HI capture only (a required photo shouldn't force the
+        // low-res tier). The caller latches this to one frame per selection.
+        auto_open,
     )
     .map(|p| (p, hi_quality));
     let lo = photo_button_with_hint(
@@ -78,6 +83,7 @@ pub fn photo_button_pair(
         PhotoConfig {
             default_quality: PhotoQuality::Low,
         },
+        false,
     )
     .map(|p| (p, PhotoQuality::Low));
     // At most one button can deliver a path on a given frame (desktop dialogs
@@ -93,11 +99,15 @@ fn photo_button_with_hint(
     hint: &str,
     enabled: bool,
     config: PhotoConfig,
+    auto_open: bool,
 ) -> Option<PathBuf> {
     let resp = ui
         .add_enabled(enabled, egui::Button::new(label))
         .on_hover_text(hint);
-    let clicked = resp.clicked();
+    // `auto_open` fires the capture as if the button were clicked — the caller
+    // uses it for a mandatory photo, latched to a single frame per selection so
+    // it never re-launches after a cancel.
+    let clicked = resp.clicked() || (enabled && auto_open);
 
     // Android delivers asynchronously: pick up a finished capture on whatever
     // frame it lands (the camera ran as a separate activity in the meantime).

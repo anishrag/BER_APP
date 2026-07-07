@@ -22,19 +22,14 @@
     <uses-permission android:name="android.permission.INTERNET" />
     <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
 
-    <!-- In-app photos: launch the system camera (ACTION_IMAGE_CAPTURE). We don't
-         declare the CAMERA permission — the camera app holds it; we just hand
-         off via an intent. The capture is written to a MediaStore output URI, so
-         no storage permission / FileProvider is needed. The <queries> entry is
-         required on API 30+ (package visibility) to resolve the camera app. -->
+    <!-- In-app photos: CameraActivity captures via CameraX (with an app-owned
+         flash toggle) instead of handing off to the system camera app, so we
+         hold the CAMERA permission ourselves (requested at runtime in
+         CameraActivity). The capture is written to our private cache dir, so no
+         storage permission / FileProvider is needed. -->
+    <uses-permission android:name="android.permission.CAMERA" />
     <uses-feature android:name="android.hardware.camera.any"
         android:required="false" />
-
-    <queries>
-        <intent>
-            <action android:name="android.media.action.IMAGE_CAPTURE" />
-        </intent>
-    </queries>
 
     <application
         android:label="BER App">
@@ -58,6 +53,16 @@
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
         </activity>
+
+        <!-- In-app CameraX capture screen, launched for-result by MainActivity's
+             requestPhoto(). Not exported (internal to the app). Locked to the
+             sensor orientation like the main activity. -->
+        <activity
+            android:name=".CameraActivity"
+            android:exported="false"
+            android:theme="@android:style/Theme.DeviceDefault.NoActionBar.Fullscreen"
+            android:screenOrientation="sensor"
+            android:configChanges="orientation|keyboardHidden|keyboard|screenSize|screenLayout|uiMode" />
     </application>
 
 </manifest>

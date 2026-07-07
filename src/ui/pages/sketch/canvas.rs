@@ -2782,6 +2782,7 @@ fn external_photos_button<F: FnMut(UiEvent)>(
                                                     action,
                                                     true,
                                                     crate::ui::widgets::PhotoQuality::High,
+                                                    false,
                                                 )
                                             {
                                                 on_event(UiEvent::Sketch(
@@ -2803,6 +2804,34 @@ fn external_photos_button<F: FnMut(UiEvent)>(
                                                     on_event(UiEvent::Sketch(
                                                         SketchEvent::BeginAnnotateExternalPhoto {
                                                             side: *side,
+                                                        },
+                                                    ));
+                                                }
+                                                // Quarter-turn rotate so the shot
+                                                // can be set upright / matched to
+                                                // the plan (⟲ anti-clockwise, ⟳
+                                                // clockwise).
+                                                if ui
+                                                    .button("⟲")
+                                                    .on_hover_text("Rotate left")
+                                                    .clicked()
+                                                {
+                                                    on_event(UiEvent::Sketch(
+                                                        SketchEvent::RotateExternalPhoto {
+                                                            side: *side,
+                                                            clockwise: false,
+                                                        },
+                                                    ));
+                                                }
+                                                if ui
+                                                    .button("⟳")
+                                                    .on_hover_text("Rotate right")
+                                                    .clicked()
+                                                {
+                                                    on_event(UiEvent::Sketch(
+                                                        SketchEvent::RotateExternalPhoto {
+                                                            side: *side,
+                                                            clockwise: true,
                                                         },
                                                     ));
                                                 }

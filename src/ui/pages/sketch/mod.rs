@@ -890,6 +890,13 @@ pub enum SketchEvent {
     RemoveExternalPhoto {
         side: ExternalSide,
     },
+    /// Rotate `side`'s external photo a quarter turn (`clockwise` or anti-) so
+    /// the assessor can set which way is up. Handled by the controller, which
+    /// bakes it into a new stored file.
+    RotateExternalPhoto {
+        side: ExternalSide,
+        clockwise: bool,
+    },
     /// Open the paintbrush ANNOTATION takeover for `side`'s external photo
     /// (the "🖌" affordance wherever external photos are shown). Handled by the
     /// app shell, not the controller: it decodes the stored image into the
@@ -1260,6 +1267,13 @@ pub struct SketchView<'a> {
     pub object_note_input: &'a mut String,
     pub object_other_name: &'a mut String,
     pub object_pending_photos: &'a mut Vec<(std::path::PathBuf, crate::ui::widgets::PhotoQuality)>,
+    /// Object kinds already recorded house-wide — the panel combines this with
+    /// each kind's `photo_policy` to decide whether the next instance needs a
+    /// photo (drives the auto-camera + OK gate). From `recorded_object_kinds`.
+    pub object_recorded_kinds: &'a [ObjectKind],
+    /// The kind the camera was already auto-opened for (one-shot latch — see
+    /// [`crate::ui::app::SketchState::object_auto_photo_for`]).
+    pub object_auto_photo_for: &'a mut Option<ObjectKind>,
     /// The open external-photo ANNOTATION session (paintbrush over a photo), or
     /// `None`. Lives on [`crate::ui::app::SketchState`]; opened by
     /// [`SketchEvent::BeginAnnotateExternalPhoto`], drawn as a takeover window

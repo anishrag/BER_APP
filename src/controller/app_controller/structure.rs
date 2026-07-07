@@ -1239,13 +1239,25 @@ impl AppController {
         max_dim: u32,
         jpeg_quality: u8,
     ) -> bool {
-        use image::ImageEncoder;
+        use image::{ImageDecoder, ImageEncoder};
         let Ok(reader) = image::ImageReader::open(src).and_then(|r| r.with_guessed_format()) else {
             return false;
         };
-        let Ok(img) = reader.decode() else {
+        // Read the camera's EXIF orientation and BAKE it into the pixels: the
+        // `image` crate and egui both ignore the EXIF tag, so without this a
+        // portrait capture (stored landscape + an "orientation" tag) displays
+        // sideways. `orientation()` is `NoTransforms` when there's no tag (e.g.
+        // desktop-picked files), making this a no-op there.
+        let Ok(mut decoder) = reader.into_decoder() else {
             return false;
         };
+        let orientation = decoder
+            .orientation()
+            .unwrap_or(image::metadata::Orientation::NoTransforms);
+        let Ok(mut img) = image::DynamicImage::from_decoder(decoder) else {
+            return false;
+        };
+        img.apply_orientation(orientation);
         // `thumbnail` only ever shrinks (keeps aspect ratio); flatten to RGB so
         // the JPEG encoder always accepts the buffer (no alpha channel).
         let scaled = img.thumbnail(max_dim, max_dim).to_rgb8();

@@ -176,6 +176,40 @@ pub fn derive_inter_storey(ber: &mut Ber) {
             ber.storeys[i].walls.regions = out;
         }
     }
+
+    // ── Buried InterStorey wall bands carry NO fabric ─────────────────────
+    // A wall the pass above SPLITS copies the parent's (already-stamped)
+    // construction onto BOTH pieces. The buried InterStorey band is out of
+    // structure scope — never offered for tagging in Phase 2 — so it must not
+    // keep the exposed band's build-up it was never assessed for. Reset it to
+    // the default UNASSIGNED construction (keeping only its derived phase, like
+    // a natively inter-storey wall). Idempotent, and — running on every
+    // materialize — it also heals records an earlier version left stamped.
+    let bands: Vec<(usize, usize, ItemId)> = ber
+        .storeys
+        .iter()
+        .enumerate()
+        .flat_map(|(si, s)| {
+            s.walls
+                .regions
+                .iter()
+                .enumerate()
+                .filter(|(_, r)| r.exposure == WallExposure::InterStorey)
+                .map(move |(ri, r)| (si, ri, r.construction_id))
+        })
+        .collect();
+    for (si, ri, cid) in bands {
+        let phase = ber
+            .wall_construction(cid)
+            .map(|c| c.base.construction_phase.clone())
+            .unwrap_or_default();
+        let reset = ber.ensure_wall_construction(
+            WallConstructionType::default(),
+            ConstructionMakeup::default(),
+            phase,
+        );
+        ber.storeys[si].walls.regions[ri].construction_id = reset;
+    }
 }
 
 // ── Neighbour footprint (plan) ─────────────────────────────────────────────
@@ -921,6 +955,61 @@ mod tests {
             (max_sill - (2.4 - 1.3 - 0.5)).abs() < 1e-6,
             "sill clamps under the wall top, got {max_sill}"
         );
+    }
+
+    /// r05 field-report follow-up: the buried InterStorey band must not INHERIT
+    /// the fabric of the wall it was split from. Assign a real construction to
+    /// the step-line wall, derive, and the lower (InterStorey) band resets to
+    /// the default/unassigned construction while the exposed remainder keeps it
+    /// — so the out-of-scope band reads "not applicable", never carrying a
+    /// build-up it was never assessed for.
+    #[test]
+    fn buried_inter_storey_wall_band_drops_the_exposed_fabric() {
+        use crate::ber::structural::{ConstructionMakeup, WallConstructionType};
+        let mut ber = riser_fixture();
+
+        // Tag the whole (pre-split) step-line wall with a real construction.
+        let cid = ber.ensure_wall_construction(
+            WallConstructionType::ConcreteHollowBlocks,
+            ConstructionMakeup::Default,
+            ConstructionPhase::default(),
+        );
+        {
+            let pre = walls_on_x(&ber.storeys[1], 4.0);
+            assert_eq!(pre.len(), 1, "one step-line wall before the split");
+            let id = pre[0].id;
+            ber.storeys[1]
+                .walls
+                .regions
+                .iter_mut()
+                .find(|w| w.id == id)
+                .unwrap()
+                .construction_id = cid;
+        }
+
+        derive_inter_storey(&mut ber);
+
+        let bands = walls_on_x(&ber.storeys[1], 4.0);
+        assert_eq!(bands.len(), 2, "split into buried band + exposed remainder");
+        for w in &bands {
+            let ty = ber
+                .wall_construction(w.construction_id)
+                .map(|c| c.construction_type)
+                .unwrap_or_default();
+            if w.exposure == WallExposure::InterStorey {
+                assert_eq!(
+                    ty,
+                    WallConstructionType::default(),
+                    "buried band drops the exposed fabric (reset to unassigned)"
+                );
+            } else {
+                assert_eq!(
+                    ty,
+                    WallConstructionType::ConcreteHollowBlocks,
+                    "the exposed remainder keeps the assigned construction"
+                );
+            }
+        }
     }
 
     // ── §6 test 4: exact idempotence, incl. a serde round-trip ───────────

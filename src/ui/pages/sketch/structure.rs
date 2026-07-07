@@ -778,6 +778,7 @@ pub(crate) fn photos_view_ui<F: FnMut(UiEvent)>(
             "➕  Add photo",
             true,
             crate::ui::widgets::PhotoQuality::High,
+            false,
         ) {
             on_event(UiEvent::Sketch(SketchEvent::AddGroupPhoto {
                 group: group_index,

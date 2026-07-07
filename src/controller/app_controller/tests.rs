@@ -2054,6 +2054,63 @@ fn ingest_photo_upgrades_provisional_in_background() {
     let _ = std::fs::remove_dir_all(&tmp);
 }
 
+/// Rotating an external photo a quarter turn swaps its stored dimensions (the
+/// manual "which way is up" control), writes a fresh file, and undo reverts to
+/// the original orientation (the prior file is kept on disk).
+#[test]
+fn rotate_external_photo_swaps_dimensions_and_undo_reverts() {
+    use image::GenericImageView;
+
+    let mut c = dimensioned_square_controller();
+    let tmp = std::env::temp_dir().join(format!("ber_rotate_{}", ItemId::default().0));
+    std::fs::create_dir_all(&tmp).unwrap();
+    c.set_photos_dir(tmp.clone());
+
+    // A landscape 800×600 photo stored as the first external side.
+    let side = ber_model::ber::common::ExternalSide::ALL[0];
+    let src = tmp.join("front.jpg");
+    image::RgbImage::from_pixel(800, 600, image::Rgb([10, 20, 30]))
+        .save(&src)
+        .unwrap();
+    c.current_record
+        .as_mut()
+        .unwrap()
+        .data
+        .photos
+        .push(ber_model::ber::common::Photo {
+            id: ItemId::default(),
+            file_path: src.to_string_lossy().into_owned(),
+            thumbnail_path: None,
+            description: None,
+            side: Some(side),
+        });
+
+    let stored_dims = |c: &AppController| -> (u32, u32) {
+        let p = c
+            .current_record
+            .as_ref()
+            .unwrap()
+            .data
+            .photos
+            .iter()
+            .find(|p| p.side == Some(side))
+            .unwrap();
+        image::open(&p.file_path).unwrap().dimensions()
+    };
+
+    c.rotate_external_photo(side, true);
+    assert_eq!(stored_dims(&c), (600, 800), "a quarter turn swaps w/h");
+
+    c.undo().expect("undo");
+    assert_eq!(
+        stored_dims(&c),
+        (800, 600),
+        "undo reverts to the original orientation"
+    );
+
+    let _ = std::fs::remove_dir_all(&tmp);
+}
+
 /// The compact-tier recompression unit (the Android path — desktop now stores
 /// originals verbatim, so this tests `recompress` directly to stay
 /// platform-independent): a large source downscales to within the tier's pixel
@@ -14065,9 +14122,27 @@ fn objects_capture_pins_counts_and_undo() {
     assert_eq!(c.active_object_room(), Some(room), "near tap reopens it");
     assert_eq!(c.object_rooms_view().len(), 1, "no new pin");
 
-    // Tapping FAR drops a second pin; undo removes it.
+    // A tap while the box is OPEN just dismisses it — no stray pin (an outside
+    // tap used to spawn a hotspot). The room stays (it has objects).
+    assert_eq!(
+        c.active_object_room(),
+        Some(room),
+        "box open before dismiss"
+    );
     c.objects_pointer_down(8.0, 8.0, 0.5);
-    assert_eq!(c.object_rooms_view().len(), 2, "a far tap adds a pin");
+    assert!(
+        c.active_object_room().is_none(),
+        "outside tap dismissed the box"
+    );
+    assert_eq!(c.object_rooms_view().len(), 1, "…and dropped NO new pin");
+
+    // With the box closed, a far tap now drops a second pin; undo removes it.
+    c.objects_pointer_down(8.0, 8.0, 0.5);
+    assert_eq!(
+        c.object_rooms_view().len(),
+        2,
+        "far tap (box closed) adds a pin"
+    );
     c.undo().expect("undo");
     assert_eq!(c.object_rooms_view().len(), 1, "undo removed the new pin");
 }
@@ -14133,7 +14208,17 @@ fn objects_3d_placement_stores_surface_point_and_pitch() {
     assert_eq!(c.active_object_room(), Some(room), "near tap reopens it");
     assert_eq!(c.object_rooms_view().len(), 1, "no new pin");
 
-    // A far 3D tap drops a fresh pin (no pitch on a wall pick); undo removes it.
+    // A 3D tap while the box is OPEN dismisses it — no stray pin. The room
+    // stays (it has an object).
+    c.objects_pointer_down_3d(0, 8.0, 8.0, 1.2, None, 0.5);
+    assert!(
+        c.active_object_room().is_none(),
+        "outside tap dismissed the box"
+    );
+    assert_eq!(c.object_rooms_view().len(), 1, "…and dropped NO new pin");
+
+    // Box closed: a far 3D tap drops a fresh pin (no pitch on a wall pick);
+    // undo removes it.
     c.objects_pointer_down_3d(0, 8.0, 8.0, 1.2, None, 0.5);
     assert_eq!(c.object_rooms_view().len(), 2);
     assert_eq!(
@@ -14143,6 +14228,88 @@ fn objects_3d_placement_stores_surface_point_and_pitch() {
     );
     c.undo().expect("undo");
     assert_eq!(c.object_rooms_view().len(), 1, "undo removed the 3D pin");
+}
+
+/// Object photo requirement: always-required kinds need a photo every time,
+/// first-instance kinds only until one of that kind is recorded house-wide, and
+/// optional kinds never. Drives the panel's auto-camera + OK gate.
+#[test]
+fn object_photo_requirement_by_policy_and_first_instance() {
+    use ber_model::ber::objects::{BoilerFuel, LightKind, ObjectKind};
+    let mut c = dimensioned_square_controller();
+    c.materialize();
+
+    // Always-required: a boiler needs a photo regardless of how many exist.
+    let boiler = ObjectKind::Boiler(BoilerFuel::Gas);
+    assert!(
+        c.object_photo_required(&boiler),
+        "boiler always requires a photo"
+    );
+
+    // First-instance: the first LED requires one; a later LED doesn't.
+    let led = ObjectKind::Light(LightKind::Led);
+    assert!(c.object_photo_required(&led), "first LED requires a photo");
+    c.objects_pointer_down(2.0, 2.0, 0.5);
+    c.add_object(led.clone(), 1, None, Vec::new());
+    assert!(!c.object_photo_required(&led), "a later LED is optional");
+    // A DIFFERENT first-instance kind is still on its own first instance.
+    assert!(
+        c.object_photo_required(&ObjectKind::Light(LightKind::Halogen)),
+        "first halogen still required (per-kind, not per-category)"
+    );
+
+    // Optional: free-text Other never requires one.
+    assert!(!c.object_photo_required(&ObjectKind::Other("meter".into())));
+
+    // Always-required stays required even after one is recorded.
+    c.add_object(boiler.clone(), 1, None, Vec::new());
+    assert!(
+        c.object_photo_required(&boiler),
+        "always-required stays required"
+    );
+}
+
+/// Two field reports on stray object pins: (1) a pin the assessor drops but
+/// never adds anything to is an accidental tap — closing it PRUNES the empty
+/// "0" hotspot rather than leaving it on the plan; (2) a canvas tap while a box
+/// is OPEN dismisses the box instead of spawning a fresh pin.
+#[test]
+fn empty_object_pin_pruned_and_open_box_dismisses_on_tap() {
+    use ber_model::ber::objects::{BoilerFuel, ObjectKind};
+    let mut c = dimensioned_square_controller();
+    c.materialize();
+
+    // Drop a pin, add nothing, close → the empty pin is gone.
+    c.objects_pointer_down(2.0, 2.0, 0.5);
+    assert_eq!(
+        c.object_rooms_view().len(),
+        1,
+        "the open pin shows while active"
+    );
+    c.close_object_room();
+    assert!(c.active_object_room().is_none());
+    assert_eq!(c.object_rooms_view().len(), 0, "empty pin pruned on close");
+
+    // Drop a pin, add an object, close → it stays.
+    c.objects_pointer_down(2.0, 2.0, 0.5);
+    c.add_object(ObjectKind::Boiler(BoilerFuel::Gas), 1, None, Vec::new());
+    c.close_object_room();
+    assert_eq!(c.object_rooms_view().len(), 1, "a pin with an object stays");
+
+    // Re-open it, then tap empty space: the tap dismisses the box (no new pin),
+    // and the object-bearing pin is kept.
+    c.objects_pointer_down(2.0, 2.0, 0.5);
+    assert!(c.active_object_room().is_some(), "re-opened the pin");
+    c.objects_pointer_down(9.0, 9.0, 0.5);
+    assert!(
+        c.active_object_room().is_none(),
+        "outside tap dismissed the box"
+    );
+    assert_eq!(
+        c.object_rooms_view().len(),
+        1,
+        "no stray pin from the dismiss"
+    );
 }
 
 /// The Objects review sums counts house-wide (flat list) and locates the
@@ -14184,7 +14351,7 @@ fn object_review_totals_and_hotspots() {
     assert_eq!(
         rv.totals
             .iter()
-            .find(|t| t.label.contains("Boiler"))
+            .find(|t| t.label.contains("Gas boiler"))
             .unwrap()
             .count,
         1
@@ -14277,8 +14444,8 @@ fn object_review_absence_confirmation() {
     let first = rv.absent_prompt.expect("an empty category to confirm");
     assert_ne!(
         first,
-        ObjectCategory::Boiler,
-        "boiler has one — not prompted"
+        ObjectCategory::HeatingSystem,
+        "heating system has one — not prompted"
     );
     let remaining0 = rv.absent_remaining;
 
@@ -16536,4 +16703,66 @@ fn window_placed_before_a_step_down_overhang_moves_down_off_the_band() {
         panic!("wall placement present");
     };
     assert_eq!(s2, sill_m, "clear once — never moved again");
+}
+
+/// r05 (field report): on the second floor, the "Remaining"/"All" select tool
+/// stayed LIT across a storey switch but selected nothing, so "Edit attributes"
+/// silently did nothing and the assessor had to re-tap the tool ("did phase 2
+/// for walls three times for the second floor … it looked like it was selecting
+/// them all"). A storey switch clears the outgoing storey's selection ids
+/// (`reset_transient_editing_state`); a lit SEED tool must re-seed for the
+/// storey we land on so the button never lies.
+#[test]
+fn seed_select_tool_reseeds_across_storey_switch() {
+    let mut c = dimensioned_square_controller(); // storey 0
+    c.set_default_ceiling_height(2.4).unwrap();
+    c.add_storey().unwrap();
+    finalise_current_storey_as_offset_square(&mut c, 6.0, 6.0, 6.0); // upper @ (6,6)
+    c.set_default_ceiling_height(2.4).unwrap();
+    c.materialize();
+
+    // The current storey's in-scope wall ids (re-derivation mints fresh region
+    // ids each materialize, so we compare against the LIVE set, not stale ids).
+    let live_walls = |c: &AppController, idx: usize| -> HashSet<ItemId> {
+        c.current_record.as_ref().unwrap().data.storeys[idx]
+            .surface_ids(SurfaceKind::Walls)
+            .into_iter()
+            .collect()
+    };
+
+    // On the upper storey (idx 1); engage the global "All" select tool.
+    set_only_kind(&mut c, SurfaceKind::Walls);
+    assert_eq!(c.current_storey_idx, Some(1));
+    c.set_structure_select_mode(Some(SelectMode::All));
+    assert!(
+        !c.structure_selected.is_empty(),
+        "All seeds the upper walls"
+    );
+    assert_eq!(c.structure_selected, live_walls(&c, 1));
+
+    // Switch to the ground storey: the tool stays lit and re-seeds for storey 0
+    // (its own walls — not left empty, not the outgoing storey's stale ids).
+    c.set_current_storey(Some(0)).unwrap();
+    assert_eq!(
+        c.structure_select(),
+        Some(SelectMode::All),
+        "tool stays lit"
+    );
+    assert!(
+        !c.structure_selected.is_empty(),
+        "the lit tool re-seeds the ground storey's walls (not left empty)"
+    );
+    assert_eq!(
+        c.structure_selected,
+        live_walls(&c, 0),
+        "re-seed picks THIS storey's live walls"
+    );
+
+    // Back to the upper storey: re-seeds to the upper storey's live walls.
+    c.set_current_storey(Some(1)).unwrap();
+    assert_eq!(
+        c.structure_selected,
+        live_walls(&c, 1),
+        "returning re-seeds the upper storey's walls — the tool never lies"
+    );
 }

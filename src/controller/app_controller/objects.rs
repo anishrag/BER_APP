@@ -86,6 +86,14 @@ impl AppController {
     /// storey — the all-storeys 2D tab resolves the target storey from the cell
     /// the tap landed in, so there's no single "current" storey to key off.
     pub fn objects_pointer_down_on(&mut self, idx: usize, wx: f64, wy: f64, tol: f64) {
+        // A canvas tap while a room box is already OPEN just DISMISSES it — a
+        // tap outside the box is most likely a mis-tap, so don't spawn a stray
+        // pin there (nor jump to another). Close it (pruning an untouched pin);
+        // the NEXT tap opens or creates.
+        if self.active_object_room.is_some() {
+            self.close_object_room();
+            return;
+        }
         // Open the nearest existing pin within tolerance.
         if let Some(record) = self.current_record.as_ref() {
             if let Some(storey) = record.data.storeys.get(idx) {
@@ -135,6 +143,12 @@ impl AppController {
         pitch_deg: Option<f32>,
         tol: f64,
     ) {
+        // A tap while a room box is OPEN dismisses it (see the 2D handler) —
+        // don't drop a stray pin on a mis-tap; the next tap opens or creates.
+        if self.active_object_room.is_some() {
+            self.close_object_room();
+            return;
+        }
         // Open the nearest existing pin on that storey within tolerance.
         if let Some(record) = self.current_record.as_ref() {
             if let Some(storey) = record.data.storeys.get(storey_idx) {
@@ -172,9 +186,34 @@ impl AppController {
         self.push_history_snapshot(snap);
     }
 
-    /// Close the open room (the panel's "Done").
+    /// Close the open room (the panel's "Done" — or a tap that dismisses it).
+    /// A pin that never received an object is an accidental / dismissed tap, so
+    /// it's dropped rather than left on the plan as an empty "0" hotspot.
     pub fn close_object_room(&mut self) {
-        self.active_object_room = None;
+        if let Some(id) = self.active_object_room.take() {
+            self.prune_object_room_if_empty(id);
+        }
+    }
+
+    /// Remove object room `room_id` iff it holds no objects. Searches every
+    /// storey (a 3D-placed pin can live off the current storey). Persists the
+    /// removal; deliberately NOT snapshotted — placing then dismissing a bare
+    /// pin isn't a meaningful edit to undo.
+    fn prune_object_room_if_empty(&mut self, room_id: ItemId) {
+        let Some(record) = self.current_record.as_mut() else {
+            return;
+        };
+        let mut removed = false;
+        for storey in &mut record.data.storeys {
+            let before = storey.object_rooms.len();
+            storey
+                .object_rooms
+                .retain(|r| r.id != room_id || !r.objects.is_empty());
+            removed |= storey.object_rooms.len() != before;
+        }
+        if removed {
+            let _ = self.mark_dirty();
+        }
     }
 
     /// Rename the open room.
@@ -334,6 +373,38 @@ impl AppController {
             categories_present: room.categories_present(),
             surface_pitch_deg: room.surface_pitch_deg,
         })
+    }
+
+    /// The distinct object KINDS already recorded house-wide — the objects
+    /// panel combines this with each kind's [`ObjectKind::photo_policy`] to
+    /// decide whether the next instance needs a photo (drives the auto-camera
+    /// and the OK gate). A first-instance kind whose kind is in here is
+    /// satisfied; an always-required kind isn't, regardless.
+    pub fn recorded_object_kinds(&self) -> Vec<ObjectKind> {
+        let mut kinds: Vec<ObjectKind> = Vec::new();
+        if let Some(record) = self.current_record.as_ref() {
+            for room in record
+                .data
+                .storeys
+                .iter()
+                .flat_map(|s| s.object_rooms.iter())
+            {
+                for o in &room.objects {
+                    if !kinds.contains(&o.kind) {
+                        kinds.push(o.kind.clone());
+                    }
+                }
+            }
+        }
+        kinds
+    }
+
+    /// Whether a photo is mandatory for the NEXT instance of `kind` (its
+    /// [`ObjectKind::photo_policy`] combined with whether one is already
+    /// recorded house-wide). The objects panel uses this to auto-open the
+    /// camera and gate OK.
+    pub fn object_photo_required(&self, kind: &ObjectKind) -> bool {
+        kind.photo_required(self.recorded_object_kinds().contains(kind))
     }
 
     /// Mutable borrow of a room by id, searching every storey (a pin placed

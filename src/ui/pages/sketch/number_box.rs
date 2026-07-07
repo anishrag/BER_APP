@@ -1027,7 +1027,9 @@ fn window_photo_picker(
             );
         }
         // TEMPORARY dual hi/lo capture (see `photo_button_pair`).
-        if let Some(captured) = photo_button_pair(ui, "📷 Add photo", true, PhotoQuality::High) {
+        if let Some(captured) =
+            photo_button_pair(ui, "📷 Add photo", true, PhotoQuality::High, false)
+        {
             pending.push(captured);
         }
     });

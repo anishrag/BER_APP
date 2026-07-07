@@ -24,30 +24,32 @@ pub enum ObjectCategory {
     Fan,
     Light,
     Radiator,
-    Boiler,
+    /// The heating plant + controls, grouped together: boiler (by fuel),
+    /// programmer, heating-zone evidence, thermostat, weather compensation.
+    /// (Thermostat + weather compensation used to be their own top-level
+    /// categories; they're subtypes here now — see [`ObjectCategory::subtypes`].)
+    HeatingSystem,
     WaterCylinder,
-    Thermostat,
     Chimney,
     AtticHatch,
-    WeatherCompensation,
     WaterFixture,
+    SolarPanel,
     Other,
 }
 
 impl ObjectCategory {
     /// The categories in picker order.
-    pub const ALL: [ObjectCategory; 12] = [
+    pub const ALL: [ObjectCategory; 11] = [
         ObjectCategory::Vent,
         ObjectCategory::Fan,
         ObjectCategory::Light,
         ObjectCategory::Radiator,
-        ObjectCategory::Boiler,
+        ObjectCategory::HeatingSystem,
         ObjectCategory::WaterCylinder,
-        ObjectCategory::Thermostat,
         ObjectCategory::Chimney,
         ObjectCategory::AtticHatch,
-        ObjectCategory::WeatherCompensation,
         ObjectCategory::WaterFixture,
+        ObjectCategory::SolarPanel,
         ObjectCategory::Other,
     ];
 
@@ -57,13 +59,12 @@ impl ObjectCategory {
             ObjectCategory::Fan => "Fan",
             ObjectCategory::Light => "Light",
             ObjectCategory::Radiator => "Radiator",
-            ObjectCategory::Boiler => "Boiler",
+            ObjectCategory::HeatingSystem => "Heating system",
             ObjectCategory::WaterCylinder => "Water cylinder",
-            ObjectCategory::Thermostat => "Thermostat",
             ObjectCategory::Chimney => "Chimney",
             ObjectCategory::AtticHatch => "Attic hatch",
-            ObjectCategory::WeatherCompensation => "Weather compensation",
             ObjectCategory::WaterFixture => "Shower / bath",
+            ObjectCategory::SolarPanel => "Solar panel",
             ObjectCategory::Other => "Other",
         }
     }
@@ -73,10 +74,15 @@ impl ObjectCategory {
     /// category maps to one kind with no sub-choice.
     pub fn subtypes(self) -> Vec<ObjectKind> {
         match self {
+            ObjectCategory::Vent => vec![
+                ObjectKind::Vent(VentKind::Open),
+                ObjectKind::Vent(VentKind::Closable),
+            ],
             ObjectCategory::Fan => vec![
                 ObjectKind::Fan(FanType::Extract),
                 ObjectKind::Fan(FanType::Supply),
                 ObjectKind::Fan(FanType::Decentralized),
+                ObjectKind::Fan(FanType::Central),
             ],
             ObjectCategory::Light => vec![
                 ObjectKind::Light(LightKind::Led),
@@ -87,10 +93,14 @@ impl ObjectCategory {
                 ObjectKind::Radiator(RadiatorTrv::WithTrv),
                 ObjectKind::Radiator(RadiatorTrv::WithoutTrv),
             ],
-            ObjectCategory::Boiler => vec![
+            ObjectCategory::HeatingSystem => vec![
                 ObjectKind::Boiler(BoilerFuel::Oil),
                 ObjectKind::Boiler(BoilerFuel::Gas),
                 ObjectKind::Boiler(BoilerFuel::HeatPump),
+                ObjectKind::Programmer,
+                ObjectKind::HeatingZones,
+                ObjectKind::Thermostat,
+                ObjectKind::WeatherCompensation,
             ],
             ObjectCategory::WaterCylinder => vec![
                 ObjectKind::WaterCylinder(CylinderKind::Standard),
@@ -110,11 +120,12 @@ impl ObjectCategory {
                 ObjectKind::WaterFixture(WaterFixtureKind::Bath),
                 ObjectKind::WaterFixture(WaterFixtureKind::ElectricShower),
             ],
+            ObjectCategory::SolarPanel => vec![
+                ObjectKind::SolarPanel(SolarPanelKind::Photovoltaic),
+                ObjectKind::SolarPanel(SolarPanelKind::SolarThermal),
+            ],
             // Singletons (no sub-choice).
-            ObjectCategory::Vent
-            | ObjectCategory::Thermostat
-            | ObjectCategory::WeatherCompensation
-            | ObjectCategory::Other => Vec::new(),
+            ObjectCategory::Other => Vec::new(),
         }
     }
 
@@ -122,9 +133,6 @@ impl ObjectCategory {
     /// categories that require a subtype choice. `Other` starts with empty text.
     pub fn singleton(self) -> Option<ObjectKind> {
         match self {
-            ObjectCategory::Vent => Some(ObjectKind::Vent),
-            ObjectCategory::Thermostat => Some(ObjectKind::Thermostat),
-            ObjectCategory::WeatherCompensation => Some(ObjectKind::WeatherCompensation),
             ObjectCategory::Other => Some(ObjectKind::Other(String::new())),
             _ => None,
         }
@@ -132,10 +140,20 @@ impl ObjectCategory {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum VentKind {
+    /// A permanently-open (fixed) vent.
+    Open,
+    /// A vent that can be closed (hit-and-miss / shuttered).
+    Closable,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum FanType {
     Extract,
     Supply,
     Decentralized,
+    /// A central ventilation unit (e.g. MVHR / MEV serving the whole dwelling).
+    Central,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -184,11 +202,19 @@ pub enum WaterFixtureKind {
     ElectricShower,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum SolarPanelKind {
+    /// Photovoltaic (electricity).
+    Photovoltaic,
+    /// Solar thermal (hot water).
+    SolarThermal,
+}
+
 /// A concrete recorded object kind: a category plus its subtype (where one
 /// applies). The single source of an object's identity + label.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ObjectKind {
-    Vent,
+    Vent(VentKind),
     Fan(FanType),
     Light(LightKind),
     Radiator(RadiatorTrv),
@@ -199,23 +225,86 @@ pub enum ObjectKind {
     AtticHatch(AtticHatchSeal),
     WeatherCompensation,
     WaterFixture(WaterFixtureKind),
+    SolarPanel(SolarPanelKind),
+    /// Heating PROGRAMMER / time control (a singleton — the presence + a photo
+    /// is the record). Groups under [`ObjectCategory::HeatingSystem`].
+    Programmer,
+    /// Evidence that the heating is ZONED (e.g. a photo of the zone valves /
+    /// wiring centre). Groups under [`ObjectCategory::HeatingSystem`].
+    HeatingZones,
     Other(String),
 }
 
+/// Whether recording an object of a given kind MUST include a photo.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PhotoPolicy {
+    /// A photo is mandatory on EVERY instance recorded.
+    AlwaysRequired,
+    /// A photo is mandatory only on the FIRST instance of this kind recorded
+    /// house-wide; later instances are optional.
+    FirstInstanceRequired,
+    /// A photo is never required.
+    Optional,
+}
+
 impl ObjectKind {
+    /// Whether a photo is required for this kind, and how often (see
+    /// [`PhotoPolicy`]). The picker's auto-camera opens for the kinds that
+    /// require one (every time, or just the first house-wide instance); the
+    /// panel's OK gate enforces it. Set from the assessor's per-item spec.
+    pub fn photo_policy(&self) -> PhotoPolicy {
+        use PhotoPolicy::*;
+        match self {
+            // First house-wide instance only: representative evidence is enough.
+            ObjectKind::Vent(_)
+            | ObjectKind::Fan(FanType::Extract | FanType::Supply)
+            | ObjectKind::Light(_)
+            | ObjectKind::Radiator(_)
+            | ObjectKind::AtticHatch(_) => FirstInstanceRequired,
+            // Free-text "Other" never forces a photo.
+            ObjectKind::Other(_) => Optional,
+            // Everything else must be photographed every time.
+            ObjectKind::Fan(FanType::Decentralized | FanType::Central)
+            | ObjectKind::Boiler(_)
+            | ObjectKind::Programmer
+            | ObjectKind::HeatingZones
+            | ObjectKind::Thermostat
+            | ObjectKind::WeatherCompensation
+            | ObjectKind::WaterCylinder(_)
+            | ObjectKind::Chimney(_)
+            | ObjectKind::WaterFixture(_)
+            | ObjectKind::SolarPanel(_) => AlwaysRequired,
+        }
+    }
+
+    /// Whether a photo is mandatory for an instance of this kind recorded NOW,
+    /// given whether one of this kind is ALREADY recorded (house-wide) — the
+    /// only context the first-instance policy needs.
+    pub fn photo_required(&self, already_recorded: bool) -> bool {
+        match self.photo_policy() {
+            PhotoPolicy::AlwaysRequired => true,
+            PhotoPolicy::FirstInstanceRequired => !already_recorded,
+            PhotoPolicy::Optional => false,
+        }
+    }
+
     pub fn category(&self) -> ObjectCategory {
         match self {
-            ObjectKind::Vent => ObjectCategory::Vent,
+            ObjectKind::Vent(_) => ObjectCategory::Vent,
             ObjectKind::Fan(_) => ObjectCategory::Fan,
             ObjectKind::Light(_) => ObjectCategory::Light,
             ObjectKind::Radiator(_) => ObjectCategory::Radiator,
-            ObjectKind::Boiler(_) => ObjectCategory::Boiler,
+            // Boiler + the heating controls all group under Heating system.
+            ObjectKind::Boiler(_)
+            | ObjectKind::Thermostat
+            | ObjectKind::WeatherCompensation
+            | ObjectKind::Programmer
+            | ObjectKind::HeatingZones => ObjectCategory::HeatingSystem,
             ObjectKind::WaterCylinder(_) => ObjectCategory::WaterCylinder,
-            ObjectKind::Thermostat => ObjectCategory::Thermostat,
             ObjectKind::Chimney(_) => ObjectCategory::Chimney,
             ObjectKind::AtticHatch(_) => ObjectCategory::AtticHatch,
-            ObjectKind::WeatherCompensation => ObjectCategory::WeatherCompensation,
             ObjectKind::WaterFixture(_) => ObjectCategory::WaterFixture,
+            ObjectKind::SolarPanel(_) => ObjectCategory::SolarPanel,
             ObjectKind::Other(_) => ObjectCategory::Other,
         }
     }
@@ -224,17 +313,24 @@ impl ObjectKind {
     /// kinds with no subtype. Used to label the subtype buttons + the review.
     pub fn subtype_label(&self) -> &str {
         match self {
+            ObjectKind::Vent(VentKind::Open) => "Open",
+            ObjectKind::Vent(VentKind::Closable) => "Closable",
             ObjectKind::Fan(FanType::Extract) => "Extract",
             ObjectKind::Fan(FanType::Supply) => "Supply",
             ObjectKind::Fan(FanType::Decentralized) => "Decentralized",
+            ObjectKind::Fan(FanType::Central) => "Central unit",
             ObjectKind::Light(LightKind::Led) => "LED",
             ObjectKind::Light(LightKind::Halogen) => "Halogen",
             ObjectKind::Light(LightKind::Incandescent) => "Incandescent",
             ObjectKind::Radiator(RadiatorTrv::WithTrv) => "With TRV",
             ObjectKind::Radiator(RadiatorTrv::WithoutTrv) => "Without TRV",
-            ObjectKind::Boiler(BoilerFuel::Oil) => "Oil",
-            ObjectKind::Boiler(BoilerFuel::Gas) => "Gas",
+            ObjectKind::Boiler(BoilerFuel::Oil) => "Oil boiler",
+            ObjectKind::Boiler(BoilerFuel::Gas) => "Gas boiler",
             ObjectKind::Boiler(BoilerFuel::HeatPump) => "Heat pump",
+            ObjectKind::Programmer => "Programmer",
+            ObjectKind::HeatingZones => "Heating zones",
+            ObjectKind::Thermostat => "Thermostat",
+            ObjectKind::WeatherCompensation => "Weather compensation",
             ObjectKind::WaterCylinder(CylinderKind::Standard) => "Standard",
             ObjectKind::WaterCylinder(CylinderKind::InternalHeatPump) => "Internal heat pump",
             ObjectKind::Chimney(ChimneyState::Open) => "Open",
@@ -245,19 +341,26 @@ impl ObjectKind {
             ObjectKind::WaterFixture(WaterFixtureKind::Shower) => "Shower",
             ObjectKind::WaterFixture(WaterFixtureKind::Bath) => "Bath",
             ObjectKind::WaterFixture(WaterFixtureKind::ElectricShower) => "Electric shower",
+            ObjectKind::SolarPanel(SolarPanelKind::Photovoltaic) => "Photovoltaic (PV)",
+            ObjectKind::SolarPanel(SolarPanelKind::SolarThermal) => "Solar water heating",
             ObjectKind::Other(s) => s,
-            _ => "",
         }
     }
 
     /// Full display label: category, plus the subtype in parentheses when there
-    /// is one (e.g. "Fan (Extract)", "Boiler (Gas)", "Vent").
+    /// is one (e.g. "Fan (Extract)", "Vent (Open)"); the heating kinds and
+    /// "Other" read as their specific label instead.
     pub fn label(&self) -> String {
         let cat = self.category().label();
         match self {
-            ObjectKind::Vent | ObjectKind::Thermostat | ObjectKind::WeatherCompensation => {
-                cat.to_string()
-            }
+            // The heating kinds are specific enough on their own — "Oil boiler",
+            // "Programmer", "Thermostat" — so don't wrap them as
+            // "Heating system (…)"; show the subtype label directly.
+            ObjectKind::Boiler(_)
+            | ObjectKind::Thermostat
+            | ObjectKind::WeatherCompensation
+            | ObjectKind::Programmer
+            | ObjectKind::HeatingZones => self.subtype_label().to_string(),
             ObjectKind::Other(s) if !s.trim().is_empty() => s.clone(),
             ObjectKind::Other(_) => "Other".to_string(),
             _ => format!("{cat} ({})", self.subtype_label()),
@@ -353,5 +456,67 @@ impl ObjectRoom {
             }
         }
         cats
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The heating plant + controls are ONE picker section — "Heating system" —
+    /// whose subtypes are the boiler (by fuel), programmer, zone evidence,
+    /// thermostat and weather compensation. (r07 + r09 field reports.)
+    #[test]
+    fn heating_system_groups_boiler_and_controls() {
+        // The category exists, is offered, and reads "Heating system".
+        assert!(ObjectCategory::ALL.contains(&ObjectCategory::HeatingSystem));
+        assert_eq!(ObjectCategory::HeatingSystem.label(), "Heating system");
+
+        // Its subtypes are exactly the boiler fuels + the four controls, in order.
+        let labels: Vec<String> = ObjectCategory::HeatingSystem
+            .subtypes()
+            .iter()
+            .map(|k| k.subtype_label().to_string())
+            .collect();
+        assert_eq!(
+            labels,
+            [
+                "Oil boiler",
+                "Gas boiler",
+                "Heat pump",
+                "Programmer",
+                "Heating zones",
+                "Thermostat",
+                "Weather compensation",
+            ]
+        );
+
+        // Every heating kind resolves to the one category…
+        for k in ObjectCategory::HeatingSystem.subtypes() {
+            assert_eq!(k.category(), ObjectCategory::HeatingSystem, "{k:?}");
+        }
+        // …and its display label is the specific thing, not "Heating system (…)".
+        assert_eq!(ObjectKind::Boiler(BoilerFuel::Oil).label(), "Oil boiler");
+        assert_eq!(ObjectKind::Programmer.label(), "Programmer");
+        assert_eq!(ObjectKind::Thermostat.label(), "Thermostat");
+        assert_eq!(
+            ObjectKind::WeatherCompensation.label(),
+            "Weather compensation"
+        );
+    }
+
+    /// Back-compat: records saved before the regroup — a boiler, a lone
+    /// thermostat, a weather-compensation object — still deserialize and now
+    /// land under Heating system.
+    #[test]
+    fn legacy_heating_object_kinds_still_load_and_regroup() {
+        for json in [
+            r#"{"Boiler":"Gas"}"#,
+            r#""Thermostat""#,
+            r#""WeatherCompensation""#,
+        ] {
+            let kind: ObjectKind = serde_json::from_str(json).expect("legacy kind loads");
+            assert_eq!(kind.category(), ObjectCategory::HeatingSystem, "{json}");
+        }
     }
 }

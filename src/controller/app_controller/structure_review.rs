@@ -134,6 +134,7 @@ impl AppController {
                 detail_lines: construction_lines(
                     c.construction_type.label(),
                     &c.base,
+                    &data.construction_phases,
                     ids.len(),
                     "Walls",
                 ),
@@ -154,6 +155,7 @@ impl AppController {
                 detail_lines: construction_lines(
                     c.construction_type.label(),
                     &c.base,
+                    &data.construction_phases,
                     ids.len(),
                     "Floors",
                 ),
@@ -174,6 +176,7 @@ impl AppController {
                 detail_lines: construction_lines(
                     c.construction_type.label(),
                     &c.base,
+                    &data.construction_phases,
                     ids.len(),
                     "Ceilings",
                 ),
@@ -301,6 +304,7 @@ fn group_title(name: &Option<String>, type_label: &str) -> String {
 fn construction_lines(
     type_label: &str,
     base: &ber_model::ber::structural::ConstructionBase,
+    phases: &ber_model::ber::common::ConstructionPhases,
     surface_count: usize,
     surface_word: &str,
 ) -> Vec<(String, String)> {
@@ -310,7 +314,12 @@ fn construction_lines(
             "Make-up".to_string(),
             makeup_label(&base.construction_makeup),
         ),
-        ("Phase".to_string(), base.construction_phase.default_name()),
+        // Phase name WITH its year (e.g. "Extension 2 (2010)") — the year is
+        // what dates the fabric, so the review shows it alongside the phase.
+        (
+            "Phase".to_string(),
+            phases.display_label(&base.construction_phase),
+        ),
     ];
     if let Some(n) = base.name.as_ref().filter(|s| !s.trim().is_empty()) {
         lines.push(("Name".to_string(), n.clone()));

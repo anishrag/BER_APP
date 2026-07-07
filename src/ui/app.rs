@@ -243,6 +243,11 @@ pub struct SketchState {
     pub object_note_input: String,
     pub object_other_name: String,
     pub object_pending_photos: Vec<(std::path::PathBuf, crate::ui::widgets::PhotoQuality)>,
+    /// The object kind we've already AUTO-opened the camera for this selection
+    /// (a mandatory-photo kind opens the camera once). Latches the auto-open to
+    /// one shot per selected kind so a cancel doesn't re-launch it; reset when
+    /// the selection changes or the object is added. See `objects_panel`.
+    pub object_auto_photo_for: Option<ber_model::ber::objects::ObjectKind>,
     /// The open external-photo ANNOTATION session (paintbrush over a stored
     /// photo), or `None`. Opened by `BeginAnnotateExternalPhoto`; drawn as a
     /// takeover window over the Sketch canvas; closes itself on Save/Cancel.
@@ -692,15 +697,20 @@ impl eframe::App for BerApp {
                     .current_record_name()
                     .unwrap_or_default();
                 // Chrome intents land in locals (the body closure borrows self).
+                // `exit_clicked` is a Cell because BOTH the chrome closure and
+                // the body closure (via the sketch page's "Save & exit BER" in
+                // the summary modal) raise it — two `&mut` captures of the same
+                // local across one `workspace_chrome` call would not borrow-check,
+                // so they share it immutably and it's consumed after the call.
                 let mut next_page: Option<Page> = None;
-                let mut exit_clicked = back_pressed;
+                let exit_clicked = std::cell::Cell::new(back_pressed);
                 workspace_chrome(
                     ctx,
                     section,
                     &ber_name,
                     |event| match event {
                         UiEvent::NavigateTo(p) => next_page = Some(p),
-                        UiEvent::ExitBer => exit_clicked = true,
+                        UiEvent::ExitBer => exit_clicked.set(true),
                         _ => {}
                     },
                     |ui| match section {
@@ -1220,6 +1230,11 @@ impl eframe::App for BerApp {
                                     (Vec::new(), Vec::new(), None, None, false)
                                 }
                             };
+                            // Object kinds already recorded house-wide — lets the
+                            // objects panel decide each kind's photo requirement
+                            // (auto-camera + OK gate).
+                            let object_recorded_kinds =
+                                self.app_controller.borrow().recorded_object_kinds();
 
                             // Owned copy of the selected region ids so the view
                             // can borrow it without holding the controller.
@@ -1534,6 +1549,8 @@ impl eframe::App for BerApp {
                                 object_note_input: &mut self.sketch_state.object_note_input,
                                 object_other_name: &mut self.sketch_state.object_other_name,
                                 object_pending_photos: &mut self.sketch_state.object_pending_photos,
+                                object_recorded_kinds: &object_recorded_kinds,
+                                object_auto_photo_for: &mut self.sketch_state.object_auto_photo_for,
                                 photo_annotator: &mut self.sketch_state.photo_annotator,
                                 objects_present,
                                 object_review_view,
@@ -2727,6 +2744,11 @@ impl eframe::App for BerApp {
                                     SketchEvent::RemoveExternalPhoto { side } => {
                                         controller.borrow_mut().remove_external_photo(side);
                                     }
+                                    SketchEvent::RotateExternalPhoto { side, clockwise } => {
+                                        controller
+                                            .borrow_mut()
+                                            .rotate_external_photo(side, clockwise);
+                                    }
                                     // UI-local: opening the annotator needs the
                                     // page-state slot the in-render view already
                                     // borrows, so it's deferred to just after
@@ -2853,6 +2875,11 @@ impl eframe::App for BerApp {
                                         self.sketch_state.vertex_drop_error = None;
                                     }
                                 },
+                                // "Save & exit BER" in the Final-phase summary
+                                // modal is rendered inside the sketch page, so its
+                                // ExitBer arrives here (not through the chrome
+                                // closure). Route it to the same exit flag.
+                                UiEvent::ExitBer => exit_clicked.set(true),
                                 _ => {}
                             });
                             // Deferred annotator open (see `annotate_request`
@@ -2875,7 +2902,7 @@ impl eframe::App for BerApp {
                         }
                     },
                 );
-                if exit_clicked {
+                if exit_clicked.get() {
                     // Flush + clear the loaded record, then return Home with
                     // all per-record page state reset (autosave means nothing
                     // is lost; no confirm dialog).

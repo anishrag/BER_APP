@@ -172,6 +172,14 @@ impl AppController {
                 self.document.dimensioning = DimensionState::default();
             }
         }
+        // A Structure-phase SEED tool (All / Remaining) stays LIT across a storey
+        // switch, but `reset_transient_editing_state` just cleared its selection
+        // (those ids belonged to the outgoing storey). Re-seed it for the storey
+        // we've landed on — otherwise the button reads active while selecting
+        // nothing, so "Edit attributes" silently does nothing and the assessor
+        // has to re-tap the tool on every floor. No-op unless a seed tool is
+        // active; `None` (all-storeys) re-seeds house-wide, as those tools act there.
+        self.reseed_structure_selection();
         self.compute_next_dimension_prompt();
         // Undo/redo is per-editing-session of one storey — don't carry across.
         self.history.clear();

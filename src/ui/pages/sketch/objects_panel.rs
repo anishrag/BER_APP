@@ -24,13 +24,12 @@ fn category_icon(cat: ObjectCategory) -> &'static str {
         ObjectCategory::Fan => "🌀",
         ObjectCategory::Light => "💡",
         ObjectCategory::Radiator => "♨",
-        ObjectCategory::Boiler => "🔥",
+        ObjectCategory::HeatingSystem => "🔥",
         ObjectCategory::WaterCylinder => "🛢",
-        ObjectCategory::Thermostat => "🌡",
         ObjectCategory::Chimney => "🏭",
         ObjectCategory::AtticHatch => "🪜",
-        ObjectCategory::WeatherCompensation => "🌦",
         ObjectCategory::WaterFixture => "🚿",
+        ObjectCategory::SolarPanel => "☀",
         ObjectCategory::Other => "➕",
     }
 }
@@ -95,6 +94,8 @@ pub(super) fn render<F: FnMut(UiEvent)>(
                                 *view.object_selected_kind = cat.singleton();
                                 view.object_other_name.clear();
                             }
+                            // Re-arm the auto-camera for the new selection.
+                            *view.object_auto_photo_for = None;
                         }
                     }
                 });
@@ -144,7 +145,12 @@ pub(super) fn render<F: FnMut(UiEvent)>(
                 if cat == ObjectCategory::Other {
                     ui.horizontal(|ui| {
                         ui.label("name");
-                        ui.text_edit_singleline(view.object_other_name);
+                        // Use the app's `text_input` (not raw `text_edit_singleline`)
+                        // so the on-screen keyboard opens on the tablet — without it
+                        // the name can't be typed, so the object never becomes
+                        // `kind_ready` and the count / photo / OK controls (below)
+                        // never appear.
+                        text_input(ui, view.object_other_name, 140.0, "name");
                     });
                     *view.object_selected_kind =
                         Some(ObjectKind::Other(view.object_other_name.clone()));
@@ -156,12 +162,33 @@ pub(super) fn render<F: FnMut(UiEvent)>(
                     .map(|k| !matches!(k, ObjectKind::Other(s) if s.trim().is_empty()))
                     .unwrap_or(false);
                 if kind_ready {
+                    let kind = view
+                        .object_selected_kind
+                        .clone()
+                        .expect("kind_ready implies a selected kind");
+                    // A photo is mandatory for this instance when the kind's
+                    // policy says so — always, or (first-instance kinds) until
+                    // one of that kind is recorded house-wide.
+                    let already_recorded = view.object_recorded_kinds.contains(&kind);
+                    let photo_required = kind.photo_required(already_recorded);
+                    let have_photo = !view.object_pending_photos.is_empty();
+
                     ui.horizontal(|ui| {
                         ui.label("count");
                         metre_input(ui, view.object_count_input, 48.0, "1");
                         ui.label("note");
                         text_input(ui, view.object_note_input, 110.0, "optional");
                     });
+
+                    // Auto-open the camera ONCE for a still-unsatisfied mandatory
+                    // photo (latched per selected kind, so a cancel doesn't loop
+                    // — the assessor taps 📷 to retry).
+                    let auto_open = photo_required
+                        && !have_photo
+                        && view.object_auto_photo_for.as_ref() != Some(&kind);
+                    if auto_open {
+                        *view.object_auto_photo_for = Some(kind.clone());
+                    }
                     ui.horizontal_wrapped(|ui| {
                         for (p, _quality) in view.object_pending_photos.iter() {
                             let src = p.to_string_lossy();
@@ -173,35 +200,49 @@ pub(super) fn render<F: FnMut(UiEvent)>(
                             );
                         }
                         // TEMPORARY dual hi/lo capture (see `photo_button_pair`).
-                        if let Some(captured) =
-                            photo_button_pair(ui, "📷 Add photo", true, PhotoQuality::High)
-                        {
+                        if let Some(captured) = photo_button_pair(
+                            ui,
+                            "📷 Add photo",
+                            true,
+                            PhotoQuality::High,
+                            auto_open,
+                        ) {
                             view.object_pending_photos.push(captured);
                         }
                     });
+                    if photo_required && !have_photo {
+                        ui.label(
+                            RichText::new("📷 A photo is required for this item")
+                                .small()
+                                .color(egui::Color32::from_rgb(220, 160, 80)),
+                        );
+                    }
+
+                    // OK is gated on the photo requirement — a mandatory photo
+                    // must be taken before the object can be added.
+                    let can_ok = !photo_required || have_photo;
                     if ui
-                        .add(egui::Button::new(RichText::new("OK").strong()))
+                        .add_enabled(can_ok, egui::Button::new(RichText::new("OK").strong()))
                         .clicked()
                     {
-                        if let Some(kind) = view.object_selected_kind.clone() {
-                            let count = view.object_count_input.trim().parse::<u32>().unwrap_or(1);
-                            let note = {
-                                let n = view.object_note_input.trim();
-                                (!n.is_empty()).then(|| n.to_string())
-                            };
-                            on_event(UiEvent::Sketch(SketchEvent::AddObject {
-                                kind,
-                                count,
-                                note,
-                                photos: view.object_pending_photos.clone(),
-                            }));
-                            *view.object_selected_category = None;
-                            *view.object_selected_kind = None;
-                            view.object_count_input.clear();
-                            view.object_note_input.clear();
-                            view.object_other_name.clear();
-                            view.object_pending_photos.clear();
-                        }
+                        let count = view.object_count_input.trim().parse::<u32>().unwrap_or(1);
+                        let note = {
+                            let n = view.object_note_input.trim();
+                            (!n.is_empty()).then(|| n.to_string())
+                        };
+                        on_event(UiEvent::Sketch(SketchEvent::AddObject {
+                            kind,
+                            count,
+                            note,
+                            photos: view.object_pending_photos.clone(),
+                        }));
+                        *view.object_selected_category = None;
+                        *view.object_selected_kind = None;
+                        *view.object_auto_photo_for = None;
+                        view.object_count_input.clear();
+                        view.object_note_input.clear();
+                        view.object_other_name.clear();
+                        view.object_pending_photos.clear();
                     }
                 }
             });

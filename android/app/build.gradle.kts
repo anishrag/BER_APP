@@ -25,6 +25,11 @@ android {
         // arm64 only — modern tablets; the Rust side only builds this target.
         ndk { abiFilters += "arm64-v8a" }
     }
+    compileOptions {
+        // CameraX (and its ListenableFuture callbacks) needs Java 8+.
+        sourceCompatibility = JavaVersion.VERSION_17
+        targetCompatibility = JavaVersion.VERSION_17
+    }
     signingConfigs {
         create("release") {
             storeFile = file(keystoreProperties["storeFile"] as String)
@@ -46,4 +51,17 @@ android {
             // wire a signingConfig here; debug builds sign automatically.
         }
     }
+}
+
+dependencies {
+    // In-app camera (CameraActivity): CameraX preview + capture with an app-owned
+    // flash toggle, replacing the hand-off to the system camera app (which owned
+    // flash). `activity` gives CameraActivity a ComponentActivity base, which is
+    // the LifecycleOwner CameraX binds its use-cases to.
+    val cameraxVersion = "1.3.4"
+    implementation("androidx.camera:camera-core:$cameraxVersion")
+    implementation("androidx.camera:camera-camera2:$cameraxVersion")
+    implementation("androidx.camera:camera-lifecycle:$cameraxVersion")
+    implementation("androidx.camera:camera-view:$cameraxVersion")
+    implementation("androidx.activity:activity:1.9.2")
 }
