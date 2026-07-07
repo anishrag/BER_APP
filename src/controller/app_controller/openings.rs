@@ -5,7 +5,10 @@
 //! ber_model ops; this only sequences them.
 use super::*;
 use ber_model::ber::common::{ItemId, Photo};
-use ber_model::ber::fenestration::{DoorKind, Frame, Glazing, Overshading, WallAnchor};
+use ber_model::ber::fenestration::{
+    window_shape_from_inputs, ComplexWindowKind, DoorKind, Frame, Glazing, Overshading, WallAnchor,
+    WindowShape,
+};
 use ber_model::ber::openings::{
     self, DoorSidelightsSpec, OpeningError, OpeningRef, SidelightLayout,
 };
@@ -21,8 +24,21 @@ pub enum OpeningToolKind {
     RoofWindow,
     Door,
     DoorSidelights,
+    /// A single window with a non-rectangular OUTLINE (rounded top, circular,
+    /// gable triangle, T-shape, …) — the shape + its dims come from the box.
+    ComplexWindow,
     /// Tap a wall to open its elevation editor (reposition existing openings).
     Edit,
+}
+
+/// A Complex-window placement from the box: the chosen shape kind + the ordered
+/// dimension inputs (in `ComplexWindowKind::field_labels` order). The controller
+/// turns these into `(width_m, height_m, WindowShape)` via
+/// [`window_shape_from_inputs`].
+#[derive(Debug, Clone, PartialEq)]
+pub struct ComplexWindowPlacement {
+    pub kind: ComplexWindowKind,
+    pub dims: Vec<f32>,
 }
 
 /// How the assessor dimensions a door + sidelights placement. Two input styles
@@ -116,6 +132,9 @@ pub struct OpeningFieldsPrompt {
     /// Overall/Detailed mode switch and binds/renders the mode's fields and
     /// checkboxes. `None` for every other tool.
     pub door_sidelights: Option<DoorSidelightsMode>,
+    /// `Some(kind)` for the Complex-window tool — the box shows the shape
+    /// dropdown and the kind's dimension fields. `None` for every other tool.
+    pub complex_window: Option<ComplexWindowKind>,
     /// Show the window-type picker (glazing/frame/year/cert, or reuse an existing
     /// type) — for tools that place a window: Window / Multi-storey / Roof window
     /// and the glazed parts of Door + sidelights. A plain solid Door has none.
@@ -143,8 +162,8 @@ pub struct ElevationOpening {
     pub width_m: f32,
     pub height_m: f32,
     pub selected: bool,
-    /// Draw it as a half-ellipse arch (a semicircular transom) instead of a rect.
-    pub arched: bool,
+    /// The window's outline shape (drawn accordingly); `Rectangular` for doors.
+    pub shape: WindowShape,
 }
 
 /// The unrolled selected wall + its openings, for the elevation overlay.
@@ -572,6 +591,7 @@ impl AppController {
     pub fn opening_fields_prompt(
         &self,
         ds_mode: DoorSidelightsMode,
+        cx_kind: ComplexWindowKind,
     ) -> Option<OpeningFieldsPrompt> {
         let p = self.pending_opening.as_ref()?;
         let req = |label: &str, hint| OpeningFieldSpec {
@@ -585,28 +605,38 @@ impl AppController {
             required: false,
         };
         let is_ds = p.tool == OpeningToolKind::DoorSidelights;
+        let is_cx = p.tool == OpeningToolKind::ComplexWindow;
         // The field list is the positional binding contract with the UI +
         // `place_opening`. Fields 0/1 are always the door leaf's W/H (in Overall
         // mode the whole-doorset W/H come first, so the door leaf shifts to 2/3 —
-        // the UI rebinds by mode). See `DoorSidelightsPlacement`.
-        let fields = match (is_ds, ds_mode) {
-            (true, DoorSidelightsMode::Overall) => vec![
-                req("overall width (m)", "whole doorset"),
-                req("overall height (m)", "whole doorset"),
-                req("door width (m)", "the leaf"),
-                req("door height (m)", "the leaf"),
-                opt("sill (m)", "0 = floor"),
-            ],
-            (true, DoorSidelightsMode::Detailed) => vec![
-                req("door width (m)", "e.g. 0.9"),
-                req("door height (m)", "e.g. 2.0"),
-                opt("left light (m)", "0 = none"),
-                opt("left sill (m)", "0 = floor"),
-                opt("right light (m)", "0 = none"),
-                opt("right sill (m)", "0 = floor"),
-                opt("transom (m)", "0 = none"),
-            ],
-            (false, _) => vec![req("width (m)", "e.g. 1.2"), req("height (m)", "e.g. 1.4")],
+        // the UI rebinds by mode). See `DoorSidelightsPlacement`. A complex window
+        // draws its fields from the chosen shape kind.
+        let fields = if is_cx {
+            cx_kind
+                .field_labels()
+                .iter()
+                .map(|(label, hint)| req(label, hint))
+                .collect()
+        } else {
+            match (is_ds, ds_mode) {
+                (true, DoorSidelightsMode::Overall) => vec![
+                    req("overall width (m)", "whole doorset"),
+                    req("overall height (m)", "whole doorset"),
+                    req("door width (m)", "the leaf"),
+                    req("door height (m)", "the leaf"),
+                    opt("sill (m)", "0 = floor"),
+                ],
+                (true, DoorSidelightsMode::Detailed) => vec![
+                    req("door width (m)", "e.g. 0.9"),
+                    req("door height (m)", "e.g. 2.0"),
+                    opt("left light (m)", "0 = none"),
+                    opt("left sill (m)", "0 = floor"),
+                    opt("right light (m)", "0 = none"),
+                    opt("right sill (m)", "0 = floor"),
+                    opt("transom (m)", "0 = none"),
+                ],
+                (false, _) => vec![req("width (m)", "e.g. 1.2"), req("height (m)", "e.g. 1.4")],
+            }
         };
         let offer_full_surface = p.tool == OpeningToolKind::Window
             && matches!(p.target, PendingOpeningTarget::Wall { .. })
@@ -617,12 +647,14 @@ impl AppController {
                 | OpeningToolKind::MultiStoreyWindow
                 | OpeningToolKind::RoofWindow
                 | OpeningToolKind::DoorSidelights
+                | OpeningToolKind::ComplexWindow
         );
         Some(OpeningFieldsPrompt {
             title: format!("{} · size", tool_label(p.tool)),
             fields,
             offer_full_surface,
             door_sidelights: is_ds.then_some(ds_mode),
+            complex_window: is_cx.then_some(cx_kind),
             offer_window_type,
             seq: self.placement_seq,
         })
@@ -657,14 +689,16 @@ impl AppController {
     /// shared type or new attributes, deduped) and a DEFAULT 1 m sill (moved
     /// later in the 2D elevation). `width_m`/`height_m` are the opening (for
     /// door+sidelights, the DOOR leaf); `door_sidelights` carries the mode's
-    /// extra measurements (sidelights + transom) and is `None` for every other
-    /// tool. On a model error the box stays open with the error shown.
+    /// extra measurements (sidelights + transom), and `complex_window` the chosen
+    /// shape + dims — each `None` outside its own tool. On a model error the box
+    /// stays open with the error shown.
     #[allow(clippy::too_many_arguments)]
     pub fn place_opening(
         &mut self,
         width_m: f32,
         height_m: f32,
         door_sidelights: Option<DoorSidelightsPlacement>,
+        complex_window: Option<ComplexWindowPlacement>,
         window_type: WindowTypeChoice,
         overshading: Overshading,
         photos: Vec<(std::path::PathBuf, PhotoQuality)>,
@@ -738,6 +772,29 @@ impl AppController {
             (OpeningToolKind::RoofWindow, PendingOpeningTarget::Roof { region_id, plan }) => {
                 openings::add_roof_window(storey, region_id, plan, width_m, height_m, type_id)
                     .map(|_| ())
+            }
+            (
+                OpeningToolKind::ComplexWindow,
+                PendingOpeningTarget::Wall {
+                    wall_id, along_m, ..
+                },
+            ) => {
+                // The shape + its bounding box come from the chosen kind + dims.
+                let (w, h, shape) = complex_window
+                    .as_ref()
+                    .map(|c| window_shape_from_inputs(c.kind, &c.dims))
+                    .unwrap_or((width_m, height_m, WindowShape::Rectangular));
+                openings::add_shaped_wall_window(
+                    storey,
+                    wall_id,
+                    along_m,
+                    w,
+                    h,
+                    DEFAULT_SILL_M,
+                    type_id,
+                    shape,
+                )
+                .map(|_| ())
             }
             (
                 OpeningToolKind::Door,
@@ -1166,14 +1223,14 @@ impl AppController {
         let openings = self
             .wall_openings(storey, wall_id)
             .into_iter()
-            .map(|(r, kind, along, sill, w, h, arched)| ElevationOpening {
+            .map(|(r, kind, along, sill, w, h, shape)| ElevationOpening {
                 kind,
                 along_m: along,
                 sill_m: sill,
                 width_m: w,
                 height_m: h,
                 selected: self.elevation_selection == Some(r),
-                arched,
+                shape,
             })
             .collect();
         Some(ElevationView {
@@ -1322,14 +1379,14 @@ impl AppController {
     // ── helpers ───────────────────────────────────────────────────────────────
 
     /// Every wall opening on `wall_id`: `(ref, kind, along, sill, width, height,
-    /// arched)`. The model owns the gather ([`openings::wall_openings`]); the
+    /// shape)`. The model owns the gather ([`openings::wall_openings`]); the
     /// shell only maps `is_door` + assembly membership to its own view kind.
     #[allow(clippy::type_complexity)]
     fn wall_openings(
         &self,
         storey: &Storey,
         wall_id: ItemId,
-    ) -> Vec<(OpeningRef, OpeningViewKind, f32, f32, f32, f32, bool)> {
+    ) -> Vec<(OpeningRef, OpeningViewKind, f32, f32, f32, f32, WindowShape)> {
         openings::wall_openings(storey, wall_id)
             .into_iter()
             .map(|o| {
@@ -1340,7 +1397,7 @@ impl AppController {
                     (true, true) => OpeningViewKind::DoorPanel,
                 };
                 (
-                    o.opening, kind, o.along_m, o.sill_m, o.width_m, o.height_m, o.arched,
+                    o.opening, kind, o.along_m, o.sill_m, o.width_m, o.height_m, o.shape,
                 )
             })
             .collect()
@@ -1355,6 +1412,7 @@ fn tool_label(tool: OpeningToolKind) -> &'static str {
         OpeningToolKind::RoofWindow => "Roof window",
         OpeningToolKind::Door => "Door",
         OpeningToolKind::DoorSidelights => "Door + sidelights",
+        OpeningToolKind::ComplexWindow => "Complex window",
         OpeningToolKind::Edit => "Edit",
     }
 }

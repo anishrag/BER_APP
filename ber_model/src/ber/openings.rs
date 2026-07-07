@@ -7,7 +7,7 @@
 //! derivation here so all opening logic is in one pure module the controller
 //! drives.
 use super::common::ItemId;
-use super::fenestration::{Door, DoorKind, OpeningPlacement, Overshading, Window};
+use super::fenestration::{Door, DoorKind, OpeningPlacement, Overshading, Window, WindowShape};
 use super::structural::Storey;
 use domain::points::point_to_segment_distance;
 
@@ -56,9 +56,9 @@ pub struct WallOpening {
     pub sill_m: f32,
     pub width_m: f32,
     pub height_m: f32,
-    /// The window is arched (a half-ellipse fanlight) — the elevation draws it as
-    /// an arch, not a rectangle. Always `false` for doors.
-    pub arched: bool,
+    /// The window's outline shape (the elevation draws it accordingly). Always
+    /// `Rectangular` for doors.
+    pub shape: WindowShape,
 }
 
 /// Every opening placed on wall `wall_id` (windows then doors, placement order),
@@ -82,7 +82,7 @@ pub fn wall_openings(storey: &Storey, wall_id: ItemId) -> Vec<WallOpening> {
                     sill_m: *sill_m,
                     width_m: w.width_m,
                     height_m: w.height_m,
-                    arched: w.arched,
+                    shape: w.shape,
                 });
             }
         }
@@ -103,7 +103,7 @@ pub fn wall_openings(storey: &Storey, wall_id: ItemId) -> Vec<WallOpening> {
                     sill_m: *sill_m,
                     width_m: d.width_m,
                     height_m: d.height_m,
-                    arched: false,
+                    shape: WindowShape::Rectangular,
                 });
             }
         }
@@ -282,8 +282,8 @@ pub fn pick_roof_region(storey: &Storey, wx: f64, wy: f64) -> Option<(ItemId, (f
         .map(|r| (r.id, (wx as f32, wy as f32)))
 }
 
-/// Add a window to a wall at `along_m` (centre), then redistribute the wall so
-/// nothing overlaps. Rolls back and returns `WallTooShort` if it can't fit.
+/// Add a rectangular window to a wall — the common case; a thin wrapper over
+/// [`add_shaped_wall_window`].
 pub fn add_wall_window(
     storey: &mut Storey,
     wall_id: ItemId,
@@ -292,6 +292,33 @@ pub fn add_wall_window(
     height_m: f32,
     sill_m: f32,
     window_type_id: ItemId,
+) -> Result<ItemId, OpeningError> {
+    add_shaped_wall_window(
+        storey,
+        wall_id,
+        along_m,
+        width_m,
+        height_m,
+        sill_m,
+        window_type_id,
+        WindowShape::Rectangular,
+    )
+}
+
+/// Add a window of a given `shape` to a wall at `along_m` (centre), then
+/// redistribute the wall so nothing overlaps. Rolls back and returns
+/// `WallTooShort` if it can't fit. Redistribution uses the bounding
+/// `width_m`/`height_m`, so it's shape-agnostic.
+#[allow(clippy::too_many_arguments)]
+pub fn add_shaped_wall_window(
+    storey: &mut Storey,
+    wall_id: ItemId,
+    along_m: f32,
+    width_m: f32,
+    height_m: f32,
+    sill_m: f32,
+    window_type_id: ItemId,
+    shape: WindowShape,
 ) -> Result<ItemId, OpeningError> {
     if width_m <= 0.0 || height_m <= 0.0 {
         return Err(OpeningError::ZeroSize);
@@ -314,7 +341,7 @@ pub fn add_wall_window(
         wall_anchor: None,
         assembly_id: None,
         multi_storey: false,
-        arched: false,
+        shape,
         overshading: Overshading::Average,
     });
     link_window(storey, wall_id, id);
@@ -405,7 +432,7 @@ pub fn add_roof_window(
         wall_anchor: None,
         assembly_id: None,
         multi_storey: false,
-        arched: false,
+        shape: WindowShape::Rectangular,
         overshading: Overshading::Average,
     });
     Ok(id)
@@ -443,7 +470,7 @@ pub fn add_full_wall_window(
         wall_anchor: None,
         assembly_id: None,
         multi_storey: false,
-        arched: false,
+        shape: WindowShape::Rectangular,
         overshading: Overshading::Average,
     });
     link_window(storey, wall_id, id);
@@ -486,7 +513,7 @@ pub fn add_multi_storey_window(
         wall_anchor: None,
         assembly_id: None,
         multi_storey: true,
-        arched: false,
+        shape: WindowShape::Rectangular,
         overshading: Overshading::Average,
     });
     link_window(storey, wall_id, id);
@@ -561,7 +588,7 @@ pub fn compose_door_sidelights(
     let assembly_left = along_m - total_w / 2.0;
     let mut added: Vec<OpeningRef> = Vec::new();
     let mut place_window =
-        |storey: &mut Storey, centre: f32, w: f32, h: f32, sill: f32, arched: bool| {
+        |storey: &mut Storey, centre: f32, w: f32, h: f32, sill: f32, shape: WindowShape| {
             let id = ItemId::default();
             storey.windows.push(Window {
                 id,
@@ -577,7 +604,7 @@ pub fn compose_door_sidelights(
                 wall_anchor: None,
                 assembly_id: Some(assembly_id),
                 multi_storey: false,
-                arched,
+                shape,
                 overshading: Overshading::Average,
             });
             link_window(storey, wall_id, id);
@@ -594,7 +621,7 @@ pub fn compose_door_sidelights(
             left_w,
             (spec.door_height_m - sill).max(0.01),
             sill,
-            false,
+            WindowShape::Rectangular,
         );
     }
     if right_w > 0.0 {
@@ -605,7 +632,7 @@ pub fn compose_door_sidelights(
             right_w,
             (spec.door_height_m - sill).max(0.01),
             sill,
-            false,
+            WindowShape::Rectangular,
         );
     }
     let door_centre = assembly_left + left_w + spec.door_width_m / 2.0;
@@ -618,7 +645,11 @@ pub fn compose_door_sidelights(
             total_w,
             th,
             spec.door_height_m,
-            spec.transom_semicircular,
+            if spec.transom_semicircular {
+                WindowShape::Arched
+            } else {
+                WindowShape::Rectangular
+            },
         );
     }
     let door_id = ItemId::default();
@@ -1143,7 +1174,7 @@ pub fn derive_opening_vertices(storey: &mut Storey) {
         .iter()
         .map(|w| {
             w.placement.as_ref().and_then(|p| {
-                opening_vertices(storey, p, w.width_m, w.height_m, w.multi_storey, w.arched)
+                opening_vertices(storey, p, w.width_m, w.height_m, w.multi_storey, w.shape)
             })
         })
         .collect();
@@ -1156,9 +1187,16 @@ pub fn derive_opening_vertices(storey: &mut Storey) {
         .doors
         .iter()
         .map(|d| {
-            d.placement
-                .as_ref()
-                .and_then(|p| opening_vertices(storey, p, d.width_m, d.height_m, false, false))
+            d.placement.as_ref().and_then(|p| {
+                opening_vertices(
+                    storey,
+                    p,
+                    d.width_m,
+                    d.height_m,
+                    false,
+                    WindowShape::Rectangular,
+                )
+            })
         })
         .collect();
     for (d, v) in storey.doors.iter_mut().zip(dr) {
@@ -1287,7 +1325,7 @@ fn opening_vertices(
     width_m: f32,
     height_m: f32,
     multi_storey: bool,
-    arched: bool,
+    shape: WindowShape,
 ) -> Option<Vec<(f32, f32, f32)>> {
     match placement {
         OpeningPlacement::Wall {
@@ -1313,21 +1351,23 @@ fn opening_vertices(
             let p = |d: f64| (origin.x + ux * d, origin.y + uy * d);
             let (lx, ly) = p(left);
             let (rx, ry) = p(right);
-            if arched {
-                // Flat bottom (BL → BR) then a half-ellipse arch back over to BL:
-                // a fanlight whose top rises `top − bottom` at the centre.
-                let (centre_d, half_d, rise) =
-                    ((left + right) * 0.5, (right - left) * 0.5, top - bottom);
-                let mut v = vec![
-                    (lx as f32, ly as f32, bottom as f32),
-                    (rx as f32, ry as f32, bottom as f32),
-                ];
-                const N: usize = 16;
-                for i in 1..N {
-                    let th = std::f64::consts::PI * (i as f64) / (N as f64);
-                    let (ax, ay) = p(centre_d + half_d * th.cos());
-                    v.push((ax as f32, ay as f32, (bottom + rise * th.sin()) as f32));
-                }
+            // Non-rectangular shapes: map the shared local outline
+            // (`window_outline`, in 0..width × 0..height) into the (possibly
+            // clamped) wall-plane box [left,right] × [bottom,top], so the
+            // silhouette matches what the elevation draws from the same source.
+            if !matches!(shape, WindowShape::Rectangular) && width_m > 0.0 && height_m > 0.0 {
+                let (span, rise) = (right - left, top - bottom);
+                let v = super::fenestration::window_outline(shape, width_m, height_m)
+                    .iter()
+                    .map(|&(u, w)| {
+                        let (ax, ay) = p(left + (u as f64 / width_m as f64) * span);
+                        (
+                            ax as f32,
+                            ay as f32,
+                            (bottom + (w as f64 / height_m as f64) * rise) as f32,
+                        )
+                    })
+                    .collect();
                 return Some(v);
             }
             Some(vec![
@@ -1368,7 +1408,7 @@ fn opening_vertices(
 mod tests {
     use super::*;
     use crate::ber::common::ItemId;
-    use crate::ber::fenestration::{Door, OpeningPlacement, Window};
+    use crate::ber::fenestration::{Door, OpeningPlacement, Window, WindowShape};
     use crate::ber::structural::{
         CeilingExposure, CeilingRegion, CeilingRegions, Opes, Polygon3D, Storey, WallExposure,
         WallRegion, WallRegions,
@@ -1401,7 +1441,7 @@ mod tests {
             wall_anchor: None,
             assembly_id: None,
             multi_storey: false,
-            arched: false,
+            shape: WindowShape::Rectangular,
             overshading: Overshading::Average,
         }
     }
@@ -1719,7 +1759,7 @@ mod tests {
             wall_anchor: None,
             assembly_id: None,
             multi_storey: false,
-            arched: false,
+            shape: WindowShape::Rectangular,
             overshading: Overshading::Average,
         });
         assert_eq!(
@@ -2100,7 +2140,11 @@ mod tests {
         );
         // The transom spans the WHOLE assembly width and is arched (its derived
         // outline is a tessellated arch, not a 4-corner rectangle).
-        let transom = s.windows.iter().find(|w| w.arched).expect("arched transom");
+        let transom = s
+            .windows
+            .iter()
+            .find(|w| w.shape == WindowShape::Arched)
+            .expect("arched transom");
         assert!(
             (transom.width_m - total_w).abs() < 1e-4,
             "transom spans the assembly: {} vs {total_w}",

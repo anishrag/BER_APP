@@ -214,6 +214,10 @@ pub struct SketchState {
     pub door_height_input: String,
     pub sidelight_left_present: bool,
     pub sidelight_right_present: bool,
+    /// Complex-window 3rd/4th dimension buffers (fields 0/1 reuse the width/height
+    /// inputs); the pinned shape kind lives on `categories`.
+    pub window_shape_c_input: String,
+    pub window_shape_d_input: String,
     /// Window-type picker (the placement box): which shared type a placed window
     /// joins. `wt_existing_id = Some` reuses an existing type by id; `None`
     /// defines a new one from glazing/frame/year/cert (find-or-created on Place,
@@ -1064,6 +1068,7 @@ impl eframe::App for BerApp {
                                 let c = self.app_controller.borrow();
                                 let prompt = c.opening_fields_prompt(
                                     self.sketch_state.categories.door_sidelights_mode,
+                                    self.sketch_state.categories.complex_window_kind,
                                 );
                                 // The window-type picker list is only needed while a
                                 // placement that offers it is in flight.
@@ -1522,6 +1527,8 @@ impl eframe::App for BerApp {
                                 sidelight_right_present: &mut self
                                     .sketch_state
                                     .sidelight_right_present,
+                                window_shape_c_input: &mut self.sketch_state.window_shape_c_input,
+                                window_shape_d_input: &mut self.sketch_state.window_shape_d_input,
                                 wt_existing_id: &mut self.sketch_state.wt_existing_id,
                                 wt_glazing: &mut self.sketch_state.wt_glazing,
                                 wt_frame: &mut self.sketch_state.wt_frame,
@@ -2159,6 +2166,7 @@ impl eframe::App for BerApp {
                                         width_m,
                                         height_m,
                                         door_sidelights,
+                                        complex_window,
                                         window_type,
                                         overshading,
                                         photos,
@@ -2167,6 +2175,7 @@ impl eframe::App for BerApp {
                                             width_m,
                                             height_m,
                                             door_sidelights,
+                                            complex_window,
                                             window_type,
                                             overshading,
                                             photos,

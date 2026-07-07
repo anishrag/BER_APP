@@ -1508,7 +1508,7 @@ mod tests {
                 wall_anchor: None,
                 assembly_id: None,
                 multi_storey: false,
-                arched: false,
+                shape: ber_model::ber::fenestration::WindowShape::Rectangular,
                 overshading: Default::default(),
             });
         }
@@ -2264,7 +2264,7 @@ mod tests {
             wall_anchor: None,
             assembly_id: None,
             multi_storey: false,
-            arched: false,
+            shape: ber_model::ber::fenestration::WindowShape::Rectangular,
             overshading: Default::default(),
         });
         // Split the bottom wall at x = 2.
@@ -4383,7 +4383,7 @@ mod tests {
             wall_anchor: None,
             assembly_id: None,
             multi_storey: false,
-            arched: false,
+            shape: ber_model::ber::fenestration::WindowShape::Rectangular,
             overshading: Default::default(),
         });
         let widx = ber.storeys[0]
@@ -4459,7 +4459,7 @@ mod tests {
             wall_anchor: None,
             assembly_id: None,
             multi_storey: false,
-            arched: false,
+            shape: ber_model::ber::fenestration::WindowShape::Rectangular,
             overshading: Default::default(),
         });
 
@@ -4830,7 +4830,7 @@ mod tests {
             wall_anchor: None,
             assembly_id: None,
             multi_storey: false,
-            arched: false,
+            shape: ber_model::ber::fenestration::WindowShape::Rectangular,
             overshading: Default::default(),
         });
         ber.storeys[0] = resolve_storey(&doc, &ber, 0, &[], &[], &[]);
@@ -4977,7 +4977,7 @@ mod tests {
             wall_anchor: None,
             assembly_id: None,
             multi_storey: false,
-            arched: false,
+            shape: ber_model::ber::fenestration::WindowShape::Rectangular,
             overshading: Overshading::Average,
         });
 
@@ -5104,7 +5104,7 @@ mod tests {
             wall_anchor: None,
             assembly_id: None,
             multi_storey: false,
-            arched: false,
+            shape: ber_model::ber::fenestration::WindowShape::Rectangular,
             overshading: Overshading::Average,
         });
 
@@ -5204,7 +5204,7 @@ mod tests {
             wall_anchor: None,
             assembly_id: None,
             multi_storey: false,
-            arched: false,
+            shape: ber_model::ber::fenestration::WindowShape::Rectangular,
             overshading: Overshading::Average,
         };
         // A sits on the buried run (world centre 1.0) — it must slide right,

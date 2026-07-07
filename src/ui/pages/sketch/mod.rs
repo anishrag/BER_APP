@@ -27,11 +27,11 @@ use egui::epaint::PathStroke;
 use egui::Pos2;
 
 use crate::controller::app_controller::{
-    ActiveObjectRoomView, AssessmentPhase, ChecklistItem, DimensionPromptUiData,
-    DoorSidelightsPlacement, EditDragPromptUiData, ElevationView, ExistingGroup,
-    ExistingWindowType, ExposureSelection, FinalMode, NewStoreyPromptUiData, ObjectPinView,
-    ObjectReviewView, OpeningFieldsPrompt, OpeningToolKind, PartitionView, PhotoView,
-    PositionPromptUiData, ReviewView, RiserView, SelectMode, SnapTagView, StructureEdit,
+    ActiveObjectRoomView, AssessmentPhase, ChecklistItem, ComplexWindowPlacement,
+    DimensionPromptUiData, DoorSidelightsPlacement, EditDragPromptUiData, ElevationView,
+    ExistingGroup, ExistingWindowType, ExposureSelection, FinalMode, NewStoreyPromptUiData,
+    ObjectPinView, ObjectReviewView, OpeningFieldsPrompt, OpeningToolKind, PartitionView,
+    PhotoView, PositionPromptUiData, ReviewView, RiserView, SelectMode, SnapTagView, StructureEdit,
     StructureReviewView, SurfaceKind, VertexDropPromptUiData, WallExposureView, WallFinishField,
     WallInclusionPromptView, WindowTypeChoice,
 };
@@ -446,6 +446,9 @@ pub enum SketchEvent {
         width_m: f32,
         height_m: f32,
         door_sidelights: Option<DoorSidelightsPlacement>,
+        /// The chosen complex-window shape + its dims (`None` for every other
+        /// tool). When `Some`, the controller derives width/height/shape from it.
+        complex_window: Option<ComplexWindowPlacement>,
         /// Which shared window type the placed window joins (an existing id, or a
         /// new attribute set find-or-created on Place). Ignored for a plain Door.
         window_type: WindowTypeChoice,
@@ -1172,6 +1175,11 @@ pub struct SketchView<'a> {
     pub door_height_input: &'a mut String,
     pub sidelight_left_present: &'a mut bool,
     pub sidelight_right_present: &'a mut bool,
+    /// Complex-window third/fourth dimension buffers (fields 0/1 reuse
+    /// `opening_width_input`/`opening_height_input`); the chosen shape kind (a
+    /// pinned per-page pick) lives on `cat_state`.
+    pub window_shape_c_input: &'a mut String,
+    pub window_shape_d_input: &'a mut String,
     /// Window-type picker state for the placement box. `wt_existing_id = Some`
     /// reuses an existing shared type by id; `None` defines a new one from the
     /// glazing/frame/year/cert fields below (deduped on Place). See

@@ -3093,7 +3093,7 @@ fn elevation_overlay<F: FnMut(UiEvent)>(
         let tp = b + o.height_m as f64;
         let (fill, stroke) = elevation_colors(o.kind, o.selected);
         let sw = if o.selected { 2.5 } else { 1.5 };
-        draw_elevation_opening(&painter, &p, l, r, b, tp, o.arched, fill, stroke, sw);
+        draw_elevation_opening(&painter, &p, l, r, b, tp, o.shape, fill, stroke, sw);
     }
     painter.text(
         rect.left_top() + egui::vec2(8.0, 8.0),
@@ -3138,13 +3138,11 @@ fn elevation_overlay<F: FnMut(UiEvent)>(
     }
 }
 
-/// Fill + border colour for an opening rectangle in the elevation (glass blue /
-/// door brown; brighter + white-bordered when selected).
-/// Draw one opening in an elevation — a filled rectangle, or a half-ellipse
-/// (flat bottom + arched top) for a semicircular transom — given its bounds in
-/// the elevation `(x, z)` frame and a mapping `p(x, z) → screen`. Shared by BOTH
-/// the edit-on-surface elevation and the Mapping review elevation so an arched
-/// window looks the same wherever it's drawn.
+/// Draw one opening in an elevation, given its bounds in the elevation `(x, z)`
+/// frame and a mapping `p(x, z) → screen`. Rectangles get a crisp box; every
+/// other shape is filled + outlined from the shared [`window_outline`] silhouette
+/// (so it matches the derived 3D `vertices` exactly). Shared by BOTH the
+/// edit-on-surface and Mapping review elevations.
 #[allow(clippy::too_many_arguments)]
 fn draw_elevation_opening(
     painter: &egui::Painter,
@@ -3153,38 +3151,58 @@ fn draw_elevation_opening(
     r: f64,
     b: f64,
     tp: f64,
-    arched: bool,
+    shape: ber_model::ber::fenestration::WindowShape,
     fill: egui::Color32,
     stroke: egui::Color32,
     sw: f32,
 ) {
+    use ber_model::ber::fenestration::{window_outline, WindowShape};
     let line =
         |a: egui::Pos2, c: egui::Pos2| painter.line_segment([a, c], egui::Stroke::new(sw, stroke));
-    if arched {
-        // Flat bottom (BL → BR) then a half-ellipse arch back over to BL.
-        let (centre, half, rise) = ((l + r) / 2.0, (r - l) / 2.0, tp - b);
-        let mut pts = vec![p(l, b), p(r, b)];
-        const N: usize = 16;
-        for i in 1..N {
-            let th = std::f64::consts::PI * (i as f64) / (N as f64);
-            pts.push(p(centre + half * th.cos(), b + rise * th.sin()));
-        }
-        painter.add(egui::Shape::convex_polygon(
-            pts.clone(),
-            fill,
-            egui::Stroke::NONE,
-        ));
-        for w in pts.windows(2) {
-            line(w[0], w[1]);
-        }
-        line(pts[pts.len() - 1], pts[0]);
-    } else {
+    let (w, h) = (r - l, tp - b);
+    if matches!(shape, WindowShape::Rectangular) {
         let ro = egui::Rect::from_two_pos(p(l, b), p(r, tp));
         painter.rect_filled(ro, 1.0, fill);
         line(ro.left_top(), ro.right_top());
         line(ro.right_top(), ro.right_bottom());
         line(ro.right_bottom(), ro.left_bottom());
         line(ro.left_bottom(), ro.left_top());
+        return;
+    }
+    // The tessellated silhouette (local metres → elevation x/z → screen).
+    let pts: Vec<egui::Pos2> = window_outline(shape, w as f32, h as f32)
+        .iter()
+        .map(|&(u, v)| p(l + u as f64, b + v as f64))
+        .collect();
+    // Fill: convex shapes as one polygon; the (concave) T as its two rects.
+    if let WindowShape::TShape { band_m, stem_w_m } = shape {
+        let stem_h = (h - band_m as f64).max(0.0);
+        let (x0, x1) = (
+            l + (w - stem_w_m as f64) / 2.0,
+            l + (w + stem_w_m as f64) / 2.0,
+        );
+        painter.rect_filled(
+            egui::Rect::from_two_pos(p(l, b + stem_h), p(r, tp)),
+            1.0,
+            fill,
+        );
+        painter.rect_filled(
+            egui::Rect::from_two_pos(p(x0, b), p(x1, b + stem_h)),
+            1.0,
+            fill,
+        );
+    } else {
+        painter.add(egui::Shape::convex_polygon(
+            pts.clone(),
+            fill,
+            egui::Stroke::NONE,
+        ));
+    }
+    for wnd in pts.windows(2) {
+        line(wnd[0], wnd[1]);
+    }
+    if let (Some(&first), Some(&last)) = (pts.first(), pts.last()) {
+        line(last, first);
     }
 }
 
@@ -4023,7 +4041,7 @@ fn mapping_review_overlay<F: FnMut(UiEvent)>(
         } else {
             (1.5, base)
         };
-        draw_elevation_opening(&painter, &p, l, r, b, tp, o.arched, fill, sc, sw);
+        draw_elevation_opening(&painter, &p, l, r, b, tp, o.shape, fill, sc, sw);
     }
 
     // Input: drag openings within the elevation sub-rect → composite (x, z).

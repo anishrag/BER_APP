@@ -107,7 +107,7 @@ mod tests {
             wall_anchor: None,
             assembly_id: None,
             multi_storey,
-            arched: false,
+            shape: ber_model::ber::fenestration::WindowShape::Rectangular,
             overshading: Default::default(),
         }
     }

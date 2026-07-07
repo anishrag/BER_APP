@@ -129,6 +129,7 @@ pub const CATEGORIES: &[Category] = &[
             Tool::Opening(OpeningToolKind::RoofWindow),
             Tool::Opening(OpeningToolKind::Door),
             Tool::Opening(OpeningToolKind::DoorSidelights),
+            Tool::Opening(OpeningToolKind::ComplexWindow),
             Tool::Opening(OpeningToolKind::Edit),
         ],
     },
@@ -191,6 +192,9 @@ pub struct CategoryUiState {
     /// doorset first (Overall) or type each piece (Detailed). Pinned like
     /// `input_mode` — the last-used choice persists across placements.
     pub door_sidelights_mode: crate::controller::app_controller::DoorSidelightsMode,
+    /// Which shape the Complex-window box is entering (rounded top, circular, …).
+    /// Pinned across placements like `door_sidelights_mode`.
+    pub complex_window_kind: ber_model::ber::fenestration::ComplexWindowKind,
 }
 
 impl Default for CategoryUiState {
@@ -204,6 +208,7 @@ impl Default for CategoryUiState {
             input_mode: super::number_box::InputMode::default(),
             input_mode_pinned: false,
             door_sidelights_mode: crate::controller::app_controller::DoorSidelightsMode::default(),
+            complex_window_kind: ber_model::ber::fenestration::ComplexWindowKind::default(),
         }
     }
 }
@@ -466,6 +471,11 @@ fn opening_tool_label(tool: OpeningToolKind) -> (&'static str, &'static str) {
             "🚪+ Door + sidelights",
             "Tap near a wall, then enter the door size and optional side / top \
              lights one at a time.",
+        ),
+        OpeningToolKind::ComplexWindow => (
+            "◗ Complex window",
+            "A non-rectangular window (rounded top, circular, gable triangle, \
+             T-shape, …). Tap a wall, pick the shape, then enter its dimensions.",
         ),
         OpeningToolKind::Edit => (
             "✋ Edit on surface",

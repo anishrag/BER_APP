@@ -116,9 +116,9 @@ pub use objects::{
 };
 use openings::PendingOpening;
 pub use openings::{
-    DoorSidelightsMode, DoorSidelightsPlacement, ElevationView, ExistingWindowType,
-    OpeningFieldSpec, OpeningFieldsPrompt, OpeningPromptUiData, OpeningToolKind, OpeningViewKind,
-    WindowTypeChoice,
+    ComplexWindowPlacement, DoorSidelightsMode, DoorSidelightsPlacement, ElevationView,
+    ExistingWindowType, OpeningFieldSpec, OpeningFieldsPrompt, OpeningPromptUiData,
+    OpeningToolKind, OpeningViewKind, WindowTypeChoice,
 };
 pub use partition::{
     PartitionDimAxis, PartitionDimPrompt, PartitionInset, PartitionRegionView, PartitionSnapTag,

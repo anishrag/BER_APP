@@ -10,6 +10,7 @@
 
 use crate::ber::ber_struct::Ber;
 use crate::ber::common::{ExternalSide, ItemId};
+use crate::ber::fenestration::WindowShape;
 use crate::ber::openings::{wall_openings, OpeningRef};
 use domain::points::Point2f64;
 
@@ -54,9 +55,9 @@ pub struct ElevOpening {
     pub wall_id: ItemId,
     pub opening: OpeningRef,
     pub is_door: bool,
-    /// The window is arched (a half-ellipse fanlight) — drawn as an arch, not a
-    /// rectangle. Always `false` for doors.
-    pub arched: bool,
+    /// The window's outline shape (drawn accordingly). Always `Rectangular` for
+    /// doors.
+    pub shape: WindowShape,
     /// Composite x of the opening's CENTRE.
     pub x_center: f64,
     pub width_m: f64,
@@ -208,7 +209,7 @@ impl Ber {
                         wall_id: w.id,
                         opening: op.opening,
                         is_door: op.is_door,
-                        arched: op.arched,
+                        shape: op.shape,
                         x_center: h.0 * px + h.1 * py,
                         width_m: op.width_m as f64,
                         sill_z: bz + op.sill_m as f64,

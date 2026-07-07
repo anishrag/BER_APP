@@ -10197,7 +10197,10 @@ fn multi_field_window_places_with_default_sill() {
     // The floating box asks for Width + Height (two fields, both required) — no
     // sill field.
     let p = c
-        .opening_fields_prompt(DoorSidelightsMode::default())
+        .opening_fields_prompt(
+            DoorSidelightsMode::default(),
+            ber_model::ber::fenestration::ComplexWindowKind::default(),
+        )
         .expect("placement staged");
     assert_eq!(p.fields.len(), 2, "width + height only (no sill)");
     assert!(p.fields.iter().all(|f| f.required));
@@ -10206,14 +10209,18 @@ fn multi_field_window_places_with_default_sill() {
         1.0,
         1.2,
         None,
+        None,
         WindowTypeChoice::default(),
         ber_model::ber::fenestration::Overshading::Average,
         Vec::new(),
     )
     .expect("window places");
     assert!(
-        c.opening_fields_prompt(DoorSidelightsMode::default())
-            .is_none(),
+        c.opening_fields_prompt(
+            DoorSidelightsMode::default(),
+            ber_model::ber::fenestration::ComplexWindowKind::default(),
+        )
+        .is_none(),
         "placement finished"
     );
     c.materialize();
@@ -10253,8 +10260,16 @@ fn window_type_picker_reuses_existing_and_adds_only_when_different() {
     let place = |c: &mut AppController, choice: WindowTypeChoice| {
         c.select_opening_tool(OpeningToolKind::Window);
         c.openings_pointer_down(5.0, -0.2, 0.5);
-        c.place_opening(1.0, 1.2, None, choice, Overshading::Average, Vec::new())
-            .expect("window places");
+        c.place_opening(
+            1.0,
+            1.2,
+            None,
+            None,
+            choice,
+            Overshading::Average,
+            Vec::new(),
+        )
+        .expect("window places");
         c.materialize();
     };
 
@@ -10383,6 +10398,7 @@ fn overshading_is_applied_per_window_at_placement() {
             1.0,
             1.2,
             None,
+            None,
             WindowTypeChoice::default(),
             overshading,
             Vec::new(),
@@ -10426,6 +10442,7 @@ fn window_photo_is_attached_at_placement() {
     c.place_opening(
         1.0,
         1.2,
+        None,
         None,
         WindowTypeChoice::New {
             glazing: ber_model::ber::fenestration::Glazing::Double,
@@ -10480,6 +10497,7 @@ fn failed_placement_discards_copied_photos() {
     let r = c.place_opening(
         999.0,
         1.2,
+        None,
         None,
         WindowTypeChoice::New {
             glazing: Glazing::Double,
@@ -10598,7 +10616,10 @@ fn place_door_sidelights_overall_mode() {
     c.openings_pointer_down(5.0, -0.2, 0.5);
     // In Overall mode the box asks for overall W/H, door W/H, and one sill.
     let p = c
-        .opening_fields_prompt(DoorSidelightsMode::Overall)
+        .opening_fields_prompt(
+            DoorSidelightsMode::Overall,
+            ber_model::ber::fenestration::ComplexWindowKind::default(),
+        )
         .expect("placement staged");
     assert_eq!(p.fields.len(), 5, "overall W/H + door W/H + sill");
     assert_eq!(p.door_sidelights, Some(DoorSidelightsMode::Overall));
@@ -10613,6 +10634,7 @@ fn place_door_sidelights_overall_mode() {
             sill: Some(0.15),
             transom_semicircular: false,
         }),
+        None,
         WindowTypeChoice::default(),
         Overshading::Average,
         Vec::new(),
@@ -10653,6 +10675,74 @@ fn place_door_sidelights_overall_mode() {
         (transom.height_m - 0.35).abs() < 1e-3,
         "transom height = overall − door, got {}",
         transom.height_m
+    );
+}
+
+/// Complex window: the tool places a single window carrying a non-rectangular
+/// shape, with its bounding box derived from the shape's minimal dimensions and
+/// its `vertices` tessellated (so curves are >4 points).
+#[test]
+fn place_complex_window_shapes() {
+    use ber_model::ber::fenestration::{ComplexWindowKind, Overshading, WindowShape};
+    let mut c = dimensioned_square_controller();
+    c.materialize();
+    c.set_openings_mode(true);
+    c.set_openings_tool(OpeningToolKind::ComplexWindow);
+
+    // A circular window — one diameter (0.6) → a 0.6 × 0.6 box, Circular shape.
+    c.openings_pointer_down(3.0, -0.2, 0.5);
+    c.place_opening(
+        0.0,
+        0.0,
+        None,
+        Some(ComplexWindowPlacement {
+            kind: ComplexWindowKind::Circular,
+            dims: vec![0.6],
+        }),
+        WindowTypeChoice::default(),
+        Overshading::Average,
+        Vec::new(),
+    )
+    .expect("circular window places");
+    // A rounded-top window — [width 1.0, rect-h 1.0, rise 0.3] → 1.0 × 1.3 box.
+    c.openings_pointer_down(7.0, -0.2, 0.5);
+    c.place_opening(
+        0.0,
+        0.0,
+        None,
+        Some(ComplexWindowPlacement {
+            kind: ComplexWindowKind::RoundedTop,
+            dims: vec![1.0, 1.0, 0.3],
+        }),
+        WindowTypeChoice::default(),
+        Overshading::Average,
+        Vec::new(),
+    )
+    .expect("rounded-top window places");
+    c.materialize();
+
+    let storey = &c.current_record.as_ref().unwrap().data.storeys[0];
+    let circ = storey
+        .windows
+        .iter()
+        .find(|w| w.shape == WindowShape::Circular)
+        .expect("circular window");
+    assert!((circ.width_m - 0.6).abs() < 1e-4 && (circ.height_m - 0.6).abs() < 1e-4);
+    assert!(
+        circ.vertices.len() > 8,
+        "circle tessellated, got {} verts",
+        circ.vertices.len()
+    );
+    let rt = storey
+        .windows
+        .iter()
+        .find(|w| matches!(w.shape, WindowShape::RoundedTop { .. }))
+        .expect("rounded-top window");
+    assert!(
+        (rt.width_m - 1.0).abs() < 1e-4 && (rt.height_m - 1.3).abs() < 1e-4,
+        "bbox = width × (rect + rise), got {}×{}",
+        rt.width_m,
+        rt.height_m
     );
 }
 

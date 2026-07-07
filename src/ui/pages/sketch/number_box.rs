@@ -32,7 +32,8 @@ use egui::{Align2, Color32, Id, RichText};
 
 use super::{SketchEvent, SketchView};
 use crate::controller::app_controller::{
-    DoorSidelightsMode, DoorSidelightsPlacement, ExistingWindowType, WindowTypeChoice,
+    ComplexWindowPlacement, DoorSidelightsMode, DoorSidelightsPlacement, ExistingWindowType,
+    WindowTypeChoice,
 };
 use crate::number_entry::bluetooth::{LaserSource, Status};
 use crate::number_entry::{apply, parse_dimension_expression, Key};
@@ -40,7 +41,9 @@ use crate::ui::pages::events::UiEvent;
 use crate::ui::widgets::HintExt;
 use crate::ui::widgets::{photo_button_pair, text_input, PhotoQuality};
 use ber_model::ber::common::ItemId;
-use ber_model::ber::fenestration::{Frame, Glazing, Overshading};
+use ber_model::ber::fenestration::{
+    window_shape_area, window_shape_from_inputs, ComplexWindowKind, Frame, Glazing, Overshading,
+};
 use ber_model::ber::openings::SidelightLayout;
 
 /// Minimum finger-target size for keypad keys (mirrors the on-screen pads).
@@ -195,6 +198,22 @@ pub(super) fn render<F: FnMut(UiEvent)>(
         let ds_mode = prompt.door_sidelights;
         let (left_present, right_present) =
             (*view.sidelight_left_present, *view.sidelight_right_present);
+        // Complex-window shape kind (`None` for every other tool), captured by
+        // value into the Place event. A live area readout of the current dims is
+        // shown as the box subtitle.
+        let cx_kind = prompt.complex_window;
+        let cx_area_label = cx_kind.map(|kind| {
+            let d = |s: &str| parse_dimension_expression(s).unwrap_or(0.0);
+            let dims = [
+                d(view.opening_width_input),
+                d(view.opening_height_input),
+                d(view.window_shape_c_input),
+                d(view.window_shape_d_input),
+            ];
+            let n = kind.field_labels().len().min(dims.len());
+            let (w, h, shape) = window_shape_from_inputs(kind, &dims[..n]);
+            format!("area ≈ {:.2} m²", window_shape_area(shape, w, h))
+        });
         // The window-type choice settled on a previous frame (the picker below
         // mutates it for the NEXT frame; a Place click reads the settled value),
         // captured by value into the action events.
@@ -243,10 +262,18 @@ pub(super) fn render<F: FnMut(UiEvent)>(
                     transom_semicircular: semicircular,
                 }),
             };
+            // A complex window carries its shape kind + the ordered dim inputs;
+            // the controller derives the bounding box + shape from them.
+            let complex_window = cx_kind.map(|kind| {
+                let n = kind.field_labels().len();
+                let dims = (0..n).map(|i| g(i).unwrap_or(0.0)).collect();
+                ComplexWindowPlacement { kind, dims }
+            });
             SketchEvent::PlaceOpening {
                 width_m,
                 height_m,
                 door_sidelights,
+                complex_window,
                 window_type: place_window_type.clone(),
                 overshading,
                 photos: place_photos.clone(),
@@ -378,7 +405,31 @@ pub(super) fn render<F: FnMut(UiEvent)>(
                     measurable: true,
                 });
             }
-            None => {}
+            // Not door+sidelights. A complex window binds its 3rd/4th dims to the
+            // shape buffers (fields 0/1 already took width/height above); a plain
+            // window/door has only the two fields, so this is a no-op there.
+            None => {
+                if f.len() > 2 {
+                    box_fields.push(BoxField {
+                        label: &f[2].label,
+                        hint: f[2].hint,
+                        buf: &mut *view.window_shape_c_input,
+                        required: f[2].required,
+                        enabled: true,
+                        measurable: true,
+                    });
+                }
+                if f.len() > 3 {
+                    box_fields.push(BoxField {
+                        label: &f[3].label,
+                        hint: f[3].hint,
+                        buf: &mut *view.window_shape_d_input,
+                        required: f[3].required,
+                        enabled: true,
+                        measurable: true,
+                    });
+                }
+            }
         }
         // A NEW window type's YEAR + GAP: typed, non-measurable values. As box
         // fields they're driven by the box's OWN keypad (no second pad), and the
@@ -480,11 +531,16 @@ pub(super) fn render<F: FnMut(UiEvent)>(
             .door_sidelights
             .is_some()
             .then_some(&mut view.cat_state.door_sidelights_mode);
+        // The shape dropdown — only for the Complex-window tool, at the box top.
+        let cx_kind_toggle: Option<&mut ComplexWindowKind> = prompt
+            .complex_window
+            .is_some()
+            .then_some(&mut view.cat_state.complex_window_kind);
         show_box_multi(
             ctx,
             rect,
             &title,
-            None,
+            cx_area_label.as_deref(),
             error,
             &mut box_fields,
             &mut checks,
@@ -492,6 +548,7 @@ pub(super) fn render<F: FnMut(UiEvent)>(
             &mut view.cat_state.input_mode,
             &mut view.cat_state.input_mode_pinned,
             ds_mode_toggle,
+            cx_kind_toggle,
             view.laser,
             &mut picker,
             extra_valid,
@@ -1252,6 +1309,7 @@ fn show_box<F: FnMut(UiEvent)>(
         mode,
         mode_pinned,
         None,
+        None,
         laser,
         &mut |_| {},
         true,
@@ -1279,6 +1337,9 @@ fn show_box_multi<F: FnMut(UiEvent)>(
     // The Door + sidelights Overall/Detailed switch, drawn under the keypad/laser
     // toggle. `None` for every other prompt (no switch shown).
     ds_mode: Option<&mut DoorSidelightsMode>,
+    // The Complex-window shape dropdown, drawn under the toggles. `None` for
+    // every other prompt.
+    cx_kind: Option<&mut ComplexWindowKind>,
     laser: &mut LaserSource,
     // Extra controls drawn in the box body, under the toggles and above the
     // keypad — e.g. the openings window-type picker. A no-op for most prompts.
@@ -1314,6 +1375,9 @@ fn show_box_multi<F: FnMut(UiEvent)>(
             mode_toggle(ui, mode, mode_pinned);
             if let Some(ds_mode) = ds_mode {
                 door_sidelights_mode_toggle(ui, ds_mode);
+            }
+            if let Some(cx_kind) = cx_kind {
+                complex_window_shape_dropdown(ui, cx_kind);
             }
             if let Some(sub) = subtitle {
                 ui.label(RichText::new(sub).color(Color32::from_gray(170)));
@@ -1597,6 +1661,23 @@ fn door_sidelights_mode_toggle(ui: &mut egui::Ui, mode: &mut DoorSidelightsMode)
         {
             *mode = DoorSidelightsMode::Detailed;
         }
+    });
+    ui.separator();
+}
+
+/// The Complex-window shape dropdown, under the input-mode toggle. Picking a
+/// shape reshapes the box's fields on the next frame. The choice persists on
+/// `CategoryUiState`, so it sticks across placements.
+fn complex_window_shape_dropdown(ui: &mut egui::Ui, kind: &mut ComplexWindowKind) {
+    ui.horizontal(|ui| {
+        ui.label("Shape");
+        egui::ComboBox::from_id_salt("complex_window_shape")
+            .selected_text(kind.label())
+            .show_ui(ui, |ui| {
+                for k in ComplexWindowKind::ALL {
+                    ui.selectable_value(kind, k, k.label());
+                }
+            });
     });
     ui.separator();
 }
