@@ -1326,6 +1326,24 @@ impl AppController {
         group: usize,
         insulation: Option<CeilingInsulation>,
     ) {
+        if self
+            .structure_edit
+            .as_ref()
+            .and_then(|e| e.groups.get(group))
+            .map(|g| g.ty.kind())
+            != Some(SurfaceKind::Ceilings)
+        {
+            return;
+        }
+        // Apply any pending type / make-up FIRST. Those writes go to the durable
+        // store and only land on the region's construction at the next
+        // materialize; until then the region still points at its OLD construction.
+        // Without this, an insulation set in the SAME session lands on that old
+        // construction and is orphaned when materialize re-points the region — so
+        // the completeness counter stays stuck (e.g. 0/3) until the "unknown" box
+        // is toggled off and on again. Materializing first makes the region's
+        // construction current, so the insulation lands where it's read from.
+        self.materialize();
         let ids = match self
             .structure_edit
             .as_ref()

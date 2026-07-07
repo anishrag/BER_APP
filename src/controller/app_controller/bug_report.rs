@@ -111,6 +111,13 @@ impl AppController {
         // 3. Context: app version + platform, plus whatever the UI supplied.
         context.insert("appVersion".into(), env!("CARGO_PKG_VERSION").into());
         context.insert("platform".into(), std::env::consts::OS.into());
+        // Read-only geometry self-check — runs ONLY at capture, so no UX cost.
+        // Flags outline edges that are nearly (but not exactly) axis-aligned and
+        // corners that aren't square, so a "corner isn't 90°" report ships the
+        // diagnosis already computed (see `outline_geometry_warnings`).
+        if let Some(warnings) = self.outline_geometry_warnings() {
+            context.insert("geometryWarnings".into(), warnings);
+        }
 
         let meta = BugReportMeta {
             note,
@@ -136,6 +143,88 @@ impl AppController {
         } else {
             "Bug report saved to this device.".into()
         })
+    }
+
+    /// A read-only self-check of every storey's OUTLINE geometry, attached to a
+    /// bug report so a "corner isn't 90°" case ships with the diagnosis already
+    /// done. Returns a compact JSON string of anomalies, or `None` when the
+    /// outlines are clean. Purely diagnostic — never mutates, and runs only when
+    /// a report is captured, so it has zero effect on normal use.
+    ///
+    /// Flags two things per outline:
+    /// - **near-axis edges**: an edge within 15° of horizontal/vertical but off
+    ///   by more than 0.3° — i.e. it's meant to be square but its two endpoints
+    ///   don't share the axis coordinate (the exact n5 symptom: a long, nearly-
+    ///   horizontal wall with a few-cm rise);
+    /// - **corners** whose interior angle isn't ~90° (and isn't a straight run).
+    pub(super) fn outline_geometry_warnings(&self) -> Option<String> {
+        use domain::points::Point2f32;
+        let axis_dev = |dx: f64, dy: f64| -> f64 {
+            // Distance (deg) of the edge direction to the nearest axis (0..45).
+            let m = dy.atan2(dx).to_degrees().rem_euclid(90.0);
+            m.min(90.0 - m)
+        };
+        let mut edges: Vec<serde_json::Value> = Vec::new();
+        let mut corners: Vec<serde_json::Value> = Vec::new();
+        for (si, sd) in self.document.storeys.iter().enumerate() {
+            let pts: Vec<Point2f32> = sd.outline.floor_plan.get_points();
+            let n = pts.len();
+            if n < 3 {
+                continue;
+            }
+            for i in 0..n {
+                let a = pts[i];
+                let b = pts[(i + 1) % n];
+                let (dx, dy) = ((b.x - a.x) as f64, (b.y - a.y) as f64);
+                let len = (dx * dx + dy * dy).sqrt();
+                if len < 0.2 {
+                    continue; // ignore slivers / duplicate points
+                }
+                let dev = axis_dev(dx, dy);
+                if dev > 0.3 && dev < 15.0 {
+                    let horizontal = dx.abs() > dy.abs();
+                    edges.push(serde_json::json!({
+                        "storey": si,
+                        "edge": i,
+                        "from": [a.x, a.y],
+                        "to": [b.x, b.y],
+                        "lengthM": (len * 1000.0).round() / 1000.0,
+                        "deviationDeg": (dev * 100.0).round() / 100.0,
+                        "coordGapM": (((if horizontal { dy } else { dx }).abs()) * 1000.0).round() / 1000.0,
+                        "axis": if horizontal { "horizontal" } else { "vertical" },
+                    }));
+                }
+            }
+            for i in 0..n {
+                let a = pts[(i + n - 1) % n];
+                let b = pts[i];
+                let c = pts[(i + 1) % n];
+                let (v1x, v1y) = ((b.x - a.x) as f64, (b.y - a.y) as f64);
+                let (v2x, v2y) = ((c.x - b.x) as f64, (c.y - b.y) as f64);
+                let dot = v1x * v2x + v1y * v2y;
+                let cross = v1x * v2y - v1y * v2x;
+                let interior = cross.abs().atan2(dot).to_degrees();
+                // Off 90° but not a (near-)straight run through the vertex.
+                if (interior - 90.0).abs() > 1.0 && interior > 5.0 && interior < 175.0 {
+                    corners.push(serde_json::json!({
+                        "storey": si,
+                        "vertex": i,
+                        "at": [b.x, b.y],
+                        "interiorDeg": (interior * 100.0).round() / 100.0,
+                    }));
+                }
+            }
+        }
+        if edges.is_empty() && corners.is_empty() {
+            return None;
+        }
+        Some(
+            serde_json::json!({
+                "nonOrthogonalEdges": edges,
+                "cornersOffFrom90": corners,
+            })
+            .to_string(),
+        )
     }
 
     /// Trigger an immediate upload attempt (e.g. WiFi came up). No-op if off.

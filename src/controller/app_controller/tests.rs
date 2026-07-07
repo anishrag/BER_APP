@@ -16920,3 +16920,72 @@ fn seed_select_tool_reseeds_across_storey_switch() {
         "returning re-seeds the upper storey's walls — the tool never lies"
     );
 }
+
+/// n2 (field report): setting a ceiling's type + make-up and THEN its insulation
+/// in the same edit session must complete the ceiling immediately — the
+/// completeness counter shouldn't stay stuck (0/N) until the "unknown" box is
+/// toggled off and on again. (Insulation used to land on the region's pre-
+/// materialize construction and get orphaned.)
+#[test]
+fn ceiling_insulation_completes_counter_same_session() {
+    use ber_model::ber::structural::{
+        CeilingConstructionType, CeilingInsulation, ConstructionMakeup, ConstructionType,
+    };
+    let mut c = dimensioned_square_controller();
+    c.set_default_ceiling_height(2.7).unwrap();
+    c.materialize();
+    set_only_kind(&mut c, SurfaceKind::Ceilings);
+    c.set_structure_select_mode(Some(SelectMode::All));
+    c.begin_structure_edit();
+    let phase = c.structure_edit().unwrap().groups[0].phase.clone();
+    c.set_structure_group_attrs(
+        0,
+        ConstructionType::Ceiling(CeilingConstructionType::FlatRoof),
+        ConstructionMakeup::Default,
+        phase,
+    );
+    // Type + make-up done, insulation still missing → not complete yet.
+    assert_eq!(
+        c.structure_progress().ceilings.0,
+        0,
+        "insulation still missing"
+    );
+    // Tick "unknown" — completes the ceiling in the SAME session, no re-toggle.
+    c.set_structure_group_insulation(0, Some(CeilingInsulation::Unknown));
+    let (done, total) = c.structure_progress().ceilings;
+    assert_eq!(done, total, "unknown insulation completes it immediately");
+    assert!(total >= 1);
+    // And it survives a further materialize (didn't just transiently show).
+    c.materialize();
+    assert_eq!(
+        c.structure_progress().ceilings.0,
+        c.structure_progress().ceilings.1,
+        "still complete after a re-resolve"
+    );
+}
+
+/// The bug-report geometry self-check flags a near-axis-but-tilted outline edge
+/// (and the off-90° corners), so a "corner isn't 90°" report ships the
+/// diagnosis. Clean square outlines produce no warning.
+#[test]
+fn bug_report_flags_non_orthogonal_outline() {
+    use manip_plan::FloorPlan;
+    let p = |x: f32, y: f32| Point2f32::new(x, y);
+    let mut c = dimensioned_square_controller();
+    // A clean orthogonal outline → no warnings.
+    assert!(
+        c.outline_geometry_warnings().is_none(),
+        "clean square is fine"
+    );
+
+    // Inject a top edge tilted 0.57° (endpoints y 5.0 vs 5.1 — a 100mm rise
+    // that the distance-based merge leaves in place).
+    c.document.storeys[0].outline.floor_plan =
+        FloorPlan::from_clean_ring(&[p(0.0, 0.0), p(10.0, 0.0), p(10.0, 5.0), p(0.0, 5.1)])
+            .unwrap();
+    let w = c
+        .outline_geometry_warnings()
+        .expect("a tilted edge is flagged");
+    assert!(w.contains("nonOrthogonalEdges"), "reports the edge: {w}");
+    assert!(w.contains("deviationDeg"), "with its deviation: {w}");
+}
