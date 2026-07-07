@@ -114,6 +114,9 @@ impl AppController {
     /// exposure / phase / floor-step modes. Leaving clears any half-finished
     /// line or carved area.
     pub fn set_ceiling_step_mode(&mut self, on: bool) {
+        // Leaving the outline draw tool: drop any un-decided re-draw stroke
+        // (a stray second outline) so it doesn't linger on the canvas. (n3)
+        self.pending_redraw = None;
         if on && !self.ceiling_step_available() {
             return;
         }

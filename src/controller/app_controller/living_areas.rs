@@ -53,6 +53,9 @@ impl AppController {
     /// living-area mode activates the most-recent living area (if any); leaving
     /// returns to the outline.
     pub fn set_living_area_mode(&mut self, on: bool) {
+        // Leaving the outline draw tool: drop any un-decided re-draw stroke
+        // (a stray second outline) so it doesn't linger on the canvas. (n3)
+        self.pending_redraw = None;
         self.living_area_mode = on;
         self.pending_cut = None;
         if on {

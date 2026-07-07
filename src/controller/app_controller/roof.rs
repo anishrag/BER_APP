@@ -79,6 +79,9 @@ impl AppController {
     /// roof depends on the full stack to know the top storey everywhere).
     /// Mutually exclusive with the other Mapping modes.
     pub fn set_roof_mode(&mut self, on: bool) {
+        // Leaving the outline draw tool: drop any un-decided re-draw stroke
+        // (a stray second outline) so it doesn't linger on the canvas. (n3)
+        self.pending_redraw = None;
         self.roof_mode = on;
         self.roof_selected.clear();
         self.pending_roof_area = None;

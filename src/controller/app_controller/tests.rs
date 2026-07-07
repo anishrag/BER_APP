@@ -16989,3 +16989,21 @@ fn bug_report_flags_non_orthogonal_outline() {
     assert!(w.contains("nonOrthogonalEdges"), "reports the edge: {w}");
     assert!(w.contains("deviationDeg"), "with its deviation: {w}");
 }
+
+/// n3 (field report): a stray second outline stroke (a `pending_redraw` awaiting
+/// the replace/add/discard decision) is dropped when the assessor switches to
+/// another mapping tool — it shouldn't linger on the canvas.
+#[test]
+fn stray_redraw_clears_when_switching_mapping_tool() {
+    let mut c = dimensioned_square_controller();
+    c.pending_redraw = Some(super::strokes::PendingRedraw {
+        stroke_points: vec![Point2f32::new(0.0, 0.0), Point2f32::new(2.0, 2.0)],
+        closed: true,
+    });
+    assert!(c.has_pending_redraw(), "a stray re-draw is pending");
+    c.set_openings_mode(true); // switch to another tool = "left draw-walls mode"
+    assert!(
+        !c.has_pending_redraw(),
+        "switching mapping tool discards the stray re-draw"
+    );
+}

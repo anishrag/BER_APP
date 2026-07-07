@@ -249,6 +249,9 @@ impl AppController {
     /// Enter/leave windows/doors mode. Mutually exclusive with the other area
     /// tools (mirrors `set_exposure_mode`).
     pub fn set_openings_mode(&mut self, on: bool) {
+        // Leaving the outline draw tool: drop any un-decided re-draw stroke
+        // (a stray second outline) so it doesn't linger on the canvas. (n3)
+        self.pending_redraw = None;
         self.close_wall_partition();
         self.openings_mode = on;
         self.pending_opening = None;

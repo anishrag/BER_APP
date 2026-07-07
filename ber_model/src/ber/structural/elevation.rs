@@ -1,8 +1,10 @@
 //! External per-side ELEVATIONS — the Stage-1 review's view of one building
 //! side: every wall (across all storeys) whose outward normal faces the side,
 //! stacked by storey height, with its openings, projected onto a vertical view
-//! plane. Facing-walls-only: there is NO occlusion, so a concave wing can show a
-//! wall a real photo wouldn't — adequate for the convex/rectangular common case.
+//! plane. Wall PANELS are facing-only (no panel occlusion), but an OPENING that
+//! a NEARER facing wall fully covers is dropped — so a recessed return wall's
+//! window doesn't show through the wall standing in front of it, matching what a
+//! camera pointed at that side would (and wouldn't) see.
 //!
 //! Pure coordinate math over the resolved model (reuses [`WallRegion::base_edge`]
 //! / [`base_frame`](WallRegion::base_frame) / [`top_profile`](WallRegion::top_profile)
@@ -112,7 +114,8 @@ impl Ber {
     /// projected onto the side's horizontal view axis `h = (-n.y, n.x)` (whose
     /// handedness matches a viewer standing OUTSIDE the side looking in). A
     /// wall's outward normal is the base-edge perpendicular flipped to point
-    /// away from the storey's centroid. Facing-walls-only — no occlusion.
+    /// away from the storey's centroid. Wall panels are facing-only; an opening a
+    /// NEARER facing wall fully covers is dropped (the occlusion retain below).
     ///
     /// [`FACING_MIN`]: a wall counts as facing the side when its outward normal
     /// is within ~60° of the side's normal.
@@ -125,6 +128,9 @@ impl Ber {
 
         let mut panels: Vec<ElevPanel> = Vec::new();
         let mut openings: Vec<ElevOpening> = Vec::new();
+        // Per facing wall: (id, depth along +n, x0, x1, base_z, top_z) — used to
+        // occlude openings on walls that stand BEHIND a nearer facing wall.
+        let mut occ: Vec<(ItemId, f64, f64, f64, f64, f64)> = Vec::new();
         let (mut min_x, mut max_x) = (f64::INFINITY, f64::NEG_INFINITY);
         let (mut min_z, mut max_z) = (f64::INFINITY, f64::NEG_INFINITY);
 
@@ -217,6 +223,10 @@ impl Ber {
                     });
                 }
 
+                let depth = mx * n.0 + my * n.1;
+                let top_z = top.iter().map(|&(_, z)| z).fold(bz, f64::max);
+                occ.push((w.id, depth, xa.min(xb), xa.max(xb), bz, top_z));
+
                 panels.push(ElevPanel {
                     x0: xa.min(xb),
                     x1: xa.max(xb),
@@ -225,6 +235,34 @@ impl Ber {
                 });
             }
         }
+
+        // Opening occlusion: the viewer stands OUTSIDE the side (along +n), so a
+        // facing wall with GREATER depth is NEARER and hides what's behind it.
+        // Drop an opening that a nearer facing wall FULLY covers (in x AND z) —
+        // e.g. a window on a recessed return wall that the main wall stands in
+        // front of, which a camera wouldn't see. Partial overlaps are kept.
+        openings.retain(|op| {
+            let Some(od) = occ
+                .iter()
+                .find(|(wid, ..)| *wid == op.wall_id)
+                .map(|&(_, d, ..)| d)
+            else {
+                return true;
+            };
+            let (ox0, ox1) = (
+                op.x_center - op.width_m * 0.5,
+                op.x_center + op.width_m * 0.5,
+            );
+            let (oz0, oz1) = (op.sill_z, op.sill_z + op.height_m);
+            !occ.iter().any(|&(wid, d, x0, x1, bz, tz)| {
+                wid != op.wall_id
+                    && d > od + 1e-6
+                    && x0 <= ox0 + 1e-6
+                    && x1 >= ox1 - 1e-6
+                    && bz <= oz0 + 1e-6
+                    && tz >= oz1 - 1e-6
+            })
+        });
 
         if panels.is_empty() {
             return SideElevation::empty(side);

@@ -23,6 +23,9 @@ impl AppController {
     /// mutually exclusive with living-area / exposure / phase modes. Leaving
     /// clears any half-finished pick.
     pub fn set_step_mode(&mut self, on: bool) {
+        // Leaving the outline draw tool: drop any un-decided re-draw stroke
+        // (a stray second outline) so it doesn't linger on the canvas. (n3)
+        self.pending_redraw = None;
         self.step_mode = on;
         self.abandon_step_shape();
         if on {

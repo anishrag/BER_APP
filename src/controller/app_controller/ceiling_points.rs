@@ -85,6 +85,9 @@ impl AppController {
     /// mutually exclusive with living-area / exposure / phase / floor-step /
     /// ceiling-step modes. Leaving clears any half-finished point.
     pub fn set_roof_point_mode(&mut self, on: bool) {
+        // Leaving the outline draw tool: drop any un-decided re-draw stroke
+        // (a stray second outline) so it doesn't linger on the canvas. (n3)
+        self.pending_redraw = None;
         if on && !self.ceiling_point_available() {
             return;
         }

@@ -128,6 +128,9 @@ impl AppController {
     /// envelope, so entering forces the outline active (and leaves living-area
     /// mode). All selection/drag state is cleared.
     pub fn set_exposure_mode(&mut self, on: bool) {
+        // Leaving the outline draw tool: drop any un-decided re-draw stroke
+        // (a stray second outline) so it doesn't linger on the canvas. (n3)
+        self.pending_redraw = None;
         // The wall-face partition view lives under exposure mode; leaving (or
         // re-entering) exposure must not leave it stranded over another tool.
         self.close_wall_partition();
