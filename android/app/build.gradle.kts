@@ -54,6 +54,17 @@ android {
 }
 
 dependencies {
+    // Kotlin 1.8 folded the jdk7/jdk8 stdlib add-ons into the main kotlin-stdlib.
+    // CameraX / androidx.activity pull kotlin-stdlib:1.8.22, while an older
+    // transitive dep still pulls the split kotlin-stdlib-jdk7/jdk8:1.6.21 — so the
+    // now-merged classes duplicate (checkDebugDuplicateClasses fails). Force the
+    // split artifacts up to 1.8.22, where they're empty stubs that just redirect
+    // to the main stdlib, and the duplicates disappear.
+    constraints {
+        implementation("org.jetbrains.kotlin:kotlin-stdlib-jdk7:1.8.22")
+        implementation("org.jetbrains.kotlin:kotlin-stdlib-jdk8:1.8.22")
+    }
+
     // In-app camera (CameraActivity): CameraX preview + capture with an app-owned
     // flash toggle, replacing the hand-off to the system camera app (which owned
     // flash). `activity` gives CameraActivity a ComponentActivity base, which is
