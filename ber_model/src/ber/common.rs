@@ -61,6 +61,14 @@ impl ExternalSide {
             ExternalSide::Back => "Back",
         }
     }
+
+    /// Whether a photo of this side is REQUIRED for the External-photos gate.
+    /// Front + Back are mandatory; Left + Right are optional (often not
+    /// accessible on a mid-terrace or a tight boundary). Single source of truth
+    /// for both the completeness gate and the UI's required/optional labelling.
+    pub fn photo_required(self) -> bool {
+        matches!(self, ExternalSide::Front | ExternalSide::Back)
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]

@@ -13785,9 +13785,9 @@ fn ceiling_exposure_carve_snaps_to_roof_division_through_carve_or_cut() {
 
 // ── External photos ─────────────────────────────────────────────────────────
 
-/// Adding a photo for each of the four sides completes the external-photos gate
-/// and turns the "External photos" checklist row green; missing one leaves it
-/// red. Re-adding a side REPLACES rather than duplicating.
+/// Front + Back complete the external-photos gate (Left + Right are OPTIONAL):
+/// the checklist row goes green once both required sides are present and red if
+/// one is missing. Re-adding a side REPLACES rather than duplicating.
 #[test]
 fn external_photos_gate_and_checklist_row() {
     use ber_model::ber::common::ExternalSide;
@@ -13814,20 +13814,36 @@ fn external_photos_gate_and_checklist_row() {
     );
     assert!(!c.external_photos_complete());
 
-    // Three of four sides → still incomplete, mapping not complete.
-    c.add_external_photo(ExternalSide::Front, &src, PhotoQuality::Full);
+    // The OPTIONAL sides alone (Left + Right) don't satisfy the gate — Front +
+    // Back are the required ones.
     c.add_external_photo(ExternalSide::Right, &src, PhotoQuality::Full);
     c.add_external_photo(ExternalSide::Left, &src, PhotoQuality::Full);
-    assert!(!c.external_photos_complete(), "three sides is not enough");
+    assert!(
+        !c.external_photos_complete(),
+        "the optional sides don't satisfy the gate"
+    );
     assert_eq!(
         checklist_status_of(&c, "External photos"),
         ChecklistStatus::Incomplete
     );
-    assert!(!c.mapping_complete(), "missing a side blocks Mapping");
 
-    // The fourth side completes the gate → row green.
+    // Front but not yet Back → still incomplete, Mapping blocked.
+    c.add_external_photo(ExternalSide::Front, &src, PhotoQuality::Full);
+    assert!(
+        !c.external_photos_complete(),
+        "Front without Back is not enough"
+    );
+    assert!(
+        !c.mapping_complete(),
+        "a missing required side blocks Mapping"
+    );
+
+    // Back completes the required pair → row green (Left/Right were never needed).
     c.add_external_photo(ExternalSide::Back, &src, PhotoQuality::Full);
-    assert!(c.external_photos_complete(), "all four sides present");
+    assert!(
+        c.external_photos_complete(),
+        "Front + Back complete the gate; Left/Right are optional"
+    );
     assert_eq!(
         checklist_status_of(&c, "External photos"),
         ChecklistStatus::AllStoreys

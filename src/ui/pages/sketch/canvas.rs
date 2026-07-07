@@ -2725,6 +2725,9 @@ fn external_photos_button<F: FnMut(UiEvent)>(
         .order(egui::Order::Foreground)
         .pivot(egui::Align2::RIGHT_BOTTOM)
         .fixed_pos(rect.right_bottom() + egui::vec2(-8.0, -8.0))
+        // Keep the whole panel inside the canvas — anchored bottom-right it grows
+        // UP, so without this it can run off the top of the screen.
+        .constrain_to(rect)
         .show(ui.ctx(), |ui| {
             egui::Frame::popup(ui.style()).show(ui, |ui| {
                 ui.vertical(|ui| {
@@ -2738,9 +2741,11 @@ fn external_photos_button<F: FnMut(UiEvent)>(
                             // With all four sides holding a ~150px thumbnail the
                             // list would grow up past the top of the screen (the
                             // panel is anchored bottom-right and grows UP), taking
-                            // the header with it. Cap it to the canvas height and
-                            // scroll the list instead.
-                            let max_h = (rect.height() - 96.0).clamp(160.0, 600.0);
+                            // the header with it. Fill the available canvas height
+                            // (minus room for the header + frame chrome) so the
+                            // opened panel is as LARGE as fits without being cut
+                            // off, and scroll only when it can't all show.
+                            let max_h = (rect.height() - 140.0).max(220.0);
                             egui::ScrollArea::vertical()
                                 .max_height(max_h)
                                 .show(ui, |ui| {
@@ -2749,11 +2754,16 @@ fn external_photos_button<F: FnMut(UiEvent)>(
                                             Some(_) => {
                                                 ui.label(format!("✓ {}", side.label()));
                                             }
-                                            None => {
+                                            None if side.photo_required() => {
                                                 ui.colored_label(
                                                     egui::Color32::from_rgb(220, 120, 120),
                                                     format!("✗ {}: missing", side.label()),
                                                 );
+                                            }
+                                            None => {
+                                                // Left / Right are optional — a neutral
+                                                // prompt, no red "missing" nag.
+                                                ui.weak(format!("○ {} (optional)", side.label()));
                                             }
                                         });
                                         // Thumbnail preview of the stored photo (prefer the

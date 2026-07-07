@@ -3,8 +3,9 @@
 //! entries with `side == Some(_)`, so they serialize with the record and the
 //! existing persist/autosave path writes them — no dedicated SQL hook.
 //!
-//! The "External photos" Mapping checklist row is complete only when ALL FOUR
-//! sides have a photo (a dwelling-level gate, like the living area).
+//! The "External photos" Mapping checklist row is complete once the REQUIRED
+//! sides (Front + Back) have a photo; Left + Right are optional (a dwelling-level
+//! gate, like the living area).
 //!
 //! Capture is the SHARED photo module: the UI's `photo_button` widget hands the
 //! controller a captured/picked file path (desktop file dialog / Android camera
@@ -211,8 +212,10 @@ impl AppController {
             .collect()
     }
 
-    /// Whether ALL FOUR external sides have a photo — the dwelling-level gate
-    /// for the "External photos" Mapping checklist row.
+    /// Whether the REQUIRED external sides have a photo — the dwelling-level gate
+    /// for the "External photos" Mapping checklist row. Front + Back are
+    /// mandatory; Left + Right are OPTIONAL (a mid-terrace or otherwise
+    /// inaccessible dwelling often has no reachable side elevations).
     pub fn external_photos_complete(&self) -> bool {
         let Some(record) = self.current_record.as_ref() else {
             return false;
@@ -220,6 +223,7 @@ impl AppController {
         let photos = &record.data.photos;
         ExternalSide::ALL
             .iter()
+            .filter(|s| s.photo_required())
             .all(|&side| photos.iter().any(|p| p.side == Some(side)))
     }
 }
