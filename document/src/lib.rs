@@ -148,9 +148,15 @@ pub struct ShapeSlot {
 }
 
 impl ShapeSlot {
-    /// Finalised — nothing left to dimension: no wall the dimensioning loop
-    /// would still prompt for. (The caller also checks the metre scale for the
-    /// outline; living areas inherit it.)
+    /// Finalised — nothing left to dimension AND nothing left to position: no
+    /// wall the dimensioning loop would still prompt for, and every free
+    /// position axis resolved. The position clause matters for a freshly-drawn
+    /// upper-storey outline: its wall LENGTHS can all be pinned while its
+    /// vertical PLACEMENT is still an open `Translate` prompt — that outline is
+    /// not finalised until the axis is resolved, so it re-prompts after reload.
+    /// (The caller also checks the metre scale for the outline; living areas
+    /// inherit it, and their free axes are marked resolved at creation since
+    /// they're never position-prompted.)
     pub fn finalised(&self) -> bool {
         self.floor_plan
             .next_promptable_wall(
@@ -158,6 +164,11 @@ impl ShapeSlot {
                 &self.dimensioning.skipped_walls,
             )
             .is_none()
+            && self
+                .dimensioning
+                .position_free_axes
+                .iter()
+                .all(|a| self.dimensioning.position_resolved_axes.contains(a))
     }
 }
 
@@ -287,6 +298,19 @@ pub struct StoreyDoc {
     /// must stay within the storey outline. Transient (in-flight only).
     #[serde(skip)]
     pub subarea_containment_override: Option<FloorPlan>,
+
+    /// While a freshly-DRAWN upper-storey OUTLINE is being dimensioned, the
+    /// footprint of the storey BELOW — the reference the position loop measures
+    /// the outline's free axes against ("how far vertically is this box from the
+    /// wall below, or centre it"). The single-storey [`StoreyDoc`] doesn't hold
+    /// the storey below, so the controller re-supplies it (exactly like
+    /// [`subarea_containment_override`](Self::subarea_containment_override)):
+    /// after the carve, and again on reload for a not-yet-finalised upper
+    /// outline. Present ONLY for an in-flight upper outline with a free position
+    /// axis; `None` for a ground storey (no reference below → the outline is
+    /// never position-prompted). Transient — kept OUT of the snapshot.
+    #[serde(skip)]
+    pub position_reference_override: Option<FloorPlan>,
 
     /// Exposure SECTIONS of each OUTLINE perimeter wall, keyed by the wall's
     /// stable start `VertexId` (survives edits). Holds ONLY painted sections;
@@ -754,8 +778,19 @@ impl StoreyDoc {
         self.dimensioning = DimensionState::default();
         self.dimensioning.scale_set = true;
         self.floor_plan = new_plan;
+        // Mirror `pinned_slot_for`: promote the genuinely-FREE drawn walls to
+        // parameters (so the length loop can ask about them), THEN pin the walls
+        // shared with the storey below, THEN record which position axes that
+        // footprint does NOT pin. A full-width upper box pins X (its sides sit on
+        // the walls below) but leaves Y free — so after its length loop it must
+        // be asked where VERTICALLY to sit. Promotion is a representation change
+        // (constant → equal-valued param), so the pin / free-axis scans are
+        // unaffected; re-derive `known_params` afterwards (promotion adds params).
+        self.floor_plan.promote_free_walls(&prev_plan, ref_walls);
         self.dimensioning.known_params =
             prev_plan.params_pinned_to_outline(&self.floor_plan, ref_walls);
+        self.dimensioning.position_free_axes =
+            prev_plan.free_position_axes(&self.floor_plan, ref_walls);
         let active = self.floor_plan.all_active_params();
         Ok((self.dimensioning.known_params.len(), active.len()))
     }
@@ -828,7 +863,13 @@ impl StoreyDoc {
 
     /// Append `slot` as a new living area and make it the active shape (loading it
     /// into the live buffer, dropping any in-flight arc / edit cursor).
-    pub fn add_active_living_area(&mut self, slot: ShapeSlot) {
+    pub fn add_active_living_area(&mut self, mut slot: ShapeSlot) {
+        // A living area's position is ACCEPTED as drawn — it is never
+        // position-prompted — so mark its free axes resolved; otherwise
+        // `finalised()` (which now also requires the position resolved) would
+        // treat a fully-dimensioned interior living area as incomplete, breaking
+        // the `has_living_area` gate.
+        slot.dimensioning.position_resolved_axes = slot.dimensioning.position_free_axes.clone();
         self.living_areas.push(slot);
         self.active = ActiveShape::LivingArea(self.living_areas.len() - 1);
         self.load_active_into_buffer();

@@ -547,22 +547,147 @@ pub fn move_roof_window(storey: &mut Storey, window_id: ItemId, new_plan: (f32, 
     }
 }
 
-/// The ROOF window whose plan rectangle contains `(x, y)`, if any (topmost — the
-/// last added — wins). Used to pick a rooflight to drag/delete in the plan view.
+/// The four PLAN corners (CCW) of a roof window's footprint. The stored
+/// `width_m`/`height_m` are CEILING-PLANE measurements: **height runs UP the
+/// slope, width runs ACROSS it**. Laid out in the region's plane and projected
+/// straight down, the up-slope extent foreshortens by `cos(pitch)` while the
+/// across-slope extent is unchanged — so a rooflight the assessor measured on
+/// the slope keeps that true size instead of overshooting in plan. On a FLAT
+/// region (or one with no resolvable plane) this degenerates to the
+/// world-axis-aligned box (`cos = 1`, width → x, height → y), matching the
+/// legacy footprint exactly. Shared by the vertex derivation, the tap
+/// hit-test, and the fit check so all three see one footprint.
+pub(crate) fn roof_window_plan_corners(
+    region: &super::structural::CeilingRegion,
+    center: (f64, f64),
+    width_m: f64,
+    height_m: f64,
+) -> [(f64, f64); 4] {
+    let (cx, cy) = center;
+    let (hw, hh) = (width_m * 0.5, height_m * 0.5);
+    // Plane gradient `(gx, gy)` = tan(pitch) in the steepest-descent direction.
+    let (gx, gy) = super::structural::region_plane(region)
+        .map(|(_, gx, gy)| (gx, gy))
+        .unwrap_or((0.0, 0.0));
+    let g2 = gx * gx + gy * gy;
+    if g2 <= 1e-12 {
+        // Flat / degenerate plane: width along +x, height along +y (legacy box).
+        return [
+            (cx - hw, cy - hh),
+            (cx + hw, cy - hh),
+            (cx + hw, cy + hh),
+            (cx - hw, cy + hh),
+        ];
+    }
+    let gmag = g2.sqrt();
+    let down = (gx / gmag, gy / gmag); // up/down-slope plan unit direction
+    let across = (-down.1, down.0); // perpendicular — across the slope
+    let cos_pitch = 1.0 / (1.0 + g2).sqrt();
+    // HEIGHT foreshortens along the slope; WIDTH is unchanged across it.
+    let up = (down.0 * hh * cos_pitch, down.1 * hh * cos_pitch);
+    let ac = (across.0 * hw, across.1 * hw);
+    [
+        (cx - ac.0 - up.0, cy - ac.1 - up.1),
+        (cx + ac.0 - up.0, cy + ac.1 - up.1),
+        (cx + ac.0 + up.0, cy + ac.1 + up.1),
+        (cx - ac.0 + up.0, cy - ac.1 + up.1),
+    ]
+}
+
+/// Point-in-quad by ray casting — winding-agnostic, so it holds whichever way
+/// the slope-projected corners wind.
+fn point_in_quad(px: f64, py: f64, quad: &[(f64, f64); 4]) -> bool {
+    let mut inside = false;
+    let mut j = 3;
+    for i in 0..4 {
+        let (xi, yi) = quad[i];
+        let (xj, yj) = quad[j];
+        if ((yi > py) != (yj > py)) && (px < (xj - xi) * (py - yi) / (yj - yi) + xi) {
+            inside = !inside;
+        }
+        j = i;
+    }
+    inside
+}
+
+/// The ROOF window whose CEILING-PLANE footprint contains `(x, y)` in plan, if
+/// any (topmost — the last added — wins). Uses the same slope-projected
+/// footprint as the derived vertices ([`roof_window_plan_corners`]) so the
+/// drawn shape and the pick target stay identical on a sloped ceiling. Used to
+/// pick a rooflight to drag/delete in the plan view.
 pub fn roof_window_at(storey: &Storey, x: f32, y: f32) -> Option<ItemId> {
-    storey
-        .windows
-        .iter()
-        .rev()
-        .find_map(|w| match &w.placement {
-            Some(OpeningPlacement::Roof { plan, .. })
-                if (x - plan.0).abs() <= w.width_m / 2.0
-                    && (y - plan.1).abs() <= w.height_m / 2.0 =>
-            {
-                Some(w.id)
+    storey.windows.iter().rev().find_map(|w| {
+        let Some(OpeningPlacement::Roof { plan, .. }) = &w.placement else {
+            return None;
+        };
+        let region = storey
+            .ceilings
+            .region_strictly_containing(domain::points::Point2f64::new(
+                plan.0 as f64,
+                plan.1 as f64,
+            ))?;
+        let corners = roof_window_plan_corners(
+            region,
+            (plan.0 as f64, plan.1 as f64),
+            w.width_m as f64,
+            w.height_m as f64,
+        );
+        point_in_quad(x as f64, y as f64, &corners).then_some(w.id)
+    })
+}
+
+/// Roof windows whose ceiling-plane footprint spills off the single ceiling
+/// region they sit on — a rooflight larger than, or hanging past the edge of,
+/// its sloped surface. A footprint "fits" when all four plan corners
+/// ([`roof_window_plan_corners`]) still resolve to the SAME host region as the
+/// placement centre; a corner that lands on a neighbouring surface (across a
+/// ridge) or off every region means the rooflight overshoots. Surfaced through
+/// the "Windows" mapping gate so the assessor repositions, resizes, or rotates
+/// it to fit — the stored size/area is never silently changed. Empty = all fit.
+pub fn oversized_roof_windows(storey: &Storey) -> Vec<ItemId> {
+    let mut out = Vec::new();
+    for w in &storey.windows {
+        let Some(OpeningPlacement::Roof { plan, .. }) = &w.placement else {
+            continue;
+        };
+        let centre = (plan.0 as f64, plan.1 as f64);
+        let Some(host) = storey
+            .ceilings
+            .region_strictly_containing(domain::points::Point2f64::new(centre.0, centre.1))
+        else {
+            continue; // centre off every region (transient) — not a fit failure
+        };
+        let host_id = host.id;
+        let corners = roof_window_plan_corners(host, centre, w.width_m as f64, w.height_m as f64);
+        // Nudge each corner a hair toward the placement centre before the strict
+        // containment test: a rooflight sized flush to a ridge/eave has corners
+        // conceptually ON the shared boundary, which the epsilon-free predicate
+        // would read as `None` (off the region) after ~1e-7 m boolean-op / f32
+        // drift. `PROFILE_EPS_M` (0.1 mm) is above that noise and far below any
+        // real overshoot, so only a corner WELL past the boundary still flags.
+        let nudged = |(x, y): (f64, f64)| -> (f64, f64) {
+            let (dx, dy) = (centre.0 - x, centre.1 - y);
+            let d = (dx * dx + dy * dy).sqrt();
+            if d <= f64::EPSILON {
+                (x, y)
+            } else {
+                let t = (super::structural::PROFILE_EPS_M / d).min(1.0);
+                (x + dx * t, y + dy * t)
             }
-            _ => None,
-        })
+        };
+        let fits = corners.iter().all(|&corner| {
+            let (x, y) = nudged(corner);
+            storey
+                .ceilings
+                .region_strictly_containing(domain::points::Point2f64::new(x, y))
+                .map(|r| r.id)
+                == Some(host_id)
+        });
+        if !fits {
+            out.push(w.id);
+        }
+    }
+    out
 }
 
 /// Compose a door+sidelights assembly on a wall at `along_m` (centre): one
@@ -1385,14 +1510,12 @@ fn opening_vertices(
             let region = storey
                 .ceilings
                 .region_strictly_containing(domain::points::Point2f64::new(cx, cy))?;
-            let (hw, hh) = (width_m as f64 * 0.5, height_m as f64 * 0.5);
-            // Plan rectangle corners (CCW); lift each onto the region plane.
-            let corners = [
-                (cx - hw, cy - hh),
-                (cx + hw, cy - hh),
-                (cx + hw, cy + hh),
-                (cx - hw, cy + hh),
-            ];
+            // The stored size is a CEILING-PLANE measurement (height up-slope,
+            // width across): lay the footprint out in the region plane and lift
+            // each corner's z, so a slope foreshortens the plan extent instead
+            // of overshooting the surface.
+            let corners =
+                roof_window_plan_corners(region, (cx, cy), width_m as f64, height_m as f64);
             let flat = region.flat_z();
             let mut out = Vec::with_capacity(4);
             for (x, y) in corners {
@@ -1443,6 +1566,24 @@ mod tests {
             multi_storey: false,
             shape: WindowShape::Rectangular,
             overshading: Overshading::Average,
+        }
+    }
+
+    /// A ceiling region whose plane rises with +y: `z = base + grad·y` (a
+    /// mono-pitch face over the plan rectangle 0..4 × 0..2). `grad = √3` gives a
+    /// 60° pitch (`cos = 0.5`) — clean foreshortening for the assertions below.
+    fn sloped_ceiling(id: ItemId, base: f64, grad: f64) -> CeilingRegion {
+        CeilingRegion {
+            id,
+            polygon: Polygon3D::new(vec![
+                p3(0.0, 0.0, base),
+                p3(4.0, 0.0, base),
+                p3(4.0, 2.0, base + grad * 2.0),
+                p3(0.0, 2.0, base + grad * 2.0),
+            ]),
+            opes: Opes::default(),
+            construction_id: ItemId::default(),
+            exposure: CeilingExposure::default(),
         }
     }
 
@@ -1600,6 +1741,202 @@ mod tests {
     }
 
     #[test]
+    fn derive_roof_window_on_a_flat_ceiling_keeps_the_axis_aligned_box() {
+        let rid = ItemId::default();
+        let region = CeilingRegion {
+            id: rid,
+            polygon: Polygon3D::new(vec![
+                p3(0.0, 0.0, 2.7),
+                p3(4.0, 0.0, 2.7),
+                p3(4.0, 4.0, 2.7),
+                p3(0.0, 4.0, 2.7),
+            ]),
+            opes: Opes::default(),
+            construction_id: ItemId::default(),
+            exposure: CeilingExposure::default(),
+        };
+        let mut storey = Storey {
+            ceilings: CeilingRegions {
+                regions: vec![region],
+            },
+            windows: vec![window(
+                ItemId::default(),
+                1.0,
+                2.0,
+                Some(OpeningPlacement::Roof {
+                    ceiling_region_id: rid,
+                    plan: (2.0, 2.0),
+                }),
+            )],
+            ..Storey::default()
+        };
+        derive_opening_vertices(&mut storey);
+        let v = &storey.windows[0].vertices;
+        // Flat ceiling: NO foreshortening — width → x (±0.5), height → y (±1.0).
+        let (min_x, max_x) = v
+            .iter()
+            .fold((f32::MAX, f32::MIN), |(a, b), c| (a.min(c.0), b.max(c.0)));
+        let (min_y, max_y) = v
+            .iter()
+            .fold((f32::MAX, f32::MIN), |(a, b), c| (a.min(c.1), b.max(c.1)));
+        assert!(
+            ((max_x - min_x) - 1.0).abs() < 1e-4 && ((max_y - min_y) - 2.0).abs() < 1e-4,
+            "flat axis box: x-extent {}, y-extent {}",
+            max_x - min_x,
+            max_y - min_y
+        );
+    }
+
+    #[test]
+    fn derive_roof_window_foreshortens_up_the_slope() {
+        let rid = ItemId::default();
+        let grad = 3.0_f64.sqrt(); // 60° pitch → cos = 0.5
+        let mut storey = Storey {
+            ceilings: CeilingRegions {
+                regions: vec![sloped_ceiling(rid, 2.4, grad)],
+            },
+            windows: vec![window(
+                ItemId::default(),
+                1.0, // width ACROSS the slope
+                2.0, // height UP the slope → plan extent 2.0·cos = 1.0
+                Some(OpeningPlacement::Roof {
+                    ceiling_region_id: rid,
+                    plan: (2.0, 1.0),
+                }),
+            )],
+            ..Storey::default()
+        };
+        derive_opening_vertices(&mut storey);
+        let v = &storey.windows[0].vertices;
+        assert_eq!(v.len(), 4);
+        let (min_x, max_x) = v
+            .iter()
+            .fold((f32::MAX, f32::MIN), |(a, b), c| (a.min(c.0), b.max(c.0)));
+        let (min_y, max_y) = v
+            .iter()
+            .fold((f32::MAX, f32::MIN), |(a, b), c| (a.min(c.1), b.max(c.1)));
+        // Across the slope (+x): unchanged width. Up the slope (+y, the gradient
+        // direction): height foreshortened by cos = 0.5 → 2.0·0.5 = 1.0.
+        assert!(
+            ((max_x - min_x) - 1.0).abs() < 1e-3,
+            "across-slope extent {} (want width 1.0)",
+            max_x - min_x
+        );
+        assert!(
+            ((max_y - min_y) - 1.0).abs() < 1e-3,
+            "up-slope plan extent {} (want height·cos = 1.0)",
+            max_y - min_y
+        );
+        // Every corner lies ON the region plane z = 2.4 + grad·y.
+        for c in v {
+            let want = 2.4 + grad * c.1 as f64;
+            assert!(
+                (c.2 as f64 - want).abs() < 1e-3,
+                "corner {c:?} off the region plane (want z {want})"
+            );
+        }
+    }
+
+    #[test]
+    fn roof_window_at_uses_the_slope_foreshortened_footprint() {
+        let rid = ItemId::default();
+        let grad = 3.0_f64.sqrt();
+        let wid = ItemId::default();
+        let storey = Storey {
+            ceilings: CeilingRegions {
+                regions: vec![sloped_ceiling(rid, 2.4, grad)],
+            },
+            windows: vec![window(
+                wid,
+                1.0,
+                2.0,
+                Some(OpeningPlacement::Roof {
+                    ceiling_region_id: rid,
+                    plan: (2.0, 1.0),
+                }),
+            )],
+            ..Storey::default()
+        };
+        // Inside the foreshortened footprint (up-slope half-extent 0.5 → y 0.5..1.5).
+        assert_eq!(roof_window_at(&storey, 2.0, 1.4), Some(wid));
+        // Past it up-slope: the OLD plan box (height 2.0 → y 0..2) would still
+        // hit here, but the ceiling-plane footprint stops at y 1.5 — so it MISSES.
+        assert_eq!(roof_window_at(&storey, 2.0, 1.9), None);
+    }
+
+    #[test]
+    fn oversized_roof_window_is_flagged() {
+        let rid = ItemId::default();
+        let grad = 3.0_f64.sqrt();
+        let wid = ItemId::default();
+        let storey = Storey {
+            ceilings: CeilingRegions {
+                regions: vec![sloped_ceiling(rid, 2.4, grad)],
+            },
+            windows: vec![window(
+                wid,
+                1.0,
+                6.0, // up-slope plan extent 6.0·0.5 = 3.0 → spills past the 2 m region
+                Some(OpeningPlacement::Roof {
+                    ceiling_region_id: rid,
+                    plan: (2.0, 1.0),
+                }),
+            )],
+            ..Storey::default()
+        };
+        assert_eq!(oversized_roof_windows(&storey), vec![wid]);
+    }
+
+    #[test]
+    fn roof_window_flush_to_the_region_edge_is_not_flagged() {
+        let rid = ItemId::default();
+        let grad = 3.0_f64.sqrt();
+        let storey = Storey {
+            ceilings: CeilingRegions {
+                regions: vec![sloped_ceiling(rid, 2.4, grad)],
+            },
+            windows: vec![window(
+                ItemId::default(),
+                4.0, // across → x 0..4, flush to both eaves
+                4.0, // up-slope plan extent 4.0·0.5 = 2.0 → y 0..2, flush to the edges
+                Some(OpeningPlacement::Roof {
+                    ceiling_region_id: rid,
+                    plan: (2.0, 1.0),
+                }),
+            )],
+            ..Storey::default()
+        };
+        // Corners land exactly on the region boundary; the centre-ward epsilon
+        // nudge keeps a flush-fit rooflight from tripping the strict predicate.
+        assert!(
+            oversized_roof_windows(&storey).is_empty(),
+            "a rooflight sized flush to the region edge must NOT be flagged"
+        );
+    }
+
+    #[test]
+    fn in_bounds_roof_window_is_not_flagged() {
+        let rid = ItemId::default();
+        let grad = 3.0_f64.sqrt();
+        let storey = Storey {
+            ceilings: CeilingRegions {
+                regions: vec![sloped_ceiling(rid, 2.4, grad)],
+            },
+            windows: vec![window(
+                ItemId::default(),
+                1.0,
+                2.0, // footprint y 0.5..1.5, x 1.5..2.5 — inside the region
+                Some(OpeningPlacement::Roof {
+                    ceiling_region_id: rid,
+                    plan: (2.0, 1.0),
+                }),
+            )],
+            ..Storey::default()
+        };
+        assert!(oversized_roof_windows(&storey).is_empty());
+    }
+
+    #[test]
     fn prune_drops_orphans_and_keeps_legacy_and_placed() {
         let wid = ItemId::default();
         let placed = window(
@@ -1744,7 +2081,26 @@ mod tests {
 
     #[test]
     fn roof_window_hit_test_and_move() {
-        let mut s = Storey::default();
+        // A flat 6×6 ceiling: the hit-test is region-aware (it builds the
+        // footprint from the host plane), so a rooflight needs a region under it.
+        let rid = ItemId::default();
+        let mut s = Storey {
+            ceilings: CeilingRegions {
+                regions: vec![CeilingRegion {
+                    id: rid,
+                    polygon: Polygon3D::new(vec![
+                        p3(0.0, 0.0, 2.7),
+                        p3(6.0, 0.0, 2.7),
+                        p3(6.0, 6.0, 2.7),
+                        p3(0.0, 6.0, 2.7),
+                    ]),
+                    opes: Opes::default(),
+                    construction_id: ItemId::default(),
+                    exposure: CeilingExposure::default(),
+                }],
+            },
+            ..Storey::default()
+        };
         let id = ItemId::default();
         s.windows.push(Window {
             id,
@@ -1753,7 +2109,7 @@ mod tests {
             height_m: 1.0,
             window_type_id: ItemId::default(),
             placement: Some(OpeningPlacement::Roof {
-                ceiling_region_id: ItemId::default(),
+                ceiling_region_id: rid,
                 plan: (2.0, 2.0),
             }),
             wall_anchor: None,

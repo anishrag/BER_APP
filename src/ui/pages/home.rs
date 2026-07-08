@@ -16,6 +16,9 @@ pub enum HomeEvent {
     /// Delete this saved BER (the render fn has already taken the two-step
     /// confirm; this fires on the confirming tap).
     DeleteBer(ItemId),
+    /// Deep-copy this saved BER into a brand-new persisted record. Non-destructive,
+    /// so no confirm — the shell duplicates and refreshes the list.
+    DuplicateBer(ItemId),
 }
 
 /// Home-page UI state, owned by `BerApp`. `rows` is a cached snapshot of the
@@ -75,6 +78,10 @@ impl HomePage {
                         format!("{}  —  {}", row.name, row.date_assessed.format("%-d %b %Y"));
                     if ui.button(label).clicked() {
                         on_event(UiEvent::Home(HomeEvent::OpenBer(row.id)));
+                    }
+                    // Duplicate is non-destructive — a plain button, no confirm.
+                    if ui.button("⧉").clicked() {
+                        on_event(UiEvent::Home(HomeEvent::DuplicateBer(row.id)));
                     }
                     if *pending_delete == Some(row.id) {
                         if ui

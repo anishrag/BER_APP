@@ -98,13 +98,21 @@ impl AppController {
     /// Per-DWELLING windows gate: green ([`ChecklistStatus::AllStoreys`]) when
     /// the dwelling has at least four windows house-wide AND every multi-storey
     /// window stays within its wall's same-type run (doesn't hang off the
-    /// building), red otherwise. Reads the RESOLVED [`Ber`] via
-    /// [`document::windows_complete`].
+    /// building) AND every ROOF window fits on the single ceiling surface it
+    /// sits on (its ceiling-plane footprint doesn't spill across a ridge onto a
+    /// neighbouring surface — the assessor must reposition, resize, or rotate an
+    /// over-large rooflight to fit), red otherwise. Reads the RESOLVED [`Ber`]
+    /// via [`document::windows_complete`] +
+    /// [`ber_model::ber::openings::oversized_roof_windows`].
     fn windows_status(&self) -> ChecklistStatus {
-        let complete = self
-            .current_record
-            .as_ref()
-            .is_some_and(|r| document::windows_complete(&r.data));
+        use ber_model::ber::openings;
+        let complete = self.current_record.as_ref().is_some_and(|r| {
+            document::windows_complete(&r.data)
+                && r.data
+                    .storeys
+                    .iter()
+                    .all(|s| openings::oversized_roof_windows(s).is_empty())
+        });
         if complete {
             ChecklistStatus::AllStoreys
         } else {

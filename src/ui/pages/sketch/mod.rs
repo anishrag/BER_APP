@@ -1413,6 +1413,26 @@ pub struct SketchView<'a> {
     pub ceiling_exposure_cut_regions: &'a [Vec<(f64, f64)>],
 }
 
+impl SketchView<'_> {
+    /// An all-storeys overlay mode (roof / floor-exposure / ceiling-exposure) is
+    /// live (post-gate): the overlaid all-storeys view REPLACES the single-storey
+    /// plan, so the single-storey plan chrome must be suppressed. Derived from the
+    /// same fields the canvas uses to pick which overlay to draw.
+    pub fn overlay_active(&self) -> bool {
+        (self.floor_exposure_mode && !self.floor_exposure_gate_pending)
+            || (self.ceiling_exposure_mode && !self.ceiling_exposure_gate_pending)
+            || (self.roof_mode && !self.roof_gate_pending)
+    }
+
+    /// A floor/ceiling-exposure carve ring is in flight (being dimensioned). Its
+    /// dimensioning still runs the dim/position prompts + the floating number box,
+    /// so those stay live even under an overlay mode.
+    pub fn carve_dimensioning(&self) -> bool {
+        !self.floor_exposure_carve_polygon.is_empty()
+            || !self.ceiling_exposure_carve_polygon.is_empty()
+    }
+}
+
 #[derive(Default)]
 pub struct SketchPage;
 
@@ -1499,7 +1519,13 @@ impl SketchPage {
             // The floating number-entry box: every single-value measurement
             // prompt is typed here, in a draggable window over the canvas
             // (constrained to it), rather than in the bottom prompt dock.
-            number_box::render(ui.ctx(), canvas_rect, &mut view, &mut on_event);
+            // Rendered OUTSIDE `canvas::render`, so it isn't covered by the
+            // canvas's overlay-mode suppression — gate it here to the same rule:
+            // suppress under an all-storeys overlay mode UNLESS a carve is being
+            // dimensioned (a carve types its length in this same box).
+            if !view.overlay_active() || view.carve_dimensioning() {
+                number_box::render(ui.ctx(), canvas_rect, &mut view, &mut on_event);
+            }
             // Phase-3 (Objects): the open room's entry panel (category → subtype
             // → count + photos → Add), a floating window over the canvas.
             objects_panel::render(ui.ctx(), canvas_rect, &mut view, &mut on_event);

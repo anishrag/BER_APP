@@ -638,6 +638,13 @@ impl AppController {
                     opt("right sill (m)", "0 = floor"),
                     opt("transom (m)", "0 = none"),
                 ],
+                // Roof window: dimensions are measured IN the sloped ceiling
+                // plane (height runs up the slope, width across it), not in the
+                // flat plan — the derivation foreshortens the up-slope extent.
+                (false, _) if p.tool == OpeningToolKind::RoofWindow => vec![
+                    req("width across slope (m)", "e.g. 0.8"),
+                    req("height up slope (m)", "e.g. 1.13"),
+                ],
                 (false, _) => vec![req("width (m)", "e.g. 1.2"), req("height (m)", "e.g. 1.4")],
             }
         };

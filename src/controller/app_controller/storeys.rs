@@ -1112,4 +1112,22 @@ impl AppController {
         let ring = prev.floors.footprint_ring()?;
         Some(ring.into_iter().map(to_f32).collect())
     }
+
+    /// Re-supply the transient position reference (the storey-below footprint)
+    /// for the ACTIVE storey after a reload, when it's an upper storey whose
+    /// outline still has an unresolved free position axis — so the
+    /// vertical-placement prompt survives a restart. The override is
+    /// `#[serde(skip)]` (like `subarea_containment_override`), so it must be
+    /// rebuilt here; a finalised outline (or a ground storey with no storey
+    /// below) clears it. Called on the load path before dimensioning restarts.
+    pub(super) fn reestablish_position_reference_override(&mut self) {
+        self.document.position_reference_override = None;
+        if self.document.outline.finalised() {
+            return;
+        }
+        if let Some(prev_ring) = self.previous_storey_ring() {
+            self.document.position_reference_override =
+                manip_plan::FloorPlan::from_clean_ring(&prev_ring).ok();
+        }
+    }
 }

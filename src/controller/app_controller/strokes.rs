@@ -440,6 +440,15 @@ impl AppController {
             &self.tuning.subarea,
             &phase_segs,
         )?;
+        // Supply the storey-below footprint as the position reference so the
+        // dimensioning loop, once the wall LENGTHS are pinned, asks where
+        // VERTICALLY (or horizontally) to place a free upper outline — a
+        // full-width box that inherited only its width from the walls below
+        // still floats along the other axis. Transient (`#[serde(skip)]`), so
+        // it's re-supplied on reload for a not-yet-finalised upper outline
+        // ([`reestablish_position_reference_override`]).
+        self.document.position_reference_override =
+            manip_plan::FloorPlan::from_clean_ring(&prev_ring).ok();
         self.warn_if_non_orthogonal("draw outline (carve)");
         // The carve replaced the upper storey's outline WHOLESALE: re-pend
         // the inherited-level seed (the tail below / the dimensioning tails

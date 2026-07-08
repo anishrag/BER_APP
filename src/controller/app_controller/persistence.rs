@@ -39,6 +39,45 @@ impl AppController {
         ber
     }
 
+    /// Deep-copy a saved BER into a BRAND-NEW, fully-persisted DB record and
+    /// return its id. Used from Home's Load list — it writes a real new row (and
+    /// clones the editing-layer snapshot if present) but does NOT open the copy:
+    /// the assessor stays on the Load list, so `current_record` is untouched.
+    ///
+    /// The `Ber` data struct carries its own `id` (must equal the record id), so
+    /// the clone's `data.id` is re-stamped to the new id. `date_assessed` is
+    /// preserved — it's a copy of the SAME assessment, not a new one.
+    pub fn duplicate_ber(&self, source: &ItemId) -> Result<ItemId, String> {
+        let repo = BerRepository::new(&self.conn);
+        let src = repo
+            .load(source)
+            .map_err(|e| format!("failed to load BER: {}", e))?;
+
+        let new_id = ItemId::default();
+        let mut data = src.data.clone();
+        data.id = new_id.clone();
+        let new_record = BerRecord {
+            id: new_id.clone(),
+            name: format!("{} (copy)", src.name),
+            date_assessed: src.date_assessed,
+            data,
+        };
+        repo.upsert(&new_record)
+            .map_err(|e| format!("duplicate upsert failed: {}", e))?;
+
+        // Clone the editing-layer snapshot (one row per ber, PK = ber_id) so the
+        // copy reopens with the exact in-progress parametric state, not a rebuild.
+        if let Some((version, storey_idx, json)) = repo
+            .load_snapshot(source)
+            .map_err(|e| format!("failed to load snapshot: {}", e))?
+        {
+            repo.save_snapshot(&new_id, version, storey_idx, &json)
+                .map_err(|e| format!("duplicate snapshot save failed: {}", e))?;
+        }
+
+        Ok(new_id)
+    }
+
     /// Set the BER's construction phases (house + extension years). These are the
     /// only phases the assessor can later assign to an area; captured on the
     /// Key Details form. No-op when no BER is loaded. Persists.
@@ -247,6 +286,11 @@ impl AppController {
         self.view = ViewTransform::default();
         self.document.edit_state = EditState::default();
         self.review = None;
+        // Restart-safe upper-outline placement: a not-yet-finalised upper
+        // outline (its wall lengths pinned but its free axis un-positioned)
+        // needs the storey-below footprint re-supplied so the vertical-placement
+        // prompt re-appears (the override is `#[serde(skip)]`).
+        self.reestablish_position_reference_override();
         self.compute_next_dimension_prompt();
         // Heal opening anchors against the (possibly re-minted) outline VertexIds
         // BEFORE the re-resolve re-mints the walls — otherwise a snapshot-less
@@ -789,6 +833,11 @@ impl AppController {
         self.view = ViewTransform::default();
         self.document.edit_state = EditState::default();
         self.review = None;
+        // Restart-safe upper-outline placement: a not-yet-finalised upper
+        // outline (its wall lengths pinned but its free axis un-positioned)
+        // needs the storey-below footprint re-supplied so the vertical-placement
+        // prompt re-appears (the override is `#[serde(skip)]`).
+        self.reestablish_position_reference_override();
         self.compute_next_dimension_prompt();
         // Heal opening anchors against the re-minted outline VertexIds BEFORE the
         // re-resolve re-mints the walls — the checkpoint has no Document snapshot,

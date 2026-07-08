@@ -272,7 +272,11 @@ impl AppController {
             current_distance: option.current_distance,
             option_idx: prompt.current_idx,
             option_count: prompt.options.len(),
-            offers_centre: false,
+            // A freshly-drawn upper-storey OUTLINE's whole-shape `Translate`
+            // prompt offers Centre (centre the box within the storey below); the
+            // phase/step carve + `Wall`-kind prompts have no such reference.
+            offers_centre: prompt.kind == PositionPromptKind::Translate
+                && self.document.position_reference_override.is_some(),
         })
     }
 
@@ -391,6 +395,9 @@ impl AppController {
         self.document.apply_position(value)?;
         self.mark_dirty()?;
         self.push_history_snapshot(undo_snap);
+        // Resolving the LAST free axis of a drawn upper-storey outline finalises
+        // it — the seed point for its inherited floor levels (no-op otherwise).
+        self.maybe_seed_inherited_levels();
         // A Structure-phase split that finishes on a POSITION prompt commits here.
         self.maybe_stage_structure_carve();
         // …and the same for a floor-exposure carve (shared dimensioning buffer).
@@ -503,6 +510,9 @@ impl AppController {
         self.record_history();
         self.document.skip_current_position();
         let _ = self.mark_dirty();
+        // Skipping the last free axis of a drawn upper-storey outline finalises
+        // it too — accepting the drawn position seeds its inherited levels.
+        self.maybe_seed_inherited_levels();
         // A Structure split whose last position prompt was SKIPPED commits here.
         self.maybe_stage_structure_carve();
         self.maybe_stage_floor_exposure_carve();
@@ -547,6 +557,26 @@ impl AppController {
             return;
         }
         self.document.cycle_position_reference();
+    }
+
+    /// The 'Centre' button for a whole-shape position prompt (a drawn
+    /// upper-storey outline): centre the shape within its reference footprint
+    /// and apply it through the same translate path as a typed distance — the
+    /// model mutation lives in [`Document::center_current_position`], this owns
+    /// only the shell workflow (undo snapshot, persist, finalisation seed). The
+    /// roof-flow Centre stages route through [`centre_roof_position`](Self::centre_roof_position)
+    /// instead. On rejection the snapshot is discarded.
+    pub fn center_current_position(&mut self) -> Result<(), String> {
+        let undo_snap = self.current_history_snapshot();
+        self.document.center_current_position()?;
+        self.mark_dirty()?;
+        self.push_history_snapshot(undo_snap);
+        // Centring the last free axis finalises a drawn upper outline.
+        self.maybe_seed_inherited_levels();
+        self.maybe_stage_structure_carve();
+        self.maybe_stage_floor_exposure_carve();
+        self.maybe_stage_ceiling_exposure_carve();
+        Ok(())
     }
 
     /// Apply the user's entered length for the current dimension prompt, then

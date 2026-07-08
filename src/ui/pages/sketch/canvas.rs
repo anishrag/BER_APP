@@ -480,6 +480,16 @@ pub(super) fn render<F: FnMut(UiEvent)>(
     // storeys cover the lower ones — what shows at a location IS its top storey
     // (= the roof there). While the gate is up, fall through to the normal plan.
     let roof_active = view.roof_mode && !view.roof_gate_pending;
+    // The all-storeys overlay modes (roof / floor-exposure / ceiling-exposure)
+    // REPLACE the single-storey plan, so its plan-detail overlays must not leak
+    // on top — they render on the ACTIVE-storey transform and would sit
+    // misaligned over the union-fit overlay. Exception: a floor/ceiling carve
+    // dimensions ITSELF through the dim/position prompts, so those stay live
+    // while a carve ring is in flight.
+    // Same derivation the number-box gate in `mod.rs` uses (via `SketchView`), so
+    // the canvas and the separately-rendered number box suppress in lockstep.
+    let overlay_mode = view.overlay_active();
+    let carve_dimensioning = view.carve_dimensioning();
     if roof_active {
         if let Some(t) = floor_exposure_transform(ber, rect, vp) {
             // Faint whole-house footprints first: the top-storey-shading CONTEXT
@@ -680,654 +690,777 @@ pub(super) fn render<F: FnMut(UiEvent)>(
         );
     }
 
-    // Structure "Edit attributes" — EXPLODED view only: place a small group-picker
-    // popup at each group's pulled-out position (clicking makes that group active;
-    // the side panel edits it). The DEFAULT in-place windows are drawn later, on
-    // top of the wall-exposure layer, by `structure_edit_overlay`.
-    if let (Some(edit), Some(storey)) = (
-        view.structure_edit,
-        ber.and_then(|b| current_storey_idx.and_then(|i| b.storeys.get(i))),
-    ) {
-        if edit.exploded && matches!(mode, SketchMode::Storey2D) {
-            if let Some(t) = render::structure_fan::fan_transform(rect, storey, vp) {
-                for fan in render::structure_fan::group_fan_layout(storey, edit) {
-                    let (wx, wy) = fan.fanned_centroid();
-                    let at = t.apply(wx, wy);
-                    let active = fan.group_index == edit.active;
-                    egui::Area::new(ui.id().with(("structure_fan", fan.group_index)))
-                        .order(egui::Order::Foreground)
-                        .fixed_pos(at)
-                        .show(ui.ctx(), |ui| {
-                            egui::Frame::popup(ui.style())
-                                .fill(if active {
-                                    fan.color.gamma_multiply(0.5)
-                                } else {
-                                    ui.style().visuals.window_fill
-                                })
-                                .show(ui, |ui| {
-                                    let label =
-                                        format!("Group {}  ·  {}", fan.group_index + 1, fan.count);
-                                    if ui.add(egui::Button::selectable(active, label)).clicked() {
-                                        on_event(UiEvent::Sketch(
-                                            SketchEvent::SetActiveStructureGroup(fan.group_index),
-                                        ));
-                                    }
-                                });
-                        });
+    // ── Single-storey plan chrome (overlay-mode suppression) ──────────────────
+    // Everything in this block renders on the ACTIVE-storey transform, so under
+    // an all-storeys overlay mode (roof / floor-exposure / ceiling-exposure) —
+    // which REPLACES the single-storey plan and fits to the footprint union — it
+    // would leak on top, mis-scaled. Gate the whole run off. The carve-exception
+    // prompt blocks further down (dim / position) keep their own
+    // `!overlay_mode || carve_dimensioning` guard so a floor/ceiling carve can
+    // still dimension itself while a ring is in flight.
+    if !overlay_mode {
+        // Structure "Edit attributes" — EXPLODED view only: place a small group-picker
+        // popup at each group's pulled-out position (clicking makes that group active;
+        // the side panel edits it). The DEFAULT in-place windows are drawn later, on
+        // top of the wall-exposure layer, by `structure_edit_overlay`.
+        if let (Some(edit), Some(storey)) = (
+            view.structure_edit,
+            ber.and_then(|b| current_storey_idx.and_then(|i| b.storeys.get(i))),
+        ) {
+            if edit.exploded && matches!(mode, SketchMode::Storey2D) {
+                if let Some(t) = render::structure_fan::fan_transform(rect, storey, vp) {
+                    for fan in render::structure_fan::group_fan_layout(storey, edit) {
+                        let (wx, wy) = fan.fanned_centroid();
+                        let at = t.apply(wx, wy);
+                        let active = fan.group_index == edit.active;
+                        egui::Area::new(ui.id().with(("structure_fan", fan.group_index)))
+                            .order(egui::Order::Foreground)
+                            .fixed_pos(at)
+                            .show(ui.ctx(), |ui| {
+                                egui::Frame::popup(ui.style())
+                                    .fill(if active {
+                                        fan.color.gamma_multiply(0.5)
+                                    } else {
+                                        ui.style().visuals.window_fill
+                                    })
+                                    .show(ui, |ui| {
+                                        let label = format!(
+                                            "Group {}  ·  {}",
+                                            fan.group_index + 1,
+                                            fan.count
+                                        );
+                                        if ui.add(egui::Button::selectable(active, label)).clicked()
+                                        {
+                                            on_event(UiEvent::Sketch(
+                                                SketchEvent::SetActiveStructureGroup(
+                                                    fan.group_index,
+                                                ),
+                                            ));
+                                        }
+                                    });
+                            });
+                    }
                 }
             }
         }
-    }
 
-    // New-storey browse stage: tint the current outline suggestion's ring
-    // translucently over the previous-storey watermark so the assessor sees
-    // the candidate footprint in place while cycling ◀ ▶ in the dock.
-    if let Some((ring, _label, _idx, _count)) = view
-        .new_storey_prompt
-        .as_ref()
-        .and_then(|p| p.suggestion.as_ref())
-    {
-        render::render_suggestion_ring(&painter, rect, ber, current_storey_idx, mode, vp, ring);
-    }
+        // New-storey browse stage: tint the current outline suggestion's ring
+        // translucently over the previous-storey watermark so the assessor sees
+        // the candidate footprint in place while cycling ◀ ▶ in the dock.
+        if let Some((ring, _label, _idx, _count)) = view
+            .new_storey_prompt
+            .as_ref()
+            .and_then(|p| p.suggestion.as_ref())
+        {
+            render::render_suggestion_ring(&painter, rect, ber, current_storey_idx, mode, vp, ring);
+        }
 
-    // Living-area sub-shapes overlaid in green (active brighter),
-    // with length labels on their known walls (like the storey).
-    render::render_living_areas(
-        &painter,
-        rect,
-        ber,
-        current_storey_idx,
-        mode,
-        display,
-        vp,
-        view.living_area_polygons,
-        living_area_wall_labels,
-        view.active_living_area,
-    );
+        // Living-area sub-shapes overlaid in green (active brighter),
+        // with length labels on their known walls (like the storey).
+        render::render_living_areas(
+            &painter,
+            rect,
+            ber,
+            current_storey_idx,
+            mode,
+            display,
+            vp,
+            view.living_area_polygons,
+            living_area_wall_labels,
+            view.active_living_area,
+        );
 
-    // Pending cut: show both candidate regions to tap between.
-    render::render_cut_candidates(
-        &painter,
-        rect,
-        ber,
-        current_storey_idx,
-        mode,
-        vp,
-        view.pending_cut_regions,
-    );
-    // Structure-phase carve: the same two-candidate highlight while picking
-    // which region's surfaces to select.
-    render::render_cut_candidates(
-        &painter,
-        rect,
-        ber,
-        current_storey_idx,
-        mode,
-        vp,
-        view.structure_cut_regions,
-    );
-    // Structure split: the in-flight ring, highlighted while it's being
-    // dimensioned (same treatment as the construction-phase pending area).
-    if view.pending_structure_split_polygon.len() >= 3 {
-        render::render_phase_regions(
+        // Pending cut: show both candidate regions to tap between.
+        render::render_cut_candidates(
             &painter,
             rect,
             ber,
             current_storey_idx,
             mode,
             vp,
-            std::slice::from_ref(&(
-                view.pending_structure_split_polygon.to_vec(),
-                "?".to_string(),
-            )),
-            egui::Color32::from_rgb(120, 200, 255), // blue: structure split
+            view.pending_cut_regions,
         );
-    }
-    // Staged carve rings: the pending SELECTION (not yet split). A gold dashed
-    // marquee INSET just inside the carved area, so the selected region reads
-    // clearly even where its edges run along the plan perimeter (outline only,
-    // no fill). The geometry only splits at "Edit attributes".
-    render::render_selection_area(
-        &painter,
-        rect,
-        ber,
-        current_storey_idx,
-        mode,
-        vp,
-        view.pending_structure_carves,
-    );
-    // Wall-inclusion ask: halo the carve edge currently being asked about, so
-    // the panel's Include / Exclude visibly refers to THAT wall. Only when the
-    // asked edge is on THIS storey — a cross-storey lasso ask (tagged with its
-    // storey) draws in the all-storeys overlay below instead, and its
-    // coordinates would be wrong in another storey's frame.
-    if let Some(wi) = &view.wall_inclusion_prompt {
-        if wi.storey_idx.is_none() || wi.storey_idx == current_storey_idx {
-            render::render_wall_inclusion_edge(
+        // Structure-phase carve: the same two-candidate highlight while picking
+        // which region's surfaces to select.
+        render::render_cut_candidates(
+            &painter,
+            rect,
+            ber,
+            current_storey_idx,
+            mode,
+            vp,
+            view.structure_cut_regions,
+        );
+        // Structure split: the in-flight ring, highlighted while it's being
+        // dimensioned (same treatment as the construction-phase pending area).
+        if view.pending_structure_split_polygon.len() >= 3 {
+            render::render_phase_regions(
                 &painter,
                 rect,
                 ber,
                 current_storey_idx,
                 mode,
                 vp,
-                wi.edge,
+                std::slice::from_ref(&(
+                    view.pending_structure_split_polygon.to_vec(),
+                    "?".to_string(),
+                )),
+                egui::Color32::from_rgb(120, 200, 255), // blue: structure split
             );
         }
-    }
-
-    // ALL-STOREYS Structure overlays: the staged lasso rings + the ask edge,
-    // each drawn into its own storey's cell with that cell's transform.
-    if current_storey_idx.is_none()
-        && matches!(mode, SketchMode::Storey2D)
-        && view.current_phase == AssessmentPhase::Structure
-    {
-        if let Some(b) = ber {
-            let cells = render::all_storeys_2d::cell_transforms(rect, b, vp);
-            let gold = egui::Color32::from_rgb(235, 195, 80);
-            for (i, ring) in view.pending_structure_carves_by_storey {
-                let (Some(t), true) = (cells.get(*i), ring.len() >= 3) else {
-                    continue;
-                };
-                let pts: Vec<egui::Pos2> = ring.iter().map(|(x, y)| t.apply(*x, *y)).collect();
-                let n = pts.len();
-                for k in 0..n {
-                    painter.line_segment([pts[k], pts[(k + 1) % n]], egui::Stroke::new(2.5, gold));
-                }
+        // Staged carve rings: the pending SELECTION (not yet split). A gold dashed
+        // marquee INSET just inside the carved area, so the selected region reads
+        // clearly even where its edges run along the plan perimeter (outline only,
+        // no fill). The geometry only splits at "Edit attributes".
+        render::render_selection_area(
+            &painter,
+            rect,
+            ber,
+            current_storey_idx,
+            mode,
+            vp,
+            view.pending_structure_carves,
+        );
+        // Wall-inclusion ask: halo the carve edge currently being asked about, so
+        // the panel's Include / Exclude visibly refers to THAT wall. Only when the
+        // asked edge is on THIS storey — a cross-storey lasso ask (tagged with its
+        // storey) draws in the all-storeys overlay below instead, and its
+        // coordinates would be wrong in another storey's frame.
+        if let Some(wi) = &view.wall_inclusion_prompt {
+            if wi.storey_idx.is_none() || wi.storey_idx == current_storey_idx {
+                render::render_wall_inclusion_edge(
+                    &painter,
+                    rect,
+                    ber,
+                    current_storey_idx,
+                    mode,
+                    vp,
+                    wi.edge,
+                );
             }
-            if let Some(wi) = &view.wall_inclusion_prompt {
-                if let Some(t) = wi.storey_idx.and_then(|i| cells.get(i)) {
-                    let a = t.apply(wi.edge.0 .0, wi.edge.0 .1);
-                    let b2 = t.apply(wi.edge.1 .0, wi.edge.1 .1);
-                    // Same halo treatment as the single-storey ask edge: a
-                    // thick amber stroke so Include/Exclude visibly refers to
-                    // THAT wall in THAT cell.
-                    painter.line_segment(
-                        [a, b2],
-                        egui::Stroke::new(5.0, egui::Color32::from_rgb(255, 170, 40)),
-                    );
+        }
+
+        // ALL-STOREYS Structure overlays: the staged lasso rings + the ask edge,
+        // each drawn into its own storey's cell with that cell's transform.
+        if current_storey_idx.is_none()
+            && matches!(mode, SketchMode::Storey2D)
+            && view.current_phase == AssessmentPhase::Structure
+        {
+            if let Some(b) = ber {
+                let cells = render::all_storeys_2d::cell_transforms(rect, b, vp);
+                let gold = egui::Color32::from_rgb(235, 195, 80);
+                for (i, ring) in view.pending_structure_carves_by_storey {
+                    let (Some(t), true) = (cells.get(*i), ring.len() >= 3) else {
+                        continue;
+                    };
+                    let pts: Vec<egui::Pos2> = ring.iter().map(|(x, y)| t.apply(*x, *y)).collect();
+                    let n = pts.len();
+                    for k in 0..n {
+                        painter
+                            .line_segment([pts[k], pts[(k + 1) % n]], egui::Stroke::new(2.5, gold));
+                    }
+                }
+                if let Some(wi) = &view.wall_inclusion_prompt {
+                    if let Some(t) = wi.storey_idx.and_then(|i| cells.get(i)) {
+                        let a = t.apply(wi.edge.0 .0, wi.edge.0 .1);
+                        let b2 = t.apply(wi.edge.1 .0, wi.edge.1 .1);
+                        // Same halo treatment as the single-storey ask edge: a
+                        // thick amber stroke so Include/Exclude visibly refers to
+                        // THAT wall in THAT cell.
+                        painter.line_segment(
+                            [a, b2],
+                            egui::Stroke::new(5.0, egui::Color32::from_rgb(255, 170, 40)),
+                        );
+                    }
                 }
             }
         }
-    }
 
-    // DEBUG: splice-pipeline phases of the last extend/trim.
-    render::render_splice_debug(
-        &painter,
-        rect,
-        ber,
-        current_storey_idx,
-        mode,
-        vp,
-        view.splice_debug,
-    );
+        // DEBUG: splice-pipeline phases of the last extend/trim.
+        render::render_splice_debug(
+            &painter,
+            rect,
+            ber,
+            current_storey_idx,
+            mode,
+            vp,
+            view.splice_debug,
+        );
 
-    // Elective-snap tags of the last action (orange markers + kind).
-    render::render_snap_tags(
-        &painter,
-        rect,
-        ber,
-        current_storey_idx,
-        mode,
-        vp,
-        view.snap_tags,
-    );
+        // Elective-snap tags of the last action (orange markers + kind).
+        render::render_snap_tags(
+            &painter,
+            rect,
+            ber,
+            current_storey_idx,
+            mode,
+            vp,
+            view.snap_tags,
+        );
 
-    // Left-click menu per snap tag: pick a different candidate, or
-    // "Don't snap", to replay the action with just that snap changed.
-    if !view.snap_tags.is_empty() {
-        if let Some(t) = render::active_storey_transform(rect, ber, current_storey_idx, mode, vp) {
-            for (ti, tag) in view.snap_tags.iter().enumerate() {
+        // Left-click menu per snap tag: pick a different candidate, or
+        // "Don't snap", to replay the action with just that snap changed.
+        if !view.snap_tags.is_empty() {
+            if let Some(t) =
+                render::active_storey_transform(rect, ber, current_storey_idx, mode, vp)
+            {
+                for (ti, tag) in view.snap_tags.iter().enumerate() {
+                    let sp = t.apply(tag.pos.0 as f64, tag.pos.1 as f64);
+                    let label = match tag.current_kind {
+                        Some(k) => format!("{} ▾", render::snap_kind_label(k)),
+                        None => "no snap ▾".to_string(),
+                    };
+                    egui::Area::new(ui.id().with(("snap_tag", ti)))
+                        .fixed_pos(sp + egui::vec2(7.0, -7.0))
+                        .order(egui::Order::Foreground)
+                        .show(ui.ctx(), |ui| {
+                            ui.menu_button(label, |ui| {
+                                // What this snap DID (point moved vs wall pinned),
+                                // so the choice below is informed.
+                                if let Some(k) = tag
+                                    .current_kind
+                                    .or_else(|| tag.options.first().map(|(k, _)| *k))
+                                {
+                                    ui.label(
+                                        egui::RichText::new(render::snap_kind_hint(k))
+                                            .small()
+                                            .weak(),
+                                    );
+                                    ui.separator();
+                                }
+                                for (kind, idx) in &tag.options {
+                                    if ui.button(render::snap_kind_label(*kind)).clicked() {
+                                        on_event(UiEvent::Sketch(SketchEvent::ChooseSnap {
+                                            from: tag.from,
+                                            choice: Some(*idx),
+                                        }));
+                                        ui.close();
+                                    }
+                                }
+                                if tag.skippable && ui.button("Don't snap").clicked() {
+                                    on_event(UiEvent::Sketch(SketchEvent::ChooseSnap {
+                                        from: tag.from,
+                                        choice: None,
+                                    }));
+                                    ui.close();
+                                }
+                            });
+                        });
+                }
+            }
+        }
+
+        // Construction-phase areas: committed regions (purple, labelled),
+        // plus the pending carved area / cut candidates while picking.
+        let phase_tint = egui::Color32::from_rgb(200, 120, 255); // purple
+        render::render_phase_regions(
+            &painter,
+            rect,
+            ber,
+            current_storey_idx,
+            mode,
+            vp,
+            view.phase_region_polygons,
+            phase_tint,
+        );
+        render::render_cut_candidates(
+            &painter,
+            rect,
+            ber,
+            current_storey_idx,
+            mode,
+            vp,
+            view.pending_phase_cut_regions,
+        );
+        if view.pending_phase_polygon.len() >= 3 {
+            render::render_phase_regions(
+                &painter,
+                rect,
+                ber,
+                current_storey_idx,
+                mode,
+                vp,
+                std::slice::from_ref(&(view.pending_phase_polygon.to_vec(), "?".to_string())),
+                phase_tint,
+            );
+        }
+
+        // Floor-step areas: committed regions (teal, labelled with the
+        // signed level), plus the pending carved area / cut candidates.
+        let step_tint = egui::Color32::from_rgb(60, 220, 200); // teal
+        render::render_phase_regions(
+            &painter,
+            rect,
+            ber,
+            current_storey_idx,
+            mode,
+            vp,
+            view.step_region_polygons,
+            step_tint,
+        );
+        render::render_cut_candidates(
+            &painter,
+            rect,
+            ber,
+            current_storey_idx,
+            mode,
+            vp,
+            view.pending_step_cut_regions,
+        );
+        if view.pending_step_polygon.len() >= 3 {
+            render::render_phase_regions(
+                &painter,
+                rect,
+                ber,
+                current_storey_idx,
+                mode,
+                vp,
+                std::slice::from_ref(&(view.pending_step_polygon.to_vec(), "?".to_string())),
+                step_tint,
+            );
+        }
+
+        // Ceiling-step areas: committed regions (amber, labelled with
+        // the signed delta — hue distinct from the floor steps' teal),
+        // the two side half-rects while the side tap is pending, and
+        // the dashed provisional line.
+        let ceiling_step_tint = egui::Color32::from_rgb(255, 170, 60); // amber
+        if !objects_phase {
+            render::render_phase_regions(
+                &painter,
+                rect,
+                ber,
+                current_storey_idx,
+                mode,
+                vp,
+                view.ceiling_step_region_polygons,
+                ceiling_step_tint,
+            );
+            // Same-height dividers: a faint dashed pass, distinct from the amber
+            // height steps (divider regions are filtered out of the amber feed above).
+            render::render_ceiling_dividers(
+                &painter,
+                rect,
+                ber,
+                current_storey_idx,
+                mode,
+                vp,
+                view.ceiling_divider_lines,
+            );
+        }
+        render::render_cut_candidates(
+            &painter,
+            rect,
+            ber,
+            current_storey_idx,
+            mode,
+            vp,
+            view.pending_ceiling_step_side_rects,
+        );
+        if let Some((a, b)) = view.pending_ceiling_step_line {
+            render::render_ceiling_step_line(
+                &painter,
+                rect,
+                ber,
+                current_storey_idx,
+                mode,
+                vp,
+                a,
+                b,
+            );
+        }
+
+        // The pending line's wall snap, drawn through the SAME snap-tag
+        // renderer as the stroke snaps — but its menu is a separate
+        // widget routed to UnsnapCeilingStepLine, never ChooseSnap:
+        // the generic replay rewinds history, and the pending line
+        // lives outside it. With no alternative candidates the menu
+        // offers exactly "Don't snap".
+        if let Some(tag) = view.ceiling_step_snap_tag {
+            render::render_snap_tags(
+                &painter,
+                rect,
+                ber,
+                current_storey_idx,
+                mode,
+                vp,
+                std::slice::from_ref(tag),
+            );
+            if let Some(t) =
+                render::active_storey_transform(rect, ber, current_storey_idx, mode, vp)
+            {
                 let sp = t.apply(tag.pos.0 as f64, tag.pos.1 as f64);
                 let label = match tag.current_kind {
                     Some(k) => format!("{} ▾", render::snap_kind_label(k)),
                     None => "no snap ▾".to_string(),
                 };
-                egui::Area::new(ui.id().with(("snap_tag", ti)))
+                egui::Area::new(ui.id().with("ceiling_step_snap_tag"))
                     .fixed_pos(sp + egui::vec2(7.0, -7.0))
                     .order(egui::Order::Foreground)
                     .show(ui.ctx(), |ui| {
                         ui.menu_button(label, |ui| {
-                            // What this snap DID (point moved vs wall pinned),
-                            // so the choice below is informed.
-                            if let Some(k) = tag
-                                .current_kind
-                                .or_else(|| tag.options.first().map(|(k, _)| *k))
-                            {
-                                ui.label(
-                                    egui::RichText::new(render::snap_kind_hint(k))
-                                        .small()
-                                        .weak(),
-                                );
-                                ui.separator();
-                            }
-                            for (kind, idx) in &tag.options {
-                                if ui.button(render::snap_kind_label(*kind)).clicked() {
-                                    on_event(UiEvent::Sketch(SketchEvent::ChooseSnap {
-                                        from: tag.from,
-                                        choice: Some(*idx),
-                                    }));
-                                    ui.close();
-                                }
-                            }
+                            ui.label(
+                                egui::RichText::new(
+                                    "line pinned onto the parallel wall — its position \
+                                 isn't asked; un-snap reopens it",
+                                )
+                                .small()
+                                .weak(),
+                            );
+                            ui.separator();
                             if tag.skippable && ui.button("Don't snap").clicked() {
-                                on_event(UiEvent::Sketch(SketchEvent::ChooseSnap {
-                                    from: tag.from,
-                                    choice: None,
-                                }));
+                                on_event(UiEvent::Sketch(SketchEvent::UnsnapCeilingStepLine));
                                 ui.close();
                             }
                         });
                     });
             }
         }
-    }
 
-    // Construction-phase areas: committed regions (purple, labelled),
-    // plus the pending carved area / cut candidates while picking.
-    let phase_tint = egui::Color32::from_rgb(200, 120, 255); // purple
-    render::render_phase_regions(
-        &painter,
-        rect,
-        ber,
-        current_storey_idx,
-        mode,
-        vp,
-        view.phase_region_polygons,
-        phase_tint,
-    );
-    render::render_cut_candidates(
-        &painter,
-        rect,
-        ber,
-        current_storey_idx,
-        mode,
-        vp,
-        view.pending_phase_cut_regions,
-    );
-    if view.pending_phase_polygon.len() >= 3 {
-        render::render_phase_regions(
-            &painter,
-            rect,
-            ber,
-            current_storey_idx,
-            mode,
-            vp,
-            std::slice::from_ref(&(view.pending_phase_polygon.to_vec(), "?".to_string())),
-            phase_tint,
-        );
-    }
-
-    // Floor-step areas: committed regions (teal, labelled with the
-    // signed level), plus the pending carved area / cut candidates.
-    let step_tint = egui::Color32::from_rgb(60, 220, 200); // teal
-    render::render_phase_regions(
-        &painter,
-        rect,
-        ber,
-        current_storey_idx,
-        mode,
-        vp,
-        view.step_region_polygons,
-        step_tint,
-    );
-    render::render_cut_candidates(
-        &painter,
-        rect,
-        ber,
-        current_storey_idx,
-        mode,
-        vp,
-        view.pending_step_cut_regions,
-    );
-    if view.pending_step_polygon.len() >= 3 {
-        render::render_phase_regions(
-            &painter,
-            rect,
-            ber,
-            current_storey_idx,
-            mode,
-            vp,
-            std::slice::from_ref(&(view.pending_step_polygon.to_vec(), "?".to_string())),
-            step_tint,
-        );
-    }
-
-    // Ceiling-step areas: committed regions (amber, labelled with
-    // the signed delta — hue distinct from the floor steps' teal),
-    // the two side half-rects while the side tap is pending, and
-    // the dashed provisional line.
-    let ceiling_step_tint = egui::Color32::from_rgb(255, 170, 60); // amber
-    if !objects_phase {
-        render::render_phase_regions(
-            &painter,
-            rect,
-            ber,
-            current_storey_idx,
-            mode,
-            vp,
-            view.ceiling_step_region_polygons,
-            ceiling_step_tint,
-        );
-        // Same-height dividers: a faint dashed pass, distinct from the amber
-        // height steps (divider regions are filtered out of the amber feed above).
-        render::render_ceiling_dividers(
-            &painter,
-            rect,
-            ber,
-            current_storey_idx,
-            mode,
-            vp,
-            view.ceiling_divider_lines,
-        );
-    }
-    render::render_cut_candidates(
-        &painter,
-        rect,
-        ber,
-        current_storey_idx,
-        mode,
-        vp,
-        view.pending_ceiling_step_side_rects,
-    );
-    if let Some((a, b)) = view.pending_ceiling_step_line {
-        render::render_ceiling_step_line(&painter, rect, ber, current_storey_idx, mode, vp, a, b);
-    }
-
-    // The pending line's wall snap, drawn through the SAME snap-tag
-    // renderer as the stroke snaps — but its menu is a separate
-    // widget routed to UnsnapCeilingStepLine, never ChooseSnap:
-    // the generic replay rewinds history, and the pending line
-    // lives outside it. With no alternative candidates the menu
-    // offers exactly "Don't snap".
-    if let Some(tag) = view.ceiling_step_snap_tag {
-        render::render_snap_tags(
-            &painter,
-            rect,
-            ber,
-            current_storey_idx,
-            mode,
-            vp,
-            std::slice::from_ref(tag),
-        );
-        if let Some(t) = render::active_storey_transform(rect, ber, current_storey_idx, mode, vp) {
-            let sp = t.apply(tag.pos.0 as f64, tag.pos.1 as f64);
-            let label = match tag.current_kind {
-                Some(k) => format!("{} ▾", render::snap_kind_label(k)),
-                None => "no snap ▾".to_string(),
-            };
-            egui::Area::new(ui.id().with("ceiling_step_snap_tag"))
-                .fixed_pos(sp + egui::vec2(7.0, -7.0))
-                .order(egui::Order::Foreground)
-                .show(ui.ctx(), |ui| {
-                    ui.menu_button(label, |ui| {
-                        ui.label(
-                            egui::RichText::new(
-                                "line pinned onto the parallel wall — its position \
-                                 isn't asked; un-snap reopens it",
-                            )
-                            .small()
-                            .weak(),
-                        );
-                        ui.separator();
-                        if tag.skippable && ui.button("Don't snap").clicked() {
-                            on_event(UiEvent::Sketch(SketchEvent::UnsnapCeilingStepLine));
-                            ui.close();
-                        }
-                    });
-                });
+        // Roof apexes: committed high points ("▲ 4.20 m" markers) plus the
+        // pending tapped point as a hollow dot, in a distinct rose-magenta.
+        // Suppressed in the Objects phase (ceiling points aren't relevant there).
+        if !objects_phase {
+            render::render_roof_apexes(
+                &painter,
+                rect,
+                ber,
+                current_storey_idx,
+                mode,
+                vp,
+                view.ceiling_apex_views,
+                view.pending_roof_point,
+            );
         }
-    }
 
-    // Roof apexes: committed high points ("▲ 4.20 m" markers) plus the
-    // pending tapped point as a hollow dot, in a distinct rose-magenta.
-    // Suppressed in the Objects phase (ceiling points aren't relevant there).
-    if !objects_phase {
-        render::render_roof_apexes(
-            &painter,
-            rect,
-            ber,
-            current_storey_idx,
-            mode,
-            vp,
-            view.ceiling_apex_views,
-            view.pending_roof_point,
-        );
-    }
-
-    // The pending roof point's wall snap(s) as ONE tag, mirroring the
-    // ceiling-step line's: drawn through the same snap-tag renderer, but
-    // its menu is a separate widget routed to UnsnapCeilingPoint, never
-    // ChooseSnap — the generic replay rewinds history, and the pending
-    // point lives outside it. The menu offers exactly "Don't snap".
-    if let Some(tag) = view.ceiling_point_snap_tag {
-        render::render_snap_tags(
-            &painter,
-            rect,
-            ber,
-            current_storey_idx,
-            mode,
-            vp,
-            std::slice::from_ref(tag),
-        );
-        if let Some(t) = render::active_storey_transform(rect, ber, current_storey_idx, mode, vp) {
-            let sp = t.apply(tag.pos.0 as f64, tag.pos.1 as f64);
-            let label = match tag.current_kind {
-                Some(k) => format!("{} ▾", render::snap_kind_label(k)),
-                None => "no snap ▾".to_string(),
-            };
-            egui::Area::new(ui.id().with("ceiling_point_snap_tag"))
-                .fixed_pos(sp + egui::vec2(7.0, -7.0))
-                .order(egui::Order::Foreground)
-                .show(ui.ctx(), |ui| {
-                    ui.menu_button(label, |ui| {
-                        ui.label(
-                            egui::RichText::new(
-                                "point pinned onto the outline wall(s) — its position \
+        // The pending roof point's wall snap(s) as ONE tag, mirroring the
+        // ceiling-step line's: drawn through the same snap-tag renderer, but
+        // its menu is a separate widget routed to UnsnapCeilingPoint, never
+        // ChooseSnap — the generic replay rewinds history, and the pending
+        // point lives outside it. The menu offers exactly "Don't snap".
+        if let Some(tag) = view.ceiling_point_snap_tag {
+            render::render_snap_tags(
+                &painter,
+                rect,
+                ber,
+                current_storey_idx,
+                mode,
+                vp,
+                std::slice::from_ref(tag),
+            );
+            if let Some(t) =
+                render::active_storey_transform(rect, ber, current_storey_idx, mode, vp)
+            {
+                let sp = t.apply(tag.pos.0 as f64, tag.pos.1 as f64);
+                let label = match tag.current_kind {
+                    Some(k) => format!("{} ▾", render::snap_kind_label(k)),
+                    None => "no snap ▾".to_string(),
+                };
+                egui::Area::new(ui.id().with("ceiling_point_snap_tag"))
+                    .fixed_pos(sp + egui::vec2(7.0, -7.0))
+                    .order(egui::Order::Foreground)
+                    .show(ui.ctx(), |ui| {
+                        ui.menu_button(label, |ui| {
+                            ui.label(
+                                egui::RichText::new(
+                                    "point pinned onto the outline wall(s) — its position \
                                  isn't asked; un-snap reverts to the tapped point",
-                            )
-                            .small()
-                            .weak(),
-                        );
-                        ui.separator();
-                        if tag.skippable && ui.button("Don't snap").clicked() {
-                            on_event(UiEvent::Sketch(SketchEvent::UnsnapCeilingPoint));
-                            ui.close();
-                        }
+                                )
+                                .small()
+                                .weak(),
+                            );
+                            ui.separator();
+                            if tag.skippable && ui.button("Don't snap").clicked() {
+                                on_event(UiEvent::Sketch(SketchEvent::UnsnapCeilingPoint));
+                                ui.close();
+                            }
+                        });
                     });
-                });
+            }
         }
-    }
 
-    // Roof ridges: committed two-apex groups as solid labelled segments
-    // ("⌃ 4.20 m"), plus the pending ridge as a dashed SEGMENT between its
-    // own endpoints (the stroke's extent, not bbox-spanning). Violet-blue,
-    // distinct from the apex rose-magenta. Suppressed in the Objects phase.
-    if !objects_phase {
-        render::render_roof_ridges(
-            &painter,
-            rect,
-            ber,
-            current_storey_idx,
-            mode,
-            vp,
-            view.ceiling_ridge_views,
-        );
-    }
-    if let Some((a, b)) = view.pending_roof_ridge_line {
-        render::render_roof_ridge_line(&painter, rect, ber, current_storey_idx, mode, vp, a, b);
-    }
+        // Roof ridges: committed two-apex groups as solid labelled segments
+        // ("⌃ 4.20 m"), plus the pending ridge as a dashed SEGMENT between its
+        // own endpoints (the stroke's extent, not bbox-spanning). Violet-blue,
+        // distinct from the apex rose-magenta. Suppressed in the Objects phase.
+        if !objects_phase {
+            render::render_roof_ridges(
+                &painter,
+                rect,
+                ber,
+                current_storey_idx,
+                mode,
+                vp,
+                view.ceiling_ridge_views,
+            );
+        }
+        if let Some((a, b)) = view.pending_roof_ridge_line {
+            render::render_roof_ridge_line(&painter, rect, ber, current_storey_idx, mode, vp, a, b);
+        }
 
-    // Roof RECTS (flat tops): committed four-apex rect groups as solid
-    // labelled outlines, plus the pending rect as a dashed outline — the
-    // ridge family's closed-stroke sibling, same violet-blue. Suppressed in
-    // the Objects phase.
-    if !objects_phase {
-        render::render_roof_rects(
-            &painter,
-            rect,
-            ber,
-            current_storey_idx,
-            mode,
-            vp,
-            view.ceiling_rect_views,
-            view.pending_roof_rect_outline,
-        );
-    }
+        // Roof RECTS (flat tops): committed four-apex rect groups as solid
+        // labelled outlines, plus the pending rect as a dashed outline — the
+        // ridge family's closed-stroke sibling, same violet-blue. Suppressed in
+        // the Objects phase.
+        if !objects_phase {
+            render::render_roof_rects(
+                &painter,
+                rect,
+                ber,
+                current_storey_idx,
+                mode,
+                vp,
+                view.ceiling_rect_views,
+                view.pending_roof_rect_outline,
+            );
+        }
 
-    // The pending ridge's wall snap, mirroring the ceiling-step line's:
-    // drawn through the same snap-tag renderer, but its menu is a separate
-    // widget routed to UnsnapCeilingRidge, never ChooseSnap — the generic
-    // replay rewinds history, and the pending ridge lives outside it. The
-    // menu offers exactly "Don't snap".
-    if let Some(tag) = view.ceiling_ridge_snap_tag {
-        render::render_snap_tags(
-            &painter,
-            rect,
-            ber,
-            current_storey_idx,
-            mode,
-            vp,
-            std::slice::from_ref(tag),
-        );
-        if let Some(t) = render::active_storey_transform(rect, ber, current_storey_idx, mode, vp) {
-            let sp = t.apply(tag.pos.0 as f64, tag.pos.1 as f64);
-            let label = match tag.current_kind {
-                Some(k) => format!("{} ▾", render::snap_kind_label(k)),
-                None => "no snap ▾".to_string(),
-            };
-            egui::Area::new(ui.id().with("ceiling_ridge_snap_tag"))
-                .fixed_pos(sp + egui::vec2(7.0, -7.0))
-                .order(egui::Order::Foreground)
-                .show(ui.ctx(), |ui| {
-                    ui.menu_button(label, |ui| {
-                        ui.label(
-                            egui::RichText::new(
-                                "ridge pinned onto the parallel wall — its position \
+        // The pending ridge's wall snap, mirroring the ceiling-step line's:
+        // drawn through the same snap-tag renderer, but its menu is a separate
+        // widget routed to UnsnapCeilingRidge, never ChooseSnap — the generic
+        // replay rewinds history, and the pending ridge lives outside it. The
+        // menu offers exactly "Don't snap".
+        if let Some(tag) = view.ceiling_ridge_snap_tag {
+            render::render_snap_tags(
+                &painter,
+                rect,
+                ber,
+                current_storey_idx,
+                mode,
+                vp,
+                std::slice::from_ref(tag),
+            );
+            if let Some(t) =
+                render::active_storey_transform(rect, ber, current_storey_idx, mode, vp)
+            {
+                let sp = t.apply(tag.pos.0 as f64, tag.pos.1 as f64);
+                let label = match tag.current_kind {
+                    Some(k) => format!("{} ▾", render::snap_kind_label(k)),
+                    None => "no snap ▾".to_string(),
+                };
+                egui::Area::new(ui.id().with("ceiling_ridge_snap_tag"))
+                    .fixed_pos(sp + egui::vec2(7.0, -7.0))
+                    .order(egui::Order::Foreground)
+                    .show(ui.ctx(), |ui| {
+                        ui.menu_button(label, |ui| {
+                            ui.label(
+                                egui::RichText::new(
+                                    "ridge pinned onto the parallel wall — its position \
                                  isn't asked; un-snap reopens it",
-                            )
-                            .small()
-                            .weak(),
-                        );
-                        ui.separator();
-                        if tag.skippable && ui.button("Don't snap").clicked() {
-                            on_event(UiEvent::Sketch(SketchEvent::UnsnapCeilingRidge));
-                            ui.close();
-                        }
+                                )
+                                .small()
+                                .weak(),
+                            );
+                            ui.separator();
+                            if tag.skippable && ui.button("Don't snap").clicked() {
+                                on_event(UiEvent::Sketch(SketchEvent::UnsnapCeilingRidge));
+                                ui.close();
+                            }
+                        });
                     });
-                });
+            }
         }
-    }
+    } // ── end single-storey plan chrome (overlay-mode suppression) ────────────
 
     // Wall exposure: colour each outline wall by its heat-loss class
     // (brighter in exposure mode; the selected wall is haloed). Derived
     // riser walls draw dashed alongside, selectable in exposure mode.
-    render::render_wall_exposure(
-        &painter,
-        rect,
-        ber,
-        current_storey_idx,
-        mode,
-        vp,
-        view.exposure_walls,
-        view.riser_views,
-        view.exposure_selection.as_ref(),
-        view.exposure_mode,
-    );
+    // Suppressed under an all-storeys overlay mode (single-storey outline).
+    if !overlay_mode {
+        render::render_wall_exposure(
+            &painter,
+            rect,
+            ber,
+            current_storey_idx,
+            mode,
+            vp,
+            view.exposure_walls,
+            view.riser_views,
+            view.exposure_selection.as_ref(),
+            view.exposure_mode,
+        );
+    }
 
-    // Structure "Edit attributes" (in-place): now the wall-exposure colours are
-    // down, recolour each group's surfaces in its group colour ON TOP (so the
-    // selection is unmistakable over exposure), draw a connector from each group
-    // to its window, and float the per-group attribute editors in their columns.
-    if let (Some(layout), Some(edit), Some(storey)) = (
-        structure_edit_layout.as_ref(),
-        view.structure_edit,
-        ber.and_then(|b| current_storey_idx.and_then(|i| b.storeys.get(i))),
-    ) {
-        if let Some((_s, t)) = render::storey_transform(rect, ber, current_storey_idx, mode, vp) {
-            render::structure_fan::render_groups_inplace(&painter, &t, storey, edit);
-            let editable = !reviewing && !dim_prompting;
-            if let Some(spec) = edit.specifying {
-                // "Specify…" is open: a centred build-up LAYER editor takes over
-                // (the small per-group windows are hidden while it's up).
-                if let Some(group) = edit.groups.get(spec) {
-                    egui::Area::new(ui.id().with("specify_layers"))
-                        .order(egui::Order::Foreground)
-                        .anchor(egui::Align2::CENTER_CENTER, egui::vec2(0.0, 0.0))
-                        .show(ui.ctx(), |ui| {
-                            egui::Frame::popup(ui.style()).show(ui, |ui| {
-                                ui.set_max_width(300.0);
-                                super::structure::layer_editor_ui(
-                                    ui,
-                                    spec,
-                                    group,
-                                    view.layer_library,
-                                    on_event,
-                                );
-                            });
-                        });
-                }
-            } else if let Some(pg) = edit.viewing_photos {
-                // Camera button is open: a centred PHOTOS view (thumbnails + add).
-                if let Some(group) = edit.groups.get(pg) {
-                    egui::Area::new(ui.id().with("view_photos"))
-                        .order(egui::Order::Foreground)
-                        .anchor(egui::Align2::CENTER_CENTER, egui::vec2(0.0, 0.0))
-                        .show(ui.ctx(), |ui| {
-                            egui::Frame::popup(ui.style()).show(ui, |ui| {
-                                ui.set_max_width(440.0);
-                                super::structure::photos_view_ui(ui, pg, group, on_event);
-                            });
-                        });
-                }
-            } else {
-                for w in &layout.windows {
-                    let i = w.group_index;
-                    let Some(group) = edit.groups.get(i) else {
-                        continue;
-                    };
-                    // Connector from the window's inner edge to the group's true
-                    // centroid, ending in a dot on the recoloured surfaces.
-                    let target = t.apply(w.centroid.0, w.centroid.1);
-                    painter.line_segment([w.inner_anchor, target], egui::Stroke::new(2.0, w.color));
-                    painter.circle_filled(target, 3.5, w.color);
-                    egui::Area::new(ui.id().with(("structure_attr", i)))
-                        .order(egui::Order::Foreground)
-                        .fixed_pos(w.pos)
-                        .show(ui.ctx(), |ui| {
-                            egui::Frame::popup(ui.style())
-                                .fill(w.color.gamma_multiply(0.22))
-                                .stroke(egui::Stroke::new(2.0, w.color))
-                                .show(ui, |ui| {
-                                    ui.set_max_width(EDIT_BOX_W - 16.0);
-                                    // The two-level heading (kind + editable name)
-                                    // is rendered by `group_editor_ui` itself now.
-                                    super::structure::group_editor_ui(
+    // Single-storey plan chrome (continued): the in-place structure editors and
+    // the Move-mode selection highlight also ride the active-storey transform, so
+    // they're suppressed under an overlay mode too. (The gated wall-exposure
+    // block above sits between the two runs, so this is a second contiguous wrap
+    // rather than an extension of the first.)
+    if !overlay_mode {
+        // Structure "Edit attributes" (in-place): now the wall-exposure colours are
+        // down, recolour each group's surfaces in its group colour ON TOP (so the
+        // selection is unmistakable over exposure), draw a connector from each group
+        // to its window, and float the per-group attribute editors in their columns.
+        if let (Some(layout), Some(edit), Some(storey)) = (
+            structure_edit_layout.as_ref(),
+            view.structure_edit,
+            ber.and_then(|b| current_storey_idx.and_then(|i| b.storeys.get(i))),
+        ) {
+            if let Some((_s, t)) = render::storey_transform(rect, ber, current_storey_idx, mode, vp)
+            {
+                render::structure_fan::render_groups_inplace(&painter, &t, storey, edit);
+                let editable = !reviewing && !dim_prompting;
+                if let Some(spec) = edit.specifying {
+                    // "Specify…" is open: a centred build-up LAYER editor takes over
+                    // (the small per-group windows are hidden while it's up).
+                    if let Some(group) = edit.groups.get(spec) {
+                        egui::Area::new(ui.id().with("specify_layers"))
+                            .order(egui::Order::Foreground)
+                            .anchor(egui::Align2::CENTER_CENTER, egui::vec2(0.0, 0.0))
+                            .show(ui.ctx(), |ui| {
+                                egui::Frame::popup(ui.style()).show(ui, |ui| {
+                                    ui.set_max_width(300.0);
+                                    super::structure::layer_editor_ui(
                                         ui,
-                                        group.ty.kind(),
-                                        i,
+                                        spec,
                                         group,
-                                        view.phase_choices,
-                                        &view.structure_existing_groups,
-                                        editable,
-                                        edit.name_error
-                                            .as_ref()
-                                            .filter(|(gi, _)| *gi == i)
-                                            .map(|(_, m)| m.as_str()),
+                                        view.layer_library,
                                         on_event,
                                     );
                                 });
-                        });
+                            });
+                    }
+                } else if let Some(pg) = edit.viewing_photos {
+                    // Camera button is open: a centred PHOTOS view (thumbnails + add).
+                    if let Some(group) = edit.groups.get(pg) {
+                        egui::Area::new(ui.id().with("view_photos"))
+                            .order(egui::Order::Foreground)
+                            .anchor(egui::Align2::CENTER_CENTER, egui::vec2(0.0, 0.0))
+                            .show(ui.ctx(), |ui| {
+                                egui::Frame::popup(ui.style()).show(ui, |ui| {
+                                    ui.set_max_width(440.0);
+                                    super::structure::photos_view_ui(ui, pg, group, on_event);
+                                });
+                            });
+                    }
+                } else {
+                    for w in &layout.windows {
+                        let i = w.group_index;
+                        let Some(group) = edit.groups.get(i) else {
+                            continue;
+                        };
+                        // Connector from the window's inner edge to the group's true
+                        // centroid, ending in a dot on the recoloured surfaces.
+                        let target = t.apply(w.centroid.0, w.centroid.1);
+                        painter.line_segment(
+                            [w.inner_anchor, target],
+                            egui::Stroke::new(2.0, w.color),
+                        );
+                        painter.circle_filled(target, 3.5, w.color);
+                        egui::Area::new(ui.id().with(("structure_attr", i)))
+                            .order(egui::Order::Foreground)
+                            .fixed_pos(w.pos)
+                            .show(ui.ctx(), |ui| {
+                                egui::Frame::popup(ui.style())
+                                    .fill(w.color.gamma_multiply(0.22))
+                                    .stroke(egui::Stroke::new(2.0, w.color))
+                                    .show(ui, |ui| {
+                                        ui.set_max_width(EDIT_BOX_W - 16.0);
+                                        // The two-level heading (kind + editable name)
+                                        // is rendered by `group_editor_ui` itself now.
+                                        super::structure::group_editor_ui(
+                                            ui,
+                                            group.ty.kind(),
+                                            i,
+                                            group,
+                                            view.phase_choices,
+                                            &view.structure_existing_groups,
+                                            editable,
+                                            edit.name_error
+                                                .as_ref()
+                                                .filter(|(gi, _)| *gi == i)
+                                                .map(|(_, m)| m.as_str()),
+                                            on_event,
+                                        );
+                                    });
+                            });
+                    }
                 }
+            }
+        }
+
+        // Move-mode selection highlight: paint the selected wall
+        // in red so the user sees which wall their drag is moving.
+        // The inserted-vertex marker (if any) takes precedence —
+        // both can't be selected at once.
+        if matches!(edit_tool, EditTools::Move) {
+            if let Some((wa, wb)) = view.edit_selected_wall {
+                render::render_equivalent_wall(
+                    &painter,
+                    rect,
+                    ber,
+                    current_storey_idx,
+                    mode,
+                    vp,
+                    wa,
+                    wb,
+                );
+            }
+            if let Some((vx, vy)) = view.edit_selected_vertex {
+                render::render_vertex_marker(
+                    &painter,
+                    rect,
+                    ber,
+                    current_storey_idx,
+                    mode,
+                    vp,
+                    vx,
+                    vy,
+                );
+            }
+        }
+    } // ── end single-storey plan chrome (continued) ───────────────────────────
+
+    // Vertex-drop prompt: draw a perpendicular distance arrow
+    // for each still-active measurement (axis not yet pinned),
+    // so the user sees what each text box refers to.
+    // Single-storey editing — suppressed under an overlay mode.
+    if !overlay_mode {
+        if let Some(vdp) = &view.vertex_drop_prompt {
+            for m in &vdp.active {
+                use crate::controller::app_controller::VertexMeasurementKind;
+                use manip_plan::ParameterAxis;
+                // Axis measurements get a perpendicular arrow at
+                // the vertex's row/column. WallLength measurements
+                // draw the arrow directly along the diagonal from
+                // neighbour → vertex (= the new wall itself).
+                let (arrow_a, arrow_b) = match m.kind {
+                    VertexMeasurementKind::Axis(ParameterAxis::X) => (
+                        (m.neighbor_pos.0, vdp.vertex_pos.1),
+                        (vdp.vertex_pos.0, vdp.vertex_pos.1),
+                    ),
+                    VertexMeasurementKind::Axis(ParameterAxis::Y) => (
+                        (vdp.vertex_pos.0, m.neighbor_pos.1),
+                        (vdp.vertex_pos.0, vdp.vertex_pos.1),
+                    ),
+                    VertexMeasurementKind::WallLength => (m.neighbor_pos, vdp.vertex_pos),
+                };
+                render::render_dimension_prompt(
+                    &painter,
+                    rect,
+                    ber,
+                    current_storey_idx,
+                    mode,
+                    vp,
+                    arrow_a,
+                    arrow_b,
+                );
             }
         }
     }
 
-    // Move-mode selection highlight: paint the selected wall
-    // in red so the user sees which wall their drag is moving.
-    // The inserted-vertex marker (if any) takes precedence —
-    // both can't be selected at once.
-    if matches!(edit_tool, EditTools::Move) {
-        if let Some((wa, wb)) = view.edit_selected_wall {
+    // Post-drag measurement prompt overlay:
+    //
+    //   * Reference wall highlighted in red (same as the moved
+    //     wall) so the user sees both walls involved.
+    //   * A cyan arrow drawn PERPENDICULAR to both walls,
+    //     spanning the actual distance being measured. For a
+    //     vertical wall pair, the arrow is horizontal; for a
+    //     horizontal wall pair, vertical.
+    // Single-storey editing — suppressed under an overlay mode (the
+    // carve does not use edit-drag).
+    if !overlay_mode {
+        if let Some(ep) = &view.edit_drag_prompt {
             render::render_equivalent_wall(
                 &painter,
                 rect,
@@ -1335,36 +1468,32 @@ pub(super) fn render<F: FnMut(UiEvent)>(
                 current_storey_idx,
                 mode,
                 vp,
-                wa,
-                wb,
+                ep.reference_wall.wall_a,
+                ep.reference_wall.wall_b,
             );
-        }
-        if let Some((vx, vy)) = view.edit_selected_vertex {
-            render::render_vertex_marker(&painter, rect, ber, current_storey_idx, mode, vp, vx, vy);
-        }
-    }
-
-    // Vertex-drop prompt: draw a perpendicular distance arrow
-    // for each still-active measurement (axis not yet pinned),
-    // so the user sees what each text box refers to.
-    if let Some(vdp) = &view.vertex_drop_prompt {
-        for m in &vdp.active {
-            use crate::controller::app_controller::VertexMeasurementKind;
-            use manip_plan::ParameterAxis;
-            // Axis measurements get a perpendicular arrow at
-            // the vertex's row/column. WallLength measurements
-            // draw the arrow directly along the diagonal from
-            // neighbour → vertex (= the new wall itself).
-            let (arrow_a, arrow_b) = match m.kind {
-                VertexMeasurementKind::Axis(ParameterAxis::X) => (
-                    (m.neighbor_pos.0, vdp.vertex_pos.1),
-                    (vdp.vertex_pos.0, vdp.vertex_pos.1),
-                ),
-                VertexMeasurementKind::Axis(ParameterAxis::Y) => (
-                    (vdp.vertex_pos.0, m.neighbor_pos.1),
-                    (vdp.vertex_pos.0, vdp.vertex_pos.1),
-                ),
-                VertexMeasurementKind::WallLength => (m.neighbor_pos, vdp.vertex_pos),
+            // Two parallel axis-aligned walls. Build a virtual
+            // arrow perpendicular to both at the midpoint of the
+            // moved wall's parallel range. render_dimension_prompt
+            // handles drawing the arrow + arrowheads; the
+            // "interior offset" auto-detects None for non-vertex
+            // points so the arrow lands directly on the line.
+            let m_dx = (ep.moved_wall.wall_b.0 - ep.moved_wall.wall_a.0).abs();
+            let m_dy = (ep.moved_wall.wall_b.1 - ep.moved_wall.wall_a.1).abs();
+            let is_vertical = m_dy > m_dx;
+            let (arrow_a, arrow_b) = if is_vertical {
+                // Horizontal arrow at moved wall's midpoint y.
+                let mid_y = (ep.moved_wall.wall_a.1 + ep.moved_wall.wall_b.1) * 0.5;
+                (
+                    (ep.reference_wall.wall_a.0, mid_y),
+                    (ep.moved_wall.wall_a.0, mid_y),
+                )
+            } else {
+                // Vertical arrow at moved wall's midpoint x.
+                let mid_x = (ep.moved_wall.wall_a.0 + ep.moved_wall.wall_b.0) * 0.5;
+                (
+                    (mid_x, ep.reference_wall.wall_a.1),
+                    (mid_x, ep.moved_wall.wall_a.1),
+                )
             };
             render::render_dimension_prompt(
                 &painter,
@@ -1379,89 +1508,39 @@ pub(super) fn render<F: FnMut(UiEvent)>(
         }
     }
 
-    // Post-drag measurement prompt overlay:
-    //
-    //   * Reference wall highlighted in red (same as the moved
-    //     wall) so the user sees both walls involved.
-    //   * A cyan arrow drawn PERPENDICULAR to both walls,
-    //     spanning the actual distance being measured. For a
-    //     vertical wall pair, the arrow is horizontal; for a
-    //     horizontal wall pair, vertical.
-    if let Some(ep) = &view.edit_drag_prompt {
-        render::render_equivalent_wall(
-            &painter,
-            rect,
-            ber,
-            current_storey_idx,
-            mode,
-            vp,
-            ep.reference_wall.wall_a,
-            ep.reference_wall.wall_b,
-        );
-        // Two parallel axis-aligned walls. Build a virtual
-        // arrow perpendicular to both at the midpoint of the
-        // moved wall's parallel range. render_dimension_prompt
-        // handles drawing the arrow + arrowheads; the
-        // "interior offset" auto-detects None for non-vertex
-        // points so the arrow lands directly on the line.
-        let m_dx = (ep.moved_wall.wall_b.0 - ep.moved_wall.wall_a.0).abs();
-        let m_dy = (ep.moved_wall.wall_b.1 - ep.moved_wall.wall_a.1).abs();
-        let is_vertical = m_dy > m_dx;
-        let (arrow_a, arrow_b) = if is_vertical {
-            // Horizontal arrow at moved wall's midpoint y.
-            let mid_y = (ep.moved_wall.wall_a.1 + ep.moved_wall.wall_b.1) * 0.5;
-            (
-                (ep.reference_wall.wall_a.0, mid_y),
-                (ep.moved_wall.wall_a.0, mid_y),
-            )
-        } else {
-            // Vertical arrow at moved wall's midpoint x.
-            let mid_x = (ep.moved_wall.wall_a.0 + ep.moved_wall.wall_b.0) * 0.5;
-            (
-                (mid_x, ep.reference_wall.wall_a.1),
-                (mid_x, ep.moved_wall.wall_a.1),
-            )
-        };
-        render::render_dimension_prompt(
-            &painter,
-            rect,
-            ber,
-            current_storey_idx,
-            mode,
-            vp,
-            arrow_a,
-            arrow_b,
-        );
-    }
-
     // Dimension-prompt overlay. Every wall the user can
     // equivalently measure (including the primary) is highlighted
     // in red. The primary additionally gets the cyan interior
     // arrow + length label, drawn last so it sits on top.
-    if let Some(p) = &view.dim_prompt {
-        for wall in &p.walls {
-            render::render_equivalent_wall(
-                &painter,
-                rect,
-                ber,
-                current_storey_idx,
-                mode,
-                vp,
-                wall.wall_a,
-                wall.wall_b,
-            );
-        }
-        if let Some(primary) = p.walls.first() {
-            render::render_dimension_prompt(
-                &painter,
-                rect,
-                ber,
-                current_storey_idx,
-                mode,
-                vp,
-                primary.wall_a,
-                primary.wall_b,
-            );
+    // Kept live while a carve ring is being dimensioned (the carve's own
+    // length prompt); otherwise suppressed under an overlay mode so the
+    // leftover single-storey outline prompt doesn't leak on top.
+    if !overlay_mode || carve_dimensioning {
+        if let Some(p) = &view.dim_prompt {
+            for wall in &p.walls {
+                render::render_equivalent_wall(
+                    &painter,
+                    rect,
+                    ber,
+                    current_storey_idx,
+                    mode,
+                    vp,
+                    wall.wall_a,
+                    wall.wall_b,
+                );
+            }
+            if let Some(primary) = p.walls.first() {
+                render::render_dimension_prompt(
+                    &painter,
+                    rect,
+                    ber,
+                    current_storey_idx,
+                    mode,
+                    vp,
+                    primary.wall_a,
+                    primary.wall_b,
+                );
+            }
         }
     }
 
@@ -1472,63 +1551,70 @@ pub(super) fn render<F: FnMut(UiEvent)>(
     //     two colours keep them apart.
     //   * A cyan arrow drawn along the prompt's axis between the
     //     two walls, spanning the distance being measured.
-    if let Some(pp) = &view.position_prompt {
-        render::render_wall_highlight(
-            &painter,
-            rect,
-            ber,
-            current_storey_idx,
-            mode,
-            vp,
-            pp.area_wall.wall_a,
-            pp.area_wall.wall_b,
-            egui::Color32::from_rgb(255, 170, 40), // orange: the area wall
-        );
-        render::render_wall_highlight(
-            &painter,
-            rect,
-            ber,
-            current_storey_idx,
-            mode,
-            vp,
-            pp.reference_wall.wall_a,
-            pp.reference_wall.wall_b,
-            egui::Color32::from_rgb(255, 80, 80), // red: the outline reference
-        );
-        let (arrow_a, arrow_b) = match pp.axis {
-            manip_plan::ParameterAxis::X => {
-                // Horizontal arrow at the area wall's midpoint y.
-                let mid_y = (pp.area_wall.wall_a.1 + pp.area_wall.wall_b.1) * 0.5;
-                (
-                    (pp.reference_wall.wall_a.0, mid_y),
-                    (pp.area_wall.wall_a.0, mid_y),
-                )
-            }
-            manip_plan::ParameterAxis::Y => {
-                // Vertical arrow at the area wall's midpoint x.
-                let mid_x = (pp.area_wall.wall_a.0 + pp.area_wall.wall_b.0) * 0.5;
-                (
-                    (mid_x, pp.reference_wall.wall_a.1),
-                    (mid_x, pp.area_wall.wall_a.1),
-                )
-            }
-        };
-        render::render_dimension_prompt(
-            &painter,
-            rect,
-            ber,
-            current_storey_idx,
-            mode,
-            vp,
-            arrow_a,
-            arrow_b,
-        );
+    // Kept live while a carve ring is being dimensioned (mirrors the
+    // dim-prompt gate); otherwise suppressed under an overlay mode.
+    if !overlay_mode || carve_dimensioning {
+        if let Some(pp) = &view.position_prompt {
+            render::render_wall_highlight(
+                &painter,
+                rect,
+                ber,
+                current_storey_idx,
+                mode,
+                vp,
+                pp.area_wall.wall_a,
+                pp.area_wall.wall_b,
+                egui::Color32::from_rgb(255, 170, 40), // orange: the area wall
+            );
+            render::render_wall_highlight(
+                &painter,
+                rect,
+                ber,
+                current_storey_idx,
+                mode,
+                vp,
+                pp.reference_wall.wall_a,
+                pp.reference_wall.wall_b,
+                egui::Color32::from_rgb(255, 80, 80), // red: the outline reference
+            );
+            let (arrow_a, arrow_b) = match pp.axis {
+                manip_plan::ParameterAxis::X => {
+                    // Horizontal arrow at the area wall's midpoint y.
+                    let mid_y = (pp.area_wall.wall_a.1 + pp.area_wall.wall_b.1) * 0.5;
+                    (
+                        (pp.reference_wall.wall_a.0, mid_y),
+                        (pp.area_wall.wall_a.0, mid_y),
+                    )
+                }
+                manip_plan::ParameterAxis::Y => {
+                    // Vertical arrow at the area wall's midpoint x.
+                    let mid_x = (pp.area_wall.wall_a.0 + pp.area_wall.wall_b.0) * 0.5;
+                    (
+                        (mid_x, pp.reference_wall.wall_a.1),
+                        (mid_x, pp.area_wall.wall_a.1),
+                    )
+                }
+            };
+            render::render_dimension_prompt(
+                &painter,
+                rect,
+                ber,
+                current_storey_idx,
+                mode,
+                vp,
+                arrow_a,
+                arrow_b,
+            );
+        }
     }
 
     // Provisional curved-wall preview (amber arc) drawn on top, so
     // the user sees the curve while dimensioning its attach lines.
-    if let Some(pts) = view.arc_preview {
-        render::render_arc_preview(&painter, rect, ber, current_storey_idx, mode, vp, pts);
+    // Single-storey editing — suppressed under an overlay mode.
+    if !overlay_mode {
+        if let Some(pts) = view.arc_preview {
+            render::render_arc_preview(&painter, rect, ber, current_storey_idx, mode, vp, pts);
+        }
     }
 
     // Two-finger navigation (touch): pinch zoom + two-finger pan, with

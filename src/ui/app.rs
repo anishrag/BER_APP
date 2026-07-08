@@ -575,6 +575,15 @@ impl BerApp {
                 self.home_state.pending_delete = None;
                 self.home_state.rows = self.app_controller.borrow().list_bers();
             }
+            HomeEvent::DuplicateBer(id) => {
+                match self.app_controller.borrow().duplicate_ber(&id) {
+                    Ok(_) => {}
+                    Err(e) => log::error!("duplicate_ber: {e}"),
+                }
+                // Refresh so the new copy appears in the Load list; the assessor
+                // stays on Home (the copy is not opened).
+                self.home_state.rows = self.app_controller.borrow().list_bers();
+            }
         }
     }
 

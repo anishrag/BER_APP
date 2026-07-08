@@ -723,7 +723,7 @@ pub(super) fn render<F: FnMut(UiEvent)>(
         ];
         if p.offers_centre {
             actions.push(
-                Action::new("Centre", "Centre it within its ceiling area", |_| {
+                Action::new("Centre", "Centre it within the available area", |_| {
                     SketchEvent::CentreRoofPosition
                 })
                 .bare(),

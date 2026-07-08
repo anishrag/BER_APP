@@ -79,6 +79,27 @@ pub struct PositionOption {
     pub current_distance: f32,
 }
 
+/// The `(lo, hi)` extent of `plan`'s footprint on `axis` — its bounding box on
+/// that axis. A degenerate/empty plan reports `(0.0, 0.0)`. Used by the Centre
+/// path to centre a shape's span within its reference footprint's span.
+fn axis_extent(plan: &FloorPlan, axis: ParameterAxis) -> (f32, f32) {
+    let mut lo = f32::INFINITY;
+    let mut hi = f32::NEG_INFINITY;
+    for p in plan.get_points() {
+        let c = match axis {
+            ParameterAxis::X => p.x,
+            ParameterAxis::Y => p.y,
+        };
+        lo = lo.min(c);
+        hi = hi.max(c);
+    }
+    if lo > hi {
+        (0.0, 0.0)
+    } else {
+        (lo, hi)
+    }
+}
+
 /// Ring-0 walls of `plan` PERPENDICULAR to `axis` (vertical walls for X),
 /// as `(start VertexId, coordinate on axis)`, in ring order.
 fn axis_walls(plan: &FloorPlan, axis: ParameterAxis) -> Vec<(VertexId, f32)> {
@@ -133,10 +154,17 @@ impl StoreyDoc {
     /// silently). Preserves `current_idx` when the prompt identity
     /// `(axis, kind)` is unchanged across recomputes.
     pub fn recompute_position_prompt(&mut self) {
-        // Only in-flight phase/step areas are position-prompted. Living areas
-        // carry the free-axes record (uniform `pinned_slot_for`) but are never
-        // asked; the outline has no boundary to be positioned against.
-        if !matches!(self.active, ActiveShape::PhaseArea | ActiveShape::StepArea) {
+        // In-flight phase/step areas are always position-prompted; a freshly
+        // DRAWN upper-storey OUTLINE is too, but ONLY while its reference (the
+        // storey-below footprint, `position_reference_override`) is supplied — a
+        // GROUND storey has no reference, so its outline stays unprompted. Living
+        // areas carry the free-axes record (uniform `pinned_slot_for`) but are
+        // never asked.
+        let outline_positionable =
+            self.active == ActiveShape::Outline && self.position_reference_override.is_some();
+        if !matches!(self.active, ActiveShape::PhaseArea | ActiveShape::StepArea)
+            && !outline_positionable
+        {
             self.dimensioning.current_position_prompt = None;
             return;
         }
@@ -183,7 +211,7 @@ impl StoreyDoc {
         //    (e.g. a cut line) was never set — its drawn coordinate is
         //    approximate. Scoped to NON-free axes: free axes are Translate's.
         for (param, axis, area_wall_vid, coord) in self.unset_wall_candidates() {
-            let refs = reference_walls(&self.outline.floor_plan, axis);
+            let refs = reference_walls(self.position_reference(), axis);
             if refs.is_empty() {
                 log::info!(
                     "position prompt for P{param} ({axis:?}) auto-resolved: no outline \
@@ -241,16 +269,12 @@ impl StoreyDoc {
             .options
             .get(prompt.current_idx)
             .ok_or_else(|| "position prompt has no selected option".to_string())?;
-        let (ring, edge_start) = self
-            .floor_plan
-            .find_vertex(opt.area_wall_vid)
-            .ok_or_else(|| "prompt wall vertex no longer exists".to_string())?;
 
         // Where the measured wall must land: the entered distance from the
         // reference, on the side the area was drawn (sign preservation).
         let target = opt.reference_value + opt.sign * value;
         log::debug!(
-            "position dimension ({:?} {:?}): wall vid {} → {} m from outline wall vid {} \
+            "position dimension ({:?} {:?}): wall vid {} → {} m from reference wall vid {} \
              (ref {:.3}, side {:+.0}) ⇒ coord {:.3} [drawn {:.3}]",
             prompt.kind,
             prompt.axis,
@@ -263,92 +287,226 @@ impl StoreyDoc {
             opt.reference_value + opt.sign * opt.current_distance,
         );
 
-        // Model-internal rollback snapshot (not the app's undo).
-        let snapshot = self.floor_plan.clone();
-        let known_params_before = self.dimensioning.known_params.clone();
-
         match prompt.kind {
             PositionPromptKind::Translate => {
-                let current = {
-                    let p = self.floor_plan.polygons()[ring][edge_start];
-                    match prompt.axis {
-                        ParameterAxis::X => p.x,
-                        ParameterAxis::Y => p.y,
-                    }
-                };
-                let (dx, dy) = match prompt.axis {
-                    ParameterAxis::X => (target - current, 0.0),
-                    ParameterAxis::Y => (0.0, target - current),
-                };
-                self.floor_plan.translate_all(dx, dy);
+                self.apply_translate_target(&prompt, target, &value.to_string())
             }
             PositionPromptKind::Wall { param } => {
-                let edge_signs_before = snapshot.edge_signs();
-                // Known up front: repair only scales NOT-known params, so
-                // delaying this would let it clobber the user's value.
-                self.dimensioning.known_params.insert(param);
-                self.floor_plan.set_parameter(param, target);
-                let invalid = self.floor_plan.validate_simple().is_err();
-                let inverted =
-                    find_flipped_edge(&edge_signs_before, &self.floor_plan.edge_signs()).is_some();
-                if (invalid || inverted)
-                    && !self.floor_plan.repair_unset_params(
-                        prompt.axis,
-                        &self.dimensioning.known_params,
-                        &snapshot,
-                    )
-                {
-                    self.floor_plan = snapshot;
-                    self.dimensioning.known_params = known_params_before;
-                    log::warn!("  → REJECTED: no shape-preserving fit found. Rolled back.");
-                    return Err(format!(
-                        "{} can't be applied without changing the shape — there's no way \
-                         to move the un-set walls that keeps every wall's direction. \
-                         Pick a distance that fits.",
-                        value
-                    ));
-                }
+                self.apply_wall_target(&prompt, param, target, &value.to_string())
             }
             PositionPromptKind::Line => unreachable!("Line prompts are shell-resolved"),
             PositionPromptKind::Point => unreachable!("Point prompts are shell-resolved"),
         }
+    }
 
-        // Guardrail (BOTH kinds): the area must stay inside the storey.
-        let tol = (self.outline.floor_plan.bounding_box_diagonal() * 0.01).max(1e-3);
-        if self
-            .outline
+    /// The plan the position loop measures against: the injected storey-below
+    /// footprint ([`position_reference_override`](StoreyDoc::position_reference_override))
+    /// ONLY while the OUTLINE itself is active (a freshly-drawn upper storey
+    /// positioned over the one below); for any sub-area (phase/step/exposure)
+    /// it's always this storey's own outline. Scoping to `Outline` is what
+    /// keeps a lingering override — left set after the upper outline finalised
+    /// — from mis-referencing a later same-session sub-area carve against the
+    /// below footprint (which, for an OVERHANGING upper storey, differs from
+    /// the actual outline).
+    fn position_reference(&self) -> &FloorPlan {
+        match self.active {
+            ActiveShape::Outline => self
+                .position_reference_override
+                .as_ref()
+                .unwrap_or(&self.outline.floor_plan),
+            _ => &self.outline.floor_plan,
+        }
+    }
+
+    /// The containment guardrail shared by both position kinds: `Some(message)`
+    /// when the just-mutated `floor_plan` would fall outside the reference
+    /// footprint. SKIPPED (always `None`) for an `Outline` — a freshly-drawn
+    /// upper storey may legitimately overhang the storey below (an extension /
+    /// cantilever). Phase/step sub-areas must stay inside the storey. `label`
+    /// prefixes the user-facing rejection.
+    fn position_guardrail_violation(&self, label: &str) -> Option<String> {
+        if self.active == ActiveShape::Outline {
+            return None;
+        }
+        let reference = self.position_reference();
+        let tol = (reference.bounding_box_diagonal() * 0.01).max(1e-3);
+        reference.any_point_outside(&self.floor_plan, tol).then(|| {
+            format!(
+                "{label} would push the area outside the storey — it must stay \
+                 inside the floor plan. Pick a distance that fits."
+            )
+        })
+    }
+
+    /// Rigid-translate the whole active shape on `prompt.axis` so its measured
+    /// wall lands at `target` (`FloorPlan::translate_all`), then run the shared
+    /// success bookkeeping (containment guardrail, pin the measured wall's
+    /// perpendicular param, record the axis resolved, recompute the next
+    /// prompt). Shared by the typed-distance path ([`apply_position`]) and the
+    /// Centre path ([`center_current_position`]) — `label` prefixes the
+    /// rejection message ("centre", or the typed value). Rolls back on
+    /// rejection.
+    fn apply_translate_target(
+        &mut self,
+        prompt: &PositionPrompt,
+        target: f32,
+        label: &str,
+    ) -> Result<(), String> {
+        let opt = *prompt
+            .options
+            .get(prompt.current_idx)
+            .ok_or_else(|| "position prompt has no selected option".to_string())?;
+        let (ring, edge_start) = self
             .floor_plan
-            .any_point_outside(&self.floor_plan, tol)
-        {
+            .find_vertex(opt.area_wall_vid)
+            .ok_or_else(|| "prompt wall vertex no longer exists".to_string())?;
+
+        // Model-internal rollback snapshot (not the app's undo).
+        let snapshot = self.floor_plan.clone();
+        let known_params_before = self.dimensioning.known_params.clone();
+
+        let current = {
+            let p = self.floor_plan.polygons()[ring][edge_start];
+            match prompt.axis {
+                ParameterAxis::X => p.x,
+                ParameterAxis::Y => p.y,
+            }
+        };
+        let (dx, dy) = match prompt.axis {
+            ParameterAxis::X => (target - current, 0.0),
+            ParameterAxis::Y => (0.0, target - current),
+        };
+        self.floor_plan.translate_all(dx, dy);
+
+        if let Some(msg) = self.position_guardrail_violation(label) {
             self.floor_plan = snapshot;
             self.dimensioning.known_params = known_params_before;
             log::warn!("  → REJECTED: would push the area outside the storey.");
+            return Err(msg);
+        }
+        self.finish_position_apply(ring, edge_start, prompt.axis);
+        Ok(())
+    }
+
+    /// Set the un-set perpendicular param of an anchored area's wall (a cut
+    /// line) to `target` + validate/repair like `apply_dimension`, then the
+    /// shared success bookkeeping. Rolls back on self-intersect / edge flip with
+    /// no shape-preserving fit, or on the containment guardrail.
+    fn apply_wall_target(
+        &mut self,
+        prompt: &PositionPrompt,
+        param: ParameterId,
+        target: f32,
+        label: &str,
+    ) -> Result<(), String> {
+        let opt = *prompt
+            .options
+            .get(prompt.current_idx)
+            .ok_or_else(|| "position prompt has no selected option".to_string())?;
+        let (ring, edge_start) = self
+            .floor_plan
+            .find_vertex(opt.area_wall_vid)
+            .ok_or_else(|| "prompt wall vertex no longer exists".to_string())?;
+
+        let snapshot = self.floor_plan.clone();
+        let known_params_before = self.dimensioning.known_params.clone();
+
+        let edge_signs_before = snapshot.edge_signs();
+        // Known up front: repair only scales NOT-known params, so delaying this
+        // would let it clobber the user's value.
+        self.dimensioning.known_params.insert(param);
+        self.floor_plan.set_parameter(param, target);
+        let invalid = self.floor_plan.validate_simple().is_err();
+        let inverted =
+            find_flipped_edge(&edge_signs_before, &self.floor_plan.edge_signs()).is_some();
+        if (invalid || inverted)
+            && !self.floor_plan.repair_unset_params(
+                prompt.axis,
+                &self.dimensioning.known_params,
+                &snapshot,
+            )
+        {
+            self.floor_plan = snapshot;
+            self.dimensioning.known_params = known_params_before;
+            log::warn!("  → REJECTED: no shape-preserving fit found. Rolled back.");
             return Err(format!(
-                "{} would push the area outside the storey — it must stay \
-                 inside the floor plan. Pick a distance that fits.",
-                value
+                "{label} can't be applied without changing the shape — there's no way \
+                 to move the un-set walls that keeps every wall's direction. \
+                 Pick a distance that fits."
             ));
         }
 
-        // Success: the measured wall's position is now exact — pin its
-        // perpendicular param (if it has one; an anchored constant needs none).
+        if let Some(msg) = self.position_guardrail_violation(label) {
+            self.floor_plan = snapshot;
+            self.dimensioning.known_params = known_params_before;
+            log::warn!("  → REJECTED: would push the area outside the storey.");
+            return Err(msg);
+        }
+        self.finish_position_apply(ring, edge_start, prompt.axis);
+        Ok(())
+    }
+
+    /// Shared success tail for both apply kinds: the measured wall's position is
+    /// now exact — pin its perpendicular param (if it has one; an anchored
+    /// constant needs none), record the axis resolved, then a full recompute
+    /// (lengths first): setting a `Wall` param known can make another wall
+    /// length-promptable — ask it as a LENGTH before any further position
+    /// question. The hook then refreshes the position prompt either way.
+    fn finish_position_apply(&mut self, ring: usize, edge_start: usize, axis: ParameterAxis) {
         if let Some((p, _)) = self.floor_plan.wall_movable_param(ring, edge_start) {
             self.dimensioning.known_params.insert(p);
         }
-        if !self
-            .dimensioning
-            .position_resolved_axes
-            .contains(&prompt.axis)
-        {
-            self.dimensioning.position_resolved_axes.push(prompt.axis);
+        if !self.dimensioning.position_resolved_axes.contains(&axis) {
+            self.dimensioning.position_resolved_axes.push(axis);
         }
-        log::debug!("  ✓ position accepted on {:?}.", prompt.axis);
-        // Full recompute (lengths first): setting a Wall param known can make
-        // another wall length-promptable — ask it as a LENGTH before any
-        // further position question. The hook then refreshes the position
-        // prompt either way.
+        log::debug!("  ✓ position accepted on {:?}.", axis);
         self.recompute_prompt();
-        Ok(())
+    }
+
+    /// The 'Centre' button for a whole-shape `Translate` position prompt:
+    /// compute the coordinate that centres the shape's extent within the
+    /// REFERENCE footprint's extent on the prompt's axis, then apply it through
+    /// the SAME translate path as a typed distance — the ceiling-tools' Centre
+    /// pattern (compute the coord that centres, feed the shared apply — cf.
+    /// [`centred_rect_lo`](crate::centred_rect_lo), which does the same over a
+    /// ceiling region rather than a footprint bbox). `Err` when there is no
+    /// `Translate` prompt open.
+    pub fn center_current_position(&mut self) -> Result<(), String> {
+        let prompt = self
+            .dimensioning
+            .current_position_prompt
+            .clone()
+            .ok_or_else(|| "no active position prompt".to_string())?;
+        if prompt.kind != PositionPromptKind::Translate {
+            return Err("only a whole-shape position can be centred".to_string());
+        }
+        let opt = *prompt
+            .options
+            .get(prompt.current_idx)
+            .ok_or_else(|| "position prompt has no selected option".to_string())?;
+        let (ring, edge_start) = self
+            .floor_plan
+            .find_vertex(opt.area_wall_vid)
+            .ok_or_else(|| "prompt wall vertex no longer exists".to_string())?;
+
+        let axis = prompt.axis;
+        let (shape_lo, shape_hi) = axis_extent(&self.floor_plan, axis);
+        let (ref_lo, ref_hi) = axis_extent(self.position_reference(), axis);
+        // Centre the shape's extent within the reference span (span_mid − len/2,
+        // like `centred_rect_lo`), then translate so the measured wall lands at
+        // its current coord plus the same delta — the target the shared path
+        // expects.
+        let len = shape_hi - shape_lo;
+        let centred_lo = (ref_lo + ref_hi) / 2.0 - len / 2.0;
+        let measured_current = {
+            let p = self.floor_plan.polygons()[ring][edge_start];
+            match axis {
+                ParameterAxis::X => p.x,
+                ParameterAxis::Y => p.y,
+            }
+        };
+        let target = measured_current + (centred_lo - shape_lo);
+        self.apply_translate_target(&prompt, target, "centre")
     }
 
     /// Skip the current position prompt — accept the drawn position. Records
@@ -401,7 +559,7 @@ impl StoreyDoc {
     /// measurement), sorted by current distance ascending.
     fn translate_options(&self, axis: ParameterAxis) -> Vec<PositionOption> {
         let area_walls = axis_walls(&self.floor_plan, axis);
-        let mut options: Vec<PositionOption> = reference_walls(&self.outline.floor_plan, axis)
+        let mut options: Vec<PositionOption> = reference_walls(self.position_reference(), axis)
             .into_iter()
             .filter_map(|(outline_wall_vid, reference_value)| {
                 area_walls
@@ -792,6 +950,274 @@ mod tests {
                 .axis,
             ParameterAxis::Y
         );
+    }
+
+    // ── Upper-storey OUTLINE vertical placement ─────────────────────────────
+    // A freshly-drawn upper outline is positioned against the storey BELOW
+    // (supplied via `position_reference_override`), not its own outline slot.
+
+    /// Carve a FULL-WIDTH upper box (y ∈ [2, 5.41]) over a 10×10 storey below,
+    /// as the new-storey flow does: the box hugs the below's left/right walls
+    /// (X pinned) but floats vertically (Y free). Returns the doc with the box
+    /// active as the Outline; the caller decides whether to supply the below
+    /// footprint as the position reference (the controller does this post-carve
+    /// for an upper storey, but NOT for a ground storey).
+    fn carve_full_width_upper_box() -> StoreyDoc {
+        let prev_ring = [p(0., 0.), p(10., 0.), p(10., 10.), p(0., 10.)];
+        let stroke = vec![
+            p(0.05, 2.0),
+            p(9.95, 2.0),
+            p(9.95, 5.41),
+            p(0.05, 5.41),
+            p(0.05, 2.05),
+        ];
+        let mut doc = StoreyDoc::default();
+        doc.carve_outline_from_previous(
+            &stroke,
+            &prev_ring,
+            &manip_plan::SubareaTuning::default(),
+            &[],
+        )
+        .expect("carve applies");
+        doc
+    }
+
+    fn ten_by_ten_reference() -> FloorPlan {
+        FloorPlan::from_clean_ring(&[p(0., 0.), p(10., 0.), p(10., 10.), p(0., 10.)]).unwrap()
+    }
+
+    fn max_y(fp: &FloorPlan) -> f32 {
+        fp.get_points()
+            .iter()
+            .map(|p| p.y)
+            .fold(f32::NEG_INFINITY, f32::max)
+    }
+
+    /// Carving a full-width upper box records Y as its only free axis, and once
+    /// the length loop completes a `Translate` position prompt appears on Y with
+    /// the below-storey top/bottom walls (y=0, y=10) as the reference options.
+    #[test]
+    fn upper_outline_full_width_box_prompts_translate_on_y() {
+        let mut doc = carve_full_width_upper_box();
+        assert_eq!(
+            doc.dimensioning.position_free_axes,
+            vec![ParameterAxis::Y],
+            "full-width box: X pinned to the storey below, Y free"
+        );
+        doc.position_reference_override = Some(ten_by_ten_reference());
+        doc.recompute_prompt();
+        complete_length_loop(&mut doc);
+
+        let prompt = doc
+            .dimensioning
+            .current_position_prompt
+            .clone()
+            .expect("Y position prompt after the length loop");
+        assert_eq!(prompt.axis, ParameterAxis::Y);
+        assert_eq!(prompt.kind, PositionPromptKind::Translate);
+        assert_eq!(prompt.options.len(), 2, "below top + bottom walls");
+        let mut refs: Vec<f32> = prompt.options.iter().map(|o| o.reference_value).collect();
+        refs.sort_by(f32::total_cmp);
+        assert!((refs[0] - 0.0).abs() < 1e-3 && (refs[1] - 10.0).abs() < 1e-3);
+    }
+
+    /// Applying a distance translates the upper outline on Y so the measured
+    /// wall lands at that distance from the chosen reference — and a distance
+    /// that pushes the box PAST the below footprint (an overhang / cantilever)
+    /// is ACCEPTED, not rejected by a containment guardrail.
+    #[test]
+    fn upper_outline_distance_translates_and_allows_overhang() {
+        let mut doc = carve_full_width_upper_box();
+        doc.position_reference_override = Some(ten_by_ten_reference());
+        doc.recompute_prompt();
+        complete_length_loop(&mut doc);
+
+        // Option 0 measures the bottom wall (y=2) from the below floor (y=0).
+        let prompt = doc.dimensioning.current_position_prompt.clone().unwrap();
+        let near = prompt
+            .options
+            .iter()
+            .position(|o| (o.reference_value - 0.0).abs() < 1e-3)
+            .unwrap();
+        doc.dimensioning
+            .current_position_prompt
+            .as_mut()
+            .unwrap()
+            .current_idx = near;
+
+        // 8 m from y=0 → bottom at y=8, top at y≈11.41 — OVER the 10 m below top.
+        doc.apply_position(8.0).unwrap();
+        assert!(
+            (min_y(&doc.floor_plan) - 8.0).abs() < 1e-3,
+            "bottom landed at 8"
+        );
+        assert!(
+            max_y(&doc.floor_plan) > 10.0,
+            "the top overhangs the storey below — accepted"
+        );
+        assert!(doc
+            .dimensioning
+            .position_resolved_axes
+            .contains(&ParameterAxis::Y));
+        assert!(doc.dimensioning.current_position_prompt.is_none());
+    }
+
+    /// `center_current_position` centres the box's Y extent within the below
+    /// footprint's Y extent: a 3.41 m box over a 10 m storey lands centred at
+    /// mid-line (y=5), rigidly (its height is preserved).
+    #[test]
+    fn upper_outline_centre_centres_within_the_below_footprint() {
+        let mut doc = carve_full_width_upper_box();
+        doc.position_reference_override = Some(ten_by_ten_reference());
+        doc.recompute_prompt();
+        complete_length_loop(&mut doc);
+        assert_eq!(
+            doc.dimensioning
+                .current_position_prompt
+                .as_ref()
+                .unwrap()
+                .axis,
+            ParameterAxis::Y
+        );
+        let height_before = max_y(&doc.floor_plan) - min_y(&doc.floor_plan);
+
+        doc.center_current_position().unwrap();
+        let (lo, hi) = (min_y(&doc.floor_plan), max_y(&doc.floor_plan));
+        assert!(
+            ((lo + hi) / 2.0 - 5.0).abs() < 1e-3,
+            "box centred on the below mid-line (got lo {lo}, hi {hi})"
+        );
+        assert!(
+            (hi - lo - height_before).abs() < 1e-3,
+            "centred rigidly — height preserved"
+        );
+        assert!(doc.dimensioning.current_position_prompt.is_none());
+    }
+
+    /// A fully-shared (reproduced) upper outline — every wall on the storey
+    /// below — has NO free position axis, so it is never position-prompted even
+    /// with the reference supplied.
+    #[test]
+    fn reproduced_upper_outline_has_no_position_prompt() {
+        let prev_ring = [p(0., 0.), p(10., 0.), p(10., 10.), p(0., 10.)];
+        let stroke = vec![p(0., 0.), p(10., 0.), p(10., 10.), p(0., 10.), p(0., 0.)];
+        let mut doc = StoreyDoc::default();
+        doc.carve_outline_from_previous(
+            &stroke,
+            &prev_ring,
+            &manip_plan::SubareaTuning::default(),
+            &[],
+        )
+        .expect("carve applies");
+        assert!(
+            doc.dimensioning.position_free_axes.is_empty(),
+            "a reproduced outline is pinned on both axes"
+        );
+        doc.position_reference_override = Some(ten_by_ten_reference());
+        doc.recompute_prompt();
+        complete_length_loop(&mut doc);
+        assert!(doc.dimensioning.current_position_prompt.is_none());
+    }
+
+    /// A GROUND storey has no storey below, so no `position_reference_override`
+    /// is supplied — its outline is never position-prompted even when its carve
+    /// left a free axis (defensive: the ground outline isn't drawn via the carve
+    /// path, but the guard must hold regardless).
+    #[test]
+    fn ground_outline_without_reference_is_never_position_prompted() {
+        let mut doc = carve_full_width_upper_box();
+        assert_eq!(doc.dimensioning.position_free_axes, vec![ParameterAxis::Y]);
+        // No reference override supplied.
+        assert!(doc.position_reference_override.is_none());
+        doc.recompute_prompt();
+        complete_length_loop(&mut doc);
+        assert!(
+            doc.dimensioning.current_position_prompt.is_none(),
+            "with no reference below, the outline is not position-prompted"
+        );
+    }
+
+    /// A STALE `position_reference_override` (left set after an upper outline
+    /// finalised) must NOT leak into a same-session sub-area carve: once a
+    /// phase/step area is active, the position loop references the actual
+    /// storey OUTLINE, not the below footprint — critical when the upper storey
+    /// OVERHANGS the below (the two differ). Here the outline spans y ∈ [8, 16]
+    /// while the stale override (below footprint) spans y ∈ [0, 10]; a phase
+    /// area drawn at y ∈ [12, 14] is inside the outline but OUTSIDE the below.
+    #[test]
+    fn stale_override_does_not_leak_into_a_subarea_carve() {
+        // Actual upper OUTLINE (overhangs the below on Y).
+        let outline =
+            FloorPlan::from_clean_ring(&[p(0., 8.), p(10., 8.), p(10., 16.), p(0., 16.)]).unwrap();
+        let known = outline.all_active_params();
+        let mut doc = StoreyDoc::default();
+        doc.outline = ShapeSlot {
+            floor_plan: outline,
+            dimensioning: DimensionState {
+                scale_set: true,
+                known_params: known,
+                ..Default::default()
+            },
+        };
+        // Stale override from finalising the upper outline: the BELOW footprint.
+        doc.position_reference_override = Some(
+            FloorPlan::from_clean_ring(&[p(0., 0.), p(10., 0.), p(10., 10.), p(0., 10.)]).unwrap(),
+        );
+        doc.active = ActiveShape::Outline;
+        doc.load_active_into_buffer();
+
+        // A phase area fully inside the OUTLINE but above the below footprint.
+        let plan =
+            FloorPlan::from_clean_ring(&[p(2., 12.), p(4., 12.), p(4., 14.), p(2., 14.)]).unwrap();
+        let slot = doc.pinned_slot_for(&doc.outline.floor_plan, plan, &[]);
+        doc.begin_phase_area(slot);
+        doc.recompute_prompt();
+        complete_length_loop(&mut doc);
+
+        // X prompt first (outline x=0/x=10, indistinguishable from below) — skip
+        // it to reach the discriminating Y prompt.
+        assert_eq!(
+            doc.dimensioning
+                .current_position_prompt
+                .as_ref()
+                .unwrap()
+                .axis,
+            ParameterAxis::X
+        );
+        doc.skip_current_position();
+
+        // Y prompt references the OUTLINE walls (y=8, y=16) — NOT the stale
+        // below footprint (y=0, y=10). This is the leak that the fix closes.
+        let prompt = doc
+            .dimensioning
+            .current_position_prompt
+            .clone()
+            .expect("Y position prompt");
+        assert_eq!(prompt.axis, ParameterAxis::Y);
+        let mut refs: Vec<f32> = prompt.options.iter().map(|o| o.reference_value).collect();
+        refs.sort_by(f32::total_cmp);
+        assert!(
+            (refs[0] - 8.0).abs() < 1e-3 && (refs[1] - 16.0).abs() < 1e-3,
+            "references are the outline walls (8, 16), not the below footprint (0, 10): {refs:?}"
+        );
+
+        // Pick the reference at y=8 (outline bottom) and place the area's bottom
+        // 5 m above it → y ∈ [13, 15]: inside the outline [8,16] but OUTSIDE the
+        // below footprint [0,10]. The guardrail measures against the OUTLINE, so
+        // this valid placement is ACCEPTED (the bug would reject it).
+        let near = prompt
+            .options
+            .iter()
+            .position(|o| (o.reference_value - 8.0).abs() < 1e-3)
+            .unwrap();
+        doc.dimensioning
+            .current_position_prompt
+            .as_mut()
+            .unwrap()
+            .current_idx = near;
+        doc.apply_position(5.0)
+            .expect("a placement inside the outline (but over the below) is accepted");
+        assert!((min_y(&doc.floor_plan) - 13.0).abs() < 1e-3);
     }
 
     /// Old persisted `DimensionState` JSON (no position fields) still loads —

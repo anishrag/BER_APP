@@ -256,14 +256,18 @@ impl AppController {
         self.resolve_roof_rect_position(centred)
     }
 
-    /// The 'Centre' button, dispatched to whichever roof flow is pending —
-    /// the one `CentreRoofPosition` event's handler (a ridge and a rect are
-    /// never pending at once; both no-op without an open location stage).
+    /// The 'Centre' button, dispatched to whichever flow is pending — the one
+    /// `CentreRoofPosition` event's handler. A roof ridge and a roof rect are
+    /// never pending at once; with neither, the open prompt is a drawn
+    /// upper-storey OUTLINE's whole-shape position, centred within the storey
+    /// below ([`center_current_position`](Self::center_current_position)).
     pub fn centre_roof_position(&mut self) -> Result<(), String> {
         if self.pending_roof_rect.is_some() {
             self.centre_roof_rect_position()
-        } else {
+        } else if self.pending_roof_ridge.is_some() {
             self.centre_roof_ridge_position()
+        } else {
+            self.center_current_position()
         }
     }
 

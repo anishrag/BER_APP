@@ -533,6 +533,76 @@ fn undimensioned_outline_is_not_persisted() {
     );
 }
 
+/// Duplicate-BER deep-copy: `duplicate_ber` writes a BRAND-NEW persisted row
+/// (a real deep copy, not in-memory), leaves the source untouched, does not open
+/// the copy, re-stamps the clone's `data.id` to the new record id, and clones
+/// the editing-layer snapshot when the source has one.
+#[test]
+fn duplicate_ber_deep_copies_into_a_new_persisted_record() {
+    let mut c = AppController::new(crate::engine::open_db(":memory:").unwrap());
+    let source = c.create_ber(
+        "Original".into(),
+        chrono::NaiveDate::from_ymd_opt(2026, 1, 1).unwrap(),
+    );
+    // Give the source some non-default data + a storey, then persist (which
+    // also writes a snapshot for the source).
+    {
+        let rec = c.current_record.as_mut().unwrap();
+        rec.data.address = "42 Test Lane".into();
+        rec.data.eircode = "D01 AB12".into();
+        rec.data.storeys.push(Default::default());
+    }
+    c.persist().unwrap();
+    assert!(
+        BerRepository::new(&c.conn)
+            .load_snapshot(&source.id)
+            .unwrap()
+            .is_some(),
+        "source has a snapshot (precondition for the copy-snapshot assertion)"
+    );
+
+    // Duplicate. Must NOT open the copy — `current_record` stays the source.
+    let new_id = c.duplicate_ber(&source.id).unwrap();
+    assert_eq!(
+        c.current_record.as_ref().unwrap().id,
+        source.id,
+        "duplicating must not change the currently-loaded record"
+    );
+
+    // (a) Two records now listed.
+    assert_eq!(c.list_bers().len(), 2, "the copy is a real new DB row");
+    // (b) New id differs from the source.
+    assert_ne!(new_id, source.id, "the copy gets a fresh id");
+
+    // (c) The copy carries the source's data, with `data.id` re-stamped to the
+    // new record id (NOT the source's).
+    let repo = BerRepository::new(&c.conn);
+    let copy = repo.load(&new_id).unwrap();
+    assert_eq!(copy.id, new_id);
+    assert_eq!(copy.data.id, new_id, "Ber.id matches the new record id");
+    assert_ne!(copy.data.id, source.id);
+    assert_eq!(copy.name, "Original (copy)");
+    assert_eq!(copy.data.address, "42 Test Lane");
+    assert_eq!(copy.data.eircode, "D01 AB12");
+    assert_eq!(copy.data.storeys.len(), 1);
+    // date_assessed is preserved (same assessment).
+    assert_eq!(
+        copy.date_assessed,
+        chrono::NaiveDate::from_ymd_opt(2026, 1, 1).unwrap()
+    );
+    // The copy has its own snapshot (deep copy included the editing layer).
+    assert!(
+        repo.load_snapshot(&new_id).unwrap().is_some(),
+        "the copy's editing-layer snapshot was cloned"
+    );
+
+    // (d) The source record is unchanged.
+    let src = repo.load(&source.id).unwrap();
+    assert_eq!(src.name, "Original");
+    assert_eq!(src.data.id, source.id);
+    assert_eq!(src.data.address, "42 Test Lane");
+}
+
 /// A living area drawn but not dimensioned is excluded from the DB write
 /// (kept in memory); the dimensioned outline around it still persists.
 #[test]
