@@ -143,6 +143,25 @@ public class MainActivity extends GameActivity {
         nativeOnImeInsets(insets.bottom);
     }
 
+    /**
+     * Called FROM Rust (ui::widgets::native_ime) after changing the IME editor
+     * info (numeric ↔ text) while the keyboard is already up: EditorInfo is
+     * only consumed when an input session starts (onCreateInputConnection), so
+     * without a restart the keyboard keeps its previous layout. Posts to the
+     * UI thread; the calling Rust render thread doesn't wait.
+     */
+    public void restartImeInput() {
+        runOnUiThread(
+                () -> {
+                    android.view.inputmethod.InputMethodManager imm =
+                            (android.view.inputmethod.InputMethodManager)
+                                    getSystemService(Context.INPUT_METHOD_SERVICE);
+                    if (imm != null && mSurfaceView != null) {
+                        imm.restartInput(mSurfaceView);
+                    }
+                });
+    }
+
     @Override
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);

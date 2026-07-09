@@ -64,9 +64,8 @@ pub fn metre_input(ui: &mut egui::Ui, buf: &mut String, width: f32, hint: &str) 
     input_with_pad(ui, buf, width, hint, PadKind::Numeric)
 }
 
-/// The free-text field: opens the shared QWERTY pad on focus when pads are
-/// enabled (Android's system IME for egui is unreliable — the pad guarantees
-/// text entry on-device).
+/// The free-text field: the native text keyboard on Android; the shared
+/// QWERTY pad on desktop when pads are enabled (`BER_TOUCH=1`).
 pub fn text_input(ui: &mut egui::Ui, buf: &mut String, width: f32, hint: &str) -> PadResponse {
     input_with_pad(ui, buf, width, hint, PadKind::Qwerty)
 }

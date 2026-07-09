@@ -33,14 +33,11 @@ shipped Android 10 (`minSdk = 30` blocks install below Android 11).
 - [ ] In **3D view**, pinch **zooms without fighting the orbit** gesture.
 - [ ] No phantom points / no unexpected "no active stroke" warning spam in logcat after a cancel.
 
-## 3. On-screen pads (typing) — fallback: `8c50973`
+## 3. ~~On-screen pads (typing)~~ SUPERSEDED — see §7 (GameActivity migration)
 
-- [ ] Measurement prompts open the **numeric metre pad**; `+` sums work (e.g. `2.1+0.9`).
-- [ ] Pad **does not cover** the field being edited.
-- [ ] **Key targets comfortable** for fingers (no fat-finger misses).
-- [ ] Text fields (Key Details name + nickname) open **qwerty**; single-shot **shift** works.
-- [ ] Numeric-only fields (years) get the numeric pad, not qwerty.
-- [ ] **Check-mark submits** (equivalent to hardware Enter) and commits the value.
+The custom pads are no longer rendered on Android (2026-07, native-keyboard
+migration); they remain the desktop `BER_TOUCH=1` path only. Typing is now
+tested by §7.
 
 ## 4. Android back button — fallback: `a292d60`
 
@@ -60,6 +57,48 @@ shipped Android 10 (`minSdk = 30` blocks install below Android 11).
 - [ ] **New** → create a record, enter the BER workspace, enter some data.
 - [ ] Fully **close** the app (swipe from recents, not just background).
 - [ ] **Reopen** → **Load** shows the record and it opens with data intact.
+
+---
+
+## 7. GameActivity migration + native keyboard (2026-07) — rollback: revert the two `gameactivity` commits
+
+The activity base class changed (NativeActivity → GameActivity), so EVERY JNI
+bridge needs re-validation even though none of their code changed, and the
+native soft keyboard replaces the custom pads. Plan + details:
+`.claude/plans/native-keyboard-gameactivity.md` (§5/§7).
+
+**Boot & bridges (gate — do these before trusting anything else):**
+
+- [ ] App installs, boots to Splash → Home, no crash (a wrong games-activity
+      AAR version aborts at startup with a `RegisterNatives` fatal in logcat).
+- [ ] Immersive mode still holds: system bars hidden, re-hidden on focus regain.
+- [ ] **Camera**: add a photo → system camera opens, capture returns into the app.
+- [ ] **Bluetooth laser**: paired DISTO connects; a reading lands in the number box.
+- [ ] **Audio**: bug-report voice note records and plays back / uploads.
+- [ ] **Keep-awake**: screen stays on while the app is in use.
+- [ ] **Network watcher**: queued bug report flushes when WiFi returns.
+- [ ] Permission prompts (BT / audio) still appear and grant correctly.
+- [ ] Two-finger nav + stroke retraction unaffected (§2 spot-check).
+- [ ] Backgrounding, rotate, lock/unlock, swipe-away-and-relaunch — no crashes.
+
+**Native keyboard:**
+
+- [ ] Tap a measurement field → **numeric** keyboard appears; digits + `.` land
+      in the field; backspace deletes **pre-filled** text too.
+- [ ] Key Details name/nickname → **text** keyboard; typing + autocomplete work.
+- [ ] Keyboard **Done** commits like Enter (prompt fires its primary action).
+- [ ] Keyboard never permanently covers the field: floating number box moves
+      above it; form fields scroll into view.
+- [ ] Dismiss the keyboard with Back → app keeps working; tapping the field
+      again re-raises it.
+- [ ] Keyboard hides when the prompt closes / focus leaves the field.
+- [ ] The old pads do NOT appear anywhere on Android.
+- [ ] Desktop `BER_TOUCH=1` still shows the pads (regression escape hatch).
+
+Known accepted quirks: typed characters append at the END of the field even if
+the visible cursor was moved mid-text (the IME mirror owns the cursor); `+`
+sums (e.g. `2.1+0.9`) may be missing from some numeric keyboards — use the
+number box's own keypad for expressions.
 
 ---
 

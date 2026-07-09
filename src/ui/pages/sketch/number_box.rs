@@ -1403,14 +1403,21 @@ fn show_box_multi<F: FnMut(UiEvent)>(
             .map(|f| parse_dimension_expression(f.buf.as_str()))
             .collect()
     };
-    // While the native keyboard is up it claims the bottom of the screen —
+    // While the native keyboard is up it claims the bottom of the SCREEN —
     // shrink the constrain rect so the box gets pushed above it (and settles
-    // back when the keyboard hides). Never below 40% of the canvas height, so
-    // an oversized keyboard can't squash the constraint into nothing.
+    // back when the keyboard hides). The inset is measured from the screen
+    // bottom, so clamp against that, not the canvas bottom. Never below 40%
+    // of the canvas height, so an oversized keyboard can't squash the
+    // constraint into nothing.
     #[cfg(target_os = "android")]
     let rect = {
-        let inset = crate::ui::widgets::native_ime::inset_bottom_points(ctx);
-        let bottom = (rect.max.y - inset).max(rect.min.y + rect.height() * 0.4);
+        let keyboard_top =
+            ctx.content_rect().bottom() - crate::ui::widgets::native_ime::inset_bottom_points(ctx);
+        let bottom = rect
+            .max
+            .y
+            .min(keyboard_top)
+            .max(rect.min.y + rect.height() * 0.4);
         egui::Rect::from_min_max(rect.min, egui::pos2(rect.max.x, bottom))
     };
     egui::Window::new(title)

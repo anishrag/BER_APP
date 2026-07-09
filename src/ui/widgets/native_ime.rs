@@ -66,6 +66,10 @@ struct Session {
     owner: Option<egui::Id>,
     last_text: String,
     shown: bool,
+    /// The keyboard layout the IME last bound. `setImeEditorInfoFields` is
+    /// only read when an input session (re)starts, so a numeric↔text focus
+    /// move while the keyboard stays up needs an explicit input restart.
+    last_kind: Option<ImeKind>,
     /// Inset the owner last scrolled itself into view for (px) — re-scroll
     /// only when the keyboard height actually changes, so the assessor can
     /// still scroll the form freely while typing.
@@ -76,6 +80,7 @@ static SESSION: Mutex<Session> = Mutex::new(Session {
     owner: None,
     last_text: String::new(),
     shown: false,
+    last_kind: None,
     handled_inset_px: 0,
 });
 
@@ -109,19 +114,34 @@ pub fn attach(
 
     if focused && !is_owner {
         // Field takes the keyboard: keyboard type first (it's read when the
-        // IME binds on show), then seed the IME buffer with the field's
-        // current text, cursor at the end, then request the keyboard.
+        // IME binds), then seed the IME buffer with the field's current text,
+        // cursor at the end, then request the keyboard. When focus hops
+        // directly between fields of DIFFERENT kinds the keyboard never goes
+        // down, so the IME must be told to restart its input session — a bare
+        // show re-uses the bound layout.
         s.owner = Some(response.id);
         s.last_text = buf.clone();
         s.handled_inset_px = 0;
-        set_editor_info(kind);
+        if s.last_kind != Some(kind) {
+            set_editor_info(kind);
+            if s.shown {
+                restart_ime_input();
+            }
+            s.last_kind = Some(kind);
+        }
         push_state(app, buf);
         app.show_soft_input(false);
         s.shown = true;
     } else if focused && is_owner {
-        if response.changed() {
-            // The field was edited on the egui side this frame (e.g. paste);
-            // push the new value so the IME buffer doesn't fight it.
+        // The system back gesture can hide the keyboard without the app ever
+        // learning — a tap on the still-focused field asks for it again.
+        if response.clicked() {
+            app.show_soft_input(false);
+        }
+        if response.changed() || *buf != s.last_text {
+            // The field's buffer moved on the app side this frame — an egui
+            // edit (paste), a laser reading, or an action clearing the field.
+            // Push it so the IME buffer doesn't revert it on the next key.
             s.last_text = buf.clone();
             push_state(app, buf);
         } else {
@@ -247,6 +267,26 @@ fn call_set_editor_info(
         ],
     )?;
     Ok(())
+}
+
+/// `MainActivity.restartImeInput()` — restart the IME's input session so an
+/// already-showing keyboard re-reads the editor info (only a session start
+/// consumes it) and switches layout.
+fn restart_ime_input() {
+    fn call() -> Result<(), jni::errors::Error> {
+        use jni::objects::JObject;
+        let ctx = ndk_context::android_context();
+        let vm = unsafe { jni::JavaVM::from_raw(ctx.vm().cast()) }?;
+        let mut env = vm.attach_current_thread()?;
+        let activity = unsafe { JObject::from_raw(ctx.context().cast()) };
+        env.call_method(&activity, "restartImeInput", "()V", &[])?;
+        Ok(())
+    }
+    if let Err(e) = call() {
+        // Non-fatal: the keyboard keeps its previous layout until it next
+        // hides and shows.
+        log::warn!("ime: restartImeInput failed: {e}");
+    }
 }
 
 /// `MainActivity.onImeInsetsChanged` override → keyboard height in physical
