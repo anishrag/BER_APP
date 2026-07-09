@@ -211,6 +211,42 @@ impl FloorRegions {
         out
     }
 
+    /// Like [`phase_zone_rings`](Self::phase_zone_rings) but keeps the FULL
+    /// `geo::Polygon` of each connected same-phase component — INCLUDING its
+    /// interior holes. When a newer overlapping phase carves the middle out of an
+    /// older one (the latest-wins partition → a donut), `phase_zone_rings` returns
+    /// only the exterior; THIS keeps the hole so a display projection can tint /
+    /// stroke the ring without filling the hole and place the label clear of it.
+    /// One polygon per connected component per phase; first-seen phase order is
+    /// preserved for determinism. A rebuilt outline isn't re-normalised (no
+    /// collinear strip) — the extra edge vertices are invisible to a stroke.
+    pub fn phase_zone_polygons(
+        &self,
+        phase_of: impl Fn(ItemId) -> ConstructionPhase,
+    ) -> Vec<(ConstructionPhase, Polygon<f64>)> {
+        use geo::bool_ops::BooleanOps;
+        let mut groups: Vec<(ConstructionPhase, MultiPolygon<f64>)> = Vec::new();
+        for r in &self.regions {
+            if r.polygon.exterior().0.len() < 4 {
+                continue;
+            }
+            let phase = phase_of(r.construction_id);
+            match groups.iter_mut().find(|(p, _)| *p == phase) {
+                Some((_, mp)) => *mp = mp.union(&r.polygon),
+                None => groups.push((phase, MultiPolygon::new(vec![r.polygon.clone()]))),
+            }
+        }
+        let mut out = Vec::new();
+        for (phase, mp) in groups {
+            for poly in mp.0 {
+                if poly.exterior().0.len() >= 4 {
+                    out.push((phase.clone(), poly));
+                }
+            }
+        }
+        out
+    }
+
     /// EVERY boundary ring of the floor's true outline: the union of all region
     /// polygons, then each resulting component's exterior AND its interior-hole
     /// rings. Unlike [`merged_outline`](Self::merged_outline) (largest exterior

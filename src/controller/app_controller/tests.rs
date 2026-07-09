@@ -872,6 +872,9 @@ fn phase_area_is_dimensioned_before_its_phase_is_assigned() {
     // Assign the phase → stored region, back to the outline.
     c.assign_phase_to_pending(ConstructionPhase::Extension1);
     assert!(!c.phase_pick_pending(), "pick consumed");
+    // `phase_region_polygons` is now the resolved DISPLAY projection, so bring
+    // the derived geometry current first (production materializes before render).
+    c.materialize();
     assert_eq!(
         c.phase_region_polygons().len(),
         1,
@@ -5789,6 +5792,7 @@ fn phase_region_undo_then_recarve_same_footprint_succeeds() {
     skip_position_prompts(&mut c);
     assert!(c.phase_pick_pending(), "phase pick open");
     c.assign_phase_to_pending(ConstructionPhase::Extension1);
+    c.materialize(); // resolved DISPLAY projection — current before reading
     assert_eq!(c.phase_region_polygons().len(), 1, "phase area committed");
 
     while c.can_undo() {
@@ -5807,6 +5811,7 @@ fn phase_region_undo_then_recarve_same_footprint_succeeds() {
     skip_position_prompts(&mut c);
     assert!(c.phase_pick_pending(), "phase pick open again");
     c.assign_phase_to_pending(ConstructionPhase::Extension1);
+    c.materialize(); // resolved DISPLAY projection — current before reading
     assert_eq!(c.phase_region_polygons().len(), 1, "one region, no phantom");
 }
 

@@ -31,9 +31,9 @@ use crate::controller::app_controller::{
     DimensionPromptUiData, DoorSidelightsPlacement, EditDragPromptUiData, ElevationView,
     ExistingGroup, ExistingWindowType, ExposureSelection, FinalMode, NewStoreyPromptUiData,
     ObjectPinView, ObjectReviewView, OpeningFieldsPrompt, OpeningToolKind, PartitionView,
-    PhotoView, PositionPromptUiData, ReviewView, RiserView, SelectMode, SnapTagView, StructureEdit,
-    StructureReviewView, SurfaceKind, VertexDropPromptUiData, WallExposureView, WallFinishField,
-    WallInclusionPromptView, WindowTypeChoice,
+    PhaseDisplayRegion, PhotoView, PositionPromptUiData, ReviewView, RiserView, SelectMode,
+    SnapTagView, StructureEdit, StructureReviewView, SurfaceKind, VertexDropPromptUiData,
+    WallExposureView, WallFinishField, WallInclusionPromptView, WindowTypeChoice,
 };
 use crate::ui::pages::events::UiEvent;
 use crate::ui::render::ViewParams;
@@ -982,7 +982,11 @@ pub struct SketchView<'a> {
     /// phase pick, the cut candidates to tap between, the phase choices for
     /// the picker, and whether a pick is currently pending.
     pub phase_mode: bool,
-    pub phase_region_polygons: &'a [(Vec<(f64, f64)>, String)],
+    pub phase_region_polygons: &'a [PhaseDisplayRegion],
+    /// Delete-panel row labels, index-aligned with the RAW session phase regions
+    /// (what `DeletePhaseRegion(i)` indexes) — distinct from the display zones
+    /// above, which are unioned per phase.
+    pub phase_delete_labels: &'a [String],
     pub pending_phase_polygon: &'a [(f64, f64)],
     pub pending_phase_cut_regions: &'a [Vec<(f64, f64)>],
     pub phase_choices: &'a [(ConstructionPhase, String)],

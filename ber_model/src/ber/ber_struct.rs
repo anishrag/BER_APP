@@ -29,6 +29,20 @@ pub struct IntakeDetails {
     pub reason: String,
 }
 
+/// One construction-PHASE zone of a storey, projected for the UI to tint and
+/// label ([`Ber::storey_phase_zone_polygons`]). A connected same-phase floor
+/// component: its `exterior` ring, its `holes` (the footprints of NEWER
+/// overlapping phases the latest-wins partition carved out — a donut), and a
+/// `label_anchor` guaranteed inside the material and OUTSIDE every hole. All
+/// world-metre; rings are open (no repeated closing vertex).
+#[derive(Debug, Clone, PartialEq)]
+pub struct PhaseZoneDisplay {
+    pub phase: ConstructionPhase,
+    pub exterior: Vec<Point2f64>,
+    pub holes: Vec<Vec<Point2f64>>,
+    pub label_anchor: Point2f64,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct Ber {
     pub id: ItemId,
@@ -382,6 +396,56 @@ impl Ber {
             .collect()
     }
 
+    /// Storey `idx`'s construction-PHASE zones projected for DISPLAY: like
+    /// [`storey_phase_zones`](Self::storey_phase_zones) but HOLE-PRESERVING and
+    /// with a guaranteed-interior label anchor, so the phase tint / label respect
+    /// a donut zone (an older phase a newer overlapping one carved the middle out
+    /// of). One [`PhaseZoneDisplay`] per connected same-phase component; each
+    /// carries its exterior ring, its hole rings, and a `label_anchor` that is
+    /// inside the material and OUTSIDE every hole. `Unassigned` zones (the
+    /// untagged remainder / unresolved ids) are skipped; empty when `idx` is out
+    /// of range or nothing is tagged. Pure projection — no mutation.
+    pub fn storey_phase_zone_polygons(&self, idx: usize) -> Vec<PhaseZoneDisplay> {
+        use geo::{Centroid, InteriorPoint, LineString};
+        let Some(storey) = self.storeys.get(idx) else {
+            return Vec::new();
+        };
+        // A geo ring → open world-metre ring (drop the repeated closing vertex).
+        let ring_of = |ls: &LineString<f64>| -> Vec<Point2f64> {
+            let mut pts: Vec<Point2f64> = ls.coords().map(|c| Point2f64::new(c.x, c.y)).collect();
+            if pts.len() > 1 && pts.first() == pts.last() {
+                pts.pop();
+            }
+            pts
+        };
+        storey
+            .floors
+            .phase_zone_polygons(|cid| {
+                self.floor_construction(cid)
+                    .map(|c| c.base.construction_phase.clone())
+                    .unwrap_or(ConstructionPhase::Unassigned)
+            })
+            .into_iter()
+            .filter(|(phase, _)| *phase != ConstructionPhase::Unassigned)
+            .map(|(phase, poly)| {
+                // A guaranteed-interior label point: geo's InteriorPoint lands
+                // inside the polygon's material (respecting holes); on the rare
+                // None fall back to the centroid, then to the origin.
+                let anchor = poly
+                    .interior_point()
+                    .or_else(|| poly.centroid())
+                    .map(|p| Point2f64::new(p.x(), p.y()))
+                    .unwrap_or_else(|| Point2f64::new(0.0, 0.0));
+                PhaseZoneDisplay {
+                    phase,
+                    exterior: ring_of(poly.exterior()),
+                    holes: poly.interiors().iter().map(ring_of).collect(),
+                    label_anchor: anchor,
+                }
+            })
+            .collect()
+    }
+
     /// Absolute Z of the highest ceiling reachable straight UP from the wall at
     /// (storey `idx`, plan position `along_m`) through the CONTIGUOUS run of
     /// vertically-aligned, SAME-TYPE walls — same `construction_id` AND
@@ -598,5 +662,89 @@ mod tests {
         // Out of range → empty, no panic.
         assert!(ber.storey_phase_zones(1).is_empty());
         assert!(ber.storey_phase_zones(99).is_empty());
+    }
+
+    /// Report 1cc38dc8 (Fix B): a phase zone shrunk to a DONUT (an older phase
+    /// with a newer overlapping phase carved out of its middle) projects through
+    /// `storey_phase_zone_polygons` carrying the HOLE ring, and its label anchor
+    /// lands inside the material and OUTSIDE the hole — geo's interior point
+    /// respects holes, so a tint/label placed there never sits in the void.
+    #[test]
+    fn storey_phase_zone_polygons_donut_carries_hole_and_labels_inside() {
+        use crate::ber::structural::FloorRegions;
+        use geo::{Contains, LineString, Polygon};
+        let mut ber = Ber::default();
+        let cid_orig = ber.ensure_floor_construction(
+            Default::default(),
+            Default::default(),
+            ConstructionPhase::Original,
+        );
+        let cid_ext = ber.ensure_floor_construction(
+            Default::default(),
+            Default::default(),
+            ConstructionPhase::Extension1,
+        );
+        let cid_rem = ber.ensure_floor_construction(
+            Default::default(),
+            Default::default(),
+            ConstructionPhase::Unassigned,
+        );
+        let rect = |x0: f64, y0: f64, x1: f64, y1: f64| {
+            vec![
+                Point2f64::new(x0, y0),
+                Point2f64::new(x1, y0),
+                Point2f64::new(x1, y1),
+                Point2f64::new(x0, y1),
+            ]
+        };
+        // The Extension island (2..6) claims the middle FIRST; Original then gets
+        // the 8×8 outline MINUS the island → a donut.
+        let floors = FloorRegions::partition(
+            &rect(0.0, 0.0, 8.0, 8.0),
+            &[
+                (rect(2.0, 2.0, 6.0, 6.0), cid_ext),
+                (rect(0.0, 0.0, 8.0, 8.0), cid_orig),
+            ],
+            cid_rem,
+        );
+        ber.storeys.push(Storey {
+            floors,
+            ..Storey::default()
+        });
+
+        let zones = ber.storey_phase_zone_polygons(0);
+        let orig = zones
+            .iter()
+            .find(|z| z.phase == ConstructionPhase::Original)
+            .expect("Original donut zone present");
+        assert_eq!(
+            orig.holes.len(),
+            1,
+            "the Original donut carries the island hole: {orig:?}"
+        );
+        // Rebuild the geo polygon (exterior + hole) and confirm the label anchor
+        // is inside its material — inside the exterior AND outside the hole.
+        let ls = |pts: &[Point2f64]| {
+            LineString::from(pts.iter().map(|p| (p.x, p.y)).collect::<Vec<_>>())
+        };
+        let poly = Polygon::new(
+            ls(&orig.exterior),
+            orig.holes.iter().map(|h| ls(h)).collect(),
+        );
+        let anchor = geo::Point::new(orig.label_anchor.x, orig.label_anchor.y);
+        assert!(
+            poly.contains(&anchor),
+            "label anchor {:?} sits inside the donut and outside the hole",
+            orig.label_anchor
+        );
+        // The Extension island zone is solid — no hole.
+        let ext = zones
+            .iter()
+            .find(|z| z.phase == ConstructionPhase::Extension1)
+            .expect("Extension island zone present");
+        assert!(
+            ext.holes.is_empty(),
+            "the island is solid (no hole): {ext:?}"
+        );
     }
 }

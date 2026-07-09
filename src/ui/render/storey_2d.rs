@@ -18,6 +18,7 @@ use geo::Coord;
 use manip_plan::CollinearitySuggestion;
 
 use super::{color_for, draw_dashed_segment, fit_transform, style, Transform2d, ViewParams};
+use crate::controller::app_controller::PhaseDisplayRegion;
 
 /// Render the storey. If `highlight` is set, the two edges named in the
 /// suggestion are drawn on top in a contrasting style so the user can see
@@ -50,7 +51,7 @@ pub fn render(
     dimensioned_walls: &[(usize, usize)],
     view: ViewParams,
     watermark_ring: Option<&[(f64, f64)]>,
-    phase_watermarks: &[(Vec<(f64, f64)>, String)],
+    phase_watermarks: &[PhaseDisplayRegion],
     fit_bbox_override: Option<((f64, f64), (f64, f64))>,
     // Region ids the assessor has SELECTED in the Structure phase — these are
     // shaded; everything else draws at its normal style. Empty outside that
@@ -326,28 +327,33 @@ fn draw_watermark_ring(painter: &egui::Painter, t: &Transform2d, ring: &[(f64, f
 fn draw_phase_watermark_rings(
     painter: &egui::Painter,
     t: &Transform2d,
-    rings: &[(Vec<(f64, f64)>, String)],
+    zones: &[PhaseDisplayRegion],
 ) {
     let purple = egui::Color32::from_rgba_unmultiplied(200, 120, 255, 130);
     let stroke = egui::Stroke::new(2.0, purple);
-    for (ring, label) in rings {
+    let dash_ring = |ring: &[(f64, f64)]| {
         if ring.len() < 3 {
-            continue;
+            return;
         }
         let pts: Vec<egui::Pos2> = ring.iter().map(|(x, y)| t.apply(*x, *y)).collect();
         let n = pts.len();
         for k in 0..n {
             draw_dashed_segment(painter, pts[k], pts[(k + 1) % n], stroke);
         }
-        let (mut cx, mut cy) = (0.0f32, 0.0f32);
-        for p in &pts {
-            cx += p.x;
-            cy += p.y;
+    };
+    for zone in zones {
+        if zone.exterior.len() < 3 {
+            continue;
         }
+        dash_ring(&zone.exterior);
+        for hole in &zone.holes {
+            dash_ring(hole);
+        }
+        let (lx, ly) = zone.label_pos;
         painter.text(
-            egui::pos2(cx / n as f32, cy / n as f32),
+            t.apply(lx, ly),
             egui::Align2::CENTER_CENTER,
-            label,
+            &zone.label,
             egui::FontId::proportional(12.0),
             purple,
         );

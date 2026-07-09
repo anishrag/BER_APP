@@ -62,6 +62,7 @@ pub use exposure::{
     ExposureSelection, ExposureSnapKind, RiserView, SectionHandle, WallExposureView,
 };
 pub use floor_exposure::{FloorExposureRegionView, FloorExposureStoreyView};
+pub use phase_regions::PhaseDisplayRegion;
 pub use roof::{RoofContextRegion, RoofRegionView, RoofShape};
 // `ExposureSection` is re-exported above (the controller's public surface).
 

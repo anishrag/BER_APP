@@ -213,7 +213,9 @@ pub(super) fn panel_token(view: &SketchView<'_>) -> String {
             return format!(
                 "phase-{}-{}",
                 view.phase_pick_pending,
-                view.phase_region_polygons.len()
+                // Raw session-region count (delete labels are index-aligned with
+                // it) — NOT the display zones, which union per phase.
+                view.phase_delete_labels.len()
             );
         }
         if view.step_mode {
@@ -553,7 +555,7 @@ pub(super) fn render_corner_actions<F: FnMut(UiEvent)>(
 
 /// Whether there's anything deletable to list in the Delete panel.
 pub(super) fn has_deletables(view: &SketchView<'_>) -> bool {
-    !view.phase_region_polygons.is_empty()
+    !view.phase_delete_labels.is_empty()
         || !view.step_region_polygons.is_empty()
         || !view.ceiling_step_region_polygons.is_empty()
         || !view.ceiling_apex_views.is_empty()
@@ -592,10 +594,9 @@ pub(super) fn render_delete_panel<F: FnMut(UiEvent)>(
                     .default_open(false)
                     .show(ui, |ui| {
                         ui.set_max_width(240.0);
-                        if !view.phase_region_polygons.is_empty() {
+                        if !view.phase_delete_labels.is_empty() {
                             section(ui, "Construction years");
-                            for (i, (_ring, label)) in view.phase_region_polygons.iter().enumerate()
-                            {
+                            for (i, label) in view.phase_delete_labels.iter().enumerate() {
                                 ui.horizontal(|ui| {
                                     if ui.button("🗑").clicked() {
                                         on_event(UiEvent::Sketch(SketchEvent::DeletePhaseRegion(

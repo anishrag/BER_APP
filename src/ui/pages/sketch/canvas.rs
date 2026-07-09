@@ -6,7 +6,7 @@ use egui::epaint::PathShape;
 
 use super::touch::TouchNav;
 use super::{EguiStroke, SketchEvent, SketchView};
-use crate::controller::app_controller::{AssessmentPhase, SelectMode};
+use crate::controller::app_controller::{AssessmentPhase, PhaseDisplayRegion, SelectMode};
 use crate::ui::pages::events::UiEvent;
 use crate::ui::render;
 use crate::ui::render::ViewParams;
@@ -801,7 +801,7 @@ pub(super) fn render<F: FnMut(UiEvent)>(
                 current_storey_idx,
                 mode,
                 vp,
-                std::slice::from_ref(&(
+                std::slice::from_ref(&PhaseDisplayRegion::from_ring(
                     view.pending_structure_split_polygon.to_vec(),
                     "?".to_string(),
                 )),
@@ -980,14 +980,23 @@ pub(super) fn render<F: FnMut(UiEvent)>(
                 current_storey_idx,
                 mode,
                 vp,
-                std::slice::from_ref(&(view.pending_phase_polygon.to_vec(), "?".to_string())),
+                std::slice::from_ref(&PhaseDisplayRegion::from_ring(
+                    view.pending_phase_polygon.to_vec(),
+                    "?".to_string(),
+                )),
                 phase_tint,
             );
         }
 
         // Floor-step areas: committed regions (teal, labelled with the
-        // signed level), plus the pending carved area / cut candidates.
+        // signed level), plus the pending carved area / cut candidates. Steps
+        // never carry a hole, so each ring becomes a simple display region.
         let step_tint = egui::Color32::from_rgb(60, 220, 200); // teal
+        let step_display: Vec<PhaseDisplayRegion> = view
+            .step_region_polygons
+            .iter()
+            .map(|(ring, label)| PhaseDisplayRegion::from_ring(ring.clone(), label.clone()))
+            .collect();
         render::render_phase_regions(
             &painter,
             rect,
@@ -995,7 +1004,7 @@ pub(super) fn render<F: FnMut(UiEvent)>(
             current_storey_idx,
             mode,
             vp,
-            view.step_region_polygons,
+            &step_display,
             step_tint,
         );
         render::render_cut_candidates(
@@ -1015,7 +1024,10 @@ pub(super) fn render<F: FnMut(UiEvent)>(
                 current_storey_idx,
                 mode,
                 vp,
-                std::slice::from_ref(&(view.pending_step_polygon.to_vec(), "?".to_string())),
+                std::slice::from_ref(&PhaseDisplayRegion::from_ring(
+                    view.pending_step_polygon.to_vec(),
+                    "?".to_string(),
+                )),
                 step_tint,
             );
         }
@@ -1026,6 +1038,11 @@ pub(super) fn render<F: FnMut(UiEvent)>(
         // the dashed provisional line.
         let ceiling_step_tint = egui::Color32::from_rgb(255, 170, 60); // amber
         if !objects_phase {
+            let ceiling_step_display: Vec<PhaseDisplayRegion> = view
+                .ceiling_step_region_polygons
+                .iter()
+                .map(|(ring, label)| PhaseDisplayRegion::from_ring(ring.clone(), label.clone()))
+                .collect();
             render::render_phase_regions(
                 &painter,
                 rect,
@@ -1033,7 +1050,7 @@ pub(super) fn render<F: FnMut(UiEvent)>(
                 current_storey_idx,
                 mode,
                 vp,
-                view.ceiling_step_region_polygons,
+                &ceiling_step_display,
                 ceiling_step_tint,
             );
             // Same-height dividers: a faint dashed pass, distinct from the amber

@@ -2005,6 +2005,178 @@ mod tests {
         );
     }
 
+    /// Report 45344913 (Fix A): a phase drawn to OVERLAP an existing phase is
+    /// now ALLOWED (the controller carves against the outline only, not
+    /// outline-minus-phases). At resolve the latest-wins partition removes the
+    /// overlap from the OLDER phase and hands it to the newer one, and total
+    /// floor area is conserved (the overlap is counted ONCE, not double). The
+    /// Extension area is drawn partly OUTSIDE the storey (a dormer overhang); the
+    /// partition clips it to the outline, so only its in-storey part resolves.
+    #[test]
+    fn overlapping_phase_wins_overlap_and_conserves_area() {
+        use geo::{Area, Contains};
+        let doc = unit_square_doc(); // 4×4 outline
+        let whole = vec![
+            Point2f32::new(0.0, 0.0),
+            Point2f32::new(4.0, 0.0),
+            Point2f32::new(4.0, 4.0),
+            Point2f32::new(0.0, 4.0),
+        ];
+        // A dormer-like Extension overlapping the Original, extending PAST the
+        // outline (x up to 6). Inside the storey it covers x∈[2,4], y∈[1,3] = 4 m².
+        let dormer = vec![
+            Point2f32::new(2.0, 1.0),
+            Point2f32::new(6.0, 1.0),
+            Point2f32::new(6.0, 3.0),
+            Point2f32::new(2.0, 3.0),
+        ];
+        // The overlap's centroid (inside both the outline and the dormer clip).
+        let overlap_centroid = geo::Point::new(3.0, 2.0);
+        // TAG ORDER: whole storey Original FIRST, dormer Extension1 LAST (newest).
+        let phase = vec![
+            PhaseRegion {
+                polygon: whole,
+                phase: ConstructionPhase::Original,
+            },
+            PhaseRegion {
+                polygon: dormer,
+                phase: ConstructionPhase::Extension1,
+            },
+        ];
+        let mut ber = Ber::default();
+        ensure_storey_constructions(&mut ber, 0, &phase);
+        let cid_ext = ber
+            .floor_construction_id(
+                Default::default(),
+                Default::default(),
+                ConstructionPhase::Extension1,
+            )
+            .unwrap();
+        let cid_orig = ber
+            .floor_construction_id(
+                Default::default(),
+                Default::default(),
+                ConstructionPhase::Original,
+            )
+            .unwrap();
+        let storey = resolve_storey(&doc, &ber, 0, &phase, &[], &[]);
+
+        // The overlap footprint carries the newer Extension1 cid.
+        let overlap_region = storey
+            .floors
+            .regions
+            .iter()
+            .find(|r| r.polygon.contains(&overlap_centroid))
+            .expect("a region covers the overlap footprint");
+        assert_eq!(
+            overlap_region.construction_id, cid_ext,
+            "the overlap belongs to the most-recently tagged (Extension1) phase"
+        );
+        // No Original region contains the overlap — the older phase was shrunk.
+        assert!(
+            storey
+                .floors
+                .regions
+                .iter()
+                .filter(|r| r.construction_id == cid_orig)
+                .all(|r| !r.polygon.contains(&overlap_centroid)),
+            "the older Original must not overlap the Extension footprint"
+        );
+        // AREA CONSERVED: the regions tile the outline exactly (4×4 = 16 m²) —
+        // the overlap is counted once, not double.
+        let total: f64 = storey
+            .floors
+            .regions
+            .iter()
+            .map(|r| r.polygon.unsigned_area())
+            .sum();
+        assert!(
+            (total - 16.0).abs() < 1e-6,
+            "floor area conserved (16 m²), got {total}"
+        );
+        // The Extension in-storey footprint is exactly the clipped overlap (4 m²).
+        let ext_area: f64 = storey
+            .floors
+            .regions
+            .iter()
+            .filter(|r| r.construction_id == cid_ext)
+            .map(|r| r.polygon.unsigned_area())
+            .sum();
+        assert!(
+            (ext_area - 4.0).abs() < 1e-6,
+            "Extension clipped to the outline (4 m²), got {ext_area}"
+        );
+    }
+
+    /// Report 45344913 (Fix A) snap orthogonality: passing NO holes to
+    /// `carve_or_cut_in_available` (so a phase MAY overlap existing phases) does
+    /// not disturb the ref-wall snap — a boundary drawn a few cm off a phase
+    /// reference line still levels flush onto it, while a far-off draw is taken
+    /// as-is. The carve (holes) and the snap (ref_walls) are independent, which
+    /// is exactly why Fix A only touched the holes argument.
+    #[test]
+    fn carve_with_no_holes_still_snaps_to_reference_walls() {
+        let doc = square_doc(&[
+            Point2f32::new(0.0, 0.0),
+            Point2f32::new(10.0, 0.0),
+            Point2f32::new(10.0, 10.0),
+            Point2f32::new(0.0, 10.0),
+        ]);
+        let tuning = crate::SubareaTuning::default();
+        // A phase reference line at x = 5.
+        let refs = [[Point2f32::new(5.0, 0.0), Point2f32::new(5.0, 10.0)]];
+
+        // A free-standing room whose right wall is drawn 10 cm off the line
+        // (x = 5.1) → levels flush onto the reference line x = 5.
+        let near = vec![
+            Point2f32::new(2.0, 2.0),
+            Point2f32::new(5.1, 2.0),
+            Point2f32::new(5.1, 6.0),
+            Point2f32::new(2.0, 6.0),
+            Point2f32::new(2.05, 2.05),
+        ];
+        let (_boundary, outcome) = doc
+            .carve_or_cut_in_available(&near, &[], &tuning, &refs)
+            .expect("the closed room carves");
+        let crate::SubareaOutcome::Area(plan) = outcome else {
+            panic!("a closed loop is a carve, not a cut");
+        };
+        let ring = plan.get_points();
+        assert!(
+            ring.iter().any(|v| (v.x - 5.0).abs() < 1e-3),
+            "near draw levelled onto the reference line x = 5: {ring:?}"
+        );
+        assert!(
+            !ring.iter().any(|v| (v.x - 5.1).abs() < 1e-3),
+            "the drawn x = 5.1 did not survive: {ring:?}"
+        );
+
+        // A room whose right wall is drawn well past any reference / outline
+        // line (x = 7.3, a large overshoot) → kept as drawn, NOT snapped.
+        let far = vec![
+            Point2f32::new(2.0, 2.0),
+            Point2f32::new(7.3, 2.0),
+            Point2f32::new(7.3, 6.0),
+            Point2f32::new(2.0, 6.0),
+            Point2f32::new(2.05, 2.05),
+        ];
+        let (_boundary, outcome) = doc
+            .carve_or_cut_in_available(&far, &[], &tuning, &refs)
+            .expect("the closed room carves");
+        let crate::SubareaOutcome::Area(plan) = outcome else {
+            panic!("a closed loop is a carve, not a cut");
+        };
+        let ring = plan.get_points();
+        assert!(
+            ring.iter().any(|v| (v.x - 7.3).abs() < 0.05),
+            "far draw taken as-is near x = 7.3 (not snapped): {ring:?}"
+        );
+        assert!(
+            !ring.iter().any(|v| (v.x - 5.0).abs() < 1e-3),
+            "far draw must not snap to the reference line x = 5: {ring:?}"
+        );
+    }
+
     /// A construction-PHASE area over half a storey CARVES the roof in two — the
     /// ceiling analogue of the floor partition — keeping both halves flat at the
     /// ceiling height (a surface-preserving coplanar split), with the plan area

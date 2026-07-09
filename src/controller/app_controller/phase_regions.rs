@@ -12,6 +12,40 @@
 //! (no polygons) leaves already-tagged surfaces untouched.
 use super::*;
 
+/// A committed construction-phase zone projected for DISPLAY (tint + label). It
+/// is HOLES-AWARE: a zone shrunk to a donut by a newer OVERLAPPING phase (the
+/// latest-wins partition) keeps its `holes`, so the tint strokes the void's edge
+/// without filling it, and `label_pos` is a point guaranteed inside the material
+/// (outside every hole). All world-metre. Reused for the simple, hole-free
+/// step / structure-split / pending overlays via [`Self::from_ring`].
+#[derive(Debug, Clone)]
+pub struct PhaseDisplayRegion {
+    pub exterior: Vec<(f64, f64)>,
+    pub holes: Vec<Vec<(f64, f64)>>,
+    pub label_pos: (f64, f64),
+    pub label: String,
+}
+
+impl PhaseDisplayRegion {
+    /// A simple (hole-free) display region from one ring + label, the label
+    /// anchored at the ring's vertex-mean. Used by the step / structure-split /
+    /// pending overlays, which never carry a hole. Under the affine world→screen
+    /// transform the world vertex-mean maps to the screen vertex-mean, so the
+    /// label lands exactly where the old per-screen centroid placed it.
+    pub fn from_ring(exterior: Vec<(f64, f64)>, label: String) -> Self {
+        let n = exterior.len().max(1) as f64;
+        let (sx, sy) = exterior
+            .iter()
+            .fold((0.0, 0.0), |(ax, ay), (x, y)| (ax + x, ay + y));
+        Self {
+            label_pos: (sx / n, sy / n),
+            exterior,
+            holes: Vec::new(),
+            label,
+        }
+    }
+}
+
 impl AppController {
     /// True when the editor is tagging construction-phase areas (drives the UI
     /// toggle and routes `DrawPerpWalls` strokes to phase carving).
@@ -116,18 +150,16 @@ impl AppController {
         // decisions from unrelated ops so only THIS stroke's snaps are tagged.
         let before = self.current_history_snapshot();
         self.begin_snap_capture();
-        // Make the outline current, then carve against the AVAILABLE region —
-        // the outline MINUS the phases already drawn. Carving against it makes the
-        // new phase snap to the neighbours' shared edges (and the outline) and
-        // keeps it from overlapping them, so the phases tile with no gaps and the
-        // shared walls land on the same coordinates (pre-known, not re-dimensioned).
+        // Make the outline current, then carve against the OUTLINE ONLY (no phase
+        // holes) — a drawn phase is ALLOWED to overlap the phases already tagged.
+        // The resolve's latest-wins partition (`document::resolve`) then removes
+        // the overlap from the older phase (shrinking it to a donut), so the new
+        // phase claims its full footprint. Snapping to neighbours' shared edges
+        // still happens via `snap_refs` below (the phase-edge/step reference
+        // walls), so a boundary drawn beside an existing phase line lands flush on
+        // it — the carve and the snap are orthogonal. Mirrors the STRUCTURE-phase
+        // carve, which also passes `&[]` for the holes.
         self.sync_active();
-        let idx = self.current_storey_idx.unwrap_or(0);
-        let phase_rings: Vec<Vec<Point2f32>> = self
-            .phase_regions
-            .get(&idx)
-            .map(|rs| rs.iter().map(|r| r.polygon.clone()).collect())
-            .unwrap_or_default();
         // Reference walls the carve levels the drawn phase boundary onto (in
         // addition to the outline): floor + ceiling STEP lines AND the edges of
         // the construction-phase regions already drawn (c4a2c3fc) — so a phase
@@ -140,15 +172,14 @@ impl AppController {
         snap_refs.extend(self.phase_reference_walls());
         log::debug!("── construction-phase sketch ───────────────────────");
 
-        // One call does subtract → pick piece → clip → cut-or-carve against the
-        // available region (outline minus the phases already drawn); we only
-        // dispatch the outcome. The chosen piece comes back for wall pinning.
-        match self.document.carve_or_cut_in_available(
-            &pts,
-            &phase_rings,
-            &self.tuning.subarea,
-            &snap_refs,
-        ) {
+        // One call does subtract → pick piece → cut-or-carve against the OUTLINE
+        // (no holes → overlap with existing phases is allowed; latest-wins in
+        // resolve settles it); we only dispatch the outcome. The chosen piece
+        // comes back for wall pinning.
+        match self
+            .document
+            .carve_or_cut_in_available(&pts, &[], &self.tuning.subarea, &snap_refs)
+        {
             Ok((boundary, SubareaOutcome::Cut(a, b))) => {
                 log::debug!("  → phase cut splits the available region into two — tap one to keep");
                 log::debug!("────────────────────────────────────────────────────");
@@ -300,10 +331,46 @@ impl AppController {
         self.abandon_phase_shape();
     }
 
-    /// The current storey's committed phase regions, as `(ring, label)` in world
-    /// coords, for the UI to tint and label. Index-aligned with deletion (see
-    /// [`delete_phase_region`](Self::delete_phase_region)). Empty when none.
-    pub fn phase_region_polygons(&self) -> Vec<(Vec<(f64, f64)>, String)> {
+    /// The current storey's committed phase zones projected for the UI to tint
+    /// and label. DISPLAY-ONLY: sourced from the RESOLVED, mutually-exclusive
+    /// floor regions (`Ber::storey_phase_zone_polygons`) — NOT the raw session
+    /// `self.phase_regions` rings (which still drive snapping / stamping and are
+    /// left untouched). So an older phase a newer one overlaps shows as a DONUT
+    /// with its hole, and each zone's label sits inside its own material (never
+    /// in the hole). `Unassigned` remainder is skipped. Empty when none.
+    ///
+    /// Because the zones are the resolved exclusive floors (unioned per phase),
+    /// this is NO LONGER index-aligned with `self.phase_regions` — deletion
+    /// ([`delete_phase_region`](Self::delete_phase_region)) still indexes the raw
+    /// session list, which the picker in the prompt dock drives separately.
+    pub fn phase_region_polygons(&self) -> Vec<PhaseDisplayRegion> {
+        let idx = self.current_storey_idx.unwrap_or(0);
+        let Some(ber) = self.current_record.as_ref().map(|r| &r.data) else {
+            return Vec::new();
+        };
+        let phases = &ber.construction_phases;
+        ber.storey_phase_zone_polygons(idx)
+            .into_iter()
+            .map(|z| PhaseDisplayRegion {
+                exterior: z.exterior.iter().map(|p| (p.x, p.y)).collect(),
+                holes: z
+                    .holes
+                    .iter()
+                    .map(|h| h.iter().map(|p| (p.x, p.y)).collect())
+                    .collect(),
+                label_pos: (z.label_anchor.x, z.label_anchor.y),
+                label: phases.display_label(&z.phase),
+            })
+            .collect()
+    }
+
+    /// Labels for the DELETE panel's construction-year rows, index-aligned with
+    /// the RAW session `self.phase_regions` — the exact list
+    /// [`delete_phase_region`](Self::delete_phase_region) indexes. Kept separate
+    /// from [`phase_region_polygons`](Self::phase_region_polygons) (the display
+    /// zones, unioned per phase) because the union loses the one-row-per-tag
+    /// mapping the delete affordance relies on. Empty when none.
+    pub fn phase_region_delete_labels(&self) -> Vec<String> {
         let idx = self.current_storey_idx.unwrap_or(0);
         let phases = self
             .current_record
@@ -315,12 +382,8 @@ impl AppController {
                 regions
                     .iter()
                     .map(|r| {
-                        let ring = r.polygon.iter().map(|p| (p.x as f64, p.y as f64)).collect();
-                        let label = phases.map_or_else(
-                            || r.phase.default_name(),
-                            |ph| ph.display_label(&r.phase),
-                        );
-                        (ring, label)
+                        phases
+                            .map_or_else(|| r.phase.default_name(), |ph| ph.display_label(&r.phase))
                     })
                     .collect()
             })

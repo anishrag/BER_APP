@@ -33,7 +33,9 @@ pub mod structure_fan;
 
 use std::collections::HashSet;
 
-use crate::controller::app_controller::{ExposureSelection, StructureEdit, WallExposureView};
+use crate::controller::app_controller::{
+    ExposureSelection, PhaseDisplayRegion, StructureEdit, WallExposureView,
+};
 use ber_model::ber::ber_struct::Ber;
 use ber_model::ber::common::ItemId;
 use ber_model::ber::structural::WallExposure;
@@ -139,15 +141,22 @@ pub fn render_ber(
                 // with the phase label, so the assessor can follow the "year"
                 // divisions the stroke snaps to. Gone once the outline lands —
                 // the dimensioning-phase watermark stays outline-only.
-                let phase_watermarks: Vec<(Vec<(f64, f64)>, String)> =
+                let phase_watermarks: Vec<PhaseDisplayRegion> =
                     if i > 0 && storey.floors.regions.is_empty() {
-                        document::phase_regions_from_floors(ber, i - 1)
+                        // HOLES-AWARE (like the committed overlay): a donut zone
+                        // below ghosts with its hole, its label anchored inside
+                        // the material.
+                        ber.storey_phase_zone_polygons(i - 1)
                             .into_iter()
-                            .map(|r| {
-                                (
-                                    r.polygon.iter().map(|p| (p.x as f64, p.y as f64)).collect(),
-                                    ber.construction_phases.display_label(&r.phase),
-                                )
+                            .map(|z| PhaseDisplayRegion {
+                                exterior: z.exterior.iter().map(|p| (p.x, p.y)).collect(),
+                                holes: z
+                                    .holes
+                                    .iter()
+                                    .map(|h| h.iter().map(|p| (p.x, p.y)).collect())
+                                    .collect(),
+                                label_pos: (z.label_anchor.x, z.label_anchor.y),
+                                label: ber.construction_phases.display_label(&z.phase),
                             })
                             .collect()
                     } else {
@@ -879,9 +888,12 @@ pub fn render_snap_tags(
 }
 
 /// Render committed tagged areas (construction-phase or floor-step regions):
-/// each ring tinted `color` with its label at the centroid, so the assessor
-/// sees which footprint carries which tag. `regions` is
-/// `(ring_world_coords, label)`.
+/// each zone's EXTERIOR and every HOLE ring tinted `color`, with ONE label at
+/// the zone's `label_pos` (a point guaranteed inside the material, outside every
+/// hole), so the assessor sees which footprint carries which tag — and a donut
+/// zone (an older phase a newer one overlaps) reads correctly, its label never
+/// falling in the hole. Hole-free overlays (steps / structure splits / pending
+/// carves) build their [`PhaseDisplayRegion`] via `PhaseDisplayRegion::from_ring`.
 #[allow(clippy::too_many_arguments)]
 pub fn render_phase_regions(
     painter: &egui::Painter,
@@ -890,7 +902,7 @@ pub fn render_phase_regions(
     current_storey_idx: Option<usize>,
     sketch_mode: SketchMode,
     view: ViewParams,
-    regions: &[(Vec<(f64, f64)>, String)],
+    regions: &[PhaseDisplayRegion],
     color: egui::Color32,
 ) {
     if regions.is_empty() {
@@ -900,25 +912,29 @@ pub fn render_phase_regions(
     else {
         return;
     };
-    for (region, label) in regions {
-        if region.len() < 3 {
-            continue;
+    let stroke_ring = |ring: &[(f64, f64)]| {
+        if ring.len() < 3 {
+            return;
         }
-        let pts: Vec<egui::Pos2> = region.iter().map(|(x, y)| t.apply(*x, *y)).collect();
+        let pts: Vec<egui::Pos2> = ring.iter().map(|(x, y)| t.apply(*x, *y)).collect();
         let n = pts.len();
         for k in 0..n {
             painter.line_segment([pts[k], pts[(k + 1) % n]], egui::Stroke::new(3.0, color));
         }
-        let (mut cx, mut cy) = (0.0f32, 0.0f32);
-        for p in &pts {
-            cx += p.x;
-            cy += p.y;
+    };
+    for region in regions {
+        if region.exterior.len() < 3 {
+            continue;
         }
-        let c = egui::pos2(cx / n as f32, cy / n as f32);
+        stroke_ring(&region.exterior);
+        for hole in &region.holes {
+            stroke_ring(hole);
+        }
+        let (lx, ly) = region.label_pos;
         painter.text(
-            c,
+            t.apply(lx, ly),
             egui::Align2::CENTER_CENTER,
-            label,
+            &region.label,
             egui::FontId::proportional(14.0),
             color,
         );
