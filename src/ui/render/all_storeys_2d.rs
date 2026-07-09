@@ -128,6 +128,9 @@ pub fn render(
             selected,
             // Full plan (not the reduced Objects view) in the overview.
             false,
+            // Overview never calls `render_wall_exposure`, so draw interior
+            // riser/step walls here (dashed) — otherwise they'd vanish.
+            true,
         );
     }
 }

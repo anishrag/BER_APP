@@ -547,12 +547,58 @@ impl AppController {
     /// instead of resetting, so the user is asked to dimension just the new
     /// walls.
     pub(super) fn apply_extend_stroke(&mut self, points: &[Point2f32]) -> Result<(), String> {
+        // Below-storey snap (ORTHO extend only): pull the extend stroke's FREE
+        // points onto the storey-BELOW outline so a dormer wall the assessor
+        // drew a touch short of the floor-below edge lands exactly ON it. Two
+        // scopings keep it safe:
+        //   - ORTHO only — a CURVE extend fits an ARC (`begin_arc_stroke`), for
+        //     which straight-ring snapping is wrong, so it's skipped there.
+        //   - FREE points only — the ATTACH points (those on/near the CURRENT
+        //     outline being extended) are FROZEN, so a shallow setback (the
+        //     current wall itself within tolerance of a below edge) can't drag
+        //     the splice seats off the wall. Only the genuinely-new bump points
+        //     may snap.
+        // ELECTIVE + tagged — the free-point snaps record `SnapDecision`s the
+        // caller drains into the replayable capture (snap-tag "don't snap" +
+        // forced-policy replay), never silent. Tolerances scale with the ring
+        // diagonals (no hardcoded metres, per the manip_plan rule); the below
+        // tol reuses the new-storey ratio for consistency with how an upper
+        // storey's own outline snaps onto the one below.
+        let mut pts = points.to_vec();
+        if self.sketch_engine.edit_tool != EditTools::ExtendCurve {
+            if let Some(prev_ring) = self.previous_storey_ring() {
+                let cur_ring = self.document.floor_plan.get_points();
+                let tol = (manip_plan::ring_diagonal(&prev_ring)
+                    * self.tuning.new_storey.snap_tol_ratio)
+                    .max(1e-3);
+                // "On/near the current outline" → an attach seat, frozen.
+                let attach_tol = (manip_plan::ring_diagonal(&cur_ring) * 0.03).max(1e-3);
+                let free_idx: Vec<usize> = (0..pts.len())
+                    .filter(|&i| manip_plan::dist_to_ring(&cur_ring, pts[i]) > attach_tol)
+                    .collect();
+                if !free_idx.is_empty() {
+                    // The free points are contiguous for a real extend (attach at
+                    // the ends), so snapping the extracted run reproduces in-place
+                    // grouping; the attach points are written back untouched.
+                    let free_pts: Vec<Point2f32> = free_idx.iter().map(|&i| pts[i]).collect();
+                    let snapped = manip_plan::snap_stroke_to_ring(&free_pts, &prev_ring, tol);
+                    for (k, &i) in free_idx.iter().enumerate() {
+                        pts[i] = snapped[k];
+                    }
+                }
+            }
+        }
+        let points: &[Point2f32] = &pts;
+
         // ExtendCurve defers: hold a provisional arc until its attach lines are
         // dimensioned (see `begin_arc_stroke`), rather than faceting now.
         if self.sketch_engine.edit_tool == EditTools::ExtendCurve {
             return self.begin_arc_stroke(points);
         }
         let undo_snap = self.current_history_snapshot();
+        // Perimeter BEFORE the splice — the source for re-homing split-wall
+        // attributes once `extend_ortho` may have carved a wall into two flanks.
+        let old_perim = self.document.floor_plan.perimeter_walls();
         let minted = self
             .document
             .floor_plan
@@ -565,6 +611,36 @@ impl AppController {
         // corner a flush porch turned into a mid-wall point) so the outline
         // stays minimal, then re-sync dimensioning state.
         self.clean_envelope_collinear();
+        // A wall the porch opened in its MIDDLE is now two flanks; the far one
+        // got a freshly-minted start vid with no exposure/construction entry.
+        // Copy the source wall's attributes onto it (from the POST-splice live
+        // buffer) so BOTH flanks inherit — before the resolve re-derives walls.
+        let new_perim = self.document.floor_plan.perimeter_walls();
+        self.document
+            .rehome_split_wall_attributes(&old_perim, &new_perim);
+        // A far wall the pre-snap dropped onto the storey-BELOW outline is now a
+        // KNOWN wall — its position is implied by the snap, exactly as a shared
+        // wall's is in the new-storey outline flow. Pin it (via the same
+        // `params_pinned_to_outline` contact scan) so the dimension loop does
+        // NOT prompt for it and a large height entry can't push the wall PAST
+        // the outline (the field overshoot). Restricted to the extend's NEWLY
+        // minted walls that landed on the below outline, so pre-existing walls
+        // keep whatever the assessor already set. Purely geometric: a far wall
+        // that did NOT snap isn't on the below outline, so nothing is pinned and
+        // it's still prompted normally.
+        if !minted.is_empty() {
+            if let Some(prev_ring) = self.previous_storey_ring() {
+                if let Ok(prev_plan) = manip_plan::FloorPlan::from_clean_ring(&prev_ring) {
+                    let minted_set: std::collections::HashSet<manip_plan::ParameterId> =
+                        minted.iter().copied().collect();
+                    let pinned = prev_plan.params_pinned_to_outline(&self.document.floor_plan, &[]);
+                    self.document
+                        .dimensioning
+                        .known_params
+                        .extend(pinned.into_iter().filter(|p| minted_set.contains(p)));
+                }
+            }
+        }
         // History snapshotted before the commit (consistent across apply_*).
         self.push_history_snapshot(undo_snap);
         self.mark_dirty()?;
@@ -658,6 +734,9 @@ impl AppController {
             return self.begin_arc_stroke(points);
         }
         let undo_snap = self.current_history_snapshot();
+        // Perimeter BEFORE the splice — the source for re-homing split-wall
+        // attributes if the trim carves a wall into two flanks.
+        let old_perim = self.document.floor_plan.perimeter_walls();
         let minted = match self.sketch_engine.edit_tool {
             EditTools::TrimOrtho => self.document.floor_plan.trim_ortho(points),
             _ => self.document.floor_plan.trim_by_stroke(points),
@@ -665,6 +744,13 @@ impl AppController {
         .map_err(|e| format!("{}", e))?;
         log::debug!("Trim: {} new param(s) {:?}", minted.len(), minted);
         self.clean_envelope_collinear();
+        // A wall the trim opened in its MIDDLE is now two flanks; the far one got
+        // a freshly-minted start vid. Copy the source wall's attributes onto it
+        // (from the POST-splice live buffer) so BOTH flanks inherit — before the
+        // resolve re-derives walls.
+        let new_perim = self.document.floor_plan.perimeter_walls();
+        self.document
+            .rehome_split_wall_attributes(&old_perim, &new_perim);
         // History snapshotted before the commit (consistent across apply_*). A
         // plain Trim never asks about collinearity, so no review step here.
         self.push_history_snapshot(undo_snap);

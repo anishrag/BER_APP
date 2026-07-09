@@ -3,7 +3,9 @@
 //! the resolved storey's derived RISER walls (the dashed-line picker's
 //! data). Pure model logic — the shell owns pointer selection, undo, and
 //! persistence.
-use crate::{centroid_key, CentroidKey, ExposureSection, StoreyDoc};
+use crate::{
+    centroid_key, CentroidKey, ExposureSection, PartitionCut, StoreyDoc, WallFacePartition,
+};
 use ber_model::ber::ber_struct::Ber;
 use ber_model::ber::common::ItemId;
 use ber_model::ber::structural::{
@@ -11,7 +13,8 @@ use ber_model::ber::structural::{
 };
 use domain::points::{Point2f32, Point2f64};
 use manip_plan::{
-    project_distance_along, ring_contains_point, ring_within_ring, segment_len, VertexId,
+    project_distance_along, ring_contains_point, ring_within_ring, segment_len, SurfaceRef,
+    VertexId,
 };
 use std::collections::HashMap;
 
@@ -349,6 +352,146 @@ impl StoreyDoc {
         let d0 = project_distance_along(a, b, len, p0.x, p0.y);
         let d1 = project_distance_along(a, b, len, p1.x, p1.y);
         Some((vid, d0.min(d1), d0.max(d1), len))
+    }
+
+    /// After a splice (dormer extend / trim) has split one outline wall into two
+    /// FLANKS, copy the source wall's per-wall attributes onto the flank that got
+    /// a FRESHLY-MINTED start [`VertexId`], so both flanks — pieces of the SAME
+    /// source wall — inherit its exposure and construction rather than only the
+    /// flank that kept the original start vid.
+    ///
+    /// The side-tables key off the wall's start vid ([`wall_sections`],
+    /// [`wall_face_partitions`]) or its [`SurfaceRef`] ([`wall_constructions`]).
+    /// `splice_into_edge` keeps the near flank's start vid but mints a new one for
+    /// the far flank, so that flank's start vid has no side-table entry and
+    /// resolves to `Unset`/default — the bug this repairs.
+    ///
+    /// `old_perimeter` / `new_perimeter` are the ring-0 perimeter walls
+    /// ([`FloorPlan::perimeter_walls`]) BEFORE and AFTER the splice, as
+    /// `(start_vid, a, b)`. (The caller passes the POST-splice perimeter
+    /// explicitly rather than letting this read `self.outline`, because the
+    /// splice edits the live editing buffer — the outline slot isn't synced until
+    /// the resolve pass, which runs *after* this.) A new perimeter edge whose
+    /// start vid is absent from the old set is a fresh flank; the OLD edge whose
+    /// segment its midpoint lies on (the 1e-2 m match used by
+    /// [`recover_wall_region_span`](Self::recover_wall_region_span) and
+    /// [`riser_walls`](Self::riser_walls)) is its source. The construction
+    /// (position-independent) is cloned as-is; the wall-local exposure sections
+    /// and face partition are TRANSLATED by the flank's start offset along the
+    /// old edge and CLIPPED to the flank's length, so a partial paint lands on
+    /// the flank(s) it actually covers (a `0..1` paint does NOT leak onto a far
+    /// flank whose own span was unpainted). Both flanks inherit; the near flank
+    /// keeps the un-touched old entry (`wall_coverage` clamps its shorter length).
+    /// A new vid that already carries an entry is left alone. Openings are not
+    /// touched.
+    ///
+    /// [`wall_sections`]: StoreyDoc::wall_sections
+    /// [`wall_face_partitions`]: StoreyDoc::wall_face_partitions
+    /// [`wall_constructions`]: StoreyDoc::wall_constructions
+    /// [`FloorPlan::perimeter_walls`]: manip_plan::FloorPlan::perimeter_walls
+    pub fn rehome_split_wall_attributes(
+        &mut self,
+        old_perimeter: &[(VertexId, Point2f32, Point2f32)],
+        new_perimeter: &[(VertexId, Point2f32, Point2f32)],
+    ) {
+        let old_vids: std::collections::HashSet<VertexId> =
+            old_perimeter.iter().map(|(v, _, _)| *v).collect();
+        for (new_vid, a, b) in new_perimeter.iter().copied() {
+            // Only freshly-minted flank starts need re-homing.
+            if old_vids.contains(&new_vid) {
+                continue;
+            }
+            let mid = Point2f32::new((a.x + b.x) * 0.5, (a.y + b.y) * 0.5);
+            let Some((old_vid, oa, ob)) = old_perimeter.iter().copied().find(|(_, oa, ob)| {
+                domain::points::point_to_segment_distance(
+                    mid.x as f64,
+                    mid.y as f64,
+                    oa.x as f64,
+                    oa.y as f64,
+                    ob.x as f64,
+                    ob.y as f64,
+                ) < 1e-2
+            }) else {
+                continue; // a genuinely new wall (not a flank of an old one)
+            };
+            // The flank is a SUB-SEGMENT of the old edge, starting `offset` metres
+            // along it FROM THE OLD WALL'S START VERTEX. Wall-local coordinates
+            // (1-D section ranges, 2-D face-partition along-x) are measured from
+            // that start vertex, so a verbatim copy would place the paint at the
+            // WRONG position on the flank (e.g. a `0..1` paint would show on a far
+            // flank whose own span `3..4` was unpainted). Translate every
+            // along-coordinate by −offset onto the flank and clip to its own
+            // length, dropping ranges outside it. (The NEAR flank keeps the old
+            // vid at offset 0; `wall_coverage` already clamps its now-shorter
+            // length, so it needs no translation.) The splice preserves ring
+            // winding, so the flank is same-oriented as the old edge and a plain
+            // subtract is the correct along-mapping.
+            let old_len = segment_len(oa, ob);
+            let flank_len = segment_len(a, b);
+            let offset = project_distance_along(oa, ob, old_len, a.x, a.y);
+
+            // 1-D exposure sections: translate + clip, drop empties.
+            if !self.wall_sections.contains_key(&new_vid) {
+                if let Some(secs) = self.wall_sections.get(&old_vid) {
+                    let moved: Vec<ExposureSection> = secs
+                        .iter()
+                        .filter_map(|s| {
+                            let ns = (s.start_m - offset).max(0.0);
+                            let ne = (s.end_m - offset).min(flank_len);
+                            (ne > ns + 1e-4).then_some(ExposureSection {
+                                start_m: ns,
+                                end_m: ne,
+                                exposure: s.exposure,
+                            })
+                        })
+                        .collect();
+                    if !moved.is_empty() {
+                        self.wall_sections.insert(new_vid, moved);
+                    }
+                }
+            }
+            // 2-D face partition (supersedes the 1-D sections for a wall):
+            // translate along-x by −offset, drop cuts/regions outside the flank
+            // span. Skip the whole partition if no region sample survives.
+            if !self.wall_face_partitions.contains_key(&new_vid) {
+                if let Some(part) = self.wall_face_partitions.get(&old_vid) {
+                    let shift = |p: Point2f32| Point2f32::new(p.x - offset, p.y);
+                    let cuts: Vec<PartitionCut> = part
+                        .cuts
+                        .iter()
+                        .filter_map(|c| {
+                            let (ca, cb) = (shift(c.a), shift(c.b));
+                            // Keep a cut that still crosses the flank span.
+                            (ca.x.max(cb.x) > 0.0 && ca.x.min(cb.x) < flank_len)
+                                .then_some(PartitionCut { a: ca, b: cb })
+                        })
+                        .collect();
+                    let regions: Vec<(Point2f32, WallExposure)> = part
+                        .regions
+                        .iter()
+                        .filter_map(|(p, e)| {
+                            let sp = shift(*p);
+                            (sp.x >= 0.0 && sp.x <= flank_len).then_some((sp, *e))
+                        })
+                        .collect();
+                    if !regions.is_empty() {
+                        self.wall_face_partitions
+                            .insert(new_vid, WallFacePartition { cuts, regions });
+                    }
+                }
+            }
+            // Construction (keyed by SurfaceRef::wall).
+            let new_ref = SurfaceRef::wall(new_vid);
+            if !self.wall_constructions.contains_key(&new_ref) {
+                if let Some(con) = self
+                    .wall_constructions
+                    .get(&SurfaceRef::wall(old_vid))
+                    .cloned()
+                {
+                    self.wall_constructions.insert(new_ref, con);
+                }
+            }
+        }
     }
 
     /// Rebuild the runtime section model from the persisted `WallRegions` (the
@@ -888,6 +1031,146 @@ mod tests {
             dimensioning: doc.dimensioning.clone(),
         };
         doc
+    }
+
+    /// When a splice SPLITS a painted wall into two flanks — the far one getting
+    /// a freshly-minted start vid — `rehome_split_wall_attributes` copies the
+    /// source wall's exposure AND construction onto the new vid, so BOTH flanks
+    /// inherit rather than only the flank that kept the original start vid.
+    #[test]
+    fn rehome_split_wall_copies_exposure_and_construction_to_new_flank() {
+        use ber_model::ber::common::ConstructionPhase;
+        use ber_model::ber::structural::{ConstructionMakeup, WallConstructionType};
+        use manip_plan::SurfaceRef;
+
+        let mut doc = square_doc(); // 4×4
+        let old_perim = doc.floor_plan.perimeter_walls();
+        // The bottom wall (both endpoints on y=0).
+        let (vid, a, b) = old_perim
+            .iter()
+            .copied()
+            .find(|(_, a, b)| a.y.abs() < 1e-4 && b.y.abs() < 1e-4)
+            .expect("a y=0 wall");
+        let len = segment_len(a, b);
+        doc.set_wall_section(vid, 0.0, len, len, WallExposure::Exposed);
+        doc.wall_constructions.insert(
+            SurfaceRef::wall(vid),
+            (
+                WallConstructionType::TimberConstruction,
+                ConstructionMakeup::Default,
+                ConstructionPhase::default(),
+                None,
+            ),
+        );
+
+        // Bump a dormer off the MIDDLE of that wall (outward, y<0): the splice
+        // splits it into a near flank keeping `vid` and a far flank with a
+        // freshly-minted start vid.
+        doc.floor_plan
+            .extend_ortho(&[
+                Point2f32::new(1.0, 0.0),
+                Point2f32::new(1.0, -1.0),
+                Point2f32::new(3.0, -1.0),
+                Point2f32::new(3.0, 0.0),
+            ])
+            .expect("dormer extend splits the wall");
+        let new_perim = doc.floor_plan.perimeter_walls();
+
+        let old_vids: std::collections::HashSet<_> = old_perim.iter().map(|(v, _, _)| *v).collect();
+        let flank_vids: Vec<VertexId> = new_perim
+            .iter()
+            .filter(|(_, a, b)| a.y.abs() < 1e-4 && b.y.abs() < 1e-4)
+            .map(|(v, _, _)| *v)
+            .collect();
+        assert_eq!(flank_vids.len(), 2, "the y=0 wall is now two flanks");
+        assert!(
+            flank_vids.iter().any(|v| !old_vids.contains(v)),
+            "the splice minted a fresh vid for the far flank"
+        );
+
+        doc.rehome_split_wall_attributes(&old_perim, &new_perim);
+
+        // BOTH y=0 flanks now carry the Exposed section AND the construction —
+        // not just the flank that kept the original vid.
+        for v in &flank_vids {
+            let secs = doc
+                .wall_sections
+                .get(v)
+                .unwrap_or_else(|| panic!("flank {v:?} has an exposure section"));
+            assert!(
+                secs.iter().any(|s| s.exposure == WallExposure::Exposed),
+                "flank {v:?} inherits Exposed"
+            );
+            assert!(
+                doc.wall_constructions.contains_key(&SurfaceRef::wall(*v)),
+                "flank {v:?} inherits the construction"
+            );
+        }
+    }
+
+    /// A PARTIAL paint must land only on the flank it covers: paint `0..1` of the
+    /// (4 m) wall Exposed, dormer-split it at the FAR end → the near flank keeps
+    /// Exposed, the far flank (whose own span was unpainted) resolves UNSET. Without
+    /// the offset-translation the far flank would inherit the `0..1` range verbatim
+    /// (clamped onto its start) and read Exposed — this test fails pre-fix.
+    #[test]
+    fn rehome_partial_paint_translates_to_the_flank_it_covers() {
+        let mut doc = square_doc(); // 4×4
+        let old_perim = doc.floor_plan.perimeter_walls();
+        let (vid, a, b) = old_perim
+            .iter()
+            .copied()
+            .find(|(_, a, b)| a.y.abs() < 1e-4 && b.y.abs() < 1e-4)
+            .expect("a y=0 wall");
+        let len = segment_len(a, b);
+        // Paint only 0..1 (near the START vertex `a`) Exposed.
+        doc.set_wall_section(vid, 0.0, 1.0, len, WallExposure::Exposed);
+
+        // Dormer bump off the FAR portion (along 2.5..3.5 from `a`), outward (−y).
+        let (ux, uy) = ((b.x - a.x) / len, (b.y - a.y) / len);
+        let at = |d: f32| Point2f32::new(a.x + ux * d, a.y + uy * d);
+        let (p1, p2) = (at(2.5), at(3.5));
+        doc.floor_plan
+            .extend_ortho(&[
+                Point2f32::new(p1.x, p1.y),
+                Point2f32::new(p1.x, p1.y - 1.0),
+                Point2f32::new(p2.x, p2.y - 1.0),
+                Point2f32::new(p2.x, p2.y),
+            ])
+            .expect("dormer extend splits the wall");
+        let new_perim = doc.floor_plan.perimeter_walls();
+        doc.rehome_split_wall_attributes(&old_perim, &new_perim);
+
+        // Split the y=0 wall into near (contains `a`) + far by midpoint distance.
+        let flanks: Vec<(VertexId, Point2f32, Point2f32)> = new_perim
+            .iter()
+            .copied()
+            .filter(|(_, fa, fb)| fa.y.abs() < 1e-4 && fb.y.abs() < 1e-4)
+            .collect();
+        assert_eq!(flanks.len(), 2, "the y=0 wall split into two flanks");
+        let dist_a = |fa: Point2f32, fb: Point2f32| {
+            let m = Point2f32::new((fa.x + fb.x) * 0.5, (fa.y + fb.y) * 0.5);
+            (m.x - a.x).hypot(m.y - a.y)
+        };
+        let (near, far) = if dist_a(flanks[0].1, flanks[0].2) < dist_a(flanks[1].1, flanks[1].2) {
+            (flanks[0].0, flanks[1].0)
+        } else {
+            (flanks[1].0, flanks[0].0)
+        };
+        let exposed = |v: VertexId| {
+            doc.wall_sections
+                .get(&v)
+                .is_some_and(|s| s.iter().any(|x| x.exposure == WallExposure::Exposed))
+        };
+        assert!(
+            exposed(near),
+            "near flank keeps the Exposed paint (its 0..1 span)"
+        );
+        assert!(
+            !exposed(far),
+            "far flank's own span was UNPAINTED → not Exposed (offset-translated + clipped away): {:?}",
+            doc.wall_sections.get(&far)
+        );
     }
 
     /// SINGLE-REPRESENTATION RULE: painting part of a wall stores ONLY the

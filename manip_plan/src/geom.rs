@@ -795,6 +795,42 @@ pub fn point_in_polygon(poly: &[Point2f32], p: Point2f32) -> bool {
     ring_contains_point(poly, p.x, p.y)
 }
 
+/// Whether `p` lies ON segment `s0`→`s1`: within `eps` of the infinite line AND
+/// between the endpoints (a hair of overshoot allowed at each end). `f64` world
+/// coordinates. A degenerate (near-zero-length) segment contains nothing.
+pub fn point_on_segment(p: Point2f64, s0: Point2f64, s1: Point2f64, eps: f64) -> bool {
+    let (dx, dy) = (s1.x - s0.x, s1.y - s0.y);
+    let len2 = dx * dx + dy * dy;
+    if len2 <= eps * eps {
+        return false;
+    }
+    // Perpendicular distance from the infinite line.
+    let cross = (p.x - s0.x) * dy - (p.y - s0.y) * dx;
+    if (cross / len2.sqrt()).abs() > eps {
+        return false;
+    }
+    // Parametric position along the segment, allowing a hair of overshoot.
+    let t = ((p.x - s0.x) * dx + (p.y - s0.y) * dy) / len2;
+    (-eps..=1.0 + eps).contains(&t)
+}
+
+/// Whether segment `a`→`b` lies ON the closed `ring` — both endpoints on a
+/// SINGLE ring edge (within `eps`). The classifier that tells a real wall (a
+/// region edge lying on the storey outline) from an internal partition seam (a
+/// region edge that reaches past, or cuts across, the outline). The ring is
+/// implicitly closed; `< 2` vertices match nothing.
+pub fn segment_on_ring(a: Point2f64, b: Point2f64, ring: &[Point2f64], eps: f64) -> bool {
+    let m = ring.len();
+    if m < 2 {
+        return false;
+    }
+    (0..m).any(|i| {
+        let s0 = ring[i];
+        let s1 = ring[(i + 1) % m];
+        point_on_segment(a, s0, s1, eps) && point_on_segment(b, s0, s1, eps)
+    })
+}
+
 /// Result of [`snap_on_face`]: the (possibly adjusted) point plus which of its
 /// coordinates were snapped to a face feature. An un-fixed coordinate is left
 /// untouched (a higher layer prompts the user for it).
@@ -1303,6 +1339,66 @@ mod tests {
 
     fn ring64(pts: &[(f64, f64)]) -> Vec<Point2f64> {
         pts.iter().map(|&(x, y)| Point2f64::new(x, y)).collect()
+    }
+
+    fn pt(x: f64, y: f64) -> Point2f64 {
+        Point2f64::new(x, y)
+    }
+
+    /// `point_on_segment`: interior + endpoint hits; off-line and past-the-end
+    /// misses; degenerate segments contain nothing.
+    #[test]
+    fn point_on_segment_classifies_on_off_and_ends() {
+        let (s0, s1) = (pt(0.0, 0.0), pt(4.0, 0.0));
+        assert!(point_on_segment(pt(2.0, 0.0), s0, s1, 1e-6), "midpoint on");
+        assert!(
+            point_on_segment(pt(0.0, 0.0), s0, s1, 1e-6),
+            "start endpoint on"
+        );
+        assert!(
+            point_on_segment(pt(4.0, 0.0), s0, s1, 1e-6),
+            "end endpoint on"
+        );
+        assert!(
+            !point_on_segment(pt(2.0, 0.01), s0, s1, 1e-6),
+            "off the line (perpendicular) is a miss"
+        );
+        assert!(
+            !point_on_segment(pt(5.0, 0.0), s0, s1, 1e-6),
+            "collinear but past the end is a miss"
+        );
+        assert!(
+            !point_on_segment(pt(0.0, 0.0), pt(1.0, 1.0), pt(1.0, 1.0), 1e-6),
+            "degenerate segment contains nothing"
+        );
+    }
+
+    /// `segment_on_ring`: a sub-segment of a ring edge is ON the ring; a segment
+    /// collinear with a ring edge but reaching PAST it (a phase seam spanning the
+    /// gap between two colinear perimeter edges) is NOT; an interior chord is NOT.
+    #[test]
+    fn segment_on_ring_matches_only_contained_edges() {
+        // Ring with a top edge broken into two collinear pieces (a gap at
+        // x∈[2,3] where the outline bumps up), mimicking the dormer footprint.
+        let ring = ring64(&[
+            (0.0, 0.0),
+            (5.0, 0.0),
+            (5.0, 2.0),
+            (3.0, 2.0), // right flank top ends here
+            (3.0, 4.0),
+            (2.0, 4.0),
+            (2.0, 2.0), // left flank top starts here
+            (0.0, 2.0),
+        ]);
+        // A sub-segment of the bottom edge → on the ring (a real wall).
+        assert!(segment_on_ring(pt(1.0, 0.0), pt(4.0, 0.0), &ring, 1e-6));
+        // The seam spanning the bump gap at y=2, x∈[2,3]: collinear with the two
+        // flank tops (y=2) but contained in neither → NOT on the ring.
+        assert!(!segment_on_ring(pt(2.0, 2.0), pt(3.0, 2.0), &ring, 1e-6));
+        // An interior chord touches no edge.
+        assert!(!segment_on_ring(pt(1.0, 1.0), pt(4.0, 1.0), &ring, 1e-6));
+        // A flank-top sub-edge IS on the ring.
+        assert!(segment_on_ring(pt(0.0, 2.0), pt(2.0, 2.0), &ring, 1e-6));
     }
 
     /// `ring_within_ring`: a fully-enclosed inner ring is contained; a coincident

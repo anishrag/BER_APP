@@ -315,6 +315,123 @@ fn extend_porch_at_corner_cleans_the_spurious_vertex() {
     assert_eq!(collinear, 0, "no spurious collinear vertices remain");
 }
 
+/// A wall painted Exposed that a dormer EXTEND splits into two flanks — the far
+/// flank getting a freshly-minted start VertexId — has its exposure RE-HOMED so
+/// BOTH resolved flank regions read Exposed, not one Exposed + one Unset.
+/// Regression for the split-wall-loses-exposure report.
+#[test]
+fn extend_split_wall_keeps_exposure_on_both_flanks() {
+    let mut c = dimensioned_square_controller();
+    // Paint the whole bottom wall (y=0) Exposed.
+    let (vid, a, b) = c
+        .document
+        .outline
+        .floor_plan
+        .perimeter_walls()
+        .into_iter()
+        .find(|(_, a, b)| a.y.abs() < 1e-4 && b.y.abs() < 1e-4)
+        .expect("a y=0 wall");
+    let len = ((b.x - a.x).powi(2) + (b.y - a.y).powi(2)).sqrt();
+    c.document
+        .set_wall_section(vid, 0.0, len, len, WallExposure::Exposed);
+    c.mark_dirty().unwrap();
+
+    // Bump a dormer off the MIDDLE of that wall (outward, y<0): the splice
+    // splits it into [0,3] (keeps `vid`) and [7,10] (a fresh vid).
+    c.set_edit_mode(EditTools::ExtendOrtho);
+    c.apply_extend_stroke(&[
+        Point2f32::new(3.0, 0.0),
+        Point2f32::new(3.0, -3.0),
+        Point2f32::new(7.0, -3.0),
+        Point2f32::new(7.0, 0.0),
+    ])
+    .expect("dormer extend");
+
+    c.materialize();
+    let storey = &c.current_record.as_ref().unwrap().data.storeys[0];
+    // The two perimeter flanks are the wall regions whose base edge lies on y=0.
+    let flanks: Vec<&ber_model::ber::structural::WallRegion> = storey
+        .walls
+        .regions
+        .iter()
+        .filter(|r| {
+            r.base_edge()
+                .is_some_and(|(a, b)| a.y.abs() < 1e-3 && b.y.abs() < 1e-3)
+        })
+        .collect();
+    assert_eq!(flanks.len(), 2, "the bottom wall split into two flanks");
+    assert!(
+        flanks.iter().all(|r| r.exposure == WallExposure::Exposed),
+        "BOTH flanks inherit Exposed (not one Unset): {:?}",
+        flanks.iter().map(|r| r.exposure).collect::<Vec<_>>()
+    );
+}
+
+/// A PARTIAL paint must not leak onto the flank it doesn't cover: paint only the
+/// FIRST metre of the 10 m bottom wall Exposed, then dormer-split it at the FAR
+/// end. The near flank (which owns the painted metre) resolves Exposed; the far
+/// flank (its own span was unpainted) resolves UNSET — the exposure sections are
+/// TRANSLATED by the flank's offset, not copied verbatim.
+#[test]
+fn extend_split_wall_partial_paint_does_not_leak_to_the_far_flank() {
+    let mut c = dimensioned_square_controller(); // 10×10
+    let (vid, a, b) = c
+        .document
+        .outline
+        .floor_plan
+        .perimeter_walls()
+        .into_iter()
+        .find(|(_, a, b)| a.y.abs() < 1e-4 && b.y.abs() < 1e-4)
+        .expect("a y=0 wall");
+    let len = ((b.x - a.x).powi(2) + (b.y - a.y).powi(2)).sqrt();
+    // Paint only the first metre (near the wall's START vertex `a`) Exposed.
+    c.document
+        .set_wall_section(vid, 0.0, 1.0, len, WallExposure::Exposed);
+    c.mark_dirty().unwrap();
+
+    // Dormer off the FAR end of the wall (x≈6..8, away from the painted x≈0..1).
+    c.set_edit_mode(EditTools::ExtendOrtho);
+    c.apply_extend_stroke(&[
+        Point2f32::new(6.0, 0.0),
+        Point2f32::new(6.0, -3.0),
+        Point2f32::new(8.0, -3.0),
+        Point2f32::new(8.0, 0.0),
+    ])
+    .expect("dormer extend");
+
+    c.materialize();
+    let storey = &c.current_record.as_ref().unwrap().data.storeys[0];
+    // Exposure resolves per coverage segment, so the painted metre x[0,1] and the
+    // unpainted rest x[1,6] are distinct regions on the near flank. Sample by x.
+    let cover_at = |xmid: f64| -> Option<WallExposure> {
+        storey
+            .walls
+            .regions
+            .iter()
+            .find(|r| {
+                r.base_edge().is_some_and(|(a, b)| {
+                    a.y.abs() < 1e-3
+                        && b.y.abs() < 1e-3
+                        && (a.x.min(b.x)..a.x.max(b.x)).contains(&xmid)
+                })
+            })
+            .map(|r| r.exposure)
+    };
+    // The painted metre (x≈0.5) on the near flank is Exposed.
+    assert_eq!(
+        cover_at(0.5),
+        Some(WallExposure::Exposed),
+        "the painted first metre resolves Exposed"
+    );
+    // The far flank (x≈9, its own span unpainted) is Unset — the paint did NOT
+    // leak onto it (the sections were offset-translated, not copied verbatim).
+    assert_eq!(
+        cover_at(9.0),
+        Some(WallExposure::Unset),
+        "the far flank's own span was unpainted → Unset (paint did NOT leak)"
+    );
+}
+
 fn ring_area(c: &AppController) -> f32 {
     let ring = &c.document.floor_plan.polygons()[0];
     let n = ring.len();
@@ -15650,6 +15767,227 @@ fn subarea_decisions_do_not_leak_into_a_later_extend_capture() {
         "ONLY the extend's decisions (top edge) — nothing leaked from the \
          living-area carve (bottom corner): {:?}",
         last.decisions.iter().map(|d| d.from).collect::<Vec<_>>()
+    );
+}
+
+/// Symptom #2 (below-storey snap for Extend): a dormer wall drawn a touch
+/// SHORT of the storey-below edge snaps onto it, and the snap is ELECTIVE +
+/// tagged (a recorded `ToPreviousOutline` decision) so "don't snap" and replay
+/// work — never a silent snap.
+#[test]
+fn extend_snaps_far_wall_onto_the_storey_below_edge() {
+    // Storey 0 = 10×10 m (north edge y=10). Storey 1 = a smaller box
+    // x[2,8] y[2,7] inside it, north wall at y=7.
+    let mut c = dimensioned_square_controller();
+    c.add_storey().unwrap();
+    c.apply_outline_world_inner(
+        &[(2.0, 2.0), (8.0, 2.0), (8.0, 7.0), (2.0, 7.0), (2.1, 2.1)],
+        true,
+    )
+    .expect("upper box outline");
+    c.set_edit_mode(EditTools::ExtendOrtho);
+
+    // A dormer bump off the north wall whose far edge lands at y=9.9 — 10 cm
+    // short of the storey-below north edge (y=10). tol ≈ 14.14 × 0.08 ≈ 1.13 m,
+    // so 0.1 m snaps.
+    c.apply_extend_stroke_event(&[(3.0, 7.0), (3.0, 9.9), (7.0, 9.9), (7.0, 7.0)]);
+
+    let pts = c.document.floor_plan.get_points();
+    assert!(
+        pts.iter().any(|p| (p.y - 10.0).abs() < 1e-3),
+        "the far wall snapped onto the storey-below edge y=10: {pts:?}"
+    );
+    assert!(
+        !pts.iter().any(|p| (p.y - 9.9).abs() < 1e-3),
+        "no vertex left at the drawn (un-snapped) y=9.9: {pts:?}"
+    );
+    let last = c.last_snap_action.as_ref().expect("extend captured");
+    assert!(
+        last.decisions.iter().any(|d| d
+            .candidates
+            .iter()
+            .any(|cand| cand.kind == manip_plan::SnapKind::ToPreviousOutline)),
+        "the below-storey snap is recorded as a tagged ToPreviousOutline decision"
+    );
+}
+
+/// The counterpart: a dormer wall drawn COMFORTABLY short of the storey-below
+/// edge (well beyond the tolerance) is left exactly where drawn — no snap.
+#[test]
+fn extend_leaves_a_comfortably_short_far_wall_unsnapped() {
+    let mut c = dimensioned_square_controller();
+    c.add_storey().unwrap();
+    c.apply_outline_world_inner(
+        &[(2.0, 2.0), (8.0, 2.0), (8.0, 7.0), (2.0, 7.0), (2.1, 2.1)],
+        true,
+    )
+    .expect("upper box outline");
+    c.set_edit_mode(EditTools::ExtendOrtho);
+
+    // Far edge at y=8.0 — 2 m short of y=10, well beyond the ~1.13 m tol.
+    c.apply_extend_stroke_event(&[(3.0, 7.0), (3.0, 8.0), (7.0, 8.0), (7.0, 7.0)]);
+
+    let pts = c.document.floor_plan.get_points();
+    assert!(
+        pts.iter().any(|p| (p.y - 8.0).abs() < 1e-3),
+        "the far wall stays where drawn (y=8): {pts:?}"
+    );
+    assert!(
+        !pts.iter().any(|p| (p.y - 10.0).abs() < 1e-3),
+        "nothing snapped onto the storey-below edge: {pts:?}"
+    );
+    let below_snapped = c.last_snap_action.as_ref().is_some_and(|last| {
+        last.decisions.iter().any(|d| {
+            d.candidates
+                .iter()
+                .any(|cand| cand.kind == manip_plan::SnapKind::ToPreviousOutline)
+        })
+    });
+    assert!(
+        !below_snapped,
+        "a comfortably short wall makes no below-storey snap"
+    );
+}
+
+/// Symptom #2 scoping: on a SHALLOW setback (the current wall itself within the
+/// below-snap tolerance of a below edge) the extend's ATTACH ends are frozen —
+/// they seat the splice on the current wall and must NOT be dragged onto the
+/// below edge. Only the free bump points may snap.
+#[test]
+fn extend_shallow_setback_keeps_attach_end_on_the_current_wall() {
+    // Below storey 0 = 10×10 (north edge y=10). Upper storey = a box whose
+    // north wall sits at y=9.9 — a 0.1 m setback, WITHIN the ~1.13 m tol of the
+    // below north edge. Set it directly (the outline-draw snap would itself pull
+    // a y=9.9 wall onto y=10).
+    let mut c = dimensioned_square_controller();
+    c.add_storey().unwrap();
+    c.document.floor_plan = FloorPlan::from_clean_ring(&[
+        Point2f32::new(2.0, 2.0),
+        Point2f32::new(8.0, 2.0),
+        Point2f32::new(8.0, 9.9),
+        Point2f32::new(2.0, 9.9),
+    ])
+    .unwrap();
+    c.document.dimensioning.scale_set = true;
+    c.set_edit_mode(EditTools::ExtendOrtho);
+
+    // A deep bump north off the y=9.9 wall (far edge y=12, beyond the below
+    // footprint so it doesn't snap). The attach ends are on the y=9.9 wall.
+    c.apply_extend_stroke_event(&[(3.0, 9.9), (3.0, 12.0), (7.0, 12.0), (7.0, 9.9)]);
+
+    let pts = c.document.floor_plan.get_points();
+    assert!(
+        pts.iter().any(|p| (p.y - 9.9).abs() < 1e-3),
+        "the attach seats stay on the y=9.9 wall (unmoved): {pts:?}"
+    );
+    assert!(
+        !pts.iter().any(|p| (p.y - 10.0).abs() < 1e-3),
+        "the attach ends were NOT dragged onto the below edge y=10: {pts:?}"
+    );
+    assert!(
+        pts.iter().any(|p| (p.y - 12.0).abs() < 1e-3),
+        "the bump attached and extended north (far edge present): {pts:?}"
+    );
+}
+
+/// Symptom #2 scoping: an ARC extend (ExtendCurve) is NOT touched by the
+/// below-storey snap — it fits a circular arc, for which straight-ring snapping
+/// is wrong, so no `ToPreviousOutline` decision is recorded even when the stroke
+/// passes right by a below edge.
+#[test]
+fn extend_curve_is_unaffected_by_the_below_storey_snap() {
+    let mut c = dimensioned_square_controller();
+    c.add_storey().unwrap();
+    c.apply_outline_world_inner(
+        &[(2.0, 2.0), (8.0, 2.0), (8.0, 7.0), (2.0, 7.0), (2.1, 2.1)],
+        true,
+    )
+    .expect("upper box outline");
+    c.set_edit_mode(EditTools::ExtendCurve);
+
+    // A curved bump off the north wall bulging up near the below north edge
+    // (y≈9.9). If the below-ring snap ran it would record a ToPreviousOutline
+    // decision — the arc path must skip it entirely.
+    c.apply_extend_stroke_event(&[(3.0, 7.0), (4.0, 9.9), (5.0, 9.9), (7.0, 7.0)]);
+
+    assert!(
+        c.document.pending_arc.is_some(),
+        "the curve extend began a provisional arc"
+    );
+    let below_snapped = c.last_snap_action.as_ref().is_some_and(|last| {
+        last.decisions.iter().any(|d| {
+            d.candidates
+                .iter()
+                .any(|cand| cand.kind == manip_plan::SnapKind::ToPreviousOutline)
+        })
+    });
+    assert!(
+        !below_snapped,
+        "an arc (ExtendCurve) extend makes no below-storey snap"
+    );
+}
+
+/// Whether ANY vertex of the primary ring at height `y` has a KNOWN y param.
+fn far_wall_y_is_known(c: &AppController, y: f32) -> bool {
+    let pts = c.document.floor_plan.get_points();
+    pts.iter().enumerate().any(|(i, p)| {
+        (p.y - y).abs() < 1e-3
+            && c.document
+                .floor_plan
+                .vertex_y_param(0, i)
+                .is_some_and(|yp| c.document.dimensioning.known_params.contains(&yp))
+    })
+}
+
+/// Symptom #2 / Gap B: when the far wall SNAPS onto the storey-below outline its
+/// position is marked KNOWN, so the dimension loop can't prompt for the dormer
+/// height and push the wall PAST the outline (the field overshoot). The below
+/// edge determines the height.
+#[test]
+fn extend_snapped_far_wall_is_pinned_known() {
+    let mut c = dimensioned_square_controller();
+    c.add_storey().unwrap();
+    c.apply_outline_world_inner(
+        &[(2.0, 2.0), (8.0, 2.0), (8.0, 7.0), (2.0, 7.0), (2.1, 2.1)],
+        true,
+    )
+    .expect("upper box outline");
+    c.set_edit_mode(EditTools::ExtendOrtho);
+
+    // Snapping extend: far edge drawn at y=9.9 → snaps to the below edge y=10.
+    c.apply_extend_stroke_event(&[(3.0, 7.0), (3.0, 9.9), (7.0, 9.9), (7.0, 7.0)]);
+    assert!(
+        c.document
+            .floor_plan
+            .get_points()
+            .iter()
+            .any(|p| (p.y - 10.0).abs() < 1e-3),
+        "sanity: the far wall snapped to y=10"
+    );
+    assert!(
+        far_wall_y_is_known(&c, 10.0),
+        "the snapped far wall's position is KNOWN (pinned), so it isn't prompted"
+    );
+}
+
+/// Counterpart: a comfortably-short far wall does NOT snap, so its position
+/// stays UNKNOWN — the assessor is prompted to dimension the height normally.
+#[test]
+fn extend_unsnapped_far_wall_stays_promptable() {
+    let mut c = dimensioned_square_controller();
+    c.add_storey().unwrap();
+    c.apply_outline_world_inner(
+        &[(2.0, 2.0), (8.0, 2.0), (8.0, 7.0), (2.0, 7.0), (2.1, 2.1)],
+        true,
+    )
+    .expect("upper box outline");
+    c.set_edit_mode(EditTools::ExtendOrtho);
+
+    // Far edge at y=8 — 2 m short of the below edge, no snap.
+    c.apply_extend_stroke_event(&[(3.0, 7.0), (3.0, 8.0), (7.0, 8.0), (7.0, 7.0)]);
+    assert!(
+        !far_wall_y_is_known(&c, 8.0),
+        "an un-snapped far wall stays promptable (not pinned)"
     );
 }
 

@@ -182,6 +182,9 @@ pub fn render_ber(
                             None,
                             &no_selection,
                             objects_view,
+                            // Single-storey view: risers are drawn by
+                            // `render_wall_exposure`, so don't double them here.
+                            false,
                         );
                     }
                     None => {
@@ -198,6 +201,9 @@ pub fn render_ber(
                             None,
                             selected,
                             objects_view,
+                            // Single-storey view: risers drawn by the exposure
+                            // overlay — don't double them here.
+                            false,
                         );
                     }
                 }
@@ -1440,7 +1446,6 @@ pub(crate) mod style {
 
     pub const FLOOR_FILL: Color32 = Color32::from_rgba_premultiplied(40, 70, 110, 50);
     pub const FLOOR_LINE: Color32 = Color32::from_rgb(120, 170, 240);
-    pub const WALL_LINE: Color32 = Color32::from_rgb(230, 230, 230);
     pub const ROOF_LINE: Color32 = Color32::from_rgb(220, 160, 80);
     /// Exposure-class colours — shared between the 2D exposure overlay and the
     /// 3D wall-region rendering so a wall reads the same in both views.

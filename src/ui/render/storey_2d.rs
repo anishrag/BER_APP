@@ -11,6 +11,7 @@ use std::collections::HashSet;
 use ber_model::ber::common::ItemId;
 use ber_model::ber::fenestration::{Door, OpeningPlacement, Window};
 use ber_model::ber::structural::{CeilingRegion, FloorRegion, Storey};
+use domain::points::Point2f64;
 use domain::sketch::DisplayMode;
 use eframe::egui;
 use geo::Coord;
@@ -59,6 +60,12 @@ pub fn render(
     // living-area overlay the canvas adds) — roof outlines, roof windows and
     // ceiling-height labels are suppressed so the plan just gives a sense of place.
     objects_view: bool,
+    // Also draw INTERIOR wall regions (risers / step walls) as dashed lines. The
+    // single-storey view leaves this OFF — `render_wall_exposure` draws risers
+    // there (dashed), so drawing them here too would double them. The all-storeys
+    // OVERVIEW (which never calls `render_wall_exposure`) turns it ON so a
+    // split-level storey's interior step edges still show.
+    draw_interior_walls: bool,
 ) {
     // Build the fit bbox from BOTH the storey and the watermark — a new (empty)
     // storey has no bbox of its own; the previous-storey watermark supplies one
@@ -85,15 +92,40 @@ pub fn render(
     }
     draw_phase_watermark_rings(painter, &t, phase_watermarks);
 
-    // Floors (background layer).
+    // Floors (background FILL only). The wall LINES are NOT derived from
+    // floor-region edges any more — that re-derivation mis-drew a solid line
+    // across a dormer opening (a phase-seam floor region keeps a full-width
+    // edge). Walls are drawn from the authoritative `storey.walls.regions`
+    // below, which already open at the dormer (flanks only, matching 3D).
     for region in &storey.floors.regions {
         draw_floor(painter, &t, region, display_mode);
     }
 
-    // Walls (when populated). For now we treat each floor edge as an implied wall
-    // and highlight them when DisplayMode::Walls is active.
-    for region in &storey.floors.regions {
-        draw_wall_edges(painter, &t, region, display_mode);
+    // Walls: the resolved wall regions are the single source of truth (derived
+    // from the ONE dimensioned perimeter), so a wall a dormer opened shows only
+    // its flanks — no full-width line across the opening, immune to floor-region
+    // seams/drift. RISERS (interior step walls) are drawn separately (dashed) by
+    // `render_wall_exposure`, so only PERIMETER walls are drawn here: a wall
+    // whose base edge lies on the floor outline boundary (a riser's is interior).
+    // The 0.05 m boundary tolerance survives the few-cm drift between
+    // separately-dimensioned regions. Empty boundary → draw every wall (fallback).
+    let boundary = storey.floors.boundary_rings();
+    let wall_color = color_for(DisplayMode::Floors, display_mode, style::FLOOR_LINE);
+    let wall_stroke = egui::Stroke::new(2.0, wall_color);
+    for wall in &storey.walls.regions {
+        let Some((a, b)) = wall.base_edge() else {
+            continue;
+        };
+        let (pa, pb) = (t.apply(a.x, a.y), t.apply(b.x, b.y));
+        let perimeter = boundary.is_empty() || wall_on_perimeter((a.x, a.y), (b.x, b.y), &boundary);
+        if perimeter {
+            painter.add(egui::Shape::line_segment([pa, pb], wall_stroke));
+        } else if draw_interior_walls {
+            // Interior riser/step wall (drawn only in the overview — the
+            // single-storey view's exposure overlay owns risers). Dashed to read
+            // as an interior division, not an outline wall.
+            painter.add(egui::Shape::dashed_line(&[pa, pb], wall_stroke, 6.0, 4.0));
+        }
     }
 
     // Roof regions (when populated) — drawn as dashed outlines above the floor.
@@ -359,9 +391,10 @@ fn draw_floor(
     let screen_pts: Vec<egui::Pos2> = coords.iter().map(|c| t.apply(c.x, c.y)).collect();
     // The usual faint fill (faded when another surface kind is the focus). The
     // SELECTION is shown by the gold marquee overlay (`draw_selection_overlay`),
-    // not by recolouring the surface fill.
+    // not by recolouring the surface fill. FILL ONLY — the wall lines are drawn
+    // from `storey.walls.regions` by the caller (a floor-region edge is NOT a
+    // reliable wall: a phase-seam region keeps an edge across a dormer opening).
     let fill = color_for(DisplayMode::Floors, display_mode, style::FLOOR_FILL);
-    let line_color = color_for(DisplayMode::Floors, display_mode, style::FLOOR_LINE);
 
     // Triangulate with earcutr so concave shapes (L, U, etc.) fill correctly.
     // egui's `convex_polygon` does a fan triangulation that cuts across the
@@ -382,12 +415,6 @@ fn draw_floor(
         }
         painter.add(egui::Shape::mesh(mesh));
     }
-
-    // Outline drawn separately so the stroke stays crisp regardless of fill mode.
-    painter.add(egui::Shape::closed_line(
-        screen_pts,
-        egui::Stroke::new(2.0, line_color),
-    ));
 }
 
 /// A bright dashed marquee around a SELECTED region's screen ring — the
@@ -408,28 +435,23 @@ fn draw_selection_outline(painter: &egui::Painter, ring: &[egui::Pos2]) {
     }
 }
 
-fn draw_wall_edges(
-    painter: &egui::Painter,
-    t: &Transform2d,
-    region: &FloorRegion,
-    display_mode: DisplayMode,
-) {
-    let coords: Vec<Coord<f64>> = region.polygon.exterior().coords().cloned().collect();
-    if coords.len() < 2 {
-        return;
-    }
-    // Only draw the dedicated wall stroke when it should be visible; otherwise
-    // the floor outline already shows the edges and we don't want to double-stroke.
-    if !matches!(display_mode, DisplayMode::Walls | DisplayMode::AllSurfaces) {
-        return;
-    }
-    let wall_color = color_for(DisplayMode::Walls, display_mode, style::WALL_LINE);
-    let stroke = egui::Stroke::new(2.5, wall_color);
-    for i in 0..(coords.len() - 1) {
-        let a = t.apply(coords[i].x, coords[i].y);
-        let b = t.apply(coords[i + 1].x, coords[i + 1].y);
-        painter.line_segment([a, b], stroke);
-    }
+/// Whether a wall's base edge `a`→`b` lies on the storey floor `boundary` — a
+/// PERIMETER wall (drawn as a plan wall line) vs an interior riser/step wall
+/// (drawn separately, dashed, by the exposure overlay). Tests the base-edge
+/// MIDPOINT against every boundary ring edge with a generous 0.05 m tolerance,
+/// so the classification survives the few-cm drift between separately-dimensioned
+/// regions: a riser is well inside the boundary; a perimeter wall is on it.
+fn wall_on_perimeter(a: (f64, f64), b: (f64, f64), boundary: &[Vec<Point2f64>]) -> bool {
+    const TOL: f64 = 0.05;
+    let mid = ((a.0 + b.0) * 0.5, (a.1 + b.1) * 0.5);
+    boundary.iter().any(|ring| {
+        let n = ring.len();
+        n >= 2
+            && (0..n).any(|i| {
+                let (p, q) = (ring[i], ring[(i + 1) % n]);
+                domain::points::point_to_segment_distance(mid.0, mid.1, p.x, p.y, q.x, q.y) <= TOL
+            })
+    })
 }
 
 fn draw_roof_overlay(
@@ -573,6 +595,60 @@ fn draw_corner_height_labels(
             format!("h={:.2}m", v.z),
             egui::FontId::proportional(9.0),
             style::ROOF_LINE,
+        );
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::wall_on_perimeter;
+    use ber_model::ber::common::ItemId;
+    use ber_model::ber::structural::FloorRegions;
+
+    /// The dormer render fix: 2D walls are drawn from the resolved wall regions'
+    /// base edges, filtered to PERIMETER walls (base edge on the floor boundary).
+    /// A dormer's opened wall resolves to its two FLANK segments — both classify
+    /// as perimeter (drawn) — while a would-be FULL-WIDTH segment spanning the
+    /// opening does NOT (its midpoint is in the opening, off the boundary), and
+    /// an INTERIOR riser (drawn separately by the exposure overlay) does not.
+    #[test]
+    fn dormer_flanks_classify_as_walls_not_the_full_width() {
+        // Box x[0,5] y[0,3] + a centred bump x[2,4] y[3,4] on top (the dormer).
+        let p = domain::points::Point2f64::new;
+        let regions = FloorRegions::from_vertex_lists(
+            vec![
+                vec![p(0.0, 0.0), p(5.0, 0.0), p(5.0, 3.0), p(0.0, 3.0)],
+                vec![p(2.0, 3.0), p(4.0, 3.0), p(4.0, 4.0), p(2.0, 4.0)],
+            ],
+            ItemId::default(),
+        );
+        let boundary = regions.boundary_rings();
+        assert!(!boundary.is_empty(), "the union yields a boundary");
+
+        // The two flanks of the opened wall (y=3) are perimeter → drawn.
+        assert!(
+            wall_on_perimeter((0.0, 3.0), (2.0, 3.0), &boundary),
+            "left flank is a perimeter wall"
+        );
+        assert!(
+            wall_on_perimeter((4.0, 3.0), (5.0, 3.0), &boundary),
+            "right flank is a perimeter wall"
+        );
+        // A full-width segment across the opening is NOT a perimeter wall — its
+        // midpoint (2.5, 3) sits in the dormer opening, off the boundary. (The
+        // resolved walls never contain this, but the classifier must reject it.)
+        assert!(
+            !wall_on_perimeter((0.0, 3.0), (5.0, 3.0), &boundary),
+            "a full-width line across the opening is NOT a wall"
+        );
+        // The bump's own side wall is perimeter; an interior riser is not.
+        assert!(
+            wall_on_perimeter((2.0, 3.0), (2.0, 4.0), &boundary),
+            "the bump side is a perimeter wall"
+        );
+        assert!(
+            !wall_on_perimeter((1.5, 1.0), (3.5, 1.0), &boundary),
+            "an interior (riser) edge is NOT a perimeter wall"
         );
     }
 }

@@ -407,8 +407,8 @@ pub fn resolve_storey(
     stamp_riser_exposure(s, &mut storey);
     // Stamp floor/ceiling horizontal exposure from the durable centroid-keyed
     // side-tables — the area analogue of the riser stamp. Floors are final
-    // (phase partition + steps + splits all ran), ceilings are final (the phase
-    // carve ran), so each region's centroid keys its override.
+    // (phase partition + steps + splits all ran), ceilings are final
+    // (the phase carve ran), so each region's centroid keys its override.
     stamp_floor_exposure(s, &mut storey);
     stamp_ceiling_exposure(s, &mut storey);
     // OPENINGS tail: walls/ceilings are now final. Every wall id is freshly minted
@@ -1858,6 +1858,57 @@ mod tests {
             storey.floors.regions.len(),
             2,
             "the floor partitions in two"
+        );
+    }
+
+    /// Symptom #1 (Unassigned → red): an extend that grows the outline past the
+    /// phase zone leaves an UNASSIGNED remainder floor region, which keeps the
+    /// construction-phase checklist incomplete (red) until the assessor tags it.
+    /// Assigning it a dated phase (here by extending the dated zone over the
+    /// whole outline) completes the gate.
+    #[test]
+    fn unassigned_remainder_keeps_phase_incomplete_until_assigned() {
+        use crate::construction_phase_complete;
+        let doc = unit_square_doc(); // 4×4
+                                     // A dated phase zone over the LEFT half only → the right half is the
+                                     // Unassigned remainder (the untagged extend-bump case).
+        let left = vec![PhaseRegion {
+            polygon: vec![
+                Point2f32::new(0.0, 0.0),
+                Point2f32::new(2.0, 0.0),
+                Point2f32::new(2.0, 4.0),
+                Point2f32::new(0.0, 4.0),
+            ],
+            phase: ConstructionPhase::Extension1,
+        }];
+        let mut ber = Ber::default();
+        ensure_storey_constructions(&mut ber, 0, &left);
+        ber.storeys[0] = resolve_storey(&doc, &ber, 0, &left, &[], &[]);
+        assert_eq!(
+            ber.storeys[0].floors.regions.len(),
+            2,
+            "Extension1 zone + Unassigned remainder — different phases stay split"
+        );
+        assert!(
+            !construction_phase_complete(&ber, 0),
+            "the Unassigned remainder keeps the construction phase incomplete (checklist red)"
+        );
+        // Assign it by extending the dated zone over the WHOLE outline → every
+        // region is Extension1, so the gate completes (and the seam is gone).
+        let full = vec![PhaseRegion {
+            polygon: vec![
+                Point2f32::new(0.0, 0.0),
+                Point2f32::new(4.0, 0.0),
+                Point2f32::new(4.0, 4.0),
+                Point2f32::new(0.0, 4.0),
+            ],
+            phase: ConstructionPhase::Extension1,
+        }];
+        ensure_storey_constructions(&mut ber, 0, &full);
+        ber.storeys[0] = resolve_storey(&doc, &ber, 0, &full, &[], &[]);
+        assert!(
+            construction_phase_complete(&ber, 0),
+            "once every floor region carries a dated phase the checklist completes"
         );
     }
 

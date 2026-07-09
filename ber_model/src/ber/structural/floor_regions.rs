@@ -211,6 +211,53 @@ impl FloorRegions {
         out
     }
 
+    /// EVERY boundary ring of the floor's true outline: the union of all region
+    /// polygons, then each resulting component's exterior AND its interior-hole
+    /// rings. Unlike [`merged_outline`](Self::merged_outline) (largest exterior
+    /// only), this keeps DISJOINT footprints and light-wells — so the renderer's
+    /// wall-vs-seam classifier sees every real perimeter edge, not just the main
+    /// footprint's. Rings are open (no repeated closing vertex); collinear
+    /// vertices are stripped so each ring edge is a maximal straight run (a
+    /// region sub-edge lying along it then tests as contained). Empty when there
+    /// are no ≥3-vertex regions.
+    pub fn boundary_rings(&self) -> Vec<Vec<Point2f64>> {
+        use geo::bool_ops::BooleanOps;
+        let mut acc: Option<MultiPolygon<f64>> = None;
+        for r in &self.regions {
+            if r.polygon.exterior().0.len() < 4 {
+                continue;
+            }
+            acc = Some(match acc {
+                None => MultiPolygon::new(vec![r.polygon.clone()]),
+                Some(mp) => mp.union(&r.polygon),
+            });
+        }
+        let Some(mp) = acc else {
+            return Vec::new();
+        };
+        let collect = |ls: &LineString<f64>| -> Vec<Point2f64> {
+            let mut pts: Vec<Point2f64> = ls.coords().map(|c| Point2f64::new(c.x, c.y)).collect();
+            if pts.len() > 1 && pts.first() == pts.last() {
+                pts.pop();
+            }
+            strip_collinear(&pts)
+        };
+        let mut rings = Vec::new();
+        for poly in &mp.0 {
+            let ext = collect(poly.exterior());
+            if ext.len() >= 3 {
+                rings.push(ext);
+            }
+            for hole in poly.interiors() {
+                let h = collect(hole);
+                if h.len() >= 3 {
+                    rings.push(h);
+                }
+            }
+        }
+        rings
+    }
+
     /// The storey footprint as ONE usable ring: when the floor is split into
     /// several phase zones, merge them back (`merged_outline`); otherwise the
     /// single region's exact stored points (no geo ops, so they round-trip).
