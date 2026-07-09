@@ -138,6 +138,12 @@ pub struct SketchState {
     /// prefill has been written, cleared when the stage closes, so the user's
     /// in-progress typing isn't clobbered every frame.
     pub ceiling_apex_prefilled: bool,
+    /// Monotonic counter bumped each time a roof-HEIGHT stage freshly opens
+    /// (alongside the prefill above). Folded into the number box's suggestion
+    /// token so re-opening the SAME stage (e.g. a ridge height for a second
+    /// area) re-arms the "first key replaces the prefill" guard — the token
+    /// otherwise persists in egui memory across the gap between the two boxes.
+    pub ceiling_apex_open_seq: u64,
     /// Backing string for the roof-ridge LENGTH input (metres). PREFILLED
     /// with the pending ridge's drawn length when the Length stage opens
     /// (via `ceiling_ridge_length_prefilled`); the user overtypes or skips.
@@ -979,6 +985,10 @@ impl eframe::App for BerApp {
                             {
                                 if !self.sketch_state.ceiling_apex_prefilled {
                                     self.sketch_state.ceiling_apex_prefilled = true;
+                                    // A fresh open: bump the seq so the token changes
+                                    // even when the same stage re-opens for a new area.
+                                    self.sketch_state.ceiling_apex_open_seq =
+                                        self.sketch_state.ceiling_apex_open_seq.wrapping_add(1);
                                     self.sketch_state.ceiling_apex_input = default_ceiling_height
                                         .map(|h| format!("{h:.2}"))
                                         .unwrap_or_default();
@@ -1458,6 +1468,7 @@ impl eframe::App for BerApp {
                                 ceiling_point_height_pending,
                                 ceiling_point_pending,
                                 ceiling_apex_input: &mut self.sketch_state.ceiling_apex_input,
+                                ceiling_apex_open_seq: self.sketch_state.ceiling_apex_open_seq,
                                 ceiling_ridge_views: &ceiling_ridge_views,
                                 pending_roof_ridge_line,
                                 ceiling_ridge_snap_tag: ceiling_ridge_snap_tag.as_ref(),

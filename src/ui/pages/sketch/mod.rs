@@ -1043,6 +1043,9 @@ pub struct SketchView<'a> {
     pub ceiling_point_height_pending: bool,
     pub ceiling_point_pending: bool,
     pub ceiling_apex_input: &'a mut String,
+    /// Bumped on each fresh roof-height-stage open; folded into the number
+    /// box's suggestion token so a same-stage re-open re-arms the pristine guard.
+    pub ceiling_apex_open_seq: u64,
     /// Roof-RIDGE line input (a stroke in roof-point mode): the committed
     /// ridges `(end_a, end_b, label)` to overlay ("⌃ 4.20 m" /
     /// "4.20→4.50 m"), the pending ridge SEGMENT for the dashed overlay, its

@@ -840,8 +840,11 @@ pub(super) fn render<F: FnMut(UiEvent)>(
             &mut view.cat_state.input_mode_pinned,
             view.laser,
             // Pre-filled with the storey's default ceiling height (all three roof
-            // HEIGHT stages share this buffer + one prefill guard).
-            Some("roof-height"),
+            // HEIGHT stages share this buffer + one prefill guard). The token is
+            // per-STAGE, not "roof-height" for all three, so a stage→stage
+            // transition (e.g. apex/rect → ridge) re-arms the pristine guard and
+            // the first typed digit REPLACES the prefill instead of appending.
+            Some(format!("roof-rect-height|{}", view.ceiling_apex_open_seq).as_str()),
             on_event,
         );
         return;
@@ -922,8 +925,9 @@ pub(super) fn render<F: FnMut(UiEvent)>(
             &mut view.cat_state.input_mode_pinned,
             view.laser,
             // Pre-filled with the storey's default ceiling height (all three roof
-            // HEIGHT stages share this buffer + one prefill guard).
-            Some("roof-height"),
+            // HEIGHT stages share this buffer + one prefill guard). Per-STAGE token
+            // (see the flat-top block) so apex/rect → ridge re-arms pristine.
+            Some(format!("roof-ridge-height|{}", view.ceiling_apex_open_seq).as_str()),
             on_event,
         );
         return;
@@ -992,8 +996,9 @@ pub(super) fn render<F: FnMut(UiEvent)>(
             &mut view.cat_state.input_mode_pinned,
             view.laser,
             // Pre-filled with the storey's default ceiling height (all three roof
-            // HEIGHT stages share this buffer + one prefill guard).
-            Some("roof-height"),
+            // HEIGHT stages share this buffer + one prefill guard). Per-STAGE token
+            // (see the flat-top block) so a stage→stage transition re-arms pristine.
+            Some(format!("roof-apex-height|{}", view.ceiling_apex_open_seq).as_str()),
             on_event,
         );
         return;
