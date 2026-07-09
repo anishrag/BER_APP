@@ -15386,6 +15386,78 @@ fn new_storey_partial_cover_derives_inter_storey_ceiling_piece() {
     );
 }
 
+/// FIX #1 (junction gate) + FIX #2 (non-accumulating ceiling cut): the
+/// inter-storey ceiling split is DEFERRED until the upper storey is
+/// dimensioned. From a finalised upper storey (below ceiling split), making the
+/// upper storey PROVISIONAL again (drop its known params → a wall left to
+/// dimension) makes the gate SKIP the junction and the coalesce REVERSE the
+/// prior cut — the below ceiling merges back to one region with no InterStorey
+/// stamp. Re-dimensioning re-derives the split. This is the direct model-level
+/// proof that a provisional (moving) upper footprint never durably cuts the
+/// below ceiling.
+#[test]
+fn inter_storey_ceiling_split_deferred_until_upper_storey_dimensioned() {
+    use ber_model::ber::structural::CeilingExposure;
+    let mut c = partial_cover_two_storey_controller();
+    assert_eq!(
+        c.current_record.as_ref().unwrap().data.storeys[0]
+            .ceilings
+            .regions
+            .len(),
+        2,
+        "fixture: below ceiling split while the upper storey is dimensioned"
+    );
+
+    // Make the upper storey PROVISIONAL: drop its known params so a wall is
+    // still promptable (the live buffer is storey 1's active outline).
+    let all = c.document.floor_plan.all_active_params();
+    c.document.dimensioning.known_params.clear();
+    c.mark_dirty().unwrap();
+    c.materialize();
+
+    assert!(
+        !c.document.storeys[1].measurements_complete(),
+        "upper storey is now provisional"
+    );
+    let below = &c.current_record.as_ref().unwrap().data.storeys[0];
+    assert_eq!(
+        below.ceilings.regions.len(),
+        1,
+        "gate skips the junction + coalesce reverses the cut → one ceiling region"
+    );
+    assert!(
+        below
+            .ceilings
+            .regions
+            .iter()
+            .all(|r| r.exposure != CeilingExposure::InterStorey),
+        "no InterStorey stamp while the upper storey is provisional"
+    );
+
+    // Re-dimension the upper storey → the junction derives the split again.
+    c.document.dimensioning.known_params = all;
+    c.mark_dirty().unwrap();
+    c.materialize();
+    assert!(
+        c.document.storeys[1].measurements_complete(),
+        "upper storey dimensioned again"
+    );
+    let below = &c.current_record.as_ref().unwrap().data.storeys[0];
+    assert_eq!(
+        below.ceilings.regions.len(),
+        2,
+        "junction re-derives the ceiling split"
+    );
+    assert!(
+        below
+            .ceilings
+            .regions
+            .iter()
+            .any(|r| r.exposure == CeilingExposure::InterStorey),
+        "the covered piece is InterStorey again"
+    );
+}
+
 /// Build a two-storey stack whose upper storey PARTIALLY covers the below
 /// storey's flat ceiling (the 4×10 left strip of a 10×10, the
 /// `new_storey_partial_cover_derives_inter_storey_ceiling_piece` fixture):

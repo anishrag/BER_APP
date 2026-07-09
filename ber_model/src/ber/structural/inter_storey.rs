@@ -72,8 +72,25 @@ const MAX_WALL_SPLIT_DEPTH: usize = 16;
 ///   horizontally at the band bounds ([`split_wall_by_line`], with a
 ///   [`MIN_SUBWALL_M`]-sized absolute-z sliver guard so re-derivation over
 ///   non-regenerated walls never shaves a sliver); stamp covered pieces.
-pub fn derive_inter_storey(ber: &mut Ber) {
-    // ── Pass 0 — clear stale stamps (self-retraction) ─────────────────────
+///
+/// GATE (`dimensioned`): a junction between storeys `i` and `j` is derived only
+/// when BOTH are `dimensioned[·]` (the controller passes each
+/// [`StoreyDoc::measurements_complete`] result). A PROVISIONAL (un-dimensioned)
+/// storey's footprint still moves as it is dimensioned, so deriving against it
+/// would stamp — and, for ceilings (regions-as-truth), durably SPLIT — the
+/// neighbour on geometry that is about to change, leaving stale sliver cuts.
+/// A skipped junction resolves `Unset` (un-split) until both sides are
+/// dimensioned. Pass 0 still runs for EVERY storey, so a junction that goes
+/// provisional is cleaned back rather than frozen. An index past the slice end
+/// is treated as provisional (`false`).
+///
+/// [`StoreyDoc::measurements_complete`]: (document crate)
+pub fn derive_inter_storey(ber: &mut Ber, dimensioned: &[bool]) {
+    // Junction gate — both storeys must be dimensioned (settled geometry).
+    let dim = |i: usize| dimensioned.get(i).copied().unwrap_or(false);
+
+    // ── Pass 0 — clear stale stamps + reverse prior inter-storey ceiling
+    // cuts (self-retraction). Runs for every storey regardless of the gate.
     for storey in &mut ber.storeys {
         for r in &mut storey.walls.regions {
             if r.exposure == WallExposure::InterStorey {
@@ -85,6 +102,13 @@ pub fn derive_inter_storey(ber: &mut Ber) {
                 r.exposure = FloorExposure::Unset;
             }
         }
+        // Ceilings are regions-as-truth (resolve keeps them verbatim), so a
+        // prior inter-storey split would ACCUMULATE across re-derives against a
+        // moved neighbour footprint (the stale-sliver bug). Coalesce reverses
+        // it — merging each buried piece back into the exposed remainder it was
+        // split from, using the still-live `InterStorey` stamp as the signal —
+        // BEFORE clearing residual (fully-buried) stamps.
+        storey.ceilings = coalesce_inter_storey_ceiling_cuts(std::mem::take(&mut storey.ceilings));
         for r in &mut storey.ceilings.regions {
             if r.exposure == CeilingExposure::InterStorey {
                 r.exposure = CeilingExposure::Unset;
@@ -114,6 +138,9 @@ pub fn derive_inter_storey(ber: &mut Ber) {
 
     // ── Floors: storey i over the below storey's footprint ────────────────
     for i in 1..n {
+        if !(dim(i) && dim(i - 1)) {
+            continue; // gate: derive only settled junctions
+        }
         let fp = &footprints[i - 1];
         if fp.is_empty() {
             continue;
@@ -130,6 +157,9 @@ pub fn derive_inter_storey(ber: &mut Ber) {
 
     // ── Ceilings: storey i under the above storey's footprint ─────────────
     for i in 0..n - 1 {
+        if !(dim(i) && dim(i + 1)) {
+            continue; // gate: derive only settled junctions
+        }
         let fp = &footprints[i + 1];
         if fp.is_empty() {
             continue;
@@ -154,6 +184,9 @@ pub fn derive_inter_storey(ber: &mut Ber) {
         for j in [i.wrapping_sub(1), i + 1] {
             if j >= n {
                 continue; // wrapping_sub(1) at i = 0 lands here too
+            }
+            if !(dim(i) && dim(j)) {
+                continue; // gate: derive only settled junctions
             }
             let fp = &footprints[j];
             if fp.is_empty() {
@@ -352,6 +385,109 @@ fn floor_plan_ring(r: &FloorRegion) -> Vec<Point2f64> {
         pts.pop();
     }
     pts
+}
+
+// ── Ceilings: reverse a prior inter-storey cut ──────────────────────────────
+
+/// Reverse a previous inter-storey CEILING split so a re-derive against a
+/// MOVED neighbour footprint can't ACCUMULATE stale sliver regions (the
+/// ceiling-sliver bug). The floor split is derived-only because
+/// [`resolve_storey`] rebuilds `storey.floors` every pass; ceilings are
+/// regions-as-truth (kept verbatim), so the cut must be reversed HERE instead.
+///
+/// Coalesces two adjacent FLAT ceiling regions that share a `construction_id`
+/// and z-height when EXACTLY ONE carries the derived
+/// [`CeilingExposure::InterStorey`] stamp — the boundary between a buried piece
+/// and the exposed remainder it was split from. The merged region is rebuilt
+/// FLAT at the shared z (no plane-eval, so no z drift) and takes the EXPOSED
+/// side's exposure.
+///
+/// Deliberately conservative, to protect the ROOF and the assessor's own
+/// ceiling carves:
+///  - only FLAT regions participate, so apex / fan / gable geometry (sloped,
+///    boolean-op-fragile) is NEVER unioned — its z is untouched;
+///  - a boundary between two NON-`InterStorey` regions (an assessor
+///    `ceiling_splits` carve) is never crossed (needs exactly one buried side);
+///  - a boundary between two `InterStorey` regions is never crossed either;
+///  - a region of a different height or construction is never crossed
+///    (a real ceiling step / construction change).
+///
+/// A fully-buried WHOLE region with no exposed flat sibling is left for the
+/// caller's clear pass. Idempotent: with no `InterStorey` stamp it is a no-op.
+/// [`resolve_storey`]: (document crate)
+fn coalesce_inter_storey_ceiling_cuts(ceilings: CeilingRegions) -> CeilingRegions {
+    use geo::bool_ops::BooleanOps;
+    use geo::Area;
+    const Z_EPS_M: f64 = 1e-6;
+
+    let mut regions = ceilings.regions;
+    // Repeatedly fuse a buried piece with the coplanar-flat exposed remainder
+    // it shares an edge with, until no such pair remains. Region counts are
+    // tiny, so the O(n²) rescan per fuse is negligible.
+    loop {
+        let mut fused = false;
+        'scan: for a in 0..regions.len() {
+            for b in (a + 1)..regions.len() {
+                let (ra, rb) = (&regions[a], &regions[b]);
+                if ra.construction_id != rb.construction_id {
+                    continue;
+                }
+                // Both flat (never touch a sloped apex/fan face) at one height.
+                let (Some(za), Some(zb)) = (ra.flat_z(), rb.flat_z()) else {
+                    continue;
+                };
+                if (za - zb).abs() > Z_EPS_M {
+                    continue; // a real ceiling step between them
+                }
+                let a_is = ra.exposure == CeilingExposure::InterStorey;
+                let b_is = rb.exposure == CeilingExposure::InterStorey;
+                if a_is == b_is {
+                    continue; // both buried, or neither — not a cut edge to reverse
+                }
+                // Edge-adjacent iff the union is ONE simple polygon whose area
+                // is the sum (disjoint faces union to two pieces → rejected;
+                // any overlap/gap → area mismatch → rejected).
+                let pa: Polygon<f64> = ra.polygon.clone().into();
+                let pb: Polygon<f64> = rb.polygon.clone().into();
+                let simple: Vec<Polygon<f64>> =
+                    pa.union(&pb).0.iter().flat_map(split_to_simple).collect();
+                if simple.len() != 1 {
+                    continue;
+                }
+                if (simple[0].unsigned_area() - (pa.unsigned_area() + pb.unsigned_area())).abs()
+                    > SLIVER_AREA_M2
+                {
+                    continue;
+                }
+                // Rebuild one FLAT region at the shared z, taking the EXPOSED
+                // side's exposure. Replace `a`, drop `b`.
+                let exposure = if a_is { rb.exposure } else { ra.exposure };
+                let cid = ra.construction_id;
+                let mut pts: Vec<Point3f64> = simple[0]
+                    .exterior()
+                    .coords()
+                    .map(|c| Point3f64::new(c.x, c.y, za))
+                    .collect();
+                if pts.len() > 1 && pts.first() == pts.last() {
+                    pts.pop();
+                }
+                regions[a] = CeilingRegion {
+                    id: ItemId::default(),
+                    polygon: Polygon3D::new(pts),
+                    opes: Default::default(),
+                    construction_id: cid,
+                    exposure,
+                };
+                regions.remove(b);
+                fused = true;
+                break 'scan;
+            }
+        }
+        if !fused {
+            break;
+        }
+    }
+    CeilingRegions { regions }
 }
 
 // ── Walls ──────────────────────────────────────────────────────────────────
@@ -606,6 +742,46 @@ mod tests {
     use super::*;
     use crate::ber::structural::{Storey, WallRegions};
 
+    /// Run the derivation treating EVERY storey as dimensioned — the settled
+    /// geometry these fixtures build directly. (The gate itself is exercised by
+    /// the controller tests, which own the `measurements_complete` signal.)
+    fn derive_all(ber: &mut Ber) {
+        let mask = vec![true; ber.storeys.len()];
+        derive_inter_storey(ber, &mask);
+    }
+
+    /// Region COUNT + per-region (zmin, zmax) of a ceiling, µm-quantized and
+    /// sorted — the region-order-independent fixpoint key (a new sliver changes
+    /// the count; a flattened/lost apex changes a z bound).
+    fn ceiling_descriptor(cs: &CeilingRegions) -> Vec<(i64, i64)> {
+        let q = |v: f64| (v * 1e6).round() as i64;
+        let mut d: Vec<(i64, i64)> = cs
+            .regions
+            .iter()
+            .map(|r| {
+                let (zmin, zmax) = r
+                    .polygon
+                    .exterior
+                    .iter()
+                    .fold((f64::INFINITY, f64::NEG_INFINITY), |(a, b), v| {
+                        (a.min(v.z), b.max(v.z))
+                    });
+                (q(zmin), q(zmax))
+            })
+            .collect();
+        d.sort();
+        d
+    }
+
+    fn ceiling_x_extent(r: &CeilingRegion) -> (f64, f64) {
+        r.polygon
+            .exterior
+            .iter()
+            .fold((f64::INFINITY, f64::NEG_INFINITY), |(a, b), v| {
+                (a.min(v.x), b.max(v.x))
+            })
+    }
+
     fn square(x0: f64, y0: f64, x1: f64, y1: f64) -> Vec<Point2f64> {
         vec![
             Point2f64::new(x0, y0),
@@ -767,7 +943,7 @@ mod tests {
             .map(|s| serde_json::to_string(&s.walls).unwrap())
             .collect();
 
-        derive_inter_storey(&mut ber);
+        derive_all(&mut ber);
 
         // Upper floor: fully over the storey below → InterStorey.
         assert_eq!(ber.storeys[1].floors.regions.len(), 1);
@@ -815,7 +991,7 @@ mod tests {
             flat_storey(square(0.0, 0.0, 4.0, 4.0), 2.4, Some(0.3)),
         ];
 
-        derive_inter_storey(&mut ber);
+        derive_all(&mut ber);
 
         // The single lower ceiling splits into the covered piece + remainder.
         let regions = &ber.storeys[0].ceilings.regions;
@@ -855,7 +1031,7 @@ mod tests {
         );
         assert_eq!(ber.storeys[1].walls.regions.len(), 4);
 
-        derive_inter_storey(&mut ber);
+        derive_all(&mut ber);
 
         // First-floor wall on the step line splits into the buried band
         // (top at the TALL ground-roof z: 4.0 abs = 1.3 storey-local) and the
@@ -933,7 +1109,7 @@ mod tests {
     #[test]
     fn riser_fixture_remainder_piece_has_a_real_base_frame_at_the_cut() {
         let mut ber = riser_fixture();
-        derive_inter_storey(&mut ber);
+        derive_all(&mut ber);
         let step_walls = walls_on_x(&ber.storeys[1], 4.0);
         assert_eq!(step_walls.len(), 2);
         let remainder = step_walls
@@ -987,7 +1163,7 @@ mod tests {
                 .construction_id = cid;
         }
 
-        derive_inter_storey(&mut ber);
+        derive_all(&mut ber);
 
         let bands = walls_on_x(&ber.storeys[1], 4.0);
         assert_eq!(bands.len(), 2, "split into buried band + exposed remainder");
@@ -1017,12 +1193,12 @@ mod tests {
     #[test]
     fn derive_is_exactly_idempotent_including_serde_round_trip() {
         let mut ber = riser_fixture();
-        derive_inter_storey(&mut ber);
+        derive_all(&mut ber);
         let once = serde_json::to_string(&ber.storeys).unwrap();
 
         // Second derive on the same value: identical region set — count,
         // geometry, ids, exposures (FULL equality via the serialized form).
-        derive_inter_storey(&mut ber);
+        derive_all(&mut ber);
         let twice = serde_json::to_string(&ber.storeys).unwrap();
         assert_eq!(once, twice, "derive must be exactly idempotent");
 
@@ -1030,7 +1206,7 @@ mod tests {
         // persists, the re-derive clears + re-stamps to the same fixpoint).
         let mut reloaded: Ber =
             serde_json::from_str(&serde_json::to_string(&ber).unwrap()).unwrap();
-        derive_inter_storey(&mut reloaded);
+        derive_all(&mut reloaded);
         let after_reload = serde_json::to_string(&reloaded.storeys).unwrap();
         assert_eq!(once, after_reload, "reload + re-derive must be a fixpoint");
     }
@@ -1040,7 +1216,7 @@ mod tests {
     #[test]
     fn removing_the_storey_above_retracts_every_stamp() {
         let mut ber = riser_fixture();
-        derive_inter_storey(&mut ber);
+        derive_all(&mut ber);
         assert!(ber.storeys[0]
             .ceilings
             .regions
@@ -1048,7 +1224,7 @@ mod tests {
             .any(|r| r.exposure == CeilingExposure::InterStorey));
 
         ber.storeys.pop();
-        derive_inter_storey(&mut ber);
+        derive_all(&mut ber);
 
         let ground = &ber.storeys[0];
         assert!(
@@ -1085,7 +1261,7 @@ mod tests {
         let mut ber = rotated_step_fixture();
         assert_eq!(walls_on_y(&ber.storeys[1], 2.0).len(), 1);
 
-        derive_inter_storey(&mut ber);
+        derive_all(&mut ber);
 
         // Local band tops on the first floor (datum 2.7): low side
         // 3.2 − 2.7 = 0.5, tall side 4.0 − 2.7 = 1.3.
@@ -1139,7 +1315,7 @@ mod tests {
 
         // Exact idempotence still holds on the rotated fixture.
         let once = serde_json::to_string(&ber.storeys).unwrap();
-        derive_inter_storey(&mut ber);
+        derive_all(&mut ber);
         let twice = serde_json::to_string(&ber.storeys).unwrap();
         assert_eq!(once, twice, "re-derive must be a no-op");
     }
@@ -1153,11 +1329,11 @@ mod tests {
     #[test]
     fn rotated_step_result_is_independent_of_neighbour_region_order() {
         let mut plain = rotated_step_fixture();
-        derive_inter_storey(&mut plain);
+        derive_all(&mut plain);
 
         let mut reversed = rotated_step_fixture();
         reversed.storeys[0].ceilings.regions.reverse();
-        derive_inter_storey(&mut reversed);
+        derive_all(&mut reversed);
 
         let (p, r) = (
             y_wall_descriptors(&plain.storeys[1], 2.0),
@@ -1204,6 +1380,175 @@ mod tests {
         assert_eq!(
             serde_json::from_str::<CeilingExposure>(&c).unwrap(),
             CeilingExposure::InterStorey
+        );
+    }
+
+    // ── Fix #2: the inter-storey ceiling cut is non-accumulating ─────────────
+
+    /// The reported bug: an upper footprint that MOVES between two derives
+    /// (5.42 → 5.21) must leave ONE clean lower-ceiling boundary at the FINAL
+    /// position — the stale 5.42 cut is reversed, no 0.2 m sliver accumulates.
+    /// Regions-as-truth: the lower ceiling is kept verbatim between derives
+    /// (the controller does not re-resolve the lower storey), so mutating only
+    /// the upper floor footprint reproduces the controller re-resolve exactly.
+    #[test]
+    fn moved_upper_footprint_leaves_one_clean_lower_ceiling_boundary() {
+        let cid = ItemId::default();
+        let mut ber = Ber::default();
+        ber.storeys = vec![
+            flat_storey(square(0.0, 0.0, 10.0, 4.0), 2.4, None),
+            flat_storey(square(0.0, 0.0, 5.42, 4.0), 2.4, Some(0.3)),
+        ];
+        derive_all(&mut ber);
+        assert_eq!(
+            ber.storeys[0].ceilings.regions.len(),
+            2,
+            "first derive cuts the lower ceiling once at 5.42"
+        );
+
+        // The upper footprint moves to 5.21 (a re-dimension); the lower ceiling
+        // stays verbatim.
+        ber.storeys[1].floors = FloorRegions::new(square(0.0, 0.0, 5.21, 4.0), cid);
+        derive_all(&mut ber);
+
+        let cs = &ber.storeys[0].ceilings.regions;
+        assert_eq!(
+            cs.len(),
+            2,
+            "still exactly two regions — the stale 5.42 cut did NOT accumulate"
+        );
+        let buried: Vec<&CeilingRegion> = cs
+            .iter()
+            .filter(|r| r.exposure == CeilingExposure::InterStorey)
+            .collect();
+        assert_eq!(buried.len(), 1, "one buried piece");
+        let (_, b_hi) = ceiling_x_extent(buried[0]);
+        assert!(
+            (b_hi - 5.21).abs() < 1e-4,
+            "boundary at the FINAL position 5.21, got {b_hi}"
+        );
+        // No region occupies the stale [5.21, 5.42] band as a sliver of its own.
+        assert!(
+            !cs.iter().any(|r| {
+                let (lo, hi) = ceiling_x_extent(r);
+                lo > 5.205 && hi < 5.425
+            }),
+            "no 0.2 m sliver region survives"
+        );
+        // Fixpoint: a third derive at the SAME footprint changes nothing.
+        let before = ceiling_descriptor(&ber.storeys[0].ceilings);
+        derive_all(&mut ber);
+        assert_eq!(
+            ceiling_descriptor(&ber.storeys[0].ceilings),
+            before,
+            "same-footprint re-derive is idempotent"
+        );
+    }
+
+    /// ROOF INTEGRITY: a lower storey with an APEX-fanned (sloped) ceiling that
+    /// gets an inter-storey cut, re-derived TWICE (a re-dimension), keeps its
+    /// sloped-region COUNT and z-heights EXACTLY — the coalesce is flat-only,
+    /// so it never unions a fan face. The apex is neither lost nor flattened.
+    #[test]
+    fn apex_ceiling_survives_inter_storey_re_derive() {
+        // Ground 8×4 fanned to a central apex (4,2) at z = 4.0 over a 2.4 base.
+        let mut ground = flat_storey(square(0.0, 0.0, 8.0, 4.0), 2.4, None);
+        ground.ceilings = ground.ceilings.with_apexes(&[CeilingApex {
+            point: Point2f64::new(4.0, 2.0),
+            z_m: 4.0,
+        }]);
+        assert!(
+            ground.ceilings.regions.len() >= 4,
+            "the fan produced multiple sloped faces"
+        );
+        let apex_zmax = |cs: &CeilingRegions| {
+            cs.regions
+                .iter()
+                .flat_map(|r| r.polygon.exterior.iter())
+                .fold(f64::NEG_INFINITY, |m, v| m.max(v.z))
+        };
+        assert!((apex_zmax(&ground.ceilings) - 4.0).abs() < 1e-6);
+
+        let first = flat_storey(square(0.0, 0.0, 4.0, 4.0), 2.4, Some(0.3));
+        let mut ber = Ber::default();
+        ber.storeys = vec![ground, first];
+
+        derive_all(&mut ber);
+        let after1 = ceiling_descriptor(&ber.storeys[0].ceilings);
+        derive_all(&mut ber);
+        let after2 = ceiling_descriptor(&ber.storeys[0].ceilings);
+        assert_eq!(
+            after1, after2,
+            "re-derive is a fixpoint — no new slivers, no lost/flattened apex"
+        );
+        assert!(
+            (apex_zmax(&ber.storeys[0].ceilings) - 4.0).abs() < 1e-6,
+            "apex height preserved across the inter-storey cut"
+        );
+    }
+
+    /// The assessor's own ceiling carve (two DIFFERENT-construction regions)
+    /// survives the derive + coalesce: coalesce only fuses across a
+    /// buried↔exposed edge of the SAME construction, so a genuine carve at x=5
+    /// is never dissolved even when the derive splits the region beside it.
+    #[test]
+    fn assessor_ceiling_carve_survives_re_derive() {
+        let cid_a = ItemId::default();
+        let cid_b = ItemId::default();
+        let flat = |ring: Vec<Point2f64>, cid: ItemId| CeilingRegion {
+            id: ItemId::default(),
+            polygon: Polygon3D::new(
+                ring.into_iter()
+                    .map(|p| Point3f64::new(p.x, p.y, 2.4))
+                    .collect(),
+            ),
+            opes: Default::default(),
+            construction_id: cid,
+            exposure: CeilingExposure::default(),
+        };
+        let mut ground = flat_storey(square(0.0, 0.0, 10.0, 4.0), 2.4, None);
+        ground.ceilings = CeilingRegions {
+            regions: vec![
+                flat(square(0.0, 0.0, 5.0, 4.0), cid_a),
+                flat(square(5.0, 0.0, 10.0, 4.0), cid_b),
+            ],
+        };
+        // Upper storey covers [0,3] — fully within construction-A's half.
+        let first = flat_storey(square(0.0, 0.0, 3.0, 4.0), 2.4, Some(0.3));
+        let mut ber = Ber::default();
+        ber.storeys = vec![ground, first];
+
+        derive_all(&mut ber);
+        derive_all(&mut ber); // re-dimension
+
+        let cs = &ber.storeys[0].ceilings.regions;
+        assert!(
+            cs.iter().any(|r| r.construction_id == cid_a),
+            "construction A survives"
+        );
+        // Construction B is untouched: one region spanning [5,10], not buried.
+        let bs: Vec<&CeilingRegion> = cs.iter().filter(|r| r.construction_id == cid_b).collect();
+        assert_eq!(bs.len(), 1, "B stays one region");
+        let (b_lo, b_hi) = ceiling_x_extent(bs[0]);
+        assert!(
+            (b_lo - 5.0).abs() < 1e-4 && (b_hi - 10.0).abs() < 1e-4,
+            "B unchanged over [5,10]"
+        );
+        assert_ne!(
+            bs[0].exposure,
+            CeilingExposure::InterStorey,
+            "B is not buried"
+        );
+        // A is split by the [0,3] footprint but never fused into B: the carve
+        // boundary at x=5 still bounds every A piece.
+        let a_hi = cs
+            .iter()
+            .filter(|r| r.construction_id == cid_a)
+            .flat_map(|r| r.polygon.exterior.iter())
+            .fold(f64::NEG_INFINITY, |m, v| m.max(v.x));
+        assert!(
+            (a_hi - 5.0).abs() < 1e-4,
+            "the assessor carve at x=5 holds, got {a_hi}"
         );
     }
 }

@@ -871,6 +871,29 @@ impl AppController {
     /// post-materialize record (dead opening drag, empty `opes`, pruned on
     /// reload).
     fn derive_horizontal_exposure_all(&mut self) {
+        // Junction gate for the cross-storey `derive_inter_storey`: a storey is
+        // eligible only when its outline is fully dimensioned
+        // (`measurements_complete` — metre scale set AND nothing left to
+        // prompt). A PROVISIONAL (un-dimensioned) storey's footprint still moves
+        // as it is dimensioned, so deriving against it stamps — and durably
+        // SPLITS the neighbour's regions-as-truth ceiling on — geometry about to
+        // change, leaving stale sliver cuts. Read from the editing slots, which
+        // are synced by this point (`refresh_storey` calls `sync_active` before
+        // resolving; the All-storeys path keeps every slot current).
+        let dimensioned: Vec<bool> = {
+            let n = self
+                .current_record
+                .as_ref()
+                .map_or(0, |r| r.data.storeys.len());
+            (0..n)
+                .map(|i| {
+                    self.document
+                        .storeys
+                        .get(i)
+                        .is_some_and(|sd| sd.measurements_complete())
+                })
+                .collect()
+        };
         let Some(record) = self.current_record.as_mut() else {
             return;
         };
@@ -890,7 +913,7 @@ impl AppController {
             .take(n)
             .map(|s| s.walls.clone())
             .collect();
-        ber_model::ber::structural::derive_inter_storey(&mut record.data);
+        ber_model::ber::structural::derive_inter_storey(&mut record.data, &dimensioned);
         for idx in 0..n {
             document::relink_openings_after_derive(
                 &self.document.storeys[idx],
