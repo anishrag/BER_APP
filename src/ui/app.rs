@@ -642,6 +642,13 @@ impl eframe::App for BerApp {
             self.splash_state.loading_started = true;
         }
 
+        // Native soft keyboard: hide it when no field has focus any more, and
+        // keep frames coming while it's up (its text arrives by polling, not
+        // as events). Top of the frame — focus state persists in egui memory,
+        // so last frame's focus is already visible here.
+        #[cfg(target_os = "android")]
+        crate::ui::widgets::native_ime::end_frame(ctx);
+
         // Keep the screen on while the app is in use (releases after 10 min idle).
         self.keep_awake.tick(ctx);
 

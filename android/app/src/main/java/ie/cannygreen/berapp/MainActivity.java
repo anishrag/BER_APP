@@ -131,6 +131,18 @@ public class MainActivity extends GameActivity {
     // reachable so the bug-report uploader / cloud sync can flush its queue.
     private static native void nativeOnNetworkUp();
 
+    // Implemented in Rust (ui::widgets::native_ime) — the soft keyboard's
+    // height in physical pixels (0 when hidden), so the UI can move floating
+    // prompts / scroll the focused field above the keyboard.
+    private static native void nativeOnImeInsets(int bottomPx);
+
+    /** GameTextInput reports IME inset changes here (UI thread). */
+    @Override
+    public void onImeInsetsChanged(androidx.core.graphics.Insets insets) {
+        super.onImeInsetsChanged(insets);
+        nativeOnImeInsets(insets.bottom);
+    }
+
     @Override
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);

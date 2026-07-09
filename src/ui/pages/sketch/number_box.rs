@@ -1403,6 +1403,16 @@ fn show_box_multi<F: FnMut(UiEvent)>(
             .map(|f| parse_dimension_expression(f.buf.as_str()))
             .collect()
     };
+    // While the native keyboard is up it claims the bottom of the screen —
+    // shrink the constrain rect so the box gets pushed above it (and settles
+    // back when the keyboard hides). Never below 40% of the canvas height, so
+    // an oversized keyboard can't squash the constraint into nothing.
+    #[cfg(target_os = "android")]
+    let rect = {
+        let inset = crate::ui::widgets::native_ime::inset_bottom_points(ctx);
+        let bottom = (rect.max.y - inset).max(rect.min.y + rect.height() * 0.4);
+        egui::Rect::from_min_max(rect.min, egui::pos2(rect.max.x, bottom))
+    };
     egui::Window::new(title)
         // Stable id (the title changes per prompt) so the dragged position is
         // remembered across prompts.
@@ -1468,6 +1478,10 @@ fn show_box_multi<F: FnMut(UiEvent)>(
             // (so a hardware keyboard still works). Tapping a box focuses it.
             let mut responses = Vec::with_capacity(fields.len());
             let mut enter = false;
+            // Set when the NATIVE keyboard edited a field this frame (Android):
+            // real editing, so it clears `pristine` like a hardware edit does.
+            #[allow(unused_mut)]
+            let mut ime_edited = false;
             let labelled = fields.iter().any(|f| !f.label.is_empty());
             for (i, f) in fields.iter_mut().enumerate() {
                 ui.horizontal(|ui| {
@@ -1491,6 +1505,15 @@ fn show_box_multi<F: FnMut(UiEvent)>(
                             .font(egui::TextStyle::Heading)
                             .hint_text(f.hint),
                     );
+                    // Tapping the field (rather than the box's keypad) raises
+                    // the native numeric keyboard and mirrors it into the buf.
+                    #[cfg(target_os = "android")]
+                    if f.enabled {
+                        use crate::ui::widgets::native_ime::{attach, ImeKind};
+                        let ime = attach(ui, &resp, f.buf, ImeKind::Numeric);
+                        ime_edited |= ime.changed;
+                        enter |= ime.submitted;
+                    }
                     if resp.gained_focus() {
                         focus = i;
                     }
@@ -1501,10 +1524,11 @@ fn show_box_multi<F: FnMut(UiEvent)>(
                 });
             }
 
-            // A hardware-keyboard edit of the field is real editing — drop the
-            // pristine suggestion so a later keypad tap appends rather than
-            // clearing (the assessor deliberately edited the value).
-            if responses.iter().any(|r| r.changed()) {
+            // A hardware-keyboard (or native soft-keyboard) edit of the field
+            // is real editing — drop the pristine suggestion so a later keypad
+            // tap appends rather than clearing (the assessor deliberately
+            // edited the value).
+            if ime_edited || responses.iter().any(|r| r.changed()) {
                 pristine = false;
             }
 

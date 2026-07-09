@@ -1,6 +1,8 @@
 //! Shared widgets used across pages.
 
 pub mod hint;
+#[cfg(target_os = "android")]
+pub mod native_ime;
 pub mod pads;
 pub mod photo;
 pub mod photo_annotate;

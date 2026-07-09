@@ -2,8 +2,14 @@
 
 Minimal Gradle wrapper around the Rust app: `cargo-ndk` builds
 `libber_app.so` (the `cdylib` whose `android_main` lives in
-`src/android.rs`), Gradle packages it into an APK with a plain
-`NativeActivity` (no Java/Kotlin code — `android:hasCode="false"`).
+`src/android.rs`), Gradle packages it into an APK. `MainActivity` extends
+`GameActivity` (`androidx.games:games-activity` — pinned to the version of
+the C glue the `android-activity` crate vendors; see the note in
+`app/build.gradle.kts`) and carries the camera / Bluetooth-laser / audio /
+keep-awake JNI bridges plus the native soft-keyboard inset callback.
+GameActivity, not NativeActivity, because only its GameTextInput path has a
+working `InputConnection` — the migration that made the native keyboard
+possible (plan: `.claude/plans/native-keyboard-gameactivity.md`).
 Target: sideloaded arm64 tablet, no Play Store.
 
 ## One-time setup

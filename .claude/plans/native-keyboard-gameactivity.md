@@ -1,6 +1,6 @@
 # Plan: Native Android keyboard via GameActivity migration
 
-**Status:** Not started. Written 2026-07-09 as an executable plan for a future agent.
+**Status:** IMPLEMENTED 2026-07-09 (branch `gameactivity`) — pending on-device verification (§5 JNI checklist + §7). Implementation notes vs. this plan: winit 0.30.12 confirmed to DROP GameTextInput text events, so `src/ui/widgets/native_ime.rs` mirrors `AndroidApp::text_input_state()` into the field buffers directly (the "shim" of Phase 2.2); games-activity AAR pinned to 2.0.2 (the C glue android-activity 0.6.0 vendors — natives verified to match); numeric-vs-text IME type wired via GameActivity's public `setImeEditorInfoFields` over JNI; IME insets via a `MainActivity.onImeInsetsChanged` override → `nativeOnImeInsets`. Phases 1–3 landed together code-wise; Phase 1 is its own commit for rollback.
 **Motivating report:** `fee88446` — "the on-screen keyboard is pretty terrible — can we use the native keyboard?"
 **Owner note:** This is a BACKEND MIGRATION, not a small patch. Do it staged; each phase is independently verifiable and independently revertable. Do NOT start Phase 2 until Phase 1 (app runs on GameActivity with every JNI bridge re-validated) is green on the tablet.
 

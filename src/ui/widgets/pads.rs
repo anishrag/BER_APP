@@ -1,12 +1,17 @@
-//! Touch-friendly text entry: the shared on-screen pads.
+//! Touch-friendly text entry: the shared entry fields.
 //!
 //! [`metre_input`] is the metre-value field used by every measurement prompt
 //! (dimension, position, heights, roof inputs, …); [`text_input`] is the
-//! free-text equivalent (names, nicknames). On touch builds — Android, or
-//! desktop with `BER_TOUCH=1` for development — focusing the field opens a
-//! shared on-screen pad (numeric or qwerty) that edits the field's backing
-//! `String` directly; no IME emulation, no synthetic key events. On plain
-//! desktop builds both are exactly the `TextEdit` idiom they replaced.
+//! free-text equivalent (names, nicknames).
+//!
+//! - **Android**: focusing the field raises the NATIVE soft keyboard (numeric
+//!   or text layout per field) via `native_ime` — GameActivity's GameTextInput
+//!   path. The on-screen pads below are not rendered.
+//! - **Desktop with `BER_TOUCH=1`**: focusing the field opens a shared
+//!   on-screen pad (numeric or qwerty) that edits the field's backing `String`
+//!   directly. This is the pads' development path and the fallback should the
+//!   native keyboard regress — don't delete them.
+//! - **Plain desktop**: both are exactly the `TextEdit` idiom they replaced.
 //!
 //! One pad exists at a time: ownership (which field the pad edits) is keyed
 //! by the `TextEdit`'s widget id in egui memory, claimed on focus, released
@@ -24,12 +29,13 @@ pub struct PadResponse {
     pub changed: bool,
 }
 
-/// Are the on-screen pads active? Android always; desktop opts in with
-/// `BER_TOUCH=1` (any value but `0`) so the pads can be developed and
-/// visually tested without a tablet.
+/// Are the on-screen pads active? Desktop opts in with `BER_TOUCH=1` (any
+/// value but `0`) so the pads can be developed and visually tested without a
+/// tablet. Android no longer uses them — fields raise the native soft
+/// keyboard instead (`native_ime`).
 fn pads_enabled() -> bool {
     if cfg!(target_os = "android") {
-        return true;
+        return false;
     }
     static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *ENABLED.get_or_init(|| std::env::var("BER_TOUCH").is_ok_and(|v| v != "0"))
@@ -85,6 +91,23 @@ fn input_with_pad(
     );
     let mut submitted = response.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
     let mut changed = response.changed();
+
+    // Android: the field drives the native soft keyboard instead of the pads.
+    #[cfg(target_os = "android")]
+    {
+        use super::native_ime::{attach, ImeKind};
+        let ime = attach(
+            ui,
+            &response,
+            buf,
+            match kind {
+                PadKind::Numeric => ImeKind::Numeric,
+                PadKind::Qwerty => ImeKind::Text,
+            },
+        );
+        changed |= ime.changed;
+        submitted |= ime.submitted;
+    }
 
     if pads_enabled() {
         let ctx = ui.ctx().clone();

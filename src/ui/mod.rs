@@ -33,6 +33,10 @@ pub fn run_android(
     controller: Rc<RefCell<AppController>>,
     android_app: winit::platform::android::activity::AndroidApp,
 ) -> Result<(), RunError> {
+    // The native-keyboard bridge needs the AndroidApp handle (show/hide +
+    // GameTextInput text state) from inside widget code — stash a clone
+    // before eframe takes ownership.
+    widgets::native_ime::init(&android_app);
     let options = eframe::NativeOptions {
         android_app: Some(android_app),
         ..Default::default()
