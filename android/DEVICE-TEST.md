@@ -95,10 +95,17 @@ native soft keyboard replaces the custom pads. Plan + details:
 - [ ] The old pads do NOT appear anywhere on Android.
 - [ ] Desktop `BER_TOUCH=1` still shows the pads (regression escape hatch).
 
-Known accepted quirks: typed characters append at the END of the field even if
-the visible cursor was moved mid-text (the IME mirror owns the cursor); `+`
-sums (e.g. `2.1+0.9`) may be missing from some numeric keyboards — use the
-number box's own keypad for expressions.
+**Cursor (mirrored both ways with the IME):**
+
+- [ ] Tap **mid-text** in a filled field → typing inserts AT the caret, not the end.
+- [ ] Backspace deletes the character **before the caret** (mid-text too).
+- [ ] **Select a range** (long-press / drag handles or double-tap) → the next
+      keystroke replaces the selection.
+- [ ] Autocomplete/word suggestions still work when typing at the end.
+- [ ] After an accepted suggestion the caret sits where the keyboard put it.
+
+Known accepted quirks: `+` sums (e.g. `2.1+0.9`) may be missing from some
+numeric keyboards — use the number box's own keypad for expressions.
 
 ---
 

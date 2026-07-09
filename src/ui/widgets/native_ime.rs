@@ -18,6 +18,14 @@
 //! so floating windows can be repositioned above the keyboard
 //! ([`inset_bottom_points`]) and covered fields scrolled into view.
 //!
+//! The CURSOR is mirrored both ways alongside the text: egui's `TextEdit`
+//! keeps its cursor in memory (`TextEditState`, char indices) and the IME
+//! state carries a selection (UTF-16 code units). Tapping mid-text or using
+//! arrow keys pushes egui's cursor to the IME, so typing/backspace happen at
+//! the visible cursor; IME edits push the resulting cursor back into egui.
+//! A selected range works too — the next keystroke replaces it, like a real
+//! `EditText`.
+//!
 //! "Done"/Enter needs no wiring here: GameTextInput's `InputConnection` is a
 //! `BaseInputConnection`, whose `performEditorAction` synthesizes
 //! KEYCODE_ENTER — that reaches egui as a real Enter key through winit, so the
@@ -59,12 +67,19 @@ static APP: OnceLock<AndroidApp> = OnceLock::new();
 /// by `MainActivity.onImeInsetsChanged` → [`nativeOnImeInsets`].
 static IME_INSET_BOTTOM_PX: AtomicI32 = AtomicI32::new(0);
 
-/// The keyboard session: which field owns it and the last text state we
-/// exchanged with the IME (so the mirror only reacts to real changes).
+/// The keyboard session: which field owns it and the last text + selection we
+/// exchanged with the IME (so the mirror only reacts to real changes, and can
+/// tell WHICH side moved).
 #[derive(Default)]
 struct Session {
     owner: Option<egui::Id>,
     last_text: String,
+    /// Selection last exchanged with the IME (UTF-16 code units, min ≤ max).
+    last_sel: (usize, usize),
+    /// egui cursor last seen/written for the owner (char indices, min ≤ max) —
+    /// a divergence from this with a quiet IME means the assessor moved the
+    /// cursor on the egui side (tap / arrows).
+    last_egui_cursor: Option<(usize, usize)>,
     shown: bool,
     /// The keyboard layout the IME last bound. `setImeEditorInfoFields` is
     /// only read when an input session (re)starts, so a numeric↔text focus
@@ -79,6 +94,8 @@ struct Session {
 static SESSION: Mutex<Session> = Mutex::new(Session {
     owner: None,
     last_text: String::new(),
+    last_sel: (0, 0),
+    last_egui_cursor: None,
     shown: false,
     last_kind: None,
     handled_inset_px: 0,
@@ -114,13 +131,13 @@ pub fn attach(
 
     if focused && !is_owner {
         // Field takes the keyboard: keyboard type first (it's read when the
-        // IME binds), then seed the IME buffer with the field's current text,
-        // cursor at the end, then request the keyboard. When focus hops
-        // directly between fields of DIFFERENT kinds the keyboard never goes
-        // down, so the IME must be told to restart its input session — a bare
-        // show re-uses the bound layout.
+        // IME binds), then seed the IME buffer with the field's current text
+        // and the cursor egui placed from the tap — so the first key already
+        // lands where the assessor pointed. When focus hops directly between
+        // fields of DIFFERENT kinds the keyboard never goes down, so the IME
+        // must be told to restart its input session — a bare show re-uses the
+        // bound layout.
         s.owner = Some(response.id);
-        s.last_text = buf.clone();
         s.handled_inset_px = 0;
         if s.last_kind != Some(kind) {
             set_editor_info(kind);
@@ -129,7 +146,12 @@ pub fn attach(
             }
             s.last_kind = Some(kind);
         }
-        push_state(app, buf);
+        let cur = egui_cursor(ui.ctx(), response.id, buf);
+        let sel = chars_to_utf16_sel(buf, cur);
+        s.last_text = buf.clone();
+        s.last_sel = sel;
+        s.last_egui_cursor = Some(cur);
+        push_state(app, buf, sel);
         app.show_soft_input(false);
         s.shown = true;
     } else if focused && is_owner {
@@ -141,25 +163,58 @@ pub fn attach(
         if response.changed() || *buf != s.last_text {
             // The field's buffer moved on the app side this frame — an egui
             // edit (paste), a laser reading, or an action clearing the field.
-            // Push it so the IME buffer doesn't revert it on the next key.
+            // Push it (with egui's cursor) so the IME doesn't revert it on
+            // the next key.
+            let cur = egui_cursor(ui.ctx(), response.id, buf);
+            let sel = chars_to_utf16_sel(buf, cur);
             s.last_text = buf.clone();
-            push_state(app, buf);
+            s.last_sel = sel;
+            s.last_egui_cursor = Some(cur);
+            push_state(app, buf, sel);
         } else {
             let state = app.text_input_state();
+            let ime_sel = clamp_sel(&state.text, (state.selection.start, state.selection.end));
             if state.text != s.last_text {
+                // The IME edited the text: mirror it AND the resulting cursor
+                // into egui, so the visible caret tracks the edit point.
                 let mut text = state.text;
+                let mut sel = ime_sel;
                 if text.contains('\n') {
                     // Newline commit = this keyboard's "Done". Strip it (all
                     // participating fields are single-line) and re-push so the
                     // IME buffer matches what the field shows.
                     text.retain(|c| c != '\n');
                     out.submitted = true;
-                    push_state(app, &text);
+                    sel = clamp_sel(&text, sel);
+                    push_state(app, &text, sel);
                 }
+                let cur = utf16_to_chars_sel(&text, sel);
                 s.last_text = text.clone();
+                s.last_sel = sel;
                 if *buf != text {
                     *buf = text;
                     out.changed = true;
+                }
+                set_egui_cursor(ui.ctx(), response.id, cur);
+                s.last_egui_cursor = Some(cur);
+            } else if ime_sel != s.last_sel {
+                // The IME moved its cursor without changing text (e.g. a
+                // spacebar cursor-drag on some keyboards): follow in egui.
+                s.last_sel = ime_sel;
+                let cur = utf16_to_chars_sel(&state.text, ime_sel);
+                set_egui_cursor(ui.ctx(), response.id, cur);
+                s.last_egui_cursor = Some(cur);
+            } else {
+                // Both quiet: did the assessor move the EGUI cursor (tap in
+                // the field, arrow keys, selection drag)? Push it to the IME
+                // so the next key lands there. Ends any active compose region
+                // — same as moving the cursor in a real EditText.
+                let cur = egui_cursor(ui.ctx(), response.id, buf);
+                if s.last_egui_cursor != Some(cur) {
+                    s.last_egui_cursor = Some(cur);
+                    let sel = chars_to_utf16_sel(buf, cur);
+                    s.last_sel = sel;
+                    push_state(app, buf, sel);
                 }
             }
         }
@@ -205,15 +260,79 @@ pub fn end_frame(ctx: &egui::Context) {
     }
 }
 
-/// Seed/replace the IME's text buffer with `text`, cursor at the end. Spans
-/// are Java string (UTF-16) indices — count code units, not bytes.
-fn push_state(app: &AndroidApp, text: &str) {
-    let end = text.encode_utf16().count();
+/// Seed/replace the IME's text buffer and selection. Spans are Java string
+/// (UTF-16 code unit) indices — never byte or char indices.
+fn push_state(app: &AndroidApp, text: &str, sel: (usize, usize)) {
     app.set_text_input_state(TextInputState {
         text: text.to_owned(),
-        selection: TextSpan { start: end, end },
+        selection: TextSpan {
+            start: sel.0,
+            end: sel.1,
+        },
         compose_region: None,
     });
+}
+
+/// The field's egui cursor as (min, max) CHAR indices, clamped to `text`;
+/// falls back to end-of-text when the `TextEdit` has no stored cursor yet.
+fn egui_cursor(ctx: &egui::Context, id: egui::Id, text: &str) -> (usize, usize) {
+    let chars = text.chars().count();
+    let range =
+        egui::widgets::text_edit::TextEditState::load(ctx, id).and_then(|s| s.cursor.char_range());
+    match range {
+        Some(r) => {
+            let (a, b) = (r.primary.index.min(chars), r.secondary.index.min(chars));
+            (a.min(b), a.max(b))
+        }
+        None => (chars, chars),
+    }
+}
+
+/// Write a cursor/selection (char indices) into the field's egui state — the
+/// `TextEdit` picks it up on its next frame (and clamps it itself).
+fn set_egui_cursor(ctx: &egui::Context, id: egui::Id, cur: (usize, usize)) {
+    let mut state = egui::widgets::text_edit::TextEditState::load(ctx, id).unwrap_or_default();
+    state
+        .cursor
+        .set_char_range(Some(egui::text::CCursorRange::two(
+            egui::text::CCursor::new(cur.0),
+            egui::text::CCursor::new(cur.1),
+        )));
+    state.store(ctx, id);
+}
+
+/// Clamp an IME selection to `text` and order it (min, max). The IME reports
+/// UTF-16 indices asynchronously, so a stale span can momentarily overshoot.
+fn clamp_sel(text: &str, sel: (usize, usize)) -> (usize, usize) {
+    let max = text.encode_utf16().count();
+    let (a, b) = (sel.0.min(max), sel.1.min(max));
+    (a.min(b), a.max(b))
+}
+
+/// Char-index selection → UTF-16 code-unit selection.
+fn chars_to_utf16_sel(text: &str, cur: (usize, usize)) -> (usize, usize) {
+    let at = |char_idx: usize| -> usize {
+        text.chars()
+            .take(char_idx)
+            .map(|c| c.len_utf16())
+            .sum::<usize>()
+    };
+    (at(cur.0), at(cur.1))
+}
+
+/// UTF-16 code-unit selection → char-index selection.
+fn utf16_to_chars_sel(text: &str, sel: (usize, usize)) -> (usize, usize) {
+    let at = |utf16_idx: usize| -> usize {
+        let mut units = 0;
+        for (chars, c) in text.chars().enumerate() {
+            if units >= utf16_idx {
+                return chars;
+            }
+            units += c.len_utf16();
+        }
+        text.chars().count()
+    };
+    (at(sel.0), at(sel.1))
 }
 
 // EditorInfo constants (android.text.InputType / android.view.inputmethod.EditorInfo).
