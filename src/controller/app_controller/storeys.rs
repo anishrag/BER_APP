@@ -149,6 +149,13 @@ impl AppController {
                 // buffer. The storey's shapes were preserved in place above.
                 self.document.active = ActiveShape::Outline;
                 self.document.load_active_into_buffer();
+                // Re-supply the storey-below footprint as the position reference
+                // so an upper storey whose outline is length-done but
+                // position-unresolved still surfaces its vertical-placement
+                // prompt (the override is `#[serde(skip)]` and was never rebuilt
+                // on a same-session switch — only on the load paths). No-op for a
+                // finalised outline or a ground storey.
+                self.reestablish_position_reference_override();
                 // Rebuild the target storey's phase areas from its tagged floor
                 // regions (unless this session already has them).
                 if !self.phase_regions.contains_key(&i) {

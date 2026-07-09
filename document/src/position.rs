@@ -308,7 +308,7 @@ impl StoreyDoc {
     /// — from mis-referencing a later same-session sub-area carve against the
     /// below footprint (which, for an OVERHANGING upper storey, differs from
     /// the actual outline).
-    fn position_reference(&self) -> &FloorPlan {
+    pub fn position_reference(&self) -> &FloorPlan {
         match self.active {
             ActiveShape::Outline => self
                 .position_reference_override
@@ -1019,6 +1019,59 @@ mod tests {
         let mut refs: Vec<f32> = prompt.options.iter().map(|o| o.reference_value).collect();
         refs.sort_by(f32::total_cmp);
         assert!((refs[0] - 0.0).abs() < 1e-3 && (refs[1] - 10.0).abs() < 1e-3);
+    }
+
+    /// The reference-wall vid on an upper-outline `Translate` option is minted
+    /// by the model in the storey-BELOW footprint (`position_reference()` → the
+    /// override), NOT the box's own outline slot. Resolving it in that same plan
+    /// yields a genuine parallel reference wall — perpendicular to the prompt
+    /// axis, sitting exactly at `reference_value`; resolving the same vid against
+    /// the box lands on an unrelated wall (the mis-placed red highlight, report
+    /// bcc699f8). Locks the two-plan invariant.
+    #[test]
+    fn upper_outline_reference_wall_resolves_in_the_below_footprint() {
+        let mut doc = carve_full_width_upper_box();
+        doc.position_reference_override = Some(ten_by_ten_reference());
+        doc.recompute_prompt();
+        complete_length_loop(&mut doc);
+
+        let prompt = doc
+            .dimensioning
+            .current_position_prompt
+            .clone()
+            .expect("Y position prompt");
+        assert_eq!(prompt.axis, ParameterAxis::Y);
+        let opt = prompt.options[prompt.current_idx];
+
+        // Resolve the vid in the SAME plan the model minted it (the override):
+        // a Y prompt measures against a HORIZONTAL below wall (perpendicular to
+        // Y) sitting at `reference_value` (y=0 or y=10) — a real parallel wall.
+        let (a, b) = doc
+            .position_reference()
+            .wall_endpoints(opt.outline_wall_vid)
+            .expect("reference wall lives in the below footprint plan");
+        assert!(
+            (a.y - b.y).abs() < 1e-3,
+            "reference wall is perpendicular to the Y prompt axis (horizontal)"
+        );
+        assert!((a.y - opt.reference_value).abs() < 1e-3);
+        assert!(
+            (opt.reference_value - 0.0).abs() < 1e-3 || (opt.reference_value - 10.0).abs() < 1e-3,
+            "a below top/bottom wall, not a box edge (the box is y∈[2,5.41])"
+        );
+
+        // The bug resolved that SAME vid against the box's own outline slot,
+        // where it is absent or a DIFFERENT wall — never the below wall at
+        // `reference_value`. The box has no wall at y=0/y=10, so it can never
+        // masquerade as the reference.
+        if let Some((ba, bb)) = doc.outline.floor_plan.wall_endpoints(opt.outline_wall_vid) {
+            let matches_reference =
+                (ba.y - bb.y).abs() < 1e-3 && (ba.y - opt.reference_value).abs() < 1e-3;
+            assert!(
+                !matches_reference,
+                "box plan must not masquerade as the below reference wall"
+            );
+        }
     }
 
     /// Applying a distance translates the upper outline on Y so the measured

@@ -264,7 +264,7 @@ impl AppController {
         Some(PositionPromptUiData {
             area_wall: wall_positions_in(&self.document.floor_plan, option.area_wall_vid)?,
             reference_wall: wall_positions_in(
-                &self.document.outline.floor_plan,
+                self.document.position_reference(),
                 option.outline_wall_vid,
             )?,
             axis: prompt.axis,

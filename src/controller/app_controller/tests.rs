@@ -4045,6 +4045,58 @@ fn switching_to_all_storeys_clears_editor_and_keeps_data() {
     assert_eq!(c.document.floor_plan.ring_count(), 1);
 }
 
+/// Report bcc699f8 (secondary): navigating BACK onto an upper storey whose
+/// outline is length-done but position-UNRESOLVED must re-establish the
+/// storey-below reference so its vertical-placement prompt reappears. The
+/// override is `#[serde(skip)]` and was rebuilt only on the load paths — never
+/// on a same-session storey switch — so the prompt was silently lost.
+#[test]
+fn switching_onto_position_unresolved_upper_storey_restores_the_prompt() {
+    let mut c = dimensioned_square_controller(); // storey 0 = 10x10
+    c.add_storey().unwrap();
+    // Full-width upper box y∈[2,8]: it hugs the below left/right walls (X
+    // pinned) but both y-walls are NEW (Y free) → a Y placement prompt once
+    // the length loop completes.
+    let world = vec![(0.1, 2.0), (9.9, 2.0), (9.9, 8.0), (0.1, 8.0), (0.15, 2.05)];
+    c.apply_outline_world_inner(&world, true).unwrap();
+    // Confirm each prompted wall at its drawn length.
+    let mut guard = 0;
+    while c.dimensioning_active() && guard < 12 {
+        let prompt = c.document.dimensioning.current_prompt.clone().unwrap();
+        let (r, e) = c
+            .document
+            .floor_plan
+            .find_vertex(prompt.wall_start_vertex)
+            .unwrap();
+        let len = c.document.floor_plan.wall_length(r, e).unwrap();
+        c.apply_dimension(len).unwrap();
+        guard += 1;
+    }
+    assert!(guard < 12, "length loop didn't terminate");
+    assert!(
+        c.document.dimensioning.current_position_prompt.is_some(),
+        "the upper outline lands in the Y placement prompt"
+    );
+    assert!(
+        c.document.position_reference_override.is_some(),
+        "the carve supplied the below footprint as the reference"
+    );
+
+    // Navigate away then BACK onto the position-unresolved storey 1. The switch
+    // clears the (serde-skipped) override; the fix re-establishes it.
+    c.set_current_storey(Some(0)).unwrap();
+    c.set_current_storey(Some(1)).unwrap();
+
+    assert!(
+        c.document.position_reference_override.is_some(),
+        "switching back re-established the below reference"
+    );
+    assert!(
+        c.document.dimensioning.current_position_prompt.is_some(),
+        "the vertical-placement prompt reappears after the switch"
+    );
+}
+
 /// Method-2 snap: on the FIRST stroke of a new upper storey, freehand points
 /// drawn near the previous storey's outline get pulled onto it. We check
 /// the helper directly (the stroke→pixel canvas conversion in
