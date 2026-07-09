@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- GameActivity extends AppCompatActivity, which throws in onCreate unless
+         the activity theme descends from Theme.AppCompat — the platform theme
+         used before the GameActivity migration
+         (Theme.DeviceDefault.NoActionBar.Fullscreen) is not acceptable to it.
+         Fullscreen + no action bar mirror that old theme; the immersive hiding
+         of the system bars is still applied at runtime by
+         MainActivity.hideSystemBars(). -->
+    <style name="BerAppTheme" parent="Theme.AppCompat.NoActionBar">
+        <item name="android:windowFullscreen">true</item>
+    </style>
+</resources>

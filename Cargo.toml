@@ -52,9 +52,9 @@ futures = { version = "0.3", optional = true }
 bluetooth = ["dep:btleplug", "dep:tokio", "dep:futures"]
 
 # eframe is split per-target: desktop keeps the full default feature set
-# (accesskit, x11, wayland, glow). On android `accesskit` is rejected unless
-# you use android-game-activity, and x11/wayland are desktop-only — so the
-# android build opts out of defaults and re-adds only what it needs.
+# (accesskit, x11, wayland, glow). x11/wayland are desktop-only, and the
+# android build has no use for accesskit — so it opts out of defaults and
+# re-adds only what it needs.
 [target.'cfg(not(target_os = "android"))'.dependencies]
 eframe = "0.33.3"
 # Native "choose image" dialog for attaching photos on desktop (Android uses the
@@ -66,10 +66,17 @@ rfd = "0.15"
 # Android entry-point deps. `AndroidApp` is always named THROUGH winit
 # (`winit::platform::android::activity::AndroidApp`) so the android-activity
 # version is the one winit links — never depend on android-activity directly.
+#
+# game-activity (not native-activity): GameActivity + GameTextInput is the only
+# working path to the native soft keyboard (NativeActivity has no
+# InputConnection, so IME text never reaches the app). The Java side must pair
+# with androidx.games:games-activity:2.0.2 — the exact version of the C glue
+# android-activity 0.6 vendors and RegisterNatives against (a mismatched AAR
+# aborts at startup). See .claude/plans/native-keyboard-gameactivity.md.
 [target.'cfg(target_os = "android")'.dependencies]
-winit = { version = "0.30", features = ["android-native-activity"] }
+winit = { version = "0.30", features = ["android-game-activity"] }
 eframe = { version = "0.33.3", default-features = false, features = [
-    "android-native-activity",
+    "android-game-activity",
     "glow",
     "default_fonts",
 ] }

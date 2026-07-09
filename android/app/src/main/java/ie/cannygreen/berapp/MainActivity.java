@@ -2,7 +2,6 @@ package ie.cannygreen.berapp;
 
 import android.Manifest;
 import android.annotation.SuppressLint;
-import android.app.NativeActivity;
 import android.bluetooth.BluetoothAdapter;
 import android.bluetooth.BluetoothDevice;
 import android.bluetooth.BluetoothGatt;
@@ -32,6 +31,8 @@ import android.view.WindowInsets;
 import android.view.WindowInsetsController;
 import android.view.WindowManager;
 
+import com.google.androidgamesdk.GameActivity;
+
 import java.io.File;
 import java.io.FileOutputStream;
 import java.io.InputStream;
@@ -41,7 +42,9 @@ import java.nio.ByteOrder;
 import java.util.UUID;
 
 /**
- * Thin subclass of {@link NativeActivity}. Two jobs:
+ * Thin subclass of {@link GameActivity} (migrated from NativeActivity so the
+ * native soft keyboard works — GameActivity's GameTextInput has a real
+ * InputConnection, which NativeActivity lacks). Two jobs:
  *
  * <ol>
  *   <li><b>Immersive mode</b> — hide the system bars so the egui surface owns
@@ -59,7 +62,7 @@ import java.util.UUID;
  * lifecycle (connect on resume, close on pause) and auto-reconnects (the Disto
  * sleeps between measurements), so the app is simply "receiving" while open.
  */
-public class MainActivity extends NativeActivity {
+public class MainActivity extends GameActivity {
     private static final String TAG = "ber_app";
 
     // Leica DISTO vendor GATT service + its distance characteristic (notifies a
@@ -96,11 +99,11 @@ public class MainActivity extends NativeActivity {
     private ConnectivityManager.NetworkCallback networkCallback;
 
     static {
-        // NativeActivity dlopen's libber_app.so from native code, which does
-        // NOT register it with the Java classloader's native-library list — so
-        // the `native` methods below would fail to resolve (UnsatisfiedLinkError).
-        // Loading it here via the JVM registers its JNI symbols for lookup;
-        // dlopen is idempotent, so this is the same already-loaded library.
+        // GameActivity loads the library named by the android.app.lib_name
+        // meta-data itself (in onCreate, via System.loadLibrary) — but only
+        // after this class is initialized. Loading it here too keeps the
+        // `native` methods below resolvable regardless of that ordering;
+        // loadLibrary is idempotent, so it's the same library either way.
         System.loadLibrary("ber_app");
     }
 
