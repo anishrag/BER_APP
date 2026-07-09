@@ -887,6 +887,51 @@ fn phase_area_is_dimensioned_before_its_phase_is_assigned() {
     );
 }
 
+/// Fix A: a construction-phase boundary drawn a few cm off a floor-step line
+/// SNAPS onto the step, exactly like the wall-exposure tool and the
+/// living-area carve snap to phase lines. The step's riser base edge is fed as
+/// a reference wall to the phase carve (`step_line_segments`), so the drawn
+/// boundary levels onto it and a snap decision is recorded.
+#[test]
+fn phase_boundary_snaps_onto_a_floor_step_line() {
+    let mut c = dimensioned_square_controller(); // 10×10 dimensioned storey
+    let p = |x: f32, y: f32| Point2f32::new(x, y);
+    // A floor step over the right half (x ∈ [5, 10]) → derives a floor riser
+    // (step line) at x = 5 spanning y ∈ [0, 10].
+    c.step_regions.entry(0).or_default().push(StepRegion {
+        polygon: vec![p(5.0, 0.0), p(10.0, 0.0), p(10.0, 10.0), p(5.0, 10.0)],
+        level_m: -0.3,
+    });
+    c.commit_to_ber().unwrap(); // the direct push doesn't bump the revision
+    assert!(
+        !c.step_line_segments().is_empty(),
+        "the floor step derives a step line the carve can snap to"
+    );
+
+    // A free-standing interior phase area whose LEFT wall sits 3 cm off the
+    // step line at x = 5 (x ∈ [5.03, 8], y ∈ [2, 8], drawn as a closed loop).
+    c.set_phase_mode(true);
+    c.apply_phase_region_stroke_event(&[
+        (5.03, 2.0),
+        (8.0, 2.0),
+        (8.0, 8.0),
+        (5.03, 8.0),
+        (5.08, 2.05),
+    ]);
+
+    // The drawn boundary levelled onto the step: its left wall is now at x = 5.
+    let ring = c.pending_phase_polygon();
+    assert!(
+        ring.iter().any(|(x, _)| (x - 5.0).abs() < 1e-3),
+        "the phase boundary snapped onto the step line at x = 5: {ring:?}"
+    );
+    // And the snap was RECORDED (the clickable snap-tag overlay is non-empty).
+    assert!(
+        !c.snap_overlay().is_empty(),
+        "a snap decision was recorded for the levelled boundary"
+    );
+}
+
 /// The reported case: a living area drawn as a square with a nook, in a
 /// dimensioned (metre-scale) storey. The orthogonalizer's coordinate-merge
 /// is scale-relative, so the nook is PRESERVED (it isn't merged away by a

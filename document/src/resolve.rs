@@ -112,8 +112,16 @@ pub fn resolve_storey(
         .expect("base wall construction ensured before resolve");
     // PARTITION each outline ring by the phase areas → one region per phase
     // zone + the remainder.
+    // MOST-RECENT-FIRST: latest phase tag wins where areas overlap. `partition`
+    // is first-claim-wins in feed order, and `phase_regions` is stored in TAG
+    // order (last = most recently tagged = the assessor's current intent). So
+    // reverse here — the latest area claims its footprint first and an enclosing
+    // OLDER area gets `outline − newer` (a hole). Done at THIS call site only so
+    // step partitioning (`with_levels`, which shares the partition loop) is
+    // untouched.
     let areas_with_cids: Vec<(Vec<Point2f64>, ItemId)> = phase_area_rings
         .iter()
+        .rev()
         .map(|(ring, phase)| {
             let cid = ber
                 .floor_construction_id(Default::default(), Default::default(), phase.clone())
@@ -1909,6 +1917,91 @@ mod tests {
         assert!(
             construction_phase_complete(&ber, 0),
             "once every floor region carries a dated phase the checklist completes"
+        );
+    }
+
+    /// Report 0005b45f: two phase areas OVERLAP (the whole storey tagged
+    /// Original, then a dormer tagged 2022 sitting inside it) must resolve as
+    /// MUTUALLY EXCLUSIVE floors, with the MOST-RECENTLY tagged area winning the
+    /// overlap. `phase_regions` is fed in TAG order (Original first, dormer
+    /// last), and `partition` is first-claim-wins in feed order — so the resolve
+    /// reverses to latest-first: the dormer claims its footprint, and the
+    /// enclosing older Original gets `outline − dormer` (a hole). Before the fix,
+    /// Original claimed the dormer's footprint first and 2022 got NO region.
+    #[test]
+    fn latest_phase_tag_wins_the_overlap() {
+        use geo::Contains;
+        let doc = unit_square_doc(); // 4×4
+        let whole = vec![
+            Point2f32::new(0.0, 0.0),
+            Point2f32::new(4.0, 0.0),
+            Point2f32::new(4.0, 4.0),
+            Point2f32::new(0.0, 4.0),
+        ];
+        // The dormer (tagged "2022") is the right half, fully inside the storey.
+        let dormer = vec![
+            Point2f32::new(2.0, 0.0),
+            Point2f32::new(4.0, 0.0),
+            Point2f32::new(4.0, 4.0),
+            Point2f32::new(2.0, 4.0),
+        ];
+        let dormer_centroid = geo::Point::new(3.0, 2.0);
+        // TAG ORDER: whole storey Original FIRST, dormer 2022 LAST (most recent).
+        let phase = vec![
+            PhaseRegion {
+                polygon: whole,
+                phase: ConstructionPhase::Original,
+            },
+            PhaseRegion {
+                polygon: dormer,
+                phase: ConstructionPhase::Extension1,
+            },
+        ];
+        let mut ber = Ber::default();
+        ensure_storey_constructions(&mut ber, 0, &phase);
+        let cid_2022 = ber
+            .floor_construction_id(
+                Default::default(),
+                Default::default(),
+                ConstructionPhase::Extension1,
+            )
+            .unwrap();
+        let cid_orig = ber
+            .floor_construction_id(
+                Default::default(),
+                Default::default(),
+                ConstructionPhase::Original,
+            )
+            .unwrap();
+        let storey = resolve_storey(&doc, &ber, 0, &phase, &[], &[]);
+        // TWO exclusive regions: the dormer + the Original with the dormer as a
+        // hole (NOT one Original swallowing everything and 2022 empty).
+        assert_eq!(
+            storey.floors.regions.len(),
+            2,
+            "dormer + Original(outline − dormer) — two exclusive regions"
+        );
+        // The dormer's footprint carries the 2022 cid (the latest tag won it).
+        let dormer_region = storey
+            .floors
+            .regions
+            .iter()
+            .find(|r| r.polygon.contains(&dormer_centroid))
+            .expect("a region covers the dormer footprint");
+        assert_eq!(
+            dormer_region.construction_id, cid_2022,
+            "the dormer footprint is the 2022 phase, not Original"
+        );
+        // NO Original region contains the dormer centroid — Original was carved
+        // back to `outline − dormer`.
+        assert!(
+            storey
+                .floors
+                .regions
+                .iter()
+                .filter(|r| r.construction_id == cid_orig)
+                .all(|r| !r.polygon.contains(&dormer_centroid)),
+            "the older Original must not overlap the dormer footprint"
         );
     }
 

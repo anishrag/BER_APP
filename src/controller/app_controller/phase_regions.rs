@@ -128,20 +128,29 @@ impl AppController {
             .get(&idx)
             .map(|rs| rs.iter().map(|r| r.polygon.clone()).collect())
             .unwrap_or_default();
+        // The floor + ceiling STEP lines the carve levels the drawn phase
+        // boundary onto in addition to the outline (like the wall-exposure tool
+        // and the living-area carve's phase lines): a boundary drawn beside a
+        // step lands flush on it. The SAME set is passed to the carve
+        // (`carve_or_cut_in_available`) and to the pin (`pinned_subarea_slot_refs`)
+        // so a snapped wall is pre-known and isn't re-prompted.
+        let step_segs = self.step_line_segments();
         log::debug!("── construction-phase sketch ───────────────────────");
 
         // One call does subtract → pick piece → clip → cut-or-carve against the
         // available region (outline minus the phases already drawn); we only
         // dispatch the outcome. The chosen piece comes back for wall pinning.
-        match self
-            .document
-            .carve_or_cut_in_available(&pts, &phase_rings, &self.tuning.subarea, &[])
-        {
+        match self.document.carve_or_cut_in_available(
+            &pts,
+            &phase_rings,
+            &self.tuning.subarea,
+            &step_segs,
+        ) {
             Ok((boundary, SubareaOutcome::Cut(a, b))) => {
                 log::debug!("  → phase cut splits the available region into two — tap one to keep");
                 log::debug!("────────────────────────────────────────────────────");
-                let sa = self.pinned_subarea_slot(&boundary, a);
-                let sb = self.pinned_subarea_slot(&boundary, b);
+                let sa = self.pinned_subarea_slot_refs(&boundary, a, &step_segs);
+                let sb = self.pinned_subarea_slot_refs(&boundary, b, &step_segs);
                 self.pending_phase_cut = Some([sa, sb]);
                 self.capture_snap_action_pending(
                     SnapAction::Subarea {
@@ -172,7 +181,7 @@ impl AppController {
                 // dimensions the drawn walls, THEN picks a phase. The exact
                 // boundary matters — it decides which surfaces are in the phase.
                 let undo_snap = self.current_history_snapshot();
-                let slot = self.pinned_subarea_slot(&boundary, plan);
+                let slot = self.pinned_subarea_slot_refs(&boundary, plan, &step_segs);
                 self.begin_phase_area_dimensioning(slot, undo_snap);
                 self.capture_snap_action(SnapAction::Subarea {
                     flow: SubareaFlow::PhaseRegion,

@@ -99,16 +99,11 @@ pub(crate) fn render(
             let is_set = region.exposure != CeilingExposure::Unset;
 
             // Base storey-shade fill (keeps storey identity across the stack).
+            // The FILL carries storey identity alone; exposure/done-state is
+            // carried entirely by the OUTLINE below (solid set / dashed to-set),
+            // so an exposure tint here would collide with the storey-shade hue.
             if let Some(m) = fill_mesh(&screen_pts, &flat, shade) {
                 painter.add(m);
-            }
-            // SET ceilings get an exposure-colour tint on top, so "done" reads at
-            // a glance and you can tell what it was set to.
-            if is_set {
-                let tint = egui::Color32::from_rgba_unmultiplied(ec.r(), ec.g(), ec.b(), 70);
-                if let Some(m) = fill_mesh(&screen_pts, &flat, tint) {
-                    painter.add(m);
-                }
             }
 
             // Selection halo UNDER the outline so both read.

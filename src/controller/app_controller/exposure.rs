@@ -298,6 +298,28 @@ impl AppController {
             .collect()
     }
 
+    /// The active storey's floor + ceiling STEP lines as world-metre reference
+    /// segments — each riser's plan base edge from [`riser_walls`](Self::riser_walls)
+    /// (so buried `InterStorey` risers are already excluded, and BOTH
+    /// `RiserKind::Floor` and `RiserKind::Ceiling` base edges are included). The
+    /// along-wall snap in exposure mode ([`exposure_snap_candidates`]) and the
+    /// phase-area carve both level onto these, so a boundary drawn beside a step
+    /// lands flush on it. ONE source of truth for "where the step lines are".
+    /// Empty when the storey has no steps.
+    ///
+    /// [`exposure_snap_candidates`]: Self::exposure_snap_candidates
+    pub(super) fn step_line_segments(&self) -> Vec<[Point2f32; 2]> {
+        self.riser_walls()
+            .into_iter()
+            .map(|r| {
+                [
+                    Point2f32::new(r.a.x as f32, r.a.y as f32),
+                    Point2f32::new(r.b.x as f32, r.b.y as f32),
+                ]
+            })
+            .collect()
+    }
+
     /// Drag the grabbed handle: project the pointer onto the wall line and set
     /// that end's distance (clamped to the wall), SNAPPING to the nearest
     /// meaningful along-wall coordinate within `tol` (world metres — the same
@@ -375,17 +397,7 @@ impl AppController {
             &self.document.living_area_wall_segments(),
             ExposureSnapKind::LivingAreaWall,
         );
-        let riser_segs: Vec<[Point2f32; 2]> = self
-            .riser_walls()
-            .into_iter()
-            .map(|r| {
-                [
-                    Point2f32::new(r.a.x as f32, r.a.y as f32),
-                    Point2f32::new(r.b.x as f32, r.b.y as f32),
-                ]
-            })
-            .collect();
-        crossings(&riser_segs, ExposureSnapKind::StepLine);
+        crossings(&self.step_line_segments(), ExposureSnapKind::StepLine);
         out
     }
 
