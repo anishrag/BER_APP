@@ -140,6 +140,11 @@ impl AppController {
     /// seed stays PENDING — it fires when the drawn outline finalises.
     pub fn choose_draw_outline(&mut self) {
         self.pending_new_storey = None;
+        // They've committed to drawing the outline — drop straight into the
+        // wall-drawing tool so a stroke draws it without a separate tool pick
+        // (mirrors the draw-first area flows' `set_edit_mode`). Harmless on the
+        // implicit-draw path (a stroke arrives already on this tool).
+        self.set_edit_mode(EditTools::DrawPerpWalls);
     }
 
     /// The user chose to browse SUGGESTED outlines: derive the ranked

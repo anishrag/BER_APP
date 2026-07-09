@@ -45,6 +45,29 @@ pub fn apply(buf: &mut String, key: Key) {
     }
 }
 
+/// Apply one key to a buffer that may still hold an untouched SUGGESTION — a
+/// value the box was PRE-FILLED with (a drawn length, the typical slab
+/// thickness, the storey's ceiling height, …). While `pristine` is set the
+/// suggestion is treated like pre-selected text: the first CONTENT key
+/// (digit / dot / backspace) drops the whole suggestion first, so a typed
+/// number REPLACES it instead of appending; a `+`/`−` keeps it as the running
+/// sum's first term. The first key of any kind CONSUMES the flag, so every
+/// subsequent key edits normally. A non-pristine buffer behaves exactly like
+/// [`apply`].
+pub fn apply_over_suggestion(buf: &mut String, key: Key, pristine: &mut bool) {
+    if *pristine {
+        *pristine = false;
+        match key {
+            // Typing (or backspacing) over the suggestion replaces it wholesale.
+            Key::Digit(_) | Key::Dot | Key::Backspace => buf.clear(),
+            // An operator keeps the suggestion as the first term; Clear empties
+            // the buffer anyway.
+            Key::Plus | Key::Minus | Key::Clear => {}
+        }
+    }
+    apply(buf, key);
+}
+
 /// Append a ` + ` / ` - ` term separator — but only after a complete number, so
 /// the expression never grows a dangling or doubled operator.
 fn append_op(buf: &mut String, op: char) {
@@ -212,6 +235,58 @@ mod key_tests {
         apply(&mut buf, Key::Plus);
         apply(&mut buf, Key::Minus);
         assert_eq!(buf, "5 + ", "second operator ignored");
+    }
+
+    /// The first digit typed over a pre-filled SUGGESTION replaces it
+    /// wholesale; later digits append normally.
+    #[test]
+    fn first_digit_replaces_a_pristine_suggestion() {
+        use super::apply_over_suggestion;
+        let mut buf = "0.25".to_string();
+        let mut pristine = true;
+        apply_over_suggestion(&mut buf, Key::Digit('5'), &mut pristine);
+        assert_eq!(buf, "5", "first digit replaces the suggestion");
+        assert!(!pristine, "the flag is consumed on the first edit");
+        apply_over_suggestion(&mut buf, Key::Digit('0'), &mut pristine);
+        assert_eq!(buf, "50", "subsequent digits append");
+    }
+
+    /// A `+`/`−` over a pristine suggestion keeps it as the running sum's first
+    /// term rather than dropping it.
+    #[test]
+    fn operator_keeps_a_pristine_suggestion_as_first_term() {
+        use super::apply_over_suggestion;
+        let mut buf = "0.25".to_string();
+        let mut pristine = true;
+        apply_over_suggestion(&mut buf, Key::Plus, &mut pristine);
+        assert_eq!(buf, "0.25 + ");
+        assert!(!pristine);
+        apply_over_suggestion(&mut buf, Key::Digit('1'), &mut pristine);
+        assert_eq!(buf, "0.25 + 1", "the next digit appends to the new term");
+    }
+
+    /// Backspace is the "first edit" too — it consumes the flag and drops the
+    /// whole suggestion (pre-selected-text semantics).
+    #[test]
+    fn backspace_clears_a_pristine_suggestion() {
+        use super::apply_over_suggestion;
+        let mut buf = "3.50".to_string();
+        let mut pristine = true;
+        apply_over_suggestion(&mut buf, Key::Backspace, &mut pristine);
+        assert_eq!(buf, "");
+        assert!(!pristine);
+    }
+
+    /// With no pristine suggestion, keys behave exactly like [`apply`] — the
+    /// no-suggestion box is unaffected.
+    #[test]
+    fn non_pristine_appends_like_apply() {
+        use super::apply_over_suggestion;
+        let mut buf = "4".to_string();
+        let mut pristine = false;
+        apply_over_suggestion(&mut buf, Key::Digit('2'), &mut pristine);
+        assert_eq!(buf, "42");
+        assert!(!pristine);
     }
 
     #[test]

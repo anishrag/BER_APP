@@ -60,6 +60,17 @@ impl AppController {
         self.pending_cut = None;
         if on {
             self.exit_openings_mode();
+            // Leave every other mutually-exclusive MAPPING mode (each setter
+            // clears its own pick/drag state), mirroring how the exposure/roof
+            // setters clear their siblings. Drawing walls / extend-ortho /
+            // extend-curve stay usable WITHIN a living area — those are edit
+            // tools, not Mapping modes, so they're deliberately not cleared here.
+            self.set_exposure_mode(false);
+            self.set_floor_exposure_mode(false);
+            self.set_ceiling_exposure_mode(false);
+            self.set_roof_mode(false);
+            self.set_phase_mode(false);
+            self.set_step_mode(false);
             // Mutually exclusive with the ceiling-step line and roof-point
             // tools (the other area tools clear each other the same way).
             self.ceiling_step_mode = false;

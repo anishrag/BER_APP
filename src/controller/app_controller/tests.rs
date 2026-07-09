@@ -17584,3 +17584,38 @@ fn extensions_added_after_sketch_appear_in_phase_picker() {
         "label carries the year: {ext1_label}"
     );
 }
+
+/// Fix (report 6b13e61f): pressing "Draw outline" for a NEW storey auto-selects
+/// the wall-drawing tool, so a stroke draws the outline without a separate tool
+/// pick. A different tool selected beforehand is overridden.
+#[test]
+fn choose_draw_outline_selects_draw_walls_tool() {
+    let mut c = dimensioned_square_controller();
+    c.set_default_ceiling_height(2.4).unwrap();
+    c.add_storey().unwrap();
+    // Some other edit tool was left selected before committing to draw.
+    c.set_edit_mode(EditTools::Move);
+    assert_eq!(c.edit_mode(), EditTools::Move);
+    c.choose_draw_outline();
+    assert_eq!(
+        c.edit_mode(),
+        EditTools::DrawPerpWalls,
+        "committing to draw the outline drops into the wall-drawing tool"
+    );
+}
+
+/// Fix (report 78f6e95b): "Living areas" deselects the other mutually-exclusive
+/// MAPPING modes. Enabling construction-phase then living-area leaves phase_mode
+/// off and living_area_mode on (they can't both be highlighted at once).
+#[test]
+fn living_area_mode_clears_sibling_mapping_modes() {
+    let mut c = dimensioned_square_controller();
+    c.set_phase_mode(true);
+    assert!(c.phase_mode(), "construction-phase mode is on");
+    c.set_living_area_mode(true);
+    assert!(c.living_area_mode(), "living-area mode is on");
+    assert!(
+        !c.phase_mode(),
+        "living areas deselected the construction-phase mapping tool"
+    );
+}

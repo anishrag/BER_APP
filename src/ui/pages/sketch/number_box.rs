@@ -36,7 +36,7 @@ use crate::controller::app_controller::{
     WindowTypeChoice,
 };
 use crate::number_entry::bluetooth::{LaserSource, Status};
-use crate::number_entry::{apply, parse_dimension_expression, Key};
+use crate::number_entry::{apply_over_suggestion, parse_dimension_expression, Key};
 use crate::ui::pages::events::UiEvent;
 use crate::ui::widgets::HintExt;
 use crate::ui::widgets::{photo_button_pair, text_input, PhotoQuality};
@@ -552,6 +552,9 @@ pub(super) fn render<F: FnMut(UiEvent)>(
             view.laser,
             &mut picker,
             extra_valid,
+            // The opening box's fields are user-entered W/H, never a pre-filled
+            // suggestion.
+            None,
             on_event,
         );
         return;
@@ -588,6 +591,7 @@ pub(super) fn render<F: FnMut(UiEvent)>(
             &mut view.cat_state.input_mode,
             &mut view.cat_state.input_mode_pinned,
             view.laser,
+            None,
             on_event,
         );
         return;
@@ -623,6 +627,7 @@ pub(super) fn render<F: FnMut(UiEvent)>(
             &mut view.cat_state.input_mode,
             &mut view.cat_state.input_mode_pinned,
             view.laser,
+            None,
             on_event,
         );
         return;
@@ -659,6 +664,8 @@ pub(super) fn render<F: FnMut(UiEvent)>(
             &mut view.cat_state.input_mode,
             &mut view.cat_state.input_mode_pinned,
             view.laser,
+            // Pre-filled with the typical 0.25 m — the first typed digit replaces it.
+            Some("thickness"),
             on_event,
         );
         return;
@@ -698,6 +705,7 @@ pub(super) fn render<F: FnMut(UiEvent)>(
             &mut view.cat_state.input_mode,
             &mut view.cat_state.input_mode_pinned,
             view.laser,
+            None,
             on_event,
         );
         return;
@@ -744,6 +752,10 @@ pub(super) fn render<F: FnMut(UiEvent)>(
                 .bare(),
             );
         }
+        // The box is pre-filled with the drawn distance; a new prompt IDENTITY
+        // (axis + kind + reference option) means a fresh suggestion, so the first
+        // typed digit replaces it. Mirrors app.rs's `position_prompt_key`.
+        let sug = format!("pos|{:?}|{:?}|{}", p.axis, p.kind, p.option_idx);
         show_box(
             ctx,
             rect,
@@ -756,6 +768,7 @@ pub(super) fn render<F: FnMut(UiEvent)>(
             &mut view.cat_state.input_mode,
             &mut view.cat_state.input_mode_pinned,
             view.laser,
+            Some(sug.as_str()),
             on_event,
         );
         return;
@@ -797,6 +810,7 @@ pub(super) fn render<F: FnMut(UiEvent)>(
             &mut view.cat_state.input_mode,
             &mut view.cat_state.input_mode_pinned,
             view.laser,
+            None,
             on_event,
         );
         return;
@@ -825,6 +839,9 @@ pub(super) fn render<F: FnMut(UiEvent)>(
             &mut view.cat_state.input_mode,
             &mut view.cat_state.input_mode_pinned,
             view.laser,
+            // Pre-filled with the storey's default ceiling height (all three roof
+            // HEIGHT stages share this buffer + one prefill guard).
+            Some("roof-height"),
             on_event,
         );
         return;
@@ -850,6 +867,10 @@ pub(super) fn render<F: FnMut(UiEvent)>(
             .bare(),
             ceiling_rect_cancel(),
         ];
+        // Pre-filled with the drawn side length; the buffer is re-filled when the
+        // LenX → LenY axis changes (mirrors app.rs's `ceiling_rect_len_key`), so
+        // the token carries the axis.
+        let rect_sug = format!("rect-len|{axis:?}");
         show_box(
             ctx,
             rect,
@@ -862,6 +883,7 @@ pub(super) fn render<F: FnMut(UiEvent)>(
             &mut view.cat_state.input_mode,
             &mut view.cat_state.input_mode_pinned,
             view.laser,
+            Some(rect_sug.as_str()),
             on_event,
         );
         return;
@@ -899,6 +921,9 @@ pub(super) fn render<F: FnMut(UiEvent)>(
             &mut view.cat_state.input_mode,
             &mut view.cat_state.input_mode_pinned,
             view.laser,
+            // Pre-filled with the storey's default ceiling height (all three roof
+            // HEIGHT stages share this buffer + one prefill guard).
+            Some("roof-height"),
             on_event,
         );
         return;
@@ -933,6 +958,8 @@ pub(super) fn render<F: FnMut(UiEvent)>(
             &mut view.cat_state.input_mode,
             &mut view.cat_state.input_mode_pinned,
             view.laser,
+            // Pre-filled with the drawn ridge length.
+            Some("ridge-length"),
             on_event,
         );
         return;
@@ -964,6 +991,9 @@ pub(super) fn render<F: FnMut(UiEvent)>(
             &mut view.cat_state.input_mode,
             &mut view.cat_state.input_mode_pinned,
             view.laser,
+            // Pre-filled with the storey's default ceiling height (all three roof
+            // HEIGHT stages share this buffer + one prefill guard).
+            Some("roof-height"),
             on_event,
         );
         return;
@@ -996,6 +1026,7 @@ pub(super) fn render<F: FnMut(UiEvent)>(
             &mut view.cat_state.input_mode,
             &mut view.cat_state.input_mode_pinned,
             view.laser,
+            None,
             on_event,
         );
         return;
@@ -1037,6 +1068,7 @@ pub(super) fn render<F: FnMut(UiEvent)>(
             &mut view.cat_state.input_mode,
             &mut view.cat_state.input_mode_pinned,
             view.laser,
+            None,
             on_event,
         );
     }
@@ -1287,6 +1319,10 @@ fn show_box<F: FnMut(UiEvent)>(
     mode: &mut InputMode,
     mode_pinned: &mut bool,
     laser: &mut LaserSource,
+    // A stable per-prompt token when this box is PRE-FILLED with a suggested
+    // value (so the first typed key replaces it — see `apply_over_suggestion`).
+    // `None` for boxes with no suggestion (they're never pristine).
+    suggestion_token: Option<&str>,
     on_event: &mut F,
 ) {
     let mut fields = [BoxField {
@@ -1313,6 +1349,7 @@ fn show_box<F: FnMut(UiEvent)>(
         laser,
         &mut |_| {},
         true,
+        suggestion_token,
         on_event,
     );
 }
@@ -1348,6 +1385,10 @@ fn show_box_multi<F: FnMut(UiEvent)>(
     // Place/Fill, disabled until the window-type name is entered). Always `true`
     // for prompts with no such requirement.
     extra_valid: bool,
+    // A stable per-prompt token when THIS box is PRE-FILLED with a suggested
+    // value; `None` for boxes with no suggestion. See the pristine handling
+    // inside the window body.
+    suggestion_token: Option<&str>,
     on_event: &mut F,
 ) {
     let focus_id = Id::new(FOCUS_MEM);
@@ -1382,6 +1423,28 @@ fn show_box_multi<F: FnMut(UiEvent)>(
             if let Some(sub) = subtitle {
                 ui.label(RichText::new(sub).color(Color32::from_gray(170)));
             }
+
+            // Suggestion "pristine" tracking (see `apply_over_suggestion`): a box
+            // pre-filled with a suggested value marks itself pristine when its
+            // prompt IDENTITY (the token) changes, so the FIRST content key
+            // REPLACES the suggestion instead of appending. Boxes with no
+            // suggestion pass `None` and are never pristine. Consumed on the first
+            // keypad key, on a laser reading, or on any hardware-keyboard edit.
+            let token = suggestion_token.unwrap_or("");
+            let token_id = Id::new("ber_number_entry_suggestion_token");
+            let pristine_id = Id::new("ber_number_entry_suggestion_pristine");
+            let mut pristine = ui.ctx().data_mut(|d| {
+                if d.get_temp::<String>(token_id).as_deref() != Some(token) {
+                    d.insert_temp(token_id, token.to_string());
+                    // Entering a suggestion prompt (non-empty token) starts
+                    // pristine; leaving one clears it.
+                    let p = !token.is_empty();
+                    d.insert_temp(pristine_id, p);
+                    p
+                } else {
+                    d.get_temp::<bool>(pristine_id).unwrap_or(false)
+                }
+            });
 
             // Which field the keypad / laser drives. Persisted across frames so a
             // button press doesn't lose it; updated when a field gains focus.
@@ -1433,6 +1496,13 @@ fn show_box_multi<F: FnMut(UiEvent)>(
                 });
             }
 
+            // A hardware-keyboard edit of the field is real editing — drop the
+            // pristine suggestion so a later keypad tap appends rather than
+            // clearing (the assessor deliberately edited the value).
+            if responses.iter().any(|r| r.changed()) {
+                pristine = false;
+            }
+
             // Boolean toggles (e.g. "semicircular transom"), under the fields.
             for c in checks.iter_mut() {
                 ui.checkbox(c.value, c.label);
@@ -1450,16 +1520,16 @@ fn show_box_multi<F: FnMut(UiEvent)>(
                         // Stay attached for detection, but don't let readings
                         // pile up while the keypad's in charge.
                         let _ = laser.poll();
-                        digit_grid(ui, &mut fields[focus].buf);
-                        plus_minus(ui, &mut fields[focus].buf);
+                        digit_grid(ui, &mut fields[focus].buf, &mut pristine);
+                        plus_minus(ui, &mut fields[focus].buf, &mut pristine);
                     }
                     // Laser mode, but the focused field can't be measured (a
                     // year / gap): use the keypad for it, so a typed value never
                     // needs a second pad — the box's keypad IS the numeric input.
                     InputMode::Laser if !fields[focus].measurable => {
                         let _ = laser.poll();
-                        digit_grid(ui, &mut fields[focus].buf);
-                        plus_minus(ui, &mut fields[focus].buf);
+                        digit_grid(ui, &mut fields[focus].buf, &mut pristine);
+                        plus_minus(ui, &mut fields[focus].buf, &mut pristine);
                     }
                     InputMode::Laser => {
                         // A reading sets the focused field, then focus advances to
@@ -1470,10 +1540,12 @@ fn show_box_multi<F: FnMut(UiEvent)>(
                                 &mut fields[focus].buf,
                                 reading.metres,
                             );
+                            // The reading replaced the term — the suggestion is gone.
+                            pristine = false;
                             laser_advanced = true;
                         }
                         laser_status_panel(ctx, ui, laser);
-                        plus_minus(ui, &mut fields[focus].buf);
+                        plus_minus(ui, &mut fields[focus].buf, &mut pristine);
                     }
                 }
                 ui.add_space(8.0);
@@ -1533,32 +1605,33 @@ fn show_box_multi<F: FnMut(UiEvent)>(
                 }
             }
             ui.ctx().data_mut(|d| d.insert_temp(focus_id, focus));
+            ui.ctx().data_mut(|d| d.insert_temp(pristine_id, pristine));
         });
 }
 
 /// The 3-wide digit grid (`7-8-9` / `4-5-6` / `1-2-3` / `0 . Del`). Each press
 /// is just a [`Key`] handed to the input engine — this fn owns only the layout,
 /// not what a key means.
-fn digit_grid(ui: &mut egui::Ui, buf: &mut String) {
+fn digit_grid(ui: &mut egui::Ui, buf: &mut String, pristine: &mut bool) {
     ui.vertical(|ui| {
         for row in [['7', '8', '9'], ['4', '5', '6'], ['1', '2', '3']] {
             ui.horizontal(|ui| {
                 for d in row {
                     if digit(ui, &d.to_string()) {
-                        apply(buf, Key::Digit(d));
+                        apply_over_suggestion(buf, Key::Digit(d), pristine);
                     }
                 }
             });
         }
         ui.horizontal(|ui| {
             if digit(ui, "0") {
-                apply(buf, Key::Digit('0'));
+                apply_over_suggestion(buf, Key::Digit('0'), pristine);
             }
             if digit(ui, ".") {
-                apply(buf, Key::Dot);
+                apply_over_suggestion(buf, Key::Dot, pristine);
             }
             if digit(ui, "Del") {
-                apply(buf, Key::Backspace);
+                apply_over_suggestion(buf, Key::Backspace, pristine);
             }
         });
     });
@@ -1567,7 +1640,7 @@ fn digit_grid(ui: &mut egui::Ui, buf: &mut String) {
 /// The operator column beside the digits: **+** on the top half, **−** on the
 /// bottom half, each spanning two key rows. `+` adds the next length to the
 /// running total; `−` subtracts it.
-fn plus_minus(ui: &mut egui::Ui, buf: &mut String) {
+fn plus_minus(ui: &mut egui::Ui, buf: &mut String, pristine: &mut bool) {
     let half = egui::vec2(KEY * 1.5, KEY * 2.0);
     ui.vertical(|ui| {
         if ui
@@ -1575,14 +1648,14 @@ fn plus_minus(ui: &mut egui::Ui, buf: &mut String) {
             .hint("Add another length to the running total")
             .clicked()
         {
-            apply(buf, Key::Plus);
+            apply_over_suggestion(buf, Key::Plus, pristine);
         }
         if ui
             .add(op_button("−", Color32::from_rgb(150, 80, 50), half))
             .hint("Subtract the next length from the running total")
             .clicked()
         {
-            apply(buf, Key::Minus);
+            apply_over_suggestion(buf, Key::Minus, pristine);
         }
     });
 }
