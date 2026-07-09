@@ -141,7 +141,10 @@ pub fn attach(
         s.handled_inset_px = 0;
         if s.last_kind != Some(kind) {
             set_editor_info(kind);
-            if s.shown {
+            // Once any field has bound the IME, a session with the OLD layout
+            // exists (it survives even a hide) — cycle it so the keyboard
+            // re-reads the editor info. Skipped only on the very first bind.
+            if s.last_kind.is_some() {
                 restart_ime_input();
             }
             s.last_kind = Some(kind);

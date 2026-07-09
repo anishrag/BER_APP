@@ -145,20 +145,46 @@ public class MainActivity extends GameActivity {
 
     /**
      * Called FROM Rust (ui::widgets::native_ime) after changing the IME editor
-     * info (numeric ↔ text) while the keyboard is already up: EditorInfo is
-     * only consumed when an input session starts (onCreateInputConnection), so
-     * without a restart the keyboard keeps its previous layout. Posts to the
-     * UI thread; the calling Rust render thread doesn't wait.
+     * info (numeric ↔ text) while the keyboard is already up. Two subtleties,
+     * both learned from the decompiled games-activity 2.0.2:
+     *
+     * <ul>
+     *   <li>{@code onCreateInputConnection} copies the editor info from the
+     *       live {@code InputConnection}'s settings, not from this activity's
+     *       field — sync it over explicitly rather than rely on the two
+     *       happening to share one EditorInfo instance.</li>
+     *   <li>A bare {@code imm.restartInput} reaches the IME as
+     *       {@code onStartInput(restarting=true)}, which keyboards (Samsung's
+     *       included) don't rebuild their layout for. Cycling hide → restart →
+     *       show forces a fresh session that re-reads the editor info. All in
+     *       one UI-thread runnable, so at most a brief flicker.</li>
+     * </ul>
+     *
+     * Posts to the UI thread; the calling Rust render thread doesn't wait.
      */
     public void restartImeInput() {
         runOnUiThread(
                 () -> {
+                    if (mSurfaceView == null) {
+                        return;
+                    }
+                    // onCreateInputConnection(null) skips the copy-out and just
+                    // returns the live connection (see the 2.0.2 bytecode).
+                    com.google.androidgamesdk.gametextinput.InputConnection ic =
+                            mSurfaceView.onCreateInputConnection(null);
+                    if (ic != null) {
+                        ic.setEditorInfo(getImeEditorInfo());
+                    }
                     android.view.inputmethod.InputMethodManager imm =
                             (android.view.inputmethod.InputMethodManager)
                                     getSystemService(Context.INPUT_METHOD_SERVICE);
-                    if (imm != null && mSurfaceView != null) {
-                        imm.restartInput(mSurfaceView);
+                    if (imm == null) {
+                        return;
                     }
+                    imm.hideSoftInputFromWindow(mSurfaceView.getWindowToken(), 0);
+                    imm.restartInput(mSurfaceView);
+                    mSurfaceView.requestFocus();
+                    imm.showSoftInput(mSurfaceView, 0);
                 });
     }
 
