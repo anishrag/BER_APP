@@ -278,6 +278,8 @@ impl AppController {
             self.pending_roof_point = None;
             self.pending_roof_ridge = None;
             self.pending_roof_rect = None;
+            self.dormer_mode = false;
+            self.pending_rect_is_dormer = false;
         }
     }
 

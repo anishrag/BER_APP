@@ -43,8 +43,9 @@ pub use poly3d::{Polygon3D, SplitLine3D};
 pub use region::stroke_is_closed;
 pub use simplification::{lasso_ring, simplify_to_cut};
 pub use snap::{
-    clear_snap_policy, dist_to_ring, set_snap_policy, snap_stroke_to_ring, snap_stroke_to_segments,
-    take_snap_decisions, SnapCandidate, SnapChoice, SnapDecision, SnapKind,
+    clear_snap_policy, dist_to_ring, set_snap_policy, snap_axis_rect_to_refs, snap_stroke_to_ring,
+    snap_stroke_to_segments, take_snap_decisions, SnapCandidate, SnapChoice, SnapDecision,
+    SnapKind,
 };
 pub use surface_ref::SurfaceRef;
 
@@ -703,7 +704,7 @@ mod position_axis_tests {
             p(4.0, 7.9),
         ];
         match outline
-            .carve_or_cut(&stroke, &SubareaTuning::default(), false)
+            .carve_or_cut(&stroke, &SubareaTuning::default(), false, None)
             .unwrap()
         {
             SubareaOutcome::Cut(a, b) => {

@@ -977,6 +977,7 @@ mod tests {
             &prev_ring,
             &manip_plan::SubareaTuning::default(),
             &[],
+            manip_plan::ring_diagonal(&prev_ring) * 0.06,
         )
         .expect("carve applies");
         doc
@@ -1160,6 +1161,7 @@ mod tests {
             &prev_ring,
             &manip_plan::SubareaTuning::default(),
             &[],
+            manip_plan::ring_diagonal(&prev_ring) * 0.06,
         )
         .expect("carve applies");
         assert!(

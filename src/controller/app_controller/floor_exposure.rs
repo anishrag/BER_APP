@@ -71,6 +71,8 @@ impl AppController {
             self.pending_roof_point = None;
             self.pending_roof_ridge = None;
             self.pending_roof_rect = None;
+            self.dormer_mode = false;
+            self.pending_rect_is_dormer = false;
         } else {
             self.floor_exposure_gate_pending = false;
         }
@@ -232,7 +234,8 @@ impl AppController {
         let boundary = self
             .floor_exposure_whole_building_boundary()
             .unwrap_or_else(|| self.document.outline.floor_plan.clone());
-        match boundary.carve_or_cut(&pts, &self.tuning.subarea, false) {
+        let wall_snap_tol = self.snap_tol_carve();
+        match boundary.carve_or_cut(&pts, &self.tuning.subarea, false, Some(wall_snap_tol)) {
             Ok(SubareaOutcome::Area(plan)) => {
                 if plan.validate_simple().is_err() {
                     // Nothing committed — drop the rejected carve's decisions.

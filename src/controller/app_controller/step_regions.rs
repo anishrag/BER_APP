@@ -39,6 +39,8 @@ impl AppController {
             self.pending_roof_point = None;
             self.pending_roof_ridge = None;
             self.pending_roof_rect = None;
+            self.dormer_mode = false;
+            self.pending_rect_is_dormer = false;
             self.activate_shape(ActiveShape::Outline);
             self.set_edit_mode(EditTools::DrawPerpWalls);
         }
@@ -117,10 +119,14 @@ impl AppController {
         // One call does subtract → pick piece → clip → cut-or-carve against the
         // available region (outline minus the steps already drawn); we only
         // dispatch the outcome. The chosen piece comes back for wall pinning.
-        match self
-            .document
-            .carve_or_cut_in_available(&pts, &step_rings, &self.tuning.subarea, &[])
-        {
+        let wall_snap_tol = self.snap_tol_carve();
+        match self.document.carve_or_cut_in_available(
+            &pts,
+            &step_rings,
+            &self.tuning.subarea,
+            &[],
+            wall_snap_tol,
+        ) {
             Ok((boundary, SubareaOutcome::Cut(a, b))) => {
                 log::debug!("  → step cut splits the available region into two — tap one to keep");
                 log::debug!("────────────────────────────────────────────────────");

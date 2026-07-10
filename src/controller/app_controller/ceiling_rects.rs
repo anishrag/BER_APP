@@ -71,6 +71,60 @@ impl PendingCeilingRect {
     }
 }
 
+/// Which SIDES of an in-flight DORMER rect snapped flush onto a reference edge
+/// at draw time — `[x_lo, x_hi, y_lo, y_hi]` (LEFT, RIGHT, BOTTOM, TOP). Only
+/// the dormer path sets these (from [`manip_plan::snap_axis_rect_to_refs`]); the
+/// PAVILION leaves the default all-false, so its FSM asks every prompt exactly
+/// as before. A pinned axis's POSITION prompt is skipped (the fitted coordinate
+/// stands); a FULLY-pinned axis (both sides) also skips its LENGTH prompt (the
+/// length is the gap between the two refs).
+#[derive(Debug, Clone, Copy, Default)]
+pub(super) struct RectPins {
+    x_lo: bool,
+    x_hi: bool,
+    y_lo: bool,
+    y_hi: bool,
+}
+
+impl RectPins {
+    /// From [`manip_plan::snap_axis_rect_to_refs`]' `[x_lo, x_hi, y_lo, y_hi]`.
+    pub(super) fn from_sides(s: [bool; 4]) -> Self {
+        Self {
+            x_lo: s[0],
+            x_hi: s[1],
+            y_lo: s[2],
+            y_hi: s[3],
+        }
+    }
+
+    /// BOTH of `axis`'s sides pinned → its length is fixed (skip the length
+    /// prompt).
+    fn both(&self, axis: ParameterAxis) -> bool {
+        match axis {
+            ParameterAxis::X => self.x_lo && self.x_hi,
+            ParameterAxis::Y => self.y_lo && self.y_hi,
+        }
+    }
+
+    /// EITHER of `axis`'s sides pinned → its position is fixed (skip the
+    /// position prompt).
+    fn any(&self, axis: ParameterAxis) -> bool {
+        match axis {
+            ParameterAxis::X => self.x_lo || self.x_hi,
+            ParameterAxis::Y => self.y_lo || self.y_hi,
+        }
+    }
+
+    /// When a length on `axis` changes, keep the HI side fixed (shifting `lo`)
+    /// rather than anchoring `lo`? True only when the HI side alone is pinned.
+    fn keep_hi(&self, axis: ParameterAxis) -> bool {
+        match axis {
+            ParameterAxis::X => self.x_hi && !self.x_lo,
+            ParameterAxis::Y => self.y_hi && !self.y_lo,
+        }
+    }
+}
+
 impl AppController {
     /// The pending rect's `(lo, hi)` corners as `Point2f64` — the form the
     /// document validators take.
@@ -103,6 +157,40 @@ impl AppController {
         });
     }
 
+    /// DORMER-only: open the LENGTH stage for `axis` unless BOTH its sides are
+    /// pinned — then its length is fixed (the gap between the two snapped refs),
+    /// so skip it: X skips to Y's length, Y skips to the position/finalize
+    /// advance. The pavilion never calls this (pins are always unset there), so
+    /// its LenX→LenY flow is unchanged.
+    pub(super) fn open_dormer_len_stage(
+        &mut self,
+        axis: ParameterAxis,
+        lo: (f32, f32),
+        len: (f32, f32),
+    ) -> Result<(), String> {
+        // Every pin read is gated on `is_dormer` so a stale pin (pins are reset
+        // at fewer sites than the flag) is provably inert on any non-dormer
+        // path — the invariant holds by construction, not by luck.
+        match axis {
+            ParameterAxis::X => {
+                if self.pending_rect_is_dormer && self.pending_rect_pins.both(ParameterAxis::X) {
+                    self.open_dormer_len_stage(ParameterAxis::Y, lo, len)
+                } else {
+                    self.pending_roof_rect = Some(PendingCeilingRect::LenX { lo, len });
+                    Ok(())
+                }
+            }
+            ParameterAxis::Y => {
+                if self.pending_rect_is_dormer && self.pending_rect_pins.both(ParameterAxis::Y) {
+                    self.advance_roof_rect(lo, len, &[ParameterAxis::X, ParameterAxis::Y])
+                } else {
+                    self.pending_roof_rect = Some(PendingCeilingRect::LenY { lo, len });
+                    Ok(())
+                }
+            }
+        }
+    }
+
     /// Advance the pending rect past its length stages: open the first
     /// POSITION question that has an outline reference to measure from
     /// (`remaining` lists the axes still to ask, in flow order — X's LO
@@ -120,6 +208,13 @@ impl AppController {
         remaining: &[ParameterAxis],
     ) -> Result<(), String> {
         for &axis in remaining {
+            // DORMER pin: a side snapped onto a reference fixes that axis's
+            // POSITION exactly — the fitted `lo` coordinate stands, so skip the
+            // position question (un-overridable by a later typed value). The
+            // pavilion never sets pins, so this branch never fires there.
+            if self.pending_rect_is_dormer && self.pending_rect_pins.any(axis) {
+                continue;
+            }
             let coord = match axis {
                 ParameterAxis::X => lo.0,
                 ParameterAxis::Y => lo.1,
@@ -136,15 +231,23 @@ impl AppController {
             }
             // None → logged auto-resolve: the drawn coordinate is accepted.
         }
-        let idx = self.current_storey_idx.unwrap_or(0);
-        self.materialize();
-        let storey = self
-            .current_record
-            .as_ref()
-            .and_then(|r| r.data.storeys.get(idx))
-            .ok_or("no storey to assign a ceiling rect to")?;
-        let (plo, phi) = Self::rect_corners_f64(lo, len);
-        document::validate_roof_rect_placement(storey, plo, phi)?;
+        // The PAVILION placement check requires a FLAT, unclaimed ceiling region.
+        // A DORMER is meant to sit on the roof SLOPE (a sloped, apex-claimed
+        // region), so this check would wrongly reject it — and the rejection,
+        // swallowed by the dormer caller, silently strands the FSM on the width
+        // prompt. The dormer's own `validate_dormer` runs at the height commit,
+        // so skip this pavilion-only check for the dormer path.
+        if !self.pending_rect_is_dormer {
+            let idx = self.current_storey_idx.unwrap_or(0);
+            self.materialize();
+            let storey = self
+                .current_record
+                .as_ref()
+                .and_then(|r| r.data.storeys.get(idx))
+                .ok_or("no storey to assign a ceiling rect to")?;
+            let (plo, phi) = Self::rect_corners_f64(lo, len);
+            document::validate_roof_rect_placement(storey, plo, phi)?;
+        }
         self.pending_roof_rect = Some(PendingCeilingRect::Height { lo, len });
         Ok(())
     }
@@ -183,9 +286,24 @@ impl AppController {
             .and_then(|r| r.data.storeys.get(idx))
             .ok_or("no storey to assign a ceiling rect to")?;
         document::validate_roof_rect_length(storey, axis, len_m)?;
+        // DORMER pin: when the HI side of this axis is pinned, keep IT fixed as
+        // the length changes (shift `lo`); the pavilion always anchors `lo`.
+        let lo = if self.pending_rect_is_dormer && self.pending_rect_pins.keep_hi(axis) {
+            match axis {
+                ParameterAxis::X => (lo.0 + len.0 - len_m, lo.1),
+                ParameterAxis::Y => (lo.0, lo.1 + len.1 - len_m),
+            }
+        } else {
+            lo
+        };
         if on_x {
-            self.pending_roof_rect = Some(PendingCeilingRect::LenY { lo, len: proposed });
-            Ok(())
+            // DORMER: skip LenY when Y is fully pinned; the pavilion always asks.
+            if self.pending_rect_is_dormer {
+                self.open_dormer_len_stage(ParameterAxis::Y, lo, proposed)
+            } else {
+                self.pending_roof_rect = Some(PendingCeilingRect::LenY { lo, len: proposed });
+                Ok(())
+            }
         } else {
             self.advance_roof_rect(lo, proposed, &[ParameterAxis::X, ParameterAxis::Y])
         }
@@ -199,8 +317,13 @@ impl AppController {
         match self.pending_roof_rect.as_ref() {
             Some(PendingCeilingRect::LenX { lo, len }) => {
                 let (lo, len) = (*lo, *len);
-                self.pending_roof_rect = Some(PendingCeilingRect::LenY { lo, len });
-                Ok(())
+                // DORMER: skip LenY when Y is fully pinned; the pavilion asks.
+                if self.pending_rect_is_dormer {
+                    self.open_dormer_len_stage(ParameterAxis::Y, lo, len)
+                } else {
+                    self.pending_roof_rect = Some(PendingCeilingRect::LenY { lo, len });
+                    Ok(())
+                }
             }
             Some(PendingCeilingRect::LenY { lo, len }) => {
                 let (lo, len) = (*lo, *len);
@@ -308,6 +431,9 @@ impl AppController {
             );
         }
         self.pending_roof_rect = None;
+        self.dormer_mode = false;
+        self.pending_rect_is_dormer = false;
+        self.pending_rect_pins = RectPins::default();
         self.mark_dirty()?;
         // Regions-as-truth: recompose the ceilings from the inputs once.
         self.recompose_ceilings(idx);
@@ -319,6 +445,9 @@ impl AppController {
     /// Discard the in-flight ceiling rect at any stage.
     pub fn cancel_pending_roof_rect(&mut self) {
         self.pending_roof_rect = None;
+        self.dormer_mode = false;
+        self.pending_rect_is_dormer = false;
+        self.pending_rect_pins = RectPins::default();
     }
 
     /// True while ANY ceiling-rect input is in flight.

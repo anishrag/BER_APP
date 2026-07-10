@@ -304,11 +304,10 @@ impl AppController {
             return None;
         }
         let ring = self.previous_storey_ring()?;
-        // ~8% of the previous diagonal: forgiving enough that a wall the user
+        // Viewport-relative snap radius: forgiving enough that a wall the user
         // drew "close" to the storey below lands on it, yet far below the depth
         // of a real extension (e.g. a garage bump-out), which stays un-snapped.
-        let tol =
-            (manip_plan::ring_diagonal(&ring) * self.tuning.new_storey.snap_tol_ratio).max(1e-3);
+        let tol = self.snap_tol_extend();
         let snapped = manip_plan::snap_stroke_to_ring(points, &ring, tol);
         let moved = points
             .iter()
@@ -422,23 +421,20 @@ impl AppController {
             }
             _ => Vec::new(),
         };
-        let pts = {
-            let tol = (manip_plan::ring_diagonal(&prev_ring)
-                * self.tuning.new_storey.snap_tol_ratio)
-                .max(1e-3);
-            manip_plan::snap_stroke_to_segments(
-                &pts,
-                &phase_segs,
-                tol,
-                manip_plan::SnapKind::ToPhaseBoundary,
-            )
-        };
+        let extend_tol = self.snap_tol_extend();
+        let pts = manip_plan::snap_stroke_to_segments(
+            &pts,
+            &phase_segs,
+            extend_tol,
+            manip_plan::SnapKind::ToPhaseBoundary,
+        );
         let undo_snap = self.current_history_snapshot();
         let (pinned, active) = self.document.carve_outline_from_previous(
             &pts,
             &prev_ring,
             &self.tuning.subarea,
             &phase_segs,
+            extend_tol,
         )?;
         // Supply the storey-below footprint as the position reference so the
         // dimensioning loop, once the wall LENGTHS are pinned, asks where
@@ -568,9 +564,7 @@ impl AppController {
         if self.sketch_engine.edit_tool != EditTools::ExtendCurve {
             if let Some(prev_ring) = self.previous_storey_ring() {
                 let cur_ring = self.document.floor_plan.get_points();
-                let tol = (manip_plan::ring_diagonal(&prev_ring)
-                    * self.tuning.new_storey.snap_tol_ratio)
-                    .max(1e-3);
+                let tol = self.snap_tol_extend();
                 // "On/near the current outline" → an attach seat, frozen.
                 let attach_tol = (manip_plan::ring_diagonal(&cur_ring) * 0.03).max(1e-3);
                 let free_idx: Vec<usize> = (0..pts.len())

@@ -2135,8 +2135,11 @@ mod tests {
             Point2f32::new(2.0, 6.0),
             Point2f32::new(2.05, 2.05),
         ];
+        // Wall-leveling snap tol (metres): 0.3 m so the 0.1 m-off near draw
+        // levels but the 2.3 m-off far draw does not (matches the pre-viewport
+        // region-relative value for this ~3×4 m room).
         let (_boundary, outcome) = doc
-            .carve_or_cut_in_available(&near, &[], &tuning, &refs)
+            .carve_or_cut_in_available(&near, &[], &tuning, &refs, 0.3)
             .expect("the closed room carves");
         let crate::SubareaOutcome::Area(plan) = outcome else {
             panic!("a closed loop is a carve, not a cut");
@@ -2161,7 +2164,7 @@ mod tests {
             Point2f32::new(2.05, 2.05),
         ];
         let (_boundary, outcome) = doc
-            .carve_or_cut_in_available(&far, &[], &tuning, &refs)
+            .carve_or_cut_in_available(&far, &[], &tuning, &refs, 0.3)
             .expect("the closed room carves");
         let crate::SubareaOutcome::Area(plan) = outcome else {
             panic!("a closed loop is a carve, not a cut");
@@ -3285,7 +3288,7 @@ mod tests {
         let outcome = doc
             .outline
             .floor_plan
-            .carve_or_cut(&stroke, &SubareaTuning::default(), false)
+            .carve_or_cut(&stroke, &SubareaTuning::default(), false, None)
             .expect("the closed rect carves");
         let SubareaOutcome::Area(plan) = outcome else {
             panic!("a closed loop carves an area");

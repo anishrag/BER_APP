@@ -816,6 +816,40 @@ pub(super) fn render<F: FnMut(UiEvent)>(
         return;
     }
 
+    // ── Roof: DORMER flat-top height ────────────────────────────────────────
+    // The dormer reuses the rect FSM, so its height stage IS
+    // `ceiling_rect_height_pending`; the `ceiling_rect_is_dormer` discriminator
+    // reroutes the title + Set event so the surrounding roof isn't resloped.
+    if view.ceiling_rect_height_pending && view.ceiling_rect_is_dormer {
+        let actions = vec![
+            Action::new(
+                "Set",
+                "Raise a flat-topped dormer to this height (the roof around it keeps its slope)",
+                SketchEvent::AssignDormerHeight,
+            )
+            .primary(),
+            ceiling_rect_cancel(),
+        ];
+        show_box(
+            ctx,
+            rect,
+            "Dormer height (m)",
+            None,
+            "e.g. 2.6",
+            view.roof_error,
+            view.ceiling_apex_input,
+            &actions,
+            &mut view.cat_state.input_mode,
+            &mut view.cat_state.input_mode_pinned,
+            view.laser,
+            // Its own per-stage pristine token (see the flat-top block), so a
+            // rect → dormer transition re-arms the prefill guard.
+            Some(format!("roof-dormer-height|{}", view.ceiling_apex_open_seq).as_str()),
+            on_event,
+        );
+        return;
+    }
+
     // ── Roof: flat-top (rect) height ────────────────────────────────────────
     if view.ceiling_rect_height_pending {
         let actions = vec![

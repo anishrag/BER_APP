@@ -64,6 +64,14 @@ pub struct Storey {
     /// `#[serde(default)]` so older records load.
     #[serde(default, alias = "ceiling_apex_hints")]
     pub ceiling_apex_hints: Vec<CeilingApexHint>,
+    /// Flat-topped DORMER patches carved into this storey's sloped attic
+    /// ceiling: each raises its `footprint` to a single flat `top_z_m` while the
+    /// surrounding roof KEEPS its slope (the dormer does NOT reslope its
+    /// neighbours; its vertical walls fall out of `riser_faces`). Durable INPUT
+    /// like the apexes, replayed by `CeilingRegions::with_flat_patches` at
+    /// resolve. `#[serde(default)]` so older records load.
+    #[serde(default)]
+    pub dormers: Vec<Dormer>,
     /// Floor-slab thickness in metres between this storey's floor and the
     /// ceiling of the storey below it bears on. Durable INPUT like
     /// `ceiling_height_m` — asked first when the storey is added (never on

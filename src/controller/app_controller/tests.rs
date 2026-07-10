@@ -7232,6 +7232,8 @@ fn ceiling_ready_t_controller() -> AppController {
 #[test]
 fn ceiling_ridge_default_wall_bounds_its_own_arm() {
     let mut c = ceiling_ready_t_controller();
+    // ceiling-line snap radius 0.2 m (view-diag 5 m x 0.04).
+    c.set_view_world_diagonal_m(5.0);
     // Same-height split at y = 3 (Less side = the bottom bar): the bottom bar
     // and the top stub become two flat-default regions, so the bottom bar is a
     // region of its OWN that `ridge_region_ring` can return. (Direct push +
@@ -7358,6 +7360,9 @@ fn ceiling_ridge_line_input_matches_the_two_point_flow() {
 #[test]
 fn ceiling_ridge_snap_skips_the_cross_question_and_lands_on_the_wall() {
     let mut c = ceiling_ready_l_controller();
+    // Pin the ceiling-line snap radius to 0.2 m (view-diagonal 5 m × 0.04),
+    // the tolerance this test's ±0.1 m / ±0.5 m offsets were chosen for.
+    c.set_view_world_diagonal_m(5.0);
     c.set_roof_point_mode(true);
     assert!(c.ceiling_point_mode());
     // Drawn at x ≈ 5.9 — within 0.2 of the interior wall at x = 6; the
@@ -7502,6 +7507,8 @@ fn ceiling_ridge_start_snap_skips_its_question_and_unsnap_reopens_it() {
 #[test]
 fn unsnap_roof_ridge_cross_reopens_the_cross_question_with_the_drawn_coord() {
     let mut c = ceiling_ready_l_controller();
+    // ceiling-line snap radius 0.2 m (view-diag 5 m x 0.04).
+    c.set_view_world_diagonal_m(5.0);
     c.set_roof_point_mode(true);
     c.apply_roof_ridge_stroke_event(&[(5.88, 0.5), (5.92, 2.0), (5.9, 3.5)]);
     // Cross snapped: pass the length, then the start question (the cross's
@@ -7928,6 +7935,8 @@ fn ceiling_ridge_stage_order_table() {
     ];
     for (name, stroke, want) in rows {
         let mut c = ceiling_ready_l_controller();
+        // ceiling-line snap radius 0.2 m (view-diag 5 m x 0.04).
+        c.set_view_world_diagonal_m(5.0);
         c.set_roof_point_mode(true);
         c.apply_roof_ridge_stroke_event(&stroke);
         let mut seq: Vec<&str> = Vec::new();
@@ -8125,6 +8134,8 @@ fn centre_rejection_lands_on_the_open_prompt_and_only_ridge_stages_offer_it() {
     // The roof-point tap flow's prompt does NOT offer Centre, and the
     // ridge-centre handler is a no-op on it.
     let mut c = ceiling_apex_ready_controller();
+    // ceiling-line snap radius 0.2 m (view-diag 5 m x 0.04).
+    c.set_view_world_diagonal_m(5.0);
     c.ceiling_point_tap(3.8, 5.2);
     let ui = c.position_prompt_for_ui().expect("tap flow's X prompt");
     assert!(!ui.offers_centre, "the tap flow has no Centre");
@@ -8140,6 +8151,8 @@ fn centre_rejection_lands_on_the_open_prompt_and_only_ridge_stages_offer_it() {
     // 10 m along Y) but exceeds the 4 m run through the midpoint — the
     // Centre click is rejected exactly like a typed start.
     let mut c = ceiling_ready_l_controller();
+    // ceiling-line snap radius 0.2 m (view-diag 5 m x 0.04).
+    c.set_view_world_diagonal_m(5.0);
     c.set_roof_point_mode(true);
     c.apply_roof_ridge_stroke_event(&[(7.98, 0.5), (8.02, 5.5)]);
     c.skip_roof_ridge_length().unwrap(); // drawn 5 m stands
@@ -8159,6 +8172,8 @@ fn centre_rejection_lands_on_the_open_prompt_and_only_ridge_stages_offer_it() {
 
     // A length that fits the band centres within it: 3 m → lo = 0.5.
     let mut c = ceiling_ready_l_controller();
+    // ceiling-line snap radius 0.2 m (view-diag 5 m x 0.04).
+    c.set_view_world_diagonal_m(5.0);
     c.set_roof_point_mode(true);
     c.apply_roof_ridge_stroke_event(&[(7.98, 0.5), (8.02, 5.5)]);
     c.assign_roof_ridge_length(3.0).unwrap();
@@ -8173,10 +8188,145 @@ fn centre_rejection_lands_on_the_open_prompt_and_only_ridge_stages_offer_it() {
     );
 }
 
+/// The T-shaped plan from bug report 36949322: a 5×5 main body with a 2×2
+/// protrusion on top (x ∈ [1, 3], y ∈ [5, 7]). Default ceiling 1.0 m, roof-point
+/// mode ready.
+fn plan_36949322_controller() -> AppController {
+    let p = |x: f32, y: f32| Point2f32::new(x, y);
+    let mut c = AppController::new(crate::engine::open_db(":memory:").unwrap());
+    let _ = c.create_ber(
+        "T".into(),
+        chrono::NaiveDate::from_ymd_opt(2026, 1, 1).unwrap(),
+    );
+    c.document.floor_plan = FloorPlan::from_clean_ring(&[
+        p(0., 0.),
+        p(5., 0.),
+        p(5., 5.),
+        p(3., 5.),
+        p(3., 7.),
+        p(1., 7.),
+        p(1., 5.),
+        p(0., 5.),
+    ])
+    .unwrap();
+    c.document.dimensioning.scale_set = true;
+    c.document.dimensioning.known_params = c.document.floor_plan.all_active_params();
+    c.commit_to_ber().unwrap();
+    c.set_default_ceiling_height(1.0).expect("height applies");
+    c.set_roof_point_mode(true);
+    assert!(c.ceiling_point_mode());
+    c
+}
+
+/// Report 36949322 — "I drew the ridge and it asked me about centering from one
+/// side but not the other." Reproduces the reported T-plan (5×5 body + a 2×2
+/// protrusion whose right wall sits at x=3). ROOT CAUSE: the ridge's right end
+/// lines up (in X) with the PROTRUSION's wall coordinate (x=3), so the end-snap
+/// fires and reads that end as a gable — even though that wall bounds the
+/// protrusion up at y∈[5,7], NOT the ridge down at y=2.5, where x=3 is interior.
+/// A gable-fixed end determines the along-ridge position by construction, so the
+/// along (START) stage — and its Centre — is skipped; only the perpendicular
+/// CROSS offset still asks. Move the ridge end off that stray coordinate and BOTH
+/// stages ask Centre. Snapping a wall the ridge doesn't physically reach is the
+/// confusing part.
+#[test]
+fn ridge_end_snapping_a_stray_wall_coordinate_skips_the_along_stage() {
+    // A — the reported ridge: right end at x=3, the protrusion's wall coordinate.
+    // Cross asks Centre; the along stage is SKIPPED (right end read as a gable).
+    let mut c = plan_36949322_controller();
+    // ceiling-line snap radius 0.2 m (view-diag 5 m x 0.04).
+    c.set_view_world_diagonal_m(5.0);
+    c.apply_roof_ridge_stroke_event(&[(1.49, 2.5), (2.2, 2.52), (3.0, 2.49)]);
+    // The ridge is NOT on the generic snap_overlay path.
+    assert!(
+        c.snap_overlay().is_empty(),
+        "ridge is not on the generic snap_overlay path"
+    );
+    if c.ceiling_ridge_length_pending() {
+        c.skip_roof_ridge_length().unwrap();
+    }
+    let cross = c
+        .position_prompt_for_ui()
+        .expect("cross (perpendicular) stage");
+    assert_eq!(cross.axis, ParameterAxis::Y);
+    assert!(cross.offers_centre, "perpendicular offset offers Centre");
+    // The end snap IS electively un-snappable — via the ridge's OWN tag
+    // (`ceiling_ridge_snap_tag`), shown from the cross stage on.
+    assert!(
+        c.ceiling_ridge_snap_tag().is_some(),
+        "the ridge exposes its own Don't-snap tag for the stray-coordinate end snap"
+    );
+    c.skip_position_dimension().unwrap();
+    assert!(
+        c.position_prompt_for_ui().is_none(),
+        "along stage SKIPPED — the right end snapped x=3 (the protrusion wall coord)"
+    );
+    assert!(
+        c.ceiling_ridge_height_pending(),
+        "so it goes straight to height — Centre was offered on ONE axis only"
+    );
+
+    // A2 — the un-snap the assessor wanted ALREADY EXISTS: redraw the same ridge,
+    // and at the cross stage tap the ridge's Don't-snap tag; the end reverts to
+    // its drawn coordinate, so skipping the cross RE-OPENS the along (START) stage
+    // with its Centre instead of skipping it.
+    let mut c = plan_36949322_controller();
+    // ceiling-line snap radius 0.2 m (view-diag 5 m x 0.04).
+    c.set_view_world_diagonal_m(5.0);
+    c.apply_roof_ridge_stroke_event(&[(1.49, 2.5), (2.2, 2.52), (3.0, 2.49)]);
+    if c.ceiling_ridge_length_pending() {
+        c.skip_roof_ridge_length().unwrap();
+    }
+    assert!(
+        c.ceiling_ridge_snap_tag().is_some(),
+        "the end-snap Don't-snap tag is present at the cross stage"
+    );
+    // Tap Don't-snap: the end reverts and the flow reopens at the Length
+    // question (end snap dropped); skip length→cross and the along stage appears.
+    c.unsnap_roof_ridge();
+    assert!(
+        c.ceiling_ridge_length_pending(),
+        "un-snapping the end reopens the length question"
+    );
+    c.skip_roof_ridge_length().unwrap(); // → cross
+    c.skip_position_dimension().unwrap(); // skip cross → along
+    let start = c
+        .position_prompt_for_ui()
+        .expect("with the end un-snapped the along stage now appears");
+    assert_eq!(start.axis, ParameterAxis::X);
+    assert!(
+        start.offers_centre,
+        "the re-opened along stage offers Centre"
+    );
+
+    // C — control: the SAME ridge with its right end at x=2.7 (no wall coordinate
+    // within the 0.2 m snap tol) → no gable snap, so the along stage appears and
+    // Centre is offered on BOTH axes.
+    let mut c = plan_36949322_controller();
+    // ceiling-line snap radius 0.2 m (view-diag 5 m x 0.04).
+    c.set_view_world_diagonal_m(5.0);
+    c.apply_roof_ridge_stroke_event(&[(1.6, 2.5), (2.15, 2.52), (2.7, 2.49)]);
+    if c.ceiling_ridge_length_pending() {
+        c.skip_roof_ridge_length().unwrap();
+    }
+    let cross = c.position_prompt_for_ui().expect("cross stage");
+    assert!(cross.offers_centre);
+    c.skip_position_dimension().unwrap();
+    let start = c
+        .position_prompt_for_ui()
+        .expect("along stage appears when no end snaps a stray coordinate");
+    assert_eq!(start.axis, ParameterAxis::X);
+    assert!(
+        start.offers_centre,
+        "with no gable snap the along position ALSO offers Centre — both axes asked"
+    );
+}
+
 // ── roof RECT (flat-topped hip / pavilion) ──────────────────────────────────
 
 /// A hand-wavy CLOSED rectangle around (2,2)..(6,5) — routes to the rect
 /// flow (ends meet + encloses area, the carve's closure classification).
+
 fn rect_stroke() -> Vec<(f32, f32)> {
     vec![
         (2.0, 2.0),
@@ -8429,6 +8579,476 @@ fn ceiling_rect_survives_reload_and_rederive_fixpoint() {
         before,
         "derive → reload → derive is a fixpoint"
     );
+}
+
+/// DORMER round-trip (the rect flow's non-resloping sibling): a CLOSED stroke
+/// in DORMER mode reuses the pavilion rect FSM — discriminated by
+/// `pending_rect_is_dormer` — but its height stage commits a durable `Dormer`
+/// (NOT four apexes). `recompose` then flattens the footprint to the dormer
+/// top via `with_flat_patches` while the SURROUNDING ceiling keeps its
+/// original plane (unlike the pavilion, which reslopes the whole region up),
+/// and `riser_faces` walls the dormer for free. Survives reload + re-derive.
+#[test]
+fn dormer_closed_stroke_commits_a_flat_patch_without_resloping() {
+    let mut c = dimensioned_square_controller();
+    c.set_default_ceiling_height(2.4).unwrap();
+    c.set_dormer_mode(true);
+    assert!(c.dormer_mode() && c.dormer_available());
+    // Entering dormer mode is mutually exclusive with the ceiling-point tool.
+    assert!(
+        !c.ceiling_point_mode(),
+        "dormer mode clears ceiling-point mode"
+    );
+
+    // A closed rectangle inside the ceiling → the shared rect FSM, flagged a
+    // dormer.
+    c.apply_dormer_stroke_event(&rect_stroke());
+    assert!(c.ceiling_rect_pending(), "closed stroke → rect FSM");
+    assert!(c.pending_rect_is_dormer(), "…flagged a dormer");
+
+    // Drive the shared FSM by accepting the drawn values (skip lengths +
+    // positions), exactly like the pavilion fixpoint test — only the commit
+    // differs.
+    c.skip_roof_rect_length().unwrap();
+    c.skip_roof_rect_length().unwrap();
+    c.skip_position_dimension().unwrap(); // PosX: drawn stands
+    c.skip_position_dimension().unwrap(); // PosY: drawn stands → finalize → height
+    assert!(c.ceiling_rect_height_pending() && c.pending_rect_is_dormer());
+
+    c.assign_dormer_height(2.6).expect("dormer commits");
+    assert!(!c.ceiling_rect_pending(), "flow complete");
+
+    c.materialize();
+    let storey = &c.current_record.as_ref().unwrap().data.storeys[0];
+    // The DURABLE record is a dormer — NOT apexes (that's the pavilion).
+    assert_eq!(storey.dormers.len(), 1, "one durable dormer");
+    assert!((storey.dormers[0].top_z_m - 2.6).abs() < 1e-6);
+    assert!(
+        storey.ceiling_apexes.is_empty(),
+        "a dormer stamps no apexes"
+    );
+    // A flat region at the dormer top…
+    assert!(
+        storey
+            .ceilings
+            .regions
+            .iter()
+            .any(|r| r.flat_z().is_some_and(|z| (z - 2.6).abs() < 1e-6)),
+        "flat patch at the dormer top"
+    );
+    // …while the SURROUNDING ceiling stays at its original 2.4 (NOT resloped
+    // up to 2.6 the way a pavilion would).
+    assert!(
+        storey
+            .ceilings
+            .regions
+            .iter()
+            .any(|r| r.flat_z().is_some_and(|z| (z - 2.4).abs() < 1e-6)),
+        "the surrounding ceiling keeps its original height"
+    );
+    // The height step at the footprint boundary walls the dormer for free.
+    assert!(
+        !storey.ceilings.riser_faces().is_empty(),
+        "dormer riser walls derived"
+    );
+    // The committed-dormer overlay labels it.
+    let views = c.dormer_views();
+    assert_eq!(views.len(), 1, "one committed dormer overlay");
+    assert_eq!(views[0].1, "⌐ 2.60 m");
+
+    // Reload + re-derive is a fixpoint.
+    let before = ceiling_vertex_fingerprint(&c);
+    let id = c.current_record.as_ref().unwrap().id.clone();
+    c.flush_if_dirty().unwrap();
+    c.open_ber(&id).unwrap();
+    let storey = &c.current_record.as_ref().unwrap().data.storeys[0];
+    assert_eq!(storey.dormers.len(), 1, "dormer persisted");
+    assert_eq!(c.dormer_views().len(), 1, "overlay re-derives");
+    c.mark_dirty().unwrap();
+    c.materialize();
+    assert_eq!(
+        ceiling_vertex_fingerprint(&c),
+        before,
+        "derive → reload → derive is a fixpoint"
+    );
+}
+
+/// DORMER snapping + pinning (the standard draw-tool behaviour, added to the
+/// dormer path only): a second dormer drawn slightly off an EXISTING dormer's
+/// edge pre-snaps FLUSH onto it, records an elective snap tag, and PINS that
+/// side — its position prompt (PosX here) is SKIPPED, so the snapped coordinate
+/// is un-overridable: a later typed X length extends the OPPOSITE side while the
+/// pinned side stays put. Contrast: a pavilion rect with no references nearby
+/// never snaps and is still asked all four prompts (the flat-top path is
+/// unchanged).
+#[test]
+fn dormer_snaps_flush_to_a_neighbour_and_pins_the_snapped_side() {
+    let mut c = dimensioned_square_controller();
+    c.set_default_ceiling_height(2.4).unwrap();
+    c.set_dormer_mode(true);
+    assert!(c.dormer_mode());
+
+    // Commit a first dormer at roughly (2,2)–(6,5) — well clear of the eave, so
+    // it doesn't snap to anything itself.
+    c.apply_dormer_stroke_event(&rect_stroke());
+    assert!(c.pending_rect_is_dormer(), "first dormer pends");
+    assert!(
+        c.snap_overlay().is_empty(),
+        "first dormer is far from every reference — no snap"
+    );
+    c.skip_roof_rect_length().unwrap();
+    c.skip_roof_rect_length().unwrap();
+    c.skip_position_dimension().unwrap();
+    c.skip_position_dimension().unwrap();
+    c.assign_dormer_height(2.6).expect("first dormer commits");
+    c.materialize();
+
+    // The first dormer's RIGHT edge, the reference the second will snap onto.
+    let rx = {
+        let storey = &c.current_record.as_ref().unwrap().data.storeys[0];
+        assert_eq!(storey.dormers.len(), 1, "first dormer durable");
+        storey.dormers[0]
+            .footprint
+            .iter()
+            .map(|p| p.x)
+            .fold(f64::MIN, f64::max) as f32
+    };
+
+    // A second dormer whose LEFT side sits 0.05 m off `rx` (< the 0.15 m snap
+    // tolerance) and runs ALONGSIDE the first dormer's right edge (y ∈ [2.5,
+    // 4.5], inside the first dormer's [~2, ~5] extent) — so ONLY the left side
+    // is in reach of a reference.
+    let x0 = rx + 0.05;
+    let x1 = rx + 3.0;
+    c.apply_dormer_stroke_event(&[
+        (x0, 2.5),
+        (x0 + 1.4, 2.48),
+        (x1, 2.5),
+        (x1 + 0.02, 3.5),
+        (x1, 4.5),
+        (x0 + 1.4, 4.52),
+        (x0, 4.5),
+        (x0 - 0.02, 3.5),
+        (x0, 2.55),
+    ]);
+    assert!(c.pending_rect_is_dormer(), "second dormer pends");
+    assert!(
+        !c.snap_overlay().is_empty(),
+        "the left side snapped → an elective snap tag is recorded"
+    );
+    // The left side landed FLUSH on the neighbour's edge…
+    let outline = c.pending_roof_rect_outline().expect("dashed overlay");
+    assert!(
+        (outline[0].0 as f32 - rx).abs() < 0.02,
+        "left side snapped to rx={rx}, got {}",
+        outline[0].0
+    );
+    // …but only the left side is pinned, so its LENGTH is still asked (X not
+    // fully pinned).
+    assert_eq!(
+        c.ceiling_rect_length_pending(),
+        Some(ParameterAxis::X),
+        "one-sided pin still asks the length"
+    );
+
+    // A typed X length extends the OPPOSITE (right) side; the pinned left side
+    // is un-overridable — it stays on rx.
+    c.assign_roof_rect_length(3.0).expect("width applies");
+    let outline = c.pending_roof_rect_outline().expect("overlay");
+    assert!(
+        (outline[0].0 as f32 - rx).abs() < 0.02,
+        "pinned left side unmoved by the typed length"
+    );
+    assert!(
+        (outline[1].0 as f32 - (rx + 3.0)).abs() < 0.02,
+        "the RIGHT side took the typed 3 m width"
+    );
+    assert_eq!(c.ceiling_rect_length_pending(), Some(ParameterAxis::Y));
+    c.assign_roof_rect_length(2.0).expect("depth applies");
+
+    // The pinned axis's POSITION prompt (PosX) is SKIPPED — the only position
+    // question is PosY.
+    assert!(c.ceiling_rect_position_pending(), "a position prompt is up");
+    let ui = c.position_prompt_for_ui().expect("position prompt");
+    assert_eq!(
+        ui.axis,
+        ParameterAxis::Y,
+        "PosX skipped (pinned); only PosY is asked"
+    );
+    let outline = c.pending_roof_rect_outline().expect("overlay");
+    assert!(
+        (outline[0].0 as f32 - rx).abs() < 0.02,
+        "pinned left side still on rx at the position stage"
+    );
+
+    // Tap-to-unsnap replays through `SnapAction::Dormer`: the stroke re-fits
+    // UN-snapped (left side reverts to the drawn x0, the pin is gone) and the
+    // FSM re-opens at LenX.
+    c.unsnap_last();
+    assert!(
+        c.pending_rect_is_dormer(),
+        "the re-fit re-opens the dormer FSM"
+    );
+    let outline = c.pending_roof_rect_outline().expect("re-fit overlay");
+    assert!(
+        (outline[0].0 as f32 - x0).abs() < 0.05,
+        "un-snapped left side back on the drawn x0={x0}, got {}",
+        outline[0].0
+    );
+    assert_eq!(
+        c.ceiling_rect_length_pending(),
+        Some(ParameterAxis::X),
+        "un-snapped → back at LenX"
+    );
+
+    // The pavilion (flat-top rect) path is UNCHANGED: no refs nearby, no snap,
+    // all four prompts still asked.
+    let mut p = ceiling_apex_ready_controller();
+    p.apply_roof_ridge_stroke_event(&rect_stroke());
+    assert!(
+        p.snap_overlay().is_empty(),
+        "the pavilion path never pre-snaps"
+    );
+    assert_eq!(p.ceiling_rect_length_pending(), Some(ParameterAxis::X));
+    p.assign_roof_rect_length(4.0).unwrap();
+    assert_eq!(p.ceiling_rect_length_pending(), Some(ParameterAxis::Y));
+    p.assign_roof_rect_length(2.0).unwrap();
+    assert_eq!(
+        p.position_prompt_for_ui().expect("PosX").axis,
+        ParameterAxis::X,
+        "pavilion still asks PosX"
+    );
+    p.apply_position_dimension(3.0).unwrap();
+    assert_eq!(
+        p.position_prompt_for_ui().expect("PosY").axis,
+        ParameterAxis::Y,
+        "pavilion still asks PosY"
+    );
+}
+
+/// The HI-side pin: when only a dormer's RIGHT edge snaps to a reference, a
+/// typed X length must keep THAT edge fixed and move the left side (the
+/// `keep_hi` `lo` recompute in `assign_roof_rect_length`) — the mirror image of
+/// the LO-pin covered above.
+#[test]
+fn dormer_hi_side_pin_keeps_the_right_edge_fixed() {
+    let mut c = dimensioned_square_controller();
+    // dormer snap radius 0.15 m (min clamp) - the eave stays clear.
+    c.set_view_world_diagonal_m(3.0);
+    c.set_default_ceiling_height(2.4).unwrap();
+    c.set_dormer_mode(true);
+
+    // A first dormer ~ (2,2)-(6,5); its LEFT edge is the reference the second
+    // will snap its RIGHT side onto.
+    c.apply_dormer_stroke_event(&rect_stroke());
+    c.skip_roof_rect_length().unwrap();
+    c.skip_roof_rect_length().unwrap();
+    c.skip_position_dimension().unwrap();
+    c.skip_position_dimension().unwrap();
+    c.assign_dormer_height(2.6).expect("first dormer commits");
+    c.materialize();
+
+    let lx = {
+        let storey = &c.current_record.as_ref().unwrap().data.storeys[0];
+        storey.dormers[0]
+            .footprint
+            .iter()
+            .map(|p| p.x)
+            .fold(f64::MAX, f64::min) as f32
+    };
+
+    // Second dormer in the ~2 m gap LEFT of the first (which sits at x∈[2,6]),
+    // its RIGHT side 0.05 m off `lx` and running alongside it (y ∈ [2.5, 4.5],
+    // inside the first's extent) — so ONLY the right (HI) side snaps.
+    let x1 = lx - 0.05; // right side → snaps to lx
+    let x0 = lx - 1.6; // left side → free, still clear of the eave
+    c.apply_dormer_stroke_event(&[
+        (x0, 2.5),
+        (x0 + 0.7, 2.48),
+        (x1, 2.5),
+        (x1 + 0.02, 3.5),
+        (x1, 4.5),
+        (x0 + 0.7, 4.52),
+        (x0, 4.5),
+        (x0 - 0.02, 3.5),
+        (x0, 2.55),
+    ]);
+    assert!(!c.snap_overlay().is_empty(), "the right side snapped");
+    let outline = c.pending_roof_rect_outline().expect("dashed overlay");
+    assert!(
+        (outline[1].0 as f32 - lx).abs() < 0.02,
+        "right side snapped to lx={lx}, got {}",
+        outline[1].0
+    );
+    assert_eq!(
+        c.ceiling_rect_length_pending(),
+        Some(ParameterAxis::X),
+        "one-sided pin still asks the length"
+    );
+
+    // A typed X length keeps the pinned RIGHT side on lx and moves the LEFT side.
+    c.assign_roof_rect_length(1.0).expect("width applies");
+    let outline = c.pending_roof_rect_outline().expect("overlay");
+    assert!(
+        (outline[1].0 as f32 - lx).abs() < 0.02,
+        "pinned right side unmoved by the typed length"
+    );
+    assert!(
+        (outline[0].0 as f32 - (lx - 1.0)).abs() < 0.02,
+        "the LEFT side took the typed 1 m width"
+    );
+    assert_eq!(
+        c.ceiling_rect_length_pending(),
+        Some(ParameterAxis::Y),
+        "advanced past the pinned axis to LenY"
+    );
+}
+
+/// REGRESSION (bug df354150): a dormer cheek running alongside a SHORTER
+/// parallel reference (partial overlap) must snap its WHOLE side flush onto it
+/// and PIN it — the whole-EDGE snap, not the old per-POINT pre-snap that only
+/// pulled the stroke points near the reference and left the fitted side off it.
+///
+/// Setup: one committed dormer A (footprint ~[2,6]×[2,5]); its SHORT right edge
+/// (x≈6, y∈[~2,~5]) is the LEFT reference for a new dormer C, and the storey
+/// eave (x=10) is the RIGHT reference. C is drawn to the right of A, TALLER than
+/// A (y∈[1,6]) so its LEFT cheek overlaps A's right edge only PARTIALLY (the
+/// reference is a subset of the cheek — the exact bug). Under the old point
+/// pre-snap only the cheek points level with A's edge moved, leaving the fitted
+/// left side off x≈6, so the side wasn't pinned and the width was still asked.
+/// The whole-edge snap lands the ENTIRE left side flush and pins it; with the
+/// right cheek pinned on the eave too, X is FULLY pinned and the WIDTH prompt
+/// (LenX) is SKIPPED — the FSM goes straight to the depth (LenY).
+#[test]
+fn dormer_partial_overlap_snaps_both_cheeks_and_skips_the_width() {
+    let mut c = dimensioned_square_controller();
+    c.set_default_ceiling_height(2.4).unwrap();
+    c.set_dormer_mode(true);
+
+    // Dormer A over the clean flat ceiling. Far from every reference, snaps
+    // nothing itself.
+    c.apply_dormer_stroke_event(&rect_stroke());
+    assert!(c.snap_overlay().is_empty(), "A is clear of every reference");
+    c.skip_roof_rect_length().unwrap();
+    c.skip_roof_rect_length().unwrap();
+    c.skip_position_dimension().unwrap();
+    c.skip_position_dimension().unwrap();
+    c.assign_dormer_height(2.6).expect("dormer A commits");
+    c.materialize();
+
+    // A's SHORT right edge (the partial reference) and the eave (x = 10, the
+    // full-height reference).
+    let ax_r = {
+        let storey = &c.current_record.as_ref().unwrap().data.storeys[0];
+        assert_eq!(storey.dormers.len(), 1, "A durable");
+        storey.dormers[0]
+            .footprint
+            .iter()
+            .map(|p| p.x)
+            .fold(f64::MIN, f64::max) as f32
+    };
+    let eave_x = 10.0_f32;
+
+    // Dormer C to the RIGHT of A, TALLER (y∈[1,6]) than A — its LEFT cheek runs
+    // alongside A's short right edge with only PARTIAL overlap; its RIGHT cheek
+    // runs alongside the eave.
+    let x0 = ax_r + 0.05; // left cheek 0.05 off A's right edge (partial overlap)
+    let x1 = eave_x - 0.05; // right cheek 0.05 off the eave
+    let xm = 0.5 * (x0 + x1);
+    c.apply_dormer_stroke_event(&[
+        (x0, 1.0),
+        (xm, 0.98),
+        (x1, 1.0),
+        (x1 + 0.02, 3.5),
+        (x1, 6.0),
+        (xm, 6.02),
+        (x0, 6.0),
+        (x0 - 0.02, 3.5),
+        (x0, 1.05),
+    ]);
+    assert!(c.pending_rect_is_dormer(), "dormer C pends");
+    // BOTH cheeks snapped flush → two elective snap tags (one per snapped side).
+    assert_eq!(
+        c.snap_overlay().len(),
+        2,
+        "both cheeks snapped their whole side (left one only partially overlaps)"
+    );
+    let outline = c.pending_roof_rect_outline().expect("dashed overlay");
+    assert!(
+        (outline[0].0 as f32 - ax_r).abs() < 0.02,
+        "left cheek snapped flush onto A's SHORT right edge {ax_r}, got {}",
+        outline[0].0
+    );
+    assert!(
+        (outline[1].0 as f32 - eave_x).abs() < 0.02,
+        "right cheek snapped flush onto the eave {eave_x}, got {}",
+        outline[1].0
+    );
+    // X is FULLY pinned → the width prompt is SKIPPED; the FSM opens the depth
+    // (LenY) directly. The bug left the fitted left side off x≈6, so X was NOT
+    // fully pinned and the width was still asked.
+    assert_eq!(
+        c.ceiling_rect_length_pending(),
+        Some(ParameterAxis::Y),
+        "both cheeks pinned → LenX skipped, straight to LenY"
+    );
+}
+
+/// Regression (report df354150): a dormer sits on the roof SLOPE, but the FSM's
+/// finalize ran the PAVILION placement check (`validate_roof_rect_placement`),
+/// which rejects a sloped / apex-claimed region — the rejection was swallowed by
+/// the dormer caller, silently stranding the FSM on the width prompt forever.
+/// The dormer path must SKIP that pavilion check (its own `validate_dormer` runs
+/// at the height commit) and reach the height stage. The earlier dormer tests
+/// used a FLAT ceiling, where the pavilion check happens to pass, so they missed
+/// this.
+#[test]
+fn dormer_on_a_sloped_region_reaches_the_height_stage() {
+    // Fan the square ceiling into a sloped roof: an apex at (4, 5) @ 4.2 m.
+    let mut c = ceiling_apex_ready_controller();
+    c.ceiling_point_tap(3.8, 5.2);
+    c.apply_position_dimension(4.0).expect("X applies");
+    c.apply_position_dimension(5.0).expect("Y applies");
+    c.assign_roof_apex(4.2).expect("apex slopes the roof");
+    c.materialize();
+
+    c.set_dormer_mode(true);
+    assert!(c.dormer_mode());
+
+    // A dormer strictly inside the SLOPED bottom fan triangle (0,0)-(10,0)-(4,5),
+    // away from every reference so nothing snaps — it takes the LenX prompt, and
+    // skipping through must land on the HEIGHT stage (before the fix, the finalize
+    // rejected the sloped region and the FSM stayed stuck at LenX).
+    c.apply_dormer_stroke_event(&[
+        (3.0, 1.0),
+        (4.0, 0.98),
+        (5.0, 1.0),
+        (5.05, 1.75),
+        (5.0, 2.5),
+        (4.0, 2.52),
+        (3.0, 2.5),
+        (2.95, 1.75),
+        (3.0, 1.05),
+    ]);
+    assert!(c.pending_rect_is_dormer(), "dormer pends");
+    // Skip every length/position prompt (nothing snapped, so all are asked) — the
+    // last skip runs the finalize, which must NOT reject a sloped dormer.
+    while c.ceiling_rect_length_pending().is_some() {
+        c.skip_roof_rect_length().unwrap();
+    }
+    while c.ceiling_rect_position_pending() {
+        c.skip_position_dimension().unwrap();
+    }
+    assert!(
+        c.ceiling_rect_height_pending(),
+        "dormer on a sloped region reaches the height stage (not stranded on width)"
+    );
+
+    // And it commits: the roof over the footprint runs ~2.4–3.3 m, so 4.5 clears.
+    c.assign_dormer_height(4.5).expect("dormer commits");
+    c.materialize();
+    let storey = &c.current_record.as_ref().unwrap().data.storeys[0];
+    assert_eq!(storey.dormers.len(), 1, "one durable dormer on the slope");
 }
 
 /// THE RECT FIXPOINT over a STEPPED base (design §5's second required
@@ -8813,6 +9433,8 @@ fn ceiling_ridge_unsnap_transition_table() {
     ];
     for row in rows {
         let mut c = ceiling_ready_l_controller();
+        // ceiling-line snap radius 0.2 m (view-diag 5 m x 0.04).
+        c.set_view_world_diagonal_m(5.0);
         c.set_roof_point_mode(true);
         c.apply_roof_ridge_stroke_event(&row.stroke);
         for _ in 0..row.skips {
@@ -14139,9 +14761,11 @@ fn ceiling_carve_stroke_presnaps_onto_the_roof_division() {
     c.materialize();
 
     let segs = c.ceiling_carve_reference_segments();
-    let tol = c.tuning.subarea.corner_snap_m;
+    // Mirror production's ceiling-exposure pre-snap tolerance (viewport-relative,
+    // via the shared config) rather than a stale fixed constant.
+    let tol = c.snap_tol_ceiling_exposure();
     // A carve traced with its left edge ~5 cm to the right of the division
-    // (x≈4.05) — within the corner-snap tol of x=4.
+    // (x≈4.05) — within the ceiling-exposure snap tol of x=4.
     let raw = vec![
         Point2f32::new(4.05, 2.0),
         Point2f32::new(9.0, 2.0),
@@ -17181,6 +17805,8 @@ fn window_placed_before_a_burying_section_moves_up_off_the_band() {
 
     // Ground 10×10, FLAT 2.4 ceiling; storey 1 (slab 0.3) over the left strip.
     let mut c = dimensioned_square_controller();
+    // snap radius 0.15 m so the x=3.8 step stays 0.2 m off the x=4 wall.
+    c.set_view_world_diagonal_m(3.0);
     c.set_default_ceiling_height(2.4).unwrap();
     c.materialize();
     c.add_storey().unwrap();

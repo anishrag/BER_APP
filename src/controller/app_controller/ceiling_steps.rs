@@ -140,6 +140,8 @@ impl AppController {
             self.pending_roof_point = None;
             self.pending_roof_ridge = None;
             self.pending_roof_rect = None;
+            self.dormer_mode = false;
+            self.pending_rect_is_dormer = false;
             // A surviving cut-pick would fire on the SAME tap as the ceiling
             // line flow (its choose_* methods have no mode guard), grafting an
             // in-flight phase/step shape under the line — clear them all.
@@ -227,11 +229,13 @@ impl AppController {
         // drawn beside a phase "year" boundary lands on it — same as living areas.
         let ref_walls = self.phase_reference_walls();
         let action_points: Vec<(f32, f32)> = pts.iter().map(|p| (p.x, p.y)).collect();
+        let wall_snap_tol = self.snap_tol_carve();
         match self.document.carve_or_cut_in_available(
             pts,
             &step_rings,
             &self.tuning.subarea,
             &ref_walls,
+            wall_snap_tol,
         ) {
             Ok((boundary, SubareaOutcome::Area(plan))) => {
                 if let Err(e) = plan.validate_simple() {
@@ -288,7 +292,11 @@ impl AppController {
     /// side tap.
     fn begin_ceiling_step_side(&mut self, axis: ParameterAxis, coord_m: f32) {
         let extras = self.region_snap_references(axis);
-        let (coord_m, snap) = match self.document.snap_ceiling_step_line(axis, coord_m, &extras) {
+        let snap_tol = self.snap_tol_ceiling_line();
+        let (coord_m, snap) = match self
+            .document
+            .snap_ceiling_step_line(axis, coord_m, &extras, snap_tol)
+        {
             Some((snapped, outline_wall_vid)) => (
                 snapped,
                 Some(CeilingLineSnap {

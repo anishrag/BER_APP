@@ -3,8 +3,8 @@ use serde::{Deserialize, Serialize};
 use super::common::{ConstructionPhase, ConstructionPhases, ItemId, Photo, Year};
 use super::fenestration::{Frame, Glazing, WindowNameSpecifics, WindowType};
 use super::structural::{
-    CeilingApex, CeilingApexHint, CeilingConstruction, FloorConstruction, Storey, ThermalMassInfo,
-    WallConstruction,
+    CeilingApex, CeilingApexHint, CeilingConstruction, Dormer, FloorConstruction, Storey,
+    ThermalMassInfo, WallConstruction,
 };
 use super::systems::{HeatingSystem, SolarElements, VentilationSystem};
 use domain::points::Point2f64;
@@ -541,6 +541,24 @@ impl Ber {
                 apex: (q.x as f32, q.y as f32),
                 region,
             });
+        }
+    }
+
+    /// Append a flat-topped DORMER to storey `storey_idx`'s durable dormer
+    /// list (replayed at resolve by [`CeilingRegions::with_flat_patches`]).
+    /// Each footprint vertex is QUANTIZED to the f32 grid, exactly as
+    /// [`add_ceiling_apex`](Self::add_ceiling_apex) quantizes an apex point:
+    /// the reload reconstruction round-trips roof rings through f32, and the
+    /// derived dormer seams only line up when the stored footprint survives
+    /// that round-trip. No-op when the storey doesn't exist.
+    ///
+    /// [`CeilingRegions::with_flat_patches`]: super::structural::CeilingRegions::with_flat_patches
+    pub fn add_dormer(&mut self, storey_idx: usize, mut dormer: Dormer) {
+        for p in &mut dormer.footprint {
+            *p = CeilingApex::quantize_point(*p);
+        }
+        if let Some(storey) = self.storeys.get_mut(storey_idx) {
+            storey.dormers.push(dormer);
         }
     }
 

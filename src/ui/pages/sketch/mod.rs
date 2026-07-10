@@ -169,6 +169,14 @@ pub enum SketchEvent {
         dx: f32,
         dy: f32,
     },
+    /// Per-frame push of the currently-VISIBLE world rectangle's diagonal
+    /// (metres), computed by the canvas from the live pan/zoom transform. The
+    /// controller stores it (`set_view_world_diagonal_m`) to size its
+    /// viewport-relative snap tolerances. Only a scalar crosses the boundary —
+    /// no egui types reach the controller.
+    ViewportWorldDiagonal {
+        world_diagonal_m: f32,
+    },
     /// Primary-drag orbit delta in the 3D view (degrees of yaw/pitch,
     /// already converted from pixels by the canvas).
     OrbitView {
@@ -351,6 +359,18 @@ pub enum SketchEvent {
     AssignCeilingRectHeight(f32),
     /// Discard the in-flight roof rect at any stage.
     CancelPendingCeilingRect,
+    /// Toggle DORMER mode: when on, a CLOSED stroke draws a flat-topped
+    /// rectangular dormer carved into the sloped attic ceiling (reusing the
+    /// rect FSM, but committing a non-resloping `Dormer` at the height step).
+    SetDormerMode(bool),
+    /// A DORMER stroke (world coords) drawn in dormer mode — a closed
+    /// rectangle fitted to the dormer footprint (the rect flow's sibling).
+    DormerStrokeWorld {
+        points: Vec<(f32, f32)>,
+    },
+    /// User entered the dormer's flat-top height (metres, ABSOLUTE above the
+    /// storey floor datum) for the pending dormer.
+    AssignDormerHeight(f32),
     /// "Don't snap" on the pending roof ridge's snap tag: revert the cross
     /// coordinate to its drawn value and reopen the position question. Routed
     /// to the controller's dedicated `unsnap_roof_ridge` — NOT
@@ -1082,6 +1102,17 @@ pub struct SketchView<'a> {
     pub ceiling_rect_length_axis: Option<manip_plan::ParameterAxis>,
     pub ceiling_rect_height_pending: bool,
     pub ceiling_rect_pending: bool,
+    /// DORMER input (a flat-topped patch carved into the sloped attic, NOT
+    /// resloping its neighbours): the tool mode + availability gate (same as
+    /// the rect/apex tools), the committed dormers `(footprint ring, label)`
+    /// to overlay ("⌐ 2.60 m"), and whether the in-flight rect FSM belongs to
+    /// a dormer — which reroutes the HEIGHT stage's title + Set event. The
+    /// dormer reuses the rect drawing / length / position FSM, so it needs no
+    /// extra pending flags beyond this discriminator.
+    pub dormer_mode: bool,
+    pub dormer_available: bool,
+    pub dormer_views: &'a [(Vec<(f64, f64)>, String)],
+    pub ceiling_rect_is_dormer: bool,
     pub ceiling_ridge_length_input: &'a mut String,
     /// Last error from the roof assigns (apex height / ridge length / ridge
     /// height), shown inline in the shared roof toolbar — one field because

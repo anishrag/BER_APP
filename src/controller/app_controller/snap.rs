@@ -25,6 +25,11 @@ pub(super) enum SnapAction {
         points: Vec<(f32, f32)>,
         pick: Option<(f32, f32)>,
     },
+    /// A DORMER footprint stroke in world coords, replayed through
+    /// `apply_dormer_stroke_event`. Like `Subarea`, its entry point captures
+    /// ITSELF (re-runs the fit + re-derives the pins under the forced policy),
+    /// so replay must not rebuild the capture for it.
+    Dormer { points: Vec<(f32, f32)> },
 }
 
 /// Which sub-area carve flow a [`SnapAction::Subarea`] replays through — each
@@ -252,6 +257,15 @@ impl AppController {
                 }
                 Ok(())
             }
+            SnapAction::Dormer { points } => {
+                // Clear any in-flight rect so the entry point's guard doesn't
+                // early-out, then re-run the fit under the forced policy — it
+                // re-derives the pins and re-captures itself.
+                self.pending_roof_rect = None;
+                self.pending_rect_is_dormer = false;
+                self.apply_dormer_stroke_event(points);
+                Ok(())
+            }
         };
         if let Err(e) = r {
             log::error!("[snap replay] re-run failed: {e}");
@@ -278,18 +292,22 @@ impl AppController {
         self.dispatch_snap_action(&last.action);
         manip_plan::clear_snap_policy();
         // Re-capture so the action can be replayed again. Two shapes:
-        //  - A `Subarea` re-run captures ITSELF (its entry point drains the
-        //    decisions into a fresh `LastSnapAction`, and a pick re-applied by
-        //    the dispatch arm updates it via `record_subarea_pick`) — the
-        //    thread-local is empty here, and the fresh capture is left as-is.
+        //  - A `Subarea` OR `Dormer` re-run captures ITSELF (its entry point
+        //    drains the decisions into a fresh `LastSnapAction`, and a pick
+        //    re-applied by the dispatch arm updates it via `record_subarea_pick`)
+        //    — the thread-local is empty here, and the fresh capture is left
+        //    as-is.
         //  - The tier-1 actions (`Freehand` / `OutlineWorld`) re-run through
         //    their INNER apply fns, which don't capture — their decisions are
         //    still in the thread-local, so rebuild the capture here with the
         //    original `before`/`hlen` (unchanged by construction: the truncate +
         //    restore above re-established exactly that state).
         let decisions = manip_plan::take_snap_decisions();
-        let subarea = matches!(last.action, SnapAction::Subarea { .. });
-        if !decisions.is_empty() && !subarea {
+        let self_capturing = matches!(
+            last.action,
+            SnapAction::Subarea { .. } | SnapAction::Dormer { .. }
+        );
+        if !decisions.is_empty() && !self_capturing {
             self.last_snap_action = Some(LastSnapAction {
                 action: last.action,
                 before: last.before,

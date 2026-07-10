@@ -74,6 +74,8 @@ impl AppController {
             self.pending_roof_point = None;
             self.pending_roof_ridge = None;
             self.pending_roof_rect = None;
+            self.dormer_mode = false;
+            self.pending_rect_is_dormer = false;
             self.activate_shape(ActiveShape::Outline);
             self.set_edit_mode(EditTools::DrawPerpWalls);
         }
@@ -176,10 +178,14 @@ impl AppController {
         // (no holes → overlap with existing phases is allowed; latest-wins in
         // resolve settles it); we only dispatch the outcome. The chosen piece
         // comes back for wall pinning.
-        match self
-            .document
-            .carve_or_cut_in_available(&pts, &[], &self.tuning.subarea, &snap_refs)
-        {
+        let wall_snap_tol = self.snap_tol_carve();
+        match self.document.carve_or_cut_in_available(
+            &pts,
+            &[],
+            &self.tuning.subarea,
+            &snap_refs,
+            wall_snap_tol,
+        ) {
             Ok((boundary, SubareaOutcome::Cut(a, b))) => {
                 log::debug!("  → phase cut splits the available region into two — tap one to keep");
                 log::debug!("────────────────────────────────────────────────────");

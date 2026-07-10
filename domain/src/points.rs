@@ -95,3 +95,65 @@ pub fn ring_centroid(ring: &[Point2f64]) -> Point2f64 {
     let sy: f64 = pts.iter().map(|p| p.y).sum();
     Point2f64::new(sx / n, sy / n)
 }
+
+/// The unsigned plan area of a closed ring (the shoelace formula; a
+/// closing-duplicate vertex is tolerated). Zero for a degenerate ring — fewer
+/// than three distinct vertices, or all vertices collinear. The companion of
+/// [`ring_centroid`] for cheap non-degeneracy tests (e.g. "is this footprint a
+/// real patch or a collapsed sliver?").
+pub fn ring_area(ring: &[Point2f64]) -> f64 {
+    let mut pts = ring;
+    if pts.len() >= 2 && pts[0] == pts[pts.len() - 1] {
+        pts = &pts[..pts.len() - 1];
+    }
+    if pts.len() < 3 {
+        return 0.0;
+    }
+    let n = pts.len();
+    let mut area2 = 0.0;
+    for i in 0..n {
+        let a = pts[i];
+        let b = pts[(i + 1) % n];
+        area2 += a.x * b.y - b.x * a.y;
+    }
+    area2.abs() / 2.0
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn ring_area_of_a_rectangle_is_width_times_height() {
+        let rect = [
+            Point2f64::new(0.0, 0.0),
+            Point2f64::new(3.0, 0.0),
+            Point2f64::new(3.0, 2.0),
+            Point2f64::new(0.0, 2.0),
+        ];
+        assert!((ring_area(&rect) - 6.0).abs() < 1e-12);
+        // Orientation-independent (unsigned): reversing the winding is the same.
+        let rev: Vec<_> = rect.iter().rev().copied().collect();
+        assert!((ring_area(&rev) - 6.0).abs() < 1e-12);
+        // A closing-duplicate vertex is tolerated.
+        let mut closed = rect.to_vec();
+        closed.push(rect[0]);
+        assert!((ring_area(&closed) - 6.0).abs() < 1e-12);
+    }
+
+    #[test]
+    fn ring_area_of_a_degenerate_ring_is_zero() {
+        assert_eq!(ring_area(&[]), 0.0);
+        assert_eq!(
+            ring_area(&[Point2f64::new(1.0, 1.0), Point2f64::new(2.0, 2.0)]),
+            0.0
+        );
+        // Collinear vertices enclose no area.
+        let collinear = [
+            Point2f64::new(0.0, 0.0),
+            Point2f64::new(1.0, 0.0),
+            Point2f64::new(2.0, 0.0),
+        ];
+        assert_eq!(ring_area(&collinear), 0.0);
+    }
+}

@@ -205,10 +205,11 @@ impl AppController {
         // raised ceiling area's edge) — so a ridge drawn near an area edge lands
         // exactly on it; a ridge along a wall/boundary is a valid mono-pitch.
         let cross_refs = self.region_snap_references(axis);
+        let snap_tol = self.snap_tol_ceiling_line();
         let (coord_m, cross_snap) =
             match self
                 .document
-                .snap_roof_ridge_coord(axis, coord_m, &cross_refs)
+                .snap_roof_ridge_coord(axis, coord_m, &cross_refs, snap_tol)
             {
                 Some((snapped, outline_wall_vid)) => (
                     snapped,
@@ -227,10 +228,10 @@ impl AppController {
         let end_refs = self.region_snap_references(axis.other());
         let mut lo_hit = self
             .document
-            .snap_roof_ridge_coord(axis.other(), lo, &end_refs);
+            .snap_roof_ridge_coord(axis.other(), lo, &end_refs, snap_tol);
         let mut hi_hit = self
             .document
-            .snap_roof_ridge_coord(axis.other(), hi, &end_refs);
+            .snap_roof_ridge_coord(axis.other(), hi, &end_refs, snap_tol);
         if let (Some((lc, _)), Some((hc, _))) = (lo_hit, hi_hit) {
             if lc == hc {
                 if (lc - lo).abs() <= (hc - hi).abs() {

@@ -436,6 +436,22 @@ pub(super) fn render<F: FnMut(UiEvent)>(
         });
     let vp = structure_edit_layout.as_ref().map(|l| l.view).unwrap_or(vp);
 
+    // Push the diagonal (metres) of the currently-VISIBLE world rectangle to the
+    // controller each frame, so its snap tolerances scale with zoom. Computed by
+    // inverting the two canvas corners through the SAME transform the storey is
+    // drawn with; only this scalar crosses into the controller. `None` (no
+    // session / storey) leaves the controller on its plan-bbox fallback.
+    if let Some(t) = canvas_transform(ber, current_storey_idx, rect, vp, true) {
+        let (x0, y0) = t.inverse(rect.left(), rect.top());
+        let (x1, y1) = t.inverse(rect.right(), rect.bottom());
+        let diag = (((x1 - x0).powi(2) + (y1 - y0).powi(2)).sqrt()) as f32;
+        if diag.is_finite() && diag > 0.0 {
+            on_event(UiEvent::Sketch(SketchEvent::ViewportWorldDiagonal {
+                world_diagonal_m: diag,
+            }));
+        }
+    }
+
     let painter = ui.painter_at(rect);
     painter.rect_filled(rect, 0.0, egui::Color32::from_gray(30));
 
@@ -1232,6 +1248,23 @@ pub(super) fn render<F: FnMut(UiEvent)>(
             );
         }
 
+        // Committed DORMERS: each footprint as a solid labelled outline
+        // ("⌐ 2.60 m"), distinct green from the ridge family (a dormer is a
+        // non-resloping patch, not a ridge). The pending dormer footprint shows
+        // through the shared pending-rect dashed outline above. Suppressed in
+        // the Objects phase.
+        if !objects_phase {
+            render::render_dormers(
+                &painter,
+                rect,
+                ber,
+                current_storey_idx,
+                mode,
+                vp,
+                view.dormer_views,
+            );
+        }
+
         // The pending ridge's wall snap, mirroring the ceiling-step line's:
         // drawn through the same snap-tag renderer, but its menu is a separate
         // widget routed to UnsnapCeilingRidge, never ChooseSnap — the generic
@@ -1702,6 +1735,7 @@ pub(super) fn render<F: FnMut(UiEvent)>(
         && !view.step_mode
         && !view.ceiling_step_mode
         && !view.ceiling_point_mode
+        && !view.dormer_mode
         && !view.partition_mode
         && !view.living_area_mode
         && view.current_phase != AssessmentPhase::Structure;
@@ -2574,6 +2608,9 @@ pub(super) fn render<F: FnMut(UiEvent)>(
                 // in metre space too.
                 let ceiling_ridge_draw =
                     view.ceiling_point_mode && matches!(edit_tool, EditTools::DrawPerpWalls);
+                // In dormer mode a closed stroke draws the dormer footprint —
+                // the rect flow's sibling, in metre space too.
+                let dormer_draw = view.dormer_mode && matches!(edit_tool, EditTools::DrawPerpWalls);
                 // First outline of a fresh upper storey: drawn over
                 // the previous-storey watermark, so it must be
                 // captured in that storey's metre space (mirrors the
@@ -2584,6 +2621,7 @@ pub(super) fn render<F: FnMut(UiEvent)>(
                     && !view.step_mode
                     && !view.ceiling_step_mode
                     && !view.ceiling_point_mode
+                    && !view.dormer_mode
                     && matches!(current_storey_idx, Some(i) if i > 0)
                     && ber
                         .and_then(|b| b.storeys.get(current_storey_idx?))
@@ -2593,6 +2631,7 @@ pub(super) fn render<F: FnMut(UiEvent)>(
                     || step_draw
                     || ceiling_step_draw
                     || ceiling_ridge_draw
+                    || dormer_draw
                     || outline_on_watermark
                     || matches!(
                         edit_tool,
@@ -2645,6 +2684,10 @@ pub(super) fn render<F: FnMut(UiEvent)>(
                             }
                         } else if ceiling_ridge_draw {
                             SketchEvent::CeilingRidgeStrokeWorld {
+                                points: world_points,
+                            }
+                        } else if dormer_draw {
+                            SketchEvent::DormerStrokeWorld {
                                 points: world_points,
                             }
                         } else if outline_on_watermark {

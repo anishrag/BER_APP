@@ -9,12 +9,9 @@
 # another tolerance.
 
 new_storey:
-  # Snap radius for pulling a traced point onto the previous outline. (The new
-  # storey is otherwise traced through the living-area carve — see `subarea`.)
-  snap_tol_ratio: 0.08
-
   # View zoom when an upper storey is added (1.0 = pure auto-fit; <1 zooms out
-  # to leave room to draw past the previous footprint).
+  # to leave room to draw past the previous footprint). The traced-point snap
+  # radius now lives in the `snap.extend` block below.
   add_storey_zoom: 0.7
 
 collinearity:
@@ -62,3 +59,20 @@ subarea:
   # an outline CORNER within this many metres -- so a carve that hugs a wall up to
   # a corner reaches it exactly instead of stopping a hand-width short.
   corner_snap_m: 0.15
+
+# Snap-to-reference tolerances, one block per tool. Each tolerance is
+# (visible-world-diagonal_m * ratio) clamped into [min_m, max_m] metres, so the
+# snap radius scales with how far you're zoomed in/out but never collapses to
+# nothing or balloons. All five default to the same {ratio 0.04, 0.15-1.0 m}
+# band; tune a tool individually by editing its block.
+snap:
+  # Dormer edge-snap (fitted rectangle sides onto surrounding references).
+  dormer:            { ratio: 0.04, min_m: 0.15, max_m: 1.0 }
+  # Ceiling-exposure carve pre-snap (stroke onto interior roof-division lines).
+  ceiling_exposure:  { ratio: 0.04, min_m: 0.15, max_m: 1.0 }
+  # Ridge + ceiling-step LINE snaps (drawn line/point onto a parallel wall).
+  ceiling_line:      { ratio: 0.04, min_m: 0.15, max_m: 1.0 }
+  # Phase / floor-step / living-area carve wall leveling.
+  carve:             { ratio: 0.04, min_m: 0.15, max_m: 1.0 }
+  # Extend + new-storey stroke snap (traced points onto the storey below).
+  extend:            { ratio: 0.04, min_m: 0.15, max_m: 1.0 }

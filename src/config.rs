@@ -18,9 +18,6 @@ use serde::Deserialize;
 #[derive(Debug, Clone, Deserialize)]
 #[serde(default)]
 pub struct NewStoreyTuning {
-    /// Snap radius for pulling a traced point onto the previous outline
-    /// (`ring_diag * this`).
-    pub snap_tol_ratio: f32,
     /// View zoom when a new upper storey is added (leaves room to draw past the
     /// previous footprint). `1.0` = pure auto-fit.
     pub add_storey_zoom: f32,
@@ -29,7 +26,6 @@ pub struct NewStoreyTuning {
 impl Default for NewStoreyTuning {
     fn default() -> Self {
         Self {
-            snap_tol_ratio: 0.08,
             add_storey_zoom: 0.7,
         }
     }
@@ -54,6 +50,59 @@ impl Default for CollinearityTuning {
     }
 }
 
+/// One tool's viewport-relative snap-to-reference threshold. The tolerance is
+/// `(view_diag_m * ratio).clamp(min_m, max_m)` — a fraction of the currently
+/// VISIBLE world diagonal (metres), floored/ceilinged to a sane metre band so a
+/// zoomed-in view never collapses it to nothing and a zoomed-out one never
+/// balloons it. `ratio` is a pure fraction; `min_m` / `max_m` are absolute
+/// metres. This is the single snap-tolerance POLICY: geometry code receives the
+/// resulting `f32`, never these knobs.
+#[derive(Debug, Clone, Copy, PartialEq, Deserialize)]
+#[serde(default)]
+pub struct SnapThreshold {
+    pub ratio: f32,
+    pub min_m: f32,
+    pub max_m: f32,
+}
+
+impl Default for SnapThreshold {
+    fn default() -> Self {
+        Self {
+            ratio: 0.04,
+            min_m: 0.15,
+            max_m: 1.0,
+        }
+    }
+}
+
+impl SnapThreshold {
+    /// The snap tolerance (metres) for a view whose visible-world diagonal is
+    /// `view_diag_m`: `(view_diag_m * ratio)` clamped into `[min_m, max_m]`.
+    pub fn tol(&self, view_diag_m: f32) -> f32 {
+        (view_diag_m * self.ratio).clamp(self.min_m, self.max_m)
+    }
+}
+
+/// Per-tool snap-to-reference thresholds, grouped so every snap tolerance in the
+/// app lives in one place. Each field defaults to [`SnapThreshold::default`]
+/// (ratio 0.04, band 0.15–1.0 m) — identical for now, individually tunable
+/// later via `tuning.yaml`.
+#[derive(Debug, Clone, Copy, Default, Deserialize)]
+#[serde(default)]
+pub struct SnapThresholds {
+    /// Dormer edge-snap (the fitted dormer rectangle's sides onto references).
+    pub dormer: SnapThreshold,
+    /// Ceiling-exposure carve pre-snap (stroke onto interior roof-division lines).
+    pub ceiling_exposure: SnapThreshold,
+    /// Ridge + ceiling-step LINE snaps (a drawn line/point onto a parallel wall).
+    pub ceiling_line: SnapThreshold,
+    /// Phase / floor-step / living-area carve wall leveling (drawn walls onto
+    /// parallel outline / reference walls).
+    pub carve: SnapThreshold,
+    /// Extend + new-storey stroke snap (traced points onto the storey below).
+    pub extend: SnapThreshold,
+}
+
 /// The full tuning tree (root of `tuning.yaml`).
 #[derive(Debug, Clone, Default, Deserialize)]
 #[serde(default)]
@@ -63,6 +112,8 @@ pub struct Tuning {
     /// Sub-area carve knobs (living areas / construction-phase areas), in
     /// `manip_plan`.
     pub subarea: manip_plan::SubareaTuning,
+    /// Viewport-relative snap-to-reference thresholds, per tool.
+    pub snap: SnapThresholds,
 }
 
 /// Shipped defaults, embedded at compile time. The repo-root file IS the
@@ -116,7 +167,6 @@ mod tests {
         let d = Tuning::default();
         let ns = &t.new_storey;
         let dn = &d.new_storey;
-        assert_eq!(ns.snap_tol_ratio, dn.snap_tol_ratio);
         assert_eq!(ns.add_storey_zoom, dn.add_storey_zoom);
         assert_eq!(
             t.collinearity.min_separation_ratio,
@@ -141,5 +191,27 @@ mod tests {
         );
         assert_eq!(t.subarea.cut_reach_tol_ratio, d.subarea.cut_reach_tol_ratio);
         assert_eq!(t.subarea.corner_snap_m, d.subarea.corner_snap_m);
+        // Snap thresholds: the whole grouped block matches the built-in defaults
+        // (each per-tool `SnapThreshold` derives `PartialEq`).
+        assert_eq!(t.snap.dormer, d.snap.dormer);
+        assert_eq!(t.snap.ceiling_exposure, d.snap.ceiling_exposure);
+        assert_eq!(t.snap.ceiling_line, d.snap.ceiling_line);
+        assert_eq!(t.snap.carve, d.snap.carve);
+        assert_eq!(t.snap.extend, d.snap.extend);
+    }
+
+    /// `SnapThreshold::tol` is linear in the view diagonal between the clamps,
+    /// and saturates at `min_m` / `max_m` outside them.
+    #[test]
+    fn snap_threshold_tol_clamps_and_interpolates() {
+        let t = SnapThreshold::default(); // ratio 0.04, band 0.15–1.0 m
+                                          // Below the min clamp: 3 m × 0.04 = 0.12 → min 0.15.
+        assert!((t.tol(3.0) - 0.15).abs() < 1e-6);
+        // Linear in between: 10 m × 0.04 = 0.40; 5 m → 0.20.
+        assert!((t.tol(10.0) - 0.40).abs() < 1e-6);
+        assert!((t.tol(5.0) - 0.20).abs() < 1e-6);
+        // At/above the max clamp: 25 m → 1.0 (exact), 30 m → 1.0 (saturated).
+        assert!((t.tol(25.0) - 1.0).abs() < 1e-6);
+        assert!((t.tol(30.0) - 1.0).abs() < 1e-6);
     }
 }

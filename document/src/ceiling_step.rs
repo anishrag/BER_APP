@@ -251,12 +251,16 @@ const LINE_OFF_FOOTPRINT_MSG: &str =
 /// within a millimetre of the bounding box edge steps nothing.
 const LINE_CROSS_TOL: f32 = 1e-3;
 
-/// How close (metres) a drawn/tapped step line must land to a parallel outline
-/// wall to SNAP onto it. Hand precision on a tablet, matching the spirit of
-/// the other snap tolerances; promotable to `tuning.yaml` later if it needs
-/// per-device adjustment. Crate-visible: the roof-ridge stroke fit
-/// (`ceiling_point.rs`) expands its endpoint test by the same tolerance — a
-/// stroke ending on/just past the wall must survive to the end snap.
+/// Fixed FIT slop (metres) for the roof-mode stroke fits: how far a fitted
+/// rectangle side ([`StoreyDoc::fit_roof_rect`]) or ridge endpoint
+/// ([`StoreyDoc::fit_roof_ridge_line`]) may sit past a footprint wall and still
+/// be ACCEPTED (a stroke ending on/just past the wall survives to its end snap).
+/// This is an accept/reject slop, NOT a snap-to-reference radius — the drawn
+/// LINE/POINT SNAPS ([`snap_ceiling_step_line`](StoreyDoc::snap_ceiling_step_line),
+/// [`snap_roof_ridge_coord`](StoreyDoc::snap_roof_ridge_coord),
+/// [`snap_roof_point_coord`](StoreyDoc::snap_roof_point_coord)) take a
+/// viewport-relative `tol` argument from the shell instead. Kept fixed and
+/// crate-visible for the fit tests and `ceiling_point.rs`.
 pub(crate) const CEILING_LINE_SNAP_TOL_M: f32 = 0.2;
 
 // ── Ceiling-step operations ─────────────────────────────────────────────────
@@ -303,7 +307,7 @@ impl StoreyDoc {
     }
 
     /// Snap a drawn/tapped step line onto the nearest parallel outline wall
-    /// within [`CEILING_LINE_SNAP_TOL_M`]. The candidates are the SAME deduped
+    /// within `tol` (metres, viewport-relative). The candidates are the SAME deduped
     /// reference walls the position prompt offers ([`reference_walls`]) — so a
     /// snapped line IS at a reference wall's coordinate, exact by
     /// construction, which is exactly why the shell SKIPS the position prompt
@@ -318,18 +322,20 @@ impl StoreyDoc {
     /// vertex id) PLUS `extra_coords` — additional reference coordinates on
     /// `axis` the shell gathered from existing region lines (this storey's floor
     /// boundaries and the storey below's; see [`region_line_coords`]). Nearest
-    /// within [`CEILING_LINE_SNAP_TOL_M`] wins.
+    /// within `tol` wins.
     ///
     /// Returns `(snapped coordinate, Some(outline wall vid))` when the winner is
     /// an outline wall, or `(coordinate, None)` when it is one of the extra
-    /// reference lines (no outline vertex). `None` when nothing is within
-    /// tolerance. Pure — the shell decides when to call, supplies the extra
-    /// references, and remembers the drawn coordinate for un-snapping.
+    /// reference lines (no outline vertex). `None` when nothing is within `tol`.
+    /// Pure — the shell decides when to call, supplies the extra
+    /// references, computes the viewport-relative `tol` (metres), and remembers
+    /// the drawn coordinate for un-snapping.
     pub fn snap_ceiling_step_line(
         &self,
         axis: ParameterAxis,
         coord_m: f32,
         extra_coords: &[f32],
+        tol: f32,
     ) -> Option<(f32, Option<VertexId>)> {
         let ((min_x, min_y), (max_x, max_y)) = self.outline.floor_plan.bounding_box()?;
         let (lo, hi) = match axis {
@@ -353,14 +359,14 @@ impl StoreyDoc {
         outline
             .chain(extras)
             .map(|(c, vid)| (c, vid, (c - coord_m).abs()))
-            .filter(|(_, _, d)| *d <= CEILING_LINE_SNAP_TOL_M)
+            .filter(|(_, _, d)| *d <= tol)
             .min_by(|a, b| a.2.total_cmp(&b.2))
             .map(|(c, vid, _)| (c, vid))
     }
 
     /// Snap a ridge coordinate — the CROSS coordinate (on `axis`) or an EXTENT
     /// END (on the ALONG axis `axis.other()`, callers pass that axis directly) —
-    /// onto the nearest parallel reference within [`CEILING_LINE_SNAP_TOL_M`],
+    /// onto the nearest parallel reference within `tol` (metres, viewport-relative),
     /// INCLUDING walls at the outline bbox extremes: a ridge along an outer wall
     /// is a valid mono-pitch and a ridge end on the boundary is a gable (the one
     /// deliberate difference from
@@ -376,8 +382,9 @@ impl StoreyDoc {
         axis: ParameterAxis,
         coord_m: f32,
         extra_coords: &[f32],
+        tol: f32,
     ) -> Option<(f32, Option<VertexId>)> {
-        self.snap_line_to_reference_wall(axis, coord_m, true, extra_coords)
+        self.snap_line_to_reference_wall(axis, coord_m, true, extra_coords, tol)
     }
 
     /// Snap a roof-POINT coordinate on `axis` to the nearest parallel outline
@@ -390,8 +397,9 @@ impl StoreyDoc {
         &self,
         axis: ParameterAxis,
         coord_m: f32,
+        tol: f32,
     ) -> Option<(f32, VertexId)> {
-        self.snap_line_to_reference_wall(axis, coord_m, true, &[])
+        self.snap_line_to_reference_wall(axis, coord_m, true, &[], tol)
             .map(|(c, vid)| (c, vid.expect("outline-only snap yields a vertex id")))
     }
 
@@ -399,14 +407,14 @@ impl StoreyDoc {
     /// walls on `axis` (each `Some(vid)`), optionally excluding the outline bbox
     /// extremes, PLUS `extra_coords` — internal reference lines (ceiling/floor
     /// region boundaries) that carry no outline vertex (`None`) and are never at
-    /// a bbox extreme, so always eligible. Nearest within
-    /// [`CEILING_LINE_SNAP_TOL_M`] wins.
+    /// a bbox extreme, so always eligible. Nearest within `tol` wins.
     fn snap_line_to_reference_wall(
         &self,
         axis: ParameterAxis,
         coord_m: f32,
         include_extremes: bool,
         extra_coords: &[f32],
+        tol: f32,
     ) -> Option<(f32, Option<VertexId>)> {
         let ((min_x, min_y), (max_x, max_y)) = self.outline.floor_plan.bounding_box()?;
         let (lo, hi) = match axis {
@@ -424,7 +432,7 @@ impl StoreyDoc {
         outline
             .chain(extras)
             .map(|(c, vid)| (c, vid, (c - coord_m).abs()))
-            .filter(|(_, _, d)| *d <= CEILING_LINE_SNAP_TOL_M)
+            .filter(|(_, _, d)| *d <= tol)
             .min_by(|a, b| a.2.total_cmp(&b.2))
             .map(|(c, vid, _)| (c, vid))
     }
@@ -806,7 +814,7 @@ mod tests {
         // x = 6.9 is within 0.2 of BOTH x = 7 (0.1 away) and x = 6.75
         // (0.15 away) — the nearer wall, x = 7, wins.
         let (coord, _) = doc
-            .snap_ceiling_step_line(ParameterAxis::X, 6.9, &[])
+            .snap_ceiling_step_line(ParameterAxis::X, 6.9, &[], 0.2)
             .expect("within tolerance");
         assert!(
             (coord - 7.0).abs() < 1e-6,
@@ -814,17 +822,17 @@ mod tests {
         );
         // x = 6.82 flips the nearest to 6.75.
         let (coord, _) = doc
-            .snap_ceiling_step_line(ParameterAxis::X, 6.82, &[])
+            .snap_ceiling_step_line(ParameterAxis::X, 6.82, &[], 0.2)
             .unwrap();
         assert!((coord - 6.75).abs() < 1e-6);
         // The Y axis snaps to its non-extreme walls the same way.
         let (coord, _) = doc
-            .snap_ceiling_step_line(ParameterAxis::Y, 2.1, &[])
+            .snap_ceiling_step_line(ParameterAxis::Y, 2.1, &[], 0.2)
             .unwrap();
         assert!((coord - 2.0).abs() < 1e-6);
         // Beyond tolerance: nearest non-extreme wall is 1.75 m away.
         assert!(doc
-            .snap_ceiling_step_line(ParameterAxis::X, 5.0, &[])
+            .snap_ceiling_step_line(ParameterAxis::X, 5.0, &[], 0.2)
             .is_none());
     }
 
@@ -836,22 +844,22 @@ mod tests {
         // Near the x = 0 / x = 10 extremes — inside the footprint, within
         // tolerance of the boundary walls, but those never qualify.
         assert!(doc
-            .snap_ceiling_step_line(ParameterAxis::X, 0.1, &[])
+            .snap_ceiling_step_line(ParameterAxis::X, 0.1, &[], 0.2)
             .is_none());
         assert!(doc
-            .snap_ceiling_step_line(ParameterAxis::X, 9.9, &[])
+            .snap_ceiling_step_line(ParameterAxis::X, 9.9, &[], 0.2)
             .is_none());
         // A plain rectangle has ONLY extreme walls: nothing ever snaps.
         let rect = storey_10x6();
         assert!(rect
-            .snap_ceiling_step_line(ParameterAxis::X, 0.15, &[])
+            .snap_ceiling_step_line(ParameterAxis::X, 0.15, &[], 0.2)
             .is_none());
         assert!(rect
-            .snap_ceiling_step_line(ParameterAxis::Y, 5.9, &[])
+            .snap_ceiling_step_line(ParameterAxis::Y, 5.9, &[], 0.2)
             .is_none());
         // No outline at all → nothing to snap to.
         assert!(StoreyDoc::default()
-            .snap_ceiling_step_line(ParameterAxis::X, 1.0, &[])
+            .snap_ceiling_step_line(ParameterAxis::X, 1.0, &[], 0.2)
             .is_none());
     }
 
@@ -864,17 +872,17 @@ mod tests {
         let rect = storey_10x6(); // only extreme outline walls
                                   // Drawn x = 4.1; an extra reference line at x = 4.0 is within tolerance.
         let (coord, vid) = rect
-            .snap_ceiling_step_line(ParameterAxis::X, 4.1, &[4.0])
+            .snap_ceiling_step_line(ParameterAxis::X, 4.1, &[4.0], 0.2)
             .expect("snaps to the extra reference line");
         assert!((coord - 4.0).abs() < 1e-6);
         assert!(vid.is_none(), "an extra line carries no outline vertex");
         // An extra coord ON the bbox extreme (x = 0) is excluded.
         assert!(rect
-            .snap_ceiling_step_line(ParameterAxis::X, 0.1, &[0.0])
+            .snap_ceiling_step_line(ParameterAxis::X, 0.1, &[0.0], 0.2)
             .is_none());
         // Beyond tolerance: no snap.
         assert!(rect
-            .snap_ceiling_step_line(ParameterAxis::X, 4.5, &[4.0])
+            .snap_ceiling_step_line(ParameterAxis::X, 4.5, &[4.0], 0.2)
             .is_none());
     }
 
@@ -948,39 +956,39 @@ mod tests {
         // Near the x = 0 extreme: the step-line snap refuses, the ridge-end
         // snap lands ON the boundary.
         assert!(doc
-            .snap_ceiling_step_line(ParameterAxis::X, 0.1, &[])
+            .snap_ceiling_step_line(ParameterAxis::X, 0.1, &[], 0.2)
             .is_none());
         let (coord, _) = doc
-            .snap_roof_ridge_coord(ParameterAxis::X, 0.1, &[])
+            .snap_roof_ridge_coord(ParameterAxis::X, 0.1, &[], 0.2)
             .expect("extreme wall snaps for a ridge end");
         assert!(coord.abs() < 1e-6);
         // Near the x = 10 extreme.
         let (coord, _) = doc
-            .snap_roof_ridge_coord(ParameterAxis::X, 9.9, &[])
+            .snap_roof_ridge_coord(ParameterAxis::X, 9.9, &[], 0.2)
             .unwrap();
         assert!((coord - 10.0).abs() < 1e-6);
         // Interior walls still snap identically (x = 6.9 → nearest is 7).
         let (coord, _) = doc
-            .snap_roof_ridge_coord(ParameterAxis::X, 6.9, &[])
+            .snap_roof_ridge_coord(ParameterAxis::X, 6.9, &[], 0.2)
             .unwrap();
         assert!((coord - 7.0).abs() < 1e-6);
         // Beyond tolerance: nothing.
         assert!(doc
-            .snap_roof_ridge_coord(ParameterAxis::X, 5.0, &[])
+            .snap_roof_ridge_coord(ParameterAxis::X, 5.0, &[], 0.2)
             .is_none());
         // A plain rectangle's ONLY walls are extremes: the ridge end snaps
         // where the step line never could.
         let rect = storey_10x6();
         let (coord, _) = rect
-            .snap_roof_ridge_coord(ParameterAxis::Y, 5.9, &[])
+            .snap_roof_ridge_coord(ParameterAxis::Y, 5.9, &[], 0.2)
             .unwrap();
         assert!((coord - 6.0).abs() < 1e-6);
         assert!(rect
-            .snap_ceiling_step_line(ParameterAxis::Y, 5.9, &[])
+            .snap_ceiling_step_line(ParameterAxis::Y, 5.9, &[], 0.2)
             .is_none());
         // No outline at all → nothing to snap to.
         assert!(StoreyDoc::default()
-            .snap_roof_ridge_coord(ParameterAxis::X, 1.0, &[])
+            .snap_roof_ridge_coord(ParameterAxis::X, 1.0, &[], 0.2)
             .is_none());
     }
 
@@ -993,11 +1001,11 @@ mod tests {
         let rect = storey_10x6(); // outline walls on X at x = 0 and x = 10 only
                                   // Nothing near x = 4.05 without extras (both outline walls are far off).
         assert!(rect
-            .snap_roof_ridge_coord(ParameterAxis::X, 4.05, &[])
+            .snap_roof_ridge_coord(ParameterAxis::X, 4.05, &[], 0.2)
             .is_none());
         // With an internal boundary at x = 4 supplied, the ridge snaps onto it.
         let (coord, vid) = rect
-            .snap_roof_ridge_coord(ParameterAxis::X, 4.05, &[4.0])
+            .snap_roof_ridge_coord(ParameterAxis::X, 4.05, &[4.0], 0.2)
             .expect("snaps to the internal boundary");
         assert!((coord - 4.0).abs() < 1e-6);
         assert!(

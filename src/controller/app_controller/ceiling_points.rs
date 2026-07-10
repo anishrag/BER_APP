@@ -95,6 +95,8 @@ impl AppController {
         self.pending_roof_point = None;
         self.pending_roof_ridge = None;
         self.pending_roof_rect = None;
+        self.dormer_mode = false;
+        self.pending_rect_is_dormer = false;
         if on {
             self.exit_openings_mode();
             self.living_area_mode = false;
@@ -141,32 +143,35 @@ impl AppController {
             log::error!("ceiling point: {}", e);
             return;
         }
-        let (x, snap_x) = match self
-            .document
-            .snap_roof_point_coord(ParameterAxis::X, tapped.x)
-        {
-            Some((snapped, outline_wall_vid)) => (
-                snapped,
-                Some(CeilingPointAxisSnap {
-                    drawn_coord_m: tapped.x,
-                    outline_wall_vid,
-                }),
-            ),
-            None => (tapped.x, None),
-        };
-        let (y, snap_y) = match self
-            .document
-            .snap_roof_point_coord(ParameterAxis::Y, tapped.y)
-        {
-            Some((snapped, outline_wall_vid)) => (
-                snapped,
-                Some(CeilingPointAxisSnap {
-                    drawn_coord_m: tapped.y,
-                    outline_wall_vid,
-                }),
-            ),
-            None => (tapped.y, None),
-        };
+        let snap_tol = self.snap_tol_ceiling_line();
+        let (x, snap_x) =
+            match self
+                .document
+                .snap_roof_point_coord(ParameterAxis::X, tapped.x, snap_tol)
+            {
+                Some((snapped, outline_wall_vid)) => (
+                    snapped,
+                    Some(CeilingPointAxisSnap {
+                        drawn_coord_m: tapped.x,
+                        outline_wall_vid,
+                    }),
+                ),
+                None => (tapped.x, None),
+            };
+        let (y, snap_y) =
+            match self
+                .document
+                .snap_roof_point_coord(ParameterAxis::Y, tapped.y, snap_tol)
+            {
+                Some((snapped, outline_wall_vid)) => (
+                    snapped,
+                    Some(CeilingPointAxisSnap {
+                        drawn_coord_m: tapped.y,
+                        outline_wall_vid,
+                    }),
+                ),
+                None => (tapped.y, None),
+            };
         self.advance_roof_point(
             Point2f32::new(x, y),
             snap_x,

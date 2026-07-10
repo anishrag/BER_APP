@@ -802,6 +802,137 @@ pub fn snap_stroke_to_segments(
     apply_grouped_stroke_snaps(stroke, &targets, kind)
 }
 
+/// EDGE-snap the four SIDES of the axis-aligned rectangle `[lo, hi]` onto nearby
+/// PARALLEL reference segments — the whole-edge analogue of a point snap, and the
+/// robust behaviour a dormer footprint needs (a cheek running alongside a shorter
+/// reference snaps its WHOLE side flush, however short the reference). For each
+/// side — left (x = lo.x), right (x = hi.x), bottom (y = lo.y), top (y = hi.y):
+///
+/// - An x-side considers only VERTICAL references (`|dx| ≈ 0`); a y-side only
+///   HORIZONTAL ones. A DIAGONAL reference (a roof hip) never snaps an axis side.
+/// - A reference is a candidate when its perpendicular offset from the side is
+///   ≤ `tol` AND its extent OVERLAPS the side's extent along the shared axis by
+///   any POSITIVE amount (a SHORT reference that overlaps only part of the side
+///   still counts). The side snaps its whole coordinate onto the NEAREST such
+///   reference.
+/// - INVERSION GUARD: if snapping a pair of opposing sides would collapse or
+///   invert the rectangle on that axis, BOTH snaps are dropped (that axis stays
+///   put and unpinned).
+///
+/// Each snapped side is recorded as ONE elective [`SnapKind::ToParallelWall`]
+/// decision (keyed at the side MIDPOINT, replay-stable) and applied only if the
+/// forced-choice policy didn't skip it — mirroring `carve::snap_walls`, so the
+/// controller's snap-tag / tap-to-unsnap machinery drives it unchanged. A
+/// sub-[`NOOP_SNAP_EPS_M`] move is invisible: applied silently, no tag. A
+/// side whose decision the policy skipped is left un-snapped AND un-pinned.
+///
+/// Returns `((lo.x, lo.y), (len.x, len.y), [x_lo, x_hi, y_lo, y_hi])` — the
+/// snapped LO corner, the side lengths (`hi - lo`, matching how the rect FSM
+/// stores geometry), and which sides pinned.
+pub fn snap_axis_rect_to_refs(
+    lo: Point2f32,
+    hi: Point2f32,
+    segments: &[[Point2f32; 2]],
+    tol: f32,
+) -> ((f32, f32), (f32, f32), [bool; 4]) {
+    let eps = 1e-3_f32; // axis-aligned classifier + minimum positive overlap
+    let min_extent = 1e-3_f32; // never let a snap collapse/invert the rect
+
+    // Nearest reference coordinate a side can level onto: parallel to the side,
+    // overlapping the side's extent by any positive amount, within `tol`
+    // perpendicular. `want_vertical` selects vertical refs (for an x-side) or
+    // horizontal ones (for a y-side); diagonal refs match neither.
+    let nearest = |side_coord: f32, span: (f32, f32), want_vertical: bool| -> Option<f32> {
+        let (s_lo, s_hi) = (span.0.min(span.1), span.0.max(span.1));
+        let mut best: Option<(f32, f32)> = None; // (coord, |offset|)
+        for seg in segments {
+            let (a, b) = (seg[0], seg[1]);
+            let (dx, dy) = (b.x - a.x, b.y - a.y);
+            let (coord, r_lo, r_hi) = if want_vertical {
+                if dx.abs() > eps {
+                    continue; // not a vertical reference
+                }
+                (a.x, a.y.min(b.y), a.y.max(b.y))
+            } else {
+                if dy.abs() > eps {
+                    continue; // not a horizontal reference
+                }
+                (a.y, a.x.min(b.x), a.x.max(b.x))
+            };
+            let off = (coord - side_coord).abs();
+            if off > tol {
+                continue;
+            }
+            if r_hi.min(s_hi) - r_lo.max(s_lo) <= eps {
+                continue; // no positive overlap along the shared axis
+            }
+            if best.is_none_or(|(_, bo)| off < bo) {
+                best = Some((coord, off));
+            }
+        }
+        best.map(|(c, _)| c)
+    };
+
+    // Candidates from the ORIGINAL rect (replay-stable — never re-derived from a
+    // partly snapped rect).
+    let mut c_xlo = nearest(lo.x, (lo.y, hi.y), true);
+    let mut c_xhi = nearest(hi.x, (lo.y, hi.y), true);
+    let mut c_ylo = nearest(lo.y, (lo.x, hi.x), false);
+    let mut c_yhi = nearest(hi.y, (lo.x, hi.x), false);
+
+    // Inversion guard, per axis: prospective snapped sides that would collapse or
+    // cross the rect drop BOTH snaps on that axis.
+    if c_xhi.unwrap_or(hi.x) - c_xlo.unwrap_or(lo.x) <= min_extent {
+        c_xlo = None;
+        c_xhi = None;
+    }
+    if c_yhi.unwrap_or(hi.y) - c_ylo.unwrap_or(lo.y) <= min_extent {
+        c_ylo = None;
+        c_yhi = None;
+    }
+
+    // Record + apply one elective decision per snapped side. Returns whether the
+    // side was applied (policy could skip it).
+    let apply_snap = |from: Point2f32, to: Point2f32, dist: f32| -> bool {
+        dist < NOOP_SNAP_EPS_M || record_grouped_choice(SnapKind::ToParallelWall, from, to, dist)
+    };
+
+    let (mut lo_x, mut lo_y) = (lo.x, lo.y);
+    let (mut hi_x, mut hi_y) = (hi.x, hi.y);
+    let mut pins = [false; 4];
+
+    if let Some(tx) = c_xlo {
+        let from = Point2f32::new(lo.x, (lo.y + hi.y) * 0.5);
+        if apply_snap(from, Point2f32::new(tx, from.y), (tx - lo.x).abs()) {
+            lo_x = tx;
+            pins[0] = true;
+        }
+    }
+    if let Some(tx) = c_xhi {
+        let from = Point2f32::new(hi.x, (lo.y + hi.y) * 0.5);
+        if apply_snap(from, Point2f32::new(tx, from.y), (tx - hi.x).abs()) {
+            hi_x = tx;
+            pins[1] = true;
+        }
+    }
+    if let Some(ty) = c_ylo {
+        let from = Point2f32::new((lo.x + hi.x) * 0.5, lo.y);
+        if apply_snap(from, Point2f32::new(from.x, ty), (ty - lo.y).abs()) {
+            lo_y = ty;
+            pins[2] = true;
+        }
+    }
+    if let Some(ty) = c_yhi {
+        let from = Point2f32::new((lo.x + hi.x) * 0.5, hi.y);
+        if apply_snap(from, Point2f32::new(from.x, ty), (ty - hi.y).abs()) {
+            hi_y = ty;
+            pins[3] = true;
+        }
+    }
+
+    ((lo_x, lo_y), (hi_x - lo_x, hi_y - lo_y), pins)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1390,5 +1521,71 @@ mod tests {
         // Interior point: nearest wall, not a vertex.
         assert!((dist_to_ring(&ring, p(5.0, 2.0)) - 2.0).abs() < 1e-4);
         assert_eq!(dist_to_ring(&[p(0.0, 0.0)], p(1.0, 1.0)), f32::INFINITY);
+    }
+
+    #[test]
+    fn snap_axis_rect_partial_overlap_ref_snaps_whole_side() {
+        let p = |x, y| Point2f32::new(x, y);
+        let _ = take_snap_decisions();
+        // A rect x∈[0,4], y∈[0,5]. A SHORT vertical reference at x=0.05 spanning
+        // only y∈[1,2] — it overlaps the LEFT side (which spans the full y∈[0,5])
+        // by only part of its length. The whole left side must still snap onto it.
+        let (lo, hi) = (p(0.05, 0.0), p(4.0, 5.0));
+        let refs = [[p(0.0, 1.0), p(0.0, 2.0)]];
+        let (slo, slen, pins) = snap_axis_rect_to_refs(lo, hi, &refs, 0.15);
+        assert!((slo.0 - 0.0).abs() < 1e-4, "left side snapped onto x=0");
+        assert!((slo.1 - 0.0).abs() < 1e-4, "bottom unmoved");
+        assert!(
+            (slen.0 - 4.0).abs() < 1e-4,
+            "right side unmoved (len grows)"
+        );
+        assert_eq!(pins, [true, false, false, false], "only x_lo pinned");
+        let _ = take_snap_decisions();
+    }
+
+    #[test]
+    fn snap_axis_rect_no_parallel_ref_leaves_side_unpinned() {
+        let p = |x, y| Point2f32::new(x, y);
+        let _ = take_snap_decisions();
+        let (lo, hi) = (p(0.5, 0.5), p(4.0, 5.0));
+        // A vertical ref far away in x, and a horizontal ref far away in y.
+        let refs = [[p(9.0, 0.0), p(9.0, 5.0)], [p(0.0, 9.0), p(4.0, 9.0)]];
+        let (slo, slen, pins) = snap_axis_rect_to_refs(lo, hi, &refs, 0.15);
+        assert_eq!((slo, slen), ((0.5, 0.5), (3.5, 4.5)), "unchanged");
+        assert_eq!(pins, [false; 4], "nothing in range → nothing pinned");
+        assert!(take_snap_decisions().is_empty());
+    }
+
+    #[test]
+    fn snap_axis_rect_diagonal_ref_never_snaps_an_axis_side() {
+        let p = |x, y| Point2f32::new(x, y);
+        let _ = take_snap_decisions();
+        let (lo, hi) = (p(0.05, 0.05), p(4.0, 5.0));
+        // A DIAGONAL reference passing right by the LO corner — must not snap
+        // either the left (vertical) or bottom (horizontal) side.
+        let refs = [[p(0.0, 0.0), p(1.0, 1.0)]];
+        let (slo, slen, pins) = snap_axis_rect_to_refs(lo, hi, &refs, 0.5);
+        assert_eq!((slo, slen), ((0.05, 0.05), (3.95, 4.95)), "unchanged");
+        assert_eq!(pins, [false; 4], "diagonal ref snaps no axis side");
+        assert!(take_snap_decisions().is_empty());
+    }
+
+    #[test]
+    fn snap_axis_rect_inversion_guard_drops_the_axis() {
+        let p = |x, y| Point2f32::new(x, y);
+        let _ = take_snap_decisions();
+        // A THIN rect x∈[0.05, 0.12] (0.07 wide) with a SINGLE vertical ref at
+        // x=0.10 in reach of BOTH x-sides. Snapping each side onto it would
+        // collapse the rect to zero width; the guard drops both snaps, leaving
+        // the x axis exactly as drawn and unpinned.
+        let (lo, hi) = (p(0.05, 0.0), p(0.12, 5.0));
+        let refs = [[p(0.10, 0.0), p(0.10, 5.0)]];
+        let (slo, slen, pins) = snap_axis_rect_to_refs(lo, hi, &refs, 0.15);
+        assert!(
+            (slo.0 - 0.05).abs() < 1e-4 && (slen.0 - 0.07).abs() < 1e-4,
+            "x axis left as drawn (guard): {slo:?} {slen:?}"
+        );
+        assert_eq!(pins, [false; 4], "inversion guard leaves the axis unpinned");
+        let _ = take_snap_decisions();
     }
 }

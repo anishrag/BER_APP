@@ -2223,10 +2223,14 @@ impl AppController {
         // dimensioning (the pin matches the snap; declining the snap tag
         // reopens the question).
         let ref_walls = self.phase_reference_walls();
-        match self
-            .document
-            .carve_or_cut_in_available(&pts, &[], &self.tuning.subarea, &ref_walls)
-        {
+        let wall_snap_tol = self.snap_tol_carve();
+        match self.document.carve_or_cut_in_available(
+            &pts,
+            &[],
+            &self.tuning.subarea,
+            &ref_walls,
+            wall_snap_tol,
+        ) {
             Ok((boundary, SubareaOutcome::Cut(a, b))) => {
                 self.pending_structure_cut = Some([
                     self.pinned_subarea_slot_refs(&boundary, a, &ref_walls),

@@ -48,6 +48,29 @@ impl CeilingApex {
     }
 }
 
+/// A flat-topped DORMER patch carved into an already-sloped attic ceiling: the
+/// `footprint` region is set to the single flat height `top_z_m` while the
+/// SURROUNDING roof keeps its slope — the dormer does NOT reslope its
+/// neighbours. Its vertical walls fall out for free from
+/// [`CeilingRegions::riser_faces`] once the flat patch and the sloped remainder
+/// meet at different heights along the footprint boundary. Durable INPUT like
+/// [`CeilingApex`]; resolve replays the list via
+/// [`CeilingRegions::with_flat_patches`].
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct Dormer {
+    /// The dormer's plan footprint: a CLOSED ring in storey/world metres (no
+    /// closing duplicate required). Quantized to the f32 grid by
+    /// [`Ber::add_dormer`], mirroring [`CeilingApex::point`], so the derived
+    /// seams line up after the reload round-trip.
+    ///
+    /// [`Ber::add_dormer`]: super::ber_struct::Ber::add_dormer
+    pub footprint: Vec<Point2f64>,
+    /// ABSOLUTE flat height of the dormer top in metres above the storey's floor
+    /// datum ("dormer ceiling at 2.6 m"), NOT a delta against the roof it carves
+    /// into.
+    pub top_z_m: f64,
+}
+
 /// Plan tolerance (m) for claiming an apex that sits ON a region boundary.
 /// Same rationale as `PROFILE_EPS_M`: derived rings are boolean-op output that
 /// can sit a few 1e-7 m off the line they conceptually coincide with — a
@@ -316,6 +339,123 @@ impl CeilingRegions {
             regions = next;
         }
         Self { regions }
+    }
+
+    /// Carve flat-topped DORMER patches into the (possibly SLOPED) regions
+    /// WITHOUT resloping their neighbours. For each `(ring, z_abs)`: 2D-boolean
+    /// split every region by `ring` — the same [`geo`] `BooleanOps` +
+    /// [`SLIVER_AREA_M2`] pattern as [`with_z_deltas`](Self::with_z_deltas) and
+    /// [`split_faces_coplanar`](Self::split_faces_coplanar). The INSIDE piece(s)
+    /// (region ∩ ring) become NEW FLAT regions with every vertex at the absolute
+    /// `z_abs` (a fresh id, so [`riser_faces`](Self::riser_faces) pairs the patch
+    /// against its neighbours); the OUTSIDE piece(s) (region − ring) keep the
+    /// SOURCE face's plane ([`region_plane`]) — so the surrounding slope stays
+    /// bit-identical to the original. A region the ring never intersects (inside
+    /// area < [`SLIVER_AREA_M2`]) is returned UNTOUCHED — same id, same opes; a
+    /// region the ring fully covers flattens to one `z_abs` piece (no remainder).
+    ///
+    /// Split pieces inherit `construction_id`/`exposure`, get fresh ids and
+    /// default `opes` (mirroring `split_faces_coplanar` — region identity does
+    /// not survive a split). Boolean results carrying interior rings are
+    /// decomposed (`split_to_simple`) and sub-[`SLIVER_AREA_M2`] slivers dropped;
+    /// rings with < 3 vertices are skipped; a plan-degenerate region (no plane)
+    /// passes through unsplit; multiple patches compose in SEQUENCE; empty
+    /// `patches` → `self` unchanged.
+    ///
+    /// Unlike the flat-input, delta-stamping `with_z_deltas`, this runs over the
+    /// resolved SLOPED attic: the flat patch and the sloped remainder meet at
+    /// different heights along the footprint boundary, so `riser_faces` derives
+    /// the dormer's vertical walls for free — and emits NOTHING along a boundary
+    /// edge where the flat top is flush with the roof.
+    ///
+    /// [`region_plane`]: super::region_plane
+    pub fn with_flat_patches(&self, patches: &[(Vec<Point2f64>, f64)]) -> CeilingRegions {
+        use geo::bool_ops::BooleanOps;
+        use geo::Area;
+        if patches.is_empty() {
+            return self.clone();
+        }
+        let to_poly = |ring: &[Point2f64]| {
+            Polygon::new(
+                LineString::from(ring.iter().map(|p| (p.x, p.y)).collect::<Vec<_>>()),
+                vec![],
+            )
+        };
+        let mut regions = self.regions.clone();
+        for (ring, z_abs) in patches {
+            if ring.len() < 3 {
+                continue;
+            }
+            let area_poly = to_poly(ring);
+            let mut next: Vec<CeilingRegion> = Vec::new();
+            for region in regions {
+                let Some((c0, cx, cy)) = region_plane(&region) else {
+                    next.push(region); // plan-degenerate — nothing to split
+                    continue;
+                };
+                let region_poly: Polygon<f64> = region.polygon.clone().into();
+                let inside = region_poly.intersection(&area_poly);
+                let inside_area: f64 = inside.0.iter().map(|p| p.unsigned_area()).sum();
+                if inside_area < SLIVER_AREA_M2 {
+                    next.push(region); // patch misses this face — keep it byte-identical
+                    continue;
+                }
+                let cid = region.construction_id;
+                let exposure = region.exposure;
+                // INSIDE: the flat dormer top — every vertex stamped at `z_abs`.
+                let mk_flat = |poly: &Polygon<f64>| {
+                    let mut pts: Vec<Point3f64> = poly
+                        .exterior()
+                        .coords()
+                        .map(|c| Point3f64::new(c.x, c.y, *z_abs))
+                        .collect();
+                    if pts.len() > 1 && pts.first() == pts.last() {
+                        pts.pop();
+                    }
+                    CeilingRegion {
+                        id: ItemId::default(),
+                        polygon: Polygon3D::new(pts),
+                        opes: Opes::default(),
+                        construction_id: cid,
+                        exposure,
+                    }
+                };
+                // OUTSIDE: the surrounding roof kept on the SOURCE plane
+                // (z read from the plane, not a flat stamp) — bit-identical slope.
+                let mk_sloped = |poly: &Polygon<f64>| {
+                    let mut pts: Vec<Point3f64> = poly
+                        .exterior()
+                        .coords()
+                        .map(|c| Point3f64::new(c.x, c.y, c0 + cx * c.x + cy * c.y))
+                        .collect();
+                    if pts.len() > 1 && pts.first() == pts.last() {
+                        pts.pop();
+                    }
+                    CeilingRegion {
+                        id: ItemId::default(),
+                        polygon: Polygon3D::new(pts),
+                        opes: Opes::default(),
+                        construction_id: cid,
+                        exposure,
+                    }
+                };
+                for poly in inside.0.iter().flat_map(split_to_simple) {
+                    if poly.unsigned_area() < SLIVER_AREA_M2 {
+                        continue;
+                    }
+                    next.push(mk_flat(&poly));
+                }
+                let outside = region_poly.difference(&area_poly);
+                for poly in outside.0.iter().flat_map(split_to_simple) {
+                    if poly.unsigned_area() < SLIVER_AREA_M2 {
+                        continue;
+                    }
+                    next.push(mk_sloped(&poly));
+                }
+            }
+            regions = next;
+        }
+        CeilingRegions { regions }
     }
 
     /// Shape the regions by roof `apexes` in ONE pass (the last step of the
@@ -814,6 +954,64 @@ impl CeilingRegions {
                 .then(|| region_plane(r).map(|(c0, cx, cy)| c0 + cx * p.x + cy * p.y))
                 .flatten()
         })
+    }
+
+    /// How much of `footprint` the roof covers, and the roof's MAXIMUM height
+    /// over that coverage — the two facts the dormer validator needs, computed
+    /// so the roof height at a region-boundary seam is captured from BOTH sides.
+    ///
+    /// Returns `(covered_area, roof_max_z)`: `covered_area` (m²) is the summed
+    /// plan area of `footprint ∩` each region (region interiors are disjoint, so
+    /// the sum is the covered fraction — a dormer may legitimately SPAN several
+    /// ceiling areas); `roof_max_z` is the largest ceiling-surface height over
+    /// the covered area, or `None` when the footprint intersects nothing.
+    ///
+    /// The height is taken from EACH region's OWN affine plane
+    /// ([`region_plane`]: `z = c0 + cx·x + cy·y`) evaluated at every vertex of
+    /// THAT region's intersection piece — the footprint corners inside the
+    /// region, the region corners inside the footprint (a ridge/apex passing
+    /// through the interior), and the boundary crossings. Because each region
+    /// contributes the max of its own plane over its own piece, a DISCONTINUOUS
+    /// roof step at a shared seam is captured from both sides: the higher region
+    /// wins there regardless of region order — unlike [`top_z_at`], whose
+    /// first-region-wins tie-break is order-dependent ON a seam.
+    ///
+    /// The intersection / `split_to_simple` / MultiPolygon handling mirrors
+    /// [`with_flat_patches`](Self::with_flat_patches): MultiPolygon results are
+    /// decomposed to simple pieces and sub-[`SLIVER_AREA_M2`] slivers are
+    /// dropped. A plan-degenerate region (no plane) and a footprint of < 3
+    /// vertices contribute nothing.
+    ///
+    /// [`region_plane`]: super::region_plane
+    /// [`top_z_at`]: Self::top_z_at
+    pub fn footprint_coverage_and_roof_max(&self, footprint: &[Point2f64]) -> (f64, Option<f64>) {
+        use geo::bool_ops::BooleanOps;
+        use geo::Area;
+        if footprint.len() < 3 {
+            return (0.0, None);
+        }
+        let fp_poly = ring_to_poly(footprint);
+        let mut covered_area = 0.0_f64;
+        let mut roof_max: Option<f64> = None;
+        for region in &self.regions {
+            let Some((c0, cx, cy)) = region_plane(region) else {
+                continue; // plan-degenerate — no plane to sample
+            };
+            let region_poly: Polygon<f64> = region.polygon.clone().into();
+            let inter = region_poly.intersection(&fp_poly);
+            for poly in inter.0.iter().flat_map(split_to_simple) {
+                let a = poly.unsigned_area();
+                if a < SLIVER_AREA_M2 {
+                    continue; // graze / no real overlap
+                }
+                covered_area += a;
+                for c in poly.exterior().coords() {
+                    let z = c0 + cx * c.x + cy * c.y;
+                    roof_max = Some(roof_max.map_or(z, |m: f64| m.max(z)));
+                }
+            }
+        }
+        (covered_area, roof_max)
     }
 
     /// The floor levels a storey ABOVE inherits from this (below-storey)

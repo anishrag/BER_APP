@@ -52,6 +52,74 @@ impl AppController {
         self.view
     }
 
+    /// Record the diagonal (metres) of the currently-VISIBLE world rectangle —
+    /// the sketch UI computes it from the live pan/zoom transform and pushes it
+    /// each frame. A plain `f32`, so no egui type crosses into the controller;
+    /// the snap-tolerance helpers ([`snap_view_diag`](Self::snap_view_diag))
+    /// read it to size viewport-relative snap radii.
+    pub fn set_view_world_diagonal_m(&mut self, d: f32) {
+        self.view_world_diagonal_m = Some(d);
+    }
+
+    /// The world diagonal (metres) that sizes viewport-relative snap tolerances:
+    /// the value the UI last pushed ([`set_view_world_diagonal_m`](Self::set_view_world_diagonal_m)),
+    /// else a plan-bbox diagonal — so headless/standalone runs, tests, and the
+    /// pre-first-frame case are always defined. The fallback tries, in order:
+    /// the active storey outline; the live editing buffer; the PREVIOUS storey's
+    /// ring (so a fresh upper storey being traced — whose own outline is still
+    /// empty — is sized by the footprint it's drawn over, the scale the real
+    /// app's viewport would show); then a 1 m floor (the clamp still yields the
+    /// per-tool `min_m` on a truly empty session).
+    fn snap_view_diag(&self) -> f32 {
+        if let Some(d) = self
+            .view_world_diagonal_m
+            .filter(|d| d.is_finite() && *d > 0.0)
+        {
+            return d;
+        }
+        let outline = self.document.outline.floor_plan.bounding_box_diagonal();
+        if outline > 0.0 {
+            return outline;
+        }
+        let buffer = self.document.floor_plan.bounding_box_diagonal();
+        if buffer > 0.0 {
+            return buffer;
+        }
+        if let Some(prev) = self.previous_storey_ring() {
+            let d = manip_plan::ring_diagonal(&prev);
+            if d > 0.0 {
+                return d;
+            }
+        }
+        1.0
+    }
+
+    /// Dormer edge-snap tolerance (metres), viewport-relative.
+    pub(crate) fn snap_tol_dormer(&self) -> f32 {
+        self.tuning.snap.dormer.tol(self.snap_view_diag())
+    }
+
+    /// Ceiling-exposure carve pre-snap tolerance (metres), viewport-relative.
+    pub(crate) fn snap_tol_ceiling_exposure(&self) -> f32 {
+        self.tuning.snap.ceiling_exposure.tol(self.snap_view_diag())
+    }
+
+    /// Ridge + ceiling-step LINE snap tolerance (metres), viewport-relative.
+    pub(crate) fn snap_tol_ceiling_line(&self) -> f32 {
+        self.tuning.snap.ceiling_line.tol(self.snap_view_diag())
+    }
+
+    /// Phase / floor-step / living-area carve wall-leveling tolerance (metres),
+    /// viewport-relative.
+    pub(crate) fn snap_tol_carve(&self) -> f32 {
+        self.tuning.snap.carve.tol(self.snap_view_diag())
+    }
+
+    /// Extend + new-storey stroke snap tolerance (metres), viewport-relative.
+    pub(crate) fn snap_tol_extend(&self) -> f32 {
+        self.tuning.snap.extend.tol(self.snap_view_diag())
+    }
+
     /// Multiply current zoom by `factor`, keeping `anchor` (canvas pixel pos)
     /// stationary. Clamped to a reasonable range.
     pub fn zoom_view(&mut self, factor: f32, anchor: (f32, f32), canvas_center: (f32, f32)) {

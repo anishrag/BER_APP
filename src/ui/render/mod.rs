@@ -606,6 +606,9 @@ pub fn render_roof_apexes(
 /// The roof-ridge hue: violet-blue, distinct from the apex rose-magenta, the
 /// phase purple, the floor-step teal and the ceiling-step amber.
 const ROOF_RIDGE_COLOR: egui::Color32 = egui::Color32::from_rgb(130, 150, 255);
+/// Committed-dormer outline + label colour — a green distinct from the
+/// ridge/rect family's violet-blue (a dormer is a non-resloping flat patch).
+const DORMER_COLOR: egui::Color32 = egui::Color32::from_rgb(70, 190, 120);
 
 /// Draw the PENDING roof-ridge line as a dashed segment between its OWN
 /// endpoints (the stroke's extent — a ridge has endpoints, unlike the
@@ -715,6 +718,52 @@ pub fn render_roof_rects(
                 egui::Stroke::new(3.0, ROOF_RIDGE_COLOR),
             );
         }
+    }
+}
+
+/// Draw the storey's COMMITTED dormers: a solid outline around each dormer
+/// footprint ring, labelled at its centroid ("⌐ 2.60 m"). A distinct green
+/// from the ridge/rect family's violet-blue — a dormer is a non-resloping flat
+/// patch carved into the sloped attic, not a ridge. The footprint is a general
+/// ring (v1 is rectangular, but a future non-rectangular dormer draws
+/// unchanged).
+pub fn render_dormers(
+    painter: &egui::Painter,
+    rect: egui::Rect,
+    ber: Option<&Ber>,
+    current_storey_idx: Option<usize>,
+    sketch_mode: SketchMode,
+    view: ViewParams,
+    dormers: &[(Vec<(f64, f64)>, String)],
+) {
+    if dormers.is_empty() {
+        return;
+    }
+    let Some((_storey, t)) = storey_transform(rect, ber, current_storey_idx, sketch_mode, view)
+    else {
+        return;
+    };
+    for (ring, label) in dormers {
+        if ring.len() < 2 {
+            continue;
+        }
+        let pts: Vec<egui::Pos2> = ring.iter().map(|(x, y)| t.apply(*x, *y)).collect();
+        let n = pts.len();
+        for k in 0..n {
+            painter.line_segment(
+                [pts[k], pts[(k + 1) % n]],
+                egui::Stroke::new(3.0, DORMER_COLOR),
+            );
+        }
+        let cx = pts.iter().map(|p| p.x).sum::<f32>() / n as f32;
+        let cy = pts.iter().map(|p| p.y).sum::<f32>() / n as f32;
+        painter.text(
+            egui::pos2(cx, cy),
+            egui::Align2::CENTER_CENTER,
+            label,
+            egui::FontId::proportional(13.0),
+            DORMER_COLOR,
+        );
     }
 }
 

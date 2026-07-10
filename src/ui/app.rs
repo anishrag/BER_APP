@@ -859,6 +859,10 @@ impl eframe::App for BerApp {
                                 pending_roof_rect_length,
                                 ceiling_rect_height_pending,
                                 ceiling_rect_pending,
+                                ceiling_rect_is_dormer,
+                                dormer_mode,
+                                dormer_available,
+                                dormer_views,
                                 default_ceiling_height,
                                 ceiling_heights_set,
                                 new_storey_prompt,
@@ -950,6 +954,10 @@ impl eframe::App for BerApp {
                                     controller_ref.pending_roof_rect_length(),
                                     controller_ref.ceiling_rect_height_pending(),
                                     controller_ref.ceiling_rect_pending(),
+                                    controller_ref.pending_rect_is_dormer(),
+                                    controller_ref.dormer_mode(),
+                                    controller_ref.dormer_available(),
+                                    controller_ref.dormer_views(),
                                     controller_ref.default_ceiling_height(),
                                     controller_ref.ceiling_heights_set(),
                                     controller_ref.new_storey_prompt(),
@@ -1495,6 +1503,10 @@ impl eframe::App for BerApp {
                                 ceiling_rect_length_axis,
                                 ceiling_rect_height_pending,
                                 ceiling_rect_pending,
+                                dormer_mode,
+                                dormer_available,
+                                dormer_views: &dormer_views,
+                                ceiling_rect_is_dormer,
                                 ceiling_ridge_length_input: &mut self
                                     .sketch_state
                                     .ceiling_ridge_length_input,
@@ -1720,6 +1732,11 @@ impl eframe::App for BerApp {
                                     }
                                     SketchEvent::PanView { dx, dy } => {
                                         controller.borrow_mut().pan_view(dx, dy);
+                                    }
+                                    SketchEvent::ViewportWorldDiagonal { world_diagonal_m } => {
+                                        controller
+                                            .borrow_mut()
+                                            .set_view_world_diagonal_m(world_diagonal_m);
                                     }
                                     SketchEvent::OrbitView { dyaw, dpitch } => {
                                         controller.borrow_mut().orbit_view(dyaw, dpitch);
@@ -2099,6 +2116,23 @@ impl eframe::App for BerApp {
                                     SketchEvent::CancelPendingCeilingRect => {
                                         controller.borrow_mut().cancel_pending_roof_rect();
                                         self.sketch_state.roof_error = None;
+                                    }
+                                    SketchEvent::SetDormerMode(on) => {
+                                        controller.borrow_mut().set_dormer_mode(on);
+                                    }
+                                    SketchEvent::DormerStrokeWorld { points } => {
+                                        controller.borrow_mut().apply_dormer_stroke_event(&points);
+                                    }
+                                    SketchEvent::AssignDormerHeight(z_m) => {
+                                        match controller.borrow_mut().assign_dormer_height(z_m) {
+                                            Ok(()) => {
+                                                self.sketch_state.roof_error = None;
+                                            }
+                                            Err(e) => {
+                                                log::error!("assign_dormer_height: {}", e);
+                                                self.sketch_state.roof_error = Some(e);
+                                            }
+                                        }
                                     }
                                     SketchEvent::SetExposureMode(on) => {
                                         controller.borrow_mut().set_exposure_mode(on);

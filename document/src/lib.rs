@@ -31,9 +31,9 @@ mod windows;
 
 pub use ceiling_point::{
     centred_rect_lo, centred_ridge_cross, centred_ridge_start, resolve_ridge_slope_side,
-    ridge_meet_edge_height, ridge_region_ring, validate_roof_apex, validate_roof_rect_length,
-    validate_roof_rect_placement, validate_roof_rect_ridge, validate_roof_ridge,
-    validate_roof_ridge_extent, validate_roof_ridge_length, RidgeSlopeSide,
+    ridge_meet_edge_height, ridge_region_ring, validate_dormer, validate_roof_apex,
+    validate_roof_rect_length, validate_roof_rect_placement, validate_roof_rect_ridge,
+    validate_roof_ridge, validate_roof_ridge_extent, validate_roof_ridge_length, RidgeSlopeSide,
 };
 pub use ceiling_step::{
     canonicalize_ceiling_steps, ceiling_line_coords, region_line_coords, CeilingStepRegion,
@@ -708,17 +708,24 @@ impl StoreyDoc {
     /// Returns that piece (the caller pins walls against it) plus the outcome.
     /// `holes` empty → the whole outline (the relationship "sub-areas are carved
     /// against the outline" lives here, not in the caller).
+    ///
+    /// `wall_snap_tol` is the max perpendicular gap (metres) at which a drawn
+    /// wall levels onto a parallel outline/reference wall — the shell computes it
+    /// from the viewport and passes a plain number, keeping the snap POLICY out
+    /// of `document`.
     pub fn carve_or_cut_in_available(
         &self,
         stroke: &[Point2f32],
         holes: &[Vec<Point2f32>],
         tuning: &SubareaTuning,
         ref_walls: &[[Point2f32; 2]],
+        wall_snap_tol: f32,
     ) -> Result<(FloorPlan, SubareaOutcome), Error> {
         let pieces = self.outline.floor_plan.subtract_all(holes);
         let boundary = pick_piece_for_stroke(pieces, stroke)
             .unwrap_or_else(|| self.outline.floor_plan.clone());
-        let outcome = boundary.carve_or_cut_refs(stroke, tuning, false, ref_walls)?;
+        let outcome =
+            boundary.carve_or_cut_refs(stroke, tuning, false, ref_walls, Some(wall_snap_tol))?;
         Ok((boundary, outcome))
     }
 
@@ -751,18 +758,21 @@ impl StoreyDoc {
     /// pre-snapped onto, so the pin matches the snap (a declined snap leaves the
     /// wall off the line → not pinned → its dimension question stays). Returns
     /// `(pinned, active)` parameter counts for the shell's logging. On error the
-    /// buffer is untouched.
+    /// buffer is untouched. `wall_snap_tol` (metres) is the wall-leveling snap
+    /// tolerance the shell computed from the viewport — see
+    /// [`carve_or_cut_in_available`](Self::carve_or_cut_in_available).
     pub fn carve_outline_from_previous(
         &mut self,
         stroke: &[Point2f32],
         prev_ring: &[Point2f32],
         tuning: &SubareaTuning,
         ref_walls: &[[Point2f32; 2]],
+        wall_snap_tol: f32,
     ) -> Result<(usize, usize), String> {
         let prev_plan = FloorPlan::from_clean_ring(prev_ring)
             .map_err(|e| format!("Failed to build reference outline: {:?}", e))?;
         let outcome = prev_plan
-            .carve_or_cut(stroke, tuning, true)
+            .carve_or_cut(stroke, tuning, true, Some(wall_snap_tol))
             .map_err(|e| format!("Failed to trace new storey: {:?}", e))?;
         let new_plan = match outcome {
             SubareaOutcome::Area(plan) => plan,
@@ -985,7 +995,13 @@ mod tests {
         // WITHOUT the reference: the x=5 wall's coordinate is unknown.
         let mut doc = StoreyDoc::default();
         let (pinned, active) = doc
-            .carve_outline_from_previous(&stroke, &prev_ring, &tuning, &[])
+            .carve_outline_from_previous(
+                &stroke,
+                &prev_ring,
+                &tuning,
+                &[],
+                manip_plan::ring_diagonal(&prev_ring) * 0.06,
+            )
             .expect("carve applies");
         assert!(
             pinned < active,
@@ -997,7 +1013,13 @@ mod tests {
         // every wall coordinate is known — nothing left to dimension.
         let mut doc = StoreyDoc::default();
         let (pinned, active) = doc
-            .carve_outline_from_previous(&stroke, &prev_ring, &tuning, &phase_line)
+            .carve_outline_from_previous(
+                &stroke,
+                &prev_ring,
+                &tuning,
+                &phase_line,
+                manip_plan::ring_diagonal(&prev_ring) * 0.06,
+            )
             .expect("carve applies");
         assert_eq!(
             pinned, active,

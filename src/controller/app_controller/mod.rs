@@ -15,6 +15,7 @@
 //   - `review`        — the collinearity-review cursor.
 //   - `ceiling_points`   — roof-point (apex / sloped-ceiling) tagging.
 //   - `ceiling_ridges`   — roof-RIDGE line input (a stroke placing two apexes).
+//   - `ceiling_dormers`  — flat-topped DORMER input (a closed stroke, non-resloping).
 //   - `snap`          — elective-snap tags, choose/un-snap replay.
 //   - `step_regions`  — floor-step (raise/lower area) tagging workflow.
 //   - `storeys`       — storey switching + the deferred-derive pipeline.
@@ -84,6 +85,7 @@ use sketch::model::Stroke;
 use sketch::SketchEngine;
 use std::collections::{HashMap, HashSet};
 
+mod ceiling_dormers;
 mod ceiling_points;
 mod ceiling_rects;
 mod ceiling_ridges;
@@ -98,7 +100,7 @@ mod strokes;
 mod view;
 
 use ceiling_points::PendingCeilingPoint;
-use ceiling_rects::PendingCeilingRect;
+use ceiling_rects::{PendingCeilingRect, RectPins};
 use ceiling_ridges::{PendingCeilingRidge, RidgeQuestion};
 use ceiling_steps::PendingCeilingStep;
 pub use dimensioning::{DimensionPromptUiData, PositionPromptUiData};
@@ -276,6 +278,26 @@ pub struct AppController {
     /// DURABLE record is the same `Storey::ceiling_apexes`; see
     /// `ceiling_rects.rs`.
     pending_roof_rect: Option<PendingCeilingRect>,
+    /// True when the editor is placing a flat-topped DORMER (a raised
+    /// rectangular patch carved into an already-sloped attic ceiling —
+    /// unlike the pavilion rect, it does NOT reslope its neighbours; its
+    /// vertical walls fall out of `CeilingRegions::riser_faces`). Mutually
+    /// exclusive with the other ceiling modes; same gate as the rect/apex
+    /// tools. Toggled by the UI. See `ceiling_dormers.rs`.
+    dormer_mode: bool,
+    /// Discriminates the SHARED `PendingCeilingRect` FSM: true iff the
+    /// in-flight rect was drawn in `dormer_mode`, so its final HEIGHT stage
+    /// commits a `Dormer` (non-resloping) rather than four pavilion apexes.
+    /// Only meaningful while `pending_roof_rect.is_some()` (read via
+    /// [`pending_rect_is_dormer`](Self::pending_rect_is_dormer)); the pavilion
+    /// flow leaves it false, byte-for-byte unchanged.
+    pending_rect_is_dormer: bool,
+    /// Which SIDES of the in-flight DORMER rect are PINNED — snapped flush onto
+    /// a reference edge at draw time, so their dimension prompt is skipped and
+    /// their coordinate is un-overridable (see `ceiling_dormers.rs` /
+    /// `ceiling_rects.rs`). Default all-false and set only on the dormer path;
+    /// the pavilion never reads or sets it, so its FSM is unaffected.
+    pending_rect_pins: RectPins,
     /// True when the editor is placing windows/doors. A tap near a wall drops
     /// the selected opening type on the nearest wall (then prompts size); a tap
     /// with no pending placement opens that wall's ELEVATION editor. Mutually
@@ -453,6 +475,12 @@ pub struct AppController {
     redo: Vec<HistorySnapshot>,
     /// View transform layered on top of the canvas auto-fit (pan + zoom).
     view: ViewTransform,
+    /// Diagonal (metres) of the currently-VISIBLE world rectangle, pushed each
+    /// frame by the sketch UI (`set_view_world_diagonal_m`). A plain scalar so no
+    /// egui type crosses the boundary; the snap-tolerance policy
+    /// (`snap_view_diag` + `snap_tol_*`) reads it. `None` before the first frame
+    /// / in headless runs — the helpers then fall back to the plan-bbox diagonal.
+    view_world_diagonal_m: Option<f32>,
     /// Runtime thresholds loaded from `tuning.yaml` (new-storey + collinearity).
     tuning: crate::config::Tuning,
     /// The assessor's current workflow phase (Mapping → Structure → Objects) —
@@ -635,6 +663,9 @@ impl AppController {
             pending_roof_point: None,
             pending_roof_ridge: None,
             pending_roof_rect: None,
+            dormer_mode: false,
+            pending_rect_is_dormer: false,
+            pending_rect_pins: RectPins::default(),
             openings_mode: false,
             navigation_mode: false,
             openings_tool: OpeningToolKind::Window,
@@ -681,6 +712,7 @@ impl AppController {
             history: Vec::new(),
             redo: Vec::new(),
             view: ViewTransform::default(),
+            view_world_diagonal_m: None,
             tuning: crate::config::Tuning::load(),
             current_phase: AssessmentPhase::default(),
             structure_kinds: std::collections::BTreeSet::from([SurfaceKind::Walls]),

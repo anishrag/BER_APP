@@ -1136,6 +1136,330 @@ mod tests {
         assert!((z - h).abs() < 1e-9, "remainder keeps its height");
     }
 
+    // ── with_flat_patches (dormers) ─────────────────────────────────────────
+
+    /// A ceiling region sloping z = 2.0 + 0.1·x over `ring`, one construction.
+    fn sloped_region(ring: Vec<Point2f64>, cid: ItemId) -> CeilingRegion {
+        CeilingRegion {
+            id: ItemId::default(),
+            polygon: Polygon3D::new(
+                ring.into_iter()
+                    .map(|p| Point3f64::new(p.x, p.y, 2.0 + 0.1 * p.x))
+                    .collect(),
+            ),
+            opes: Opes::default(),
+            construction_id: cid,
+            exposure: CeilingExposure::default(),
+        }
+    }
+
+    /// A ceiling region over `ring` on the plane z = c0 + cx·x + cy·y (cx = cy =
+    /// 0 gives a flat region at c0), one construction.
+    fn region_on_plane(
+        ring: Vec<Point2f64>,
+        c0: f64,
+        cx: f64,
+        cy: f64,
+        cid: ItemId,
+    ) -> CeilingRegion {
+        CeilingRegion {
+            id: ItemId::default(),
+            polygon: Polygon3D::new(
+                ring.into_iter()
+                    .map(|p| Point3f64::new(p.x, p.y, c0 + cx * p.x + cy * p.y))
+                    .collect(),
+            ),
+            opes: Opes::default(),
+            construction_id: cid,
+            exposure: CeilingExposure::default(),
+        }
+    }
+
+    /// The DISCONTINUOUS-STEP span the dormer review flagged: region A slopes UP
+    /// to 3.0 at the shared seam x = 5, region B is flat at 2.6 there — a
+    /// discontinuous roof step. A footprint spanning both must report the roof's
+    /// max as A's 3.0 (the higher side of the seam), NOT B's 2.6. Because each
+    /// region contributes the max of its OWN plane over its OWN piece, the answer
+    /// is the same in either region order — `top_z_at`'s first-region-wins
+    /// tie-break ON the seam is exactly the ambiguity this avoids.
+    #[test]
+    fn footprint_coverage_roof_max_captures_the_higher_side_of_a_step() {
+        let cid = ItemId::default();
+        // A: x∈[0,5]×[0,6], plane z = 1.0 + 0.4·x → 3.0 at the seam x = 5.
+        let mk_a = || region_on_plane(square(0.0, 0.0, 5.0, 6.0), 1.0, 0.4, 0.0, cid);
+        // B: x∈[5,10]×[0,6], flat at 2.6.
+        let mk_b = || region_on_plane(square(5.0, 0.0, 10.0, 6.0), 2.6, 0.0, 0.0, cid);
+        // Footprint x∈[3,7]×[2,4] spans both: 2×2 over A + 2×2 over B = 8 m².
+        let fp = square(3.0, 2.0, 7.0, 4.0);
+        for (label, regions) in [
+            ("A before B", vec![mk_a(), mk_b()]),
+            ("B before A", vec![mk_b(), mk_a()]),
+        ] {
+            let ceilings = CeilingRegions { regions };
+            let (covered, roof_max) = ceilings.footprint_coverage_and_roof_max(&fp);
+            assert!(
+                (covered - 8.0).abs() < 1e-6,
+                "{label}: full coverage, got {covered}"
+            );
+            let roof_max = roof_max.expect("footprint intersects both regions");
+            assert!(
+                (roof_max - 3.0).abs() < 1e-9,
+                "{label}: the step's higher side (3.0) binds, not B's 2.6 — got {roof_max}"
+            );
+        }
+        // A footprint over NOTHING → no coverage, no roof.
+        let (covered, roof_max) = CeilingRegions {
+            regions: vec![mk_a()],
+        }
+        .footprint_coverage_and_roof_max(&square(20.0, 20.0, 24.0, 24.0));
+        assert_eq!(covered, 0.0);
+        assert_eq!(roof_max, None);
+    }
+
+    /// A flat dormer patch carved into a SLOPED region: the inside piece is flat
+    /// at the absolute top, the outside remainder stays on the SOURCE plane, and
+    /// a region the ring never touches comes out byte-identical.
+    #[test]
+    fn with_flat_patches_flattens_inside_and_keeps_the_slope_outside() {
+        let cid = ItemId::default();
+        // Sloped attic z = 2.0 + 0.1·x over [0,10]² (plane c0=2.0, cx=0.1, cy=0).
+        let sloped = sloped_region(square(0.0, 0.0, 10.0, 10.0), cid);
+        // A flat region far away the dormer never intersects.
+        let far = CeilingRegion {
+            id: ItemId::default(),
+            polygon: Polygon3D::new(vec![
+                Point3f64::new(20.0, 20.0, 2.4),
+                Point3f64::new(24.0, 20.0, 2.4),
+                Point3f64::new(24.0, 24.0, 2.4),
+                Point3f64::new(20.0, 24.0, 2.4),
+            ]),
+            opes: Opes::default(),
+            construction_id: cid,
+            exposure: CeilingExposure::default(),
+        };
+        let far_id = far.id;
+        let far_poly = far.polygon.clone();
+        let ceilings = CeilingRegions {
+            regions: vec![sloped, far],
+        };
+
+        let out = ceilings.with_flat_patches(&[(square(3.0, 3.0, 6.0, 6.0), 3.5)]);
+
+        // INSIDE: exactly one flat patch at z = 3.5, area 3×3 = 9 m².
+        let patches: Vec<_> = out
+            .regions
+            .iter()
+            .filter(|r| r.flat_z().is_some_and(|z| (z - 3.5).abs() < 1e-9))
+            .collect();
+        assert_eq!(patches.len(), 1, "one flat dormer patch");
+        assert!(
+            (patches[0].area() - 9.0).abs() < 1e-6,
+            "3×3 dormer footprint"
+        );
+        assert!(
+            patches[0]
+                .polygon
+                .exterior
+                .iter()
+                .all(|v| (v.z - 3.5).abs() < 1e-9),
+            "every dormer-top vertex sits at z_abs"
+        );
+        assert_eq!(
+            patches[0].construction_id, cid,
+            "patch inherits construction"
+        );
+
+        // UNTOUCHED neighbour: byte-identical, same id (never re-split).
+        let far_out = out
+            .regions
+            .iter()
+            .find(|r| r.id == far_id)
+            .expect("the untouched region survives");
+        assert_eq!(
+            far_out.polygon, far_poly,
+            "a region the ring misses is byte-identical"
+        );
+
+        // OUTSIDE: every sloped-remainder piece samples the ORIGINAL plane.
+        for r in &out.regions {
+            if r.id == far_id || r.flat_z().is_some_and(|z| (z - 3.5).abs() < 1e-9) {
+                continue;
+            }
+            let (c0, cx, cy) = region_plane(r).expect("planar remainder");
+            assert!(
+                (c0 - 2.0).abs() < 1e-9 && (cx - 0.1).abs() < 1e-9 && cy.abs() < 1e-9,
+                "remainder stays on the source plane, got ({c0}, {cx}, {cy})"
+            );
+        }
+    }
+
+    /// After `with_flat_patches`, `riser_faces` derives the dormer's vertical
+    /// walls around the boundary — but emits NOTHING along an edge where the
+    /// flat top is flush with the sloped roof.
+    #[test]
+    fn with_flat_patches_riser_faces_wall_the_dormer_and_skip_the_flush_edge() {
+        let cid = ItemId::default();
+        // Slope z = 2.0 + 0.1·x: roof is 2.3 at x = 3 and 2.6 at x = 6.
+        let sloped = sloped_region(square(0.0, 0.0, 10.0, 10.0), cid);
+        let ceilings = CeilingRegions {
+            regions: vec![sloped],
+        };
+        // Dormer top at 2.6 = the roof height along the x = 6 edge → FLUSH there,
+        // a 0.3 m step along the x = 3 edge.
+        let out = ceilings.with_flat_patches(&[(square(3.0, 3.0, 6.0, 6.0), 2.6)]);
+        let faces = out.riser_faces();
+        assert!(!faces.is_empty(), "the dormer boundary walls up");
+        assert!(faces.len() >= 3, "faces on the three non-flush edges");
+
+        // The x = 3 edge: a full-height 0.3 m riser (2.3 → 2.6) on the line x = 3.
+        let x3 = faces.iter().find(|f| {
+            f.exterior.iter().all(|v| (v.x - 3.0).abs() < 1e-6)
+                && f.exterior.iter().any(|v| (v.z - 2.3).abs() < 1e-4)
+                && f.exterior.iter().any(|v| (v.z - 2.6).abs() < 1e-4)
+        });
+        assert!(x3.is_some(), "a 0.3 m riser on the x = 3 dormer edge");
+
+        // The x = 6 edge is FLUSH (patch 2.6 = roof 2.6): no face lies wholly on it.
+        assert!(
+            !faces
+                .iter()
+                .any(|f| f.exterior.iter().all(|v| (v.x - 6.0).abs() < 1e-6)),
+            "no riser along the flush x = 6 edge"
+        );
+    }
+
+    /// A dormer footprint SPANNING a SLOPED region and an adjacent FLAT
+    /// protrusion (the reported workflow) composes to a single flat top at
+    /// `z_abs`: both source regions' inside pieces flatten to `z_abs` — coplanar,
+    /// so together they read as ONE continuous dormer top with NO riser along
+    /// their shared seam — while the surrounding roof keeps its own planes and
+    /// `riser_faces` walls the whole spanning footprint.
+    #[test]
+    fn with_flat_patches_span_a_sloped_and_a_flat_region() {
+        let cid = ItemId::default();
+        // Sloped A over x∈[0,5]: z = 2.0 + 0.1·x (2.0 → 2.5). Flat protrusion B
+        // over x∈[5,10] at 2.5 — continuous with A at the shared boundary x = 5.
+        let sloped = sloped_region(square(0.0, 0.0, 5.0, 10.0), cid);
+        let flat = region_on_plane(square(5.0, 0.0, 10.0, 10.0), 2.5, 0.0, 0.0, cid);
+        let ceilings = CeilingRegions {
+            regions: vec![sloped, flat],
+        };
+
+        // Dormer top at 2.8, footprint square(3,3,7,7) — spans the x = 5 boundary.
+        let out = ceilings.with_flat_patches(&[(square(3.0, 3.0, 7.0, 7.0), 2.8)]);
+        assert_flat_dormer_top_spans(&out, 2.8, 16.0, 5.0);
+
+        // Surrounding roof unchanged: the sloped remainder on its source plane,
+        // the flat remainder still at 2.5.
+        for r in &out.regions {
+            if r.flat_z().is_some_and(|z| (z - 2.8).abs() < 1e-9) {
+                continue;
+            }
+            let (c0, cx, cy) = region_plane(r).expect("planar remainder");
+            let sloped_ok = (c0 - 2.0).abs() < 1e-9 && (cx - 0.1).abs() < 1e-9 && cy.abs() < 1e-9;
+            let flat_ok = (c0 - 2.5).abs() < 1e-9 && cx.abs() < 1e-9 && cy.abs() < 1e-9;
+            assert!(
+                sloped_ok || flat_ok,
+                "remainder keeps its own plane, got ({c0}, {cx}, {cy})"
+            );
+        }
+    }
+
+    /// A CORNER/RIDGE dormer spanning TWO SLOPED faces that meet at a ridge
+    /// composes the same way — both inside pieces flatten to one coplanar top at
+    /// `z_abs`, the two slopes stay unchanged, and `riser_faces` walls the whole
+    /// footprint with NO riser along the coplanar seam over the ridge.
+    #[test]
+    fn with_flat_patches_span_two_slopes_across_a_ridge() {
+        let cid = ItemId::default();
+        // Gable: south face rises z = 2.0 + 0.4·y over y∈[0,5] to the ridge at
+        // y = 5 (z = 4.0); north face falls z = 6.0 - 0.4·y over y∈[5,10].
+        let south = region_on_plane(square(0.0, 0.0, 10.0, 5.0), 2.0, 0.0, 0.4, cid);
+        let north = region_on_plane(square(0.0, 5.0, 10.0, 10.0), 6.0, 0.0, -0.4, cid);
+        let ceilings = CeilingRegions {
+            regions: vec![south, north],
+        };
+
+        // Dormer top at 4.5 (above the 4.0 ridge), footprint square(3,4,7,6) —
+        // straddles the ridge y = 5.
+        let out = ceilings.with_flat_patches(&[(square(3.0, 4.0, 7.0, 6.0), 4.5)]);
+        assert_flat_dormer_top_spans(&out, 4.5, 8.0, 5.0);
+
+        // Both slopes survive on their source planes.
+        for r in &out.regions {
+            if r.flat_z().is_some_and(|z| (z - 4.5).abs() < 1e-9) {
+                continue;
+            }
+            let (c0, cx, cy) = region_plane(r).expect("planar remainder");
+            let south_ok = (c0 - 2.0).abs() < 1e-9 && cx.abs() < 1e-9 && (cy - 0.4).abs() < 1e-9;
+            let north_ok = (c0 - 6.0).abs() < 1e-9 && cx.abs() < 1e-9 && (cy + 0.4).abs() < 1e-9;
+            assert!(
+                south_ok || north_ok,
+                "remainder keeps its own slope, got ({c0}, {cx}, {cy})"
+            );
+        }
+    }
+
+    /// Shared assertions for a SPANNING dormer top: the inside pieces are all
+    /// flat at `z_abs` (coplanar — one continuous top), together cover `area`
+    /// m², and `riser_faces` walls the footprint while emitting NO riser along
+    /// the coplanar seam at the source-region boundary `seam_coord` (an x=const
+    /// or y=const line inside the flat top).
+    fn assert_flat_dormer_top_spans(out: &CeilingRegions, z_abs: f64, area: f64, seam_coord: f64) {
+        let top: Vec<_> = out
+            .regions
+            .iter()
+            .filter(|r| r.flat_z().is_some_and(|z| (z - z_abs).abs() < 1e-9))
+            .collect();
+        assert!(!top.is_empty(), "the spanning dormer top exists");
+        let top_area: f64 = top.iter().map(|r| r.area()).sum();
+        assert!(
+            (top_area - area).abs() < 1e-6,
+            "the flat top covers the whole footprint ({area} m²), got {top_area}"
+        );
+        for r in &top {
+            assert!(
+                r.polygon
+                    .exterior
+                    .iter()
+                    .all(|v| (v.z - z_abs).abs() < 1e-9),
+                "every dormer-top vertex sits at z_abs"
+            );
+        }
+        let faces = out.riser_faces();
+        assert!(!faces.is_empty(), "the dormer boundary walls up");
+        // The coplanar seam between the two inside pieces (both at z_abs) emits
+        // nothing — no riser face lies wholly on the source-region boundary line.
+        assert!(
+            !faces.iter().any(|f| {
+                f.exterior.iter().all(|v| (v.x - seam_coord).abs() < 1e-6)
+                    || f.exterior.iter().all(|v| (v.y - seam_coord).abs() < 1e-6)
+            }),
+            "no riser along the coplanar seam inside the flat top"
+        );
+    }
+
+    /// `#[serde(default)]`: a Storey JSON produced by the OLD shape (no
+    /// `dormers` field) still deserializes, with an empty dormer vec.
+    #[test]
+    fn storey_without_dormers_deserializes_to_empty_vec() {
+        let mut storey = Storey::default();
+        storey.dormers.push(Dormer {
+            footprint: square(3.0, 3.0, 6.0, 6.0),
+            top_z_m: 2.6,
+        });
+        // Round-trips as-is with the field present.
+        let json = serde_json::to_value(&storey).expect("serialize");
+        let back: Storey = serde_json::from_value(json.clone()).expect("round-trip");
+        assert_eq!(back.dormers.len(), 1);
+        assert!((back.dormers[0].top_z_m - 2.6).abs() < 1e-9);
+        // OLD shape: strip the field entirely — it defaults to empty.
+        let mut old = json;
+        assert!(old.as_object_mut().unwrap().remove("dormers").is_some());
+        let loaded: Storey = serde_json::from_value(old).expect("old JSON still loads");
+        assert!(loaded.dormers.is_empty(), "missing dormers → empty vec");
+    }
+
     /// HIGH-severity regression: a step area strictly INTERIOR to a region
     /// makes `difference` return the region with a HOLE; `Polygon3D` is
     /// exterior-only, so without decomposition the hole is silently filled —

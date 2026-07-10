@@ -49,7 +49,7 @@ use ber_model::ber::structural::{
     rect_hip_switches, ridge_hub_switches, CeilingApex, CeilingApexGroup, CeilingRegion, Storey,
     APEX_BOUNDARY_EPS_M,
 };
-use domain::points::{to_f32, Point2f32, Point2f64};
+use domain::points::{ring_area, to_f32, Point2f32, Point2f64};
 use manip_plan::ParameterAxis;
 
 /// User-facing rejection for a tapped point outside the storey footprint.
@@ -202,6 +202,37 @@ const RECT_CORNER_OUTSIDE_CEILING_MSG: &str =
 /// ceiling area than the centre's. Kept stable.
 const RECT_CORNERS_SAME_REGION_MSG: &str =
     "All four corners of the flat top must sit in the same ceiling area.";
+
+/// User-facing rejection for a dormer footprint that isn't a usable closed
+/// patch (fewer than three corners, or a collapsed / self-touching ring with no
+/// plan area). Kept stable — tests match on it.
+const DORMER_DEGENERATE_MSG: &str =
+    "The dormer footprint isn't a closed area — draw a closed patch with three or more \
+     corners and real area.";
+
+/// User-facing rejection for a dormer whose footprint is NOT fully covered by
+/// the roof — part of it pokes past the union of the storey's ceiling areas.
+/// A footprint may SPAN several ceiling areas (a dormer running from a sloped
+/// area into an adjacent flat protrusion); only poking OUTSIDE the roof is
+/// rejected. Kept stable — tests match on it.
+const DORMER_OUTSIDE_CEILING_MSG: &str =
+    "The dormer must sit within the roof — keep the whole patch over ceiling area(s).";
+
+/// User-facing rejection for a dormer top that dips BELOW the roof it carves
+/// into somewhere over its footprint (an inverted riser). Flush with the roof
+/// along the uphill edge is allowed; anywhere lower is not. Kept stable.
+const DORMER_TOP_BELOW_ROOF_MSG: &str =
+    "The dormer top must clear the roof — raise the height / move it downslope.";
+
+/// A dormer footprint whose plan area is at or below this (m²) is treated as
+/// degenerate — a sliver too small to carve a real patch.
+const DORMER_MIN_AREA_M2: f64 = 1e-4;
+
+/// Plan-area slack (m²) allowed between the footprint and the roof coverage
+/// before a dormer is judged to poke outside — boolean-op noise / boundary
+/// grazes, not a real gap. Also the per-region graze threshold below which a
+/// region ∩ footprint is treated as no overlap.
+const DORMER_COVERAGE_EPS_M2: f64 = 1e-4;
 
 /// A typed ridge length at or below this (m) is rejected — it places the two
 /// apexes (near-)coincident.
@@ -1018,6 +1049,88 @@ pub fn centred_rect_lo(
     }
     let span_mid = centre_c + (t_min + t_max) / 2.0;
     Ok((span_mid - len / 2.0) as f32)
+}
+
+// ── The island DORMER (a flat-topped patch raised into a sloped attic) ───────
+
+/// Validate a flat-topped island DORMER against the storey's RESOLVED ceilings
+/// (the assign-time check, run on the materialized `Storey` before
+/// [`Ber::add_dormer`] — the caller has already `materialize()`d, so this reads
+/// the resolved `storey.ceilings`, exactly like [`validate_roof_apex`] and the
+/// rect validators). A patch, flat top, that may SPAN one or more ceiling areas.
+///
+/// - `top_z_m` finite and > 0 (ABSOLUTE height above the storey's floor datum,
+///   the [`Dormer::top_z_m`] convention — not a delta).
+/// - `footprint` is a non-degenerate closed ring: three or more corners and a
+///   plan area over [`DORMER_MIN_AREA_M2`] ([`ring_area`]).
+/// - The footprint may SPAN SEVERAL ceiling areas — which, UNLIKE
+///   [`validate_roof_apex`], MAY BE SLOPED (the whole point of a dormer is to
+///   carve into an already-pitched roof; flatness is NOT required). The
+///   assessor builds the roof slopes on the un-protruded ceiling, then draws a
+///   dormer that runs from that sloped area INTO an adjacent FLAT protrusion,
+///   so ONE footprint legitimately covers a sloped region + a flat one. Rather
+///   than requiring a single region, the footprint must be COVERED by the UNION
+///   of the storey's ceiling regions: sum each region's 2D intersection with
+///   the footprint; if the covered area falls short of the footprint's own area
+///   (beyond [`DORMER_COVERAGE_EPS_M2`]) part pokes outside the roof and is
+///   rejected ([`DORMER_OUTSIDE_CEILING_MSG`]); nothing intersecting is also
+///   rejected.
+/// - `top_z_m` must clear the roof over the WHOLE footprint. Sampling only the
+///   footprint's own vertices is INSUFFICIENT: when a ridge/apex passes through
+///   the footprint interior it is higher than any footprint corner. The
+///   coverage and the roof's maximum height are computed together by
+///   [`CeilingRegions::footprint_coverage_and_roof_max`], which evaluates EACH
+///   region's OWN plane over its OWN intersection piece — so a DISCONTINUOUS
+///   roof step at a region seam is captured from both sides (the higher side
+///   wins, order-independently). The top must be `≥` that maximum (within
+///   [`APEX_BOUNDARY_EPS_M`]). Flush (`==`) with the highest point passes; a top
+///   below the roof anywhere is an inverted riser and is rejected
+///   ([`DORMER_TOP_BELOW_ROOF_MSG`]).
+///
+/// `Err` is user-facing, all messages stable.
+///
+/// [`Ber::add_dormer`]: ber_model::ber::structural::ber_struct::Ber::add_dormer
+/// [`Dormer::top_z_m`]: ber_model::ber::structural::Dormer::top_z_m
+/// [`CeilingRegions::footprint_coverage_and_roof_max`]:
+/// ber_model::ber::structural::CeilingRegions::footprint_coverage_and_roof_max
+pub fn validate_dormer(
+    storey: &Storey,
+    footprint: &[Point2f64],
+    top_z_m: f64,
+) -> Result<(), String> {
+    if !top_z_m.is_finite() || top_z_m <= 0.0 {
+        return Err(format!(
+            "height must be a positive number of metres (got {top_z_m})"
+        ));
+    }
+    // 1. A non-degenerate closed ring with real plan area.
+    if footprint.len() < 3 || ring_area(footprint) <= DORMER_MIN_AREA_M2 {
+        return Err(DORMER_DEGENERATE_MSG.to_string());
+    }
+    let fp_area = ring_area(footprint).abs();
+
+    // 2. Containment + roof height in one pass. `roof_max` reads each region's
+    //    OWN plane over its OWN intersection piece, so a discontinuous step at a
+    //    region seam is captured from both sides (no first-region-wins ambiguity
+    //    of `top_z_at`, whose sample points would otherwise sit ON the seam).
+    let (covered, roof_max) = storey.ceilings.footprint_coverage_and_roof_max(footprint);
+    // The footprint must be COVERED by the UNION of the roof's ceiling areas
+    // (spanning several is fine; poking outside — or over a hole — is not).
+    if covered < fp_area - DORMER_COVERAGE_EPS_M2 {
+        return Err(DORMER_OUTSIDE_CEILING_MSG.to_string());
+    }
+    // Nothing intersecting → no roof to carve into.
+    let Some(roof_max) = roof_max else {
+        return Err(DORMER_OUTSIDE_CEILING_MSG.to_string());
+    };
+
+    // 3. Clearance — the top must clear the roof over the WHOLE footprint. Flush
+    //    (≥, within the boundary epsilon) with the highest point passes; below
+    //    the roof anywhere is an inverted riser.
+    if top_z_m < roof_max - APEX_BOUNDARY_EPS_M {
+        return Err(DORMER_TOP_BELOW_ROOF_MSG.to_string());
+    }
+    Ok(())
 }
 
 impl StoreyDoc {
@@ -2474,5 +2587,271 @@ mod tests {
             validate_roof_ridge(&storey, a, b, 3.0).is_ok(),
             "the height stage also accepts it"
         );
+    }
+
+    // ── DORMER validation ───────────────────────────────────────────────────
+
+    /// A single SLOPED ceiling region — a `[x0,x1] × [y0,y1]` rectangle on the
+    /// plane `z = base + slope_y·y` (rises northward in y). Planar by
+    /// construction, so `region_plane` / `top_z_at` evaluate it exactly.
+    fn sloped_quad(x0: f64, y0: f64, x1: f64, y1: f64, base: f64, slope_y: f64) -> CeilingRegion {
+        let z = |y: f64| base + slope_y * y;
+        CeilingRegion {
+            id: Default::default(),
+            polygon: Polygon3D::new(vec![
+                Point3f64::new(x0, y0, z(y0)),
+                Point3f64::new(x1, y0, z(y0)),
+                Point3f64::new(x1, y1, z(y1)),
+                Point3f64::new(x0, y1, z(y1)),
+            ]),
+            opes: Default::default(),
+            construction_id: Default::default(),
+            exposure: Default::default(),
+        }
+    }
+
+    /// A single FLAT ceiling region — a `[x0,x1] × [y0,y1]` rectangle at `z`.
+    fn flat_quad(x0: f64, y0: f64, x1: f64, y1: f64, z: f64) -> CeilingRegion {
+        CeilingRegion {
+            id: Default::default(),
+            polygon: Polygon3D::new(vec![
+                Point3f64::new(x0, y0, z),
+                Point3f64::new(x1, y0, z),
+                Point3f64::new(x1, y1, z),
+                Point3f64::new(x0, y1, z),
+            ]),
+            opes: Default::default(),
+            construction_id: Default::default(),
+            exposure: Default::default(),
+        }
+    }
+
+    /// A four-face PYRAMID fan over 4×4: base corners at `base`, apex (2,2) at
+    /// `apex_z`. Each triangular face is planar by construction, so the apex is a
+    /// region CORNER strictly inside a footprint drawn around it — higher than
+    /// any of that footprint's own corners. Faces meet at the apex (a shared
+    /// corner), so `top_z_at(2,2)` evaluates to `apex_z`.
+    fn fan_pyramid(base: f64, apex_z: f64) -> Vec<CeilingRegion> {
+        let a = Point3f64::new(2.0, 2.0, apex_z);
+        let mk = |p0: Point3f64, p1: Point3f64| CeilingRegion {
+            id: Default::default(),
+            polygon: Polygon3D::new(vec![p0, p1, a]),
+            opes: Default::default(),
+            construction_id: Default::default(),
+            exposure: Default::default(),
+        };
+        let c00 = Point3f64::new(0.0, 0.0, base);
+        let c10 = Point3f64::new(4.0, 0.0, base);
+        let c11 = Point3f64::new(4.0, 4.0, base);
+        let c01 = Point3f64::new(0.0, 4.0, base);
+        vec![mk(c00, c10), mk(c10, c11), mk(c11, c01), mk(c01, c00)]
+    }
+
+    fn storey_with_regions(regions: Vec<CeilingRegion>) -> Storey {
+        Storey {
+            ceilings: CeilingRegions { regions },
+            ..Storey::default()
+        }
+    }
+
+    fn pt(x: f64, y: f64) -> Point2f64 {
+        Point2f64::new(x, y)
+    }
+
+    /// An island dormer strictly inside ONE SLOPED region is accepted when its
+    /// top clears the roof over the whole footprint — INCLUDING the flush case
+    /// where the top exactly meets the roof along the uphill edge (the key
+    /// relaxation vs `validate_roof_apex`: the region need NOT be flat).
+    #[test]
+    fn island_dormer_on_a_sloped_region_is_accepted() {
+        // 10×6 region on z = 2.0 + 0.2·y: roof rises from 2.0 (y=0) to 3.2 (y=6).
+        let storey = storey_with_regions(vec![sloped_quad(0.0, 0.0, 10.0, 6.0, 2.0, 0.2)]);
+        // Footprint (3,2)-(6,2)-(6,4)-(3,4): roof over it spans 2.4 (y=2) → 2.8
+        // (y=4, the uphill edge).
+        let fp = vec![pt(3.0, 2.0), pt(6.0, 2.0), pt(6.0, 4.0), pt(3.0, 4.0)];
+        // Well clear of the roof.
+        assert!(validate_dormer(&storey, &fp, 3.0).is_ok());
+        // FLUSH with the roof along the uphill edge (max roof z = 2.8): ≥ passes.
+        assert!(
+            validate_dormer(&storey, &fp, 2.8).is_ok(),
+            "a top flush with the uphill roof edge is allowed"
+        );
+    }
+
+    /// The REPORTED case: a dormer whose footprint SPANS a sloped region and an
+    /// adjacent FLAT protrusion is ACCEPTED — the whole patch is covered by the
+    /// UNION of the two areas, so it no longer has to land in one region.
+    #[test]
+    fn dormer_spanning_a_sloped_and_a_flat_region_is_accepted() {
+        // Sloped region A over x∈[0,5] (z = 2.0 + 0.2·y), flat protrusion B over
+        // x∈[5,10] at 2.8 — the two share the internal boundary x = 5.
+        let storey = storey_with_regions(vec![
+            sloped_quad(0.0, 0.0, 5.0, 6.0, 2.0, 0.2),
+            flat_quad(5.0, 0.0, 10.0, 6.0, 2.8),
+        ]);
+        // Footprint runs from the sloped area (x = 3) INTO the flat one (x = 7).
+        let fp = vec![pt(3.0, 2.0), pt(7.0, 2.0), pt(7.0, 4.0), pt(3.0, 4.0)];
+        // Roof over it: the sloped side peaks at y = 4 → 2.0 + 0.8 = 2.8; the
+        // flat side is 2.8. A top of 3.0 clears the whole footprint.
+        assert!(
+            validate_dormer(&storey, &fp, 3.0).is_ok(),
+            "a dormer spanning a sloped + flat region is accepted"
+        );
+        // FLUSH with the highest roof point (2.8) passes.
+        assert!(validate_dormer(&storey, &fp, 2.8).is_ok());
+        // A top below the roof (2.5 < 2.8) is an inverted riser — rejected.
+        assert_eq!(
+            validate_dormer(&storey, &fp, 2.5).unwrap_err(),
+            DORMER_TOP_BELOW_ROOF_MSG
+        );
+    }
+
+    /// A CORNER/RIDGE dormer spanning TWO SLOPED faces that meet at a ridge (the
+    /// dormer runs across the ridge onto both slopes) is ACCEPTED when its top
+    /// clears the ridge — and REJECTED when the ridge, running through the
+    /// footprint INTERIOR, rises above the top even though every footprint corner
+    /// is below it (the same union-coverage + intersection-vertex path as the
+    /// flat-span case, exercised over two SLOPED regions).
+    #[test]
+    fn dormer_spanning_two_slopes_across_a_ridge() {
+        // South face rises z = 2.0 + 0.4·y to the ridge at y = 5 (z = 4.0); north
+        // face falls z = 6.0 - 0.4·y from it.
+        let storey = storey_with_regions(vec![
+            sloped_quad(0.0, 0.0, 10.0, 5.0, 2.0, 0.4),
+            sloped_quad(0.0, 5.0, 10.0, 10.0, 6.0, -0.4),
+        ]);
+        // Footprint straddles the ridge y = 5: corners at y = 4/6 sit at z = 3.6,
+        // the ridge crosses the interior at z = 4.0.
+        let fp = vec![pt(3.0, 4.0), pt(7.0, 4.0), pt(7.0, 6.0), pt(3.0, 6.0)];
+        // Clears the ridge → accepted; flush with it (4.0) too.
+        assert!(
+            validate_dormer(&storey, &fp, 4.2).is_ok(),
+            "a dormer spanning two slopes across the ridge is accepted"
+        );
+        assert!(
+            validate_dormer(&storey, &fp, 4.0).is_ok(),
+            "flush with the ridge passes"
+        );
+        // Above every corner (3.6) but below the interior ridge (4.0): the
+        // boundary crossings (3,5)/(7,5) sit on the ridge at 4.0, so clearance
+        // rejects — the ridge through the interior, not any corner, binds.
+        assert_eq!(
+            validate_dormer(&storey, &fp, 3.8).unwrap_err(),
+            DORMER_TOP_BELOW_ROOF_MSG
+        );
+    }
+
+    /// A dormer top BELOW a ridge/apex that passes through the footprint
+    /// INTERIOR is rejected — even though the top clears every footprint CORNER.
+    /// Proves the clearance check samples the intersection vertices (which
+    /// include the interior apex), not just the footprint's own corners.
+    #[test]
+    fn dormer_top_below_an_interior_ridge_apex_is_rejected() {
+        // Pyramid fan over 4×4: base 2.4, apex (2,2) at 4.2. A footprint square
+        // (1,1)-(3,3) around the apex has all FOUR corners at z = 3.3, but the
+        // apex — a region corner INSIDE the footprint — rises to 4.2.
+        let storey = storey_with_regions(fan_pyramid(2.4, 4.2));
+        let fp = vec![pt(1.0, 1.0), pt(3.0, 1.0), pt(3.0, 3.0), pt(1.0, 3.0)];
+        // Above every corner (3.3) yet below the interior apex (4.2): corner-only
+        // sampling would WRONGLY accept; the intersection-vertex check rejects.
+        assert_eq!(
+            validate_dormer(&storey, &fp, 3.5).unwrap_err(),
+            DORMER_TOP_BELOW_ROOF_MSG
+        );
+        // Flush with the apex (4.2) passes.
+        assert!(validate_dormer(&storey, &fp, 4.2).is_ok());
+    }
+
+    /// A dormer whose top dips below the sloped roof SOMEWHERE over its
+    /// footprint (an inverted riser) is rejected, even though it clears the roof
+    /// at the downhill edge.
+    #[test]
+    fn dormer_top_below_the_slope_somewhere_is_rejected() {
+        let storey = storey_with_regions(vec![sloped_quad(0.0, 0.0, 10.0, 6.0, 2.0, 0.2)]);
+        // Roof over the footprint: 2.4 (y=2) → 2.8 (y=4). A top of 2.6 clears the
+        // downhill edge but is BELOW the roof at the uphill edge.
+        let fp = vec![pt(3.0, 2.0), pt(6.0, 2.0), pt(6.0, 4.0), pt(3.0, 4.0)];
+        assert_eq!(
+            validate_dormer(&storey, &fp, 2.6).unwrap_err(),
+            DORMER_TOP_BELOW_ROOF_MSG
+        );
+    }
+
+    /// A dormer poking outside the roof (a footprint vertex past the region /
+    /// outline) is rejected with the outside-ceiling message.
+    #[test]
+    fn dormer_poking_outside_the_outline_is_rejected() {
+        let storey = storey_with_regions(vec![sloped_quad(0.0, 0.0, 10.0, 6.0, 2.0, 0.2)]);
+        // Centre at x=9.5 is inside, but the right corners at x=11 fall past the
+        // region's outer wall (x=10).
+        let fp = vec![pt(8.0, 2.0), pt(11.0, 2.0), pt(11.0, 4.0), pt(8.0, 4.0)];
+        assert_eq!(
+            validate_dormer(&storey, &fp, 4.0).unwrap_err(),
+            DORMER_OUTSIDE_CEILING_MSG
+        );
+        // No ceilings at all → also outside.
+        assert_eq!(
+            validate_dormer(&Storey::default(), &fp, 4.0).unwrap_err(),
+            DORMER_OUTSIDE_CEILING_MSG
+        );
+    }
+
+    /// The review's DISCONTINUOUS-STEP gap: region A slopes up to 3.0 at the
+    /// seam x = 5, region B is flat at 2.6. A dormer spanning both must see the
+    /// roof max as A's 3.0 (the seam's higher side), so a top of 2.7 is REJECTED
+    /// (inverted riser) and 3.1 accepted — regardless of region order. The old
+    /// `top_z_at` seam sampling could return B's 2.6 and wrongly accept 2.7.
+    #[test]
+    fn dormer_over_a_discontinuous_step_reads_the_higher_side() {
+        // A: x∈[0,5], z = 1.0 + 0.4·x → 3.0 at the seam x = 5.
+        let mk_a = || CeilingRegion {
+            id: Default::default(),
+            polygon: Polygon3D::new(vec![
+                Point3f64::new(0.0, 0.0, 1.0),
+                Point3f64::new(5.0, 0.0, 3.0),
+                Point3f64::new(5.0, 6.0, 3.0),
+                Point3f64::new(0.0, 6.0, 1.0),
+            ]),
+            opes: Default::default(),
+            construction_id: Default::default(),
+            exposure: Default::default(),
+        };
+        // B: x∈[5,10], flat at 2.6.
+        let mk_b = || flat_quad(5.0, 0.0, 10.0, 6.0, 2.6);
+        let fp = vec![pt(3.0, 2.0), pt(7.0, 2.0), pt(7.0, 4.0), pt(3.0, 4.0)];
+        for regions in [vec![mk_a(), mk_b()], vec![mk_b(), mk_a()]] {
+            let storey = storey_with_regions(regions);
+            // 2.7 sits below A's 3.0 at the seam — inverted riser, rejected.
+            assert_eq!(
+                validate_dormer(&storey, &fp, 2.7).unwrap_err(),
+                DORMER_TOP_BELOW_ROOF_MSG,
+                "the step's higher side (3.0) binds, not B's 2.6"
+            );
+            // 3.1 clears the whole footprint.
+            assert!(validate_dormer(&storey, &fp, 3.1).is_ok());
+        }
+    }
+
+    /// A degenerate footprint (too few corners, or zero plan area) and a
+    /// non-finite / non-positive top height are rejected up front.
+    #[test]
+    fn degenerate_footprint_and_bad_height_are_rejected() {
+        let storey = storey_with_regions(vec![sloped_quad(0.0, 0.0, 10.0, 6.0, 2.0, 0.2)]);
+        // Fewer than three corners.
+        assert_eq!(
+            validate_dormer(&storey, &[pt(3.0, 2.0), pt(4.0, 2.0)], 3.0).unwrap_err(),
+            DORMER_DEGENERATE_MSG
+        );
+        // Three COLLINEAR corners → zero area.
+        assert_eq!(
+            validate_dormer(&storey, &[pt(3.0, 2.0), pt(4.0, 2.0), pt(5.0, 2.0)], 3.0).unwrap_err(),
+            DORMER_DEGENERATE_MSG
+        );
+        // Non-finite / non-positive top height.
+        let fp = vec![pt(3.0, 2.0), pt(6.0, 2.0), pt(6.0, 4.0), pt(3.0, 4.0)];
+        for z in [f64::NAN, f64::INFINITY, 0.0, -1.0] {
+            let err = validate_dormer(&storey, &fp, z).unwrap_err();
+            assert!(err.contains("positive"), "z = {z} got: {err}");
+        }
     }
 }

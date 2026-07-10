@@ -71,6 +71,8 @@ impl AppController {
             self.pending_roof_point = None;
             self.pending_roof_ridge = None;
             self.pending_roof_rect = None;
+            self.dormer_mode = false;
+            self.pending_rect_is_dormer = false;
         } else {
             self.ceiling_exposure_gate_pending = false;
         }
@@ -213,7 +215,7 @@ impl AppController {
         // pre-snapped onto an interior line sits away from that outline, so the
         // boundary-follow leaves it on the division.
         let ref_segments = self.ceiling_carve_reference_segments();
-        let snap_tol = self.tuning.subarea.corner_snap_m;
+        let snap_tol = self.snap_tol_ceiling_exposure();
         let pts = manip_plan::snap_stroke_to_segments(
             &raw,
             &ref_segments,
@@ -237,7 +239,8 @@ impl AppController {
         let boundary = self
             .floor_exposure_whole_building_boundary()
             .unwrap_or_else(|| self.document.outline.floor_plan.clone());
-        match boundary.carve_or_cut(&pts, &self.tuning.subarea, false) {
+        let wall_snap_tol = self.snap_tol_carve();
+        match boundary.carve_or_cut(&pts, &self.tuning.subarea, false, Some(wall_snap_tol)) {
             Ok(SubareaOutcome::Area(plan)) => {
                 if plan.validate_simple().is_err() {
                     // Nothing committed — drop the rejected carve's decisions.

@@ -79,6 +79,8 @@ impl AppController {
             self.pending_roof_point = None;
             self.pending_roof_ridge = None;
             self.pending_roof_rect = None;
+            self.dormer_mode = false;
+            self.pending_rect_is_dormer = false;
             // Drop straight into draw mode so a stroke makes a new living area
             // without the user also having to pick the tool.
             self.set_edit_mode(EditTools::DrawPerpWalls);
@@ -275,11 +277,13 @@ impl AppController {
             .collect();
         // One call into `document` does subtract → pick piece → clip → cut-or-carve;
         // we only dispatch the outcome to the right workflow.
+        let wall_snap_tol = self.snap_tol_carve();
         match self.document.carve_or_cut_in_available(
             &pts,
             &holes,
             &self.tuning.subarea,
             &ref_walls,
+            wall_snap_tol,
         ) {
             // A straight cut → offer both halves to pick from. Each region's walls
             // along the boundary / a phase line are pinned; only the cut wall is set.

@@ -286,6 +286,8 @@ impl AppController {
         self.pending_roof_point = None;
         self.pending_roof_ridge = None;
         self.pending_roof_rect = None;
+        self.dormer_mode = false;
+        self.pending_rect_is_dormer = false;
         self.ceiling_point_mode = false;
         self.exit_openings_mode();
         self.edit_drag_prompt = None;
@@ -424,6 +426,8 @@ impl AppController {
         self.pending_roof_point = None;
         self.pending_roof_ridge = None;
         self.pending_roof_rect = None;
+        self.dormer_mode = false;
+        self.pending_rect_is_dormer = false;
         self.ceiling_point_mode = false;
         self.exit_openings_mode();
         self.living_area_mode = false;
@@ -764,6 +768,15 @@ impl AppController {
         let apexes = storey.ceiling_apexes.clone();
         let hints = storey.ceiling_apex_hints.clone();
         let splits = storey.ceiling_splits.clone();
+        // Durable dormers: each carves a flat, raised patch into the (possibly
+        // already-sloped) attic WITHOUT resloping its neighbours — composed
+        // AFTER the apexes (so it sees their slope) and BEFORE the coplanar
+        // face splits, mirroring the durable-input order.
+        let dormer_patches: Vec<(Vec<domain::points::Point2f64>, f64)> = storey
+            .dormers
+            .iter()
+            .map(|d| (d.footprint.clone(), d.top_z_m))
+            .collect();
         let Some(cid) = record.data.ceiling_construction_id(
             Default::default(),
             Default::default(),
@@ -791,6 +804,9 @@ impl AppController {
         }
         if !apexes.is_empty() {
             ceilings = ceilings.with_apexes_hinted(&apexes, &hints);
+        }
+        if !dormer_patches.is_empty() {
+            ceilings = ceilings.with_flat_patches(&dormer_patches);
         }
         if !splits.is_empty() {
             ceilings = ceilings.split_faces_coplanar(&splits);

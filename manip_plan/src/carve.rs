@@ -159,26 +159,34 @@ use crate::polygon_area;
 impl FloorPlan {
     /// Resolve a freehand sub-area stroke against this outline in one step —
     /// clip, then cut or carve. See [`carve_or_cut`].
+    ///
+    /// `wall_snap_tol` is the max perpendicular gap (metres) at which a drawn
+    /// wall levels onto a parallel outline/reference wall — the app passes a
+    /// viewport-relative value; `None` uses the region-size-relative default
+    /// (legacy behaviour, for callers with no viewport).
     pub fn carve_or_cut(
         &self,
         stroke: &[Point2f32],
         tuning: &SubareaTuning,
         allow_outside: bool,
+        wall_snap_tol: Option<f32>,
     ) -> Result<SubareaOutcome, Error> {
-        self.carve_or_cut_refs(stroke, tuning, allow_outside, &[])
+        self.carve_or_cut_refs(stroke, tuning, allow_outside, &[], wall_snap_tol)
     }
 
     /// [`carve_or_cut`](Self::carve_or_cut) plus extra REFERENCE walls the drawn
     /// sub-area levels onto in addition to this outline — world-metre segments
     /// that aren't on the carve boundary (construction-phase lines, say), so a
     /// wall drawn beside one lands flush on it. Same per-line leveling as the
-    /// outline snap (`snap_walls`); pass `&[]` for none.
+    /// outline snap (`snap_walls`); pass `&[]` for none. `wall_snap_tol` as in
+    /// [`carve_or_cut`](Self::carve_or_cut).
     pub fn carve_or_cut_refs(
         &self,
         stroke: &[Point2f32],
         tuning: &SubareaTuning,
         allow_outside: bool,
         ref_walls: &[[Point2f32; 2]],
+        wall_snap_tol: Option<f32>,
     ) -> Result<SubareaOutcome, Error> {
         carve_or_cut(
             &self.parametric.ring_points(0),
@@ -186,6 +194,7 @@ impl FloorPlan {
             tuning,
             allow_outside,
             ref_walls,
+            wall_snap_tol,
         )
     }
 }
@@ -210,16 +219,30 @@ thread_local! {
     /// function. Overwritten on every carve, so it never carries stale data.
     static CARVE_REF_WALLS: std::cell::RefCell<Vec<[Point2f32; 2]>> =
         const { std::cell::RefCell::new(Vec::new()) };
+
+    /// The wall-leveling snap tolerance (metres) for the current carve — the max
+    /// perpendicular gap at which [`snap_walls`] pulls a drawn wall onto a
+    /// parallel reference wall. Set once at the top of [`carve_or_cut`] from its
+    /// `wall_snap_tol` argument, alongside [`CARVE_REF_WALLS`], and read deep in
+    /// the finalize by [`clean_region_ring`] — same "reaches the leveller without
+    /// threading through every cut/carve/finalize function" rationale as the
+    /// reference walls. `None` (a direct `sub_area`/`split_cut` call, or the
+    /// ortho-trim path that reuses [`clean_region_ring`]) falls back to the
+    /// region-size-relative default, preserving the pre-viewport behaviour.
+    static CARVE_WALL_SNAP_TOL: std::cell::RefCell<Option<f32>> =
+        const { std::cell::RefCell::new(None) };
 }
 
-/// Clears [`CARVE_REF_WALLS`] when it drops, so the reference set never leaks
-/// past the carve that set it — `snap_walls` also runs from the ortho-trim path
-/// (`clean_region_ring` in `path_edits`), which doesn't go through
-/// [`carve_or_cut`] and must see an empty set, not a previous carve's leftovers.
+/// Clears [`CARVE_REF_WALLS`] and [`CARVE_WALL_SNAP_TOL`] when it drops, so
+/// neither leaks past the carve that set it — `snap_walls` / `clean_region_ring`
+/// also run from the ortho-trim path (`clean_region_ring` in `path_edits`),
+/// which doesn't go through [`carve_or_cut`] and must see an empty ref set and
+/// the size-relative default tol, not a previous carve's leftovers.
 struct CarveRefWallsGuard;
 impl Drop for CarveRefWallsGuard {
     fn drop(&mut self) {
         CARVE_REF_WALLS.with(|c| c.borrow_mut().clear());
+        CARVE_WALL_SNAP_TOL.with(|c| *c.borrow_mut() = None);
     }
 }
 
@@ -230,12 +253,15 @@ impl Drop for CarveRefWallsGuard {
 /// neither a pre-clipped stroke nor a tolerance — the whole clip→tol→cut/carve
 /// pipeline lives here, not in the caller. `ref_walls` are extra reference walls
 /// the finalize levels onto besides the outline (see [`CARVE_REF_WALLS`]).
+/// `wall_snap_tol` (metres, or `None` for the size-relative default) is the
+/// wall-leveling snap tolerance; see [`CARVE_WALL_SNAP_TOL`].
 fn carve_or_cut(
     outline: &[Point2f32],
     stroke: &[Point2f32],
     tuning: &SubareaTuning,
     allow_outside: bool,
     ref_walls: &[[Point2f32; 2]],
+    wall_snap_tol: Option<f32>,
 ) -> Result<SubareaOutcome, Error> {
     // No storey footprint to carve against (e.g. a freshly-added storey with no
     // outline yet) — there's nothing to clip/follow, so bail instead of letting
@@ -246,7 +272,8 @@ fn carve_or_cut(
         ));
     }
     CARVE_REF_WALLS.with(|c| *c.borrow_mut() = ref_walls.to_vec());
-    let _ref_walls_guard = CarveRefWallsGuard; // clears CARVE_REF_WALLS on any return
+    CARVE_WALL_SNAP_TOL.with(|c| *c.borrow_mut() = wall_snap_tol);
+    let _ref_walls_guard = CarveRefWallsGuard; // clears both thread-locals on any return
     let pts = region::clip_stroke_inside(outline, stroke, tuning.close_gap_m, allow_outside);
     let tol = (geom::bbox_diagonal(&pts) * tuning.rdp_tol_ratio).max(tuning.rdp_tol_floor);
     match split_cut(outline, &pts, tol, tuning)? {
@@ -362,7 +389,15 @@ pub(crate) fn clean_region_ring(outline: &[Point2f32], pts: &[Point2f32]) -> Vec
     // meant to sit on the storey, lands exactly on those walls. Only AXIS-aligned
     // walls snap: a diagonal is placed verbatim by the boundary-aware loop, and a
     // cut's ends are already exact boundary crossings.
-    let snap_tol = (area_diag * 0.06).max(1e-3);
+    //
+    // The snap tolerance is the carve's viewport-relative `wall_snap_tol` when a
+    // `carve_or_cut` set it ([`CARVE_WALL_SNAP_TOL`]); otherwise (a direct
+    // `sub_area`/`split_cut` call, or the ortho-trim reuse of this function) it
+    // falls back to the region-size-relative default `(area_diag * 0.06)` —
+    // preserving the pre-viewport behaviour for those paths.
+    let snap_tol = CARVE_WALL_SNAP_TOL
+        .with(|c| *c.borrow())
+        .unwrap_or_else(|| (area_diag * 0.06).max(1e-3));
     let snapped = snap_walls(outline, pts, snap_tol);
 
     let clean_tol = (area_diag * 0.005).max(1e-4);
@@ -1099,6 +1134,7 @@ mod cut_line_tests {
             &SubareaTuning::default(),
             false,
             &[],
+            None,
         )
         .expect_err("opposite chamfers share no row or column");
         assert!(matches!(err, Error::CutWouldChangeShape), "got {err:?}");
@@ -2851,8 +2887,15 @@ mod alignment_snap_tests {
             p(7.0, 10.6222),
             p(5.9, 10.6222),
         ];
-        let outcome = carve_or_cut(&outline, &stroke, &SubareaTuning::default(), false, &[])
-            .expect("the closed rect carves");
+        let outcome = carve_or_cut(
+            &outline,
+            &stroke,
+            &SubareaTuning::default(),
+            false,
+            &[],
+            None,
+        )
+        .expect("the closed rect carves");
         let SubareaOutcome::Area(plan) = outcome else {
             panic!("a closed loop is a carve, not a cut");
         };
@@ -2907,7 +2950,7 @@ mod alignment_snap_tests {
             p(2.05, 2.05),
         ];
         let outcome = outline
-            .carve_or_cut_refs(&stroke, &SubareaTuning::default(), false, &phase_line)
+            .carve_or_cut_refs(&stroke, &SubareaTuning::default(), false, &phase_line, None)
             .expect("the closed room carves");
         let SubareaOutcome::Area(plan) = outcome else {
             panic!("a closed loop is a carve, not a cut");
@@ -3059,7 +3102,7 @@ mod checkpoint_cut {
         let t = SubareaTuning::default();
         let res = FloorPlan::from_clean_ring(&o)
             .unwrap()
-            .carve_or_cut(&stroke, &t, false);
+            .carve_or_cut(&stroke, &t, false, None);
         // A short near-vertical cut (ends within `close_gap_m`, so it must NOT be
         // mis-clipped as a closed loop) whose ends land on CORNERS in line with an
         // existing wall must still be a dividing CUT: the cut extends the wall
@@ -3089,7 +3132,7 @@ mod empty_outline_guard {
             Point2f32::new(0.0, 1.0),
         ];
         assert!(empty
-            .carve_or_cut(&stroke, &SubareaTuning::default(), false)
+            .carve_or_cut(&stroke, &SubareaTuning::default(), false, None)
             .is_err());
     }
 }
