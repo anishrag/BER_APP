@@ -3298,7 +3298,7 @@ fn flat_roof_eave_snaps_to_the_resolved_ceiling_z() {
         area.eave_z
     );
     assert!(
-        area.follows_ceiling(&record.data.storeys[0].ceilings),
+        area.follows_ceiling(&record.data.storeys[0].ceilings, &[]),
         "a flat roof at its ceiling's z coincides with it"
     );
 }

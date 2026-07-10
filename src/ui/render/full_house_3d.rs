@@ -127,14 +127,20 @@ pub fn render(
         if ber
             .storeys
             .get(area.storey_idx)
-            .is_some_and(|s| area.follows_ceiling(&s.ceilings))
+            .is_some_and(|s| area.follows_ceiling(&s.ceilings, &area.dormer_patches(ber)))
         {
             continue;
         }
         // Built via the SAME apex/ridge fan the ceiling uses, over the grouped
         // ceiling footprint — so the roof shares the ceiling's plan vertices.
+        // Covered storeys' dormers are composed in: the roof joins each
+        // dormer's flat top instead of draping its plane over the dormer.
         for region in area
-            .regions(ber_model::ber::roof::DEFAULT_OVERHANG_M, ItemId::default())
+            .regions_with_dormers(
+                ber,
+                ber_model::ber::roof::DEFAULT_OVERHANG_M,
+                ItemId::default(),
+            )
             .regions
         {
             let ring = &region.polygon.exterior;

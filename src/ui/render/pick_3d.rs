@@ -266,12 +266,16 @@ pub fn pick_surface_3d(
             if ber
                 .storeys
                 .get(area.storey_idx)
-                .is_some_and(|s| area.follows_ceiling(&s.ceilings))
+                .is_some_and(|s| area.follows_ceiling(&s.ceilings, &area.dormer_patches(ber)))
             {
                 continue;
             }
             for region in area
-                .regions(ber_model::ber::roof::DEFAULT_OVERHANG_M, ItemId::default())
+                .regions_with_dormers(
+                    ber,
+                    ber_model::ber::roof::DEFAULT_OVERHANG_M,
+                    ItemId::default(),
+                )
                 .regions
             {
                 let ring: Vec<(f64, f64, f64)> = region

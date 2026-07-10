@@ -135,11 +135,55 @@ impl RoofArea {
     /// True when this roof covers ceiling regions on `storey_idx`. Legacy
     /// records (empty `covered_storeys`) cover exactly their base storey.
     pub fn covers_storey(&self, storey_idx: usize) -> bool {
+        self.covered_storey_indices().contains(&storey_idx)
+    }
+
+    /// The storeys this area covers — legacy records (empty `covered_storeys`)
+    /// cover exactly their base storey.
+    pub fn covered_storey_indices(&self) -> Vec<usize> {
         if self.covered_storeys.is_empty() {
-            self.storey_idx == storey_idx
+            vec![self.storey_idx]
         } else {
-            self.covered_storeys.contains(&storey_idx)
+            self.covered_storeys.clone()
         }
+    }
+
+    /// Every covered storey's DORMER flat-patches `(footprint ring, top z)`,
+    /// datum-shifted into BASE-storey-local z. These are the inputs
+    /// [`regions_with_dormers`](Self::regions_with_dormers) composes over the
+    /// roof planes, so the roof JOINS each dormer's flat top instead of
+    /// draping its plane straight over the dormer.
+    pub fn dormer_patches(&self, ber: &crate::ber::ber_struct::Ber) -> Vec<(Vec<Point2f64>, f64)> {
+        let datums = ber.storey_floor_datums();
+        let base = datums.get(self.storey_idx).copied().unwrap_or(0.0);
+        self.covered_storey_indices()
+            .into_iter()
+            .filter_map(|idx| ber.storeys.get(idx).map(|s| (idx, s)))
+            .flat_map(|(idx, s)| {
+                let shift = datums.get(idx).copied().unwrap_or(0.0) - base;
+                s.dormers
+                    .iter()
+                    .map(move |d| (d.footprint.clone(), d.top_z_m + shift))
+            })
+            .collect()
+    }
+
+    /// [`regions`](Self::regions) with every covered storey's dormers composed
+    /// in ([`dormer_patches`](Self::dormer_patches), applied through the
+    /// ceiling's own [`with_flat_patches`](CeilingRegions::with_flat_patches)
+    /// AFTER the apex fan — the same order the ceiling composes). The main
+    /// planes stay computed from footprint + apexes as if the dormer weren't
+    /// there (no ridge fanning off a dormer edge); the dormer footprint is
+    /// then carved out and stamped flat at the dormer top, so the roof
+    /// surface joins the dormer roof.
+    pub fn regions_with_dormers(
+        &self,
+        ber: &crate::ber::ber_struct::Ber,
+        overhang_m: f64,
+        construction_id: ItemId,
+    ) -> CeilingRegions {
+        self.regions(overhang_m, construction_id)
+            .with_flat_patches(&self.dormer_patches(ber))
     }
 
     /// The bounding box (plan, world metres) of the given footprint rings, or
@@ -262,15 +306,20 @@ impl RoofArea {
     ///
     /// `FollowCeiling` is true by definition; other shapes get a geometric
     /// two-way check between the UN-OVERHUNG roof surface (`regions(0.0, …)` —
-    /// the overhang lip is drawing-only) and the covered ceiling regions (those
-    /// whose plan centroid falls inside the footprint): every vertex of each
-    /// surface must lie ON the other surface (within [`COINCIDE_EPS_M`]). Both
-    /// directions are needed — a gable's eave corners lie on a flat ceiling
-    /// (ridge vertices catch it), and a flat roof's corners lie on a raised
-    /// ceiling's plan (the ceiling's raised vertices catch it). No covered
-    /// ceiling (unresolved storey / mismatched grouping) is `false` — when in
-    /// doubt, draw the roof.
-    pub fn follows_ceiling(&self, ceilings: &CeilingRegions) -> bool {
+    /// the overhang lip is drawing-only — composed with `dormer_patches` so a
+    /// dormer carved into BOTH surfaces doesn't read as a departure) and the
+    /// covered ceiling regions (those whose plan centroid falls inside the
+    /// footprint): every vertex of each surface must lie ON the other surface
+    /// (within [`COINCIDE_EPS_M`]). Both directions are needed — a gable's
+    /// eave corners lie on a flat ceiling (ridge vertices catch it), and a
+    /// flat roof's corners lie on a raised ceiling's plan (the ceiling's
+    /// raised vertices catch it). No covered ceiling (unresolved storey /
+    /// mismatched grouping) is `false` — when in doubt, draw the roof.
+    pub fn follows_ceiling(
+        &self,
+        ceilings: &CeilingRegions,
+        dormer_patches: &[(Vec<Point2f64>, f64)],
+    ) -> bool {
         if self.shape == RoofShape::FollowCeiling {
             return true;
         }
@@ -287,7 +336,9 @@ impl RoofArea {
                     .any(|fp| fp.contains(&geo::Point::new(c.x, c.y)))
             })
             .collect();
-        let roof = self.regions(0.0, ItemId::default());
+        let roof = self
+            .regions(0.0, ItemId::default())
+            .with_flat_patches(dormer_patches);
         if covered.is_empty() || roof.regions.is_empty() {
             return false;
         }
@@ -1060,7 +1111,7 @@ mod tests {
             apexes: Vec::new(),
         };
         let ceilings = CeilingRegions::default_for_footprint(square_10(), 2.4, ItemId::default());
-        assert!(area.follows_ceiling(&ceilings));
+        assert!(area.follows_ceiling(&ceilings, &[]));
     }
 
     /// A flat roof over a ceiling with a RAISED STEP departs from it (the roof
@@ -1086,7 +1137,7 @@ mod tests {
         ];
         let ceilings = CeilingRegions::default_for_footprint(square_10(), 2.4, ItemId::default())
             .with_z_deltas(&[(half, 0.5)]);
-        assert!(!area.follows_ceiling(&ceilings));
+        assert!(!area.follows_ceiling(&ceilings, &[]));
     }
 
     /// A gable over a flat ceiling departs — the eave corners lie on the
@@ -1107,7 +1158,7 @@ mod tests {
             apexes,
         };
         let ceilings = CeilingRegions::default_for_footprint(square_10(), 2.4, ItemId::default());
-        assert!(!area.follows_ceiling(&ceilings));
+        assert!(!area.follows_ceiling(&ceilings, &[]));
     }
 
     /// FollowCeiling follows BY DEFINITION (rafters are the ceiling, one
@@ -1125,7 +1176,7 @@ mod tests {
             footprint: square_10(),
             apexes: Vec::new(),
         };
-        assert!(area.follows_ceiling(&CeilingRegions::default()));
+        assert!(area.follows_ceiling(&CeilingRegions::default(), &[]));
     }
 
     /// No covered ceiling (unresolved storey) → NOT following: when in doubt,
@@ -1143,7 +1194,7 @@ mod tests {
             footprint: square_10(),
             apexes: Vec::new(),
         };
-        assert!(!area.follows_ceiling(&CeilingRegions::default()));
+        assert!(!area.follows_ceiling(&CeilingRegions::default(), &[]));
     }
 
     /// A FLAT area ignores the overhang entirely: no plan offset, no z change —
@@ -1184,6 +1235,114 @@ mod tests {
             rings(&over),
             rings(&plain),
             "overhung and un-overhung flat areas are identical"
+        );
+    }
+
+    /// A dormer carved into the roof: the main gable planes are computed as if
+    /// the dormer weren't there (no ridge fanning off its edge — ridge z and
+    /// the surrounding slope plane are unchanged), then the dormer footprint
+    /// is stamped FLAT at the dormer top — the roof JOINS the dormer roof
+    /// instead of draping its plane over it.
+    #[test]
+    fn regions_with_dormers_carve_the_flat_top_and_keep_the_planes() {
+        use crate::ber::ber_struct::Ber;
+        use crate::ber::structural::{Dormer, Storey};
+
+        let ridge = (Point2f64::new(5.0, 0.0), Point2f64::new(5.0, 10.0));
+        let apexes = RoofArea::ridge_apexes(ridge, 45.0, 2.4, &square_10());
+        let area = RoofArea {
+            id: ItemId::default(),
+            storey_idx: 0,
+            covered_storeys: Vec::new(),
+            shape: RoofShape::Gable,
+            pitch_deg: 45.0,
+            eave_z: 2.4,
+            ridge: Some(ridge),
+            footprint: square_10(),
+            apexes,
+        };
+        // A dormer low on the west slope (plane z = 2.4 + x over x ∈ [0, 5]):
+        // top 4.5 clears the plane over its whole footprint (x ≤ 2 → z ≤ 4.4).
+        let mut storey = Storey::default();
+        storey.dormers.push(Dormer {
+            footprint: vec![
+                Point2f64::new(0.5, 4.0),
+                Point2f64::new(2.0, 4.0),
+                Point2f64::new(2.0, 6.0),
+                Point2f64::new(0.5, 6.0),
+            ],
+            top_z_m: 4.5,
+        });
+        let mut ber = Ber::default();
+        ber.storeys.push(storey);
+
+        let regions = area.regions_with_dormers(&ber, 0.0, ItemId::default());
+        let flat_tops: Vec<_> = regions
+            .regions
+            .iter()
+            .filter(|r| r.flat_z().is_some_and(|z| (z - 4.5).abs() < 1e-6))
+            .collect();
+        assert_eq!(flat_tops.len(), 1, "ONE flat dormer top at its z");
+        let (zmin, zmax) = z_extent(&regions);
+        assert!((zmax - 7.4).abs() < 1e-6, "ridge z untouched: {zmax}");
+        assert!((zmin - 2.4).abs() < 1e-6, "eave untouched: {zmin}");
+        // The slope OUTSIDE the dormer keeps the original plane (z = 2.4 + x
+        // on the west side) — sampled beside the dormer.
+        let refs: Vec<&CeilingRegion> = regions.regions.iter().collect();
+        assert!(
+            on_surface(&refs, &Point3f64::new(3.0, 5.0, 5.4)),
+            "west slope plane intact outside the dormer"
+        );
+    }
+
+    /// A dormer on a covered UPPER storey (the attic) patches the roof at its
+    /// WORLD height: `dormer_patches` re-bases its top z from the attic's
+    /// floor datum onto the roof's base storey.
+    #[test]
+    fn dormer_patches_are_datum_shifted_to_the_base_storey() {
+        use crate::ber::ber_struct::Ber;
+        use crate::ber::structural::{Dormer, Storey};
+
+        let mut ber = Ber::default();
+        let mut lower = Storey::default();
+        lower.ceiling_height_m = Some(2.4);
+        ber.storeys.push(lower);
+        let mut attic = Storey::default();
+        attic.ceiling_height_m = Some(2.2);
+        attic.dormers.push(Dormer {
+            footprint: vec![
+                Point2f64::new(1.0, 1.0),
+                Point2f64::new(3.0, 1.0),
+                Point2f64::new(3.0, 3.0),
+                Point2f64::new(1.0, 3.0),
+            ],
+            top_z_m: 1.8,
+        });
+        ber.storeys.push(attic);
+
+        let area = RoofArea {
+            id: ItemId::default(),
+            storey_idx: 0,
+            covered_storeys: vec![0, 1],
+            shape: RoofShape::Gable,
+            pitch_deg: 45.0,
+            eave_z: 2.4,
+            ridge: None,
+            footprint: square_10(),
+            apexes: Vec::new(),
+        };
+        let datums = ber.storey_floor_datums();
+        assert!(
+            datums[1] - datums[0] > 0.5,
+            "the storeys' datums genuinely differ: {datums:?}"
+        );
+        let patches = area.dormer_patches(&ber);
+        assert_eq!(patches.len(), 1);
+        let expected = 1.8 + datums[1] - datums[0];
+        assert!(
+            (patches[0].1 - expected).abs() < 1e-9,
+            "top z re-based onto the base storey: expected {expected}, got {}",
+            patches[0].1
         );
     }
 }
