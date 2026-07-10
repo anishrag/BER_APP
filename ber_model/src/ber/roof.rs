@@ -320,7 +320,12 @@ impl RoofArea {
         ceilings: &CeilingRegions,
         dormer_patches: &[(Vec<Point2f64>, f64)],
     ) -> bool {
-        if self.shape == RoofShape::FollowCeiling {
+        // A SINGLE-storey FollowCeiling roof reproduces its storey's ceiling
+        // by construction. A MULTI-storey one does NOT coincide with the BASE
+        // storey's ceilings — its rafter skirt continues over them down to
+        // the eave — so it must stay visible/pickable: fall through to the
+        // geometric check (which reports the departure).
+        if self.shape == RoofShape::FollowCeiling && self.covered_storey_indices().len() <= 1 {
             return true;
         }
         use geo::Contains;
@@ -351,6 +356,31 @@ impl RoofArea {
                 .iter()
                 .all(|r| r.polygon.exterior.iter().all(|v| on_surface(&covered, v)))
     }
+}
+
+/// The apexes a `FollowCeiling` roof adopts at commit: every covered storey's
+/// ceiling apexes, re-based from the owning storey's floor datum onto the
+/// BASE storey's — so the copied rafter planes keep their world height. The
+/// datum-shift twin of [`RoofArea::dormer_patches`], which does the same for
+/// dormer tops on the committed area.
+pub fn adopted_ceiling_apexes(
+    ber: &crate::ber::ber_struct::Ber,
+    base_idx: usize,
+    covered: &[usize],
+) -> Vec<CeilingApex> {
+    let datums = ber.storey_floor_datums();
+    let base_datum = datums.get(base_idx).copied().unwrap_or(0.0);
+    covered
+        .iter()
+        .filter_map(|&idx| ber.storeys.get(idx).map(|s| (idx, s)))
+        .flat_map(|(idx, s)| {
+            let shift = datums.get(idx).copied().unwrap_or(0.0) - base_datum;
+            s.ceiling_apexes.iter().map(move |a| CeilingApex {
+                point: a.point,
+                z_m: a.z_m + shift,
+            })
+        })
+        .collect()
 }
 
 /// UNION the grouped footprint rings into contiguous plan pieces: adjacent
@@ -1292,6 +1322,47 @@ mod tests {
         assert!(
             on_surface(&refs, &Point3f64::new(3.0, 5.0, 5.4)),
             "west slope plane intact outside the dormer"
+        );
+    }
+
+    /// A MULTI-storey FollowCeiling roof must stay visible and pickable: its
+    /// rafter skirt continues over the BASE storey's flat ceilings down to the
+    /// eave, so `follows_ceiling` reports the departure instead of
+    /// short-circuiting true — only a SINGLE-storey FollowCeiling area (which
+    /// reproduces its own storey's ceiling exactly) is suppressed.
+    #[test]
+    fn multi_storey_follow_ceiling_is_not_suppressed() {
+        let apexes = vec![
+            CeilingApex {
+                point: Point2f64::new(5.0, 0.0),
+                z_m: 6.9,
+            },
+            CeilingApex {
+                point: Point2f64::new(5.0, 10.0),
+                z_m: 6.9,
+            },
+        ];
+        let base_ceilings =
+            CeilingRegions::default_for_footprint(square_10(), 2.4, ItemId::default());
+        let mut area = RoofArea {
+            id: ItemId::default(),
+            storey_idx: 0,
+            covered_storeys: vec![0, 1],
+            shape: RoofShape::FollowCeiling,
+            pitch_deg: 0.0,
+            eave_z: 2.4,
+            ridge: None,
+            footprint: square_10(),
+            apexes,
+        };
+        assert!(
+            !area.follows_ceiling(&base_ceilings, &[]),
+            "multi-storey Follow departs from the base ceilings → drawn"
+        );
+        area.covered_storeys = Vec::new();
+        assert!(
+            area.follows_ceiling(&base_ceilings, &[]),
+            "single-storey Follow still coincides by definition → suppressed"
         );
     }
 

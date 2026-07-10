@@ -6,7 +6,7 @@
 //! proposal/drawing + geometry land in later stages.
 use super::*;
 use ber_model::ber::roof::RoofArea;
-use ber_model::ber::structural::{CeilingApex, CeilingExposure, SurfaceKind};
+use ber_model::ber::structural::{CeilingExposure, SurfaceKind};
 use domain::points::Point2f64;
 use manip_plan::ParameterAxis;
 use std::collections::BTreeSet;
@@ -495,26 +495,17 @@ impl AppController {
                 .flat_map(|r| RoofArea::ridge_apexes(*r, pitch_deg, eave_z, &footprint))
                 .collect(),
             // Adopt the covered storeys' ceiling slope (converted attic) —
-            // apex z re-based from each owning storey's floor datum to the
-            // BASE storey's, so the copied planes keep their world height.
+            // apex z re-based onto the BASE storey's datum in ber_model.
             RoofShape::FollowCeiling => {
                 let record = self
                     .current_record
                     .as_ref()
                     .ok_or("No record to add the roof to.")?;
-                let datums = record.data.storey_floor_datums();
-                let base_datum = datums.get(storey_idx).copied().unwrap_or(0.0);
-                covered_storeys
-                    .iter()
-                    .filter_map(|&idx| record.data.storeys.get(idx).map(|s| (idx, s)))
-                    .flat_map(|(idx, s)| {
-                        let shift = datums.get(idx).copied().unwrap_or(0.0) - base_datum;
-                        s.ceiling_apexes.iter().map(move |a| CeilingApex {
-                            point: a.point,
-                            z_m: a.z_m + shift,
-                        })
-                    })
-                    .collect()
+                ber_model::ber::roof::adopted_ceiling_apexes(
+                    &record.data,
+                    storey_idx,
+                    &covered_storeys,
+                )
             }
         };
         let record = self

@@ -12,10 +12,16 @@
 //! are the roof area and the walls themselves; no new persistence.
 //!
 //! Like [`derive_inter_storey`](super::derive_inter_storey), this composes on
-//! top of the per-storey resolves (walls are fresh-minted each resolve, so the
-//! pass never accumulates). It runs on the storeys a roof area covers ABOVE
-//! its base storey only — the base storey's walls sit below their own ceiling,
-//! i.e. below the eave, and are never inside the roof void.
+//! top of the per-storey resolves. Only the ACTIVE storey is re-resolved
+//! between derive tails, so the pass regularly re-runs on its OWN output —
+//! it must be (and is) stable there: a re-cut along an existing split
+//! collapses to one piece and the stamp re-applies. KNOWN LIMIT (v1): the
+//! stamp is the paintable `SemiExposed`, indistinguishable from assessor
+//! paint, so there is no clear pass — deleting/reshaping the roof area leaves
+//! stale splits + stamps on a NON-active covered storey until that storey is
+//! next re-resolved. The pass runs on the storeys a roof area covers ABOVE
+//! its base storey only — the base storey's walls sit below their own
+//! ceiling, i.e. below the eave, and are never inside the roof void.
 //!
 //! A wall is considered only when its base midpoint sits strictly INSIDE the
 //! roof footprint ([`BOUNDARY_INSET_M`]): a gable-end / eave-line wall ON the
@@ -31,7 +37,7 @@ use domain::points::{point_to_segment_distance, Point2f64, Point3f64};
 
 use super::constructions::WallExposure;
 use super::wall_regions::{split_wall_by_line, WallRegion};
-use super::CeilingRegions;
+use super::{CeilingRegions, Polygon3D};
 
 /// How far INSIDE the roof footprint a wall's base midpoint must sit for the
 /// roof to pass OVER the wall (metres). A wall on the boundary (gable end,
@@ -144,6 +150,85 @@ fn void_side_roof_z(job: &VoidJob, p: Point2f64, n: (f64, f64)) -> Option<f64> {
     z.map(|z| z + job.shift)
 }
 
+/// Minimum face area (m²) a split piece must have to be kept: a cut that
+/// GRAZES a wall corner or runs along its top edge produces a sliver /
+/// zero-area half with duplicated vertices, which would pollute the wall list
+/// and crash a LATER pass over it (its plane has no normal). Below this, the
+/// cut is treated as not dividing the wall.
+const MIN_PIECE_AREA_M2: f64 = 1e-4;
+
+/// The face area (m²) of a planar ring via Newell's method — ~0 for a
+/// degenerate ring (duplicated / collinear vertices).
+fn face_area(ext: &[Point3f64]) -> f64 {
+    if ext.len() < 3 {
+        return 0.0;
+    }
+    let (mut nx, mut ny, mut nz) = (0.0_f64, 0.0_f64, 0.0_f64);
+    for i in 0..ext.len() {
+        let a = ext[i];
+        let b = ext[(i + 1) % ext.len()];
+        nx += (a.y - b.y) * (a.z + b.z);
+        ny += (a.z - b.z) * (a.x + b.x);
+        nz += (a.x - b.x) * (a.y + b.y);
+    }
+    (nx * nx + ny * ny + nz * nz).sqrt() / 2.0
+}
+
+/// Normalise a split piece's ring: a BOTTOM base frame or NO frame, never an
+/// inverted one. [`rebase_ring_start`](super::wall_regions::rebase_ring_start)
+/// rotates the ring to the valid frame with minimal base z — right for the
+/// horizontal cuts it was built for, but a piece above a DIAGONAL roof cut
+/// has no horizontal bottom edge, and its only valid rotation is an
+/// upside-down "base" along the TOP, which would let an opening re-home
+/// against a frame whose base_z is the piece's top. Keep the raw (frameless)
+/// ring instead — a frameless piece simply can't host an opening.
+fn rebase_piece(piece: WallRegion) -> WallRegion {
+    let z_min = piece
+        .polygon
+        .exterior
+        .iter()
+        .map(|v| v.z)
+        .fold(f64::MAX, f64::min);
+    let n = piece.polygon.exterior.len();
+    let mut frameless: Option<WallRegion> = None;
+    for k in 0..n {
+        let mut ring = piece.polygon.exterior.clone();
+        ring.rotate_left(k);
+        let candidate = WallRegion {
+            polygon: Polygon3D { exterior: ring },
+            ..piece.clone()
+        };
+        match candidate.base_frame() {
+            // A rotation whose frame sits at the piece's bottom: take it.
+            Some((_, _, _, base_z)) if base_z <= z_min + 1e-6 => return candidate,
+            // Remember a frameless rotation as the fallback.
+            None if frameless.is_none() => frameless = Some(candidate),
+            _ => {}
+        }
+    }
+    frameless.unwrap_or(piece)
+}
+
+/// Drop consecutive duplicate vertices (and a duplicated closing vertex) a
+/// corner-grazing cut can leave on a piece's ring.
+fn dedupe_ring(region: &mut WallRegion) {
+    let ext = &mut region.polygon.exterior;
+    ext.dedup_by(|a, b| {
+        (a.x - b.x).abs() < 1e-9 && (a.y - b.y).abs() < 1e-9 && (a.z - b.z).abs() < 1e-9
+    });
+    while ext.len() >= 2 {
+        let (first, last) = (ext[0], ext[ext.len() - 1]);
+        if (first.x - last.x).abs() < 1e-9
+            && (first.y - last.y).abs() < 1e-9
+            && (first.z - last.z).abs() < 1e-9
+        {
+            ext.pop();
+        } else {
+            break;
+        }
+    }
+}
+
 /// Split `wall` by the roof plane over it (when it crosses) and push the
 /// piece(s) onto `out`, stamping pieces under the roof `SemiExposed`.
 fn split_and_stamp(wall: WallRegion, job: &VoidJob, out: &mut Vec<WallRegion>) {
@@ -154,7 +239,10 @@ fn split_and_stamp(wall: WallRegion, job: &VoidJob, out: &mut Vec<WallRegion>) {
     let (a2, b2) = (Point2f64::new(a.x, a.y), Point2f64::new(b.x, b.y));
     let mid = Point2f64::new((a2.x + b2.x) / 2.0, (a2.y + b2.y) / 2.0);
     let len = ((b2.x - a2.x).powi(2) + (b2.y - a2.y).powi(2)).sqrt();
-    if len < 1e-6 || !strictly_inside(&job.rings, mid) {
+    if len < 1e-6
+        || face_area(&wall.polygon.exterior) < MIN_PIECE_AREA_M2
+        || !strictly_inside(&job.rings, mid)
+    {
         out.push(wall);
         return;
     }
@@ -196,10 +284,25 @@ fn split_and_stamp(wall: WallRegion, job: &VoidJob, out: &mut Vec<WallRegion>) {
         Some((za, zb)) => {
             let p0 = Point3f64::new(a2.x, a2.y, za + job.shift);
             let p1 = Point3f64::new(b2.x, b2.y, zb + job.shift);
-            // A cut outside the face leaves one empty half — degenerate
-            // pieces are already dropped by split_wall_by_line.
-            let halves = split_wall_by_line(&wall, p0, p1);
-            if halves.is_empty() {
+            // Clean each half (a corner-grazing cut leaves duplicated
+            // vertices), drop slivers, and rebase each piece's ring so it's a
+            // first-class wall where possible (the same normalisation the
+            // inter-storey derivation applies to its horizontal-cut outputs).
+            // A cut that doesn't produce TWO real pieces didn't divide the
+            // wall — keep it whole.
+            let halves: Vec<WallRegion> = split_wall_by_line(&wall, p0, p1)
+                .into_iter()
+                .map(|mut piece| {
+                    dedupe_ring(&mut piece);
+                    piece
+                })
+                .filter(|piece| {
+                    piece.polygon.exterior.len() >= 3
+                        && face_area(&piece.polygon.exterior) >= MIN_PIECE_AREA_M2
+                })
+                .map(rebase_piece)
+                .collect();
+            if halves.len() < 2 {
                 vec![wall]
             } else {
                 halves
@@ -252,7 +355,12 @@ mod tests {
         let mut attic = Storey::default();
         attic.ceiling_height_m = Some(2.2);
         ber.storeys.push(attic);
-        let footprint = vec![vec![p2(0.0, 0.0), p2(10.0, 0.0), p2(10.0, 10.0), p2(0.0, 10.0)]];
+        let footprint = vec![vec![
+            p2(0.0, 0.0),
+            p2(10.0, 0.0),
+            p2(10.0, 10.0),
+            p2(0.0, 10.0),
+        ]];
         let ridge = (p2(5.0, 0.0), p2(5.0, 10.0));
         let apexes = RoofArea::ridge_apexes(ridge, 45.0, 2.4, &footprint);
         ber.roof.areas.push(RoofArea {
@@ -293,10 +401,13 @@ mod tests {
         let mut ber = gabled_two_storey_ber();
         // Cheek along y = 5, x ∈ [0.5, 2], attic-local z 0..2. The west-slope
         // roof over it is z = x, crossing the face diagonally.
-        ber.storeys[1]
-            .walls
-            .regions
-            .push(wall(p2(0.5, 5.0), p2(2.0, 5.0), 0.0, 2.0, WallExposure::Exposed));
+        ber.storeys[1].walls.regions.push(wall(
+            p2(0.5, 5.0),
+            p2(2.0, 5.0),
+            0.0,
+            2.0,
+            WallExposure::Exposed,
+        ));
         derive_roof_voids(&mut ber);
 
         let walls = &ber.storeys[1].walls.regions;
@@ -333,20 +444,29 @@ mod tests {
     fn knee_wall_stamped_whole_boundary_and_base_walls_untouched() {
         let mut ber = gabled_two_storey_ber();
         // Knee wall x ∈ [3, 4] at y = 5, z 0..1 — roof z = x ≥ 3 over all of it.
-        ber.storeys[1]
-            .walls
-            .regions
-            .push(wall(p2(3.0, 5.0), p2(4.0, 5.0), 0.0, 1.0, WallExposure::Unset));
+        ber.storeys[1].walls.regions.push(wall(
+            p2(3.0, 5.0),
+            p2(4.0, 5.0),
+            0.0,
+            1.0,
+            WallExposure::Unset,
+        ));
         // Attic gable end ON the footprint boundary (x = 0).
-        ber.storeys[1]
-            .walls
-            .regions
-            .push(wall(p2(0.0, 2.0), p2(0.0, 8.0), 0.0, 2.0, WallExposure::Exposed));
+        ber.storeys[1].walls.regions.push(wall(
+            p2(0.0, 2.0),
+            p2(0.0, 8.0),
+            0.0,
+            2.0,
+            WallExposure::Exposed,
+        ));
         // A base-storey wall inside the footprint — below its own eave.
-        ber.storeys[0]
-            .walls
-            .regions
-            .push(wall(p2(3.0, 5.0), p2(7.0, 5.0), 0.0, 2.4, WallExposure::Exposed));
+        ber.storeys[0].walls.regions.push(wall(
+            p2(3.0, 5.0),
+            p2(7.0, 5.0),
+            0.0,
+            2.4,
+            WallExposure::Exposed,
+        ));
         derive_roof_voids(&mut ber);
 
         let attic = &ber.storeys[1].walls.regions;
@@ -367,6 +487,132 @@ mod tests {
             base[0].exposure,
             WallExposure::Exposed,
             "base-storey wall untouched"
+        );
+    }
+
+    /// The cheek cut exits exactly AT the wall's top corner (a corner graze).
+    /// The pass must stay stable when re-run on its own output (only the
+    /// active storey re-resolves between derive tails): same piece count, no
+    /// sliver pieces, no duplicated ring vertices, no panic.
+    #[test]
+    fn pass_is_stable_and_sliver_free_on_its_own_output() {
+        let mut ber = gabled_two_storey_ber();
+        // Roof z = x crosses this face from (0.5, z 0.5) and exits exactly at
+        // the top corner (2.0, z 2.0).
+        ber.storeys[1].walls.regions.push(wall(
+            p2(0.5, 5.0),
+            p2(2.0, 5.0),
+            0.0,
+            2.0,
+            WallExposure::Exposed,
+        ));
+        derive_roof_voids(&mut ber);
+        derive_roof_voids(&mut ber); // re-run on the pass's own output
+        derive_roof_voids(&mut ber);
+
+        let walls = &ber.storeys[1].walls.regions;
+        assert_eq!(walls.len(), 2, "stable piece count across re-runs");
+        for w in walls.iter() {
+            assert!(
+                face_area(&w.polygon.exterior) >= MIN_PIECE_AREA_M2,
+                "no sliver pieces: area {}",
+                face_area(&w.polygon.exterior)
+            );
+            let ext = &w.polygon.exterior;
+            for i in 0..ext.len() {
+                let (a, b) = (ext[i], ext[(i + 1) % ext.len()]);
+                assert!(
+                    (a.x - b.x).abs() > 1e-9
+                        || (a.y - b.y).abs() > 1e-9
+                        || (a.z - b.z).abs() > 1e-9,
+                    "no duplicated ring vertices"
+                );
+            }
+        }
+        assert_eq!(
+            walls
+                .iter()
+                .filter(|w| w.exposure == WallExposure::SemiExposed)
+                .count(),
+            1,
+            "stamp stable across re-runs"
+        );
+    }
+
+    /// A wall whose TOP runs exactly ALONG the roof slope (a cheek fully under
+    /// the rafters) is not divided — the graze produces no second real piece —
+    /// and is stamped whole.
+    #[test]
+    fn top_edge_on_the_slope_is_not_divided() {
+        let mut ber = gabled_two_storey_ber();
+        // Top edge exactly on z = x from (0.5, 0.5) to (2.0, 2.0).
+        ber.storeys[1].walls.regions.push(WallRegion {
+            id: ItemId::default(),
+            polygon: Polygon3D::new(vec![
+                Point3f64::new(0.5, 5.0, 0.0),
+                Point3f64::new(2.0, 5.0, 0.0),
+                Point3f64::new(2.0, 5.0, 2.0),
+                Point3f64::new(0.5, 5.0, 0.5),
+            ]),
+            exposure: WallExposure::Exposed,
+            opes: Opes::default(),
+            construction_id: ItemId::default(),
+        });
+        derive_roof_voids(&mut ber);
+
+        let walls = &ber.storeys[1].walls.regions;
+        assert_eq!(walls.len(), 1, "graze along the top divides nothing");
+        assert!(
+            face_area(&walls[0].polygon.exterior) > 1.0,
+            "the wall kept its full face"
+        );
+        assert_eq!(
+            walls[0].exposure,
+            WallExposure::SemiExposed,
+            "wholly under the slope → the void stamp"
+        );
+    }
+
+    /// No emitted piece carries an INVERTED base frame (a "base" along its
+    /// top edge, which would garbage an opening's re-homing): each piece
+    /// either has its frame at the BOTTOM, or — a piece above a diagonal cut,
+    /// which has no horizontal bottom — no frame at all. The piece under the
+    /// cut keeps a real bottom frame.
+    #[test]
+    fn split_pieces_never_carry_an_inverted_base_frame() {
+        let mut ber = gabled_two_storey_ber();
+        ber.storeys[1].walls.regions.push(wall(
+            p2(0.5, 5.0),
+            p2(2.0, 5.0),
+            0.0,
+            2.0,
+            WallExposure::Exposed,
+        ));
+        derive_roof_voids(&mut ber);
+        let walls = &ber.storeys[1].walls.regions;
+        for w in walls {
+            if let Some((_, _, _, base_z)) = w.base_frame() {
+                let z_min = w
+                    .polygon
+                    .exterior
+                    .iter()
+                    .map(|v| v.z)
+                    .fold(f64::MAX, f64::min);
+                assert!(
+                    (base_z - z_min).abs() < 1e-6,
+                    "a frame, if any, sits at the piece's BOTTOM ({base_z} vs {z_min})"
+                );
+            }
+        }
+        // The under-roof piece is a first-class wall (bottom frame intact).
+        let semi = walls
+            .iter()
+            .find(|w| w.exposure == WallExposure::SemiExposed)
+            .expect("the under-roof piece");
+        assert!(
+            semi.base_frame()
+                .is_some_and(|(_, _, _, base_z)| base_z.abs() < 1e-6),
+            "the lower piece keeps its floor-level base frame"
         );
     }
 }
