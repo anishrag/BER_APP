@@ -3274,6 +3274,35 @@ fn roof_row_gates_mapping_complete() {
     );
 }
 
+/// A flat roof's eave snaps to the RESOLVED z of the grouped ceiling region —
+/// over a stepped (h + Δ) piece it sits at 2.7, not the storey default 2.4 —
+/// so the flat roof coincides with its ceiling (`follows_ceiling`, suppressed
+/// in the 3D view) instead of floating a step below it.
+#[test]
+fn flat_roof_eave_snaps_to_the_resolved_ceiling_z() {
+    let mut c = ceiling_ready_controller();
+    ceiling_step_to_amount_at_x4(&mut c);
+    c.assign_ceiling_step_delta(0.3).expect("amount applies");
+    c.materialize();
+
+    c.set_roof_mode(true);
+    c.confirm_all_storeys_added_roof();
+    c.roof_region_tap(7.0, 5.0, 0.5); // the RAISED piece (right of x = 4)
+    c.pick_roof_area_shape(RoofShape::Flat);
+
+    let record = c.current_record.as_ref().unwrap();
+    let area = record.data.roof.areas.last().expect("roof area committed");
+    assert!(
+        (area.eave_z - 2.7).abs() < 1e-6,
+        "eave at the stepped piece's resolved z, got {}",
+        area.eave_z
+    );
+    assert!(
+        area.follows_ceiling(&record.data.storeys[0].ceilings),
+        "a flat roof at its ceiling's z coincides with it"
+    );
+}
+
 /// The three new Mapping checklist rows exist and each gates `mapping_complete`:
 /// a dwelling with no living area / an Unassigned floor / Unset surfaces is NOT
 /// mapping-complete; once all three are satisfied (plus the pre-existing rows)

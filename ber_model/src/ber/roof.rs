@@ -213,11 +213,13 @@ impl RoofArea {
     /// much and the fan's base is LOWERED by `overhang · slope`, so each sloped
     /// face passes through the wall-top at the wall and CONTINUES down past it —
     /// the overhang eave sits below the wall-top (it may fall within the storey
-    /// for a thick-insulation attic; that's fine, it's the drawing only). A flat
-    /// roof (no slope) just gets a level lip at the eave.
+    /// for a thick-insulation attic; that's fine, it's the drawing only). A FLAT
+    /// area (no apexes) gets NO overhang at all — a flat roof IS its ceiling's
+    /// upper face, and a level lip past the walls would draw structure that
+    /// isn't there.
     pub fn regions(&self, overhang_m: f64, construction_id: ItemId) -> CeilingRegions {
         let merged = merge_footprint_rings(&self.footprint);
-        if overhang_m <= 0.0 {
+        if overhang_m <= 0.0 || self.apexes.is_empty() {
             return CeilingRegions::default_for_footprint(merged, self.eave_z, construction_id)
                 .with_apexes(&self.apexes);
         }
@@ -1056,9 +1058,11 @@ mod tests {
         assert!(!area.follows_ceiling(&CeilingRegions::default()));
     }
 
-    /// A flat roof's overhang is a LEVEL lip at the eave (no slope to continue).
+    /// A FLAT area ignores the overhang entirely: no plan offset, no z change —
+    /// a flat roof coincides with its ceiling's plan and level, so an overhang
+    /// lip would draw structure that isn't there.
     #[test]
-    fn flat_overhang_is_a_level_lip() {
+    fn flat_area_ignores_the_overhang() {
         let area = RoofArea {
             id: ItemId::default(),
             storey_idx: 0,
@@ -1070,11 +1074,27 @@ mod tests {
             apexes: Vec::new(),
         };
         let over = area.regions(0.3, ItemId::default());
-        assert!(min_x(&over) < -0.2, "footprint offset outward");
+        assert!(
+            (min_x(&over) - 0.0).abs() < 1e-9,
+            "footprint NOT offset outward: min_x = {}",
+            min_x(&over)
+        );
         let (zmin, zmax) = z_extent(&over);
         assert!(
             (zmin - 2.6).abs() < 1e-9 && (zmax - 2.6).abs() < 1e-9,
-            "flat lip stays level at the eave"
+            "flat stays level at the eave"
+        );
+        let plain = area.regions(0.0, ItemId::default());
+        let rings = |r: &CeilingRegions| -> Vec<Vec<(f64, f64, f64)>> {
+            r.regions
+                .iter()
+                .map(|r| r.polygon.exterior.iter().map(|v| (v.x, v.y, v.z)).collect())
+                .collect()
+        };
+        assert_eq!(
+            rings(&over),
+            rings(&plain),
+            "overhung and un-overhung flat areas are identical"
         );
     }
 }

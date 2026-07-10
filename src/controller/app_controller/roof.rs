@@ -394,12 +394,31 @@ impl AppController {
         ber_model::ber::roof::merge_footprint_rings(&rings)
     }
 
-    /// The covered storey's ceiling height (the eave height for a roof over it).
+    /// The eave height for a roof over the grouped area on `storey_idx` — the
+    /// RESOLVED z of the grouped ceiling regions (highest flat plane among
+    /// them), so the roof sits on the ceiling as it actually is (a stepped /
+    /// carved region isn't at the storey's default height, and a flat roof
+    /// committed off the default would float a hair off its ceiling and never
+    /// coincide). Falls back to the storey's default ceiling height when no
+    /// grouped region is flat (sloped grouping) or nothing is grouped there.
     fn roof_eave_z(&self, storey_idx: usize) -> Option<f64> {
-        self.current_record
+        let storey = self
+            .current_record
             .as_ref()
-            .and_then(|r| r.data.storeys.get(storey_idx))
-            .and_then(|s| s.ceiling_height_m)
+            .and_then(|r| r.data.storeys.get(storey_idx))?;
+        let grouped_flat_max = storey
+            .ceilings
+            .regions
+            .iter()
+            .filter(|r| {
+                self.roof_selected
+                    .contains(&(storey_idx, document::centroid_key(r.centroid())))
+            })
+            .filter_map(|r| r.flat_z())
+            .fold(None, |acc: Option<f64>, z| {
+                Some(acc.map_or(z, |a| a.max(z)))
+            });
+        grouped_flat_max.or(storey.ceiling_height_m)
     }
 
     /// True when the grouped area's storey has a SLOPED ceiling (it has ceiling
