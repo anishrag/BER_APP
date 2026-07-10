@@ -4178,4 +4178,149 @@ mod tests {
         assert_eq!(out.regions.len(), 1);
         assert_eq!(out.regions[0].id, id, "empty cuts → untouched");
     }
+
+    // ── Copy-height helpers ─────────────────────────────────────────────────
+
+    /// A flat-topped 4-vertex quad wall reports its single top z; a gabled top
+    /// (a peak vertex breaking the flat run) reports `None`.
+    #[test]
+    fn flat_top_z_some_for_flat_top_none_for_gabled() {
+        let flat = WallRegion {
+            id: ItemId::default(),
+            polygon: Polygon3D::new(vec![
+                Point3f64::new(0.0, 0.0, 0.0), // a base
+                Point3f64::new(4.0, 0.0, 0.0), // b base
+                Point3f64::new(4.0, 0.0, 2.5), // b top
+                Point3f64::new(0.0, 0.0, 2.5), // a top
+            ]),
+            exposure: WallExposure::Exposed,
+            opes: Opes::default(),
+            construction_id: ItemId::default(),
+        };
+        assert_eq!(flat.flat_top_z(), Some(2.5));
+
+        let gabled = WallRegion {
+            id: ItemId::default(),
+            polygon: Polygon3D::new(vec![
+                Point3f64::new(0.0, 0.0, 0.0),  // a base
+                Point3f64::new(10.0, 0.0, 0.0), // b base
+                Point3f64::new(10.0, 0.0, 2.5), // b top
+                Point3f64::new(5.0, 0.0, 3.5),  // ridge peak — top varies
+                Point3f64::new(0.0, 0.0, 2.5),  // a top
+            ]),
+            exposure: WallExposure::Exposed,
+            opes: Opes::default(),
+            construction_id: ItemId::default(),
+        };
+        assert_eq!(gabled.flat_top_z(), None, "a gabled top has no single z");
+    }
+
+    /// `copy_height_ceiling_at` reads a KNOWN height and only a known one:
+    /// (a) flat ceiling area, (b) sloped area → None, (c) level ridge,
+    /// (d) sloped ridge → None, (e) flat-topped wall.
+    #[test]
+    fn copy_height_ceiling_at_reads_known_heights() {
+        let cid = ItemId::default();
+
+        // (a) FLAT ceiling area at z = 2.6 → its z inside.
+        let flat_storey = Storey {
+            ceilings: CeilingRegions::default_for_footprint(
+                vec![square(0.0, 0.0, 4.0, 4.0)],
+                2.6,
+                cid,
+            ),
+            ..Default::default()
+        };
+        assert_eq!(flat_storey.copy_height_ceiling_at(2.0, 2.0, 0.1), Some(2.6));
+
+        // (b) SLOPED ceiling area → None at a mid-slope point.
+        let sloped_storey = Storey {
+            ceilings: CeilingRegions {
+                regions: vec![CeilingRegion {
+                    id: ItemId::default(),
+                    polygon: Polygon3D::new(vec![
+                        Point3f64::new(0.0, 0.0, 2.4),
+                        Point3f64::new(4.0, 0.0, 2.4),
+                        Point3f64::new(4.0, 4.0, 3.1),
+                        Point3f64::new(0.0, 4.0, 3.1),
+                    ]),
+                    opes: Opes::default(),
+                    construction_id: cid,
+                    exposure: CeilingExposure::default(),
+                }],
+            },
+            ..Default::default()
+        };
+        assert_eq!(sloped_storey.copy_height_ceiling_at(2.0, 2.0, 0.1), None);
+
+        // (c) LEVEL ridge (both apexes at z = 4.2) → z near the ridge segment.
+        let (a, b) = gable_apexes();
+        let level_apexes = vec![a, b];
+        let level_storey = Storey {
+            ceilings: gable_footprint(cid).with_apexes(&level_apexes),
+            ceiling_apexes: level_apexes,
+            ..Default::default()
+        };
+        assert_eq!(
+            level_storey.copy_height_ceiling_at(5.0, 2.0, 0.1),
+            Some(4.2)
+        );
+
+        // (d) SLOPED ridge (apexes at differing z) → None at a mid-ridge point
+        // far from either apex (no other known surface there).
+        let sloped_apexes = vec![
+            CeilingApex {
+                point: Point2f64::new(2.0, 2.0),
+                z_m: 4.2,
+            },
+            CeilingApex {
+                point: Point2f64::new(8.0, 2.0),
+                z_m: 3.0,
+            },
+        ];
+        let sloped_ridge_storey = Storey {
+            ceilings: gable_footprint(cid).with_apexes(&sloped_apexes),
+            ceiling_apexes: sloped_apexes,
+            ..Default::default()
+        };
+        assert_eq!(
+            sloped_ridge_storey.copy_height_ceiling_at(5.0, 2.0, 0.1),
+            None
+        );
+
+        // (e) FLAT-TOPPED wall → its top z near the base edge.
+        let wall_storey = Storey {
+            walls: WallRegions {
+                regions: vec![WallRegion {
+                    id: ItemId::default(),
+                    polygon: Polygon3D::new(vec![
+                        Point3f64::new(0.0, 0.0, 0.0),
+                        Point3f64::new(10.0, 0.0, 0.0),
+                        Point3f64::new(10.0, 0.0, 2.5),
+                        Point3f64::new(0.0, 0.0, 2.5),
+                    ]),
+                    exposure: WallExposure::Exposed,
+                    opes: Opes::default(),
+                    construction_id: cid,
+                }],
+            },
+            ..Default::default()
+        };
+        assert_eq!(wall_storey.copy_height_ceiling_at(5.0, 0.0, 0.1), Some(2.5));
+    }
+
+    /// `copy_height_floor_at` returns a floor area's `level_m` inside it, and
+    /// `None` off any floor region.
+    #[test]
+    fn copy_height_floor_at_reads_level_or_none() {
+        let cid = ItemId::default();
+        let mut floors = FloorRegions::new(square(0.0, 0.0, 10.0, 10.0), cid);
+        floors.regions[0].level_m = 0.3;
+        let storey = Storey {
+            floors,
+            ..Default::default()
+        };
+        assert_eq!(storey.copy_height_floor_at(5.0, 5.0, 0.1), Some(0.3));
+        assert_eq!(storey.copy_height_floor_at(50.0, 50.0, 0.1), None);
+    }
 }

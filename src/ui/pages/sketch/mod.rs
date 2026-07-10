@@ -371,6 +371,19 @@ pub enum SketchEvent {
     /// User entered the dormer's flat-top height (metres, ABSOLUTE above the
     /// storey floor datum) for the pending dormer.
     AssignDormerHeight(f32),
+    /// "Copy from" in one of the three height prompts (dormer / ceiling-step /
+    /// floor-step): enter copy-height pick mode so a tap on a known surface
+    /// copies its height.
+    StartCopyHeight,
+    /// A canvas tap while in copy-height pick mode: read the KNOWN height at the
+    /// tapped surface and commit it (or reject an unknown surface).
+    CopyHeightTap {
+        world_x: f64,
+        world_y: f64,
+        tol: f64,
+    },
+    /// Leave copy-height pick mode without copying (re-shows the keypad).
+    CancelCopyHeight,
     /// "Don't snap" on the pending roof ridge's snap tag: revert the cross
     /// coordinate to its drawn value and reopen the position question. Routed
     /// to the controller's dedicated `unsnap_roof_ridge` — NOT
@@ -1047,6 +1060,12 @@ pub struct SketchView<'a> {
     pub ceiling_amount_input: &'a mut String,
     /// Last error from the ceiling-step assign, shown inline in its toolbar.
     pub ceiling_step_error: Option<&'a str>,
+    /// "Copy height from a known surface" pick: true while the assessor is
+    /// tapping a surface to copy its height (the dormer / ceiling-step /
+    /// floor-step prompt then shows a pick hint instead of the keypad), plus the
+    /// transient rejection message (unknown surface, or a rejected copy).
+    pub copy_height_pick_pending: bool,
+    pub copy_height_error: Option<&'a str>,
     /// Roof-point (apex) tagging: mode flag + availability gate (same gate as
     /// the ceiling steps), the committed apexes `(position, label)` to mark
     /// ("▲ 4.20 m"), the pending point's position for the provisional dot,

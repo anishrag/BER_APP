@@ -89,6 +89,7 @@ mod ceiling_dormers;
 mod ceiling_points;
 mod ceiling_rects;
 mod ceiling_ridges;
+mod copy_height;
 mod history;
 mod new_storey;
 mod persistence;
@@ -103,6 +104,7 @@ use ceiling_points::PendingCeilingPoint;
 use ceiling_rects::{PendingCeilingRect, RectPins};
 use ceiling_ridges::{PendingCeilingRidge, RidgeQuestion};
 use ceiling_steps::PendingCeilingStep;
+use copy_height::CopyHeightTarget;
 pub use dimensioning::{DimensionPromptUiData, PositionPromptUiData};
 pub use editing::{
     EditDragPrompt, EditDragPromptUiData, MeasurementOption, VertexDropPrompt,
@@ -618,6 +620,16 @@ pub struct AppController {
     /// A ceiling-exposure straight CUT awaiting the assessor's side pick (mirror
     /// of [`floor_exposure_pending_cut`](Self::floor_exposure_pending_cut)).
     ceiling_exposure_pending_cut: Option<[ShapeSlot; 2]>,
+    /// Active "copy height from a known surface" pick, targeting whichever of
+    /// the dormer / ceiling-step / floor-step height prompts was open when it
+    /// started. `Some` = the canvas is in pick mode (a tap on a known surface
+    /// copies + commits its height). Transient — outside undo. See
+    /// `copy_height.rs`.
+    copy_height_pick: Option<CopyHeightTarget>,
+    /// Transient rejection message for the copy-height pick (tapped an unknown
+    /// surface, or the copied height failed the commit's guard). Shown under the
+    /// pick hint; cleared on start / cancel / a successful copy.
+    copy_height_error: Option<String>,
 }
 
 impl AppController {
@@ -744,6 +756,8 @@ impl AppController {
             ceiling_exposure_carve_in_flight: false,
             ceiling_exposure_carve_ref: None,
             ceiling_exposure_pending_cut: None,
+            copy_height_pick: None,
+            copy_height_error: None,
         }
     }
 }

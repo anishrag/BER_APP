@@ -821,6 +821,10 @@ pub(super) fn render<F: FnMut(UiEvent)>(
     // `ceiling_rect_height_pending`; the `ceiling_rect_is_dormer` discriminator
     // reroutes the title + Set event so the surrounding roof isn't resloped.
     if view.ceiling_rect_height_pending && view.ceiling_rect_is_dormer {
+        if view.copy_height_pick_pending {
+            show_copy_height_hint(ctx, rect, view.copy_height_error, on_event);
+            return;
+        }
         let actions = vec![
             Action::new(
                 "Set",
@@ -828,6 +832,7 @@ pub(super) fn render<F: FnMut(UiEvent)>(
                 SketchEvent::AssignDormerHeight,
             )
             .primary(),
+            copy_height_action(),
             ceiling_rect_cancel(),
         ];
         show_box(
@@ -1040,6 +1045,10 @@ pub(super) fn render<F: FnMut(UiEvent)>(
 
     // ── Floor-step amount (Raise / Lower own the sign) ──────────────────────
     if view.step_pick_pending {
+        if view.copy_height_pick_pending {
+            show_copy_height_hint(ctx, rect, view.copy_height_error, on_event);
+            return;
+        }
         let actions = vec![
             Action::new("Raise", "Raise this area's floor by the amount", |v| {
                 SketchEvent::AssignStepLevel(v.abs())
@@ -1047,6 +1056,7 @@ pub(super) fn render<F: FnMut(UiEvent)>(
             Action::new("Lower", "Lower this area's floor by the amount", |v| {
                 SketchEvent::AssignStepLevel(-v.abs())
             }),
+            copy_height_action(),
             Action::new("Cancel", "Discard this step area", |_| {
                 SketchEvent::CancelPendingStep
             })
@@ -1073,6 +1083,10 @@ pub(super) fn render<F: FnMut(UiEvent)>(
 
     // ── Ceiling-step amount (Up / Down own the sign) ────────────────────────
     if view.ceiling_step_amount_pending {
+        if view.copy_height_pick_pending {
+            show_copy_height_hint(ctx, rect, view.copy_height_error, on_event);
+            return;
+        }
         let actions = vec![
             Action::new("Up", "Raise the ceiling on that side by the amount", |v| {
                 SketchEvent::AssignCeilingStepDelta(v.abs())
@@ -1082,6 +1096,7 @@ pub(super) fn render<F: FnMut(UiEvent)>(
                 "Lower the ceiling on that side by the amount",
                 |v| SketchEvent::AssignCeilingStepDelta(-v.abs()),
             ),
+            copy_height_action(),
             Action::new(
                 "Keep same height",
                 "Split without a step — both sides stay the same height",
@@ -1111,6 +1126,52 @@ pub(super) fn render<F: FnMut(UiEvent)>(
             on_event,
         );
     }
+}
+
+/// The "Copy from" arm shared by the three height prompts (dormer / ceiling-
+/// step / floor-step): a bare action that puts the app in copy-height pick mode
+/// so a tap on a known surface copies its height.
+fn copy_height_action() -> Action {
+    Action::new(
+        "Copy from",
+        "Copy the height from a known surface — tap a flat area, level ridge, or flat-topped wall",
+        |_| SketchEvent::StartCopyHeight,
+    )
+    .bare()
+}
+
+/// The COMPACT pick-mode panel that replaces the keypad while the assessor is
+/// tapping a known surface to copy its height. Reuses the number box's window
+/// id so it appears where the box was; shows the instruction (+ any rejection
+/// error in red) and a Cancel that re-opens the keypad.
+fn show_copy_height_hint<F: FnMut(UiEvent)>(
+    ctx: &egui::Context,
+    rect: egui::Rect,
+    error: Option<&str>,
+    on_event: &mut F,
+) {
+    egui::Window::new("Copy height")
+        .id(Id::new("ber_number_entry"))
+        .order(egui::Order::Foreground)
+        .default_pos(rect.right_top() + egui::vec2(-280.0, 110.0))
+        .pivot(Align2::LEFT_TOP)
+        .constrain_to(rect)
+        .collapsible(false)
+        .resizable(false)
+        .show(ctx, |ui| {
+            ui.label("Tap a flat area, ridge, or wall to copy its height");
+            if let Some(err) = error {
+                ui.label(RichText::new(err).color(Color32::from_rgb(220, 80, 80)));
+            }
+            ui.add_space(6.0);
+            if ui
+                .button("Cancel")
+                .hint("Back to typing the height")
+                .clicked()
+            {
+                on_event(UiEvent::Sketch(SketchEvent::CancelCopyHeight));
+            }
+        });
 }
 
 /// The two roof flows share a "Cancel" with distinct events; small helpers keep

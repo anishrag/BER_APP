@@ -246,6 +246,16 @@ impl WallRegion {
         })
         .unwrap_or(base_z)
     }
+
+    /// The wall's single TOP z when its top profile is FLAT (all top vertices
+    /// within 1e-6 m), else `None` (a sloped/gabled top whose height varies).
+    /// The top vertices are `exterior[top_start_index()..]`. Used by the
+    /// "copy height" pick to read a flat-topped wall's known height.
+    pub fn flat_top_z(&self) -> Option<f64> {
+        let top = &self.polygon.exterior[self.top_start_index()..];
+        let z0 = top.first()?.z;
+        top.iter().all(|v| (v.z - z0).abs() <= 1e-6).then_some(z0)
+    }
 }
 
 /// Collection of wall regions

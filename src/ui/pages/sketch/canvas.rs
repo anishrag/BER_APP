@@ -1752,10 +1752,34 @@ pub(super) fn render<F: FnMut(UiEvent)>(
         }
     }
 
+    // Copy-height pick: while active it OWNS the primary tap (a click reads the
+    // KNOWN height at the tapped surface and commits it). Placed FIRST and
+    // threaded through every other pick's guard below (`!copy_pick`) so nothing
+    // else fires while picking.
+    let copy_pick = view.copy_height_pick_pending;
+    if copy_pick
+        && matches!(mode, SketchMode::Storey2D)
+        && !touch_nav_active
+        && response.clicked_by(egui::PointerButton::Primary)
+    {
+        if let (Some(pos), Some(t)) = (
+            response.interact_pointer_pos(),
+            canvas_transform(ber, current_storey_idx, rect, vp, true),
+        ) {
+            let (wx, wy) = t.inverse(pos.x, pos.y);
+            let tol_world = (12.0 / t.scale()) as f64;
+            on_event(UiEvent::Sketch(SketchEvent::CopyHeightTap {
+                world_x: wx,
+                world_y: wy,
+                tol: tol_world,
+            }));
+        }
+    }
+
     // Pending cut: a primary click picks which candidate region to
     // keep as the living area. Takes priority over stroke/edit input.
     let cut_pending = !view.pending_cut_regions.is_empty();
-    if cut_pending {
+    if cut_pending && !copy_pick {
         if response.clicked_by(egui::PointerButton::Primary) {
             if let Some((wx, wy)) = response
                 .interact_pointer_pos()
@@ -1772,7 +1796,7 @@ pub(super) fn render<F: FnMut(UiEvent)>(
     // Pending PHASE cut: a primary click picks which candidate region
     // to tag with a construction phase. Mirrors the living-area cut.
     let phase_cut_pending = !view.pending_phase_cut_regions.is_empty();
-    if phase_cut_pending {
+    if phase_cut_pending && !copy_pick {
         if response.clicked_by(egui::PointerButton::Primary) {
             if let Some((wx, wy)) = response
                 .interact_pointer_pos()
@@ -1789,7 +1813,7 @@ pub(super) fn render<F: FnMut(UiEvent)>(
     // Pending STEP cut: a primary click picks which candidate region
     // gets the floor level. Mirrors the phase cut.
     let step_cut_pending = !view.pending_step_cut_regions.is_empty();
-    if step_cut_pending {
+    if step_cut_pending && !copy_pick {
         if response.clicked_by(egui::PointerButton::Primary) {
             if let Some((wx, wy)) = response
                 .interact_pointer_pos()
@@ -1814,6 +1838,7 @@ pub(super) fn render<F: FnMut(UiEvent)>(
     // that), so this can stay coarse.
     if (view.ceiling_step_side_pending
         || (view.ceiling_step_mode && matches!(edit_tool, EditTools::DrawPerpWalls)))
+        && !copy_pick
         && !cut_pending
         && !phase_cut_pending
         && !step_cut_pending
@@ -1842,6 +1867,7 @@ pub(super) fn render<F: FnMut(UiEvent)>(
         && !view.ceiling_ridge_pending
         && !view.ceiling_rect_pending
         && matches!(edit_tool, EditTools::DrawPerpWalls)
+        && !copy_pick
         && !cut_pending
         && !phase_cut_pending
         && !step_cut_pending
@@ -1868,7 +1894,7 @@ pub(super) fn render<F: FnMut(UiEvent)>(
         structure_phase && matches!(view.structure_select, Some(SelectMode::Click));
     let structure_carve =
         structure_phase && matches!(view.structure_select, Some(SelectMode::Carve));
-    if structure_click && matches!(mode, SketchMode::Storey2D) && !touch_nav_active {
+    if structure_click && matches!(mode, SketchMode::Storey2D) && !touch_nav_active && !copy_pick {
         // `watermark = true`: the storey is DRAWN with the previous-storey
         // watermark folded into the fit (`fit_bbox_for_storey`), so a setback
         // upper storey renders smaller than its own bbox would. Invert the tap
@@ -2257,6 +2283,7 @@ pub(super) fn render<F: FnMut(UiEvent)>(
                     draw_stroke(&painter, rect, stroke);
                 }
             } else if !view.roof_area_pitch_pending
+                && !copy_pick
                 && response.clicked_by(egui::PointerButton::Primary)
             {
                 if let Some(pos) = response.interact_pointer_pos() {

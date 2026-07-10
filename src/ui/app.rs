@@ -1086,6 +1086,13 @@ impl eframe::App for BerApp {
                             let step_error = self.sketch_state.step_error.clone();
                             let ceiling_step_error = self.sketch_state.ceiling_step_error.clone();
                             let roof_error = self.sketch_state.roof_error.clone();
+                            let copy_height_pick_pending =
+                                self.app_controller.borrow().copy_height_pick_pending();
+                            let copy_height_error = self
+                                .app_controller
+                                .borrow()
+                                .copy_height_error()
+                                .map(str::to_owned);
                             let new_storey_error = self.sketch_state.new_storey_error.clone();
                             let floor_thickness_error =
                                 self.sketch_state.floor_thickness_error.clone();
@@ -1474,6 +1481,8 @@ impl eframe::App for BerApp {
                                 ceiling_step_pending,
                                 ceiling_amount_input: &mut self.sketch_state.ceiling_amount_input,
                                 ceiling_step_error: ceiling_step_error.as_deref(),
+                                copy_height_pick_pending,
+                                copy_height_error: copy_height_error.as_deref(),
                                 ceiling_point_mode,
                                 ceiling_point_available,
                                 ceiling_apex_views: &ceiling_apex_views,
@@ -2133,6 +2142,21 @@ impl eframe::App for BerApp {
                                                 self.sketch_state.roof_error = Some(e);
                                             }
                                         }
+                                    }
+                                    SketchEvent::StartCopyHeight => {
+                                        controller.borrow_mut().start_copy_height();
+                                    }
+                                    SketchEvent::CopyHeightTap {
+                                        world_x,
+                                        world_y,
+                                        tol,
+                                    } => {
+                                        controller
+                                            .borrow_mut()
+                                            .copy_height_tap(world_x, world_y, tol);
+                                    }
+                                    SketchEvent::CancelCopyHeight => {
+                                        controller.borrow_mut().cancel_copy_height();
                                     }
                                     SketchEvent::SetExposureMode(on) => {
                                         controller.borrow_mut().set_exposure_mode(on);

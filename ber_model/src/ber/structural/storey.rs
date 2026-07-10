@@ -605,6 +605,72 @@ impl Storey {
                 .collect(),
         }
     }
+
+    /// The KNOWN ceiling-context height at plan point `(x, y)` within `tol`
+    /// (world metres), or `None` when the surface hit has no height the
+    /// assessor could read (a sloped face / mid-slope point / sloped ridge).
+    /// Tried in order, first hit wins: (1) a LEVEL ridge / single apex, (2) a
+    /// FLAT-TOPPED wall, (3) a FLAT ceiling area. Reads RESOLVED regions — the
+    /// caller materializes first.
+    pub fn copy_height_ceiling_at(&self, x: f64, y: f64, tol: f64) -> Option<f64> {
+        // 1. LEVEL ridge segment / single apex point.
+        for g in self.ceilings.apex_groups(&self.ceiling_apexes) {
+            match g.apex_idxs.as_slice() {
+                [ia, ib] => {
+                    let (a, b) = (&self.ceiling_apexes[*ia], &self.ceiling_apexes[*ib]);
+                    if (a.z_m - b.z_m).abs() > 1e-6 {
+                        continue; // sloped/mono-pitch ridge — height not readable
+                    }
+                    if point_to_segment_distance(x, y, a.point.x, a.point.y, b.point.x, b.point.y)
+                        <= tol
+                    {
+                        return Some(a.z_m);
+                    }
+                }
+                [ia] => {
+                    let a = &self.ceiling_apexes[*ia];
+                    if (x - a.point.x).hypot(y - a.point.y) <= tol {
+                        return Some(a.z_m);
+                    }
+                }
+                _ => {}
+            }
+        }
+        // 2. FLAT-TOPPED wall.
+        if let Some(id) = self.surface_at(SurfaceKind::Walls, x, y, tol) {
+            if let Some(z) = self
+                .walls
+                .regions
+                .iter()
+                .find(|r| r.id == id)
+                .and_then(|w| w.flat_top_z())
+            {
+                return Some(z);
+            }
+        }
+        // 3. FLAT ceiling area (flat_z Some = known; None = sloped → None).
+        if let Some(id) = self.surface_at(SurfaceKind::Ceilings, x, y, tol) {
+            return self
+                .ceilings
+                .regions
+                .iter()
+                .find(|r| r.id == id)
+                .and_then(|r| r.flat_z());
+        }
+        None
+    }
+
+    /// The floor level at plan point `(x, y)` within `tol` — floors are always
+    /// flat, so any floor area's `level_m` is a KNOWN height. `None` off any
+    /// floor region. Reads RESOLVED regions — the caller materializes first.
+    pub fn copy_height_floor_at(&self, x: f64, y: f64, tol: f64) -> Option<f64> {
+        let id = self.surface_at(SurfaceKind::Floors, x, y, tol)?;
+        self.floors
+            .regions
+            .iter()
+            .find(|r| r.id == id)
+            .map(|r| r.level_m)
+    }
 }
 
 /// Per-storey tally of structural surfaces, one field per kind. Drives the

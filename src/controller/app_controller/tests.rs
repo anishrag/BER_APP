@@ -18344,3 +18344,259 @@ fn living_area_mode_clears_sibling_mapping_modes() {
         "living areas deselected the construction-phase mapping tool"
     );
 }
+
+// ─── Copy height from a known surface ────────────────────────────────────────
+
+/// DORMER target: with a SLOPED (apex-fanned) ceiling, the dormer height prompt
+/// offers "Copy from". A tap on a mid-slope point is REJECTED (its height isn't
+/// known) — the error shows and the pick stays open; a tap on the LEVEL apex
+/// copies its ABSOLUTE z straight into `assign_dormer_height`.
+#[test]
+fn copy_height_dormer_copies_apex_absolute_and_rejects_mid_slope() {
+    // Fan the ceiling up to a single apex at (4, 5) = 4.2 m → a sloped roof.
+    let mut c = ceiling_apex_ready_controller();
+    c.ceiling_point_tap(3.8, 5.2);
+    c.apply_position_dimension(4.0).expect("X applies"); // x = 4
+    c.apply_position_dimension(5.0).expect("Y applies"); // y = 5
+    c.assign_roof_apex(4.2).expect("apex assigns");
+    assert!(!c.ceiling_point_pending(), "apex committed");
+
+    // Draw a dormer under the slope and drive it to its height stage.
+    c.set_dormer_mode(true);
+    assert!(c.dormer_mode() && !c.ceiling_point_mode());
+    c.apply_dormer_stroke_event(&rect_stroke());
+    c.skip_roof_rect_length().unwrap();
+    c.skip_roof_rect_length().unwrap();
+    c.skip_position_dimension().unwrap();
+    c.skip_position_dimension().unwrap();
+    assert!(c.ceiling_rect_height_pending() && c.pending_rect_is_dormer());
+
+    // Enter copy-height pick mode from the dormer prompt.
+    c.start_copy_height();
+    assert!(c.copy_height_pick_pending(), "dormer prompt → pick mode");
+
+    // A mid-slope tap has a real height nobody could read → rejected, still open.
+    c.copy_height_tap(3.0, 3.0, 0.2);
+    assert!(
+        c.copy_height_pick_pending(),
+        "sloped tap stays in pick mode"
+    );
+    assert!(c.copy_height_error().is_some(), "rejection message shown");
+    assert!(
+        c.pending_rect_is_dormer(),
+        "the dormer prompt is untouched by the rejected tap"
+    );
+
+    // A tap on the LEVEL apex copies its absolute z (4.2) and commits.
+    c.copy_height_tap(4.0, 5.0, 0.2);
+    assert!(
+        !c.copy_height_pick_pending(),
+        "successful copy closes the pick"
+    );
+    assert!(c.copy_height_error().is_none());
+    assert!(!c.ceiling_rect_pending(), "dormer committed");
+    c.materialize();
+    let storey = &c.current_record.as_ref().unwrap().data.storeys[0];
+    assert_eq!(storey.dormers.len(), 1, "one dormer");
+    assert!(
+        (storey.dormers[0].top_z_m - 4.2).abs() < 1e-6,
+        "dormer top is the ABSOLUTE copied apex z, got {}",
+        storey.dormers[0].top_z_m
+    );
+}
+
+/// The copy-height pick AUTO-HEALS if the underlying prompt is dismissed
+/// out-of-band (the number box is a non-modal window, so a tool/storey switch
+/// can close the prompt mid-pick). `copy_height_pick_pending` then reports done
+/// — the keypad re-shows and the canvas stops swallowing taps — and a stray tap
+/// no-ops instead of committing to a gone prompt.
+#[test]
+fn copy_height_pick_auto_heals_when_prompt_dismissed_out_of_band() {
+    let mut c = dimensioned_square_controller();
+    c.set_default_ceiling_height(2.4).unwrap();
+    c.set_dormer_mode(true);
+    c.apply_dormer_stroke_event(&rect_stroke());
+    c.skip_roof_rect_length().unwrap();
+    c.skip_roof_rect_length().unwrap();
+    c.skip_position_dimension().unwrap();
+    c.skip_position_dimension().unwrap();
+    assert!(c.ceiling_rect_height_pending() && c.pending_rect_is_dormer());
+
+    c.start_copy_height();
+    assert!(c.copy_height_pick_pending(), "pick armed");
+
+    // Dismiss the dormer prompt out-of-band (as a tool switch / cancel would).
+    c.cancel_pending_roof_rect();
+    assert!(!c.ceiling_rect_height_pending(), "prompt gone");
+    assert!(
+        !c.copy_height_pick_pending(),
+        "pick auto-heals — no longer swallowing canvas taps"
+    );
+    assert_eq!(
+        c.current_record.as_ref().unwrap().data.storeys[0]
+            .dormers
+            .len(),
+        0
+    );
+
+    // A stray tap while stale no-ops (heals the flag, commits nothing).
+    c.copy_height_tap(5.0, 5.0, 0.2);
+    assert!(!c.copy_height_pick_pending());
+    c.materialize();
+    assert_eq!(
+        c.current_record.as_ref().unwrap().data.storeys[0]
+            .dormers
+            .len(),
+        0,
+        "stale tap committed nothing"
+    );
+}
+
+/// CEILING-STEP target: the copied ABSOLUTE ceiling height is committed as a
+/// DELTA from the storey's default (`H − default`), so the stepped area ends up
+/// at exactly the copied height. Copy from a region raised to 2.7 → the target
+/// area rises to 2.7 (default 2.4 + delta 0.3).
+#[test]
+fn copy_height_ceiling_step_commits_h_minus_default() {
+    let mut c = ceiling_ready_controller(); // 10×10, default ceiling 2.4
+                                            // First step: raise x > 4 to 2.7 (delta +0.3).
+    ceiling_step_to_amount_at_x4(&mut c);
+    c.assign_ceiling_step_delta(0.3)
+        .expect("first delta applies");
+    c.materialize();
+    {
+        let storey = &c.current_record.as_ref().unwrap().data.storeys[0];
+        assert!(
+            storey
+                .copy_height_ceiling_at(7.0, 5.0, 0.2)
+                .is_some_and(|z| (z - 2.7).abs() < 1e-4),
+            "x > 4 region raised to 2.7, got {:?}",
+            storey.copy_height_ceiling_at(7.0, 5.0, 0.2)
+        );
+    }
+
+    // A SECOND step on a fresh line at x = 2 (greater side), driven to its
+    // amount stage. It doesn't coincide with the x = 4 boundary, so it isn't
+    // snap-pinned and shows a position prompt.
+    c.apply_ceiling_step_stroke_event(&[(1.98, 0.5), (2.02, 5.0), (2.0, 9.5)]);
+    assert!(c.ceiling_step_side_pending());
+    c.ceiling_step_tap(5.0, 5.0); // right of the line → x > 2 side
+    c.apply_position_dimension(2.0).expect("position applies"); // 2 m from x = 0
+    assert!(c.ceiling_step_amount_pending(), "second step at its amount");
+
+    // Copy the 2.7 region's height into the x > 2 step.
+    c.start_copy_height();
+    assert!(c.copy_height_pick_pending());
+    c.copy_height_tap(7.0, 5.0, 0.2); // taps the known 2.7 region
+    assert!(
+        !c.copy_height_pick_pending(),
+        "known surface copied + committed"
+    );
+    assert!(!c.ceiling_step_amount_pending(), "prompt closed");
+
+    // The copy committed delta = H − default = 2.7 − 2.4 = 0.3, so the piece in
+    // 2 < x < 4 (default 2.4 + 0.3) is now at exactly the copied 2.7.
+    c.materialize();
+    let storey = &c.current_record.as_ref().unwrap().data.storeys[0];
+    assert!(
+        storey
+            .copy_height_ceiling_at(3.0, 5.0, 0.2)
+            .is_some_and(|z| (z - 2.7).abs() < 1e-4),
+        "2 < x < 4 piece stepped to the copied 2.7, got {:?}",
+        storey.copy_height_ceiling_at(3.0, 5.0, 0.2)
+    );
+}
+
+/// FLOOR-STEP target: floors are always flat, so any floor level is known and
+/// is committed as the ABSOLUTE step level. Copying the default (level 0) floor
+/// hits the amount prompt's own zero-step guard → the error surfaces and the
+/// pick stays open; copying a floor already stepped to −0.3 sets the new area to
+/// −0.3.
+#[test]
+fn copy_height_floor_step_commits_absolute_level_and_surfaces_guard() {
+    let mut c = dimensioned_square_controller(); // 10×10, floor level 0
+    c.sync_active();
+
+    // First floor step: a small interior area lowered to −0.3.
+    c.set_step_mode(true);
+    c.apply_step_region_stroke_event(&[
+        (0.5, 0.5),
+        (1.4, 0.5),
+        (1.4, 1.4),
+        (0.5, 1.4),
+        (0.55, 0.55),
+    ]);
+    let mut guard = 0;
+    while c.dimensioning_active() && guard < 12 {
+        c.apply_dimension(0.9).expect("dimension applies");
+        guard += 1;
+    }
+    skip_position_prompts(&mut c);
+    assert!(c.step_pick_pending(), "first area at its amount");
+    c.assign_step_level_to_pending(-0.3)
+        .expect("first level applies");
+    c.materialize();
+    {
+        // The dimensioned step area sits around (0.45, 0.45); its floor is −0.3.
+        let storey = &c.current_record.as_ref().unwrap().data.storeys[0];
+        assert!(
+            storey
+                .copy_height_floor_at(0.45, 0.45, 0.2)
+                .is_some_and(|z| (z + 0.3).abs() < 1e-4),
+            "first area floor at −0.3, got {:?}",
+            storey.copy_height_floor_at(0.45, 0.45, 0.2)
+        );
+    }
+
+    // A SECOND step area, driven to its amount stage.
+    c.set_step_mode(true);
+    c.apply_step_region_stroke_event(&[
+        (3.0, 3.0),
+        (4.0, 3.0),
+        (4.0, 4.0),
+        (3.0, 4.0),
+        (3.05, 3.05),
+    ]);
+    guard = 0;
+    while c.dimensioning_active() && guard < 12 {
+        c.apply_dimension(1.0).expect("dimension applies");
+        guard += 1;
+    }
+    skip_position_prompts(&mut c);
+    assert!(c.step_pick_pending(), "second area at its amount");
+
+    c.start_copy_height();
+    assert!(c.copy_height_pick_pending());
+
+    // Copy the DEFAULT floor (level 0) → the amount prompt's zero-step guard
+    // rejects it; the error surfaces and the pick stays open.
+    c.copy_height_tap(8.0, 8.0, 0.2);
+    assert!(
+        c.copy_height_pick_pending(),
+        "guard-rejected copy stays in pick"
+    );
+    assert!(c.copy_height_error().is_some(), "guard error surfaced");
+    assert!(c.step_pick_pending(), "the floor-step prompt is still open");
+
+    // Copy the −0.3 region → the new area takes that absolute level and commits.
+    c.copy_height_tap(0.45, 0.45, 0.2);
+    assert!(
+        !c.copy_height_pick_pending(),
+        "known level copied + committed"
+    );
+    assert!(!c.step_pick_pending(), "prompt closed");
+    c.materialize();
+    // Now TWO floor areas sit at the copied −0.3 (the original + the new one),
+    // demonstrating the copied level was committed absolutely.
+    let storey = &c.current_record.as_ref().unwrap().data.storeys[0];
+    let lowered = storey
+        .floors
+        .regions
+        .iter()
+        .filter(|r| (r.level_m + 0.3).abs() < 1e-4)
+        .count();
+    assert_eq!(
+        lowered, 2,
+        "the new area joined the −0.3 level via the copy"
+    );
+}
