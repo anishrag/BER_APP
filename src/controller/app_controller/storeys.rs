@@ -937,6 +937,11 @@ impl AppController {
             .map(|s| s.walls.clone())
             .collect();
         ber_model::ber::structural::derive_inter_storey(&mut record.data, &dimensioned);
+        // Roof-void walls: split covered storeys' walls by the dwelling roof
+        // surface and stamp the piece under it SemiExposed (a dormer cheek /
+        // knee wall inside the eaves void). Derived fresh each tail, like the
+        // inter-storey pass it composes with.
+        ber_model::ber::structural::derive_roof_voids(&mut record.data);
         for idx in 0..n {
             document::relink_openings_after_derive(
                 &self.document.storeys[idx],
