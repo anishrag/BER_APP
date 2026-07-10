@@ -99,9 +99,19 @@ pub enum RoofShape {
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct RoofArea {
     pub id: ItemId,
-    /// The storey this roof sits on (its top ceiling) — for the eave height and
-    /// the dual-insulation pairing with that storey's ceiling.
+    /// The BASE storey this roof's eave sits on — `eave_z` and the derived
+    /// planes' z are local to ITS floor datum. For a roof spanning several
+    /// storeys (an attic conversion plus the surrounding ceilings of the
+    /// storey below) this is the lowest covered storey; the full covered set
+    /// is [`covered_storeys`](Self::covered_storeys).
     pub storey_idx: usize,
+    /// Every storey whose ceiling regions this roof covers (an attic-spanning
+    /// roof covers the attic AND the storey below). Empty in records written
+    /// before multi-storey areas existed — read via
+    /// [`covers_storey`](Self::covers_storey), which treats empty as
+    /// `[storey_idx]`.
+    #[serde(default)]
+    pub covered_storeys: Vec<usize>,
     pub shape: RoofShape,
     /// The drawn pitch in degrees (`Gable`/`Hip`); 0 for `Flat`/`FollowCeiling`.
     /// Descriptive — the geometry is driven by `apexes`.
@@ -122,6 +132,16 @@ pub struct RoofArea {
 }
 
 impl RoofArea {
+    /// True when this roof covers ceiling regions on `storey_idx`. Legacy
+    /// records (empty `covered_storeys`) cover exactly their base storey.
+    pub fn covers_storey(&self, storey_idx: usize) -> bool {
+        if self.covered_storeys.is_empty() {
+            self.storey_idx == storey_idx
+        } else {
+            self.covered_storeys.contains(&storey_idx)
+        }
+    }
+
     /// The bounding box (plan, world metres) of the given footprint rings, or
     /// `None` if degenerate.
     fn footprint_bbox(footprint: &[Vec<Point2f64>]) -> Option<(f64, f64, f64, f64)> {
@@ -551,7 +571,7 @@ impl Roof {
         let pt = geo::Point::new(p.x, p.y);
         self.areas
             .iter()
-            .filter(|a| a.storey_idx == storey_idx)
+            .filter(|a| a.covers_storey(storey_idx))
             .flat_map(|a| a.footprint.iter())
             .any(|ring| ring_polygon(ring).contains(&pt))
     }
@@ -579,11 +599,69 @@ mod tests {
         ]]
     }
 
+    /// A multi-storey area (attic + the storey below) covers ceiling regions on
+    /// EVERY storey in `covered_storeys`; a legacy area (empty set) covers
+    /// exactly its base storey.
+    #[test]
+    fn covers_on_credits_every_covered_storey() {
+        let area = RoofArea {
+            id: ItemId::default(),
+            storey_idx: 0,
+            covered_storeys: vec![0, 1],
+            shape: RoofShape::Gable,
+            pitch_deg: 45.0,
+            eave_z: 2.4,
+            ridge: None,
+            footprint: square_10(),
+            apexes: Vec::new(),
+        };
+        let roof = Roof { areas: vec![area] };
+        let p = Point2f64::new(5.0, 5.0);
+        assert!(roof.covers_on(0, p), "covers its base storey");
+        assert!(roof.covers_on(1, p), "covers the attic storey too");
+        assert!(!roof.covers_on(2, p), "not a storey outside the set");
+    }
+
+    /// A RoofArea JSON written before `covered_storeys` existed deserializes
+    /// with the empty set — and `covers_storey` then reads it as covering
+    /// exactly its base storey.
+    #[test]
+    fn roof_area_json_without_covered_storeys_deserializes() {
+        let area = RoofArea {
+            id: ItemId::default(),
+            storey_idx: 1,
+            covered_storeys: vec![0, 1],
+            shape: RoofShape::Flat,
+            pitch_deg: 0.0,
+            eave_z: 2.4,
+            ridge: None,
+            footprint: square_10(),
+            apexes: Vec::new(),
+        };
+        // JSON produced by the OLD shape: serialize and strip the field.
+        let mut json = serde_json::to_value(&area).expect("serialize");
+        assert!(
+            json.as_object_mut()
+                .expect("object")
+                .remove("covered_storeys")
+                .is_some(),
+            "field present in the current shape"
+        );
+        let legacy: RoofArea = serde_json::from_value(json).expect("legacy JSON loads");
+        assert!(legacy.covered_storeys.is_empty());
+        assert!(
+            legacy.covers_storey(1),
+            "legacy area covers its base storey"
+        );
+        assert!(!legacy.covers_storey(0));
+    }
+
     #[test]
     fn covers_on_matches_storey_and_plan_containment() {
         let area = RoofArea {
             id: ItemId::default(),
             storey_idx: 1,
+            covered_storeys: Vec::new(),
             shape: RoofShape::Flat,
             pitch_deg: 0.0,
             eave_z: 2.4,
@@ -628,6 +706,7 @@ mod tests {
         let area = RoofArea {
             id: ItemId::default(),
             storey_idx: 0,
+            covered_storeys: Vec::new(),
             shape: RoofShape::Gable,
             pitch_deg: 45.0,
             eave_z: 2.4,
@@ -662,6 +741,7 @@ mod tests {
         let area = RoofArea {
             id: ItemId::default(),
             storey_idx: 0,
+            covered_storeys: Vec::new(),
             shape: RoofShape::FollowCeiling,
             pitch_deg: 0.0,
             eave_z: 2.4,
@@ -687,6 +767,7 @@ mod tests {
         let area = RoofArea {
             id: ItemId::default(),
             storey_idx: 0,
+            covered_storeys: Vec::new(),
             shape: RoofShape::Flat,
             pitch_deg: 0.0,
             eave_z: 2.6,
@@ -736,6 +817,7 @@ mod tests {
         let area = RoofArea {
             id: ItemId::default(),
             storey_idx: 0,
+            covered_storeys: Vec::new(),
             shape: RoofShape::Gable,
             pitch_deg: 45.0,
             eave_z: 2.4,
@@ -898,6 +980,7 @@ mod tests {
         let area = RoofArea {
             id: ItemId::default(),
             storey_idx: 0,
+            covered_storeys: Vec::new(),
             shape: RoofShape::Gable,
             pitch_deg: 45.0,
             eave_z: 2.4,
@@ -968,6 +1051,7 @@ mod tests {
         let area = RoofArea {
             id: ItemId::default(),
             storey_idx: 0,
+            covered_storeys: Vec::new(),
             shape: RoofShape::Flat,
             pitch_deg: 0.0,
             eave_z: 2.4,
@@ -986,6 +1070,7 @@ mod tests {
         let area = RoofArea {
             id: ItemId::default(),
             storey_idx: 0,
+            covered_storeys: Vec::new(),
             shape: RoofShape::Flat,
             pitch_deg: 0.0,
             eave_z: 2.4,
@@ -1013,6 +1098,7 @@ mod tests {
         let area = RoofArea {
             id: ItemId::default(),
             storey_idx: 0,
+            covered_storeys: Vec::new(),
             shape: RoofShape::Gable,
             pitch_deg: 45.0,
             eave_z: 2.4,
@@ -1031,6 +1117,7 @@ mod tests {
         let area = RoofArea {
             id: ItemId::default(),
             storey_idx: 0,
+            covered_storeys: Vec::new(),
             shape: RoofShape::FollowCeiling,
             pitch_deg: 0.0,
             eave_z: 2.4,
@@ -1048,6 +1135,7 @@ mod tests {
         let area = RoofArea {
             id: ItemId::default(),
             storey_idx: 0,
+            covered_storeys: Vec::new(),
             shape: RoofShape::Flat,
             pitch_deg: 0.0,
             eave_z: 2.4,
@@ -1066,6 +1154,7 @@ mod tests {
         let area = RoofArea {
             id: ItemId::default(),
             storey_idx: 0,
+            covered_storeys: Vec::new(),
             shape: RoofShape::Flat,
             pitch_deg: 0.0,
             eave_z: 2.6,

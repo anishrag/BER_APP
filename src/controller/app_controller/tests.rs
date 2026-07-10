@@ -6770,6 +6770,91 @@ fn roof_follows_a_sloped_ceiling_in_a_converted_attic() {
     );
 }
 
+/// Attic conversion spanning storeys: grouping the attic's SLOPED ceiling with
+/// the surrounding flat ceiling of the storey BELOW commits ONE roof area —
+/// based on the lower storey (its ceiling is the eave), covering both storeys,
+/// with the attic's ceiling apexes DATUM-SHIFTED into base-storey-local z so
+/// the extended rafter planes keep their world height.
+#[test]
+fn roof_area_spans_attic_and_the_storey_below() {
+    use ber_model::ber::structural::CeilingApex;
+    use domain::points::Point2f64;
+
+    // Storey 0 = 10x10, ceiling 2.4. Storey 1 (the attic) = 6x6 at the same
+    // origin, ceiling sloped to a ridge at x = 3 (4.0 m above the ATTIC floor).
+    let mut c = dimensioned_square_controller();
+    c.set_default_ceiling_height(2.4).unwrap();
+    c.add_storey().unwrap();
+    finalise_current_storey_as_square(&mut c, 6.0);
+    c.set_default_ceiling_height(2.2).unwrap();
+    {
+        let rec = c.current_record.as_mut().unwrap();
+        rec.data.add_ceiling_apex(
+            1,
+            CeilingApex {
+                point: Point2f64::new(3.0, 0.0),
+                z_m: 4.0,
+            },
+        );
+        rec.data.add_ceiling_apex(
+            1,
+            CeilingApex {
+                point: Point2f64::new(3.0, 6.0),
+                z_m: 4.0,
+            },
+        );
+    }
+    c.recompose_ceilings(1);
+    c.materialize();
+
+    c.set_roof_mode(true);
+    c.confirm_all_storeys_added_roof();
+    // Group the attic's west slope AND storey 0's ceiling outside the attic.
+    c.roof_region_tap(1.5, 3.0, 0.5); // attic slope (storey 1)
+    c.roof_region_tap(8.0, 8.0, 0.5); // storey 0's ceiling band (no attic there)
+    let selected_storeys: std::collections::BTreeSet<usize> =
+        c.roof_selected.iter().map(|(idx, _)| *idx).collect();
+    assert_eq!(
+        selected_storeys.into_iter().collect::<Vec<_>>(),
+        vec![0, 1],
+        "regions from BOTH storeys grouped into one area"
+    );
+    assert!(
+        c.roof_area_ceiling_is_sloped(),
+        "the attic's sloped ceiling is detected across the grouping"
+    );
+    c.pick_roof_area_shape(RoofShape::FollowCeiling);
+
+    let ber = &c.current_record.as_ref().unwrap().data;
+    assert_eq!(ber.roof.areas.len(), 1);
+    let area = &ber.roof.areas[0];
+    assert_eq!(area.storey_idx, 0, "based on the LOWER storey (the eave)");
+    assert_eq!(area.covered_storeys, vec![0, 1]);
+    assert!(
+        (area.eave_z - 2.4).abs() < 1e-6,
+        "eave at storey 0's ceiling, got {}",
+        area.eave_z
+    );
+    // The attic's apexes were adopted, re-based onto storey 0's floor datum.
+    let datums = ber.storey_floor_datums();
+    let expected_apex_z = 4.0 + datums[1] - datums[0];
+    assert_eq!(
+        area.apexes.len(),
+        2,
+        "the attic's ridge apexes were adopted"
+    );
+    assert!(
+        area.apexes
+            .iter()
+            .all(|a| (a.z_m - expected_apex_z).abs() < 1e-6),
+        "apex z datum-shifted to base-local: expected {expected_apex_z}, got {:?}",
+        area.apexes.iter().map(|a| a.z_m).collect::<Vec<_>>()
+    );
+    // Coverage credits BOTH storeys' ceiling regions (the mapping-gate read).
+    assert!(ber.roof.covers_on(0, Point2f64::new(8.0, 8.0)));
+    assert!(ber.roof.covers_on(1, Point2f64::new(1.5, 3.0)));
+}
+
 /// A tap within snap tolerance of a parallel wall on ONE axis snaps that
 /// axis: its position prompt is SKIPPED (the coordinate is a reference
 /// wall's, exact by construction), the single tag renders, the OTHER axis is

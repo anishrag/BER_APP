@@ -6,21 +6,25 @@
 //! proposal/drawing + geometry land in later stages.
 use super::*;
 use ber_model::ber::roof::RoofArea;
-use ber_model::ber::structural::{CeilingExposure, SurfaceKind};
+use ber_model::ber::structural::{CeilingApex, CeilingExposure, SurfaceKind};
 use domain::points::Point2f64;
 use manip_plan::ParameterAxis;
+use std::collections::BTreeSet;
 
 // The persisted roof-shape enum; re-exported (and again from `mod.rs`) so the UI
 // keeps reaching it via `crate::controller::app_controller::RoofShape`.
 pub use ber_model::ber::roof::RoofShape;
 
 /// The in-flight per-area roof drawing, after the assessor grouped some ceiling
-/// areas (`roof_selected`) and picked a sloped shape. Session-only, cleared on
-/// mode exit / cancel / commit. The committed roof area lands on `Ber.roof`
-/// (SEPARATE from the ceiling) — it does NOT touch the ceiling apexes.
+/// areas (`roof_selected`, possibly across SEVERAL storeys — an attic
+/// conversion plus the storey below) and picked a sloped shape. Session-only,
+/// cleared on mode exit / cancel / commit. The committed roof area lands on
+/// `Ber.roof` (SEPARATE from the ceiling) — it does NOT touch the ceiling
+/// apexes. `storey_idx` is the BASE storey (the lowest covered eave,
+/// `roof_base_and_eave`).
 #[derive(Clone, Debug)]
 pub enum PendingRoofArea {
-    /// Awaiting ridge STROKE(s) for `shape` over the grouped area on
+    /// Awaiting ridge STROKE(s) for `shape` over the grouped area based on
     /// `storey_idx`. A GABLE takes one stroke and moves on; a HIP collects
     /// every ridge the assessor draws in `ridges` (an L-shaped hip has
     /// several) until they Finish. Each stroke is edge-snapped
@@ -221,14 +225,10 @@ impl AppController {
             }
         }
         if let Some((_, idx, key)) = best {
-            // A roof area sits on ONE storey (apexes are per-storey). Once a
-            // region is grouped, ignore taps on a different storey rather than
-            // silently committing a partial roof to just one of them.
-            if let Some((existing_idx, _)) = self.roof_selected.iter().next() {
-                if *existing_idx != idx {
-                    return;
-                }
-            }
+            // Regions from DIFFERENT storeys may share one roof area: an attic
+            // conversion's sloped ceiling plus the surrounding flat ceilings of
+            // the storey below form ONE roof (base storey + eave resolved by
+            // `roof_base_and_eave`, apexes datum-shifted at commit).
             let sel = (idx, key);
             if !self.roof_selected.insert(sel) {
                 self.roof_selected.remove(&sel);
@@ -308,16 +308,17 @@ impl AppController {
     ///
     /// [`centre_ridge`]: ber_model::ber::roof::centre_ridge
     pub fn centre_pending_roof_ridge(&mut self) {
-        let storey_idx = match self.pending_roof_area.as_ref() {
+        if !matches!(
+            self.pending_roof_area.as_ref(),
             Some(PendingRoofArea::PickPitch {
                 shape: RoofShape::Gable,
-                storey_idx,
                 ..
-            }) => *storey_idx,
-            _ => return,
-        };
+            })
+        ) {
+            return;
+        }
         // The grouping is still live during the pitch stage (cleared on commit).
-        let footprint = self.roof_selected_rings(storey_idx);
+        let footprint = self.roof_selected_rings();
         if let Some(PendingRoofArea::PickPitch { ridges, .. }) = self.pending_roof_area.as_mut() {
             for ridge in ridges.iter_mut() {
                 *ridge = ber_model::ber::roof::centre_ridge(*ridge, &footprint);
@@ -325,60 +326,114 @@ impl AppController {
         }
     }
 
-    /// The combined bbox of the grouped ceiling regions on `storey_idx` (world
-    /// metres). `None` when none are grouped there.
-    fn roof_selected_bbox(&self, storey_idx: usize) -> Option<((f64, f64), (f64, f64))> {
-        let storey = self.current_record.as_ref()?.data.storeys.get(storey_idx)?;
+    /// The combined bbox of ALL grouped ceiling regions (world metres, across
+    /// every selected storey). `None` when nothing is grouped.
+    fn roof_selected_bbox(&self) -> Option<((f64, f64), (f64, f64))> {
+        let record = self.current_record.as_ref()?;
         let mut bb: Option<(f64, f64, f64, f64)> = None;
-        for r in &storey.ceilings.regions {
-            if !self
-                .roof_selected
-                .contains(&(storey_idx, document::centroid_key(r.centroid())))
-            {
-                continue;
-            }
-            for v in &r.polygon.exterior {
-                bb = Some(match bb {
-                    None => (v.x, v.y, v.x, v.y),
-                    Some((minx, miny, maxx, maxy)) => {
-                        (minx.min(v.x), miny.min(v.y), maxx.max(v.x), maxy.max(v.y))
-                    }
-                });
+        for (storey_idx, storey) in record.data.storeys.iter().enumerate() {
+            for r in &storey.ceilings.regions {
+                if !self
+                    .roof_selected
+                    .contains(&(storey_idx, document::centroid_key(r.centroid())))
+                {
+                    continue;
+                }
+                for v in &r.polygon.exterior {
+                    bb = Some(match bb {
+                        None => (v.x, v.y, v.x, v.y),
+                        Some((minx, miny, maxx, maxy)) => {
+                            (minx.min(v.x), miny.min(v.y), maxx.max(v.x), maxy.max(v.y))
+                        }
+                    });
+                }
             }
         }
         bb.map(|(minx, miny, maxx, maxy)| ((minx, miny), (maxx, maxy)))
     }
 
-    /// The storey the grouped area belongs to — the storey index of the grouped
-    /// regions (first one). First cut: a roof area is assumed to sit on a single
-    /// storey (the eave is that storey's ceiling height).
-    fn roof_target_storey(&self) -> Option<usize> {
-        self.roof_selected.iter().map(|(idx, _)| *idx).min()
+    /// The sorted, de-duplicated storey indices of the grouped regions — the
+    /// committed area's `covered_storeys`.
+    fn roof_selected_storeys(&self) -> Vec<usize> {
+        self.roof_selected
+            .iter()
+            .map(|(idx, _)| *idx)
+            .collect::<BTreeSet<usize>>()
+            .into_iter()
+            .collect()
     }
 
-    /// The grouped ceiling-area rings on `storey_idx` (plan, world metres, no
-    /// closing duplicate), UNIONED into contiguous pieces — the roof area's
-    /// covered footprint. Merged so the grouped selection is ONE roof: ridge
-    /// snapping/centring measure against the COMBINED boundary (not the
-    /// internal seams between grouped areas), corner-snap targets are the real
-    /// outline corners, and the committed footprint fans as one surface.
-    fn roof_selected_rings(&self, storey_idx: usize) -> Vec<Vec<Point2f64>> {
-        let Some(storey) = self
-            .current_record
-            .as_ref()
-            .and_then(|r| r.data.storeys.get(storey_idx))
-        else {
+    /// The grouped selection's BASE storey + the eave height LOCAL to its floor
+    /// datum. Every grouped region contributes a world-z eave candidate: its
+    /// resolved flat plane (`datum + flat_z`) or — for a sloped region (a
+    /// converted attic's rafter ceiling) — the storey's default ceiling
+    /// height. A SLOPED roof takes the LOWEST candidate (`highest = false`):
+    /// the merged footprint's boundary sits on the lowest covered ceiling — an
+    /// attic-spanning gable rises from the ceiling of the storey BELOW. A FLAT
+    /// roof takes the HIGHEST: it lies on the highest ceiling piece it covers
+    /// (a roof over a stepped ceiling sits on the raised side, not inside it).
+    /// The base storey is the winning candidate's owner, so the stored
+    /// storey-local `eave_z` renders at the right world height.
+    fn roof_base_and_eave(&self, highest: bool) -> Option<(usize, f64)> {
+        let record = self.current_record.as_ref()?;
+        let datums = record.data.storey_floor_datums();
+        let mut best: Option<(usize, f64, f64)> = None; // (storey, world_z, datum)
+        for storey_idx in self.roof_selected_storeys() {
+            let Some(storey) = record.data.storeys.get(storey_idx) else {
+                continue;
+            };
+            let datum = datums.get(storey_idx).copied().unwrap_or(0.0);
+            let local = storey
+                .ceilings
+                .regions
+                .iter()
+                .filter(|r| {
+                    self.roof_selected
+                        .contains(&(storey_idx, document::centroid_key(r.centroid())))
+                })
+                .filter_map(|r| r.flat_z())
+                .fold(None, |acc: Option<f64>, z| {
+                    Some(acc.map_or(z, |a| if highest { a.max(z) } else { a.min(z) }))
+                });
+            let Some(local) = local.or(storey.ceiling_height_m) else {
+                continue;
+            };
+            let world = datum + local;
+            let better = match best {
+                None => true,
+                Some((_, w, _)) => {
+                    if highest {
+                        world > w
+                    } else {
+                        world < w
+                    }
+                }
+            };
+            if better {
+                best = Some((storey_idx, world, datum));
+            }
+        }
+        best.map(|(storey_idx, world, datum)| (storey_idx, world - datum))
+    }
+
+    /// The grouped ceiling-area rings (plan, world metres, no closing
+    /// duplicate) across EVERY selected storey, UNIONED into contiguous
+    /// pieces — the roof area's covered footprint. Merged so the grouped
+    /// selection is ONE roof: ridge snapping/centring measure against the
+    /// COMBINED boundary (not the internal seams between grouped areas —
+    /// including the seam where an attic's rings meet the storey-below's),
+    /// corner-snap targets are the real outline corners, and the committed
+    /// footprint fans as one surface.
+    fn roof_selected_rings(&self) -> Vec<Vec<Point2f64>> {
+        let Some(record) = self.current_record.as_ref() else {
             return Vec::new();
         };
-        let rings: Vec<Vec<Point2f64>> = storey
-            .ceilings
-            .regions
-            .iter()
-            .filter(|r| {
+        let mut rings: Vec<Vec<Point2f64>> = Vec::new();
+        for (storey_idx, storey) in record.data.storeys.iter().enumerate() {
+            for r in storey.ceilings.regions.iter().filter(|r| {
                 self.roof_selected
                     .contains(&(storey_idx, document::centroid_key(r.centroid())))
-            })
-            .map(|r| {
+            }) {
                 let mut ring: Vec<Point2f64> = r
                     .polygon
                     .exterior
@@ -388,61 +443,41 @@ impl AppController {
                 if ring.len() >= 2 && ring[0] == ring[ring.len() - 1] {
                     ring.pop();
                 }
-                ring
-            })
-            .collect();
+                rings.push(ring);
+            }
+        }
         ber_model::ber::roof::merge_footprint_rings(&rings)
     }
 
-    /// The eave height for a roof over the grouped area on `storey_idx` — the
-    /// RESOLVED z of the grouped ceiling regions (highest flat plane among
-    /// them), so the roof sits on the ceiling as it actually is (a stepped /
-    /// carved region isn't at the storey's default height, and a flat roof
-    /// committed off the default would float a hair off its ceiling and never
-    /// coincide). Falls back to the storey's default ceiling height when no
-    /// grouped region is flat (sloped grouping) or nothing is grouped there.
-    fn roof_eave_z(&self, storey_idx: usize) -> Option<f64> {
-        let storey = self
-            .current_record
-            .as_ref()
-            .and_then(|r| r.data.storeys.get(storey_idx))?;
-        let grouped_flat_max = storey
-            .ceilings
-            .regions
-            .iter()
-            .filter(|r| {
-                self.roof_selected
-                    .contains(&(storey_idx, document::centroid_key(r.centroid())))
-            })
-            .filter_map(|r| r.flat_z())
-            .fold(None, |acc: Option<f64>, z| {
-                Some(acc.map_or(z, |a| a.max(z)))
-            });
-        grouped_flat_max.or(storey.ceiling_height_m)
-    }
-
-    /// True when the grouped area's storey has a SLOPED ceiling (it has ceiling
-    /// apexes) — a converted attic / room-in-roof, where the roof should adopt the
-    /// ceiling's slope ("Follow ceiling") rather than a freshly-drawn pitch.
+    /// True when ANY grouped storey has a SLOPED ceiling (it has ceiling
+    /// apexes) — a converted attic / room-in-roof, where the roof should adopt
+    /// the ceiling's slope ("Follow ceiling") rather than a freshly-drawn
+    /// pitch. A multi-storey grouping (attic + the storey below) counts: the
+    /// roof follows the attic's rafters and extends them over the rest.
     pub fn roof_area_ceiling_is_sloped(&self) -> bool {
-        let Some(storey_idx) = self.roof_target_storey() else {
+        let Some(record) = self.current_record.as_ref() else {
             return false;
         };
-        self.current_record
-            .as_ref()
-            .and_then(|r| r.data.storeys.get(storey_idx))
-            .map(|s| !s.ceiling_apexes.is_empty())
-            .unwrap_or(false)
+        self.roof_selected_storeys().into_iter().any(|idx| {
+            record
+                .data
+                .storeys
+                .get(idx)
+                .map(|s| !s.ceiling_apexes.is_empty())
+                .unwrap_or(false)
+        })
     }
 
     /// Commit a finished roof area onto `Ber.roof` (SEPARATE from the ceiling — it
     /// does NOT touch the ceiling apexes), then clear the grouping + pending state.
-    /// The geometry-driving apexes are computed by `shape`: `Gable`/`Hip` from the
-    /// drawn ridge(s) + pitch (one apex pair per ridge, each over its own local
-    /// run); `FollowCeiling` copies the covered storey's ceiling apexes (so the
-    /// roof reproduces the sloped ceiling); `Flat` has none. The descriptive
-    /// `ridge` field records the FIRST drawn ridge (the apexes carry the full
-    /// multi-ridge geometry).
+    /// `storey_idx` is the BASE storey (`roof_base_and_eave`); `covered_storeys`
+    /// records every grouped storey. The geometry-driving apexes are computed by
+    /// `shape`: `Gable`/`Hip` from the drawn ridge(s) + pitch (one apex pair per
+    /// ridge, each over its own local run); `FollowCeiling` copies every covered
+    /// storey's ceiling apexes DATUM-SHIFTED into base-storey-local z (so an
+    /// attic's rafter planes extend over the storey below at the right world
+    /// height); `Flat` has none. The descriptive `ridge` field records the FIRST
+    /// drawn ridge (the apexes carry the full multi-ridge geometry).
     fn commit_roof_area(
         &mut self,
         storey_idx: usize,
@@ -451,20 +486,36 @@ impl AppController {
         eave_z: f64,
         ridges: Vec<(Point2f64, Point2f64)>,
     ) -> Result<(), String> {
-        let footprint = self.roof_selected_rings(storey_idx);
+        let footprint = self.roof_selected_rings();
+        let covered_storeys = self.roof_selected_storeys();
         let apexes = match shape {
             RoofShape::Flat => Vec::new(),
             RoofShape::Gable | RoofShape::Hip => ridges
                 .iter()
                 .flat_map(|r| RoofArea::ridge_apexes(*r, pitch_deg, eave_z, &footprint))
                 .collect(),
-            // Adopt the covered storey's ceiling slope (converted attic).
-            RoofShape::FollowCeiling => self
-                .current_record
-                .as_ref()
-                .and_then(|r| r.data.storeys.get(storey_idx))
-                .map(|s| s.ceiling_apexes.clone())
-                .unwrap_or_default(),
+            // Adopt the covered storeys' ceiling slope (converted attic) —
+            // apex z re-based from each owning storey's floor datum to the
+            // BASE storey's, so the copied planes keep their world height.
+            RoofShape::FollowCeiling => {
+                let record = self
+                    .current_record
+                    .as_ref()
+                    .ok_or("No record to add the roof to.")?;
+                let datums = record.data.storey_floor_datums();
+                let base_datum = datums.get(storey_idx).copied().unwrap_or(0.0);
+                covered_storeys
+                    .iter()
+                    .filter_map(|&idx| record.data.storeys.get(idx).map(|s| (idx, s)))
+                    .flat_map(|(idx, s)| {
+                        let shift = datums.get(idx).copied().unwrap_or(0.0) - base_datum;
+                        s.ceiling_apexes.iter().map(move |a| CeilingApex {
+                            point: a.point,
+                            z_m: a.z_m + shift,
+                        })
+                    })
+                    .collect()
+            }
         };
         let record = self
             .current_record
@@ -473,6 +524,7 @@ impl AppController {
         record.data.roof.areas.push(RoofArea {
             id: ItemId::default(),
             storey_idx,
+            covered_storeys,
             shape,
             pitch_deg,
             eave_z,
@@ -489,16 +541,17 @@ impl AppController {
     /// Pick the shape for the grouped roof area. `Flat` and `FollowCeiling` commit
     /// immediately (no ridge/pitch — FollowCeiling reuses the sloped ceiling);
     /// `Gable`/`Hip` start the ridge-draw flow. No-op without a grouped area.
+    /// A FLAT roof lies on the HIGHEST grouped ceiling piece; a sloped one
+    /// rises from the LOWEST (its eave).
     pub fn pick_roof_area_shape(&mut self, shape: RoofShape) {
         if !self.roof_area_can_pick_shape() {
             return;
         }
-        let Some(storey_idx) = self.roof_target_storey() else {
+        let Some((storey_idx, eave_z)) = self.roof_base_and_eave(shape == RoofShape::Flat) else {
             return;
         };
         match shape {
             RoofShape::Flat | RoofShape::FollowCeiling => {
-                let eave_z = self.roof_eave_z(storey_idx).unwrap_or(0.0);
                 let _ = self.commit_roof_area(storey_idx, shape, 0.0, eave_z, Vec::new());
             }
             RoofShape::Gable | RoofShape::Hip => {
@@ -553,9 +606,10 @@ impl AppController {
         let not_a_line =
             || "That stroke isn't a straight line — draw one straight stroke along the ridge.";
         let eave_z = self
-            .roof_eave_z(storey_idx)
+            .roof_base_and_eave(false)
+            .map(|(_, z)| z)
             .ok_or("Set this storey's ceiling height before drawing its roof.")?;
-        let footprint = self.roof_selected_rings(storey_idx);
+        let footprint = self.roof_selected_rings();
         let ridge = match shape {
             RoofShape::Hip => {
                 // Free-direction fit: a hip's corner ridges are legitimately
@@ -574,7 +628,7 @@ impl AppController {
             _ => {
                 let (axis, coord, _) = manip_plan::fit_axis_segment(&pts).ok_or_else(not_a_line)?;
                 let ((minx, miny), (maxx, maxy)) = self
-                    .roof_selected_bbox(storey_idx)
+                    .roof_selected_bbox()
                     .ok_or("No grouped roof area to place the ridge in.")?;
                 // `axis == X` ⇒ ridge runs along Y at x = coord, slopes fall
                 // in X; `axis == Y` ⇒ ridge runs along X at y = coord. A gable
@@ -629,7 +683,8 @@ impl AppController {
         }
         let (storey_idx, ridges) = (*storey_idx, ridges.clone());
         let eave_z = self
-            .roof_eave_z(storey_idx)
+            .roof_base_and_eave(false)
+            .map(|(_, z)| z)
             .ok_or("Set this storey's ceiling height before drawing its roof.")?;
         self.pending_roof_area = Some(PendingRoofArea::PickPitch {
             storey_idx,

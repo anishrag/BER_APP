@@ -461,6 +461,7 @@ mod tests {
         ber.roof.areas.push(RoofArea {
             id: ItemId::default(),
             storey_idx: 1,
+            covered_storeys: Vec::new(),
             shape: RoofShape::Gable,
             pitch_deg: 45.0,
             eave_z: 2.4,
