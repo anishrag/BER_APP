@@ -278,14 +278,23 @@ impl AppController {
             ParameterAxis::Y
         };
         let proposed = if on_x { (len_m, len.1) } else { (len.0, len_m) };
-        let idx = self.current_storey_idx.unwrap_or(0);
-        self.materialize();
-        let storey = self
-            .current_record
-            .as_ref()
-            .and_then(|r| r.data.storeys.get(idx))
-            .ok_or("no storey to assign a ceiling rect to")?;
-        document::validate_roof_rect_length(storey, axis, len_m)?;
+        // The PAVILION length check validates the typed side against the ceiling
+        // AREA's span through the rect (a ridge-length check). That's meaningless
+        // for a DORMER — its footprint may span multiple sloped regions and is
+        // validated by `validate_dormer` at the height commit; on a sloped/ridged
+        // roof that span comes out ~0 and wrongly rejects EVERY width ("no ceiling
+        // area is that long — under 0.00 m"). Skip it for the dormer path
+        // (pavilion unchanged; a degenerate dormer is caught at the commit).
+        if !self.pending_rect_is_dormer {
+            let idx = self.current_storey_idx.unwrap_or(0);
+            self.materialize();
+            let storey = self
+                .current_record
+                .as_ref()
+                .and_then(|r| r.data.storeys.get(idx))
+                .ok_or("no storey to assign a ceiling rect to")?;
+            document::validate_roof_rect_length(storey, axis, len_m)?;
+        }
         // DORMER pin: when the HI side of this axis is pinned, keep IT fixed as
         // the length changes (shift `lo`); the pavilion always anchors `lo`.
         let lo = if self.pending_rect_is_dormer && self.pending_rect_pins.keep_hi(axis) {

@@ -1412,6 +1412,11 @@ mod tests {
             .filter(|r| r.flat_z().is_some_and(|z| (z - z_abs).abs() < 1e-9))
             .collect();
         assert!(!top.is_empty(), "the spanning dormer top exists");
+        assert_eq!(
+            top.len(),
+            1,
+            "the dormer top is ONE merged region, not split by the seam underneath"
+        );
         let top_area: f64 = top.iter().map(|r| r.area()).sum();
         assert!(
             (top_area - area).abs() < 1e-6,

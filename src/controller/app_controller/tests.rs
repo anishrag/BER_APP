@@ -9051,6 +9051,48 @@ fn dormer_on_a_sloped_region_reaches_the_height_stage() {
     assert_eq!(storey.dormers.len(), 1, "one durable dormer on the slope");
 }
 
+/// Regression ("weird error setting flat-top width"): a dormer's WIDTH stage ran
+/// the PAVILION length check (`validate_roof_rect_length` → a ceiling-AREA span
+/// check), which returns ~0 on a sloped/ridged roof and rejected EVERY width
+/// with "no ceiling area is that long — under 0.00 m". The dormer must skip that
+/// pavilion check; its footprint is validated by `validate_dormer` at commit.
+#[test]
+fn dormer_width_accepted_on_a_sloped_roof() {
+    // Fan the ceiling into a slope (apex at (4,5) @ 4.2 m), then draw a dormer
+    // inside the sloped bottom triangle, clear of references (→ LenX asked).
+    let mut c = ceiling_apex_ready_controller();
+    c.ceiling_point_tap(3.8, 5.2);
+    c.apply_position_dimension(4.0).unwrap();
+    c.apply_position_dimension(5.0).unwrap();
+    c.assign_roof_apex(4.2).unwrap();
+    c.materialize();
+    c.set_dormer_mode(true);
+    c.apply_dormer_stroke_event(&[
+        (3.0, 1.0),
+        (4.0, 0.98),
+        (5.0, 1.0),
+        (5.05, 1.75),
+        (5.0, 2.5),
+        (4.0, 2.52),
+        (3.0, 2.5),
+        (2.95, 1.75),
+        (3.0, 1.05),
+    ]);
+    assert_eq!(
+        c.ceiling_rect_length_pending(),
+        Some(ParameterAxis::X),
+        "dormer at the width stage"
+    );
+    // Typing a width must SUCCEED (before the fix: rejected with the 0.00 m span).
+    c.assign_roof_rect_length(1.5)
+        .expect("dormer width accepted on a sloped roof");
+    assert_eq!(
+        c.ceiling_rect_length_pending(),
+        Some(ParameterAxis::Y),
+        "advanced to the depth stage"
+    );
+}
+
 /// THE RECT FIXPOINT over a STEPPED base (design §5's second required
 /// test — the boolean-noise path the EPS claim band and the apex_groups
 /// all-apex-top amendment exist for): a pavilion over a raised ceiling

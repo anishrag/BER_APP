@@ -388,6 +388,13 @@ impl CeilingRegions {
             }
             let area_poly = to_poly(ring);
             let mut next: Vec<CeilingRegion> = Vec::new();
+            // The dormer-top (INSIDE) pieces from EVERY source region are all
+            // stamped at `z_abs` — the same height — so a footprint spanning a
+            // roof ridge, a ceiling step, or an area boundary is ONE flat surface,
+            // not split by the seam underneath. Union them into a single top; only
+            // the OUTSIDE remainders (each on its own source plane) stay separate.
+            let mut inside_union: Option<geo::MultiPolygon<f64>> = None;
+            let mut top: Option<(ItemId, CeilingExposure, f64)> = None; // dominant (cid, exposure, area)
             for region in regions {
                 let Some((c0, cx, cy)) = region_plane(&region) else {
                     next.push(region); // plan-degenerate — nothing to split
@@ -402,24 +409,16 @@ impl CeilingRegions {
                 }
                 let cid = region.construction_id;
                 let exposure = region.exposure;
-                // INSIDE: the flat dormer top — every vertex stamped at `z_abs`.
-                let mk_flat = |poly: &Polygon<f64>| {
-                    let mut pts: Vec<Point3f64> = poly
-                        .exterior()
-                        .coords()
-                        .map(|c| Point3f64::new(c.x, c.y, *z_abs))
-                        .collect();
-                    if pts.len() > 1 && pts.first() == pts.last() {
-                        pts.pop();
-                    }
-                    CeilingRegion {
-                        id: ItemId::default(),
-                        polygon: Polygon3D::new(pts),
-                        opes: Opes::default(),
-                        construction_id: cid,
-                        exposure,
-                    }
-                };
+                // The merged top inherits the DOMINANT source's construction /
+                // exposure (largest overlap) — the dormer roof is one surface the
+                // assessor assigns; dominant is the sensible default.
+                if top.is_none_or(|(_, _, a)| inside_area > a) {
+                    top = Some((cid, exposure, inside_area));
+                }
+                inside_union = Some(match inside_union {
+                    Some(acc) => acc.union(&inside),
+                    None => inside,
+                });
                 // OUTSIDE: the surrounding roof kept on the SOURCE plane
                 // (z read from the plane, not a flat stamp) — bit-identical slope.
                 let mk_sloped = |poly: &Polygon<f64>| {
@@ -439,18 +438,36 @@ impl CeilingRegions {
                         exposure,
                     }
                 };
-                for poly in inside.0.iter().flat_map(split_to_simple) {
-                    if poly.unsigned_area() < SLIVER_AREA_M2 {
-                        continue;
-                    }
-                    next.push(mk_flat(&poly));
-                }
                 let outside = region_poly.difference(&area_poly);
                 for poly in outside.0.iter().flat_map(split_to_simple) {
                     if poly.unsigned_area() < SLIVER_AREA_M2 {
                         continue;
                     }
                     next.push(mk_sloped(&poly));
+                }
+            }
+            // Emit the merged flat top: one region per connected component of the
+            // union, every vertex stamped at `z_abs`.
+            if let (Some(union), Some((cid, exposure, _))) = (inside_union, top) {
+                for poly in union.0.iter().flat_map(split_to_simple) {
+                    if poly.unsigned_area() < SLIVER_AREA_M2 {
+                        continue;
+                    }
+                    let mut pts: Vec<Point3f64> = poly
+                        .exterior()
+                        .coords()
+                        .map(|c| Point3f64::new(c.x, c.y, *z_abs))
+                        .collect();
+                    if pts.len() > 1 && pts.first() == pts.last() {
+                        pts.pop();
+                    }
+                    next.push(CeilingRegion {
+                        id: ItemId::default(),
+                        polygon: Polygon3D::new(pts),
+                        opes: Opes::default(),
+                        construction_id: cid,
+                        exposure,
+                    });
                 }
             }
             regions = next;
