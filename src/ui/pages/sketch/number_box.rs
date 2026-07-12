@@ -1842,6 +1842,11 @@ fn show_box_multi<F: FnMut(UiEvent)>(
                 {
                     focus = next;
                     responses[focus].request_focus();
+                    // Programmatic focus move — the assessor is shooting the
+                    // laser, not typing. Don't pop the native keyboard over
+                    // the box; a physical tap on the field still raises it.
+                    #[cfg(target_os = "android")]
+                    crate::ui::widgets::native_ime::suppress_next_show();
                 }
             }
             ui.ctx().data_mut(|d| d.insert_temp(focus_id, focus));

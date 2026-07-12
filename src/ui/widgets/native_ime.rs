@@ -89,6 +89,10 @@ struct Session {
     /// only when the keyboard height actually changes, so the assessor can
     /// still scroll the form freely while typing.
     handled_inset_px: i32,
+    /// One-shot: the next PROGRAMMATIC focus gain must not raise the keyboard
+    /// (set via [`suppress_next_show`] by e.g. the laser auto-advance). A real
+    /// tap on the field overrides it — `clicked()` always shows.
+    suppress_next_show: bool,
 }
 
 static SESSION: Mutex<Session> = Mutex::new(Session {
@@ -99,6 +103,7 @@ static SESSION: Mutex<Session> = Mutex::new(Session {
     shown: false,
     last_kind: None,
     handled_inset_px: 0,
+    suppress_next_show: false,
 });
 
 /// Store the `AndroidApp` handle. Called once from `ui::run_android` before
@@ -110,6 +115,17 @@ pub fn init(app: &AndroidApp) {
 /// The keyboard height in egui points (0 when hidden).
 pub fn inset_bottom_points(ctx: &egui::Context) -> f32 {
     IME_INSET_BOTTOM_PX.load(Ordering::Relaxed) as f32 / ctx.pixels_per_point()
+}
+
+/// Call right after a PROGRAMMATIC `request_focus()` (e.g. the laser
+/// auto-advance moving to the next measurement field): the next [`attach`]
+/// focus gain adopts the field WITHOUT raising the keyboard — the assessor is
+/// shooting the laser, not typing. One-shot; consumed by the next focus gain.
+/// A physical tap still shows the keyboard (a tap's `clicked()` overrides the
+/// flag, and a tap on the already-focused field re-shows it as before), and if
+/// the keyboard is already up it simply stays up and follows the new field.
+pub fn suppress_next_show() {
+    SESSION.lock().unwrap().suppress_next_show = true;
 }
 
 /// Attach the native keyboard to a `TextEdit`: call right after `ui.add(...)`
@@ -128,6 +144,11 @@ pub fn attach(
 
     let focused = response.has_focus();
     let is_owner = s.owner == Some(response.id);
+
+    // One-shot from `suppress_next_show`: consumed by whichever field gains
+    // focus next (only that field reaches the gain branch below). A stale
+    // flag can't eat a real tap — `clicked()` overrides it.
+    let suppress = focused && !is_owner && std::mem::take(&mut s.suppress_next_show);
 
     if focused && !is_owner {
         // Field takes the keyboard: keyboard type first (it's read when the
@@ -155,13 +176,22 @@ pub fn attach(
         s.last_sel = sel;
         s.last_egui_cursor = Some(cur);
         push_state(app, buf, sel);
-        app.show_soft_input(false);
-        s.shown = true;
+        // Programmatic focus (laser auto-advance) adopts the field without
+        // raising the keyboard: if it's already up it stays up and follows
+        // (`s.shown` unchanged); if it's down it stays down until a real tap.
+        // A tap that lands focus this same frame shows as normal.
+        if !suppress || s.shown || response.clicked() {
+            app.show_soft_input(false);
+            s.shown = true;
+        }
     } else if focused && is_owner {
         // The system back gesture can hide the keyboard without the app ever
-        // learning — a tap on the still-focused field asks for it again.
+        // learning — a tap on the still-focused field asks for it again. Also
+        // the path that RAISES the keyboard on a field adopted silently by a
+        // suppressed (laser auto-advance) focus move.
         if response.clicked() {
             app.show_soft_input(false);
+            s.shown = true;
         }
         if response.changed() || *buf != s.last_text {
             // The field's buffer moved on the app side this frame — an egui
