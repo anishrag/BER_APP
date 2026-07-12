@@ -4115,9 +4115,10 @@ fn view_buttons<F: FnMut(UiEvent)>(
 }
 
 /// The floating "📷 Add external pictures" control, anchored to the canvas's
-/// BOTTOM-RIGHT corner. A button toggles a small panel listing the four sides
-/// (Front / Right / Left / Back), each showing a ✓ + filename when it has a
-/// photo or "missing" when it doesn't, with an Add/Replace action that opens a
+/// BOTTOM-RIGHT corner. A button toggles a panel showing the four sides
+/// (Front / Right / Left / Back) as a two-column grid, each entry showing a
+/// ✓ when it has a photo (with a thumbnail) or "missing" when it doesn't,
+/// with an Add/Replace action that opens a
 /// desktop file picker (`rfd`). The chosen path is emitted as
 /// [`SketchEvent::AddExternalPhoto`]; the controller never sees a file dialog.
 ///
@@ -4149,132 +4150,139 @@ fn external_photos_button<F: FnMut(UiEvent)>(
                     egui::CollapsingHeader::new("📷 Add external pictures")
                         .default_open(false)
                         .show(ui, |ui| {
-                            ui.set_max_width(230.0);
-                            // With all four sides holding a ~150px thumbnail the
-                            // list would grow up past the top of the screen (the
-                            // panel is anchored bottom-right and grows UP), taking
-                            // the header with it. Fill the available canvas height
-                            // (minus room for the header + frame chrome) so the
-                            // opened panel is as LARGE as fits without being cut
-                            // off, and scroll only when it can't all show.
-                            // 60 ≈ header + frame chrome + the 8px anchor margins;
+                            // Two-column grid of side entries (Front | Right,
+                            // Left | Back) so the opened panel spends WIDTH
+                            // instead of stacking four thumbnails into one tall
+                            // 230px strip — on the ~2000px-wide tablet canvas
+                            // there's plenty of room, and halving the stack
+                            // height means the whole panel normally fits the
+                            // screen with no scrolling. Column width fits the
+                            // 280px thumbnail plus the capture-button row.
+                            ui.set_max_width(680.0);
+                            // The panel sizes to its CONTENT (the ScrollArea
+                            // auto-shrinks), capped at the canvas height minus
+                            // room for the header + frame chrome + the 8px
+                            // anchor margins so it never runs off the top (the
+                            // panel is anchored bottom-right and grows UP).
+                            // The scrollbar only appears in that capped case;
                             // constrain_to keeps the panel on-screen regardless.
                             let max_h = (rect.height() - 60.0).max(220.0);
                             egui::ScrollArea::vertical()
                                 .max_height(max_h)
                                 .show(ui, |ui| {
-                                    for (side, photo) in &view.external_photos {
-                                        ui.horizontal(|ui| match photo {
-                                            Some(_) => {
-                                                ui.label(format!("✔ {}", side.label()));
-                                            }
-                                            None if side.photo_required() => {
-                                                ui.colored_label(
-                                                    egui::Color32::from_rgb(220, 120, 120),
-                                                    format!("✗ {}: missing", side.label()),
-                                                );
-                                            }
-                                            None => {
-                                                // Left / Right are optional — a neutral
-                                                // prompt, no red "missing" nag.
-                                                ui.weak(format!("○ {} (optional)", side.label()));
-                                            }
-                                        });
-                                        // Thumbnail preview of the stored photo (prefer the
-                                        // lightweight thumbnail; fall back to the original).
-                                        if let Some(p) = photo {
-                                            let src =
-                                                p.thumbnail_path.as_deref().unwrap_or(&p.file_path);
-                                            ui.add(
-                                                egui::Image::new(format!("file://{src}"))
-                                                    .fit_to_exact_size(egui::vec2(200.0, 150.0))
-                                                    .maintain_aspect_ratio(true)
-                                                    .corner_radius(4.0),
-                                            );
-                                        }
-                                        ui.horizontal(|ui| {
-                                            // The shared capture widget: desktop file dialog
-                                            // / Android camera, returning the captured path.
-                                            // Elevation shots want legible detail, so the hi
-                                            // tier is High (TEMPORARY dual hi/lo buttons —
-                                            // see `photo_button_pair`).
-                                            let action =
-                                                if photo.is_some() { "Replace" } else { "Add" };
-                                            if let Some((path, quality)) =
-                                                crate::ui::widgets::photo_button_pair(
-                                                    ui,
-                                                    action,
-                                                    true,
-                                                    crate::ui::widgets::PhotoQuality::High,
-                                                    false,
-                                                )
+                                    egui::Grid::new(ui.id().with("external_photo_grid"))
+                                        .num_columns(2)
+                                        .min_col_width(300.0)
+                                        .spacing(egui::vec2(20.0, 16.0))
+                                        .show(ui, |ui| {
+                                            for (i, entry) in
+                                                view.external_photos.iter().enumerate()
                                             {
-                                                on_event(UiEvent::Sketch(
-                                                    SketchEvent::AddExternalPhoto {
-                                                        side: *side,
-                                                        path,
-                                                        quality,
-                                                    },
-                                                ));
-                                            }
-                                            if photo.is_some() {
-                                                // Paintbrush annotation over the stored photo
-                                                // (opens the takeover; see `photo_annotate`).
-                                                if ui
-                                                    .button("🖌")
-                                                    .on_hover_text("Draw on this photo")
-                                                    .clicked()
-                                                {
-                                                    on_event(UiEvent::Sketch(
-                                                        SketchEvent::BeginAnnotateExternalPhoto {
-                                                            side: *side,
-                                                        },
-                                                    ));
-                                                }
-                                                // Quarter-turn rotate so the shot
-                                                // can be set upright / matched to
-                                                // the plan (⟲ anti-clockwise, ⟳
-                                                // clockwise).
-                                                if ui
-                                                    .button("⟲")
-                                                    .on_hover_text("Rotate left")
-                                                    .clicked()
-                                                {
-                                                    on_event(UiEvent::Sketch(
-                                                        SketchEvent::RotateExternalPhoto {
-                                                            side: *side,
-                                                            clockwise: false,
-                                                        },
-                                                    ));
-                                                }
-                                                if ui
-                                                    .button("⟳")
-                                                    .on_hover_text("Rotate right")
-                                                    .clicked()
-                                                {
-                                                    on_event(UiEvent::Sketch(
-                                                        SketchEvent::RotateExternalPhoto {
-                                                            side: *side,
-                                                            clockwise: true,
-                                                        },
-                                                    ));
-                                                }
-                                                if ui.button("Remove").clicked() {
-                                                    on_event(UiEvent::Sketch(
-                                                        SketchEvent::RemoveExternalPhoto {
-                                                            side: *side,
-                                                        },
-                                                    ));
+                                                external_photo_entry(ui, entry, on_event);
+                                                // Two entries per grid row.
+                                                if i % 2 == 1 {
+                                                    ui.end_row();
                                                 }
                                             }
                                         });
-                                        ui.separator();
-                                    }
                                 });
                         });
                 });
             });
         });
+}
+
+/// One side's entry in the [`external_photos_button`] grid: status label,
+/// thumbnail (when a photo is stored), and the capture / annotate / rotate /
+/// remove button row.
+fn external_photo_entry<F: FnMut(UiEvent)>(
+    ui: &mut egui::Ui,
+    (side, photo): &(
+        ber_model::ber::common::ExternalSide,
+        Option<crate::controller::app_controller::PhotoView>,
+    ),
+    on_event: &mut F,
+) {
+    ui.vertical(|ui| {
+        match photo {
+            Some(_) => {
+                ui.label(format!("✔ {}", side.label()));
+            }
+            None if side.photo_required() => {
+                ui.colored_label(
+                    egui::Color32::from_rgb(220, 120, 120),
+                    format!("✗ {}: missing", side.label()),
+                );
+            }
+            None => {
+                // Left / Right are optional — a neutral
+                // prompt, no red "missing" nag.
+                ui.weak(format!("○ {} (optional)", side.label()));
+            }
+        }
+        // Thumbnail preview of the stored photo (prefer the
+        // lightweight thumbnail; fall back to the original).
+        if let Some(p) = photo {
+            let src = p.thumbnail_path.as_deref().unwrap_or(&p.file_path);
+            ui.add(
+                egui::Image::new(format!("file://{src}"))
+                    .fit_to_exact_size(egui::vec2(280.0, 210.0))
+                    .maintain_aspect_ratio(true)
+                    .corner_radius(4.0),
+            );
+        }
+        ui.horizontal(|ui| {
+            // The shared capture widget: desktop file dialog
+            // / Android camera, returning the captured path.
+            // Elevation shots want legible detail, so the hi
+            // tier is High (TEMPORARY dual hi/lo buttons —
+            // see `photo_button_pair`).
+            let action = if photo.is_some() { "Replace" } else { "Add" };
+            if let Some((path, quality)) = crate::ui::widgets::photo_button_pair(
+                ui,
+                action,
+                true,
+                crate::ui::widgets::PhotoQuality::High,
+                false,
+            ) {
+                on_event(UiEvent::Sketch(SketchEvent::AddExternalPhoto {
+                    side: *side,
+                    path,
+                    quality,
+                }));
+            }
+            if photo.is_some() {
+                // Paintbrush annotation over the stored photo
+                // (opens the takeover; see `photo_annotate`).
+                if ui.button("🖌").on_hover_text("Draw on this photo").clicked() {
+                    on_event(UiEvent::Sketch(SketchEvent::BeginAnnotateExternalPhoto {
+                        side: *side,
+                    }));
+                }
+                // Quarter-turn rotate so the shot
+                // can be set upright / matched to
+                // the plan (⟲ anti-clockwise, ⟳
+                // clockwise).
+                if ui.button("⟲").on_hover_text("Rotate left").clicked() {
+                    on_event(UiEvent::Sketch(SketchEvent::RotateExternalPhoto {
+                        side: *side,
+                        clockwise: false,
+                    }));
+                }
+                if ui.button("⟳").on_hover_text("Rotate right").clicked() {
+                    on_event(UiEvent::Sketch(SketchEvent::RotateExternalPhoto {
+                        side: *side,
+                        clockwise: true,
+                    }));
+                }
+                if ui.button("Remove").clicked() {
+                    on_event(UiEvent::Sketch(SketchEvent::RemoveExternalPhoto {
+                        side: *side,
+                    }));
+                }
+            }
+        });
+    });
 }
 
 /// The current storey's screen↔world transform for the 2D canvas, or `None`
