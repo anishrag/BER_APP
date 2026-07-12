@@ -401,6 +401,13 @@ impl AppController {
             .as_ref()
             .and_then(|r| r.data.storeys.get(idx))
             .ok_or("no storey to assign a ceiling ridge to")?;
+        // The automatic GABLE-END rule: an extent end on / just short of /
+        // just past its ceiling area's boundary snaps EXACTLY onto it, so the
+        // solve yields the wall-to-wall gable (two slopes + vertical ends)
+        // instead of a hip fan — zero taps for the common case. Ends further
+        // inside keep the drawn hip. Model logic lives in `document`; the
+        // Height stage then carries the snapped extent.
+        let (lo, len_m) = document::snap_ridge_extent_to_gables(storey, axis, coord_m, lo, len_m);
         document::validate_roof_ridge_extent(storey, axis, coord_m, lo, len_m)?;
         self.pending_roof_ridge = Some(PendingCeilingRidge::Height {
             axis,
@@ -1188,8 +1195,7 @@ impl AppController {
             return Vec::new();
         };
         storey
-            .ceilings
-            .apex_groups(&storey.ceiling_apexes)
+            .ceiling_apex_groups()
             .into_iter()
             .filter(|g| g.apex_idxs.len() == 2)
             .map(|g| {

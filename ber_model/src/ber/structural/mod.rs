@@ -2002,6 +2002,203 @@ mod tests {
         }
     }
 
+    /// THE TRUE GABLE (field report 2026-07-12): ridge endpoints ON two
+    /// opposite boundary edges — even on a rectangle-ISH ring carrying an
+    /// extra collinear vertex on a gable edge — yield exactly TWO sloped
+    /// planes reaching only the 4 corners: the gable-edge hub triangles are
+    /// vertical (zero plan area) and drop as slivers, the hip transitions
+    /// merge into the slopes, and NO fan plane attaches the end-edge
+    /// vertices to the ridge. The vertical gable ends themselves are walls
+    /// (the roof-void wall split), not ceiling faces.
+    #[test]
+    fn ridge_endpoints_on_opposite_edges_make_two_plane_gable() {
+        let cid = ItemId::default();
+        // 10×4 ring with an extra collinear vertex at (0, 1) on the left
+        // (gable) edge — the "rectangle-ish" drawing.
+        let ring = vec![
+            Point2f64::new(0.0, 0.0),
+            Point2f64::new(10.0, 0.0),
+            Point2f64::new(10.0, 4.0),
+            Point2f64::new(0.0, 4.0),
+            Point2f64::new(0.0, 1.0),
+        ];
+        let apexes = vec![
+            CeilingApex {
+                point: Point2f64::new(0.0, 2.0), // ON the left edge
+                z_m: 4.2,
+            },
+            CeilingApex {
+                point: Point2f64::new(10.0, 2.0), // ON the right edge
+                z_m: 4.2,
+            },
+        ];
+        let out = CeilingRegions::default_for_footprint(vec![ring], 2.4, cid).with_apexes(&apexes);
+        assert_eq!(
+            out.regions.len(),
+            2,
+            "a true gable: two slopes, no hip/fan faces: {:?}",
+            out.regions.iter().map(|r| &r.polygon).collect::<Vec<_>>()
+        );
+        let total: f64 = out.regions.iter().map(plan_area).sum();
+        assert!((total - 40.0).abs() < 1e-6, "the two slopes tile the area");
+        for r in &out.regions {
+            assert!(is_planar(r), "non-planar slope: {:?}", r.polygon);
+            assert!(r.flat_z().is_none(), "each face genuinely slopes");
+            assert_eq!(
+                apex_vertex_count(r, &apexes),
+                2,
+                "each slope runs the full ridge"
+            );
+            // Only the 4 footprint corners join the ridge corners on each
+            // face — the collinear left-edge vertex vanished with its
+            // vertical slivers.
+            assert_eq!(r.polygon.exterior.len(), 4, "eave edge + ridge edge");
+        }
+    }
+
+    /// The tap-to-unfan LIFT on a single-apex fan: unfanning one vertex of a
+    /// hexagonal fan removes its fan plane — the two hub triangles beside it
+    /// become coplanar with the chord plane through its fanned neighbours
+    /// and the apex, and merge into ONE face: 6 planes → 5, same coverage,
+    /// with the unfanned vertex LIFTED onto that plane (here BELOW the base:
+    /// the corner pokes past the chord, so the plane keeps falling past the
+    /// eave line — the "roof continues over the bay" reading).
+    #[test]
+    fn unfan_one_vertex_of_a_hexagon_fan_gives_five_planes() {
+        let cid = ItemId::default();
+        let hex = vec![
+            Point2f64::new(0.0, 0.0),
+            Point2f64::new(4.0, 0.0),
+            Point2f64::new(6.0, 2.0),
+            Point2f64::new(4.0, 4.0),
+            Point2f64::new(0.0, 4.0),
+            Point2f64::new(-2.0, 2.0),
+        ];
+        let apexes = vec![CeilingApex {
+            point: Point2f64::new(2.0, 2.0),
+            z_m: 4.5,
+        }];
+        let base = CeilingRegions::default_for_footprint(vec![hex], 2.4, cid);
+        // Baseline: the fan reaches ALL six vertices (the conservatory case).
+        let fanned = base.clone().with_apexes(&apexes);
+        assert_eq!(fanned.regions.len(), 6, "fan to every vertex by default");
+
+        let unfanned = vec![Point2f64::new(6.0, 2.0)];
+        let out = base.with_apexes_hinted_unfanned(&apexes, &[], &unfanned);
+        assert_eq!(out.regions.len(), 5, "one fan plane folded away");
+        let total: f64 = out.regions.iter().map(plan_area).sum();
+        assert!((total - 24.0).abs() < 1e-6, "coverage unchanged");
+        // The merged face holds the lifted vertex on the chord plane through
+        // (4,0,2.4)/(4,4,2.4) and the apex (2,2,4.5): z = 2.4 + (4−x)·1.05 →
+        // 0.3 at x = 6.
+        let lifted = out
+            .regions
+            .iter()
+            .find(|r| {
+                r.polygon
+                    .exterior
+                    .iter()
+                    .any(|v| (v.x - 6.0).abs() <= 1e-9 && (v.y - 2.0).abs() <= 1e-9)
+            })
+            .expect("the unfanned vertex still bounds a face");
+        assert_eq!(lifted.polygon.exterior.len(), 4, "two triangles merged");
+        let v = lifted
+            .polygon
+            .exterior
+            .iter()
+            .find(|v| (v.x - 6.0).abs() <= 1e-9)
+            .unwrap();
+        assert!(
+            (v.z - 0.3).abs() <= 1e-9,
+            "lifted onto the chord plane, got z = {}",
+            v.z
+        );
+        assert!(is_planar(lifted), "the merged face is one plane");
+        // And the group machinery stays intact: the unfanned-aware base
+        // check keeps every face in the merged ring (the plain one would
+        // warn-exclude the lifted face).
+        let groups = out.apex_groups_unfanned(&apexes, &unfanned);
+        assert_eq!(groups.len(), 1);
+        assert_eq!(groups[0].base_z, 2.4);
+        let ring_area: f64 = groups[0]
+            .merged_rings
+            .iter()
+            .map(|ring| {
+                let n = ring.len();
+                (0..n)
+                    .map(|i| {
+                        let (p, q) = (ring[i], ring[(i + 1) % n]);
+                        p.x * q.y - q.x * p.y
+                    })
+                    .sum::<f64>()
+                    .abs()
+                    / 2.0
+            })
+            .sum();
+        assert!(
+            (ring_area - 24.0).abs() < 1e-6,
+            "the merged ring keeps the lifted face's area (got {ring_area})"
+        );
+    }
+
+    /// Re-applying the SAME apexes + unfanned set to the unfanned solve's own
+    /// output reproduces it — the re-apply identity the reload/recompose
+    /// fixpoint rides on (the lift re-computes the same chord plane, so the
+    /// lifted z round-trips).
+    #[test]
+    fn unfanned_solve_reapplies_to_itself() {
+        let cid = ItemId::default();
+        let hex = vec![
+            Point2f64::new(0.0, 0.0),
+            Point2f64::new(4.0, 0.0),
+            Point2f64::new(6.0, 2.0),
+            Point2f64::new(4.0, 4.0),
+            Point2f64::new(0.0, 4.0),
+            Point2f64::new(-2.0, 2.0),
+        ];
+        let apexes = vec![CeilingApex {
+            point: Point2f64::new(2.0, 2.0),
+            z_m: 4.5,
+        }];
+        let unfanned = vec![Point2f64::new(6.0, 2.0)];
+        let out = CeilingRegions::default_for_footprint(vec![hex], 2.4, cid)
+            .with_apexes_hinted_unfanned(&apexes, &[], &unfanned);
+        let again = out
+            .clone()
+            .with_apexes_hinted_unfanned(&apexes, &[], &unfanned);
+        assert_eq!(again.regions.len(), out.regions.len(), "same face count");
+        for before in &out.regions {
+            assert!(
+                again
+                    .regions
+                    .iter()
+                    .any(|after| cyclically_equal(&after.polygon, &before.polygon)),
+                "face lost by re-apply: {:?}",
+                before.polygon
+            );
+        }
+    }
+
+    /// `Storey::ceiling_unfanned` is serde-ADDITIVE: an old record without
+    /// the field loads with an empty set (today's fan-everything behaviour),
+    /// and a populated set round-trips.
+    #[test]
+    fn storey_ceiling_unfanned_serde_roundtrip_and_default() {
+        let mut storey = Storey::default();
+        storey.ceiling_unfanned = vec![(6.0, 2.0), (-2.0, 2.0)];
+        let json = serde_json::to_value(&storey).unwrap();
+        let back: Storey = serde_json::from_value(json.clone()).unwrap();
+        assert_eq!(back.ceiling_unfanned, vec![(6.0, 2.0), (-2.0, 2.0)]);
+        // An "old" record: the same JSON with the field removed.
+        let mut old = json;
+        old.as_object_mut().unwrap().remove("ceiling_unfanned");
+        let legacy: Storey = serde_json::from_value(old).unwrap();
+        assert!(
+            legacy.ceiling_unfanned.is_empty(),
+            "records saved before the field default to fan-everything"
+        );
+    }
+
     /// RE-APPLY-TO-SELF IDENTITY for a TRANSITION triangle `(w, A, B)`, for
     /// all three positions of w's ridge parameter: t(w) interior to [0, 1]
     /// (it comes back as a transition triangle), t(w) < 0 and t(w) > 1 (it

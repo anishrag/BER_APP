@@ -527,8 +527,7 @@ impl AppController {
             return Vec::new();
         };
         storey
-            .ceilings
-            .apex_groups(&storey.ceiling_apexes)
+            .ceiling_apex_groups()
             .into_iter()
             .filter(|g| g.apex_idxs.len() == 4)
             .filter_map(|g| {

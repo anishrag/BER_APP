@@ -860,6 +860,7 @@ impl eframe::App for BerApp {
                                 ceiling_point_mode,
                                 ceiling_point_available,
                                 ceiling_apex_views,
+                                ceiling_fan_marker_views,
                                 pending_roof_point,
                                 ceiling_point_snap_tag,
                                 ceiling_point_position_pending,
@@ -955,6 +956,7 @@ impl eframe::App for BerApp {
                                     controller_ref.ceiling_point_mode(),
                                     controller_ref.ceiling_point_available(),
                                     controller_ref.ceiling_apex_views(),
+                                    controller_ref.ceiling_fan_marker_views(),
                                     controller_ref.pending_roof_point_position(),
                                     controller_ref.ceiling_point_snap_tag(),
                                     controller_ref.ceiling_point_position_pending(),
@@ -1514,6 +1516,7 @@ impl eframe::App for BerApp {
                                 ceiling_point_mode,
                                 ceiling_point_available,
                                 ceiling_apex_views: &ceiling_apex_views,
+                                ceiling_fan_markers: &ceiling_fan_marker_views,
                                 pending_roof_point,
                                 ceiling_point_snap_tag: ceiling_point_snap_tag.as_ref(),
                                 ceiling_point_position_pending,
@@ -1997,6 +2000,11 @@ impl eframe::App for BerApp {
                                         controller
                                             .borrow_mut()
                                             .ceiling_point_tap(world_x as f32, world_y as f32);
+                                    }
+                                    SketchEvent::CeilingFanMarkerTap { world_x, world_y } => {
+                                        controller
+                                            .borrow_mut()
+                                            .toggle_ceiling_fan_vertex(world_x, world_y);
                                     }
                                     SketchEvent::AssignCeilingApexHeight(z_m) => {
                                         match controller.borrow_mut().assign_roof_apex(z_m) {

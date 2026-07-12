@@ -64,6 +64,15 @@ pub struct Storey {
     /// `#[serde(default)]` so older records load.
     #[serde(default, alias = "ceiling_apex_hints")]
     pub ceiling_apex_hints: Vec<CeilingApexHint>,
+    /// UNFANNED ceiling ring vertices (tap-to-unfan): plan points (f32 grid,
+    /// the `CeilingApex::quantize_point` convention) of ceiling-area corners
+    /// that must NOT anchor a fan/ridge plane of their own — the resolve lifts
+    /// each onto its neighbours' chord plane instead
+    /// (`CeilingRegions::with_apexes_hinted_unfanned`). Durable INPUT like the
+    /// apexes, re-applied on every recompose. `#[serde(default)]` so older
+    /// records load (empty = the fan-to-every-vertex behaviour of before).
+    #[serde(default)]
+    pub ceiling_unfanned: Vec<(f32, f32)>,
     /// Flat-topped DORMER patches carved into this storey's sloped attic
     /// ceiling: each raises its `footprint` to a single flat `top_z_m` while the
     /// surrounding roof KEEPS its slope (the dormer does NOT reslope its
@@ -206,6 +215,25 @@ impl Storey {
     /// that fan them go with it), and the DB only ever holds finalised geometry.
     /// The durable INPUTS (`ceiling_height_m`, `ceiling_apex_hints`,
     /// `floor_thickness_m`, `ceiling_steps`) are left untouched.
+    /// The storey's UNFANNED ceiling vertices as plan points — the form
+    /// `CeilingRegions::with_apexes_hinted_unfanned` / `apex_groups_unfanned`
+    /// consume.
+    pub fn ceiling_unfanned_points(&self) -> Vec<Point2f64> {
+        self.ceiling_unfanned
+            .iter()
+            .map(|&(x, y)| Point2f64::new(x as f64, y as f64))
+            .collect()
+    }
+
+    /// The storey's ceiling apex groups WITH its own unfanned set supplied —
+    /// the call every consumer with a `Storey` in hand should make (the raw
+    /// `CeilingRegions::apex_groups` would warn-exclude lifted faces from the
+    /// merged rings on a storey that has unfanned vertices).
+    pub fn ceiling_apex_groups(&self) -> Vec<CeilingApexGroup> {
+        self.ceilings
+            .apex_groups_unfanned(&self.ceiling_apexes, &self.ceiling_unfanned_points())
+    }
+
     pub fn clear_derived_geometry(&mut self) {
         self.floors = FloorRegions::default();
         self.walls = WallRegions::default();
@@ -614,7 +642,7 @@ impl Storey {
     /// caller materializes first.
     pub fn copy_height_ceiling_at(&self, x: f64, y: f64, tol: f64) -> Option<f64> {
         // 1. LEVEL ridge segment / single apex point.
-        for g in self.ceilings.apex_groups(&self.ceiling_apexes) {
+        for g in self.ceiling_apex_groups() {
             match g.apex_idxs.as_slice() {
                 [ia, ib] => {
                     let (a, b) = (&self.ceiling_apexes[*ia], &self.ceiling_apexes[*ib]);

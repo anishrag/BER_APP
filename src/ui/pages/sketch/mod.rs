@@ -326,6 +326,13 @@ pub enum SketchEvent {
     CancelPendingCeilingPoint,
     /// Delete the current storey's roof apex at the given index.
     DeleteCeilingApex(usize),
+    /// Tap on a ceiling fan-vertex marker (world coords — the MARKER's own
+    /// position, the canvas hit-test resolves the finger tap to it): toggle
+    /// that vertex in/out of the storey's unfanned set (unfan / re-fan).
+    CeilingFanMarkerTap {
+        world_x: f64,
+        world_y: f64,
+    },
     /// A roof-RIDGE stroke (world coords) drawn in roof-point mode — fitted
     /// to an axis-aligned segment placing TWO apexes at once (stroke = ridge,
     /// tap = point: the ceiling-step stroke/tap routing pattern).
@@ -1102,6 +1109,10 @@ pub struct SketchView<'a> {
     pub ceiling_point_mode: bool,
     pub ceiling_point_available: bool,
     pub ceiling_apex_views: &'a [((f64, f64), String)],
+    /// Tap-to-unfan fan-vertex markers `(position, fanned)` — rendered (and
+    /// tappable) only while roof-point mode is on and a fan/ridge group has
+    /// them actionable (the controller returns them empty otherwise).
+    pub ceiling_fan_markers: &'a [((f64, f64), bool)],
     pub pending_roof_point: Option<(f64, f64)>,
     /// The pending point's wall snap as one standard snap tag (its menu
     /// offers only "Don't snap", routed to UnsnapCeilingPoint).

@@ -2430,6 +2430,22 @@ pub(super) fn render<F: FnMut(UiEvent)>(
             );
         }
 
+        // Tap-to-unfan fan-vertex markers (roof-point mode only — the
+        // controller feeds them empty otherwise): filled dot = fanned (tap
+        // unfans), struck hollow dot = unfanned (tap re-fans). The tap
+        // hit-test lives with the roof-point tap dispatch below.
+        if !objects_phase && !view.ceiling_fan_markers.is_empty() {
+            render::render_ceiling_fan_markers(
+                &painter,
+                rect,
+                ber,
+                current_storey_idx,
+                mode,
+                vp,
+                view.ceiling_fan_markers,
+            );
+        }
+
         // The pending roof point's wall snap(s) as ONE tag, mirroring the
         // ceiling-step line's: drawn through the same snap-tag renderer, but
         // its menu is a separate widget routed to UnsnapCeilingPoint, never
@@ -3109,14 +3125,36 @@ pub(super) fn render<F: FnMut(UiEvent)>(
         && !step_cut_pending
     {
         if response.clicked_by(egui::PointerButton::Primary) {
-            if let Some((wx, wy)) = response
-                .interact_pointer_pos()
-                .and_then(|pos| screen_to_world(ber, current_storey_idx, rect, vp, pos))
-            {
-                on_event(UiEvent::Sketch(SketchEvent::CeilingPointTap {
-                    world_x: wx,
-                    world_y: wy,
-                }));
+            if let Some(pos) = response.interact_pointer_pos() {
+                // Fan-marker hit-test FIRST, in SCREEN space (a constant
+                // finger target regardless of zoom): the nearest marker
+                // within 14 px claims the tap and toggles its vertex —
+                // otherwise the tap would ALSO try to place a new roof
+                // point on top of the marker. The event carries the
+                // MARKER's own world position, not the finger's.
+                let marker_hit =
+                    render::active_storey_transform(rect, ber, current_storey_idx, mode, vp)
+                        .and_then(|t| {
+                            view.ceiling_fan_markers
+                                .iter()
+                                .map(|((mx, my), _)| ((*mx, *my), t.apply(*mx, *my).distance(pos)))
+                                .filter(|(_, d)| *d <= 14.0)
+                                .min_by(|(_, a), (_, b)| a.total_cmp(b))
+                                .map(|(m, _)| m)
+                        });
+                if let Some((mx, my)) = marker_hit {
+                    on_event(UiEvent::Sketch(SketchEvent::CeilingFanMarkerTap {
+                        world_x: mx,
+                        world_y: my,
+                    }));
+                } else if let Some((wx, wy)) =
+                    screen_to_world(ber, current_storey_idx, rect, vp, pos)
+                {
+                    on_event(UiEvent::Sketch(SketchEvent::CeilingPointTap {
+                        world_x: wx,
+                        world_y: wy,
+                    }));
+                }
             }
         }
     }

@@ -47,8 +47,8 @@
 use crate::StoreyDoc;
 use ber_model::ber::common::ItemId;
 use ber_model::ber::structural::{
-    rect_hip_switches, ridge_hub_switches, CeilingApex, CeilingApexGroup, CeilingRegion, Storey,
-    APEX_BOUNDARY_EPS_M,
+    rect_hip_switches, ridge_hub_switches, strip_collinear, CeilingApex, CeilingApexGroup,
+    CeilingRegion, Storey, APEX_BOUNDARY_EPS_M, UNFAN_MATCH_EPS_M,
 };
 use domain::points::{ring_area, to_f32, Point2f32, Point2f64};
 use manip_plan::ParameterAxis;
@@ -343,7 +343,7 @@ pub fn validate_roof_apex(storey: &Storey, p: Point2f64, z_m: f64) -> Result<(),
         ));
     }
     let ri = region_idx_uniquely_claiming(storey, p)?;
-    let groups = storey.ceilings.apex_groups(&storey.ceiling_apexes);
+    let groups = storey.ceiling_apex_groups();
     let base = match groups.iter().find(|g| g.region_idxs.contains(&ri)) {
         None => storey.ceilings.regions[ri]
             .flat_z()
@@ -461,7 +461,7 @@ fn ridge_fits_region_height(
     for q in [qa, qb] {
         check_end_claims(storey, q, ra)?;
     }
-    let groups = storey.ceilings.apex_groups(&storey.ceiling_apexes);
+    let groups = storey.ceiling_apex_groups();
     if groups.iter().any(|g| g.region_idxs.contains(&ra)) {
         return Err(RIDGE_REGION_OCCUPIED_MSG.to_string());
     }
@@ -514,7 +514,7 @@ pub fn validate_roof_ridge_length(
     // Only flat, un-apexed regions can host a new ridge — the same region
     // predicates the finalize check applies, lifted to the optimistic
     // "could ANY area take it" form.
-    let groups = storey.ceilings.apex_groups(&storey.ceiling_apexes);
+    let groups = storey.ceiling_apex_groups();
     let max_extent = storey
         .ceilings
         .regions
@@ -644,7 +644,7 @@ fn ridge_fits_region_extent(
     lo: f32,
     len_m: f32,
 ) -> Result<(), String> {
-    let groups = storey.ceilings.apex_groups(&storey.ceiling_apexes);
+    let groups = storey.ceiling_apex_groups();
     if groups.iter().any(|g| g.region_idxs.contains(&ridx)) {
         return Err(RIDGE_REGION_OCCUPIED_MSG.to_string());
     }
@@ -835,6 +835,161 @@ pub fn centred_ridge_start(
     Ok((span_mid - len_m as f64 / 2.0) as f32)
 }
 
+// ── Gable-end snap + tap-to-unfan fan markers ───────────────────────────────
+
+/// How close (m) a ridge END must be to its ceiling area's boundary — short
+/// of it OR past it — to auto-snap ONTO the boundary at finalize (the
+/// automatic GABLE-END rule): the same tolerance the ridge drawing's
+/// elective end snap uses ([`crate::ceiling_step::CEILING_LINE_SNAP_TOL_M`]).
+const RIDGE_GABLE_SNAP_TOL_M: f64 = crate::ceiling_step::CEILING_LINE_SNAP_TOL_M as f64;
+
+/// The automatic GABLE-END rule, applied by the shell at the ridge FINALIZE
+/// step (once the geometry is fully determined, before
+/// [`validate_roof_ridge_extent`]): each extent end that lies ON, short of,
+/// or past its ceiling area's boundary within [`RIDGE_GABLE_SNAP_TOL_M`] is
+/// pulled EXACTLY onto the boundary — the wall-to-wall gable the assessor
+/// meant. Returns the (possibly) adjusted `(lo, len_m)`.
+///
+/// Why this makes the gable: with a ridge endpoint exactly ON a boundary
+/// edge, the resolve's hub triangles along that edge are VERTICAL (zero plan
+/// area) and drop as slivers, and the hip transition triangles merge into
+/// the two slope planes — so the end edge becomes a vertical gable end (its
+/// wall rises to the ridge via the roof-void wall split) and its vertices
+/// are excluded from the fan. A classic gable over a rectangle thus solves
+/// to exactly two sloped planes reaching only the 4 corners, with zero taps.
+/// Ends further inside than the tolerance keep today's hip/fan behaviour
+/// (the conservatory case).
+///
+/// The span is the region's contiguous run through the ridge MIDPOINT along
+/// the extent axis (`axis.other()` — the [`validate_roof_ridge_extent`]
+/// convention), so on an L-shape the end snaps to ITS area's wall, not the
+/// bbox. A midpoint in no region, or a degenerate span, returns the input
+/// unchanged (the finalize validation right after surfaces the real error).
+pub fn snap_ridge_extent_to_gables(
+    storey: &Storey,
+    axis: ParameterAxis,
+    coord_m: f32,
+    lo: f32,
+    len_m: f32,
+) -> (f32, f32) {
+    let half = len_m as f64 / 2.0;
+    let mid_along = lo as f64 + half;
+    let (mid, dir) = match axis {
+        ParameterAxis::X => (
+            Point2f64::new(coord_m as f64, mid_along),
+            Point2f64::new(0.0, 1.0),
+        ),
+        ParameterAxis::Y => (
+            Point2f64::new(mid_along, coord_m as f64),
+            Point2f64::new(1.0, 0.0),
+        ),
+    };
+    let Some(region) = storey.ceilings.region_strictly_containing(mid) else {
+        return (lo, len_m);
+    };
+    let Some((t_min, t_max)) = region.plan_span_through(mid, dir) else {
+        return (lo, len_m);
+    };
+    let (wall_lo, wall_hi) = (mid_along + t_min, mid_along + t_max);
+    let hi = lo as f64 + len_m as f64;
+    let new_lo = if (lo as f64 - wall_lo).abs() <= RIDGE_GABLE_SNAP_TOL_M {
+        wall_lo
+    } else {
+        lo as f64
+    };
+    let new_hi = if (hi - wall_hi).abs() <= RIDGE_GABLE_SNAP_TOL_M {
+        wall_hi
+    } else {
+        hi
+    };
+    if new_lo != lo as f64 || new_hi != hi {
+        log::debug!(
+            "ridge gable-end snap: extent [{:.3}, {:.3}] → [{new_lo:.3}, {new_hi:.3}] \
+             (area run [{wall_lo:.3}, {wall_hi:.3}])",
+            lo,
+            hi
+        );
+    }
+    (new_lo as f32, (new_hi - new_lo) as f32)
+}
+
+/// One tappable fan-vertex marker of the ceiling-shape editing context: a
+/// ceiling-area corner the current fan/ridge solve treats (or, unfanned,
+/// WOULD treat) as a fan target. See [`ceiling_fan_markers`].
+#[derive(Debug, Clone, PartialEq)]
+pub struct CeilingFanMarker {
+    /// The vertex's plan position (world metres) — also the identity the
+    /// unfan toggle stores (f32-quantized by `Ber::toggle_ceiling_unfanned`).
+    pub pos: Point2f64,
+    /// `true` while the vertex anchors its own fan plane; `false` when it is
+    /// in the storey's unfanned set (tapping re-fans it).
+    pub fanned: bool,
+}
+
+/// The tap-to-unfan MARKERS for the storey's resolved roofs — the generic
+/// escape hatch when the automatic gable rule doesn't apply: every non-apex,
+/// non-collinear vertex of each fan/ridge group's merged ring, flagged
+/// fanned/unfanned against `storey.ceiling_unfanned`. Semantics of unfanning
+/// live in the resolve (`ceiling_geom::lift_unfanned`): the vertex's fan
+/// plane folds into its neighbours' chord plane.
+///
+/// A group contributes markers only when they are actionable: MORE THAN 4
+/// vertices currently fanned (a 4-corner roof is already the minimal shape —
+/// no clutter on a plain gable/hip), OR any vertex already unfanned (its
+/// marker must stay tappable to RE-fan, even at 4 or fewer). Only 1-apex
+/// (fan) and 2-apex (ridge) groups participate — the 4-corner pavilion loft
+/// has no per-vertex fan. Collinear ring vertices are stripped
+/// ([`strip_collinear`]): they contribute no fan plane, so unfanning them
+/// would change nothing. Empty when the storey has no shaped ceiling.
+pub fn ceiling_fan_markers(storey: &Storey) -> Vec<CeilingFanMarker> {
+    if storey.ceiling_apexes.is_empty() {
+        return Vec::new();
+    }
+    let unfanned = storey.ceiling_unfanned_points();
+    let near = |a: &Point2f64, bx: f64, by: f64| {
+        (a.x - bx).abs() <= UNFAN_MATCH_EPS_M && (a.y - by).abs() <= UNFAN_MATCH_EPS_M
+    };
+    let mut out = Vec::new();
+    for g in storey.ceiling_apex_groups() {
+        if !matches!(g.apex_idxs.len(), 1 | 2) {
+            continue; // pavilion / degenerate group — no per-vertex fan
+        }
+        let mut markers = Vec::new();
+        for ring in &g.merged_rings {
+            for v in strip_collinear(ring) {
+                if g.apex_idxs
+                    .iter()
+                    .any(|&ia| near(&storey.ceiling_apexes[ia].point, v.x, v.y))
+                {
+                    continue; // a gable-end hub on the boundary — not a fan target
+                }
+                let fanned = !unfanned.iter().any(|u| near(u, v.x, v.y));
+                markers.push(CeilingFanMarker { pos: v, fanned });
+            }
+        }
+        let fanned_count = markers.iter().filter(|m| m.fanned).count();
+        if fanned_count > 4 || markers.iter().any(|m| !m.fanned) {
+            out.extend(markers);
+        }
+    }
+    out
+}
+
+/// The marker within `tol_m` (plan metres) of `p` nearest to it — the
+/// document-side guard behind the shell's unfan toggle: only a CURRENT
+/// marker's canonical position may be toggled (a stray tap toggles nothing).
+pub fn ceiling_fan_marker_at(storey: &Storey, p: Point2f64, tol_m: f64) -> Option<Point2f64> {
+    ceiling_fan_markers(storey)
+        .into_iter()
+        .map(|m| {
+            let d2 = (m.pos.x - p.x).powi(2) + (m.pos.y - p.y).powi(2);
+            (m, d2)
+        })
+        .filter(|(_, d2)| *d2 <= tol_m * tol_m)
+        .min_by(|(_, a), (_, b)| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal))
+        .map(|(m, _)| m.pos)
+}
+
 // ── The closed-stroke RECT ridge (flat-topped hip / pavilion) ───────────────
 
 /// The four corners of the rect `(lo, hi)`, QUANTIZED exactly as
@@ -944,7 +1099,7 @@ pub fn validate_roof_rect_placement(
     let centre = Point2f64::new((qlo.x + qhi.x) / 2.0, (qlo.y + qhi.y) / 2.0);
     let ridx = region_idx_strictly_containing(storey, centre)
         .map_err(|_| RECT_OUTSIDE_CEILING_MSG.to_string())?;
-    let groups = storey.ceilings.apex_groups(&storey.ceiling_apexes);
+    let groups = storey.ceiling_apex_groups();
     if groups.iter().any(|g| g.region_idxs.contains(&ridx)) {
         return Err(RECT_REGION_OCCUPIED_MSG.to_string());
     }
@@ -1512,6 +1667,120 @@ mod tests {
     fn apply_apexes(storey: &mut Storey, apexes: Vec<CeilingApex>) {
         storey.ceiling_apexes = apexes;
         storey.ceilings = std::mem::take(&mut storey.ceilings).with_apexes(&storey.ceiling_apexes);
+    }
+
+    /// The automatic GABLE-END rule ([`snap_ridge_extent_to_gables`]): an
+    /// extent end within the snap tolerance (0.2 m) of its ceiling area's
+    /// boundary — short of it OR past it — snaps exactly onto it; a
+    /// genuinely interior end (a real hip) is untouched; ends snap
+    /// independently.
+    #[test]
+    fn ridge_gable_snap_pulls_near_wall_ends_onto_the_walls() {
+        let storey = storey_with_flat_roof(2.4);
+        // Vertical ridge at x = 2 over the 4×4, ends 0.15 m short of the
+        // walls → both snap: the wall-to-wall gable.
+        let (lo, len) = snap_ridge_extent_to_gables(&storey, ParameterAxis::X, 2.0, 0.15, 3.7);
+        assert!(
+            lo.abs() < 1e-6 && (len - 4.0).abs() < 1e-6,
+            "both ends snap: got ({lo}, {len})"
+        );
+        // A slight overshoot clamps back onto the walls too.
+        let (lo, len) = snap_ridge_extent_to_gables(&storey, ParameterAxis::X, 2.0, -0.1, 4.2);
+        assert!(
+            lo.abs() < 1e-6 && (len - 4.0).abs() < 1e-6,
+            "overshoot clamps: got ({lo}, {len})"
+        );
+        // Ends 0.5 m inside — a deliberate hip — stay exactly as drawn.
+        assert_eq!(
+            snap_ridge_extent_to_gables(&storey, ParameterAxis::X, 2.0, 0.5, 3.0),
+            (0.5, 3.0)
+        );
+        // One near end snaps without dragging the far (interior) end along.
+        let (lo, len) = snap_ridge_extent_to_gables(&storey, ParameterAxis::X, 2.0, 0.1, 3.0);
+        assert!(
+            lo.abs() < 1e-6 && (len - 3.1).abs() < 1e-6,
+            "only the near end snaps: got ({lo}, {len})"
+        );
+    }
+
+    /// The hexagon ring behind the fan-marker tests: 6 corners, area 24 m².
+    fn hex_ring() -> Vec<Point2f64> {
+        vec![
+            Point2f64::new(0.0, 0.0),
+            Point2f64::new(4.0, 0.0),
+            Point2f64::new(6.0, 2.0),
+            Point2f64::new(4.0, 4.0),
+            Point2f64::new(0.0, 4.0),
+            Point2f64::new(-2.0, 2.0),
+        ]
+    }
+
+    /// [`ceiling_fan_markers`] shows markers only when ACTIONABLE: a true
+    /// gable's 4-corner fan gets none; a hexagon fan (6 > 4 fanned) gets all
+    /// six; unfanning one keeps all six visible with the unfanned one
+    /// flagged (it must stay tappable to re-fan). [`ceiling_fan_marker_at`]
+    /// resolves a near tap to the canonical vertex.
+    #[test]
+    fn fan_markers_show_only_when_actionable_and_flag_unfanned() {
+        // A wall-to-wall gable over the 4×4: the fan reaches only the 4
+        // corners — nothing actionable, no markers.
+        let mut gable = storey_with_flat_roof(2.4);
+        apply_apexes(
+            &mut gable,
+            vec![
+                CeilingApex {
+                    point: Point2f64::new(2.0, 0.0),
+                    z_m: 4.2,
+                },
+                CeilingApex {
+                    point: Point2f64::new(2.0, 4.0),
+                    z_m: 4.2,
+                },
+            ],
+        );
+        assert!(
+            ceiling_fan_markers(&gable).is_empty(),
+            "a 4-corner gable fan shows no markers"
+        );
+
+        // A hexagon fan: six fanned vertices → all six markers, all fanned.
+        let mut storey = storey_with_flat_ring(hex_ring(), 2.4);
+        apply_apexes(
+            &mut storey,
+            vec![CeilingApex {
+                point: Point2f64::new(2.0, 2.0),
+                z_m: 4.5,
+            }],
+        );
+        let markers = ceiling_fan_markers(&storey);
+        assert_eq!(markers.len(), 6, "every hexagon corner is a fan target");
+        assert!(markers.iter().all(|m| m.fanned));
+        assert_eq!(
+            ceiling_fan_marker_at(&storey, Point2f64::new(6.001, 2.0), 0.01),
+            Some(Point2f64::new(6.0, 2.0)),
+            "a near tap resolves to the canonical vertex"
+        );
+        assert_eq!(
+            ceiling_fan_marker_at(&storey, Point2f64::new(3.0, 2.0), 0.01),
+            None,
+            "a stray tap hits nothing"
+        );
+
+        // Unfan one vertex and re-derive the way recompose does: the marker
+        // set stays six, with exactly that vertex flagged unfanned.
+        storey.ceiling_unfanned = vec![(6.0, 2.0)];
+        storey.ceilings =
+            CeilingRegions::default_for_footprint(vec![hex_ring()], 2.4, Default::default())
+                .with_apexes_hinted_unfanned(
+                    &storey.ceiling_apexes,
+                    &[],
+                    &storey.ceiling_unfanned_points(),
+                );
+        let markers = ceiling_fan_markers(&storey);
+        assert_eq!(markers.len(), 6, "the unfanned vertex stays tappable");
+        let unf: Vec<_> = markers.iter().filter(|m| !m.fanned).collect();
+        assert_eq!(unf.len(), 1);
+        assert_eq!(unf[0].pos, Point2f64::new(6.0, 2.0));
     }
 
     /// A 10×4 footprint with a deep SLOT cut from the right (y ∈ [1, 3],

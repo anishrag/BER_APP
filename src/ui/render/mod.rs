@@ -612,6 +612,42 @@ pub fn render_roof_apexes(
     }
 }
 
+/// Draw the tap-to-unfan fan-vertex markers (roof-point mode only — the
+/// controller returns them empty otherwise): a FANNED vertex is a small
+/// filled orange dot with a white ring (tapping unfans it); an UNFANNED one
+/// is a hollow dot with a strike through it (tapping re-fans it). Orange,
+/// distinct from the apex rose-magenta and the ridge violet-blue.
+pub fn render_ceiling_fan_markers(
+    painter: &egui::Painter,
+    rect: egui::Rect,
+    ber: Option<&Ber>,
+    current_storey_idx: Option<usize>,
+    sketch_mode: SketchMode,
+    view: ViewParams,
+    markers: &[((f64, f64), bool)],
+) {
+    if markers.is_empty() {
+        return;
+    }
+    let Some((_storey, t)) = storey_transform(rect, ber, current_storey_idx, sketch_mode, view)
+    else {
+        return;
+    };
+    let color = egui::Color32::from_rgb(255, 165, 40); // fan-marker orange
+    for ((x, y), fanned) in markers {
+        let p = t.apply(*x, *y);
+        if *fanned {
+            painter.circle_filled(p, 5.0, color);
+            painter.circle_stroke(p, 5.0, egui::Stroke::new(1.5, egui::Color32::WHITE));
+        } else {
+            painter.circle_stroke(p, 5.0, egui::Stroke::new(2.0, color));
+            // The strike: this corner is currently excluded from the fan.
+            let d = egui::vec2(4.0, -4.0);
+            painter.line_segment([p - d, p + d], egui::Stroke::new(2.0, color));
+        }
+    }
+}
+
 /// The roof-ridge hue: violet-blue, distinct from the apex rose-magenta, the
 /// phase purple, the floor-step teal and the ceiling-step amber.
 const ROOF_RIDGE_COLOR: egui::Color32 = egui::Color32::from_rgb(130, 150, 255);

@@ -770,6 +770,7 @@ impl AppController {
         };
         let apexes = storey.ceiling_apexes.clone();
         let hints = storey.ceiling_apex_hints.clone();
+        let unfanned = storey.ceiling_unfanned_points();
         let splits = storey.ceiling_splits.clone();
         // Durable dormers: each carves a flat, raised patch into the (possibly
         // already-sloped) attic WITHOUT resloping its neighbours — composed
@@ -806,7 +807,7 @@ impl AppController {
             ceilings = ceilings.with_z_deltas(&areas);
         }
         if !apexes.is_empty() {
-            ceilings = ceilings.with_apexes_hinted(&apexes, &hints);
+            ceilings = ceilings.with_apexes_hinted_unfanned(&apexes, &hints, &unfanned);
         }
         if !dormer_patches.is_empty() {
             ceilings = ceilings.with_flat_patches(&dormer_patches);

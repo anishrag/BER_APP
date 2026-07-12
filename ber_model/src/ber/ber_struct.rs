@@ -544,6 +544,30 @@ impl Ber {
         }
     }
 
+    /// Toggle plan point `p` in/out of storey `storey_idx`'s UNFANNED ceiling
+    /// vertex set (`Storey::ceiling_unfanned` — tap-to-unfan). The point is
+    /// QUANTIZED to the f32 grid like an apex (`CeilingApex::quantize_point`),
+    /// and matched against the stored set within `UNFAN_MATCH_EPS_M` so a
+    /// re-tap of a marker re-fans it even across the f32 round-trip. Returns
+    /// `Some(true)` when the vertex is now unfanned, `Some(false)` when it was
+    /// re-fanned, `None` when the storey doesn't exist. Validation (the point
+    /// being a real fan-marker vertex) happens upstream in the document layer.
+    pub fn toggle_ceiling_unfanned(&mut self, storey_idx: usize, p: Point2f64) -> Option<bool> {
+        use super::structural::UNFAN_MATCH_EPS_M;
+        let q = CeilingApex::quantize_point(p);
+        let storey = self.storeys.get_mut(storey_idx)?;
+        if let Some(i) = storey.ceiling_unfanned.iter().position(|&(x, y)| {
+            ((x as f64) - q.x).abs() <= UNFAN_MATCH_EPS_M
+                && ((y as f64) - q.y).abs() <= UNFAN_MATCH_EPS_M
+        }) {
+            storey.ceiling_unfanned.remove(i);
+            Some(false)
+        } else {
+            storey.ceiling_unfanned.push((q.x as f32, q.y as f32));
+            Some(true)
+        }
+    }
+
     /// Append a flat-topped DORMER to storey `storey_idx`'s durable dormer
     /// list (replayed at resolve by [`CeilingRegions::with_flat_patches`]).
     /// Each footprint vertex is QUANTIZED to the f32 grid, exactly as
@@ -582,6 +606,30 @@ mod tests {
 
     fn p3(x: f64, y: f64, z: f64) -> Point3f64 {
         Point3f64::new(x, y, z)
+    }
+
+    /// The unfan toggle quantizes, matches within the epsilon (so a
+    /// re-tap re-fans across the f32 round-trip), and reports the new state.
+    #[test]
+    fn toggle_ceiling_unfanned_adds_then_removes() {
+        let mut ber = Ber::default();
+        ber.storeys.push(Storey::default());
+        let p = Point2f64::new(6.0, 2.0);
+        assert_eq!(ber.toggle_ceiling_unfanned(0, p), Some(true), "unfanned");
+        assert_eq!(ber.storeys[0].ceiling_unfanned, vec![(6.0, 2.0)]);
+        // A hair off (within the match epsilon) still toggles the SAME entry.
+        let near = Point2f64::new(6.0 + 5e-5, 2.0);
+        assert_eq!(
+            ber.toggle_ceiling_unfanned(0, near),
+            Some(false),
+            "re-fanned"
+        );
+        assert!(ber.storeys[0].ceiling_unfanned.is_empty());
+        assert_eq!(
+            ber.toggle_ceiling_unfanned(7, p),
+            None,
+            "missing storey is a no-op"
+        );
     }
 
     fn wall(cid: ItemId, exposure: WallExposure, ext: Vec<Point3f64>) -> WallRegion {

@@ -50,7 +50,10 @@ pub fn debug_dump_storey(storey: &Storey, label: &str) -> String {
 
     let _ = writeln!(s, "ceilings ({}):", storey.ceilings.regions.len());
     for (i, r) in storey.ceilings.regions.iter().enumerate() {
-        let class = match (r.flat_z(), r.fan_base_z(&storey.ceiling_apexes)) {
+        let class = match (
+            r.flat_z(),
+            r.fan_base_z_excluding(&storey.ceiling_apexes, &storey.ceiling_unfanned_points()),
+        ) {
             (Some(z), _) => format!("flat_z={z:.4}"),
             (None, Some(b)) => format!("sloped fan_base_z={b:.4}"),
             (None, None) => "sloped fan_base_z=None".to_string(),
@@ -96,7 +99,7 @@ pub fn debug_dump_storey(storey: &Storey, label: &str) -> String {
         );
     }
 
-    let groups = storey.ceilings.apex_groups(&storey.ceiling_apexes);
+    let groups = storey.ceiling_apex_groups();
     let _ = writeln!(s, "apex_groups ({}):", groups.len());
     for (i, g) in groups.iter().enumerate() {
         let rings: Vec<String> = g

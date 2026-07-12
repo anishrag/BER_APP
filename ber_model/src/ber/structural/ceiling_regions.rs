@@ -542,6 +542,26 @@ impl CeilingRegions {
     /// hint, or whose hint lands in no claimed area, keeps first-claim (so normal
     /// apexes and old records are byte-identical).
     pub fn with_apexes_hinted(self, apexes: &[CeilingApex], hints: &[CeilingApexHint]) -> Self {
+        self.with_apexes_hinted_unfanned(apexes, hints, &[])
+    }
+
+    /// Like [`with_apexes_hinted`](Self::with_apexes_hinted), plus the
+    /// tap-to-unfan escape hatch: `unfanned` (the storey's durable
+    /// `ceiling_unfanned` set, as plan points) names ring vertices that must
+    /// NOT anchor a fan plane of their own. The fan/ridge triangulations lift
+    /// each matched vertex onto the chord plane through its nearest fanned
+    /// neighbours and its hub apex (`lift_unfanned` in `ceiling_geom` — the
+    /// normative semantics doc), so the coplanar merge folds its would-be fan
+    /// planes into the neighbours' single plane. Empty `unfanned` (every old
+    /// record, and both delegating forms above) is byte-identical to before.
+    /// The 4-corner RECT (pavilion) branch has no per-vertex fan and ignores
+    /// the set.
+    pub fn with_apexes_hinted_unfanned(
+        self,
+        apexes: &[CeilingApex],
+        hints: &[CeilingApexHint],
+        unfanned: &[Point2f64],
+    ) -> Self {
         if apexes.is_empty() {
             return self;
         }
@@ -615,6 +635,7 @@ impl CeilingRegions {
                 1 => next.extend(merge_coplanar_faces(fan_triangles(
                     region,
                     &apexes[contained[0]],
+                    unfanned,
                 ))),
                 n => {
                     // 4 contained apexes forming an axis-aligned RECT with
@@ -659,6 +680,7 @@ impl CeilingRegions {
                         region,
                         &apexes[contained[0]],
                         &apexes[contained[1]],
+                        unfanned,
                     )));
                 }
             }
@@ -678,6 +700,26 @@ impl CeilingRegions {
     ///
     /// [`fan_base_z`]: CeilingRegion::fan_base_z
     pub fn apex_groups(&self, apexes: &[CeilingApex]) -> Vec<CeilingApexGroup> {
+        self.apex_groups_unfanned(apexes, &[])
+    }
+
+    /// Like [`apex_groups`](Self::apex_groups), plus the storey's UNFANNED
+    /// vertex set: a face carrying a LIFTED (unfanned) vertex is not level
+    /// off its apex corners, so the plain [`fan_base_z`] would warn-exclude
+    /// it from `base_z`/`merged_rings` on every call (log spam, and the
+    /// merged ring — the marker/validation footprint — would lose exactly
+    /// the unfanned vertex the assessor needs to tap again to RE-fan).
+    /// Passing the set makes the base check drop those vertices too
+    /// ([`fan_base_z_excluding`]). Callers with a `Storey` in hand should
+    /// prefer `Storey::ceiling_apex_groups`, which supplies the set.
+    ///
+    /// [`fan_base_z`]: CeilingRegion::fan_base_z
+    /// [`fan_base_z_excluding`]: CeilingRegion::fan_base_z_excluding
+    pub fn apex_groups_unfanned(
+        &self,
+        apexes: &[CeilingApex],
+        unfanned: &[Point2f64],
+    ) -> Vec<CeilingApexGroup> {
         use geo::bool_ops::BooleanOps;
         use geo::Area;
         const EPS_M: f64 = 1e-6;
@@ -792,7 +834,7 @@ impl CeilingRegions {
                         merge.push(r);
                         continue;
                     }
-                    match (r.fan_base_z(apexes), base_z) {
+                    match (r.fan_base_z_excluding(apexes, unfanned), base_z) {
                         (Some(z), None) => {
                             base_z = Some(z);
                             merge.push(r);
@@ -1283,21 +1325,36 @@ impl CeilingRegion {
     ///
     /// [`flat_z`]: CeilingRegion::flat_z
     pub fn fan_base_z(&self, apexes: &[CeilingApex]) -> Option<f64> {
+        self.fan_base_z_excluding(apexes, &[])
+    }
+
+    /// [`fan_base_z`](Self::fan_base_z) with the storey's UNFANNED vertex set
+    /// also dropped (within [`UNFAN_MATCH_EPS_M`] — those vertices were
+    /// LIFTED off the base by `lift_unfanned`, so they must not disqualify
+    /// the remaining level base). Empty `unfanned` is exactly `fan_base_z`.
+    pub fn fan_base_z_excluding(
+        &self,
+        apexes: &[CeilingApex],
+        unfanned: &[Point2f64],
+    ) -> Option<f64> {
         const EPS_M: f64 = 1e-6;
         if self.polygon.exterior.len() < 3 {
             return None;
         }
-        let base: Vec<f64> = self
-            .polygon
-            .exterior
-            .iter()
-            .filter(|v| {
-                !apexes
-                    .iter()
-                    .any(|a| (v.x - a.point.x).abs() <= EPS_M && (v.y - a.point.y).abs() <= EPS_M)
-            })
-            .map(|v| v.z)
-            .collect();
+        let base: Vec<f64> =
+            self.polygon
+                .exterior
+                .iter()
+                .filter(|v| {
+                    !apexes.iter().any(|a| {
+                        (v.x - a.point.x).abs() <= EPS_M && (v.y - a.point.y).abs() <= EPS_M
+                    }) && !unfanned.iter().any(|u| {
+                        (v.x - u.x).abs() <= UNFAN_MATCH_EPS_M
+                            && (v.y - u.y).abs() <= UNFAN_MATCH_EPS_M
+                    })
+                })
+                .map(|v| v.z)
+                .collect();
         let (&z0, rest) = base.split_first()?;
         rest.iter().all(|z| (z - z0).abs() <= EPS_M).then_some(z0)
     }

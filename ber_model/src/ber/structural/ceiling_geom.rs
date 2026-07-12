@@ -16,8 +16,11 @@ pub(crate) fn ring_to_poly(ring: &[Point2f64]) -> Polygon<f64> {
 }
 
 /// Drop vertices that lie on (or very nearly on) the straight line between their
-/// neighbours — used to clean a merged outline ring and the suggestion rings in
-/// `ber::suggest`.
+/// neighbours — used to clean a merged outline ring, the suggestion rings in
+/// `ber::suggest`, and (public since the fan-marker feature) the group merged
+/// rings behind the document layer's tap-to-unfan markers: a collinear ring
+/// vertex contributes no fan plane of its own (its hub triangles are coplanar
+/// and merge away), so it is not a marker.
 ///
 /// `cross` is twice the signed area of the (prev, cur, next) triangle, in m²
 /// (coords are metres). Real building corners are far off collinear — even a
@@ -27,7 +30,7 @@ pub(crate) fn ring_to_poly(ring: &[Point2f64]) -> Polygon<f64> {
 /// A real outline has no genuine slight bends, so `TOL` sits between the two:
 /// anything below it is noise to drop. (Was 1e-9, which only caught EXACTLY
 /// collinear and so missed near-collinear vertices, splitting one wall in two.)
-pub(crate) fn strip_collinear(ring: &[Point2f64]) -> Vec<Point2f64> {
+pub fn strip_collinear(ring: &[Point2f64]) -> Vec<Point2f64> {
     // Perpendicular deviation this catches is TOL / span: ~1–5 mm over typical
     // 2–8 m edges — far tighter than any real corner, far looser than f32 noise.
     const TOL: f64 = 1e-2;
@@ -62,6 +65,101 @@ pub(crate) fn strip_collinear(ring: &[Point2f64]) -> Vec<Point2f64> {
 /// pipeline (`ber::suggest`) — the re-apply identities depend on all of them
 /// drawing the line in the same place.
 pub(crate) const SLIVER_AREA_M2: f64 = 1e-6;
+
+/// Plan tolerance (m) for matching a ring vertex to a stored UNFANNED point
+/// (`Storey::ceiling_unfanned`). Looser than the 1e-6 apex-corner identity:
+/// the unfanned points are f32-quantized ring vertices, but the ring a later
+/// resolve feeds back may be boolean-op output sitting a few 1e-7 m off.
+/// Same rationale (and value) as [`APEX_BOUNDARY_EPS_M`]; real neighbouring
+/// vertices are centimetres apart, so no false capture.
+pub const UNFAN_MATCH_EPS_M: f64 = 1e-4;
+
+/// Whether ring vertex `v` plan-matches a point of the UNFANNED set (within
+/// [`UNFAN_MATCH_EPS_M`]).
+fn is_unfanned(v: &Point3f64, unfanned: &[Point2f64]) -> bool {
+    unfanned
+        .iter()
+        .any(|u| (v.x - u.x).abs() <= UNFAN_MATCH_EPS_M && (v.y - u.y).abs() <= UNFAN_MATCH_EPS_M)
+}
+
+/// The UNFAN LIFT — the tap-to-unfan escape hatch, run right after
+/// [`pre_lift`] (and, for a ridge, BEFORE the midline split, so synthetic
+/// split vertices never join the walk): every ring vertex plan-matching a
+/// point of `unfanned` (within [`UNFAN_MATCH_EPS_M`]) and NOT plan-matching
+/// an applied apex (apex corners belong to `pre_lift`) stops being a fan
+/// target. Its z is RE-COMPUTED on the CHORD PLANE through its nearest
+/// fanned ring neighbours `u`/`w` (the closest non-unfanned vertices walking
+/// the ring each way, at their current — pre-lifted — z) and the hub apex
+/// the vertex would rise to (`hub_of`; THE apex for a fan, the nearer-by-
+/// ridge-parameter hub for a ridge). The triangulation then emits its usual
+/// per-edge hub triangles over the SAME plan ring — any z assignment tiles
+/// watertight — and the coplanar merge collapses the now-coplanar pieces
+/// into the neighbours' single plane: the surface re-solves as if the vertex
+/// weren't a fan target, and the boundary between it and the eave becomes a
+/// straight raking edge (the wall below rises to meet the lifted z).
+///
+/// Degenerate cases keep the vertex's current z (warn where surprising):
+/// fewer than two fanned vertices left on the ring (no chord to span), or a
+/// chord plane that is vertical / degenerate over plan (|n·ẑ| ≈ 0 — e.g. a
+/// chord endpoint that IS the hub, as happens when re-applying to a face
+/// whose ring carries the apex as a corner: the vertex was already lifted on
+/// the first pass, so keeping its z is exactly the re-apply identity).
+fn lift_unfanned(
+    mut ext: Vec<Point3f64>,
+    unfanned: &[Point2f64],
+    apexes: &[&CeilingApex],
+    hub_of: impl Fn(&Point3f64) -> Point3f64,
+) -> Vec<Point3f64> {
+    const EPS_M: f64 = 1e-6;
+    if unfanned.is_empty() || ext.len() < 3 {
+        return ext;
+    }
+    let is_apex = |v: &Point3f64| {
+        apexes
+            .iter()
+            .any(|a| (v.x - a.point.x).abs() <= EPS_M && (v.y - a.point.y).abs() <= EPS_M)
+    };
+    let target: Vec<bool> = ext
+        .iter()
+        .map(|v| is_unfanned(v, unfanned) && !is_apex(v))
+        .collect();
+    if !target.iter().any(|t| *t) {
+        return ext;
+    }
+    if target.iter().filter(|t| !**t).count() < 2 {
+        log::warn!(
+            "unfan: fewer than two fanned vertices would remain on a ceiling ring — \
+             ignoring the unfanned set for this region"
+        );
+        return ext;
+    }
+    let n = ext.len();
+    let orig = ext.clone();
+    for i in 0..n {
+        if !target[i] {
+            continue;
+        }
+        // Nearest fanned neighbours, walking the ring each way.
+        let mut j = (i + n - 1) % n;
+        while target[j] {
+            j = (j + n - 1) % n;
+        }
+        let mut k = (i + 1) % n;
+        while target[k] {
+            k = (k + 1) % n;
+        }
+        let (u, w) = (orig[j], orig[k]);
+        let h = hub_of(&orig[i]);
+        // The chord plane through (u, w, h); skip when vertical/degenerate
+        // over plan (keeps the current z — see the doc above).
+        let nrm = (w - u).cross(&(h - u));
+        if nrm.z.abs() <= 1e-9 {
+            continue;
+        }
+        ext[i].z = u.z - (nrm.x * (ext[i].x - u.x) + nrm.y * (ext[i].y - u.y)) / nrm.z;
+    }
+    ext
+}
 
 /// D2 step 0 — PRE-LIFT: any ring vertex plan-matching one of `apexes`
 /// (within 1e-6 m, the `fan_base_z` predicate) takes that apex's z.
@@ -103,15 +201,22 @@ fn ring_signed_plan_area(ext: &[Point3f64]) -> f64 {
 
 /// FAN a region to a single `apex` (the 1-apex branch of
 /// [`CeilingRegions::with_apexes`], where the semantics are documented):
-/// pre-lift, then one triangle per boundary edge `(vᵢ, vᵢ₊₁, apex)`, dropping
+/// pre-lift, unfan-lift ([`lift_unfanned`] — vertices of the `unfanned` set
+/// rise onto their neighbours' chord plane instead of anchoring the fan),
+/// then one triangle per boundary edge `(vᵢ, vᵢ₊₁, apex)`, dropping
 /// sub-[`SLIVER_AREA_M2`] slivers — exactly the degenerate pair incident to
 /// an apex that is already a corner. Fresh ids, default `opes`, inherited
 /// `construction_id`.
-pub(crate) fn fan_triangles(region: CeilingRegion, apex: &CeilingApex) -> Vec<CeilingRegion> {
+pub(crate) fn fan_triangles(
+    region: CeilingRegion,
+    apex: &CeilingApex,
+    unfanned: &[Point2f64],
+) -> Vec<CeilingRegion> {
     let cid = region.construction_id;
     let exposure = region.exposure;
-    let ext = pre_lift(region.polygon.exterior, &[apex]);
     let apex_v = Point3f64::new(apex.point.x, apex.point.y, apex.z_m);
+    let ext = pre_lift(region.polygon.exterior, &[apex]);
+    let ext = lift_unfanned(ext, unfanned, &[apex], |_| apex_v);
     let n = ext.len();
     let mut out = Vec::new();
     for i in 0..n {
@@ -252,10 +357,22 @@ pub(crate) fn ridge_triangles(
     region: CeilingRegion,
     a: &CeilingApex,
     b: &CeilingApex,
+    unfanned: &[Point2f64],
 ) -> Vec<CeilingRegion> {
     let cid = region.construction_id;
     let exposure = region.exposure;
     let ext = pre_lift(region.polygon.exterior, &[a, b]);
+    // Unfan-lift BEFORE the midline split: the walk to a vertex's fanned
+    // neighbours must see only REAL ring vertices, and the split then
+    // interpolates z along the already-lifted edges. Hub choice matches the
+    // per-edge rule: the vertex's own ridge parameter, tie → B.
+    let ext = lift_unfanned(ext, unfanned, &[a, b], |v| {
+        let (dx, dy) = (b.point.x - a.point.x, b.point.y - a.point.y);
+        let d2 = dx * dx + dy * dy;
+        let is_b = d2 >= 1e-12 && ((v.x - a.point.x) * dx + (v.y - a.point.y) * dy) / d2 >= 0.5;
+        let h = if is_b { b } else { a };
+        Point3f64::new(h.point.x, h.point.y, h.z_m)
+    });
     let ext = ridge_split_ring(ext, a.point, b.point);
     let plan: Vec<(f64, f64)> = ext.iter().map(|v| (v.x, v.y)).collect();
     let Some(hubs) = ridge_edge_hubs(&plan, a.point, b.point) else {
@@ -273,6 +390,9 @@ pub(crate) fn ridge_triangles(
                 exposure,
             },
             a,
+            // The ring above is already unfan-lifted (a ≈ b, so the hub
+            // choice was moot) — don't lift twice.
+            &[],
         );
     };
     let hub_v = |is_b: bool| {
