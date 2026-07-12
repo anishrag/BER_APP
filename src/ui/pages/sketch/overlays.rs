@@ -158,7 +158,7 @@ fn phase_box(
                 if complete {
                     // Same green as the checklist's "all storeys done" dot.
                     ui.label(
-                        RichText::new("✓")
+                        RichText::new("✔")
                             .color(Color32::from_rgb(80, 180, 95))
                             .size(15.0)
                             .strong(),

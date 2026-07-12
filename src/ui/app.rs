@@ -456,7 +456,7 @@ impl BerApp {
                         } else if let Some(secs) = self.bug_report.recorded_secs {
                             ui.label(
                                 egui::RichText::new(format!(
-                                    "✓ Recorded  {:02}:{:02}",
+                                    "✔ Recorded  {:02}:{:02}",
                                     secs / 60,
                                     secs % 60
                                 ))

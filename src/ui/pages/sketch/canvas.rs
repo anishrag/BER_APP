@@ -303,6 +303,21 @@ fn optimise_slot_order(rect: egui::Rect, anchors: &[egui::Pos2]) -> Vec<usize> {
     order
 }
 
+/// Apply one drag-swap to the session slot order: transpose the SLOTS of
+/// groups `a` and `b` — identified by their INDEX in the session's group
+/// list, the one identity that is unique for the session (names are not:
+/// real records hold several groups named "Group 4", and a duplicate name
+/// must never move a bystander box). Unknown indices are a no-op.
+fn transpose_slot_order(order: &mut [usize], a: usize, b: usize) {
+    let (pa, pb) = (
+        order.iter().position(|&g| g == a),
+        order.iter().position(|&g| g == b),
+    );
+    if let (Some(pa), Some(pb)) = (pa, pb) {
+        order.swap(pa, pb);
+    }
+}
+
 /// The SWAP target for a box dropped in the single-storey prescriptive
 /// layout: the other box whose rect the dropped rect overlaps MOST (greatest
 /// positive overlap area). `None` when the drop touches no other box —
@@ -863,6 +878,49 @@ fn slot_order_store_id(ui: &egui::Ui) -> egui::Id {
     ui.id().with("structure_slot_order")
 }
 
+/// Where the LIVE box-drag state lives while a box is carried by its grip
+/// handle: `(group, offset from its laid-out position)`. The renderer alone
+/// reads it (the layout keeps every box in its slot/pin until the DROP), so
+/// the plan never re-fits under the finger. Cleared on release.
+fn box_drag_store_id(ui: &egui::Ui) -> egui::Id {
+    ui.id().with("structure_box_drag")
+}
+
+/// The grip strip at the top of every attribute box — its explicit DRAG
+/// HANDLE. Area movability was retired here deliberately: the layout forces
+/// each box's position every frame (`current_pos` overwrites the area's
+/// stored pivot, so egui's own drag fought the force), and on touch a drag
+/// starting over the box's interactive content (title field, dropdowns)
+/// never reached the area background anyway. A dedicated `Sense::drag()`
+/// strip has no competing children, claims the touch immediately, and keeps
+/// the drag via egui's pointer capture even as the box follows with a
+/// one-frame lag.
+fn drag_handle_ui(ui: &mut egui::Ui, color: egui::Color32) -> egui::Response {
+    let (rect, resp) =
+        ui.allocate_exact_size(egui::vec2(ui.available_width(), 16.0), egui::Sense::drag());
+    // Three grip lines, painted (no glyph — font coverage on-device is not
+    // a given; see the ✔ swap), brighter while grabbed.
+    let stroke = egui::Stroke::new(
+        1.5,
+        if resp.dragged() {
+            egui::Color32::WHITE
+        } else {
+            color
+        },
+    );
+    let c = rect.center();
+    for dy in [-3.0, 0.0, 3.0] {
+        ui.painter().line_segment(
+            [
+                egui::pos2(c.x - 14.0, c.y + dy),
+                egui::pos2(c.x + 14.0, c.y + dy),
+            ],
+            stroke,
+        );
+    }
+    resp.on_hover_cursor(egui::CursorIcon::Grab)
+}
+
 /// Gather [`EditBoxUiState`] for this frame from egui memory.
 fn edit_box_ui_state(
     ui: &egui::Ui,
@@ -1284,15 +1342,23 @@ fn structure_edit_windows_ui<F: FnMut(UiEvent)>(
                 }
                 continue;
             }
-            // Full box. MOVABLE: the assessor can drag it anywhere (over the
-            // plan too); the dropped position is remembered for the session
-            // and the auto-layout leaves it alone (`dragged_window`). The
-            // drag is consumed by the Area's own layer, so it never pans the
-            // canvas or draws a stroke.
+            // Full box, positioned by the LAYOUT (slot / margin / pin) plus
+            // any live grip-handle drag offset. The box is carried by the
+            // grip strip at its top ([`drag_handle_ui`]) — not by Area
+            // movability, which the per-frame position force neutered and
+            // touch rarely reached. While carried it renders offset from its
+            // laid-out spot (one frame behind the finger); the layout itself
+            // never moves until the DROP, so the plan can't jitter.
+            let drag_state: Option<(usize, egui::Vec2)> =
+                ui.ctx().data(|d| d.get_temp(box_drag_store_id(ui)));
+            let my_drag = drag_state
+                .filter(|(g, _)| *g == i)
+                .map(|(_, off)| off)
+                .unwrap_or(egui::Vec2::ZERO);
+            let mut handle: Option<egui::Response> = None;
             let area = egui::Area::new(attr_area_id(ui, i))
                 .order(egui::Order::Foreground)
-                .movable(true)
-                .current_pos(w.pos)
+                .fixed_pos(w.pos + my_drag)
                 .constrain_to(canvas_rect)
                 .show(ui.ctx(), |ui| {
                     egui::Frame::popup(ui.style())
@@ -1300,6 +1366,7 @@ fn structure_edit_windows_ui<F: FnMut(UiEvent)>(
                         .stroke(egui::Stroke::new(2.0, w.color))
                         .show(ui, |ui| {
                             ui.set_max_width(EDIT_BOX_W - 16.0);
+                            handle = Some(drag_handle_ui(ui, w.color));
                             // The two-level heading (kind + editable name)
                             // is rendered by `group_editor_ui` itself now.
                             super::structure::group_editor_ui(
@@ -1318,6 +1385,7 @@ fn structure_edit_windows_ui<F: FnMut(UiEvent)>(
                             );
                         });
                 });
+            let handle = handle.expect("the area closure always runs");
             // Connector from the box's edge to the group's true anchor,
             // ending in a dot ON the recoloured surfaces. Drawn from the
             // box's ACTUAL rect (after `show`) so the line tracks a live
@@ -1334,25 +1402,52 @@ fn structure_edit_windows_ui<F: FnMut(UiEvent)>(
                 painter.circle_filled(target, 3.5, w.color);
             }
             let single_storey = layout.all_storeys_inner.is_none();
-            // SINGLE-STOREY, mid-drag: ring the box the drop would SWAP with,
-            // so the target is visible before release. Painted on the canvas
-            // layer just OUTSIDE the target's frame — the ring stays visible
-            // around the Foreground box it marks.
-            if single_storey && area.response.dragged() {
-                if let Some(t) = swap_target(&layout.windows, i, area.response.rect) {
-                    if let Some(tw) = layout.windows.iter().find(|w| w.group_index == t) {
-                        painter.rect_stroke(
-                            egui::Rect::from_min_size(tw.pos, tw.size).expand(3.0),
-                            4.0,
-                            egui::Stroke::new(2.5, egui::Color32::WHITE),
-                            egui::StrokeKind::Outside,
-                        );
+            // The box's rect where the FINGER has it: the rendered rect plus
+            // this frame's not-yet-applied handle delta.
+            let carried_rect = area.response.rect.translate(handle.drag_delta());
+            // Grip-drag lifecycle. The offset lives in `box_drag_store_id`;
+            // updating it AFTER the area was shown gives the one-frame lag.
+            if handle.drag_started() {
+                ui.ctx()
+                    .data_mut(|d| d.insert_temp(box_drag_store_id(ui), (i, egui::Vec2::ZERO)));
+                // The carried box rides above everything.
+                ui.ctx().move_to_top(area.response.layer_id);
+            }
+            if handle.dragged() {
+                let delta = handle.drag_delta();
+                ui.ctx().data_mut(|d| {
+                    let state: &mut (usize, egui::Vec2) = d
+                        .get_temp_mut_or_insert_with(box_drag_store_id(ui), || {
+                            (i, egui::Vec2::ZERO)
+                        });
+                    if state.0 == i {
+                        state.1 += delta;
+                    }
+                });
+                ui.ctx().request_repaint();
+                // SINGLE-STOREY, mid-drag: ring the box the drop would SWAP
+                // with, so the target is visible before release. Painted on
+                // the canvas layer just OUTSIDE the target's frame — the
+                // ring stays visible around the Foreground box it marks.
+                if single_storey {
+                    if let Some(t) = swap_target(&layout.windows, i, carried_rect) {
+                        if let Some(tw) = layout.windows.iter().find(|w| w.group_index == t) {
+                            painter.rect_stroke(
+                                egui::Rect::from_min_size(tw.pos, tw.size).expand(3.0),
+                                4.0,
+                                egui::Stroke::new(2.5, egui::Color32::WHITE),
+                                egui::StrokeKind::Outside,
+                            );
+                        }
                     }
                 }
+            } else if drag_state.is_some_and(|(g, _)| g == i) && !handle.drag_stopped() {
+                // Stale carry state (the drag ended out of sight — e.g. a
+                // cancelled touch): drop it, the box snaps home.
+                ui.ctx()
+                    .data_mut(|d| d.remove::<(usize, egui::Vec2)>(box_drag_store_id(ui)));
             }
-            // Drop handling, on RELEASE only (mid-drag egui moves the Area
-            // itself and the connector tracks the live rect above; committing
-            // mid-drag would re-fit the plan every frame under the finger).
+            // Drop handling, on RELEASE only.
             //
             // SINGLE-STOREY (prescriptive slots): dragging means SWAP — a
             // drop on another box transposes the two groups' slots in the
@@ -1364,22 +1459,31 @@ fn structure_edit_windows_ui<F: FnMut(UiEvent)>(
             // takes the minimal cardinal nudge clear of every other box (they
             // stay put), the position persists, and the packing + plan-fit
             // re-run around it next frame.
-            if area.response.drag_stopped() {
+            if handle.drag_stopped() {
+                ui.ctx()
+                    .data_mut(|d| d.remove::<(usize, egui::Vec2)>(box_drag_store_id(ui)));
                 if single_storey {
-                    if let Some(target) = swap_target(&layout.windows, i, area.response.rect) {
-                        let store = slot_order_store_id(ui);
-                        let n = edit.groups.len();
-                        ui.ctx().data_mut(|d| {
-                            let order: &mut Vec<usize> =
-                                d.get_temp_mut_or_insert_with(store, || (0..n).collect());
-                            let (pa, pb) = (
-                                order.iter().position(|&g| g == i),
-                                order.iter().position(|&g| g == target),
-                            );
-                            if let (Some(pa), Some(pb)) = (pa, pb) {
-                                order.swap(pa, pb);
+                    if let Some(target) = swap_target(&layout.windows, i, carried_rect) {
+                        // Transpose the order THE USER IS LOOKING AT — the
+                        // displayed windows are in slot sequence — rather
+                        // than whatever the store holds: if store and
+                        // display ever diverged, writing a transposed store
+                        // would teleport bystander boxes on the drop.
+                        // Groups are identified by their session INDEX —
+                        // never by name (duplicates exist in real data).
+                        let mut order: Vec<usize> =
+                            layout.windows.iter().map(|w| w.group_index).collect();
+                        // Groups past the slot cap aren't displayed; keep
+                        // them as a stable ascending tail so the stored
+                        // order stays a full permutation.
+                        for g in 0..edit.groups.len() {
+                            if !order.contains(&g) {
+                                order.push(g);
                             }
-                        });
+                        }
+                        transpose_slot_order(&mut order, i, target);
+                        let store = slot_order_store_id(ui);
+                        ui.ctx().data_mut(|d| d.insert_temp(store, order));
                     }
                 } else {
                     let store = drag_store_id(ui);
@@ -1389,12 +1493,13 @@ fn structure_edit_windows_ui<F: FnMut(UiEvent)>(
                         .filter(|o| o.group_index != i)
                         .map(|o| egui::Rect::from_min_size(o.pos, o.size))
                         .collect();
-                    let dropped = nudge_clear_of(area.response.rect, &others, canvas_rect);
+                    let dropped = nudge_clear_of(carried_rect, &others, canvas_rect);
                     ui.ctx().data_mut(|d| {
                         let map: &mut DraggedBoxes = d.get_temp_mut_or_default(store);
                         map.insert(i, dropped.min);
                     });
                 }
+                ui.ctx().request_repaint();
             }
             // Tap-to-raise: a press anywhere on a box brings it above its
             // peers (a dragged box dropped over another stays reachable).
@@ -1579,6 +1684,7 @@ pub(super) fn render<F: FnMut(UiEvent)>(
             d.remove::<DraggedBoxes>(drag_store_id(ui));
             d.remove::<Vec<usize>>(slot_order_store_id(ui));
             d.remove::<usize>(expand_store_id(ui));
+            d.remove::<(usize, egui::Vec2)>(box_drag_store_id(ui));
         });
     }
     let vp = structure_edit_layout.as_ref().map(|l| l.view).unwrap_or(vp);
@@ -4060,7 +4166,7 @@ fn external_photos_button<F: FnMut(UiEvent)>(
                                     for (side, photo) in &view.external_photos {
                                         ui.horizontal(|ui| match photo {
                                             Some(_) => {
-                                                ui.label(format!("✓ {}", side.label()));
+                                                ui.label(format!("✔ {}", side.label()));
                                             }
                                             None if side.photo_required() => {
                                                 ui.colored_label(
@@ -4639,7 +4745,7 @@ fn phase_signpost<F: FnMut(UiEvent)>(
     let review_label = match view.current_phase {
         AssessmentPhase::Final => {
             if view.details_reviewed {
-                "BER complete ✓"
+                "BER complete ✔"
             } else {
                 "Mark BER complete"
             }
@@ -4921,7 +5027,7 @@ fn object_review_overlay<F: FnMut(UiEvent)>(
                 if ui
                     .add_enabled(
                         confirmable,
-                        egui::Button::new(egui::RichText::new("✓ All reviewed & OK").strong()),
+                        egui::Button::new(egui::RichText::new("✔ All reviewed & OK").strong()),
                     )
                     .clicked()
                 {
@@ -5036,7 +5142,7 @@ fn object_review_overlay<F: FnMut(UiEvent)>(
         } else {
             ui.separator();
             ui.label(
-                egui::RichText::new("All empty categories confirmed ✓")
+                egui::RichText::new("All empty categories confirmed ✔")
                     .color(egui::Color32::from_gray(150)),
             );
         }
@@ -5091,7 +5197,7 @@ fn structure_review_overlay<F: FnMut(UiEvent)>(
                 }
                 ui.separator();
                 if ui
-                    .button(egui::RichText::new("✓ All looks good").strong())
+                    .button(egui::RichText::new("✔ All looks good").strong())
                     .clicked()
                 {
                     on_event(UiEvent::Sketch(SketchEvent::ConfirmStructureReview));
@@ -5242,7 +5348,7 @@ fn mapping_review_overlay<F: FnMut(UiEvent)>(
                 }
                 ui.separator();
                 if ui
-                    .button(egui::RichText::new("✓ All looks good").strong())
+                    .button(egui::RichText::new("✔ All looks good").strong())
                     .clicked()
                 {
                     on_event(UiEvent::Sketch(SketchEvent::ConfirmMappingReview));
@@ -6116,6 +6222,43 @@ mod tests {
         for w in &windows {
             assert!(!rects_strictly_overlap(inner, window_rect(w)));
         }
+    }
+
+    /// The on-device duplicate-name scenario: the record holds TWO groups
+    /// both displayed as "Group 4" (groups 1 and 3 here — the display name
+    /// deliberately NEVER enters the slot pipeline: `SlotSeed` carries no
+    /// name and [`transpose_slot_order`] keys strictly on the session group
+    /// INDEX). Swapping group 1 with group 2 must move exactly those two;
+    /// the same-named bystander (group 3) and everyone else stay put.
+    #[test]
+    fn duplicate_names_swap_moves_exactly_one_pair() {
+        let mut order: Vec<usize> = (0..6).collect();
+        // Baseline placement.
+        let seeds: Vec<SlotSeed> = order.iter().map(|&g| slot_seed(g)).collect();
+        let (before, ..) = place_windows_prescriptive(tall_rect(), &seeds);
+        let pos_before: Vec<egui::Pos2> = (0..6)
+            .map(|g| before.iter().find(|w| w.group_index == g).unwrap().pos)
+            .collect();
+        // The drop: group 1 (one "Group 4") dropped onto group 2.
+        transpose_slot_order(&mut order, 1, 2);
+        assert_eq!(order, vec![0, 2, 1, 3, 4, 5], "exactly one transposition");
+        let seeds: Vec<SlotSeed> = order.iter().map(|&g| slot_seed(g)).collect();
+        let (after, ..) = place_windows_prescriptive(tall_rect(), &seeds);
+        let pos_after: Vec<egui::Pos2> = (0..6)
+            .map(|g| after.iter().find(|w| w.group_index == g).unwrap().pos)
+            .collect();
+        assert_eq!(pos_after[1], pos_before[2], "group 1 took group 2's slot");
+        assert_eq!(pos_after[2], pos_before[1], "group 2 took group 1's slot");
+        for g in [0, 3, 4, 5] {
+            assert_eq!(
+                pos_after[g], pos_before[g],
+                "bystander group {g} (incl. the same-named twin, group 3) must not move"
+            );
+        }
+        // Unknown indices (a stale drop target) are a strict no-op.
+        let snapshot = order.clone();
+        transpose_slot_order(&mut order, 1, 99);
+        assert_eq!(order, snapshot);
     }
 
     /// The drop hit-test: greatest positive overlap picks the swap target;

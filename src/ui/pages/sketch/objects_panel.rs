@@ -78,7 +78,7 @@ pub(super) fn render<F: FnMut(UiEvent)>(
                         let here = present.contains(&cat);
                         let selected = *view.object_selected_category == Some(cat);
                         let icon = category_icon(cat);
-                        let mark = if here { " ✓" } else { "" };
+                        let mark = if here { " ✔" } else { "" };
                         let btn = egui::Button::new(
                             RichText::new(format!("{icon}\n{}{mark}", cat.label())).size(12.0),
                         )

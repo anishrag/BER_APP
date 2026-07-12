@@ -684,7 +684,7 @@ fn vertex_drop_prompt_toolbar<F: FnMut(UiEvent)>(
         // targets the right measurement. Cap at 4 slots.
         let slot = m.idx.min(inputs.len() - 1);
         let submitted = metre_input(ui, &mut inputs[slot], 60.0, "=?").submitted;
-        let clicked = ui.button("✓").hint("Set this distance").clicked();
+        let clicked = ui.button("✔").hint("Set this distance").clicked();
         if clicked || submitted {
             if let Some(v) = parse_dimension_expression(&inputs[slot]) {
                 on_event(UiEvent::Sketch(SketchEvent::ApplyVertexMeasurement {

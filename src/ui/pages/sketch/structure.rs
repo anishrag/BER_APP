@@ -311,7 +311,7 @@ pub(crate) fn group_editor_ui<F: FnMut(UiEvent)>(
         ui.painter().text(
             top_right + egui::vec2(-2.0, 0.0),
             egui::Align2::RIGHT_TOP,
-            "✓",
+            "✔",
             egui::FontId::proportional(EDITOR_FONT + 3.0),
             // Same green as the checklist's "all storeys done" dot / phase tick.
             egui::Color32::from_rgb(80, 180, 95),
@@ -705,22 +705,22 @@ fn unknown_specify_buttons_ui<F: FnMut(UiEvent)>(
 /// build-up, exactly as it did beside ▤).
 fn default_button_label(makeup: &ConstructionMakeup) -> (bool, String) {
     match makeup {
-        ConstructionMakeup::Default => (true, "✓".to_string()),
+        ConstructionMakeup::Default => (true, "✔".to_string()),
         ConstructionMakeup::DefaultPlus {
             extra_insulation_mm: 0,
             plasterboard: true,
-        } => (true, "✓ pb".to_string()),
+        } => (true, "✔ pb".to_string()),
         ConstructionMakeup::DefaultPlus {
             extra_insulation_mm,
             plasterboard: true,
-        } => (true, format!("✓ pb+{extra_insulation_mm}")),
+        } => (true, format!("✔ pb+{extra_insulation_mm}")),
         ConstructionMakeup::DefaultPlus {
             extra_insulation_mm,
             plasterboard: false,
-        } => (true, format!("✓ +{extra_insulation_mm}")),
+        } => (true, format!("✔ +{extra_insulation_mm}")),
         other => match other.plasterboard_insulation_mm() {
-            Some(mm) => (true, format!("✓ pb+{mm}")),
-            None => (false, "✓".to_string()),
+            Some(mm) => (true, format!("✔ pb+{mm}")),
+            None => (false, "✔".to_string()),
         },
     }
 }
@@ -825,14 +825,14 @@ fn ceiling_default_dropdown_ui<F: FnMut(UiEvent)>(
                 ..
             },
             _,
-        ) => (true, format!("✓ {extra_insulation_mm}")),
+        ) => (true, format!("✔ {extra_insulation_mm}")),
         (ConstructionMakeup::Default, Some(CeilingInsulation::ThicknessMm(v))) => {
-            (true, format!("✓ {}", format_mm(v)))
+            (true, format!("✔ {}", format_mm(v)))
         }
         (ConstructionMakeup::Default, Some(CeilingInsulation::Unknown)) => {
-            (true, "✓ unk".to_string())
+            (true, "✔ unk".to_string())
         }
-        _ => (false, "✓".to_string()),
+        _ => (false, "✔".to_string()),
     };
     let resp = ui
         .add_enabled(
