@@ -78,11 +78,11 @@ pub enum ConstructionMakeup {
     #[default]
     Tbd, // UNSET — not yet classified (the pre-edit default); counts as not done
     Unknown,     // the assessor DECLARED it unknown — a real choice, counts as done
-    /// The DEFAULT construction PLUS extra measured insulation the assessor
-    /// found added on top (an insulation upgrade over the era-default fabric).
-    /// `extra_insulation_mm` is the measured added thickness. ADDITIVE serde
-    /// variant (2026-07): records saved before it existed never contain the
-    /// tag, so old JSON keeps loading unchanged.
+    /// The DEFAULT construction PLUS an upgrade the assessor found added on
+    /// top: `extra_insulation_mm` of measured insulation, and — walls'
+    /// insulated dry-lining — optionally a plasterboard slab over it.
+    /// ADDITIVE serde variant (2026-07): records saved before it existed
+    /// never contain the tag, so old JSON keeps loading unchanged.
     ///
     /// TODO(deap-export): the DEAP U-value story — the default construction's
     /// age-band U-value adjusted for the added insulation — is a derivation
@@ -90,29 +90,41 @@ pub enum ConstructionMakeup {
     /// this crate yet); the model just stores the measurement faithfully.
     DefaultPlus {
         extra_insulation_mm: u32,
+        /// Whether the upgrade is an insulated DRY-LINING: a plasterboard
+        /// slab over the extra insulation (the wall editor's "+ plasterboard"
+        /// / "+ pb + X mm" picks — dry-lining always includes the slab, so
+        /// plasterboard-only is `plasterboard: true` with 0 mm insulation).
+        /// ADDITIVE serde field (2026-07, days after the variant itself):
+        /// records saved by the first `DefaultPlus` shape — bare added
+        /// insulation, no slab (the retired ✓+ picker) — never contain it
+        /// and load as `false`.
+        #[serde(default)]
+        plasterboard: bool,
     },
     Layers(Vec<ConstructionLayer>), // custom stack of layers
 }
 
-/// DEAP's standard insulation THICKNESS options, in mm — the preset list the
-/// quick pickers offer (the [`ConstructionMakeup::DefaultPlus`]
-/// extra-insulation entry and the quick plasterboard+insulation build-up).
-/// A shortcut table, not a restriction: free-typed thicknesses stay possible
-/// via the layer editor / the free-entry box.
-pub const DEAP_INSULATION_THICKNESS_MM: &[u32] = &[10, 20, 25, 30, 40, 50, 60, 70, 80];
+/// The WALL attribute editor's insulated dry-lining THICKNESS options, in mm
+/// — the option list of the combined "✓ Default" dropdown's "+ pb + X mm"
+/// entries (10 mm steps; the plasterboard slab is always included —
+/// [`ConstructionMakeup::DefaultPlus`] with `plasterboard: true`). A shortcut
+/// table, not a restriction: free-form stacks stay possible via the layer
+/// editor.
+pub const WALL_DRY_LINING_THICKNESS_MM: &[u32] = &[10, 20, 30, 40, 50, 60, 70, 80, 90, 100];
 
 /// The CEILING attribute editor's extra-insulation THICKNESS options, in mm —
 /// the option list of the combined "Default" dropdown (era-default
 /// construction + this much measured insulation, in 25 mm steps; the
 /// dropdown's other entry, "unknown", is the TRUE default: era construction,
-/// extra insulation unknown). Distinct from the walls' DEAP dry-lining table
+/// extra insulation unknown). Distinct from the walls' dry-lining table
 /// above — loft insulation runs much thicker.
 pub const CEILING_INSULATION_THICKNESS_MM: &[u32] =
     &[25, 50, 75, 100, 125, 150, 175, 200, 225, 250, 275, 300];
 
-/// Nominal plasterboard slab thickness for the quick plasterboard+insulation
-/// build-up, in whole mm (the standard 12.5 mm slab, rounded up —
-/// [`ConstructionLayer::thickness_mm`] is integral mm).
+/// Nominal plasterboard slab thickness, in whole mm (the standard 12.5 mm
+/// slab, rounded up — [`ConstructionLayer::thickness_mm`] is integral mm).
+/// The thickness the retired ▤ quick picker stamped on its plasterboard
+/// layer (see [`ConstructionMakeup::plasterboard_insulation_mm`]).
 pub const PLASTERBOARD_THICKNESS_MM: u32 = 13;
 
 /// Construction types (example: 5-6 options)
@@ -210,8 +222,9 @@ impl ConstructionMakeup {
     /// Whether this build-up needs a backing PHOTO to count as done. A
     /// SPECIFIED custom build-up (`Layers`) does — the assessor declared an
     /// actual fabric stack, so a photo is the evidence for it — and so does
-    /// `DefaultPlus`: the assessor asserted a MEASURED added-insulation
-    /// thickness, and (exactly like a ceiling's specified
+    /// `DefaultPlus` (measured added insulation and/or a dry-lining slab):
+    /// the assessor asserted concrete fabric on top of the default, and
+    /// (exactly like a ceiling's specified
     /// [`CeilingInsulation::ThicknessMm`]) a measurable fabric claim needs
     /// photographic evidence. `Default` (a standard assumed construction),
     /// `Unknown` (declared unknown) and `NonHeatLoss` are not specified
@@ -223,33 +236,14 @@ impl ConstructionMakeup {
         )
     }
 
-    /// The quick "plasterboard + insulation" build-up: a plasterboard slab
-    /// (nominal [`PLASTERBOARD_THICKNESS_MM`]) over `insulation_mm` of EPS
-    /// insulation, inside → outside. The one-tap shortcut the Structure
-    /// editor offers beside Default/Unknown/Specify — it produces an ordinary
-    /// `Layers` build-up, so it edits, photographs and completes exactly like
-    /// a stack specified by hand in the layer editor.
-    pub fn plasterboard_insulation(insulation_mm: u32) -> Self {
-        ConstructionMakeup::Layers(vec![
-            ConstructionLayer {
-                thickness_mm: PLASTERBOARD_THICKNESS_MM,
-                material: ConstructionMaterial::Plasterboard,
-                bridged: false,
-            },
-            ConstructionLayer {
-                thickness_mm: insulation_mm,
-                material: ConstructionMaterial::InsulationEPS,
-                bridged: false,
-            },
-        ])
-    }
-
     /// The insulation thickness (mm) when this make-up IS a quick
-    /// plasterboard+insulation build-up
-    /// ([`plasterboard_insulation`](Self::plasterboard_insulation)) — exactly
-    /// a plasterboard layer over an EPS insulation layer. `None` for anything
-    /// else, including hand-specified stacks that merely contain those
-    /// materials among others. Lets the quick picker show its selected state.
+    /// plasterboard+insulation build-up — exactly a plasterboard layer over
+    /// an EPS insulation layer, the two-layer `Layers` stack the RETIRED ▤
+    /// quick picker produced. `None` for anything else, including
+    /// hand-specified stacks that merely contain those materials among
+    /// others. Kept for legacy DISPLAY: the wall editor's combined "✓
+    /// Default" button shows such a record as its nearest dry-lining label
+    /// without rewriting the stored `Layers` data.
     pub fn plasterboard_insulation_mm(&self) -> Option<u32> {
         match self {
             ConstructionMakeup::Layers(v) => match v.as_slice() {
@@ -1241,7 +1235,8 @@ mod tests {
         assert!(
             !ceiling(
                 ConstructionMakeup::DefaultPlus {
-                    extra_insulation_mm: 150
+                    extra_insulation_mm: 150,
+                    plasterboard: false
                 },
                 false
             )
@@ -1251,7 +1246,8 @@ mod tests {
         assert!(
             ceiling(
                 ConstructionMakeup::DefaultPlus {
-                    extra_insulation_mm: 150
+                    extra_insulation_mm: 150,
+                    plasterboard: false
                 },
                 true
             )
@@ -1290,38 +1286,52 @@ mod tests {
         assert_eq!(old.insulation, None, "pre-field records load unspecified");
     }
 
-    /// `DefaultPlus` — the default construction plus measured extra
-    /// insulation — is a real choice (set), and like `Layers` it asserts
-    /// measurable fabric, so its build-up completes only with a backing photo.
+    /// `DefaultPlus` — the default construction plus a found upgrade (extra
+    /// insulation and/or a dry-lining slab) — is a real choice (set), and
+    /// like `Layers` it asserts measurable fabric, so its build-up completes
+    /// only with a backing photo. That holds for every shape of the upgrade,
+    /// including plasterboard-only dry-lining.
     #[test]
     fn default_plus_is_set_and_requires_photo() {
-        let dp = ConstructionMakeup::DefaultPlus {
-            extra_insulation_mm: 50,
-        };
-        assert!(dp.is_set(), "DefaultPlus is a made choice");
-        assert!(
-            dp.requires_photo(),
-            "a measured added thickness needs photographic evidence"
-        );
+        for dp in [
+            ConstructionMakeup::DefaultPlus {
+                extra_insulation_mm: 50,
+                plasterboard: false,
+            },
+            ConstructionMakeup::DefaultPlus {
+                extra_insulation_mm: 50,
+                plasterboard: true,
+            },
+            // Plasterboard-only dry-lining (0 mm extra insulation).
+            ConstructionMakeup::DefaultPlus {
+                extra_insulation_mm: 0,
+                plasterboard: true,
+            },
+        ] {
+            assert!(dp.is_set(), "{dp:?} is a made choice");
+            assert!(
+                dp.requires_photo(),
+                "{dp:?}: an asserted fabric upgrade needs photographic evidence"
+            );
 
-        let mut base = ConstructionBase {
-            construction_makeup: dp,
-            ..Default::default()
-        };
-        assert!(
-            !base.build_up_done(),
-            "DefaultPlus without a photo is not done"
-        );
-        base.photos.push(Photo::default());
-        assert!(base.build_up_done(), "a backing photo completes it");
+            let mut base = ConstructionBase {
+                construction_makeup: dp.clone(),
+                ..Default::default()
+            };
+            assert!(!base.build_up_done(), "{dp:?} without a photo is not done");
+            base.photos.push(Photo::default());
+            assert!(base.build_up_done(), "a backing photo completes {dp:?}");
+        }
     }
 
-    /// The new `DefaultPlus` variant round-trips through serde, and —
-    /// additive evolution — JSON produced by the OLD enum shape (which never
-    /// contains the new tag) still deserializes to the same values.
+    /// The `DefaultPlus` variant (incl. the additive `plasterboard` field)
+    /// round-trips through serde, and — additive evolution — JSON produced by
+    /// the OLD enum shapes (no `DefaultPlus` tag at all; a `DefaultPlus`
+    /// without the `plasterboard` field) still deserializes to the same
+    /// values.
     #[test]
     fn construction_makeup_serde_roundtrip_and_old_shape() {
-        // Every variant round-trips, including the new one.
+        // Every variant round-trips, including the new dry-lining shapes.
         for mk in [
             ConstructionMakeup::NonHeatLoss,
             ConstructionMakeup::Default,
@@ -1329,30 +1339,47 @@ mod tests {
             ConstructionMakeup::Unknown,
             ConstructionMakeup::DefaultPlus {
                 extra_insulation_mm: 40,
+                plasterboard: false,
             },
-            ConstructionMakeup::plasterboard_insulation(60),
+            ConstructionMakeup::DefaultPlus {
+                extra_insulation_mm: 0,
+                plasterboard: true,
+            },
+            ConstructionMakeup::DefaultPlus {
+                extra_insulation_mm: 50,
+                plasterboard: true,
+            },
         ] {
             let back: ConstructionMakeup =
                 serde_json::from_str(&serde_json::to_string(&mk).unwrap()).unwrap();
             assert_eq!(back, mk, "round-trip of {mk:?}");
         }
 
-        // The new variant's wire shape (externally tagged struct variant).
+        // The variant's wire shape (externally tagged struct variant).
         assert_eq!(
             serde_json::to_string(&ConstructionMakeup::DefaultPlus {
-                extra_insulation_mm: 25
+                extra_insulation_mm: 25,
+                plasterboard: true
             })
             .unwrap(),
-            r#"{"DefaultPlus":{"extra_insulation_mm":25}}"#
+            r#"{"DefaultPlus":{"extra_insulation_mm":25,"plasterboard":true}}"#
         );
 
-        // JSON literals exactly as the OLD shape serialized them (unit
-        // variants as strings; Layers externally tagged) keep loading.
+        // JSON literals exactly as the OLD shapes serialized them (unit
+        // variants as strings; Layers externally tagged; DefaultPlus before
+        // the `plasterboard` field, which loads as `false`) keep loading.
         for (old_json, expect) in [
             (r#""NonHeatLoss""#, ConstructionMakeup::NonHeatLoss),
             (r#""Default""#, ConstructionMakeup::Default),
             (r#""Tbd""#, ConstructionMakeup::Tbd),
             (r#""Unknown""#, ConstructionMakeup::Unknown),
+            (
+                r#"{"DefaultPlus":{"extra_insulation_mm":25}}"#,
+                ConstructionMakeup::DefaultPlus {
+                    extra_insulation_mm: 25,
+                    plasterboard: false,
+                },
+            ),
             (
                 r#"{"Layers":[{"thickness_mm":100,"material":"InsulationEPS","bridged":false}]}"#,
                 ConstructionMakeup::Layers(vec![ConstructionLayer {
@@ -1368,20 +1395,24 @@ mod tests {
         }
     }
 
-    /// The quick plasterboard+insulation shortcut builds the two-layer stack
-    /// (plasterboard inside, EPS insulation outside), reads back through
-    /// `plasterboard_insulation_mm`, and nothing else masquerades as it.
+    /// `plasterboard_insulation_mm` recognizes exactly the two-layer stack
+    /// the RETIRED ▤ quick picker saved (plasterboard inside, EPS insulation
+    /// outside) — the legacy-display hook — and nothing else masquerades as
+    /// it.
     #[test]
     fn plasterboard_insulation_quick_buildup() {
-        let mk = ConstructionMakeup::plasterboard_insulation(50);
-        let ConstructionMakeup::Layers(layers) = &mk else {
-            panic!("expected a Layers build-up");
-        };
-        assert_eq!(layers.len(), 2);
-        assert_eq!(layers[0].material, ConstructionMaterial::Plasterboard);
-        assert_eq!(layers[0].thickness_mm, PLASTERBOARD_THICKNESS_MM);
-        assert_eq!(layers[1].material, ConstructionMaterial::InsulationEPS);
-        assert_eq!(layers[1].thickness_mm, 50);
+        let mk = ConstructionMakeup::Layers(vec![
+            ConstructionLayer {
+                thickness_mm: PLASTERBOARD_THICKNESS_MM,
+                material: ConstructionMaterial::Plasterboard,
+                bridged: false,
+            },
+            ConstructionLayer {
+                thickness_mm: 50,
+                material: ConstructionMaterial::InsulationEPS,
+                bridged: false,
+            },
+        ]);
         assert_eq!(mk.plasterboard_insulation_mm(), Some(50));
         assert!(
             mk.requires_photo(),
@@ -1409,7 +1440,8 @@ mod tests {
         );
         assert_eq!(
             ConstructionMakeup::DefaultPlus {
-                extra_insulation_mm: 50
+                extra_insulation_mm: 50,
+                plasterboard: true
             }
             .plasterboard_insulation_mm(),
             None

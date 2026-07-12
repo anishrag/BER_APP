@@ -2306,6 +2306,7 @@ fn ceiling_combined_default_dropdown_mapping() {
         ConstructionType::Ceiling(CeilingConstructionType::FlatRoof),
         ConstructionMakeup::DefaultPlus {
             extra_insulation_mm: 100,
+            plasterboard: false,
         },
         Default::default(),
     );
@@ -2314,7 +2315,8 @@ fn ceiling_combined_default_dropdown_mapping() {
         ceiling_state(&c),
         (
             ConstructionMakeup::DefaultPlus {
-                extra_insulation_mm: 100
+                extra_insulation_mm: 100,
+                plasterboard: false
             },
             None
         ),
@@ -2344,6 +2346,90 @@ fn ceiling_combined_default_dropdown_mapping() {
     c.end_structure_edit();
     c.materialize();
     assert_eq!(c.structure_progress().ceilings, (1, 1));
+}
+
+/// The compacted WALL editor's data mapping. Its combined "✓ Default"
+/// dropdown emits ONE attrs event per pick: "default" → plain `Default`
+/// (complete at once — an assumed construction needs no photo);
+/// "+ plasterboard" → `DefaultPlus { 0 mm, plasterboard: true }`;
+/// "+ pb + X mm" → `DefaultPlus { X, plasterboard: true }` — the dry-lining
+/// states assert found fabric, so they stay photo-gated like a specified
+/// stack. A legacy pb-less `DefaultPlus` (the retired ✓+ picker) keeps its
+/// stored shape until the next pick normalizes it.
+#[test]
+fn wall_combined_default_dropdown_mapping() {
+    use ber_model::ber::structural::{ConstructionMakeup, ConstructionType, WallConstructionType};
+    let mut c = dimensioned_square_controller();
+    c.materialize();
+
+    set_only_kind(&mut c, SurfaceKind::Walls);
+    c.set_structure_select_mode(Some(SelectMode::All));
+    c.begin_structure_edit();
+
+    let attrs = |c: &mut AppController, makeup: ConstructionMakeup| {
+        c.set_structure_group_attrs(
+            0,
+            ConstructionType::Wall(WallConstructionType::CavityWall),
+            makeup,
+            Default::default(),
+        );
+    };
+    let group_makeup = |c: &AppController| c.structure_edit().unwrap().groups[0].makeup.clone();
+
+    // "default": plain era default — complete immediately, no photo demanded.
+    attrs(&mut c, ConstructionMakeup::Default);
+    assert_eq!(group_makeup(&c), ConstructionMakeup::Default);
+    assert!(c.structure_edit().unwrap().groups[0].is_complete());
+
+    // "+ plasterboard": bare dry-lining slab — a fabric claim, photo-gated.
+    let pb_only = ConstructionMakeup::DefaultPlus {
+        extra_insulation_mm: 0,
+        plasterboard: true,
+    };
+    attrs(&mut c, pb_only.clone());
+    assert_eq!(group_makeup(&c), pb_only);
+    assert!(
+        !c.structure_edit().unwrap().groups[0].is_complete(),
+        "dry-lining without a photo has no tick"
+    );
+
+    // "+ pb + 50mm": insulated dry-lining — same photo gate.
+    let pb_50 = ConstructionMakeup::DefaultPlus {
+        extra_insulation_mm: 50,
+        plasterboard: true,
+    };
+    attrs(&mut c, pb_50.clone());
+    assert_eq!(group_makeup(&c), pb_50);
+    assert!(!c.structure_edit().unwrap().groups[0].is_complete());
+
+    // The pick lands on the DURABLE store too (the group's shared wall
+    // construction carries the dry-lining make-up after materialize).
+    c.materialize();
+    assert!(
+        c.current_record
+            .as_ref()
+            .unwrap()
+            .data
+            .wall_constructions
+            .iter()
+            .any(|w| w.base.construction_makeup == pb_50),
+        "the dry-lining make-up is stored on the wall construction"
+    );
+
+    // LEGACY: a pb-less DefaultPlus (the retired ✓+ picker) stays stored
+    // as-is — photo-gated, never silently rewritten…
+    let legacy = ConstructionMakeup::DefaultPlus {
+        extra_insulation_mm: 40,
+        plasterboard: false,
+    };
+    attrs(&mut c, legacy.clone());
+    assert_eq!(group_makeup(&c), legacy);
+    assert!(!c.structure_edit().unwrap().groups[0].is_complete());
+    // …until the next pick normalizes onto a state the dropdown offers.
+    attrs(&mut c, ConstructionMakeup::Default);
+    assert_eq!(group_makeup(&c), ConstructionMakeup::Default);
+    assert!(c.structure_edit().unwrap().groups[0].is_complete());
+    c.end_structure_edit();
 }
 
 /// `ingest_photo` returns a provisional photo IMMEDIATELY (a fast byte-copy, no
@@ -12934,7 +13020,8 @@ fn structure_group_tick_predicate_matches_completeness() {
     assert!(
         !ceiling(
             M::DefaultPlus {
-                extra_insulation_mm: 150
+                extra_insulation_mm: 150,
+                plasterboard: false
             },
             None,
             vec![]
@@ -12944,7 +13031,8 @@ fn structure_group_tick_predicate_matches_completeness() {
     );
     assert!(ceiling(
         M::DefaultPlus {
-            extra_insulation_mm: 150
+            extra_insulation_mm: 150,
+            plasterboard: false
         },
         None,
         vec![Photo::default()]

@@ -369,8 +369,22 @@ fn makeup_label(m: &ConstructionMakeup) -> String {
         ConstructionMakeup::Default => "Default".to_string(),
         ConstructionMakeup::Tbd => "Not set".to_string(),
         ConstructionMakeup::Unknown => "Unknown".to_string(),
+        // The dry-lining states (walls' combined ✓ dropdown): the slab is
+        // always included, with or without extra insulation. A pb-less
+        // DefaultPlus is the legacy bare added-insulation shape.
+        ConstructionMakeup::DefaultPlus {
+            extra_insulation_mm: 0,
+            plasterboard: true,
+        } => "Default + plasterboard".to_string(),
         ConstructionMakeup::DefaultPlus {
             extra_insulation_mm,
+            plasterboard: true,
+        } => {
+            format!("Default + pb + {extra_insulation_mm}mm insulation")
+        }
+        ConstructionMakeup::DefaultPlus {
+            extra_insulation_mm,
+            plasterboard: false,
         } => {
             format!("Default + {extra_insulation_mm}mm insulation")
         }

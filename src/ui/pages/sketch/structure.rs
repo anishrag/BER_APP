@@ -18,7 +18,7 @@ use ber_model::ber::structural::{
     CeilingConstructionType, CeilingExposure, CeilingInsulation, ConstructionLayer,
     ConstructionMakeup, ConstructionType, FloorConstructionType, FloorExposure, SurfaceExposure,
     WallConstructionType, WallExposure, CEILING_INSULATION_THICKNESS_MM,
-    DEAP_INSULATION_THICKNESS_MM,
+    WALL_DRY_LINING_THICKNESS_MM,
 };
 
 use super::SketchEvent;
@@ -286,16 +286,17 @@ pub(crate) fn group_editor_ui<F: FnMut(UiEvent)>(
     on_event: &mut F,
 ) {
     let relevant: Vec<&ExistingGroup> = existing.iter().filter(|e| e.ty.kind() == kind).collect();
-    // CEILINGS get a COMPACT box: whenever the full editor shows (not the
+    // COMPACT box (all kinds): whenever the full editor shows (not the
     // two-mode entry), the title and the name textbox merge onto ONE line
-    // ("Roof (n) — [name]") instead of a centred heading plus a name row.
-    let merged_title = kind == SurfaceKind::Ceilings && (g.show_editor || relevant.is_empty());
+    // ("Wall (n) — [name]") instead of a centred heading plus a name row.
+    let merged_title = g.show_editor || relevant.is_empty();
 
     // Heading level 1: the surface kind + the group's surface COUNT — centred,
-    // bold (e.g. "Wall (3)"). When every attribute of the group's construction
-    // is fully set ([`EditGroup::is_complete`] — same predicate as the
-    // checklist, incl. the ceiling-insulation gate), a tick sits at the TOP
-    // RIGHT of the box (the checklist's green, same glyph).
+    // bold (e.g. "Wall (3)") — only over the two-mode entry now (the full
+    // editor merges it into the name line below). When every attribute of the
+    // group's construction is fully set ([`EditGroup::is_complete`] — same
+    // predicate as the checklist, incl. the ceiling-insulation gate), a tick
+    // sits at the TOP RIGHT of the box (the checklist's green, same glyph).
     if !merged_title {
         ui.vertical_centered(|ui| {
             ui.label(
@@ -353,10 +354,9 @@ pub(crate) fn group_editor_ui<F: FnMut(UiEvent)>(
         return;
     }
 
-    // Heading level 2: the editable group name (defaults to "Group N"). On a
-    // ceiling box this row IS the title — "Roof (n) — [name]" on one line
-    // (`merged_title`); walls/floors keep the separate name row under the
-    // centred heading.
+    // Heading level 2: the editable group name (defaults to "Group N"). In
+    // the full editor this row IS the title — "Wall (n) — [name]" on one
+    // line (`merged_title`).
     let mut name = g.name.clone();
     let renamed = if merged_title {
         ui.horizontal(|ui| {
@@ -565,67 +565,47 @@ pub(crate) fn group_editor_ui<F: FnMut(UiEvent)>(
             .weak(),
         );
     }
-    if kind == SurfaceKind::Ceilings {
-        // CEILINGS: a COMPACT build-up row of exactly three controls — the
-        // combined "Default" button-with-dropdown (era-default construction
-        // plus an extra-insulation pick: "unknown" or a thickness — it
-        // carries what the retired separate "Insulation [mm] / unknown" row
-        // held), Unknown (?), and Specify… (ℹ, the layer editor). No ✓/✓+
-        // pair and no ▤ quick picker here — those stay on walls/floors.
-        ui.horizontal_wrapped(|ui| {
-            ceiling_default_dropdown_ui(ui, group_index, g, enabled, on_event);
-            let sel = g.makeup == ConstructionMakeup::Unknown;
-            if ui
-                .add_enabled(
-                    enabled,
-                    egui::Button::selectable(sel, egui::RichText::new("?").size(EDITOR_FONT + 3.0)),
-                )
-                .on_hover_text("Unknown")
-                .clicked()
-            {
-                on_event(UiEvent::Sketch(SketchEvent::SetStructureGroupAttrs {
-                    group: group_index,
-                    ty: g.ty,
-                    makeup: ConstructionMakeup::Unknown,
-                    phase: g.phase.clone(),
-                }));
+    // BUILD-UP row — a COMPACT three controls for every kind: the kind's ✓
+    // "Default" control, then Unknown (?) and Specify… (ℹ, the layer
+    // editor). Ceilings: ✓ is the combined dropdown carrying the extra LOFT
+    // insulation question ("unknown" / a thickness). Walls: ✓ is the
+    // combined dropdown carrying the insulated DRY-LINING question ("default"
+    // / "+ plasterboard" / "+ pb + X mm"). Floors: ✓ is a plain Default
+    // toggle (no dry-lining option on a floor). The old ✓+ preset dropdown,
+    // its free-entry row and the ▤ quick picker are retired everywhere;
+    // legacy records they produced display their nearest label on the ✓
+    // button WITHOUT being rewritten, and any missing photo evidence
+    // surfaces via the group colouring alone.
+    ui.horizontal_wrapped(|ui| {
+        match kind {
+            SurfaceKind::Ceilings => {
+                ceiling_default_dropdown_ui(ui, group_index, g, enabled, on_event)
             }
-            let specify_sel = matches!(g.makeup, ConstructionMakeup::Layers(_));
-            if ui
-                .add_enabled(
-                    enabled,
-                    egui::Button::selectable(
-                        specify_sel,
-                        egui::RichText::new("ℹ").size(EDITOR_FONT + 3.0),
-                    ),
-                )
-                .on_hover_text("Specify…")
-                .clicked()
-            {
-                on_event(UiEvent::Sketch(SketchEvent::BeginSpecifyLayers {
-                    group: group_index,
-                }));
+            SurfaceKind::Walls => wall_default_dropdown_ui(ui, group_index, g, enabled, on_event),
+            SurfaceKind::Floors => {
+                let (sel, label) = default_button_label(&g.makeup);
+                if ui
+                    .add_enabled(
+                        enabled,
+                        egui::Button::selectable(
+                            sel,
+                            egui::RichText::new(label).size(EDITOR_FONT + 3.0),
+                        ),
+                    )
+                    .on_hover_text("Default")
+                    .clicked()
+                {
+                    on_event(UiEvent::Sketch(SketchEvent::SetStructureGroupAttrs {
+                        group: group_index,
+                        ty: g.ty,
+                        makeup: ConstructionMakeup::Default,
+                        phase: g.phase.clone(),
+                    }));
+                }
             }
-        });
-    } else {
-        walls_floors_build_up_row_ui(ui, group_index, g, enabled, on_event);
-    }
-    // DEFAULT-PLUS ONLY (walls/floors): the free-entry row for the
-    // extra-insulation thickness — the preset dropdown above is the shortcut,
-    // typing stays possible — plus the photo hint (a measured added thickness
-    // needs a backing photo, same gate as a specified build-up). A ceiling
-    // box never grows this row: its combined "Default" dropdown owns the
-    // thickness there, and a legacy ceiling `DefaultPlus` record just shows
-    // its value on that button (incompleteness surfaces via the group
-    // colouring alone).
-    if kind != SurfaceKind::Ceilings {
-        if let ConstructionMakeup::DefaultPlus {
-            extra_insulation_mm,
-        } = &g.makeup
-        {
-            default_plus_ui(ui, group_index, g, *extra_insulation_mm, enabled, on_event);
         }
-    }
+        unknown_specify_buttons_ui(ui, group_index, g, enabled, on_event);
+    });
     // Bottom line: the camera button (photos view; shows a count when there
     // are any) on the left, RESET on the right — one shared row. Reset is on
     // EVERY box, fresh or attributed: reselecting an already-attributed
@@ -671,143 +651,150 @@ pub(crate) fn group_editor_ui<F: FnMut(UiEvent)>(
     });
 }
 
-/// The WALLS/FLOORS build-up row — unchanged by the ceiling compaction:
-/// build-up as ICON buttons/pickers (no label — hover for the meaning).
-/// Default (✓) and Unknown (?) set the make-up directly; Default plus (✓+) is
-/// a PRESET dropdown — the default construction PLUS a measured extra
-/// insulation thickness (DEAP's standard options), so the make-up always
-/// lands with a real measurement; Specify (ℹ) opens the LAYER editor (the
-/// `Layers` build-up); ▤ is the quick plasterboard+insulation dropdown — a
-/// two-layer `Layers` build-up without the editor (Specify… stays the
-/// free-form path). The unset `Tbd` default isn't offered. (Ceilings render
-/// their own compact three-control row instead — see
-/// [`ceiling_default_dropdown_ui`].)
-fn walls_floors_build_up_row_ui<F: FnMut(UiEvent)>(
+/// The `?` (Unknown) + `ℹ` (Specify…) pair that ends every build-up row:
+/// `?` declares the build-up unknown (a real choice — completes without a
+/// photo); `ℹ` opens the LAYER editor (the `Layers` build-up, which lights
+/// this button selected).
+fn unknown_specify_buttons_ui<F: FnMut(UiEvent)>(
     ui: &mut egui::Ui,
     group_index: usize,
     g: &EditGroup,
     enabled: bool,
     on_event: &mut F,
 ) {
-    ui.horizontal_wrapped(|ui| {
-        for (icon, tip, mk) in [
-            ("✓", "Default", ConstructionMakeup::Default),
-            ("?", "Unknown", ConstructionMakeup::Unknown),
-        ] {
-            let sel = g.makeup == mk;
-            if ui
-                .add_enabled(
-                    enabled,
-                    egui::Button::selectable(
-                        sel,
-                        egui::RichText::new(icon).size(EDITOR_FONT + 3.0),
-                    ),
-                )
-                .on_hover_text(tip)
-                .clicked()
-            {
-                on_event(UiEvent::Sketch(SketchEvent::SetStructureGroupAttrs {
-                    group: group_index,
-                    ty: g.ty,
-                    makeup: mk.clone(),
-                    phase: g.phase.clone(),
-                }));
-            }
-            // The Default-plus preset dropdown sits between ✓ and ?.
-            if mk == ConstructionMakeup::Default {
-                let dp_text = match &g.makeup {
-                    ConstructionMakeup::DefaultPlus {
-                        extra_insulation_mm,
-                    } => {
-                        format!("✓+ {extra_insulation_mm}")
-                    }
-                    _ => "✓+".to_string(),
-                };
-                ui.add_enabled_ui(enabled, |ui| {
-                    egui::ComboBox::from_id_salt(("structure_default_plus", group_index))
-                        .selected_text(egui::RichText::new(dp_text).size(EDITOR_FONT + 3.0))
-                        .width(8.0)
-                        .show_ui(ui, |ui| {
-                            for mm in DEAP_INSULATION_THICKNESS_MM {
-                                let sel = g.makeup
-                                    == (ConstructionMakeup::DefaultPlus {
-                                        extra_insulation_mm: *mm,
-                                    });
-                                if ui
-                                    .selectable_label(
-                                        sel,
-                                        egui::RichText::new(format!("{mm} mm")).size(EDITOR_FONT),
-                                    )
-                                    .clicked()
-                                {
-                                    on_event(UiEvent::Sketch(
-                                        SketchEvent::SetStructureGroupAttrs {
-                                            group: group_index,
-                                            ty: g.ty,
-                                            makeup: ConstructionMakeup::DefaultPlus {
-                                                extra_insulation_mm: *mm,
-                                            },
-                                            phase: g.phase.clone(),
-                                        },
-                                    ));
-                                }
-                            }
-                        })
-                        .response
-                        .on_hover_text("Default plus — default construction + added insulation");
-                });
-            }
-        }
-        // Specify… → open the build-up layer editor.
-        let specify_sel = matches!(g.makeup, ConstructionMakeup::Layers(_));
+    let sel = g.makeup == ConstructionMakeup::Unknown;
+    if ui
+        .add_enabled(
+            enabled,
+            egui::Button::selectable(sel, egui::RichText::new("?").size(EDITOR_FONT + 3.0)),
+        )
+        .on_hover_text("Unknown")
+        .clicked()
+    {
+        on_event(UiEvent::Sketch(SketchEvent::SetStructureGroupAttrs {
+            group: group_index,
+            ty: g.ty,
+            makeup: ConstructionMakeup::Unknown,
+            phase: g.phase.clone(),
+        }));
+    }
+    let specify_sel = matches!(g.makeup, ConstructionMakeup::Layers(_));
+    if ui
+        .add_enabled(
+            enabled,
+            egui::Button::selectable(
+                specify_sel,
+                egui::RichText::new("ℹ").size(EDITOR_FONT + 3.0),
+            ),
+        )
+        .on_hover_text("Specify…")
+        .clicked()
+    {
+        on_event(UiEvent::Sketch(SketchEvent::BeginSpecifyLayers {
+            group: group_index,
+        }));
+    }
+}
+
+/// The wall/floor ✓ "Default" button's `(selected, label)`: plain `Default`
+/// → "✓"; the dry-lining states → "✓ pb" / "✓ pb+X" (mm implied). Legacy
+/// states the new controls can't produce show their NEAREST label without
+/// rewriting the stored data until the next pick: "✓ +X" for a pb-less
+/// `DefaultPlus` (the retired ✓+ picker), "✓ pb+X" for the retired ▤'s
+/// two-layer plasterboard+insulation stack (ℹ lights too — it IS a `Layers`
+/// build-up, exactly as it did beside ▤).
+fn default_button_label(makeup: &ConstructionMakeup) -> (bool, String) {
+    match makeup {
+        ConstructionMakeup::Default => (true, "✓".to_string()),
+        ConstructionMakeup::DefaultPlus {
+            extra_insulation_mm: 0,
+            plasterboard: true,
+        } => (true, "✓ pb".to_string()),
+        ConstructionMakeup::DefaultPlus {
+            extra_insulation_mm,
+            plasterboard: true,
+        } => (true, format!("✓ pb+{extra_insulation_mm}")),
+        ConstructionMakeup::DefaultPlus {
+            extra_insulation_mm,
+            plasterboard: false,
+        } => (true, format!("✓ +{extra_insulation_mm}")),
+        other => match other.plasterboard_insulation_mm() {
+            Some(mm) => (true, format!("✓ pb+{mm}")),
+            None => (false, "✓".to_string()),
+        },
+    }
+}
+
+/// The WALLS build-up row's combined "✓ Default" control: a selectable icon
+/// button that opens the dry-lining dropdown — "default" (the plain era
+/// default), "+ plasterboard" (a bare dry-lining slab), or "+ pb + X mm"
+/// (insulated dry-lining in 10 mm steps, [`WALL_DRY_LINING_THICKNESS_MM`] —
+/// the slab is always included). A pick writes the matching make-up in ONE
+/// event: `Default`, or `DefaultPlus {{ plasterboard: true, .. }}`. While
+/// active the button renders SELECTED with the chosen value in compact icon
+/// form ([`default_button_label`]), which also shows legacy ✓+ / ▤ records
+/// as their nearest label without rewriting them.
+fn wall_default_dropdown_ui<F: FnMut(UiEvent)>(
+    ui: &mut egui::Ui,
+    group_index: usize,
+    g: &EditGroup,
+    enabled: bool,
+    on_event: &mut F,
+) {
+    let (sel, label) = default_button_label(&g.makeup);
+    let resp = ui
+        .add_enabled(
+            enabled,
+            // Sized like its ? / ℹ siblings — this is an ICON button.
+            egui::Button::selectable(sel, egui::RichText::new(label).size(EDITOR_FONT + 3.0)),
+        )
+        .on_hover_text("Default construction — tap for dry-lining options");
+    let mut pick = |makeup: ConstructionMakeup| {
+        on_event(UiEvent::Sketch(SketchEvent::SetStructureGroupAttrs {
+            group: group_index,
+            ty: g.ty,
+            makeup,
+            phase: g.phase.clone(),
+        }));
+    };
+    egui::Popup::menu(&resp).show(|ui| {
         if ui
-            .add_enabled(
-                enabled,
-                egui::Button::selectable(
-                    specify_sel,
-                    egui::RichText::new("ℹ").size(EDITOR_FONT + 3.0),
-                ),
+            .selectable_label(
+                g.makeup == ConstructionMakeup::Default,
+                egui::RichText::new("default").size(EDITOR_FONT),
             )
-            .on_hover_text("Specify…")
             .clicked()
         {
-            on_event(UiEvent::Sketch(SketchEvent::BeginSpecifyLayers {
-                group: group_index,
-            }));
+            pick(ConstructionMakeup::Default);
         }
-        // Quick plasterboard+insulation build-up: DEAP's standard insulation
-        // thicknesses as one-tap presets — builds `Layers([plasterboard,
-        // insulation @ mm])` without opening the layer editor.
-        let pb_text = match g.makeup.plasterboard_insulation_mm() {
-            Some(mm) => format!("▤ {mm}"),
-            None => "▤".to_string(),
+        let pb_only = ConstructionMakeup::DefaultPlus {
+            extra_insulation_mm: 0,
+            plasterboard: true,
         };
-        ui.add_enabled_ui(enabled, |ui| {
-            egui::ComboBox::from_id_salt(("structure_pb_ins", group_index))
-                .selected_text(egui::RichText::new(pb_text).size(EDITOR_FONT + 3.0))
-                .width(8.0)
-                .show_ui(ui, |ui| {
-                    for mm in DEAP_INSULATION_THICKNESS_MM {
-                        let sel = g.makeup.plasterboard_insulation_mm() == Some(*mm);
-                        if ui
-                            .selectable_label(
-                                sel,
-                                egui::RichText::new(format!("{mm} mm")).size(EDITOR_FONT),
-                            )
-                            .clicked()
-                        {
-                            on_event(UiEvent::Sketch(SketchEvent::SetStructureGroupAttrs {
-                                group: group_index,
-                                ty: g.ty,
-                                makeup: ConstructionMakeup::plasterboard_insulation(*mm),
-                                phase: g.phase.clone(),
-                            }));
-                        }
-                    }
-                })
-                .response
-                .on_hover_text("Plasterboard + insulation (quick build-up)");
-        });
+        if ui
+            .selectable_label(
+                g.makeup == pb_only,
+                egui::RichText::new("+ plasterboard").size(EDITOR_FONT),
+            )
+            .clicked()
+        {
+            pick(pb_only.clone());
+        }
+        for mm in WALL_DRY_LINING_THICKNESS_MM {
+            let mk = ConstructionMakeup::DefaultPlus {
+                extra_insulation_mm: *mm,
+                plasterboard: true,
+            };
+            if ui
+                .selectable_label(
+                    g.makeup == mk,
+                    egui::RichText::new(format!("+ pb + {mm}mm")).size(EDITOR_FONT),
+                )
+                .clicked()
+            {
+                pick(mk.clone());
+            }
+        }
     });
 }
 
@@ -835,6 +822,7 @@ fn ceiling_default_dropdown_ui<F: FnMut(UiEvent)>(
         (
             ConstructionMakeup::DefaultPlus {
                 extra_insulation_mm,
+                ..
             },
             _,
         ) => (true, format!("✓ {extra_insulation_mm}")),
@@ -904,66 +892,6 @@ fn emit_ceiling_default_pick<F: FnMut(UiEvent)>(
         group: group_index,
         insulation,
     }));
-}
-
-/// The DEFAULT-PLUS extra-insulation row of the group editor (WALLS/FLOORS —
-/// a ceiling's thickness lives on its combined "Default" dropdown instead): a
-/// free-entry thickness box (mm) for the measured insulation added over the
-/// default construction — the preset dropdown in the build-up row is the
-/// shortcut; this keeps any measured value typable — plus the inline photo
-/// hint while the measurement lacks its evidence. Buffer idiom: the text
-/// lives in egui memory keyed by the group, stored together with the model
-/// value it corresponds to, so it re-seeds when the value changes underneath
-/// (a preset pick, undo) but leaves in-flight typing alone.
-fn default_plus_ui<F: FnMut(UiEvent)>(
-    ui: &mut egui::Ui,
-    group_index: usize,
-    g: &EditGroup,
-    current_mm: u32,
-    enabled: bool,
-    on_event: &mut F,
-) {
-    let store = egui::Id::new(("default_plus_extra", group_index));
-    let (mut text, mut synced) = ui
-        .ctx()
-        .data_mut(|d| d.get_temp::<(String, u32)>(store))
-        .filter(|(_, synced)| *synced == current_mm)
-        .unwrap_or_else(|| (current_mm.to_string(), current_mm));
-    ui.horizontal(|ui| {
-        ui.label(egui::RichText::new("Extra insulation").size(EDITOR_FONT));
-        ui.add_enabled_ui(enabled, |ui| {
-            if metre_input(ui, &mut text, 46.0, "mm").changed {
-                // Typing owns the value while it parses to a positive whole
-                // number of mm; partial/invalid text leaves the last valid
-                // measurement in place (the buffer keeps what was typed).
-                if let Ok(v) = text.trim().parse::<u32>() {
-                    if v > 0 && v != synced {
-                        synced = v;
-                        on_event(UiEvent::Sketch(SketchEvent::SetStructureGroupAttrs {
-                            group: group_index,
-                            ty: g.ty,
-                            makeup: ConstructionMakeup::DefaultPlus {
-                                extra_insulation_mm: v,
-                            },
-                            phase: g.phase.clone(),
-                        }));
-                    }
-                }
-            }
-        });
-        ui.label(egui::RichText::new("mm").size(EDITOR_FONT));
-    });
-    // The photo hint while the measured thickness lacks its evidence — the
-    // make-up requires a photo (`ConstructionMakeup::requires_photo`), same
-    // gate as a specified build-up.
-    if g.photos.is_empty() {
-        ui.label(
-            egui::RichText::new("a photo of the added insulation is required")
-                .size(EDITOR_FONT - 1.5)
-                .color(ui.visuals().warn_fg_color),
-        );
-    }
-    ui.ctx().data_mut(|d| d.insert_temp(store, (text, synced)));
 }
 
 /// Compact mm display for the ceiling "Default" button's value: whole numbers
